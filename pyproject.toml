@@ -1,0 +1,44 @@
+[build-system]
+requires = ["scikit-build-core", "pybind11"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "loki"
+version = "0.0.1"
+description = "Leveraging Optimal significance to unveil Keplerian orbIt pulsars"
+readme = "README.md"
+license = {text = "MIT"}
+authors=[{name="Pravir Kumar", email="pravirka@gmail.com"}]
+requires-python = ">=3.8"
+dependencies = ["numpy"]
+keywords = ["pybind11", "cibuildwheel", "c++", "pypi", "numpy"]
+classifiers=[
+    "Programming Language :: C++",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: Implementation :: PyPy",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "License :: OSI Approved :: MIT License",
+]
+
+[project.urls]
+Github = "https://github.com/pravirkr/loki"
+
+[project.optional-dependencies]
+test = ["pytest"]
+docs = ["cmake", "breathe", "sphinx_rtd_theme"]
+
+[tool.scikit-build.cmake.define]
+BUILD_PYTHON = "ON"
+
+[tool.cibuildwheel]
+test-extras = "test"
+test-command = "python -m pytest {project}/tests/python -v"
+test-skip = "pp* *-musllinux* *-manylinux_i686"
