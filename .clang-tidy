@@ -1,4 +1,4 @@
-Checks:          'clang-diagnostic-*,clang-analyzer-*,cppcoreguidelines-*,modernize-*,-modernize-use-trailing-return-type,-modernize-use-nodiscard'
+Checks:          'clang-diagnostic-*,clang-analyzer-*,-cppcoreguidelines-*,modernize-*,-modernize-use-trailing-return-type,-modernize-use-nodiscard'
 WarningsAsErrors: false
 HeaderFilterRegex: ' '
 AnalyzeTemporaryDtors: false
