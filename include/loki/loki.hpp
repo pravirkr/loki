@@ -1,6 +1,5 @@
 #pragma once
 
-#include <numeric>
 #include <vector>
 
 namespace loki {
@@ -12,10 +11,6 @@ namespace loki {
  * @returns a vector of given size and type
  */
 template <typename T>
-std::vector<T> make_vector(std::size_t size) {
-    std::vector<T> v(size, 0);
-    std::iota(v.begin(), v.end(), 0);
-    return v;
-}
+std::vector<T> make_vector(std::size_t size);
 
 }  // namespace loki

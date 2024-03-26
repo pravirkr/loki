@@ -2,11 +2,39 @@ format:
   disable: false
   line_width: 100
   tab_size: 2
-  max_subgroups_hwrap: 2
-  max_pargs_hwrap: 6
-  max_rows_cmdline: 2
-  min_prefix_chars: 4
-  max_prefix_chars: 10
-  max_lines_hwrap: 2
-  line_ending: unix
+  max_subgroups_hwrap: 3
+  dangle_parens: true
 
+enable_markup: false
+
+parse:
+  additional_commands:
+    cpmfindpackage:
+      pargs:
+        nargs: '*'
+        flags: []
+      spelling: CPMFindPackage
+      kwargs: &cpmaddpackagekwargs
+        NAME: 1
+        FORCE: 1
+        VERSION: 1
+        GIT_TAG: 1
+        DOWNLOAD_ONLY: 1
+        GITHUB_REPOSITORY: 1
+        GITLAB_REPOSITORY: 1
+        GIT_REPOSITORY: 1
+        SVN_REPOSITORY: 1
+        SVN_REVISION: 1
+        SOURCE_DIR: 1
+        DOWNLOAD_COMMAND: 1
+        FIND_PACKAGE_ARGUMENTS: 1
+        NO_CACHE: 1
+        GIT_SHALLOW: 1
+        URL: 1
+        URL_HASH: 1
+        URL_MD5: 1
+        DOWNLOAD_NAME: 1
+        DOWNLOAD_NO_EXTRACT: 1
+        HTTP_USERNAME: 1
+        HTTP_PASSWORD: 1
+        OPTIONS: +
