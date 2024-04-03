@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <numeric>
 #include <span>
+#include <stdexcept>
 #include <string_view>
 #include <vector>
 
@@ -14,7 +15,7 @@ class MatchedFilter {
 public:
     MatchedFilter(const std::vector<size_t>& widths_arr, size_t nprofiles,
                   size_t nbins, std::string_view shape = "boxcar")
-        : widths_arr(widths_arr), nprofiles(nprofiles), nbins(nbins),
+        : widths_arr(widths_arr), nbins(nbins), nprofiles(nprofiles),
           shape(shape),
           fft2d(nprofiles, widths_arr.size(), get_nbins_pow2(nbins)) {
         ntemplates = widths_arr.size();
@@ -28,6 +29,7 @@ public:
 
     std::vector<float> get_templates() const { return templates; }
     std::size_t get_ntemplates() const { return ntemplates; }
+    std::size_t get_nbins() const { return nbins_pow2; }
     void compute(std::span<const float> arr, std::span<float> out) {
         const size_t arr_size = arr.size();
         if (arr_size != nprofiles * nbins) {
@@ -127,41 +129,44 @@ private:
 namespace loki {
 
 // out = x + scalar
-void add_scalar(const std::span<float> x, const float scalar,
+void add_scalar(std::span<const float> x, const float scalar,
                 std::span<float> out) {
     std::transform(x.begin(), x.end(), out.begin(),
                    [scalar](float xi) { return xi + scalar; });
 }
 
 // return max(x[i] - y[i])
-float diff_max(const std::span<float> x, const std::span<float> y) {
-    return std::transform_reduce(
-        x.begin(), x.end(), y.begin(), -std::numeric_limits<float>::max(),
-        [](float a, float b) { return std::max(a, b); },
-        [](float xi, float yi) { return xi - yi; });
+float diff_max(std::span<const float> x, std::span<const float> y) {
+    float max_diff = -std::numeric_limits<float>::max();
+    for (size_t i = 0; i < x.size(); ++i) {
+        max_diff = std::max(max_diff, x[i] - y[i]);
+    }
+    return max_diff;
 }
 
 // out[nsum] = x[0] + x[1] + ... + x[size-1] + x[0] + x[1] + ...
-void circular_prefix_sum(std::span<const float> x, size_t nsum,
-                         std::span<float> out) {
-    double acc        = 0;
-    const size_t size = x.size();
-    const size_t jmax = std::min(size, nsum);
+void circular_prefix_sum(std::span<const float> x, std::span<float> out) {
+    double acc         = 0;
+    const size_t nbins = x.size();
+    const size_t nsum  = out.size();
+    const size_t jmax  = std::min(nbins, nsum);
     for (size_t j = 0; j < jmax; ++j) {
         acc += x[j];
         out[j] = static_cast<float>(acc);
     }
-    if (nsum <= size) {
+    if (nsum <= nbins) {
         return;
     }
     // Wrap around
-    const size_t n_wraps = nsum / size;
-    const size_t extra   = nsum % size;
+    const size_t n_wraps = nsum / nbins;
+    const size_t extra   = nsum % nbins;
     const float last     = out[jmax - 1];
     for (size_t i_wrap = 1; i_wrap < n_wraps; ++i_wrap) {
-        add_scalar(out, i_wrap * last, out.subspan(i_wrap * size, size));
+        add_scalar(out.subspan(0, nbins), i_wrap * last,
+                   out.subspan(i_wrap * nbins, nbins));
     }
-    add_scalar(out, n_wraps * last, out.subspan(n_wraps * size, extra));
+    add_scalar(out.subspan(0, extra), n_wraps * last,
+               out.subspan(n_wraps * nbins, extra));
 }
 
 // Compute the S/N of single pulse proile
@@ -175,7 +180,7 @@ void snr_1d(std::span<const float> arr, std::span<const size_t> widths,
     }
 
     std::vector<float> psum(nbins + wmax);
-    circular_prefix_sum(arr, nbins + wmax, psum);
+    circular_prefix_sum(arr, std::span<float>(psum));
     const float sum = psum[nbins - 1];  // sum of the input array
     const std::span<float> psum_span(psum);
 
@@ -183,7 +188,7 @@ void snr_1d(std::span<const float> arr, std::span<const size_t> widths,
         // Height and baseline of a boxcar filter with width w bins
         // and zero mean and unit square sum
         const auto w     = static_cast<float>(widths[iw]);
-        const float h    = std::sqrt((nbins - w) / (nbins + w));  // height = +h
+        const float h    = std::sqrt((nbins - w) / (nbins * w));  // height = +h
         const float b    = w * h / (nbins - w);  // baseline = -b
         const float dmax = diff_max(psum_span.subspan(w, nbins),
                                     psum_span.subspan(0, nbins));
@@ -201,11 +206,10 @@ void snr_2d(std::span<const float> arr, const size_t nprofiles,
     if (out.size() != nprofiles * ntemplates) {
         throw std::invalid_argument("Output array size does not match");
     }
-    #pragma omp parallel for
+#pragma omp parallel for
     for (size_t i = 0; i < nprofiles; ++i) {
-        std::span<const float> profile(arr.data() + i * nbins, nbins);
-        std::span<float> snr_out(out.data() + i, ntemplates);
-        snr_1d(profile, widths, stdnoise, snr_out);
+        snr_1d(arr.subspan(i * nbins, nbins), widths, stdnoise,
+               out.subspan(i * ntemplates, ntemplates));
     }
 }
 

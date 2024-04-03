@@ -25,15 +25,25 @@ inline py::array_t<typename Sequence::value_type> as_pyarray(Sequence&& seq) {
 
 PYBIND11_MODULE(libloki, mod) {
     mod.doc() = "Python bindings for the loki library";
+    mod.def("cirular_prefix_sum",
+            [](const py::array_t<float, py::array::c_style>& arr, size_t nsum) {
+                auto out = py::array_t<float, py::array::c_style>(nsum);
+                loki::circular_prefix_sum(
+                    std::span<const float>(arr.data(), arr.size()),
+                    std::span<float>(out.mutable_data(), out.size()));
+                return out;
+            });
+
     mod.def("snr_1d", [](const py::array_t<float, py::array::c_style>& arr,
                          const py::array_t<size_t, py::array::c_style>& widths,
                          float stdnoise) {
         auto widths_arr = widths.cast<std::vector<size_t>>();
-        auto out        = py::array_t<float>(widths_arr.size());
+        auto out = py::array_t<float, py::array::c_style>(widths_arr.size());
         loki::snr_1d(
             std::span<const float>(arr.data(), arr.size()),
             std::span<const size_t>(widths_arr.data(), widths_arr.size()),
             stdnoise, std::span<float>(out.mutable_data(), out.size()));
+        return out;
     });
     mod.def("snr_2d", [](const py::array_t<float, py::array::c_style>& arr,
                          const py::array_t<size_t, py::array::c_style>& widths,
@@ -41,12 +51,14 @@ PYBIND11_MODULE(libloki, mod) {
         const auto shape     = arr.shape();
         const auto nprofiles = shape[0];
         auto widths_arr      = widths.cast<std::vector<size_t>>();
-        auto out             = py::array_t<float>(py::array::ShapeContainer(
-            {nprofiles, static_cast<long>(widths_arr.size())}));
+        auto out
+            = py::array_t<float, py::array::c_style>(py::array::ShapeContainer(
+                {nprofiles, static_cast<long>(widths_arr.size())}));
         loki::snr_2d(
             std::span<const float>(arr.data(), arr.size()), nprofiles,
             std::span<const size_t>(widths_arr.data(), widths_arr.size()),
             stdnoise, std::span<float>(out.mutable_data(), out.size()));
+        return out;
     });
 
     py::class_<MatchedFilter>(mod, "MatchedFilter")
@@ -58,13 +70,24 @@ PYBIND11_MODULE(libloki, mod) {
                  }),
              py::arg("widths_arr"), py::arg("nprofiles"), py::arg("nbins"),
              py::arg("shape") = "boxcar")
-        .def_property_readonly("templates", &MatchedFilter::get_templates)
+        .def_property_readonly("ntemplates", &MatchedFilter::get_ntemplates)
+        .def_property_readonly("nbins", &MatchedFilter::get_nbins)
+        // returns 2d array
+        .def_property_readonly("templates",
+                               [](MatchedFilter& mf) {
+                                   // return a py::array_t<float> from a
+                                   // std::vector<float> also reshape the array
+                                   // to 2d using ntemplates and nbins
+                                   return as_pyarray(mf.get_templates());
+                               })
         // takes 2d array as input and returns 2d array as output
         .def("compute", [](MatchedFilter& mf,
                            const py::array_t<float, py::array::c_style>& arr) {
-            const auto shape = arr.shape();
-            auto snr         = py::array_t<float>(py::array::ShapeContainer(
-                {shape[1], static_cast<long>(mf.get_ntemplates())}));
+            const auto shape     = arr.shape();
+            const auto nprofiles = shape[0];
+            auto snr             = py::array_t<float, py::array::c_style>(
+                py::array::ShapeContainer(
+                    {nprofiles, static_cast<long>(mf.get_ntemplates())}));
             mf.compute(std::span<const float>(arr.data(), arr.size()),
                        std::span<float>(snr.mutable_data(), snr.size()));
             return snr;

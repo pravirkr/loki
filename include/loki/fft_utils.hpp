@@ -2,10 +2,7 @@
 
 #include <cstddef>
 #include <span>
-#include <complex>
 #include <fftw3.h>
-
-using fcomplex = std::complex<float>;
 
 class FFT_2D {
 public:
@@ -28,7 +25,7 @@ public:
         fftwf_destroy_plan(plan_inverse);
     }
 
-    void circular_convolve(const std::span<float> n1, const std::span<float> n2,
+    void circular_convolve(std::span<float> n1, std::span<float> n2,
                            std::span<float> out) {
         // Forward FFT
         fftwf_execute_dft_r2c(plan_forward, n1.data(), n1_fft);
