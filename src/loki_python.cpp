@@ -3,7 +3,8 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
-#include "loki/scores.hpp"
+#include <loki/score.hpp>
+#include <loki/utils.hpp>
 
 namespace py = pybind11;
 

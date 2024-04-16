@@ -1,4 +1,5 @@
 find_package(pybind11 CONFIG REQUIRED)
 pybind11_add_module(libloki loki_python.cpp)
+target_include_directories(libloki PUBLIC ${CMAKE_SOURCE_DIR}/lib)
 target_link_libraries(libloki PUBLIC loki)
 install(TARGETS libloki DESTINATION loki)

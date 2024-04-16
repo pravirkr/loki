@@ -7,12 +7,12 @@ name = "loki"
 version = "0.0.1"
 description = "Leveraging Optimal significance to unveil Keplerian orbIt pulsars"
 readme = "README.md"
-license = {text = "MIT"}
-authors=[{name="Pravir Kumar", email="pravirka@gmail.com"}]
+license = { text = "MIT" }
+authors = [{ name = "Pravir Kumar", email = "pravirka@gmail.com" }]
 requires-python = ">=3.8"
 dependencies = ["numpy"]
 keywords = ["pybind11", "cibuildwheel", "c++", "pypi", "numpy"]
-classifiers=[
+classifiers = [
     "Programming Language :: C++",
     "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.8",
@@ -37,8 +37,7 @@ docs = ["cmake", "breathe", "sphinx_rtd_theme"]
 
 [tool.scikit-build]
 cmake.build-type = "Release"
-cmake.define = {BUILD_PYTHON = "ON", BUILD_TESTING = "OFF", ENABLE_FAST_MATH = "ON"}
-
+cmake.define = { BUILD_PYTHON = "ON", BUILD_TESTING = "OFF", ENABLE_FAST_MATH = "ON" }
 
 [tool.cibuildwheel]
 test-extras = "test"
