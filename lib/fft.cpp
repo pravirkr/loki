@@ -1,40 +1,41 @@
-#pragma once
-
 #include <loki/fft.hpp>
 
-FFT_2D::FFT_2D(size_t n1x, size_t n2x, size_t ny) : n1x(n1x), n2x(n2x), ny(ny) {
-  fft_size = ny / 2 + 1;
-  n1_fft = fftwf_alloc_complex(n1x * fft_size);
-  n2_fft = fftwf_alloc_complex(n2x * fft_size);
-  n1n2_fft = fftwf_alloc_complex(n1x * n2x * fft_size);
-  plan_forward =
-      fftwf_plan_dft_r2c_2d(n1x, ny, nullptr, nullptr, FFTW_ESTIMATE);
-  plan_inverse =
-      fftwf_plan_dft_c2r_2d(n1x, ny, nullptr, nullptr, FFTW_ESTIMATE);
-};
+FFT2D::FFT2D(size_t n1x, size_t n2x, size_t ny)
+    : m_n1x(n1x), m_n2x(n2x), m_ny(ny), m_fft_size(ny / 2 + 1),
+      m_n1_fft(fftwf_alloc_complex(n1x * m_fft_size)),
+      m_n2_fft(fftwf_alloc_complex(n2x * m_fft_size)),
+      m_n1n2_fft(fftwf_alloc_complex(n1x * n2x * m_fft_size)),
+      m_plan_forward(
+          fftwf_plan_dft_r2c_2d(n1x, ny, nullptr, nullptr, FFTW_ESTIMATE)),
+      m_plan_inverse(
+          fftwf_plan_dft_c2r_2d(n1x, ny, nullptr, nullptr, FFTW_ESTIMATE)) {
 
-FFT_2D::~FFT_2D() {
-  fftwf_free(n1_fft);
-  fftwf_free(n2_fft);
-  fftwf_free(n1n2_fft);
-  fftwf_destroy_plan(plan_forward);
-  fftwf_destroy_plan(plan_inverse);
+      };
+
+FFT2D::~FFT2D() {
+  fftwf_free(m_n1_fft);
+  fftwf_free(m_n2_fft);
+  fftwf_free(m_n1n2_fft);
+  fftwf_destroy_plan(m_plan_forward);
+  fftwf_destroy_plan(m_plan_inverse);
 }
 
-void FFT_2D::circular_convolve(std::span<float> n1, std::span<float> n2,
-                               std::span<float> out) {
+void FFT2D::circular_convolve(std::span<float> n1, std::span<float> n2,
+                              std::span<float> out) {
   // Forward FFT
-  fftwf_execute_dft_r2c(plan_forward, n1.data(), n1_fft);
-  fftwf_execute_dft_r2c(plan_forward, n2.data(), n2_fft);
+  fftwf_execute_dft_r2c(m_plan_forward, n1.data(), m_n1_fft);
+  fftwf_execute_dft_r2c(m_plan_forward, n2.data(), m_n2_fft);
   // Multiply the FFTs
-  for (size_t i = 0; i < n1x * n2x * fft_size; ++i) {
-    const size_t idx_n1 = (i / (n2x * fft_size)) * fft_size + (i % fft_size);
-    const size_t idx_n2 = (i / fft_size) % n2x * fft_size + (i % fft_size);
-    n1n2_fft[i][0] = n1_fft[idx_n1][0] * n2_fft[idx_n2][0] -
-                     n1_fft[idx_n1][1] * n2_fft[idx_n2][1];
-    n1n2_fft[i][1] = n1_fft[idx_n1][0] * n2_fft[idx_n2][1] +
-                     n1_fft[idx_n1][1] * n2_fft[idx_n2][0];
+  for (size_t i = 0; i < m_n1x * m_n2x * m_fft_size; ++i) {
+    const size_t idx_n1 =
+        (i / (m_n2x * m_fft_size)) * m_fft_size + (i % m_fft_size);
+    const size_t idx_n2 =
+        (i / m_fft_size) % m_n2x * m_fft_size + (i % m_fft_size);
+    m_n1n2_fft[i][0] = m_n1_fft[idx_n1][0] * m_n2_fft[idx_n2][0] -
+                       m_n1_fft[idx_n1][1] * m_n2_fft[idx_n2][1];
+    m_n1n2_fft[i][1] = m_n1_fft[idx_n1][0] * m_n2_fft[idx_n2][1] +
+                       m_n1_fft[idx_n1][1] * m_n2_fft[idx_n2][0];
   }
   // Inverse FFT
-  fftwf_execute_dft_c2r(plan_inverse, n1n2_fft, out.data());
+  fftwf_execute_dft_c2r(m_plan_inverse, m_n1n2_fft, out.data());
 }

@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.15)
+cmake_minimum_required(VERSION 3.18)
 cmake_policy(SET CMP0148 OLD)
 
 project(
@@ -11,61 +11,44 @@ project(
 option(BUILD_DOCS "Build documentation" OFF)
 option(BUILD_PYTHON "Build Python bindings" ON)
 option(BUILD_TESTING "Build tests" ON)
-option(ENABLE_FAST_MATH "Enable fast math flags" ON)
-option(ENABLE_CLANG_TIDY "Run Clang Tidy to get static analysis" OFF)
+option(CODE_COVERAGE "Enable coverage reporting" OFF)
 
 # Define the minimum C++ standard that is required
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${PROJECT_SOURCE_DIR}/cmake)
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra")
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g")
-set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -DNDEBUG -march=native -fopenmp")
-
-if(ENABLE_FAST_MATH)
-  set(FAST_MATH_FLAGS_SAFE
-      "-fassociative-math -fno-rounding-math -fno-signed-zeros -fno-trapping-math"
-  )
-  set(FAST_MATH_FLAGS_UNSAFE "-ffinite-math-only -fno-math-errno")
-  set(CMAKE_CXX_FLAGS_RELEASE
-      "${CMAKE_CXX_FLAGS_RELEASE} ${FAST_MATH_FLAGS_SAFE} ${FAST_MATH_FLAGS_UNSAFE}"
-  )
-endif()
+set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -DNDEBUG -march=native -ffast-math")
 
 if(NOT CMAKE_BUILD_TYPE)
-  set(CMAKE_BUILD_TYPE Debug)
+  set(CMAKE_BUILD_TYPE Release)
 endif()
 
 # Initialize some default paths
 include(GNUInstallDirs)
-include(CTest)
 include(cmake/CPM.cmake)
 
-# Find dependencies
-CPMFindPackage(
-  NAME spdlog
-  VERSION 1.10.0
-  GITHUB_REPOSITORY gabime/spdlog
-  OPTIONS "SPDLOG_INSTALL ON"
-)
-if(BUILD_TESTING)
-
+# Code Coverage Configuration
+add_library(coverage_config INTERFACE)
+if(CODE_COVERAGE)
+  target_compile_options(coverage_config INTERFACE -O0 -g --coverage)
+  target_link_options(coverage_config INTERFACE --coverage)
 endif()
-find_package(FFTW REQUIRED)
-find_package(OpenMP REQUIRED)
 
-include_directories(${CMAKE_SOURCE_DIR}/include)
-# Build the c++ library
+# Build the C++ library
+set(LIBRARY_NAME loki)
 add_subdirectory(lib)
-# Build the c++ tests
-if(BUILD_TESTING)
-  add_subdirectory(tests/cpp)
-endif()
-# Build the python bindings
+# Build the Python bindings
 if(BUILD_PYTHON)
   add_subdirectory(src)
+endif()
+# Build tests
+if(BUILD_TESTING)
+  add_subdirectory(tests/cpp)
 endif()
 
 # Install targets and configuration
@@ -75,12 +58,6 @@ install(
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
-)
-
-install(
-  EXPORT loki_config
-  NAMESPACE loki::
-  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/loki
 )
 
 install(DIRECTORY ${CMAKE_CURRENT_LIST_DIR}/include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})

@@ -5,41 +5,97 @@ build-backend = "scikit_build_core.build"
 [project]
 name = "loki"
 version = "0.0.1"
-description = "Leveraging Optimal significance to unveil Keplerian orbIt pulsars"
+description = "Leverage Optimal significance to unveil Keplerian orbIt pulsars"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "Pravir Kumar", email = "pravirka@gmail.com" }]
-requires-python = ">=3.8"
-dependencies = ["numpy"]
-keywords = ["pybind11", "cibuildwheel", "c++", "pypi", "numpy"]
+requires-python = ">=3.9"
 classifiers = [
     "Programming Language :: C++",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: Implementation :: CPython",
-    "Programming Language :: Python :: Implementation :: PyPy",
     "Operating System :: MacOS :: MacOS X",
     "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
     "License :: OSI Approved :: MIT License",
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Astronomy",
 ]
+dependencies = ["numpy"]
 
 [project.urls]
 Github = "https://github.com/pravirkr/loki"
 
 [project.optional-dependencies]
-test = ["pytest"]
-docs = ["cmake", "breathe", "sphinx_rtd_theme"]
+tests = [
+    "pytest",
+    "pytest-cov",
+    "pytest-randomly",
+    "pytest-sugar",
+    "pytest-benchmark",
+    "mypy",
+]
+docs = ["sphinx", "sphinx-book-theme", "sphinx-click", "myst-nb", "breathe"]
+develop = ["ruff"]
 
 [tool.scikit-build]
+cmake.version = ">=3.15"
 cmake.build-type = "Release"
-cmake.define = { BUILD_PYTHON = "ON", BUILD_TESTING = "OFF", ENABLE_FAST_MATH = "ON" }
+install.strip = false
+
+[tool.scikit-build.cmake.define]
+BUILD_PYTHON = "ON"
+BUILD_TESTING = "OFF"
+BUILD_DOCS = "OFF"
 
 [tool.cibuildwheel]
 test-extras = "test"
 test-command = "python -m pytest {project}/tests/python -v"
 test-skip = "pp* *-musllinux* *-manylinux_i686"
+
+[tool.ruff]
+include = ["pyproject.toml", "src/**/*.py"]
+line-length = 88
+indent-width = 4
+target-version = "py39"
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = ["D1", "ANN1", "PLR2004"]
+
+[tool.ruff.lint.pylint]
+max-args = 10
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = "tests/python"
+
+[tool.coverage.run]
+omit = ["tests/*", "*__init__.py", "docs/*"]
+
+[tool.coverage.report]
+show_missing = true
+ignore_errors = true
+#fail_under = 85
+exclude_lines = ['raise AssertionError', 'raise NotImplementedError']
+
+[tool.coverage.path]
+source = "src/dmt"
+
+[tool.gcovr]
+filter = ["lib/*"]
+
+[tool.mypy]
+ignore_missing_imports = true
+plugins = ["numpy.typing.mypy_plugin"]

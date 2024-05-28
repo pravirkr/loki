@@ -1,3 +1,3 @@
 # loki
 
-Leveraging Optimal significance to unveil Keplerian orbIt pulsars
+Leverage Optimal significance to unveil Keplerian orbIt pulsars

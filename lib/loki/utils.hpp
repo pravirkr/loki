@@ -5,8 +5,7 @@
 namespace loki {
 
 // out = x + scalar
-void add_scalar(std::span<const float> x, const float scalar,
-                std::span<float> out);
+void add_scalar(std::span<const float> x, float scalar, std::span<float> out);
 
 // return max(x[i] - y[i])
 float diff_max(std::span<const float> x, std::span<const float> y);

@@ -2,15 +2,15 @@
 #include <cstddef>
 #include <span>
 
-namespace loki {
+#include <loki/utils.hpp>
 
-void add_scalar(std::span<const float> x, const float scalar,
-                std::span<float> out) {
+void loki::add_scalar(std::span<const float> x, float scalar,
+                      std::span<float> out) {
   std::transform(x.begin(), x.end(), out.begin(),
                  [scalar](float xi) { return xi + scalar; });
 }
 
-float diff_max(std::span<const float> x, std::span<const float> y) {
+float loki::diff_max(std::span<const float> x, std::span<const float> y) {
   float max_diff = -std::numeric_limits<float>::max();
   for (size_t i = 0; i < x.size(); ++i) {
     max_diff = std::max(max_diff, x[i] - y[i]);
@@ -18,7 +18,7 @@ float diff_max(std::span<const float> x, std::span<const float> y) {
   return max_diff;
 }
 
-void circular_prefix_sum(std::span<const float> x, std::span<float> out) {
+void loki::circular_prefix_sum(std::span<const float> x, std::span<float> out) {
   double acc = 0;
   const size_t nbins = x.size();
   const size_t nsum = out.size();
@@ -35,11 +35,9 @@ void circular_prefix_sum(std::span<const float> x, std::span<float> out) {
   const size_t extra = nsum % nbins;
   const float last = out[jmax - 1];
   for (size_t i_wrap = 1; i_wrap < n_wraps; ++i_wrap) {
-    add_scalar(out.subspan(0, nbins), i_wrap * last,
+    add_scalar(out.subspan(0, nbins), static_cast<float>(i_wrap) * last,
                out.subspan(i_wrap * nbins, nbins));
   }
-  add_scalar(out.subspan(0, extra), n_wraps * last,
+  add_scalar(out.subspan(0, extra), static_cast<float>(n_wraps) * last,
              out.subspan(n_wraps * nbins, extra));
 }
-
-} // namespace loki

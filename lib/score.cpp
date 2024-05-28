@@ -9,43 +9,45 @@
 MatchedFilter::MatchedFilter(const std::vector<size_t> &widths_arr,
                              size_t nprofiles, size_t nbins,
                              std::string_view shape)
-    : widths_arr(widths_arr), nbins(nbins), nprofiles(nprofiles), shape(shape),
-      fft2d(nprofiles, widths_arr.size(), get_nbins_pow2(nbins)) {
-  ntemplates = widths_arr.size();
-  nbins_pow2 = get_nbins_pow2(nbins);
+    : m_widths_arr(widths_arr), m_nbins(nbins), m_nprofiles(nprofiles),
+      m_shape(shape),
+      m_fft2d(nprofiles, widths_arr.size(), get_nbins_pow2(nbins)) {
+  m_ntemplates = widths_arr.size();
+  m_nbins_pow2 = get_nbins_pow2(nbins);
   // Allocate memory for the templates
-  templates.resize(ntemplates * nbins_pow2, 0.0f);
-  arr_padded.resize(nprofiles * nbins_pow2, 0.0f);
-  snr_arr.resize(nprofiles * ntemplates * nbins_pow2, 0.0f);
+  m_templates.resize(m_ntemplates * m_nbins_pow2, 0.0f);
+  m_arr_padded.resize(nprofiles * m_nbins_pow2, 0.0f);
+  m_snr_arr.resize(nprofiles * m_ntemplates * m_nbins_pow2, 0.0f);
   initialise_templates();
 };
 
-std::vector<float> MatchedFilter::get_templates() const { return templates; }
-std::size_t MatchedFilter::get_ntemplates() const { return ntemplates; }
-std::size_t MatchedFilter::get_nbins() const { return nbins_pow2; }
+std::vector<float> MatchedFilter::get_templates() const { return m_templates; }
+std::size_t MatchedFilter::get_ntemplates() const { return m_ntemplates; }
+std::size_t MatchedFilter::get_nbins() const { return m_nbins_pow2; }
 void MatchedFilter::compute(std::span<const float> arr, std::span<float> out) {
   const size_t arr_size = arr.size();
-  if (arr_size != nprofiles * nbins) {
+  if (arr_size != m_nprofiles * m_nbins) {
     throw std::invalid_argument("Input array size does not match");
   }
   const size_t out_size = out.size();
-  if (out_size != nprofiles * ntemplates) {
+  if (out_size != m_nprofiles * m_ntemplates) {
     throw std::invalid_argument("Output array size does not match");
   }
-  if (arr_size != nbins_pow2) {
-    std::ranges::copy(arr, arr_padded.begin());
+  if (arr_size != m_nbins_pow2) {
+    std::ranges::copy(arr, m_arr_padded.begin());
   } else {
-    arr_padded.assign(arr.begin(), arr.end());
+    m_arr_padded.assign(arr.begin(), arr.end());
   }
-  fft2d.circular_convolve(std::span<float>(arr_padded),
-                          std::span<float>(templates),
-                          std::span<float>(snr_arr));
+  m_fft2d.circular_convolve(std::span<float>(m_arr_padded),
+                            std::span<float>(m_templates),
+                            std::span<float>(m_snr_arr));
   // Find the maximum value for each profile and template and then scale
-  for (size_t i = 0; i < nprofiles; ++i) {
-    for (size_t j = 0; j < ntemplates; ++j) {
-      const auto idx = i * ntemplates + j;
-      const auto snr_idx = snr_arr.begin() + idx * nbins_pow2;
-      out[idx] = *std::max_element(snr_idx, snr_idx + nbins_pow2) / nbins_pow2;
+  for (size_t i = 0; i < m_nprofiles; ++i) {
+    for (size_t j = 0; j < m_ntemplates; ++j) {
+      const auto idx = i * m_ntemplates + j;
+      const auto snr_idx = m_snr_arr.begin() + idx * m_nbins_pow2;
+      out[idx] =
+          *std::max_element(snr_idx, snr_idx + m_nbins_pow2) / m_nbins_pow2;
     }
   }
 }
@@ -55,32 +57,34 @@ std::size_t MatchedFilter::get_nbins_pow2(std::size_t nbins) {
 }
 
 void MatchedFilter::initialise_templates() {
-  if (shape == "gaussian") {
-    for (size_t i = 0; i < ntemplates; ++i) {
-      std::span<float> temp_arr(templates.data() + i * nbins_pow2, nbins_pow2);
-      generate_gaussian_template(temp_arr, widths_arr[i]);
+  if (m_shape == "gaussian") {
+    for (size_t i = 0; i < m_ntemplates; ++i) {
+      std::span<float> temp_arr(m_templates.data() + i * m_nbins_pow2, m_nbins_pow2);
+      generate_gaussian_template(temp_arr, m_widths_arr[i]);
     }
-  } else if (shape == "boxcar") {
-    for (size_t i = 0; i < ntemplates; ++i) {
-      std::span<float> temp_arr(templates.data() + i * nbins_pow2, nbins_pow2);
-      generate_boxcar_template(temp_arr, widths_arr[i]);
+  } else if (m_shape == "boxcar") {
+    for (size_t i = 0; i < m_ntemplates; ++i) {
+      std::span<float> temp_arr(m_templates.data() + i * m_nbins_pow2, m_nbins_pow2);
+      generate_boxcar_template(temp_arr, m_widths_arr[i]);
     }
   } else {
     throw std::invalid_argument("Invalid shape");
   }
 }
 
-void MatchedFilter::generate_boxcar_template(std::span<float> &arr, size_t width) {
+void MatchedFilter::generate_boxcar_template(std::span<float> &arr,
+                                             size_t width) {
   const size_t temp_nbins = arr.size();
   const auto temp_start = arr.begin() + temp_nbins / 2 - width / 2;
   const auto temp_end = temp_start + width + (width % 2);
   std::fill(arr.begin(), temp_start, 0.0f);
-  std::fill(temp_start, temp_end, 1.0f);
-  std::fill(temp_end, arr.end(), 0.0f);
+  std::fill(temp_start, temp_end, 1.0F);
+  std::fill(temp_end, arr.end(), 0.0F);
   normalise(arr);
 }
 
-void MatchedFilter::generate_gaussian_template(std::span<float> &arr, size_t width) {
+void MatchedFilter::generate_gaussian_template(std::span<float> &arr,
+                                               size_t width) {
   const size_t temp_nbins = arr.size();
   const float sigma = width / (2.0f * std::sqrt(2.0f * std::log(2.0f)));
   const auto xmax = static_cast<size_t>(std::ceil(3.5 * sigma));

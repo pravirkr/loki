@@ -1,13 +1,20 @@
-file(GLOB LOKI_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
-add_library(loki ${LOKI_SOURCES})
-target_include_directories(loki PRIVATE ${FFTW_INCLUDE_DIRS})
-target_include_directories(
-  loki PUBLIC $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/lib>
-              $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+# Find dependencies
+CPMFindPackage(
+  NAME spdlog
+  VERSION 1.13.0
+  GITHUB_REPOSITORY gabime/spdlog
+  OPTIONS "SPDLOG_INSTALL ON"
 )
-target_link_libraries(loki PRIVATE spdlog::spdlog_header_only ${FFTW_FLOAT_LIB})
-# Check if OpenMP was found
-if(OpenMP_CXX_FOUND)
-  target_link_libraries(loki PRIVATE OpenMP::OpenMP_CXX)
-  target_compile_definitions(loki PRIVATE USE_OPENMP)
-endif()
+find_package(FFTW REQUIRED)
+find_package(OpenMP REQUIRED)
+
+file(GLOB LIBRARY_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
+
+add_library(${LIBRARY_NAME} ${LIBRARY_SOURCES})
+
+target_include_directories(${LIBRARY_NAME} PUBLIC ${CMAKE_SOURCE_DIR}/include)
+target_include_directories(${LIBRARY_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${FFTW_INCLUDE_DIRS})
+target_link_libraries(
+  ${LIBRARY_NAME} PUBLIC coverage_config spdlog::spdlog_header_only ${FFTW_FLOAT_LIB}
+                         OpenMP::OpenMP_CXX
+)
