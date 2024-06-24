@@ -2,74 +2,100 @@
 
 #include <array>
 #include <cstddef>
+#include <optional>
 #include <random>
+#include <span>
 #include <vector>
 
 struct FoldsType {
-    // shape: (nthresholds, nprobs, ntrials, nbins)
+    // ntrials x nbins
     std::vector<float> data;
-    float variance{};
-    size_t nthresholds;
-    size_t nprobs;
+    float variance;
     size_t ntrials;
     size_t nbins;
 
-    FoldsType(size_t nthresholds, size_t nprobs, size_t ntrials, size_t nbins)
-        : data(nthresholds * nprobs * ntrials * nbins, 0.0F),
-          nthresholds(nthresholds),
-          nprobs(nprobs),
+    FoldsType(size_t ntrials, size_t nbins, float variance = 0.0F)
+        : data(ntrials * nbins),
+          variance(variance),
           ntrials(ntrials),
           nbins(nbins) {}
+};
 
-    size_t get_trial_pos(size_t ithreshold, size_t iprob) const {
-        return ithreshold * nprobs * ntrials * nbins + iprob * ntrials * nbins;
-    }
-
-    std::vector<size_t> get_non_nan_trial_indices(size_t ithreshold,
-                                                  size_t iprob) const {
-        std::vector<size_t> indices;
-        const auto trials_pos = get_trial_pos(ithreshold, iprob);
-        for (size_t i = 0; i < ntrials; ++i) {
-            if (!std::isnan(data[trials_pos + i * nbins])) {
-                indices.push_back(i);
-            }
-        }
-        return indices;
-    }
+struct StateInfo {
+    float success_h0;
+    float success_h1;
+    float complexity;
+    float complexity_cumul;
+    float success_h1_cumul;
+    std::vector<std::array<float, 2>> backtrack;
+    float cost() const { return complexity_cumul / success_h1_cumul; }
 };
 
 class State {
 public:
-    float m_success_h0;
-    float m_success_h1;
-    float m_complexity;
-    float m_complexity_cumul;
-    float m_success_h1_cumul;
-    std::vector<std::array<float, 2>> m_backtrack;
-
-    float cost() const;
+    FoldsType m_folds_h0;
+    FoldsType m_folds_h1;
+    StateInfo m_state_info;
     bool is_empty() const;
-    State gen_next_using_threshold(
-        const FoldsType& folds_in_h0, FoldsType& folds_out_h0,
-        const FoldsType& folds_in_h1, FoldsType& folds_out_h1, float threshold,
-        float bias_snr, const std::vector<float>& profile, size_t nbranches,
-        std::mt19937& gen, size_t ithreshold, size_t iprob) const;
 
-    static init_stat
+    State gen_next(float threshold,
+                   float bias_snr,
+                   std::span<const float> profile,
+                   size_t nbranches,
+                   std::mt19937& rng,
+                   size_t ntrials,
+                   float ducy_max = 0.3F) const;
 
-private:
-    static size_t pick_random_element(const std::vector<size_t>& vec,
-                                      std::mt19937& gen);
-
-    void simulate_folds(const FoldsType& folds_in, FoldsType& folds_out,
-                        const std::vector<float>& profile, std::mt19937& gen,
-                        float bias_snr, float var_add, size_t ithreshold,
-                        size_t iprob) const;
-
-    static std::vector<size_t> measure_success(const FoldsType& folds,
-                                               float snr_threshold,
-                                               size_t ithreshold, size_t iprob);
+    static State init(float threshold,
+                      float bias_snr,
+                      std::span<const float> profile,
+                      size_t nbranches,
+                      std::mt19937& rng,
+                      size_t ntrials,
+                      float ducy_max = 0.3F,
+                      float var_init = 2.0F);
 };
+
+std::vector<size_t> neighbouring_indices(std::span<const float> arr,
+                                         float target,
+                                         size_t left_size,
+                                         size_t right_size);
+
+/**
+ * @brief Simulate folded profiles by adding signal + noise to the template.
+ *
+ * @param folds_in Folded data with shape (ntrials, nbins).
+ * @param profile Normalized template profile.
+ * @param rng Random number generator.
+ * @param bias_snr Bias signal-to-noise ratio.
+ * @param var_add Variance to add to the noise.
+ * @param ntrials Number of trials to simulate.
+ * @return FoldsType Folded data with shape (ntrials, nbins).
+ */
+FoldsType simulate_folds(const FoldsType& folds_in,
+                         std::span<const float> profile,
+                         std::mt19937& rng,
+                         float bias_snr = 0.0F,
+                         float var_add  = 1.0F,
+                         size_t ntrials = 1024);
+
+std::vector<float> compute_scores(const FoldsType& folds,
+                                  float ducy_max = 0.3F);
+
+FoldsType prune_folds(const FoldsType& folds_in,
+                      std::span<const float> scores,
+                      float threshold);
+
+std::pair<FoldsType, State>
+gen_next_using_threshold(const FoldsType& folds_in_h0,
+                         const FoldsType& folds_in_h1,
+                         float threshold,
+                         float bias_snr,
+                         std::span<const float> profile,
+                         size_t nbranches,
+                         std::mt19937& rng,
+                         size_t ntrials,
+                         float ducy_max = 0.3F);
 
 class DynamicThresholdScheme {
 public:
@@ -78,25 +104,33 @@ public:
     std::vector<float> m_thresholds;
     std::vector<float> m_probs;
     size_t m_ntrials;
-    float m_bias_snr;
 
-    FoldsType m_folds_in_h0;
-    FoldsType m_folds_in_h1;
-    FoldsType m_folds_out_h0;
-    FoldsType m_folds_out_h1;
+    size_t m_nbins;
+    size_t m_nsegments;
+    size_t m_nthresholds;
+    size_t m_nprobs;
+    float m_bias_snr;
+    std::vector<std::optional<State>> m_states_in;
+    std::vector<std::optional<State>> m_states_out;
+    std::vector<std::optional<StateInfo>> m_states_info;
 
     DynamicThresholdScheme(const std::vector<size_t>& branching_pattern,
                            const std::vector<float>& profile,
-                           float snr_final = 8.0F, float snr_step = 0.1F,
-                           size_t ntrials = 1024, size_t nprobs = 10);
-    void run(size_t nsteps);
+                           float snr_final = 8.0F,
+                           float snr_step  = 0.1F,
+                           size_t ntrials  = 1024,
+                           size_t nprobs   = 10);
+    void run(size_t thres_neigh = 10);
 
     State get_best_state() const;
 
 private:
+    std::mt19937 m_rng;
+
     static std::vector<float>
     get_norm_profile(const std::vector<float>& profile);
     static std::vector<float> get_thresholds(float snr_final, float snr_step);
     static std::vector<float> get_probs(size_t nprobs);
     void init_states();
+    void run_segment(size_t isegment, size_t thres_neigh = 10);
 };

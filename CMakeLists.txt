@@ -11,13 +11,13 @@ project(
 option(BUILD_DOCS "Build documentation" OFF)
 option(BUILD_PYTHON "Build Python bindings" ON)
 option(BUILD_TESTING "Build tests" ON)
+option(BUILD_BENCHMARKS "Build benchmarks" OFF)
 option(CODE_COVERAGE "Enable coverage reporting" OFF)
 
 # Define the minimum C++ standard that is required
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${PROJECT_SOURCE_DIR}/cmake)
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra")
@@ -49,6 +49,10 @@ endif()
 # Build tests
 if(BUILD_TESTING)
   add_subdirectory(tests/cpp)
+endif()
+# Build benchmarks
+if(BUILD_BENCHMARKS)
+  add_subdirectory(bench)
 endif()
 
 # Install targets and configuration

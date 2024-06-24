@@ -27,7 +27,7 @@ file(GLOB LIBRARY_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
 add_library(${LIBRARY_NAME} ${LIBRARY_SOURCES})
 
 target_include_directories(${LIBRARY_NAME} PUBLIC ${CMAKE_SOURCE_DIR}/include)
-target_include_directories(${LIBRARY_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${FFTW_INCLUDE_DIRS} ${Eigen_SOURCE_DIR}
+target_include_directories(${LIBRARY_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${FFTW_INCLUDE_DIRS} ${Eigen_SOURCE_DIR})
 target_link_libraries(
   ${LIBRARY_NAME} PUBLIC coverage_config spdlog::spdlog_header_only ${FFTW_FLOAT_LIB}
                          OpenMP::OpenMP_CXX Eigen

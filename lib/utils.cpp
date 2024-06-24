@@ -1,10 +1,13 @@
 #include <algorithm>
+#include <arm_neon.h>
 #include <cstddef>
+#include <numeric>
 #include <span>
 
 #include <Eigen/Dense>
 
 #include <loki/utils.hpp>
+#include <stdexcept>
 
 void loki::add_scalar(std::span<const float> x,
                       float scalar,
@@ -22,26 +25,29 @@ float loki::diff_max(std::span<const float> x, std::span<const float> y) {
 }
 
 void loki::circular_prefix_sum(std::span<const float> x, std::span<float> out) {
-    double acc         = 0;
     const size_t nbins = x.size();
     const size_t nsum  = out.size();
-    const size_t jmax  = std::min(nbins, nsum);
-    for (size_t j = 0; j < jmax; ++j) {
-        acc += x[j];
-        out[j] = static_cast<float>(acc);
+
+    if (nbins == 0 || nsum == 0) {
+        return;
     }
+
+    // Compute the initial prefix sum
+    std::inclusive_scan(x.begin(),
+                        x.begin() + static_cast<int>(std::min(nbins, nsum)),
+                        out.begin());
     if (nsum <= nbins) {
         return;
     }
     // Wrap around
     const size_t n_wraps = nsum / nbins;
     const size_t extra   = nsum % nbins;
-    const float last     = out[jmax - 1];
-    for (size_t i_wrap = 1; i_wrap < n_wraps; ++i_wrap) {
-        add_scalar(out.subspan(0, nbins), static_cast<float>(i_wrap) * last,
-                   out.subspan(i_wrap * nbins, nbins));
+    const float last_sum = out[nbins - 1];
+    for (size_t i = 1; i < n_wraps; ++i) {
+        add_scalar(out.subspan(0, nbins), static_cast<float>(i) * last_sum,
+                   out.subspan(i * nbins, nbins));
     }
-    add_scalar(out.subspan(0, extra), static_cast<float>(n_wraps) * last,
+    add_scalar(out.subspan(0, extra), static_cast<float>(n_wraps) * last_sum,
                out.subspan(n_wraps * nbins, extra));
 }
 

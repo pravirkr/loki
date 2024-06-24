@@ -9,12 +9,12 @@ namespace loki {
 
 std::vector<float> ffa_shift_ref(std::span<const float> param_vec, float t_ref);
 
-std::tuple<std::vector<int>, double>
+std::tuple<std::vector<int>, float>
 ffa_resolve(std::span<const float> pset_cur,
-            const std::vector<std::vector<double>>& parr_prev,
+            const std::vector<std::vector<float>>& parr_prev,
             int ffa_level,
             int latter,
-            double tchunk_init,
+            float tchunk_init,
             int nbins);
 
 void ffa_init(std::span<const float> ts,

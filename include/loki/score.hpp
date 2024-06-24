@@ -9,8 +9,10 @@
 
 class MatchedFilter {
 public:
-    MatchedFilter(const std::vector<size_t>& widths_arr, size_t nprofiles,
-                  size_t nbins, std::string_view shape = "boxcar");
+    MatchedFilter(const std::vector<size_t>& widths_arr,
+                  size_t nprofiles,
+                  size_t nbins,
+                  std::string_view shape = "boxcar");
 
     std::vector<float> get_templates() const;
     std::size_t get_ntemplates() const;
@@ -32,22 +34,25 @@ private:
     // FFTW plans
     FFT2D m_fft2d;
 
-    std::size_t get_nbins_pow2(std::size_t nbins);
     void initialise_templates();
-    void generate_boxcar_template(std::span<float>& arr, size_t width);
-    void generate_gaussian_template(std::span<float>& arr, size_t width);
-    void normalise(std::span<float>& arr);
+    static void generate_boxcar_template(std::span<float>& arr, size_t width);
+    static void generate_gaussian_template(std::span<float>& arr, size_t width);
+    static void normalise(std::span<float>& arr);
+    static std::size_t get_nbins_pow2(std::size_t nbins);
 };
 
 namespace loki {
 
 // Compute the S/N of single pulse proile
-void snr_1d(std::span<const float> arr, std::span<const size_t> widths,
-            float stdnoise, std::span<float> out);
-
-// Compute the S/N of array of single pulse profiles
-void snr_2d(std::span<const float> arr, size_t nprofiles,
-            std::span<const size_t> widths, float stdnoise,
+void snr_1d(std::span<const float> arr,
+            std::span<const size_t> widths,
+            float stdnoise,
             std::span<float> out);
 
-}  // namespace loki
+// Compute the S/N of array of single pulse profiles
+void snr_2d(std::span<const float> arr,
+            size_t nprofiles,
+            std::span<const size_t> widths,
+            float stdnoise,
+            std::span<float> out);
+} // namespace loki
