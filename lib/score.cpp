@@ -115,13 +115,10 @@ void MatchedFilter::generate_gaussian_template(std::span<float>& arr,
     normalise(arr);
 }
 
-namespace loki {
-
-// Compute the S/N of single pulse proile
-void snr_1d(std::span<const float> arr,
-            std::span<const size_t> widths,
-            float stdnoise,
-            std::span<float> out) {
+void loki::snr_1d(std::span<const float> arr,
+                  std::span<const size_t> widths,
+                  float stdnoise,
+                  std::span<float> out) {
     const size_t wmax       = *std::max_element(widths.begin(), widths.end());
     const size_t nbins      = arr.size();
     const size_t ntemplates = widths.size();
@@ -149,11 +146,11 @@ void snr_1d(std::span<const float> arr,
 }
 
 // Compute the S/N of array of single pulse profiles
-void snr_2d(std::span<const float> arr,
-            const size_t nprofiles,
-            std::span<const size_t> widths,
-            float stdnoise,
-            std::span<float> out) {
+void loki::snr_2d(std::span<const float> arr,
+                  const size_t nprofiles,
+                  std::span<const size_t> widths,
+                  float stdnoise,
+                  std::span<float> out) {
     const size_t nbins      = arr.size() / nprofiles;
     const size_t ntemplates = widths.size();
     if (out.size() != nprofiles * ntemplates) {
@@ -166,5 +163,3 @@ void snr_2d(std::span<const float> arr,
                out.subspan(i * ntemplates, ntemplates));
     }
 }
-
-} // namespace loki

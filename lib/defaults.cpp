@@ -72,15 +72,6 @@ loki::ffa_resolve(std::span<const float> pset_cur,
     return {pindex_prev, phase_rel};
 }
 
-void loki::ffa_init(std::span<const float> ts,
-                    std::span<float> fold,
-                    std::span<const float> param_arr,
-                    float tsegment_cur,
-                    size_t nbins) {
-    //fold_brute_start(ts, std::span<const float> freq_arr, std::span<float> fold,
-    //                 size_t chunk_len, size_t nbins, float dt, float t_ref);
-}
-
 float loki::freq_step(float tobs, size_t nbins, float f_max, float tol_bins) {
     const auto m_cycle   = tobs * f_max;
     const auto tsamp_min = 1.0F / (f_max * static_cast<float>(nbins));

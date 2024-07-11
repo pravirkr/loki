@@ -7,28 +7,43 @@ CPMFindPackage(
 )
 
 CPMFindPackage(
-  NAME Eigen
+  NAME Eigen3
   VERSION 3.4.0
   URL https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.tar.gz
-  # Eigen's CMakelists are not intended for library use
-  DOWNLOAD_ONLY YES 
+  DOWNLOAD_ONLY YES
 )
 
-if(Eigen_ADDED)
-  add_library(Eigen INTERFACE IMPORTED)
-  target_include_directories(Eigen INTERFACE ${Eigen_SOURCE_DIR})
+if(Eigen3_ADDED)
+  add_library(Eigen3::Eigen INTERFACE IMPORTED)
+  target_include_directories(Eigen3::Eigen INTERFACE ${Eigen3_SOURCE_DIR})
+endif()
+
+CPMFindPackage(
+  NAME Boost
+  VERSION 1.84
+  URL https://github.com/boostorg/math/archive/refs/tags/boost-1.84.0.tar.gz
+  DOWNLOAD_ONLY YES
+)
+
+if(Boost_ADDED)
+  add_library(Boost::boost INTERFACE IMPORTED)
+  target_include_directories(Boost::boost INTERFACE ${Boost_SOURCE_DIR}/include)
 endif()
 
 find_package(FFTW REQUIRED)
 find_package(OpenMP REQUIRED)
+
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 file(GLOB LIBRARY_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
 
 add_library(${LIBRARY_NAME} ${LIBRARY_SOURCES})
 
 target_include_directories(${LIBRARY_NAME} PUBLIC ${CMAKE_SOURCE_DIR}/include)
-target_include_directories(${LIBRARY_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${FFTW_INCLUDE_DIRS} ${Eigen_SOURCE_DIR})
+target_include_directories(
+  ${LIBRARY_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${FFTW_INCLUDE_DIRS} ${Boost_SOURCE_DIR}
+)
 target_link_libraries(
   ${LIBRARY_NAME} PUBLIC coverage_config spdlog::spdlog_header_only ${FFTW_FLOAT_LIB}
-                         OpenMP::OpenMP_CXX Eigen
+                         OpenMP::OpenMP_CXX Eigen3::Eigen Boost::boost
 )

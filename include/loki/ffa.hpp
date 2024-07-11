@@ -1,11 +1,11 @@
 #pragma once
 
-#include <array>
 #include <cstddef>
+#include <optional>
 #include <span>
 
-using SizeType       = std::size_t;
-using ParamLimitType = std::array<float, 2>;
+#include <loki/fold.hpp>
+#include <loki/loki_types.hpp>
 
 struct SearchConfig {
     // Number of samples in time series
@@ -30,13 +30,16 @@ struct SearchConfig {
                  float tolerance,
                  const std::vector<ParamLimitType>& param_limits);
 
-    std::vector<float> ffa_step(float tsegment_cur) const;
+    std::vector<float> get_ffa_step(float tsegment_cur) const;
+    SizeType get_segment_len_init_default() const;
+    SizeType get_segment_len_final_default() const;
 
 private:
     void validate_config() const;
 };
 
 struct FFAPlan {
+    std::vector<SizeType> segment_lens;
     std::vector<float> tsegments;
     std::vector<std::vector<std::vector<float>>> params;
     std::vector<std::vector<float>> dparams;
@@ -44,11 +47,37 @@ struct FFAPlan {
     SizeType buffer_size;
 };
 
+class FFADPFunctions {
+public:
+    explicit FFADPFunctions(SearchConfig cfg, FFAPlan& ffa_plan);
+    FFADPFunctions(const FFADPFunctions&)            = delete;
+    FFADPFunctions& operator=(const FFADPFunctions&) = delete;
+    FFADPFunctions(FFADPFunctions&&)                 = delete;
+    FFADPFunctions& operator=(FFADPFunctions&&)      = delete;
+    ~FFADPFunctions();
+
+    void init(std::span<const float> ts, std::span<float> fold);
+    void resolve(std::span<const float> pset_cur,
+                 const std::vector<std::vector<float>>& parr_prev,
+                 int ffa_level,
+                 int latter);
+    void add(std::span<const float> ts_a,
+             std::span<const float> ts_b,
+             std::span<float> ts_c);
+    void shift(std::span<const float> pset_cur, float t_ref_prev);
+    void pack(std::span<float> fold_out) const;
+
+private:
+    SearchConfig m_cfg;
+    FFAPlan& m_ffa_plan;
+    std::unique_ptr<BruteFold> m_brute_fold;
+};
+
 class FFA {
 public:
     explicit FFA(SearchConfig cfg,
-                 int segment_len_init  = -1,
-                 int segment_len_final = -1);
+                 std::optional<SizeType> segment_len_init  = std::nullopt,
+                 std::optional<SizeType> segment_len_final = std::nullopt);
     FFA(const FFA&)            = delete;
     FFA& operator=(const FFA&) = delete;
     FFA(FFA&&)                 = delete;
@@ -74,7 +103,6 @@ private:
     void execute_iter(std::span<const float> fold_in,
                       std::span<float> fold_out);
     void configure_plan();
-    SizeType check_segment_len_init(int segment_len_init) const;
-    SizeType check_segment_len_final(int segment_len_final) const;
+    void validate_params() const;
     SizeType calculate_niters() const;
 };
