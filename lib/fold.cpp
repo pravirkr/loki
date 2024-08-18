@@ -45,8 +45,8 @@ void BruteFold::compute_phase() {
     for (SizeType ifreq = 0; ifreq < m_nfreqs; ++ifreq) {
         for (SizeType i = 0; i < m_segment_len; ++i) {
             const float proper_time = static_cast<float>(i) * m_tsamp - m_t_ref;
-            m_phase_map[ifreq * m_segment_len + i] = loki::get_phase_idx(
-                proper_time - m_t_ref, m_freq_arr[ifreq], m_nbin, 0);
+            m_phase_map[ifreq * m_segment_len + i] =
+                loki::get_phase_idx(proper_time, m_freq_arr[ifreq], m_nbin, 0);
         }
     }
 }

@@ -111,10 +111,6 @@ FFA::FFA(SearchConfig cfg,
     // Allocate memory for the FFA buffers
     m_fold_in.resize(m_ffa_plan.buffer_size, 0.0F);
     m_fold_out.resize(m_ffa_plan.buffer_size, 0.0F);
-    // Initialize the BruteFold object for initialization
-    m_brute_fold = std::make_unique<BruteFold>(
-        m_ffa_plan.params[0].back(), m_cfg.nbins, m_segment_len_init,
-        m_cfg.tsamp, m_ffa_plan.tsegments[0] / 2.0F);
 }
 
 const FFAPlan& FFA::get_plan() const { return m_ffa_plan; }
@@ -134,8 +130,8 @@ void FFA::execute(std::span<const float> ts, std::span<float> fold) {
 
 void FFA::initialize(std::span<const float> ts, std::span<float> fold) {
     spdlog::debug("Initializing FFA");
-    m_ffa_functions.ffa_init(ts, fold, m_ffa_plan.params[0][0],
-                             m_ffa_plan.tsegments[0]);
+    // m_ffa_functions.ffa_init(ts, fold, m_ffa_plan.params[0][0],
+    //                          m_ffa_plan.tsegments[0]);
 }
 
 void FFA::configure_plan() {

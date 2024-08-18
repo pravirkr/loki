@@ -68,6 +68,33 @@ SizeType loki::find_nearest_sorted_idx(std::span<const T> arr_sorted, T val) {
     return idx;
 }
 
+std::vector<SizeType> loki::find_neighbouring_indices(
+    std::span<const SizeType> indices, SizeType target_idx, SizeType num) {
+
+    if (indices.empty()) {
+        throw std::invalid_argument("indices cannot be empty");
+    }
+    if (num == 0) {
+        throw std::invalid_argument("num must be greater than 0");
+    }
+
+    // Find the index of target_idx in indices
+    const auto target_it =
+        std::lower_bound(indices.begin(), indices.end(), target_idx);
+    const auto target_idx_pos =
+        static_cast<SizeType>(std::distance(indices.begin(), target_it));
+
+    // Calculate the window around the target
+    auto left = (target_idx_pos > num / 2) ? target_idx_pos - num / 2 : 0;
+    const auto right = std::min(indices.size(), left + num);
+    // Adjust left if we're at the right edge
+    left = (right > num) ? right - num : 0;
+
+    // Return the slice of indices
+    return {indices.begin() + static_cast<int>(left),
+            indices.begin() + static_cast<int>(right)};
+}
+
 std::vector<float> range_param(float vmin, float vmax, float dv) {
     if (vmin > vmax) {
         throw std::invalid_argument("vmin must be less than or equal to vmax");

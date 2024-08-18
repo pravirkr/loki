@@ -6,27 +6,28 @@
 #include <vector>
 
 #include <loki/fft.hpp>
+#include <loki/loki_types.hpp>
 
 class MatchedFilter {
 public:
-    MatchedFilter(const std::vector<size_t>& widths_arr,
-                  size_t nprofiles,
-                  size_t nbins,
+    MatchedFilter(std::span<const SizeType> widths_arr,
+                  SizeType nprofiles,
+                  SizeType nbins,
                   std::string_view shape = "boxcar");
 
     std::vector<float> get_templates() const;
-    std::size_t get_ntemplates() const;
-    std::size_t get_nbins() const;
+    SizeType get_ntemplates() const;
+    SizeType get_nbins() const;
     void compute(std::span<const float> arr, std::span<float> out);
 
 private:
-    std::vector<size_t> m_widths_arr;
-    std::size_t m_nbins;
-    std::size_t m_nprofiles;
+    std::vector<SizeType> m_widths_arr;
+    SizeType m_nprofiles;
+    SizeType m_nbins;
     std::string_view m_shape;
 
-    std::size_t m_nbins_pow2;
-    std::size_t m_ntemplates;
+    SizeType m_nbins_pow2;
+    SizeType m_ntemplates;
     std::vector<float> m_templates;
     std::vector<float> m_arr_padded;
     std::vector<float> m_snr_arr;
@@ -35,24 +36,28 @@ private:
     FFT2D m_fft2d;
 
     void initialise_templates();
-    static void generate_boxcar_template(std::span<float>& arr, size_t width);
-    static void generate_gaussian_template(std::span<float>& arr, size_t width);
+    static void generate_boxcar_template(std::span<float>& arr, SizeType width);
+    static void generate_gaussian_template(std::span<float>& arr,
+                                           SizeType width);
     static void normalise(std::span<float>& arr);
-    static std::size_t get_nbins_pow2(std::size_t nbins);
+    static SizeType get_nbins_pow2(SizeType nbins);
 };
 
 namespace loki {
 
+std::vector<SizeType> generate_width_trials(SizeType nbins_max,
+                                            float spacing_factor = 1.5F);
+
 // Compute the S/N of single pulse proile
 void snr_1d(std::span<const float> arr,
-            std::span<const size_t> widths,
-            float stdnoise,
-            std::span<float> out);
+            std::span<const SizeType> widths,
+            std::span<float> out,
+            float stdnoise = 1.0F);
 
 // Compute the S/N of array of single pulse profiles
 void snr_2d(std::span<const float> arr,
-            size_t nprofiles,
-            std::span<const size_t> widths,
-            float stdnoise,
-            std::span<float> out);
+            SizeType nprofiles,
+            std::span<const SizeType> widths,
+            std::span<float> out,
+            float stdnoise = 1.0F);
 } // namespace loki
