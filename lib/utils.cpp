@@ -95,30 +95,5 @@ std::vector<SizeType> loki::find_neighbouring_indices(
             indices.begin() + static_cast<int>(right)};
 }
 
-std::vector<float> range_param(float vmin, float vmax, float dv) {
-    if (vmin > vmax) {
-        throw std::invalid_argument("vmin must be less than or equal to vmax");
-    }
-    if (dv <= 0) {
-        throw std::invalid_argument("dv must be positive");
-    }
-    // Check if step size is larger than half the range
-    if (dv > (vmax - vmin) / 2.0F) {
-        return {(vmax + vmin) / 2.0F};
-    }
-    const auto npoints = static_cast<int>((vmax - vmin) / dv);
-    Eigen::VectorXf grid_points_eigen =
-        Eigen::VectorXf::LinSpaced(npoints + 2, vmin, vmax);
-    std::vector<float> grid_points(grid_points_eigen.data() + 1,
-                                   grid_points_eigen.data() + 1 + npoints);
-    return grid_points;
-}
 
-SizeType loki::get_phase_idx(float proper_time,
-                             float freq,
-                             SizeType nbins,
-                             float delay) {
-    const auto phase      = std::fmod((proper_time + delay) * freq, 1.0F);
-    const auto phase_bins = phase * static_cast<float>(nbins);
-    return static_cast<SizeType>(std::round(phase_bins)) % nbins;
-}
+

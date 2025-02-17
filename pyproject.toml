@@ -9,14 +9,13 @@ description = "Leverage Optimal significance to unveil Keplerian orbIt pulsars"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "Pravir Kumar", email = "pravirka@gmail.com" }]
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 classifiers = [
     "Programming Language :: C++",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Operating System :: MacOS :: MacOS X",
     "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
@@ -61,7 +60,7 @@ test-skip = "pp* *-musllinux* *-manylinux_i686"
 include = ["pyproject.toml", "src/**/*.py"]
 line-length = 88
 indent-width = 4
-target-version = "py39"
+target-version = "py311"
 
 [tool.ruff.format]
 quote-style = "double"
@@ -69,7 +68,7 @@ indent-style = "space"
 
 [tool.ruff.lint]
 select = ["ALL"]
-ignore = ["D1", "ANN1", "PLR2004"]
+ignore = ["D1", "PLR2004"]
 
 [tool.ruff.lint.pylint]
 max-args = 10

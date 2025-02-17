@@ -24,11 +24,4 @@ SizeType find_nearest_sorted_idx(std::span<const T> arr_sorted, T val);
 std::vector<SizeType> find_neighbouring_indices(
     std::span<const SizeType> indices, SizeType target_idx, SizeType num);
 
-// generate consistent grid points for range [vmin, vmax] with step dv
-std::vector<float> range_param(float vmin, float vmax, float dv);
-
-// return index of phase bin
-SizeType
-get_phase_idx(float proper_time, float freq, SizeType nbins, float delay);
-
 } // namespace loki

@@ -142,7 +142,6 @@ class DynamicThresholdScheme {
 public:
     DynamicThresholdScheme(std::span<const float> branching_pattern,
                            std::span<const float> profile,
-                           SizeType nparams,
                            float snr_final      = 8.0F,
                            SizeType nthresholds = 100,
                            SizeType ntrials     = 1024,
@@ -165,7 +164,6 @@ public:
 private:
     std::vector<float> m_branching_pattern;
     std::vector<float> m_profile;
-    SizeType m_nparams;
     SizeType m_nthresholds;
     std::vector<float> m_thresholds;
     std::vector<float> m_probs;
@@ -188,14 +186,16 @@ private:
     static std::vector<float>
     compute_thresholds(float snr_start, float snr_final, SizeType nthresholds);
     static std::vector<float> compute_probs(SizeType nprobs);
+    static std::vector<float> compute_probs_test(SizeType nprobs);
     static std::vector<float> bound_scheme(SizeType nstages, float snr_bound);
-    static std::vector<float> trials_scheme(SizeType nstages,
-                                            SizeType nparams,
-                                            SizeType trials_start = 1);
-    static std::vector<float> guess_scheme(SizeType nstages,
-                                           float snr_bound,
-                                           SizeType nparams,
-                                           SizeType trials_start = 1);
+    static std::vector<float>
+    trials_scheme(std::span<const float> branching_pattern,
+                  SizeType trials_start = 1);
+    static std::vector<float>
+    guess_scheme(SizeType nstages,
+                 float snr_bound,
+                 std::span<const float> branching_pattern,
+                 SizeType trials_start = 1);
 };
 
 std::vector<float> compute_norm_profile(std::span<const float> profile);

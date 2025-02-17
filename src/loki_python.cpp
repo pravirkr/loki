@@ -121,23 +121,21 @@ PYBIND11_MODULE(libloki, m) {
         .def_readwrite("backtrack", &State::backtrack)
         .def_property_readonly("cost", &State::cost);
     py::class_<DynamicThresholdScheme>(m_thresholds, "DynamicThresholdScheme")
-        .def(
-            py::init([](const py::array_t<float>& branching_pattern,
-                        const py::array_t<float>& profile, SizeType nparams,
-                        float snr_final, SizeType nthresholds, SizeType ntrials,
-                        SizeType nprobs, float ducy_max, float beam_width) {
-                return std::make_unique<DynamicThresholdScheme>(
-                    std::span<const float>(branching_pattern.data(),
-                                           branching_pattern.size()),
-                    std::span<const float>(profile.data(), profile.size()),
-                    nparams, snr_final, nthresholds, ntrials, nprobs, ducy_max,
-                    beam_width);
-            }),
-            py::arg("branching_pattern"), py::arg("profile"),
-            py::arg("nparams"), py::arg("snr_final") = 8.0F,
-            py::arg("nthresholds") = 100, py::arg("ntrials") = 1024,
-            py::arg("nprobs") = 10, py::arg("ducy_max") = 0.3F,
-            py::arg("beam_width") = 0.7F)
+        .def(py::init([](const py::array_t<float>& branching_pattern,
+                         const py::array_t<float>& profile, float snr_final,
+                         SizeType nthresholds, SizeType ntrials,
+                         SizeType nprobs, float ducy_max, float beam_width) {
+                 return std::make_unique<DynamicThresholdScheme>(
+                     std::span<const float>(branching_pattern.data(),
+                                            branching_pattern.size()),
+                     std::span<const float>(profile.data(), profile.size()),
+                     snr_final, nthresholds, ntrials, nprobs, ducy_max,
+                     beam_width);
+             }),
+             py::arg("branching_pattern"), py::arg("profile"),
+             py::arg("snr_final") = 8.0F, py::arg("nthresholds") = 100,
+             py::arg("ntrials") = 1024, py::arg("nprobs") = 10,
+             py::arg("ducy_max") = 0.3F, py::arg("beam_width") = 0.7F)
         .def("get_current_thresholds_idx",
              &DynamicThresholdScheme::get_current_thresholds_idx)
         .def("run", &DynamicThresholdScheme::run, py::arg("thres_neigh") = 10)

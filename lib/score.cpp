@@ -1,3 +1,5 @@
+#include <loki/score.hpp>
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -6,7 +8,6 @@
 
 #include <omp.h>
 
-#include <loki/score.hpp>
 #include <loki/utils.hpp>
 
 MatchedFilter::MatchedFilter(std::span<const SizeType> widths_arr,
@@ -50,7 +51,7 @@ void MatchedFilter::compute(std::span<const float> arr, std::span<float> out) {
     // Find the maximum value for each profile and template and then scale
     for (SizeType i = 0; i < m_nprofiles; ++i) {
         for (SizeType j = 0; j < m_ntemplates; ++j) {
-            const auto idx     = i * m_ntemplates + j;
+            const auto idx     = (i * m_ntemplates) + j;
             const auto snr_idx = m_snr_arr.begin() + idx * m_nbins_pow2;
             out[idx] = *std::max_element(snr_idx, snr_idx + m_nbins_pow2) /
                        m_nbins_pow2;
@@ -61,13 +62,13 @@ void MatchedFilter::compute(std::span<const float> arr, std::span<float> out) {
 void MatchedFilter::initialise_templates() {
     if (m_shape == "gaussian") {
         for (SizeType i = 0; i < m_ntemplates; ++i) {
-            std::span<float> temp_arr(m_templates.data() + i * m_nbins_pow2,
+            std::span<float> temp_arr(m_templates.data() + (i * m_nbins_pow2),
                                       m_nbins_pow2);
             generate_gaussian_template(temp_arr, m_widths_arr[i]);
         }
     } else if (m_shape == "boxcar") {
         for (SizeType i = 0; i < m_ntemplates; ++i) {
-            std::span<float> temp_arr(m_templates.data() + i * m_nbins_pow2,
+            std::span<float> temp_arr(m_templates.data() + (i * m_nbins_pow2),
                                       m_nbins_pow2);
             generate_boxcar_template(temp_arr, m_widths_arr[i]);
         }
@@ -80,8 +81,8 @@ void MatchedFilter::normalise(std::span<float>& arr) {
     const float sum =
         std::inner_product(arr.begin(), arr.end(), arr.begin(), 0.0F);
     const float scale = 1.0F / std::sqrt(sum);
-    std::transform(arr.begin(), arr.end(), arr.begin(),
-                   [scale](float val) { return val * scale; });
+    std::ranges::transform(arr, arr.begin(),
+                           [scale](float val) { return val * scale; });
 }
 
 SizeType MatchedFilter::get_nbins_pow2(SizeType nbins) {
@@ -91,7 +92,7 @@ SizeType MatchedFilter::get_nbins_pow2(SizeType nbins) {
 void MatchedFilter::generate_boxcar_template(std::span<float>& arr,
                                              SizeType width) {
     const SizeType temp_nbins = arr.size();
-    const auto start          = temp_nbins / 2 - width / 2;
+    const auto start          = (temp_nbins / 2) - (width / 2);
     const auto end            = start + width + (width % 2);
     std::fill(arr.begin(), arr.begin() + static_cast<int>(start), 0.0F);
     std::fill(arr.begin() + static_cast<int>(start),
@@ -107,7 +108,7 @@ void MatchedFilter::generate_gaussian_template(std::span<float>& arr,
         static_cast<float>(width) / (2.0F * std::sqrt(2.0F * std::log(2.0F)));
     const auto xmax = static_cast<SizeType>(std::ceil(3.5 * sigma));
 
-    const auto temp_start = temp_nbins / 2 - xmax;
+    const auto temp_start = (temp_nbins / 2) - xmax;
     for (SizeType i = 0; i < 2 * xmax + 1; ++i) {
         const auto x        = static_cast<float>(i - xmax);
         arr[temp_start + i] = std::exp(-x * x / (2.0F * sigma * sigma));
@@ -135,7 +136,7 @@ void loki::snr_1d(std::span<const float> arr,
                   std::span<const SizeType> widths,
                   std::span<float> out,
                   float stdnoise) {
-    const SizeType wmax       = *std::max_element(widths.begin(), widths.end());
+    const SizeType wmax       = *std::ranges::max_element(widths);
     const SizeType nbins      = arr.size();
     const SizeType ntemplates = widths.size();
     if (out.size() != ntemplates) {

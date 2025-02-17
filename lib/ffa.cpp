@@ -1,119 +1,127 @@
+#include <loki/ffa.hpp>
+
 #include <numeric>
 #include <ranges>
 #include <utility>
 
 #include <spdlog/spdlog.h>
 
+#include <loki/basic.hpp>
+#include <loki/cartesian.hpp>
 #include <loki/defaults.hpp>
-#include <loki/ffa.hpp>
+#include <loki/psr_utils.hpp>
 #include <loki/utils.hpp>
 
-SearchConfig::SearchConfig(SizeType nsamps,
-                           float tsamp,
-                           SizeType nbins,
-                           float tolerance,
-                           const std::vector<ParamLimitType>& param_limits)
-    : nsamps(nsamps),
-      tsamp(tsamp),
-      nbins(nbins),
-      tolerance(tolerance),
-      param_limits(param_limits) {
-    if (param_limits.empty()) {
-        throw std::runtime_error("coord_limits must be non-empty");
-    }
-    nparams = param_limits.size();
-    validate_config();
-    tobs  = static_cast<float>(nsamps) * tsamp;
-    f_min = param_limits[nparams - 1][0];
-    f_max = param_limits[nparams - 1][1];
+FFAPlan::FFAPlan(PulsarSearchConfig cfg) : m_cfg(std::move(cfg)) {
+    configure_plan();
 }
 
-std::vector<float> SearchConfig::get_ffa_step(float tsegment_cur) const {
-    const auto step_freq =
-        loki::freq_step(tsegment_cur, nbins, f_max, tolerance);
-    std::vector<float> step_arr{step_freq};
-    const auto t_ref = tsegment_cur / 2.0F;
-    for (SizeType deriv = 2; deriv <= nparams; ++deriv) {
-        const auto step_param =
-            loki::deriv_step(tsegment_cur, tsamp, deriv, tolerance, t_ref);
-        step_arr.insert(step_arr.begin(), step_param);
-    }
-    return step_arr;
-};
-
-SizeType SearchConfig::get_segment_len_init_default() const {
-    const auto levels = static_cast<SizeType>(
-        std::log2(static_cast<float>(nsamps) * tsamp * f_max));
-    return static_cast<SizeType>(nsamps / (1 << levels));
+SizeType FFAPlan::get_buffer_size() const noexcept {
+    return std::ranges::max(
+        fold_shapes | std::views::transform([](const auto& shape) {
+            return std::accumulate(shape.begin(), shape.end(), 1,
+                                   std::multiplies<size_t>());
+        }));
 }
 
-SizeType SearchConfig::get_segment_len_final_default() const { return nsamps; }
+void FFAPlan::configure_plan() {
+    const auto levels = m_cfg.niters_ffa + 1;
+    segment_lens.resize(levels);
+    tsegments.resize(levels);
+    params.resize(levels);
+    dparams.resize(levels);
+    fold_shapes.resize(levels);
+    coordinates.resize(levels);
 
-void SearchConfig::validate_config() const {
-    if (nsamps <= 0) {
-        throw std::runtime_error("nsamps must be positive");
+    for (SizeType i_level = 0; i_level < levels; ++i_level) {
+        const auto segment_len = m_cfg.bseg_brute * (1 << i_level);
+        const auto tsegment    = static_cast<float>(segment_len) * m_cfg.tsamp;
+        const auto nsegments   = m_cfg.nsamps / segment_len;
+        const auto dparam_arr  = m_cfg.get_dparams(tsegment);
+
+        segment_lens[i_level] = segment_len;
+        tsegments[i_level]    = tsegment;
+        dparams[i_level]      = dparam_arr;
+        params[i_level].resize(m_cfg.nparams);
+        fold_shapes[i_level].resize(m_cfg.nparams + 2);
+
+        fold_shapes[i_level][0] = nsegments;
+        for (SizeType iparam = 0; iparam < m_cfg.nparams; ++iparam) {
+            const auto param_arr = loki::utils::range_param(
+                m_cfg.param_limits[iparam][0], m_cfg.param_limits[iparam][1],
+                dparam_arr[iparam]);
+            params[i_level][iparam]          = param_arr;
+            fold_shapes[i_level][iparam + 1] = param_arr.size();
+        }
+        fold_shapes[i_level][m_cfg.nparams + 1] = m_cfg.nbins;
     }
-    if ((nsamps & (nsamps - 1)) != 0) {
-        throw std::runtime_error("nsamps must be power of 2");
+    // Check param arr lengths for the initialization
+    if (m_cfg.nparams > 1) {
+        for (SizeType iparam = 0; iparam < m_cfg.nparams - 1; ++iparam) {
+            if (params[0][iparam].size() != 1) {
+                throw std::runtime_error(
+                    "Only one parameter for higher order derivatives is "
+                    "supported for the initialization");
+            }
+        }
     }
-    if (tsamp <= 0) {
-        throw std::runtime_error("tsamp must be positive");
-    }
-    if (nbins <= 0) {
-        throw std::runtime_error("nbins must be positive");
-    }
-    if (tolerance <= 0) {
-        throw std::runtime_error("tolerance must be positive");
-    }
-    if (nparams > 4) {
-        throw std::runtime_error("nparams > 4 is not supported");
-    }
-    for (const auto& param_limit : param_limits) {
-        if (param_limit[0] >= param_limit[1]) {
-            throw std::runtime_error("coord_limits must be increasing");
+
+    // Now resolve the params for the FFA plan
+    for (SizeType i_level = 1; i_level < levels; ++i_level) {
+        std::vector<float> p_set_cur(m_cfg.nparams);
+        const auto strides = calculate_strides(params[i_level - 1]);
+        for (const auto& p_set_view : cartesian_product_view(params[i_level])) {
+            for (SizeType iparam = 0; iparam < m_cfg.nparams; ++iparam) {
+                p_set_cur[iparam] = p_set_view[iparam];
+            }
+            const auto [p_idx_tail, phase_shift_tail] =
+                loki::ffa_resolve(p_set_cur, params[i_level - 1], i_level, 0,
+                                  m_cfg.tseg_brute, m_cfg.nbins);
+            const auto [p_idx_head, phase_shift_head] =
+                loki::ffa_resolve(p_set_cur, params[i_level - 1], i_level, 1,
+                                  m_cfg.tseg_brute, m_cfg.nbins);
+            const auto& i_coord_tail =
+                std::inner_product(p_idx_tail.begin(), p_idx_tail.end(),
+                                   strides.begin(), SizeType{0});
+            const auto& i_coord_head =
+                std::inner_product(p_idx_head.begin(), p_idx_head.end(),
+                                   strides.begin(), SizeType{0});
+
+            const auto coord_cur = FFACoord{.i_coord_tail = i_coord_tail,
+                                            .shift_tail   = phase_shift_tail,
+                                            .i_coord_head = i_coord_head,
+                                            .shift_head   = phase_shift_head};
+            coordinates[i_level].emplace_back(coord_cur);
         }
     }
 }
 
-FFADPFunctions::FFADPFunctions(SearchConfig cfg, FFAPlan& ffa_plan)
-    : m_cfg(std::move(cfg)),
-      m_ffa_plan(ffa_plan) {
-    // Initialize the BruteFold object for initialization
-    const auto& freq_arr = m_ffa_plan.params[0].back();
-    const auto t_ref     = m_ffa_plan.tsegments[0] / 2.0F;
-    m_brute_fold         = std::make_unique<BruteFold>(
-        freq_arr, m_cfg.nbins, m_ffa_plan.segment_lens[0], m_cfg.tsamp, t_ref);
+std::vector<SizeType>
+FFAPlan::calculate_strides(std::span<const std::vector<float>> p_arr) {
+    const auto nparams = p_arr.size();
+    std::vector<SizeType> strides(nparams);
+    strides[nparams - 1] = 1;
+    for (SizeType i = nparams - 2; i >= 0; --i) {
+        strides[i] = strides[i + 1] * p_arr[i + 1].size();
+    }
+    return strides;
 }
 
-void FFADPFunctions::init(std::span<const float> ts, std::span<float> fold) {
-    m_brute_fold->execute(ts, fold);
-}
-
-void FFADPFunctions::resolve(std::span<const float> pset_cur,
-                             const std::vector<std::vector<float>>& parr_prev,
-                             int ffa_level,
-                             int latter) {
-    loki::ffa_resolve(pset_cur, parr_prev, ffa_level, latter,
-                      m_ffa_plan.tsegments[ffa_level], m_cfg.nbins);
-}
-
-FFA::FFA(SearchConfig cfg,
-         std::optional<SizeType> segment_len_init,
-         std::optional<SizeType> segment_len_final)
-    : m_cfg(std::move(cfg)),
-      m_segment_len_init(
-          segment_len_init.value_or(m_cfg.get_segment_len_init_default())),
-      m_segment_len_final(
-          segment_len_final.value_or(m_cfg.get_segment_len_final_default())),
-      m_niters(calculate_niters()) {
-    validate_params();
-    configure_plan();
+FFA::FFA(PulsarSearchConfig cfg) : m_cfg(std::move(cfg)), m_ffa_plan(m_cfg) {
     // Allocate memory for the FFA buffers
-    m_fold_in.resize(m_ffa_plan.buffer_size, 0.0F);
-    m_fold_out.resize(m_ffa_plan.buffer_size, 0.0F);
+    m_fold_in.resize(m_ffa_plan.get_buffer_size(), 0.0F);
+    m_fold_out.resize(m_ffa_plan.get_buffer_size(), 0.0F);
 }
 
 const FFAPlan& FFA::get_plan() const { return m_ffa_plan; }
+
+void FFA::initialize(std::span<const float> ts, std::span<float> fold) {
+    spdlog::debug("Initializing FFA");
+    const auto t_ref = m_ffa_plan.tsegments[0] / 2.0F;
+    brute_fold(ts, fold, m_ffa_plan.params[0].back(),
+               m_ffa_plan.segment_lens[0], m_cfg.nbins, m_cfg.nsamps,
+               m_cfg.tsamp, t_ref);
+}
 
 void FFA::execute(std::span<const float> ts, std::span<float> fold) {
     if (ts.size() != m_cfg.nsamps) {
@@ -122,86 +130,14 @@ void FFA::execute(std::span<const float> ts, std::span<float> fold) {
     if (fold.size() != m_cfg.nbins) {
         throw std::runtime_error("fold must have size nbins");
     }
-    initialize(ts, fold);
-    for (SizeType i_iter = 0; i_iter < m_niters + 1; ++i_iter) {
-        execute_iter(ts, fold);
-    }
-}
+    float* fold_in_ptr  = m_fold_in.data();
+    float* fold_out_ptr = m_fold_out.data();
 
-void FFA::initialize(std::span<const float> ts, std::span<float> fold) {
-    spdlog::debug("Initializing FFA");
-    // m_ffa_functions.ffa_init(ts, fold, m_ffa_plan.params[0][0],
-    //                          m_ffa_plan.tsegments[0]);
-}
-
-void FFA::configure_plan() {
-    m_ffa_plan.segment_lens.resize(m_niters + 1);
-    m_ffa_plan.tsegments.resize(m_niters + 1);
-    m_ffa_plan.params.resize(m_niters + 1);
-    m_ffa_plan.dparams.resize(m_niters + 1);
-    m_ffa_plan.fold_shapes.resize(m_niters + 1);
-
-    for (SizeType i_iter = 0; i_iter < m_niters + 1; ++i_iter) {
-        const auto segment_len = m_segment_len_init * (1 << i_iter);
-        const auto nsegments   = m_cfg.nsamps / segment_len;
-        const auto tsegment    = static_cast<float>(segment_len) * m_cfg.tsamp;
-        const auto dparam_arr  = m_cfg.get_ffa_step(tsegment);
-
-        m_ffa_plan.segment_lens[i_iter] = segment_len;
-        m_ffa_plan.tsegments[i_iter]    = tsegment;
-        m_ffa_plan.dparams[i_iter]      = dparam_arr;
-        m_ffa_plan.params[i_iter].resize(m_cfg.nparams);
-        m_ffa_plan.fold_shapes[i_iter].resize(m_cfg.nparams + 2);
-
-        m_ffa_plan.fold_shapes[i_iter][0] = nsegments;
-        for (SizeType iparam = 0; iparam < m_cfg.nparams; ++iparam) {
-            const auto param_arr = loki::range_param(
-                m_cfg.param_limits[iparam][0], m_cfg.param_limits[iparam][1],
-                dparam_arr[iparam]);
-            m_ffa_plan.params[i_iter][iparam]          = param_arr;
-            m_ffa_plan.fold_shapes[i_iter][iparam + 1] = param_arr.size();
-        }
-        m_ffa_plan.fold_shapes[i_iter][m_cfg.nparams + 1] = m_cfg.nbins;
+    initialize(ts, std::span<float>(fold_in_ptr, m_ffa_plan.get_buffer_size()));
+    for (SizeType i_iter = 1; i_iter < m_cfg.niters_ffa + 1; ++i_iter) {
+        execute_iter(fold_in_ptr, fold_out_ptr, i_iter);
+        std::swap(fold_in_ptr, fold_out_ptr);
     }
-    m_ffa_plan.buffer_size = std::ranges::max(
-        m_ffa_plan.fold_shapes | std::views::transform([](const auto& shape) {
-            return std::accumulate(shape.begin(), shape.end(), 1,
-                                   std::multiplies<size_t>());
-        }));
-
-    // Check param arr lengths for the initialization
-    if (m_cfg.nparams > 1) {
-        for (SizeType iparam = 0; iparam < m_cfg.nparams - 1; ++iparam) {
-            if (m_ffa_plan.params[0][iparam].size() != 1) {
-                throw std::runtime_error(
-                    "Only one parameter for higher order derivatives is "
-                    "supported for the initialization");
-            }
-        }
-    }
-}
-
-void FFA::validate_params() const {
-    if (!((m_segment_len_init & (m_segment_len_init - 1)) == 0)) {
-        throw std::runtime_error("Segment length must be power of 2");
-    }
-    if (m_segment_len_init > m_cfg.nsamps) {
-        throw std::runtime_error("Segment length must be less than nsamps");
-    }
-    if (!((m_segment_len_final & (m_segment_len_final - 1)) == 0)) {
-        throw std::runtime_error("Segment length must be power of 2");
-    }
-    if (m_segment_len_final > m_cfg.nsamps) {
-        throw std::runtime_error("Segment length must be less than nsamps");
-    }
-    if (m_segment_len_final <= m_segment_len_init) {
-        throw std::runtime_error(
-            "Final segment length must be greater than initial");
-    }
-}
-
-SizeType FFA::calculate_niters() const {
-    const auto nsegments_init  = m_cfg.nsamps / m_segment_len_init;
-    const auto nsegments_final = m_cfg.nsamps / m_segment_len_final;
-    return static_cast<SizeType>(std::log2(nsegments_init / nsegments_final));
+    // Last iteration directly writes to the output buffer
+    execute_iter(fold_in_ptr, fold_out_ptr, m_cfg.niters_ffa);
 }

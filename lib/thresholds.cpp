@@ -1,3 +1,5 @@
+#include <loki/thresholds.hpp>
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -16,7 +18,6 @@
 #include <loki/loki_types.hpp>
 #include <loki/math.hpp>
 #include <loki/score.hpp>
-#include <loki/thresholds.hpp>
 #include <loki/utils.hpp>
 
 FoldVector::FoldVector(SizeType ntrials, SizeType nbins, float variance)
@@ -39,7 +40,7 @@ std::vector<float> FoldVector::get_norm() const {
     const auto std = std::sqrt(variance);
     for (SizeType i = 0; i < ntrials; ++i) {
         for (SizeType j = 0; j < nbins; ++j) {
-            norm_data[i * nbins + j] = data[i * nbins + j] / std;
+            norm_data[(i * nbins) + j] = data[(i * nbins) + j] / std;
         }
     }
     return norm_data;
@@ -143,7 +144,6 @@ State::gen_next_using_surv_prob(const FoldsType& fold_state,
 DynamicThresholdScheme::DynamicThresholdScheme(
     std::span<const float> branching_pattern,
     std::span<const float> profile,
-    SizeType nparams,
     float snr_final,
     SizeType nthresholds,
     SizeType ntrials,
@@ -151,7 +151,6 @@ DynamicThresholdScheme::DynamicThresholdScheme(
     float ducy_max,
     float beam_width)
     : m_branching_pattern(branching_pattern.begin(), branching_pattern.end()),
-      m_nparams(nparams),
       m_ntrials(ntrials),
       m_ducy_max(ducy_max),
       m_beam_width(beam_width),
@@ -161,13 +160,13 @@ DynamicThresholdScheme::DynamicThresholdScheme(
     }
     m_profile     = compute_norm_profile(profile);
     m_thresholds  = compute_thresholds(0.1F, snr_final, nthresholds);
-    m_probs       = compute_probs(nprobs);
+    m_probs       = compute_probs_test(nprobs);
     m_nbins       = m_profile.size();
     m_nstages     = m_branching_pattern.size();
     m_nthresholds = m_thresholds.size();
     m_nprobs      = m_probs.size();
     m_bias_snr    = snr_final / static_cast<float>(std::sqrt(m_nstages + 1));
-    m_guess_path  = guess_scheme(m_nstages, snr_final, m_nparams);
+    m_guess_path  = guess_scheme(m_nstages, snr_final, m_branching_pattern);
     m_folds_in.resize(m_nthresholds * m_nprobs);
     m_folds_out.resize(m_nthresholds * m_nprobs);
     m_states.resize(m_nstages * m_nthresholds * m_nprobs);
@@ -223,7 +222,7 @@ void DynamicThresholdScheme::run(SizeType thres_neigh) {
         run_segment(istage, thres_neigh);
         // swap folds
         std::swap(m_folds_in, m_folds_out);
-        std::fill(m_folds_out.begin(), m_folds_out.end(), std::nullopt);
+        std::ranges::fill(m_folds_out, std::nullopt);
         const auto progress = static_cast<float>(istage) /
                               static_cast<float>(m_nstages - 1) * 100.0F;
         bar.set_progress(static_cast<SizeType>(progress));
@@ -277,8 +276,8 @@ std::string DynamicThresholdScheme::save(const std::string& outdir) const {
     for (SizeType istage = 0; istage < m_nstages; ++istage) {
         for (SizeType ithres = 0; ithres < m_nthresholds; ++ithres) {
             for (SizeType iprob = 0; iprob < m_nprobs; ++iprob) {
-                const auto idx = istage * m_nthresholds * m_nprobs +
-                                 ithres * m_nprobs + iprob;
+                const auto idx = (istage * m_nthresholds * m_nprobs) +
+                                 (ithres * m_nprobs) + iprob;
                 const auto& state = m_states[idx];
                 if (state.has_value()) {
                     state_data.push_back(
@@ -323,7 +322,7 @@ void DynamicThresholdScheme::run_segment(SizeType istage,
             SizeType icand = 0;
             for (SizeType jthresh : neighbour_beam_indices) {
                 for (SizeType kprob = 0; kprob < m_nprobs; ++kprob) {
-                    const auto prev_idx = jthresh * m_nprobs + kprob;
+                    const auto prev_idx = (jthresh * m_nprobs) + kprob;
                     const auto prev_state =
                         m_states[stage_offset_prev + prev_idx];
                     const auto prev_fold_state = m_folds_in[prev_idx];
@@ -349,7 +348,7 @@ void DynamicThresholdScheme::run_segment(SizeType istage,
                 const auto& fold_state = std::get<1>(candidates[j]);
                 const auto iprob =
                     find_bin_index(m_probs, state.success_h1_cumul);
-                const auto cur_idx       = ithres * m_nprobs + iprob;
+                const auto cur_idx       = (ithres * m_nprobs) + iprob;
                 const auto cur_state_idx = stage_offset_cur + cur_idx;
                 auto& existing_state     = m_states[cur_state_idx];
                 if (!existing_state.has_value() ||
@@ -379,8 +378,8 @@ void DynamicThresholdScheme::init_states() {
             fold_state, m_thresholds[ithres], m_branching_pattern[0],
             m_bias_snr, m_profile, m_rng, 1.0F, m_ntrials, m_ducy_max);
         const auto iprob = find_bin_index(m_probs, cur_state.success_h1_cumul);
-        m_states[ithres * m_nprobs + iprob]   = cur_state;
-        m_folds_in[ithres * m_nprobs + iprob] = cur_fold_state;
+        m_states[(ithres * m_nprobs) + iprob]   = cur_state;
+        m_folds_in[(ithres * m_nprobs) + iprob] = cur_fold_state;
     }
 }
 
@@ -398,11 +397,22 @@ std::vector<float> DynamicThresholdScheme::compute_thresholds(
 std::vector<float> DynamicThresholdScheme::compute_probs(SizeType nprobs) {
     std::vector<float> probs(nprobs);
     for (SizeType i = 0; i < nprobs; ++i) {
-        float value = std::exp(-3 + (3.0F * static_cast<float>(i)) /
-                                        (static_cast<float>(nprobs) - 1));
+        float value = std::exp(-3 + ((3.0F * static_cast<float>(i)) /
+                                     (static_cast<float>(nprobs) - 1)));
         probs[i]    = 1 - value;
     }
-    std::reverse(probs.begin(), probs.end());
+    std::ranges::reverse(probs);
+    return probs;
+}
+
+std::vector<float> DynamicThresholdScheme::compute_probs_test(SizeType nprobs) {
+    std::vector<float> probs(nprobs);
+    probs[0] = 0.0F;
+    for (SizeType i = 1; i < nprobs; ++i) {
+        float value = std::exp(-3 + ((3.0F * static_cast<float>(i - 1)) /
+                                     (static_cast<float>(nprobs) - 1)));
+        probs[i]    = value;
+    }
     return probs;
 }
 
@@ -417,33 +427,31 @@ std::vector<float> DynamicThresholdScheme::bound_scheme(SizeType nstages,
     return thresholds;
 }
 
-std::vector<float> DynamicThresholdScheme::trials_scheme(
-    SizeType nstages, SizeType nparams, SizeType trials_start) {
-    SizeType complexity_scaling = 0;
-    for (SizeType i = 1; i <= nparams; ++i) {
-        complexity_scaling += i;
-    }
+std::vector<float>
+DynamicThresholdScheme::trials_scheme(std::span<const float> branching_pattern,
+                                      SizeType trials_start) {
+    const auto nstages = branching_pattern.size();
     std::vector<float> result(nstages);
+    // trials = np.cumprod(branching_pattern) * trials_start
+    auto trials = static_cast<float>(trials_start);
     for (SizeType i = 0; i < nstages; ++i) {
-        const auto trials =
-            static_cast<float>(trials_start) *
-            static_cast<float>(std::pow(i + 2, complexity_scaling));
-        result[i] = loki::norm_isf(1 / trials);
+        trials *= branching_pattern[i];
+        result[i] = loki::math::norm_isf(1 / trials);
     }
     return result;
 }
 
-std::vector<float> DynamicThresholdScheme::guess_scheme(SizeType nstages,
-                                                        float snr_bound,
-                                                        SizeType nparams,
-                                                        SizeType trials_start) {
+std::vector<float>
+DynamicThresholdScheme::guess_scheme(SizeType nstages,
+                                     float snr_bound,
+                                     std::span<const float> branching_pattern,
+                                     SizeType trials_start) {
     const auto thresholds_bound = bound_scheme(nstages, snr_bound);
     const auto thresholds_trials =
-        trials_scheme(nstages, nparams, trials_start);
+        trials_scheme(branching_pattern, trials_start);
     std::vector<float> result(nstages);
-    std::transform(
-        thresholds_bound.begin(), thresholds_bound.end(),
-        thresholds_trials.begin(), result.begin(),
+    std::ranges::transform(
+        thresholds_bound, thresholds_trials, result.begin(),
         [](float bound, float trials) { return std::min(bound, trials); });
     return result;
 }
@@ -512,9 +520,7 @@ float compute_threshold_survival(std::span<const float> scores,
                            std::min(n_surviving, scores.size()));
 
     std::vector<float> top_scores(n_surviving);
-    std::partial_sort_copy(scores.begin(), scores.end(), top_scores.begin(),
-                           top_scores.end(), std::greater<>());
-
+    std::ranges::partial_sort_copy(scores, top_scores, std::greater<>());
     return top_scores.back();
 }
 
@@ -546,7 +552,7 @@ FoldVector prune_folds(const FoldVector& folds_in,
 }
 
 SizeType find_bin_index(std::span<const float> bins, float value) {
-    auto it = std::upper_bound(bins.begin(), bins.end(), value);
+    auto it = std::ranges::upper_bound(bins, value);
     return std::distance(bins.begin(), it) - 1;
 }
 
@@ -554,7 +560,7 @@ std::vector<std::optional<State>>
 evaluate_threshold_scheme(std::span<const float> thresholds,
                           std::span<const float> branching_pattern,
                           std::span<const float> profile,
-                          SizeType ntrials_min,
+                          SizeType ntrials,
                           float snr_final,
                           float ducy_max) {
     if (thresholds.empty() || branching_pattern.empty() || profile.empty()) {
@@ -570,17 +576,17 @@ evaluate_threshold_scheme(std::span<const float> thresholds,
     const auto profile_norm = compute_norm_profile(profile);
     const auto bias_snr =
         snr_final / std::sqrt(static_cast<float>(nstages + 1));
-    const float var_init = 2.0F;
+    const float var_init = 1.0F;
     std::vector<std::optional<State>> states(nstages);
     std::vector<std::optional<FoldsType>> fold_states(nstages);
 
     ThreadSafeRNG rng(std::random_device{}());
-    const FoldVector folds_init(ntrials_min, nbins);
+    const FoldVector folds_init(ntrials, nbins);
     // Simulate the initial folds (pruning level = 0)
-    auto folds_h0 = simulate_folds(folds_init, profile_norm, rng, 0.0F,
-                                   var_init, ntrials_min);
+    auto folds_h0 =
+        simulate_folds(folds_init, profile_norm, rng, 0.0F, var_init, ntrials);
     auto folds_h1 = simulate_folds(folds_init, profile_norm, rng, bias_snr,
-                                   var_init, ntrials_min);
+                                   var_init, ntrials);
     const State initial_state;
     FoldsType initial_fold_state{std::move(folds_h0), std::move(folds_h1)};
     for (SizeType istage = 0; istage < nstages; ++istage) {
@@ -589,12 +595,14 @@ evaluate_threshold_scheme(std::span<const float> thresholds,
         const auto& prev_fold_state =
             (istage == 0) ? initial_fold_state : *fold_states[istage - 1];
         if (istage > 0 && prev_fold_state.is_empty()) {
-            spdlog::info("Path not viable, stopping at stage {}", istage);
+            spdlog::info(
+                "Path not viable, No trials survived, stopping at stage {}",
+                istage);
             break;
         }
         auto [cur_state, cur_fold_state] = prev_state.gen_next_using_thresh(
             prev_fold_state, thresholds[istage], branching_pattern[istage],
-            bias_snr, profile_norm, rng, 1.0F, ntrials_min, ducy_max);
+            bias_snr, profile_norm, rng, 1.0F, ntrials, ducy_max);
         states[istage]      = std::move(cur_state);
         fold_states[istage] = std::move(cur_fold_state);
     }
@@ -605,7 +613,7 @@ std::vector<std::optional<State>>
 determine_threshold_scheme(std::span<const float> survive_probs,
                            std::span<const float> branching_pattern,
                            std::span<const float> profile,
-                           SizeType ntrials_min,
+                           SizeType ntrials,
                            float snr_final,
                            float ducy_max) {
     if (survive_probs.empty() || branching_pattern.empty() || profile.empty()) {
@@ -621,17 +629,17 @@ determine_threshold_scheme(std::span<const float> survive_probs,
     const auto profile_norm = compute_norm_profile(profile);
     const auto bias_snr =
         snr_final / std::sqrt(static_cast<float>(nstages + 1));
-    const float var_init = 2.0F;
+    const float var_init = 1.0F;
     std::vector<std::optional<State>> states(nstages);
     std::vector<std::optional<FoldsType>> fold_states(nstages);
 
     ThreadSafeRNG rng(std::random_device{}());
-    const FoldVector folds_init(ntrials_min, nbins);
+    const FoldVector folds_init(ntrials, nbins);
     // Simulate the initial folds (pruning level = 0)
-    auto folds_h0 = simulate_folds(folds_init, profile_norm, rng, 0.0F,
-                                   var_init, ntrials_min);
+    auto folds_h0 =
+        simulate_folds(folds_init, profile_norm, rng, 0.0F, var_init, ntrials);
     auto folds_h1 = simulate_folds(folds_init, profile_norm, rng, bias_snr,
-                                   var_init, ntrials_min);
+                                   var_init, ntrials);
     const State initial_state;
     const FoldsType initial_fold_state{std::move(folds_h0),
                                        std::move(folds_h1)};
@@ -648,7 +656,7 @@ determine_threshold_scheme(std::span<const float> survive_probs,
             prev_state.gen_next_using_surv_prob(
                 prev_fold_state, survive_probs[istage],
                 branching_pattern[istage], bias_snr, profile_norm, rng, 1.0F,
-                ntrials_min, ducy_max);
+                ntrials, ducy_max);
         states[istage]      = cur_state;
         fold_states[istage] = cur_fold_state;
     }
