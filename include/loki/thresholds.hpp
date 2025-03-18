@@ -146,6 +146,7 @@ public:
                            SizeType nthresholds = 100,
                            SizeType ntrials     = 1024,
                            SizeType nprobs      = 10,
+                           float prob_min       = 0.05F,
                            float ducy_max       = 0.3F,
                            float beam_width     = 0.7F);
 
@@ -185,17 +186,21 @@ private:
     void init_states();
     static std::vector<float>
     compute_thresholds(float snr_start, float snr_final, SizeType nthresholds);
-    static std::vector<float> compute_probs(SizeType nprobs);
-    static std::vector<float> compute_probs_test(SizeType nprobs);
+    static std::vector<float> compute_probs(SizeType nprobs,
+                                            float prob_min = 0.05F);
+    static std::vector<float> compute_probs_linear(SizeType nprobs,
+                                                float prob_min = 0.05F);
     static std::vector<float> bound_scheme(SizeType nstages, float snr_bound);
     static std::vector<float>
     trials_scheme(std::span<const float> branching_pattern,
-                  SizeType trials_start = 1);
+                  SizeType trials_start = 1,
+                  float min_trials      = 1E10F);
     static std::vector<float>
     guess_scheme(SizeType nstages,
                  float snr_bound,
                  std::span<const float> branching_pattern,
-                 SizeType trials_start = 1);
+                 SizeType trials_start = 1,
+                 float min_trials      = 1E10F);
 };
 
 std::vector<float> compute_norm_profile(std::span<const float> profile);
@@ -217,7 +222,7 @@ FoldVector prune_folds(const FoldVector& folds_in,
                        std::span<const float> scores,
                        float threshold);
 
-SizeType find_bin_index(std::span<const float> bins, float value);
+IndexType find_bin_index(std::span<const float> bins, float value);
 
 std::vector<std::optional<State>>
 evaluate_threshold_scheme(std::span<const float> thresholds,
