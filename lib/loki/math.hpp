@@ -5,11 +5,11 @@
 #include <concepts>
 #include <stdexcept>
 
-#include <Eigen/Dense>
 #include <boost/math/distributions/chi_squared.hpp>
 #include <boost/math/distributions/normal.hpp>
 #include <boost/math/special_functions/binomial.hpp>
 #include <boost/math/special_functions/factorials.hpp>
+#include <xtensor/xtensor.hpp>
 
 #include <loki/loki_types.hpp>
 
@@ -134,88 +134,28 @@ private:
         m_chi_sq_minus_logsf_table;
 };
 
-template <typename T> class ChebyshevPolynomials {
-    static_assert(std::is_floating_point_v<T>, "Type must be floating point");
+/** Generate a table of Chebyshev polynomial coefficients and their derivatives.
+ * @param order_max Maximum polynomial order (T_0 to T_order_max).
+ * @param n_derivs Number of derivatives to compute (0th is the polynomial
+ * itself).
+ * @return 3D tensor of shape (n_derivs + 1, order_max + 1, order_max + 1).
+ */
+xt::xtensor<float, 3> generate_cheb_table(SizeType order_max,
+                                          SizeType n_derivs);
 
-public:
-    using Matrix = Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>;
-    using Vector = Eigen::Matrix<T, Eigen::Dynamic, 1>;
-    using Tensor3 =
-        std::vector<Matrix>; // Eigen doesn't have built-in 3D tensor
-
-    static Tensor3 generate_chebyshev_table(SizeType order_max,
-                                            SizeType n_derivs) {
-        // Initialize 3D tensor as vector of matrices
-        Tensor3 tab(n_derivs + 1, Matrix::Zero(order_max + 1, order_max + 1));
-
-        // Initialize base cases
-        tab[0](0, 0) = 1.0;
-        tab[0](1, 1) = 1.0;
-
-        // Generate Chebyshev polynomials
-        for (SizeType jorder = 2; jorder <= order_max; ++jorder) {
-            // 2 * roll(prev, 1) - prev2
-            tab[0].row(jorder) = 2 * tab[0]
-                                         .row(jorder - 1)
-                                         .head(order_max)
-                                         .eval()
-                                         .transpose()
-                                         .transpose()
-                                         .homogeneous()
-                                         .head(order_max + 1) -
-                                 tab[0].row(jorder - 2);
-        }
-        // Generate derivatives
-        Vector factor = Vector::LinSpaced(order_max + 2, 1, order_max + 2);
-
-        for (SizeType ideriv = 1; ideriv <= n_derivs; ++ideriv) {
-            for (SizeType jorder = 1; jorder <= order_max; ++jorder) {
-                // roll(prev, -1) * factor
-                tab[ideriv].row(jorder).head(order_max) =
-                    tab[ideriv - 1].row(jorder).tail(order_max).cwiseProduct(
-                        factor.head(order_max).transpose());
-                tab[ideriv](jorder, order_max) = 0;
-            }
-        }
-        return tab;
-    }
-
-    static Matrix
-    generalized_chebyshev_polynomials(SizeType poly_order, T t0, T scale) {
-        Matrix cheb_pols = generate_chebyshev_table(poly_order, 0)[0];
-
-        // Scale the polynomials
-        Vector scale_factor(poly_order + 1);
-        for (SizeType i = 0; i <= poly_order; ++i) {
-            scale_factor[i] = std::pow(1.0 / scale, static_cast<T>(i));
-        }
-
-        // Scale each row
-        cheb_pols =
-            cheb_pols.array().rowwise() * scale_factor.transpose().array();
-
-        // Shift origin to t0
-        Matrix shifted_pols = Matrix::Zero(poly_order + 1, poly_order + 1);
-
-        for (SizeType iorder = 0; iorder <= poly_order; ++iorder) {
-            for (SizeType iterm = 0; iterm <= iorder; ++iterm) {
-                T binom_coef = boost::math::binomial_coefficient<T>(
-                    static_cast<unsigned>(iorder),
-                    static_cast<unsigned>(iterm));
-                shifted_pols(iorder, iterm) =
-                    binom_coef * std::pow(-t0, static_cast<T>(iorder - iterm));
-            }
-        }
-
-        return cheb_pols * shifted_pols;
-    }
-};
+/** Generate generalized Chebyshev polynomials with shift and scale.
+ * @param poly_order Maximum polynomial order.
+ * @param t0 Shift parameter (center of the domain).
+ * @param scale Scale parameter for the domain.
+ * @return 2D matrix of shape (poly_order + 1, poly_order + 1).
+ */
+xt::xtensor<float, 2>
+generalized_cheb_pols(SizeType poly_order, float t0, float scale);
 
 constexpr bool is_power_of_two(SizeType n) noexcept {
     return (n != 0U) && ((n & (n - 1)) == 0U);
 }
 
 using StatTables = StatLookupTables<float>;
-using ChebyshevF = ChebyshevPolynomials<float>;
 
 } // namespace loki::math

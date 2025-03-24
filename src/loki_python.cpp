@@ -1,5 +1,6 @@
 #include <cstddef>
 #include <span>
+#include <vector>
 
 #include <pybind11/iostream.h>
 #include <pybind11/numpy.h>
@@ -7,11 +8,12 @@
 #include <pybind11/stl.h>
 
 #include "pybind_utils.hpp"
+#include <loki/ffa.hpp>
+#include <loki/fold.hpp>
 #include <loki/loki_types.hpp>
 #include <loki/score.hpp>
 #include <loki/thresholds.hpp>
 #include <loki/utils.hpp>
-#include <vector>
 
 namespace py = pybind11;
 
@@ -247,4 +249,76 @@ PYBIND11_MODULE(libloki, m) {
                 target_idx, num);
         },
         py::arg("beam_indices"), py::arg("target_idx"), py::arg("num"));
+
+    auto m_fold = m.def_submodule("fold", "Fold submodule");
+
+    m_fold.def(
+        "compute_brute_fold",
+        [](const py::array_t<float>& ts_e, const py::array_t<float>& ts_v,
+           const py::array_t<FloatType>& freq_arr, SizeType segment_len,
+           SizeType nbins, SizeType nsamps, FloatType tsamp, FloatType t_ref,
+           SizeType nthreads) {
+            return compute_brute_fold(
+                std::span<const float>(ts_e.data(), ts_e.size()),
+                std::span<const float>(ts_v.data(), ts_v.size()),
+                std::span<const FloatType>(freq_arr.data(), freq_arr.size()),
+                segment_len, nbins, nsamps, tsamp, t_ref, nthreads);
+        },
+        py::arg("ts_e"), py::arg("ts_v"), py::arg("freq_arr"),
+        py::arg("segment_len"), py::arg("nbins"), py::arg("nsamps"),
+        py::arg("tsamp"), py::arg("t_ref") = 0.0F, py::arg("nthreads") = 1);
+
+    auto m_configs = m.def_submodule("configs", "Configs submodule");
+    py::class_<PulsarSearchConfig>(m_configs, "PulsarSearchConfig")
+        .def(py::init<SizeType, FloatType, SizeType, FloatType,
+                      const std::vector<ParamLimitType>&, FloatType, FloatType,
+                      std::optional<SizeType>, std::optional<SizeType>,
+                      SizeType>(),
+             py::arg("nsamps"), py::arg("tsamp"), py::arg("nbins"),
+             py::arg("tol_bins"), py::arg("param_limits"),
+             py::arg("ducy_max") = 0.2F, py::arg("wtsp") = 1.5F,
+             py::arg("bseg_brute") = std::nullopt,
+             py::arg("bseg_ffa") = std::nullopt, py::arg("nthreads") = 1)
+        .def_property_readonly("nsamps", &PulsarSearchConfig::get_nsamps)
+        .def_property_readonly("tsamp", &PulsarSearchConfig::get_tsamp)
+        .def_property_readonly("nbins", &PulsarSearchConfig::get_nbins)
+        .def_property_readonly("tol_bins", &PulsarSearchConfig::get_tol_bins)
+        .def_property_readonly("param_limits",
+                               &PulsarSearchConfig::get_param_limits)
+        .def_property_readonly("ducy_max", &PulsarSearchConfig::get_ducy_max)
+        .def_property_readonly("wtsp", &PulsarSearchConfig::get_wtsp)
+        .def_property_readonly("bseg_brute",
+                               &PulsarSearchConfig::get_bseg_brute)
+        .def_property_readonly("bseg_ffa", &PulsarSearchConfig::get_bseg_ffa)
+        .def_property_readonly("nthreads", &PulsarSearchConfig::get_nthreads)
+        .def_property_readonly("tseg_brute",
+                               &PulsarSearchConfig::get_tseg_brute)
+        .def_property_readonly("tseg_ffa", &PulsarSearchConfig::get_tseg_ffa)
+        .def_property_readonly("niters_ffa",
+                               &PulsarSearchConfig::get_niters_ffa)
+        .def_property_readonly("nparams", &PulsarSearchConfig::get_nparams)
+        .def_property_readonly("f_min", &PulsarSearchConfig::get_f_min)
+        .def_property_readonly("f_max", &PulsarSearchConfig::get_f_max)
+        .def("dparams_f", &PulsarSearchConfig::get_dparams_f,
+             py::arg("tseg_cur"))
+        .def("dparams", &PulsarSearchConfig::get_dparams, py::arg("tseg_cur"))
+        .def("dparams_lim", &PulsarSearchConfig::get_dparams_lim,
+             py::arg("tseg_cur"));
+
+    auto m_ffa = m.def_submodule("ffa", "FFA submodule");
+    py::class_<FFA>(m_ffa, "FFA")
+        .def(py::init<PulsarSearchConfig>(), py::arg("cfg"))
+        .def_property_readonly("plan", &FFA::get_plan)
+        .def("execute", &FFA::execute, py::arg("ts_e"), py::arg("ts_v"),
+             py::arg("fold"));
+
+    m_ffa.def(
+        "compute_ffa",
+        [](const py::array_t<float>& ts_e, const py::array_t<float>& ts_v,
+           const py::object& cfg) {
+            return compute_ffa(std::span<const float>(ts_e.data(), ts_e.size()),
+                               std::span<const float>(ts_v.data(), ts_v.size()),
+                               cfg.cast<PulsarSearchConfig>());
+        },
+        py::arg("ts_e"), py::arg("ts_v"), py::arg("cfg"));
 }

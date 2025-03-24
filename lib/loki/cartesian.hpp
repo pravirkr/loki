@@ -1,15 +1,19 @@
+#pragma once
+
 #include <array>
 #include <cstddef>
 #include <ranges>
 #include <span>
 #include <vector>
 
+#include <loki/loki_types.hpp>
+
 // A proxy for the current combination in the Cartesian product.
 // It provides read-only access to the combination elements.
 class CartesianProductProxy {
 public:
     // The constructor copies the current indices.
-    constexpr CartesianProductProxy(std::span<const std::vector<float>> params,
+    constexpr CartesianProductProxy(std::span<const std::vector<FloatType>> params,
                                     std::array<size_t, 5> indices,
                                     size_t dims) noexcept
         : m_params(params),
@@ -17,7 +21,7 @@ public:
           m_dims(dims) {}
 
     // Access element at position i in the combination.
-    constexpr float operator[](size_t i) const noexcept {
+    constexpr FloatType operator[](size_t i) const noexcept {
         return m_params[i][m_indices[i]];
     }
 
@@ -32,7 +36,7 @@ public:
             : m_proxy(proxy),
               m_pos(pos) {}
 
-        constexpr float operator*() const noexcept { return (*m_proxy)[m_pos]; }
+        constexpr FloatType operator*() const noexcept { return (*m_proxy)[m_pos]; }
 
         constexpr ConstIterator& operator++() noexcept {
             ++m_pos;
@@ -52,7 +56,7 @@ public:
     constexpr ConstIterator end() const noexcept { return {this, m_dims}; }
 
 private:
-    std::span<const std::vector<float>> m_params;
+    std::span<const std::vector<FloatType>> m_params;
     std::array<size_t, 5> m_indices;
     size_t m_dims;
 };
@@ -69,7 +73,7 @@ class CartesianProductIterator {
 public:
     // Begin iterator constructor.
     constexpr explicit CartesianProductIterator(
-        std::span<const std::vector<float>> params) noexcept
+        std::span<const std::vector<FloatType>> params) noexcept
         : m_params(params),
           m_dims(params.size()),
           m_done(false) {
@@ -84,7 +88,7 @@ public:
 
     // End iterator constructor.
     constexpr CartesianProductIterator(
-        std::span<const std::vector<float>> params, bool /*unused*/)
+        std::span<const std::vector<FloatType>> params, bool /*unused*/)
         : m_params(params),
           m_dims(params.size()),
           m_done(true) {
@@ -122,7 +126,7 @@ public:
     }
 
 private:
-    std::span<const std::vector<float>> m_params;
+    std::span<const std::vector<FloatType>> m_params;
     std::array<size_t, 5> m_indices{};
     size_t m_dims;
     bool m_done;
@@ -133,7 +137,7 @@ class CartesianProductView
     : public std::ranges::view_interface<CartesianProductView> {
 public:
     explicit constexpr CartesianProductView(
-        std::span<const std::vector<float>> params) noexcept
+        std::span<const std::vector<FloatType>> params) noexcept
         : m_params(params) {}
 
     constexpr auto begin() const noexcept {
@@ -151,13 +155,13 @@ public:
     }
 
 private:
-    std::span<const std::vector<float>> m_params;
+    std::span<const std::vector<FloatType>> m_params;
 };
 
 // Helper function to create the Cartesian product view.
 constexpr auto
-cartesian_product_view(const std::vector<std::vector<float>>& params) {
-    return CartesianProductView(std::span<const std::vector<float>>(params));
+cartesian_product_view(const std::vector<std::vector<FloatType>>& params) {
+    return CartesianProductView(std::span<const std::vector<FloatType>>(params));
 }
 
 // ------------------------------------------------------------------------
@@ -166,7 +170,7 @@ cartesian_product_view(const std::vector<std::vector<float>>& params) {
 //#include <iostream>
 //
 //int main() {
-//    std::vector<std::vector<float>> params = {
+//    std::vector<std::vector<FloatType>> params = {
 //        {1.0f, 2.0f}, {10.0f, 20.0f, 30.0f}, {100.0f, 200.0f}};
 //
 //    for (const auto& combination : cartesian_product_view(params)) {

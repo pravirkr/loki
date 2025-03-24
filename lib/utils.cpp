@@ -4,15 +4,13 @@
 #include <span>
 #include <stdexcept>
 
-#include <Eigen/Dense>
-
 #include <loki/utils.hpp>
 
 void loki::add_scalar(std::span<const float> x,
                       float scalar,
                       std::span<float> out) {
-    std::transform(x.begin(), x.end(), out.begin(),
-                   [scalar](float xi) { return xi + scalar; });
+    std::ranges::transform(x, out.begin(),
+                           [scalar](float xi) { return xi + scalar; });
 }
 
 float loki::diff_max(std::span<const float> x, std::span<const float> y) {
@@ -79,13 +77,12 @@ std::vector<SizeType> loki::find_neighbouring_indices(
     }
 
     // Find the index of target_idx in indices
-    const auto target_it =
-        std::lower_bound(indices.begin(), indices.end(), target_idx);
+    const auto target_it = std::ranges::lower_bound(indices, target_idx);
     const auto target_idx_pos =
         static_cast<SizeType>(std::distance(indices.begin(), target_it));
 
     // Calculate the window around the target
-    auto left = (target_idx_pos > num / 2) ? target_idx_pos - num / 2 : 0;
+    auto left = (target_idx_pos > num / 2) ? target_idx_pos - (num / 2) : 0;
     const auto right = std::min(indices.size(), left + num);
     // Adjust left if we're at the right edge
     left = (right > num) ? right - num : 0;
@@ -94,6 +91,3 @@ std::vector<SizeType> loki::find_neighbouring_indices(
     return {indices.begin() + static_cast<int>(left),
             indices.begin() + static_cast<int>(right)};
 }
-
-
-

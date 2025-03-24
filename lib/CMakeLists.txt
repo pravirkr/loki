@@ -7,21 +7,34 @@ CPMFindPackage(
 )
 
 CPMFindPackage(
-  NAME Eigen3
-  VERSION 3.4.0
-  URL https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.tar.gz
+  NAME xsimd
+  VERSION 11.2.0
+  URL https://github.com/xtensor-stack/xsimd/archive/refs/tags/11.2.0.tar.gz
   DOWNLOAD_ONLY YES
 )
 
-if(Eigen3_ADDED)
-  add_library(Eigen3::Eigen INTERFACE IMPORTED)
-  target_include_directories(Eigen3::Eigen INTERFACE ${Eigen3_SOURCE_DIR})
+if(xsimd_ADDED)
+  add_library(xsimd::xsimd INTERFACE IMPORTED)
+  target_include_directories(xsimd::xsimd INTERFACE ${xsimd_SOURCE_DIR}/include)
+endif()
+
+CPMFindPackage(
+  NAME xtensor
+  VERSION 0.25.0
+  URL https://github.com/xtensor-stack/xtensor/archive/refs/tags/0.25.0.tar.gz
+  DOWNLOAD_ONLY YES
+)
+
+if(xtensor_ADDED)
+  add_library(xtensor::xtensor INTERFACE IMPORTED)
+  target_include_directories(xtensor INTERFACE ${xtensor_SOURCE_DIR}/include)
+  target_compile_definitions(xtensor INTERFACE XTENSOR_USE_XSIMD)
 endif()
 
 CPMFindPackage(
   NAME Boost
-  VERSION 1.84
-  URL https://github.com/boostorg/math/archive/refs/tags/boost-1.84.0.tar.gz
+  VERSION 1.87
+  URL https://github.com/boostorg/math/archive/refs/tags/boost-1.87.0.tar.gz
   DOWNLOAD_ONLY YES
 )
 
@@ -76,10 +89,12 @@ target_link_libraries(
   ${LIBRARY_NAME}
   PUBLIC coverage_config
          spdlog::spdlog_header_only
-         Eigen3::Eigen
          Boost::boost
          HighFive
          indicators::indicators
          ${FFTW_FLOAT_LIB}
          OpenMP::OpenMP_CXX
+         xtensor
+         xtensor::optimize
+         xtensor::use_xsimd
 )
