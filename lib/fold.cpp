@@ -3,8 +3,6 @@
 #include <algorithm>
 #include <thread>
 
-#include <spdlog/spdlog.h>
-
 #include <loki/loki_types.hpp>
 #include <loki/psr_utils.hpp>
 #include <loki/utils.hpp>
@@ -78,6 +76,7 @@ void BruteFold::compute_phase() {
     }
 }
 
+/*
 void BruteFold::execute_segment(std::span<const float> ts_e_seg,
                                 std::span<const float> ts_v_seg,
                                 std::span<float> fold_seg) {
@@ -91,6 +90,51 @@ void BruteFold::execute_segment(std::span<const float> ts_e_seg,
             const auto out_idx_v = freq_offset_out + iphase + m_nbins;
             fold_seg[out_idx_e] += ts_e_seg[isamp];
             fold_seg[out_idx_v] += ts_v_seg[isamp];
+        }
+    }
+}
+*/
+
+void BruteFold::execute_segment(std::span<const float> ts_e_seg,
+                                std::span<const float> ts_v_seg,
+                                std::span<float> fold_seg) {
+    const SizeType segment_len_act = ts_e_seg.size();
+    for (SizeType ifreq = 0; ifreq < m_nfreqs; ++ifreq) {
+        // Precompute pointers for this frequency
+        const uint32_t* phase_ptr =
+            m_phase_map.data() + (ifreq * m_segment_len);
+        float* fold_e_base = fold_seg.data() + (ifreq * 2 * m_nbins);
+        float* fold_v_base = fold_e_base + m_nbins;
+
+        // Unroll inner loop by 4
+        SizeType isamp = 0;
+        for (; isamp + 3 < segment_len_act; isamp += 4) {
+            // Sample 0
+            const uint32_t iphase0 = phase_ptr[isamp];
+            fold_e_base[iphase0] += ts_e_seg[isamp];
+            fold_v_base[iphase0] += ts_v_seg[isamp];
+
+            // Sample 1
+            const uint32_t iphase1 = phase_ptr[isamp + 1];
+            fold_e_base[iphase1] += ts_e_seg[isamp + 1];
+            fold_v_base[iphase1] += ts_v_seg[isamp + 1];
+
+            // Sample 2
+            const uint32_t iphase2 = phase_ptr[isamp + 2];
+            fold_e_base[iphase2] += ts_e_seg[isamp + 2];
+            fold_v_base[iphase2] += ts_v_seg[isamp + 2];
+
+            // Sample 3
+            const uint32_t iphase3 = phase_ptr[isamp + 3];
+            fold_e_base[iphase3] += ts_e_seg[isamp + 3];
+            fold_v_base[iphase3] += ts_v_seg[isamp + 3];
+        }
+
+        // Handle remaining samples
+        for (; isamp < segment_len_act; ++isamp) {
+            const uint32_t iphase = phase_ptr[isamp];
+            fold_e_base[iphase] += ts_e_seg[isamp];
+            fold_v_base[iphase] += ts_v_seg[isamp];
         }
     }
 }
