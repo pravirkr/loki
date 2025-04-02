@@ -112,34 +112,29 @@ PYBIND11_MODULE(libloki, m) {
 
     auto m_thresholds = m.def_submodule("thresholds", "Thresholds submodule");
 
-    py::class_<State>(m_thresholds, "State")
-        .def(py::init<>())
-        .def_readwrite("success_h0", &State::success_h0)
-        .def_readwrite("success_h1", &State::success_h1)
-        .def_readwrite("complexity", &State::complexity)
-        .def_readwrite("complexity_cumul", &State::complexity_cumul)
-        .def_readwrite("success_h1_cumul", &State::success_h1_cumul)
-        .def_readwrite("nbranches", &State::nbranches)
-        .def_readwrite("backtrack", &State::backtrack)
-        .def_property_readonly("cost", &State::cost);
+    PYBIND11_NUMPY_DTYPE(State, success_h0, success_h1, complexity,
+                         complexity_cumul, success_h1_cumul, nbranches,
+                         threshold, threshold_prev, success_h1_cumul_prev,
+                         is_empty);
     py::class_<DynamicThresholdScheme>(m_thresholds, "DynamicThresholdScheme")
-        .def(
-            py::init([](const py::array_t<float>& branching_pattern,
-                        const py::array_t<float>& profile, float snr_final,
-                        SizeType nthresholds, SizeType ntrials, SizeType nprobs,
-                        float prob_min, float ducy_max, float beam_width) {
-                return std::make_unique<DynamicThresholdScheme>(
-                    std::span<const float>(branching_pattern.data(),
-                                           branching_pattern.size()),
-                    std::span<const float>(profile.data(), profile.size()),
-                    snr_final, nthresholds, ntrials, nprobs, prob_min, ducy_max,
-                    beam_width);
-            }),
-            py::arg("branching_pattern"), py::arg("profile"),
-            py::arg("snr_final") = 8.0F, py::arg("nthresholds") = 100,
-            py::arg("ntrials") = 1024, py::arg("nprobs") = 10,
-            py::arg("prob_min") = 0.05F, py::arg("ducy_max") = 0.3F,
-            py::arg("beam_width") = 0.7F)
+        .def(py::init([](const py::array_t<float>& branching_pattern,
+                         const py::array_t<float>& profile, SizeType ntrials,
+                         SizeType nprobs, float prob_min, float snr_final,
+                         SizeType nthresholds, float ducy_max, float wtsp,
+                         float beam_width, SizeType nthreads) {
+                 return std::make_unique<DynamicThresholdScheme>(
+                     std::span<const float>(branching_pattern.data(),
+                                            branching_pattern.size()),
+                     std::span<const float>(profile.data(), profile.size()),
+                     ntrials, nprobs, prob_min, snr_final, nthresholds,
+                     ducy_max, wtsp, beam_width, nthreads);
+             }),
+             py::arg("branching_pattern"), py::arg("profile"),
+             py::arg("ntrials") = 1024, py::arg("nprobs") = 10,
+             py::arg("prob_min") = 0.05F, py::arg("snr_final") = 8.0F,
+             py::arg("nthresholds") = 100, py::arg("ducy_max") = 0.3F,
+             py::arg("wtsp") = 1.0F, py::arg("beam_width") = 0.7F,
+             py::arg("nthreads") = 1)
         .def("get_current_thresholds_idx",
              &DynamicThresholdScheme::get_current_thresholds_idx)
         .def("run", &DynamicThresholdScheme::run, py::arg("thres_neigh") = 10)
@@ -166,78 +161,42 @@ PYBIND11_MODULE(libloki, m) {
                                    return as_pyarray(self.get_probs());
                                })
         .def("get_states", [](DynamicThresholdScheme& self) {
-            auto states = self.get_states();
-            py::list state_list;
-            for (const auto& state : states) {
-                if (state) {
-                    state_list.append(State(*state));
-                } else {
-                    state_list.append(py::none());
-                }
-            }
-            return state_list;
+            return as_pyarray(self.get_states());
         });
     m_thresholds.def(
-        "evaluate_threshold_scheme",
+        "evaluate_scheme",
         [](const py::array_t<float>& thresholds,
            const py::array_t<float>& branching_pattern,
            const py::array_t<float>& profile, SizeType ntrials, float snr_final,
-           float ducy_max) {
-            return evaluate_threshold_scheme(
+           float ducy_max, float wtsp) {
+            return evaluate_scheme(
                 std::span<const float>(thresholds.data(), thresholds.size()),
                 std::span<const float>(branching_pattern.data(),
                                        branching_pattern.size()),
                 std::span<const float>(profile.data(), profile.size()), ntrials,
-                snr_final, ducy_max);
+                snr_final, ducy_max, wtsp);
         },
         py::arg("thresholds"), py::arg("branching_pattern"), py::arg("profile"),
         py::arg("ntrials") = 1024, py::arg("snr_final") = 8.0F,
-        py::arg("ducy_max") = 0.3F);
+        py::arg("ducy_max") = 0.3F, py::arg("wtsp") = 1.0F);
     m_thresholds.def(
-        "determine_threshold_scheme",
+        "determine_scheme",
         [](const py::array_t<float>& survive_probs,
            const py::array_t<float>& branching_pattern,
            const py::array_t<float>& profile, SizeType ntrials, float snr_final,
-           float ducy_max) {
-            return determine_threshold_scheme(
+           float ducy_max, float wtsp) {
+            return determine_scheme(
                 std::span<const float>(survive_probs.data(),
                                        survive_probs.size()),
                 std::span<const float>(branching_pattern.data(),
                                        branching_pattern.size()),
                 std::span<const float>(profile.data(), profile.size()), ntrials,
-                snr_final, ducy_max);
+                snr_final, ducy_max, wtsp);
         },
         py::arg("survive_probs"), py::arg("branching_pattern"),
         py::arg("profile"), py::arg("ntrials") = 1024,
-        py::arg("snr_final") = 8.0F, py::arg("ducy_max") = 0.3F);
-    m_thresholds.def(
-        "simulate_folds",
-        [](const py::array_t<float>& folds, float var_cur,
-           const py::array_t<float>& profile, float bias_snr, float var_add,
-           SizeType ntrials) {
-            const auto nbins      = profile.size();
-            const auto ntrials_in = folds.size() / nbins;
-            const auto folds_in   = FoldVector(
-                std::vector<float>(folds.data(), folds.data() + folds.size()),
-                var_cur, ntrials_in, nbins);
-            ThreadSafeRNG rng(std::random_device{}());
-            auto out = simulate_folds(
-                folds_in,
-                std::span<const float>(profile.data(), profile.size()), rng,
-                bias_snr, var_add, ntrials);
-            return as_pyarray_ref(out.data);
-        },
-        py::arg("folds"), py::arg("var_cur"), py::arg("profile"),
-        py::arg("bias_snr") = 0.0F, py::arg("var_add") = 1.0F,
-        py::arg("ntrials") = 1024);
-    m_thresholds.def(
-        "compute_threshold_survival",
-        [](const py::array_t<float>& scores, float survive_prob) {
-            return compute_threshold_survival(
-                std::span<const float>(scores.data(), scores.size()),
-                survive_prob);
-        },
-        py::arg("scores"), py::arg("survive_prob"));
+        py::arg("snr_final") = 8.0F, py::arg("ducy_max") = 0.3F,
+        py::arg("wtsp") = 1.0F);
 
     auto m_utils = m.def_submodule("utils", "Utils submodule");
     m_utils.def(
