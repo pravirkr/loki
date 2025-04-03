@@ -1,9 +1,14 @@
 set(PYBIND11_FINDPYTHON ON)
 find_package(pybind11 CONFIG REQUIRED)
 
-set(PYMODULE_NAME libloki)
-pybind11_add_module(${PYMODULE_NAME} loki_python.cpp)
-target_include_directories(${PYMODULE_NAME} PUBLIC ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/lib)
-target_link_libraries(${PYMODULE_NAME} PUBLIC ${LIBRARY_NAME})
-install(TARGETS ${PYMODULE_NAME} DESTINATION ${LIBRARY_NAME})
+set(LOKI_PYMODULE_NAME lib${LOKI_LIBRARY_NAME})
+pybind11_add_module(${LOKI_PYMODULE_NAME} loki_python.cpp)
+
+# Include directories needed for the binding code
+target_include_directories(${LOKI_PYMODULE_NAME} PRIVATE ${PROJECT_SOURCE_DIR}/include)
+
+# Link against the main library
+target_link_libraries(${LOKI_PYMODULE_NAME} PRIVATE ${LOKI_LIBRARY_NAME})
+
+# Install the Python module
+install(TARGETS ${LOKI_PYMODULE_NAME} DESTINATION ${LOKI_LIBRARY_NAME})

@@ -1,100 +1,104 @@
-# Find dependencies
+# Define the library
+file(GLOB LOKI_CXX_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
+set(LOKI_ALL_SOURCES ${LOKI_CXX_SOURCES})
+
+# Add CUDA sources if available
+if(CMAKE_CUDA_COMPILER)
+  file(GLOB LOKI_CUDA_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*.cu)
+  list(APPEND LOKI_ALL_SOURCES ${LOKI_CUDA_SOURCES})
+endif()
+
+add_library(${LOKI_LIBRARY_NAME} ${LOKI_ALL_SOURCES})
+# Alias for easier usage downstream if needed
+add_library(${PROJECT_NAME}::${LOKI_LIBRARY_NAME} ALIAS ${LOKI_LIBRARY_NAME})
+
+# Set include directories
+target_include_directories(
+  ${LOKI_LIBRARY_NAME}
+  PUBLIC $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include> $<INSTALL_INTERFACE:include>
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+# System dependencies
+message(STATUS "Searching for required system dependencies...")
+find_package(OpenMP REQUIRED)
+find_package(HDF5 REQUIRED)
+find_package(FFTW REQUIRED)
+
+# CPM Dependencies
+message(STATUS "Searching for CPM dependencies (will download if not found locally)...")
+
+# spdlog (Header-only logging library)
 CPMFindPackage(
   NAME spdlog
-  VERSION 1.13.0
+  VERSION 1.15.2
   GITHUB_REPOSITORY gabime/spdlog
   OPTIONS "SPDLOG_INSTALL ON"
 )
 
+# xsimd (SIMD library) - Header-only
 CPMFindPackage(
   NAME xsimd
   VERSION 11.2.0
   URL https://github.com/xtensor-stack/xsimd/archive/refs/tags/11.2.0.tar.gz
-  DOWNLOAD_ONLY YES
 )
 
-if(xsimd_ADDED)
-  add_library(xsimd::xsimd INTERFACE IMPORTED)
-  target_include_directories(xsimd::xsimd INTERFACE ${xsimd_SOURCE_DIR}/include)
-endif()
-
+# xtensor (Tensor library) - Header-only, depends on xsimd
 CPMFindPackage(
   NAME xtensor
   VERSION 0.25.0
   URL https://github.com/xtensor-stack/xtensor/archive/refs/tags/0.25.0.tar.gz
-  DOWNLOAD_ONLY YES
+  OPTIONS "XTENSOR_USE_XSIMD ON" "XTENSOR_USE_OPENMP ON"
 )
 
-if(xtensor_ADDED)
-  add_library(xtensor::xtensor INTERFACE IMPORTED)
-  target_include_directories(xtensor INTERFACE ${xtensor_SOURCE_DIR}/include)
-  target_compile_definitions(xtensor INTERFACE XTENSOR_USE_XSIMD)
+# Boost (Using specific components, header-only for math)
+find_package(Boost 1.87.0 QUIET COMPONENTS math)
+if(NOT Boost_FOUND OR NOT Boost_math_FOUND)
+  message(STATUS "Local Boost::math not found or too old, downloading via CPM...")
+  CPMAddPackage(
+    NAME Boost
+    VERSION 1.87.0
+    URL https://github.com/boostorg/math/archive/refs/tags/boost-1.87.0.tar.gz
+    DOWNLOAD_ONLY YES
+  )
+  if(Boost_ADDED)
+    add_library(Boost::math INTERFACE IMPORTED GLOBAL)
+    target_include_directories(Boost::math INTERFACE ${Boost_SOURCE_DIR}/include)
+    set(Boost_FOUND TRUE)
+  endif()
 endif()
 
-CPMFindPackage(
-  NAME Boost
-  VERSION 1.87
-  URL https://github.com/boostorg/math/archive/refs/tags/boost-1.87.0.tar.gz
-  DOWNLOAD_ONLY YES
-)
-
-if(Boost_ADDED)
-  add_library(Boost::boost INTERFACE IMPORTED)
-  target_include_directories(Boost::boost INTERFACE ${Boost_SOURCE_DIR}/include)
-endif()
-
+# HighFive (HDF5 C++ interface) - Depends on HDF5 found earlier
 CPMFindPackage(
   NAME HighFive
-  VERSION 2.10.0
-  URL https://github.com/BlueBrain/HighFive/archive/refs/tags/v2.10.0.tar.gz
-  DOWNLOAD_ONLY YES
-  OPTIONS "HIGHFIVE_FIND_HDF5 OFF"
+  VERSION 3.0.0
+  URL https://github.com/highfive-devs/highfive/archive/refs/tags/v3.0.0-beta2.tar.gz
+  OPTIONS "HIGHFIVE_FIND_HDF5 ON" "HIGHFIVE_USE_XTENSOR ON"
 )
 
-if(HighFive_ADDED)
-  add_library(HighFive INTERFACE IMPORTED)
-  find_package(HDF5 REQUIRED)
-  target_link_libraries(HighFive INTERFACE HDF5::HDF5)
-  target_include_directories(HighFive INTERFACE ${HighFive_SOURCE_DIR}/include)
-endif()
-
+# indicators (Progress indicators) - Header-only
 CPMFindPackage(
   NAME indicators
   VERSION 2.3
   URL https://github.com/p-ranav/indicators/archive/refs/tags/v2.3.tar.gz
   DOWNLOAD_ONLY YES
 )
-
 if(indicators_ADDED)
-  add_library(indicators::indicators INTERFACE IMPORTED)
+  add_library(indicators::indicators INTERFACE IMPORTED GLOBAL)
   target_include_directories(indicators::indicators INTERFACE ${indicators_SOURCE_DIR}/include)
 endif()
 
-find_package(FFTW REQUIRED)
-find_package(OpenMP REQUIRED)
-
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-
-file(GLOB LIBRARY_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
-
-add_library(${LIBRARY_NAME} ${LIBRARY_SOURCES})
-
-target_include_directories(
-  ${LIBRARY_NAME}
-  PUBLIC $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include> $<INSTALL_INTERFACE:include>
-  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${FFTW_INCLUDE_DIRS}
-)
-
+# Link libraries
 target_link_libraries(
-  ${LIBRARY_NAME}
-  PUBLIC coverage_config
-         spdlog::spdlog_header_only
-         Boost::boost
-         HighFive
-         indicators::indicators
+  ${LOKI_LIBRARY_NAME}
+  PUBLIC OpenMP::OpenMP_CXX
+         HDF5::HDF5
          ${FFTW_FLOAT_LIB}
-         OpenMP::OpenMP_CXX
+         spdlog::spdlog_header_only
+         xsimd
          xtensor
-         xtensor::optimize
-         xtensor::use_xsimd
+         Boost::math
+         HighFive::HighFive
+         indicators::indicators
+         coverage_config
 )
