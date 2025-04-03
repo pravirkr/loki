@@ -1,8 +1,9 @@
 #pragma once
 
 #include <span>
+#include <vector>
 
-#include <loki/loki_types.hpp>
+#include "loki/loki_types.hpp"
 
 namespace loki {
 

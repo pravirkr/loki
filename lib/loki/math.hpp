@@ -3,6 +3,7 @@
 #include <array>
 #include <cmath>
 #include <concepts>
+#include <cstddef>
 #include <stdexcept>
 
 #include <boost/math/distributions/chi_squared.hpp>
@@ -11,7 +12,7 @@
 #include <boost/math/special_functions/factorials.hpp>
 #include <xtensor/xtensor.hpp>
 
-#include <loki/loki_types.hpp>
+#include "loki/loki_types.hpp"
 
 namespace loki::math {
 

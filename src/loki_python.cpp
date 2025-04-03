@@ -1,3 +1,5 @@
+#include "pybind_utils.hpp"
+
 #include <cstddef>
 #include <span>
 #include <vector>
@@ -7,13 +9,12 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
-#include "pybind_utils.hpp"
-#include <loki/ffa.hpp>
-#include <loki/fold.hpp>
-#include <loki/loki_types.hpp>
-#include <loki/score.hpp>
-#include <loki/thresholds.hpp>
-#include <loki/utils.hpp>
+#include "loki/ffa.hpp"
+#include "loki/fold.hpp"
+#include "loki/loki_types.hpp"
+#include "loki/score.hpp"
+#include "loki/thresholds.hpp"
+#include "loki/utils.hpp"
 
 namespace py = pybind11;
 

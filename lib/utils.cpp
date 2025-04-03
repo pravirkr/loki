@@ -1,10 +1,10 @@
+#include "loki/utils.hpp"
+
 #include <algorithm>
 #include <cstddef>
 #include <numeric>
 #include <span>
 #include <stdexcept>
-
-#include <loki/utils.hpp>
 
 void loki::add_scalar(std::span<const float> x,
                       float scalar,

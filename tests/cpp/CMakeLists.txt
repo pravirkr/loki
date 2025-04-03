@@ -22,6 +22,8 @@ add_executable(${LOKI_TEST_TARGET} ${LOKI_TEST_SOURCES})
 target_include_directories(
   ${LOKI_TEST_TARGET} PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/lib
 )
-target_link_libraries(${LOKI_TEST_TARGET} PRIVATE ${LOKI_LIBRARY_NAME} Catch2::Catch2WithMain)
+target_link_libraries(
+  ${LOKI_TEST_TARGET} PRIVATE ${LOKI_LIBRARY_NAME} ${LOKI_COMPILE_OPTIONS} Catch2::Catch2WithMain
+)
 
 catch_discover_tests(${LOKI_TEST_TARGET})

@@ -2,9 +2,10 @@
 
 #include <cstddef>
 #include <span>
+#include <vector>
 
-#include <loki/configs.hpp>
-#include <loki/loki_types.hpp>
+#include "loki/configs.hpp"
+#include "loki/loki_types.hpp"
 
 // FFA Coordinate plan for a single param for a single iteration
 struct FFACoord {

@@ -1,4 +1,4 @@
-#include <loki/math.hpp>
+#include "loki/math.hpp"
 
 #include <xtensor-blas/xlinalg.hpp>
 #include <xtensor/xarray.hpp>

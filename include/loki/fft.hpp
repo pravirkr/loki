@@ -1,8 +1,9 @@
 #pragma once
 
 #include <cstddef>
-#include <fftw3.h>
 #include <span>
+
+#include <fftw3.h>
 
 class FFT2D {
 public:

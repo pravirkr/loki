@@ -1,4 +1,4 @@
-#include <loki/thresholds.hpp>
+#include "loki/thresholds.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -15,10 +15,10 @@
 #include <omp.h>
 #include <spdlog/spdlog.h>
 
-#include <loki/loki_types.hpp>
-#include <loki/math.hpp>
-#include <loki/score.hpp>
-#include <loki/utils.hpp>
+#include "loki/loki_types.hpp"
+#include "loki/math.hpp"
+#include "loki/score.hpp"
+#include "loki/utils.hpp"
 
 FoldVector::FoldVector(SizeType ntrials, SizeType nbins, float variance)
     : data(ntrials * nbins),

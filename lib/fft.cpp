@@ -1,4 +1,4 @@
-#include <loki/fft.hpp>
+#include "loki/fft.hpp"
 
 FFT2D::FFT2D(size_t n1x, size_t n2x, size_t ny)
     : m_n1x(n1x), m_n2x(n2x), m_ny(ny), m_fft_size(ny / 2 + 1),

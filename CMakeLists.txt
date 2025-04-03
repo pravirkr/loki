@@ -27,7 +27,7 @@ option(${PROJECT_NAME}_ENABLE_COVERAGE "Enable coverage reporting" OFF)
 option(${PROJECT_NAME}_OPTIMIZE_NATIVE "Enable native CPU optimizations (-march=native)" ON)
 option(${PROJECT_NAME}_FAST_MATH "Enable fast math optimizations (-ffast-math)" ON)
 option(${PROJECT_NAME}_ENABLE_IPO "Enable Interprocedural Optimization (Link-Time Optimization)"
-       OFF
+       ON
 )
 
 # Set C++ standard
@@ -49,32 +49,39 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 # Interprocedural Optimization (IPO/LTO)
-if(${PROJECT_NAME}_ENABLE_IPO)
+if(CMAKE_BUILD_TYPE MATCHES "Release" AND ${PROJECT_NAME}_ENABLE_IPO)
   include(CheckIPOSupported)
   check_ipo_supported(RESULT ipo_supported)
   if(ipo_supported)
     set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
-    message(STATUS "Interprocedural Optimization (IPO/LTO) enabled.")
+    message(STATUS "IPO/LTO enabled for Release build.")
   else()
-    message(
-      WARNING "Interprocedural Optimization (IPO/LTO) requested but not supported by the toolchain."
-    )
+    message(WARNING "IPO/LTO requested but not supported.")
   endif()
 else()
   set(CMAKE_INTERPROCEDURAL_OPTIMIZATION FALSE)
 endif()
 
-# Compiler flags
-add_compile_options(-Wall -Wextra -Wpedantic)
-add_compile_options($<$<CONFIG:Debug>:-g>)
-add_compile_options($<$<CONFIG:Release,RelWithDebInfo>:-O3;-DNDEBUG>) # Optimizations
-add_compile_options($<$<CONFIG:MinSizeRel>:-Os;-DNDEBUG>) # Size optimizations
+# Compiler flags (Interface target to hold global compile options)
+set(LOKI_COMPILE_OPTIONS ${PROJECT_NAME}_COMPILE_OPTIONS)
+add_library(${LOKI_COMPILE_OPTIONS} INTERFACE)
+target_compile_options(${LOKI_COMPILE_OPTIONS} INTERFACE -Wall -Wextra -Wpedantic)
+target_compile_options(
+  ${LOKI_COMPILE_OPTIONS} INTERFACE $<$<CONFIG:Debug>:-g> $<$<CONFIG:Release>:-O3;-DNDEBUG>
+                                    $<$<CONFIG:MinSizeRel>:-Os;-DNDEBUG>
+)
 if(${PROJECT_NAME}_OPTIMIZE_NATIVE)
-  add_compile_options($<$<AND:$<NOT:$<CONFIG:Debug>>,$<COMPILE_LANGUAGE:CXX>>:-march=native>)
+  target_compile_options(
+    ${LOKI_COMPILE_OPTIONS}
+    INTERFACE $<$<AND:$<NOT:$<CONFIG:Debug>>,$<COMPILE_LANGUAGE:CXX>>:-march=native>
+  )
   message(STATUS "Native CPU optimizations enabled (-march=native) for C++ Release builds.")
 endif()
 if(${PROJECT_NAME}_FAST_MATH)
-  add_compile_options($<$<AND:$<NOT:$<CONFIG:Debug>>,$<COMPILE_LANGUAGE:CXX>>:-ffast-math>)
+  target_compile_options(
+    ${LOKI_COMPILE_OPTIONS}
+    INTERFACE $<$<AND:$<NOT:$<CONFIG:Debug>>,$<COMPILE_LANGUAGE:CXX>>:-ffast-math>
+  )
   message(STATUS "Fast math enabled (-ffast-math) for C++ Release builds.")
 endif()
 
@@ -142,7 +149,10 @@ if(${PROJECT_NAME}_ENABLE_COVERAGE)
     message(
       WARNING "Code coverage requested, but not supported for compiler ${CMAKE_CXX_COMPILER_ID}."
     )
-    set(${PROJECT_NAME}_ENABLE_COVERAGE OFF CACHE BOOL "" FORCE)
+    set(${PROJECT_NAME}_ENABLE_COVERAGE
+        OFF
+        CACHE BOOL "" FORCE
+    )
     add_library(coverage_config INTERFACE)
   endif()
 else()
@@ -158,13 +168,13 @@ endif()
 if(${PROJECT_NAME}_BUILD_TESTING)
   add_subdirectory(tests/cpp)
 endif()
-if(LOKI_BUILD_BENCHMARKS)
+if(${PROJECT_NAME}_BUILD_BENCHMARKS)
   add_subdirectory(bench)
 endif()
 
 # Installation
 install(
-  TARGETS ${LOKI_LIBRARY_NAME} coverage_config
+  TARGETS ${LOKI_LIBRARY_NAME} ${LOKI_COMPILE_OPTIONS} coverage_config
   EXPORT ${PROJECT_NAME}Targets
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}

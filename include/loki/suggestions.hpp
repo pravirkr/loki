@@ -7,7 +7,7 @@
 
 #include <xtensor/xtensor.hpp>
 
-#include <loki/loki_types.hpp>
+#include "loki/loki_types.hpp"
 
 class SuggestionStruct {
 public:

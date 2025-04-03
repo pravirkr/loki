@@ -1,7 +1,7 @@
-#include <loki/math.hpp>
-#include <loki/utils.hpp>
+#include "loki/psr_utils.hpp"
 
-#include <loki/psr_utils.hpp>
+#include "loki/math.hpp"
+#include "loki/utils.hpp"
 
 SizeType loki::utils::get_phase_idx(FloatType proper_time,
                                     FloatType freq,

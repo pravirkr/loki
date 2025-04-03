@@ -1,7 +1,8 @@
+#include <cstddef>
+
 #include <catch2/catch_test_macros.hpp>
 
-#include <cstddef>
-#include <loki/utils.hpp>
+#include "loki/utils.hpp"
 
 // Test the add_scalar function
 TEST_CASE("add_scalar", "[utils]") {

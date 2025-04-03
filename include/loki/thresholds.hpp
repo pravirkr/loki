@@ -9,7 +9,7 @@
 
 #include <omp.h>
 
-#include <loki/loki_types.hpp>
+#include "loki/loki_types.hpp"
 
 class SimpleRNG {
 private:

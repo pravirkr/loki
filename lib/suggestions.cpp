@@ -1,5 +1,4 @@
 #include "loki/suggestions.hpp"
-#include "loki/loki_types.hpp"
 
 #include <algorithm>
 #include <ranges>
@@ -14,6 +13,8 @@
 #include <xtensor/xview.hpp>
 
 #include <omp.h>
+
+#include "loki/loki_types.hpp"
 
 SuggestionStruct::SuggestionStruct(xt::xtensor<double, 3> param_sets,
                                    xt::xtensor<float, 3> folds,

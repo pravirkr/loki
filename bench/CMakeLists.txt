@@ -12,4 +12,7 @@ add_executable(${LOKI_BENCH_TARGET} ${LOKI_BENCH_SOURCES})
 target_include_directories(
   ${LOKI_BENCH_TARGET} PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/lib
 )
-target_link_libraries(${LOKI_BENCH_TARGET} PRIVATE ${LOKI_LIBRARY_NAME} benchmark::benchmark_main)
+target_link_libraries(
+  ${LOKI_BENCH_TARGET} PRIVATE ${LOKI_LIBRARY_NAME} ${LOKI_COMPILE_OPTIONS}
+                               benchmark::benchmark_main
+)

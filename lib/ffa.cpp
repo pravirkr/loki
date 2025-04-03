@@ -1,5 +1,4 @@
-#include "loki/loki_types.hpp"
-#include <loki/ffa.hpp>
+#include "loki/ffa.hpp"
 
 #include <numeric>
 #include <ranges>
@@ -8,14 +7,14 @@
 #include <indicators/cursor_control.hpp>
 #include <indicators/progress_bar.hpp>
 #include <spdlog/spdlog.h>
+#include <xsimd/xsimd.hpp>
 
-#include <loki/basic.hpp>
-#include <loki/cartesian.hpp>
-#include <loki/configs.hpp>
-#include <loki/defaults.hpp>
-#include <loki/fold.hpp>
-#include <loki/psr_utils.hpp>
-#include <loki/utils.hpp>
+#include "loki/basic.hpp"
+#include "loki/cartesian.hpp"
+#include "loki/configs.hpp"
+#include "loki/fold.hpp"
+#include "loki/loki_types.hpp"
+#include "loki/psr_utils.hpp"
 
 FFAPlan::FFAPlan(PulsarSearchConfig cfg) : m_cfg(std::move(cfg)) {
     configure_plan();
@@ -48,7 +47,7 @@ void FFAPlan::configure_plan() {
     coordinates.resize(levels);
 
     for (SizeType i_level = 0; i_level < levels; ++i_level) {
-        const auto segment_len = m_cfg.get_bseg_brute() * (1 << i_level);
+        const auto segment_len = m_cfg.get_bseg_brute() * (1U << i_level);
         const auto tsegment =
             static_cast<float>(segment_len) * m_cfg.get_tsamp();
         const auto nsegments  = m_cfg.get_nsamps() / segment_len;

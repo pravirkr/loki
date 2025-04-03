@@ -1,11 +1,11 @@
-#include <loki/configs.hpp>
+#include "loki/configs.hpp"
 
 #include <format>
 #include <thread>
 
 #include <spdlog/spdlog.h>
 
-#include <loki/psr_utils.hpp>
+#include "loki/psr_utils.hpp"
 
 PulsarSearchConfig::PulsarSearchConfig(
     SizeType nsamps,
@@ -83,7 +83,7 @@ SizeType PulsarSearchConfig::get_bseg_brute_default() const {
     const SizeType init_levels = (m_nsamps == 1) ? 1 : 5;
     const auto levels          = static_cast<SizeType>(
         std::log2(static_cast<FloatType>(m_nsamps) * m_tsamp * m_f_min));
-    return static_cast<SizeType>(m_nsamps / (1 << (levels - init_levels)));
+    return static_cast<SizeType>(m_nsamps / (1U << (levels - init_levels)));
 }
 
 SizeType PulsarSearchConfig::get_bseg_ffa_default() const { return m_nsamps; }

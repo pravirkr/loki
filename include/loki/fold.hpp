@@ -3,8 +3,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <vector>
 
-#include <loki/loki_types.hpp>
+#include "loki/loki_types.hpp"
 
 /**
  * @brief Fold time series using brute-force method

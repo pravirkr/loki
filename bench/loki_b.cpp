@@ -1,13 +1,12 @@
-#include <benchmark/benchmark.h>
-
 #include <algorithm>
 #include <cstddef>
 #include <random>
 #include <vector>
 
+#include <benchmark/benchmark.h>
 #include <omp.h>
 
-#include <loki/score.hpp>
+#include "loki/score.hpp"
 
 class ScoresFixture : public benchmark::Fixture {
 public:
@@ -33,9 +32,9 @@ public:
 class ScoresFixture2D : public benchmark::Fixture {
 public:
     void SetUp(const ::benchmark::State& state) override {
-        nwidths = 15;
+        nwidths   = 15;
         nprofiles = state.range(0);
-        nsamps  = 4096;
+        nsamps    = 4096;
     }
 
     void TearDown(const ::benchmark::State& /*unused*/) override {}
@@ -65,7 +64,8 @@ BENCHMARK_DEFINE_F(ScoresFixture, BM_loki_snr_1d)(benchmark::State& state) {
     }
 }
 
-BENCHMARK_DEFINE_F(ScoresFixture2D, BM_loki_snr_2d_seq)(benchmark::State& state) {
+BENCHMARK_DEFINE_F(ScoresFixture2D,
+                   BM_loki_snr_2d_seq)(benchmark::State& state) {
     omp_set_num_threads(1);
     std::random_device rd;
     std::mt19937 gen(rd());
@@ -74,11 +74,13 @@ BENCHMARK_DEFINE_F(ScoresFixture2D, BM_loki_snr_2d_seq)(benchmark::State& state)
     std::iota(widths.begin(), widths.end(), 1);
     std::vector<float> out(nprofiles * widths.size());
     for (auto _ : state) {
-        loki::snr_2d(std::span(arr), nprofiles, std::span(widths), 1.0F, std::span(out));
+        loki::snr_2d(std::span(arr), nprofiles, std::span(widths), 1.0F,
+                     std::span(out));
     }
 }
 
-BENCHMARK_DEFINE_F(ScoresFixture2D, BM_loki_snr_2d_par)(benchmark::State& state) {
+BENCHMARK_DEFINE_F(ScoresFixture2D,
+                   BM_loki_snr_2d_par)(benchmark::State& state) {
     omp_set_num_threads(8);
     std::random_device rd;
     std::mt19937 gen(rd());
@@ -87,7 +89,8 @@ BENCHMARK_DEFINE_F(ScoresFixture2D, BM_loki_snr_2d_par)(benchmark::State& state)
     std::iota(widths.begin(), widths.end(), 1);
     std::vector<float> out(nprofiles * widths.size());
     for (auto _ : state) {
-        loki::snr_2d(std::span(arr), nprofiles, std::span(widths), 1.0F, std::span(out));
+        loki::snr_2d(std::span(arr), nprofiles, std::span(widths), 1.0F,
+                     std::span(out));
     }
 }
 

@@ -6,16 +6,17 @@
 #include <span>
 #include <vector>
 
-#include <loki/loki_types.hpp>
+#include "loki/loki_types.hpp"
 
 // A proxy for the current combination in the Cartesian product.
 // It provides read-only access to the combination elements.
 class CartesianProductProxy {
 public:
     // The constructor copies the current indices.
-    constexpr CartesianProductProxy(std::span<const std::vector<FloatType>> params,
-                                    std::array<size_t, 5> indices,
-                                    size_t dims) noexcept
+    constexpr CartesianProductProxy(
+        std::span<const std::vector<FloatType>> params,
+        std::array<size_t, 5> indices,
+        size_t dims) noexcept
         : m_params(params),
           m_indices(indices),
           m_dims(dims) {}
@@ -36,7 +37,9 @@ public:
             : m_proxy(proxy),
               m_pos(pos) {}
 
-        constexpr FloatType operator*() const noexcept { return (*m_proxy)[m_pos]; }
+        constexpr FloatType operator*() const noexcept {
+            return (*m_proxy)[m_pos];
+        }
 
         constexpr ConstIterator& operator++() noexcept {
             ++m_pos;
@@ -63,10 +66,10 @@ private:
 
 /**
  * @brief A view over the Cartesian product of float vectors
- * 
+ *
  * Thread Safety: Safe for concurrent reading, but iterators must not be
  * shared between threads.
- * 
+ *
  * Note: The input vectors must outlive this view
  */
 class CartesianProductIterator {
@@ -161,25 +164,26 @@ private:
 // Helper function to create the Cartesian product view.
 constexpr auto
 cartesian_product_view(const std::vector<std::vector<FloatType>>& params) {
-    return CartesianProductView(std::span<const std::vector<FloatType>>(params));
+    return CartesianProductView(
+        std::span<const std::vector<FloatType>>(params));
 }
 
 // ------------------------------------------------------------------------
 // Example usage:
 
-//#include <iostream>
+// #include <iostream>
 //
-//int main() {
-//    std::vector<std::vector<FloatType>> params = {
-//        {1.0f, 2.0f}, {10.0f, 20.0f, 30.0f}, {100.0f, 200.0f}};
+// int main() {
+//     std::vector<std::vector<FloatType>> params = {
+//         {1.0f, 2.0f}, {10.0f, 20.0f, 30.0f}, {100.0f, 200.0f}};
 //
-//    for (const auto& combination : cartesian_product_view(params)) {
-//        // Each 'combination' is a proxy providing access to the current tuple.
-//        for (size_t i = 0; i < combination.size(); ++i) {
-//            std::cout << combination[i] << " ";
-//        }
-//        std::cout << "\n";
-//    }
-//    return 0;
-//}
-// ------------------------------------------------------------------------
+//     for (const auto& combination : cartesian_product_view(params)) {
+//         // Each 'combination' is a proxy providing access to the current
+//         tuple. for (size_t i = 0; i < combination.size(); ++i) {
+//             std::cout << combination[i] << " ";
+//         }
+//         std::cout << "\n";
+//     }
+//     return 0;
+// }
+//  ------------------------------------------------------------------------

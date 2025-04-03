@@ -1,11 +1,10 @@
-#include <loki/fold.hpp>
+#include "loki/fold.hpp"
 
 #include <algorithm>
 #include <thread>
 
-#include <loki/loki_types.hpp>
-#include <loki/psr_utils.hpp>
-#include <loki/utils.hpp>
+#include "loki/loki_types.hpp"
+#include "loki/psr_utils.hpp"
 
 BruteFold::BruteFold(std::span<const FloatType> freq_arr,
                      SizeType segment_len,

@@ -91,6 +91,7 @@ endif()
 # Link libraries
 target_link_libraries(
   ${LOKI_LIBRARY_NAME}
+  PRIVATE ${LOKI_COMPILE_OPTIONS}
   PUBLIC OpenMP::OpenMP_CXX
          HDF5::HDF5
          ${FFTW_FLOAT_LIB}

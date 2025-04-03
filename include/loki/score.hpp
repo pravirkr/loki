@@ -5,8 +5,8 @@
 #include <string_view>
 #include <vector>
 
-#include <loki/fft.hpp>
-#include <loki/loki_types.hpp>
+#include "loki/fft.hpp"
+#include "loki/loki_types.hpp"
 
 class MatchedFilter {
 public:

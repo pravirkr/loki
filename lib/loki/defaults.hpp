@@ -2,4 +2,3 @@
 
 #include <cstddef>
 
-#include <loki/math.hpp>

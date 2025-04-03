@@ -1,4 +1,4 @@
-#include <loki/score.hpp>
+#include "loki/score.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -8,7 +8,7 @@
 
 #include <omp.h>
 
-#include <loki/utils.hpp>
+#include "loki/utils.hpp"
 
 MatchedFilter::MatchedFilter(std::span<const SizeType> widths_arr,
                              SizeType nprofiles,

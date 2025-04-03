@@ -1,14 +1,13 @@
-#include "loki/loki_types.hpp"
-#include <loki/basic.hpp>
+#include "loki/basic.hpp"
 
 #include <algorithm>
 #include <cstddef>
 #include <span>
 #include <vector>
 
-#include <loki/math.hpp>
-#include <loki/psr_utils.hpp>
-#include <loki/utils.hpp>
+#include "loki/loki_types.hpp"
+#include "loki/psr_utils.hpp"
+#include "loki/utils.hpp"
 
 std::tuple<std::vector<SizeType>, SizeType>
 loki::ffa_resolve(std::span<const FloatType> pset_cur,
