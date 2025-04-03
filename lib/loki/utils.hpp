@@ -19,8 +19,8 @@ float diff_max(std::span<const float> x, std::span<const float> y);
 void circular_prefix_sum(std::span<const float> x, std::span<float> out);
 
 // return index of nearest value in sorted array
-template <typename T>
-SizeType find_nearest_sorted_idx(std::span<const T> arr_sorted, T val);
+SizeType find_nearest_sorted_idx(std::span<const FloatType> arr_sorted,
+                                 FloatType val);
 
 std::vector<SizeType> find_neighbouring_indices(
     std::span<const SizeType> indices, SizeType target_idx, SizeType num);

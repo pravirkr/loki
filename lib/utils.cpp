@@ -48,12 +48,12 @@ void loki::circular_prefix_sum(std::span<const float> x, std::span<float> out) {
                out.subspan(n_wraps * nbins, extra));
 }
 
-template <typename T>
-SizeType loki::find_nearest_sorted_idx(std::span<const T> arr_sorted, T val) {
+SizeType loki::find_nearest_sorted_idx(std::span<const FloatType> arr_sorted,
+                                       FloatType val) {
     if (arr_sorted.empty()) {
         throw std::runtime_error("Array is empty");
     }
-    auto it      = std::lower_bound(arr_sorted.begin(), arr_sorted.end(), val);
+    auto it      = std::ranges::lower_bound(arr_sorted, val);
     SizeType idx = std::distance(arr_sorted.begin(), it);
 
     if (it != arr_sorted.end()) {

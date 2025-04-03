@@ -76,11 +76,12 @@ CPMFindPackage(
   OPTIONS "HIGHFIVE_FIND_HDF5 ON" "HIGHFIVE_USE_XTENSOR ON"
 )
 
-# indicators (Progress indicators) - Header-only
+# indicators (Progress indicators) - Header-only (Use git main branch)
 CPMFindPackage(
   NAME indicators
   VERSION 2.3
-  URL https://github.com/p-ranav/indicators/archive/refs/tags/v2.3.tar.gz
+  GIT_TAG ac6c93ea2b1f97a220d10a0729a625b3f51e320b
+  GITHUB_REPOSITORY p-ranav/indicators
   DOWNLOAD_ONLY YES
 )
 if(indicators_ADDED)
