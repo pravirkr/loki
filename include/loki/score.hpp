@@ -1,12 +1,13 @@
 #pragma once
 
-#include <cstddef>
 #include <span>
 #include <string_view>
 #include <vector>
 
 #include "loki/fft.hpp"
 #include "loki/loki_types.hpp"
+
+namespace loki::score {
 
 class MatchedFilter {
 public:
@@ -43,8 +44,6 @@ private:
     static SizeType get_nbins_pow2(SizeType nbins);
 };
 
-namespace loki {
-
 std::vector<SizeType> generate_width_trials(SizeType nbins_max,
                                             float spacing_factor = 1.5F);
 
@@ -60,4 +59,4 @@ void snr_2d(std::span<const float> arr,
             std::span<const SizeType> widths,
             std::span<float> out,
             float stdnoise = 1.0F);
-} // namespace loki
+} // namespace loki::score

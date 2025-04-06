@@ -5,6 +5,8 @@ set(LOKI_ALL_SOURCES ${LOKI_CXX_SOURCES})
 # Add CUDA sources if available
 if(CMAKE_CUDA_COMPILER)
   file(GLOB LOKI_CUDA_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*.cu)
+  # Set CUDA-specific compile options for these sources
+  set_source_files_properties(${LOKI_CUDA_SOURCES} PROPERTIES LANGUAGE CUDA)
   list(APPEND LOKI_ALL_SOURCES ${LOKI_CUDA_SOURCES})
 endif()
 

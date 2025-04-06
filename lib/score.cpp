@@ -2,13 +2,14 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstddef>
 #include <numeric>
 #include <stdexcept>
 
 #include <omp.h>
 
 #include "loki/utils.hpp"
+
+namespace loki::score {
 
 MatchedFilter::MatchedFilter(std::span<const SizeType> widths_arr,
                              SizeType nprofiles,
@@ -86,7 +87,7 @@ void MatchedFilter::normalise(std::span<float>& arr) {
 }
 
 SizeType MatchedFilter::get_nbins_pow2(SizeType nbins) {
-    return 1 << static_cast<SizeType>(std::ceil(std::log2(nbins)));
+    return 1U << static_cast<SizeType>(std::ceil(std::log2(nbins)));
 }
 
 void MatchedFilter::generate_boxcar_template(std::span<float>& arr,
@@ -104,8 +105,8 @@ void MatchedFilter::generate_boxcar_template(std::span<float>& arr,
 void MatchedFilter::generate_gaussian_template(std::span<float>& arr,
                                                SizeType width) {
     const SizeType temp_nbins = arr.size();
-    const float sigma =
-        static_cast<float>(width) / (2.0F * std::sqrt(2.0F * std::log(2.0F)));
+    const float sigma         = static_cast<float>(width) /
+                        (2.0F * std::sqrt(2.0F * std::numbers::ln2_v<float>));
     const auto xmax = static_cast<SizeType>(std::ceil(3.5 * sigma));
 
     const auto temp_start = (temp_nbins / 2) - xmax;
@@ -116,8 +117,8 @@ void MatchedFilter::generate_gaussian_template(std::span<float>& arr,
     normalise(arr);
 }
 
-std::vector<SizeType> loki::generate_width_trials(SizeType nbins_max,
-                                                  float spacing_factor) {
+std::vector<SizeType> generate_width_trials(SizeType nbins_max,
+                                            float spacing_factor) {
     std::vector<SizeType> widths = {1};
     while (widths.back() < nbins_max) {
         const auto next_width =
@@ -132,10 +133,10 @@ std::vector<SizeType> loki::generate_width_trials(SizeType nbins_max,
     return widths;
 }
 
-void loki::snr_1d(std::span<const float> arr,
-                  std::span<const SizeType> widths,
-                  std::span<float> out,
-                  float stdnoise) {
+void snr_1d(std::span<const float> arr,
+            std::span<const SizeType> widths,
+            std::span<float> out,
+            float stdnoise) {
     const SizeType wmax       = *std::ranges::max_element(widths);
     const SizeType nbins      = arr.size();
     const SizeType ntemplates = widths.size();
@@ -144,7 +145,7 @@ void loki::snr_1d(std::span<const float> arr,
     }
 
     std::vector<float> psum(nbins + wmax);
-    circular_prefix_sum(arr, std::span<float>(psum));
+    utils::circular_prefix_sum(arr, std::span<float>(psum));
     const float sum = psum[nbins - 1]; // sum of the input array
     const std::span<float> psum_span(psum);
 
@@ -156,18 +157,18 @@ void loki::snr_1d(std::span<const float> arr,
                                      static_cast<float>(nbins * w));
         const float b =
             static_cast<float>(w) * h / static_cast<float>(nbins - w);
-        const float dmax =
-            diff_max(psum_span.subspan(w, nbins), psum_span.subspan(0, nbins));
-        out[iw] = ((h + b) * dmax - b * sum) / stdnoise;
+        const float dmax = utils::diff_max(psum_span.subspan(w, nbins),
+                                           psum_span.subspan(0, nbins));
+        out[iw]          = ((h + b) * dmax - b * sum) / stdnoise;
     }
 }
 
 // Compute the S/N of array of single pulse profiles
-void loki::snr_2d(std::span<const float> arr,
-                  const SizeType nprofiles,
-                  std::span<const SizeType> widths,
-                  std::span<float> out,
-                  float stdnoise) {
+void snr_2d(std::span<const float> arr,
+            const SizeType nprofiles,
+            std::span<const SizeType> widths,
+            std::span<float> out,
+            float stdnoise) {
     const SizeType nbins      = arr.size() / nprofiles;
     const SizeType ntemplates = widths.size();
     if (out.size() != nprofiles * ntemplates) {
@@ -180,3 +181,4 @@ void loki::snr_2d(std::span<const float> arr,
                out.subspan(i * ntemplates, ntemplates), stdnoise);
     }
 }
+} // namespace loki::score

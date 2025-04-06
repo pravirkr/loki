@@ -120,9 +120,11 @@ if(CMAKE_CUDA_COMPILER)
     message(STATUS "Fast math enabled (--use-fast-math) for CUDA Release builds.")
   endif()
   set(CMAKE_CUDA_USE_RESPONSE_FILE_FOR_INCLUDES 0)
+  add_compile_definitions(${PROJECT_NAME}_ENABLE_CUDA)
 
 else()
   message(STATUS "CUDA compiler not found or language check failed. GPU code will not be built.")
+  remove_definitions(${PROJECT_NAME}_ENABLE_CUDA)
 endif()
 
 # CPM.cmake Setup

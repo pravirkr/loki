@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstddef>
 #include <filesystem>
 #include <format>
 #include <random>
@@ -20,42 +19,60 @@
 #include "loki/score.hpp"
 #include "loki/utils.hpp"
 
-FoldVector::FoldVector(SizeType ntrials, SizeType nbins, float variance)
-    : data(ntrials * nbins),
-      variance(variance),
-      ntrials(ntrials),
-      nbins(nbins) {}
-
-FoldVector::FoldVector(const std::vector<float>& data,
-                       float variance,
-                       SizeType ntrials,
-                       SizeType nbins)
-    : data(data),
-      variance(variance),
-      ntrials(ntrials),
-      nbins(nbins) {}
-
-std::vector<float> FoldVector::get_norm() const {
-    std::vector<float> norm_data(data.size());
-    const auto std = std::sqrt(variance);
-    for (SizeType i = 0; i < ntrials; ++i) {
-        for (SizeType j = 0; j < nbins; ++j) {
-            const auto idx = (i * nbins) + j;
-            norm_data[idx] = data[idx] / std;
-        }
-    }
-    return norm_data;
-}
-
-FoldsType::FoldsType(SizeType ntrials, SizeType nbins, float variance)
-    : folds_h0(ntrials, nbins, variance),
-      folds_h1(ntrials, nbins, variance) {}
-
-bool FoldsType::is_empty() const {
-    return folds_h0.data.empty() || folds_h1.data.empty();
-}
-
+namespace loki {
 namespace {
+struct FoldVector {
+    std::vector<float> data;
+    float variance;
+    SizeType ntrials;
+    SizeType nbins;
+
+    FoldVector(const std::vector<float>& data,
+               float variance,
+               SizeType ntrials,
+               SizeType nbins)
+        : data(data),
+          variance(variance),
+          ntrials(ntrials),
+          nbins(nbins) {}
+
+    FoldVector(SizeType ntrials, SizeType nbins, float variance = 0.0F)
+        : data(ntrials * nbins),
+          variance(variance),
+          ntrials(ntrials),
+          nbins(nbins) {}
+
+    std::vector<float> get_norm() const {
+        std::vector<float> norm_data(data.size());
+        const auto std = std::sqrt(variance);
+        for (SizeType i = 0; i < ntrials; ++i) {
+            for (SizeType j = 0; j < nbins; ++j) {
+                const auto idx = (i * nbins) + j;
+                norm_data[idx] = data[idx] / std;
+            }
+        }
+        return norm_data;
+    }
+};
+
+struct FoldsType {
+    FoldVector folds_h0;
+    FoldVector folds_h1;
+
+    FoldsType(SizeType ntrials, SizeType nbins, float variance = 0.0F)
+        : folds_h0(ntrials, nbins, variance),
+          folds_h1(ntrials, nbins, variance) {}
+
+    template <typename FoldVector0, typename FoldVector1>
+    FoldsType(FoldVector0&& folds_h0, FoldVector1&& folds_h1)
+        : folds_h0(std::forward<FoldVector0>(folds_h0)),
+          folds_h1(std::forward<FoldVector1>(folds_h1)) {}
+
+    bool is_empty() const {
+        return folds_h0.data.empty() || folds_h1.data.empty();
+    }
+};
+
 std::vector<float> compute_norm_profile(std::span<const float> profile) {
     std::vector<float> profile_norm(profile.begin(), profile.end());
     float sum_of_squares = std::inner_product(profile.begin(), profile.end(),
@@ -74,7 +91,7 @@ IndexType find_bin_index(std::span<const float> bins, float value) {
 
 FoldVector simulate_folds(const FoldVector& folds_in,
                           std::span<const float> profile,
-                          ThreadSafeRNG& rng,
+                          utils::ThreadSafeRNG& rng,
                           float bias_snr       = 0.0F,
                           float var_add        = 1.0F,
                           SizeType ntrials_min = 1024) {
@@ -114,10 +131,10 @@ std::vector<float>
 compute_scores(const FoldVector& folds, float ducy_max, float wtsp) {
     const auto max_width = static_cast<SizeType>(
         std::ceil(static_cast<float>(folds.nbins) * ducy_max));
-    const auto widths     = loki::generate_width_trials(max_width, wtsp);
+    const auto widths     = score::generate_width_trials(max_width, wtsp);
     const auto folds_norm = folds.get_norm();
     std::vector<float> folds_snr(folds.ntrials * widths.size());
-    loki::snr_2d(folds_norm, folds.ntrials, widths, folds_snr);
+    score::snr_2d(folds_norm, folds.ntrials, widths, folds_snr);
     std::vector<float> scores(folds.ntrials);
     for (SizeType i = 0; i < folds.ntrials; ++i) {
         const auto offset = i * widths.size();
@@ -203,7 +220,7 @@ gen_next_using_thresh(const State& state_cur,
                       float nbranches,
                       float bias_snr,
                       std::span<const float> profile,
-                      ThreadSafeRNG& rng,
+                      utils::ThreadSafeRNG& rng,
                       float var_add    = 1.0F,
                       SizeType ntrials = 1024,
                       float ducy_max   = 0.3F,
@@ -232,7 +249,7 @@ gen_next_using_surv_prob(const State& state_cur,
                          float nbranches,
                          float bias_snr,
                          std::span<const float> profile,
-                         ThreadSafeRNG& rng,
+                         utils::ThreadSafeRNG& rng,
                          float var_add    = 1.0F,
                          SizeType ntrials = 1024,
                          float ducy_max   = 0.3F,
@@ -273,9 +290,79 @@ HighFive::CompoundType create_compound_state() {
 
 } // namespace
 
-HIGHFIVE_REGISTER_TYPE(State, create_compound_state)
+// CPU-specific implementation
+template <> class DynamicThresholdScheme<backend::CPU>::Impl {
+public:
+    Impl(std::span<const float> branching_pattern,
+         std::span<const float> profile,
+         SizeType ntrials,
+         SizeType nprobs,
+         float prob_min,
+         float snr_final,
+         SizeType nthresholds,
+         float ducy_max,
+         float wtsp,
+         float beam_width,
+         SizeType nthreads);
 
-DynamicThresholdScheme::DynamicThresholdScheme(
+    std::vector<SizeType> get_current_thresholds_idx(SizeType istage) const;
+    std::vector<float> get_branching_pattern() const {
+        return m_branching_pattern;
+    }
+    std::vector<float> get_profile() const { return m_profile; }
+    std::vector<float> get_thresholds() const { return m_thresholds; }
+    std::vector<float> get_probs() const { return m_probs; }
+    SizeType get_nstages() const { return m_nstages; }
+    SizeType get_nthresholds() const { return m_nthresholds; }
+    SizeType get_nprobs() const { return m_nprobs; }
+    std::vector<State> get_states() const { return m_states; }
+    void run(SizeType thres_neigh = 10);
+    std::string save(const std::string& outdir = "./") const;
+
+private:
+    std::vector<float> m_branching_pattern;
+    SizeType m_ntrials;
+    float m_ducy_max;
+    float m_wtsp;
+    float m_beam_width;
+    utils::ThreadSafeRNG m_rng;
+    SizeType m_nthreads;
+
+    std::vector<float> m_profile;
+    std::vector<float> m_thresholds;
+    std::vector<float> m_probs;
+    SizeType m_nprobs;
+    SizeType m_nbins;
+    SizeType m_nstages;
+    SizeType m_nthresholds;
+    float m_bias_snr;
+    std::vector<float> m_guess_path;
+    std::vector<std::optional<FoldsType>> m_folds_in;
+    std::vector<std::optional<FoldsType>> m_folds_out;
+    std::vector<State> m_states;
+
+    void run_segment(SizeType istage, SizeType thres_neigh = 10);
+    void init_states();
+    static std::vector<float>
+    compute_thresholds(float snr_start, float snr_final, SizeType nthresholds);
+    static std::vector<float> compute_probs(SizeType nprobs,
+                                            float prob_min = 0.05F);
+    static std::vector<float> compute_probs_linear(SizeType nprobs,
+                                                   float prob_min = 0.05F);
+    static std::vector<float> bound_scheme(SizeType nstages, float snr_bound);
+    static std::vector<float>
+    trials_scheme(std::span<const float> branching_pattern,
+                  SizeType trials_start = 1,
+                  float min_trials      = 1E10F);
+    static std::vector<float>
+    guess_scheme(SizeType nstages,
+                 float snr_bound,
+                 std::span<const float> branching_pattern,
+                 SizeType trials_start = 1,
+                 float min_trials      = 1E10F);
+};
+
+DynamicThresholdScheme<backend::CPU>::Impl::Impl(
     std::span<const float> branching_pattern,
     std::span<const float> profile,
     SizeType ntrials,
@@ -319,7 +406,8 @@ DynamicThresholdScheme::DynamicThresholdScheme(
 }
 
 std::vector<SizeType>
-DynamicThresholdScheme::get_current_thresholds_idx(SizeType istage) const {
+DynamicThresholdScheme<backend::CPU>::Impl::get_current_thresholds_idx(
+    SizeType istage) const {
     const auto guess       = m_guess_path[istage];
     const auto half_extent = m_beam_width;
     const auto lower_bound = std::max(0.0F, guess - half_extent);
@@ -335,26 +423,7 @@ DynamicThresholdScheme::get_current_thresholds_idx(SizeType istage) const {
     return result;
 }
 
-std::vector<float> DynamicThresholdScheme::get_branching_pattern() const {
-    return m_branching_pattern;
-}
-std::vector<float> DynamicThresholdScheme::get_profile() const {
-    return m_profile;
-}
-std::vector<float> DynamicThresholdScheme::get_thresholds() const {
-    return m_thresholds;
-}
-std::vector<float> DynamicThresholdScheme::get_probs() const { return m_probs; }
-SizeType DynamicThresholdScheme::get_nstages() const { return m_nstages; }
-SizeType DynamicThresholdScheme::get_nthresholds() const {
-    return m_nthresholds;
-}
-SizeType DynamicThresholdScheme::get_nprobs() const { return m_nprobs; }
-std::vector<State> DynamicThresholdScheme::get_states() const {
-    return m_states;
-}
-
-void DynamicThresholdScheme::run(SizeType thres_neigh) {
+void DynamicThresholdScheme<backend::CPU>::Impl::run(SizeType thres_neigh) {
     spdlog::info("Running dynamic threshold scheme");
     indicators::show_console_cursor(false);
     indicators::ProgressBar bar{
@@ -375,7 +444,8 @@ void DynamicThresholdScheme::run(SizeType thres_neigh) {
     indicators::show_console_cursor(true);
 }
 
-std::string DynamicThresholdScheme::save(const std::string& outdir) const {
+std::string DynamicThresholdScheme<backend::CPU>::Impl::save(
+    const std::string& outdir) const {
     const std::filesystem::path filebase =
         std::format("dynscheme_nstages_{}_nthresh_{}_nprobs_{}_"
                     "ntrials_{}_snr_{:.1f}_beam_{:.1f}.h5",
@@ -414,8 +484,8 @@ std::string DynamicThresholdScheme::save(const std::string& outdir) const {
     return filepath.string();
 }
 
-void DynamicThresholdScheme::run_segment(SizeType istage,
-                                         SizeType thres_neigh) {
+void DynamicThresholdScheme<backend::CPU>::Impl::run_segment(
+    SizeType istage, SizeType thres_neigh) {
     const auto beam_idx_cur      = get_current_thresholds_idx(istage);
     const auto beam_idx_prev     = get_current_thresholds_idx(istage - 1);
     const auto stage_offset_prev = (istage - 1) * m_nthresholds * m_nprobs;
@@ -425,8 +495,8 @@ void DynamicThresholdScheme::run_segment(SizeType istage,
     for (SizeType i = 0; i < beam_idx_cur.size(); ++i) {
         const auto ithres = beam_idx_cur[i];
         // Find nearest neighbors in the previous beam
-        const auto neighbour_beam_indices =
-            loki::find_neighbouring_indices(beam_idx_prev, ithres, thres_neigh);
+        const auto neighbour_beam_indices = utils::find_neighbouring_indices(
+            beam_idx_prev, ithres, thres_neigh);
         for (SizeType jthresh : neighbour_beam_indices) {
             for (SizeType kprob = 0; kprob < m_nprobs; ++kprob) {
                 const auto prev_fold_idx = (jthresh * m_nprobs) + kprob;
@@ -464,7 +534,7 @@ void DynamicThresholdScheme::run_segment(SizeType istage,
     }
 }
 
-void DynamicThresholdScheme::init_states() {
+void DynamicThresholdScheme<backend::CPU>::Impl::init_states() {
     const float var_init = 1.0F;
     const FoldVector folds_init(m_ntrials, m_nbins);
     // Simulate the initial folds (pruning level = 0)
@@ -489,7 +559,8 @@ void DynamicThresholdScheme::init_states() {
     }
 }
 
-std::vector<float> DynamicThresholdScheme::compute_thresholds(
+std::vector<float>
+DynamicThresholdScheme<backend::CPU>::Impl::compute_thresholds(
     float snr_start, float snr_final, SizeType nthresholds) {
     std::vector<float> thresholds(nthresholds);
     const auto snr_step =
@@ -500,8 +571,9 @@ std::vector<float> DynamicThresholdScheme::compute_thresholds(
     return thresholds;
 }
 
-std::vector<float> DynamicThresholdScheme::compute_probs(SizeType nprobs,
-                                                         float prob_min) {
+std::vector<float>
+DynamicThresholdScheme<backend::CPU>::Impl::compute_probs(SizeType nprobs,
+                                                          float prob_min) {
     if (nprobs <= 1) {
         throw std::invalid_argument("Number of probabilities must be > 1");
     }
@@ -519,7 +591,8 @@ std::vector<float> DynamicThresholdScheme::compute_probs(SizeType nprobs,
 }
 
 std::vector<float>
-DynamicThresholdScheme::compute_probs_linear(SizeType nprobs, float prob_min) {
+DynamicThresholdScheme<backend::CPU>::Impl::compute_probs_linear(
+    SizeType nprobs, float prob_min) {
     if (nprobs <= 1) {
         throw std::invalid_argument("Number of probabilities must be > 1");
     }
@@ -533,8 +606,9 @@ DynamicThresholdScheme::compute_probs_linear(SizeType nprobs, float prob_min) {
     return probs;
 }
 
-std::vector<float> DynamicThresholdScheme::bound_scheme(SizeType nstages,
-                                                        float snr_bound) {
+std::vector<float>
+DynamicThresholdScheme<backend::CPU>::Impl::bound_scheme(SizeType nstages,
+                                                         float snr_bound) {
     const auto nsegments = nstages + 1;
     std::vector<float> thresholds(nstages);
     for (SizeType i = 0; i < nstages; ++i) {
@@ -544,10 +618,10 @@ std::vector<float> DynamicThresholdScheme::bound_scheme(SizeType nstages,
     return thresholds;
 }
 
-std::vector<float>
-DynamicThresholdScheme::trials_scheme(std::span<const float> branching_pattern,
-                                      SizeType trials_start,
-                                      float min_trials) {
+std::vector<float> DynamicThresholdScheme<backend::CPU>::Impl::trials_scheme(
+    std::span<const float> branching_pattern,
+    SizeType trials_start,
+    float min_trials) {
     const auto nstages = branching_pattern.size();
     std::vector<float> result(nstages);
     // trials = np.cumprod(branching_pattern) * trials_start
@@ -560,12 +634,12 @@ DynamicThresholdScheme::trials_scheme(std::span<const float> branching_pattern,
     return result;
 }
 
-std::vector<float>
-DynamicThresholdScheme::guess_scheme(SizeType nstages,
-                                     float snr_bound,
-                                     std::span<const float> branching_pattern,
-                                     SizeType trials_start,
-                                     float min_trials) {
+std::vector<float> DynamicThresholdScheme<backend::CPU>::Impl::guess_scheme(
+    SizeType nstages,
+    float snr_bound,
+    std::span<const float> branching_pattern,
+    SizeType trials_start,
+    float min_trials) {
     const auto thresholds_bound = bound_scheme(nstages, snr_bound);
     const auto thresholds_trials =
         trials_scheme(branching_pattern, trials_start, min_trials);
@@ -574,6 +648,76 @@ DynamicThresholdScheme::guess_scheme(SizeType nstages,
         thresholds_bound, thresholds_trials, result.begin(),
         [](float bound, float trials) { return std::min(bound, trials); });
     return result;
+}
+
+// CPU-specific constructor implementation
+template <>
+template <std::same_as<backend::CPU> P>
+DynamicThresholdScheme<backend::CPU>::DynamicThresholdScheme(
+    std::span<const float> branching_pattern,
+    std::span<const float> profile,
+    SizeType ntrials,
+    SizeType nprobs,
+    float prob_min,
+    float snr_final,
+    SizeType nthresholds,
+    float ducy_max,
+    float wtsp,
+    float beam_width,
+    SizeType nthreads)
+    : m_impl(std::make_unique<Impl>(branching_pattern,
+                                    profile,
+                                    ntrials,
+                                    nprobs,
+                                    prob_min,
+                                    snr_final,
+                                    nthresholds,
+                                    ducy_max,
+                                    wtsp,
+                                    beam_width,
+                                    nthreads)) {}
+
+// Method implementations - these forward to the Impl
+template <>
+std::vector<float>
+DynamicThresholdScheme<backend::CPU>::get_branching_pattern() const {
+    return m_impl->get_branching_pattern();
+}
+template <>
+std::vector<float> DynamicThresholdScheme<backend::CPU>::get_profile() const {
+    return m_impl->get_profile();
+}
+template <>
+std::vector<float>
+DynamicThresholdScheme<backend::CPU>::get_thresholds() const {
+    return m_impl->get_thresholds();
+}
+template <>
+std::vector<float> DynamicThresholdScheme<backend::CPU>::get_probs() const {
+    return m_impl->get_probs();
+}
+template <> SizeType DynamicThresholdScheme<backend::CPU>::get_nstages() const {
+    return m_impl->get_nstages();
+}
+template <>
+SizeType DynamicThresholdScheme<backend::CPU>::get_nthresholds() const {
+    return m_impl->get_nthresholds();
+}
+template <> SizeType DynamicThresholdScheme<backend::CPU>::get_nprobs() const {
+    return m_impl->get_nprobs();
+}
+template <>
+std::vector<State> DynamicThresholdScheme<backend::CPU>::get_states() const {
+    return m_impl->get_states();
+}
+template <>
+void DynamicThresholdScheme<backend::CPU>::run(SizeType thres_neigh) {
+    m_impl->run(thres_neigh);
+}
+template <>
+std::string
+DynamicThresholdScheme<backend::CPU>::save(const std::string& outdir) const {
+    return m_impl->save(outdir);
 }
 
 std::vector<State> evaluate_scheme(std::span<const float> thresholds,
@@ -601,7 +745,7 @@ std::vector<State> evaluate_scheme(std::span<const float> thresholds,
     std::vector<State> states(nstages, initial_state);
     std::vector<std::optional<FoldsType>> fold_states(nstages);
 
-    ThreadSafeRNG rng(std::random_device{}());
+    utils::ThreadSafeRNG rng(std::random_device{}());
     const FoldVector folds_init(ntrials, nbins);
     // Simulate the initial folds (pruning level = 0)
     auto folds_h0 =
@@ -655,7 +799,7 @@ std::vector<State> determine_scheme(std::span<const float> survive_probs,
     std::vector<State> states(nstages, initial_state);
     std::vector<std::optional<FoldsType>> fold_states(nstages);
 
-    ThreadSafeRNG rng(std::random_device{}());
+    utils::ThreadSafeRNG rng(std::random_device{}());
     const FoldVector folds_init(ntrials, nbins);
     // Simulate the initial folds (pruning level = 0)
     auto folds_h0 =
@@ -682,3 +826,6 @@ std::vector<State> determine_scheme(std::span<const float> survive_probs,
     }
     return states;
 }
+} // namespace loki
+
+HIGHFIVE_REGISTER_TYPE(loki::State, loki::create_compound_state)
