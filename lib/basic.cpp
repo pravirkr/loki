@@ -9,13 +9,15 @@
 #include "loki/psr_utils.hpp"
 #include "loki/utils.hpp"
 
+namespace loki::ffa {
+
 std::tuple<std::vector<SizeType>, SizeType>
-loki::ffa_resolve(std::span<const FloatType> pset_cur,
-                  std::span<const std::vector<FloatType>> parr_prev,
-                  SizeType ffa_level,
-                  SizeType latter,
-                  FloatType tseg_brute,
-                  SizeType nbins) {
+ffa_resolve(std::span<const FloatType> pset_cur,
+            std::span<const std::vector<FloatType>> parr_prev,
+            SizeType ffa_level,
+            SizeType latter,
+            FloatType tseg_brute,
+            SizeType nbins) {
     const auto nparams = pset_cur.size();
     const auto t_ref_prev =
         (static_cast<FloatType>(latter) - 0.5F) *
@@ -28,22 +30,24 @@ loki::ffa_resolve(std::span<const FloatType> pset_cur,
     } else {
         std::vector<FloatType> dvec_cur(nparams + 1, 0.0F);
         std::copy(pset_cur.begin(), pset_cur.end() - 1, dvec_cur.begin());
-        std::vector<FloatType> dvec_prev = loki::utils::shift_params(
+        std::vector<FloatType> dvec_prev = psr_utils::shift_params(
             dvec_cur, static_cast<FloatType>(t_ref_prev));
         std::copy(dvec_prev.begin(), dvec_prev.end() - 1, pset_prev.begin());
         pset_prev[nparams - 1] = pset_cur[nparams - 1] *
-                                 (1.0F + dvec_prev[nparams - 2] / loki::kCval);
-        delay_rel = dvec_prev[nparams - 1] / loki::kCval;
+                                 (1.0F + dvec_prev[nparams - 2] / utils::kCval);
+        delay_rel = dvec_prev[nparams - 1] / utils::kCval;
     }
 
-    const SizeType relative_phase = loki::utils::get_phase_idx(
+    const SizeType relative_phase = psr_utils::get_phase_idx(
         t_ref_prev, pset_prev[nparams - 1], nbins, delay_rel);
 
     std::vector<SizeType> pindex_prev(nparams);
     for (SizeType ip = 0; ip < nparams; ++ip) {
-        pindex_prev[ip] = loki::find_nearest_sorted_idx(
+        pindex_prev[ip] = utils::find_nearest_sorted_idx(
             std::span(parr_prev[ip]), pset_prev[ip]);
     }
 
     return {pindex_prev, relative_phase};
 }
+
+} // namespace loki::ffa

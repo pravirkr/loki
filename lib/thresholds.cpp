@@ -17,9 +17,10 @@
 #include "loki/loki_types.hpp"
 #include "loki/math.hpp"
 #include "loki/score.hpp"
+#include "loki/simulation.hpp"
 #include "loki/utils.hpp"
 
-namespace loki {
+namespace loki::thresholds {
 namespace {
 struct FoldVector {
     std::vector<float> data;
@@ -73,17 +74,6 @@ struct FoldsType {
     }
 };
 
-std::vector<float> compute_norm_profile(std::span<const float> profile) {
-    std::vector<float> profile_norm(profile.begin(), profile.end());
-    float sum_of_squares = std::inner_product(profile.begin(), profile.end(),
-                                              profile.begin(), 0.0F);
-    float norm           = std::sqrt(sum_of_squares);
-    for (float& elem : profile_norm) {
-        elem /= norm;
-    }
-    return profile_norm;
-}
-
 IndexType find_bin_index(std::span<const float> bins, float value) {
     auto it = std::ranges::upper_bound(bins, value);
     return std::distance(bins.begin(), it) - 1;
@@ -106,8 +96,8 @@ FoldVector simulate_folds(const FoldVector& folds_in,
     const auto ntrials       = repeat_factor * ntrials_in;
     FoldVector folds_out(ntrials, nbins, folds_in.variance + var_add);
 
-    std::vector<float> template_scaled(nbins);
-    std::ranges::transform(profile, template_scaled.begin(),
+    std::vector<float> profile_scaled(nbins);
+    std::ranges::transform(profile, profile_scaled.begin(),
                            [bias_snr](float x) { return x * bias_snr; });
 
     std::vector<float> noise(ntrials * nbins);
@@ -121,7 +111,7 @@ FoldVector simulate_folds(const FoldVector& folds_in,
         for (SizeType j = 0; j < nbins; ++j) {
             folds_out.data[trial_offset + j] = folds_in.data[orig_offset + j] +
                                                noise[trial_offset + j] +
-                                               template_scaled[j];
+                                               profile_scaled[j];
         }
     }
     return folds_out;
@@ -291,10 +281,11 @@ HighFive::CompoundType create_compound_state() {
 } // namespace
 
 // CPU-specific implementation
-template <> class DynamicThresholdScheme<backend::CPU>::Impl {
+class DynamicThresholdScheme::Impl {
 public:
     Impl(std::span<const float> branching_pattern,
-         std::span<const float> profile,
+         float ref_ducy,
+         SizeType nbins,
          SizeType ntrials,
          SizeType nprobs,
          float prob_min,
@@ -303,9 +294,8 @@ public:
          float ducy_max,
          float wtsp,
          float beam_width,
-         SizeType nthreads);
+         int nthreads);
 
-    std::vector<SizeType> get_current_thresholds_idx(SizeType istage) const;
     std::vector<float> get_branching_pattern() const {
         return m_branching_pattern;
     }
@@ -321,6 +311,7 @@ public:
 
 private:
     std::vector<float> m_branching_pattern;
+    float m_ref_ducy;
     SizeType m_ntrials;
     float m_ducy_max;
     float m_wtsp;
@@ -343,6 +334,7 @@ private:
 
     void run_segment(SizeType istage, SizeType thres_neigh = 10);
     void init_states();
+    std::vector<SizeType> get_current_thresholds_idx(SizeType istage) const;
     static std::vector<float>
     compute_thresholds(float snr_start, float snr_final, SizeType nthresholds);
     static std::vector<float> compute_probs(SizeType nprobs,
@@ -362,19 +354,20 @@ private:
                  float min_trials      = 1E10F);
 };
 
-DynamicThresholdScheme<backend::CPU>::Impl::Impl(
-    std::span<const float> branching_pattern,
-    std::span<const float> profile,
-    SizeType ntrials,
-    SizeType nprobs,
-    float prob_min,
-    float snr_final,
-    SizeType nthresholds,
-    float ducy_max,
-    float wtsp,
-    float beam_width,
-    SizeType nthreads)
+DynamicThresholdScheme::Impl::Impl(std::span<const float> branching_pattern,
+                                   float ref_ducy,
+                                   SizeType nbins,
+                                   SizeType ntrials,
+                                   SizeType nprobs,
+                                   float prob_min,
+                                   float snr_final,
+                                   SizeType nthresholds,
+                                   float ducy_max,
+                                   float wtsp,
+                                   float beam_width,
+                                   int nthreads)
     : m_branching_pattern(branching_pattern.begin(), branching_pattern.end()),
+      m_ref_ducy(ref_ducy),
       m_ntrials(ntrials),
       m_ducy_max(ducy_max),
       m_wtsp(wtsp),
@@ -384,7 +377,7 @@ DynamicThresholdScheme<backend::CPU>::Impl::Impl(
     if (m_branching_pattern.empty()) {
         throw std::invalid_argument("Branching pattern is empty");
     }
-    m_profile     = compute_norm_profile(profile);
+    m_profile     = simulation::generate_folded_profile(nbins, ref_ducy);
     m_thresholds  = compute_thresholds(0.1F, snr_final, nthresholds);
     m_probs       = compute_probs(nprobs, prob_min);
     m_nprobs      = m_probs.size();
@@ -405,25 +398,7 @@ DynamicThresholdScheme<backend::CPU>::Impl::Impl(
     init_states();
 }
 
-std::vector<SizeType>
-DynamicThresholdScheme<backend::CPU>::Impl::get_current_thresholds_idx(
-    SizeType istage) const {
-    const auto guess       = m_guess_path[istage];
-    const auto half_extent = m_beam_width;
-    const auto lower_bound = std::max(0.0F, guess - half_extent);
-    const auto upper_bound = std::min(m_thresholds.back(), guess + half_extent);
-
-    std::vector<SizeType> result;
-    for (SizeType i = 0; i < m_thresholds.size(); ++i) {
-        if (m_thresholds[i] >= lower_bound && m_thresholds[i] <= upper_bound) {
-            result.push_back(i);
-        }
-    }
-
-    return result;
-}
-
-void DynamicThresholdScheme<backend::CPU>::Impl::run(SizeType thres_neigh) {
+void DynamicThresholdScheme::Impl::run(SizeType thres_neigh) {
     spdlog::info("Running dynamic threshold scheme");
     indicators::show_console_cursor(false);
     indicators::ProgressBar bar{
@@ -444,19 +419,20 @@ void DynamicThresholdScheme<backend::CPU>::Impl::run(SizeType thres_neigh) {
     indicators::show_console_cursor(true);
 }
 
-std::string DynamicThresholdScheme<backend::CPU>::Impl::save(
-    const std::string& outdir) const {
-    const std::filesystem::path filebase =
-        std::format("dynscheme_nstages_{}_nthresh_{}_nprobs_{}_"
-                    "ntrials_{}_snr_{:.1f}_beam_{:.1f}.h5",
-                    m_nstages, m_nthresholds, m_nprobs, m_ntrials,
-                    m_thresholds.back(), m_beam_width);
+std::string
+DynamicThresholdScheme::Impl::save(const std::string& outdir) const {
+    const std::filesystem::path filebase = std::format(
+        "dynscheme_nstages_{:03d}_nthresh_{:03d}_nprobs_{:03d}_"
+        "ntrials_{:04d}_snr_{:04.1f}_ducy_{:04.2f}_beam_{:03.1f}.h5",
+        m_nstages, m_nthresholds, m_nprobs, m_ntrials, m_thresholds.back(),
+        m_ref_ducy, m_beam_width);
     const std::filesystem::path filepath =
         std::filesystem::path(outdir) / filebase;
     HighFive::File file(filepath, HighFive::File::Overwrite);
     // Save simple attributes
     file.createAttribute("ntrials", m_ntrials);
     file.createAttribute("snr_final", m_thresholds.back());
+    file.createAttribute("ref_ducy", m_ref_ducy);
     file.createAttribute("ducy_max", m_ducy_max);
     file.createAttribute("wtsp", m_wtsp);
     file.createAttribute("beam_width", m_beam_width);
@@ -484,8 +460,8 @@ std::string DynamicThresholdScheme<backend::CPU>::Impl::save(
     return filepath.string();
 }
 
-void DynamicThresholdScheme<backend::CPU>::Impl::run_segment(
-    SizeType istage, SizeType thres_neigh) {
+void DynamicThresholdScheme::Impl::run_segment(SizeType istage,
+                                               SizeType thres_neigh) {
     const auto beam_idx_cur      = get_current_thresholds_idx(istage);
     const auto beam_idx_prev     = get_current_thresholds_idx(istage - 1);
     const auto stage_offset_prev = (istage - 1) * m_nthresholds * m_nprobs;
@@ -534,7 +510,7 @@ void DynamicThresholdScheme<backend::CPU>::Impl::run_segment(
     }
 }
 
-void DynamicThresholdScheme<backend::CPU>::Impl::init_states() {
+void DynamicThresholdScheme::Impl::init_states() {
     const float var_init = 1.0F;
     const FoldVector folds_init(m_ntrials, m_nbins);
     // Simulate the initial folds (pruning level = 0)
@@ -559,8 +535,23 @@ void DynamicThresholdScheme<backend::CPU>::Impl::init_states() {
     }
 }
 
-std::vector<float>
-DynamicThresholdScheme<backend::CPU>::Impl::compute_thresholds(
+std::vector<SizeType> DynamicThresholdScheme::Impl::get_current_thresholds_idx(
+    SizeType istage) const {
+    const auto guess       = m_guess_path[istage];
+    const auto half_extent = m_beam_width;
+    const auto lower_bound = std::max(0.0F, guess - half_extent);
+    const auto upper_bound = std::min(m_thresholds.back(), guess + half_extent);
+
+    std::vector<SizeType> result;
+    for (SizeType i = 0; i < m_thresholds.size(); ++i) {
+        if (m_thresholds[i] >= lower_bound && m_thresholds[i] <= upper_bound) {
+            result.push_back(i);
+        }
+    }
+
+    return result;
+}
+std::vector<float> DynamicThresholdScheme::Impl::compute_thresholds(
     float snr_start, float snr_final, SizeType nthresholds) {
     std::vector<float> thresholds(nthresholds);
     const auto snr_step =
@@ -571,9 +562,8 @@ DynamicThresholdScheme<backend::CPU>::Impl::compute_thresholds(
     return thresholds;
 }
 
-std::vector<float>
-DynamicThresholdScheme<backend::CPU>::Impl::compute_probs(SizeType nprobs,
-                                                          float prob_min) {
+std::vector<float> DynamicThresholdScheme::Impl::compute_probs(SizeType nprobs,
+                                                               float prob_min) {
     if (nprobs <= 1) {
         throw std::invalid_argument("Number of probabilities must be > 1");
     }
@@ -591,8 +581,8 @@ DynamicThresholdScheme<backend::CPU>::Impl::compute_probs(SizeType nprobs,
 }
 
 std::vector<float>
-DynamicThresholdScheme<backend::CPU>::Impl::compute_probs_linear(
-    SizeType nprobs, float prob_min) {
+DynamicThresholdScheme::Impl::compute_probs_linear(SizeType nprobs,
+                                                   float prob_min) {
     if (nprobs <= 1) {
         throw std::invalid_argument("Number of probabilities must be > 1");
     }
@@ -606,9 +596,8 @@ DynamicThresholdScheme<backend::CPU>::Impl::compute_probs_linear(
     return probs;
 }
 
-std::vector<float>
-DynamicThresholdScheme<backend::CPU>::Impl::bound_scheme(SizeType nstages,
-                                                         float snr_bound) {
+std::vector<float> DynamicThresholdScheme::Impl::bound_scheme(SizeType nstages,
+                                                              float snr_bound) {
     const auto nsegments = nstages + 1;
     std::vector<float> thresholds(nstages);
     for (SizeType i = 0; i < nstages; ++i) {
@@ -618,7 +607,7 @@ DynamicThresholdScheme<backend::CPU>::Impl::bound_scheme(SizeType nstages,
     return thresholds;
 }
 
-std::vector<float> DynamicThresholdScheme<backend::CPU>::Impl::trials_scheme(
+std::vector<float> DynamicThresholdScheme::Impl::trials_scheme(
     std::span<const float> branching_pattern,
     SizeType trials_start,
     float min_trials) {
@@ -634,7 +623,7 @@ std::vector<float> DynamicThresholdScheme<backend::CPU>::Impl::trials_scheme(
     return result;
 }
 
-std::vector<float> DynamicThresholdScheme<backend::CPU>::Impl::guess_scheme(
+std::vector<float> DynamicThresholdScheme::Impl::guess_scheme(
     SizeType nstages,
     float snr_bound,
     std::span<const float> branching_pattern,
@@ -650,12 +639,10 @@ std::vector<float> DynamicThresholdScheme<backend::CPU>::Impl::guess_scheme(
     return result;
 }
 
-// CPU-specific constructor implementation
-template <>
-template <std::same_as<backend::CPU> P>
-DynamicThresholdScheme<backend::CPU>::DynamicThresholdScheme(
+DynamicThresholdScheme::DynamicThresholdScheme(
     std::span<const float> branching_pattern,
-    std::span<const float> profile,
+    float ref_ducy,
+    SizeType nbins,
     SizeType ntrials,
     SizeType nprobs,
     float prob_min,
@@ -664,9 +651,10 @@ DynamicThresholdScheme<backend::CPU>::DynamicThresholdScheme(
     float ducy_max,
     float wtsp,
     float beam_width,
-    SizeType nthreads)
+    int nthreads)
     : m_impl(std::make_unique<Impl>(branching_pattern,
-                                    profile,
+                                    ref_ducy,
+                                    nbins,
                                     ntrials,
                                     nprobs,
                                     prob_min,
@@ -676,58 +664,52 @@ DynamicThresholdScheme<backend::CPU>::DynamicThresholdScheme(
                                     wtsp,
                                     beam_width,
                                     nthreads)) {}
+DynamicThresholdScheme::~DynamicThresholdScheme() = default;
+DynamicThresholdScheme::DynamicThresholdScheme(
+    DynamicThresholdScheme&&) noexcept = default;
+DynamicThresholdScheme&
+DynamicThresholdScheme::operator=(DynamicThresholdScheme&&) noexcept = default;
 
-// Method implementations - these forward to the Impl
-template <>
-std::vector<float>
-DynamicThresholdScheme<backend::CPU>::get_branching_pattern() const {
+std::vector<float> DynamicThresholdScheme::get_branching_pattern() const {
     return m_impl->get_branching_pattern();
 }
-template <>
-std::vector<float> DynamicThresholdScheme<backend::CPU>::get_profile() const {
+std::vector<float> DynamicThresholdScheme::get_profile() const {
     return m_impl->get_profile();
 }
-template <>
-std::vector<float>
-DynamicThresholdScheme<backend::CPU>::get_thresholds() const {
+std::vector<float> DynamicThresholdScheme::get_thresholds() const {
     return m_impl->get_thresholds();
 }
-template <>
-std::vector<float> DynamicThresholdScheme<backend::CPU>::get_probs() const {
+std::vector<float> DynamicThresholdScheme::get_probs() const {
     return m_impl->get_probs();
 }
-template <> SizeType DynamicThresholdScheme<backend::CPU>::get_nstages() const {
+SizeType DynamicThresholdScheme::get_nstages() const {
     return m_impl->get_nstages();
 }
-template <>
-SizeType DynamicThresholdScheme<backend::CPU>::get_nthresholds() const {
+SizeType DynamicThresholdScheme::get_nthresholds() const {
     return m_impl->get_nthresholds();
 }
-template <> SizeType DynamicThresholdScheme<backend::CPU>::get_nprobs() const {
+SizeType DynamicThresholdScheme::get_nprobs() const {
     return m_impl->get_nprobs();
 }
-template <>
-std::vector<State> DynamicThresholdScheme<backend::CPU>::get_states() const {
+std::vector<State> DynamicThresholdScheme::get_states() const {
     return m_impl->get_states();
 }
-template <>
-void DynamicThresholdScheme<backend::CPU>::run(SizeType thres_neigh) {
+void DynamicThresholdScheme::run(SizeType thres_neigh) {
     m_impl->run(thres_neigh);
 }
-template <>
-std::string
-DynamicThresholdScheme<backend::CPU>::save(const std::string& outdir) const {
+std::string DynamicThresholdScheme::save(const std::string& outdir) const {
     return m_impl->save(outdir);
 }
 
 std::vector<State> evaluate_scheme(std::span<const float> thresholds,
                                    std::span<const float> branching_pattern,
-                                   std::span<const float> profile,
+                                   float ref_ducy,
+                                   SizeType nbins,
                                    SizeType ntrials,
                                    float snr_final,
                                    float ducy_max,
                                    float wtsp) {
-    if (thresholds.empty() || branching_pattern.empty() || profile.empty()) {
+    if (thresholds.empty() || branching_pattern.empty()) {
         throw std::invalid_argument("Input arrays cannot be empty");
     }
     if (thresholds.size() != branching_pattern.size()) {
@@ -735,9 +717,8 @@ std::vector<State> evaluate_scheme(std::span<const float> thresholds,
             "Number of thresholds must match the number of stages");
     }
 
-    const auto nstages      = branching_pattern.size();
-    const auto nbins        = profile.size();
-    const auto profile_norm = compute_norm_profile(profile);
+    const auto nstages = branching_pattern.size();
+    const auto profile = simulation::generate_folded_profile(nbins, ref_ducy);
     const auto bias_snr =
         snr_final / std::sqrt(static_cast<float>(nstages + 1));
     const float var_init = 1.0F;
@@ -749,9 +730,9 @@ std::vector<State> evaluate_scheme(std::span<const float> thresholds,
     const FoldVector folds_init(ntrials, nbins);
     // Simulate the initial folds (pruning level = 0)
     auto folds_h0 =
-        simulate_folds(folds_init, profile_norm, rng, 0.0F, var_init, ntrials);
-    auto folds_h1 = simulate_folds(folds_init, profile_norm, rng, bias_snr,
-                                   var_init, ntrials);
+        simulate_folds(folds_init, profile, rng, 0.0F, var_init, ntrials);
+    auto folds_h1 =
+        simulate_folds(folds_init, profile, rng, bias_snr, var_init, ntrials);
     FoldsType initial_fold_state{std::move(folds_h0), std::move(folds_h1)};
     for (SizeType istage = 0; istage < nstages; ++istage) {
         const auto prev_state =
@@ -766,8 +747,8 @@ std::vector<State> evaluate_scheme(std::span<const float> thresholds,
         }
         auto [cur_state, cur_fold_state] = gen_next_using_thresh(
             prev_state, prev_fold_state, thresholds[istage],
-            branching_pattern[istage], bias_snr, profile_norm, rng, 1.0F,
-            ntrials, ducy_max, wtsp);
+            branching_pattern[istage], bias_snr, profile, rng, 1.0F, ntrials,
+            ducy_max, wtsp);
         states[istage]      = cur_state;
         fold_states[istage] = std::move(cur_fold_state);
     }
@@ -776,12 +757,13 @@ std::vector<State> evaluate_scheme(std::span<const float> thresholds,
 
 std::vector<State> determine_scheme(std::span<const float> survive_probs,
                                     std::span<const float> branching_pattern,
-                                    std::span<const float> profile,
+                                    float ref_ducy,
+                                    SizeType nbins,
                                     SizeType ntrials,
                                     float snr_final,
                                     float ducy_max,
                                     float wtsp) {
-    if (survive_probs.empty() || branching_pattern.empty() || profile.empty()) {
+    if (survive_probs.empty() || branching_pattern.empty()) {
         throw std::invalid_argument("Input arrays cannot be empty");
     }
     if (survive_probs.size() != branching_pattern.size()) {
@@ -789,9 +771,8 @@ std::vector<State> determine_scheme(std::span<const float> survive_probs,
             "Number of survival probabilities must match the number of stages");
     }
 
-    const auto nstages      = branching_pattern.size();
-    const auto nbins        = profile.size();
-    const auto profile_norm = compute_norm_profile(profile);
+    const auto nstages = branching_pattern.size();
+    const auto profile = simulation::generate_folded_profile(nbins, ref_ducy);
     const auto bias_snr =
         snr_final / std::sqrt(static_cast<float>(nstages + 1));
     const float var_init = 1.0F;
@@ -803,9 +784,9 @@ std::vector<State> determine_scheme(std::span<const float> survive_probs,
     const FoldVector folds_init(ntrials, nbins);
     // Simulate the initial folds (pruning level = 0)
     auto folds_h0 =
-        simulate_folds(folds_init, profile_norm, rng, 0.0F, var_init, ntrials);
-    auto folds_h1 = simulate_folds(folds_init, profile_norm, rng, bias_snr,
-                                   var_init, ntrials);
+        simulate_folds(folds_init, profile, rng, 0.0F, var_init, ntrials);
+    auto folds_h1 =
+        simulate_folds(folds_init, profile, rng, bias_snr, var_init, ntrials);
     const FoldsType initial_fold_state{std::move(folds_h0),
                                        std::move(folds_h1)};
     for (SizeType istage = 0; istage < nstages; ++istage) {
@@ -814,18 +795,22 @@ std::vector<State> determine_scheme(std::span<const float> survive_probs,
         const auto& prev_fold_state =
             (istage == 0) ? initial_fold_state : *fold_states[istage - 1];
         if (istage > 0 && prev_fold_state.is_empty()) {
-            spdlog::info("Path not viable, stopping at stage {}", istage);
+            spdlog::info(
+                "Path not viable, No trials survived, stopping at stage {}",
+                istage);
             break;
         }
         auto [cur_state, cur_fold_state] = gen_next_using_surv_prob(
             prev_state, prev_fold_state, survive_probs[istage],
-            branching_pattern[istage], bias_snr, profile_norm, rng, 1.0F,
-            ntrials, ducy_max, wtsp);
+            branching_pattern[istage], bias_snr, profile, rng, 1.0F, ntrials,
+            ducy_max, wtsp);
         states[istage]      = cur_state;
         fold_states[istage] = cur_fold_state;
     }
     return states;
 }
-} // namespace loki
 
-HIGHFIVE_REGISTER_TYPE(loki::State, loki::create_compound_state)
+} // namespace loki::thresholds
+
+HIGHFIVE_REGISTER_TYPE(loki::thresholds::State,
+                       loki::thresholds::create_compound_state)

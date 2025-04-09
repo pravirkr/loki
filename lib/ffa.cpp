@@ -61,7 +61,7 @@ void FFAPlan::configure_plan() {
 
         fold_shapes[i_level][0] = nsegments;
         for (SizeType iparam = 0; iparam < m_cfg.get_nparams(); ++iparam) {
-            const auto param_arr = loki::utils::range_param(
+            const auto param_arr = loki::psr_utils::range_param(
                 m_cfg.get_param_limits()[iparam][0],
                 m_cfg.get_param_limits()[iparam][1], dparam_arr[iparam]);
             params[i_level][iparam]          = param_arr;
@@ -88,12 +88,12 @@ void FFAPlan::configure_plan() {
             for (SizeType iparam = 0; iparam < m_cfg.get_nparams(); ++iparam) {
                 p_set_cur[iparam] = p_set_view[iparam];
             }
-            const auto [p_idx_tail, phase_shift_tail] =
-                loki::ffa_resolve(p_set_cur, params[i_level - 1], i_level, 0,
-                                  m_cfg.get_tseg_brute(), m_cfg.get_nbins());
-            const auto [p_idx_head, phase_shift_head] =
-                loki::ffa_resolve(p_set_cur, params[i_level - 1], i_level, 1,
-                                  m_cfg.get_tseg_brute(), m_cfg.get_nbins());
+            const auto [p_idx_tail, phase_shift_tail] = loki::ffa::ffa_resolve(
+                p_set_cur, params[i_level - 1], i_level, 0,
+                m_cfg.get_tseg_brute(), m_cfg.get_nbins());
+            const auto [p_idx_head, phase_shift_head] = loki::ffa::ffa_resolve(
+                p_set_cur, params[i_level - 1], i_level, 1,
+                m_cfg.get_tseg_brute(), m_cfg.get_nbins());
             const auto& i_tail =
                 std::inner_product(p_idx_tail.begin(), p_idx_tail.end(),
                                    strides.begin(), SizeType{0});
@@ -158,9 +158,9 @@ void FFA::initialize(std::span<const float> ts_e, std::span<const float> ts_v) {
     spdlog::debug("Initializing FFA");
     const auto t_ref     = m_ffa_plan.tsegments[0] / 2.0F;
     const auto freqs_arr = m_ffa_plan.params[0].back();
-    BruteFold bf(freqs_arr, m_ffa_plan.segment_lens[0], m_cfg.get_nbins(),
-                 m_cfg.get_nsamps(), m_cfg.get_tsamp(), t_ref,
-                 m_cfg.get_nthreads());
+    loki::fold::BruteFold bf(freqs_arr, m_ffa_plan.segment_lens[0],
+                             m_cfg.get_nbins(), m_cfg.get_nsamps(),
+                             m_cfg.get_tsamp(), t_ref, m_cfg.get_nthreads());
     auto fold_init = std::span(m_fold_in.data(), bf.get_fold_size());
     bf.execute(ts_e, ts_v, fold_init);
 }

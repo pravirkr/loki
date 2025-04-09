@@ -53,15 +53,15 @@ PulsarSearchConfig::PulsarSearchConfig(
 std::vector<FloatType>
 PulsarSearchConfig::get_dparams_f(FloatType tseg_cur) const {
     const FloatType t_ref = (m_nparams == 1) ? 0.0 : tseg_cur / 2.0;
-    return loki::utils::poly_taylor_step_f(m_nparams, tseg_cur, m_nbins,
-                                           m_tol_bins, t_ref);
+    return loki::psr_utils::poly_taylor_step_f(m_nparams, tseg_cur, m_nbins,
+                                               m_tol_bins, t_ref);
 }
 
 std::vector<FloatType>
 PulsarSearchConfig::get_dparams(FloatType tseg_cur) const {
     const FloatType t_ref = (m_nparams == 1) ? 0.0 : tseg_cur / 2.0;
-    return loki::utils::poly_taylor_step_d(m_nparams, tseg_cur, m_nbins,
-                                           m_tol_bins, m_f_max, t_ref);
+    return loki::psr_utils::poly_taylor_step_d(m_nparams, tseg_cur, m_nbins,
+                                               m_tol_bins, m_f_max, t_ref);
 }
 
 std::vector<FloatType>

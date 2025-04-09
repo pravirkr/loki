@@ -7,7 +7,7 @@
 
 #include "loki/loki_types.hpp"
 
-namespace loki::utils {
+namespace loki::psr_utils {
 
 // Calculate the phase index of the proper time in the folded profile.
 SizeType get_phase_idx(FloatType proper_time,
@@ -55,4 +55,4 @@ branch_param(FloatType param_cur,
 std::vector<FloatType>
 range_param(FloatType vmin, FloatType vmax, FloatType dv);
 
-} // namespace loki::utils
+} // namespace loki::psr_utils

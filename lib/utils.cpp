@@ -6,14 +6,14 @@
 #include <span>
 #include <stdexcept>
 
-void loki::add_scalar(std::span<const float> x,
-                      float scalar,
-                      std::span<float> out) {
+namespace loki::utils {
+
+void add_scalar(std::span<const float> x, float scalar, std::span<float> out) {
     std::ranges::transform(x, out.begin(),
                            [scalar](float xi) { return xi + scalar; });
 }
 
-float loki::diff_max(std::span<const float> x, std::span<const float> y) {
+float diff_max(std::span<const float> x, std::span<const float> y) {
     float max_diff = -std::numeric_limits<float>::max();
     for (SizeType i = 0; i < x.size(); ++i) {
         max_diff = std::max(max_diff, x[i] - y[i]);
@@ -21,7 +21,7 @@ float loki::diff_max(std::span<const float> x, std::span<const float> y) {
     return max_diff;
 }
 
-void loki::circular_prefix_sum(std::span<const float> x, std::span<float> out) {
+void circular_prefix_sum(std::span<const float> x, std::span<float> out) {
     const SizeType nbins = x.size();
     const SizeType nsum  = out.size();
 
@@ -48,8 +48,8 @@ void loki::circular_prefix_sum(std::span<const float> x, std::span<float> out) {
                out.subspan(n_wraps * nbins, extra));
 }
 
-SizeType loki::find_nearest_sorted_idx(std::span<const FloatType> arr_sorted,
-                                       FloatType val) {
+SizeType find_nearest_sorted_idx(std::span<const FloatType> arr_sorted,
+                                 FloatType val) {
     if (arr_sorted.empty()) {
         throw std::runtime_error("Array is empty");
     }
@@ -66,7 +66,7 @@ SizeType loki::find_nearest_sorted_idx(std::span<const FloatType> arr_sorted,
     return idx;
 }
 
-std::vector<SizeType> loki::find_neighbouring_indices(
+std::vector<SizeType> find_neighbouring_indices(
     std::span<const SizeType> indices, SizeType target_idx, SizeType num) {
 
     if (indices.empty()) {
@@ -91,3 +91,4 @@ std::vector<SizeType> loki::find_neighbouring_indices(
     return {indices.begin() + static_cast<int>(left),
             indices.begin() + static_cast<int>(right)};
 }
+} // namespace loki::utils

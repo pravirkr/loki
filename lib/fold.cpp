@@ -6,6 +6,8 @@
 #include "loki/loki_types.hpp"
 #include "loki/psr_utils.hpp"
 
+namespace loki::fold {
+
 BruteFold::BruteFold(std::span<const FloatType> freq_arr,
                      SizeType segment_len,
                      SizeType nbins,
@@ -69,7 +71,7 @@ void BruteFold::compute_phase() {
             const auto proper_time =
                 (static_cast<FloatType>(isamp) * m_tsamp) - m_t_ref;
             m_phase_map[freq_offset_in + isamp] =
-                static_cast<uint32_t>(loki::utils::get_phase_idx(
+                static_cast<uint32_t>(psr_utils::get_phase_idx(
                     proper_time, m_freq_arr[ifreq], m_nbins, 0.0));
         }
     }
@@ -152,3 +154,5 @@ std::vector<float> compute_brute_fold(std::span<const float> ts_e,
     bf.execute(ts_e, ts_v, std::span<float>(fold));
     return fold;
 }
+
+} // namespace loki::fold

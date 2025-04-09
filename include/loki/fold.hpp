@@ -7,6 +7,7 @@
 
 #include "loki/loki_types.hpp"
 
+namespace loki::fold {
 /**
  * @brief Fold time series using brute-force method
  *
@@ -67,3 +68,5 @@ std::vector<float> compute_brute_fold(std::span<const float> ts_e,
                                       FloatType tsamp,
                                       FloatType t_ref   = 0.0,
                                       SizeType nthreads = 1);
+
+} // namespace loki::fold

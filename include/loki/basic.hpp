@@ -7,7 +7,7 @@
 
 #include "loki/loki_types.hpp"
 
-namespace loki {
+namespace loki::ffa {
 
 std::tuple<std::vector<SizeType>, SizeType>
 ffa_resolve(std::span<const FloatType> pset_cur,
@@ -17,4 +17,4 @@ ffa_resolve(std::span<const FloatType> pset_cur,
             FloatType tseg_brute,
             SizeType nbins);
 
-} // namespace loki
+} // namespace loki::ffa

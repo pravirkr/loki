@@ -1,13 +1,12 @@
 #pragma once
 
-#include <concepts>
 #include <span>
 #include <string>
 #include <vector>
 
 #include "loki/loki_types.hpp"
 
-namespace loki {
+namespace loki::thresholds {
 
 struct State {
     float success_h0{1.0F};
@@ -25,13 +24,11 @@ struct State {
     State() = default;
 };
 
-template <backend::ExecutionBackend Backend = backend::CPU>
 class DynamicThresholdScheme {
 public:
-    // Specialized constructors for different execution policies
-    template <std::same_as<backend::CPU> P = Backend>
     DynamicThresholdScheme(std::span<const float> branching_pattern,
-                           std::span<const float> profile,
+                           float ref_ducy,
+                           SizeType nbins       = 64,
                            SizeType ntrials     = 1024,
                            SizeType nprobs      = 10,
                            float prob_min       = 0.05F,
@@ -40,21 +37,7 @@ public:
                            float ducy_max       = 0.3F,
                            float wtsp           = 1.0F,
                            float beam_width     = 0.7F,
-                           SizeType nthreads    = 1);
-#ifdef LOKI_ENABLE_CUDA
-    template <std::same_as<backend::CUDA> P = Backend>
-    DynamicThresholdScheme(std::span<const float> branching_pattern,
-                           std::span<const float> profile,
-                           SizeType ntrials,
-                           SizeType nprobs,
-                           float prob_min,
-                           float snr_final,
-                           SizeType nthresholds,
-                           float ducy_max,
-                           float wtsp,
-                           float beam_width,
-                           int device_id);
-#endif
+                           int nthreads         = 1);
     ~DynamicThresholdScheme();
     DynamicThresholdScheme(DynamicThresholdScheme&&) noexcept;
     DynamicThresholdScheme& operator=(DynamicThresholdScheme&&) noexcept;
@@ -78,15 +61,10 @@ private:
     std::unique_ptr<Impl> m_impl;
 };
 
-// Type aliases for convenience
-using DynamicThresholdSchemeCPU = DynamicThresholdScheme<backend::CPU>;
-#ifdef LOKI_ENABLE_CUDA
-using DynamicThresholdSchemeCUDA = DynamicThresholdScheme<backend::CUDA>;
-#endif
-
 std::vector<State> evaluate_scheme(std::span<const float> thresholds,
                                    std::span<const float> branching_pattern,
-                                   std::span<const float> profile,
+                                   float ref_ducy,
+                                   SizeType nbins   = 64,
                                    SizeType ntrials = 1024,
                                    float snr_final  = 8.0F,
                                    float ducy_max   = 0.3F,
@@ -94,9 +72,11 @@ std::vector<State> evaluate_scheme(std::span<const float> thresholds,
 
 std::vector<State> determine_scheme(std::span<const float> survive_probs,
                                     std::span<const float> branching_pattern,
-                                    std::span<const float> profile,
+                                    float ref_ducy,
+                                    SizeType nbins   = 64,
                                     SizeType ntrials = 1024,
                                     float snr_final  = 8.0F,
                                     float ducy_max   = 0.3F,
                                     float wtsp       = 1.0F);
-} // namespace loki
+
+} // namespace loki::thresholds
