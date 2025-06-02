@@ -4,10 +4,10 @@
 #include <string_view>
 #include <vector>
 
-#include "loki/fft.hpp"
-#include "loki/loki_types.hpp"
+#include "loki/common/types.hpp"
+#include "loki/utils/fft.hpp"
 
-namespace loki::score {
+namespace loki::detection {
 
 class MatchedFilter {
 public:
@@ -34,7 +34,7 @@ private:
     std::vector<float> m_snr_arr;
 
     // FFTW plans
-    FFT2D m_fft2d;
+    utils::FFT2D m_fft2d;
 
     void initialise_templates();
     static void generate_boxcar_template(std::span<float>& arr, SizeType width);
@@ -59,4 +59,5 @@ void snr_2d(std::span<const float> arr,
             std::span<const SizeType> widths,
             std::span<float> out,
             float stdnoise = 1.0F);
-} // namespace loki::score
+
+} // namespace loki::detection

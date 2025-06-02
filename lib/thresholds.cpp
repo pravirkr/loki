@@ -1,4 +1,4 @@
-#include "loki/thresholds.hpp"
+#include "loki/detection/thresholds.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -14,13 +14,13 @@
 #include <omp.h>
 #include <spdlog/spdlog.h>
 
-#include "loki/loki_types.hpp"
+#include "loki/common/types.hpp"
+#include "loki/detection/score.hpp"
 #include "loki/math.hpp"
-#include "loki/score.hpp"
-#include "loki/simulation.hpp"
+#include "loki/simulation/simulation.hpp"
 #include "loki/utils.hpp"
 
-namespace loki::thresholds {
+namespace loki::detection {
 namespace {
 struct FoldVector {
     std::vector<float> data;
@@ -121,10 +121,10 @@ std::vector<float>
 compute_scores(const FoldVector& folds, float ducy_max, float wtsp) {
     const auto max_width = static_cast<SizeType>(
         std::ceil(static_cast<float>(folds.nbins) * ducy_max));
-    const auto widths     = score::generate_width_trials(max_width, wtsp);
+    const auto widths     = detection::generate_width_trials(max_width, wtsp);
     const auto folds_norm = folds.get_norm();
     std::vector<float> folds_snr(folds.ntrials * widths.size());
-    score::snr_2d(folds_norm, folds.ntrials, widths, folds_snr);
+    detection::snr_2d(folds_norm, folds.ntrials, widths, folds_snr);
     std::vector<float> scores(folds.ntrials);
     for (SizeType i = 0; i < folds.ntrials; ++i) {
         const auto offset = i * widths.size();
@@ -294,6 +294,7 @@ public:
          float ducy_max,
          float wtsp,
          float beam_width,
+         SizeType trials_start,
          int nthreads);
 
     std::vector<float> get_branching_pattern() const {
@@ -316,8 +317,9 @@ private:
     float m_ducy_max;
     float m_wtsp;
     float m_beam_width;
+    SizeType m_trials_start;
     utils::ThreadSafeRNG m_rng;
-    SizeType m_nthreads;
+    int m_nthreads;
 
     std::vector<float> m_profile;
     std::vector<float> m_thresholds;
@@ -365,6 +367,7 @@ DynamicThresholdScheme::Impl::Impl(std::span<const float> branching_pattern,
                                    float ducy_max,
                                    float wtsp,
                                    float beam_width,
+                                   SizeType trials_start,
                                    int nthreads)
     : m_branching_pattern(branching_pattern.begin(), branching_pattern.end()),
       m_ref_ducy(ref_ducy),
@@ -372,6 +375,7 @@ DynamicThresholdScheme::Impl::Impl(std::span<const float> branching_pattern,
       m_ducy_max(ducy_max),
       m_wtsp(wtsp),
       m_beam_width(beam_width),
+      m_trials_start(trials_start),
       m_rng(std::random_device{}()),
       m_nthreads(nthreads) {
     if (m_branching_pattern.empty()) {
@@ -385,12 +389,11 @@ DynamicThresholdScheme::Impl::Impl(std::span<const float> branching_pattern,
     m_nstages     = m_branching_pattern.size();
     m_nthresholds = m_thresholds.size();
 
-    m_nthreads = std::max<SizeType>(m_nthreads, 1);
-    m_nthreads =
-        std::min<SizeType>(m_nthreads, std::thread::hardware_concurrency());
+    m_nthreads = std::clamp(m_nthreads, 1, omp_get_max_threads());
 
-    m_bias_snr   = snr_final / static_cast<float>(std::sqrt(m_nstages + 1));
-    m_guess_path = guess_scheme(m_nstages, snr_final, m_branching_pattern);
+    m_bias_snr = snr_final / static_cast<float>(std::sqrt(m_nstages + 1));
+    m_guess_path =
+        guess_scheme(m_nstages, snr_final, m_branching_pattern, m_trials_start);
     m_folds_in.resize(m_nthresholds * m_nprobs);
     m_folds_out.resize(m_nthresholds * m_nprobs);
     State initial_state;
@@ -614,9 +617,10 @@ std::vector<float> DynamicThresholdScheme::Impl::trials_scheme(
     const auto nstages = branching_pattern.size();
     std::vector<float> result(nstages);
     // trials = np.cumprod(branching_pattern) * trials_start
-    auto trials = static_cast<float>(trials_start);
+    auto log2_trials = std::log2(static_cast<float>(trials_start));
     for (SizeType i = 0; i < nstages; ++i) {
-        trials *= branching_pattern[i];
+        log2_trials += std::log2(branching_pattern[i]);
+        const auto trials           = std::exp2(log2_trials);
         const auto effective_trials = std::max(trials, min_trials);
         result[i] = loki::math::norm_isf(1 / effective_trials);
     }
@@ -651,6 +655,7 @@ DynamicThresholdScheme::DynamicThresholdScheme(
     float ducy_max,
     float wtsp,
     float beam_width,
+    SizeType trials_start,
     int nthreads)
     : m_impl(std::make_unique<Impl>(branching_pattern,
                                     ref_ducy,
@@ -663,6 +668,7 @@ DynamicThresholdScheme::DynamicThresholdScheme(
                                     ducy_max,
                                     wtsp,
                                     beam_width,
+                                    trials_start,
                                     nthreads)) {}
 DynamicThresholdScheme::~DynamicThresholdScheme() = default;
 DynamicThresholdScheme::DynamicThresholdScheme(
@@ -810,7 +816,7 @@ std::vector<State> determine_scheme(std::span<const float> survive_probs,
     return states;
 }
 
-} // namespace loki::thresholds
+} // namespace loki::detection
 
-HIGHFIVE_REGISTER_TYPE(loki::thresholds::State,
-                       loki::thresholds::create_compound_state)
+HIGHFIVE_REGISTER_TYPE(loki::detection::State,
+                       loki::detection::create_compound_state)

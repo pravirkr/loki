@@ -2,84 +2,97 @@
 
 #include <array>
 #include <cstddef>
+#include <format>
 #include <ranges>
 #include <span>
+#include <stdexcept>
+#include <type_traits>
 #include <vector>
 
-#include "loki/loki_types.hpp"
+#include "loki/common/types.hpp"
 
-// A proxy for the current combination in the Cartesian product.
-// It provides read-only access to the combination elements.
-class CartesianProductProxy {
+namespace loki::utils {
+
+/**
+ * @brief Proxy for the current combination in the Cartesian product.
+ * Provides read-only access to the combination elements.
+ */
+template <typename T, SizeType MaxDims = 5> class CartesianProductProxy {
+    static_assert(std::is_floating_point_v<T>,
+                  "T must be a floating-point type");
+
 public:
-    // The constructor copies the current indices.
-    constexpr CartesianProductProxy(
-        std::span<const std::vector<FloatType>> params,
-        std::array<size_t, 5> indices,
-        size_t dims) noexcept
+    using Container  = std::vector<T>;
+    using ParamsSpan = std::span<const Container>;
+    using Indices    = std::array<SizeType, MaxDims>;
+
+    constexpr CartesianProductProxy(ParamsSpan params,
+                                    const Indices& indices,
+                                    SizeType dims) noexcept
         : m_params(params),
           m_indices(indices),
           m_dims(dims) {}
 
-    // Access element at position i in the combination.
-    constexpr FloatType operator[](size_t i) const noexcept {
+    constexpr T operator[](SizeType i) const noexcept {
         return m_params[i][m_indices[i]];
     }
+    constexpr SizeType size() const noexcept { return m_dims; }
 
-    // Returns the number of dimensions.
-    constexpr size_t size() const noexcept { return m_dims; }
-
-    // Optional: allows iterating over the elements in the combination.
+    // Iterator for range-based for over the proxy
     class ConstIterator {
     public:
         constexpr ConstIterator(const CartesianProductProxy* proxy,
-                                size_t pos) noexcept
+                                SizeType pos) noexcept
             : m_proxy(proxy),
               m_pos(pos) {}
 
-        constexpr FloatType operator*() const noexcept {
-            return (*m_proxy)[m_pos];
-        }
-
+        constexpr T operator*() const noexcept { return (*m_proxy)[m_pos]; }
         constexpr ConstIterator& operator++() noexcept {
             ++m_pos;
             return *this;
         }
-
         constexpr bool operator!=(const ConstIterator& other) const noexcept {
             return m_pos != other.m_pos;
         }
 
     private:
         const CartesianProductProxy* m_proxy;
-        size_t m_pos;
+        SizeType m_pos;
     };
 
     constexpr ConstIterator begin() const noexcept { return {this, 0}; }
     constexpr ConstIterator end() const noexcept { return {this, m_dims}; }
 
 private:
-    std::span<const std::vector<FloatType>> m_params;
-    std::array<size_t, 5> m_indices;
-    size_t m_dims;
+    ParamsSpan m_params;
+    Indices m_indices;
+    SizeType m_dims;
 };
 
 /**
- * @brief A view over the Cartesian product of float vectors
+ * @brief Iterator for the Cartesian product of float/double vectors.
  *
  * Thread Safety: Safe for concurrent reading, but iterators must not be
  * shared between threads.
  *
  * Note: The input vectors must outlive this view
  */
-class CartesianProductIterator {
+template <typename T, SizeType MaxDims = 5> class CartesianProductIterator {
 public:
+    using Container  = std::vector<T>;
+    using ParamsSpan = std::span<const Container>;
+    using Indices    = std::array<SizeType, MaxDims>;
     // Begin iterator constructor.
-    constexpr explicit CartesianProductIterator(
-        std::span<const std::vector<FloatType>> params) noexcept
+    constexpr explicit CartesianProductIterator(ParamsSpan params)
         : m_params(params),
           m_dims(params.size()),
           m_done(false) {
+        if (m_dims > MaxDims) {
+            throw std::invalid_argument(
+                std::format("Too many dimensions for CartesianProductIterator "
+                            "(got {}, max {})",
+                            m_dims, MaxDims));
+        }
         m_indices.fill(0);
         // Mark as done if there are no dimensions or any vector is empty.
         if (m_dims == 0 || std::ranges::any_of(m_params, [](const auto& vec) {
@@ -90,23 +103,28 @@ public:
     }
 
     // End iterator constructor.
-    constexpr CartesianProductIterator(
-        std::span<const std::vector<FloatType>> params, bool /*unused*/)
+    constexpr CartesianProductIterator(ParamsSpan params, bool /*unused*/)
         : m_params(params),
           m_dims(params.size()),
           m_done(true) {
+        if (m_dims > MaxDims) {
+            throw std::invalid_argument(
+                std::format("Too many dimensions for CartesianProductIterator "
+                            "(got {}, max {})",
+                            m_dims, MaxDims));
+        }
         m_indices.fill(0);
     }
 
     // Dereference returns a proxy for the current combination.
-    constexpr CartesianProductProxy operator*() const noexcept {
+    constexpr CartesianProductProxy<T, MaxDims> operator*() const noexcept {
         return {m_params, m_indices, m_dims};
     }
 
     // Increment the iterator to the next combination.
     constexpr CartesianProductIterator& operator++() noexcept {
         // Loop from the last dimension backwards.
-        for (size_t i = m_dims; i-- > 0;) {
+        for (SizeType i = m_dims; i-- > 0;) {
             ++m_indices[i];
             if (m_indices[i] < m_params[i].size()) {
                 return *this;
@@ -121,7 +139,8 @@ public:
 
     constexpr bool
     operator==(const CartesianProductIterator& other) const noexcept {
-        return m_done == other.m_done;
+        return m_done == other.m_done &&
+               (m_done || m_indices == other.m_indices);
     }
     constexpr bool
     operator!=(const CartesianProductIterator& other) const noexcept {
@@ -129,26 +148,31 @@ public:
     }
 
 private:
-    std::span<const std::vector<FloatType>> m_params;
-    std::array<size_t, 5> m_indices{};
-    size_t m_dims;
+    ParamsSpan m_params;
+    Indices m_indices;
+    SizeType m_dims;
     bool m_done;
 };
 
-// A view that allows range-based iteration over the Cartesian product.
+/**
+ * @brief
+ *
+ */
+template <typename T, SizeType MaxDims = 5>
 class CartesianProductView
-    : public std::ranges::view_interface<CartesianProductView> {
+    : public std::ranges::view_interface<CartesianProductView<T, MaxDims>> {
 public:
-    explicit constexpr CartesianProductView(
-        std::span<const std::vector<FloatType>> params) noexcept
+    using Container  = std::vector<T>;
+    using ParamsSpan = std::span<const Container>;
+    constexpr explicit CartesianProductView(ParamsSpan params) noexcept
         : m_params(params) {}
 
     constexpr auto begin() const noexcept {
-        return CartesianProductIterator(m_params);
+        return CartesianProductIterator<T, MaxDims>(m_params);
     }
 
     constexpr auto end() const noexcept {
-        return CartesianProductIterator(m_params, true);
+        return CartesianProductIterator<T, MaxDims>(m_params, true);
     }
 
     constexpr bool empty() const noexcept {
@@ -158,15 +182,22 @@ public:
     }
 
 private:
-    std::span<const std::vector<FloatType>> m_params;
+    ParamsSpan m_params;
 };
 
-// Helper function to create the Cartesian product view.
+/**
+ * @brief Helper function to create the Cartesian product view.
+ * @tparam T      Floating-point type (float/double)
+ * @tparam MaxDims Maximum number of dimensions supported (default: 5)
+ */
+template <typename T, SizeType MaxDims = 5>
 constexpr auto
-cartesian_product_view(const std::vector<std::vector<FloatType>>& params) {
-    return CartesianProductView(
-        std::span<const std::vector<FloatType>>(params));
+cartesian_product_view(const std::vector<std::vector<T>>& params) {
+    return CartesianProductView<T, MaxDims>(
+        std::span<const std::vector<T>>(params));
 }
+
+} // namespace loki::utils
 
 // ------------------------------------------------------------------------
 // Example usage:
@@ -174,12 +205,13 @@ cartesian_product_view(const std::vector<std::vector<FloatType>>& params) {
 // #include <iostream>
 //
 // int main() {
-//     std::vector<std::vector<FloatType>> params = {
+//     std::vector<std::vector<float>> params = {
 //         {1.0f, 2.0f}, {10.0f, 20.0f, 30.0f}, {100.0f, 200.0f}};
 //
 //     for (const auto& combination : cartesian_product_view(params)) {
 //         // Each 'combination' is a proxy providing access to the current
-//         tuple. for (size_t i = 0; i < combination.size(); ++i) {
+//         //tuple.
+//         for (size_t i = 0; i < combination.size(); ++i) {
 //             std::cout << combination[i] << " ";
 //         }
 //         std::cout << "\n";

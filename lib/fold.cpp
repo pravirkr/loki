@@ -1,20 +1,20 @@
-#include "loki/fold.hpp"
+#include "loki/algorithms/fold.hpp"
 
 #include <algorithm>
-#include <thread>
+#include <omp.h>
 
-#include "loki/loki_types.hpp"
+#include "loki/common/types.hpp"
 #include "loki/psr_utils.hpp"
 
-namespace loki::fold {
+namespace loki::algorithms {
 
-BruteFold::BruteFold(std::span<const FloatType> freq_arr,
+BruteFold::BruteFold(std::span<const double> freq_arr,
                      SizeType segment_len,
                      SizeType nbins,
                      SizeType nsamps,
-                     FloatType tsamp,
-                     FloatType t_ref,
-                     SizeType nthreads)
+                     double tsamp,
+                     double t_ref,
+                     int nthreads)
     : m_freq_arr(freq_arr.begin(), freq_arr.end()),
       m_segment_len(segment_len),
       m_nbins(nbins),
@@ -29,9 +29,7 @@ BruteFold::BruteFold(std::span<const FloatType> freq_arr,
         throw std::runtime_error(
             "Number of samples is not a multiple of segment length");
     }
-    m_nthreads = std::max<SizeType>(m_nthreads, 1);
-    m_nthreads =
-        std::min<SizeType>(m_nthreads, std::thread::hardware_concurrency());
+    m_nthreads  = std::clamp(m_nthreads, 1, omp_get_max_threads());
     m_nfreqs    = m_freq_arr.size();
     m_nsegments = m_nsamps / m_segment_len;
     m_phase_map.resize(m_nfreqs * m_segment_len);
@@ -54,13 +52,14 @@ void BruteFold::execute(std::span<const float> ts_e,
     if (fold.size() != get_fold_size()) {
         throw std::runtime_error("Output array has wrong size");
     }
-#pragma omp parallel for num_threads(m_nthreads)
+#pragma omp parallel for schedule(static) num_threads(m_nthreads)
     for (SizeType iseg = 0; iseg < m_nsegments; ++iseg) {
         const auto ts_e_seg = ts_e.subspan(iseg * m_segment_len, m_segment_len);
         const auto ts_v_seg = ts_v.subspan(iseg * m_segment_len, m_segment_len);
         auto fold_seg =
             fold.subspan(iseg * m_nfreqs * 2 * m_nbins, m_nfreqs * 2 * m_nbins);
-        execute_segment(ts_e_seg, ts_v_seg, fold_seg);
+        execute_segment(ts_e_seg.data(), ts_v_seg.data(), fold_seg.data(),
+                        m_segment_len);
     }
 }
 
@@ -69,7 +68,7 @@ void BruteFold::compute_phase() {
         const auto freq_offset_in = ifreq * m_segment_len;
         for (SizeType isamp = 0; isamp < m_segment_len; ++isamp) {
             const auto proper_time =
-                (static_cast<FloatType>(isamp) * m_tsamp) - m_t_ref;
+                (static_cast<double>(isamp) * m_tsamp) - m_t_ref;
             m_phase_map[freq_offset_in + isamp] =
                 static_cast<uint32_t>(psr_utils::get_phase_idx(
                     proper_time, m_freq_arr[ifreq], m_nbins, 0.0));
@@ -77,63 +76,29 @@ void BruteFold::compute_phase() {
     }
 }
 
-/*
-void BruteFold::execute_segment(std::span<const float> ts_e_seg,
-                                std::span<const float> ts_v_seg,
-                                std::span<float> fold_seg) {
+void BruteFold::execute_segment(const float* __restrict__ ts_e_seg,
+                                const float* __restrict__ ts_v_seg,
+                                float* __restrict__ fold_seg,
+                                SizeType segment_len_act) noexcept {
     for (SizeType ifreq = 0; ifreq < m_nfreqs; ++ifreq) {
-        const auto freq_offset_in  = ifreq * m_segment_len;
-        const auto freq_offset_out = ifreq * 2 * m_nbins;
-        const auto segment_len_act = ts_e_seg.size();
-        for (SizeType isamp = 0; isamp < segment_len_act; ++isamp) {
-            const auto iphase    = m_phase_map[freq_offset_in + isamp];
-            const auto out_idx_e = freq_offset_out + iphase;
-            const auto out_idx_v = freq_offset_out + iphase + m_nbins;
-            fold_seg[out_idx_e] += ts_e_seg[isamp];
-            fold_seg[out_idx_v] += ts_v_seg[isamp];
+        const auto freq_offset_in          = ifreq * m_segment_len;
+        const auto freq_offset_out         = ifreq * 2 * m_nbins;
+        const auto* __restrict__ phase_ptr = &m_phase_map[freq_offset_in];
+        float* __restrict__ fold_e_base    = fold_seg + freq_offset_out;
+        float* __restrict__ fold_v_base    = fold_e_base + m_nbins;
+
+        const SizeType main_loop = segment_len_act & ~(kUnrollFactor - 1);
+        for (SizeType isamp = 0; isamp < main_loop; isamp += kUnrollFactor) {
+            UNROLL_VECTORIZE
+            for (SizeType j = 0; j < kUnrollFactor; ++j) {
+                const auto idx    = isamp + j;
+                const auto iphase = phase_ptr[idx];
+                fold_e_base[iphase] += ts_e_seg[idx];
+                fold_v_base[iphase] += ts_v_seg[idx];
+            }
         }
-    }
-}
-*/
-
-void BruteFold::execute_segment(std::span<const float> ts_e_seg,
-                                std::span<const float> ts_v_seg,
-                                std::span<float> fold_seg) {
-    const SizeType segment_len_act = ts_e_seg.size();
-    for (SizeType ifreq = 0; ifreq < m_nfreqs; ++ifreq) {
-        // Precompute pointers for this frequency
-        const uint32_t* phase_ptr =
-            m_phase_map.data() + (ifreq * m_segment_len);
-        float* fold_e_base = fold_seg.data() + (ifreq * 2 * m_nbins);
-        float* fold_v_base = fold_e_base + m_nbins;
-
-        // Unroll inner loop by 4
-        SizeType isamp = 0;
-        for (; isamp + 3 < segment_len_act; isamp += 4) {
-            // Sample 0
-            const uint32_t iphase0 = phase_ptr[isamp];
-            fold_e_base[iphase0] += ts_e_seg[isamp];
-            fold_v_base[iphase0] += ts_v_seg[isamp];
-
-            // Sample 1
-            const uint32_t iphase1 = phase_ptr[isamp + 1];
-            fold_e_base[iphase1] += ts_e_seg[isamp + 1];
-            fold_v_base[iphase1] += ts_v_seg[isamp + 1];
-
-            // Sample 2
-            const uint32_t iphase2 = phase_ptr[isamp + 2];
-            fold_e_base[iphase2] += ts_e_seg[isamp + 2];
-            fold_v_base[iphase2] += ts_v_seg[isamp + 2];
-
-            // Sample 3
-            const uint32_t iphase3 = phase_ptr[isamp + 3];
-            fold_e_base[iphase3] += ts_e_seg[isamp + 3];
-            fold_v_base[iphase3] += ts_v_seg[isamp + 3];
-        }
-
-        // Handle remaining samples
-        for (; isamp < segment_len_act; ++isamp) {
-            const uint32_t iphase = phase_ptr[isamp];
+        for (SizeType isamp = main_loop; isamp < segment_len_act; ++isamp) {
+            const auto iphase = phase_ptr[isamp];
             fold_e_base[iphase] += ts_e_seg[isamp];
             fold_v_base[iphase] += ts_v_seg[isamp];
         }
@@ -142,17 +107,17 @@ void BruteFold::execute_segment(std::span<const float> ts_e_seg,
 
 std::vector<float> compute_brute_fold(std::span<const float> ts_e,
                                       std::span<const float> ts_v,
-                                      std::span<const FloatType> freq_arr,
+                                      std::span<const double> freq_arr,
                                       SizeType segment_len,
                                       SizeType nbins,
-                                      SizeType nsamps,
-                                      FloatType tsamp,
-                                      FloatType t_ref,
-                                      SizeType nthreads) {
+                                      double tsamp,
+                                      double t_ref,
+                                      int nthreads) {
+    const SizeType nsamps = ts_e.size();
     BruteFold bf(freq_arr, segment_len, nbins, nsamps, tsamp, t_ref, nthreads);
     std::vector<float> fold(bf.get_fold_size(), 0.0F);
     bf.execute(ts_e, ts_v, std::span<float>(fold));
     return fold;
 }
 
-} // namespace loki::fold
+} // namespace loki::algorithms

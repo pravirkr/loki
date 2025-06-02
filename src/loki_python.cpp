@@ -9,12 +9,13 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
-#include "loki/ffa.hpp"
-#include "loki/fold.hpp"
-#include "loki/loki_types.hpp"
-#include "loki/score.hpp"
-#include "loki/thresholds.hpp"
-#include "loki/utils.hpp"
+#include "loki/common/types.hpp"
+#include "loki/loki.hpp"
+
+namespace loki {
+using algorithms::FFA;
+using detection::MatchedFilter;
+using search::PulsarSearchConfig;
 
 namespace py = pybind11;
 
@@ -24,7 +25,6 @@ PYBIND11_MODULE(libloki, m) {
     py::add_ostream_redirect(m, "ostream_redirect");
 
     auto m_scores = m.def_submodule("scores", "Scores submodule");
-    using loki::score::MatchedFilter;
     py::class_<MatchedFilter>(m_scores, "MatchedFilter")
         .def(py::init(
                  [](const py::array_t<size_t, py::array::c_style>& widths_arr,
@@ -66,33 +66,29 @@ PYBIND11_MODULE(libloki, m) {
         "generate_width_trials",
         [](size_t nbins_max, float spacing_factor) {
             auto trials =
-                loki::score::generate_width_trials(nbins_max, spacing_factor);
+                detection::generate_width_trials(nbins_max, spacing_factor);
             return as_pyarray_ref(trials);
         },
         py::arg("nbins_max"), py::arg("spacing_factor") = 1.5F);
 
     m_scores.def(
         "snr_1d",
-        [](const py::array_t<float>& arr, const py::array_t<SizeType>& widths,
+        [](const PyArrayT<float>& arr, const PyArrayT<SizeType>& widths,
            float stdnoise) {
-            if (arr.ndim() != 1 || widths.ndim() != 1) {
-                throw std::runtime_error("Input arrays must be 1-dimensional");
-            }
             if (arr.size() == 0 || widths.size() == 0) {
                 throw std::runtime_error("Input arrays cannot be empty");
             }
-            auto out = py::array_t<float>(widths.size());
-            loki::score::snr_1d(
-                std::span<const float>(arr.data(), arr.size()),
-                std::span<const SizeType>(widths.data(), widths.size()),
-                std::span<float>(out.mutable_data(), out.size()), stdnoise);
+            auto out = PyArrayT<float>(widths.size());
+            detection::snr_1d(to_span<const float>(arr),
+                              to_span<const SizeType>(widths),
+                              to_span<float>(out), stdnoise);
             return out;
         },
         py::arg("arr"), py::arg("widths"), py::arg("stdnoise") = 1.0F);
     m_scores.def(
         "snr_2d",
-        [](const py::array_t<float, py::array::c_style>& arr,
-           const py::array_t<SizeType>& widths, float stdnoise) {
+        [](const PyArrayT<float>& arr, const PyArrayT<SizeType>& widths,
+           float stdnoise) {
             if (arr.ndim() != 2 || widths.ndim() != 1) {
                 throw std::runtime_error("Input array must be 2-dimensional, "
                                          "widths must be 1-dimensional");
@@ -102,41 +98,42 @@ PYBIND11_MODULE(libloki, m) {
             }
             const auto nprofiles = arr.shape(0);
 
-            auto out = py::array_t<float, py::array::c_style>(
-                {nprofiles, widths.size()});
-            loki::score::snr_2d(
-                std::span<const float>(arr.data(), arr.size()), nprofiles,
-                std::span<const SizeType>(widths.data(), widths.size()),
-                std::span<float>(out.mutable_data(), out.size()), stdnoise);
+            auto out = PyArrayT<float>({nprofiles, widths.size()});
+            detection::snr_2d(to_span<const float>(arr), nprofiles,
+                              to_span<const SizeType>(widths),
+                              to_span<float>(out), stdnoise);
             return out;
         },
         py::arg("arr"), py::arg("widths"), py::arg("stdnoise") = 1.0F);
 
     auto m_thresholds = m.def_submodule("thresholds", "Thresholds submodule");
-    using loki::thresholds::DynamicThresholdScheme;
+    using detection::DynamicThresholdScheme;
 
-    PYBIND11_NUMPY_DTYPE(loki::thresholds::State, success_h0, success_h1,
-                         complexity, complexity_cumul, success_h1_cumul,
-                         nbranches, threshold, threshold_prev,
-                         success_h1_cumul_prev, is_empty);
+    PYBIND11_NUMPY_DTYPE(detection::State, success_h0, success_h1, complexity,
+                         complexity_cumul, success_h1_cumul, nbranches,
+                         threshold, threshold_prev, success_h1_cumul_prev,
+                         is_empty);
     py::class_<DynamicThresholdScheme>(m_thresholds, "DynamicThresholdScheme")
-        .def(py::init([](const py::array_t<float>& branching_pattern,
-                         float ref_ducy, SizeType nbins, SizeType ntrials,
-                         SizeType nprobs, float prob_min, float snr_final,
-                         SizeType nthresholds, float ducy_max, float wtsp,
-                         float beam_width, int nthreads) {
-                 return std::make_unique<DynamicThresholdScheme>(
-                     std::span<const float>(branching_pattern.data(),
-                                            branching_pattern.size()),
-                     ref_ducy, nbins, ntrials, nprobs, prob_min, snr_final,
-                     nthresholds, ducy_max, wtsp, beam_width, nthreads);
-             }),
-             py::arg("branching_pattern"), py::arg("ref_ducy"),
-             py::arg("nbins") = 64, py::arg("ntrials") = 1024,
-             py::arg("nprobs") = 10, py::arg("prob_min") = 0.05F,
-             py::arg("snr_final") = 8.0F, py::arg("nthresholds") = 100,
-             py::arg("ducy_max") = 0.3F, py::arg("wtsp") = 1.0F,
-             py::arg("beam_width") = 0.7F, py::arg("nthreads") = 1)
+        .def(
+            py::init([](const py::array_t<float>& branching_pattern,
+                        float ref_ducy, SizeType nbins, SizeType ntrials,
+                        SizeType nprobs, float prob_min, float snr_final,
+                        SizeType nthresholds, float ducy_max, float wtsp,
+                        float beam_width, SizeType trials_start, int nthreads) {
+                return std::make_unique<DynamicThresholdScheme>(
+                    std::span<const float>(branching_pattern.data(),
+                                           branching_pattern.size()),
+                    ref_ducy, nbins, ntrials, nprobs, prob_min, snr_final,
+                    nthresholds, ducy_max, wtsp, beam_width, trials_start,
+                    nthreads);
+            }),
+            py::arg("branching_pattern"), py::arg("ref_ducy"),
+            py::arg("nbins") = 64, py::arg("ntrials") = 1024,
+            py::arg("nprobs") = 10, py::arg("prob_min") = 0.05F,
+            py::arg("snr_final") = 8.0F, py::arg("nthresholds") = 100,
+            py::arg("ducy_max") = 0.3F, py::arg("wtsp") = 1.0F,
+            py::arg("beam_width") = 0.7F, py::arg("trials_start") = 1,
+            py::arg("nthreads") = 1)
         .def("run", &DynamicThresholdScheme::run, py::arg("thres_neigh") = 10)
         .def("save", &DynamicThresholdScheme::save, py::arg("outdir") = "./")
         .def_property_readonly("nstages", &DynamicThresholdScheme::get_nstages)
@@ -169,7 +166,7 @@ PYBIND11_MODULE(libloki, m) {
            const py::array_t<float>& branching_pattern, float ref_ducy,
            SizeType nbins, SizeType ntrials, float snr_final, float ducy_max,
            float wtsp) {
-            return loki::thresholds::evaluate_scheme(
+            return detection::evaluate_scheme(
                 std::span<const float>(thresholds.data(), thresholds.size()),
                 std::span<const float>(branching_pattern.data(),
                                        branching_pattern.size()),
@@ -185,7 +182,7 @@ PYBIND11_MODULE(libloki, m) {
            const py::array_t<float>& branching_pattern, float ref_ducy,
            SizeType nbins, SizeType ntrials, float snr_final, float ducy_max,
            float wtsp) {
-            return loki::thresholds::determine_scheme(
+            return detection::determine_scheme(
                 std::span<const float>(survive_probs.data(),
                                        survive_probs.size()),
                 std::span<const float>(branching_pattern.data(),
@@ -197,46 +194,35 @@ PYBIND11_MODULE(libloki, m) {
         py::arg("snr_final") = 8.0F, py::arg("ducy_max") = 0.3F,
         py::arg("wtsp") = 1.0F);
 
-    auto m_utils = m.def_submodule("utils", "Utils submodule");
-    m_utils.def(
-        "find_neighbouring_indices",
-        [](const py::array_t<SizeType>& indices, SizeType target_idx,
-           SizeType num) {
-            return loki::utils::find_neighbouring_indices(
-                std::span<const SizeType>(indices.data(), indices.size()),
-                target_idx, num);
-        },
-        py::arg("beam_indices"), py::arg("target_idx"), py::arg("num"));
-
     auto m_fold = m.def_submodule("fold", "Fold submodule");
-
     m_fold.def(
         "compute_brute_fold",
-        [](const py::array_t<float>& ts_e, const py::array_t<float>& ts_v,
-           const py::array_t<FloatType>& freq_arr, SizeType segment_len,
-           SizeType nbins, SizeType nsamps, FloatType tsamp, FloatType t_ref,
-           SizeType nthreads) {
-            return loki::fold::compute_brute_fold(
-                std::span<const float>(ts_e.data(), ts_e.size()),
-                std::span<const float>(ts_v.data(), ts_v.size()),
-                std::span<const FloatType>(freq_arr.data(), freq_arr.size()),
-                segment_len, nbins, nsamps, tsamp, t_ref, nthreads);
+        [](const PyArrayT<float>& ts_e, const PyArrayT<float>& ts_v,
+           const PyArrayT<double>& freq_arr, SizeType segment_len,
+           SizeType nbins, double tsamp, double t_ref, int nthreads) {
+            return as_pyarray(algorithms::compute_brute_fold(
+                to_span<const float>(ts_e), to_span<const float>(ts_v),
+                to_span<const double>(freq_arr), segment_len, nbins, tsamp,
+                t_ref, nthreads));
         },
         py::arg("ts_e"), py::arg("ts_v"), py::arg("freq_arr"),
-        py::arg("segment_len"), py::arg("nbins"), py::arg("nsamps"),
-        py::arg("tsamp"), py::arg("t_ref") = 0.0F, py::arg("nthreads") = 1);
+        py::arg("segment_len"), py::arg("nbins"), py::arg("tsamp"),
+        py::arg("t_ref") = 0.0F, py::arg("nthreads") = 1);
 
     auto m_configs = m.def_submodule("configs", "Configs submodule");
     py::class_<PulsarSearchConfig>(m_configs, "PulsarSearchConfig")
-        .def(py::init<SizeType, FloatType, SizeType, FloatType,
-                      const std::vector<ParamLimitType>&, FloatType, FloatType,
-                      std::optional<SizeType>, std::optional<SizeType>,
-                      SizeType>(),
+        .def(py::init<SizeType, double, SizeType, double,
+                      const std::vector<ParamLimitType>&, double, double,
+                      SizeType, SizeType, std::optional<SizeType>,
+                      std::optional<SizeType>, bool, SizeType, SizeType>(),
              py::arg("nsamps"), py::arg("tsamp"), py::arg("nbins"),
              py::arg("tol_bins"), py::arg("param_limits"),
-             py::arg("ducy_max") = 0.2F, py::arg("wtsp") = 1.5F,
-             py::arg("bseg_brute") = std::nullopt,
-             py::arg("bseg_ffa") = std::nullopt, py::arg("nthreads") = 1)
+             py::arg("ducy_max") = 0.2, py::arg("wtsp") = 1.5,
+             py::arg("prune_poly_order") = 3, py::arg("prune_n_derivs") = 3,
+             py::arg("bseg_brute")     = std::nullopt,
+             py::arg("bseg_ffa")       = std::nullopt,
+             py::arg("use_fft_shifts") = true, py::arg("branch_max") = 16,
+             py::arg("nthreads") = 1)
         .def_property_readonly("nsamps", &PulsarSearchConfig::get_nsamps)
         .def_property_readonly("tsamp", &PulsarSearchConfig::get_tsamp)
         .def_property_readonly("nbins", &PulsarSearchConfig::get_nbins)
@@ -245,9 +231,17 @@ PYBIND11_MODULE(libloki, m) {
                                &PulsarSearchConfig::get_param_limits)
         .def_property_readonly("ducy_max", &PulsarSearchConfig::get_ducy_max)
         .def_property_readonly("wtsp", &PulsarSearchConfig::get_wtsp)
+        .def_property_readonly("prune_poly_order",
+                               &PulsarSearchConfig::get_prune_poly_order)
+        .def_property_readonly("prune_n_derivs",
+                               &PulsarSearchConfig::get_prune_n_derivs)
         .def_property_readonly("bseg_brute",
                                &PulsarSearchConfig::get_bseg_brute)
         .def_property_readonly("bseg_ffa", &PulsarSearchConfig::get_bseg_ffa)
+        .def_property_readonly("use_fft_shifts",
+                               &PulsarSearchConfig::get_use_fft_shifts)
+        .def_property_readonly("branch_max",
+                               &PulsarSearchConfig::get_branch_max)
         .def_property_readonly("nthreads", &PulsarSearchConfig::get_nthreads)
         .def_property_readonly("tseg_brute",
                                &PulsarSearchConfig::get_tseg_brute)
@@ -274,9 +268,12 @@ PYBIND11_MODULE(libloki, m) {
         "compute_ffa",
         [](const py::array_t<float>& ts_e, const py::array_t<float>& ts_v,
            const py::object& cfg) {
-            return compute_ffa(std::span<const float>(ts_e.data(), ts_e.size()),
-                               std::span<const float>(ts_v.data(), ts_v.size()),
-                               cfg.cast<PulsarSearchConfig>());
+            return algorithms::compute_ffa(
+                std::span<const float>(ts_e.data(), ts_e.size()),
+                std::span<const float>(ts_v.data(), ts_v.size()),
+                cfg.cast<PulsarSearchConfig>());
         },
         py::arg("ts_e"), py::arg("ts_v"), py::arg("cfg"));
 }
+
+} // namespace loki

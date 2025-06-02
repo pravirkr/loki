@@ -4,9 +4,9 @@
 #include <string>
 #include <vector>
 
-#include "loki/loki_types.hpp"
+#include "loki/common/types.hpp"
 
-namespace loki::thresholds {
+namespace loki::detection {
 
 struct State {
     float success_h0{1.0F};
@@ -28,16 +28,17 @@ class DynamicThresholdScheme {
 public:
     DynamicThresholdScheme(std::span<const float> branching_pattern,
                            float ref_ducy,
-                           SizeType nbins       = 64,
-                           SizeType ntrials     = 1024,
-                           SizeType nprobs      = 10,
-                           float prob_min       = 0.05F,
-                           float snr_final      = 8.0F,
-                           SizeType nthresholds = 100,
-                           float ducy_max       = 0.3F,
-                           float wtsp           = 1.0F,
-                           float beam_width     = 0.7F,
-                           int nthreads         = 1);
+                           SizeType nbins        = 64,
+                           SizeType ntrials      = 1024,
+                           SizeType nprobs       = 10,
+                           float prob_min        = 0.05F,
+                           float snr_final       = 8.0F,
+                           SizeType nthresholds  = 100,
+                           float ducy_max        = 0.3F,
+                           float wtsp            = 1.0F,
+                           float beam_width      = 0.7F,
+                           SizeType trials_start = 1,
+                           int nthreads          = 1);
     ~DynamicThresholdScheme();
     DynamicThresholdScheme(DynamicThresholdScheme&&) noexcept;
     DynamicThresholdScheme& operator=(DynamicThresholdScheme&&) noexcept;
@@ -79,4 +80,4 @@ std::vector<State> determine_scheme(std::span<const float> survive_probs,
                                     float ducy_max   = 0.3F,
                                     float wtsp       = 1.0F);
 
-} // namespace loki::thresholds
+} // namespace loki::detection

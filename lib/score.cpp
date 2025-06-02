@@ -1,4 +1,4 @@
-#include "loki/score.hpp"
+#include "loki/detection/score.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -10,7 +10,7 @@
 
 #include "loki/utils.hpp"
 
-namespace loki::score {
+namespace loki::detection {
 
 MatchedFilter::MatchedFilter(std::span<const SizeType> widths_arr,
                              SizeType nprofiles,
@@ -22,7 +22,7 @@ MatchedFilter::MatchedFilter(std::span<const SizeType> widths_arr,
       m_shape(shape),
       m_nbins_pow2(get_nbins_pow2(m_nbins)),
       m_ntemplates(widths_arr.size()),
-      m_fft2d(FFT2D(m_nprofiles, m_ntemplates, m_nbins_pow2)) {
+      m_fft2d(utils::FFT2D(m_nprofiles, m_ntemplates, m_nbins_pow2)) {
     // Allocate memory for the templates
     m_templates.resize(m_ntemplates * m_nbins_pow2, 0.0F);
     m_arr_padded.resize(nprofiles * m_nbins_pow2, 0.0F);
@@ -182,4 +182,4 @@ void snr_2d(std::span<const float> arr,
                out.subspan(i * ntemplates, ntemplates), stdnoise);
     }
 }
-} // namespace loki::score
+} // namespace loki::detection

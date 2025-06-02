@@ -5,22 +5,23 @@
 #include <span>
 #include <vector>
 
-#include "loki/loki_types.hpp"
+#include "loki/common/types.hpp"
 
-namespace loki::fold {
+namespace loki::algorithms {
+
 /**
  * @brief Fold time series using brute-force method
  *
  */
 class BruteFold {
 public:
-    BruteFold(std::span<const FloatType> freq_arr,
+    BruteFold(std::span<const double> freq_arr,
               SizeType segment_len,
               SizeType nbins,
               SizeType nsamps,
-              FloatType tsamp,
-              FloatType t_ref   = 0.0F,
-              SizeType nthreads = 1);
+              double tsamp,
+              double t_ref = 0.0,
+              int nthreads = 1);
     BruteFold(const BruteFold&)            = delete;
     BruteFold& operator=(const BruteFold&) = delete;
     BruteFold(BruteFold&&)                 = delete;
@@ -40,33 +41,33 @@ public:
                  std::span<float> fold);
 
 private:
-    std::vector<FloatType> m_freq_arr;
+    std::vector<double> m_freq_arr;
     SizeType m_segment_len;
     SizeType m_nbins;
     SizeType m_nsamps;
-    FloatType m_tsamp;
-    FloatType m_t_ref;
-    SizeType m_nthreads;
+    double m_tsamp;
+    double m_t_ref;
+    int m_nthreads;
 
     SizeType m_nfreqs;
     SizeType m_nsegments;
     std::vector<uint32_t> m_phase_map;
 
     void compute_phase();
-    void execute_segment(std::span<const float> ts_e_seg,
-                         std::span<const float> ts_v_seg,
-                         std::span<float> fold_seg);
+    void execute_segment(const float* __restrict__ ts_e_seg,
+                         const float* __restrict__ ts_v_seg,
+                         float* __restrict__ fold_seg,
+                         SizeType segment_len_act) noexcept;
 };
 
 /* Convenience function to fold time series using brute-force method */
 std::vector<float> compute_brute_fold(std::span<const float> ts_e,
                                       std::span<const float> ts_v,
-                                      std::span<const FloatType> freq_arr,
+                                      std::span<const double> freq_arr,
                                       SizeType segment_len,
                                       SizeType nbins,
-                                      SizeType nsamps,
-                                      FloatType tsamp,
-                                      FloatType t_ref   = 0.0,
-                                      SizeType nthreads = 1);
+                                      double tsamp,
+                                      double t_ref = 0.0,
+                                      int nthreads = 1);
 
-} // namespace loki::fold
+} // namespace loki::algorithms

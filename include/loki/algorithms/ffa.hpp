@@ -4,10 +4,12 @@
 #include <span>
 #include <vector>
 
-#include "loki/configs.hpp"
-#include "loki/loki_types.hpp"
+#include "loki/common/types.hpp"
+#include "loki/search/configs.hpp"
 
-// FFA Coordinate plan for a single param for a single iteration
+namespace loki::algorithms {
+
+// FFA Coordinate plan for a single param coordinate in a single iteration
 struct FFACoord {
     SizeType i_tail;     // Tail coordinate index in the previous iteration
     SizeType shift_tail; // Shift in the tail coordinate
@@ -17,29 +19,29 @@ struct FFACoord {
 
 struct FFAPlan {
     std::vector<SizeType> segment_lens;
-    std::vector<FloatType> tsegments;
-    std::vector<std::vector<std::vector<FloatType>>> params;
-    std::vector<std::vector<FloatType>> dparams;
+    std::vector<double> tsegments;
+    std::vector<std::vector<std::vector<double>>> params;
+    std::vector<std::vector<double>> dparams;
     std::vector<std::vector<SizeType>> fold_shapes;
     std::vector<std::vector<FFACoord>> coordinates;
 
     FFAPlan() = delete;
-    explicit FFAPlan(PulsarSearchConfig cfg);
+    explicit FFAPlan(search::PulsarSearchConfig cfg);
 
     SizeType get_memory_usage() const noexcept;
     SizeType get_buffer_size() const noexcept;
     SizeType get_fold_size() const noexcept;
 
 private:
-    PulsarSearchConfig m_cfg;
+    search::PulsarSearchConfig m_cfg;
     void configure_plan();
     static std::vector<SizeType>
-    calculate_strides(std::span<const std::vector<FloatType>> p_arr);
+    calculate_strides(std::span<const std::vector<double>> p_arr);
 };
 
 class FFA {
 public:
-    explicit FFA(PulsarSearchConfig cfg);
+    explicit FFA(search::PulsarSearchConfig cfg);
     FFA(const FFA&)            = delete;
     FFA& operator=(const FFA&) = delete;
     FFA(FFA&&)                 = delete;
@@ -52,8 +54,9 @@ public:
                  std::span<float> fold);
 
 private:
-    PulsarSearchConfig m_cfg;
+    search::PulsarSearchConfig m_cfg;
     FFAPlan m_ffa_plan;
+    int m_nthreads;
 
     // Buffers for the FFA plan
     std::vector<float> m_fold_in;
@@ -62,10 +65,12 @@ private:
     void initialize(std::span<const float> ts_e, std::span<const float> ts_v);
     void execute_iter(const float* __restrict__ fold_in,
                       float* __restrict__ fold_out,
-                      SizeType i_iter);
+                      SizeType i_level);
 };
 
 // Convenience function to fold time series using FFA method
 std::vector<float> compute_ffa(std::span<const float> ts_e,
                                std::span<const float> ts_v,
-                               PulsarSearchConfig cfg);
+                               search::PulsarSearchConfig cfg);
+
+} // namespace loki::algorithms

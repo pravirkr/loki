@@ -1,4 +1,6 @@
-#include "loki/fft.hpp"
+#include "loki/utils/fft.hpp"
+
+namespace loki::utils {
 
 FFT2D::FFT2D(size_t n1x, size_t n2x, size_t ny)
     : m_n1x(n1x), m_n2x(n2x), m_ny(ny), m_fft_size(ny / 2 + 1),
@@ -28,9 +30,9 @@ void FFT2D::circular_convolve(std::span<float> n1, std::span<float> n2,
   // Multiply the FFTs
   for (size_t i = 0; i < m_n1x * m_n2x * m_fft_size; ++i) {
     const size_t idx_n1 =
-        (i / (m_n2x * m_fft_size)) * m_fft_size + (i % m_fft_size);
+        ((i / (m_n2x * m_fft_size)) * m_fft_size) + (i % m_fft_size);
     const size_t idx_n2 =
-        (i / m_fft_size) % m_n2x * m_fft_size + (i % m_fft_size);
+        ((i / m_fft_size) % m_n2x * m_fft_size) + (i % m_fft_size);
     m_n1n2_fft[i][0] = m_n1_fft[idx_n1][0] * m_n2_fft[idx_n2][0] -
                        m_n1_fft[idx_n1][1] * m_n2_fft[idx_n2][1];
     m_n1n2_fft[i][1] = m_n1_fft[idx_n1][0] * m_n2_fft[idx_n2][1] +
@@ -39,3 +41,5 @@ void FFT2D::circular_convolve(std::span<float> n1, std::span<float> n2,
   // Inverse FFT
   fftwf_execute_dft_c2r(m_plan_inverse, m_n1n2_fft, out.data());
 }
+
+} // namespace loki::utils

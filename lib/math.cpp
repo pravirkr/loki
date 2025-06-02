@@ -1,10 +1,9 @@
 #include "loki/math.hpp"
 
 #include <xtensor-blas/xlinalg.hpp>
-#include <xtensor/xarray.hpp>
-#include <xtensor/xmath.hpp>
-#include <xtensor/xtensor.hpp>
-#include <xtensor/xview.hpp>
+#include <xtensor/containers/xtensor.hpp>
+#include <xtensor/core/xmath.hpp>
+#include <xtensor/views/xview.hpp>
 
 namespace loki::math {
 

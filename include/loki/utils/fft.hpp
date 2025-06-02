@@ -5,12 +5,15 @@
 
 #include <fftw3.h>
 
+namespace loki::utils {
+
 class FFT2D {
 public:
     FFT2D(size_t n1x, size_t n2x, size_t ny);
     ~FFT2D();
 
-    void circular_convolve(std::span<float> n1, std::span<float> n2,
+    void circular_convolve(std::span<float> n1,
+                           std::span<float> n2,
                            std::span<float> out);
 
 private:
@@ -25,3 +28,5 @@ private:
     fftwf_plan m_plan_forward;
     fftwf_plan m_plan_inverse;
 };
+
+} // namespace loki::utils

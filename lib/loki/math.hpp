@@ -10,9 +10,9 @@
 #include <boost/math/distributions/normal.hpp>
 #include <boost/math/special_functions/binomial.hpp>
 #include <boost/math/special_functions/factorials.hpp>
-#include <xtensor/xtensor.hpp>
+#include <xtensor/containers/xtensor.hpp>
 
-#include "loki/loki_types.hpp"
+#include "loki/common/types.hpp"
 
 namespace loki::math {
 

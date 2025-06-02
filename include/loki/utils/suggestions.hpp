@@ -5,9 +5,11 @@
 #include <tuple>
 #include <vector>
 
-#include <xtensor/xtensor.hpp>
+#include <xtensor/containers/xtensor.hpp>
 
-#include "loki/loki_types.hpp"
+#include "loki/common/types.hpp"
+
+namespace loki::utils {
 
 class SuggestionStruct {
 public:
@@ -93,3 +95,5 @@ std::vector<SizeType> get_unique_indices(const xt::xtensor<double, 3>& params);
 std::vector<SizeType>
 get_unique_indices_scores(const xt::xtensor<double, 3>& params,
                           std::span<const float> scores);
+
+} // namespace loki::utils

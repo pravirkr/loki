@@ -1,7 +1,8 @@
 #include <catch2/catch_test_macros.hpp>
 
-#include "loki/thresholds.hpp"
+#include "loki/detection/thresholds.hpp"
 
+namespace loki {
 TEST_CASE("DynamicThresholdScheme", "[thresholds]") {
     std::vector<float> branching_pattern = {0.5F, 0.5F, 0.5F, 0.5F, 0.5F};
 
@@ -16,7 +17,7 @@ TEST_CASE("DynamicThresholdScheme", "[thresholds]") {
     float wtsp           = 1.0F;
     float beam_width     = 0.7F;
     int nthreads         = 1;
-    loki::thresholds::DynamicThresholdScheme dyn_scheme(
+    detection::DynamicThresholdScheme dyn_scheme(
         branching_pattern, ref_ducy, nbins, ntrials, nprobs, prob_min,
         snr_final, nthresholds, ducy_max, wtsp, beam_width, nthreads);
     SECTION("get_branching_pattern") {
@@ -32,3 +33,4 @@ TEST_CASE("DynamicThresholdScheme", "[thresholds]") {
         REQUIRE(thresholds.size() == nthresholds);
     }
 }
+} // namespace loki

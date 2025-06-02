@@ -5,54 +5,61 @@
 #include <tuple>
 #include <vector>
 
-#include "loki/loki_types.hpp"
+#include "loki/common/types.hpp"
 
 namespace loki::psr_utils {
 
 // Calculate the phase index of the proper time in the folded profile.
-SizeType get_phase_idx(FloatType proper_time,
-                       FloatType freq,
-                       SizeType nbins,
-                       FloatType delay);
+SizeType
+get_phase_idx(double proper_time, double freq, SizeType nbins, double delay);
+
+// Calculate the (unrounded) phase index of the proper time.
+double get_phase_idx_complete(double proper_time,
+                              double freq,
+                              SizeType nbins,
+                              double delay);
 
 // Grid size for frequency and its derivatives {f_k, ..., f}.
-std::vector<FloatType> poly_taylor_step_f(SizeType nparams,
-                                          FloatType tobs,
-                                          SizeType fold_bins,
-                                          FloatType tol_bins,
-                                          FloatType t_ref = 0.0F);
+std::vector<double> poly_taylor_step_f(SizeType nparams,
+                                       double tobs,
+                                       SizeType fold_bins,
+                                       double tol_bins,
+                                       double t_ref = 0.0);
 
 // Grid for parameters {d_k,... d_2, f} based on the Taylor expansion.
-std::vector<FloatType> poly_taylor_step_d(SizeType nparams,
-                                          FloatType tobs,
-                                          SizeType fold_bins,
-                                          FloatType tol_bins,
-                                          FloatType f_max,
-                                          FloatType t_ref = 0.0F);
+std::vector<double> poly_taylor_step_d(SizeType nparams,
+                                       double tobs,
+                                       SizeType fold_bins,
+                                       double tol_bins,
+                                       double f_max,
+                                       double t_ref = 0.0);
 
 // Compute the bin shift for parameters {d_k,... d_2, f}.
-std::vector<FloatType>
-poly_taylor_shift_d(std::span<const FloatType> dparam_cur,
-                    std::span<const FloatType> dparam_new,
-                    FloatType tobs_new,
-                    SizeType fold_bins,
-                    FloatType f_cur,
-                    FloatType t_ref = 0.0F);
+std::vector<double> poly_taylor_shift_d(std::span<const double> dparam_old,
+                                        std::span<const double> dparam_new,
+                                        double tobs_new,
+                                        SizeType fold_bins,
+                                        double f_cur,
+                                        double t_ref = 0.0);
 
 // Shift the kinematical parameters to a new reference time.
-std::vector<FloatType> shift_params(std::span<const FloatType> param_vec,
-                                    FloatType delta_t);
+std::vector<double> shift_params_d(std::span<const double> param_vec,
+                                   double delta_t,
+                                   SizeType n_out = 3);
+
+// Shift the search parameters vector to a new reference time.
+std::tuple<std::vector<double>, double>
+shift_params(std::span<const double> param_vec, double delta_t);
 
 // Refine a parameter range around a current value with a finer step size.
-std::tuple<std::vector<FloatType>, FloatType>
-branch_param(FloatType param_cur,
-             FloatType dparam_cur,
-             FloatType dparam_new,
-             FloatType param_min = std::numeric_limits<FloatType>::lowest(),
-             FloatType param_max = std::numeric_limits<FloatType>::max());
+std::tuple<std::vector<double>, double>
+branch_param(double param_cur,
+             double dparam_cur,
+             double dparam_new,
+             double param_min = std::numeric_limits<double>::lowest(),
+             double param_max = std::numeric_limits<double>::max());
 
 // Generate an evenly spaced array of values between vmin and vmax.
-std::vector<FloatType>
-range_param(FloatType vmin, FloatType vmax, FloatType dv);
+std::vector<double> range_param(double vmin, double vmax, double dv);
 
 } // namespace loki::psr_utils

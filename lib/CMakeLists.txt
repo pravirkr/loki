@@ -41,15 +41,15 @@ CPMFindPackage(
 # xsimd (SIMD library) - Header-only
 CPMFindPackage(
   NAME xsimd
-  VERSION 11.2.0
-  URL https://github.com/xtensor-stack/xsimd/archive/refs/tags/11.2.0.tar.gz
+  VERSION 13.2.0
+  URL https://github.com/xtensor-stack/xsimd/archive/refs/tags/13.2.0.tar.gz
 )
 
 # xtensor (Tensor library) - Header-only, depends on xsimd
 CPMFindPackage(
   NAME xtensor
-  VERSION 0.25.0
-  URL https://github.com/xtensor-stack/xtensor/archive/refs/tags/0.25.0.tar.gz
+  VERSION 0.26.0
+  URL https://github.com/xtensor-stack/xtensor/archive/refs/tags/0.26.0.tar.gz
   OPTIONS "XTENSOR_USE_XSIMD ON" "XTENSOR_USE_OPENMP ON"
 )
 
@@ -73,8 +73,8 @@ endif()
 # HighFive (HDF5 C++ interface) - Depends on HDF5 found earlier
 CPMFindPackage(
   NAME HighFive
-  VERSION 3.0.0
-  URL https://github.com/highfive-devs/highfive/archive/refs/tags/v3.0.0-beta2.tar.gz
+  VERSION 2.10.1
+  URL https://github.com/BlueBrain/HighFive/archive/refs/tags/v2.10.1.tar.gz
   OPTIONS "HIGHFIVE_FIND_HDF5 ON" "HIGHFIVE_USE_XTENSOR ON"
 )
 
@@ -99,10 +99,9 @@ target_link_libraries(
          HDF5::HDF5
          ${FFTW_FLOAT_LIB}
          spdlog::spdlog_header_only
-         xsimd
          xtensor
          Boost::math
-         HighFive::HighFive
+         HighFive
          indicators::indicators
          coverage_config
 )

@@ -48,8 +48,8 @@ void circular_prefix_sum(std::span<const float> x, std::span<float> out) {
                out.subspan(n_wraps * nbins, extra));
 }
 
-SizeType find_nearest_sorted_idx(std::span<const FloatType> arr_sorted,
-                                 FloatType val) {
+SizeType find_nearest_sorted_idx(std::span<const double> arr_sorted,
+                                 double val) {
     if (arr_sorted.empty()) {
         throw std::runtime_error("Array is empty");
     }

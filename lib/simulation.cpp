@@ -1,4 +1,4 @@
-#include "loki/simulation.hpp"
+#include "loki/simulation/simulation.hpp"
 
 #include <algorithm>
 #include <cmath>

@@ -1,20 +1,22 @@
-#include "loki/suggestions.hpp"
+#include "loki/utils/suggestions.hpp"
 
 #include <algorithm>
 #include <ranges>
 #include <span>
 #include <unordered_map>
 
-#include <xtensor/xadapt.hpp>
-#include <xtensor/xindex_view.hpp>
-#include <xtensor/xmath.hpp>
-#include <xtensor/xoperation.hpp>
-#include <xtensor/xsort.hpp>
-#include <xtensor/xview.hpp>
+#include <xtensor/containers/xtensor.hpp>
+#include <xtensor/core/xmath.hpp>
+#include <xtensor/core/xoperation.hpp>
+#include <xtensor/misc/xsort.hpp>
+#include <xtensor/views/xindex_view.hpp>
+#include <xtensor/views/xview.hpp>
 
 #include <omp.h>
 
-#include "loki/loki_types.hpp"
+#include "loki/common/types.hpp"
+
+namespace loki::utils {
 
 SuggestionStruct::SuggestionStruct(xt::xtensor<double, 3> param_sets,
                                    xt::xtensor<float, 3> folds,
@@ -313,3 +315,5 @@ get_unique_indices_scores(const xt::xtensor<double, 3>& params,
     unique_indices.resize(count);
     return unique_indices;
 }
+
+} // namespace loki::utils

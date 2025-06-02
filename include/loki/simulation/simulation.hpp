@@ -2,7 +2,7 @@
 
 #include <vector>
 
-#include "loki/loki_types.hpp"
+#include "loki/common/types.hpp"
 
 namespace loki::simulation {
 

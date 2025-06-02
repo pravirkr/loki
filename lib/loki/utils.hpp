@@ -6,11 +6,11 @@
 
 #include <omp.h>
 
-#include "loki/loki_types.hpp"
+#include "loki/common/types.hpp"
 
 namespace loki::utils {
 
-constexpr float kCval = 299792458.0F;
+inline constexpr double kCval = 299792458.0;
 
 // out = x + scalar
 void add_scalar(std::span<const float> x, float scalar, std::span<float> out);
@@ -22,8 +22,8 @@ float diff_max(std::span<const float> x, std::span<const float> y);
 void circular_prefix_sum(std::span<const float> x, std::span<float> out);
 
 // return index of nearest value in sorted array
-SizeType find_nearest_sorted_idx(std::span<const FloatType> arr_sorted,
-                                 FloatType val);
+SizeType find_nearest_sorted_idx(std::span<const double> arr_sorted,
+                                 double val);
 
 std::vector<SizeType> find_neighbouring_indices(
     std::span<const SizeType> indices, SizeType target_idx, SizeType num);
