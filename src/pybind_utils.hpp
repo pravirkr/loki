@@ -40,21 +40,13 @@ template <typename T>
 inline std::span<const T> to_span(const PyArrayT<T>& arr) {
     static_assert(!std::is_pointer_v<T>, "T must not be a pointer type");
     static_assert(!std::is_reference_v<T>, "T must not be a reference type");
-
     py::buffer_info buffer = arr.request();
-    if (buffer.ndim != 1) {
-        throw std::runtime_error("to_span: Array must be 1-dimensional");
-    }
     return std::span<const T>(static_cast<const T*>(buffer.ptr), buffer.size);
 }
 
 template <typename T> inline std::span<T> to_span(PyArrayT<T>& arr) {
     static_assert(!std::is_pointer_v<T>, "T must not be a pointer type");
     static_assert(!std::is_reference_v<T>, "T must not be a reference type");
-
     py::buffer_info buffer = arr.request();
-    if (buffer.ndim != 1) {
-        throw std::runtime_error("to_span: Array must be 1-dimensional");
-    }
     return std::span<T>(static_cast<T*>(buffer.ptr), buffer.size);
 }

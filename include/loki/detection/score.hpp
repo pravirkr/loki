@@ -5,7 +5,11 @@
 #include <vector>
 
 #include "loki/common/types.hpp"
-#include "loki/utils/fft.hpp"
+
+#ifdef LOKI_ENABLE_CUDA
+#include <cuda/std/span>
+#include <cuda_runtime_api.h>
+#endif // LOKI_ENABLE_CUDA
 
 namespace loki::detection {
 
@@ -16,36 +20,24 @@ public:
                   SizeType nbins,
                   std::string_view shape = "boxcar");
 
-    std::vector<float> get_templates() const;
-    SizeType get_ntemplates() const;
-    SizeType get_nbins() const;
+    ~MatchedFilter();
+    MatchedFilter(MatchedFilter&&) noexcept;
+    MatchedFilter& operator=(MatchedFilter&&) noexcept;
+    MatchedFilter(const MatchedFilter&)            = delete;
+    MatchedFilter& operator=(const MatchedFilter&) = delete;
+
+    std::vector<float> get_templates() const noexcept;
+    SizeType get_ntemplates() const noexcept;
+    SizeType get_nbins() const noexcept;
     void compute(std::span<const float> arr, std::span<float> out);
 
 private:
-    std::vector<SizeType> m_widths_arr;
-    SizeType m_nprofiles;
-    SizeType m_nbins;
-    std::string_view m_shape;
-
-    SizeType m_nbins_pow2;
-    SizeType m_ntemplates;
-    std::vector<float> m_templates;
-    std::vector<float> m_arr_padded;
-    std::vector<float> m_snr_arr;
-
-    // FFTW plans
-    utils::FFT2D m_fft2d;
-
-    void initialise_templates();
-    static void generate_boxcar_template(std::span<float>& arr, SizeType width);
-    static void generate_gaussian_template(std::span<float>& arr,
-                                           SizeType width);
-    static void normalise(std::span<float>& arr);
-    static SizeType get_nbins_pow2(SizeType nbins);
+    class Impl;
+    std::unique_ptr<Impl> m_impl;
 };
 
 std::vector<SizeType> generate_width_trials(SizeType nbins_max,
-                                            float spacing_factor = 1.5F);
+                                            float wtsp = 1.5F);
 
 // Compute the S/N of single pulse proile
 void snr_1d(std::span<const float> arr,

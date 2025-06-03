@@ -1,76 +1,65 @@
 #pragma once
 
-#include <cstddef>
+#include <memory>
 #include <span>
 #include <vector>
 
-#include "loki/common/types.hpp"
+#include "loki/algorithms/plans.hpp"
 #include "loki/search/configs.hpp"
+
+#ifdef LOKI_ENABLE_CUDA
+#include <cuda/std/span>
+#include <cuda_runtime_api.h>
+#endif // LOKI_ENABLE_CUDA
 
 namespace loki::algorithms {
 
-// FFA Coordinate plan for a single param coordinate in a single iteration
-struct FFACoord {
-    SizeType i_tail;     // Tail coordinate index in the previous iteration
-    SizeType shift_tail; // Shift in the tail coordinate
-    SizeType i_head;     // Head coordinate index in the previous iteration
-    SizeType shift_head; // Shift in the head coordinate
-};
-
-struct FFAPlan {
-    std::vector<SizeType> segment_lens;
-    std::vector<double> tsegments;
-    std::vector<std::vector<std::vector<double>>> params;
-    std::vector<std::vector<double>> dparams;
-    std::vector<std::vector<SizeType>> fold_shapes;
-    std::vector<std::vector<FFACoord>> coordinates;
-
-    FFAPlan() = delete;
-    explicit FFAPlan(search::PulsarSearchConfig cfg);
-
-    SizeType get_memory_usage() const noexcept;
-    SizeType get_buffer_size() const noexcept;
-    SizeType get_fold_size() const noexcept;
-
-private:
-    search::PulsarSearchConfig m_cfg;
-    void configure_plan();
-    static std::vector<SizeType>
-    calculate_strides(std::span<const std::vector<double>> p_arr);
-};
-
 class FFA {
 public:
-    explicit FFA(search::PulsarSearchConfig cfg);
+    explicit FFA(const search::PulsarSearchConfig& cfg);
+
+    ~FFA();
+    FFA(FFA&&) noexcept;
+    FFA& operator=(FFA&&) noexcept;
     FFA(const FFA&)            = delete;
     FFA& operator=(const FFA&) = delete;
-    FFA(FFA&&)                 = delete;
-    FFA& operator=(FFA&&)      = delete;
-    ~FFA()                     = default;
 
-    const FFAPlan& get_plan() const;
+    const FFAPlan& get_plan() const noexcept;
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
                  std::span<float> fold);
 
 private:
-    search::PulsarSearchConfig m_cfg;
-    FFAPlan m_ffa_plan;
-    int m_nthreads;
-
-    // Buffers for the FFA plan
-    std::vector<float> m_fold_in;
-    std::vector<float> m_fold_out;
-
-    void initialize(std::span<const float> ts_e, std::span<const float> ts_v);
-    void execute_iter(const float* __restrict__ fold_in,
-                      float* __restrict__ fold_out,
-                      SizeType i_level);
+    class Impl;
+    std::unique_ptr<Impl> m_impl;
 };
 
 // Convenience function to fold time series using FFA method
 std::vector<float> compute_ffa(std::span<const float> ts_e,
                                std::span<const float> ts_v,
-                               search::PulsarSearchConfig cfg);
+                               const search::PulsarSearchConfig& cfg);
+
+#ifdef LOKI_ENABLE_CUDA
+
+class FFACUDA {
+public:
+    explicit FFACUDA(const search::PulsarSearchConfig& cfg);
+
+    ~FFACUDA();
+    FFACUDA(FFACUDA&&) noexcept;
+    FFACUDA& operator=(FFACUDA&&) noexcept;
+    FFACUDA(const FFACUDA&)            = delete;
+    FFACUDA& operator=(const FFACUDA&) = delete;
+
+    const FFAPlan& get_plan() const noexcept;
+    void execute(cuda::std::span<const float> ts_e,
+                 cuda::std::span<const float> ts_v,
+                 cuda::std::span<float> fold);
+
+private:
+    class Impl;
+    std::unique_ptr<Impl> m_impl;
+};
+#endif // LOKI_ENABLE_CUDA
 
 } // namespace loki::algorithms

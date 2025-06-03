@@ -6,15 +6,17 @@
 #include <span>
 #include <stdexcept>
 
+#include <omp.h>
+
 namespace loki::utils {
 
-void add_scalar(std::span<const float> x, float scalar, std::span<float> out) {
-    std::ranges::transform(x, out.begin(),
-                           [scalar](float xi) { return xi + scalar; });
+SizeType next_power_of_two(SizeType n) noexcept {
+    return 1U << static_cast<SizeType>(std::ceil(std::log2(n)));
 }
 
 float diff_max(std::span<const float> x, std::span<const float> y) {
     float max_diff = -std::numeric_limits<float>::max();
+#pragma omp simd reduction(max : max_diff)
     for (SizeType i = 0; i < x.size(); ++i) {
         max_diff = std::max(max_diff, x[i] - y[i]);
     }
@@ -24,11 +26,9 @@ float diff_max(std::span<const float> x, std::span<const float> y) {
 void circular_prefix_sum(std::span<const float> x, std::span<float> out) {
     const SizeType nbins = x.size();
     const SizeType nsum  = out.size();
-
     if (nbins == 0 || nsum == 0) {
         return;
     }
-
     // Compute the initial prefix sum
     std::inclusive_scan(x.begin(),
                         x.begin() + static_cast<int>(std::min(nbins, nsum)),
@@ -37,15 +37,24 @@ void circular_prefix_sum(std::span<const float> x, std::span<float> out) {
         return;
     }
     // Wrap around
+    const float last_sum   = out[nbins - 1];
     const SizeType n_wraps = nsum / nbins;
     const SizeType extra   = nsum % nbins;
-    const float last_sum   = out[nbins - 1];
     for (SizeType i = 1; i < n_wraps; ++i) {
-        add_scalar(out.subspan(0, nbins), static_cast<float>(i) * last_sum,
-                   out.subspan(i * nbins, nbins));
+        const float offset_sum = static_cast<float>(i) * last_sum;
+        const SizeType offset  = i * nbins;
+        for (SizeType j = 0; j < nbins; ++j) {
+            out[offset + j] = out[j] + offset_sum;
+        }
     }
-    add_scalar(out.subspan(0, extra), static_cast<float>(n_wraps) * last_sum,
-               out.subspan(n_wraps * nbins, extra));
+    if (extra > 0) {
+        const float final_offset = static_cast<float>(n_wraps) * last_sum;
+        const SizeType offset    = n_wraps * nbins;
+
+        for (SizeType j = 0; j < extra; ++j) {
+            out[offset + j] = out[j] + final_offset;
+        }
+    }
 }
 
 SizeType find_nearest_sorted_idx(std::span<const double> arr_sorted,

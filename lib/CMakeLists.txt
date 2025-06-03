@@ -1,25 +1,33 @@
 # Define the library
-file(GLOB LOKI_CXX_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
-set(LOKI_ALL_SOURCES ${LOKI_CXX_SOURCES})
+file(GLOB LOKI_LIBRARY_CXX_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
+set(LOKI_LIBRARY_ALL_SOURCES ${LOKI_LIBRARY_CXX_SOURCES})
 
 # Add CUDA sources if available
 if(CMAKE_CUDA_COMPILER)
-  file(GLOB LOKI_CUDA_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*.cu)
-  # Set CUDA-specific compile options for these sources
-  set_source_files_properties(${LOKI_CUDA_SOURCES} PROPERTIES LANGUAGE CUDA)
-  list(APPEND LOKI_ALL_SOURCES ${LOKI_CUDA_SOURCES})
+  file(GLOB LOKI_LIBRARY_CUDA_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*.cu)
+  list(APPEND LOKI_LIBRARY_ALL_SOURCES ${LOKI_LIBRARY_CUDA_SOURCES})
+
+  # Explicitly set CUDA files to be compiled with CUDA
+  set_source_files_properties(${LOKI_LIBRARY_CUDA_SOURCES} PROPERTIES LANGUAGE CUDA)
 endif()
 
-add_library(${LOKI_LIBRARY_NAME} ${LOKI_ALL_SOURCES})
-# Alias for easier usage downstream if needed
+add_library(${LOKI_LIBRARY_NAME} ${LOKI_LIBRARY_ALL_SOURCES})
 add_library(${PROJECT_NAME}::${LOKI_LIBRARY_NAME} ALIAS ${LOKI_LIBRARY_NAME})
 
 # Set include directories
 target_include_directories(
   ${LOKI_LIBRARY_NAME}
-  PUBLIC $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include> $<INSTALL_INTERFACE:include>
+  PUBLIC $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
 )
+
+# Add CUDA include directories when available
+if(CMAKE_CUDA_COMPILER)
+  target_include_directories(${LOKI_LIBRARY_NAME} 
+    PUBLIC ${CUDAToolkit_INCLUDE_DIRS}
+  )
+endif()
 
 # System dependencies
 message(STATUS "Searching for required system dependencies...")
@@ -91,17 +99,46 @@ if(indicators_ADDED)
   target_include_directories(indicators::indicators INTERFACE ${indicators_SOURCE_DIR}/include)
 endif()
 
+# Code coverage setup
+if(ENABLE_COVERAGE)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    add_library(coverage_config INTERFACE)
+    target_compile_options(coverage_config INTERFACE -O0 -g --coverage)
+    target_link_options(coverage_config INTERFACE --coverage)
+    message(STATUS "Code coverage enabled.")
+  else()
+    message(
+      WARNING "Code coverage requested, but not supported for compiler ${CMAKE_CXX_COMPILER_ID}."
+    )
+    set(ENABLE_COVERAGE
+        OFF
+        CACHE BOOL "" FORCE
+    )
+    add_library(coverage_config INTERFACE)
+  endif()
+else()
+  add_library(coverage_config INTERFACE)
+endif()
+
 # Link libraries
 target_link_libraries(
   ${LOKI_LIBRARY_NAME}
-  PRIVATE ${LOKI_COMPILE_OPTIONS}
+  PRIVATE ${LOKI_COMPILE_OPTIONS} coverage_config
   PUBLIC OpenMP::OpenMP_CXX
          HDF5::HDF5
-         ${FFTW_FLOAT_LIB}
+         ${FFTW_FLOAT_OPENMP_LIB}
          spdlog::spdlog_header_only
          xtensor
          Boost::math
          HighFive
          indicators::indicators
-         coverage_config
 )
+
+# Add CUDA options and libraries when available
+if(CMAKE_CUDA_COMPILER)
+  target_link_libraries(${LOKI_LIBRARY_NAME} 
+    PRIVATE ${LOKI_CUDA_OPTIONS}
+    PUBLIC CUDA::cudart
+    PRIVATE CUDA::cuda_driver
+  )
+endif()

@@ -12,8 +12,8 @@ namespace loki::utils {
 
 inline constexpr double kCval = 299792458.0;
 
-// out = x + scalar
-void add_scalar(std::span<const float> x, float scalar, std::span<float> out);
+// Return the next power of two greater than or equal to n
+SizeType next_power_of_two(SizeType n) noexcept;
 
 // return max(x[i] - y[i])
 float diff_max(std::span<const float> x, std::span<const float> y);

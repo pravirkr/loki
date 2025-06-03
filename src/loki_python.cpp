@@ -9,11 +9,11 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
-#include "loki/common/types.hpp"
 #include "loki/loki.hpp"
 
 namespace loki {
 using algorithms::FFA;
+using algorithms::FFAPlan;
 using detection::MatchedFilter;
 using search::PulsarSearchConfig;
 
@@ -258,20 +258,27 @@ PYBIND11_MODULE(libloki, m) {
              py::arg("tseg_cur"));
 
     auto m_ffa = m.def_submodule("ffa", "FFA submodule");
+    py::class_<FFAPlan>(m_ffa, "FFAPlan")
+        .def_property_readonly("memory_usage", &FFAPlan::get_memory_usage)
+        .def_property_readonly("buffer_size", &FFAPlan::get_buffer_size)
+        .def_property_readonly("fold_size", &FFAPlan::get_fold_size);
+
     py::class_<FFA>(m_ffa, "FFA")
         .def(py::init<PulsarSearchConfig>(), py::arg("cfg"))
         .def_property_readonly("plan", &FFA::get_plan)
-        .def("execute", &FFA::execute, py::arg("ts_e"), py::arg("ts_v"),
-             py::arg("fold"));
+        .def("execute", [](FFA& self, const PyArrayT<float>& ts_e,
+                           const PyArrayT<float>& ts_v, PyArrayT<float>& fold) {
+            self.execute(to_span<const float>(ts_e), to_span<const float>(ts_v),
+                         to_span<float>(fold));
+        },
+        py::arg("ts_e"), py::arg("ts_v"), py::arg("fold"));
 
     m_ffa.def(
         "compute_ffa",
-        [](const py::array_t<float>& ts_e, const py::array_t<float>& ts_v,
-           const py::object& cfg) {
-            return algorithms::compute_ffa(
-                std::span<const float>(ts_e.data(), ts_e.size()),
-                std::span<const float>(ts_v.data(), ts_v.size()),
-                cfg.cast<PulsarSearchConfig>());
+        [](const PyArrayT<float>& ts_e, const PyArrayT<float>& ts_v,
+           const PulsarSearchConfig& cfg) {
+            return algorithms::compute_ffa(to_span<const float>(ts_e),
+                                           to_span<const float>(ts_v), cfg);
         },
         py::arg("ts_e"), py::arg("ts_v"), py::arg("cfg"));
 }

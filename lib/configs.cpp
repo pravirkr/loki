@@ -34,11 +34,25 @@ PulsarSearchConfig::PulsarSearchConfig(
       m_wtsp(wtsp),
       m_prune_poly_order(prune_poly_order),
       m_prune_n_derivs(prune_n_derivs),
-      m_bseg_brute(bseg_brute.value_or(get_bseg_brute_default())),
-      m_bseg_ffa(bseg_ffa.value_or(get_bseg_ffa_default())),
       m_use_fft_shifts(use_fft_shifts),
       m_branch_max(branch_max),
       m_nthreads(nthreads) {
+    if (m_param_limits.empty()) {
+        throw std::runtime_error("coord_limits must be non-empty");
+    }
+    m_nparams    = m_param_limits.size();
+    m_f_min      = m_param_limits[m_nparams - 1][0];
+    m_f_max      = m_param_limits[m_nparams - 1][1];
+    m_bseg_brute = bseg_brute.value_or(get_bseg_brute_default());
+    m_bseg_ffa   = bseg_ffa.value_or(get_bseg_ffa_default());
+
+    m_nthreads = std::clamp(m_nthreads, 1, omp_get_max_threads());
+    validate();
+    m_tseg_brute = static_cast<double>(m_bseg_brute) * m_tsamp;
+    m_tseg_ffa   = static_cast<double>(m_bseg_ffa) * m_tsamp;
+    m_niters_ffa = static_cast<SizeType>(std::log2(
+        static_cast<double>(m_bseg_ffa) / static_cast<double>(m_bseg_brute)));
+
     spdlog::info(
         "PulsarSearchConfigClass: nsamps={}, tsamp={}, nbins={}, tol_bins={}, "
         "ducy_max={}, wtsp={}, prune_poly_order={}, prune_n_derivs={}, "
@@ -47,19 +61,6 @@ PulsarSearchConfig::PulsarSearchConfig(
         m_nsamps, m_tsamp, m_nbins, m_tol_bins, m_ducy_max, m_wtsp,
         m_prune_poly_order, m_prune_n_derivs, m_bseg_brute, m_bseg_ffa,
         m_use_fft_shifts, m_branch_max, m_nthreads);
-    if (m_param_limits.empty()) {
-        throw std::runtime_error("coord_limits must be non-empty");
-    }
-    m_nparams  = m_param_limits.size();
-    m_nthreads  = std::clamp(m_nthreads, 1, omp_get_max_threads());
-
-    validate();
-    m_tseg_brute = static_cast<double>(m_bseg_brute) * m_tsamp;
-    m_tseg_ffa   = static_cast<double>(m_bseg_ffa) * m_tsamp;
-    m_niters_ffa = static_cast<SizeType>(std::log2(
-        static_cast<double>(m_bseg_ffa) / static_cast<double>(m_bseg_brute)));
-    m_f_min      = m_param_limits[m_nparams - 1][0];
-    m_f_max      = m_param_limits[m_nparams - 1][1];
 }
 
 std::vector<double> PulsarSearchConfig::get_dparams_f(double tseg_cur) const {
@@ -89,7 +90,7 @@ std::vector<double> PulsarSearchConfig::get_dparams_lim(double tseg_cur) const {
 }
 
 SizeType PulsarSearchConfig::get_bseg_brute_default() const {
-    const SizeType init_levels = (m_nsamps == 1) ? 1 : 5;
+    const SizeType init_levels = (m_nparams == 1) ? 1 : 5;
     const auto levels          = static_cast<SizeType>(
         std::log2(static_cast<double>(m_nsamps) * m_tsamp * m_f_min));
     return static_cast<SizeType>(m_nsamps / (1U << (levels - init_levels)));

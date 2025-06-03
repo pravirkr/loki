@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.22)
+cmake_minimum_required(VERSION 3.24)
 
 project(
   loki
@@ -7,6 +7,7 @@ project(
   DESCRIPTION "A high-performance C++ Pulsar searching library"
 )
 
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # Modern CMake policies
 if(POLICY CMP0146)
   cmake_policy(SET CMP0146 NEW)
@@ -17,19 +18,31 @@ endif()
 if(POLICY CMP0167)
   cmake_policy(SET CMP0167 NEW)
 endif()
-set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+
+# Compiler version requirements
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 13.0)
+    message(
+      FATAL_ERROR
+        "GCC 13.0 or higher is required for C++20 support. Found: ${CMAKE_CXX_COMPILER_VERSION}"
+    )
+  endif()
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+  if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 18.0)
+    message(
+      FATAL_ERROR
+        "Clang 18.0 or higher is required for C++20 support. Found: ${CMAKE_CXX_COMPILER_VERSION}"
+    )
+  endif()
+endif()
 
 # Configuration options
-option(${PROJECT_NAME}_BUILD_DOCS "Build documentation" OFF)
-option(${PROJECT_NAME}_BUILD_PYTHON "Build Python bindings" ON)
-option(${PROJECT_NAME}_BUILD_TESTING "Build tests" ON)
-option(${PROJECT_NAME}_BUILD_BENCHMARKS "Build benchmarks" OFF)
-option(${PROJECT_NAME}_ENABLE_COVERAGE "Enable coverage reporting" OFF)
-option(${PROJECT_NAME}_OPTIMIZE_NATIVE "Enable native CPU optimizations (-march=native)" ON)
-option(${PROJECT_NAME}_FAST_MATH "Enable fast math optimizations (-ffast-math)" ON)
-option(${PROJECT_NAME}_ENABLE_IPO "Enable Interprocedural Optimization (Link-Time Optimization)"
-       ON
-)
+option(BUILD_DOCS "Build documentation" OFF)
+option(BUILD_PYTHON "Build Python bindings" ON)
+option(BUILD_TESTING "Build tests" OFF)
+option(BUILD_BENCHMARKS "Build benchmarks" OFF)
+option(ENABLE_COVERAGE "Enable coverage reporting" OFF)
+option(ENABLE_IPO "Enable Interprocedural Optimization (Link-Time Optimization)" ON)
 
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 20)
@@ -50,7 +63,7 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 # Interprocedural Optimization (IPO/LTO)
-if(CMAKE_BUILD_TYPE MATCHES "Release" AND ${PROJECT_NAME}_ENABLE_IPO)
+if(CMAKE_BUILD_TYPE MATCHES "Release" AND ENABLE_IPO)
   include(CheckIPOSupported)
   check_ipo_supported(RESULT ipo_supported)
   if(ipo_supported)
@@ -63,32 +76,20 @@ else()
   set(CMAKE_INTERPROCEDURAL_OPTIMIZATION FALSE)
 endif()
 
+# Project structure and paths
+list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
+include(GNUInstallDirs) # Defines standard installation paths
+
 # Compiler flags (Interface target to hold global compile options)
 set(LOKI_COMPILE_OPTIONS ${PROJECT_NAME}_COMPILE_OPTIONS)
 add_library(${LOKI_COMPILE_OPTIONS} INTERFACE)
 target_compile_options(${LOKI_COMPILE_OPTIONS} INTERFACE -Wall -Wextra -Wpedantic)
 target_compile_options(
-  ${LOKI_COMPILE_OPTIONS} INTERFACE $<$<CONFIG:Debug>:-g> $<$<CONFIG:Release>:-O3;-DNDEBUG>
-                                    $<$<CONFIG:MinSizeRel>:-Os;-DNDEBUG>
+  ${LOKI_COMPILE_OPTIONS}
+  INTERFACE $<$<CONFIG:Debug>:-g> $<$<CONFIG:Release>:-O3;-DNDEBUG>
+            $<$<CONFIG:MinSizeRel>:-Os;-DNDEBUG>
+            $<$<AND:$<NOT:$<CONFIG:Debug>>,$<COMPILE_LANGUAGE:CXX>>:-march=native;-ffast-math>
 )
-if(${PROJECT_NAME}_OPTIMIZE_NATIVE)
-  target_compile_options(
-    ${LOKI_COMPILE_OPTIONS}
-    INTERFACE $<$<AND:$<NOT:$<CONFIG:Debug>>,$<COMPILE_LANGUAGE:CXX>>:-march=native>
-  )
-  message(STATUS "Native CPU optimizations enabled (-march=native) for C++ Release builds.")
-endif()
-if(${PROJECT_NAME}_FAST_MATH)
-  target_compile_options(
-    ${LOKI_COMPILE_OPTIONS}
-    INTERFACE $<$<AND:$<NOT:$<CONFIG:Debug>>,$<COMPILE_LANGUAGE:CXX>>:-ffast-math>
-  )
-  message(STATUS "Fast math enabled (-ffast-math) for C++ Release builds.")
-endif()
-
-# Project structure and paths
-list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
-include(GNUInstallDirs) # Defines standard installation paths
 
 # Find CUDA and set up the project
 include(CheckLanguage)
@@ -96,36 +97,40 @@ check_language(CUDA)
 
 if(CMAKE_CUDA_COMPILER)
   enable_language(CUDA)
-  if(CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 12.0.0)
-    message(FATAL_ERROR "CUDA 12.0 or higher is required. Found: ${CMAKE_CUDA_COMPILER_VERSION}")
-  else()
-    message(STATUS "Found CUDA ${CMAKE_CUDA_COMPILER_VERSION}.")
+  if(CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 12.6.0)
+    message(FATAL_ERROR "CUDA 12.6 or higher is required. Found: ${CMAKE_CUDA_COMPILER_VERSION}")
   endif()
+  message(STATUS "Found CUDA ${CMAKE_CUDA_COMPILER_VERSION}.")
 
-  set(CMAKE_CUDA_STANDARD 20)
+  # Find CUDA Toolkit for proper include dirs and linking
+  find_package(CUDAToolkit REQUIRED)
+
+  set(CMAKE_CUDA_STANDARD ${CMAKE_CXX_STANDARD})
   set(CMAKE_CUDA_STANDARD_REQUIRED ON)
   set(CMAKE_CUDA_EXTENSIONS OFF)
-  set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -c -Xcompiler=-Wall,-Wextra --expt-extended-lambda")
-  set(CMAKE_CUDA_FLAGS_DEBUG "-G -g")
-  set(CMAKE_CUDA_FLAGS_RELEASE "-O3 -DNDEBUG")
-  # Optional performance flags (CUDA)
-  if(${PROJECT_NAME}_OPTIMIZE_NATIVE)
-    # Add native arch for the host compiler part of CUDA compilation
-    set(CMAKE_CUDA_FLAGS_RELEASE "${CMAKE_CUDA_FLAGS_RELEASE} -Xcompiler=-march=native")
-    message(
-      STATUS "Native CPU optimizations enabled (-Xcompiler=-march=native) for CUDA Release builds."
-    )
-  endif()
-  if(${PROJECT_NAME}_FAST_MATH)
-    set(CMAKE_CUDA_FLAGS_RELEASE "${CMAKE_CUDA_FLAGS_RELEASE} --use-fast-math")
-    message(STATUS "Fast math enabled (--use-fast-math) for CUDA Release builds.")
-  endif()
-  set(CMAKE_CUDA_USE_RESPONSE_FILE_FOR_INCLUDES 0)
-  add_compile_definitions(${PROJECT_NAME}_ENABLE_CUDA)
 
+  # Define a target for CUDA compilation options
+  set(LOKI_CUDA_OPTIONS ${PROJECT_NAME}_CUDA_OPTIONS)
+  add_library(${LOKI_CUDA_OPTIONS} INTERFACE)
+  target_compile_options(
+    ${LOKI_CUDA_OPTIONS}
+    INTERFACE $<$<COMPILE_LANGUAGE:CUDA>:
+              -Wno-pedantic
+              --expt-extended-lambda
+              --expt-relaxed-constexpr
+              -Xcompiler=-Wall,-Wextra
+              $<$<CONFIG:Debug>:-G;-g>
+              $<$<CONFIG:Release>:-O3;-use_fast_math>
+              >
+  )
+  set(CMAKE_CUDA_ARCHITECTURES native)
+  message(STATUS "CUDA Architectures: ${CMAKE_CUDA_ARCHITECTURES}")
+  # Disable response files for better IDE integration
+  set(CMAKE_CUDA_USE_RESPONSE_FILE_FOR_INCLUDES OFF)
+  add_compile_definitions(LOKI_ENABLE_CUDA)
 else()
-  message(STATUS "CUDA compiler not found or language check failed. GPU code will not be built.")
-  remove_definitions(${PROJECT_NAME}_ENABLE_CUDA)
+  message(STATUS "CUDA compiler not found. GPU code will not be built.")
+  remove_definitions(LOKI_ENABLE_CUDA)
 endif()
 
 # CPM.cmake Setup
@@ -141,41 +146,21 @@ if(DEFINED ENV{CPM_SOURCE_CACHE})
   )
 endif()
 
-# Code coverage setup
-if(${PROJECT_NAME}_ENABLE_COVERAGE)
-  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    add_library(coverage_config INTERFACE)
-    target_compile_options(coverage_config INTERFACE --coverage)
-    target_link_options(coverage_config INTERFACE --coverage)
-    message(STATUS "Code coverage enabled.")
-  else()
-    message(
-      WARNING "Code coverage requested, but not supported for compiler ${CMAKE_CXX_COMPILER_ID}."
-    )
-    set(${PROJECT_NAME}_ENABLE_COVERAGE
-        OFF
-        CACHE BOOL "" FORCE
-    )
-    add_library(coverage_config INTERFACE)
-  endif()
-else()
-  add_library(coverage_config INTERFACE)
-endif()
-
-# Add subdirectories
+# Define library names and Add subdirectories
 set(LOKI_LIBRARY_NAME ${PROJECT_NAME})
+set(LOKI_PYTHON_LIBRARY_NAME libloki)
 add_subdirectory(lib)
-if(${PROJECT_NAME}_BUILD_PYTHON)
+if(BUILD_PYTHON)
   add_subdirectory(src)
 endif()
-if(${PROJECT_NAME}_BUILD_TESTING)
+if(BUILD_TESTING)
   add_subdirectory(tests/cpp)
 endif()
-if(${PROJECT_NAME}_BUILD_BENCHMARKS)
+if(BUILD_BENCHMARKS)
   add_subdirectory(bench)
 endif()
 
-# Installation
+# Install targets
 install(
   TARGETS ${LOKI_LIBRARY_NAME} ${LOKI_COMPILE_OPTIONS} coverage_config
   EXPORT ${PROJECT_NAME}Targets
@@ -185,9 +170,19 @@ install(
   INCLUDES
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
-install(DIRECTORY ${CMAKE_CURRENT_LIST_DIR}/include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
-# Export targets
+# Also install CUDA options if available
+if(CMAKE_CUDA_COMPILER)
+  install(
+    TARGETS ${LOKI_CUDA_OPTIONS}
+    EXPORT ${PROJECT_NAME}Targets
+  )
+endif()
+
+# Install headers
+install(DIRECTORY ${CMAKE_SOURCE_DIR}/include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+
+# Generate and install export file
 install(
   EXPORT ${PROJECT_NAME}Targets
   FILE ${PROJECT_NAME}Targets.cmake
