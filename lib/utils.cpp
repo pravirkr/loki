@@ -15,10 +15,14 @@ SizeType next_power_of_two(SizeType n) noexcept {
 }
 
 float diff_max(std::span<const float> x, std::span<const float> y) {
-    float max_diff = -std::numeric_limits<float>::max();
-#pragma omp simd reduction(max : max_diff)
-    for (SizeType i = 0; i < x.size(); ++i) {
-        max_diff = std::max(max_diff, x[i] - y[i]);
+    const SizeType size             = x.size();
+    const float* __restrict__ x_ptr = x.data();
+    const float* __restrict__ y_ptr = y.data();
+
+    float max_diff = -std::numeric_limits<float>::infinity();
+#pragma omp simd simdlen(16) reduction(max : max_diff)
+    for (SizeType i = 0; i < size; ++i) {
+        max_diff = std::max(max_diff, x_ptr[i] - y_ptr[i]);
     }
     return max_diff;
 }

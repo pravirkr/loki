@@ -42,7 +42,7 @@ option(BUILD_PYTHON "Build Python bindings" ON)
 option(BUILD_TESTING "Build tests" OFF)
 option(BUILD_BENCHMARKS "Build benchmarks" OFF)
 option(ENABLE_COVERAGE "Enable coverage reporting" OFF)
-option(ENABLE_IPO "Enable Interprocedural Optimization (Link-Time Optimization)" ON)
+option(ENABLE_IPO "Enable Interprocedural Optimization (Link-Time Optimization)" OFF)
 
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 20)
