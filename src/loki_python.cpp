@@ -258,7 +258,30 @@ PYBIND11_MODULE(libloki, m) {
              py::arg("tseg_cur"));
 
     auto m_ffa = m.def_submodule("ffa", "FFA submodule");
+    PYBIND11_NUMPY_DTYPE(algorithms::FFACoord, i_tail, shift_tail, i_head,
+                         shift_head);
     py::class_<FFAPlan>(m_ffa, "FFAPlan")
+        .def_property_readonly("segment_lens",
+                               [](const FFAPlan& self) {
+                                   return as_pyarray_ref(self.segment_lens);
+                               })
+        .def_property_readonly(
+            "tsegments",
+            [](const FFAPlan& self) { return as_pyarray_ref(self.tsegments); })
+        .def_property_readonly(
+            "params",
+            [](const FFAPlan& self) { return as_listof_pyarray(self.params); })
+        .def_property_readonly(
+            "dparams",
+            [](const FFAPlan& self) { return as_listof_pyarray(self.dparams); })
+        .def_property_readonly("fold_shapes",
+                               [](const FFAPlan& self) {
+                                   return as_listof_pyarray(self.fold_shapes);
+                               })
+        .def_property_readonly("coordinates",
+                               [](const FFAPlan& self) {
+                                   return as_listof_pyarray(self.coordinates);
+                               })
         .def_property_readonly("memory_usage", &FFAPlan::get_memory_usage)
         .def_property_readonly("buffer_size", &FFAPlan::get_buffer_size)
         .def_property_readonly("fold_size", &FFAPlan::get_fold_size);
@@ -266,12 +289,14 @@ PYBIND11_MODULE(libloki, m) {
     py::class_<FFA>(m_ffa, "FFA")
         .def(py::init<PulsarSearchConfig>(), py::arg("cfg"))
         .def_property_readonly("plan", &FFA::get_plan)
-        .def("execute", [](FFA& self, const PyArrayT<float>& ts_e,
-                           const PyArrayT<float>& ts_v, PyArrayT<float>& fold) {
-            self.execute(to_span<const float>(ts_e), to_span<const float>(ts_v),
-                         to_span<float>(fold));
-        },
-        py::arg("ts_e"), py::arg("ts_v"), py::arg("fold"));
+        .def(
+            "execute",
+            [](FFA& self, const PyArrayT<float>& ts_e,
+               const PyArrayT<float>& ts_v, PyArrayT<float>& fold) {
+                self.execute(to_span<const float>(ts_e),
+                             to_span<const float>(ts_v), to_span<float>(fold));
+            },
+            py::arg("ts_e"), py::arg("ts_v"), py::arg("fold"));
 
     m_ffa.def(
         "compute_ffa",

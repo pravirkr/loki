@@ -70,8 +70,8 @@ public:
                   SizeType nbins,
                   SizeType nsamps,
                   double tsamp,
-                  double t_ref = 0.0,
-                  int nthreads = 1);
+                  double t_ref  = 0.0,
+                  int device_id = 0);
     ~BruteFoldCUDA();
     BruteFoldCUDA(BruteFoldCUDA&&) noexcept;
     BruteFoldCUDA& operator=(BruteFoldCUDA&&) noexcept;
@@ -86,9 +86,13 @@ public:
      * @param ts_v Time series variance
      * @param fold  Folded time series with shape [nsegments, nfreqs, 2, nbins]
      */
+    void execute(std::span<const float> ts_e,
+                 std::span<const float> ts_v,
+                 std::span<float> fold);
     void execute(cuda::std::span<const float> ts_e,
                  cuda::std::span<const float> ts_v,
-                 cuda::std::span<float> fold);
+                 cuda::std::span<float> fold,
+                 cudaStream_t stream = nullptr);
 
 private:
     class Impl;

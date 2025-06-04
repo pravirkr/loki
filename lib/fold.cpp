@@ -10,13 +10,13 @@ namespace loki::algorithms {
 
 class BruteFold::Impl {
 public:
-    explicit Impl(std::span<const double> freq_arr,
-                  SizeType segment_len,
-                  SizeType nbins,
-                  SizeType nsamps,
-                  double tsamp,
-                  double t_ref,
-                  int nthreads)
+    Impl(std::span<const double> freq_arr,
+         SizeType segment_len,
+         SizeType nbins,
+         SizeType nsamps,
+         double tsamp,
+         double t_ref,
+         int nthreads)
         : m_freq_arr(freq_arr.begin(), freq_arr.end()),
           m_segment_len(segment_len),
           m_nbins(nbins),

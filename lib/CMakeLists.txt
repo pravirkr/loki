@@ -4,36 +4,21 @@ set(LOKI_LIBRARY_ALL_SOURCES ${LOKI_LIBRARY_CXX_SOURCES})
 
 # Add CUDA sources if available
 if(CMAKE_CUDA_COMPILER)
-  file(GLOB LOKI_LIBRARY_CUDA_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*.cu)
-  list(APPEND LOKI_LIBRARY_ALL_SOURCES ${LOKI_LIBRARY_CUDA_SOURCES})
+  #file(GLOB LOKI_LIBRARY_CUDA_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*.cu)
+  #list(APPEND LOKI_LIBRARY_ALL_SOURCES ${LOKI_LIBRARY_CUDA_SOURCES})
 
   # Explicitly set CUDA files to be compiled with CUDA
-  set_source_files_properties(${LOKI_LIBRARY_CUDA_SOURCES} PROPERTIES LANGUAGE CUDA)
+  #set_source_files_properties(${LOKI_LIBRARY_CUDA_SOURCES} PROPERTIES LANGUAGE CUDA)
 endif()
 
 add_library(${LOKI_LIBRARY_NAME} ${LOKI_LIBRARY_ALL_SOURCES})
 add_library(${PROJECT_NAME}::${LOKI_LIBRARY_NAME} ALIAS ${LOKI_LIBRARY_NAME})
 
-# Set include directories
-target_include_directories(
-  ${LOKI_LIBRARY_NAME}
-  PUBLIC $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
-         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
-  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
-)
-
-# Add CUDA include directories when available
-if(CMAKE_CUDA_COMPILER)
-  target_include_directories(${LOKI_LIBRARY_NAME} 
-    PUBLIC ${CUDAToolkit_INCLUDE_DIRS}
-  )
-endif()
-
 # System dependencies
 message(STATUS "Searching for required system dependencies...")
 find_package(OpenMP REQUIRED)
 find_package(HDF5 REQUIRED)
-find_package(FFTW REQUIRED)
+find_package(FFTW REQUIRED COMPONENTS FLOAT_LIB FLOAT_OPENMP_LIB)
 
 # CPM Dependencies
 message(STATUS "Searching for CPM dependencies (will download if not found locally)...")
@@ -61,21 +46,25 @@ CPMFindPackage(
   OPTIONS "XTENSOR_USE_XSIMD ON" "XTENSOR_USE_OPENMP ON"
 )
 
-# Boost (Using specific components, header-only for math)
-find_package(Boost 1.87.0 QUIET COMPONENTS math)
-if(NOT Boost_FOUND OR NOT Boost_math_FOUND)
-  message(STATUS "Local Boost::math not found or too old, downloading via CPM...")
+# Try to find header-only Boost for math(no COMPONENTS needed)
+find_package(Boost 1.83.0 QUIET)
+if(NOT Boost_FOUND)
+  message(STATUS "Boost not found or too old, downloading Boost.Math via CPM...")
   CPMAddPackage(
-    NAME Boost
-    VERSION 1.87.0
-    URL https://github.com/boostorg/math/archive/refs/tags/boost-1.87.0.tar.gz
+    NAME BoostMath
+    VERSION 1.83.0
+    URL https://github.com/boostorg/math/archive/refs/tags/boost-1.83.0.tar.gz
     DOWNLOAD_ONLY YES
   )
-  if(Boost_ADDED)
+  if(BoostMath_ADDED)
     add_library(Boost::math INTERFACE IMPORTED GLOBAL)
-    target_include_directories(Boost::math INTERFACE ${Boost_SOURCE_DIR}/include)
-    set(Boost_FOUND TRUE)
+    target_include_directories(Boost::math INTERFACE ${BoostMath_SOURCE_DIR}/include)
   endif()
+else()
+  # Use system headers
+  message(STATUS "Using system Boost headers for math: ${Boost_INCLUDE_DIRS}")
+  add_library(Boost::math INTERFACE IMPORTED GLOBAL)
+  target_include_directories(Boost::math INTERFACE ${Boost_INCLUDE_DIRS})
 endif()
 
 # HighFive (HDF5 C++ interface) - Depends on HDF5 found earlier
@@ -120,13 +109,27 @@ else()
   add_library(coverage_config INTERFACE)
 endif()
 
+# Set include directories
+target_include_directories(
+  ${LOKI_LIBRARY_NAME}
+  PUBLIC $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include/>
+         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+# Add CUDA include directories when available
+if(CMAKE_CUDA_COMPILER)
+  target_include_directories(${LOKI_LIBRARY_NAME} PUBLIC ${CUDAToolkit_INCLUDE_DIRS})
+endif()
+
 # Link libraries
 target_link_libraries(
   ${LOKI_LIBRARY_NAME}
   PRIVATE ${LOKI_COMPILE_OPTIONS} coverage_config
   PUBLIC OpenMP::OpenMP_CXX
          HDF5::HDF5
-         ${FFTW_FLOAT_OPENMP_LIB}
+         FFTW::Float 
+         FFTW::FloatOpenMP
          spdlog::spdlog_header_only
          xtensor
          Boost::math
@@ -136,7 +139,8 @@ target_link_libraries(
 
 # Add CUDA options and libraries when available
 if(CMAKE_CUDA_COMPILER)
-  target_link_libraries(${LOKI_LIBRARY_NAME} 
+  target_link_libraries(
+    ${LOKI_LIBRARY_NAME}
     PRIVATE ${LOKI_CUDA_OPTIONS}
     PUBLIC CUDA::cudart
     PRIVATE CUDA::cuda_driver
