@@ -6,7 +6,7 @@
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
 
-namespace loki::algorithms {
+namespace loki::plans {
 
 // FFA Coordinate plan for a single param coordinate in a single iteration
 struct FFACoord {
@@ -38,4 +38,4 @@ private:
     calculate_strides(std::span<const std::vector<double>> p_arr);
 };
 
-} // namespace loki::algorithms
+} // namespace loki::plans

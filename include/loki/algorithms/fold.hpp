@@ -98,6 +98,15 @@ private:
     class Impl;
     std::unique_ptr<Impl> m_impl;
 };
+
+std::vector<float> compute_brute_fold_cuda(std::span<const float> ts_e,
+                                           std::span<const float> ts_v,
+                                           std::span<const double> freq_arr,
+                                           SizeType segment_len,
+                                           SizeType nbins,
+                                           double tsamp,
+                                           double t_ref  = 0.0,
+                                           int device_id = 0);
 #endif // LOKI_ENABLE_CUDA
 
 } // namespace loki::algorithms

@@ -24,7 +24,7 @@ public:
     FFA(const FFA&)            = delete;
     FFA& operator=(const FFA&) = delete;
 
-    const FFAPlan& get_plan() const noexcept;
+    const plans::FFAPlan& get_plan() const noexcept;
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
                  std::span<float> fold);
@@ -43,7 +43,7 @@ std::vector<float> compute_ffa(std::span<const float> ts_e,
 
 class FFACUDA {
 public:
-    explicit FFACUDA(const search::PulsarSearchConfig& cfg);
+    FFACUDA(const search::PulsarSearchConfig& cfg, int device_id);
 
     ~FFACUDA();
     FFACUDA(FFACUDA&&) noexcept;
@@ -51,15 +51,24 @@ public:
     FFACUDA(const FFACUDA&)            = delete;
     FFACUDA& operator=(const FFACUDA&) = delete;
 
-    const FFAPlan& get_plan() const noexcept;
+    const plans::FFAPlan& get_plan() const noexcept;
+    void execute(std::span<const float> ts_e,
+                 std::span<const float> ts_v,
+                 std::span<float> fold);
     void execute(cuda::std::span<const float> ts_e,
                  cuda::std::span<const float> ts_v,
-                 cuda::std::span<float> fold);
+                 cuda::std::span<float> fold,
+                 cudaStream_t stream);
 
 private:
     class Impl;
     std::unique_ptr<Impl> m_impl;
 };
+
+std::vector<float> compute_ffa_cuda(std::span<const float> ts_e,
+                                    std::span<const float> ts_v,
+                                    const search::PulsarSearchConfig& cfg,
+                                    int device_id);
 #endif // LOKI_ENABLE_CUDA
 
 } // namespace loki::algorithms

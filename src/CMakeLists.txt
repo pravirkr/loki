@@ -13,16 +13,16 @@ target_link_libraries(
 install(TARGETS ${LOKI_PYMODULE_NAME} DESTINATION ${LOKI_LIBRARY_NAME})
 
 # GPU module (if CUDA is available)
-#if(CMAKE_CUDA_COMPILER)
-#  set(LOKI_PYGPUMODULE_NAME libcuda${LOKI_LIBRARY_NAME})
-#  pybind11_add_module(${LOKI_PYGPUMODULE_NAME} loki_python_cuda.cpp)
-#  target_include_directories(
-#    ${LOKI_PYGPUMODULE_NAME} PUBLIC ${PROJECT_SOURCE_DIR}/include ${CUDAToolkit_INCLUDE_DIRS}
-#  )
-#  target_link_libraries(
-#    ${LOKI_PYGPUMODULE_NAME}
-#    PUBLIC ${PROJECT_NAME}::${LOKI_LIBRARY_NAME} ${LOKI_COMPILE_OPTIONS}
-#    PRIVATE ${LOKI_CUDA_OPTIONS}
-#  )
-#  install(TARGETS ${LOKI_PYGPUMODULE_NAME} DESTINATION ${LOKI_LIBRARY_NAME})
-#endif()
+if(CMAKE_CUDA_COMPILER)
+  set(LOKI_PYGPUMODULE_NAME libcu${LOKI_LIBRARY_NAME})
+  pybind11_add_module(${LOKI_PYGPUMODULE_NAME} loki_python_cuda.cpp)
+  target_include_directories(
+    ${LOKI_PYGPUMODULE_NAME} PUBLIC ${PROJECT_SOURCE_DIR}/include ${CUDAToolkit_INCLUDE_DIRS}
+  )
+  target_link_libraries(
+    ${LOKI_PYGPUMODULE_NAME}
+    PUBLIC ${PROJECT_NAME}::${LOKI_LIBRARY_NAME} ${LOKI_COMPILE_OPTIONS}
+    PRIVATE ${LOKI_CUDA_OPTIONS}
+  )
+  install(TARGETS ${LOKI_PYGPUMODULE_NAME} DESTINATION ${LOKI_LIBRARY_NAME})
+endif()

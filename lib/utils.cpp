@@ -1,7 +1,6 @@
 #include "loki/utils.hpp"
 
 #include <algorithm>
-#include <cstddef>
 #include <numeric>
 #include <span>
 #include <stdexcept>
@@ -14,15 +13,13 @@ SizeType next_power_of_two(SizeType n) noexcept {
     return 1U << static_cast<SizeType>(std::ceil(std::log2(n)));
 }
 
-float diff_max(std::span<const float> x, std::span<const float> y) {
-    const SizeType size             = x.size();
-    const float* __restrict__ x_ptr = x.data();
-    const float* __restrict__ y_ptr = y.data();
-
+float diff_max(const float* __restrict__ x,
+               const float* __restrict__ y,
+               SizeType size) {
     float max_diff = -std::numeric_limits<float>::infinity();
 #pragma omp simd simdlen(16) reduction(max : max_diff)
     for (SizeType i = 0; i < size; ++i) {
-        max_diff = std::max(max_diff, x_ptr[i] - y_ptr[i]);
+        max_diff = std::max(max_diff, x[i] - y[i]);
     }
     return max_diff;
 }

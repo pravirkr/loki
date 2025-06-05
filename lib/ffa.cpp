@@ -57,7 +57,7 @@ public:
     Impl(Impl&&)                 = delete;
     Impl& operator=(Impl&&)      = delete;
 
-    const FFAPlan& get_plan() const { return m_ffa_plan; }
+    const plans::FFAPlan& get_plan() const { return m_ffa_plan; }
 
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
@@ -115,7 +115,7 @@ public:
 
 private:
     search::PulsarSearchConfig m_cfg;
-    FFAPlan m_ffa_plan;
+    plans::FFAPlan m_ffa_plan;
     int m_nthreads;
 
     // Buffers for the FFA plan
@@ -173,7 +173,9 @@ FFA::FFA(const search::PulsarSearchConfig& cfg)
 FFA::~FFA()                               = default;
 FFA::FFA(FFA&& other) noexcept            = default;
 FFA& FFA::operator=(FFA&& other) noexcept = default;
-const FFAPlan& FFA::get_plan() const noexcept { return m_impl->get_plan(); }
+const plans::FFAPlan& FFA::get_plan() const noexcept {
+    return m_impl->get_plan();
+}
 void FFA::execute(std::span<const float> ts_e,
                   std::span<const float> ts_v,
                   std::span<float> fold) {

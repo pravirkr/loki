@@ -12,7 +12,7 @@
 #include "loki/psr_utils.hpp"
 #include "loki/search/configs.hpp"
 
-namespace loki::algorithms {
+namespace loki::plans {
 
 FFAPlan::FFAPlan(search::PulsarSearchConfig cfg) : m_cfg(std::move(cfg)) {
     configure_plan();
@@ -122,4 +122,4 @@ FFAPlan::calculate_strides(std::span<const std::vector<double>> p_arr) {
     return strides;
 }
 
-} // namespace loki::algorithms
+} // namespace loki::plans

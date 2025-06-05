@@ -193,8 +193,8 @@ void snr_1d(std::span<const float> arr,
 
     std::vector<float> psum(nbins + wmax);
     utils::circular_prefix_sum(arr, std::span<float>(psum));
-    const float sum = psum[nbins - 1]; // sum of the input array
-    const std::span<float> psum_span(psum);
+    const float sum              = psum[nbins - 1]; // sum of the input array
+    float* __restrict__ psum_ptr = psum.data();
 
     for (SizeType iw = 0; iw < ntemplates; ++iw) {
         // Height and baseline of a boxcar filter with width w bins
@@ -204,8 +204,7 @@ void snr_1d(std::span<const float> arr,
                                      static_cast<float>(nbins * w));
         const float b =
             static_cast<float>(w) * h / static_cast<float>(nbins - w);
-        const float dmax = utils::diff_max(psum_span.subspan(w, nbins),
-                                           psum_span.subspan(0, nbins));
+        const float dmax = utils::diff_max(psum_ptr + w, psum_ptr, nbins);
         out[iw]          = ((h + b) * dmax - b * sum) / stdnoise;
     }
 }

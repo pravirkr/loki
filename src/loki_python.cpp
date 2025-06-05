@@ -13,7 +13,7 @@
 
 namespace loki {
 using algorithms::FFA;
-using algorithms::FFAPlan;
+using plans::FFAPlan;
 using detection::MatchedFilter;
 using search::PulsarSearchConfig;
 
@@ -258,7 +258,7 @@ PYBIND11_MODULE(libloki, m) {
              py::arg("tseg_cur"));
 
     auto m_ffa = m.def_submodule("ffa", "FFA submodule");
-    PYBIND11_NUMPY_DTYPE(algorithms::FFACoord, i_tail, shift_tail, i_head,
+    PYBIND11_NUMPY_DTYPE(plans::FFACoord, i_tail, shift_tail, i_head,
                          shift_head);
     py::class_<FFAPlan>(m_ffa, "FFAPlan")
         .def_property_readonly("segment_lens",

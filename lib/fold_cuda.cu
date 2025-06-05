@@ -55,22 +55,75 @@ __global__ void kernel_fold(const float* __restrict__ ts_e,
                             int segment_len,
                             int nbins,
                             int nsegments) {
-    const auto iseg  = static_cast<int>(blockIdx.z);
-    const auto ifreq = static_cast<int>(blockIdx.y);
     const auto isamp =
         static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
+    const auto ifreq = static_cast<int>(blockIdx.y);
 
-    if (iseg >= nsegments || ifreq >= nfreqs || isamp >= segment_len) {
+    if (isamp >= segment_len || ifreq >= nfreqs) {
         return;
     }
-    const auto ts_idx    = (iseg * segment_len) + isamp;
-    const auto phase_idx = (ifreq * segment_len) + isamp;
-    const auto phase_bin = phase_map[phase_idx];
-    const auto fold_base_idx =
-        (iseg * nfreqs * 2 * nbins) + (ifreq * 2 * nbins);
-    atomicAdd(&fold[fold_base_idx + phase_bin], ts_e[ts_idx]);
-    atomicAdd(&fold[fold_base_idx + nbins + phase_bin], ts_v[ts_idx]);
+    const auto phase_idx  = (ifreq * segment_len) + isamp;
+    const auto phase_bin  = phase_map[phase_idx];
+    const int freq_offset = ifreq * 2 * nbins;
+    for (int iseg = 0; iseg < nsegments; ++iseg) {
+        const int ts_idx        = (iseg * segment_len) + isamp;
+        const int fold_base_idx = (iseg * nfreqs * 2 * nbins) + freq_offset;
+
+        atomicAdd(&fold[fold_base_idx + phase_bin], ts_e[ts_idx]);
+        atomicAdd(&fold[fold_base_idx + nbins + phase_bin], ts_v[ts_idx]);
+    }
 }
+
+// Alternative: Use shared memory for even better performance
+__global__ void kernel_fold_shared_mem(const float* __restrict__ ts_e,
+                                       const float* __restrict__ ts_v,
+                                       const uint32_t* __restrict__ phase_map,
+                                       float* __restrict__ fold,
+                                       int nfreqs,
+                                       int segment_len,
+                                       int nbins,
+                                       int nsegments) {
+    // One block per frequency, each block processes all samples for that
+    // frequency
+    extern __shared__ float shared_bins[];
+    float* shared_e = shared_bins;
+    float* shared_v = shared_bins + nbins;
+
+    const auto tid               = static_cast<int>(threadIdx.x);
+    const auto ifreq             = static_cast<int>(blockIdx.y);
+    const auto threads_per_block = static_cast<int>(blockDim.x);
+
+    for (int iseg = 0; iseg < nsegments; ++iseg) {
+        // Initialize shared memory for this segment
+        for (int bin = tid; bin < nbins; bin += threads_per_block) {
+            shared_e[bin] = 0.0F;
+            shared_v[bin] = 0.0F;
+        }
+        __syncthreads();
+
+        // Process samples for this frequency and segment
+        for (int isamp = tid; isamp < segment_len; isamp += threads_per_block) {
+            const auto phase_idx = (ifreq * segment_len) + isamp;
+            const auto phase_bin = phase_map[phase_idx];
+            const auto ts_idx    = (iseg * segment_len) + isamp;
+
+            // Accumulate in shared memory
+            atomicAdd(&shared_e[phase_bin], ts_e[ts_idx]);
+            atomicAdd(&shared_v[phase_bin], ts_v[ts_idx]);
+        }
+        __syncthreads();
+
+        // Write shared memory results to global memory for this segment
+        const auto fold_base_idx =
+            (iseg * nfreqs * 2 * nbins) + (ifreq * 2 * nbins);
+        for (int bin = tid; bin < nbins; bin += threads_per_block) {
+            atomicAdd(&fold[fold_base_idx + bin], shared_e[bin]);
+            atomicAdd(&fold[fold_base_idx + nbins + bin], shared_v[bin]);
+        }
+        __syncthreads();
+    }
+}
+
 } // namespace
 
 namespace loki::algorithms {
@@ -209,15 +262,31 @@ private:
                         const float* __restrict__ ts_v_d,
                         float* __restrict__ fold_d,
                         cudaStream_t stream) {
-        const dim3 block_dim(256, 1, 1);
-        const dim3 grid_dim((m_segment_len + block_dim.x - 1) / block_dim.x,
-                            static_cast<int>(m_nfreqs),
-                            static_cast<int>(m_nsegments));
-        cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
-        kernel_fold<<<grid_dim, block_dim, 0, stream>>>(
-            ts_e_d, ts_v_d, thrust::raw_pointer_cast(m_phase_map_d.data()),
-            fold_d, static_cast<int>(m_nfreqs), static_cast<int>(m_segment_len),
-            static_cast<int>(m_nbins), static_cast<int>(m_nsegments));
+        // Use shared memory for small bin counts
+        if (m_nbins <= 512) {
+            const dim3 block_dim(256);
+            const dim3 grid_dim(1, m_nfreqs);
+            const auto shared_mem_size =
+                static_cast<int>(2 * m_nbins * sizeof(float));
+
+            cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
+            kernel_fold_shared_mem<<<grid_dim, block_dim, shared_mem_size,
+                                     stream>>>(
+                ts_e_d, ts_v_d, thrust::raw_pointer_cast(m_phase_map_d.data()),
+                fold_d, static_cast<int>(m_nfreqs),
+                static_cast<int>(m_segment_len), static_cast<int>(m_nbins),
+                static_cast<int>(m_nsegments));
+        } else {
+            const dim3 block_dim(256);
+            const dim3 grid_dim((m_segment_len + block_dim.x - 1) / block_dim.x,
+                                static_cast<int>(m_nfreqs), 1);
+            cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
+            kernel_fold<<<grid_dim, block_dim, 0, stream>>>(
+                ts_e_d, ts_v_d, thrust::raw_pointer_cast(m_phase_map_d.data()),
+                fold_d, static_cast<int>(m_nfreqs),
+                static_cast<int>(m_segment_len), static_cast<int>(m_nbins),
+                static_cast<int>(m_nsegments));
+        }
         cuda_utils::check_last_cuda_error("kernel_fold launch failed");
     }
 }; // End BruteFoldCUDA::Impl definition
@@ -249,6 +318,22 @@ void BruteFoldCUDA::execute(cuda::std::span<const float> ts_e,
                             cuda::std::span<float> fold,
                             cudaStream_t stream) {
     m_impl->execute_d(ts_e, ts_v, fold, stream);
+}
+
+std::vector<float> compute_brute_fold_cuda(std::span<const float> ts_e,
+                                           std::span<const float> ts_v,
+                                           std::span<const double> freq_arr,
+                                           SizeType segment_len,
+                                           SizeType nbins,
+                                           double tsamp,
+                                           double t_ref,
+                                           int device_id) {
+    const SizeType nsamps = ts_e.size();
+    BruteFoldCUDA bf(freq_arr, segment_len, nbins, nsamps, tsamp, t_ref,
+                     device_id);
+    std::vector<float> fold(bf.get_fold_size(), 0.0F);
+    bf.execute(ts_e, ts_v, std::span<float>(fold));
+    return fold;
 }
 
 } // namespace loki::algorithms

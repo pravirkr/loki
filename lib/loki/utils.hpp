@@ -16,7 +16,9 @@ inline constexpr double kCval = 299792458.0;
 SizeType next_power_of_two(SizeType n) noexcept;
 
 // return max(x[i] - y[i])
-float diff_max(std::span<const float> x, std::span<const float> y);
+float diff_max(const float* __restrict__ x,
+               const float* __restrict__ y,
+               SizeType size);
 
 // out[nsum] = x[0] + x[1] + ... + x[size-1] + x[0] + x[1] + ...
 void circular_prefix_sum(std::span<const float> x, std::span<float> out);
