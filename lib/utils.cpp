@@ -67,7 +67,7 @@ SizeType find_nearest_sorted_idx(std::span<const double> arr_sorted,
     SizeType idx = std::distance(arr_sorted.begin(), it);
 
     if (it != arr_sorted.end()) {
-        if (it != arr_sorted.begin() && val - *(it - 1) < *it - val) {
+        if (it != arr_sorted.begin() && val - *(it - 1) <= *it - val) {
             idx--;
         }
     } else {

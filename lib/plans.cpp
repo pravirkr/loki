@@ -1,5 +1,6 @@
 #include "loki/algorithms/plans.hpp"
 
+#include <cstdint>
 #include <numeric>
 #include <ranges>
 #include <utility>
@@ -27,7 +28,7 @@ SizeType FFAPlan::get_buffer_size() const noexcept {
 }
 
 SizeType FFAPlan::get_memory_usage() const noexcept {
-    return get_buffer_size() * sizeof(float);
+    return 2 * get_buffer_size() * sizeof(float);
 }
 
 SizeType FFAPlan::get_fold_size() const noexcept {
@@ -79,8 +80,20 @@ void FFAPlan::configure_plan() {
         }
     }
     // Now resolve the params for the FFA plan
+    // First do level 0 (important for book-keeping, ncoords_prev!)
+    std::vector<double> p_set_cur(m_cfg.get_nparams());
+    for (const auto& p_set_view : utils::cartesian_product_view(params[0])) {
+        for (SizeType iparam = 0; iparam < m_cfg.get_nparams(); ++iparam) {
+            p_set_cur[iparam] = p_set_view[iparam];
+        }
+        const auto coord_cur = FFACoord{.i_tail     = SIZE_MAX,
+                                        .shift_tail = SIZE_MAX,
+                                        .i_head     = SIZE_MAX,
+                                        .shift_head = SIZE_MAX};
+        coordinates[0].emplace_back(coord_cur);
+    }
+
     for (SizeType i_level = 1; i_level < levels; ++i_level) {
-        std::vector<double> p_set_cur(m_cfg.get_nparams());
         const auto strides = calculate_strides(params[i_level - 1]);
         for (const auto& p_set_view :
              utils::cartesian_product_view(params[i_level])) {

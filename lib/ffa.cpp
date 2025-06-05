@@ -38,6 +38,7 @@ inline void shift_add(const float* __restrict__ data_tail,
         out_row1[j] = data_tail_row1[idx_tail] + data_head_row1[idx_head];
     }
 }
+
 } // namespace
 
 class FFA::Impl {
@@ -142,15 +143,15 @@ private:
     void execute_iter(const float* __restrict__ fold_in,
                       float* __restrict__ fold_out,
                       SizeType i_level) {
-        const auto& coords_cur  = m_ffa_plan.coordinates[i_level];
-        const auto& coords_prev = m_ffa_plan.coordinates[i_level - 1];
+        const auto coords_cur   = m_ffa_plan.coordinates[i_level];
+        const auto coords_prev  = m_ffa_plan.coordinates[i_level - 1];
         const auto nsegments    = m_ffa_plan.fold_shapes[i_level][0];
         const auto nbins        = m_ffa_plan.fold_shapes[i_level].back();
         const auto ncoords_cur  = coords_cur.size();
         const auto ncoords_prev = coords_prev.size();
 #pragma omp parallel for num_threads(m_nthreads)
         for (SizeType icoord = 0; icoord < ncoords_cur; ++icoord) {
-            const auto& coord_cur = coords_cur[icoord];
+            const auto coord_cur = coords_cur[icoord];
             for (SizeType iseg = 0; iseg < nsegments; ++iseg) {
                 const auto tail_offset =
                     ((iseg * 2) * ncoords_prev * 2 * nbins) +
@@ -160,9 +161,12 @@ private:
                     (coord_cur.i_head * 2 * nbins);
                 const auto out_offset =
                     (iseg * ncoords_cur * 2 * nbins) + (icoord * 2 * nbins);
-                shift_add(fold_in + tail_offset, coord_cur.shift_tail,
-                          fold_in + head_offset, coord_cur.shift_head,
-                          fold_out + out_offset, nbins);
+
+                const float* fold_tail = &fold_in[tail_offset];
+                const float* fold_head = &fold_in[head_offset];
+                float* fold_sum        = &fold_out[out_offset];
+                shift_add(fold_tail, coord_cur.shift_tail, fold_head,
+                          coord_cur.shift_head, fold_sum, nbins);
             }
         }
     }

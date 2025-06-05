@@ -105,9 +105,13 @@ std::vector<double> shift_params_d(std::span<const double> param_vec,
     const auto n_out_min = std::min(n_out, nparams);
     std::vector<double> result(n_out_min, 0.0);
 
-    for (SizeType i = 0; i < nparams; ++i) {
-        for (SizeType j = 0; j <= i; ++j) {
-            const auto k = i - j;
+    // We want the last n_out_min rows of the transformation matrix
+    const auto start_row = nparams - n_out_min;
+
+    for (SizeType i = 0; i < n_out_min; ++i) {
+        const auto row = start_row + i;
+        for (SizeType j = 0; j <= row; ++j) {
+            const auto k = row - j;
             auto term =
                 std::pow(delta_t, k) / static_cast<double>(math::factorial(k));
             result[i] += param_vec[j] * term;
@@ -131,7 +135,7 @@ shift_params(std::span<const double> param_vec, double delta_t) {
         std::copy(dvec_new.begin(), dvec_new.end() - 2, param_vec_new.begin());
     }
     param_vec_new.back() =
-        param_vec.back() * (1.0 + dvec_new[nparams - 1] / utils::kCval);
+        param_vec.back() * (1.0 + dvec_new[nparams - 2] / utils::kCval);
     const auto delay_rel = dvec_new.back() / utils::kCval;
     return {param_vec_new, delay_rel};
 }
