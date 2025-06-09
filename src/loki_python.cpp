@@ -13,6 +13,7 @@
 
 namespace loki {
 using algorithms::FFA;
+using algorithms::FFACOMPLEX;
 using detection::MatchedFilter;
 using plans::FFAPlan;
 using search::PulsarSearchConfig;
@@ -284,7 +285,11 @@ PYBIND11_MODULE(libloki, m) {
                                })
         .def_property_readonly("memory_usage", &FFAPlan::get_memory_usage)
         .def_property_readonly("buffer_size", &FFAPlan::get_buffer_size)
-        .def_property_readonly("fold_size", &FFAPlan::get_fold_size);
+        .def_property_readonly("fold_size", &FFAPlan::get_fold_size)
+        .def_property_readonly("fold_size_complex",
+                               &FFAPlan::get_fold_size_complex)
+        .def_property_readonly("buffer_size_complex",
+                               &FFAPlan::get_buffer_size_complex);
 
     py::class_<FFA>(m_ffa, "FFA")
         .def(py::init<PulsarSearchConfig>(), py::arg("cfg"))
@@ -303,6 +308,36 @@ PYBIND11_MODULE(libloki, m) {
         [](const PyArrayT<float>& ts_e, const PyArrayT<float>& ts_v,
            const PulsarSearchConfig& cfg) {
             return as_pyarray(algorithms::compute_ffa(
+                to_span<const float>(ts_e), to_span<const float>(ts_v), cfg));
+        },
+        py::arg("ts_e"), py::arg("ts_v"), py::arg("cfg"));
+
+    py::class_<FFACOMPLEX>(m_ffa, "FFACOMPLEX")
+        .def(py::init<PulsarSearchConfig>(), py::arg("cfg"))
+        .def_property_readonly("plan", &FFACOMPLEX::get_plan)
+        .def(
+            "execute",
+            [](FFACOMPLEX& self, const PyArrayT<float>& ts_e,
+               const PyArrayT<float>& ts_v, PyArrayT<float>& fold) {
+                self.execute(to_span<const float>(ts_e),
+                             to_span<const float>(ts_v), to_span<float>(fold));
+            },
+            py::arg("ts_e"), py::arg("ts_v"), py::arg("fold"))
+        .def(
+            "execute",
+            [](FFACOMPLEX& self, const PyArrayT<float>& ts_e,
+               const PyArrayT<float>& ts_v, PyArrayT<ComplexType>& fold) {
+                self.execute(to_span<const float>(ts_e),
+                             to_span<const float>(ts_v),
+                             to_span<ComplexType>(fold));
+            },
+            py::arg("ts_e"), py::arg("ts_v"), py::arg("fold"));
+
+    m_ffa.def(
+        "compute_ffa_complex",
+        [](const PyArrayT<float>& ts_e, const PyArrayT<float>& ts_v,
+           const PulsarSearchConfig& cfg) {
+            return as_pyarray(algorithms::compute_ffa_complex(
                 to_span<const float>(ts_e), to_span<const float>(ts_v), cfg));
         },
         py::arg("ts_e"), py::arg("ts_v"), py::arg("cfg"));

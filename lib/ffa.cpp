@@ -17,14 +17,16 @@ namespace loki::algorithms {
 
 namespace {
 void shift_add(const float* __restrict__ data_tail,
-               SizeType phase_shift_tail,
+               double phase_shift_tail,
                const float* __restrict__ data_head,
-               SizeType phase_shift_head,
+               double phase_shift_head,
                float* __restrict__ out,
                SizeType nbins) {
 
-    const SizeType shift_tail = phase_shift_tail % nbins;
-    const SizeType shift_head = phase_shift_head % nbins;
+    const SizeType shift_tail =
+        static_cast<SizeType>(std::round(phase_shift_tail)) % nbins;
+    const SizeType shift_head =
+        static_cast<SizeType>(std::round(phase_shift_head)) % nbins;
 
     const float* __restrict__ data_tail_row1 = data_tail + nbins;
     const float* __restrict__ data_head_row1 = data_head + nbins;
@@ -145,12 +147,14 @@ private:
         const auto ncoords_cur  = coords_cur.size();
         const auto ncoords_prev = coords_prev.size();
 
-        constexpr SizeType BLOCK_SIZE = 8;
-#pragma omp parallel for num_threads(m_nthreads)
+        constexpr SizeType kBlockSize = 8;
+#pragma omp parallel for num_threads(m_nthreads) default(none)                 \
+    shared(fold_in, fold_out, coords_cur, coords_prev, nsegments, nbins,       \
+               ncoords_cur, ncoords_prev)
         for (SizeType icoord_block = 0; icoord_block < ncoords_cur;
-             icoord_block += BLOCK_SIZE) {
+             icoord_block += kBlockSize) {
             SizeType block_end =
-                std::min(icoord_block + BLOCK_SIZE, ncoords_cur);
+                std::min(icoord_block + kBlockSize, ncoords_cur);
             for (SizeType iseg = 0; iseg < nsegments; ++iseg) {
                 for (SizeType icoord = icoord_block; icoord < block_end;
                      ++icoord) {

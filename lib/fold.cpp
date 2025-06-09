@@ -93,7 +93,7 @@ private:
                 const auto proper_time =
                     (static_cast<double>(isamp) * m_tsamp) - m_t_ref;
                 m_phase_map[freq_offset_in + isamp] =
-                    static_cast<uint32_t>(psr_utils::get_phase_idx(
+                    static_cast<uint32_t>(psr_utils::get_phase_idx_int(
                         proper_time, m_freq_arr[ifreq], m_nbins, 0.0));
             }
         }

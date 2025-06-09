@@ -28,6 +28,9 @@ public:
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
                  std::span<float> fold);
+    void execute(std::span<const float> ts_e,
+                 std::span<const float> ts_v,
+                 std::span<ComplexType> fold);
 
 private:
     class Impl;

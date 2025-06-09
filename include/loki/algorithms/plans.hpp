@@ -10,10 +10,10 @@ namespace loki::plans {
 
 // FFA Coordinate plan for a single param coordinate in a single iteration
 struct FFACoord {
-    SizeType i_tail;     // Tail coordinate index in the previous iteration
-    SizeType shift_tail; // Shift in the tail coordinate
-    SizeType i_head;     // Head coordinate index in the previous iteration
-    SizeType shift_head; // Shift in the head coordinate
+    SizeType i_tail;   // Tail coordinate index in the previous iteration
+    double shift_tail; // Shift in the tail coordinate
+    SizeType i_head;   // Head coordinate index in the previous iteration
+    double shift_head; // Shift in the head coordinate
 };
 
 struct FFAPlan {

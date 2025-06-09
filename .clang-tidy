@@ -6,6 +6,7 @@ Checks: >
   clang-diagnostic-*,
   concurrency-*,
   cppcoreguidelines*,
+  -cppcoreguidelines-non-private-member-variables-in-classes,
   -cppcoreguidelines-avoid-magic-numbers,
   -cppcoreguidelines-init-variables,
   -cppcoreguidelines-pro-bounds-pointer-arithmetic,

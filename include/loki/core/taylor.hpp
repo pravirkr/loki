@@ -9,7 +9,7 @@
 
 namespace loki::core {
 
-std::tuple<std::vector<SizeType>, SizeType>
+std::tuple<std::vector<SizeType>, double>
 ffa_taylor_resolve(std::span<const double> pset_cur,
                    std::span<const std::vector<double>> param_arr,
                    SizeType ffa_level,
