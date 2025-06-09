@@ -36,6 +36,24 @@ SizeType FFAPlan::get_fold_size() const noexcept {
                            1, std::multiplies<>());
 }
 
+SizeType FFAPlan::get_buffer_size_complex() const noexcept {
+    return std::ranges::max(
+        fold_shapes | std::views::transform([](const auto& shape) {
+            auto complex_shape   = shape;
+            complex_shape.back() = complex_shape.back() / 2 + 1;
+            return std::accumulate(complex_shape.begin(), complex_shape.end(),
+                                   1, std::multiplies<>());
+        }));
+}
+
+SizeType FFAPlan::get_fold_size_complex() const noexcept {
+    // Final fold shape with RFFT transformation
+    auto complex_shape   = fold_shapes.back();
+    complex_shape.back() = complex_shape.back() / 2 + 1;
+    return std::accumulate(complex_shape.begin(), complex_shape.end(), 1,
+                           std::multiplies<>());
+}
+
 void FFAPlan::configure_plan() {
     const auto levels = m_cfg.get_niters_ffa() + 1;
     segment_lens.resize(levels);

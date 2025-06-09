@@ -38,6 +38,8 @@ struct FFACoordD {
 
 struct FFAPlanD {
     thrust::device_vector<int> nsegments;
+    thrust::device_vector<int> nbins;
+    thrust::device_vector<int> ncoords;
     thrust::device_vector<double> freqs_arr_start;
     FFACoordD coordinates;
 };
@@ -47,8 +49,12 @@ inline void transfer_ffa_plan_to_device(const FFAPlan& plan, FFAPlanD& plan_d) {
     const auto levels = static_cast<int>(plan.fold_shapes.size());
     // Transfer shape to device
     plan_d.nsegments.resize(levels);
+    plan_d.nbins.resize(levels);
+    plan_d.ncoords.resize(levels);
     for (int i = 0; i < levels; ++i) {
         plan_d.nsegments[i] = static_cast<int>(plan.fold_shapes[i][0]);
+        plan_d.nbins[i]     = static_cast<int>(plan.fold_shapes[i].back());
+        plan_d.ncoords[i]   = static_cast<int>(plan.coordinates[i].size());
     }
     plan_d.freqs_arr_start = plan.params[0].back();
 
@@ -58,16 +64,16 @@ inline void transfer_ffa_plan_to_device(const FFAPlan& plan, FFAPlanD& plan_d) {
     for (const auto& host_coords_iter : plan.coordinates) {
         total_size += host_coords_iter.size();
     }
-    i_tail.resize(total_size);
-    shift_tail.resize(total_size);
-    i_head.resize(total_size);
-    shift_head.resize(total_size);
+    i_tail.reserve(total_size);
+    shift_tail.reserve(total_size);
+    i_head.reserve(total_size);
+    shift_head.reserve(total_size);
     for (const auto& host_coords_iter : plan.coordinates) {
         for (const auto& coord : host_coords_iter) {
-            i_tail.emplace_back(coord.i_tail);
-            shift_tail.emplace_back(coord.shift_tail);
-            i_head.emplace_back(coord.i_head);
-            shift_head.emplace_back(coord.shift_head);
+            i_tail.emplace_back(static_cast<int>(coord.i_tail));
+            shift_tail.emplace_back(static_cast<int>(coord.shift_tail));
+            i_head.emplace_back(static_cast<int>(coord.i_head));
+            shift_head.emplace_back(static_cast<int>(coord.shift_head));
         }
     }
     plan_d.coordinates.i_tail     = i_tail;

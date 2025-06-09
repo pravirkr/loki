@@ -46,15 +46,50 @@ struct ComputePhase {
     }
 };
 
-// CUDA kernel for folding operation
-__global__ void kernel_fold(const float* __restrict__ ts_e,
-                            const float* __restrict__ ts_v,
-                            const uint32_t* __restrict__ phase_map,
-                            float* __restrict__ fold,
-                            int nfreqs,
-                            int segment_len,
-                            int nbins,
-                            int nsegments) {
+// CUDA kernel for folding operation with 1D block configuration
+__global__ void kernel_fold_segments(const float* __restrict__ ts_e,
+                                     const float* __restrict__ ts_v,
+                                     const uint32_t* __restrict__ phase_map,
+                                     float* __restrict__ fold,
+                                     int nfreqs,
+                                     int segment_len,
+                                     int nbins,
+                                     int nsegments) {
+    const auto tid = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
+    // Total (segment, sample) pairs
+    const auto total_work = nsegments * segment_len;
+
+    if (tid >= total_work) {
+        return;
+    }
+
+    // Decode thread ID to (segment, sample)
+    const int iseg  = tid / segment_len;
+    const int isamp = tid % segment_len;
+
+    // Process all frequencies for this (segment, sample) pair
+    for (int ifreq = 0; ifreq < nfreqs; ++ifreq) {
+        const auto phase_idx = (ifreq * segment_len) + isamp;
+        const auto phase_bin = phase_map[phase_idx];
+        const auto ts_idx    = (iseg * segment_len) + isamp;
+        const auto fold_base_idx =
+            (iseg * nfreqs * 2 * nbins) + (ifreq * 2 * nbins);
+
+        // Atomic add (but much less contention now!)
+        atomicAdd(&fold[fold_base_idx + phase_bin], ts_e[ts_idx]);
+        atomicAdd(&fold[fold_base_idx + nbins + phase_bin], ts_v[ts_idx]);
+    }
+}
+
+// CUDA kernel for folding operation with 2D block configuration
+__global__ void kernel_fold_2d(const float* __restrict__ ts_e,
+                               const float* __restrict__ ts_v,
+                               const uint32_t* __restrict__ phase_map,
+                               float* __restrict__ fold,
+                               int nfreqs,
+                               int segment_len,
+                               int nbins,
+                               int nsegments) {
     const auto isamp =
         static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
     const auto ifreq = static_cast<int>(blockIdx.y);
@@ -262,8 +297,20 @@ private:
                         const float* __restrict__ ts_v_d,
                         float* __restrict__ fold_d,
                         cudaStream_t stream) {
-        // Use shared memory for small bin counts
-        if (m_nbins <= 512) {
+        // Use 1D block configuration for small nfreqs
+        if (m_nfreqs <= 64) {
+            const auto total_work =
+                static_cast<int>(m_nsegments * m_segment_len);
+            const dim3 block_dim(512);
+            const dim3 grid_dim((total_work + block_dim.x - 1) / block_dim.x);
+            cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
+            kernel_fold_segments<<<grid_dim, block_dim, 0, stream>>>(
+                ts_e_d, ts_v_d, thrust::raw_pointer_cast(m_phase_map_d.data()),
+                fold_d, static_cast<int>(m_nfreqs),
+                static_cast<int>(m_segment_len), static_cast<int>(m_nbins),
+                static_cast<int>(m_nsegments));
+        } else if (m_nbins <= 512) {
+            // Use shared memory for small bin counts
             const dim3 block_dim(256);
             const dim3 grid_dim(1, m_nfreqs);
             const auto shared_mem_size =
@@ -277,11 +324,12 @@ private:
                 static_cast<int>(m_segment_len), static_cast<int>(m_nbins),
                 static_cast<int>(m_nsegments));
         } else {
+            // Use 2D block configuration for large nfreqs
             const dim3 block_dim(256);
             const dim3 grid_dim((m_segment_len + block_dim.x - 1) / block_dim.x,
                                 static_cast<int>(m_nfreqs), 1);
             cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
-            kernel_fold<<<grid_dim, block_dim, 0, stream>>>(
+            kernel_fold_2d<<<grid_dim, block_dim, 0, stream>>>(
                 ts_e_d, ts_v_d, thrust::raw_pointer_cast(m_phase_map_d.data()),
                 fold_d, static_cast<int>(m_nfreqs),
                 static_cast<int>(m_segment_len), static_cast<int>(m_nbins),

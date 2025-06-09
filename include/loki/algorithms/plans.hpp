@@ -29,7 +29,9 @@ struct FFAPlan {
 
     SizeType get_memory_usage() const noexcept;
     SizeType get_buffer_size() const noexcept;
+    SizeType get_buffer_size_complex() const noexcept;
     SizeType get_fold_size() const noexcept;
+    SizeType get_fold_size_complex() const noexcept;
 
 private:
     search::PulsarSearchConfig m_cfg;

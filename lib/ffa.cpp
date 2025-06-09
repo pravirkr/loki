@@ -5,23 +5,23 @@
 #include <utility>
 
 #include <indicators/cursor_control.hpp>
-#include <indicators/progress_bar.hpp>
+#include <omp.h>
 #include <spdlog/spdlog.h>
-#include <xsimd/xsimd.hpp>
 
 #include "loki/algorithms/fold.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
+#include "loki/utils.hpp"
 
 namespace loki::algorithms {
 
 namespace {
-inline void shift_add(const float* __restrict__ data_tail,
-                      SizeType phase_shift_tail,
-                      const float* __restrict__ data_head,
-                      SizeType phase_shift_head,
-                      float* __restrict__ out,
-                      SizeType nbins) {
+void shift_add(const float* __restrict__ data_tail,
+               SizeType phase_shift_tail,
+               const float* __restrict__ data_head,
+               SizeType phase_shift_head,
+               float* __restrict__ out,
+               SizeType nbins) {
 
     const SizeType shift_tail = phase_shift_tail % nbins;
     const SizeType shift_head = phase_shift_head % nbins;
@@ -82,19 +82,14 @@ public:
                             fold.size(), m_ffa_plan.get_fold_size()));
         }
         auto start = std::chrono::steady_clock::now();
-        indicators::show_console_cursor(false);
-        indicators::ProgressBar bar{
-            indicators::option::PrefixText{"Computing FFA"},
-            indicators::option::ShowPercentage(true),
-            indicators::option::ShowElapsedTime{true},
-            indicators::option::ShowRemainingTime{true},
-        };
         initialize(ts_e, ts_v);
         // Use raw pointers for swapping buffers
         float* fold_in_ptr  = m_fold_in.data();
         float* fold_out_ptr = m_fold_out.data();
         const auto levels   = m_cfg.get_niters_ffa() + 1;
 
+        indicators::show_console_cursor(false);
+        auto bar = utils::make_standard_bar("Computing FFA...");
         for (SizeType i_level = 1; i_level < levels - 1; ++i_level) {
             execute_iter(fold_in_ptr, fold_out_ptr, i_level);
             std::swap(fold_in_ptr, fold_out_ptr);
@@ -149,24 +144,32 @@ private:
         const auto nbins        = m_ffa_plan.fold_shapes[i_level].back();
         const auto ncoords_cur  = coords_cur.size();
         const auto ncoords_prev = coords_prev.size();
-#pragma omp parallel for num_threads(m_nthreads)
-        for (SizeType icoord = 0; icoord < ncoords_cur; ++icoord) {
-            const auto coord_cur = coords_cur[icoord];
-            for (SizeType iseg = 0; iseg < nsegments; ++iseg) {
-                const auto tail_offset =
-                    ((iseg * 2) * ncoords_prev * 2 * nbins) +
-                    (coord_cur.i_tail * 2 * nbins);
-                const auto head_offset =
-                    ((iseg * 2 + 1) * ncoords_prev * 2 * nbins) +
-                    (coord_cur.i_head * 2 * nbins);
-                const auto out_offset =
-                    (iseg * ncoords_cur * 2 * nbins) + (icoord * 2 * nbins);
 
-                const float* fold_tail = &fold_in[tail_offset];
-                const float* fold_head = &fold_in[head_offset];
-                float* fold_sum        = &fold_out[out_offset];
-                shift_add(fold_tail, coord_cur.shift_tail, fold_head,
-                          coord_cur.shift_head, fold_sum, nbins);
+        constexpr SizeType BLOCK_SIZE = 8;
+#pragma omp parallel for num_threads(m_nthreads)
+        for (SizeType icoord_block = 0; icoord_block < ncoords_cur;
+             icoord_block += BLOCK_SIZE) {
+            SizeType block_end =
+                std::min(icoord_block + BLOCK_SIZE, ncoords_cur);
+            for (SizeType iseg = 0; iseg < nsegments; ++iseg) {
+                for (SizeType icoord = icoord_block; icoord < block_end;
+                     ++icoord) {
+                    const auto& coord_cur = coords_cur[icoord];
+                    const auto tail_offset =
+                        ((iseg * 2) * ncoords_prev * 2 * nbins) +
+                        (coord_cur.i_tail * 2 * nbins);
+                    const auto head_offset =
+                        ((iseg * 2 + 1) * ncoords_prev * 2 * nbins) +
+                        (coord_cur.i_head * 2 * nbins);
+                    const auto out_offset =
+                        (iseg * ncoords_cur * 2 * nbins) + (icoord * 2 * nbins);
+
+                    const float* fold_tail = &fold_in[tail_offset];
+                    const float* fold_head = &fold_in[head_offset];
+                    float* fold_sum        = &fold_out[out_offset];
+                    shift_add(fold_tail, coord_cur.shift_tail, fold_head,
+                              coord_cur.shift_head, fold_sum, nbins);
+                }
             }
         }
     }

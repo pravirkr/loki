@@ -29,6 +29,32 @@ PYBIND11_MODULE(libculoki, m) { // NOLINT
         py::arg("ts_e"), py::arg("ts_v"), py::arg("freq_arr"),
         py::arg("segment_len"), py::arg("nbins"), py::arg("tsamp"),
         py::arg("t_ref") = 0.0F, py::arg("device_id") = 0);
+
+    auto m_ffa = m.def_submodule("ffa", "FFA submodule");
+
+    py::class_<algorithms::FFACUDA>(m_ffa, "FFACUDA")
+        .def(py::init<search::PulsarSearchConfig, int>(), py::arg("cfg"),
+             py::arg("device_id") = 0)
+        .def_property_readonly("plan", &algorithms::FFACUDA::get_plan)
+        .def(
+            "execute",
+            [](algorithms::FFACUDA& self, const PyArrayT<float>& ts_e,
+               const PyArrayT<float>& ts_v, PyArrayT<float>& fold) {
+                self.execute(to_span<const float>(ts_e),
+                             to_span<const float>(ts_v), to_span<float>(fold));
+            },
+            py::arg("ts_e"), py::arg("ts_v"), py::arg("fold"));
+
+    m_ffa.def(
+        "compute_ffa_cuda",
+        [](const PyArrayT<float>& ts_e, const PyArrayT<float>& ts_v,
+           const search::PulsarSearchConfig& cfg, int device_id) {
+            return as_pyarray(algorithms::compute_ffa_cuda(
+                to_span<const float>(ts_e), to_span<const float>(ts_v), cfg,
+                device_id));
+        },
+        py::arg("ts_e"), py::arg("ts_v"), py::arg("cfg"),
+        py::arg("device_id") = 0);
 }
 
 } // namespace loki

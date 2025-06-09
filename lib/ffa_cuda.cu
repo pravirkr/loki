@@ -13,12 +13,13 @@
 #include <thrust/transform.h>
 
 #include "loki/algorithms/fold.hpp"
+#include "loki/common/types.hpp"
 #include "loki/cuda_utils.cuh"
 #include "loki/plans_cuda.cuh"
 
 namespace {
 
-// CUDA kernel for FFA iteration processing multiple coordinates
+// OPTIMIZED: One thread per smallest work unit, optimized for memory coalescing
 __global__ void kernel_ffa_iter(const float* __restrict__ fold_in,
                                 float* __restrict__ fold_out,
                                 const loki::plans::FFACoordDPtrs coords,
@@ -27,35 +28,45 @@ __global__ void kernel_ffa_iter(const float* __restrict__ fold_in,
                                 int nsegments,
                                 int nbins) {
 
-    const int icoord = blockIdx.y;
-    const int iseg   = blockIdx.z;
-    const int j      = blockIdx.x * blockDim.x + threadIdx.x;
+    // 1D thread mapping with optimal work distribution
+    const auto tid = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
+    const auto total_work = ncoords_cur * nsegments * nbins;
 
-    if (icoord >= ncoords_cur || iseg >= nsegments || j >= nbins) {
+    if (tid >= total_work) {
         return;
     }
 
-    // Calculate offsets (same logic as CPU version)
-    const int tail_offset = ((iseg * 2) * ncoords_prev * 2 * nbins) +
-                            (coords.i_tail[icoord] * 2 * nbins);
-    const int head_offset = ((iseg * 2 + 1) * ncoords_prev * 2 * nbins) +
-                            (coords.i_head[icoord] * 2 * nbins);
+    // Decode thread ID to (icoord, iseg, ibin) - OPTIMIZED ORDER for coalescing
+    const int ibin   = tid % nbins; // Fastest varying (best for coalescing)
+    const int temp   = tid / nbins;
+    const int iseg   = temp % nsegments;
+    const int icoord = temp / nsegments;
+
+    // Precompute coordinate data (avoid repeated access)
+    const int coord_tail = coords.i_tail[icoord];
+    const int coord_head = coords.i_head[icoord];
+    const int shift_tail = coords.shift_tail[icoord] % nbins;
+    const int shift_head = coords.shift_head[icoord] % nbins;
+
+    const int idx_tail =
+        (ibin < shift_tail) ? (ibin + nbins - shift_tail) : (ibin - shift_tail);
+    const int idx_head =
+        (ibin < shift_head) ? (ibin + nbins - shift_head) : (ibin - shift_head);
+
+    // Calculate offsets
+    const int tail_offset =
+        ((iseg * 2) * ncoords_prev * 2 * nbins) + (coord_tail * 2 * nbins);
+    const int head_offset =
+        ((iseg * 2 + 1) * ncoords_prev * 2 * nbins) + (coord_head * 2 * nbins);
     const int out_offset =
         (iseg * ncoords_cur * 2 * nbins) + (icoord * 2 * nbins);
 
-    // Perform shift_add operation inline
-    const int shift_tail = coords.shift_tail[icoord] % nbins;
-    const int shift_head = coords.shift_head[icoord] % nbins;
-    const int idx_tail =
-        (j < shift_tail) ? (j + nbins - shift_tail) : (j - shift_tail);
-    const int idx_head =
-        (j < shift_head) ? (j + nbins - shift_head) : (j - shift_head);
-
-    // Process both e and v components
-    fold_out[out_offset + j] =
+    // Process both e and v components (vectorized access)
+    fold_out[out_offset + ibin] =
         fold_in[tail_offset + idx_tail] + fold_in[head_offset + idx_head];
-    fold_out[out_offset + j + nbins] = fold_in[tail_offset + idx_tail + nbins] +
-                                       fold_in[head_offset + idx_head + nbins];
+    fold_out[out_offset + ibin + nbins] =
+        fold_in[tail_offset + idx_tail + nbins] +
+        fold_in[head_offset + idx_head + nbins];
 }
 
 } // namespace
@@ -89,57 +100,46 @@ public:
                    std::span<float> fold) {
         check_inputs(ts_e.size(), ts_v.size(), fold.size());
 
+        // Resize buffers only if needed
+        if (m_ts_e_d.size() != ts_e.size()) {
+            m_ts_e_d.resize(ts_e.size());
+            m_ts_v_d.resize(ts_v.size());
+        }
+        if (m_fold_output_d.size() != fold.size()) {
+            m_fold_output_d.resize(fold.size());
+        }
         // Copy input data to device
         cudaStream_t stream = nullptr;
-        thrust::device_vector<float> ts_e_d(ts_e.begin(), ts_e.end());
-        thrust::device_vector<float> ts_v_d(ts_v.begin(), ts_v.end());
-        thrust::device_vector<float> fold_d(fold.size(), 0.0F);
+        cudaMemcpyAsync(thrust::raw_pointer_cast(m_ts_e_d.data()), ts_e.data(),
+                        ts_e.size() * sizeof(float), cudaMemcpyHostToDevice,
+                        stream);
+        cudaMemcpyAsync(thrust::raw_pointer_cast(m_ts_v_d.data()), ts_v.data(),
+                        ts_v.size() * sizeof(float), cudaMemcpyHostToDevice,
+                        stream);
 
-        // Execute FFA on device
-        execute_d(cuda::std::span<const float>(
-                      thrust::raw_pointer_cast(ts_e_d.data()), ts_e_d.size()),
-                  cuda::std::span<const float>(
-                      thrust::raw_pointer_cast(ts_v_d.data()), ts_v_d.size()),
-                  cuda::std::span<float>(
-                      thrust::raw_pointer_cast(fold_d.data()), fold_d.size()),
-                  stream);
+        // Execute FFA on device using persistent buffers
+        execute_d(
+            cuda::std::span<const float>(
+                thrust::raw_pointer_cast(m_ts_e_d.data()), m_ts_e_d.size()),
+            cuda::std::span<const float>(
+                thrust::raw_pointer_cast(m_ts_v_d.data()), m_ts_v_d.size()),
+            cuda::std::span<float>(
+                thrust::raw_pointer_cast(m_fold_output_d.data()),
+                m_fold_output_d.size()),
+            stream);
 
         // Copy result back to host
-        thrust::copy(fold_d.begin(), fold_d.end(), fold.begin());
+        thrust::copy(m_fold_output_d.begin(), m_fold_output_d.end(),
+                     fold.begin());
         spdlog::debug("FFACUDA::Impl: Host execution complete");
     }
 
-    void execute_d(cuda::std::span<const float> ts_e,
-                   cuda::std::span<const float> ts_v,
-                   cuda::std::span<float> fold,
+    void execute_d(cuda::std::span<const float> ts_e_d,
+                   cuda::std::span<const float> ts_v_d,
+                   cuda::std::span<float> fold_d,
                    cudaStream_t stream) {
-        check_inputs(ts_e.size(), ts_v.size(), fold.size());
-
-        // Initialize with BruteFoldCUDA
-        initialize_device(ts_e, ts_v, stream);
-
-        // Ping-pong between buffers for iterative FFA levels
-        float* fold_in_ptr  = thrust::raw_pointer_cast(m_fold_in_d.data());
-        float* fold_out_ptr = thrust::raw_pointer_cast(m_fold_out_d.data());
-        const auto levels   = m_cfg.get_niters_ffa() + 1;
-
-        // FFA iterations (levels 1 to levels-2)
-        for (loki::SizeType i_level = 1; i_level < levels - 1; ++i_level) {
-            execute_iter_device(fold_in_ptr, fold_out_ptr, i_level, stream);
-            std::swap(fold_in_ptr, fold_out_ptr);
-        }
-
-        // Last iteration writes directly to output
-        if (levels > 1) {
-            execute_iter_device(fold_in_ptr, fold.data(),
-                                m_cfg.get_niters_ffa(), stream);
-        } else {
-            // Single level case - just copy
-            cudaMemcpyAsync(fold.data(), fold_in_ptr,
-                            fold.size() * sizeof(float),
-                            cudaMemcpyDeviceToDevice, stream);
-        }
-
+        check_inputs(ts_e_d.size(), ts_v_d.size(), fold_d.size());
+        execute_device(ts_e_d, ts_v_d, fold_d, stream);
         spdlog::debug("FFACUDA::Impl: Device execution complete on stream");
     }
 
@@ -152,6 +152,11 @@ private:
     // Buffers for the FFA plan
     thrust::device_vector<float> m_fold_in_d;
     thrust::device_vector<float> m_fold_out_d;
+
+    // Add persistent input/output buffers
+    thrust::device_vector<float> m_ts_e_d;
+    thrust::device_vector<float> m_ts_v_d;
+    thrust::device_vector<float> m_fold_output_d;
 
     void check_inputs(loki::SizeType ts_e_size,
                       loki::SizeType ts_v_size,
@@ -175,8 +180,8 @@ private:
         }
     }
 
-    void initialize_device(cuda::std::span<const float> ts_e,
-                           cuda::std::span<const float> ts_v,
+    void initialize_device(cuda::std::span<const float> ts_e_d,
+                           cuda::std::span<const float> ts_v_d,
                            cudaStream_t stream) {
         const auto t_ref =
             m_cfg.get_nparams() == 1 ? 0.0 : m_ffa_plan.tsegments[0] / 2.0;
@@ -186,49 +191,63 @@ private:
                                      m_cfg.get_nbins(), m_cfg.get_nsamps(),
                                      m_cfg.get_tsamp(), t_ref, m_device_id);
 
-        bf.execute(ts_e, ts_v,
+        bf.execute(ts_e_d, ts_v_d,
                    cuda::std::span(thrust::raw_pointer_cast(m_fold_in_d.data()),
                                    bf.get_fold_size()),
                    stream);
     }
 
-    void execute_iter_device(const float* __restrict__ fold_in,
-                             float* __restrict__ fold_out,
-                             loki::SizeType i_level,
-                             cudaStream_t stream) {
+    void execute_device(cuda::std::span<const float> ts_e_d,
+                        cuda::std::span<const float> ts_v_d,
+                        cuda::std::span<float> fold_d,
+                        cudaStream_t stream) {
+        // Clear internal buffers before each execution
+        thrust::fill(m_fold_in_d.begin(), m_fold_in_d.end(), 0.0F);
+        initialize_device(ts_e_d, ts_v_d, stream);
 
-        const auto nsegments =
-            static_cast<int>(m_ffa_plan.fold_shapes[i_level][0]);
-        const auto nbins =
-            static_cast<int>(m_ffa_plan.fold_shapes[i_level].back());
-        const auto ncoords_cur =
-            static_cast<int>(m_ffa_plan.coordinates[i_level].size());
-        const auto ncoords_prev =
-            static_cast<int>(m_ffa_plan.coordinates[i_level - 1].size());
+        // Ping-pong between buffers for iterative FFA levels
+        float* fold_in_ptr  = thrust::raw_pointer_cast(m_fold_in_d.data());
+        float* fold_out_ptr = thrust::raw_pointer_cast(m_fold_out_d.data());
+        float* fold_d_ptr   = thrust::raw_pointer_cast(fold_d.data());
 
-        // Get device coordinate pointers for this level
-        auto coords_ptrs = m_ffa_plan_d.coordinates.get_raw_ptrs();
+        const auto levels = m_cfg.get_niters_ffa() + 1;
+        auto coords_cur   = m_ffa_plan_d.coordinates.get_raw_ptrs();
+        cuda_utils::check_last_cuda_error("thrust::raw_pointer_cast failed");
+        coords_cur.update_offsets(m_ffa_plan_d.ncoords[0]);
 
-        // Calculate offset for this level in the flattened coordinate arrays
-        // The coordinates are flattened sequentially: level 1, level 2, ...,
-        // level i
-        int coord_offset = 0;
-        for (loki::SizeType level = 1; level < i_level; ++level) {
-            coord_offset +=
-                static_cast<int>(m_ffa_plan.coordinates[level].size());
+        // FFA iterations (levels 1 to levels)
+        for (SizeType i_level = 1; i_level < levels; ++i_level) {
+            const auto nsegments    = m_ffa_plan_d.nsegments[i_level];
+            const auto nbins        = m_ffa_plan_d.nbins[i_level];
+            const auto ncoords_cur  = m_ffa_plan_d.ncoords[i_level];
+            const auto ncoords_prev = m_ffa_plan_d.ncoords[i_level - 1];
+
+            const int total_work = ncoords_cur * nsegments * nbins;
+            const int block_size = (total_work < 65536) ? 256 : 512;
+            const int grid_size  = (total_work + block_size - 1) / block_size;
+
+            const dim3 block_dim(block_size);
+            const dim3 grid_dim(grid_size);
+
+            cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
+
+            // Determine output buffer: final iteration writes to fold_d
+            float* current_out_ptr =
+                (i_level == levels - 1) ? fold_d_ptr : fold_out_ptr;
+
+            kernel_ffa_iter<<<grid_dim, block_dim, 0, stream>>>(
+                fold_in_ptr, current_out_ptr, coords_cur, ncoords_cur,
+                ncoords_prev, nsegments, nbins);
+            cuda_utils::check_last_cuda_error("kernel_ffa_iter launch failed");
+
+            // Ping-pong buffers (unless it's the final iteration)
+            if (i_level < levels - 1) {
+                coords_cur.update_offsets(ncoords_cur);
+                std::swap(fold_in_ptr, fold_out_ptr);
+            }
         }
-        coords_ptrs.update_offsets(coord_offset);
 
-        // Launch 3D kernel: (nbins, coordinates, segments)
-        const int threads_per_block = 256;
-        const dim3 block_dim(threads_per_block);
-        const dim3 grid_dim((nbins + threads_per_block - 1) / threads_per_block,
-                            ncoords_cur, nsegments);
-        cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
-        kernel_ffa_iter<<<grid_dim, block_dim, 0, stream>>>(
-            fold_in, fold_out, coords_ptrs, ncoords_cur, ncoords_prev,
-            nsegments, nbins);
-        cuda_utils::check_last_cuda_error("kernel_ffa_iter launch failed");
+        spdlog::debug("FFACUDA::Impl: Iterations submitted to stream.");
     }
 
 }; // End FFACUDA::Impl definition

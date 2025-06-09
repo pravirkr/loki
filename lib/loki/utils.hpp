@@ -2,8 +2,11 @@
 
 #include <random>
 #include <span>
+#include <string_view>
 #include <vector>
 
+#include <indicators/cursor_control.hpp>
+#include <indicators/progress_bar.hpp>
 #include <omp.h>
 
 #include "loki/common/types.hpp"
@@ -81,5 +84,22 @@ public:
                       [&]() { return dist(get_engine_for_current_thread()); });
     }
 };
+
+// Factory function for a standard ProgressBar
+inline indicators::ProgressBar make_standard_bar(std::string_view prefix) {
+    return indicators::ProgressBar{
+        indicators::option::BarWidth{50},
+        indicators::option::Start{" "},
+        indicators::option::Fill{"\u2501"},
+        indicators::option::Lead{"\u2501"},
+        indicators::option::Remainder{" "},
+        indicators::option::End{" "},
+        indicators::option::ForegroundColor{indicators::Color::red},
+        indicators::option::PrefixText{prefix},
+        indicators::option::ShowPercentage{true},
+        indicators::option::ShowElapsedTime{true},
+        indicators::option::ShowRemainingTime{true},
+        indicators::option::Stream{std::cerr}};
+}
 
 } // namespace loki::utils
