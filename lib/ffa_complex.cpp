@@ -76,8 +76,15 @@ public:
                          ComplexType(0.0F, 0.0F));
         m_fold_out.resize(m_ffa_plan.get_buffer_size_complex(),
                           ComplexType(0.0F, 0.0F));
-        assert(reinterpret_cast<uintptr_t>(m_fold_in.data()) % 32 == 0);
-        assert(reinterpret_cast<uintptr_t>(m_fold_out.data()) % 32 == 0);
+        // Initialize the brute fold
+        const auto t_ref =
+            m_cfg.get_nparams() == 1 ? 0.0 : m_ffa_plan.tsegments[0] / 2.0;
+        const auto freqs_arr = m_ffa_plan.params[0].back();
+
+        m_the_bf = std::make_unique<algorithms::BruteFold>(
+            freqs_arr, m_ffa_plan.segment_lens[0], m_cfg.get_nbins(),
+            m_cfg.get_nsamps(), m_cfg.get_tsamp(), t_ref, m_cfg.get_nthreads());
+        m_fold_in_tmp.resize(m_the_bf->get_fold_size(), 0.0F);
     }
 
     ~Impl()                      = default;
@@ -123,21 +130,21 @@ public:
                  std::span<ComplexType> fold) {
         if (ts_e.size() != m_cfg.get_nsamps()) {
             throw std::runtime_error(
-                std::format("ts must have size nsamps (got "
-                            "{} != {})",
-                            ts_e.size(), m_cfg.get_nsamps()));
+                std::format("FFACOMPLEX::Impl: ts_e must have size nsamps "
+                            "Expected {}, got {}",
+                            m_cfg.get_nsamps(), ts_e.size()));
         }
         if (ts_v.size() != ts_e.size()) {
             throw std::runtime_error(
-                std::format("ts variance must have size nsamps "
-                            "(got {} != {})",
-                            ts_v.size(), ts_e.size()));
+                std::format("FFACOMPLEX::Impl: ts_v must have size nsamps "
+                            "Expected {}, got {}",
+                            ts_e.size(), ts_v.size()));
         }
         if (fold.size() != m_ffa_plan.get_fold_size_complex()) {
             throw std::runtime_error(
-                std::format("Output array has wrong size (got "
-                            "{} != {})",
-                            fold.size(), m_ffa_plan.get_fold_size_complex()));
+                std::format("FFACOMPLEX::Impl: Output array has wrong size. "
+                            "Expected {}, got {}",
+                            m_ffa_plan.get_fold_size_complex(), fold.size()));
         }
         execute_core(ts_e, ts_v, fold);
     }
@@ -152,23 +159,19 @@ private:
     std::vector<ComplexType> m_fold_out;
     std::vector<float> m_fold_in_tmp;
 
+    std::unique_ptr<algorithms::BruteFold> m_the_bf;
+
     void initialize(std::span<const float> ts_e, std::span<const float> ts_v) {
         auto start = std::chrono::steady_clock::now();
         spdlog::info("FFA initialize");
-        const auto t_ref =
-            m_cfg.get_nparams() == 1 ? 0.0 : m_ffa_plan.tsegments[0] / 2.0;
-        const auto freqs_arr = m_ffa_plan.params[0].back();
-        algorithms::BruteFold bf(
-            freqs_arr, m_ffa_plan.segment_lens[0], m_cfg.get_nbins(),
-            m_cfg.get_nsamps(), m_cfg.get_tsamp(), t_ref, m_cfg.get_nthreads());
-        std::vector<float> fold_in_tmp(bf.get_fold_size(), 0.0F);
-        bf.execute(ts_e, ts_v, fold_in_tmp);
+        m_the_bf->execute(ts_e, ts_v, m_fold_in_tmp);
 
         // RFFT the input
-        const auto nfft         = bf.get_fold_size() / m_cfg.get_nbins();
+        const auto nfft         = m_the_bf->get_fold_size() / m_cfg.get_nbins();
         const auto complex_size = nfft * ((m_cfg.get_nbins() / 2) + 1);
         utils::rfft_batch(
-            fold_in_tmp, std::span<ComplexType>(m_fold_in.data(), complex_size),
+            m_fold_in_tmp,
+            std::span<ComplexType>(m_fold_in.data(), complex_size),
             static_cast<int>(nfft), static_cast<int>(m_cfg.get_nbins()),
             m_nthreads);
         auto end = std::chrono::steady_clock::now();

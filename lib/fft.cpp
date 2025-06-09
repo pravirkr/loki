@@ -1,5 +1,6 @@
 #include "loki/utils/fft.hpp"
 
+#include <format>
 #include <omp.h>
 #include <spdlog/spdlog.h>
 
@@ -72,12 +73,17 @@ void rfft_batch(std::span<float> real_input,
     ensure_fftw_threading(nthreads);
     const int n_complex = (n_real / 2) + 1;
     if (static_cast<int>(real_input.size()) != batch_size * n_real) {
-        throw std::runtime_error(
-            "RFFT batch: real_input size does not match batch size");
+        throw std::runtime_error(std::format(
+            "RFFT batch: real_input size does not match batch size. Expected "
+            "{}, got {}",
+            batch_size * n_real, real_input.size()));
     }
     if (static_cast<int>(complex_output.size()) != batch_size * n_complex) {
         throw std::runtime_error(
-            "RFFT batch: complex_output size does not match batch size");
+            std::format("RFFT batch: complex_output size does not match batch "
+                        "size. Expected "
+                        "{}, got {}",
+                        batch_size * n_complex, complex_output.size()));
     }
     auto* real_ptr    = real_input.data();
     auto* complex_ptr = reinterpret_cast<fftwf_complex*>(complex_output.data());

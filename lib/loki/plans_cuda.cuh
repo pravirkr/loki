@@ -10,9 +10,9 @@ namespace loki::plans {
 
 struct FFACoordDPtrs {
     const int* i_tail;
-    const int* shift_tail;
+    const double* shift_tail;
     const int* i_head;
-    const int* shift_head;
+    const double* shift_head;
 
     __host__ __device__ void update_offsets(int offset_value) {
         i_tail += offset_value;
@@ -24,9 +24,9 @@ struct FFACoordDPtrs {
 
 struct FFACoordD {
     thrust::device_vector<int> i_tail;
-    thrust::device_vector<int> shift_tail;
+    thrust::device_vector<double> shift_tail;
     thrust::device_vector<int> i_head;
-    thrust::device_vector<int> shift_head;
+    thrust::device_vector<double> shift_head;
 
     __host__ FFACoordDPtrs get_raw_ptrs() const {
         return {.i_tail     = thrust::raw_pointer_cast(i_tail.data()),
@@ -71,9 +71,9 @@ inline void transfer_ffa_plan_to_device(const FFAPlan& plan, FFAPlanD& plan_d) {
     for (const auto& host_coords_iter : plan.coordinates) {
         for (const auto& coord : host_coords_iter) {
             i_tail.emplace_back(static_cast<int>(coord.i_tail));
-            shift_tail.emplace_back(static_cast<int>(coord.shift_tail));
+            shift_tail.emplace_back(coord.shift_tail);
             i_head.emplace_back(static_cast<int>(coord.i_head));
-            shift_head.emplace_back(static_cast<int>(coord.shift_head));
+            shift_head.emplace_back(coord.shift_head);
         }
     }
     plan_d.coordinates.i_tail     = i_tail;

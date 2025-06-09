@@ -1,3 +1,5 @@
+#include "loki/algorithms/ffa.hpp"
+#include "loki/algorithms/ffa_complex.hpp"
 #include "pybind_utils.hpp"
 
 #include <pybind11/iostream.h>
@@ -8,6 +10,8 @@
 #include "loki/loki.hpp"
 
 namespace loki {
+using algorithms::FFACOMPLEXCUDA;
+using algorithms::FFACUDA;
 
 namespace py = pybind11;
 using namespace pybind11::literals; // NOLINT
@@ -32,13 +36,13 @@ PYBIND11_MODULE(libculoki, m) { // NOLINT
 
     auto m_ffa = m.def_submodule("ffa", "FFA submodule");
 
-    py::class_<algorithms::FFACUDA>(m_ffa, "FFACUDA")
+    py::class_<FFACUDA>(m_ffa, "FFACUDA")
         .def(py::init<search::PulsarSearchConfig, int>(), py::arg("cfg"),
              py::arg("device_id") = 0)
-        .def_property_readonly("plan", &algorithms::FFACUDA::get_plan)
+        .def_property_readonly("plan", &FFACUDA::get_plan)
         .def(
             "execute",
-            [](algorithms::FFACUDA& self, const PyArrayT<float>& ts_e,
+            [](FFACUDA& self, const PyArrayT<float>& ts_e,
                const PyArrayT<float>& ts_v, PyArrayT<float>& fold) {
                 self.execute(to_span<const float>(ts_e),
                              to_span<const float>(ts_v), to_span<float>(fold));
@@ -50,6 +54,30 @@ PYBIND11_MODULE(libculoki, m) { // NOLINT
         [](const PyArrayT<float>& ts_e, const PyArrayT<float>& ts_v,
            const search::PulsarSearchConfig& cfg, int device_id) {
             return as_pyarray(algorithms::compute_ffa_cuda(
+                to_span<const float>(ts_e), to_span<const float>(ts_v), cfg,
+                device_id));
+        },
+        py::arg("ts_e"), py::arg("ts_v"), py::arg("cfg"),
+        py::arg("device_id") = 0);
+
+    py::class_<FFACOMPLEXCUDA>(m_ffa, "FFACOMPLEXCUDA")
+        .def(py::init<search::PulsarSearchConfig, int>(), py::arg("cfg"),
+             py::arg("device_id") = 0)
+        .def_property_readonly("plan", &FFACOMPLEXCUDA::get_plan)
+        .def(
+            "execute",
+            [](FFACOMPLEXCUDA& self, const PyArrayT<float>& ts_e,
+               const PyArrayT<float>& ts_v, PyArrayT<float>& fold) {
+                self.execute(to_span<const float>(ts_e),
+                             to_span<const float>(ts_v), to_span<float>(fold));
+            },
+            py::arg("ts_e"), py::arg("ts_v"), py::arg("fold"));
+
+    m_ffa.def(
+        "compute_ffa_complex_cuda",
+        [](const PyArrayT<float>& ts_e, const PyArrayT<float>& ts_v,
+           const search::PulsarSearchConfig& cfg, int device_id) {
+            return as_pyarray(algorithms::compute_ffa_complex_cuda(
                 to_span<const float>(ts_e), to_span<const float>(ts_v), cfg,
                 device_id));
         },

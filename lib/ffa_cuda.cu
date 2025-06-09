@@ -45,8 +45,8 @@ __global__ void kernel_ffa_iter(const float* __restrict__ fold_in,
     // Precompute coordinate data (avoid repeated access)
     const int coord_tail = coords.i_tail[icoord];
     const int coord_head = coords.i_head[icoord];
-    const int shift_tail = coords.shift_tail[icoord] % nbins;
-    const int shift_head = coords.shift_head[icoord] % nbins;
+    const int shift_tail = __double2int_rn(coords.shift_tail[icoord]) % nbins;
+    const int shift_head = __double2int_rn(coords.shift_head[icoord]) % nbins;
 
     const int idx_tail =
         (ibin < shift_tail) ? (ibin + nbins - shift_tail) : (ibin - shift_tail);

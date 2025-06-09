@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "loki/algorithms/plans.hpp"
+#include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
 
 #ifdef LOKI_ENABLE_CUDA
@@ -61,6 +62,10 @@ public:
     void execute(cuda::std::span<const float> ts_e,
                  cuda::std::span<const float> ts_v,
                  cuda::std::span<float> fold,
+                 cudaStream_t stream);
+    void execute(cuda::std::span<const float> ts_e,
+                 cuda::std::span<const float> ts_v,
+                 cuda::std::span<ComplexTypeCUDA> fold,
                  cudaStream_t stream);
 
 private:

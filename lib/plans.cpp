@@ -105,9 +105,9 @@ void FFAPlan::configure_plan() {
             p_set_cur[iparam] = p_set_view[iparam];
         }
         const auto coord_cur = FFACoord{.i_tail     = SIZE_MAX,
-                                        .shift_tail = SIZE_MAX,
+                                        .shift_tail = 0,
                                         .i_head     = SIZE_MAX,
-                                        .shift_head = SIZE_MAX};
+                                        .shift_head = 0};
         coordinates[0].emplace_back(coord_cur);
     }
 
