@@ -15,6 +15,7 @@
 
 #include "loki/common/types.hpp"
 #include "loki/cuda_utils.cuh"
+#include "loki/exceptions.hpp"
 
 namespace {
 
@@ -179,13 +180,11 @@ public:
           m_tsamp(tsamp),
           m_t_ref(t_ref),
           m_device_id(device_id) {
-        if (m_freq_arr.empty()) {
-            throw std::runtime_error("Frequency array is empty");
-        }
-        if (m_nsamps % m_segment_len != 0) {
-            throw std::runtime_error(
-                "Number of samples is not a multiple of segment length");
-        }
+        error_check::check(!m_freq_arr.empty(),
+                           "BruteFoldCUDA::Impl: Frequency array is empty");
+        error_check::check(m_nsamps % m_segment_len == 0,
+                           "BruteFoldCUDA::Impl: Number of samples is not a "
+                           "multiple of segment length");
         cuda_utils::set_device(m_device_id);
         m_nfreqs    = m_freq_arr.size();
         m_nsegments = m_nsamps / m_segment_len;
@@ -234,6 +233,8 @@ public:
                    cuda::std::span<float> fold,
                    cudaStream_t stream) {
         check_inputs(ts_e.size(), ts_v.size(), fold.size());
+        // Ensure output fold is zeroed
+        thrust::fill(thrust::device, fold.begin(), fold.end(), 0.0F);
         execute_device(ts_e.data(), ts_v.data(), fold.data(), stream);
         spdlog::debug(
             "BruteFoldCUDA::Impl: Device execution complete on stream");
@@ -255,24 +256,15 @@ private:
     void check_inputs(SizeType ts_e_size,
                       SizeType ts_v_size,
                       SizeType fold_size) const {
-        if (ts_e_size != m_nsamps) {
-            throw std::runtime_error(
-                std::format("BruteFoldCUDA::Impl: Input array has wrong size. "
-                            "Expected {}, got {}",
-                            m_nsamps, ts_e_size));
-        }
-        if (ts_v_size != ts_e_size) {
-            throw std::runtime_error(std::format(
-                "BruteFoldCUDA::Impl: Input variance array has wrong size. "
-                "Expected {}, got {}",
-                ts_e_size, ts_v_size));
-        }
-        if (fold_size != get_fold_size()) {
-            throw std::runtime_error(
-                std::format("BruteFoldCUDA::Impl: Output array has wrong size. "
-                            "Expected {}, got {}",
-                            get_fold_size(), fold_size));
-        }
+        error_check::check_equal(
+            ts_e_size, m_nsamps,
+            "BruteFoldCUDA::Impl: ts_e must have size nsamps");
+        error_check::check_equal(
+            ts_v_size, ts_e_size,
+            "BruteFoldCUDA::Impl: ts_v must have size nsamps");
+        error_check::check_equal(
+            fold_size, get_fold_size(),
+            "BruteFoldCUDA::Impl: fold must have size fold_size");
     }
 
     void compute_phase() {

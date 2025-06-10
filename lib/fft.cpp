@@ -1,8 +1,9 @@
 #include "loki/utils/fft.hpp"
 
-#include <format>
 #include <omp.h>
 #include <spdlog/spdlog.h>
+
+#include "loki/exceptions.hpp"
 
 namespace loki::utils {
 
@@ -72,19 +73,14 @@ void rfft_batch(std::span<float> real_input,
                 int nthreads) {
     ensure_fftw_threading(nthreads);
     const int n_complex = (n_real / 2) + 1;
-    if (static_cast<int>(real_input.size()) != batch_size * n_real) {
-        throw std::runtime_error(std::format(
-            "RFFT batch: real_input size does not match batch size. Expected "
-            "{}, got {}",
-            batch_size * n_real, real_input.size()));
-    }
-    if (static_cast<int>(complex_output.size()) != batch_size * n_complex) {
-        throw std::runtime_error(
-            std::format("RFFT batch: complex_output size does not match batch "
-                        "size. Expected "
-                        "{}, got {}",
-                        batch_size * n_complex, complex_output.size()));
-    }
+
+    error_check::check_equal(
+        real_input.size(), batch_size * n_real,
+        "RFFT batch: real_input size does not match batch size");
+    error_check::check_equal(
+        complex_output.size(), batch_size * n_complex,
+        "RFFT batch: complex_output size does not match batch size");
+
     auto* real_ptr    = real_input.data();
     auto* complex_ptr = reinterpret_cast<fftwf_complex*>(complex_output.data());
 
@@ -114,14 +110,14 @@ void irfft_batch(std::span<ComplexType> complex_input,
                  int nthreads) {
     ensure_fftw_threading(nthreads);
     const int n_complex = (n_real / 2) + 1;
-    if (static_cast<int>(real_output.size()) != batch_size * n_real) {
-        throw std::runtime_error(
-            "IRFFT batch: real_output size does not match batch size");
-    }
-    if (static_cast<int>(complex_input.size()) != batch_size * n_complex) {
-        throw std::runtime_error(
-            "IRFFT batch: complex_input size does not match batch size");
-    }
+
+    error_check::check_equal(
+        real_output.size(), batch_size * n_real,
+        "IRFFT batch: real_output size does not match batch size");
+    error_check::check_equal(
+        complex_input.size(), batch_size * n_complex,
+        "IRFFT batch: complex_input size does not match batch size");
+
     auto* complex_ptr = reinterpret_cast<fftwf_complex*>(complex_input.data());
     auto* real_ptr    = real_output.data();
 

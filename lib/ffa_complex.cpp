@@ -1,9 +1,7 @@
 #include "loki/algorithms/ffa_complex.hpp"
 
 #include <algorithm>
-#include <chrono>
 #include <cmath>
-#include <format>
 #include <memory>
 #include <numbers>
 #include <utility>
@@ -14,7 +12,9 @@
 
 #include "loki/algorithms/fold.hpp"
 #include "loki/common/types.hpp"
+#include "loki/exceptions.hpp"
 #include "loki/search/configs.hpp"
+#include "loki/timing.hpp"
 #include "loki/utils.hpp"
 #include "loki/utils/fft.hpp"
 
@@ -36,7 +36,6 @@ void shift_add_complex(const ComplexType* __restrict__ data_tail,
     const auto phase_factor_head =
         -2.0 * std::numbers::pi * phase_shift_head / static_cast<double>(nbins);
 
-    // Process e and v components (2 profiles)
     const ComplexType* __restrict__ data_tail_e = data_tail;
     const ComplexType* __restrict__ data_tail_v = data_tail + nbins_f;
     const ComplexType* __restrict__ data_head_e = data_head;
@@ -83,8 +82,8 @@ public:
 
         m_the_bf = std::make_unique<algorithms::BruteFold>(
             freqs_arr, m_ffa_plan.segment_lens[0], m_cfg.get_nbins(),
-            m_cfg.get_nsamps(), m_cfg.get_tsamp(), t_ref, m_cfg.get_nthreads());
-        m_fold_in_tmp.resize(m_the_bf->get_fold_size(), 0.0F);
+            m_cfg.get_nsamps(), m_cfg.get_tsamp(), t_ref, m_nthreads);
+        m_fold_in_brute.resize(m_the_bf->get_fold_size(), 0.0F);
     }
 
     ~Impl()                      = default;
@@ -98,24 +97,17 @@ public:
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
                  std::span<float> fold) {
-        if (ts_e.size() != m_cfg.get_nsamps()) {
-            throw std::runtime_error(
-                std::format("ts must have size nsamps (got "
-                            "{} != {})",
-                            ts_e.size(), m_cfg.get_nsamps()));
-        }
-        if (ts_v.size() != ts_e.size()) {
-            throw std::runtime_error(
-                std::format("ts variance must have size nsamps "
-                            "(got {} != {})",
-                            ts_v.size(), ts_e.size()));
-        }
-        if (fold.size() != m_ffa_plan.get_fold_size()) {
-            throw std::runtime_error(
-                std::format("Output array has wrong size (got "
-                            "{} != {})",
-                            fold.size(), m_ffa_plan.get_fold_size()));
-        }
+        error_check::check_equal(
+            ts_e.size(), m_cfg.get_nsamps(),
+            "FFACOMPLEX::Impl::execute: ts_e must have size nsamps");
+        error_check::check_equal(
+            ts_v.size(), ts_e.size(),
+            "FFACOMPLEX::Impl::execute: ts_v must have size nsamps");
+        error_check::check_equal(
+            fold.size(), m_ffa_plan.get_fold_size(),
+            "FFACOMPLEX::Impl::execute: fold must have size fold_size");
+
+        ScopeTimer timer("FFACOMPLEX::execute");
         std::vector<ComplexType> fold_complex(
             m_ffa_plan.get_fold_size_complex(), ComplexType(0.0F, 0.0F));
         execute_core(ts_e, ts_v, fold_complex);
@@ -128,24 +120,17 @@ public:
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
                  std::span<ComplexType> fold) {
-        if (ts_e.size() != m_cfg.get_nsamps()) {
-            throw std::runtime_error(
-                std::format("FFACOMPLEX::Impl: ts_e must have size nsamps "
-                            "Expected {}, got {}",
-                            m_cfg.get_nsamps(), ts_e.size()));
-        }
-        if (ts_v.size() != ts_e.size()) {
-            throw std::runtime_error(
-                std::format("FFACOMPLEX::Impl: ts_v must have size nsamps "
-                            "Expected {}, got {}",
-                            ts_e.size(), ts_v.size()));
-        }
-        if (fold.size() != m_ffa_plan.get_fold_size_complex()) {
-            throw std::runtime_error(
-                std::format("FFACOMPLEX::Impl: Output array has wrong size. "
-                            "Expected {}, got {}",
-                            m_ffa_plan.get_fold_size_complex(), fold.size()));
-        }
+        error_check::check_equal(
+            ts_e.size(), m_cfg.get_nsamps(),
+            "FFACOMPLEX::Impl::execute: ts_e must have size nsamps");
+        error_check::check_equal(
+            ts_v.size(), ts_e.size(),
+            "FFACOMPLEX::Impl::execute: ts_v must have size nsamps");
+        error_check::check_equal(
+            fold.size(), m_ffa_plan.get_fold_size_complex(),
+            "FFACOMPLEX::Impl::execute: fold must have size fold_size_complex");
+
+        ScopeTimer timer("FFACOMPLEX::execute");
         execute_core(ts_e, ts_v, fold);
     }
 
@@ -153,65 +138,56 @@ private:
     search::PulsarSearchConfig m_cfg;
     plans::FFAPlan m_ffa_plan;
     int m_nthreads;
+    std::unique_ptr<algorithms::BruteFold> m_the_bf;
 
     // Buffers for the FFA plan
     std::vector<ComplexType> m_fold_in;
     std::vector<ComplexType> m_fold_out;
-    std::vector<float> m_fold_in_tmp;
-
-    std::unique_ptr<algorithms::BruteFold> m_the_bf;
+    std::vector<float> m_fold_in_brute;
 
     void initialize(std::span<const float> ts_e, std::span<const float> ts_v) {
-        auto start = std::chrono::steady_clock::now();
-        spdlog::info("FFA initialize");
-        m_the_bf->execute(ts_e, ts_v, m_fold_in_tmp);
+        ScopeTimer timer("FFACOMPLEX::initialize");
+        m_the_bf->execute(ts_e, ts_v, m_fold_in_brute);
 
         // RFFT the input
         const auto nfft         = m_the_bf->get_fold_size() / m_cfg.get_nbins();
         const auto complex_size = nfft * ((m_cfg.get_nbins() / 2) + 1);
         utils::rfft_batch(
-            m_fold_in_tmp,
+            m_fold_in_brute,
             std::span<ComplexType>(m_fold_in.data(), complex_size),
             static_cast<int>(nfft), static_cast<int>(m_cfg.get_nbins()),
             m_nthreads);
-        auto end = std::chrono::steady_clock::now();
-        auto elapsed_ms =
-            std::chrono::duration_cast<std::chrono::milliseconds>(end - start)
-                .count();
-        spdlog::info("FFA::initialize took {} ms", elapsed_ms);
     }
 
     void execute_core(std::span<const float> ts_e,
                       std::span<const float> ts_v,
                       std::span<ComplexType> fold_complex) {
-        auto start = std::chrono::steady_clock::now();
-        // Clear internal buffers before each execution
-        std::ranges::fill(m_fold_in, ComplexType(0.0F, 0.0F));
         initialize(ts_e, ts_v);
+
         // Use raw pointers for swapping buffers
-        ComplexType* fold_in_ptr  = m_fold_in.data();
-        ComplexType* fold_out_ptr = m_fold_out.data();
-        const auto levels         = m_cfg.get_niters_ffa() + 1;
+        ComplexType* fold_in_ptr     = m_fold_in.data();
+        ComplexType* fold_out_ptr    = m_fold_out.data();
+        ComplexType* fold_result_ptr = fold_complex.data();
+
+        const auto levels = m_cfg.get_niters_ffa() + 1;
 
         indicators::show_console_cursor(false);
         auto bar = utils::make_standard_bar("Computing FFA...");
-        for (SizeType i_level = 1; i_level < levels - 1; ++i_level) {
-            execute_iter(fold_in_ptr, fold_out_ptr, i_level);
-            std::swap(fold_in_ptr, fold_out_ptr);
+        for (SizeType i_level = 1; i_level < levels; ++i_level) {
+            // Determine output buffer: final iteration writes to output buffer
+            const bool is_last = i_level == levels - 1;
+            ComplexType* current_out_ptr =
+                is_last ? fold_result_ptr : fold_out_ptr;
+            execute_iter(fold_in_ptr, current_out_ptr, i_level);
+            // Ping-pong buffers (unless it's the final iteration)
+            if (!is_last) {
+                std::swap(fold_in_ptr, fold_out_ptr);
+            }
             const auto progress = static_cast<float>(i_level) /
                                   static_cast<float>(levels - 1) * 100.0F;
             bar.set_progress(static_cast<SizeType>(progress));
         }
-        // Last iteration directly writes to the output buffer
-        execute_iter(fold_in_ptr, fold_complex.data(), m_cfg.get_niters_ffa());
-        bar.set_progress(100);
         indicators::show_console_cursor(true);
-        spdlog::info("FFA finished");
-        auto end = std::chrono::steady_clock::now();
-        auto elapsed_ms =
-            std::chrono::duration_cast<std::chrono::milliseconds>(end - start)
-                .count();
-        spdlog::info("FFA::execute took {} ms", elapsed_ms);
     }
 
     void execute_iter(const ComplexType* __restrict__ fold_in,

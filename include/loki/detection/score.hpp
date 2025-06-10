@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -36,6 +37,7 @@ private:
     std::unique_ptr<Impl> m_impl;
 };
 
+// Generate a list of widths for the matched filter
 std::vector<SizeType> generate_width_trials(SizeType nbins_max,
                                             float wtsp = 1.5F);
 

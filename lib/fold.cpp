@@ -4,6 +4,7 @@
 #include <omp.h>
 
 #include "loki/common/types.hpp"
+#include "loki/exceptions.hpp"
 #include "loki/psr_utils.hpp"
 
 namespace loki::algorithms {
@@ -24,16 +25,15 @@ public:
           m_tsamp(tsamp),
           m_t_ref(t_ref),
           m_nthreads(nthreads) {
-        if (m_freq_arr.empty()) {
-            throw std::runtime_error("Frequency array is empty");
-        }
-        if (m_nsamps % m_segment_len != 0) {
-            throw std::runtime_error(
-                "Number of samples is not a multiple of segment length");
-        }
+        error_check::check(!m_freq_arr.empty(),
+                           "BruteFold::Impl: Frequency array is empty");
+        error_check::check(m_nsamps % m_segment_len == 0,
+                           "BruteFold::Impl: Number of samples is not a "
+                           "multiple of segment length");
         m_nthreads  = std::clamp(m_nthreads, 1, omp_get_max_threads());
         m_nfreqs    = m_freq_arr.size();
         m_nsegments = m_nsamps / m_segment_len;
+        // Allocate and compute phase map
         m_phase_map.resize(m_nfreqs * m_segment_len);
         compute_phase();
     }
@@ -51,16 +51,20 @@ public:
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
                  std::span<float> fold) {
-        if (ts_e.size() != m_nsamps) {
-            throw std::runtime_error("Input array has wrong size");
-        }
-        if (ts_v.size() != ts_e.size()) {
-            throw std::runtime_error("Input variance array has wrong size");
-        }
-        if (fold.size() != get_fold_size()) {
-            throw std::runtime_error("Output array has wrong size");
-        }
-#pragma omp parallel for schedule(static) num_threads(m_nthreads)
+        error_check::check_equal(
+            ts_e.size(), m_nsamps,
+            "BruteFold::Impl::execute: ts_e must have size nsamps");
+        error_check::check_equal(
+            ts_v.size(), ts_e.size(),
+            "BruteFold::Impl::execute: ts_v must have size nsamps");
+        error_check::check_equal(
+            fold.size(), get_fold_size(),
+            "BruteFold::Impl::execute: fold must have size fold_size");
+        // Ensure output fold is zeroed
+        std::ranges::fill(fold, 0.0F);
+
+#pragma omp parallel for num_threads(m_nthreads) default(none)                 \
+    shared(ts_e, ts_v, fold, m_segment_len, m_nfreqs, m_nbins, m_nsegments)
         for (SizeType iseg = 0; iseg < m_nsegments; ++iseg) {
             const auto ts_e_seg =
                 ts_e.subspan(iseg * m_segment_len, m_segment_len);

@@ -1,7 +1,5 @@
 #include "loki/algorithms/ffa.hpp"
 
-#include <chrono>
-#include <format>
 #include <utility>
 
 #include <indicators/cursor_control.hpp>
@@ -10,7 +8,9 @@
 
 #include "loki/algorithms/fold.hpp"
 #include "loki/common/types.hpp"
+#include "loki/exceptions.hpp"
 #include "loki/search/configs.hpp"
+#include "loki/timing.hpp"
 #include "loki/utils.hpp"
 
 namespace loki::algorithms {
@@ -23,21 +23,25 @@ void shift_add(const float* __restrict__ data_tail,
                float* __restrict__ out,
                SizeType nbins) {
 
-    const SizeType shift_tail =
+    const auto shift_tail =
         static_cast<SizeType>(std::round(phase_shift_tail)) % nbins;
-    const SizeType shift_head =
+    const auto shift_head =
         static_cast<SizeType>(std::round(phase_shift_head)) % nbins;
 
-    const float* __restrict__ data_tail_row1 = data_tail + nbins;
-    const float* __restrict__ data_head_row1 = data_head + nbins;
-    float* __restrict__ out_row1             = out + nbins;
+    const float* __restrict__ data_tail_e = data_tail;
+    const float* __restrict__ data_tail_v = data_tail + nbins;
+    const float* __restrict__ data_head_e = data_head;
+    const float* __restrict__ data_head_v = data_head + nbins;
+    float* __restrict__ out_e             = out;
+    float* __restrict__ out_v             = out + nbins;
+
     for (SizeType j = 0; j < nbins; ++j) {
-        const SizeType idx_tail =
+        const auto idx_tail =
             (j < shift_tail) ? (j + nbins - shift_tail) : (j - shift_tail);
-        const SizeType idx_head =
+        const auto idx_head =
             (j < shift_head) ? (j + nbins - shift_head) : (j - shift_head);
-        out[j]      = data_tail[idx_tail] + data_head[idx_head];
-        out_row1[j] = data_tail_row1[idx_tail] + data_head_row1[idx_head];
+        out_e[j] = data_tail_e[idx_tail] + data_head_e[idx_head];
+        out_v[j] = data_tail_v[idx_tail] + data_head_v[idx_head];
     }
 }
 
@@ -52,6 +56,14 @@ public:
         // Allocate memory for the FFA buffers
         m_fold_in.resize(m_ffa_plan.get_buffer_size(), 0.0F);
         m_fold_out.resize(m_ffa_plan.get_buffer_size(), 0.0F);
+        // Initialize the brute fold
+        const auto t_ref =
+            m_cfg.get_nparams() == 1 ? 0.0 : m_ffa_plan.tsegments[0] / 2.0;
+        const auto freqs_arr = m_ffa_plan.params[0].back();
+
+        m_the_bf = std::make_unique<algorithms::BruteFold>(
+            freqs_arr, m_ffa_plan.segment_lens[0], m_cfg.get_nbins(),
+            m_cfg.get_nsamps(), m_cfg.get_tsamp(), t_ref, m_nthreads);
     }
 
     ~Impl()                      = default;
@@ -65,76 +77,58 @@ public:
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
                  std::span<float> fold) {
-        if (ts_e.size() != m_cfg.get_nsamps()) {
-            throw std::runtime_error(
-                std::format("ts must have size nsamps (got "
-                            "{} != {})",
-                            ts_e.size(), m_cfg.get_nsamps()));
-        }
-        if (ts_v.size() != ts_e.size()) {
-            throw std::runtime_error(
-                std::format("ts variance must have size nsamps "
-                            "(got {} != {})",
-                            ts_v.size(), ts_e.size()));
-        }
-        if (fold.size() != m_ffa_plan.get_fold_size()) {
-            throw std::runtime_error(
-                std::format("Output array has wrong size (got "
-                            "{} != {})",
-                            fold.size(), m_ffa_plan.get_fold_size()));
-        }
-        auto start = std::chrono::steady_clock::now();
+        error_check::check_equal(
+            ts_e.size(), m_cfg.get_nsamps(),
+            "FFA::Impl::execute: ts_e must have size nsamps");
+        error_check::check_equal(
+            ts_v.size(), ts_e.size(),
+            "FFA::Impl::execute: ts_v must have size nsamps");
+        error_check::check_equal(
+            fold.size(), m_ffa_plan.get_fold_size(),
+            "FFA::Impl::execute: fold must have size fold_size");
+
+        ScopeTimer timer("FFA::execute");
         initialize(ts_e, ts_v);
+
         // Use raw pointers for swapping buffers
-        float* fold_in_ptr  = m_fold_in.data();
-        float* fold_out_ptr = m_fold_out.data();
-        const auto levels   = m_cfg.get_niters_ffa() + 1;
+        float* fold_in_ptr     = m_fold_in.data();
+        float* fold_out_ptr    = m_fold_out.data();
+        float* fold_result_ptr = fold.data();
+
+        const auto levels = m_cfg.get_niters_ffa() + 1;
 
         indicators::show_console_cursor(false);
         auto bar = utils::make_standard_bar("Computing FFA...");
-        for (SizeType i_level = 1; i_level < levels - 1; ++i_level) {
-            execute_iter(fold_in_ptr, fold_out_ptr, i_level);
-            std::swap(fold_in_ptr, fold_out_ptr);
+        for (SizeType i_level = 1; i_level < levels; ++i_level) {
+            // Determine output buffer: final iteration writes to output buffer
+            const bool is_last     = i_level == levels - 1;
+            float* current_out_ptr = is_last ? fold_result_ptr : fold_out_ptr;
+            execute_iter(fold_in_ptr, current_out_ptr, i_level);
+            // Ping-pong buffers (unless it's the final iteration)
+            if (!is_last) {
+                std::swap(fold_in_ptr, fold_out_ptr);
+            }
             const auto progress = static_cast<float>(i_level) /
                                   static_cast<float>(levels - 1) * 100.0F;
             bar.set_progress(static_cast<SizeType>(progress));
         }
-        // Last iteration directly writes to the output buffer
-        execute_iter(fold_in_ptr, fold.data(), m_cfg.get_niters_ffa());
-        bar.set_progress(100);
         indicators::show_console_cursor(true);
-        spdlog::info("FFA finished");
-        auto end = std::chrono::steady_clock::now();
-        auto elapsed_ms =
-            std::chrono::duration_cast<std::chrono::milliseconds>(end - start)
-                .count();
-        spdlog::info("FFA::execute took {} ms", elapsed_ms);
     }
 
 private:
     search::PulsarSearchConfig m_cfg;
     plans::FFAPlan m_ffa_plan;
     int m_nthreads;
+    std::unique_ptr<algorithms::BruteFold> m_the_bf;
 
     // Buffers for the FFA plan
     std::vector<float> m_fold_in;
     std::vector<float> m_fold_out;
 
     void initialize(std::span<const float> ts_e, std::span<const float> ts_v) {
-        auto start = std::chrono::steady_clock::now();
-        spdlog::info("FFA initialize");
-        const auto t_ref =
-            m_cfg.get_nparams() == 1 ? 0.0 : m_ffa_plan.tsegments[0] / 2.0;
-        const auto freqs_arr = m_ffa_plan.params[0].back();
-        algorithms::BruteFold bf(
-            freqs_arr, m_ffa_plan.segment_lens[0], m_cfg.get_nbins(),
-            m_cfg.get_nsamps(), m_cfg.get_tsamp(), t_ref, m_cfg.get_nthreads());
-        bf.execute(ts_e, ts_v, std::span(m_fold_in.data(), bf.get_fold_size()));
-        auto end = std::chrono::steady_clock::now();
-        auto elapsed_ms =
-            std::chrono::duration_cast<std::chrono::milliseconds>(end - start)
-                .count();
-        spdlog::info("FFA::initialize took {} ms", elapsed_ms);
+        ScopeTimer timer("FFA::initialize");
+        m_the_bf->execute(
+            ts_e, ts_v, std::span(m_fold_in.data(), m_the_bf->get_fold_size()));
     }
 
     void execute_iter(const float* __restrict__ fold_in,

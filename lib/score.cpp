@@ -10,10 +10,88 @@
 #include <omp.h>
 
 #include "loki/common/types.hpp"
+#include "loki/exceptions.hpp"
 #include "loki/utils.hpp"
 #include "loki/utils/fft.hpp"
 
 namespace loki::detection {
+
+namespace {
+void normalise_l2(std::span<float> arr) {
+    if (arr.empty()) {
+        return;
+    }
+    const float mean = std::reduce(arr.begin(), arr.end(), 0.0F) /
+                       static_cast<float>(arr.size());
+    std::ranges::transform(arr, arr.begin(),
+                           [mean](float val) { return val - mean; });
+    // Compute norm (L2)
+    const float norm = std::sqrt(
+        std::inner_product(arr.begin(), arr.end(), arr.begin(), 0.0F));
+    // Normalize in-place if norm is non-zero
+    if (norm > 0.0F) {
+        const float scale = 1.0F / norm;
+        std::ranges::transform(arr, arr.begin(),
+                               [scale](float val) { return val * scale; });
+    }
+}
+
+void generate_boxcar_templates(std::span<float> templates,
+                               std::span<const SizeType> widths,
+                               SizeType nbins) {
+    const auto ntemplates = widths.size();
+    error_check::check_equal(templates.size(), ntemplates * nbins,
+                             "generate_boxcar_templates: templates size does "
+                             "not match");
+    for (SizeType iw = 0; iw < ntemplates; ++iw) {
+        const auto width   = widths[iw];
+        auto template_span = templates.subspan(iw * nbins, nbins);
+        // Fill the first 'width' bins with 1.0, rest remain 0.0
+        std::fill_n(template_span.begin(), std::min(width, nbins), 1.0F);
+        normalise_l2(template_span);
+    }
+}
+
+void generate_gaussian_templates(std::span<float> templates,
+                                 std::span<const SizeType> widths,
+                                 SizeType nbins) {
+    const auto ntemplates = widths.size();
+    error_check::check_equal(templates.size(), ntemplates * nbins,
+                             "generate_gaussian_templates: templates size does "
+                             "not match");
+    for (SizeType iw = 0; iw < ntemplates; ++iw) {
+        const SizeType width = widths[iw];
+        auto template_span   = templates.subspan(iw * nbins, nbins);
+        const auto sigma =
+            static_cast<float>(width) /
+            (2.0F * std::sqrt(2.0F * std::numbers::ln2_v<float>));
+        const auto xmax = static_cast<SizeType>(std::ceil(3.5F * sigma));
+        const auto gaussian_width = (2 * xmax) + 1;
+
+        if (nbins >= gaussian_width) {
+            // Template fits entirely within nbins - center it
+            const auto start = (nbins / 2) - xmax;
+            for (SizeType i = 0; i < gaussian_width; ++i) {
+                const auto x = static_cast<float>(static_cast<int>(i) -
+                                                  static_cast<int>(xmax));
+                template_span[start + i] =
+                    std::exp(-x * x / (2.0F * sigma * sigma));
+            }
+        } else {
+            // Template is larger than nbins - truncate it
+            const auto start_offset = xmax - (nbins / 2);
+            for (SizeType i = 0; i < nbins; ++i) {
+                const auto x =
+                    static_cast<float>(static_cast<int>(start_offset + i) -
+                                       static_cast<int>(xmax));
+                template_span[i] = std::exp(-x * x / (2.0F * sigma * sigma));
+            }
+        }
+        normalise_l2(template_span);
+    }
+}
+
+} // namespace
 
 class MatchedFilter::Impl {
 public:
@@ -89,56 +167,14 @@ private:
 
     void initialise_templates() {
         if (m_shape == "gaussian") {
-            for (SizeType i = 0; i < m_ntemplates; ++i) {
-                std::span<float> temp_arr(
-                    m_templates.data() + (i * m_nbins_pow2), m_nbins_pow2);
-                generate_gaussian_template(temp_arr, m_widths_arr[i]);
-            }
+            generate_gaussian_templates(m_templates, m_widths_arr,
+                                        m_nbins_pow2);
         } else if (m_shape == "boxcar") {
-            for (SizeType i = 0; i < m_ntemplates; ++i) {
-                std::span<float> temp_arr(
-                    m_templates.data() + (i * m_nbins_pow2), m_nbins_pow2);
-                generate_boxcar_template(temp_arr, m_widths_arr[i]);
-            }
+            generate_boxcar_templates(m_templates, m_widths_arr, m_nbins_pow2);
         } else {
-            throw std::invalid_argument("Invalid shape");
+            throw std::invalid_argument(
+                std::format("Invalid template shape: {}", m_shape));
         }
-    }
-
-    static void normalise(std::span<float>& arr) {
-        const float sum =
-            std::inner_product(arr.begin(), arr.end(), arr.begin(), 0.0F);
-        const float scale = 1.0F / std::sqrt(sum);
-        std::ranges::transform(arr, arr.begin(),
-                               [scale](float val) { return val * scale; });
-    }
-
-    static void generate_boxcar_template(std::span<float>& arr,
-                                         SizeType width) {
-        const SizeType temp_nbins = arr.size();
-        const auto start          = (temp_nbins / 2) - (width / 2);
-        const auto end            = start + width + (width % 2);
-        std::fill(arr.begin(), arr.begin() + static_cast<int>(start), 0.0F);
-        std::fill(arr.begin() + static_cast<int>(start),
-                  arr.begin() + static_cast<int>(end), 1.0F);
-        std::fill(arr.begin() + static_cast<int>(end), arr.end(), 0.0F);
-        normalise(arr);
-    }
-
-    static void generate_gaussian_template(std::span<float>& arr,
-                                           SizeType width) {
-        const SizeType temp_nbins = arr.size();
-        const float sigma =
-            static_cast<float>(width) /
-            (2.0F * std::sqrt(2.0F * std::numbers::ln2_v<float>));
-        const auto xmax = static_cast<SizeType>(std::ceil(3.5 * sigma));
-
-        const auto temp_start = (temp_nbins / 2) - xmax;
-        for (SizeType i = 0; i < 2 * xmax + 1; ++i) {
-            const auto x        = static_cast<float>(i - xmax);
-            arr[temp_start + i] = std::exp(-x * x / (2.0F * sigma * sigma));
-        }
-        normalise(arr);
     }
 }; // End MatchedFilter::Impl definition
 
