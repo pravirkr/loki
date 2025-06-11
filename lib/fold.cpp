@@ -114,7 +114,8 @@ private:
             float* __restrict__ fold_e_base    = fold_seg + freq_offset_out;
             float* __restrict__ fold_v_base    = fold_e_base + m_nbins;
 
-            const SizeType main_loop = segment_len_act & ~(kUnrollFactor - 1);
+            const SizeType main_loop =
+                segment_len_act - (segment_len_act % kUnrollFactor);
             for (SizeType isamp = 0; isamp < main_loop;
                  isamp += kUnrollFactor) {
                 UNROLL_VECTORIZE

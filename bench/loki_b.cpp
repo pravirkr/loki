@@ -6,7 +6,9 @@
 #include <benchmark/benchmark.h>
 #include <omp.h>
 
-#include "loki/score.hpp"
+#include "loki/detection/score.hpp"
+
+namespace loki::detection {
 
 class ScoresFixture : public benchmark::Fixture {
 public:
@@ -60,7 +62,8 @@ BENCHMARK_DEFINE_F(ScoresFixture, BM_loki_snr_1d)(benchmark::State& state) {
     std::iota(widths.begin(), widths.end(), 1);
     std::vector<float> out(widths.size());
     for (auto _ : state) {
-        loki::snr_1d(std::span(arr), std::span(widths), 1.0F, std::span(out));
+        detection::snr_1d(std::span(arr), std::span(widths), std::span(out),
+                          1.0F);
     }
 }
 
@@ -74,8 +77,8 @@ BENCHMARK_DEFINE_F(ScoresFixture2D,
     std::iota(widths.begin(), widths.end(), 1);
     std::vector<float> out(nprofiles * widths.size());
     for (auto _ : state) {
-        loki::snr_2d(std::span(arr), nprofiles, std::span(widths), 1.0F,
-                     std::span(out));
+        detection::snr_2d(std::span(arr), nprofiles, std::span(widths),
+                          std::span(out), 1.0F);
     }
 }
 
@@ -89,8 +92,8 @@ BENCHMARK_DEFINE_F(ScoresFixture2D,
     std::iota(widths.begin(), widths.end(), 1);
     std::vector<float> out(nprofiles * widths.size());
     for (auto _ : state) {
-        loki::snr_2d(std::span(arr), nprofiles, std::span(widths), 1.0F,
-                     std::span(out));
+        detection::snr_2d(std::span(arr), nprofiles, std::span(widths),
+                          std::span(out), 1.0F);
     }
 }
 
@@ -110,3 +113,5 @@ BENCHMARK_REGISTER_F(ScoresFixture2D, BM_loki_snr_2d_par)
     ->Range(kMinNsamps, kMaxNsamps);
 
 // BENCHMARK_MAIN();
+
+} // namespace loki::detection

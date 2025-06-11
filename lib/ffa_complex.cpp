@@ -26,14 +26,14 @@ namespace {
  * @brief Optimized version with pre-computed phases and tweaks to
  * auto-vectorize efficiently with GCC.
  */
-void shift_add_complex_optimized(const ComplexType* __restrict__ data_tail,
-                                 double phase_shift_tail,
-                                 const ComplexType* __restrict__ data_head,
-                                 double phase_shift_head,
-                                 ComplexType* __restrict__ out,
-                                 ComplexType* __restrict__ temp_buffer,
-                                 SizeType nbins_f,
-                                 SizeType nbins) {
+void shift_add_complex(const ComplexType* __restrict__ data_tail,
+                       double phase_shift_tail,
+                       const ComplexType* __restrict__ data_head,
+                       double phase_shift_head,
+                       ComplexType* __restrict__ out,
+                       ComplexType* __restrict__ temp_buffer,
+                       SizeType nbins_f,
+                       SizeType nbins) {
 
     const ComplexType* __restrict__ data_tail_e = data_tail;
     const ComplexType* __restrict__ data_tail_v = data_tail + nbins_f;
@@ -74,17 +74,20 @@ void shift_add_complex_optimized(const ComplexType* __restrict__ data_tail,
 }
 
 /**
- * @brief Idea here is to replace the two expensive sin/cos calls with one
- * cheaper complex multiply. Processing in blocks to remove the loop-carried
- * dependency.
+ * @brief Optimized version using a recurrence relation for the phase. Idea here
+ * is to replace the two expensive sin/cos calls with one cheaper complex
+ * multiply. Processing in blocks to remove the loop-carried dependency.
+ *
+ * This is the only version that vectorizes efficiently across architectures.
+ * The other versions are not vectorized.
  */
-void shift_add_complex(const ComplexType* __restrict__ data_tail,
-                       double phase_shift_tail,
-                       const ComplexType* __restrict__ data_head,
-                       double phase_shift_head,
-                       ComplexType* __restrict__ out,
-                       SizeType nbins_f,
-                       SizeType nbins) {
+void shift_add_complex_recurrence(const ComplexType* __restrict__ data_tail,
+                                  double phase_shift_tail,
+                                  const ComplexType* __restrict__ data_head,
+                                  double phase_shift_head,
+                                  ComplexType* __restrict__ out,
+                                  SizeType nbins_f,
+                                  SizeType nbins) {
     // Calculate the constant phase step per iteration
     const auto phase_step_tail_angle =
         -2.0 * std::numbers::pi * phase_shift_tail / static_cast<double>(nbins);
@@ -126,10 +129,11 @@ void shift_add_complex(const ComplexType* __restrict__ data_tail,
     ComplexType* __restrict__ out_e             = out;
     ComplexType* __restrict__ out_v             = out + nbins_f;
 
-    const SizeType n_vectorized = nbins_f - (nbins_f % kUnrollFactor);
+    const SizeType main_loop = nbins_f - (nbins_f % kUnrollFactor);
 
     // Vectorized main part
-    for (SizeType k = 0; k < n_vectorized; k += kUnrollFactor) {
+    for (SizeType k = 0; k < main_loop; k += kUnrollFactor) {
+        UNROLL_VECTORIZE
         for (SizeType j = 0; j < kUnrollFactor; ++j) {
             const ComplexType phase_tail =
                 current_block_start_phase_tail * delta_vec_tail[j];
@@ -145,10 +149,10 @@ void shift_add_complex(const ComplexType* __restrict__ data_tail,
     }
 
     // Scalar remainder part for nbins_f not divisible by kUnrollFactor
-    if (n_vectorized < nbins_f) {
+    if (main_loop < nbins_f) {
         ComplexType current_phase_tail = current_block_start_phase_tail;
         ComplexType current_phase_head = current_block_start_phase_head;
-        for (SizeType k = n_vectorized; k < nbins_f; ++k) {
+        for (SizeType k = main_loop; k < nbins_f; ++k) {
             out_e[k] = (data_tail_e[k] * current_phase_tail) +
                        (data_head_e[k] * current_phase_head);
             out_v[k] = (data_tail_v[k] * current_phase_tail) +
@@ -300,11 +304,9 @@ private:
 
         constexpr SizeType kBlockSize = 8;
 
-        // Thread-private buffer - each thread gets its own buffer
-        std::vector<ComplexType> temp_buffer(2 * nbins_f);
 #pragma omp parallel for num_threads(m_nthreads) default(none)                 \
     shared(fold_in, fold_out, coords_cur, coords_prev, nsegments, nbins,       \
-               nbins_f, ncoords_cur, ncoords_prev) firstprivate(temp_buffer)
+               nbins_f, ncoords_cur, ncoords_prev)
         for (SizeType icoord_block = 0; icoord_block < ncoords_cur;
              icoord_block += kBlockSize) {
             SizeType block_end =
@@ -327,12 +329,9 @@ private:
                     const ComplexType* __restrict__ fold_head =
                         &fold_in[head_offset];
                     ComplexType* __restrict__ fold_sum = &fold_out[out_offset];
-                    ComplexType* __restrict__ temp_buffer_ptr =
-                        temp_buffer.data();
-                    shift_add_complex_optimized(fold_tail, coord_cur.shift_tail,
-                                                fold_head, coord_cur.shift_head,
-                                                fold_sum, temp_buffer_ptr,
-                                                nbins_f, nbins);
+                    shift_add_complex_recurrence(
+                        fold_tail, coord_cur.shift_tail, fold_head,
+                        coord_cur.shift_head, fold_sum, nbins_f, nbins);
                 }
             }
         }

@@ -2,7 +2,6 @@
 
 #include <array>
 #include <complex>
-#include <concepts>
 #include <cstddef>
 
 #include <xtensor/containers/xtensor.hpp>
@@ -40,23 +39,3 @@ inline constexpr size_t kUnrollFactor = 4;
 #endif
 
 } // namespace loki
-
-namespace loki::backend {
-
-/**
- * @brief Tag struct representing the CPU backend.
- */
-struct CPU {};
-
-/**
- * @brief Tag struct representing the CUDA backend.
- */
-struct CUDA {};
-
-/**
- * @brief Concept to constrain template parameters to valid execution backends.
- */
-template <typename T>
-concept ExecutionBackend = std::same_as<T, CPU> || std::same_as<T, CUDA>;
-
-} // namespace loki::backend
