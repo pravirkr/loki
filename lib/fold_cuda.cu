@@ -17,6 +17,8 @@
 #include "loki/cuda_utils.cuh"
 #include "loki/exceptions.hpp"
 
+namespace loki::algorithms {
+
 namespace {
 
 // CUDA device function to calculate phase index
@@ -161,8 +163,6 @@ __global__ void kernel_fold_shared_mem(const float* __restrict__ ts_e,
 }
 
 } // namespace
-
-namespace loki::algorithms {
 
 class BruteFoldCUDA::Impl {
 public:

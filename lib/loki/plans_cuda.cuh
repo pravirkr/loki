@@ -58,7 +58,8 @@ inline void transfer_ffa_plan_to_device(const FFAPlan& plan, FFAPlanD& plan_d) {
     }
     plan_d.freqs_arr_start = plan.params[0].back();
 
-    std::vector<int> i_tail, shift_tail, i_head, shift_head;
+    std::vector<int> i_tail, i_head;
+    std::vector<double> shift_tail, shift_head;
     // Calculate total size for efficient allocation
     size_t total_size = 0;
     for (const auto& host_coords_iter : plan.coordinates) {

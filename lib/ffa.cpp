@@ -45,6 +45,46 @@ void shift_add(const float* __restrict__ data_tail,
     }
 }
 
+/**
+ * @brief Optimized version, using a single stack-allocated buffer and no
+ * branches in the loop.
+ */
+void shift_add_optimized(const float* __restrict__ data_tail,
+                         double phase_shift_tail,
+                         const float* __restrict__ data_head,
+                         double phase_shift_head,
+                         float* __restrict__ out,
+                         float* __restrict__ temp_buffer,
+                         SizeType nbins) {
+
+    const auto shift_tail_raw =
+        static_cast<SizeType>(std::round(phase_shift_tail));
+    const SizeType s_tail = (shift_tail_raw % nbins + nbins) % nbins;
+    const auto shift_head_raw =
+        static_cast<SizeType>(std::round(phase_shift_head));
+    const SizeType s_head     = (shift_head_raw % nbins + nbins) % nbins;
+    const SizeType total_size = 2 * nbins;
+
+    // Rotate data_tail directly into the final output buffer for both channels
+    std::copy_n(data_tail, nbins - s_tail, out + s_tail);
+    std::copy_n(data_tail + nbins - s_tail, s_tail, out);
+    std::copy_n(data_tail + nbins, nbins - s_tail, out + nbins + s_tail);
+    std::copy_n(data_tail + nbins + nbins - s_tail, s_tail, out + nbins);
+
+    // Rotate data_head into the temporary buffer for both channels
+    std::copy_n(data_head, nbins - s_head, temp_buffer + s_head);
+    std::copy_n(data_head + nbins - s_head, s_head, temp_buffer);
+    std::copy_n(data_head + nbins, nbins - s_head,
+                temp_buffer + nbins + s_head);
+    std::copy_n(data_head + nbins + nbins - s_head, s_head,
+                temp_buffer + nbins);
+
+    // --- Perform the final addition in a single loop ---
+    for (SizeType j = 0; j < total_size; ++j) {
+        out[j] += temp_buffer[j];
+    }
+}
+
 } // namespace
 
 class FFA::Impl {
@@ -142,9 +182,12 @@ private:
         const auto ncoords_prev = coords_prev.size();
 
         constexpr SizeType kBlockSize = 8;
+
+        // Thread-private buffer - each thread gets its own buffer
+        std::vector<float> temp_buffer(2 * nbins);
 #pragma omp parallel for num_threads(m_nthreads) default(none)                 \
     shared(fold_in, fold_out, coords_cur, coords_prev, nsegments, nbins,       \
-               ncoords_cur, ncoords_prev)
+               ncoords_cur, ncoords_prev) firstprivate(temp_buffer)
         for (SizeType icoord_block = 0; icoord_block < ncoords_cur;
              icoord_block += kBlockSize) {
             SizeType block_end =
@@ -162,11 +205,13 @@ private:
                     const auto out_offset =
                         (iseg * ncoords_cur * 2 * nbins) + (icoord * 2 * nbins);
 
-                    const float* fold_tail = &fold_in[tail_offset];
-                    const float* fold_head = &fold_in[head_offset];
-                    float* fold_sum        = &fold_out[out_offset];
-                    shift_add(fold_tail, coord_cur.shift_tail, fold_head,
-                              coord_cur.shift_head, fold_sum, nbins);
+                    const float* __restrict__ fold_tail = &fold_in[tail_offset];
+                    const float* __restrict__ fold_head = &fold_in[head_offset];
+                    float* __restrict__ fold_sum        = &fold_out[out_offset];
+                    float* __restrict__ temp_buffer_ptr = temp_buffer.data();
+                    shift_add_optimized(fold_tail, coord_cur.shift_tail,
+                                        fold_head, coord_cur.shift_head,
+                                        fold_sum, temp_buffer_ptr, nbins);
                 }
             }
         }

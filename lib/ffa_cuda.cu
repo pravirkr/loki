@@ -15,14 +15,18 @@
 #include "loki/algorithms/fold.hpp"
 #include "loki/common/types.hpp"
 #include "loki/cuda_utils.cuh"
+#include "loki/exceptions.hpp"
 #include "loki/plans_cuda.cuh"
+#include "loki/timing.hpp"
+
+namespace loki::algorithms {
 
 namespace {
 
 // OPTIMIZED: One thread per smallest work unit, optimized for memory coalescing
 __global__ void kernel_ffa_iter(const float* __restrict__ fold_in,
                                 float* __restrict__ fold_out,
-                                const loki::plans::FFACoordDPtrs coords,
+                                const plans::FFACoordDPtrs coords,
                                 int ncoords_cur,
                                 int ncoords_prev,
                                 int nsegments,
@@ -43,10 +47,12 @@ __global__ void kernel_ffa_iter(const float* __restrict__ fold_in,
     const int icoord = temp / nsegments;
 
     // Precompute coordinate data (avoid repeated access)
-    const int coord_tail = coords.i_tail[icoord];
-    const int coord_head = coords.i_head[icoord];
-    const int shift_tail = __double2int_rn(coords.shift_tail[icoord]) % nbins;
-    const int shift_head = __double2int_rn(coords.shift_head[icoord]) % nbins;
+    const int coord_tail     = coords.i_tail[icoord];
+    const int coord_head     = coords.i_head[icoord];
+    const int shift_tail_raw = __double2int_rn(coords.shift_tail[icoord]);
+    const int shift_head_raw = __double2int_rn(coords.shift_head[icoord]);
+    const int shift_tail     = (shift_tail_raw % nbins + nbins) % nbins;
+    const int shift_head     = (shift_head_raw % nbins + nbins) % nbins;
 
     const int idx_tail =
         (ibin < shift_tail) ? (ibin + nbins - shift_tail) : (ibin - shift_tail);
@@ -71,8 +77,6 @@ __global__ void kernel_ffa_iter(const float* __restrict__ fold_in,
 
 } // namespace
 
-namespace loki::algorithms {
-
 class FFACUDA::Impl {
 public:
     Impl(search::PulsarSearchConfig cfg, int device_id)
@@ -80,8 +84,18 @@ public:
           m_ffa_plan(m_cfg),
           m_device_id(device_id) {
         cuda_utils::set_device(m_device_id);
+        // Allocate memory for the FFA buffers
         m_fold_in_d.resize(m_ffa_plan.get_buffer_size(), 0.0F);
         m_fold_out_d.resize(m_ffa_plan.get_buffer_size(), 0.0F);
+        // Initialize the brute fold
+        const auto t_ref =
+            m_cfg.get_nparams() == 1 ? 0.0 : m_ffa_plan.tsegments[0] / 2.0;
+        const auto freqs_arr = m_ffa_plan.params[0].back();
+
+        m_the_bf = std::make_unique<algorithms::BruteFoldCUDA>(
+            freqs_arr, m_ffa_plan.segment_lens[0], m_cfg.get_nbins(),
+            m_cfg.get_nsamps(), m_cfg.get_tsamp(), t_ref, m_device_id);
+
         plans::transfer_ffa_plan_to_device(m_ffa_plan, m_ffa_plan_d);
         cuda_utils::check_last_cuda_error(
             "FFACUDA::Impl::transfer_ffa_plan_to_device failed");
@@ -148,6 +162,7 @@ private:
     plans::FFAPlan m_ffa_plan;
     plans::FFAPlanD m_ffa_plan_d;
     int m_device_id;
+    std::unique_ptr<algorithms::BruteFoldCUDA> m_the_bf;
 
     // Buffers for the FFA plan
     thrust::device_vector<float> m_fold_in_d;
@@ -158,60 +173,46 @@ private:
     thrust::device_vector<float> m_ts_v_d;
     thrust::device_vector<float> m_fold_output_d;
 
-    void check_inputs(loki::SizeType ts_e_size,
-                      loki::SizeType ts_v_size,
-                      loki::SizeType fold_size) const {
-        if (ts_e_size != m_cfg.get_nsamps()) {
-            throw std::runtime_error(std::format(
-                "FFACUDA::Impl: ts must have size nsamps. Expected {}, got {}",
-                m_cfg.get_nsamps(), ts_e_size));
-        }
-        if (ts_v_size != ts_e_size) {
-            throw std::runtime_error(
-                std::format("FFACUDA::Impl: ts variance must have size nsamps. "
-                            "Expected {}, got {}",
-                            ts_e_size, ts_v_size));
-        }
-        if (fold_size != m_ffa_plan.get_fold_size()) {
-            throw std::runtime_error(
-                std::format("FFACUDA::Impl: Output array has wrong size. "
-                            "Expected {}, got {}",
-                            m_ffa_plan.get_fold_size(), fold_size));
-        }
+    void check_inputs(SizeType ts_e_size,
+                      SizeType ts_v_size,
+                      SizeType fold_size) const {
+        error_check::check_equal(
+            ts_e_size, m_cfg.get_nsamps(),
+            "FFACUDA::Impl::execute: ts_e must have size nsamps");
+        error_check::check_equal(
+            ts_v_size, ts_e_size,
+            "FFACUDA::Impl::execute: ts_v must have size nsamps");
+        error_check::check_equal(
+            fold_size, m_ffa_plan.get_fold_size(),
+            "FFACUDA::Impl::execute: fold must have size fold_size");
     }
 
     void initialize_device(cuda::std::span<const float> ts_e_d,
                            cuda::std::span<const float> ts_v_d,
                            cudaStream_t stream) {
-        const auto t_ref =
-            m_cfg.get_nparams() == 1 ? 0.0 : m_ffa_plan.tsegments[0] / 2.0;
-        const auto freqs_arr = m_ffa_plan.params[0].back();
-
-        algorithms::BruteFoldCUDA bf(freqs_arr, m_ffa_plan.segment_lens[0],
-                                     m_cfg.get_nbins(), m_cfg.get_nsamps(),
-                                     m_cfg.get_tsamp(), t_ref, m_device_id);
-
-        bf.execute(ts_e_d, ts_v_d,
-                   cuda::std::span(thrust::raw_pointer_cast(m_fold_in_d.data()),
-                                   bf.get_fold_size()),
-                   stream);
+        ScopeTimer timer("FFACUDA::Impl::initialize_device");
+        m_the_bf->execute(
+            ts_e_d, ts_v_d,
+            cuda::std::span(thrust::raw_pointer_cast(m_fold_in_d.data()),
+                            m_the_bf->get_fold_size()),
+            stream);
     }
 
     void execute_device(cuda::std::span<const float> ts_e_d,
                         cuda::std::span<const float> ts_v_d,
                         cuda::std::span<float> fold_d,
                         cudaStream_t stream) {
-        // Clear internal buffers before each execution
-        thrust::fill(m_fold_in_d.begin(), m_fold_in_d.end(), 0.0F);
+        ScopeTimer timer("FFACUDA::Impl::execute_device");
         initialize_device(ts_e_d, ts_v_d, stream);
 
-        // Ping-pong between buffers for iterative FFA levels
-        float* fold_in_ptr  = thrust::raw_pointer_cast(m_fold_in_d.data());
-        float* fold_out_ptr = thrust::raw_pointer_cast(m_fold_out_d.data());
-        float* fold_d_ptr   = thrust::raw_pointer_cast(fold_d.data());
+        // Use raw pointers for swapping buffers
+        float* fold_in_ptr     = thrust::raw_pointer_cast(m_fold_in_d.data());
+        float* fold_out_ptr    = thrust::raw_pointer_cast(m_fold_out_d.data());
+        float* fold_result_ptr = thrust::raw_pointer_cast(fold_d.data());
 
         const auto levels = m_cfg.get_niters_ffa() + 1;
-        auto coords_cur   = m_ffa_plan_d.coordinates.get_raw_ptrs();
+
+        auto coords_cur = m_ffa_plan_d.coordinates.get_raw_ptrs();
         cuda_utils::check_last_cuda_error("thrust::raw_pointer_cast failed");
         coords_cur.update_offsets(m_ffa_plan_d.ncoords[0]);
 
@@ -231,9 +232,9 @@ private:
 
             cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
 
-            // Determine output buffer: final iteration writes to fold_d
-            float* current_out_ptr =
-                (i_level == levels - 1) ? fold_d_ptr : fold_out_ptr;
+            // Determine output buffer: final iteration writes to output buffer
+            const bool is_last     = i_level == levels - 1;
+            float* current_out_ptr = is_last ? fold_result_ptr : fold_out_ptr;
 
             kernel_ffa_iter<<<grid_dim, block_dim, 0, stream>>>(
                 fold_in_ptr, current_out_ptr, coords_cur, ncoords_cur,
@@ -241,7 +242,7 @@ private:
             cuda_utils::check_last_cuda_error("kernel_ffa_iter launch failed");
 
             // Ping-pong buffers (unless it's the final iteration)
-            if (i_level < levels - 1) {
+            if (!is_last) {
                 coords_cur.update_offsets(ncoords_cur);
                 std::swap(fold_in_ptr, fold_out_ptr);
             }

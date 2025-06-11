@@ -1,7 +1,6 @@
 #include "loki/algorithms/ffa_complex.hpp"
 
 #include <memory>
-#include <stdexcept>
 
 #include <spdlog/spdlog.h>
 
@@ -15,6 +14,7 @@
 #include "loki/algorithms/fold.hpp"
 #include "loki/common/types.hpp"
 #include "loki/cuda_utils.cuh"
+#include "loki/exceptions.hpp"
 #include "loki/plans_cuda.cuh"
 #include "loki/utils/fft.hpp"
 
@@ -119,7 +119,6 @@ public:
                            ComplexTypeCUDA(0.0F, 0.0F));
         m_fold_out_d.resize(m_ffa_plan.get_buffer_size_complex(),
                             ComplexTypeCUDA(0.0F, 0.0F));
-
         // Initialize the brute fold
         const auto t_ref =
             m_cfg.get_nparams() == 1 ? 0.0 : m_ffa_plan.tsegments[0] / 2.0;
@@ -128,7 +127,7 @@ public:
         m_the_bf = std::make_unique<algorithms::BruteFoldCUDA>(
             freqs_arr, m_ffa_plan.segment_lens[0], m_cfg.get_nbins(),
             m_cfg.get_nsamps(), m_cfg.get_tsamp(), t_ref, m_device_id);
-        m_fold_in_tmp_d.resize(m_the_bf->get_fold_size(), 0.0F);
+        m_fold_in_brute_d.resize(m_the_bf->get_fold_size(), 0.0F);
 
         plans::transfer_ffa_plan_to_device(m_ffa_plan, m_ffa_plan_d);
         cuda_utils::check_last_cuda_error(
@@ -215,63 +214,45 @@ private:
     plans::FFAPlan m_ffa_plan;
     plans::FFAPlanD m_ffa_plan_d;
     int m_device_id;
+    std::unique_ptr<algorithms::BruteFoldCUDA> m_the_bf;
 
     // Buffers for the FFA plan
     thrust::device_vector<ComplexTypeCUDA> m_fold_in_d;
     thrust::device_vector<ComplexTypeCUDA> m_fold_out_d;
-    thrust::device_vector<float> m_fold_in_tmp_d;
+    thrust::device_vector<float> m_fold_in_brute_d;
 
     // Add persistent input/output buffers
     thrust::device_vector<float> m_ts_e_d;
     thrust::device_vector<float> m_ts_v_d;
     thrust::device_vector<float> m_fold_output_d;
 
-    std::unique_ptr<algorithms::BruteFoldCUDA> m_the_bf;
-
-    void check_inputs(loki::SizeType ts_e_size,
-                      loki::SizeType ts_v_size,
-                      loki::SizeType fold_size) const {
-        if (ts_e_size != m_cfg.get_nsamps()) {
-            throw std::runtime_error(
-                std::format("FFACOMPLEXCUDA::Impl: ts must have size nsamps. "
-                            "Expected {}, got {}",
-                            m_cfg.get_nsamps(), ts_e_size));
-        }
-        if (ts_v_size != ts_e_size) {
-            throw std::runtime_error(std::format(
-                "FFACOMPLEXCUDA::Impl: ts variance must have size nsamps. "
-                "Expected {}, got {}",
-                ts_e_size, ts_v_size));
-        }
-        if (fold_size != m_ffa_plan.get_fold_size()) {
-            throw std::runtime_error(std::format(
-                "FFACOMPLEXCUDA::Impl: Output array has wrong size. "
-                "Expected {}, got {}",
-                m_ffa_plan.get_fold_size(), fold_size));
-        }
+    void check_inputs(SizeType ts_e_size,
+                      SizeType ts_v_size,
+                      SizeType fold_size) const {
+        error_check::check_equal(
+            ts_e_size, m_cfg.get_nsamps(),
+            "FFACOMPLEXCUDA::Impl::execute: ts_e must have size nsamps");
+        error_check::check_equal(
+            ts_v_size, ts_e_size,
+            "FFACOMPLEXCUDA::Impl::execute: ts_v must have size nsamps");
+        error_check::check_equal(
+            fold_size, m_ffa_plan.get_fold_size(),
+            "FFACOMPLEXCUDA::Impl::execute: fold must have size fold_size");
     }
 
-    void check_inputs_complex(loki::SizeType ts_e_size,
-                              loki::SizeType ts_v_size,
-                              loki::SizeType fold_complex_size) const {
-        if (ts_e_size != m_cfg.get_nsamps()) {
-            throw std::runtime_error(
-                std::format("FFACOMPLEXCUDA::Impl: ts_e must have size nsamps. "
-                            "Expected {}, got {}",
-                            m_cfg.get_nsamps(), ts_e_size));
-        }
-        if (ts_v_size != ts_e_size) {
-            throw std::runtime_error(
-                std::format("FFACOMPLEXCUDA::Impl: ts_v must have size nsamps. "
-                            "Expected {}, got {}",
-                            ts_e_size, ts_v_size));
-        }
-        if (fold_complex_size != m_ffa_plan.get_fold_size_complex()) {
-            throw std::runtime_error(std::format(
-                "FFACOMPLEXCUDA::Impl: Output array has wrong size. "
-                "Expected {}, got {}",
-                m_ffa_plan.get_fold_size_complex(), fold_complex_size));
-        }
+    void check_inputs_complex(SizeType ts_e_size,
+                              SizeType ts_v_size,
+                              SizeType fold_complex_size) const {
+        error_check::check_equal(
+            ts_e_size, m_cfg.get_nsamps(),
+            "FFACOMPLEXCUDA::Impl::execute: ts_e must have size nsamps");
+        error_check::check_equal(
+            ts_v_size, ts_e_size,
+            "FFACOMPLEXCUDA::Impl::execute: ts_v must have size nsamps");
+        error_check::check_equal(fold_complex_size,
+                                 m_ffa_plan.get_fold_size_complex(),
+                                 "FFACOMPLEXCUDA::Impl::execute: fold must "
+                                 "have size fold_size_complex");
     }
 
     void initialize_device(cuda::std::span<const float> ts_e_d,
@@ -279,8 +260,8 @@ private:
                            cudaStream_t stream) {
         m_the_bf->execute(
             ts_e_d, ts_v_d,
-            cuda::std::span(thrust::raw_pointer_cast(m_fold_in_tmp_d.data()),
-                            m_fold_in_tmp_d.size()),
+            cuda::std::span(thrust::raw_pointer_cast(m_fold_in_brute_d.data()),
+                            m_fold_in_brute_d.size()),
             stream);
 
         // RFFT the input
@@ -288,8 +269,8 @@ private:
         const auto complex_size = nfft * ((m_cfg.get_nbins() / 2) + 1);
         utils::rfft_batch_cuda(
             cuda::std::span<float>(
-                thrust::raw_pointer_cast(m_fold_in_tmp_d.data()),
-                m_fold_in_tmp_d.size()),
+                thrust::raw_pointer_cast(m_fold_in_brute_d.data()),
+                m_fold_in_brute_d.size()),
             cuda::std::span<ComplexTypeCUDA>(
                 thrust::raw_pointer_cast(m_fold_in_d.data()), complex_size),
             static_cast<int>(nfft), static_cast<int>(m_cfg.get_nbins()),
@@ -300,21 +281,19 @@ private:
                         cuda::std::span<const float> ts_v_d,
                         cuda::std::span<ComplexTypeCUDA> fold_d_complex,
                         cudaStream_t stream) {
-        // Clear internal buffers before each execution
-        thrust::fill(m_fold_in_d.begin(), m_fold_in_d.end(),
-                     ComplexTypeCUDA(0.0F, 0.0F));
         initialize_device(ts_e_d, ts_v_d, stream);
 
-        // Ping-pong between buffers for iterative FFA levels
+        // Use raw pointers for swapping buffers
         ComplexTypeCUDA* fold_in_ptr =
             thrust::raw_pointer_cast(m_fold_in_d.data());
         ComplexTypeCUDA* fold_out_ptr =
             thrust::raw_pointer_cast(m_fold_out_d.data());
-        ComplexTypeCUDA* fold_complex_ptr =
+        ComplexTypeCUDA* fold_result_ptr =
             thrust::raw_pointer_cast(fold_d_complex.data());
 
         const auto levels = m_cfg.get_niters_ffa() + 1;
-        auto coords_cur   = m_ffa_plan_d.coordinates.get_raw_ptrs();
+
+        auto coords_cur = m_ffa_plan_d.coordinates.get_raw_ptrs();
         cuda_utils::check_last_cuda_error("thrust::raw_pointer_cast failed");
         coords_cur.update_offsets(m_ffa_plan_d.ncoords[0]);
 
@@ -335,9 +314,10 @@ private:
 
             cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
 
-            // Determine output buffer: final iteration writes to fold_d
+            // Determine output buffer: final iteration writes to output buffer
+            const bool is_last = i_level == levels - 1;
             ComplexTypeCUDA* current_out_ptr =
-                (i_level == levels - 1) ? fold_complex_ptr : fold_out_ptr;
+                is_last ? fold_result_ptr : fold_out_ptr;
 
             kernel_ffa_complex_iter<<<grid_dim, block_dim, 0, stream>>>(
                 fold_in_ptr, current_out_ptr, coords_cur, ncoords_cur,
@@ -346,7 +326,7 @@ private:
                 "kernel_ffa_complex_iter launch failed");
 
             // Ping-pong buffers (unless it's the final iteration)
-            if (i_level < levels - 1) {
+            if (!is_last) {
                 coords_cur.update_offsets(ncoords_cur);
                 std::swap(fold_in_ptr, fold_out_ptr);
             }
