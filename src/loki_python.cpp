@@ -10,6 +10,7 @@
 #include <pybind11/stl.h>
 
 #include "loki/loki.hpp"
+#include "loki/psr_utils.hpp"
 
 namespace loki {
 using algorithms::FFA;
@@ -341,6 +342,44 @@ PYBIND11_MODULE(libloki, m) {
                 to_span<const float>(ts_e), to_span<const float>(ts_v), cfg));
         },
         py::arg("ts_e"), py::arg("ts_v"), py::arg("cfg"));
+
+    auto m_psr_utils = m.def_submodule("psr_utils", "PSR utils submodule");
+    m_psr_utils.def(
+        "shift_params",
+        [](const PyArrayT<double>& pset_cur, double delta_t) {
+            auto [pset_prev, delay] = psr_utils::shift_params(
+                to_span<const double>(pset_cur), delta_t);
+            return std::make_tuple(as_pyarray_ref(pset_prev), delay);
+        },
+        py::arg("pset_cur"), py::arg("delta_t"));
+    m_psr_utils.def(
+        "get_phase_idx",
+        [](double delta_t, double period, SizeType nbins, double delay) {
+            return psr_utils::get_phase_idx(delta_t, period, nbins, delay);
+        },
+        py::arg("delta_t"), py::arg("period"), py::arg("nbins"),
+        py::arg("delay"));
+    m_psr_utils.def(
+        "ffa_taylor_resolve",
+        [](const PyArrayT<double>& pset_cur,
+           const std::vector<PyArrayT<double>>& param_arr, SizeType ffa_level,
+           SizeType latter, double tseg_brute, SizeType nbins) {
+            std::vector<std::vector<double>> param_vecs;
+            param_vecs.reserve(param_arr.size());
+            for (const auto& arr : param_arr) {
+                param_vecs.emplace_back(arr.data(), arr.data() + arr.size());
+            }
+            std::span<const std::vector<double>> param_span(param_vecs);
+
+            auto [pindex_prev, relative_phase] = core::ffa_taylor_resolve(
+                to_span<const double>(pset_cur),
+                param_span, ffa_level,
+                latter,
+                tseg_brute, nbins);
+            return std::make_tuple(as_pyarray_ref(pindex_prev), relative_phase);
+        },
+        py::arg("pset_cur"), py::arg("param_arr"), py::arg("ffa_level"),
+        py::arg("latter"), py::arg("tseg_brute"), py::arg("nbins"));
 }
 
 } // namespace loki

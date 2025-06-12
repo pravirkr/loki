@@ -5,6 +5,7 @@
 #include "loki/algorithms/ffa.hpp"         // IWYU pragma: export
 #include "loki/algorithms/ffa_complex.hpp" // IWYU pragma: export
 #include "loki/algorithms/fold.hpp"        // IWYU pragma: export
+#include "loki/core/taylor.hpp"            // IWYU pragma: export
 #include "loki/detection/score.hpp"        // IWYU pragma: export
 #include "loki/detection/thresholds.hpp"   // IWYU pragma: export
 #include "loki/search/configs.hpp"         // IWYU pragma: export

@@ -4,6 +4,7 @@
 #include <format>
 
 #include <xtensor-blas/xlinalg.hpp>
+#include <xtensor/generators/xbuilder.hpp>
 #include <xtensor/views/xview.hpp>
 
 #include "loki/math.hpp"
@@ -239,7 +240,7 @@ shift_params(std::span<const double> param_vec, double delta_t) {
         std::copy(dvec_new.begin(), dvec_new.end() - 2, param_vec_new.begin());
     }
     param_vec_new.back() =
-        param_vec.back() * (1.0 + dvec_new[nparams - 2] / utils::kCval);
+        param_vec.back() * (1.0 + dvec_new[nparams - 1] / utils::kCval);
     const auto delay_rel = dvec_new.back() / utils::kCval;
     return {param_vec_new, delay_rel};
 }
@@ -303,7 +304,8 @@ shift_params_circular_batch(const xt::xtensor<double, 3>& param_vec_batch,
     // Compute required order
     auto max_omega      = xt::amax(omega_batch)();
     auto required_order = std::min(
-        static_cast<SizeType>(max_omega * std::abs(delta_t) * M_E + 10), 100ul);
+        static_cast<SizeType>((max_omega * std::abs(delta_t) * M_E) + 10),
+        100UL);
 
     // Create dvec_cur with extended size
     xt::xtensor<double, 2> dvec_cur =
@@ -474,14 +476,11 @@ std::vector<double> range_param(double vmin, double vmax, double dv) {
     if (dv > (vmax - vmin) / 2.0) {
         return {(vmax + vmin) / 2.0};
     }
-    const auto npoints = static_cast<SizeType>((vmax - vmin) / dv);
-    const auto step    = (vmax - vmin) / static_cast<double>(npoints + 1);
-    std::vector<double> grid_points;
-    grid_points.reserve(npoints);
-    for (SizeType i = 1; i <= npoints; ++i) {
-        grid_points.push_back(vmin + (step * static_cast<double>(i)));
-    }
-    return grid_points;
+    // np.linspace(vmin, vmax, npoints + 2)[1:-1]
+    const auto npoints   = static_cast<SizeType>((vmax - vmin) / dv);
+    auto grid_points     = xt::linspace(vmin, vmax, npoints + 2);
+    const auto grid_view = xt::view(grid_points, xt::range(1, npoints + 1));
+    return {grid_view.begin(), grid_view.end()};
 }
 
 } // namespace loki::psr_utils
