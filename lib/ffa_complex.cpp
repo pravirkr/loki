@@ -302,11 +302,72 @@ private:
         const auto ncoords_cur  = coords_cur.size();
         const auto ncoords_prev = coords_prev.size();
 
-        constexpr SizeType kBlockSize = 8;
+        // Choose strategy based on level characteristics
+        if (nsegments >= 256) {
+            execute_iter_segment(fold_in, fold_out, coords_cur, nsegments,
+                                 nbins_f, nbins, ncoords_cur, ncoords_prev);
+        } else {
+            execute_iter_standard(fold_in, fold_out, coords_cur, nsegments,
+                                  nbins_f, nbins, ncoords_cur, ncoords_prev);
+        }
+    }
+
+    void execute_iter_segment(const ComplexType* __restrict__ fold_in,
+                              ComplexType* __restrict__ fold_out,
+                              const auto& coords_cur,
+                              SizeType nsegments,
+                              SizeType nbins_f,
+                              SizeType nbins,
+                              SizeType ncoords_cur,
+                              SizeType ncoords_prev) {
+        // Process one segment at a time to keep data in cache
+        constexpr SizeType kBlockSize = 32;
+#pragma omp parallel for num_threads(m_nthreads) default(none)                 \
+    shared(fold_in, fold_out, coords_cur, nsegments, nbins, nbins_f,           \
+               ncoords_cur, ncoords_prev)
+        for (SizeType iseg = 0; iseg < nsegments; ++iseg) {
+            // Process coordinates in blocks within each segment
+            for (SizeType icoord_block = 0; icoord_block < ncoords_cur;
+                 icoord_block += kBlockSize) {
+                SizeType block_end =
+                    std::min(icoord_block + kBlockSize, ncoords_cur);
+                for (SizeType icoord = icoord_block; icoord < block_end;
+                     ++icoord) {
+                    const auto& coord_cur = coords_cur[icoord];
+                    const auto tail_offset =
+                        ((iseg * 2) * ncoords_prev * 2 * nbins_f) +
+                        (coord_cur.i_tail * 2 * nbins_f);
+                    const auto head_offset =
+                        ((iseg * 2 + 1) * ncoords_prev * 2 * nbins_f) +
+                        (coord_cur.i_head * 2 * nbins_f);
+                    const auto out_offset = (iseg * ncoords_cur * 2 * nbins_f) +
+                                            (icoord * 2 * nbins_f);
+                    const ComplexType* __restrict__ fold_tail =
+                        &fold_in[tail_offset];
+                    const ComplexType* __restrict__ fold_head =
+                        &fold_in[head_offset];
+                    ComplexType* __restrict__ fold_sum = &fold_out[out_offset];
+                    shift_add_complex_recurrence(
+                        fold_tail, coord_cur.shift_tail, fold_head,
+                        coord_cur.shift_head, fold_sum, nbins_f, nbins);
+                }
+            }
+        }
+    }
+
+    void execute_iter_standard(const ComplexType* __restrict__ fold_in,
+                               ComplexType* __restrict__ fold_out,
+                               const auto& coords_cur,
+                               SizeType nsegments,
+                               SizeType nbins_f,
+                               SizeType nbins,
+                               SizeType ncoords_cur,
+                               SizeType ncoords_prev) {
+        constexpr SizeType kBlockSize = 32;
 
 #pragma omp parallel for num_threads(m_nthreads) default(none)                 \
-    shared(fold_in, fold_out, coords_cur, coords_prev, nsegments, nbins,       \
-               nbins_f, ncoords_cur, ncoords_prev)
+    shared(fold_in, fold_out, coords_cur, nsegments, nbins, nbins_f,           \
+               ncoords_cur, ncoords_prev)
         for (SizeType icoord_block = 0; icoord_block < ncoords_cur;
              icoord_block += kBlockSize) {
             SizeType block_end =

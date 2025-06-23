@@ -6,6 +6,7 @@
 #include <spdlog/spdlog.h>
 
 #include "loki/common/types.hpp"
+#include "loki/detection/score.hpp"
 #include "loki/psr_utils.hpp"
 
 namespace loki::search {
@@ -52,6 +53,8 @@ PulsarSearchConfig::PulsarSearchConfig(
     m_tseg_ffa   = static_cast<double>(m_bseg_ffa) * m_tsamp;
     m_niters_ffa = static_cast<SizeType>(std::log2(
         static_cast<double>(m_bseg_ffa) / static_cast<double>(m_bseg_brute)));
+    m_score_widths =
+        detection::generate_box_width_trials(m_nbins, m_ducy_max, m_wtsp);
 
     spdlog::info(
         "PulsarSearchConfigClass: nsamps={}, tsamp={}, nbins={}, tol_bins={}, "

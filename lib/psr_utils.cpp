@@ -448,18 +448,78 @@ std::tuple<std::vector<double>, double> branch_param(double param_cur,
     const auto confidence_const =
         0.5 * (1.0 + 1.0 / static_cast<double>(n - 2));
     const auto half_range = confidence_const * dparam_cur;
-    const auto step       = 2.0 * half_range / static_cast<double>(n - 1);
 
     // Generate array excluding first and last points
-    std::vector<double> param_arr_new;
-    param_arr_new.reserve(n - 2);
-    for (int i = 1; i < n - 1; ++i) {
-        param_arr_new.push_back(param_cur - half_range +
-                                (step * static_cast<double>(i)));
+    auto grid_points =
+        xt::linspace(param_cur - half_range, param_cur + half_range, n);
+    auto param_arr_new           = xt::view(grid_points, xt::range(1, n - 1));
+    const auto dparam_new_actual = dparam_cur / static_cast<double>(n - 2);
+    return {std::vector<double>(param_arr_new.begin(), param_arr_new.end()),
+            dparam_new_actual};
+}
+
+std::pair<double, SizeType> branch_param_padded(std::span<double> out_values,
+                                                double param_cur,
+                                                double dparam_cur,
+                                                double dparam_new,
+                                                double param_min,
+                                                double param_max) {
+    if (dparam_cur <= 0.0 || dparam_new <= 0.0) {
+        throw std::invalid_argument(
+            std::format("Both dparam_cur and dparam_new must be positive (got "
+                        "{}, {})",
+                        dparam_cur, dparam_new));
+    }
+    if (param_cur < param_min || param_cur > param_max) {
+        throw std::invalid_argument(std::format(
+            "param_cur must be within [param_min, param_max] (got {})",
+            param_cur));
     }
 
-    const auto dparam_new_actual = dparam_cur / static_cast<double>(n - 2);
-    return {param_arr_new, dparam_new_actual};
+    SizeType count           = 0;
+    double dparam_new_actual = dparam_new; // Default if no branching occurs
+
+    // If desired step size is too large, return current value
+    if (dparam_new > (param_max - param_min) / 2.0) {
+        if (!out_values.empty()) {
+            out_values[0] = param_cur;
+            count         = 1;
+        }
+        dparam_new_actual = dparam_cur;
+        return {dparam_new_actual, count};
+    }
+
+    const auto n = 2 + static_cast<int>(std::ceil(dparam_cur / dparam_new));
+    const auto num_points = n - 2;
+    if (num_points <= 0) {
+        throw std::invalid_argument(std::format(
+            "Invalid input: ensure dparam_cur > dparam_new (got {}, {})",
+            dparam_cur, dparam_new));
+    }
+
+    // Calculate the actual branched values
+    // 0.5 < confidence_const < 1
+    const double confidence_const =
+        0.5 * (1.0 + 1.0 / static_cast<double>(num_points));
+    const double half_range  = confidence_const * dparam_cur;
+    const double start       = param_cur - half_range;
+    const double stop        = param_cur + half_range;
+    const auto num_intervals = n - 1;
+    const double step = (stop - start) / static_cast<double>(num_intervals);
+
+    // Generate points and fill the start of the padded array
+    double current_val = start + step;
+    count = std::min(static_cast<SizeType>(num_points), out_values.size());
+
+    for (SizeType i = 0; i < count; ++i) {
+        out_values[i] = current_val;
+        current_val += step;
+    }
+
+    // Calculate actual dparam based on generated points
+    dparam_new_actual = dparam_cur / static_cast<double>(num_points);
+
+    return {dparam_new_actual, count};
 }
 
 std::vector<double> range_param(double vmin, double vmax, double dv) {

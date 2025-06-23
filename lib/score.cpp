@@ -200,13 +200,16 @@ void MatchedFilter::compute(std::span<const float> arr, std::span<float> out) {
     m_impl->compute(arr, out);
 }
 
-std::vector<SizeType> generate_width_trials(SizeType nbins_max, float wtsp) {
+std::vector<SizeType>
+generate_box_width_trials(SizeType fold_bins, double ducy_max, double wtsp) {
+    const auto wmax = static_cast<SizeType>(
+        std::max(1.0, ducy_max * static_cast<double>(fold_bins)));
     std::vector<SizeType> widths = {1};
-    while (widths.back() < nbins_max) {
+    while (widths.back() < wmax) {
         const auto next_width = std::max(
             static_cast<SizeType>(widths.back() + 1),
-            static_cast<SizeType>(wtsp * static_cast<float>(widths.back())));
-        if (next_width > nbins_max) {
+            static_cast<SizeType>(wtsp * static_cast<double>(widths.back())));
+        if (next_width > wmax) {
             break;
         }
         widths.push_back(next_width);
@@ -264,6 +267,68 @@ void snr_2d(std::span<const float> arr,
         snr_1d(arr.subspan(i * nbins, nbins), widths,
                out.subspan(i * ntemplates, ntemplates), stdnoise);
     }
+}
+
+void snr_boxcar_batch(xt::xtensor<float, 3>& folds,
+                      std::span<const SizeType> widths,
+                      std::span<float> out) {
+    const SizeType batch_size = folds.shape(0);
+    const SizeType nbins      = folds.shape(2);
+    const SizeType n_widths   = widths.size();
+
+    error_check::check_equal(
+        batch_size, out.size(),
+        "snr_boxcar_batch: folds and out size do not match");
+
+    // Find max width for prefix sum buffer allocation
+    const SizeType max_width = *std::ranges::max_element(widths);
+    std::vector<float> prefix_sum(nbins + max_width);
+    std::vector<float> fold_norm(nbins);
+
+    for (SizeType i = 0; i < batch_size; ++i) {
+        for (SizeType j = 0; j < nbins; ++j) {
+            const float ts_e = folds(i, 0, j);
+            const float ts_v = folds(i, 1, j);
+            fold_norm[j]     = ts_e / std::sqrt(ts_v);
+        }
+
+        // Compute circular prefix sum
+        utils::circular_prefix_sum(std::span<const float>(fold_norm),
+                                   std::span<float>(prefix_sum));
+        const float total_sum        = prefix_sum[nbins - 1];
+        float* __restrict__ psum_ptr = prefix_sum.data();
+
+        // Compute SNR for each width, find maximum
+        float max_snr = -std::numeric_limits<float>::max();
+        for (SizeType iw = 0; iw < n_widths; ++iw) {
+            const SizeType width  = widths[iw];
+            const SizeType size_w = nbins - width;
+
+            const float h = std::sqrt(static_cast<float>(size_w) /
+                                      static_cast<float>(nbins * width));
+            const float b =
+                static_cast<float>(width) * h / static_cast<float>(size_w);
+            const float dmax =
+                utils::diff_max(psum_ptr + width, psum_ptr, nbins);
+            const float snr = ((h + b) * dmax) - (b * total_sum);
+            max_snr         = std::max(max_snr, snr);
+        }
+        out[i] = max_snr;
+    }
+}
+
+void snr_boxcar_batch_complex(xt::xtensor<ComplexType, 3>& folds,
+                              std::span<const SizeType> widths,
+                              std::span<float> out) {
+    const auto batch_size = folds.shape(0);
+    const auto nbins      = folds.shape(2);
+
+    xt::xtensor<float, 3> folds_t({batch_size, 2, nbins}, 0.0F);
+    std::span<ComplexType> folds_span(folds.data(), folds.size());
+    std::span<float> folds_t_span(folds_t.data(), folds_t.size());
+    utils::irfft_batch(folds_span, folds_t_span, static_cast<int>(batch_size),
+                       static_cast<int>(nbins), 1);
+    snr_boxcar_batch(folds_t, widths, out);
 }
 
 } // namespace loki::detection

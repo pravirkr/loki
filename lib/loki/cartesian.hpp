@@ -1,13 +1,15 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
-#include <cstddef>
 #include <format>
 #include <ranges>
 #include <span>
 #include <stdexcept>
 #include <type_traits>
 #include <vector>
+
+#include <xtensor/containers/xtensor.hpp>
 
 #include "loki/common/types.hpp"
 
@@ -195,6 +197,75 @@ constexpr auto
 cartesian_product_view(const std::vector<std::vector<T>>& params) {
     return CartesianProductView<T, MaxDims>(
         std::span<const std::vector<T>>(params));
+}
+
+template <typename T, SizeType MaxDims = 5>
+constexpr auto cartesian_product_view(std::span<const std::vector<T>> params) {
+    return CartesianProductView<T, MaxDims>(params);
+}
+
+// Helper function for cartesian product with padded arrays
+inline std::tuple<xt::xtensor<double, 2>, std::vector<SizeType>>
+cartesian_prod_padded(const xt::xtensor<double, 3>& padded_arrays,
+                      const xt::xtensor<SizeType, 2>& actual_counts,
+                      SizeType n_batch,
+                      SizeType nparams) {
+
+    std::vector<SizeType> items_per_batch(n_batch);
+    SizeType total_items = 0;
+
+    // First pass: Calculate total items and items per batch
+    for (SizeType i = 0; i < n_batch; ++i) {
+        SizeType count_i = 1;
+        for (SizeType j = 0; j < nparams; ++j) {
+            count_i *= actual_counts(i, j);
+        }
+        items_per_batch[i] = count_i;
+        total_items += count_i;
+    }
+
+    xt::xtensor<double, 2> cart_prod({total_items, nparams});
+    std::vector<SizeType> origins(total_items);
+
+    // Second pass: Generate combinations and fill arrays
+    SizeType current_row_idx = 0;
+    for (SizeType i = 0; i < n_batch; ++i) {
+        const SizeType num_items_i = items_per_batch[i];
+
+        // Fill origins for this batch
+        std::ranges::fill(
+            origins.begin() + static_cast<IndexType>(current_row_idx),
+            origins.begin() +
+                static_cast<IndexType>(current_row_idx + num_items_i),
+            i);
+
+        // Generate Cartesian product for batch 'i'
+        std::vector<SizeType> indices(nparams, 0);
+
+        for (SizeType item_row_idx = 0; item_row_idx < num_items_i;
+             ++item_row_idx) {
+            // Fill current combination
+            for (SizeType k = 0; k < nparams; ++k) {
+                cart_prod(current_row_idx + item_row_idx, k) =
+                    padded_arrays(i, k, indices[k]);
+            }
+
+            // Odometer increment (except for last item)
+            if (item_row_idx < num_items_i - 1) {
+                for (SizeType k = nparams; k-- > 0;) {
+                    const SizeType max_idx_k = actual_counts(i, k) - 1;
+                    if (indices[k] < max_idx_k) {
+                        ++indices[k];
+                        break;
+                    }
+                    indices[k] = 0;
+                }
+            }
+        }
+        current_row_idx += num_items_i;
+    }
+
+    return {std::move(cart_prod), std::move(origins)};
 }
 
 } // namespace loki::utils

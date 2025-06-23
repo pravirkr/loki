@@ -88,6 +88,15 @@ if(indicators_ADDED)
   target_include_directories(indicators::indicators INTERFACE ${indicators_SOURCE_DIR}/include)
 endif()
 
+# Thread pool
+CPMAddPackage(
+  NAME BS_thread_pool
+  GITHUB_REPOSITORY bshoshany/thread-pool
+  VERSION 5.0.0 EXCLUDE_FROM_ALL SYSTEM
+)
+add_library(BS_thread_pool INTERFACE)
+target_include_directories(BS_thread_pool INTERFACE ${BS_thread_pool_SOURCE_DIR}/include)
+
 # Code coverage setup
 if(ENABLE_COVERAGE)
   if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
@@ -128,13 +137,14 @@ target_link_libraries(
   PRIVATE ${LOKI_COMPILE_OPTIONS} coverage_config
   PUBLIC OpenMP::OpenMP_CXX
          HDF5::HDF5
-         FFTW::Float 
+         FFTW::Float
          FFTW::FloatOpenMP
          spdlog::spdlog_header_only
          xtensor
          Boost::math
          HighFive
          indicators::indicators
+         BS_thread_pool
 )
 
 # Add CUDA options and libraries when available

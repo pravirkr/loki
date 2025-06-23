@@ -5,6 +5,8 @@
 #include <string_view>
 #include <vector>
 
+#include <xtensor/containers/xtensor.hpp>
+
 #include "loki/common/types.hpp"
 
 #ifdef LOKI_ENABLE_CUDA
@@ -37,9 +39,10 @@ private:
     std::unique_ptr<Impl> m_impl;
 };
 
-// Generate a list of widths for the matched filter
-std::vector<SizeType> generate_width_trials(SizeType nbins_max,
-                                            float wtsp = 1.5F);
+// Generate boxcar width trials for matched filtering
+std::vector<SizeType> generate_box_width_trials(SizeType fold_bins,
+                                                double ducy_max = 0.2,
+                                                double wtsp     = 1.5);
 
 // Compute the S/N of single pulse proile
 void snr_1d(std::span<const float> arr,
@@ -53,5 +56,19 @@ void snr_2d(std::span<const float> arr,
             std::span<const SizeType> widths,
             std::span<float> out,
             float stdnoise = 1.0F);
+
+// Compute the S/N of a batch of folded profiles
+void snr_boxcar_batch(xt::xtensor<float, 3>& folds,
+                      std::span<const SizeType> widths,
+                      std::span<float> out);
+
+// Compute the S/N of a batch of ComplexType folded profiles
+void snr_boxcar_batch_complex(xt::xtensor<ComplexType, 3>& folds,
+                              std::span<const SizeType> widths,
+                              std::span<float> out);
+
+template <typename FoldType>
+using ScoringFunction = std::function<void(
+    xt::xtensor<FoldType, 3>&, std::span<const SizeType>, std::span<float>)>;
 
 } // namespace loki::detection

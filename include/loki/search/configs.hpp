@@ -51,6 +51,9 @@ public:
     [[nodiscard]] SizeType get_nparams() const { return m_nparams; }
     [[nodiscard]] double get_f_min() const { return m_f_min; }
     [[nodiscard]] double get_f_max() const { return m_f_max; }
+    [[nodiscard]] const std::vector<SizeType>& get_score_widths() const {
+        return m_score_widths;
+    }
 
     [[nodiscard]] std::vector<double> get_dparams_f(double tseg_cur) const;
     [[nodiscard]] std::vector<double> get_dparams(double tseg_cur) const;
@@ -81,6 +84,7 @@ private:
     SizeType m_nparams{};
     double m_f_min{};
     double m_f_max{};
+    std::vector<SizeType> m_score_widths;
 };
 
 } // namespace loki::search

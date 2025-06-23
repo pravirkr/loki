@@ -13,17 +13,17 @@ namespace loki::utils {
 template <typename FoldType = float> class SuggestionStruct {
 public:
     /**
-     * A struct to hold suggestions for pruning.
+     * A struct to hold suggestions for pruning. Creates following arrays:
+     * - param_sets: Parameter sets, shape (max_sugg, nparams + 2, 2)
+     * - folds: Folded profiles, shape (max_sugg, 2, nbins)
+     * - scores: Scores for each suggestion, shape (max_sugg)
+     * - backtracks: Backtracks, shape (max_sugg, nparams + 2)
      *
-     * @param param_sets Parameter sets: shape (nsuggestions, nparams, 2)
-     * @param folds Folded profiles: shape (nsuggestions, nbins, 2)
-     * @param scores Scores for each suggestion (nsuggestions)
-     * @param backtracks Backtracks: shape (nsuggestions, 2 + nparams)
+     * @param max_sugg Maximum number of suggestions to hold
+     * @param nparams Number of parameters
+     * @param nbins Number of bins
      */
-    SuggestionStruct(xt::xtensor<double, 3> param_sets,
-                     xt::xtensor<FoldType, 3> folds,
-                     std::vector<float> scores,
-                     xt::xtensor<SizeType, 2> backtracks);
+    SuggestionStruct(SizeType max_sugg, SizeType nparams, SizeType nbins);
 
     ~SuggestionStruct();
     SuggestionStruct(SuggestionStruct&&) noexcept;
@@ -37,19 +37,18 @@ public:
     [[nodiscard]] const std::vector<float>& get_scores() const noexcept;
     [[nodiscard]] const xt::xtensor<SizeType, 2>&
     get_backtracks() const noexcept;
-    [[nodiscard]] SizeType get_valid_size() const noexcept;
-    [[nodiscard]] SizeType get_size() const noexcept;
+    [[nodiscard]] SizeType get_max_sugg() const noexcept;
     [[nodiscard]] SizeType get_nparams() const noexcept;
-    [[nodiscard]] float get_size_lb() const noexcept;
+    [[nodiscard]] SizeType get_nbins() const noexcept;
+    [[nodiscard]] SizeType get_nsugg() const noexcept;
+    [[nodiscard]] float get_nsugg_lb() const noexcept;
     [[nodiscard]] float get_score_max() const noexcept;
     [[nodiscard]] float get_score_min() const noexcept;
     [[nodiscard]] float get_score_median() const noexcept;
 
-    // Setter
-    void set_valid_size(SizeType valid_size) noexcept;
+    void set_nsugg(SizeType nsugg) noexcept;
+    void reset() noexcept;
 
-    // Create a new empty suggestion struct with specified capacity
-    [[nodiscard]] SuggestionStruct get_new(SizeType max_sugg) const;
     // Get the best suggestion (highest score)
     [[nodiscard]] std::
         tuple<xt::xtensor<double, 2>, xt::xtensor<FoldType, 2>, float>
@@ -61,6 +60,11 @@ public:
                            const xt::xtensor<FoldType, 2>& fold,
                            float score,
                            const std::vector<SizeType>& backtrack);
+    // Add an initial set of suggestions to the struct
+    void add_initial(const xt::xtensor<double, 3>& param_sets_batch,
+                     const xt::xtensor<FoldType, 3>& folds_batch,
+                     const std::vector<float>& scores_batch,
+                     const xt::xtensor<SizeType, 2>& backtracks_batch);
     // Add a batch of suggestions to the struct if there is space
     [[nodiscard]] float
     add_batch(const xt::xtensor<double, 3>& param_sets_batch,
@@ -70,8 +74,6 @@ public:
               float current_threshold);
     // Trim to keep only suggestions with scores >= median
     [[nodiscard]] float trim_threshold();
-    // Return only the valid portion of the struct, excluding garbage data
-    [[nodiscard]] SuggestionStruct trim_empty() const;
     // Trim repeated suggestions
     void trim_repeats();
     // Trim repeated suggestions and keep only those with scores >= median

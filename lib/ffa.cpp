@@ -181,13 +181,72 @@ private:
         const auto ncoords_cur  = coords_cur.size();
         const auto ncoords_prev = coords_prev.size();
 
-        constexpr SizeType kBlockSize = 8;
+        // Choose strategy based on level characteristics
+        if (nsegments >= 256) {
+            execute_iter_segment(fold_in, fold_out, coords_cur, nsegments,
+                                 nbins, ncoords_cur, ncoords_prev);
+        } else {
+            execute_iter_standard(fold_in, fold_out, coords_cur, nsegments,
+                                  nbins, ncoords_cur, ncoords_prev);
+        }
+    }
 
-        // Thread-private buffer - each thread gets its own buffer
+    void execute_iter_segment(const float* __restrict__ fold_in,
+                              float* __restrict__ fold_out,
+                              const auto& coords_cur,
+                              SizeType nsegments,
+                              SizeType nbins,
+                              SizeType ncoords_cur,
+                              SizeType ncoords_prev) {
+        // Process one segment at a time to keep data in cache
+        constexpr SizeType kBlockSize = 32;
+
         std::vector<float> temp_buffer(2 * nbins);
 #pragma omp parallel for num_threads(m_nthreads) default(none)                 \
-    shared(fold_in, fold_out, coords_cur, coords_prev, nsegments, nbins,       \
-               ncoords_cur, ncoords_prev) firstprivate(temp_buffer)
+    shared(fold_in, fold_out, coords_cur, nsegments, nbins, ncoords_cur,       \
+               ncoords_prev) firstprivate(temp_buffer)
+        for (SizeType iseg = 0; iseg < nsegments; ++iseg) {
+            // Process coordinates in blocks within each segment
+            for (SizeType icoord_block = 0; icoord_block < ncoords_cur;
+                 icoord_block += kBlockSize) {
+                SizeType block_end =
+                    std::min(icoord_block + kBlockSize, ncoords_cur);
+                for (SizeType icoord = icoord_block; icoord < block_end;
+                     ++icoord) {
+                    const auto& coord_cur = coords_cur[icoord];
+                    const auto tail_offset =
+                        ((iseg * 2) * ncoords_prev * 2 * nbins) +
+                        (coord_cur.i_tail * 2 * nbins);
+                    const auto head_offset =
+                        ((iseg * 2 + 1) * ncoords_prev * 2 * nbins) +
+                        (coord_cur.i_head * 2 * nbins);
+                    const auto out_offset =
+                        (iseg * ncoords_cur * 2 * nbins) + (icoord * 2 * nbins);
+                    const float* __restrict__ fold_tail = &fold_in[tail_offset];
+                    const float* __restrict__ fold_head = &fold_in[head_offset];
+                    float* __restrict__ fold_sum        = &fold_out[out_offset];
+                    float* __restrict__ temp_buffer_ptr = temp_buffer.data();
+                    shift_add_optimized(fold_tail, coord_cur.shift_tail,
+                                        fold_head, coord_cur.shift_head,
+                                        fold_sum, temp_buffer_ptr, nbins);
+                }
+            }
+        }
+    }
+
+    void execute_iter_standard(const float* __restrict__ fold_in,
+                               float* __restrict__ fold_out,
+                               const auto& coords_cur,
+                               SizeType nsegments,
+                               SizeType nbins,
+                               SizeType ncoords_cur,
+                               SizeType ncoords_prev) {
+        constexpr SizeType kBlockSize = 32;
+
+        std::vector<float> temp_buffer(2 * nbins);
+#pragma omp parallel for num_threads(m_nthreads) default(none)                 \
+    shared(fold_in, fold_out, coords_cur, nsegments, nbins, ncoords_cur,       \
+               ncoords_prev) firstprivate(temp_buffer)
         for (SizeType icoord_block = 0; icoord_block < ncoords_cur;
              icoord_block += kBlockSize) {
             SizeType block_end =
