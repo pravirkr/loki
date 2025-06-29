@@ -20,8 +20,8 @@ public:
                         search::PulsarSearchConfig cfg);
 
     // Core interface methods
-    auto load(const xt::xtensor<FoldType, 2>& fold, SizeType seg_idx) const
-        -> xt::xtensor<FoldType, 1>;
+    auto load(std::span<const FoldType> ffa_fold, SizeType seg_idx) const
+        -> std::span<const FoldType>;
 
     auto resolve(const xt::xtensor<double, 3>& leaf_batch,
                  std::pair<double, double> coord_add,
@@ -42,11 +42,12 @@ public:
     auto pack(const xt::xtensor<FoldType, 2>& data) const
         -> xt::xtensor<FoldType, 1>;
 
-    void shift_add(const xt::xtensor<FoldType, 3>& segment_batch,
-                   std::span<const double> shift_batch,
-                   const xt::xtensor<FoldType, 3>& folds,
-                   std::span<const SizeType> isuggest_batch,
-                   xt::xtensor<FoldType, 3>& out) const;
+    void load_shift_add(std::span<const FoldType> ffa_fold_segment,
+                        std::span<const SizeType> param_idx_batch,
+                        std::span<const double> shift_batch,
+                        const xt::xtensor<FoldType, 3>& folds,
+                        std::span<const SizeType> isuggest_batch,
+                        xt::xtensor<FoldType, 3>& out);
 
     auto transform(const xt::xtensor<double, 2>& leaf,
                    std::pair<double, double> coord_cur,
@@ -72,6 +73,9 @@ private:
     std::vector<double> m_dparams;
     double m_tseg_ffa;
     search::PulsarSearchConfig m_cfg;
+
+    // Buffers for shift-add operations
+    std::vector<FoldType> m_shift_buffer;
 };
 
 // Type aliases for convenience

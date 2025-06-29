@@ -17,6 +17,7 @@
 #include <omp.h>
 
 #include "loki/common/types.hpp"
+#include "loki/psr_utils.hpp"
 
 namespace loki::utils {
 
@@ -213,8 +214,18 @@ public:
         }
 
         // Call the batch shift function
-        // return psr_utils::shift_params_batch(transformed_params, delta_t);
-        return transformed_params;
+        xt::xtensor<double, 3> trans_params;
+        if (m_nparams < 4) {
+            auto [trans_params, _] =
+                psr_utils::shift_params_batch(transformed_params, delta_t);
+        } else if (m_nparams == 4) {
+            auto [trans_params, _] = psr_utils::shift_params_circular_batch(
+                transformed_params, delta_t);
+        } else {
+            throw std::runtime_error(std::format(
+                "Suggestion struct must have less than 4 parameters."));
+        }
+        return trans_params;
     }
 
     bool add(const xt::xtensor<double, 2>& param_set,

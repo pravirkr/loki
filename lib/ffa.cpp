@@ -9,83 +9,12 @@
 #include "loki/algorithms/fold.hpp"
 #include "loki/common/types.hpp"
 #include "loki/exceptions.hpp"
+#include "loki/kernels.hpp"
 #include "loki/search/configs.hpp"
 #include "loki/timing.hpp"
 #include "loki/utils.hpp"
 
 namespace loki::algorithms {
-
-namespace {
-void shift_add(const float* __restrict__ data_tail,
-               double phase_shift_tail,
-               const float* __restrict__ data_head,
-               double phase_shift_head,
-               float* __restrict__ out,
-               SizeType nbins) {
-
-    const auto shift_tail =
-        static_cast<SizeType>(std::round(phase_shift_tail)) % nbins;
-    const auto shift_head =
-        static_cast<SizeType>(std::round(phase_shift_head)) % nbins;
-
-    const float* __restrict__ data_tail_e = data_tail;
-    const float* __restrict__ data_tail_v = data_tail + nbins;
-    const float* __restrict__ data_head_e = data_head;
-    const float* __restrict__ data_head_v = data_head + nbins;
-    float* __restrict__ out_e             = out;
-    float* __restrict__ out_v             = out + nbins;
-
-    for (SizeType j = 0; j < nbins; ++j) {
-        const auto idx_tail =
-            (j < shift_tail) ? (j + nbins - shift_tail) : (j - shift_tail);
-        const auto idx_head =
-            (j < shift_head) ? (j + nbins - shift_head) : (j - shift_head);
-        out_e[j] = data_tail_e[idx_tail] + data_head_e[idx_head];
-        out_v[j] = data_tail_v[idx_tail] + data_head_v[idx_head];
-    }
-}
-
-/**
- * @brief Optimized version, using a single stack-allocated buffer and no
- * branches in the loop.
- */
-void shift_add_optimized(const float* __restrict__ data_tail,
-                         double phase_shift_tail,
-                         const float* __restrict__ data_head,
-                         double phase_shift_head,
-                         float* __restrict__ out,
-                         float* __restrict__ temp_buffer,
-                         SizeType nbins) {
-
-    const auto shift_tail_raw =
-        static_cast<SizeType>(std::round(phase_shift_tail));
-    const SizeType s_tail = (shift_tail_raw % nbins + nbins) % nbins;
-    const auto shift_head_raw =
-        static_cast<SizeType>(std::round(phase_shift_head));
-    const SizeType s_head     = (shift_head_raw % nbins + nbins) % nbins;
-    const SizeType total_size = 2 * nbins;
-
-    // Rotate data_tail directly into the final output buffer for both channels
-    std::copy_n(data_tail, nbins - s_tail, out + s_tail);
-    std::copy_n(data_tail + nbins - s_tail, s_tail, out);
-    std::copy_n(data_tail + nbins, nbins - s_tail, out + nbins + s_tail);
-    std::copy_n(data_tail + nbins + nbins - s_tail, s_tail, out + nbins);
-
-    // Rotate data_head into the temporary buffer for both channels
-    std::copy_n(data_head, nbins - s_head, temp_buffer + s_head);
-    std::copy_n(data_head + nbins - s_head, s_head, temp_buffer);
-    std::copy_n(data_head + nbins, nbins - s_head,
-                temp_buffer + nbins + s_head);
-    std::copy_n(data_head + nbins + nbins - s_head, s_head,
-                temp_buffer + nbins);
-
-    // --- Perform the final addition in a single loop ---
-    for (SizeType j = 0; j < total_size; ++j) {
-        out[j] += temp_buffer[j];
-    }
-}
-
-} // namespace
 
 class FFA::Impl {
 public:
@@ -226,9 +155,9 @@ private:
                     const float* __restrict__ fold_head = &fold_in[head_offset];
                     float* __restrict__ fold_sum        = &fold_out[out_offset];
                     float* __restrict__ temp_buffer_ptr = temp_buffer.data();
-                    shift_add_optimized(fold_tail, coord_cur.shift_tail,
-                                        fold_head, coord_cur.shift_head,
-                                        fold_sum, temp_buffer_ptr, nbins);
+                    kernels::shift_add_buffer(
+                        fold_tail, coord_cur.shift_tail, fold_head,
+                        coord_cur.shift_head, fold_sum, temp_buffer_ptr, nbins);
                 }
             }
         }
@@ -268,9 +197,9 @@ private:
                     const float* __restrict__ fold_head = &fold_in[head_offset];
                     float* __restrict__ fold_sum        = &fold_out[out_offset];
                     float* __restrict__ temp_buffer_ptr = temp_buffer.data();
-                    shift_add_optimized(fold_tail, coord_cur.shift_tail,
-                                        fold_head, coord_cur.shift_head,
-                                        fold_sum, temp_buffer_ptr, nbins);
+                    kernels::shift_add_buffer(
+                        fold_tail, coord_cur.shift_tail, fold_head,
+                        coord_cur.shift_head, fold_sum, temp_buffer_ptr, nbins);
                 }
             }
         }

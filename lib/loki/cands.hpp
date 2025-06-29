@@ -16,6 +16,7 @@
 
 #include <hdf5.h>
 #include <highfive/highfive.hpp>
+#include <xtensor/containers/xtensor.hpp>
 
 #include "loki/common/types.hpp"
 
@@ -283,7 +284,7 @@ public:
 
     void write_run_results(const std::string& run_name,
                            const std::vector<SizeType>& scheme,
-                           const std::vector<double>& param_sets,
+                           const xt::xtensor<double, 3>& param_sets,
                            const std::vector<float>& scores,
                            const PruneStatsCollection& pstats) {
         if (m_runs_group->exist(run_name)) {

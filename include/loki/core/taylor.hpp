@@ -53,17 +53,4 @@ void poly_taylor_suggest(std::span<const FoldType> fold_segment,
                          detection::ScoringFunction<FoldType> scoring_func,
                          utils::SuggestionStruct<FoldType>& sugg_struct);
 
-void poly_shift_add_batch(const xt::xtensor<float, 3>& segment_batch,
-                          std::span<const SizeType> shift_batch,
-                          const xt::xtensor<float, 3>& folds,
-                          std::span<const SizeType> isuggest_batch,
-                          xt::xtensor<float, 3>& out);
-
-void poly_shift_add_complex_batch(
-    const xt::xtensor<ComplexType, 3>& segment_batch,
-    std::span<const double> shift_batch,
-    const xt::xtensor<ComplexType, 3>& folds,
-    std::span<const SizeType> isuggest_batch,
-    xt::xtensor<ComplexType, 3>& out);
-
 } // namespace loki::core

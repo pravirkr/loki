@@ -151,6 +151,10 @@ public:
             return a < b;
         });
     }
+    SizeType get_nseg() const { return m_nseg; }
+    SizeType get_ref_idx() const { return m_ref_idx; }
+    double get_tseg() const { return m_tseg; }
+    std::vector<SizeType> get_data() const { return m_data; }
 
     /**
      * @brief Returns the reference time at the middle of the reference segment.

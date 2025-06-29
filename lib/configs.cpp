@@ -41,7 +41,9 @@ PulsarSearchConfig::PulsarSearchConfig(
     if (m_param_limits.empty()) {
         throw std::runtime_error("coord_limits must be non-empty");
     }
-    m_nparams    = m_param_limits.size();
+    m_nbins_f = m_nbins / 2 + 1;
+    m_nparams = m_param_limits.size();
+    m_param_names.assign(kParamNames.end() - m_nparams, kParamNames.end());
     m_f_min      = m_param_limits[m_nparams - 1][0];
     m_f_max      = m_param_limits[m_nparams - 1][1];
     m_bseg_brute = bseg_brute.value_or(get_bseg_brute_default());

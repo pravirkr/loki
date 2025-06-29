@@ -38,4 +38,7 @@ inline constexpr size_t kUnrollFactor = 4;
 #define UNROLL_VECTORIZE
 #endif
 
+inline constexpr std::array<std::string, 4> kParamNames = {"snap", "jerk",
+                                                           "accel", "freq"};
+
 } // namespace loki

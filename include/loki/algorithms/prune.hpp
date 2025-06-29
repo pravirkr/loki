@@ -18,7 +18,7 @@ public:
     PruningManager(const search::PulsarSearchConfig& cfg,
                    const std::vector<float>& threshold_scheme,
                    std::optional<SizeType> n_runs,
-                   std::optional<const std::vector<SizeType>&> ref_segs,
+                   std::optional<std::vector<SizeType>> ref_segs,
                    SizeType max_sugg   = 1U << 18U,
                    SizeType batch_size = 1024U,
                    int nthreads        = 1);
@@ -30,16 +30,16 @@ public:
 
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
-                 std::filesystem::path outdir = "./",
-                 std::string_view file_prefix = "test",
-                 std::string_view kind        = "taylor");
+                 const std::filesystem::path& outdir = "./",
+                 std::string_view file_prefix        = "test",
+                 std::string_view kind               = "taylor");
 
 private:
     class Impl;
     std::unique_ptr<Impl> m_impl;
 };
 
-class Prune {
+template <typename FoldType> class Prune {
 public:
     Prune(const plans::FFAPlan& ffa_plan,
           const search::PulsarSearchConfig& cfg,
@@ -54,12 +54,12 @@ public:
     Prune(const Prune&)            = delete;
     Prune& operator=(const Prune&) = delete;
 
-    void
-    execute(std::span<const float> ffa_fold,
-            SizeType ref_seg,
-            std::filesystem::path outdir                     = "./",
-            std::optional<std::filesystem::path> log_file    = std::nullopt,
-            std::optional<std::filesystem::path> result_file = std::nullopt);
+    void execute(
+        std::span<const FoldType> ffa_fold,
+        SizeType ref_seg,
+        const std::filesystem::path& outdir                     = "./",
+        const std::optional<std::filesystem::path>& log_file    = std::nullopt,
+        const std::optional<std::filesystem::path>& result_file = std::nullopt);
 
 private:
     class Impl;

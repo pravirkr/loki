@@ -28,6 +28,7 @@ public:
     [[nodiscard]] SizeType get_nsamps() const { return m_nsamps; }
     [[nodiscard]] double get_tsamp() const { return m_tsamp; }
     [[nodiscard]] SizeType get_nbins() const { return m_nbins; }
+    [[nodiscard]] SizeType get_nbins_f() const { return m_nbins_f; }
     [[nodiscard]] double get_tol_bins() const { return m_tol_bins; }
     [[nodiscard]] const std::vector<ParamLimitType>& get_param_limits() const {
         return m_param_limits;
@@ -49,6 +50,9 @@ public:
     [[nodiscard]] double get_tseg_ffa() const { return m_tseg_ffa; }
     [[nodiscard]] SizeType get_niters_ffa() const { return m_niters_ffa; }
     [[nodiscard]] SizeType get_nparams() const { return m_nparams; }
+    [[nodiscard]] std::vector<std::string> get_param_names() const {
+        return m_param_names;
+    }
     [[nodiscard]] double get_f_min() const { return m_f_min; }
     [[nodiscard]] double get_f_max() const { return m_f_max; }
     [[nodiscard]] const std::vector<SizeType>& get_score_widths() const {
@@ -67,6 +71,7 @@ private:
     SizeType m_nsamps;
     double m_tsamp;
     SizeType m_nbins;
+    SizeType m_nbins_f;
     double m_tol_bins;
     std::vector<ParamLimitType> m_param_limits;
     double m_ducy_max;
@@ -82,6 +87,7 @@ private:
     double m_tseg_ffa{};
     SizeType m_niters_ffa{};
     SizeType m_nparams{};
+    std::vector<std::string> m_param_names;
     double m_f_min{};
     double m_f_max{};
     std::vector<SizeType> m_score_widths;

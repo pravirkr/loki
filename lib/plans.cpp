@@ -85,7 +85,11 @@ void FFAPlan::configure_plan() {
             fold_shapes[i_level][iparam + 1] = param_arr.size();
         }
         fold_shapes[i_level][m_cfg.get_nparams() + 1] = 2;
-        fold_shapes[i_level][m_cfg.get_nparams() + 2] = m_cfg.get_nbins();
+        if (m_cfg.get_use_fft_shifts()) {
+            fold_shapes[i_level][m_cfg.get_nparams() + 2] = m_cfg.get_nbins_f();
+        } else {
+            fold_shapes[i_level][m_cfg.get_nparams() + 2] = m_cfg.get_nbins();
+        }
     }
     // Check param arr lengths for the initialization
     if (m_cfg.get_nparams() > 1) {

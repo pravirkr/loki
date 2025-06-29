@@ -1,14 +1,16 @@
 #include "loki/core/dynamic.hpp"
 
 #include <algorithm>
-
+#include <span>
 #include <utility>
+
 #include <xtensor/containers/xadapt.hpp>
 #include <xtensor/containers/xtensor.hpp>
 #include <xtensor/views/xview.hpp>
 
 #include "loki/core/taylor.hpp"
 #include "loki/detection/score.hpp"
+#include "loki/kernels.hpp"
 #include "loki/search/configs.hpp"
 
 namespace loki::core {
@@ -22,13 +24,30 @@ PruneTaylorDPFuncts<FoldType>::PruneTaylorDPFuncts(
     : m_param_arr(param_arr.begin(), param_arr.end()),
       m_dparams(dparams.begin(), dparams.end()),
       m_tseg_ffa(tseg_ffa),
-      m_cfg(std::move(cfg)) {}
+      m_cfg(std::move(cfg)) {
+    if constexpr (std::is_same_v<FoldType, ComplexType>) {
+        m_shift_buffer.resize(1); // Not needed for complex
+    } else {
+        m_shift_buffer.resize(2 * m_cfg.get_nbins());
+    }
+}
 
 template <typename FoldType>
-auto PruneTaylorDPFuncts<FoldType>::load(const xt::xtensor<FoldType, 2>& fold,
+auto PruneTaylorDPFuncts<FoldType>::load(std::span<const FoldType> ffa_fold,
                                          SizeType seg_idx) const
-    -> xt::xtensor<FoldType, 1> {
-    return xt::view(fold, seg_idx, xt::all());
+    -> std::span<const FoldType> {
+    SizeType n_param_sets = 1;
+    for (const auto& arr : m_param_arr) {
+        n_param_sets *= arr.size();
+    }
+    if constexpr (std::is_same_v<FoldType, ComplexType>) {
+        return ffa_fold.subspan(seg_idx * n_param_sets * 2 *
+                                    m_cfg.get_nbins_f(),
+                                n_param_sets * 2 * m_cfg.get_nbins_f());
+    } else {
+        return ffa_fold.subspan(seg_idx * n_param_sets * 2 * m_cfg.get_nbins(),
+                                n_param_sets * 2 * m_cfg.get_nbins());
+    }
 }
 
 template <typename FoldType>
@@ -98,24 +117,30 @@ void PruneTaylorDPFuncts<FoldType>::score(
 }
 
 template <typename FoldType>
-void PruneTaylorDPFuncts<FoldType>::shift_add(
-    const xt::xtensor<FoldType, 3>& segment_batch,
+void PruneTaylorDPFuncts<FoldType>::load_shift_add(
+    std::span<const FoldType> ffa_fold_segment,
+    std::span<const SizeType> param_idx_batch,
     std::span<const double> shift_batch,
     const xt::xtensor<FoldType, 3>& folds,
     std::span<const SizeType> isuggest_batch,
-    xt::xtensor<FoldType, 3>& out) const {
+    xt::xtensor<FoldType, 3>& out) {
+    const SizeType n_batch = folds.shape(0);
     if constexpr (std::is_same_v<FoldType, ComplexType>) {
-        poly_shift_add_complex_batch(segment_batch, shift_batch, folds,
-                                     isuggest_batch, out);
+        kernels::shift_add_complex_recurrence_batch(
+            folds.data(), isuggest_batch.data(), ffa_fold_segment.data(),
+            param_idx_batch.data(), shift_batch.data(), out.data(),
+            m_cfg.get_nbins_f(), m_cfg.get_nbins(), n_batch);
     } else {
         // Float version: round shifts to integers
-        std::vector<SizeType> shift_rounded(shift_batch.size());
+        std::vector<SizeType> shift_batch_rounded(shift_batch.size());
         std::transform(shift_batch.begin(), shift_batch.end(),
-                       shift_rounded.begin(), [](double shift) {
+                       shift_batch_rounded.begin(), [](double shift) {
                            return static_cast<SizeType>(std::round(shift));
                        });
-        poly_shift_add_batch(segment_batch, shift_rounded, folds,
-                             isuggest_batch, out);
+        kernels::shift_add_buffer_batch(
+            folds.data(), isuggest_batch.data(), ffa_fold_segment.data(),
+            param_idx_batch.data(), shift_batch_rounded.data(), out.data(),
+            m_shift_buffer.data(), m_cfg.get_nbins(), n_batch);
     }
 }
 
@@ -129,8 +154,8 @@ auto PruneTaylorDPFuncts<FoldType>::pack(
 template <typename FoldType>
 auto PruneTaylorDPFuncts<FoldType>::transform(
     const xt::xtensor<double, 2>& leaf,
-    std::pair<double, double> coord_cur,
-    const xt::xtensor<double, 2>& trans_matrix) const
+    std::pair<double, double> /*coord_cur*/,
+    const xt::xtensor<double, 2>& /*trans_matrix*/) const
     -> xt::xtensor<double, 2> {
     // Taylor variant doesn't transform - just return original leaf
     return leaf;
@@ -138,8 +163,8 @@ auto PruneTaylorDPFuncts<FoldType>::transform(
 
 template <typename FoldType>
 auto PruneTaylorDPFuncts<FoldType>::get_transform_matrix(
-    std::pair<double, double> coord_cur,
-    std::pair<double, double> coord_prev) const -> xt::xtensor<double, 2> {
+    std::pair<double, double> /*coord_cur*/,
+    std::pair<double, double> /*coord_prev*/) const -> xt::xtensor<double, 2> {
     // Return identity matrix for Taylor variant
     // Size should match parameter dimensions (typically 4x4 for poly_order=4)
     const SizeType size             = m_cfg.get_prune_poly_order() + 1;
@@ -153,16 +178,16 @@ auto PruneTaylorDPFuncts<FoldType>::get_transform_matrix(
 template <typename FoldType>
 auto PruneTaylorDPFuncts<FoldType>::validate(
     const xt::xtensor<double, 3>& leaves,
-    std::pair<double, double> coord_valid,
+    std::pair<double, double> /*coord_valid*/,
     const std::tuple<xt::xtensor<double, 1>, xt::xtensor<double, 1>, double>&
-        validation_params) const -> xt::xtensor<double, 3> {
+    /*validation_params*/) const -> xt::xtensor<double, 3> {
     // Taylor variant doesn't filter - return all leaves
     return leaves;
 }
 
 template <typename FoldType>
 auto PruneTaylorDPFuncts<FoldType>::get_validation_params(
-    std::pair<double, double> coord_add) const
+    std::pair<double, double> /*coord_add*/) const
     -> std::tuple<xt::xtensor<double, 1>, xt::xtensor<double, 1>, double> {
     // Return empty validation parameters for Taylor variant
     xt::xtensor<double, 1> empty_arr = xt::zeros<double>({0});

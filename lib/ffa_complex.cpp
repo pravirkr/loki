@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cmath>
 #include <memory>
-#include <numbers>
 #include <utility>
 
 #include <indicators/cursor_control.hpp>
@@ -13,157 +12,13 @@
 #include "loki/algorithms/fold.hpp"
 #include "loki/common/types.hpp"
 #include "loki/exceptions.hpp"
+#include "loki/kernels.hpp"
 #include "loki/search/configs.hpp"
 #include "loki/timing.hpp"
 #include "loki/utils.hpp"
 #include "loki/utils/fft.hpp"
 
 namespace loki::algorithms {
-
-namespace {
-
-/**
- * @brief Optimized version with pre-computed phases and tweaks to
- * auto-vectorize efficiently with GCC.
- */
-void shift_add_complex(const ComplexType* __restrict__ data_tail,
-                       double phase_shift_tail,
-                       const ComplexType* __restrict__ data_head,
-                       double phase_shift_head,
-                       ComplexType* __restrict__ out,
-                       ComplexType* __restrict__ temp_buffer,
-                       SizeType nbins_f,
-                       SizeType nbins) {
-
-    const ComplexType* __restrict__ data_tail_e = data_tail;
-    const ComplexType* __restrict__ data_tail_v = data_tail + nbins_f;
-    const ComplexType* __restrict__ data_head_e = data_head;
-    const ComplexType* __restrict__ data_head_v = data_head + nbins_f;
-    ComplexType* __restrict__ out_e             = out;
-    ComplexType* __restrict__ out_v             = out + nbins_f;
-    ComplexType* __restrict__ phases_tail_ptr   = temp_buffer;
-    ComplexType* __restrict__ phases_head_ptr   = temp_buffer + nbins_f;
-
-    // --- Pre-computation Step ---
-    const auto phase_factor_tail =
-        -2.0 * std::numbers::pi * phase_shift_tail / static_cast<double>(nbins);
-    const auto phase_factor_head =
-        -2.0 * std::numbers::pi * phase_shift_head / static_cast<double>(nbins);
-
-    // Fill the phase arrays (int is necessary for the compiler to vectorize)
-    // Fast complex exponential: exp(i * theta) = cos(theta) + i *sin(theta)
-    for (int k = 0; k < static_cast<int>(nbins_f); ++k) {
-        const auto k_phase_tail = static_cast<double>(k) * phase_factor_tail;
-        const auto k_phase_head = static_cast<double>(k) * phase_factor_head;
-        phases_tail_ptr[k]      = {static_cast<float>(std::cos(k_phase_tail)),
-                                   static_cast<float>(std::sin(k_phase_tail))};
-        phases_head_ptr[k]      = {static_cast<float>(std::cos(k_phase_head)),
-                                   static_cast<float>(std::sin(k_phase_head))};
-    }
-
-    // There are no loop-carried dependencies. Memory access is linear.
-    // (int is necessary for the compiler to vectorize)
-    for (int k = 0; k < static_cast<int>(nbins_f); ++k) {
-        const ComplexType phase_tail = phases_tail_ptr[k];
-        const ComplexType phase_head = phases_head_ptr[k];
-        out_e[k] =
-            (data_tail_e[k] * phase_tail) + (data_head_e[k] * phase_head);
-        out_v[k] =
-            (data_tail_v[k] * phase_tail) + (data_head_v[k] * phase_head);
-    }
-}
-
-/**
- * @brief Optimized version using a recurrence relation for the phase. Idea here
- * is to replace the two expensive sin/cos calls with one cheaper complex
- * multiply. Processing in blocks to remove the loop-carried dependency.
- *
- * This is the only version that vectorizes efficiently across architectures.
- * The other versions are not vectorized.
- */
-void shift_add_complex_recurrence(const ComplexType* __restrict__ data_tail,
-                                  double phase_shift_tail,
-                                  const ComplexType* __restrict__ data_head,
-                                  double phase_shift_head,
-                                  ComplexType* __restrict__ out,
-                                  SizeType nbins_f,
-                                  SizeType nbins) {
-    // Calculate the constant phase step per iteration
-    const auto phase_step_tail_angle =
-        -2.0 * std::numbers::pi * phase_shift_tail / static_cast<double>(nbins);
-    const auto phase_step_head_angle =
-        -2.0 * std::numbers::pi * phase_shift_head / static_cast<double>(nbins);
-
-    // This is the complex number we will multiply by in each iteration
-    const ComplexType delta_phase_tail = {
-        static_cast<float>(std::cos(phase_step_tail_angle)),
-        static_cast<float>(std::sin(phase_step_tail_angle))};
-    const ComplexType delta_phase_head = {
-        static_cast<float>(std::cos(phase_step_head_angle)),
-        static_cast<float>(std::sin(phase_step_head_angle))};
-
-    // Phase steps within a SIMD block: [d^0, d^1, d^2, d^3]
-    std::array<ComplexType, kUnrollFactor> delta_vec_tail;
-    std::array<ComplexType, kUnrollFactor> delta_vec_head;
-    delta_vec_tail[0] = {1.0F, 0.0F};
-    delta_vec_head[0] = {1.0F, 0.0F};
-    for (SizeType i = 1; i < kUnrollFactor; ++i) {
-        delta_vec_tail[i] = delta_vec_tail[i - 1] * delta_phase_tail;
-        delta_vec_head[i] = delta_vec_head[i - 1] * delta_phase_head;
-    }
-
-    // Phase step between SIMD blocks: d^SIMD_WIDTH
-    const ComplexType delta_block_tail =
-        delta_vec_tail.back() * delta_phase_tail;
-    const ComplexType delta_block_head =
-        delta_vec_head.back() * delta_phase_head;
-
-    // Initial phase for k=0 is exp(i*0) = 1 + 0i
-    ComplexType current_block_start_phase_tail = {1.0F, 0.0F};
-    ComplexType current_block_start_phase_head = {1.0F, 0.0F};
-
-    const ComplexType* __restrict__ data_tail_e = data_tail;
-    const ComplexType* __restrict__ data_tail_v = data_tail + nbins_f;
-    const ComplexType* __restrict__ data_head_e = data_head;
-    const ComplexType* __restrict__ data_head_v = data_head + nbins_f;
-    ComplexType* __restrict__ out_e             = out;
-    ComplexType* __restrict__ out_v             = out + nbins_f;
-
-    const SizeType main_loop = nbins_f - (nbins_f % kUnrollFactor);
-
-    // Vectorized main part
-    for (SizeType k = 0; k < main_loop; k += kUnrollFactor) {
-        UNROLL_VECTORIZE
-        for (SizeType j = 0; j < kUnrollFactor; ++j) {
-            const ComplexType phase_tail =
-                current_block_start_phase_tail * delta_vec_tail[j];
-            const ComplexType phase_head =
-                current_block_start_phase_head * delta_vec_head[j];
-            out_e[k + j] = (data_tail_e[k + j] * phase_tail) +
-                           (data_head_e[k + j] * phase_head);
-            out_v[k + j] = (data_tail_v[k + j] * phase_tail) +
-                           (data_head_v[k + j] * phase_head);
-        }
-        current_block_start_phase_tail *= delta_block_tail;
-        current_block_start_phase_head *= delta_block_head;
-    }
-
-    // Scalar remainder part for nbins_f not divisible by kUnrollFactor
-    if (main_loop < nbins_f) {
-        ComplexType current_phase_tail = current_block_start_phase_tail;
-        ComplexType current_phase_head = current_block_start_phase_head;
-        for (SizeType k = main_loop; k < nbins_f; ++k) {
-            out_e[k] = (data_tail_e[k] * current_phase_tail) +
-                       (data_head_e[k] * current_phase_head);
-            out_v[k] = (data_tail_v[k] * current_phase_tail) +
-                       (data_head_v[k] * current_phase_head);
-            current_phase_tail *= delta_phase_tail;
-            current_phase_head *= delta_phase_head;
-        }
-    }
-}
-
-} // namespace
 
 class FFACOMPLEX::Impl {
 public:
@@ -347,7 +202,7 @@ private:
                     const ComplexType* __restrict__ fold_head =
                         &fold_in[head_offset];
                     ComplexType* __restrict__ fold_sum = &fold_out[out_offset];
-                    shift_add_complex_recurrence(
+                    kernels::shift_add_complex_recurrence(
                         fold_tail, coord_cur.shift_tail, fold_head,
                         coord_cur.shift_head, fold_sum, nbins_f, nbins);
                 }
@@ -390,7 +245,7 @@ private:
                     const ComplexType* __restrict__ fold_head =
                         &fold_in[head_offset];
                     ComplexType* __restrict__ fold_sum = &fold_out[out_offset];
-                    shift_add_complex_recurrence(
+                    kernels::shift_add_complex_recurrence(
                         fold_tail, coord_cur.shift_tail, fold_head,
                         coord_cur.shift_head, fold_sum, nbins_f, nbins);
                 }
