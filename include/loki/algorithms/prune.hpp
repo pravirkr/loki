@@ -13,15 +13,15 @@
 
 namespace loki::algorithms {
 
-class PruningManager {
+template <typename FoldType> class PruningManager {
 public:
     PruningManager(const search::PulsarSearchConfig& cfg,
                    const std::vector<float>& threshold_scheme,
-                   std::optional<SizeType> n_runs,
-                   std::optional<std::vector<SizeType>> ref_segs,
-                   SizeType max_sugg   = 1U << 18U,
-                   SizeType batch_size = 1024U,
-                   int nthreads        = 1);
+                   std::optional<SizeType> n_runs                = std::nullopt,
+                   std::optional<std::vector<SizeType>> ref_segs = std::nullopt,
+                   SizeType max_sugg                             = 1U << 18U,
+                   SizeType batch_size                           = 1024U,
+                   int nthreads                                  = 1);
     ~PruningManager();
     PruningManager(PruningManager&&) noexcept;
     PruningManager& operator=(PruningManager&&) noexcept;
@@ -38,6 +38,10 @@ private:
     class Impl;
     std::unique_ptr<Impl> m_impl;
 };
+
+// Type aliases for convenience
+using PruningManagerFloat   = PruningManager<float>;
+using PruningManagerComplex = PruningManager<ComplexType>;
 
 template <typename FoldType> class Prune {
 public:

@@ -1,3 +1,4 @@
+#include "loki/common/types.hpp"
 #include "pybind_utils.hpp"
 
 #include <cstddef>
@@ -65,30 +66,30 @@ PYBIND11_MODULE(libloki, m) {
             return snr;
         });
     m_scores.def(
-        "generate_width_trials",
-        [](size_t nbins_max, float spacing_factor) {
+        "generate_box_width_trials",
+        [](SizeType nbins, double ducy_max, double wtsp) {
             auto trials =
-                detection::generate_width_trials(nbins_max, spacing_factor);
+                detection::generate_box_width_trials(nbins, ducy_max, wtsp);
             return as_pyarray_ref(trials);
         },
-        py::arg("nbins_max"), py::arg("spacing_factor") = 1.5F);
+        py::arg("nbins"), py::arg("ducy_max") = 0.3, py::arg("wtsp") = 1.5);
 
     m_scores.def(
-        "snr_1d",
+        "snr_boxcar_1d",
         [](const PyArrayT<float>& arr, const PyArrayT<SizeType>& widths,
            float stdnoise) {
             if (arr.size() == 0 || widths.size() == 0) {
                 throw std::runtime_error("Input arrays cannot be empty");
             }
             auto out = PyArrayT<float>(widths.size());
-            detection::snr_1d(to_span<const float>(arr),
-                              to_span<const SizeType>(widths),
-                              to_span<float>(out), stdnoise);
+            detection::snr_boxcar_1d(to_span<const float>(arr),
+                                     to_span<const SizeType>(widths),
+                                     to_span<float>(out), stdnoise);
             return out;
         },
         py::arg("arr"), py::arg("widths"), py::arg("stdnoise") = 1.0F);
     m_scores.def(
-        "snr_2d",
+        "snr_boxcar_2d",
         [](const PyArrayT<float>& arr, const PyArrayT<SizeType>& widths,
            float stdnoise) {
             if (arr.ndim() != 2 || widths.ndim() != 1) {
@@ -101,9 +102,29 @@ PYBIND11_MODULE(libloki, m) {
             const auto nprofiles = arr.shape(0);
 
             auto out = PyArrayT<float>({nprofiles, widths.size()});
-            detection::snr_2d(to_span<const float>(arr), nprofiles,
-                              to_span<const SizeType>(widths),
-                              to_span<float>(out), stdnoise);
+            detection::snr_boxcar_2d(to_span<const float>(arr), nprofiles,
+                                     to_span<const SizeType>(widths),
+                                     to_span<float>(out), stdnoise);
+            return out;
+        },
+        py::arg("arr"), py::arg("widths"), py::arg("stdnoise") = 1.0F);
+    m_scores.def(
+        "snr_boxcar_3d",
+        [](const PyArrayT<float>& arr, const PyArrayT<SizeType>& widths,
+           float stdnoise) {
+            if (arr.ndim() != 3 || widths.ndim() != 1) {
+                throw std::runtime_error("Input array must be 3-dimensional, "
+                                         "widths must be 1-dimensional");
+            }
+            if (arr.shape(0) == 0 || arr.shape(1) == 0 || widths.size() == 0) {
+                throw std::runtime_error("Input arrays cannot be empty");
+            }
+            const auto nprofiles = arr.shape(0);
+
+            auto out = PyArrayT<float>({nprofiles, widths.size()});
+            detection::snr_boxcar_3d(to_span<const float>(arr), nprofiles,
+                                     to_span<const SizeType>(widths),
+                                     to_span<float>(out), stdnoise);
             return out;
         },
         py::arg("arr"), py::arg("widths"), py::arg("stdnoise") = 1.0F);
@@ -228,6 +249,7 @@ PYBIND11_MODULE(libloki, m) {
         .def_property_readonly("nsamps", &PulsarSearchConfig::get_nsamps)
         .def_property_readonly("tsamp", &PulsarSearchConfig::get_tsamp)
         .def_property_readonly("nbins", &PulsarSearchConfig::get_nbins)
+        .def_property_readonly("nbins_f", &PulsarSearchConfig::get_nbins_f)
         .def_property_readonly("tol_bins", &PulsarSearchConfig::get_tol_bins)
         .def_property_readonly("param_limits",
                                &PulsarSearchConfig::get_param_limits)
@@ -251,8 +273,15 @@ PYBIND11_MODULE(libloki, m) {
         .def_property_readonly("niters_ffa",
                                &PulsarSearchConfig::get_niters_ffa)
         .def_property_readonly("nparams", &PulsarSearchConfig::get_nparams)
+        .def_property_readonly("param_names",
+                               &PulsarSearchConfig::get_param_names)
         .def_property_readonly("f_min", &PulsarSearchConfig::get_f_min)
         .def_property_readonly("f_max", &PulsarSearchConfig::get_f_max)
+        .def_property_readonly("score_widths",
+                               [](const PulsarSearchConfig& self) {
+                                   return as_pyarray_ref(
+                                       self.get_score_widths());
+                               })
         .def("dparams_f", &PulsarSearchConfig::get_dparams_f,
              py::arg("tseg_cur"))
         .def("dparams", &PulsarSearchConfig::get_dparams, py::arg("tseg_cur"))
@@ -268,8 +297,14 @@ PYBIND11_MODULE(libloki, m) {
                                    return as_pyarray_ref(self.segment_lens);
                                })
         .def_property_readonly(
+            "nsegments",
+            [](const FFAPlan& self) { return as_pyarray_ref(self.nsegments); })
+        .def_property_readonly(
             "tsegments",
             [](const FFAPlan& self) { return as_pyarray_ref(self.tsegments); })
+        .def_property_readonly(
+            "ncoords",
+            [](const FFAPlan& self) { return as_pyarray_ref(self.ncoords); })
         .def_property_readonly(
             "params",
             [](const FFAPlan& self) { return as_listof_pyarray(self.params); })
@@ -290,10 +325,19 @@ PYBIND11_MODULE(libloki, m) {
         .def_property_readonly("fold_size_complex",
                                &FFAPlan::get_fold_size_complex)
         .def_property_readonly("buffer_size_complex",
-                               &FFAPlan::get_buffer_size_complex);
+                               &FFAPlan::get_buffer_size_complex)
+        .def_property_readonly("params_dict", [](const FFAPlan& self) {
+            auto params_map = self.get_params_dict();
+            py::dict result;
+            for (const auto& [key, value] : params_map) {
+                result[py::str(key)] = as_pyarray_ref(value);
+            }
+            return result;
+        });
 
     py::class_<FFA>(m_ffa, "FFA")
-        .def(py::init<PulsarSearchConfig>(), py::arg("cfg"))
+        .def(py::init<PulsarSearchConfig, bool>(), py::arg("cfg"),
+             py::arg("show_progress") = true)
         .def_property_readonly("plan", &FFA::get_plan)
         .def(
             "execute",
@@ -304,17 +348,9 @@ PYBIND11_MODULE(libloki, m) {
             },
             py::arg("ts_e"), py::arg("ts_v"), py::arg("fold"));
 
-    m_ffa.def(
-        "compute_ffa",
-        [](const PyArrayT<float>& ts_e, const PyArrayT<float>& ts_v,
-           const PulsarSearchConfig& cfg) {
-            return as_pyarray(algorithms::compute_ffa(
-                to_span<const float>(ts_e), to_span<const float>(ts_v), cfg));
-        },
-        py::arg("ts_e"), py::arg("ts_v"), py::arg("cfg"));
-
     py::class_<FFACOMPLEX>(m_ffa, "FFACOMPLEX")
-        .def(py::init<PulsarSearchConfig>(), py::arg("cfg"))
+        .def(py::init<PulsarSearchConfig, bool>(), py::arg("cfg"),
+             py::arg("show_progress") = true)
         .def_property_readonly("plan", &FFACOMPLEX::get_plan)
         .def(
             "execute",
@@ -335,13 +371,40 @@ PYBIND11_MODULE(libloki, m) {
             py::arg("ts_e"), py::arg("ts_v"), py::arg("fold"));
 
     m_ffa.def(
+        "compute_ffa",
+        [](const PyArrayT<float>& ts_e, const PyArrayT<float>& ts_v,
+           const PulsarSearchConfig& cfg, bool show_progress) {
+            auto [scores, ffa_plan] = algorithms::compute_ffa(
+                to_span<const float>(ts_e), to_span<const float>(ts_v), cfg,
+                show_progress);
+            return std::make_tuple(as_pyarray(std::move(scores)), ffa_plan);
+        },
+        py::arg("ts_e"), py::arg("ts_v"), py::arg("cfg"),
+        py::arg("show_progress") = true);
+
+    m_ffa.def(
         "compute_ffa_complex",
         [](const PyArrayT<float>& ts_e, const PyArrayT<float>& ts_v,
-           const PulsarSearchConfig& cfg) {
-            return as_pyarray(algorithms::compute_ffa_complex(
-                to_span<const float>(ts_e), to_span<const float>(ts_v), cfg));
+           const PulsarSearchConfig& cfg, bool show_progress) {
+            auto [scores, ffa_plan] = algorithms::compute_ffa_complex(
+                to_span<const float>(ts_e), to_span<const float>(ts_v), cfg,
+                show_progress);
+            return std::make_tuple(as_pyarray(std::move(scores)), ffa_plan);
         },
-        py::arg("ts_e"), py::arg("ts_v"), py::arg("cfg"));
+        py::arg("ts_e"), py::arg("ts_v"), py::arg("cfg"),
+        py::arg("show_progress") = true);
+
+    m_ffa.def(
+        "compute_ffa_scores",
+        [](const PyArrayT<float>& ts_e, const PyArrayT<float>& ts_v,
+           const PulsarSearchConfig& cfg, bool show_progress) {
+            auto [scores, ffa_plan] = algorithms::compute_ffa_scores(
+                to_span<const float>(ts_e), to_span<const float>(ts_v), cfg,
+                show_progress);
+            return std::make_tuple(as_pyarray(std::move(scores)), ffa_plan);
+        },
+        py::arg("ts_e"), py::arg("ts_v"), py::arg("cfg"),
+        py::arg("show_progress") = true);
 
     auto m_psr_utils = m.def_submodule("psr_utils", "PSR utils submodule");
     m_psr_utils.def(
@@ -372,9 +435,7 @@ PYBIND11_MODULE(libloki, m) {
             std::span<const std::vector<double>> param_span(param_vecs);
 
             auto [pindex_prev, relative_phase] = core::ffa_taylor_resolve(
-                to_span<const double>(pset_cur),
-                param_span, ffa_level,
-                latter,
+                to_span<const double>(pset_cur), param_span, ffa_level, latter,
                 tseg_brute, nbins);
             return std::make_tuple(as_pyarray_ref(pindex_prev), relative_phase);
         },

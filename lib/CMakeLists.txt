@@ -94,8 +94,10 @@ CPMAddPackage(
   GITHUB_REPOSITORY bshoshany/thread-pool
   VERSION 5.0.0 EXCLUDE_FROM_ALL SYSTEM
 )
-add_library(BS_thread_pool INTERFACE)
-target_include_directories(BS_thread_pool INTERFACE ${BS_thread_pool_SOURCE_DIR}/include)
+if(BS_thread_pool_ADDED)
+  add_library(BS_thread_pool INTERFACE IMPORTED GLOBAL)
+  target_include_directories(BS_thread_pool INTERFACE ${BS_thread_pool_SOURCE_DIR}/include)
+endif()
 
 # Code coverage setup
 if(ENABLE_COVERAGE)
@@ -134,7 +136,7 @@ endif()
 # Link libraries
 target_link_libraries(
   ${LOKI_LIBRARY_NAME}
-  PRIVATE ${LOKI_COMPILE_OPTIONS} coverage_config
+  PRIVATE ${LOKI_COMPILE_OPTIONS} coverage_config 
   PUBLIC OpenMP::OpenMP_CXX
          HDF5::HDF5
          FFTW::Float

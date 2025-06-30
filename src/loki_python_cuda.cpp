@@ -1,5 +1,4 @@
 #include "loki/algorithms/ffa.hpp"
-#include "loki/algorithms/ffa_complex.hpp"
 #include "pybind_utils.hpp"
 
 #include <pybind11/iostream.h>

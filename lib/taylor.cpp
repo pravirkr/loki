@@ -215,15 +215,18 @@ poly_taylor_branch_batch(const xt::xtensor<double, 3>& param_set_batch,
     const auto [_, scale_cur] = coord_cur;
 
     // Extract parameter arrays
-    const auto param_cur_batch =
+    const xt::xtensor<double, 2> param_cur_batch =
         xt::view(param_set_batch, xt::all(), xt::range(0, nparams), 0);
-    const auto dparam_cur_batch =
+    const xt::xtensor<double, 2> dparam_cur_batch =
         xt::view(param_set_batch, xt::all(), xt::range(0, nparams), 1);
-    const auto f0_batch = xt::view(param_set_batch, xt::all(), nparams, 0);
-    const auto t0_batch = xt::view(param_set_batch, xt::all(), nparams + 1, 0);
-    const auto scale_batch =
+    const xt::xtensor<double, 1> f0_batch =
+        xt::view(param_set_batch, xt::all(), nparams, 0);
+    const xt::xtensor<double, 1> t0_batch =
+        xt::view(param_set_batch, xt::all(), nparams + 1, 0);
+    const xt::xtensor<double, 1> scale_batch =
         xt::view(param_set_batch, xt::all(), nparams + 1, 1);
-    const auto f_max_batch = xt::view(param_cur_batch, xt::all(), nparams - 1);
+    const xt::xtensor<double, 1> f_max_batch =
+        xt::view(param_cur_batch, xt::all(), nparams - 1);
 
     // Calculate optimal parameters
     const double tseg_cur = 2.0 * scale_cur;

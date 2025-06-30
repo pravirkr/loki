@@ -1,6 +1,8 @@
 #pragma once
 
+#include <map>
 #include <span>
+#include <string>
 #include <vector>
 
 #include "loki/common/types.hpp"
@@ -18,7 +20,9 @@ struct FFACoord {
 
 struct FFAPlan {
     std::vector<SizeType> segment_lens;
+    std::vector<SizeType> nsegments;
     std::vector<double> tsegments;
+    std::vector<SizeType> ncoords;
     std::vector<std::vector<std::vector<double>>> params;
     std::vector<std::vector<double>> dparams;
     std::vector<std::vector<SizeType>> fold_shapes;
@@ -32,6 +36,8 @@ struct FFAPlan {
     SizeType get_buffer_size_complex() const noexcept;
     SizeType get_fold_size() const noexcept;
     SizeType get_fold_size_complex() const noexcept;
+    // Get a dictionary of parameters for the last level of the plan
+    std::map<std::string, std::vector<double>> get_params_dict() const;
 
 private:
     search::PulsarSearchConfig m_cfg;

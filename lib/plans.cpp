@@ -10,6 +10,7 @@
 #include "loki/cartesian.hpp"
 #include "loki/common/types.hpp"
 #include "loki/core/taylor.hpp"
+#include "loki/exceptions.hpp"
 #include "loki/psr_utils.hpp"
 #include "loki/search/configs.hpp"
 
@@ -54,10 +55,26 @@ SizeType FFAPlan::get_fold_size_complex() const noexcept {
                            std::multiplies<>());
 }
 
+std::map<std::string, std::vector<double>> FFAPlan::get_params_dict() const {
+    const auto param_names = m_cfg.get_param_names();
+    const auto params_arr  = params.back();
+    error_check::check_equal(params_arr.size(), param_names.size(),
+                             "Number of parameters in the last level of the "
+                             "FFA plan does not match the number of parameter "
+                             "names");
+    std::map<std::string, std::vector<double>> result;
+    for (SizeType i = 0; i < param_names.size(); ++i) {
+        result[param_names[i]] = params_arr[i];
+    }
+    return result;
+}
+
 void FFAPlan::configure_plan() {
     const auto levels = m_cfg.get_niters_ffa() + 1;
     segment_lens.resize(levels);
+    nsegments.resize(levels);
     tsegments.resize(levels);
+    ncoords.resize(levels);
     params.resize(levels);
     dparams.resize(levels);
     fold_shapes.resize(levels);
@@ -67,16 +84,17 @@ void FFAPlan::configure_plan() {
         const auto segment_len = m_cfg.get_bseg_brute() * (1U << i_level);
         const auto tsegment =
             static_cast<double>(segment_len) * m_cfg.get_tsamp();
-        const auto nsegments  = m_cfg.get_nsamps() / segment_len;
-        const auto dparam_arr = m_cfg.get_dparams(tsegment);
+        const auto nsegments_cur = m_cfg.get_nsamps() / segment_len;
+        const auto dparam_arr    = m_cfg.get_dparams(tsegment);
 
         segment_lens[i_level] = segment_len;
+        nsegments[i_level]    = nsegments_cur;
         tsegments[i_level]    = tsegment;
         dparams[i_level]      = dparam_arr;
         params[i_level].resize(m_cfg.get_nparams());
         fold_shapes[i_level].resize(m_cfg.get_nparams() + 3);
 
-        fold_shapes[i_level][0] = nsegments;
+        fold_shapes[i_level][0] = nsegments_cur;
         for (SizeType iparam = 0; iparam < m_cfg.get_nparams(); ++iparam) {
             const auto param_arr = psr_utils::range_param(
                 m_cfg.get_param_limits()[iparam][0],
@@ -114,6 +132,7 @@ void FFAPlan::configure_plan() {
                                         .shift_head = 0};
         coordinates[0].emplace_back(coord_cur);
     }
+    ncoords[0] = coordinates[0].size();
 
     for (SizeType i_level = 1; i_level < levels; ++i_level) {
         const auto strides = calculate_strides(params[i_level - 1]);
@@ -143,6 +162,7 @@ void FFAPlan::configure_plan() {
                                             .shift_head = phase_shift_head};
             coordinates[i_level].emplace_back(coord_cur);
         }
+        ncoords[i_level] = coordinates[i_level].size();
     }
 }
 

@@ -119,12 +119,11 @@ FoldVector simulate_folds(const FoldVector& folds_in,
 
 std::vector<float>
 compute_scores(const FoldVector& folds, float ducy_max, float wtsp) {
-    const auto max_width = static_cast<SizeType>(
-        std::ceil(static_cast<float>(folds.nbins) * ducy_max));
-    const auto widths     = detection::generate_width_trials(max_width, wtsp);
+    const auto widths =
+        detection::generate_box_width_trials(folds.nbins, ducy_max, wtsp);
     const auto folds_norm = folds.get_norm();
     std::vector<float> folds_snr(folds.ntrials * widths.size());
-    detection::snr_2d(folds_norm, folds.ntrials, widths, folds_snr);
+    detection::snr_boxcar_2d(folds_norm, folds.ntrials, widths, folds_snr);
     std::vector<float> scores(folds.ntrials);
     for (SizeType i = 0; i < folds.ntrials; ++i) {
         const auto offset = i * widths.size();

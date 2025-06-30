@@ -20,7 +20,7 @@
 
 namespace loki::algorithms {
 
-class PruningManager::Impl {
+template <typename FoldType> class PruningManager<FoldType>::Impl {
 public:
     Impl(search::PulsarSearchConfig cfg,
          const std::vector<float>& threshold_scheme,
@@ -35,10 +35,16 @@ public:
           m_ref_segs(std::move(ref_segs)),
           m_max_sugg(max_sugg),
           m_batch_size(batch_size),
-          m_nthreads(nthreads) {
-        m_the_ffa            = std::make_unique<algorithms::FFA>(m_cfg);
-        const auto& ffa_plan = m_the_ffa->get_plan();
-        m_ffa_fold.resize(ffa_plan.get_fold_size(), 0.0F);
+          m_nthreads(nthreads),
+          m_ffa_plan(m_cfg) {
+        // Create appropriate FFA instance based on FoldType
+        if constexpr (std::is_same_v<FoldType, ComplexType>) {
+            m_the_ffa_complex = std::make_unique<algorithms::FFACOMPLEX>(m_cfg);
+            m_ffa_fold.resize(m_ffa_plan.get_fold_size_complex());
+        } else {
+            m_the_ffa = std::make_unique<algorithms::FFA>(m_cfg);
+            m_ffa_fold.resize(m_ffa_plan.get_fold_size());
+        }
     }
 
     ~Impl()                      = default;
@@ -52,12 +58,15 @@ public:
                  const std::filesystem::path& outdir,
                  std::string_view file_prefix,
                  std::string_view kind) {
-        // Compute FFA fold
-        m_the_ffa->execute(ts_e, ts_v, std::span<float>(m_ffa_fold));
-
+        // Execute appropriate FFA instance
+        if constexpr (std::is_same_v<FoldType, ComplexType>) {
+            m_the_ffa_complex->execute(ts_e, ts_v,
+                                       std::span<ComplexType>(m_ffa_fold));
+        } else {
+            m_the_ffa->execute(ts_e, ts_v, std::span<float>(m_ffa_fold));
+        }
         // Setup output files and directory
-        const auto& ffa_plan = m_the_ffa->get_plan();
-        const auto nsegments = ffa_plan.fold_shapes.back()[0];
+        const auto nsegments = m_ffa_plan.fold_shapes.back()[0];
         const std::string filebase =
             std::format("{}_pruning_nstages_{}", file_prefix, nsegments);
         const auto log_file = outdir / std::format("{}_log.txt", filebase);
@@ -105,9 +114,11 @@ private:
     SizeType m_batch_size;
     int m_nthreads;
 
-    // FFA plan and buffer
+    // Type-specific FFA instances
+    plans::FFAPlan m_ffa_plan;
     std::unique_ptr<algorithms::FFA> m_the_ffa;
-    std::vector<float> m_ffa_fold;
+    std::unique_ptr<algorithms::FFACOMPLEX> m_the_ffa_complex;
+    std::vector<FoldType> m_ffa_fold;
 
     std::vector<SizeType> determine_ref_segs(SizeType nsegments) const {
         if (m_n_runs.has_value()) {
@@ -138,10 +149,8 @@ private:
                                  const std::filesystem::path& log_file,
                                  const std::filesystem::path& result_file,
                                  std::string_view kind) {
-        const auto& ffa_plan = m_the_ffa->get_plan();
-
-        auto prune = Prune<float>(ffa_plan, m_cfg, m_threshold_scheme,
-                                  m_max_sugg, m_batch_size, kind);
+        auto prune = Prune<FoldType>(m_ffa_plan, m_cfg, m_threshold_scheme,
+                                     m_max_sugg, m_batch_size, kind);
         for (const auto ref_seg : ref_segs) {
             spdlog::info("Processing ref segment {} (single-threaded)",
                          ref_seg);
@@ -153,9 +162,6 @@ private:
                                 const std::filesystem::path& outdir,
                                 const std::filesystem::path& log_file,
                                 std::string_view kind) {
-
-        const auto& ffa_plan = m_the_ffa->get_plan();
-
         // Create thread pool
         BS::thread_pool pool(m_nthreads);
 
@@ -163,6 +169,7 @@ private:
         std::vector<std::future<void>> futures;
         futures.reserve(ref_segs.size());
 
+        const auto& ffa_plan = m_ffa_plan;
         for (const auto ref_seg : ref_segs) {
             auto future = pool.submit_task(
                 [this, ffa_plan, ref_seg, outdir, kind]() mutable {
@@ -201,8 +208,8 @@ private:
 
         try {
             // Create separate Prune instance for this thread
-            auto prune = Prune<float>(ffa_plan, m_cfg, m_threshold_scheme,
-                                      m_max_sugg, m_batch_size, kind);
+            auto prune = Prune<FoldType>(ffa_plan, m_cfg, m_threshold_scheme,
+                                         m_max_sugg, m_batch_size, kind);
 
             // Generate unique temporary files for this thread
             const std::string run_name =
@@ -211,9 +218,6 @@ private:
                 outdir / std::format("tmp_{}_log.txt", run_name);
             const auto temp_result_file =
                 outdir / std::format("tmp_{}_results.h5", run_name);
-
-            spdlog::info("Processing ref segment {} (thread {})", ref_seg,
-                         std::this_thread::get_id());
 
             prune.execute(m_ffa_fold, ref_seg, outdir, temp_log_file,
                           temp_result_file);
@@ -334,7 +338,7 @@ private:
     std::unique_ptr<utils::SuggestionStruct<FoldType>> m_suggestions_in;
     std::unique_ptr<utils::SuggestionStruct<FoldType>> m_suggestions_out;
 
-    void initialize(std::span<const float> ffa_fold,
+    void initialize(std::span<const FoldType> ffa_fold,
                     SizeType ref_seg,
                     const std::filesystem::path& log_file) {
         ScopeTimer timer("Prune::initialize");
@@ -469,7 +473,7 @@ private:
              i_batch_start += batch_size) {
             const auto i_batch_end =
                 std::min(i_batch_start + batch_size, n_branches);
-            const auto current_batch_size = i_batch_end - i_batch_start;
+            // const auto current_batch_size = i_batch_end - i_batch_start;
 
             // Branch
             t_start                = std::chrono::steady_clock::now();
@@ -627,13 +631,15 @@ private:
     }
 };
 
-PruningManager::PruningManager(const search::PulsarSearchConfig& cfg,
-                               const std::vector<float>& threshold_scheme,
-                               std::optional<SizeType> n_runs,
-                               std::optional<std::vector<SizeType>> ref_segs,
-                               SizeType max_sugg,
-                               SizeType batch_size,
-                               int nthreads)
+template <typename FoldType>
+PruningManager<FoldType>::PruningManager(
+    const search::PulsarSearchConfig& cfg,
+    const std::vector<float>& threshold_scheme,
+    std::optional<SizeType> n_runs,
+    std::optional<std::vector<SizeType>> ref_segs,
+    SizeType max_sugg,
+    SizeType batch_size,
+    int nthreads)
     : m_impl(std::make_unique<Impl>(cfg,
                                     threshold_scheme,
                                     n_runs,
@@ -641,15 +647,20 @@ PruningManager::PruningManager(const search::PulsarSearchConfig& cfg,
                                     max_sugg,
                                     batch_size,
                                     nthreads)) {}
-PruningManager::~PruningManager()                               = default;
-PruningManager::PruningManager(PruningManager&& other) noexcept = default;
-PruningManager&
-PruningManager::operator=(PruningManager&& other) noexcept = default;
-void PruningManager::execute(std::span<const float> ts_e,
-                             std::span<const float> ts_v,
-                             const std::filesystem::path& outdir,
-                             std::string_view file_prefix,
-                             std::string_view kind) {
+template <typename FoldType>
+PruningManager<FoldType>::~PruningManager() = default;
+template <typename FoldType>
+PruningManager<FoldType>::PruningManager(PruningManager&& other) noexcept =
+    default;
+template <typename FoldType>
+PruningManager<FoldType>&
+PruningManager<FoldType>::operator=(PruningManager&& other) noexcept = default;
+template <typename FoldType>
+void PruningManager<FoldType>::execute(std::span<const float> ts_e,
+                                       std::span<const float> ts_v,
+                                       const std::filesystem::path& outdir,
+                                       std::string_view file_prefix,
+                                       std::string_view kind) {
     m_impl->execute(ts_e, ts_v, outdir, file_prefix, kind);
 }
 
@@ -677,5 +688,12 @@ void Prune<FoldType>::execute(
     const std::optional<std::filesystem::path>& result_file) {
     m_impl->execute(ffa_fold, ref_seg, outdir, log_file, result_file);
 }
+
+// Template instantiations
+template class PruningManager<float>;
+template class PruningManager<ComplexType>;
+
+template class Prune<float>;
+template class Prune<ComplexType>;
 
 } // namespace loki::algorithms

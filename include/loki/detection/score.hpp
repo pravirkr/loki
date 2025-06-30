@@ -44,18 +44,27 @@ std::vector<SizeType> generate_box_width_trials(SizeType fold_bins,
                                                 double ducy_max = 0.2,
                                                 double wtsp     = 1.5);
 
-// Compute the S/N of single pulse proile
-void snr_1d(std::span<const float> arr,
-            std::span<const SizeType> widths,
-            std::span<float> out,
-            float stdnoise = 1.0F);
+// Compute the Boxcar S/N of a single pulse profile
+void snr_boxcar_1d(std::span<const float> arr,
+                   std::span<const SizeType> widths,
+                   std::span<float> out,
+                   float stdnoise = 1.0F);
 
-// Compute the S/N of array of single pulse profiles
-void snr_2d(std::span<const float> arr,
-            SizeType nprofiles,
-            std::span<const SizeType> widths,
-            std::span<float> out,
-            float stdnoise = 1.0F);
+// Compute the Boxcar S/N of a batch of single pulse profiles
+void snr_boxcar_2d(std::span<const float> arr,
+                   SizeType nprofiles,
+                   std::span<const SizeType> widths,
+                   std::span<float> out,
+                   float stdnoise = 1.0F,
+                   int nthreads   = 1);
+
+// Compute the Boxcar S/N of a batch of E, V folded profiles
+void snr_boxcar_3d(std::span<const float> arr,
+                   SizeType nprofiles,
+                   std::span<const SizeType> widths,
+                   std::span<float> out,
+                   float stdnoise = 1.0F,
+                   int nthreads   = 1);
 
 // Compute the S/N of a batch of folded profiles
 void snr_boxcar_batch(xt::xtensor<float, 3>& folds,

@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "loki/algorithms/plans.hpp"
+#include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
 
 #ifdef LOKI_ENABLE_CUDA
@@ -16,7 +17,8 @@ namespace loki::algorithms {
 
 class FFA {
 public:
-    explicit FFA(const search::PulsarSearchConfig& cfg);
+    explicit FFA(const search::PulsarSearchConfig& cfg,
+                 bool show_progress = true);
 
     ~FFA();
     FFA(FFA&&) noexcept;
@@ -34,10 +36,49 @@ private:
     std::unique_ptr<Impl> m_impl;
 };
 
+class FFACOMPLEX {
+public:
+    explicit FFACOMPLEX(const search::PulsarSearchConfig& cfg,
+                        bool show_progress = true);
+
+    ~FFACOMPLEX();
+    FFACOMPLEX(FFACOMPLEX&&) noexcept;
+    FFACOMPLEX& operator=(FFACOMPLEX&&) noexcept;
+    FFACOMPLEX(const FFACOMPLEX&)            = delete;
+    FFACOMPLEX& operator=(const FFACOMPLEX&) = delete;
+
+    const plans::FFAPlan& get_plan() const noexcept;
+    void execute(std::span<const float> ts_e,
+                 std::span<const float> ts_v,
+                 std::span<float> fold);
+    void execute(std::span<const float> ts_e,
+                 std::span<const float> ts_v,
+                 std::span<ComplexType> fold);
+
+private:
+    class Impl;
+    std::unique_ptr<Impl> m_impl;
+};
+
 // Convenience function to fold time series using FFA method
-std::vector<float> compute_ffa(std::span<const float> ts_e,
-                               std::span<const float> ts_v,
-                               const search::PulsarSearchConfig& cfg);
+std::tuple<std::vector<float>, plans::FFAPlan>
+compute_ffa(std::span<const float> ts_e,
+            std::span<const float> ts_v,
+            const search::PulsarSearchConfig& cfg,
+            bool show_progress = true);
+
+// Convenience function to fold time series using FFA method with Fourier shifts
+std::tuple<std::vector<float>, plans::FFAPlan>
+compute_ffa_complex(std::span<const float> ts_e,
+                    std::span<const float> ts_v,
+                    const search::PulsarSearchConfig& cfg,
+                    bool show_progress = true);
+
+std::tuple<std::vector<float>, plans::FFAPlan>
+compute_ffa_scores(std::span<const float> ts_e,
+                   std::span<const float> ts_v,
+                   const search::PulsarSearchConfig& cfg,
+                   bool show_progress = true);
 
 #ifdef LOKI_ENABLE_CUDA
 
@@ -65,10 +106,45 @@ private:
     std::unique_ptr<Impl> m_impl;
 };
 
+class FFACOMPLEXCUDA {
+public:
+    FFACOMPLEXCUDA(const search::PulsarSearchConfig& cfg, int device_id);
+
+    ~FFACOMPLEXCUDA();
+    FFACOMPLEXCUDA(FFACOMPLEXCUDA&&) noexcept;
+    FFACOMPLEXCUDA& operator=(FFACOMPLEXCUDA&&) noexcept;
+    FFACOMPLEXCUDA(const FFACOMPLEXCUDA&)            = delete;
+    FFACOMPLEXCUDA& operator=(const FFACOMPLEXCUDA&) = delete;
+
+    const plans::FFAPlan& get_plan() const noexcept;
+    void execute(std::span<const float> ts_e,
+                 std::span<const float> ts_v,
+                 std::span<float> fold);
+    void execute(cuda::std::span<const float> ts_e,
+                 cuda::std::span<const float> ts_v,
+                 cuda::std::span<float> fold,
+                 cudaStream_t stream);
+    void execute(cuda::std::span<const float> ts_e,
+                 cuda::std::span<const float> ts_v,
+                 cuda::std::span<ComplexTypeCUDA> fold,
+                 cudaStream_t stream);
+
+private:
+    class Impl;
+    std::unique_ptr<Impl> m_impl;
+};
+
 std::vector<float> compute_ffa_cuda(std::span<const float> ts_e,
                                     std::span<const float> ts_v,
                                     const search::PulsarSearchConfig& cfg,
                                     int device_id);
+
+std::vector<float>
+compute_ffa_complex_cuda(std::span<const float> ts_e,
+                         std::span<const float> ts_v,
+                         const search::PulsarSearchConfig& cfg,
+                         int device_id);
+
 #endif // LOKI_ENABLE_CUDA
 
 } // namespace loki::algorithms

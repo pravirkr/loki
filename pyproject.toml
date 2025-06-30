@@ -24,7 +24,10 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Astronomy",
 ]
-dependencies = ["numpy"]
+dependencies = [
+    "numpy",
+    "pyloki @ git+https://github.com/pravirkr/pyloki.git",
+]
 
 [project.urls]
 Github = "https://github.com/pravirkr/loki"
