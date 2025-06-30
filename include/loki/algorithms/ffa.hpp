@@ -134,17 +134,23 @@ private:
     std::unique_ptr<Impl> m_impl;
 };
 
-std::vector<float> compute_ffa_cuda(std::span<const float> ts_e,
-                                    std::span<const float> ts_v,
-                                    const search::PulsarSearchConfig& cfg,
-                                    int device_id);
+std::tuple<std::vector<float>, plans::FFAPlan>
+compute_ffa_cuda(std::span<const float> ts_e,
+                 std::span<const float> ts_v,
+                 const search::PulsarSearchConfig& cfg,
+                 int device_id);
 
-std::vector<float>
+std::tuple<std::vector<float>, plans::FFAPlan>
 compute_ffa_complex_cuda(std::span<const float> ts_e,
                          std::span<const float> ts_v,
                          const search::PulsarSearchConfig& cfg,
                          int device_id);
 
+std::tuple<std::vector<float>, plans::FFAPlan>
+compute_ffa_scores_cuda(std::span<const float> ts_e,
+                        std::span<const float> ts_v,
+                        const search::PulsarSearchConfig& cfg,
+                        int device_id);
 #endif // LOKI_ENABLE_CUDA
 
 } // namespace loki::algorithms

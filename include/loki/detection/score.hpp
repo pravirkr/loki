@@ -80,4 +80,22 @@ template <typename FoldType>
 using ScoringFunction = std::function<void(
     xt::xtensor<FoldType, 3>&, std::span<const SizeType>, std::span<float>)>;
 
+#ifdef LOKI_ENABLE_CUDA
+
+void snr_boxcar_3d_cuda(std::span<const float> arr,
+                        SizeType nprofiles,
+                        std::span<const SizeType> widths,
+                        std::span<float> out,
+                        float stdnoise = 1.0F,
+                        int device_id  = 0);
+
+void snr_boxcar_3d_cuda_d(cuda::std::span<const float> arr,
+                          SizeType nprofiles,
+                          std::span<const SizeType> widths,
+                          std::span<float> out,
+                          float stdnoise = 1.0F,
+                          int device_id  = 0);
+
+#endif // LOKI_ENABLE_CUDA
+
 } // namespace loki::detection
