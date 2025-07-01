@@ -64,7 +64,8 @@ SizeType FFAPlan::get_fold_size_complex() const noexcept {
 }
 
 SizeType FFAPlan::get_memory_usage() const noexcept {
-    SizeType total_memory = 0;
+    const auto internal_buffers = get_fold_size() >= get_buffer_size() ? 1 : 2;
+    SizeType total_memory       = 0;
     if (m_cfg.get_use_fft_shifts()) {
         const auto complex_buffer_size = get_buffer_size_complex();
         total_memory += 2 * complex_buffer_size * sizeof(ComplexType);
@@ -72,7 +73,7 @@ SizeType FFAPlan::get_memory_usage() const noexcept {
         total_memory += temp_complex_size * sizeof(ComplexType);
     } else {
         const auto float_buffer_size = get_buffer_size();
-        total_memory += 2 * float_buffer_size * sizeof(float);
+        total_memory += internal_buffers * float_buffer_size * sizeof(float);
     }
 
     return total_memory;

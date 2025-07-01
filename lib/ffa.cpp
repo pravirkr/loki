@@ -27,12 +27,11 @@ public:
           m_show_progress(show_progress),
           m_ffa_plan(m_cfg),
           m_nthreads(m_cfg.get_nthreads()),
-          m_use_output_buffer_optimization(m_ffa_plan.get_fold_size() >=
-                                           m_ffa_plan.get_buffer_size()) {
+          m_use_single_buffer(m_ffa_plan.get_fold_size() >=
+                              m_ffa_plan.get_buffer_size()) {
         // Allocate memory for the FFA buffers
         m_fold_in.resize(m_ffa_plan.get_buffer_size(), 0.0F);
-        // Only allocate m_fold_out if optimization is not possible
-        if (!m_use_output_buffer_optimization) {
+        if (!m_use_single_buffer) {
             m_fold_out.resize(m_ffa_plan.get_buffer_size(), 0.0F);
         }
         // Initialize the brute fold
@@ -43,16 +42,13 @@ public:
         m_the_bf = std::make_unique<algorithms::BruteFold>(
             freqs_arr, m_ffa_plan.segment_lens[0], m_cfg.get_nbins(),
             m_cfg.get_nsamps(), m_cfg.get_tsamp(), t_ref, m_nthreads);
+
         // Log detailed memory usage
-        const auto buffer_size      = m_ffa_plan.get_buffer_size();
-        const auto internal_buffers = m_use_output_buffer_optimization ? 1 : 2;
-        const auto memory_usage =
-            internal_buffers * buffer_size * sizeof(float);
+        const auto memory_usage = m_ffa_plan.get_memory_usage();
         const auto memory_gb =
             static_cast<float>(memory_usage) / (1024.0F * 1024.0F * 1024.0F);
-        spdlog::info("FFA Memory: {:.2f} GB ({} buffers, {}optimized)",
-                     memory_gb, internal_buffers,
-                     m_use_output_buffer_optimization ? "" : "not ");
+        spdlog::info("FFA Memory Usage: {:.2f} GB ({} buffers)", memory_gb,
+                     m_use_single_buffer ? 1 : 2);
     }
 
     ~Impl()                      = default;
@@ -77,18 +73,10 @@ public:
             "FFA::Impl::execute: fold must have size fold_size");
 
         ScopeTimer timer("FFA::execute");
-
-        const auto levels = m_cfg.get_niters_ffa() + 1;
-        utils::ProgressGuard progress_guard(m_show_progress);
-        auto bar = utils::make_standard_bar("Computing FFA...");
-
-        if (m_use_output_buffer_optimization) {
-            // Use optimized ping-pong between m_fold_in and output fold buffer
-            execute_optimized(ts_e, ts_v, fold, levels, bar);
+        if (m_use_single_buffer) {
+            execute_single_buffer(ts_e, ts_v, fold);
         } else {
-            // Use traditional two-buffer approach
-            initialize(ts_e, ts_v);
-            execute_traditional(fold, levels, bar);
+            execute_double_buffer(ts_e, ts_v, fold);
         }
     }
 
@@ -97,42 +85,40 @@ private:
     bool m_show_progress;
     plans::FFAPlan m_ffa_plan;
     int m_nthreads;
+    bool m_use_single_buffer;
     std::unique_ptr<algorithms::BruteFold> m_the_bf;
-    bool m_use_output_buffer_optimization;
 
     // Buffers for the FFA plan
     std::vector<float> m_fold_in;
     std::vector<float> m_fold_out;
 
-    void initialize(std::span<const float> ts_e, std::span<const float> ts_v) {
-        ScopeTimer timer("FFA::initialize");
-        m_the_bf->execute(
-            ts_e, ts_v, std::span(m_fold_in.data(), m_the_bf->get_fold_size()));
-    }
-
     void initialize(std::span<const float> ts_e,
                     std::span<const float> ts_v,
-                    float* target_buffer,
-                    SizeType buffer_size) {
+                    float* init_buffer) {
         ScopeTimer timer("FFA::initialize");
-        // Clear the entire buffer first to avoid garbage in unused regions
-        std::fill_n(target_buffer, buffer_size, 0.0F);
         m_the_bf->execute(ts_e, ts_v,
-                          std::span(target_buffer, m_the_bf->get_fold_size()));
+                          std::span(init_buffer, m_the_bf->get_fold_size()));
     }
 
-    void
-    execute_traditional(std::span<float> fold, SizeType levels, auto& bar) {
-        // Traditional approach with two internal buffers
+    void execute_double_buffer(std::span<const float> ts_e,
+                               std::span<const float> ts_v,
+                               std::span<float> fold) {
+        initialize(ts_e, ts_v, m_fold_in.data());
+
         float* fold_in_ptr     = m_fold_in.data();
         float* fold_out_ptr    = m_fold_out.data();
         float* fold_result_ptr = fold.data();
 
+        const auto levels = m_cfg.get_niters_ffa() + 1;
+        utils::ProgressGuard progress_guard(m_show_progress);
+        auto bar = utils::make_standard_bar("Computing FFA...");
+
         for (SizeType i_level = 1; i_level < levels; ++i_level) {
+            // Determine output buffer: final iteration writes to output buffer
             const bool is_last     = i_level == levels - 1;
             float* current_out_ptr = is_last ? fold_result_ptr : fold_out_ptr;
             execute_iter(fold_in_ptr, current_out_ptr, i_level);
-
+            // Ping-pong buffers (unless it's the final iteration)
             if (!is_last) {
                 std::swap(fold_in_ptr, fold_out_ptr);
             }
@@ -144,13 +130,12 @@ private:
         }
     }
 
-    void execute_optimized(std::span<const float> ts_e,
-                           std::span<const float> ts_v,
-                           std::span<float> fold,
-                           SizeType levels,
-                           auto& bar) {
-        // Optimized approach using m_fold_in and output fold buffer for
-        // ping-pong
+    void execute_single_buffer(std::span<const float> ts_e,
+                               std::span<const float> ts_v,
+                               std::span<float> fold) {
+        const auto levels = m_cfg.get_niters_ffa() + 1;
+
+        // Use m_fold_in and output fold buffer for ping-pong
         float* fold_internal_ptr = m_fold_in.data();
         float* fold_result_ptr   = fold.data();
 
@@ -158,35 +143,29 @@ private:
         const SizeType internal_iters = levels - 2;
 
         // Determine starting configuration to ensure final result lands in fold
-        // If odd number of swaps: initialize in fold, end in fold
-        // If even number of swaps: initialize in internal, end in fold
         bool odd_swaps = (internal_iters % 2) == 1;
-
         float *current_in_ptr, *current_out_ptr;
         if (odd_swaps) {
             // Initialize in fold, will end up in fold after odd swaps
-            initialize(ts_e, ts_v, fold_result_ptr, fold.size());
+            initialize(ts_e, ts_v, fold_result_ptr);
             current_in_ptr  = fold_result_ptr;
             current_out_ptr = fold_internal_ptr;
         } else {
             // Initialize in internal, will end up in fold after even swaps
-            initialize(ts_e, ts_v, fold_internal_ptr,
-                       m_ffa_plan.get_buffer_size());
+            initialize(ts_e, ts_v, fold_internal_ptr);
             current_in_ptr  = fold_internal_ptr;
             current_out_ptr = fold_result_ptr;
         }
 
+        utils::ProgressGuard progress_guard(m_show_progress);
+        auto bar = utils::make_standard_bar("Computing FFA...");
+
         for (SizeType i_level = 1; i_level < levels; ++i_level) {
             const bool is_last = i_level == levels - 1;
-
-            // Always use normal ping-pong logic
             execute_iter(current_in_ptr, current_out_ptr, i_level);
-
-            // Swap for next iteration (except after final iteration)
             if (!is_last) {
                 std::swap(current_in_ptr, current_out_ptr);
             }
-
             if (m_show_progress) {
                 const auto progress = static_cast<float>(i_level) /
                                       static_cast<float>(levels - 1) * 100.0F;
@@ -307,12 +286,16 @@ public:
         : m_cfg(std::move(cfg)),
           m_show_progress(show_progress),
           m_ffa_plan(m_cfg),
-          m_nthreads(m_cfg.get_nthreads()) {
+          m_nthreads(m_cfg.get_nthreads()),
+          m_use_single_buffer(m_ffa_plan.get_fold_size_complex() >=
+                              m_ffa_plan.get_buffer_size_complex()) {
         // Allocate memory for the FFA buffers
         m_fold_in.resize(m_ffa_plan.get_buffer_size_complex(),
                          ComplexType(0.0F, 0.0F));
-        m_fold_out.resize(m_ffa_plan.get_buffer_size_complex(),
-                          ComplexType(0.0F, 0.0F));
+        if (!m_use_single_buffer) {
+            m_fold_out.resize(m_ffa_plan.get_buffer_size_complex(),
+                              ComplexType(0.0F, 0.0F));
+        }
         // Initialize the brute fold
         const auto t_ref =
             m_cfg.get_nparams() == 1 ? 0.0 : m_ffa_plan.tsegments[0] / 2.0;
@@ -326,8 +309,8 @@ public:
         const auto memory_usage = m_ffa_plan.get_memory_usage();
         const auto memory_gb =
             static_cast<float>(memory_usage) / (1024.0F * 1024.0F * 1024.0F);
-        spdlog::info("FFACOMPLEX Memory Usage: {:.2f} GB ({} bytes)", memory_gb,
-                     memory_usage);
+        spdlog::info("FFACOMPLEX Memory Usage: {:.2f} GB ({} buffers)",
+                     memory_gb, m_use_single_buffer ? 1 : 2);
     }
 
     ~Impl()                      = default;
@@ -347,18 +330,25 @@ public:
         error_check::check_equal(
             ts_v.size(), ts_e.size(),
             "FFACOMPLEX::Impl::execute: ts_v must have size nsamps");
-        error_check::check_equal(
-            fold.size(), m_ffa_plan.get_fold_size(),
-            "FFACOMPLEX::Impl::execute: fold must have size fold_size");
+        error_check::check_equal(fold.size(),
+                                 2 * m_ffa_plan.get_fold_size_complex(),
+                                 "FFACOMPLEX::Impl::execute: fold must have "
+                                 "size 2 * fold_size_complex");
 
         ScopeTimer timer("FFACOMPLEX::execute");
-        std::vector<ComplexType> fold_complex(
-            m_ffa_plan.get_fold_size_complex(), ComplexType(0.0F, 0.0F));
-        execute_core(ts_e, ts_v, fold_complex);
-        // IRFFT the output
+        auto fold_complex =
+            std::span<ComplexType>(reinterpret_cast<ComplexType*>(fold.data()),
+                                   m_ffa_plan.get_fold_size_complex());
+        if (m_use_single_buffer) {
+            execute_single_buffer(ts_e, ts_v, fold_complex);
+        } else {
+            execute_double_buffer(ts_e, ts_v, fold_complex);
+        }
+        // IRFFT in-place
         const auto nfft = m_ffa_plan.get_fold_size() / m_cfg.get_nbins();
-        utils::irfft_batch(fold_complex, fold, static_cast<int>(nfft),
-                           static_cast<int>(m_cfg.get_nbins()), m_nthreads);
+        utils::irfft_batch_inplace(fold_complex, static_cast<int>(nfft),
+                                   static_cast<int>(m_cfg.get_nbins()),
+                                   m_nthreads);
     }
 
     void execute(std::span<const float> ts_e,
@@ -375,7 +365,11 @@ public:
             "FFACOMPLEX::Impl::execute: fold must have size fold_size_complex");
 
         ScopeTimer timer("FFACOMPLEX::execute");
-        execute_core(ts_e, ts_v, fold);
+        if (m_use_single_buffer) {
+            execute_single_buffer(ts_e, ts_v, fold);
+        } else {
+            execute_double_buffer(ts_e, ts_v, fold);
+        }
     }
 
 private:
@@ -383,55 +377,47 @@ private:
     bool m_show_progress;
     plans::FFAPlan m_ffa_plan;
     int m_nthreads;
+    bool m_use_single_buffer;
     std::unique_ptr<algorithms::BruteFold> m_the_bf;
 
     // Buffers for the FFA plan
     std::vector<ComplexType> m_fold_in;
     std::vector<ComplexType> m_fold_out;
 
-    void initialize(std::span<const float> ts_e, std::span<const float> ts_v) {
+    void initialize(std::span<const float> ts_e,
+                    std::span<const float> ts_v,
+                    ComplexType* init_buffer) {
         ScopeTimer timer("FFACOMPLEX::initialize");
 
-        const auto required_floats  = m_ffa_plan.get_brute_fold_size_complex();
-        const auto available_floats = m_fold_in.size() * 2;
-
-        if (available_floats < required_floats) {
-            throw std::runtime_error(
-                std::format("FFACOMPLEX::initialize: Buffer too small. Need {} "
-                            "floats, have {}",
-                            required_floats, available_floats));
-        }
+        const auto required_floats = m_ffa_plan.get_brute_fold_size_complex();
 
         // Cast complex buffer to float for brute folding
-        auto real_view = std::span<float>(
-            reinterpret_cast<float*>(m_fold_in.data()), required_floats);
+        auto real_view = std::span<float>(reinterpret_cast<float*>(init_buffer),
+                                          required_floats);
         m_the_bf->execute_stride(ts_e, ts_v, real_view);
 
         // In-place RFFT
         const auto nfft         = m_the_bf->get_fold_size() / m_cfg.get_nbins();
         const auto complex_size = nfft * ((m_cfg.get_nbins() / 2) + 1);
         utils::rfft_batch_inplace(
-            std::span<ComplexType>(m_fold_in.data(), complex_size),
+            std::span<ComplexType>(init_buffer, complex_size),
             static_cast<int>(nfft), static_cast<int>(m_cfg.get_nbins()),
             m_nthreads);
     }
 
-    void execute_core(std::span<const float> ts_e,
-                      std::span<const float> ts_v,
-                      std::span<ComplexType> fold_complex) {
-        initialize(ts_e, ts_v);
+    void execute_double_buffer(std::span<const float> ts_e,
+                               std::span<const float> ts_v,
+                               std::span<ComplexType> fold_complex) {
+        initialize(ts_e, ts_v, m_fold_in.data());
 
-        // Use raw pointers for swapping buffers
         ComplexType* fold_in_ptr     = m_fold_in.data();
         ComplexType* fold_out_ptr    = m_fold_out.data();
         ComplexType* fold_result_ptr = fold_complex.data();
 
         const auto levels = m_cfg.get_niters_ffa() + 1;
-
-        if (m_show_progress) {
-            indicators::show_console_cursor(false);
-        }
+        utils::ProgressGuard progress_guard(m_show_progress);
         auto bar = utils::make_standard_bar("Computing FFA...");
+
         for (SizeType i_level = 1; i_level < levels; ++i_level) {
             // Determine output buffer: final iteration writes to output buffer
             const bool is_last = i_level == levels - 1;
@@ -448,8 +434,49 @@ private:
                 bar.set_progress(static_cast<SizeType>(progress));
             }
         }
-        if (m_show_progress) {
-            indicators::show_console_cursor(true);
+    }
+
+    void execute_single_buffer(std::span<const float> ts_e,
+                               std::span<const float> ts_v,
+                               std::span<ComplexType> fold_complex) {
+        const auto levels = m_cfg.get_niters_ffa() + 1;
+
+        // Use m_fold_in and output fold buffer for ping-pong
+        ComplexType* fold_internal_ptr = m_fold_in.data();
+        ComplexType* fold_result_ptr   = fold_complex.data();
+
+        // Calculate the number of internal iterations (excluding final write)
+        const SizeType internal_iters = levels - 2;
+
+        // Determine starting configuration to ensure final result lands in fold
+        bool odd_swaps = (internal_iters % 2) == 1;
+        ComplexType *current_in_ptr, *current_out_ptr;
+        if (odd_swaps) {
+            // Initialize in fold, will end up in fold after odd swaps
+            initialize(ts_e, ts_v, fold_result_ptr);
+            current_in_ptr  = fold_result_ptr;
+            current_out_ptr = fold_internal_ptr;
+        } else {
+            // Initialize in internal, will end up in fold after even swaps
+            initialize(ts_e, ts_v, fold_internal_ptr);
+            current_in_ptr  = fold_internal_ptr;
+            current_out_ptr = fold_result_ptr;
+        }
+
+        utils::ProgressGuard progress_guard(m_show_progress);
+        auto bar = utils::make_standard_bar("Computing FFA...");
+
+        for (SizeType i_level = 1; i_level < levels; ++i_level) {
+            const bool is_last = i_level == levels - 1;
+            execute_iter(current_in_ptr, current_out_ptr, i_level);
+            if (!is_last) {
+                std::swap(current_in_ptr, current_out_ptr);
+            }
+            if (m_show_progress) {
+                const auto progress = static_cast<float>(i_level) /
+                                      static_cast<float>(levels - 1) * 100.0F;
+                bar.set_progress(static_cast<SizeType>(progress));
+            }
         }
     }
 
@@ -614,8 +641,10 @@ compute_ffa_complex(std::span<const float> ts_e,
                     bool show_progress) {
     FFACOMPLEX ffa(cfg, show_progress);
     const auto& ffa_plan = ffa.get_plan();
-    std::vector<float> fold(ffa_plan.get_fold_size(), 0.0F);
+    std::vector<float> fold(2 * ffa_plan.get_fold_size_complex(), 0.0F);
     ffa.execute(ts_e, ts_v, std::span<float>(fold));
+    // RESIZE to actual result size
+    fold.resize(ffa_plan.get_fold_size());
     return {std::move(fold), ffa_plan};
 }
 

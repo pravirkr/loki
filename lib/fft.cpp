@@ -1,5 +1,6 @@
 #include "loki/utils/fft.hpp"
 
+#include <mutex>
 #include <omp.h>
 #include <spdlog/spdlog.h>
 
@@ -199,6 +200,65 @@ void irfft_batch(std::span<ComplexType> complex_input,
     }
     spdlog::debug("IRFFT batch completed: {} transforms of size {}", batch_size,
                   n_real);
+}
+
+void irfft_batch_inplace(std::span<ComplexType> inout_buffer,
+                         int batch_size,
+                         int n_real,
+                         int nthreads) {
+    ensure_fftw_threading(nthreads);
+    // Input validation
+    if (batch_size <= 0 || n_real <= 0) {
+        throw std::invalid_argument(std::format(
+            "IRFFT in-place: batch_size ({}) and n_real ({}) must be positive",
+            batch_size, n_real));
+    }
+    if (n_real % 2 != 0) {
+        throw std::invalid_argument(
+            std::format("IRFFT in-place: n_real ({}) must be even", n_real));
+    }
+
+    const int n_complex = (n_real / 2) + 1;
+
+    // For in-place C2R, we need space for the larger of the two layouts
+    const int required_complex = batch_size * n_complex;
+    if (static_cast<int>(inout_buffer.size()) < required_complex) {
+        throw std::invalid_argument(
+            std::format("IRFFT in-place: buffer too small. Need {} complex "
+                        "elements, have {}",
+                        required_complex, inout_buffer.size()));
+    }
+
+    auto* data_ptr = reinterpret_cast<fftwf_complex*>(inout_buffer.data());
+
+    fftwf_plan plan = fftwf_plan_many_dft_c2r(
+        1,                                  // rank
+        &n_real,                            // transform size
+        batch_size,                         // number of transforms
+        data_ptr,                           // input (complex)
+        nullptr, 1, n_complex,              // input layout
+        reinterpret_cast<float*>(data_ptr), // output (same buffer, as float*)
+        nullptr, 1, n_real,                 // output layout with padding
+        FFTW_ESTIMATE                       // fast planning
+    );
+
+    if (plan == nullptr) {
+        throw std::runtime_error("Failed to create in-place IRFFT plan");
+    }
+
+    fftwf_execute(plan);
+    fftwf_destroy_plan(plan);
+
+    // FFTW C2R doesn't normalize - apply normalization
+    const auto norm               = 1.0F / static_cast<float>(n_real);
+    const int total_real_elements = batch_size * n_real;
+    auto* real_data               = reinterpret_cast<float*>(data_ptr);
+    for (int i = 0; i < total_real_elements; ++i) {
+        real_data[i] *= norm;
+    }
+
+    spdlog::debug("In-place IRFFT batch completed: {} transforms of size {}",
+                  batch_size, n_real);
 }
 
 } // namespace loki::utils

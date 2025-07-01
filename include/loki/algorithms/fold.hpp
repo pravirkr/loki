@@ -84,6 +84,7 @@ public:
     BruteFoldCUDA& operator=(const BruteFoldCUDA&) = delete;
 
     SizeType get_fold_size() const;
+    SizeType get_fold_size_stride() const;
     /**
      * @brief Fold time series using brute-force method
      *
@@ -98,6 +99,10 @@ public:
                  cuda::std::span<const float> ts_v,
                  cuda::std::span<float> fold,
                  cudaStream_t stream = nullptr);
+    void execute_stride(cuda::std::span<const float> ts_e,
+                        cuda::std::span<const float> ts_v,
+                        cuda::std::span<float> fold,
+                        cudaStream_t stream = nullptr);
 
 private:
     class Impl;

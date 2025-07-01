@@ -55,6 +55,11 @@ void irfft_batch(std::span<ComplexType> complex_input,
                  int n_real,
                  int nthreads = 1);
 
+void irfft_batch_inplace(std::span<ComplexType> inout_buffer,
+                         int batch_size,
+                         int n_real,
+                         int nthreads = 1);
+
 #ifdef LOKI_ENABLE_CUDA
 
 void rfft_batch_cuda(cuda::std::span<float> real_input,
@@ -63,11 +68,21 @@ void rfft_batch_cuda(cuda::std::span<float> real_input,
                      int n_real,
                      cudaStream_t stream = nullptr);
 
+void rfft_batch_inplace_cuda(cuda::std::span<ComplexTypeCUDA> inout_buffer,
+                             int batch_size,
+                             int n_real,
+                             cudaStream_t stream = nullptr);
+
 void irfft_batch_cuda(cuda::std::span<ComplexTypeCUDA> complex_input,
                       cuda::std::span<float> real_output,
                       int batch_size,
                       int n_real,
                       cudaStream_t stream = nullptr);
+
+void irfft_batch_inplace_cuda(cuda::std::span<ComplexTypeCUDA> inout_buffer,
+                              int batch_size,
+                              int n_real,
+                              cudaStream_t stream = nullptr);
 
 #endif // LOKI_ENABLE_CUDA
 

@@ -2,7 +2,6 @@
 
 #include <cmath>
 #include <memory>
-#include <stdexcept>
 
 #include <spdlog/spdlog.h>
 
@@ -202,6 +201,10 @@ public:
     SizeType get_fold_size() const {
         return m_nsegments * m_nfreqs * 2 * m_nbins;
     }
+    SizeType get_fold_size_stride() const {
+        // Extra padding for in-place RFFT
+        return m_nsegments * m_nfreqs * 2 * (m_nbins + 2);
+    }
 
     void execute_h(std::span<const float> ts_e,
                    std::span<const float> ts_v,
@@ -235,7 +238,22 @@ public:
         check_inputs(ts_e.size(), ts_v.size(), fold.size());
         // Ensure output fold is zeroed
         thrust::fill(thrust::device, fold.begin(), fold.end(), 0.0F);
-        execute_device(ts_e.data(), ts_v.data(), fold.data(), stream);
+        execute_device(ts_e.data(), ts_v.data(), fold.data(),
+                       static_cast<int>(m_nbins), stream);
+        spdlog::debug(
+            "BruteFoldCUDA::Impl: Device execution complete on stream");
+    }
+
+    void execute_stride_d(cuda::std::span<const float> ts_e,
+                          cuda::std::span<const float> ts_v,
+                          cuda::std::span<float> fold,
+                          cudaStream_t stream) {
+        check_inputs_stride(ts_e.size(), ts_v.size(), fold.size());
+        // Ensure output fold is zeroed
+        thrust::fill(thrust::device, fold.begin(), fold.end(), 0.0F);
+        const auto profile_stride = static_cast<int>(m_nbins + 2);
+        execute_device(ts_e.data(), ts_v.data(), fold.data(), profile_stride,
+                       stream);
         spdlog::debug(
             "BruteFoldCUDA::Impl: Device execution complete on stream");
     }
@@ -267,6 +285,20 @@ private:
             "BruteFoldCUDA::Impl: fold must have size fold_size");
     }
 
+    void check_inputs_stride(SizeType ts_e_size,
+                             SizeType ts_v_size,
+                             SizeType fold_size) const {
+        error_check::check_equal(
+            ts_e_size, m_nsamps,
+            "BruteFoldCUDA::Impl: ts_e must have size nsamps");
+        error_check::check_equal(
+            ts_v_size, ts_e_size,
+            "BruteFoldCUDA::Impl: ts_v must have size nsamps");
+        error_check::check_equal(
+            fold_size, get_fold_size_stride(),
+            "BruteFoldCUDA::Impl: fold must have size fold_size_stride");
+    }
+
     void compute_phase() {
         thrust::device_vector<double> freq_arr_d(m_freq_arr);
         const int total_elements = static_cast<int>(m_nfreqs * m_segment_len);
@@ -288,7 +320,9 @@ private:
     void execute_device(const float* __restrict__ ts_e_d,
                         const float* __restrict__ ts_v_d,
                         float* __restrict__ fold_d,
+                        const int profile_stride,
                         cudaStream_t stream) {
+        const int nbins = profile_stride;
         // Use 1D block configuration for small nfreqs
         if (m_nfreqs <= 64) {
             const auto total_work =
@@ -299,21 +333,21 @@ private:
             kernel_fold_segments<<<grid_dim, block_dim, 0, stream>>>(
                 ts_e_d, ts_v_d, thrust::raw_pointer_cast(m_phase_map_d.data()),
                 fold_d, static_cast<int>(m_nfreqs),
-                static_cast<int>(m_segment_len), static_cast<int>(m_nbins),
+                static_cast<int>(m_segment_len), static_cast<int>(nbins),
                 static_cast<int>(m_nsegments));
-        } else if (m_nbins <= 512) {
+        } else if (nbins <= 512) {
             // Use shared memory for small bin counts
             const dim3 block_dim(256);
             const dim3 grid_dim(1, m_nfreqs);
             const auto shared_mem_size =
-                static_cast<int>(2 * m_nbins * sizeof(float));
+                (2 * nbins * static_cast<int>(sizeof(float)));
 
             cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
             kernel_fold_shared_mem<<<grid_dim, block_dim, shared_mem_size,
                                      stream>>>(
                 ts_e_d, ts_v_d, thrust::raw_pointer_cast(m_phase_map_d.data()),
                 fold_d, static_cast<int>(m_nfreqs),
-                static_cast<int>(m_segment_len), static_cast<int>(m_nbins),
+                static_cast<int>(m_segment_len), static_cast<int>(nbins),
                 static_cast<int>(m_nsegments));
         } else {
             // Use 2D block configuration for large nfreqs
@@ -324,7 +358,7 @@ private:
             kernel_fold_2d<<<grid_dim, block_dim, 0, stream>>>(
                 ts_e_d, ts_v_d, thrust::raw_pointer_cast(m_phase_map_d.data()),
                 fold_d, static_cast<int>(m_nfreqs),
-                static_cast<int>(m_segment_len), static_cast<int>(m_nbins),
+                static_cast<int>(m_segment_len), static_cast<int>(nbins),
                 static_cast<int>(m_nsegments));
         }
         cuda_utils::check_last_cuda_error("kernel_fold launch failed");
@@ -348,6 +382,9 @@ BruteFoldCUDA::operator=(BruteFoldCUDA&& other) noexcept = default;
 SizeType BruteFoldCUDA::get_fold_size() const {
     return m_impl->get_fold_size();
 }
+SizeType BruteFoldCUDA::get_fold_size_stride() const {
+    return m_impl->get_fold_size_stride();
+}
 void BruteFoldCUDA::execute(std::span<const float> ts_e,
                             std::span<const float> ts_v,
                             std::span<float> fold) {
@@ -358,6 +395,12 @@ void BruteFoldCUDA::execute(cuda::std::span<const float> ts_e,
                             cuda::std::span<float> fold,
                             cudaStream_t stream) {
     m_impl->execute_d(ts_e, ts_v, fold, stream);
+}
+void BruteFoldCUDA::execute_stride(cuda::std::span<const float> ts_e,
+                                   cuda::std::span<const float> ts_v,
+                                   cuda::std::span<float> fold,
+                                   cudaStream_t stream) {
+    m_impl->execute_stride_d(ts_e, ts_v, fold, stream);
 }
 
 std::vector<float> compute_brute_fold_cuda(std::span<const float> ts_e,
