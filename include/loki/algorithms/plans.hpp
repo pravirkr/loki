@@ -26,22 +26,26 @@ struct FFAPlan {
     std::vector<std::vector<std::vector<double>>> params;
     std::vector<std::vector<double>> dparams;
     std::vector<std::vector<SizeType>> fold_shapes;
+    std::vector<std::vector<SizeType>> fold_shapes_complex;
     std::vector<std::vector<FFACoord>> coordinates;
 
     FFAPlan() = delete;
     explicit FFAPlan(search::PulsarSearchConfig cfg);
 
-    SizeType get_memory_usage() const noexcept;
     SizeType get_buffer_size() const noexcept;
     SizeType get_buffer_size_complex() const noexcept;
+    SizeType get_brute_fold_size() const noexcept;
+    SizeType get_brute_fold_size_complex() const noexcept;
     SizeType get_fold_size() const noexcept;
     SizeType get_fold_size_complex() const noexcept;
+    SizeType get_memory_usage() const noexcept;
     // Get a dictionary of parameters for the last level of the plan
     std::map<std::string, std::vector<double>> get_params_dict() const;
 
 private:
     search::PulsarSearchConfig m_cfg;
     void configure_plan();
+    void validate_plan() const;
     static std::vector<SizeType>
     calculate_strides(std::span<const std::vector<double>> p_arr);
 };

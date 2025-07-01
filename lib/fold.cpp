@@ -48,6 +48,11 @@ public:
         return m_nsegments * m_nfreqs * 2 * m_nbins;
     }
 
+    SizeType get_fold_size_stride() const {
+        // Extra padding for in-place RFFT
+        return m_nsegments * m_nfreqs * 2 * (m_nbins + 2);
+    }
+
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
                  std::span<float> fold) {
@@ -73,7 +78,39 @@ public:
             auto fold_seg = fold.subspan(iseg * m_nfreqs * 2 * m_nbins,
                                          m_nfreqs * 2 * m_nbins);
             execute_segment(ts_e_seg.data(), ts_v_seg.data(), fold_seg.data(),
-                            m_segment_len);
+                            m_segment_len, m_nbins);
+        }
+    }
+
+    void execute_stride(std::span<const float> ts_e,
+                        std::span<const float> ts_v,
+                        std::span<float> fold) {
+        error_check::check_equal(
+            ts_e.size(), m_nsamps,
+            "BruteFold::Impl::execute_stride: ts_e must have size nsamps");
+        error_check::check_equal(
+            ts_v.size(), ts_e.size(),
+            "BruteFold::Impl::execute_stride: ts_v must have size nsamps");
+        error_check::check_equal(
+            fold.size(), get_fold_size_stride(),
+            "BruteFold::Impl::execute_stride: fold must have size "
+            "fold_size_stride");
+        // Ensure output fold is zeroed
+        std::ranges::fill(fold, 0.0F);
+        const auto profile_stride = m_nbins + 2;
+
+#pragma omp parallel for num_threads(m_nthreads) default(none)                 \
+    shared(ts_e, ts_v, fold, m_segment_len, m_nfreqs, m_nsegments,             \
+               profile_stride)
+        for (SizeType iseg = 0; iseg < m_nsegments; ++iseg) {
+            const auto ts_e_seg =
+                ts_e.subspan(iseg * m_segment_len, m_segment_len);
+            const auto ts_v_seg =
+                ts_v.subspan(iseg * m_segment_len, m_segment_len);
+            auto fold_seg = fold.subspan(iseg * m_nfreqs * 2 * profile_stride,
+                                         m_nfreqs * 2 * profile_stride);
+            execute_segment(ts_e_seg.data(), ts_v_seg.data(), fold_seg.data(),
+                            m_segment_len, profile_stride);
         }
     }
 
@@ -106,13 +143,14 @@ private:
     void execute_segment(const float* __restrict__ ts_e_seg,
                          const float* __restrict__ ts_v_seg,
                          float* __restrict__ fold_seg,
-                         SizeType segment_len_act) noexcept {
+                         SizeType segment_len_act,
+                         SizeType profile_stride) noexcept {
         for (SizeType ifreq = 0; ifreq < m_nfreqs; ++ifreq) {
             const auto freq_offset_in          = ifreq * m_segment_len;
-            const auto freq_offset_out         = ifreq * 2 * m_nbins;
+            const auto freq_offset_out         = ifreq * 2 * profile_stride;
             const auto* __restrict__ phase_ptr = &m_phase_map[freq_offset_in];
             float* __restrict__ fold_e_base    = fold_seg + freq_offset_out;
-            float* __restrict__ fold_v_base    = fold_e_base + m_nbins;
+            float* __restrict__ fold_v_base    = fold_e_base + profile_stride;
 
             const SizeType main_loop =
                 segment_len_act - (segment_len_act % kUnrollFactor);
@@ -133,6 +171,7 @@ private:
             }
         }
     }
+
 }; // End BruteFold::Impl definition
 
 BruteFold::BruteFold(std::span<const double> freq_arr,
@@ -148,10 +187,19 @@ BruteFold::~BruteFold()                                     = default;
 BruteFold::BruteFold(BruteFold&& other) noexcept            = default;
 BruteFold& BruteFold::operator=(BruteFold&& other) noexcept = default;
 SizeType BruteFold::get_fold_size() const { return m_impl->get_fold_size(); }
+SizeType BruteFold::get_fold_size_stride() const {
+    return m_impl->get_fold_size_stride();
+}
+
 void BruteFold::execute(std::span<const float> ts_e,
                         std::span<const float> ts_v,
                         std::span<float> fold) {
     m_impl->execute(ts_e, ts_v, fold);
+}
+void BruteFold::execute_stride(std::span<const float> ts_e,
+                               std::span<const float> ts_v,
+                               std::span<float> fold) {
+    m_impl->execute_stride(ts_e, ts_v, fold);
 }
 
 std::vector<float> compute_brute_fold(std::span<const float> ts_e,

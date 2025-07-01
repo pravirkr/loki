@@ -44,6 +44,11 @@ void rfft_batch(std::span<float> real_input,
                 int n_real,
                 int nthreads = 1);
 
+void rfft_batch_inplace(std::span<ComplexType> inout_buffer,
+                        int batch_size,
+                        int n_real,
+                        int nthreads = 1);
+
 void irfft_batch(std::span<ComplexType> complex_input,
                  std::span<float> real_output,
                  int batch_size,

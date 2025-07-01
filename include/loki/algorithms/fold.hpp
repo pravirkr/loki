@@ -32,6 +32,7 @@ public:
     BruteFold& operator=(const BruteFold&) = delete;
 
     SizeType get_fold_size() const;
+    SizeType get_fold_size_stride() const;
     /**
      * @brief Fold time series using brute-force method
      *
@@ -42,6 +43,10 @@ public:
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
                  std::span<float> fold);
+
+    void execute_stride(std::span<const float> ts_e,
+                        std::span<const float> ts_v,
+                        std::span<float> fold);
 
 private:
     class Impl;

@@ -368,6 +368,9 @@ poetry.toml
 # cursor
 .cursor/
 
+# claude
+CLAUDE.md
+
 # LSP config files
 pyrightconfig.json
 

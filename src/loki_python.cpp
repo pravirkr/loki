@@ -316,6 +316,11 @@ PYBIND11_MODULE(libloki, m) {
                                [](const FFAPlan& self) {
                                    return as_listof_pyarray(self.fold_shapes);
                                })
+        .def_property_readonly("fold_shapes_complex",
+                               [](const FFAPlan& self) {
+                                   return as_listof_pyarray(
+                                       self.fold_shapes_complex);
+                               })
         .def_property_readonly("coordinates",
                                [](const FFAPlan& self) {
                                    return as_listof_pyarray(self.coordinates);

@@ -18,6 +18,7 @@ namespace loki::plans {
 
 FFAPlan::FFAPlan(search::PulsarSearchConfig cfg) : m_cfg(std::move(cfg)) {
     configure_plan();
+    validate_plan();
 }
 
 SizeType FFAPlan::get_buffer_size() const noexcept {
@@ -28,8 +29,15 @@ SizeType FFAPlan::get_buffer_size() const noexcept {
         }));
 }
 
-SizeType FFAPlan::get_memory_usage() const noexcept {
-    return 2 * get_buffer_size() * sizeof(float);
+SizeType FFAPlan::get_brute_fold_size() const noexcept {
+    return std::accumulate(fold_shapes.front().begin(),
+                           fold_shapes.front().end(), 1, std::multiplies<>());
+}
+
+SizeType FFAPlan::get_brute_fold_size_complex() const noexcept {
+    const auto nfft = get_brute_fold_size() / m_cfg.get_nbins();
+    // For in-place RFFT, FFTW needs nfft * (nbins + 2) floats total
+    return nfft * (m_cfg.get_nbins() + 2);
 }
 
 SizeType FFAPlan::get_fold_size() const noexcept {
@@ -38,21 +46,36 @@ SizeType FFAPlan::get_fold_size() const noexcept {
 }
 
 SizeType FFAPlan::get_buffer_size_complex() const noexcept {
-    return std::ranges::max(
-        fold_shapes | std::views::transform([](const auto& shape) {
-            auto complex_shape   = shape;
-            complex_shape.back() = complex_shape.back() / 2 + 1;
-            return std::accumulate(complex_shape.begin(), complex_shape.end(),
-                                   1, std::multiplies<>());
+    // Calculate the standard complex buffer size (max of all FFA levels)
+    const auto standard_complex_size = std::ranges::max(
+        fold_shapes_complex | std::views::transform([](const auto& shape) {
+            return std::accumulate(shape.begin(), shape.end(), 1,
+                                   std::multiplies<>());
         }));
+    const auto required_complex = (get_brute_fold_size_complex() + 1) / 2;
+    return std::max(static_cast<SizeType>(standard_complex_size),
+                    required_complex);
 }
 
 SizeType FFAPlan::get_fold_size_complex() const noexcept {
-    // Final fold shape with RFFT transformation
-    auto complex_shape   = fold_shapes.back();
-    complex_shape.back() = complex_shape.back() / 2 + 1;
-    return std::accumulate(complex_shape.begin(), complex_shape.end(), 1,
+    return std::accumulate(fold_shapes_complex.back().begin(),
+                           fold_shapes_complex.back().end(), 1,
                            std::multiplies<>());
+}
+
+SizeType FFAPlan::get_memory_usage() const noexcept {
+    SizeType total_memory = 0;
+    if (m_cfg.get_use_fft_shifts()) {
+        const auto complex_buffer_size = get_buffer_size_complex();
+        total_memory += 2 * complex_buffer_size * sizeof(ComplexType);
+        const auto temp_complex_size = get_fold_size_complex();
+        total_memory += temp_complex_size * sizeof(ComplexType);
+    } else {
+        const auto float_buffer_size = get_buffer_size();
+        total_memory += 2 * float_buffer_size * sizeof(float);
+    }
+
+    return total_memory;
 }
 
 std::map<std::string, std::vector<double>> FFAPlan::get_params_dict() const {
@@ -78,6 +101,7 @@ void FFAPlan::configure_plan() {
     params.resize(levels);
     dparams.resize(levels);
     fold_shapes.resize(levels);
+    fold_shapes_complex.resize(levels);
     coordinates.resize(levels);
 
     for (SizeType i_level = 0; i_level < levels; ++i_level) {
@@ -93,21 +117,23 @@ void FFAPlan::configure_plan() {
         dparams[i_level]      = dparam_arr;
         params[i_level].resize(m_cfg.get_nparams());
         fold_shapes[i_level].resize(m_cfg.get_nparams() + 3);
+        fold_shapes_complex[i_level].resize(m_cfg.get_nparams() + 3);
 
-        fold_shapes[i_level][0] = nsegments_cur;
+        fold_shapes[i_level][0]         = nsegments_cur;
+        fold_shapes_complex[i_level][0] = nsegments_cur;
         for (SizeType iparam = 0; iparam < m_cfg.get_nparams(); ++iparam) {
             const auto param_arr = psr_utils::range_param(
                 m_cfg.get_param_limits()[iparam][0],
                 m_cfg.get_param_limits()[iparam][1], dparam_arr[iparam]);
-            params[i_level][iparam]          = param_arr;
-            fold_shapes[i_level][iparam + 1] = param_arr.size();
+            params[i_level][iparam]                  = param_arr;
+            fold_shapes[i_level][iparam + 1]         = param_arr.size();
+            fold_shapes_complex[i_level][iparam + 1] = param_arr.size();
         }
-        fold_shapes[i_level][m_cfg.get_nparams() + 1] = 2;
-        if (m_cfg.get_use_fft_shifts()) {
-            fold_shapes[i_level][m_cfg.get_nparams() + 2] = m_cfg.get_nbins_f();
-        } else {
-            fold_shapes[i_level][m_cfg.get_nparams() + 2] = m_cfg.get_nbins();
-        }
+        fold_shapes[i_level][m_cfg.get_nparams() + 1]         = 2;
+        fold_shapes_complex[i_level][m_cfg.get_nparams() + 1] = 2;
+        fold_shapes[i_level][m_cfg.get_nparams() + 2] = m_cfg.get_nbins();
+        fold_shapes_complex[i_level][m_cfg.get_nparams() + 2] =
+            m_cfg.get_nbins_f();
     }
     // Check param arr lengths for the initialization
     if (m_cfg.get_nparams() > 1) {
@@ -163,6 +189,32 @@ void FFAPlan::configure_plan() {
             coordinates[i_level].emplace_back(coord_cur);
         }
         ncoords[i_level] = coordinates[i_level].size();
+    }
+}
+
+void FFAPlan::validate_plan() const {
+    error_check::check(get_buffer_size() > 0,
+                       "FFAPlan::validate_plan: buffer size is zero");
+    error_check::check(get_buffer_size_complex() > 0,
+                       "FFAPlan::validate_plan: buffer size (complex) is zero");
+    error_check::check(get_fold_size() > 0,
+                       "FFAPlan::validate_plan: fold size is zero");
+    error_check::check(get_fold_size_complex() > 0,
+                       "FFAPlan::validate_plan: fold size (complex) is zero");
+    error_check::check(get_brute_fold_size() > 0,
+                       "FFAPlan::validate_plan: brute fold size is zero");
+    error_check::check(
+        get_brute_fold_size_complex() > 0,
+        "FFAPlan::validate_plan: brute fold size (complex) is zero");
+
+    // For the first level, only the freqs array should have size > 1
+    for (SizeType iparam = 0; iparam < m_cfg.get_nparams() - 1; ++iparam) {
+        if (params[0][iparam].size() != 1) {
+            throw std::runtime_error(
+                "FFAPlan::validate_plan: Only one parameter for higher order "
+                "derivatives is supported for the initialization for the "
+                "first level");
+        }
     }
 }
 

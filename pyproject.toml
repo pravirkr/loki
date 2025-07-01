@@ -53,6 +53,7 @@ install.strip = false
 BUILD_PYTHON = "ON"
 BUILD_TESTING = "OFF"
 BUILD_DOCS = "OFF"
+CMAKE_BUILD_PARALLEL_LEVEL = "4"
 
 [tool.cibuildwheel]
 test-extras = "test"

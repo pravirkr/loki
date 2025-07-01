@@ -102,4 +102,25 @@ inline indicators::ProgressBar make_standard_bar(std::string_view prefix) {
         indicators::option::Stream{std::cerr}};
 }
 
+class ProgressGuard {
+    bool m_show;
+    // This class is used to hide the console cursor during progress bar updates
+    // and restore it after the progress bar is done.
+public:
+    explicit ProgressGuard(bool show) : m_show(show) {
+        if (m_show) {
+            indicators::show_console_cursor(false);
+        }
+    }
+    ~ProgressGuard() {
+        if (m_show) {
+            indicators::show_console_cursor(true);
+        }
+    }
+    ProgressGuard(const ProgressGuard&)            = delete;
+    ProgressGuard& operator=(const ProgressGuard&) = delete;
+    ProgressGuard(ProgressGuard&&)                 = delete;
+    ProgressGuard& operator=(ProgressGuard&&)      = delete;
+};
+
 } // namespace loki::utils
