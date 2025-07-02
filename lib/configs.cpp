@@ -151,6 +151,14 @@ void PulsarSearchConfig::validate() const {
                 param_limit[0], param_limit[1]));
         }
     }
+    if (m_use_fft_shifts) {
+        // Make sure m_nbins is even
+        if ((m_nbins & 1U) != 0) {
+            throw std::runtime_error(std::format(
+                "nbins must be even when use_fft_shifts is true (got {})",
+                m_nbins));
+        }
+    }
 }
 
 } // namespace loki::search

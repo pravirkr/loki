@@ -490,19 +490,36 @@ public:
                    cuda::std::span<float> fold_d,
                    cudaStream_t stream) {
         check_inputs(ts_e_d.size(), ts_v_d.size(), fold_d.size());
-        auto fold_complex = cuda::std::span<ComplexTypeCUDA>(
-            reinterpret_cast<ComplexTypeCUDA*>(fold_d.data()),
-            m_ffa_plan.get_fold_size_complex());
-        if (m_use_single_buffer) {
-            execute_single_buffer_device(ts_e_d, ts_v_d, fold_complex, stream);
-        } else {
-            execute_double_buffer_device(ts_e_d, ts_v_d, fold_complex, stream);
-        }
-        // IRFFT in-place
+        const auto fold_size         = m_ffa_plan.get_fold_size();
+        const auto fold_size_complex = m_ffa_plan.get_fold_size_complex();
         const auto nfft = m_ffa_plan.get_fold_size() / m_cfg.get_nbins();
-        utils::irfft_batch_inplace_cuda(fold_complex, static_cast<int>(nfft),
-                                        static_cast<int>(m_cfg.get_nbins()),
-                                        stream);
+
+        ScopeTimer timer("FFACOMPLEXCUDA::execute_device");
+        if (m_use_single_buffer) {
+            auto fold_complex = cuda::std::span<ComplexTypeCUDA>(
+                reinterpret_cast<ComplexTypeCUDA*>(fold_d.data()),
+                m_ffa_plan.get_fold_size_complex());
+            execute_single_buffer_device(ts_e_d, ts_v_d, fold_complex, true,
+                                         stream);
+            // IRFFT
+            utils::irfft_batch_cuda(
+                cuda::std::span(thrust::raw_pointer_cast(m_fold_in_d.data()),
+                                fold_size_complex),
+                cuda::std::span(thrust::raw_pointer_cast(fold_d.data()),
+                                fold_size),
+                static_cast<int>(nfft), static_cast<int>(m_cfg.get_nbins()),
+                stream);
+        } else {
+            ComplexTypeCUDA* result_ptr =
+                execute_double_buffer_device(ts_e_d, ts_v_d, stream);
+            // IRFFT
+            utils::irfft_batch_cuda(
+                cuda::std::span(result_ptr, fold_size_complex),
+                cuda::std::span(thrust::raw_pointer_cast(fold_d.data()),
+                                fold_size),
+                static_cast<int>(nfft), static_cast<int>(m_cfg.get_nbins()),
+                stream);
+        }
         spdlog::debug("FFACUDA::Impl: Device execution complete on stream");
     }
 
@@ -512,8 +529,9 @@ public:
                    cudaStream_t stream) {
         check_inputs_complex(ts_e_d.size(), ts_v_d.size(),
                              fold_complex_d.size());
+        ScopeTimer timer("FFACOMPLEXCUDA::execute_device");
         if (m_use_single_buffer) {
-            execute_single_buffer_device(ts_e_d, ts_v_d, fold_complex_d,
+            execute_single_buffer_device(ts_e_d, ts_v_d, fold_complex_d, false,
                                          stream);
         } else {
             execute_double_buffer_device(ts_e_d, ts_v_d, fold_complex_d,
@@ -572,18 +590,20 @@ private:
     void initialize_device(cuda::std::span<const float> ts_e_d,
                            cuda::std::span<const float> ts_v_d,
                            ComplexTypeCUDA* init_buffer_d,
+                           ComplexTypeCUDA* temp_buffer_d,
                            cudaStream_t stream) {
-        const auto required_floats = m_ffa_plan.get_brute_fold_size_complex();
+        ScopeTimer timer("FFACOMPLEXCUDA::initialize");
+        // Use temp_buffer for the initial real-valued brute fold output
+        auto real_temp_view =
+            cuda::std::span<float>(reinterpret_cast<float*>(temp_buffer_d),
+                                   m_ffa_plan.get_brute_fold_size());
+        m_the_bf->execute(ts_e_d, ts_v_d, real_temp_view, stream);
 
-        // Cast complex buffer to float for brute folding
-        auto real_view = cuda::std::span<float>(
-            reinterpret_cast<float*>(init_buffer_d), required_floats);
-        m_the_bf->execute_stride(ts_e_d, ts_v_d, real_view, stream);
-
-        // In-place RFFT
+        // Out-of-place RFFT from temp_buffer (real) to init_buffer (complex)
         const auto nfft         = m_the_bf->get_fold_size() / m_cfg.get_nbins();
         const auto complex_size = nfft * ((m_cfg.get_nbins() / 2) + 1);
-        utils::rfft_batch_inplace_cuda(
+        utils::rfft_batch_cuda(
+            real_temp_view,
             cuda::std::span<ComplexTypeCUDA>(init_buffer_d, complex_size),
             static_cast<int>(nfft), static_cast<int>(m_cfg.get_nbins()),
             stream);
@@ -594,9 +614,9 @@ private:
         cuda::std::span<const float> ts_v_d,
         cuda::std::span<ComplexTypeCUDA> fold_complex_d,
         cudaStream_t stream) {
-        ScopeTimer timer("FFACOMPLEXCUDA::Impl::execute_device");
-        initialize_device(ts_e_d, ts_v_d,
-                          thrust::raw_pointer_cast(m_fold_in_d.data()), stream);
+        initialize_device(
+            ts_e_d, ts_v_d, thrust::raw_pointer_cast(m_fold_in_d.data()),
+            thrust::raw_pointer_cast(m_fold_out_d.data()), stream);
 
         ComplexTypeCUDA* fold_in_ptr =
             thrust::raw_pointer_cast(m_fold_in_d.data());
@@ -649,12 +669,68 @@ private:
         spdlog::debug("FFACUDA::Impl: Iterations submitted to stream.");
     }
 
+    // This is a special case for the double buffer implementation where we
+    // want to return the buffer that was the output of the last iteration.
+    // This is used for the IRFFT.
+    ComplexTypeCUDA*
+    execute_double_buffer_device(cuda::std::span<const float> ts_e_d,
+                                 cuda::std::span<const float> ts_v_d,
+                                 cudaStream_t stream) {
+        initialize_device(
+            ts_e_d, ts_v_d, thrust::raw_pointer_cast(m_fold_in_d.data()),
+            thrust::raw_pointer_cast(m_fold_out_d.data()), stream);
+
+        ComplexTypeCUDA* fold_in_ptr =
+            thrust::raw_pointer_cast(m_fold_in_d.data());
+        ComplexTypeCUDA* fold_out_ptr =
+            thrust::raw_pointer_cast(m_fold_out_d.data());
+
+        const auto levels = m_cfg.get_niters_ffa() + 1;
+
+        auto coords_cur = m_ffa_plan_d.coordinates.get_raw_ptrs();
+        cuda_utils::check_last_cuda_error("thrust::raw_pointer_cast failed");
+        coords_cur.update_offsets(m_ffa_plan_d.ncoords[0]);
+
+        // FFA iterations (levels 1 to levels)
+        for (SizeType i_level = 1; i_level < levels; ++i_level) {
+            const auto nsegments    = m_ffa_plan_d.nsegments[i_level];
+            const auto nbins        = m_ffa_plan_d.nbins[i_level];
+            const auto ncoords_cur  = m_ffa_plan_d.ncoords[i_level];
+            const auto ncoords_prev = m_ffa_plan_d.ncoords[i_level - 1];
+            const auto nbins_f      = (nbins / 2) + 1;
+
+            const int total_work = ncoords_cur * nsegments * nbins_f;
+            const int block_size = (total_work < 65536) ? 256 : 512;
+            const int grid_size  = (total_work + block_size - 1) / block_size;
+
+            const dim3 block_dim(block_size);
+            const dim3 grid_dim(grid_size);
+
+            cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
+
+            // Always ping-pong between internal buffers
+            const bool is_last = i_level == levels - 1;
+            kernel_ffa_complex_iter<<<grid_dim, block_dim, 0, stream>>>(
+                fold_in_ptr, fold_out_ptr, coords_cur, ncoords_cur,
+                ncoords_prev, nsegments, nbins_f, nbins);
+            cuda_utils::check_last_cuda_error(
+                "kernel_ffa_complex_iter launch failed");
+            std::swap(fold_in_ptr, fold_out_ptr);
+            if (!is_last) {
+                coords_cur.update_offsets(ncoords_cur);
+            }
+        }
+
+        spdlog::debug("FFACUDA::Impl: Iterations submitted to stream.");
+        return fold_in_ptr;
+    }
+
     void execute_single_buffer_device(
         cuda::std::span<const float> ts_e_d,
         cuda::std::span<const float> ts_v_d,
         cuda::std::span<ComplexTypeCUDA> fold_d_complex,
+        bool output_in_internal_buffer,
         cudaStream_t stream) {
-        ScopeTimer timer("FFACOMPLEXCUDA::Impl::execute_device");
         const auto levels = m_cfg.get_niters_ffa() + 1;
 
         // Use m_fold_in and output fold buffer for ping-pong
@@ -666,20 +742,25 @@ private:
         // Calculate the number of internal iterations (excluding final write)
         const SizeType internal_iters = levels - 2;
 
-        // Determine starting configuration to ensure final result lands in fold
+        // Determine starting configuration to ensure final result lands in the
+        // correct side of the ping-pong table
         bool odd_swaps = (internal_iters % 2) == 1;
+        const bool init_in_internal =
+            (odd_swaps ^ output_in_internal_buffer) == 0;
         ComplexTypeCUDA *current_in_ptr, *current_out_ptr;
-        if (odd_swaps) {
-            // Initialize in fold, will end up in fold after odd swaps
-            initialize_device(ts_e_d, ts_v_d, fold_result_ptr, stream);
-            current_in_ptr  = fold_result_ptr;
-            current_out_ptr = fold_internal_ptr;
-        } else {
-            // Initialize in internal, will end up in fold after even swaps
-            initialize_device(ts_e_d, ts_v_d, fold_internal_ptr, stream);
+        if (init_in_internal) {
+            // Initialize in internal, will end up in the desired buffer
             current_in_ptr  = fold_internal_ptr;
             current_out_ptr = fold_result_ptr;
+        } else {
+            // Initialize in fold, will end up in the desired buffer
+            current_in_ptr  = fold_result_ptr;
+            current_out_ptr = fold_internal_ptr;
         }
+
+        // Initialize the current buffer
+        initialize_device(ts_e_d, ts_v_d, current_in_ptr, current_out_ptr,
+                          stream);
 
         auto coords_cur = m_ffa_plan_d.coordinates.get_raw_ptrs();
         cuda_utils::check_last_cuda_error("thrust::raw_pointer_cast failed");

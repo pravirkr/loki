@@ -34,12 +34,6 @@ SizeType FFAPlan::get_brute_fold_size() const noexcept {
                            fold_shapes.front().end(), 1, std::multiplies<>());
 }
 
-SizeType FFAPlan::get_brute_fold_size_complex() const noexcept {
-    const auto nfft = get_brute_fold_size() / m_cfg.get_nbins();
-    // For in-place RFFT, FFTW needs nfft * (nbins + 2) floats total
-    return nfft * (m_cfg.get_nbins() + 2);
-}
-
 SizeType FFAPlan::get_fold_size() const noexcept {
     return std::accumulate(fold_shapes.back().begin(), fold_shapes.back().end(),
                            1, std::multiplies<>());
@@ -47,14 +41,11 @@ SizeType FFAPlan::get_fold_size() const noexcept {
 
 SizeType FFAPlan::get_buffer_size_complex() const noexcept {
     // Calculate the standard complex buffer size (max of all FFA levels)
-    const auto standard_complex_size = std::ranges::max(
+    return std::ranges::max(
         fold_shapes_complex | std::views::transform([](const auto& shape) {
             return std::accumulate(shape.begin(), shape.end(), 1,
                                    std::multiplies<>());
         }));
-    const auto required_complex = (get_brute_fold_size_complex() + 1) / 2;
-    return std::max(static_cast<SizeType>(standard_complex_size),
-                    required_complex);
 }
 
 SizeType FFAPlan::get_fold_size_complex() const noexcept {
@@ -68,9 +59,8 @@ SizeType FFAPlan::get_memory_usage() const noexcept {
     SizeType total_memory       = 0;
     if (m_cfg.get_use_fft_shifts()) {
         const auto complex_buffer_size = get_buffer_size_complex();
-        total_memory += 2 * complex_buffer_size * sizeof(ComplexType);
-        const auto temp_complex_size = get_fold_size_complex();
-        total_memory += temp_complex_size * sizeof(ComplexType);
+        total_memory +=
+            internal_buffers * complex_buffer_size * sizeof(ComplexType);
     } else {
         const auto float_buffer_size = get_buffer_size();
         total_memory += internal_buffers * float_buffer_size * sizeof(float);
@@ -204,10 +194,6 @@ void FFAPlan::validate_plan() const {
                        "FFAPlan::validate_plan: fold size (complex) is zero");
     error_check::check(get_brute_fold_size() > 0,
                        "FFAPlan::validate_plan: brute fold size is zero");
-    error_check::check(
-        get_brute_fold_size_complex() > 0,
-        "FFAPlan::validate_plan: brute fold size (complex) is zero");
-
     // For the first level, only the freqs array should have size > 1
     for (SizeType iparam = 0; iparam < m_cfg.get_nparams() - 1; ++iparam) {
         if (params[0][iparam].size() != 1) {

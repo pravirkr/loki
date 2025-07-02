@@ -53,7 +53,7 @@ public:
                  std::span<float> fold);
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
-                 std::span<ComplexType> fold);
+                 std::span<ComplexType> fold_complex);
 
 private:
     class Impl;
@@ -126,7 +126,7 @@ public:
                  cudaStream_t stream);
     void execute(cuda::std::span<const float> ts_e,
                  cuda::std::span<const float> ts_v,
-                 cuda::std::span<ComplexTypeCUDA> fold,
+                 cuda::std::span<ComplexTypeCUDA> fold_complex,
                  cudaStream_t stream);
 
 private:
