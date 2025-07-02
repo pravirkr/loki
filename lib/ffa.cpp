@@ -705,7 +705,7 @@ compute_ffa_scores(std::span<const float> ts_e,
     const auto& score_widths = cfg.get_score_widths();
     const auto nscores       = n_param_sets * score_widths.size();
     std::vector<float> scores(nscores);
-    detection::snr_boxcar_3d(fold, n_param_sets, score_widths, scores, 1.0F,
+    detection::snr_boxcar_3d(fold, n_param_sets, score_widths, scores,
                              cfg.get_nthreads());
     return {std::move(scores), ffa_plan};
 }

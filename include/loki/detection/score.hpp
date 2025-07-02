@@ -50,21 +50,28 @@ void snr_boxcar_1d(std::span<const float> arr,
                    std::span<float> out,
                    float stdnoise = 1.0F);
 
-// Compute the Boxcar S/N of a batch of single pulse profiles
-void snr_boxcar_2d(std::span<const float> arr,
-                   SizeType nprofiles,
-                   std::span<const SizeType> widths,
-                   std::span<float> out,
-                   float stdnoise = 1.0F,
-                   int nthreads   = 1);
+// Compute the Boxcar S/N of a batch of single pulse profiles with common
+// variance Useful for thresholding code
+void snr_boxcar_2d_max(std::span<const float> arr,
+                       SizeType nprofiles,
+                       std::span<const SizeType> widths,
+                       std::span<float> out,
+                       float stdnoise = 1.0F,
+                       int nthreads   = 1);
 
-// Compute the Boxcar S/N of a batch of E, V folded profiles
+// Compute the Boxcar S/N (for each width) of a batch of E, V folded profiles
 void snr_boxcar_3d(std::span<const float> arr,
                    SizeType nprofiles,
                    std::span<const SizeType> widths,
                    std::span<float> out,
-                   float stdnoise = 1.0F,
-                   int nthreads   = 1);
+                   int nthreads = 1);
+
+// Compute the Boxcar S/N of a batch of E, V folded profiles
+void snr_boxcar_3d_max(std::span<const float> arr,
+                       SizeType nprofiles,
+                       std::span<const SizeType> widths,
+                       std::span<float> out,
+                       int nthreads = 1);
 
 // Compute the S/N of a batch of folded profiles
 void snr_boxcar_batch(xt::xtensor<float, 3>& folds,
@@ -82,19 +89,24 @@ using ScoringFunction = std::function<void(
 
 #ifdef LOKI_ENABLE_CUDA
 
+void snr_boxcar_2d_max_d(cuda::std::span<const float> arr,
+                         SizeType nprofiles,
+                         cuda::std::span<const SizeType> widths,
+                         cuda::std::span<float> out,
+                         float stdnoise = 1.0F,
+                         int device_id  = 0);
+
 void snr_boxcar_3d_cuda(std::span<const float> arr,
                         SizeType nprofiles,
                         std::span<const SizeType> widths,
                         std::span<float> out,
-                        float stdnoise = 1.0F,
-                        int device_id  = 0);
+                        int device_id = 0);
 
 void snr_boxcar_3d_cuda_d(cuda::std::span<const float> arr,
                           SizeType nprofiles,
                           std::span<const SizeType> widths,
                           std::span<float> out,
-                          float stdnoise = 1.0F,
-                          int device_id  = 0);
+                          int device_id = 0);
 
 #endif // LOKI_ENABLE_CUDA
 

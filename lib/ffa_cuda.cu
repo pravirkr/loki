@@ -903,7 +903,7 @@ compute_ffa_scores_cuda(std::span<const float> ts_e,
     const auto nscores       = n_param_sets * score_widths.size();
     std::vector<float> scores(nscores);
     detection::snr_boxcar_3d_cuda(fold, n_param_sets, score_widths, scores,
-                                  1.0F, device_id);
+                                  device_id);
     return {std::move(scores), ffa_plan};
 }
 

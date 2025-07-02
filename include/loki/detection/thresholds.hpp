@@ -6,6 +6,11 @@
 
 #include "loki/common/types.hpp"
 
+#ifdef LOKI_ENABLE_CUDA
+#include <cuda/std/span>
+#include <cuda_runtime_api.h>
+#endif // LOKI_ENABLE_CUDA
+
 namespace loki::detection {
 
 struct State {
@@ -53,6 +58,7 @@ public:
     SizeType get_nstages() const;
     SizeType get_nthresholds() const;
     SizeType get_nprobs() const;
+    std::vector<SizeType> get_box_score_widths() const;
     std::vector<State> get_states() const;
     void run(SizeType thres_neigh = 10);
     std::string save(const std::string& outdir = "./") const;
@@ -79,5 +85,40 @@ std::vector<State> determine_scheme(std::span<const float> survive_probs,
                                     float snr_final  = 8.0F,
                                     float ducy_max   = 0.3F,
                                     float wtsp       = 1.0F);
+
+#ifdef LOKI_ENABLE_CUDA
+
+class DynamicThresholdSchemeCUDA {
+public:
+    DynamicThresholdSchemeCUDA(std::span<const float> branching_pattern,
+                               float ref_ducy,
+                               SizeType nbins        = 64,
+                               SizeType ntrials      = 1024,
+                               SizeType nprobs       = 10,
+                               float prob_min        = 0.05F,
+                               float snr_final       = 8.0F,
+                               SizeType nthresholds  = 100,
+                               float ducy_max        = 0.3F,
+                               float wtsp            = 1.0F,
+                               float beam_width      = 0.7F,
+                               SizeType trials_start = 1,
+                               int device_id         = 0);
+    ~DynamicThresholdSchemeCUDA();
+    DynamicThresholdSchemeCUDA(DynamicThresholdSchemeCUDA&&) noexcept;
+    DynamicThresholdSchemeCUDA&
+    operator=(DynamicThresholdSchemeCUDA&&) noexcept;
+    DynamicThresholdSchemeCUDA(const DynamicThresholdSchemeCUDA&) = delete;
+    DynamicThresholdSchemeCUDA&
+    operator=(const DynamicThresholdSchemeCUDA&) = delete;
+
+    void run(SizeType thres_neigh = 10);
+    std::string save(const std::string& outdir = "./") const;
+
+private:
+    class Impl;
+    std::unique_ptr<Impl> m_impl;
+};
+
+#endif // LOKI_ENABLE_CUDA
 
 } // namespace loki::detection
