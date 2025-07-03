@@ -89,12 +89,19 @@ using ScoringFunction = std::function<void(
 
 #ifdef LOKI_ENABLE_CUDA
 
-void snr_boxcar_2d_max_d(cuda::std::span<const float> arr,
-                         SizeType nprofiles,
-                         cuda::std::span<const SizeType> widths,
-                         cuda::std::span<float> out,
-                         float stdnoise = 1.0F,
-                         int device_id  = 0);
+void snr_boxcar_2d_max_cuda(std::span<const float> arr,
+                            SizeType nprofiles,
+                            std::span<const SizeType> widths,
+                            std::span<float> out,
+                            float stdnoise = 1.0F,
+                            int device_id  = 0);
+
+void snr_boxcar_2d_max_cuda_d(cuda::std::span<const float> arr,
+                              SizeType nprofiles,
+                              cuda::std::span<const SizeType> widths,
+                              cuda::std::span<float> out,
+                              float stdnoise = 1.0F,
+                              int device_id  = 0);
 
 void snr_boxcar_3d_cuda(std::span<const float> arr,
                         SizeType nprofiles,
@@ -104,9 +111,21 @@ void snr_boxcar_3d_cuda(std::span<const float> arr,
 
 void snr_boxcar_3d_cuda_d(cuda::std::span<const float> arr,
                           SizeType nprofiles,
-                          std::span<const SizeType> widths,
-                          std::span<float> out,
+                          cuda::std::span<const SizeType> widths,
+                          cuda::std::span<float> out,
                           int device_id = 0);
+
+void snr_boxcar_3d_max_cuda(std::span<const float> arr,
+                            SizeType nprofiles,
+                            std::span<const SizeType> widths,
+                            std::span<float> out,
+                            int device_id = 0);
+
+void snr_boxcar_3d_max_cuda_d(cuda::std::span<const float> arr,
+                              SizeType nprofiles,
+                              cuda::std::span<const SizeType> widths,
+                              cuda::std::span<float> out,
+                              int device_id = 0);
 
 #endif // LOKI_ENABLE_CUDA
 

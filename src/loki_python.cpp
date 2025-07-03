@@ -89,9 +89,9 @@ PYBIND11_MODULE(libloki, m) {
         },
         py::arg("arr"), py::arg("widths"), py::arg("stdnoise") = 1.0F);
     m_scores.def(
-        "snr_boxcar_2d",
+        "snr_boxcar_2d_max",
         [](const PyArrayT<float>& arr, const PyArrayT<SizeType>& widths,
-           float stdnoise) {
+           float stdnoise, int nthreads) {
             if (arr.ndim() != 2 || widths.ndim() != 1) {
                 throw std::runtime_error("Input array must be 2-dimensional, "
                                          "widths must be 1-dimensional");
@@ -101,17 +101,19 @@ PYBIND11_MODULE(libloki, m) {
             }
             const auto nprofiles = arr.shape(0);
 
-            auto out = PyArrayT<float>({nprofiles, widths.size()});
-            detection::snr_boxcar_2d(to_span<const float>(arr), nprofiles,
-                                     to_span<const SizeType>(widths),
-                                     to_span<float>(out), stdnoise);
+            auto out = PyArrayT<float>(nprofiles);
+            detection::snr_boxcar_2d_max(to_span<const float>(arr), nprofiles,
+                                         to_span<const SizeType>(widths),
+                                         to_span<float>(out), stdnoise,
+                                         nthreads);
             return out;
         },
-        py::arg("arr"), py::arg("widths"), py::arg("stdnoise") = 1.0F);
+        py::arg("arr"), py::arg("widths"), py::arg("stdnoise") = 1.0F,
+        py::arg("nthreads") = 1);
     m_scores.def(
         "snr_boxcar_3d",
         [](const PyArrayT<float>& arr, const PyArrayT<SizeType>& widths,
-           float stdnoise, int n_threads) {
+           int nthreads) {
             if (arr.ndim() != 3 || widths.ndim() != 1) {
                 throw std::runtime_error("Input array must be 3-dimensional, "
                                          "widths must be 1-dimensional");
@@ -124,11 +126,30 @@ PYBIND11_MODULE(libloki, m) {
             auto out = PyArrayT<float>({nprofiles, widths.size()});
             detection::snr_boxcar_3d(to_span<const float>(arr), nprofiles,
                                      to_span<const SizeType>(widths),
-                                     to_span<float>(out), stdnoise, n_threads);
+                                     to_span<float>(out), nthreads);
             return out;
         },
-        py::arg("arr"), py::arg("widths"), py::arg("stdnoise") = 1.0F,
-        py::arg("n_threads") = 1);
+        py::arg("arr"), py::arg("widths"), py::arg("nthreads") = 1);
+    m_scores.def(
+        "snr_boxcar_3d_max",
+        [](const PyArrayT<float>& arr, const PyArrayT<SizeType>& widths,
+           int nthreads) {
+            if (arr.ndim() != 3 || widths.ndim() != 1) {
+                throw std::runtime_error("Input array must be 3-dimensional, "
+                                         "widths must be 1-dimensional");
+            }
+            if (arr.shape(0) == 0 || arr.shape(1) == 0 || widths.size() == 0) {
+                throw std::runtime_error("Input arrays cannot be empty");
+            }
+            const auto nprofiles = arr.shape(0);
+
+            auto out = PyArrayT<float>(nprofiles);
+            detection::snr_boxcar_3d_max(to_span<const float>(arr), nprofiles,
+                                         to_span<const SizeType>(widths),
+                                         to_span<float>(out), nthreads);
+            return out;
+        },
+        py::arg("arr"), py::arg("widths"), py::arg("nthreads") = 1);
 
     auto m_thresholds = m.def_submodule("thresholds", "Thresholds submodule");
     using detection::DynamicThresholdScheme;

@@ -16,7 +16,7 @@ SizeType next_power_of_two(SizeType n) noexcept {
 float diff_max(const float* __restrict__ x,
                const float* __restrict__ y,
                SizeType size) {
-    float max_diff = -std::numeric_limits<float>::infinity();
+    float max_diff = std::numeric_limits<float>::lowest();
 #pragma omp simd simdlen(16) reduction(max : max_diff)
     for (SizeType i = 0; i < size; ++i) {
         max_diff = std::max(max_diff, x[i] - y[i]);

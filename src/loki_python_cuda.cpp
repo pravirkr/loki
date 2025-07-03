@@ -20,9 +20,31 @@ PYBIND11_MODULE(libculoki, m) { // NOLINT
 
     auto m_scores = m.def_submodule("scores", "Scores submodule");
     m_scores.def(
-        "snr_boxcar_3d",
+        "snr_boxcar_2d_max",
         [](const PyArrayT<float>& arr, const PyArrayT<SizeType>& widths,
            float stdnoise, int device_id) {
+            if (arr.ndim() != 2 || widths.ndim() != 1) {
+                throw std::runtime_error("Input array must be 2-dimensional, "
+                                         "widths must be 1-dimensional");
+            }
+            if (arr.shape(0) == 0 || arr.shape(1) == 0 || widths.size() == 0) {
+                throw std::runtime_error("Input arrays cannot be empty");
+            }
+            const auto nprofiles = arr.shape(0);
+
+            auto out = PyArrayT<float>(nprofiles);
+            detection::snr_boxcar_2d_max_cuda(
+                to_span<const float>(arr), nprofiles,
+                to_span<const SizeType>(widths), to_span<float>(out), stdnoise,
+                device_id);
+            return out;
+        },
+        py::arg("arr"), py::arg("widths"), py::arg("stdnoise") = 1.0F,
+        py::arg("device_id") = 0);
+    m_scores.def(
+        "snr_boxcar_3d",
+        [](const PyArrayT<float>& arr, const PyArrayT<SizeType>& widths,
+           int device_id) {
             if (arr.ndim() != 3 || widths.ndim() != 1) {
                 throw std::runtime_error("Input array must be 3-dimensional, "
                                          "widths must be 1-dimensional");
@@ -35,13 +57,31 @@ PYBIND11_MODULE(libculoki, m) { // NOLINT
             auto out = PyArrayT<float>({nprofiles, widths.size()});
             detection::snr_boxcar_3d_cuda(to_span<const float>(arr), nprofiles,
                                           to_span<const SizeType>(widths),
-                                          to_span<float>(out), stdnoise,
-                                          device_id);
+                                          to_span<float>(out), device_id);
             return out;
         },
-        py::arg("arr"), py::arg("widths"), py::arg("stdnoise") = 1.0F,
-        py::arg("device_id") = 0);
+        py::arg("arr"), py::arg("widths"), py::arg("device_id") = 0);
+    m_scores.def(
+        "snr_boxcar_3d_max",
+        [](const PyArrayT<float>& arr, const PyArrayT<SizeType>& widths,
+           int device_id) {
+            if (arr.ndim() != 3 || widths.ndim() != 1) {
+                throw std::runtime_error("Input array must be 3-dimensional, "
+                                         "widths must be 1-dimensional");
+            }
+            if (arr.shape(0) == 0 || arr.shape(1) == 0 || widths.size() == 0) {
+                throw std::runtime_error("Input arrays cannot be empty");
+            }
+            const auto nprofiles = arr.shape(0);
 
+            auto out = PyArrayT<float>(nprofiles);
+            detection::snr_boxcar_3d_max_cuda(to_span<const float>(arr),
+                                              nprofiles,
+                                              to_span<const SizeType>(widths),
+                                              to_span<float>(out), device_id);
+            return out;
+        },
+        py::arg("arr"), py::arg("widths"), py::arg("device_id") = 0);
     auto m_fold = m.def_submodule("fold", "Fold submodule");
     m_fold.def(
         "compute_brute_fold_cuda",

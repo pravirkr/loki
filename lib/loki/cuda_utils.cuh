@@ -179,6 +179,7 @@ inline void check_cuda_sync_error(
 inline void check_kernel_launch_params(
     dim3 grid,
     dim3 block,
+    size_t shmem_size = 0,
     const std::source_location loc = std::source_location::current()) {
     int device;
     cudaDeviceProp props{};
@@ -203,6 +204,7 @@ inline void check_kernel_launch_params(
     check_limit(grid.x, props.maxGridSize[0], "Grid X");
     check_limit(grid.y, props.maxGridSize[1], "Grid Y");
     check_limit(grid.z, props.maxGridSize[2], "Grid Z");
+    check_limit(shmem_size, props.sharedMemPerBlock, "Shared memory");
 }
 
 [[nodiscard]] inline std::string get_device_info() noexcept {

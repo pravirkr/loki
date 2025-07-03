@@ -9,252 +9,206 @@
 
 #include "loki/cuda_utils.cuh"
 #include "loki/exceptions.hpp"
+#include "loki/timing.hpp"
 
 namespace loki::detection {
 
 namespace {
 
-__global__ void snr_boxcar_2d_max_kernel(const float* __restrict__ arr,
-                                         int nprofiles,
-                                         const SizeType* __restrict__ widths,
-                                         int nwidths,
-                                         float* __restrict__ out,
-                                         int nbins,
-                                         float stdnoise,
-                                         int profiles_per_block) {
-    using BlockScan   = cub::BlockScan<float, 256>;
-    using BlockReduce = cub::BlockReduce<float, 256>;
+// Optimized 2D max kernel using warp strategy (Assigns one warp per profile)
+template <int BLOCK_THREADS, bool IS_3D, bool FIND_MAX>
+__global__ void snr_boxcar_kernel_warp(const float* __restrict__ arr,
+                                       int nprofiles,
+                                       int nbins,
+                                       const SizeType* __restrict__ widths,
+                                       int nwidths,
+                                       float* __restrict__ out,
+                                       float stdnoise = 1.0f) {
+    // --- Kernel Configuration & Indexing ---
+    constexpr int WARP_SIZE          = 32;
+    constexpr int PROFILES_PER_BLOCK = BLOCK_THREADS / WARP_SIZE;
+    const int warp_id                = threadIdx.x / WARP_SIZE;
+    const int lane_id                = threadIdx.x % WARP_SIZE;
+    const int profile_idx = blockIdx.x * PROFILES_PER_BLOCK + warp_id;
 
-    const int block_start = static_cast<int>(blockIdx.x) * profiles_per_block;
-    const int block_end = std::min(block_start + profiles_per_block, nprofiles);
-    const int tid       = static_cast<int>(threadIdx.x);
-    const int stride    = static_cast<int>(blockDim.x);
+    if (profile_idx >= nprofiles) {
+        return;
+    }
 
-    __shared__ union {
-        typename BlockScan::TempStorage scan;
-        typename BlockReduce::TempStorage reduce;
-    } temp_storage;
+    // --- Dynamic Shared Memory ---
+    extern __shared__ float s_mem_block[];
+    float* s_warp_data = &s_mem_block[warp_id * nbins];
 
-    __shared__ float s_data[2048]; // For prefix sum, assumes nbins <= 2048
+    using WarpScan   = cub::WarpScan<float, WARP_SIZE>;
+    using WarpReduce = cub::WarpReduce<float, WARP_SIZE>;
+    __shared__ typename WarpScan::TempStorage temp_scan[PROFILES_PER_BLOCK];
+    __shared__ typename WarpReduce::TempStorage temp_reduce[PROFILES_PER_BLOCK];
 
-    for (int profile_idx = block_start; profile_idx < block_end;
-         ++profile_idx) {
-        // Step 1: Load profile data into shared memory
-        for (int j = tid; j < nbins; j += stride) {
-            const int idx = profile_idx * nbins + j;
-            s_data[j]     = arr[idx];
+    // Load data from global to shared memory
+    for (int j = lane_id; j < nbins; j += WARP_SIZE) {
+        if constexpr (IS_3D) {
+            const int idx_e = (profile_idx * 2 * nbins) + j;
+            const int idx_v = (profile_idx * 2 * nbins) + j + nbins;
+            s_warp_data[j]  = arr[idx_e] / sqrtf(arr[idx_v]);
+        } else {
+            const int idx  = profile_idx * nbins + j;
+            s_warp_data[j] = arr[idx];
         }
-        __syncthreads();
-        // Step 2: Compute prefix sum using CUB
-        float thread_val = 0.0F;
-        if (tid < nbins) {
-            thread_val = s_data[tid];
+    }
+    __syncthreads();
+
+    // Perform warp-level complicated inclusive prefix sum
+    float running_sum    = 0.0f;
+    const int num_chunks = (nbins + WARP_SIZE - 1) / WARP_SIZE;
+    for (int chunk = 0; chunk < num_chunks; ++chunk) {
+        int idx   = chunk * WARP_SIZE + lane_id;
+        float val = (idx < nbins) ? s_warp_data[idx] : 0.0f;
+        WarpScan(temp_scan[warp_id]).InclusiveSum(val, val);
+        if (idx < nbins) {
+            s_warp_data[idx] = val + running_sum;
         }
+        float chunk_sum = __shfl_sync(0xFFFFFFFF, val, WARP_SIZE - 1);
+        if (lane_id == 0)
+            running_sum += chunk_sum;
+        running_sum = __shfl_sync(0xFFFFFFFF, running_sum, 0);
+    }
+    __syncthreads();
 
-        BlockScan(temp_storage.scan).InclusiveSum(thread_val, thread_val);
+    // Find max SNR across all widths
+    const float total_sum = s_warp_data[nbins - 1];
+    float thread_max_snr  = -CUDART_INF_F;
 
-        if (tid < nbins) {
-            s_data[tid] = thread_val;
+    for (int iw = 0; iw < nwidths; ++iw) {
+        const int w   = static_cast<int>(widths[iw]);
+        const float h = sqrtf(static_cast<float>(nbins - w) /
+                              static_cast<float>(nbins * w));
+        const float b =
+            static_cast<float>(w) * h / static_cast<float>(nbins - w);
+
+        float thread_max_diff = -CUDART_INF_F;
+        for (int j = lane_id; j < nbins; j += WARP_SIZE) {
+            float sum_before_start = (j > 0) ? s_warp_data[j - 1] : 0.0f;
+            float current_sum;
+            const int end_idx = j + w - 1;
+            if (end_idx < nbins) {
+                // Normal case: sum from j to j+w-1
+                current_sum = s_warp_data[end_idx] - sum_before_start;
+            } else {
+                // Circular case: sum wraps around
+                current_sum = (total_sum - sum_before_start) +
+                              s_warp_data[end_idx % nbins];
+            }
+            thread_max_diff = fmaxf(thread_max_diff, current_sum);
         }
-        __syncthreads();
+        float max_diff = WarpReduce(temp_reduce[warp_id])
+                             .Reduce(thread_max_diff, cub::Max());
 
-        const float total_sum = s_data[nbins - 1];
-
-        // Step 3: Compute SNR for each width and find maximum
-        float thread_max_snr = -CUDART_INF_F;
-
-        for (int iw = tid; iw < nwidths; iw += stride) {
-            const int w   = static_cast<int>(widths[iw]);
-            const float h = sqrtf(static_cast<float>(nbins - w) /
-                                  static_cast<float>(nbins * w));
-            const float b =
-                static_cast<float>(w) * h / static_cast<float>(nbins - w);
-
-            // Compute maximum window sum (same logic as existing 3D kernel)
-            float max_diff = -CUDART_INF_F;
-            for (int j = 0; j < nbins; ++j) {
-                float current_sum;
-                int end_idx = j + w - 1;
-                if (end_idx < nbins) {
-                    float sum_at_end       = s_data[end_idx];
-                    float sum_before_start = (j > 0) ? s_data[j - 1] : 0.0F;
-                    current_sum            = sum_at_end - sum_before_start;
-                } else {
-                    float sum_tail =
-                        total_sum - ((j > 0) ? s_data[j - 1] : 0.0F);
-                    float sum_head = s_data[end_idx % nbins];
-                    current_sum    = sum_tail + sum_head;
-                }
-                max_diff = fmaxf(max_diff, current_sum);
+        if (lane_id == 0) {
+            float snr;
+            if constexpr (IS_3D) {
+                snr = ((h + b) * max_diff) - (b * total_sum);
+            } else {
+                snr = (((h + b) * max_diff) - (b * total_sum)) / stdnoise;
             }
 
-            const float snr =
-                (((h + b) * max_diff) - (b * total_sum)) / stdnoise;
-            thread_max_snr = fmaxf(thread_max_snr, snr);
+            if constexpr (FIND_MAX) {
+                thread_max_snr = fmaxf(thread_max_snr, snr);
+            } else {
+                out[(profile_idx * nwidths) + iw] = snr;
+            }
         }
+    }
 
-        // Step 4: Block reduction to find maximum across all threads
-        __syncthreads();
-        float block_max_snr =
-            BlockReduce(temp_storage.reduce).Reduce(thread_max_snr, cub::Max());
-
-        // Step 5: Store result
-        if (tid == 0) {
-            out[profile_idx] = block_max_snr;
+    // Final reduction to get max SNR across all widths for this warp
+    if constexpr (FIND_MAX) {
+        __shared__
+            typename WarpReduce::TempStorage temp_final[PROFILES_PER_BLOCK];
+        float final_max_snr =
+            WarpReduce(temp_final[warp_id]).Reduce(thread_max_snr, cub::Max());
+        if (lane_id == 0) {
+            out[profile_idx] = final_max_snr;
         }
-
-        __syncthreads();
     }
 }
 
-__global__ void snr_boxcar_3d_kernel_cub(const float* __restrict__ arr,
-                                         int nprofiles,
-                                         const SizeType* __restrict__ widths,
-                                         int nwidths,
-                                         float* __restrict__ out,
-                                         int nbins,
-                                         int profiles_per_block) {
-    // Typedef for CUB BlockScan for a 1D block of 256 threads.
-    using BlockScan = cub::BlockScan<float, 256>;
+// Unified launch function template
+template <bool IS_3D, bool FIND_MAX>
+void launch_snr_boxcar_kernel(cuda::std::span<const float> arr,
+                              SizeType nprofiles,
+                              cuda::std::span<const SizeType> widths,
+                              cuda::std::span<float> out,
+                              float stdnoise,
+                              int device_id) {
+    cuda_utils::set_device(device_id);
 
-    const int block_start = static_cast<int>(blockIdx.x) * profiles_per_block;
-    const int block_end = std::min(block_start + profiles_per_block, nprofiles);
-    const int tid       = static_cast<int>(threadIdx.x);
-    const int stride    = static_cast<int>(blockDim.x);
+    const auto nbins =
+        IS_3D ? arr.size() / (2 * nprofiles) : arr.size() / nprofiles;
+    const auto nwidths = widths.size();
 
-    // Shared memory for CUB's internal storage.
-    __shared__ typename BlockScan::TempStorage temp_storage;
+    constexpr int WARP_KERNEL_BLOCK_THREADS = 128;
+    constexpr int PROFILES_PER_BLOCK        = WARP_KERNEL_BLOCK_THREADS / 32;
+    const size_t warp_kernel_shmem = PROFILES_PER_BLOCK * nbins * sizeof(float);
+    const dim3 block_dim(WARP_KERNEL_BLOCK_THREADS);
+    const dim3 grid_dim((nprofiles + PROFILES_PER_BLOCK - 1) /
+                        PROFILES_PER_BLOCK);
 
-    // Shared memory as a staging area for our data.
-    __shared__ float s_data[2048]; // Assumes nbins <= 2048
+    cuda_utils::check_kernel_launch_params(grid_dim, block_dim,
+                                           warp_kernel_shmem);
 
-    for (int profile_idx = block_start; profile_idx < block_end;
-         ++profile_idx) {
-        // Step 1: Cooperatively load data from global to shared memory staging
-        // area.
-        for (int j = tid; j < nbins; j += stride) {
-            const int idx_e = (profile_idx * 2 * nbins) + j;
-            const int idx_v = (profile_idx * 2 * nbins) + j + nbins;
-            s_data[j]       = arr[idx_e] / sqrtf(arr[idx_v]);
-        }
-        __syncthreads();
+    snr_boxcar_kernel_warp<WARP_KERNEL_BLOCK_THREADS, IS_3D, FIND_MAX>
+        <<<grid_dim, block_dim, warp_kernel_shmem>>>(
+            arr.data(), static_cast<int>(nprofiles), static_cast<int>(nbins),
+            widths.data(), static_cast<int>(nwidths), out.data(), stdnoise);
 
-        // Step 2: The Correct CUB Scan Pattern
-        // a) Each thread loads its value from shared memory into a register.
-        float thread_val = 0.0F;
-        if (tid < nbins) {
-            thread_val = s_data[tid];
-        }
+    cuda_utils::check_last_cuda_error("snr_boxcar_kernel_warp launch failed");
+}
 
-        // b) Perform the inclusive scan on the per-thread register data.
-        BlockScan(temp_storage).InclusiveSum(thread_val, thread_val);
+// Unified host wrapper template
+template <bool IS_3D, bool FIND_MAX>
+void snr_boxcar_cuda_impl(std::span<const float> arr,
+                          SizeType nprofiles,
+                          std::span<const SizeType> widths,
+                          std::span<float> out,
+                          float stdnoise,
+                          int device_id) {
+    cuda_utils::set_device(device_id);
+    thrust::device_vector<float> d_arr(arr.begin(), arr.end());
+    thrust::device_vector<SizeType> d_widths(widths.begin(), widths.end());
+    thrust::device_vector<float> d_out(out.size());
 
-        // c) Each thread writes its result back to shared memory.
-        if (tid < nbins) {
-            s_data[tid] = thread_val;
-        }
-        __syncthreads();
-        const float total_sum = s_data[nbins - 1];
+    launch_snr_boxcar_kernel<IS_3D, FIND_MAX>(
+        cuda::std::span<const float>(thrust::raw_pointer_cast(d_arr.data()),
+                                     d_arr.size()),
+        nprofiles,
+        cuda::std::span<const SizeType>(
+            thrust::raw_pointer_cast(d_widths.data()), d_widths.size()),
+        cuda::std::span<float>(thrust::raw_pointer_cast(d_out.data()),
+                               d_out.size()),
+        stdnoise, device_id);
 
-        for (int iw = tid; iw < nwidths; iw += stride) {
-            const int w   = static_cast<int>(widths[iw]);
-            const float h = sqrtf(static_cast<float>(nbins - w) /
-                                  static_cast<float>(nbins * w));
-            const float b =
-                static_cast<float>(w) * h / static_cast<float>(nbins - w);
-            float max_diff = -CUDART_INF_F;
-
-            for (int j = 0; j < nbins; ++j) {
-                float current_sum;
-                int end_idx = j + w - 1;
-
-                if (end_idx < nbins) {
-                    float sum_at_end       = s_data[end_idx];
-                    float sum_before_start = (j > 0) ? s_data[j - 1] : 0.0F;
-                    current_sum            = sum_at_end - sum_before_start;
-                } else {
-                    float sum_tail =
-                        total_sum - ((j > 0) ? s_data[j - 1] : 0.0F);
-                    float sum_head = s_data[end_idx % nbins];
-                    current_sum    = sum_tail + sum_head;
-                }
-                max_diff = fmaxf(max_diff, current_sum);
-            }
-
-            const float snr = (((h + b) * max_diff) - (b * total_sum));
-            out[(profile_idx * nwidths) + iw] = snr;
-        }
-        __syncthreads();
-    }
+    thrust::copy(d_out.begin(), d_out.end(), out.begin());
 }
 
 } // namespace
 
-void snr_boxcar_2d_max_d(cuda::std::span<const float> arr,
-                         SizeType nprofiles,
-                         cuda::std::span<const SizeType> widths,
-                         cuda::std::span<float> out,
-                         float stdnoise,
-                         int device_id) {
-    cuda_utils::set_device(device_id);
-
-    const auto nbins   = arr.size() / nprofiles;
-    const auto nwidths = widths.size();
-    error_check::check_equal(out.size(), nprofiles,
-                             "snr_boxcar_2d_max_d: out size does not match");
-
-    const int profiles_per_block = 8;
-    const int block_size         = 256;
-    const int grid_size =
-        (static_cast<int>(nprofiles) + profiles_per_block - 1) /
-        profiles_per_block;
-    const size_t shared_mem_size = sizeof(float) * 2048;
-    const dim3 block_dim(block_size);
-    const dim3 grid_dim(grid_size);
-    cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
-
-    snr_boxcar_2d_max_kernel<<<grid_dim, block_dim, shared_mem_size>>>(
-        arr.data(), static_cast<int>(nprofiles), widths.data(),
-        static_cast<int>(nwidths), out.data(), static_cast<int>(nbins),
-        stdnoise, profiles_per_block);
-
-    cuda_utils::check_last_cuda_error("snr_boxcar_2d_max_kernel launch failed");
+void snr_boxcar_2d_max_cuda(std::span<const float> arr,
+                            SizeType nprofiles,
+                            std::span<const SizeType> widths,
+                            std::span<float> out,
+                            float stdnoise,
+                            int device_id) {
+    snr_boxcar_cuda_impl<false, true>(arr, nprofiles, widths, out, stdnoise,
+                                      device_id);
 }
 
-void snr_boxcar_3d_cuda_d(cuda::std::span<const float> arr,
-                          SizeType nprofiles,
-                          std::span<const SizeType> widths,
-                          std::span<float> out,
-                          int device_id) {
-    cuda_utils::set_device(device_id);
-
-    const auto nbins      = arr.size() / (2 * nprofiles);
-    const auto ntemplates = widths.size();
-    error_check::check_equal(out.size(), nprofiles * ntemplates,
-                             "snr_boxcar_3d_cuda_d: out size does not match");
-
-    thrust::device_vector<SizeType> d_widths(widths.begin(), widths.end());
-    thrust::device_vector<float> d_out(out.size());
-
-    const int profiles_per_block = 8;
-    const int block_size         = 256;
-    const int grid_size =
-        (static_cast<int>(nprofiles) + profiles_per_block - 1) /
-        profiles_per_block;
-    const size_t shared_mem_size = sizeof(float) * 2048;
-    const dim3 block_dim(block_size);
-    const dim3 grid_dim(grid_size);
-    cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
-
-    snr_boxcar_3d_kernel_cub<<<grid_dim, block_dim, shared_mem_size>>>(
-        arr.data(), static_cast<int>(nprofiles), d_widths.data().get(),
-        static_cast<int>(ntemplates), d_out.data().get(),
-        static_cast<int>(nbins), profiles_per_block);
-
-    cuda_utils::check_last_cuda_error(
-        "snr_boxcar_kernel_cub_fixed launch failed");
-
-    thrust::copy(d_out.begin(), d_out.end(), out.begin());
+void snr_boxcar_2d_max_cuda_d(cuda::std::span<const float> arr,
+                              SizeType nprofiles,
+                              cuda::std::span<const SizeType> widths,
+                              cuda::std::span<float> out,
+                              float stdnoise,
+                              int device_id) {
+    launch_snr_boxcar_kernel<false, true>(arr, nprofiles, widths, out, stdnoise,
+                                          device_id);
 }
 
 void snr_boxcar_3d_cuda(std::span<const float> arr,
@@ -262,13 +216,35 @@ void snr_boxcar_3d_cuda(std::span<const float> arr,
                         std::span<const SizeType> widths,
                         std::span<float> out,
                         int device_id) {
-    cuda_utils::set_device(device_id);
-    thrust::device_vector<float> d_arr(arr.begin(), arr.end());
+    snr_boxcar_cuda_impl<true, false>(arr, nprofiles, widths, out, 1.0f,
+                                      device_id);
+}
 
-    snr_boxcar_3d_cuda_d(
-        cuda::std::span<const float>(thrust::raw_pointer_cast(d_arr.data()),
-                                     d_arr.size()),
-        nprofiles, widths, out, device_id);
+void snr_boxcar_3d_cuda_d(cuda::std::span<const float> arr,
+                          SizeType nprofiles,
+                          cuda::std::span<const SizeType> widths,
+                          cuda::std::span<float> out,
+                          int device_id) {
+    launch_snr_boxcar_kernel<true, false>(arr, nprofiles, widths, out, 1.0f,
+                                          device_id);
+}
+
+void snr_boxcar_3d_max_cuda(std::span<const float> arr,
+                            SizeType nprofiles,
+                            std::span<const SizeType> widths,
+                            std::span<float> out,
+                            int device_id) {
+    snr_boxcar_cuda_impl<true, true>(arr, nprofiles, widths, out, 1.0f,
+                                     device_id);
+}
+
+void snr_boxcar_3d_max_cuda_d(cuda::std::span<const float> arr,
+                              SizeType nprofiles,
+                              cuda::std::span<const SizeType> widths,
+                              cuda::std::span<float> out,
+                              int device_id) {
+    launch_snr_boxcar_kernel<true, true>(arr, nprofiles, widths, out, 1.0f,
+                                         device_id);
 }
 
 } // namespace loki::detection
