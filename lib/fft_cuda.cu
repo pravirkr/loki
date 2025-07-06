@@ -1,6 +1,5 @@
 #include "loki/utils/fft.hpp"
 
-#include <format>
 #include <spdlog/spdlog.h>
 
 #include <cuda/std/complex>

@@ -263,8 +263,9 @@ std::tuple<State, FoldsType> gen_next_using_thresh_cuda(
         cuda::std::span<float> scores_span(
             thrust::raw_pointer_cast(scores_h0.data()), scores_h0.size());
 
-        snr_boxcar_2d_max_d(folds_span, folds_h0.ntrials, widths_span,
-                            scores_span, std::sqrt(folds_h0.variance));
+        detection::snr_boxcar_2d_max_cuda_d(folds_span, folds_h0.ntrials,
+                                            widths_span, scores_span,
+                                            std::sqrt(folds_h0.variance));
     }
 
     const auto folds_h0_pruned =
@@ -290,8 +291,9 @@ std::tuple<State, FoldsType> gen_next_using_thresh_cuda(
         cuda::std::span<float> scores_span(
             thrust::raw_pointer_cast(scores_h1.data()), scores_h1.size());
 
-        snr_boxcar_2d_max_d(folds_span, folds_h1.ntrials, widths_span,
-                            scores_span, std::sqrt(folds_h1.variance));
+        detection::snr_boxcar_2d_max_cuda_d(folds_span, folds_h1.ntrials,
+                                            widths_span, scores_span,
+                                            std::sqrt(folds_h1.variance));
     }
 
     const auto folds_h1_pruned =

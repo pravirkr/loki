@@ -43,6 +43,7 @@ public:
                            float wtsp            = 1.0F,
                            float beam_width      = 0.7F,
                            SizeType trials_start = 1,
+                           bool use_lut_rng      = false,
                            int nthreads          = 1);
     ~DynamicThresholdScheme();
     DynamicThresholdScheme(DynamicThresholdScheme&&) noexcept;

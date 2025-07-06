@@ -1,10 +1,16 @@
 #include "loki/detection/thresholds.hpp"
 
 #include <algorithm>
+#include <cassert>
 #include <cmath>
+#include <exception>
 #include <filesystem>
 #include <format>
+#include <memory>
+#include <mutex>
+#include <queue>
 #include <random>
+#include <span>
 #include <stdexcept>
 #include <vector>
 
@@ -15,89 +21,333 @@
 #include "loki/common/types.hpp"
 #include "loki/detection/scheme.hpp"
 #include "loki/detection/score.hpp"
+#include "loki/exceptions.hpp"
+#include "loki/math.hpp"
 #include "loki/simulation/simulation.hpp"
 #include "loki/utils.hpp"
 
 namespace loki::detection {
 namespace {
-struct FoldVector {
-    std::vector<float> data;
-    float variance;
-    SizeType ntrials;
-    SizeType nbins;
 
-    FoldVector(const std::vector<float>& data,
-               float variance,
-               SizeType ntrials,
-               SizeType nbins)
-        : data(data),
-          variance(variance),
-          ntrials(ntrials),
-          nbins(nbins) {}
+class DualPoolFoldManager;
 
-    FoldVector(SizeType ntrials, SizeType nbins, float variance = 0.0F)
-        : data(ntrials * nbins),
-          variance(variance),
-          ntrials(ntrials),
-          nbins(nbins) {}
+/**
+ * Handle to a pre-allocated FoldVector. Its destructor automatically returns
+ * the memory to the manager.
+ */
+class FoldVectorHandle {
+public:
+    FoldVectorHandle(float* data,
+                     SizeType actual_ntrials,
+                     SizeType capacity_ntrials,
+                     SizeType nbins,
+                     float variance,
+                     DualPoolFoldManager* manager)
+        : m_data(data),
+          m_actual_ntrials(actual_ntrials),
+          m_capacity_ntrials(capacity_ntrials),
+          m_nbins(nbins),
+          m_variance(variance),
+          m_manager(manager) {}
+
+    // Move-only semantics
+    FoldVectorHandle(const FoldVectorHandle&)            = delete;
+    FoldVectorHandle& operator=(const FoldVectorHandle&) = delete;
+
+    FoldVectorHandle(FoldVectorHandle&& other) noexcept
+        : m_data(other.m_data),
+          m_actual_ntrials(other.m_actual_ntrials),
+          m_capacity_ntrials(other.m_capacity_ntrials),
+          m_nbins(other.m_nbins),
+          m_variance(other.m_variance),
+          m_manager(other.m_manager) {
+        other.m_manager = nullptr; // Prevent double deallocation
+    }
+
+    FoldVectorHandle& operator=(FoldVectorHandle&& other) noexcept {
+        if (this != &other) {
+            release();
+            m_data             = other.m_data;
+            m_actual_ntrials   = other.m_actual_ntrials;
+            m_capacity_ntrials = other.m_capacity_ntrials;
+            m_nbins            = other.m_nbins;
+            m_variance         = other.m_variance;
+            m_manager          = other.m_manager;
+            other.m_manager    = nullptr;
+        }
+        return *this;
+    }
+
+    ~FoldVectorHandle() { release(); }
+
+    // Interface
+    std::span<float> data() { return {m_data, m_actual_ntrials * m_nbins}; }
+    std::span<const float> data() const {
+        return {m_data, m_actual_ntrials * m_nbins};
+    }
+    SizeType ntrials() const { return m_actual_ntrials; }
+    SizeType nbins() const { return m_nbins; }
+    float variance() const { return m_variance; }
+    void set_ntrials(SizeType ntrials) {
+        assert(ntrials <= m_capacity_ntrials);
+        m_actual_ntrials = ntrials;
+    }
+    void set_variance(float variance) { m_variance = variance; }
+
+private:
+    void release() noexcept; // Implemented after DualPoolFoldManager
+
+    float* m_data;
+    SizeType m_actual_ntrials;
+    SizeType m_capacity_ntrials;
+    SizeType m_nbins;
+    float m_variance;
+    DualPoolFoldManager* m_manager;
 };
+
+/**
+ * A thread-safe, pre-allocated memory manager using a dual-pool (ping-pong)
+ * buffering strategy to improve cache locality.
+ */
+class DualPoolFoldManager {
+public:
+    DualPoolFoldManager(SizeType nbins,
+                        SizeType ntrials_min,
+                        SizeType slots_per_pool)
+        : m_nbins(nbins),
+          m_max_ntrials(2 * ntrials_min),
+          m_slot_size(m_max_ntrials * nbins),
+          m_slots_per_pool(slots_per_pool) {
+
+        // Pre-allocate all memory for both pools
+        m_data_a.resize(m_slots_per_pool * m_slot_size);
+        m_slot_occupied_a.resize(m_slots_per_pool, false);
+        m_data_b.resize(m_slots_per_pool * m_slot_size);
+        m_slot_occupied_b.resize(m_slots_per_pool, false);
+
+        // Initialize free slots for both pools
+        for (SizeType i = 0; i < m_slots_per_pool; ++i) {
+            m_free_slots_a.push(i);
+            m_free_slots_b.push(i);
+        }
+
+        // Start with A as the "out" pool and B as the "in" pool
+        // We only ever allocate from the "out" pool.
+        set_pools_a_out_b_in();
+    }
+
+    DualPoolFoldManager(const DualPoolFoldManager&)            = delete;
+    DualPoolFoldManager& operator=(const DualPoolFoldManager&) = delete;
+    DualPoolFoldManager(DualPoolFoldManager&&)                 = delete;
+    DualPoolFoldManager& operator=(DualPoolFoldManager&&)      = delete;
+
+    ~DualPoolFoldManager() = default;
+
+    /**
+     * Allocates a new FoldVector from the current "out" pool.
+     */
+    [[nodiscard]] std::unique_ptr<FoldVectorHandle>
+    allocate(SizeType initial_ntrials = 0, float variance = 0.0F) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+
+        if (m_free_slots_out->empty()) {
+            throw std::runtime_error(
+                "DualPoolFoldManager 'out' pool exhausted!");
+        }
+
+        const auto slot_idx = m_free_slots_out->front();
+        m_free_slots_out->pop();
+        (*m_slot_occupied_out)[slot_idx] = true;
+        float* slot_data = m_data_out->data() + (slot_idx * m_slot_size);
+        return std::make_unique<FoldVectorHandle>(
+            slot_data, initial_ntrials, m_max_ntrials, m_nbins, variance, this);
+    }
+
+    /**
+     * Deallocates a handle's memory, returning it to the correct pool's free
+     * list.
+     */
+    void deallocate(const float* data_ptr) noexcept {
+        std::lock_guard<std::mutex> lock(m_mutex);
+
+        // Determine which pool the pointer belongs to and release it.
+        if (data_ptr >= m_data_a.data() &&
+            data_ptr < m_data_a.data() + m_data_a.size()) {
+            deallocate_from_pool(data_ptr, m_data_a, m_slot_occupied_a,
+                                 m_free_slots_a);
+        } else if (data_ptr >= m_data_b.data() &&
+                   data_ptr < m_data_b.data() + m_data_b.size()) {
+            deallocate_from_pool(data_ptr, m_data_b, m_slot_occupied_b,
+                                 m_free_slots_b);
+        } else {
+            // This should not happen if used correctly
+            assert(false &&
+                   "Attempted to deallocate memory not owned by this manager.");
+            std::terminate();
+        }
+    }
+
+    /**
+     * Swaps the roles of the "in" and "out" pools.
+     */
+    void swap_pools() {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_data_out == &m_data_a) {
+            set_pools_b_out_a_in();
+        } else {
+            set_pools_a_out_b_in();
+        }
+    }
+
+private:
+    void deallocate_from_pool(const float* data_ptr,
+                              const std::vector<float>& data_pool,
+                              std::vector<bool>& occupied_pool,
+                              std::queue<SizeType>& free_pool) const {
+        // Calculate slot index from pointer offset
+        const auto byte_offset = static_cast<SizeType>(
+            reinterpret_cast<const char*>(data_ptr) -
+            reinterpret_cast<const char*>(data_pool.data()));
+        const auto slot_idx = byte_offset / (m_slot_size * sizeof(float));
+
+        assert(slot_idx < m_slots_per_pool);
+        assert(occupied_pool[slot_idx]);
+
+        occupied_pool[slot_idx] = false;
+        free_pool.push(slot_idx);
+    }
+
+    void set_pools_a_out_b_in() {
+        m_data_out          = &m_data_a;
+        m_slot_occupied_out = &m_slot_occupied_a;
+        m_free_slots_out    = &m_free_slots_a;
+        m_data_in           = &m_data_b;
+        m_slot_occupied_in  = &m_slot_occupied_b;
+        m_free_slots_in     = &m_free_slots_b;
+    }
+
+    void set_pools_b_out_a_in() {
+        m_data_out          = &m_data_b;
+        m_slot_occupied_out = &m_slot_occupied_b;
+        m_free_slots_out    = &m_free_slots_b;
+        m_data_in           = &m_data_a;
+        m_slot_occupied_in  = &m_slot_occupied_a;
+        m_free_slots_in     = &m_free_slots_a;
+    }
+
+    // Pool A
+    std::vector<float> m_data_a;
+    std::vector<bool> m_slot_occupied_a;
+    std::queue<SizeType> m_free_slots_a;
+
+    // Pool B
+    std::vector<float> m_data_b;
+    std::vector<bool> m_slot_occupied_b;
+    std::queue<SizeType> m_free_slots_b;
+
+    // Pointers to current in/out pools
+    std::vector<float>* m_data_out         = nullptr;
+    std::vector<bool>* m_slot_occupied_out = nullptr;
+    std::queue<SizeType>* m_free_slots_out = nullptr;
+    std::vector<float>* m_data_in          = nullptr;
+    std::vector<bool>* m_slot_occupied_in  = nullptr;
+    std::queue<SizeType>* m_free_slots_in  = nullptr;
+
+    // Config
+    SizeType m_nbins;
+    SizeType m_max_ntrials;
+    SizeType m_slot_size;
+    SizeType m_slots_per_pool;
+    mutable std::mutex m_mutex;
+};
+
+inline void FoldVectorHandle::release() noexcept {
+    if (m_manager != nullptr) {
+        try {
+            m_manager->deallocate(m_data);
+        } catch (...) {
+            assert(false && "Exception in FoldVectorHandle::release");
+            std::terminate();
+        }
+        m_manager = nullptr;
+    }
+}
 
 struct FoldsType {
-    FoldVector folds_h0;
-    FoldVector folds_h1;
+    std::unique_ptr<FoldVectorHandle> folds_h0;
+    std::unique_ptr<FoldVectorHandle> folds_h1;
 
-    FoldsType(SizeType ntrials, SizeType nbins, float variance = 0.0F)
-        : folds_h0(ntrials, nbins, variance),
-          folds_h1(ntrials, nbins, variance) {}
-
-    template <typename FoldVector0, typename FoldVector1>
-    FoldsType(FoldVector0&& folds_h0, FoldVector1&& folds_h1)
-        : folds_h0(std::forward<FoldVector0>(folds_h0)),
-          folds_h1(std::forward<FoldVector1>(folds_h1)) {}
+    FoldsType() = default;
+    FoldsType(std::unique_ptr<FoldVectorHandle> h0,
+              std::unique_ptr<FoldVectorHandle> h1)
+        : folds_h0(std::move(h0)),
+          folds_h1(std::move(h1)) {}
 
     bool is_empty() const {
-        return folds_h0.data.empty() || folds_h1.data.empty();
+        return !folds_h0 || !folds_h1 || folds_h0->data().empty() ||
+               folds_h1->data().empty();
     }
+
+    FoldsType(const FoldsType&)            = delete;
+    FoldsType& operator=(const FoldsType&) = delete;
+    FoldsType(FoldsType&&)                 = default;
+    FoldsType& operator=(FoldsType&&)      = default;
+
+    ~FoldsType() = default;
 };
+
+// Alias for clarity
+using FoldGrid = std::vector<std::optional<FoldsType>>;
 
 IndexType find_bin_index(std::span<const float> bins, float value) {
     auto it = std::ranges::upper_bound(bins, value);
     return std::distance(bins.begin(), it) - 1;
 }
 
-FoldVector simulate_folds(const FoldVector& folds_in,
-                          std::span<const float> profile,
-                          utils::ThreadSafeRNG& rng,
-                          float bias_snr       = 0.0F,
-                          float var_add        = 1.0F,
-                          SizeType ntrials_min = 1024) {
-    const auto ntrials_in = folds_in.ntrials;
-    const auto nbins      = folds_in.nbins;
+std::unique_ptr<FoldVectorHandle>
+simulate_folds(const FoldVectorHandle& folds_in,
+               std::span<const float> profile,
+               math::ThreadSafeRNGBase& rng,
+               DualPoolFoldManager& manager,
+               float bias_snr       = 0.0F,
+               float var_add        = 1.0F,
+               SizeType ntrials_min = 1024) {
+    const auto ntrials_in = folds_in.ntrials();
+    const auto nbins      = folds_in.nbins();
+
     if (ntrials_in == 0) {
         throw std::invalid_argument("No trials in the input folds");
     }
-    // Create even folds by copying the input folds
+    // Calculate output size
     const auto repeat_factor = static_cast<SizeType>(std::ceil(
         static_cast<float>(ntrials_min) / static_cast<float>(ntrials_in)));
-    const auto ntrials       = repeat_factor * ntrials_in;
-    FoldVector folds_out(ntrials, nbins, folds_in.variance + var_add);
+    const auto ntrials_out   = repeat_factor * ntrials_in;
 
+    // Allocate output
+    auto folds_out =
+        manager.allocate(ntrials_out, folds_in.variance() + var_add);
+    auto input_data  = folds_in.data();
+    auto output_data = folds_out->data();
+
+    // Scale profile by bias_snr
     std::vector<float> profile_scaled(nbins);
     std::ranges::transform(profile, profile_scaled.begin(),
                            [bias_snr](float x) { return x * bias_snr; });
+    // Generate noise
+    std::vector<float> noise(ntrials_out * nbins);
+    rng.generate_normal_dist_range(std::span<float>(noise), 0.0F,
+                                   std::sqrt(var_add));
 
-    std::vector<float> noise(ntrials * nbins);
-    std::normal_distribution<float> dist(0.0F, std::sqrt(var_add));
-    rng.generate_range(dist, std::span<float>(noise));
-
-    for (SizeType i = 0; i < ntrials; ++i) {
+    // Fill output data
+    for (SizeType i = 0; i < ntrials_out; ++i) {
         const auto orig_trial   = i % ntrials_in;
         const auto trial_offset = i * nbins;
         const auto orig_offset  = orig_trial * nbins;
         for (SizeType j = 0; j < nbins; ++j) {
-            folds_out.data[trial_offset + j] = folds_in.data[orig_offset + j] +
-                                               noise[trial_offset + j] +
-                                               profile_scaled[j];
+            const auto out_idx = trial_offset + j;
+            const auto in_idx  = orig_offset + j;
+            output_data[out_idx] =
+                input_data[in_idx] + noise[out_idx] + profile_scaled[j];
         }
     }
     return folds_out;
@@ -118,29 +368,34 @@ float compute_threshold_survival(std::span<const float> scores,
     return top_scores.back();
 }
 
-FoldVector prune_folds(const FoldVector& folds_in,
-                       std::span<const float> scores,
-                       float threshold) {
-    const auto ntrials = folds_in.ntrials;
-    const auto nbins   = folds_in.nbins;
-    if (scores.size() != ntrials) {
-        throw std::invalid_argument("Scores size does not match");
-    }
-    std::vector<SizeType> good_scores_idx;
-    for (SizeType i_trial = 0; i_trial < ntrials; ++i_trial) {
-        if (scores[i_trial] > threshold) {
-            good_scores_idx.push_back(i_trial);
+std::unique_ptr<FoldVectorHandle> prune_folds(const FoldVectorHandle& folds_in,
+                                              std::span<const float> scores,
+                                              float threshold,
+                                              DualPoolFoldManager& manager) {
+    const auto ntrials = folds_in.ntrials();
+    const auto nbins   = folds_in.nbins();
+    error_check::check_equal(scores.size(), ntrials,
+                             "Scores size does not match number of trials");
+    std::vector<SizeType> good_indices;
+    good_indices.reserve(ntrials);
+    for (SizeType i = 0; i < ntrials; ++i) {
+        if (scores[i] > threshold) {
+            good_indices.push_back(i);
         }
     }
-    const auto ntrials_success = good_scores_idx.size();
-    FoldVector folds_out(ntrials_success, folds_in.nbins, folds_in.variance);
-    const auto& fold_in = folds_in.data;
-    auto& fold_out      = folds_out.data;
-    for (SizeType i_trial = 0; i_trial < ntrials_success; ++i_trial) {
-        const auto offset_in  = good_scores_idx[i_trial] * nbins;
-        const auto offset_out = i_trial * nbins;
-        std::copy_n(fold_in.begin() + static_cast<int>(offset_in), nbins,
-                    fold_out.begin() + static_cast<int>(offset_out));
+    const auto ntrials_success = good_indices.size();
+    // Allocate output
+    auto folds_out = manager.allocate(ntrials_success, folds_in.variance());
+    // Copy successful trials
+    auto input_data  = folds_in.data();
+    auto output_data = folds_out->data();
+
+    for (SizeType i = 0; i < ntrials_success; ++i) {
+        const auto input_offset  = good_indices[i] * nbins;
+        const auto output_offset = i * nbins;
+        std::copy_n(
+            input_data.begin() + static_cast<IndexType>(input_offset), nbins,
+            output_data.begin() + static_cast<IndexType>(output_offset));
     }
     return folds_out;
 }
@@ -180,30 +435,36 @@ gen_next_using_thresh(const State& state_cur,
                       float bias_snr,
                       std::span<const float> profile,
                       std::span<const SizeType> box_score_widths,
-                      utils::ThreadSafeRNG& rng,
+                      math::ThreadSafeRNGBase& rng,
+                      DualPoolFoldManager& manager,
                       float var_add    = 1.0F,
                       SizeType ntrials = 1024) {
-    const auto folds_h0 = simulate_folds(folds_cur.folds_h0, profile, rng, 0.0F,
-                                         var_add, ntrials);
-    std::vector<float> scores_h0(folds_h0.ntrials);
-    detection::snr_boxcar_2d_max(folds_h0.data, folds_h0.ntrials,
+    auto folds_h0_sim = simulate_folds(*folds_cur.folds_h0, profile, rng,
+                                       manager, 0.0F, var_add, ntrials);
+    std::vector<float> scores_h0(folds_h0_sim->ntrials());
+    detection::snr_boxcar_2d_max(folds_h0_sim->data(), folds_h0_sim->ntrials(),
                                  box_score_widths, scores_h0,
-                                 std::sqrt(folds_h0.variance));
-    const auto folds_h0_pruned = prune_folds(folds_h0, scores_h0, threshold);
-    const auto success_h0      = static_cast<float>(folds_h0_pruned.ntrials) /
-                            static_cast<float>(folds_h0.ntrials);
-    const auto folds_h1 = simulate_folds(folds_cur.folds_h1, profile, rng,
-                                         bias_snr, var_add, ntrials);
-    std::vector<float> scores_h1(folds_h1.ntrials);
-    detection::snr_boxcar_2d_max(folds_h1.data, folds_h1.ntrials,
+                                 std::sqrt(folds_h0_sim->variance()));
+    auto folds_h0_pruned =
+        prune_folds(*folds_h0_sim, scores_h0, threshold, manager);
+    const auto success_h0 = static_cast<float>(folds_h0_pruned->ntrials()) /
+                            static_cast<float>(folds_h0_sim->ntrials());
+
+    auto folds_h1_sim = simulate_folds(*folds_cur.folds_h1, profile, rng,
+                                       manager, bias_snr, var_add, ntrials);
+    std::vector<float> scores_h1(folds_h1_sim->ntrials());
+    detection::snr_boxcar_2d_max(folds_h1_sim->data(), folds_h1_sim->ntrials(),
                                  box_score_widths, scores_h1,
-                                 std::sqrt(folds_h1.variance));
-    const auto folds_h1_pruned = prune_folds(folds_h1, scores_h1, threshold);
-    const auto success_h1      = static_cast<float>(folds_h1_pruned.ntrials) /
-                            static_cast<float>(folds_h1.ntrials);
+                                 std::sqrt(folds_h1_sim->variance()));
+    auto folds_h1_pruned =
+        prune_folds(*folds_h1_sim, scores_h1, threshold, manager);
+    const auto success_h1 = static_cast<float>(folds_h1_pruned->ntrials()) /
+                            static_cast<float>(folds_h1_sim->ntrials());
+
     const auto state_next =
         gen_next_state(state_cur, threshold, success_h0, success_h1, nbranches);
-    return {state_next, FoldsType{folds_h0_pruned, folds_h1_pruned}};
+    return {state_next,
+            FoldsType{std::move(folds_h0_pruned), std::move(folds_h1_pruned)}};
 }
 
 std::tuple<State, FoldsType>
@@ -214,32 +475,38 @@ gen_next_using_surv_prob(const State& state_cur,
                          float bias_snr,
                          std::span<const float> profile,
                          std::span<const SizeType> box_score_widths,
-                         utils::ThreadSafeRNG& rng,
+                         math::ThreadSafeRNGBase& rng,
+                         DualPoolFoldManager& manager,
                          float var_add    = 1.0F,
                          SizeType ntrials = 1024) {
-    const auto folds_h0 = simulate_folds(folds_cur.folds_h0, profile, rng, 0.0F,
-                                         var_add, ntrials);
-    std::vector<float> scores_h0(folds_h0.ntrials);
-    detection::snr_boxcar_2d_max(folds_h0.data, folds_h0.ntrials,
+    auto folds_h0_sim = simulate_folds(*folds_cur.folds_h0, profile, rng,
+                                       manager, 0.0F, var_add, ntrials);
+    std::vector<float> scores_h0(folds_h0_sim->ntrials());
+    detection::snr_boxcar_2d_max(folds_h0_sim->data(), folds_h0_sim->ntrials(),
                                  box_score_widths, scores_h0,
-                                 std::sqrt(folds_h0.variance));
+                                 std::sqrt(folds_h0_sim->variance()));
     const auto threshold_h0 =
         compute_threshold_survival(scores_h0, surv_prob_h0);
-    const auto folds_h0_pruned = prune_folds(folds_h0, scores_h0, threshold_h0);
-    const auto success_h0      = static_cast<float>(folds_h0_pruned.ntrials) /
-                            static_cast<float>(folds_h0.ntrials);
-    const auto folds_h1 = simulate_folds(folds_cur.folds_h1, profile, rng,
-                                         bias_snr, var_add, ntrials);
-    std::vector<float> scores_h1(folds_h1.ntrials);
-    detection::snr_boxcar_2d_max(folds_h1.data, folds_h1.ntrials,
+    auto folds_h0_pruned =
+        prune_folds(*folds_h0_sim, scores_h0, threshold_h0, manager);
+    const auto success_h0 = static_cast<float>(folds_h0_pruned->ntrials()) /
+                            static_cast<float>(folds_h0_sim->ntrials());
+
+    auto folds_h1_sim = simulate_folds(*folds_cur.folds_h1, profile, rng,
+                                       manager, bias_snr, var_add, ntrials);
+    std::vector<float> scores_h1(folds_h1_sim->ntrials());
+    detection::snr_boxcar_2d_max(folds_h1_sim->data(), folds_h1_sim->ntrials(),
                                  box_score_widths, scores_h1,
-                                 std::sqrt(folds_h1.variance));
-    const auto folds_h1_pruned = prune_folds(folds_h1, scores_h1, threshold_h0);
-    const auto success_h1      = static_cast<float>(folds_h1_pruned.ntrials) /
-                            static_cast<float>(folds_h1.ntrials);
+                                 std::sqrt(folds_h1_sim->variance()));
+    auto folds_h1_pruned =
+        prune_folds(*folds_h1_sim, scores_h1, threshold_h0, manager);
+    const auto success_h1 = static_cast<float>(folds_h1_pruned->ntrials()) /
+                            static_cast<float>(folds_h1_sim->ntrials());
+
     const auto state_next = gen_next_state(state_cur, threshold_h0, success_h0,
                                            success_h1, nbranches);
-    return {state_next, FoldsType{folds_h0_pruned, folds_h1_pruned}};
+    return {state_next,
+            FoldsType{std::move(folds_h0_pruned), std::move(folds_h1_pruned)}};
 }
 
 // Create a compound type for State
@@ -274,6 +541,7 @@ public:
          float wtsp,
          float beam_width,
          SizeType trials_start,
+         bool use_lut_rng,
          int nthreads)
         : m_branching_pattern(branching_pattern.begin(),
                               branching_pattern.end()),
@@ -283,7 +551,7 @@ public:
           m_wtsp(wtsp),
           m_beam_width(beam_width),
           m_trials_start(trials_start),
-          m_rng(std::random_device{}()),
+          m_use_lut_rng(use_lut_rng),
           m_nthreads(nthreads) {
         if (m_branching_pattern.empty()) {
             throw std::invalid_argument("Branching pattern is empty");
@@ -304,10 +572,22 @@ public:
         m_bias_snr   = snr_final / static_cast<float>(std::sqrt(m_nstages + 1));
         m_guess_path = detection::guess_scheme(
             m_nstages, snr_final, m_branching_pattern, m_trials_start);
-        m_folds_in.resize(m_nthresholds * m_nprobs);
-        m_folds_out.resize(m_nthresholds * m_nprobs);
-        State initial_state;
-        m_states.resize(m_nstages * m_nthresholds * m_nprobs, initial_state);
+
+        if (m_use_lut_rng) {
+            m_rng = std::make_unique<math::ThreadSafeLUTRNG>(
+                std::random_device{}());
+        } else {
+            m_rng =
+                std::make_unique<math::ThreadSafeRNG>(std::random_device{}());
+        }
+
+        const auto slots_per_pool = compute_max_allocations_needed();
+        m_manager = std::make_unique<DualPoolFoldManager>(m_nbins, m_ntrials,
+                                                          slots_per_pool);
+        spdlog::info("Pre-allocated 2 pools of {} slots each", slots_per_pool);
+        m_folds_current.resize(m_nthresholds * m_nprobs);
+        m_folds_next.resize(m_nthresholds * m_nprobs);
+        m_states.resize(m_nstages * m_nthresholds * m_nprobs, State{});
         init_states();
     }
 
@@ -334,9 +614,11 @@ public:
 
         for (SizeType istage = 1; istage < m_nstages; ++istage) {
             run_segment(istage, thres_neigh);
-            // swap folds
-            std::swap(m_folds_in, m_folds_out);
-            std::ranges::fill(m_folds_out, std::nullopt);
+            m_manager->swap_pools();
+            std::swap(m_folds_current, m_folds_next);
+            for (auto& fold_opt : m_folds_next) {
+                fold_opt.reset();
+            }
             const auto progress = static_cast<float>(istage) /
                                   static_cast<float>(m_nstages - 1) * 100.0F;
             bar.set_progress(static_cast<SizeType>(progress));
@@ -393,7 +675,7 @@ private:
     float m_wtsp;
     float m_beam_width;
     SizeType m_trials_start;
-    utils::ThreadSafeRNG m_rng;
+    bool m_use_lut_rng;
     int m_nthreads;
 
     std::vector<float> m_profile;
@@ -406,33 +688,68 @@ private:
     std::vector<SizeType> m_box_score_widths;
     float m_bias_snr;
     std::vector<float> m_guess_path;
-    std::vector<std::optional<FoldsType>> m_folds_in;
-    std::vector<std::optional<FoldsType>> m_folds_out;
     std::vector<State> m_states;
+
+    std::unique_ptr<math::ThreadSafeRNGBase> m_rng;
+    std::unique_ptr<DualPoolFoldManager> m_manager;
+    FoldGrid m_folds_current;
+    FoldGrid m_folds_next;
+
+    SizeType compute_max_allocations_needed() {
+        SizeType max_active_per_stage = 0;
+        for (SizeType istage = 0; istage < m_nstages; ++istage) {
+            auto active_thresholds = get_current_thresholds_idx(istage);
+            max_active_per_stage =
+                std::max(max_active_per_stage, active_thresholds.size());
+        }
+        // h0 + h1 per cell
+        const auto max_persistent = max_active_per_stage * m_nprobs * 2;
+        // 2 simulated and 2 pruned folds per transition
+        const auto max_temporary  = m_nthreads * 4;
+        const auto slots_per_pool = max_persistent + max_temporary;
+        spdlog::info("Allocation analysis: {} active thresholds max, {} prob "
+                     "bins, {} threads",
+                     max_active_per_stage, m_nprobs, m_nthreads);
+        spdlog::info("Need {} persistent + {} temporary = {} slots per pool",
+                     max_persistent, max_temporary, slots_per_pool);
+        return slots_per_pool;
+    }
 
     void init_states() {
         const float var_init = 1.0F;
-        const FoldVector folds_init(m_ntrials, m_nbins);
-        // Simulate the initial folds (pruning level = 0)
-        const auto folds_h0 = simulate_folds(folds_init, m_profile, m_rng, 0.0F,
-                                             var_init, m_ntrials);
-        const auto folds_h1 = simulate_folds(folds_init, m_profile, m_rng,
-                                             m_bias_snr, var_init, m_ntrials);
+        // Create initial fold vectors
+        auto folds_h0_init = m_manager->allocate(m_ntrials, 0.0F);
+        auto folds_h1_init = m_manager->allocate(m_ntrials, 0.0F);
+        std::fill(folds_h0_init->data().begin(), folds_h0_init->data().end(),
+                  0.0F);
+        std::fill(folds_h1_init->data().begin(), folds_h1_init->data().end(),
+                  0.0F);
+
+        // Simulate the initial folds
+        auto folds_h0_sim =
+            simulate_folds(*folds_h0_init, m_profile, *m_rng, *m_manager, 0.0F,
+                           var_init, m_ntrials);
+        auto folds_h1_sim =
+            simulate_folds(*folds_h1_init, m_profile, *m_rng, *m_manager,
+                           m_bias_snr, var_init, m_ntrials);
+
         State initial_state;
-        const FoldsType fold_state{folds_h0, folds_h1};
+        FoldsType fold_state{std::move(folds_h0_sim), std::move(folds_h1_sim)};
         const auto thresholds_idx = get_current_thresholds_idx(0);
         for (SizeType ithres : thresholds_idx) {
-            const auto [cur_state, cur_fold_state] = gen_next_using_thresh(
+            auto [cur_state, cur_fold_state] = gen_next_using_thresh(
                 initial_state, fold_state, m_thresholds[ithres],
                 m_branching_pattern[0], m_bias_snr, m_profile,
-                m_box_score_widths, m_rng, 1.0F, m_ntrials);
+                m_box_score_widths, *m_rng, *m_manager, 1.0F, m_ntrials);
+
             const auto iprob =
                 find_bin_index(m_probs, cur_state.success_h1_cumul);
             if (iprob < 0 || iprob >= static_cast<IndexType>(m_nprobs)) {
                 continue;
             }
-            m_states[(ithres * m_nprobs) + iprob]   = cur_state;
-            m_folds_in[(ithres * m_nprobs) + iprob] = cur_fold_state;
+            const auto fold_idx       = (ithres * m_nprobs) + iprob;
+            m_states[fold_idx]        = cur_state;
+            m_folds_current[fold_idx] = std::move(cur_fold_state);
         }
     }
 
@@ -473,34 +790,40 @@ private:
                     const auto prev_fold_idx = (jthresh * m_nprobs) + kprob;
                     const auto prev_state =
                         m_states[stage_offset_prev + prev_fold_idx];
+
                     if (prev_state.is_empty) {
                         continue;
                     }
-                    const auto prev_fold_state = m_folds_in[prev_fold_idx];
-                    if (prev_fold_state.has_value() &&
-                        !prev_fold_state->is_empty()) {
-                        const auto [cur_state, cur_fold_state] =
-                            gen_next_using_thresh(prev_state, *prev_fold_state,
-                                                  m_thresholds[ithres],
-                                                  m_branching_pattern[istage],
-                                                  m_bias_snr, m_profile,
-                                                  m_box_score_widths, m_rng,
-                                                  1.0F, m_ntrials);
-                        const auto iprob =
-                            find_bin_index(m_probs, cur_state.success_h1_cumul);
-                        if (iprob < 0 ||
-                            iprob >= static_cast<IndexType>(m_nprobs)) {
-                            continue;
-                        }
-                        const auto cur_idx       = (ithres * m_nprobs) + iprob;
-                        const auto cur_state_idx = stage_offset_cur + cur_idx;
-                        auto& existing_state     = m_states[cur_state_idx];
-                        if (existing_state.is_empty ||
-                            cur_state.complexity_cumul <
-                                existing_state.complexity_cumul) {
-                            existing_state       = cur_state;
-                            m_folds_out[cur_idx] = cur_fold_state;
-                        }
+                    const auto& prev_fold_state_opt =
+                        m_folds_current[prev_fold_idx];
+                    if (!prev_fold_state_opt.has_value() ||
+                        prev_fold_state_opt->is_empty()) {
+                        continue;
+                    }
+                    auto [cur_state, cur_fold_state] = gen_next_using_thresh(
+                        prev_state, *prev_fold_state_opt, m_thresholds[ithres],
+                        m_branching_pattern[istage], m_bias_snr, m_profile,
+                        m_box_score_widths, *m_rng, *m_manager, 1.0F,
+                        m_ntrials);
+
+                    const auto iprob =
+                        find_bin_index(m_probs, cur_state.success_h1_cumul);
+                    if (iprob < 0 ||
+                        iprob >= static_cast<IndexType>(m_nprobs)) {
+                        continue;
+                    }
+
+                    const auto cur_idx       = (ithres * m_nprobs) + iprob;
+                    const auto cur_state_idx = stage_offset_cur + cur_idx;
+
+                    auto& existing_state = m_states[cur_state_idx];
+                    auto& existing_folds = m_folds_next[cur_idx];
+
+                    if (existing_state.is_empty ||
+                        cur_state.complexity_cumul <
+                            existing_state.complexity_cumul) {
+                        existing_state = cur_state;
+                        existing_folds = std::move(cur_fold_state);
                     }
                 }
             }
@@ -521,6 +844,7 @@ DynamicThresholdScheme::DynamicThresholdScheme(
     float wtsp,
     float beam_width,
     SizeType trials_start,
+    bool use_lut_rng,
     int nthreads)
     : m_impl(std::make_unique<Impl>(branching_pattern,
                                     ref_ducy,
@@ -534,6 +858,7 @@ DynamicThresholdScheme::DynamicThresholdScheme(
                                     wtsp,
                                     beam_width,
                                     trials_start,
+                                    use_lut_rng,
                                     nthreads)) {}
 DynamicThresholdScheme::~DynamicThresholdScheme() = default;
 DynamicThresholdScheme::DynamicThresholdScheme(
@@ -602,7 +927,7 @@ std::vector<State> evaluate_scheme(std::span<const float> thresholds,
     std::vector<State> states(nstages, initial_state);
     std::vector<std::optional<FoldsType>> fold_states(nstages);
 
-    utils::ThreadSafeRNG rng(std::random_device{}());
+    math::ThreadSafeRNG rng(std::random_device{}());
     const FoldVector folds_init(ntrials, nbins);
     // Simulate the initial folds (pruning level = 0)
     auto folds_h0 =
@@ -658,7 +983,7 @@ std::vector<State> determine_scheme(std::span<const float> survive_probs,
     std::vector<State> states(nstages, initial_state);
     std::vector<std::optional<FoldsType>> fold_states(nstages);
 
-    utils::ThreadSafeRNG rng(std::random_device{}());
+    math::ThreadSafeRNG rng(std::random_device{}());
     const FoldVector folds_init(ntrials, nbins);
     // Simulate the initial folds (pruning level = 0)
     auto folds_h0 =

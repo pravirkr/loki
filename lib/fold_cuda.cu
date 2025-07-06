@@ -122,9 +122,9 @@ __global__ void kernel_fold_shared_mem(const float* __restrict__ ts_e,
                                        int nsegments) {
     // One block per frequency, each block processes all samples for that
     // frequency
-    extern __shared__ float shared_bins[];
-    float* shared_e = shared_bins;
-    float* shared_v = shared_bins + nbins;
+    extern __shared__ float shared_bins[]; // NOLINT
+    float* shared_e = shared_bins;         // NOLINT
+    float* shared_v = shared_bins + nbins; // NOLINT
 
     const auto tid               = static_cast<int>(threadIdx.x);
     const auto ifreq             = static_cast<int>(blockIdx.y);
