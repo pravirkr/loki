@@ -11,6 +11,7 @@
 namespace loki {
 using algorithms::FFACOMPLEXCUDA;
 using algorithms::FFACUDA;
+using detection::DynamicThresholdSchemeCUDA;
 
 namespace py = pybind11;
 using namespace pybind11::literals; // NOLINT
@@ -82,6 +83,37 @@ PYBIND11_MODULE(libculoki, m) { // NOLINT
             return out;
         },
         py::arg("arr"), py::arg("widths"), py::arg("device_id") = 0);
+    auto m_thresholds = m.def_submodule("thresholds", "Thresholds submodule");
+
+    PYBIND11_NUMPY_DTYPE(detection::State, success_h0, success_h1, complexity,
+                         complexity_cumul, success_h1_cumul, nbranches,
+                         threshold, cost, threshold_prev, success_h1_cumul_prev,
+                         is_empty);
+    py::class_<DynamicThresholdSchemeCUDA>(m_thresholds,
+                                           "DynamicThresholdSchemeCUDA")
+        .def(py::init([](const py::array_t<float>& branching_pattern,
+                         float ref_ducy, SizeType nbins, SizeType ntrials,
+                         SizeType nprobs, float prob_min, float snr_final,
+                         SizeType nthresholds, float ducy_max, float wtsp,
+                         float beam_width, SizeType trials_start,
+                         int device_id) {
+                 return std::make_unique<DynamicThresholdSchemeCUDA>(
+                     std::span<const float>(branching_pattern.data(),
+                                            branching_pattern.size()),
+                     ref_ducy, nbins, ntrials, nprobs, prob_min, snr_final,
+                     nthresholds, ducy_max, wtsp, beam_width, trials_start,
+                     device_id);
+             }),
+             py::arg("branching_pattern"), py::arg("ref_ducy"),
+             py::arg("nbins") = 64, py::arg("ntrials") = 1024,
+             py::arg("nprobs") = 10, py::arg("prob_min") = 0.05F,
+             py::arg("snr_final") = 8.0F, py::arg("nthresholds") = 100,
+             py::arg("ducy_max") = 0.3F, py::arg("wtsp") = 1.0F,
+             py::arg("beam_width") = 0.7F, py::arg("trials_start") = 1,
+             py::arg("device_id") = 0)
+        .def("run", &DynamicThresholdSchemeCUDA::run, py::arg("thres_neigh") = 10)
+        .def("save", &DynamicThresholdSchemeCUDA::save, py::arg("outdir") = "./");
+
     auto m_fold = m.def_submodule("fold", "Fold submodule");
     m_fold.def(
         "compute_brute_fold_cuda",

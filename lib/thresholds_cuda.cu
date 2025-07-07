@@ -1,104 +1,369 @@
 #include "loki/detection/thresholds.hpp"
 
-#include "loki/common/types.hpp"
-#include "loki/cuda_utils.cuh"
-#include "loki/detection/scheme.hpp"
-#include "loki/detection/score.hpp"
-#include "loki/simulation/simulation.hpp"
-#include "loki/utils.hpp"
+#include <algorithm>
+#include <cassert>
+#include <filesystem>
+#include <format>
+#include <memory>
+#include <mutex>
+#include <queue>
+#include <random>
 
+#include <cuda_runtime.h>
+#include <curand.h>
 #include <curand_kernel.h>
+#include <curanddx.hpp>
+#include <device_launch_parameters.h>
 #include <thrust/copy.h>
 #include <thrust/device_vector.h>
 #include <thrust/execution_policy.h>
 #include <thrust/host_vector.h>
+#include <thrust/partition.h>
+#include <thrust/remove.h>
 #include <thrust/sequence.h>
 #include <thrust/sort.h>
 #include <thrust/transform.h>
 
-#include <algorithm>
-#include <filesystem>
-#include <format>
-#include <random>
-
+#include <cuda/std/optional>
+#include <cuda/std/span>
 #include <highfive/highfive.hpp>
 #include <spdlog/spdlog.h>
 
+#include "loki/common/types.hpp"
+#include "loki/cuda_utils.cuh"
+#include "loki/detection/scheme.hpp"
+#include "loki/detection/score.hpp"
+#include "loki/math_cuda.cuh"
+#include "loki/simulation/simulation.hpp"
+#include "loki/utils.hpp"
+
 namespace loki::detection {
 
+// Define the cuRANDDx Generator Descriptor.
+// NOTE: Set the SM version to your target architecture for best performance.
+// An L40S is Ada Lovelace (sm_89), so SM<800> is a compatible and good choice.
+using RNG = decltype(curanddx::Generator<curanddx::philox4_32>() +
+                     curanddx::PhiloxRounds<10>() + curanddx::SM<800>() +
+                     curanddx::Thread());
+
 namespace {
+class DualPoolFoldManager;
 
-#ifndef LOKI_CHECK_CUDA_ERROR
-#define LOKI_CHECK_CUDA_ERROR(msg)                                             \
-    do {                                                                       \
-        cudaError_t e = cudaGetLastError();                                    \
-        if (e != cudaSuccess) {                                                \
-            fprintf(stderr, "CUDA error in %s: %s\n", msg,                     \
-                    cudaGetErrorString(e));                                    \
-            exit(EXIT_FAILURE);                                                \
-        }                                                                      \
-    } while (0)
-#endif
+/**
+ * CUDA FoldVector Handle - RAII wrapper for GPU memory with automatic
+ * deallocation
+ */
+class FoldVectorHandle {
+public:
+    FoldVectorHandle(float* data,
+                     SizeType actual_ntrials,
+                     SizeType capacity_ntrials,
+                     SizeType nbins,
+                     float variance,
+                     DualPoolFoldManager* manager)
+        : m_data(data),
+          m_actual_ntrials(actual_ntrials),
+          m_capacity_ntrials(capacity_ntrials),
+          m_nbins(nbins),
+          m_variance(variance),
+          m_manager(manager) {}
 
-#ifndef CURAND_CHECK
-#define CURAND_CHECK(expr)                                                     \
-    do {                                                                       \
-        curandStatus_t status = (expr);                                        \
-        if (status != CURAND_STATUS_SUCCESS) {                                 \
-            fprintf(stderr, "CURAND error at %s:%d: %d\n", __FILE__, __LINE__, \
-                    status);                                                   \
-            exit(EXIT_FAILURE);                                                \
-        }                                                                      \
-    } while (0)
-#endif
+    // Move-only semantics
+    FoldVectorHandle(const FoldVectorHandle&)            = delete;
+    FoldVectorHandle& operator=(const FoldVectorHandle&) = delete;
 
-struct FoldVector {
-    thrust::device_vector<float> data;
-    float variance;
-    SizeType ntrials;
-    SizeType nbins;
+    FoldVectorHandle(FoldVectorHandle&& other) noexcept
+        : m_data(other.m_data),
+          m_actual_ntrials(other.m_actual_ntrials),
+          m_capacity_ntrials(other.m_capacity_ntrials),
+          m_nbins(other.m_nbins),
+          m_variance(other.m_variance),
+          m_manager(other.m_manager) {
+        other.m_manager = nullptr; // Prevent double deallocation
+    }
 
-    FoldVector(SizeType ntrials = 0, SizeType nbins = 0, float variance = 0.0F)
-        : data(ntrials * nbins),
-          variance(variance),
-          ntrials(ntrials),
-          nbins(nbins) {}
+    FoldVectorHandle& operator=(FoldVectorHandle&& other) noexcept {
+        if (this != &other) {
+            release();
+            m_data             = other.m_data;
+            m_actual_ntrials   = other.m_actual_ntrials;
+            m_capacity_ntrials = other.m_capacity_ntrials;
+            m_nbins            = other.m_nbins;
+            m_variance         = other.m_variance;
+            m_manager          = other.m_manager;
+            other.m_manager    = nullptr;
+        }
+        return *this;
+    }
 
-    bool is_empty() const { return ntrials == 0; }
+    ~FoldVectorHandle() { release(); }
+
+    // Interface
+    cuda::std::span<float> data() { return {m_data, size()}; }
+    cuda::std::span<const float> data() const { return {m_data, size()}; }
+    float* raw_data() { return m_data; }
+    const float* raw_data() const { return m_data; }
+    SizeType size() const { return m_actual_ntrials * m_nbins; }
+    SizeType ntrials() const { return m_actual_ntrials; }
+    SizeType nbins() const { return m_nbins; }
+    float variance() const { return m_variance; }
+    void set_ntrials(SizeType ntrials) {
+        assert(ntrials <= m_capacity_ntrials);
+        m_actual_ntrials = ntrials;
+    }
+    void set_variance(float variance) { m_variance = variance; }
+
+private:
+    void release() noexcept; // Implemented after DualPoolFoldManager
+
+    float* m_data;
+    SizeType m_actual_ntrials;
+    SizeType m_capacity_ntrials;
+    SizeType m_nbins;
+    float m_variance;
+    DualPoolFoldManager* m_manager;
 };
+
+/**
+ * CUDA Dual-Pool Memory Manager using thrust::device_vector for safety
+ */
+class DualPoolFoldManager {
+public:
+    DualPoolFoldManager(SizeType nbins,
+                        SizeType ntrials_min,
+                        SizeType slots_per_pool)
+        : m_nbins(nbins),
+          m_max_ntrials(2 * ntrials_min),
+          m_slot_size(m_max_ntrials * nbins),
+          m_slots_per_pool(slots_per_pool) {
+
+        // Pre-allocate all memory for both pools using thrust
+        m_data_a.resize(m_slots_per_pool * m_slot_size);
+        m_slot_occupied_a.resize(m_slots_per_pool, false);
+        m_data_b.resize(m_slots_per_pool * m_slot_size);
+        m_slot_occupied_b.resize(m_slots_per_pool, false);
+
+        // Initialize free slots for both pools
+        for (SizeType i = 0; i < m_slots_per_pool; ++i) {
+            m_free_slots_a.push(i);
+            m_free_slots_b.push(i);
+        }
+
+        // Start with A as the "out" pool and B as the "in" pool
+        set_pools_a_out_b_in();
+    }
+
+    DualPoolFoldManager(const DualPoolFoldManager&)            = delete;
+    DualPoolFoldManager& operator=(const DualPoolFoldManager&) = delete;
+    DualPoolFoldManager(DualPoolFoldManager&&)                 = delete;
+    DualPoolFoldManager& operator=(DualPoolFoldManager&&)      = delete;
+
+    ~DualPoolFoldManager() = default;
+
+    /**
+     * Allocates a new FoldVector from the current "out" pool.
+     */
+    [[nodiscard]] std::unique_ptr<FoldVectorHandle>
+    allocate(SizeType initial_ntrials = 0, float variance = 0.0F) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+
+        if (m_free_slots_out->empty()) {
+            throw std::runtime_error(
+                "DualPoolFoldManager 'out' pool exhausted!");
+        }
+
+        const auto slot_idx = m_free_slots_out->front();
+        m_free_slots_out->pop();
+        (*m_slot_occupied_out)[slot_idx] = true;
+        float* slot_data = thrust::raw_pointer_cast(m_data_out->data()) +
+                           (slot_idx * m_slot_size);
+        return std::make_unique<FoldVectorHandle>(
+            slot_data, initial_ntrials, m_max_ntrials, m_nbins, variance, this);
+    }
+
+    /**
+     * Deallocates a handle's memory, returning it to the correct pool's free
+     * list.
+     */
+    void deallocate(const float* data_ptr) noexcept {
+        std::lock_guard<std::mutex> lock(m_mutex);
+
+        // Determine which pool the pointer belongs to and release it.
+        auto pool_a_start = thrust::raw_pointer_cast(m_data_a.data());
+        auto pool_b_start = thrust::raw_pointer_cast(m_data_b.data());
+
+        if (data_ptr >= pool_a_start &&
+            data_ptr < pool_a_start + m_data_a.size()) {
+            deallocate_from_pool(data_ptr, pool_a_start, m_slot_occupied_a,
+                                 m_free_slots_a);
+        } else if (data_ptr >= pool_b_start &&
+                   data_ptr < pool_b_start + m_data_b.size()) {
+            deallocate_from_pool(data_ptr, pool_b_start, m_slot_occupied_b,
+                                 m_free_slots_b);
+        } else {
+            // This should not happen if used correctly
+            assert(false &&
+                   "Attempted to deallocate memory not owned by this manager.");
+            std::terminate();
+        }
+    }
+
+    /**
+     * Swaps the roles of the "in" and "out" pools.
+     */
+    void swap_pools() {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_data_out == &m_data_a) {
+            set_pools_b_out_a_in();
+        } else {
+            set_pools_a_out_b_in();
+        }
+    }
+
+private:
+    void deallocate_from_pool(const float* data_ptr,
+                              const float* pool_start,
+                              std::vector<bool>& occupied_pool,
+                              std::queue<SizeType>& free_pool) const {
+        // Calculate slot index from pointer offset
+        const auto byte_offset = (data_ptr - pool_start);
+        const auto slot_idx    = byte_offset / m_slot_size;
+
+        assert(slot_idx < m_slots_per_pool);
+        assert(occupied_pool[slot_idx]);
+
+        occupied_pool[slot_idx] = false;
+        free_pool.push(slot_idx);
+    }
+
+    void set_pools_a_out_b_in() {
+        m_data_out          = &m_data_a;
+        m_slot_occupied_out = &m_slot_occupied_a;
+        m_free_slots_out    = &m_free_slots_a;
+        m_data_in           = &m_data_b;
+        m_slot_occupied_in  = &m_slot_occupied_b;
+        m_free_slots_in     = &m_free_slots_b;
+    }
+
+    void set_pools_b_out_a_in() {
+        m_data_out          = &m_data_b;
+        m_slot_occupied_out = &m_slot_occupied_b;
+        m_free_slots_out    = &m_free_slots_b;
+        m_data_in           = &m_data_a;
+        m_slot_occupied_in  = &m_slot_occupied_a;
+        m_free_slots_in     = &m_free_slots_a;
+    }
+
+    // Pool A - using thrust::device_vector for safety
+    thrust::device_vector<float> m_data_a;
+    std::vector<bool> m_slot_occupied_a;
+    std::queue<SizeType> m_free_slots_a;
+
+    // Pool B
+    thrust::device_vector<float> m_data_b;
+    std::vector<bool> m_slot_occupied_b;
+    std::queue<SizeType> m_free_slots_b;
+
+    // Pointers to current in/out pools
+    thrust::device_vector<float>* m_data_out = nullptr;
+    std::vector<bool>* m_slot_occupied_out   = nullptr;
+    std::queue<SizeType>* m_free_slots_out   = nullptr;
+    thrust::device_vector<float>* m_data_in  = nullptr;
+    std::vector<bool>* m_slot_occupied_in    = nullptr;
+    std::queue<SizeType>* m_free_slots_in    = nullptr;
+
+    // Config
+    SizeType m_nbins;
+    SizeType m_max_ntrials;
+    SizeType m_slot_size;
+    SizeType m_slots_per_pool;
+    mutable std::mutex m_mutex;
+};
+
+inline void FoldVectorHandle::release() noexcept {
+    if (m_manager != nullptr) {
+        try {
+            m_manager->deallocate(m_data);
+        } catch (...) {
+            assert(false && "Exception in FoldVectorHandle::release");
+            std::terminate();
+        }
+        m_manager = nullptr;
+    }
+}
 
 struct FoldsType {
-    FoldVector folds_h0;
-    FoldVector folds_h1;
-    bool is_empty_flag = true;
+    std::unique_ptr<FoldVectorHandle> folds_h0;
+    std::unique_ptr<FoldVectorHandle> folds_h1;
 
-    FoldsType(SizeType ntrials = 0, SizeType nbins = 0, float variance = 0.0F)
-        : folds_h0(ntrials, nbins, variance),
-          folds_h1(ntrials, nbins, variance),
-          is_empty_flag(ntrials == 0) {}
+    FoldsType() = default;
+    FoldsType(std::unique_ptr<FoldVectorHandle> h0,
+              std::unique_ptr<FoldVectorHandle> h1)
+        : folds_h0(std::move(h0)),
+          folds_h1(std::move(h1)) {}
 
-    template <typename FoldVector0, typename FoldVector1>
-    FoldsType(FoldVector0&& folds_h0, FoldVector1&& folds_h1)
-        : folds_h0(std::forward<FoldVector0>(folds_h0)),
-          folds_h1(std::forward<FoldVector1>(folds_h1)) {}
+    bool is_empty() const {
+        return !folds_h0 || !folds_h1 || folds_h0->data().empty() ||
+               folds_h1->data().empty();
+    }
 
-    FoldsType(FoldsType&&)                 = default;
-    FoldsType& operator=(FoldsType&&)      = default;
     FoldsType(const FoldsType&)            = delete;
     FoldsType& operator=(const FoldsType&) = delete;
+    FoldsType(FoldsType&&)                 = default;
+    FoldsType& operator=(FoldsType&&)      = default;
 
-    bool is_empty() const { return is_empty_flag; }
+    ~FoldsType() = default;
 };
 
-struct FoldInfo {
-    float* data_h0;
-    float* data_h1;
-    SizeType ntrials_h0;
-    SizeType ntrials_h1;
-    SizeType nbins;
-    float variance_h0;
-    float variance_h1;
-    bool is_empty;
+// Batch transition data for parallel processing
+struct TransitionWorkItem {
+    SizeType threshold_idx;
+    SizeType prob_idx;
+    SizeType input_fold_idx;
+    StateD input_state;
+    float threshold;
+    float nbranches;
+    // Input fold info
+    const float* input_h0_data;
+    const float* input_h1_data;
+    SizeType input_h0_ntrials;
+    SizeType input_h1_ntrials;
+    float input_variance;
+    // Output buffer pointers (pre-allocated)
+    float* output_h0_sim_data;
+    float* output_h1_sim_data;
+    SizeType output_h0_sim_ntrials;
+    SizeType output_h1_sim_ntrials;
+    float* output_h0_pruned_data;
+    float* output_h1_pruned_data;
+};
+
+struct TransitionResult {
+    SizeType threshold_idx; // ithres
+    SizeType prob_idx;      // computed iprob from success_h1_cumul
+    StateD computed_state;
+    float* output_h0_data; // Points to pruned data in device memory
+    float* output_h1_data; // Points to pruned data in device memory
+    float output_variance;
+    SizeType output_ntrials_h0;
+    SizeType output_ntrials_h1;
+    bool invalid; // true if this result should be ignored
+};
+
+struct TransitionBatch {
+    thrust::device_vector<TransitionWorkItem> work_items_d;
+    thrust::device_vector<float> scores_pool_d;
+    thrust::device_vector<int> indices_pool_d;
+    thrust::device_vector<TransitionResult> results_d;
+    thrust::device_vector<float> probs_d;
+
+    void reserve(SizeType max_items, SizeType max_trials) {
+        work_items_d.reserve(max_items);
+        scores_pool_d.resize(max_items * max_trials * 2);
+        indices_pool_d.resize(max_items * max_trials * 2);
+        results_d.resize(max_items);
+        probs_d.resize(max_items);
+    }
 };
 
 IndexType find_bin_index(std::span<const float> bins, float value) {
@@ -106,68 +371,486 @@ IndexType find_bin_index(std::span<const float> bins, float value) {
     return std::distance(bins.begin(), it) - 1;
 }
 
-State gen_next_state(const State& state_cur,
-                     float threshold,
-                     float success_h0,
-                     float success_h1,
-                     float nbranches) {
-    const auto nleaves_next     = state_cur.complexity * nbranches;
-    const auto nleaves_surv     = nleaves_next * success_h0;
-    const auto complexity_cumul = state_cur.complexity_cumul + nleaves_next;
-    const auto success_h1_cumul = state_cur.success_h1_cumul * success_h1;
-
-    // Create a new state struct
-    State state_next;
-    state_next.success_h0       = success_h0;
-    state_next.success_h1       = success_h1;
-    state_next.complexity       = nleaves_surv;
-    state_next.complexity_cumul = complexity_cumul;
-    state_next.success_h1_cumul = success_h1_cumul;
-    state_next.nbranches        = nbranches;
-    state_next.threshold        = threshold;
-    state_next.cost             = complexity_cumul / success_h1_cumul;
-    state_next.is_empty         = false;
-    // For backtracking
-    state_next.threshold_prev        = state_cur.threshold;
-    state_next.success_h1_cumul_prev = state_cur.success_h1_cumul;
-    return state_next;
-}
-
 __global__ void simulate_folds_kernel(float* __restrict__ folds_out,
                                       const float* __restrict__ folds_in,
                                       const float* __restrict__ profile,
                                       const float* __restrict__ noise,
-                                      SizeType ntrials_out,
-                                      SizeType ntrials_in,
-                                      SizeType nbins,
+                                      int ntrials_out,
+                                      int ntrials_in,
+                                      int nbins,
                                       float bias_snr) {
-    const SizeType i = blockIdx.x * blockDim.x + threadIdx.x;
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= ntrials_out * nbins)
         return;
 
-    const SizeType trial_idx = i / nbins;
-    const SizeType bin_idx   = i % nbins;
+    const int trial_idx = i / nbins;
+    const int bin_idx   = i % nbins;
 
     if (trial_idx >= ntrials_out)
         return;
 
-    const SizeType orig_trial =
-        (ntrials_in == 0) ? 0 : (trial_idx % ntrials_in);
-    const SizeType orig_offset = orig_trial * nbins + bin_idx;
+    const int orig_trial  = (ntrials_in == 0) ? 0 : (trial_idx % ntrials_in);
+    const int orig_offset = orig_trial * nbins + bin_idx;
 
     float fold_in_val = (ntrials_in == 0) ? 0.0f : folds_in[orig_offset];
     folds_out[i]      = fold_in_val + noise[i] + profile[bin_idx] * bias_snr;
 }
 
-FoldVector simulate_folds_cuda(const FoldVector& folds_in,
-                               const thrust::device_vector<float>& profile,
-                               curandGenerator_t& generator,
-                               float bias_snr,
-                               float var_add,
-                               SizeType ntrials_min) {
-    const auto ntrials_in = folds_in.ntrials;
-    const auto nbins      = folds_in.nbins;
+__global__ void prune_trials_kernel(const float* __restrict__ folds_in,
+                                    float* __restrict__ folds_out,
+                                    const int* __restrict__ good_indices,
+                                    int ntrials_out,
+                                    int nbins) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= ntrials_out * nbins)
+        return;
 
+    int trial_idx = idx / nbins;
+    int bin_idx   = idx % nbins;
+
+    if (trial_idx < ntrials_out) {
+        int orig_trial = good_indices[trial_idx];
+        int orig_idx   = orig_trial * nbins + bin_idx;
+        folds_out[idx] = folds_in[orig_idx];
+    }
+}
+
+// Unified kernel for simulating both H0 and H1 folds in one launch
+__global__ void
+simulate_folds_dual_kernel(float* __restrict__ folds_h0_out,
+                           float* __restrict__ folds_h1_out,
+                           const float* __restrict__ folds_h0_in,
+                           const float* __restrict__ folds_h1_in,
+                           const float* __restrict__ profile,
+                           const float* __restrict__ profile_scaled,
+                           const float* __restrict__ noise_h0,
+                           const float* __restrict__ noise_h1,
+                           int ntrials_out,
+                           int ntrials_in,
+                           int nbins) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= ntrials_out * nbins)
+        return;
+
+    const int trial_idx = i / nbins;
+    const int bin_idx   = i % nbins;
+
+    if (trial_idx >= ntrials_out)
+        return;
+
+    // FIX 4: Match CPU logic exactly - no zero handling since we throw
+    // exception above
+    const int orig_trial  = trial_idx % ntrials_in;
+    const int orig_offset = orig_trial * nbins + bin_idx;
+
+    // H0 processing (no signal bias) - matches CPU line 349-350
+    folds_h0_out[i] = folds_h0_in[orig_offset] + noise_h0[i];
+
+    // H1 processing (with pre-scaled profile) - matches CPU line 349-350
+    folds_h1_out[i] =
+        folds_h1_in[orig_offset] + noise_h1[i] + profile_scaled[bin_idx];
+}
+
+// Unified kernel for pruning both H0 and H1 folds in one launch
+__global__ void prune_folds_dual_kernel(const float* __restrict__ folds_h0_in,
+                                        const float* __restrict__ folds_h1_in,
+                                        float* __restrict__ folds_h0_out,
+                                        float* __restrict__ folds_h1_out,
+                                        const int* __restrict__ good_indices_h0,
+                                        const int* __restrict__ good_indices_h1,
+                                        int ntrials_h0_out,
+                                        int ntrials_h1_out,
+                                        int nbins) {
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    // FIX 5: Process H0 and H1 separately with proper bounds checking
+    // Process H0 trials
+    if (idx < ntrials_h0_out * nbins) {
+        const int trial_idx     = idx / nbins;
+        const int bin_idx       = idx % nbins;
+        const int orig_trial_h0 = good_indices_h0[trial_idx];
+        const int orig_idx_h0   = orig_trial_h0 * nbins + bin_idx;
+        folds_h0_out[idx]       = folds_h0_in[orig_idx_h0];
+    }
+
+    // Process H1 trials (offset by H0 total size)
+    const int h1_idx = idx - (ntrials_h0_out * nbins);
+    if (h1_idx >= 0 && h1_idx < ntrials_h1_out * nbins) {
+        const int trial_idx     = h1_idx / nbins;
+        const int bin_idx       = h1_idx % nbins;
+        const int orig_trial_h1 = good_indices_h1[trial_idx];
+        const int orig_idx_h1   = orig_trial_h1 * nbins + bin_idx;
+        folds_h1_out[h1_idx]    = folds_h1_in[orig_idx_h1];
+    }
+}
+
+__device__ float compute_snr_boxcar_score(const float* folds,
+                                          SizeType ntrials,
+                                          SizeType nbins,
+                                          const SizeType* box_widths,
+                                          SizeType nwidths,
+                                          float noise_std) {
+    // Inline the SNR boxcar scoring logic here
+    // This replaces the external kernel call
+    float max_score = 0.0f;
+    // ... implement the scoring logic as device function
+    return max_score;
+}
+
+__device__ SizeType find_bin_index_device(const float* bins,
+                                          SizeType nbins,
+                                          float value) {
+    // Binary search or linear search for small arrays
+    for (SizeType i = 0; i < nbins - 1; ++i) {
+        if (value >= bins[i] && value < bins[i + 1]) {
+            return i;
+        }
+    }
+    return nbins - 1; // Handle edge case
+}
+
+__device__ void simulate_transition_phase(const TransitionWorkItem& work_item,
+                                          const float* __restrict__ profile,
+                                          int nbins,
+                                          float bias_snr,
+                                          float var_add,
+                                          unsigned long long seed,
+                                          unsigned long long offset) {
+    extern __shared__ float shared_profile_scaled[]; // nbins elements
+    const int tid        = threadIdx.x;
+    const int block_size = blockDim.x;
+    const int block_id   = blockIdx.x;
+
+    // Pre-scale profile for H1 (shared across all threads in block)
+    for (int i = tid; i < nbins; i += block_size) {
+        shared_profile_scaled[i] = profile[i] * bias_snr;
+    }
+    __syncthreads();
+
+    // Calculate total elements to process for both H0 and H1
+    const SizeType total_elements_h0 = work_item.output_h0_sim_ntrials * nbins;
+    const SizeType total_elements_h1 = work_item.output_h1_sim_ntrials * nbins;
+    const float noise_stddev         = sqrtf(var_add);
+
+    // Lambda for processing 4 elements to match cuRANDDx generate4()
+    auto process_batch = [&](SizeType base_i, SizeType total_elements,
+                             const float* in_data, float* out_data,
+                             SizeType input_ntrials, SizeType seq_id_base,
+                             bool add_signal) {
+        const SizeType seq_id =
+            seq_id_base + (block_id * total_elements + base_i) / 4;
+        // Generate noise using cuRANDDx
+        // Use unique sequence ID for each element
+        RNG rng(seed, seq_id, offset);
+        curanddx::normal<float, curanddx::box_muller> dist(0.0f, noise_stddev);
+        const float4 noise = dist.generate4(rng);
+
+        SizeType trial_idx   = base_i / nbins;
+        SizeType bin_idx     = base_i % nbins;
+        SizeType orig_trial  = trial_idx % input_ntrials;
+        SizeType orig_offset = orig_trial * nbins + bin_idx;
+
+#pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            SizeType idx = base_i + j;
+            if (idx >= total_elements) {
+                break;
+            }
+            float noise_val = j == 0   ? noise.x
+                              : j == 1 ? noise.y
+                              : j == 2 ? noise.z
+                                       : noise.w;
+            const float profile_val =
+                add_signal ? shared_profile_scaled[bin_idx] : 0.0f;
+            out_data[idx] = in_data[orig_offset] + noise_val + profile_val;
+
+            bin_idx++;
+            if (bin_idx >= nbins) {
+                bin_idx = 0;
+                trial_idx++;
+                orig_trial = trial_idx % input_ntrials;
+            }
+            orig_offset = orig_trial * nbins + bin_idx;
+        }
+    };
+
+    // H0: no signal bias
+    for (SizeType base = tid * 4; base < total_elements_h0;
+         base += block_size * 4) {
+        do_batch(base, total_elements_h0, work_item.input_h0_data,
+                 work_item.output_h0_sim_data, work_item.input_h0_ntrials, 0,
+                 false);
+    }
+    // H1: with signal bias
+    const SizeType h1_seq_offset = (total_elements_h0 + 3) / 4;
+    for (SizeType base = tid * 4; base < total_elements_h1;
+         base += block_size * 4) {
+        do_batch(base, total_elements_h1, work_item.input_h1_data,
+                 work_item.output_h1_sim_data, work_item.input_h1_ntrials,
+                 h1_seq_offset, true);
+    }
+}
+
+__device__ void prune_transition_phase(const TransitionWorkItem& item,
+                                       const float* __restrict__ scores_h0,
+                                       const float* __restrict__ scores_h1,
+                                       float threshold,
+                                       int nbins,
+                                       SizeType* output_ntrials_h0,
+                                       SizeType* output_ntrials_h1) {
+    extern __shared__ int shm[];
+    const int tid        = threadIdx.x;
+    const int block_size = blockDim.x;
+    // Shared memory for reduction
+    int& shared_count_h0   = *reinterpret_cast<int*>(&shm[0]);
+    int& shared_count_h1   = *reinterpret_cast<int*>(&shm[1]);
+    int* shared_indices_h0 = &shm[2];
+    int* shared_indices_h1 = &shm[2 + block_size];
+
+    if (tid == 0) {
+        shared_count_h0 = 0;
+        shared_count_h1 = 0;
+    }
+    __syncthreads();
+
+    // Collect surviving H0 and H1 trials into shared lists
+    auto collect = [&](const float* scores, int max_trials, int& shared_count,
+                       int* shared_idx) {
+        int local_good[32]; // Local buffer for good indices
+        int local_count = 0;
+
+        // strided over trials
+        for (int i = tid; i < max_trials; i += block_size) {
+            if (scores[i] > threshold) {
+                local_good[local_count++] = i;
+                if (local_count == 32) {
+                    // Flush local buffer to shared memory
+                    int pos = atomicAdd(&shared_count, 32);
+#pragma unroll
+                    for (int j = 0; j < 32; ++j) {
+                        if (pos + j < block_size) {
+                            shared_idx[pos + j] = local_good[j];
+                        }
+                    }
+                    local_count = 0;
+                }
+            }
+        }
+        // flush remainder
+        if (local_count > 0) {
+            int pos = atomicAdd(&shared_count, local_count);
+#pragma unroll
+            for (int j = 0; j < 32; ++j) {
+                if (j < local_count && pos + j < block_size) {
+                    shared_idx[pos + j] = local_good[j];
+                }
+            }
+        }
+    };
+
+    collect(scores_h0, item.output_h0_sim_ntrials, shared_count_h0,
+            shared_indices_h0);
+    collect(scores_h1, item.output_h1_sim_ntrials, shared_count_h1,
+            shared_indices_h1);
+    __syncthreads();
+
+    // Copy H0 surviving trials
+    for (int i = tid; i < shared_count_h0; i += block_size) {
+        const int orig_trial         = shared_indices_h0[i];
+        const SizeType input_offset  = orig_trial * nbins;
+        const SizeType output_offset = i * nbins;
+
+        // Copy entire trial (all bins)
+        for (int j = 0; j < nbins; ++j) {
+            item.output_h0_pruned_data[output_offset + j] =
+                item.output_h0_sim_data[input_offset + j];
+        }
+    }
+    // Copy H1 surviving trials
+    for (int i = tid; i < shared_count_h1; i += block_size) {
+        const int orig_trial         = shared_indices_h1[i];
+        const SizeType input_offset  = orig_trial * nbins;
+        const SizeType output_offset = i * nbins;
+
+        for (int j = 0; j < nbins; ++j) {
+            item.output_h1_pruned_data[output_offset + j] =
+                item.output_h1_sim_data[input_offset + j];
+        }
+    }
+    // Store final counts (single thread)
+    if (tid == 0) {
+        *output_ntrials_h0 = shared_count_h0;
+        *output_ntrials_h1 = shared_count_h1;
+    }
+}
+
+__global__ void process_transitions_unified_kernel(
+    const TransitionWorkItem* __restrict__ work_items,
+    int num_items,
+    const float* __restrict__ profile,
+    int nbins,
+    const SizeType* __restrict__ box_score_widths,
+    int nwidths,
+    float bias_snr,
+    float var_add,
+    SizeType ntrials_target,
+    const float* __restrict__ probs,
+    int nprobs,
+    float* __restrict__ scores_pool,
+    int* __restrict__ indices_pool,
+    TransitionResult* __restrict__ results,
+    unsigned long long seed,
+    unsigned long long offset) {
+
+    const int item_idx = blockIdx.x;
+    if (item_idx >= num_items)
+        return;
+
+    const auto& work_item = work_items[item_idx];
+    const int tid         = threadIdx.x;
+    const int block_size  = blockDim.x;
+
+    // Calculate memory offsets for this work item
+    const SizeType score_offset_h0   = item_idx * ntrials_target;
+    const SizeType score_offset_h1   = score_offset_h0 + ntrials_target;
+    const SizeType indices_offset_h0 = item_idx * ntrials_target;
+    const SizeType indices_offset_h1 = indices_offset_h0 + ntrials_target;
+
+    // Shared memory for output counts
+    __shared__ SizeType shared_ntrials_h0_out;
+    __shared__ SizeType shared_ntrials_h1_out;
+
+    // Phase 1: Simulation (threads collaborate)
+    simulate_transition_phase(work_item, profile, nbins, bias_snr, var_add,
+                              seed, offset);
+    __syncthreads();
+
+    // Phase 2: Scoring (threads collaborate)
+    score_transition_phase(work_item, box_score_widths, nwidths, nbins,
+                           scores_pool + score_offset_h0,
+                           scores_pool + score_offset_h1, tid, block_size);
+    __syncthreads();
+
+    // Phase 3: Pruning (threads collaborate)
+    prune_transition_phase(
+        work_item, scores_pool + score_offset_h0, scores_pool + score_offset_h1,
+        indices_pool + indices_offset_h0, indices_pool + indices_offset_h1,
+        work_item.threshold, nbins, tid, block_size, &shared_ntrials_h0_out,
+        &shared_ntrials_h1_out);
+    __syncthreads();
+
+    // Phase 4: Compute final state and result (single thread per block)
+    if (tid == 0) {
+        const SizeType ntrials_h0_out = shared_ntrials_h0_out;
+        const SizeType ntrials_h1_out = shared_ntrials_h1_out;
+        // Calculate success rates
+        const auto success_h0 =
+            static_cast<float>(ntrials_h0_out) /
+            static_cast<float>(work_item.output_h0_sim_ntrials);
+        const auto success_h1 =
+            static_cast<float>(ntrials_h1_out) /
+            static_cast<float>(work_item.output_h1_sim_ntrials);
+
+        // Generate next state
+        const auto state_next = work_item.input_state.gen_next(
+            work_item.threshold, success_h0, success_h1, work_item.nbranches);
+
+        // Find probability bin
+        const SizeType iprob =
+            find_bin_index_device(probs, nprobs, state_next.success_h1_cumul);
+
+        // Store result
+        TransitionResult& result = results[item_idx];
+        result.threshold_idx     = work_item.threshold_idx;
+        result.prob_idx          = iprob;
+        result.computed_state    = state_next;
+        result.output_h0_data    = work_item.output_h0_pruned_data;
+        result.output_h1_data    = work_item.output_h1_pruned_data;
+        result.output_variance   = work_item.input_variance + var_add;
+        result.output_ntrials_h0 = ntrials_h0_out;
+        result.output_ntrials_h1 = ntrials_h1_out;
+        result.invalid = (iprob < 0 || iprob >= static_cast<IndexType>(nprobs));
+    }
+}
+
+__global__ void update_states_kernel(const TransitionResult* results,
+                                     int num_results,
+                                     int nprobs,
+                                     SizeType stage_offset_cur,
+                                     StateD* states,
+                                     float** fold_h0_ptrs,
+                                     float** fold_h1_ptrs,
+                                     SizeType* fold_ntrials_h0,
+                                     SizeType* fold_ntrials_h1,
+                                     float* fold_variances_h0,
+                                     float* fold_variances_h1) {
+
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_results) {
+        return;
+    }
+    const TransitionResult& result = results[idx];
+    if (result.invalid) {
+        return;
+    }
+    const int fold_idx  = (result.threshold_idx * nprobs) + result.prob_idx;
+    const int state_idx = stage_offset_cur + fold_idx;
+    // Use atomic compare-and-swap to handle race conditions
+    // Convert float to int for atomic operations (assumes IEEE 754)
+    const int new_complexity_bits =
+        __float_as_int(result.computed_state.complexity_cumul);
+    int* state_complexity_ptr =
+        reinterpret_cast<int*>(&states[state_idx].complexity_cumul);
+
+    // Atomic compare-and-swap loop
+    int old_complexity_bits = atomicOr(state_complexity_ptr, 0);
+
+    bool should_update = false;
+    if (states[state_idx].is_empty) {
+        // Try to claim this empty slot
+        int expected_empty = __float_as_int(0.0f);
+        if (atomicCAS(state_complexity_ptr, expected_empty,
+                      new_complexity_bits) == expected_empty) {
+            should_update = true;
+        }
+    } else {
+        // Compare complexities and try to update if we're better
+        float old_complexity = __int_as_float(old_complexity_bits);
+        if (result.computed_state.complexity_cumul < old_complexity) {
+            if (atomicCAS(state_complexity_ptr, old_complexity_bits,
+                          new_complexity_bits) == old_complexity_bits) {
+                should_update = true;
+            }
+        }
+    }
+
+    if (should_update) {
+        states[state_idx]           = result.computed_state;
+        fold_h0_ptrs[fold_idx]      = result.output_h0_data;
+        fold_h1_ptrs[fold_idx]      = result.output_h1_data;
+        fold_ntrials_h0[fold_idx]   = result.output_ntrials_h0;
+        fold_ntrials_h1[fold_idx]   = result.output_ntrials_h1;
+        fold_variances_h0[fold_idx] = result.output_variance;
+        fold_variances_h1[fold_idx] = result.output_variance;
+    }
+}
+
+std::unique_ptr<FoldVectorHandle>
+simulate_folds(const FoldVectorHandle& folds_in,
+               cuda::std::span<const float> profile,
+               math::CuRandRNG& rng,
+               DualPoolFoldManager& manager,
+               float bias_snr       = 0.0F,
+               float var_add        = 1.0F,
+               SizeType ntrials_min = 1024) {
+    const auto ntrials_in = folds_in.ntrials();
+    const auto nbins      = folds_in.nbins();
+
+    if (ntrials_in == 0 && ntrials_min == 0) {
+        return manager.allocate(0, folds_in.variance() + var_add);
+    }
+
+    // Calculate output size
     const auto repeat_factor =
         (ntrials_in == 0)
             ? 1
@@ -175,146 +858,235 @@ FoldVector simulate_folds_cuda(const FoldVector& folds_in,
                                               static_cast<float>(ntrials_in)));
     const auto ntrials_out = std::max(ntrials_min, repeat_factor * ntrials_in);
 
-    FoldVector folds_out(ntrials_out, nbins, folds_in.variance + var_add);
+    // Allocate output
+    auto folds_out =
+        manager.allocate(ntrials_out, folds_in.variance() + var_add);
 
+    // Generate noise
     thrust::device_vector<float> noise(ntrials_out * nbins);
-    CURAND_CHECK(curandGenerateNormal(generator,
-                                      thrust::raw_pointer_cast(noise.data()),
-                                      noise.size(), 0.0f, std::sqrt(var_add)));
+    rng.generate_range(
+        cuda::std::span<float>(thrust::raw_pointer_cast(noise.data()),
+                               noise.size()),
+        0.0f, std::sqrt(var_add));
 
-    const float* folds_in_ptr =
-        ntrials_in > 0 ? thrust::raw_pointer_cast(folds_in.data.data())
-                       : nullptr;
-
+    // Launch simulation kernel
     const int threads = 256;
     const int blocks  = (ntrials_out * nbins + threads - 1) / threads;
     simulate_folds_kernel<<<blocks, threads>>>(
-        thrust::raw_pointer_cast(folds_out.data.data()), folds_in_ptr,
+        folds_out->raw_data(), folds_in.raw_data(),
         thrust::raw_pointer_cast(profile.data()),
         thrust::raw_pointer_cast(noise.data()), ntrials_out, ntrials_in, nbins,
         bias_snr);
-    LOKI_CHECK_CUDA_ERROR("simulate_folds_kernel");
+    cuda_utils::check_last_cuda_error("simulate_folds_kernel");
 
     return folds_out;
 }
 
-struct is_above_threshold {
-    float threshold;
-    is_above_threshold(float t) : threshold(t) {}
-    __device__ bool operator()(float score) const { return score > threshold; }
-};
+std::unique_ptr<FoldVectorHandle>
+prune_folds(const FoldVectorHandle& folds_in,
+            cuda::std::span<const float> scores,
+            float threshold,
+            DualPoolFoldManager& manager) {
+    const auto ntrials = folds_in.ntrials();
+    const auto nbins   = folds_in.nbins();
 
-FoldVector prune_folds_cuda(const FoldVector& folds_in,
-                            const thrust::device_vector<float>& scores,
-                            float threshold) {
-    const auto ntrials_in = folds_in.ntrials;
-    const auto nbins      = folds_in.nbins;
+    if (ntrials == 0) {
+        return manager.allocate(0, folds_in.variance());
+    }
 
     // Find indices of trials that survive the threshold
-    thrust::device_vector<SizeType> trial_indices(ntrials_in);
+    thrust::device_vector<int> trial_indices(ntrials);
     thrust::sequence(trial_indices.begin(), trial_indices.end());
 
-    auto new_end = thrust::copy_if(trial_indices.begin(), trial_indices.end(),
-                                   scores.begin(), trial_indices.begin(),
-                                   is_above_threshold(threshold));
+    auto new_end = thrust::copy_if(
+        trial_indices.begin(), trial_indices.end(),
+        thrust::device_pointer_cast(scores.data()), trial_indices.begin(),
+        [threshold] __device__(float score) { return score > threshold; });
 
-    SizeType ntrials_out = thrust::distance(trial_indices.begin(), new_end);
-    trial_indices.resize(ntrials_out);
+    const int ntrials_out = thrust::distance(trial_indices.begin(), new_end);
 
-    FoldVector folds_out(ntrials_out, nbins, folds_in.variance);
-
-    if (ntrials_out > 0) {
-        // Copy surviving trials
-        for (SizeType i = 0; i < ntrials_out; ++i) {
-            SizeType old_trial_idx = trial_indices[i];
-            thrust::copy_n(folds_in.data.begin() + old_trial_idx * nbins, nbins,
-                           folds_out.data.begin() + i * nbins);
-        }
+    if (ntrials_out == 0) {
+        return manager.allocate(0, folds_in.variance());
     }
+
+    // Allocate output
+    auto folds_out = manager.allocate(ntrials_out, folds_in.variance());
+
+    // Launch pruning kernel
+    const int threads = 256;
+    const int blocks  = (ntrials_out * nbins + threads - 1) / threads;
+    prune_trials_kernel<<<blocks, threads>>>(
+        folds_in.raw_data(), folds_out->raw_data(),
+        thrust::raw_pointer_cast(trial_indices.data()), ntrials_out, nbins);
+    cuda_utils::check_last_cuda_error("prune_trials_kernel");
 
     return folds_out;
 }
 
-std::tuple<State, FoldsType> gen_next_using_thresh_cuda(
-    const State& state_cur,
-    const FoldsType& folds_cur,
-    float threshold,
-    float nbranches,
-    float bias_snr,
-    const thrust::device_vector<float>& profile,
-    const thrust::device_vector<SizeType>& box_score_widths,
-    curandGenerator_t& generator,
-    float var_add,
-    SizeType ntrials_min) {
+__host__ __device__ StateD StateD::gen_next(float threshold,
+                                            float success_h0,
+                                            float success_h1,
+                                            float nbranches) const noexcept {
+    const auto nleaves_next          = this->complexity * nbranches;
+    const auto nleaves_surv          = nleaves_next * success_h0;
+    const auto complexity_cumul_next = this->complexity_cumul + nleaves_next;
+    const auto success_h1_cumul_next = this->success_h1_cumul * success_h1;
+    const auto cost_next = complexity_cumul_next / success_h1_cumul_next;
 
-    // H0 simulation
-    const auto folds_h0 = simulate_folds_cuda(
-        folds_cur.folds_h0, profile, generator, 0.0f, var_add, ntrials_min);
+    // Create a new state struct
+    StateD state_next;
+    state_next.success_h0       = success_h0;
+    state_next.success_h1       = success_h1;
+    state_next.complexity       = nleaves_surv;
+    state_next.complexity_cumul = complexity_cumul_next;
+    state_next.success_h1_cumul = success_h1_cumul_next;
+    state_next.nbranches        = nbranches;
+    state_next.threshold        = threshold;
+    state_next.cost             = cost_next;
+    state_next.is_empty         = false;
+    // For backtracking
+    state_next.threshold_prev        = this->threshold;
+    state_next.success_h1_cumul_prev = this->success_h1_cumul;
+    return state_next;
+}
 
-    thrust::device_vector<float> scores_h0(folds_h0.ntrials);
-    if (folds_h0.ntrials > 0) {
-        // Create cuda::std::span for the scoring function
-        cuda::std::span<const float> folds_span(
-            thrust::raw_pointer_cast(folds_h0.data.data()),
-            folds_h0.data.size());
-        cuda::std::span<const SizeType> widths_span(
-            thrust::raw_pointer_cast(box_score_widths.data()),
-            box_score_widths.size());
-        cuda::std::span<float> scores_span(
+std::tuple<State, FoldsType>
+gen_next_using_thresh(const State& state_cur,
+                      const FoldsType& folds_cur,
+                      float threshold,
+                      float nbranches,
+                      float bias_snr,
+                      cuda::std::span<const float> profile,
+                      cuda::std::span<const SizeType> box_score_widths,
+                      math::CuRandRNG& rng,
+                      DualPoolFoldManager& manager,
+                      float var_add    = 1.0F,
+                      SizeType ntrials = 1024) {
+
+    const auto ntrials_in = folds_cur.folds_h0->ntrials();
+    const auto nbins      = folds_cur.folds_h0->nbins();
+
+    // FIX 1: Match CPU zero input handling exactly
+    if (ntrials_in == 0) {
+        throw std::invalid_argument("No trials in the input folds");
+    }
+
+    // FIX 2: Match CPU memory allocation logic exactly
+    const auto repeat_factor = static_cast<SizeType>(std::ceil(
+        static_cast<float>(ntrials) / static_cast<float>(ntrials_in)));
+    const auto ntrials_out   = repeat_factor * ntrials_in;
+
+    // Allocate output folds
+    auto folds_h0_sim =
+        manager.allocate(ntrials_out, folds_cur.folds_h0->variance() + var_add);
+    auto folds_h1_sim =
+        manager.allocate(ntrials_out, folds_cur.folds_h1->variance() + var_add);
+
+    // FIX 3: Pre-scale profile like CPU version for H1
+    thrust::device_vector<float> profile_scaled(nbins);
+    thrust::transform(profile.begin(), profile.end(), profile_scaled.begin(),
+                      [bias_snr] __device__(float x) { return x * bias_snr; });
+
+    // Generate noise for both H0 and H1
+    thrust::device_vector<float> noise_h0(ntrials_out * nbins);
+    thrust::device_vector<float> noise_h1(ntrials_out * nbins);
+    rng.generate_range(
+        cuda::std::span<float>(thrust::raw_pointer_cast(noise_h0.data()),
+                               noise_h0.size()),
+        0.0f, std::sqrt(var_add));
+    rng.generate_range(
+        cuda::std::span<float>(thrust::raw_pointer_cast(noise_h1.data()),
+                               noise_h1.size()),
+        0.0f, std::sqrt(var_add));
+
+    // Kernel 1: Unified simulation for both H0 and H1
+    const int threads = 256;
+    const int blocks  = (ntrials_out * nbins + threads - 1) / threads;
+    simulate_folds_dual_kernel<<<blocks, threads>>>(
+        folds_h0_sim->raw_data(), folds_h1_sim->raw_data(),
+        folds_cur.folds_h0->raw_data(), folds_cur.folds_h1->raw_data(),
+        profile.data(), thrust::raw_pointer_cast(profile_scaled.data()),
+        thrust::raw_pointer_cast(noise_h0.data()),
+        thrust::raw_pointer_cast(noise_h1.data()), ntrials_out, ntrials_in,
+        nbins);
+    cuda_utils::check_last_cuda_error("simulate_folds_dual_kernel");
+
+    // Allocate device memory for scores
+    thrust::device_vector<float> scores_h0(ntrials_out);
+    thrust::device_vector<float> scores_h1(ntrials_out);
+
+    // Kernel 2: Score H0 folds
+    {
+        cuda::std::span<const float> folds_h0_span(folds_h0_sim->data());
+        cuda::std::span<float> scores_h0_span(
             thrust::raw_pointer_cast(scores_h0.data()), scores_h0.size());
-
-        detection::snr_boxcar_2d_max_cuda_d(folds_span, folds_h0.ntrials,
-                                            widths_span, scores_span,
-                                            std::sqrt(folds_h0.variance));
+        detection::snr_boxcar_2d_max_cuda_d(
+            folds_h0_span, ntrials_out, box_score_widths, scores_h0_span,
+            std::sqrt(folds_h0_sim->variance()));
     }
 
-    const auto folds_h0_pruned =
-        prune_folds_cuda(folds_h0, scores_h0, threshold);
-    const float success_h0 = (folds_h0.ntrials == 0)
-                                 ? 0.0f
-                                 : static_cast<float>(folds_h0_pruned.ntrials) /
-                                       static_cast<float>(folds_h0.ntrials);
-
-    // H1 simulation
-    const auto folds_h1 = simulate_folds_cuda(
-        folds_cur.folds_h1, profile, generator, bias_snr, var_add, ntrials_min);
-
-    thrust::device_vector<float> scores_h1(folds_h1.ntrials);
-    if (folds_h1.ntrials > 0) {
-        // Create cuda::std::span for the scoring function
-        cuda::std::span<const float> folds_span(
-            thrust::raw_pointer_cast(folds_h1.data.data()),
-            folds_h1.data.size());
-        cuda::std::span<const SizeType> widths_span(
-            thrust::raw_pointer_cast(box_score_widths.data()),
-            box_score_widths.size());
-        cuda::std::span<float> scores_span(
+    // Kernel 3: Score H1 folds
+    {
+        cuda::std::span<const float> folds_h1_span(folds_h1_sim->data());
+        cuda::std::span<float> scores_h1_span(
             thrust::raw_pointer_cast(scores_h1.data()), scores_h1.size());
-
-        detection::snr_boxcar_2d_max_cuda_d(folds_span, folds_h1.ntrials,
-                                            widths_span, scores_span,
-                                            std::sqrt(folds_h1.variance));
+        detection::snr_boxcar_2d_max_cuda_d(
+            folds_h1_span, ntrials_out, box_score_widths, scores_h1_span,
+            std::sqrt(folds_h1_sim->variance()));
     }
 
-    const auto folds_h1_pruned =
-        prune_folds_cuda(folds_h1, scores_h1, threshold);
-    const float success_h1 = (folds_h1.ntrials == 0)
-                                 ? 0.0f
-                                 : static_cast<float>(folds_h1_pruned.ntrials) /
-                                       static_cast<float>(folds_h1.ntrials);
+    // Find surviving trials for both H0 and H1
+    thrust::device_vector<int> trial_indices_h0(ntrials_out);
+    thrust::device_vector<int> trial_indices_h1(ntrials_out);
+    thrust::sequence(trial_indices_h0.begin(), trial_indices_h0.end());
+    thrust::sequence(trial_indices_h1.begin(), trial_indices_h1.end());
+
+    auto new_end_h0 = thrust::copy_if(
+        trial_indices_h0.begin(), trial_indices_h0.end(), scores_h0.begin(),
+        trial_indices_h0.begin(),
+        [threshold] __device__(float score) { return score > threshold; });
+    auto new_end_h1 = thrust::copy_if(
+        trial_indices_h1.begin(), trial_indices_h1.end(), scores_h1.begin(),
+        trial_indices_h1.begin(),
+        [threshold] __device__(float score) { return score > threshold; });
+
+    const int ntrials_h0_out =
+        thrust::distance(trial_indices_h0.begin(), new_end_h0);
+    const int ntrials_h1_out =
+        thrust::distance(trial_indices_h1.begin(), new_end_h1);
+
+    // Allocate output pruned folds
+    auto folds_h0_pruned =
+        manager.allocate(ntrials_h0_out, folds_h0_sim->variance());
+    auto folds_h1_pruned =
+        manager.allocate(ntrials_h1_out, folds_h1_sim->variance());
+
+    // Kernel 4: Unified pruning for both H0 and H1
+    if (ntrials_h0_out > 0 || ntrials_h1_out > 0) {
+        const int total_elements = (ntrials_h0_out + ntrials_h1_out) * nbins;
+        const int prune_blocks   = (total_elements + threads - 1) / threads;
+        prune_folds_dual_kernel<<<prune_blocks, threads>>>(
+            folds_h0_sim->raw_data(), folds_h1_sim->raw_data(),
+            folds_h0_pruned->raw_data(), folds_h1_pruned->raw_data(),
+            thrust::raw_pointer_cast(trial_indices_h0.data()),
+            thrust::raw_pointer_cast(trial_indices_h1.data()), ntrials_h0_out,
+            ntrials_h1_out, nbins);
+        cuda_utils::check_last_cuda_error("prune_folds_dual_kernel");
+    }
+
+    // Calculate success rates
+    const auto success_h0 =
+        static_cast<float>(ntrials_h0_out) / static_cast<float>(ntrials_out);
+    const auto success_h1 =
+        static_cast<float>(ntrials_h1_out) / static_cast<float>(ntrials_out);
 
     const auto state_next =
         gen_next_state(state_cur, threshold, success_h0, success_h1, nbranches);
-
-    FoldsType new_folds;
-    new_folds.folds_h0 = std::move(folds_h0_pruned);
-    new_folds.folds_h1 = std::move(folds_h1_pruned);
-    new_folds.is_empty_flag =
-        new_folds.folds_h0.is_empty() || new_folds.folds_h1.is_empty();
-
-    return {state_next, std::move(new_folds)};
+    return {state_next,
+            FoldsType{std::move(folds_h0_pruned), std::move(folds_h1_pruned)}};
 }
 
+// Create a compound type for State
 HighFive::CompoundType create_compound_state() {
     return {{"success_h0", HighFive::create_datatype<float>()},
             {"success_h1", HighFive::create_datatype<float>()},
@@ -346,22 +1118,121 @@ public:
          float wtsp,
          float beam_width,
          SizeType trials_start,
-         int device_id);
-    ~Impl();
+         int device_id)
+        : m_branching_pattern(branching_pattern.begin(),
+                              branching_pattern.end()),
+          m_ref_ducy(ref_ducy),
+          m_ntrials(ntrials),
+          m_ducy_max(ducy_max),
+          m_wtsp(wtsp),
+          m_beam_width(beam_width),
+          m_trials_start(trials_start),
+          m_device_id(device_id) {
+
+        cuda_utils::set_device(m_device_id);
+        if (m_branching_pattern.empty()) {
+            throw std::invalid_argument("Branching pattern is empty");
+        }
+        // Host-side computations
+        m_profile_h = simulation::generate_folded_profile(nbins, ref_ducy);
+        m_thresholds =
+            detection::compute_thresholds(0.1F, snr_final, nthresholds);
+        m_probs       = detection::compute_probs(nprobs, prob_min);
+        m_nprobs      = m_probs.size();
+        m_nbins       = m_profile_h.size();
+        m_nstages     = m_branching_pattern.size();
+        m_nthresholds = m_thresholds.size();
+        auto box_score_widths_h =
+            detection::generate_box_width_trials(m_nbins, m_ducy_max, m_wtsp);
+        m_bias_snr   = snr_final / static_cast<float>(std::sqrt(m_nstages + 1));
+        m_guess_path = detection::guess_scheme(
+            m_nstages, snr_final, m_branching_pattern, m_trials_start);
+
+        // Copy data to device
+        m_profile_d          = m_profile_h;
+        m_box_score_widths_d = box_score_widths_h;
+
+        m_rng = std::make_unique<math::CuRandRNG>();
+        // Initialize memory management
+        const auto slots_per_pool = compute_max_allocations_needed();
+        m_manager = std::make_unique<DualPoolFoldManager>(m_nbins, m_ntrials,
+                                                          slots_per_pool);
+        spdlog::info("Pre-allocated 2 CUDA pools of {} slots each",
+                     slots_per_pool);
+
+        // Initialize state management
+        m_folds_current.resize(m_nthresholds * m_nprobs);
+        m_folds_next.resize(m_nthresholds * m_nprobs);
+        m_states.resize(m_nstages * m_nthresholds * m_nprobs, State{});
+        init_states();
+    }
+    ~Impl()                          = default;
     Impl(const Impl&)                = delete;
     Impl& operator=(const Impl&)     = delete;
     Impl(Impl&&) noexcept            = default;
     Impl& operator=(Impl&&) noexcept = default;
 
     // Methods
-    void run(SizeType thres_neigh = 10);
-    std::string save(const std::string& outdir = "./") const;
+    void run(SizeType thres_neigh = 10) {
+        spdlog::info("Running dynamic threshold scheme on CUDA");
+        utils::ProgressGuard progress_guard(true);
+        auto bar = utils::make_standard_bar("Computing scheme...");
+
+        for (SizeType istage = 1; istage < m_nstages; ++istage) {
+            run_segment(istage, thres_neigh);
+            m_manager->swap_pools();
+            std::swap(m_folds_current, m_folds_next);
+            for (auto& fold_opt : m_folds_next) {
+                fold_opt.reset();
+            }
+            const auto progress = static_cast<float>(istage) /
+                                  static_cast<float>(m_nstages - 1) * 100.0F;
+            bar.set_progress(static_cast<SizeType>(progress));
+        }
+    }
+
+    std::string save(const std::string& outdir = "./") const {
+        const std::filesystem::path filebase = std::format(
+            "dynscheme_nstages_{:03d}_nthresh_{:03d}_nprobs_{:03d}_"
+            "ntrials_{:04d}_snr_{:04.1f}_ducy_{:04.2f}_beam_{:03.1f}.h5",
+            m_nstages, m_nthresholds, m_nprobs, m_ntrials, m_thresholds.back(),
+            m_ref_ducy, m_beam_width);
+        const std::filesystem::path filepath =
+            std::filesystem::path(outdir) / filebase;
+        HighFive::File file(filepath, HighFive::File::Overwrite);
+        // Save simple attributes
+        file.createAttribute("ntrials", m_ntrials);
+        file.createAttribute("snr_final", m_thresholds.back());
+        file.createAttribute("ref_ducy", m_ref_ducy);
+        file.createAttribute("ducy_max", m_ducy_max);
+        file.createAttribute("wtsp", m_wtsp);
+        file.createAttribute("beam_width", m_beam_width);
+
+        // Create dataset creation property list and enable compression
+        HighFive::DataSetCreateProps props;
+        props.add(HighFive::Chunking(std::vector<hsize_t>{1024}));
+        props.add(HighFive::Deflate(9));
+
+        // Save arrays
+        file.createDataSet("branching_pattern", m_branching_pattern);
+        file.createDataSet("profile", m_profile_h);
+        file.createDataSet("thresholds", m_thresholds);
+        file.createDataSet("probs", m_probs);
+        file.createDataSet("guess_path", m_guess_path);
+        // Define the 3D dataspace for states
+        std::vector<SizeType> dims = {m_nstages, m_nthresholds, m_nprobs};
+        HighFive::DataSetCreateProps props_states;
+        std::vector<hsize_t> chunk_dims(dims.begin(), dims.end());
+        props_states.add(HighFive::Chunking(chunk_dims));
+        auto dataset =
+            file.createDataSet("states", HighFive::DataSpace(dims),
+                               create_compound_state(), props_states);
+        dataset.write_raw(m_states.data());
+        spdlog::info("Saved dynamic threshold scheme to {}", filepath.string());
+        return filepath.string();
+    }
 
 private:
-    void init_states();
-    void run_segment(SizeType istage, SizeType thres_neigh);
-    std::vector<SizeType> get_current_thresholds_idx(SizeType istage) const;
-
     // Host-side parameters and metadata
     std::vector<float> m_branching_pattern;
     float m_ref_ducy;
@@ -370,7 +1241,6 @@ private:
     float m_wtsp;
     float m_beam_width;
     SizeType m_trials_start;
-    curandGenerator_t m_generator;
     std::vector<float> m_profile_h;
     std::vector<float> m_thresholds;
     std::vector<float> m_probs;
@@ -386,138 +1256,313 @@ private:
     thrust::device_vector<float> m_profile_d;
     thrust::device_vector<SizeType> m_box_score_widths_d;
 
+    // Memory and RNG management
+    std::unique_ptr<DualPoolFoldManager> m_manager;
+    std::unique_ptr<math::CuRandRNG> m_rng;
+
     // State management
-    std::vector<State> m_states;
-    std::vector<std::optional<FoldsType>> m_folds_in;
-    std::vector<std::optional<FoldsType>> m_folds_out;
-};
+    std::vector<State> m_states_h;
+    thrust::device_vector<State> m_states_d;
+    thrust::device_vector<cuda::std::optional<FoldsType>> m_folds_current_d;
+    thrust::device_vector<cuda::std::optional<FoldsType>> m_folds_next_d;
 
-DynamicThresholdSchemeCUDA::Impl::Impl(std::span<const float> branching_pattern,
-                                       float ref_ducy,
-                                       SizeType nbins,
-                                       SizeType ntrials,
-                                       SizeType nprobs,
-                                       float prob_min,
-                                       float snr_final,
-                                       SizeType nthresholds,
-                                       float ducy_max,
-                                       float wtsp,
-                                       float beam_width,
-                                       SizeType trials_start,
-                                       int device_id)
-    : m_branching_pattern(branching_pattern.begin(), branching_pattern.end()),
-      m_ref_ducy(ref_ducy),
-      m_ntrials(ntrials),
-      m_ducy_max(ducy_max),
-      m_wtsp(wtsp),
-      m_beam_width(beam_width),
-      m_trials_start(trials_start),
-      m_device_id(device_id) {
-
-    cudaSetDevice(m_device_id);
-
-    unsigned int seed = std::random_device{}();
-    CURAND_CHECK(
-        curandCreateGenerator(&m_generator, CURAND_RNG_PSEUDO_DEFAULT));
-    CURAND_CHECK(curandSetPseudoRandomGeneratorSeed(m_generator, seed));
-
-    if (m_branching_pattern.empty()) {
-        throw std::invalid_argument("Branching pattern is empty");
-    }
-
-    // Host-side computations
-    m_profile_h   = simulation::generate_folded_profile(nbins, ref_ducy);
-    m_thresholds  = detection::compute_thresholds(0.1F, snr_final, nthresholds);
-    m_probs       = detection::compute_probs(nprobs, prob_min);
-    m_nprobs      = m_probs.size();
-    m_nbins       = m_profile_h.size();
-    m_nstages     = m_branching_pattern.size();
-    m_nthresholds = m_thresholds.size();
-    auto box_score_widths_h =
-        detection::generate_box_width_trials(m_nbins, m_ducy_max, m_wtsp);
-    m_bias_snr   = snr_final / static_cast<float>(std::sqrt(m_nstages + 1));
-    m_guess_path = detection::guess_scheme(m_nstages, snr_final,
-                                           m_branching_pattern, m_trials_start);
-
-    // Copy data to device
-    m_profile_d          = m_profile_h;
-    m_box_score_widths_d = box_score_widths_h;
-
-    // Initialize state management
-    State initial_state;
-    m_states.resize(m_nstages * m_nthresholds * m_nprobs, initial_state);
-    m_folds_in.resize(m_nthresholds * m_nprobs);
-    m_folds_out.resize(m_nthresholds * m_nprobs);
-
-    init_states();
-}
-
-DynamicThresholdSchemeCUDA::Impl::~Impl() {
-    CURAND_CHECK(curandDestroyGenerator(m_generator));
-}
-
-void DynamicThresholdSchemeCUDA::Impl::init_states() {
-    const float var_init = 1.0F;
-    const FoldVector folds_init(m_ntrials, m_nbins);
-
-    // Simulate the initial folds (pruning level = 0)
-    auto folds_h0 = simulate_folds_cuda(folds_init, m_profile_d, m_generator,
-                                        0.0F, var_init, m_ntrials);
-    auto folds_h1 = simulate_folds_cuda(folds_init, m_profile_d, m_generator,
-                                        m_bias_snr, var_init, m_ntrials);
-
-    State initial_state;
-    FoldsType fold_state{std::move(folds_h0), std::move(folds_h1)};
-
-    const auto thresholds_idx = get_current_thresholds_idx(0);
-    for (SizeType ithres : thresholds_idx) {
-        auto [cur_state, cur_fold_state] = gen_next_using_thresh_cuda(
-            initial_state, fold_state, m_thresholds[ithres],
-            m_branching_pattern[0], m_bias_snr, m_profile_d,
-            m_box_score_widths_d, m_generator, 1.0F, m_ntrials);
-
-        const auto iprob = find_bin_index(m_probs, cur_state.success_h1_cumul);
-        if (iprob < 0 || iprob >= static_cast<IndexType>(m_nprobs)) {
-            continue;
+    SizeType compute_max_allocations_needed() {
+        SizeType max_active_per_stage = 0;
+        for (SizeType istage = 0; istage < m_nstages; ++istage) {
+            auto active_thresholds = get_current_thresholds_idx(istage);
+            max_active_per_stage =
+                std::max(max_active_per_stage, active_thresholds.size());
         }
-
-        m_states[(ithres * m_nprobs) + iprob]   = cur_state;
-        m_folds_in[(ithres * m_nprobs) + iprob] = std::move(cur_fold_state);
+        // h0 + h1 per cell
+        const auto max_persistent = max_active_per_stage * m_nprobs * 2;
+        // 2 simulated and 2 pruned folds per transition
+        const auto max_temporary  = 8; // Conservative for CUDA
+        const auto slots_per_pool = max_persistent + max_temporary;
+        spdlog::info(
+            "CUDA allocation analysis: {} active thresholds max, {} prob "
+            "bins",
+            max_active_per_stage, m_nprobs);
+        spdlog::info("Need {} persistent + {} temporary = {} slots per pool",
+                     max_persistent, max_temporary, slots_per_pool);
+        return slots_per_pool;
     }
-}
 
-void DynamicThresholdSchemeCUDA::Impl::run_segment(SizeType istage,
-                                                   SizeType thres_neigh) {
-    const auto beam_idx_cur      = get_current_thresholds_idx(istage);
-    const auto beam_idx_prev     = get_current_thresholds_idx(istage - 1);
-    const auto stage_offset_prev = (istage - 1) * m_nthresholds * m_nprobs;
-    const auto stage_offset_cur  = istage * m_nthresholds * m_nprobs;
+    void init_states() {
+        const float var_init = 1.0F;
+        // Create initial fold vectors
+        auto folds_h0_init = m_manager->allocate(m_ntrials, 0.0F);
+        auto folds_h1_init = m_manager->allocate(m_ntrials, 0.0F);
 
-    for (SizeType i = 0; i < beam_idx_cur.size(); ++i) {
-        const auto ithres = beam_idx_cur[i];
-        // Find nearest neighbors in the previous beam
-        const auto neighbour_beam_indices = utils::find_neighbouring_indices(
-            beam_idx_prev, ithres, thres_neigh);
+        // Zero-initialize on GPU
+        cudaMemset(folds_h0_init->raw_data(), 0,
+                   folds_h0_init->size() * sizeof(float));
+        cudaMemset(folds_h1_init->raw_data(), 0,
+                   folds_h1_init->size() * sizeof(float));
+        cuda_utils::check_last_cuda_error("init_states memset");
+        const auto m_profile_d_span = cuda::std::span<const float>(
+            thrust::raw_pointer_cast(m_profile_d.data()), m_profile_d.size());
+        const auto m_box_score_widths_d_span = cuda::std::span<const SizeType>(
+            thrust::raw_pointer_cast(m_box_score_widths_d.data()),
+            m_box_score_widths_d.size());
 
-        for (SizeType jthresh : neighbour_beam_indices) {
-            for (SizeType kprob = 0; kprob < m_nprobs; ++kprob) {
-                const auto prev_fold_idx = (jthresh * m_nprobs) + kprob;
-                const auto prev_state =
-                    m_states[stage_offset_prev + prev_fold_idx];
+        // Simulate the initial folds
+        auto folds_h0_sim =
+            simulate_folds(*folds_h0_init, m_profile_d_span, *m_rng, *m_manager,
+                           0.0F, var_init, m_ntrials);
+        auto folds_h1_sim =
+            simulate_folds(*folds_h1_init, m_profile_d_span, *m_rng, *m_manager,
+                           m_bias_snr, var_init, m_ntrials);
 
-                if (prev_state.is_empty) {
-                    continue;
+        State initial_state;
+        FoldsType fold_state{std::move(folds_h0_sim), std::move(folds_h1_sim)};
+        const auto thresholds_idx = get_current_thresholds_idx(0);
+        for (SizeType ithres : thresholds_idx) {
+            auto [cur_state, cur_fold_state] = gen_next_using_thresh(
+                initial_state, fold_state, m_thresholds[ithres],
+                m_branching_pattern[0], m_bias_snr, m_profile_d_span,
+                m_box_score_widths_d_span, *m_rng, *m_manager, 1.0F, m_ntrials);
+
+            const auto iprob =
+                find_bin_index(m_probs, cur_state.success_h1_cumul);
+            if (iprob < 0 || iprob >= static_cast<IndexType>(m_nprobs)) {
+                continue;
+            }
+            const auto fold_idx         = (ithres * m_nprobs) + iprob;
+            m_states_d[fold_idx]        = cur_state;
+            m_folds_current_d[fold_idx] = std::move(cur_fold_state);
+        }
+    }
+
+    std::vector<SizeType> get_current_thresholds_idx(SizeType istage) const {
+        const auto guess       = m_guess_path[istage];
+        const auto half_extent = m_beam_width;
+        const auto lower_bound = std::max(0.0F, guess - half_extent);
+        const auto upper_bound =
+            std::min(m_thresholds.back(), guess + half_extent);
+
+        std::vector<SizeType> result;
+        for (SizeType i = 0; i < m_thresholds.size(); ++i) {
+            if (m_thresholds[i] >= lower_bound &&
+                m_thresholds[i] <= upper_bound) {
+                result.push_back(i);
+            }
+        }
+        return result;
+    }
+
+    void collect_transitions(TransitionBatch& batch,
+                             const std::vector<SizeType>& beam_idx_cur,
+                             const std::vector<SizeType>& beam_idx_prev,
+                             SizeType stage_offset_prev,
+                             SizeType istage,
+                             SizeType thres_neigh,
+                             float var_add) {
+        for (SizeType i = 0; i < beam_idx_cur.size(); ++i) {
+            const auto ithres = beam_idx_cur[i];
+            // Find nearest neighbors in the previous beam
+            const auto neighbour_beam_indices =
+                utils::find_neighbouring_indices(beam_idx_prev, ithres,
+                                                 thres_neigh);
+
+            for (SizeType jthresh : neighbour_beam_indices) {
+                for (SizeType kprob = 0; kprob < m_nprobs; ++kprob) {
+                    const auto prev_fold_idx = (jthresh * m_nprobs) + kprob;
+                    const auto prev_state =
+                        m_states_d[stage_offset_prev + prev_fold_idx];
+
+                    if (prev_state.is_empty)
+                        continue;
+
+                    const auto& prev_fold_state =
+                        m_folds_current_d[prev_fold_idx];
+                    if (!prev_fold_state.has_value() ||
+                        prev_fold_state->is_empty())
+                        continue;
+
+                    // Pre-allocate output buffers
+                    const auto ntrials_in_h0 =
+                        *prev_fold_state->folds_h0.ntrials();
+                    const auto ntrials_in_h1 =
+                        *prev_fold_state->folds_h1.ntrials();
+                    if (ntrials_in_h0 == 0 || ntrials_in_h1 == 0) {
+                        throw std::invalid_argument(
+                            "No trials in the input folds");
+                    }
+                    const auto repeat_factor_h0 = static_cast<SizeType>(
+                        std::ceil(static_cast<float>(m_ntrials) /
+                                  static_cast<float>(ntrials_in_h0)));
+                    const auto ntrials_out_h0 =
+                        repeat_factor_h0 * ntrials_in_h0;
+                    const auto repeat_factor_h1 = static_cast<SizeType>(
+                        std::ceil(static_cast<float>(m_ntrials) /
+                                  static_cast<float>(ntrials_in_h1)));
+                    const auto ntrials_out_h1 =
+                        repeat_factor_h1 * ntrials_in_h1;
+                    auto output_h0_sim = m_manager->allocate(
+                        ntrials_out_h0,
+                        *prev_fold_state->folds_h0.variance() + var_add);
+                    auto output_h1_sim = m_manager->allocate(
+                        ntrials_out_h1,
+                        *prev_fold_state->folds_h1.variance() + var_add);
+                    auto output_h0_pruned = m_manager->allocate(
+                        ntrials_out_h0, output_h0_sim->variance());
+                    auto output_h1_pruned = m_manager->allocate(
+                        ntrials_out_h1, output_h1_sim->variance());
+
+                    TransitionWorkItem item;
+                    item.threshold_idx  = ithres;
+                    item.prob_idx       = kprob;
+                    item.input_fold_idx = prev_fold_idx;
+                    item.input_state    = prev_state;
+                    item.threshold      = m_thresholds[ithres];
+                    item.nbranches      = m_branching_pattern[istage];
+                    item.input_h0_data  = prev_fold_state->folds_h0->raw_data();
+                    item.input_h1_data  = prev_fold_state->folds_h1->raw_data();
+                    item.input_h0_ntrials =
+                        prev_fold_state->folds_h0->ntrials();
+                    item.input_h1_ntrials =
+                        prev_fold_state->folds_h1->ntrials();
+                    item.output_h0_sim_data    = output_h0_sim->raw_data();
+                    item.output_h1_sim_data    = output_h1_sim->raw_data();
+                    item.output_h0_sim_ntrials = ntrials_out_h0;
+                    item.output_h1_sim_ntrials = ntrials_out_h1;
+                    item.output_h0_pruned_data = output_h0_pruned->raw_data();
+                    item.output_h1_pruned_data = output_h1_pruned->raw_data();
+
+                    batch.work_items_d.push_back(item);
+                    // Store handles for RAII
+                    m_temp_handles.push_back(std::move(output_h0_sim));
+                    m_temp_handles.push_back(std::move(output_h1_sim));
+                    m_temp_handles.push_back(std::move(output_h0_pruned));
+                    m_temp_handles.push_back(std::move(output_h1_pruned));
                 }
+            }
+        }
+    }
 
-                const auto& prev_fold_state = m_folds_in[prev_fold_idx];
-                if (prev_fold_state.has_value() &&
-                    !prev_fold_state->is_empty()) {
-                    auto [cur_state, cur_fold_state] =
-                        gen_next_using_thresh_cuda(
-                            prev_state, *prev_fold_state, m_thresholds[ithres],
-                            m_branching_pattern[istage], m_bias_snr,
-                            m_profile_d, m_box_score_widths_d, m_generator,
-                            1.0F, m_ntrials);
+    void run_segment(SizeType istage, SizeType thres_neigh) {
+        const float var_add          = 1.0F;
+        const auto beam_idx_cur      = get_current_thresholds_idx(istage);
+        const auto beam_idx_prev     = get_current_thresholds_idx(istage - 1);
+        const auto stage_offset_prev = (istage - 1) * m_nthresholds * m_nprobs;
+        const auto stage_offset_cur  = istage * m_nthresholds * m_nprobs;
+
+        // Step 1: Collect all transitions into batch
+        TransitionBatch batch;
+        const SizeType max_transitions =
+            beam_idx_cur.size() * thres_neigh * m_nprobs;
+        batch.reserve(max_transitions, m_ntrials * 2);
+
+        collect_transitions(batch, beam_idx_cur, beam_idx_prev,
+                            stage_offset_prev, istage, thres_neigh, var_add);
+
+        if (batch.work_items_d.empty())
+            return;
+
+        // Step 2: Process entire batch on GPU
+        process_transition_batch(batch, var_add);
+
+        // Step 3: Update states and folds from results
+        update_states_from_batch(batch, stage_offset_cur);
+    }
+
+    void update_states_from_batch(TransitionBatch& batch,
+                                  SizeType stage_offset_cur) {
+        // Copy results back from device (states and fold metadata)
+        thrust::copy(m_states_d.begin() + stage_offset_cur,
+                     m_states_d.begin() + stage_offset_cur +
+                         (m_nthresholds * m_nprobs),
+                     m_states.begin() + stage_offset_cur);
+
+        // Update m_folds_next with the new pointers and metadata
+        // (This part depends on how you want to structure the fold management)
+
+        // Clean up temporary handles
+        m_temp_handles.clear();
+    }
+
+    void process_transition_batch(TransitionBatch& batch, float var_add) {
+        const auto num_items = static_cast<int>(batch.work_items_d.size());
+
+        // Generate random seed and offset
+        const unsigned long long seed   = std::random_device{}();
+        const unsigned long long offset = 0;
+        // Launch unified kernel: one block per transition
+        const dim3 block_dim(256);
+        const dim3 grid_dim(num_items);
+        const size_t shared_mem_size = m_nbins * sizeof(float);
+        cuda::utils::check_kernel_launch_params(grid_dim, block_dim,
+                                                shared_mem_size);
+
+        process_transitions_unified_kernel<<<grid_dim, block_dim,
+                                             shared_mem_size>>>(
+            thrust::raw_pointer_cast(batch.work_items_d.data()), num_items,
+            thrust::raw_pointer_cast(m_profile_d.data()),
+            static_cast<int>(m_nbins),
+            thrust::raw_pointer_cast(m_box_score_widths_d.data()),
+            static_cast<int>(m_box_score_widths_d.size()), m_bias_snr, var_add,
+            m_ntrials, thrust::raw_pointer_cast(batch.probs_d.data()),
+            static_cast<int>(m_nprobs),
+            thrust::raw_pointer_cast(batch.scores_pool_d.data()),
+            thrust::raw_pointer_cast(batch.indices_pool_d.data()),
+            thrust::raw_pointer_cast(batch.results_d.data()), seed, offset);
+        cuda_utils::check_last_cuda_error("process_transitions_unified_kernel");
+
+        // Phase 2: Launch state update kernel
+        const dim3 update_block_dim(256);
+        const dim3 update_grid_dim((num_items + update_block_dim.x - 1) /
+                                   update_block_dim.x);
+
+        update_states_kernel<<<update_grid_dim, update_block_dim>>>(
+            thrust::raw_pointer_cast(batch.results_d.data()), num_items,
+            static_cast<int>(m_nprobs), stage_offset_cur,
+            thrust::raw_pointer_cast(m_states_d.data()),
+            thrust::raw_pointer_cast(m_fold_h0_ptrs_d.data()),
+            thrust::raw_pointer_cast(m_fold_h1_ptrs_d.data()),
+            thrust::raw_pointer_cast(m_fold_ntrials_h0_d.data()),
+            thrust::raw_pointer_cast(m_fold_ntrials_h1_d.data()),
+            thrust::raw_pointer_cast(m_fold_variances_h0_d.data()),
+            thrust::raw_pointer_cast(m_fold_variances_h1_d.data()));
+        cuda_utils::check_last_cuda_error("update_states_kernel");
+    }
+
+    void run_segment(SizeType istage, SizeType thres_neigh) {
+        const auto beam_idx_cur      = get_current_thresholds_idx(istage);
+        const auto beam_idx_prev     = get_current_thresholds_idx(istage - 1);
+        const auto stage_offset_prev = (istage - 1) * m_nthresholds * m_nprobs;
+        const auto stage_offset_cur  = istage * m_nthresholds * m_nprobs;
+        const auto m_profile_d_span  = cuda::std::span<const float>(
+            thrust::raw_pointer_cast(m_profile_d.data()), m_profile_d.size());
+        const auto m_box_score_widths_d_span = cuda::std::span<const SizeType>(
+            thrust::raw_pointer_cast(m_box_score_widths_d.data()),
+            m_box_score_widths_d.size());
+
+        for (SizeType i = 0; i < beam_idx_cur.size(); ++i) {
+            const auto ithres = beam_idx_cur[i];
+            // Find nearest neighbors in the previous beam
+            const auto neighbour_beam_indices =
+                utils::find_neighbouring_indices(beam_idx_prev, ithres,
+                                                 thres_neigh);
+            for (SizeType jthresh : neighbour_beam_indices) {
+                for (SizeType kprob = 0; kprob < m_nprobs; ++kprob) {
+                    const auto prev_fold_idx = (jthresh * m_nprobs) + kprob;
+                    const auto prev_state =
+                        m_states[stage_offset_prev + prev_fold_idx];
+
+                    if (prev_state.is_empty) {
+                        continue;
+                    }
+                    const auto& prev_fold_state =
+                        m_folds_current[prev_fold_idx];
+                    if (!prev_fold_state.has_value() ||
+                        prev_fold_state->is_empty()) {
+                        continue;
+                    }
+                    auto [cur_state, cur_fold_state] = gen_next_using_thresh(
+                        prev_state, *prev_fold_state, m_thresholds[ithres],
+                        m_branching_pattern[istage], m_bias_snr,
+                        m_profile_d_span, m_box_score_widths_d_span, *m_rng,
+                        *m_manager, 1.0F, m_ntrials);
 
                     const auto iprob =
                         find_bin_index(m_probs, cur_state.success_h1_cumul);
@@ -528,94 +1573,21 @@ void DynamicThresholdSchemeCUDA::Impl::run_segment(SizeType istage,
 
                     const auto cur_idx       = (ithres * m_nprobs) + iprob;
                     const auto cur_state_idx = stage_offset_cur + cur_idx;
-                    auto& existing_state     = m_states[cur_state_idx];
+
+                    auto& existing_state = m_states[cur_state_idx];
+                    auto& existing_folds = m_folds_next[cur_idx];
 
                     if (existing_state.is_empty ||
                         cur_state.complexity_cumul <
                             existing_state.complexity_cumul) {
-                        existing_state       = cur_state;
-                        m_folds_out[cur_idx] = std::move(cur_fold_state);
+                        existing_state = cur_state;
+                        existing_folds = std::move(cur_fold_state);
                     }
                 }
             }
         }
     }
-}
-
-void DynamicThresholdSchemeCUDA::Impl::run(SizeType thres_neigh) {
-    spdlog::info("Running dynamic threshold scheme on CUDA");
-    utils::ProgressGuard progress_guard(true);
-    auto bar = utils::make_standard_bar("Computing scheme...");
-
-    for (SizeType istage = 1; istage < m_nstages; ++istage) {
-        run_segment(istage, thres_neigh);
-        // swap fold buffers
-        std::swap(m_folds_in, m_folds_out);
-        std::ranges::fill(m_folds_out, std::nullopt);
-
-        const auto progress = static_cast<float>(istage) /
-                              static_cast<float>(m_nstages - 1) * 100.0F;
-        bar.set_progress(static_cast<SizeType>(progress));
-    }
-}
-
-std::string
-DynamicThresholdSchemeCUDA::Impl::save(const std::string& outdir) const {
-    const std::filesystem::path filebase = std::format(
-        "dynscheme_cuda_nstages_{:03d}_nthresh_{:03d}_nprobs_{:03d}_"
-        "ntrials_{:04d}_snr_{:04.1f}_ducy_{:04.2f}_beam_{:03.1f}.h5",
-        m_nstages, m_nthresholds, m_nprobs, m_ntrials, m_thresholds.back(),
-        m_ref_ducy, m_beam_width);
-    const std::filesystem::path filepath =
-        std::filesystem::path(outdir) / filebase;
-    HighFive::File file(filepath, HighFive::File::Overwrite);
-    // Save simple attributes
-    file.createAttribute("ntrials", m_ntrials);
-    file.createAttribute("snr_final", m_thresholds.back());
-    file.createAttribute("ref_ducy", m_ref_ducy);
-    file.createAttribute("ducy_max", m_ducy_max);
-    file.createAttribute("wtsp", m_wtsp);
-    file.createAttribute("beam_width", m_beam_width);
-
-    // Create dataset creation property list and enable compression
-    HighFive::DataSetCreateProps props;
-    props.add(HighFive::Chunking(std::vector<hsize_t>{1024}));
-    props.add(HighFive::Deflate(9));
-
-    // Save arrays
-    file.createDataSet("branching_pattern", m_branching_pattern);
-    file.createDataSet("profile", m_profile_h);
-    file.createDataSet("thresholds", m_thresholds);
-    file.createDataSet("probs", m_probs);
-    file.createDataSet("guess_path", m_guess_path);
-    // Define the 3D dataspace for states
-    std::vector<SizeType> dims = {m_nstages, m_nthresholds, m_nprobs};
-    HighFive::DataSetCreateProps props_states;
-    std::vector<hsize_t> chunk_dims(dims.begin(), dims.end());
-    props_states.add(HighFive::Chunking(chunk_dims));
-    auto dataset = file.createDataSet("states", HighFive::DataSpace(dims),
-                                      create_compound_state(), props_states);
-    dataset.write_raw(m_states.data());
-    spdlog::info("Saved dynamic threshold scheme to {}", filepath.string());
-    return filepath.string();
-}
-
-std::vector<SizeType>
-DynamicThresholdSchemeCUDA::Impl::get_current_thresholds_idx(
-    SizeType istage) const {
-    const auto guess       = m_guess_path[istage];
-    const auto half_extent = m_beam_width;
-    const auto lower_bound = std::max(0.0F, guess - half_extent);
-    const auto upper_bound = std::min(m_thresholds.back(), guess + half_extent);
-
-    std::vector<SizeType> result;
-    for (SizeType i = 0; i < m_thresholds.size(); ++i) {
-        if (m_thresholds[i] >= lower_bound && m_thresholds[i] <= upper_bound) {
-            result.push_back(i);
-        }
-    }
-    return result;
-}
+};
 
 DynamicThresholdSchemeCUDA::DynamicThresholdSchemeCUDA(
     std::span<const float> branching_pattern,

@@ -400,33 +400,6 @@ std::unique_ptr<FoldVectorHandle> prune_folds(const FoldVectorHandle& folds_in,
     return folds_out;
 }
 
-State gen_next_state(const State& state_cur,
-                     float threshold,
-                     float success_h0,
-                     float success_h1,
-                     float nbranches) {
-    const auto nleaves_next     = state_cur.complexity * nbranches;
-    const auto nleaves_surv     = nleaves_next * success_h0;
-    const auto complexity_cumul = state_cur.complexity_cumul + nleaves_next;
-    const auto success_h1_cumul = state_cur.success_h1_cumul * success_h1;
-
-    // Create a new state struct
-    State state_next;
-    state_next.success_h0       = success_h0;
-    state_next.success_h1       = success_h1;
-    state_next.complexity       = nleaves_surv;
-    state_next.complexity_cumul = complexity_cumul;
-    state_next.success_h1_cumul = success_h1_cumul;
-    state_next.nbranches        = nbranches;
-    state_next.threshold        = threshold;
-    state_next.cost             = complexity_cumul / success_h1_cumul;
-    state_next.is_empty         = false;
-    // For backtracking
-    state_next.threshold_prev        = state_cur.threshold;
-    state_next.success_h1_cumul_prev = state_cur.success_h1_cumul;
-    return state_next;
-}
-
 std::tuple<State, FoldsType>
 gen_next_using_thresh(const State& state_cur,
                       const FoldsType& folds_cur,
@@ -462,7 +435,7 @@ gen_next_using_thresh(const State& state_cur,
                             static_cast<float>(folds_h1_sim->ntrials());
 
     const auto state_next =
-        gen_next_state(state_cur, threshold, success_h0, success_h1, nbranches);
+        state_cur.gen_next(threshold, success_h0, success_h1, nbranches);
     return {state_next,
             FoldsType{std::move(folds_h0_pruned), std::move(folds_h1_pruned)}};
 }
@@ -503,8 +476,8 @@ gen_next_using_surv_prob(const State& state_cur,
     const auto success_h1 = static_cast<float>(folds_h1_pruned->ntrials()) /
                             static_cast<float>(folds_h1_sim->ntrials());
 
-    const auto state_next = gen_next_state(state_cur, threshold_h0, success_h0,
-                                           success_h1, nbranches);
+    const auto state_next =
+        state_cur.gen_next(threshold_h0, success_h0, success_h1, nbranches);
     return {state_next,
             FoldsType{std::move(folds_h0_pruned), std::move(folds_h1_pruned)}};
 }
@@ -525,6 +498,33 @@ HighFive::CompoundType create_compound_state() {
 }
 
 } // namespace
+
+State State::gen_next(float threshold,
+                      float success_h0,
+                      float success_h1,
+                      float nbranches) const noexcept {
+    const auto nleaves_next          = this->complexity * nbranches;
+    const auto nleaves_surv          = nleaves_next * success_h0;
+    const auto complexity_cumul_next = this->complexity_cumul + nleaves_next;
+    const auto success_h1_cumul_next = this->success_h1_cumul * success_h1;
+    const auto cost_next = complexity_cumul_next / success_h1_cumul_next;
+
+    // Create a new state struct
+    State state_next;
+    state_next.success_h0       = success_h0;
+    state_next.success_h1       = success_h1;
+    state_next.complexity       = nleaves_surv;
+    state_next.complexity_cumul = complexity_cumul_next;
+    state_next.success_h1_cumul = success_h1_cumul_next;
+    state_next.nbranches        = nbranches;
+    state_next.threshold        = threshold;
+    state_next.cost             = cost_next;
+    state_next.is_empty         = false;
+    // For backtracking
+    state_next.threshold_prev        = this->threshold;
+    state_next.success_h1_cumul_prev = this->success_h1_cumul;
+    return state_next;
+}
 
 // CPU-specific implementation
 class DynamicThresholdScheme::Impl {
@@ -590,6 +590,11 @@ public:
         m_states.resize(m_nstages * m_nthresholds * m_nprobs, State{});
         init_states();
     }
+    ~Impl()                          = default;
+    Impl(const Impl&)                = delete;
+    Impl& operator=(const Impl&)     = delete;
+    Impl(Impl&&) noexcept            = default;
+    Impl& operator=(Impl&&) noexcept = default;
 
     // Getters
     std::vector<float> get_branching_pattern() const {
@@ -794,14 +799,14 @@ private:
                     if (prev_state.is_empty) {
                         continue;
                     }
-                    const auto& prev_fold_state_opt =
+                    const auto& prev_fold_state =
                         m_folds_current[prev_fold_idx];
-                    if (!prev_fold_state_opt.has_value() ||
-                        prev_fold_state_opt->is_empty()) {
+                    if (!prev_fold_state.has_value() ||
+                        prev_fold_state->is_empty()) {
                         continue;
                     }
                     auto [cur_state, cur_fold_state] = gen_next_using_thresh(
-                        prev_state, *prev_fold_state_opt, m_thresholds[ithres],
+                        prev_state, *prev_fold_state, m_thresholds[ithres],
                         m_branching_pattern[istage], m_bias_snr, m_profile,
                         m_box_score_widths, *m_rng, *m_manager, 1.0F,
                         m_ntrials);
@@ -908,13 +913,12 @@ std::vector<State> evaluate_scheme(std::span<const float> thresholds,
                                    float snr_final,
                                    float ducy_max,
                                    float wtsp) {
-    if (thresholds.empty() || branching_pattern.empty()) {
-        throw std::invalid_argument("Input arrays cannot be empty");
-    }
-    if (thresholds.size() != branching_pattern.size()) {
-        throw std::invalid_argument(
-            "Number of thresholds must match the number of stages");
-    }
+    error_check::check(!thresholds.empty(), "thresholds cannot be empty");
+    error_check::check(!branching_pattern.empty(),
+                       "branching_pattern cannot be empty");
+    error_check::check_equal(thresholds.size(), branching_pattern.size(),
+                             "Number of thresholds must match the number of "
+                             "stages");
 
     const auto nstages = branching_pattern.size();
     const auto profile = simulation::generate_folded_profile(nbins, ref_ducy);
@@ -925,21 +929,31 @@ std::vector<State> evaluate_scheme(std::span<const float> thresholds,
     const float var_init = 1.0F;
     State initial_state;
     std::vector<State> states(nstages, initial_state);
-    std::vector<std::optional<FoldsType>> fold_states(nstages);
+
+    const auto slots_per_pool = 10;
+    auto manager =
+        std::make_unique<DualPoolFoldManager>(nbins, ntrials, slots_per_pool);
+    FoldGrid folds_current(1);
+    FoldGrid folds_next(1);
 
     math::ThreadSafeRNG rng(std::random_device{}());
-    const FoldVector folds_init(ntrials, nbins);
+    // Create initial fold vectors
+    auto folds_h0_init = manager->allocate(ntrials, 0.0F);
+    auto folds_h1_init = manager->allocate(ntrials, 0.0F);
+    std::fill(folds_h0_init->data().begin(), folds_h0_init->data().end(), 0.0F);
+    std::fill(folds_h1_init->data().begin(), folds_h1_init->data().end(), 0.0F);
     // Simulate the initial folds (pruning level = 0)
-    auto folds_h0 =
-        simulate_folds(folds_init, profile, rng, 0.0F, var_init, ntrials);
-    auto folds_h1 =
-        simulate_folds(folds_init, profile, rng, bias_snr, var_init, ntrials);
-    FoldsType initial_fold_state{std::move(folds_h0), std::move(folds_h1)};
+    auto folds_h0_sim = simulate_folds(*folds_h0_init, profile, rng, *manager,
+                                       0.0F, var_init, ntrials);
+    auto folds_h1_sim = simulate_folds(*folds_h1_init, profile, rng, *manager,
+                                       bias_snr, var_init, ntrials);
+    FoldsType initial_fold_state{std::move(folds_h0_sim),
+                                 std::move(folds_h1_sim)};
     for (SizeType istage = 0; istage < nstages; ++istage) {
         const auto prev_state =
             (istage == 0) ? initial_state : states[istage - 1];
         const auto& prev_fold_state =
-            (istage == 0) ? initial_fold_state : *fold_states[istage - 1];
+            (istage == 0) ? initial_fold_state : *folds_current[0];
         if (istage > 0 && prev_fold_state.is_empty()) {
             spdlog::info(
                 "Path not viable, No trials survived, stopping at stage {}",
@@ -949,9 +963,21 @@ std::vector<State> evaluate_scheme(std::span<const float> thresholds,
         auto [cur_state, cur_fold_state] = gen_next_using_thresh(
             prev_state, prev_fold_state, thresholds[istage],
             branching_pattern[istage], bias_snr, profile, box_score_widths, rng,
-            1.0F, ntrials);
-        states[istage]      = cur_state;
-        fold_states[istage] = std::move(cur_fold_state);
+            *manager, 1.0F, ntrials);
+        states[istage] = cur_state;
+        if (istage == 0) {
+            folds_current[0] = std::move(cur_fold_state);
+        } else {
+            folds_next[0] = std::move(cur_fold_state);
+        }
+        if (istage > 0) {
+            // Swap the folds
+            manager->swap_pools();
+            std::swap(folds_current, folds_next);
+            for (auto& fold_opt : folds_next) {
+                fold_opt.reset();
+            }
+        }
     }
     return states;
 }
@@ -964,13 +990,12 @@ std::vector<State> determine_scheme(std::span<const float> survive_probs,
                                     float snr_final,
                                     float ducy_max,
                                     float wtsp) {
-    if (survive_probs.empty() || branching_pattern.empty()) {
-        throw std::invalid_argument("Input arrays cannot be empty");
-    }
-    if (survive_probs.size() != branching_pattern.size()) {
-        throw std::invalid_argument(
-            "Number of survival probabilities must match the number of stages");
-    }
+    error_check::check(!survive_probs.empty(), "thresholds cannot be empty");
+    error_check::check(!branching_pattern.empty(),
+                       "branching_pattern cannot be empty");
+    error_check::check_equal(survive_probs.size(), branching_pattern.size(),
+                             "Number of thresholds must match the number of "
+                             "stages");
 
     const auto nstages = branching_pattern.size();
     const auto profile = simulation::generate_folded_profile(nbins, ref_ducy);
@@ -981,22 +1006,31 @@ std::vector<State> determine_scheme(std::span<const float> survive_probs,
     const float var_init = 1.0F;
     State initial_state;
     std::vector<State> states(nstages, initial_state);
-    std::vector<std::optional<FoldsType>> fold_states(nstages);
+
+    const auto slots_per_pool = 10;
+    auto manager =
+        std::make_unique<DualPoolFoldManager>(nbins, ntrials, slots_per_pool);
+    FoldGrid folds_current(1);
+    FoldGrid folds_next(1);
 
     math::ThreadSafeRNG rng(std::random_device{}());
-    const FoldVector folds_init(ntrials, nbins);
+    // Create initial fold vectors
+    auto folds_h0_init = manager->allocate(ntrials, 0.0F);
+    auto folds_h1_init = manager->allocate(ntrials, 0.0F);
+    std::fill(folds_h0_init->data().begin(), folds_h0_init->data().end(), 0.0F);
+    std::fill(folds_h1_init->data().begin(), folds_h1_init->data().end(), 0.0F);
     // Simulate the initial folds (pruning level = 0)
-    auto folds_h0 =
-        simulate_folds(folds_init, profile, rng, 0.0F, var_init, ntrials);
-    auto folds_h1 =
-        simulate_folds(folds_init, profile, rng, bias_snr, var_init, ntrials);
-    const FoldsType initial_fold_state{std::move(folds_h0),
-                                       std::move(folds_h1)};
+    auto folds_h0_sim = simulate_folds(*folds_h0_init, profile, rng, *manager,
+                                       0.0F, var_init, ntrials);
+    auto folds_h1_sim = simulate_folds(*folds_h1_init, profile, rng, *manager,
+                                       bias_snr, var_init, ntrials);
+    FoldsType initial_fold_state{std::move(folds_h0_sim),
+                                 std::move(folds_h1_sim)};
     for (SizeType istage = 0; istage < nstages; ++istage) {
         const auto prev_state =
             (istage == 0) ? initial_state : states[istage - 1];
         const auto& prev_fold_state =
-            (istage == 0) ? initial_fold_state : *fold_states[istage - 1];
+            (istage == 0) ? initial_fold_state : *folds_current[0];
         if (istage > 0 && prev_fold_state.is_empty()) {
             spdlog::info(
                 "Path not viable, No trials survived, stopping at stage {}",
@@ -1006,9 +1040,21 @@ std::vector<State> determine_scheme(std::span<const float> survive_probs,
         auto [cur_state, cur_fold_state] = gen_next_using_surv_prob(
             prev_state, prev_fold_state, survive_probs[istage],
             branching_pattern[istage], bias_snr, profile, box_score_widths, rng,
-            1.0F, ntrials);
-        states[istage]      = cur_state;
-        fold_states[istage] = cur_fold_state;
+            *manager, 1.0F, ntrials);
+        states[istage] = cur_state;
+        if (istage == 0) {
+            folds_current[0] = std::move(cur_fold_state);
+        } else {
+            folds_next[0] = std::move(cur_fold_state);
+        }
+        if (istage > 0) {
+            // Swap the folds
+            manager->swap_pools();
+            std::swap(folds_current, folds_next);
+            for (auto& fold_opt : folds_next) {
+                fold_opt.reset();
+            }
+        }
     }
     return states;
 }

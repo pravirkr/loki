@@ -34,17 +34,17 @@ void rfft_batch_cuda(cuda::std::span<float> real_input,
     auto* complex_ptr = reinterpret_cast<cufftComplex*>(complex_output.data());
 
     cufftHandle plan;
-    cuda_utils::check_cuda_call(
+    cuda_utils::check_cufft_call(
         cufftPlan1d(&plan, n_real, CUFFT_R2C, batch_size),
         "RFFT CUDA: cufftPlan1d failed");
     if (stream != nullptr) {
-        cuda_utils::check_cuda_call(cufftSetStream(plan, stream),
-                                    "RFFT CUDA: cufftSetStream failed");
+        cuda_utils::check_cufft_call(cufftSetStream(plan, stream),
+                                     "RFFT CUDA: cufftSetStream failed");
     }
-    cuda_utils::check_cuda_call(cufftExecR2C(plan, real_ptr, complex_ptr),
-                                "RFFT CUDA: cufftExecR2C failed");
-    cuda_utils::check_cuda_call(cufftDestroy(plan),
-                                "RFFT CUDA: cufftDestroy failed");
+    cuda_utils::check_cufft_call(cufftExecR2C(plan, real_ptr, complex_ptr),
+                                 "RFFT CUDA: cufftExecR2C failed");
+    cuda_utils::check_cufft_call(cufftDestroy(plan),
+                                 "RFFT CUDA: cufftDestroy failed");
     spdlog::debug("RFFT CUDA batch completed: {} transforms of size {}",
                   batch_size, n_real);
 }
@@ -69,17 +69,17 @@ void irfft_batch_cuda(cuda::std::span<ComplexTypeCUDA> complex_input,
 
     // Create cuFFT plan
     cufftHandle plan;
-    cuda_utils::check_cuda_call(
+    cuda_utils::check_cufft_call(
         cufftPlan1d(&plan, n_real, CUFFT_C2R, batch_size),
         "IRFFT CUDA: cufftPlan1d failed");
     if (stream != nullptr) {
-        cuda_utils::check_cuda_call(cufftSetStream(plan, stream),
-                                    "IRFFT CUDA: cufftSetStream failed");
+        cuda_utils::check_cufft_call(cufftSetStream(plan, stream),
+                                     "IRFFT CUDA: cufftSetStream failed");
     }
-    cuda_utils::check_cuda_call(cufftExecC2R(plan, complex_ptr, real_ptr),
-                                "IRFFT CUDA: cufftExecC2R failed");
-    cuda_utils::check_cuda_call(cufftDestroy(plan),
-                                "IRFFT CUDA: cufftDestroy failed");
+    cuda_utils::check_cufft_call(cufftExecC2R(plan, complex_ptr, real_ptr),
+                                 "IRFFT CUDA: cufftExecC2R failed");
+    cuda_utils::check_cufft_call(cufftDestroy(plan),
+                                 "IRFFT CUDA: cufftDestroy failed");
     // Apply normalization (cuFFT C2R doesn't normalize automatically)
     const float norm         = 1.0F / static_cast<float>(n_real);
     const int total_elements = batch_size * n_real;

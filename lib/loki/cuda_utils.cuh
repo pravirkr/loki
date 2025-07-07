@@ -5,9 +5,11 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <variant>
 
 #include <cuda_runtime.h>
 #include <cufft.h>
+#include <curand.h>
 
 namespace loki::cuda_utils {
 
@@ -16,44 +18,100 @@ namespace {
 constexpr std::string_view cufft_error_string(cufftResult error) noexcept {
     switch (error) {
     case CUFFT_SUCCESS:
-        return "CUFFT_SUCCESS";
+        return "CUFFT_SUCCESS: The cuFFT operation was successful.";
     case CUFFT_INVALID_PLAN:
-        return "CUFFT_INVALID_PLAN";
+        return "CUFFT_INVALID_PLAN: cuFFT was passed an invalid plan handle.";
     case CUFFT_ALLOC_FAILED:
-        return "CUFFT_ALLOC_FAILED";
-    case CUFFT_INVALID_TYPE:
-        return "CUFFT_INVALID_TYPE";
+        return "CUFFT_ALLOC_FAILED: cuFFT failed to allocate GPU or CPU "
+               "memory.";
     case CUFFT_INVALID_VALUE:
-        return "CUFFT_INVALID_VALUE";
+        return "CUFFT_INVALID_VALUE: User specified an invalid pointer or "
+               "parameter";
     case CUFFT_INTERNAL_ERROR:
-        return "CUFFT_INTERNAL_ERROR";
+        return "CUFFT_INTERNAL_ERROR: Driver or internal cuFFT library error";
     case CUFFT_EXEC_FAILED:
-        return "CUFFT_EXEC_FAILED";
+        return "CUFFT_EXEC_FAILED: Failed to execute an FFT on the GPU";
     case CUFFT_SETUP_FAILED:
-        return "CUFFT_SETUP_FAILED";
+        return "CUFFT_SETUP_FAILED: The cuFFT library failed to initialize";
     case CUFFT_INVALID_SIZE:
-        return "CUFFT_INVALID_SIZE";
-    case CUFFT_UNALIGNED_DATA:
-        return "CUFFT_UNALIGNED_DATA";
+        return "CUFFT_INVALID_SIZE: User specified an invalid transform size";
+    case CUFFT_INCOMPLETE_PARAMETER_LIST:
+        return "CUFFT_INCOMPLETE_PARAMETER_LIST: Missing parameters in call";
+    case CUFFT_INVALID_DEVICE:
+        return "CUFFT_INVALID_DEVICE: Execution of a plan was on different GPU "
+               "than plan creation";
+    case CUFFT_PARSE_ERROR:
+        return "CUFFT_PARSE_ERROR: Internal plan database error";
+    case CUFFT_NO_WORKSPACE:
+        return "CUFFT_NO_WORKSPACE: No workspace has been provided prior to "
+               "plan execution";
+    case CUFFT_NOT_IMPLEMENTED:
+        return "CUFFT_NOT_IMPLEMENTED: Function does not implement "
+               "functionality for parameters given.";
+    case CUFFT_NOT_SUPPORTED:
+        return "CUFFT_NOT_SUPPORTED: Operation is not supported for parameters "
+               "given.";
     default:
         return "Unknown cuFFT error";
+    }
+}
+
+constexpr std::string_view curand_error_string(curandStatus_t error) noexcept {
+    switch (error) {
+    case CURAND_STATUS_SUCCESS:
+        return "CURAND_STATUS_SUCCESS: No errors.";
+    case CURAND_STATUS_VERSION_MISMATCH:
+        return "CURAND_STATUS_VERSION_MISMATCH: Header file and linked library "
+               "version do not match.";
+    case CURAND_STATUS_NOT_INITIALIZED:
+        return "CURAND_STATUS_NOT_INITIALIZED: Generator not initialized.";
+    case CURAND_STATUS_ALLOCATION_FAILED:
+        return "CURAND_STATUS_ALLOCATION_FAILED: Memory allocation failed.";
+    case CURAND_STATUS_TYPE_ERROR:
+        return "CURAND_STATUS_TYPE_ERROR: Generator is wrong type.";
+    case CURAND_STATUS_OUT_OF_RANGE:
+        return "CURAND_STATUS_OUT_OF_RANGE: Argument out of range.";
+    case CURAND_STATUS_LENGTH_NOT_MULTIPLE:
+        return "CURAND_STATUS_LENGTH_NOT_MULTIPLE: Length requested is not a "
+               "multple of dimension.";
+    case CURAND_STATUS_DOUBLE_PRECISION_REQUIRED:
+        return "CURAND_STATUS_DOUBLE_PRECISION_REQUIRED: GPU does not have "
+               "double precision required by MRG32k3a.";
+    case CURAND_STATUS_LAUNCH_FAILURE:
+        return "CURAND_STATUS_LAUNCH_FAILURE: Kernel launch failure.";
+    case CURAND_STATUS_PREEXISTING_FAILURE:
+        return "CURAND_STATUS_PREEXISTING_FAILURE: Preexisting failure on "
+               "library entry.";
+    case CURAND_STATUS_INITIALIZATION_FAILED:
+        return "CURAND_STATUS_INITIALIZATION_FAILED: Initialization of CUDA "
+               "failed.";
+    case CURAND_STATUS_ARCH_MISMATCH:
+        return "CURAND_STATUS_ARCH_MISMATCH: Architecture mismatch, GPU does "
+               "not support requested feature.";
+    case CURAND_STATUS_INTERNAL_ERROR:
+        return "CURAND_STATUS_INTERNAL_ERROR: Internal library error.";
+    default:
+        return "Unknown cuRAND error";
     }
 }
 } // namespace
 
 /**
- * @brief Custom exception class for CUDA errors.
+ * @brief Unified exception class for all CUDA-related library errors.
  */
 class CudaException : public std::runtime_error {
 public:
+    // Error type identification
+    enum class ErrorType { Cuda, Cufft, Curand };
+
     // Constructor for cudaError_t
     explicit CudaException(
         cudaError_t code,
         std::string_view user_msg       = "",
         const std::source_location& loc = std::source_location::current())
-        : std::runtime_error(format_cuda_error(code, user_msg, loc)),
-          m_code(static_cast<int>(code)),
-          m_is_cuda(true),
+        : std::runtime_error(format_error(code, user_msg, loc)),
+          m_error_code(code),
+          m_error_type(ErrorType::Cuda),
           m_file(loc.file_name()),
           m_line(loc.line()),
           m_func(loc.function_name()),
@@ -64,63 +122,83 @@ public:
         cufftResult code,
         std::string_view user_msg       = "",
         const std::source_location& loc = std::source_location::current())
-        : std::runtime_error(format_cufft_error(code, user_msg, loc)),
-          m_code(static_cast<int>(code)),
-          m_is_cuda(false),
+        : std::runtime_error(format_error(code, user_msg, loc)),
+          m_error_code(code),
+          m_error_type(ErrorType::Cufft),
           m_file(loc.file_name()),
           m_line(loc.line()),
           m_func(loc.function_name()),
           m_user_msg(user_msg) {}
 
-    [[nodiscard]] constexpr int code() const noexcept { return m_code; }
-    [[nodiscard]] constexpr bool is_cuda_error() const noexcept {
-        return m_is_cuda;
-    }
-    [[nodiscard]] constexpr const char* file() const noexcept { return m_file; }
-    [[nodiscard]] constexpr uint32_t line() const noexcept { return m_line; }
-    [[nodiscard]] constexpr const char* function() const noexcept {
-        return m_func;
-    }
-    [[nodiscard]] constexpr std::string_view user_message() const noexcept {
+    // Constructor for curandStatus_t
+    explicit CudaException(
+        curandStatus_t code,
+        std::string_view user_msg       = "",
+        const std::source_location& loc = std::source_location::current())
+        : std::runtime_error(format_error(code, user_msg, loc)),
+          m_error_code(code),
+          m_error_type(ErrorType::Curand),
+          m_file(loc.file_name()),
+          m_line(loc.line()),
+          m_func(loc.function_name()),
+          m_user_msg(user_msg) {}
+
+    [[nodiscard]] ErrorType error_type() const noexcept { return m_error_type; }
+    [[nodiscard]] const char* file() const noexcept { return m_file; }
+    [[nodiscard]] uint32_t line() const noexcept { return m_line; }
+    [[nodiscard]] const char* function() const noexcept { return m_func; }
+    [[nodiscard]] std::string_view user_message() const noexcept {
         return m_user_msg;
     }
+    template <typename T> [[nodiscard]] T code() const {
+        return std::get<T>(m_error_code);
+    }
+    // Get error string for the specific error type
     [[nodiscard]] std::string error_string() const {
-        return m_is_cuda ? cudaGetErrorString(static_cast<cudaError_t>(m_code))
-                         : std::string(cufft_error_string(
-                               static_cast<cufftResult>(m_code)));
+        return std::visit(
+            [](auto&& error) -> std::string {
+                using T = std::decay_t<decltype(error)>;
+                if constexpr (std::is_same_v<T, cudaError_t>) {
+                    return cudaGetErrorString(error);
+                } else if constexpr (std::is_same_v<T, cufftResult>) {
+                    return std::string(cufft_error_string(error));
+                } else if constexpr (std::is_same_v<T, curandStatus_t>) {
+                    return std::string(curand_error_string(error));
+                }
+            },
+            m_error_code);
     }
 
 private:
-    int m_code;
-    bool m_is_cuda;
+    std::variant<cudaError_t, cufftResult, curandStatus_t> m_error_code;
+    ErrorType m_error_type;
     const char* m_file;
     uint32_t m_line;
     const char* m_func;
     std::string m_user_msg;
 
-    // Helper to format the what() message for CUDA errors
-    static std::string format_cuda_error(cudaError_t code,
-                                         std::string_view user_msg,
-                                         const std::source_location& loc) {
-        auto base_msg =
-            std::format("CUDA Error [{}]: {}", static_cast<int>(code),
-                        cudaGetErrorString(code));
-        return user_msg.empty()
-                   ? std::format("{} in {} ({}:{})", base_msg,
-                                 loc.function_name(), loc.file_name(),
-                                 loc.line())
-                   : std::format("{} in {} ({}:{}): {}", base_msg,
-                                 loc.function_name(), loc.file_name(),
-                                 loc.line(), user_msg);
-    }
+    // Generic error formatting using std::visit
+    template <typename ErrorCode>
+    static std::string format_error(ErrorCode code,
+                                    std::string_view user_msg,
+                                    const std::source_location& loc) {
+        std::string library_name;
+        std::string error_desc;
 
-    // Helper to format the what() message for cuFFT errors
-    static std::string format_cufft_error(cufftResult code,
-                                          std::string_view user_msg,
-                                          const std::source_location& loc) {
-        auto base_msg =
-            std::format("cuFFT Error [{}]: {}", static_cast<int>(code),
-                        cufft_error_string(code));
+        if constexpr (std::is_same_v<ErrorCode, cudaError_t>) {
+            library_name = "CUDA";
+            error_desc   = cudaGetErrorString(code);
+        } else if constexpr (std::is_same_v<ErrorCode, cufftResult>) {
+            library_name = "cuFFT";
+            error_desc   = cufft_error_string(code);
+        } else if constexpr (std::is_same_v<ErrorCode, curandStatus_t>) {
+            library_name = "cuRAND";
+            error_desc   = curand_error_string(code);
+        }
+
+        auto base_msg = std::format("{} Error [{}]: {}", library_name,
+                                    static_cast<int>(code), error_desc);
+
         return user_msg.empty()
                    ? std::format("{} in {} ({}:{})", base_msg,
                                  loc.function_name(), loc.file_name(),
@@ -143,10 +221,19 @@ check_cuda_call(cudaError_t result,
 }
 
 inline void
-check_cuda_call(cufftResult result,
-                std::string_view msg     = "",
-                std::source_location loc = std::source_location::current()) {
+check_cufft_call(cufftResult result,
+                 std::string_view msg     = "",
+                 std::source_location loc = std::source_location::current()) {
     if (result != CUFFT_SUCCESS) {
+        throw CudaException(result, msg, loc);
+    }
+}
+
+inline void
+check_curand_call(curandStatus_t result,
+                  std::string_view msg     = "",
+                  std::source_location loc = std::source_location::current()) {
+    if (result != CURAND_STATUS_SUCCESS) {
         throw CudaException(result, msg, loc);
     }
 }
@@ -179,7 +266,7 @@ inline void check_cuda_sync_error(
 inline void check_kernel_launch_params(
     dim3 grid,
     dim3 block,
-    size_t shmem_size = 0,
+    size_t shmem_size              = 0,
     const std::source_location loc = std::source_location::current()) {
     int device;
     cudaDeviceProp props{};

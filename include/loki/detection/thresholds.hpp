@@ -27,6 +27,11 @@ struct State {
     bool is_empty{true};
 
     State() = default;
+
+    State gen_next(float threshold,
+                   float success_h0,
+                   float success_h1,
+                   float nbranches) const noexcept;
 };
 
 class DynamicThresholdScheme {
@@ -88,6 +93,27 @@ std::vector<State> determine_scheme(std::span<const float> survive_probs,
                                     float wtsp       = 1.0F);
 
 #ifdef LOKI_ENABLE_CUDA
+
+struct StateD {
+    float success_h0{1.0F};
+    float success_h1{1.0F};
+    float complexity{1.0F};
+    float complexity_cumul{1.0F};
+    float success_h1_cumul{1.0F};
+    float nbranches{1.0F};
+    float threshold{-1.0F};
+    float cost{1.0F};
+    float threshold_prev{-1.0F};
+    float success_h1_cumul_prev{1.0F};
+    bool is_empty{true};
+
+    __host__ __device__ StateD() = default;
+
+    __host__ __device__ StateD gen_next(float threshold,
+                                        float success_h0,
+                                        float success_h1,
+                                        float nbranches) const noexcept;
+};
 
 class DynamicThresholdSchemeCUDA {
 public:

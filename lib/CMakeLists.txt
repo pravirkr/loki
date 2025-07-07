@@ -154,7 +154,7 @@ if(CMAKE_CUDA_COMPILER)
   target_link_libraries(
     ${LOKI_LIBRARY_NAME}
     PRIVATE ${LOKI_CUDA_OPTIONS}
-    PUBLIC CUDA::cudart CUDA::cufft
+    PUBLIC CUDA::cudart CUDA::cufft CUDA::curand
     PRIVATE CUDA::cuda_driver
   )
 endif()
