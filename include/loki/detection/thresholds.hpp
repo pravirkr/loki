@@ -98,7 +98,7 @@ struct StateD {
     float success_h0{1.0F};
     float success_h1{1.0F};
     float complexity{1.0F};
-    float complexity_cumul{1.0F};
+    float complexity_cumul{std::numeric_limits<float>::infinity()};
     float success_h1_cumul{1.0F};
     float nbranches{1.0F};
     float threshold{-1.0F};
@@ -113,6 +113,7 @@ struct StateD {
                                         float success_h0,
                                         float success_h1,
                                         float nbranches) const noexcept;
+    __host__ __device__ State to_state() const;
 };
 
 class DynamicThresholdSchemeCUDA {

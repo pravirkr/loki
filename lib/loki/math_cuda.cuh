@@ -2,12 +2,13 @@
 
 #include <cuda/std/span>
 #include <cuda_runtime.h>
-#include <curand.h>
+//#include <curand.h>
 
 #include "loki/cuda_utils.cuh"
 
 namespace loki::math {
 
+#if 0
 class CuRandRNG {
 private:
     curandGenerator_t m_gen;
@@ -74,5 +75,6 @@ public:
             m_gen, range.data(), range.size(), mean, stddev));
     }
 };
+#endif
 
 } // namespace loki::math
