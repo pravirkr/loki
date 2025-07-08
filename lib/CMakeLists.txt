@@ -46,7 +46,7 @@ CPMFindPackage(
   OPTIONS "XTENSOR_USE_XSIMD ON" "XTENSOR_USE_OPENMP ON"
 )
 
-# Try to find header-only Boost for math(no COMPONENTS needed)
+# Try to find header-only Boost for math+random(no COMPONENTS needed)
 find_package(Boost 1.83.0 QUIET)
 if(NOT Boost_FOUND)
   message(STATUS "Boost not found or too old, downloading Boost.Math via CPM...")
@@ -56,15 +56,27 @@ if(NOT Boost_FOUND)
     URL https://github.com/boostorg/math/archive/refs/tags/boost-1.83.0.tar.gz
     DOWNLOAD_ONLY YES
   )
+  CPMAddPackage(
+    NAME BoostRandom
+    VERSION 1.83.0
+    URL https://github.com/boostorg/random/archive/refs/tags/boost-1.83.0.tar.gz
+    DOWNLOAD_ONLY YES
+  )
   if(BoostMath_ADDED)
     add_library(Boost::math INTERFACE IMPORTED GLOBAL)
     target_include_directories(Boost::math INTERFACE ${BoostMath_SOURCE_DIR}/include)
   endif()
+  if(BoostRandom_ADDED)
+    add_library(Boost::random INTERFACE IMPORTED GLOBAL)
+    target_include_directories(Boost::random INTERFACE ${BoostRandom_SOURCE_DIR}/include)
+  endif()
 else()
   # Use system headers
-  message(STATUS "Using system Boost headers for math: ${Boost_INCLUDE_DIRS}")
+  message(STATUS "Using system Boost headers for math+random: ${Boost_INCLUDE_DIRS}")
   add_library(Boost::math INTERFACE IMPORTED GLOBAL)
   target_include_directories(Boost::math INTERFACE ${Boost_INCLUDE_DIRS})
+  add_library(Boost::random INTERFACE IMPORTED GLOBAL)
+  target_include_directories(Boost::random INTERFACE ${Boost_INCLUDE_DIRS})
 endif()
 
 # HighFive (HDF5 C++ interface) - Depends on HDF5 found earlier
@@ -97,6 +109,31 @@ CPMAddPackage(
 if(BS_thread_pool_ADDED)
   add_library(BS_thread_pool INTERFACE IMPORTED GLOBAL)
   target_include_directories(BS_thread_pool INTERFACE ${BS_thread_pool_SOURCE_DIR}/include)
+endif()
+
+# cuRANDDx (mathdx)
+if(CMAKE_CUDA_COMPILER)
+  find_package(mathdx QUIET COMPONENTS curanddx CONFIG)
+  if(curanddx_FOUND)
+    message(STATUS "Found cuRANDDx (mathdx): ${mathdx_INCLUDE_DIRS}")
+  else()
+    message(STATUS "cuRANDDx (mathdx) not found, downloading via CPM...")
+    CPMAddPackage(
+      NAME mathdx
+      VERSION 25.01.1
+      URL https://developer.nvidia.com/downloads/compute/cuRANDDx/redist/cuRANDDx/nvidia-mathdx-25.01.1.tar.gz
+      DOWNLOAD_ONLY YES
+    )
+    if(mathdx_ADDED)
+      add_library(mathdx::curanddx INTERFACE IMPORTED GLOBAL)
+      target_include_directories(
+        mathdx::curanddx INTERFACE ${mathdx_SOURCE_DIR}/nvidia/mathdx/25.01/include
+      )
+    endif()
+  endif()
+  # Set the SM version to your target architecture for best performance.
+  find_package(CURANDDX_SM REQUIRED)
+  target_compile_definitions(mathdx::curanddx INTERFACE CURANDDX_SM=${CURANDDX_SM})
 endif()
 
 # Code coverage setup
@@ -136,7 +173,7 @@ endif()
 # Link libraries
 target_link_libraries(
   ${LOKI_LIBRARY_NAME}
-  PRIVATE ${LOKI_COMPILE_OPTIONS} coverage_config 
+  PRIVATE ${LOKI_COMPILE_OPTIONS} coverage_config
   PUBLIC OpenMP::OpenMP_CXX
          HDF5::HDF5
          FFTW::Float
@@ -144,6 +181,7 @@ target_link_libraries(
          spdlog::spdlog_header_only
          xtensor
          Boost::math
+         Boost::random
          HighFive
          indicators::indicators
          BS_thread_pool
@@ -154,7 +192,7 @@ if(CMAKE_CUDA_COMPILER)
   target_link_libraries(
     ${LOKI_LIBRARY_NAME}
     PRIVATE ${LOKI_CUDA_OPTIONS}
-    PUBLIC CUDA::cudart CUDA::cufft CUDA::curand
+    PUBLIC CUDA::cudart CUDA::cufft mathdx::curanddx
     PRIVATE CUDA::cuda_driver
   )
 endif()

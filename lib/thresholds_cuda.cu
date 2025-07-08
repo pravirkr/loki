@@ -17,6 +17,7 @@
 #include <thrust/copy.h>
 #include <thrust/device_vector.h>
 #include <thrust/execution_policy.h>
+#include <thrust/for_each.h>
 #include <thrust/host_vector.h>
 #include <thrust/partition.h>
 #include <thrust/remove.h>
@@ -40,11 +41,9 @@
 namespace loki::detection {
 
 // Define the cuRANDDx Generator Descriptor.
-// NOTE: Set the SM version to your target architecture for best performance.
-// An L40S is Ada Lovelace (sm_89), so SM<800> is a compatible and good choice.
 using RNG = decltype(curanddx::Generator<curanddx::philox4_32>() +
-                     curanddx::PhiloxRounds<10>() + curanddx::SM<800>() +
-                     curanddx::Thread());
+                     curanddx::PhiloxRounds<10>() +
+                     curanddx::SM<CURANDDX_SM>() + curanddx::Thread());
 
 namespace {
 class DualPoolFoldManager;
@@ -189,8 +188,8 @@ public:
         std::lock_guard<std::mutex> lock(m_mutex);
 
         // Determine which pool the pointer belongs to and release it.
-        auto pool_a_start = thrust::raw_pointer_cast(m_data_a.data());
-        auto pool_b_start = thrust::raw_pointer_cast(m_data_b.data());
+        auto* pool_a_start = thrust::raw_pointer_cast(m_data_a.data());
+        auto* pool_b_start = thrust::raw_pointer_cast(m_data_b.data());
 
         if (data_ptr >= pool_a_start &&
             data_ptr < pool_a_start + m_data_a.size()) {
@@ -315,39 +314,67 @@ struct FoldsType {
     ~FoldsType() = default;
 };
 
+struct FoldsDeviceData {
+    const float* folds_h0_data;
+    const float* folds_h1_data;
+    int folds_h0_ntrials;
+    int folds_h1_ntrials;
+    float folds_h0_variance;
+    float folds_h1_variance;
+    bool is_empty;
+
+    __device__ __host__ FoldsDeviceData()
+        : folds_h0_data(nullptr),
+          folds_h1_data(nullptr),
+          folds_h0_ntrials(0),
+          folds_h1_ntrials(0),
+          folds_h0_variance(0.0f),
+          folds_h1_variance(0.0f),
+          is_empty(true) {}
+
+    __device__ __host__ FoldsDeviceData(const FoldsType& folds)
+        : folds_h0_data(folds.folds_h0 ? folds.folds_h0->raw_data() : nullptr),
+          folds_h1_data(folds.folds_h1 ? folds.folds_h1->raw_data() : nullptr),
+          folds_h0_ntrials(folds.folds_h0 ? folds.folds_h0->ntrials() : 0),
+          folds_h1_ntrials(folds.folds_h1 ? folds.folds_h1->ntrials() : 0),
+          folds_h0_variance(folds.folds_h0 ? folds.folds_h0->variance() : 0.0f),
+          folds_h1_variance(folds.folds_h1 ? folds.folds_h1->variance() : 0.0f),
+          is_empty(folds.is_empty()) {}
+};
+
 // Batch transition data for parallel processing
-struct TransitionWorkItem {
-    SizeType threshold_idx;
-    SizeType prob_idx;
-    SizeType input_fold_idx;
+struct TransitionWorkItem { // NOLINT
+    int threshold_idx;
+    int prob_idx;
+    int input_fold_idx;
     StateD input_state;
     float threshold;
     float nbranches;
     // Input fold info
     const float* input_h0_data;
     const float* input_h1_data;
-    SizeType input_h0_ntrials;
-    SizeType input_h1_ntrials;
+    int input_h0_ntrials;
+    int input_h1_ntrials;
     float input_variance;
     // Output buffer pointers (pre-allocated)
     float* output_h0_sim_data;
     float* output_h1_sim_data;
-    SizeType output_h0_sim_ntrials;
-    SizeType output_h1_sim_ntrials;
+    int output_h0_sim_ntrials;
+    int output_h1_sim_ntrials;
     float* output_h0_pruned_data;
     float* output_h1_pruned_data;
 };
 
-struct TransitionResult {
-    SizeType threshold_idx; // ithres
-    SizeType prob_idx;      // computed iprob from success_h1_cumul
+struct TransitionResult { // NOLINT
+    int threshold_idx;
+    int prob_idx;
     StateD computed_state;
-    float* output_h0_data; // Points to pruned data in device memory
-    float* output_h1_data; // Points to pruned data in device memory
+    float* output_h0_data;
+    float* output_h1_data;
     float output_variance;
-    SizeType output_ntrials_h0;
-    SizeType output_ntrials_h1;
-    bool invalid; // true if this result should be ignored
+    int output_ntrials_h0;
+    int output_ntrials_h1;
+    bool invalid;
 };
 
 struct TransitionBatch {
@@ -379,7 +406,7 @@ __global__ void simulate_folds_kernel(float* __restrict__ folds_out,
                                       int ntrials_in,
                                       int nbins,
                                       float bias_snr) {
-    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const int i = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (i >= ntrials_out * nbins)
         return;
 
@@ -497,16 +524,21 @@ __device__ float compute_snr_boxcar_score(const float* folds,
     return max_score;
 }
 
-__device__ SizeType find_bin_index_device(const float* bins,
-                                          SizeType nbins,
-                                          float value) {
-    // Binary search or linear search for small arrays
-    for (SizeType i = 0; i < nbins - 1; ++i) {
-        if (value >= bins[i] && value < bins[i + 1]) {
-            return i;
+__device__ int find_bin_index_device(const float* __restrict__ probs,
+                                     int nprobs,
+                                     float value) {
+    // value below first bin
+    if (value < probs[0]) {
+        return -1;
+    }
+    // scan for the first bin > value
+    for (int i = 1; i < nprobs; ++i) {
+        if (value < probs[i]) {
+            return i - 1;
         }
     }
-    return nbins - 1; // Handle edge case
+    // value >= last edge
+    return nprobs - 1;
 }
 
 __device__ void simulate_transition_phase(const TransitionWorkItem& work_item,
@@ -514,12 +546,12 @@ __device__ void simulate_transition_phase(const TransitionWorkItem& work_item,
                                           int nbins,
                                           float bias_snr,
                                           float var_add,
-                                          unsigned long long seed,
-                                          unsigned long long offset) {
-    extern __shared__ float shared_profile_scaled[]; // nbins elements
-    const int tid        = threadIdx.x;
-    const int block_size = blockDim.x;
-    const int block_id   = blockIdx.x;
+                                          uint64_t seed,
+                                          uint64_t offset) {
+    extern __shared__ float shared_profile_scaled[]; // NOLINT
+    const int tid        = static_cast<int>(threadIdx.x);
+    const int block_size = static_cast<int>(blockDim.x);
+    const int block_id   = static_cast<int>(blockIdx.x);
 
     // Pre-scale profile for H1 (shared across all threads in block)
     for (int i = tid; i < nbins; i += block_size) {
@@ -528,40 +560,40 @@ __device__ void simulate_transition_phase(const TransitionWorkItem& work_item,
     __syncthreads();
 
     // Calculate total elements to process for both H0 and H1
-    const SizeType total_elements_h0 = work_item.output_h0_sim_ntrials * nbins;
-    const SizeType total_elements_h1 = work_item.output_h1_sim_ntrials * nbins;
-    const float noise_stddev         = sqrtf(var_add);
+    const int total_elements_h0 = work_item.output_h0_sim_ntrials * nbins;
+    const int total_elements_h1 = work_item.output_h1_sim_ntrials * nbins;
+    const float noise_stddev    = sqrtf(var_add);
 
     // Lambda for processing 4 elements to match cuRANDDx generate4()
-    auto process_batch = [&](SizeType base_i, SizeType total_elements,
+    auto process_batch = [&](int base_i, int total_elements,
                              const float* in_data, float* out_data,
-                             SizeType input_ntrials, SizeType seq_id_base,
+                             int input_ntrials, int seq_id_base,
                              bool add_signal) {
-        const SizeType seq_id =
-            seq_id_base + (block_id * total_elements + base_i) / 4;
-        // Generate noise using cuRANDDx
-        // Use unique sequence ID for each element
+        const int seq_id =
+            seq_id_base + ((block_id * total_elements + base_i) / 4);
+        // Generate noise using cuRANDDx (Use unique sequence ID for each
+        // element)
         RNG rng(seed, seq_id, offset);
-        curanddx::normal<float, curanddx::box_muller> dist(0.0f, noise_stddev);
+        curanddx::normal<float, curanddx::box_muller> dist(0.0F, noise_stddev);
         const float4 noise = dist.generate4(rng);
 
-        SizeType trial_idx   = base_i / nbins;
-        SizeType bin_idx     = base_i % nbins;
-        SizeType orig_trial  = trial_idx % input_ntrials;
-        SizeType orig_offset = orig_trial * nbins + bin_idx;
+        int trial_idx   = base_i / nbins;
+        int bin_idx     = base_i % nbins;
+        int orig_trial  = trial_idx % input_ntrials;
+        int orig_offset = (orig_trial * nbins) + bin_idx;
 
 #pragma unroll
         for (int j = 0; j < 4; ++j) {
-            SizeType idx = base_i + j;
+            const int idx = base_i + j;
             if (idx >= total_elements) {
                 break;
             }
             float noise_val = j == 0   ? noise.x
-                              : j == 1 ? noise.y
-                              : j == 2 ? noise.z
-                                       : noise.w;
+                              : j == 1 ? noise.y  // NOLINT
+                              : j == 2 ? noise.z  // NOLINT
+                                       : noise.w; // NOLINT
             const float profile_val =
-                add_signal ? shared_profile_scaled[bin_idx] : 0.0f;
+                add_signal ? shared_profile_scaled[bin_idx] : 0.0F;
             out_data[idx] = in_data[orig_offset] + noise_val + profile_val;
 
             bin_idx++;
@@ -575,35 +607,33 @@ __device__ void simulate_transition_phase(const TransitionWorkItem& work_item,
     };
 
     // H0: no signal bias
-    for (SizeType base = tid * 4; base < total_elements_h0;
-         base += block_size * 4) {
-        do_batch(base, total_elements_h0, work_item.input_h0_data,
-                 work_item.output_h0_sim_data, work_item.input_h0_ntrials, 0,
-                 false);
+    for (int base = tid * 4; base < total_elements_h0; base += block_size * 4) {
+        process_batch(base, total_elements_h0, work_item.input_h0_data,
+                      work_item.output_h0_sim_data, work_item.input_h0_ntrials,
+                      0, false);
     }
     // H1: with signal bias
-    const SizeType h1_seq_offset = (total_elements_h0 + 3) / 4;
-    for (SizeType base = tid * 4; base < total_elements_h1;
-         base += block_size * 4) {
-        do_batch(base, total_elements_h1, work_item.input_h1_data,
-                 work_item.output_h1_sim_data, work_item.input_h1_ntrials,
-                 h1_seq_offset, true);
+    const int h1_seq_offset = (total_elements_h0 + 3) / 4;
+    for (int base = tid * 4; base < total_elements_h1; base += block_size * 4) {
+        process_batch(base, total_elements_h1, work_item.input_h1_data,
+                      work_item.output_h1_sim_data, work_item.input_h1_ntrials,
+                      h1_seq_offset, true);
     }
 }
 
-__device__ void prune_transition_phase(const TransitionWorkItem& item,
+__device__ void prune_transition_phase(const TransitionWorkItem& work_item,
                                        const float* __restrict__ scores_h0,
                                        const float* __restrict__ scores_h1,
                                        float threshold,
                                        int nbins,
-                                       SizeType* output_ntrials_h0,
-                                       SizeType* output_ntrials_h1) {
-    extern __shared__ int shm[];
-    const int tid        = threadIdx.x;
-    const int block_size = blockDim.x;
+                                       int* output_ntrials_h0,
+                                       int* output_ntrials_h1) {
+    extern __shared__ int shm[]; // NOLINT
+    const int tid        = static_cast<int>(threadIdx.x);
+    const int block_size = static_cast<int>(blockDim.x);
     // Shared memory for reduction
-    int& shared_count_h0   = *reinterpret_cast<int*>(&shm[0]);
-    int& shared_count_h1   = *reinterpret_cast<int*>(&shm[1]);
+    int& shared_count_h0   = *(&shm[0]);
+    int& shared_count_h1   = *(&shm[1]);
     int* shared_indices_h0 = &shm[2];
     int* shared_indices_h1 = &shm[2 + block_size];
 
@@ -648,33 +678,33 @@ __device__ void prune_transition_phase(const TransitionWorkItem& item,
         }
     };
 
-    collect(scores_h0, item.output_h0_sim_ntrials, shared_count_h0,
+    collect(scores_h0, work_item.output_h0_sim_ntrials, shared_count_h0,
             shared_indices_h0);
-    collect(scores_h1, item.output_h1_sim_ntrials, shared_count_h1,
+    collect(scores_h1, work_item.output_h1_sim_ntrials, shared_count_h1,
             shared_indices_h1);
     __syncthreads();
 
     // Copy H0 surviving trials
     for (int i = tid; i < shared_count_h0; i += block_size) {
-        const int orig_trial         = shared_indices_h0[i];
-        const SizeType input_offset  = orig_trial * nbins;
-        const SizeType output_offset = i * nbins;
+        const int orig_trial    = shared_indices_h0[i];
+        const int input_offset  = orig_trial * nbins;
+        const int output_offset = i * nbins;
 
         // Copy entire trial (all bins)
         for (int j = 0; j < nbins; ++j) {
-            item.output_h0_pruned_data[output_offset + j] =
-                item.output_h0_sim_data[input_offset + j];
+            work_item.output_h0_pruned_data[output_offset + j] =
+                work_item.output_h0_sim_data[input_offset + j];
         }
     }
     // Copy H1 surviving trials
     for (int i = tid; i < shared_count_h1; i += block_size) {
-        const int orig_trial         = shared_indices_h1[i];
-        const SizeType input_offset  = orig_trial * nbins;
-        const SizeType output_offset = i * nbins;
+        const int orig_trial    = shared_indices_h1[i];
+        const int input_offset  = orig_trial * nbins;
+        const int output_offset = i * nbins;
 
         for (int j = 0; j < nbins; ++j) {
-            item.output_h1_pruned_data[output_offset + j] =
-                item.output_h1_sim_data[input_offset + j];
+            work_item.output_h1_pruned_data[output_offset + j] =
+                work_item.output_h1_sim_data[input_offset + j];
         }
     }
     // Store final counts (single thread)
@@ -693,32 +723,32 @@ __global__ void process_transitions_unified_kernel(
     int nwidths,
     float bias_snr,
     float var_add,
-    SizeType ntrials_target,
+    int ntrials_target,
     const float* __restrict__ probs,
     int nprobs,
     float* __restrict__ scores_pool,
-    int* __restrict__ indices_pool,
     TransitionResult* __restrict__ results,
-    unsigned long long seed,
-    unsigned long long offset) {
+    uint64_t seed,
+    uint64_t offset) {
 
-    const int item_idx = blockIdx.x;
-    if (item_idx >= num_items)
+    const auto item_idx = static_cast<int>(blockIdx.x);
+    if (item_idx >= num_items) {
         return;
+    }
 
     const auto& work_item = work_items[item_idx];
-    const int tid         = threadIdx.x;
-    const int block_size  = blockDim.x;
+    const auto tid        = static_cast<int>(threadIdx.x);
+    const auto block_size = static_cast<int>(blockDim.x);
 
     // Calculate memory offsets for this work item
-    const SizeType score_offset_h0   = item_idx * ntrials_target;
-    const SizeType score_offset_h1   = score_offset_h0 + ntrials_target;
-    const SizeType indices_offset_h0 = item_idx * ntrials_target;
-    const SizeType indices_offset_h1 = indices_offset_h0 + ntrials_target;
+    const auto score_offset_h0   = item_idx * ntrials_target;
+    const auto score_offset_h1   = score_offset_h0 + ntrials_target;
+    const auto indices_offset_h0 = item_idx * ntrials_target;
+    const auto indices_offset_h1 = indices_offset_h0 + ntrials_target;
 
     // Shared memory for output counts
-    __shared__ SizeType shared_ntrials_h0_out;
-    __shared__ SizeType shared_ntrials_h1_out;
+    __shared__ int shared_ntrials_h0_out;
+    __shared__ int shared_ntrials_h1_out;
 
     // Phase 1: Simulation (threads collaborate)
     simulate_transition_phase(work_item, profile, nbins, bias_snr, var_add,
@@ -732,17 +762,16 @@ __global__ void process_transitions_unified_kernel(
     __syncthreads();
 
     // Phase 3: Pruning (threads collaborate)
-    prune_transition_phase(
-        work_item, scores_pool + score_offset_h0, scores_pool + score_offset_h1,
-        indices_pool + indices_offset_h0, indices_pool + indices_offset_h1,
-        work_item.threshold, nbins, tid, block_size, &shared_ntrials_h0_out,
-        &shared_ntrials_h1_out);
+    prune_transition_phase(work_item, scores_pool + score_offset_h0,
+                           scores_pool + score_offset_h1, work_item.threshold,
+                           nbins, tid, block_size, &shared_ntrials_h0_out,
+                           &shared_ntrials_h1_out);
     __syncthreads();
 
     // Phase 4: Compute final state and result (single thread per block)
     if (tid == 0) {
-        const SizeType ntrials_h0_out = shared_ntrials_h0_out;
-        const SizeType ntrials_h1_out = shared_ntrials_h1_out;
+        const auto ntrials_h0_out = shared_ntrials_h0_out;
+        const auto ntrials_h1_out = shared_ntrials_h1_out;
         // Calculate success rates
         const auto success_h0 =
             static_cast<float>(ntrials_h0_out) /
@@ -756,7 +785,7 @@ __global__ void process_transitions_unified_kernel(
             work_item.threshold, success_h0, success_h1, work_item.nbranches);
 
         // Find probability bin
-        const SizeType iprob =
+        const auto iprob =
             find_bin_index_device(probs, nprobs, state_next.success_h1_cumul);
 
         // Store result
@@ -776,16 +805,16 @@ __global__ void process_transitions_unified_kernel(
 __global__ void update_states_kernel(const TransitionResult* results,
                                      int num_results,
                                      int nprobs,
-                                     SizeType stage_offset_cur,
+                                     int stage_offset_cur,
                                      StateD* states,
                                      float** fold_h0_ptrs,
                                      float** fold_h1_ptrs,
-                                     SizeType* fold_ntrials_h0,
-                                     SizeType* fold_ntrials_h1,
+                                     int* fold_ntrials_h0,
+                                     int* fold_ntrials_h1,
                                      float* fold_variances_h0,
                                      float* fold_variances_h1) {
 
-    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const auto idx = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
     if (idx >= num_results) {
         return;
     }
@@ -808,7 +837,7 @@ __global__ void update_states_kernel(const TransitionResult* results,
     bool should_update = false;
     if (states[state_idx].is_empty) {
         // Try to claim this empty slot
-        int expected_empty = __float_as_int(0.0f);
+        int expected_empty = __float_as_int(0.0F);
         if (atomicCAS(state_complexity_ptr, expected_empty,
                       new_complexity_bits) == expected_empty) {
             should_update = true;
@@ -834,6 +863,158 @@ __global__ void update_states_kernel(const TransitionResult* results,
         fold_variances_h1[fold_idx] = result.output_variance;
     }
 }
+
+struct IndexPair {
+    SizeType ithres;
+    SizeType jthresh;
+};
+
+struct PairWithCount {
+    IndexPair pair;
+    SizeType count; // Number of valid kprob iterations
+};
+
+struct CountValidWorkItems {
+    const StateD* states_ptr;
+    const cuda::std::optional<FoldsType>* folds_ptr;
+    SizeType stage_offset_prev;
+    SizeType nprobs;
+
+    CountValidWorkItems(
+        const thrust::device_vector<StateD>& states_d,
+        const thrust::device_vector<cuda::std::optional<FoldsType>>&
+            folds_current_d,
+        SizeType stage_offset_prev,
+        SizeType nprobs)
+        : states_ptr(thrust::raw_pointer_cast(states_d.data())),
+          folds_ptr(thrust::raw_pointer_cast(folds_current_d.data())),
+          stage_offset_prev(stage_offset_prev),
+          nprobs(nprobs) {}
+
+    __device__ PairWithCount operator()(const IndexPair& pair) const {
+        SizeType count = 0;
+        for (SizeType kprob = 0; kprob < nprobs; ++kprob) {
+            const auto prev_fold_idx = (pair.jthresh * nprobs) + kprob;
+            const auto& prev_state =
+                states_ptr[stage_offset_prev + prev_fold_idx];
+            if (prev_state.is_empty) {
+                continue;
+            }
+            const auto& prev_fold_state = folds_ptr[prev_fold_idx];
+            if (!prev_fold_state.has_value() || prev_fold_state->is_empty()) {
+                continue;
+            }
+            count++;
+        }
+        return {.pair = pair, .count = count};
+    }
+};
+
+struct TransitionFunctor {
+    const StateD* states_ptr;
+    const cuda::std::optional<FoldsDeviceData>* folds_ptr;
+    const float* thresholds_ptr;
+    const float* branching_pattern_ptr;
+    SizeType nprobs;
+    SizeType ntrials;
+    SizeType stage_offset_prev;
+    SizeType istage;
+    float var_add;
+    TransitionWorkItem* work_items_ptr;
+    const SizeType* offset_ptr;
+    DualPoolFoldManager* manager;
+
+    TransitionFunctor(
+        const thrust::device_vector<StateD>& states_d,
+        const thrust::device_vector<cuda::std::optional<FoldsDeviceData>>&
+            folds_current_d,
+        const thrust::device_vector<float>& thresholds,
+        const thrust::device_vector<float>& branching_pattern,
+        SizeType nprobs,
+        SizeType ntrials,
+        SizeType offset_prev,
+        SizeType stage,
+        float var,
+        thrust::device_vector<TransitionWorkItem>& items_d,
+        const thrust::device_vector<SizeType>& offsets,
+        DualPoolFoldManager* manager)
+        : states_ptr(thrust::raw_pointer_cast(states_d.data())),
+          folds_ptr(thrust::raw_pointer_cast(folds_current_d.data())),
+          thresholds_ptr(thrust::raw_pointer_cast(thresholds.data())),
+          branching_pattern_ptr(
+              thrust::raw_pointer_cast(branching_pattern.data())),
+          nprobs(nprobs),
+          ntrials(ntrials),
+          stage_offset_prev(offset_prev),
+          istage(stage),
+          var_add(var),
+          work_items_ptr(thrust::raw_pointer_cast(items_d.data())),
+          offset_ptr(thrust::raw_pointer_cast(offsets.data())),
+          manager(manager) {}
+
+    __device__ void operator()(const PairWithCount& pair_with_count) {
+        const auto& pair = pair_with_count.pair;
+        SizeType ithres  = pair.ithres;
+        SizeType jthresh = pair.jthresh;
+        // Current offset
+        SizeType base_offset =
+            offset_ptr[&pair_with_count - &pair_with_count[0]];
+        SizeType slot = base_offset;
+        for (SizeType kprob = 0; kprob < nprobs; ++kprob) {
+            const auto prev_fold_idx = (jthresh * nprobs) + kprob;
+            const auto& prev_state =
+                states_ptr[stage_offset_prev + prev_fold_idx];
+            if (prev_state.is_empty) {
+                continue;
+            }
+            const auto& prev_fold_state = folds_ptr[prev_fold_idx];
+            if (!prev_fold_state.has_value() || prev_fold_state->is_empty()) {
+                continue;
+            }
+            // Pre-allocate output buffers
+            const auto ntrials_in_h0 = prev_fold_state->folds_h0_ntrials;
+            const auto ntrials_in_h1 = prev_fold_state->folds_h1_ntrials;
+            const auto repeat_factor_h0 =
+                static_cast<SizeType>(ceilf(static_cast<float>(ntrials) /
+                                            static_cast<float>(ntrials_in_h0)));
+            const auto ntrials_out_h0 = repeat_factor_h0 * ntrials_in_h0;
+            const auto repeat_factor_h1 =
+                static_cast<SizeType>(ceilf(static_cast<float>(ntrials) /
+                                            static_cast<float>(ntrials_in_h1)));
+            const auto ntrials_out_h1 = repeat_factor_h1 * ntrials_in_h1;
+
+            auto output_h0_sim = manager->allocate(
+                ntrials_out_h0, prev_fold_state->folds_h0_variance + var_add);
+            auto output_h1_sim = manager->allocate(
+                ntrials_out_h1, prev_fold_state->folds_h1_variance + var_add);
+            auto output_h0_pruned =
+                manager->allocate(ntrials_out_h0, output_h0_sim->variance());
+            auto output_h1_pruned =
+                manager->allocate(ntrials_out_h1, output_h1_sim->variance());
+
+            // Populate the TransitionWorkItem
+            TransitionWorkItem item;
+            item.threshold_idx         = static_cast<int>(ithres);
+            item.prob_idx              = static_cast<int>(kprob);
+            item.input_fold_idx        = static_cast<int>(prev_fold_idx);
+            item.input_state           = prev_state;
+            item.threshold             = thresholds_ptr[ithres];
+            item.nbranches             = branching_pattern_ptr[istage];
+            item.input_h0_data         = prev_fold_state->folds_h0->raw_data();
+            item.input_h1_data         = prev_fold_state->folds_h1->raw_data();
+            item.input_h0_ntrials      = prev_fold_state->folds_h0->ntrials();
+            item.input_h1_ntrials      = prev_fold_state->folds_h1->ntrials();
+            item.output_h0_sim_data    = output_h0_sim->raw_data();
+            item.output_h1_sim_data    = output_h1_sim->raw_data();
+            item.output_h0_sim_ntrials = ntrials_out_h0;
+            item.output_h1_sim_ntrials = ntrials_out_h1;
+            item.output_h0_pruned_data = output_h0_pruned->raw_data();
+            item.output_h1_pruned_data = output_h1_pruned->raw_data();
+            work_items_ptr[slot]       = item;
+            slot++;
+        }
+    }
+};
 
 std::unique_ptr<FoldVectorHandle>
 simulate_folds(const FoldVectorHandle& folds_in,
@@ -921,33 +1102,6 @@ prune_folds(const FoldVectorHandle& folds_in,
     cuda_utils::check_last_cuda_error("prune_trials_kernel");
 
     return folds_out;
-}
-
-__host__ __device__ StateD StateD::gen_next(float threshold,
-                                            float success_h0,
-                                            float success_h1,
-                                            float nbranches) const noexcept {
-    const auto nleaves_next          = this->complexity * nbranches;
-    const auto nleaves_surv          = nleaves_next * success_h0;
-    const auto complexity_cumul_next = this->complexity_cumul + nleaves_next;
-    const auto success_h1_cumul_next = this->success_h1_cumul * success_h1;
-    const auto cost_next = complexity_cumul_next / success_h1_cumul_next;
-
-    // Create a new state struct
-    StateD state_next;
-    state_next.success_h0       = success_h0;
-    state_next.success_h1       = success_h1;
-    state_next.complexity       = nleaves_surv;
-    state_next.complexity_cumul = complexity_cumul_next;
-    state_next.success_h1_cumul = success_h1_cumul_next;
-    state_next.nbranches        = nbranches;
-    state_next.threshold        = threshold;
-    state_next.cost             = cost_next;
-    state_next.is_empty         = false;
-    // For backtracking
-    state_next.threshold_prev        = this->threshold;
-    state_next.success_h1_cumul_prev = this->success_h1_cumul;
-    return state_next;
 }
 
 std::tuple<State, FoldsType>
@@ -1103,6 +1257,33 @@ HighFive::CompoundType create_compound_state() {
 
 } // namespace
 
+__host__ __device__ StateD StateD::gen_next(float threshold,
+                                            float success_h0,
+                                            float success_h1,
+                                            float nbranches) const noexcept {
+    const auto nleaves_next          = this->complexity * nbranches;
+    const auto nleaves_surv          = nleaves_next * success_h0;
+    const auto complexity_cumul_next = this->complexity_cumul + nleaves_next;
+    const auto success_h1_cumul_next = this->success_h1_cumul * success_h1;
+    const auto cost_next = complexity_cumul_next / success_h1_cumul_next;
+
+    // Create a new state struct
+    StateD state_next;
+    state_next.success_h0       = success_h0;
+    state_next.success_h1       = success_h1;
+    state_next.complexity       = nleaves_surv;
+    state_next.complexity_cumul = complexity_cumul_next;
+    state_next.success_h1_cumul = success_h1_cumul_next;
+    state_next.nbranches        = nbranches;
+    state_next.threshold        = threshold;
+    state_next.cost             = cost_next;
+    state_next.is_empty         = false;
+    // For backtracking
+    state_next.threshold_prev        = this->threshold;
+    state_next.success_h1_cumul_prev = this->success_h1_cumul;
+    return state_next;
+}
+
 // CUDA-specific implementation
 class DynamicThresholdSchemeCUDA::Impl {
 public:
@@ -1161,9 +1342,10 @@ public:
                      slots_per_pool);
 
         // Initialize state management
-        m_folds_current.resize(m_nthresholds * m_nprobs);
-        m_folds_next.resize(m_nthresholds * m_nprobs);
-        m_states.resize(m_nstages * m_nthresholds * m_nprobs, State{});
+        m_folds_current_d.resize(m_nthresholds * m_nprobs);
+        m_folds_next_d.resize(m_nthresholds * m_nprobs);
+        m_states_d.resize(m_nstages * m_nthresholds * m_nprobs, State{});
+        m_states_h.resize(m_nstages * m_nthresholds * m_nprobs, State{});
         init_states();
     }
     ~Impl()                          = default;
@@ -1181,10 +1363,9 @@ public:
         for (SizeType istage = 1; istage < m_nstages; ++istage) {
             run_segment(istage, thres_neigh);
             m_manager->swap_pools();
-            std::swap(m_folds_current, m_folds_next);
-            for (auto& fold_opt : m_folds_next) {
-                fold_opt.reset();
-            }
+            std::swap(m_folds_current_d, m_folds_next_d);
+            thrust::fill(thrust::device, m_folds_next_d.begin(),
+                         m_folds_next_d.end(), cuda::std::nullopt);
             const auto progress = static_cast<float>(istage) /
                                   static_cast<float>(m_nstages - 1) * 100.0F;
             bar.set_progress(static_cast<SizeType>(progress));
@@ -1261,8 +1442,8 @@ private:
     std::unique_ptr<math::CuRandRNG> m_rng;
 
     // State management
-    std::vector<State> m_states_h;
-    thrust::device_vector<State> m_states_d;
+    std::vector<State> m_states;
+    thrust::device_vector<StateD> m_states_d;
     thrust::device_vector<cuda::std::optional<FoldsType>> m_folds_current_d;
     thrust::device_vector<cuda::std::optional<FoldsType>> m_folds_next_d;
 
@@ -1350,6 +1531,62 @@ private:
         return result;
     }
 
+    void collect_transitions_new(TransitionBatch& batch,
+                                 const std::vector<SizeType>& beam_idx_cur,
+                                 const std::vector<SizeType>& beam_idx_prev,
+                                 SizeType stage_offset_prev,
+                                 SizeType istage,
+                                 SizeType thres_neigh,
+                                 float var_add) {
+        std::vector<IndexPair> h_pairs;
+        h_pairs.reserve(beam_idx_cur.size() * thres_neigh);
+        for (SizeType i = 0; i < beam_idx_cur.size(); ++i) {
+            const auto ithres = beam_idx_cur[i];
+            // Find nearest neighbors in the previous beam
+            const auto neighbour_beam_indices =
+                utils::find_neighbouring_indices(beam_idx_prev, ithres,
+                                                 thres_neigh);
+
+            for (SizeType jthresh : neighbour_beam_indices) {
+                h_pairs.push_back({ithres, jthresh});
+            }
+        }
+        thrust::device_vector<IndexPair> d_pairs = h_pairs;
+        thrust::device_vector<PairWithCount> d_pairs_with_count(d_pairs.size());
+        thrust::transform(thrust::device, d_pairs.begin(), d_pairs.end(),
+                          d_pairs_with_count.begin(),
+                          CountValidWorkItems(m_states_d, m_folds_current_d,
+                                              stage_offset_prev, m_nprobs));
+
+        thrust::device_vector<SizeType> d_offsets(d_pairs.size());
+        thrust::transform(
+            thrust::device, d_pairs_with_count.begin(),
+            d_pairs_with_count.end(), d_offsets.begin(),
+            [] __device__(const PairWithCount& pwc) { return pwc.count; });
+        thrust::exclusive_scan(thrust::device, d_offsets.begin(),
+                               d_offsets.end(), d_offsets.begin());
+
+        SizeType total_items = 0;
+        if (!d_offsets.empty()) {
+            const auto count =
+                thrust::raw_pointer_cast(
+                    d_pairs_with_count.data())[d_pairs_with_count.size() - 1]
+                    .count;
+            total_items = d_offsets.back() + count;
+        }
+        batch.work_items_d.resize(total_items);
+
+        thrust::for_each(
+            thrust::device, d_pairs_with_count.begin(),
+            d_pairs_with_count.end(),
+            TransitionFunctor(m_states_d, m_folds_current_d, m_thresholds,
+                              m_branching_pattern, m_nprobs, m_ntrials,
+                              stage_offset_prev, istage, var_add,
+                              batch.work_items_d, d_offsets, m_manager.get()));
+
+        cudaDeviceSynchronize();
+    }
+
     void collect_transitions(TransitionBatch& batch,
                              const std::vector<SizeType>& beam_idx_cur,
                              const std::vector<SizeType>& beam_idx_prev,
@@ -1370,8 +1607,9 @@ private:
                     const auto prev_state =
                         m_states_d[stage_offset_prev + prev_fold_idx];
 
-                    if (prev_state.is_empty)
+                    if (prev_state.is_empty) {
                         continue;
+                    }
 
                     const auto& prev_fold_state =
                         m_folds_current_d[prev_fold_idx];
@@ -1430,11 +1668,6 @@ private:
                     item.output_h1_pruned_data = output_h1_pruned->raw_data();
 
                     batch.work_items_d.push_back(item);
-                    // Store handles for RAII
-                    m_temp_handles.push_back(std::move(output_h0_sim));
-                    m_temp_handles.push_back(std::move(output_h1_sim));
-                    m_temp_handles.push_back(std::move(output_h0_pruned));
-                    m_temp_handles.push_back(std::move(output_h1_pruned));
                 }
             }
         }
