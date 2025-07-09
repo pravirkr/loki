@@ -27,15 +27,14 @@ public:
          std::optional<SizeType> n_runs,
          std::optional<std::vector<SizeType>> ref_segs,
          SizeType max_sugg,
-         SizeType batch_size,
-         int nthreads)
+         SizeType batch_size)
         : m_cfg(std::move(cfg)),
           m_threshold_scheme(threshold_scheme),
           m_n_runs(n_runs),
           m_ref_segs(std::move(ref_segs)),
           m_max_sugg(max_sugg),
           m_batch_size(batch_size),
-          m_nthreads(nthreads),
+          m_nthreads(m_cfg.get_nthreads()),
           m_ffa_plan(m_cfg) {
         // Create appropriate FFA instance based on FoldType
         if constexpr (std::is_same_v<FoldType, ComplexType>) {
@@ -59,6 +58,7 @@ public:
                  std::string_view file_prefix,
                  std::string_view kind) {
         // Execute appropriate FFA instance
+        spdlog::info("PruningManager::execute: Initializing with FFA");
         if constexpr (std::is_same_v<FoldType, ComplexType>) {
             m_the_ffa_complex->execute(ts_e, ts_v,
                                        std::span<ComplexType>(m_ffa_fold));
@@ -66,7 +66,7 @@ public:
             m_the_ffa->execute(ts_e, ts_v, std::span<float>(m_ffa_fold));
         }
         // Setup output files and directory
-        const auto nsegments = m_ffa_plan.fold_shapes.back()[0];
+        const auto nsegments = m_ffa_plan.nsegments.back();
         const std::string filebase =
             std::format("{}_pruning_nstages_{}", file_prefix, nsegments);
         const auto log_file = outdir / std::format("{}_log.txt", filebase);
@@ -74,12 +74,17 @@ public:
             outdir / std::format("{}_results.h5", filebase);
 
         // Create output directory
-        std::filesystem::create_directories(outdir);
+        std::error_code ec;
+        std::filesystem::create_directories(outdir, ec);
+        if (!std::filesystem::exists(outdir)) {
+            throw std::runtime_error(
+                std::format("PruningManager::execute: Failed to create output "
+                            "directory '{}': {}",
+                            outdir.string(), ec.message()));
+        }
 
         // Determine ref_segs to process
-        std::vector<SizeType> ref_segs_to_process =
-            determine_ref_segs(nsegments);
-
+        auto ref_segs_to_process = determine_ref_segs(nsegments);
         spdlog::info("Starting Pruning for {} runs, with {} threads",
                      ref_segs_to_process.size(), m_nthreads);
 
@@ -131,10 +136,15 @@ private:
             }
 
             std::vector<SizeType> ref_segs(n_runs);
-            for (SizeType i = 0; i < n_runs; ++i) {
-                ref_segs[i] = static_cast<SizeType>(
-                    std::round(static_cast<double>(i * (nsegments - 1)) /
-                               static_cast<double>(n_runs - 1)));
+            if (n_runs == 1) {
+                ref_segs[0] = 0;
+            } else {
+                const auto denom = static_cast<double>(n_runs - 1);
+                const auto max   = static_cast<double>(nsegments - 1);
+                for (SizeType i = 0; i < n_runs; ++i) {
+                    ref_segs[i] = static_cast<SizeType>(
+                        std::round(static_cast<double>(i) * max / denom));
+                }
             }
             return ref_segs;
         }
@@ -283,7 +293,7 @@ public:
 
         initialize(ffa_fold, ref_seg, actual_log_file);
 
-        const auto nsegments = m_ffa_plan.fold_shapes.back()[0];
+        const auto nsegments = m_ffa_plan.nsegments.back();
         for (SizeType iter = 0; iter < nsegments - 1; ++iter) {
             execute_iteration(ffa_fold, actual_log_file);
             // Check for early termination (no survivors)
@@ -347,7 +357,7 @@ private:
         m_suggestions_out->reset();
 
         // Initialize snail scheme for current ref_seg
-        const auto nsegments = m_ffa_plan.fold_shapes.back()[0];
+        const auto nsegments = m_ffa_plan.nsegments.back();
         const auto tseg      = m_ffa_plan.tsegments.back();
         m_scheme =
             std::make_unique<psr_utils::SnailScheme>(nsegments, ref_seg, tseg);
@@ -638,15 +648,13 @@ PruningManager<FoldType>::PruningManager(
     std::optional<SizeType> n_runs,
     std::optional<std::vector<SizeType>> ref_segs,
     SizeType max_sugg,
-    SizeType batch_size,
-    int nthreads)
+    SizeType batch_size)
     : m_impl(std::make_unique<Impl>(cfg,
                                     threshold_scheme,
                                     n_runs,
                                     std::move(ref_segs),
                                     max_sugg,
-                                    batch_size,
-                                    nthreads)) {}
+                                    batch_size)) {}
 template <typename FoldType>
 PruningManager<FoldType>::~PruningManager() = default;
 template <typename FoldType>

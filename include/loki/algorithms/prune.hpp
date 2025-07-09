@@ -20,8 +20,7 @@ public:
                    std::optional<SizeType> n_runs                = std::nullopt,
                    std::optional<std::vector<SizeType>> ref_segs = std::nullopt,
                    SizeType max_sugg                             = 1U << 18U,
-                   SizeType batch_size                           = 1024U,
-                   int nthreads                                  = 1);
+                   SizeType batch_size                           = 1024U);
     ~PruningManager();
     PruningManager(PruningManager&&) noexcept;
     PruningManager& operator=(PruningManager&&) noexcept;

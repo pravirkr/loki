@@ -278,6 +278,8 @@ public:
         m_file->createAttribute("max_sugg", max_sugg);
 
         HighFive::DataSetCreateProps props;
+        props.add(
+            HighFive::Chunking(std::vector<hsize_t>{threshold_scheme.size()}));
         props.add(HighFive::Deflate(9)); // Gzip compression level 9
         m_file->createDataSet("threshold_scheme", threshold_scheme, props);
     }

@@ -1,3 +1,4 @@
+#include "loki/algorithms/prune.hpp"
 #include "loki/common/types.hpp"
 #include "pybind_utils.hpp"
 
@@ -16,6 +17,8 @@
 namespace loki {
 using algorithms::FFA;
 using algorithms::FFACOMPLEX;
+using algorithms::PruningManagerComplex;
+using algorithms::PruningManagerFloat;
 using detection::MatchedFilter;
 using plans::FFAPlan;
 using search::PulsarSearchConfig;
@@ -465,6 +468,49 @@ PYBIND11_MODULE(libloki, m) {
         },
         py::arg("pset_cur"), py::arg("param_arr"), py::arg("ffa_level"),
         py::arg("latter"), py::arg("tseg_brute"), py::arg("nbins"));
+
+    auto m_prune = m.def_submodule("prune", "Pruning submodule");
+    py::class_<PruningManagerFloat>(m_prune, "PruningManager")
+        .def(py::init<const PulsarSearchConfig&, const std::vector<float>&,
+                      std::optional<SizeType>,
+                      std::optional<std::vector<SizeType>>, SizeType,
+                      SizeType>(),
+             py::arg("cfg"), py::arg("threshold_scheme"),
+             py::arg("n_runs")   = std::nullopt,
+             py::arg("ref_segs") = std::nullopt,
+             py::arg("max_sugg") = 1U << 18U, py::arg("batch_size") = 1024U)
+        .def(
+            "execute",
+            [](PruningManagerFloat& self, const PyArrayT<float>& ts_e,
+               const PyArrayT<float>& ts_v, const std::string& outdir,
+               const std::string& file_prefix, const std::string& kind) {
+                self.execute(to_span<const float>(ts_e),
+                             to_span<const float>(ts_v), outdir, file_prefix,
+                             kind);
+            },
+            py::arg("ts_e"), py::arg("ts_v"), py::arg("outdir"),
+            py::arg("file_prefix"), py::arg("kind"));
+
+    py::class_<PruningManagerComplex>(m_prune, "PruningManagerComplex")
+        .def(py::init<const PulsarSearchConfig&, const std::vector<float>&,
+                      std::optional<SizeType>,
+                      std::optional<std::vector<SizeType>>, SizeType,
+                      SizeType>(),
+             py::arg("cfg"), py::arg("threshold_scheme"),
+             py::arg("n_runs")   = std::nullopt,
+             py::arg("ref_segs") = std::nullopt,
+             py::arg("max_sugg") = 1U << 18U, py::arg("batch_size") = 1024U)
+        .def(
+            "execute",
+            [](PruningManagerComplex& self, const PyArrayT<float>& ts_e,
+               const PyArrayT<float>& ts_v, const std::string& outdir,
+               const std::string& file_prefix, const std::string& kind) {
+                self.execute(to_span<const float>(ts_e),
+                             to_span<const float>(ts_v), outdir, file_prefix,
+                             kind);
+            },
+            py::arg("ts_e"), py::arg("ts_v"), py::arg("outdir"),
+            py::arg("file_prefix"), py::arg("kind"));
 }
 
 } // namespace loki

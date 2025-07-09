@@ -50,7 +50,7 @@ void poly_taylor_suggest(std::span<const FoldType> fold_segment,
                          std::span<const double> dparams,
                          SizeType poly_order,
                          std::span<const SizeType> score_widths,
-                         detection::ScoringFunction<FoldType> scoring_func,
+                         const detection::ScoringFunction<FoldType>& scoring_func,
                          utils::SuggestionStruct<FoldType>& sugg_struct);
 
 } // namespace loki::core

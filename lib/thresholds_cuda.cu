@@ -63,8 +63,6 @@ struct FoldVectorHandleDevice {
 struct DevicePoolAllocator {
     float* pool_a_data;
     float* pool_b_data;
-    int* free_slots_a;
-    int* free_slots_b;
     int* next_free_a;
     int* next_free_b;
     SizeType slot_size;
@@ -78,61 +76,35 @@ struct DevicePoolAllocator {
      */
     __device__ FoldVectorHandleDevice allocate(SizeType ntrials,
                                                float variance) const {
-        FoldVectorHandleDevice handle;
+        FoldVectorHandleDevice handle; // handle.data is nullptr by default
 
-        // Select the appropriate pool
-        float* pool_data;
-        int* free_slots;
-        int* next_free;
-        int pool_id;
+        // Select the appropriate pool and counter
+        int* next_free_counter =
+            (current_out_pool == 0) ? next_free_a : next_free_b;
+        float* pool_data = (current_out_pool == 0) ? pool_a_data : pool_b_data;
 
-        if (current_out_pool == 0) {
-            pool_data  = pool_a_data;
-            free_slots = free_slots_a;
-            next_free  = next_free_a;
-            pool_id    = 0;
-        } else {
-            pool_data  = pool_b_data;
-            free_slots = free_slots_b;
-            next_free  = next_free_b;
-            pool_id    = 1;
-        }
-
-        // Atomically get a free slot
-        int slot_idx = atomicAdd(next_free, 1);
+        // Atomically get a free slot index (bump allocation)
+        int slot_idx = atomicAdd(next_free_counter, 1);
 
         if (slot_idx < static_cast<int>(slots_per_pool)) {
-            // Find the actual free slot
-            for (int i = 0; i < static_cast<int>(slots_per_pool); ++i) {
-                if (atomicCAS(&free_slots[i], 1, 0) == 1) {
-                    // Successfully claimed this slot
-                    handle.data             = pool_data + (i * slot_size);
-                    handle.ntrials          = ntrials;
-                    handle.capacity_ntrials = max_ntrials;
-                    handle.nbins            = nbins;
-                    handle.variance         = variance;
-                    handle.pool_id          = pool_id;
-                    handle.slot_idx         = i;
-                    break;
-                }
-            }
+            handle.data             = pool_data + (slot_idx * slot_size);
+            handle.ntrials          = ntrials;
+            handle.capacity_ntrials = max_ntrials;
+            handle.nbins            = nbins;
+            handle.variance         = variance;
+            handle.pool_id          = current_out_pool;
+            handle.slot_idx         = slot_idx;
         }
 
         return handle;
     }
 
     /**
-     * Deallocate - callable from device
+     * Deallocate - callable from device (no-op for bump allocator)
      */
-    __device__ void deallocate(const FoldVectorHandleDevice& handle) {
-        if (!handle.is_valid()) {
-            return;
-        }
-
-        int* free_slots = (handle.pool_id == 0) ? free_slots_a : free_slots_b;
-
-        // Mark slot as free
-        atomicExch(&free_slots[handle.slot_idx], 1);
+    __device__ void deallocate(const FoldVectorHandleDevice& /*handle*/) const {
+        // This is a no-op because the entire pool is reset by swap_pools.
+        // The slot becomes reusable after swap_pools resets the counter.
     }
 };
 
@@ -153,15 +125,7 @@ public:
         m_pool_a.resize(m_slots_per_pool * m_slot_size);
         m_pool_b.resize(m_slots_per_pool * m_slot_size);
 
-        // Initialize free slot tracking on device
-        m_free_slots_a.resize(m_slots_per_pool);
-        m_free_slots_b.resize(m_slots_per_pool);
-
-        // Initialize all slots as free (1 = free, 0 = occupied)
-        thrust::fill(m_free_slots_a.begin(), m_free_slots_a.end(), 1);
-        thrust::fill(m_free_slots_b.begin(), m_free_slots_b.end(), 1);
-
-        // Allocate counters
+        // Allocate counters for bump allocation
         cudaMalloc(&m_next_free_a, sizeof(int));
         cudaMalloc(&m_next_free_b, sizeof(int));
         cudaMemset(m_next_free_a, 0, sizeof(int));
@@ -184,15 +148,13 @@ public:
      * Get device allocator for use in kernels
      */
     DevicePoolAllocator get_device_allocator() {
-        return {.pool_a_data  = thrust::raw_pointer_cast(m_pool_a.data()),
-                .pool_b_data  = thrust::raw_pointer_cast(m_pool_b.data()),
-                .free_slots_a = thrust::raw_pointer_cast(m_free_slots_a.data()),
-                .free_slots_b = thrust::raw_pointer_cast(m_free_slots_b.data()),
-                .next_free_a  = m_next_free_a,
-                .next_free_b  = m_next_free_b,
-                .slot_size    = m_slot_size,
-                .max_ntrials  = m_max_ntrials,
-                .nbins        = m_nbins,
+        return {.pool_a_data      = thrust::raw_pointer_cast(m_pool_a.data()),
+                .pool_b_data      = thrust::raw_pointer_cast(m_pool_b.data()),
+                .next_free_a      = m_next_free_a,
+                .next_free_b      = m_next_free_b,
+                .slot_size        = m_slot_size,
+                .max_ntrials      = m_max_ntrials,
+                .nbins            = m_nbins,
                 .slots_per_pool   = m_slots_per_pool,
                 .current_out_pool = m_current_out_pool};
     }
@@ -203,14 +165,12 @@ public:
     void swap_pools() {
         m_current_out_pool = 1 - m_current_out_pool;
 
-        // Reset the "in" pool for next use
+        // Reset the "in" pool's counter for next use
         if (m_current_out_pool == 0) {
-            // B is now "in", reset it
-            thrust::fill(m_free_slots_b.begin(), m_free_slots_b.end(), 1);
+            // B is now "in", reset its counter
             cudaMemset(m_next_free_b, 0, sizeof(int));
         } else {
-            // A is now "in", reset it
-            thrust::fill(m_free_slots_a.begin(), m_free_slots_a.end(), 1);
+            // A is now "in", reset its counter
             cudaMemset(m_next_free_a, 0, sizeof(int));
         }
     }
@@ -218,8 +178,6 @@ public:
 private:
     thrust::device_vector<float> m_pool_a;
     thrust::device_vector<float> m_pool_b;
-    thrust::device_vector<int> m_free_slots_a;
-    thrust::device_vector<int> m_free_slots_b;
     int* m_next_free_a = nullptr;
     int* m_next_free_b = nullptr;
 
@@ -645,6 +603,7 @@ update_states_kernel(const TransitionResult* results,
                      int nprobs,
                      int stage_offset_cur,
                      StateD* states_out_ptr,
+                     int* locks_ptr,
                      cuda::std::optional<FoldsTypeDevice>* folds_out_ptr) {
 
     const auto idx = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
@@ -658,34 +617,21 @@ update_states_kernel(const TransitionResult* results,
     const int fold_idx  = (result.threshold_idx * nprobs) + result.prob_idx;
     const int state_idx = stage_offset_cur + fold_idx;
 
-    float* state_complexity_ptr_float =
-        &states_out_ptr[state_idx].complexity_cumul;
-    int* state_complexity_ptr =
-        reinterpret_cast<int*>(state_complexity_ptr_float);
-    // Use atomic compare-and-swap to handle race conditions
-    // Convert float to int for atomic operations (assumes IEEE 754)
-    const float new_complexity    = result.computed_state.complexity_cumul;
-    const int new_complexity_bits = __float_as_int(new_complexity);
-
-    int old_complexity_bits = *state_complexity_ptr;
-    // Keep trying to swap as long as our new state is better than the one in
-    // memory
-    while (__int_as_float(old_complexity_bits) > new_complexity) {
-        int returned_bits = atomicCAS(state_complexity_ptr, old_complexity_bits,
-                                      new_complexity_bits);
-
-        if (returned_bits == old_complexity_bits) {
-            // Success! We won the race. Update the rest of the struct.
-            states_out_ptr[state_idx] = result.computed_state;
-            folds_out_ptr[fold_idx]   = result.folds_out;
-            break; // Exit the loop
-        }
-
-        // If we are here, another thread beat us.
-        // The value returned by atomicCAS is the new value in memory.
-        // Loop again with this new value to see if we are still better.
-        old_complexity_bits = returned_bits;
+    // Acquire lock for this grid cell using a spinlock
+    int* lock = &locks_ptr[state_idx];
+    while (atomicCAS(lock, 0, 1) != 0) {
+        // Spin while waiting for the lock to be released
     }
+    const float current_complexity = states_out_ptr[state_idx].complexity_cumul;
+    const float new_complexity     = result.computed_state.complexity_cumul;
+
+    if (states_out_ptr[state_idx].is_empty || new_complexity < current_complexity) {
+        // Our new state is better, so update everything.
+        states_out_ptr[state_idx] = result.computed_state;
+        folds_out_ptr[fold_idx]   = result.folds_out;
+    }
+    // Release the lock
+    atomicExch(lock, 0);
 }
 
 struct IndexPair {
@@ -729,6 +675,9 @@ struct CountValidWorkItems {
                 continue;
             }
             count++;
+        }
+        if (count == 0) {
+            printf("Count is 0 for pair (%zu, %zu)\n", pair.ithres, pair.jthresh);
         }
         return {.pair = pair, .count = count};
     }
@@ -986,6 +935,19 @@ HighFive::CompoundType create_compound_state() {
 
 } // namespace
 
+__host__ __device__ StateD::StateD() noexcept
+    : success_h0(1.0F),
+      success_h1(1.0F),
+      complexity(1.0F),
+      complexity_cumul(std::numeric_limits<float>::infinity()),
+      success_h1_cumul(1.0F),
+      nbranches(1.0F),
+      threshold(-1.0F),
+      cost(std::numeric_limits<float>::infinity()),
+      threshold_prev(-1.0F),
+      success_h1_cumul_prev(1.0F),
+      is_empty(true) {}
+
 __host__ __device__ StateD StateD::gen_next(float threshold,
                                             float success_h0,
                                             float success_h1,
@@ -1097,8 +1059,11 @@ public:
         // Initialize state management
         m_folds_current_d.resize(m_nthresholds * m_nprobs);
         m_folds_next_d.resize(m_nthresholds * m_nprobs);
-        m_states_d.resize(m_nstages * m_nthresholds * m_nprobs, StateD{});
-        m_states.resize(m_nstages * m_nthresholds * m_nprobs, State{});
+        const auto grid_size = m_nstages * m_nthresholds * m_nprobs;
+        m_states_d.resize(grid_size, StateD());
+        m_states_locks_d.resize(grid_size);
+        thrust::fill(m_states_locks_d.begin(), m_states_locks_d.end(), 0);
+        m_states.resize(grid_size, State{});
         init_states();
     }
     ~Impl()                          = default;
@@ -1119,6 +1084,7 @@ public:
             run_segment(istage, thres_neigh, allocator);
             m_device_manager->swap_pools();
             std::swap(m_folds_current_d, m_folds_next_d);
+            spdlog::info("After swap for stage {}, checking folds_current_d validity", istage);
             // Deallocate using thrust
             thrust::for_each(thrust::device, m_folds_next_d.begin(),
                              m_folds_next_d.end(),
@@ -1206,6 +1172,7 @@ private:
     thrust::device_vector<float> m_probs_d;
     thrust::device_vector<SizeType> m_box_score_widths_d;
     thrust::device_vector<StateD> m_states_d;
+    thrust::device_vector<int> m_states_locks_d;
     thrust::device_vector<cuda::std::optional<FoldsTypeDevice>>
         m_folds_current_d;
     thrust::device_vector<cuda::std::optional<FoldsTypeDevice>> m_folds_next_d;
@@ -1257,6 +1224,9 @@ private:
 
         // Process initial batch
         process_initial_batch(initial_batch, var_init);
+        // Wait for the GPU to finish computing the initial states before
+        // proceeding.
+        cudaDeviceSynchronize();
     }
 
     std::vector<SizeType> get_current_thresholds_idx(SizeType istage) const {
@@ -1305,6 +1275,7 @@ private:
             "Processing transitions for segment {} of {} ({} thresholds)",
             istage, m_nstages, beam_idx_cur.size());
         process_transition_batch(batch, var_add, stage_offset_cur);
+        cudaDeviceSynchronize();
     }
 
     void process_initial_batch(TransitionBatch& batch, float var_init) {
@@ -1349,6 +1320,7 @@ private:
             thrust::raw_pointer_cast(batch.results_d.data()), num_items,
             static_cast<int>(m_nprobs), 0, /* stage_offset_cur is 0 */
             thrust::raw_pointer_cast(m_states_d.data()),
+            thrust::raw_pointer_cast(m_states_locks_d.data()),
             thrust::raw_pointer_cast(m_folds_current_d.data()));
         cuda_utils::check_last_cuda_error("update_states_kernel_initial");
     }
@@ -1466,6 +1438,7 @@ private:
             thrust::raw_pointer_cast(batch.results_d.data()), num_items,
             static_cast<int>(m_nprobs), static_cast<int>(stage_offset_cur),
             thrust::raw_pointer_cast(m_states_d.data()),
+            thrust::raw_pointer_cast(m_states_locks_d.data()),
             thrust::raw_pointer_cast(m_folds_next_d.data()));
         cuda_utils::check_last_cuda_error("update_states_kernel");
     }

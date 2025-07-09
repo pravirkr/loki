@@ -297,14 +297,15 @@ poly_taylor_branch_batch(const xt::xtensor<double, 3>& param_set_batch,
 }
 
 template <typename FoldType>
-void poly_taylor_suggest(std::span<const FoldType> fold_segment,
-                         std::pair<double, double> coord_init,
-                         std::span<const std::vector<double>> param_arr,
-                         std::span<const double> dparams,
-                         SizeType poly_order,
-                         std::span<const SizeType> score_widths,
-                         detection::ScoringFunction<FoldType> scoring_func,
-                         utils::SuggestionStruct<FoldType>& sugg_struct) {
+void poly_taylor_suggest(
+    std::span<const FoldType> fold_segment,
+    std::pair<double, double> coord_init,
+    std::span<const std::vector<double>> param_arr,
+    std::span<const double> dparams,
+    SizeType poly_order,
+    std::span<const SizeType> score_widths,
+    const detection::ScoringFunction<FoldType>& scoring_func,
+    utils::SuggestionStruct<FoldType>& sugg_struct) {
     const auto nparams = param_arr.size();
     error_check::check_equal(nparams, poly_order,
                              "nparams should be equal to poly_order");
@@ -332,7 +333,8 @@ void poly_taylor_suggest(std::span<const FoldType> fold_segment,
     }
 
     // Create folds tensor: (n_param_sets, 2, nbins)
-    auto folds = xt::adapt(fold_segment.data(), {n_param_sets, 2, nbins});
+    std::vector<SizeType> fold_shape = {n_param_sets, 2, nbins};
+    xt::xtensor<FoldType, 3> folds = xt::adapt(fold_segment.data(), fold_shape);
 
     // Calculate scores
     std::vector<float> scores(n_param_sets);
@@ -344,4 +346,25 @@ void poly_taylor_suggest(std::span<const FoldType> fold_segment,
     // Initialize the SuggestionStruct with the generated data
     sugg_struct.add_initial(param_sets, folds, scores, backtracks);
 }
+
+template void poly_taylor_suggest<float>(
+    std::span<const float> fold_segment,
+    std::pair<double, double> coord_init,
+    std::span<const std::vector<double>> param_arr,
+    std::span<const double> dparams,
+    SizeType poly_order,
+    std::span<const SizeType> score_widths,
+    const detection::ScoringFunction<float>& scoring_func,
+    utils::SuggestionStruct<float>& sugg_struct);
+
+template void poly_taylor_suggest<ComplexType>(
+    std::span<const ComplexType> fold_segment,
+    std::pair<double, double> coord_init,
+    std::span<const std::vector<double>> param_arr,
+    std::span<const double> dparams,
+    SizeType poly_order,
+    std::span<const SizeType> score_widths,
+    const detection::ScoringFunction<ComplexType>& scoring_func,
+    utils::SuggestionStruct<ComplexType>& sugg_struct);
+
 } // namespace loki::core
