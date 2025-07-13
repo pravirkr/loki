@@ -4,7 +4,6 @@
 #include <cmath>
 #include <concepts>
 #include <cstdint>
-#include <limits>
 #include <random>
 #include <span>
 #include <stdexcept>
@@ -166,56 +165,71 @@ constexpr bool is_power_of_two(SizeType n) noexcept {
 
 using StatTables = StatLookupTables<float>;
 
-class ThreadSafeRNGBase {
-protected:
-    // Use boost::random is much faster than std::random.
-    std::vector<boost::random::mt19937> m_rngs;
-
+class ThreadSafeRNGInterface {
 public:
-    explicit ThreadSafeRNGBase(
-        unsigned int base_seed = std::random_device{}()) {
-        const int max_threads = omp_get_max_threads();
+    virtual ~ThreadSafeRNGInterface()                                = default;
+    ThreadSafeRNGInterface(const ThreadSafeRNGInterface&)            = delete;
+    ThreadSafeRNGInterface& operator=(const ThreadSafeRNGInterface&) = delete;
+    ThreadSafeRNGInterface(ThreadSafeRNGInterface&&)                 = default;
+    ThreadSafeRNGInterface& operator=(ThreadSafeRNGInterface&&)      = default;
+    virtual void generate_normal_dist_range(std::span<float> range,
+                                            float mean,
+                                            float stddev)            = 0;
+
+protected:
+    explicit ThreadSafeRNGInterface(int max_threads)
+        : m_max_threads(max_threads) {
+        validate_thread_params(max_threads);
+    }
+    static void validate_thread_params(int max_threads) {
         if (max_threads <= 0) {
             throw std::runtime_error("OpenMP: Invalid thread count");
         }
-        m_rngs.reserve(max_threads);
+    }
+    template <typename SeedType>
+    static std::vector<SeedType> generate_thread_seeds(unsigned int base_seed,
+                                                       int max_threads) {
         // Use std::seed_seq to generate high-quality, non-correlated seeds for
         // each thread.
         std::seed_seq seq{base_seed};
-        std::vector<uint32_t> thread_seeds(max_threads);
+        std::vector<SeedType> thread_seeds(max_threads);
         seq.generate(thread_seeds.begin(), thread_seeds.end());
+        return thread_seeds;
+    }
+    static int get_current_thread_id(int max_threads) {
+        const int tid = omp_get_thread_num();
+        if (tid < 0 || tid >= max_threads) {
+            throw std::out_of_range("Invalid OpenMP thread id");
+        }
+        return tid;
+    }
+
+    int m_max_threads;
+};
+
+class ThreadSafeRNG final : public ThreadSafeRNGInterface {
+private:
+    std::vector<boost::random::mt19937> m_rngs;
+
+public:
+    explicit ThreadSafeRNG(unsigned int base_seed = std::random_device{}(),
+                           int max_threads        = omp_get_max_threads())
+        : ThreadSafeRNGInterface(max_threads) {
+
+        m_rngs.reserve(max_threads);
+        auto thread_seeds =
+            generate_thread_seeds<uint32_t>(base_seed, max_threads);
+
         for (int i = 0; i < max_threads; ++i) {
             m_rngs.emplace_back(thread_seeds[i]);
         }
     }
 
-    ThreadSafeRNGBase(const ThreadSafeRNGBase&)            = delete;
-    ThreadSafeRNGBase& operator=(const ThreadSafeRNGBase&) = delete;
-    ThreadSafeRNGBase(ThreadSafeRNGBase&&)                 = default;
-    ThreadSafeRNGBase& operator=(ThreadSafeRNGBase&&)      = default;
-    virtual ~ThreadSafeRNGBase()                           = default;
-
-    boost::random::mt19937& get_engine_for_current_thread() {
-        const int tid = omp_get_thread_num();
-        if (tid < 0 || tid >= static_cast<int>(m_rngs.size())) {
-            throw std::out_of_range("Invalid OpenMP thread id");
-        }
-        return m_rngs[tid];
-    }
-
-    virtual void generate_normal_dist_range(std::span<float> range,
-                                            float mean,
-                                            float stddev) = 0;
-};
-
-class ThreadSafeRNG final : public ThreadSafeRNGBase {
-public:
-    using ThreadSafeRNGBase::ThreadSafeRNGBase;
-
     // Fills a range with random numbers using a provided distribution.
     template <class Distribution, typename T>
     void generate_range(Distribution& dist, std::span<T> range) {
-        auto& engine = get_engine_for_current_thread();
+        const int tid = get_current_thread_id(m_max_threads);
+        auto& engine  = m_rngs[tid];
         for (auto& val : range) {
             val = dist(engine);
         }
@@ -224,11 +238,76 @@ public:
     void generate_normal_dist_range(std::span<float> range,
                                     float mean,
                                     float stddev) override {
-        auto& engine = get_engine_for_current_thread();
+        const int tid = get_current_thread_id(m_max_threads);
+        auto& engine  = m_rngs[tid];
         boost::random::normal_distribution<float> dist(mean, stddev);
         for (auto& val : range) {
             val = dist(engine);
         }
+    }
+};
+
+/**
+ * @brief Thread-safe random number generator using xoshiro256+
+ *
+ * This class provides a thread-safe implementation of a random number generator
+ * that uses xoshiro256+ to generate random numbers.
+ *
+ * The implementation is based on the xoshiro256+ algorithm, which is a fast,
+ * simple, and high-quality random number generator.
+ *
+ * Taken from: https://prng.di.unimi.it/
+ *
+ */
+struct VectorXoshiro256Plus {
+    using BatchU64                       = xsimd::batch<uint64_t>;
+    static constexpr SizeType kBatchSize = BatchU64::size;
+    BatchU64 s0{}, s1{}, s2{}, s3{};
+
+    VectorXoshiro256Plus() : VectorXoshiro256Plus(0) {}
+    explicit VectorXoshiro256Plus(uint64_t base_seed) { seed(base_seed); }
+
+    void seed(uint64_t base_seed) {
+        std::array<uint64_t, kBatchSize> offsets{};
+        for (SizeType i = 0; i < kBatchSize; ++i) {
+            offsets[i] = i;
+        }
+        BatchU64 offset_batch = BatchU64::load_unaligned(offsets.data());
+
+        s0 = BatchU64(base_seed);
+        s1 = s0 + offset_batch * 0x9e3779b97f4a7c15ULL;
+        s2 = s1 + offset_batch * 0x3c6ef372fe94f82bULL;
+        s3 = s2 + offset_batch * 0xa54ff53a5f1d36f1ULL;
+
+        for (int i = 0; i < 12; ++i) {
+            next();
+        }
+    }
+
+    BatchU64 next() {
+        // xoshiro256+ - simpler and faster than xoshiro256++
+        BatchU64 result = s0 + s3;
+        BatchU64 t      = s1 << 17;
+        s2 ^= s0;
+        s3 ^= s1;
+        s1 ^= s2;
+        s0 ^= s3;
+        s2 ^= t;
+        s3 = xsimd::rotl(s3, 45);
+        return result;
+    }
+
+    static constexpr SizeType kNumU32PerArray = 2 * BatchU64::size;
+    std::array<uint32_t, kNumU32PerArray> next_u32_array() {
+        BatchU64 r1 = next();
+        BatchU64 r2 = next();
+        std::array<uint32_t, kNumU32PerArray> result{};
+        for (SizeType i = 0; i < kBatchSize; ++i) {
+            // Upper 24 bits
+            result[i]              = static_cast<uint32_t>(r1.get(i) >> 40U);
+            result[i + kBatchSize] = static_cast<uint32_t>(r2.get(i) >> 40U);
+        }
+        return result;
     }
 };
 
@@ -238,7 +317,7 @@ public:
  *
  * This class provides a thread-safe implementation of a random number generator
  * that uses a lookup table with linear interpolation to generate normally
- * distributed random numbers. 3x faster than Boost's normal_distribution.
+ * distributed random numbers. 3-5x faster than Boost's normal_distribution.
  *
  * The lookup table is initialized once and shared across all threads. It
  * precomputes a large Q-function table of quantiles, then for each uniform draw
@@ -246,19 +325,22 @@ public:
  * calls).
  *
  * The interpolation error is ≲1e-5; visually indistinguishable for Monte-Carlo
- * noise. The lookup table is initialized with 2^16 + 1 entries for good
+ * noise. The lookup table is initialized with 2^17 + 1 entries for good
  * resolution.
  */
-class ThreadSafeLUTRNG final : public ThreadSafeRNGBase {
+class ThreadSafeLUTRNG : public ThreadSafeRNGInterface {
 private:
-    static std::vector<float> m_lut;
-    static std::once_flag m_lut_init_flag;
-    static constexpr float kInvUint32Max =
-        1.0F / static_cast<float>(std::numeric_limits<uint32_t>::max());
+    static inline std::vector<float> m_lut;
+    static inline std::once_flag m_lut_init_flag;
+    // 24-bit precision for the uniform distribution
+    static constexpr float kInvU24 = 1.0F / static_cast<float>(1ULL << 24U);
+
+    std::vector<VectorXoshiro256Plus> m_rngs;
 
     // This function is called only once to populate the lookup table.
     static void initialize_lut() {
-        constexpr SizeType kTableSize = 65537;
+        // 2^17 + 1 for high resolution
+        constexpr SizeType kTableSize = 131073U;
         m_lut.resize(kTableSize);
         // Use `double` for the distribution object.
         // This provides the necessary precision to calculate quantiles for
@@ -273,9 +355,16 @@ private:
     }
 
 public:
-    explicit ThreadSafeLUTRNG(unsigned int base_seed = std::random_device{}())
-        : ThreadSafeRNGBase(base_seed) {
+    explicit ThreadSafeLUTRNG(unsigned int base_seed = std::random_device{}(),
+                              int max_threads        = omp_get_max_threads())
+        : ThreadSafeRNGInterface(max_threads) {
         std::call_once(m_lut_init_flag, initialize_lut);
+        m_rngs.resize(max_threads);
+        auto thread_seeds =
+            generate_thread_seeds<uint64_t>(base_seed, max_threads);
+        for (int i = 0; i < max_threads; ++i) {
+            m_rngs[i].seed(thread_seeds[i]);
+        }
     }
 
     void generate_normal_dist_range(std::span<float> range,
@@ -285,32 +374,41 @@ public:
                                          stddev);
     }
 
+private:
     void generate_normal_dist_range_xsimd(float* __restrict__ range,
-                                          SizeType range_size,
+                                          std::size_t range_size,
                                           float mean,
                                           float stddev) {
-        auto& engine                  = get_engine_for_current_thread();
+        const int tid = omp_get_thread_num();
+        if (tid < 0 || tid >= static_cast<int>(m_rngs.size())) {
+            throw std::out_of_range("Invalid OpenMP thread id");
+        }
+        auto& rng = m_rngs[tid];
+
         using BatchFloat              = xsimd::batch<float>;
         using BatchInt                = xsimd::batch<int32_t>;
         constexpr SizeType kBatchSize = BatchFloat::size;
         const auto max_idx            = static_cast<float>(m_lut.size() - 2);
 
-        std::array<uint32_t, kBatchSize> bits{};
         std::array<float, kBatchSize> bits_float{};
         std::array<float, kBatchSize> idxf_buf{};
         std::array<int32_t, kBatchSize> idxs_buf{};
+
+        const BatchFloat mean_v(mean);
+        const BatchFloat stddev_v(stddev);
+        float const* __restrict__ lut_ptr = m_lut.data();
         const SizeType main_loop = range_size - (range_size % kBatchSize);
+
         for (SizeType i = 0; i < main_loop; i += kBatchSize) {
-            // Generate random bits and convert to uniform floats
-            for (SizeType j = 0; j < kBatchSize; ++j) {
-                bits[j] = engine();
-            }
+            // Get array of uint32_t values directly from vectorized RNG
+            auto bits_array = rng.next_u32_array();
+
             // Load bits as floats directly and scale to [0, max_idx]
             for (SizeType j = 0; j < kBatchSize; ++j) {
-                bits_float[j] = static_cast<float>(bits[j]);
+                bits_float[j] = static_cast<float>(bits_array[j]);
             }
-            BatchFloat u = xsimd::load_unaligned(bits_float.data()) *
-                           kInvUint32Max * max_idx;
+            BatchFloat u =
+                xsimd::load_unaligned(bits_float.data()) * kInvU24 * max_idx;
             // Split into index and fractional parts
             BatchFloat idxf = xsimd::floor(u);
             BatchFloat frac = u - idxf;
@@ -321,34 +419,39 @@ public:
             }
             BatchInt idxs = xsimd::load_unaligned(idxs_buf.data());
 
-            // Gather y1 and y2 from lookup table
-            const auto dummy_batch = BatchFloat(0.0F);
-            BatchFloat y1 = xsimd::kernel::gather(dummy_batch, m_lut.data(),
-                                                  idxs, xsimd::default_arch{});
-            BatchFloat y2 = xsimd::kernel::gather(dummy_batch, m_lut.data() + 1,
-                                                  idxs, xsimd::default_arch{});
-
-            // Interpolate, scale, and shift
-            BatchFloat samples = y1 + (y2 - y1) * frac;
-            samples = samples * BatchFloat(stddev) + BatchFloat(mean);
-            // Store result
+            // Gather and interpolate
+            BatchFloat y1      = BatchFloat::gather(lut_ptr, idxs);
+            BatchFloat y2      = BatchFloat::gather(lut_ptr + 1, idxs);
+            BatchFloat samples = xsimd::fma(frac, y2 - y1, y1);
+            samples            = xsimd::fma(samples, stddev_v, mean_v);
             samples.store_unaligned(range + i);
         }
-        // Scalar tail
-        for (SizeType i = main_loop; i < range_size; ++i) {
-            const uint32_t bits = engine();
-            const auto u   = static_cast<float>(bits) * kInvUint32Max * max_idx;
-            const auto idx = static_cast<SizeType>(std::floor(u));
-            const auto frac = u - static_cast<float>(idx);
-            const auto y1   = m_lut[idx];
-            const auto y2   = m_lut[idx + 1];
-            range[i]        = (y1 + (y2 - y1) * frac) * stddev + mean;
+
+        // Scalar tail: Generate num_u32_per_array values once and use for
+        // all tail elements
+        if (main_loop < range_size) {
+            auto tail_bits_array = rng.next_u32_array();
+            SizeType tail_idx    = 0;
+
+            for (SizeType i = main_loop; i < range_size; ++i) {
+                const uint32_t bits = tail_bits_array[tail_idx++];
+                const auto u    = static_cast<float>(bits) * kInvU24 * max_idx;
+                const auto idx  = static_cast<SizeType>(std::floor(u));
+                const auto frac = u - static_cast<float>(idx);
+                const auto y1   = lut_ptr[idx];
+                const auto y2   = lut_ptr[idx + 1];
+                const auto standard = std::fma(frac, y2 - y1, y1);
+                range[i]            = std::fma(standard, stddev, mean);
+
+                // Generate new batch if we've used all values
+                if (tail_idx >= VectorXoshiro256Plus::kNumU32PerArray &&
+                    i + 1 < range_size) {
+                    tail_bits_array = rng.next_u32_array();
+                    tail_idx        = 0;
+                }
+            }
         }
     }
 };
-
-// Define static members for ThreadSafeLUTRNG
-inline std::vector<float> ThreadSafeLUTRNG::m_lut;
-inline std::once_flag ThreadSafeLUTRNG::m_lut_init_flag;
 
 } // namespace loki::math

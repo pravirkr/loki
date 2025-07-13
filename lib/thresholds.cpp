@@ -332,7 +332,7 @@ IndexType find_bin_index(std::span<const float> bins, float value) {
 std::unique_ptr<FoldVectorHandle>
 simulate_folds(const FoldVectorHandle& folds_in,
                std::span<const float> profile,
-               math::ThreadSafeRNGBase& rng,
+               math::ThreadSafeRNGInterface& rng,
                DualPoolFoldManager& manager,
                ThreadLocalBuffers& buffers,
                float bias_snr       = 0.0F,
@@ -432,7 +432,7 @@ gen_next_using_thresh(const State& state_cur,
                       float bias_snr,
                       std::span<const float> profile,
                       std::span<const SizeType> box_score_widths,
-                      math::ThreadSafeRNGBase& rng,
+                      math::ThreadSafeRNGInterface& rng,
                       DualPoolFoldManager& manager,
                       ThreadLocalBuffers& buffers,
                       float var_add    = 1.0F,
@@ -475,7 +475,7 @@ gen_next_using_surv_prob(const State& state_cur,
                          float bias_snr,
                          std::span<const float> profile,
                          std::span<const SizeType> box_score_widths,
-                         math::ThreadSafeRNGBase& rng,
+                         math::ThreadSafeRNGInterface& rng,
                          DualPoolFoldManager& manager,
                          ThreadLocalBuffers& buffers,
                          float var_add    = 1.0F,
@@ -730,7 +730,7 @@ private:
     std::vector<float> m_guess_path;
     std::vector<State> m_states;
 
-    std::unique_ptr<math::ThreadSafeRNGBase> m_rng;
+    std::unique_ptr<math::ThreadSafeRNGInterface> m_rng;
     std::unique_ptr<DualPoolFoldManager> m_manager;
     FoldGrid m_folds_current;
     FoldGrid m_folds_next;
