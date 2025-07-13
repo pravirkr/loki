@@ -5,6 +5,7 @@
 
 #include <xtensor-blas/xlinalg.hpp>
 #include <xtensor/generators/xbuilder.hpp>
+#include <xtensor/misc/xpad.hpp>
 #include <xtensor/views/xview.hpp>
 
 #include "loki/math.hpp"
@@ -141,30 +142,30 @@ poly_taylor_shift_d_vec(const xt::xtensor<double, 2>& dparam_old,
     const auto dt          = tobs_new - t_ref;
     const auto fold_bins_d = static_cast<double>(fold_bins);
 
-    xt::xtensor<double, 2> result     = xt::zeros<double>({nbatch, nparams});
-    xt::xtensor<double, 1> dt_powers  = xt::zeros<double>({nparams});
-    xt::xtensor<double, 1> factorials = xt::zeros<double>({nparams});
+    xt::xtensor<double, 2> result = xt::zeros<double>({nbatch, nparams});
+    std::vector<double> dt_powers(nparams, 0.0);
+    std::vector<double> factorials(nparams, 0.0);
 
     double dt_power = dt;
     for (SizeType i = 0; i < nparams; ++i) {
-        dt_powers(i)  = dt_power;
-        factorials(i) = math::factorial(static_cast<double>(i + 1));
+        dt_powers[i]  = dt_power;
+        factorials[i] = math::factorial(static_cast<double>(i + 1));
         dt_power *= dt;
     }
     for (SizeType i = 0; i < nparams; ++i) {
         const auto k     = nparams - 1 - i;
-        auto factor_base = dt_powers(i) * fold_bins_d / factorials(i);
+        auto factor_base = dt_powers[k] * fold_bins_d / factorials[k];
 
-        if (i > 0) {
+        if (i < nparams - 1) {
             // Scale by f_cur / C_VAL for all but last parameter
             auto factors = factor_base * f_cur / utils::kCval;
-            xt::view(result, xt::all(), k) =
+            xt::view(result, xt::all(), i) =
                 xt::abs(xt::view(dparam_old, xt::all(), i) -
                         xt::view(dparam_new, xt::all(), i)) *
                 factors;
         } else {
-            // No scaling for last parameter
-            xt::view(result, xt::all(), k) =
+            // No scaling for last parameter (frequency)
+            xt::view(result, xt::all(), i) =
                 xt::abs(xt::view(dparam_old, xt::all(), i) -
                         xt::view(dparam_new, xt::all(), i)) *
                 factor_base;
@@ -360,9 +361,6 @@ shift_params_circular_batch(const xt::xtensor<double, 3>& param_vec_batch,
 
 xt::xtensor<double, 3>
 convert_taylor_to_circular(const xt::xtensor<double, 3>& param_sets) {
-
-    const auto size = param_sets.shape()[0];
-
     // Extract Taylor parameters
     auto snap  = xt::view(param_sets, xt::all(), 0, 0);
     auto jerk  = xt::view(param_sets, xt::all(), 1, 0);

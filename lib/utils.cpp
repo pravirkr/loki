@@ -5,7 +5,12 @@
 #include <span>
 #include <stdexcept>
 
+#include <xtensor/containers/xarray.hpp>
+#include <xtensor/io/xio.hpp>
+#include <xtensor/views/xview.hpp>
+
 #include <omp.h>
+#include <spdlog/spdlog.h>
 
 namespace loki::utils {
 
@@ -100,5 +105,39 @@ std::vector<SizeType> find_neighbouring_indices(
     // Return the slice of indices
     return {indices.begin() + static_cast<int>(left),
             indices.begin() + static_cast<int>(right)};
+}
+
+void debug_tensor(const xt::xtensor<double, 3>& leaf_batch, SizeType n_slices) {
+    xt::print_options::set_line_width(120);
+    xt::print_options::set_threshold(1000);
+    xt::print_options::set_edge_items(10);
+
+    size_t num_slices = std::min<size_t>(n_slices, leaf_batch.shape()[0]);
+
+    for (size_t i = 0; i < num_slices; ++i) {
+        auto slice = xt::view(leaf_batch, i, xt::all(), xt::all());
+
+        std::ostringstream oss;
+        oss << slice;
+
+        spdlog::info("leaf_batch[{}] =\n{}", i, oss.str());
+    }
+}
+
+void debug_tensor(const xt::xtensor<double, 2>& leaf_batch, SizeType n_slices) {
+    xt::print_options::set_line_width(120);
+    xt::print_options::set_threshold(1000);
+    xt::print_options::set_edge_items(10);
+
+    size_t num_slices = std::min<size_t>(n_slices, leaf_batch.shape()[0]);
+
+    for (size_t i = 0; i < num_slices; ++i) {
+        auto slice = xt::view(leaf_batch, i, xt::all());
+
+        std::ostringstream oss;
+        oss << slice;
+
+        spdlog::info("leaf_batch[{}] =\n{}", i, oss.str());
+    }
 }
 } // namespace loki::utils

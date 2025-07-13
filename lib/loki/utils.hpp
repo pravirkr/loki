@@ -69,4 +69,9 @@ public:
     ProgressGuard& operator=(ProgressGuard&&)      = delete;
 };
 
+void debug_tensor(const xt::xtensor<double, 3>& leaf_batch,
+                  SizeType n_slices = 5);
+void debug_tensor(const xt::xtensor<double, 2>& leaf_batch,
+                  SizeType n_slices = 5);
+
 } // namespace loki::utils

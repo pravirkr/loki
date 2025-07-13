@@ -16,6 +16,7 @@
 #include "loki/core/dynamic.hpp"
 #include "loki/psr_utils.hpp"
 #include "loki/timing.hpp"
+#include "loki/utils.hpp"
 #include "loki/utils/suggestions.hpp"
 
 namespace loki::algorithms {
@@ -241,9 +242,9 @@ private:
 struct IterationStats {
     SizeType n_leaves     = 0;
     SizeType n_leaves_phy = 0;
-    float score_min       = std::numeric_limits<float>::infinity();
-    float score_max       = -std::numeric_limits<float>::infinity();
-    std::array<double, 7> timers{};
+    float score_min       = std::numeric_limits<float>::max();
+    float score_max       = std::numeric_limits<float>::min();
+    std::array<float, 7> timers{};
 };
 
 template <typename FoldType> class Prune<FoldType>::Impl {
@@ -294,6 +295,9 @@ public:
         initialize(ffa_fold, ref_seg, actual_log_file);
 
         const auto nsegments = m_ffa_plan.nsegments.back();
+        utils::ProgressGuard progress_guard(true);
+        auto bar = utils::make_standard_bar("Pruning...");
+
         for (SizeType iter = 0; iter < nsegments - 1; ++iter) {
             execute_iteration(ffa_fold, actual_log_file);
             // Check for early termination (no survivors)
@@ -303,6 +307,9 @@ public:
                     iter + 1);
                 break;
             }
+            const auto progress = static_cast<float>(iter) /
+                                  static_cast<float>(nsegments - 1) * 100.0F;
+            bar.set_progress(static_cast<SizeType>(progress));
         }
         // Determine which suggestion buffer contains the final results
         // After ping-pong, the "input" buffer contains the latest results
@@ -390,7 +397,7 @@ private:
 
         // Write the initial prune stats to the log file
         std::ofstream log(log_file, std::ios::app);
-        log << pstats_cur.get_summary() << '\n';
+        log << pstats_cur.get_summary();
         log.close();
     }
 
@@ -400,12 +407,11 @@ private:
             return;
         }
         ++m_prune_level;
-        if (m_prune_level >= m_threshold_scheme.size()) {
-            m_prune_complete = true;
-            spdlog::info("Pruning complete - exceeded threshold scheme length "
-                         "at level {}",
-                         m_prune_level);
-            return;
+        if (m_prune_level > m_threshold_scheme.size()) {
+            throw std::runtime_error(
+                std::format("Pruning complete - exceeded threshold scheme "
+                            "length at level {}",
+                            m_prune_level));
         }
         // Reset output suggestion buffer
         m_suggestions_out->reset();
@@ -429,9 +435,10 @@ private:
         };
         // Write stats to log
         std::ofstream log(log_file, std::ios::app);
-        log << pstats_cur.get_summary() << '\n';
+        log << pstats_cur.get_summary();
         log.close();
-        m_pstats->update_stats(pstats_cur);
+        std::span<const float> timer_vals(stats.timers.data(), stats.timers.size());
+        m_pstats->update_stats(pstats_cur, timer_vals);
 
         // Check if no survivors
         if (m_suggestions_in->get_nsugg() == 0) {
@@ -470,12 +477,6 @@ private:
         const auto batch_size =
             std::max(1UL, std::min(m_batch_size, n_branches));
 
-        std::vector<SizeType> isuggest_batch(batch_size);
-        xt::xtensor<FoldType, 3> batch_combined_res(
-            {batch_size, 2, m_cfg.get_nbins()});
-        std::vector<float> batch_scores(batch_size);
-        std::vector<SizeType> filtered_indices(batch_size);
-
         auto t_start = std::chrono::steady_clock::now();
 
         // Process branches in batches
@@ -483,18 +484,17 @@ private:
              i_batch_start += batch_size) {
             const auto i_batch_end =
                 std::min(i_batch_start + batch_size, n_branches);
-            // const auto current_batch_size = i_batch_end - i_batch_start;
-
+            const auto current_batch_size = i_batch_end - i_batch_start;
             // Branch
-            t_start                = std::chrono::steady_clock::now();
-            const auto param_batch = xt::view(
+            t_start = std::chrono::steady_clock::now();
+            const xt::xtensor<double, 3> param_batch = xt::view(
                 m_suggestions_in->get_param_sets(),
                 xt::range(i_batch_start, i_batch_end), xt::all(), xt::all());
             auto [batch_leaves, batch_leaf_origins] =
                 m_prune_funcs->branch(param_batch, coord_cur);
             const auto n_leaves_batch = batch_leaves.shape(0);
             stats.n_leaves += n_leaves_batch;
-            stats.timers[0] += std::chrono::duration<double>(
+            stats.timers[0] += std::chrono::duration<float>(
                                    std::chrono::steady_clock::now() - t_start)
                                    .count();
             if (n_leaves_batch == 0) {
@@ -509,9 +509,12 @@ private:
             }
             const auto n_leaves_after_validation = batch_leaves.shape(0);
             stats.n_leaves_phy += n_leaves_after_validation;
-            stats.timers[1] += std::chrono::duration<double>(
+            stats.timers[1] += std::chrono::duration<float>(
                                    std::chrono::steady_clock::now() - t_start)
                                    .count();
+            if (n_leaves_after_validation == 0) {
+                continue;
+            }
 
             // Resolve
             t_start = std::chrono::steady_clock::now();
@@ -521,17 +524,34 @@ private:
                                    std::chrono::steady_clock::now() - t_start)
                                    .count();
 
+            // Allocate arrays with correct size
+            std::vector<SizeType> batch_isuggest(n_leaves_after_validation);
+            xt::xtensor<FoldType, 3> batch_combined_res(
+                {n_leaves_after_validation, 2, m_cfg.get_nbins()});
+            std::vector<float> batch_scores(n_leaves_after_validation);
+            std::vector<SizeType> filtered_indices;
+            filtered_indices.reserve(n_leaves_after_validation);
+            if (batch_leaf_origins.size() != n_leaves_after_validation) {
+                throw std::runtime_error(std::format(
+                    "Size mismatch: batch_leaf_origins.size()={}, "
+                    "n_leaves_after_validation={}",
+                    batch_leaf_origins.size(), n_leaves_after_validation));
+            }
             // Load, shift, add
             t_start = std::chrono::steady_clock::now();
             // Map batch_leaf_origins to global indices
-            for (SizeType i = 0; i < batch_leaf_origins.size(); ++i) {
-                isuggest_batch[i] = batch_leaf_origins[i] + i_batch_start;
+            for (SizeType i = 0; i < n_leaves_after_validation; ++i) {
+                if (batch_leaf_origins[i] >= current_batch_size) {
+                    throw std::runtime_error(std::format(
+                        "batch_leaf_origins[{}]={} >= current_batch_size={}", i,
+                        batch_leaf_origins[i], current_batch_size));
+                }
+                batch_isuggest[i] = batch_leaf_origins[i] + i_batch_start;
             }
-            m_prune_funcs->load_shift_add(ffa_fold_segment, batch_param_idx,
-                                          batch_phase_shift,
-                                          m_suggestions_in->get_folds(),
-                                          isuggest_batch, batch_combined_res);
-            stats.timers[3] += std::chrono::duration<double>(
+            m_prune_funcs->load_shift_add(
+                m_suggestions_in->get_folds(), batch_isuggest, ffa_fold_segment,
+                batch_param_idx, batch_phase_shift, batch_combined_res);
+            stats.timers[3] += std::chrono::duration<float>(
                                    std::chrono::steady_clock::now() - t_start)
                                    .count();
 
@@ -544,7 +564,7 @@ private:
                 stats.score_min = std::min(stats.score_min, *min_it);
                 stats.score_max = std::max(stats.score_max, *max_it);
             }
-            stats.timers[4] += std::chrono::duration<double>(
+            stats.timers[4] += std::chrono::duration<float>(
                                    std::chrono::steady_clock::now() - t_start)
                                    .count();
 
@@ -559,7 +579,7 @@ private:
             const auto num_passing = filtered_indices.size();
             if (num_passing == 0) {
                 stats.timers[6] +=
-                    std::chrono::duration<double>(
+                    std::chrono::duration<float>(
                         std::chrono::steady_clock::now() - t_start)
                         .count();
                 continue;
@@ -581,19 +601,18 @@ private:
                 filtered_scores[i]      = batch_scores[idx];
                 filtered_param_idx[i]   = batch_param_idx[idx];
                 filtered_phase_shift[i] = batch_phase_shift[idx];
-                filtered_isuggest[i]    = isuggest_batch[idx];
+                filtered_isuggest[i]    = batch_isuggest[idx];
             }
 
-            stats.timers[6] += std::chrono::duration<double>(
+            stats.timers[6] += std::chrono::duration<float>(
                                    std::chrono::steady_clock::now() - t_start)
                                    .count();
 
             // Transform
             t_start                          = std::chrono::steady_clock::now();
             const auto filtered_leaves_trans = m_prune_funcs->transform(
-                xt::view(filtered_leaves, xt::all(), xt::all(), 0), coord_cur,
-                trans_matrix);
-            stats.timers[5] += std::chrono::duration<double>(
+                filtered_leaves, coord_cur, trans_matrix);
+            stats.timers[5] += std::chrono::duration<float>(
                                    std::chrono::steady_clock::now() - t_start)
                                    .count();
 
@@ -617,7 +636,7 @@ private:
                 filtered_leaves_trans, filtered_combined_res, filtered_scores,
                 batch_backtrack, current_threshold);
 
-            stats.timers[6] += std::chrono::duration<double>(
+            stats.timers[6] += std::chrono::duration<float>(
                                    std::chrono::steady_clock::now() - t_start)
                                    .count();
         }

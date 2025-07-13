@@ -297,6 +297,7 @@ public:
         auto [level_stats, timer_stats] = pstats.get_packed_data();
 
         HighFive::DataSetCreateProps props;
+        props.add(HighFive::Chunking(std::vector<hsize_t>{1024}));
         props.add(HighFive::Deflate(9));
 
         // Create std::vector from xtensor data with shape
@@ -304,16 +305,16 @@ public:
         std::vector<SizeType> tensor_shape(shape.begin(), shape.end());
         std::vector<double> tensor_data(param_sets.data(),
                                         param_sets.data() + param_sets.size());
-
-        run_group.createDataSet("scheme", scheme, props);
         run_group.createDataSet("param_sets_data", tensor_data, props);
-        run_group.createAttribute("param_sets_shape", tensor_shape);
-        run_group.createDataSet("scores", scores, props);
+
+        run_group.createDataSet("scheme", scheme);
+        run_group.createDataSet("param_sets_shape", tensor_shape);
+        run_group.createDataSet("scores", scores);
         if (!level_stats.empty()) {
-            run_group.createDataSet("level_stats", level_stats, props);
+            run_group.createDataSet("level_stats", level_stats);
         }
         if (!timer_stats.empty()) {
-            run_group.createDataSet("timer_stats", timer_stats, props);
+            run_group.createDataSet("timer_stats", timer_stats);
         }
     }
 

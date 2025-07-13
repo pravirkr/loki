@@ -42,17 +42,17 @@ public:
     auto pack(const xt::xtensor<FoldType, 2>& data) const
         -> xt::xtensor<FoldType, 1>;
 
-    void load_shift_add(std::span<const FoldType> ffa_fold_segment,
-                        std::span<const SizeType> param_idx_batch,
-                        std::span<const double> shift_batch,
-                        const xt::xtensor<FoldType, 3>& folds,
-                        std::span<const SizeType> isuggest_batch,
+    void load_shift_add(const xt::xtensor<FoldType, 3>& folds,
+                        std::span<const SizeType> batch_isuggest,
+                        std::span<const FoldType> ffa_fold_segment,
+                        std::span<const SizeType> batch_param_idx,
+                        std::span<const double> batch_shift,
                         xt::xtensor<FoldType, 3>& out);
 
-    auto transform(const xt::xtensor<double, 2>& leaf,
+    auto transform(const xt::xtensor<double, 3>& leaf,
                    std::pair<double, double> coord_cur,
                    const xt::xtensor<double, 2>& trans_matrix) const
-        -> xt::xtensor<double, 2>;
+        -> xt::xtensor<double, 3>;
 
     auto get_transform_matrix(std::pair<double, double> coord_cur,
                               std::pair<double, double> coord_prev) const

@@ -252,13 +252,14 @@ cartesian_prod_padded(const xt::xtensor<double, 3>& padded_arrays,
 
             // Odometer increment (except for last item)
             if (item_row_idx < num_items_i - 1) {
-                for (SizeType k = nparams; k-- > 0;) {
-                    const SizeType max_idx_k = actual_counts(i, k) - 1;
-                    if (indices[k] < max_idx_k) {
-                        ++indices[k];
+                for (SizeType k = nparams; k > 0; --k) {
+                    const SizeType idx = k - 1; // Convert to 0-based index
+                    const SizeType max_idx_k = actual_counts(i, idx) - 1;
+                    if (indices[idx] < max_idx_k) {
+                        ++indices[idx];
                         break;
                     }
-                    indices[k] = 0;
+                    indices[idx] = 0;
                 }
             }
         }

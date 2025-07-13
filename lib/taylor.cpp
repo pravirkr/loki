@@ -53,7 +53,6 @@ poly_taylor_resolve_batch(const xt::xtensor<double, 3>& leaf_batch,
                           std::pair<double, double> coord_init,
                           std::span<const std::vector<double>> param_arr,
                           SizeType fold_bins) {
-
     const SizeType n_leaves = leaf_batch.shape(0);
     const SizeType nparams  = param_arr.size();
     const double delta_t    = coord_add.first - coord_init.first;
@@ -244,11 +243,11 @@ poly_taylor_branch_batch(const xt::xtensor<double, 3>& param_set_batch,
                                                0.0);
     xt::xtensor<double, 2> pad_branched_dparams({n_batch, nparams}, 0.0);
     xt::xtensor<SizeType, 2> branched_counts({n_batch, nparams}, 0);
-
     for (SizeType i = 0; i < n_batch; ++i) {
         for (SizeType j = 0; j < nparams; ++j) {
             const auto [p_min, p_max] = param_limits[j];
-            auto slice_span = xt::view(pad_branched_params, i, j, xt::all());
+            auto slice_span =
+                std::span(&pad_branched_params(i, j, 0), branch_max);
             auto [dparam_act, count] = psr_utils::branch_param_padded(
                 slice_span, param_cur_batch(i, j), dparam_cur_batch(i, j),
                 dparam_opt_batch(i, j), p_min, p_max);

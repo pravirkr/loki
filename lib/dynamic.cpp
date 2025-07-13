@@ -118,28 +118,28 @@ void PruneTaylorDPFuncts<FoldType>::score(
 
 template <typename FoldType>
 void PruneTaylorDPFuncts<FoldType>::load_shift_add(
-    std::span<const FoldType> ffa_fold_segment,
-    std::span<const SizeType> param_idx_batch,
-    std::span<const double> shift_batch,
     const xt::xtensor<FoldType, 3>& folds,
-    std::span<const SizeType> isuggest_batch,
+    std::span<const SizeType> batch_isuggest,
+    std::span<const FoldType> ffa_fold_segment,
+    std::span<const SizeType> batch_param_idx,
+    std::span<const double> batch_shift,
     xt::xtensor<FoldType, 3>& out) {
-    const SizeType n_batch = folds.shape(0);
+    const SizeType n_batch = out.shape(0);
     if constexpr (std::is_same_v<FoldType, ComplexType>) {
         kernels::shift_add_complex_recurrence_batch(
-            folds.data(), isuggest_batch.data(), ffa_fold_segment.data(),
-            param_idx_batch.data(), shift_batch.data(), out.data(),
+            folds.data(), batch_isuggest.data(), ffa_fold_segment.data(),
+            batch_param_idx.data(), batch_shift.data(), out.data(),
             m_cfg.get_nbins_f(), m_cfg.get_nbins(), n_batch);
     } else {
         // Float version: round shifts to integers
-        std::vector<SizeType> shift_batch_rounded(shift_batch.size());
-        std::transform(shift_batch.begin(), shift_batch.end(),
-                       shift_batch_rounded.begin(), [](double shift) {
+        std::vector<SizeType> batch_shift_rounded(batch_shift.size());
+        std::transform(batch_shift.begin(), batch_shift.end(),
+                       batch_shift_rounded.begin(), [](double shift) {
                            return static_cast<SizeType>(std::round(shift));
                        });
         kernels::shift_add_buffer_batch(
-            folds.data(), isuggest_batch.data(), ffa_fold_segment.data(),
-            param_idx_batch.data(), shift_batch_rounded.data(), out.data(),
+            folds.data(), batch_isuggest.data(), ffa_fold_segment.data(),
+            batch_param_idx.data(), batch_shift_rounded.data(), out.data(),
             m_shift_buffer.data(), m_cfg.get_nbins(), n_batch);
     }
 }
@@ -153,12 +153,12 @@ auto PruneTaylorDPFuncts<FoldType>::pack(
 
 template <typename FoldType>
 auto PruneTaylorDPFuncts<FoldType>::transform(
-    const xt::xtensor<double, 2>& leaf,
+    const xt::xtensor<double, 3>& leaf_batch,
     std::pair<double, double> /*coord_cur*/,
     const xt::xtensor<double, 2>& /*trans_matrix*/) const
-    -> xt::xtensor<double, 2> {
+    -> xt::xtensor<double, 3> {
     // Taylor variant doesn't transform - just return original leaf
-    return leaf;
+    return leaf_batch;
 }
 
 template <typename FoldType>
