@@ -284,7 +284,7 @@ private:
                            cuda::std::span<const float> ts_v_d,
                            float* init_buffer_d,
                            cudaStream_t stream) {
-        ScopeTimer timer("FFACUDA::Impl::initialize_device");
+        timing::ScopeTimer timer("FFACUDA::Impl::initialize_device");
         m_the_bf->execute(
             ts_e_d, ts_v_d,
             cuda::std::span(init_buffer_d, m_the_bf->get_fold_size()), stream);
@@ -294,7 +294,7 @@ private:
                                       cuda::std::span<const float> ts_v_d,
                                       cuda::std::span<float> fold_d,
                                       cudaStream_t stream) {
-        ScopeTimer timer("FFACUDA::Impl::execute_device");
+        timing::ScopeTimer timer("FFACUDA::Impl::execute_device");
         initialize_device(ts_e_d, ts_v_d,
                           thrust::raw_pointer_cast(m_fold_in_d.data()), stream);
 
@@ -347,7 +347,7 @@ private:
                                       cuda::std::span<const float> ts_v_d,
                                       cuda::std::span<float> fold_d,
                                       cudaStream_t stream) {
-        ScopeTimer timer("FFACUDA::Impl::execute_device");
+        timing::ScopeTimer timer("FFACUDA::Impl::execute_device");
         const auto levels = m_cfg.get_niters_ffa() + 1;
 
         // Use m_fold_in and output fold buffer for ping-pong
@@ -494,7 +494,7 @@ public:
         const auto fold_size_complex = m_ffa_plan.get_fold_size_complex();
         const auto nfft = m_ffa_plan.get_fold_size() / m_cfg.get_nbins();
 
-        ScopeTimer timer("FFACOMPLEXCUDA::execute_device");
+        timing::ScopeTimer timer("FFACOMPLEXCUDA::execute_device");
         if (m_use_single_buffer) {
             auto fold_complex = cuda::std::span<ComplexTypeCUDA>(
                 reinterpret_cast<ComplexTypeCUDA*>(fold_d.data()),
@@ -529,7 +529,7 @@ public:
                    cudaStream_t stream) {
         check_inputs_complex(ts_e_d.size(), ts_v_d.size(),
                              fold_complex_d.size());
-        ScopeTimer timer("FFACOMPLEXCUDA::execute_device");
+        timing::ScopeTimer timer("FFACOMPLEXCUDA::execute_device");
         if (m_use_single_buffer) {
             execute_single_buffer_device(ts_e_d, ts_v_d, fold_complex_d, false,
                                          stream);
@@ -592,7 +592,7 @@ private:
                            ComplexTypeCUDA* init_buffer_d,
                            ComplexTypeCUDA* temp_buffer_d,
                            cudaStream_t stream) {
-        ScopeTimer timer("FFACOMPLEXCUDA::initialize");
+        timing::ScopeTimer timer("FFACOMPLEXCUDA::initialize");
         // Use temp_buffer for the initial real-valued brute fold output
         auto real_temp_view =
             cuda::std::span<float>(reinterpret_cast<float*>(temp_buffer_d),

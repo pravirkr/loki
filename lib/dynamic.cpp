@@ -52,28 +52,30 @@ auto PruneTaylorDPFuncts<FoldType>::load(std::span<const FoldType> ffa_fold,
 
 template <typename FoldType>
 auto PruneTaylorDPFuncts<FoldType>::resolve(
-    const xt::xtensor<double, 3>& leaf_batch,
+    const xt::xtensor<double, 3>& batch_leaves,
     std::pair<double, double> coord_add,
-    std::pair<double, double> coord_init) const
+    std::pair<double, double> coord_init,
+    SizeType n_leaves) const
     -> std::tuple<std::vector<SizeType>, std::vector<double>> {
     if (m_cfg.get_prune_poly_order() == 4) {
-        return poly_taylor_resolve_snap_batch(leaf_batch, coord_add, coord_init,
-                                              m_param_arr, m_cfg.get_nbins());
+        return poly_taylor_resolve_snap_batch(batch_leaves, coord_add,
+                                              coord_init, m_param_arr,
+                                              m_cfg.get_nbins(), n_leaves);
     }
-    return poly_taylor_resolve_batch(leaf_batch, coord_add, coord_init,
-                                     m_param_arr, m_cfg.get_nbins());
+    return poly_taylor_resolve_batch(batch_leaves, coord_add, coord_init,
+                                     m_param_arr, m_cfg.get_nbins(), n_leaves);
 }
 
 template <typename FoldType>
 auto PruneTaylorDPFuncts<FoldType>::branch(
     const xt::xtensor<double, 3>& param_set_batch,
-    std::pair<double, double> coord_cur) const
-    -> std::tuple<xt::xtensor<double, 3>, std::vector<SizeType>> {
+    std::pair<double, double> coord_cur,
+    xt::xtensor<double, 3>& batch_leaves) const -> std::vector<SizeType> {
 
     return poly_taylor_branch_batch(
-        param_set_batch, coord_cur, m_cfg.get_nbins(), m_cfg.get_tol_bins(),
-        m_cfg.get_prune_poly_order(), m_cfg.get_param_limits(),
-        m_cfg.get_branch_max());
+        param_set_batch, coord_cur, batch_leaves, m_cfg.get_nbins(),
+        m_cfg.get_tol_bins(), m_cfg.get_prune_poly_order(),
+        m_cfg.get_param_limits(), m_cfg.get_branch_max());
 }
 
 template <typename FoldType>
@@ -124,7 +126,8 @@ void PruneTaylorDPFuncts<FoldType>::load_shift_add(
     std::span<const SizeType> batch_param_idx,
     std::span<const double> batch_shift,
     xt::xtensor<FoldType, 3>& out) {
-    const SizeType n_batch = out.shape(0);
+    // Use one of the spans to get the correct batch size
+    const auto n_batch = batch_isuggest.size();
     if constexpr (std::is_same_v<FoldType, ComplexType>) {
         kernels::shift_add_complex_recurrence_batch(
             folds.data(), batch_isuggest.data(), ffa_fold_segment.data(),
@@ -159,13 +162,11 @@ auto PruneTaylorDPFuncts<FoldType>::pack(
 }
 
 template <typename FoldType>
-auto PruneTaylorDPFuncts<FoldType>::transform(
-    const xt::xtensor<double, 3>& leaf_batch,
+void PruneTaylorDPFuncts<FoldType>::transform(
+    xt::xtensor<double, 3>& /*batch_leaves*/,
     std::pair<double, double> /*coord_cur*/,
-    const xt::xtensor<double, 2>& /*trans_matrix*/) const
-    -> xt::xtensor<double, 3> {
+    const xt::xtensor<double, 2>& /*trans_matrix*/) const {
     // Taylor variant doesn't transform - just return original leaf
-    return leaf_batch;
 }
 
 template <typename FoldType>
@@ -184,12 +185,13 @@ auto PruneTaylorDPFuncts<FoldType>::get_transform_matrix(
 
 template <typename FoldType>
 auto PruneTaylorDPFuncts<FoldType>::validate(
-    const xt::xtensor<double, 3>& leaves,
+    const xt::xtensor<double, 3>& /*batch_leaves*/,
     std::pair<double, double> /*coord_valid*/,
     const std::tuple<xt::xtensor<double, 1>, xt::xtensor<double, 1>, double>&
-    /*validation_params*/) const -> xt::xtensor<double, 3> {
+    /*validation_params*/,
+    SizeType n_leaves) const -> SizeType {
     // Taylor variant doesn't filter - return all leaves
-    return leaves;
+    return n_leaves;
 }
 
 template <typename FoldType>

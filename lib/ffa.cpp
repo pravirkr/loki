@@ -72,7 +72,7 @@ public:
             fold.size(), m_ffa_plan.get_fold_size(),
             "FFA::Impl::execute: fold must have size fold_size");
 
-        ScopeTimer timer("FFA::execute");
+        timing::ScopeTimer timer("FFA::execute");
         if (m_use_single_buffer) {
             execute_single_buffer(ts_e, ts_v, fold);
         } else {
@@ -95,7 +95,7 @@ private:
     void initialize(std::span<const float> ts_e,
                     std::span<const float> ts_v,
                     float* init_buffer) {
-        ScopeTimer timer("FFA::initialize");
+        timing::ScopeTimer timer("FFA::initialize");
         m_the_bf->execute(ts_e, ts_v,
                           std::span(init_buffer, m_the_bf->get_fold_size()));
     }
@@ -337,7 +337,7 @@ public:
                                  "FFACOMPLEX::Impl::execute: fold must have "
                                  "size 2 * fold_size_complex");
 
-        ScopeTimer timer("FFACOMPLEX::execute");
+        timing::ScopeTimer timer("FFACOMPLEX::execute");
 
         const auto nfft = fold_size / m_cfg.get_nbins();
         if (m_use_single_buffer) {
@@ -373,7 +373,7 @@ public:
             fold_complex.size(), m_ffa_plan.get_fold_size_complex(),
             "FFACOMPLEX::Impl::execute: fold must have size fold_size_complex");
 
-        ScopeTimer timer("FFACOMPLEX::execute");
+        timing::ScopeTimer timer("FFACOMPLEX::execute");
         if (m_use_single_buffer) {
             execute_single_buffer(ts_e, ts_v, fold_complex, false);
         } else {
@@ -397,7 +397,7 @@ private:
                     std::span<const float> ts_v,
                     ComplexType* init_buffer,
                     ComplexType* temp_buffer) {
-        ScopeTimer timer("FFACOMPLEX::initialize");
+        timing::ScopeTimer timer("FFACOMPLEX::initialize");
         // Use temp_buffer for the initial real-valued brute fold output
         auto real_temp_view =
             std::span<float>(reinterpret_cast<float*>(temp_buffer),

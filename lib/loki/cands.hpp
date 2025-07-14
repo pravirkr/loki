@@ -9,7 +9,6 @@
 #include <map>
 #include <numeric>
 #include <optional>
-#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -77,6 +76,57 @@ struct TimerStatsPacked {
     float threshold{};
 };
 
+class TimerStats {
+public:
+    TimerStats() {
+        for (const auto& name : kTimerNames) {
+            m_timers[name] = 0.0F;
+        }
+    }
+    [[nodiscard]] float& operator[](const std::string& key) {
+        return m_timers[key];
+    }
+    [[nodiscard]] const float& operator[](const std::string& key) const {
+        return m_timers.at(key);
+    }
+    [[nodiscard]] float at(const std::string& key) const {
+        return m_timers.at(key);
+    }
+    float& at(const std::string& key) { return m_timers.at(key); }
+    [[nodiscard]] bool contains(const std::string& key) const {
+        return m_timers.contains(key);
+    }
+    [[nodiscard]] auto begin() const { return m_timers.begin(); }
+    [[nodiscard]] auto end() const { return m_timers.end(); }
+    [[nodiscard]] auto begin() { return m_timers.begin(); }
+    [[nodiscard]] auto end() { return m_timers.end(); }
+
+    [[nodiscard]] float total() const {
+        return std::accumulate(
+            m_timers.begin(), m_timers.end(), 0.0F,
+            [](float sum, const auto& pair) { return sum + pair.second; });
+    }
+    void reset() {
+        for (auto& [name, time] : m_timers) {
+            time = 0.0F;
+        }
+    }
+    // Accumulation operator
+    TimerStats& operator+=(const TimerStats& other) {
+        for (const auto& [name, time] : other.m_timers) {
+            m_timers[name] += time;
+        }
+        return *this;
+    }
+
+private:
+    static constexpr std::array kTimerNames = {
+        "branch", "validate",  "resolve",   "shift_add",
+        "score",  "threshold", "transform", "batch_add"};
+
+    std::map<std::string, float> m_timers;
+};
+
 // Create a compound type for PruneStats
 inline HighFive::CompoundType create_compound_prune_stats() {
     return {{"level", HighFive::create_datatype<SizeType>()},
@@ -102,32 +152,16 @@ inline HighFive::CompoundType create_compound_timer_stats() {
 
 class PruneStatsCollection {
 public:
-    static constexpr std::array kTimerNames = {
-        "branch", "validate",  "resolve",  "shift_add",
-        "score",  "transform", "threshold"};
+    PruneStatsCollection() = default;
 
-    PruneStatsCollection() {
-        for (const auto& name : kTimerNames) {
-            m_timers[name] = 0.0;
-        }
-    }
     [[nodiscard]] size_t get_nstages() const { return m_stats_list.size(); }
 
-    void update_stats(
-        const PruneStats& stats,
-        std::optional<std::span<const float>> timer_vals = std::nullopt) {
+    void update_stats(const PruneStats& stats, const TimerStats& timers) {
         m_stats_list.push_back(stats);
-        if (timer_vals) {
-            const auto& vals = *timer_vals;
-            if (vals.size() != kTimerNames.size()) {
-                throw std::invalid_argument(std::format(
-                    "Invalid timer array length: expected {}, got {}",
-                    kTimerNames.size(), vals.size()));
-            }
-            for (size_t i = 0; i < kTimerNames.size(); ++i) {
-                m_timers[kTimerNames[i]] += vals[i];
-            }
-        }
+        m_accumulated_timers += timers;
+    }
+    void update_stats(const PruneStats& stats) {
+        m_stats_list.push_back(stats);
     }
 
     [[nodiscard]] std::optional<PruneStats> get_stats(SizeType level) const {
@@ -157,36 +191,35 @@ public:
     }
 
     [[nodiscard]] std::string get_timer_summary() const {
-        const float total_time = get_total_time();
-        if (total_time == 0.0) {
+        const float total_time = m_accumulated_timers.total();
+        if (total_time == 0.0F) {
             return "Timing breakdown: 0.00s\n";
         }
         std::string summary =
             std::format("Timing breakdown: {:.2f}s\n", total_time);
-        for (const auto& name : kTimerNames) {
-            if (auto it = m_timers.find(std::string{name});
-                it != m_timers.end()) {
-                const auto percent = (it->second / total_time) * 100.0F;
-                summary += std::format("  {:10s}: {:6.1f}%\n", name, percent);
-            }
+        std::vector<std::pair<std::string, float>> sorted_timers(
+            m_accumulated_timers.begin(), m_accumulated_timers.end());
+        std::ranges::sort(sorted_timers, [](const auto& a, const auto& b) {
+            return a.second > b.second;
+        });
+        for (const auto& [name, time] : sorted_timers) {
+            const auto percent = (time / total_time) * 100.0F;
+            summary += std::format("  {:10s}: {:6.1f}%\n", name, percent);
         }
         return summary;
     }
 
     [[nodiscard]] std::string get_concise_timer_summary() const {
-        const float total_time = get_total_time();
-        if (total_time == 0.0) {
+        const float total_time = m_accumulated_timers.total();
+        if (total_time == 0.0F) {
             return "Total: 0.0s";
         }
 
         // Copy timers to a vector to sort them by time
-        std::vector<std::pair<std::string_view, float>> sorted_times;
-        sorted_times.reserve(m_timers.size());
-        for (const auto& [name, time] : m_timers) {
-            sorted_times.emplace_back(name, time);
-        }
+        std::vector<std::pair<std::string, float>> sorted_times(
+            m_accumulated_timers.begin(), m_accumulated_timers.end());
         std::ranges::sort(sorted_times, [](const auto& a, const auto& b) {
-            return a.second > b.second; // Sort descending
+            return a.second > b.second;
         });
 
         std::string breakdown;
@@ -208,25 +241,26 @@ public:
                             std::vector<TimerStatsPacked>>
     get_packed_data() const {
         std::vector<TimerStatsPacked> packed_timers;
-        if (get_total_time() > 0.0F) {
-            packed_timers.emplace_back(
-                m_timers.at("branch"), m_timers.at("validate"),
-                m_timers.at("resolve"), m_timers.at("shift_add"),
-                m_timers.at("score"), m_timers.at("transform"),
-                m_timers.at("threshold"));
+        if (m_accumulated_timers.total() > 0.0F) {
+            packed_timers.emplace_back(m_accumulated_timers.at("branch"),
+                                       m_accumulated_timers.at("validate"),
+                                       m_accumulated_timers.at("resolve"),
+                                       m_accumulated_timers.at("shift_add"),
+                                       m_accumulated_timers.at("score"),
+                                       m_accumulated_timers.at("transform"),
+                                       m_accumulated_timers.at("batch_add"));
         }
         return {m_stats_list, packed_timers};
     }
 
+    // Direct access to accumulated timers
+    [[nodiscard]] const TimerStats& get_timers() const {
+        return m_accumulated_timers;
+    }
+
 private:
     std::vector<PruneStats> m_stats_list;
-    std::map<std::string, float> m_timers;
-
-    [[nodiscard]] float get_total_time() const {
-        return std::accumulate(
-            m_timers.begin(), m_timers.end(), 0.0F,
-            [](float sum, const auto& pair) { return sum + pair.second; });
-    }
+    TimerStats m_accumulated_timers;
 };
 
 class PruneResultWriter {

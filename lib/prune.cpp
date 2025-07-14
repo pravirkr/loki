@@ -1,7 +1,6 @@
 #include "loki/algorithms/prune.hpp"
 
 #include <algorithm>
-#include <chrono>
 #include <filesystem>
 #include <format>
 #include <utility>
@@ -243,8 +242,8 @@ struct IterationStats {
     SizeType n_leaves     = 0;
     SizeType n_leaves_phy = 0;
     float score_min       = std::numeric_limits<float>::max();
-    float score_max       = std::numeric_limits<float>::min();
-    std::array<float, 7> timers{};
+    float score_max       = std::numeric_limits<float>::lowest();
+    cands::TimerStats batch_timers;
 };
 
 template <typename FoldType> class Prune<FoldType>::Impl {
@@ -340,7 +339,7 @@ public:
     void initialize(std::span<const FoldType> ffa_fold,
                     SizeType ref_seg,
                     const std::filesystem::path& log_file) {
-        ScopeTimer timer("Prune::initialize");
+        timing::ScopeTimer timer("Prune::initialize");
         // Initialize suggestion buffers
         m_suggestions_in->reset();
         m_suggestions_out->reset();
@@ -419,9 +418,7 @@ public:
         std::ofstream log(log_file, std::ios::app);
         log << pstats_cur.get_summary();
         log.close();
-        std::span<const float> timer_vals(stats.timers.data(),
-                                          stats.timers.size());
-        m_pstats->update_stats(pstats_cur, timer_vals);
+        m_pstats->update_stats(pstats_cur, stats.batch_timers);
 
         // Check if no survivors
         if (m_suggestions_in->get_nsugg() == 0) {
@@ -477,11 +474,12 @@ private:
                                    float threshold,
                                    IterationStats& stats) {
         // Get coordinates
-        const auto coord_init  = m_scheme->get_coord(0);
-        const auto coord_cur   = m_scheme->get_coord(m_prune_level);
-        const auto coord_prev  = m_scheme->get_coord(m_prune_level - 1);
-        const auto coord_add   = m_scheme->get_seg_coord(m_prune_level);
-        const auto coord_valid = m_scheme->get_valid(m_prune_level);
+        const auto coord_init        = m_scheme->get_coord(0);
+        const auto coord_cur         = m_scheme->get_coord(m_prune_level);
+        const auto coord_prev        = m_scheme->get_coord(m_prune_level - 1);
+        const auto coord_add         = m_scheme->get_seg_coord(m_prune_level);
+        const auto coord_valid       = m_scheme->get_valid(m_prune_level);
+        const auto max_branch_factor = 12;
 
         // Load fold segment for current level
         const auto ffa_fold_segment =
@@ -497,267 +495,129 @@ private:
         const auto n_branches = m_suggestions_in->get_nsugg();
         const auto batch_size =
             std::max(1UL, std::min(m_batch_size, n_branches));
+        const auto max_batch_size = batch_size * max_branch_factor;
 
-        auto t_start = std::chrono::steady_clock::now();
+        timing::SimpleTimer timer;
+        const auto nparams = m_cfg.get_nparams();
+        xt::xtensor<double, 3> batch_leaves({max_batch_size, nparams + 2, 2});
+        xt::xtensor<FoldType, 3> batch_combined_res(
+            {max_batch_size, 2, m_cfg.get_nbins()});
+        xt::xtensor<SizeType, 2> batch_backtrack({max_batch_size, nparams + 2});
+        std::vector<float> batch_scores(max_batch_size);
+        std::vector<SizeType> batch_isuggest(max_batch_size);
 
         // Process branches in batches
         for (SizeType i_batch_start = 0; i_batch_start < n_branches;
              i_batch_start += batch_size) {
             const auto i_batch_end =
                 std::min(i_batch_start + batch_size, n_branches);
-            const auto current_batch_size = i_batch_end - i_batch_start;
+
             // Branch
-            t_start = std::chrono::steady_clock::now();
-            const xt::xtensor<double, 3> param_batch = xt::view(
+            timer.start();
+            const auto param_batch = xt::view(
                 m_suggestions_in->get_param_sets(),
                 xt::range(i_batch_start, i_batch_end), xt::all(), xt::all());
-            auto [batch_leaves, batch_leaf_origins] =
-                m_prune_funcs->branch(param_batch, coord_cur);
-            const auto n_leaves_batch = batch_leaves.shape(0);
+            const auto batch_leaf_origins =
+                m_prune_funcs->branch(param_batch, coord_cur, batch_leaves);
+            const auto n_leaves_batch = batch_leaf_origins.size();
+            stats.batch_timers["branch"] += timer.stop();
             stats.n_leaves += n_leaves_batch;
-            stats.timers[0] += std::chrono::duration<float>(
-                                   std::chrono::steady_clock::now() - t_start)
-                                   .count();
             if (n_leaves_batch == 0) {
                 continue;
             }
-            // Write batch_leaves and batch_leaf_origins to a file
-            if (i_batch_start == 0) {
-                // Write batch_leaves (3D tensor) - flatten and write as rows
-                std::ofstream batch_leaves_file("batch_leaves_loki.txt",
-                                                std::ios::app);
-                auto shape = batch_leaves.shape();
-                batch_leaves_file << "# Shape: " << shape[0] << " " << shape[1]
-                                  << " " << shape[2] << std::endl;
-                for (size_t i = 0; i < shape[0]; ++i) {
-                    for (size_t j = 0; j < shape[1]; ++j) {
-                        for (size_t k = 0; k < shape[2]; ++k) {
-                            batch_leaves_file << batch_leaves(i, j, k);
-                            if (k < shape[2] - 1)
-                                batch_leaves_file << " ";
-                        }
-                        batch_leaves_file << std::endl;
-                    }
-                }
-                batch_leaves_file.close();
-
-                // Write batch_leaf_origins (vector<SizeType>)
-                std::ofstream batch_leaf_origins_file(
-                    "batch_leaf_origins_loki.txt", std::ios::app);
-                for (size_t i = 0; i < batch_leaf_origins.size(); ++i) {
-                    batch_leaf_origins_file << batch_leaf_origins[i];
-                    if (i < batch_leaf_origins.size() - 1)
-                        batch_leaf_origins_file << " ";
-                }
-                batch_leaf_origins_file << std::endl;
-                batch_leaf_origins_file.close();
-            }
 
             // Validation
-            t_start = std::chrono::steady_clock::now();
+            timer.start();
+            auto n_leaves_after_validation = n_leaves_batch;
             if (validation_check) {
-                batch_leaves = m_prune_funcs->validate(
-                    batch_leaves, coord_valid, validation_params);
+                n_leaves_after_validation =
+                    m_prune_funcs->validate(batch_leaves, coord_valid,
+                                            validation_params, n_leaves_batch);
             }
-            const auto n_leaves_after_validation = batch_leaves.shape(0);
+            stats.batch_timers["validate"] += timer.stop();
             stats.n_leaves_phy += n_leaves_after_validation;
-            stats.timers[1] += std::chrono::duration<float>(
-                                   std::chrono::steady_clock::now() - t_start)
-                                   .count();
             if (n_leaves_after_validation == 0) {
                 continue;
             }
 
             // Resolve
-            t_start = std::chrono::steady_clock::now();
-            auto [batch_param_idx, batch_phase_shift] =
-                m_prune_funcs->resolve(batch_leaves, coord_add, coord_init);
-            stats.timers[2] += std::chrono::duration<double>(
-                                   std::chrono::steady_clock::now() - t_start)
-                                   .count();
+            timer.start();
+            const auto [batch_param_idx, batch_phase_shift] =
+                m_prune_funcs->resolve(batch_leaves, coord_add, coord_init,
+                                       n_leaves_after_validation);
+            stats.batch_timers["resolve"] += timer.stop();
 
-            if (i_batch_start == 0) {
-                // Write batch_param_idx (vector<SizeType>)
-                std::ofstream batch_param_idx_file("batch_param_idx_loki.txt",
-                                                   std::ios::app);
-                for (size_t i = 0; i < batch_param_idx.size(); ++i) {
-                    batch_param_idx_file << batch_param_idx[i];
-                    if (i < batch_param_idx.size() - 1)
-                        batch_param_idx_file << " ";
-                }
-                batch_param_idx_file << std::endl;
-                batch_param_idx_file.close();
-
-                // Write batch_phase_shift (vector<double>)
-                std::ofstream batch_phase_shift_file(
-                    "batch_phase_shift_loki.txt", std::ios::app);
-                for (size_t i = 0; i < batch_phase_shift.size(); ++i) {
-                    batch_phase_shift_file << batch_phase_shift[i];
-                    if (i < batch_phase_shift.size() - 1)
-                        batch_phase_shift_file << " ";
-                }
-                batch_phase_shift_file << std::endl;
-                batch_phase_shift_file.close();
-            }
-
-            // Allocate arrays with correct size
-            std::vector<SizeType> batch_isuggest(n_leaves_after_validation);
-            xt::xtensor<FoldType, 3> batch_combined_res(
-                {n_leaves_after_validation, 2, m_cfg.get_nbins()});
-            std::vector<float> batch_scores(n_leaves_after_validation);
-            std::vector<SizeType> filtered_indices;
-            filtered_indices.reserve(n_leaves_after_validation);
-            if (batch_leaf_origins.size() != n_leaves_after_validation) {
-                throw std::runtime_error(std::format(
-                    "Size mismatch: batch_leaf_origins.size()={}, "
-                    "n_leaves_after_validation={}",
-                    batch_leaf_origins.size(), n_leaves_after_validation));
-            }
-            // Load, shift, add
-            t_start = std::chrono::steady_clock::now();
-            // Map batch_leaf_origins to global indices
+            // Load, shift, add (Map batch_leaf_origins to global indices)
+            timer.start();
+            auto batch_isuggest_span =
+                std::span(batch_isuggest).first(n_leaves_after_validation);
             for (SizeType i = 0; i < n_leaves_after_validation; ++i) {
-                if (batch_leaf_origins[i] >= current_batch_size) {
-                    throw std::runtime_error(std::format(
-                        "batch_leaf_origins[{}]={} >= current_batch_size={}", i,
-                        batch_leaf_origins[i], current_batch_size));
-                }
-                batch_isuggest[i] = batch_leaf_origins[i] + i_batch_start;
+                batch_isuggest_span[i] = batch_leaf_origins[i] + i_batch_start;
             }
-            m_prune_funcs->load_shift_add(
-                m_suggestions_in->get_folds(), batch_isuggest, ffa_fold_segment,
-                batch_param_idx, batch_phase_shift, batch_combined_res);
-            stats.timers[3] += std::chrono::duration<float>(
-                                   std::chrono::steady_clock::now() - t_start)
-                                   .count();
+            m_prune_funcs->load_shift_add(m_suggestions_in->get_folds(),
+                                          batch_isuggest_span, ffa_fold_segment,
+                                          batch_param_idx, batch_phase_shift,
+                                          batch_combined_res);
+            stats.batch_timers["shift_add"] += timer.stop();
 
             // Score
-            t_start = std::chrono::steady_clock::now();
-            m_prune_funcs->score(batch_combined_res, batch_scores);
-            if (n_leaves_after_validation > 0) {
-                const auto [min_it, max_it] =
-                    std::ranges::minmax_element(batch_scores);
-                stats.score_min = std::min(stats.score_min, *min_it);
-                stats.score_max = std::max(stats.score_max, *max_it);
-            }
-            stats.timers[4] += std::chrono::duration<float>(
-                                   std::chrono::steady_clock::now() - t_start)
-                                   .count();
-            if (i_batch_start == 0) {
-                // Write batch_isuggest (vector<SizeType>)
-                std::ofstream batch_isuggest_file("batch_isuggest_loki.txt",
-                                                  std::ios::app);
-                for (size_t i = 0; i < batch_isuggest.size(); ++i) {
-                    batch_isuggest_file << batch_isuggest[i];
-                    if (i < batch_isuggest.size() - 1)
-                        batch_isuggest_file << " ";
-                }
-                batch_isuggest_file << std::endl;
-                batch_isuggest_file.close();
+            timer.start();
+            auto batch_scores_span =
+                std::span(batch_scores).first(n_leaves_after_validation);
+            m_prune_funcs->score(batch_combined_res, batch_scores_span);
+            const auto [min_it, max_it] =
+                std::ranges::minmax_element(batch_scores_span);
+            stats.score_min = std::min(stats.score_min, *min_it);
+            stats.score_max = std::max(stats.score_max, *max_it);
+            stats.batch_timers["score"] += timer.stop();
 
-                // Write batch_combined_res (3D tensor) - similar to
-                // batch_leaves
-                std::ofstream batch_combined_res_file(
-                    "batch_combined_res_loki.txt", std::ios::app);
-                auto shape = batch_combined_res.shape();
-                batch_combined_res_file << "# Shape: " << shape[0] << " "
-                                        << shape[1] << " " << shape[2]
-                                        << std::endl;
-                for (size_t i = 0; i < shape[0]; ++i) {
-                    for (size_t j = 0; j < shape[1]; ++j) {
-                        for (size_t k = 0; k < shape[2]; ++k) {
-                            batch_combined_res_file
-                                << batch_combined_res(i, j, k);
-                            if (k < shape[2] - 1)
-                                batch_combined_res_file << " ";
-                        }
-                        batch_combined_res_file << std::endl;
-                    }
-                }
-                batch_combined_res_file.close();
-
-                // Write batch_scores (vector<float>)
-                std::ofstream batch_scores_file("batch_scores_loki.txt",
-                                                std::ios::app);
-                for (size_t i = 0; i < batch_scores.size(); ++i) {
-                    batch_scores_file << batch_scores[i];
-                    if (i < batch_scores.size() - 1)
-                        batch_scores_file << " ";
-                }
-                batch_scores_file << std::endl;
-                batch_scores_file.close();
-            }
             // Thresholding & filtering
-            t_start = std::chrono::steady_clock::now();
-            filtered_indices.clear();
+            timer.start();
+            SizeType num_passing = 0;
             for (SizeType i = 0; i < n_leaves_after_validation; ++i) {
-                if (batch_scores[i] >= threshold) {
-                    filtered_indices.push_back(i);
+                if (batch_scores_span[i] >= threshold) {
+                    // Filter in-place
+                    batch_scores_span[num_passing] = batch_scores_span[i];
+                    xt::view(batch_leaves, num_passing, xt::all(), xt::all()) =
+                        xt::view(batch_leaves, i, xt::all(), xt::all());
+                    xt::view(batch_combined_res, num_passing, xt::all(),
+                             xt::all()) =
+                        xt::view(batch_combined_res, i, xt::all(), xt::all());
+                    // Construct backtrack
+                    batch_backtrack(num_passing, 0) = batch_isuggest_span[i];
+                    batch_backtrack(num_passing, 1) = batch_param_idx[i];
+                    for (SizeType j = 2; j < nparams + 1; ++j) {
+                        batch_backtrack(num_passing, j) = 0;
+                    }
+                    batch_backtrack(num_passing, nparams + 1) =
+                        static_cast<SizeType>(std::round(batch_phase_shift[i]));
+
+                    ++num_passing;
                 }
             }
-            const auto num_passing = filtered_indices.size();
+            stats.batch_timers["filter"] += timer.stop();
             if (num_passing == 0) {
-                stats.timers[6] +=
-                    std::chrono::duration<float>(
-                        std::chrono::steady_clock::now() - t_start)
-                        .count();
                 continue;
             }
-            // Filter results
-            auto filtered_leaves = xt::view(
-                batch_leaves, xt::keep(filtered_indices), xt::all(), xt::all());
-            auto filtered_combined_res =
-                xt::view(batch_combined_res, xt::keep(filtered_indices),
-                         xt::all(), xt::all());
-
-            std::vector<float> filtered_scores(num_passing);
-            std::vector<SizeType> filtered_param_idx(num_passing);
-            std::vector<double> filtered_phase_shift(num_passing);
-            std::vector<SizeType> filtered_isuggest(num_passing);
-
-            for (SizeType i = 0; i < num_passing; ++i) {
-                const auto idx          = filtered_indices[i];
-                filtered_scores[i]      = batch_scores[idx];
-                filtered_param_idx[i]   = batch_param_idx[idx];
-                filtered_phase_shift[i] = batch_phase_shift[idx];
-                filtered_isuggest[i]    = batch_isuggest[idx];
+            if (num_passing > max_batch_size) {
+                throw std::runtime_error(
+                    std::format("num_passing={} > max_batch_size={}",
+                                num_passing, max_batch_size));
             }
-
-            stats.timers[6] += std::chrono::duration<float>(
-                                   std::chrono::steady_clock::now() - t_start)
-                                   .count();
 
             // Transform
-            t_start                          = std::chrono::steady_clock::now();
-            const auto filtered_leaves_trans = m_prune_funcs->transform(
-                filtered_leaves, coord_cur, trans_matrix);
-            stats.timers[5] += std::chrono::duration<float>(
-                                   std::chrono::steady_clock::now() - t_start)
-                                   .count();
+            timer.start();
+            m_prune_funcs->transform(batch_leaves, coord_cur, trans_matrix);
+            stats.batch_timers["transform"] += timer.stop();
 
-            // Construct backtrack
-            t_start               = std::chrono::steady_clock::now();
-            const auto bt_nparams = m_cfg.get_nparams();
-            xt::xtensor<SizeType, 2> batch_backtrack(
-                {num_passing, bt_nparams + 2});
-
-            for (SizeType i = 0; i < num_passing; ++i) {
-                batch_backtrack(i, 0) = filtered_isuggest[i];
-                batch_backtrack(i, 1) = filtered_param_idx[i];
-                for (SizeType j = 2; j < bt_nparams + 1; ++j) {
-                    batch_backtrack(i, j) = 0;
-                }
-                batch_backtrack(i, bt_nparams + 1) =
-                    static_cast<SizeType>(std::round(filtered_phase_shift[i]));
-            }
             // Add batch to output suggestions
+            timer.start();
+            const auto filtered_scores_span =
+                batch_scores_span.first(num_passing);
             current_threshold = m_suggestions_out->add_batch(
-                filtered_leaves_trans, filtered_combined_res, filtered_scores,
+                batch_leaves, batch_combined_res, filtered_scores_span,
                 batch_backtrack, current_threshold);
-
-            stats.timers[6] += std::chrono::duration<float>(
-                                   std::chrono::steady_clock::now() - t_start)
-                                   .count();
+            stats.batch_timers["batch_add"] += timer.stop();
         }
     }
 

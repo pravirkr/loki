@@ -411,20 +411,26 @@ void snr_boxcar_3d_max(std::span<const float> arr,
 void snr_boxcar_batch(xt::xtensor<float, 3>& folds,
                       std::span<const SizeType> widths,
                       std::span<float> out) {
-    snr_boxcar_3d_max(std::span<const float>(folds.data(), folds.size()),
-                      folds.shape(0), widths, out, 1);
+    // Always use out span to get the correct batch size
+    const auto nbatch              = out.size();
+    const auto folds_size_relevant = nbatch * folds.shape(1) * folds.shape(2);
+    snr_boxcar_3d_max(std::span<const float>(folds.data(), folds_size_relevant),
+                      nbatch, widths, out, 1);
 }
 
 void snr_boxcar_batch_complex(xt::xtensor<ComplexType, 3>& folds,
                               std::span<const SizeType> widths,
                               std::span<float> out) {
-    const auto batch_size = folds.shape(0);
-    const auto nbins      = folds.shape(2);
+    // Always use out span to get the correct batch size
+    const auto nbatch              = out.size();
+    const auto nbins_f             = folds.shape(2);
+    const auto nbins               = 2 * (nbins_f - 1);
+    const auto folds_size_relevant = nbatch * folds.shape(1) * nbins_f;
 
-    xt::xtensor<float, 3> folds_t({batch_size, 2, nbins}, 0.0F);
-    std::span<ComplexType> folds_span(folds.data(), folds.size());
+    xt::xtensor<float, 3> folds_t({nbatch, folds.shape(1), nbins}, 0.0F);
+    std::span<ComplexType> folds_span(folds.data(), folds_size_relevant);
     std::span<float> folds_t_span(folds_t.data(), folds_t.size());
-    utils::irfft_batch(folds_span, folds_t_span, static_cast<int>(batch_size),
+    utils::irfft_batch(folds_span, folds_t_span, static_cast<int>(nbatch),
                        static_cast<int>(nbins), 1);
     snr_boxcar_batch(folds_t, widths, out);
 }

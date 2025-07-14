@@ -48,19 +48,20 @@ ffa_taylor_resolve(std::span<const double> pset_cur,
 }
 
 std::tuple<std::vector<SizeType>, std::vector<double>>
-poly_taylor_resolve_batch(const xt::xtensor<double, 3>& leaf_batch,
+poly_taylor_resolve_batch(const xt::xtensor<double, 3>& batch_leaves,
                           std::pair<double, double> coord_add,
                           std::pair<double, double> coord_init,
                           std::span<const std::vector<double>> param_arr,
-                          SizeType fold_bins) {
-    const SizeType n_leaves = leaf_batch.shape(0);
-    const SizeType nparams  = param_arr.size();
-    const double delta_t    = coord_add.first - coord_init.first;
+                          SizeType fold_bins,
+                          SizeType n_leaves) {
+    const auto nparams   = param_arr.size();
+    const double delta_t = coord_add.first - coord_init.first;
 
-    auto param_vec_batch =
-        xt::view(leaf_batch, xt::all(), xt::range(0, nparams), xt::all());
-    auto freq_old_batch = xt::view(leaf_batch, xt::all(), nparams - 1, 0);
-    auto [kvec_new_batch, delay_batch] =
+    const auto param_vec_batch = xt::view(batch_leaves, xt::range(0, n_leaves),
+                                          xt::range(0, nparams), xt::all());
+    const auto freq_old_batch =
+        xt::view(batch_leaves, xt::range(0, n_leaves), nparams - 1, 0);
+    const auto [kvec_new_batch, delay_batch] =
         psr_utils::shift_params_batch(param_vec_batch, delta_t);
 
     // Calculate relative phases
@@ -87,22 +88,26 @@ poly_taylor_resolve_batch(const xt::xtensor<double, 3>& leaf_batch,
 }
 
 std::tuple<std::vector<SizeType>, std::vector<double>>
-poly_taylor_resolve_snap_batch(const xt::xtensor<double, 3>& leaf_batch,
+poly_taylor_resolve_snap_batch(const xt::xtensor<double, 3>& batch_leaves,
                                std::pair<double, double> coord_add,
                                std::pair<double, double> coord_init,
                                std::span<const std::vector<double>> param_arr,
-                               SizeType fold_bins) {
+                               SizeType fold_bins,
+                               SizeType n_leaves) {
 
-    const SizeType n_leaves = leaf_batch.shape(0);
-    const SizeType nparams  = param_arr.size();
-    const double delta_t    = coord_add.first - coord_init.first;
+    const SizeType nparams = param_arr.size();
+    const double delta_t   = coord_add.first - coord_init.first;
 
-    const auto param_vec_batch =
-        xt::view(leaf_batch, xt::all(), xt::range(0, nparams), xt::all());
-    const auto freq_old_batch = xt::view(leaf_batch, xt::all(), nparams - 1, 0);
-    const auto snap_old_batch = xt::view(leaf_batch, xt::all(), 0, 0);
-    const auto dsnap_old_batch = xt::view(leaf_batch, xt::all(), 0, 1);
-    const auto accel_old_batch = xt::view(leaf_batch, xt::all(), 2, 0);
+    const auto param_vec_batch = xt::view(batch_leaves, xt::range(0, n_leaves),
+                                          xt::range(0, nparams), xt::all());
+    const auto freq_old_batch =
+        xt::view(batch_leaves, xt::range(0, n_leaves), nparams - 1, 0);
+    const auto snap_old_batch =
+        xt::view(batch_leaves, xt::range(0, n_leaves), 0, 0);
+    const auto dsnap_old_batch =
+        xt::view(batch_leaves, xt::range(0, n_leaves), 0, 1);
+    const auto accel_old_batch =
+        xt::view(batch_leaves, xt::range(0, n_leaves), 2, 0);
 
     // Create mask for circular orbit conditions
     std::vector<bool> mask(n_leaves);
@@ -197,9 +202,10 @@ poly_taylor_resolve_snap_batch(const xt::xtensor<double, 3>& leaf_batch,
     return {std::move(param_idx_flat), std::move(relative_phase_batch)};
 }
 
-std::tuple<xt::xtensor<double, 3>, std::vector<SizeType>>
+std::vector<SizeType>
 poly_taylor_branch_batch(const xt::xtensor<double, 3>& param_set_batch,
                          std::pair<double, double> coord_cur,
+                         xt::xtensor<double, 3>& batch_leaves,
                          SizeType fold_bins,
                          double tol_bins,
                          SizeType poly_order,
@@ -277,9 +283,8 @@ poly_taylor_branch_batch(const xt::xtensor<double, 3>& param_set_batch,
 
     // Construct final output
     const SizeType total_leaves = batch_origins.size();
-    xt::xtensor<double, 3> batch_leaves({total_leaves, poly_order + 2, 2}, 0.0);
-    xt::view(batch_leaves, xt::all(), xt::range(0, nparams), 0) =
-        batch_leaves_taylor;
+    xt::view(batch_leaves, xt::range(0, total_leaves), xt::range(0, nparams),
+             0)                 = batch_leaves_taylor;
 
     // Fill dparams using advanced indexing
     for (SizeType i = 0; i < total_leaves; ++i) {
@@ -292,7 +297,7 @@ poly_taylor_branch_batch(const xt::xtensor<double, 3>& param_set_batch,
         batch_leaves(i, poly_order + 1, 1) = scale_batch(origin);
     }
 
-    return {std::move(batch_leaves), std::move(batch_origins)};
+    return std::move(batch_origins);
 }
 
 template <typename FoldType>

@@ -273,9 +273,10 @@ public:
 
     float add_batch(const xt::xtensor<double, 3>& param_sets_batch,
                     const xt::xtensor<FoldType, 3>& folds_batch,
-                    const std::vector<float>& scores_batch,
+                    std::span<const float> scores_batch,
                     const xt::xtensor<SizeType, 2>& backtracks_batch,
                     float current_threshold) {
+        // Always use scores_batch to get the correct batch size
         const auto num_to_add = scores_batch.size();
         if (num_to_add == 0) {
             return current_threshold;
@@ -536,7 +537,7 @@ template <typename FoldType>
 float SuggestionStruct<FoldType>::add_batch(
     const xt::xtensor<double, 3>& param_sets_batch,
     const xt::xtensor<FoldType, 3>& folds_batch,
-    const std::vector<float>& scores_batch,
+    std::span<const float> scores_batch,
     const xt::xtensor<SizeType, 2>& backtracks_batch,
     float current_threshold) {
     return m_impl->add_batch(param_sets_batch, folds_batch, scores_batch,

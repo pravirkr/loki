@@ -4,6 +4,9 @@
 #include <spdlog/spdlog.h>
 #include <string_view>
 
+namespace loki::timing {
+
+// ScopeTimer class to measure and log the time taken by a block of code
 class ScopeTimer {
 public:
     explicit ScopeTimer(std::string_view label)
@@ -42,3 +45,18 @@ private:
     std::chrono::steady_clock::time_point m_start;
     inline static bool s_enabled = true; // default: enabled
 };
+
+// Simple timer class for start/stop timing
+class SimpleTimer {
+    using Clock = std::chrono::steady_clock;
+    Clock::time_point m_start;
+
+public:
+    void start() { m_start = Clock::now(); }
+
+    [[nodiscard]] float stop() const {
+        return std::chrono::duration<float>(Clock::now() - m_start).count();
+    }
+};
+
+} // namespace loki::timing

@@ -239,14 +239,17 @@ void shift_add_buffer_batch(const float* __restrict__ data_folds,
             const float* __restrict__ segment_e = segment_ev;
             const float* __restrict__ segment_v = segment_ev + nbins;
 
-            // E channel: rotate left by 'shift' positions
-            std::copy_n(segment_e + shift, copy1_size, temp_buffer);
-            std::copy_n(segment_e, copy2_size, temp_buffer + copy1_size);
+            // E channel: RIGHT shift by 'shift' positions
+            // Copy last (nbins - shift) elements to beginning
+            std::copy_n(segment_e + copy1_size, copy2_size, temp_buffer);
+            // Copy first shift elements to end
+            std::copy_n(segment_e, copy1_size, temp_buffer + copy2_size);
 
-            // V channel: rotate left by 'shift' positions
-            std::copy_n(segment_v + shift, copy1_size, temp_buffer + nbins);
-            std::copy_n(segment_v, copy2_size,
-                        temp_buffer + nbins + copy1_size);
+            // V channel: RIGHT shift by 'shift' positions
+            std::copy_n(segment_v + copy1_size, copy2_size,
+                        temp_buffer + nbins);
+            std::copy_n(segment_v, copy1_size,
+                        temp_buffer + nbins + copy2_size);
             for (SizeType j = 0; j < total_size; ++j) {
                 out_ev[j] = fold_ev[j] + temp_buffer[j];
             }

@@ -4,6 +4,7 @@
 #include <tuple>
 #include <vector>
 
+#include <span>
 #include <xtensor/containers/xtensor.hpp>
 
 #include "loki/common/types.hpp"
@@ -69,7 +70,7 @@ public:
     [[nodiscard]] float
     add_batch(const xt::xtensor<double, 3>& param_sets_batch,
               const xt::xtensor<FoldType, 3>& folds_batch,
-              const std::vector<float>& scores_batch,
+              std::span<const float> scores_batch,
               const xt::xtensor<SizeType, 2>& backtracks_batch,
               float current_threshold);
     // Trim to keep only suggestions with scores >= median

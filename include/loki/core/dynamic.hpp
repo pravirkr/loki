@@ -23,14 +23,16 @@ public:
     auto load(std::span<const FoldType> ffa_fold, SizeType seg_idx) const
         -> std::span<const FoldType>;
 
-    auto resolve(const xt::xtensor<double, 3>& leaf_batch,
+    auto resolve(const xt::xtensor<double, 3>& batch_leaves,
                  std::pair<double, double> coord_add,
-                 std::pair<double, double> coord_init) const
+                 std::pair<double, double> coord_init,
+                 SizeType n_leaves) const
         -> std::tuple<std::vector<SizeType>, std::vector<double>>;
 
     auto branch(const xt::xtensor<double, 3>& param_set_batch,
-                std::pair<double, double> coord_cur) const
-        -> std::tuple<xt::xtensor<double, 3>, std::vector<SizeType>>;
+                std::pair<double, double> coord_cur,
+                xt::xtensor<double, 3>& batch_leaves) const
+        -> std::vector<SizeType>;
 
     void suggest(std::span<const FoldType> fold_segment,
                  std::pair<double, double> coord_init,
@@ -49,21 +51,20 @@ public:
                         std::span<const double> batch_shift,
                         xt::xtensor<FoldType, 3>& out);
 
-    auto transform(const xt::xtensor<double, 3>& leaf,
+    void transform(xt::xtensor<double, 3>& batch_leaves,
                    std::pair<double, double> coord_cur,
-                   const xt::xtensor<double, 2>& trans_matrix) const
-        -> xt::xtensor<double, 3>;
+                   const xt::xtensor<double, 2>& trans_matrix) const;
 
     auto get_transform_matrix(std::pair<double, double> coord_cur,
                               std::pair<double, double> coord_prev) const
         -> xt::xtensor<double, 2>;
 
-    auto validate(const xt::xtensor<double, 3>& leaves,
+    auto validate(const xt::xtensor<double, 3>& batch_leaves,
                   std::pair<double, double> coord_valid,
                   const std::tuple<xt::xtensor<double, 1>,
                                    xt::xtensor<double, 1>,
-                                   double>& validation_params) const
-        -> xt::xtensor<double, 3>;
+                                   double>& validation_params,
+                  SizeType n_leaves) const -> SizeType;
 
     auto get_validation_params(std::pair<double, double> coord_add) const
         -> std::tuple<xt::xtensor<double, 1>, xt::xtensor<double, 1>, double>;
