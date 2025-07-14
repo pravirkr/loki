@@ -337,24 +337,6 @@ public:
         spdlog::info("Pruning time: {}", m_pstats->get_concise_timer_summary());
     }
 
-private:
-    plans::FFAPlan m_ffa_plan;
-    search::PulsarSearchConfig m_cfg;
-    std::vector<float> m_threshold_scheme;
-    SizeType m_max_sugg;
-    SizeType m_batch_size;
-    std::string_view m_kind;
-
-    bool m_prune_complete{false};
-    SizeType m_prune_level{};
-    std::unique_ptr<psr_utils::SnailScheme> m_scheme;
-    std::unique_ptr<core::PruneTaylorDPFuncts<FoldType>> m_prune_funcs;
-    std::unique_ptr<cands::PruneStatsCollection> m_pstats;
-
-    // Suggestion buffers (ping-pong strategy)
-    std::unique_ptr<utils::SuggestionStruct<FoldType>> m_suggestions_in;
-    std::unique_ptr<utils::SuggestionStruct<FoldType>> m_suggestions_out;
-
     void initialize(std::span<const FoldType> ffa_fold,
                     SizeType ref_seg,
                     const std::filesystem::path& log_file) {
@@ -437,7 +419,8 @@ private:
         std::ofstream log(log_file, std::ios::app);
         log << pstats_cur.get_summary();
         log.close();
-        std::span<const float> timer_vals(stats.timers.data(), stats.timers.size());
+        std::span<const float> timer_vals(stats.timers.data(),
+                                          stats.timers.size());
         m_pstats->update_stats(pstats_cur, timer_vals);
 
         // Check if no survivors
@@ -450,6 +433,44 @@ private:
         // Ping-pong: swap input and output buffers
         std::swap(m_suggestions_in, m_suggestions_out);
     }
+
+    utils::SuggestionStruct<FoldType> get_suggestions_in() const {
+        utils::SuggestionStruct<FoldType> suggestions_in(
+            m_suggestions_in->get_max_sugg(), m_suggestions_in->get_nparams(),
+            m_suggestions_in->get_nbins());
+        suggestions_in.add_initial(
+            m_suggestions_in->get_param_sets(), m_suggestions_in->get_folds(),
+            m_suggestions_in->get_scores(), m_suggestions_in->get_backtracks());
+        return suggestions_in;
+    }
+    utils::SuggestionStruct<FoldType> get_suggestions_out() const {
+        utils::SuggestionStruct<FoldType> suggestions_out(
+            m_suggestions_out->get_max_sugg(), m_suggestions_out->get_nparams(),
+            m_suggestions_out->get_nbins());
+        suggestions_out.add_initial(m_suggestions_out->get_param_sets(),
+                                    m_suggestions_out->get_folds(),
+                                    m_suggestions_out->get_scores(),
+                                    m_suggestions_out->get_backtracks());
+        return suggestions_out;
+    }
+
+private:
+    plans::FFAPlan m_ffa_plan;
+    search::PulsarSearchConfig m_cfg;
+    std::vector<float> m_threshold_scheme;
+    SizeType m_max_sugg;
+    SizeType m_batch_size;
+    std::string_view m_kind;
+
+    bool m_prune_complete{false};
+    SizeType m_prune_level{};
+    std::unique_ptr<psr_utils::SnailScheme> m_scheme;
+    std::unique_ptr<core::PruneTaylorDPFuncts<FoldType>> m_prune_funcs;
+    std::unique_ptr<cands::PruneStatsCollection> m_pstats;
+
+    // Suggestion buffers (ping-pong strategy)
+    std::unique_ptr<utils::SuggestionStruct<FoldType>> m_suggestions_in;
+    std::unique_ptr<utils::SuggestionStruct<FoldType>> m_suggestions_out;
 
     void execute_iteration_batched(std::span<const FoldType> ffa_fold,
                                    SizeType seg_idx_cur,
@@ -500,6 +521,37 @@ private:
             if (n_leaves_batch == 0) {
                 continue;
             }
+            // Write batch_leaves and batch_leaf_origins to a file
+            if (i_batch_start == 0) {
+                // Write batch_leaves (3D tensor) - flatten and write as rows
+                std::ofstream batch_leaves_file("batch_leaves_loki.txt",
+                                                std::ios::app);
+                auto shape = batch_leaves.shape();
+                batch_leaves_file << "# Shape: " << shape[0] << " " << shape[1]
+                                  << " " << shape[2] << std::endl;
+                for (size_t i = 0; i < shape[0]; ++i) {
+                    for (size_t j = 0; j < shape[1]; ++j) {
+                        for (size_t k = 0; k < shape[2]; ++k) {
+                            batch_leaves_file << batch_leaves(i, j, k);
+                            if (k < shape[2] - 1)
+                                batch_leaves_file << " ";
+                        }
+                        batch_leaves_file << std::endl;
+                    }
+                }
+                batch_leaves_file.close();
+
+                // Write batch_leaf_origins (vector<SizeType>)
+                std::ofstream batch_leaf_origins_file(
+                    "batch_leaf_origins_loki.txt", std::ios::app);
+                for (size_t i = 0; i < batch_leaf_origins.size(); ++i) {
+                    batch_leaf_origins_file << batch_leaf_origins[i];
+                    if (i < batch_leaf_origins.size() - 1)
+                        batch_leaf_origins_file << " ";
+                }
+                batch_leaf_origins_file << std::endl;
+                batch_leaf_origins_file.close();
+            }
 
             // Validation
             t_start = std::chrono::steady_clock::now();
@@ -523,6 +575,30 @@ private:
             stats.timers[2] += std::chrono::duration<double>(
                                    std::chrono::steady_clock::now() - t_start)
                                    .count();
+
+            if (i_batch_start == 0) {
+                // Write batch_param_idx (vector<SizeType>)
+                std::ofstream batch_param_idx_file("batch_param_idx_loki.txt",
+                                                   std::ios::app);
+                for (size_t i = 0; i < batch_param_idx.size(); ++i) {
+                    batch_param_idx_file << batch_param_idx[i];
+                    if (i < batch_param_idx.size() - 1)
+                        batch_param_idx_file << " ";
+                }
+                batch_param_idx_file << std::endl;
+                batch_param_idx_file.close();
+
+                // Write batch_phase_shift (vector<double>)
+                std::ofstream batch_phase_shift_file(
+                    "batch_phase_shift_loki.txt", std::ios::app);
+                for (size_t i = 0; i < batch_phase_shift.size(); ++i) {
+                    batch_phase_shift_file << batch_phase_shift[i];
+                    if (i < batch_phase_shift.size() - 1)
+                        batch_phase_shift_file << " ";
+                }
+                batch_phase_shift_file << std::endl;
+                batch_phase_shift_file.close();
+            }
 
             // Allocate arrays with correct size
             std::vector<SizeType> batch_isuggest(n_leaves_after_validation);
@@ -567,7 +643,50 @@ private:
             stats.timers[4] += std::chrono::duration<float>(
                                    std::chrono::steady_clock::now() - t_start)
                                    .count();
+            if (i_batch_start == 0) {
+                // Write batch_isuggest (vector<SizeType>)
+                std::ofstream batch_isuggest_file("batch_isuggest_loki.txt",
+                                                  std::ios::app);
+                for (size_t i = 0; i < batch_isuggest.size(); ++i) {
+                    batch_isuggest_file << batch_isuggest[i];
+                    if (i < batch_isuggest.size() - 1)
+                        batch_isuggest_file << " ";
+                }
+                batch_isuggest_file << std::endl;
+                batch_isuggest_file.close();
 
+                // Write batch_combined_res (3D tensor) - similar to
+                // batch_leaves
+                std::ofstream batch_combined_res_file(
+                    "batch_combined_res_loki.txt", std::ios::app);
+                auto shape = batch_combined_res.shape();
+                batch_combined_res_file << "# Shape: " << shape[0] << " "
+                                        << shape[1] << " " << shape[2]
+                                        << std::endl;
+                for (size_t i = 0; i < shape[0]; ++i) {
+                    for (size_t j = 0; j < shape[1]; ++j) {
+                        for (size_t k = 0; k < shape[2]; ++k) {
+                            batch_combined_res_file
+                                << batch_combined_res(i, j, k);
+                            if (k < shape[2] - 1)
+                                batch_combined_res_file << " ";
+                        }
+                        batch_combined_res_file << std::endl;
+                    }
+                }
+                batch_combined_res_file.close();
+
+                // Write batch_scores (vector<float>)
+                std::ofstream batch_scores_file("batch_scores_loki.txt",
+                                                std::ios::app);
+                for (size_t i = 0; i < batch_scores.size(); ++i) {
+                    batch_scores_file << batch_scores[i];
+                    if (i < batch_scores.size() - 1)
+                        batch_scores_file << " ";
+                }
+                batch_scores_file << std::endl;
+                batch_scores_file.close();
+            }
             // Thresholding & filtering
             t_start = std::chrono::steady_clock::now();
             filtered_indices.clear();
@@ -707,6 +826,16 @@ template <typename FoldType>
 Prune<FoldType>& Prune<FoldType>::operator=(Prune&& other) noexcept = default;
 
 template <typename FoldType>
+utils::SuggestionStruct<FoldType> Prune<FoldType>::get_suggestions_in() const {
+    return m_impl->get_suggestions_in();
+}
+
+template <typename FoldType>
+utils::SuggestionStruct<FoldType> Prune<FoldType>::get_suggestions_out() const {
+    return m_impl->get_suggestions_out();
+}
+
+template <typename FoldType>
 void Prune<FoldType>::execute(
     std::span<const FoldType> ffa_fold,
     SizeType ref_seg,
@@ -714,6 +843,19 @@ void Prune<FoldType>::execute(
     const std::optional<std::filesystem::path>& log_file,
     const std::optional<std::filesystem::path>& result_file) {
     m_impl->execute(ffa_fold, ref_seg, outdir, log_file, result_file);
+}
+
+template <typename FoldType>
+void Prune<FoldType>::initialize(std::span<const FoldType> ffa_fold,
+                                 SizeType ref_seg,
+                                 const std::filesystem::path& log_file) {
+    m_impl->initialize(ffa_fold, ref_seg, log_file);
+}
+
+template <typename FoldType>
+void Prune<FoldType>::execute_iteration(std::span<const FoldType> ffa_fold,
+                                        const std::filesystem::path& log_file) {
+    m_impl->execute_iteration(ffa_fold, log_file);
 }
 
 // Template instantiations

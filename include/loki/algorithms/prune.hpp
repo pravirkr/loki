@@ -10,6 +10,7 @@
 #include "loki/algorithms/plans.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
+#include "loki/utils/suggestions.hpp"
 
 namespace loki::algorithms {
 
@@ -57,6 +58,9 @@ public:
     Prune(const Prune&)            = delete;
     Prune& operator=(const Prune&) = delete;
 
+    utils::SuggestionStruct<FoldType> get_suggestions_in() const;
+    utils::SuggestionStruct<FoldType> get_suggestions_out() const;
+
     void execute(
         std::span<const FoldType> ffa_fold,
         SizeType ref_seg,
@@ -64,9 +68,19 @@ public:
         const std::optional<std::filesystem::path>& log_file    = std::nullopt,
         const std::optional<std::filesystem::path>& result_file = std::nullopt);
 
+    void initialize(std::span<const FoldType> ffa_fold,
+                    SizeType ref_seg,
+                    const std::filesystem::path& log_file);
+
+    void execute_iteration(std::span<const FoldType> ffa_fold,
+                           const std::filesystem::path& log_file);
+
 private:
     class Impl;
     std::unique_ptr<Impl> m_impl;
 };
+
+using PruneFloat   = Prune<float>;
+using PruneComplex = Prune<ComplexType>;
 
 } // namespace loki::algorithms

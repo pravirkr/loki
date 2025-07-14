@@ -17,6 +17,8 @@
 namespace loki {
 using algorithms::FFA;
 using algorithms::FFACOMPLEX;
+using algorithms::PruneComplex;
+using algorithms::PruneFloat;
 using algorithms::PruningManagerComplex;
 using algorithms::PruningManagerFloat;
 using detection::MatchedFilter;
@@ -470,6 +472,27 @@ PYBIND11_MODULE(libloki, m) {
         py::arg("latter"), py::arg("tseg_brute"), py::arg("nbins"));
 
     auto m_prune = m.def_submodule("prune", "Pruning submodule");
+
+    py::class_<utils::SuggestionStruct<float>>(m_prune, "SuggestionStructFloat")
+        .def(py::init<SizeType, SizeType, SizeType>(), py::arg("max_sugg"),
+             py::arg("nparams"), py::arg("nbins"))
+        .def_property_readonly("param_sets",
+                               [](const utils::SuggestionStruct<float>& self) {
+                                   return as_pyarray_ref(self.get_param_sets());
+                               })
+        .def_property_readonly("folds",
+                               [](const utils::SuggestionStruct<float>& self) {
+                                   return as_pyarray_ref(self.get_folds());
+                               })
+        .def_property_readonly("scores",
+                               [](const utils::SuggestionStruct<float>& self) {
+                                   return as_pyarray_ref(self.get_scores());
+                               })
+        .def_property_readonly("backtracks",
+                               [](const utils::SuggestionStruct<float>& self) {
+                                   return as_pyarray_ref(self.get_backtracks());
+                               });
+
     py::class_<PruningManagerFloat>(m_prune, "PruningManager")
         .def(py::init<const PulsarSearchConfig&, const std::vector<float>&,
                       std::optional<SizeType>,
@@ -511,6 +534,45 @@ PYBIND11_MODULE(libloki, m) {
             },
             py::arg("ts_e"), py::arg("ts_v"), py::arg("outdir"),
             py::arg("file_prefix"), py::arg("kind"));
-}
 
+    py::class_<PruneFloat>(m_prune, "Prune")
+        .def(py::init<const FFAPlan&, const PulsarSearchConfig&,
+                      const std::vector<float>&, SizeType, SizeType,
+                      std::string_view>(),
+             py::arg("ffa_plan"), py::arg("cfg"), py::arg("threshold_scheme"),
+             py::arg("max_sugg") = 1U << 18U, py::arg("batch_size") = 1024U,
+             py::arg("kind") = "taylor")
+        .def(
+            "execute",
+            [](PruneFloat& self, const PyArrayT<float>& ffa_fold,
+               SizeType ref_seg, const std::string& outdir,
+               const std::string& file_prefix, const std::string& kind) {
+                self.execute(to_span<const float>(ffa_fold), ref_seg, outdir,
+                             file_prefix, kind);
+            },
+            py::arg("ffa_fold"), py::arg("ref_seg"), py::arg("outdir"),
+            py::arg("file_prefix"), py::arg("kind"))
+        .def_property_readonly(
+            "suggestions_in",
+            [](PruneFloat& self) { return self.get_suggestions_in(); })
+        .def_property_readonly(
+            "suggestions_out",
+            [](PruneFloat& self) { return self.get_suggestions_out(); })
+        .def(
+            "initialize",
+            [](PruneFloat& self, const PyArrayT<float>& ffa_fold,
+               SizeType ref_seg, const std::string& log_file) {
+                self.initialize(to_span<const float>(ffa_fold), ref_seg,
+                                log_file);
+            },
+            py::arg("ffa_fold"), py::arg("ref_seg"), py::arg("log_file"))
+        .def(
+            "execute_iteration",
+            [](PruneFloat& self, const PyArrayT<float>& ffa_fold,
+               const std::string& log_file) {
+                self.execute_iteration(to_span<const float>(ffa_fold),
+                                       log_file);
+            },
+            py::arg("ffa_fold"), py::arg("log_file"));
+}
 } // namespace loki

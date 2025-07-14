@@ -131,12 +131,19 @@ void PruneTaylorDPFuncts<FoldType>::load_shift_add(
             batch_param_idx.data(), batch_shift.data(), out.data(),
             m_cfg.get_nbins_f(), m_cfg.get_nbins(), n_batch);
     } else {
-        // Float version: round shifts to integers
+        // Float version: round shifts to integers properly wrapped
         std::vector<SizeType> batch_shift_rounded(batch_shift.size());
-        std::transform(batch_shift.begin(), batch_shift.end(),
-                       batch_shift_rounded.begin(), [](double shift) {
-                           return static_cast<SizeType>(std::round(shift));
-                       });
+        std::transform(
+            batch_shift.begin(), batch_shift.end(), batch_shift_rounded.begin(),
+            [nbins = m_cfg.get_nbins()](double shift) {
+                auto rounded = static_cast<SizeType>(std::round(shift));
+                // Handle wrapping: if rounded equals nbins, wrap to 0
+                if (rounded == nbins) {
+                    return static_cast<SizeType>(0);
+                }
+                return rounded;
+            });
+
         kernels::shift_add_buffer_batch(
             folds.data(), batch_isuggest.data(), ffa_fold_segment.data(),
             batch_param_idx.data(), batch_shift_rounded.data(), out.data(),
