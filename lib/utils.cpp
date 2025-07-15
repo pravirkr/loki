@@ -81,6 +81,52 @@ SizeType find_nearest_sorted_idx(std::span<const double> arr_sorted,
     return idx;
 }
 
+/**
+ * @brief An optimized version using a two-pointer/scanning approach.
+ * This is extremely fast if the input values (`val`) are monotonic.
+ *
+ * @param arr_sorted A sorted span of doubles.
+ * @param val The value to find the nearest element to.
+ * @param hint_idx A reference to the starting index for the search. It will be
+ * updated.
+ * @return The index of the nearest element.
+ */
+SizeType find_nearest_sorted_idx_scan(std::span<const double> arr_sorted,
+                                      double val,
+                                      SizeType& hint_idx) {
+    const SizeType n = arr_sorted.size();
+    if (n == 0) {
+        throw std::runtime_error("Array is empty in scanning search.");
+    }
+
+    // Scan forward from the last known position (the hint).
+    // If input `val` is monotonic, this loop does minimal work over time.
+    while (hint_idx < n && arr_sorted[hint_idx] < val) {
+        hint_idx++;
+    }
+    // Scan backward in case the `val` sequence isn't perfectly monotonic.
+    while (hint_idx > 0 && arr_sorted[hint_idx - 1] >= val) {
+        hint_idx--;
+    }
+
+    // `hint_idx` is now our lower bound index.
+    SizeType idx = hint_idx;
+
+    // --- Decision logic to find the nearest neighbor (identical to original)
+    // ---
+    if (idx == 0) {
+        return 0;
+    }
+    if (idx == n) {
+        return n - 1;
+    }
+    if ((val - arr_sorted[idx - 1]) <= (arr_sorted[idx] - val)) {
+        return idx - 1;
+    } else {
+        return idx;
+    }
+}
+
 std::vector<SizeType> find_neighbouring_indices(
     std::span<const SizeType> indices, SizeType target_idx, SizeType num) {
 

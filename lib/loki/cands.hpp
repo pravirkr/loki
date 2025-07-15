@@ -330,15 +330,16 @@ public:
         HighFive::Group run_group       = m_runs_group->createGroup(run_name);
         auto [level_stats, timer_stats] = pstats.get_packed_data();
 
-        HighFive::DataSetCreateProps props;
-        props.add(HighFive::Chunking(std::vector<hsize_t>{1024}));
-        props.add(HighFive::Deflate(9));
-
         // Create std::vector from xtensor data with shape
         const auto& shape = param_sets.shape();
         std::vector<SizeType> tensor_shape(shape.begin(), shape.end());
         std::vector<double> tensor_data(param_sets.data(),
                                         param_sets.data() + param_sets.size());
+        HighFive::DataSetCreateProps props;
+        const hsize_t chunk_size = static_cast<hsize_t>(
+            std::min<hsize_t>(1024, static_cast<hsize_t>(param_sets.shape(0))));
+        props.add(HighFive::Chunking(std::vector<hsize_t>{chunk_size}));
+        props.add(HighFive::Deflate(9));
         run_group.createDataSet("param_sets_data", tensor_data, props);
 
         run_group.createDataSet("scheme", scheme);

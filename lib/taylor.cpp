@@ -73,14 +73,14 @@ poly_taylor_resolve_batch(const xt::xtensor<double, 3>& batch_leaves,
     // Calculate flattened parameter indices
     std::vector<SizeType> param_idx_flat(n_leaves);
     const SizeType f_size = param_arr[nparams - 1].size();
-
+    SizeType hint_a{}, hint_f{};
     for (SizeType i = 0; i < n_leaves; ++i) {
         const auto f_val = kvec_new_batch(i, nparams - 1, 0);
         const auto a_val = kvec_new_batch(i, nparams - 2, 0);
-        const auto idx_f =
-            utils::find_nearest_sorted_idx(param_arr[nparams - 1], f_val);
-        const auto idx_a =
-            utils::find_nearest_sorted_idx(param_arr[nparams - 2], a_val);
+        const auto idx_f = utils::find_nearest_sorted_idx_scan(
+            param_arr[nparams - 1], f_val, hint_f);
+        const auto idx_a = utils::find_nearest_sorted_idx_scan(
+            param_arr[nparams - 2], a_val, hint_a);
         param_idx_flat[i] = idx_a * f_size + idx_f;
     }
 
@@ -98,8 +98,9 @@ poly_taylor_resolve_snap_batch(const xt::xtensor<double, 3>& batch_leaves,
     const SizeType nparams = param_arr.size();
     const double delta_t   = coord_add.first - coord_init.first;
 
-    const auto param_vec_batch = xt::view(batch_leaves, xt::range(0, n_leaves),
-                                          xt::range(0, nparams), xt::all());
+    const auto param_vec_batch =
+        xt::view(batch_leaves, xt::range(0, n_leaves), xt::range(0, nparams),
+                 xt::all(), xt::all());
     const auto freq_old_batch =
         xt::view(batch_leaves, xt::range(0, n_leaves), nparams - 1, 0);
     const auto snap_old_batch =
@@ -143,14 +144,14 @@ poly_taylor_resolve_snap_batch(const xt::xtensor<double, 3>& batch_leaves,
                 xt::view(param_vec_batch, orig_idx, xt::all(), xt::all());
         }
 
-        auto [kvec_new_circ, delay_circ] =
+        const auto [kvec_new_circ, delay_circ] =
             psr_utils::shift_params_circular_batch(param_vec_circular, delta_t);
 
         // Copy results back to main arrays
         for (SizeType i = 0; i < idx_circular.size(); ++i) {
             const SizeType orig_idx = idx_circular[i];
-            xt::view(kvec_new_batch, orig_idx, xt::all(), xt::all()) =
-                xt::view(kvec_new_circ, i, xt::all(), xt::all());
+            xt::view(kvec_new_batch, orig_idx, xt::all()) =
+                xt::view(kvec_new_circ, i, xt::all());
             delay_batch[orig_idx] = delay_circ[i];
         }
     }
@@ -166,14 +167,14 @@ poly_taylor_resolve_snap_batch(const xt::xtensor<double, 3>& batch_leaves,
                 xt::view(param_vec_batch, orig_idx, xt::all(), xt::all());
         }
 
-        auto [kvec_new_norm, delay_norm] =
+        const auto [kvec_new_norm, delay_norm] =
             psr_utils::shift_params_batch(param_vec_normal, delta_t);
 
         // Copy results back to main arrays
         for (SizeType i = 0; i < idx_normal.size(); ++i) {
             const SizeType orig_idx = idx_normal[i];
-            xt::view(kvec_new_batch, orig_idx, xt::all(), xt::all()) =
-                xt::view(kvec_new_norm, i, xt::all(), xt::all());
+            xt::view(kvec_new_batch, orig_idx, xt::all()) =
+                xt::view(kvec_new_norm, i, xt::all());
             delay_batch[orig_idx] = delay_norm[i];
         }
     }
@@ -188,14 +189,14 @@ poly_taylor_resolve_snap_batch(const xt::xtensor<double, 3>& batch_leaves,
     // Calculate flattened parameter indices (same as previous function)
     std::vector<SizeType> param_idx_flat(n_leaves);
     const SizeType f_size = param_arr[nparams - 1].size();
-
+    SizeType hint_a{}, hint_f{};
     for (SizeType i = 0; i < n_leaves; ++i) {
         const auto f_val = kvec_new_batch(i, nparams - 1, 0);
         const auto a_val = kvec_new_batch(i, nparams - 2, 0);
-        const auto idx_f =
-            utils::find_nearest_sorted_idx(param_arr[nparams - 1], f_val);
-        const auto idx_a =
-            utils::find_nearest_sorted_idx(param_arr[nparams - 2], a_val);
+        const auto idx_f = utils::find_nearest_sorted_idx_scan(
+            param_arr[nparams - 1], f_val, hint_f);
+        const auto idx_a = utils::find_nearest_sorted_idx_scan(
+            param_arr[nparams - 2], a_val, hint_a);
         param_idx_flat[i] = idx_a * f_size + idx_f;
     }
 
@@ -220,18 +221,16 @@ poly_taylor_branch_batch(const xt::xtensor<double, 3>& param_set_batch,
     const auto [_, scale_cur] = coord_cur;
 
     // Extract parameter arrays
-    const xt::xtensor<double, 2> param_cur_batch =
-        xt::view(param_set_batch, xt::all(), xt::range(0, nparams), 0);
-    const xt::xtensor<double, 2> dparam_cur_batch =
+    const auto param_set_cur_batch =
+        xt::view(param_set_batch, xt::all(), xt::range(0, nparams), xt::all());
+    const auto dparam_cur_batch =
         xt::view(param_set_batch, xt::all(), xt::range(0, nparams), 1);
-    const xt::xtensor<double, 1> f0_batch =
-        xt::view(param_set_batch, xt::all(), nparams, 0);
-    const xt::xtensor<double, 1> t0_batch =
-        xt::view(param_set_batch, xt::all(), nparams + 1, 0);
-    const xt::xtensor<double, 1> scale_batch =
+    const auto f0_batch = xt::view(param_set_batch, xt::all(), nparams, 0);
+    const auto t0_batch = xt::view(param_set_batch, xt::all(), nparams + 1, 0);
+    const auto scale_batch =
         xt::view(param_set_batch, xt::all(), nparams + 1, 1);
-    const xt::xtensor<double, 1> f_max_batch =
-        xt::view(param_cur_batch, xt::all(), nparams - 1);
+    const auto f_max_batch =
+        xt::view(param_set_batch, xt::all(), nparams - 1, 0);
 
     // Calculate optimal parameters
     const double tseg_cur = 2.0 * scale_cur;
@@ -245,42 +244,36 @@ poly_taylor_branch_batch(const xt::xtensor<double, 3>& param_set_batch,
         t_ref);
 
     // Vectorized padded branching
-    xt::xtensor<double, 3> pad_branched_params({n_batch, nparams, branch_max},
-                                               0.0);
-    xt::xtensor<double, 2> pad_branched_dparams({n_batch, nparams}, 0.0);
-    xt::xtensor<SizeType, 2> branched_counts({n_batch, nparams}, 0);
-    for (SizeType i = 0; i < n_batch; ++i) {
-        for (SizeType j = 0; j < nparams; ++j) {
-            const auto [p_min, p_max] = param_limits[j];
-            auto slice_span =
-                std::span(&pad_branched_params(i, j, 0), branch_max);
-            auto [dparam_act, count] = psr_utils::branch_param_padded(
-                slice_span, param_cur_batch(i, j), dparam_cur_batch(i, j),
-                dparam_opt_batch(i, j), p_min, p_max);
-            pad_branched_dparams(i, j) = dparam_act;
-            branched_counts(i, j)      = count;
-        }
-    }
-
-    // Vectorized selection based on mask
+    auto pad_branched_params =
+        xt::empty<double>({n_batch, nparams, branch_max});
+    auto pad_branched_dparams = xt::empty<double>({n_batch, nparams});
+    auto branched_counts      = xt::empty<SizeType>({n_batch, nparams});
     for (SizeType i = 0; i < n_batch; ++i) {
         for (SizeType j = 0; j < nparams; ++j) {
             if (shift_bins_batch(i, j) <= tol_bins) {
-                // Reset branched params and use current value
-                for (SizeType k = 0; k < branch_max; ++k) {
-                    pad_branched_params(i, j, k) = 0.0;
-                }
-                pad_branched_params(i, j, 0) = param_cur_batch(i, j);
-                pad_branched_dparams(i, j)   = dparam_cur_batch(i, j);
+                // Mask triggered: only use current value
+                pad_branched_params(i, j, 0) = param_set_cur_batch(i, j, 0);
+                pad_branched_dparams(i, j)   = param_set_cur_batch(i, j, 1);
                 branched_counts(i, j)        = 1;
+            } else {
+                // Normal branching
+                const auto [p_min, p_max] = param_limits[j];
+                auto slice_span =
+                    std::span(&pad_branched_params(i, j, 0), branch_max);
+                auto [dparam_act, count] = psr_utils::branch_param_padded(
+                    slice_span, param_set_cur_batch(i, j, 0),
+                    param_set_cur_batch(i, j, 1), dparam_opt_batch(i, j), p_min,
+                    p_max);
+                pad_branched_dparams(i, j) = dparam_act;
+                branched_counts(i, j)      = count;
             }
         }
     }
 
     // Optimized padded Cartesian product
-    auto [batch_leaves_taylor, batch_origins] = utils::cartesian_prod_padded(
-        pad_branched_params, branched_counts, n_batch, nparams);
-
+    const auto [batch_leaves_taylor, batch_origins] =
+        utils::cartesian_prod_padded(pad_branched_params, branched_counts,
+                                     n_batch, nparams);
     // Construct final output
     const SizeType total_leaves = batch_origins.size();
     xt::view(batch_leaves, xt::range(0, total_leaves), xt::range(0, nparams),
@@ -296,8 +289,7 @@ poly_taylor_branch_batch(const xt::xtensor<double, 3>& param_set_batch,
         batch_leaves(i, poly_order + 1, 0) = t0_batch(origin);
         batch_leaves(i, poly_order + 1, 1) = scale_batch(origin);
     }
-
-    return std::move(batch_origins);
+    return batch_origins;
 }
 
 template <typename FoldType>

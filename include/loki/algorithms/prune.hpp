@@ -57,19 +57,14 @@ public:
     Prune(const Prune&)            = delete;
     Prune& operator=(const Prune&) = delete;
 
+    SizeType get_memory_usage() const noexcept;
+
     void execute(
         std::span<const FoldType> ffa_fold,
         SizeType ref_seg,
         const std::filesystem::path& outdir                     = "./",
         const std::optional<std::filesystem::path>& log_file    = std::nullopt,
         const std::optional<std::filesystem::path>& result_file = std::nullopt);
-
-    void initialize(std::span<const FoldType> ffa_fold,
-                    SizeType ref_seg,
-                    const std::filesystem::path& log_file);
-
-    void execute_iteration(std::span<const FoldType> ffa_fold,
-                           const std::filesystem::path& log_file);
 
 private:
     class Impl;

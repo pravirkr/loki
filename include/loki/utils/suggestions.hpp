@@ -11,14 +11,40 @@
 
 namespace loki::utils {
 
+/**
+ * @brief A circular buffer for managing search suggestions with in-place
+ * updates.
+ *
+ * This class implements a memory-efficient circular buffer to store, prune, and
+ * update "suggestions" during an iterative search algorithm. It is designed to
+ * minimize memory allocations by using a single buffer and performing updates
+ * in-place.
+ *
+ * Key features:
+ * - **In-Place Updates**: New suggestions are generated from old ones within
+ * the same buffer, split into a "read region" (current iteration's input) and a
+ *   "write region" (next iteration's candidates).
+ * - **Memory Management**: If the buffer fills, it automatically trims the
+ *   lowest-scoring suggestions from the **write region** to make space.
+ * - **Defragmentation**: After each iteration, the buffer is defragmented to
+ *   ensure the active data is in a contiguous block, simplifying subsequent
+ *   read operations.
+ *
+ * Suggestions struct contains following arrays:
+ * - param_sets: Parameter sets, shape (max_sugg, nparams + 2, 2)
+ * - folds: Folded profiles, shape (max_sugg, 2, nbins)
+ * - scores: Scores for each suggestion, shape (max_sugg)
+ * - backtracks: Backtracks, shape (max_sugg, nparams + 2)
+ *
+ * @tparam FoldType The type of the folded profiles.
+ */
 template <typename FoldType = float> class SuggestionStruct {
 public:
     /**
-     * A struct to hold suggestions for pruning. Creates following arrays:
-     * - param_sets: Parameter sets, shape (max_sugg, nparams + 2, 2)
-     * - folds: Folded profiles, shape (max_sugg, 2, nbins)
-     * - scores: Scores for each suggestion, shape (max_sugg)
-     * - backtracks: Backtracks, shape (max_sugg, nparams + 2)
+     * @brief Constructor for the SuggestionStruct class.
+     *
+     * Initializes the internal arrays with the given maximum number of
+     * suggestions, number of parameters, and number of bins.
      *
      * @param max_sugg Maximum number of suggestions to hold
      * @param nparams Number of parameters
@@ -35,7 +61,7 @@ public:
     // Getters
     [[nodiscard]] const xt::xtensor<double, 3>& get_param_sets() const noexcept;
     [[nodiscard]] const xt::xtensor<FoldType, 3>& get_folds() const noexcept;
-    [[nodiscard]] const std::vector<float>& get_scores() const noexcept;
+    [[nodiscard]] std::vector<float> get_scores() const noexcept;
     [[nodiscard]] const xt::xtensor<SizeType, 2>&
     get_backtracks() const noexcept;
     [[nodiscard]] SizeType get_max_sugg() const noexcept;
@@ -47,6 +73,7 @@ public:
     [[nodiscard]] float get_score_max() const noexcept;
     [[nodiscard]] float get_score_min() const noexcept;
     [[nodiscard]] float get_score_median() const noexcept;
+    [[nodiscard]] SizeType get_memory_usage() const noexcept;
 
     void set_nsugg(SizeType nsugg) noexcept;
     void reset() noexcept;

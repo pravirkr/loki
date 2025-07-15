@@ -204,18 +204,11 @@ shift_params_d_batch(const xt::xtensor<double, 2>& param_vec_batch,
     const auto nparams      = param_vec_batch.shape()[1];
     const auto n_out_actual = std::min(n_out, nparams);
 
-    xt::xtensor<double, 2> powers = xt::zeros<double>({nparams, nparams});
-    for (SizeType i = 0; i < nparams; ++i) {
-        for (SizeType j = 0; j <= i; ++j) {
-            powers(i, j) = static_cast<double>(i - j);
-        }
-    }
-
     // Compute transformation matrix: t_mat = delta_t^powers / factorial(powers)
     xt::xtensor<double, 2> t_mat = xt::zeros<double>({nparams, nparams});
     for (SizeType i = 0; i < nparams; ++i) {
         for (SizeType j = 0; j <= i; ++j) {
-            const auto power = static_cast<SizeType>(powers(i, j));
+            const auto power = static_cast<double>(i - j);
             t_mat(i, j)      = std::pow(delta_t, power) /
                           math::factorial(static_cast<double>(power));
         }
@@ -249,21 +242,20 @@ shift_params(std::span<const double> param_vec, double delta_t) {
 std::tuple<xt::xtensor<double, 3>, xt::xtensor<double, 1>>
 shift_params_batch(const xt::xtensor<double, 3>& param_vec_batch,
                    double delta_t) {
-    const auto size    = param_vec_batch.shape()[0];
-    const auto nparams = param_vec_batch.shape()[1];
+    const auto nbatch  = param_vec_batch.shape(0);
+    const auto nparams = param_vec_batch.shape(1);
 
-    xt::xtensor<double, 2> dvec_cur = xt::zeros<double>({size, nparams + 1});
+    xt::xtensor<double, 2> dvec_cur = xt::zeros<double>({nbatch, nparams + 1});
+    xt::xtensor<double, 3> param_vec_new(param_vec_batch);
+    xt::xtensor<double, 1> delay_rel = xt::zeros<double>({nbatch});
 
     // Copy till acceleration: dvec_cur[:, :-2] = param_vec_batch[:, :-1, 0]
     if (nparams > 1) {
         xt::view(dvec_cur, xt::all(), xt::range(0, nparams - 1)) =
             xt::view(param_vec_batch, xt::all(), xt::range(0, nparams - 1), 0);
     }
-
     // Transform using batch operation
-    auto dvec_new      = shift_params_d_batch(dvec_cur, delta_t, nparams + 1);
-    auto param_vec_new = param_vec_batch; // Copy input
-    xt::xtensor<double, 1> delay_rel = xt::zeros<double>({size});
+    const auto dvec_new = shift_params_d_batch(dvec_cur, delta_t, nparams + 1);
 
     // Update parameters: param_vec_new[:, :-1, 0] = dvec_new[:, :-2]
     if (nparams > 1) {
@@ -273,13 +265,13 @@ shift_params_batch(const xt::xtensor<double, 3>& param_vec_batch,
 
     // Update frequency: param_vec_new[:, -1, 0] = param_vec_batch[:, -1, 0] *
     // (1 + dvec_new[:, -2] / C_VAL)
-    auto freq_correction =
-        1.0 + xt::view(dvec_new, xt::all(), nparams - 1) / utils::kCval;
     xt::view(param_vec_new, xt::all(), nparams - 1, 0) =
-        xt::view(param_vec_batch, xt::all(), nparams - 1, 0) * freq_correction;
+        xt::view(param_vec_batch, xt::all(), nparams - 1, 0) *
+        (1.0 + xt::view(dvec_new, xt::all(), nparams - 1) / utils::kCval);
 
     // Compute delay: delay_rel = dvec_new[:, -1] / C_VAL
-    delay_rel = xt::view(dvec_new, xt::all(), nparams) / utils::kCval;
+    xt::view(delay_rel, xt::all()) =
+        xt::view(dvec_new, xt::all(), nparams) / utils::kCval;
 
     return {param_vec_new, delay_rel};
 }
@@ -288,29 +280,27 @@ std::tuple<xt::xtensor<double, 3>, xt::xtensor<double, 1>>
 shift_params_circular_batch(const xt::xtensor<double, 3>& param_vec_batch,
                             double delta_t) {
 
-    const auto size    = param_vec_batch.shape()[0];
-    const auto nparams = param_vec_batch.shape()[1];
-
+    const auto nbatch  = param_vec_batch.shape(0);
+    const auto nparams = param_vec_batch.shape(1); // nparams + 2
     if (nparams != 4) {
         throw std::invalid_argument(
             "4 parameters are needed for circular orbit resolve.");
     }
 
-    // Extract parameters for omega calculation
-    auto snap_values    = xt::view(param_vec_batch, xt::all(), 0, 0);
-    auto accel_values   = xt::view(param_vec_batch, xt::all(), 2, 0);
-    auto minus_omega_sq = snap_values / accel_values;
-    auto omega_batch    = xt::sqrt(-minus_omega_sq);
-
-    // Compute required order
-    auto max_omega      = xt::amax(omega_batch)();
-    auto required_order = std::min(
+    // Omega calculation
+    const auto minus_omega_sq = xt::view(param_vec_batch, xt::all(), 0, 0) /
+                                xt::view(param_vec_batch, xt::all(), 2, 0);
+    const auto omega_batch    = xt::sqrt(-minus_omega_sq);
+    const auto max_omega      = xt::amax(omega_batch)();
+    const auto required_order = std::min(
         static_cast<SizeType>((max_omega * std::abs(delta_t) * M_E) + 10),
         100UL);
 
     // Create dvec_cur with extended size
     xt::xtensor<double, 2> dvec_cur =
-        xt::zeros<double>({size, required_order + 1});
+        xt::zeros<double>({nbatch, required_order + 1});
+    xt::xtensor<double, 3> param_vec_new(param_vec_batch);
+    xt::xtensor<double, 1> delay_rel = xt::zeros<double>({nbatch});
 
     // Copy base parameters: dvec_cur[:, -5:-2] = param_vec_batch[:, :-1, 0]
     xt::view(dvec_cur, xt::all(),
@@ -337,24 +327,20 @@ shift_params_circular_batch(const xt::xtensor<double, 3>& param_vec_batch,
     }
 
     // Transform using batch operation
-    auto dvec_new = shift_params_d_batch(dvec_cur, delta_t, nparams + 1);
-
-    // Create output arrays
-    auto param_vec_new               = param_vec_batch; // Copy input
-    xt::xtensor<double, 1> delay_rel = xt::zeros<double>({size});
+    const auto dvec_new = shift_params_d_batch(dvec_cur, delta_t, nparams + 1);
 
     // Update parameters: param_vec_new[:, :-1, 0] = dvec_new[:, :-2]
     xt::view(param_vec_new, xt::all(), xt::range(0, nparams - 1), 0) =
         xt::view(dvec_new, xt::all(), xt::range(0, nparams - 1));
 
     // Update frequency with correction
-    auto freq_correction =
-        1.0 + xt::view(dvec_new, xt::all(), nparams - 1) / utils::kCval;
     xt::view(param_vec_new, xt::all(), nparams - 1, 0) =
-        xt::view(param_vec_batch, xt::all(), nparams - 1, 0) * freq_correction;
+        xt::view(param_vec_batch, xt::all(), nparams - 1, 0) *
+        (1.0 + xt::view(dvec_new, xt::all(), nparams - 1) / utils::kCval);
 
     // Compute delay
-    delay_rel = xt::view(dvec_new, xt::all(), nparams) / utils::kCval;
+    xt::view(delay_rel, xt::all()) =
+        xt::view(dvec_new, xt::all(), nparams) / utils::kCval;
 
     return {param_vec_new, delay_rel};
 }

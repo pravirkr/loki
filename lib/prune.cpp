@@ -161,6 +161,11 @@ private:
                                  std::string_view kind) {
         auto prune = Prune<FoldType>(m_ffa_plan, m_cfg, m_threshold_scheme,
                                      m_max_sugg, m_batch_size, kind);
+        // Log detailed memory usage
+        const auto memory_usage = prune.get_memory_usage();
+        const auto memory_gb =
+            static_cast<float>(memory_usage) / (1024.0F * 1024.0F * 1024.0F);
+        spdlog::info("Pruning Memory Usage: {:.2f} GB", memory_gb);
         for (const auto ref_seg : ref_segs) {
             spdlog::info("Processing ref segment {} (single-threaded)",
                          ref_seg);
@@ -263,6 +268,14 @@ template <typename FoldType> struct IterationWorkspace {
           batch_scores(max_batch_size),
           batch_isuggest(max_batch_size),
           max_batch_size(max_batch_size) {}
+
+    SizeType get_memory_usage() const noexcept {
+        return (batch_leaves.size() * sizeof(double)) +
+               (batch_combined_res.size() * sizeof(FoldType)) +
+               (batch_backtrack.size() * sizeof(SizeType)) +
+               (batch_scores.size() * sizeof(float)) +
+               (batch_isuggest.size() * sizeof(SizeType));
+    }
 };
 
 template <typename FoldType> class Prune<FoldType>::Impl {
@@ -298,6 +311,11 @@ public:
     Impl& operator=(const Impl&) = delete;
     Impl(Impl&&)                 = delete;
     Impl& operator=(Impl&&)      = delete;
+
+    SizeType get_memory_usage() const noexcept {
+        return m_iteration_workspace->get_memory_usage() +
+               m_suggestions->get_memory_usage();
+    }
 
     void execute(std::span<const FoldType> ffa_fold,
                  SizeType ref_seg,
@@ -355,11 +373,29 @@ public:
         spdlog::info("Pruning time: {}", m_pstats->get_concise_timer_summary());
     }
 
+private:
+    plans::FFAPlan m_ffa_plan;
+    search::PulsarSearchConfig m_cfg;
+    std::vector<float> m_threshold_scheme;
+    SizeType m_max_sugg;
+    SizeType m_batch_size;
+    std::string_view m_kind;
+
+    bool m_prune_complete{false};
+    SizeType m_prune_level{};
+    std::unique_ptr<psr_utils::SnailScheme> m_scheme;
+    std::unique_ptr<core::PruneTaylorDPFuncts<FoldType>> m_prune_funcs;
+    std::unique_ptr<cands::PruneStatsCollection> m_pstats;
+
+    // A single, in-place (circular) suggestion buffer
+    std::unique_ptr<utils::SuggestionStruct<FoldType>> m_suggestions;
+    std::unique_ptr<IterationWorkspace<FoldType>> m_iteration_workspace;
+
     void initialize(std::span<const FoldType> ffa_fold,
                     SizeType ref_seg,
                     const std::filesystem::path& log_file) {
         timing::ScopeTimer timer("Prune::initialize");
-        // Initialize suggestion buffer
+        // Reset the suggestion buffer state
         m_suggestions->reset();
 
         // Initialize snail scheme for current ref_seg
@@ -412,7 +448,8 @@ public:
                             "length at level {}",
                             m_prune_level));
         }
-        // Prepare the buffer for an in-place update
+        // Prepare for in-place update: mark start of write region, reset size
+        // for new suggestions.
         m_suggestions->prepare_for_in_place_update();
 
         IterationStats stats;
@@ -423,7 +460,7 @@ public:
 
         execute_iteration_batched(ffa_fold, seg_idx_cur, threshold, stats);
 
-        // Finalize the in-place update, making the new suggestions active
+        // Finalize: make new region active, defragment for contiguous access.
         m_suggestions->finalize_in_place_update();
 
         // Update statistics
@@ -453,24 +490,9 @@ public:
         }
     }
 
-private:
-    plans::FFAPlan m_ffa_plan;
-    search::PulsarSearchConfig m_cfg;
-    std::vector<float> m_threshold_scheme;
-    SizeType m_max_sugg;
-    SizeType m_batch_size;
-    std::string_view m_kind;
-
-    bool m_prune_complete{false};
-    SizeType m_prune_level{};
-    std::unique_ptr<psr_utils::SnailScheme> m_scheme;
-    std::unique_ptr<core::PruneTaylorDPFuncts<FoldType>> m_prune_funcs;
-    std::unique_ptr<cands::PruneStatsCollection> m_pstats;
-
-    // A single, in-place (circular) suggestion buffer
-    std::unique_ptr<utils::SuggestionStruct<FoldType>> m_suggestions;
-    std::unique_ptr<IterationWorkspace<FoldType>> m_iteration_workspace;
-
+    // Iteration flow: Branch -> Validate -> Resolve -> Load/Shift/Add -> Score
+    // -> Filter -> Transform -> Add to buffer.
+    // Buffer manages space via trimming; advances consumption post-batch.
     void execute_iteration_batched(std::span<const FoldType> ffa_fold,
                                    SizeType seg_idx_cur,
                                    float threshold,
@@ -517,7 +539,15 @@ private:
             stats.batch_timers["branch"] += timer.stop();
             stats.n_leaves += n_leaves_batch;
             if (n_leaves_batch == 0) {
+                m_suggestions->advance_read_consumed(i_batch_end -
+                                                     i_batch_start);
                 continue;
+            }
+            if (n_leaves_batch > m_iteration_workspace->max_batch_size) {
+                throw std::runtime_error(std::format(
+                    "Branch factor exceeded workspace size: n_leaves_batch={} "
+                    "> max_batch_size={}",
+                    n_leaves_batch, m_iteration_workspace->max_batch_size));
             }
 
             // Validation
@@ -531,6 +561,8 @@ private:
             stats.batch_timers["validate"] += timer.stop();
             stats.n_leaves_phy += n_leaves_after_validation;
             if (n_leaves_after_validation == 0) {
+                m_suggestions->advance_read_consumed(i_batch_end -
+                                                     i_batch_start);
                 continue;
             }
 
@@ -602,6 +634,8 @@ private:
             }
             stats.batch_timers["filter"] += timer.stop();
             if (num_passing == 0) {
+                m_suggestions->advance_read_consumed(i_batch_end -
+                                                     i_batch_start);
                 continue;
             }
             if (num_passing > m_iteration_workspace->max_batch_size) {
@@ -696,6 +730,11 @@ template <typename FoldType>
 Prune<FoldType>& Prune<FoldType>::operator=(Prune&& other) noexcept = default;
 
 template <typename FoldType>
+SizeType Prune<FoldType>::get_memory_usage() const noexcept {
+    return m_impl->get_memory_usage();
+}
+
+template <typename FoldType>
 void Prune<FoldType>::execute(
     std::span<const FoldType> ffa_fold,
     SizeType ref_seg,
@@ -703,19 +742,6 @@ void Prune<FoldType>::execute(
     const std::optional<std::filesystem::path>& log_file,
     const std::optional<std::filesystem::path>& result_file) {
     m_impl->execute(ffa_fold, ref_seg, outdir, log_file, result_file);
-}
-
-template <typename FoldType>
-void Prune<FoldType>::initialize(std::span<const FoldType> ffa_fold,
-                                 SizeType ref_seg,
-                                 const std::filesystem::path& log_file) {
-    m_impl->initialize(ffa_fold, ref_seg, log_file);
-}
-
-template <typename FoldType>
-void Prune<FoldType>::execute_iteration(std::span<const FoldType> ffa_fold,
-                                        const std::filesystem::path& log_file) {
-    m_impl->execute_iteration(ffa_fold, log_file);
 }
 
 // Template instantiations

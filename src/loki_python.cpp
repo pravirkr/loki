@@ -11,6 +11,9 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include <xtensor/containers/xadapt.hpp>
+#include <xtensor/containers/xtensor.hpp>
+
 #include "loki/loki.hpp"
 #include "loki/psr_utils.hpp"
 
@@ -551,22 +554,59 @@ PYBIND11_MODULE(libloki, m) {
                              file_prefix, kind);
             },
             py::arg("ffa_fold"), py::arg("ref_seg"), py::arg("outdir"),
-            py::arg("file_prefix"), py::arg("kind"))
-        .def(
-            "initialize",
-            [](PruneFloat& self, const PyArrayT<float>& ffa_fold,
-               SizeType ref_seg, const std::string& log_file) {
-                self.initialize(to_span<const float>(ffa_fold), ref_seg,
-                                log_file);
-            },
-            py::arg("ffa_fold"), py::arg("ref_seg"), py::arg("log_file"))
-        .def(
-            "execute_iteration",
-            [](PruneFloat& self, const PyArrayT<float>& ffa_fold,
-               const std::string& log_file) {
-                self.execute_iteration(to_span<const float>(ffa_fold),
-                                       log_file);
-            },
-            py::arg("ffa_fold"), py::arg("log_file"));
+            py::arg("file_prefix"), py::arg("kind"));
+
+    auto m_taylor = m.def_submodule("taylor", "Taylor submodule");
+    m_taylor.def(
+        "poly_taylor_resolve_batch",
+        [](const PyArrayT<double>& batch_leaves,
+           std::pair<double, double> coord_add,
+           std::pair<double, double> coord_init,
+           const std::vector<PyArrayT<double>>& param_arr, SizeType fold_bins,
+           SizeType n_leaves) {
+            std::vector<std::vector<double>> param_vecs;
+            param_vecs.reserve(param_arr.size());
+            for (const auto& arr : param_arr) {
+                param_vecs.emplace_back(arr.data(), arr.data() + arr.size());
+            }
+            std::span<const std::vector<double>> param_span(param_vecs);
+            xt::xtensor<double, 3> batch_leaves_xt = xt::adapt(
+                batch_leaves.data(), batch_leaves.size(), xt::no_ownership(),
+                std::vector<std::size_t>(batch_leaves.shape(),
+                                         batch_leaves.shape() +
+                                             batch_leaves.ndim()));
+            return core::poly_taylor_resolve_batch(batch_leaves_xt, coord_add,
+                                                   coord_init, param_span,
+                                                   fold_bins, n_leaves);
+        },
+        py::arg("batch_leaves"), py::arg("coord_add"), py::arg("coord_init"),
+        py::arg("param_arr"), py::arg("fold_bins"), py::arg("n_leaves"));
+
+    m_taylor.def(
+        "poly_taylor_branch_batch",
+        [](const PyArrayT<double>& param_set_batch,
+           std::pair<double, double> coord_cur,
+           const PyArrayT<double>& batch_leaves, SizeType fold_bins,
+           double tol_bins, SizeType poly_order,
+           const std::vector<ParamLimitType>& param_limits,
+           SizeType branch_max) {
+            xt::xtensor<double, 3> param_set_batch_xt =
+                xt::adapt(param_set_batch.data(), param_set_batch.size(),
+                          xt::no_ownership(),
+                          std::vector<std::size_t>(param_set_batch.shape(),
+                                                   param_set_batch.shape() +
+                                                       param_set_batch.ndim()));
+            xt::xtensor<double, 3> batch_leaves_xt = xt::adapt(
+                batch_leaves.data(), batch_leaves.size(), xt::no_ownership(),
+                std::vector<std::size_t>(batch_leaves.shape(),
+                                         batch_leaves.shape() +
+                                             batch_leaves.ndim()));
+            return core::poly_taylor_branch_batch(
+                param_set_batch_xt, coord_cur, batch_leaves_xt, fold_bins,
+                tol_bins, poly_order, param_limits, branch_max);
+        },
+        py::arg("param_set_batch"), py::arg("coord_cur"),
+        py::arg("batch_leaves"), py::arg("fold_bins"), py::arg("tol_bins"),
+        py::arg("poly_order"), py::arg("param_limits"), py::arg("branch_max"));
 }
 } // namespace loki

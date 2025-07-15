@@ -16,6 +16,7 @@
 #include <omp.h>
 
 #include "loki/common/types.hpp"
+#include "loki/exceptions.hpp"
 #include "loki/psr_utils.hpp"
 
 namespace loki::utils {
@@ -72,14 +73,37 @@ get_unique_indices_scores(const xt::xtensor<double, 3>& params,
 }
 } // namespace
 
+/**
+Circular buffer layout (all indices modulo m_capacity):
+
+┌────────┬───────────────┬───────────────┐
+│ unused │  READ REGION  │  WRITE REGION │
+└────────┴───────────────┴───────────────┘
+           ^ m_head         ^ m_write_start
+           size = m_size_old      size = m_size
+During an iteration we:
+
+1. prepare_for_in_place_update()
+      – freezes READ, opens empty WRITE.
+2. Consumers call advance_read_consumed() as they read.
+3. Producers call add()/add_batch() into WRITE.
+4. If WRITE fills, trim_*() may delete from WRITE only.
+5. finalize_in_place_update()
+      – promotes WRITE to READ and defragments to
+        make [0, m_size) contiguous for next round.
+
+All operations keep the invariant
+   m_size_old - m_read_consumed + m_size ≤ m_capacity
+- Read region: Old suggestions (m_head to m_head + m_size_old -
+m_read_consumed).
+- Write region: New suggestions (m_write_start to m_write_head).
+*/
 template <typename FoldType> class SuggestionStruct<FoldType>::Impl {
 public:
     Impl(SizeType capacity, SizeType nparams, SizeType nbins)
         : m_capacity(capacity),
           m_nparams(nparams),
           m_nbins(nbins) {
-        // Create empty tensors with the same shapes but different first
-        // dimension
         m_param_sets =
             xt::xtensor<double, 3>({m_capacity, m_nparams + 2, 2}, 0.0);
         m_folds = xt::xtensor<FoldType, 3>({m_capacity, 2, m_nbins});
@@ -107,7 +131,18 @@ public:
     const xt::xtensor<FoldType, 3>& get_folds() const noexcept {
         return m_folds;
     }
-    const std::vector<float>& get_scores() const noexcept { return m_scores; }
+    std::vector<float> get_scores() const {
+        std::vector<float> valid_scores;
+        if (m_size == 0) {
+            return valid_scores;
+        }
+        valid_scores.reserve(m_size);
+        const auto start_idx = m_is_updating ? m_write_start : m_head;
+        for (SizeType i = 0; i < m_size; ++i) {
+            valid_scores.push_back(m_scores[(start_idx + i) % m_capacity]);
+        }
+        return valid_scores;
+    }
     const xt::xtensor<SizeType, 2>& get_backtracks() const noexcept {
         return m_backtracks;
     }
@@ -160,10 +195,20 @@ public:
         return *mid;
     }
 
+    SizeType get_memory_usage() const noexcept {
+        return (m_param_sets.size() * sizeof(double)) +
+               (m_folds.size() * sizeof(FoldType)) +
+               (m_scores.size() * sizeof(float)) +
+               (m_backtracks.size() * sizeof(SizeType));
+    }
+
     void set_nsugg(SizeType nsugg) noexcept {
         m_size     = nsugg;
         m_head     = 0;
         m_size_old = 0;
+        error_check::check(
+            m_size <= m_capacity,
+            "SuggestionStruct: Invalid size after set_nsugg. Buffer overflow.");
     }
     void reset() noexcept {
         m_size          = 0;
@@ -193,7 +238,11 @@ public:
         defragment();
     }
 
-    void advance_read_consumed(SizeType n) { m_read_consumed += n; }
+    void advance_read_consumed(SizeType n) {
+        error_check::check(m_read_consumed + n <= m_size_old,
+                           "SuggestionStruct: read_consumed overflow");
+        m_read_consumed += n;
+    }
 
     std::tuple<xt::xtensor<double, 2>, xt::xtensor<FoldType, 2>, float>
     get_best() const {
@@ -239,8 +288,9 @@ public:
             return xt::xtensor<double, 3>({0, 0, 0});
         }
         xt::xtensor<double, 3> contig_params({m_size, m_nparams + 2, 2});
+        const auto start_idx = m_is_updating ? m_write_start : m_head;
         for (SizeType i = 0; i < m_size; ++i) {
-            const auto src_idx = (m_head + i) % m_capacity;
+            const auto src_idx = (start_idx + i) % m_capacity;
             xt::view(contig_params, i, xt::all(), xt::all()) =
                 xt::view(m_param_sets, src_idx, xt::all(), xt::all());
         }
@@ -254,11 +304,13 @@ public:
         // Call the batch shift function
         xt::xtensor<double, 3> trans_params;
         if (m_nparams < 4) {
-            auto [trans_params, _] =
+            auto [shifted, _] =
                 psr_utils::shift_params_batch(transformed_params, delta_t);
+            trans_params = std::move(shifted);
         } else if (m_nparams == 4) {
-            auto [trans_params, _] = psr_utils::shift_params_circular_batch(
+            auto [shifted, _] = psr_utils::shift_params_circular_batch(
                 transformed_params, delta_t);
+            trans_params = std::move(shifted);
         } else {
             throw std::runtime_error(std::format(
                 "Suggestion struct must have less than 4 parameters."));
@@ -292,15 +344,15 @@ public:
                      const xt::xtensor<FoldType, 3>& folds_batch,
                      const std::vector<float>& scores_batch,
                      const xt::xtensor<SizeType, 2>& backtracks_batch) {
-        const auto num_to_add = scores_batch.size();
-        if (num_to_add > m_capacity) {
+        const auto slots_to_write = scores_batch.size();
+        if (slots_to_write > m_capacity) {
             throw std::runtime_error(std::format(
                 "SuggestionStruct: Suggestions too large to add: {} > {}",
-                num_to_add, m_capacity));
+                slots_to_write, m_capacity));
         }
         reset(); // Start fresh
         // Copy all data efficiently using views
-        for (SizeType i = 0; i < num_to_add; ++i) {
+        for (SizeType i = 0; i < slots_to_write; ++i) {
             xt::view(m_param_sets, i, xt::all(), xt::all()) =
                 xt::view(param_sets_batch, i, xt::all(), xt::all());
             xt::view(m_folds, i, xt::all(), xt::all()) =
@@ -309,42 +361,53 @@ public:
                 xt::view(backtracks_batch, i, xt::all());
             m_scores[i] = scores_batch[i];
         }
-        m_size = num_to_add;
+        m_size = slots_to_write;
+        error_check::check(m_size <= m_capacity,
+                           "SuggestionStruct: Invalid size after add_initial. "
+                           "Buffer overflow.");
     }
 
+    // Adds filtered batch to write region. If full, trims write region via
+    // median threshold. Loops until all candidates fit, reclaiming space from
+    // consumed old suggestions.
     float add_batch(const xt::xtensor<double, 3>& param_sets_batch,
                     const xt::xtensor<FoldType, 3>& folds_batch,
                     std::span<const float> scores_batch,
                     const xt::xtensor<SizeType, 2>& backtracks_batch,
                     float current_threshold) {
         // Always use scores_batch to get the correct batch size
-        const auto num_to_add = scores_batch.size();
-        if (num_to_add == 0) {
+        const auto slots_to_write = scores_batch.size();
+        if (slots_to_write == 0) {
             return current_threshold;
         }
         auto effective_threshold = current_threshold;
 
         // Create initial mask for scores >= threshold
-        std::vector<SizeType> candidate_indices;
-        candidate_indices.reserve(num_to_add);
+        std::vector<SizeType> pending_indices;
+        pending_indices.reserve(slots_to_write);
 
         auto update_candidates = [&]() {
-            candidate_indices.clear();
-            for (SizeType i = 0; i < num_to_add; ++i) {
+            pending_indices.clear();
+            for (SizeType i = 0; i < slots_to_write; ++i) {
                 if (scores_batch[i] >= effective_threshold) {
-                    candidate_indices.push_back(i);
+                    pending_indices.push_back(i);
                 }
             }
         };
 
         update_candidates();
 
-        while (!candidate_indices.empty()) {
+        while (!pending_indices.empty()) {
             const auto space_left =
                 m_capacity - ((m_size_old - m_read_consumed) + m_size);
+            if (space_left < 0 || space_left > m_capacity) {
+                throw std::runtime_error(std::format(
+                    "SuggestionStruct: Invalid space left ({}) after "
+                    "add_batch. Buffer overflow.",
+                    space_left));
+            }
             if (space_left == 0) {
-                // Buffer is full, try to trim.
-                // Trimming operates on the *newly added* suggestions.
+                // Buffer is full, try to trim the newly added suggestions.
                 const auto new_threshold_from_trim = trim_threshold();
                 effective_threshold =
                     std::max(effective_threshold, new_threshold_from_trim);
@@ -354,11 +417,11 @@ public:
             }
 
             const auto n_to_add_now =
-                std::min(candidate_indices.size(), space_left);
+                std::min(pending_indices.size(), space_left);
 
             // Batched assignment
             for (SizeType i = 0; i < n_to_add_now; ++i) {
-                const auto src_idx = candidate_indices[i];
+                const auto src_idx = pending_indices[i];
                 const auto dst_idx = m_write_head;
 
                 xt::view(m_param_sets, dst_idx, xt::all(), xt::all()) =
@@ -372,11 +435,14 @@ public:
                 m_write_head = (m_write_head + 1) % m_capacity;
             }
             m_size += n_to_add_now;
+            error_check::check(m_size <= m_capacity,
+                               "SuggestionStruct: Invalid size after "
+                               "add_batch. Buffer overflow.");
 
             // Remove added candidates from the list
-            candidate_indices.erase(candidate_indices.begin(),
-                                    candidate_indices.begin() +
-                                        static_cast<IndexType>(n_to_add_now));
+            pending_indices.erase(pending_indices.begin(),
+                                  pending_indices.begin() +
+                                      static_cast<IndexType>(n_to_add_now));
         }
         return effective_threshold;
     }
@@ -393,6 +459,69 @@ public:
         for (SizeType i = 0; i < m_size; ++i) {
             const auto current_idx = (m_write_start + i) % m_capacity;
             indices[i]             = m_scores[current_idx] >= threshold;
+        }
+
+        keep(indices);
+        // After trimming, the write head must be updated to the new end of the
+        // block.
+        if (m_is_updating) {
+            m_write_head = (m_write_start + m_size) % m_capacity;
+        }
+        return threshold;
+    }
+
+    float trim_half() {
+        if (m_size == 0) {
+            return 0.0F;
+        }
+
+        // To guarantee progress, we will keep at most half of the suggestions.
+        const SizeType n_to_keep = m_size / 2;
+
+        // Find the score of the (n_to_keep)-th best suggestion. This will be
+        // our new threshold.
+        std::vector<float> scores_copy;
+        scores_copy.reserve(m_size);
+        const auto start_idx = m_is_updating ? m_write_start : m_head;
+        for (SizeType i = 0; i < m_size; ++i) {
+            scores_copy.push_back(m_scores[(start_idx + i) % m_capacity]);
+        }
+
+        // Find the threshold score that would keep the top `n_to_keep`
+        // elements. We sort in descending order to find the n_to_keep-th
+        // largest element.
+        auto nth = scores_copy.begin() + n_to_keep;
+        std::nth_element(scores_copy.begin(), nth, scores_copy.end(),
+                         std::greater<float>());
+        const float threshold =
+            (n_to_keep < m_size) ? *nth : scores_copy.back();
+
+        // Create a mask to keep the top n_to_keep suggestions, breaking ties
+        // arbitrarily but consistently.
+        std::vector<bool> indices(m_size, false);
+        SizeType kept_count = 0;
+        // Keep all suggestions with a score strictly greater than the
+        // threshold.
+        for (SizeType i = 0; i < m_size; ++i) {
+            const auto current_idx = (start_idx + i) % m_capacity;
+            if (m_scores[current_idx] > threshold) {
+                indices[i] = true;
+                kept_count++;
+            }
+        }
+        // Keep suggestions with a score equal to the threshold until we reach
+        // n_to_keep.
+        if (kept_count < n_to_keep) {
+            for (SizeType i = 0; i < m_size; ++i) {
+                if (kept_count >= n_to_keep) {
+                    break;
+                }
+                const auto current_idx = (start_idx + i) % m_capacity;
+                if (m_scores[current_idx] == threshold) {
+                    indices[i] = true;
+                    kept_count++;
+                }
+            }
         }
 
         keep(indices);
@@ -494,8 +623,9 @@ private:
     bool m_is_updating{false};
     SizeType m_read_consumed{0};
 
-    // Optimized in-place update
-    // Compacts the currently valid region based on a boolean mask.
+    // Compacts the current region (write or full, based on m_is_updating) using
+    // boolean mask.
+    // Only affects [start_idx, start_idx + m_size); updates m_size.
     void keep(const std::vector<bool>& indices) {
         // Count how many elements to keep
         SizeType count = std::count(indices.begin(), indices.end(), true);
@@ -525,10 +655,14 @@ private:
         }
         // Update valid size
         m_size = count;
+        error_check::check(
+            m_size <= m_capacity,
+            "SuggestionStruct: Invalid size after keep. Buffer overflow.");
     }
 
-    // Moves the valid region to the beginning of the buffer to
-    // make it contiguous.
+    // Moves valid data (m_head to m_head + m_size) to buffer start (index 0).
+    // Handles wrapped data with temp buffers to prevent overwrite.
+    // Post-condition: m_head == 0, data is contiguous.
     void defragment() {
         if (m_head == 0) {
             return; // Already contiguous at the start
@@ -539,25 +673,25 @@ private:
         }
         // Handle wrapped vs. non-wrapped data
         if (m_head + m_size <= m_capacity) {
-            // Data is in a single contiguous block, just not at the start.
-            // Move it to the start.
-            auto params_slice =
+            // Data is contiguous but not at the start – copy via temp buffer
+            // (safety first, to avoid overlap with the write region).
+            xt::xtensor<double, 3> params_slice =
                 xt::view(m_param_sets, xt::range(m_head, m_head + m_size),
                          xt::all(), xt::all());
-            auto folds_slice =
+            xt::xtensor<FoldType, 3> folds_slice =
                 xt::view(m_folds, xt::range(m_head, m_head + m_size), xt::all(),
                          xt::all());
-            auto backtracks_slice = xt::view(
+            xt::xtensor<SizeType, 2> backtracks_slice = xt::view(
                 m_backtracks, xt::range(m_head, m_head + m_size), xt::all());
-
             xt::view(m_param_sets, xt::range(0, m_size), xt::all(), xt::all()) =
                 params_slice;
             xt::view(m_folds, xt::range(0, m_size), xt::all(), xt::all()) =
                 folds_slice;
-            std::copy(m_scores.begin() + m_head,
-                      m_scores.begin() + m_head + m_size, m_scores.begin());
             xt::view(m_backtracks, xt::range(0, m_size), xt::all()) =
                 backtracks_slice;
+            std::vector<float> tmp_scores(m_scores.begin() + m_head,
+                                          m_scores.begin() + m_head + m_size);
+            std::ranges::copy(tmp_scores, m_scores.begin());
 
         } else {
             // Data is wrapped around the end of the buffer.
@@ -630,8 +764,7 @@ SuggestionStruct<FoldType>::get_folds() const noexcept {
     return m_impl->get_folds();
 }
 template <typename FoldType>
-const std::vector<float>&
-SuggestionStruct<FoldType>::get_scores() const noexcept {
+std::vector<float> SuggestionStruct<FoldType>::get_scores() const noexcept {
     return m_impl->get_scores();
 }
 template <typename FoldType>
@@ -674,6 +807,10 @@ float SuggestionStruct<FoldType>::get_score_min() const noexcept {
 template <typename FoldType>
 float SuggestionStruct<FoldType>::get_score_median() const noexcept {
     return m_impl->get_score_median();
+}
+template <typename FoldType>
+SizeType SuggestionStruct<FoldType>::get_memory_usage() const noexcept {
+    return m_impl->get_memory_usage();
 }
 template <typename FoldType>
 void SuggestionStruct<FoldType>::set_nsugg(SizeType nsugg) noexcept {

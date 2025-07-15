@@ -28,6 +28,10 @@ void circular_prefix_sum(std::span<const float> x, std::span<float> out);
 SizeType find_nearest_sorted_idx(std::span<const double> arr_sorted,
                                  double val);
 
+SizeType find_nearest_sorted_idx_scan(std::span<const double> arr_sorted,
+                                      double val,
+                                      SizeType& hint_idx);
+
 std::vector<SizeType> find_neighbouring_indices(
     std::span<const SizeType> indices, SizeType target_idx, SizeType num);
 
