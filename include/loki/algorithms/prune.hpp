@@ -10,7 +10,6 @@
 #include "loki/algorithms/plans.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
-#include "loki/utils/suggestions.hpp"
 
 namespace loki::algorithms {
 
@@ -57,9 +56,6 @@ public:
     Prune& operator=(Prune&&) noexcept;
     Prune(const Prune&)            = delete;
     Prune& operator=(const Prune&) = delete;
-
-    utils::SuggestionStruct<FoldType> get_suggestions_in() const;
-    utils::SuggestionStruct<FoldType> get_suggestions_out() const;
 
     void execute(
         std::span<const FoldType> ffa_fold,

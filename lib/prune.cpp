@@ -246,6 +246,25 @@ struct IterationStats {
     cands::TimerStats batch_timers;
 };
 
+template <typename FoldType> struct IterationWorkspace {
+    xt::xtensor<double, 3> batch_leaves;
+    xt::xtensor<FoldType, 3> batch_combined_res;
+    xt::xtensor<SizeType, 2> batch_backtrack;
+    std::vector<float> batch_scores;
+    std::vector<SizeType> batch_isuggest;
+    SizeType max_batch_size;
+
+    IterationWorkspace(SizeType max_batch_size,
+                       SizeType nparams,
+                       SizeType nbins)
+        : batch_leaves({max_batch_size, nparams + 2, 2}),
+          batch_combined_res({max_batch_size, 2, nbins}),
+          batch_backtrack({max_batch_size, nparams + 2}),
+          batch_scores(max_batch_size),
+          batch_isuggest(max_batch_size),
+          max_batch_size(max_batch_size) {}
+};
+
 template <typename FoldType> class Prune<FoldType>::Impl {
 public:
     Impl(plans::FFAPlan ffa_plan,
@@ -260,11 +279,15 @@ public:
           m_max_sugg(max_sugg),
           m_batch_size(batch_size),
           m_kind(kind) {
-        // Allocate suggestion buffers
-        m_suggestions_in = std::make_unique<utils::SuggestionStruct<FoldType>>(
+        // Allocate suggestion buffer
+        m_suggestions = std::make_unique<utils::SuggestionStruct<FoldType>>(
             m_max_sugg, m_cfg.get_nparams(), m_cfg.get_nbins());
-        m_suggestions_out = std::make_unique<utils::SuggestionStruct<FoldType>>(
-            m_max_sugg, m_cfg.get_nparams(), m_cfg.get_nbins());
+
+        // Allocate iteration workspace
+        const auto max_branch_factor = 12;
+        const auto max_batch_size    = m_batch_size * max_branch_factor;
+        m_iteration_workspace = std::make_unique<IterationWorkspace<FoldType>>(
+            max_batch_size, m_cfg.get_nparams(), m_cfg.get_nbins());
 
         // Setup pruning functions
         setup_pruning();
@@ -310,9 +333,6 @@ public:
                                   static_cast<float>(nsegments - 1) * 100.0F;
             bar.set_progress(static_cast<SizeType>(progress));
         }
-        // Determine which suggestion buffer contains the final results
-        // After ping-pong, the "input" buffer contains the latest results
-        auto* final_suggestions = m_suggestions_in.get();
 
         // Transform the suggestion params to middle of the data
         const auto delta_t = m_scheme->get_delta(m_prune_level);
@@ -320,10 +340,9 @@ public:
         // Write results
         auto result_writer = cands::PruneResultWriter(
             actual_result_file, cands::PruneResultWriter::Mode::kAppend);
-        result_writer.write_run_results(
-            run_name, m_scheme->get_data(),
-            final_suggestions->get_transformed(delta_t),
-            final_suggestions->get_scores(), *m_pstats);
+        result_writer.write_run_results(run_name, m_scheme->get_data(),
+                                        m_suggestions->get_transformed(delta_t),
+                                        m_suggestions->get_scores(), *m_pstats);
 
         // Final log entries
         std::ofstream final_log(actual_log_file, std::ios::app);
@@ -340,9 +359,8 @@ public:
                     SizeType ref_seg,
                     const std::filesystem::path& log_file) {
         timing::ScopeTimer timer("Prune::initialize");
-        // Initialize suggestion buffers
-        m_suggestions_in->reset();
-        m_suggestions_out->reset();
+        // Initialize suggestion buffer
+        m_suggestions->reset();
 
         // Initialize snail scheme for current ref_seg
         const auto nsegments = m_ffa_plan.nsegments.back();
@@ -359,7 +377,7 @@ public:
         const auto fold_segment =
             m_prune_funcs->load(ffa_fold, m_scheme->get_ref_idx());
         const auto coord_init = m_scheme->get_coord(m_prune_level);
-        m_prune_funcs->suggest(fold_segment, coord_init, *m_suggestions_in);
+        m_prune_funcs->suggest(fold_segment, coord_init, *m_suggestions);
 
         // Initialize the prune stats
         m_pstats = std::make_unique<cands::PruneStatsCollection>();
@@ -367,12 +385,12 @@ public:
             .level         = m_prune_level,
             .seg_idx       = m_scheme->get_idx(m_prune_level),
             .threshold     = 0,
-            .score_min     = m_suggestions_in->get_score_min(),
-            .score_max     = m_suggestions_in->get_score_max(),
-            .n_branches    = m_suggestions_in->get_nsugg(),
-            .n_leaves      = m_suggestions_in->get_nsugg(),
-            .n_leaves_phy  = m_suggestions_in->get_nsugg(),
-            .n_leaves_surv = m_suggestions_in->get_nsugg(),
+            .score_min     = m_suggestions->get_score_min(),
+            .score_max     = m_suggestions->get_score_max(),
+            .n_branches    = m_suggestions->get_nsugg(),
+            .n_leaves      = m_suggestions->get_nsugg(),
+            .n_leaves_phy  = m_suggestions->get_nsugg(),
+            .n_leaves_surv = m_suggestions->get_nsugg(),
         };
         m_pstats->update_stats(pstats_cur);
 
@@ -394,13 +412,19 @@ public:
                             "length at level {}",
                             m_prune_level));
         }
-        // Reset output suggestion buffer
-        m_suggestions_out->reset();
+        // Prepare the buffer for an in-place update
+        m_suggestions->prepare_for_in_place_update();
 
         IterationStats stats;
         const auto seg_idx_cur = m_scheme->get_idx(m_prune_level);
         const auto threshold   = m_threshold_scheme[m_prune_level - 1];
+        // Capture the number of branches *before* finalizing the update
+        const auto n_branches = m_suggestions->get_nsugg_old();
+
         execute_iteration_batched(ffa_fold, seg_idx_cur, threshold, stats);
+
+        // Finalize the in-place update, making the new suggestions active
+        m_suggestions->finalize_in_place_update();
 
         // Update statistics
         const cands::PruneStats pstats_cur{
@@ -409,10 +433,10 @@ public:
             .threshold     = threshold,
             .score_min     = stats.score_min,
             .score_max     = stats.score_max,
-            .n_branches    = m_suggestions_in->get_nsugg(),
+            .n_branches    = n_branches,
             .n_leaves      = stats.n_leaves,
             .n_leaves_phy  = stats.n_leaves_phy,
-            .n_leaves_surv = m_suggestions_out->get_nsugg(),
+            .n_leaves_surv = m_suggestions->get_nsugg(),
         };
         // Write stats to log
         std::ofstream log(log_file, std::ios::app);
@@ -421,34 +445,12 @@ public:
         m_pstats->update_stats(pstats_cur, stats.batch_timers);
 
         // Check if no survivors
-        if (m_suggestions_in->get_nsugg() == 0) {
+        if (m_suggestions->get_nsugg() == 0) {
             m_prune_complete = true;
             spdlog::info("Pruning complete at level {} - no survivors",
                          m_prune_level);
             return;
         }
-        // Ping-pong: swap input and output buffers
-        std::swap(m_suggestions_in, m_suggestions_out);
-    }
-
-    utils::SuggestionStruct<FoldType> get_suggestions_in() const {
-        utils::SuggestionStruct<FoldType> suggestions_in(
-            m_suggestions_in->get_max_sugg(), m_suggestions_in->get_nparams(),
-            m_suggestions_in->get_nbins());
-        suggestions_in.add_initial(
-            m_suggestions_in->get_param_sets(), m_suggestions_in->get_folds(),
-            m_suggestions_in->get_scores(), m_suggestions_in->get_backtracks());
-        return suggestions_in;
-    }
-    utils::SuggestionStruct<FoldType> get_suggestions_out() const {
-        utils::SuggestionStruct<FoldType> suggestions_out(
-            m_suggestions_out->get_max_sugg(), m_suggestions_out->get_nparams(),
-            m_suggestions_out->get_nbins());
-        suggestions_out.add_initial(m_suggestions_out->get_param_sets(),
-                                    m_suggestions_out->get_folds(),
-                                    m_suggestions_out->get_scores(),
-                                    m_suggestions_out->get_backtracks());
-        return suggestions_out;
     }
 
 private:
@@ -465,21 +467,20 @@ private:
     std::unique_ptr<core::PruneTaylorDPFuncts<FoldType>> m_prune_funcs;
     std::unique_ptr<cands::PruneStatsCollection> m_pstats;
 
-    // Suggestion buffers (ping-pong strategy)
-    std::unique_ptr<utils::SuggestionStruct<FoldType>> m_suggestions_in;
-    std::unique_ptr<utils::SuggestionStruct<FoldType>> m_suggestions_out;
+    // A single, in-place (circular) suggestion buffer
+    std::unique_ptr<utils::SuggestionStruct<FoldType>> m_suggestions;
+    std::unique_ptr<IterationWorkspace<FoldType>> m_iteration_workspace;
 
     void execute_iteration_batched(std::span<const FoldType> ffa_fold,
                                    SizeType seg_idx_cur,
                                    float threshold,
                                    IterationStats& stats) {
         // Get coordinates
-        const auto coord_init        = m_scheme->get_coord(0);
-        const auto coord_cur         = m_scheme->get_coord(m_prune_level);
-        const auto coord_prev        = m_scheme->get_coord(m_prune_level - 1);
-        const auto coord_add         = m_scheme->get_seg_coord(m_prune_level);
-        const auto coord_valid       = m_scheme->get_valid(m_prune_level);
-        const auto max_branch_factor = 12;
+        const auto coord_init  = m_scheme->get_coord(0);
+        const auto coord_cur   = m_scheme->get_coord(m_prune_level);
+        const auto coord_prev  = m_scheme->get_coord(m_prune_level - 1);
+        const auto coord_add   = m_scheme->get_seg_coord(m_prune_level);
+        const auto coord_valid = m_scheme->get_valid(m_prune_level);
 
         // Load fold segment for current level
         const auto ffa_fold_segment =
@@ -492,19 +493,12 @@ private:
             m_prune_funcs->get_validation_params(coord_valid);
         const bool validation_check = false;
 
-        const auto n_branches = m_suggestions_in->get_nsugg();
+        const auto n_branches = m_suggestions->get_nsugg_old();
+        const auto nparams    = m_cfg.get_nparams();
         const auto batch_size =
             std::max(1UL, std::min(m_batch_size, n_branches));
-        const auto max_batch_size = batch_size * max_branch_factor;
 
         timing::SimpleTimer timer;
-        const auto nparams = m_cfg.get_nparams();
-        xt::xtensor<double, 3> batch_leaves({max_batch_size, nparams + 2, 2});
-        xt::xtensor<FoldType, 3> batch_combined_res(
-            {max_batch_size, 2, m_cfg.get_nbins()});
-        xt::xtensor<SizeType, 2> batch_backtrack({max_batch_size, nparams + 2});
-        std::vector<float> batch_scores(max_batch_size);
-        std::vector<SizeType> batch_isuggest(max_batch_size);
 
         // Process branches in batches
         for (SizeType i_batch_start = 0; i_batch_start < n_branches;
@@ -515,10 +509,10 @@ private:
             // Branch
             timer.start();
             const auto param_batch = xt::view(
-                m_suggestions_in->get_param_sets(),
+                m_suggestions->get_param_sets(),
                 xt::range(i_batch_start, i_batch_end), xt::all(), xt::all());
-            const auto batch_leaf_origins =
-                m_prune_funcs->branch(param_batch, coord_cur, batch_leaves);
+            const auto batch_leaf_origins = m_prune_funcs->branch(
+                param_batch, coord_cur, m_iteration_workspace->batch_leaves);
             const auto n_leaves_batch = batch_leaf_origins.size();
             stats.batch_timers["branch"] += timer.stop();
             stats.n_leaves += n_leaves_batch;
@@ -530,9 +524,9 @@ private:
             timer.start();
             auto n_leaves_after_validation = n_leaves_batch;
             if (validation_check) {
-                n_leaves_after_validation =
-                    m_prune_funcs->validate(batch_leaves, coord_valid,
-                                            validation_params, n_leaves_batch);
+                n_leaves_after_validation = m_prune_funcs->validate(
+                    m_iteration_workspace->batch_leaves, coord_valid,
+                    validation_params, n_leaves_batch);
             }
             stats.batch_timers["validate"] += timer.stop();
             stats.n_leaves_phy += n_leaves_after_validation;
@@ -543,28 +537,32 @@ private:
             // Resolve
             timer.start();
             const auto [batch_param_idx, batch_phase_shift] =
-                m_prune_funcs->resolve(batch_leaves, coord_add, coord_init,
+                m_prune_funcs->resolve(m_iteration_workspace->batch_leaves,
+                                       coord_add, coord_init,
                                        n_leaves_after_validation);
             stats.batch_timers["resolve"] += timer.stop();
 
             // Load, shift, add (Map batch_leaf_origins to global indices)
             timer.start();
             auto batch_isuggest_span =
-                std::span(batch_isuggest).first(n_leaves_after_validation);
+                std::span(m_iteration_workspace->batch_isuggest)
+                    .first(n_leaves_after_validation);
             for (SizeType i = 0; i < n_leaves_after_validation; ++i) {
                 batch_isuggest_span[i] = batch_leaf_origins[i] + i_batch_start;
             }
-            m_prune_funcs->load_shift_add(m_suggestions_in->get_folds(),
-                                          batch_isuggest_span, ffa_fold_segment,
-                                          batch_param_idx, batch_phase_shift,
-                                          batch_combined_res);
+            m_prune_funcs->load_shift_add(
+                m_suggestions->get_folds(), batch_isuggest_span,
+                ffa_fold_segment, batch_param_idx, batch_phase_shift,
+                m_iteration_workspace->batch_combined_res);
             stats.batch_timers["shift_add"] += timer.stop();
 
             // Score
             timer.start();
             auto batch_scores_span =
-                std::span(batch_scores).first(n_leaves_after_validation);
-            m_prune_funcs->score(batch_combined_res, batch_scores_span);
+                std::span(m_iteration_workspace->batch_scores)
+                    .first(n_leaves_after_validation);
+            m_prune_funcs->score(m_iteration_workspace->batch_combined_res,
+                                 batch_scores_span);
             const auto [min_it, max_it] =
                 std::ranges::minmax_element(batch_scores_span);
             stats.score_min = std::min(stats.score_min, *min_it);
@@ -578,18 +576,25 @@ private:
                 if (batch_scores_span[i] >= threshold) {
                     // Filter in-place
                     batch_scores_span[num_passing] = batch_scores_span[i];
-                    xt::view(batch_leaves, num_passing, xt::all(), xt::all()) =
-                        xt::view(batch_leaves, i, xt::all(), xt::all());
-                    xt::view(batch_combined_res, num_passing, xt::all(),
-                             xt::all()) =
-                        xt::view(batch_combined_res, i, xt::all(), xt::all());
+                    xt::view(m_iteration_workspace->batch_leaves, num_passing,
+                             xt::all(), xt::all()) =
+                        xt::view(m_iteration_workspace->batch_leaves, i,
+                                 xt::all(), xt::all());
+                    xt::view(m_iteration_workspace->batch_combined_res,
+                             num_passing, xt::all(), xt::all()) =
+                        xt::view(m_iteration_workspace->batch_combined_res, i,
+                                 xt::all(), xt::all());
                     // Construct backtrack
-                    batch_backtrack(num_passing, 0) = batch_isuggest_span[i];
-                    batch_backtrack(num_passing, 1) = batch_param_idx[i];
+                    m_iteration_workspace->batch_backtrack(num_passing, 0) =
+                        batch_isuggest_span[i];
+                    m_iteration_workspace->batch_backtrack(num_passing, 1) =
+                        batch_param_idx[i];
                     for (SizeType j = 2; j < nparams + 1; ++j) {
-                        batch_backtrack(num_passing, j) = 0;
+                        m_iteration_workspace->batch_backtrack(num_passing, j) =
+                            0;
                     }
-                    batch_backtrack(num_passing, nparams + 1) =
+                    m_iteration_workspace->batch_backtrack(num_passing,
+                                                           nparams + 1) =
                         static_cast<SizeType>(std::round(batch_phase_shift[i]));
 
                     ++num_passing;
@@ -599,25 +604,30 @@ private:
             if (num_passing == 0) {
                 continue;
             }
-            if (num_passing > max_batch_size) {
-                throw std::runtime_error(
-                    std::format("num_passing={} > max_batch_size={}",
-                                num_passing, max_batch_size));
+            if (num_passing > m_iteration_workspace->max_batch_size) {
+                throw std::runtime_error(std::format(
+                    "num_passing={} > max_batch_size={}", num_passing,
+                    m_iteration_workspace->max_batch_size));
             }
 
             // Transform
             timer.start();
-            m_prune_funcs->transform(batch_leaves, coord_cur, trans_matrix);
+            m_prune_funcs->transform(m_iteration_workspace->batch_leaves,
+                                     coord_cur, trans_matrix);
             stats.batch_timers["transform"] += timer.stop();
 
             // Add batch to output suggestions
             timer.start();
             const auto filtered_scores_span =
                 batch_scores_span.first(num_passing);
-            current_threshold = m_suggestions_out->add_batch(
-                batch_leaves, batch_combined_res, filtered_scores_span,
-                batch_backtrack, current_threshold);
+            current_threshold = m_suggestions->add_batch(
+                m_iteration_workspace->batch_leaves,
+                m_iteration_workspace->batch_combined_res, filtered_scores_span,
+                m_iteration_workspace->batch_backtrack, current_threshold);
             stats.batch_timers["batch_add"] += timer.stop();
+            // Notify the buffer that a batch of the old suggestions has been
+            // consumed
+            m_suggestions->advance_read_consumed(i_batch_end - i_batch_start);
         }
     }
 
@@ -684,16 +694,6 @@ template <typename FoldType>
 Prune<FoldType>::Prune(Prune&& other) noexcept = default;
 template <typename FoldType>
 Prune<FoldType>& Prune<FoldType>::operator=(Prune&& other) noexcept = default;
-
-template <typename FoldType>
-utils::SuggestionStruct<FoldType> Prune<FoldType>::get_suggestions_in() const {
-    return m_impl->get_suggestions_in();
-}
-
-template <typename FoldType>
-utils::SuggestionStruct<FoldType> Prune<FoldType>::get_suggestions_out() const {
-    return m_impl->get_suggestions_out();
-}
 
 template <typename FoldType>
 void Prune<FoldType>::execute(

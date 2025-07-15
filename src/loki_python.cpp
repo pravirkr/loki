@@ -552,12 +552,6 @@ PYBIND11_MODULE(libloki, m) {
             },
             py::arg("ffa_fold"), py::arg("ref_seg"), py::arg("outdir"),
             py::arg("file_prefix"), py::arg("kind"))
-        .def_property_readonly(
-            "suggestions_in",
-            [](PruneFloat& self) { return self.get_suggestions_in(); })
-        .def_property_readonly(
-            "suggestions_out",
-            [](PruneFloat& self) { return self.get_suggestions_out(); })
         .def(
             "initialize",
             [](PruneFloat& self, const PyArrayT<float>& ffa_fold,

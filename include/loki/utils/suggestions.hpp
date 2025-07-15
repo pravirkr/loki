@@ -42,6 +42,7 @@ public:
     [[nodiscard]] SizeType get_nparams() const noexcept;
     [[nodiscard]] SizeType get_nbins() const noexcept;
     [[nodiscard]] SizeType get_nsugg() const noexcept;
+    [[nodiscard]] SizeType get_nsugg_old() const noexcept;
     [[nodiscard]] float get_nsugg_lb() const noexcept;
     [[nodiscard]] float get_score_max() const noexcept;
     [[nodiscard]] float get_score_min() const noexcept;
@@ -49,6 +50,9 @@ public:
 
     void set_nsugg(SizeType nsugg) noexcept;
     void reset() noexcept;
+    void prepare_for_in_place_update();
+    void finalize_in_place_update();
+    void advance_read_consumed(SizeType n);
 
     // Get the best suggestion (highest score)
     [[nodiscard]] std::
