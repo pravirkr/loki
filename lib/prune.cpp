@@ -13,6 +13,7 @@
 #include "loki/cands.hpp"
 #include "loki/common/types.hpp"
 #include "loki/core/dynamic.hpp"
+#include "loki/progress.hpp"
 #include "loki/psr_utils.hpp"
 #include "loki/timing.hpp"
 #include "loki/utils.hpp"
@@ -178,18 +179,28 @@ private:
                                 const std::filesystem::path& log_file,
                                 std::string_view kind) {
         // Create thread pool
+        progress::MultiprocessProgressTracker tracker("Pruning tree");
+        tracker.start();
         BS::thread_pool pool(m_nthreads);
 
         // Submit tasks for each ref_seg
         std::vector<std::future<void>> futures;
         futures.reserve(ref_segs.size());
+        std::vector<int> task_ids;
+        task_ids.reserve(ref_segs.size());
 
         const auto& ffa_plan = m_ffa_plan;
+        const auto nsegments = ffa_plan.nsegments.back();
         for (const auto ref_seg : ref_segs) {
-            auto future = pool.submit_task(
-                [this, ffa_plan, ref_seg, outdir, kind]() mutable {
-                    execute_single_ref_seg(ffa_plan, ref_seg, outdir, kind);
-                });
+            const auto id = tracker.add_task(
+                std::format("Pruning segment {:03d}", ref_seg), nsegments - 1);
+            task_ids.push_back(id);
+
+            auto future = pool.submit_task([this, ffa_plan, ref_seg, outdir,
+                                            kind, &tracker, id]() mutable {
+                execute_single_ref_seg(ffa_plan, ref_seg, outdir, kind, tracker,
+                                       id);
+            });
             futures.push_back(std::move(future));
         }
         // Wait for all tasks to complete and handle exceptions
@@ -215,11 +226,15 @@ private:
             }
             log.close();
         }
+        tracker.stop();
+        spdlog::info("All tasks completed and progress tracker stopped.");
     }
     void execute_single_ref_seg(const plans::FFAPlan& ffa_plan,
                                 SizeType ref_seg,
                                 const std::filesystem::path& outdir,
-                                std::string_view kind) {
+                                std::string_view kind,
+                                progress::MultiprocessProgressTracker& tracker,
+                                int task_id) {
 
         try {
             // Create separate Prune instance for this thread
