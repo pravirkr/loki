@@ -29,7 +29,7 @@
 #include "loki/detection/scheme.hpp"
 #include "loki/detection/score.hpp"
 #include "loki/simulation/simulation.hpp"
-#include "loki/utils.hpp"
+#include "loki/progress.hpp"
 
 namespace loki::detection {
 
@@ -1075,8 +1075,8 @@ public:
     // Methods
     void run(SizeType thres_neigh = 10) {
         spdlog::info("Running dynamic threshold scheme on CUDA");
-        utils::ProgressGuard progress_guard(true);
-        auto bar = utils::make_standard_bar("Computing scheme...");
+        progress::ProgressGuard progress_guard(true);
+        auto bar = progress::make_standard_bar("Computing scheme...");
 
         for (SizeType istage = 1; istage < m_nstages; ++istage) {
             // Get device allocator for this stage

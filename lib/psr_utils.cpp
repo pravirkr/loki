@@ -1,5 +1,6 @@
 #include "loki/psr_utils.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <format>
 
@@ -94,6 +95,28 @@ poly_taylor_step_d_vec(SizeType nparams,
     return dparams;
 }
 
+void poly_taylor_step_d_vec_flat(SizeType nparams,
+                                 double tobs,
+                                 SizeType fold_bins,
+                                 double tol_bins,
+                                 std::span<const double> f_max,
+                                 std::span<double> dparams_batch,
+                                 double t_ref) {
+
+    const auto dparams_f =
+        poly_taylor_step_f(nparams, tobs, fold_bins, tol_bins, t_ref);
+    const auto nbatch = f_max.size();
+    error_check::check_equal(dparams_batch.size(), nbatch * nparams,
+                             "dparams_batch must be of size nbatch * nparams");
+    for (SizeType i = 0; i < nbatch; ++i) {
+        const auto factor = utils::kCval / f_max[i];
+        for (SizeType j = 0; j < nparams - 1; ++j) {
+            dparams_batch[(i * nparams) + j] = dparams_f[j] * factor;
+        }
+        dparams_batch[(i * nparams) + (nparams - 1)] = dparams_f[nparams - 1];
+    }
+}
+
 bool split_f(double df_old,
              double df_new,
              double tobs_new,
@@ -173,6 +196,57 @@ poly_taylor_shift_d_vec(const xt::xtensor<double, 2>& dparam_old,
     }
 
     return result;
+}
+
+void poly_taylor_shift_d_vec_flat(std::span<const double> dparam_old,
+                                  std::span<const double> dparam_new,
+                                  double tobs_new,
+                                  SizeType fold_bins,
+                                  std::span<const double> f_cur,
+                                  double t_ref,
+                                  std::span<double> shift_bins_batch,
+                                  SizeType nbatch,
+                                  SizeType nparams) {
+
+    const auto dt          = tobs_new - t_ref;
+    const auto fold_bins_d = static_cast<double>(fold_bins);
+    error_check::check_equal(
+        shift_bins_batch.size(), nbatch * nparams,
+        "shift_bins_batch must be of size nbatch * nparams");
+
+    // Pre-compute dt powers and factorials
+    std::vector<double> dt_powers(nparams);
+    std::vector<double> factorials(nparams);
+
+    double dt_power = dt;
+    for (SizeType i = 0; i < nparams; ++i) {
+        dt_powers[i]  = dt_power;
+        factorials[i] = math::factorial(static_cast<double>(i + 1));
+        dt_power *= dt;
+    }
+
+    // Optimized computation
+    for (SizeType i = 0; i < nparams; ++i) {
+        const auto k           = nparams - 1 - i;
+        const auto factor_base = dt_powers[k] * fold_bins_d / factorials[k];
+
+        if (i < nparams - 1) {
+            // Scale by f_cur / C_VAL for all but last parameter
+            const auto scale_factor = factor_base / utils::kCval;
+            for (SizeType batch_idx = 0; batch_idx < nbatch; ++batch_idx) {
+                const SizeType idx = (batch_idx * nparams) + i;
+                const double diff = std::abs(dparam_old[idx] - dparam_new[idx]);
+                shift_bins_batch[idx] = diff * scale_factor * f_cur[batch_idx];
+            }
+        } else {
+            // No scaling for last parameter (frequency)
+            for (SizeType batch_idx = 0; batch_idx < nbatch; ++batch_idx) {
+                const SizeType idx = (batch_idx * nparams) + i;
+                const double diff = std::abs(dparam_old[idx] - dparam_new[idx]);
+                shift_bins_batch[idx] = diff * factor_base;
+            }
+        }
+    }
 }
 
 std::vector<double> shift_params_d(std::span<const double> param_vec,
@@ -276,16 +350,72 @@ shift_params_batch(const xt::xtensor<double, 3>& param_vec_batch,
     return {param_vec_new, delay_rel};
 }
 
+// Optimized flat version of shift_params_batch operations
+void shift_params_batch_flat(std::span<const double> param_vec_data,
+                             double delta_t,
+                             SizeType nbatch,
+                             SizeType nparams,
+                             SizeType param_vec_stride,
+                             std::span<double> kvec_new_data,
+                             std::span<double> delay_batch) {
+    error_check::check(nparams > 1, "nparams must be greater than 1");
+
+    const SizeType transform_dim = nparams + 1;
+    // Pre-compute transformation coefficients (factorial terms)
+    std::vector<double> taylor_coeffs(transform_dim);
+    double dt_power = 1.0;
+    for (SizeType k = 0; k < transform_dim; ++k) {
+        taylor_coeffs[k] = dt_power / math::factorial(static_cast<double>(k));
+        dt_power *= delta_t;
+    }
+    std::vector<double> dvec_cur(transform_dim, 0.0);
+    std::vector<double> dvec_new(transform_dim, 0.0);
+
+    // Process each batch item
+    for (SizeType batch_idx = 0; batch_idx < nbatch; ++batch_idx) {
+        const SizeType batch_offset = batch_idx * param_vec_stride;
+        const SizeType kvec_offset  = batch_idx * nparams;
+
+        // Reset arrays
+        std::ranges::fill(dvec_cur, 0.0);
+        std::ranges::fill(dvec_new, 0.0);
+
+        // Extract current parameters (excluding frequency for dvec_cur)
+        for (SizeType j = 0; j < nparams - 1; ++j) {
+            dvec_cur[j] = param_vec_data[batch_offset + (j * 2)];
+        }
+
+        // Apply transformation: dvec_new = T_mat * dvec_cur
+        for (SizeType i = 0; i < transform_dim; ++i) {
+            for (SizeType j = 0; j <= i && j < transform_dim; ++j) {
+                const SizeType power = i - j;
+                dvec_new[i] += dvec_cur[j] * taylor_coeffs[power];
+            }
+        }
+        // Update parameter values (except frequency)
+        for (SizeType j = 0; j < nparams - 1; ++j) {
+            kvec_new_data[kvec_offset + j] = dvec_new[j];
+        }
+
+        // Update frequency with relativistic correction
+        const double freq_old =
+            param_vec_data[batch_offset + ((nparams - 1) * 2)];
+        kvec_new_data[kvec_offset + (nparams - 1)] =
+            freq_old * (1.0 + (dvec_new[nparams - 1] / utils::kCval));
+
+        // Compute delay
+        delay_batch[batch_idx] = dvec_new[nparams] / utils::kCval;
+    }
+}
+
 std::tuple<xt::xtensor<double, 3>, xt::xtensor<double, 1>>
 shift_params_circular_batch(const xt::xtensor<double, 3>& param_vec_batch,
                             double delta_t) {
 
     const auto nbatch  = param_vec_batch.shape(0);
     const auto nparams = param_vec_batch.shape(1); // nparams + 2
-    if (nparams != 4) {
-        throw std::invalid_argument(
-            "4 parameters are needed for circular orbit resolve.");
-    }
+    error_check::check_equal(nparams, 4U,
+                             "nparams should be 4 for circular orbit resolve");
 
     // Omega calculation
     const auto minus_omega_sq = xt::view(param_vec_batch, xt::all(), 0, 0) /
@@ -343,6 +473,111 @@ shift_params_circular_batch(const xt::xtensor<double, 3>& param_vec_batch,
         xt::view(dvec_new, xt::all(), nparams) / utils::kCval;
 
     return {param_vec_new, delay_rel};
+}
+
+// Optimized flat version of shift_params_circular_batch
+void shift_params_circular_batch_flat(std::span<const double> param_vec_data,
+                                      double delta_t,
+                                      SizeType nbatch,
+                                      SizeType nparams,
+                                      SizeType param_vec_stride,
+                                      std::span<double> kvec_new_data,
+                                      std::span<double> delay_batch) {
+    error_check::check_equal(nparams, 4U,
+                             "nparams should be 4 for circular orbit resolve");
+
+    // Calculate omega values for all batches
+    std::vector<double> omega_batch(nbatch);
+    double max_omega = 0.0;
+
+    for (SizeType batch_idx = 0; batch_idx < nbatch; ++batch_idx) {
+        const SizeType batch_offset = batch_idx * param_vec_stride;
+        const double minus_omega_sq =
+            param_vec_data[batch_offset] / param_vec_data[batch_offset + 4];
+        const double omega     = std::sqrt(-minus_omega_sq);
+        omega_batch[batch_idx] = omega;
+        max_omega              = std::max(max_omega, omega);
+    }
+
+    const auto required_order = std::min(
+        static_cast<SizeType>((max_omega * std::abs(delta_t) * M_E) + 10),
+        100UL);
+
+    // Pre-compute transformation coefficients for the extended matrix
+    const SizeType transform_dim = required_order;
+    std::vector<double> taylor_coeffs(transform_dim);
+    double dt_power = 1.0;
+    for (SizeType k = 0; k < transform_dim; ++k) {
+        taylor_coeffs[k] = dt_power / math::factorial(static_cast<double>(k));
+        dt_power *= delta_t;
+    }
+
+    std::vector<double> dvec_cur(transform_dim, 0.0);
+    std::vector<double> dvec_new(transform_dim, 0.0);
+
+    // Process each batch item
+    for (SizeType batch_idx = 0; batch_idx < nbatch; ++batch_idx) {
+        const SizeType batch_offset = batch_idx * param_vec_stride;
+        const SizeType kvec_offset  = batch_idx * nparams;
+        const double omega          = omega_batch[batch_idx];
+        const double minus_omega_sq = -(omega * omega);
+
+        // Reset arrays
+        std::ranges::fill(dvec_cur, 0.0);
+        std::ranges::fill(dvec_new, 0.0);
+
+        // Copy base parameters: dvec_cur[:, -5:-2] = param_vec_batch[:, :-1, 0]
+        // This corresponds to required_order-4 to required_order-1
+        const SizeType base_start = required_order - 4;
+        for (SizeType j = 0; j < 3; ++j) {
+            dvec_cur[base_start + j] = param_vec_data[batch_offset + (j * 2)];
+        }
+
+        // Fill higher order derivatives
+        for (SizeType power = 5; power <= required_order; ++power) {
+            const SizeType col_idx = required_order - power;
+
+            if (power % 2 == 0) {
+                // Even powers: coefficients based on accel
+                const SizeType exponent = (power - 2) / 2;
+                const double coef =
+                    std::pow(minus_omega_sq, static_cast<double>(exponent)) *
+                    param_vec_data[batch_offset + 4];
+                dvec_cur[col_idx] = coef;
+            } else {
+                // Odd powers: coefficients based on velocity
+                const SizeType exponent = (power - 3) / 2;
+                const double coef =
+                    std::pow(minus_omega_sq, static_cast<double>(exponent)) *
+                    param_vec_data[batch_offset + 2];
+                dvec_cur[col_idx] = coef;
+            }
+        }
+
+        // Apply transformation matrix
+        for (SizeType i = 0; i < nparams + 1; ++i) {
+            for (SizeType j = 0; j <= i && j < transform_dim; ++j) {
+                const SizeType power = i - j;
+                if (power < taylor_coeffs.size()) {
+                    dvec_new[i] += dvec_cur[j] * taylor_coeffs[power];
+                }
+            }
+        }
+
+        // Update parameter values (except frequency)
+        for (SizeType j = 0; j < nparams - 1; ++j) {
+            kvec_new_data[kvec_offset + j] = dvec_new[j];
+        }
+
+        // Update frequency with relativistic correction
+        const double freq_old =
+            param_vec_data[batch_offset + ((nparams - 1) * 2)];
+        kvec_new_data[kvec_offset + (nparams - 1)] =
+            freq_old * (1.0 + (dvec_new[nparams - 1] / utils::kCval));
+
+        // Compute delay
+        delay_batch[batch_idx] = dvec_new[nparams] / utils::kCval;
+    }
 }
 
 xt::xtensor<double, 3>

@@ -103,7 +103,10 @@ public:
     Impl(SizeType capacity, SizeType nparams, SizeType nbins)
         : m_capacity(capacity),
           m_nparams(nparams),
-          m_nbins(nbins) {
+          m_nbins(nbins),
+          m_leaves_stride((nparams + 2) * 2),
+          m_combined_res_stride(2 * nbins),
+          m_backtrack_stride(nparams + 2) {
         m_param_sets =
             xt::xtensor<double, 3>({m_capacity, m_nparams + 2, 2}, 0.0);
         m_folds = xt::xtensor<FoldType, 3>({m_capacity, 2, m_nbins});
@@ -382,6 +385,19 @@ public:
         }
         auto effective_threshold = current_threshold;
 
+        std::span<double> m_param_sets_span(m_param_sets.data(),
+                                            m_param_sets.size());
+        std::span<FoldType> m_folds_span(m_folds.data(), m_folds.size());
+        std::span<SizeType> m_backtracks_span(m_backtracks.data(),
+                                              m_backtracks.size());
+        std::span<float> m_scores_span(m_scores.data(), m_scores.size());
+        std::span<const double> param_sets_batch_span(param_sets_batch.data(),
+                                                      param_sets_batch.size());
+        std::span<const FoldType> folds_batch_span(folds_batch.data(),
+                                                   folds_batch.size());
+        std::span<const SizeType> backtracks_batch_span(
+            backtracks_batch.data(), backtracks_batch.size());
+
         // Create initial mask for scores >= threshold
         std::vector<SizeType> pending_indices;
         pending_indices.reserve(slots_to_write);
@@ -421,16 +437,31 @@ public:
 
             // Batched assignment
             for (SizeType i = 0; i < n_to_add_now; ++i) {
-                const auto src_idx = pending_indices[i];
-                const auto dst_idx = m_write_head;
-
-                xt::view(m_param_sets, dst_idx, xt::all(), xt::all()) =
-                    xt::view(param_sets_batch, src_idx, xt::all(), xt::all());
-                xt::view(m_folds, dst_idx, xt::all(), xt::all()) =
-                    xt::view(folds_batch, src_idx, xt::all(), xt::all());
-                m_scores[dst_idx] = scores_batch[src_idx];
-                xt::view(m_backtracks, dst_idx, xt::all()) =
-                    xt::view(backtracks_batch, src_idx, xt::all());
+                const auto src_idx               = pending_indices[i];
+                const auto dst_idx               = m_write_head;
+                const SizeType leaves_src_offset = src_idx * m_leaves_stride;
+                const SizeType leaves_dst_offset = dst_idx * m_leaves_stride;
+                const SizeType combined_res_src_offset =
+                    src_idx * m_combined_res_stride;
+                const SizeType combined_res_dst_offset =
+                    dst_idx * m_combined_res_stride;
+                const SizeType backtrack_src_offset =
+                    src_idx * m_backtrack_stride;
+                const SizeType backtrack_dst_offset =
+                    dst_idx * m_backtrack_stride;
+                std::copy(param_sets_batch_span.begin() + leaves_src_offset,
+                          param_sets_batch_span.begin() + leaves_src_offset +
+                              m_leaves_stride,
+                          m_param_sets_span.begin() + leaves_dst_offset);
+                std::copy(folds_batch_span.begin() + combined_res_src_offset,
+                          folds_batch_span.begin() + combined_res_src_offset +
+                              m_combined_res_stride,
+                          m_folds_span.begin() + combined_res_dst_offset);
+                std::copy(backtracks_batch_span.begin() + backtrack_src_offset,
+                          backtracks_batch_span.begin() + backtrack_src_offset +
+                              m_backtrack_stride,
+                          m_backtracks_span.begin() + backtrack_dst_offset);
+                m_scores_span[dst_idx] = scores_batch[src_idx];
 
                 m_write_head = (m_write_head + 1) % m_capacity;
             }
@@ -611,6 +642,9 @@ private:
     SizeType m_capacity;
     SizeType m_nparams;
     SizeType m_nbins;
+    SizeType m_leaves_stride;
+    SizeType m_combined_res_stride;
+    SizeType m_backtrack_stride;
 
     // Circular buffer state
     SizeType m_head{0};     // Index of the first valid element

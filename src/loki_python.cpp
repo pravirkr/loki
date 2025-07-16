@@ -581,32 +581,5 @@ PYBIND11_MODULE(libloki, m) {
         },
         py::arg("batch_leaves"), py::arg("coord_add"), py::arg("coord_init"),
         py::arg("param_arr"), py::arg("fold_bins"), py::arg("n_leaves"));
-
-    m_taylor.def(
-        "poly_taylor_branch_batch",
-        [](const PyArrayT<double>& param_set_batch,
-           std::pair<double, double> coord_cur,
-           const PyArrayT<double>& batch_leaves, SizeType fold_bins,
-           double tol_bins, SizeType poly_order,
-           const std::vector<ParamLimitType>& param_limits,
-           SizeType branch_max) {
-            xt::xtensor<double, 3> param_set_batch_xt =
-                xt::adapt(param_set_batch.data(), param_set_batch.size(),
-                          xt::no_ownership(),
-                          std::vector<std::size_t>(param_set_batch.shape(),
-                                                   param_set_batch.shape() +
-                                                       param_set_batch.ndim()));
-            xt::xtensor<double, 3> batch_leaves_xt = xt::adapt(
-                batch_leaves.data(), batch_leaves.size(), xt::no_ownership(),
-                std::vector<std::size_t>(batch_leaves.shape(),
-                                         batch_leaves.shape() +
-                                             batch_leaves.ndim()));
-            return core::poly_taylor_branch_batch(
-                param_set_batch_xt, coord_cur, batch_leaves_xt, fold_bins,
-                tol_bins, poly_order, param_limits, branch_max);
-        },
-        py::arg("param_set_batch"), py::arg("coord_cur"),
-        py::arg("batch_leaves"), py::arg("fold_bins"), py::arg("tol_bins"),
-        py::arg("poly_order"), py::arg("param_limits"), py::arg("branch_max"));
 }
 } // namespace loki

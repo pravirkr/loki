@@ -29,10 +29,11 @@ public:
                  SizeType n_leaves) const
         -> std::tuple<std::vector<SizeType>, std::vector<double>>;
 
-    auto branch(const xt::xtensor<double, 3>& param_set_batch,
+    auto branch(std::span<const double> batch_psets,
                 std::pair<double, double> coord_cur,
-                xt::xtensor<double, 3>& batch_leaves) const
-        -> std::vector<SizeType>;
+                std::span<double> batch_leaves,
+                SizeType n_batch,
+                SizeType n_params) const -> std::vector<SizeType>;
 
     void suggest(std::span<const FoldType> fold_segment,
                  std::pair<double, double> coord_init,

@@ -13,9 +13,9 @@
 #include "loki/detection/score.hpp"
 #include "loki/exceptions.hpp"
 #include "loki/kernels.hpp"
+#include "loki/progress.hpp"
 #include "loki/search/configs.hpp"
 #include "loki/timing.hpp"
-#include "loki/utils.hpp"
 #include "loki/utils/fft.hpp"
 
 namespace loki::algorithms {
@@ -110,8 +110,8 @@ private:
         float* fold_result_ptr = fold.data();
 
         const auto levels = m_cfg.get_niters_ffa() + 1;
-        utils::ProgressGuard progress_guard(m_show_progress);
-        auto bar = utils::make_standard_bar("Computing FFA...");
+        progress::ProgressGuard progress_guard(m_show_progress);
+        auto bar = progress::make_standard_bar("Computing FFA...");
 
         for (SizeType i_level = 1; i_level < levels; ++i_level) {
             // Determine output buffer: final iteration writes to output buffer
@@ -157,8 +157,8 @@ private:
             current_out_ptr = fold_result_ptr;
         }
 
-        utils::ProgressGuard progress_guard(m_show_progress);
-        auto bar = utils::make_standard_bar("Computing FFA...");
+        progress::ProgressGuard progress_guard(m_show_progress);
+        auto bar = progress::make_standard_bar("Computing FFA...");
 
         for (SizeType i_level = 1; i_level < levels; ++i_level) {
             const bool is_last = i_level == levels - 1;
@@ -423,8 +423,8 @@ private:
         ComplexType* fold_result_ptr = fold_complex.data();
 
         const auto levels = m_cfg.get_niters_ffa() + 1;
-        utils::ProgressGuard progress_guard(m_show_progress);
-        auto bar = utils::make_standard_bar("Computing FFA...");
+        progress::ProgressGuard progress_guard(m_show_progress);
+        auto bar = progress::make_standard_bar("Computing FFA...");
 
         for (SizeType i_level = 1; i_level < levels; ++i_level) {
             // Determine output buffer: final iteration writes to output buffer
@@ -455,8 +455,8 @@ private:
         ComplexType* fold_out_ptr = m_fold_out.data();
 
         const auto levels = m_cfg.get_niters_ffa() + 1;
-        utils::ProgressGuard progress_guard(m_show_progress);
-        auto bar = utils::make_standard_bar("Computing FFA...");
+        progress::ProgressGuard progress_guard(m_show_progress);
+        auto bar = progress::make_standard_bar("Computing FFA...");
 
         for (SizeType i_level = 1; i_level < levels; ++i_level) {
             // Always ping-pong between internal buffers
@@ -504,8 +504,8 @@ private:
         // Initialize the current buffer
         initialize(ts_e, ts_v, current_in_ptr, current_out_ptr);
 
-        utils::ProgressGuard progress_guard(m_show_progress);
-        auto bar = utils::make_standard_bar("Computing FFA...");
+        progress::ProgressGuard progress_guard(m_show_progress);
+        auto bar = progress::make_standard_bar("Computing FFA...");
 
         for (SizeType i_level = 1; i_level < levels; ++i_level) {
             const bool is_last = i_level == levels - 1;

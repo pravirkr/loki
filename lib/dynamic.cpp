@@ -62,19 +62,22 @@ auto PruneTaylorDPFuncts<FoldType>::resolve(
                                               coord_init, m_param_arr,
                                               m_cfg.get_nbins(), n_leaves);
     }
-    return poly_taylor_resolve_batch(batch_leaves, coord_add, coord_init,
-                                     m_param_arr, m_cfg.get_nbins(), n_leaves);
+    return poly_taylor_resolve_batch_flat(batch_leaves, coord_add, coord_init,
+                                          m_param_arr, m_cfg.get_nbins(),
+                                          n_leaves);
 }
 
 template <typename FoldType>
-auto PruneTaylorDPFuncts<FoldType>::branch(
-    const xt::xtensor<double, 3>& param_set_batch,
-    std::pair<double, double> coord_cur,
-    xt::xtensor<double, 3>& batch_leaves) const -> std::vector<SizeType> {
+auto PruneTaylorDPFuncts<FoldType>::branch(std::span<const double> batch_psets,
+                                           std::pair<double, double> coord_cur,
+                                           std::span<double> batch_leaves,
+                                           SizeType n_batch,
+                                           SizeType n_params) const
+    -> std::vector<SizeType> {
 
-    return poly_taylor_branch_batch(
-        param_set_batch, coord_cur, batch_leaves, m_cfg.get_nbins(),
-        m_cfg.get_tol_bins(), m_cfg.get_prune_poly_order(),
+    return poly_taylor_branch_batch_flat(
+        batch_psets, coord_cur, batch_leaves, n_batch, n_params,
+        m_cfg.get_nbins(), m_cfg.get_tol_bins(), m_cfg.get_prune_poly_order(),
         m_cfg.get_param_limits(), m_cfg.get_branch_max());
 }
 

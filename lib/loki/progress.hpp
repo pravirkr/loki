@@ -3,15 +3,17 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <cmath>
 #include <iomanip>
 #include <iostream>
 #include <map>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
+#include <indicators/cursor_control.hpp>
+#include <indicators/progress_bar.hpp>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
 
@@ -342,6 +344,44 @@ private:
         return 80;
 #endif
     }
+};
+
+// Factory function for a standard ProgressBar
+inline indicators::ProgressBar make_standard_bar(std::string_view prefix) {
+    return indicators::ProgressBar{
+        indicators::option::BarWidth{50},
+        indicators::option::Start{" "},
+        indicators::option::Fill{"\u2501"},
+        indicators::option::Lead{"\u2501"},
+        indicators::option::Remainder{" "},
+        indicators::option::End{" "},
+        indicators::option::ForegroundColor{indicators::Color::red},
+        indicators::option::PrefixText{prefix},
+        indicators::option::ShowPercentage{true},
+        indicators::option::ShowElapsedTime{true},
+        indicators::option::ShowRemainingTime{true},
+        indicators::option::Stream{std::cerr}};
+}
+
+class ProgressGuard {
+    bool m_show;
+    // This class is used to hide the console cursor during progress bar updates
+    // and restore it after the progress bar is done.
+public:
+    explicit ProgressGuard(bool show) : m_show(show) {
+        if (m_show) {
+            indicators::show_console_cursor(false);
+        }
+    }
+    ~ProgressGuard() {
+        if (m_show) {
+            indicators::show_console_cursor(true);
+        }
+    }
+    ProgressGuard(const ProgressGuard&)            = delete;
+    ProgressGuard& operator=(const ProgressGuard&) = delete;
+    ProgressGuard(ProgressGuard&&)                 = delete;
+    ProgressGuard& operator=(ProgressGuard&&)      = delete;
 };
 
 } // namespace loki::progress

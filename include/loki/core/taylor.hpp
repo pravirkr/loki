@@ -29,6 +29,14 @@ poly_taylor_resolve_batch(const xt::xtensor<double, 3>& batch_leaves,
                           SizeType n_leaves);
 
 std::tuple<std::vector<SizeType>, std::vector<double>>
+poly_taylor_resolve_batch_flat(const xt::xtensor<double, 3>& batch_leaves,
+                               std::pair<double, double> coord_add,
+                               std::pair<double, double> coord_init,
+                               std::span<const std::vector<double>> param_arr,
+                               SizeType fold_bins,
+                               SizeType n_leaves);
+
+std::tuple<std::vector<SizeType>, std::vector<double>>
 poly_taylor_resolve_snap_batch(const xt::xtensor<double, 3>& batch_leaves,
                                std::pair<double, double> coord_add,
                                std::pair<double, double> coord_init,
@@ -45,6 +53,18 @@ poly_taylor_branch_batch(const xt::xtensor<double, 3>& param_set_batch,
                          SizeType poly_order,
                          const std::vector<ParamLimitType>& param_limits,
                          SizeType branch_max = 16U);
+
+std::vector<SizeType>
+poly_taylor_branch_batch_flat(std::span<const double> batch_psets,
+                              std::pair<double, double> coord_cur,
+                              std::span<double> batch_leaves,
+                              SizeType n_batch,
+                              SizeType n_params,
+                              SizeType fold_bins,
+                              double tol_bins,
+                              SizeType poly_order,
+                              const std::vector<ParamLimitType>& param_limits,
+                              SizeType branch_max = 16U);
 
 template <typename FoldType>
 void poly_taylor_suggest(

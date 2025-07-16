@@ -16,7 +16,6 @@
 #include "loki/progress.hpp"
 #include "loki/psr_utils.hpp"
 #include "loki/timing.hpp"
-#include "loki/utils.hpp"
 #include "loki/utils/suggestions.hpp"
 
 namespace loki::algorithms {
@@ -272,7 +271,13 @@ template <typename FoldType> struct IterationWorkspace {
     xt::xtensor<SizeType, 2> batch_backtrack;
     std::vector<float> batch_scores;
     std::vector<SizeType> batch_isuggest;
+    std::vector<SizeType> batch_passing_indices;
+
     SizeType max_batch_size;
+    SizeType nparams;
+    SizeType leaves_stride;
+    SizeType combined_res_stride;
+    SizeType backtrack_stride;
 
     IterationWorkspace(SizeType max_batch_size,
                        SizeType nparams,
@@ -282,14 +287,93 @@ template <typename FoldType> struct IterationWorkspace {
           batch_backtrack({max_batch_size, nparams + 2}),
           batch_scores(max_batch_size),
           batch_isuggest(max_batch_size),
-          max_batch_size(max_batch_size) {}
+          batch_passing_indices(max_batch_size),
+          max_batch_size(max_batch_size),
+          nparams(nparams),
+          leaves_stride((nparams + 2) * 2),
+          combined_res_stride(2 * nbins),
+          backtrack_stride(nparams + 2) {}
+
+    // Call this after filling batch_scores and batch_passing_indices
+    void filter_batch(SizeType num_passing,
+                      std::span<const SizeType> batch_param_idx,
+                      std::span<const double> batch_phase_shift) {
+        std::span<double> batch_leaves_span(batch_leaves.data(),
+                                            batch_leaves.size());
+        std::span<FoldType> batch_combined_res_span(batch_combined_res.data(),
+                                                    batch_combined_res.size());
+        std::span<SizeType> batch_backtrack_span(batch_backtrack.data(),
+                                                 batch_backtrack.size());
+        std::span<float> batch_scores_span(batch_scores.data(),
+                                           batch_scores.size());
+        std::span<SizeType> batch_isuggest_span(batch_isuggest.data(),
+                                                batch_isuggest.size());
+        std::span<SizeType> batch_passing_indices_span(
+            batch_passing_indices.data(), batch_passing_indices.size());
+
+        for (SizeType dst_idx = 0; dst_idx < num_passing; ++dst_idx) {
+            const SizeType src_idx     = batch_passing_indices_span[dst_idx];
+            batch_scores_span[dst_idx] = batch_scores_span[src_idx];
+            const SizeType leaves_src_offset = src_idx * leaves_stride;
+            const SizeType leaves_dst_offset = dst_idx * leaves_stride;
+            std::copy(batch_leaves_span.begin() + leaves_src_offset,
+                      batch_leaves_span.begin() + leaves_src_offset +
+                          leaves_stride,
+                      batch_leaves_span.begin() + leaves_dst_offset);
+            const SizeType combined_src_offset = src_idx * combined_res_stride;
+            const SizeType combined_dst_offset = dst_idx * combined_res_stride;
+            std::copy(batch_combined_res_span.begin() + combined_src_offset,
+                      batch_combined_res_span.begin() + combined_src_offset +
+                          combined_res_stride,
+                      batch_combined_res_span.begin() + combined_dst_offset);
+            const SizeType backtrack_offset = dst_idx * backtrack_stride;
+            batch_backtrack_span[backtrack_offset + 0] =
+                batch_isuggest_span[src_idx];
+            batch_backtrack_span[backtrack_offset + 1] =
+                batch_param_idx[src_idx];
+
+            // Vectorized zero-fill for middle elements
+            std::fill(batch_backtrack_span.begin() + backtrack_offset + 2,
+                      batch_backtrack_span.begin() + backtrack_offset + 2 +
+                          (nparams - 1),
+                      SizeType{0});
+
+            batch_backtrack_span[backtrack_offset + nparams + 1] =
+                static_cast<SizeType>(std::round(batch_phase_shift[src_idx]));
+        }
+    }
+
+    void filter_batch_backtrack(SizeType num_passing,
+                                std::span<const SizeType> batch_param_idx,
+                                std::span<const double> batch_phase_shift) {
+        std::span<SizeType> batch_backtrack_span(batch_backtrack.data(),
+                                                 batch_backtrack.size());
+        std::span<SizeType> batch_isuggest_span(batch_isuggest.data(),
+                                                batch_isuggest.size());
+
+        for (SizeType i = 0; i < num_passing; ++i) {
+            const SizeType backtrack_offset            = i * backtrack_stride;
+            batch_backtrack_span[backtrack_offset + 0] = batch_isuggest_span[i];
+            batch_backtrack_span[backtrack_offset + 1] = batch_param_idx[i];
+
+            // Vectorized zero-fill
+            std::fill(batch_backtrack_span.begin() + backtrack_offset + 2,
+                      batch_backtrack_span.begin() + backtrack_offset + 2 +
+                          (nparams - 1),
+                      SizeType{0});
+
+            batch_backtrack_span[backtrack_offset + nparams + 1] =
+                static_cast<SizeType>(std::round(batch_phase_shift[i]));
+        }
+    }
 
     SizeType get_memory_usage() const noexcept {
         return (batch_leaves.size() * sizeof(double)) +
                (batch_combined_res.size() * sizeof(FoldType)) +
                (batch_backtrack.size() * sizeof(SizeType)) +
                (batch_scores.size() * sizeof(float)) +
-               (batch_isuggest.size() * sizeof(SizeType));
+               (batch_isuggest.size() * sizeof(SizeType)) +
+               (batch_passing_indices.size() * sizeof(SizeType));
     }
 };
 
@@ -312,8 +396,7 @@ public:
             m_max_sugg, m_cfg.get_nparams(), m_cfg.get_nbins());
 
         // Allocate iteration workspace
-        const auto max_branch_factor = 12;
-        const auto max_batch_size    = m_batch_size * max_branch_factor;
+        const auto max_batch_size = m_batch_size * m_cfg.get_branch_max();
         m_iteration_workspace = std::make_unique<IterationWorkspace<FoldType>>(
             max_batch_size, m_cfg.get_nparams(), m_cfg.get_nbins());
 
@@ -350,8 +433,8 @@ public:
         initialize(ffa_fold, ref_seg, actual_log_file);
 
         const auto nsegments = m_ffa_plan.nsegments.back();
-        utils::ProgressGuard progress_guard(true);
-        auto bar = utils::make_standard_bar("Pruning...");
+        progress::ProgressGuard progress_guard(true);
+        auto bar = progress::make_standard_bar("Pruning...");
 
         for (SizeType iter = 0; iter < nsegments - 1; ++iter) {
             execute_iteration(ffa_fold, actual_log_file);
@@ -531,7 +614,7 @@ private:
         const bool validation_check = false;
 
         const auto n_branches = m_suggestions->get_nsugg_old();
-        const auto nparams    = m_cfg.get_nparams();
+        const auto n_params   = m_cfg.get_nparams();
         const auto batch_size =
             std::max(1UL, std::min(m_batch_size, n_branches));
 
@@ -542,14 +625,20 @@ private:
              i_batch_start += batch_size) {
             const auto i_batch_end =
                 std::min(i_batch_start + batch_size, n_branches);
+            const auto current_batch_size = i_batch_end - i_batch_start;
 
             // Branch
             timer.start();
-            const auto param_batch = xt::view(
-                m_suggestions->get_param_sets(),
-                xt::range(i_batch_start, i_batch_end), xt::all(), xt::all());
+            std::span<const double> batch_psets_span(
+                m_suggestions->get_param_sets().data() +
+                    (i_batch_start * ((n_params + 2) * 2)),
+                current_batch_size * ((n_params + 2) * 2));
+            std::span<double> batch_leaves_span(
+                m_iteration_workspace->batch_leaves.data(),
+                m_iteration_workspace->batch_leaves.size());
             const auto batch_leaf_origins = m_prune_funcs->branch(
-                param_batch, coord_cur, m_iteration_workspace->batch_leaves);
+                batch_psets_span, coord_cur, batch_leaves_span,
+                current_batch_size, n_params);
             const auto n_leaves_batch = batch_leaf_origins.size();
             stats.batch_timers["branch"] += timer.stop();
             stats.n_leaves += n_leaves_batch;
@@ -616,38 +705,20 @@ private:
             stats.score_max = std::max(stats.score_max, *max_it);
             stats.batch_timers["score"] += timer.stop();
 
-            // Thresholding & filtering
+            // Thresholding & filtering (direct memory operations)
             timer.start();
+            auto batch_passing_indices_span =
+                std::span(m_iteration_workspace->batch_passing_indices)
+                    .first(n_leaves_after_validation);
             SizeType num_passing = 0;
             for (SizeType i = 0; i < n_leaves_after_validation; ++i) {
                 if (batch_scores_span[i] >= threshold) {
-                    // Filter in-place
-                    batch_scores_span[num_passing] = batch_scores_span[i];
-                    xt::view(m_iteration_workspace->batch_leaves, num_passing,
-                             xt::all(), xt::all()) =
-                        xt::view(m_iteration_workspace->batch_leaves, i,
-                                 xt::all(), xt::all());
-                    xt::view(m_iteration_workspace->batch_combined_res,
-                             num_passing, xt::all(), xt::all()) =
-                        xt::view(m_iteration_workspace->batch_combined_res, i,
-                                 xt::all(), xt::all());
-                    // Construct backtrack
-                    m_iteration_workspace->batch_backtrack(num_passing, 0) =
-                        batch_isuggest_span[i];
-                    m_iteration_workspace->batch_backtrack(num_passing, 1) =
-                        batch_param_idx[i];
-                    for (SizeType j = 2; j < nparams + 1; ++j) {
-                        m_iteration_workspace->batch_backtrack(num_passing, j) =
-                            0;
-                    }
-                    m_iteration_workspace->batch_backtrack(num_passing,
-                                                           nparams + 1) =
-                        static_cast<SizeType>(std::round(batch_phase_shift[i]));
-
+                    batch_passing_indices_span[num_passing] = i;
                     ++num_passing;
                 }
             }
             stats.batch_timers["filter"] += timer.stop();
+
             if (num_passing == 0) {
                 m_suggestions->advance_read_consumed(i_batch_end -
                                                      i_batch_start);
@@ -658,6 +729,17 @@ private:
                     "num_passing={} > max_batch_size={}", num_passing,
                     m_iteration_workspace->max_batch_size));
             }
+
+            timer.start();
+            if (num_passing != n_leaves_after_validation) {
+                m_iteration_workspace->filter_batch(
+                    num_passing, batch_param_idx, batch_phase_shift);
+            } else {
+                // Only construct backtrack
+                m_iteration_workspace->filter_batch_backtrack(
+                    num_passing, batch_param_idx, batch_phase_shift);
+            }
+            stats.batch_timers["filter"] += timer.stop();
 
             // Transform
             timer.start();
