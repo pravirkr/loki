@@ -4,8 +4,6 @@
 #include <tuple>
 #include <vector>
 
-#include <xtensor/containers/xtensor.hpp>
-
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
 #include "loki/utils/suggestions.hpp"
@@ -23,10 +21,11 @@ public:
     auto load(std::span<const FoldType> ffa_fold, SizeType seg_idx) const
         -> std::span<const FoldType>;
 
-    auto resolve(const xt::xtensor<double, 3>& batch_leaves,
+    auto resolve(std::span<const double> batch_leaves,
                  std::pair<double, double> coord_add,
                  std::pair<double, double> coord_init,
-                 SizeType n_leaves) const
+                 SizeType n_leaves,
+                 SizeType n_params) const
         -> std::tuple<std::vector<SizeType>, std::vector<double>>;
 
     auto branch(std::span<const double> batch_psets,
@@ -39,36 +38,41 @@ public:
                  std::pair<double, double> coord_init,
                  utils::SuggestionStruct<FoldType>& sugg_struct) const;
 
-    void score(xt::xtensor<FoldType, 3>& combined_res_batch,
-               std::span<float> out) const;
+    void score(std::span<const FoldType> batch_folds,
+               std::span<float> batch_scores,
+               SizeType n_batch) const noexcept;
 
-    auto pack(const xt::xtensor<FoldType, 2>& data) const
-        -> xt::xtensor<FoldType, 1>;
+    void pack(std::span<const FoldType> data,
+              std::span<FoldType> out) const noexcept;
 
-    void load_shift_add(const xt::xtensor<FoldType, 3>& folds,
+    void load_shift_add(std::span<const FoldType> batch_folds_suggest,
                         std::span<const SizeType> batch_isuggest,
                         std::span<const FoldType> ffa_fold_segment,
                         std::span<const SizeType> batch_param_idx,
                         std::span<const double> batch_shift,
-                        xt::xtensor<FoldType, 3>& out);
+                        std::span<FoldType> batch_folds_out,
+                        SizeType n_batch) noexcept;
 
-    void transform(xt::xtensor<double, 3>& batch_leaves,
+    void transform(std::span<const double> batch_leaves,
                    std::pair<double, double> coord_cur,
-                   const xt::xtensor<double, 2>& trans_matrix) const;
+                   std::span<const double> trans_matrix,
+                   SizeType n_leaves,
+                   SizeType n_params) const;
 
     auto get_transform_matrix(std::pair<double, double> coord_cur,
                               std::pair<double, double> coord_prev) const
-        -> xt::xtensor<double, 2>;
+        -> std::vector<double>;
 
-    auto validate(const xt::xtensor<double, 3>& batch_leaves,
-                  std::pair<double, double> coord_valid,
-                  const std::tuple<xt::xtensor<double, 1>,
-                                   xt::xtensor<double, 1>,
-                                   double>& validation_params,
-                  SizeType n_leaves) const -> SizeType;
+    auto
+    validate(std::span<const double> batch_leaves,
+             std::pair<double, double> coord_valid,
+             const std::tuple<std::vector<double>, std::vector<double>, double>&
+                 validation_params,
+             SizeType n_leaves,
+             SizeType n_params) const -> SizeType;
 
     auto get_validation_params(std::pair<double, double> coord_add) const
-        -> std::tuple<xt::xtensor<double, 1>, xt::xtensor<double, 1>, double>;
+        -> std::tuple<std::vector<double>, std::vector<double>, double>;
 
 private:
     std::vector<std::vector<double>> m_param_arr;

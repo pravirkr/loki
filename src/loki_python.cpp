@@ -11,9 +11,6 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
-#include <xtensor/containers/xadapt.hpp>
-#include <xtensor/containers/xtensor.hpp>
-
 #include "loki/loki.hpp"
 #include "loki/psr_utils.hpp"
 
@@ -555,31 +552,5 @@ PYBIND11_MODULE(libloki, m) {
             },
             py::arg("ffa_fold"), py::arg("ref_seg"), py::arg("outdir"),
             py::arg("file_prefix"), py::arg("kind"));
-
-    auto m_taylor = m.def_submodule("taylor", "Taylor submodule");
-    m_taylor.def(
-        "poly_taylor_resolve_batch",
-        [](const PyArrayT<double>& batch_leaves,
-           std::pair<double, double> coord_add,
-           std::pair<double, double> coord_init,
-           const std::vector<PyArrayT<double>>& param_arr, SizeType fold_bins,
-           SizeType n_leaves) {
-            std::vector<std::vector<double>> param_vecs;
-            param_vecs.reserve(param_arr.size());
-            for (const auto& arr : param_arr) {
-                param_vecs.emplace_back(arr.data(), arr.data() + arr.size());
-            }
-            std::span<const std::vector<double>> param_span(param_vecs);
-            xt::xtensor<double, 3> batch_leaves_xt = xt::adapt(
-                batch_leaves.data(), batch_leaves.size(), xt::no_ownership(),
-                std::vector<std::size_t>(batch_leaves.shape(),
-                                         batch_leaves.shape() +
-                                             batch_leaves.ndim()));
-            return core::poly_taylor_resolve_batch(batch_leaves_xt, coord_add,
-                                                   coord_init, param_span,
-                                                   fold_bins, n_leaves);
-        },
-        py::arg("batch_leaves"), py::arg("coord_add"), py::arg("coord_init"),
-        py::arg("param_arr"), py::arg("fold_bins"), py::arg("n_leaves"));
 }
 } // namespace loki

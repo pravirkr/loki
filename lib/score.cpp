@@ -408,31 +408,26 @@ void snr_boxcar_3d_max(std::span<const float> arr,
     }
 }
 
-void snr_boxcar_batch(xt::xtensor<float, 3>& folds,
+void snr_boxcar_batch(std::span<const float> batch_folds,
                       std::span<const SizeType> widths,
-                      std::span<float> out) {
-    // Always use out span to get the correct batch size
-    const auto nbatch              = out.size();
-    const auto folds_size_relevant = nbatch * folds.shape(1) * folds.shape(2);
-    snr_boxcar_3d_max(std::span<const float>(folds.data(), folds_size_relevant),
-                      nbatch, widths, out, 1);
+                      std::span<float> batch_scores,
+                      SizeType n_batch) {
+    snr_boxcar_3d_max(batch_folds, n_batch, widths, batch_scores, 1);
 }
 
-void snr_boxcar_batch_complex(xt::xtensor<ComplexType, 3>& folds,
+void snr_boxcar_batch_complex(std::span<const ComplexType> batch_folds,
                               std::span<const SizeType> widths,
-                              std::span<float> out) {
+                              std::span<float> batch_scores,
+                              SizeType n_batch) {
     // Always use out span to get the correct batch size
-    const auto nbatch              = out.size();
-    const auto nbins_f             = folds.shape(2);
-    const auto nbins               = 2 * (nbins_f - 1);
-    const auto folds_size_relevant = nbatch * folds.shape(1) * nbins_f;
+    const auto nbins_f = batch_folds.size() / (2 * n_batch);
+    const auto nbins   = 2 * (nbins_f - 1);
 
-    xt::xtensor<float, 3> folds_t({nbatch, folds.shape(1), nbins}, 0.0F);
-    std::span<ComplexType> folds_span(folds.data(), folds_size_relevant);
-    std::span<float> folds_t_span(folds_t.data(), folds_t.size());
-    utils::irfft_batch(folds_span, folds_t_span, static_cast<int>(nbatch),
+    std::vector<float> folds_t(n_batch * 2 * nbins, 0.0F);
+    std::vector<ComplexType> folds_span(batch_folds.begin(), batch_folds.end());
+    utils::irfft_batch(folds_span, folds_t, static_cast<int>(n_batch),
                        static_cast<int>(nbins), 1);
-    snr_boxcar_batch(folds_t, widths, out);
+    snr_boxcar_batch(folds_t, widths, batch_scores, n_batch);
 }
 
 } // namespace loki::detection

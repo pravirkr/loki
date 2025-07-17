@@ -15,7 +15,6 @@
 
 #include <hdf5.h>
 #include <highfive/highfive.hpp>
-#include <xtensor/containers/xtensor.hpp>
 
 #include "loki/common/types.hpp"
 
@@ -320,8 +319,9 @@ public:
 
     void write_run_results(const std::string& run_name,
                            const std::vector<SizeType>& scheme,
-                           const xt::xtensor<double, 3>& param_sets,
+                           const std::vector<double>& param_sets,
                            const std::vector<float>& scores,
+                           SizeType n_param_sets,
                            const PruneStatsCollection& pstats) {
         if (m_runs_group->exist(run_name)) {
             throw std::runtime_error(
@@ -330,20 +330,14 @@ public:
         HighFive::Group run_group       = m_runs_group->createGroup(run_name);
         auto [level_stats, timer_stats] = pstats.get_packed_data();
 
-        // Create std::vector from xtensor data with shape
-        const auto& shape = param_sets.shape();
-        std::vector<SizeType> tensor_shape(shape.begin(), shape.end());
-        std::vector<double> tensor_data(param_sets.data(),
-                                        param_sets.data() + param_sets.size());
         HighFive::DataSetCreateProps props;
-        const hsize_t chunk_size = static_cast<hsize_t>(
-            std::min<hsize_t>(1024, static_cast<hsize_t>(param_sets.shape(0))));
+        const auto chunk_size =
+            static_cast<hsize_t>(std::min(1024UL, n_param_sets));
         props.add(HighFive::Chunking(std::vector<hsize_t>{chunk_size}));
         props.add(HighFive::Deflate(9));
-        run_group.createDataSet("param_sets_data", tensor_data, props);
+        run_group.createDataSet("param_sets", param_sets, props);
 
         run_group.createDataSet("scheme", scheme);
-        run_group.createDataSet("param_sets_shape", tensor_shape);
         run_group.createDataSet("scores", scores);
         if (!level_stats.empty()) {
             run_group.createDataSet("level_stats", level_stats);

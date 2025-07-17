@@ -28,8 +28,9 @@
 #include "loki/cuda_utils.cuh"
 #include "loki/detection/scheme.hpp"
 #include "loki/detection/score.hpp"
-#include "loki/simulation/simulation.hpp"
 #include "loki/progress.hpp"
+#include "loki/simulation/simulation.hpp"
+#include "loki/utils.hpp"
 
 namespace loki::detection {
 
@@ -625,7 +626,8 @@ update_states_kernel(const TransitionResult* results,
     const float current_complexity = states_out_ptr[state_idx].complexity_cumul;
     const float new_complexity     = result.computed_state.complexity_cumul;
 
-    if (states_out_ptr[state_idx].is_empty || new_complexity < current_complexity) {
+    if (states_out_ptr[state_idx].is_empty ||
+        new_complexity < current_complexity) {
         // Our new state is better, so update everything.
         states_out_ptr[state_idx] = result.computed_state;
         folds_out_ptr[fold_idx]   = result.folds_out;
@@ -677,7 +679,8 @@ struct CountValidWorkItems {
             count++;
         }
         if (count == 0) {
-            printf("Count is 0 for pair (%zu, %zu)\n", pair.ithres, pair.jthresh);
+            printf("Count is 0 for pair (%zu, %zu)\n", pair.ithres,
+                   pair.jthresh);
         }
         return {.pair = pair, .count = count};
     }
@@ -1084,7 +1087,9 @@ public:
             run_segment(istage, thres_neigh, allocator);
             m_device_manager->swap_pools();
             std::swap(m_folds_current_d, m_folds_next_d);
-            spdlog::info("After swap for stage {}, checking folds_current_d validity", istage);
+            spdlog::info(
+                "After swap for stage {}, checking folds_current_d validity",
+                istage);
             // Deallocate using thrust
             thrust::for_each(thrust::device, m_folds_next_d.begin(),
                              m_folds_next_d.end(),

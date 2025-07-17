@@ -3,8 +3,7 @@
 #include <array>
 #include <complex>
 #include <cstddef>
-
-#include <xtensor/containers/xtensor.hpp>
+#include <type_traits>
 
 #ifdef LOKI_ENABLE_CUDA
 #include <cuda/std/complex>
@@ -15,12 +14,22 @@
 
 namespace loki {
 
-using SizeType        = std::size_t;
-using IndexType       = std::ptrdiff_t;
-using ComplexType     = std::complex<float>;
-using ParamLimitType  = std::array<double, 2>;
-using SuggestionTypeF = xt::xtensor<float, 3>;
-using SuggestionTypeD = xt::xtensor<double, 3>;
+using SizeType       = std::size_t;
+using IndexType      = std::ptrdiff_t;
+using ComplexType    = std::complex<float>;
+using ParamLimitType = std::array<double, 2>;
+
+template <typename T>
+concept SupportedFoldType =
+    std::is_same_v<T, float> || std::is_same_v<T, ComplexType>;
+
+template <SupportedFoldType FoldType> constexpr FoldType default_fold_value() {
+    if constexpr (std::is_same_v<FoldType, std::complex<float>>) {
+        return FoldType{0.0F, 0.0F};
+    } else {
+        return FoldType{};
+    }
+}
 
 #ifdef LOKI_ENABLE_CUDA
 using ComplexTypeCUDA = cuda::std::complex<float>;

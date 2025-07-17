@@ -4,10 +4,7 @@
 #include <span>
 #include <utility>
 
-#include <xtensor/containers/xadapt.hpp>
-#include <xtensor/containers/xtensor.hpp>
-#include <xtensor/views/xview.hpp>
-
+#include "loki/common/types.hpp"
 #include "loki/core/taylor.hpp"
 #include "loki/detection/score.hpp"
 #include "loki/kernels.hpp"
@@ -52,19 +49,20 @@ auto PruneTaylorDPFuncts<FoldType>::load(std::span<const FoldType> ffa_fold,
 
 template <typename FoldType>
 auto PruneTaylorDPFuncts<FoldType>::resolve(
-    const xt::xtensor<double, 3>& batch_leaves,
+    std::span<const double> batch_leaves,
     std::pair<double, double> coord_add,
     std::pair<double, double> coord_init,
-    SizeType n_leaves) const
+    SizeType n_leaves,
+    SizeType n_params) const
     -> std::tuple<std::vector<SizeType>, std::vector<double>> {
     if (m_cfg.get_prune_poly_order() == 4) {
-        return poly_taylor_resolve_snap_batch(batch_leaves, coord_add,
-                                              coord_init, m_param_arr,
-                                              m_cfg.get_nbins(), n_leaves);
+        return poly_taylor_resolve_snap_batch(
+            batch_leaves, coord_add, coord_init, m_param_arr, m_cfg.get_nbins(),
+            n_leaves, n_params);
     }
-    return poly_taylor_resolve_batch_flat(batch_leaves, coord_add, coord_init,
-                                          m_param_arr, m_cfg.get_nbins(),
-                                          n_leaves);
+    return poly_taylor_resolve_batch(batch_leaves, coord_add, coord_init,
+                                     m_param_arr, m_cfg.get_nbins(), n_leaves,
+                                     n_params);
 }
 
 template <typename FoldType>
@@ -75,7 +73,7 @@ auto PruneTaylorDPFuncts<FoldType>::branch(std::span<const double> batch_psets,
                                            SizeType n_params) const
     -> std::vector<SizeType> {
 
-    return poly_taylor_branch_batch_flat(
+    return poly_taylor_branch_batch(
         batch_psets, coord_cur, batch_leaves, n_batch, n_params,
         m_cfg.get_nbins(), m_cfg.get_tol_bins(), m_cfg.get_prune_poly_order(),
         m_cfg.get_param_limits(), m_cfg.get_branch_max());
@@ -90,16 +88,16 @@ void PruneTaylorDPFuncts<FoldType>::suggest(
     // Create scoring function based on FoldType
     detection::ScoringFunction<FoldType> scoring_func;
     if constexpr (std::is_same_v<FoldType, ComplexType>) {
-        scoring_func = [](xt::xtensor<FoldType, 3>& folds,
+        scoring_func = [](std::span<const FoldType> folds,
                           std::span<const SizeType> widths,
-                          std::span<float> out) {
-            detection::snr_boxcar_batch_complex(folds, widths, out);
+                          std::span<float> out, SizeType n_batch) {
+            detection::snr_boxcar_batch_complex(folds, widths, out, n_batch);
         };
     } else {
-        scoring_func = [](xt::xtensor<FoldType, 3>& folds,
+        scoring_func = [](std::span<const FoldType> folds,
                           std::span<const SizeType> widths,
-                          std::span<float> out) {
-            detection::snr_boxcar_batch(folds, widths, out);
+                          std::span<float> out, SizeType n_batch) {
+            detection::snr_boxcar_batch(folds, widths, out, n_batch);
         };
     }
 
@@ -110,32 +108,33 @@ void PruneTaylorDPFuncts<FoldType>::suggest(
 }
 
 template <typename FoldType>
-void PruneTaylorDPFuncts<FoldType>::score(
-    xt::xtensor<FoldType, 3>& combined_res_batch, std::span<float> out) const {
+void PruneTaylorDPFuncts<FoldType>::score(std::span<const FoldType> batch_folds,
+                                          std::span<float> batch_scores,
+                                          SizeType n_batch) const noexcept {
     if constexpr (std::is_same_v<FoldType, ComplexType>) {
-        detection::snr_boxcar_batch_complex(combined_res_batch,
-                                            m_cfg.get_score_widths(), out);
+        detection::snr_boxcar_batch_complex(
+            batch_folds, m_cfg.get_score_widths(), batch_scores, n_batch);
     } else {
-        detection::snr_boxcar_batch(combined_res_batch,
-                                    m_cfg.get_score_widths(), out);
+        detection::snr_boxcar_batch(batch_folds, m_cfg.get_score_widths(),
+                                    batch_scores, n_batch);
     }
 }
 
 template <typename FoldType>
 void PruneTaylorDPFuncts<FoldType>::load_shift_add(
-    const xt::xtensor<FoldType, 3>& folds,
+    std::span<const FoldType> batch_folds_suggest,
     std::span<const SizeType> batch_isuggest,
     std::span<const FoldType> ffa_fold_segment,
     std::span<const SizeType> batch_param_idx,
     std::span<const double> batch_shift,
-    xt::xtensor<FoldType, 3>& out) {
-    // Use one of the spans to get the correct batch size
-    const auto n_batch = batch_isuggest.size();
+    std::span<FoldType> batch_folds_out,
+    SizeType n_batch) noexcept {
     if constexpr (std::is_same_v<FoldType, ComplexType>) {
         kernels::shift_add_complex_recurrence_batch(
-            folds.data(), batch_isuggest.data(), ffa_fold_segment.data(),
-            batch_param_idx.data(), batch_shift.data(), out.data(),
-            m_cfg.get_nbins_f(), m_cfg.get_nbins(), n_batch);
+            batch_folds_suggest.data(), batch_isuggest.data(),
+            ffa_fold_segment.data(), batch_param_idx.data(), batch_shift.data(),
+            batch_folds_out.data(), m_cfg.get_nbins_f(), m_cfg.get_nbins(),
+            n_batch);
     } else {
         // Float version: round shifts to integers properly wrapped
         std::vector<SizeType> batch_shift_rounded(batch_shift.size());
@@ -151,48 +150,52 @@ void PruneTaylorDPFuncts<FoldType>::load_shift_add(
             });
 
         kernels::shift_add_buffer_batch(
-            folds.data(), batch_isuggest.data(), ffa_fold_segment.data(),
-            batch_param_idx.data(), batch_shift_rounded.data(), out.data(),
+            batch_folds_suggest.data(), batch_isuggest.data(),
+            ffa_fold_segment.data(), batch_param_idx.data(),
+            batch_shift_rounded.data(), batch_folds_out.data(),
             m_shift_buffer.data(), m_cfg.get_nbins(), n_batch);
     }
 }
 
 template <typename FoldType>
-auto PruneTaylorDPFuncts<FoldType>::pack(
-    const xt::xtensor<FoldType, 2>& data) const -> xt::xtensor<FoldType, 1> {
-    // Simple flattening - equivalent to Python's pack function
-    return xt::flatten(data);
+void PruneTaylorDPFuncts<FoldType>::pack(
+    std::span<const FoldType> data, std::span<FoldType> out) const noexcept {
+    // Placeholder for future implementation
+    std::copy(data.begin(), data.end(), out.begin());
 }
 
 template <typename FoldType>
 void PruneTaylorDPFuncts<FoldType>::transform(
-    xt::xtensor<double, 3>& /*batch_leaves*/,
+    std::span<const double> /*batch_leaves*/,
     std::pair<double, double> /*coord_cur*/,
-    const xt::xtensor<double, 2>& /*trans_matrix*/) const {
+    std::span<const double> /*trans_matrix*/,
+    SizeType /*n_leaves*/,
+    SizeType /*n_params*/) const {
     // Taylor variant doesn't transform - just return original leaf
 }
 
 template <typename FoldType>
 auto PruneTaylorDPFuncts<FoldType>::get_transform_matrix(
     std::pair<double, double> /*coord_cur*/,
-    std::pair<double, double> /*coord_prev*/) const -> xt::xtensor<double, 2> {
+    std::pair<double, double> /*coord_prev*/) const -> std::vector<double> {
     // Return identity matrix for Taylor variant
     // Size should match parameter dimensions (typically 4x4 for poly_order=4)
-    const SizeType size             = m_cfg.get_prune_poly_order() + 1;
-    xt::xtensor<double, 2> identity = xt::zeros<double>({size, size});
+    const SizeType size = m_cfg.get_prune_poly_order() + 1;
+    std::vector<double> identity(size * size, 0.0);
     for (SizeType i = 0; i < size; ++i) {
-        identity(i, i) = 1.0;
+        identity[(i * size) + i] = 1.0;
     }
     return identity;
 }
 
 template <typename FoldType>
 auto PruneTaylorDPFuncts<FoldType>::validate(
-    const xt::xtensor<double, 3>& /*batch_leaves*/,
+    std::span<const double> /*batch_leaves*/,
     std::pair<double, double> /*coord_valid*/,
-    const std::tuple<xt::xtensor<double, 1>, xt::xtensor<double, 1>, double>&
+    const std::tuple<std::vector<double>, std::vector<double>, double>&
     /*validation_params*/,
-    SizeType n_leaves) const -> SizeType {
+    SizeType n_leaves,
+    SizeType /*n_params*/) const -> SizeType {
     // Taylor variant doesn't filter - return all leaves
     return n_leaves;
 }
@@ -200,9 +203,9 @@ auto PruneTaylorDPFuncts<FoldType>::validate(
 template <typename FoldType>
 auto PruneTaylorDPFuncts<FoldType>::get_validation_params(
     std::pair<double, double> /*coord_add*/) const
-    -> std::tuple<xt::xtensor<double, 1>, xt::xtensor<double, 1>, double> {
+    -> std::tuple<std::vector<double>, std::vector<double>, double> {
     // Return empty validation parameters for Taylor variant
-    xt::xtensor<double, 1> empty_arr = xt::zeros<double>({0});
+    std::vector<double> empty_arr(0);
     return std::make_tuple(empty_arr, empty_arr, 0.0);
 }
 

@@ -16,7 +16,6 @@
 #include <boost/random.hpp>
 #include <omp.h>
 #include <xsimd/xsimd.hpp>
-#include <xtensor/containers/xtensor.hpp>
 
 #include "loki/common/types.hpp"
 
@@ -147,8 +146,7 @@ private:
  * itself).
  * @return 3D tensor of shape (n_derivs + 1, order_max + 1, order_max + 1).
  */
-xt::xtensor<float, 3> generate_cheb_table(SizeType order_max,
-                                          SizeType n_derivs);
+std::vector<float> generate_cheb_table(SizeType order_max, SizeType n_derivs);
 
 /** Generate generalized Chebyshev polynomials with shift and scale.
  * @param poly_order Maximum polynomial order.
@@ -156,7 +154,7 @@ xt::xtensor<float, 3> generate_cheb_table(SizeType order_max,
  * @param scale Scale parameter for the domain.
  * @return 2D matrix of shape (poly_order + 1, poly_order + 1).
  */
-xt::xtensor<float, 2>
+std::vector<float>
 generalized_cheb_pols(SizeType poly_order, float t0, float scale);
 
 constexpr bool is_power_of_two(SizeType n) noexcept {

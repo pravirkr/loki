@@ -9,8 +9,6 @@
 #include <type_traits>
 #include <vector>
 
-#include <xtensor/containers/xtensor.hpp>
-
 #include "loki/common/types.hpp"
 
 namespace loki::utils {
@@ -205,77 +203,12 @@ constexpr auto cartesian_product_view(std::span<const std::vector<T>> params) {
 }
 
 // Helper function for cartesian product with padded arrays
-inline std::tuple<xt::xtensor<double, 2>, std::vector<SizeType>>
-cartesian_prod_padded(const xt::xtensor<double, 3>& padded_arrays,
-                      const xt::xtensor<SizeType, 2>& actual_counts,
-                      SizeType n_batch,
-                      SizeType nparams) {
-
-    std::vector<SizeType> items_per_batch(n_batch);
-    SizeType total_items = 0;
-
-    // First pass: Calculate total items and items per batch
-    for (SizeType i = 0; i < n_batch; ++i) {
-        SizeType count_i = 1;
-        for (SizeType j = 0; j < nparams; ++j) {
-            count_i *= actual_counts(i, j);
-        }
-        items_per_batch[i] = count_i;
-        total_items += count_i;
-    }
-
-    xt::xtensor<double, 2> cart_prod({total_items, nparams});
-    std::vector<SizeType> origins(total_items);
-
-    // Second pass: Generate combinations and fill arrays
-    SizeType current_row_idx = 0;
-    for (SizeType i = 0; i < n_batch; ++i) {
-        const SizeType num_items_i = items_per_batch[i];
-
-        // Fill origins for this batch
-        std::ranges::fill(
-            origins.begin() + static_cast<IndexType>(current_row_idx),
-            origins.begin() +
-                static_cast<IndexType>(current_row_idx + num_items_i),
-            i);
-
-        // Generate Cartesian product for batch 'i'
-        std::vector<SizeType> indices(nparams, 0);
-
-        for (SizeType item_row_idx = 0; item_row_idx < num_items_i;
-             ++item_row_idx) {
-            // Fill current combination
-            for (SizeType k = 0; k < nparams; ++k) {
-                cart_prod(current_row_idx + item_row_idx, k) =
-                    padded_arrays(i, k, indices[k]);
-            }
-
-            // Odometer increment (except for last item)
-            if (item_row_idx < num_items_i - 1) {
-                for (SizeType k = nparams; k > 0; --k) {
-                    const SizeType idx = k - 1; // Convert to 0-based index
-                    const SizeType max_idx_k = actual_counts(i, idx) - 1;
-                    if (indices[idx] < max_idx_k) {
-                        ++indices[idx];
-                        break;
-                    }
-                    indices[idx] = 0;
-                }
-            }
-        }
-        current_row_idx += num_items_i;
-    }
-
-    return {std::move(cart_prod), std::move(origins)};
-}
-
-// Optimized flat version of cartesian_prod_padded
 inline std::tuple<std::vector<double>, std::vector<SizeType>>
-cartesian_prod_padded_flat(std::span<const double> padded_arrays,
-                           std::span<const SizeType> actual_counts,
-                           SizeType n_batch,
-                           SizeType nparams,
-                           SizeType branch_max) {
+cartesian_prod_padded(std::span<const double> padded_arrays,
+                      std::span<const SizeType> actual_counts,
+                      SizeType n_batch,
+                      SizeType nparams,
+                      SizeType branch_max) {
 
     std::vector<SizeType> items_per_batch(n_batch);
     SizeType total_items = 0;
@@ -315,7 +248,8 @@ cartesian_prod_padded_flat(std::span<const double> padded_arrays,
             for (SizeType k = 0; k < nparams; ++k) {
                 const SizeType padded_idx =
                     (i * nparams * branch_max) + (k * branch_max) + indices[k];
-                cart_prod[(output_row * nparams) + k] = padded_arrays[padded_idx];
+                cart_prod[(output_row * nparams) + k] =
+                    padded_arrays[padded_idx];
             }
 
             // Odometer increment (except for last item)

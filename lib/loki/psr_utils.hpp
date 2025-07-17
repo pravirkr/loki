@@ -10,8 +10,6 @@
 #include <utility>
 #include <vector>
 
-#include <xtensor/containers/xtensor.hpp>
-
 #include "loki/common/types.hpp"
 #include "loki/exceptions.hpp"
 
@@ -42,21 +40,13 @@ std::vector<double> poly_taylor_step_d(SizeType nparams,
                                        double f_max,
                                        double t_ref = 0.0);
 
-xt::xtensor<double, 2>
-poly_taylor_step_d_vec(SizeType nparams,
-                       double tobs,
-                       SizeType fold_bins,
-                       double tol_bins,
-                       const xt::xtensor<double, 1>& f_max,
-                       double t_ref = 0.0);
-
-void poly_taylor_step_d_vec_flat(SizeType nparams,
-                                 double tobs,
-                                 SizeType fold_bins,
-                                 double tol_bins,
-                                 std::span<const double> f_max,
-                                 std::span<double> dparams_batch,
-                                 double t_ref = 0.0);
+void poly_taylor_step_d_vec(SizeType nparams,
+                            double tobs,
+                            SizeType fold_bins,
+                            double tol_bins,
+                            std::span<const double> f_max,
+                            std::span<double> dparams_batch,
+                            double t_ref = 0.0);
 
 // Check if a parameter should be split
 bool split_f(double df_old,
@@ -75,23 +65,15 @@ std::vector<double> poly_taylor_shift_d(std::span<const double> dparam_old,
                                         double f_cur,
                                         double t_ref = 0.0);
 
-xt::xtensor<double, 2>
-poly_taylor_shift_d_vec(const xt::xtensor<double, 2>& dparam_old,
-                        const xt::xtensor<double, 2>& dparam_new,
-                        double tobs_new,
-                        SizeType fold_bins,
-                        const xt::xtensor<double, 1>& f_cur,
-                        double t_ref = 0.0);
-
-void poly_taylor_shift_d_vec_flat(std::span<const double> dparam_old,
-                                  std::span<const double> dparam_new,
-                                  double tobs_new,
-                                  SizeType fold_bins,
-                                  std::span<const double> f_cur,
-                                  double t_ref,
-                                  std::span<double> shift_bins_batch,
-                                  SizeType nbatch,
-                                  SizeType nparams);
+void poly_taylor_shift_d_vec(std::span<const double> dparam_old,
+                             std::span<const double> dparam_new,
+                             double tobs_new,
+                             SizeType fold_bins,
+                             std::span<const double> f_cur,
+                             double t_ref,
+                             std::span<double> shift_bins_batch,
+                             SizeType nbatch,
+                             SizeType nparams);
 
 // Shift the kinematical parameters to a new reference time.
 std::vector<double> shift_params_d(std::span<const double> param_vec,
@@ -102,40 +84,28 @@ std::vector<double> shift_params_d(std::span<const double> param_vec,
 std::tuple<std::vector<double>, double>
 shift_params(std::span<const double> param_vec, double delta_t);
 
-xt::xtensor<double, 2>
-shift_params_d_batch(const xt::xtensor<double, 2>& param_vec_batch,
-                     double delta_t,
-                     SizeType n_out);
-
-std::tuple<xt::xtensor<double, 3>, xt::xtensor<double, 1>>
-shift_params_batch(const xt::xtensor<double, 3>& param_vec_batch,
-                   double delta_t);
-
-void shift_params_batch_flat(std::span<const double> param_vec_data,
-                             double delta_t,
-                             SizeType nbatch,
-                             SizeType nparams,
-                             SizeType param_vec_stride,
-                             std::span<double> kvec_new_data,
-                             std::span<double> delay_batch);
+void shift_params_batch(std::span<const double> param_vec_data,
+                        double delta_t,
+                        SizeType nbatch,
+                        SizeType nparams,
+                        SizeType param_vec_stride,
+                        std::span<double> kvec_new_data,
+                        std::span<double> delay_batch);
 
 // Circular orbit batch shifting
-std::tuple<xt::xtensor<double, 3>, xt::xtensor<double, 1>>
-shift_params_circular_batch(const xt::xtensor<double, 3>& param_vec_batch,
-                            double delta_t);
-
-void shift_params_circular_batch_flat(std::span<const double> param_vec_data,
-                                      double delta_t,
-                                      SizeType nbatch,
-                                      SizeType nparams,
-                                      SizeType param_vec_stride,
-                                      std::span<double> kvec_new_data,
-                                      std::span<double> delay_batch);
+void shift_params_circular_batch(std::span<const double> param_vec_data,
+                                 double delta_t,
+                                 SizeType nbatch,
+                                 SizeType nparams,
+                                 SizeType param_vec_stride,
+                                 std::span<double> kvec_new_data,
+                                 std::span<double> delay_batch);
 
 // Conversion from Taylor to circular parameters
+/*
 xt::xtensor<double, 3>
 convert_taylor_to_circular(const xt::xtensor<double, 3>& param_sets);
-
+*/
 // Refine a parameter range around a current value with a finer step size.
 std::tuple<std::vector<double>, double>
 branch_param(double param_cur,

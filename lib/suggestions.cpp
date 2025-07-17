@@ -6,13 +6,6 @@
 #include <span>
 #include <unordered_map>
 
-#include <xtensor/containers/xtensor.hpp>
-#include <xtensor/core/xmath.hpp>
-#include <xtensor/core/xoperation.hpp>
-#include <xtensor/misc/xsort.hpp>
-#include <xtensor/views/xindex_view.hpp>
-#include <xtensor/views/xview.hpp>
-
 #include <omp.h>
 
 #include "loki/common/types.hpp"
@@ -24,43 +17,43 @@ namespace loki::utils {
 namespace {
 
 std::vector<SizeType>
-get_unique_indices_scores(const xt::xtensor<double, 3>& params,
-                          std::span<const float> scores) {
-    const SizeType nparams = params.shape()[0];
+get_unique_indices_scores(std::span<const double> batch_leaves,
+                          std::span<const float> batch_scores,
+                          SizeType n_leaves,
+                          SizeType n_params) {
+    const auto leaves_stride_batch = batch_leaves.size() / n_leaves;
     std::vector<SizeType> unique_indices;
-    unique_indices.reserve(nparams);
+    unique_indices.reserve(n_leaves);
 
     std::unordered_map<int64_t, bool> unique_dict;
     std::unordered_map<int64_t, float> m_scoresdict;
     std::unordered_map<int64_t, SizeType> count_dict;
 
-    unique_dict.reserve(nparams);
-    m_scoresdict.reserve(nparams);
-    count_dict.reserve(nparams);
+    unique_dict.reserve(n_leaves);
+    m_scoresdict.reserve(n_leaves);
+    count_dict.reserve(n_leaves);
 
     SizeType count = 0;
-    for (SizeType i = 0; i < nparams; ++i) {
-        if (params.shape()[1] < 2) {
-            continue;
-        }
-
+    for (SizeType i = 0; i < n_leaves; ++i) {
         // Use the sum of the last two elements' first values as the key
-        const double val1 = params(i, params.shape()[1] - 2, 0);
-        const double val2 = params(i, params.shape()[1] - 1, 0);
+        const double val1 =
+            batch_leaves[(i * leaves_stride_batch) + ((n_params - 2) * 2)];
+        const double val2 =
+            batch_leaves[(i * leaves_stride_batch) + ((n_params - 1) * 2)];
         const auto key = static_cast<int64_t>(std::round((val1 + val2) * 1e9));
 
         auto it = unique_dict.find(key);
         if (it != unique_dict.end() && it->second) {
             // Found existing entry, update if current score is better
-            if (scores[i] > m_scoresdict[key]) {
-                m_scoresdict[key]   = scores[i];
+            if (batch_scores[i] > m_scoresdict[key]) {
+                m_scoresdict[key]   = batch_scores[i];
                 SizeType idx        = count_dict[key];
                 unique_indices[idx] = i;
             }
         } else {
             // New unique entry
             unique_dict[key]  = true;
-            m_scoresdict[key] = scores[i];
+            m_scoresdict[key] = batch_scores[i];
             count_dict[key]   = count;
             unique_indices.push_back(i);
             ++count;
@@ -104,22 +97,14 @@ public:
         : m_capacity(capacity),
           m_nparams(nparams),
           m_nbins(nbins),
-          m_leaves_stride((nparams + 2) * 2),
-          m_combined_res_stride(2 * nbins),
-          m_backtrack_stride(nparams + 2) {
-        m_param_sets =
-            xt::xtensor<double, 3>({m_capacity, m_nparams + 2, 2}, 0.0);
-        m_folds = xt::xtensor<FoldType, 3>({m_capacity, 2, m_nbins});
-
-        // Initialize folds based on type
-        if constexpr (std::is_same_v<FoldType, std::complex<float>>) {
-            m_folds.fill(std::complex<float>(0.0F, 0.0F));
-        } else {
-            m_folds.fill(FoldType{});
-        }
-
-        m_scores     = std::vector<float>(m_capacity, 0.0F);
-        m_backtracks = xt::xtensor<SizeType, 2>({m_capacity, m_nparams + 2}, 0);
+          m_leaves_stride((nparams + 2) * kLeavesParamStride),
+          m_folds_stride(2 * nbins),
+          m_backtracks_stride(nparams + 2),
+          m_param_sets(m_capacity * m_leaves_stride, 0.0),
+          m_scores(m_capacity, 0.0F),
+          m_backtracks(m_capacity * m_backtracks_stride, 0) {
+        m_folds = std::vector<FoldType>(m_capacity * m_folds_stride,
+                                        default_fold_value<FoldType>());
     }
 
     ~Impl()                      = default;
@@ -128,12 +113,10 @@ public:
     Impl(Impl&&)                 = default;
     Impl& operator=(Impl&&)      = default;
 
-    const xt::xtensor<double, 3>& get_param_sets() const noexcept {
+    const std::vector<double>& get_param_sets() const noexcept {
         return m_param_sets;
     }
-    const xt::xtensor<FoldType, 3>& get_folds() const noexcept {
-        return m_folds;
-    }
+    const std::vector<FoldType>& get_folds() const noexcept { return m_folds; }
     std::vector<float> get_scores() const {
         std::vector<float> valid_scores;
         if (m_size == 0) {
@@ -146,7 +129,7 @@ public:
         }
         return valid_scores;
     }
-    const xt::xtensor<SizeType, 2>& get_backtracks() const noexcept {
+    const std::vector<SizeType>& get_backtracks() const noexcept {
         return m_backtracks;
     }
     SizeType get_max_sugg() const noexcept { return m_capacity; }
@@ -247,20 +230,13 @@ public:
         m_read_consumed += n;
     }
 
-    std::tuple<xt::xtensor<double, 2>, xt::xtensor<FoldType, 2>, float>
+    std::tuple<std::span<const double>, std::span<const FoldType>, float>
     get_best() const {
         if (m_size == 0) {
             // Return empty tensors and 0 score
-            xt::xtensor<double, 2> empty_params({m_nparams + 2, 2}, 0.0);
-            xt::xtensor<FoldType, 2> empty_folds({2, m_nbins});
-
-            // Initialize empty_folds based on FoldType
-            if constexpr (std::is_same_v<FoldType, std::complex<float>>) {
-                empty_folds.fill(std::complex<float>(0.0F, 0.0F));
-            } else {
-                empty_folds.fill(FoldType{});
-            }
-
+            std::vector<double> empty_params(m_leaves_stride, 0.0);
+            std::vector<FoldType> empty_folds(m_folds_stride,
+                                              default_fold_value<FoldType>());
             return std::make_tuple(empty_params, empty_folds, 0.0F);
         }
 
@@ -275,128 +251,106 @@ public:
         }
         const auto idx_max_abs = (m_head + idx_max_rel) % m_capacity;
         // Extract the best parameter set and fold using views
-        auto best_params =
-            xt::view(m_param_sets, idx_max_abs, xt::all(), xt::all());
-        auto best_folds = xt::view(m_folds, idx_max_abs, xt::all(), xt::all());
+        std::span<const double> best_params(m_param_sets.data() +
+                                                (idx_max_abs * m_leaves_stride),
+                                            m_leaves_stride);
+        std::span<const FoldType> best_folds(
+            m_folds.data() + (idx_max_abs * m_folds_stride), m_folds_stride);
+
         // Return copies
         return std::make_tuple(best_params, best_folds, m_scores[idx_max_abs]);
     }
 
-    xt::xtensor<double, 3> get_transformed(double delta_t) const {
+    std::vector<double> get_transformed(double delta_t) const {
         // Extract all parameter sets except the last two rows for each
         // suggestion using views
         // This method now needs to handle potentially non-contiguous data
         // For simplicity, we create a contiguous copy first.
-        if (m_param_sets.shape()[1] <= 2) {
-            return xt::xtensor<double, 3>({0, 0, 0});
-        }
-        xt::xtensor<double, 3> contig_params({m_size, m_nparams + 2, 2});
+        std::vector<double> contig_params(m_size * m_leaves_stride, 0.0);
         const auto start_idx = m_is_updating ? m_write_start : m_head;
         for (SizeType i = 0; i < m_size; ++i) {
             const auto src_idx = (start_idx + i) % m_capacity;
-            xt::view(contig_params, i, xt::all(), xt::all()) =
-                xt::view(m_param_sets, src_idx, xt::all(), xt::all());
+            std::copy(m_param_sets.begin() + src_idx * m_leaves_stride,
+                      m_param_sets.begin() + src_idx * m_leaves_stride +
+                          m_leaves_stride,
+                      contig_params.begin() + i * m_leaves_stride);
         }
 
-        // Extract all but the last two parameters for each suggestion
-        xt::xtensor<double, 3> transformed_params({m_size, m_nparams, 2});
-        xt::view(transformed_params, xt::all(), xt::all(), xt::all()) =
-            xt::view(contig_params, xt::all(), xt::range(0, m_nparams),
-                     xt::all());
+        // Call the batch shift function (only params, not dparams)
+        std::vector<double> trans_params_batch(m_size * m_nparams);
+        std::vector<double> delay_batch(m_size); // Redundant for now
 
-        // Call the batch shift function
-        xt::xtensor<double, 3> trans_params;
         if (m_nparams < 4) {
-            auto [shifted, _] =
-                psr_utils::shift_params_batch(transformed_params, delta_t);
-            trans_params = std::move(shifted);
+            psr_utils::shift_params_batch(contig_params, delta_t, m_size,
+                                          m_nparams, m_leaves_stride,
+                                          trans_params_batch, delay_batch);
         } else if (m_nparams == 4) {
-            auto [shifted, _] = psr_utils::shift_params_circular_batch(
-                transformed_params, delta_t);
-            trans_params = std::move(shifted);
+            psr_utils::shift_params_circular_batch(
+                contig_params, delta_t, m_size, m_nparams, m_leaves_stride,
+                trans_params_batch, delay_batch);
         } else {
             throw std::runtime_error(std::format(
                 "Suggestion struct must have less than 4 parameters."));
         }
-        return trans_params;
+        return trans_params_batch;
     }
 
-    bool add(const xt::xtensor<double, 2>& param_set,
-             const xt::xtensor<FoldType, 2>& fold,
+    bool add(std::span<const double> param_set,
+             std::span<const FoldType> fold,
              float score,
-             const std::vector<SizeType>& backtrack) {
+             std::span<const SizeType> backtrack) {
         if (m_size_old + m_size >= m_capacity) {
             return false;
         }
         const auto write_idx = m_write_head;
-        // Copy data to the corresponding position using views
-        xt::view(m_param_sets, write_idx, xt::all(), xt::all()) = param_set;
-        xt::view(m_folds, write_idx, xt::all(), xt::all())      = fold;
-        m_scores[write_idx]                                     = score;
-        // Convert backtrack vector to xtensor view and assign
-        xt::xtensor<SizeType, 1> bt_tensor = xt::adapt(backtrack);
-        xt::view(m_backtracks, write_idx, xt::range(0, bt_tensor.size())) =
-            bt_tensor;
-
+        std::ranges::copy(param_set,
+                          m_param_sets.begin() + write_idx * m_leaves_stride);
+        std::copy(fold.begin(), fold.end(),
+                  m_folds.begin() + (write_idx * m_folds_stride));
+        m_scores[write_idx] = score;
+        std::ranges::copy(backtrack, m_backtracks.begin() +
+                                         write_idx * m_backtracks_stride);
         m_write_head = (m_write_head + 1) % m_capacity;
         ++m_size;
         return true;
     }
 
-    void add_initial(const xt::xtensor<double, 3>& param_sets_batch,
-                     const xt::xtensor<FoldType, 3>& folds_batch,
-                     const std::vector<float>& scores_batch,
-                     const xt::xtensor<SizeType, 2>& backtracks_batch) {
-        const auto slots_to_write = scores_batch.size();
-        if (slots_to_write > m_capacity) {
-            throw std::runtime_error(std::format(
-                "SuggestionStruct: Suggestions too large to add: {} > {}",
-                slots_to_write, m_capacity));
-        }
+    void add_initial(std::span<const double> param_sets_batch,
+                     std::span<const FoldType> folds_batch,
+                     std::span<const float> scores_batch,
+                     std::span<const SizeType> backtracks_batch,
+                     SizeType slots_to_write) {
+        error_check::check_less_equal(slots_to_write, m_capacity,
+                                      "SuggestionStruct: Suggestions too large "
+                                      "to add.");
+        error_check::check_equal(slots_to_write, scores_batch.size(),
+                                 "slots_to_write must match scores_batch size");
+
         reset(); // Start fresh
-        // Copy all data efficiently using views
-        for (SizeType i = 0; i < slots_to_write; ++i) {
-            xt::view(m_param_sets, i, xt::all(), xt::all()) =
-                xt::view(param_sets_batch, i, xt::all(), xt::all());
-            xt::view(m_folds, i, xt::all(), xt::all()) =
-                xt::view(folds_batch, i, xt::all(), xt::all());
-            xt::view(m_backtracks, i, xt::all()) =
-                xt::view(backtracks_batch, i, xt::all());
-            m_scores[i] = scores_batch[i];
-        }
+        std::ranges::copy(param_sets_batch, m_param_sets.begin());
+        std::ranges::copy(folds_batch, m_folds.begin());
+        std::ranges::copy(backtracks_batch, m_backtracks.begin());
+        std::ranges::copy(scores_batch, m_scores.begin());
         m_size = slots_to_write;
-        error_check::check(m_size <= m_capacity,
-                           "SuggestionStruct: Invalid size after add_initial. "
-                           "Buffer overflow.");
+        error_check::check_less_equal(m_size, m_capacity,
+                                      "SuggestionStruct: Invalid size after "
+                                      "add_initial. Buffer overflow.");
     }
 
     // Adds filtered batch to write region. If full, trims write region via
     // median threshold. Loops until all candidates fit, reclaiming space from
     // consumed old suggestions.
-    float add_batch(const xt::xtensor<double, 3>& param_sets_batch,
-                    const xt::xtensor<FoldType, 3>& folds_batch,
+    float add_batch(std::span<const double> param_sets_batch,
+                    std::span<const FoldType> folds_batch,
                     std::span<const float> scores_batch,
-                    const xt::xtensor<SizeType, 2>& backtracks_batch,
-                    float current_threshold) {
+                    std::span<const SizeType> backtracks_batch,
+                    float current_threshold,
+                    SizeType slots_to_write) {
         // Always use scores_batch to get the correct batch size
-        const auto slots_to_write = scores_batch.size();
         if (slots_to_write == 0) {
             return current_threshold;
         }
         auto effective_threshold = current_threshold;
-
-        std::span<double> m_param_sets_span(m_param_sets.data(),
-                                            m_param_sets.size());
-        std::span<FoldType> m_folds_span(m_folds.data(), m_folds.size());
-        std::span<SizeType> m_backtracks_span(m_backtracks.data(),
-                                              m_backtracks.size());
-        std::span<float> m_scores_span(m_scores.data(), m_scores.size());
-        std::span<const double> param_sets_batch_span(param_sets_batch.data(),
-                                                      param_sets_batch.size());
-        std::span<const FoldType> folds_batch_span(folds_batch.data(),
-                                                   folds_batch.size());
-        std::span<const SizeType> backtracks_batch_span(
-            backtracks_batch.data(), backtracks_batch.size());
 
         // Create initial mask for scores >= threshold
         std::vector<SizeType> pending_indices;
@@ -441,34 +395,32 @@ public:
                 const auto dst_idx               = m_write_head;
                 const SizeType leaves_src_offset = src_idx * m_leaves_stride;
                 const SizeType leaves_dst_offset = dst_idx * m_leaves_stride;
-                const SizeType combined_res_src_offset =
-                    src_idx * m_combined_res_stride;
-                const SizeType combined_res_dst_offset =
-                    dst_idx * m_combined_res_stride;
+                const SizeType folds_src_offset  = src_idx * m_folds_stride;
+                const SizeType folds_dst_offset  = dst_idx * m_folds_stride;
                 const SizeType backtrack_src_offset =
-                    src_idx * m_backtrack_stride;
+                    src_idx * m_backtracks_stride;
                 const SizeType backtrack_dst_offset =
-                    dst_idx * m_backtrack_stride;
-                std::copy(param_sets_batch_span.begin() + leaves_src_offset,
-                          param_sets_batch_span.begin() + leaves_src_offset +
+                    dst_idx * m_backtracks_stride;
+                std::copy(param_sets_batch.begin() + leaves_src_offset,
+                          param_sets_batch.begin() + leaves_src_offset +
                               m_leaves_stride,
-                          m_param_sets_span.begin() + leaves_dst_offset);
-                std::copy(folds_batch_span.begin() + combined_res_src_offset,
-                          folds_batch_span.begin() + combined_res_src_offset +
-                              m_combined_res_stride,
-                          m_folds_span.begin() + combined_res_dst_offset);
-                std::copy(backtracks_batch_span.begin() + backtrack_src_offset,
-                          backtracks_batch_span.begin() + backtrack_src_offset +
-                              m_backtrack_stride,
-                          m_backtracks_span.begin() + backtrack_dst_offset);
-                m_scores_span[dst_idx] = scores_batch[src_idx];
+                          m_param_sets.begin() + leaves_dst_offset);
+                std::copy(folds_batch.begin() + folds_src_offset,
+                          folds_batch.begin() + folds_src_offset +
+                              m_folds_stride,
+                          m_folds.begin() + folds_dst_offset);
+                std::copy(backtracks_batch.begin() + backtrack_src_offset,
+                          backtracks_batch.begin() + backtrack_src_offset +
+                              m_backtracks_stride,
+                          m_backtracks.begin() + backtrack_dst_offset);
+                m_scores[dst_idx] = scores_batch[src_idx];
 
                 m_write_head = (m_write_head + 1) % m_capacity;
             }
             m_size += n_to_add_now;
-            error_check::check(m_size <= m_capacity,
-                               "SuggestionStruct: Invalid size after "
-                               "add_batch. Buffer overflow.");
+            error_check::check_less_equal(m_size, m_capacity,
+                                          "SuggestionStruct: Invalid size "
+                                          "after add_batch. Buffer overflow.");
 
             // Remove added candidates from the list
             pending_indices.erase(pending_indices.begin(),
@@ -569,18 +521,22 @@ public:
             return;
         }
         const auto start_idx = m_is_updating ? m_write_start : m_head;
-        xt::xtensor<double, 3> contig_params({m_size, m_nparams + 2, 2});
+
+        std::vector<double> contig_params(m_size * m_leaves_stride, 0.0);
         std::vector<float> contig_scores(m_size);
         for (SizeType i = 0; i < m_size; ++i) {
             const auto src_idx = (start_idx + i) % m_capacity;
-            xt::view(contig_params, i, xt::all(), xt::all()) =
-                xt::view(m_param_sets, src_idx, xt::all(), xt::all());
+            std::copy(m_param_sets.begin() + src_idx * m_leaves_stride,
+                      m_param_sets.begin() + src_idx * m_leaves_stride +
+                          m_leaves_stride,
+                      contig_params.begin() + i * m_leaves_stride);
             contig_scores[i] = m_scores[src_idx];
         }
 
         // Get unique indices on contiguous copy
         const auto unique_idx = get_unique_indices_scores(
-            contig_params, std::span<const float>(contig_scores));
+            contig_params, std::span<const float>(contig_scores), m_size,
+            m_nparams);
 
         // Convert indices to boolean mask
         std::vector<bool> idx_bool(m_size, false);
@@ -604,17 +560,20 @@ public:
         const float threshold = get_score_median();
         const auto start_idx  = m_is_updating ? m_write_start : m_head;
 
-        xt::xtensor<double, 3> contig_params({m_size, m_nparams + 2, 2});
+        std::vector<double> contig_params(m_size * m_leaves_stride, 0.0);
         std::vector<float> contig_scores(m_size);
         for (SizeType i = 0; i < m_size; ++i) {
             const auto src_idx = (start_idx + i) % m_capacity;
-            xt::view(contig_params, i, xt::all(), xt::all()) =
-                xt::view(m_param_sets, src_idx, xt::all(), xt::all());
+            std::copy(m_param_sets.begin() + src_idx * m_leaves_stride,
+                      m_param_sets.begin() + src_idx * m_leaves_stride +
+                          m_leaves_stride,
+                      contig_params.begin() + i * m_leaves_stride);
             contig_scores[i] = m_scores[src_idx];
         }
 
         auto unique_idx = get_unique_indices_scores(
-            contig_params, std::span<const float>(contig_scores));
+            contig_params, std::span<const float>(contig_scores), m_size,
+            m_nparams);
 
         // Create boolean mask for unique indices and scores >= threshold
         std::vector<bool> idx_bool(m_size, false);
@@ -634,17 +593,18 @@ public:
     }
 
 private:
-    xt::xtensor<double, 3> m_param_sets;   // Shape: (capacity, nparams + 2, 2)
-    xt::xtensor<FoldType, 3> m_folds;      // Shape: (capacity, 2, nbins)
-    std::vector<float> m_scores;           // Shape: (capacity)
-    xt::xtensor<SizeType, 2> m_backtracks; // Shape: (capacity, nparams + 2)
-
+    constexpr static SizeType kLeavesParamStride = 2;
     SizeType m_capacity;
     SizeType m_nparams;
     SizeType m_nbins;
     SizeType m_leaves_stride;
-    SizeType m_combined_res_stride;
-    SizeType m_backtrack_stride;
+    SizeType m_folds_stride;
+    SizeType m_backtracks_stride;
+
+    std::vector<double> m_param_sets;   // Shape: (capacity, nparams + 2, 2)
+    std::vector<FoldType> m_folds;      // Shape: (capacity, 2, nbins)
+    std::vector<float> m_scores;        // Shape: (capacity)
+    std::vector<SizeType> m_backtracks; // Shape: (capacity, nparams + 2)
 
     // Circular buffer state
     SizeType m_head{0};     // Index of the first valid element
@@ -676,12 +636,20 @@ private:
             if (indices[read_idx_rel]) {
                 const auto src_idx = (start_idx + read_idx_rel) % m_capacity;
                 if (write_idx != src_idx) {
-                    xt::view(m_param_sets, write_idx, xt::all(), xt::all()) =
-                        xt::view(m_param_sets, src_idx, xt::all(), xt::all());
-                    xt::view(m_folds, write_idx, xt::all(), xt::all()) =
-                        xt::view(m_folds, src_idx, xt::all(), xt::all());
-                    xt::view(m_backtracks, write_idx, xt::all()) =
-                        xt::view(m_backtracks, src_idx, xt::all());
+                    std::copy(m_param_sets.begin() + src_idx * m_leaves_stride,
+                              m_param_sets.begin() + src_idx * m_leaves_stride +
+                                  m_leaves_stride,
+                              m_param_sets.begin() +
+                                  write_idx * m_leaves_stride);
+                    std::copy(m_folds.begin() + (src_idx * m_folds_stride),
+                              m_folds.begin() + (src_idx * m_folds_stride) +
+                                  m_folds_stride,
+                              m_folds.begin() + (write_idx * m_folds_stride));
+                    std::copy(
+                        m_backtracks.begin() + src_idx * m_backtracks_stride,
+                        m_backtracks.begin() + src_idx * m_backtracks_stride +
+                            m_backtracks_stride,
+                        m_backtracks.begin() + write_idx * m_backtracks_stride);
                     m_scores[write_idx] = m_scores[src_idx];
                 }
                 write_idx = (write_idx + 1) % m_capacity;
@@ -709,22 +677,24 @@ private:
         if (m_head + m_size <= m_capacity) {
             // Data is contiguous but not at the start – copy via temp buffer
             // (safety first, to avoid overlap with the write region).
-            xt::xtensor<double, 3> params_slice =
-                xt::view(m_param_sets, xt::range(m_head, m_head + m_size),
-                         xt::all(), xt::all());
-            xt::xtensor<FoldType, 3> folds_slice =
-                xt::view(m_folds, xt::range(m_head, m_head + m_size), xt::all(),
-                         xt::all());
-            xt::xtensor<SizeType, 2> backtracks_slice = xt::view(
-                m_backtracks, xt::range(m_head, m_head + m_size), xt::all());
-            xt::view(m_param_sets, xt::range(0, m_size), xt::all(), xt::all()) =
-                params_slice;
-            xt::view(m_folds, xt::range(0, m_size), xt::all(), xt::all()) =
-                folds_slice;
-            xt::view(m_backtracks, xt::range(0, m_size), xt::all()) =
-                backtracks_slice;
+            std::vector<double> tmp_param_sets(
+                m_param_sets.begin() + m_head * m_leaves_stride,
+                m_param_sets.begin() + m_head * m_leaves_stride +
+                    m_size * m_leaves_stride);
+            std::vector<FoldType> tmp_folds(
+                m_folds.begin() + (m_head * m_folds_stride),
+                m_folds.begin() + (m_head * m_folds_stride) +
+                    (m_size * m_folds_stride));
+            std::vector<SizeType> tmp_backtracks(
+                m_backtracks.begin() + (m_head * m_backtracks_stride),
+                m_backtracks.begin() + (m_head * m_backtracks_stride) +
+                    (m_size * m_backtracks_stride));
             std::vector<float> tmp_scores(m_scores.begin() + m_head,
                                           m_scores.begin() + m_head + m_size);
+
+            std::ranges::copy(tmp_param_sets, m_param_sets.begin());
+            std::ranges::copy(tmp_folds, m_folds.begin());
+            std::ranges::copy(tmp_backtracks, m_backtracks.begin());
             std::ranges::copy(tmp_scores, m_scores.begin());
 
         } else {
@@ -734,38 +704,44 @@ private:
 
             // Use a temporary buffer for the first part to avoid overwriting
             // it.
-            xt::xtensor<double, 3> temp_params =
-                xt::view(m_param_sets, xt::range(m_head, m_capacity), xt::all(),
-                         xt::all());
-            xt::xtensor<FoldType, 3> temp_folds = xt::view(
-                m_folds, xt::range(m_head, m_capacity), xt::all(), xt::all());
-            std::vector<float> temp_scores(m_scores.begin() + m_head,
-                                           m_scores.end());
-            xt::xtensor<SizeType, 2> temp_backtracks = xt::view(
-                m_backtracks, xt::range(m_head, m_capacity), xt::all());
-
+            std::vector<double> tmp_param_sets(
+                m_param_sets.begin() + m_head * m_leaves_stride,
+                m_param_sets.begin() + m_head * m_leaves_stride +
+                    part1_size * m_leaves_stride);
+            std::vector<FoldType> tmp_folds(
+                m_folds.begin() + (m_head * m_folds_stride),
+                m_folds.begin() + (m_head * m_folds_stride) +
+                    (part1_size * m_folds_stride));
+            std::vector<SizeType> tmp_backtracks(
+                m_backtracks.begin() + (m_head * m_backtracks_stride),
+                m_backtracks.begin() + (m_head * m_backtracks_stride) +
+                    part1_size * m_backtracks_stride);
+            std::vector<float> tmp_scores(m_scores.begin() + m_head,
+                                          m_scores.begin() + m_head +
+                                              part1_size);
             // Move the second part (from the start of the buffer) to its new
             // position
-            xt::view(m_param_sets, xt::range(part1_size, m_size), xt::all(),
-                     xt::all()) =
-                xt::view(m_param_sets, xt::range(0, part2_size), xt::all(),
-                         xt::all());
-            xt::view(m_folds, xt::range(part1_size, m_size), xt::all(),
-                     xt::all()) = xt::view(m_folds, xt::range(0, part2_size),
-                                           xt::all(), xt::all());
-            std::copy(m_scores.begin(), m_scores.begin() + part2_size,
-                      m_scores.begin() + part1_size);
-            xt::view(m_backtracks, xt::range(part1_size, m_size), xt::all()) =
-                xt::view(m_backtracks, xt::range(0, part2_size), xt::all());
-
+            std::copy(m_param_sets.begin() + part1_size * m_leaves_stride,
+                      m_param_sets.begin() + part1_size * m_leaves_stride +
+                          part2_size * m_leaves_stride,
+                      m_param_sets.begin());
+            std::copy(m_folds.begin() + (part1_size * m_folds_stride),
+                      m_folds.begin() + (part1_size * m_folds_stride) +
+                          (part2_size * m_folds_stride),
+                      m_folds.begin());
+            std::copy(m_backtracks.begin() + (part1_size * m_backtracks_stride),
+                      m_backtracks.begin() +
+                          (part1_size * m_backtracks_stride) +
+                          (part2_size * m_backtracks_stride),
+                      m_backtracks.begin());
+            std::copy(m_scores.begin() + part1_size,
+                      m_scores.begin() + (part1_size + part2_size),
+                      m_scores.begin());
             // Copy the first part from the temporary buffer to the start.
-            xt::view(m_param_sets, xt::range(0, part1_size), xt::all(),
-                     xt::all()) = temp_params;
-            xt::view(m_folds, xt::range(0, part1_size), xt::all(), xt::all()) =
-                temp_folds;
-            std::ranges::copy(temp_scores, m_scores.begin());
-            xt::view(m_backtracks, xt::range(0, part1_size), xt::all()) =
-                temp_backtracks;
+            std::ranges::copy(tmp_param_sets, m_param_sets.begin());
+            std::ranges::copy(tmp_folds, m_folds.begin());
+            std::ranges::copy(tmp_backtracks, m_backtracks.begin());
+            std::ranges::copy(tmp_scores, m_scores.begin());
         }
 
         m_head = 0;
@@ -788,12 +764,12 @@ SuggestionStruct<FoldType>& SuggestionStruct<FoldType>::operator=(
     SuggestionStruct<FoldType>&& other) noexcept = default;
 // Getters
 template <typename FoldType>
-const xt::xtensor<double, 3>&
+const std::vector<double>&
 SuggestionStruct<FoldType>::get_param_sets() const noexcept {
     return m_impl->get_param_sets();
 }
 template <typename FoldType>
-const xt::xtensor<FoldType, 3>&
+const std::vector<FoldType>&
 SuggestionStruct<FoldType>::get_folds() const noexcept {
     return m_impl->get_folds();
 }
@@ -802,7 +778,7 @@ std::vector<float> SuggestionStruct<FoldType>::get_scores() const noexcept {
     return m_impl->get_scores();
 }
 template <typename FoldType>
-const xt::xtensor<SizeType, 2>&
+const std::vector<SizeType>&
 SuggestionStruct<FoldType>::get_backtracks() const noexcept {
     return m_impl->get_backtracks();
 }
@@ -867,40 +843,43 @@ void SuggestionStruct<FoldType>::advance_read_consumed(SizeType n) {
 }
 // Other methods
 template <typename FoldType>
-std::tuple<xt::xtensor<double, 2>, xt::xtensor<FoldType, 2>, float>
+std::tuple<std::span<const double>, std::span<const FoldType>, float>
 SuggestionStruct<FoldType>::get_best() const {
     return m_impl->get_best();
 }
 template <typename FoldType>
-xt::xtensor<double, 3>
+std::vector<double>
 SuggestionStruct<FoldType>::get_transformed(double delta_t) const {
     return m_impl->get_transformed(delta_t);
 }
 template <typename FoldType>
-bool SuggestionStruct<FoldType>::add(const xt::xtensor<double, 2>& param_set,
-                                     const xt::xtensor<FoldType, 2>& fold,
+bool SuggestionStruct<FoldType>::add(std::span<const double> param_set,
+                                     std::span<const FoldType> fold,
                                      float score,
-                                     const std::vector<SizeType>& backtrack) {
+                                     std::span<const SizeType> backtrack) {
     return m_impl->add(param_set, fold, score, backtrack);
 }
 template <typename FoldType>
 void SuggestionStruct<FoldType>::add_initial(
-    const xt::xtensor<double, 3>& param_sets_batch,
-    const xt::xtensor<FoldType, 3>& folds_batch,
-    const std::vector<float>& scores_batch,
-    const xt::xtensor<SizeType, 2>& backtracks_batch) {
+    std::span<const double> param_sets_batch,
+    std::span<const FoldType> folds_batch,
+    std::span<const float> scores_batch,
+    std::span<const SizeType> backtracks_batch,
+    SizeType slots_to_write) {
     m_impl->add_initial(param_sets_batch, folds_batch, scores_batch,
-                        backtracks_batch);
+                        backtracks_batch, slots_to_write);
 }
 template <typename FoldType>
 float SuggestionStruct<FoldType>::add_batch(
-    const xt::xtensor<double, 3>& param_sets_batch,
-    const xt::xtensor<FoldType, 3>& folds_batch,
+    std::span<const double> param_sets_batch,
+    std::span<const FoldType> folds_batch,
     std::span<const float> scores_batch,
-    const xt::xtensor<SizeType, 2>& backtracks_batch,
-    float current_threshold) {
+    std::span<const SizeType> backtracks_batch,
+    float current_threshold,
+    SizeType slots_to_write) {
     return m_impl->add_batch(param_sets_batch, folds_batch, scores_batch,
-                             backtracks_batch, current_threshold);
+                             backtracks_batch, current_threshold,
+                             slots_to_write);
 }
 template <typename FoldType>
 float SuggestionStruct<FoldType>::trim_threshold() {

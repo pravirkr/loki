@@ -4,11 +4,6 @@
 #include <cmath>
 #include <format>
 
-#include <xtensor-blas/xlinalg.hpp>
-#include <xtensor/generators/xbuilder.hpp>
-#include <xtensor/misc/xpad.hpp>
-#include <xtensor/views/xview.hpp>
-
 #include "loki/math.hpp"
 #include "loki/utils.hpp"
 
@@ -75,33 +70,13 @@ std::vector<double> poly_taylor_step_d(SizeType nparams,
     return dparams_d;
 }
 
-xt::xtensor<double, 2>
-poly_taylor_step_d_vec(SizeType nparams,
-                       double tobs,
-                       SizeType fold_bins,
-                       double tol_bins,
-                       const xt::xtensor<double, 1>& f_max,
-                       double t_ref) {
-
-    const auto dparams_f =
-        poly_taylor_step_f(nparams, tobs, fold_bins, tol_bins, t_ref);
-    const auto nbatch = f_max.size();
-
-    xt::xtensor<double, 2> dparams = xt::zeros<double>({nbatch, nparams});
-    for (SizeType i = 0; i < nparams - 1; ++i) {
-        xt::view(dparams, xt::all(), i) = dparams_f[i] * utils::kCval / f_max;
-    }
-    xt::view(dparams, xt::all(), nparams - 1) = dparams_f[nparams - 1];
-    return dparams;
-}
-
-void poly_taylor_step_d_vec_flat(SizeType nparams,
-                                 double tobs,
-                                 SizeType fold_bins,
-                                 double tol_bins,
-                                 std::span<const double> f_max,
-                                 std::span<double> dparams_batch,
-                                 double t_ref) {
+void poly_taylor_step_d_vec(SizeType nparams,
+                            double tobs,
+                            SizeType fold_bins,
+                            double tol_bins,
+                            std::span<const double> f_max,
+                            std::span<double> dparams_batch,
+                            double t_ref) {
 
     const auto dparams_f =
         poly_taylor_step_f(nparams, tobs, fold_bins, tol_bins, t_ref);
@@ -152,61 +127,15 @@ std::vector<double> poly_taylor_shift_d(std::span<const double> dparam_old,
     return shift;
 }
 
-xt::xtensor<double, 2>
-poly_taylor_shift_d_vec(const xt::xtensor<double, 2>& dparam_old,
-                        const xt::xtensor<double, 2>& dparam_new,
-                        double tobs_new,
-                        SizeType fold_bins,
-                        const xt::xtensor<double, 1>& f_cur,
-                        double t_ref) {
-
-    const auto nbatch      = dparam_old.shape()[0];
-    const auto nparams     = dparam_old.shape()[1];
-    const auto dt          = tobs_new - t_ref;
-    const auto fold_bins_d = static_cast<double>(fold_bins);
-
-    xt::xtensor<double, 2> result = xt::zeros<double>({nbatch, nparams});
-    std::vector<double> dt_powers(nparams, 0.0);
-    std::vector<double> factorials(nparams, 0.0);
-
-    double dt_power = dt;
-    for (SizeType i = 0; i < nparams; ++i) {
-        dt_powers[i]  = dt_power;
-        factorials[i] = math::factorial(static_cast<double>(i + 1));
-        dt_power *= dt;
-    }
-    for (SizeType i = 0; i < nparams; ++i) {
-        const auto k     = nparams - 1 - i;
-        auto factor_base = dt_powers[k] * fold_bins_d / factorials[k];
-
-        if (i < nparams - 1) {
-            // Scale by f_cur / C_VAL for all but last parameter
-            auto factors = factor_base * f_cur / utils::kCval;
-            xt::view(result, xt::all(), i) =
-                xt::abs(xt::view(dparam_old, xt::all(), i) -
-                        xt::view(dparam_new, xt::all(), i)) *
-                factors;
-        } else {
-            // No scaling for last parameter (frequency)
-            xt::view(result, xt::all(), i) =
-                xt::abs(xt::view(dparam_old, xt::all(), i) -
-                        xt::view(dparam_new, xt::all(), i)) *
-                factor_base;
-        }
-    }
-
-    return result;
-}
-
-void poly_taylor_shift_d_vec_flat(std::span<const double> dparam_old,
-                                  std::span<const double> dparam_new,
-                                  double tobs_new,
-                                  SizeType fold_bins,
-                                  std::span<const double> f_cur,
-                                  double t_ref,
-                                  std::span<double> shift_bins_batch,
-                                  SizeType nbatch,
-                                  SizeType nparams) {
+void poly_taylor_shift_d_vec(std::span<const double> dparam_old,
+                             std::span<const double> dparam_new,
+                             double tobs_new,
+                             SizeType fold_bins,
+                             std::span<const double> f_cur,
+                             double t_ref,
+                             std::span<double> shift_bins_batch,
+                             SizeType nbatch,
+                             SizeType nparams) {
 
     const auto dt          = tobs_new - t_ref;
     const auto fold_bins_d = static_cast<double>(fold_bins);
@@ -271,28 +200,6 @@ std::vector<double> shift_params_d(std::span<const double> param_vec,
     return result;
 }
 
-xt::xtensor<double, 2>
-shift_params_d_batch(const xt::xtensor<double, 2>& param_vec_batch,
-                     double delta_t,
-                     SizeType n_out) {
-    const auto nparams      = param_vec_batch.shape()[1];
-    const auto n_out_actual = std::min(n_out, nparams);
-
-    // Compute transformation matrix: t_mat = delta_t^powers / factorial(powers)
-    xt::xtensor<double, 2> t_mat = xt::zeros<double>({nparams, nparams});
-    for (SizeType i = 0; i < nparams; ++i) {
-        for (SizeType j = 0; j <= i; ++j) {
-            const auto power = static_cast<double>(i - j);
-            t_mat(i, j)      = std::pow(delta_t, power) /
-                          math::factorial(static_cast<double>(power));
-        }
-    }
-    // Take only the last n_out rows
-    auto t_mat_subset =
-        xt::view(t_mat, xt::range(nparams - n_out_actual, nparams), xt::all());
-    return xt::linalg::dot(param_vec_batch, xt::transpose(t_mat_subset));
-}
-
 std::tuple<std::vector<double>, double>
 shift_params(std::span<const double> param_vec, double delta_t) {
     const auto nparams = param_vec.size();
@@ -313,51 +220,14 @@ shift_params(std::span<const double> param_vec, double delta_t) {
     return {param_vec_new, delay_rel};
 }
 
-std::tuple<xt::xtensor<double, 3>, xt::xtensor<double, 1>>
-shift_params_batch(const xt::xtensor<double, 3>& param_vec_batch,
-                   double delta_t) {
-    const auto nbatch  = param_vec_batch.shape(0);
-    const auto nparams = param_vec_batch.shape(1);
-
-    xt::xtensor<double, 2> dvec_cur = xt::zeros<double>({nbatch, nparams + 1});
-    xt::xtensor<double, 3> param_vec_new(param_vec_batch);
-    xt::xtensor<double, 1> delay_rel = xt::zeros<double>({nbatch});
-
-    // Copy till acceleration: dvec_cur[:, :-2] = param_vec_batch[:, :-1, 0]
-    if (nparams > 1) {
-        xt::view(dvec_cur, xt::all(), xt::range(0, nparams - 1)) =
-            xt::view(param_vec_batch, xt::all(), xt::range(0, nparams - 1), 0);
-    }
-    // Transform using batch operation
-    const auto dvec_new = shift_params_d_batch(dvec_cur, delta_t, nparams + 1);
-
-    // Update parameters: param_vec_new[:, :-1, 0] = dvec_new[:, :-2]
-    if (nparams > 1) {
-        xt::view(param_vec_new, xt::all(), xt::range(0, nparams - 1), 0) =
-            xt::view(dvec_new, xt::all(), xt::range(0, nparams - 1));
-    }
-
-    // Update frequency: param_vec_new[:, -1, 0] = param_vec_batch[:, -1, 0] *
-    // (1 + dvec_new[:, -2] / C_VAL)
-    xt::view(param_vec_new, xt::all(), nparams - 1, 0) =
-        xt::view(param_vec_batch, xt::all(), nparams - 1, 0) *
-        (1.0 + xt::view(dvec_new, xt::all(), nparams - 1) / utils::kCval);
-
-    // Compute delay: delay_rel = dvec_new[:, -1] / C_VAL
-    xt::view(delay_rel, xt::all()) =
-        xt::view(dvec_new, xt::all(), nparams) / utils::kCval;
-
-    return {param_vec_new, delay_rel};
-}
-
 // Optimized flat version of shift_params_batch operations
-void shift_params_batch_flat(std::span<const double> param_vec_data,
-                             double delta_t,
-                             SizeType nbatch,
-                             SizeType nparams,
-                             SizeType param_vec_stride,
-                             std::span<double> kvec_new_data,
-                             std::span<double> delay_batch) {
+void shift_params_batch(std::span<const double> param_vec_data,
+                        double delta_t,
+                        SizeType nbatch,
+                        SizeType nparams,
+                        SizeType param_vec_stride,
+                        std::span<double> kvec_new_data,
+                        std::span<double> delay_batch) {
     error_check::check(nparams > 1, "nparams must be greater than 1");
 
     const SizeType transform_dim = nparams + 1;
@@ -408,81 +278,14 @@ void shift_params_batch_flat(std::span<const double> param_vec_data,
     }
 }
 
-std::tuple<xt::xtensor<double, 3>, xt::xtensor<double, 1>>
-shift_params_circular_batch(const xt::xtensor<double, 3>& param_vec_batch,
-                            double delta_t) {
-
-    const auto nbatch  = param_vec_batch.shape(0);
-    const auto nparams = param_vec_batch.shape(1); // nparams + 2
-    error_check::check_equal(nparams, 4U,
-                             "nparams should be 4 for circular orbit resolve");
-
-    // Omega calculation
-    const auto minus_omega_sq = xt::view(param_vec_batch, xt::all(), 0, 0) /
-                                xt::view(param_vec_batch, xt::all(), 2, 0);
-    const auto omega_batch    = xt::sqrt(-minus_omega_sq);
-    const auto max_omega      = xt::amax(omega_batch)();
-    const auto required_order = std::min(
-        static_cast<SizeType>((max_omega * std::abs(delta_t) * M_E) + 10),
-        100UL);
-
-    // Create dvec_cur with extended size
-    xt::xtensor<double, 2> dvec_cur =
-        xt::zeros<double>({nbatch, required_order + 1});
-    xt::xtensor<double, 3> param_vec_new(param_vec_batch);
-    xt::xtensor<double, 1> delay_rel = xt::zeros<double>({nbatch});
-
-    // Copy base parameters: dvec_cur[:, -5:-2] = param_vec_batch[:, :-1, 0]
-    xt::view(dvec_cur, xt::all(),
-             xt::range(required_order - 4, required_order - 1)) =
-        xt::view(param_vec_batch, xt::all(), xt::range(0, 3), 0);
-
-    // Fill higher order derivatives
-    for (SizeType power = 5; power <= required_order; ++power) {
-        const auto col_idx = required_order - power;
-
-        if (power % 2 == 0) {
-            // Even powers: coefficients based on accel
-            const auto exponent = (power - 2) / 2;
-            auto coefs          = xt::pow(minus_omega_sq, exponent) *
-                         xt::view(param_vec_batch, xt::all(), 2, 0);
-            xt::view(dvec_cur, xt::all(), col_idx) = coefs;
-        } else {
-            // Odd powers: coefficients based on velocity
-            const auto exponent = (power - 3) / 2;
-            auto coefs          = xt::pow(minus_omega_sq, exponent) *
-                         xt::view(param_vec_batch, xt::all(), 1, 0);
-            xt::view(dvec_cur, xt::all(), col_idx) = coefs;
-        }
-    }
-
-    // Transform using batch operation
-    const auto dvec_new = shift_params_d_batch(dvec_cur, delta_t, nparams + 1);
-
-    // Update parameters: param_vec_new[:, :-1, 0] = dvec_new[:, :-2]
-    xt::view(param_vec_new, xt::all(), xt::range(0, nparams - 1), 0) =
-        xt::view(dvec_new, xt::all(), xt::range(0, nparams - 1));
-
-    // Update frequency with correction
-    xt::view(param_vec_new, xt::all(), nparams - 1, 0) =
-        xt::view(param_vec_batch, xt::all(), nparams - 1, 0) *
-        (1.0 + xt::view(dvec_new, xt::all(), nparams - 1) / utils::kCval);
-
-    // Compute delay
-    xt::view(delay_rel, xt::all()) =
-        xt::view(dvec_new, xt::all(), nparams) / utils::kCval;
-
-    return {param_vec_new, delay_rel};
-}
-
 // Optimized flat version of shift_params_circular_batch
-void shift_params_circular_batch_flat(std::span<const double> param_vec_data,
-                                      double delta_t,
-                                      SizeType nbatch,
-                                      SizeType nparams,
-                                      SizeType param_vec_stride,
-                                      std::span<double> kvec_new_data,
-                                      std::span<double> delay_batch) {
+void shift_params_circular_batch(std::span<const double> param_vec_data,
+                                 double delta_t,
+                                 SizeType nbatch,
+                                 SizeType nparams,
+                                 SizeType param_vec_stride,
+                                 std::span<double> kvec_new_data,
+                                 std::span<double> delay_batch) {
     error_check::check_equal(nparams, 4U,
                              "nparams should be 4 for circular orbit resolve");
 
@@ -580,6 +383,7 @@ void shift_params_circular_batch_flat(std::span<const double> param_vec_data,
     }
 }
 
+/*
 xt::xtensor<double, 3>
 convert_taylor_to_circular(const xt::xtensor<double, 3>& param_sets) {
     // Extract Taylor parameters
@@ -635,6 +439,7 @@ convert_taylor_to_circular(const xt::xtensor<double, 3>& param_sets) {
 
     return out;
 }
+*/
 
 std::tuple<std::vector<double>, double> branch_param(double param_cur,
                                                      double dparam_cur,
@@ -670,10 +475,9 @@ std::tuple<std::vector<double>, double> branch_param(double param_cur,
 
     // Generate array excluding first and last points
     auto grid_points =
-        xt::linspace(param_cur - half_range, param_cur + half_range, n);
-    auto param_arr_new           = xt::view(grid_points, xt::range(1, n - 1));
+        utils::linspace(param_cur - half_range, param_cur + half_range, n);
     const auto dparam_new_actual = dparam_cur / static_cast<double>(n - 2);
-    return {std::vector<double>(param_arr_new.begin(), param_arr_new.end()),
+    return {std::vector<double>(grid_points.begin() + 1, grid_points.end() - 1),
             dparam_new_actual};
 }
 
@@ -756,10 +560,9 @@ std::vector<double> range_param(double vmin, double vmax, double dv) {
         return {(vmax + vmin) / 2.0};
     }
     // np.linspace(vmin, vmax, npoints + 2)[1:-1]
-    const auto npoints   = static_cast<SizeType>((vmax - vmin) / dv);
-    auto grid_points     = xt::linspace(vmin, vmax, npoints + 2);
-    const auto grid_view = xt::view(grid_points, xt::range(1, npoints + 1));
-    return {grid_view.begin(), grid_view.end()};
+    const auto npoints = static_cast<SizeType>((vmax - vmin) / dv);
+    auto grid_points   = utils::linspace(vmin, vmax, npoints + 2);
+    return {grid_points.begin() + 1, grid_points.end() - 1};
 }
 
 } // namespace loki::psr_utils

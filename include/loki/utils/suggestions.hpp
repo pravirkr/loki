@@ -1,11 +1,9 @@
 #pragma once
 
 #include <memory>
+#include <span>
 #include <tuple>
 #include <vector>
-
-#include <span>
-#include <xtensor/containers/xtensor.hpp>
 
 #include "loki/common/types.hpp"
 
@@ -59,11 +57,10 @@ public:
     SuggestionStruct& operator=(const SuggestionStruct&) = delete;
 
     // Getters
-    [[nodiscard]] const xt::xtensor<double, 3>& get_param_sets() const noexcept;
-    [[nodiscard]] const xt::xtensor<FoldType, 3>& get_folds() const noexcept;
+    [[nodiscard]] const std::vector<double>& get_param_sets() const noexcept;
+    [[nodiscard]] const std::vector<FoldType>& get_folds() const noexcept;
     [[nodiscard]] std::vector<float> get_scores() const noexcept;
-    [[nodiscard]] const xt::xtensor<SizeType, 2>&
-    get_backtracks() const noexcept;
+    [[nodiscard]] const std::vector<SizeType>& get_backtracks() const noexcept;
     [[nodiscard]] SizeType get_max_sugg() const noexcept;
     [[nodiscard]] SizeType get_nparams() const noexcept;
     [[nodiscard]] SizeType get_nbins() const noexcept;
@@ -83,27 +80,28 @@ public:
 
     // Get the best suggestion (highest score)
     [[nodiscard]] std::
-        tuple<xt::xtensor<double, 2>, xt::xtensor<FoldType, 2>, float>
+        tuple<std::span<const double>, std::span<const FoldType>, float>
         get_best() const;
     // Transform the search parameters to some given t_ref
-    [[nodiscard]] xt::xtensor<double, 3> get_transformed(double delta_t) const;
+    [[nodiscard]] std::vector<double> get_transformed(double delta_t) const;
     // Add a suggestion to the struct if there is space
-    [[nodiscard]] bool add(const xt::xtensor<double, 2>& param_set,
-                           const xt::xtensor<FoldType, 2>& fold,
+    [[nodiscard]] bool add(std::span<const double> param_set,
+                           std::span<const FoldType> fold,
                            float score,
-                           const std::vector<SizeType>& backtrack);
+                           std::span<const SizeType> backtrack);
     // Add an initial set of suggestions to the struct
-    void add_initial(const xt::xtensor<double, 3>& param_sets_batch,
-                     const xt::xtensor<FoldType, 3>& folds_batch,
-                     const std::vector<float>& scores_batch,
-                     const xt::xtensor<SizeType, 2>& backtracks_batch);
+    void add_initial(std::span<const double> param_sets_batch,
+                     std::span<const FoldType> folds_batch,
+                     std::span<const float> scores_batch,
+                     std::span<const SizeType> backtracks_batch,
+                     SizeType slots_to_write);
     // Add a batch of suggestions to the struct if there is space
-    [[nodiscard]] float
-    add_batch(const xt::xtensor<double, 3>& param_sets_batch,
-              const xt::xtensor<FoldType, 3>& folds_batch,
-              std::span<const float> scores_batch,
-              const xt::xtensor<SizeType, 2>& backtracks_batch,
-              float current_threshold);
+    [[nodiscard]] float add_batch(std::span<const double> param_sets_batch,
+                                  std::span<const FoldType> folds_batch,
+                                  std::span<const float> scores_batch,
+                                  std::span<const SizeType> backtracks_batch,
+                                  float current_threshold,
+                                  SizeType slots_to_write);
     // Trim to keep only suggestions with scores >= median
     [[nodiscard]] float trim_threshold();
     // Trim repeated suggestions

@@ -5,8 +5,6 @@
 #include <string_view>
 #include <vector>
 
-#include <xtensor/containers/xtensor.hpp>
-
 #include "loki/common/types.hpp"
 
 #ifdef LOKI_ENABLE_CUDA
@@ -74,18 +72,22 @@ void snr_boxcar_3d_max(std::span<const float> arr,
                        int nthreads = 1);
 
 // Compute the S/N of a batch of folded profiles
-void snr_boxcar_batch(xt::xtensor<float, 3>& folds,
+void snr_boxcar_batch(std::span<const float> batch_folds,
                       std::span<const SizeType> widths,
-                      std::span<float> out);
+                      std::span<float> batch_scores,
+                      SizeType n_batch);
 
 // Compute the S/N of a batch of ComplexType folded profiles
-void snr_boxcar_batch_complex(xt::xtensor<ComplexType, 3>& folds,
+void snr_boxcar_batch_complex(std::span<const ComplexType> batch_folds,
                               std::span<const SizeType> widths,
-                              std::span<float> out);
+                              std::span<float> batch_scores,
+                              SizeType n_batch);
 
 template <typename FoldType>
-using ScoringFunction = std::function<void(
-    xt::xtensor<FoldType, 3>&, std::span<const SizeType>, std::span<float>)>;
+using ScoringFunction = std::function<void(std::span<const FoldType>,
+                                           std::span<const SizeType>,
+                                           std::span<float>,
+                                           SizeType)>;
 
 #ifdef LOKI_ENABLE_CUDA
 

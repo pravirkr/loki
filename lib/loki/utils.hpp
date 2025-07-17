@@ -31,9 +31,9 @@ SizeType find_nearest_sorted_idx_scan(std::span<const double> arr_sorted,
 std::vector<SizeType> find_neighbouring_indices(
     std::span<const SizeType> indices, SizeType target_idx, SizeType num);
 
-void debug_tensor(const xt::xtensor<double, 3>& leaf_batch,
-                  SizeType n_slices = 5);
-void debug_tensor(const xt::xtensor<double, 2>& leaf_batch,
-                  SizeType n_slices = 5);
+std::vector<double> linspace(double start,
+                             double stop,
+                             SizeType num_samples = 50,
+                             bool endpoint        = true) noexcept;
 
 } // namespace loki::utils
