@@ -382,48 +382,43 @@ void poly_taylor_suggest(
     std::span<const std::vector<double>> param_arr,
     std::span<const double> dparams,
     SizeType poly_order,
+    SizeType nbins,
     std::span<const SizeType> score_widths,
     const detection::ScoringFunction<FoldType>& scoring_func,
-    utils::SuggestionStruct<FoldType>& sugg_struct) {
+    utils::SuggestionTree<FoldType>& sugg_tree) {
     const auto nparams = param_arr.size();
     error_check::check_equal(nparams, poly_order,
                              "nparams should be equal to poly_order");
-    SizeType n_param_sets = 1;
+    SizeType n_leaves = 1;
     for (const auto& arr : param_arr) {
-        n_param_sets *= arr.size();
+        n_leaves *= arr.size();
     }
-    // const auto nbins       = fold_segment.size() / (n_param_sets * 2);
-    const auto [t0, scale] = coord_init;
+    error_check::check_equal(fold_segment.size(), n_leaves * 2 * nbins,
+                             "fold_segment size mismatch");
+    const auto [t0, scale]   = coord_init;
+    const auto leaves_stride = sugg_tree.get_leaves_stride();
 
     // Create parameter sets tensor: (n_param_sets, poly_order + 2, 2)
-    std::vector<double> param_sets(n_param_sets * (poly_order + 2) * 2, 0.0);
+    std::vector<double> param_sets(n_leaves * leaves_stride);
 
-    SizeType param_idx = 0;
+    SizeType leaf_idx = 0;
     for (const auto& p_set_view : utils::cartesian_product_view(param_arr)) {
+        const auto leaves_offset = leaf_idx * leaves_stride;
         // Fill first nparams dimensions with parameter values and dparams
         for (SizeType j = 0; j < nparams; ++j) {
-            param_sets[(param_idx * (poly_order + 2) * 2) + (j * 2) + 0] =
-                p_set_view[j];
-            param_sets[(param_idx * (poly_order + 2) * 2) + (j * 2) + 1] =
-                dparams[j];
+            param_sets[leaves_offset + (j * 2) + 0] = p_set_view[j];
+            param_sets[leaves_offset + (j * 2) + 1] = dparams[j];
         }
-        param_sets[(param_idx * (poly_order + 2) * 2) + (nparams * 2) + 0] =
-            p_set_view[nparams - 1];
-        param_sets[(param_idx * (poly_order + 2) * 2) + (nparams * 2) + 1] = t0;
-        param_sets[(param_idx * (poly_order + 2) * 2) + (nparams * 2) + 2] =
-            scale;
-        ++param_idx;
+        param_sets[leaves_offset + (nparams * 2) + 0] = p_set_view[nparams - 1];
+        param_sets[leaves_offset + ((nparams + 1) * 2) + 0] = t0;
+        param_sets[leaves_offset + ((nparams + 1) * 2) + 1] = scale;
+        ++leaf_idx;
     }
     // Calculate scores
-    std::vector<float> scores(n_param_sets);
-    scoring_func(fold_segment, score_widths, scores, n_param_sets);
-
-    // Create backtracks tensor: (n_param_sets, 2 + nparams)
-    std::vector<SizeType> backtracks(n_param_sets * (2 + nparams), 0);
-
+    std::vector<float> scores(n_leaves);
+    scoring_func(fold_segment, score_widths, scores, n_leaves);
     // Initialize the SuggestionStruct with the generated data
-    sugg_struct.add_initial(param_sets, fold_segment, scores, backtracks,
-                            n_param_sets);
+    sugg_tree.add_initial(param_sets, fold_segment, scores, n_leaves);
 }
 
 template void poly_taylor_suggest<float>(
@@ -432,9 +427,10 @@ template void poly_taylor_suggest<float>(
     std::span<const std::vector<double>> param_arr,
     std::span<const double> dparams,
     SizeType poly_order,
+    SizeType nbins,
     std::span<const SizeType> score_widths,
     const detection::ScoringFunction<float>& scoring_func,
-    utils::SuggestionStruct<float>& sugg_struct);
+    utils::SuggestionTree<float>& sugg_tree);
 
 template void poly_taylor_suggest<ComplexType>(
     std::span<const ComplexType> fold_segment,
@@ -442,8 +438,9 @@ template void poly_taylor_suggest<ComplexType>(
     std::span<const std::vector<double>> param_arr,
     std::span<const double> dparams,
     SizeType poly_order,
+    SizeType nbins,
     std::span<const SizeType> score_widths,
     const detection::ScoringFunction<ComplexType>& scoring_func,
-    utils::SuggestionStruct<ComplexType>& sugg_struct);
+    utils::SuggestionTree<ComplexType>& sugg_tree);
 
 } // namespace loki::core

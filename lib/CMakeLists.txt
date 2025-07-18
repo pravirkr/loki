@@ -37,14 +37,10 @@ CPMFindPackage(
   VERSION 13.2.0
   URL https://github.com/xtensor-stack/xsimd/archive/refs/tags/13.2.0.tar.gz
 )
-
-# xtensor (Tensor library) - Header-only, depends on xsimd
-CPMFindPackage(
-  NAME xtensor
-  VERSION 0.26.0
-  URL https://github.com/xtensor-stack/xtensor/archive/refs/tags/0.26.0.tar.gz
-  OPTIONS "XTENSOR_USE_XSIMD ON" "XTENSOR_USE_OPENMP ON"
-)
+if(xsimd_ADDED)
+  add_library(xsimd INTERFACE IMPORTED GLOBAL)
+  target_include_directories(xsimd INTERFACE ${xsimd_SOURCE_DIR}/include)
+endif()
 
 # Try to find header-only Boost for math+random(no COMPONENTS needed)
 find_package(Boost 1.83.0 QUIET)
@@ -179,7 +175,7 @@ target_link_libraries(
          FFTW::Float
          FFTW::FloatOpenMP
          spdlog::spdlog_header_only
-         xtensor
+         xsimd
          Boost::math
          Boost::random
          HighFive

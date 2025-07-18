@@ -103,12 +103,8 @@ SizeType find_nearest_sorted_idx_scan(std::span<const double> arr_sorted,
     while (hint_idx > 0 && arr_sorted[hint_idx - 1] >= val) {
         hint_idx--;
     }
-
     // `hint_idx` is now our lower bound index.
     SizeType idx = hint_idx;
-
-    // --- Decision logic to find the nearest neighbor (identical to original)
-    // ---
     if (idx == 0) {
         return 0;
     }
@@ -117,9 +113,8 @@ SizeType find_nearest_sorted_idx_scan(std::span<const double> arr_sorted,
     }
     if ((val - arr_sorted[idx - 1]) <= (arr_sorted[idx] - val)) {
         return idx - 1;
-    } else {
-        return idx;
     }
+    return idx;
 }
 
 std::vector<SizeType> find_neighbouring_indices(

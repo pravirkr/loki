@@ -473,24 +473,20 @@ PYBIND11_MODULE(libloki, m) {
 
     auto m_prune = m.def_submodule("prune", "Pruning submodule");
 
-    py::class_<utils::SuggestionStruct<float>>(m_prune, "SuggestionStructFloat")
+    py::class_<utils::SuggestionTree<float>>(m_prune, "SuggestionTreeFloat")
         .def(py::init<SizeType, SizeType, SizeType>(), py::arg("max_sugg"),
              py::arg("nparams"), py::arg("nbins"))
-        .def_property_readonly("param_sets",
-                               [](const utils::SuggestionStruct<float>& self) {
-                                   return as_pyarray_ref(self.get_param_sets());
+        .def_property_readonly("leaves",
+                               [](const utils::SuggestionTree<float>& self) {
+                                   return as_pyarray_ref(self.get_leaves());
                                })
         .def_property_readonly("folds",
-                               [](const utils::SuggestionStruct<float>& self) {
+                               [](const utils::SuggestionTree<float>& self) {
                                    return as_pyarray_ref(self.get_folds());
                                })
         .def_property_readonly("scores",
-                               [](const utils::SuggestionStruct<float>& self) {
+                               [](const utils::SuggestionTree<float>& self) {
                                    return as_pyarray_ref(self.get_scores());
-                               })
-        .def_property_readonly("backtracks",
-                               [](const utils::SuggestionStruct<float>& self) {
-                                   return as_pyarray_ref(self.get_backtracks());
                                });
 
     py::class_<PruningManagerFloat>(m_prune, "PruningManager")

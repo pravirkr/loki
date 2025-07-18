@@ -29,41 +29,44 @@ namespace loki::utils {
  *   read operations.
  *
  * Suggestions struct contains following arrays:
- * - param_sets: Parameter sets, shape (max_sugg, nparams + 2, 2)
- * - folds: Folded profiles, shape (max_sugg, 2, nbins)
- * - scores: Scores for each suggestion, shape (max_sugg)
- * - backtracks: Backtracks, shape (max_sugg, nparams + 2)
+ * - leaves: Parameter sets, shape (capacity, nparams + 2, 2)
+ * - folds: Folded profiles, shape (capacity, 2, nbins)
+ * - scores: Scores for each suggestion, shape (capacity)
  *
  * @tparam FoldType The type of the folded profiles.
  */
-template <typename FoldType = float> class SuggestionStruct {
+template <typename FoldType = float> class SuggestionTree {
 public:
     /**
-     * @brief Constructor for the SuggestionStruct class.
+     * @brief Constructor for the SuggestionTree class.
      *
      * Initializes the internal arrays with the given maximum number of
      * suggestions, number of parameters, and number of bins.
      *
-     * @param max_sugg Maximum number of suggestions to hold
+     * @param capacity Maximum number of suggestions to hold
      * @param nparams Number of parameters
      * @param nbins Number of bins
      */
-    SuggestionStruct(SizeType max_sugg, SizeType nparams, SizeType nbins);
+    SuggestionTree(SizeType capacity, SizeType nparams, SizeType nbins);
 
-    ~SuggestionStruct();
-    SuggestionStruct(SuggestionStruct&&) noexcept;
-    SuggestionStruct& operator=(SuggestionStruct&&) noexcept;
-    SuggestionStruct(const SuggestionStruct&)            = delete;
-    SuggestionStruct& operator=(const SuggestionStruct&) = delete;
+    ~SuggestionTree();
+    SuggestionTree(SuggestionTree&&) noexcept;
+    SuggestionTree& operator=(SuggestionTree&&) noexcept;
+    SuggestionTree(const SuggestionTree&)            = delete;
+    SuggestionTree& operator=(const SuggestionTree&) = delete;
 
     // Getters
-    [[nodiscard]] const std::vector<double>& get_param_sets() const noexcept;
-    [[nodiscard]] const std::vector<FoldType>& get_folds() const noexcept;
-    [[nodiscard]] std::vector<float> get_scores() const noexcept;
-    [[nodiscard]] const std::vector<SizeType>& get_backtracks() const noexcept;
-    [[nodiscard]] SizeType get_max_sugg() const noexcept;
+    [[nodiscard]] SizeType get_capacity() const noexcept;
     [[nodiscard]] SizeType get_nparams() const noexcept;
     [[nodiscard]] SizeType get_nbins() const noexcept;
+    [[nodiscard]] SizeType get_leaves_stride() const noexcept;
+    [[nodiscard]] SizeType get_folds_stride() const noexcept;
+    [[nodiscard]] const std::vector<double>& get_leaves() const noexcept;
+    [[nodiscard]] std::span<const double>
+    get_leaves_span(SizeType start_leaf_idx, SizeType n_leaves) const noexcept;
+    [[nodiscard]] const std::vector<FoldType>& get_folds() const noexcept;
+    [[nodiscard]] std::vector<float> get_scores() const noexcept;
+
     [[nodiscard]] SizeType get_nsugg() const noexcept;
     [[nodiscard]] SizeType get_nsugg_old() const noexcept;
     [[nodiscard]] float get_nsugg_lb() const noexcept;
@@ -85,21 +88,18 @@ public:
     // Transform the search parameters to some given t_ref
     [[nodiscard]] std::vector<double> get_transformed(double delta_t) const;
     // Add a suggestion to the struct if there is space
-    [[nodiscard]] bool add(std::span<const double> param_set,
+    [[nodiscard]] bool add(std::span<const double> leaf,
                            std::span<const FoldType> fold,
-                           float score,
-                           std::span<const SizeType> backtrack);
+                           float score);
     // Add an initial set of suggestions to the struct
-    void add_initial(std::span<const double> param_sets_batch,
-                     std::span<const FoldType> folds_batch,
-                     std::span<const float> scores_batch,
-                     std::span<const SizeType> backtracks_batch,
+    void add_initial(std::span<const double> batch_leaves,
+                     std::span<const FoldType> batch_folds,
+                     std::span<const float> batch_scores,
                      SizeType slots_to_write);
     // Add a batch of suggestions to the struct if there is space
-    [[nodiscard]] float add_batch(std::span<const double> param_sets_batch,
-                                  std::span<const FoldType> folds_batch,
-                                  std::span<const float> scores_batch,
-                                  std::span<const SizeType> backtracks_batch,
+    [[nodiscard]] float add_batch(std::span<const double> batch_leaves,
+                                  std::span<const FoldType> batch_folds,
+                                  std::span<const float> batch_scores,
                                   float current_threshold,
                                   SizeType slots_to_write);
     // Trim to keep only suggestions with scores >= median
@@ -114,7 +114,7 @@ private:
     std::unique_ptr<Impl> m_impl;
 };
 
-using SuggestionStructFloat   = SuggestionStruct<float>;
-using SuggestionStructComplex = SuggestionStruct<ComplexType>;
+using SuggestionTreeFloat   = SuggestionTree<float>;
+using SuggestionTreeComplex = SuggestionTree<ComplexType>;
 
 } // namespace loki::utils

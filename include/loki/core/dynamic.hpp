@@ -36,7 +36,7 @@ public:
 
     void suggest(std::span<const FoldType> fold_segment,
                  std::pair<double, double> coord_init,
-                 utils::SuggestionStruct<FoldType>& sugg_struct) const;
+                 utils::SuggestionTree<FoldType>& sugg_tree) const;
 
     void score(std::span<const FoldType> batch_folds,
                std::span<float> batch_scores,

@@ -55,8 +55,9 @@ void poly_taylor_suggest(
     std::span<const std::vector<double>> param_arr,
     std::span<const double> dparams,
     SizeType poly_order,
+    SizeType nbins,
     std::span<const SizeType> score_widths,
     const detection::ScoringFunction<FoldType>& scoring_func,
-    utils::SuggestionStruct<FoldType>& sugg_struct);
+    utils::SuggestionTree<FoldType>& sugg_tree);
 
 } // namespace loki::core

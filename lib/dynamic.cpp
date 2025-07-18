@@ -83,7 +83,7 @@ template <typename FoldType>
 void PruneTaylorDPFuncts<FoldType>::suggest(
     std::span<const FoldType> fold_segment,
     std::pair<double, double> coord_init,
-    utils::SuggestionStruct<FoldType>& sugg_struct) const {
+    utils::SuggestionTree<FoldType>& sugg_tree) const {
 
     // Create scoring function based on FoldType
     detection::ScoringFunction<FoldType> scoring_func;
@@ -103,8 +103,8 @@ void PruneTaylorDPFuncts<FoldType>::suggest(
 
     poly_taylor_suggest<FoldType>(fold_segment, coord_init, m_param_arr,
                                   m_dparams, m_cfg.get_prune_poly_order(),
-                                  m_cfg.get_score_widths(), scoring_func,
-                                  sugg_struct);
+                                  m_cfg.get_nbins(), m_cfg.get_score_widths(),
+                                  scoring_func, sugg_tree);
 }
 
 template <typename FoldType>

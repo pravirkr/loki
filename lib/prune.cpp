@@ -271,11 +271,9 @@ template <typename FoldType> struct PruningWorkspace {
     SizeType nbins;
     SizeType leaves_stride;
     SizeType folds_stride;
-    SizeType backtracks_stride;
 
     std::vector<double> batch_leaves;
     std::vector<FoldType> batch_folds;
-    std::vector<SizeType> batch_backtrack;
     std::vector<float> batch_scores;
     std::vector<SizeType> batch_isuggest;
     std::vector<SizeType> batch_passing_indices;
@@ -286,18 +284,14 @@ template <typename FoldType> struct PruningWorkspace {
           nbins(nbins),
           leaves_stride((nparams + 2) * kLeavesParamStride),
           folds_stride(2 * nbins),
-          backtracks_stride(nparams + 2),
           batch_leaves(max_batch_size * leaves_stride),
           batch_folds(max_batch_size * folds_stride),
-          batch_backtrack(max_batch_size * backtracks_stride),
           batch_scores(max_batch_size),
           batch_isuggest(max_batch_size),
           batch_passing_indices(max_batch_size) {}
 
     // Call this after filling batch_scores and batch_passing_indices
-    void filter_batch(SizeType n_leaves_passing,
-                      std::span<const SizeType> batch_param_idx,
-                      std::span<const double> batch_phase_shift) noexcept {
+    void filter_batch(SizeType n_leaves_passing) noexcept {
         for (SizeType dst_idx = 0; dst_idx < n_leaves_passing; ++dst_idx) {
             const SizeType src_idx           = batch_passing_indices[dst_idx];
             batch_scores[dst_idx]            = batch_scores[src_idx];
@@ -311,45 +305,12 @@ template <typename FoldType> struct PruningWorkspace {
             std::copy(batch_folds.begin() + folds_src_offset,
                       batch_folds.begin() + folds_src_offset + folds_stride,
                       batch_folds.begin() + folds_dst_offset);
-            const SizeType backtrack_offset       = dst_idx * backtracks_stride;
-            batch_backtrack[backtrack_offset + 0] = batch_isuggest[src_idx];
-            batch_backtrack[backtrack_offset + 1] = batch_param_idx[src_idx];
-
-            // Vectorized zero-fill for middle elements
-            std::fill(batch_backtrack.begin() + backtrack_offset + 2,
-                      batch_backtrack.begin() + backtrack_offset + 2 +
-                          (nparams - 1),
-                      SizeType{0});
-
-            batch_backtrack[backtrack_offset + nparams + 1] =
-                static_cast<SizeType>(std::round(batch_phase_shift[src_idx]));
-        }
-    }
-
-    void
-    filter_batch_backtrack(SizeType n_leaves_passing,
-                           std::span<const SizeType> batch_param_idx,
-                           std::span<const double> batch_phase_shift) noexcept {
-        for (SizeType i = 0; i < n_leaves_passing; ++i) {
-            const SizeType backtrack_offset       = i * backtracks_stride;
-            batch_backtrack[backtrack_offset + 0] = batch_isuggest[i];
-            batch_backtrack[backtrack_offset + 1] = batch_param_idx[i];
-
-            // Vectorized zero-fill
-            std::fill(batch_backtrack.begin() + backtrack_offset + 2,
-                      batch_backtrack.begin() + backtrack_offset + 2 +
-                          (nparams - 1),
-                      SizeType{0});
-
-            batch_backtrack[backtrack_offset + nparams + 1] =
-                static_cast<SizeType>(std::round(batch_phase_shift[i]));
         }
     }
 
     SizeType get_memory_usage() const noexcept {
         return (batch_leaves.size() * sizeof(double)) +
                (batch_folds.size() * sizeof(FoldType)) +
-               (batch_backtrack.size() * sizeof(SizeType)) +
                (batch_scores.size() * sizeof(float)) +
                (batch_isuggest.size() * sizeof(SizeType)) +
                (batch_passing_indices.size() * sizeof(SizeType));
@@ -371,7 +332,7 @@ public:
           m_batch_size(batch_size),
           m_kind(kind) {
         // Allocate suggestion buffer
-        m_suggestions = std::make_unique<utils::SuggestionStruct<FoldType>>(
+        m_suggestions = std::make_unique<utils::SuggestionTree<FoldType>>(
             m_max_sugg, m_cfg.get_nparams(), m_cfg.get_nbins());
 
         // Allocate iteration workspace
@@ -438,8 +399,7 @@ public:
         result_writer.write_run_results(run_name, m_scheme->get_data(),
                                         m_suggestions->get_transformed(delta_t),
                                         m_suggestions->get_scores(),
-                                        m_suggestions->get_nsugg(),
-                                        *m_pstats);
+                                        m_suggestions->get_nsugg(), *m_pstats);
 
         // Final log entries
         std::ofstream final_log(actual_log_file, std::ios::app);
@@ -467,7 +427,7 @@ private:
     std::unique_ptr<cands::PruneStatsCollection> m_pstats;
 
     // A single, in-place (circular) suggestion buffer
-    std::unique_ptr<utils::SuggestionStruct<FoldType>> m_suggestions;
+    std::unique_ptr<utils::SuggestionTree<FoldType>> m_suggestions;
     std::unique_ptr<PruningWorkspace<FoldType>> m_pruning_workspace;
 
     void initialize(std::span<const FoldType> ffa_fold,
@@ -610,12 +570,10 @@ private:
 
             // Branch
             timer.start();
-            std::span<const double> batch_psets_span(
-                m_suggestions->get_param_sets().data() +
-                    (i_batch_start * m_pruning_workspace->leaves_stride),
-                current_batch_size * m_pruning_workspace->leaves_stride);
+            auto batch_leaves_span = m_suggestions->get_leaves_span(
+                i_batch_start, current_batch_size);
             const auto batch_leaf_origins = m_prune_funcs->branch(
-                batch_psets_span, coord_cur, m_pruning_workspace->batch_leaves,
+                batch_leaves_span, coord_cur, m_pruning_workspace->batch_leaves,
                 current_batch_size, n_params);
             const auto n_leaves_batch = batch_leaf_origins.size();
             stats.batch_timers["branch"] += timer.stop();
@@ -662,12 +620,9 @@ private:
             for (SizeType i = 0; i < n_leaves_after_validation; ++i) {
                 batch_isuggest_span[i] = batch_leaf_origins[i] + i_batch_start;
             }
-            std::span<const FoldType> batch_folds_suggest_span(
-                m_suggestions->get_folds().data(),
-                m_suggestions->get_folds().size());
             m_prune_funcs->load_shift_add(
-                batch_folds_suggest_span, batch_isuggest_span, ffa_fold_segment,
-                batch_param_idx, batch_phase_shift,
+                m_suggestions->get_folds(), batch_isuggest_span,
+                ffa_fold_segment, batch_param_idx, batch_phase_shift,
                 m_pruning_workspace->batch_folds, n_leaves_after_validation);
             stats.batch_timers["shift_add"] += timer.stop();
 
@@ -714,12 +669,7 @@ private:
 
             timer.start();
             if (n_leaves_passing != n_leaves_after_validation) {
-                m_pruning_workspace->filter_batch(
-                    n_leaves_passing, batch_param_idx, batch_phase_shift);
-            } else {
-                // Only construct backtrack
-                m_pruning_workspace->filter_batch_backtrack(
-                    n_leaves_passing, batch_param_idx, batch_phase_shift);
+                m_pruning_workspace->filter_batch(n_leaves_passing);
             }
             stats.batch_timers["filter"] += timer.stop();
 
@@ -735,8 +685,7 @@ private:
             current_threshold = m_suggestions->add_batch(
                 m_pruning_workspace->batch_leaves,
                 m_pruning_workspace->batch_folds, batch_scores_span,
-                m_pruning_workspace->batch_backtrack, current_threshold,
-                n_leaves_passing);
+                current_threshold, n_leaves_passing);
             stats.batch_timers["batch_add"] += timer.stop();
             // Notify the buffer that a batch of the old suggestions has been
             // consumed
