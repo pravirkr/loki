@@ -152,6 +152,9 @@ public:
         std::lock_guard<std::mutex> lock(m_mutex);
 
         if (m_free_slots_out->empty()) {
+            spdlog::error("Pool exhausted! Active slots: {}, Max slots: {}",
+                          m_slots_per_pool - m_free_slots_out->size(),
+                          m_slots_per_pool);
             throw std::runtime_error(
                 "DualPoolFoldManager 'out' pool exhausted!");
         }
@@ -394,35 +397,33 @@ float compute_threshold_survival(std::span<const float> scores,
     return top_scores.back();
 }
 
-std::unique_ptr<FoldVectorHandle> prune_folds(const FoldVectorHandle& folds_in,
-                                              std::span<const float> scores,
-                                              float threshold,
-                                              DualPoolFoldManager& manager) {
+std::unique_ptr<FoldVectorHandle>
+prune_folds(std::unique_ptr<FoldVectorHandle> folds_in_ptr,
+            std::span<const float> scores,
+            float threshold) {
+    auto& folds_in     = *folds_in_ptr;
     const auto ntrials = folds_in.ntrials();
     const auto nbins   = folds_in.nbins();
     error_check::check_equal(scores.size(), ntrials,
                              "Scores size does not match number of trials");
 
-    // Allocate output with dummy placeholder number of trials
-    auto folds_out   = manager.allocate(ntrials, folds_in.variance());
-    auto input_data  = folds_in.data();
-    auto output_data = folds_out->data();
-
+    auto data                = folds_in.data();
     SizeType ntrials_success = 0;
     for (SizeType i = 0; i < ntrials; ++i) {
         if (scores[i] > threshold) {
-            const auto input_offset  = i * nbins;
-            const auto output_offset = ntrials_success * nbins;
-            std::copy_n(
-                input_data.begin() + static_cast<IndexType>(input_offset),
-                nbins,
-                output_data.begin() + static_cast<IndexType>(output_offset));
+            if (i != ntrials_success) { // Avoid self-copy
+                const auto input_offset  = i * nbins;
+                const auto output_offset = ntrials_success * nbins;
+                std::copy_n(
+                    data.begin() + static_cast<IndexType>(input_offset), nbins,
+                    data.begin() + static_cast<IndexType>(output_offset));
+            }
             ++ntrials_success;
         }
     }
     // Set correct number of trials in output
-    folds_out->set_ntrials(ntrials_success);
-    return folds_out;
+    folds_in.set_ntrials(ntrials_success);
+    return folds_in_ptr;
 }
 
 std::tuple<State, FoldsType>
@@ -445,10 +446,11 @@ gen_next_using_thresh(const State& state_cur,
     detection::snr_boxcar_2d_max(folds_h0_sim->data(), folds_h0_sim->ntrials(),
                                  box_score_widths, scores_h0,
                                  std::sqrt(folds_h0_sim->variance()));
+    const auto folds_h0_sim_ntrials = folds_h0_sim->ntrials();
     auto folds_h0_pruned =
-        prune_folds(*folds_h0_sim, scores_h0, threshold, manager);
+        prune_folds(std::move(folds_h0_sim), scores_h0, threshold);
     const auto success_h0 = static_cast<float>(folds_h0_pruned->ntrials()) /
-                            static_cast<float>(folds_h0_sim->ntrials());
+                            static_cast<float>(folds_h0_sim_ntrials);
 
     auto folds_h1_sim =
         simulate_folds(*folds_cur.folds_h1, profile, rng, manager, buffers,
@@ -457,10 +459,11 @@ gen_next_using_thresh(const State& state_cur,
     detection::snr_boxcar_2d_max(folds_h1_sim->data(), folds_h1_sim->ntrials(),
                                  box_score_widths, scores_h1,
                                  std::sqrt(folds_h1_sim->variance()));
+    const auto folds_h1_sim_ntrials = folds_h1_sim->ntrials();
     auto folds_h1_pruned =
-        prune_folds(*folds_h1_sim, scores_h1, threshold, manager);
+        prune_folds(std::move(folds_h1_sim), scores_h1, threshold);
     const auto success_h1 = static_cast<float>(folds_h1_pruned->ntrials()) /
-                            static_cast<float>(folds_h1_sim->ntrials());
+                            static_cast<float>(folds_h1_sim_ntrials);
 
     const auto state_next =
         state_cur.gen_next(threshold, success_h0, success_h1, nbranches);
@@ -490,10 +493,11 @@ gen_next_using_surv_prob(const State& state_cur,
                                  std::sqrt(folds_h0_sim->variance()));
     const auto threshold_h0 =
         compute_threshold_survival(scores_h0, surv_prob_h0);
+    const auto folds_h0_sim_ntrials = folds_h0_sim->ntrials();
     auto folds_h0_pruned =
-        prune_folds(*folds_h0_sim, scores_h0, threshold_h0, manager);
+        prune_folds(std::move(folds_h0_sim), scores_h0, threshold_h0);
     const auto success_h0 = static_cast<float>(folds_h0_pruned->ntrials()) /
-                            static_cast<float>(folds_h0_sim->ntrials());
+                            static_cast<float>(folds_h0_sim_ntrials);
 
     auto folds_h1_sim =
         simulate_folds(*folds_cur.folds_h1, profile, rng, manager, buffers,
@@ -502,10 +506,11 @@ gen_next_using_surv_prob(const State& state_cur,
     detection::snr_boxcar_2d_max(folds_h1_sim->data(), folds_h1_sim->ntrials(),
                                  box_score_widths, scores_h1,
                                  std::sqrt(folds_h1_sim->variance()));
+    const auto folds_h1_sim_ntrials = folds_h1_sim->ntrials();
     auto folds_h1_pruned =
-        prune_folds(*folds_h1_sim, scores_h1, threshold_h0, manager);
+        prune_folds(std::move(folds_h1_sim), scores_h1, threshold_h0);
     const auto success_h1 = static_cast<float>(folds_h1_pruned->ntrials()) /
-                            static_cast<float>(folds_h1_sim->ntrials());
+                            static_cast<float>(folds_h1_sim_ntrials);
 
     const auto state_next =
         state_cur.gen_next(threshold_h0, success_h0, success_h1, nbranches);
@@ -745,8 +750,8 @@ private:
         }
         // h0 + h1 per cell
         const auto max_persistent = max_active_per_stage * m_nprobs * 2;
-        // 2 simulated and 2 pruned folds per transition
-        const auto max_temporary  = m_nthreads * 4;
+        // 2 simulated folds per transition
+        const auto max_temporary  = m_nthreads * 2;
         const auto slots_per_pool = max_persistent + max_temporary;
         spdlog::info("Allocation analysis: {} active thresholds max, {} prob "
                      "bins, {} threads",

@@ -24,18 +24,19 @@ find_package(FFTW REQUIRED COMPONENTS FLOAT_LIB FLOAT_OPENMP_LIB)
 message(STATUS "Searching for CPM dependencies (will download if not found locally)...")
 
 # spdlog (Header-only logging library)
-CPMFindPackage(
+CPMAddPackage(
   NAME spdlog
-  VERSION 1.15.2
-  GITHUB_REPOSITORY gabime/spdlog
+  VERSION 1.15.3
+  URL https://github.com/gabime/spdlog/archive/refs/tags/v1.15.3.tar.gz
   OPTIONS "SPDLOG_INSTALL ON"
 )
 
 # xsimd (SIMD library) - Header-only
-CPMFindPackage(
+CPMAddPackage(
   NAME xsimd
   VERSION 13.2.0
   URL https://github.com/xtensor-stack/xsimd/archive/refs/tags/13.2.0.tar.gz
+  DOWNLOAD_ONLY YES
 )
 if(xsimd_ADDED)
   add_library(xsimd INTERFACE IMPORTED GLOBAL)
@@ -76,15 +77,15 @@ else()
 endif()
 
 # HighFive (HDF5 C++ interface) - Depends on HDF5 found earlier
-CPMFindPackage(
+CPMAddPackage(
   NAME HighFive
-  VERSION 2.10.1
-  URL https://github.com/BlueBrain/HighFive/archive/refs/tags/v2.10.1.tar.gz
-  OPTIONS "HIGHFIVE_FIND_HDF5 ON" "HIGHFIVE_USE_XTENSOR ON"
+  VERSION 3.0.0
+  URL https://github.com/highfive-devs/highfive/archive/refs/tags/v3.0.0.tar.gz
+  OPTIONS "HIGHFIVE_FIND_HDF5 ON"
 )
 
 # indicators (Progress indicators) - Header-only (Use git main branch)
-CPMFindPackage(
+CPMAddPackage(
   NAME indicators
   VERSION 2.3
   GIT_TAG ac6c93ea2b1f97a220d10a0729a625b3f51e320b
@@ -99,8 +100,10 @@ endif()
 # Thread pool
 CPMAddPackage(
   NAME BS_thread_pool
-  GITHUB_REPOSITORY bshoshany/thread-pool
-  VERSION 5.0.0 EXCLUDE_FROM_ALL SYSTEM
+  VERSION 5.0.0 
+  URL https://github.com/bshoshany/thread-pool/archive/refs/tags/v5.0.0.tar.gz
+  DOWNLOAD_ONLY YES
+  EXCLUDE_FROM_ALL SYSTEM
 )
 if(BS_thread_pool_ADDED)
   add_library(BS_thread_pool INTERFACE IMPORTED GLOBAL)
@@ -178,7 +181,7 @@ target_link_libraries(
          xsimd
          Boost::math
          Boost::random
-         HighFive
+         HighFive::HighFive
          indicators::indicators
          BS_thread_pool
 )
