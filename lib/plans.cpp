@@ -89,6 +89,7 @@ void FFAPlan::configure_plan() {
     nsegments.resize(levels);
     tsegments.resize(levels);
     ncoords.resize(levels);
+    ncoords_lb.resize(levels);
     params.resize(levels);
     dparams.resize(levels);
     fold_shapes.resize(levels);
@@ -150,6 +151,8 @@ void FFAPlan::configure_plan() {
         coordinates[0].emplace_back(coord_cur);
     }
     ncoords[0] = coordinates[0].size();
+    ncoords_lb[0] =
+        ncoords[0] > 0 ? std::log2(static_cast<float>(ncoords[0])) : 0.0F;
 
     for (SizeType i_level = 1; i_level < levels; ++i_level) {
         const auto strides = calculate_strides(params[i_level - 1]);
@@ -180,6 +183,10 @@ void FFAPlan::configure_plan() {
             coordinates[i_level].emplace_back(coord_cur);
         }
         ncoords[i_level] = coordinates[i_level].size();
+        ncoords_lb[i_level] =
+            ncoords[i_level] > 0
+                ? std::log2(static_cast<float>(ncoords[i_level]))
+                : 0.0F;
     }
 }
 

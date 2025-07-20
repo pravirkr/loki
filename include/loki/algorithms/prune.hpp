@@ -9,6 +9,7 @@
 
 #include "loki/algorithms/plans.hpp"
 #include "loki/common/types.hpp"
+#include "loki/progress.hpp"
 #include "loki/search/configs.hpp"
 
 namespace loki::algorithms {
@@ -64,7 +65,9 @@ public:
         SizeType ref_seg,
         const std::filesystem::path& outdir                     = "./",
         const std::optional<std::filesystem::path>& log_file    = std::nullopt,
-        const std::optional<std::filesystem::path>& result_file = std::nullopt);
+        const std::optional<std::filesystem::path>& result_file = std::nullopt,
+        progress::MultiprocessProgressTracker* tracker          = nullptr,
+        int task_id                                             = 0);
 
 private:
     class Impl;

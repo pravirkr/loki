@@ -194,11 +194,16 @@ private:
                 std::format("Pruning segment {:03d}", ref_seg), nsegments - 1);
             task_ids.push_back(id);
 
-            auto future = pool.submit_task([this, ffa_plan, ref_seg, outdir,
-                                            kind, &tracker, id]() mutable {
-                execute_single_ref_seg(ffa_plan, ref_seg, outdir, kind, tracker,
-                                       id);
-            });
+            auto future = pool.submit_task(
+                [this, ref_seg, outdir, kind, &tracker, id]() mutable {
+                    // Create a Prune instance for each thread
+                    auto prune =
+                        Prune<FoldType>(m_ffa_plan, m_cfg, m_threshold_scheme,
+                                        m_max_sugg, m_batch_size, kind);
+
+                    prune.execute(m_ffa_fold, ref_seg, outdir, std::nullopt,
+                                  std::nullopt, &tracker, id);
+                });
             futures.push_back(std::move(future));
         }
         // Wait for all tasks to complete and handle exceptions
@@ -206,14 +211,16 @@ private:
         for (size_t i = 0; i < futures.size(); ++i) {
             try {
                 futures[i].get();
-                spdlog::info("Completed ref segment {}", ref_segs[i]);
+                //tracker.log(spdlog::level::info, "Completed ref segment {}",
+                //            ref_segs[i]);
             } catch (const std::exception& e) {
                 const std::string error_msg = std::format(
                     "Error in ref_seg {}: {}", ref_segs[i], e.what());
                 errors.emplace_back(ref_segs[i], error_msg);
-                spdlog::error(error_msg);
+                //tracker.log(spdlog::level::err, "{}", error_msg);
             }
         }
+        tracker.stop();
 
         // Log errors to file
         if (!errors.empty()) {
@@ -223,36 +230,10 @@ private:
                                    error_msg);
             }
             log.close();
+            spdlog::error("{}", errors.back().second);
         }
-        tracker.stop();
+        
         spdlog::info("All tasks completed and progress tracker stopped.");
-    }
-    void execute_single_ref_seg(const plans::FFAPlan& ffa_plan,
-                                SizeType ref_seg,
-                                const std::filesystem::path& outdir,
-                                std::string_view kind,
-                                progress::MultiprocessProgressTracker& tracker,
-                                int task_id) {
-
-        try {
-            // Create separate Prune instance for this thread
-            auto prune = Prune<FoldType>(ffa_plan, m_cfg, m_threshold_scheme,
-                                         m_max_sugg, m_batch_size, kind);
-
-            // Generate unique temporary files for this thread
-            const std::string run_name =
-                std::format("{:03d}_{:03d}", ref_seg, ref_seg);
-            const auto temp_log_file =
-                outdir / std::format("tmp_{}_log.txt", run_name);
-            const auto temp_result_file =
-                outdir / std::format("tmp_{}_results.h5", run_name);
-
-            prune.execute(m_ffa_fold, ref_seg, outdir, temp_log_file,
-                          temp_result_file);
-        } catch (const std::exception& e) {
-            spdlog::error("Error in ref_seg {}: {}", ref_seg, e.what());
-            throw; // Re-throw to be caught by the future
-        }
     }
 };
 
@@ -359,9 +340,11 @@ public:
                  SizeType ref_seg,
                  const std::filesystem::path& outdir,
                  const std::optional<std::filesystem::path>& log_file,
-                 const std::optional<std::filesystem::path>& result_file) {
+                 const std::optional<std::filesystem::path>& result_file,
+                 progress::MultiprocessProgressTracker* tracker,
+                 int task_id) {
         const std::string run_name =
-            std::format("{:03d}_{:02d}", ref_seg, ref_seg);
+            std::format("{:03d}_{:02d}", ref_seg, task_id);
         std::filesystem::path actual_log_file =
             log_file.value_or(outdir / std::format("tmp_{}_log.txt", run_name));
         std::filesystem::path actual_result_file = result_file.value_or(
@@ -370,24 +353,27 @@ public:
         log << std::format("Pruning log for ref segment: {}\n", ref_seg);
         log.close();
 
-        initialize(ffa_fold, ref_seg, actual_log_file);
-
         const auto nsegments = m_ffa_plan.nsegments.back();
         progress::ProgressGuard progress_guard(true);
-        auto bar = progress::make_standard_bar("Pruning...");
+        progress::ProgressTracker bar(
+            std::format("Pruning segment {:03d}", ref_seg), nsegments - 1,
+            tracker, task_id);
+
+        initialize(ffa_fold, ref_seg, actual_log_file, &bar);
 
         for (SizeType iter = 0; iter < nsegments - 1; ++iter) {
-            execute_iteration(ffa_fold, actual_log_file);
+            execute_iteration(ffa_fold, actual_log_file, &bar);
             // Check for early termination (no survivors)
             if (m_prune_complete) {
-                spdlog::info(
+                bar.log(
+                    spdlog::level::info,
                     "Pruning terminated early at iteration {} - no survivors",
                     iter + 1);
                 break;
             }
-            const auto progress = static_cast<float>(iter) /
-                                  static_cast<float>(nsegments - 1) * 100.0F;
-            bar.set_progress(static_cast<SizeType>(progress));
+            bar.set_score(m_suggestions->get_score_max());
+            bar.set_leaves(m_suggestions->get_nsugg_lb());
+            bar.set_progress(iter + 1);
         }
 
         // Transform the suggestion params to middle of the data
@@ -407,9 +393,12 @@ public:
                                  ref_seg);
         final_log << std::format("Time: {}\n", m_pstats->get_timer_summary());
         final_log.close();
-        spdlog::info("Pruning complete for ref segment {}", ref_seg);
-        spdlog::info("Pruning stats: {}", m_pstats->get_stats_summary());
-        spdlog::info("Pruning time: {}", m_pstats->get_concise_timer_summary());
+        bar.log(spdlog::level::info, "Pruning complete for ref segment {}",
+                ref_seg);
+        bar.log(spdlog::level::info, "Pruning stats: {}",
+                m_pstats->get_stats_summary());
+        bar.log(spdlog::level::info, "Pruning time: {}",
+                m_pstats->get_concise_timer_summary());
     }
 
 private:
@@ -432,8 +421,9 @@ private:
 
     void initialize(std::span<const FoldType> ffa_fold,
                     SizeType ref_seg,
-                    const std::filesystem::path& log_file) {
-        timing::ScopeTimer timer("Prune::initialize");
+                    const std::filesystem::path& log_file,
+                    progress::ProgressTracker* bar) {
+        //timing::ScopeTimer timer("Prune::initialize");
         // Reset the suggestion buffer state
         m_suggestions->reset();
 
@@ -445,8 +435,9 @@ private:
 
         m_prune_level    = 0;
         m_prune_complete = false;
-        spdlog::info("Initializing pruning run for ref segment: {}",
-                     m_scheme->get_ref_idx());
+        bar->log(spdlog::level::info,
+                 "Initializing pruning run for ref segment: {}",
+                 m_scheme->get_ref_idx());
 
         // Initialize the suggestions with the first segment
         const auto fold_segment =
@@ -476,7 +467,8 @@ private:
     }
 
     void execute_iteration(std::span<const FoldType> ffa_fold,
-                           const std::filesystem::path& log_file) {
+                           const std::filesystem::path& log_file,
+                           progress::ProgressTracker* bar) {
         if (m_prune_complete) {
             return;
         }
@@ -523,8 +515,9 @@ private:
         // Check if no survivors
         if (m_suggestions->get_nsugg() == 0) {
             m_prune_complete = true;
-            spdlog::info("Pruning complete at level {} - no survivors",
-                         m_prune_level);
+            bar->log(spdlog::level::info,
+                     "Pruning complete at level {} - no survivors",
+                     m_prune_level);
             return;
         }
     }
@@ -768,8 +761,11 @@ void Prune<FoldType>::execute(
     SizeType ref_seg,
     const std::filesystem::path& outdir,
     const std::optional<std::filesystem::path>& log_file,
-    const std::optional<std::filesystem::path>& result_file) {
-    m_impl->execute(ffa_fold, ref_seg, outdir, log_file, result_file);
+    const std::optional<std::filesystem::path>& result_file,
+    progress::MultiprocessProgressTracker* tracker,
+    int task_id) {
+    m_impl->execute(ffa_fold, ref_seg, outdir, log_file, result_file, tracker,
+                    task_id);
 }
 
 // Template instantiations

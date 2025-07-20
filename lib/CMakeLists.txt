@@ -84,19 +84,6 @@ CPMAddPackage(
   OPTIONS "HIGHFIVE_FIND_HDF5 ON"
 )
 
-# indicators (Progress indicators) - Header-only (Use git main branch)
-CPMAddPackage(
-  NAME indicators
-  VERSION 2.3
-  GIT_TAG ac6c93ea2b1f97a220d10a0729a625b3f51e320b
-  GITHUB_REPOSITORY p-ranav/indicators
-  DOWNLOAD_ONLY YES
-)
-if(indicators_ADDED)
-  add_library(indicators::indicators INTERFACE IMPORTED GLOBAL)
-  target_include_directories(indicators::indicators INTERFACE ${indicators_SOURCE_DIR}/include)
-endif()
-
 # Thread pool
 CPMAddPackage(
   NAME BS_thread_pool
@@ -182,7 +169,6 @@ target_link_libraries(
          Boost::math
          Boost::random
          HighFive::HighFive
-         indicators::indicators
          BS_thread_pool
 )
 

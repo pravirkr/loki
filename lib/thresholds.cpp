@@ -655,7 +655,8 @@ public:
     void run(SizeType thres_neigh = 10) {
         spdlog::info("Running dynamic threshold scheme");
         progress::ProgressGuard progress_guard(true);
-        auto bar = progress::make_standard_bar("Computing scheme...");
+        auto bar =
+            progress::make_standard_bar("Computing scheme", m_nstages - 1);
 
         for (SizeType istage = 1; istage < m_nstages; ++istage) {
             run_segment(istage, thres_neigh);
@@ -665,10 +666,9 @@ public:
             for (auto& fold_opt : m_folds_next) {
                 fold_opt.reset();
             }
-            const auto progress = static_cast<float>(istage) /
-                                  static_cast<float>(m_nstages - 1) * 100.0F;
-            bar.set_progress(static_cast<SizeType>(progress));
+            bar.set_progress(istage);
         }
+        bar.mark_as_completed();
     }
 
     // Save

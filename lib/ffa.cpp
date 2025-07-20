@@ -4,7 +4,6 @@
 #include <memory>
 #include <utility>
 
-#include <indicators/cursor_control.hpp>
 #include <omp.h>
 #include <spdlog/spdlog.h>
 
@@ -111,7 +110,7 @@ private:
 
         const auto levels = m_cfg.get_niters_ffa() + 1;
         progress::ProgressGuard progress_guard(m_show_progress);
-        auto bar = progress::make_standard_bar("Computing FFA...");
+        auto bar = progress::make_ffa_bar("Computing FFA", levels - 1);
 
         for (SizeType i_level = 1; i_level < levels; ++i_level) {
             // Determine output buffer: final iteration writes to output buffer
@@ -123,11 +122,11 @@ private:
                 std::swap(fold_in_ptr, fold_out_ptr);
             }
             if (m_show_progress) {
-                const auto progress = static_cast<float>(i_level) /
-                                      static_cast<float>(levels - 1) * 100.0F;
-                bar.set_progress(static_cast<SizeType>(progress));
+                bar->set_leaves(m_ffa_plan.ncoords_lb[i_level]);
+                bar->set_progress(i_level);
             }
         }
+        bar->mark_as_completed();
     }
 
     void execute_single_buffer(std::span<const float> ts_e,
@@ -158,7 +157,7 @@ private:
         }
 
         progress::ProgressGuard progress_guard(m_show_progress);
-        auto bar = progress::make_standard_bar("Computing FFA...");
+        auto bar = progress::make_ffa_bar("Computing FFA", levels - 1);
 
         for (SizeType i_level = 1; i_level < levels; ++i_level) {
             const bool is_last = i_level == levels - 1;
@@ -167,11 +166,11 @@ private:
                 std::swap(current_in_ptr, current_out_ptr);
             }
             if (m_show_progress) {
-                const auto progress = static_cast<float>(i_level) /
-                                      static_cast<float>(levels - 1) * 100.0F;
-                bar.set_progress(static_cast<SizeType>(progress));
+                bar->set_leaves(m_ffa_plan.ncoords_lb[i_level]);
+                bar->set_progress(i_level);
             }
         }
+        bar->mark_as_completed();
     }
 
     void execute_iter(const float* __restrict__ fold_in,
@@ -424,7 +423,7 @@ private:
 
         const auto levels = m_cfg.get_niters_ffa() + 1;
         progress::ProgressGuard progress_guard(m_show_progress);
-        auto bar = progress::make_standard_bar("Computing FFA...");
+        auto bar = progress::make_ffa_bar("Computing FFA", levels - 1);
 
         for (SizeType i_level = 1; i_level < levels; ++i_level) {
             // Determine output buffer: final iteration writes to output buffer
@@ -437,11 +436,11 @@ private:
                 std::swap(fold_in_ptr, fold_out_ptr);
             }
             if (m_show_progress) {
-                const auto progress = static_cast<float>(i_level) /
-                                      static_cast<float>(levels - 1) * 100.0F;
-                bar.set_progress(static_cast<SizeType>(progress));
+                bar->set_leaves(m_ffa_plan.ncoords_lb[i_level]);
+                bar->set_progress(i_level);
             }
         }
+        bar->mark_as_completed();
     }
 
     // This is a special case for the double buffer implementation where we
@@ -456,7 +455,7 @@ private:
 
         const auto levels = m_cfg.get_niters_ffa() + 1;
         progress::ProgressGuard progress_guard(m_show_progress);
-        auto bar = progress::make_standard_bar("Computing FFA...");
+        auto bar = progress::make_ffa_bar("Computing FFA", levels - 1);
 
         for (SizeType i_level = 1; i_level < levels; ++i_level) {
             // Always ping-pong between internal buffers
@@ -464,11 +463,11 @@ private:
             std::swap(fold_in_ptr, fold_out_ptr);
 
             if (m_show_progress) {
-                const auto progress = static_cast<float>(i_level) /
-                                      static_cast<float>(levels - 1) * 100.0F;
-                bar.set_progress(static_cast<SizeType>(progress));
+                bar->set_leaves(m_ffa_plan.ncoords_lb[i_level]);
+                bar->set_progress(i_level);
             }
         }
+        bar->mark_as_completed();
         return fold_in_ptr;
     }
 
@@ -505,7 +504,7 @@ private:
         initialize(ts_e, ts_v, current_in_ptr, current_out_ptr);
 
         progress::ProgressGuard progress_guard(m_show_progress);
-        auto bar = progress::make_standard_bar("Computing FFA...");
+        auto bar = progress::make_ffa_bar("Computing FFA", levels - 1);
 
         for (SizeType i_level = 1; i_level < levels; ++i_level) {
             const bool is_last = i_level == levels - 1;
@@ -514,11 +513,11 @@ private:
                 std::swap(current_in_ptr, current_out_ptr);
             }
             if (m_show_progress) {
-                const auto progress = static_cast<float>(i_level) /
-                                      static_cast<float>(levels - 1) * 100.0F;
-                bar.set_progress(static_cast<SizeType>(progress));
+                bar->set_leaves(m_ffa_plan.ncoords_lb[i_level]);
+                bar->set_progress(i_level);
             }
         }
+        bar->mark_as_completed();
     }
 
     void execute_iter(const ComplexType* __restrict__ fold_in,

@@ -23,6 +23,7 @@ struct FFAPlan {
     std::vector<SizeType> nsegments;
     std::vector<double> tsegments;
     std::vector<SizeType> ncoords;
+    std::vector<float> ncoords_lb;
     std::vector<std::vector<std::vector<double>>> params;
     std::vector<std::vector<double>> dparams;
     std::vector<std::vector<SizeType>> fold_shapes;
