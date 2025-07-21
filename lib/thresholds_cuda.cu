@@ -67,10 +67,10 @@ struct FoldVectorHandleDevice {
 struct DevicePoolAllocator {
     float* pool_a_data;
     float* pool_b_data;
-    int* free_slots_a; // Pointer to free_slots array
-    int* free_slots_b;
-    int* free_top_a;
-    int* free_top_b;
+    int* free_slots_a; // Stack of available slot indices for pool A
+    int* free_slots_b; // Stack of available slot indices for pool B
+    int* free_top_a;   // Pointer to the count of free slots in A
+    int* free_top_b;   // Pointer to the count of free slots in B
     SizeType slot_size;
     SizeType max_ntrials;
     SizeType nbins;
@@ -78,7 +78,8 @@ struct DevicePoolAllocator {
     int current_out_pool; // 0 for A, 1 for B
 
     /**
-     * Allocate from the current "out" pool - callable from device
+     * Allocate from the current "out" pool - callable from device.
+     * This implements a lock-free pop from a concurrent stack.
      */
     __device__ FoldVectorHandleDevice allocate(SizeType ntrials,
                                                float variance) const {
@@ -88,65 +89,30 @@ struct DevicePoolAllocator {
         int* free_slots = (current_out_pool == 0) ? free_slots_a : free_slots_b;
         float* pool_data = (current_out_pool == 0) ? pool_a_data : pool_b_data;
 
-        // DEBUG: Check initial state
-        int current_top = atomicAdd(free_top, 0); // Read without modifying
-        if (threadIdx.x == 0 && blockIdx.x < 5) { // Only first few blocks
-            printf(
-                "Block %d: Before alloc, current_top=%d, slots_per_pool=%d\n",
-                blockIdx.x, current_top, static_cast<int>(slots_per_pool));
+        // Atomically decrement the free slot counter. The return value is the
+        // *new* count. The index we want is this new count.
+        int stack_idx = atomicSub(free_top, 1) - 1;
+
+        if (stack_idx >= 0) {
+            // Get the actual slot index from the free list stack
+            int slot_idx = free_slots[stack_idx];
+
+            handle.data             = pool_data + (slot_idx * slot_size);
+            handle.ntrials          = ntrials;
+            handle.capacity_ntrials = max_ntrials;
+            handle.nbins            = nbins;
+            handle.variance         = variance;
+            handle.pool_id          = current_out_pool;
+            handle.slot_idx         = static_cast<SizeType>(slot_idx);
         }
-
-        // Atomically decrement and get the NEW top value
-        int new_top = atomicAdd(free_top, -1) - 1;
-
-        if (threadIdx.x == 0 && blockIdx.x < 5) {
-            printf("Block %d: After atomicAdd, new_top=%d\n", blockIdx.x,
-                   new_top);
-        }
-
-        if (new_top >= 0 && new_top < static_cast<int>(slots_per_pool)) {
-            int slot_idx = free_slots[new_top];
-
-            if (threadIdx.x == 0 && blockIdx.x < 5) {
-                printf("Block %d: slot_idx=%d, slot_size=%d\n", blockIdx.x,
-                       slot_idx, static_cast<int>(slot_size));
-            }
-
-            if (slot_idx >= 0 && slot_idx < static_cast<int>(slots_per_pool)) {
-                handle.data             = pool_data + (slot_idx * slot_size);
-                handle.ntrials          = ntrials;
-                handle.capacity_ntrials = max_ntrials;
-                handle.nbins            = nbins;
-                handle.variance         = variance;
-                handle.pool_id          = current_out_pool;
-                handle.slot_idx         = static_cast<SizeType>(slot_idx);
-
-                if (threadIdx.x == 0 && blockIdx.x < 5) {
-                    printf("Block %d: SUCCESS - allocated slot %d\n",
-                           blockIdx.x, slot_idx);
-                }
-            } else {
-                // CRITICAL: Restore the counter if slot_idx is invalid
-                atomicAdd(free_top, 1);
-                if (threadIdx.x == 0 && blockIdx.x < 3) {
-                    printf("Block %d: INVALID slot_idx=%d, restored counter\n",
-                           blockIdx.x, slot_idx);
-                }
-            }
-        } else {
-            // CRITICAL: Restore the counter if new_top is out of range
-            atomicAdd(free_top, 1);
-            if (threadIdx.x == 0 && blockIdx.x < 3) {
-                printf(
-                    "Block %d: Pool exhausted, new_top=%d, restored counter\n",
-                    blockIdx.x, new_top);
-            }
-        }
+        // If stack_idx < 0, the pool is exhausted. The handle remains invalid
+        // (handle.data == nullptr), which is the correct failure signal.
         return handle;
     }
 
     /**
-     * Deallocate - callable from device
+     * Deallocate - callable from device.
+     * This implements a lock-free push to a concurrent stack.
      */
     __device__ void deallocate(const FoldVectorHandleDevice& handle) const {
         if (!handle.is_valid()) {
@@ -156,19 +122,17 @@ struct DevicePoolAllocator {
         int* free_top   = (handle.pool_id == 0) ? free_top_a : free_top_b;
         int* free_slots = (handle.pool_id == 0) ? free_slots_a : free_slots_b;
 
-        // Atomically increment the top pointer. The return value is the old top
-        // index.
-        int old_top  = atomicAdd(free_top, 1);
-        int push_idx = old_top + 1;
+        // Atomically increment the free slot counter. The return value is the
+        // *old* count, which is the correct index to push our slot_idx into.
+        int stack_idx = atomicAdd(free_top, 1);
 
-        if (push_idx < static_cast<int>(slots_per_pool)) {
-            // Write the freed slot index to the new top of the stack.
-            free_slots[push_idx] = static_cast<int>(handle.slot_idx);
-        } else {
-            // This indicates a severe error, like a double-free, causing an
-            // overflow. Revert the counter to prevent further corruption.
-            atomicAdd(free_top, -1);
+        if (stack_idx < static_cast<int>(slots_per_pool)) {
+            // Return the slot index to the free list stack
+            free_slots[stack_idx] = static_cast<int>(handle.slot_idx);
         }
+        // If stack_idx is out of bounds, it implies a double-free or memory
+        // corruption. We do not revert the counter, as this would hide the
+        // error and lead to more corruption.
     }
 };
 
@@ -178,10 +142,10 @@ struct DevicePoolAllocator {
 class DualPoolFoldManagerDevice {
 public:
     DualPoolFoldManagerDevice(SizeType nbins,
-                              SizeType ntrials_min,
+                              SizeType max_ntrials_per_slot,
                               SizeType slots_per_pool)
         : m_nbins(nbins),
-          m_max_ntrials(2 * ntrials_min),
+          m_max_ntrials(max_ntrials_per_slot),
           m_slot_size(m_max_ntrials * nbins),
           m_slots_per_pool(slots_per_pool) {
 
@@ -189,7 +153,7 @@ public:
         m_pool_a.resize(m_slots_per_pool * m_slot_size);
         m_pool_b.resize(m_slots_per_pool * m_slot_size);
 
-        // Allocate free slot stacks (indices 0 to slots-1)
+        // Allocate and initialize free slot stacks (indices 0 to slots-1)
         m_free_slots_a.resize(m_slots_per_pool);
         m_free_slots_b.resize(m_slots_per_pool);
         thrust::sequence(thrust::device, m_free_slots_a.begin(),
@@ -197,13 +161,14 @@ public:
         thrust::sequence(thrust::device, m_free_slots_b.begin(),
                          m_free_slots_b.end(), 0);
 
-        // Allocate tops (init to slots_per_pool - 1)
+        // Allocate and initialize the top-of-stack counters.
+        // The value represents the *count* of free slots.
         cudaMalloc(&m_free_top_a, sizeof(int));
         cudaMalloc(&m_free_top_b, sizeof(int));
-        int initial_top = static_cast<int>(slots_per_pool) - 1;
-        cudaMemcpy(m_free_top_a, &initial_top, sizeof(int),
+        int initial_count = static_cast<int>(slots_per_pool);
+        cudaMemcpy(m_free_top_a, &initial_count, sizeof(int),
                    cudaMemcpyHostToDevice);
-        cudaMemcpy(m_free_top_b, &initial_top, sizeof(int),
+        cudaMemcpy(m_free_top_b, &initial_count, sizeof(int),
                    cudaMemcpyHostToDevice);
     }
 
@@ -294,17 +259,15 @@ struct FoldsTypeDevice {
 struct DeallocateFunctor {
     DevicePoolAllocator allocator;
 
-    __device__ void operator()(cuda::std::optional<FoldsTypeDevice>& fold) {
-        if (fold.has_value()) {
-            const auto& f = fold.value();
-            if (f.folds_h0.is_valid()) {
-                allocator.deallocate(f.folds_h0);
-            }
-            if (f.folds_h1.is_valid()) {
-                allocator.deallocate(f.folds_h1);
-            }
-            fold = cuda::std::nullopt;
+    __device__ void operator()(FoldsTypeDevice& fold) const {
+        if (fold.folds_h0.is_valid()) {
+            allocator.deallocate(fold.folds_h0);
         }
+        if (fold.folds_h1.is_valid()) {
+            allocator.deallocate(fold.folds_h1);
+        }
+        // Reset to default (nullptrs)
+        fold = FoldsTypeDevice();
     }
 };
 
@@ -344,15 +307,15 @@ __device__ int find_bin_index_device(const float* __restrict__ probs,
     return nprobs - 1;
 }
 
-__device__ void simulate_transition_phase(
-    const TransitionWorkItem& work_item,
-    const cuda::std::optional<FoldsTypeDevice>* __restrict__ folds_in_ptr,
-    const float* __restrict__ profile,
-    int nbins,
-    float bias_snr,
-    float var_add,
-    uint64_t seed,
-    uint64_t offset) {
+__device__ void
+simulate_transition_phase(const TransitionWorkItem& work_item,
+                          const FoldsTypeDevice* __restrict__ folds_in_ptr,
+                          const float* __restrict__ profile,
+                          int nbins,
+                          float bias_snr,
+                          float var_add,
+                          uint64_t seed,
+                          uint64_t offset) {
     extern __shared__ float shared_profile_scaled[]; // NOLINT
     const int tid        = static_cast<int>(threadIdx.x);
     const int block_size = static_cast<int>(blockDim.x);
@@ -417,7 +380,7 @@ __device__ void simulate_transition_phase(
     // stage
     const FoldsTypeDevice& fold_in =
         work_item.is_initial ? work_item.folds_in_initial
-                             : folds_in_ptr[work_item.input_fold_idx].value();
+                             : folds_in_ptr[work_item.input_fold_idx];
     // H0: no signal bias
     for (int base = tid * 4; base < total_elements_h0; base += block_size * 4) {
         process_batch(base, total_elements_h0, fold_in.folds_h0.data,
@@ -619,13 +582,6 @@ score_and_prune_fused(FoldsTypeDevice& folds_sim,
             folds_sim.folds_h1.variance, shared_count_h1, shared_indices_h1);
     __syncthreads();
 
-    if (tid == 0) {
-        printf("Block %d: H0 %d→%d, H1 %d→%d, thr=%.3f\n", blockIdx.x,
-               static_cast<int>(folds_sim.folds_h0.ntrials), shared_count_h0,
-               static_cast<int>(folds_sim.folds_h1.ntrials), shared_count_h1,
-               threshold);
-    }
-
     // *** Sort the surviving‐trial indices ascending ***
     bitonic_sort_shared(shared_indices_h0, shared_count_h0);
     bitonic_sort_shared(shared_indices_h1, shared_count_h1);
@@ -663,7 +619,7 @@ score_and_prune_fused(FoldsTypeDevice& folds_sim,
 __global__ void merged_transition_kernel(
     TransitionWorkItem* __restrict__ work_items,
     int num_items,
-    const cuda::std::optional<FoldsTypeDevice>* __restrict__ folds_in_ptr,
+    const FoldsTypeDevice* __restrict__ folds_in_ptr,
     const float* __restrict__ profile,
     int nbins,
     const SizeType* __restrict__ box_score_widths,
@@ -674,7 +630,7 @@ __global__ void merged_transition_kernel(
     int nprobs,
     int stage_offset_cur,
     StateD* __restrict__ states_out_ptr,
-    cuda::std::optional<FoldsTypeDevice>* __restrict__ folds_out_ptr,
+    FoldsTypeDevice* __restrict__ folds_out_ptr,
     int* __restrict__ locks_ptr,
     DevicePoolAllocator allocator, // Pass by value since it's lightweight
     uint64_t seed,
@@ -750,9 +706,9 @@ __global__ void merged_transition_kernel(
             if (existing_state.is_empty ||
                 state_next.complexity_cumul < existing_state.complexity_cumul) {
                 // Deallocate old folds before overwriting to prevent leaks
-                if (existing_folds.has_value()) {
-                    allocator.deallocate(existing_folds->folds_h0);
-                    allocator.deallocate(existing_folds->folds_h1);
+                if (!existing_folds.is_empty()) {
+                    allocator.deallocate(existing_folds.folds_h0);
+                    allocator.deallocate(existing_folds.folds_h1);
                 }
                 // Update to better state
                 existing_state = state_next;
@@ -780,7 +736,7 @@ __global__ void merged_transition_kernel(
 
 struct CountValidTransitions {
     const StateD* states_ptr;
-    const cuda::std::optional<FoldsTypeDevice>* folds_ptr;
+    const FoldsTypeDevice* folds_ptr;
     SizeType stage_offset_prev;
     SizeType nprobs;
 
@@ -798,29 +754,11 @@ struct CountValidTransitions {
             }
 
             const auto& prev_fold_state = folds_ptr[prev_fold_idx];
-
-            if (blockIdx.x < 1) { // Print for first few thread blocks only
-                bool is_invalid =
-                    !prev_fold_state.has_value() || prev_fold_state->is_empty();
-                printf("Count: j=%d,k=%d,idx=%d | has_val=%d,is_empty=%d -> "
-                       "is_invalid=%d\n",
-                       (int)jthresh, (int)kprob, (int)prev_fold_idx,
-                       (int)prev_fold_state.has_value(),
-                       (int)prev_fold_state->is_empty(), (int)is_invalid);
-
-                if (prev_fold_state.has_value()) {
-                    printf("     h0_ptr=%p, h0_ntrials=%d | h1_ptr=%p, "
-                           "h1_ntrials=%d\n",
-                           prev_fold_state->folds_h0.data,
-                           (int)prev_fold_state->folds_h0.ntrials,
-                           prev_fold_state->folds_h1.data,
-                           (int)prev_fold_state->folds_h1.ntrials);
-                }
-            }
-            if (!prev_fold_state.has_value() || prev_fold_state->is_empty()) {
+            if (prev_fold_state.is_empty()) {
                 continue;
             }
 
+            // If we get here, the state is valid for transition.
             count++;
         }
         return count;
@@ -867,8 +805,9 @@ zero_fill_initial_kernel(const TransitionWorkItem* __restrict__ work_items,
                          int nbins) {
 
     const auto item_idx = static_cast<int>(blockIdx.x);
-    if (item_idx >= num_items)
+    if (item_idx >= num_items) {
         return;
+    }
 
     const auto& work_item = work_items[item_idx];
     const auto tid        = static_cast<int>(threadIdx.x);
@@ -886,7 +825,7 @@ zero_fill_initial_kernel(const TransitionWorkItem* __restrict__ work_items,
 
 struct TransitionFunctor {
     const StateD* states_ptr;
-    const cuda::std::optional<FoldsTypeDevice>* folds_ptr;
+    const FoldsTypeDevice* folds_ptr;
     const float* thresholds_ptr;
     const float* branching_pattern_ptr;
     SizeType nprobs;
@@ -902,8 +841,7 @@ struct TransitionFunctor {
 
     TransitionFunctor(
         const thrust::device_vector<StateD>& states_d,
-        const thrust::device_vector<cuda::std::optional<FoldsTypeDevice>>&
-            folds_current_d,
+        const thrust::device_vector<FoldsTypeDevice>& folds_current_d,
         const thrust::device_vector<float>& thresholds,
         const thrust::device_vector<float>& branching_pattern,
         SizeType nprobs,
@@ -962,13 +900,13 @@ struct TransitionFunctor {
             }
 
             const auto& prev_fold_state = folds_ptr[prev_fold_idx];
-            if (!prev_fold_state.has_value() || prev_fold_state->is_empty()) {
+            if (prev_fold_state.is_empty()) {
                 continue;
             }
 
             // Pre-allocate output buffers
-            const auto ntrials_in_h0 = prev_fold_state->folds_h0.ntrials;
-            const auto ntrials_in_h1 = prev_fold_state->folds_h1.ntrials;
+            const auto ntrials_in_h0 = prev_fold_state.folds_h0.ntrials;
+            const auto ntrials_in_h1 = prev_fold_state.folds_h1.ntrials;
             if (ntrials_in_h0 == 0 || ntrials_in_h1 == 0) {
                 continue;
             }
@@ -982,9 +920,9 @@ struct TransitionFunctor {
             const auto ntrials_out_h1 = repeat_h1 * ntrials_in_h1;
 
             auto folds_h0_sim = allocator->allocate(
-                ntrials_out_h0, prev_fold_state->folds_h0.variance + var_add);
+                ntrials_out_h0, prev_fold_state.folds_h0.variance + var_add);
             auto folds_h1_sim = allocator->allocate(
-                ntrials_out_h1, prev_fold_state->folds_h1.variance + var_add);
+                ntrials_out_h1, prev_fold_state.folds_h1.variance + var_add);
 
             // Create work item
             TransitionWorkItem item;
@@ -1135,9 +1073,10 @@ public:
         m_box_score_widths_d  = m_box_score_widths;
 
         // Initialize memory management
-        const auto slots_per_pool = compute_max_allocations_needed();
-        m_device_manager          = std::make_unique<DualPoolFoldManagerDevice>(
-            m_nbins, m_ntrials, slots_per_pool);
+        const auto slots_per_pool      = compute_max_allocations_needed();
+        const auto max_trials_per_slot = m_ntrials * 2;
+        m_device_manager = std::make_unique<DualPoolFoldManagerDevice>(
+            m_nbins, max_trials_per_slot, slots_per_pool);
         spdlog::info("Pre-allocated 2 CUDA pools of {} slots each",
                      slots_per_pool);
 
@@ -1163,7 +1102,8 @@ public:
     void run(SizeType thres_neigh = 10) {
         spdlog::info("Running dynamic threshold scheme on CUDA");
         progress::ProgressGuard progress_guard(true);
-        auto bar = progress::make_standard_bar("Computing scheme...");
+        auto bar =
+            progress::make_standard_bar("Computing scheme", m_nstages - 1);
 
         for (SizeType istage = 1; istage < m_nstages; ++istage) {
             // Get device allocator for this stage
@@ -1181,10 +1121,9 @@ public:
                              DeallocateFunctor{deallocator});
             cudaDeviceSynchronize();
 
-            const auto progress = static_cast<float>(istage) /
-                                  static_cast<float>(m_nstages - 1) * 100.0F;
-            bar.set_progress(static_cast<SizeType>(progress));
+            bar.set_progress(istage);
         }
+        bar.mark_as_completed();
         // Copy final states back to host
         thrust::transform(thrust::device, m_states_d.begin(), m_states_d.end(),
                           m_states.begin(), StateConversionFunctor{});
@@ -1266,9 +1205,8 @@ private:
     thrust::device_vector<SizeType> m_box_score_widths_d;
     thrust::device_vector<StateD> m_states_d;
     thrust::device_vector<int> m_states_locks_d;
-    thrust::device_vector<cuda::std::optional<FoldsTypeDevice>>
-        m_folds_current_d;
-    thrust::device_vector<cuda::std::optional<FoldsTypeDevice>> m_folds_next_d;
+    thrust::device_vector<FoldsTypeDevice> m_folds_current_d;
+    thrust::device_vector<FoldsTypeDevice> m_folds_next_d;
 
     SizeType compute_max_allocations_needed() {
         SizeType max_active_per_stage = 0;
@@ -1398,7 +1336,8 @@ private:
         }
 
         if (threshold_pairs.empty()) {
-            spdlog::info("All keys size: 0");
+            spdlog::warn("Stage {}: No threshold pairs found to process.",
+                         istage);
             return;
         }
 
@@ -1417,9 +1356,22 @@ private:
                 .folds_ptr = thrust::raw_pointer_cast(m_folds_current_d.data()),
                 .stage_offset_prev = stage_offset_prev,
                 .nprobs            = m_nprobs});
+        // print the first 5 and last 5 transition counts
+        thrust::host_vector<SizeType> transition_counts_h = transition_counts_d;
+        for (SizeType i = 0; i < 5; ++i) {
+            spdlog::info("Transition count for pair {} -> {}: {}",
+                         threshold_pairs[i].first, threshold_pairs[i].second,
+                         transition_counts_h[i]);
+        }
+        for (SizeType i = transition_counts_h.size() - 5;
+             i < transition_counts_h.size(); ++i) {
+            spdlog::info("Transition count for pair {} -> {}: {}",
+                         threshold_pairs[i].first, threshold_pairs[i].second,
+                         transition_counts_h[i]);
+        }
 
         // Compute prefix sum for offsets
-        thrust::device_vector<SizeType> offsets_d(threshold_pairs.size() + 1);
+        thrust::device_vector<SizeType> offsets_d(threshold_pairs.size());
         thrust::exclusive_scan(thrust::device, transition_counts_d.begin(),
                                transition_counts_d.end(), offsets_d.begin(), 0);
 
@@ -1472,8 +1424,8 @@ private:
         thrust::device_vector<TransitionWorkItem>& work_items_d,
         float var_add,
         SizeType stage_offset_cur,
-        const cuda::std::optional<FoldsTypeDevice>* __restrict__ folds_in_ptr,
-        cuda::std::optional<FoldsTypeDevice>* __restrict__ folds_out_ptr,
+        const FoldsTypeDevice* __restrict__ folds_in_ptr,
+        FoldsTypeDevice* __restrict__ folds_out_ptr,
         DevicePoolAllocator& allocator) {
         const auto num_items = static_cast<int>(work_items_d.size());
         if (num_items == 0) {

@@ -104,7 +104,7 @@ public:
     }
 
 private:
-    std::string_view m_text;
+    std::string m_text;
     Style m_style;
 };
 

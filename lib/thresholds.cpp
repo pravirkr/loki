@@ -107,35 +107,41 @@ private:
 };
 
 /**
+ * A helper struct to encapsulate all data for a single memory pool.
+ */
+struct Pool {
+    std::vector<float> data;
+    // Using 'char' as a boolean flag is safer in concurrent contexts
+    std::vector<char> slot_occupied;
+    std::queue<SizeType> free_slots;
+
+    Pool(SizeType slots_per_pool, SizeType slot_size_in_floats)
+        : data(slots_per_pool * slot_size_in_floats),
+          slot_occupied(slots_per_pool, 0) // 0 for false
+    {
+        for (SizeType i = 0; i < slots_per_pool; ++i) {
+            free_slots.push(i);
+        }
+    }
+};
+
+/**
  * A thread-safe, pre-allocated memory manager using a dual-pool (ping-pong)
  * buffering strategy to improve cache locality.
  */
 class DualPoolFoldManager {
 public:
     DualPoolFoldManager(SizeType nbins,
-                        SizeType ntrials_min,
+                        SizeType max_ntrials_per_slot,
                         SizeType slots_per_pool)
         : m_nbins(nbins),
-          m_max_ntrials(2 * ntrials_min),
-          m_slot_size(m_max_ntrials * nbins),
-          m_slots_per_pool(slots_per_pool) {
-
-        // Pre-allocate all memory for both pools
-        m_data_a.resize(m_slots_per_pool * m_slot_size);
-        m_slot_occupied_a.resize(m_slots_per_pool, false);
-        m_data_b.resize(m_slots_per_pool * m_slot_size);
-        m_slot_occupied_b.resize(m_slots_per_pool, false);
-
-        // Initialize free slots for both pools
-        for (SizeType i = 0; i < m_slots_per_pool; ++i) {
-            m_free_slots_a.push(i);
-            m_free_slots_b.push(i);
-        }
-
-        // Start with A as the "out" pool and B as the "in" pool
-        // We only ever allocate from the "out" pool.
-        set_pools_a_out_b_in();
-    }
+          m_max_ntrials(max_ntrials_per_slot),
+          m_slot_size_floats(m_max_ntrials * nbins),
+          m_slots_per_pool(slots_per_pool),
+          m_pool_a(slots_per_pool, m_slot_size_floats),
+          m_pool_b(slots_per_pool, m_slot_size_floats),
+          m_pool_out(&m_pool_a),
+          m_pool_in(&m_pool_b) {}
 
     DualPoolFoldManager(const DualPoolFoldManager&)            = delete;
     DualPoolFoldManager& operator=(const DualPoolFoldManager&) = delete;
@@ -151,18 +157,19 @@ public:
     allocate(SizeType initial_ntrials = 0, float variance = 0.0F) {
         std::lock_guard<std::mutex> lock(m_mutex);
 
-        if (m_free_slots_out->empty()) {
+        if (m_pool_out->free_slots.empty()) {
             spdlog::error("Pool exhausted! Active slots: {}, Max slots: {}",
-                          m_slots_per_pool - m_free_slots_out->size(),
+                          m_slots_per_pool - m_pool_out->free_slots.size(),
                           m_slots_per_pool);
             throw std::runtime_error(
                 "DualPoolFoldManager 'out' pool exhausted!");
         }
 
-        const auto slot_idx = m_free_slots_out->front();
-        m_free_slots_out->pop();
-        (*m_slot_occupied_out)[slot_idx] = true;
-        float* slot_data = m_data_out->data() + (slot_idx * m_slot_size);
+        const auto slot_idx = m_pool_out->free_slots.front();
+        m_pool_out->free_slots.pop();
+        m_pool_out->slot_occupied[slot_idx] = 1; // 1 for true
+        float* slot_data =
+            m_pool_out->data.data() + (slot_idx * m_slot_size_floats);
         return std::make_unique<FoldVectorHandle>(
             slot_data, initial_ntrials, m_max_ntrials, m_nbins, variance, this);
     }
@@ -175,14 +182,12 @@ public:
         std::lock_guard<std::mutex> lock(m_mutex);
 
         // Determine which pool the pointer belongs to and release it.
-        if (data_ptr >= m_data_a.data() &&
-            data_ptr < m_data_a.data() + m_data_a.size()) {
-            deallocate_from_pool(data_ptr, m_data_a, m_slot_occupied_a,
-                                 m_free_slots_a);
-        } else if (data_ptr >= m_data_b.data() &&
-                   data_ptr < m_data_b.data() + m_data_b.size()) {
-            deallocate_from_pool(data_ptr, m_data_b, m_slot_occupied_b,
-                                 m_free_slots_b);
+        if (data_ptr >= m_pool_a.data.data() &&
+            data_ptr < m_pool_a.data.data() + m_pool_a.data.size()) {
+            deallocate_from_pool(data_ptr, m_pool_a);
+        } else if (data_ptr >= m_pool_b.data.data() &&
+                   data_ptr < m_pool_b.data.data() + m_pool_b.data.size()) {
+            deallocate_from_pool(data_ptr, m_pool_b);
         } else {
             // This should not happen if used correctly
             assert(false &&
@@ -196,12 +201,12 @@ public:
      */
     void swap_pools() {
         std::lock_guard<std::mutex> lock(m_mutex);
-        if (m_data_out == &m_data_a) {
-            set_pools_b_out_a_in();
-        } else {
-            set_pools_a_out_b_in();
-        }
+        std::swap(m_pool_in, m_pool_out);
     }
+
+    /**
+     * Returns the maximum number of trials per slot.
+     */
     [[nodiscard]] SizeType get_max_ntrials() const noexcept {
         return m_max_ntrials;
     }
@@ -210,69 +215,39 @@ public:
      * Returns the total memory size of the two pools.
      */
     [[nodiscard]] SizeType get_memory_size() const noexcept {
-        return 2 * m_slots_per_pool * m_slot_size * sizeof(float);
+        return 2 * m_slots_per_pool * m_slot_size_floats * sizeof(float);
     }
 
 private:
-    void deallocate_from_pool(const float* data_ptr, // NOLINT
-                              const std::vector<float>& data_pool,
-                              std::vector<bool>& occupied_pool,
-                              std::queue<SizeType>& free_pool) noexcept {
+    void deallocate_from_pool(const float* data_ptr,
+                              Pool& pool) const noexcept {
         // Calculate slot index from pointer offset
-        const auto byte_offset = static_cast<SizeType>(
-            reinterpret_cast<const char*>(data_ptr) -
-            reinterpret_cast<const char*>(data_pool.data()));
-        const auto slot_idx = byte_offset / (m_slot_size * sizeof(float));
+        const auto float_offset = std::distance(
+            static_cast<const float*>(pool.data.data()), data_ptr);
+        const auto slot_idx =
+            static_cast<SizeType>(float_offset) / m_slot_size_floats;
 
         assert(slot_idx < m_slots_per_pool);
-        assert(occupied_pool[slot_idx]);
+        assert(pool.slot_occupied[slot_idx] &&
+               "Attempting to deallocate a free slot");
 
-        occupied_pool[slot_idx] = false;
-        free_pool.push(slot_idx);
+        pool.slot_occupied[slot_idx] = 0; // 0 for false
+        pool.free_slots.push(slot_idx);
     }
-
-    void set_pools_a_out_b_in() {
-        m_data_out          = &m_data_a;
-        m_slot_occupied_out = &m_slot_occupied_a;
-        m_free_slots_out    = &m_free_slots_a;
-        m_data_in           = &m_data_b;
-        m_slot_occupied_in  = &m_slot_occupied_b;
-        m_free_slots_in     = &m_free_slots_b;
-    }
-
-    void set_pools_b_out_a_in() {
-        m_data_out          = &m_data_b;
-        m_slot_occupied_out = &m_slot_occupied_b;
-        m_free_slots_out    = &m_free_slots_b;
-        m_data_in           = &m_data_a;
-        m_slot_occupied_in  = &m_slot_occupied_a;
-        m_free_slots_in     = &m_free_slots_a;
-    }
-
-    // Pool A
-    std::vector<float> m_data_a;
-    std::vector<bool> m_slot_occupied_a;
-    std::queue<SizeType> m_free_slots_a;
-
-    // Pool B
-    std::vector<float> m_data_b;
-    std::vector<bool> m_slot_occupied_b;
-    std::queue<SizeType> m_free_slots_b;
-
-    // Pointers to current in/out pools
-    std::vector<float>* m_data_out         = nullptr;
-    std::vector<bool>* m_slot_occupied_out = nullptr;
-    std::queue<SizeType>* m_free_slots_out = nullptr;
-    std::vector<float>* m_data_in          = nullptr;
-    std::vector<bool>* m_slot_occupied_in  = nullptr;
-    std::queue<SizeType>* m_free_slots_in  = nullptr;
 
     // Config
     SizeType m_nbins;
     SizeType m_max_ntrials;
-    SizeType m_slot_size;
+    SizeType m_slot_size_floats;
     SizeType m_slots_per_pool;
     mutable std::mutex m_mutex;
+    // Pool data
+    Pool m_pool_a;
+    Pool m_pool_b;
+
+    // Pointers to current in/out pools
+    Pool* m_pool_out;
+    Pool* m_pool_in;
 };
 
 inline void FoldVectorHandle::release() noexcept {
@@ -617,9 +592,10 @@ public:
                 std::make_unique<math::ThreadSafeRNG>(std::random_device{}());
         }
 
-        const auto slots_per_pool = compute_max_allocations_needed();
-        m_manager = std::make_unique<DualPoolFoldManager>(m_nbins, m_ntrials,
-                                                          slots_per_pool);
+        const auto slots_per_pool      = compute_max_allocations_needed();
+        const auto max_trials_per_slot = m_ntrials * 2;
+        m_manager                      = std::make_unique<DualPoolFoldManager>(
+            m_nbins, max_trials_per_slot, slots_per_pool);
         const auto pool_memory_size = m_manager->get_memory_size();
         const auto pool_memory_size_gb =
             static_cast<float>(pool_memory_size) / 1024.0F / 1024.0F / 1024.0F;

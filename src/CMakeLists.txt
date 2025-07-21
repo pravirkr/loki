@@ -17,7 +17,7 @@ if(CMAKE_CUDA_COMPILER)
   set(LOKI_PYGPUMODULE_NAME libcu${LOKI_LIBRARY_NAME})
   pybind11_add_module(${LOKI_PYGPUMODULE_NAME} loki_python_cuda.cpp)
   target_include_directories(
-    ${LOKI_PYGPUMODULE_NAME} PUBLIC ${PROJECT_SOURCE_DIR}/include ${CUDAToolkit_INCLUDE_DIRS}
+    ${LOKI_PYGPUMODULE_NAME} PUBLIC ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/lib ${CUDAToolkit_INCLUDE_DIRS}
   )
   target_link_libraries(
     ${LOKI_PYGPUMODULE_NAME}
