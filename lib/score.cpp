@@ -422,11 +422,12 @@ void snr_boxcar_batch_complex(std::span<const ComplexType> batch_folds,
     // Always use out span to get the correct batch size
     const auto nbins_f = batch_folds.size() / (2 * n_batch);
     const auto nbins   = 2 * (nbins_f - 1);
+    const auto nfft    = 2 * n_batch;
 
     std::vector<float> folds_t(n_batch * 2 * nbins, 0.0F);
     std::vector<ComplexType> folds_span(batch_folds.begin(), batch_folds.end());
-    utils::irfft_batch(folds_span, folds_t, static_cast<int>(n_batch),
-                       static_cast<int>(nbins), 1);
+    utils::irfft_batch(folds_span, folds_t, static_cast<int>(nfft),
+                           static_cast<int>(nbins), 1);
     snr_boxcar_batch(folds_t, widths, batch_scores, n_batch);
 }
 

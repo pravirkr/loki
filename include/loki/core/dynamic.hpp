@@ -6,6 +6,7 @@
 
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
+#include "loki/utils/fft.hpp"
 #include "loki/utils/suggestions.hpp"
 
 namespace loki::core {
@@ -82,6 +83,7 @@ private:
 
     // Buffers for shift-add operations
     std::vector<FoldType> m_shift_buffer;
+    std::unique_ptr<utils::IrfftExecutor> m_irfft_executor;
 };
 
 // Type aliases for convenience

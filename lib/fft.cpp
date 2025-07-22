@@ -1,25 +1,62 @@
 #include "loki/utils/fft.hpp"
 
+#include <cstddef>
+#include <format>
 #include <mutex>
+
 #include <omp.h>
 #include <spdlog/spdlog.h>
 
+#include "loki/common/types.hpp"
 #include "loki/exceptions.hpp"
 
 namespace loki::utils {
 
-FFT2D::FFT2D(size_t n1x, size_t n2x, size_t ny)
+namespace {
+struct FFTWManager {
+    std::unordered_map<int, fftwf_plan> plan_cache;
+    std::mutex mutex;
+    bool initialized{false};
+
+    FFTWManager() = default;
+    ~FFTWManager() {
+        std::lock_guard<std::mutex> lock(mutex);
+        for (auto const& [key, val] : plan_cache) {
+            fftwf_destroy_plan(val);
+        }
+        if (initialized) {
+            fftwf_cleanup_threads();
+        }
+    }
+
+    FFTWManager(const FFTWManager&)            = delete;
+    FFTWManager& operator=(const FFTWManager&) = delete;
+    FFTWManager(FFTWManager&&)                 = delete;
+    FFTWManager& operator=(FFTWManager&&)      = delete;
+};
+
+// static instance of FFTWManager
+FFTWManager g_fftw_manager;
+} // namespace
+
+FFT2D::FFT2D(SizeType n1x, SizeType n2x, SizeType ny)
     : m_n1x(n1x),
       m_n2x(n2x),
       m_ny(ny),
-      m_fft_size(ny / 2 + 1),
+      m_fft_size((ny / 2) + 1),
       m_n1_fft(fftwf_alloc_complex(n1x * m_fft_size)),
       m_n2_fft(fftwf_alloc_complex(n2x * m_fft_size)),
       m_n1n2_fft(fftwf_alloc_complex(n1x * n2x * m_fft_size)),
-      m_plan_forward(
-          fftwf_plan_dft_r2c_2d(n1x, ny, nullptr, nullptr, FFTW_ESTIMATE)),
-      m_plan_inverse(
-          fftwf_plan_dft_c2r_2d(n1x, ny, nullptr, nullptr, FFTW_ESTIMATE)) {
+      m_plan_forward(fftwf_plan_dft_r2c_2d(static_cast<int>(n1x),
+                                           static_cast<int>(ny),
+                                           nullptr,
+                                           nullptr,
+                                           FFTW_ESTIMATE)),
+      m_plan_inverse(fftwf_plan_dft_c2r_2d(static_cast<int>(n1x),
+                                           static_cast<int>(ny),
+                                           nullptr,
+                                           nullptr,
+                                           FFTW_ESTIMATE)) {
 
       };
 
@@ -50,6 +87,76 @@ void FFT2D::circular_convolve(std::span<float> n1,
     }
     // Inverse FFT
     fftwf_execute_dft_c2r(m_plan_inverse, m_n1n2_fft, out.data());
+}
+
+// --- IrfftExecutor ---
+
+IrfftExecutor::IrfftExecutor(int n_real)
+    : m_n_real(n_real),
+      m_n_complex((n_real / 2) + 1) {
+    std::lock_guard<std::mutex> lock(g_fftw_manager.mutex);
+    if (!g_fftw_manager.initialized) {
+        if (fftwf_init_threads() == 0) {
+            throw std::runtime_error("Failed to initialize FFTW threads");
+        }
+        fftwf_plan_with_nthreads(1);
+        g_fftw_manager.initialized = true;
+    }
+}
+
+void IrfftExecutor::execute(std::span<ComplexType> complex_input,
+                            std::span<float> real_output,
+                            int batch_size) {
+    error_check::check_equal(
+        real_output.size(), static_cast<SizeType>(batch_size * m_n_real),
+        "IrfftExecutor: real_output size does not match batch size");
+    error_check::check_equal(
+        complex_input.size(), static_cast<SizeType>(batch_size * m_n_complex),
+        "IrfftExecutor: complex_input size does not match batch size");
+
+    auto* plan = get_plan(batch_size);
+
+    auto* complex_ptr = reinterpret_cast<fftwf_complex*>(complex_input.data());
+    auto* real_ptr    = real_output.data();
+
+    fftwf_execute_dft_c2r(plan, complex_ptr, real_ptr);
+
+    // FFTW C2R doesn't normalize - apply normalization
+    const auto norm          = 1.0F / static_cast<float>(m_n_real);
+    const int total_elements = batch_size * m_n_real;
+    for (int i = 0; i < total_elements; ++i) {
+        real_output[i] *= norm;
+    }
+
+    spdlog::debug("IrfftExecutor: completed: {} transforms of size {}",
+                  batch_size, m_n_real);
+}
+
+fftwf_plan IrfftExecutor::get_plan(int batch_size) {
+    std::lock_guard<std::mutex> lock(s_mutex);
+    auto it = s_plan_cache.find(batch_size);
+    if (it != s_plan_cache.end()) {
+        return it->second;
+    }
+
+    fftwf_plan plan = fftwf_plan_many_dft_c2r(
+        1,                       // rank
+        &m_n_real,               // transform size
+        batch_size,              // number of transforms
+        nullptr,                 // input (dummy)
+        nullptr, 1, m_n_complex, // input layout: stride=1, dist=n_complex
+        nullptr,                 // output (dummy)
+        nullptr, 1, m_n_real,    // output layout: stride=1, dist=n_real
+        FFTW_ESTIMATE            // fast planning
+    );
+
+    if (plan == nullptr) {
+        throw std::runtime_error(std::format(
+            "Failed to create IRFFT plan for batch_size={}", batch_size));
+    }
+
+    s_plan_cache[batch_size] = plan;
+    return plan;
 }
 
 void ensure_fftw_threading(int nthreads) {

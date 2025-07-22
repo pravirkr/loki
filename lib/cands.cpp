@@ -5,6 +5,8 @@
 #include <format>
 #include <fstream>
 #include <numeric>
+#include <regex>
+#include <tuple>
 
 #include <hdf5.h>
 #include <highfive/highfive.hpp>
@@ -14,6 +16,16 @@ namespace loki::cands {
 namespace {
 float round_2dp(float val) noexcept {
     return std::round(val * 100.0F) / 100.0F;
+}
+
+// Returns (ref_seg, task_id) as integers, or (-1, -1) if not matched
+std::tuple<int, int> extract_ref_seg_task_id(const std::string& filename) {
+    std::regex re(R"(tmp_(\d{3})_(\d{2})_.*\.(?:txt|h5))");
+    std::smatch match;
+    if (std::regex_match(filename, match, re)) {
+        return {std::stoi(match[1]), std::stoi(match[2])};
+    }
+    return {-1, -1};
 }
 
 // Create a compound type for PruneStats
@@ -287,29 +299,62 @@ void merge_prune_result_files(const std::filesystem::path& results_dir,
         throw std::runtime_error(std::format(
             "Results directory does not exist: {}", results_dir.string()));
     }
-    // Merge log files
-    std::ofstream main_log(log_file, std::ios::app);
-    if (!main_log) {
-        throw std::runtime_error(
-            std::format("Cannot open log file: {}", log_file.string()));
-    }
+
+    // --- Collect and sort log files ---
+    std::vector<std::filesystem::directory_entry> temp_log_files;
     for (const auto& entry : std::filesystem::directory_iterator(results_dir)) {
         if (!entry.is_regular_file()) {
             continue;
         }
         const auto filename = entry.path().filename().string();
         if (filename.starts_with("tmp_") && filename.ends_with("_log.txt")) {
-            std::ifstream temp_log(entry.path());
-            if (temp_log) {
-                main_log << temp_log.rdbuf();
-            }
-            temp_log.close();
-            std::filesystem::remove(entry.path());
+            temp_log_files.push_back(entry);
         }
+    }
+    std::ranges::sort(temp_log_files, [](const auto& a, const auto& b) {
+        auto [ref_a, task_a] =
+            extract_ref_seg_task_id(a.path().filename().string());
+        auto [ref_b, task_b] =
+            extract_ref_seg_task_id(b.path().filename().string());
+        return std::tie(ref_a, task_a) < std::tie(ref_b, task_b);
+    });
+
+    // --- Merge log files in order ---
+    std::ofstream main_log(log_file, std::ios::app);
+    if (!main_log) {
+        throw std::runtime_error(
+            std::format("Cannot open log file: {}", log_file.string()));
+    }
+    for (const auto& entry : temp_log_files) {
+        std::ifstream temp_log(entry.path());
+        if (temp_log) {
+            main_log << temp_log.rdbuf();
+        }
+        temp_log.close();
+        std::filesystem::remove(entry.path());
     }
     main_log.close();
 
-    // Merge HDF5 files
+    // --- Collect and sort HDF5 files ---
+    std::vector<std::filesystem::directory_entry> temp_h5_files;
+    for (const auto& entry : std::filesystem::directory_iterator(results_dir)) {
+        if (!entry.is_regular_file()) {
+            continue;
+        }
+        const auto filename = entry.path().filename().string();
+        if (filename.starts_with("tmp_") && filename.ends_with("_results.h5")) {
+            temp_h5_files.push_back(entry);
+        }
+    }
+    std::ranges::sort(temp_h5_files, [](const auto& a, const auto& b) {
+        auto [ref_a, task_a] =
+            extract_ref_seg_task_id(a.path().filename().string());
+        auto [ref_b, task_b] =
+            extract_ref_seg_task_id(b.path().filename().string());
+        return std::tie(ref_a, task_a) < std::tie(ref_b, task_b);
+    });
+
+    // --- Merge HDF5 files in order ---
     auto open_mode = std::filesystem::exists(result_file)
                          ? HighFive::File::ReadWrite
                          : HighFive::File::Create;
@@ -317,35 +362,26 @@ void merge_prune_result_files(const std::filesystem::path& results_dir,
     HighFive::Group main_runs_group = main_h5.exist("runs")
                                           ? main_h5.getGroup("runs")
                                           : main_h5.createGroup("runs");
-    for (const auto& entry : std::filesystem::directory_iterator(results_dir)) {
-        if (!entry.is_regular_file()) {
-            continue;
-        }
-        const auto filename = entry.path().filename().string();
-        if (filename.starts_with("tmp_") && filename.ends_with("_results.h5")) {
-            HighFive::File temp_h5(entry.path().string(),
-                                   HighFive::File::ReadOnly);
-
-            if (temp_h5.exist("runs")) {
-                HighFive::Group temp_runs_group = temp_h5.getGroup("runs");
-                for (const auto& run_name : temp_runs_group.listObjectNames()) {
-                    if (main_runs_group.exist(run_name)) {
-                        continue;
-                    }
-                    // Use HDF5 native copy
-                    herr_t status =
-                        H5Ocopy(temp_runs_group.getId(), run_name.c_str(),
-                                main_runs_group.getId(), run_name.c_str(),
-                                H5P_DEFAULT, H5P_DEFAULT);
-                    if (status < 0) {
-                        throw std::runtime_error(
-                            std::format("Failed to copy run '{}' from {}",
-                                        run_name, entry.path().string()));
-                    }
+    for (const auto& entry : temp_h5_files) {
+        HighFive::File temp_h5(entry.path().string(), HighFive::File::ReadOnly);
+        if (temp_h5.exist("runs")) {
+            HighFive::Group temp_runs_group = temp_h5.getGroup("runs");
+            for (const auto& run_name : temp_runs_group.listObjectNames()) {
+                if (main_runs_group.exist(run_name)) {
+                    continue;
+                }
+                herr_t status =
+                    H5Ocopy(temp_runs_group.getId(), run_name.c_str(),
+                            main_runs_group.getId(), run_name.c_str(),
+                            H5P_DEFAULT, H5P_DEFAULT);
+                if (status < 0) {
+                    throw std::runtime_error(
+                        std::format("Failed to copy run '{}' from {}", run_name,
+                                    entry.path().string()));
                 }
             }
-            std::filesystem::remove(entry.path());
         }
+        std::filesystem::remove(entry.path());
     }
 }
 

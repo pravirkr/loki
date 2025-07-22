@@ -20,14 +20,31 @@
 
 namespace loki::algorithms {
 
-template <typename FoldType> class PruningManager<FoldType>::Impl {
+class PruningManager::BaseImpl {
 public:
-    Impl(search::PulsarSearchConfig cfg,
-         const std::vector<float>& threshold_scheme,
-         std::optional<SizeType> n_runs,
-         std::optional<std::vector<SizeType>> ref_segs,
-         SizeType max_sugg,
-         SizeType batch_size)
+    BaseImpl()                           = default;
+    virtual ~BaseImpl()                  = default;
+    BaseImpl(const BaseImpl&)            = delete;
+    BaseImpl& operator=(const BaseImpl&) = delete;
+    BaseImpl(BaseImpl&&)                 = delete;
+    BaseImpl& operator=(BaseImpl&&)      = delete;
+
+    virtual void execute(std::span<const float> ts_e,
+                         std::span<const float> ts_v,
+                         const std::filesystem::path& outdir,
+                         std::string_view file_prefix,
+                         std::string_view kind) = 0;
+};
+
+template <typename FoldType>
+class PruningManagerTypedImpl final : public PruningManager::BaseImpl {
+public:
+    PruningManagerTypedImpl(search::PulsarSearchConfig cfg,
+                            const std::vector<float>& threshold_scheme,
+                            std::optional<SizeType> n_runs,
+                            std::optional<std::vector<SizeType>> ref_segs,
+                            SizeType max_sugg,
+                            SizeType batch_size)
         : m_cfg(std::move(cfg)),
           m_threshold_scheme(threshold_scheme),
           m_n_runs(n_runs),
@@ -46,17 +63,17 @@ public:
         }
     }
 
-    ~Impl()                      = default;
-    Impl(const Impl&)            = delete;
-    Impl& operator=(const Impl&) = delete;
-    Impl(Impl&&)                 = delete;
-    Impl& operator=(Impl&&)      = delete;
+    ~PruningManagerTypedImpl() final                        = default;
+    PruningManagerTypedImpl(const PruningManagerTypedImpl&) = delete;
+    PruningManagerTypedImpl& operator=(const PruningManagerTypedImpl&) = delete;
+    PruningManagerTypedImpl(PruningManagerTypedImpl&&)                 = delete;
+    PruningManagerTypedImpl& operator=(PruningManagerTypedImpl&&)      = delete;
 
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
                  const std::filesystem::path& outdir,
                  std::string_view file_prefix,
-                 std::string_view kind) {
+                 std::string_view kind) override {
         // Execute appropriate FFA instance
         spdlog::info("PruningManager::execute: Initializing with FFA");
         if constexpr (std::is_same_v<FoldType, ComplexType>) {
@@ -126,6 +143,7 @@ private:
     std::vector<FoldType> m_ffa_fold;
 
     std::vector<SizeType> determine_ref_segs(SizeType nsegments) const {
+        // ref_segs = list(np.linspace(0, dyp.nsegments - 1, n_runs, dtype=int))
         if (m_n_runs.has_value()) {
             // n_runs takes precedence over ref_segs
             const auto n_runs = m_n_runs.value();
@@ -134,7 +152,6 @@ private:
                     std::format("n_runs must be between 1 and {}, got {}",
                                 nsegments, n_runs));
             }
-
             std::vector<SizeType> ref_segs(n_runs);
             if (n_runs == 1) {
                 ref_segs[0] = 0;
@@ -142,8 +159,9 @@ private:
                 const auto denom = static_cast<double>(n_runs - 1);
                 const auto max   = static_cast<double>(nsegments - 1);
                 for (SizeType i = 0; i < n_runs; ++i) {
+                    // ties → even (to match numpy)
                     ref_segs[i] = static_cast<SizeType>(
-                        std::round(static_cast<double>(i) * max / denom));
+                        std::rint(static_cast<double>(i) * max / denom));
                 }
             }
             return ref_segs;
@@ -298,7 +316,7 @@ template <typename FoldType> struct PruningWorkspace {
                (batch_isuggest.size() * sizeof(SizeType)) +
                (batch_passing_indices.size() * sizeof(SizeType));
     }
-};
+}; // End PruningManagerTypedImpl definition
 
 template <typename FoldType> class Prune<FoldType>::Impl {
 public:
@@ -315,13 +333,23 @@ public:
           m_batch_size(batch_size),
           m_kind(kind) {
         // Allocate suggestion buffer
-        m_suggestions = std::make_unique<utils::SuggestionTree<FoldType>>(
-            m_max_sugg, m_cfg.get_nparams(), m_cfg.get_nbins());
+        if constexpr (std::is_same_v<FoldType, ComplexType>) {
+            m_suggestions = std::make_unique<utils::SuggestionTree<FoldType>>(
+                m_max_sugg, m_cfg.get_nparams(), m_cfg.get_nbins_f());
+        } else {
+            m_suggestions = std::make_unique<utils::SuggestionTree<FoldType>>(
+                m_max_sugg, m_cfg.get_nparams(), m_cfg.get_nbins());
+        }
 
         // Allocate iteration workspace
         const auto max_batch_size = m_batch_size * m_cfg.get_branch_max();
-        m_pruning_workspace = std::make_unique<PruningWorkspace<FoldType>>(
-            max_batch_size, m_cfg.get_nparams(), m_cfg.get_nbins());
+        if constexpr (std::is_same_v<FoldType, ComplexType>) {
+            m_pruning_workspace = std::make_unique<PruningWorkspace<FoldType>>(
+                max_batch_size, m_cfg.get_nparams(), m_cfg.get_nbins_f());
+        } else {
+            m_pruning_workspace = std::make_unique<PruningWorkspace<FoldType>>(
+                max_batch_size, m_cfg.get_nparams(), m_cfg.get_nbins());
+        }
 
         // Setup pruning functions
         setup_pruning();
@@ -394,7 +422,7 @@ public:
                                  ref_seg);
         final_log << std::format("Time: {}\n", m_pstats->get_timer_summary());
         final_log.close();
-        spdlog::info("Pruning complete for ref segment {}", ref_seg);
+        spdlog::info("Pruning complete for ref segment: {}", ref_seg);
         spdlog::info("Pruning stats: {}", m_pstats->get_stats_summary());
         spdlog::info("Pruning time: {}", m_pstats->get_concise_timer_summary());
     }
@@ -696,36 +724,33 @@ private:
                 std::format("Invalid pruning kind: {}", m_kind));
         }
     }
-};
+}; // End Prune::Impl definition
 
-template <typename FoldType>
-PruningManager<FoldType>::PruningManager(
-    const search::PulsarSearchConfig& cfg,
-    const std::vector<float>& threshold_scheme,
-    std::optional<SizeType> n_runs,
-    std::optional<std::vector<SizeType>> ref_segs,
-    SizeType max_sugg,
-    SizeType batch_size)
-    : m_impl(std::make_unique<Impl>(cfg,
-                                    threshold_scheme,
-                                    n_runs,
-                                    std::move(ref_segs),
-                                    max_sugg,
-                                    batch_size)) {}
-template <typename FoldType>
-PruningManager<FoldType>::~PruningManager() = default;
-template <typename FoldType>
-PruningManager<FoldType>::PruningManager(PruningManager&& other) noexcept =
-    default;
-template <typename FoldType>
-PruningManager<FoldType>&
-PruningManager<FoldType>::operator=(PruningManager&& other) noexcept = default;
-template <typename FoldType>
-void PruningManager<FoldType>::execute(std::span<const float> ts_e,
-                                       std::span<const float> ts_v,
-                                       const std::filesystem::path& outdir,
-                                       std::string_view file_prefix,
-                                       std::string_view kind) {
+PruningManager::PruningManager(const search::PulsarSearchConfig& cfg,
+                               const std::vector<float>& threshold_scheme,
+                               std::optional<SizeType> n_runs,
+                               std::optional<std::vector<SizeType>> ref_segs,
+                               SizeType max_sugg,
+                               SizeType batch_size) {
+    if (cfg.get_use_fft_shifts()) {
+        m_impl = std::make_unique<PruningManagerTypedImpl<ComplexType>>(
+            cfg, threshold_scheme, n_runs, std::move(ref_segs), max_sugg,
+            batch_size);
+    } else {
+        m_impl = std::make_unique<PruningManagerTypedImpl<float>>(
+            cfg, threshold_scheme, n_runs, std::move(ref_segs), max_sugg,
+            batch_size);
+    }
+}
+PruningManager::~PruningManager()                               = default;
+PruningManager::PruningManager(PruningManager&& other) noexcept = default;
+PruningManager&
+PruningManager::operator=(PruningManager&& other) noexcept = default;
+void PruningManager::execute(std::span<const float> ts_e,
+                             std::span<const float> ts_v,
+                             const std::filesystem::path& outdir,
+                             std::string_view file_prefix,
+                             std::string_view kind) {
     m_impl->execute(ts_e, ts_v, outdir, file_prefix, kind);
 }
 
@@ -761,10 +786,6 @@ void Prune<FoldType>::execute(
     m_impl->execute(ffa_fold, ref_seg, outdir, log_file, result_file, tracker,
                     task_id);
 }
-
-// Template instantiations
-template class PruningManager<float>;
-template class PruningManager<ComplexType>;
 
 template class Prune<float>;
 template class Prune<ComplexType>;

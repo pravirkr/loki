@@ -1,7 +1,9 @@
 #pragma once
 
 #include <cstddef>
+#include <mutex>
 #include <span>
+#include <unordered_map>
 
 #ifdef LOKI_ENABLE_CUDA
 #include <cuda/std/span>
@@ -16,24 +18,54 @@ namespace loki::utils {
 
 class FFT2D {
 public:
-    FFT2D(size_t n1x, size_t n2x, size_t ny);
+    FFT2D(SizeType n1x, SizeType n2x, SizeType ny);
     ~FFT2D();
+
+    FFT2D(const FFT2D&)            = delete;
+    FFT2D& operator=(const FFT2D&) = delete;
+    FFT2D(FFT2D&&)                 = delete;
+    FFT2D& operator=(FFT2D&&)      = delete;
 
     void circular_convolve(std::span<float> n1,
                            std::span<float> n2,
                            std::span<float> out);
 
 private:
-    size_t m_n1x;
-    size_t m_n2x;
-    size_t m_ny;
+    SizeType m_n1x;
+    SizeType m_n2x;
+    SizeType m_ny;
 
-    size_t m_fft_size;
+    SizeType m_fft_size;
     fftwf_complex* m_n1_fft;
     fftwf_complex* m_n2_fft;
     fftwf_complex* m_n1n2_fft;
     fftwf_plan m_plan_forward;
     fftwf_plan m_plan_inverse;
+};
+
+class IrfftExecutor {
+public:
+    explicit IrfftExecutor(int n_real);
+    ~IrfftExecutor() = default;
+
+    IrfftExecutor(const IrfftExecutor&)            = delete;
+    IrfftExecutor& operator=(const IrfftExecutor&) = delete;
+    IrfftExecutor(IrfftExecutor&&)                 = delete;
+    IrfftExecutor& operator=(IrfftExecutor&&)      = delete;
+
+    void execute(std::span<ComplexType> complex_input,
+                 std::span<float> real_output,
+                 int batch_size);
+
+private:
+    int m_n_real;
+    int m_n_complex;
+
+    inline static std::unordered_map<int, fftwf_plan> s_plan_cache;
+    inline static std::mutex s_mutex;
+    inline static bool s_initialized{false};
+
+    fftwf_plan get_plan(int batch_size);
 };
 
 void ensure_fftw_threading(int nthreads = 1);

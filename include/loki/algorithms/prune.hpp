@@ -14,7 +14,7 @@
 
 namespace loki::algorithms {
 
-template <typename FoldType> class PruningManager {
+class PruningManager {
 public:
     PruningManager(const search::PulsarSearchConfig& cfg,
                    const std::vector<float>& threshold_scheme,
@@ -34,14 +34,12 @@ public:
                  std::string_view file_prefix        = "test",
                  std::string_view kind               = "taylor");
 
-private:
-    class Impl;
-    std::unique_ptr<Impl> m_impl;
-};
+    // Opaque handle to the implementation
+    class BaseImpl;
 
-// Type aliases for convenience
-using PruningManagerFloat   = PruningManager<float>;
-using PruningManagerComplex = PruningManager<ComplexType>;
+private:
+    std::unique_ptr<BaseImpl> m_impl;
+};
 
 template <typename FoldType> class Prune {
 public:

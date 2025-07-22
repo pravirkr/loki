@@ -129,7 +129,8 @@ private:
  *
  * This function merges temporary HDF5 files created during the multiprocessing
  * of pruning results into a final result file. It also merges log files into a
- * single log file. The temporary files are deleted after merging.
+ * single log file. The temporary files are deleted after merging. Merging order
+ * is based on ref_seg.
  */
 void merge_prune_result_files(const std::filesystem::path& results_dir,
                               const std::filesystem::path& log_file,

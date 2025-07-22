@@ -144,7 +144,7 @@ public:
         error_check::check(nseg > 0, "nseg must be greater than 0.");
         error_check::check(ref_idx < nseg, "ref_idx must be less than nseg.");
         error_check::check(tseg >= 0.0, "tseg must be non-negative.");
-        // np.argsort(np.abs(np.arange(nseg) - ref_idx))
+        // np.argsort(np.abs(np.arange(nseg) - ref_idx), kind="stable")
         std::iota(m_data.begin(), m_data.end(), 0);
         std::ranges::sort(m_data, [ref = m_ref_idx](SizeType a, SizeType b) {
             auto da = (a < ref) ? (ref - a) : (a - ref);
