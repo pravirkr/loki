@@ -102,7 +102,13 @@ CPMAddPackage(
   NAME CLI11
   VERSION 2.5.0
   URL https://github.com/CLIUtils/CLI11/archive/refs/tags/v2.5.0.tar.gz
+  DOWNLOAD_ONLY YES
+  EXCLUDE_FROM_ALL SYSTEM
 )
+if(CLI11_ADDED)
+  add_library(CLI11::CLI11 INTERFACE IMPORTED GLOBAL)
+  target_include_directories(CLI11::CLI11 INTERFACE ${CLI11_SOURCE_DIR}/include)
+endif()
 
 # toml++
 CPMAddPackage(
