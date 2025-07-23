@@ -25,36 +25,25 @@ float diff_max(const float* __restrict__ x,
 }
 
 void circular_prefix_sum(std::span<const float> x, std::span<float> out) {
-    const SizeType nbins = x.size();
-    const SizeType nsum  = out.size();
+    const auto nbins = x.size();
+    const auto nsum  = out.size();
     if (nbins == 0 || nsum == 0) {
         return;
     }
     // Compute the initial prefix sum
+    const auto initial_count = std::min(nbins, nsum);
     std::inclusive_scan(x.begin(),
-                        x.begin() + static_cast<int>(std::min(nbins, nsum)),
+                        x.begin() + static_cast<IndexType>(initial_count),
                         out.begin());
     if (nsum <= nbins) {
         return;
     }
     // Wrap around
-    const float last_sum   = out[nbins - 1];
-    const SizeType n_wraps = nsum / nbins;
-    const SizeType extra   = nsum % nbins;
-    for (SizeType i = 1; i < n_wraps; ++i) {
-        const float offset_sum = static_cast<float>(i) * last_sum;
-        const SizeType offset  = i * nbins;
-        for (SizeType j = 0; j < nbins; ++j) {
-            out[offset + j] = out[j] + offset_sum;
-        }
-    }
-    if (extra > 0) {
-        const float final_offset = static_cast<float>(n_wraps) * last_sum;
-        const SizeType offset    = n_wraps * nbins;
-
-        for (SizeType j = 0; j < extra; ++j) {
-            out[offset + j] = out[j] + final_offset;
-        }
+    const float last_sum = out[nbins - 1];
+    for (SizeType i = nbins; i < nsum; ++i) {
+        const auto wrap_count   = i / nbins;
+        const auto pos_in_cycle = i % nbins;
+        out[i] = out[pos_in_cycle] + static_cast<float>(wrap_count) * last_sum;
     }
 }
 

@@ -56,8 +56,8 @@ void poly_taylor_suggest(
     std::span<const double> dparams,
     SizeType poly_order,
     SizeType nbins,
-    std::span<const SizeType> score_widths,
     const detection::ScoringFunction<FoldType>& scoring_func,
+    detection::BoxcarWidthsCache& boxcar_widths_cache,
     utils::SuggestionTree<FoldType>& sugg_tree);
 
 } // namespace loki::core

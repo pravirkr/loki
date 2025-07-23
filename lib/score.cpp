@@ -200,6 +200,26 @@ void MatchedFilter::compute(std::span<const float> arr, std::span<float> out) {
     m_impl->compute(arr, out);
 }
 
+// SnrBoxcarCache
+BoxcarWidthsCache::BoxcarWidthsCache(std::span<const SizeType> widths,
+                                     SizeType nbins)
+    : widths(widths.begin(), widths.end()),
+      wmax(*std::ranges::max_element(widths)),
+      ntemplates(widths.size()),
+      h_vals(widths.size()),
+      b_vals(widths.size()),
+      fold_norm_buffer(nbins),
+      psum_buffer(nbins + wmax) {
+
+    // Precompute h_vals and b_vals for all widths
+    for (SizeType iw = 0; iw < widths.size(); ++iw) {
+        const auto w = widths[iw];
+        h_vals[iw]   = std::sqrt(static_cast<float>(nbins - w) /
+                                 static_cast<float>(nbins * w));
+        b_vals[iw] =
+            static_cast<float>(w) * h_vals[iw] / static_cast<float>(nbins - w);
+    }
+}
 std::vector<SizeType>
 generate_box_width_trials(SizeType fold_bins, double ducy_max, double wtsp) {
     const auto wmax = static_cast<SizeType>(
@@ -408,27 +428,58 @@ void snr_boxcar_3d_max(std::span<const float> arr,
     }
 }
 
-void snr_boxcar_batch(std::span<const float> batch_folds,
-                      std::span<const SizeType> widths,
-                      std::span<float> batch_scores,
-                      SizeType n_batch) {
-    snr_boxcar_3d_max(batch_folds, n_batch, widths, batch_scores, 1);
+namespace {
+void snr_boxcar_batch_kernel(const float* __restrict__ arr,
+                             SizeType nprofiles,
+                             SizeType nbins,
+                             float* __restrict__ out,
+                             BoxcarWidthsCache& cache) {
+    // Use precomputed values from cache
+    const auto* __restrict__ widths = cache.widths.data();
+    const auto wmax                 = cache.wmax;
+    const auto ntemplates           = cache.ntemplates;
+    const auto* __restrict__ h_vals = cache.h_vals.data();
+    const auto* __restrict__ b_vals = cache.b_vals.data();
+    auto* __restrict__ fold_norm    = cache.fold_norm_buffer.data();
+    auto* __restrict__ psum         = cache.psum_buffer.data();
+
+    for (SizeType i = 0; i < nprofiles; ++i) {
+        const SizeType base_idx            = i * 2 * nbins;
+        const float* __restrict__ ts_e_ptr = arr + base_idx;
+        const float* __restrict__ ts_v_ptr = arr + base_idx + nbins;
+        for (SizeType j = 0; j < nbins; ++j) {
+            const float inv_sqrt_v = 1.0F / std::sqrt(ts_v_ptr[j]);
+            fold_norm[j]           = ts_e_ptr[j] * inv_sqrt_v;
+        }
+        utils::circular_prefix_sum(std::span<const float>(fold_norm, nbins),
+                                   std::span<float>(psum, nbins + wmax));
+        const float sum              = psum[nbins - 1];
+        float* __restrict__ psum_ptr = psum;
+
+        // Compute SNR for each width, find maximum
+        float max_snr = std::numeric_limits<float>::lowest();
+        for (SizeType iw = 0; iw < ntemplates; ++iw) {
+            const auto dmax =
+                utils::diff_max(psum_ptr + widths[iw], psum_ptr, nbins);
+            const float snr =
+                ((h_vals[iw] + b_vals[iw]) * dmax) - (b_vals[iw] * sum);
+            max_snr = std::max(max_snr, snr);
+        }
+        out[i] = max_snr;
+    }
 }
+} // namespace
 
-void snr_boxcar_batch_complex(std::span<const ComplexType> batch_folds,
-                              std::span<const SizeType> widths,
-                              std::span<float> batch_scores,
-                              SizeType n_batch) {
-    // Always use out span to get the correct batch size
-    const auto nbins_f = batch_folds.size() / (2 * n_batch);
-    const auto nbins   = 2 * (nbins_f - 1);
-    const auto nfft    = 2 * n_batch;
-
-    std::vector<float> folds_t(n_batch * 2 * nbins, 0.0F);
-    std::vector<ComplexType> folds_span(batch_folds.begin(), batch_folds.end());
-    utils::irfft_batch(folds_span, folds_t, static_cast<int>(nfft),
-                           static_cast<int>(nbins), 1);
-    snr_boxcar_batch(folds_t, widths, batch_scores, n_batch);
+void snr_boxcar_batch(std::span<const float> batch_folds,
+                      std::span<float> batch_scores,
+                      SizeType n_batch,
+                      BoxcarWidthsCache& cache) {
+    error_check::check_equal(
+        batch_scores.size(), n_batch,
+        "snr_boxcar_batch: batch_scores size does not match n_batch");
+    const auto nbins = batch_folds.size() / (2 * n_batch);
+    snr_boxcar_batch_kernel(batch_folds.data(), n_batch, nbins,
+                            batch_scores.data(), cache);
 }
 
 } // namespace loki::detection

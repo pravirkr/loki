@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "loki/common/types.hpp"
+#include "loki/detection/score.hpp"
 #include "loki/search/configs.hpp"
 #include "loki/utils/fft.hpp"
 #include "loki/utils/suggestions.hpp"
@@ -38,7 +39,7 @@ public:
 
     void suggest(std::span<const FoldType> fold_segment,
                  std::pair<double, double> coord_init,
-                 utils::SuggestionTree<FoldType>& sugg_tree) const;
+                 utils::SuggestionTree<FoldType>& sugg_tree);
 
     void score(std::span<const FoldType> batch_folds,
                std::span<float> batch_scores,
@@ -88,6 +89,8 @@ private:
     // Buffer for ComplexType irfft transform
     std::vector<float> m_batch_folds_buffer;
     std::unique_ptr<utils::IrfftExecutor> m_irfft_executor;
+    // Cache for snr_boxcar_batch
+    detection::BoxcarWidthsCache m_boxcar_widths_cache;
 };
 
 // Type aliases for convenience

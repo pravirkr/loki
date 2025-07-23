@@ -23,7 +23,8 @@ PruneTaylorDPFuncts<FoldType>::PruneTaylorDPFuncts(
       m_dparams(dparams.begin(), dparams.end()),
       m_tseg_ffa(tseg_ffa),
       m_cfg(std::move(cfg)),
-      m_batch_size(batch_size) {
+      m_batch_size(batch_size),
+      m_boxcar_widths_cache(m_cfg.get_score_widths(), m_cfg.get_nbins()) {
     if constexpr (std::is_same_v<FoldType, ComplexType>) {
         m_irfft_executor =
             std::make_unique<utils::IrfftExecutor>(m_cfg.get_nbins());
@@ -90,30 +91,34 @@ template <typename FoldType>
 void PruneTaylorDPFuncts<FoldType>::suggest(
     std::span<const FoldType> fold_segment,
     std::pair<double, double> coord_init,
-    utils::SuggestionTree<FoldType>& sugg_tree) const {
+    utils::SuggestionTree<FoldType>& sugg_tree) {
 
     // Create scoring function based on FoldType
     detection::ScoringFunction<FoldType> scoring_func;
     if constexpr (std::is_same_v<FoldType, ComplexType>) {
-        scoring_func = [](std::span<const FoldType> folds,
-                          std::span<const SizeType> widths,
-                          std::span<float> out, SizeType n_batch) {
-            detection::snr_boxcar_batch_complex(folds, widths, out, n_batch);
+        scoring_func = [this](std::span<const FoldType> folds,
+                              std::span<float> out, SizeType n_batch,
+                              detection::BoxcarWidthsCache& cache) {
+            const auto nfft = 2 * n_batch;
+            auto folds_t    = std::span<float>(m_batch_folds_buffer)
+                               .first(nfft * m_cfg.get_nbins());
+            m_irfft_executor->execute(folds, folds_t, static_cast<int>(nfft));
+            detection::snr_boxcar_batch(folds_t, out, n_batch, cache);
         };
-        poly_taylor_suggest<FoldType>(
-            fold_segment, coord_init, m_param_arr, m_dparams,
-            m_cfg.get_prune_poly_order(), m_cfg.get_nbins_f(),
-            m_cfg.get_score_widths(), scoring_func, sugg_tree);
+        poly_taylor_suggest<FoldType>(fold_segment, coord_init, m_param_arr,
+                                      m_dparams, m_cfg.get_prune_poly_order(),
+                                      m_cfg.get_nbins_f(), scoring_func,
+                                      m_boxcar_widths_cache, sugg_tree);
     } else {
-        scoring_func = [](std::span<const FoldType> folds,
-                          std::span<const SizeType> widths,
-                          std::span<float> out, SizeType n_batch) {
-            detection::snr_boxcar_batch(folds, widths, out, n_batch);
+        scoring_func = [](std::span<const FoldType> folds, std::span<float> out,
+                          SizeType n_batch,
+                          detection::BoxcarWidthsCache& cache) {
+            detection::snr_boxcar_batch(folds, out, n_batch, cache);
         };
-        poly_taylor_suggest<FoldType>(
-            fold_segment, coord_init, m_param_arr, m_dparams,
-            m_cfg.get_prune_poly_order(), m_cfg.get_nbins(),
-            m_cfg.get_score_widths(), scoring_func, sugg_tree);
+        poly_taylor_suggest<FoldType>(fold_segment, coord_init, m_param_arr,
+                                      m_dparams, m_cfg.get_prune_poly_order(),
+                                      m_cfg.get_nbins(), scoring_func,
+                                      m_boxcar_widths_cache, sugg_tree);
     }
 }
 
@@ -124,13 +129,13 @@ void PruneTaylorDPFuncts<FoldType>::score(std::span<const FoldType> batch_folds,
     if constexpr (std::is_same_v<FoldType, ComplexType>) {
         const auto nfft = 2 * n_batch;
         auto folds_t    = std::span<float>(m_batch_folds_buffer)
-                           .first(n_batch * 2 * m_cfg.get_nbins());
+                           .first(nfft * m_cfg.get_nbins());
         m_irfft_executor->execute(batch_folds, folds_t, static_cast<int>(nfft));
-        detection::snr_boxcar_batch(folds_t, m_cfg.get_score_widths(),
-                                    batch_scores, n_batch);
+        detection::snr_boxcar_batch(folds_t, batch_scores, n_batch,
+                                    m_boxcar_widths_cache);
     } else {
-        detection::snr_boxcar_batch(batch_folds, m_cfg.get_score_widths(),
-                                    batch_scores, n_batch);
+        detection::snr_boxcar_batch(batch_folds, batch_scores, n_batch,
+                                    m_boxcar_widths_cache);
     }
 }
 

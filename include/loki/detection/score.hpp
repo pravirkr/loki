@@ -37,6 +37,18 @@ private:
     std::unique_ptr<Impl> m_impl;
 };
 
+struct BoxcarWidthsCache {
+    std::vector<SizeType> widths;
+    SizeType wmax;
+    SizeType ntemplates;
+    std::vector<float> h_vals;
+    std::vector<float> b_vals;
+    std::vector<float> fold_norm_buffer;
+    std::vector<float> psum_buffer;
+
+    BoxcarWidthsCache(std::span<const SizeType> widths, SizeType nbins);
+};
+
 // Generate boxcar width trials for matched filtering
 std::vector<SizeType> generate_box_width_trials(SizeType fold_bins,
                                                 double ducy_max = 0.2,
@@ -73,21 +85,15 @@ void snr_boxcar_3d_max(std::span<const float> arr,
 
 // Compute the S/N of a batch of folded profiles
 void snr_boxcar_batch(std::span<const float> batch_folds,
-                      std::span<const SizeType> widths,
                       std::span<float> batch_scores,
-                      SizeType n_batch);
-
-// Compute the S/N of a batch of ComplexType folded profiles
-void snr_boxcar_batch_complex(std::span<const ComplexType> batch_folds,
-                              std::span<const SizeType> widths,
-                              std::span<float> batch_scores,
-                              SizeType n_batch);
+                      SizeType n_batch,
+                      BoxcarWidthsCache& cache);
 
 template <typename FoldType>
 using ScoringFunction = std::function<void(std::span<const FoldType>,
-                                           std::span<const SizeType>,
                                            std::span<float>,
-                                           SizeType)>;
+                                           SizeType,
+                                           BoxcarWidthsCache&)>;
 
 #ifdef LOKI_ENABLE_CUDA
 

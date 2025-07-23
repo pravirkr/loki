@@ -97,6 +97,26 @@ if(BS_thread_pool_ADDED)
   target_include_directories(BS_thread_pool INTERFACE ${BS_thread_pool_SOURCE_DIR}/include)
 endif()
 
+# CLI11
+CPMAddPackage(
+  NAME CLI11
+  VERSION 2.5.0
+  URL https://github.com/CLIUtils/CLI11/archive/refs/tags/v2.5.0.tar.gz
+)
+
+# toml++
+CPMAddPackage(
+  NAME tomlplusplus
+  VERSION 3.4.0
+  URL https://github.com/marzer/tomlplusplus/archive/refs/tags/v3.4.0.tar.gz
+  DOWNLOAD_ONLY YES
+  EXCLUDE_FROM_ALL SYSTEM
+)
+if(tomlplusplus_ADDED)
+  add_library(tomlplusplus INTERFACE IMPORTED GLOBAL)
+  target_include_directories(tomlplusplus INTERFACE ${tomlplusplus_SOURCE_DIR}/include)
+endif()
+
 # cuRANDDx (mathdx)
 if(CMAKE_CUDA_COMPILER)
   find_package(mathdx QUIET COMPONENTS curanddx CONFIG)
@@ -170,6 +190,8 @@ target_link_libraries(
          Boost::random
          HighFive::HighFive
          BS_thread_pool
+         tomlplusplus
+         CLI11::CLI11
 )
 
 # Add CUDA options and libraries when available

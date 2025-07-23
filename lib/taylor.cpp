@@ -383,8 +383,8 @@ void poly_taylor_suggest(
     std::span<const double> dparams,
     SizeType poly_order,
     SizeType nbins,
-    std::span<const SizeType> score_widths,
     const detection::ScoringFunction<FoldType>& scoring_func,
+    detection::BoxcarWidthsCache& boxcar_widths_cache,
     utils::SuggestionTree<FoldType>& sugg_tree) {
     const auto nparams = param_arr.size();
     error_check::check_equal(nparams, poly_order,
@@ -416,7 +416,7 @@ void poly_taylor_suggest(
     }
     // Calculate scores
     std::vector<float> scores(n_leaves);
-    scoring_func(fold_segment, score_widths, scores, n_leaves);
+    scoring_func(fold_segment, scores, n_leaves, boxcar_widths_cache);
     // Initialize the SuggestionStruct with the generated data
     sugg_tree.add_initial(param_sets, fold_segment, scores, n_leaves);
 }
@@ -428,8 +428,8 @@ template void poly_taylor_suggest<float>(
     std::span<const double> dparams,
     SizeType poly_order,
     SizeType nbins,
-    std::span<const SizeType> score_widths,
     const detection::ScoringFunction<float>& scoring_func,
+    detection::BoxcarWidthsCache& boxcar_widths_cache,
     utils::SuggestionTree<float>& sugg_tree);
 
 template void poly_taylor_suggest<ComplexType>(
@@ -439,8 +439,8 @@ template void poly_taylor_suggest<ComplexType>(
     std::span<const double> dparams,
     SizeType poly_order,
     SizeType nbins,
-    std::span<const SizeType> score_widths,
     const detection::ScoringFunction<ComplexType>& scoring_func,
+    detection::BoxcarWidthsCache& boxcar_widths_cache,
     utils::SuggestionTree<ComplexType>& sugg_tree);
 
 } // namespace loki::core
