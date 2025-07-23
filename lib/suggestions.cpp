@@ -352,9 +352,14 @@ public:
         update_candidates();
 
         while (!pending_indices.empty()) {
-            const auto space_left =
-                m_capacity - ((m_size_old - m_read_consumed) + m_size);
-            if (space_left < 0 || space_left > m_capacity) {
+            // Using IndexType to safely handle potential negative results
+            const auto space_left = static_cast<IndexType>(m_capacity) -
+                                    ((static_cast<IndexType>(m_size_old) -
+                                      static_cast<IndexType>(m_read_consumed)) +
+                                     static_cast<IndexType>(m_size));
+
+            if (space_left < 0 ||
+                space_left > static_cast<IndexType>(m_capacity)) {
                 throw std::runtime_error(
                     std::format("SuggestionTree: Invalid space left ({}) after "
                                 "add_batch. Buffer overflow.",
@@ -370,8 +375,8 @@ public:
                 continue; // Try again with new threshold
             }
 
-            const auto n_to_add_now =
-                std::min(pending_indices.size(), space_left);
+            const auto n_to_add_now = std::min(
+                pending_indices.size(), static_cast<SizeType>(space_left));
 
             // Batched assignment
             for (SizeType i = 0; i < n_to_add_now; ++i) {

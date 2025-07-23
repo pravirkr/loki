@@ -1,6 +1,5 @@
 #pragma once
 
-#include <cstddef>
 #include <mutex>
 #include <span>
 #include <unordered_map>
@@ -53,7 +52,7 @@ public:
     IrfftExecutor(IrfftExecutor&&)                 = delete;
     IrfftExecutor& operator=(IrfftExecutor&&)      = delete;
 
-    void execute(std::span<ComplexType> complex_input,
+    void execute(std::span<const ComplexType> complex_input,
                  std::span<float> real_output,
                  int batch_size);
 

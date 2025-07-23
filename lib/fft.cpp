@@ -104,7 +104,7 @@ IrfftExecutor::IrfftExecutor(int n_real)
     }
 }
 
-void IrfftExecutor::execute(std::span<ComplexType> complex_input,
+void IrfftExecutor::execute(std::span<const ComplexType> complex_input,
                             std::span<float> real_output,
                             int batch_size) {
     error_check::check_equal(
@@ -116,8 +116,11 @@ void IrfftExecutor::execute(std::span<ComplexType> complex_input,
 
     auto* plan = get_plan(batch_size);
 
-    auto* complex_ptr = reinterpret_cast<fftwf_complex*>(complex_input.data());
-    auto* real_ptr    = real_output.data();
+    // FFTW API is not const-correct, so cast away const as we are
+    // promising to preserve the input. (only works for 1D transforms)
+    auto* complex_ptr = reinterpret_cast<fftwf_complex*>(
+        const_cast<ComplexType*>(complex_input.data())); // NOLINT
+    auto* real_ptr = real_output.data();
 
     fftwf_execute_dft_c2r(plan, complex_ptr, real_ptr);
 
@@ -139,7 +142,8 @@ fftwf_plan IrfftExecutor::get_plan(int batch_size) {
         return it->second;
     }
 
-    fftwf_plan plan = fftwf_plan_many_dft_c2r(
+    const unsigned flags = FFTW_ESTIMATE | FFTW_PRESERVE_INPUT;
+    fftwf_plan plan      = fftwf_plan_many_dft_c2r(
         1,                       // rank
         &m_n_real,               // transform size
         batch_size,              // number of transforms
@@ -147,7 +151,7 @@ fftwf_plan IrfftExecutor::get_plan(int batch_size) {
         nullptr, 1, m_n_complex, // input layout: stride=1, dist=n_complex
         nullptr,                 // output (dummy)
         nullptr, 1, m_n_real,    // output layout: stride=1, dist=n_real
-        FFTW_ESTIMATE            // fast planning
+        flags                    // fast planning
     );
 
     if (plan == nullptr) {

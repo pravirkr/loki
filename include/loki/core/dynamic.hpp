@@ -16,7 +16,8 @@ public:
     PruneTaylorDPFuncts(std::span<const std::vector<double>> param_arr,
                         std::span<const double> dparams,
                         double tseg_ffa,
-                        search::PulsarSearchConfig cfg);
+                        search::PulsarSearchConfig cfg,
+                        SizeType batch_size);
 
     // Core interface methods
     auto load(std::span<const FoldType> ffa_fold, SizeType seg_idx) const
@@ -41,7 +42,7 @@ public:
 
     void score(std::span<const FoldType> batch_folds,
                std::span<float> batch_scores,
-               SizeType n_batch) const noexcept;
+               SizeType n_batch) noexcept;
 
     void pack(std::span<const FoldType> data,
               std::span<FoldType> out) const noexcept;
@@ -80,9 +81,12 @@ private:
     std::vector<double> m_dparams;
     double m_tseg_ffa;
     search::PulsarSearchConfig m_cfg;
+    SizeType m_batch_size;
 
-    // Buffers for shift-add operations
+    // Buffer for shift-add operations
     std::vector<FoldType> m_shift_buffer;
+    // Buffer for ComplexType irfft transform
+    std::vector<float> m_batch_folds_buffer;
     std::unique_ptr<utils::IrfftExecutor> m_irfft_executor;
 };
 

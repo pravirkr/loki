@@ -718,7 +718,7 @@ private:
             m_prune_funcs =
                 std::make_unique<core::PruneTaylorDPFuncts<FoldType>>(
                     m_ffa_plan.params.back(), m_ffa_plan.dparams.back(),
-                    m_ffa_plan.tsegments.back(), m_cfg);
+                    m_ffa_plan.tsegments.back(), m_cfg, m_batch_size);
         } else {
             throw std::runtime_error(
                 std::format("Invalid pruning kind: {}", m_kind));
