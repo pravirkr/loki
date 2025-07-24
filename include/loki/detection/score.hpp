@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <span>
 #include <string_view>
@@ -90,10 +91,8 @@ void snr_boxcar_batch(std::span<const float> batch_folds,
                       BoxcarWidthsCache& cache);
 
 template <typename FoldType>
-using ScoringFunction = std::function<void(std::span<const FoldType>,
-                                           std::span<float>,
-                                           SizeType,
-                                           BoxcarWidthsCache&)>;
+using ScoringFunction = std::function<void(
+    std::span<const FoldType>, std::span<float>, SizeType, BoxcarWidthsCache&)>;
 
 #ifdef LOKI_ENABLE_CUDA
 

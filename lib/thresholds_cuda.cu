@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
+#include <fcntl.h>
 #include <filesystem>
 #include <format>
 #include <memory>
@@ -17,6 +18,7 @@
 #include <highfive/highfive.hpp>
 #include <math_constants.h>
 #include <spdlog/spdlog.h>
+#include <sys/stat.h>
 #include <thrust/device_vector.h>
 #include <thrust/execution_policy.h>
 #include <thrust/fill.h>
@@ -141,7 +143,7 @@ struct DevicePoolAllocator {
      * Deallocate - callable from device.
      * This implements a lock-free push to a concurrent stack.
      */
-    __device__ void deallocate(const FoldVectorHandleDevice& handle) const {
+    __device__ void deallocate(FoldVectorHandleDevice& handle) const {
         if (!handle.is_valid()) {
             return;
         }
@@ -235,18 +237,38 @@ public:
     void swap_pools() { m_current_out_pool = 1 - m_current_out_pool; }
 
     void debug_pool_status() {
-        int top_a, top_b;
+        int top_a = -1, top_b = -1;
         cudaMemcpy(&top_a, m_free_top_a, sizeof(int), cudaMemcpyDeviceToHost);
         cudaMemcpy(&top_b, m_free_top_b, sizeof(int), cudaMemcpyDeviceToHost);
 
-        spdlog::info("Pool status: A_top={}, B_top={}, slots_per_pool={}, "
-                     "current_out={}",
-                     top_a, top_b, m_slots_per_pool, m_current_out_pool);
+        const int used_a = static_cast<int>(m_slots_per_pool) - top_a;
+        const int used_b = static_cast<int>(m_slots_per_pool) - top_b;
 
-        if (top_a < -100 || top_b < -100 ||
-            top_a >= static_cast<int>(m_slots_per_pool) ||
-            top_b >= static_cast<int>(m_slots_per_pool)) {
-            spdlog::error("POOL CORRUPTION DETECTED!");
+        const float usage_pct_a = 100.0F * static_cast<float>(used_a) /
+                                  static_cast<float>(m_slots_per_pool);
+        const float usage_pct_b = 100.0F * static_cast<float>(used_b) /
+                                  static_cast<float>(m_slots_per_pool);
+
+        const std::string cur_pool = (m_current_out_pool != 0) ? "B" : "A";
+        spdlog::info("Cur Pool: {}; Pool A: used = {}/{} ({:.1f}%)  |  Pool B: "
+                     "used = {}/{} ({:.1f}%)",
+                     cur_pool, used_a, m_slots_per_pool, usage_pct_a, used_b,
+                     m_slots_per_pool, usage_pct_b);
+
+        // Corruption checks
+        if (top_a < 0 || top_b < 0 ||
+            top_a > static_cast<int>(m_slots_per_pool) ||
+            top_b > static_cast<int>(m_slots_per_pool)) {
+            spdlog::error("POOL CORRUPTION DETECTED! (top_a={}, top_b={})",
+                          top_a, top_b);
+        }
+
+        // Optional warning when near exhaustion
+        if (top_a == 0 || top_b == 0) {
+            spdlog::warn("Pool A or B is completely exhausted!");
+        } else if (usage_pct_a > 95.0F || usage_pct_b > 95.0F) {
+            spdlog::warn(
+                "Pool usage above 95%. Consider increasing slots per pool.");
         }
     }
 
@@ -287,14 +309,76 @@ struct DeallocateFunctor {
     DevicePoolAllocator allocator;
 
     __device__ void operator()(FoldsTypeDevice& fold) const {
-        if (fold.folds_h0.is_valid()) {
-            allocator.deallocate(fold.folds_h0);
-        }
-        if (fold.folds_h1.is_valid()) {
-            allocator.deallocate(fold.folds_h1);
-        }
+        allocator.deallocate(fold.folds_h0);
+        allocator.deallocate(fold.folds_h1);
         // Reset to default (nullptrs)
         fold = FoldsTypeDevice();
+    }
+};
+
+
+struct BoxcarWidthsCacheDeviceView {
+    const int* box_score_widths;
+    const float* h_vals;
+    const float* b_vals;
+    float* psum_workspace;
+
+    int nsum; // Size of the psum_workspace for each thread
+    int nwidths;
+    int nbins;
+    int wmax;
+};
+
+struct BoxcarWidthsCacheDevice {
+    thrust::device_vector<int> box_score_widths_d;
+    thrust::device_vector<float> h_vals_d;
+    thrust::device_vector<float> b_vals_d;
+    thrust::device_vector<float> psum_workspace_d;
+    int nsum;
+    int nwidths;
+    int nbins;
+    int wmax;
+
+    BoxcarWidthsCacheDevice(std::span<const SizeType> box_score_widths,
+                            int nbins,
+                            int max_concurrent_threads)
+        : nbins(nbins) {
+
+        nwidths = static_cast<int>(box_score_widths.size());
+        wmax    = static_cast<int>(*std::ranges::max_element(box_score_widths));
+        std::vector<float> h_vals(nwidths);
+        std::vector<float> b_vals(nwidths);
+
+        box_score_widths_d.resize(nwidths);
+        for (int i = 0; i < nwidths; ++i) {
+            const int w           = static_cast<int>(box_score_widths[i]);
+            const auto nbins_f    = static_cast<float>(nbins);
+            const auto w_f        = static_cast<float>(w);
+            box_score_widths_d[i] = w;
+            h_vals[i] = std::sqrt((nbins_f - w_f) / (nbins_f * w_f));
+            b_vals[i] = w_f * h_vals[i] / (nbins_f - w_f);
+        }
+        h_vals_d = h_vals;
+        b_vals_d = b_vals;
+        nsum     = nbins + wmax;
+
+        // Allocate the per-thread psum workspace
+        // Each thread needs a buffer of size (nbins + wmax).
+        const auto total_workspace_size = nsum * max_concurrent_threads;
+        psum_workspace_d.resize(total_workspace_size);
+    }
+
+    BoxcarWidthsCacheDeviceView get_device_view() {
+        return BoxcarWidthsCacheDeviceView{
+            .box_score_widths =
+                thrust::raw_pointer_cast(box_score_widths_d.data()),
+            .h_vals         = thrust::raw_pointer_cast(h_vals_d.data()),
+            .b_vals         = thrust::raw_pointer_cast(b_vals_d.data()),
+            .psum_workspace = thrust::raw_pointer_cast(psum_workspace_d.data()),
+            .nsum           = nsum,
+            .nwidths        = nwidths,
+            .nbins          = nbins,
+            .wmax           = wmax};
     }
 };
 
@@ -432,123 +516,49 @@ simulate_folds_kernel(const FoldsTypeDevice* __restrict__ folds_in_ptr,
                    var_add, seed, offset);
 }
 
-__device__ float
-compute_trial_snr_on_demand_old(const float* __restrict__ trial_data,
-                                int nbins,
-                                const SizeType* __restrict__ widths,
-                                int nwidths,
-                                float stdnoise = 1.0F) {
-    const int tid        = static_cast<int>(threadIdx.x);
-    const int block_size = static_cast<int>(blockDim.x);
-    // Step 1: Compute total sum collaboratively
-    float total_sum = 0.0F;
-    for (int i = tid; i < nbins; i += block_size) {
-        total_sum += trial_data[i];
-    }
-
-    // Block-wide reduction for total sum
-    for (unsigned int offset = block_size / 2; offset > 0; offset >>= 1U) {
-        total_sum += __shfl_down_sync(0xFFFFFFFF, total_sum, offset);
-    }
-    // Broadcast to all threads
-    total_sum = __shfl_sync(0xFFFFFFFF, total_sum, 0);
-
-    float max_snr = -CUDART_INF_F;
-
-    // Step 2: Process each width
-    for (int iw = 0; iw < nwidths; ++iw) {
-        const int w   = static_cast<int>(widths[iw]);
-        const float h = sqrtf(static_cast<float>(nbins - w) /
-                              static_cast<float>(nbins * w));
-        const float b =
-            static_cast<float>(w) * h / static_cast<float>(nbins - w);
-
-        float thread_max_diff = -CUDART_INF_F;
-
-        // Each thread processes multiple starting positions
-        for (int start = tid; start < nbins; start += block_size) {
-            // Compute windowed sum on-the-fly
-            float window_sum = 0.0F;
-
-            for (int i = 0; i < w; ++i) {
-                int idx = (start + i) % nbins; // Handle circular wrapping
-                window_sum += trial_data[idx];
-            }
-
-            thread_max_diff = fmaxf(thread_max_diff, window_sum);
-        }
-
-        // Block-wide reduction to find maximum difference for this width
-        for (unsigned int offset = block_size / 2; offset > 0; offset >>= 1U) {
-            float temp = __shfl_down_sync(0xFFFFFFFF, thread_max_diff, offset);
-            thread_max_diff = fmaxf(thread_max_diff, temp);
-        }
-
-        float snr = -CUDART_INF_F;
-        if (tid == 0) {
-            snr = (((h + b) * thread_max_diff) - (b * total_sum)) / stdnoise;
-            // max_snr = fmaxf(max_snr, snr);
-        }
-        float snr_broadcast = __shfl_sync(0xFFFFFFFF, snr, 0);
-        max_snr             = fmaxf(max_snr, snr_broadcast);
-        //__syncthreads();
-    }
-
-    // Broadcast final result to all threads
-    float result_snr = __shfl_sync(0xFFFFFFFF, max_snr, 0);
-    return result_snr;
-}
+constexpr int kLocalFilterMax = 32;
 
 __device__ float
 compute_trial_snr_on_demand(const float* __restrict__ trial_data,
                             int nbins,
-                            const SizeType* __restrict__ widths,
-                            int nwidths,
-                            float stdnoise = 1.0F) {
-    float total_sum = 0.0F;
+                            const BoxcarWidthsCacheDeviceView& box_cache,
+                            float stdnoise) {
+    const int nwidths                = box_cache.nwidths;
+    const int nsum                   = box_cache.nsum;
+    const int* __restrict__ widths   = box_cache.box_score_widths;
+    const float* __restrict__ h_vals = box_cache.h_vals;
+    const float* __restrict__ b_vals = box_cache.b_vals;
 
-    // Step 1: Total sum of trial data
-    for (int i = 0; i < nbins; ++i) {
-        total_sum += trial_data[i];
+    // Calculate the pointer to this thread's private workspace
+    const auto tid = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
+    float* psum =
+        box_cache.psum_workspace + (static_cast<IndexType>(tid * nsum));
+
+    // Compute circular prefix sum (inclusive scan with wrapping)
+    psum[0] = trial_data[0];
+    for (int i = 1; i < nbins; ++i) {
+        psum[i] = psum[i - 1] + trial_data[i];
+    }
+    const float total_sum = psum[nbins - 1];
+    for (int i = nbins; i < nsum; ++i) {
+        const int wrap_count   = i / nbins;
+        const int pos_in_cycle = i % nbins;
+        psum[i] =
+            psum[pos_in_cycle] + (static_cast<float>(wrap_count) * total_sum);
     }
 
     float max_snr = -CUDART_INF_F;
-
-    // Step 2: Loop over each width template
     for (int iw = 0; iw < nwidths; ++iw) {
-        const int w = static_cast<int>(widths[iw]);
-        if (w <= 0 || w > nbins) {
-            continue; // sanity check
+        float max_diff = -CUDART_INF_F;
+        for (int j = 0; j < nbins; ++j) {
+            const float diff = psum[widths[iw] + j] - psum[j];
+            max_diff         = max(diff, max_diff);
         }
-
-        // Boxcar filter parameters
-        const float h = sqrtf(static_cast<float>(nbins - w) /
-                              static_cast<float>(nbins * w));
-        const float b =
-            static_cast<float>(w) * h / static_cast<float>(nbins - w);
-
-        float max_window_sum = -CUDART_INF_F;
-
-        // Step 3: Slide window over nbins with circular wrapping
-        for (int start = 0; start < nbins; ++start) {
-            float window_sum = 0.0F;
-            for (int i = 0; i < w; ++i) {
-                int idx = (start + i) % nbins;
-                window_sum += trial_data[idx];
-            }
-            if (window_sum > max_window_sum) {
-                max_window_sum = window_sum;
-            }
-        }
-
-        // Step 4: Compute SNR for this width
-        const float snr =
-            (((h + b) * max_window_sum) - (b * total_sum)) / stdnoise;
-        if (snr > max_snr) {
-            max_snr = snr;
-        }
+        const float snr = (((h_vals[iw] + b_vals[iw]) * max_diff) -
+                           (b_vals[iw] * total_sum)) /
+                          stdnoise;
+        max_snr = max(snr, max_snr);
     }
-
     return max_snr;
 }
 
@@ -566,23 +576,49 @@ __inline__ __device__ void bitonic_sort_shared(int* data, int count) {
 
     const unsigned int idx = threadIdx.x;
 
-    for (unsigned int k = 2; k <= m; k <<= 1U) {
+    for (unsigned int k = 2U; k <= m; k <<= 1U) {
         for (unsigned int j = k >> 1U; j > 0; j >>= 1U) {
+            __syncthreads();
             if (idx < static_cast<unsigned int>(count)) {
                 unsigned int ixj = idx ^ j;
-                if (ixj < static_cast<unsigned int>(count)) {
+                if (ixj > idx && ixj < static_cast<unsigned int>(count)) {
                     bool up = ((idx & k) == 0);
                     int a = data[idx], b = data[ixj];
-                    // swap to enforce ascending order if up==true,
-                    // or descending if up==false (we only use ascending)
+                    // Swap to enforce ascending order if up==true
                     if ((a > b) == up) {
                         data[idx] = b;
                         data[ixj] = a;
                     }
                 }
             }
-            __syncthreads();
         }
+    }
+    __syncthreads(); // Ensure all threads have completed sorting
+}
+
+__device__ void compact_in_place(int count,
+                                 const int* __restrict__ indices,
+                                 float* __restrict__ data,
+                                 int nbins,
+                                 int ntrials_max) {
+    const int tid        = static_cast<int>(threadIdx.x);
+    const int block_size = static_cast<int>(blockDim.x);
+
+    // Moves one surviving trial to its new, compacted position.
+    for (int i = 0; i < count; ++i) {
+        const int original_idx = indices[i];
+        if (original_idx != i) {
+            // Threads in the block cooperate to copy the elements of a single
+            // trial. This ensures memory accesses are coalesced.
+            for (int j = tid; j < nbins; j += block_size) {
+                const int in_offset  = (original_idx * nbins) + j;
+                const int out_offset = (i * nbins) + j;
+                if (in_offset < ntrials_max * nbins) {
+                    data[out_offset] = data[in_offset];
+                }
+            }
+        }
+        __syncthreads();
     }
 }
 
@@ -597,8 +633,7 @@ __inline__ __device__ void bitonic_sort_shared(int* data, int count) {
 
 __device__ void
 score_and_prune_fused(FoldsTypeDevice& folds_sim,
-                      const SizeType* __restrict__ box_score_widths,
-                      int nwidths,
+                      const BoxcarWidthsCacheDeviceView& box_cache,
                       int nbins,
                       float threshold) {
     extern __shared__ int shm[]; // NOLINT
@@ -623,10 +658,11 @@ score_and_prune_fused(FoldsTypeDevice& folds_sim,
     __syncthreads();
 
     // Collect surviving H0 and H1 trials into shared lists
-    auto collect = [&](const float* trial_data, int sim_trials, float variance,
-                       int& shared_count, int* shared_idx) {
+    auto collect = [&](const float* __restrict__ trial_data, int sim_trials,
+                       float variance, int& shared_count,
+                       int* __restrict__ shared_idx) {
         // Local buffer for good indices
-        int local_good[32]; // NOLINT
+        int local_good[kLocalFilterMax]; // NOLINT
         int local_count      = 0;
         const float stdnoise = sqrtf(variance);
 
@@ -634,10 +670,10 @@ score_and_prune_fused(FoldsTypeDevice& folds_sim,
         for (int i = tid; i < sim_trials; i += block_size) {
             float score = compute_trial_snr_on_demand(
                 trial_data + static_cast<IndexType>(i * nbins), nbins,
-                box_score_widths, nwidths, stdnoise);
+                box_cache, stdnoise);
             if (score > threshold) {
                 local_good[local_count++] = i;
-                if (local_count == 32) {
+                if (local_count == kLocalFilterMax) {
                     // Flush local buffer to shared memory
                     int pos = atomicAdd(&shared_count, local_count);
                     for (int j = 0; j < local_count; ++j) {
@@ -661,46 +697,30 @@ score_and_prune_fused(FoldsTypeDevice& folds_sim,
     };
 
     // pointers into the single in‐place buffers
-    float* folds_sim_h0 = folds_sim.folds_h0.data;
-    float* folds_sim_h1 = folds_sim.folds_h1.data;
+    float* __restrict__ folds_sim_h0 = folds_sim.folds_h0.data;
+    float* __restrict__ folds_sim_h1 = folds_sim.folds_h1.data;
 
-    collect(folds_sim_h0, static_cast<int>(folds_sim.folds_h0.ntrials),
-            folds_sim.folds_h0.variance, shared_count_h0, shared_indices_h0);
-    collect(folds_sim_h1, static_cast<int>(folds_sim.folds_h1.ntrials),
-            folds_sim.folds_h1.variance, shared_count_h1, shared_indices_h1);
+    collect(folds_sim_h0, max_trials_h0, folds_sim.folds_h0.variance,
+            shared_count_h0, shared_indices_h0);
+    __syncthreads();
+    collect(folds_sim_h1, max_trials_h1, folds_sim.folds_h1.variance,
+            shared_count_h1, shared_indices_h1);
     __syncthreads();
 
     // *** Sort the surviving‐trial indices ascending ***
     bitonic_sort_shared(shared_indices_h0, shared_count_h0);
     bitonic_sort_shared(shared_indices_h1, shared_count_h1);
-    __syncthreads();
 
-    // *** In‐place copy “to the left” ***
-    for (int i = tid; i < shared_count_h0; i += block_size) {
-        const int orig_trial = shared_indices_h0[i];
-        if (orig_trial != i) {
-            const int in_off  = orig_trial * nbins;
-            const int out_off = i * nbins;
-            for (int j = 0; j < nbins; ++j) {
-                folds_sim_h0[out_off + j] = folds_sim_h0[in_off + j];
-            }
-        }
-    }
-    for (int i = tid; i < shared_count_h1; i += block_size) {
-        const int orig_trial = shared_indices_h1[i];
-        if (orig_trial != i) {
-            const int in_off  = orig_trial * nbins;
-            const int out_off = i * nbins;
-            for (int j = 0; j < nbins; ++j) {
-                folds_sim_h1[out_off + j] = folds_sim_h1[in_off + j];
-            }
-        }
-    }
-    __syncthreads();
+    // In-place copy using the coalesced helper function
+    compact_in_place(shared_count_h0, shared_indices_h0,
+                     folds_sim.folds_h0.data, nbins, max_trials_h0);
+    compact_in_place(shared_count_h1, shared_indices_h1,
+                     folds_sim.folds_h1.data, nbins, max_trials_h1);
+
     // Update ntrials in the handle itself
     if (tid == 0) {
-        folds_sim.folds_h0.ntrials = shared_count_h0;
-        folds_sim.folds_h1.ntrials = shared_count_h1;
+        folds_sim.folds_h0.ntrials = static_cast<SizeType>(shared_count_h0);
+        folds_sim.folds_h1.ntrials = static_cast<SizeType>(shared_count_h1);
     }
 }
 
@@ -709,8 +729,7 @@ __global__ void transition_kernel(
     int num_items,
     const float* __restrict__ profile,
     int nbins,
-    const SizeType* __restrict__ box_score_widths,
-    int nwidths,
+    const BoxcarWidthsCacheDeviceView& box_cache,
     float bias_snr,
     float var_add,
     const float* __restrict__ probs,
@@ -721,8 +740,7 @@ __global__ void transition_kernel(
     int* __restrict__ locks_ptr,
     DevicePoolAllocator* allocator, // Pass by value since it's lightweight
     uint64_t seed,
-    uint64_t offset,
-    int* __restrict__ update_counter) {
+    uint64_t offset) {
 
     const auto item_idx = static_cast<int>(blockIdx.x);
     if (item_idx >= num_items) {
@@ -749,7 +767,7 @@ __global__ void transition_kernel(
     }
 
     // Phase 2: Fused Score and Prune (threads collaborate)
-    score_and_prune_fused(work_item.folds_sim, box_score_widths, nwidths, nbins,
+    score_and_prune_fused(work_item.folds_sim, box_cache, nbins,
                           work_item.threshold);
     __syncthreads();
 
@@ -771,37 +789,14 @@ __global__ void transition_kernel(
                       static_cast<float>(ntrials_sim_h1_before_prune)
                 : 0.0F;
 
-        printf("ntrials_sim_h0_before_prune=%d, ntrials_h0_out=%d, "
-               "ntrials_sim_h1_before_prune=%d, ntrials_h1_out=%d\n",
-               ntrials_sim_h0_before_prune,
-               static_cast<int>(work_item.folds_sim.folds_h0.ntrials),
-               ntrials_sim_h1_before_prune,
-               static_cast<int>(work_item.folds_sim.folds_h1.ntrials));
-
         // Generate next state
-        printf("Generating next state for threshold=%f, success_h0=%f, "
-               "success_h1=%f, nbranches=%f\n",
-               work_item.threshold, success_h0, success_h1,
-               work_item.nbranches);
         const auto state_next = work_item.input_state.gen_next(
             work_item.threshold, success_h0, success_h1, work_item.nbranches);
-
-        printf("Generated state_next: is_empty=%d, complexity=%f, thread=%d\n",
-               state_next.is_empty, state_next.complexity_cumul, threadIdx.x);
+        // Find the bin index for the next state
         const auto iprob =
             find_bin_index_device(probs, nprobs, state_next.success_h1_cumul);
 
-        printf("iprob=%d, nprobs=%d, success_h1_cumul=%f\n", iprob, nprobs,
-               state_next.success_h1_cumul);
-
         bool stored_new_folds = false;
-        // if (iprob < 0 || iprob >= nprobs) {
-        //     const int fold_idx  = (work_item.thres_idx * nprobs) + iprob;
-        //     const int state_idx = stage_offset_cur + fold_idx;
-
-        //    printf("Invalid iprob for state_idx=%d, success_h1_cumul=%f\n",
-        //           state_idx, state_next.success_h1_cumul);
-        //}
         if (iprob >= 0 && iprob < nprobs) {
             const int fold_idx  = (work_item.thres_idx * nprobs) + iprob;
             const int state_idx = stage_offset_cur + fold_idx;
@@ -814,29 +809,18 @@ __global__ void transition_kernel(
             auto& existing_state = states_out_ptr[state_idx];
             auto& existing_folds = folds_out_ptr[fold_idx];
 
-            // printf("Target state_idx=%d, current complexity=%f, new "
-            //        "complexity=%f\n",
-            //        state_idx, existing_state.complexity_cumul,
-            //        state_next.complexity_cumul);
-
             if (existing_state.is_empty ||
                 state_next.complexity_cumul < existing_state.complexity_cumul) {
                 // Deallocate old folds before overwriting to prevent leaks
-                if (!existing_folds.is_empty()) {
-                    allocator->deallocate(existing_folds.folds_h0);
-                    allocator->deallocate(existing_folds.folds_h1);
-                }
+                allocator->deallocate(existing_folds.folds_h0);
+                allocator->deallocate(existing_folds.folds_h1);
+
                 // Update to better state
-                // printf("Updating state_idx=%d with new state.\n", state_idx);
                 existing_state = state_next;
                 // Move pruned folds to persistent storage
-                existing_folds   = work_item.folds_sim;
+                existing_folds = work_item.folds_sim;
+
                 stored_new_folds = true;
-                atomicAdd(update_counter, 1);
-            } else {
-                // printf(
-                //     "Skipped updating state_idx=%d due to higher
-                //     complexity.\n", state_idx);
             }
             // Release lock
             atomicExch(lock, 0);
@@ -942,6 +926,23 @@ struct TransitionFunctor {
         for (SizeType kprob = 0; kprob < nprobs; ++kprob) {
             SizeType global_slot = base_offset + slot;
             if (global_slot < batch_start) {
+                // Only increment slot if this would have been a valid
+                // transition! So, replicate the checks here:
+                const auto prev_fold_idx = (jthresh * nprobs) + kprob;
+                const auto& prev_state =
+                    states_ptr[stage_offset_prev + prev_fold_idx];
+                if (prev_state.is_empty) {
+                    continue;
+                }
+                const auto& prev_fold_state = folds_ptr[prev_fold_idx];
+                if (prev_fold_state.is_empty()) {
+                    continue;
+                }
+                const auto ntrials_in_h0 = prev_fold_state.folds_h0.ntrials;
+                const auto ntrials_in_h1 = prev_fold_state.folds_h1.ntrials;
+                if (ntrials_in_h0 == 0 || ntrials_in_h1 == 0) {
+                    continue;
+                }
                 slot++;
                 continue;
             }
@@ -1099,8 +1100,7 @@ public:
           m_wtsp(wtsp),
           m_beam_width(beam_width),
           m_trials_start(trials_start),
-          m_device_id(device_id),
-          m_batch_size(256) {
+          m_device_id(device_id) {
 
         cuda_utils::set_device(m_device_id);
         if (m_branching_pattern.empty()) {
@@ -1144,6 +1144,10 @@ public:
         m_states_locks_d.resize(grid_size);
         thrust::fill(m_states_locks_d.begin(), m_states_locks_d.end(), 0);
         m_states.resize(grid_size, State{});
+        m_boxcar_cache_d = std::make_unique<BoxcarWidthsCacheDevice>(
+            m_box_score_widths, m_nbins, m_batch_size * m_threads_per_block);
+
+        // Initialize states
         init_states();
         m_device_manager->swap_pools();
     }
@@ -1156,29 +1160,25 @@ public:
     // Methods
     void run(SizeType thres_neigh = 10) {
         spdlog::info("Running dynamic threshold scheme on CUDA");
-        // progress::ProgressGuard progress_guard(true);
-        // auto bar =
-        //     progress::make_standard_bar("Computing scheme", m_nstages - 1);
+        progress::ProgressGuard progress_guard(true);
+        auto bar =
+            progress::make_standard_bar("Computing scheme", m_nstages - 1);
 
         for (SizeType istage = 1; istage < m_nstages; ++istage) {
-            // Get device allocator for this stage
             auto allocator = m_device_manager->get_device_allocator();
             run_segment(istage, thres_neigh, allocator);
+
+            // Deallocate before swapping pools
+            thrust::for_each(thrust::device, m_folds_current_d.begin(),
+                             m_folds_current_d.end(),
+                             DeallocateFunctor{allocator});
             m_device_manager->swap_pools();
             std::swap(m_folds_current_d, m_folds_next_d);
-            spdlog::info(
-                "After swap for stage {}, checking folds_current_d validity",
-                istage);
-            // Deallocate using thrust with a fresh allocator
-            auto deallocator = m_device_manager->get_device_allocator();
-            thrust::for_each(thrust::device, m_folds_next_d.begin(),
-                             m_folds_next_d.end(),
-                             DeallocateFunctor{deallocator});
             cudaDeviceSynchronize();
 
-            // bar.set_progress(istage);
+            bar.set_progress(istage);
         }
-        // bar.mark_as_completed();
+        bar.mark_as_completed();
         //  Copy final states back to host
         thrust::transform(thrust::device, m_states_d.begin(), m_states_d.end(),
                           m_states.begin(), StateConversionFunctor{});
@@ -1235,7 +1235,8 @@ private:
     float m_beam_width;
     SizeType m_trials_start;
     int m_device_id;
-    SizeType m_batch_size{};
+    SizeType m_batch_size{256};
+    SizeType m_threads_per_block{256};
 
     std::vector<float> m_profile;
     std::vector<float> m_thresholds;
@@ -1262,6 +1263,9 @@ private:
     thrust::device_vector<int> m_states_locks_d;
     thrust::device_vector<FoldsTypeDevice> m_folds_current_d;
     thrust::device_vector<FoldsTypeDevice> m_folds_next_d;
+
+    // Boxcar cache for scoring
+    std::unique_ptr<BoxcarWidthsCacheDevice> m_boxcar_cache_d;
 
     SizeType compute_max_allocations_needed() {
         SizeType max_active_per_stage = 0;
@@ -1321,7 +1325,6 @@ private:
         const auto thresholds_idx = get_current_thresholds_idx(0);
         const auto num_items      = thresholds_idx.size();
         thrust::device_vector<SizeType> thresholds_idx_d = thresholds_idx;
-        spdlog::info("Initial stage: {} threshold indices", num_items);
 
         // Create work items for initial stage
         thrust::device_vector<TransitionWorkItem> work_items_d(num_items);
@@ -1351,23 +1354,17 @@ private:
         const SizeType shmem_size = std::max(profile_mem, pruning_mem);
         cuda_utils::check_kernel_launch_params(grid_dim, block_dim, shmem_size);
 
-        int* d_update_counter;
-        cudaMalloc(&d_update_counter, sizeof(int));
-        cudaMemset(d_update_counter, 0, sizeof(int));
-
         transition_kernel<<<grid_dim, block_dim, shmem_size>>>(
             thrust::raw_pointer_cast(work_items_d.data()),
             static_cast<int>(num_items),
             thrust::raw_pointer_cast(m_profile_d.data()),
-            static_cast<int>(m_nbins),
-            thrust::raw_pointer_cast(m_box_score_widths_d.data()),
-            static_cast<int>(m_box_score_widths_d.size()), m_bias_snr, var_add,
-            thrust::raw_pointer_cast(m_probs_d.data()),
+            static_cast<int>(m_nbins), m_boxcar_cache_d->get_device_view(),
+            m_bias_snr, var_add, thrust::raw_pointer_cast(m_probs_d.data()),
             static_cast<int>(m_nprobs), 0,
             thrust::raw_pointer_cast(m_states_d.data()),
             thrust::raw_pointer_cast(m_folds_current_d.data()),
             thrust::raw_pointer_cast(m_states_locks_d.data()), &allocator, seed,
-            offset, d_update_counter);
+            offset);
         cuda_utils::check_last_cuda_error("transition_kernel");
         cudaDeviceSynchronize();
 
@@ -1376,26 +1373,6 @@ private:
         free_fold(folds_h1_init);
         free_fold(folds_h0_sim);
         free_fold(folds_h1_sim);
-
-        int h_num_updates = 0;
-        cudaMemcpy(&h_num_updates, d_update_counter, sizeof(int),
-                   cudaMemcpyDeviceToHost);
-        spdlog::info("States updated in kernel: {}", h_num_updates);
-
-        // Check results
-        thrust::host_vector<StateD> states_h(m_nthresholds * m_nprobs);
-        thrust::copy(m_states_d.begin(),
-                     m_states_d.begin() + (m_nthresholds * m_nprobs),
-                     states_h.begin());
-
-        int non_empty_count = 0;
-        for (const auto& state : states_h) {
-            if (!state.is_empty) {
-                non_empty_count++;
-            }
-        }
-        spdlog::info("Initial stage created {} non-empty states",
-                     non_empty_count);
     }
 
     std::vector<SizeType> get_current_thresholds_idx(SizeType istage) const {
@@ -1423,8 +1400,6 @@ private:
         const auto beam_idx_prev     = get_current_thresholds_idx(istage - 1);
         const auto stage_offset_prev = (istage - 1) * m_nthresholds * m_nprobs;
         const auto stage_offset_cur  = istage * m_nthresholds * m_nprobs;
-        spdlog::info("Running segment {} of {} ({} thresholds)", istage,
-                     m_nstages, beam_idx_cur.size());
 
         // Step 1: Generate all possible (ithres, jthresh) pairs
         std::vector<std::pair<SizeType, SizeType>> threshold_pairs;
@@ -1461,7 +1436,6 @@ private:
 
         SizeType total_transitions;
         thrust::copy_n(offsets_d.end() - 1, 1, &total_transitions);
-        spdlog::info("All transitions count: {}", total_transitions);
 
         if (total_transitions == 0) {
             return;
@@ -1470,15 +1444,12 @@ private:
         // Step 3: Process in batches
         const SizeType num_batches =
             (total_transitions + m_batch_size - 1) / m_batch_size;
-        spdlog::info("Running {} batches", num_batches);
 
         for (SizeType b = 0; b < num_batches; ++b) {
             const SizeType start = b * m_batch_size;
             const SizeType end =
                 std::min(start + m_batch_size, total_transitions);
             const SizeType current_batch_size = end - start;
-            spdlog::info("Batch {} of {} ({} transitions)", b, num_batches,
-                         current_batch_size);
 
             // Create work items for this batch
             thrust::device_vector<TransitionWorkItem> work_items_d(
@@ -1528,45 +1499,19 @@ private:
             cuda_utils::check_kernel_launch_params(grid_dim, block_dim,
                                                    shmem_size);
 
-            int* d_update_counter;
-            cudaMalloc(&d_update_counter, sizeof(int));
-            cudaMemset(d_update_counter, 0, sizeof(int));
-
             transition_kernel<<<grid_dim, block_dim, shmem_size>>>(
                 thrust::raw_pointer_cast(work_items_d.data()),
                 static_cast<int>(current_batch_size),
                 thrust::raw_pointer_cast(m_profile_d.data()),
-                static_cast<int>(m_nbins),
-                thrust::raw_pointer_cast(m_box_score_widths_d.data()),
-                static_cast<int>(m_box_score_widths_d.size()), m_bias_snr,
-                var_add, thrust::raw_pointer_cast(m_probs_d.data()),
+                static_cast<int>(m_nbins), m_boxcar_cache_d->get_device_view(),
+                m_bias_snr, var_add, thrust::raw_pointer_cast(m_probs_d.data()),
                 static_cast<int>(m_nprobs), static_cast<int>(stage_offset_cur),
                 thrust::raw_pointer_cast(m_states_d.data()),
                 thrust::raw_pointer_cast(m_folds_next_d.data()),
                 thrust::raw_pointer_cast(m_states_locks_d.data()), &allocator,
-                seed, offset, d_update_counter);
+                seed, offset);
             cuda_utils::check_last_cuda_error("transition_kernel");
             cudaDeviceSynchronize();
-
-            int h_num_updates = 0;
-            cudaMemcpy(&h_num_updates, d_update_counter, sizeof(int),
-                       cudaMemcpyDeviceToHost);
-            spdlog::info("States updated in kernel: {}", h_num_updates);
-
-            // check results
-            thrust::host_vector<StateD> states_h(m_nthresholds * m_nprobs);
-            thrust::copy(m_states_d.begin() + stage_offset_cur,
-                         m_states_d.begin() + stage_offset_cur +
-                             (m_nthresholds * m_nprobs),
-                         states_h.begin());
-            int non_empty_count = 0;
-            for (const auto& state : states_h) {
-                if (!state.is_empty) {
-                    non_empty_count++;
-                }
-            }
-            spdlog::info("Stage {}: Batch {} created {} non-empty states",
-                         istage, b, non_empty_count);
         }
     }
 };
