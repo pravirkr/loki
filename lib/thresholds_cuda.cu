@@ -9,6 +9,7 @@
 #include <memory>
 #include <random>
 
+#include <cub/cub.cuh>
 #include <cuda/std/atomic>
 #include <cuda/std/optional>
 #include <cuda/std/span>
@@ -316,7 +317,6 @@ struct DeallocateFunctor {
     }
 };
 
-
 struct BoxcarWidthsCacheDeviceView {
     const int* box_score_widths;
     const float* h_vals;
@@ -562,6 +562,114 @@ compute_trial_snr_on_demand(const float* __restrict__ trial_data,
     return max_snr;
 }
 
+/**
+ * @brief Computes the Signal-to-Noise Ratio (SNR) for a single trial profile.
+ *
+ * This function is the heart of the optimization. An entire 32-thread warp
+ * collaborates to score one trial, leveraging shared memory and CUB primitives
+ * for maximum efficiency.
+ *
+ * @param trial_data Pointer to the start of the trial's data in global memory.
+ * @param nbins The number of bins in the trial profile.
+ * @param box_cache A view containing pre-calculated boxcar filter parameters.
+ * @param stdnoise The standard deviation of the noise for this trial.
+ * @param shm_warp_psum A pointer to the warp's dedicated section of shared
+ * memory for the prefix sum.
+ * @param temp_scan Temporary storage for the CUB WarpScan primitive.
+ * @param temp_reduce_1 Temporary storage for the first CUB WarpReduce
+ * primitive.
+ * @param temp_reduce_2 Temporary storage for the second CUB WarpReduce
+ * primitive.
+ * @return The maximum SNR found for the trial across all boxcar widths.
+ */
+__device__ float compute_trial_snr_warp_level(
+    const float* __restrict__ trial_data,
+    int nbins,
+    const BoxcarWidthsCacheDeviceView& box_cache,
+    float stdnoise,
+    float* __restrict__ shm_warp_psum,
+    typename cub::WarpScan<float>::TempStorage& temp_scan,
+    typename cub::WarpReduce<float>::TempStorage& temp_reduce_1,
+    typename cub::WarpReduce<float>::TempStorage& temp_reduce_2) {
+
+    constexpr int kWarpSize = 32;
+    using WarpScan          = cub::WarpScan<float, kWarpSize>;
+    using WarpReduce        = cub::WarpReduce<float, kWarpSize>;
+
+    const int lane_id = static_cast<int>(threadIdx.x) % kWarpSize;
+
+    // CRITICAL: Zero out the shared memory workspace before use. This prevents
+    // data corruption from previous trials processed by the same warp.
+    for (int i = lane_id; i < box_cache.nsum; i += kWarpSize) {
+        shm_warp_psum[i] = 0.0f;
+    }
+    __syncthreads();
+
+    // Coalesced load from global to shared memory.
+    for (int i = lane_id; i < nbins; i += kWarpSize) {
+        shm_warp_psum[i] = trial_data[i];
+    }
+    __syncthreads();
+
+    // Perform a warp-level inclusive prefix sum (scan) in shared memory.
+    float running_sum    = 0.0f;
+    const int num_chunks = (nbins + kWarpSize - 1) / kWarpSize;
+    for (int chunk = 0; chunk < num_chunks; ++chunk) {
+        int idx   = (chunk * kWarpSize) + lane_id;
+        float val = (idx < nbins) ? shm_warp_psum[idx] : 0.0f;
+        WarpScan(temp_scan).InclusiveSum(val, val);
+        if (idx < nbins) {
+            shm_warp_psum[idx] = val + running_sum;
+        }
+        float chunk_sum = __shfl_sync(0xFFFFFFFF, val, kWarpSize - 1);
+        if (lane_id == 0) {
+            running_sum += chunk_sum;
+        }
+        running_sum = __shfl_sync(0xFFFFFFFF, running_sum, 0);
+    }
+    __syncthreads();
+
+    // Find the maximum SNR across all boxcar widths
+    const float total_sum            = shm_warp_psum[nbins - 1];
+    float warp_max_snr               = -CUDART_INF_F;
+    const int nwidths                = box_cache.nwidths;
+    const int* __restrict__ widths   = box_cache.box_score_widths;
+    const float* __restrict__ h_vals = box_cache.h_vals;
+    const float* __restrict__ b_vals = box_cache.b_vals;
+
+    for (int iw = 0; iw < nwidths; ++iw) {
+        float thread_max_diff = -CUDART_INF_F;
+        for (int j = lane_id; j < nbins; j += kWarpSize) {
+            float sum_before_start = (j > 0) ? shm_warp_psum[j - 1] : 0.0F;
+            float current_sum;
+            const int end_idx = j + widths[iw] - 1;
+            if (end_idx < nbins) {
+                // Normal case: sum from j to j+w-1
+                current_sum = shm_warp_psum[end_idx] - sum_before_start;
+            } else {
+                // Circular case: sum wraps around
+                current_sum = (total_sum - sum_before_start) +
+                              shm_warp_psum[end_idx % nbins];
+            }
+            thread_max_diff = fmaxf(thread_max_diff, current_sum);
+        }
+        float max_diff =
+            WarpReduce(temp_reduce_1).Reduce(thread_max_diff, cub::Max());
+
+        if (lane_id == 0) {
+            const float snr = (((h_vals[iw] + b_vals[iw]) * max_diff) -
+                               (b_vals[iw] * total_sum)) /
+                              stdnoise;
+            warp_max_snr = fmaxf(warp_max_snr, snr);
+        }
+    }
+    // Final reduction to get max SNR across all widths for this warp
+    // A separate temporary storage object is required for correctness.
+    float final_max_snr =
+        WarpReduce(temp_reduce_2).Reduce(warp_max_snr, cub::Max());
+    return final_max_snr;
+}
+
 //------------------------------------------------------------------------
 // A small device‐side bitonic sort on `data[0..count)`, all in shared memory.
 // Rounds `count` up to the next power‐of‐2 internally, but only swaps
@@ -632,10 +740,10 @@ __device__ void compact_in_place(int count,
 //------------------------------------------------------------------------
 
 __device__ void
-score_and_prune_fused(FoldsTypeDevice& folds_sim,
-                      const BoxcarWidthsCacheDeviceView& box_cache,
-                      int nbins,
-                      float threshold) {
+score_and_prune_fused_old(FoldsTypeDevice& folds_sim,
+                          const BoxcarWidthsCacheDeviceView& box_cache,
+                          int nbins,
+                          float threshold) {
     extern __shared__ int shm[]; // NOLINT
 
     const int tid        = static_cast<int>(threadIdx.x);
@@ -696,14 +804,10 @@ score_and_prune_fused(FoldsTypeDevice& folds_sim,
         }
     };
 
-    // pointers into the single in‐place buffers
-    float* __restrict__ folds_sim_h0 = folds_sim.folds_h0.data;
-    float* __restrict__ folds_sim_h1 = folds_sim.folds_h1.data;
-
-    collect(folds_sim_h0, max_trials_h0, folds_sim.folds_h0.variance,
+    collect(folds_sim.folds_h0.data, max_trials_h0, folds_sim.folds_h0.variance,
             shared_count_h0, shared_indices_h0);
     __syncthreads();
-    collect(folds_sim_h1, max_trials_h1, folds_sim.folds_h1.variance,
+    collect(folds_sim.folds_h1.data, max_trials_h1, folds_sim.folds_h1.variance,
             shared_count_h1, shared_indices_h1);
     __syncthreads();
 
@@ -718,6 +822,139 @@ score_and_prune_fused(FoldsTypeDevice& folds_sim,
                      folds_sim.folds_h1.data, nbins, max_trials_h1);
 
     // Update ntrials in the handle itself
+    if (tid == 0) {
+        folds_sim.folds_h0.ntrials = static_cast<SizeType>(shared_count_h0);
+        folds_sim.folds_h1.ntrials = static_cast<SizeType>(shared_count_h1);
+    }
+}
+
+/**
+ * @brief In-place scores, filters, and compacts trial profiles for a single
+ * work item.
+ *
+ * This kernel orchestrates the score-and-prune process. Warps within the block
+ * are assigned trials to score in parallel using the
+ * `compute_trial_snr_warp_level` helper. Surviving trial indices are collected,
+ * sorted, and then used to compact the data in-place.
+ */
+__device__ void
+score_and_prune_fused(FoldsTypeDevice& folds_sim,
+                      const BoxcarWidthsCacheDeviceView& box_cache,
+                      int nbins,
+                      float threshold) {
+    extern __shared__ int shm_int[];
+
+    // --- Thread & Warp Indexing ---
+    constexpr int kWarpSize = 32;
+    using WarpScan          = cub::WarpScan<float, kWarpSize>;
+    using WarpReduce        = cub::WarpReduce<float, kWarpSize>;
+
+    const int tid       = static_cast<int>(threadIdx.x);
+    const int warp_id   = tid / kWarpSize;
+    const int lane_id   = tid % kWarpSize;
+    const int num_warps = blockDim.x / kWarpSize;
+
+    const int max_trials_h0 = static_cast<int>(folds_sim.folds_h0.ntrials);
+    const int max_trials_h1 = static_cast<int>(folds_sim.folds_h1.ntrials);
+
+    // --- Shared Memory Layout ---
+    __shared__ int shared_count_h0;
+    __shared__ int shared_count_h1;
+
+    int* shared_indices_h0 = &shm_int[0];
+    int* shared_indices_h1 = &shm_int[max_trials_h0];
+    char* shmem_base_ptr =
+        reinterpret_cast<char*>(&shm_int[max_trials_h0 + max_trials_h1]);
+
+    auto* temp_scan_base =
+        reinterpret_cast<typename WarpScan::TempStorage*>(shmem_base_ptr);
+    shmem_base_ptr += num_warps * sizeof(typename WarpScan::TempStorage);
+
+    // Two separate temporary storage areas are required for the two reductions
+    // in the helper function to prevent race conditions.
+    auto* temp_reduce_1_base =
+        reinterpret_cast<typename WarpReduce::TempStorage*>(shmem_base_ptr);
+    shmem_base_ptr += num_warps * sizeof(typename WarpReduce::TempStorage);
+    auto* temp_reduce_2_base =
+        reinterpret_cast<typename WarpReduce::TempStorage*>(shmem_base_ptr);
+    shmem_base_ptr += num_warps * sizeof(typename WarpReduce::TempStorage);
+
+    // Workspace for the parallel prefix sum (per warp)
+    float* psum_base = reinterpret_cast<float*>(shmem_base_ptr);
+    // --- End Shared Memory Layout ---
+
+    if (tid == 0) {
+        shared_count_h0 = 0;
+        shared_count_h1 = 0;
+    }
+    __syncthreads();
+
+    // --- Collection Phase ---
+    auto collect_warp_level =
+        [&](const float* __restrict__ all_trials_data, int sim_trials,
+            float variance, int& shared_count, int* __restrict__ shared_idx) {
+            int local_good[kLocalFilterMax]; // NOLINT
+            int local_count      = 0;
+            const float stdnoise = sqrtf(variance);
+
+            // Per-warp shared memory psum workspace
+            float* shm_warp_psum = psum_base + warp_id * box_cache.nsum;
+            auto& temp_scan      = temp_scan_base[warp_id];
+            auto& temp_reduce_1  = temp_reduce_1_base[warp_id];
+            auto& temp_reduce_2  = temp_reduce_2_base[warp_id];
+
+            // This strided loop correctly and efficiently distributes trials
+            // among the warps.
+            for (int i = warp_id; i < sim_trials; i += num_warps) {
+                float score = compute_trial_snr_warp_level(
+                    all_trials_data + static_cast<IndexType>(i * nbins), nbins,
+                    box_cache, stdnoise, shm_warp_psum, temp_scan,
+                    temp_reduce_1, temp_reduce_2);
+
+                if (lane_id == 0) {
+                    if (score > threshold) {
+                        local_good[local_count++] = i;
+                        if (local_count == kLocalFilterMax) {
+                            int pos = atomicAdd(&shared_count, local_count);
+                            for (int j = 0; j < local_count; ++j) {
+                                // Add bounds check as in old kernel
+                                if (pos + j < sim_trials) {
+                                    shared_idx[pos + j] = local_good[j];
+                                }
+                            }
+                            local_count = 0; // Reset local buffer
+                        }
+                    }
+                }
+                __syncthreads();
+            }
+
+            if (lane_id == 0 && local_count > 0) {
+                int pos = atomicAdd(&shared_count, local_count);
+                for (int j = 0; j < local_count; ++j) {
+                    if (pos + j < sim_trials) {
+                        shared_idx[pos + j] = local_good[j];
+                    }
+                }
+            }
+            __syncthreads();
+        };
+
+    collect_warp_level(folds_sim.folds_h0.data, max_trials_h0,
+                       folds_sim.folds_h0.variance, shared_count_h0,
+                       shared_indices_h0);
+    collect_warp_level(folds_sim.folds_h1.data, max_trials_h1,
+                       folds_sim.folds_h1.variance, shared_count_h1,
+                       shared_indices_h1);
+
+    // --- Sort & Compact Phase ---
+    bitonic_sort_shared(shared_indices_h0, shared_count_h0);
+    bitonic_sort_shared(shared_indices_h1, shared_count_h1);
+    compact_in_place(shared_count_h0, shared_indices_h0,
+                     folds_sim.folds_h0.data, nbins, max_trials_h0);
+    compact_in_place(shared_count_h1, shared_indices_h1,
+                     folds_sim.folds_h1.data, nbins, max_trials_h1);
+
     if (tid == 0) {
         folds_sim.folds_h0.ntrials = static_cast<SizeType>(shared_count_h0);
         folds_sim.folds_h1.ntrials = static_cast<SizeType>(shared_count_h1);
@@ -1179,7 +1416,7 @@ public:
             bar.set_progress(istage);
         }
         bar.mark_as_completed();
-        //  Copy final states back to host
+        // Copy final states back to host
         thrust::transform(thrust::device, m_states_d.begin(), m_states_d.end(),
                           m_states.begin(), StateConversionFunctor{});
     }
@@ -1351,7 +1588,19 @@ private:
         const SizeType pruning_mem =
             (2 * sizeof(int)) +
             (2 * m_device_manager->get_max_ntrials() * sizeof(int));
-        const SizeType shmem_size = std::max(profile_mem, pruning_mem);
+
+        const SizeType index_shmem_size = std::max(profile_mem, pruning_mem);
+        const int num_warps             = block_dim.x / 32;
+        const size_t cub_storage_size =
+            num_warps *
+            (sizeof(typename cub::WarpScan<float>::TempStorage) +
+             2 * sizeof(typename cub::WarpReduce<float>::TempStorage));
+        const size_t psum_workspace_size =
+            num_warps * m_boxcar_cache_d->nsum * sizeof(float);
+
+        const size_t shmem_size =
+            index_shmem_size + cub_storage_size + psum_workspace_size;
+
         cuda_utils::check_kernel_launch_params(grid_dim, block_dim, shmem_size);
 
         transition_kernel<<<grid_dim, block_dim, shmem_size>>>(
@@ -1495,7 +1744,19 @@ private:
             const SizeType pruning_mem =
                 (2 * sizeof(int)) +
                 (2 * m_device_manager->get_max_ntrials() * sizeof(int));
-            const SizeType shmem_size = std::max(profile_mem, pruning_mem);
+            const SizeType index_shmem_size =
+                std::max(profile_mem, pruning_mem);
+            const int num_warps = block_dim.x / 32;
+            const size_t cub_storage_size =
+                num_warps *
+                (sizeof(typename cub::WarpScan<float>::TempStorage) +
+                 2 * sizeof(typename cub::WarpReduce<float>::TempStorage));
+            const size_t psum_workspace_size =
+                num_warps * m_boxcar_cache_d->nsum * sizeof(float);
+
+            const size_t shmem_size =
+                index_shmem_size + cub_storage_size + psum_workspace_size;
+
             cuda_utils::check_kernel_launch_params(grid_dim, block_dim,
                                                    shmem_size);
 
