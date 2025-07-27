@@ -1,7 +1,10 @@
 #include "loki/core/taylor.hpp"
 
+#include <algorithm>
 #include <span>
 #include <vector>
+
+#include <spdlog/spdlog.h>
 
 #include "loki/cartesian.hpp"
 #include "loki/common/types.hpp"
@@ -375,6 +378,95 @@ poly_taylor_branch_batch(std::span<const double> batch_psets,
     return batch_origins;
 }
 
+std::vector<double>
+poly_taylor_leaves(std::span<const std::vector<double>> param_arr,
+                   std::span<const double> dparams,
+                   std::pair<double, double> coord_init,
+                   SizeType leaves_stride) {
+    const auto nparams = param_arr.size();
+    SizeType n_leaves  = 1;
+    for (const auto& arr : param_arr) {
+        n_leaves *= arr.size();
+    }
+    const auto [t0, scale] = coord_init;
+
+    // Create parameter sets tensor: (n_param_sets, poly_order + 2, 2)
+    std::vector<double> param_sets(n_leaves * leaves_stride);
+
+    SizeType leaf_idx = 0;
+    for (const auto& p_set_view : utils::cartesian_product_view(param_arr)) {
+        const auto leaves_offset = leaf_idx * leaves_stride;
+        // Fill first nparams dimensions with parameter values and dparams
+        for (SizeType j = 0; j < nparams; ++j) {
+            param_sets[leaves_offset + (j * 2) + 0] = p_set_view[j];
+            param_sets[leaves_offset + (j * 2) + 1] = dparams[j];
+        }
+        param_sets[leaves_offset + (nparams * 2) + 0] = p_set_view[nparams - 1];
+        param_sets[leaves_offset + ((nparams + 1) * 2) + 0] = t0;
+        param_sets[leaves_offset + ((nparams + 1) * 2) + 1] = scale;
+        ++leaf_idx;
+    }
+    return param_sets;
+}
+
+std::vector<double>
+poly_taylor_branch(std::span<const double> leaf,
+                   std::pair<double, double> coord_cur,
+                   SizeType n_params,
+                   SizeType fold_bins,
+                   double tol_bins,
+                   const std::vector<ParamLimitType>& param_limits) {
+    const auto branch_max    = 100;
+    const auto leaves_stride = (n_params + 2) * 2;
+    std::vector<double> branch_leaves(branch_max * leaves_stride);
+    const auto poly_order    = n_params;
+    const auto batch_origins = poly_taylor_branch_batch(
+        leaf, coord_cur, branch_leaves, 1, n_params, fold_bins, tol_bins,
+        poly_order, param_limits, branch_max);
+    return {branch_leaves.begin(),
+            branch_leaves.begin() +
+                static_cast<IndexType>(batch_origins.size() * leaves_stride)};
+}
+
+std::vector<SizeType>
+poly_taylor_branching_pattern(std::span<const std::vector<double>> param_arr,
+                              std::span<const double> dparams_lim,
+                              const std::vector<ParamLimitType>& param_limits,
+                              SizeType nsegments,
+                              double tsegment,
+                              SizeType fold_bins,
+                              double tol_bins) {
+    std::vector<SizeType> branching_pattern;
+    const auto n_params = param_limits.size();
+    psr_utils::SnailScheme scheme(nsegments, 0, tsegment);
+    branching_pattern.reserve(nsegments - 1);
+    const auto leaves_stride = (n_params + 2) * 2;
+    const auto coord         = scheme.get_coord(0);
+    const auto leaves =
+        core::poly_taylor_leaves(param_arr, dparams_lim, coord, leaves_stride);
+    const auto n_leaves = leaves.size() / leaves_stride;
+    // Get last leaf
+    auto leaf = std::span(leaves).subspan((leaves_stride * (n_leaves - 1)),
+                                          leaves_stride);
+    std::vector<double> leaf_data(leaves_stride);
+    std::ranges::copy(leaf, leaf_data.begin());
+
+    for (SizeType prune_level = 1; prune_level < nsegments - 1; ++prune_level) {
+        const auto coord_cur  = scheme.get_coord(prune_level);
+        const auto leaves_arr = poly_taylor_branch(
+            leaf_data, coord_cur, n_params, fold_bins, tol_bins, param_limits);
+        const auto n_leaves_branch = leaves_arr.size() / leaves_stride;
+        branching_pattern.push_back(n_leaves_branch);
+        const auto leaf_start = leaves_stride * (n_leaves_branch - 1);
+        std::ranges::copy(
+            leaves_arr.begin() + static_cast<IndexType>(leaf_start),
+            leaves_arr.begin() +
+                static_cast<IndexType>(leaf_start + leaves_stride),
+            leaf_data.begin());
+    }
+    return branching_pattern;
+}
+
 template <typename FoldType>
 void poly_taylor_suggest(
     std::span<const FoldType> fold_segment,
@@ -395,25 +487,9 @@ void poly_taylor_suggest(
     }
     error_check::check_equal(fold_segment.size(), n_leaves * 2 * nbins,
                              "fold_segment size mismatch");
-    const auto [t0, scale]   = coord_init;
     const auto leaves_stride = sugg_tree.get_leaves_stride();
-
-    // Create parameter sets tensor: (n_param_sets, poly_order + 2, 2)
-    std::vector<double> param_sets(n_leaves * leaves_stride);
-
-    SizeType leaf_idx = 0;
-    for (const auto& p_set_view : utils::cartesian_product_view(param_arr)) {
-        const auto leaves_offset = leaf_idx * leaves_stride;
-        // Fill first nparams dimensions with parameter values and dparams
-        for (SizeType j = 0; j < nparams; ++j) {
-            param_sets[leaves_offset + (j * 2) + 0] = p_set_view[j];
-            param_sets[leaves_offset + (j * 2) + 1] = dparams[j];
-        }
-        param_sets[leaves_offset + (nparams * 2) + 0] = p_set_view[nparams - 1];
-        param_sets[leaves_offset + ((nparams + 1) * 2) + 0] = t0;
-        param_sets[leaves_offset + ((nparams + 1) * 2) + 1] = scale;
-        ++leaf_idx;
-    }
+    const auto param_sets =
+        poly_taylor_leaves(param_arr, dparams, coord_init, leaves_stride);
     // Calculate scores
     std::vector<float> scores(n_leaves);
     scoring_func(fold_segment, scores, n_leaves, boxcar_widths_cache);

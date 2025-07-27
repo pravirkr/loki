@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <span>
 #include <tuple>
 #include <vector>
@@ -16,6 +17,7 @@ template <typename FoldType> class PruneTaylorDPFuncts {
 public:
     PruneTaylorDPFuncts(std::span<const std::vector<double>> param_arr,
                         std::span<const double> dparams,
+                        SizeType nseg_ffa,
                         double tseg_ffa,
                         search::PulsarSearchConfig cfg,
                         SizeType batch_size);
@@ -77,12 +79,23 @@ public:
     auto get_validation_params(std::pair<double, double> coord_add) const
         -> std::tuple<std::vector<double>, std::vector<double>, double>;
 
+    SizeType get_branch_max() const noexcept {
+        return *std::ranges::max_element(m_branching_pattern);
+    }
+
+    std::vector<SizeType> get_branching_pattern() const noexcept {
+        return m_branching_pattern;
+    }
+
 private:
     std::vector<std::vector<double>> m_param_arr;
     std::vector<double> m_dparams;
+    SizeType m_nseg_ffa;
     double m_tseg_ffa;
     search::PulsarSearchConfig m_cfg;
     SizeType m_batch_size;
+
+    std::vector<SizeType> m_branching_pattern;
 
     // Buffer for shift-add operations
     std::vector<FoldType> m_shift_buffer;

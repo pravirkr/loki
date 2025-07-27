@@ -22,7 +22,6 @@ public:
                        std::optional<SizeType> bseg_brute = std::nullopt,
                        std::optional<SizeType> bseg_ffa   = std::nullopt,
                        bool use_fft_shifts                = true,
-                       SizeType branch_max                = 16,
                        int nthreads                       = 1);
 
     // Getters
@@ -45,7 +44,6 @@ public:
     [[nodiscard]] SizeType get_bseg_brute() const { return m_bseg_brute; }
     [[nodiscard]] SizeType get_bseg_ffa() const { return m_bseg_ffa; }
     [[nodiscard]] bool get_use_fft_shifts() const { return m_use_fft_shifts; }
-    [[nodiscard]] SizeType get_branch_max() const { return m_branch_max; }
     [[nodiscard]] int get_nthreads() const { return m_nthreads; }
     [[nodiscard]] double get_tseg_brute() const { return m_tseg_brute; }
     [[nodiscard]] double get_tseg_ffa() const { return m_tseg_ffa; }
@@ -82,7 +80,6 @@ private:
     SizeType m_bseg_brute;
     SizeType m_bseg_ffa;
     bool m_use_fft_shifts;
-    SizeType m_branch_max;
     int m_nthreads;
     double m_tseg_brute{};
     double m_tseg_ffa{};

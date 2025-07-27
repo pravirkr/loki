@@ -7,6 +7,7 @@
 #include <utility>
 
 #include <BS_thread_pool.hpp>
+#include <fmt/ranges.h>
 #include <spdlog/spdlog.h>
 
 #include "loki/algorithms/ffa.hpp"
@@ -240,7 +241,13 @@ private:
                 errors.emplace_back(ref_segs[i], error_msg);
             }
         }
-        tracker.stop();
+
+        if (errors.empty()) {
+            spdlog::info("All tasks completed successfully.");
+        } else {
+            spdlog::warn("Completed with {} errors out of {} tasks.",
+                         errors.size(), ref_segs.size());
+        }
 
         // Log errors to file
         if (!errors.empty()) {
@@ -250,10 +257,15 @@ private:
                                    error_msg);
             }
             log.close();
-            spdlog::error("{}", errors.back().second);
-        }
+            spdlog::error("Errors occurred during processing. Last error: {}",
+                          errors.back().second);
 
-        spdlog::info("All tasks completed and progress tracker stopped.");
+            throw std::runtime_error(
+                std::format("Multi-threaded execution failed: {} out of {} "
+                            "tasks failed",
+                            errors.size(), ref_segs.size()));
+        }
+        tracker.stop();
     }
 };
 
@@ -332,6 +344,9 @@ public:
           m_max_sugg(max_sugg),
           m_batch_size(batch_size),
           m_kind(kind) {
+        // Setup pruning functions
+        setup_pruning();
+
         // Allocate suggestion buffer
         if constexpr (std::is_same_v<FoldType, ComplexType>) {
             m_suggestions = std::make_unique<utils::SuggestionTree<FoldType>>(
@@ -342,7 +357,8 @@ public:
         }
 
         // Allocate iteration workspace
-        const auto max_batch_size = m_batch_size * m_cfg.get_branch_max();
+        const auto branch_max = m_prune_funcs->get_branch_max();
+        const auto max_batch_size = m_batch_size * branch_max;
         if constexpr (std::is_same_v<FoldType, ComplexType>) {
             m_pruning_workspace = std::make_unique<PruningWorkspace<FoldType>>(
                 max_batch_size, m_cfg.get_nparams(), m_cfg.get_nbins_f());
@@ -350,9 +366,6 @@ public:
             m_pruning_workspace = std::make_unique<PruningWorkspace<FoldType>>(
                 max_batch_size, m_cfg.get_nparams(), m_cfg.get_nbins());
         }
-
-        // Setup pruning functions
-        setup_pruning();
     }
 
     ~Impl()                      = default;
@@ -717,8 +730,9 @@ private:
         if (m_kind == "taylor") {
             m_prune_funcs =
                 std::make_unique<core::PruneTaylorDPFuncts<FoldType>>(
-                    m_ffa_plan.params.back(), m_ffa_plan.dparams.back(),
-                    m_ffa_plan.tsegments.back(), m_cfg, m_batch_size);
+                    m_ffa_plan.params.back(), m_ffa_plan.dparams_lim.back(),
+                    m_ffa_plan.nsegments.back(), m_ffa_plan.tsegments.back(),
+                    m_cfg, m_batch_size);
         } else {
             throw std::runtime_error(
                 std::format("Invalid pruning kind: {}", m_kind));

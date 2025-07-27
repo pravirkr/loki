@@ -92,6 +92,7 @@ void FFAPlan::configure_plan() {
     ncoords_lb.resize(levels);
     params.resize(levels);
     dparams.resize(levels);
+    dparams_lim.resize(levels);
     fold_shapes.resize(levels);
     fold_shapes_complex.resize(levels);
     coordinates.resize(levels);
@@ -102,11 +103,13 @@ void FFAPlan::configure_plan() {
             static_cast<double>(segment_len) * m_cfg.get_tsamp();
         const auto nsegments_cur = m_cfg.get_nsamps() / segment_len;
         const auto dparam_arr    = m_cfg.get_dparams(tsegment);
+        const auto dparam_arr_lim = m_cfg.get_dparams_lim(tsegment);
 
         segment_lens[i_level] = segment_len;
         nsegments[i_level]    = nsegments_cur;
         tsegments[i_level]    = tsegment;
         dparams[i_level]      = dparam_arr;
+        dparams_lim[i_level]  = dparam_arr_lim;
         params[i_level].resize(m_cfg.get_nparams());
         fold_shapes[i_level].resize(m_cfg.get_nparams() + 3);
         fold_shapes_complex[i_level].resize(m_cfg.get_nparams() + 3);

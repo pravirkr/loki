@@ -36,6 +36,29 @@ poly_taylor_resolve_snap_batch(std::span<const double> batch_leaves,
                                SizeType n_leaves,
                                SizeType n_params);
 
+std::vector<double>
+poly_taylor_leaves(std::span<const std::vector<double>> param_arr,
+                   std::span<const double> dparams,
+                   std::pair<double, double> coord_init,
+                   SizeType leaves_stride);
+
+std::vector<double>
+poly_taylor_branch(std::span<const double> leaf,
+                   std::pair<double, double> coord_cur,
+                   SizeType n_params,
+                   SizeType fold_bins,
+                   double tol_bins,
+                   const std::vector<ParamLimitType>& param_limits);
+
+std::vector<SizeType>
+poly_taylor_branching_pattern(std::span<const std::vector<double>> param_arr,
+                              std::span<const double> dparams,
+                              const std::vector<ParamLimitType>& param_limits,
+                              SizeType nsegments,
+                              double tsegment,
+                              SizeType fold_bins,
+                              double tol_bins);
+
 std::vector<SizeType>
 poly_taylor_branch_batch(std::span<const double> batch_psets,
                          std::pair<double, double> coord_cur,

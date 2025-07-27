@@ -14,8 +14,28 @@
 namespace loki::cands {
 
 namespace {
-float round_2dp(float val) noexcept {
-    return std::round(val * 100.0F) / 100.0F;
+
+double round_dp(double x, int digits) noexcept {
+    // Round-half-to-even (bankers' rounding)
+    if (!std::isfinite(x)) {
+        return x;
+    }
+
+    const double scale = std::pow(10.0, digits);
+    double scaled      = x * scale;
+    double int_part;
+    double frac_part = std::modf(scaled, &int_part);
+
+    if (std::fabs(frac_part) == 0.5) {
+        // Round-half-to-even
+        if (std::fmod(int_part, 2.0) == 0.0) {
+            return int_part / scale; // already even
+        }
+        // round toward even
+        return (int_part + (scaled > 0 ? 1.0 : -1.0)) / scale;
+    }
+
+    return std::round(scaled) / scale;
 }
 
 // Returns (ref_seg, task_id) as integers, or (-1, -1) if not matched
@@ -54,20 +74,21 @@ HighFive::CompoundType create_compound_timer_stats() {
 } // namespace
 
 // --- PruneStats ---
-float PruneStats::lb_leaves() const noexcept {
-    return round_2dp(std::log2(static_cast<float>(n_leaves_phy)));
+double PruneStats::lb_leaves() const noexcept {
+    return round_dp(std::log2(static_cast<double>(n_leaves_phy)), 2);
 }
-float PruneStats::branch_frac() const noexcept {
-    return round_2dp(static_cast<float>(n_leaves) /
-                     static_cast<float>(n_branches));
+double PruneStats::branch_frac() const noexcept {
+    return round_dp(
+        static_cast<double>(n_leaves) / static_cast<double>(n_branches), 2);
 }
-float PruneStats::phys_frac() const noexcept {
-    return round_2dp(static_cast<float>(n_leaves_phy) /
-                     static_cast<float>(n_leaves));
+double PruneStats::phys_frac() const noexcept {
+    return round_dp(
+        static_cast<double>(n_leaves_phy) / static_cast<double>(n_leaves), 2);
 }
-float PruneStats::surv_frac() const noexcept {
-    return round_2dp(static_cast<float>(n_leaves_surv) /
-                     static_cast<float>(n_leaves_phy));
+double PruneStats::surv_frac() const noexcept {
+    return round_dp(static_cast<double>(n_leaves_surv) /
+                        static_cast<double>(n_leaves_phy),
+                    2);
 }
 std::string PruneStats::get_summary() const noexcept {
     return std::format("Prune level: {:3d}, seg_idx: {:3d}, lb_leaves: "

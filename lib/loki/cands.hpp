@@ -25,10 +25,10 @@ struct PruneStats {
     SizeType n_leaves_phy  = 1;
     SizeType n_leaves_surv = 1;
 
-    [[nodiscard]] float lb_leaves() const noexcept;
-    [[nodiscard]] float branch_frac() const noexcept;
-    [[nodiscard]] float phys_frac() const noexcept;
-    [[nodiscard]] float surv_frac() const noexcept;
+    [[nodiscard]] double lb_leaves() const noexcept;
+    [[nodiscard]] double branch_frac() const noexcept;
+    [[nodiscard]] double phys_frac() const noexcept;
+    [[nodiscard]] double surv_frac() const noexcept;
     [[nodiscard]] std::string get_summary() const noexcept;
 };
 

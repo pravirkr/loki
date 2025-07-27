@@ -4,6 +4,8 @@
 #include <span>
 #include <utility>
 
+#include <spdlog/spdlog.h>
+
 #include "loki/common/types.hpp"
 #include "loki/core/taylor.hpp"
 #include "loki/detection/score.hpp"
@@ -16,20 +18,25 @@ template <typename FoldType>
 PruneTaylorDPFuncts<FoldType>::PruneTaylorDPFuncts(
     std::span<const std::vector<double>> param_arr,
     std::span<const double> dparams,
+    SizeType nseg_ffa,
     double tseg_ffa,
     search::PulsarSearchConfig cfg,
     SizeType batch_size)
     : m_param_arr(param_arr.begin(), param_arr.end()),
       m_dparams(dparams.begin(), dparams.end()),
+      m_nseg_ffa(nseg_ffa),
       m_tseg_ffa(tseg_ffa),
       m_cfg(std::move(cfg)),
       m_batch_size(batch_size),
       m_boxcar_widths_cache(m_cfg.get_score_widths(), m_cfg.get_nbins()) {
+    m_branching_pattern = poly_taylor_branching_pattern(
+        m_param_arr, m_dparams, m_cfg.get_param_limits(), m_nseg_ffa,
+        m_tseg_ffa, m_cfg.get_nbins(), m_cfg.get_tol_bins());
     if constexpr (std::is_same_v<FoldType, ComplexType>) {
         m_irfft_executor =
             std::make_unique<utils::IrfftExecutor>(m_cfg.get_nbins());
         m_shift_buffer.resize(1); // Not needed for complex
-        const auto max_batch_size = m_batch_size * m_cfg.get_branch_max();
+        const auto max_batch_size = m_batch_size * get_branch_max();
         m_batch_folds_buffer.resize(max_batch_size * 2 * m_cfg.get_nbins());
     } else {
         m_shift_buffer.resize(2 * m_cfg.get_nbins());
@@ -84,7 +91,7 @@ auto PruneTaylorDPFuncts<FoldType>::branch(std::span<const double> batch_psets,
     return poly_taylor_branch_batch(
         batch_psets, coord_cur, batch_leaves, n_batch, n_params,
         m_cfg.get_nbins(), m_cfg.get_tol_bins(), m_cfg.get_prune_poly_order(),
-        m_cfg.get_param_limits(), m_cfg.get_branch_max());
+        m_cfg.get_param_limits(), get_branch_max());
 }
 
 template <typename FoldType>

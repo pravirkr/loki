@@ -26,6 +26,7 @@ struct FFAPlan {
     std::vector<float> ncoords_lb;
     std::vector<std::vector<std::vector<double>>> params;
     std::vector<std::vector<double>> dparams;
+    std::vector<std::vector<double>> dparams_lim;
     std::vector<std::vector<SizeType>> fold_shapes;
     std::vector<std::vector<SizeType>> fold_shapes_complex;
     std::vector<std::vector<FFACoord>> coordinates;

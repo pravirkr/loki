@@ -307,16 +307,21 @@ void shift_params_circular_batch(std::span<const double> param_vec_data,
         100UL);
 
     // Pre-compute transformation coefficients for the extended matrix
-    const SizeType transform_dim = required_order;
+    const SizeType transform_dim = required_order + 1;
     std::vector<double> taylor_coeffs(transform_dim);
-    double dt_power = 1.0;
-    for (SizeType k = 0; k < transform_dim; ++k) {
-        taylor_coeffs[k] = dt_power / math::factorial(static_cast<double>(k));
-        dt_power *= delta_t;
+    // double dt_power = 1.0;
+    // for (SizeType k = 0; k < transform_dim; ++k) {
+    //     taylor_coeffs[k] = dt_power /
+    //     math::factorial(static_cast<double>(k)); dt_power *= delta_t;
+    // }
+    taylor_coeffs[0] = 1.0;
+    for (SizeType k = 1; k < transform_dim; ++k) {
+        taylor_coeffs[k] =
+            taylor_coeffs[k - 1] * delta_t / static_cast<double>(k);
     }
 
     std::vector<double> dvec_cur(transform_dim, 0.0);
-    std::vector<double> dvec_new(transform_dim, 0.0);
+    std::vector<double> dvec_new(nparams + 1, 0.0);
 
     // Process each batch item
     for (SizeType batch_idx = 0; batch_idx < nbatch; ++batch_idx) {
@@ -331,7 +336,7 @@ void shift_params_circular_batch(std::span<const double> param_vec_data,
 
         // Copy base parameters: dvec_cur[:, -5:-2] = param_vec_batch[:, :-1, 0]
         // This corresponds to required_order-4 to required_order-1
-        const SizeType base_start = required_order - 4;
+        const SizeType base_start = required_order - 4; // transform_dim - 5
         for (SizeType j = 0; j < 3; ++j) {
             dvec_cur[base_start + j] = param_vec_data[batch_offset + (j * 2)];
         }
@@ -359,12 +364,13 @@ void shift_params_circular_batch(std::span<const double> param_vec_data,
 
         // Apply transformation matrix
         for (SizeType i = 0; i < nparams + 1; ++i) {
-            for (SizeType j = 0; j <= i && j < transform_dim; ++j) {
-                const SizeType power = i - j;
-                if (power < taylor_coeffs.size()) {
-                    dvec_new[i] += dvec_cur[j] * taylor_coeffs[power];
-                }
+            const SizeType row = transform_dim - (nparams + 1) + i;
+            double sum         = 0.0;
+            for (SizeType col = 0; col <= row; ++col) {
+                const SizeType expo = row - col;
+                sum += dvec_cur[col] * taylor_coeffs[expo];
             }
+            dvec_new[i] = sum;
         }
 
         // Update parameter values (except frequency)
@@ -454,8 +460,8 @@ std::tuple<std::vector<double>, double> branch_param(double param_cur,
     }
     if (param_cur < param_min || param_cur > param_max) {
         throw std::invalid_argument(std::format(
-            "param_cur must be within [param_min, param_max] (got {})",
-            param_cur));
+            "param_cur ({}) must be within [param_min ({}), param_max ({})]",
+            param_cur, param_min, param_max));
     }
 
     // If desired step size is too large, return current value
@@ -495,8 +501,8 @@ std::pair<double, SizeType> branch_param_padded(std::span<double> out_values,
     }
     if (param_cur < param_min || param_cur > param_max) {
         throw std::invalid_argument(std::format(
-            "param_cur must be within [param_min, param_max] (got {})",
-            param_cur));
+            "param_cur ({}) must be within [param_min ({}), param_max ({})]",
+            param_cur, param_min, param_max));
     }
 
     SizeType count           = 0;
@@ -504,10 +510,8 @@ std::pair<double, SizeType> branch_param_padded(std::span<double> out_values,
 
     // If desired step size is too large, return current value
     if (dparam_new > (param_max - param_min) / 2.0) {
-        if (!out_values.empty()) {
-            out_values[0] = param_cur;
-            count         = 1;
-        }
+        out_values[0]     = param_cur;
+        count             = 1;
         dparam_new_actual = dparam_cur;
         return {dparam_new_actual, count};
     }

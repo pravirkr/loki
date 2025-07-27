@@ -24,7 +24,6 @@ PulsarSearchConfig::PulsarSearchConfig(
     std::optional<SizeType> bseg_brute,
     std::optional<SizeType> bseg_ffa,
     bool use_fft_shifts,
-    SizeType branch_max,
     int nthreads)
     : m_nsamps(nsamps),
       m_tsamp(tsamp),
@@ -36,7 +35,6 @@ PulsarSearchConfig::PulsarSearchConfig(
       m_prune_poly_order(prune_poly_order),
       m_prune_n_derivs(prune_n_derivs),
       m_use_fft_shifts(use_fft_shifts),
-      m_branch_max(branch_max),
       m_nthreads(nthreads) {
     if (m_param_limits.empty()) {
         throw std::runtime_error("coord_limits must be non-empty");
@@ -61,11 +59,10 @@ PulsarSearchConfig::PulsarSearchConfig(
     spdlog::info(
         "PulsarSearchConfigClass: nsamps={}, tsamp={}, nbins={}, tol_bins={}, "
         "ducy_max={}, wtsp={}, prune_poly_order={}, prune_n_derivs={}, "
-        "bseg_brute={}, bseg_ffa={}, use_fft_shifts={}, branch_max={}, "
-        "nthreads={}",
+        "bseg_brute={}, bseg_ffa={}, use_fft_shifts={}, nthreads={}",
         m_nsamps, m_tsamp, m_nbins, m_tol_bins, m_ducy_max, m_wtsp,
         m_prune_poly_order, m_prune_n_derivs, m_bseg_brute, m_bseg_ffa,
-        m_use_fft_shifts, m_branch_max, m_nthreads);
+        m_use_fft_shifts, m_nthreads);
 }
 
 std::vector<double> PulsarSearchConfig::get_dparams_f(double tseg_cur) const {

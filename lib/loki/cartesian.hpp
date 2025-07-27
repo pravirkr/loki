@@ -9,6 +9,8 @@
 #include <type_traits>
 #include <vector>
 
+#include <spdlog/spdlog.h>
+
 #include "loki/common/types.hpp"
 
 namespace loki::utils {

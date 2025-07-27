@@ -260,14 +260,14 @@ PYBIND11_MODULE(libloki, m) {
         .def(py::init<SizeType, double, SizeType, double,
                       const std::vector<ParamLimitType>&, double, double,
                       SizeType, SizeType, std::optional<SizeType>,
-                      std::optional<SizeType>, bool, SizeType, SizeType>(),
+                      std::optional<SizeType>, bool, SizeType>(),
              py::arg("nsamps"), py::arg("tsamp"), py::arg("nbins"),
              py::arg("tol_bins"), py::arg("param_limits"),
              py::arg("ducy_max") = 0.2, py::arg("wtsp") = 1.5,
              py::arg("prune_poly_order") = 3, py::arg("prune_n_derivs") = 3,
              py::arg("bseg_brute")     = std::nullopt,
              py::arg("bseg_ffa")       = std::nullopt,
-             py::arg("use_fft_shifts") = true, py::arg("branch_max") = 16,
+             py::arg("use_fft_shifts") = true,
              py::arg("nthreads") = 1)
         .def_property_readonly("nsamps", &PulsarSearchConfig::get_nsamps)
         .def_property_readonly("tsamp", &PulsarSearchConfig::get_tsamp)
@@ -287,8 +287,6 @@ PYBIND11_MODULE(libloki, m) {
         .def_property_readonly("bseg_ffa", &PulsarSearchConfig::get_bseg_ffa)
         .def_property_readonly("use_fft_shifts",
                                &PulsarSearchConfig::get_use_fft_shifts)
-        .def_property_readonly("branch_max",
-                               &PulsarSearchConfig::get_branch_max)
         .def_property_readonly("nthreads", &PulsarSearchConfig::get_nthreads)
         .def_property_readonly("tseg_brute",
                                &PulsarSearchConfig::get_tseg_brute)
