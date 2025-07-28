@@ -341,24 +341,28 @@ PYBIND11_MODULE(libloki, m) {
                                    return as_listof_pyarray(
                                        self.fold_shapes_complex);
                                })
-        .def_property_readonly("coordinates",
-                               [](const FFAPlan& self) {
-                                   return as_listof_pyarray(self.coordinates);
-                               })
-        .def_property_readonly("memory_usage", &FFAPlan::get_memory_usage)
+        .def_property_readonly("buffer_memory_usage",
+                               &FFAPlan::get_buffer_memory_usage)
+        .def_property_readonly("coord_memory_usage",
+                               &FFAPlan::get_coord_memory_usage)
         .def_property_readonly("buffer_size", &FFAPlan::get_buffer_size)
         .def_property_readonly("fold_size", &FFAPlan::get_fold_size)
         .def_property_readonly("fold_size_complex",
                                &FFAPlan::get_fold_size_complex)
         .def_property_readonly("buffer_size_complex",
                                &FFAPlan::get_buffer_size_complex)
-        .def_property_readonly("params_dict", [](const FFAPlan& self) {
-            auto params_map = self.get_params_dict();
-            py::dict result;
-            for (const auto& [key, value] : params_map) {
-                result[py::str(key)] = as_pyarray_ref(value);
-            }
-            return result;
+        .def_property_readonly("params_dict",
+                               [](const FFAPlan& self) {
+                                   auto params_map = self.get_params_dict();
+                                   py::dict result;
+                                   for (const auto& [key, value] : params_map) {
+                                       result[py::str(key)] =
+                                           as_pyarray_ref(value);
+                                   }
+                                   return result;
+                               })
+        .def("resolve_coordinates", [](FFAPlan& self) {
+            return as_listof_pyarray(self.resolve_coordinates());
         });
 
     py::class_<FFA>(m_ffa, "FFA")
@@ -510,12 +514,14 @@ PYBIND11_MODULE(libloki, m) {
             for (const auto& arr : param_arr) {
                 param_vecs.emplace_back(arr.data(), arr.data() + arr.size());
             }
-            auto [pindex_prev, relative_phase] =
-                core::poly_taylor_resolve_batch(
-                    to_span<const double>(pset_batch), coord_add, coord_init,
-                    param_vecs, fold_bins, nbatch, nparams);
-            return std::make_tuple(as_pyarray_ref(pindex_prev),
-                                   as_pyarray_ref(relative_phase));
+            std::vector<SizeType> param_idx_flat_batch(nbatch);
+            std::vector<float> relative_phase_batch(nbatch);
+            core::poly_taylor_resolve_batch(
+                to_span<const double>(pset_batch), coord_add, coord_init,
+                param_vecs, param_idx_flat_batch, relative_phase_batch,
+                fold_bins, nbatch, nparams);
+            return std::make_tuple(as_pyarray_ref(param_idx_flat_batch),
+                                   as_pyarray_ref(relative_phase_batch));
         },
         py::arg("pset_batch"), py::arg("coord_add"), py::arg("coord_init"),
         py::arg("param_arr"), py::arg("fold_bins"));
@@ -532,12 +538,14 @@ PYBIND11_MODULE(libloki, m) {
             for (const auto& arr : param_arr) {
                 param_vecs.emplace_back(arr.data(), arr.data() + arr.size());
             }
-            auto [pindex_prev, relative_phase] =
-                core::poly_taylor_resolve_snap_batch(
-                    to_span<const double>(pset_batch), coord_add, coord_init,
-                    param_vecs, fold_bins, nbatch, nparams);
-            return std::make_tuple(as_pyarray_ref(pindex_prev),
-                                   as_pyarray_ref(relative_phase));
+            std::vector<SizeType> param_idx_flat_batch(nbatch);
+            std::vector<float> relative_phase_batch(nbatch);
+            core::poly_taylor_resolve_snap_batch(
+                to_span<const double>(pset_batch), coord_add, coord_init,
+                param_vecs, param_idx_flat_batch, relative_phase_batch,
+                fold_bins, nbatch, nparams);
+            return std::make_tuple(as_pyarray_ref(param_idx_flat_batch),
+                                   as_pyarray_ref(relative_phase_batch));
         },
         py::arg("pset_batch"), py::arg("coord_add"), py::arg("coord_init"),
         py::arg("param_arr"), py::arg("fold_bins"));

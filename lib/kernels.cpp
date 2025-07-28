@@ -10,9 +10,9 @@
 namespace loki::kernels {
 
 void shift_add(const float* __restrict__ data_tail,
-               double phase_shift_tail,
+               float phase_shift_tail,
                const float* __restrict__ data_head,
-               double phase_shift_head,
+               float phase_shift_head,
                float* __restrict__ out,
                SizeType nbins) noexcept {
 
@@ -39,9 +39,9 @@ void shift_add(const float* __restrict__ data_tail,
 }
 
 void shift_add_buffer(const float* __restrict__ data_tail,
-                      double phase_shift_tail,
+                      float phase_shift_tail,
                       const float* __restrict__ data_head,
-                      double phase_shift_head,
+                      float phase_shift_head,
                       float* __restrict__ out,
                       float* __restrict__ temp_buffer,
                       SizeType nbins) noexcept {
@@ -75,9 +75,9 @@ void shift_add_buffer(const float* __restrict__ data_tail,
 }
 
 void shift_add_complex_buffer(const ComplexType* __restrict__ data_tail,
-                              double phase_shift_tail,
+                              float phase_shift_tail,
                               const ComplexType* __restrict__ data_head,
-                              double phase_shift_head,
+                              float phase_shift_head,
                               ComplexType* __restrict__ out,
                               ComplexType* __restrict__ temp_buffer,
                               SizeType nbins_f,
@@ -94,15 +94,15 @@ void shift_add_complex_buffer(const ComplexType* __restrict__ data_tail,
 
     // --- Pre-computation Step ---
     const auto phase_factor_tail =
-        -2.0 * std::numbers::pi * phase_shift_tail / static_cast<double>(nbins);
+        -2.0 * std::numbers::pi * phase_shift_tail / static_cast<float>(nbins);
     const auto phase_factor_head =
-        -2.0 * std::numbers::pi * phase_shift_head / static_cast<double>(nbins);
+        -2.0 * std::numbers::pi * phase_shift_head / static_cast<float>(nbins);
 
     // Fill the phase arrays (int is necessary for the compiler to vectorize)
     // Fast complex exponential: exp(i * theta) = cos(theta) + i *sin(theta)
     for (int k = 0; k < static_cast<int>(nbins_f); ++k) {
-        const auto k_phase_tail = static_cast<double>(k) * phase_factor_tail;
-        const auto k_phase_head = static_cast<double>(k) * phase_factor_head;
+        const auto k_phase_tail = static_cast<float>(k) * phase_factor_tail;
+        const auto k_phase_head = static_cast<float>(k) * phase_factor_head;
         phases_tail_ptr[k]      = {static_cast<float>(std::cos(k_phase_tail)),
                                    static_cast<float>(std::sin(k_phase_tail))};
         phases_head_ptr[k]      = {static_cast<float>(std::cos(k_phase_head)),
@@ -122,17 +122,17 @@ void shift_add_complex_buffer(const ComplexType* __restrict__ data_tail,
 }
 
 void shift_add_complex_recurrence(const ComplexType* __restrict__ data_tail,
-                                  double phase_shift_tail,
+                                  float phase_shift_tail,
                                   const ComplexType* __restrict__ data_head,
-                                  double phase_shift_head,
+                                  float phase_shift_head,
                                   ComplexType* __restrict__ out,
                                   SizeType nbins_f,
                                   SizeType nbins) noexcept {
     // Calculate the constant phase step per iteration
     const auto phase_step_tail_angle =
-        -2.0 * std::numbers::pi * phase_shift_tail / static_cast<double>(nbins);
+        -2.0 * std::numbers::pi * phase_shift_tail / static_cast<float>(nbins);
     const auto phase_step_head_angle =
-        -2.0 * std::numbers::pi * phase_shift_head / static_cast<double>(nbins);
+        -2.0 * std::numbers::pi * phase_shift_head / static_cast<float>(nbins);
 
     // This is the complex number we will multiply by in each iteration
     const ComplexType delta_phase_tail = {
@@ -262,7 +262,7 @@ void shift_add_complex_recurrence_batch(
     const SizeType* __restrict__ idx_folds,
     const ComplexType* __restrict__ data_ffa,
     const SizeType* __restrict__ idx_ffa,
-    const double* __restrict__ shift_batch,
+    const float* __restrict__ shift_batch,
     ComplexType* __restrict__ out,
     SizeType nbins_f,
     SizeType nbins,
@@ -274,8 +274,8 @@ void shift_add_complex_recurrence_batch(
         const auto fold_idx = idx_folds[irow];
 
         // Calculate phase step per frequency bin
-        const double phase_step_angle =
-            -2.0 * std::numbers::pi * shift / static_cast<double>(nbins);
+        const auto phase_step_angle =
+            -2.0 * std::numbers::pi * shift / static_cast<float>(nbins);
 
         // Complex phase step for recurrence relation
         const ComplexType delta_phase = {
@@ -328,6 +328,210 @@ void shift_add_complex_recurrence_batch(
                 out_e[k] = fold_e[k] + (segment_e[k] * current_phase);
                 out_v[k] = fold_v[k] + (segment_v[k] * current_phase);
                 current_phase *= delta_phase;
+            }
+        }
+    }
+}
+
+void ffa_iter_segment(const float* __restrict__ fold_in,
+                      float* __restrict__ fold_out,
+                      const plans::FFACoord* __restrict__ coords_cur,
+                      SizeType nsegments,
+                      SizeType nbins,
+                      SizeType ncoords_cur,
+                      SizeType ncoords_prev,
+                      int nthreads) {
+    nthreads = std::clamp(nthreads, 1, omp_get_max_threads());
+    // Process one segment at a time to keep data in cache
+    constexpr SizeType kBlockSize  = 32;
+    const SizeType fold_stride     = 2 * nbins;
+    const SizeType seg_prev_stride = ncoords_prev * fold_stride;
+    const SizeType seg_out_stride  = ncoords_cur * fold_stride;
+
+#pragma omp parallel num_threads(nthreads) default(none)                       \
+    shared(fold_in, fold_out, coords_cur, nsegments, nbins, ncoords_cur,       \
+               ncoords_prev, fold_stride, seg_prev_stride, seg_out_stride)
+    {
+        // Each thread allocates its own buffer once
+        std::vector<float> temp_buffer(2 * nbins);
+        auto* __restrict__ temp_buffer_ptr = temp_buffer.data();
+
+#pragma omp for
+        for (SizeType iseg = 0; iseg < nsegments; ++iseg) {
+            // Process coordinates in blocks within each segment
+            for (SizeType icoord_block = 0; icoord_block < ncoords_cur;
+                 icoord_block += kBlockSize) {
+                const auto block_end =
+                    std::min(icoord_block + kBlockSize, ncoords_cur);
+                for (SizeType icoord = icoord_block; icoord < block_end;
+                     ++icoord) {
+                    const auto* __restrict__ coord_cur = &coords_cur[icoord];
+                    const auto tail_offset =
+                        ((iseg * 2) * seg_prev_stride) +
+                        (static_cast<SizeType>(coord_cur->i_tail) *
+                         fold_stride);
+                    const auto head_offset =
+                        ((iseg * 2 + 1) * seg_prev_stride) +
+                        (static_cast<SizeType>(coord_cur->i_head) *
+                         fold_stride);
+                    const auto out_offset =
+                        (iseg * seg_out_stride) + (icoord * fold_stride);
+
+                    const auto* __restrict__ fold_tail = &fold_in[tail_offset];
+                    const auto* __restrict__ fold_head = &fold_in[head_offset];
+                    auto* __restrict__ fold_sum        = &fold_out[out_offset];
+
+                    shift_add_buffer(fold_tail, coord_cur->shift_tail,
+                                     fold_head, coord_cur->shift_head, fold_sum,
+                                     temp_buffer_ptr, nbins);
+                }
+            }
+        }
+    }
+}
+
+void ffa_iter_standard(const float* __restrict__ fold_in,
+                       float* __restrict__ fold_out,
+                       const plans::FFACoord* __restrict__ coords_cur,
+                       SizeType nsegments,
+                       SizeType nbins,
+                       SizeType ncoords_cur,
+                       SizeType ncoords_prev,
+                       int nthreads) {
+    nthreads = std::clamp(nthreads, 1, omp_get_max_threads());
+    constexpr SizeType kBlockSize  = 32;
+    const SizeType fold_stride     = 2 * nbins;
+    const SizeType seg_prev_stride = ncoords_prev * fold_stride;
+    const SizeType seg_out_stride  = ncoords_cur * fold_stride;
+
+#pragma omp parallel num_threads(nthreads) default(none)                       \
+    shared(fold_in, fold_out, coords_cur, nsegments, nbins, ncoords_cur,       \
+               ncoords_prev, fold_stride, seg_prev_stride, seg_out_stride)
+    {
+        std::vector<float> temp_buffer(2 * nbins);
+        auto* __restrict__ temp_buffer_ptr = temp_buffer.data();
+
+#pragma omp for
+        for (SizeType icoord_block = 0; icoord_block < ncoords_cur;
+             icoord_block += kBlockSize) {
+            const auto block_end =
+                std::min(icoord_block + kBlockSize, ncoords_cur);
+            for (SizeType iseg = 0; iseg < nsegments; ++iseg) {
+                for (SizeType icoord = icoord_block; icoord < block_end;
+                     ++icoord) {
+                    const auto* __restrict__ coord_cur = &coords_cur[icoord];
+                    const auto tail_offset =
+                        ((iseg * 2) * seg_prev_stride) +
+                        (static_cast<SizeType>(coord_cur->i_tail) *
+                         fold_stride);
+                    const auto head_offset =
+                        ((iseg * 2 + 1) * seg_prev_stride) +
+                        (static_cast<SizeType>(coord_cur->i_head) *
+                         fold_stride);
+                    const auto out_offset =
+                        (iseg * seg_out_stride) + (icoord * fold_stride);
+
+                    const auto* __restrict__ fold_tail = &fold_in[tail_offset];
+                    const auto* __restrict__ fold_head = &fold_in[head_offset];
+                    auto* __restrict__ fold_sum        = &fold_out[out_offset];
+
+                    shift_add_buffer(fold_tail, coord_cur->shift_tail,
+                                     fold_head, coord_cur->shift_head, fold_sum,
+                                     temp_buffer_ptr, nbins);
+                }
+            }
+        }
+    }
+}
+
+void ffa_complex_iter_segment(const ComplexType* __restrict__ fold_in,
+                              ComplexType* __restrict__ fold_out,
+                              const plans::FFACoord* __restrict__ coords_cur,
+                              SizeType nsegments,
+                              SizeType nbins_f,
+                              SizeType nbins,
+                              SizeType ncoords_cur,
+                              SizeType ncoords_prev,
+                              int nthreads) {
+    nthreads = std::clamp(nthreads, 1, omp_get_max_threads());
+    // Process one segment at a time to keep data in cache
+    constexpr SizeType kBlockSize  = 32;
+    const SizeType fold_stride     = 2 * nbins_f;
+    const SizeType seg_prev_stride = ncoords_prev * fold_stride;
+    const SizeType seg_out_stride  = ncoords_cur * fold_stride;
+
+#pragma omp parallel for num_threads(nthreads) default(none) shared(           \
+        fold_in, fold_out, coords_cur, nsegments, nbins, nbins_f, ncoords_cur, \
+            ncoords_prev, fold_stride, seg_prev_stride, seg_out_stride)
+    for (SizeType iseg = 0; iseg < nsegments; ++iseg) {
+        // Process coordinates in blocks within each segment
+        for (SizeType icoord_block = 0; icoord_block < ncoords_cur;
+             icoord_block += kBlockSize) {
+            SizeType block_end =
+                std::min(icoord_block + kBlockSize, ncoords_cur);
+            for (SizeType icoord = icoord_block; icoord < block_end; ++icoord) {
+                const auto* __restrict__ coord_cur = &coords_cur[icoord];
+                const auto tail_offset =
+                    ((iseg * 2) * seg_prev_stride) +
+                    (static_cast<SizeType>(coord_cur->i_tail) * fold_stride);
+                const auto head_offset =
+                    ((iseg * 2 + 1) * seg_prev_stride) +
+                    (static_cast<SizeType>(coord_cur->i_head) * fold_stride);
+                const auto out_offset =
+                    (iseg * seg_out_stride) + (icoord * fold_stride);
+
+                const auto* __restrict__ fold_tail = &fold_in[tail_offset];
+                const auto* __restrict__ fold_head = &fold_in[head_offset];
+                auto* __restrict__ fold_sum        = &fold_out[out_offset];
+
+                kernels::shift_add_complex_recurrence(
+                    fold_tail, coord_cur->shift_tail, fold_head,
+                    coord_cur->shift_head, fold_sum, nbins_f, nbins);
+            }
+        }
+    }
+}
+
+void ffa_complex_iter_standard(const ComplexType* __restrict__ fold_in,
+                               ComplexType* __restrict__ fold_out,
+                               const plans::FFACoord* __restrict__ coords_cur,
+                               SizeType nsegments,
+                               SizeType nbins_f,
+                               SizeType nbins,
+                               SizeType ncoords_cur,
+                               SizeType ncoords_prev,
+                               int nthreads) {
+    nthreads = std::clamp(nthreads, 1, omp_get_max_threads());
+    constexpr SizeType kBlockSize  = 32;
+    const SizeType fold_stride     = 2 * nbins_f;
+    const SizeType seg_prev_stride = ncoords_prev * fold_stride;
+    const SizeType seg_out_stride  = ncoords_cur * fold_stride;
+
+#pragma omp parallel for num_threads(nthreads) default(none) shared(           \
+        fold_in, fold_out, coords_cur, nsegments, nbins, nbins_f, ncoords_cur, \
+            ncoords_prev, fold_stride, seg_prev_stride, seg_out_stride)
+    for (SizeType icoord_block = 0; icoord_block < ncoords_cur;
+         icoord_block += kBlockSize) {
+        SizeType block_end = std::min(icoord_block + kBlockSize, ncoords_cur);
+        for (SizeType iseg = 0; iseg < nsegments; ++iseg) {
+            for (SizeType icoord = icoord_block; icoord < block_end; ++icoord) {
+                const auto* __restrict__ coord_cur = &coords_cur[icoord];
+                const auto tail_offset =
+                    ((iseg * 2) * seg_prev_stride) +
+                    (static_cast<SizeType>(coord_cur->i_tail) * fold_stride);
+                const auto head_offset =
+                    ((iseg * 2 + 1) * seg_prev_stride) +
+                    (static_cast<SizeType>(coord_cur->i_head) * fold_stride);
+                const auto out_offset =
+                    (iseg * seg_out_stride) + (icoord * fold_stride);
+
+                const auto* __restrict__ fold_tail = &fold_in[tail_offset];
+                const auto* __restrict__ fold_head = &fold_in[head_offset];
+                auto* __restrict__ fold_sum        = &fold_out[out_offset];
+
+                kernels::shift_add_complex_recurrence(
+                    fold_tail, coord_cur->shift_tail, fold_head,
+                    coord_cur->shift_head, fold_sum, nbins_f, nbins);
             }
         }
     }

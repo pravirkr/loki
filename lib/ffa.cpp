@@ -33,6 +33,11 @@ public:
         if (!m_use_single_buffer) {
             m_fold_out.resize(m_ffa_plan.get_buffer_size(), 0.0F);
         }
+        // Allocate memory for the FFA coordinates
+        m_coordinates.resize(m_ffa_plan.n_levels);
+        for (SizeType i_level = 0; i_level < m_ffa_plan.n_levels; ++i_level) {
+            m_coordinates[i_level].resize(m_ffa_plan.ncoords[i_level]);
+        }
         // Initialize the brute fold
         const auto t_ref =
             m_cfg.get_nparams() == 1 ? 0.0 : m_ffa_plan.tsegments[0] / 2.0;
@@ -43,11 +48,12 @@ public:
             m_cfg.get_nsamps(), m_cfg.get_tsamp(), t_ref, m_nthreads);
 
         // Log detailed memory usage
-        const auto memory_usage = m_ffa_plan.get_memory_usage();
-        const auto memory_gb =
-            static_cast<float>(memory_usage) / (1024.0F * 1024.0F * 1024.0F);
-        spdlog::info("FFA Memory Usage: {:.2f} GB ({} buffers)", memory_gb,
-                     m_use_single_buffer ? 1 : 2);
+        const auto memory_buffer_gb = m_ffa_plan.get_buffer_memory_usage();
+        const auto memory_coord_gb  = m_ffa_plan.get_coord_memory_usage();
+        spdlog::info("FFA Memory Usage: {:.2f} GB ({} buffers) + {:.2f} GB "
+                     "(coords)",
+                     memory_buffer_gb, m_use_single_buffer ? 1 : 2,
+                     memory_coord_gb);
     }
 
     ~Impl()                      = default;
@@ -61,6 +67,7 @@ public:
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
                  std::span<float> fold) {
+        timing::ScopeTimer timer("FFA::execute");
         error_check::check_equal(
             ts_e.size(), m_cfg.get_nsamps(),
             "FFA::Impl::execute: ts_e must have size nsamps");
@@ -71,7 +78,9 @@ public:
             fold.size(), m_ffa_plan.get_fold_size(),
             "FFA::Impl::execute: fold must have size fold_size");
 
-        timing::ScopeTimer timer("FFA::execute");
+        // Resolve the coordinates for the FFA plan
+        m_ffa_plan.resolve_coordinates(m_coordinates);
+        // Execute the FFA plan
         if (m_use_single_buffer) {
             execute_single_buffer(ts_e, ts_v, fold);
         } else {
@@ -90,6 +99,7 @@ private:
     // Buffers for the FFA plan
     std::vector<float> m_fold_in;
     std::vector<float> m_fold_out;
+    std::vector<std::vector<plans::FFACoord>> m_coordinates;
 
     void initialize(std::span<const float> ts_e,
                     std::span<const float> ts_v,
@@ -176,105 +186,21 @@ private:
     void execute_iter(const float* __restrict__ fold_in,
                       float* __restrict__ fold_out,
                       SizeType i_level) {
-        const auto coords_cur   = m_ffa_plan.coordinates[i_level];
-        const auto coords_prev  = m_ffa_plan.coordinates[i_level - 1];
+        const auto coords_cur   = m_coordinates[i_level];
         const auto nsegments    = m_ffa_plan.fold_shapes[i_level][0];
         const auto nbins        = m_ffa_plan.fold_shapes[i_level].back();
-        const auto ncoords_cur  = coords_cur.size();
-        const auto ncoords_prev = coords_prev.size();
+        const auto ncoords_cur  = m_ffa_plan.ncoords[i_level];
+        const auto ncoords_prev = m_ffa_plan.ncoords[i_level - 1];
 
         // Choose strategy based on level characteristics
         if (nsegments >= 256) {
-            execute_iter_segment(fold_in, fold_out, coords_cur, nsegments,
-                                 nbins, ncoords_cur, ncoords_prev);
+            kernels::ffa_iter_segment(fold_in, fold_out, coords_cur.data(),
+                                      nsegments, nbins, ncoords_cur,
+                                      ncoords_prev, m_nthreads);
         } else {
-            execute_iter_standard(fold_in, fold_out, coords_cur, nsegments,
-                                  nbins, ncoords_cur, ncoords_prev);
-        }
-    }
-
-    void execute_iter_segment(const float* __restrict__ fold_in,
-                              float* __restrict__ fold_out,
-                              const auto& coords_cur,
-                              SizeType nsegments,
-                              SizeType nbins,
-                              SizeType ncoords_cur,
-                              SizeType ncoords_prev) {
-        // Process one segment at a time to keep data in cache
-        constexpr SizeType kBlockSize = 32;
-
-        std::vector<float> temp_buffer(2 * nbins);
-#pragma omp parallel for num_threads(m_nthreads) default(none)                 \
-    shared(fold_in, fold_out, coords_cur, nsegments, nbins, ncoords_cur,       \
-               ncoords_prev) firstprivate(temp_buffer)
-        for (SizeType iseg = 0; iseg < nsegments; ++iseg) {
-            // Process coordinates in blocks within each segment
-            for (SizeType icoord_block = 0; icoord_block < ncoords_cur;
-                 icoord_block += kBlockSize) {
-                SizeType block_end =
-                    std::min(icoord_block + kBlockSize, ncoords_cur);
-                for (SizeType icoord = icoord_block; icoord < block_end;
-                     ++icoord) {
-                    const auto& coord_cur = coords_cur[icoord];
-                    const auto tail_offset =
-                        ((iseg * 2) * ncoords_prev * 2 * nbins) +
-                        (coord_cur.i_tail * 2 * nbins);
-                    const auto head_offset =
-                        ((iseg * 2 + 1) * ncoords_prev * 2 * nbins) +
-                        (coord_cur.i_head * 2 * nbins);
-                    const auto out_offset =
-                        (iseg * ncoords_cur * 2 * nbins) + (icoord * 2 * nbins);
-                    const float* __restrict__ fold_tail = &fold_in[tail_offset];
-                    const float* __restrict__ fold_head = &fold_in[head_offset];
-                    float* __restrict__ fold_sum        = &fold_out[out_offset];
-                    float* __restrict__ temp_buffer_ptr = temp_buffer.data();
-                    kernels::shift_add_buffer(fold_tail, coord_cur.shift_tail,
-                                              fold_head, coord_cur.shift_head,
-                                              fold_sum, temp_buffer_ptr, nbins);
-                }
-            }
-        }
-    }
-
-    void execute_iter_standard(const float* __restrict__ fold_in,
-                               float* __restrict__ fold_out,
-                               const auto& coords_cur,
-                               SizeType nsegments,
-                               SizeType nbins,
-                               SizeType ncoords_cur,
-                               SizeType ncoords_prev) {
-        constexpr SizeType kBlockSize = 32;
-
-        std::vector<float> temp_buffer(2 * nbins);
-#pragma omp parallel for num_threads(m_nthreads) default(none)                 \
-    shared(fold_in, fold_out, coords_cur, nsegments, nbins, ncoords_cur,       \
-               ncoords_prev) firstprivate(temp_buffer)
-        for (SizeType icoord_block = 0; icoord_block < ncoords_cur;
-             icoord_block += kBlockSize) {
-            SizeType block_end =
-                std::min(icoord_block + kBlockSize, ncoords_cur);
-            for (SizeType iseg = 0; iseg < nsegments; ++iseg) {
-                for (SizeType icoord = icoord_block; icoord < block_end;
-                     ++icoord) {
-                    const auto& coord_cur = coords_cur[icoord];
-                    const auto tail_offset =
-                        ((iseg * 2) * ncoords_prev * 2 * nbins) +
-                        (coord_cur.i_tail * 2 * nbins);
-                    const auto head_offset =
-                        ((iseg * 2 + 1) * ncoords_prev * 2 * nbins) +
-                        (coord_cur.i_head * 2 * nbins);
-                    const auto out_offset =
-                        (iseg * ncoords_cur * 2 * nbins) + (icoord * 2 * nbins);
-
-                    const float* __restrict__ fold_tail = &fold_in[tail_offset];
-                    const float* __restrict__ fold_head = &fold_in[head_offset];
-                    float* __restrict__ fold_sum        = &fold_out[out_offset];
-                    float* __restrict__ temp_buffer_ptr = temp_buffer.data();
-                    kernels::shift_add_buffer(fold_tail, coord_cur.shift_tail,
-                                              fold_head, coord_cur.shift_head,
-                                              fold_sum, temp_buffer_ptr, nbins);
-                }
-            }
+            kernels::ffa_iter_standard(fold_in, fold_out, coords_cur.data(),
+                                       nsegments, nbins, ncoords_cur,
+                                       ncoords_prev, m_nthreads);
         }
     }
 }; // End FFA::Impl definition
@@ -295,6 +221,11 @@ public:
             m_fold_out.resize(m_ffa_plan.get_buffer_size_complex(),
                               ComplexType(0.0F, 0.0F));
         }
+        // Allocate memory for the FFA coordinates
+        m_coordinates.resize(m_ffa_plan.n_levels);
+        for (SizeType i_level = 0; i_level < m_ffa_plan.n_levels; ++i_level) {
+            m_coordinates[i_level].resize(m_ffa_plan.ncoords[i_level]);
+        }
         // Initialize the brute fold
         const auto t_ref =
             m_cfg.get_nparams() == 1 ? 0.0 : m_ffa_plan.tsegments[0] / 2.0;
@@ -305,11 +236,12 @@ public:
             m_cfg.get_nsamps(), m_cfg.get_tsamp(), t_ref, m_nthreads);
 
         // Log detailed memory usage
-        const auto memory_usage = m_ffa_plan.get_memory_usage();
-        const auto memory_gb =
-            static_cast<float>(memory_usage) / (1024.0F * 1024.0F * 1024.0F);
-        spdlog::info("FFACOMPLEX Memory Usage: {:.2f} GB ({} buffers)",
-                     memory_gb, m_use_single_buffer ? 1 : 2);
+        const auto memory_buffer_gb = m_ffa_plan.get_buffer_memory_usage();
+        const auto memory_coord_gb  = m_ffa_plan.get_coord_memory_usage();
+        spdlog::info(
+            "FFACOMPLEX Memory Usage: {:.2f} GB ({} buffers) + {:.2f} GB "
+            "(coords)",
+            memory_buffer_gb, m_use_single_buffer ? 1 : 2, memory_coord_gb);
     }
 
     ~Impl()                      = default;
@@ -323,6 +255,7 @@ public:
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
                  std::span<float> fold) {
+        timing::ScopeTimer timer("FFACOMPLEX::execute");
         const auto fold_size         = m_ffa_plan.get_fold_size();
         const auto fold_size_complex = m_ffa_plan.get_fold_size_complex();
 
@@ -336,7 +269,8 @@ public:
                                  "FFACOMPLEX::Impl::execute: fold must have "
                                  "size 2 * fold_size_complex");
 
-        timing::ScopeTimer timer("FFACOMPLEX::execute");
+        // Resolve the coordinates for the FFA plan
+        m_ffa_plan.resolve_coordinates(m_coordinates);
 
         const auto nfft = fold_size / m_cfg.get_nbins();
         if (m_use_single_buffer) {
@@ -362,6 +296,7 @@ public:
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
                  std::span<ComplexType> fold_complex) {
+        timing::ScopeTimer timer("FFACOMPLEX::execute");
         error_check::check_equal(
             ts_e.size(), m_cfg.get_nsamps(),
             "FFACOMPLEX::Impl::execute: ts_e must have size nsamps");
@@ -372,7 +307,9 @@ public:
             fold_complex.size(), m_ffa_plan.get_fold_size_complex(),
             "FFACOMPLEX::Impl::execute: fold must have size fold_size_complex");
 
-        timing::ScopeTimer timer("FFACOMPLEX::execute");
+        // Resolve the coordinates for the FFA plan
+        m_ffa_plan.resolve_coordinates(m_coordinates);
+
         if (m_use_single_buffer) {
             execute_single_buffer(ts_e, ts_v, fold_complex, false);
         } else {
@@ -391,6 +328,7 @@ private:
     // Buffers for the FFA plan
     std::vector<ComplexType> m_fold_in;
     std::vector<ComplexType> m_fold_out;
+    std::vector<std::vector<plans::FFACoord>> m_coordinates;
 
     void initialize(std::span<const float> ts_e,
                     std::span<const float> ts_v,
@@ -523,107 +461,23 @@ private:
     void execute_iter(const ComplexType* __restrict__ fold_in,
                       ComplexType* __restrict__ fold_out,
                       SizeType i_level) {
-        const auto coords_cur   = m_ffa_plan.coordinates[i_level];
-        const auto coords_prev  = m_ffa_plan.coordinates[i_level - 1];
+        const auto coords_cur   = m_coordinates[i_level];
+        const auto coords_prev  = m_coordinates[i_level - 1];
         const auto nsegments    = m_ffa_plan.fold_shapes[i_level][0];
         const auto nbins        = m_ffa_plan.fold_shapes[i_level].back();
         const auto nbins_f      = (nbins / 2) + 1;
-        const auto ncoords_cur  = coords_cur.size();
-        const auto ncoords_prev = coords_prev.size();
+        const auto ncoords_cur  = m_ffa_plan.ncoords[i_level];
+        const auto ncoords_prev = m_ffa_plan.ncoords[i_level - 1];
 
         // Choose strategy based on level characteristics
         if (nsegments >= 256) {
-            execute_iter_segment(fold_in, fold_out, coords_cur, nsegments,
-                                 nbins_f, nbins, ncoords_cur, ncoords_prev);
+            kernels::ffa_complex_iter_segment(
+                fold_in, fold_out, coords_cur.data(), nsegments, nbins_f, nbins,
+                ncoords_cur, ncoords_prev, m_nthreads);
         } else {
-            execute_iter_standard(fold_in, fold_out, coords_cur, nsegments,
-                                  nbins_f, nbins, ncoords_cur, ncoords_prev);
-        }
-    }
-
-    void execute_iter_segment(const ComplexType* __restrict__ fold_in,
-                              ComplexType* __restrict__ fold_out,
-                              const auto& coords_cur,
-                              SizeType nsegments,
-                              SizeType nbins_f,
-                              SizeType nbins,
-                              SizeType ncoords_cur,
-                              SizeType ncoords_prev) {
-        // Process one segment at a time to keep data in cache
-        constexpr SizeType kBlockSize = 32;
-#pragma omp parallel for num_threads(m_nthreads) default(none)                 \
-    shared(fold_in, fold_out, coords_cur, nsegments, nbins, nbins_f,           \
-               ncoords_cur, ncoords_prev)
-        for (SizeType iseg = 0; iseg < nsegments; ++iseg) {
-            // Process coordinates in blocks within each segment
-            for (SizeType icoord_block = 0; icoord_block < ncoords_cur;
-                 icoord_block += kBlockSize) {
-                SizeType block_end =
-                    std::min(icoord_block + kBlockSize, ncoords_cur);
-                for (SizeType icoord = icoord_block; icoord < block_end;
-                     ++icoord) {
-                    const auto& coord_cur = coords_cur[icoord];
-                    const auto tail_offset =
-                        ((iseg * 2) * ncoords_prev * 2 * nbins_f) +
-                        (coord_cur.i_tail * 2 * nbins_f);
-                    const auto head_offset =
-                        ((iseg * 2 + 1) * ncoords_prev * 2 * nbins_f) +
-                        (coord_cur.i_head * 2 * nbins_f);
-                    const auto out_offset = (iseg * ncoords_cur * 2 * nbins_f) +
-                                            (icoord * 2 * nbins_f);
-                    const ComplexType* __restrict__ fold_tail =
-                        &fold_in[tail_offset];
-                    const ComplexType* __restrict__ fold_head =
-                        &fold_in[head_offset];
-                    ComplexType* __restrict__ fold_sum = &fold_out[out_offset];
-                    kernels::shift_add_complex_recurrence(
-                        fold_tail, coord_cur.shift_tail, fold_head,
-                        coord_cur.shift_head, fold_sum, nbins_f, nbins);
-                }
-            }
-        }
-    }
-
-    void execute_iter_standard(const ComplexType* __restrict__ fold_in,
-                               ComplexType* __restrict__ fold_out,
-                               const auto& coords_cur,
-                               SizeType nsegments,
-                               SizeType nbins_f,
-                               SizeType nbins,
-                               SizeType ncoords_cur,
-                               SizeType ncoords_prev) {
-        constexpr SizeType kBlockSize = 32;
-
-#pragma omp parallel for num_threads(m_nthreads) default(none)                 \
-    shared(fold_in, fold_out, coords_cur, nsegments, nbins, nbins_f,           \
-               ncoords_cur, ncoords_prev)
-        for (SizeType icoord_block = 0; icoord_block < ncoords_cur;
-             icoord_block += kBlockSize) {
-            SizeType block_end =
-                std::min(icoord_block + kBlockSize, ncoords_cur);
-            for (SizeType iseg = 0; iseg < nsegments; ++iseg) {
-                for (SizeType icoord = icoord_block; icoord < block_end;
-                     ++icoord) {
-                    const auto& coord_cur = coords_cur[icoord];
-                    const auto tail_offset =
-                        ((iseg * 2) * ncoords_prev * 2 * nbins_f) +
-                        (coord_cur.i_tail * 2 * nbins_f);
-                    const auto head_offset =
-                        ((iseg * 2 + 1) * ncoords_prev * 2 * nbins_f) +
-                        (coord_cur.i_head * 2 * nbins_f);
-                    const auto out_offset = (iseg * ncoords_cur * 2 * nbins_f) +
-                                            (icoord * 2 * nbins_f);
-
-                    const ComplexType* __restrict__ fold_tail =
-                        &fold_in[tail_offset];
-                    const ComplexType* __restrict__ fold_head =
-                        &fold_in[head_offset];
-                    ComplexType* __restrict__ fold_sum = &fold_out[out_offset];
-                    kernels::shift_add_complex_recurrence(
-                        fold_tail, coord_cur.shift_tail, fold_head,
-                        coord_cur.shift_head, fold_sum, nbins_f, nbins);
-                }
-            }
+            kernels::ffa_complex_iter_standard(
+                fold_in, fold_out, coords_cur.data(), nsegments, nbins_f, nbins,
+                ncoords_cur, ncoords_prev, m_nthreads);
         }
     }
 }; // End FFACOMPLEX::Impl definition

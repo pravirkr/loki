@@ -9,8 +9,10 @@
 
 namespace loki::psr_utils {
 
-double
-get_phase_idx(double proper_time, double freq, SizeType nbins, double delay) {
+float get_phase_idx(double proper_time,
+                    double freq,
+                    SizeType nbins,
+                    double delay) {
     if (freq <= 0.0) {
         throw std::invalid_argument(
             std::format("Frequency must be positive (got {})", freq));
@@ -23,7 +25,7 @@ get_phase_idx(double proper_time, double freq, SizeType nbins, double delay) {
     const auto phase      = std::fmod((proper_time + delay) * freq, 1.0);
     const auto norm_phase = phase < 0.0 ? phase + 1.0 : phase;
     // phase is in [0, 1). Round and wrap to ensure it is in [0, nbins).
-    return norm_phase * static_cast<double>(nbins);
+    return static_cast<float>(norm_phase * static_cast<double>(nbins));
 }
 
 SizeType get_phase_idx_int(double proper_time,
@@ -176,6 +178,21 @@ void poly_taylor_shift_d_vec(std::span<const double> dparam_old,
             }
         }
     }
+}
+
+std::vector<std::vector<double>> precompute_shift_matrix(SizeType nparams,
+                                                         double delta_t) {
+    std::vector<std::vector<double>> trans_matrix(
+        nparams, std::vector<double>(nparams, 0.0));
+    for (SizeType i = 0; i < nparams; ++i) {
+        for (SizeType j = 0; j <= i; ++j) {
+            const auto k = i - j;
+            const auto term =
+                std::pow(delta_t, k) / static_cast<double>(math::factorial(k));
+            trans_matrix[i][j] = term;
+        }
+    }
+    return trans_matrix;
 }
 
 std::vector<double> shift_params_d(std::span<const double> param_vec,

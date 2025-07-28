@@ -10,7 +10,7 @@
 
 namespace loki::core {
 
-std::tuple<std::vector<SizeType>, double>
+std::tuple<std::vector<SizeType>, float>
 ffa_taylor_resolve(std::span<const double> pset_cur,
                    std::span<const std::vector<double>> param_arr,
                    SizeType ffa_level,
@@ -18,23 +18,49 @@ ffa_taylor_resolve(std::span<const double> pset_cur,
                    double tseg_brute,
                    SizeType nbins);
 
-std::tuple<std::vector<SizeType>, std::vector<double>>
-poly_taylor_resolve_batch(std::span<const double> batch_leaves,
-                          std::pair<double, double> coord_add,
-                          std::pair<double, double> coord_init,
-                          std::span<const std::vector<double>> param_arr,
-                          SizeType fold_bins,
-                          SizeType n_leaves,
-                          SizeType n_params);
+void ffa_taylor_resolve_batch_freq(
+    std::span<const std::vector<double>> param_arr_cur,
+    std::span<const std::vector<double>> param_arr_prev,
+    std::span<uint32_t> pindex_prev_flat_batch,
+    std::span<float> relative_phase_batch,
+    SizeType ffa_level,
+    SizeType latter,
+    double tseg_brute,
+    SizeType nbins);
 
-std::tuple<std::vector<SizeType>, std::vector<double>>
-poly_taylor_resolve_snap_batch(std::span<const double> batch_leaves,
+void ffa_taylor_resolve_batch(
+    std::span<const std::vector<double>> param_arr_cur,
+    std::span<const std::vector<double>> param_arr_prev,
+    std::span<SizeType> param_arr_cur_strides,
+    std::span<SizeType> param_arr_prev_strides,
+    std::span<uint32_t> pindex_prev_flat_batch,
+    std::span<float> relative_phase_batch,
+    SizeType ffa_level,
+    SizeType latter,
+    double tseg_brute,
+    SizeType nbins,
+    int nthreads);
+
+void poly_taylor_resolve_batch(std::span<const double> batch_leaves,
                                std::pair<double, double> coord_add,
                                std::pair<double, double> coord_init,
                                std::span<const std::vector<double>> param_arr,
+                               std::span<SizeType> param_idx_flat_batch,
+                               std::span<float> relative_phase_batch,
                                SizeType fold_bins,
                                SizeType n_leaves,
                                SizeType n_params);
+
+void poly_taylor_resolve_snap_batch(
+    std::span<const double> batch_leaves,
+    std::pair<double, double> coord_add,
+    std::pair<double, double> coord_init,
+    std::span<const std::vector<double>> param_arr,
+    std::span<SizeType> param_idx_flat_batch,
+    std::span<float> relative_phase_batch,
+    SizeType fold_bins,
+    SizeType n_leaves,
+    SizeType n_params);
 
 std::vector<double>
 poly_taylor_leaves(std::span<const std::vector<double>> param_arr,

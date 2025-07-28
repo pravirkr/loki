@@ -4,6 +4,7 @@
 #include <span>
 #include <vector>
 
+#include <omp.h>
 #include <spdlog/spdlog.h>
 
 #include "loki/cartesian.hpp"
@@ -15,7 +16,7 @@
 
 namespace loki::core {
 
-std::tuple<std::vector<SizeType>, double>
+std::tuple<std::vector<SizeType>, float>
 ffa_taylor_resolve(std::span<const double> pset_cur,
                    std::span<const std::vector<double>> param_arr,
                    SizeType ffa_level,
@@ -39,21 +40,157 @@ ffa_taylor_resolve(std::span<const double> pset_cur,
         psr_utils::get_phase_idx(delta_t, pset_cur[nparams - 1], nbins, delay);
 
     std::vector<SizeType> pindex_prev(nparams);
+    SizeType hint_idx{};
     for (SizeType ip = 0; ip < nparams; ++ip) {
-        pindex_prev[ip] = utils::find_nearest_sorted_idx(
-            std::span(param_arr[ip]), pset_prev[ip]);
+        pindex_prev[ip] = utils::find_nearest_sorted_idx_scan(
+            std::span(param_arr[ip]), pset_prev[ip], hint_idx);
     }
     return {pindex_prev, relative_phase};
 }
 
-std::tuple<std::vector<SizeType>, std::vector<double>>
-poly_taylor_resolve_batch(std::span<const double> batch_leaves,
-                          std::pair<double, double> coord_add,
-                          std::pair<double, double> coord_init,
-                          std::span<const std::vector<double>> param_arr,
-                          SizeType fold_bins,
-                          SizeType n_leaves,
-                          SizeType n_params) {
+void ffa_taylor_resolve_batch_freq(
+    std::span<const std::vector<double>> param_arr_cur,
+    std::span<const std::vector<double>> param_arr_prev,
+    std::span<uint32_t> pindex_prev_flat_batch,
+    std::span<float> relative_phase_batch,
+    SizeType ffa_level,
+    SizeType latter,
+    double tseg_brute,
+    SizeType nbins) {
+    const auto nparams = param_arr_prev.size();
+    error_check::check_equal(
+        nparams, param_arr_cur.size(),
+        "param_arr_cur and param_arr_prev should have the same size");
+    error_check::check_equal(nparams, 1U,
+                             "nparams should be 1 for frequency resolve");
+    const auto& freq_arr = param_arr_cur[0];
+    const auto nfreqs    = freq_arr.size();
+    error_check::check_equal(nfreqs, pindex_prev_flat_batch.size(),
+                             "pindex_prev_flat size mismatch");
+    error_check::check_equal(nfreqs, relative_phase_batch.size(),
+                             "relative_phase_batch size mismatch");
+
+    const auto tsegment = std::pow(2.0, ffa_level - 1) * tseg_brute;
+    const auto delta_t  = static_cast<double>(latter) * tsegment;
+
+    // Calculate relative phases and flattened parameter indices
+    SizeType hint_idx = 0;
+    for (SizeType i = 0; i < nfreqs; ++i) {
+        pindex_prev_flat_batch[i] =
+            static_cast<uint32_t>(utils::find_nearest_sorted_idx_scan(
+                std::span(param_arr_prev[0]), freq_arr[i], hint_idx));
+        relative_phase_batch[i] =
+            psr_utils::get_phase_idx(delta_t, freq_arr[i], nbins, 0.0);
+    }
+}
+
+void ffa_taylor_resolve_batch(
+    std::span<const std::vector<double>> param_arr_cur,
+    std::span<const std::vector<double>> param_arr_prev,
+    std::span<SizeType> param_arr_cur_strides,
+    std::span<SizeType> param_arr_prev_strides,
+    std::span<uint32_t> pindex_prev_flat_batch,
+    std::span<float> relative_phase_batch,
+    SizeType ffa_level,
+    SizeType latter,
+    double tseg_brute,
+    SizeType nbins,
+    int nthreads) {
+
+    nthreads           = std::clamp(nthreads, 1, omp_get_max_threads());
+    const auto nparams = param_arr_prev.size();
+    error_check::check_equal(
+        nparams, param_arr_cur.size(),
+        "param_arr_cur and param_arr_prev should have the same size");
+    error_check::check_equal(nparams, param_arr_cur_strides.size(),
+                             "param_arr_cur_strides size mismatch");
+    error_check::check_equal(nparams, param_arr_prev_strides.size(),
+                             "param_arr_prev_strides size mismatch");
+    error_check::check_greater_equal(
+        nparams, 2U, "nparams should be >= 2 for taylor resolve");
+    SizeType ncoords = 1;
+    for (const auto& param_arr : param_arr_cur) {
+        ncoords *= param_arr.size();
+    }
+    error_check::check_equal(ncoords, pindex_prev_flat_batch.size(),
+                             "pindex_prev_flat size mismatch");
+    error_check::check_equal(ncoords, relative_phase_batch.size(),
+                             "relative_phase_batch size mismatch");
+
+    const auto tsegment = std::pow(2.0, ffa_level - 1) * tseg_brute;
+    const auto delta_t  = (static_cast<double>(latter) - 0.5) * tsegment;
+
+    // Pre-compute transformation matrix
+    const auto trans_matrix =
+        psr_utils::precompute_shift_matrix(nparams + 1, delta_t);
+
+#pragma omp parallel num_threads(nthreads) default(none)                       \
+    shared(param_arr_cur, param_arr_prev, param_arr_cur_strides,               \
+               param_arr_prev_strides, pindex_prev_flat_batch,                 \
+               relative_phase_batch, nparams, ncoords, nbins, delta_t,         \
+               trans_matrix)
+    {
+        // Thread-local storage for all temporary variables
+        std::vector<double> p_set_cur(nparams, 0.0);
+        std::vector<double> dvec_cur(nparams + 1, 0.0);
+        std::vector<double> dvec_new(nparams + 1, 0.0);
+        std::vector<double> p_set_new(nparams, 0.0);
+        std::vector<SizeType> hint_idx(nparams);
+#pragma omp for
+        for (SizeType coord_idx = 0; coord_idx < ncoords; ++coord_idx) {
+            // 1. Reconstruct current parameter combination from the flat index
+            for (SizeType p = 0; p < nparams; ++p) {
+                const auto index_in_dim =
+                    (coord_idx / param_arr_cur_strides[p]) %
+                    param_arr_cur[p].size();
+                p_set_cur[p] = param_arr_cur[p][index_in_dim];
+            }
+            // Copy til acceleration, excluding frequency
+            for (SizeType p = 0; p < nparams - 1; ++p) {
+                dvec_cur[p] = p_set_cur[p];
+            }
+            // Apply transformation matrix
+            for (SizeType row = 0; row < nparams + 1; ++row) {
+                double sum = 0.0;
+                for (SizeType col = 0; col <= row; ++col) {
+                    sum += trans_matrix[row][col] * dvec_cur[col];
+                }
+                dvec_new[row] = sum;
+            }
+            // Copy back till acceleration
+            for (SizeType p = 0; p < nparams - 1; ++p) {
+                p_set_new[p] = dvec_new[p];
+            }
+            // Handle frequency parameter specially
+            p_set_new[nparams - 1] =
+                p_set_cur[nparams - 1] *
+                (1.0 + dvec_new[nparams - 1] / utils::kCval);
+
+            const auto delay_rel      = dvec_new[nparams] / utils::kCval;
+            const auto relative_phase = psr_utils::get_phase_idx(
+                delta_t, p_set_cur[nparams - 1], nbins, delay_rel);
+
+            SizeType pindex_prev_cur = 0;
+            for (SizeType ip = 0; ip < nparams; ++ip) {
+                const auto pindex_prev = utils::find_nearest_sorted_idx_scan(
+                    std::span(param_arr_prev[ip]), p_set_new[ip], hint_idx[ip]);
+                pindex_prev_cur += pindex_prev * param_arr_prev_strides[ip];
+            }
+            pindex_prev_flat_batch[coord_idx] = pindex_prev_cur;
+            relative_phase_batch[coord_idx]   = relative_phase;
+        }
+    }
+}
+
+void poly_taylor_resolve_batch(std::span<const double> batch_leaves,
+                               std::pair<double, double> coord_add,
+                               std::pair<double, double> coord_init,
+                               std::span<const std::vector<double>> param_arr,
+                               std::span<SizeType> param_idx_flat_batch,
+                               std::span<float> relative_phase_batch,
+                               SizeType fold_bins,
+                               SizeType n_leaves,
+                               SizeType n_params) {
     const SizeType leaves_stride_param = 2;
     const SizeType leaves_stride_batch = (n_params + 2) * leaves_stride_param;
     error_check::check_equal(n_params, param_arr.size(),
@@ -61,6 +198,10 @@ poly_taylor_resolve_batch(std::span<const double> batch_leaves,
     error_check::check_greater_equal(batch_leaves.size(),
                                      n_leaves * leaves_stride_batch,
                                      "batch_leaves size mismatch");
+    error_check::check_equal(param_idx_flat_batch.size(), n_leaves,
+                             "param_idx_flat_batch size mismatch");
+    error_check::check_equal(relative_phase_batch.size(), n_leaves,
+                             "relative_phase_batch size mismatch");
     const double delta_t = coord_add.first - coord_init.first;
 
     // Allocate working memory for transformed parameters and delays
@@ -71,7 +212,6 @@ poly_taylor_resolve_batch(std::span<const double> batch_leaves,
                                   delay_batch);
 
     // Calculate relative phases
-    std::vector<double> relative_phase_batch(n_leaves);
     for (SizeType i = 0; i < n_leaves; ++i) {
         const auto freq_old =
             batch_leaves[(i * leaves_stride_batch) + ((n_params - 1) * 2)];
@@ -79,7 +219,6 @@ poly_taylor_resolve_batch(std::span<const double> batch_leaves,
             delta_t, freq_old, fold_bins, delay_batch[i]);
     }
     // Calculate flattened parameter indices
-    std::vector<SizeType> param_idx_flat(n_leaves);
     const SizeType f_size = param_arr[n_params - 1].size();
     SizeType hint_a{}, hint_f{};
     for (SizeType i = 0; i < n_leaves; ++i) {
@@ -90,20 +229,20 @@ poly_taylor_resolve_batch(std::span<const double> batch_leaves,
             param_arr[n_params - 1], f_val, hint_f);
         const auto idx_a = utils::find_nearest_sorted_idx_scan(
             param_arr[n_params - 2], a_val, hint_a);
-        param_idx_flat[i] = idx_a * f_size + idx_f;
+        param_idx_flat_batch[i] = idx_a * f_size + idx_f;
     }
-
-    return {std::move(param_idx_flat), std::move(relative_phase_batch)};
 }
 
-std::tuple<std::vector<SizeType>, std::vector<double>>
-poly_taylor_resolve_snap_batch(std::span<const double> batch_leaves,
-                               std::pair<double, double> coord_add,
-                               std::pair<double, double> coord_init,
-                               std::span<const std::vector<double>> param_arr,
-                               SizeType fold_bins,
-                               SizeType n_leaves,
-                               SizeType n_params) {
+void poly_taylor_resolve_snap_batch(
+    std::span<const double> batch_leaves,
+    std::pair<double, double> coord_add,
+    std::pair<double, double> coord_init,
+    std::span<const std::vector<double>> param_arr,
+    std::span<SizeType> param_idx_flat_batch,
+    std::span<float> relative_phase_batch,
+    SizeType fold_bins,
+    SizeType n_leaves,
+    SizeType n_params) {
     const SizeType leaves_stride_param = 2;
     const SizeType leaves_stride_batch = (n_params + 2) * leaves_stride_param;
     error_check::check_equal(n_params, 4U,
@@ -113,6 +252,10 @@ poly_taylor_resolve_snap_batch(std::span<const double> batch_leaves,
     error_check::check_greater_equal(batch_leaves.size(),
                                      n_leaves * leaves_stride_batch,
                                      "batch_leaves size mismatch");
+    error_check::check_equal(param_idx_flat_batch.size(), n_leaves,
+                             "param_idx_flat_batch size mismatch");
+    error_check::check_equal(relative_phase_batch.size(), n_leaves,
+                             "relative_phase_batch size mismatch");
     const double delta_t = coord_add.first - coord_init.first;
 
     // Create mask for circular orbit conditions
@@ -215,7 +358,6 @@ poly_taylor_resolve_snap_batch(std::span<const double> batch_leaves,
     }
 
     // Calculate relative phases
-    std::vector<double> relative_phase_batch(n_leaves);
     for (SizeType i = 0; i < n_leaves; ++i) {
         const auto freq_old =
             batch_leaves[(i * leaves_stride_batch) + ((n_params - 1) * 2)];
@@ -224,7 +366,6 @@ poly_taylor_resolve_snap_batch(std::span<const double> batch_leaves,
     }
 
     // Calculate flattened parameter indices (same as previous function)
-    std::vector<SizeType> param_idx_flat(n_leaves);
     const SizeType f_size = param_arr[n_params - 1].size();
     SizeType hint_a{}, hint_f{};
     for (SizeType i = 0; i < n_leaves; ++i) {
@@ -235,10 +376,8 @@ poly_taylor_resolve_snap_batch(std::span<const double> batch_leaves,
             param_arr[n_params - 1], f_val, hint_f);
         const auto idx_a = utils::find_nearest_sorted_idx_scan(
             param_arr[n_params - 2], a_val, hint_a);
-        param_idx_flat[i] = idx_a * f_size + idx_f;
+        param_idx_flat_batch[i] = idx_a * f_size + idx_f;
     }
-
-    return {std::move(param_idx_flat), std::move(relative_phase_batch)};
 }
 
 std::vector<SizeType>

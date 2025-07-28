@@ -7,15 +7,13 @@
 
 #include <omp.h>
 
-namespace loki::utils {
+#include "loki/common/types.hpp"
 
-SizeType next_power_of_two(SizeType n) noexcept {
-    return 1U << static_cast<SizeType>(std::ceil(std::log2(n)));
-}
+namespace loki::utils {
 
 float diff_max(const float* __restrict__ x,
                const float* __restrict__ y,
-               SizeType size) {
+               SizeType size) noexcept {
     float max_diff = std::numeric_limits<float>::lowest();
 #pragma omp simd simdlen(16) reduction(max : max_diff)
     for (SizeType i = 0; i < size; ++i) {
@@ -50,59 +48,58 @@ void circular_prefix_sum(std::span<const float> x, std::span<float> out) {
 SizeType find_nearest_sorted_idx(std::span<const double> arr_sorted,
                                  double val) {
     if (arr_sorted.empty()) {
-        throw std::runtime_error("Array is empty");
+        throw std::invalid_argument("find_nearest_sorted_idx: array is empty");
     }
-    auto it      = std::ranges::lower_bound(arr_sorted, val);
-    SizeType idx = std::distance(arr_sorted.begin(), it);
+    if (std::isnan(val)) {
+        throw std::invalid_argument("find_nearest_sorted_idx: val is NaN");
+    }
+    const auto it = std::ranges::lower_bound(arr_sorted, val);
+    auto idx = static_cast<SizeType>(std::distance(arr_sorted.begin(), it));
 
-    if (it != arr_sorted.end()) {
-        if (it != arr_sorted.begin() && val - *(it - 1) <= *it - val) {
-            idx--;
-        }
-    } else {
-        idx = arr_sorted.size() - 1;
+    // Handle case where val is larger than all elements
+    if (it == arr_sorted.end()) {
+        return arr_sorted.size() - 1;
+    }
+    // Check if previous element is closer
+    if (it != arr_sorted.begin() && val - *(it - 1) <= *it - val) {
+        --idx;
     }
     return idx;
 }
 
-/**
- * @brief An optimized version using a two-pointer/scanning approach.
- * This is extremely fast if the input values (`val`) are monotonic.
- *
- * @param arr_sorted A sorted span of doubles.
- * @param val The value to find the nearest element to.
- * @param hint_idx A reference to the starting index for the search. It will be
- * updated.
- * @return The index of the nearest element.
- */
 SizeType find_nearest_sorted_idx_scan(std::span<const double> arr_sorted,
                                       double val,
                                       SizeType& hint_idx) {
-    const SizeType n = arr_sorted.size();
+    const auto n = arr_sorted.size();
     if (n == 0) {
-        throw std::runtime_error("Array is empty in scanning search.");
+        throw std::invalid_argument(
+            "find_nearest_sorted_idx_scan: array is empty");
+    }
+    if (std::isnan(val)) {
+        throw std::invalid_argument("find_nearest_sorted_idx_scan: val is NaN");
     }
 
+    // Clamp the hint to a valid range.
+    hint_idx = std::min(hint_idx, n);
+
     // Scan forward from the last known position (the hint).
-    // If input `val` is monotonic, this loop does minimal work over time.
     while (hint_idx < n && arr_sorted[hint_idx] < val) {
-        hint_idx++;
+        ++hint_idx;
     }
     // Scan backward in case the `val` sequence isn't perfectly monotonic.
     while (hint_idx > 0 && arr_sorted[hint_idx - 1] >= val) {
-        hint_idx--;
+        --hint_idx;
     }
     // `hint_idx` is now our lower bound index.
     SizeType idx = hint_idx;
-    if (idx == 0) {
-        return 0;
-    }
     if (idx == n) {
-        return n - 1;
+        idx = n - 1; // past the end
+    } else if (idx > 0 &&
+               (val - arr_sorted[idx - 1]) <= (arr_sorted[idx] - val)) {
+        --idx; // predecessor is closer (or tie)
     }
-    if ((val - arr_sorted[idx - 1]) <= (arr_sorted[idx] - val)) {
-        return idx - 1;
-    }
+
+    hint_idx = idx; // keep hint consistent for next call
     return idx;
 }
 
@@ -110,26 +107,29 @@ std::vector<SizeType> find_neighbouring_indices(
     std::span<const SizeType> indices, SizeType target_idx, SizeType num) {
 
     if (indices.empty()) {
-        throw std::invalid_argument("indices cannot be empty");
+        throw std::invalid_argument("find_neighbouring_indices: indices empty");
     }
     if (num == 0) {
-        throw std::invalid_argument("num must be greater than 0");
+        throw std::invalid_argument("find_neighbouring_indices: num == 0");
     }
 
     // Find the index of target_idx in indices
-    const auto target_it = std::ranges::lower_bound(indices, target_idx);
-    const auto target_idx_pos =
-        static_cast<SizeType>(std::distance(indices.begin(), target_it));
+    const auto it  = std::ranges::lower_bound(indices, target_idx);
+    const auto pos = static_cast<SizeType>(std::distance(indices.begin(), it));
 
     // Calculate the window around the target
-    auto left = (target_idx_pos > num / 2) ? target_idx_pos - (num / 2) : 0;
+    const auto half  = num / 2;
+    auto left        = (pos > half) ? pos - half : 0;
     const auto right = std::min(indices.size(), left + num);
-    // Adjust left if we're at the right edge
-    left = (right > num) ? right - num : 0;
+    if (right - left < num && right == indices.size()) {
+        left = right > num ? right - num : 0; // adjust when at right edge
+    }
 
-    // Return the slice of indices
-    return {indices.begin() + static_cast<int>(left),
-            indices.begin() + static_cast<int>(right)};
+    std::vector<SizeType> result;
+    result.reserve(right - left);
+    result.assign(indices.begin() + static_cast<IndexType>(left),
+                  indices.begin() + static_cast<IndexType>(right));
+    return result;
 }
 
 std::vector<double> linspace(double start,

@@ -1,6 +1,7 @@
 #include "loki/detection/score.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <numbers>
 #include <numeric>
@@ -103,7 +104,7 @@ public:
           m_nprofiles(nprofiles),
           m_nbins(nbins),
           m_shape(shape),
-          m_nbins_pow2(utils::next_power_of_two(m_nbins)),
+          m_nbins_pow2(std::bit_ceil(m_nbins)),
           m_ntemplates(widths_arr.size()),
           m_fft2d(utils::FFT2D(m_nprofiles, m_ntemplates, m_nbins_pow2)) {
         // Allocate memory for the templates

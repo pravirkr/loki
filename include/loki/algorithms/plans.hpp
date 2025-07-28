@@ -12,24 +12,26 @@ namespace loki::plans {
 
 // FFA Coordinate plan for a single param coordinate in a single iteration
 struct FFACoord {
-    SizeType i_tail;   // Tail coordinate index in the previous iteration
-    double shift_tail; // Shift in the tail coordinate
-    SizeType i_head;   // Head coordinate index in the previous iteration
-    double shift_head; // Shift in the head coordinate
+    uint32_t i_tail;  // Tail coordinate index in the previous iteration
+    float shift_tail; // Shift in the tail coordinate
+    uint32_t i_head;  // Head coordinate index in the previous iteration
+    float shift_head; // Shift in the head coordinate
 };
 
 struct FFAPlan {
+    SizeType n_params{};
+    SizeType n_levels{};
     std::vector<SizeType> segment_lens;
     std::vector<SizeType> nsegments;
     std::vector<double> tsegments;
     std::vector<SizeType> ncoords;
     std::vector<float> ncoords_lb;
     std::vector<std::vector<std::vector<double>>> params;
+    std::vector<std::vector<SizeType>> param_cart_strides;
     std::vector<std::vector<double>> dparams;
     std::vector<std::vector<double>> dparams_lim;
     std::vector<std::vector<SizeType>> fold_shapes;
     std::vector<std::vector<SizeType>> fold_shapes_complex;
-    std::vector<std::vector<FFACoord>> coordinates;
 
     FFAPlan() = delete;
     explicit FFAPlan(search::PulsarSearchConfig cfg);
@@ -39,9 +41,13 @@ struct FFAPlan {
     SizeType get_brute_fold_size() const noexcept;
     SizeType get_fold_size() const noexcept;
     SizeType get_fold_size_complex() const noexcept;
-    SizeType get_memory_usage() const noexcept;
+    float get_buffer_memory_usage() const noexcept;
+    float get_coord_memory_usage() const noexcept;
     // Get a dictionary of parameters for the last level of the plan
     std::map<std::string, std::vector<double>> get_params_dict() const;
+
+    void resolve_coordinates(std::span<std::vector<FFACoord>> coordinates);
+    std::vector<std::vector<FFACoord>> resolve_coordinates();
 
 private:
     search::PulsarSearchConfig m_cfg;

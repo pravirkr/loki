@@ -26,12 +26,13 @@ public:
     auto load(std::span<const FoldType> ffa_fold, SizeType seg_idx) const
         -> std::span<const FoldType>;
 
-    auto resolve(std::span<const double> batch_leaves,
+    void resolve(std::span<const double> batch_leaves,
                  std::pair<double, double> coord_add,
                  std::pair<double, double> coord_init,
+                 std::span<SizeType> param_idx_flat_batch,
+                 std::span<float> relative_phase_batch,
                  SizeType n_leaves,
-                 SizeType n_params) const
-        -> std::tuple<std::vector<SizeType>, std::vector<double>>;
+                 SizeType n_params) const;
 
     auto branch(std::span<const double> batch_psets,
                 std::pair<double, double> coord_cur,
@@ -54,7 +55,7 @@ public:
                         std::span<const SizeType> batch_isuggest,
                         std::span<const FoldType> ffa_fold_segment,
                         std::span<const SizeType> batch_param_idx,
-                        std::span<const double> batch_shift,
+                        std::span<const float> batch_phase_shift,
                         std::span<FoldType> batch_folds_out,
                         SizeType n_batch) noexcept;
 

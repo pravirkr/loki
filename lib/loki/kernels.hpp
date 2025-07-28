@@ -1,5 +1,6 @@
 #pragma once
 
+#include "loki/algorithms/plans.hpp"
 #include "loki/common/types.hpp"
 
 namespace loki::kernels {
@@ -16,9 +17,9 @@ namespace loki::kernels {
  * @param nbins  The number of bins in the input/output arrays.
  */
 void shift_add(const float* __restrict__ data_tail,
-               double phase_shift_tail,
+               float phase_shift_tail,
                const float* __restrict__ data_head,
-               double phase_shift_head,
+               float phase_shift_head,
                float* __restrict__ out,
                SizeType nbins) noexcept;
 
@@ -27,9 +28,9 @@ void shift_add(const float* __restrict__ data_tail,
  * size 2 * nbins.
  */
 void shift_add_buffer(const float* __restrict__ data_tail,
-                      double phase_shift_tail,
+                      float phase_shift_tail,
                       const float* __restrict__ data_head,
-                      double phase_shift_head,
+                      float phase_shift_head,
                       float* __restrict__ out,
                       float* __restrict__ temp_buffer,
                       SizeType nbins) noexcept;
@@ -51,9 +52,9 @@ void shift_add_buffer(const float* __restrict__ data_tail,
  * (time-domain)
  */
 void shift_add_complex_buffer(const ComplexType* __restrict__ data_tail,
-                              double phase_shift_tail,
+                              float phase_shift_tail,
                               const ComplexType* __restrict__ data_head,
-                              double phase_shift_head,
+                              float phase_shift_head,
                               ComplexType* __restrict__ out,
                               ComplexType* __restrict__ temp_buffer,
                               SizeType nbins_f,
@@ -69,9 +70,9 @@ void shift_add_complex_buffer(const ComplexType* __restrict__ data_tail,
  * architectures. The other versions are not vectorized.
  */
 void shift_add_complex_recurrence(const ComplexType* __restrict__ data_tail,
-                                  double phase_shift_tail,
+                                  float phase_shift_tail,
                                   const ComplexType* __restrict__ data_head,
-                                  double phase_shift_head,
+                                  float phase_shift_head,
                                   ComplexType* __restrict__ out,
                                   SizeType nbins_f,
                                   SizeType nbins) noexcept;
@@ -120,10 +121,48 @@ void shift_add_complex_recurrence_batch(
     const SizeType* __restrict__ idx_folds,
     const ComplexType* __restrict__ data_ffa,
     const SizeType* __restrict__ idx_ffa,
-    const double* __restrict__ shift_batch,
+    const float* __restrict__ shift_batch,
     ComplexType* __restrict__ out,
     SizeType nbins_f,
     SizeType nbins,
     SizeType nbatch) noexcept;
+
+void ffa_iter_segment(const float* __restrict__ fold_in,
+                      float* __restrict__ fold_out,
+                      const plans::FFACoord* __restrict__ coords_cur,
+                      SizeType nsegments,
+                      SizeType nbins,
+                      SizeType ncoords_cur,
+                      SizeType ncoords_prev,
+                      int nthreads);
+
+void ffa_iter_standard(const float* __restrict__ fold_in,
+                       float* __restrict__ fold_out,
+                       const plans::FFACoord* __restrict__ coords_cur,
+                       SizeType nsegments,
+                       SizeType nbins,
+                       SizeType ncoords_cur,
+                       SizeType ncoords_prev,
+                       int nthreads);
+
+void ffa_complex_iter_segment(const ComplexType* __restrict__ fold_in,
+                              ComplexType* __restrict__ fold_out,
+                              const plans::FFACoord* __restrict__ coords_cur,
+                              SizeType nsegments,
+                              SizeType nbins_f,
+                              SizeType nbins,
+                              SizeType ncoords_cur,
+                              SizeType ncoords_prev,
+                              int nthreads);
+
+void ffa_complex_iter_standard(const ComplexType* __restrict__ fold_in,
+                               ComplexType* __restrict__ fold_out,
+                               const plans::FFACoord* __restrict__ coords_cur,
+                               SizeType nsegments,
+                               SizeType nbins_f,
+                               SizeType nbins,
+                               SizeType ncoords_cur,
+                               SizeType ncoords_prev,
+                               int nthreads);
 
 } // namespace loki::kernels

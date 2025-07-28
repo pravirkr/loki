@@ -1,13 +1,11 @@
 #include "loki/algorithms/plans.hpp"
 
-#include <cstdint>
 #include <numeric>
 #include <ranges>
 #include <utility>
 
 #include <spdlog/spdlog.h>
 
-#include "loki/cartesian.hpp"
 #include "loki/common/types.hpp"
 #include "loki/core/taylor.hpp"
 #include "loki/exceptions.hpp"
@@ -54,7 +52,7 @@ SizeType FFAPlan::get_fold_size_complex() const noexcept {
                            std::multiplies<>());
 }
 
-SizeType FFAPlan::get_memory_usage() const noexcept {
+float FFAPlan::get_buffer_memory_usage() const noexcept {
     const auto internal_buffers = get_fold_size() >= get_buffer_size() ? 1 : 2;
     SizeType total_memory       = 0;
     if (m_cfg.get_use_fft_shifts()) {
@@ -65,8 +63,15 @@ SizeType FFAPlan::get_memory_usage() const noexcept {
         const auto float_buffer_size = get_buffer_size();
         total_memory += internal_buffers * float_buffer_size * sizeof(float);
     }
+    return static_cast<float>(total_memory) / static_cast<float>(1ULL << 30U);
+}
 
-    return total_memory;
+float FFAPlan::get_coord_memory_usage() const noexcept {
+    SizeType total_memory = 0;
+    for (SizeType i_level = 0; i_level < n_levels; ++i_level) {
+        total_memory += ncoords[i_level] * sizeof(FFACoord);
+    }
+    return static_cast<float>(total_memory) / static_cast<float>(1ULL << 30U);
 }
 
 std::map<std::string, std::vector<double>> FFAPlan::get_params_dict() const {
@@ -85,24 +90,26 @@ std::map<std::string, std::vector<double>> FFAPlan::get_params_dict() const {
 
 void FFAPlan::configure_plan() {
     const auto levels = m_cfg.get_niters_ffa() + 1;
+    n_params          = m_cfg.get_nparams();
+    n_levels          = levels;
     segment_lens.resize(levels);
     nsegments.resize(levels);
     tsegments.resize(levels);
     ncoords.resize(levels);
     ncoords_lb.resize(levels);
     params.resize(levels);
+    param_cart_strides.resize(levels);
     dparams.resize(levels);
     dparams_lim.resize(levels);
     fold_shapes.resize(levels);
     fold_shapes_complex.resize(levels);
-    coordinates.resize(levels);
 
     for (SizeType i_level = 0; i_level < levels; ++i_level) {
         const auto segment_len = m_cfg.get_bseg_brute() * (1U << i_level);
         const auto tsegment =
             static_cast<double>(segment_len) * m_cfg.get_tsamp();
-        const auto nsegments_cur = m_cfg.get_nsamps() / segment_len;
-        const auto dparam_arr    = m_cfg.get_dparams(tsegment);
+        const auto nsegments_cur  = m_cfg.get_nsamps() / segment_len;
+        const auto dparam_arr     = m_cfg.get_dparams(tsegment);
         const auto dparam_arr_lim = m_cfg.get_dparams_lim(tsegment);
 
         segment_lens[i_level] = segment_len;
@@ -110,13 +117,13 @@ void FFAPlan::configure_plan() {
         tsegments[i_level]    = tsegment;
         dparams[i_level]      = dparam_arr;
         dparams_lim[i_level]  = dparam_arr_lim;
-        params[i_level].resize(m_cfg.get_nparams());
-        fold_shapes[i_level].resize(m_cfg.get_nparams() + 3);
-        fold_shapes_complex[i_level].resize(m_cfg.get_nparams() + 3);
+        params[i_level].resize(n_params);
+        fold_shapes[i_level].resize(n_params + 3);
+        fold_shapes_complex[i_level].resize(n_params + 3);
 
         fold_shapes[i_level][0]         = nsegments_cur;
         fold_shapes_complex[i_level][0] = nsegments_cur;
-        for (SizeType iparam = 0; iparam < m_cfg.get_nparams(); ++iparam) {
+        for (SizeType iparam = 0; iparam < n_params; ++iparam) {
             const auto param_arr = psr_utils::range_param(
                 m_cfg.get_param_limits()[iparam][0],
                 m_cfg.get_param_limits()[iparam][1], dparam_arr[iparam]);
@@ -124,72 +131,30 @@ void FFAPlan::configure_plan() {
             fold_shapes[i_level][iparam + 1]         = param_arr.size();
             fold_shapes_complex[i_level][iparam + 1] = param_arr.size();
         }
-        fold_shapes[i_level][m_cfg.get_nparams() + 1]         = 2;
-        fold_shapes_complex[i_level][m_cfg.get_nparams() + 1] = 2;
-        fold_shapes[i_level][m_cfg.get_nparams() + 2] = m_cfg.get_nbins();
-        fold_shapes_complex[i_level][m_cfg.get_nparams() + 2] =
-            m_cfg.get_nbins_f();
+        param_cart_strides[i_level]        = calculate_strides(params[i_level]);
+        fold_shapes[i_level][n_params + 1] = 2;
+        fold_shapes_complex[i_level][n_params + 1] = 2;
+        fold_shapes[i_level][n_params + 2]         = m_cfg.get_nbins();
+        fold_shapes_complex[i_level][n_params + 2] = m_cfg.get_nbins_f();
+        ncoords[i_level] =
+            std::accumulate(params[i_level].begin(), params[i_level].end(), 1UL,
+                            [](SizeType acc, const auto& param_vec) {
+                                return acc * param_vec.size();
+                            });
+        ncoords_lb[i_level] =
+            ncoords[i_level] > 0
+                ? std::log2(static_cast<float>(ncoords[i_level]))
+                : 0.0F;
     }
     // Check param arr lengths for the initialization
-    if (m_cfg.get_nparams() > 1) {
-        for (SizeType iparam = 0; iparam < m_cfg.get_nparams() - 1; ++iparam) {
+    if (n_params > 1) {
+        for (SizeType iparam = 0; iparam < n_params - 1; ++iparam) {
             if (params[0][iparam].size() != 1) {
                 throw std::runtime_error(
                     "Only one parameter for higher order derivatives is "
                     "supported for the initialization");
             }
         }
-    }
-    // Now resolve the params for the FFA plan
-    // First do level 0 (important for book-keeping, ncoords_prev!)
-    std::vector<double> p_set_cur(m_cfg.get_nparams());
-    for (const auto& p_set_view : utils::cartesian_product_view(params[0])) {
-        for (SizeType iparam = 0; iparam < m_cfg.get_nparams(); ++iparam) {
-            p_set_cur[iparam] = p_set_view[iparam];
-        }
-        const auto coord_cur = FFACoord{.i_tail     = SIZE_MAX,
-                                        .shift_tail = 0,
-                                        .i_head     = SIZE_MAX,
-                                        .shift_head = 0};
-        coordinates[0].emplace_back(coord_cur);
-    }
-    ncoords[0] = coordinates[0].size();
-    ncoords_lb[0] =
-        ncoords[0] > 0 ? std::log2(static_cast<float>(ncoords[0])) : 0.0F;
-
-    for (SizeType i_level = 1; i_level < levels; ++i_level) {
-        const auto strides = calculate_strides(params[i_level - 1]);
-        for (const auto& p_set_view :
-             utils::cartesian_product_view(params[i_level])) {
-            for (SizeType iparam = 0; iparam < m_cfg.get_nparams(); ++iparam) {
-                p_set_cur[iparam] = p_set_view[iparam];
-            }
-            const auto [p_idx_tail, phase_shift_tail] =
-                core::ffa_taylor_resolve(p_set_cur, params[i_level - 1],
-                                         i_level, 0, m_cfg.get_tseg_brute(),
-                                         m_cfg.get_nbins());
-            const auto [p_idx_head, phase_shift_head] =
-                core::ffa_taylor_resolve(p_set_cur, params[i_level - 1],
-                                         i_level, 1, m_cfg.get_tseg_brute(),
-                                         m_cfg.get_nbins());
-            const auto i_tail =
-                std::inner_product(p_idx_tail.begin(), p_idx_tail.end(),
-                                   strides.begin(), SizeType{0});
-            const auto i_head =
-                std::inner_product(p_idx_head.begin(), p_idx_head.end(),
-                                   strides.begin(), SizeType{0});
-
-            const auto coord_cur = FFACoord{.i_tail     = i_tail,
-                                            .shift_tail = phase_shift_tail,
-                                            .i_head     = i_head,
-                                            .shift_head = phase_shift_head};
-            coordinates[i_level].emplace_back(coord_cur);
-        }
-        ncoords[i_level] = coordinates[i_level].size();
-        ncoords_lb[i_level] =
-            ncoords[i_level] > 0
-                ? std::log2(static_cast<float>(ncoords[i_level]))
-                : 0.0F;
     }
 }
 
@@ -224,6 +189,70 @@ FFAPlan::calculate_strides(std::span<const std::vector<double>> p_arr) {
         strides[i] = strides[i + 1] * p_arr[i + 1].size();
     }
     return strides;
+}
+
+void FFAPlan::resolve_coordinates(
+    std::span<std::vector<FFACoord>> coordinates) {
+    // Resolve the params for the FFA plan
+    std::vector<double> p_set_cur(n_params);
+    const auto ncoords_max = std::ranges::max(ncoords);
+    std::vector<float> relative_phase_batch(ncoords_max);
+    std::vector<uint32_t> pindex_prev_flat(ncoords_max);
+    for (SizeType i_level = 1; i_level < n_levels; ++i_level) {
+        const auto ncoords_cur = ncoords[i_level];
+        auto& coords_cur       = coordinates[i_level];
+        error_check::check_greater_equal(coords_cur.size(), ncoords_cur,
+                                         "FFAPlan::resolve_coordinates: "
+                                         "coords_cur must have size >= "
+                                         "ncoords_cur");
+        auto relative_phase_batch_span =
+            std::span(relative_phase_batch).first(ncoords_cur);
+        auto pindex_prev_flat_span =
+            std::span(pindex_prev_flat).first(ncoords_cur);
+        if (n_params == 1) {
+            core::ffa_taylor_resolve_batch_freq(
+                params[i_level], params[i_level - 1], pindex_prev_flat_span,
+                relative_phase_batch_span, i_level, 0, tsegments[i_level],
+                m_cfg.get_nbins());
+        } else {
+            core::ffa_taylor_resolve_batch(
+                params[i_level], params[i_level - 1],
+                param_cart_strides[i_level], param_cart_strides[i_level - 1],
+                pindex_prev_flat_span, relative_phase_batch_span, i_level, 0,
+                tsegments[i_level], m_cfg.get_nbins(), m_cfg.get_nthreads());
+        }
+        // Generate coordinates for the tail
+        for (SizeType coord_idx = 0; coord_idx < ncoords_cur; ++coord_idx) {
+            coords_cur[coord_idx].i_tail     = pindex_prev_flat[coord_idx];
+            coords_cur[coord_idx].shift_tail = relative_phase_batch[coord_idx];
+        }
+        if (n_params == 1) {
+            core::ffa_taylor_resolve_batch_freq(
+                params[i_level], params[i_level - 1], pindex_prev_flat_span,
+                relative_phase_batch_span, i_level, 1, tsegments[i_level],
+                m_cfg.get_nbins());
+        } else {
+            core::ffa_taylor_resolve_batch(
+                params[i_level], params[i_level - 1],
+                param_cart_strides[i_level], param_cart_strides[i_level - 1],
+                pindex_prev_flat_span, relative_phase_batch_span, i_level, 1,
+                tsegments[i_level], m_cfg.get_nbins(), m_cfg.get_nthreads());
+        }
+        // Generate coordinates for the head
+        for (SizeType coord_idx = 0; coord_idx < ncoords_cur; ++coord_idx) {
+            coords_cur[coord_idx].i_head     = pindex_prev_flat[coord_idx];
+            coords_cur[coord_idx].shift_head = relative_phase_batch[coord_idx];
+        }
+    }
+}
+
+std::vector<std::vector<FFACoord>> FFAPlan::resolve_coordinates() {
+    std::vector<std::vector<FFACoord>> coordinates(n_levels);
+    for (SizeType i_level = 0; i_level < n_levels; ++i_level) {
+        coordinates[i_level].resize(ncoords[i_level]);
+    }
+    resolve_coordinates(std::span(coordinates));
+    return coordinates;
 }
 
 } // namespace loki::plans

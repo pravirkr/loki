@@ -288,6 +288,8 @@ template <typename FoldType> struct PruningWorkspace {
     std::vector<double> batch_leaves;
     std::vector<FoldType> batch_folds;
     std::vector<float> batch_scores;
+    std::vector<SizeType> batch_param_idx;
+    std::vector<float> batch_phase_shift;
     std::vector<SizeType> batch_isuggest;
     std::vector<SizeType> batch_passing_indices;
 
@@ -300,6 +302,8 @@ template <typename FoldType> struct PruningWorkspace {
           batch_leaves(max_batch_size * leaves_stride),
           batch_folds(max_batch_size * folds_stride),
           batch_scores(max_batch_size),
+          batch_param_idx(max_batch_size),
+          batch_phase_shift(max_batch_size),
           batch_isuggest(max_batch_size),
           batch_passing_indices(max_batch_size) {}
 
@@ -325,6 +329,8 @@ template <typename FoldType> struct PruningWorkspace {
         return (batch_leaves.size() * sizeof(double)) +
                (batch_folds.size() * sizeof(FoldType)) +
                (batch_scores.size() * sizeof(float)) +
+               (batch_param_idx.size() * sizeof(SizeType)) +
+               (batch_phase_shift.size() * sizeof(float)) +
                (batch_isuggest.size() * sizeof(SizeType)) +
                (batch_passing_indices.size() * sizeof(SizeType));
     }
@@ -357,7 +363,7 @@ public:
         }
 
         // Allocate iteration workspace
-        const auto branch_max = m_prune_funcs->get_branch_max();
+        const auto branch_max     = m_prune_funcs->get_branch_max();
         const auto max_batch_size = m_batch_size * branch_max;
         if constexpr (std::is_same_v<FoldType, ComplexType>) {
             m_pruning_workspace = std::make_unique<PruningWorkspace<FoldType>>(
@@ -634,10 +640,16 @@ private:
 
             // Resolve
             timer.start();
-            const auto [batch_param_idx, batch_phase_shift] =
-                m_prune_funcs->resolve(m_pruning_workspace->batch_leaves,
-                                       coord_add, coord_init,
-                                       n_leaves_after_validation, n_params);
+            auto batch_param_idx_span =
+                std::span(m_pruning_workspace->batch_param_idx)
+                    .first(n_leaves_after_validation);
+            auto batch_phase_shift_span =
+                std::span(m_pruning_workspace->batch_phase_shift)
+                    .first(n_leaves_after_validation);
+            m_prune_funcs->resolve(m_pruning_workspace->batch_leaves, coord_add,
+                                   coord_init, batch_param_idx_span,
+                                   batch_phase_shift_span,
+                                   n_leaves_after_validation, n_params);
             stats.batch_timers["resolve"] += timer.stop();
 
             // Load, shift, add (Map batch_leaf_origins to global indices)
@@ -650,7 +662,7 @@ private:
             }
             m_prune_funcs->load_shift_add(
                 m_suggestions->get_folds(), batch_isuggest_span,
-                ffa_fold_segment, batch_param_idx, batch_phase_shift,
+                ffa_fold_segment, batch_param_idx_span, batch_phase_shift_span,
                 m_pruning_workspace->batch_folds, n_leaves_after_validation);
             stats.batch_timers["shift_add"] += timer.stop();
 

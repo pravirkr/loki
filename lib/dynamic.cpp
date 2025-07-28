@@ -63,21 +63,23 @@ auto PruneTaylorDPFuncts<FoldType>::load(std::span<const FoldType> ffa_fold,
 }
 
 template <typename FoldType>
-auto PruneTaylorDPFuncts<FoldType>::resolve(
+void PruneTaylorDPFuncts<FoldType>::resolve(
     std::span<const double> batch_leaves,
     std::pair<double, double> coord_add,
     std::pair<double, double> coord_init,
+    std::span<SizeType> param_idx_flat_batch,
+    std::span<float> relative_phase_batch,
     SizeType n_leaves,
-    SizeType n_params) const
-    -> std::tuple<std::vector<SizeType>, std::vector<double>> {
+    SizeType n_params) const {
     if (m_cfg.get_prune_poly_order() == 4) {
-        return poly_taylor_resolve_snap_batch(
-            batch_leaves, coord_add, coord_init, m_param_arr, m_cfg.get_nbins(),
-            n_leaves, n_params);
+        poly_taylor_resolve_snap_batch(batch_leaves, coord_add, coord_init,
+                                       m_param_arr, param_idx_flat_batch,
+                                       relative_phase_batch, m_cfg.get_nbins(),
+                                       n_leaves, n_params);
     }
-    return poly_taylor_resolve_batch(batch_leaves, coord_add, coord_init,
-                                     m_param_arr, m_cfg.get_nbins(), n_leaves,
-                                     n_params);
+    poly_taylor_resolve_batch(batch_leaves, coord_add, coord_init, m_param_arr,
+                              param_idx_flat_batch, relative_phase_batch,
+                              m_cfg.get_nbins(), n_leaves, n_params);
 }
 
 template <typename FoldType>
@@ -152,21 +154,21 @@ void PruneTaylorDPFuncts<FoldType>::load_shift_add(
     std::span<const SizeType> batch_isuggest,
     std::span<const FoldType> ffa_fold_segment,
     std::span<const SizeType> batch_param_idx,
-    std::span<const double> batch_shift,
+    std::span<const float> batch_phase_shift,
     std::span<FoldType> batch_folds_out,
     SizeType n_batch) noexcept {
     if constexpr (std::is_same_v<FoldType, ComplexType>) {
         kernels::shift_add_complex_recurrence_batch(
             batch_folds_suggest.data(), batch_isuggest.data(),
-            ffa_fold_segment.data(), batch_param_idx.data(), batch_shift.data(),
+            ffa_fold_segment.data(), batch_param_idx.data(), batch_phase_shift.data(),
             batch_folds_out.data(), m_cfg.get_nbins_f(), m_cfg.get_nbins(),
             n_batch);
     } else {
         // Float version: round shifts to integers properly wrapped
-        std::vector<SizeType> batch_shift_rounded(batch_shift.size());
+        std::vector<SizeType> batch_shift_rounded(batch_phase_shift.size());
         std::transform(
-            batch_shift.begin(), batch_shift.end(), batch_shift_rounded.begin(),
-            [nbins = m_cfg.get_nbins()](double shift) {
+            batch_phase_shift.begin(), batch_phase_shift.end(), batch_shift_rounded.begin(),
+            [nbins = m_cfg.get_nbins()](float shift) {
                 auto rounded = static_cast<SizeType>(std::round(shift));
                 // Handle wrapping: if rounded equals nbins, wrap to 0
                 if (rounded == nbins) {

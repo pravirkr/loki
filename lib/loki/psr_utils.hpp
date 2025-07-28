@@ -16,8 +16,10 @@
 namespace loki::psr_utils {
 
 // Calculate the phase index of the proper time in the folded profile.
-double
-get_phase_idx(double proper_time, double freq, SizeType nbins, double delay);
+float get_phase_idx(double proper_time,
+                    double freq,
+                    SizeType nbins,
+                    double delay);
 
 // Calculate the rounded integer phase index of the proper time.
 SizeType get_phase_idx_int(double proper_time,
@@ -74,6 +76,9 @@ void poly_taylor_shift_d_vec(std::span<const double> dparam_old,
                              std::span<double> shift_bins_batch,
                              SizeType nbatch,
                              SizeType nparams);
+
+std::vector<std::vector<double>> precompute_shift_matrix(SizeType nparams,
+                                                         double delta_t);
 
 // Shift the kinematical parameters to a new reference time.
 std::vector<double> shift_params_d(std::span<const double> param_vec,
