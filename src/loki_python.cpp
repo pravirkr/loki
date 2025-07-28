@@ -267,8 +267,7 @@ PYBIND11_MODULE(libloki, m) {
              py::arg("prune_poly_order") = 3, py::arg("prune_n_derivs") = 3,
              py::arg("bseg_brute")     = std::nullopt,
              py::arg("bseg_ffa")       = std::nullopt,
-             py::arg("use_fft_shifts") = true,
-             py::arg("nthreads") = 1)
+             py::arg("use_fft_shifts") = true, py::arg("nthreads") = 1)
         .def_property_readonly("nsamps", &PulsarSearchConfig::get_nsamps)
         .def_property_readonly("tsamp", &PulsarSearchConfig::get_tsamp)
         .def_property_readonly("nbins", &PulsarSearchConfig::get_nbins)
@@ -313,6 +312,7 @@ PYBIND11_MODULE(libloki, m) {
     PYBIND11_NUMPY_DTYPE(plans::FFACoord, i_tail, shift_tail, i_head,
                          shift_head);
     py::class_<FFAPlan>(m_ffa, "FFAPlan")
+        .def(py::init<PulsarSearchConfig>(), py::arg("cfg"))
         .def_property_readonly("segment_lens",
                                [](const FFAPlan& self) {
                                    return as_pyarray_ref(self.segment_lens);
@@ -449,6 +449,38 @@ PYBIND11_MODULE(libloki, m) {
         py::arg("delta_t"), py::arg("period"), py::arg("nbins"),
         py::arg("delay"));
     m_psr_utils.def(
+        "shift_params_batch",
+        [](const PyArrayT<double>& pset_batch, double delta_t) {
+            const SizeType nbatch  = pset_batch.shape(0);
+            const SizeType nparams = pset_batch.shape(1) - 2;
+            const SizeType param_vec_stride =
+                pset_batch.shape(1) * pset_batch.shape(2);
+            std::vector<double> kvec_new_batch(nbatch * nparams);
+            std::vector<double> delay_batch(nbatch);
+            psr_utils::shift_params_batch(
+                to_span<const double>(pset_batch), delta_t, nbatch, nparams,
+                param_vec_stride, kvec_new_batch, delay_batch);
+            return std::make_tuple(as_pyarray_ref(kvec_new_batch),
+                                   as_pyarray_ref(delay_batch));
+        },
+        py::arg("pset_batch"), py::arg("delta_t"));
+    m_psr_utils.def(
+        "shift_params_circular_batch",
+        [](const PyArrayT<double>& pset_batch, double delta_t) {
+            const SizeType nbatch  = pset_batch.shape(0);
+            const SizeType nparams = 4;
+            const SizeType param_vec_stride =
+                pset_batch.shape(1) * pset_batch.shape(2);
+            std::vector<double> kvec_new_batch(nbatch * nparams);
+            std::vector<double> delay_batch(nbatch);
+            psr_utils::shift_params_circular_batch(
+                to_span<const double>(pset_batch), delta_t, nbatch, nparams,
+                param_vec_stride, kvec_new_batch, delay_batch);
+            return std::make_tuple(as_pyarray_ref(kvec_new_batch),
+                                   as_pyarray_ref(delay_batch));
+        },
+        py::arg("pset_batch"), py::arg("delta_t"));
+    m_psr_utils.def(
         "ffa_taylor_resolve",
         [](const PyArrayT<double>& pset_cur,
            const std::vector<PyArrayT<double>>& param_arr, SizeType ffa_level,
@@ -458,15 +490,57 @@ PYBIND11_MODULE(libloki, m) {
             for (const auto& arr : param_arr) {
                 param_vecs.emplace_back(arr.data(), arr.data() + arr.size());
             }
-            std::span<const std::vector<double>> param_span(param_vecs);
-
             auto [pindex_prev, relative_phase] = core::ffa_taylor_resolve(
-                to_span<const double>(pset_cur), param_span, ffa_level, latter,
+                to_span<const double>(pset_cur), param_vecs, ffa_level, latter,
                 tseg_brute, nbins);
             return std::make_tuple(as_pyarray_ref(pindex_prev), relative_phase);
         },
         py::arg("pset_cur"), py::arg("param_arr"), py::arg("ffa_level"),
         py::arg("latter"), py::arg("tseg_brute"), py::arg("nbins"));
+    m_psr_utils.def(
+        "poly_taylor_resolve_batch",
+        [](const PyArrayT<double>& pset_batch,
+           std::pair<double, double> coord_add,
+           std::pair<double, double> coord_init,
+           const std::vector<PyArrayT<double>>& param_arr, SizeType fold_bins) {
+            const SizeType nbatch  = pset_batch.shape(0);
+            const SizeType nparams = pset_batch.shape(1) - 2;
+            std::vector<std::vector<double>> param_vecs;
+            param_vecs.reserve(param_arr.size());
+            for (const auto& arr : param_arr) {
+                param_vecs.emplace_back(arr.data(), arr.data() + arr.size());
+            }
+            auto [pindex_prev, relative_phase] =
+                core::poly_taylor_resolve_batch(
+                    to_span<const double>(pset_batch), coord_add, coord_init,
+                    param_vecs, fold_bins, nbatch, nparams);
+            return std::make_tuple(as_pyarray_ref(pindex_prev),
+                                   as_pyarray_ref(relative_phase));
+        },
+        py::arg("pset_batch"), py::arg("coord_add"), py::arg("coord_init"),
+        py::arg("param_arr"), py::arg("fold_bins"));
+    m_psr_utils.def(
+        "poly_taylor_resolve_snap_batch",
+        [](const PyArrayT<double>& pset_batch,
+           std::pair<double, double> coord_add,
+           std::pair<double, double> coord_init,
+           const std::vector<PyArrayT<double>>& param_arr, SizeType fold_bins) {
+            const SizeType nbatch  = pset_batch.shape(0);
+            const SizeType nparams = pset_batch.shape(1) - 2;
+            std::vector<std::vector<double>> param_vecs;
+            param_vecs.reserve(param_arr.size());
+            for (const auto& arr : param_arr) {
+                param_vecs.emplace_back(arr.data(), arr.data() + arr.size());
+            }
+            auto [pindex_prev, relative_phase] =
+                core::poly_taylor_resolve_snap_batch(
+                    to_span<const double>(pset_batch), coord_add, coord_init,
+                    param_vecs, fold_bins, nbatch, nparams);
+            return std::make_tuple(as_pyarray_ref(pindex_prev),
+                                   as_pyarray_ref(relative_phase));
+        },
+        py::arg("pset_batch"), py::arg("coord_add"), py::arg("coord_init"),
+        py::arg("param_arr"), py::arg("fold_bins"));
 
     auto m_prune = m.def_submodule("prune", "Pruning submodule");
 
