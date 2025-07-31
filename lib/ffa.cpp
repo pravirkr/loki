@@ -231,7 +231,7 @@ public:
             m_cfg.get_nparams() == 1 ? 0.0 : m_ffa_plan.tsegments[0] / 2.0;
         const auto freqs_arr = m_ffa_plan.params[0].back();
 
-        m_the_bf = std::make_unique<algorithms::BruteFold>(
+        m_the_bf = std::make_unique<algorithms::BruteFoldComplex>(
             freqs_arr, m_ffa_plan.segment_lens[0], m_cfg.get_nbins(),
             m_cfg.get_nsamps(), m_cfg.get_tsamp(), t_ref, m_nthreads);
 
@@ -323,7 +323,7 @@ private:
     plans::FFAPlan m_ffa_plan;
     int m_nthreads;
     bool m_use_single_buffer;
-    std::unique_ptr<algorithms::BruteFold> m_the_bf;
+    std::unique_ptr<algorithms::BruteFoldComplex> m_the_bf;
 
     // Buffers for the FFA plan
     std::vector<ComplexType> m_fold_in;
@@ -332,28 +332,16 @@ private:
 
     void initialize(std::span<const float> ts_e,
                     std::span<const float> ts_v,
-                    ComplexType* init_buffer,
-                    ComplexType* temp_buffer) {
+                    ComplexType* init_buffer) {
         timing::ScopeTimer timer("FFACOMPLEX::initialize");
-        // Use temp_buffer for the initial real-valued brute fold output
-        auto real_temp_view =
-            std::span<float>(reinterpret_cast<float*>(temp_buffer),
-                             m_ffa_plan.get_brute_fold_size());
-        m_the_bf->execute(ts_e, ts_v, real_temp_view);
-
-        // Out-of-place RFFT from temp_buffer (real) to init_buffer (complex)
-        const auto nfft         = m_the_bf->get_fold_size() / m_cfg.get_nbins();
-        const auto complex_size = nfft * ((m_cfg.get_nbins() / 2) + 1);
-        utils::rfft_batch(real_temp_view,
-                          std::span<ComplexType>(init_buffer, complex_size),
-                          static_cast<int>(nfft),
-                          static_cast<int>(m_cfg.get_nbins()), m_nthreads);
+        m_the_bf->execute(ts_e, ts_v,
+                          std::span(init_buffer, m_the_bf->get_fold_size()));
     }
 
     void execute_double_buffer(std::span<const float> ts_e,
                                std::span<const float> ts_v,
                                std::span<ComplexType> fold_complex) {
-        initialize(ts_e, ts_v, m_fold_in.data(), m_fold_out.data());
+        initialize(ts_e, ts_v, m_fold_in.data());
 
         ComplexType* fold_in_ptr     = m_fold_in.data();
         ComplexType* fold_out_ptr    = m_fold_out.data();
@@ -386,7 +374,7 @@ private:
     // This is used for the IRFFT.
     ComplexType* execute_double_buffer(std::span<const float> ts_e,
                                        std::span<const float> ts_v) {
-        initialize(ts_e, ts_v, m_fold_in.data(), m_fold_out.data());
+        initialize(ts_e, ts_v, m_fold_in.data());
 
         ComplexType* fold_in_ptr  = m_fold_in.data();
         ComplexType* fold_out_ptr = m_fold_out.data();
@@ -439,7 +427,7 @@ private:
         }
 
         // Initialize the current buffer
-        initialize(ts_e, ts_v, current_in_ptr, current_out_ptr);
+        initialize(ts_e, ts_v, current_in_ptr);
 
         progress::ProgressGuard progress_guard(m_show_progress);
         auto bar = progress::make_ffa_bar("Computing FFA", levels - 1);
@@ -520,7 +508,9 @@ std::tuple<std::vector<float>, plans::FFAPlan>
 compute_ffa(std::span<const float> ts_e,
             std::span<const float> ts_v,
             const search::PulsarSearchConfig& cfg,
+            bool quiet,
             bool show_progress) {
+    timing::ScopedLogLevel scoped_log_level(quiet);
     FFA ffa(cfg, show_progress);
     const auto& ffa_plan = ffa.get_plan();
     std::vector<float> fold(ffa_plan.get_fold_size(), 0.0F);
@@ -532,7 +522,9 @@ std::tuple<std::vector<float>, plans::FFAPlan>
 compute_ffa_complex(std::span<const float> ts_e,
                     std::span<const float> ts_v,
                     const search::PulsarSearchConfig& cfg,
+                    bool quiet,
                     bool show_progress) {
+    timing::ScopedLogLevel scoped_log_level(quiet);
     FFACOMPLEX ffa(cfg, show_progress);
     const auto& ffa_plan = ffa.get_plan();
     std::vector<float> fold(2 * ffa_plan.get_fold_size_complex(), 0.0F);
@@ -546,10 +538,12 @@ std::tuple<std::vector<float>, plans::FFAPlan>
 compute_ffa_scores(std::span<const float> ts_e,
                    std::span<const float> ts_v,
                    const search::PulsarSearchConfig& cfg,
+                   bool quiet,
                    bool show_progress) {
+    timing::ScopedLogLevel scoped_log_level(quiet);
     const auto [fold, ffa_plan] =
         cfg.get_use_fft_shifts()
-            ? compute_ffa_complex(ts_e, ts_v, cfg, show_progress)
+            ? compute_ffa_complex(ts_e, ts_v, cfg, quiet, show_progress)
             : compute_ffa(ts_e, ts_v, cfg, show_progress);
     const auto nsegments    = ffa_plan.nsegments.back();
     const auto n_param_sets = ffa_plan.ncoords.back();

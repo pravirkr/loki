@@ -4,6 +4,8 @@
 #include <complex>
 #include <cstddef>
 #include <type_traits>
+#include <vector>
+#include <xsimd/xsimd.hpp>
 
 #ifdef LOKI_ENABLE_CUDA
 #include <cuda/std/complex>
@@ -18,6 +20,8 @@ using SizeType       = std::size_t;
 using IndexType      = std::ptrdiff_t;
 using ComplexType    = std::complex<float>;
 using ParamLimitType = std::array<double, 2>;
+
+using AlignedFloatVec = std::vector<float, xsimd::aligned_allocator<float>>;
 
 template <typename T>
 concept SupportedFoldType =

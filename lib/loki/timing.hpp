@@ -59,4 +59,30 @@ public:
     }
 };
 
+// ScopedLogLevel class to temporarily set the log level
+class ScopedLogLevel {
+public:
+    explicit ScopedLogLevel(bool quiet)
+        : m_old_level(spdlog::get_level()),
+          m_quiet(quiet) {
+        if (m_quiet) {
+            spdlog::set_level(spdlog::level::err);
+        }
+    }
+    ~ScopedLogLevel() {
+        if (m_quiet) {
+            spdlog::set_level(m_old_level);
+        }
+    }
+
+    ScopedLogLevel(const ScopedLogLevel&)            = delete;
+    ScopedLogLevel& operator=(const ScopedLogLevel&) = delete;
+    ScopedLogLevel(ScopedLogLevel&&)                 = delete;
+    ScopedLogLevel& operator=(ScopedLogLevel&&)      = delete;
+
+private:
+    spdlog::level::level_enum m_old_level;
+    bool m_quiet;
+};
+
 } // namespace loki::timing

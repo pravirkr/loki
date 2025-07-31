@@ -65,20 +65,23 @@ std::tuple<std::vector<float>, plans::FFAPlan>
 compute_ffa(std::span<const float> ts_e,
             std::span<const float> ts_v,
             const search::PulsarSearchConfig& cfg,
-            bool show_progress = true);
+            bool quiet = false,
+            bool show_progress = false);
 
 // Convenience function to fold time series using FFA method with Fourier shifts
 std::tuple<std::vector<float>, plans::FFAPlan>
 compute_ffa_complex(std::span<const float> ts_e,
                     std::span<const float> ts_v,
                     const search::PulsarSearchConfig& cfg,
-                    bool show_progress = true);
+                    bool quiet = false,
+                    bool show_progress = false);
 
 std::tuple<std::vector<float>, plans::FFAPlan>
 compute_ffa_scores(std::span<const float> ts_e,
                    std::span<const float> ts_v,
                    const search::PulsarSearchConfig& cfg,
-                   bool show_progress = true);
+                   bool quiet = false,
+                   bool show_progress = false);
 
 #ifdef LOKI_ENABLE_CUDA
 

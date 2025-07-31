@@ -212,14 +212,15 @@ void FFAPlan::resolve_coordinates(
         if (n_params == 1) {
             core::ffa_taylor_resolve_batch_freq(
                 params[i_level], params[i_level - 1], pindex_prev_flat_span,
-                relative_phase_batch_span, i_level, 0, tsegments[i_level],
+                relative_phase_batch_span, i_level, 0, m_cfg.get_tseg_brute(),
                 m_cfg.get_nbins());
         } else {
             core::ffa_taylor_resolve_batch(
                 params[i_level], params[i_level - 1],
                 param_cart_strides[i_level], param_cart_strides[i_level - 1],
                 pindex_prev_flat_span, relative_phase_batch_span, i_level, 0,
-                tsegments[i_level], m_cfg.get_nbins(), m_cfg.get_nthreads());
+                m_cfg.get_tseg_brute(), m_cfg.get_nbins(),
+                m_cfg.get_nthreads());
         }
         // Generate coordinates for the tail
         for (SizeType coord_idx = 0; coord_idx < ncoords_cur; ++coord_idx) {
@@ -229,14 +230,15 @@ void FFAPlan::resolve_coordinates(
         if (n_params == 1) {
             core::ffa_taylor_resolve_batch_freq(
                 params[i_level], params[i_level - 1], pindex_prev_flat_span,
-                relative_phase_batch_span, i_level, 1, tsegments[i_level],
+                relative_phase_batch_span, i_level, 1, m_cfg.get_tseg_brute(),
                 m_cfg.get_nbins());
         } else {
             core::ffa_taylor_resolve_batch(
                 params[i_level], params[i_level - 1],
                 param_cart_strides[i_level], param_cart_strides[i_level - 1],
                 pindex_prev_flat_span, relative_phase_batch_span, i_level, 1,
-                tsegments[i_level], m_cfg.get_nbins(), m_cfg.get_nthreads());
+                m_cfg.get_tseg_brute(), m_cfg.get_nbins(),
+                m_cfg.get_nthreads());
         }
         // Generate coordinates for the head
         for (SizeType coord_idx = 0; coord_idx < ncoords_cur; ++coord_idx) {
