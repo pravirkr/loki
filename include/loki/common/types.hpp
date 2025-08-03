@@ -39,7 +39,7 @@ template <SupportedFoldType FoldType> constexpr FoldType default_fold_value() {
 using ComplexTypeCUDA = cuda::std::complex<float>;
 #endif // LOKI_ENABLE_CUDA
 
-inline constexpr size_t kUnrollFactor = 4;
+inline constexpr size_t kUnrollFactor = 8;
 
 #if defined(__clang__)
 #define UNROLL_VECTORIZE                                                       \

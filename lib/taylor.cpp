@@ -54,7 +54,6 @@ void ffa_taylor_resolve_batch_freq(
     std::span<uint32_t> pindex_prev_flat_batch,
     std::span<float> relative_phase_batch,
     SizeType ffa_level,
-    SizeType latter,
     double tseg_brute,
     SizeType nbins) {
     const auto nparams = param_arr_prev.size();
@@ -64,54 +63,45 @@ void ffa_taylor_resolve_batch_freq(
     error_check::check_equal(nparams, 1U,
                              "nparams should be 1 for frequency resolve");
     const auto& freq_arr = param_arr_cur[0];
-    const auto nfreqs    = freq_arr.size();
-    error_check::check_equal(nfreqs, pindex_prev_flat_batch.size(),
+    const auto n_freq    = freq_arr.size();
+    error_check::check_equal(n_freq, pindex_prev_flat_batch.size(),
                              "pindex_prev_flat size mismatch");
-    error_check::check_equal(nfreqs, relative_phase_batch.size(),
+    error_check::check_equal(n_freq, relative_phase_batch.size(),
                              "relative_phase_batch size mismatch");
 
-    const auto tsegment = std::pow(2.0, ffa_level - 1) * tseg_brute;
-    const auto delta_t  = static_cast<double>(latter) * tsegment;
+    const auto delta_t = std::pow(2.0, ffa_level - 1) * tseg_brute;
 
     // Calculate relative phases and flattened parameter indices
-    SizeType hint_idx = 0;
-    for (SizeType i = 0; i < nfreqs; ++i) {
-        pindex_prev_flat_batch[i] =
-            static_cast<uint32_t>(utils::find_nearest_sorted_idx_scan(
-                std::span(param_arr_prev[0]), freq_arr[i], hint_idx));
+    SizeType hint_f = 0;
+    for (SizeType i = 0; i < n_freq; ++i) {
+        const auto idx_f = utils::find_nearest_sorted_idx_scan(
+            std::span(param_arr_prev[0]), freq_arr[i], hint_f);
+        pindex_prev_flat_batch[i] = static_cast<uint32_t>(idx_f);
         relative_phase_batch[i] =
             psr_utils::get_phase_idx(delta_t, freq_arr[i], nbins, 0.0);
     }
 }
 
-void ffa_taylor_resolve_batch(
+void ffa_taylor_resolve_batch_accel(
     std::span<const std::vector<double>> param_arr_cur,
     std::span<const std::vector<double>> param_arr_prev,
-    std::span<SizeType> param_arr_cur_strides,
-    std::span<SizeType> param_arr_prev_strides,
     std::span<uint32_t> pindex_prev_flat_batch,
     std::span<float> relative_phase_batch,
     SizeType ffa_level,
     SizeType latter,
     double tseg_brute,
-    SizeType nbins,
-    int nthreads) {
-
-    nthreads           = std::clamp(nthreads, 1, omp_get_max_threads());
+    SizeType nbins) {
     const auto nparams = param_arr_prev.size();
     error_check::check_equal(
         nparams, param_arr_cur.size(),
         "param_arr_cur and param_arr_prev should have the same size");
-    error_check::check_equal(nparams, param_arr_cur_strides.size(),
-                             "param_arr_cur_strides size mismatch");
-    error_check::check_equal(nparams, param_arr_prev_strides.size(),
-                             "param_arr_prev_strides size mismatch");
-    error_check::check_greater_equal(
-        nparams, 2U, "nparams should be >= 2 for taylor resolve");
-    SizeType ncoords = 1;
-    for (const auto& param_arr : param_arr_cur) {
-        ncoords *= param_arr.size();
-    }
+    error_check::check_equal(nparams, 2U,
+                             "nparams should be 2 for accel resolve");
+
+    const auto n_accel     = param_arr_cur[0].size();
+    const auto n_freq      = param_arr_cur[1].size();
+    const auto ncoords     = n_accel * n_freq;
+    const auto n_freq_prev = param_arr_prev[1].size();
     error_check::check_equal(ncoords, pindex_prev_flat_batch.size(),
                              "pindex_prev_flat size mismatch");
     error_check::check_equal(ncoords, relative_phase_batch.size(),
@@ -120,64 +110,148 @@ void ffa_taylor_resolve_batch(
     const auto tsegment = std::pow(2.0, ffa_level - 1) * tseg_brute;
     const auto delta_t  = (static_cast<double>(latter) - 0.5) * tsegment;
 
-    // Pre-compute transformation matrix
-    const auto trans_matrix =
-        psr_utils::precompute_shift_matrix(nparams + 1, delta_t);
+    // Pre-compute constants to avoid repeated calculations
+    const auto inv_c_val       = 1.0 / utils::kCval;
+    const auto half_delta_t_sq = 0.5 * delta_t * delta_t;
 
-#pragma omp parallel num_threads(nthreads) default(none)                       \
-    shared(param_arr_cur, param_arr_prev, param_arr_cur_strides,               \
-               param_arr_prev_strides, pindex_prev_flat_batch,                 \
-               relative_phase_batch, nparams, ncoords, nbins, delta_t,         \
-               trans_matrix)
-    {
-        // Thread-local storage for all temporary variables
-        std::vector<double> p_set_cur(nparams, 0.0);
-        std::vector<double> dvec_cur(nparams + 1, 0.0);
-        std::vector<double> dvec_new(nparams + 1, 0.0);
-        std::vector<double> p_set_new(nparams, 0.0);
-        std::vector<SizeType> hint_idx(nparams);
-#pragma omp for
-        for (SizeType coord_idx = 0; coord_idx < ncoords; ++coord_idx) {
-            // 1. Reconstruct current parameter combination from the flat index
-            for (SizeType p = 0; p < nparams; ++p) {
-                const auto index_in_dim =
-                    (coord_idx / param_arr_cur_strides[p]) %
-                    param_arr_cur[p].size();
-                p_set_cur[p] = param_arr_cur[p][index_in_dim];
-            }
-            // Copy til acceleration, excluding frequency
-            for (SizeType p = 0; p < nparams - 1; ++p) {
-                dvec_cur[p] = p_set_cur[p];
-            }
-            // Apply transformation matrix
-            for (SizeType row = 0; row < nparams + 1; ++row) {
-                double sum = 0.0;
-                for (SizeType col = 0; col <= row; ++col) {
-                    sum += trans_matrix[row][col] * dvec_cur[col];
-                }
-                dvec_new[row] = sum;
-            }
-            // Copy back till acceleration
-            for (SizeType p = 0; p < nparams - 1; ++p) {
-                p_set_new[p] = dvec_new[p];
-            }
-            // Handle frequency parameter specially
-            p_set_new[nparams - 1] =
-                p_set_cur[nparams - 1] *
-                (1.0 + dvec_new[nparams - 1] / utils::kCval);
+    // parameter access patterns
+    const auto& accel_arr_cur  = param_arr_cur[0];
+    const auto& freq_arr_cur   = param_arr_cur[1];
+    const auto& accel_arr_prev = param_arr_prev[0];
+    const auto& freq_arr_prev  = param_arr_prev[1];
 
-            const auto delay_rel      = dvec_new[nparams] / utils::kCval;
-            const auto relative_phase = psr_utils::get_phase_idx(
-                delta_t, p_set_cur[nparams - 1], nbins, delay_rel);
+    SizeType hint_a = 0;
+    for (SizeType accel_idx = 0; accel_idx < n_accel; ++accel_idx) {
+        const auto a_cur = accel_arr_cur[accel_idx];
+        const auto a_new = a_cur;
+        const auto v_new = a_cur * delta_t;
+        const auto d_new = a_cur * half_delta_t_sq;
+        const auto idx_a = utils::find_nearest_sorted_idx_scan(
+            std::span(accel_arr_prev), a_new, hint_a);
 
-            SizeType pindex_prev_cur = 0;
-            for (SizeType ip = 0; ip < nparams; ++ip) {
-                const auto pindex_prev = utils::find_nearest_sorted_idx_scan(
-                    std::span(param_arr_prev[ip]), p_set_new[ip], hint_idx[ip]);
-                pindex_prev_cur += pindex_prev * param_arr_prev_strides[ip];
+        SizeType hint_f = 0;
+        for (SizeType freq_idx = 0; freq_idx < n_freq; ++freq_idx) {
+            const auto coord_idx = (accel_idx * n_freq) + freq_idx;
+            const auto f_cur     = freq_arr_cur[freq_idx];
+            const auto f_new     = f_cur * (1.0 + v_new * inv_c_val);
+            const auto delay_rel = d_new * inv_c_val;
+
+            const auto relative_phase =
+                psr_utils::get_phase_idx(delta_t, f_cur, nbins, delay_rel);
+            const auto idx_f = utils::find_nearest_sorted_idx_scan(
+                std::span(freq_arr_prev), f_new, hint_f);
+
+            pindex_prev_flat_batch[coord_idx] =
+                static_cast<uint32_t>((idx_a * n_freq_prev) + idx_f);
+            relative_phase_batch[coord_idx] = relative_phase;
+        }
+    }
+}
+
+void ffa_taylor_resolve_batch_jerk(
+    std::span<const std::vector<double>> param_arr_cur,
+    std::span<const std::vector<double>> param_arr_prev,
+    std::span<uint32_t> pindex_prev_flat_batch,
+    std::span<float> relative_phase_batch,
+    SizeType ffa_level,
+    SizeType latter,
+    double tseg_brute,
+    SizeType nbins) {
+    const auto nparams = param_arr_prev.size();
+    error_check::check_equal(
+        nparams, param_arr_cur.size(),
+        "param_arr_cur and param_arr_prev should have the same size");
+    error_check::check_equal(nparams, 3U,
+                             "nparams should be 3 for jerk resolve");
+
+    const auto n_jerk       = param_arr_cur[0].size();
+    const auto n_accel      = param_arr_cur[1].size();
+    const auto n_freq       = param_arr_cur[2].size();
+    const auto ncoords      = n_jerk * n_accel * n_freq;
+    const auto n_accel_prev = param_arr_prev[1].size();
+    const auto n_freq_prev  = param_arr_prev[2].size();
+
+    error_check::check_equal(ncoords, pindex_prev_flat_batch.size(),
+                             "pindex_prev_flat size mismatch");
+    error_check::check_equal(ncoords, relative_phase_batch.size(),
+                             "relative_phase_batch size mismatch");
+
+    const auto tsegment = std::pow(2.0, ffa_level - 1) * tseg_brute;
+    const auto delta_t  = (static_cast<double>(latter) - 0.5) * tsegment;
+
+    // Pre-compute constants to avoid repeated calculations
+    const auto inv_c_val           = 1.0 / utils::kCval;
+    const auto delta_t_sq          = delta_t * delta_t;
+    const auto delta_t_cubed       = delta_t_sq * delta_t;
+    const auto half_delta_t_sq     = 0.5 * delta_t_sq;
+    const auto sixth_delta_t_cubed = delta_t_cubed / 6.0;
+
+    // Cache-friendly access patterns
+    const auto& jerk_arr_cur   = param_arr_cur[0];
+    const auto& accel_arr_cur  = param_arr_cur[1];
+    const auto& freq_arr_cur   = param_arr_cur[2];
+    const auto& jerk_arr_prev  = param_arr_prev[0];
+    const auto& accel_arr_prev = param_arr_prev[1];
+    const auto& freq_arr_prev  = param_arr_prev[2];
+
+    const auto jerk_stride_prev  = n_accel_prev * n_freq_prev;
+    const auto accel_stride_prev = n_freq_prev;
+
+    // Separate hints for better search performance
+    SizeType hint_j = 0;
+
+    for (SizeType jerk_idx = 0; jerk_idx < n_jerk; ++jerk_idx) {
+        const auto j_cur = jerk_arr_cur[jerk_idx];
+        const auto j_new = j_cur; // No transformation needed
+
+        // Pre-compute jerk-related terms for this jerk value
+        const auto j_delta_t             = j_cur * delta_t;
+        const auto half_j_delta_t_sq     = 0.5 * j_cur * delta_t_sq;
+        const auto j_sixth_delta_t_cubed = j_cur * sixth_delta_t_cubed;
+
+        // Find jerk index once per jerk_idx
+        const auto idx_j = utils::find_nearest_sorted_idx_scan(
+            std::span(jerk_arr_prev), j_new, hint_j);
+
+        SizeType hint_a = 0;
+
+        for (SizeType accel_idx = 0; accel_idx < n_accel; ++accel_idx) {
+            const auto a_cur = accel_arr_cur[accel_idx];
+
+            // Compute acceleration-related terms
+            const auto a_new = a_cur + j_delta_t;
+            const auto v_new = (a_cur * delta_t) + half_j_delta_t_sq;
+            const auto d_new =
+                (a_cur * half_delta_t_sq) + j_sixth_delta_t_cubed;
+
+            // Find accel index once per (jerk_idx, accel_idx) pair
+            const auto idx_a = utils::find_nearest_sorted_idx_scan(
+                std::span(accel_arr_prev), a_new, hint_a);
+
+            // Pre-compute stride calculation
+            const auto jerk_accel_offset =
+                (idx_j * jerk_stride_prev) + (idx_a * accel_stride_prev);
+
+            SizeType hint_f = 0;
+
+            for (SizeType freq_idx = 0; freq_idx < n_freq; ++freq_idx) {
+                const auto coord_idx =
+                    ((jerk_idx * n_accel + accel_idx) * n_freq) + freq_idx;
+                const auto f_cur = freq_arr_cur[freq_idx];
+
+                // Frequency-specific calculations
+                const auto f_new     = f_cur * (1.0 + v_new * inv_c_val);
+                const auto delay_rel = d_new * inv_c_val;
+                const auto relative_phase =
+                    psr_utils::get_phase_idx(delta_t, f_cur, nbins, delay_rel);
+
+                const auto idx_f = utils::find_nearest_sorted_idx_scan(
+                    std::span(freq_arr_prev), f_new, hint_f);
+
+                pindex_prev_flat_batch[coord_idx] =
+                    static_cast<uint32_t>(jerk_accel_offset + idx_f);
+                relative_phase_batch[coord_idx] = relative_phase;
             }
-            pindex_prev_flat_batch[coord_idx] = pindex_prev_cur;
-            relative_phase_batch[coord_idx]   = relative_phase;
         }
     }
 }

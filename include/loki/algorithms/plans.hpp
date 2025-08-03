@@ -18,6 +18,11 @@ struct FFACoord {
     float shift_head; // Shift in the head coordinate
 };
 
+struct FFACoordFreq {
+    uint32_t idx;
+    float shift;
+};
+
 struct FFAPlan {
     SizeType n_params{};
     SizeType n_levels{};
@@ -48,6 +53,11 @@ struct FFAPlan {
 
     void resolve_coordinates(std::span<std::vector<FFACoord>> coordinates);
     std::vector<std::vector<FFACoord>> resolve_coordinates();
+
+    // Specialized functions for frequency coordinates
+    void
+    resolve_coordinates_freq(std::span<std::vector<FFACoordFreq>> coordinates);
+    std::vector<std::vector<FFACoordFreq>> resolve_coordinates_freq();
 
 private:
     search::PulsarSearchConfig m_cfg;

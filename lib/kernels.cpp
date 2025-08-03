@@ -41,13 +41,13 @@ void shift_add(const float* __restrict__ data_tail,
     }
 }
 
-void shift_add_buffer(const float* __restrict__ data_tail,
-                      float phase_shift_tail,
-                      const float* __restrict__ data_head,
-                      float phase_shift_head,
-                      float* __restrict__ out,
-                      float* __restrict__ temp_buffer,
-                      SizeType nbins) noexcept {
+void shift_add_buffer_binary(const float* __restrict__ data_tail,
+                             float phase_shift_tail,
+                             const float* __restrict__ data_head,
+                             float phase_shift_head,
+                             float* __restrict__ out,
+                             float* __restrict__ temp_buffer,
+                             SizeType nbins) noexcept {
 
     const auto shift_tail_raw =
         static_cast<SizeType>(std::round(phase_shift_tail));
@@ -77,13 +77,45 @@ void shift_add_buffer(const float* __restrict__ data_tail,
     }
 }
 
-void shift_add_complex(const ComplexType* __restrict__ data_tail,
-                       float phase_shift_tail,
-                       const ComplexType* __restrict__ data_head,
-                       float phase_shift_head,
-                       ComplexType* __restrict__ out,
-                       SizeType nbins_f,
-                       SizeType nbins) noexcept {
+void shift_add_buffer_linear(const float* __restrict__ data_tail,
+                             const float* __restrict__ data_head,
+                             float phase_shift,
+                             float* __restrict__ out,
+                             float* __restrict__ temp_buffer,
+                             SizeType nbins) noexcept {
+    // Trick to round phase shift to integer and wrap to [0, nbins)
+    // might be expensive but robust and handles negative shifts
+    const auto shift_raw      = static_cast<SizeType>(std::round(phase_shift));
+    const SizeType shift      = (shift_raw % nbins + nbins) % nbins;
+    const SizeType total_size = 2 * nbins;
+    // Optimized circular shift: rotate data_head into temp buffer
+    // Right shift by 'shift' positions
+    const float* __restrict__ src1 = data_head;
+    const float* __restrict__ src2 = data_head + nbins;
+    float* __restrict__ dst1       = temp_buffer;
+    float* __restrict__ dst2       = temp_buffer + nbins;
+    const auto shift_size          = nbins - shift;
+
+    // Copy last shift_size elements to beginning
+    std::memcpy(dst1 + shift, src1, sizeof(float) * shift_size);
+    // Copy first shift elements to end
+    std::memcpy(dst1, src1 + shift_size, sizeof(float) * shift);
+    std::memcpy(dst2 + shift, src2, sizeof(float) * shift_size);
+    std::memcpy(dst2, src2 + shift_size, sizeof(float) * shift);
+
+    // Perform the final addition in a single loop
+    for (SizeType j = 0; j < total_size; ++j) {
+        out[j] = data_tail[j] + temp_buffer[j];
+    }
+}
+
+void shift_add_complex_binary(const ComplexType* __restrict__ data_tail,
+                              float phase_shift_tail,
+                              const ComplexType* __restrict__ data_head,
+                              float phase_shift_head,
+                              ComplexType* __restrict__ out,
+                              SizeType nbins_f,
+                              SizeType nbins) noexcept {
 
     const ComplexType* __restrict__ data_tail_e = data_tail;
     const ComplexType* __restrict__ data_tail_v = data_tail + nbins_f;
@@ -116,13 +148,14 @@ void shift_add_complex(const ComplexType* __restrict__ data_tail,
     }
 }
 
-void shift_add_complex_recurrence(const ComplexType* __restrict__ data_tail,
-                                  float phase_shift_tail,
-                                  const ComplexType* __restrict__ data_head,
-                                  float phase_shift_head,
-                                  ComplexType* __restrict__ out,
-                                  SizeType nbins_f,
-                                  SizeType nbins) noexcept {
+void shift_add_complex_recurrence_binary(
+    const ComplexType* __restrict__ data_tail,
+    float phase_shift_tail,
+    const ComplexType* __restrict__ data_head,
+    float phase_shift_head,
+    ComplexType* __restrict__ out,
+    SizeType nbins_f,
+    SizeType nbins) noexcept {
     using BatchType                  = xsimd::batch<ComplexType>;
     static constexpr auto kBatchSize = BatchType::size;
 
@@ -232,155 +265,89 @@ void shift_add_complex_recurrence(const ComplexType* __restrict__ data_tail,
     }
 }
 
-void shift_add_buffer_batch(const float* __restrict__ data_folds,
-                            const SizeType* __restrict__ idx_folds,
-                            const float* __restrict__ data_ffa,
-                            const SizeType* __restrict__ idx_ffa,
-                            const SizeType* __restrict__ shift_batch,
-                            float* __restrict__ out,
-                            float* __restrict__ temp_buffer,
-                            SizeType nbins,
-                            SizeType nbatch) noexcept {
-    const auto total_size = 2 * nbins;
-    for (SizeType irow = 0; irow < nbatch; ++irow) {
-        const SizeType shift_raw = shift_batch[irow];
-        const SizeType shift     = (shift_raw % nbins + nbins) % nbins;
-        const SizeType ffa_idx   = idx_ffa[irow];
-        const SizeType fold_idx  = idx_folds[irow];
-
-        // Get restrict pointers for current batch item
-        const float* __restrict__ segment_ev =
-            data_ffa + (ffa_idx * total_size);
-        const float* __restrict__ fold_ev =
-            data_folds + (fold_idx * total_size);
-        float* __restrict__ out_ev = out + (irow * total_size);
-
-        // Handle zero shift case
-        if (shift == 0) {
-            for (SizeType j = 0; j < total_size; ++j) {
-                out_ev[j] = fold_ev[j] + segment_ev[j];
-            }
-        } else {
-            // Optimized circular shift: rotate segment into temp buffer
-            const SizeType copy1_size = nbins - shift;
-            const SizeType copy2_size = shift;
-
-            const float* __restrict__ segment_e = segment_ev;
-            const float* __restrict__ segment_v = segment_ev + nbins;
-
-            // E channel: RIGHT shift by 'shift' positions
-            // Copy last (nbins - shift) elements to beginning
-            std::copy_n(segment_e + copy1_size, copy2_size, temp_buffer);
-            // Copy first shift elements to end
-            std::copy_n(segment_e, copy1_size, temp_buffer + copy2_size);
-
-            // V channel: RIGHT shift by 'shift' positions
-            std::copy_n(segment_v + copy1_size, copy2_size,
-                        temp_buffer + nbins);
-            std::copy_n(segment_v, copy1_size,
-                        temp_buffer + nbins + copy2_size);
-            for (SizeType j = 0; j < total_size; ++j) {
-                out_ev[j] = fold_ev[j] + temp_buffer[j];
-            }
-        }
-    }
-}
-
 // On the fly phase computation is faster than precomputed phase steps on Intel
 // CPUs.
-void shift_add_complex_recurrence_batch(
-    const ComplexType* __restrict__ data_folds,
-    const SizeType* __restrict__ idx_folds,
-    const ComplexType* __restrict__ data_ffa,
-    const SizeType* __restrict__ idx_ffa,
-    const float* __restrict__ shift_batch,
+void shift_add_complex_recurrence_linear(
+    const ComplexType* __restrict__ data_tail,
+    const ComplexType* __restrict__ data_head,
+    float phase_shift,
     ComplexType* __restrict__ out,
     SizeType nbins_f,
-    SizeType nbins,
-    SizeType nbatch) noexcept {
+    SizeType nbins) noexcept {
     using BatchType                  = xsimd::batch<ComplexType>;
     static constexpr auto kBatchSize = BatchType::size;
 
-    for (SizeType irow = 0; irow < nbatch; ++irow) {
-        const auto shift    = shift_batch[irow];
-        const auto ffa_idx  = idx_ffa[irow];
-        const auto fold_idx = idx_folds[irow];
+    const ComplexType* __restrict__ data_tail_e = data_tail;
+    const ComplexType* __restrict__ data_tail_v = data_tail + nbins_f;
+    const ComplexType* __restrict__ data_head_e = data_head;
+    const ComplexType* __restrict__ data_head_v = data_head + nbins_f;
+    ComplexType* __restrict__ out_e             = out;
+    ComplexType* __restrict__ out_v             = out + nbins_f;
 
-        // Calculate phase step per frequency bin
-        const auto phase_step_angle =
-            -2.0 * std::numbers::pi * shift / static_cast<float>(nbins);
+    // Calculate the constant phase step per iteration
+    const auto phase_step_angle =
+        -2.0 * std::numbers::pi * phase_shift / static_cast<float>(nbins);
 
-        // Complex phase step for recurrence relation
-        const ComplexType delta_phase = {
-            static_cast<float>(std::cos(phase_step_angle)),
-            static_cast<float>(std::sin(phase_step_angle))};
+    // This is the complex number we will multiply by in each iteration
+    const ComplexType delta_phase = {
+        static_cast<float>(std::cos(phase_step_angle)),
+        static_cast<float>(std::sin(phase_step_angle))};
 
-        // Phase steps within a SIMD block: [d^0, d^1, ..., d^(N-1)]
-        std::array<ComplexType, kBatchSize> delta_vec_std;
-        delta_vec_std[0] = {1.0F, 0.0F};
-        for (size_t i = 1; i < kBatchSize; ++i) {
-            delta_vec_std[i] = delta_vec_std[i - 1] * delta_phase;
-        }
-        const auto delta_vec = xsimd::load_unaligned(delta_vec_std.data());
+    // Phase steps within a SIMD block: [d^0, d^1, d^2, d^3]
+    std::array<ComplexType, kBatchSize> delta_vec_std;
+    delta_vec_std[0] = {1.0F, 0.0F};
+    for (size_t i = 1; i < kBatchSize; ++i) {
+        delta_vec_std[i] = delta_vec_std[i - 1] * delta_phase;
+    }
 
-        // Phase step between SIMD blocks
-        const ComplexType delta_block = delta_vec_std.back() * delta_phase;
+    // Load the phase steps into SIMD registers
+    const auto delta_vec = xsimd::load_unaligned(delta_vec_std.data());
 
-        // Initial phase for k=0 is exp(i*0) = 1 + 0i
-        ComplexType current_block_start_phase = {1.0F, 0.0F};
+    // Phase step between SIMD blocks: d^SIMD_WIDTH
+    const ComplexType delta_block = delta_vec_std.back() * delta_phase;
 
-        // Get restrict pointers for current batch item
-        const auto* __restrict__ segment_e =
-            data_ffa + ((ffa_idx * 2 + 0) * nbins_f);
-        const auto* __restrict__ segment_v =
-            data_ffa + ((ffa_idx * 2 + 1) * nbins_f);
-        const auto* __restrict__ fold_e =
-            data_folds + ((fold_idx * 2 + 0) * nbins_f);
-        const auto* __restrict__ fold_v =
-            data_folds + ((fold_idx * 2 + 1) * nbins_f);
-        auto* __restrict__ out_e = out + ((irow * 2 + 0) * nbins_f);
-        auto* __restrict__ out_v = out + ((irow * 2 + 1) * nbins_f);
+    // Initial phase for k=0 is exp(i*0) = 1 + 0i
+    ComplexType current_block_start_phase = {1.0F, 0.0F};
 
-        auto compute_and_store = [&](SizeType k, const BatchType& phase) {
-            const auto fold_e_vec    = xsimd::load_unaligned(&fold_e[k]);
-            const auto segment_e_vec = xsimd::load_unaligned(&segment_e[k]);
-            (fold_e_vec + segment_e_vec * phase).store_unaligned(&out_e[k]);
-            const auto fold_v_vec    = xsimd::load_unaligned(&fold_v[k]);
-            const auto segment_v_vec = xsimd::load_unaligned(&segment_v[k]);
-            (fold_v_vec + segment_v_vec * phase).store_unaligned(&out_v[k]);
-        };
+    auto compute_and_store = [&](SizeType k, const BatchType& phase) {
+        const auto tail_e_data = xsimd::load_unaligned(&data_tail_e[k]);
+        const auto head_e_data = xsimd::load_unaligned(&data_head_e[k]);
+        (tail_e_data + head_e_data * phase).store_unaligned(&out_e[k]);
+        const auto tail_v_data = xsimd::load_unaligned(&data_tail_v[k]);
+        const auto head_v_data = xsimd::load_unaligned(&data_head_v[k]);
+        (tail_v_data + head_v_data * phase).store_unaligned(&out_v[k]);
+    };
 
-        // First process two batches at a time to maximize throughput
-        const SizeType main_loop = nbins_f - (nbins_f % (2 * kBatchSize));
-        for (SizeType k = 0; k < main_loop; k += 2 * kBatchSize) {
-            const BatchType phase0 =
-                xsimd::broadcast(current_block_start_phase) * delta_vec;
-            compute_and_store(k, phase0);
-            current_block_start_phase *= delta_block;
-            const BatchType phase1 =
-                xsimd::broadcast(current_block_start_phase) * delta_vec;
-            compute_and_store(k + kBatchSize, phase1);
-            current_block_start_phase *= delta_block;
-        }
+    // First process two batches at a time to maximize throughput
+    const SizeType main_loop = nbins_f - (nbins_f % (2 * kBatchSize));
+    for (SizeType k = 0; k < main_loop; k += 2 * kBatchSize) {
+        const BatchType phase0 =
+            xsimd::broadcast(current_block_start_phase) * delta_vec;
+        compute_and_store(k, phase0);
+        current_block_start_phase *= delta_block;
+        const BatchType phase1 =
+            xsimd::broadcast(current_block_start_phase) * delta_vec;
+        compute_and_store(k + kBatchSize, phase1);
+        current_block_start_phase *= delta_block;
+    }
 
-        // Process the remaining batches
-        SizeType k = main_loop;
-        if (k + kBatchSize <= nbins_f) {
-            const BatchType phase =
-                xsimd::broadcast(current_block_start_phase) * delta_vec;
-            compute_and_store(k, phase);
-            k += kBatchSize;
-            current_block_start_phase *= delta_block;
-        }
+    // Process the remaining batches
+    SizeType k = main_loop;
+    if (k + kBatchSize <= nbins_f) {
+        const BatchType phase =
+            xsimd::broadcast(current_block_start_phase) * delta_vec;
+        compute_and_store(k, phase);
+        k += kBatchSize;
+        current_block_start_phase *= delta_block;
+    }
 
-        // Scalar remainder part
-        if (k < nbins_f) {
-            ComplexType current_phase = current_block_start_phase;
-            for (; k < nbins_f; ++k) {
-                out_e[k] = fold_e[k] + (segment_e[k] * current_phase);
-                out_v[k] = fold_v[k] + (segment_v[k] * current_phase);
-                current_phase *= delta_phase;
-            }
+    // Scalar remainder part
+    if (k < nbins_f) {
+        ComplexType current_phase = current_block_start_phase;
+        for (; k < nbins_f; ++k) {
+            out_e[k] = data_tail_e[k] + data_head_e[k] * current_phase;
+            out_v[k] = data_tail_v[k] + data_head_v[k] * current_phase;
+            current_phase *= delta_phase;
         }
     }
 }
@@ -708,9 +675,9 @@ void ffa_iter_segment(const float* __restrict__ fold_in,
                     const auto* __restrict__ fold_head = &fold_in[head_offset];
                     auto* __restrict__ fold_sum        = &fold_out[out_offset];
 
-                    shift_add_buffer(fold_tail, coord_cur->shift_tail,
-                                     fold_head, coord_cur->shift_head, fold_sum,
-                                     temp_buffer_ptr, nbins);
+                    shift_add_buffer_binary(fold_tail, coord_cur->shift_tail,
+                                            fold_head, coord_cur->shift_head,
+                                            fold_sum, temp_buffer_ptr, nbins);
                 }
             }
         }
@@ -762,9 +729,116 @@ void ffa_iter_standard(const float* __restrict__ fold_in,
                     const auto* __restrict__ fold_head = &fold_in[head_offset];
                     auto* __restrict__ fold_sum        = &fold_out[out_offset];
 
-                    shift_add_buffer(fold_tail, coord_cur->shift_tail,
-                                     fold_head, coord_cur->shift_head, fold_sum,
-                                     temp_buffer_ptr, nbins);
+                    shift_add_buffer_binary(fold_tail, coord_cur->shift_tail,
+                                            fold_head, coord_cur->shift_head,
+                                            fold_sum, temp_buffer_ptr, nbins);
+                }
+            }
+        }
+    }
+}
+
+void ffa_iter_segment_freq(const float* __restrict__ fold_in,
+                           float* __restrict__ fold_out,
+                           const plans::FFACoordFreq* __restrict__ coords_cur,
+                           SizeType nsegments,
+                           SizeType nbins,
+                           SizeType ncoords_cur,
+                           SizeType ncoords_prev,
+                           int nthreads) {
+    nthreads = std::clamp(nthreads, 1, omp_get_max_threads());
+    // Process one segment at a time to keep data in cache
+    constexpr SizeType kBlockSize  = 32;
+    const SizeType fold_stride     = 2 * nbins;
+    const SizeType seg_prev_stride = ncoords_prev * fold_stride;
+    const SizeType seg_out_stride  = ncoords_cur * fold_stride;
+
+#pragma omp parallel num_threads(nthreads) default(none)                       \
+    shared(fold_in, fold_out, coords_cur, nsegments, nbins, ncoords_cur,       \
+               ncoords_prev, fold_stride, seg_prev_stride, seg_out_stride)
+    {
+        // Each thread allocates its own buffer once
+        std::vector<float> temp_buffer(2 * nbins);
+        auto* __restrict__ temp_buffer_ptr = temp_buffer.data();
+
+#pragma omp for
+        for (SizeType iseg = 0; iseg < nsegments; ++iseg) {
+            // Process coordinates in blocks within each segment
+            for (SizeType icoord_block = 0; icoord_block < ncoords_cur;
+                 icoord_block += kBlockSize) {
+                const auto block_end =
+                    std::min(icoord_block + kBlockSize, ncoords_cur);
+                for (SizeType icoord = icoord_block; icoord < block_end;
+                     ++icoord) {
+                    const auto* __restrict__ coord_cur = &coords_cur[icoord];
+                    const auto tail_offset =
+                        ((iseg * 2) * seg_prev_stride) +
+                        (static_cast<SizeType>(coord_cur->idx) * fold_stride);
+                    const auto head_offset =
+                        ((iseg * 2 + 1) * seg_prev_stride) +
+                        (static_cast<SizeType>(coord_cur->idx) * fold_stride);
+                    const auto out_offset =
+                        (iseg * seg_out_stride) + (icoord * fold_stride);
+
+                    const auto* __restrict__ fold_tail = &fold_in[tail_offset];
+                    const auto* __restrict__ fold_head = &fold_in[head_offset];
+                    auto* __restrict__ fold_sum        = &fold_out[out_offset];
+
+                    shift_add_buffer_linear(fold_tail, fold_head,
+                                            coord_cur->shift, fold_sum,
+                                            temp_buffer_ptr, nbins);
+                }
+            }
+        }
+    }
+}
+
+void ffa_iter_standard_freq(const float* __restrict__ fold_in,
+                            float* __restrict__ fold_out,
+                            const plans::FFACoordFreq* __restrict__ coords_cur,
+                            SizeType nsegments,
+                            SizeType nbins,
+                            SizeType ncoords_cur,
+                            SizeType ncoords_prev,
+                            int nthreads) {
+    nthreads = std::clamp(nthreads, 1, omp_get_max_threads());
+    constexpr SizeType kBlockSize  = 32;
+    const SizeType fold_stride     = 2 * nbins;
+    const SizeType seg_prev_stride = ncoords_prev * fold_stride;
+    const SizeType seg_out_stride  = ncoords_cur * fold_stride;
+
+#pragma omp parallel num_threads(nthreads) default(none)                       \
+    shared(fold_in, fold_out, coords_cur, nsegments, nbins, ncoords_cur,       \
+               ncoords_prev, fold_stride, seg_prev_stride, seg_out_stride)
+    {
+        std::vector<float> temp_buffer(2 * nbins);
+        auto* __restrict__ temp_buffer_ptr = temp_buffer.data();
+
+#pragma omp for
+        for (SizeType icoord_block = 0; icoord_block < ncoords_cur;
+             icoord_block += kBlockSize) {
+            const auto block_end =
+                std::min(icoord_block + kBlockSize, ncoords_cur);
+            for (SizeType iseg = 0; iseg < nsegments; ++iseg) {
+                for (SizeType icoord = icoord_block; icoord < block_end;
+                     ++icoord) {
+                    const auto* __restrict__ coord_cur = &coords_cur[icoord];
+                    const auto tail_offset =
+                        ((iseg * 2) * seg_prev_stride) +
+                        (static_cast<SizeType>(coord_cur->idx) * fold_stride);
+                    const auto head_offset =
+                        ((iseg * 2 + 1) * seg_prev_stride) +
+                        (static_cast<SizeType>(coord_cur->idx) * fold_stride);
+                    const auto out_offset =
+                        (iseg * seg_out_stride) + (icoord * fold_stride);
+
+                    const auto* __restrict__ fold_tail = &fold_in[tail_offset];
+                    const auto* __restrict__ fold_head = &fold_in[head_offset];
+                    auto* __restrict__ fold_sum        = &fold_out[out_offset];
+
+                    shift_add_buffer_linear(fold_tail, fold_head,
+                                            coord_cur->shift, fold_sum,
+                                            temp_buffer_ptr, nbins);
                 }
             }
         }
@@ -811,7 +885,7 @@ void ffa_complex_iter_segment(const ComplexType* __restrict__ fold_in,
                 const auto* __restrict__ fold_head = &fold_in[head_offset];
                 auto* __restrict__ fold_sum        = &fold_out[out_offset];
 
-                kernels::shift_add_complex_recurrence(
+                kernels::shift_add_complex_recurrence_binary(
                     fold_tail, coord_cur->shift_tail, fold_head,
                     coord_cur->shift_head, fold_sum, nbins_f, nbins);
             }
@@ -856,11 +930,151 @@ void ffa_complex_iter_standard(const ComplexType* __restrict__ fold_in,
                 const auto* __restrict__ fold_head = &fold_in[head_offset];
                 auto* __restrict__ fold_sum        = &fold_out[out_offset];
 
-                kernels::shift_add_complex_recurrence(
+                kernels::shift_add_complex_recurrence_binary(
                     fold_tail, coord_cur->shift_tail, fold_head,
                     coord_cur->shift_head, fold_sum, nbins_f, nbins);
             }
         }
+    }
+}
+
+void ffa_complex_iter_segment_freq(
+    const ComplexType* __restrict__ fold_in,
+    ComplexType* __restrict__ fold_out,
+    const plans::FFACoordFreq* __restrict__ coords_cur,
+    SizeType nsegments,
+    SizeType nbins_f,
+    SizeType nbins,
+    SizeType ncoords_cur,
+    SizeType ncoords_prev,
+    int nthreads) {
+    nthreads = std::clamp(nthreads, 1, omp_get_max_threads());
+    // Process one segment at a time to keep data in cache
+    constexpr SizeType kBlockSize  = 32;
+    const SizeType fold_stride     = 2 * nbins_f;
+    const SizeType seg_prev_stride = ncoords_prev * fold_stride;
+    const SizeType seg_out_stride  = ncoords_cur * fold_stride;
+
+#pragma omp parallel for num_threads(nthreads) default(none) shared(           \
+        fold_in, fold_out, coords_cur, nsegments, nbins, nbins_f, ncoords_cur, \
+            ncoords_prev, fold_stride, seg_prev_stride, seg_out_stride)
+    for (SizeType iseg = 0; iseg < nsegments; ++iseg) {
+        // Process coordinates in blocks within each segment
+        for (SizeType icoord_block = 0; icoord_block < ncoords_cur;
+             icoord_block += kBlockSize) {
+            SizeType block_end =
+                std::min(icoord_block + kBlockSize, ncoords_cur);
+            for (SizeType icoord = icoord_block; icoord < block_end; ++icoord) {
+                const auto* __restrict__ coord_cur = &coords_cur[icoord];
+                const auto tail_offset =
+                    ((iseg * 2) * seg_prev_stride) +
+                    (static_cast<SizeType>(coord_cur->idx) * fold_stride);
+                const auto head_offset =
+                    ((iseg * 2 + 1) * seg_prev_stride) +
+                    (static_cast<SizeType>(coord_cur->idx) * fold_stride);
+                const auto out_offset =
+                    (iseg * seg_out_stride) + (icoord * fold_stride);
+
+                const auto* __restrict__ fold_tail = &fold_in[tail_offset];
+                const auto* __restrict__ fold_head = &fold_in[head_offset];
+                auto* __restrict__ fold_sum        = &fold_out[out_offset];
+
+                kernels::shift_add_complex_recurrence_linear(
+                    fold_tail, fold_head, coord_cur->shift, fold_sum, nbins_f,
+                    nbins);
+            }
+        }
+    }
+}
+
+void ffa_complex_iter_standard_freq(
+    const ComplexType* __restrict__ fold_in,
+    ComplexType* __restrict__ fold_out,
+    const plans::FFACoordFreq* __restrict__ coords_cur,
+    SizeType nsegments,
+    SizeType nbins_f,
+    SizeType nbins,
+    SizeType ncoords_cur,
+    SizeType ncoords_prev,
+    int nthreads) {
+    nthreads = std::clamp(nthreads, 1, omp_get_max_threads());
+    constexpr SizeType kBlockSize  = 32;
+    const SizeType fold_stride     = 2 * nbins_f;
+    const SizeType seg_prev_stride = ncoords_prev * fold_stride;
+    const SizeType seg_out_stride  = ncoords_cur * fold_stride;
+
+#pragma omp parallel for num_threads(nthreads) default(none) shared(           \
+        fold_in, fold_out, coords_cur, nsegments, nbins, nbins_f, ncoords_cur, \
+            ncoords_prev, fold_stride, seg_prev_stride, seg_out_stride)
+    for (SizeType icoord_block = 0; icoord_block < ncoords_cur;
+         icoord_block += kBlockSize) {
+        SizeType block_end = std::min(icoord_block + kBlockSize, ncoords_cur);
+        for (SizeType iseg = 0; iseg < nsegments; ++iseg) {
+            for (SizeType icoord = icoord_block; icoord < block_end; ++icoord) {
+                const auto* __restrict__ coord_cur = &coords_cur[icoord];
+                const auto tail_offset =
+                    ((iseg * 2) * seg_prev_stride) +
+                    (static_cast<SizeType>(coord_cur->idx) * fold_stride);
+                const auto head_offset =
+                    ((iseg * 2 + 1) * seg_prev_stride) +
+                    (static_cast<SizeType>(coord_cur->idx) * fold_stride);
+                const auto out_offset =
+                    (iseg * seg_out_stride) + (icoord * fold_stride);
+
+                const auto* __restrict__ fold_tail = &fold_in[tail_offset];
+                const auto* __restrict__ fold_head = &fold_in[head_offset];
+                auto* __restrict__ fold_sum        = &fold_out[out_offset];
+
+                kernels::shift_add_complex_recurrence_linear(
+                    fold_tail, fold_head, coord_cur->shift, fold_sum, nbins_f,
+                    nbins);
+            }
+        }
+    }
+}
+
+void shift_add_buffer_batch(const float* __restrict__ data_folds,
+                            const SizeType* __restrict__ idx_folds,
+                            const float* __restrict__ data_ffa,
+                            const SizeType* __restrict__ idx_ffa,
+                            const float* __restrict__ shift_batch,
+                            float* __restrict__ out,
+                            float* __restrict__ temp_buffer,
+                            SizeType nbins,
+                            SizeType nbatch) noexcept {
+    const auto total_size = 2 * nbins;
+    for (SizeType irow = 0; irow < nbatch; ++irow) {
+        // Get restrict pointers for current batch item
+        const float* __restrict__ data_tail =
+            data_folds + (idx_folds[irow] * total_size);
+        const float* __restrict__ data_head =
+            data_ffa + (idx_ffa[irow] * total_size);
+        float* __restrict__ data_out = out + (irow * total_size);
+        shift_add_buffer_linear(data_tail, data_head, shift_batch[irow],
+                                data_out, temp_buffer, nbins);
+    }
+}
+
+void shift_add_complex_recurrence_batch(
+    const ComplexType* __restrict__ data_folds,
+    const SizeType* __restrict__ idx_folds,
+    const ComplexType* __restrict__ data_ffa,
+    const SizeType* __restrict__ idx_ffa,
+    const float* __restrict__ shift_batch,
+    ComplexType* __restrict__ out,
+    SizeType nbins_f,
+    SizeType nbins,
+    SizeType nbatch) noexcept {
+    const auto total_size = 2 * nbins_f;
+    for (SizeType irow = 0; irow < nbatch; ++irow) {
+        // Get restrict pointers for current batch item
+        const auto* __restrict__ data_tail =
+            data_folds + (idx_folds[irow] * total_size);
+        const auto* __restrict__ data_head =
+            data_ffa + (idx_ffa[irow] * total_size);
+        auto* __restrict__ data_out = out + (irow * total_size);
+        shift_add_complex_recurrence_linear(
+            data_tail, data_head, shift_batch[irow], data_out, nbins_f, nbins);
     }
 }
 

@@ -10,6 +10,7 @@
 
 namespace loki::core {
 
+// Old method (not used anymore)
 std::tuple<std::vector<SizeType>, float>
 ffa_taylor_resolve(std::span<const double> pset_cur,
                    std::span<const std::vector<double>> param_arr,
@@ -24,22 +25,28 @@ void ffa_taylor_resolve_batch_freq(
     std::span<uint32_t> pindex_prev_flat_batch,
     std::span<float> relative_phase_batch,
     SizeType ffa_level,
-    SizeType latter,
     double tseg_brute,
     SizeType nbins);
 
-void ffa_taylor_resolve_batch(
+void ffa_taylor_resolve_batch_accel(
     std::span<const std::vector<double>> param_arr_cur,
     std::span<const std::vector<double>> param_arr_prev,
-    std::span<SizeType> param_arr_cur_strides,
-    std::span<SizeType> param_arr_prev_strides,
     std::span<uint32_t> pindex_prev_flat_batch,
     std::span<float> relative_phase_batch,
     SizeType ffa_level,
     SizeType latter,
     double tseg_brute,
-    SizeType nbins,
-    int nthreads);
+    SizeType nbins);
+
+void ffa_taylor_resolve_batch_jerk(
+    std::span<const std::vector<double>> param_arr_cur,
+    std::span<const std::vector<double>> param_arr_prev,
+    std::span<uint32_t> pindex_prev_flat_batch,
+    std::span<float> relative_phase_batch,
+    SizeType ffa_level,
+    SizeType latter,
+    double tseg_brute,
+    SizeType nbins);
 
 void poly_taylor_resolve_batch(std::span<const double> batch_leaves,
                                std::pair<double, double> coord_add,

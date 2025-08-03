@@ -121,17 +121,6 @@ private:
                 m_bucket_indices[writers[bucket_idx]++] = isamp;
             }
         }
-        // Sort each bucket's indices for monotonic access (better
-        // cache/prefetch)
-        for (SizeType ifreq = 0; ifreq < m_nfreqs; ++ifreq) {
-            for (SizeType iphase = 0; iphase < m_nbins; ++iphase) {
-                const auto bucket_idx = (ifreq * m_nbins) + iphase;
-                const auto start      = m_offsets[bucket_idx];
-                const auto end        = m_offsets[bucket_idx + 1];
-                std::sort(m_bucket_indices.data() + start,
-                          m_bucket_indices.data() + end);
-            }
-        }
     }
 
 }; // End BruteFold::Impl definition

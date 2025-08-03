@@ -191,10 +191,12 @@ FFAPlan::calculate_strides(std::span<const std::vector<double>> p_arr) {
     return strides;
 }
 
-void FFAPlan::resolve_coordinates(
-    std::span<std::vector<FFACoord>> coordinates) {
-    // Resolve the params for the FFA plan
-    std::vector<double> p_set_cur(n_params);
+void FFAPlan::resolve_coordinates_freq(
+    std::span<std::vector<FFACoordFreq>> coordinates) {
+    error_check::check_equal(n_params, 1,
+                             "resolve_coordinates_freq() only supports "
+                             "nparams=1");
+    // Resolve the frequency coordinates for the FFA plan
     const auto ncoords_max = std::ranges::max(ncoords);
     std::vector<float> relative_phase_batch(ncoords_max);
     std::vector<uint32_t> pindex_prev_flat(ncoords_max);
@@ -209,43 +211,84 @@ void FFAPlan::resolve_coordinates(
             std::span(relative_phase_batch).first(ncoords_cur);
         auto pindex_prev_flat_span =
             std::span(pindex_prev_flat).first(ncoords_cur);
-        if (n_params == 1) {
-            core::ffa_taylor_resolve_batch_freq(
-                params[i_level], params[i_level - 1], pindex_prev_flat_span,
-                relative_phase_batch_span, i_level, 0, m_cfg.get_tseg_brute(),
-                m_cfg.get_nbins());
-        } else {
-            core::ffa_taylor_resolve_batch(
-                params[i_level], params[i_level - 1],
-                param_cart_strides[i_level], param_cart_strides[i_level - 1],
-                pindex_prev_flat_span, relative_phase_batch_span, i_level, 0,
-                m_cfg.get_tseg_brute(), m_cfg.get_nbins(),
-                m_cfg.get_nthreads());
+        core::ffa_taylor_resolve_batch_freq(
+            params[i_level], params[i_level - 1], pindex_prev_flat_span,
+            relative_phase_batch_span, i_level, m_cfg.get_tseg_brute(),
+            m_cfg.get_nbins());
+        // Generate coordinates for the head
+        for (SizeType coord_idx = 0; coord_idx < ncoords_cur; ++coord_idx) {
+            coords_cur[coord_idx].idx   = pindex_prev_flat[coord_idx];
+            coords_cur[coord_idx].shift = relative_phase_batch[coord_idx];
         }
-        // Generate coordinates for the tail
+    }
+}
+
+void FFAPlan::resolve_coordinates(
+    std::span<std::vector<FFACoord>> coordinates) {
+    error_check::check_greater_equal(n_params, 2U,
+                                     "resolve_coordinates_deriv() only "
+                                     "supports nparams>=2");
+    error_check::check_less_equal(n_params, 3U,
+                                  "resolve_coordinates_deriv() only "
+                                  "supports nparams<=3. Larger values are "
+                                  "not supported yet.");
+
+    using ResolveFunc =
+        void (*)(std::span<const std::vector<double>>,
+                 std::span<const std::vector<double>>, std::span<uint32_t>,
+                 std::span<float>, SizeType, SizeType, double, SizeType);
+
+    constexpr std::array<ResolveFunc, 2> kResolveFuncs = {
+        core::ffa_taylor_resolve_batch_accel, // nparams == 2
+        core::ffa_taylor_resolve_batch_jerk   // nparams == 3
+    };
+
+    const auto resolve_func = kResolveFuncs[n_params - 2];
+
+    // Resolve the params for the FFA plan
+    const auto ncoords_max = std::ranges::max(ncoords);
+    std::vector<float> relative_phase_batch(ncoords_max);
+    std::vector<uint32_t> pindex_prev_flat(ncoords_max);
+
+    for (SizeType i_level = 1; i_level < n_levels; ++i_level) {
+        const auto ncoords_cur = ncoords[i_level];
+        auto& coords_cur       = coordinates[i_level];
+        error_check::check_greater_equal(coords_cur.size(), ncoords_cur,
+                                         "FFAPlan::resolve_coordinates: "
+                                         "coords_cur must have size >= "
+                                         "ncoords_cur");
+        auto relative_phase_batch_span =
+            std::span(relative_phase_batch).first(ncoords_cur);
+        auto pindex_prev_flat_span =
+            std::span(pindex_prev_flat).first(ncoords_cur);
+
+        // Tail coordinates
+        resolve_func(params[i_level], params[i_level - 1],
+                     pindex_prev_flat_span, relative_phase_batch_span, i_level,
+                     0, m_cfg.get_tseg_brute(), m_cfg.get_nbins());
         for (SizeType coord_idx = 0; coord_idx < ncoords_cur; ++coord_idx) {
             coords_cur[coord_idx].i_tail     = pindex_prev_flat[coord_idx];
             coords_cur[coord_idx].shift_tail = relative_phase_batch[coord_idx];
         }
-        if (n_params == 1) {
-            core::ffa_taylor_resolve_batch_freq(
-                params[i_level], params[i_level - 1], pindex_prev_flat_span,
-                relative_phase_batch_span, i_level, 1, m_cfg.get_tseg_brute(),
-                m_cfg.get_nbins());
-        } else {
-            core::ffa_taylor_resolve_batch(
-                params[i_level], params[i_level - 1],
-                param_cart_strides[i_level], param_cart_strides[i_level - 1],
-                pindex_prev_flat_span, relative_phase_batch_span, i_level, 1,
-                m_cfg.get_tseg_brute(), m_cfg.get_nbins(),
-                m_cfg.get_nthreads());
-        }
-        // Generate coordinates for the head
+
+        // Head coordinates
+        resolve_func(params[i_level], params[i_level - 1],
+                     pindex_prev_flat_span, relative_phase_batch_span, i_level,
+                     1, m_cfg.get_tseg_brute(), m_cfg.get_nbins());
         for (SizeType coord_idx = 0; coord_idx < ncoords_cur; ++coord_idx) {
             coords_cur[coord_idx].i_head     = pindex_prev_flat[coord_idx];
             coords_cur[coord_idx].shift_head = relative_phase_batch[coord_idx];
         }
     }
+}
+
+std::vector<std::vector<FFACoordFreq>> FFAPlan::resolve_coordinates_freq() {
+    std::vector<std::vector<FFACoordFreq>> coordinates(n_levels);
+    for (SizeType i_level = 0; i_level < n_levels; ++i_level) {
+        coordinates[i_level].resize(ncoords[i_level]);
+    }
+    resolve_coordinates_freq(std::span(coordinates));
+    return coordinates;
 }
 
 std::vector<std::vector<FFACoord>> FFAPlan::resolve_coordinates() {

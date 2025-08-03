@@ -27,27 +27,39 @@ public:
           m_ffa_plan(m_cfg),
           m_nthreads(m_cfg.get_nthreads()),
           m_use_single_buffer(m_ffa_plan.get_fold_size() >=
-                              m_ffa_plan.get_buffer_size()) {
+                              m_ffa_plan.get_buffer_size()),
+          m_is_freq_only(m_cfg.get_nparams() == 1) {
+
         // Allocate memory for the FFA buffers
         m_fold_in.resize(m_ffa_plan.get_buffer_size(), 0.0F);
         if (!m_use_single_buffer) {
             m_fold_out.resize(m_ffa_plan.get_buffer_size(), 0.0F);
         }
-        // Allocate memory for the FFA coordinates
-        m_coordinates.resize(m_ffa_plan.n_levels);
-        for (SizeType i_level = 0; i_level < m_ffa_plan.n_levels; ++i_level) {
-            m_coordinates[i_level].resize(m_ffa_plan.ncoords[i_level]);
+
+        // Allocate memory for the FFA coordinates (based on nparams)
+        if (m_is_freq_only) {
+            m_coordinates_freq.resize(m_ffa_plan.n_levels);
+            for (SizeType i_level = 0; i_level < m_ffa_plan.n_levels;
+                 ++i_level) {
+                m_coordinates_freq[i_level].resize(m_ffa_plan.ncoords[i_level]);
+            }
+        } else {
+            m_coordinates.resize(m_ffa_plan.n_levels);
+            for (SizeType i_level = 0; i_level < m_ffa_plan.n_levels;
+                 ++i_level) {
+                m_coordinates[i_level].resize(m_ffa_plan.ncoords[i_level]);
+            }
         }
+
         // Initialize the brute fold
         const auto t_ref =
             m_cfg.get_nparams() == 1 ? 0.0 : m_ffa_plan.tsegments[0] / 2.0;
         const auto freqs_arr = m_ffa_plan.params[0].back();
-
-        m_the_bf = std::make_unique<algorithms::BruteFold>(
+        m_the_bf             = std::make_unique<algorithms::BruteFold>(
             freqs_arr, m_ffa_plan.segment_lens[0], m_cfg.get_nbins(),
             m_cfg.get_nsamps(), m_cfg.get_tsamp(), t_ref, m_nthreads);
 
-        // Log detailed memory usage
+        // Log memory usage
         const auto memory_buffer_gb = m_ffa_plan.get_buffer_memory_usage();
         const auto memory_coord_gb  = m_ffa_plan.get_coord_memory_usage();
         spdlog::info("FFA Memory Usage: {:.2f} GB ({} buffers) + {:.2f} GB "
@@ -79,7 +91,12 @@ public:
             "FFA::Impl::execute: fold must have size fold_size");
 
         // Resolve the coordinates for the FFA plan
-        m_ffa_plan.resolve_coordinates(m_coordinates);
+        if (m_is_freq_only) {
+            m_ffa_plan.resolve_coordinates_freq(m_coordinates_freq);
+        } else {
+            m_ffa_plan.resolve_coordinates(m_coordinates);
+        }
+
         // Execute the FFA plan
         if (m_use_single_buffer) {
             execute_single_buffer(ts_e, ts_v, fold);
@@ -94,12 +111,14 @@ private:
     plans::FFAPlan m_ffa_plan;
     int m_nthreads;
     bool m_use_single_buffer;
+    bool m_is_freq_only;
     std::unique_ptr<algorithms::BruteFold> m_the_bf;
 
     // Buffers for the FFA plan
     std::vector<float> m_fold_in;
     std::vector<float> m_fold_out;
     std::vector<std::vector<plans::FFACoord>> m_coordinates;
+    std::vector<std::vector<plans::FFACoordFreq>> m_coordinates_freq;
 
     void initialize(std::span<const float> ts_e,
                     std::span<const float> ts_v,
@@ -186,21 +205,34 @@ private:
     void execute_iter(const float* __restrict__ fold_in,
                       float* __restrict__ fold_out,
                       SizeType i_level) {
-        const auto coords_cur   = m_coordinates[i_level];
         const auto nsegments    = m_ffa_plan.fold_shapes[i_level][0];
         const auto nbins        = m_ffa_plan.fold_shapes[i_level].back();
         const auto ncoords_cur  = m_ffa_plan.ncoords[i_level];
         const auto ncoords_prev = m_ffa_plan.ncoords[i_level - 1];
 
         // Choose strategy based on level characteristics
-        if (nsegments >= 256) {
-            kernels::ffa_iter_segment(fold_in, fold_out, coords_cur.data(),
-                                      nsegments, nbins, ncoords_cur,
-                                      ncoords_prev, m_nthreads);
+        if (m_is_freq_only) {
+            const auto coords_cur = m_coordinates_freq[i_level];
+            if (nsegments >= 256) {
+                kernels::ffa_iter_segment_freq(
+                    fold_in, fold_out, coords_cur.data(), nsegments, nbins,
+                    ncoords_cur, ncoords_prev, m_nthreads);
+            } else {
+                kernels::ffa_iter_standard_freq(
+                    fold_in, fold_out, coords_cur.data(), nsegments, nbins,
+                    ncoords_cur, ncoords_prev, m_nthreads);
+            }
         } else {
-            kernels::ffa_iter_standard(fold_in, fold_out, coords_cur.data(),
-                                       nsegments, nbins, ncoords_cur,
-                                       ncoords_prev, m_nthreads);
+            const auto coords_cur = m_coordinates[i_level];
+            if (nsegments >= 256) {
+                kernels::ffa_iter_segment(fold_in, fold_out, coords_cur.data(),
+                                          nsegments, nbins, ncoords_cur,
+                                          ncoords_prev, m_nthreads);
+            } else {
+                kernels::ffa_iter_standard(fold_in, fold_out, coords_cur.data(),
+                                           nsegments, nbins, ncoords_cur,
+                                           ncoords_prev, m_nthreads);
+            }
         }
     }
 }; // End FFA::Impl definition
@@ -213,7 +245,8 @@ public:
           m_ffa_plan(m_cfg),
           m_nthreads(m_cfg.get_nthreads()),
           m_use_single_buffer(m_ffa_plan.get_fold_size_complex() >=
-                              m_ffa_plan.get_buffer_size_complex()) {
+                              m_ffa_plan.get_buffer_size_complex()),
+          m_is_freq_only(m_cfg.get_nparams() == 1) {
         // Allocate memory for the FFA buffers
         m_fold_in.resize(m_ffa_plan.get_buffer_size_complex(),
                          ComplexType(0.0F, 0.0F));
@@ -221,17 +254,27 @@ public:
             m_fold_out.resize(m_ffa_plan.get_buffer_size_complex(),
                               ComplexType(0.0F, 0.0F));
         }
-        // Allocate memory for the FFA coordinates
-        m_coordinates.resize(m_ffa_plan.n_levels);
-        for (SizeType i_level = 0; i_level < m_ffa_plan.n_levels; ++i_level) {
-            m_coordinates[i_level].resize(m_ffa_plan.ncoords[i_level]);
+
+        // Allocate memory for the FFA coordinates (based on nparams)
+        if (m_is_freq_only) {
+            m_coordinates_freq.resize(m_ffa_plan.n_levels);
+            for (SizeType i_level = 0; i_level < m_ffa_plan.n_levels;
+                 ++i_level) {
+                m_coordinates_freq[i_level].resize(m_ffa_plan.ncoords[i_level]);
+            }
+        } else {
+            m_coordinates.resize(m_ffa_plan.n_levels);
+            for (SizeType i_level = 0; i_level < m_ffa_plan.n_levels;
+                 ++i_level) {
+                m_coordinates[i_level].resize(m_ffa_plan.ncoords[i_level]);
+            }
         }
+
         // Initialize the brute fold
         const auto t_ref =
             m_cfg.get_nparams() == 1 ? 0.0 : m_ffa_plan.tsegments[0] / 2.0;
         const auto freqs_arr = m_ffa_plan.params[0].back();
-
-        m_the_bf = std::make_unique<algorithms::BruteFoldComplex>(
+        m_the_bf             = std::make_unique<algorithms::BruteFoldComplex>(
             freqs_arr, m_ffa_plan.segment_lens[0], m_cfg.get_nbins(),
             m_cfg.get_nsamps(), m_cfg.get_tsamp(), t_ref, m_nthreads);
 
@@ -270,7 +313,11 @@ public:
                                  "size 2 * fold_size_complex");
 
         // Resolve the coordinates for the FFA plan
-        m_ffa_plan.resolve_coordinates(m_coordinates);
+        if (m_is_freq_only) {
+            m_ffa_plan.resolve_coordinates_freq(m_coordinates_freq);
+        } else {
+            m_ffa_plan.resolve_coordinates(m_coordinates);
+        }
 
         const auto nfft = fold_size / m_cfg.get_nbins();
         if (m_use_single_buffer) {
@@ -308,7 +355,11 @@ public:
             "FFACOMPLEX::Impl::execute: fold must have size fold_size_complex");
 
         // Resolve the coordinates for the FFA plan
-        m_ffa_plan.resolve_coordinates(m_coordinates);
+        if (m_is_freq_only) {
+            m_ffa_plan.resolve_coordinates_freq(m_coordinates_freq);
+        } else {
+            m_ffa_plan.resolve_coordinates(m_coordinates);
+        }
 
         if (m_use_single_buffer) {
             execute_single_buffer(ts_e, ts_v, fold_complex, false);
@@ -323,12 +374,14 @@ private:
     plans::FFAPlan m_ffa_plan;
     int m_nthreads;
     bool m_use_single_buffer;
+    bool m_is_freq_only;
     std::unique_ptr<algorithms::BruteFoldComplex> m_the_bf;
 
     // Buffers for the FFA plan
     std::vector<ComplexType> m_fold_in;
     std::vector<ComplexType> m_fold_out;
     std::vector<std::vector<plans::FFACoord>> m_coordinates;
+    std::vector<std::vector<plans::FFACoordFreq>> m_coordinates_freq;
 
     void initialize(std::span<const float> ts_e,
                     std::span<const float> ts_v,
@@ -449,8 +502,6 @@ private:
     void execute_iter(const ComplexType* __restrict__ fold_in,
                       ComplexType* __restrict__ fold_out,
                       SizeType i_level) {
-        const auto coords_cur   = m_coordinates[i_level];
-        const auto coords_prev  = m_coordinates[i_level - 1];
         const auto nsegments    = m_ffa_plan.fold_shapes[i_level][0];
         const auto nbins        = m_ffa_plan.fold_shapes[i_level].back();
         const auto nbins_f      = (nbins / 2) + 1;
@@ -458,14 +509,28 @@ private:
         const auto ncoords_prev = m_ffa_plan.ncoords[i_level - 1];
 
         // Choose strategy based on level characteristics
-        if (nsegments >= 256) {
-            kernels::ffa_complex_iter_segment(
-                fold_in, fold_out, coords_cur.data(), nsegments, nbins_f, nbins,
-                ncoords_cur, ncoords_prev, m_nthreads);
+        if (m_is_freq_only) {
+            const auto coords_cur = m_coordinates_freq[i_level];
+            if (nsegments >= 256) {
+                kernels::ffa_complex_iter_segment_freq(
+                    fold_in, fold_out, coords_cur.data(), nsegments, nbins_f,
+                    nbins, ncoords_cur, ncoords_prev, m_nthreads);
+            } else {
+                kernels::ffa_complex_iter_standard_freq(
+                    fold_in, fold_out, coords_cur.data(), nsegments, nbins_f,
+                    nbins, ncoords_cur, ncoords_prev, m_nthreads);
+            }
         } else {
-            kernels::ffa_complex_iter_standard(
-                fold_in, fold_out, coords_cur.data(), nsegments, nbins_f, nbins,
-                ncoords_cur, ncoords_prev, m_nthreads);
+            const auto coords_cur = m_coordinates[i_level];
+            if (nsegments >= 256) {
+                kernels::ffa_complex_iter_segment(
+                    fold_in, fold_out, coords_cur.data(), nsegments, nbins_f,
+                    nbins, ncoords_cur, ncoords_prev, m_nthreads);
+            } else {
+                kernels::ffa_complex_iter_standard(
+                    fold_in, fold_out, coords_cur.data(), nsegments, nbins_f,
+                    nbins, ncoords_cur, ncoords_prev, m_nthreads);
+            }
         }
     }
 }; // End FFACOMPLEX::Impl definition

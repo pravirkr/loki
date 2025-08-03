@@ -27,13 +27,23 @@ void shift_add(const float* __restrict__ data_tail,
  * @brief Optimized version of shift_add, using a single pre-allocated buffer of
  * size 2 * nbins.
  */
-void shift_add_buffer(const float* __restrict__ data_tail,
-                      float phase_shift_tail,
-                      const float* __restrict__ data_head,
-                      float phase_shift_head,
-                      float* __restrict__ out,
-                      float* __restrict__ temp_buffer,
-                      SizeType nbins) noexcept;
+void shift_add_buffer_binary(const float* __restrict__ data_tail,
+                             float phase_shift_tail,
+                             const float* __restrict__ data_head,
+                             float phase_shift_head,
+                             float* __restrict__ out,
+                             float* __restrict__ temp_buffer,
+                             SizeType nbins) noexcept;
+
+/**
+ * @brief Optimized version of shift_add_buffer, for frequency-only FFA.
+ */
+void shift_add_buffer_linear(const float* __restrict__ data_tail,
+                             const float* __restrict__ data_head,
+                             float phase_shift,
+                             float* __restrict__ out,
+                             float* __restrict__ temp_buffer,
+                             SizeType nbins) noexcept;
 
 /**
  * @brief Shift two complex arrays and add them together.
@@ -48,13 +58,13 @@ void shift_add_buffer(const float* __restrict__ data_tail,
  * @param nbins  The number of original bins in the input/output arrays
  * (time-domain)
  */
-void shift_add_complex(const ComplexType* __restrict__ data_tail,
-                       float phase_shift_tail,
-                       const ComplexType* __restrict__ data_head,
-                       float phase_shift_head,
-                       ComplexType* __restrict__ out,
-                       SizeType nbins_f,
-                       SizeType nbins) noexcept;
+void shift_add_complex_binary(const ComplexType* __restrict__ data_tail,
+                              float phase_shift_tail,
+                              const ComplexType* __restrict__ data_head,
+                              float phase_shift_head,
+                              ComplexType* __restrict__ out,
+                              SizeType nbins_f,
+                              SizeType nbins) noexcept;
 
 /**
  * @brief Optimized version of shift_add_complex using a recurrence relation for
@@ -66,63 +76,34 @@ void shift_add_complex(const ComplexType* __restrict__ data_tail,
  * @note This is the only version that vectorizes efficiently across
  * architectures. The other versions are not vectorized.
  */
-void shift_add_complex_recurrence(const ComplexType* __restrict__ data_tail,
-                                  float phase_shift_tail,
-                                  const ComplexType* __restrict__ data_head,
-                                  float phase_shift_head,
-                                  ComplexType* __restrict__ out,
-                                  SizeType nbins_f,
-                                  SizeType nbins) noexcept;
-
-/**
- * @brief Shift ffa data and add it to the folds data for each batch.
- *
- * @param data_folds  The folds data (size: nbatch * 2 * nbins)
- * @param idx_folds  The batch indices of the folds data (size: nbatch)
- * @param data_ffa  The ffa data (size: nbatch * 2 * nbins)
- * @param idx_ffa  The batch indices of the ffa data (size: nbatch)
- * @param shift_batch  The shifts to apply to the ffa data (size: nbatch)
- * @param out  The output array (size: nbatch * 2 * nbins)
- * @param temp_buffer  A pre-allocated buffer of size 2 * nbins
- * @param nbins  The number of bins in the input/output arrays (time-domain)
- * @param nbatch  The batch size.
- */
-void shift_add_buffer_batch(const float* __restrict__ data_folds,
-                            const SizeType* __restrict__ idx_folds,
-                            const float* __restrict__ data_ffa,
-                            const SizeType* __restrict__ idx_ffa,
-                            const SizeType* __restrict__ shift_batch,
-                            float* __restrict__ out,
-                            float* __restrict__ temp_buffer,
-                            SizeType nbins,
-                            SizeType nbatch) noexcept;
-
-/**
- * @brief Shift complex ffa data and add it to the complex folds data for each
- * batch.
- *
- * @param data_folds  The folds data (size: nbatch * 2 * nbins_f)
- * @param idx_folds  The batch indices of the folds data (size: nbatch)
- * @param data_ffa  The ffa data (size: nbatch * 2 * nbins_f)
- * @param idx_ffa  The batch indices of the ffa data (size: nbatch)
- * @param shift_batch  The shifts to apply to the ffa data (size: nbatch)
- * @param out  The output array (size: nbatch * 2 * nbins_f)
- * @param nbins_f  The number of frequency bins (FFT size)
- * @param nbins  The number of time-domain bins (original fold size)
- * @param nbatch  The batch size.
- *
- * @note Uses recurrence relation for phase calculation for optimal performance.
- */
-void shift_add_complex_recurrence_batch(
-    const ComplexType* __restrict__ data_folds,
-    const SizeType* __restrict__ idx_folds,
-    const ComplexType* __restrict__ data_ffa,
-    const SizeType* __restrict__ idx_ffa,
-    const float* __restrict__ shift_batch,
+void shift_add_complex_recurrence_binary(
+    const ComplexType* __restrict__ data_tail,
+    float phase_shift_tail,
+    const ComplexType* __restrict__ data_head,
+    float phase_shift_head,
     ComplexType* __restrict__ out,
     SizeType nbins_f,
-    SizeType nbins,
-    SizeType nbatch) noexcept;
+    SizeType nbins) noexcept;
+
+/**
+ * @brief Shift a complex array and add it to another complex array.
+ *
+ *
+ * @param data_tail  The tail of the data to add (size: 2 * nbins_f)
+ * @param data_head  The head of the data toshift to add (size: 2 * nbins_f)
+ * @param phase_shift  The phase shift to apply to the head.
+ * @param out  The output array (size: 2 * nbins_f)
+ * @param nbins_f  The number of bins in the input/output arrays (FFT size)
+ * @param nbins  The number of original bins in the input/output arrays
+ * (time-domain)
+ */
+void shift_add_complex_recurrence_linear(
+    const ComplexType* __restrict__ data_tail,
+    const ComplexType* __restrict__ data_head,
+    float phase_shift,
+    ComplexType* __restrict__ out,
+    SizeType nbins_f,
+    SizeType nbins) noexcept;
 
 /**
  * @brief Brute force fold a segment of data.
@@ -212,6 +193,24 @@ void ffa_iter_standard(const float* __restrict__ fold_in,
                        SizeType ncoords_prev,
                        int nthreads);
 
+void ffa_iter_segment_freq(const float* __restrict__ fold_in,
+                           float* __restrict__ fold_out,
+                           const plans::FFACoordFreq* __restrict__ coords_cur,
+                           SizeType nsegments,
+                           SizeType nbins,
+                           SizeType ncoords_cur,
+                           SizeType ncoords_prev,
+                           int nthreads);
+
+void ffa_iter_standard_freq(const float* __restrict__ fold_in,
+                            float* __restrict__ fold_out,
+                            const plans::FFACoordFreq* __restrict__ coords_cur,
+                            SizeType nsegments,
+                            SizeType nbins,
+                            SizeType ncoords_cur,
+                            SizeType ncoords_prev,
+                            int nthreads);
+
 void ffa_complex_iter_segment(const ComplexType* __restrict__ fold_in,
                               ComplexType* __restrict__ fold_out,
                               const plans::FFACoord* __restrict__ coords_cur,
@@ -231,5 +230,77 @@ void ffa_complex_iter_standard(const ComplexType* __restrict__ fold_in,
                                SizeType ncoords_cur,
                                SizeType ncoords_prev,
                                int nthreads);
+
+void ffa_complex_iter_segment_freq(
+    const ComplexType* __restrict__ fold_in,
+    ComplexType* __restrict__ fold_out,
+    const plans::FFACoordFreq* __restrict__ coords_cur,
+    SizeType nsegments,
+    SizeType nbins_f,
+    SizeType nbins,
+    SizeType ncoords_cur,
+    SizeType ncoords_prev,
+    int nthreads);
+
+void ffa_complex_iter_standard_freq(
+    const ComplexType* __restrict__ fold_in,
+    ComplexType* __restrict__ fold_out,
+    const plans::FFACoordFreq* __restrict__ coords_cur,
+    SizeType nsegments,
+    SizeType nbins_f,
+    SizeType nbins,
+    SizeType ncoords_cur,
+    SizeType ncoords_prev,
+    int nthreads);
+
+/**
+ * @brief Shift ffa data and add it to the folds data for each batch.
+ *
+ * @param data_folds  The folds data (size: nbatch * 2 * nbins)
+ * @param idx_folds  The batch indices of the folds data (size: nbatch)
+ * @param data_ffa  The ffa data (size: nbatch * 2 * nbins)
+ * @param idx_ffa  The batch indices of the ffa data (size: nbatch)
+ * @param shift_batch  The shifts to apply to the ffa data (size: nbatch)
+ * @param out  The output array (size: nbatch * 2 * nbins)
+ * @param temp_buffer  A pre-allocated buffer of size 2 * nbins
+ * @param nbins  The number of bins in the input/output arrays (time-domain)
+ * @param nbatch  The batch size.
+ */
+void shift_add_buffer_batch(const float* __restrict__ data_folds,
+                            const SizeType* __restrict__ idx_folds,
+                            const float* __restrict__ data_ffa,
+                            const SizeType* __restrict__ idx_ffa,
+                            const float* __restrict__ shift_batch,
+                            float* __restrict__ out,
+                            float* __restrict__ temp_buffer,
+                            SizeType nbins,
+                            SizeType nbatch) noexcept;
+
+/**
+ * @brief Shift complex ffa data and add it to the complex folds data for each
+ * batch.
+ *
+ * @param data_folds  The folds data (size: nbatch * 2 * nbins_f)
+ * @param idx_folds  The batch indices of the folds data (size: nbatch)
+ * @param data_ffa  The ffa data (size: nbatch * 2 * nbins_f)
+ * @param idx_ffa  The batch indices of the ffa data (size: nbatch)
+ * @param shift_batch  The shifts to apply to the ffa data (size: nbatch)
+ * @param out  The output array (size: nbatch * 2 * nbins_f)
+ * @param nbins_f  The number of frequency bins (FFT size)
+ * @param nbins  The number of time-domain bins (original fold size)
+ * @param nbatch  The batch size.
+ *
+ * @note Uses recurrence relation for phase calculation for optimal performance.
+ */
+void shift_add_complex_recurrence_batch(
+    const ComplexType* __restrict__ data_folds,
+    const SizeType* __restrict__ idx_folds,
+    const ComplexType* __restrict__ data_ffa,
+    const SizeType* __restrict__ idx_ffa,
+    const float* __restrict__ shift_batch,
+    ComplexType* __restrict__ out,
+    SizeType nbins_f,
+    SizeType nbins,
+    SizeType nbatch) noexcept;
 
 } // namespace loki::kernels
