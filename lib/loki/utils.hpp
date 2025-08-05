@@ -33,6 +33,10 @@ void circular_prefix_sum(std::span<const float> x, std::span<float> out);
  *
  * @param   arr_sorted  Monotonically non‑decreasing array.
  * @param   val         Search value (must be finite).
+ * @param   rtol        Relative tolerance for floating-point comparison
+ * (default: 1e-5).
+ * @param   atol        Absolute tolerance for floating-point comparison
+ *                      (default: 1e-8).
  * @return  Index of the nearest element.
  *
  * @throws  std::invalid_argument if the array is empty or @p val is NaN.
@@ -40,27 +44,39 @@ void circular_prefix_sum(std::span<const float> x, std::span<float> out);
  * @complex **O(log n)** comparisons via `std::ranges::lower_bound`.
  */
 [[nodiscard]] SizeType
-find_nearest_sorted_idx(std::span<const double> arr_sorted, double val);
+find_nearest_sorted_idx(std::span<const double> arr_sorted,
+                        double val,
+                        double rtol = 1e-5,
+                        double atol = 1e-8);
 
 /**
  * @brief  Two‑pointer **amortised O(1)** nearest‑index finder.
  *
- * Picks up searching from @p hint_idx, making it *extremely* efficient when
- * successive queries have monotonic or near‑monotonic values.
+ * Find the index of the closest value in a sorted array using a linear scan
+ * starting from a hint index.
  *
- * The function updates @p hint_idx so that the next call can resume from the
- * most recent lower‑bound position.
+ * In case of a tie, the index of the smaller value is returned.
+ * Behavior is undefined if the array is not sorted in ascending order.
+ * The hint_idx is updated to the returned index for use in subsequent calls.
  *
  * @param   arr_sorted  Monotonically non‑decreasing array.
  * @param   val         Search value (finite).
- * @param   hint_idx    [in/out]  Starting position hint; becomes the lower
- *                     bound after the call.
+ * @param   hint_idx    [in/out]  Reference to an index used as a starting point
+ * for the scan, updated to the returned index.
+ * @param   rtol        Relative tolerance for floating-point comparison
+ * (default: 1e-5).
+ * @param   atol        Absolute tolerance for floating-point comparison
+ *                      (default: 1e-8).
  * @return  Index of the nearest element (same tie rule as the binary version).
  *
  * @throws  std::invalid_argument if the array is empty, @p val is NaN.
  */
-[[nodiscard]] SizeType find_nearest_sorted_idx_scan(
-    std::span<const double> arr_sorted, double val, SizeType& hint_idx);
+[[nodiscard]] SizeType
+find_nearest_sorted_idx_scan(std::span<const double> arr_sorted,
+                             double val,
+                             SizeType& hint_idx,
+                             double rtol = 1e-5,
+                             double atol = 1e-8);
 
 /**
  * @brief  Return @p num indices centred (as much as possible) around

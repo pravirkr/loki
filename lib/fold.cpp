@@ -99,11 +99,12 @@ private:
             for (SizeType isamp = 0; isamp < m_segment_len; ++isamp) {
                 const auto proper_time =
                     (static_cast<double>(isamp) * m_tsamp) - m_t_ref;
-                const auto iphase =
-                    static_cast<uint32_t>(psr_utils::get_phase_idx_int(
-                        proper_time, m_freq_arr[ifreq], m_nbins, 0.0));
-                m_phase_map[freq_offset_in + isamp] = iphase;
-                const auto bucket_idx = (ifreq * m_nbins) + iphase;
+                const auto iphase = psr_utils::get_phase_idx(
+                    proper_time, m_freq_arr[ifreq], m_nbins, 0.0);
+                const auto iphase_int =
+                    static_cast<uint32_t>(std::nearbyint(iphase)) % m_nbins;
+                m_phase_map[freq_offset_in + isamp] = iphase_int;
+                const auto bucket_idx = (ifreq * m_nbins) + iphase_int;
                 ++counts[bucket_idx];
             }
         }

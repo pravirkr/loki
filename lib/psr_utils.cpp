@@ -17,27 +17,26 @@ float get_phase_idx(double proper_time,
         throw std::invalid_argument(
             std::format("Frequency must be positive (got {})", freq));
     }
-    if (nbins <= 0) {
+    if (nbins == 0) {
         throw std::invalid_argument(
             std::format("Number of bins must be positive (got {})", nbins));
     }
-    // Ensure norm_phase is non-negative
-    const auto phase      = std::fmod((proper_time + delay) * freq, 1.0);
-    const auto norm_phase = phase < 0.0 ? phase + 1.0 : phase;
-    // phase is in [0, 1). Round and wrap to ensure it is in [0, nbins).
-    return static_cast<float>(norm_phase * static_cast<double>(nbins));
-}
-
-SizeType get_phase_idx_int(double proper_time,
-                           double freq,
-                           SizeType nbins,
-                           double delay) {
-    const auto phase = get_phase_idx(proper_time, freq, nbins, delay);
-    auto iphase      = static_cast<SizeType>(std::round(phase));
-    if (iphase == nbins) {
-        iphase = 0;
+    // Calculate the total phase in cycles (can be negative or > 1)
+    const double total_phase = (proper_time + delay) * freq;
+    // Normalize phase to [0, 1) interval
+    double norm_phase = std::fmod(total_phase, 1.0);
+    // Handle negative phases by wrapping to positive equivalent
+    // This ensures the result is always in [0, 1)
+    if (norm_phase < 0.0) {
+        norm_phase += 1.0;
     }
-    return iphase;
+    // Scale the normalized phase to [0, nbins) and convert to float
+    auto scaled_phase =
+        static_cast<float>(norm_phase * static_cast<double>(nbins));
+    if (scaled_phase >= static_cast<float>(nbins)) {
+        scaled_phase = 0.0F;
+    }
+    return scaled_phase;
 }
 
 std::vector<double> poly_taylor_step_f(SizeType nparams,
@@ -582,7 +581,8 @@ std::vector<double> range_param(double vmin, double vmax, double dv) {
     }
     // np.linspace(vmin, vmax, npoints + 2)[1:-1]
     const auto npoints = static_cast<SizeType>((vmax - vmin) / dv);
-    auto grid_points   = utils::linspace(vmin, vmax, npoints + 2);
+    auto grid_points =
+        utils::linspace(vmin, vmax, npoints + 2, /*endpoint=*/true);
     return {grid_points.begin() + 1, grid_points.end() - 1};
 }
 

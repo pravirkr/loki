@@ -38,7 +38,7 @@ get_unique_indices_scores(std::span<const double> batch_leaves,
             batch_leaves[(i * leaves_stride_batch) + ((n_params - 2) * 2)];
         const double val2 =
             batch_leaves[(i * leaves_stride_batch) + ((n_params - 1) * 2)];
-        const auto key = static_cast<int64_t>(std::round((val1 + val2) * 1e9));
+        const auto key = static_cast<int64_t>(std::nearbyint((val1 + val2) * 1e9));
 
         auto it = unique_dict.find(key);
         if (it != unique_dict.end() && it->second) {

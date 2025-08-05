@@ -46,7 +46,9 @@ void circular_prefix_sum(std::span<const float> x, std::span<float> out) {
 }
 
 SizeType find_nearest_sorted_idx(std::span<const double> arr_sorted,
-                                 double val) {
+                                 double val,
+                                 double rtol,
+                                 double atol) {
     if (arr_sorted.empty()) {
         throw std::invalid_argument("find_nearest_sorted_idx: array is empty");
     }
@@ -61,15 +63,21 @@ SizeType find_nearest_sorted_idx(std::span<const double> arr_sorted,
         return arr_sorted.size() - 1;
     }
     // Check if previous element is closer
-    if (it != arr_sorted.begin() && val - *(it - 1) <= *it - val) {
-        --idx;
+    if (it != arr_sorted.begin()) {
+        const auto diff_prev = std::abs(val - *(it - 1));
+        const auto diff_curr = std::abs(*it - val);
+        if (diff_prev <= diff_curr * (1.0 + rtol) + atol) {
+            --idx;
+        }
     }
     return idx;
 }
 
 SizeType find_nearest_sorted_idx_scan(std::span<const double> arr_sorted,
                                       double val,
-                                      SizeType& hint_idx) {
+                                      SizeType& hint_idx,
+                                      double rtol,
+                                      double atol) {
     const auto n = arr_sorted.size();
     if (n == 0) {
         throw std::invalid_argument(
@@ -94,9 +102,12 @@ SizeType find_nearest_sorted_idx_scan(std::span<const double> arr_sorted,
     SizeType idx = hint_idx;
     if (idx == n) {
         idx = n - 1; // past the end
-    } else if (idx > 0 &&
-               (val - arr_sorted[idx - 1]) <= (arr_sorted[idx] - val)) {
-        --idx; // predecessor is closer (or tie)
+    } else if (idx > 0) {
+        double diff_prev = std::abs(val - arr_sorted[idx - 1]);
+        double diff_curr = std::abs(arr_sorted[idx] - val);
+        if (diff_prev <= diff_curr * (1.0 + rtol) + atol) {
+            --idx; // predecessor is closer (or tie)
+        }
     }
 
     hint_idx = idx; // keep hint consistent for next call
@@ -145,10 +156,8 @@ std::vector<double> linspace(double start,
         result[0] = start;
         return result;
     }
-    const auto step =
-        (stop - start) /
-        std::fmax(1.0, static_cast<double>(num_samples - (endpoint ? 1 : 0)));
-
+    const auto divisor = endpoint ? (num_samples - 1) : num_samples;
+    const auto step    = (stop - start) / static_cast<double>(divisor);
     for (SizeType i = 0; i < num_samples; ++i) {
         result[i] = start + step * static_cast<double>(i);
     }

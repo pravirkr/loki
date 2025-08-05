@@ -14,28 +14,13 @@
 namespace loki::cands {
 
 namespace {
-
+// Round-half-to-even (bankers' rounding)
 double round_dp(double x, int digits) noexcept {
-    // Round-half-to-even (bankers' rounding)
     if (!std::isfinite(x)) {
         return x;
     }
-
     const double scale = std::pow(10.0, digits);
-    double scaled      = x * scale;
-    double int_part;
-    double frac_part = std::modf(scaled, &int_part);
-
-    if (std::fabs(frac_part) == 0.5) {
-        // Round-half-to-even
-        if (std::fmod(int_part, 2.0) == 0.0) {
-            return int_part / scale; // already even
-        }
-        // round toward even
-        return (int_part + (scaled > 0 ? 1.0 : -1.0)) / scale;
-    }
-
-    return std::round(scaled) / scale;
+    return std::nearbyint(x * scale) / scale;
 }
 
 // Returns (ref_seg, task_id) as integers, or (-1, -1) if not matched

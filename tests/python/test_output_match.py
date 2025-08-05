@@ -79,7 +79,7 @@ def test_brute_fold_variants(
     )
 
 
-@pytest.mark.parametrize(("use_fft_shifts", "decimal"), [(False, 2), (True, 1)])
+@pytest.mark.parametrize(("use_fft_shifts", "decimal"), [(False, 3), (True, 1)])
 def test_ffa_freq(
     mock_data: tuple[np.ndarray, np.ndarray],
     default_params: dict[str, Any],
@@ -135,7 +135,7 @@ def test_ffa_freq(
         )
 
 
-@pytest.mark.parametrize(("use_fft_shifts", "decimal"), [(False, 2), (True, 1)])
+@pytest.mark.parametrize(("use_fft_shifts", "decimal"), [(False, 3), (True, 1)])
 def test_ffa_accel(
     mock_data: tuple[np.ndarray, np.ndarray],
     default_params: dict[str, Any],

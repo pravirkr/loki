@@ -15,17 +15,22 @@
 
 namespace loki::psr_utils {
 
-// Calculate the phase index of the proper time in the folded profile.
+/**
+ * @brief Computes the absolute phase index for a periodic signal.
+ *
+ * The phase is calculated as the fractional part of the total cycles
+ * ((time + delay) * frequency) and then scaled by the number of bins.
+ *
+ * @param proper_time The time of the event (e.g., arrival time).
+ * @param freq The frequency of the periodic signal in Hz.
+ * @param nbins The number of phase bins to divide the period into.
+ * @param delay A time delay offset to be added to proper_time.
+ * @return The phase bin index as a float, in the range [0, nbins).
+ */
 float get_phase_idx(double proper_time,
                     double freq,
                     SizeType nbins,
-                    double delay);
-
-// Calculate the rounded integer phase index of the proper time.
-SizeType get_phase_idx_int(double proper_time,
-                           double freq,
-                           SizeType nbins,
-                           double delay);
+                    double delay = 0.0);
 
 // Grid size for frequency and its derivatives {f_k, ..., f}.
 std::vector<double> poly_taylor_step_f(SizeType nparams,

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <numbers>
 
 #include <omp.h>
@@ -20,9 +21,9 @@ void shift_add(const float* __restrict__ data_tail,
                SizeType nbins) noexcept {
 
     const auto shift_tail =
-        static_cast<SizeType>(std::round(phase_shift_tail)) % nbins;
+        static_cast<SizeType>(std::nearbyint(phase_shift_tail)) % nbins;
     const auto shift_head =
-        static_cast<SizeType>(std::round(phase_shift_head)) % nbins;
+        static_cast<SizeType>(std::nearbyint(phase_shift_head)) % nbins;
 
     const float* __restrict__ data_tail_e = data_tail;
     const float* __restrict__ data_tail_v = data_tail + nbins;
@@ -49,29 +50,33 @@ void shift_add_buffer_binary(const float* __restrict__ data_tail,
                              float* __restrict__ temp_buffer,
                              SizeType nbins) noexcept {
 
-    const auto shift_tail_raw =
-        static_cast<SizeType>(std::round(phase_shift_tail));
-    const SizeType s_tail = (shift_tail_raw % nbins + nbins) % nbins;
-    const auto shift_head_raw =
-        static_cast<SizeType>(std::round(phase_shift_head));
-    const SizeType s_head     = (shift_head_raw % nbins + nbins) % nbins;
+    const auto shift_tail =
+        static_cast<SizeType>(std::nearbyint(phase_shift_tail)) % nbins;
+    const auto shift_head =
+        static_cast<SizeType>(std::nearbyint(phase_shift_head)) % nbins;
     const SizeType total_size = 2 * nbins;
 
-    // Rotate data_tail directly into the final output buffer for both channels
-    std::copy_n(data_tail, nbins - s_tail, out + s_tail);
-    std::copy_n(data_tail + nbins - s_tail, s_tail, out);
-    std::copy_n(data_tail + nbins, nbins - s_tail, out + nbins + s_tail);
-    std::copy_n(data_tail + nbins + nbins - s_tail, s_tail, out + nbins);
+    // Circular shift data_tail into out
+    const auto shift_tail_size = nbins - shift_tail;
+    std::memcpy(out + shift_tail, data_tail, sizeof(float) * shift_tail_size);
+    std::memcpy(out, data_tail + shift_tail_size, sizeof(float) * shift_tail);
+    std::memcpy(out + nbins + shift_tail, data_tail + nbins,
+                sizeof(float) * shift_tail_size);
+    std::memcpy(out + nbins, data_tail + nbins + shift_tail_size,
+                sizeof(float) * shift_tail);
 
-    // Rotate data_head into the temporary buffer for both channels
-    std::copy_n(data_head, nbins - s_head, temp_buffer + s_head);
-    std::copy_n(data_head + nbins - s_head, s_head, temp_buffer);
-    std::copy_n(data_head + nbins, nbins - s_head,
-                temp_buffer + nbins + s_head);
-    std::copy_n(data_head + nbins + nbins - s_head, s_head,
-                temp_buffer + nbins);
+    // Circular shift data_head into temp_buffer
+    const auto shift_head_size = nbins - shift_head;
+    std::memcpy(temp_buffer + shift_head, data_head,
+                sizeof(float) * shift_head_size);
+    std::memcpy(temp_buffer, data_head + shift_head_size,
+                sizeof(float) * shift_head);
+    std::memcpy(temp_buffer + nbins + shift_head, data_head + nbins,
+                sizeof(float) * shift_head_size);
+    std::memcpy(temp_buffer + nbins, data_head + nbins + shift_head_size,
+                sizeof(float) * shift_head);
 
-    // --- Perform the final addition in a single loop ---
+    // Perform the final addition in a single loop
     for (SizeType j = 0; j < total_size; ++j) {
         out[j] += temp_buffer[j];
     }
@@ -83,25 +88,20 @@ void shift_add_buffer_linear(const float* __restrict__ data_tail,
                              float* __restrict__ out,
                              float* __restrict__ temp_buffer,
                              SizeType nbins) noexcept {
-    // Trick to round phase shift to integer and wrap to [0, nbins)
-    // might be expensive but robust and handles negative shifts
-    const auto shift_raw      = static_cast<SizeType>(std::round(phase_shift));
-    const SizeType shift      = (shift_raw % nbins + nbins) % nbins;
+    const auto shift = static_cast<SizeType>(std::nearbyint(phase_shift)) % nbins;
     const SizeType total_size = 2 * nbins;
     // Optimized circular shift: rotate data_head into temp buffer
     // Right shift by 'shift' positions
-    const float* __restrict__ src1 = data_head;
-    const float* __restrict__ src2 = data_head + nbins;
-    float* __restrict__ dst1       = temp_buffer;
-    float* __restrict__ dst2       = temp_buffer + nbins;
-    const auto shift_size          = nbins - shift;
+    const auto shift_size = nbins - shift;
 
     // Copy last shift_size elements to beginning
-    std::memcpy(dst1 + shift, src1, sizeof(float) * shift_size);
+    std::memcpy(temp_buffer + shift, data_head, sizeof(float) * shift_size);
     // Copy first shift elements to end
-    std::memcpy(dst1, src1 + shift_size, sizeof(float) * shift);
-    std::memcpy(dst2 + shift, src2, sizeof(float) * shift_size);
-    std::memcpy(dst2, src2 + shift_size, sizeof(float) * shift);
+    std::memcpy(temp_buffer, data_head + shift_size, sizeof(float) * shift);
+    std::memcpy(temp_buffer + nbins + shift, data_head + nbins,
+                sizeof(float) * shift_size);
+    std::memcpy(temp_buffer + nbins, data_head + nbins + shift_size,
+                sizeof(float) * shift);
 
     // Perform the final addition in a single loop
     for (SizeType j = 0; j < total_size; ++j) {
@@ -219,8 +219,8 @@ void shift_add_complex_recurrence_binary(
     };
 
     // First process two batches at a time to maximize throughput
-    const SizeType main_loop = nbins_f - (nbins_f % (2 * kBatchSize));
-    for (SizeType k = 0; k < main_loop; k += 2 * kBatchSize) {
+    SizeType k = 0;
+    for (; k + 2 * kBatchSize <= nbins_f; k += 2 * kBatchSize) {
         const BatchType phase0_tail =
             xsimd::broadcast(current_block_start_phase_tail) * delta_vec_tail;
         const BatchType phase0_head =
@@ -238,7 +238,6 @@ void shift_add_complex_recurrence_binary(
     }
 
     // Process the remaining batches
-    SizeType k = main_loop;
     if (k + kBatchSize <= nbins_f) {
         const BatchType phase_tail =
             xsimd::broadcast(current_block_start_phase_tail) * delta_vec_tail;
@@ -319,8 +318,8 @@ void shift_add_complex_recurrence_linear(
     };
 
     // First process two batches at a time to maximize throughput
-    const SizeType main_loop = nbins_f - (nbins_f % (2 * kBatchSize));
-    for (SizeType k = 0; k < main_loop; k += 2 * kBatchSize) {
+    SizeType k = 0;
+    for (; k + 2 * kBatchSize <= nbins_f; k += 2 * kBatchSize) {
         const BatchType phase0 =
             xsimd::broadcast(current_block_start_phase) * delta_vec;
         compute_and_store(k, phase0);
@@ -332,7 +331,6 @@ void shift_add_complex_recurrence_linear(
     }
 
     // Process the remaining batches
-    SizeType k = main_loop;
     if (k + kBatchSize <= nbins_f) {
         const BatchType phase =
             xsimd::broadcast(current_block_start_phase) * delta_vec;
@@ -393,8 +391,8 @@ void brute_fold_segment(const float* __restrict__ ts_e_seg,
                 sum_v += ts_v_seg[idx];
             }
 
-            fold_e_base[iphase] += sum_e;
-            fold_v_base[iphase] += sum_v;
+            fold_e_base[iphase] = sum_e;
+            fold_v_base[iphase] = sum_v;
         }
     }
 }
@@ -479,8 +477,8 @@ void brute_fold_segment_complex(const float* __restrict__ ts_e_seg,
                 const auto phase =
                     phase_factor * BatchType::load_aligned(&proper_time[k]);
                 const auto [sin_phase, cos_phase] = xsimd::sincos(phase);
-                cos_phase.store_unaligned(&delta_phasors_r[k]);
-                sin_phase.store_unaligned(&delta_phasors_i[k]);
+                cos_phase.store_aligned(&delta_phasors_r[k]);
+                sin_phase.store_aligned(&delta_phasors_i[k]);
             };
 
         // --- Helper lambda for the core computation ---
@@ -508,8 +506,8 @@ void brute_fold_segment_complex(const float* __restrict__ ts_e_seg,
                 xsimd::fms(phasor_r, delta_r, phasor_i * delta_i);
             const auto new_i =
                 xsimd::fma(phasor_r, delta_i, phasor_i * delta_r);
-            new_r.store_unaligned(&current_phasors_r[k]);
-            new_i.store_unaligned(&current_phasors_i[k]);
+            new_r.store_aligned(&current_phasors_r[k]);
+            new_i.store_aligned(&current_phasors_i[k]);
         };
 
         // Compute base phasors
@@ -533,8 +531,10 @@ void brute_fold_segment_complex(const float* __restrict__ ts_e_seg,
             delta_phasors_r[j] = std::cos(phase);
             delta_phasors_i[j] = std::sin(phase);
         }
-        std::ranges::copy(delta_phasors_r, current_phasors_r.begin());
-        std::ranges::copy(delta_phasors_i, current_phasors_i.begin());
+        for (SizeType i = 0; i < segment_len; ++i) {
+            current_phasors_r[i] = delta_phasors_r[i];
+            current_phasors_i[i] = delta_phasors_i[i];
+        }
 
         // AC components with SIMD
         for (SizeType m = 1; m < nbins_f; ++m) {
