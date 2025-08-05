@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pytest
-from pyloki.config import PulsarSearchConfig
+from pyloki.config import ParamLimits, PulsarSearchConfig
 from pyloki.core import common
 from pyloki.ffa import compute_ffa
 from pyloki.io.timeseries import TimeSeries
@@ -35,6 +35,7 @@ def default_params() -> dict[str, Any]:
         "nthreads": 8,
         "freqs_arr": np.linspace(140, 145, 50),
         "nsamps": nsamps,
+        "tobs": nsamps * 0.000064,
     }
 
 
@@ -163,6 +164,66 @@ def test_ffa_accel(
         nbins=default_params["nbins"],
         tol_bins=2,
         param_limits=param_limits,
+        bseg_brute=1024,
+        bseg_ffa=default_params["nsamps"],
+        use_fft_shifts=use_fft_shifts,
+        nthreads=default_params["nthreads"],
+    )
+
+    cpp_fn = (
+        loki.ffa.compute_ffa if not use_fft_shifts else loki.ffa.compute_ffa_complex
+    )
+
+    out_cpp, _ = cpp_fn(ts_e, ts_v, cfg_cpp, quiet=True)
+    out_py = compute_ffa(TimeSeries(ts_e, ts_v, cfg_py.tsamp), cfg_py, quiet=True)
+
+    if use_fft_shifts:
+        shape = (*out_py.shape[:-1], (out_py.shape[-1] - 1) * 2)
+        np.testing.assert_array_almost_equal(
+            out_cpp.reshape(shape),
+            np.fft.irfft(out_py),
+            decimal=decimal,
+        )
+    else:
+        np.testing.assert_array_almost_equal(
+            out_cpp.reshape(out_py.shape),
+            out_py,
+            decimal=decimal,
+        )
+
+
+@pytest.mark.parametrize(("use_fft_shifts", "decimal"), [(False, 3), (True, 1)])
+def test_ffa_jerk(
+    mock_data: tuple[np.ndarray, np.ndarray],
+    default_params: dict[str, Any],
+    *,
+    use_fft_shifts: bool,
+    decimal: int,
+) -> None:
+    ts_e, ts_v = mock_data
+    param_limits = ParamLimits.from_upper(
+        [-0.5, -50.0, 143.5],
+        (-1, 1),
+        default_params["tobs"],
+    )
+
+    cfg_py = PulsarSearchConfig(
+        nsamps=default_params["nsamps"],
+        tsamp=default_params["tsamp"],
+        nbins=default_params["nbins"],
+        tol_bins=4,
+        param_limits=param_limits.limits,
+        bseg_brute=1024,
+        bseg_ffa=default_params["nsamps"],
+        use_fft_shifts=use_fft_shifts,
+    )
+
+    cfg_cpp = loki.configs.PulsarSearchConfig(
+        nsamps=default_params["nsamps"],
+        tsamp=default_params["tsamp"],
+        nbins=default_params["nbins"],
+        tol_bins=4,
+        param_limits=param_limits.limits,
         bseg_brute=1024,
         bseg_ffa=default_params["nsamps"],
         use_fft_shifts=use_fft_shifts,

@@ -88,7 +88,8 @@ void shift_add_buffer_linear(const float* __restrict__ data_tail,
                              float* __restrict__ out,
                              float* __restrict__ temp_buffer,
                              SizeType nbins) noexcept {
-    const auto shift = static_cast<SizeType>(std::nearbyint(phase_shift)) % nbins;
+    const auto shift =
+        static_cast<SizeType>(std::nearbyint(phase_shift)) % nbins;
     const SizeType total_size = 2 * nbins;
     // Optimized circular shift: rotate data_head into temp buffer
     // Right shift by 'shift' positions
@@ -424,11 +425,9 @@ void brute_fold_ts(const float* __restrict__ ts_e,
 void brute_fold_segment_complex(const float* __restrict__ ts_e_seg,
                                 const float* __restrict__ ts_v_seg,
                                 ComplexType* __restrict__ fold_seg,
-                                const double* __restrict__ freqs,
                                 SizeType nfreqs,
                                 SizeType nbins_f,
                                 SizeType segment_len,
-                                AlignedFloatVec& proper_time,
                                 AlignedFloatVec& delta_phasors_r,
                                 AlignedFloatVec& delta_phasors_i,
                                 AlignedFloatVec& current_phasors_r,
@@ -461,8 +460,8 @@ void brute_fold_segment_complex(const float* __restrict__ ts_e_seg,
     }
 
     for (SizeType ifreq = 0; ifreq < nfreqs; ++ifreq) {
-        const auto freq            = static_cast<float>(freqs[ifreq]);
-        const auto freq_offset_out = ifreq * 2 * nbins_f;
+        const auto freq_offset_out            = ifreq * 2 * nbins_f;
+        const auto phasor_offset              = ifreq * segment_len;
         ComplexType* __restrict__ fold_e_base = fold_seg + freq_offset_out;
         ComplexType* __restrict__ fold_v_base = fold_e_base + nbins_f;
 
@@ -470,23 +469,15 @@ void brute_fold_segment_complex(const float* __restrict__ ts_e_seg,
         fold_e_base[0] = ComplexType(sum_e, 0.0F);
         fold_v_base[0] = ComplexType(sum_v, 0.0F);
 
-        // --- Helper lambda for the phasors ---
-        auto compute_base_phasors =
-            [&](SizeType k, AlignedFloatVec& delta_phasors_r,
-                AlignedFloatVec& delta_phasors_i, float phase_factor) {
-                const auto phase =
-                    phase_factor * BatchType::load_aligned(&proper_time[k]);
-                const auto [sin_phase, cos_phase] = xsimd::sincos(phase);
-                cos_phase.store_aligned(&delta_phasors_r[k]);
-                sin_phase.store_aligned(&delta_phasors_i[k]);
-            };
-
         // --- Helper lambda for the core computation ---
         auto compute_dft_op = [&](SizeType k, BatchType& acc_e_r,
                                   BatchType& acc_e_i, BatchType& acc_v_r,
                                   BatchType& acc_v_i,
                                   AlignedFloatVec& current_phasors_r,
-                                  AlignedFloatVec& current_phasors_i) {
+                                  AlignedFloatVec& current_phasors_i,
+                                  AlignedFloatVec& delta_phasors_r,
+                                  AlignedFloatVec& delta_phasors_i,
+                                  SizeType phasor_offset) {
             const auto samples_e = BatchType::load_unaligned(&ts_e_seg[k]);
             const auto samples_v = BatchType::load_unaligned(&ts_v_seg[k]);
             const auto phasor_r =
@@ -500,8 +491,10 @@ void brute_fold_segment_complex(const float* __restrict__ ts_e_seg,
             acc_v_i = xsimd::fma(samples_v, phasor_i, acc_v_i);
 
             // update current phasor ← current * base
-            const auto delta_r = BatchType::load_aligned(&delta_phasors_r[k]);
-            const auto delta_i = BatchType::load_aligned(&delta_phasors_i[k]);
+            const auto delta_r =
+                BatchType::load_aligned(&delta_phasors_r[phasor_offset + k]);
+            const auto delta_i =
+                BatchType::load_aligned(&delta_phasors_i[phasor_offset + k]);
             const auto new_r =
                 xsimd::fms(phasor_r, delta_r, phasor_i * delta_i);
             const auto new_i =
@@ -509,32 +502,16 @@ void brute_fold_segment_complex(const float* __restrict__ ts_e_seg,
             new_r.store_aligned(&current_phasors_r[k]);
             new_i.store_aligned(&current_phasors_i[k]);
         };
-
-        // Compute base phasors
-        const auto phase_factor =
-            -2.0F * static_cast<float>(std::numbers::pi) * freq;
-        SizeType j = 0;
-        for (; j + 2 * kBatchSize <= segment_len; j += 2 * kBatchSize) {
-            compute_base_phasors(j, delta_phasors_r, delta_phasors_i,
-                                 phase_factor);
-            compute_base_phasors(j + kBatchSize, delta_phasors_r,
-                                 delta_phasors_i, phase_factor);
-        }
-        if (j + kBatchSize <= segment_len) {
-            compute_base_phasors(j, delta_phasors_r, delta_phasors_i,
-                                 phase_factor);
-            j += kBatchSize;
-        }
-        for (; j < segment_len; ++j) {
-            const auto phase =
-                static_cast<float>(phase_factor) * proper_time[j];
-            delta_phasors_r[j] = std::cos(phase);
-            delta_phasors_i[j] = std::sin(phase);
-        }
-        for (SizeType i = 0; i < segment_len; ++i) {
-            current_phasors_r[i] = delta_phasors_r[i];
-            current_phasors_i[i] = delta_phasors_i[i];
-        }
+        const float* __restrict__ base_r_start =
+            delta_phasors_r.data() + static_cast<std::ptrdiff_t>(phasor_offset);
+        const float* __restrict__ base_i_start =
+            delta_phasors_i.data() + static_cast<std::ptrdiff_t>(phasor_offset);
+        std::copy(base_r_start,
+                  base_r_start + static_cast<std::ptrdiff_t>(segment_len),
+                  current_phasors_r.data());
+        std::copy(base_i_start,
+                  base_i_start + static_cast<std::ptrdiff_t>(segment_len),
+                  current_phasors_i.data());
 
         // AC components with SIMD
         for (SizeType m = 1; m < nbins_f; ++m) {
@@ -546,13 +523,16 @@ void brute_fold_segment_complex(const float* __restrict__ ts_e_seg,
             SizeType k = 0;
             for (; k + 2 * kBatchSize <= segment_len; k += 2 * kBatchSize) {
                 compute_dft_op(k, acc_e_r, acc_e_i, acc_v_r, acc_v_i,
-                               current_phasors_r, current_phasors_i);
+                               current_phasors_r, current_phasors_i,
+                               delta_phasors_r, delta_phasors_i, phasor_offset);
                 compute_dft_op(k + kBatchSize, acc_e_r, acc_e_i, acc_v_r,
-                               acc_v_i, current_phasors_r, current_phasors_i);
+                               acc_v_i, current_phasors_r, current_phasors_i,
+                               delta_phasors_r, delta_phasors_i, phasor_offset);
             }
             if (k + kBatchSize <= segment_len) {
                 compute_dft_op(k, acc_e_r, acc_e_i, acc_v_r, acc_v_i,
-                               current_phasors_r, current_phasors_i);
+                               current_phasors_r, current_phasors_i,
+                               delta_phasors_r, delta_phasors_i, phasor_offset);
                 k += kBatchSize;
             }
 
@@ -571,9 +551,9 @@ void brute_fold_segment_complex(const float* __restrict__ ts_e_seg,
                 const float old_r = current_phasors_r[k];
                 const float old_i = current_phasors_i[k];
                 current_phasors_r[k] =
-                    old_r * delta_phasors_r[k] - old_i * delta_phasors_i[k];
+                    old_r * base_r_start[k] - old_i * base_i_start[k];
                 current_phasors_i[k] =
-                    old_r * delta_phasors_i[k] + old_i * delta_phasors_r[k];
+                    old_r * base_i_start[k] + old_i * base_r_start[k];
             }
 
             fold_e_base[m] = ComplexType(final_e_r, final_e_i);
@@ -593,8 +573,10 @@ void brute_fold_ts_complex(const float* __restrict__ ts_e,
                            double tsamp,
                            double t_ref,
                            int nthreads) noexcept {
-    nthreads           = std::clamp(nthreads, 1, omp_get_max_threads());
-    const auto nbins_f = (nbins / 2) + 1;
+    using BatchType           = xsimd::batch<float>;
+    constexpr auto kBatchSize = BatchType::size;
+    nthreads                  = std::clamp(nthreads, 1, omp_get_max_threads());
+    const auto nbins_f        = (nbins / 2) + 1;
 
     // Precompute proper_time vector
     AlignedFloatVec proper_time(segment_len);
@@ -602,13 +584,54 @@ void brute_fold_ts_complex(const float* __restrict__ ts_e,
         proper_time[i] =
             static_cast<float>((static_cast<double>(i) * tsamp) - t_ref);
     }
+    AlignedFloatVec delta_phasors_r(nfreqs * segment_len);
+    AlignedFloatVec delta_phasors_i(nfreqs * segment_len);
+    // --- Helper lambda for the phasors ---
+    // xsimd::sincos requires modulo 2pi phase
+    const auto two_pi = BatchType(2.0F * static_cast<float>(std::numbers::pi));
+    auto compute_base_phasors =
+        [&](SizeType k, AlignedFloatVec& delta_phasors_r,
+            AlignedFloatVec& delta_phasors_i, AlignedFloatVec& proper_time,
+            float phase_factor, SizeType phasor_offset) {
+            const auto phase_raw =
+                phase_factor * BatchType::load_aligned(&proper_time[k]);
+            const auto phase = xsimd::remainder(phase_raw, two_pi);
+            const auto [sin_phase, cos_phase] = xsimd::sincos(phase);
+            cos_phase.store_aligned(&delta_phasors_r[phasor_offset + k]);
+            sin_phase.store_aligned(&delta_phasors_i[phasor_offset + k]);
+        };
+    // Compute base phasors
+#pragma omp parallel for num_threads(nthreads) default(none)                   \
+    shared(freqs, nfreqs, segment_len, delta_phasors_r, delta_phasors_i,       \
+               proper_time, compute_base_phasors)
+    for (SizeType ifreq = 0; ifreq < nfreqs; ++ifreq) {
+        const auto phase_factor =
+            static_cast<float>(-2.0 * std::numbers::pi * freqs[ifreq]);
+        const auto phasor_offset = ifreq * segment_len;
+        SizeType j               = 0;
+        for (; j + 2 * kBatchSize <= segment_len; j += 2 * kBatchSize) {
+            compute_base_phasors(j, delta_phasors_r, delta_phasors_i,
+                                 proper_time, phase_factor, phasor_offset);
+            compute_base_phasors(j + kBatchSize, delta_phasors_r,
+                                 delta_phasors_i, proper_time, phase_factor,
+                                 phasor_offset);
+        }
+        if (j + kBatchSize <= segment_len) {
+            compute_base_phasors(j, delta_phasors_r, delta_phasors_i,
+                                 proper_time, phase_factor, phasor_offset);
+            j += kBatchSize;
+        }
+        for (; j < segment_len; ++j) {
+            const auto phase                   = phase_factor * proper_time[j];
+            delta_phasors_r[phasor_offset + j] = std::cos(phase);
+            delta_phasors_i[phasor_offset + j] = std::sin(phase);
+        }
+    }
 
 #pragma omp parallel num_threads(nthreads) default(none)                       \
-    shared(ts_e, ts_v, fold, freqs, nfreqs, nsegments, segment_len, nbins,     \
-               tsamp, t_ref, nbins_f, proper_time)
+    shared(ts_e, ts_v, fold, nfreqs, nsegments, segment_len, nbins, tsamp,     \
+               t_ref, nbins_f, delta_phasors_r, delta_phasors_i)
     {
-        AlignedFloatVec delta_phasors_r(segment_len);
-        AlignedFloatVec delta_phasors_i(segment_len);
         AlignedFloatVec current_phasors_r(segment_len);
         AlignedFloatVec current_phasors_i(segment_len);
 
@@ -619,10 +642,10 @@ void brute_fold_ts_complex(const float* __restrict__ ts_e,
             const float* __restrict__ ts_v_seg = ts_v + start_idx;
             ComplexType* __restrict__ fold_seg =
                 fold + (iseg * nfreqs * 2 * nbins_f);
-            brute_fold_segment_complex(
-                ts_e_seg, ts_v_seg, fold_seg, freqs, nfreqs, nbins_f,
-                segment_len, proper_time, delta_phasors_r, delta_phasors_i,
-                current_phasors_r, current_phasors_i);
+            brute_fold_segment_complex(ts_e_seg, ts_v_seg, fold_seg, nfreqs,
+                                       nbins_f, segment_len, delta_phasors_r,
+                                       delta_phasors_i, current_phasors_r,
+                                       current_phasors_i);
         }
     }
 }

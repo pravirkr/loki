@@ -119,9 +119,10 @@ public:
 private:
     std::filesystem::path m_filepath;
     Mode m_mode;
-    std::unique_ptr<HighFive::File> m_file;
-    std::unique_ptr<HighFive::Group> m_runs_group;
     inline static std::mutex m_hdf5_mutex;
+
+    HighFive::File open_file() const;
+    static HighFive::Group open_runs_group(HighFive::File& file);
 };
 
 /**

@@ -274,7 +274,7 @@ public:
         const auto t_ref =
             m_cfg.get_nparams() == 1 ? 0.0 : m_ffa_plan.tsegments[0] / 2.0;
         const auto freqs_arr = m_ffa_plan.params[0].back();
-        m_the_bf             = std::make_unique<algorithms::BruteFoldComplex>(
+        m_the_bf = std::make_unique<algorithms::BruteFoldComplex>(
             freqs_arr, m_ffa_plan.segment_lens[0], m_cfg.get_nbins(),
             m_cfg.get_nsamps(), m_cfg.get_tsamp(), t_ref, m_nthreads);
 

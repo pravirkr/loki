@@ -221,50 +221,28 @@ PruneStatsCollection::get_packed_data() const {
 // --- PruneResultWriter ---
 PruneResultWriter::PruneResultWriter(std::filesystem::path filename, Mode mode)
     : m_filepath(std::move(filename)),
-      m_mode(mode) {
-
-    HighFive::File::AccessMode open_mode;
-    if (m_mode == Mode::kWrite) {
-        open_mode = HighFive::File::Overwrite;
-    } else if (std::filesystem::exists(m_filepath)) {
-        open_mode = HighFive::File::ReadWrite;
-    } else {
-        open_mode = HighFive::File::Create;
-    }
-
-    m_file = std::make_unique<HighFive::File>(m_filepath.string(), open_mode);
-
-    if (!m_file || !m_file->isValid()) {
-        throw std::runtime_error("Failed to create valid HDF5 file");
-    }
-    if (!m_file->exist("runs")) {
-        m_runs_group =
-            std::make_unique<HighFive::Group>(m_file->createGroup("runs"));
-    } else {
-        m_runs_group =
-            std::make_unique<HighFive::Group>(m_file->getGroup("runs"));
-    }
-}
+      m_mode(mode) {}
 
 void PruneResultWriter::write_metadata(
     const std::vector<std::string>& param_names,
     SizeType nsegments,
     SizeType max_sugg,
     const std::vector<float>& threshold_scheme) {
-    if (m_file->exist("pruning_version")) {
+    HighFive::File file = open_file();
+    if (file.exist("pruning_version")) {
         throw std::runtime_error("Metadata already exists in file. Use "
                                  "append mode or new file.");
     }
-    m_file->createAttribute("pruning_version", "1.0.0-cpp");
-    m_file->createAttribute("param_names", param_names);
-    m_file->createAttribute("nsegments", nsegments);
-    m_file->createAttribute("max_sugg", max_sugg);
+    file.createAttribute("pruning_version", "1.0.0-cpp");
+    file.createAttribute("param_names", param_names);
+    file.createAttribute("nsegments", nsegments);
+    file.createAttribute("max_sugg", max_sugg);
 
     HighFive::DataSetCreateProps props;
     props.add(
         HighFive::Chunking(std::vector<hsize_t>{threshold_scheme.size()}));
     props.add(HighFive::Deflate(9)); // Gzip compression level 9
-    m_file->createDataSet("threshold_scheme", threshold_scheme, props);
+    file.createDataSet("threshold_scheme", threshold_scheme, props);
 }
 
 void PruneResultWriter::write_run_results(const std::string& run_name,
@@ -274,19 +252,26 @@ void PruneResultWriter::write_run_results(const std::string& run_name,
                                           SizeType n_param_sets,
                                           const PruneStatsCollection& pstats) {
     std::lock_guard<std::mutex> lock(m_hdf5_mutex);
-    if (m_runs_group->exist(run_name)) {
+
+    HighFive::File file        = open_file();
+    HighFive::Group runs_group = open_runs_group(file);
+    if (runs_group.exist(run_name)) {
         throw std::runtime_error(
             std::format("Run name {} already exists.", run_name));
     }
-    HighFive::Group run_group       = m_runs_group->createGroup(run_name);
+    HighFive::Group run_group       = runs_group.createGroup(run_name);
     auto [level_stats, timer_stats] = pstats.get_packed_data();
 
-    HighFive::DataSetCreateProps props;
-    const auto chunk_size =
-        static_cast<hsize_t>(std::min(1024UL, n_param_sets));
-    props.add(HighFive::Chunking(std::vector<hsize_t>{chunk_size}));
-    props.add(HighFive::Deflate(9));
-    run_group.createDataSet("param_sets", param_sets, props);
+    if (!param_sets.empty()) {
+        HighFive::DataSetCreateProps props;
+        const auto chunk_size =
+            static_cast<hsize_t>(std::min(1024UL, n_param_sets));
+        props.add(HighFive::Chunking(std::vector<hsize_t>{chunk_size}));
+        props.add(HighFive::Deflate(9));
+        run_group.createDataSet("param_sets", param_sets, props);
+    } else {
+        run_group.createDataSet("param_sets", param_sets);
+    }
 
     run_group.createDataSet("scheme", scheme);
     run_group.createDataSet("scores", scores);
@@ -296,6 +281,28 @@ void PruneResultWriter::write_run_results(const std::string& run_name,
     if (!timer_stats.empty()) {
         run_group.createDataSet("timer_stats", timer_stats);
     }
+}
+
+HighFive::File PruneResultWriter::open_file() const {
+    HighFive::File::AccessMode open_mode;
+    if (m_mode == Mode::kWrite) {
+        open_mode = HighFive::File::Overwrite;
+    } else if (std::filesystem::exists(m_filepath)) {
+        open_mode = HighFive::File::ReadWrite;
+    } else {
+        open_mode = HighFive::File::Create;
+    }
+
+    HighFive::File file(m_filepath.string(), open_mode);
+    if (!file.isValid()) {
+        throw std::runtime_error("Failed to create valid HDF5 file");
+    }
+    return file;
+}
+
+HighFive::Group PruneResultWriter::open_runs_group(HighFive::File& file) {
+    return file.exist("runs") ? file.getGroup("runs")
+                              : file.createGroup("runs");
 }
 
 void merge_prune_result_files(const std::filesystem::path& results_dir,
