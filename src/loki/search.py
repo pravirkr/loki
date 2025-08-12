@@ -17,7 +17,8 @@ def ffa_search(
     tseries: TimeSeries,
     search_cfg: PulsarSearchConfig,
     *,
-    show_progress: bool = True,
+    quiet: bool = False,
+    show_progress: bool = False,
 ) -> tuple[FFAPlan, Periodogram]:
     """Perform a Fast Folding Algorithm search on a time series.
 
@@ -27,7 +28,9 @@ def ffa_search(
         The time series to search.
     search_cfg : PulsarSearchConfig
         The configuration object for the search.
-    show_progress : bool, default=True
+    quiet : bool, default=False
+        Whether to suppress logging.
+    show_progress : bool, default=False
         Whether to show progress of FFA computation.
 
     Returns
@@ -39,6 +42,7 @@ def ffa_search(
         tseries.ts_e,
         tseries.ts_v,
         search_cfg,
+        quiet=quiet,
         show_progress=show_progress,
     )
     snrs = snrs_flat.reshape(

@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "loki/common/types.hpp"
+#include "loki/core/taylor.hpp"
 #include "loki/detection/score.hpp"
 #include "loki/search/configs.hpp"
 #include "loki/utils/fft.hpp"
@@ -105,6 +106,22 @@ private:
     std::unique_ptr<utils::IrfftExecutor> m_irfft_executor;
     // Cache for snr_boxcar_batch
     detection::BoxcarWidthsCache m_boxcar_widths_cache;
+
+    // Function pointers for resolving different polynomial orders
+    using PolyResolveFunc = void (*)(std::span<const double>,
+                                     std::pair<double, double>,
+                                     std::pair<double, double>,
+                                     std::span<const std::vector<double>>,
+                                     std::span<SizeType>,
+                                     std::span<float>,
+                                     SizeType,
+                                     SizeType,
+                                     SizeType);
+    static constexpr std::array<PolyResolveFunc, 3> kPolyResolveFuncs = {
+        poly_taylor_resolve_accel_batch,   // nparams == 2
+        poly_taylor_resolve_jerk_batch,    // nparams == 3
+        poly_taylor_resolve_circular_batch // nparams == 4
+    };
 };
 
 // Type aliases for convenience

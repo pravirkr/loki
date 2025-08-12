@@ -19,7 +19,7 @@ ffa_taylor_resolve(std::span<const double> pset_cur,
                    double tseg_brute,
                    SizeType nbins);
 
-void ffa_taylor_resolve_batch_freq(
+void ffa_taylor_resolve_freq_batch(
     std::span<const std::vector<double>> param_arr_cur,
     std::span<const std::vector<double>> param_arr_prev,
     std::span<uint32_t> pindex_prev_flat_batch,
@@ -28,7 +28,7 @@ void ffa_taylor_resolve_batch_freq(
     double tseg_brute,
     SizeType nbins);
 
-void ffa_taylor_resolve_batch_accel(
+void ffa_taylor_resolve_accel_batch(
     std::span<const std::vector<double>> param_arr_cur,
     std::span<const std::vector<double>> param_arr_prev,
     std::span<uint32_t> pindex_prev_flat_batch,
@@ -38,7 +38,7 @@ void ffa_taylor_resolve_batch_accel(
     double tseg_brute,
     SizeType nbins);
 
-void ffa_taylor_resolve_batch_jerk(
+void ffa_taylor_resolve_jerk_batch(
     std::span<const std::vector<double>> param_arr_cur,
     std::span<const std::vector<double>> param_arr_prev,
     std::span<uint32_t> pindex_prev_flat_batch,
@@ -47,6 +47,38 @@ void ffa_taylor_resolve_batch_jerk(
     SizeType latter,
     double tseg_brute,
     SizeType nbins);
+
+void ffa_taylor_resolve_snap_batch(
+    std::span<const std::vector<double>> param_arr_cur,
+    std::span<const std::vector<double>> param_arr_prev,
+    std::span<uint32_t> pindex_prev_flat_batch,
+    std::span<float> relative_phase_batch,
+    SizeType ffa_level,
+    SizeType latter,
+    double tseg_brute,
+    SizeType nbins);
+
+void poly_taylor_resolve_accel_batch(
+    std::span<const double> leaves_batch,
+    std::pair<double, double> coord_add,
+    std::pair<double, double> coord_init,
+    std::span<const std::vector<double>> param_arr,
+    std::span<SizeType> pindex_flat_batch,
+    std::span<float> relative_phase_batch,
+    SizeType nbins,
+    SizeType n_leaves,
+    SizeType n_params);
+
+void poly_taylor_resolve_jerk_batch(
+    std::span<const double> leaves_batch,
+    std::pair<double, double> coord_add,
+    std::pair<double, double> coord_init,
+    std::span<const std::vector<double>> param_arr,
+    std::span<SizeType> pindex_flat_batch,
+    std::span<float> relative_phase_batch,
+    SizeType nbins,
+    SizeType n_leaves,
+    SizeType n_params);
 
 void poly_taylor_resolve_batch(std::span<const double> batch_leaves,
                                std::pair<double, double> coord_add,
@@ -58,14 +90,14 @@ void poly_taylor_resolve_batch(std::span<const double> batch_leaves,
                                SizeType n_leaves,
                                SizeType n_params);
 
-void poly_taylor_resolve_snap_batch(
-    std::span<const double> batch_leaves,
+void poly_taylor_resolve_circular_batch(
+    std::span<const double> leaves_batch,
     std::pair<double, double> coord_add,
     std::pair<double, double> coord_init,
     std::span<const std::vector<double>> param_arr,
-    std::span<SizeType> param_idx_flat_batch,
+    std::span<SizeType> pindex_flat_batch,
     std::span<float> relative_phase_batch,
-    SizeType fold_bins,
+    SizeType nbins,
     SizeType n_leaves,
     SizeType n_params);
 

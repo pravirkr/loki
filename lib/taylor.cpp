@@ -48,7 +48,7 @@ ffa_taylor_resolve(std::span<const double> pset_cur,
     return {pindex_prev, relative_phase};
 }
 
-void ffa_taylor_resolve_batch_freq(
+void ffa_taylor_resolve_freq_batch(
     std::span<const std::vector<double>> param_arr_cur,
     std::span<const std::vector<double>> param_arr_prev,
     std::span<uint32_t> pindex_prev_flat_batch,
@@ -82,7 +82,7 @@ void ffa_taylor_resolve_batch_freq(
     }
 }
 
-void ffa_taylor_resolve_batch_accel(
+void ffa_taylor_resolve_accel_batch(
     std::span<const std::vector<double>> param_arr_cur,
     std::span<const std::vector<double>> param_arr_prev,
     std::span<uint32_t> pindex_prev_flat_batch,
@@ -98,10 +98,15 @@ void ffa_taylor_resolve_batch_accel(
     error_check::check_equal(nparams, 2U,
                              "nparams should be 2 for accel resolve");
 
-    const auto n_accel     = param_arr_cur[0].size();
-    const auto n_freq      = param_arr_cur[1].size();
-    const auto ncoords     = n_accel * n_freq;
-    const auto n_freq_prev = param_arr_prev[1].size();
+    // parameter access patterns
+    const auto& accel_arr_cur  = param_arr_cur[0];
+    const auto& freq_arr_cur   = param_arr_cur[1];
+    const auto& accel_arr_prev = param_arr_prev[0];
+    const auto& freq_arr_prev  = param_arr_prev[1];
+    const auto n_accel         = param_arr_cur[0].size();
+    const auto n_freq          = param_arr_cur[1].size();
+    const auto n_freq_prev     = param_arr_prev[1].size();
+    const auto ncoords         = n_accel * n_freq;
     error_check::check_equal(ncoords, pindex_prev_flat_batch.size(),
                              "pindex_prev_flat size mismatch");
     error_check::check_equal(ncoords, relative_phase_batch.size(),
@@ -114,20 +119,14 @@ void ffa_taylor_resolve_batch_accel(
     const auto inv_c_val       = 1.0 / utils::kCval;
     const auto half_delta_t_sq = 0.5 * delta_t * delta_t;
 
-    // parameter access patterns
-    const auto& accel_arr_cur  = param_arr_cur[0];
-    const auto& freq_arr_cur   = param_arr_cur[1];
-    const auto& accel_arr_prev = param_arr_prev[0];
-    const auto& freq_arr_prev  = param_arr_prev[1];
-
     SizeType hint_a = 0;
     for (SizeType accel_idx = 0; accel_idx < n_accel; ++accel_idx) {
         const auto a_cur = accel_arr_cur[accel_idx];
         const auto a_new = a_cur;
         const auto v_new = a_cur * delta_t;
         const auto d_new = a_cur * half_delta_t_sq;
-        const auto idx_a = utils::find_nearest_sorted_idx_scan(
-            std::span(accel_arr_prev), a_new, hint_a);
+        const auto idx_a =
+            utils::find_nearest_sorted_idx_scan(accel_arr_prev, a_new, hint_a);
 
         SizeType hint_f = 0;
         for (SizeType freq_idx = 0; freq_idx < n_freq; ++freq_idx) {
@@ -136,19 +135,18 @@ void ffa_taylor_resolve_batch_accel(
             const auto f_new     = f_cur * (1.0 + v_new * inv_c_val);
             const auto delay_rel = d_new * inv_c_val;
 
-            const auto relative_phase =
+            relative_phase_batch[coord_idx] =
                 psr_utils::get_phase_idx(delta_t, f_cur, nbins, delay_rel);
             const auto idx_f = utils::find_nearest_sorted_idx_scan(
-                std::span(freq_arr_prev), f_new, hint_f);
+                freq_arr_prev, f_new, hint_f);
 
             pindex_prev_flat_batch[coord_idx] =
                 static_cast<uint32_t>((idx_a * n_freq_prev) + idx_f);
-            relative_phase_batch[coord_idx] = relative_phase;
         }
     }
 }
 
-void ffa_taylor_resolve_batch_jerk(
+void ffa_taylor_resolve_jerk_batch(
     std::span<const std::vector<double>> param_arr_cur,
     std::span<const std::vector<double>> param_arr_prev,
     std::span<uint32_t> pindex_prev_flat_batch,
@@ -256,6 +254,277 @@ void ffa_taylor_resolve_batch_jerk(
     }
 }
 
+void ffa_taylor_resolve_snap_batch(
+    std::span<const std::vector<double>> param_arr_cur,
+    std::span<const std::vector<double>> param_arr_prev,
+    std::span<uint32_t> pindex_prev_flat_batch,
+    std::span<float> relative_phase_batch,
+    SizeType ffa_level,
+    SizeType latter,
+    double tseg_brute,
+    SizeType nbins) {
+    const auto nparams = param_arr_prev.size();
+    error_check::check_equal(
+        nparams, param_arr_cur.size(),
+        "param_arr_cur and param_arr_prev should have the same size");
+    error_check::check_equal(nparams, 4U,
+                             "nparams should be 4 for snap resolve");
+
+    const auto n_snap       = param_arr_cur[0].size();
+    const auto n_jerk       = param_arr_cur[1].size();
+    const auto n_accel      = param_arr_cur[2].size();
+    const auto n_freq       = param_arr_cur[3].size();
+    const auto ncoords      = n_snap * n_jerk * n_accel * n_freq;
+    const auto n_jerk_prev  = param_arr_prev[1].size();
+    const auto n_accel_prev = param_arr_prev[2].size();
+    const auto n_freq_prev  = param_arr_prev[3].size();
+
+    error_check::check_equal(ncoords, pindex_prev_flat_batch.size(),
+                             "pindex_prev_flat size mismatch");
+    error_check::check_equal(ncoords, relative_phase_batch.size(),
+                             "relative_phase_batch size mismatch");
+
+    const auto tsegment = std::pow(2.0, ffa_level - 1) * tseg_brute;
+    const auto delta_t  = (static_cast<double>(latter) - 0.5) * tsegment;
+
+    // Pre-compute constants to avoid repeated calculations
+    const auto inv_c_val                   = 1.0 / utils::kCval;
+    const auto delta_t_sq                  = delta_t * delta_t;
+    const auto delta_t_cubed               = delta_t_sq * delta_t;
+    const auto delta_t_fourth              = delta_t_cubed * delta_t;
+    const auto half_delta_t_sq             = 0.5 * delta_t_sq;
+    const auto sixth_delta_t_cubed         = delta_t_cubed / 6.0;
+    const auto twentyfourth_delta_t_fourth = delta_t_fourth / 24.0;
+
+    // Cache-friendly access patterns
+    const auto& snap_arr_cur   = param_arr_cur[0];
+    const auto& jerk_arr_cur   = param_arr_cur[1];
+    const auto& accel_arr_cur  = param_arr_cur[2];
+    const auto& freq_arr_cur   = param_arr_cur[3];
+    const auto& snap_arr_prev  = param_arr_prev[0];
+    const auto& jerk_arr_prev  = param_arr_prev[1];
+    const auto& accel_arr_prev = param_arr_prev[2];
+    const auto& freq_arr_prev  = param_arr_prev[3];
+
+    const auto snap_stride_prev  = n_jerk_prev * n_accel_prev * n_freq_prev;
+    const auto jerk_stride_prev  = n_accel_prev * n_freq_prev;
+    const auto accel_stride_prev = n_freq_prev;
+
+    // Separate hints for better search performance
+    SizeType hint_s = 0;
+
+    for (SizeType snap_idx = 0; snap_idx < n_snap; ++snap_idx) {
+        const auto s_cur = snap_arr_cur[snap_idx];
+        const auto s_new = s_cur; // No transformation needed
+
+        // Pre-compute snap-related terms for this snap value
+        const auto s_delta_t             = s_cur * delta_t;
+        const auto half_s_delta_t_sq     = 0.5 * s_cur * delta_t_sq;
+        const auto s_sixth_delta_t_cubed = s_cur * sixth_delta_t_cubed;
+        const auto s_twentyfourth_delta_t_fourth =
+            s_cur * twentyfourth_delta_t_fourth;
+
+        // Find snap index once per snap_idx
+        const auto idx_s = utils::find_nearest_sorted_idx_scan(
+            std::span(snap_arr_prev), s_new, hint_s);
+
+        SizeType hint_j = 0;
+
+        for (SizeType jerk_idx = 0; jerk_idx < n_jerk; ++jerk_idx) {
+            const auto j_cur = jerk_arr_cur[jerk_idx];
+
+            // Compute jerk-related terms
+            const auto j_new                 = j_cur + s_delta_t;
+            const auto j_delta_t             = j_cur * delta_t;
+            const auto half_j_delta_t_sq     = 0.5 * j_cur * delta_t_sq;
+            const auto j_sixth_delta_t_cubed = j_cur * sixth_delta_t_cubed;
+
+            // Find jerk index once per (snap_idx, jerk_idx) pair
+            const auto idx_j = utils::find_nearest_sorted_idx_scan(
+                std::span(jerk_arr_prev), j_new, hint_j);
+
+            SizeType hint_a = 0;
+
+            for (SizeType accel_idx = 0; accel_idx < n_accel; ++accel_idx) {
+                const auto a_cur = accel_arr_cur[accel_idx];
+
+                // Compute acceleration-related terms
+                const auto a_new = a_cur + j_delta_t + half_s_delta_t_sq;
+                const auto v_new = (a_cur * delta_t) + half_j_delta_t_sq +
+                                   s_sixth_delta_t_cubed;
+                const auto d_new = (a_cur * half_delta_t_sq) +
+                                   j_sixth_delta_t_cubed +
+                                   s_twentyfourth_delta_t_fourth;
+
+                // Find accel index once per (snap_idx, jerk_idx, accel_idx)
+                // tuple
+                const auto idx_a = utils::find_nearest_sorted_idx_scan(
+                    std::span(accel_arr_prev), a_new, hint_a);
+
+                // Pre-compute stride calculation
+                const auto snap_jerk_accel_offset = (idx_s * snap_stride_prev) +
+                                                    (idx_j * jerk_stride_prev) +
+                                                    (idx_a * accel_stride_prev);
+
+                SizeType hint_f = 0;
+
+                for (SizeType freq_idx = 0; freq_idx < n_freq; ++freq_idx) {
+                    const auto coord_idx =
+                        (((snap_idx * n_jerk + jerk_idx) * n_accel +
+                          accel_idx) *
+                         n_freq) +
+                        freq_idx;
+                    const auto f_cur = freq_arr_cur[freq_idx];
+
+                    // Frequency-specific calculations
+                    const auto f_new     = f_cur * (1.0 + v_new * inv_c_val);
+                    const auto delay_rel = d_new * inv_c_val;
+                    const auto relative_phase = psr_utils::get_phase_idx(
+                        delta_t, f_cur, nbins, delay_rel);
+
+                    const auto idx_f = utils::find_nearest_sorted_idx_scan(
+                        std::span(freq_arr_prev), f_new, hint_f);
+
+                    pindex_prev_flat_batch[coord_idx] =
+                        static_cast<uint32_t>(snap_jerk_accel_offset + idx_f);
+                    relative_phase_batch[coord_idx] = relative_phase;
+                }
+            }
+        }
+    }
+}
+
+void poly_taylor_resolve_accel_batch(
+    std::span<const double> leaves_batch,
+    std::pair<double, double> coord_add,
+    std::pair<double, double> coord_init,
+    std::span<const std::vector<double>> param_arr,
+    std::span<SizeType> pindex_flat_batch,
+    std::span<float> relative_phase_batch,
+    SizeType nbins,
+    SizeType n_leaves,
+    SizeType n_params) {
+    constexpr SizeType kParamsExpected    = 2;
+    constexpr SizeType kLeavesStrideParam = 2;
+    constexpr SizeType kLeavesStrideBatch =
+        (kParamsExpected + 2) * kLeavesStrideParam;
+
+    error_check::check_equal(n_params, kParamsExpected,
+                             "nparams should be 2 for accel resolve");
+    error_check::check_equal(param_arr.size(), kParamsExpected,
+                             "param_arr should have 2 parameters");
+    error_check::check_greater_equal(leaves_batch.size(),
+                                     n_leaves * kLeavesStrideBatch,
+                                     "batch_leaves size mismatch");
+    error_check::check_equal(pindex_flat_batch.size(), n_leaves,
+                             "param_idx_flat_batch size mismatch");
+    error_check::check_equal(relative_phase_batch.size(), n_leaves,
+                             "relative_phase_batch size mismatch");
+
+    const double delta_t = coord_add.first - coord_init.first;
+
+    // Cache-friendly access patterns
+    const auto& accel_arr_grid = param_arr[0];
+    const auto& freq_arr_grid  = param_arr[1];
+    const auto n_freq          = param_arr[1].size();
+
+    // Pre-compute constants to avoid repeated calculations
+    const auto inv_c_val       = 1.0 / utils::kCval;
+    const auto half_delta_t_sq = 0.5 * delta_t * delta_t;
+
+    SizeType hint_a = 0, hint_f = 0;
+    for (SizeType i = 0; i < n_leaves; ++i) {
+        const SizeType batch_offset = i * kLeavesStrideBatch;
+
+        const auto a_cur     = leaves_batch[batch_offset + 0];
+        const auto f_cur     = leaves_batch[batch_offset + 2];
+        const auto a_new     = a_cur;
+        const auto v_new     = a_cur * delta_t;
+        const auto d_new     = a_cur * half_delta_t_sq;
+        const auto f_new     = f_cur * (1.0 + v_new * inv_c_val);
+        const auto delay_rel = d_new * inv_c_val;
+
+        // Calculate relative phase
+        relative_phase_batch[i] =
+            psr_utils::get_phase_idx(delta_t, f_cur, nbins, delay_rel);
+
+        // Find nearest grid indices
+        const auto idx_a =
+            utils::find_nearest_sorted_idx_scan(accel_arr_grid, a_new, hint_a);
+        const auto idx_f =
+            utils::find_nearest_sorted_idx_scan(freq_arr_grid, f_new, hint_f);
+        pindex_flat_batch[i] = idx_a * n_freq + idx_f;
+    }
+}
+
+void poly_taylor_resolve_jerk_batch(
+    std::span<const double> leaves_batch,
+    std::pair<double, double> coord_add,
+    std::pair<double, double> coord_init,
+    std::span<const std::vector<double>> param_arr,
+    std::span<SizeType> pindex_flat_batch,
+    std::span<float> relative_phase_batch,
+    SizeType nbins,
+    SizeType n_leaves,
+    SizeType n_params) {
+    constexpr SizeType kParamsExpected    = 3;
+    constexpr SizeType kLeavesStrideParam = 2;
+    constexpr SizeType kLeavesStrideBatch =
+        (kParamsExpected + 2) * kLeavesStrideParam;
+
+    error_check::check_equal(n_params, kParamsExpected,
+                             "nparams should be 3 for jerk resolve");
+    error_check::check_equal(param_arr.size(), kParamsExpected,
+                             "param_arr should have 3 parameters");
+    error_check::check_greater_equal(leaves_batch.size(),
+                                     n_leaves * kLeavesStrideBatch,
+                                     "batch_leaves size mismatch");
+    error_check::check_equal(pindex_flat_batch.size(), n_leaves,
+                             "param_idx_flat_batch size mismatch");
+    error_check::check_equal(relative_phase_batch.size(), n_leaves,
+                             "relative_phase_batch size mismatch");
+
+    const double delta_t = coord_add.first - coord_init.first;
+
+    // Cache-friendly access patterns
+    const auto& accel_arr_grid = param_arr[1];
+    const auto& freq_arr_grid  = param_arr[2];
+    const auto n_freq          = param_arr[2].size();
+
+    // Pre-compute constants to avoid repeated calculations
+    const auto inv_c_val           = 1.0 / utils::kCval;
+    const auto delta_t_sq          = delta_t * delta_t;
+    const auto delta_t_cubed       = delta_t_sq * delta_t;
+    const auto half_delta_t_sq     = 0.5 * delta_t_sq;
+    const auto sixth_delta_t_cubed = delta_t_cubed / 6.0;
+
+    SizeType hint_a = 0, hint_f = 0;
+    for (SizeType i = 0; i < n_leaves; ++i) {
+        const SizeType batch_offset = i * kLeavesStrideBatch;
+
+        const auto j_cur = leaves_batch[batch_offset + 0];
+        const auto a_cur = leaves_batch[batch_offset + 2];
+        const auto f_cur = leaves_batch[batch_offset + 4];
+        const auto a_new = a_cur + (j_cur * delta_t);
+        const auto v_new = (a_cur * delta_t) + (j_cur * half_delta_t_sq);
+        const auto d_new =
+            (a_cur * half_delta_t_sq) + (j_cur * sixth_delta_t_cubed);
+        const auto f_new     = f_cur * (1.0 + v_new * inv_c_val);
+        const auto delay_rel = d_new * inv_c_val;
+
+        // Calculate relative phase
+        relative_phase_batch[i] =
+            psr_utils::get_phase_idx(delta_t, f_cur, nbins, delay_rel);
+
+        // Find nearest grid indices
+        const auto idx_a =
+            utils::find_nearest_sorted_idx_scan(accel_arr_grid, a_new, hint_a);
+        const auto idx_f =
+            utils::find_nearest_sorted_idx_scan(freq_arr_grid, f_new, hint_f);
+        pindex_flat_batch[i] = idx_a * n_freq + idx_f;
+    }
+}
+
 void poly_taylor_resolve_batch(std::span<const double> batch_leaves,
                                std::pair<double, double> coord_add,
                                std::pair<double, double> coord_init,
@@ -307,150 +576,148 @@ void poly_taylor_resolve_batch(std::span<const double> batch_leaves,
     }
 }
 
-void poly_taylor_resolve_snap_batch(
-    std::span<const double> batch_leaves,
+void poly_taylor_resolve_circular_batch(
+    std::span<const double> leaves_batch,
     std::pair<double, double> coord_add,
     std::pair<double, double> coord_init,
     std::span<const std::vector<double>> param_arr,
-    std::span<SizeType> param_idx_flat_batch,
+    std::span<SizeType> pindex_flat_batch,
     std::span<float> relative_phase_batch,
-    SizeType fold_bins,
+    SizeType nbins,
     SizeType n_leaves,
     SizeType n_params) {
-    const SizeType leaves_stride_param = 2;
-    const SizeType leaves_stride_batch = (n_params + 2) * leaves_stride_param;
-    error_check::check_equal(n_params, 4U,
+    constexpr SizeType kParamsExpected    = 4;
+    constexpr SizeType kLeavesStrideParam = 2;
+    constexpr SizeType kLeavesStrideBatch =
+        (kParamsExpected + 2) * kLeavesStrideParam;
+
+    error_check::check_equal(n_params, kParamsExpected,
                              "nparams should be 4 for circular orbit resolve");
-    error_check::check_equal(n_params, param_arr.size(),
-                             "nparams should be equal to param_arr size");
-    error_check::check_greater_equal(batch_leaves.size(),
-                                     n_leaves * leaves_stride_batch,
+    error_check::check_equal(param_arr.size(), kParamsExpected,
+                             "param_arr should have 4 parameters");
+    error_check::check_greater_equal(leaves_batch.size(),
+                                     n_leaves * kLeavesStrideBatch,
                                      "batch_leaves size mismatch");
-    error_check::check_equal(param_idx_flat_batch.size(), n_leaves,
-                             "param_idx_flat_batch size mismatch");
+    error_check::check_equal(pindex_flat_batch.size(), n_leaves,
+                             "pindex_flat_batch size mismatch");
     error_check::check_equal(relative_phase_batch.size(), n_leaves,
                              "relative_phase_batch size mismatch");
-    const double delta_t = coord_add.first - coord_init.first;
+    const double delta_t   = coord_add.first - coord_init.first;
+    const double inv_c_val = 1.0 / utils::kCval;
 
-    // Create mask for circular orbit conditions
+    // Cache-friendly access to parameter grids
+    const auto& accel_arr_grid = param_arr[2];
+    const auto& freq_arr_grid  = param_arr[3];
+    const auto n_freq          = param_arr[3].size();
+
+    // Categorize leaves into circular vs normal
     std::vector<bool> mask(n_leaves);
     std::vector<SizeType> idx_circular, idx_normal;
+    idx_circular.reserve(n_leaves / 2);
+    idx_normal.reserve(n_leaves / 2);
 
     for (SizeType i = 0; i < n_leaves; ++i) {
-        const SizeType batch_offset = i * leaves_stride_batch;
-        const double snap           = batch_leaves[batch_offset];
-        const double dsnap          = batch_leaves[batch_offset + 1];
-        const double accel          = batch_leaves[batch_offset + 4];
+        const SizeType batch_offset = i * kLeavesStrideBatch;
 
-        mask[i] = (accel != 0.0) && (snap != 0.0) && ((-snap / accel) > 0.0) &&
-                  (std::abs(snap / dsnap) > 5.0);
+        const auto snap  = leaves_batch[batch_offset];
+        const auto dsnap = leaves_batch[batch_offset + 1];
+        const auto accel = leaves_batch[batch_offset + 4];
 
-        if (mask[i]) {
+        // Circular orbit mask condition
+        const bool is_circular = (accel != 0.0) && (snap != 0.0) &&
+                                 ((-snap / accel) > 0.0) &&
+                                 (std::abs(snap / dsnap) > 5.0);
+        if (is_circular) {
             idx_circular.push_back(i);
         } else {
             idx_normal.push_back(i);
         }
     }
 
-    // Allocate working memory for transformed parameters and delays
-    std::vector<double> kvec_new_batch(n_leaves * n_params);
-    std::vector<double> delay_batch(n_leaves);
 
+    SizeType hint_a = 0, hint_f = 0;
     // Process circular indices
-    if (!idx_circular.empty()) {
-        std::vector<double> param_vec_circular_data(idx_circular.size() *
-                                                    leaves_stride_batch);
-        // Extract subset for circular processing
-        for (SizeType i = 0; i < idx_circular.size(); ++i) {
-            const SizeType orig_idx   = idx_circular[i];
-            const SizeType src_offset = orig_idx * leaves_stride_batch;
-            const SizeType dst_offset = i * leaves_stride_batch;
-            std::copy(
-                batch_leaves.begin() + static_cast<IndexType>(src_offset),
-                batch_leaves.begin() +
-                    static_cast<IndexType>(src_offset + leaves_stride_batch),
-                param_vec_circular_data.begin() +
-                    static_cast<IndexType>(dst_offset));
-        }
+    for (SizeType i : idx_circular) {
+        const SizeType batch_offset = i * kLeavesStrideBatch;
 
-        std::vector<double> kvec_circ(idx_circular.size() * n_params);
-        std::vector<double> delay_circ(idx_circular.size());
-        psr_utils::shift_params_circular_batch(
-            param_vec_circular_data, delta_t, idx_circular.size(), n_params,
-            leaves_stride_batch, kvec_circ, delay_circ);
+        const auto s_cur = leaves_batch[batch_offset + 0];
+        const auto j_cur = leaves_batch[batch_offset + 2];
+        const auto a_cur = leaves_batch[batch_offset + 4];
+        const auto f_cur = leaves_batch[batch_offset + 6];
 
-        // Copy results back to main arrays
-        for (SizeType i = 0; i < idx_circular.size(); ++i) {
-            const SizeType orig_idx   = idx_circular[i];
-            const SizeType src_offset = i * n_params;
-            const SizeType dst_offset = orig_idx * n_params;
-            std::copy(kvec_circ.begin() + static_cast<IndexType>(src_offset),
-                      kvec_circ.begin() +
-                          static_cast<IndexType>(src_offset + n_params),
-                      kvec_new_batch.begin() +
-                          static_cast<IndexType>(dst_offset));
-            delay_batch[orig_idx] = delay_circ[i];
-        }
+        // Circular orbit mask condition
+        const auto minus_omega_sq  = s_cur / a_cur;
+        const auto omega_orb       = std::sqrt(-minus_omega_sq);
+        const auto omega_orb_sq    = -minus_omega_sq;
+        const auto omega_orb_cubed = omega_orb * omega_orb_sq;
+        const auto x_cos_nu_i_c    = -j_cur / omega_orb_cubed;
+        const auto x_sin_nu_i_c    = -a_cur / omega_orb_sq;
+        // Evolve the phase to the new time t_j = t_i + delta_t
+        const auto omega_dt = omega_orb * delta_t;
+        const auto cos_odt  = std::cos(omega_dt);
+        const auto sin_odt  = std::sin(omega_dt);
+        const auto x_cos_nu_j_c =
+            (x_cos_nu_i_c * cos_odt) - (x_sin_nu_i_c * sin_odt);
+        const auto x_sin_nu_j_c =
+            (x_sin_nu_i_c * cos_odt) + (x_cos_nu_i_c * sin_odt);
+        // Calculate the new derivatives at t_j directly from the new phase
+        const auto a_new     = -x_cos_nu_j_c * omega_orb_sq;
+        const auto v_new     = -x_sin_nu_j_c * omega_orb;
+        const auto d_new     = x_cos_nu_j_c - x_cos_nu_i_c;
+        const auto f_new     = f_cur * (1.0 + v_new * inv_c_val);
+        const auto delay_rel = d_new * inv_c_val;
+
+        // Calculate relative phase
+        relative_phase_batch[i] =
+            psr_utils::get_phase_idx(delta_t, f_cur, nbins, delay_rel);
+
+        // Find nearest grid indices (only need accel and freq)
+        const auto idx_a =
+            utils::find_nearest_sorted_idx_scan(accel_arr_grid, a_new, hint_a);
+        const auto idx_f =
+            utils::find_nearest_sorted_idx_scan(freq_arr_grid, f_new, hint_f);
+
+        pindex_flat_batch[i] = idx_a * n_freq + idx_f;
     }
 
+    // Reset hints
+    hint_a = 0;
+    hint_f = 0;
+
+    // Pre-compute constants to avoid repeated calculations
+    const auto delta_t_sq                  = delta_t * delta_t;
+    const auto delta_t_cubed               = delta_t_sq * delta_t;
+    const auto delta_t_fourth              = delta_t_cubed * delta_t;
+    const auto half_delta_t_sq             = 0.5 * delta_t_sq;
+    const auto sixth_delta_t_cubed         = delta_t_cubed / 6.0;
+    const auto twentyfourth_delta_t_fourth = delta_t_fourth / 24.0;
     // Process normal indices
-    if (!idx_normal.empty()) {
-        std::vector<double> param_vec_normal_data(idx_normal.size() *
-                                                  leaves_stride_batch);
-        // Extract normal data
-        for (SizeType i = 0; i < idx_normal.size(); ++i) {
-            const SizeType orig_idx   = idx_normal[i];
-            const SizeType src_offset = orig_idx * leaves_stride_batch;
-            const SizeType dst_offset = i * leaves_stride_batch;
-            std::copy(
-                batch_leaves.begin() + static_cast<IndexType>(src_offset),
-                batch_leaves.begin() +
-                    static_cast<IndexType>(src_offset + leaves_stride_batch),
-                param_vec_normal_data.begin() +
-                    static_cast<IndexType>(dst_offset));
-        }
+    for (SizeType i : idx_normal) {
+        const SizeType batch_offset = i * kLeavesStrideBatch;
 
-        std::vector<double> kvec_norm(idx_normal.size() * n_params);
-        std::vector<double> delay_norm(idx_normal.size());
+        const auto s_cur = leaves_batch[batch_offset + 0];
+        const auto j_cur = leaves_batch[batch_offset + 2];
+        const auto a_cur = leaves_batch[batch_offset + 4];
+        const auto f_cur = leaves_batch[batch_offset + 6];
+        const auto a_new =
+            a_cur + (j_cur * delta_t) + (s_cur * half_delta_t_sq);
+        const auto v_new = (a_cur * delta_t) + (j_cur * half_delta_t_sq) +
+                           (s_cur * sixth_delta_t_cubed);
+        const auto d_new = (a_cur * half_delta_t_sq) +
+                           (j_cur * sixth_delta_t_cubed) +
+                           (s_cur * twentyfourth_delta_t_fourth);
+        const auto f_new     = f_cur * (1.0 + v_new * inv_c_val);
+        const auto delay_rel = d_new * inv_c_val;
 
-        psr_utils::shift_params_batch(
-            param_vec_normal_data, delta_t, idx_normal.size(), n_params,
-            leaves_stride_batch, kvec_norm, delay_norm);
+        // Calculate relative phase
+        relative_phase_batch[i] =
+            psr_utils::get_phase_idx(delta_t, f_cur, nbins, delay_rel);
 
-        // Copy results back to main arrays
-        for (SizeType i = 0; i < idx_normal.size(); ++i) {
-            const SizeType orig_idx   = idx_normal[i];
-            const SizeType src_offset = i * n_params;
-            const SizeType dst_offset = orig_idx * n_params;
-            std::copy(kvec_norm.begin() + static_cast<IndexType>(src_offset),
-                      kvec_norm.begin() +
-                          static_cast<IndexType>(src_offset + n_params),
-                      kvec_new_batch.begin() +
-                          static_cast<IndexType>(dst_offset));
-            delay_batch[orig_idx] = delay_norm[i];
-        }
-    }
-
-    // Calculate relative phases
-    for (SizeType i = 0; i < n_leaves; ++i) {
-        const auto freq_old =
-            batch_leaves[(i * leaves_stride_batch) + ((n_params - 1) * 2)];
-        relative_phase_batch[i] = psr_utils::get_phase_idx(
-            delta_t, freq_old, fold_bins, delay_batch[i]);
-    }
-
-    // Calculate flattened parameter indices (same as previous function)
-    const SizeType f_size = param_arr[n_params - 1].size();
-    SizeType hint_a{}, hint_f{};
-    for (SizeType i = 0; i < n_leaves; ++i) {
-        const SizeType kvec_offset = i * n_params;
-        const auto f_val = kvec_new_batch[kvec_offset + (n_params - 1)];
-        const auto a_val = kvec_new_batch[kvec_offset + (n_params - 2)];
-        const auto idx_f = utils::find_nearest_sorted_idx_scan(
-            param_arr[n_params - 1], f_val, hint_f);
-        const auto idx_a = utils::find_nearest_sorted_idx_scan(
-            param_arr[n_params - 2], a_val, hint_a);
-        param_idx_flat_batch[i] = idx_a * f_size + idx_f;
+        const auto idx_a =
+            utils::find_nearest_sorted_idx_scan(accel_arr_grid, a_new, hint_a);
+        const auto idx_f =
+            utils::find_nearest_sorted_idx_scan(freq_arr_grid, f_new, hint_f);
+        pindex_flat_batch[i] = idx_a * n_freq + idx_f;
     }
 }
 

@@ -48,8 +48,9 @@ std::vector<double> poly_taylor_step_f(SizeType nparams,
     const auto dt   = tobs - t_ref;
     std::vector<double> dparams_f(nparams);
     for (SizeType i = 0; i < nparams; ++i) {
+        const auto orth_factor = std::pow(2.0, i);
         dparams_f[nparams - 1 - i] =
-            dphi * math::factorial(static_cast<double>(i + 1)) /
+            dphi * orth_factor * math::factorial(static_cast<double>(i + 1)) /
             std::pow(dt, i + 1);
     }
     return dparams_f;
@@ -117,8 +118,10 @@ std::vector<double> poly_taylor_shift_d(std::span<const double> dparam_old,
     const auto dt      = tobs_new - t_ref;
     std::vector<double> shift(nparams);
     for (SizeType i = 0; i < nparams; ++i) {
-        auto factor = std::pow(dt, i + 1) * static_cast<double>(fold_bins) /
-                      math::factorial(static_cast<double>(i + 1));
+        const auto orth_factor = std::pow(2.0, i);
+        auto factor =
+            std::pow(dt, i + 1) * static_cast<double>(fold_bins) /
+            (math::factorial(static_cast<double>(i + 1)) * orth_factor);
         if (i > 0) {
             factor *= f_cur / utils::kCval;
         }

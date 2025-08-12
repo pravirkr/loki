@@ -609,7 +609,7 @@ compute_ffa_scores(std::span<const float> ts_e,
     const auto [fold, ffa_plan] =
         cfg.get_use_fft_shifts()
             ? compute_ffa_complex(ts_e, ts_v, cfg, quiet, show_progress)
-            : compute_ffa(ts_e, ts_v, cfg, show_progress);
+            : compute_ffa(ts_e, ts_v, cfg, quiet, show_progress);
     const auto nsegments    = ffa_plan.nsegments.back();
     const auto n_param_sets = ffa_plan.ncoords.back();
     error_check::check_equal(

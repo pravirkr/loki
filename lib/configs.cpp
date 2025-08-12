@@ -56,7 +56,7 @@ PulsarSearchConfig::PulsarSearchConfig(
     m_score_widths =
         detection::generate_box_width_trials(m_nbins, m_ducy_max, m_wtsp);
 
-    spdlog::info(
+    spdlog::debug(
         "PulsarSearchConfigClass: nsamps={}, tsamp={}, nbins={}, tol_bins={}, "
         "ducy_max={}, wtsp={}, prune_poly_order={}, prune_n_derivs={}, "
         "bseg_brute={}, bseg_ffa={}, use_fft_shifts={}, nthreads={}",

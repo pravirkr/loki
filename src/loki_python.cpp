@@ -539,7 +539,7 @@ PYBIND11_MODULE(libloki, m) {
         py::arg("pset_batch"), py::arg("coord_add"), py::arg("coord_init"),
         py::arg("param_arr"), py::arg("fold_bins"));
     m_psr_utils.def(
-        "poly_taylor_resolve_snap_batch",
+        "poly_taylor_resolve_circular_batch",
         [](const PyArrayT<double>& pset_batch,
            std::pair<double, double> coord_add,
            std::pair<double, double> coord_init,
@@ -553,7 +553,7 @@ PYBIND11_MODULE(libloki, m) {
             }
             std::vector<SizeType> param_idx_flat_batch(nbatch);
             std::vector<float> relative_phase_batch(nbatch);
-            core::poly_taylor_resolve_snap_batch(
+            core::poly_taylor_resolve_circular_batch(
                 to_span<const double>(pset_batch), coord_add, coord_init,
                 param_vecs, param_idx_flat_batch, relative_phase_batch,
                 fold_bins, nbatch, nparams);

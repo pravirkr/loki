@@ -211,7 +211,7 @@ void FFAPlan::resolve_coordinates_freq(
             std::span(relative_phase_batch).first(ncoords_cur);
         auto pindex_prev_flat_span =
             std::span(pindex_prev_flat).first(ncoords_cur);
-        core::ffa_taylor_resolve_batch_freq(
+        core::ffa_taylor_resolve_freq_batch(
             params[i_level], params[i_level - 1], pindex_prev_flat_span,
             relative_phase_batch_span, i_level, m_cfg.get_tseg_brute(),
             m_cfg.get_nbins());
@@ -228,9 +228,10 @@ void FFAPlan::resolve_coordinates(
     error_check::check_greater_equal(n_params, 2U,
                                      "resolve_coordinates_deriv() only "
                                      "supports nparams>=2");
-    error_check::check_less_equal(n_params, 3U,
+
+    error_check::check_less_equal(n_params, 4U,
                                   "resolve_coordinates_deriv() only "
-                                  "supports nparams<=3. Larger values are "
+                                  "supports nparams<=4. Larger values are "
                                   "not supported yet.");
 
     using ResolveFunc =
@@ -238,9 +239,10 @@ void FFAPlan::resolve_coordinates(
                  std::span<const std::vector<double>>, std::span<uint32_t>,
                  std::span<float>, SizeType, SizeType, double, SizeType);
 
-    constexpr std::array<ResolveFunc, 2> kResolveFuncs = {
-        core::ffa_taylor_resolve_batch_accel, // nparams == 2
-        core::ffa_taylor_resolve_batch_jerk   // nparams == 3
+    constexpr std::array<ResolveFunc, 3> kResolveFuncs = {
+        core::ffa_taylor_resolve_accel_batch, // nparams == 2
+        core::ffa_taylor_resolve_jerk_batch,  // nparams == 3
+        core::ffa_taylor_resolve_snap_batch   // nparams == 4
     };
 
     const auto resolve_func = kResolveFuncs[n_params - 2];
