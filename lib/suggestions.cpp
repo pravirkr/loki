@@ -38,7 +38,8 @@ get_unique_indices_scores(std::span<const double> batch_leaves,
             batch_leaves[(i * leaves_stride_batch) + ((n_params - 2) * 2)];
         const double val2 =
             batch_leaves[(i * leaves_stride_batch) + ((n_params - 1) * 2)];
-        const auto key = static_cast<int64_t>(std::nearbyint((val1 + val2) * 1e9));
+        const auto key =
+            static_cast<int64_t>(std::nearbyint((val1 + val2) * 1e9));
 
         auto it = unique_dict.find(key);
         if (it != unique_dict.end() && it->second) {
@@ -271,14 +272,14 @@ public:
         std::vector<double> trans_params_batch(m_size * m_nparams);
         std::vector<double> delay_batch(m_size); // Redundant for now
 
-        if (m_nparams < 4) {
+        if (m_nparams < 5) {
             psr_utils::shift_params_batch(contig_params, delta_t, m_size,
                                           m_nparams, m_leaves_stride,
                                           trans_params_batch, delay_batch);
-        } else if (m_nparams == 4) {
-            psr_utils::shift_params_circular_batch(
-                contig_params, delta_t, m_size, m_nparams, m_leaves_stride,
-                trans_params_batch, delay_batch);
+            //} else if (m_nparams == 4) {
+            //    psr_utils::shift_params_circular_batch(
+            //        contig_params, delta_t, m_size, m_nparams,
+            //        m_leaves_stride, trans_params_batch, delay_batch);
         } else {
             throw std::runtime_error(std::format(
                 "Suggestion struct must have less than 4 parameters."));

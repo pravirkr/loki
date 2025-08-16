@@ -436,13 +436,15 @@ void poly_taylor_resolve_accel_batch(
     for (SizeType i = 0; i < n_leaves; ++i) {
         const SizeType batch_offset = i * kLeavesStrideBatch;
 
-        const auto a_cur     = leaves_batch[batch_offset + 0];
-        const auto f_cur     = leaves_batch[batch_offset + 2];
-        const auto a_new     = a_cur;
-        const auto v_new     = a_cur * delta_t;
-        const auto d_new     = a_cur * half_delta_t_sq;
-        const auto f_new     = f_cur * (1.0 + v_new * inv_c_val);
-        const auto delay_rel = d_new * inv_c_val;
+        const auto a_cur       = leaves_batch[batch_offset + 0];
+        const auto f_cur       = leaves_batch[batch_offset + 2];
+        const auto a_new       = a_cur;
+        const auto delta_v_new = a_cur * delta_t;
+        const auto delta_d_new = a_cur * half_delta_t_sq;
+        // Calculates new frequency based on the first-order Doppler
+        // approximation:
+        const auto f_new     = f_cur * (1.0 + delta_v_new * inv_c_val);
+        const auto delay_rel = delta_d_new * inv_c_val;
 
         // Calculate relative phase
         relative_phase_batch[i] =
@@ -502,15 +504,93 @@ void poly_taylor_resolve_jerk_batch(
     for (SizeType i = 0; i < n_leaves; ++i) {
         const SizeType batch_offset = i * kLeavesStrideBatch;
 
-        const auto j_cur = leaves_batch[batch_offset + 0];
-        const auto a_cur = leaves_batch[batch_offset + 2];
-        const auto f_cur = leaves_batch[batch_offset + 4];
-        const auto a_new = a_cur + (j_cur * delta_t);
-        const auto v_new = (a_cur * delta_t) + (j_cur * half_delta_t_sq);
-        const auto d_new =
+        const auto j_cur       = leaves_batch[batch_offset + 0];
+        const auto a_cur       = leaves_batch[batch_offset + 2];
+        const auto f_cur       = leaves_batch[batch_offset + 4];
+        const auto a_new       = a_cur + (j_cur * delta_t);
+        const auto delta_v_new = (a_cur * delta_t) + (j_cur * half_delta_t_sq);
+        const auto delta_d_new =
             (a_cur * half_delta_t_sq) + (j_cur * sixth_delta_t_cubed);
-        const auto f_new     = f_cur * (1.0 + v_new * inv_c_val);
-        const auto delay_rel = d_new * inv_c_val;
+        // Calculates new frequency based on the first-order Doppler
+        // approximation:
+        const auto f_new     = f_cur * (1.0 + delta_v_new * inv_c_val);
+        const auto delay_rel = delta_d_new * inv_c_val;
+
+        // Calculate relative phase
+        relative_phase_batch[i] =
+            psr_utils::get_phase_idx(delta_t, f_cur, nbins, delay_rel);
+
+        // Find nearest grid indices
+        const auto idx_a =
+            utils::find_nearest_sorted_idx_scan(accel_arr_grid, a_new, hint_a);
+        const auto idx_f =
+            utils::find_nearest_sorted_idx_scan(freq_arr_grid, f_new, hint_f);
+        pindex_flat_batch[i] = idx_a * n_freq + idx_f;
+    }
+}
+
+void poly_taylor_resolve_snap_batch(
+    std::span<const double> leaves_batch,
+    std::pair<double, double> coord_add,
+    std::pair<double, double> coord_init,
+    std::span<const std::vector<double>> param_arr,
+    std::span<SizeType> pindex_flat_batch,
+    std::span<float> relative_phase_batch,
+    SizeType nbins,
+    SizeType n_leaves,
+    SizeType n_params) {
+    constexpr SizeType kParamsExpected    = 4;
+    constexpr SizeType kLeavesStrideParam = 2;
+    constexpr SizeType kLeavesStrideBatch =
+        (kParamsExpected + 2) * kLeavesStrideParam;
+
+    error_check::check_equal(n_params, kParamsExpected,
+                             "nparams should be 4 for snap resolve");
+    error_check::check_equal(param_arr.size(), kParamsExpected,
+                             "param_arr should have 4 parameters");
+    error_check::check_greater_equal(leaves_batch.size(),
+                                     n_leaves * kLeavesStrideBatch,
+                                     "batch_leaves size mismatch");
+    error_check::check_equal(pindex_flat_batch.size(), n_leaves,
+                             "param_idx_flat_batch size mismatch");
+    error_check::check_equal(relative_phase_batch.size(), n_leaves,
+                             "relative_phase_batch size mismatch");
+
+    const double delta_t = coord_add.first - coord_init.first;
+
+    // Cache-friendly access patterns
+    const auto& accel_arr_grid = param_arr[1];
+    const auto& freq_arr_grid  = param_arr[2];
+    const auto n_freq          = param_arr[2].size();
+
+    // Pre-compute constants to avoid repeated calculations
+    const auto inv_c_val                   = 1.0 / utils::kCval;
+    const auto delta_t_sq                  = delta_t * delta_t;
+    const auto delta_t_cubed               = delta_t_sq * delta_t;
+    const auto delta_t_fourth              = delta_t_cubed * delta_t;
+    const auto half_delta_t_sq             = 0.5 * delta_t_sq;
+    const auto sixth_delta_t_cubed         = delta_t_cubed / 6.0;
+    const auto twentyfourth_delta_t_fourth = delta_t_fourth / 24.0;
+
+    SizeType hint_a = 0, hint_f = 0;
+    for (SizeType i = 0; i < n_leaves; ++i) {
+        const SizeType batch_offset = i * kLeavesStrideBatch;
+
+        const auto s_cur = leaves_batch[batch_offset + 0];
+        const auto j_cur = leaves_batch[batch_offset + 2];
+        const auto a_cur = leaves_batch[batch_offset + 4];
+        const auto f_cur = leaves_batch[batch_offset + 6];
+        const auto a_new =
+            a_cur + (j_cur * delta_t) + (s_cur * half_delta_t_sq);
+        const auto delta_v_new = (a_cur * delta_t) + (j_cur * half_delta_t_sq) +
+                                 (s_cur * sixth_delta_t_cubed);
+        const auto delta_d_new = (a_cur * half_delta_t_sq) +
+                                 (j_cur * sixth_delta_t_cubed) +
+                                 (s_cur * twentyfourth_delta_t_fourth);
+        // Calculates new frequency based on the first-order Doppler
+        // approximation:
+        const auto f_new     = f_cur * (1.0 + delta_v_new * inv_c_val);
+        const auto delay_rel = delta_d_new * inv_c_val;
 
         // Calculate relative phase
         relative_phase_batch[i] =
@@ -634,7 +714,6 @@ void poly_taylor_resolve_circular_batch(
         }
     }
 
-
     SizeType hint_a = 0, hint_f = 0;
     // Process circular indices
     for (SizeType i : idx_circular) {
@@ -650,22 +729,18 @@ void poly_taylor_resolve_circular_batch(
         const auto omega_orb       = std::sqrt(-minus_omega_sq);
         const auto omega_orb_sq    = -minus_omega_sq;
         const auto omega_orb_cubed = omega_orb * omega_orb_sq;
-        const auto x_cos_nu_i_c    = -j_cur / omega_orb_cubed;
-        const auto x_sin_nu_i_c    = -a_cur / omega_orb_sq;
         // Evolve the phase to the new time t_j = t_i + delta_t
         const auto omega_dt = omega_orb * delta_t;
         const auto cos_odt  = std::cos(omega_dt);
         const auto sin_odt  = std::sin(omega_dt);
-        const auto x_cos_nu_j_c =
-            (x_cos_nu_i_c * cos_odt) - (x_sin_nu_i_c * sin_odt);
-        const auto x_sin_nu_j_c =
-            (x_sin_nu_i_c * cos_odt) + (x_cos_nu_i_c * sin_odt);
-        // Calculate the new derivatives at t_j directly from the new phase
-        const auto a_new     = -x_cos_nu_j_c * omega_orb_sq;
-        const auto v_new     = -x_sin_nu_j_c * omega_orb;
-        const auto d_new     = x_cos_nu_j_c - x_cos_nu_i_c;
-        const auto f_new     = f_cur * (1.0 + v_new * inv_c_val);
-        const auto delay_rel = d_new * inv_c_val;
+        const auto a_new = (a_cur * cos_odt) + ((j_cur / omega_orb) * sin_odt);
+        const auto delta_v_new = ((a_cur / omega_orb) * sin_odt) -
+                                 ((j_cur / omega_orb_sq) * (cos_odt - 1.0));
+        const auto delta_d_new = -((a_cur / omega_orb_sq) * (cos_odt - 1.0)) -
+                                 ((j_cur / omega_orb_cubed) * sin_odt) +
+                                 ((j_cur * delta_t) / omega_orb_sq);
+        const auto f_new     = f_cur * (1.0 + delta_v_new * inv_c_val);
+        const auto delay_rel = delta_d_new * inv_c_val;
 
         // Calculate relative phase
         relative_phase_batch[i] =
