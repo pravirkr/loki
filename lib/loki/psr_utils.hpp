@@ -94,22 +94,16 @@ std::vector<double> shift_params_d(std::span<const double> param_vec,
 std::tuple<std::vector<double>, double>
 shift_params(std::span<const double> param_vec, double delta_t);
 
-void shift_params_batch(std::span<const double> param_vec_data,
+void shift_params_batch(std::span<double> param_vec_data,
                         double delta_t,
-                        SizeType nbatch,
-                        SizeType nparams,
-                        SizeType param_vec_stride,
-                        std::span<double> kvec_new_data,
-                        std::span<double> delay_batch);
+                        SizeType n_batch,
+                        SizeType n_params);
 
 // Circular orbit batch shifting
-void shift_params_circular_batch(std::span<const double> param_vec_data,
+void shift_params_circular_batch(std::span<double> param_vec_data,
                                  double delta_t,
-                                 SizeType nbatch,
-                                 SizeType nparams,
-                                 SizeType param_vec_stride,
-                                 std::span<double> kvec_new_data,
-                                 std::span<double> delay_batch);
+                                 SizeType n_batch,
+                                 SizeType n_params);
 
 // Conversion from Taylor to circular parameters
 /*
@@ -138,6 +132,16 @@ branch_param_padded(std::span<double> out_values,
 
 // Generate an evenly spaced array of values between vmin and vmax.
 std::vector<double> range_param(double vmin, double vmax, double dv);
+
+// Generate a branching pattern for the pruning Taylor search.
+std::vector<double>
+generate_branching_pattern(std::span<const std::vector<double>> param_arr,
+                           std::span<const double> dparams,
+                           const std::vector<ParamLimitType>& param_limits,
+                           double tseg_ffa,
+                           SizeType nstages,
+                           SizeType fold_bins,
+                           double tol_bins);
 
 /**
  * @class SnailScheme

@@ -71,7 +71,8 @@ public:
         -> std::vector<double>;
 
     auto
-    validate(std::span<const double> batch_leaves,
+    validate(std::span<double> leaves_batch,
+             std::span<SizeType> leaves_origins,
              std::pair<double, double> coord_valid,
              const std::tuple<std::vector<double>, std::vector<double>, double>&
                  validation_params,

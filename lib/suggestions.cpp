@@ -258,33 +258,28 @@ public:
         // suggestion using views
         // This method now needs to handle potentially non-contiguous data
         // For simplicity, we create a contiguous copy first.
-        std::vector<double> contig_params(m_size * m_leaves_stride, 0.0);
+        // Only copy nparams rows, not the last two rows (delay and frequency)
+        const auto batch_stride = m_nparams * kLeavesParamStride;
+        std::vector<double> contig_params(m_size * batch_stride, 0.0);
         const auto start_idx = m_is_updating ? m_write_start : m_head;
         for (SizeType i = 0; i < m_size; ++i) {
-            const auto src_idx = (start_idx + i) % m_capacity;
-            std::copy(m_leaves.begin() + src_idx * m_leaves_stride,
-                      m_leaves.begin() + src_idx * m_leaves_stride +
-                          m_leaves_stride,
-                      contig_params.begin() + i * m_leaves_stride);
+            const auto src_idx      = (start_idx + i) % m_capacity;
+            const auto start_offset = src_idx * m_leaves_stride;
+            std::copy(m_leaves.begin() + start_offset,
+                      m_leaves.begin() + start_offset + batch_stride,
+                      contig_params.begin() + i * batch_stride);
         }
-
-        // Call the batch shift function (only params, not dparams)
-        std::vector<double> trans_params_batch(m_size * m_nparams);
-        std::vector<double> delay_batch(m_size); // Redundant for now
-
-        if (m_nparams < 5) {
+        if (m_nparams < 4) {
             psr_utils::shift_params_batch(contig_params, delta_t, m_size,
-                                          m_nparams, m_leaves_stride,
-                                          trans_params_batch, delay_batch);
-            //} else if (m_nparams == 4) {
-            //    psr_utils::shift_params_circular_batch(
-            //        contig_params, delta_t, m_size, m_nparams,
-            //        m_leaves_stride, trans_params_batch, delay_batch);
+                                          m_nparams);
+        } else if (m_nparams == 4) {
+            psr_utils::shift_params_circular_batch(contig_params, delta_t,
+                                                   m_size, m_nparams);
         } else {
             throw std::runtime_error(std::format(
                 "Suggestion struct must have less than 4 parameters."));
         }
-        return trans_params_batch;
+        return contig_params;
     }
 
     bool add(std::span<const double> leaf,

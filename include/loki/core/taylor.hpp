@@ -91,16 +91,6 @@ void poly_taylor_resolve_snap_batch(
     SizeType n_leaves,
     SizeType n_params);
 
-void poly_taylor_resolve_batch(std::span<const double> batch_leaves,
-                               std::pair<double, double> coord_add,
-                               std::pair<double, double> coord_init,
-                               std::span<const std::vector<double>> param_arr,
-                               std::span<SizeType> param_idx_flat_batch,
-                               std::span<float> relative_phase_batch,
-                               SizeType fold_bins,
-                               SizeType n_leaves,
-                               SizeType n_params);
-
 void poly_taylor_resolve_circular_batch(
     std::span<const double> leaves_batch,
     std::pair<double, double> coord_add,
@@ -111,6 +101,11 @@ void poly_taylor_resolve_circular_batch(
     SizeType nbins,
     SizeType n_leaves,
     SizeType n_params);
+
+SizeType poly_taylor_validate_batch(std::span<double> leaves_batch,
+                                    std::span<SizeType> leaves_origins,
+                                    SizeType n_leaves,
+                                    SizeType n_params);
 
 std::vector<double>
 poly_taylor_leaves(std::span<const std::vector<double>> param_arr,

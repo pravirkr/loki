@@ -199,13 +199,17 @@ auto PruneTaylorDPFuncts<FoldType>::get_transform_matrix(
 
 template <typename FoldType>
 auto PruneTaylorDPFuncts<FoldType>::validate(
-    std::span<const double> /*batch_leaves*/,
+    std::span<double> leaves_batch,
+    std::span<SizeType> leaves_origins,
     std::pair<double, double> /*coord_valid*/,
     const std::tuple<std::vector<double>, std::vector<double>, double>&
     /*validation_params*/,
     SizeType n_leaves,
-    SizeType /*n_params*/) const -> SizeType {
-    // Taylor variant doesn't filter - return all leaves
+    SizeType n_params) const -> SizeType {
+    if (n_params == 4) {
+        return poly_taylor_validate_batch(leaves_batch, leaves_origins,
+                                          n_leaves, n_params);
+    }
     return n_leaves;
 }
 

@@ -132,7 +132,7 @@ void ffa_taylor_resolve_accel_batch(
         for (SizeType freq_idx = 0; freq_idx < n_freq; ++freq_idx) {
             const auto coord_idx = (accel_idx * n_freq) + freq_idx;
             const auto f_cur     = freq_arr_cur[freq_idx];
-            const auto f_new     = f_cur * (1.0 + v_new * inv_c_val);
+            const auto f_new     = f_cur * (1.0 - v_new * inv_c_val);
             const auto delay_rel = d_new * inv_c_val;
 
             relative_phase_batch[coord_idx] =
@@ -238,7 +238,7 @@ void ffa_taylor_resolve_jerk_batch(
                 const auto f_cur = freq_arr_cur[freq_idx];
 
                 // Frequency-specific calculations
-                const auto f_new     = f_cur * (1.0 + v_new * inv_c_val);
+                const auto f_new     = f_cur * (1.0 - v_new * inv_c_val);
                 const auto delay_rel = d_new * inv_c_val;
                 const auto relative_phase =
                     psr_utils::get_phase_idx(delta_t, f_cur, nbins, delay_rel);
@@ -377,7 +377,7 @@ void ffa_taylor_resolve_snap_batch(
                     const auto f_cur = freq_arr_cur[freq_idx];
 
                     // Frequency-specific calculations
-                    const auto f_new     = f_cur * (1.0 + v_new * inv_c_val);
+                    const auto f_new     = f_cur * (1.0 - v_new * inv_c_val);
                     const auto delay_rel = d_new * inv_c_val;
                     const auto relative_phase = psr_utils::get_phase_idx(
                         delta_t, f_cur, nbins, delay_rel);
@@ -443,7 +443,7 @@ void poly_taylor_resolve_accel_batch(
         const auto delta_d_new = a_cur * half_delta_t_sq;
         // Calculates new frequency based on the first-order Doppler
         // approximation:
-        const auto f_new     = f_cur * (1.0 + delta_v_new * inv_c_val);
+        const auto f_new     = f_cur * (1.0 - delta_v_new * inv_c_val);
         const auto delay_rel = delta_d_new * inv_c_val;
 
         // Calculate relative phase
@@ -513,7 +513,7 @@ void poly_taylor_resolve_jerk_batch(
             (a_cur * half_delta_t_sq) + (j_cur * sixth_delta_t_cubed);
         // Calculates new frequency based on the first-order Doppler
         // approximation:
-        const auto f_new     = f_cur * (1.0 + delta_v_new * inv_c_val);
+        const auto f_new     = f_cur * (1.0 - delta_v_new * inv_c_val);
         const auto delay_rel = delta_d_new * inv_c_val;
 
         // Calculate relative phase
@@ -589,7 +589,7 @@ void poly_taylor_resolve_snap_batch(
                                  (s_cur * twentyfourth_delta_t_fourth);
         // Calculates new frequency based on the first-order Doppler
         // approximation:
-        const auto f_new     = f_cur * (1.0 + delta_v_new * inv_c_val);
+        const auto f_new     = f_cur * (1.0 - delta_v_new * inv_c_val);
         const auto delay_rel = delta_d_new * inv_c_val;
 
         // Calculate relative phase
@@ -602,57 +602,6 @@ void poly_taylor_resolve_snap_batch(
         const auto idx_f =
             utils::find_nearest_sorted_idx_scan(freq_arr_grid, f_new, hint_f);
         pindex_flat_batch[i] = idx_a * n_freq + idx_f;
-    }
-}
-
-void poly_taylor_resolve_batch(std::span<const double> batch_leaves,
-                               std::pair<double, double> coord_add,
-                               std::pair<double, double> coord_init,
-                               std::span<const std::vector<double>> param_arr,
-                               std::span<SizeType> param_idx_flat_batch,
-                               std::span<float> relative_phase_batch,
-                               SizeType fold_bins,
-                               SizeType n_leaves,
-                               SizeType n_params) {
-    const SizeType leaves_stride_param = 2;
-    const SizeType leaves_stride_batch = (n_params + 2) * leaves_stride_param;
-    error_check::check_equal(n_params, param_arr.size(),
-                             "nparams should be equal to param_arr size");
-    error_check::check_greater_equal(batch_leaves.size(),
-                                     n_leaves * leaves_stride_batch,
-                                     "batch_leaves size mismatch");
-    error_check::check_equal(param_idx_flat_batch.size(), n_leaves,
-                             "param_idx_flat_batch size mismatch");
-    error_check::check_equal(relative_phase_batch.size(), n_leaves,
-                             "relative_phase_batch size mismatch");
-    const double delta_t = coord_add.first - coord_init.first;
-
-    // Allocate working memory for transformed parameters and delays
-    std::vector<double> kvec_new_batch(n_leaves * n_params);
-    std::vector<double> delay_batch(n_leaves);
-    psr_utils::shift_params_batch(batch_leaves, delta_t, n_leaves, n_params,
-                                  leaves_stride_batch, kvec_new_batch,
-                                  delay_batch);
-
-    // Calculate relative phases
-    for (SizeType i = 0; i < n_leaves; ++i) {
-        const auto freq_old =
-            batch_leaves[(i * leaves_stride_batch) + ((n_params - 1) * 2)];
-        relative_phase_batch[i] = psr_utils::get_phase_idx(
-            delta_t, freq_old, fold_bins, delay_batch[i]);
-    }
-    // Calculate flattened parameter indices
-    const SizeType f_size = param_arr[n_params - 1].size();
-    SizeType hint_a{}, hint_f{};
-    for (SizeType i = 0; i < n_leaves; ++i) {
-        const SizeType kvec_offset = i * n_params;
-        const auto f_val = kvec_new_batch[kvec_offset + (n_params - 1)];
-        const auto a_val = kvec_new_batch[kvec_offset + (n_params - 2)];
-        const auto idx_f = utils::find_nearest_sorted_idx_scan(
-            param_arr[n_params - 1], f_val, hint_f);
-        const auto idx_a = utils::find_nearest_sorted_idx_scan(
-            param_arr[n_params - 2], a_val, hint_a);
-        param_idx_flat_batch[i] = idx_a * f_size + idx_f;
     }
 }
 
@@ -739,7 +688,7 @@ void poly_taylor_resolve_circular_batch(
         const auto delta_d_new = -((a_cur / omega_orb_sq) * (cos_odt - 1.0)) -
                                  ((j_cur / omega_orb_cubed) * sin_odt) +
                                  ((j_cur * delta_t) / omega_orb_sq);
-        const auto f_new     = f_cur * (1.0 + delta_v_new * inv_c_val);
+        const auto f_new     = f_cur * (1.0 - delta_v_new * inv_c_val);
         const auto delay_rel = delta_d_new * inv_c_val;
 
         // Calculate relative phase
@@ -781,7 +730,7 @@ void poly_taylor_resolve_circular_batch(
         const auto d_new = (a_cur * half_delta_t_sq) +
                            (j_cur * sixth_delta_t_cubed) +
                            (s_cur * twentyfourth_delta_t_fourth);
-        const auto f_new     = f_cur * (1.0 + v_new * inv_c_val);
+        const auto f_new     = f_cur * (1.0 - v_new * inv_c_val);
         const auto delay_rel = d_new * inv_c_val;
 
         // Calculate relative phase
@@ -794,6 +743,47 @@ void poly_taylor_resolve_circular_batch(
             utils::find_nearest_sorted_idx_scan(freq_arr_grid, f_new, hint_f);
         pindex_flat_batch[i] = idx_a * n_freq + idx_f;
     }
+}
+
+SizeType poly_taylor_validate_batch(std::span<double> leaves_batch,
+                                    std::span<SizeType> leaves_origins,
+                                    SizeType n_leaves,
+                                    SizeType n_params) {
+    constexpr SizeType kParamsExpected    = 4;
+    constexpr SizeType kLeavesStrideParam = 2;
+    constexpr SizeType kLeavesStrideBatch =
+        (kParamsExpected + 2) * kLeavesStrideParam;
+    constexpr double kEps = 1e-15;
+
+    error_check::check_equal(n_params, kParamsExpected,
+                             "nparams should be 4 for circular orbit resolve");
+    error_check::check_greater_equal(leaves_batch.size(),
+                                     n_leaves * kLeavesStrideBatch,
+                                     "batch_leaves size mismatch");
+    SizeType write_idx = 0;
+    for (SizeType i = 0; i < n_leaves; ++i) {
+        const SizeType batch_offset = i * kLeavesStrideBatch;
+
+        const auto snap  = leaves_batch[batch_offset + 0];
+        const auto accel = leaves_batch[batch_offset + 4];
+        bool zero_case  = (std::abs(snap) < kEps) || (std::abs(accel) < kEps);
+        bool real_omega = (-snap / accel) >= 0.0;
+        if (zero_case || real_omega) {
+            // Copy this leaf to the write position if needed
+            if (write_idx != i) {
+                // Copy batch
+                for (SizeType j = 0; j < kLeavesStrideBatch; ++j) {
+                    leaves_batch[(write_idx * kLeavesStrideBatch) + j] =
+                        leaves_batch[batch_offset + j];
+                }
+                // Copy origin
+                leaves_origins[write_idx] = leaves_origins[i];
+            }
+            ++write_idx;
+        }
+    }
+    // write_idx is the new number of valid leaves
+    return write_idx;
 }
 
 std::vector<SizeType>

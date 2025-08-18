@@ -58,6 +58,7 @@ public:
         return m_score_widths;
     }
 
+    // Methods
     [[nodiscard]] std::vector<double> get_dparams_f(double tseg_cur) const;
     [[nodiscard]] std::vector<double> get_dparams(double tseg_cur) const;
     [[nodiscard]] std::vector<double> get_dparams_lim(double tseg_cur) const;

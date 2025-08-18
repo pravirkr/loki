@@ -586,7 +586,6 @@ private:
             m_prune_funcs->get_transform_matrix(coord_cur, coord_prev);
         const auto validation_params =
             m_prune_funcs->get_validation_params(coord_valid);
-        const bool validation_check = false;
 
         const auto n_branches = m_suggestions->get_nsugg_old();
         const auto n_params   = m_cfg.get_nparams();
@@ -606,7 +605,7 @@ private:
             timer.start();
             auto batch_leaves_span = m_suggestions->get_leaves_span(
                 i_batch_start, current_batch_size);
-            const auto batch_leaf_origins = m_prune_funcs->branch(
+            auto batch_leaf_origins = m_prune_funcs->branch(
                 batch_leaves_span, coord_cur, m_pruning_workspace->batch_leaves,
                 current_batch_size, n_params);
             const auto n_leaves_batch = batch_leaf_origins.size();
@@ -625,12 +624,9 @@ private:
 
             // Validation
             timer.start();
-            auto n_leaves_after_validation = n_leaves_batch;
-            if (validation_check) {
-                n_leaves_after_validation = m_prune_funcs->validate(
-                    m_pruning_workspace->batch_leaves, coord_valid,
-                    validation_params, n_leaves_batch, n_params);
-            }
+            const auto n_leaves_after_validation = m_prune_funcs->validate(
+                m_pruning_workspace->batch_leaves, batch_leaf_origins,
+                coord_valid, validation_params, n_leaves_batch, n_params);
             stats.batch_timers["validate"] += timer.stop();
             stats.n_leaves_phy += n_leaves_after_validation;
             if (n_leaves_after_validation == 0) {

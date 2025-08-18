@@ -59,6 +59,9 @@ struct FFAPlan {
     resolve_coordinates_freq(std::span<std::vector<FFACoordFreq>> coordinates);
     std::vector<std::vector<FFACoordFreq>> resolve_coordinates_freq();
 
+    // Generate a branching pattern for the pruning Taylor search.
+    std::vector<double> generate_branching_pattern() const;
+
 private:
     search::PulsarSearchConfig m_cfg;
     void configure_plan();

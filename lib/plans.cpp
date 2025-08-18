@@ -22,33 +22,34 @@ FFAPlan::FFAPlan(search::PulsarSearchConfig cfg) : m_cfg(std::move(cfg)) {
 SizeType FFAPlan::get_buffer_size() const noexcept {
     return std::ranges::max(
         fold_shapes | std::views::transform([](const auto& shape) {
-            return std::accumulate(shape.begin(), shape.end(), 1,
+            return std::accumulate(shape.begin(), shape.end(), SizeType{1},
                                    std::multiplies<>());
         }));
 }
 
 SizeType FFAPlan::get_brute_fold_size() const noexcept {
     return std::accumulate(fold_shapes.front().begin(),
-                           fold_shapes.front().end(), 1, std::multiplies<>());
+                           fold_shapes.front().end(), SizeType{1},
+                           std::multiplies<>());
 }
 
 SizeType FFAPlan::get_fold_size() const noexcept {
     return std::accumulate(fold_shapes.back().begin(), fold_shapes.back().end(),
-                           1, std::multiplies<>());
+                           SizeType{1}, std::multiplies<>());
 }
 
 SizeType FFAPlan::get_buffer_size_complex() const noexcept {
     // Calculate the standard complex buffer size (max of all FFA levels)
     return std::ranges::max(
         fold_shapes_complex | std::views::transform([](const auto& shape) {
-            return std::accumulate(shape.begin(), shape.end(), 1,
+            return std::accumulate(shape.begin(), shape.end(), SizeType{1},
                                    std::multiplies<>());
         }));
 }
 
 SizeType FFAPlan::get_fold_size_complex() const noexcept {
     return std::accumulate(fold_shapes_complex.back().begin(),
-                           fold_shapes_complex.back().end(), 1,
+                           fold_shapes_complex.back().end(), SizeType{1},
                            std::multiplies<>());
 }
 
@@ -300,6 +301,13 @@ std::vector<std::vector<FFACoord>> FFAPlan::resolve_coordinates() {
     }
     resolve_coordinates(std::span(coordinates));
     return coordinates;
+}
+
+std::vector<double> FFAPlan::generate_branching_pattern() const {
+    return psr_utils::generate_branching_pattern(
+        params.back(), dparams_lim.back(), m_cfg.get_param_limits(),
+        m_cfg.get_tseg_ffa(), nsegments.back() - 1, m_cfg.get_nbins(),
+        m_cfg.get_tol_bins());
 }
 
 } // namespace loki::plans
