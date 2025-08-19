@@ -1,5 +1,6 @@
 #pragma once
 
+#include <pybind11/iostream.h>
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -68,3 +69,17 @@ inline py::list as_listof_pyarray(
     }
     return result;
 }
+
+// Simple RAII wrapper for stream redirection
+class StreamRedirection {
+public:
+    StreamRedirection()
+        : m_stdout_redirect(std::cout,
+                            py::module_::import("sys").attr("stdout")),
+          m_stderr_redirect(std::cerr,
+                            py::module_::import("sys").attr("stderr")) {}
+
+private:
+    py::scoped_ostream_redirect m_stdout_redirect;
+    py::scoped_estream_redirect m_stderr_redirect;
+};

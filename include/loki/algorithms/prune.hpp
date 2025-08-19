@@ -32,7 +32,8 @@ public:
                  std::span<const float> ts_v,
                  const std::filesystem::path& outdir = "./",
                  std::string_view file_prefix        = "test",
-                 std::string_view kind               = "taylor");
+                 std::string_view kind               = "taylor",
+                 bool show_progress                  = true);
 
     // Opaque handle to the implementation
     class BaseImpl;
@@ -65,7 +66,8 @@ public:
         const std::optional<std::filesystem::path>& log_file    = std::nullopt,
         const std::optional<std::filesystem::path>& result_file = std::nullopt,
         progress::MultiprocessProgressTracker* tracker          = nullptr,
-        int task_id                                             = 0);
+        int task_id                                             = 0,
+        bool show_progress                                      = true);
 
 private:
     class Impl;

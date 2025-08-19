@@ -270,7 +270,7 @@ void ProgressBar::print_progress() {
         m_elapsed = std::chrono::steady_clock::now() - m_start_time;
     }
 
-    std::ostream& os = std::cerr;
+    std::ostream& os = std::cout;
     details::erase_line();
 
     // Transient behavior: only print if not completed, or if not transient
@@ -396,7 +396,7 @@ void MultiprocessProgressTracker::stop() {
     if (!m_permanently_stopped.load()) {
         render_frame(true); // Final render to flush logs
         clear_progress_lines();
-        std::cerr << std::flush;
+        std::cout << std::flush;
         details::show_console_cursor(true);
         m_permanently_stopped.store(true);
     }
@@ -457,16 +457,16 @@ void MultiprocessProgressTracker::queue_log(std::string msg) {
 void MultiprocessProgressTracker::final_cleanup() {
     std::lock_guard<std::mutex> lock(m_output_mutex);
     clear_progress_lines();
-    std::cerr << std::flush;
+    std::cout << std::flush;
 }
 
 void MultiprocessProgressTracker::clear_progress_lines() const noexcept {
     if (m_last_rendered_lines > 0) {
-        std::cerr << "\r\033[K";
+        std::cout << "\r\033[K";
         for (int i = 1; i < m_last_rendered_lines; ++i) {
-            std::cerr << "\033[A\033[K";
+            std::cout << "\033[A\033[K";
         }
-        std::cerr << "\r";
+        std::cout << "\r";
     }
 }
 
@@ -514,15 +514,15 @@ void MultiprocessProgressTracker::render_frame(bool is_final_render) {
 
     // 2. Print any logs. This will scroll the terminal as needed.
     for (const auto& log : logs_to_print) {
-        std::cerr << log; // Assume log messages have newlines
+        std::cout << log; // Assume log messages have newlines
     }
 
     // 3. Render the new progress bars at the bottom.
     for (size_t i = 0; i < lines_to_render.size(); ++i) {
-        std::cerr << lines_to_render[i]
+        std::cout << lines_to_render[i]
                   << (i == lines_to_render.size() - 1 ? "" : "\n");
     }
-    std::cerr << std::flush;
+    std::cout << std::flush;
     m_last_rendered_lines = static_cast<int>(lines_to_render.size());
 }
 

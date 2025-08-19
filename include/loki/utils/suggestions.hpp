@@ -73,7 +73,7 @@ public:
     [[nodiscard]] float get_score_max() const noexcept;
     [[nodiscard]] float get_score_min() const noexcept;
     [[nodiscard]] float get_score_median() const noexcept;
-    [[nodiscard]] SizeType get_memory_usage() const noexcept;
+    [[nodiscard]] float get_memory_usage() const noexcept;
 
     void set_nsugg(SizeType nsugg) noexcept;
     void reset() noexcept;

@@ -114,6 +114,7 @@ public:
                            const std::vector<double>& param_sets,
                            const std::vector<float>& scores,
                            SizeType n_param_sets,
+                           SizeType n_params,
                            const PruneStatsCollection& pstats);
 
 private:

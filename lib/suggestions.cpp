@@ -180,10 +180,12 @@ public:
         return *mid;
     }
 
-    SizeType get_memory_usage() const noexcept {
-        return (m_leaves.size() * sizeof(double)) +
-               (m_folds.size() * sizeof(FoldType)) +
-               (m_scores.size() * sizeof(float));
+    float get_memory_usage() const noexcept {
+        const auto total_memory = (m_leaves.size() * sizeof(double)) +
+                                  (m_folds.size() * sizeof(FoldType)) +
+                                  (m_scores.size() * sizeof(float));
+        return static_cast<float>(total_memory) /
+               static_cast<float>(1ULL << 30U);
     }
 
     void set_nsugg(SizeType nsugg) noexcept {
@@ -779,7 +781,7 @@ float SuggestionTree<FoldType>::get_score_median() const noexcept {
     return m_impl->get_score_median();
 }
 template <typename FoldType>
-SizeType SuggestionTree<FoldType>::get_memory_usage() const noexcept {
+float SuggestionTree<FoldType>::get_memory_usage() const noexcept {
     return m_impl->get_memory_usage();
 }
 template <typename FoldType>

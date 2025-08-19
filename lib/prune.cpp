@@ -34,7 +34,8 @@ public:
                          std::span<const float> ts_v,
                          const std::filesystem::path& outdir,
                          std::string_view file_prefix,
-                         std::string_view kind) = 0;
+                         std::string_view kind,
+                         bool show_progress) = 0;
 };
 
 template <typename FoldType>
@@ -52,17 +53,7 @@ public:
           m_ref_segs(std::move(ref_segs)),
           m_max_sugg(max_sugg),
           m_batch_size(batch_size),
-          m_nthreads(m_cfg.get_nthreads()),
-          m_ffa_plan(m_cfg) {
-        // Create appropriate FFA instance based on FoldType
-        if constexpr (std::is_same_v<FoldType, ComplexType>) {
-            m_the_ffa_complex = std::make_unique<algorithms::FFACOMPLEX>(m_cfg);
-            m_ffa_fold.resize(m_ffa_plan.get_fold_size_complex());
-        } else {
-            m_the_ffa = std::make_unique<algorithms::FFA>(m_cfg);
-            m_ffa_fold.resize(m_ffa_plan.get_fold_size());
-        }
-    }
+          m_nthreads(m_cfg.get_nthreads()) {}
 
     ~PruningManagerTypedImpl() final                        = default;
     PruningManagerTypedImpl(const PruningManagerTypedImpl&) = delete;
@@ -74,17 +65,26 @@ public:
                  std::span<const float> ts_v,
                  const std::filesystem::path& outdir,
                  std::string_view file_prefix,
-                 std::string_view kind) override {
-        // Execute appropriate FFA instance
-        spdlog::info("PruningManager::execute: Initializing with FFA");
-        if constexpr (std::is_same_v<FoldType, ComplexType>) {
-            m_the_ffa_complex->execute(ts_e, ts_v,
-                                       std::span<ComplexType>(m_ffa_fold));
-        } else {
-            m_the_ffa->execute(ts_e, ts_v, std::span<float>(m_ffa_fold));
-        }
+                 std::string_view kind,
+                 bool show_progress) override {
+        spdlog::info("PruningManager: Initializing with FFA");
+        // Create appropriate FFA fold
+        std::vector<FoldType> ffa_fold;
+        plans::FFAPlan ffa_plan = [&] {
+            if constexpr (std::is_same_v<FoldType, ComplexType>) {
+                auto [fold, plan] = compute_ffa_complex_domain(
+                    ts_e, ts_v, m_cfg, /*quiet=*/false, show_progress);
+                ffa_fold = std::move(fold);
+                return std::move(plan);
+            } else {
+                auto [fold, plan] = compute_ffa(ts_e, ts_v, m_cfg,
+                                                /*quiet=*/false, show_progress);
+                ffa_fold          = std::move(fold);
+                return std::move(plan);
+            }
+        }();
         // Setup output files and directory
-        const auto nsegments = m_ffa_plan.nsegments.back();
+        const auto nsegments = ffa_plan.nsegments.back();
         const std::string filebase =
             std::format("{}_pruning_nstages_{}", file_prefix, nsegments);
         const auto log_file = outdir / std::format("{}_log.txt", filebase);
@@ -118,10 +118,12 @@ public:
                               m_threshold_scheme);
         // Execute based on thread count
         if (m_nthreads == 1) {
-            execute_single_threaded(ref_segs_to_process, outdir, log_file,
-                                    result_file, kind);
+            execute_single_threaded(ffa_fold, ffa_plan, ref_segs_to_process,
+                                    outdir, log_file, result_file, kind,
+                                    show_progress);
         } else {
-            execute_multi_threaded(ref_segs_to_process, outdir, log_file, kind);
+            execute_multi_threaded(ffa_fold, ffa_plan, ref_segs_to_process,
+                                   outdir, log_file, kind, show_progress);
             cands::merge_prune_result_files(outdir, log_file, result_file);
         }
         spdlog::info("Pruning complete. Results saved to {}",
@@ -138,10 +140,10 @@ private:
     int m_nthreads;
 
     // Type-specific FFA instances
-    plans::FFAPlan m_ffa_plan;
-    std::unique_ptr<algorithms::FFA> m_the_ffa;
-    std::unique_ptr<algorithms::FFACOMPLEX> m_the_ffa_complex;
-    std::vector<FoldType> m_ffa_fold;
+    // plans::FFAPlan m_ffa_plan;
+    // std::unique_ptr<algorithms::FFA> m_the_ffa;
+    // std::unique_ptr<algorithms::FFACOMPLEX> m_the_ffa_complex;
+    // std::vector<FoldType> m_ffa_fold;
 
     std::vector<SizeType> determine_ref_segs(SizeType nsegments) const {
         // ref_segs = list(np.linspace(0, dyp.nsegments - 1, n_runs, dtype=int))
@@ -173,33 +175,37 @@ private:
         throw std::runtime_error("Either n_runs or ref_segs must be provided");
     }
 
-    void execute_single_threaded(const std::vector<SizeType>& ref_segs,
+    void execute_single_threaded(std::span<const FoldType> ffa_fold,
+                                 const plans::FFAPlan& ffa_plan,
+                                 const std::vector<SizeType>& ref_segs,
                                  const std::filesystem::path& outdir,
                                  const std::filesystem::path& log_file,
                                  const std::filesystem::path& result_file,
-                                 std::string_view kind) {
-        auto prune = Prune<FoldType>(m_ffa_plan, m_cfg, m_threshold_scheme,
+                                 std::string_view kind,
+                                 bool show_progress) {
+        auto prune = Prune<FoldType>(ffa_plan, m_cfg, m_threshold_scheme,
                                      m_max_sugg, m_batch_size, kind);
-        // Log detailed memory usage
-        const auto memory_usage = prune.get_memory_usage();
-        const auto memory_gb =
-            static_cast<float>(memory_usage) / (1024.0F * 1024.0F * 1024.0F);
-        spdlog::info("Pruning Memory Usage: {:.2f} GB", memory_gb);
         for (const auto ref_seg : ref_segs) {
-            spdlog::info("Processing ref segment {} (single-threaded)",
-                         ref_seg);
-            prune.execute(m_ffa_fold, ref_seg, outdir, log_file, result_file,
-                          /*tracker=*/nullptr, /*task_id=*/0);
+            prune.execute(ffa_fold, ref_seg, outdir, log_file, result_file,
+                          /*tracker=*/nullptr, /*task_id=*/0, show_progress);
         }
     }
 
-    void execute_multi_threaded(const std::vector<SizeType>& ref_segs,
+    void execute_multi_threaded(std::span<const FoldType> ffa_fold,
+                                const plans::FFAPlan& ffa_plan,
+                                const std::vector<SizeType>& ref_segs,
                                 const std::filesystem::path& outdir,
                                 const std::filesystem::path& log_file,
-                                std::string_view kind) {
+                                std::string_view kind,
+                                bool show_progress) {
+        // Only create progress tracker if show_progress is true
+        std::unique_ptr<progress::MultiprocessProgressTracker> tracker;
+        if (show_progress) {
+            tracker = std::make_unique<progress::MultiprocessProgressTracker>(
+                "Pruning tree");
+            tracker->start();
+        }
         // Create thread pool
-        progress::MultiprocessProgressTracker tracker("Pruning tree");
-        tracker.start();
         BS::thread_pool pool(m_nthreads);
 
         // Submit tasks for each ref_seg
@@ -208,25 +214,31 @@ private:
         std::vector<int> task_ids;
         task_ids.reserve(ref_segs.size());
 
-        const auto& ffa_plan = m_ffa_plan;
         const auto nsegments = ffa_plan.nsegments.back();
+        int id               = 0;
         for (const auto ref_seg : ref_segs) {
-            const auto id = tracker.add_task(
-                std::format("Pruning segment {:03d}", ref_seg), nsegments - 1,
-                /*transient=*/true);
+            if (tracker) {
+                id = tracker->add_task(
+                    std::format("Pruning segment {:03d}", ref_seg),
+                    nsegments - 1,
+                    /*transient=*/true);
+            } else {
+                id++;
+            }
             task_ids.push_back(id);
 
             auto future = pool.submit_task(
-                [this, ref_seg, outdir, kind, &tracker, id]() mutable {
+                [this, ref_seg, outdir, kind, tracker_ptr = tracker.get(), id,
+                 show_progress, &ffa_plan, &ffa_fold]() mutable {
                     // Create a Prune instance for each thread
                     auto prune =
-                        Prune<FoldType>(m_ffa_plan, m_cfg, m_threshold_scheme,
+                        Prune<FoldType>(ffa_plan, m_cfg, m_threshold_scheme,
                                         m_max_sugg, m_batch_size, kind);
 
                     prune.execute(
-                        m_ffa_fold, ref_seg, outdir, /*log_file=*/std::nullopt,
-                        /*result_file=*/std::nullopt, /*tracker=*/&tracker,
-                        /*task_id=*/id);
+                        ffa_fold, ref_seg, outdir, /*log_file=*/std::nullopt,
+                        /*result_file=*/std::nullopt, /*tracker=*/tracker_ptr,
+                        /*task_id=*/id, /*show_progress=*/show_progress);
                 });
             futures.push_back(std::move(future));
         }
@@ -265,7 +277,9 @@ private:
                             "tasks failed",
                             errors.size(), ref_segs.size()));
         }
-        tracker.stop();
+        if (tracker) {
+            tracker->stop();
+        }
     }
 };
 
@@ -325,14 +339,17 @@ template <typename FoldType> struct PruningWorkspace {
         }
     }
 
-    SizeType get_memory_usage() const noexcept {
-        return (batch_leaves.size() * sizeof(double)) +
-               (batch_folds.size() * sizeof(FoldType)) +
-               (batch_scores.size() * sizeof(float)) +
-               (batch_param_idx.size() * sizeof(SizeType)) +
-               (batch_phase_shift.size() * sizeof(float)) +
-               (batch_isuggest.size() * sizeof(SizeType)) +
-               (batch_passing_indices.size() * sizeof(SizeType));
+    float get_memory_usage() const noexcept {
+        const auto total_memory =
+            (batch_leaves.size() * sizeof(double)) +
+            (batch_folds.size() * sizeof(FoldType)) +
+            (batch_scores.size() * sizeof(float)) +
+            (batch_param_idx.size() * sizeof(SizeType)) +
+            (batch_phase_shift.size() * sizeof(float)) +
+            (batch_isuggest.size() * sizeof(SizeType)) +
+            (batch_passing_indices.size() * sizeof(SizeType));
+        return static_cast<float>(total_memory) /
+               static_cast<float>(1ULL << 30U);
     }
 }; // End PruningManagerTypedImpl definition
 
@@ -380,20 +397,26 @@ public:
     Impl(Impl&&)                 = delete;
     Impl& operator=(Impl&&)      = delete;
 
-    SizeType get_memory_usage() const noexcept {
-        return m_pruning_workspace->get_memory_usage() +
-               m_suggestions->get_memory_usage();
-    }
-
     void execute(std::span<const FoldType> ffa_fold,
                  SizeType ref_seg,
                  const std::filesystem::path& outdir,
                  const std::optional<std::filesystem::path>& log_file,
                  const std::optional<std::filesystem::path>& result_file,
                  progress::MultiprocessProgressTracker* tracker,
-                 int task_id) {
+                 int task_id,
+                 bool show_progress) {
         const std::string run_name =
             std::format("{:03d}_{:02d}", ref_seg, task_id);
+
+        // Log detailed memory usage
+        const auto memory_workspace_gb =
+            m_pruning_workspace->get_memory_usage();
+        const auto memory_suggestions_gb = m_suggestions->get_memory_usage();
+        spdlog::info("Pruning run {:03d}: Memory Usage: {:.2f} GB "
+                     "(suggestions) + {:.2f} GB (workspace)",
+                     ref_seg, memory_suggestions_gb, memory_workspace_gb);
+
+        // Setup log and result files
         std::filesystem::path actual_log_file =
             log_file.value_or(outdir / std::format("tmp_{}_log.txt", run_name));
         std::filesystem::path actual_result_file = result_file.value_or(
@@ -403,10 +426,14 @@ public:
         log.close();
 
         const auto nsegments = m_ffa_plan.nsegments.back();
-        progress::ProgressGuard progress_guard(true);
-        progress::ProgressTracker bar(
-            std::format("Pruning segment {:03d}", ref_seg), nsegments - 1,
-            tracker, task_id);
+        std::unique_ptr<progress::ProgressGuard> progress_guard;
+        std::unique_ptr<progress::ProgressTracker> bar;
+        if (show_progress) {
+            progress_guard = std::make_unique<progress::ProgressGuard>(true);
+            bar            = std::make_unique<progress::ProgressTracker>(
+                std::format("Pruning segment {:03d}", ref_seg), nsegments - 1,
+                tracker, task_id);
+        }
 
         initialize(ffa_fold, ref_seg, actual_log_file);
 
@@ -419,9 +446,11 @@ public:
                     iter + 1);
                 break;
             }
-            bar.set_score(m_suggestions->get_score_max());
-            bar.set_leaves(m_suggestions->get_nsugg_lb());
-            bar.set_progress(iter + 1);
+            if (bar) {
+                bar->set_score(m_suggestions->get_score_max());
+                bar->set_leaves(m_suggestions->get_nsugg_lb());
+                bar->set_progress(iter + 1);
+            }
         }
 
         // Transform the suggestion params to middle of the data
@@ -433,17 +462,20 @@ public:
         result_writer.write_run_results(run_name, m_scheme->get_data(),
                                         m_suggestions->get_transformed(delta_t),
                                         m_suggestions->get_scores(),
-                                        m_suggestions->get_nsugg(), *m_pstats);
+                                        m_suggestions->get_nsugg(),
+                                        m_cfg.get_nparams(), *m_pstats);
 
         // Final log entries
         std::ofstream final_log(actual_log_file, std::ios::app);
-        final_log << std::format("Pruning complete for ref segment {}\n",
+        final_log << std::format("Pruning run complete for ref segment {}\n",
                                  ref_seg);
         final_log << std::format("Time: {}\n", m_pstats->get_timer_summary());
         final_log.close();
-        spdlog::info("Pruning complete for ref segment: {}", ref_seg);
-        spdlog::info("Pruning stats: {}", m_pstats->get_stats_summary());
-        spdlog::info("Pruning time: {}", m_pstats->get_concise_timer_summary());
+        spdlog::info("Pruning run {:03d}: complete", ref_seg);
+        spdlog::info("Pruning run {:03d}: stats: {}", ref_seg,
+                     m_pstats->get_stats_summary());
+        spdlog::info("Pruning run {:03d}: timer: {}", ref_seg,
+                     m_pstats->get_concise_timer_summary());
     }
 
 private:
@@ -467,8 +499,8 @@ private:
     void initialize(std::span<const FoldType> ffa_fold,
                     SizeType ref_seg,
                     const std::filesystem::path& log_file) {
-        timing::ScopeTimer timer("Prune::initialize");
-        // Reset the suggestion buffer state
+        // timing::ScopeTimer timer("Prune::initialize");
+        //  Reset the suggestion buffer state
         m_suggestions->reset();
 
         // Initialize snail scheme for current ref_seg
@@ -479,8 +511,7 @@ private:
 
         m_prune_level    = 0;
         m_prune_complete = false;
-        spdlog::info("Initializing pruning run for ref segment: {}",
-                     m_scheme->get_ref_idx());
+        spdlog::info("Pruning run {:03d}: initialized", ref_seg);
 
         // Initialize the suggestions with the first segment
         const auto fold_segment =
@@ -557,7 +588,7 @@ private:
         // Check if no survivors
         if (m_suggestions->get_nsugg() == 0) {
             m_prune_complete = true;
-            spdlog::info("Pruning complete at level {} - no survivors",
+            spdlog::info("Pruning run complete at level {} - no survivors",
                          m_prune_level);
             return;
         }
@@ -772,8 +803,9 @@ void PruningManager::execute(std::span<const float> ts_e,
                              std::span<const float> ts_v,
                              const std::filesystem::path& outdir,
                              std::string_view file_prefix,
-                             std::string_view kind) {
-    m_impl->execute(ts_e, ts_v, outdir, file_prefix, kind);
+                             std::string_view kind,
+                             bool show_progress) {
+    m_impl->execute(ts_e, ts_v, outdir, file_prefix, kind, show_progress);
 }
 
 template <typename FoldType>
@@ -792,11 +824,6 @@ template <typename FoldType>
 Prune<FoldType>& Prune<FoldType>::operator=(Prune&& other) noexcept = default;
 
 template <typename FoldType>
-SizeType Prune<FoldType>::get_memory_usage() const noexcept {
-    return m_impl->get_memory_usage();
-}
-
-template <typename FoldType>
 void Prune<FoldType>::execute(
     std::span<const FoldType> ffa_fold,
     SizeType ref_seg,
@@ -804,9 +831,10 @@ void Prune<FoldType>::execute(
     const std::optional<std::filesystem::path>& log_file,
     const std::optional<std::filesystem::path>& result_file,
     progress::MultiprocessProgressTracker* tracker,
-    int task_id) {
+    int task_id,
+    bool show_progress) {
     m_impl->execute(ffa_fold, ref_seg, outdir, log_file, result_file, tracker,
-                    task_id);
+                    task_id, show_progress);
 }
 
 template class Prune<float>;

@@ -11,6 +11,8 @@
 #include <hdf5.h>
 #include <highfive/highfive.hpp>
 
+#include "loki/common/types.hpp"
+
 namespace loki::cands {
 
 namespace {
@@ -250,6 +252,7 @@ void PruneResultWriter::write_run_results(const std::string& run_name,
                                           const std::vector<double>& param_sets,
                                           const std::vector<float>& scores,
                                           SizeType n_param_sets,
+                                          SizeType n_params,
                                           const PruneStatsCollection& pstats) {
     std::lock_guard<std::mutex> lock(m_hdf5_mutex);
 
@@ -262,17 +265,37 @@ void PruneResultWriter::write_run_results(const std::string& run_name,
     HighFive::Group run_group       = runs_group.createGroup(run_name);
     auto [level_stats, timer_stats] = pstats.get_packed_data();
 
+    constexpr SizeType kLeavesParamStride = 2;
+    // Validate param_sets dimensions
     if (!param_sets.empty()) {
-        HighFive::DataSetCreateProps props;
-        const auto chunk_size =
-            static_cast<hsize_t>(std::min(1024UL, n_param_sets));
-        props.add(HighFive::Chunking(std::vector<hsize_t>{chunk_size}));
-        props.add(HighFive::Deflate(9));
-        run_group.createDataSet("param_sets", param_sets, props);
-    } else {
-        run_group.createDataSet("param_sets", param_sets);
+        const auto expected_size = n_param_sets * n_params * kLeavesParamStride;
+        if (param_sets.size() != expected_size) {
+            throw std::invalid_argument(std::format(
+                "param_sets size does not match the expected dimension: {} != "
+                "({} * {} * {})",
+                param_sets.size(), n_param_sets, n_params, kLeavesParamStride));
+        }
     }
-
+    const std::vector<SizeType> param_sets_dims = {n_param_sets, n_params,
+                                                   kLeavesParamStride};
+    HighFive::DataSpace param_sets_space(param_sets_dims);
+    HighFive::DataSetCreateProps props;
+    if (!param_sets.empty()) {
+        const auto chunk_n_param_sets =
+            static_cast<hsize_t>(std::min(1024UL, n_param_sets));
+        const std::vector<hsize_t> chunk_dims = {chunk_n_param_sets, n_params,
+                                                 kLeavesParamStride};
+        props.add(HighFive::Chunking(chunk_dims));
+        props.add(HighFive::Deflate(9));
+    }
+    auto param_sets_dataset =
+        run_group.createDataSet("param_sets", param_sets_space,
+                                HighFive::create_datatype<double>(), props);
+    if (!param_sets.empty()) {
+        // This allows writing flat data directly to multidimensional datasets
+        param_sets_dataset.write_raw(param_sets.data(),
+                                     HighFive::create_datatype<double>());
+    }
     run_group.createDataSet("scheme", scheme);
     run_group.createDataSet("scores", scores);
     if (!level_stats.empty()) {

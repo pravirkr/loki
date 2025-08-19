@@ -585,6 +585,20 @@ compute_ffa_complex(std::span<const float> ts_e,
     return {std::move(fold), ffa_plan};
 }
 
+std::tuple<std::vector<ComplexType>, plans::FFAPlan>
+compute_ffa_complex_domain(std::span<const float> ts_e,
+                           std::span<const float> ts_v,
+                           const search::PulsarSearchConfig& cfg,
+                           bool quiet,
+                           bool show_progress) {
+    timing::ScopedLogLevel scoped_log_level(quiet);
+    FFACOMPLEX ffa(cfg, show_progress);
+    const auto& ffa_plan = ffa.get_plan();
+    std::vector<ComplexType> fold(ffa_plan.get_fold_size_complex(), 0.0F);
+    ffa.execute(ts_e, ts_v, std::span<ComplexType>(fold));
+    return {std::move(fold), ffa_plan};
+}
+
 std::tuple<std::vector<float>, plans::FFAPlan>
 compute_ffa_scores(std::span<const float> ts_e,
                    std::span<const float> ts_v,

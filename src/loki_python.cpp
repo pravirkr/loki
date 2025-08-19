@@ -567,13 +567,14 @@ PYBIND11_MODULE(libloki, m) {
             "execute",
             [](PruningManager& self, const PyArrayT<float>& ts_e,
                const PyArrayT<float>& ts_v, const std::string& outdir,
-               const std::string& file_prefix, const std::string& kind) {
+               const std::string& file_prefix, const std::string& kind,
+               bool show_progress) {
                 self.execute(to_span<const float>(ts_e),
                              to_span<const float>(ts_v), outdir, file_prefix,
-                             kind);
+                             kind, show_progress);
             },
             py::arg("ts_e"), py::arg("ts_v"), py::arg("outdir"),
-            py::arg("file_prefix"), py::arg("kind"));
+            py::arg("file_prefix"), py::arg("kind"), py::arg("show_progress") = true);
 
     py::class_<PruneFloat>(m_prune, "Prune")
         .def(py::init<const FFAPlan&, const PulsarSearchConfig&,
