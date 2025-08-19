@@ -141,19 +141,22 @@ std::tuple<std::vector<float>, plans::FFAPlan>
 compute_ffa_cuda(std::span<const float> ts_e,
                  std::span<const float> ts_v,
                  const search::PulsarSearchConfig& cfg,
-                 int device_id);
+                 int device_id,
+                 bool quiet = false);
 
 std::tuple<std::vector<float>, plans::FFAPlan>
 compute_ffa_complex_cuda(std::span<const float> ts_e,
                          std::span<const float> ts_v,
                          const search::PulsarSearchConfig& cfg,
-                         int device_id);
+                         int device_id,
+                         bool quiet = false);
 
 std::tuple<std::vector<float>, plans::FFAPlan>
 compute_ffa_scores_cuda(std::span<const float> ts_e,
                         std::span<const float> ts_v,
                         const search::PulsarSearchConfig& cfg,
-                        int device_id);
+                        int device_id,
+                        bool quiet = false);
 #endif // LOKI_ENABLE_CUDA
 
 } // namespace loki::algorithms

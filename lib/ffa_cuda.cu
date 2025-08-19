@@ -48,12 +48,10 @@ __global__ void kernel_ffa_iter(const float* __restrict__ fold_in,
     const int icoord = temp / nsegments;
 
     // Precompute coordinate data (avoid repeated access)
-    const int coord_tail     = coords.i_tail[icoord];
-    const int coord_head     = coords.i_head[icoord];
-    const int shift_tail_raw = __double2int_rn(coords.shift_tail[icoord]);
-    const int shift_head_raw = __double2int_rn(coords.shift_head[icoord]);
-    const int shift_tail     = (shift_tail_raw % nbins + nbins) % nbins;
-    const int shift_head     = (shift_head_raw % nbins + nbins) % nbins;
+    const int coord_tail = coords.i_tail[icoord];
+    const int coord_head = coords.i_head[icoord];
+    const int shift_tail = __float2int_rn(coords.shift_tail[icoord]) % nbins;
+    const int shift_head = __float2int_rn(coords.shift_head[icoord]) % nbins;
 
     const int idx_tail =
         (ibin < shift_tail) ? (ibin + nbins - shift_tail) : (ibin - shift_tail);
@@ -74,6 +72,49 @@ __global__ void kernel_ffa_iter(const float* __restrict__ fold_in,
     fold_out[out_offset + ibin + nbins] =
         fold_in[tail_offset + idx_tail + nbins] +
         fold_in[head_offset + idx_head + nbins];
+}
+
+__global__ void kernel_ffa_freq_iter(const float* __restrict__ fold_in,
+                                     float* __restrict__ fold_out,
+                                     const plans::FFACoordFreqDPtrs coords,
+                                     int ncoords_cur,
+                                     int ncoords_prev,
+                                     int nsegments,
+                                     int nbins) {
+
+    // 1D thread mapping with optimal work distribution
+    const auto tid = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
+    const auto total_work = ncoords_cur * nsegments * nbins;
+
+    if (tid >= total_work) {
+        return;
+    }
+
+    // Decode thread ID to (icoord, iseg, ibin) - OPTIMIZED ORDER for coalescing
+    const int ibin   = tid % nbins; // Fastest varying (best for coalescing)
+    const int temp   = tid / nbins;
+    const int iseg   = temp % nsegments;
+    const int icoord = temp / nsegments;
+
+    // Precompute coordinate data (avoid repeated access)
+    const int coord_idx = coords.idx[icoord];
+    const int shift     = __float2int_rn(coords.shift[icoord]) % nbins;
+
+    const int idx = (ibin < shift) ? (ibin + nbins - shift) : (ibin - shift);
+
+    // Calculate offsets
+    const int tail_offset =
+        ((iseg * 2) * ncoords_prev * 2 * nbins) + (coord_idx * 2 * nbins);
+    const int head_offset =
+        ((iseg * 2 + 1) * ncoords_prev * 2 * nbins) + (coord_idx * 2 * nbins);
+    const int out_offset =
+        (iseg * ncoords_cur * 2 * nbins) + (icoord * 2 * nbins);
+
+    // Process both e and v components (vectorized access)
+    fold_out[out_offset + ibin] =
+        fold_in[tail_offset] + fold_in[head_offset + idx];
+    fold_out[out_offset + ibin + nbins] =
+        fold_in[tail_offset + nbins] + fold_in[head_offset + idx + nbins];
 }
 
 // OPTIMIZED: One thread per smallest work unit, optimized for memory coalescing
@@ -170,25 +211,48 @@ public:
           m_ffa_plan(m_cfg),
           m_device_id(device_id),
           m_use_single_buffer(m_ffa_plan.get_fold_size() >=
-                              m_ffa_plan.get_buffer_size()) {
+                              m_ffa_plan.get_buffer_size()),
+          m_is_freq_only(m_cfg.get_nparams() == 1) {
         cuda_utils::set_device(m_device_id);
+
         // Allocate memory for the FFA buffers
         m_fold_in_d.resize(m_ffa_plan.get_buffer_size(), 0.0F);
         if (!m_use_single_buffer) {
             m_fold_out_d.resize(m_ffa_plan.get_buffer_size(), 0.0F);
         }
+
+        // Allocate memory for the FFA coordinates (based on nparams)
+        if (m_is_freq_only) {
+            m_coordinates_freq.resize(m_ffa_plan.n_levels);
+            for (SizeType i_level = 0; i_level < m_ffa_plan.n_levels;
+                 ++i_level) {
+                m_coordinates_freq[i_level].resize(m_ffa_plan.ncoords[i_level]);
+            }
+            m_coordinates_freq_d.resize(m_ffa_plan.get_coord_size());
+        } else {
+            m_coordinates.resize(m_ffa_plan.n_levels);
+            for (SizeType i_level = 0; i_level < m_ffa_plan.n_levels;
+                 ++i_level) {
+                m_coordinates[i_level].resize(m_ffa_plan.ncoords[i_level]);
+            }
+            m_coordinates_d.resize(m_ffa_plan.get_coord_size());
+        }
+
         // Initialize the brute fold
         const auto t_ref =
             m_cfg.get_nparams() == 1 ? 0.0 : m_ffa_plan.tsegments[0] / 2.0;
         const auto freqs_arr = m_ffa_plan.params[0].back();
-
-        m_the_bf = std::make_unique<algorithms::BruteFoldCUDA>(
+        m_the_bf             = std::make_unique<algorithms::BruteFoldCUDA>(
             freqs_arr, m_ffa_plan.segment_lens[0], m_cfg.get_nbins(),
             m_cfg.get_nsamps(), m_cfg.get_tsamp(), t_ref, m_device_id);
 
-        plans::transfer_ffa_plan_to_device(m_ffa_plan, m_ffa_plan_d);
-        cuda_utils::check_last_cuda_error(
-            "FFACUDA::Impl::transfer_ffa_plan_to_device failed");
+        // Log memory usage
+        const auto memory_buffer_gb = m_ffa_plan.get_buffer_memory_usage();
+        const auto memory_coord_gb  = m_ffa_plan.get_coord_memory_usage();
+        spdlog::info("FFA Memory Usage: {:.2f} GB ({} buffers) + {:.2f} GB "
+                     "(coords)",
+                     memory_buffer_gb, m_use_single_buffer ? 1 : 2,
+                     memory_coord_gb);
     }
 
     ~Impl()                      = default;
@@ -241,25 +305,38 @@ public:
                    cuda::std::span<float> fold_d,
                    cudaStream_t stream) {
         check_inputs(ts_e_d.size(), ts_v_d.size(), fold_d.size());
-        if (m_use_single_buffer) {
-            execute_single_buffer_device(ts_e_d, ts_v_d, fold_d, stream);
+
+        // Resolve the coordinates for the FFA plan
+        if (m_is_freq_only) {
+            m_ffa_plan.resolve_coordinates_freq(m_coordinates_freq);
+            m_coordinates_freq_d.copy_from_host(m_coordinates_freq,
+                                                m_ffa_plan.get_coord_size());
         } else {
-            execute_double_buffer_device(ts_e_d, ts_v_d, fold_d, stream);
+            m_ffa_plan.resolve_coordinates(m_coordinates);
+            m_coordinates_d.copy_from_host(m_coordinates,
+                                           m_ffa_plan.get_coord_size());
         }
+        execute_unified_device(ts_e_d, ts_v_d, fold_d, stream);
         spdlog::debug("FFACUDA::Impl: Device execution complete on stream");
     }
 
 private:
     search::PulsarSearchConfig m_cfg;
     plans::FFAPlan m_ffa_plan;
-    plans::FFAPlanD m_ffa_plan_d;
     int m_device_id;
     bool m_use_single_buffer;
+    bool m_is_freq_only;
     std::unique_ptr<algorithms::BruteFoldCUDA> m_the_bf;
 
     // Buffers for the FFA plan
     thrust::device_vector<float> m_fold_in_d;
     thrust::device_vector<float> m_fold_out_d;
+
+    // Buffers for the FFA coordinates
+    std::vector<std::vector<plans::FFACoord>> m_coordinates;
+    std::vector<std::vector<plans::FFACoordFreq>> m_coordinates_freq;
+    plans::FFACoordD m_coordinates_d;
+    plans::FFACoordFreqD m_coordinates_freq_d;
 
     // Add persistent input/output buffers
     thrust::device_vector<float> m_ts_e_d;
@@ -290,118 +367,137 @@ private:
             cuda::std::span(init_buffer_d, m_the_bf->get_fold_size()), stream);
     }
 
-    void execute_double_buffer_device(cuda::std::span<const float> ts_e_d,
-                                      cuda::std::span<const float> ts_v_d,
-                                      cuda::std::span<float> fold_d,
-                                      cudaStream_t stream) {
-        timing::ScopeTimer timer("FFACUDA::Impl::execute_device");
-        initialize_device(ts_e_d, ts_v_d,
-                          thrust::raw_pointer_cast(m_fold_in_d.data()), stream);
-
-        float* fold_in_ptr     = thrust::raw_pointer_cast(m_fold_in_d.data());
-        float* fold_out_ptr    = thrust::raw_pointer_cast(m_fold_out_d.data());
-        float* fold_result_ptr = thrust::raw_pointer_cast(fold_d.data());
-
-        const auto levels = m_cfg.get_niters_ffa() + 1;
-
-        auto coords_cur = m_ffa_plan_d.coordinates.get_raw_ptrs();
-        cuda_utils::check_last_cuda_error("thrust::raw_pointer_cast failed");
-        coords_cur.update_offsets(m_ffa_plan_d.ncoords[0]);
-
-        // FFA iterations (levels 1 to levels)
-        for (SizeType i_level = 1; i_level < levels; ++i_level) {
-            const auto nsegments    = m_ffa_plan_d.nsegments[i_level];
-            const auto nbins        = m_ffa_plan_d.nbins[i_level];
-            const auto ncoords_cur  = m_ffa_plan_d.ncoords[i_level];
-            const auto ncoords_prev = m_ffa_plan_d.ncoords[i_level - 1];
-
-            const int total_work = ncoords_cur * nsegments * nbins;
-            const int block_size = (total_work < 65536) ? 256 : 512;
-            const int grid_size  = (total_work + block_size - 1) / block_size;
-
-            const dim3 block_dim(block_size);
-            const dim3 grid_dim(grid_size);
-
-            cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
-
-            // Determine output buffer: final iteration writes to output buffer
-            const bool is_last     = i_level == levels - 1;
-            float* current_out_ptr = is_last ? fold_result_ptr : fold_out_ptr;
-
-            kernel_ffa_iter<<<grid_dim, block_dim, 0, stream>>>(
-                fold_in_ptr, current_out_ptr, coords_cur, ncoords_cur,
-                ncoords_prev, nsegments, nbins);
-            cuda_utils::check_last_cuda_error("kernel_ffa_iter launch failed");
-
-            // Ping-pong buffers (unless it's the final iteration)
-            if (!is_last) {
-                coords_cur.update_offsets(ncoords_cur);
-                std::swap(fold_in_ptr, fold_out_ptr);
-            }
-        }
-
-        spdlog::debug("FFACUDA::Impl: Iterations submitted to stream.");
-    }
-
-    void execute_single_buffer_device(cuda::std::span<const float> ts_e_d,
-                                      cuda::std::span<const float> ts_v_d,
-                                      cuda::std::span<float> fold_d,
-                                      cudaStream_t stream) {
+    void execute_unified_device(cuda::std::span<const float> ts_e_d,
+                                cuda::std::span<const float> ts_v_d,
+                                cuda::std::span<float> fold_d,
+                                cudaStream_t stream) {
         timing::ScopeTimer timer("FFACUDA::Impl::execute_device");
         const auto levels = m_cfg.get_niters_ffa() + 1;
+        error_check::check_greater_equal(
+            levels, 2,
+            "FFACUDA::Impl::execute_unified_device: levels must be greater "
+            "than or equal to 2");
 
         // Use m_fold_in and output fold buffer for ping-pong
-        float* fold_internal_ptr = thrust::raw_pointer_cast(m_fold_in_d.data());
-        float* fold_result_ptr   = thrust::raw_pointer_cast(fold_d.data());
+        float* fold_in_ptr     = thrust::raw_pointer_cast(m_fold_in_d.data());
+        float* fold_result_ptr = thrust::raw_pointer_cast(fold_d.data());
+        float* fold_out_ptr =
+            m_use_single_buffer ? nullptr
+                                : thrust::raw_pointer_cast(m_fold_out_d.data());
 
-        // Calculate the number of internal iterations (excluding final write)
-        const SizeType internal_iters = levels - 2;
-        // Determine starting configuration to ensure final result lands in fold
-        bool odd_swaps = (internal_iters % 2) == 1;
-        float *current_in_ptr, *current_out_ptr;
-        if (odd_swaps) {
-            // Initialize in fold, will end up in fold after odd swaps
-            initialize_device(ts_e_d, ts_v_d, fold_result_ptr, stream);
-            current_in_ptr  = fold_result_ptr;
-            current_out_ptr = fold_internal_ptr;
+        float* current_in_ptr  = nullptr;
+        float* current_out_ptr = nullptr;
+        if (m_use_single_buffer) {
+            // internal_iters excludes the final write
+            const SizeType internal_iters = levels - 2;
+            // Ensure final result lands in fold
+            const bool odd_swaps = (internal_iters % 2) == 1;
+            if (odd_swaps) {
+                // init -> fold, then odd swaps -> ends in fold
+                initialize_device(ts_e_d, ts_v_d, fold_result_ptr, stream);
+                current_in_ptr  = fold_result_ptr;
+                current_out_ptr = fold_in_ptr;
+            } else {
+                // init -> internal, then even swaps -> ends in fold
+                initialize_device(ts_e_d, ts_v_d, fold_in_ptr, stream);
+                current_in_ptr  = fold_in_ptr;
+                current_out_ptr = fold_result_ptr;
+            }
         } else {
-            // Initialize in internal, will end up in fold after even swaps
-            initialize_device(ts_e_d, ts_v_d, fold_internal_ptr, stream);
-            current_in_ptr  = fold_internal_ptr;
-            current_out_ptr = fold_result_ptr;
+            // double buffer: init -> fold_in, ping-pong with fold_out, final
+            // -> fold_result
+            initialize_device(ts_e_d, ts_v_d, fold_in_ptr, stream);
+            current_in_ptr  = fold_in_ptr;
+            current_out_ptr = fold_out_ptr;
         }
+        // Get coordinates based on freq_only flag
+        if (m_is_freq_only) {
+            auto coords_cur = m_coordinates_freq_d.get_raw_ptrs();
+            cuda_utils::check_last_cuda_error(
+                "thrust::raw_pointer_cast failed");
+            coords_cur.update_offsets(static_cast<int>(m_ffa_plan.ncoords[0]));
 
-        auto coords_cur = m_ffa_plan_d.coordinates.get_raw_ptrs();
-        cuda_utils::check_last_cuda_error("thrust::raw_pointer_cast failed");
-        coords_cur.update_offsets(m_ffa_plan_d.ncoords[0]);
+            // FFA iterations with freq kernel
+            for (SizeType i_level = 1; i_level < levels; ++i_level) {
+                const auto nsegments =
+                    static_cast<int>(m_ffa_plan.fold_shapes[i_level][0]);
+                const auto nbins =
+                    static_cast<int>(m_ffa_plan.fold_shapes[i_level].back());
+                const auto ncoords_cur =
+                    static_cast<int>(m_ffa_plan.ncoords[i_level]);
+                const auto ncoords_prev =
+                    static_cast<int>(m_ffa_plan.ncoords[i_level - 1]);
 
-        // FFA iterations (levels 1 to levels)
-        for (SizeType i_level = 1; i_level < levels; ++i_level) {
-            const auto nsegments    = m_ffa_plan_d.nsegments[i_level];
-            const auto nbins        = m_ffa_plan_d.nbins[i_level];
-            const auto ncoords_cur  = m_ffa_plan_d.ncoords[i_level];
-            const auto ncoords_prev = m_ffa_plan_d.ncoords[i_level - 1];
+                const int total_work = ncoords_cur * nsegments * nbins;
+                const int block_size = (total_work < 65536) ? 256 : 512;
+                const int grid_size =
+                    (total_work + block_size - 1) / block_size;
 
-            const int total_work = ncoords_cur * nsegments * nbins;
-            const int block_size = (total_work < 65536) ? 256 : 512;
-            const int grid_size  = (total_work + block_size - 1) / block_size;
+                const dim3 block_dim(block_size);
+                const dim3 grid_dim(grid_size);
+                cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
 
-            const dim3 block_dim(block_size);
-            const dim3 grid_dim(grid_size);
+                const bool is_last = i_level == levels - 1;
+                // Final write target:
+                //  - single-buffer: by parity we already arranged
+                //  current_out_ptr == fold_result_ptr on last iter
+                //  - double-buffer: override to fold_result_ptr
+                float* output_ptr = (!m_use_single_buffer && is_last)
+                                        ? fold_result_ptr
+                                        : current_out_ptr;
 
-            cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
+                kernel_ffa_freq_iter<<<grid_dim, block_dim, 0, stream>>>(
+                    current_in_ptr, output_ptr, coords_cur, ncoords_cur,
+                    ncoords_prev, nsegments, nbins);
+                cuda_utils::check_last_cuda_error(
+                    "kernel_ffa_freq_iter launch failed");
 
-            // Determine output buffer: final iteration writes to output buffer
-            const bool is_last = i_level == levels - 1;
-            kernel_ffa_iter<<<grid_dim, block_dim, 0, stream>>>(
-                current_in_ptr, current_out_ptr, coords_cur, ncoords_cur,
-                ncoords_prev, nsegments, nbins);
-            cuda_utils::check_last_cuda_error("kernel_ffa_iter launch failed");
+                if (!is_last) {
+                    coords_cur.update_offsets(ncoords_cur);
+                    std::swap(current_in_ptr, current_out_ptr);
+                }
+            }
+        } else {
+            auto coords_cur = m_coordinates_d.get_raw_ptrs();
+            cuda_utils::check_last_cuda_error(
+                "thrust::raw_pointer_cast failed");
+            coords_cur.update_offsets(static_cast<int>(m_ffa_plan.ncoords[0]));
 
-            // Ping-pong buffers (unless it's the final iteration)
-            if (!is_last) {
-                coords_cur.update_offsets(ncoords_cur);
-                std::swap(current_in_ptr, current_out_ptr);
+            // FFA iterations with regular kernel
+            for (SizeType i_level = 1; i_level < levels; ++i_level) {
+                const auto nsegments =
+                    static_cast<int>(m_ffa_plan.fold_shapes[i_level][0]);
+                const auto nbins =
+                    static_cast<int>(m_ffa_plan.fold_shapes[i_level].back());
+                const auto ncoords_cur =
+                    static_cast<int>(m_ffa_plan.ncoords[i_level]);
+                const auto ncoords_prev =
+                    static_cast<int>(m_ffa_plan.ncoords[i_level - 1]);
+
+                const int total_work = ncoords_cur * nsegments * nbins;
+                const int block_size = (total_work < 65536) ? 256 : 512;
+                const int grid_size =
+                    (total_work + block_size - 1) / block_size;
+
+                const dim3 block_dim(block_size);
+                const dim3 grid_dim(grid_size);
+                cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
+
+                const bool is_last = i_level == levels - 1;
+                float* output_ptr  = (!m_use_single_buffer && is_last)
+                                         ? fold_result_ptr
+                                         : current_out_ptr;
+
+                kernel_ffa_iter<<<grid_dim, block_dim, 0, stream>>>(
+                    current_in_ptr, output_ptr, coords_cur, ncoords_cur,
+                    ncoords_prev, nsegments, nbins);
+                cuda_utils::check_last_cuda_error(
+                    "kernel_ffa_iter launch failed");
+
+                if (!is_last) {
+                    coords_cur.update_offsets(ncoords_cur);
+                    std::swap(current_in_ptr, current_out_ptr);
+                }
             }
         }
 
@@ -417,8 +513,10 @@ public:
           m_ffa_plan(m_cfg),
           m_device_id(device_id),
           m_use_single_buffer(m_ffa_plan.get_fold_size_complex() >=
-                              m_ffa_plan.get_buffer_size_complex()) {
+                              m_ffa_plan.get_buffer_size_complex()),
+          m_is_freq_only(m_cfg.get_nparams() == 1) {
         cuda_utils::set_device(m_device_id);
+
         // Allocate memory for the FFA buffers
         m_fold_in_d.resize(m_ffa_plan.get_buffer_size_complex(),
                            ComplexTypeCUDA(0.0F, 0.0F));
@@ -426,18 +524,39 @@ public:
             m_fold_out_d.resize(m_ffa_plan.get_buffer_size_complex(),
                                 ComplexTypeCUDA(0.0F, 0.0F));
         }
+
+        // Allocate memory for the FFA coordinates (based on nparams)
+        if (m_is_freq_only) {
+            m_coordinates_freq.resize(m_ffa_plan.n_levels);
+            for (SizeType i_level = 0; i_level < m_ffa_plan.n_levels;
+                 ++i_level) {
+                m_coordinates_freq[i_level].resize(m_ffa_plan.ncoords[i_level]);
+            }
+            m_coordinates_freq_d.resize(m_ffa_plan.get_coord_size());
+        } else {
+            m_coordinates.resize(m_ffa_plan.n_levels);
+            for (SizeType i_level = 0; i_level < m_ffa_plan.n_levels;
+                 ++i_level) {
+                m_coordinates[i_level].resize(m_ffa_plan.ncoords[i_level]);
+            }
+            m_coordinates_d.resize(m_ffa_plan.get_coord_size());
+        }
+
         // Initialize the brute fold
         const auto t_ref =
             m_cfg.get_nparams() == 1 ? 0.0 : m_ffa_plan.tsegments[0] / 2.0;
         const auto freqs_arr = m_ffa_plan.params[0].back();
-
-        m_the_bf = std::make_unique<algorithms::BruteFoldCUDA>(
+        m_the_bf = std::make_unique<algorithms::BruteFoldComplexCUDA>(
             freqs_arr, m_ffa_plan.segment_lens[0], m_cfg.get_nbins(),
             m_cfg.get_nsamps(), m_cfg.get_tsamp(), t_ref, m_device_id);
 
-        plans::transfer_ffa_plan_to_device(m_ffa_plan, m_ffa_plan_d);
-        cuda_utils::check_last_cuda_error(
-            "FFACUDA::Impl::transfer_ffa_plan_to_device failed");
+        // Log memory usage
+        const auto memory_buffer_gb = m_ffa_plan.get_buffer_memory_usage();
+        const auto memory_coord_gb  = m_ffa_plan.get_coord_memory_usage();
+        spdlog::info("FFA Memory Usage: {:.2f} GB ({} buffers) + {:.2f} GB "
+                     "(coords)",
+                     memory_buffer_gb, m_use_single_buffer ? 1 : 2,
+                     memory_coord_gb);
     }
 
     ~Impl()                      = default;
@@ -543,14 +662,20 @@ public:
 private:
     search::PulsarSearchConfig m_cfg;
     plans::FFAPlan m_ffa_plan;
-    plans::FFAPlanD m_ffa_plan_d;
     int m_device_id;
     bool m_use_single_buffer;
-    std::unique_ptr<algorithms::BruteFoldCUDA> m_the_bf;
+    bool m_is_freq_only;
+    std::unique_ptr<algorithms::BruteFoldComplexCUDA> m_the_bf;
 
     // Buffers for the FFA plan
     thrust::device_vector<ComplexTypeCUDA> m_fold_in_d;
     thrust::device_vector<ComplexTypeCUDA> m_fold_out_d;
+
+    // Buffers for the FFA coordinates
+    std::vector<std::vector<plans::FFACoord>> m_coordinates;
+    std::vector<std::vector<plans::FFACoordFreq>> m_coordinates_freq;
+    plans::FFACoordD m_coordinates_d;
+    plans::FFACoordFreqD m_coordinates_freq_d;
 
     // Add persistent input/output buffers
     thrust::device_vector<float> m_ts_e_d;
@@ -590,23 +715,11 @@ private:
     void initialize_device(cuda::std::span<const float> ts_e_d,
                            cuda::std::span<const float> ts_v_d,
                            ComplexTypeCUDA* init_buffer_d,
-                           ComplexTypeCUDA* temp_buffer_d,
                            cudaStream_t stream) {
         timing::ScopeTimer timer("FFACOMPLEXCUDA::initialize");
-        // Use temp_buffer for the initial real-valued brute fold output
-        auto real_temp_view =
-            cuda::std::span<float>(reinterpret_cast<float*>(temp_buffer_d),
-                                   m_ffa_plan.get_brute_fold_size());
-        m_the_bf->execute(ts_e_d, ts_v_d, real_temp_view, stream);
-
-        // Out-of-place RFFT from temp_buffer (real) to init_buffer (complex)
-        const auto nfft         = m_the_bf->get_fold_size() / m_cfg.get_nbins();
-        const auto complex_size = nfft * ((m_cfg.get_nbins() / 2) + 1);
-        utils::rfft_batch_cuda(
-            real_temp_view,
-            cuda::std::span<ComplexTypeCUDA>(init_buffer_d, complex_size),
-            static_cast<int>(nfft), static_cast<int>(m_cfg.get_nbins()),
-            stream);
+        m_the_bf->execute(
+            ts_e_d, ts_v_d,
+            cuda::std::span(init_buffer_d, m_the_bf->get_fold_size()), stream);
     }
 
     void execute_double_buffer_device(
@@ -614,9 +727,8 @@ private:
         cuda::std::span<const float> ts_v_d,
         cuda::std::span<ComplexTypeCUDA> fold_complex_d,
         cudaStream_t stream) {
-        initialize_device(
-            ts_e_d, ts_v_d, thrust::raw_pointer_cast(m_fold_in_d.data()),
-            thrust::raw_pointer_cast(m_fold_out_d.data()), stream);
+        initialize_device(ts_e_d, ts_v_d,
+                          thrust::raw_pointer_cast(m_fold_in_d.data()), stream);
 
         ComplexTypeCUDA* fold_in_ptr =
             thrust::raw_pointer_cast(m_fold_in_d.data());
@@ -805,21 +917,17 @@ private:
 
 FFACUDA::FFACUDA(const search::PulsarSearchConfig& cfg, int device_id)
     : m_impl(std::make_unique<Impl>(cfg, device_id)) {}
-
 FFACUDA::~FFACUDA()                                   = default;
 FFACUDA::FFACUDA(FFACUDA&& other) noexcept            = default;
 FFACUDA& FFACUDA::operator=(FFACUDA&& other) noexcept = default;
-
 const plans::FFAPlan& FFACUDA::get_plan() const noexcept {
     return m_impl->get_plan();
 }
-
 void FFACUDA::execute(std::span<const float> ts_e,
                       std::span<const float> ts_v,
                       std::span<float> fold) {
     m_impl->execute_h(ts_e, ts_v, fold);
 }
-
 void FFACUDA::execute(cuda::std::span<const float> ts_e,
                       cuda::std::span<const float> ts_v,
                       cuda::std::span<float> fold,
@@ -830,29 +938,24 @@ void FFACUDA::execute(cuda::std::span<const float> ts_e,
 FFACOMPLEXCUDA::FFACOMPLEXCUDA(const search::PulsarSearchConfig& cfg,
                                int device_id)
     : m_impl(std::make_unique<Impl>(cfg, device_id)) {}
-
 FFACOMPLEXCUDA::~FFACOMPLEXCUDA()                               = default;
 FFACOMPLEXCUDA::FFACOMPLEXCUDA(FFACOMPLEXCUDA&& other) noexcept = default;
 FFACOMPLEXCUDA&
 FFACOMPLEXCUDA::operator=(FFACOMPLEXCUDA&& other) noexcept = default;
-
 const plans::FFAPlan& FFACOMPLEXCUDA::get_plan() const noexcept {
     return m_impl->get_plan();
 }
-
 void FFACOMPLEXCUDA::execute(std::span<const float> ts_e,
                              std::span<const float> ts_v,
                              std::span<float> fold) {
     m_impl->execute_h(ts_e, ts_v, fold);
 }
-
 void FFACOMPLEXCUDA::execute(cuda::std::span<const float> ts_e,
                              cuda::std::span<const float> ts_v,
                              cuda::std::span<float> fold,
                              cudaStream_t stream) {
     m_impl->execute_d(ts_e, ts_v, fold, stream);
 }
-
 void FFACOMPLEXCUDA::execute(cuda::std::span<const float> ts_e,
                              cuda::std::span<const float> ts_v,
                              cuda::std::span<ComplexTypeCUDA> fold,
@@ -864,7 +967,9 @@ std::tuple<std::vector<float>, plans::FFAPlan>
 compute_ffa_cuda(std::span<const float> ts_e,
                  std::span<const float> ts_v,
                  const search::PulsarSearchConfig& cfg,
-                 int device_id) {
+                 int device_id,
+                 bool quiet) {
+    timing::ScopedLogLevel scoped_log_level(quiet);
     FFACUDA ffa(cfg, device_id);
     const auto& ffa_plan = ffa.get_plan();
     std::vector<float> fold(ffa_plan.get_fold_size(), 0.0F);
@@ -876,7 +981,9 @@ std::tuple<std::vector<float>, plans::FFAPlan>
 compute_ffa_complex_cuda(std::span<const float> ts_e,
                          std::span<const float> ts_v,
                          const search::PulsarSearchConfig& cfg,
-                         int device_id) {
+                         int device_id,
+                         bool quiet) {
+    timing::ScopedLogLevel scoped_log_level(quiet);
     FFACOMPLEXCUDA ffa(cfg, device_id);
     const auto& ffa_plan = ffa.get_plan();
     std::vector<float> fold(2 * ffa_plan.get_fold_size_complex(), 0.0F);
@@ -890,10 +997,12 @@ std::tuple<std::vector<float>, plans::FFAPlan>
 compute_ffa_scores_cuda(std::span<const float> ts_e,
                         std::span<const float> ts_v,
                         const search::PulsarSearchConfig& cfg,
-                        int device_id) {
+                        int device_id,
+                        bool quiet) {
+    timing::ScopedLogLevel scoped_log_level(quiet);
     const auto [fold, ffa_plan] =
         cfg.get_use_fft_shifts()
-            ? compute_ffa_complex_cuda(ts_e, ts_v, cfg, device_id)
+            ? compute_ffa_complex_cuda(ts_e, ts_v, cfg, device_id, quiet)
             : compute_ffa_cuda(ts_e, ts_v, cfg, device_id);
     const auto nsegments    = ffa_plan.nsegments.back();
     const auto n_param_sets = ffa_plan.ncoords.back();

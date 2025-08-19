@@ -98,11 +98,7 @@ public:
         }
 
         // Execute the FFA plan
-        if (m_use_single_buffer) {
-            execute_single_buffer(ts_e, ts_v, fold);
-        } else {
-            execute_double_buffer(ts_e, ts_v, fold);
-        }
+        execute_unified(ts_e, ts_v, fold);
     }
 
 private:
@@ -128,69 +124,59 @@ private:
                           std::span(init_buffer, m_the_bf->get_fold_size()));
     }
 
-    void execute_double_buffer(std::span<const float> ts_e,
-                               std::span<const float> ts_v,
-                               std::span<float> fold) {
-        initialize(ts_e, ts_v, m_fold_in.data());
-
-        float* fold_in_ptr     = m_fold_in.data();
-        float* fold_out_ptr    = m_fold_out.data();
-        float* fold_result_ptr = fold.data();
-
+    void execute_unified(std::span<const float> ts_e,
+                         std::span<const float> ts_v,
+                         std::span<float> fold) {
         const auto levels = m_cfg.get_niters_ffa() + 1;
-        progress::ProgressGuard progress_guard(m_show_progress);
-        auto bar = progress::make_ffa_bar("Computing FFA", levels - 1);
-
-        for (SizeType i_level = 1; i_level < levels; ++i_level) {
-            // Determine output buffer: final iteration writes to output buffer
-            const bool is_last     = i_level == levels - 1;
-            float* current_out_ptr = is_last ? fold_result_ptr : fold_out_ptr;
-            execute_iter(fold_in_ptr, current_out_ptr, i_level);
-            // Ping-pong buffers (unless it's the final iteration)
-            if (!is_last) {
-                std::swap(fold_in_ptr, fold_out_ptr);
-            }
-            if (m_show_progress) {
-                bar->set_leaves(m_ffa_plan.ncoords_lb[i_level]);
-                bar->set_progress(i_level);
-            }
-        }
-        bar->mark_as_completed();
-    }
-
-    void execute_single_buffer(std::span<const float> ts_e,
-                               std::span<const float> ts_v,
-                               std::span<float> fold) {
-        const auto levels = m_cfg.get_niters_ffa() + 1;
+        error_check::check_greater_equal(
+            levels, 2,
+            "FFA::Impl::execute_unified: levels must be greater than or equal "
+            "to 2");
 
         // Use m_fold_in and output fold buffer for ping-pong
-        float* fold_internal_ptr = m_fold_in.data();
-        float* fold_result_ptr   = fold.data();
+        float* fold_in_ptr     = m_fold_in.data();
+        float* fold_result_ptr = fold.data();
+        float* fold_out_ptr = m_use_single_buffer ? nullptr : m_fold_out.data();
 
-        // Calculate the number of internal iterations (excluding final write)
-        const SizeType internal_iters = levels - 2;
-
-        // Determine starting configuration to ensure final result lands in fold
-        bool odd_swaps = (internal_iters % 2) == 1;
-        float *current_in_ptr, *current_out_ptr;
-        if (odd_swaps) {
-            // Initialize in fold, will end up in fold after odd swaps
-            initialize(ts_e, ts_v, fold_result_ptr);
-            current_in_ptr  = fold_result_ptr;
-            current_out_ptr = fold_internal_ptr;
+        float* current_in_ptr  = nullptr;
+        float* current_out_ptr = nullptr;
+        if (m_use_single_buffer) {
+            // internal_iters excludes the final write
+            const SizeType internal_iters = levels - 2;
+            // Ensure final result lands in fold
+            const bool odd_swaps = (internal_iters % 2) == 1;
+            if (odd_swaps) {
+                // init -> fold, then odd swaps -> ends in fold
+                initialize(ts_e, ts_v, fold_result_ptr);
+                current_in_ptr  = fold_result_ptr;
+                current_out_ptr = fold_in_ptr;
+            } else {
+                // init -> internal, then even swaps -> ends in fold
+                initialize(ts_e, ts_v, fold_in_ptr);
+                current_in_ptr  = fold_in_ptr;
+                current_out_ptr = fold_result_ptr;
+            }
         } else {
-            // Initialize in internal, will end up in fold after even swaps
-            initialize(ts_e, ts_v, fold_internal_ptr);
-            current_in_ptr  = fold_internal_ptr;
-            current_out_ptr = fold_result_ptr;
+            // double buffer: init -> fold_in, ping-pong with fold_out, final
+            // -> fold_result
+            initialize(ts_e, ts_v, fold_in_ptr);
+            current_in_ptr  = fold_in_ptr;
+            current_out_ptr = fold_out_ptr;
         }
-
         progress::ProgressGuard progress_guard(m_show_progress);
         auto bar = progress::make_ffa_bar("Computing FFA", levels - 1);
 
         for (SizeType i_level = 1; i_level < levels; ++i_level) {
             const bool is_last = i_level == levels - 1;
-            execute_iter(current_in_ptr, current_out_ptr, i_level);
+            // Final write target:
+            //  - single-buffer: by parity we already arranged
+            //  current_out_ptr == fold_result_ptr on last iter
+            //  - double-buffer: override to fold_result_ptr
+            float* output_ptr = (!m_use_single_buffer && is_last)
+                                    ? fold_result_ptr
+                                    : current_out_ptr;
+            execute_iter(current_in_ptr, output_ptr, i_level);
+            // Ping-pong buffers (unless it's the final iteration)
             if (!is_last) {
                 std::swap(current_in_ptr, current_out_ptr);
             }
@@ -274,7 +260,7 @@ public:
         const auto t_ref =
             m_cfg.get_nparams() == 1 ? 0.0 : m_ffa_plan.tsegments[0] / 2.0;
         const auto freqs_arr = m_ffa_plan.params[0].back();
-        m_the_bf = std::make_unique<algorithms::BruteFoldComplex>(
+        m_the_bf             = std::make_unique<algorithms::BruteFoldComplex>(
             freqs_arr, m_ffa_plan.segment_lens[0], m_cfg.get_nbins(),
             m_cfg.get_nsamps(), m_cfg.get_tsamp(), t_ref, m_nthreads);
 

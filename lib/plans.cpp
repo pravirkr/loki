@@ -53,6 +53,10 @@ SizeType FFAPlan::get_fold_size_complex() const noexcept {
                            std::multiplies<>());
 }
 
+SizeType FFAPlan::get_coord_size() const noexcept {
+    return std::accumulate(ncoords.begin(), ncoords.end(), 0, std::plus<>());
+}
+
 float FFAPlan::get_buffer_memory_usage() const noexcept {
     const auto internal_buffers = get_fold_size() >= get_buffer_size() ? 1 : 2;
     SizeType total_memory       = 0;
@@ -68,10 +72,7 @@ float FFAPlan::get_buffer_memory_usage() const noexcept {
 }
 
 float FFAPlan::get_coord_memory_usage() const noexcept {
-    SizeType total_memory = 0;
-    for (SizeType i_level = 0; i_level < n_levels; ++i_level) {
-        total_memory += ncoords[i_level] * sizeof(FFACoord);
-    }
+    const auto total_memory = get_coord_size() * sizeof(FFACoord);
     return static_cast<float>(total_memory) / static_cast<float>(1ULL << 30U);
 }
 

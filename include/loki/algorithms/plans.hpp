@@ -46,6 +46,7 @@ struct FFAPlan {
     SizeType get_brute_fold_size() const noexcept;
     SizeType get_fold_size() const noexcept;
     SizeType get_fold_size_complex() const noexcept;
+    SizeType get_coord_size() const noexcept;
     float get_buffer_memory_usage() const noexcept;
     float get_coord_memory_usage() const noexcept;
     // Get a dictionary of parameters for the last level of the plan

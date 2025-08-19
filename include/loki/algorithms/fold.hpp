@@ -141,6 +141,46 @@ private:
     std::unique_ptr<Impl> m_impl;
 };
 
+/**
+ * @brief Fold time series using brute-force method
+ *
+ */
+class BruteFoldComplexCUDA {
+public:
+    BruteFoldComplexCUDA(std::span<const double> freq_arr,
+                         SizeType segment_len,
+                         SizeType nbins,
+                         SizeType nsamps,
+                         double tsamp,
+                         double t_ref  = 0.0,
+                         int device_id = 0);
+    ~BruteFoldComplexCUDA();
+    BruteFoldComplexCUDA(BruteFoldComplexCUDA&&) noexcept;
+    BruteFoldComplexCUDA& operator=(BruteFoldComplexCUDA&&) noexcept;
+    BruteFoldComplexCUDA(const BruteFoldComplexCUDA&)            = delete;
+    BruteFoldComplexCUDA& operator=(const BruteFoldComplexCUDA&) = delete;
+
+    SizeType get_fold_size() const;
+    /**
+     * @brief Fold time series using brute-force method
+     *
+     * @param ts_e Time series signal
+     * @param ts_v Time series variance
+     * @param fold  Folded time series with shape [nsegments, nfreqs, 2, nbins]
+     */
+    void execute(std::span<const float> ts_e,
+                 std::span<const float> ts_v,
+                 std::span<ComplexType> fold);
+    void execute(cuda::std::span<const float> ts_e,
+                 cuda::std::span<const float> ts_v,
+                 cuda::std::span<ComplexTypeCUDA> fold,
+                 cudaStream_t stream = nullptr);
+
+private:
+    class Impl;
+    std::unique_ptr<Impl> m_impl;
+};
+
 std::vector<float> compute_brute_fold_cuda(std::span<const float> ts_e,
                                            std::span<const float> ts_v,
                                            std::span<const double> freq_arr,
@@ -149,6 +189,15 @@ std::vector<float> compute_brute_fold_cuda(std::span<const float> ts_e,
                                            double tsamp,
                                            double t_ref  = 0.0,
                                            int device_id = 0);
+std::vector<ComplexType>
+compute_brute_fold_complex_cuda(std::span<const float> ts_e,
+                                std::span<const float> ts_v,
+                                std::span<const double> freq_arr,
+                                SizeType segment_len,
+                                SizeType nbins,
+                                double tsamp,
+                                double t_ref  = 0.0,
+                                int device_id = 0);
 #endif // LOKI_ENABLE_CUDA
 
 } // namespace loki::algorithms

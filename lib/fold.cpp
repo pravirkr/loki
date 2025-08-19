@@ -253,7 +253,6 @@ BruteFoldComplex::operator=(BruteFoldComplex&& other) noexcept = default;
 SizeType BruteFoldComplex::get_fold_size() const {
     return m_impl->get_fold_size();
 }
-
 void BruteFoldComplex::execute(std::span<const float> ts_e,
                                std::span<const float> ts_v,
                                std::span<ComplexType> fold) {
