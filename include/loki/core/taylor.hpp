@@ -80,17 +80,6 @@ void poly_taylor_resolve_jerk_batch(
     SizeType n_leaves,
     SizeType n_params);
 
-void poly_taylor_resolve_snap_batch(
-    std::span<const double> leaves_batch,
-    std::pair<double, double> coord_add,
-    std::pair<double, double> coord_init,
-    std::span<const std::vector<double>> param_arr,
-    std::span<SizeType> pindex_flat_batch,
-    std::span<float> relative_phase_batch,
-    SizeType nbins,
-    SizeType n_leaves,
-    SizeType n_params);
-
 void poly_taylor_resolve_circular_batch(
     std::span<const double> leaves_batch,
     std::pair<double, double> coord_add,

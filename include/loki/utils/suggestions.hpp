@@ -10,23 +10,27 @@
 namespace loki::utils {
 
 /**
- * @brief A circular buffer for managing search suggestions with in-place
- * updates.
+ * @brief A memory-efficient circular buffer for managing search suggestions.
  *
- * This class implements a memory-efficient circular buffer to store, prune, and
- * update "suggestions" during an iterative search algorithm. It is designed to
- * minimize memory allocations by using a single buffer and performing updates
- * in-place.
+ * This class implements a circular buffer for iterative search algorithms to
+ * store, prune, and update "suggestions". It minimizes memory allocations by
+ * avoiding defragmentation and using in-place updates.
  *
- * Key features:
- * - **In-Place Updates**: New suggestions are generated from old ones within
- * the same buffer, split into a "read region" (current iteration's input) and a
- *   "write region" (next iteration's candidates).
- * - **Memory Management**: If the buffer fills, it automatically trims the
- *   lowest-scoring suggestions from the **write region** to make space.
- * - **Defragmentation**: After each iteration, the buffer is defragmented to
- *   ensure the active data is in a contiguous block, simplifying subsequent
- *   read operations.
+ * **Circular Buffer Design:**
+ * - Buffer is never defragmented - data remains in circular layout
+ * - New suggestions are generated from old ones within the same buffer, split
+ *   into a "read region" (current iteration's input) and a "write region"
+ *   (next iteration's candidates).
+ * - Automatic trimming when buffer fills up
+ *
+ * **State Transitions:**
+ * 1. `prepare_for_in_place_update()` - Split buffer: READ region (old) + WRITE
+ * region (new, empty)
+ * 2. `get_leaves_span()` + `advance_read_consumed()` - Read old data
+ * incrementally
+ * 3. `add_batch()` - Write new data, auto-trim if needed
+ * 4. `finalize_in_place_update()` - Promote WRITE region to be the new READ
+ * region
  *
  * Suggestions struct contains following arrays:
  * - leaves: Parameter sets, shape (capacity, nparams + 2, 2)
@@ -62,8 +66,10 @@ public:
     [[nodiscard]] SizeType get_leaves_stride() const noexcept;
     [[nodiscard]] SizeType get_folds_stride() const noexcept;
     [[nodiscard]] const std::vector<double>& get_leaves() const noexcept;
-    [[nodiscard]] std::span<const double>
-    get_leaves_span(SizeType start_leaf_idx, SizeType n_leaves) const noexcept;
+    // Returns {span, actual_size}, where actual_size <= requested n_leaves,
+    // limited to contiguous segment before wrap.
+    std::pair<std::span<const double>, SizeType>
+    get_leaves_span(SizeType n_leaves) const;
     [[nodiscard]] const std::vector<FoldType>& get_folds() const noexcept;
     [[nodiscard]] std::vector<float> get_scores() const noexcept;
 
@@ -80,6 +86,10 @@ public:
     void prepare_for_in_place_update();
     void finalize_in_place_update();
     void advance_read_consumed(SizeType n);
+
+    void compute_physical_indices(std::span<const SizeType> logical_indices,
+                                  std::span<SizeType> physical_indices,
+                                  SizeType n_leaves) const;
 
     // Get the best suggestion (highest score)
     [[nodiscard]] std::

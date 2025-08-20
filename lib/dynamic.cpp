@@ -6,6 +6,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "loki/algorithms/plans.hpp"
 #include "loki/common/types.hpp"
 #include "loki/core/taylor.hpp"
 #include "loki/detection/score.hpp"
@@ -29,9 +30,8 @@ PruneTaylorDPFuncts<FoldType>::PruneTaylorDPFuncts(
       m_cfg(std::move(cfg)),
       m_batch_size(batch_size),
       m_boxcar_widths_cache(m_cfg.get_score_widths(), m_cfg.get_nbins()) {
-    m_branching_pattern = poly_taylor_branching_pattern(
-        m_param_arr, m_dparams, m_cfg.get_param_limits(), m_nseg_ffa,
-        m_tseg_ffa, m_cfg.get_nbins(), m_cfg.get_tol_bins());
+    const auto ffa_plan = plans::FFAPlan(m_cfg);
+    m_branching_pattern = ffa_plan.generate_branching_pattern();
     if constexpr (std::is_same_v<FoldType, ComplexType>) {
         m_irfft_executor =
             std::make_unique<utils::IrfftExecutor>(m_cfg.get_nbins());

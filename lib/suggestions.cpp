@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <memory>
 #include <span>
 #include <unordered_map>
@@ -13,56 +14,10 @@
 namespace loki::utils {
 
 namespace {
-
-std::vector<SizeType>
-get_unique_indices_scores(std::span<const double> batch_leaves,
-                          std::span<const float> batch_scores,
-                          SizeType n_leaves,
-                          SizeType n_params) {
-    const auto leaves_stride_batch = batch_leaves.size() / n_leaves;
-    std::vector<SizeType> unique_indices;
-    unique_indices.reserve(n_leaves);
-
-    std::unordered_map<int64_t, bool> unique_dict;
-    std::unordered_map<int64_t, float> m_scoresdict;
-    std::unordered_map<int64_t, SizeType> count_dict;
-
-    unique_dict.reserve(n_leaves);
-    m_scoresdict.reserve(n_leaves);
-    count_dict.reserve(n_leaves);
-
-    SizeType count = 0;
-    for (SizeType i = 0; i < n_leaves; ++i) {
-        // Use the sum of the last two elements' first values as the key
-        const double val1 =
-            batch_leaves[(i * leaves_stride_batch) + ((n_params - 2) * 2)];
-        const double val2 =
-            batch_leaves[(i * leaves_stride_batch) + ((n_params - 1) * 2)];
-        const auto key =
-            static_cast<int64_t>(std::nearbyint((val1 + val2) * 1e9));
-
-        auto it = unique_dict.find(key);
-        if (it != unique_dict.end() && it->second) {
-            // Found existing entry, update if current score is better
-            if (batch_scores[i] > m_scoresdict[key]) {
-                m_scoresdict[key]   = batch_scores[i];
-                SizeType idx        = count_dict[key];
-                unique_indices[idx] = i;
-            }
-        } else {
-            // New unique entry
-            unique_dict[key]  = true;
-            m_scoresdict[key] = batch_scores[i];
-            count_dict[key]   = count;
-            unique_indices.push_back(i);
-            ++count;
-        }
-    }
-
-    // Resize to actual count of unique entries
-    unique_indices.resize(count);
-    return unique_indices;
-}
+struct BestIndices {
+    float score;
+    SizeType win_idx;
+};
 } // namespace
 
 /**
@@ -81,8 +36,9 @@ During an iteration we:
 3. Producers call add()/add_batch() into WRITE.
 4. If WRITE fills, trim_*() may delete from WRITE only.
 5. finalize_in_place_update()
-      – promotes WRITE to READ and defragments to
-        make [0, m_size) contiguous for next round.
+      – promotes WRITE to READ.
+6. Buffer is circular and not defragmented. It starts at m_head and wraps
+   around to m_write_start.
 
 All operations keep the invariant
    m_size_old - m_read_consumed + m_size ≤ m_capacity
@@ -111,23 +67,49 @@ public:
     Impl& operator=(Impl&&)      = default;
 
     const std::vector<double>& get_leaves() const noexcept { return m_leaves; }
-    std::span<const double> get_leaves_span(SizeType start_leaf_idx,
-                                            SizeType n_leaves) const noexcept {
-        return {m_leaves.data() + (start_leaf_idx * m_leaves_stride),
-                n_leaves * m_leaves_stride};
+    std::pair<std::span<const double>, SizeType>
+    get_leaves_span(SizeType n_leaves) const {
+        // During updates, we read from the old region starting at m_head
+        const SizeType available = m_size_old - m_read_consumed;
+        error_check::check_less_equal(
+            n_leaves, available,
+            "get_leaves_span: requested range exceeds available data");
+
+        // Compute physical start: relative to current head of read region
+        const SizeType physical_start = (m_head + m_read_consumed) % m_capacity;
+
+        // Compute how many contiguous elements we can take before wrap
+        const auto dist_to_end = m_capacity - physical_start;
+        const auto actual_size = std::min(n_leaves, dist_to_end);
+
+        // Return span with correct byte size (actual_size elements, not bytes)
+        return {{m_leaves.data() + (physical_start * m_leaves_stride),
+                 actual_size * m_leaves_stride},
+                actual_size};
     }
+
     const std::vector<FoldType>& get_folds() const noexcept { return m_folds; }
     std::vector<float> get_scores() const {
-        std::vector<float> valid_scores;
+        std::vector<float> scores(m_size);
         if (m_size == 0) {
-            return valid_scores;
+            return scores;
         }
-        valid_scores.reserve(m_size);
-        const auto start_idx = m_is_updating ? m_write_start : m_head;
-        for (SizeType i = 0; i < m_size; ++i) {
-            valid_scores.push_back(m_scores[(start_idx + i) % m_capacity]);
+        const auto start_idx = get_current_start_idx();
+        // Check if data wraps around
+        if (start_idx + m_size <= m_capacity) {
+            // Contiguous case - single fast copy
+            std::copy(m_scores.begin() + start_idx,
+                      m_scores.begin() + start_idx + m_size, scores.begin());
+        } else {
+            // Wrapped case - two contiguous copies
+            const auto first_part = m_capacity - start_idx;
+            std::copy(m_scores.begin() + start_idx, m_scores.end(),
+                      scores.begin());
+            std::copy(m_scores.begin(),
+                      m_scores.begin() + (m_size - first_part),
+                      scores.begin() + first_part);
         }
-        return valid_scores;
+        return scores;
     }
     SizeType get_capacity() const noexcept { return m_capacity; }
     SizeType get_nparams() const noexcept { return m_nparams; }
@@ -143,7 +125,7 @@ public:
         if (m_size == 0) {
             return 0.0F;
         }
-        const auto start_idx = m_is_updating ? m_write_start : m_head;
+        const auto start_idx = get_current_start_idx();
         float max_score      = std::numeric_limits<float>::lowest();
         for (SizeType i = 0; i < m_size; ++i) {
             max_score =
@@ -156,7 +138,7 @@ public:
         if (m_size == 0) {
             return 0.0F;
         }
-        const auto start_idx = m_is_updating ? m_write_start : m_head;
+        const auto start_idx = get_current_start_idx();
         float min_score      = std::numeric_limits<float>::max();
         for (SizeType i = 0; i < m_size; ++i) {
             min_score =
@@ -169,22 +151,52 @@ public:
         if (m_size == 0) {
             return 0.0F;
         }
-        const auto start_idx = m_is_updating ? m_write_start : m_head;
-        std::vector<float> scores_copy;
-        scores_copy.reserve(m_size);
-        for (SizeType i = 0; i < m_size; ++i) {
-            scores_copy.push_back(m_scores[(start_idx + i) % m_capacity]);
-        }
-        const auto mid = scores_copy.begin() + m_size / 2;
-        std::nth_element(scores_copy.begin(), mid, scores_copy.end());
-        return *mid;
+        const auto start_idx = get_current_start_idx();
+        std::vector<SizeType> idx(m_size);
+        std::iota(idx.begin(), idx.end(), 0);
+        auto score_at = [&](SizeType i) {
+            return m_scores[(start_idx + i) % m_capacity];
+        };
+        const auto mid = idx.begin() + m_size / 2;
+        std::nth_element(
+            idx.begin(), mid, idx.end(),
+            [&](SizeType a, SizeType b) { return score_at(a) < score_at(b); });
+
+        return score_at(*mid);
     }
 
     float get_memory_usage() const noexcept {
-        const auto total_memory = (m_leaves.size() * sizeof(double)) +
-                                  (m_folds.size() * sizeof(FoldType)) +
-                                  (m_scores.size() * sizeof(float));
-        return static_cast<float>(total_memory) /
+        const auto total_base_bytes = (m_leaves.size() * sizeof(double)) +
+                                      (m_folds.size() * sizeof(FoldType)) +
+                                      (m_scores.size() * sizeof(float));
+        // Peak temporary allocations (worst case scenario)
+        SizeType peak_temp_bytes = 0;
+
+        // 1. get_scores() temp allocation
+        peak_temp_bytes = std::max(peak_temp_bytes, m_capacity * sizeof(float));
+        // 2. get_transformed() temp allocation
+        const auto transform_bytes =
+            m_capacity * m_nparams * kLeavesParamStride * sizeof(double);
+        peak_temp_bytes = std::max(peak_temp_bytes, transform_bytes);
+        // 3. trim operations temp allocations
+        const auto trim_temp_bytes =
+            // scores_copy in get_score_median
+            (m_capacity * sizeof(float)) +
+            // idx array in trim_half
+            (m_capacity * sizeof(SizeType)) +
+            // moves vector in keep (worst case: all elements move)
+            (m_capacity * sizeof(std::pair<SizeType, SizeType>)) +
+            // best_by_key map in compute_uniqueness_mask_inplace (worst case:
+            // all unique)
+            (m_capacity * (sizeof(int64_t) + sizeof(BestIndices))) +
+            // keep_mask
+            (m_capacity * sizeof(bool)) +
+            // pending_indices in add_batch
+            (m_capacity * sizeof(SizeType));
+
+        peak_temp_bytes = std::max(peak_temp_bytes, trim_temp_bytes);
+
+        return static_cast<float>(total_base_bytes + peak_temp_bytes) /
                static_cast<float>(1ULL << 30U);
     }
 
@@ -205,29 +217,64 @@ public:
     }
 
     void prepare_for_in_place_update() {
+        error_check::check_equal(m_is_updating, false,
+                                 "Cannot prepare for update while already "
+                                 "updating");
         m_size_old      = m_size;
         m_write_start   = (m_head + m_size) % m_capacity;
         m_write_head    = m_write_start;
         m_size          = 0; // The new size starts at 0
         m_is_updating   = true;
         m_read_consumed = 0;
+        validate_circular_buffer_state();
     }
 
     void finalize_in_place_update() {
+        error_check::check_equal(
+            m_read_consumed, m_size_old,
+            "finalize_in_place_update: not all old data consumed");
         m_head          = m_write_start;
         m_size_old      = 0;
         m_is_updating   = false;
         m_read_consumed = 0;
-
-        // Always defragment to ensure data is contiguous and starts at 0
-        // for the next iteration. This simplifies the read logic immensely.
-        defragment();
     }
 
     void advance_read_consumed(SizeType n) {
         error_check::check_less_equal(m_read_consumed + n, m_size_old,
                                       "SuggestionTree: read_consumed overflow");
         m_read_consumed += n;
+
+        // Validate circular buffer invariant
+        error_check::check_less_equal(
+            m_size_old - m_read_consumed + m_size, m_capacity,
+            "SuggestionTree: circular buffer invariant violated");
+    }
+
+    void compute_physical_indices(std::span<const SizeType> logical_indices,
+                                  std::span<SizeType> physical_indices,
+                                  SizeType n_leaves) const {
+        if (!m_is_updating) {
+            throw std::runtime_error(
+                "compute_physical_indices: only valid during updates");
+        }
+        error_check::check_greater_equal(
+            logical_indices.size(), n_leaves,
+            "compute_physical_indices: logical_indices "
+            "size must be greater than or equal to n_leaves");
+        error_check::check_greater_equal(physical_indices.size(), n_leaves,
+                                         "compute_physical_indices: "
+                                         "physical_indices size must be "
+                                         "greater than or equal to n_leaves");
+
+        // logical_indices are relative to current batch span. The span starts
+        // at this physical location:
+        const auto span_start_physical =
+            (m_head + m_read_consumed) % m_capacity;
+        for (SizeType i = 0; i < n_leaves; ++i) {
+            const auto span_relative_idx = logical_indices[i];
+            physical_indices[i] =
+                (span_start_physical + span_relative_idx) % m_capacity;
+        }
     }
 
     std::tuple<std::span<const double>, std::span<const FoldType>, float>
@@ -236,17 +283,18 @@ public:
             return {std::span<const double>{}, std::span<const FoldType>{},
                     0.0F};
         }
-
-        // Find the index of the maximum score
+        const auto start_idx = get_current_start_idx();
         float max_score      = std::numeric_limits<float>::lowest();
         SizeType idx_max_rel = 0;
         for (SizeType i = 0; i < m_size; ++i) {
-            if (m_scores[(m_head + i) % m_capacity] > max_score) {
-                max_score   = m_scores[(m_head + i) % m_capacity];
+            const auto current_idx = (start_idx + i) % m_capacity;
+            if (m_scores[current_idx] > max_score) {
+                max_score   = m_scores[current_idx];
                 idx_max_rel = i;
             }
         }
-        const auto idx_max_abs = (m_head + idx_max_rel) % m_capacity;
+        const auto idx_max_abs = (start_idx + idx_max_rel) % m_capacity;
+
         // Extract the best parameter set and fold using views
         return {std::span{m_leaves.data() + (idx_max_abs * m_leaves_stride),
                           m_leaves_stride},
@@ -256,20 +304,38 @@ public:
     }
 
     std::vector<double> get_transformed(double delta_t) const {
-        // Extract all parameter sets except the last two rows for each
-        // suggestion using views
-        // This method now needs to handle potentially non-contiguous data
-        // For simplicity, we create a contiguous copy first.
         // Only copy nparams rows, not the last two rows (delay and frequency)
         const auto batch_stride = m_nparams * kLeavesParamStride;
         std::vector<double> contig_params(m_size * batch_stride, 0.0);
-        const auto start_idx = m_is_updating ? m_write_start : m_head;
-        for (SizeType i = 0; i < m_size; ++i) {
-            const auto src_idx      = (start_idx + i) % m_capacity;
-            const auto start_offset = src_idx * m_leaves_stride;
-            std::copy(m_leaves.begin() + start_offset,
-                      m_leaves.begin() + start_offset + batch_stride,
-                      contig_params.begin() + i * batch_stride);
+        const auto start_idx = get_current_start_idx();
+
+        // Check if data wraps around
+        if (start_idx + m_size <= m_capacity) {
+            // Contiguous case - single copy with stride
+            for (SizeType i = 0; i < m_size; ++i) {
+                const auto src_offset = (start_idx + i) * m_leaves_stride;
+                const auto dst_offset = i * batch_stride;
+                std::copy(m_leaves.begin() + src_offset,
+                          m_leaves.begin() + src_offset + batch_stride,
+                          contig_params.begin() + dst_offset);
+            }
+        } else {
+            // Wrapped case
+            const auto first_part = m_capacity - start_idx;
+            for (SizeType i = 0; i < first_part; ++i) {
+                const auto src_offset = (start_idx + i) * m_leaves_stride;
+                const auto dst_offset = i * batch_stride;
+                std::copy(m_leaves.begin() + src_offset,
+                          m_leaves.begin() + src_offset + batch_stride,
+                          contig_params.begin() + dst_offset);
+            }
+            for (SizeType i = 0; i < m_size - first_part; ++i) {
+                const auto src_offset = i * m_leaves_stride;
+                const auto dst_offset = (first_part + i) * batch_stride;
+                std::copy(m_leaves.begin() + src_offset,
+                          m_leaves.begin() + src_offset + batch_stride,
+                          contig_params.begin() + dst_offset);
+            }
         }
         if (m_nparams < 4) {
             psr_utils::shift_params_batch(contig_params, delta_t, m_size,
@@ -395,10 +461,6 @@ public:
                 m_write_head = (m_write_head + 1) % m_capacity;
             }
             m_size += n_to_add_now;
-            error_check::check_less_equal(m_size, m_capacity,
-                                          "SuggestionTree: Invalid size "
-                                          "after add_batch. Buffer overflow.");
-
             // Remove added candidates from the list
             pending_indices.erase(pending_indices.begin(),
                                   pending_indices.begin() +
@@ -408,6 +470,10 @@ public:
     }
 
     float trim_threshold() {
+        if (!m_is_updating) {
+            throw std::runtime_error(
+                "trim_threshold: only allowed during updates");
+        }
         if (m_size == 0) {
             return 0.0F;
         }
@@ -422,11 +488,6 @@ public:
         }
 
         keep(indices);
-        // After trimming, the write head must be updated to the new end of
-        // the block.
-        if (m_is_updating) {
-            m_write_head = (m_write_start + m_size) % m_capacity;
-        }
         return threshold;
     }
 
@@ -438,135 +499,79 @@ public:
         // To guarantee progress, we will keep at most half of the
         // suggestions.
         const SizeType n_to_keep = m_size / 2;
-
         // Find the score of the (n_to_keep)-th best suggestion. This will
         // be our new threshold.
-        std::vector<float> scores_copy;
-        scores_copy.reserve(m_size);
-        const auto start_idx = m_is_updating ? m_write_start : m_head;
-        for (SizeType i = 0; i < m_size; ++i) {
-            scores_copy.push_back(m_scores[(start_idx + i) % m_capacity]);
-        }
+        const auto start_idx = get_current_start_idx();
+        // Indices proxy instead of scores copy
+        std::vector<SizeType> idx(m_size);
+        std::iota(idx.begin(), idx.end(), 0);
+
+        auto nth      = idx.begin() + n_to_keep;
+        auto score_at = [&](SizeType i) {
+            return m_scores[(start_idx + i) % m_capacity];
+        };
 
         // Find the threshold score that would keep the top `n_to_keep`
         // elements. We sort in descending order to find the n_to_keep-th
         // largest element.
-        auto nth = scores_copy.begin() + n_to_keep;
-        std::nth_element(scores_copy.begin(), nth, scores_copy.end(),
-                         std::greater<float>());
-        const float threshold =
-            (n_to_keep < m_size) ? *nth : scores_copy.back();
+        std::nth_element(
+            idx.begin(), nth, idx.end(),
+            [&](SizeType a, SizeType b) { return score_at(a) > score_at(b); });
 
-        // Create a mask to keep the top n_to_keep suggestions, breaking
-        // ties arbitrarily but consistently.
-        std::vector<bool> indices(m_size, false);
+        const float threshold = score_at(*nth);
+
+        // Build mask: one pass, keep > threshold; fill == threshold until
+        // quota.
+        std::vector<bool> keep_mask(m_size, false);
         SizeType kept_count = 0;
-        // Keep all suggestions with a score strictly greater than the
-        // threshold.
         for (SizeType i = 0; i < m_size; ++i) {
-            const auto current_idx = (start_idx + i) % m_capacity;
-            if (m_scores[current_idx] > threshold) {
-                indices[i] = true;
-                kept_count++;
+            if (score_at(i) > threshold) {
+                keep_mask[i] = true;
+                ++kept_count;
             }
         }
-        // Keep suggestions with a score equal to the threshold until we
-        // reach n_to_keep.
-        if (kept_count < n_to_keep) {
-            for (SizeType i = 0; i < m_size; ++i) {
-                if (kept_count >= n_to_keep) {
-                    break;
-                }
-                const auto current_idx = (start_idx + i) % m_capacity;
-                if (m_scores[current_idx] == threshold) {
-                    indices[i] = true;
-                    kept_count++;
-                }
+        for (SizeType i = 0; kept_count < n_to_keep && i < m_size; ++i) {
+            if (!keep_mask[i] && score_at(i) == threshold) {
+                keep_mask[i] = true;
+                ++kept_count;
             }
         }
 
-        keep(indices);
-        // After trimming, the write head must be updated to the new end of
-        // the block.
-        if (m_is_updating) {
-            m_write_head = (m_write_start + m_size) % m_capacity;
-        }
+        keep(keep_mask);
         return threshold;
     }
 
     void trim_repeats() {
+        if (!m_is_updating) {
+            throw std::runtime_error(
+                "trim_repeats: only allowed during updates");
+        }
         if (m_size == 0) {
             return;
         }
-        const auto start_idx = m_is_updating ? m_write_start : m_head;
-
-        std::vector<double> contig_params(m_size * m_leaves_stride, 0.0);
-        std::vector<float> contig_scores(m_size);
-        for (SizeType i = 0; i < m_size; ++i) {
-            const auto src_idx = (start_idx + i) % m_capacity;
-            std::copy(m_leaves.begin() + src_idx * m_leaves_stride,
-                      m_leaves.begin() + src_idx * m_leaves_stride +
-                          m_leaves_stride,
-                      contig_params.begin() + i * m_leaves_stride);
-            contig_scores[i] = m_scores[src_idx];
-        }
-
-        // Get unique indices on contiguous copy
-        const auto unique_idx = get_unique_indices_scores(
-            contig_params, std::span<const float>(contig_scores), m_size,
-            m_nparams);
-
-        // Convert indices to boolean mask
-        std::vector<bool> idx_bool(m_size, false);
-        for (SizeType idx : unique_idx) {
-            idx_bool[idx] = true;
-        }
-
-        keep(idx_bool);
-        // After trimming, the write head must be updated to the new end of
-        // the block.
-        if (m_is_updating) {
-            m_write_head = (m_write_start + m_size) % m_capacity;
-        }
+        const auto keep_mask = compute_uniqueness_mask_inplace();
+        keep(keep_mask);
     }
 
     float trim_repeats_threshold() {
+        if (!m_is_updating) {
+            throw std::runtime_error(
+                "trim_repeats_threshold: only allowed during updates");
+        }
         if (m_size == 0) {
             return 0.0F;
         }
-
-        const float threshold = get_score_median();
-        const auto start_idx  = m_is_updating ? m_write_start : m_head;
-
-        std::vector<double> contig_params(m_size * m_leaves_stride, 0.0);
-        std::vector<float> contig_scores(m_size);
+        auto keep_mask       = compute_uniqueness_mask_inplace();
+        const auto threshold = get_score_median();
+        const auto start_idx = get_current_start_idx();
+        // Update keep_mask to keep only scores >= threshold
         for (SizeType i = 0; i < m_size; ++i) {
-            const auto src_idx = (start_idx + i) % m_capacity;
-            std::copy(m_leaves.begin() + src_idx * m_leaves_stride,
-                      m_leaves.begin() + src_idx * m_leaves_stride +
-                          m_leaves_stride,
-                      contig_params.begin() + i * m_leaves_stride);
-            contig_scores[i] = m_scores[src_idx];
-        }
-
-        auto unique_idx = get_unique_indices_scores(
-            contig_params, std::span<const float>(contig_scores), m_size,
-            m_nparams);
-
-        // Create boolean mask for unique indices and scores >= threshold
-        std::vector<bool> idx_bool(m_size, false);
-        for (SizeType idx : unique_idx) {
-            if (contig_scores[idx] >= threshold) {
-                idx_bool[idx] = true;
+            const auto buffer_idx = (start_idx + i) % m_capacity;
+            if (m_scores[buffer_idx] < threshold) {
+                keep_mask[i] = false;
             }
         }
-
-        keep(idx_bool);
-        // After trimming, the write head must be updated to the new end of
-        // the block.
-        if (m_is_updating) {
-            m_write_head = (m_write_start + m_size) % m_capacity;
-        }
+        keep(keep_mask);
         return threshold;
     }
 
@@ -593,6 +598,10 @@ private:
     bool m_is_updating{false};
     SizeType m_read_consumed{0};
 
+    SizeType get_current_start_idx() const noexcept {
+        return m_is_updating ? m_write_start : m_head;
+    }
+
     // Compacts the current region (write or full, based on m_is_updating)
     // using boolean mask. Only affects [start_idx, start_idx + m_size);
     // updates m_size.
@@ -604,101 +613,103 @@ private:
         }
         if (count == 0) {
             m_size = 0;
+            if (m_is_updating) {
+                m_write_head = m_write_start;
+            }
             return;
         }
-        const auto start_idx = m_is_updating ? m_write_start : m_head;
-        SizeType write_idx   = start_idx;
+        const auto start_idx = get_current_start_idx();
+        // Collect all moves first, then do bulk operations
+        std::vector<std::pair<SizeType, SizeType>> moves;
+        moves.reserve(count);
+
+        SizeType write_idx = start_idx;
         for (SizeType read_idx_rel = 0; read_idx_rel < m_size; ++read_idx_rel) {
             if (indices[read_idx_rel]) {
                 const auto src_idx = (start_idx + read_idx_rel) % m_capacity;
                 if (write_idx != src_idx) {
-                    std::copy(m_leaves.begin() + src_idx * m_leaves_stride,
-                              m_leaves.begin() + src_idx * m_leaves_stride +
-                                  m_leaves_stride,
-                              m_leaves.begin() + write_idx * m_leaves_stride);
-                    std::copy(m_folds.begin() + (src_idx * m_folds_stride),
-                              m_folds.begin() + (src_idx * m_folds_stride) +
-                                  m_folds_stride,
-                              m_folds.begin() + (write_idx * m_folds_stride));
-                    m_scores[write_idx] = m_scores[src_idx];
+                    moves.push_back({src_idx, write_idx});
                 }
                 write_idx = (write_idx + 1) % m_capacity;
             }
         }
+        for (const auto& move : moves) {
+            std::copy(m_leaves.begin() + (move.first * m_leaves_stride),
+                      m_leaves.begin() + (move.first * m_leaves_stride) +
+                          m_leaves_stride,
+                      m_leaves.begin() + (move.second * m_leaves_stride));
+            std::copy(m_folds.begin() + (move.first * m_folds_stride),
+                      m_folds.begin() + (move.first * m_folds_stride) +
+                          m_folds_stride,
+                      m_folds.begin() + (move.second * m_folds_stride));
+            m_scores[move.second] = m_scores[move.first];
+        }
         // Update valid size
         m_size = count;
+        // After trimming, the write head must be updated to the new end
+        if (m_is_updating) {
+            m_write_head = (m_write_start + m_size) % m_capacity;
+        }
         error_check::check_less_equal(m_size, m_capacity,
                                       "SuggestionTree: Invalid size after "
                                       "keep. Buffer overflow.");
     }
 
-    // Moves valid data (m_head to m_head + m_size) to buffer start (index
-    // 0). Handles wrapped data with temp buffers to prevent overwrite.
-    // Post-condition: m_head == 0, data is contiguous.
-    void defragment() {
-        if (m_head == 0) {
-            return; // Already contiguous at the start
-        }
-        if (m_size == 0) {
-            m_head = 0;
-            return;
-        }
-        // Handle wrapped vs. non-wrapped data
-        if (m_head + m_size <= m_capacity) {
-            // Data is contiguous but not at the start – copy via temp
-            // buffer (safety first, to avoid overlap with the write
-            // region).
-            std::vector<double> tmp_leaves(
-                m_leaves.begin() + m_head * m_leaves_stride,
-                m_leaves.begin() + m_head * m_leaves_stride +
-                    m_size * m_leaves_stride);
-            std::vector<FoldType> tmp_folds(
-                m_folds.begin() + (m_head * m_folds_stride),
-                m_folds.begin() + (m_head * m_folds_stride) +
-                    (m_size * m_folds_stride));
-            std::vector<float> tmp_scores(m_scores.begin() + m_head,
-                                          m_scores.begin() + m_head + m_size);
+    // Memory-efficient uniqueness detection
+    // Tie-break: keep first occurrence when scores are equal.
+    std::vector<bool> compute_uniqueness_mask_inplace() {
+        std::vector<bool> keep_mask(m_size, false);
+        std::unordered_map<int64_t, BestIndices> best_by_key;
+        best_by_key.reserve(m_size);
 
-            std::ranges::copy(tmp_leaves, m_leaves.begin());
-            std::ranges::copy(tmp_folds, m_folds.begin());
-            std::ranges::copy(tmp_scores, m_scores.begin());
+        const auto start_idx = get_current_start_idx();
+        for (SizeType i = 0; i < m_size; ++i) {
+            const auto buffer_idx    = (start_idx + i) % m_capacity;
+            const auto leaves_offset = buffer_idx * m_leaves_stride;
+            const auto val1 = m_leaves[leaves_offset + ((m_nparams - 2) * 2)];
+            const auto val2 = m_leaves[leaves_offset + ((m_nparams - 1) * 2)];
+            const auto key =
+                static_cast<int64_t>(std::nearbyint((val1 + val2) * 1e9));
+            const auto score = m_scores[buffer_idx];
 
-        } else {
-            // Data is wrapped around the end of the buffer.
-            const auto part1_size = m_capacity - m_head;
-            const auto part2_size = m_size - part1_size;
-
-            // Use a temporary buffer for the first part to avoid
-            // overwriting it.
-            std::vector<double> tmp_leaves(
-                m_leaves.begin() + m_head * m_leaves_stride,
-                m_leaves.begin() + m_head * m_leaves_stride +
-                    part1_size * m_leaves_stride);
-            std::vector<FoldType> tmp_folds(
-                m_folds.begin() + (m_head * m_folds_stride),
-                m_folds.begin() + (m_head * m_folds_stride) +
-                    (part1_size * m_folds_stride));
-            std::vector<float> tmp_scores(m_scores.begin() + m_head,
-                                          m_scores.begin() + m_head +
-                                              part1_size);
-            // Move the second part (from the start of the buffer) to its
-            // new position
-            std::copy(m_leaves.begin(),
-                      m_leaves.begin() + (part2_size * m_leaves_stride),
-                      m_leaves.begin() + (part1_size * m_leaves_stride));
-            std::copy(m_folds.begin(),
-                      m_folds.begin() + (part2_size * m_folds_stride),
-                      m_folds.begin() + (part1_size * m_folds_stride));
-            std::copy(m_scores.begin(), m_scores.begin() + part2_size,
-                      m_scores.begin() + part1_size);
-            // Copy the first part from the temporary buffer to the start.
-            std::ranges::copy(tmp_leaves, m_leaves.begin());
-            std::ranges::copy(tmp_folds, m_folds.begin());
-            std::ranges::copy(tmp_scores, m_scores.begin());
+            auto it = best_by_key.find(key);
+            if (it == best_by_key.end()) {
+                best_by_key.emplace(key, BestIndices{score, i});
+            } else if (score > it->second.score) {
+                it->second.score   = score;
+                it->second.win_idx = i;
+            }
         }
 
-        m_head = 0;
+        // Mark the winners
+        for (const auto& kv : best_by_key) {
+            keep_mask[kv.second.win_idx] = true;
+        }
+        return keep_mask;
     }
+
+    void validate_circular_buffer_state() {
+        // Core invariant: total used space <= capacity
+        const auto total_used = (m_size_old - m_read_consumed) + m_size;
+        error_check::check_less_equal(total_used, m_capacity,
+                                      "Circular buffer invariant violated: "
+                                      "total_used > capacity");
+
+        // State consistency checks
+        error_check::check_less_equal(m_read_consumed, m_size_old,
+                                      "read_consumed cannot exceed size_old");
+
+        error_check::check_less(m_head, m_capacity,
+                                "head must be within capacity");
+
+        if (m_is_updating) {
+            error_check::check_less(m_write_start, m_capacity,
+                                    "write_start must be within capacity");
+            error_check::check_less(m_write_head, m_capacity,
+                                    "write_head must be within capacity");
+        }
+    }
+
 }; // End SuggestionTree::Impl definition
 
 // Public interface implementation
@@ -742,10 +753,9 @@ SuggestionTree<FoldType>::get_leaves() const noexcept {
     return m_impl->get_leaves();
 }
 template <typename FoldType>
-std::span<const double>
-SuggestionTree<FoldType>::get_leaves_span(SizeType start_leaf_idx,
-                                          SizeType n_leaves) const noexcept {
-    return m_impl->get_leaves_span(start_leaf_idx, n_leaves);
+std::pair<std::span<const double>, SizeType>
+SuggestionTree<FoldType>::get_leaves_span(SizeType n_leaves) const {
+    return m_impl->get_leaves_span(n_leaves);
 }
 template <typename FoldType>
 const std::vector<FoldType>&
@@ -802,6 +812,14 @@ void SuggestionTree<FoldType>::finalize_in_place_update() {
 template <typename FoldType>
 void SuggestionTree<FoldType>::advance_read_consumed(SizeType n) {
     m_impl->advance_read_consumed(n);
+}
+template <typename FoldType>
+void SuggestionTree<FoldType>::compute_physical_indices(
+    std::span<const SizeType> logical_indices,
+    std::span<SizeType> physical_indices,
+    SizeType n_leaves) const {
+    m_impl->compute_physical_indices(logical_indices, physical_indices,
+                                     n_leaves);
 }
 // Other methods
 template <typename FoldType>

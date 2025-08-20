@@ -83,10 +83,12 @@ public:
         -> std::tuple<std::vector<double>, std::vector<double>, double>;
 
     SizeType get_branch_max() const noexcept {
-        return *std::ranges::max_element(m_branching_pattern);
+        // Take 2x to be safe
+        const auto max_val = *std::ranges::max_element(m_branching_pattern);
+        return static_cast<SizeType>(std::ceil(max_val * 2));
     }
 
-    std::vector<SizeType> get_branching_pattern() const noexcept {
+    std::vector<double> get_branching_pattern() const noexcept {
         return m_branching_pattern;
     }
 
@@ -98,7 +100,7 @@ private:
     search::PulsarSearchConfig m_cfg;
     SizeType m_batch_size;
 
-    std::vector<SizeType> m_branching_pattern;
+    std::vector<double> m_branching_pattern;
 
     // Buffer for shift-add operations
     std::vector<FoldType> m_shift_buffer;
@@ -119,9 +121,9 @@ private:
                                      SizeType,
                                      SizeType);
     static constexpr std::array<PolyResolveFunc, 3> kPolyResolveFuncs = {
-        poly_taylor_resolve_accel_batch, // nparams == 2
-        poly_taylor_resolve_jerk_batch,  // nparams == 3
-        poly_taylor_resolve_snap_batch   // nparams == 4
+        poly_taylor_resolve_accel_batch,   // nparams == 2
+        poly_taylor_resolve_jerk_batch,    // nparams == 3
+        poly_taylor_resolve_circular_batch // nparams == 4
     };
 };
 

@@ -27,6 +27,9 @@ template <typename T>
 concept SupportedFoldType =
     std::is_same_v<T, float> || std::is_same_v<T, ComplexType>;
 
+template <typename T>
+concept TriviallyCopyable = std::is_trivially_copyable_v<T>;
+
 template <SupportedFoldType FoldType> constexpr FoldType default_fold_value() {
     if constexpr (std::is_same_v<FoldType, std::complex<float>>) {
         return FoldType{0.0F, 0.0F};

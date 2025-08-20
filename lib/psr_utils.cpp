@@ -241,7 +241,7 @@ shift_params(std::span<const double> param_vec, double delta_t) {
 }
 
 // Optimized flat version of shift_params_batch operations
-void shift_params_batch(std::span<double> param_vec_data,
+void shift_params_batch(std::span<double> params_batch,
                         double delta_t,
                         SizeType n_batch,
                         SizeType n_params) {
@@ -269,7 +269,7 @@ void shift_params_batch(std::span<double> param_vec_data,
 
         // Extract current parameters (excluding frequency for dvec_cur)
         for (SizeType j = 0; j < n_params - 1; ++j) {
-            dvec_cur[j] = param_vec_data[batch_offset + (j * kParamsStride)];
+            dvec_cur[j] = params_batch[batch_offset + (j * kParamsStride)];
         }
 
         // Apply transformation: dvec_new = T_mat * dvec_cur
@@ -281,16 +281,16 @@ void shift_params_batch(std::span<double> param_vec_data,
         }
         // Update parameter values (except frequency)
         for (SizeType j = 0; j < n_params - 1; ++j) {
-            param_vec_data[batch_offset + (j * kParamsStride)] = dvec_new[j];
+            params_batch[batch_offset + (j * kParamsStride)] = dvec_new[j];
         }
         // Update frequency with relativistic correction
-        param_vec_data[batch_offset + ((n_params - 1) * kParamsStride)] *=
+        params_batch[batch_offset + ((n_params - 1) * kParamsStride)] *=
             (1.0 - (dvec_new[n_params - 1] / utils::kCval));
     }
 }
 
 // Optimized flat version of shift_params_circular_batch
-void shift_params_circular_batch(std::span<double> param_vec_data,
+void shift_params_circular_batch(std::span<double> params_batch,
                                  double delta_t,
                                  SizeType n_batch,
                                  SizeType n_params) {
@@ -298,34 +298,61 @@ void shift_params_circular_batch(std::span<double> param_vec_data,
                              "nparams should be 4 for circular orbit resolve");
     constexpr auto kParamsStride = 2UL;
     constexpr auto kBatchStride  = 4UL * kParamsStride;
-    // Process each batch item
-    for (SizeType batch_idx = 0; batch_idx < n_batch; ++batch_idx) {
-        const SizeType batch_offset = batch_idx * kBatchStride;
 
-        const auto s_cur = param_vec_data[batch_offset + (0 * kParamsStride)];
-        const auto j_cur = param_vec_data[batch_offset + (2 * kParamsStride)];
-        const auto a_cur = param_vec_data[batch_offset + (4 * kParamsStride)];
-        const auto f_cur = param_vec_data[batch_offset + (6 * kParamsStride)];
+    // Pre-compute constants for normal indices
+    const auto delta_t_sq          = delta_t * delta_t;
+    const auto delta_t_cubed       = delta_t_sq * delta_t;
+    const auto half_delta_t_sq     = 0.5 * delta_t_sq;
+    const auto sixth_delta_t_cubed = delta_t_cubed / 6.0;
+
+    for (SizeType i = 0; i < n_batch; ++i) {
+        const SizeType batch_offset = i * kBatchStride;
+        const auto s_cur = params_batch[batch_offset + (0 * kParamsStride)];
+        const auto j_cur = params_batch[batch_offset + (1 * kParamsStride)];
+        const auto a_cur = params_batch[batch_offset + (2 * kParamsStride)];
+        const auto f_cur = params_batch[batch_offset + (3 * kParamsStride)];
 
         // Circular orbit mask condition
-        const auto minus_omega_sq = s_cur / a_cur;
-        const auto omega_orb      = std::sqrt(-minus_omega_sq);
-        const auto omega_orb_sq   = -minus_omega_sq;
-        // Evolve the phase to the new time t_j = t_i + delta_t
-        const auto omega_dt = omega_orb * delta_t;
-        const auto cos_odt  = std::cos(omega_dt);
-        const auto sin_odt  = std::sin(omega_dt);
-        const auto a_new = (a_cur * cos_odt) + ((j_cur / omega_orb) * sin_odt);
-        const auto j_new = (j_cur * cos_odt) - ((a_cur * omega_orb) * sin_odt);
-        const auto s_new = -omega_orb_sq * a_new;
-        const auto delta_v = ((a_cur / omega_orb) * sin_odt) -
-                             ((j_cur / omega_orb_sq) * (cos_odt - 1.0));
-        const auto f_new = f_cur * (1.0 - delta_v * utils::kCval);
-        // Update parameter values
-        param_vec_data[batch_offset + (0 * kParamsStride)] = s_new;
-        param_vec_data[batch_offset + (2 * kParamsStride)] = j_new;
-        param_vec_data[batch_offset + (4 * kParamsStride)] = a_new;
-        param_vec_data[batch_offset + (6 * kParamsStride)] = f_new;
+        const bool is_circular =
+            (a_cur != 0.0) && (s_cur != 0.0) && ((-s_cur / a_cur) > 0.0);
+
+        if (is_circular) {
+            const auto minus_omega_sq = s_cur / a_cur;
+            const auto omega_orb      = std::sqrt(-minus_omega_sq);
+            const auto omega_orb_sq   = -minus_omega_sq;
+            // Evolve the phase to the new time t_j = t_i + delta_t
+            const auto omega_dt = omega_orb * delta_t;
+            const auto cos_odt  = std::cos(omega_dt);
+            const auto sin_odt  = std::sin(omega_dt);
+            const auto a_new =
+                (a_cur * cos_odt) + ((j_cur / omega_orb) * sin_odt);
+            const auto j_new =
+                (j_cur * cos_odt) - ((a_cur * omega_orb) * sin_odt);
+            const auto s_new   = -omega_orb_sq * a_new;
+            const auto delta_v = ((a_cur / omega_orb) * sin_odt) -
+                                 ((j_cur / omega_orb_sq) * (cos_odt - 1.0));
+            const auto f_new = f_cur * (1.0 - delta_v / utils::kCval);
+            // Update parameter values
+            params_batch[batch_offset + (0 * kParamsStride)] = s_new;
+            params_batch[batch_offset + (1 * kParamsStride)] = j_new;
+            params_batch[batch_offset + (2 * kParamsStride)] = a_new;
+            params_batch[batch_offset + (3 * kParamsStride)] = f_new;
+        } else {
+            // Normal Taylor shift
+            const auto s_new = s_cur; // snap is constant in normal case
+            const auto j_new = j_cur + (s_cur * delta_t);
+            const auto a_new =
+                a_cur + (j_cur * delta_t) + (s_cur * half_delta_t_sq);
+            const auto delta_v_new = (a_cur * delta_t) +
+                                     (j_cur * half_delta_t_sq) +
+                                     (s_cur * sixth_delta_t_cubed);
+            const auto f_new = f_cur * (1.0 - delta_v_new / utils::kCval);
+            // Update parameter values
+            params_batch[batch_offset + (0 * kParamsStride)] = s_new;
+            params_batch[batch_offset + (1 * kParamsStride)] = j_new;
+            params_batch[batch_offset + (2 * kParamsStride)] = a_new;
+            params_batch[batch_offset + (3 * kParamsStride)] = f_new;
+        }
     }
 }
 
@@ -356,21 +383,22 @@ convert_taylor_to_circular(const xt::xtensor<double, 3>& param_sets) {
     xt::view(out, xt::all(), 1, 0) =
         freq * (1.0 - (-jerk / omega_sq) / utils::kCval);
     xt::view(out, xt::all(), 2, 0) = -accel / (omega_sq * utils::kCval);
-    xt::view(out, xt::all(), 3, 0) = -jerk / (omega_sq_cubed * utils::kCval);
+    xt::view(out, xt::all(), 3, 0) = -jerk / (omega_sq_cubed *
+utils::kCval);
 
     // Uncertainties
     auto d_omega_sq = xt::sqrt(xt::pow(dsnap / accel, 2) +
-                               xt::pow((snap * daccel) / xt::pow(accel, 2), 2));
+                               xt::pow((snap * daccel) / xt::pow(accel, 2),
+2));
 
     xt::view(out, xt::all(), 0, 1) = 0.5 * d_omega_sq / omega;
 
     // Complex uncertainty calculations using xtensor operations
     auto freq_term1 =
         xt::pow((1.0 + jerk / (omega_sq * utils::kCval)) * dfreq, 2);
-    auto freq_term2 = xt::pow((freq / (omega_sq * utils::kCval)) * djerk, 2);
-    auto freq_term3 = xt::pow(
-        (freq * jerk / (xt::pow(omega_sq, 2) * utils::kCval)) * d_omega_sq, 2);
-    xt::view(out, xt::all(), 1, 1) =
+    auto freq_term2 = xt::pow((freq / (omega_sq * utils::kCval)) * djerk,
+2); auto freq_term3 = xt::pow( (freq * jerk / (xt::pow(omega_sq, 2) *
+utils::kCval)) * d_omega_sq, 2); xt::view(out, xt::all(), 1, 1) =
         xt::sqrt(freq_term1 + freq_term2 + freq_term3);
 
     auto x_cos_term1 = xt::pow(daccel / (omega_sq * utils::kCval), 2);
@@ -380,8 +408,8 @@ convert_taylor_to_circular(const xt::xtensor<double, 3>& param_sets) {
 
     auto x_sin_term1 = xt::pow(djerk / (omega_sq_cubed * utils::kCval), 2);
     auto x_sin_term2 = xt::pow(
-        (1.5 * jerk * d_omega_sq) / (utils::kCval * xt::pow(omega_sq, 2.5)), 2);
-    xt::view(out, xt::all(), 3, 1) = xt::sqrt(x_sin_term1 + x_sin_term2);
+        (1.5 * jerk * d_omega_sq) / (utils::kCval * xt::pow(omega_sq, 2.5)),
+2); xt::view(out, xt::all(), 3, 1) = xt::sqrt(x_sin_term1 + x_sin_term2);
 
     return out;
 }
@@ -399,9 +427,10 @@ std::tuple<std::vector<double>, double> branch_param(double param_cur,
                         dparam_cur, dparam_new));
     }
     if (param_cur < param_min || param_cur > param_max) {
-        throw std::invalid_argument(std::format(
-            "param_cur ({}) must be within [param_min ({}), param_max ({})]",
-            param_cur, param_min, param_max));
+        throw std::invalid_argument(
+            std::format("param_cur ({}) must be within [param_min ({}), "
+                        "param_max ({})]",
+                        param_cur, param_min, param_max));
     }
 
     // If desired step size is too large, return current value
@@ -440,9 +469,10 @@ std::pair<double, SizeType> branch_param_padded(std::span<double> out_values,
                         dparam_cur, dparam_new));
     }
     if (param_cur < param_min || param_cur > param_max) {
-        throw std::invalid_argument(std::format(
-            "param_cur ({}) must be within [param_min ({}), param_max ({})]",
-            param_cur, param_min, param_max));
+        throw std::invalid_argument(
+            std::format("param_cur ({}) must be within [param_min ({}), "
+                        "param_max ({})]",
+                        param_cur, param_min, param_max));
     }
 
     SizeType count           = 0;

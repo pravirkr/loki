@@ -94,13 +94,13 @@ std::vector<double> shift_params_d(std::span<const double> param_vec,
 std::tuple<std::vector<double>, double>
 shift_params(std::span<const double> param_vec, double delta_t);
 
-void shift_params_batch(std::span<double> param_vec_data,
+void shift_params_batch(std::span<double> params_batch,
                         double delta_t,
                         SizeType n_batch,
                         SizeType n_params);
 
 // Circular orbit batch shifting
-void shift_params_circular_batch(std::span<double> param_vec_data,
+void shift_params_circular_batch(std::span<double> params_batch,
                                  double delta_t,
                                  SizeType n_batch,
                                  SizeType n_params);

@@ -626,16 +626,26 @@ private:
         timing::SimpleTimer timer;
 
         // Process branches in batches
-        for (SizeType i_batch_start = 0; i_batch_start < n_branches;
-             i_batch_start += batch_size) {
-            const auto i_batch_end =
-                std::min(i_batch_start + batch_size, n_branches);
-            const auto current_batch_size = i_batch_end - i_batch_start;
+        // Process branches in potentially split batches to handle wraps
+        SizeType total_processed = 0;
+        while (total_processed < n_branches) {
+            const SizeType remaining       = n_branches - total_processed;
+            const SizeType this_batch_size = std::min(batch_size, remaining);
+
+            // Get contiguous span; it may be smaller if wrap occurs
+            // Read from the beginning of unconsumed data
+            auto [batch_leaves_span, current_batch_size] =
+                m_suggestions->get_leaves_span(this_batch_size);
+            if (current_batch_size == 0) {
+                throw std::runtime_error(
+                    std::format("Loaded batch size is 0: total_processed={}, "
+                                "this_batch_size={}, remaining={}",
+                                total_processed, this_batch_size, remaining));
+            }
+            total_processed += current_batch_size;
 
             // Branch
             timer.start();
-            auto batch_leaves_span = m_suggestions->get_leaves_span(
-                i_batch_start, current_batch_size);
             auto batch_leaf_origins = m_prune_funcs->branch(
                 batch_leaves_span, coord_cur, m_pruning_workspace->batch_leaves,
                 current_batch_size, n_params);
@@ -681,14 +691,11 @@ private:
 
             // Load, shift, add (Map batch_leaf_origins to global indices)
             timer.start();
-            auto batch_isuggest_span =
-                std::span(m_pruning_workspace->batch_isuggest)
-                    .first(n_leaves_after_validation);
-            for (SizeType i = 0; i < n_leaves_after_validation; ++i) {
-                batch_isuggest_span[i] = batch_leaf_origins[i] + i_batch_start;
-            }
+            m_suggestions->compute_physical_indices(
+                batch_leaf_origins, m_pruning_workspace->batch_isuggest,
+                n_leaves_after_validation);
             m_prune_funcs->load_shift_add(
-                m_suggestions->get_folds(), batch_isuggest_span,
+                m_suggestions->get_folds(), m_pruning_workspace->batch_isuggest,
                 ffa_fold_segment, batch_param_idx_span, batch_phase_shift_span,
                 m_pruning_workspace->batch_folds, n_leaves_after_validation);
             stats.batch_timers["shift_add"] += timer.stop();
