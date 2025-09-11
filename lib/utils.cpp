@@ -41,7 +41,7 @@ void circular_prefix_sum(std::span<const float> x, std::span<float> out) {
     for (SizeType i = nbins; i < nsum; ++i) {
         const auto wrap_count   = i / nbins;
         const auto pos_in_cycle = i % nbins;
-        out[i] = out[pos_in_cycle] + static_cast<float>(wrap_count) * last_sum;
+        out[i] = out[pos_in_cycle] + (static_cast<float>(wrap_count) * last_sum);
     }
 }
 
@@ -66,7 +66,7 @@ SizeType find_nearest_sorted_idx(std::span<const double> arr_sorted,
     if (it != arr_sorted.begin()) {
         const auto diff_prev = std::abs(val - *(it - 1));
         const auto diff_curr = std::abs(*it - val);
-        if (diff_prev <= diff_curr * (1.0 + rtol) + atol) {
+        if (diff_prev <= (diff_curr * (1.0 + rtol)) + atol) {
             --idx;
         }
     }
@@ -105,7 +105,7 @@ SizeType find_nearest_sorted_idx_scan(std::span<const double> arr_sorted,
     } else if (idx > 0) {
         double diff_prev = std::abs(val - arr_sorted[idx - 1]);
         double diff_curr = std::abs(arr_sorted[idx] - val);
-        if (diff_prev <= diff_curr * (1.0 + rtol) + atol) {
+        if (diff_prev <= (diff_curr * (1.0 + rtol)) + atol) {
             --idx; // predecessor is closer (or tie)
         }
     }
@@ -159,7 +159,7 @@ std::vector<double> linspace(double start,
     const auto divisor = endpoint ? (num_samples - 1) : num_samples;
     const auto step    = (stop - start) / static_cast<double>(divisor);
     for (SizeType i = 0; i < num_samples; ++i) {
-        result[i] = start + step * static_cast<double>(i);
+        result[i] = start + (step * static_cast<double>(i));
     }
     // Correct the last element to be exactly stop if endpoint is true
     if (endpoint && num_samples > 1) {

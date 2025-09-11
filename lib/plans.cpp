@@ -227,14 +227,17 @@ void FFAPlan::resolve_coordinates_freq(
 
 void FFAPlan::resolve_coordinates(
     std::span<std::vector<FFACoord>> coordinates) {
-    error_check::check_greater_equal(n_params, 2U,
-                                     "resolve_coordinates_deriv() only "
-                                     "supports nparams>=2");
+    error_check::check_greater_equal(
+        n_params, 2U,
+        "resolve_coordinates only "
+        "supports nparams>=2. For frequency "
+        "coordinates, use resolve_coordinates_freq() instead.");
 
-    error_check::check_less_equal(n_params, 4U,
-                                  "resolve_coordinates_deriv() only "
-                                  "supports nparams<=4. Larger values are "
-                                  "not supported yet.");
+    error_check::check_less_equal(
+        n_params, 3U,
+        "resolve_coordinates only "
+        "supports nparams<=3. Larger values are "
+        "not supported and advised. Use Pruning instead.");
 
     using ResolveFunc =
         void (*)(std::span<const std::vector<double>>,
@@ -244,7 +247,6 @@ void FFAPlan::resolve_coordinates(
     constexpr std::array<ResolveFunc, 3> kResolveFuncs = {
         core::ffa_taylor_resolve_accel_batch, // nparams == 2
         core::ffa_taylor_resolve_jerk_batch,  // nparams == 3
-        core::ffa_taylor_resolve_snap_batch   // nparams == 4
     };
 
     const auto resolve_func = kResolveFuncs[n_params - 2];

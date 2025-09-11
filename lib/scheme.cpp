@@ -10,7 +10,7 @@ compute_thresholds(float snr_start, float snr_final, SizeType nthresholds) {
     const auto snr_step =
         (snr_final - snr_start) / static_cast<float>(nthresholds - 1);
     for (SizeType i = 0; i < nthresholds; ++i) {
-        thresholds[i] = static_cast<float>(i) * snr_step + snr_start;
+        thresholds[i] = (static_cast<float>(i) * snr_step) + snr_start;
     }
     return thresholds;
 }
@@ -40,7 +40,7 @@ std::vector<float> compute_probs_linear(SizeType nprobs, float prob_min) {
     float step = (1.0F - prob_min) / static_cast<float>(nprobs - 1);
 
     for (SizeType i = 0; i < nprobs; ++i) {
-        probs[i] = prob_min + step * static_cast<float>(i);
+        probs[i] = prob_min + (step * static_cast<float>(i));
     }
 
     return probs;

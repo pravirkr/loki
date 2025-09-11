@@ -48,15 +48,40 @@ void ffa_taylor_resolve_jerk_batch(
     double tseg_brute,
     SizeType nbins);
 
-void ffa_taylor_resolve_snap_batch(
-    std::span<const std::vector<double>> param_arr_cur,
-    std::span<const std::vector<double>> param_arr_prev,
-    std::span<uint32_t> pindex_prev_flat_batch,
-    std::span<float> relative_phase_batch,
-    SizeType ffa_level,
-    SizeType latter,
-    double tseg_brute,
-    SizeType nbins);
+std::vector<double>
+poly_taylor_leaves(std::span<const std::vector<double>> param_arr,
+                   std::span<const double> dparams,
+                   std::pair<double, double> coord_init,
+                   SizeType leaves_stride);
+
+template <typename FoldType>
+void poly_taylor_suggest(
+    std::span<const FoldType> fold_segment,
+    std::pair<double, double> coord_init,
+    std::span<const std::vector<double>> param_arr,
+    std::span<const double> dparams,
+    SizeType poly_order,
+    SizeType nbins,
+    const detection::ScoringFunction<FoldType>& scoring_func,
+    detection::BoxcarWidthsCache& boxcar_widths_cache,
+    utils::SuggestionTree<FoldType>& sugg_tree);
+
+std::vector<SizeType>
+poly_taylor_branch_batch(std::span<const double> batch_psets,
+                         std::pair<double, double> coord_cur,
+                         std::span<double> batch_leaves,
+                         SizeType n_batch,
+                         SizeType n_params,
+                         SizeType fold_bins,
+                         double tol_bins,
+                         SizeType poly_order,
+                         const std::vector<ParamLimitType>& param_limits,
+                         SizeType branch_max = 16U);
+
+SizeType poly_taylor_validate_batch(std::span<double> leaves_batch,
+                                    std::span<SizeType> leaves_origins,
+                                    SizeType n_leaves,
+                                    SizeType n_params);
 
 void poly_taylor_resolve_accel_batch(
     std::span<const double> leaves_batch,
@@ -91,17 +116,6 @@ void poly_taylor_resolve_circular_batch(
     SizeType n_leaves,
     SizeType n_params);
 
-SizeType poly_taylor_validate_batch(std::span<double> leaves_batch,
-                                    std::span<SizeType> leaves_origins,
-                                    SizeType n_leaves,
-                                    SizeType n_params);
-
-std::vector<double>
-poly_taylor_leaves(std::span<const std::vector<double>> param_arr,
-                   std::span<const double> dparams,
-                   std::pair<double, double> coord_init,
-                   SizeType leaves_stride);
-
 std::vector<double>
 poly_taylor_branch(std::span<const double> leaf,
                    std::pair<double, double> coord_cur,
@@ -118,29 +132,5 @@ poly_taylor_branching_pattern(std::span<const std::vector<double>> param_arr,
                               double tsegment,
                               SizeType fold_bins,
                               double tol_bins);
-
-std::vector<SizeType>
-poly_taylor_branch_batch(std::span<const double> batch_psets,
-                         std::pair<double, double> coord_cur,
-                         std::span<double> batch_leaves,
-                         SizeType n_batch,
-                         SizeType n_params,
-                         SizeType fold_bins,
-                         double tol_bins,
-                         SizeType poly_order,
-                         const std::vector<ParamLimitType>& param_limits,
-                         SizeType branch_max = 16U);
-
-template <typename FoldType>
-void poly_taylor_suggest(
-    std::span<const FoldType> fold_segment,
-    std::pair<double, double> coord_init,
-    std::span<const std::vector<double>> param_arr,
-    std::span<const double> dparams,
-    SizeType poly_order,
-    SizeType nbins,
-    const detection::ScoringFunction<FoldType>& scoring_func,
-    detection::BoxcarWidthsCache& boxcar_widths_cache,
-    utils::SuggestionTree<FoldType>& sugg_tree);
 
 } // namespace loki::core

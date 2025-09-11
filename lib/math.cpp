@@ -28,7 +28,7 @@ std::vector<float> generate_cheb_table(SizeType order_max, SizeType n_derivs) {
             // Shift coefficients right (multiply by x) and apply recurrence
             const float rolled =
                 (k > 0) ? tab[idx3d(0, jorder - 1, k - 1)] : 0.0F;
-            tab[idx3d(0, jorder, k)] = 2.0F * rolled - prev2;
+            tab[idx3d(0, jorder, k)] = (2.0F * rolled) - prev2;
         }
     }
 
