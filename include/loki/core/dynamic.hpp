@@ -27,17 +27,19 @@ public:
     auto load(std::span<const FoldType> ffa_fold, SizeType seg_idx) const
         -> std::span<const FoldType>;
 
-    void resolve(std::span<const double> batch_leaves,
+    void resolve(std::span<const double> leaves_batch,
                  std::pair<double, double> coord_add,
+                 std::pair<double, double> coord_cur,
                  std::pair<double, double> coord_init,
                  std::span<SizeType> param_idx_flat_batch,
                  std::span<float> relative_phase_batch,
                  SizeType n_leaves,
                  SizeType n_params) const;
 
-    auto branch(std::span<const double> batch_psets,
+    auto branch(std::span<const double> leaves_batch,
                 std::pair<double, double> coord_cur,
-                std::span<double> batch_leaves,
+                std::pair<double, double> coord_prev,
+                std::span<double> leaves_branch_batch,
                 SizeType n_batch,
                 SizeType n_params) const -> std::vector<SizeType>;
 
@@ -60,9 +62,9 @@ public:
                         std::span<FoldType> batch_folds_out,
                         SizeType n_batch) noexcept;
 
-    void transform(std::span<const double> batch_leaves,
+    void transform(std::span<double> leaves_batch,
+                   std::pair<double, double> coord_next,
                    std::pair<double, double> coord_cur,
-                   std::span<const double> trans_matrix,
                    SizeType n_leaves,
                    SizeType n_params) const;
 
@@ -70,14 +72,11 @@ public:
                               std::pair<double, double> coord_prev) const
         -> std::vector<double>;
 
-    auto
-    validate(std::span<double> leaves_batch,
-             std::span<SizeType> leaves_origins,
-             std::pair<double, double> coord_valid,
-             const std::tuple<std::vector<double>, std::vector<double>, double>&
-                 validation_params,
-             SizeType n_leaves,
-             SizeType n_params) const -> SizeType;
+    auto validate(std::span<double> leaves_batch,
+                  std::span<SizeType> leaves_origins,
+                  std::pair<double, double> coord_cur,
+                  SizeType n_leaves,
+                  SizeType n_params) const -> SizeType;
 
     auto get_validation_params(std::pair<double, double> coord_add) const
         -> std::tuple<std::vector<double>, std::vector<double>, double>;
@@ -114,16 +113,34 @@ private:
     using PolyResolveFunc = void (*)(std::span<const double>,
                                      std::pair<double, double>,
                                      std::pair<double, double>,
+                                     std::pair<double, double>,
                                      std::span<const std::vector<double>>,
                                      std::span<SizeType>,
                                      std::span<float>,
                                      SizeType,
                                      SizeType,
-                                     SizeType);
-    static constexpr std::array<PolyResolveFunc, 3> kPolyResolveFuncs = {
+                                     SizeType,
+                                     double);
+    static constexpr std::array<PolyResolveFunc, 4> kPolyResolveFuncs = {
         poly_taylor_resolve_accel_batch,   // nparams == 2
         poly_taylor_resolve_jerk_batch,    // nparams == 3
-        poly_taylor_resolve_circular_batch // nparams == 4
+        poly_taylor_resolve_snap_batch,    // nparams == 4
+        poly_taylor_resolve_circular_batch // nparams == 5
+    };
+
+    // Function pointers for Transforming different polynomial orders
+    using PolyTransformFunc = void (*)(std::span<double>,
+                                       std::pair<double, double>,
+                                       std::pair<double, double>,
+                                       SizeType,
+                                       SizeType,
+                                       bool,
+                                       double);
+    static constexpr std::array<PolyTransformFunc, 4> kPolyTransformFuncs = {
+        poly_taylor_transform_accel_batch,   // nparams == 2
+        poly_taylor_transform_jerk_batch,    // nparams == 3
+        poly_taylor_transform_snap_batch,    // nparams == 4
+        poly_taylor_transform_circular_batch // nparams == 5
     };
 };
 

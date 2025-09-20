@@ -3,6 +3,7 @@
 #include <map>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "loki/common/types.hpp"
@@ -61,7 +62,8 @@ struct FFAPlan {
     std::vector<std::vector<FFACoordFreq>> resolve_coordinates_freq();
 
     // Generate a branching pattern for the pruning Taylor search.
-    std::vector<double> generate_branching_pattern() const;
+    std::vector<double>
+    get_branching_pattern(std::string_view kind = "taylor") const;
 
 private:
     search::PulsarSearchConfig m_cfg;
@@ -70,5 +72,29 @@ private:
     static std::vector<SizeType>
     calculate_strides(std::span<const std::vector<double>> p_arr);
 };
+
+// Generate an approximate branching pattern for the pruning search.
+std::vector<double> generate_branching_pattern_approx(
+    std::span<const std::vector<double>> param_arr,
+    std::span<const double> dparams_lim,
+    const std::vector<ParamLimitType>& param_limits,
+    double tseg_ffa,
+    SizeType nsegments,
+    SizeType fold_bins,
+    double tol_bins,
+    bool use_conservative_errors = false,
+    std::string_view kind        = "taylor");
+
+// Generate an exact branching pattern for the pruning search.
+std::vector<double>
+generate_branching_pattern(std::span<const std::vector<double>> param_arr,
+                           std::span<const double> dparams_lim,
+                           const std::vector<ParamLimitType>& param_limits,
+                           double tseg_ffa,
+                           SizeType nsegments,
+                           SizeType fold_bins,
+                           double tol_bins,
+                           bool use_conservative_errors = false,
+                           std::string_view kind        = "taylor");
 
 } // namespace loki::plans

@@ -233,20 +233,21 @@ void FFAPlan::resolve_coordinates(
         "supports nparams>=2. For frequency "
         "coordinates, use resolve_coordinates_freq() instead.");
 
-    error_check::check_less_equal(
-        n_params, 3U,
-        "resolve_coordinates only "
-        "supports nparams<=3. Larger values are "
-        "not supported and advised. Use Pruning instead.");
+    error_check::check_less_equal(n_params, 5U,
+                                  "resolve_coordinates only "
+                                  "supports nparams<=5. Larger values are "
+                                  "not supported and advised.");
 
     using ResolveFunc =
         void (*)(std::span<const std::vector<double>>,
                  std::span<const std::vector<double>>, std::span<uint32_t>,
                  std::span<float>, SizeType, SizeType, double, SizeType);
 
-    constexpr std::array<ResolveFunc, 3> kResolveFuncs = {
-        core::ffa_taylor_resolve_accel_batch, // nparams == 2
-        core::ffa_taylor_resolve_jerk_batch,  // nparams == 3
+    constexpr std::array<ResolveFunc, 4> kResolveFuncs = {
+        core::ffa_taylor_resolve_accel_batch,   // nparams == 2
+        core::ffa_taylor_resolve_jerk_batch,    // nparams == 3
+        core::ffa_taylor_resolve_snap_batch,    // nparams == 4
+        core::ffa_taylor_resolve_crackle_batch, // nparams == 5
     };
 
     const auto resolve_func = kResolveFuncs[n_params - 2];
@@ -306,11 +307,58 @@ std::vector<std::vector<FFACoord>> FFAPlan::resolve_coordinates() {
     return coordinates;
 }
 
-std::vector<double> FFAPlan::generate_branching_pattern() const {
-    return psr_utils::generate_branching_pattern(
+std::vector<double>
+FFAPlan::get_branching_pattern(std::string_view kind) const {
+    return generate_branching_pattern(
         params.back(), dparams_lim.back(), m_cfg.get_param_limits(),
-        m_cfg.get_tseg_ffa(), nsegments.back() - 1, m_cfg.get_nbins(),
-        m_cfg.get_tol_bins());
+        m_cfg.get_tseg_ffa(), nsegments.back(), m_cfg.get_nbins(),
+        m_cfg.get_tol_bins(), m_cfg.get_use_conservative_grid(), kind);
+}
+
+std::vector<double> generate_branching_pattern_approx(
+    std::span<const std::vector<double>> param_arr,
+    std::span<const double> dparams_lim,
+    const std::vector<ParamLimitType>& param_limits,
+    double tseg_ffa,
+    SizeType nsegments,
+    SizeType fold_bins,
+    double tol_bins,
+    bool use_conservative_errors,
+    std::string_view kind) {
+    const SizeType ref_seg = 0;
+    if (kind == "taylor") {
+        return core::generate_bp_taylor_approx(
+            param_arr, dparams_lim, param_limits, tseg_ffa, nsegments,
+            fold_bins, tol_bins, ref_seg, use_conservative_errors);
+    }
+    throw std::invalid_argument(
+        "Invalid kind for branching pattern generation");
+}
+
+std::vector<double>
+generate_branching_pattern(std::span<const std::vector<double>> param_arr,
+                           std::span<const double> dparams_lim,
+                           const std::vector<ParamLimitType>& param_limits,
+                           double tseg_ffa,
+                           SizeType nsegments,
+                           SizeType fold_bins,
+                           double tol_bins,
+                           bool use_conservative_errors,
+                           std::string_view kind) {
+    const SizeType ref_seg  = 0;
+    const SizeType n_params = param_arr.size();
+    if (kind == "taylor" && n_params == 5) {
+        return core::generate_bp_taylor_circular(
+            param_arr, dparams_lim, param_limits, tseg_ffa, nsegments,
+            fold_bins, tol_bins, ref_seg, use_conservative_errors);
+    }
+    if (kind == "taylor" && n_params <= 4) {
+        return core::generate_bp_taylor(
+            param_arr, dparams_lim, param_limits, tseg_ffa, nsegments,
+            fold_bins, tol_bins, ref_seg, use_conservative_errors);
+    }
+    throw std::invalid_argument(
+        "Invalid kind for branching pattern generation");
 }
 
 } // namespace loki::plans

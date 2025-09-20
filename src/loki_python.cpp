@@ -13,6 +13,7 @@
 
 #include "loki/loki.hpp"
 #include "loki/psr_utils.hpp"
+#include "loki/transforms.hpp"
 
 namespace loki {
 using algorithms::FFA;
@@ -273,14 +274,16 @@ PYBIND11_MODULE(libloki, m) {
         .def(py::init<SizeType, double, SizeType, double,
                       const std::vector<ParamLimitType>&, double, double,
                       SizeType, SizeType, std::optional<SizeType>,
-                      std::optional<SizeType>, bool, SizeType>(),
+                      std::optional<SizeType>, double, double, bool, bool,
+                      int>(),
              py::arg("nsamps"), py::arg("tsamp"), py::arg("nbins"),
              py::arg("tol_bins"), py::arg("param_limits"),
              py::arg("ducy_max") = 0.2, py::arg("wtsp") = 1.5,
              py::arg("prune_poly_order") = 3, py::arg("prune_n_derivs") = 3,
-             py::arg("bseg_brute")     = std::nullopt,
-             py::arg("bseg_ffa")       = std::nullopt,
-             py::arg("use_fft_shifts") = true, py::arg("nthreads") = 1)
+             py::arg("bseg_brute") = std::nullopt,
+             py::arg("bseg_ffa") = std::nullopt, py::arg("p_orb_min") = 1e-5,
+             py::arg("snap_threshold") = 5.0, py::arg("use_fft_shifts") = true,
+             py::arg("use_conservative_grid") = false, py::arg("nthreads") = 1)
         .def_property_readonly("nsamps", &PulsarSearchConfig::get_nsamps)
         .def_property_readonly("tsamp", &PulsarSearchConfig::get_tsamp)
         .def_property_readonly("nbins", &PulsarSearchConfig::get_nbins)
@@ -297,8 +300,13 @@ PYBIND11_MODULE(libloki, m) {
         .def_property_readonly("bseg_brute",
                                &PulsarSearchConfig::get_bseg_brute)
         .def_property_readonly("bseg_ffa", &PulsarSearchConfig::get_bseg_ffa)
+        .def_property_readonly("p_orb_min", &PulsarSearchConfig::get_p_orb_min)
+        .def_property_readonly("snap_threshold",
+                               &PulsarSearchConfig::get_snap_threshold)
         .def_property_readonly("use_fft_shifts",
                                &PulsarSearchConfig::get_use_fft_shifts)
+        .def_property_readonly("use_conservative_grid",
+                               &PulsarSearchConfig::get_use_conservative_grid)
         .def_property_readonly("nthreads", &PulsarSearchConfig::get_nthreads)
         .def_property_readonly("tseg_brute",
                                &PulsarSearchConfig::get_tseg_brute)
@@ -345,6 +353,10 @@ PYBIND11_MODULE(libloki, m) {
         .def_property_readonly(
             "dparams",
             [](const FFAPlan& self) { return as_listof_pyarray(self.dparams); })
+        .def_property_readonly("dparams_lim",
+                               [](const FFAPlan& self) {
+                                   return as_listof_pyarray(self.dparams_lim);
+                               })
         .def_property_readonly("fold_shapes",
                                [](const FFAPlan& self) {
                                    return as_listof_pyarray(self.fold_shapes);
@@ -378,9 +390,12 @@ PYBIND11_MODULE(libloki, m) {
              [](FFAPlan& self) {
                  return as_listof_pyarray(self.resolve_coordinates());
              })
-        .def("generate_branching_pattern", [](FFAPlan& self) {
-            return as_pyarray_ref(self.generate_branching_pattern());
-        });
+        .def(
+            "get_branching_pattern",
+            [](FFAPlan& self, std::string_view kind) {
+                return as_pyarray_ref(self.get_branching_pattern(kind));
+            },
+            py::arg("kind") = "taylor");
 
     py::class_<FFA>(m_ffa, "FFA")
         .def(py::init<PulsarSearchConfig, bool>(), py::arg("cfg"),
@@ -455,9 +470,9 @@ PYBIND11_MODULE(libloki, m) {
 
     auto m_psr_utils = m.def_submodule("psr_utils", "PSR utils submodule");
     m_psr_utils.def(
-        "shift_params",
+        "shift_taylor_params_d_f",
         [](const PyArrayT<double>& pset_cur, double delta_t) {
-            auto [pset_prev, delay] = psr_utils::shift_params(
+            auto [pset_prev, delay] = transforms::shift_taylor_params_d_f(
                 to_span<const double>(pset_cur), delta_t);
             return std::make_tuple(as_pyarray_ref(pset_prev), delay);
         },
@@ -469,31 +484,6 @@ PYBIND11_MODULE(libloki, m) {
         },
         py::arg("delta_t"), py::arg("period"), py::arg("nbins"),
         py::arg("delay"));
-    m_psr_utils.def(
-        "shift_params_batch",
-        [](const PyArrayT<double>& pset_batch, double delta_t) {
-            const SizeType n_batch  = pset_batch.shape(0);
-            const SizeType n_params = pset_batch.shape(1);
-            // Copy into a new vector for in-place modification
-            std::vector<double> pset_batch_copy(
-                pset_batch.data(), pset_batch.data() + pset_batch.size());
-            psr_utils::shift_params_batch(pset_batch_copy, delta_t, n_batch,
-                                          n_params);
-            return as_pyarray_ref(pset_batch_copy);
-        },
-        py::arg("pset_batch"), py::arg("delta_t"));
-    m_psr_utils.def(
-        "shift_params_circular_batch",
-        [](const PyArrayT<double>& pset_batch, double delta_t) {
-            const SizeType n_batch  = pset_batch.shape(0);
-            const SizeType n_params = pset_batch.shape(1);
-            std::vector<double> pset_batch_copy(
-                pset_batch.data(), pset_batch.data() + pset_batch.size());
-            psr_utils::shift_params_circular_batch(pset_batch_copy, delta_t,
-                                                   n_batch, n_params);
-            return as_pyarray_ref(pset_batch_copy);
-        },
-        py::arg("pset_batch"), py::arg("delta_t"));
     m_psr_utils.def(
         "ffa_taylor_resolve",
         [](const PyArrayT<double>& pset_cur,
@@ -513,12 +503,14 @@ PYBIND11_MODULE(libloki, m) {
         py::arg("latter"), py::arg("tseg_brute"), py::arg("nbins"));
     m_psr_utils.def(
         "poly_taylor_resolve_circular_batch",
-        [](const PyArrayT<double>& pset_batch,
+        [](const PyArrayT<double>& leaves_batch,
            std::pair<double, double> coord_add,
+           std::pair<double, double> coord_cur,
            std::pair<double, double> coord_init,
-           const std::vector<PyArrayT<double>>& param_arr, SizeType fold_bins) {
-            const SizeType nbatch  = pset_batch.shape(0);
-            const SizeType nparams = pset_batch.shape(1) - 2;
+           const std::vector<PyArrayT<double>>& param_arr, SizeType fold_bins,
+           double snap_threshold) {
+            const SizeType nbatch  = leaves_batch.shape(0);
+            const SizeType nparams = leaves_batch.shape(1) - 2;
             std::vector<std::vector<double>> param_vecs;
             param_vecs.reserve(param_arr.size());
             for (const auto& arr : param_arr) {
@@ -527,20 +519,23 @@ PYBIND11_MODULE(libloki, m) {
             std::vector<SizeType> param_idx_flat_batch(nbatch);
             std::vector<float> relative_phase_batch(nbatch);
             core::poly_taylor_resolve_circular_batch(
-                to_span<const double>(pset_batch), coord_add, coord_init,
-                param_vecs, param_idx_flat_batch, relative_phase_batch,
-                fold_bins, nbatch, nparams);
+                to_span<const double>(leaves_batch), coord_add, coord_cur,
+                coord_init, param_vecs, param_idx_flat_batch,
+                relative_phase_batch, fold_bins, nbatch, nparams,
+                snap_threshold);
             return std::make_tuple(as_pyarray_ref(param_idx_flat_batch),
                                    as_pyarray_ref(relative_phase_batch));
         },
-        py::arg("pset_batch"), py::arg("coord_add"), py::arg("coord_init"),
-        py::arg("param_arr"), py::arg("fold_bins"));
+        py::arg("pset_batch"), py::arg("coord_add"), py::arg("coord_cur"),
+        py::arg("coord_init"), py::arg("param_arr"), py::arg("fold_bins"),
+        py::arg("snap_threshold"));
 
     auto m_prune = m.def_submodule("prune", "Pruning submodule");
 
     py::class_<utils::SuggestionTree<float>>(m_prune, "SuggestionTreeFloat")
-        .def(py::init<SizeType, SizeType, SizeType>(), py::arg("max_sugg"),
-             py::arg("nparams"), py::arg("nbins"))
+        .def(py::init<SizeType, SizeType, SizeType, std::string_view>(),
+             py::arg("max_sugg"), py::arg("nparams"), py::arg("nbins"),
+             py::arg("kind"))
         .def_property_readonly("leaves",
                                [](const utils::SuggestionTree<float>& self) {
                                    return as_pyarray_ref(self.get_leaves());
@@ -574,7 +569,8 @@ PYBIND11_MODULE(libloki, m) {
                              kind, show_progress);
             },
             py::arg("ts_e"), py::arg("ts_v"), py::arg("outdir"),
-            py::arg("file_prefix"), py::arg("kind"), py::arg("show_progress") = true);
+            py::arg("file_prefix"), py::arg("kind"),
+            py::arg("show_progress") = true);
 
     py::class_<PruneFloat>(m_prune, "Prune")
         .def(py::init<const FFAPlan&, const PulsarSearchConfig&,

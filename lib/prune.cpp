@@ -296,7 +296,7 @@ template <typename FoldType> struct PruningWorkspace {
     SizeType max_batch_size;
     SizeType nparams;
     SizeType nbins;
-    SizeType leaves_stride;
+    SizeType leaves_stride{};
     SizeType folds_stride;
 
     std::vector<double> batch_leaves;
@@ -373,10 +373,10 @@ public:
         // Allocate suggestion buffer
         if constexpr (std::is_same_v<FoldType, ComplexType>) {
             m_suggestions = std::make_unique<utils::SuggestionTree<FoldType>>(
-                m_max_sugg, m_cfg.get_nparams(), m_cfg.get_nbins_f());
+                m_max_sugg, m_cfg.get_nparams(), m_cfg.get_nbins_f(), kind);
         } else {
             m_suggestions = std::make_unique<utils::SuggestionTree<FoldType>>(
-                m_max_sugg, m_cfg.get_nparams(), m_cfg.get_nbins());
+                m_max_sugg, m_cfg.get_nparams(), m_cfg.get_nbins(), kind);
         }
 
         // Allocate iteration workspace
@@ -454,22 +454,22 @@ public:
         }
 
         // Transform the suggestion params to middle of the data
-        const auto delta_t = m_scheme->get_delta(m_prune_level);
+        const auto coord_mid = m_scheme->get_coord(m_prune_level);
 
         // Write results
         auto result_writer = cands::PruneResultWriter(
             actual_result_file, cands::PruneResultWriter::Mode::kAppend);
-        result_writer.write_run_results(run_name, m_scheme->get_data(),
-                                        m_suggestions->get_transformed(delta_t),
-                                        m_suggestions->get_scores(),
-                                        m_suggestions->get_nsugg(),
-                                        m_cfg.get_nparams(), *m_pstats);
+        result_writer.write_run_results(
+            run_name, m_scheme->get_data(),
+            m_suggestions->get_transformed(coord_mid),
+            m_suggestions->get_scores(), m_suggestions->get_nsugg(),
+            m_cfg.get_nparams(), *m_pstats);
 
         // Final log entries
         std::ofstream final_log(actual_log_file, std::ios::app);
         final_log << std::format("Pruning run complete for ref segment {}\n",
                                  ref_seg);
-        final_log << std::format("Time: {}\n", m_pstats->get_timer_summary());
+        final_log << std::format("Time: {}\n\n", m_pstats->get_timer_summary());
         final_log.close();
         spdlog::info("Pruning run {:03d}: complete", ref_seg);
         spdlog::info("Pruning run {:03d}: stats: {}", ref_seg,
@@ -602,21 +602,17 @@ private:
                                    float threshold,
                                    IterationStats& stats) {
         // Get coordinates
-        const auto coord_init  = m_scheme->get_coord(0);
-        const auto coord_cur   = m_scheme->get_coord(m_prune_level);
-        const auto coord_prev  = m_scheme->get_coord(m_prune_level - 1);
-        const auto coord_add   = m_scheme->get_seg_coord(m_prune_level);
-        const auto coord_valid = m_scheme->get_valid(m_prune_level);
+        const auto coord_init = m_scheme->get_coord(0);
+        const auto coord_prev = m_scheme->get_coord(m_prune_level - 1);
+        const auto coord_next = m_scheme->get_coord(m_prune_level);
+        const auto coord_cur  = m_scheme->get_current_coord(m_prune_level);
+        const auto coord_add  = m_scheme->get_seg_coord(m_prune_level);
 
         // Load fold segment for current level
         const auto ffa_fold_segment =
             m_prune_funcs->load(ffa_fold, seg_idx_cur);
 
         auto current_threshold = threshold;
-        const auto trans_matrix =
-            m_prune_funcs->get_transform_matrix(coord_cur, coord_prev);
-        const auto validation_params =
-            m_prune_funcs->get_validation_params(coord_valid);
 
         const auto n_branches = m_suggestions->get_nsugg_old();
         const auto n_params   = m_cfg.get_nparams();
@@ -646,9 +642,10 @@ private:
 
             // Branch
             timer.start();
-            auto batch_leaf_origins = m_prune_funcs->branch(
-                batch_leaves_span, coord_cur, m_pruning_workspace->batch_leaves,
-                current_batch_size, n_params);
+            auto batch_leaf_origins =
+                m_prune_funcs->branch(batch_leaves_span, coord_cur, coord_prev,
+                                      m_pruning_workspace->batch_leaves,
+                                      current_batch_size, n_params);
             const auto n_leaves_batch = batch_leaf_origins.size();
             stats.batch_timers["branch"] += timer.stop();
             stats.n_leaves += n_leaves_batch;
@@ -667,7 +664,7 @@ private:
             timer.start();
             const auto n_leaves_after_validation = m_prune_funcs->validate(
                 m_pruning_workspace->batch_leaves, batch_leaf_origins,
-                coord_valid, validation_params, n_leaves_batch, n_params);
+                coord_cur, n_leaves_batch, n_params);
             stats.batch_timers["validate"] += timer.stop();
             stats.n_leaves_phy += n_leaves_after_validation;
             if (n_leaves_after_validation == 0) {
@@ -684,7 +681,7 @@ private:
                 std::span(m_pruning_workspace->batch_phase_shift)
                     .first(n_leaves_after_validation);
             m_prune_funcs->resolve(m_pruning_workspace->batch_leaves, coord_add,
-                                   coord_init, batch_param_idx_span,
+                                   coord_cur, coord_init, batch_param_idx_span,
                                    batch_phase_shift_span,
                                    n_leaves_after_validation, n_params);
             stats.batch_timers["resolve"] += timer.stop();
@@ -750,7 +747,7 @@ private:
             // Transform
             timer.start();
             m_prune_funcs->transform(m_pruning_workspace->batch_leaves,
-                                     coord_cur, trans_matrix, n_leaves_passing,
+                                     coord_next, coord_cur, n_leaves_passing,
                                      n_params);
             stats.batch_timers["transform"] += timer.stop();
 
@@ -768,9 +765,9 @@ private:
     }
 
     void setup_pruning() {
-        if (m_cfg.get_nparams() > 4) {
+        if (m_cfg.get_nparams() > 5) {
             throw std::runtime_error(
-                std::format("Pruning not supported for nparams > 4."));
+                std::format("Pruning not supported for nparams > 5."));
         }
 
         if (m_kind == "taylor") {

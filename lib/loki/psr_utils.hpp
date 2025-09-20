@@ -40,6 +40,14 @@ std::vector<double> poly_taylor_step_f(SizeType nparams,
                                        double t_ref = 0.0);
 
 // Grid for parameters {d_k,... d_2, f} based on the Taylor expansion.
+std::vector<double> poly_taylor_step_d_f(SizeType nparams,
+                                         double tobs,
+                                         SizeType fold_bins,
+                                         double tol_bins,
+                                         double f_max,
+                                         double t_ref = 0.0);
+
+// Grid for parameters {d_k,... d_2, d_1} based on the Taylor expansion.
 std::vector<double> poly_taylor_step_d(SizeType nparams,
                                        double tobs,
                                        SizeType fold_bins,
@@ -82,34 +90,6 @@ void poly_taylor_shift_d_vec(std::span<const double> dparam_old,
                              SizeType nbatch,
                              SizeType nparams);
 
-std::vector<std::vector<double>> precompute_shift_matrix(SizeType nparams,
-                                                         double delta_t);
-
-// Shift the kinematical parameters to a new reference time.
-std::vector<double> shift_params_d(std::span<const double> param_vec,
-                                   double delta_t,
-                                   SizeType n_out = 3);
-
-// Shift the search parameters vector to a new reference time.
-std::tuple<std::vector<double>, double>
-shift_params(std::span<const double> param_vec, double delta_t);
-
-void shift_params_batch(std::span<double> params_batch,
-                        double delta_t,
-                        SizeType n_batch,
-                        SizeType n_params);
-
-// Circular orbit batch shifting
-void shift_params_circular_batch(std::span<double> params_batch,
-                                 double delta_t,
-                                 SizeType n_batch,
-                                 SizeType n_params);
-
-// Conversion from Taylor to circular parameters
-/*
-xt::xtensor<double, 3>
-convert_taylor_to_circular(const xt::xtensor<double, 3>& param_sets);
-*/
 // Refine a parameter range around a current value with a finer step size.
 std::tuple<std::vector<double>, double>
 branch_param(double param_cur,
@@ -132,16 +112,6 @@ branch_param_padded(std::span<double> out_values,
 
 // Generate an evenly spaced array of values between vmin and vmax.
 std::vector<double> range_param(double vmin, double vmax, double dv);
-
-// Generate a branching pattern for the pruning Taylor search.
-std::vector<double>
-generate_branching_pattern(std::span<const std::vector<double>> param_arr,
-                           std::span<const double> dparams,
-                           const std::vector<ParamLimitType>& param_limits,
-                           double tseg_ffa,
-                           SizeType nstages,
-                           SizeType fold_bins,
-                           double tol_bins);
 
 /**
  * @class SnailScheme
@@ -236,6 +206,23 @@ public:
         const auto ref_val     = (current_idx + 0.5) * m_tseg;
         const auto scale_val   = 0.5 * m_tseg;
         return {ref_val, scale_val};
+    }
+
+    /**
+     * @brief Gets the coordinate (ref and scale) for the accumulated current
+     * segment at a given level.
+     * @param level The hierarchical level.
+     * @return A pair containing the reference and scale for the segment in
+     * seconds.
+     */
+    [[nodiscard]] std::pair<double, double>
+    get_current_coord(SizeType level) const {
+        if (level == 0) {
+            return get_coord(level);
+        }
+        const auto [prev_ref, prev_scale] = get_coord(level - 1);
+        const auto [cur_ref, cur_scale]   = get_coord(level);
+        return {prev_ref, cur_scale};
     }
 
     /**

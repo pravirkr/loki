@@ -26,6 +26,7 @@ struct PruneStats {
     SizeType n_leaves_surv = 1;
 
     [[nodiscard]] double lb_leaves() const noexcept;
+    [[nodiscard]] double lb_leaves_phys() const noexcept;
     [[nodiscard]] double branch_frac() const noexcept;
     [[nodiscard]] double phys_frac() const noexcept;
     [[nodiscard]] double surv_frac() const noexcept;

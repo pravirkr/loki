@@ -23,7 +23,10 @@ PulsarSearchConfig::PulsarSearchConfig(
     SizeType prune_n_derivs,
     std::optional<SizeType> bseg_brute,
     std::optional<SizeType> bseg_ffa,
+    double p_orb_min,
+    double snap_threshold,
     bool use_fft_shifts,
+    bool use_conservative_grid,
     int nthreads)
     : m_nsamps(nsamps),
       m_tsamp(tsamp),
@@ -34,7 +37,10 @@ PulsarSearchConfig::PulsarSearchConfig(
       m_wtsp(wtsp),
       m_prune_poly_order(prune_poly_order),
       m_prune_n_derivs(prune_n_derivs),
+      m_p_orb_min(p_orb_min),
+      m_snap_threshold(snap_threshold),
       m_use_fft_shifts(use_fft_shifts),
+      m_use_conservative_grid(use_conservative_grid),
       m_nthreads(nthreads) {
     if (m_param_limits.empty()) {
         throw std::runtime_error("coord_limits must be non-empty");
@@ -73,8 +79,8 @@ std::vector<double> PulsarSearchConfig::get_dparams_f(double tseg_cur) const {
 
 std::vector<double> PulsarSearchConfig::get_dparams(double tseg_cur) const {
     const double t_ref = (m_nparams == 1) ? 0.0 : tseg_cur / 2.0;
-    return psr_utils::poly_taylor_step_d(m_nparams, tseg_cur, m_nbins,
-                                         m_tol_bins, m_f_max, t_ref);
+    return psr_utils::poly_taylor_step_d_f(m_nparams, tseg_cur, m_nbins,
+                                           m_tol_bins, m_f_max, t_ref);
 }
 
 std::vector<double> PulsarSearchConfig::get_dparams_lim(double tseg_cur) const {

@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <span>
+#include <string_view>
 #include <tuple>
 #include <vector>
 
@@ -50,8 +51,12 @@ public:
      * @param capacity Maximum number of suggestions to hold
      * @param nparams Number of parameters
      * @param nbins Number of bins
+     * @param mode Mode of the suggestion tree (e.g. Taylor, Chebyshev)
      */
-    SuggestionTree(SizeType capacity, SizeType nparams, SizeType nbins);
+    SuggestionTree(SizeType capacity,
+                   SizeType nparams,
+                   SizeType nbins,
+                   std::string_view mode);
 
     ~SuggestionTree();
     SuggestionTree(SuggestionTree&&) noexcept;
@@ -63,6 +68,7 @@ public:
     [[nodiscard]] SizeType get_capacity() const noexcept;
     [[nodiscard]] SizeType get_nparams() const noexcept;
     [[nodiscard]] SizeType get_nbins() const noexcept;
+    [[nodiscard]] std::string_view get_mode() const noexcept;
     [[nodiscard]] SizeType get_leaves_stride() const noexcept;
     [[nodiscard]] SizeType get_folds_stride() const noexcept;
     [[nodiscard]] const std::vector<double>& get_leaves() const noexcept;
@@ -95,8 +101,9 @@ public:
     [[nodiscard]] std::
         tuple<std::span<const double>, std::span<const FoldType>, float>
         get_best() const;
-    // Transform the search parameters to some given t_ref
-    [[nodiscard]] std::vector<double> get_transformed(double delta_t) const;
+    // Transform the search parameters to given coordinate
+    [[nodiscard]] std::vector<double>
+    get_transformed(std::pair<double, double> coord_mid) const;
     // Add a suggestion to the struct if there is space
     [[nodiscard]] bool add(std::span<const double> leaf,
                            std::span<const FoldType> fold,

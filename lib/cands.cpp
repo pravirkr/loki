@@ -64,6 +64,9 @@ HighFive::CompoundType create_compound_timer_stats() {
 double PruneStats::lb_leaves() const noexcept {
     return round_dp(std::log2(static_cast<double>(n_leaves_phy)), 2);
 }
+double PruneStats::lb_leaves_phys() const noexcept {
+    return round_dp(std::log2(static_cast<double>(n_leaves_phy)), 2);
+}
 double PruneStats::branch_frac() const noexcept {
     return round_dp(
         static_cast<double>(n_leaves) / static_cast<double>(n_branches), 2);
@@ -78,12 +81,13 @@ double PruneStats::surv_frac() const noexcept {
                     2);
 }
 std::string PruneStats::get_summary() const noexcept {
-    return std::format("Prune level: {:3d}, seg_idx: {:3d}, lb_leaves: "
-                       "{:5.2f}, branch_frac: {:5.2f},"
+    return std::format("Prune level: {:3d}, seg_idx: {:3d}, leaves: {:5.2f}, "
+                       "leaves_phys: {:5.2f}, branch_frac: {:5.2f},"
                        "score thresh: {:5.2f}, max: {:5.2f}, min: {:5.2f}, "
                        "P(surv): {:4.2f}\n",
-                       level, seg_idx, lb_leaves(), branch_frac(), threshold,
-                       score_max, score_min, surv_frac());
+                       level, seg_idx, lb_leaves(), lb_leaves_phys(),
+                       branch_frac(), threshold, score_max, score_min,
+                       surv_frac());
 }
 
 // --- TimerStats ---
@@ -265,26 +269,27 @@ void PruneResultWriter::write_run_results(const std::string& run_name,
     HighFive::Group run_group       = runs_group.createGroup(run_name);
     auto [level_stats, timer_stats] = pstats.get_packed_data();
 
-    constexpr SizeType kLeavesParamStride = 2;
+    constexpr SizeType kParamStride = 2U;
     // Validate param_sets dimensions
     if (!param_sets.empty()) {
-        const auto expected_size = n_param_sets * n_params * kLeavesParamStride;
+        const auto expected_size = n_param_sets * n_params * kParamStride;
         if (param_sets.size() != expected_size) {
             throw std::invalid_argument(std::format(
                 "param_sets size does not match the expected dimension: {} != "
                 "({} * {} * {})",
-                param_sets.size(), n_param_sets, n_params, kLeavesParamStride));
+                param_sets.size(), n_param_sets, n_params, kParamStride));
         }
     }
+    // Write only n_params rows
     const std::vector<SizeType> param_sets_dims = {n_param_sets, n_params,
-                                                   kLeavesParamStride};
+                                                   kParamStride};
     HighFive::DataSpace param_sets_space(param_sets_dims);
     HighFive::DataSetCreateProps props;
     if (!param_sets.empty()) {
         const auto chunk_n_param_sets =
             static_cast<hsize_t>(std::min(1024UL, n_param_sets));
         const std::vector<hsize_t> chunk_dims = {chunk_n_param_sets, n_params,
-                                                 kLeavesParamStride};
+                                                 kParamStride};
         props.add(HighFive::Chunking(chunk_dims));
         props.add(HighFive::Deflate(9));
     }

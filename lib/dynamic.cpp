@@ -31,7 +31,7 @@ PruneTaylorDPFuncts<FoldType>::PruneTaylorDPFuncts(
       m_batch_size(batch_size),
       m_boxcar_widths_cache(m_cfg.get_score_widths(), m_cfg.get_nbins()) {
     const auto ffa_plan = plans::FFAPlan(m_cfg);
-    m_branching_pattern = ffa_plan.generate_branching_pattern();
+    m_branching_pattern = ffa_plan.get_branching_pattern("taylor");
     if constexpr (std::is_same_v<FoldType, ComplexType>) {
         m_irfft_executor =
             std::make_unique<utils::IrfftExecutor>(m_cfg.get_nbins());
@@ -64,30 +64,38 @@ auto PruneTaylorDPFuncts<FoldType>::load(std::span<const FoldType> ffa_fold,
 
 template <typename FoldType>
 void PruneTaylorDPFuncts<FoldType>::resolve(
-    std::span<const double> batch_leaves,
+    std::span<const double> leaves_batch,
     std::pair<double, double> coord_add,
+    std::pair<double, double> coord_cur,
     std::pair<double, double> coord_init,
     std::span<SizeType> param_idx_flat_batch,
     std::span<float> relative_phase_batch,
     SizeType n_leaves,
     SizeType n_params) const {
     kPolyResolveFuncs[m_cfg.get_prune_poly_order() - 2](
-        batch_leaves, coord_add, coord_init, m_param_arr, param_idx_flat_batch,
-        relative_phase_batch, m_cfg.get_nbins(), n_leaves, n_params);
+        leaves_batch, coord_add, coord_cur, coord_init, m_param_arr,
+        param_idx_flat_batch, relative_phase_batch, m_cfg.get_nbins(), n_leaves,
+        n_params, m_cfg.get_snap_threshold());
 }
 
 template <typename FoldType>
-auto PruneTaylorDPFuncts<FoldType>::branch(std::span<const double> batch_psets,
-                                           std::pair<double, double> coord_cur,
-                                           std::span<double> batch_leaves,
-                                           SizeType n_batch,
-                                           SizeType n_params) const
-    -> std::vector<SizeType> {
-
-    return poly_taylor_branch_batch(
-        batch_psets, coord_cur, batch_leaves, n_batch, n_params,
-        m_cfg.get_nbins(), m_cfg.get_tol_bins(), m_cfg.get_prune_poly_order(),
-        m_cfg.get_param_limits(), get_branch_max());
+auto PruneTaylorDPFuncts<FoldType>::branch(
+    std::span<const double> leaves_batch,
+    std::pair<double, double> coord_cur,
+    std::pair<double, double> /*coord_prev*/,
+    std::span<double> leaves_branch_batch,
+    SizeType n_batch,
+    SizeType n_params) const -> std::vector<SizeType> {
+    if (n_params == 5) {
+        return poly_taylor_branch_circular_batch(
+            leaves_batch, coord_cur, leaves_branch_batch, n_batch, n_params,
+            m_cfg.get_nbins(), m_cfg.get_tol_bins(), m_cfg.get_param_limits(),
+            get_branch_max(), m_cfg.get_snap_threshold());
+    }
+    return poly_taylor_branch_batch(leaves_batch, coord_cur,
+                                    leaves_branch_batch, n_batch, n_params,
+                                    m_cfg.get_nbins(), m_cfg.get_tol_bins(),
+                                    m_cfg.get_param_limits(), get_branch_max());
 }
 
 template <typename FoldType>
@@ -175,12 +183,14 @@ void PruneTaylorDPFuncts<FoldType>::pack(
 
 template <typename FoldType>
 void PruneTaylorDPFuncts<FoldType>::transform(
-    std::span<const double> /*batch_leaves*/,
-    std::pair<double, double> /*coord_cur*/,
-    std::span<const double> /*trans_matrix*/,
-    SizeType /*n_leaves*/,
-    SizeType /*n_params*/) const {
-    // Taylor variant doesn't transform - just return original leaf
+    std::span<double> leaves_batch,
+    std::pair<double, double> coord_next,
+    std::pair<double, double> coord_cur,
+    SizeType n_leaves,
+    SizeType n_params) const {
+    kPolyTransformFuncs[m_cfg.get_prune_poly_order() - 2](
+        leaves_batch, coord_next, coord_cur, n_leaves, n_params,
+        m_cfg.get_use_conservative_grid(), m_cfg.get_snap_threshold());
 }
 
 template <typename FoldType>
@@ -201,14 +211,13 @@ template <typename FoldType>
 auto PruneTaylorDPFuncts<FoldType>::validate(
     std::span<double> leaves_batch,
     std::span<SizeType> leaves_origins,
-    std::pair<double, double> /*coord_valid*/,
-    const std::tuple<std::vector<double>, std::vector<double>, double>&
-    /*validation_params*/,
+    std::pair<double, double> /*coord_cur*/,
     SizeType n_leaves,
     SizeType n_params) const -> SizeType {
-    if (n_params == 4) {
-        return poly_taylor_validate_batch(leaves_batch, leaves_origins,
-                                          n_leaves, n_params);
+    if (n_params == 5) {
+        return poly_taylor_validate_circular_batch(
+            leaves_batch, leaves_origins, n_leaves, n_params,
+            m_cfg.get_p_orb_min(), m_cfg.get_snap_threshold());
     }
     return n_leaves;
 }

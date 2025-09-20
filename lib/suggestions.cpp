@@ -4,12 +4,15 @@
 #include <cmath>
 #include <cstring>
 #include <memory>
+#include <numeric>
 #include <span>
+#include <string>
+#include <string_view>
 #include <unordered_map>
 
 #include "loki/common/types.hpp"
 #include "loki/exceptions.hpp"
-#include "loki/psr_utils.hpp"
+#include "loki/transforms.hpp"
 
 namespace loki::utils {
 
@@ -48,11 +51,15 @@ m_read_consumed).
 */
 template <typename FoldType> class SuggestionTree<FoldType>::Impl {
 public:
-    Impl(SizeType capacity, SizeType nparams, SizeType nbins)
+    Impl(SizeType capacity,
+         SizeType nparams,
+         SizeType nbins,
+         std::string_view mode)
         : m_capacity(capacity),
           m_nparams(nparams),
           m_nbins(nbins),
-          m_leaves_stride((nparams + 2) * kLeavesParamStride),
+          m_mode(mode),
+          m_leaves_stride((nparams + 2) * kParamStride),
           m_folds_stride(2 * nbins),
           m_leaves(m_capacity * m_leaves_stride, 0.0),
           m_scores(m_capacity, 0.0F) {
@@ -114,6 +121,7 @@ public:
     SizeType get_capacity() const noexcept { return m_capacity; }
     SizeType get_nparams() const noexcept { return m_nparams; }
     SizeType get_nbins() const noexcept { return m_nbins; }
+    std::string_view get_mode() const noexcept { return m_mode; }
     SizeType get_leaves_stride() const noexcept { return m_leaves_stride; }
     SizeType get_folds_stride() const noexcept { return m_folds_stride; }
     SizeType get_nsugg() const noexcept { return m_size; }
@@ -176,7 +184,7 @@ public:
         peak_temp_bytes = std::max(peak_temp_bytes, m_capacity * sizeof(float));
         // 2. get_transformed() temp allocation
         const auto transform_bytes =
-            m_capacity * m_nparams * kLeavesParamStride * sizeof(double);
+            m_capacity * m_leaves_stride * sizeof(double);
         peak_temp_bytes = std::max(peak_temp_bytes, transform_bytes);
         // 3. trim operations temp allocations
         const auto trim_temp_bytes =
@@ -303,10 +311,10 @@ public:
                 m_scores[idx_max_abs]};
     }
 
-    std::vector<double> get_transformed(double delta_t) const {
-        // Only copy nparams rows, not the last two rows (delay and frequency)
-        const auto batch_stride = m_nparams * kLeavesParamStride;
-        std::vector<double> contig_params(m_size * batch_stride, 0.0);
+    std::vector<double>
+    get_transformed(std::pair<double, double> coord_mid) const {
+        // Copy all leaves rows
+        std::vector<double> contig_leaves(m_size * m_leaves_stride, 0.0);
         const auto start_idx = get_current_start_idx();
 
         // Check if data wraps around
@@ -314,40 +322,51 @@ public:
             // Contiguous case - single copy with stride
             for (SizeType i = 0; i < m_size; ++i) {
                 const auto src_offset = (start_idx + i) * m_leaves_stride;
-                const auto dst_offset = i * batch_stride;
+                const auto dst_offset = i * m_leaves_stride;
                 std::copy(m_leaves.begin() + src_offset,
-                          m_leaves.begin() + src_offset + batch_stride,
-                          contig_params.begin() + dst_offset);
+                          m_leaves.begin() + src_offset + m_leaves_stride,
+                          contig_leaves.begin() + dst_offset);
             }
         } else {
             // Wrapped case
             const auto first_part = m_capacity - start_idx;
             for (SizeType i = 0; i < first_part; ++i) {
                 const auto src_offset = (start_idx + i) * m_leaves_stride;
-                const auto dst_offset = i * batch_stride;
+                const auto dst_offset = i * m_leaves_stride;
                 std::copy(m_leaves.begin() + src_offset,
-                          m_leaves.begin() + src_offset + batch_stride,
-                          contig_params.begin() + dst_offset);
+                          m_leaves.begin() + src_offset + m_leaves_stride,
+                          contig_leaves.begin() + dst_offset);
             }
             for (SizeType i = 0; i < m_size - first_part; ++i) {
                 const auto src_offset = i * m_leaves_stride;
-                const auto dst_offset = (first_part + i) * batch_stride;
+                const auto dst_offset = (first_part + i) * m_leaves_stride;
                 std::copy(m_leaves.begin() + src_offset,
-                          m_leaves.begin() + src_offset + batch_stride,
-                          contig_params.begin() + dst_offset);
+                          m_leaves.begin() + src_offset + m_leaves_stride,
+                          contig_leaves.begin() + dst_offset);
             }
         }
-        if (m_nparams < 4) {
-            psr_utils::shift_params_batch(contig_params, delta_t, m_size,
-                                          m_nparams);
-        } else if (m_nparams == 4) {
-            psr_utils::shift_params_circular_batch(contig_params, delta_t,
-                                                   m_size, m_nparams);
+        // Transform in-place
+        if (m_mode == "taylor") {
+            transforms::report_leaves_taylor_batch(contig_leaves, m_size,
+                                                   m_nparams);
+        } else if (m_mode == "chebyshev") {
+            transforms::report_leaves_chebyshev_batch(contig_leaves, coord_mid,
+                                                      m_size, m_nparams);
         } else {
             throw std::runtime_error(std::format(
-                "Suggestion struct must have less than 4 parameters."));
+                "Suggestion struct mode must be taylor or chebyshev."));
         }
-        return contig_params;
+        // Report only param_sets rows
+        const auto param_sets_stride = m_nparams * kParamStride;
+        std::vector<double> contig_param_sets(m_size * param_sets_stride, 0.0);
+        for (SizeType i = 0; i < m_size; ++i) {
+            const auto src_offset = i * m_leaves_stride;
+            const auto dst_offset = i * param_sets_stride;
+            std::copy(contig_leaves.begin() + src_offset,
+                      contig_leaves.begin() + src_offset + param_sets_stride,
+                      contig_param_sets.begin() + dst_offset);
+        }
+        return contig_param_sets;
     }
 
     bool add(std::span<const double> leaf,
@@ -576,11 +595,12 @@ public:
     }
 
 private:
-    constexpr static SizeType kLeavesParamStride = 2;
+    constexpr static SizeType kParamStride = 2;
     SizeType m_capacity;
     SizeType m_nparams;
     SizeType m_nbins;
-    SizeType m_leaves_stride;
+    std::string m_mode;
+    SizeType m_leaves_stride{};
     SizeType m_folds_stride;
 
     std::vector<double> m_leaves;  // Shape: (capacity, nparams + 2, 2)
@@ -716,8 +736,9 @@ private:
 template <typename FoldType>
 SuggestionTree<FoldType>::SuggestionTree(SizeType capacity,
                                          SizeType nparams,
-                                         SizeType nbins)
-    : m_impl(std::make_unique<Impl>(capacity, nparams, nbins)) {}
+                                         SizeType nbins,
+                                         std::string_view mode)
+    : m_impl(std::make_unique<Impl>(capacity, nparams, nbins, mode)) {}
 template <typename FoldType>
 SuggestionTree<FoldType>::~SuggestionTree() = default;
 template <typename FoldType>
@@ -738,6 +759,10 @@ size_t SuggestionTree<FoldType>::get_nparams() const noexcept {
 template <typename FoldType>
 SizeType SuggestionTree<FoldType>::get_nbins() const noexcept {
     return m_impl->get_nbins();
+}
+template <typename FoldType>
+std::string_view SuggestionTree<FoldType>::get_mode() const noexcept {
+    return m_impl->get_mode();
 }
 template <typename FoldType>
 SizeType SuggestionTree<FoldType>::get_leaves_stride() const noexcept {
@@ -828,9 +853,9 @@ SuggestionTree<FoldType>::get_best() const {
     return m_impl->get_best();
 }
 template <typename FoldType>
-std::vector<double>
-SuggestionTree<FoldType>::get_transformed(double delta_t) const {
-    return m_impl->get_transformed(delta_t);
+std::vector<double> SuggestionTree<FoldType>::get_transformed(
+    std::pair<double, double> coord_mid) const {
+    return m_impl->get_transformed(coord_mid);
 }
 template <typename FoldType>
 bool SuggestionTree<FoldType>::add(std::span<const double> leaf,

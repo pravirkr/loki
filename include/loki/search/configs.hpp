@@ -21,7 +21,10 @@ public:
                        SizeType prune_n_derivs            = 3,
                        std::optional<SizeType> bseg_brute = std::nullopt,
                        std::optional<SizeType> bseg_ffa   = std::nullopt,
+                       double p_orb_min                   = 1e-5,
+                       double snap_threshold              = 5.0,
                        bool use_fft_shifts                = true,
+                       bool use_conservative_grid         = false,
                        int nthreads                       = 1);
 
     // Getters
@@ -43,7 +46,12 @@ public:
     }
     [[nodiscard]] SizeType get_bseg_brute() const { return m_bseg_brute; }
     [[nodiscard]] SizeType get_bseg_ffa() const { return m_bseg_ffa; }
+    [[nodiscard]] double get_p_orb_min() const { return m_p_orb_min; }
+    [[nodiscard]] double get_snap_threshold() const { return m_snap_threshold; }
     [[nodiscard]] bool get_use_fft_shifts() const { return m_use_fft_shifts; }
+    [[nodiscard]] bool get_use_conservative_grid() const {
+        return m_use_conservative_grid;
+    }
     [[nodiscard]] int get_nthreads() const { return m_nthreads; }
     [[nodiscard]] double get_tseg_brute() const { return m_tseg_brute; }
     [[nodiscard]] double get_tseg_ffa() const { return m_tseg_ffa; }
@@ -80,7 +88,10 @@ private:
     SizeType m_prune_n_derivs;
     SizeType m_bseg_brute;
     SizeType m_bseg_ffa;
+    double m_p_orb_min;
+    double m_snap_threshold;
     bool m_use_fft_shifts;
+    bool m_use_conservative_grid;
     int m_nthreads;
     double m_tseg_brute{};
     double m_tseg_ffa{};
