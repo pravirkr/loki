@@ -1,5 +1,6 @@
 #include "loki/algorithms/plans.hpp"
 
+#include <algorithm>
 #include <numeric>
 #include <ranges>
 #include <utility>
@@ -359,6 +360,44 @@ generate_branching_pattern(std::span<const std::vector<double>> param_arr,
     }
     throw std::invalid_argument(
         "Invalid kind for branching pattern generation");
+}
+
+std::vector<FFARegion> generate_ffa_regions(double p_min,
+                                            double p_max,
+                                            double tsamp,
+                                            SizeType nbins_min,
+                                            double growth_factor,
+                                            std::optional<SizeType> nbins_max) {
+    error_check::check_greater(p_min, 0.0, "p_min must be positive.");
+    error_check::check_greater(p_max, p_min, "p_max must be > p_min.");
+    error_check::check_greater(tsamp, 0.0, "tsamp must be positive.");
+    error_check::check_greater_equal(nbins_min, 2, "nbins_min must be >= 2.");
+    error_check::check_greater(growth_factor, 1.0,
+                               "growth_factor must be > 1.0.");
+    if (nbins_max.has_value() && nbins_max.value() < nbins_min) {
+        throw std::invalid_argument("nbins_max cannot be < nbins_min.");
+    }
+
+    std::vector<FFARegion> regions;
+    auto nbins_cur = std::min(nbins_min, static_cast<SizeType>(p_min / tsamp));
+
+    // Core invariant: physical time width of a single folding bin (in seconds).
+    const double bin_width = p_min / static_cast<double>(nbins_cur);
+    auto p_cur_low         = p_min;
+    while (p_cur_low < p_max) {
+        auto nbins_for_region = nbins_cur;
+        if (nbins_max.has_value() && nbins_for_region >= nbins_max.value()) {
+            regions.push_back(
+                {1.0 / p_max, 1.0 / p_cur_low, nbins_max.value()});
+            break;
+        }
+        const double p_cur_high = std::min(p_cur_low * growth_factor, p_max);
+        regions.push_back(
+            {1.0 / p_cur_high, 1.0 / p_cur_low, nbins_for_region});
+        p_cur_low = p_cur_high;
+        nbins_cur = static_cast<SizeType>(p_cur_low / bin_width);
+    }
+    return regions;
 }
 
 } // namespace loki::plans

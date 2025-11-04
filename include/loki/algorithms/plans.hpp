@@ -97,4 +97,41 @@ generate_branching_pattern(std::span<const std::vector<double>> param_arr,
                            bool use_conservative_errors = false,
                            std::string_view kind        = "taylor");
 
+// A structure to hold the parameters for a single FFA search region.
+struct FFARegion {
+    double f_start;
+    double f_end;
+    SizeType nbins;
+};
+
+/**
+ * @brief Generates frequency regions for an efficient FFA search.
+ *
+ * This function divides a wide frequency search range into smaller, contiguous
+ * chunks. The core principle is to maintain a nearly constant physical time
+ * resolution per folding bin, ensuring consistent sensitivity to a given pulse
+ * duty cycle across the search. The number of bins grows with the frequency
+ * until an optional maximum is reached.
+ *
+ * @param p_min The minimum period of the entire search range (in seconds).
+ * @param p_max The maximum period of the entire search range (in seconds).
+ * @param tsamp The sampling interval of the input data (in seconds).
+ * @param nbins_min The minimum number of folding bins to use for the shortest
+ * periods.
+ * @param growth_factor The factor by which the number of bins grows for each
+ * region. A value of 2.0 creates octave regions.
+ * @param nbins_max An optional maximum number of bins to cap memory usage for
+ * long periods.
+ * @return A std::vector of FFARegion structs, each defining a single FFA search
+ * region.
+ * @throws std::invalid_argument if input parameters are illogical.
+ */
+std::vector<FFARegion>
+generate_ffa_regions(double p_min,
+                     double p_max,
+                     double tsamp,
+                     SizeType nbins_min,
+                     double growth_factor              = 2.0,
+                     std::optional<SizeType> nbins_max = std::nullopt);
+
 } // namespace loki::plans
