@@ -14,7 +14,6 @@
 #include "loki/common/types.hpp"
 #include "loki/detection/score.hpp"
 #include "loki/exceptions.hpp"
-#include "loki/math.hpp"
 #include "loki/psr_utils.hpp"
 #include "loki/transforms.hpp"
 #include "loki/utils.hpp"

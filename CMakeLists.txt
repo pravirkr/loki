@@ -173,10 +173,12 @@ install(
 
 # Also install CUDA options if available
 if(CMAKE_CUDA_COMPILER)
-  install(
-    TARGETS ${LOKI_CUDA_OPTIONS}
-    EXPORT ${PROJECT_NAME}Targets
-  )
+  install(TARGETS ${LOKI_CUDA_OPTIONS} EXPORT ${PROJECT_NAME}Targets)
+endif()
+
+# Install coverage config if enabled
+if(ENABLE_COVERAGE)
+  install(TARGETS coverage_config EXPORT ${PROJECT_NAME}Targets)
 endif()
 
 # Install headers

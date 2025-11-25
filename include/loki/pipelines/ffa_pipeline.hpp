@@ -13,26 +13,26 @@
 
 namespace loki::algorithms {
 
-class FFAPipeline {
+class FFAManager {
 public:
-    explicit FFAPipeline(const search::PulsarSearchConfig& cfg,
-                         float max_memory_gb,
-                         bool show_progress = true);
-
-    ~FFAPipeline();
-    FFAPipeline(FFAPipeline&&) noexcept;
-    FFAPipeline& operator=(FFAPipeline&&) noexcept;
-    FFAPipeline(const FFAPipeline&)            = delete;
-    FFAPipeline& operator=(const FFAPipeline&) = delete;
+    explicit FFAManager(const search::PulsarSearchConfig& cfg,
+                        bool show_progress = true);
+    ~FFAManager();
+    FFAManager(FFAManager&&) noexcept;
+    FFAManager& operator=(FFAManager&&) noexcept;
+    FFAManager(const FFAManager&)            = delete;
+    FFAManager& operator=(const FFAManager&) = delete;
 
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
                  const std::filesystem::path& outdir = "./",
                  std::string_view file_prefix        = "test");
 
+    // Opaque handle to the implementation
+    class BaseImpl;
+
 private:
-    class Impl;
-    std::unique_ptr<Impl> m_impl;
+    std::unique_ptr<BaseImpl> m_impl;
 };
 
 } // namespace loki::algorithms

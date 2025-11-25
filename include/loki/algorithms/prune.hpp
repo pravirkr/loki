@@ -44,7 +44,7 @@ private:
 
 template <typename FoldType> class Prune {
 public:
-    Prune(const plans::FFAPlan& ffa_plan,
+    Prune(const plans::FFAPlan<FoldType>& ffa_plan,
           const search::PulsarSearchConfig& cfg,
           std::span<const float> threshold_scheme,
           SizeType max_sugg     = 1U << 18U,
@@ -74,7 +74,7 @@ private:
     std::unique_ptr<Impl> m_impl;
 };
 
-using PruneFloat   = Prune<float>;
-using PruneComplex = Prune<ComplexType>;
+using PruneTime    = Prune<float>;
+using PruneFourier = Prune<ComplexType>;
 
 } // namespace loki::algorithms

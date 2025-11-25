@@ -13,10 +13,12 @@
 namespace loki::algorithms {
 
 /**
- * @brief Fold time series using brute-force method
+ * @brief Brute-force folding algorithm for Pulsar Search
  *
+ * @tparam FoldType The type of fold to use (float for time domain, ComplexType
+ * for Fourier domain)
  */
-class BruteFold {
+template <SupportedFoldType FoldType> class BruteFold {
 public:
     BruteFold(std::span<const double> freq_arr,
               SizeType segment_len,
@@ -38,67 +40,30 @@ public:
      * @param ts_e Time series signal
      * @param ts_v Time series variance
      * @param fold  Folded time series with shape [nsegments, nfreqs, 2, nbins]
+     * (time domain) or [nsegments, nfreqs, 2, nbins_f] (Fourier domain)
      */
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
-                 std::span<float> fold);
+                 std::span<FoldType> fold);
 
 private:
     class Impl;
     std::unique_ptr<Impl> m_impl;
 };
 
-class BruteFoldComplex {
-public:
-    BruteFoldComplex(std::span<const double> freq_arr,
-                     SizeType segment_len,
-                     SizeType nbins,
-                     SizeType nsamps,
-                     double tsamp,
-                     double t_ref = 0.0,
-                     int nthreads = 1);
-    ~BruteFoldComplex();
-    BruteFoldComplex(BruteFoldComplex&&) noexcept;
-    BruteFoldComplex& operator=(BruteFoldComplex&&) noexcept;
-    BruteFoldComplex(const BruteFoldComplex&)            = delete;
-    BruteFoldComplex& operator=(const BruteFoldComplex&) = delete;
-
-    SizeType get_fold_size() const;
-    /**
-     * @brief Fold time series using brute-force method
-     *
-     * @param ts_e Time series signal
-     * @param ts_v Time series variance
-     * @param fold  Folded time series with shape [nsegments, nfreqs, 2,
-     * nbins_f]
-     */
-    void execute(std::span<const float> ts_e,
-                 std::span<const float> ts_v,
-                 std::span<ComplexType> fold);
-
-private:
-    class Impl;
-    std::unique_ptr<Impl> m_impl;
-};
+using BruteFoldFloat   = BruteFold<float>;
+using BruteFoldComplex = BruteFold<ComplexType>;
 
 /* Convenience function to fold time series using brute-force method */
-std::vector<float> compute_brute_fold(std::span<const float> ts_e,
-                                      std::span<const float> ts_v,
-                                      std::span<const double> freq_arr,
-                                      SizeType segment_len,
-                                      SizeType nbins,
-                                      double tsamp,
-                                      double t_ref = 0.0,
-                                      int nthreads = 1);
-std::vector<ComplexType>
-compute_brute_fold_complex(std::span<const float> ts_e,
-                           std::span<const float> ts_v,
-                           std::span<const double> freq_arr,
-                           SizeType segment_len,
-                           SizeType nbins,
-                           double tsamp,
-                           double t_ref = 0.0,
-                           int nthreads = 1);
+template <SupportedFoldType FoldType>
+std::vector<FoldType> compute_brute_fold(std::span<const float> ts_e,
+                                         std::span<const float> ts_v,
+                                         std::span<const double> freq_arr,
+                                         SizeType segment_len,
+                                         SizeType nbins,
+                                         double tsamp,
+                                         double t_ref = 0.0,
+                                         int nthreads = 1);
 
 #ifdef LOKI_ENABLE_CUDA
 /**

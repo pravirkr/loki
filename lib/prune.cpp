@@ -7,7 +7,6 @@
 #include <utility>
 
 #include <BS_thread_pool.hpp>
-#include <fmt/ranges.h>
 #include <spdlog/spdlog.h>
 
 #include "loki/algorithms/ffa.hpp"
@@ -69,22 +68,13 @@ public:
                  bool show_progress) override {
         spdlog::info("PruningManager: Initializing with FFA");
         // Create appropriate FFA fold
-        std::vector<FoldType> ffa_fold;
-        plans::FFAPlan ffa_plan = [&] {
-            if constexpr (std::is_same_v<FoldType, ComplexType>) {
-                auto [fold, plan] = compute_ffa_complex_domain(
-                    ts_e, ts_v, m_cfg, /*quiet=*/false, show_progress);
-                ffa_fold = std::move(fold);
-                return std::move(plan);
-            } else {
-                auto [fold, plan] = compute_ffa(ts_e, ts_v, m_cfg,
-                                                /*quiet=*/false, show_progress);
-                ffa_fold          = std::move(fold);
-                return std::move(plan);
-            }
-        }();
+        std::pair<std::vector<FoldType>, plans::FFAPlan<FoldType>> result =
+            compute_ffa<FoldType>(ts_e, ts_v, m_cfg, /*quiet=*/false,
+                                  show_progress);
+        const std::vector<FoldType> ffa_fold    = std::move(result.first);
+        const plans::FFAPlan<FoldType> ffa_plan = std::move(result.second);
         // Setup output files and directory
-        const auto nsegments = ffa_plan.nsegments.back();
+        const auto nsegments = ffa_plan.get_nsegments().back();
         const std::string filebase =
             std::format("{}_pruning_nstages_{}", file_prefix, nsegments);
         const auto log_file = outdir / std::format("{}_log.txt", filebase);
@@ -176,7 +166,7 @@ private:
     }
 
     void execute_single_threaded(std::span<const FoldType> ffa_fold,
-                                 const plans::FFAPlan& ffa_plan,
+                                 const plans::FFAPlan<FoldType>& ffa_plan,
                                  const std::vector<SizeType>& ref_segs,
                                  const std::filesystem::path& outdir,
                                  const std::filesystem::path& log_file,
@@ -192,7 +182,7 @@ private:
     }
 
     void execute_multi_threaded(std::span<const FoldType> ffa_fold,
-                                const plans::FFAPlan& ffa_plan,
+                                const plans::FFAPlan<FoldType>& ffa_plan,
                                 const std::vector<SizeType>& ref_segs,
                                 const std::filesystem::path& outdir,
                                 const std::filesystem::path& log_file,
@@ -214,7 +204,7 @@ private:
         std::vector<int> task_ids;
         task_ids.reserve(ref_segs.size());
 
-        const auto nsegments = ffa_plan.nsegments.back();
+        const auto nsegments = ffa_plan.get_nsegments().back();
         int id               = 0;
         for (const auto ref_seg : ref_segs) {
             if (tracker) {
@@ -355,7 +345,7 @@ template <typename FoldType> struct PruningWorkspace {
 
 template <typename FoldType> class Prune<FoldType>::Impl {
 public:
-    Impl(plans::FFAPlan ffa_plan,
+    Impl(plans::FFAPlan<FoldType> ffa_plan,
          search::PulsarSearchConfig cfg,
          std::span<const float> threshold_scheme,
          SizeType max_sugg,
@@ -397,6 +387,11 @@ public:
     Impl(Impl&&)                 = delete;
     Impl& operator=(Impl&&)      = delete;
 
+    SizeType get_memory_usage() const noexcept {
+        return m_pruning_workspace->get_memory_usage() +
+               m_suggestions->get_memory_usage();
+    }
+
     void execute(std::span<const FoldType> ffa_fold,
                  SizeType ref_seg,
                  const std::filesystem::path& outdir,
@@ -425,7 +420,7 @@ public:
         log << std::format("Pruning log for ref segment: {}\n", ref_seg);
         log.close();
 
-        const auto nsegments = m_ffa_plan.nsegments.back();
+        const auto nsegments = m_ffa_plan.get_nsegments().back();
         std::unique_ptr<progress::ProgressGuard> progress_guard;
         std::unique_ptr<progress::ProgressTracker> bar;
         if (show_progress) {
@@ -479,7 +474,7 @@ public:
     }
 
 private:
-    plans::FFAPlan m_ffa_plan;
+    plans::FFAPlan<FoldType> m_ffa_plan;
     search::PulsarSearchConfig m_cfg;
     std::vector<float> m_threshold_scheme;
     SizeType m_max_sugg;
@@ -504,8 +499,8 @@ private:
         m_suggestions->reset();
 
         // Initialize snail scheme for current ref_seg
-        const auto nsegments = m_ffa_plan.nsegments.back();
-        const auto tseg      = m_ffa_plan.tsegments.back();
+        const auto nsegments = m_ffa_plan.get_nsegments().back();
+        const auto tseg      = m_ffa_plan.get_tsegments().back();
         m_scheme =
             std::make_unique<psr_utils::SnailScheme>(nsegments, ref_seg, tseg);
 
@@ -773,9 +768,10 @@ private:
         if (m_kind == "taylor") {
             m_prune_funcs =
                 std::make_unique<core::PruneTaylorDPFuncts<FoldType>>(
-                    m_ffa_plan.params.back(), m_ffa_plan.dparams_lim.back(),
-                    m_ffa_plan.nsegments.back(), m_ffa_plan.tsegments.back(),
-                    m_cfg, m_batch_size);
+                    m_ffa_plan.get_params().back(),
+                    m_ffa_plan.get_dparams_lim().back(),
+                    m_ffa_plan.get_nsegments().back(),
+                    m_ffa_plan.get_tsegments().back(), m_cfg, m_batch_size);
         } else {
             throw std::runtime_error(
                 std::format("Invalid pruning kind: {}", m_kind));
@@ -789,7 +785,7 @@ PruningManager::PruningManager(const search::PulsarSearchConfig& cfg,
                                std::optional<std::vector<SizeType>> ref_segs,
                                SizeType max_sugg,
                                SizeType batch_size) {
-    if (cfg.get_use_fft_shifts()) {
+    if (cfg.get_use_fourier()) {
         m_impl = std::make_unique<PruningManagerTypedImpl<ComplexType>>(
             cfg, threshold_scheme, n_runs, std::move(ref_segs), max_sugg,
             batch_size);
@@ -813,7 +809,7 @@ void PruningManager::execute(std::span<const float> ts_e,
 }
 
 template <typename FoldType>
-Prune<FoldType>::Prune(const plans::FFAPlan& ffa_plan,
+Prune<FoldType>::Prune(const plans::FFAPlan<FoldType>& ffa_plan,
                        const search::PulsarSearchConfig& cfg,
                        std::span<const float> threshold_scheme,
                        SizeType max_sugg,
@@ -827,6 +823,10 @@ Prune<FoldType>::Prune(Prune&& other) noexcept = default;
 template <typename FoldType>
 Prune<FoldType>& Prune<FoldType>::operator=(Prune&& other) noexcept = default;
 
+template <typename FoldType>
+SizeType Prune<FoldType>::get_memory_usage() const noexcept {
+    return m_impl->get_memory_usage();
+}
 template <typename FoldType>
 void Prune<FoldType>::execute(
     std::span<const FoldType> ffa_fold,

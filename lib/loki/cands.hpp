@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <map>
 #include <optional>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -91,6 +92,43 @@ public:
 private:
     std::vector<PruneStats> m_stats_list;
     TimerStats m_accumulated_timers;
+};
+
+class FFAResultWriter {
+public:
+    enum class Mode : std::uint8_t { kWrite, kAppend };
+    /**
+     * @brief Construct a new FFAResultWriter object.
+     *
+     * @param filename Path to the HDF5 output file.
+     * @param mode     kWrite will truncate the file if it exists.
+     * kAppend will open an existing file.
+     */
+    explicit FFAResultWriter(std::filesystem::path filename,
+                             Mode mode = Mode::kWrite);
+    ~FFAResultWriter() = default;
+    // Disable copy/move constructors and operators
+    FFAResultWriter(const FFAResultWriter&)            = delete;
+    FFAResultWriter& operator=(const FFAResultWriter&) = delete;
+    FFAResultWriter(FFAResultWriter&&)                 = delete;
+    FFAResultWriter& operator=(FFAResultWriter&&)      = delete;
+
+    void write_metadata(const std::vector<std::string>& param_names,
+                        const std::vector<SizeType>& scoring_widths);
+
+    void write_results(std::span<const double> param_sets,
+                       std::span<const float> scores,
+                       SizeType n_param_sets,
+                       SizeType n_params);
+
+private:
+    std::filesystem::path m_filepath;
+    Mode m_mode;
+    inline static std::mutex m_hdf5_mutex;
+    bool m_datasets_initialized;
+
+    HighFive::File m_file; 
+    HighFive::File open_file() const;
 };
 
 class PruneResultWriter {

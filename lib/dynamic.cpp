@@ -29,8 +29,8 @@ PruneTaylorDPFuncts<FoldType>::PruneTaylorDPFuncts(
       m_tseg_ffa(tseg_ffa),
       m_cfg(std::move(cfg)),
       m_batch_size(batch_size),
-      m_boxcar_widths_cache(m_cfg.get_score_widths(), m_cfg.get_nbins()) {
-    const auto ffa_plan = plans::FFAPlan(m_cfg);
+      m_boxcar_widths_cache(m_cfg.get_scoring_widths(), m_cfg.get_nbins()) {
+    const plans::FFAPlan<FoldType> ffa_plan(m_cfg);
     m_branching_pattern = ffa_plan.get_branching_pattern("taylor");
     if constexpr (std::is_same_v<FoldType, ComplexType>) {
         m_irfft_executor =
@@ -75,7 +75,7 @@ void PruneTaylorDPFuncts<FoldType>::resolve(
     kPolyResolveFuncs[m_cfg.get_prune_poly_order() - 2](
         leaves_batch, coord_add, coord_cur, coord_init, m_param_arr,
         param_idx_flat_batch, relative_phase_batch, m_cfg.get_nbins(), n_leaves,
-        n_params, m_cfg.get_snap_threshold());
+        n_params, m_cfg.get_snap_activation_threshold());
 }
 
 template <typename FoldType>
@@ -89,12 +89,12 @@ auto PruneTaylorDPFuncts<FoldType>::branch(
     if (n_params == 5) {
         return poly_taylor_branch_circular_batch(
             leaves_batch, coord_cur, leaves_branch_batch, n_batch, n_params,
-            m_cfg.get_nbins(), m_cfg.get_tol_bins(), m_cfg.get_param_limits(),
-            get_branch_max(), m_cfg.get_snap_threshold());
+            m_cfg.get_nbins(), m_cfg.get_eta(), m_cfg.get_param_limits(),
+            get_branch_max(), m_cfg.get_snap_activation_threshold());
     }
     return poly_taylor_branch_batch(leaves_batch, coord_cur,
                                     leaves_branch_batch, n_batch, n_params,
-                                    m_cfg.get_nbins(), m_cfg.get_tol_bins(),
+                                    m_cfg.get_nbins(), m_cfg.get_eta(),
                                     m_cfg.get_param_limits(), get_branch_max());
 }
 
@@ -190,7 +190,8 @@ void PruneTaylorDPFuncts<FoldType>::transform(
     SizeType n_params) const {
     kPolyTransformFuncs[m_cfg.get_prune_poly_order() - 2](
         leaves_batch, coord_next, coord_cur, n_leaves, n_params,
-        m_cfg.get_use_conservative_grid(), m_cfg.get_snap_threshold());
+        m_cfg.get_use_conservative_grid(),
+        m_cfg.get_snap_activation_threshold());
 }
 
 template <typename FoldType>
@@ -217,7 +218,7 @@ auto PruneTaylorDPFuncts<FoldType>::validate(
     if (n_params == 5) {
         return poly_taylor_validate_circular_batch(
             leaves_batch, leaves_origins, n_leaves, n_params,
-            m_cfg.get_p_orb_min(), m_cfg.get_snap_threshold());
+            m_cfg.get_p_orb_min(), m_cfg.get_snap_activation_threshold());
     }
     return n_leaves;
 }

@@ -125,6 +125,32 @@ inline void check_not_null(
     }
 }
 
+// Check power of 2
+template <std::integral Size>
+inline void check_power_of_2(
+    Size value,
+    std::string_view msg            = "",
+    const std::source_location& loc = std::source_location::current()) {
+    if ((value & (value - 1)) != 0) {
+        std::string composed =
+            msg.empty()
+                ? std::format("Check failed: {} is not a power of 2", value)
+                : std::format("{} must be power of 2 (got {})", msg, value);
+        throw DetailedException(composed, loc);
+    }
+}
+
+// Check if value is even
+template <std::unsigned_integral Size>
+inline void
+check_even(Size value,
+           std::string_view msg            = "",
+           const std::source_location& loc = std::source_location::current()) {
+    if ((value & 1U) != 0U) {
+        throw DetailedException(msg, loc);
+    }
+}
+
 // Check if index is within range [0, size)
 template <std::integral Index, std::integral Size>
 inline void

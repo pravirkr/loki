@@ -40,6 +40,10 @@ template <SupportedFoldType FoldType> constexpr FoldType default_fold_value() {
 
 #ifdef LOKI_ENABLE_CUDA
 using ComplexTypeCUDA = cuda::std::complex<float>;
+
+template <typename T>
+concept SupportedFoldTypeCUDA =
+    std::is_same_v<T, float> || std::is_same_v<T, ComplexTypeCUDA>;
 #endif // LOKI_ENABLE_CUDA
 
 inline constexpr size_t kUnrollFactor = 8;

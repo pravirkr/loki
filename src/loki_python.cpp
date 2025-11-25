@@ -1,5 +1,6 @@
 #include "loki/algorithms/prune.hpp"
 #include "loki/common/types.hpp"
+#include "loki_templates.hpp"
 #include "pybind_utils.hpp"
 
 #include <cstddef>
@@ -16,13 +17,12 @@
 #include "loki/transforms.hpp"
 
 namespace loki {
-using algorithms::FFA;
-using algorithms::FFACOMPLEX;
-using algorithms::PruneComplex;
-using algorithms::PruneFloat;
+using algorithms::FFAManager;
+using algorithms::PruneFourier;
+using algorithms::PruneTime;
 using algorithms::PruningManager;
 using detection::MatchedFilter;
-using plans::FFAPlan;
+using plans::FFAPlanBase;
 using search::PulsarSearchConfig;
 
 namespace py = pybind11;
@@ -243,11 +243,11 @@ PYBIND11_MODULE(libloki, m) {
 
     auto m_fold = m.def_submodule("fold", "Fold submodule");
     m_fold.def(
-        "compute_brute_fold",
+        "compute_brute_fold_time",
         [](const PyArrayT<float>& ts_e, const PyArrayT<float>& ts_v,
            const PyArrayT<double>& freq_arr, SizeType segment_len,
            SizeType nbins, double tsamp, double t_ref, int nthreads) {
-            return as_pyarray(algorithms::compute_brute_fold(
+            return as_pyarray(algorithms::compute_brute_fold<float>(
                 to_span<const float>(ts_e), to_span<const float>(ts_v),
                 to_span<const double>(freq_arr), segment_len, nbins, tsamp,
                 t_ref, nthreads));
@@ -256,11 +256,11 @@ PYBIND11_MODULE(libloki, m) {
         py::arg("segment_len"), py::arg("nbins"), py::arg("tsamp"),
         py::arg("t_ref") = 0.0F, py::arg("nthreads") = 1);
     m_fold.def(
-        "compute_brute_fold_complex",
+        "compute_brute_fold_fourier",
         [](const PyArrayT<float>& ts_e, const PyArrayT<float>& ts_v,
            const PyArrayT<double>& freq_arr, SizeType segment_len,
            SizeType nbins, double tsamp, double t_ref, int nthreads) {
-            return as_pyarray(algorithms::compute_brute_fold_complex(
+            return as_pyarray(algorithms::compute_brute_fold<ComplexType>(
                 to_span<const float>(ts_e), to_span<const float>(ts_v),
                 to_span<const double>(freq_arr), segment_len, nbins, tsamp,
                 t_ref, nthreads));
@@ -272,39 +272,41 @@ PYBIND11_MODULE(libloki, m) {
     auto m_configs = m.def_submodule("configs", "Configs submodule");
     py::class_<PulsarSearchConfig>(m_configs, "PulsarSearchConfig")
         .def(py::init<SizeType, double, SizeType, double,
-                      const std::vector<ParamLimitType>&, double, double,
-                      SizeType, SizeType, std::optional<SizeType>,
-                      std::optional<SizeType>, double, double, bool, bool,
-                      int>(),
+                      const std::vector<ParamLimitType>&, double, double, bool,
+                      int, double, double, std::optional<SizeType>,
+                      std::optional<SizeType>, std::optional<SizeType>, double,
+                      SizeType, double, double, bool>(),
              py::arg("nsamps"), py::arg("tsamp"), py::arg("nbins"),
-             py::arg("tol_bins"), py::arg("param_limits"),
-             py::arg("ducy_max") = 0.2, py::arg("wtsp") = 1.5,
-             py::arg("prune_poly_order") = 3, py::arg("prune_n_derivs") = 3,
+             py::arg("eta"), py::arg("param_limits"), py::arg("ducy_max") = 0.2,
+             py::arg("wtsp") = 1.5, py::arg("use_fourier") = true,
+             py::arg("nthreads") = 1, py::arg("max_memory_gb") = 8.0,
+             py::arg("octave_scale") = 2.0, py::arg("nbins_max") = std::nullopt,
              py::arg("bseg_brute") = std::nullopt,
-             py::arg("bseg_ffa") = std::nullopt, py::arg("p_orb_min") = 1e-5,
-             py::arg("snap_threshold") = 5.0, py::arg("use_fft_shifts") = true,
-             py::arg("use_conservative_grid") = false, py::arg("nthreads") = 1)
+             py::arg("bseg_ffa") = std::nullopt, py::arg("snr_min") = 5.0,
+             py::arg("prune_poly_order") = 3, py::arg("p_orb_min") = 1e-5,
+             py::arg("snap_activation_threshold") = 5.0,
+             py::arg("use_conservative_grid")     = false)
         .def_property_readonly("nsamps", &PulsarSearchConfig::get_nsamps)
         .def_property_readonly("tsamp", &PulsarSearchConfig::get_tsamp)
+        .def_property_readonly("tobs", &PulsarSearchConfig::get_tobs)
         .def_property_readonly("nbins", &PulsarSearchConfig::get_nbins)
         .def_property_readonly("nbins_f", &PulsarSearchConfig::get_nbins_f)
-        .def_property_readonly("tol_bins", &PulsarSearchConfig::get_tol_bins)
+        .def_property_readonly("eta", &PulsarSearchConfig::get_eta)
         .def_property_readonly("param_limits",
                                &PulsarSearchConfig::get_param_limits)
         .def_property_readonly("ducy_max", &PulsarSearchConfig::get_ducy_max)
         .def_property_readonly("wtsp", &PulsarSearchConfig::get_wtsp)
         .def_property_readonly("prune_poly_order",
                                &PulsarSearchConfig::get_prune_poly_order)
-        .def_property_readonly("prune_n_derivs",
-                               &PulsarSearchConfig::get_prune_n_derivs)
         .def_property_readonly("bseg_brute",
                                &PulsarSearchConfig::get_bseg_brute)
         .def_property_readonly("bseg_ffa", &PulsarSearchConfig::get_bseg_ffa)
         .def_property_readonly("p_orb_min", &PulsarSearchConfig::get_p_orb_min)
-        .def_property_readonly("snap_threshold",
-                               &PulsarSearchConfig::get_snap_threshold)
-        .def_property_readonly("use_fft_shifts",
-                               &PulsarSearchConfig::get_use_fft_shifts)
+        .def_property_readonly(
+            "snap_activation_threshold",
+            &PulsarSearchConfig::get_snap_activation_threshold)
+        .def_property_readonly("use_fourier",
+                               &PulsarSearchConfig::get_use_fourier)
         .def_property_readonly("use_conservative_grid",
                                &PulsarSearchConfig::get_use_conservative_grid)
         .def_property_readonly("nthreads", &PulsarSearchConfig::get_nthreads)
@@ -321,63 +323,78 @@ PYBIND11_MODULE(libloki, m) {
         .def_property_readonly("score_widths",
                                [](const PulsarSearchConfig& self) {
                                    return as_pyarray_ref(
-                                       self.get_score_widths());
+                                       self.get_scoring_widths());
                                })
+        .def_property_readonly("n_scoring_widths",
+                               &PulsarSearchConfig::get_n_scoring_widths)
         .def("dparams_f", &PulsarSearchConfig::get_dparams_f,
              py::arg("tseg_cur"))
         .def("dparams", &PulsarSearchConfig::get_dparams, py::arg("tseg_cur"))
         .def("dparams_lim", &PulsarSearchConfig::get_dparams_lim,
              py::arg("tseg_cur"));
 
-    auto m_ffa = m.def_submodule("ffa", "FFA submodule");
+    // Plans submodule
+    auto m_plans = m.def_submodule("plans", "Plans submodule");
     PYBIND11_NUMPY_DTYPE(plans::FFACoord, i_tail, shift_tail, i_head,
                          shift_head);
-    py::class_<FFAPlan>(m_ffa, "FFAPlan")
+    PYBIND11_NUMPY_DTYPE(plans::FFACoordFreq, idx, shift);
+    PYBIND11_NUMPY_DTYPE(plans::FFARegion, f_start, f_end, nbins);
+
+    // Bind FFAPlanBase
+    py::class_<FFAPlanBase>(m_plans, "FFAPlanBase")
         .def(py::init<PulsarSearchConfig>(), py::arg("cfg"))
+        .def_property_readonly("n_params", &FFAPlanBase::get_n_params)
+        .def_property_readonly("n_levels", &FFAPlanBase::get_n_levels)
         .def_property_readonly("segment_lens",
-                               [](const FFAPlan& self) {
-                                   return as_pyarray_ref(self.segment_lens);
+                               [](const FFAPlanBase& self) {
+                                   return as_pyarray_ref(
+                                       self.get_segment_lens());
                                })
-        .def_property_readonly(
-            "nsegments",
-            [](const FFAPlan& self) { return as_pyarray_ref(self.nsegments); })
-        .def_property_readonly(
-            "tsegments",
-            [](const FFAPlan& self) { return as_pyarray_ref(self.tsegments); })
-        .def_property_readonly(
-            "ncoords",
-            [](const FFAPlan& self) { return as_pyarray_ref(self.ncoords); })
-        .def_property_readonly(
-            "params",
-            [](const FFAPlan& self) { return as_listof_pyarray(self.params); })
-        .def_property_readonly(
-            "dparams",
-            [](const FFAPlan& self) { return as_listof_pyarray(self.dparams); })
-        .def_property_readonly("dparams_lim",
-                               [](const FFAPlan& self) {
-                                   return as_listof_pyarray(self.dparams_lim);
+        .def_property_readonly("nsegments",
+                               [](const FFAPlanBase& self) {
+                                   return as_pyarray_ref(self.get_nsegments());
                                })
-        .def_property_readonly("fold_shapes",
-                               [](const FFAPlan& self) {
-                                   return as_listof_pyarray(self.fold_shapes);
+        .def_property_readonly("tsegments",
+                               [](const FFAPlanBase& self) {
+                                   return as_pyarray_ref(self.get_tsegments());
                                })
-        .def_property_readonly("fold_shapes_complex",
-                               [](const FFAPlan& self) {
+        .def_property_readonly("ncoords",
+                               [](const FFAPlanBase& self) {
+                                   return as_pyarray_ref(self.get_ncoords());
+                               })
+        .def_property_readonly("ncoords_lb",
+                               [](const FFAPlanBase& self) {
+                                   return as_pyarray_ref(self.get_ncoords_lb());
+                               })
+        .def_property_readonly("ncoords_offsets",
+                               [](const FFAPlanBase& self) {
+                                   return as_pyarray_ref(
+                                       self.get_ncoords_offsets());
+                               })
+        .def_property_readonly("params",
+                               [](const FFAPlanBase& self) {
+                                   return as_listof_pyarray(self.get_params());
+                               })
+        .def_property_readonly("param_cart_strides",
+                               [](const FFAPlanBase& self) {
                                    return as_listof_pyarray(
-                                       self.fold_shapes_complex);
+                                       self.get_param_cart_strides());
                                })
-        .def_property_readonly("buffer_memory_usage",
-                               &FFAPlan::get_buffer_memory_usage)
+        .def_property_readonly("dparams",
+                               [](const FFAPlanBase& self) {
+                                   return as_listof_pyarray(self.get_dparams());
+                               })
+        .def_property_readonly("dparams_lim",
+                               [](const FFAPlanBase& self) {
+                                   return as_listof_pyarray(
+                                       self.get_dparams_lim());
+                               })
+        .def_property_readonly("config", &FFAPlanBase::get_config)
+        .def_property_readonly("coord_size", &FFAPlanBase::get_coord_size)
         .def_property_readonly("coord_memory_usage",
-                               &FFAPlan::get_coord_memory_usage)
-        .def_property_readonly("buffer_size", &FFAPlan::get_buffer_size)
-        .def_property_readonly("fold_size", &FFAPlan::get_fold_size)
-        .def_property_readonly("fold_size_complex",
-                               &FFAPlan::get_fold_size_complex)
-        .def_property_readonly("buffer_size_complex",
-                               &FFAPlan::get_buffer_size_complex)
+                               &FFAPlanBase::get_coord_memory_usage)
         .def_property_readonly("params_dict",
-                               [](const FFAPlan& self) {
+                               [](const FFAPlanBase& self) {
                                    auto params_map = self.get_params_dict();
                                    py::dict result;
                                    for (const auto& [key, value] : params_map) {
@@ -387,71 +404,70 @@ PYBIND11_MODULE(libloki, m) {
                                    return result;
                                })
         .def("resolve_coordinates",
-             [](FFAPlan& self) {
+             [](FFAPlanBase& self) {
                  return as_listof_pyarray(self.resolve_coordinates());
+             })
+        .def("resolve_coordinates_freq",
+             [](FFAPlanBase& self) {
+                 return as_listof_pyarray(self.resolve_coordinates_freq());
              })
         .def(
             "get_branching_pattern",
-            [](FFAPlan& self, std::string_view kind) {
+            [](FFAPlanBase& self, std::string_view kind) {
                 return as_pyarray_ref(self.get_branching_pattern(kind));
             },
             py::arg("kind") = "taylor");
 
-    py::class_<FFA>(m_ffa, "FFA")
-        .def(py::init<PulsarSearchConfig, bool>(), py::arg("cfg"),
-             py::arg("show_progress") = true)
-        .def_property_readonly("plan", &FFA::get_plan)
-        .def(
-            "execute",
-            [](FFA& self, const PyArrayT<float>& ts_e,
-               const PyArrayT<float>& ts_v, PyArrayT<float>& fold) {
-                self.execute(to_span<const float>(ts_e),
-                             to_span<const float>(ts_v), to_span<float>(fold));
-            },
-            py::arg("ts_e"), py::arg("ts_v"), py::arg("fold"));
+    bind_ffa_plan<float>(m_plans, "FFAPlanTime");
+    bind_ffa_plan<ComplexType>(m_plans, "FFAPlanFourier");
+    bind_ffa_region_stats<float>(m_plans, "FFARegionStatsTime");
+    bind_ffa_region_stats<ComplexType>(m_plans, "FFARegionStatsFourier");
+    bind_ffa_region_planner<float>(m_plans, "FFARegionPlannerTime");
+    bind_ffa_region_planner<ComplexType>(m_plans, "FFARegionPlannerFourier");
+    m_plans.def("generate_ffa_regions", &plans::generate_ffa_regions,
+                py::arg("p_min"), py::arg("p_max"), py::arg("tsamp"),
+                py::arg("nbins_min"), py::arg("eta_min"),
+                py::arg("growth_factor") = 2.0,
+                py::arg("nbins_max")     = std::nullopt);
 
-    py::class_<FFACOMPLEX>(m_ffa, "FFACOMPLEX")
-        .def(py::init<PulsarSearchConfig, bool>(), py::arg("cfg"),
-             py::arg("show_progress") = true)
-        .def_property_readonly("plan", &FFACOMPLEX::get_plan)
-        .def(
-            "execute",
-            [](FFACOMPLEX& self, const PyArrayT<float>& ts_e,
-               const PyArrayT<float>& ts_v, PyArrayT<float>& fold) {
-                self.execute(to_span<const float>(ts_e),
-                             to_span<const float>(ts_v), to_span<float>(fold));
-            },
-            py::arg("ts_e"), py::arg("ts_v"), py::arg("fold"))
-        .def(
-            "execute",
-            [](FFACOMPLEX& self, const PyArrayT<float>& ts_e,
-               const PyArrayT<float>& ts_v, PyArrayT<ComplexType>& fold) {
-                self.execute(to_span<const float>(ts_e),
-                             to_span<const float>(ts_v),
-                             to_span<ComplexType>(fold));
-            },
-            py::arg("ts_e"), py::arg("ts_v"), py::arg("fold"));
+    // FFA submodule
+    auto m_ffa = m.def_submodule("ffa", "FFA submodule");
+    bind_ffa_class<float>(m_ffa, "FFATime");
+    bind_ffa_class<ComplexType>(m_ffa, "FFAFourier");
 
     m_ffa.def(
-        "compute_ffa",
+        "compute_ffa_time",
         [](const PyArrayT<float>& ts_e, const PyArrayT<float>& ts_v,
            const PulsarSearchConfig& cfg, bool quiet, bool show_progress) {
-            auto [scores, ffa_plan] = algorithms::compute_ffa(
+            auto [fold, ffa_plan] = algorithms::compute_ffa<float>(
                 to_span<const float>(ts_e), to_span<const float>(ts_v), cfg,
                 quiet, show_progress);
-            return std::make_tuple(as_pyarray(std::move(scores)), ffa_plan);
+            return std::make_tuple(as_pyarray(std::move(fold)), ffa_plan);
         },
         py::arg("ts_e"), py::arg("ts_v"), py::arg("cfg"),
         py::arg("quiet") = false, py::arg("show_progress") = false);
 
     m_ffa.def(
-        "compute_ffa_complex",
+        "compute_ffa_fourier",
         [](const PyArrayT<float>& ts_e, const PyArrayT<float>& ts_v,
            const PulsarSearchConfig& cfg, bool quiet, bool show_progress) {
-            auto [scores, ffa_plan] = algorithms::compute_ffa_complex(
+            auto [fold, ffa_plan] = algorithms::compute_ffa<ComplexType>(
                 to_span<const float>(ts_e), to_span<const float>(ts_v), cfg,
                 quiet, show_progress);
-            return std::make_tuple(as_pyarray(std::move(scores)), ffa_plan);
+            return std::make_tuple(as_pyarray(std::move(fold)), ffa_plan);
+        },
+        py::arg("ts_e"), py::arg("ts_v"), py::arg("cfg"),
+        py::arg("quiet") = false, py::arg("show_progress") = false);
+
+    m_ffa.def(
+        "compute_ffa_fourier_return_to_time",
+        [](const PyArrayT<float>& ts_e, const PyArrayT<float>& ts_v,
+           const PulsarSearchConfig& cfg, bool quiet, bool show_progress) {
+            auto [fold, ffa_plan] =
+                algorithms::compute_ffa_fourier_return_to_time(
+                    to_span<const float>(ts_e), to_span<const float>(ts_v), cfg,
+                    quiet, show_progress);
+            return std::make_tuple(as_pyarray(std::move(fold)), ffa_plan);
         },
         py::arg("ts_e"), py::arg("ts_v"), py::arg("cfg"),
         py::arg("quiet") = false, py::arg("show_progress") = false);
@@ -467,6 +483,20 @@ PYBIND11_MODULE(libloki, m) {
         },
         py::arg("ts_e"), py::arg("ts_v"), py::arg("cfg"),
         py::arg("quiet") = false, py::arg("show_progress") = false);
+
+    py::class_<FFAManager>(m_ffa, "FFAManager")
+        .def(py::init<const PulsarSearchConfig&, bool>(), py::arg("cfg"),
+             py::arg("show_progress") = true)
+        .def(
+            "execute",
+            [](FFAManager& self, const PyArrayT<float>& ts_e,
+               const PyArrayT<float>& ts_v, const std::string& outdir,
+               const std::string& file_prefix) {
+                self.execute(to_span<const float>(ts_e),
+                             to_span<const float>(ts_v), outdir, file_prefix);
+            },
+            py::arg("ts_e"), py::arg("ts_v"), py::arg("outdir"),
+            py::arg("file_prefix") = "test");
 
     auto m_psr_utils = m.def_submodule("psr_utils", "PSR utils submodule");
     m_psr_utils.def(
@@ -571,23 +601,7 @@ PYBIND11_MODULE(libloki, m) {
             py::arg("ts_e"), py::arg("ts_v"), py::arg("outdir"),
             py::arg("file_prefix"), py::arg("kind"),
             py::arg("show_progress") = true);
-
-    py::class_<PruneFloat>(m_prune, "Prune")
-        .def(py::init<const FFAPlan&, const PulsarSearchConfig&,
-                      const std::vector<float>&, SizeType, SizeType,
-                      std::string_view>(),
-             py::arg("ffa_plan"), py::arg("cfg"), py::arg("threshold_scheme"),
-             py::arg("max_sugg") = 1U << 18U, py::arg("batch_size") = 1024U,
-             py::arg("kind") = "taylor")
-        .def(
-            "execute",
-            [](PruneFloat& self, const PyArrayT<float>& ffa_fold,
-               SizeType ref_seg, const std::string& outdir,
-               const std::string& file_prefix, const std::string& kind) {
-                self.execute(to_span<const float>(ffa_fold), ref_seg, outdir,
-                             file_prefix, kind);
-            },
-            py::arg("ffa_fold"), py::arg("ref_seg"), py::arg("outdir"),
-            py::arg("file_prefix"), py::arg("kind"));
+    bind_prune_class<float>(m_prune, "PruneTime");
+    bind_prune_class<ComplexType>(m_prune, "PruneFourier");
 }
 } // namespace loki

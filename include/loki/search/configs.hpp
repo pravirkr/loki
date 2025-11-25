@@ -7,100 +7,129 @@
 
 namespace loki::search {
 
+/**
+ * @brief Configuration for Pulsar Search algorithms
+ *
+ * This class contains parameters for both FFA and Pruning algorithms.
+ * When using FFA alone, pruning-specific parameters are ignored.
+ *
+ * EP only Parameters:
+ *   - prune_poly_order, p_orb_min, snap_activation_threshold
+ *   - use_conservative_grid
+ */
 class PulsarSearchConfig {
 public:
     PulsarSearchConfig() = delete;
     PulsarSearchConfig(SizeType nsamps,
                        double tsamp,
                        SizeType nbins,
-                       double tol_bins,
+                       double eta,
                        const std::vector<ParamLimitType>& param_limits,
                        double ducy_max                    = 0.2,
                        double wtsp                        = 1.5,
-                       SizeType prune_poly_order          = 3,
-                       SizeType prune_n_derivs            = 3,
+                       bool use_fourier                   = true,
+                       int nthreads                       = 1,
+                       double max_memory_gb               = 8.0,
+                       double octave_scale                = 2.0,
+                       std::optional<SizeType> nbins_max  = std::nullopt,
                        std::optional<SizeType> bseg_brute = std::nullopt,
                        std::optional<SizeType> bseg_ffa   = std::nullopt,
+                       double snr_min                     = 5.0,
+                       SizeType prune_poly_order          = 3,
                        double p_orb_min                   = 1e-5,
-                       double snap_threshold              = 5.0,
-                       bool use_fft_shifts                = true,
-                       bool use_conservative_grid         = false,
-                       int nthreads                       = 1);
+                       double snap_activation_threshold   = 5.0,
+                       bool use_conservative_grid         = false);
 
-    // Getters
-    [[nodiscard]] SizeType get_nsamps() const { return m_nsamps; }
-    [[nodiscard]] double get_tsamp() const { return m_tsamp; }
-    [[nodiscard]] SizeType get_nbins() const { return m_nbins; }
-    [[nodiscard]] SizeType get_nbins_f() const { return m_nbins_f; }
-    [[nodiscard]] double get_tol_bins() const { return m_tol_bins; }
-    [[nodiscard]] const std::vector<ParamLimitType>& get_param_limits() const {
-        return m_param_limits;
-    }
-    [[nodiscard]] double get_ducy_max() const { return m_ducy_max; }
-    [[nodiscard]] double get_wtsp() const { return m_wtsp; }
-    [[nodiscard]] SizeType get_prune_poly_order() const {
-        return m_prune_poly_order;
-    }
-    [[nodiscard]] SizeType get_prune_n_derivs() const {
-        return m_prune_n_derivs;
-    }
-    [[nodiscard]] SizeType get_bseg_brute() const { return m_bseg_brute; }
-    [[nodiscard]] SizeType get_bseg_ffa() const { return m_bseg_ffa; }
-    [[nodiscard]] double get_p_orb_min() const { return m_p_orb_min; }
-    [[nodiscard]] double get_snap_threshold() const { return m_snap_threshold; }
-    [[nodiscard]] bool get_use_fft_shifts() const { return m_use_fft_shifts; }
-    [[nodiscard]] bool get_use_conservative_grid() const {
-        return m_use_conservative_grid;
-    }
-    [[nodiscard]] int get_nthreads() const { return m_nthreads; }
-    [[nodiscard]] double get_tseg_brute() const { return m_tseg_brute; }
-    [[nodiscard]] double get_tseg_ffa() const { return m_tseg_ffa; }
-    [[nodiscard]] SizeType get_niters_ffa() const { return m_niters_ffa; }
-    [[nodiscard]] SizeType get_nparams() const { return m_nparams; }
-    [[nodiscard]] std::vector<std::string> get_param_names() const {
-        return m_param_names;
-    }
-    [[nodiscard]] double get_f_min() const { return m_f_min; }
-    [[nodiscard]] double get_f_max() const { return m_f_max; }
-    [[nodiscard]] const std::vector<SizeType>& get_score_widths() const {
-        return m_score_widths;
-    }
+    // --- Rule of five: PIMPL ---
+    ~PulsarSearchConfig();
+    PulsarSearchConfig(PulsarSearchConfig&&) noexcept;
+    PulsarSearchConfig& operator=(PulsarSearchConfig&&) noexcept;
+    PulsarSearchConfig(const PulsarSearchConfig&);
+    PulsarSearchConfig& operator=(const PulsarSearchConfig&);
 
-    // Methods
-    [[nodiscard]] std::vector<double> get_dparams_f(double tseg_cur) const;
-    [[nodiscard]] std::vector<double> get_dparams(double tseg_cur) const;
-    [[nodiscard]] std::vector<double> get_dparams_lim(double tseg_cur) const;
+    // --- Getters ---
+    /// @brief Get the number of samples.
+    SizeType get_nsamps() const noexcept;
+    /// @brief Get the sample time in seconds.
+    double get_tsamp() const noexcept;
+    /// @brief Get the number of frequency bins.
+    SizeType get_nbins() const noexcept;
+    /// @brief Get the total observation time in seconds.
+    double get_tobs() const noexcept;
+    /// @brief Get the number of frequency bins for the FFT.
+    SizeType get_nbins_f() const noexcept;
+    /// @brief Get the eta parameter.
+    double get_eta() const noexcept;
+    /// @brief Get the parameter limits (tuples of [min, max] values).
+    const std::vector<ParamLimitType>& get_param_limits() const noexcept;
+    /// @brief Get the maximum ducy factor.
+    double get_ducy_max() const noexcept;
+    /// @brief Get the width scale parameter for the boxcar width trials.
+    double get_wtsp() const noexcept;
+    /// @brief Get whether to use the Fourier domain.
+    bool get_use_fourier() const noexcept;
+    /// @brief Get the number of threads to use.
+    int get_nthreads() const noexcept;
+    /// @brief Get the maximum memory in GB.
+    double get_max_memory_gb() const noexcept;
+    /// @brief Get the octave scale parameter for the FFA regions.
+    double get_octave_scale() const noexcept;
+    /// @brief Get the maximum number of fold bins.
+    SizeType get_nbins_max() const noexcept;
+    /// @brief Get the number of segments for the brute force search.
+    SizeType get_bseg_brute() const noexcept;
+    /// @brief Get the number of segments for the FFA search.
+    SizeType get_bseg_ffa() const noexcept;
+    /// @brief Get the minimum SNR threshold.
+    double get_snr_min() const noexcept;
+    /// @brief Get the polynomial order for the EP algorithm.
+    SizeType get_prune_poly_order() const noexcept;
+    /// @brief Get the minimum orbital period for the circular orbit search.
+    double get_p_orb_min() const noexcept;
+    /// @brief Get the activation threshold for the snap search.
+    double get_snap_activation_threshold() const noexcept;
+    /// @brief Get whether to use the conservative gridding.
+    bool get_use_conservative_grid() const noexcept;
+    /// @brief Get the segment length for the brute force search.
+    double get_tseg_brute() const noexcept;
+    /// @brief Get the segment length for the FFA search.
+    double get_tseg_ffa() const noexcept;
+    /// @brief Get the number of iterations for the FFA search.
+    SizeType get_niters_ffa() const noexcept;
+    /// @brief Get the number of parameters to search over.
+    SizeType get_nparams() const noexcept;
+    /// @brief Get the parameter names.
+    [[nodiscard]] std::vector<std::string> get_param_names() const noexcept;
+    /// @brief Get the minimum frequency.
+    double get_f_min() const noexcept;
+    /// @brief Get the maximum frequency.
+    double get_f_max() const noexcept;
+    /// @brief Get the scoring widths.
+    [[nodiscard]] std::vector<SizeType> get_scoring_widths() const noexcept;
+    /// @brief Get the number of scoring widths.
+    SizeType get_n_scoring_widths() const noexcept;
+
+    // --- Methods ---
+    /// @brief Get the parameter step sizes for the f-based params.
+    [[nodiscard]] std::vector<double>
+    get_dparams_f(double tseg_cur) const noexcept;
+    /// @brief Get the parameter step sizes for the {f,d} based params.
+    [[nodiscard]] std::vector<double>
+    get_dparams(double tseg_cur) const noexcept;
+    /// @brief Get the parameter step sizes (limited) for the {f,d} based
+    /// params.
+    [[nodiscard]] std::vector<double>
+    get_dparams_lim(double tseg_cur) const noexcept;
+
+    /// @brief Get an updated configuration with the given parameters.
+    PulsarSearchConfig
+    get_updated_config(SizeType nbins,
+                       double eta,
+                       const std::vector<ParamLimitType>& param_limits) const noexcept;
 
 private:
-    void validate() const;
-    [[nodiscard]] SizeType get_bseg_brute_default() const;
-    [[nodiscard]] SizeType get_bseg_ffa_default() const;
-
-    SizeType m_nsamps;
-    double m_tsamp;
-    SizeType m_nbins;
-    SizeType m_nbins_f;
-    double m_tol_bins;
-    std::vector<ParamLimitType> m_param_limits;
-    double m_ducy_max;
-    double m_wtsp;
-    SizeType m_prune_poly_order;
-    SizeType m_prune_n_derivs;
-    SizeType m_bseg_brute;
-    SizeType m_bseg_ffa;
-    double m_p_orb_min;
-    double m_snap_threshold;
-    bool m_use_fft_shifts;
-    bool m_use_conservative_grid;
-    int m_nthreads;
-    double m_tseg_brute{};
-    double m_tseg_ffa{};
-    SizeType m_niters_ffa{};
-    SizeType m_nparams{};
-    std::vector<std::string> m_param_names;
-    double m_f_min{};
-    double m_f_max{};
-    std::vector<SizeType> m_score_widths;
+    class Impl;
+    std::unique_ptr<Impl> m_impl;
 };
 
 } // namespace loki::search
