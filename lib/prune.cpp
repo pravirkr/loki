@@ -68,11 +68,11 @@ public:
                  bool show_progress) override {
         spdlog::info("PruningManager: Initializing with FFA");
         // Create appropriate FFA fold
-        std::pair<std::vector<FoldType>, plans::FFAPlan<FoldType>> result =
+        std::tuple<std::vector<FoldType>, plans::FFAPlan<FoldType>> result =
             compute_ffa<FoldType>(ts_e, ts_v, m_cfg, /*quiet=*/false,
                                   show_progress);
-        const std::vector<FoldType> ffa_fold    = std::move(result.first);
-        const plans::FFAPlan<FoldType> ffa_plan = std::move(result.second);
+        const std::vector<FoldType> ffa_fold    = std::get<0>(result);
+        const plans::FFAPlan<FoldType> ffa_plan = std::get<1>(result);
         // Setup output files and directory
         const auto nsegments = ffa_plan.get_nsegments().back();
         const std::string filebase =
@@ -484,7 +484,7 @@ private:
     bool m_prune_complete{false};
     SizeType m_prune_level{};
     std::unique_ptr<psr_utils::SnailScheme> m_scheme;
-    std::unique_ptr<core::PruneTaylorDPFuncts<FoldType>> m_prune_funcs;
+    std::unique_ptr<core::PruneDPFuncts<FoldType>> m_prune_funcs;
     std::unique_ptr<cands::PruneStatsCollection> m_pstats;
 
     // A single, in-place (circular) suggestion buffer
@@ -764,18 +764,11 @@ private:
             throw std::runtime_error(
                 std::format("Pruning not supported for nparams > 5."));
         }
-
-        if (m_kind == "taylor") {
-            m_prune_funcs =
-                std::make_unique<core::PruneTaylorDPFuncts<FoldType>>(
-                    m_ffa_plan.get_params().back(),
-                    m_ffa_plan.get_dparams_lim().back(),
-                    m_ffa_plan.get_nsegments().back(),
-                    m_ffa_plan.get_tsegments().back(), m_cfg, m_batch_size);
-        } else {
-            throw std::runtime_error(
-                std::format("Invalid pruning kind: {}", m_kind));
-        }
+        m_prune_funcs = core::create_prune_dp_functs<FoldType>(
+            m_kind, m_ffa_plan.get_params().back(),
+            m_ffa_plan.get_dparams_lim().back(),
+            m_ffa_plan.get_nsegments().back(),
+            m_ffa_plan.get_tsegments().back(), m_cfg, m_batch_size);
     }
 }; // End Prune::Impl definition
 
