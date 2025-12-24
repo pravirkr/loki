@@ -1,4 +1,4 @@
-#include "loki/algorithms/ffa.hpp"
+#include "loki_templates_cuda.cuh"
 #include "pybind_utils.hpp"
 
 #include <pybind11/iostream.h>
@@ -9,8 +9,6 @@
 #include "loki/loki.hpp"
 
 namespace loki {
-using algorithms::FFACOMPLEXCUDA;
-using algorithms::FFACUDA;
 using detection::DynamicThresholdSchemeCUDA;
 
 namespace py = pybind11;
@@ -111,16 +109,18 @@ PYBIND11_MODULE(libculoki, m) { // NOLINT
              py::arg("ducy_max") = 0.3F, py::arg("wtsp") = 1.0F,
              py::arg("beam_width") = 0.7F, py::arg("trials_start") = 1,
              py::arg("device_id") = 0)
-        .def("run", &DynamicThresholdSchemeCUDA::run, py::arg("thres_neigh") = 10)
-        .def("save", &DynamicThresholdSchemeCUDA::save, py::arg("outdir") = "./");
+        .def("run", &DynamicThresholdSchemeCUDA::run,
+             py::arg("thres_neigh") = 10)
+        .def("save", &DynamicThresholdSchemeCUDA::save,
+             py::arg("outdir") = "./");
 
     auto m_fold = m.def_submodule("fold", "Fold submodule");
     m_fold.def(
-        "compute_brute_fold_cuda",
+        "compute_brute_fold_time_cuda",
         [](const PyArrayT<float>& ts_e, const PyArrayT<float>& ts_v,
            const PyArrayT<double>& freq_arr, SizeType segment_len,
            SizeType nbins, double tsamp, double t_ref, int device_id) {
-            return as_pyarray(algorithms::compute_brute_fold_cuda(
+            return as_pyarray(algorithms::compute_brute_fold_cuda<float>(
                 to_span<const float>(ts_e), to_span<const float>(ts_v),
                 to_span<const double>(freq_arr), segment_len, nbins, tsamp,
                 t_ref, device_id));
@@ -129,68 +129,73 @@ PYBIND11_MODULE(libculoki, m) { // NOLINT
         py::arg("segment_len"), py::arg("nbins"), py::arg("tsamp"),
         py::arg("t_ref") = 0.0F, py::arg("device_id") = 0);
 
+    m_fold.def(
+        "compute_brute_fold_fourier_cuda",
+        [](const PyArrayT<float>& ts_e, const PyArrayT<float>& ts_v,
+           const PyArrayT<double>& freq_arr, SizeType segment_len,
+           SizeType nbins, double tsamp, double t_ref, int device_id) {
+            return as_pyarray(
+                algorithms::compute_brute_fold_cuda<ComplexTypeCUDA>(
+                    to_span<const float>(ts_e), to_span<const float>(ts_v),
+                    to_span<const double>(freq_arr), segment_len, nbins, tsamp,
+                    t_ref, device_id));
+        },
+        py::arg("ts_e"), py::arg("ts_v"), py::arg("freq_arr"),
+        py::arg("segment_len"), py::arg("nbins"), py::arg("tsamp"),
+        py::arg("t_ref") = 0.0F, py::arg("device_id") = 0);
+
     auto m_ffa = m.def_submodule("ffa", "FFA submodule");
-
-    py::class_<FFACUDA>(m_ffa, "FFACUDA")
-        .def(py::init<search::PulsarSearchConfig, int>(), py::arg("cfg"),
-             py::arg("device_id") = 0)
-        .def_property_readonly("plan", &FFACUDA::get_plan)
-        .def(
-            "execute",
-            [](FFACUDA& self, const PyArrayT<float>& ts_e,
-               const PyArrayT<float>& ts_v, PyArrayT<float>& fold) {
-                self.execute(to_span<const float>(ts_e),
-                             to_span<const float>(ts_v), to_span<float>(fold));
-            },
-            py::arg("ts_e"), py::arg("ts_v"), py::arg("fold"));
-
-    py::class_<FFACOMPLEXCUDA>(m_ffa, "FFACOMPLEXCUDA")
-        .def(py::init<search::PulsarSearchConfig, int>(), py::arg("cfg"),
-             py::arg("device_id") = 0)
-        .def_property_readonly("plan", &FFACOMPLEXCUDA::get_plan)
-        .def(
-            "execute",
-            [](FFACOMPLEXCUDA& self, const PyArrayT<float>& ts_e,
-               const PyArrayT<float>& ts_v, PyArrayT<float>& fold) {
-                self.execute(to_span<const float>(ts_e),
-                             to_span<const float>(ts_v), to_span<float>(fold));
-            },
-            py::arg("ts_e"), py::arg("ts_v"), py::arg("fold"));
+    bind_ffa_cuda_class<float>(m_ffa, "FFACUDA");
+    bind_ffa_cuda_class<ComplexTypeCUDA>(m_ffa, "FFACOMPLEXCUDA");
 
     m_ffa.def(
-        "compute_ffa_cuda",
+        "compute_ffa_time_cuda",
         [](const PyArrayT<float>& ts_e, const PyArrayT<float>& ts_v,
-           const search::PulsarSearchConfig& cfg, int device_id) {
-            auto [scores, ffa_plan] = algorithms::compute_ffa_cuda(
+           const PulsarSearchConfig& cfg, int device_id, bool quiet) {
+            auto [fold, ffa_plan] = algorithms::compute_ffa_cuda<float>(
                 to_span<const float>(ts_e), to_span<const float>(ts_v), cfg,
-                device_id);
-            return std::make_tuple(as_pyarray(std::move(scores)), ffa_plan);
+                device_id, quiet);
+            return std::make_tuple(as_pyarray(std::move(fold)), ffa_plan);
         },
         py::arg("ts_e"), py::arg("ts_v"), py::arg("cfg"),
-        py::arg("device_id") = 0);
+        py::arg("device_id") = 0, py::arg("quiet") = false);
+
     m_ffa.def(
-        "compute_ffa_complex_cuda",
+        "compute_ffa_fourier_cuda",
         [](const PyArrayT<float>& ts_e, const PyArrayT<float>& ts_v,
-           const search::PulsarSearchConfig& cfg, int device_id) {
-            auto [scores, ffa_plan] = algorithms::compute_ffa_complex_cuda(
-                to_span<const float>(ts_e), to_span<const float>(ts_v), cfg,
-                device_id);
-            return std::make_tuple(as_pyarray(std::move(scores)), ffa_plan);
+           const PulsarSearchConfig& cfg, int device_id, bool quiet) {
+            auto [fold, ffa_plan] =
+                algorithms::compute_ffa_cuda<ComplexTypeCUDA>(
+                    to_span<const float>(ts_e), to_span<const float>(ts_v), cfg,
+                    device_id, quiet);
+            return std::make_tuple(as_pyarray(std::move(fold)), ffa_plan);
         },
         py::arg("ts_e"), py::arg("ts_v"), py::arg("cfg"),
-        py::arg("device_id") = 0);
+        py::arg("device_id") = 0, py::arg("quiet") = false);
+    m_ffa.def(
+        "compute_ffa_fourier_return_to_time_cuda",
+        [](const PyArrayT<float>& ts_e, const PyArrayT<float>& ts_v,
+           const search::PulsarSearchConfig& cfg, int device_id, bool quiet) {
+            auto [fold, ffa_plan] =
+                algorithms::compute_ffa_fourier_return_to_time_cuda(
+                    to_span<const float>(ts_e), to_span<const float>(ts_v), cfg,
+                    device_id, quiet);
+            return std::make_tuple(as_pyarray(std::move(fold)), ffa_plan);
+        },
+        py::arg("ts_e"), py::arg("ts_v"), py::arg("cfg"),
+        py::arg("device_id") = 0, py::arg("quiet") = false);
 
     m_ffa.def(
         "compute_ffa_scores_cuda",
         [](const PyArrayT<float>& ts_e, const PyArrayT<float>& ts_v,
-           const search::PulsarSearchConfig& cfg, int device_id) {
+           const search::PulsarSearchConfig& cfg, int device_id, bool quiet) {
             auto [scores, ffa_plan] = algorithms::compute_ffa_scores_cuda(
                 to_span<const float>(ts_e), to_span<const float>(ts_v), cfg,
-                device_id);
+                device_id, quiet);
             return std::make_tuple(as_pyarray(std::move(scores)), ffa_plan);
         },
         py::arg("ts_e"), py::arg("ts_v"), py::arg("cfg"),
-        py::arg("device_id") = 0);
+        py::arg("device_id") = 0, py::arg("quiet") = false);
 }
 
 } // namespace loki

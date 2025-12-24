@@ -35,4 +35,30 @@ private:
     std::unique_ptr<BaseImpl> m_impl;
 };
 
+#ifdef LOKI_ENABLE_CUDA
+
+class FFAManagerCUDA {
+public:
+    explicit FFAManagerCUDA(const search::PulsarSearchConfig& cfg,
+                            int device_id = 0);
+    ~FFAManagerCUDA();
+    FFAManagerCUDA(FFAManagerCUDA&&) noexcept;
+    FFAManagerCUDA& operator=(FFAManagerCUDA&&) noexcept;
+    FFAManagerCUDA(const FFAManagerCUDA&)            = delete;
+    FFAManagerCUDA& operator=(const FFAManagerCUDA&) = delete;
+
+    void execute(std::span<const float> ts_e,
+                 std::span<const float> ts_v,
+                 const std::filesystem::path& outdir = "./",
+                 std::string_view file_prefix        = "test");
+
+    // Opaque handle to the implementation
+    class BaseImpl;
+
+private:
+    std::unique_ptr<BaseImpl> m_impl;
+};
+
+#endif // LOKI_ENABLE_CUDA
+
 } // namespace loki::algorithms

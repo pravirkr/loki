@@ -190,8 +190,7 @@ std::vector<FoldType> compute_brute_fold(std::span<const float> ts_e,
     const SizeType nsamps = ts_e.size();
     BruteFold<FoldType> bf(freq_arr, segment_len, nbins, nsamps, tsamp, t_ref,
                            nthreads);
-    std::vector<FoldType> fold(bf.get_fold_size(),
-                               default_fold_value<FoldType>());
+    std::vector<FoldType> fold(bf.get_fold_size(), FoldType{});
     bf.execute(ts_e, ts_v, std::span<FoldType>(fold));
     return fold;
 }
@@ -200,23 +199,22 @@ std::vector<FoldType> compute_brute_fold(std::span<const float> ts_e,
 template class BruteFold<float>;
 template class BruteFold<ComplexType>;
 
-template std::vector<float>
-compute_brute_fold<float>(std::span<const float> ts_e,
-                          std::span<const float> ts_v,
-                          std::span<const double> freq_arr,
-                          SizeType segment_len,
-                          SizeType nbins,
-                          double tsamp,
-                          double t_ref,
-                          int nthreads);
+template std::vector<float> compute_brute_fold<float>(std::span<const float>,
+                                                      std::span<const float>,
+                                                      std::span<const double>,
+                                                      SizeType,
+                                                      SizeType,
+                                                      double,
+                                                      double,
+                                                      int);
 template std::vector<ComplexType>
-compute_brute_fold<ComplexType>(std::span<const float> ts_e,
-                                std::span<const float> ts_v,
-                                std::span<const double> freq_arr,
-                                SizeType segment_len,
-                                SizeType nbins,
-                                double tsamp,
-                                double t_ref,
-                                int nthreads);
+compute_brute_fold<ComplexType>(std::span<const float>,
+                                std::span<const float>,
+                                std::span<const double>,
+                                SizeType,
+                                SizeType,
+                                double,
+                                double,
+                                int);
 
 } // namespace loki::algorithms

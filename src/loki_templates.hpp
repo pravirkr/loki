@@ -2,9 +2,6 @@
 
 #include "pybind_utils.hpp"
 
-#include <cstddef>
-#include <span>
-
 #include <pybind11/iostream.h>
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
@@ -24,29 +21,30 @@ using search::PulsarSearchConfig;
 namespace py = pybind11;
 
 // Template function to bind FFAPlan<T>
-template <typename T>
+template <SupportedFoldType FoldType>
 void bind_ffa_plan(py::module& m, const std::string& name) {
-    py::class_<FFAPlan<T>, FFAPlanBase>(m, name.c_str())
+    py::class_<FFAPlan<FoldType>, FFAPlanBase>(m, name.c_str())
         .def(py::init<PulsarSearchConfig>(), py::arg("cfg"))
         .def_property_readonly("fold_shapes",
-                               [](const FFAPlan<T>& self) {
+                               [](const FFAPlan<FoldType>& self) {
                                    return as_listof_pyarray(
                                        self.get_fold_shapes());
                                })
         .def_property_readonly("brute_fold_size",
-                               &FFAPlan<T>::get_brute_fold_size)
-        .def_property_readonly("fold_size", &FFAPlan<T>::get_fold_size)
+                               &FFAPlan<FoldType>::get_brute_fold_size)
+        .def_property_readonly("fold_size", &FFAPlan<FoldType>::get_fold_size)
         .def_property_readonly("fold_size_time",
-                               &FFAPlan<T>::get_fold_size_time)
-        .def_property_readonly("buffer_size", &FFAPlan<T>::get_buffer_size)
+                               &FFAPlan<FoldType>::get_fold_size_time)
+        .def_property_readonly("buffer_size",
+                               &FFAPlan<FoldType>::get_buffer_size)
         .def_property_readonly("buffer_size_time",
-                               &FFAPlan<T>::get_buffer_size_time)
+                               &FFAPlan<FoldType>::get_buffer_size_time)
         .def_property_readonly("buffer_memory_usage",
-                               &FFAPlan<T>::get_buffer_memory_usage);
+                               &FFAPlan<FoldType>::get_buffer_memory_usage);
 }
 
 // Template function to bind FFA<T>
-template <typename FoldType>
+template <SupportedFoldType FoldType>
 void bind_ffa_class(py::module& m, const std::string& name) {
     auto cls = py::class_<FFA<FoldType>>(m, name.c_str())
                    .def(py::init<PulsarSearchConfig, bool>(), py::arg("cfg"),
@@ -120,7 +118,7 @@ template <typename FoldType>
 void bind_prune_class(py::module& m, const std::string& name) {
     py::class_<Prune<FoldType>>(m, name.c_str())
         .def(py::init<const FFAPlan<FoldType>&, const PulsarSearchConfig&,
-                      std::span<const float>, SizeType, SizeType,
+                      const PyArrayT<float>&, SizeType, SizeType,
                       std::string_view>(),
              py::arg("ffa_plan"), py::arg("cfg"), py::arg("threshold_scheme"),
              py::arg("max_sugg") = 1U << 18U, py::arg("batch_size") = 1024U,

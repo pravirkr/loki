@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <format>
 #include <limits>
 #include <numeric>
 #include <ranges>

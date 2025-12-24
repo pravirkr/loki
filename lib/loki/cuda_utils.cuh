@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <format>
 #include <source_location>
 #include <stdexcept>
@@ -102,7 +103,7 @@ constexpr std::string_view curand_error_string(curandStatus_t error) noexcept {
 class CudaException : public std::runtime_error {
 public:
     // Error type identification
-    enum class ErrorType { Cuda, Cufft, Curand };
+    enum class ErrorType : uint8_t { kCuda, kCufft, kCurand };
 
     // Constructor for cudaError_t
     explicit CudaException(
@@ -111,7 +112,7 @@ public:
         const std::source_location& loc = std::source_location::current())
         : std::runtime_error(format_error(code, user_msg, loc)),
           m_error_code(code),
-          m_error_type(ErrorType::Cuda),
+          m_error_type(ErrorType::kCuda),
           m_file(loc.file_name()),
           m_line(loc.line()),
           m_func(loc.function_name()),
@@ -124,7 +125,7 @@ public:
         const std::source_location& loc = std::source_location::current())
         : std::runtime_error(format_error(code, user_msg, loc)),
           m_error_code(code),
-          m_error_type(ErrorType::Cufft),
+          m_error_type(ErrorType::kCufft),
           m_file(loc.file_name()),
           m_line(loc.line()),
           m_func(loc.function_name()),
@@ -137,7 +138,7 @@ public:
         const std::source_location& loc = std::source_location::current())
         : std::runtime_error(format_error(code, user_msg, loc)),
           m_error_code(code),
-          m_error_type(ErrorType::Curand),
+          m_error_type(ErrorType::kCurand),
           m_file(loc.file_name()),
           m_line(loc.line()),
           m_func(loc.function_name()),
@@ -311,18 +312,58 @@ inline void check_kernel_launch_params(
                        props.totalGlobalMem >> 20U);
 }
 
-inline void set_device(int device_id) {
-    int device_count;
-    check_cuda_call(cudaGetDeviceCount(&device_count),
-                    "Failed to get device count");
-    if (device_id < 0 || device_id >= device_count) {
-        throw CudaException(
-            cudaErrorInvalidDevice,
-            std::format("Invalid device_id: {}. Must be between 0 and {}",
-                        device_id, device_count - 1));
-    }
-    check_cuda_call(cudaSetDevice(device_id),
-                    std::format("Failed to set device {}", device_id));
+// Cached device count
+[[nodiscard]] inline int get_device_count() {
+    static int count = [] {
+        int device_count;
+        check_cuda_call(
+            cudaGetDeviceCount(&device_count),
+            "cudaGetDeviceCount failed: Failed to get device count");
+        return device_count;
+    }();
+    return count;
 }
+
+inline void set_device(int device_id) {
+    const int device_count = get_device_count();
+    if (device_id < 0 || device_id >= device_count) {
+        throw CudaException(cudaErrorInvalidDevice,
+                            std::format("Invalid device_id {} (0..{})",
+                                        device_id, device_count - 1));
+    }
+
+    int current_device_id;
+    check_cuda_call(cudaGetDevice(&current_device_id), "cudaGetDevice failed");
+
+    if (current_device_id == device_id) {
+        return;
+    }
+
+    check_cuda_call(cudaSetDevice(device_id),
+                    std::format("cudaSetDevice({}) failed", device_id));
+}
+
+/**
+ * @brief RAII guard for setting and restoring the CUDA device.
+ */
+class CudaSetDeviceGuard {
+    int m_previous_device_id = -1;
+
+public:
+    explicit CudaSetDeviceGuard(int device_id) {
+        check_cuda_call(cudaGetDevice(&m_previous_device_id),
+                        "cudaGetDevice failed");
+        if (m_previous_device_id != device_id) {
+            set_device(device_id);
+        }
+    }
+
+    ~CudaSetDeviceGuard() { cudaSetDevice(m_previous_device_id); }
+    CudaSetDeviceGuard(const CudaSetDeviceGuard&)            = delete;
+    CudaSetDeviceGuard& operator=(const CudaSetDeviceGuard&) = delete;
+    CudaSetDeviceGuard(CudaSetDeviceGuard&&)                 = delete;
+    CudaSetDeviceGuard& operator=(CudaSetDeviceGuard&&)      = delete;
+};
+
 } // namespace
 } // namespace loki::cuda_utils

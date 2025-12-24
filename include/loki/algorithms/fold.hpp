@@ -66,12 +66,19 @@ std::vector<FoldType> compute_brute_fold(std::span<const float> ts_e,
                                          int nthreads = 1);
 
 #ifdef LOKI_ENABLE_CUDA
+
 /**
- * @brief Fold time series using brute-force method
+ * @brief Brute-force folding algorithm for Pulsar Search on Device
  *
+ * @tparam FoldTypeCUDA The type of fold to use (float for time domain,
+ * ComplexType for Fourier domain) on Host and ComplexTypeCUDA for Fourier
+ * domain on Device
  */
-class BruteFoldCUDA {
+template <SupportedFoldTypeCUDA FoldTypeCUDA> class BruteFoldCUDA {
 public:
+    using HostFoldType   = typename FoldTypeTraits<FoldTypeCUDA>::HostType;
+    using DeviceFoldType = typename FoldTypeTraits<FoldTypeCUDA>::DeviceType;
+
     BruteFoldCUDA(std::span<const double> freq_arr,
                   SizeType segment_len,
                   SizeType nbins,
@@ -92,13 +99,15 @@ public:
      * @param ts_e Time series signal
      * @param ts_v Time series variance
      * @param fold  Folded time series with shape [nsegments, nfreqs, 2, nbins]
+     * (time domain) or [nsegments, nfreqs, 2, nbins_f] (Fourier domain)
      */
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
-                 std::span<float> fold);
+                 std::span<HostFoldType> fold);
+    // Device interface
     void execute(cuda::std::span<const float> ts_e,
                  cuda::std::span<const float> ts_v,
-                 cuda::std::span<float> fold,
+                 cuda::std::span<DeviceFoldType> fold,
                  cudaStream_t stream = nullptr);
 
 private:
@@ -106,63 +115,21 @@ private:
     std::unique_ptr<Impl> m_impl;
 };
 
-/**
- * @brief Fold time series using brute-force method
- *
+using BruteFoldFloatCUDA   = BruteFoldCUDA<float>;
+using BruteFoldComplexCUDA = BruteFoldCUDA<ComplexTypeCUDA>;
+
+/* Convenience function to fold time series using brute-force method on Device
  */
-class BruteFoldComplexCUDA {
-public:
-    BruteFoldComplexCUDA(std::span<const double> freq_arr,
-                         SizeType segment_len,
-                         SizeType nbins,
-                         SizeType nsamps,
-                         double tsamp,
-                         double t_ref  = 0.0,
-                         int device_id = 0);
-    ~BruteFoldComplexCUDA();
-    BruteFoldComplexCUDA(BruteFoldComplexCUDA&&) noexcept;
-    BruteFoldComplexCUDA& operator=(BruteFoldComplexCUDA&&) noexcept;
-    BruteFoldComplexCUDA(const BruteFoldComplexCUDA&)            = delete;
-    BruteFoldComplexCUDA& operator=(const BruteFoldComplexCUDA&) = delete;
-
-    SizeType get_fold_size() const;
-    /**
-     * @brief Fold time series using brute-force method
-     *
-     * @param ts_e Time series signal
-     * @param ts_v Time series variance
-     * @param fold  Folded time series with shape [nsegments, nfreqs, 2, nbins]
-     */
-    void execute(std::span<const float> ts_e,
-                 std::span<const float> ts_v,
-                 std::span<ComplexType> fold);
-    void execute(cuda::std::span<const float> ts_e,
-                 cuda::std::span<const float> ts_v,
-                 cuda::std::span<ComplexTypeCUDA> fold,
-                 cudaStream_t stream = nullptr);
-
-private:
-    class Impl;
-    std::unique_ptr<Impl> m_impl;
-};
-
-std::vector<float> compute_brute_fold_cuda(std::span<const float> ts_e,
-                                           std::span<const float> ts_v,
-                                           std::span<const double> freq_arr,
-                                           SizeType segment_len,
-                                           SizeType nbins,
-                                           double tsamp,
-                                           double t_ref  = 0.0,
-                                           int device_id = 0);
-std::vector<ComplexType>
-compute_brute_fold_complex_cuda(std::span<const float> ts_e,
-                                std::span<const float> ts_v,
-                                std::span<const double> freq_arr,
-                                SizeType segment_len,
-                                SizeType nbins,
-                                double tsamp,
-                                double t_ref  = 0.0,
-                                int device_id = 0);
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+std::vector<typename FoldTypeTraits<FoldTypeCUDA>::HostType>
+compute_brute_fold_cuda(std::span<const float> ts_e,
+                        std::span<const float> ts_v,
+                        std::span<const double> freq_arr,
+                        SizeType segment_len,
+                        SizeType nbins,
+                        double tsamp,
+                        double t_ref  = 0.0,
+                        int device_id = 0);
 #endif // LOKI_ENABLE_CUDA
 
 } // namespace loki::algorithms

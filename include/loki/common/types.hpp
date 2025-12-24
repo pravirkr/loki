@@ -30,20 +30,24 @@ concept SupportedFoldType =
 template <typename T>
 concept TriviallyCopyable = std::is_trivially_copyable_v<T>;
 
-template <SupportedFoldType FoldType> constexpr FoldType default_fold_value() {
-    if constexpr (std::is_same_v<FoldType, std::complex<float>>) {
-        return FoldType{0.0F, 0.0F};
-    } else {
-        return FoldType{};
-    }
-}
-
 #ifdef LOKI_ENABLE_CUDA
 using ComplexTypeCUDA = cuda::std::complex<float>;
 
 template <typename T>
 concept SupportedFoldTypeCUDA =
     std::is_same_v<T, float> || std::is_same_v<T, ComplexTypeCUDA>;
+
+template <SupportedFoldTypeCUDA T> struct FoldTypeTraits;
+template <> struct FoldTypeTraits<float> {
+    using HostType   = float;
+    using DeviceType = float;
+};
+
+template <> struct FoldTypeTraits<ComplexTypeCUDA> {
+    using HostType   = ComplexType;
+    using DeviceType = ComplexTypeCUDA;
+};
+
 #endif // LOKI_ENABLE_CUDA
 
 inline constexpr size_t kUnrollFactor = 8;

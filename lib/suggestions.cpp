@@ -63,8 +63,7 @@ public:
           m_folds_stride(2 * nbins),
           m_leaves(m_capacity * m_leaves_stride, 0.0),
           m_scores(m_capacity, 0.0F) {
-        m_folds = std::vector<FoldType>(m_capacity * m_folds_stride,
-                                        default_fold_value<FoldType>());
+        m_folds = std::vector<FoldType>(m_capacity * m_folds_stride, FoldType{});
     }
 
     ~Impl()                      = default;

@@ -1,5 +1,5 @@
-#include "loki/algorithms/prune.hpp"
-#include "loki/common/types.hpp"
+#include "loki/loki.hpp"
+
 #include "loki_templates.hpp"
 #include "pybind_utils.hpp"
 
@@ -12,7 +12,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
-#include "loki/loki.hpp"
+#include "loki/common/types.hpp"
 #include "loki/psr_utils.hpp"
 #include "loki/transforms.hpp"
 

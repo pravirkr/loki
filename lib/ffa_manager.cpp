@@ -1,4 +1,4 @@
-#include "loki/pipelines/ffa_pipeline.hpp"
+#include "loki/pipelines/ffa_manager.hpp"
 
 #include <memory>
 #include <utility>
@@ -32,7 +32,7 @@ public:
                          std::string_view file_prefix) = 0;
 };
 
-template <typename FoldType>
+template <SupportedFoldType FoldType>
 class FFAManagerTypedImpl final : public FFAManager::BaseImpl {
 public:
     FFAManagerTypedImpl(search::PulsarSearchConfig cfg, bool show_progress)
