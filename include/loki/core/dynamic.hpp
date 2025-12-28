@@ -188,8 +188,7 @@ private:
                                      std::span<float>,
                                      SizeType,
                                      SizeType,
-                                     SizeType,
-                                     double);
+                                     SizeType);
     static constexpr std::array<PolyResolveFunc, 3> kPolyResolveFuncs = {
         poly_taylor_resolve_accel_batch, // nparams == 2
         poly_taylor_resolve_jerk_batch,  // nparams == 3

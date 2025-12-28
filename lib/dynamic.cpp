@@ -233,7 +233,7 @@ void PrunePolyTaylorDPFuncts<FoldType>::resolve(
     kPolyResolveFuncs[this->m_cfg.get_prune_poly_order() - 2](
         leaves_batch, coord_add, coord_cur, coord_init, this->m_param_arr,
         param_idx_flat_batch, relative_phase_batch, this->m_cfg.get_nbins(),
-        n_leaves, n_params, this->m_cfg.get_snap_activation_threshold());
+        n_leaves, n_params);
 }
 
 template <SupportedFoldType FoldType>

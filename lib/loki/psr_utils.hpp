@@ -115,20 +115,21 @@ branch_param_padded(std::span<double> out_values,
 std::vector<double> range_param(double vmin, double vmax, double dv);
 
 /**
- * @class SnailScheme
+ * @class MiddleOutScheme
  * @brief A utility class for "middle-out" indexing of segments for hierarchical
  * algorithms.
  */
-class SnailScheme {
+class MiddleOutScheme {
 public:
-    SnailScheme(SizeType nseg, SizeType ref_idx, double tseg = 1.0)
-        : m_nseg(nseg),
+    MiddleOutScheme(SizeType nsegments, SizeType ref_idx, double tsegment = 1.0)
+        : m_nsegments(nsegments),
           m_ref_idx(ref_idx),
-          m_tseg(tseg),
-          m_data(nseg) {
-        error_check::check(nseg > 0, "nseg must be greater than 0.");
-        error_check::check(ref_idx < nseg, "ref_idx must be less than nseg.");
-        error_check::check(tseg >= 0.0, "tseg must be non-negative.");
+          m_tsegment(tsegment),
+          m_data(nsegments) {
+        error_check::check(nsegments > 0, "nsegments must be greater than 0.");
+        error_check::check(ref_idx < nsegments,
+                           "ref_idx must be less than nsegments.");
+        error_check::check(tsegment >= 0.0, "tsegment must be non-negative.");
         // np.argsort(np.abs(np.arange(nseg) - ref_idx), kind="stable")
         std::iota(m_data.begin(), m_data.end(), 0);
         std::ranges::sort(m_data, [ref = m_ref_idx](SizeType a, SizeType b) {
@@ -140,16 +141,16 @@ public:
             return a < b;
         });
     }
-    SizeType get_nseg() const { return m_nseg; }
+    SizeType get_nsegments() const { return m_nsegments; }
     SizeType get_ref_idx() const { return m_ref_idx; }
-    double get_tseg() const { return m_tseg; }
+    double get_tsegment() const { return m_tsegment; }
     std::vector<SizeType> get_data() const { return m_data; }
 
     /**
      * @brief Returns the reference time at the middle of the reference segment.
      */
-    [[nodiscard]] double ref() const {
-        return (static_cast<double>(m_ref_idx) + 0.5) * m_tseg;
+    [[nodiscard]] double ref_time() const {
+        return (static_cast<double>(m_ref_idx) + 0.5) * m_tsegment;
     }
 
     /**
@@ -157,10 +158,10 @@ public:
      * @param level The hierarchical level (0 is the reference segment).
      * @return The segment index at the given level.
      */
-    [[nodiscard]] SizeType get_idx(SizeType level) const {
-        if (level >= m_nseg) {
+    [[nodiscard]] SizeType get_segment_idx(SizeType level) const {
+        if (level >= m_nsegments) {
             throw std::out_of_range(
-                std::format("level must be in [0, {}].", m_nseg - 1));
+                std::format("level must be in [0, {}].", m_nsegments - 1));
         }
         return m_data[level];
     }
@@ -177,9 +178,9 @@ public:
      * @return A pair containing the reference and scale in seconds.
      */
     [[nodiscard]] std::pair<double, double> get_coord(SizeType level) const {
-        if (level >= m_nseg) {
+        if (level >= m_nsegments) {
             throw std::out_of_range(
-                std::format("level must be in [0, {}].", m_nseg - 1));
+                std::format("level must be in [0, {}].", m_nsegments - 1));
         }
         auto scheme_till_now =
             std::views::take(m_data, static_cast<IndexType>(level + 1));
@@ -191,7 +192,7 @@ public:
         const auto ref_val   = (min_val + max_val + 1.0) / 2.0;
         const auto scale_val = ref_val - min_val;
 
-        return {ref_val * m_tseg, scale_val * m_tseg};
+        return {ref_val * m_tsegment, scale_val * m_tsegment};
     }
 
     /**
@@ -202,10 +203,10 @@ public:
      * seconds.
      */
     [[nodiscard]] std::pair<double, double>
-    get_seg_coord(SizeType level) const {
-        const auto current_idx = static_cast<double>(get_idx(level));
-        const auto ref_val     = (current_idx + 0.5) * m_tseg;
-        const auto scale_val   = 0.5 * m_tseg;
+    get_segment_coord(SizeType level) const {
+        const auto current_idx = static_cast<double>(get_segment_idx(level));
+        const auto ref_val     = (current_idx + 0.5) * m_tsegment;
+        const auto scale_val   = 0.5 * m_tsegment;
         return {ref_val, scale_val};
     }
 
@@ -238,9 +239,9 @@ public:
             throw std::invalid_argument(
                 std::format("prune_level must be greater than 0."));
         }
-        if (prune_level > m_nseg) {
-            throw std::out_of_range(
-                std::format("prune_level must be in [0, {}].", m_nseg - 1));
+        if (prune_level > m_nsegments) {
+            throw std::out_of_range(std::format(
+                "prune_level must be in [0, {}].", m_nsegments - 1));
         }
 
         auto scheme_till_now =
@@ -257,18 +258,18 @@ public:
      * @return The difference in seconds.
      */
     [[nodiscard]] double get_delta(SizeType level) const {
-        return get_coord(level).first - ref();
+        return get_coord(level).first - ref_time();
     }
 
     /**
      * @brief Gets the total number of segments.
      */
-    [[nodiscard]] SizeType size() const { return m_nseg; }
+    [[nodiscard]] SizeType size() const { return m_nsegments; }
 
 private:
-    SizeType m_nseg;
+    SizeType m_nsegments;
     SizeType m_ref_idx;
-    double m_tseg;
+    double m_tsegment;
     std::vector<SizeType> m_data;
 };
 
