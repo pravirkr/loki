@@ -2,7 +2,6 @@
 
 #include <span>
 #include <tuple>
-#include <utility>
 #include <vector>
 
 #include "loki/common/types.hpp"
@@ -21,14 +20,9 @@ shift_taylor_params(std::span<const double> taylor_param_vec,
                     SizeType n_out = 0);
 
 std::vector<double>
-shift_taylor_errors(std::span<const double> taylor_error_vec,
-                    double delta_t,
-                    bool conservative_errors);
-
-std::vector<double>
 shift_taylor_errors_batch(std::span<const double> taylor_error_vec,
                           double delta_t,
-                          bool conservative_errors,
+                          bool use_conservative_tile,
                           SizeType n_batch,
                           SizeType n_params);
 
@@ -37,12 +31,16 @@ shift_taylor_errors_batch(std::span<const double> taylor_error_vec,
 std::tuple<std::vector<double>, double>
 shift_taylor_params_d_f(std::span<const double> param_vec, double delta_t);
 
+std::vector<double>
+shift_taylor_circular_errors_batch(std::span<const double> taylor_error_vec,
+                                   double delta_t,
+                                   double p_orb_min,
+                                   bool use_conservative_tile,
+                                   SizeType n_batch,
+                                   SizeType n_params);
+
 void report_leaves_taylor_batch(std::span<double> leaves_batch,
                                 SizeType n_batch,
                                 SizeType n_params);
-void report_leaves_chebyshev_batch(std::span<double> leaves_batch,
-                                   std::pair<double, double> coord_mid,
-                                   SizeType n_batch,
-                                   SizeType n_params);
 
 } // namespace loki::transforms

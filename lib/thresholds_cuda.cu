@@ -10,6 +10,7 @@
 #include <random>
 
 #include <cub/cub.cuh>
+#include <cub/version.cuh>
 #include <cuda/std/atomic>
 #include <cuda/std/optional>
 #include <cuda/std/span>
@@ -42,6 +43,16 @@
 #include "loki/utils.hpp"
 
 namespace loki::detection {
+
+// Check if we are on a modern CUB version (CCCL 3.0+)
+#if CUB_VERSION >= 300000
+    #include <cuda/functional>
+    template <typename T>
+    using MaxOp = cuda::maximum<T>;
+#else
+    template <typename T>
+    using MaxOp = cub::Max;
+#endif
 
 // Define the cuRANDDx Generator Descriptor.
 using RNG = decltype(curanddx::Generator<curanddx::philox4_32>() +
@@ -654,7 +665,7 @@ __device__ float compute_trial_snr_warp_level(
             thread_max_diff = fmaxf(thread_max_diff, current_sum);
         }
         float max_diff =
-            WarpReduce(temp_reduce_1).Reduce(thread_max_diff, cub::Max());
+            WarpReduce(temp_reduce_1).Reduce(thread_max_diff, MaxOp<float>());
 
         if (lane_id == 0) {
             const float snr = (((h_vals[iw] + b_vals[iw]) * max_diff) -
@@ -666,7 +677,7 @@ __device__ float compute_trial_snr_warp_level(
     // Final reduction to get max SNR across all widths for this warp
     // A separate temporary storage object is required for correctness.
     float final_max_snr =
-        WarpReduce(temp_reduce_2).Reduce(warp_max_snr, cub::Max());
+        WarpReduce(temp_reduce_2).Reduce(warp_max_snr, MaxOp<float>());
     return final_max_snr;
 }
 
@@ -1339,7 +1350,7 @@ public:
           m_trials_start(trials_start),
           m_device_id(device_id) {
 
-        cuda_utils::set_device(m_device_id);
+        cuda_utils::CudaSetDeviceGuard device_guard(m_device_id);
         if (m_branching_pattern.empty()) {
             throw std::invalid_argument("Branching pattern is empty");
         }

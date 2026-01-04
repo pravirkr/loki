@@ -8,6 +8,7 @@
 #include <spdlog/spdlog.h>
 
 #include "loki/common/types.hpp"
+#include "loki/core/circular.hpp"
 #include "loki/core/taylor.hpp"
 #include "loki/exceptions.hpp"
 #include "loki/psr_utils.hpp"
@@ -209,13 +210,44 @@ struct FFAPlanBase::Impl {
         return coords_freq;
     }
 
-    // Generate a branching pattern for the pruning Taylor search.
-    std::vector<double>
-    get_branching_pattern(std::string_view kind = "taylor") const {
-        return generate_branching_pattern(
-            params.back(), dparams_lim.back(), m_cfg.get_param_limits(),
-            m_cfg.get_tseg_ffa(), nsegments.back(), m_cfg.get_nbins(),
-            m_cfg.get_eta(), m_cfg.get_use_conservative_grid(), kind);
+    std::vector<double> get_branching_pattern_approx(std::string_view kind,
+                                                     SizeType ref_seg,
+                                                     IndexType isuggest) const {
+        if (kind == "taylor") {
+            return core::generate_bp_poly_taylor_approx(
+                params.back(), dparams_lim.back(), m_cfg.get_param_limits(),
+                m_cfg.get_tseg_ffa(), nsegments.back(), m_cfg.get_nbins(),
+                m_cfg.get_eta(), ref_seg, isuggest,
+                m_cfg.get_use_conservative_tile());
+        }
+        throw std::invalid_argument(
+            "Invalid kind for branching pattern generation");
+    }
+
+    std::vector<double> get_branching_pattern(std::string_view kind,
+                                              SizeType ref_seg) const {
+        if (kind == "taylor") {
+            return core::generate_bp_poly_taylor(
+                params.back(), dparams_lim.back(), m_cfg.get_param_limits(),
+                m_cfg.get_tseg_ffa(), nsegments.back(), m_cfg.get_nbins(),
+                m_cfg.get_eta(), ref_seg, m_cfg.get_use_conservative_tile());
+        }
+        throw std::invalid_argument(
+            "Invalid kind for branching pattern generation");
+    }
+
+    std::vector<double> get_branching_pattern_circular(std::string_view kind,
+                                                       SizeType ref_seg) const {
+        if (kind == "taylor") {
+            return core::generate_bp_circ_taylor(
+                params.back(), dparams_lim.back(), m_cfg.get_param_limits(),
+                m_cfg.get_tseg_ffa(), nsegments.back(), m_cfg.get_nbins(),
+                m_cfg.get_eta(), ref_seg, m_cfg.get_p_orb_min(),
+                m_cfg.get_minimum_snap_cells(),
+                m_cfg.get_use_conservative_tile());
+        }
+        throw std::invalid_argument(
+            "Invalid kind for branching pattern generation");
     }
 
 private:
@@ -397,52 +429,6 @@ private:
                            "FFAPlan::validate_plan: brute fold size is zero");
     }
 }; // End FFAPlan::Impl definition
-
-std::vector<double> generate_branching_pattern_approx(
-    std::span<const std::vector<double>> param_arr,
-    std::span<const double> dparams_lim,
-    const std::vector<ParamLimitType>& param_limits,
-    double tseg_ffa,
-    SizeType nsegments,
-    SizeType fold_bins,
-    double tol_bins,
-    bool use_conservative_errors,
-    std::string_view kind) {
-    const SizeType ref_seg = 0;
-    if (kind == "taylor") {
-        return core::generate_bp_taylor_approx(
-            param_arr, dparams_lim, param_limits, tseg_ffa, nsegments,
-            fold_bins, tol_bins, ref_seg, use_conservative_errors);
-    }
-    throw std::invalid_argument(
-        "Invalid kind for branching pattern generation");
-}
-
-std::vector<double>
-generate_branching_pattern(std::span<const std::vector<double>> param_arr,
-                           std::span<const double> dparams_lim,
-                           const std::vector<ParamLimitType>& param_limits,
-                           double tseg_ffa,
-                           SizeType nsegments,
-                           SizeType fold_bins,
-                           double tol_bins,
-                           bool use_conservative_errors,
-                           std::string_view kind) {
-    const SizeType ref_seg  = 0;
-    const SizeType n_params = param_arr.size();
-    if (kind == "taylor" && n_params == 5) {
-        return core::generate_bp_taylor_circular(
-            param_arr, dparams_lim, param_limits, tseg_ffa, nsegments,
-            fold_bins, tol_bins, ref_seg, use_conservative_errors);
-    }
-    if (kind == "taylor" && n_params <= 4) {
-        return core::generate_bp_taylor(
-            param_arr, dparams_lim, param_limits, tseg_ffa, nsegments,
-            fold_bins, tol_bins, ref_seg, use_conservative_errors);
-    }
-    throw std::invalid_argument(
-        "Invalid kind for branching pattern generation");
-}
 
 std::vector<FFARegion> generate_ffa_regions(double p_min,
                                             double p_max,
@@ -952,9 +938,18 @@ void FFAPlanBase::resolve_coordinates_freq(
 std::vector<std::vector<FFACoordFreq>> FFAPlanBase::resolve_coordinates_freq() {
     return m_impl->resolve_coordinates_freq();
 }
+std::vector<double> FFAPlanBase::get_branching_pattern_approx(
+    std::string_view kind, SizeType ref_seg, IndexType isuggest) const {
+    return m_impl->get_branching_pattern_approx(kind, ref_seg, isuggest);
+}
+std::vector<double> FFAPlanBase::get_branching_pattern(std::string_view kind,
+                                                       SizeType ref_seg) const {
+    return m_impl->get_branching_pattern(kind, ref_seg);
+}
 std::vector<double>
-FFAPlanBase::get_branching_pattern(std::string_view kind) const {
-    return m_impl->get_branching_pattern(kind);
+FFAPlanBase::get_branching_pattern_circular(std::string_view kind,
+                                            SizeType ref_seg) const {
+    return m_impl->get_branching_pattern_circular(kind, ref_seg);
 }
 
 // --- Definitions for FFAPlan ---
@@ -985,6 +980,11 @@ template <SupportedFoldType FoldType>
 const std::vector<std::vector<SizeType>>&
 FFAPlan<FoldType>::get_fold_shapes() const noexcept {
     return m_impl->fold_shapes;
+}
+template <SupportedFoldType FoldType>
+const std::vector<std::vector<SizeType>>&
+FFAPlan<FoldType>::get_fold_shapes_time() const noexcept {
+    return m_impl->fold_shapes_time;
 }
 template <SupportedFoldType FoldType>
 SizeType FFAPlan<FoldType>::get_brute_fold_size() const noexcept {

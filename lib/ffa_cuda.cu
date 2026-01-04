@@ -679,9 +679,9 @@ private:
                            SizeType i_level,
                            cudaStream_t stream) {
         const auto nsegments =
-            static_cast<int>(m_ffa_plan.get_fold_shapes()[i_level][0]);
+            static_cast<int>(m_ffa_plan.get_fold_shapes_time()[i_level][0]);
         const auto nbins =
-            static_cast<int>(m_ffa_plan.get_fold_shapes()[i_level].back());
+            static_cast<int>(m_ffa_plan.get_fold_shapes_time()[i_level].back());
         const auto ncoords_cur =
             static_cast<int>(m_ffa_plan.get_ncoords()[i_level]);
         const auto ncoords_prev =
@@ -723,9 +723,9 @@ private:
                       SizeType i_level,
                       cudaStream_t stream) {
         const auto nsegments =
-            static_cast<int>(m_ffa_plan.get_fold_shapes()[i_level][0]);
+            static_cast<int>(m_ffa_plan.get_fold_shapes_time()[i_level][0]);
         const auto nbins =
-            static_cast<int>(m_ffa_plan.get_fold_shapes()[i_level].back());
+            static_cast<int>(m_ffa_plan.get_fold_shapes_time()[i_level].back());
         const auto ncoords_cur =
             static_cast<int>(m_ffa_plan.get_ncoords()[i_level]);
         const auto ncoords_prev =

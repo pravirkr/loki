@@ -63,7 +63,8 @@ public:
           m_folds_stride(2 * nbins),
           m_leaves(m_capacity * m_leaves_stride, 0.0),
           m_scores(m_capacity, 0.0F) {
-        m_folds = std::vector<FoldType>(m_capacity * m_folds_stride, FoldType{});
+        m_folds =
+            std::vector<FoldType>(m_capacity * m_folds_stride, FoldType{});
     }
 
     ~Impl()                      = default;
@@ -349,8 +350,7 @@ public:
             transforms::report_leaves_taylor_batch(contig_leaves, m_size,
                                                    m_nparams);
         } else if (m_mode == "chebyshev") {
-            transforms::report_leaves_chebyshev_batch(contig_leaves, coord_mid,
-                                                      m_size, m_nparams);
+            throw std::runtime_error("Chebyshev mode not implemented.");
         } else {
             throw std::runtime_error(std::format(
                 "Suggestion struct mode must be taylor or chebyshev."));

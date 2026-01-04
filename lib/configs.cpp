@@ -31,8 +31,10 @@ public:
          double snr_min,
          SizeType prune_poly_order,
          double p_orb_min,
-         double snap_activation_threshold,
-         bool use_conservative_grid)
+         double m_c_max,
+         double m_p_min,
+         double minimum_snap_cells,
+         bool use_conservative_tile)
         : m_nsamps(nsamps),
           m_tsamp(tsamp),
           m_nbins(nbins),
@@ -47,8 +49,10 @@ public:
           m_snr_min(snr_min),
           m_prune_poly_order(prune_poly_order),
           m_p_orb_min(p_orb_min),
-          m_snap_activation_threshold(snap_activation_threshold),
-          m_use_conservative_grid(use_conservative_grid) {
+          m_m_c_max(m_c_max),
+          m_m_p_min(m_p_min),
+          m_minimum_snap_cells(minimum_snap_cells),
+          m_use_conservative_tile(use_conservative_tile) {
         if (m_param_limits.empty()) {
             throw std::runtime_error("coord_limits must be non-empty");
         }
@@ -76,11 +80,11 @@ public:
             "ducy_max={}, wtsp={}, use_fourier={}, nthreads={}, snr_min={}, "
             "prune_poly_order={}, "
             "bseg_brute={}, bseg_ffa={}, p_orb_min={}, "
-            "snap_activation_threshold={}, use_conservative_grid={}",
+            "minimum_snap_cells={}, use_conservative_tile={}",
             m_nsamps, m_tsamp, m_nbins, m_eta, m_ducy_max, m_wtsp,
             m_use_fourier, m_nthreads, m_snr_min, m_prune_poly_order,
-            m_bseg_brute, m_bseg_ffa, m_p_orb_min, m_snap_activation_threshold,
-            m_use_conservative_grid);
+            m_bseg_brute, m_bseg_ffa, m_p_orb_min, m_minimum_snap_cells,
+            m_use_conservative_tile);
     }
 
     // Getters
@@ -105,10 +109,10 @@ public:
     double get_snr_min() const { return m_snr_min; }
     SizeType get_prune_poly_order() const { return m_prune_poly_order; }
     double get_p_orb_min() const { return m_p_orb_min; }
-    double get_snap_activation_threshold() const {
-        return m_snap_activation_threshold;
-    }
-    bool get_use_conservative_grid() const { return m_use_conservative_grid; }
+    double get_m_c_max() const { return m_m_c_max; }
+    double get_m_p_min() const { return m_m_p_min; }
+    double get_minimum_snap_cells() const { return m_minimum_snap_cells; }
+    bool get_use_conservative_tile() const { return m_use_conservative_tile; }
 
     double get_tseg_brute() const { return m_tseg_brute; }
     double get_tseg_ffa() const { return m_tseg_ffa; }
@@ -123,6 +127,10 @@ public:
     SizeType get_n_scoring_widths() const { return m_scoring_widths.size(); }
 
     // Methods
+    double get_x_mass_const() const {
+        return 0.005 * std::pow(m_m_p_min + m_m_c_max, 1.0 / 3.0) * m_m_c_max /
+               (m_m_p_min + m_m_c_max);
+    }
     std::vector<double> get_dparams_f(double tseg_cur) const {
         const double t_ref = (m_nparams == 1) ? 0.0 : tseg_cur / 2.0;
         return psr_utils::poly_taylor_step_f(m_nparams, tseg_cur, m_nbins,
@@ -170,8 +178,10 @@ public:
                 m_snr_min,
                 m_prune_poly_order,
                 m_p_orb_min,
-                m_snap_activation_threshold,
-                m_use_conservative_grid};
+                m_m_c_max,
+                m_m_p_min,
+                m_minimum_snap_cells,
+                m_use_conservative_tile};
     }
 
 private:
@@ -193,8 +203,10 @@ private:
     double m_snr_min;
     SizeType m_prune_poly_order;
     double m_p_orb_min;
-    double m_snap_activation_threshold;
-    bool m_use_conservative_grid;
+    double m_m_c_max;
+    double m_m_p_min;
+    double m_minimum_snap_cells;
+    bool m_use_conservative_tile;
 
     double m_tseg_brute{};
     double m_tseg_ffa{};
@@ -273,8 +285,10 @@ PulsarSearchConfig::PulsarSearchConfig(
     double snr_min,
     SizeType prune_poly_order,
     double p_orb_min,
-    double snap_activation_threshold,
-    bool use_conservative_grid)
+    double m_c_max,
+    double m_p_min,
+    double minimum_snap_cells,
+    bool use_conservative_tile)
     : m_impl(std::make_unique<Impl>(nsamps,
                                     tsamp,
                                     nbins,
@@ -292,8 +306,10 @@ PulsarSearchConfig::PulsarSearchConfig(
                                     snr_min,
                                     prune_poly_order,
                                     p_orb_min,
-                                    snap_activation_threshold,
-                                    use_conservative_grid)) {}
+                                    m_c_max,
+                                    m_p_min,
+                                    minimum_snap_cells,
+                                    use_conservative_tile)) {}
 PulsarSearchConfig::~PulsarSearchConfig()                             = default;
 PulsarSearchConfig::PulsarSearchConfig(PulsarSearchConfig&&) noexcept = default;
 PulsarSearchConfig&
@@ -366,11 +382,17 @@ SizeType PulsarSearchConfig::get_prune_poly_order() const noexcept {
 double PulsarSearchConfig::get_p_orb_min() const noexcept {
     return m_impl->get_p_orb_min();
 }
-double PulsarSearchConfig::get_snap_activation_threshold() const noexcept {
-    return m_impl->get_snap_activation_threshold();
+double PulsarSearchConfig::get_m_c_max() const noexcept {
+    return m_impl->get_m_c_max();
 }
-bool PulsarSearchConfig::get_use_conservative_grid() const noexcept {
-    return m_impl->get_use_conservative_grid();
+double PulsarSearchConfig::get_m_p_min() const noexcept {
+    return m_impl->get_m_p_min();
+}
+double PulsarSearchConfig::get_minimum_snap_cells() const noexcept {
+    return m_impl->get_minimum_snap_cells();
+}
+bool PulsarSearchConfig::get_use_conservative_tile() const noexcept {
+    return m_impl->get_use_conservative_tile();
 }
 double PulsarSearchConfig::get_tseg_brute() const noexcept {
     return m_impl->get_tseg_brute();
@@ -398,6 +420,9 @@ std::vector<SizeType> PulsarSearchConfig::get_scoring_widths() const noexcept {
 }
 SizeType PulsarSearchConfig::get_n_scoring_widths() const noexcept {
     return m_impl->get_n_scoring_widths();
+}
+double PulsarSearchConfig::get_x_mass_const() const noexcept {
+    return m_impl->get_x_mass_const();
 }
 std::vector<double>
 PulsarSearchConfig::get_dparams_f(double tseg_cur) const noexcept {

@@ -449,13 +449,13 @@ public:
         }
 
         // Transform the suggestion params to middle of the data
-        const auto coord_mid = m_scheme->get_coord(m_prune_level);
+        const auto coord_mid = m_snail_scheme->get_coord(m_prune_level);
 
         // Write results
         auto result_writer = cands::PruneResultWriter(
             actual_result_file, cands::PruneResultWriter::Mode::kAppend);
         result_writer.write_run_results(
-            run_name, m_scheme->get_data(),
+            run_name, m_snail_scheme->get_data(),
             m_suggestions->get_transformed(coord_mid),
             m_suggestions->get_scores(), m_suggestions->get_nsugg(),
             m_cfg.get_nparams(), *m_pstats);
@@ -483,7 +483,7 @@ private:
 
     bool m_prune_complete{false};
     SizeType m_prune_level{};
-    std::unique_ptr<psr_utils::SnailScheme> m_scheme;
+    std::unique_ptr<psr_utils::MiddleOutScheme> m_snail_scheme;
     std::unique_ptr<core::PruneDPFuncts<FoldType>> m_prune_funcs;
     std::unique_ptr<cands::PruneStatsCollection> m_pstats;
 
@@ -501,8 +501,8 @@ private:
         // Initialize snail scheme for current ref_seg
         const auto nsegments = m_ffa_plan.get_nsegments().back();
         const auto tseg      = m_ffa_plan.get_tsegments().back();
-        m_scheme =
-            std::make_unique<psr_utils::SnailScheme>(nsegments, ref_seg, tseg);
+        m_snail_scheme =
+            std::make_unique<psr_utils::MiddleOutScheme>(nsegments, ref_seg, tseg);
 
         m_prune_level    = 0;
         m_prune_complete = false;
@@ -510,15 +510,15 @@ private:
 
         // Initialize the suggestions with the first segment
         const auto fold_segment =
-            m_prune_funcs->load(ffa_fold, m_scheme->get_ref_idx());
-        const auto coord_init = m_scheme->get_coord(m_prune_level);
+            m_prune_funcs->load(ffa_fold, m_snail_scheme->get_ref_idx());
+        const auto coord_init = m_snail_scheme->get_coord(m_prune_level);
         m_prune_funcs->suggest(fold_segment, coord_init, *m_suggestions);
 
         // Initialize the prune stats
         m_pstats = std::make_unique<cands::PruneStatsCollection>();
         const cands::PruneStats pstats_cur{
             .level         = m_prune_level,
-            .seg_idx       = m_scheme->get_idx(m_prune_level),
+            .seg_idx       = m_snail_scheme->get_segment_idx(m_prune_level),
             .threshold     = 0,
             .score_min     = m_suggestions->get_score_min(),
             .score_max     = m_suggestions->get_score_max(),
@@ -552,7 +552,7 @@ private:
         m_suggestions->prepare_for_in_place_update();
 
         IterationStats stats;
-        const auto seg_idx_cur = m_scheme->get_idx(m_prune_level);
+        const auto seg_idx_cur = m_snail_scheme->get_segment_idx(m_prune_level);
         const auto threshold   = m_threshold_scheme[m_prune_level - 1];
         // Capture the number of branches *before* finalizing the update
         const auto n_branches = m_suggestions->get_nsugg_old();
@@ -597,11 +597,11 @@ private:
                                    float threshold,
                                    IterationStats& stats) {
         // Get coordinates
-        const auto coord_init = m_scheme->get_coord(0);
-        const auto coord_prev = m_scheme->get_coord(m_prune_level - 1);
-        const auto coord_next = m_scheme->get_coord(m_prune_level);
-        const auto coord_cur  = m_scheme->get_current_coord(m_prune_level);
-        const auto coord_add  = m_scheme->get_seg_coord(m_prune_level);
+        const auto coord_init = m_snail_scheme->get_coord(0);
+        const auto coord_prev = m_snail_scheme->get_coord(m_prune_level - 1);
+        const auto coord_next = m_snail_scheme->get_coord(m_prune_level);
+        const auto coord_cur  = m_snail_scheme->get_current_coord(m_prune_level);
+        const auto coord_add  = m_snail_scheme->get_segment_coord(m_prune_level);
 
         // Load fold segment for current level
         const auto ffa_fold_segment =

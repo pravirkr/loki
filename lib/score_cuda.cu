@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cub/cub.cuh>
+#include <cub/version.cuh>
 #include <cuda_runtime_api.h>
 #include <math_constants.h>
 #include <thrust/copy.h>
@@ -12,6 +13,16 @@
 #include "loki/exceptions.hpp"
 
 namespace loki::detection {
+
+// Check if we are on a modern CUB version (CCCL 3.0+)
+#if CUB_VERSION >= 300000
+    #include <cuda/functional>
+    template <typename T>
+    using MaxOp = cuda::maximum<T>;
+#else
+    template <typename T>
+    using MaxOp = cub::Max;
+#endif
 
 namespace {
 
@@ -102,7 +113,7 @@ __global__ void snr_boxcar_kernel_warp(const float* __restrict__ arr,
             thread_max_diff = fmaxf(thread_max_diff, current_sum);
         }
         float max_diff = WarpReduce(temp_reduce[warp_id])
-                             .Reduce(thread_max_diff, cub::Max());
+                             .Reduce(thread_max_diff, MaxOp<float>());
 
         if (lane_id == 0) {
             float snr;
@@ -125,7 +136,7 @@ __global__ void snr_boxcar_kernel_warp(const float* __restrict__ arr,
         __shared__
             typename WarpReduce::TempStorage temp_final[kProfilesPerBlock];
         float final_max_snr =
-            WarpReduce(temp_final[warp_id]).Reduce(thread_max_snr, cub::Max());
+            WarpReduce(temp_final[warp_id]).Reduce(thread_max_snr, MaxOp<float>());
         if (lane_id == 0) {
             out[profile_idx] = final_max_snr;
         }
@@ -140,7 +151,7 @@ void launch_snr_boxcar_kernel(cuda::std::span<const float> arr,
                               cuda::std::span<float> out,
                               float stdnoise,
                               int device_id) {
-    cuda_utils::set_device(device_id);
+    cuda_utils::CudaSetDeviceGuard device_guard(device_id);
 
     const auto nbins =
         Is3D ? arr.size() / (2 * nprofiles) : arr.size() / nprofiles;
@@ -181,7 +192,7 @@ void snr_boxcar_cuda_impl(std::span<const float> arr,
                           std::span<float> out,
                           float stdnoise,
                           int device_id) {
-    cuda_utils::set_device(device_id);
+    cuda_utils::CudaSetDeviceGuard device_guard(device_id);
     thrust::device_vector<float> d_arr(arr.begin(), arr.end());
     thrust::device_vector<SizeType> d_widths(widths.begin(), widths.end());
     thrust::device_vector<float> d_out(out.size());

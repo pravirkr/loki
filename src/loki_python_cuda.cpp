@@ -83,10 +83,6 @@ PYBIND11_MODULE(libculoki, m) { // NOLINT
         py::arg("arr"), py::arg("widths"), py::arg("device_id") = 0);
     auto m_thresholds = m.def_submodule("thresholds", "Thresholds submodule");
 
-    PYBIND11_NUMPY_DTYPE(detection::State, success_h0, success_h1, complexity,
-                         complexity_cumul, success_h1_cumul, nbranches,
-                         threshold, cost, threshold_prev, success_h1_cumul_prev,
-                         is_empty);
     py::class_<DynamicThresholdSchemeCUDA>(m_thresholds,
                                            "DynamicThresholdSchemeCUDA")
         .def(py::init([](const py::array_t<float>& branching_pattern,

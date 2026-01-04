@@ -87,10 +87,9 @@ CPMAddPackage(
 # Thread pool
 CPMAddPackage(
   NAME BS_thread_pool
-  VERSION 5.0.0 
+  VERSION 5.0.0
   URL https://github.com/bshoshany/thread-pool/archive/refs/tags/v5.0.0.tar.gz
-  DOWNLOAD_ONLY YES
-  EXCLUDE_FROM_ALL SYSTEM
+  DOWNLOAD_ONLY YES EXCLUDE_FROM_ALL SYSTEM
 )
 if(BS_thread_pool_ADDED)
   add_library(BS_thread_pool INTERFACE IMPORTED GLOBAL)
@@ -102,8 +101,7 @@ CPMAddPackage(
   NAME CLI11
   VERSION 2.5.0
   URL https://github.com/CLIUtils/CLI11/archive/refs/tags/v2.5.0.tar.gz
-  DOWNLOAD_ONLY YES
-  EXCLUDE_FROM_ALL SYSTEM
+  DOWNLOAD_ONLY YES EXCLUDE_FROM_ALL SYSTEM
 )
 if(CLI11_ADDED)
   add_library(CLI11::CLI11 INTERFACE IMPORTED GLOBAL)
@@ -115,8 +113,7 @@ CPMAddPackage(
   NAME tomlplusplus
   VERSION 3.4.0
   URL https://github.com/marzer/tomlplusplus/archive/refs/tags/v3.4.0.tar.gz
-  DOWNLOAD_ONLY YES
-  EXCLUDE_FROM_ALL SYSTEM
+  DOWNLOAD_ONLY YES EXCLUDE_FROM_ALL SYSTEM
 )
 if(tomlplusplus_ADDED)
   add_library(tomlplusplus INTERFACE IMPORTED GLOBAL)
@@ -179,6 +176,9 @@ target_include_directories(
 
 # Add CUDA include directories when available
 if(CMAKE_CUDA_COMPILER)
+  if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL "13.0")
+    target_include_directories(${LOKI_LIBRARY_NAME} PUBLIC "${CUDAToolkit_INCLUDE_DIRS}/cccl")
+  endif()
   target_include_directories(${LOKI_LIBRARY_NAME} PUBLIC ${CUDAToolkit_INCLUDE_DIRS})
 endif()
 

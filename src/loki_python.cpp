@@ -302,13 +302,12 @@ PYBIND11_MODULE(libloki, m) {
                                &PulsarSearchConfig::get_bseg_brute)
         .def_property_readonly("bseg_ffa", &PulsarSearchConfig::get_bseg_ffa)
         .def_property_readonly("p_orb_min", &PulsarSearchConfig::get_p_orb_min)
-        .def_property_readonly(
-            "snap_activation_threshold",
-            &PulsarSearchConfig::get_snap_activation_threshold)
+        .def_property_readonly("minimum_snap_cells",
+                               &PulsarSearchConfig::get_minimum_snap_cells)
         .def_property_readonly("use_fourier",
                                &PulsarSearchConfig::get_use_fourier)
-        .def_property_readonly("use_conservative_grid",
-                               &PulsarSearchConfig::get_use_conservative_grid)
+        .def_property_readonly("use_conservative_tile",
+                               &PulsarSearchConfig::get_use_conservative_tile)
         .def_property_readonly("nthreads", &PulsarSearchConfig::get_nthreads)
         .def_property_readonly("tseg_brute",
                                &PulsarSearchConfig::get_tseg_brute)
@@ -531,34 +530,6 @@ PYBIND11_MODULE(libloki, m) {
         },
         py::arg("pset_cur"), py::arg("param_arr"), py::arg("ffa_level"),
         py::arg("latter"), py::arg("tseg_brute"), py::arg("nbins"));
-    m_psr_utils.def(
-        "poly_taylor_resolve_circular_batch",
-        [](const PyArrayT<double>& leaves_batch,
-           std::pair<double, double> coord_add,
-           std::pair<double, double> coord_cur,
-           std::pair<double, double> coord_init,
-           const std::vector<PyArrayT<double>>& param_arr, SizeType fold_bins,
-           double snap_threshold) {
-            const SizeType nbatch  = leaves_batch.shape(0);
-            const SizeType nparams = leaves_batch.shape(1) - 2;
-            std::vector<std::vector<double>> param_vecs;
-            param_vecs.reserve(param_arr.size());
-            for (const auto& arr : param_arr) {
-                param_vecs.emplace_back(arr.data(), arr.data() + arr.size());
-            }
-            std::vector<SizeType> param_idx_flat_batch(nbatch);
-            std::vector<float> relative_phase_batch(nbatch);
-            core::poly_taylor_resolve_circular_batch(
-                to_span<const double>(leaves_batch), coord_add, coord_cur,
-                coord_init, param_vecs, param_idx_flat_batch,
-                relative_phase_batch, fold_bins, nbatch, nparams,
-                snap_threshold);
-            return std::make_tuple(as_pyarray_ref(param_idx_flat_batch),
-                                   as_pyarray_ref(relative_phase_batch));
-        },
-        py::arg("pset_batch"), py::arg("coord_add"), py::arg("coord_cur"),
-        py::arg("coord_init"), py::arg("param_arr"), py::arg("fold_bins"),
-        py::arg("snap_threshold"));
 
     auto m_prune = m.def_submodule("prune", "Pruning submodule");
 
@@ -601,7 +572,5 @@ PYBIND11_MODULE(libloki, m) {
             py::arg("ts_e"), py::arg("ts_v"), py::arg("outdir"),
             py::arg("file_prefix"), py::arg("kind"),
             py::arg("show_progress") = true);
-    bind_prune_class<float>(m_prune, "PruneTime");
-    bind_prune_class<ComplexType>(m_prune, "PruneFourier");
 }
 } // namespace loki

@@ -113,28 +113,4 @@ void bind_ffa_region_planner(py::module& m, const std::string& name) {
         .def_property_readonly("stats", &FFARegionPlanner<T>::get_stats);
 }
 
-// Template function to bind Prune<T>
-template <typename FoldType>
-void bind_prune_class(py::module& m, const std::string& name) {
-    py::class_<Prune<FoldType>>(m, name.c_str())
-        .def(py::init<const FFAPlan<FoldType>&, const PulsarSearchConfig&,
-                      const PyArrayT<float>&, SizeType, SizeType,
-                      std::string_view>(),
-             py::arg("ffa_plan"), py::arg("cfg"), py::arg("threshold_scheme"),
-             py::arg("max_sugg") = 1U << 18U, py::arg("batch_size") = 1024U,
-             py::arg("kind") = "taylor")
-        .def_property_readonly("memory_usage",
-                               &Prune<FoldType>::get_memory_usage)
-        .def(
-            "execute",
-            [](Prune<FoldType>& self, const PyArrayT<FoldType>& ffa_fold,
-               SizeType ref_seg, const std::string& outdir,
-               const std::string& file_prefix, const std::string& kind) {
-                self.execute(to_span<const FoldType>(ffa_fold), ref_seg, outdir,
-                             file_prefix, kind);
-            },
-            py::arg("ffa_fold"), py::arg("ref_seg"), py::arg("outdir"),
-            py::arg("file_prefix"), py::arg("kind"));
-}
-
 } // namespace loki

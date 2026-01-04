@@ -280,11 +280,11 @@ private:
     void execute_iter(const FoldType* __restrict__ fold_in,
                       FoldType* __restrict__ fold_out,
                       SizeType i_level) {
-        auto* ws                = get_workspace_data();
-        const auto nsegments    = m_ffa_plan.get_fold_shapes()[i_level][0];
-        const auto nbins        = m_ffa_plan.get_fold_shapes()[i_level].back();
-        const auto ncoords_cur  = m_ffa_plan.get_ncoords()[i_level];
-        const auto ncoords_prev = m_ffa_plan.get_ncoords()[i_level - 1];
+        auto* ws             = get_workspace_data();
+        const auto nsegments = m_ffa_plan.get_fold_shapes_time()[i_level][0];
+        const auto nbins = m_ffa_plan.get_fold_shapes_time()[i_level].back();
+        const auto ncoords_cur    = m_ffa_plan.get_ncoords()[i_level];
+        const auto ncoords_prev   = m_ffa_plan.get_ncoords()[i_level - 1];
         const auto ncoords_offset = m_ffa_plan.get_ncoords_offsets()[i_level];
 
         // Choose strategy based on level characteristics

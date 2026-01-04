@@ -8,6 +8,7 @@
 
 #include "loki/algorithms/plans.hpp"
 #include "loki/common/types.hpp"
+#include "loki/core/circular.hpp"
 #include "loki/core/taylor.hpp"
 #include "loki/detection/score.hpp"
 #include "loki/kernels.hpp"
@@ -245,8 +246,7 @@ void PrunePolyTaylorDPFuncts<FoldType>::transform(
     SizeType n_params) const {
     kPolyTransformFuncs[this->m_cfg.get_prune_poly_order() - 2](
         leaves_batch, coord_next, coord_cur, n_leaves, n_params,
-        this->m_cfg.get_use_conservative_grid(),
-        this->m_cfg.get_snap_activation_threshold());
+        this->m_cfg.get_use_conservative_tile());
 }
 
 // Specialized implementation for Circular orbit search in Taylor basis
@@ -269,11 +269,11 @@ std::vector<SizeType> PruneCircTaylorDPFuncts<FoldType>::branch(
     std::span<double> leaves_branch_batch,
     SizeType n_batch,
     SizeType n_params) const {
-    return poly_taylor_branch_circular_batch(
+    return circ_taylor_branch_batch(
         leaves_batch, coord_cur, leaves_branch_batch, n_batch, n_params,
         this->m_cfg.get_nbins(), this->m_cfg.get_eta(),
         this->m_cfg.get_param_limits(), this->get_branch_max(),
-        this->m_cfg.get_snap_activation_threshold());
+        this->m_cfg.get_minimum_snap_cells());
 }
 
 template <SupportedFoldType FoldType>
@@ -286,10 +286,10 @@ void PruneCircTaylorDPFuncts<FoldType>::resolve(
     std::span<float> relative_phase_batch,
     SizeType n_leaves,
     SizeType n_params) const {
-    poly_taylor_resolve_circular_batch(
+    circ_taylor_resolve_batch(
         leaves_batch, coord_add, coord_cur, coord_init, this->m_param_arr,
         param_idx_flat_batch, relative_phase_batch, this->m_cfg.get_nbins(),
-        n_leaves, n_params, this->m_cfg.get_snap_activation_threshold());
+        n_leaves, n_params, this->m_cfg.get_minimum_snap_cells());
 }
 
 template <SupportedFoldType FoldType>
@@ -299,10 +299,10 @@ void PruneCircTaylorDPFuncts<FoldType>::transform(
     std::pair<double, double> coord_cur,
     SizeType n_leaves,
     SizeType n_params) const {
-    poly_taylor_transform_circular_batch(
+    circ_taylor_transform_batch(
         leaves_batch, coord_next, coord_cur, n_leaves, n_params,
-        this->m_cfg.get_use_conservative_grid(),
-        this->m_cfg.get_snap_activation_threshold());
+        this->m_cfg.get_use_conservative_tile(),
+        this->m_cfg.get_minimum_snap_cells());
 }
 
 template <SupportedFoldType FoldType>
@@ -312,10 +312,11 @@ SizeType PruneCircTaylorDPFuncts<FoldType>::validate(
     std::pair<double, double> /*coord_cur*/,
     SizeType n_leaves,
     SizeType n_params) const {
-    return poly_taylor_validate_circular_batch(
+    return circ_taylor_validate_batch(
         leaves_batch, leaves_origins, n_leaves, n_params,
         this->m_cfg.get_p_orb_min(),
-        this->m_cfg.get_snap_activation_threshold());
+        this->m_cfg.get_x_mass_const(),
+        this->m_cfg.get_minimum_snap_cells());
 }
 
 // Factory function to create the correct implementation based on the kind

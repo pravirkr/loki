@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <optional>
 #include <vector>
 
@@ -37,8 +38,10 @@ public:
                        double snr_min                     = 5.0,
                        SizeType prune_poly_order          = 3,
                        double p_orb_min                   = 1e-5,
-                       double snap_activation_threshold   = 5.0,
-                       bool use_conservative_grid         = false);
+                       double m_c_max                     = 10.0,
+                       double m_p_min                     = 1.4,
+                       double minimum_snap_cells          = 5.0,
+                       bool use_conservative_tile         = false);
 
     // --- Rule of five: PIMPL ---
     ~PulsarSearchConfig();
@@ -86,10 +89,15 @@ public:
     SizeType get_prune_poly_order() const noexcept;
     /// @brief Get the minimum orbital period for the circular orbit search.
     double get_p_orb_min() const noexcept;
-    /// @brief Get the activation threshold for the snap search.
-    double get_snap_activation_threshold() const noexcept;
-    /// @brief Get whether to use the conservative gridding.
-    bool get_use_conservative_grid() const noexcept;
+    /// @brief Get the maximum mass of the companion for the circular orbit search.
+    double get_m_c_max() const noexcept;
+    /// @brief Get the minimum mass of the pulsar for the circular orbit search.
+    double get_m_p_min() const noexcept;
+    /// @brief Get the minimum number of snap cells required for the circular
+    /// orbit search to be considered active.
+    double get_minimum_snap_cells() const noexcept;
+    /// @brief Get whether to use the conservative tile.
+    bool get_use_conservative_tile() const noexcept;
     /// @brief Get the segment length for the brute force search.
     double get_tseg_brute() const noexcept;
     /// @brief Get the segment length for the FFA search.
@@ -108,6 +116,8 @@ public:
     [[nodiscard]] std::vector<SizeType> get_scoring_widths() const noexcept;
     /// @brief Get the number of scoring widths.
     SizeType get_n_scoring_widths() const noexcept;
+    /// @brief Get the mass constant for the circular orbit search.
+    double get_x_mass_const() const noexcept;
 
     // --- Methods ---
     /// @brief Get the parameter step sizes for the f-based params.
@@ -122,10 +132,10 @@ public:
     get_dparams_lim(double tseg_cur) const noexcept;
 
     /// @brief Get an updated configuration with the given parameters.
-    PulsarSearchConfig
-    get_updated_config(SizeType nbins,
-                       double eta,
-                       const std::vector<ParamLimitType>& param_limits) const noexcept;
+    PulsarSearchConfig get_updated_config(
+        SizeType nbins,
+        double eta,
+        const std::vector<ParamLimitType>& param_limits) const noexcept;
 
 private:
     class Impl;

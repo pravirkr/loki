@@ -38,8 +38,8 @@ circ_taylor_branch_batch(std::span<const double> leaves_batch,
                          std::span<double> leaves_branch_batch,
                          SizeType n_batch,
                          SizeType n_params,
-                         SizeType fold_bins,
-                         double tol_bins,
+                         SizeType nbins,
+                         double eta,
                          const std::vector<ParamLimitType>& param_limits,
                          SizeType branch_max,
                          double minimum_snap_cells);
@@ -73,14 +73,16 @@ void circ_taylor_transform_batch(std::span<double> leaves_batch,
                                  double minimum_snap_cells);
 
 std::vector<double>
-generate_bp_taylor_circular(std::span<const std::vector<double>> param_arr,
-                            std::span<const double> dparams,
-                            const std::vector<ParamLimitType>& param_limits,
-                            double tseg_ffa,
-                            SizeType nsegments,
-                            SizeType fold_bins,
-                            double tol_bins,
-                            SizeType ref_seg,
-                            bool use_conservative_tile = false);
+generate_bp_circ_taylor(std::span<const std::vector<double>> param_arr,
+                        std::span<const double> dparams,
+                        const std::vector<ParamLimitType>& param_limits,
+                        double tseg_ffa,
+                        SizeType nsegments,
+                        SizeType nbins,
+                        double eta,
+                        SizeType ref_seg,
+                        double p_orb_min,
+                        double minimum_snap_cells,
+                        bool use_conservative_tile = false);
 
 } // namespace loki::core

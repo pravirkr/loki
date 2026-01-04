@@ -1,9 +1,15 @@
 #pragma once
 
+#include <vector>
+#include <xsimd/xsimd.hpp>
+
 #include "loki/algorithms/plans.hpp"
 #include "loki/common/types.hpp"
 
 namespace loki::kernels {
+
+// Defined here so it does not interfer with nvcc
+using AlignedFloatVec = std::vector<float, xsimd::aligned_allocator<float>>;
 
 /**
  * @brief Shift two float arrays and add them together.

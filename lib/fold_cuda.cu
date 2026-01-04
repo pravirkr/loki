@@ -300,17 +300,17 @@ public:
         error_check::check(m_nsamps % m_segment_len == 0,
                            "BruteFoldCUDA::Impl: Number of samples is not a "
                            "multiple of segment length");
-        cuda_utils::set_device(m_device_id);
-        m_nfreqs    = m_freq_arr.size();
-        m_nsegments = m_nsamps / m_segment_len;
+        cuda_utils::CudaSetDeviceGuard device_guard(m_device_id);
+        m_nfreqs     = m_freq_arr.size();
+        m_nsegments  = m_nsamps / m_segment_len;
+        m_freq_arr_d = thrust::device_vector<double>(m_freq_arr);
         if constexpr (std::is_same_v<FoldTypeCUDA, float>) {
             // Time domain - allocate phase map
             m_phase_map_d.resize(m_nfreqs * m_segment_len, 0U);
             compute_phase();
         } else {
             // Fourier domain
-            m_nbins_f    = (nbins / 2) + 1;
-            m_freq_arr_d = thrust::device_vector<double>(m_freq_arr);
+            m_nbins_f = (nbins / 2) + 1;
         }
     }
 
@@ -331,41 +331,44 @@ public:
     void execute_h(std::span<const float> ts_e,
                    std::span<const float> ts_v,
                    std::span<HostFoldType> fold) {
+        spdlog::info("BruteFoldCUDA::Impl: execute_h");
         check_inputs(ts_e.size(), ts_v.size(), fold.size());
+
+        // Resize buffers only if needed
+        if (m_ts_e_d.size() != ts_e.size()) {
+            m_ts_e_d.resize(ts_e.size());
+            m_ts_v_d.resize(ts_v.size());
+        }
+        if (m_fold_d.size() != fold.size()) {
+            m_fold_d.resize(fold.size());
+        }
 
         // Copy input data to device
         cudaStream_t stream = nullptr;
-        thrust::device_vector<float> ts_e_d(ts_e.begin(), ts_e.end());
-        thrust::device_vector<float> ts_v_d(ts_v.begin(), ts_v.end());
+        cudaMemcpyAsync(thrust::raw_pointer_cast(m_ts_e_d.data()), ts_e.data(),
+                        ts_e.size() * sizeof(float), cudaMemcpyHostToDevice,
+                        stream);
+        cudaMemcpyAsync(thrust::raw_pointer_cast(m_ts_v_d.data()), ts_v.data(),
+                        ts_v.size() * sizeof(float), cudaMemcpyHostToDevice,
+                        stream);
+        spdlog::info("BruteFoldCUDA::Impl: ts_e_d and ts_v_d copied to device");
 
-        if constexpr (std::is_same_v<FoldTypeCUDA, float>) {
-            thrust::device_vector<float> fold_d(fold.size(), 0.0F);
-            // Execute folding kernel
-            execute_d(
-                cuda::std::span<const float>(
-                    thrust::raw_pointer_cast(ts_e_d.data()), ts_e_d.size()),
-                cuda::std::span<const float>(
-                    thrust::raw_pointer_cast(ts_v_d.data()), ts_v_d.size()),
-                cuda::std::span<float>(thrust::raw_pointer_cast(fold_d.data()),
-                                       fold_d.size()),
-                stream);
-            // Copy result back to host
-            thrust::copy(fold_d.begin(), fold_d.end(), fold.begin());
-        } else {
-            thrust::device_vector<ComplexTypeCUDA> fold_d(
-                fold.size(), ComplexTypeCUDA(0.0F, 0.0F));
-            // Execute folding kernel
-            execute_d(
-                cuda::std::span<const float>(
-                    thrust::raw_pointer_cast(ts_e_d.data()), ts_e_d.size()),
-                cuda::std::span<const float>(
-                    thrust::raw_pointer_cast(ts_v_d.data()), ts_v_d.size()),
-                cuda::std::span<ComplexTypeCUDA>(
-                    thrust::raw_pointer_cast(fold_d.data()), fold_d.size()),
-                stream);
-            // Copy result back to host
-            thrust::copy(fold_d.begin(), fold_d.end(), fold.begin());
-        }
+        // Execute folding kernel on device using persistent buffers
+        execute_d(
+            cuda::std::span<const float>(
+                thrust::raw_pointer_cast(m_ts_e_d.data()), m_ts_e_d.size()),
+            cuda::std::span<const float>(
+                thrust::raw_pointer_cast(m_ts_v_d.data()), m_ts_v_d.size()),
+            cuda::std::span<DeviceFoldType>(
+                thrust::raw_pointer_cast(m_fold_d.data()), m_fold_d.size()),
+            stream);
+
+        // Copy result back to host
+        spdlog::info("BruteFoldCUDA::Impl: started copying fold_d to host");
+        cudaMemcpyAsync(fold.data(), thrust::raw_pointer_cast(m_fold_d.data()),
+                        fold.size() * sizeof(float), cudaMemcpyDeviceToHost,
+                        stream);
+        spdlog::info("BruteFoldCUDA::Impl: Host execution complete");
         spdlog::debug("BruteFoldCUDA::Impl: Host execution complete");
     }
 
@@ -376,10 +379,12 @@ public:
         check_inputs(ts_e.size(), ts_v.size(), fold.size());
         // Ensure output fold is zeroed
         if constexpr (std::is_same_v<FoldTypeCUDA, float>) {
-            thrust::fill(thrust::device, fold.begin(), fold.end(), 0.0F);
+            thrust::fill(thrust::cuda::par.on(stream), fold.begin(), fold.end(),
+                         0.0F);
+            spdlog::info("BruteFoldCUDA::Impl: fold filled");
             execute_device_float(ts_e.data(), ts_v.data(), fold.data(), stream);
         } else {
-            thrust::fill(thrust::device, fold.begin(), fold.end(),
+            thrust::fill(thrust::cuda::par.on(stream), fold.begin(), fold.end(),
                          ComplexTypeCUDA(0.0F, 0.0F));
             execute_device_complex(ts_e.data(), ts_v.data(), fold.data(),
                                    stream);
@@ -400,13 +405,18 @@ private:
 
     SizeType m_nfreqs;
     SizeType m_nsegments;
+    thrust::device_vector<double> m_freq_arr_d;
+
+    // Persistent input/output buffers
+    thrust::device_vector<float> m_ts_e_d;
+    thrust::device_vector<float> m_ts_v_d;
+    thrust::device_vector<DeviceFoldType> m_fold_d;
 
     // Time domain only
     thrust::device_vector<uint32_t> m_phase_map_d;
 
     // Fourier domain only
     SizeType m_nbins_f;
-    thrust::device_vector<double> m_freq_arr_d;
 
     void check_inputs(SizeType ts_e_size,
                       SizeType ts_v_size,
@@ -423,12 +433,11 @@ private:
     }
 
     void compute_phase() {
-        thrust::device_vector<double> freq_arr_d(m_freq_arr);
         const int total_elements = static_cast<int>(m_nfreqs * m_segment_len);
         auto first               = thrust::counting_iterator<int>(0);
         auto last = thrust::counting_iterator<int>(total_elements);
         ComputePhase functor{
-            .freq_arr    = thrust::raw_pointer_cast(freq_arr_d.data()),
+            .freq_arr    = thrust::raw_pointer_cast(m_freq_arr_d.data()),
             .tsamp       = m_tsamp,
             .t_ref       = m_t_ref,
             .segment_len = static_cast<int>(m_segment_len),
@@ -444,12 +453,15 @@ private:
                               const float* __restrict__ ts_v_d,
                               float* __restrict__ fold_d,
                               cudaStream_t stream) {
+        spdlog::info("BruteFoldCUDA::Impl: execute_device_float");
         // Use 1D block configuration for small nfreqs
         if (m_nfreqs <= 64) {
             const auto total_work =
                 static_cast<int>(m_nsegments * m_segment_len);
             const dim3 block_dim(512);
             const dim3 grid_dim((total_work + block_dim.x - 1) / block_dim.x);
+            spdlog::info("BruteFoldCUDA::Impl: grid_dim = {}, block_dim = {}",
+                         grid_dim.x, block_dim.x);
             cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
             kernel_fold_segments<<<grid_dim, block_dim, 0, stream>>>(
                 ts_e_d, ts_v_d, thrust::raw_pointer_cast(m_phase_map_d.data()),
@@ -495,7 +507,8 @@ private:
         const size_t shmem_size =
             (2 * m_segment_len + (2 * block_size)) * sizeof(float);
         kernel_fold_segments_complex<<<grid, block_size, shmem_size, stream>>>(
-            ts_e_d, ts_v_d, fold_d, thrust::raw_pointer_cast(m_freq_arr_d.data()),
+            ts_e_d, ts_v_d, fold_d,
+            thrust::raw_pointer_cast(m_freq_arr_d.data()),
             static_cast<int>(m_nfreqs), static_cast<int>(m_nsegments),
             static_cast<int>(m_segment_len), static_cast<int>(m_nbins), m_tsamp,
             m_t_ref);
@@ -562,6 +575,7 @@ compute_brute_fold_cuda(std::span<const float> ts_e,
         std::fill(fold.begin(), fold.end(), HostType(0.0F, 0.0F));
     }
     bf.execute(ts_e, ts_v, std::span<HostType>(fold));
+    spdlog::info("compute_brute_fold_cuda: fold executed");
     return fold;
 }
 

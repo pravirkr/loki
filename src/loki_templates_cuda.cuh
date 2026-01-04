@@ -23,7 +23,7 @@ void bind_ffa_cuda_class(py::module& m, const std::string& name) {
         py::class_<FFACUDA<FoldTypeCUDA>>(m, name.c_str())
             .def(py::init<PulsarSearchConfig, int>(), py::arg("cfg"),
                  py::arg("device_id") = 0)
-            .def_property_readonly("plan", &FFACUDA<HostFoldType>::get_plan);
+            .def_property_readonly("plan", &FFACUDA<FoldTypeCUDA>::get_plan);
 
     // Standard execute
     cls.def(

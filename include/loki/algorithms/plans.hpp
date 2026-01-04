@@ -135,12 +135,36 @@ public:
     std::vector<std::vector<FFACoordFreq>> resolve_coordinates_freq();
 
     /**
-     * @brief Get the branching pattern for the plan.
+     * @brief Get the approximate branching pattern for the plan.
      * @param kind The kind of search for the branching pattern (e.g. "taylor").
+     * @param ref_seg The reference segment for the branching pattern.
+     * @param isuggest The index of the leaf to use for the branching pattern.
      * @return A vector of branching pattern values.
      */
     std::vector<double>
-    get_branching_pattern(std::string_view kind = "taylor") const;
+    get_branching_pattern_approx(std::string_view kind = "taylor",
+                                 SizeType ref_seg      = 0,
+                                 IndexType isuggest    = 0) const;
+
+    /**
+     * @brief Get the exact branching pattern for the plan.
+     * @param kind The kind of search for the branching pattern (e.g. "taylor").
+     * @param ref_seg The reference segment for the branching pattern.
+     * @return A vector of branching pattern values.
+     */
+    std::vector<double> get_branching_pattern(std::string_view kind = "taylor",
+                                              SizeType ref_seg      = 0) const;
+
+    /**
+     * @brief Get the exact branching pattern for the circular orbit pruning
+     * search.
+     * @param kind The kind of search for the branching pattern (e.g. "taylor").
+     * @param ref_seg The reference segment for the branching pattern.
+     * @return A vector of branching pattern values.
+     */
+    std::vector<double>
+    get_branching_pattern_circular(std::string_view kind = "taylor",
+                                   SizeType ref_seg      = 0) const;
 
 private:
     struct Impl;
@@ -174,6 +198,9 @@ public:
     /// @brief Get the fold shapes for each level.
     [[nodiscard]] const std::vector<std::vector<SizeType>>&
     get_fold_shapes() const noexcept;
+    /// @brief Get the fold shapes for each level (time domain).
+    [[nodiscard]] const std::vector<std::vector<SizeType>>&
+    get_fold_shapes_time() const noexcept;
     /// @brief Get the size of the brute fold buffer.
     SizeType get_brute_fold_size() const noexcept;
     /// @brief Get the size of the fold buffer.
@@ -191,30 +218,6 @@ private:
     struct Impl;
     std::unique_ptr<Impl> m_impl;
 };
-
-// Generate an approximate branching pattern for the pruning search.
-std::vector<double> generate_branching_pattern_approx(
-    std::span<const std::vector<double>> param_arr,
-    std::span<const double> dparams_lim,
-    const std::vector<ParamLimitType>& param_limits,
-    double tseg_ffa,
-    SizeType nsegments,
-    SizeType fold_bins,
-    double tol_bins,
-    bool use_conservative_errors = false,
-    std::string_view kind        = "taylor");
-
-// Generate an exact branching pattern for the pruning search.
-std::vector<double>
-generate_branching_pattern(std::span<const std::vector<double>> param_arr,
-                           std::span<const double> dparams_lim,
-                           const std::vector<ParamLimitType>& param_limits,
-                           double tseg_ffa,
-                           SizeType nsegments,
-                           SizeType fold_bins,
-                           double tol_bins,
-                           bool use_conservative_errors = false,
-                           std::string_view kind        = "taylor");
 
 /**
  * @brief Generates frequency regions for an efficient FFA search.

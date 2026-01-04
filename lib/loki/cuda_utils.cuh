@@ -25,6 +25,8 @@ constexpr std::string_view cufft_error_string(cufftResult error) noexcept {
     case CUFFT_ALLOC_FAILED:
         return "CUFFT_ALLOC_FAILED: cuFFT failed to allocate GPU or CPU "
                "memory.";
+    case CUFFT_INVALID_TYPE:
+        return "CUFFT_INVALID_TYPE: The cuFFT type provided is unsupported.";
     case CUFFT_INVALID_VALUE:
         return "CUFFT_INVALID_VALUE: User specified an invalid pointer or "
                "parameter";
@@ -36,13 +38,19 @@ constexpr std::string_view cufft_error_string(cufftResult error) noexcept {
         return "CUFFT_SETUP_FAILED: The cuFFT library failed to initialize";
     case CUFFT_INVALID_SIZE:
         return "CUFFT_INVALID_SIZE: User specified an invalid transform size";
+    case CUFFT_UNALIGNED_DATA:
+        return "CUFFT_UNALIGNED_DATA: Not currently in use";
+#if CUFFT_VERSION < 12000
     case CUFFT_INCOMPLETE_PARAMETER_LIST:
         return "CUFFT_INCOMPLETE_PARAMETER_LIST: Missing parameters in call";
+#endif
     case CUFFT_INVALID_DEVICE:
         return "CUFFT_INVALID_DEVICE: Execution of a plan was on different GPU "
                "than plan creation";
+#if CUFFT_VERSION < 12000
     case CUFFT_PARSE_ERROR:
         return "CUFFT_PARSE_ERROR: Internal plan database error";
+#endif
     case CUFFT_NO_WORKSPACE:
         return "CUFFT_NO_WORKSPACE: No workspace has been provided prior to "
                "plan execution";
@@ -52,7 +60,17 @@ constexpr std::string_view cufft_error_string(cufftResult error) noexcept {
     case CUFFT_NOT_SUPPORTED:
         return "CUFFT_NOT_SUPPORTED: Operation is not supported for parameters "
                "given.";
-    default:
+#if CUFFT_VERSION >= 12000
+    case CUFFT_MISSING_DEPENDENCY:
+        return "CUFFT_MISSING_DEPENDENCY: cuFFT is unable to find a dependency";
+    case CUFFT_NVRTC_FAILURE:
+        return "CUFFT_NVRTC_FAILURE: An NVRTC failure was encountered during a cuFFT operation";
+    case CUFFT_NVJITLINK_FAILURE:
+        return "CUFFT_NVJITLINK_FAILURE: An nvJitLink failure was encountered during a cuFFT operation";
+    case CUFFT_NVSHMEM_FAILURE:
+        return "CUFFT_NVSHMEM_FAILURE: An NVSHMEM failure was encountered during a cuFFT operation";
+#endif
+        default:
         return "Unknown cuFFT error";
     }
 }

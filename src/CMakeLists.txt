@@ -16,6 +16,9 @@ install(TARGETS ${LOKI_PYMODULE_NAME} DESTINATION ${LOKI_LIBRARY_NAME})
 if(CMAKE_CUDA_COMPILER)
   set(LOKI_PYGPUMODULE_NAME libcu${LOKI_LIBRARY_NAME})
   pybind11_add_module(${LOKI_PYGPUMODULE_NAME} loki_python_cuda.cpp)
+  if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL "13.0")
+    target_include_directories(${LOKI_PYGPUMODULE_NAME} PUBLIC "${CUDAToolkit_INCLUDE_DIRS}/cccl")
+  endif()
   target_include_directories(
     ${LOKI_PYGPUMODULE_NAME} PUBLIC ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/lib ${CUDAToolkit_INCLUDE_DIRS}
   )

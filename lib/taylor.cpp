@@ -406,8 +406,8 @@ poly_taylor_branch_batch(std::span<const double> leaves_batch,
                          std::span<double> leaves_branch_batch,
                          SizeType n_batch,
                          SizeType n_params,
-                         SizeType fold_bins,
-                         double tol_bins,
+                         SizeType nbins,
+                         double eta,
                          const std::vector<ParamLimitType>& param_limits,
                          SizeType branch_max) {
     constexpr SizeType kParamStride = 2U;
@@ -451,16 +451,16 @@ poly_taylor_branch_batch(std::span<const double> leaves_batch,
             leaves_batch[param_offset + ((n_params + 1) * kParamStride)];
     }
 
-    psr_utils::poly_taylor_step_d_vec(n_params, t_obs_minus_t_ref, fold_bins,
-                                      tol_bins, f0_batch, dparam_new_batch, 0);
+    psr_utils::poly_taylor_step_d_vec(n_params, t_obs_minus_t_ref, nbins, eta,
+                                      f0_batch, dparam_new_batch, 0);
     psr_utils::poly_taylor_shift_d_vec(dparam_cur_batch, dparam_new_batch,
-                                       t_obs_minus_t_ref, fold_bins, f0_batch,
-                                       0, shift_bins_batch, n_batch, n_params);
+                                       t_obs_minus_t_ref, nbins, f0_batch, 0,
+                                       shift_bins_batch, n_batch, n_params);
 
     std::vector<double> pad_branched_dparams(n_batch * n_params);
     std::vector<SizeType> branched_counts(n_batch * n_params);
     // Optimized branching loop - same logic as original but vectorized access
-    constexpr double kEps = 1e-6;
+    constexpr double kEps = 1e-12;
     for (SizeType i = 0; i < n_batch; ++i) {
         const SizeType leaf_offset = i * leaves_stride;
         const SizeType flat_base   = i * n_params;
@@ -471,7 +471,7 @@ poly_taylor_branch_batch(std::span<const double> leaves_batch,
             const double param_cur_val  = leaves_batch[param_offset + 0];
             const double dparam_cur_val = dparam_cur_batch[flat_idx];
 
-            if (shift_bins_batch[flat_idx] >= (tol_bins - kEps)) {
+            if (shift_bins_batch[flat_idx] >= (eta - kEps)) {
                 double param_min = std::numeric_limits<double>::lowest();
                 double param_max = std::numeric_limits<double>::max();
                 if (j == n_params - 1) {
@@ -790,8 +790,7 @@ void poly_taylor_transform_accel_batch(std::span<double> leaves_batch,
                                        std::pair<double, double> coord_cur,
                                        SizeType n_leaves,
                                        SizeType n_params,
-                                       bool conservative_errors,
-                                       double /*snap_threshold*/) {
+                                       bool use_conservative_tile) {
     constexpr SizeType kParamsExpected = 2;
     constexpr SizeType kParamStride    = 2;
     constexpr SizeType kLeavesStride   = (kParamsExpected + 2) * kParamStride;
@@ -822,20 +821,16 @@ void poly_taylor_transform_accel_batch(std::span<double> leaves_batch,
         const auto d_val_j =
             d_val_i + (v_val_i * delta_t) + (a_val_i * half_delta_t_sq);
 
-        double a_err_j, v_err_j, d_err_j;
-        if (conservative_errors) {
+        double a_err_j, v_err_j;
+        if (use_conservative_tile) {
             // Conservative: sqrt(errors^2 @ T^2.T)
             a_err_j = a_err_i;
             v_err_j = std::sqrt((v_err_i * v_err_i) +
                                 (a_err_i * a_err_i * delta_t * delta_t));
-            d_err_j = std::sqrt(
-                (d_err_i * d_err_i) + (v_err_i * v_err_i * delta_t * delta_t) +
-                (a_err_i * a_err_i * half_delta_t_sq * half_delta_t_sq));
         } else {
             // Non-conservative: errors * |diag(T)| = errors * 1
             a_err_j = a_err_i;
             v_err_j = v_err_i;
-            d_err_j = d_err_i;
         }
 
         // Write back transformed values
@@ -844,7 +839,7 @@ void poly_taylor_transform_accel_batch(std::span<double> leaves_batch,
         leaves_batch[leaf_offset + 2] = v_val_j;
         leaves_batch[leaf_offset + 3] = v_err_j;
         leaves_batch[leaf_offset + 4] = d_val_j;
-        leaves_batch[leaf_offset + 5] = d_err_j;
+        leaves_batch[leaf_offset + 5] = d_err_i;
     }
 }
 
@@ -853,8 +848,7 @@ void poly_taylor_transform_jerk_batch(std::span<double> leaves_batch,
                                       std::pair<double, double> coord_cur,
                                       SizeType n_leaves,
                                       SizeType n_params,
-                                      bool conservative_errors,
-                                      double /*snap_threshold*/) {
+                                      bool use_conservative_tile) {
     constexpr SizeType kParamsExpected = 3;
     constexpr SizeType kParamStride    = 2;
     constexpr SizeType kLeavesStride   = (kParamsExpected + 2) * kParamStride;
@@ -892,8 +886,8 @@ void poly_taylor_transform_jerk_batch(std::span<double> leaves_batch,
                              (a_val_i * half_delta_t_sq) +
                              (j_val_i * sixth_delta_t_cubed);
 
-        double j_err_j, a_err_j, v_err_j, d_err_j;
-        if (conservative_errors) {
+        double j_err_j, a_err_j, v_err_j;
+        if (use_conservative_tile) {
             // Conservative: sqrt(errors^2 @ T^2.T)
             j_err_j = j_err_i;
             a_err_j = std::sqrt((a_err_i * a_err_i) +
@@ -901,17 +895,11 @@ void poly_taylor_transform_jerk_batch(std::span<double> leaves_batch,
             v_err_j = std::sqrt(
                 (v_err_i * v_err_i) + (a_err_i * a_err_i * delta_t_sq) +
                 (j_err_i * j_err_i * half_delta_t_sq * half_delta_t_sq));
-            d_err_j = std::sqrt(
-                (d_err_i * d_err_i) + (v_err_i * v_err_i * delta_t_sq) +
-                (a_err_i * a_err_i * half_delta_t_sq * half_delta_t_sq) +
-                (j_err_i * j_err_i * sixth_delta_t_cubed *
-                 sixth_delta_t_cubed));
         } else {
             // Non-conservative: errors * |diag(T)| = errors * 1
             j_err_j = j_err_i;
             a_err_j = a_err_i;
             v_err_j = v_err_i;
-            d_err_j = d_err_i;
         }
 
         // Write back transformed values
@@ -922,7 +910,7 @@ void poly_taylor_transform_jerk_batch(std::span<double> leaves_batch,
         leaves_batch[leaf_offset + 4] = v_val_j;
         leaves_batch[leaf_offset + 5] = v_err_j;
         leaves_batch[leaf_offset + 6] = d_val_j;
-        leaves_batch[leaf_offset + 7] = d_err_j;
+        leaves_batch[leaf_offset + 7] = d_err_i;
     }
 }
 
@@ -931,8 +919,7 @@ void poly_taylor_transform_snap_batch(std::span<double> leaves_batch,
                                       std::pair<double, double> coord_cur,
                                       SizeType n_leaves,
                                       SizeType n_params,
-                                      bool conservative_errors,
-                                      double /*snap_threshold*/) {
+                                      bool use_conservative_tile) {
     constexpr SizeType kParamsExpected = 4;
     constexpr SizeType kParamStride    = 2;
     constexpr SizeType kLeavesStride   = (kParamsExpected + 2) * kParamStride;
@@ -978,8 +965,8 @@ void poly_taylor_transform_snap_batch(std::span<double> leaves_batch,
                              (j_val_i * sixth_delta_t_cubed) +
                              (s_val_i * twenty_fourth_delta_t_fourth);
 
-        double s_err_j, j_err_j, a_err_j, v_err_j, d_err_j;
-        if (conservative_errors) {
+        double s_err_j, j_err_j, a_err_j, v_err_j;
+        if (use_conservative_tile) {
             // Conservative: sqrt(errors^2 @ T^2.T)
             s_err_j = s_err_i;
             j_err_j = std::sqrt((j_err_i * j_err_i) +
@@ -992,20 +979,12 @@ void poly_taylor_transform_snap_batch(std::span<double> leaves_batch,
                 (j_err_i * j_err_i * half_delta_t_sq * half_delta_t_sq) +
                 (s_err_i * s_err_i * sixth_delta_t_cubed *
                  sixth_delta_t_cubed));
-            d_err_j = std::sqrt(
-                (d_err_i * d_err_i) + (v_err_i * v_err_i * delta_t_sq) +
-                (a_err_i * a_err_i * half_delta_t_sq * half_delta_t_sq) +
-                (j_err_i * j_err_i * sixth_delta_t_cubed *
-                 sixth_delta_t_cubed) +
-                (s_err_i * s_err_i * twenty_fourth_delta_t_fourth *
-                 twenty_fourth_delta_t_fourth));
         } else {
             // Non-conservative: errors * |diag(T)| = errors * 1
             s_err_j = s_err_i;
             j_err_j = j_err_i;
             a_err_j = a_err_i;
             v_err_j = v_err_i;
-            d_err_j = d_err_i;
         }
 
         // Write back transformed values
@@ -1018,7 +997,7 @@ void poly_taylor_transform_snap_batch(std::span<double> leaves_batch,
         leaves_batch[leaf_offset + 6] = v_val_j;
         leaves_batch[leaf_offset + 7] = v_err_j;
         leaves_batch[leaf_offset + 8] = d_val_j;
-        leaves_batch[leaf_offset + 9] = d_err_j;
+        leaves_batch[leaf_offset + 9] = d_err_i;
     }
 }
 
@@ -1026,15 +1005,15 @@ std::vector<double>
 poly_taylor_branch(std::span<const double> leaf,
                    std::pair<double, double> coord_cur,
                    SizeType n_params,
-                   SizeType fold_bins,
-                   double tol_bins,
+                   SizeType nbins,
+                   double eta,
                    const std::vector<ParamLimitType>& param_limits) {
     const auto branch_max    = 100;
     const auto leaves_stride = (n_params + 2) * 2;
     std::vector<double> branch_leaves(branch_max * leaves_stride);
     const auto batch_origins =
         poly_taylor_branch_batch(leaf, coord_cur, branch_leaves, 1, n_params,
-                                 fold_bins, tol_bins, param_limits, branch_max);
+                                 nbins, eta, param_limits, branch_max);
     return {branch_leaves.begin(),
             branch_leaves.begin() +
                 static_cast<IndexType>(batch_origins.size() * leaves_stride)};
@@ -1046,48 +1025,58 @@ generate_bp_poly_taylor_approx(std::span<const std::vector<double>> param_arr,
                                const std::vector<ParamLimitType>& param_limits,
                                double tseg_ffa,
                                SizeType nsegments,
-                               SizeType fold_bins,
-                               double tol_bins,
+                               SizeType nbins,
+                               double eta,
                                SizeType ref_seg,
+                               IndexType isuggest,
                                bool use_conservative_tile) {
     error_check::check_equal(param_arr.size(), dparams_lim.size(),
                              "param_arr and dparams must have the same size");
     error_check::check_equal(
         param_arr.size(), param_limits.size(),
         "param_arr and param_limits must have the same size");
-    std::vector<double> branching_pattern;
+    std::vector<double> branching_pattern(nsegments - 1);
     const auto poly_order = dparams_lim.size();
     psr_utils::MiddleOutScheme snail_scheme(nsegments, ref_seg, tseg_ffa);
-    branching_pattern.reserve(nsegments - 1);
     const auto leaves_stride = (poly_order + 2) * 2;
     const auto coord_init    = snail_scheme.get_coord(0);
     const auto leaves =
         poly_taylor_leaves(param_arr, dparams_lim, poly_order, coord_init);
     const auto n_leaves = leaves.size() / leaves_stride;
-    // Get last leaf
-    auto leaf = std::span(leaves).subspan((leaves_stride * (n_leaves - 1)),
-                                          leaves_stride);
+    // Get isuggest-th leaf
+    if (isuggest < 0) { // Negative index
+        isuggest = static_cast<IndexType>(n_leaves + isuggest);
+    }
+    error_check::check_greater_equal(isuggest, 0,
+                                     "isuggest must be non-negative");
+    error_check::check_less(isuggest, n_leaves,
+                            "isuggest must be less than n_leaves");
+    auto leaf =
+        std::span(leaves).subspan((leaves_stride * isuggest), leaves_stride);
     std::vector<double> leaf_data(leaves_stride);
     std::ranges::copy(leaf, leaf_data.begin());
-
     for (SizeType prune_level = 1; prune_level < nsegments; ++prune_level) {
         const auto coord_next = snail_scheme.get_coord(prune_level);
         const auto coord_cur  = snail_scheme.get_current_coord(prune_level);
         auto leaves_arr = poly_taylor_branch(leaf_data, coord_cur, poly_order,
-                                             fold_bins, tol_bins, param_limits);
+                                             nbins, eta, param_limits);
         const auto n_leaves_branch = leaves_arr.size() / leaves_stride;
         branching_pattern.push_back(static_cast<double>(n_leaves_branch));
         if (poly_order == 2) {
             poly_taylor_transform_accel_batch(leaves_arr, coord_next, coord_cur,
                                               n_leaves_branch, poly_order,
-                                              use_conservative_tile, 0.0);
+                                              use_conservative_tile);
         } else if (poly_order == 3) {
             poly_taylor_transform_jerk_batch(leaves_arr, coord_next, coord_cur,
                                              n_leaves_branch, poly_order,
-                                             use_conservative_tile, 0.0);
+                                             use_conservative_tile);
+        } else if (poly_order == 4) {
+            poly_taylor_transform_snap_batch(leaves_arr, coord_next, coord_cur,
+                                             n_leaves_branch, poly_order,
+                                             use_conservative_tile);
         } else {
-            throw std::invalid_argument(
-                "poly_order must be 2, or 3 for branching pattern generation");
+            throw std::invalid_argument("poly_order must be 2, 3, or 4 for "
+                                        "branching pattern generation");
         }
         const auto leaf_start = leaves_stride * (n_leaves_branch - 1);
         std::ranges::copy(
@@ -1105,10 +1094,11 @@ generate_bp_poly_taylor(std::span<const std::vector<double>> param_arr,
                         const std::vector<ParamLimitType>& param_limits,
                         double tseg_ffa,
                         SizeType nsegments,
-                        SizeType fold_bins,
-                        double tol_bins,
+                        SizeType nbins,
+                        double eta,
                         SizeType ref_seg,
                         bool use_conservative_tile) {
+    constexpr double kEps = 1e-12;
     error_check::check_equal(param_arr.size(), dparams.size(),
                              "param_arr and dparams must have the same size");
     error_check::check_equal(
@@ -1120,6 +1110,7 @@ generate_bp_poly_taylor(std::span<const std::vector<double>> param_arr,
 
     // Snail Scheme
     psr_utils::MiddleOutScheme snail_scheme(nsegments, ref_seg, tseg_ffa);
+    std::vector<double> weights(n_freqs, 1.0);
     std::vector<double> branching_pattern(nsegments - 1);
 
     // Initialize dparam_cur_batch - each frequency gets the same dparams
@@ -1152,37 +1143,32 @@ generate_bp_poly_taylor(std::span<const std::vector<double>> param_arr,
             }
         }
     }
+
+    std::vector<double> dparam_new_batch(n_freqs * poly_order, 0.0);
+    std::vector<double> shift_bins_batch(n_freqs * poly_order, 0.0);
+    std::vector<double> dparam_cur_next(n_freqs * poly_order, 0.0);
+    std::vector<double> n_branches(n_freqs, 1);
+    const auto n_params = poly_order + 1;
+    std::vector<double> dparam_d_vec(n_freqs * n_params, 0.0);
+
     for (SizeType prune_level = 1; prune_level < nsegments; ++prune_level) {
         const auto coord_next = snail_scheme.get_coord(prune_level);
         const auto coord_cur  = snail_scheme.get_current_coord(prune_level);
         const auto [t0_cur, t_obs_minus_t_ref] = coord_cur;
 
-        // Calculate optimal parameter steps
-        std::vector<double> dparam_new_batch(n_freqs * poly_order);
-        psr_utils::poly_taylor_step_d_vec(
-            poly_order, t_obs_minus_t_ref, fold_bins, tol_bins,
-            std::span<const double>(f0_batch),
-            std::span<double>(dparam_new_batch), 0);
-
-        // Calculate shift bins
-        std::vector<double> shift_bins_batch(n_freqs * poly_order);
+        // Calculate optimal parameter steps and shift bins
+        psr_utils::poly_taylor_step_d_vec(poly_order, t_obs_minus_t_ref, nbins,
+                                          eta, f0_batch, dparam_new_batch, 0);
         psr_utils::poly_taylor_shift_d_vec(
-            std::span<const double>(dparam_cur_batch),
-            std::span<const double>(dparam_new_batch), t_obs_minus_t_ref,
-            fold_bins, std::span<const double>(f0_batch), 0,
-            std::span<double>(shift_bins_batch), n_freqs, poly_order);
-
-        // Initialize arrays for next iteration
-        std::vector<double> dparam_cur_next(n_freqs * poly_order);
-        std::vector<SizeType> n_branches(n_freqs, 1);
+            dparam_cur_batch, dparam_new_batch, t_obs_minus_t_ref, nbins,
+            f0_batch, 0, shift_bins_batch, n_freqs, poly_order);
 
         // Determine branching needs
-        constexpr double kEps = 1e-12;
         for (SizeType i = 0; i < n_freqs; ++i) {
             for (SizeType j = 0; j < poly_order; ++j) {
                 const auto idx = (i * poly_order) + j;
                 const auto needs_branching =
-                    shift_bins_batch[idx] >= (tol_bins - kEps);
+                    shift_bins_batch[idx] >= (eta - kEps);
                 const auto too_large_step =
                     dparam_new_batch[idx] > (param_ranges[idx] + kEps);
 
@@ -1194,22 +1180,24 @@ generate_bp_poly_taylor(std::span<const std::vector<double>> param_arr,
                     (dparam_cur_batch[idx] + kEps) / (dparam_new_batch[idx]);
                 const auto num_points =
                     std::max(1, static_cast<int>(std::ceil(ratio - kEps)));
-                n_branches[i] *= static_cast<SizeType>(num_points);
+                n_branches[i] *= static_cast<double>(num_points);
                 dparam_cur_next[idx] =
                     dparam_cur_batch[idx] / static_cast<double>(num_points);
             }
         }
-        SizeType total_branches = 0;
+
+        // Compute average branching factor and update weights
+        double children = 0.0;
+        double parents = 0.0;
         for (SizeType i = 0; i < n_freqs; ++i) {
-            total_branches += n_branches[i];
+            children += weights[i] * n_branches[i];
+            parents += weights[i];
+            weights[i] *= n_branches[i];
         }
-        branching_pattern[prune_level - 1] =
-            static_cast<double>(total_branches) / static_cast<double>(n_freqs);
+        branching_pattern[prune_level - 1] = children / parents;
 
         // Transform dparams to the next segment
         const auto delta_t  = coord_next.first - coord_cur.first;
-        const auto n_params = poly_order + 1;
-        std::vector<double> dparam_d_vec(n_freqs * n_params, 0.0);
         for (SizeType i = 0; i < n_freqs; ++i) {
             for (SizeType j = 0; j < poly_order; ++j) {
                 dparam_d_vec[(i * n_params) + j] =

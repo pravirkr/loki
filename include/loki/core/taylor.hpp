@@ -92,8 +92,8 @@ poly_taylor_branch_batch(std::span<const double> leaves_batch,
                          std::span<double> leaves_branch_batch,
                          SizeType n_batch,
                          SizeType n_params,
-                         SizeType fold_bins,
-                         double tol_bins,
+                         SizeType nbins,
+                         double eta,
                          const std::vector<ParamLimitType>& param_limits,
                          SizeType branch_max);
 
@@ -138,31 +138,28 @@ void poly_taylor_transform_accel_batch(std::span<double> leaves_batch,
                                        std::pair<double, double> coord_cur,
                                        SizeType n_leaves,
                                        SizeType n_params,
-                                       bool conservative_errors,
-                                       double snap_threshold);
+                                       bool use_conservative_tile);
 
 void poly_taylor_transform_jerk_batch(std::span<double> leaves_batch,
                                       std::pair<double, double> coord_next,
                                       std::pair<double, double> coord_cur,
                                       SizeType n_leaves,
                                       SizeType n_params,
-                                      bool conservative_errors,
-                                      double snap_threshold);
+                                      bool use_conservative_tile);
 
 void poly_taylor_transform_snap_batch(std::span<double> leaves_batch,
                                       std::pair<double, double> coord_next,
                                       std::pair<double, double> coord_cur,
                                       SizeType n_leaves,
                                       SizeType n_params,
-                                      bool conservative_errors,
-                                      double snap_threshold);
+                                      bool use_conservative_tile);
 
 std::vector<double>
 poly_taylor_branch(std::span<const double> leaf,
                    std::pair<double, double> coord_cur,
                    SizeType n_params,
-                   SizeType fold_bins,
-                   double tol_bins,
+                   SizeType nbins,
+                   double eta,
                    const std::vector<ParamLimitType>& param_limits);
 
 // Generate an approximate branching pattern for the pruning Taylor search.
@@ -172,9 +169,10 @@ generate_bp_poly_taylor_approx(std::span<const std::vector<double>> param_arr,
                                const std::vector<ParamLimitType>& param_limits,
                                double tseg_ffa,
                                SizeType nsegments,
-                               SizeType fold_bins,
-                               double tol_bins,
+                               SizeType nbins,
+                               double eta,
                                SizeType ref_seg,
+                               IndexType isuggest = 0,
                                bool use_conservative_tile = false);
 
 // Generate an exact branching pattern for the pruning Taylor search.
@@ -184,8 +182,8 @@ generate_bp_poly_taylor(std::span<const std::vector<double>> param_arr,
                         const std::vector<ParamLimitType>& param_limits,
                         double tseg_ffa,
                         SizeType nsegments,
-                        SizeType fold_bins,
-                        double tol_bins,
+                        SizeType nbins,
+                        double eta,
                         SizeType ref_seg,
                         bool use_conservative_tile = false);
 

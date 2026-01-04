@@ -165,8 +165,8 @@ circ_taylor_branch_batch(std::span<const double> leaves_batch,
                          std::span<double> leaves_branch_batch,
                          SizeType n_batch,
                          SizeType n_params,
-                         SizeType fold_bins,
-                         double tol_bins,
+                         SizeType nbins,
+                         double eta,
                          const std::vector<ParamLimitType>& param_limits,
                          SizeType branch_max,
                          double minimum_snap_cells) {
@@ -216,11 +216,11 @@ circ_taylor_branch_batch(std::span<const double> leaves_batch,
             leaves_batch[param_offset + ((n_params + 1) * kParamStride)];
     }
 
-    psr_utils::poly_taylor_step_d_vec(n_params, t_obs_minus_t_ref, fold_bins,
-                                      tol_bins, f0_batch, dparam_new_batch, 0);
+    psr_utils::poly_taylor_step_d_vec(n_params, t_obs_minus_t_ref, nbins, eta,
+                                      f0_batch, dparam_new_batch, 0);
     psr_utils::poly_taylor_shift_d_vec(dparam_cur_batch, dparam_new_batch,
-                                       t_obs_minus_t_ref, fold_bins, f0_batch,
-                                       0, shift_bins_batch, n_batch, n_params);
+                                       t_obs_minus_t_ref, nbins, f0_batch, 0,
+                                       shift_bins_batch, n_batch, n_params);
 
     // --- Vectorized Padded Branching (All params except crackle) ---
     std::vector<double> pad_branched_dparams(n_batch * n_params);
@@ -275,7 +275,7 @@ circ_taylor_branch_batch(std::span<const double> leaves_batch,
             const double dparam_cur_val = dparam_cur_batch[flat_idx];
 
             const bool needs_branching =
-                shift_bins_batch[flat_idx] >= (tol_bins - kEps);
+                shift_bins_batch[flat_idx] >= (eta - kEps);
 
             if (j == 0) {
                 // Track which batches need crackle branching
@@ -834,82 +834,266 @@ void circ_taylor_transform_batch(std::span<double> leaves_batch,
     for (SizeType i : idx_circular_snap) {
         const SizeType leaf_offset = i * kLeavesStride;
 
-        const auto s_val_i = leaves_batch[leaf_offset + 2];
-        const auto j_val_i = leaves_batch[leaf_offset + 4];
-        const auto a_val_i = leaves_batch[leaf_offset + 6];
-        const auto v_val_i = leaves_batch[leaf_offset + 8];
-        const auto d_val_i = leaves_batch[leaf_offset + 10];
+        const double d4_i     = leaves_batch[leaf_offset + 2];
+        const double sig_d4_i = leaves_batch[leaf_offset + 3];
+        const double d3_i     = leaves_batch[leaf_offset + 4];
+        const double sig_d3_i = leaves_batch[leaf_offset + 5];
+        const double d2_i     = leaves_batch[leaf_offset + 6];
+        const double sig_d2_i = leaves_batch[leaf_offset + 7];
+        const double d1_i     = leaves_batch[leaf_offset + 8];
+        const double sig_d1_i = leaves_batch[leaf_offset + 9];
+        const double d0_i     = leaves_batch[leaf_offset + 10];
+        const double sig_d0_i = leaves_batch[leaf_offset + 11];
 
-        const double omega_orb_sq = -s_val_i / a_val_i;
+        const double omega_orb_sq = -d4_i / d2_i;
         const double omega_orb    = std::sqrt(omega_orb_sq);
-        const double omega_dt     = omega_orb * delta_t;
-        const double cos_odt      = std::cos(omega_dt);
-        const double sin_odt      = std::sin(omega_dt);
+        // Evolve the phase to the new time t_j = t_i + delta_t
+        const double omega_dt = omega_orb * delta_t;
+        const double cos_odt  = std::cos(omega_dt);
+        const double sin_odt  = std::sin(omega_dt);
 
-        // Pin-down {s, j, a}
-        const double a_val_j =
-            (a_val_i * cos_odt) + ((j_val_i / omega_orb) * sin_odt);
-        const double j_val_j =
-            (j_val_i * cos_odt) - ((a_val_i * omega_orb) * sin_odt);
-        const double s_val_j = -omega_orb_sq * a_val_j;
-        const double c_val_j = -omega_orb_sq * j_val_j;
+        // Precompute some constants for efficiency
+        const double inv_omega_orb          = 1.0 / omega_orb;
+        const double inv_omega_orb_sq       = 1.0 / omega_orb_sq;
+        const double sin_odt_inv_omega      = sin_odt * inv_omega_orb;
+        const double d3_i_sin_odt_inv_omega = d3_i * sin_odt_inv_omega;
+        const double d2_i_omega_sin_odt     = d2_i * omega_orb * sin_odt;
+
+        // Pin-down omega using {d4, d2}
+        const double d2_j = (d2_i * cos_odt) + d3_i_sin_odt_inv_omega;
+        const double d3_j = (d3_i * cos_odt) - d2_i_omega_sin_odt;
+        const double d4_j = -omega_orb_sq * d2_j;
+        const double d5_j = -omega_orb_sq * d3_j;
         // Integrate to get {v, d}
-        const double v_circ_i = -j_val_i / omega_orb_sq;
-        const double v_circ_j = -j_val_j / omega_orb_sq;
-        const double v_val_j  = v_circ_j + (v_val_i - v_circ_i);
-        const double d_circ_j = -a_val_j / omega_orb_sq;
-        const double d_circ_i = -a_val_i / omega_orb_sq;
-        const double d_val_j =
-            d_circ_j + (d_val_i - d_circ_i) + ((v_val_i - v_circ_i) * delta_t);
+        const double v_circ_i = -d3_i / omega_orb_sq;
+        const double v_circ_j = -d3_j / omega_orb_sq;
+        const double d1_diff  = d1_i - v_circ_i;
+        const double d1_j     = v_circ_j + d1_diff;
+        const double d_circ_j = -d2_j / omega_orb_sq;
+        const double d_circ_i = -d2_i / omega_orb_sq;
+        const double d0_j = d_circ_j + (d0_i - d_circ_i) + (d1_diff * delta_t);
 
-        // Write back transformed values (errors unchanged)
-        leaves_batch[leaf_offset + 0]  = c_val_j;
-        leaves_batch[leaf_offset + 2]  = s_val_j;
-        leaves_batch[leaf_offset + 4]  = j_val_j;
-        leaves_batch[leaf_offset + 6]  = a_val_j;
-        leaves_batch[leaf_offset + 8]  = v_val_j;
-        leaves_batch[leaf_offset + 10] = d_val_j;
+        // Transform errors
+        double sig_d5_j, sig_d4_j, sig_d3_j, sig_d2_j, sig_d1_j;
+        if (use_conservative_tile) {
+            const double omega_cu     = omega_orb_sq * omega_orb;
+            const double inv_omega_cu = inv_omega_orb * inv_omega_orb_sq;
+            const double var_d1_i     = sig_d1_i * sig_d1_i;
+            const double var_d2_i     = sig_d2_i * sig_d2_i;
+            const double var_d3_i     = sig_d3_i * sig_d3_i;
+            const double var_d4_i     = sig_d4_i * sig_d4_i;
+
+            const double u2 = (omega_dt * d3_j * inv_omega_orb_sq) -
+                              (d3_i_sin_odt_inv_omega * inv_omega_orb);
+            const double u3 = -(omega_dt * d2_j) - (d2_i * sin_odt);
+            const double u4 = -(2 * omega_orb * d2_j) - (omega_orb_sq * u2);
+            const double u5 = -(2 * omega_orb * d3_j) - (omega_orb_sq * u3);
+            const double u1 =
+                (2 * (d3_j - d3_i) * inv_omega_cu) - (u3 * inv_omega_orb_sq);
+            const double v2 = -omega_orb / (2 * d2_i);
+            const double v4 = omega_orb / (2 * d4_i);
+
+            const double j52 = (omega_cu * sin_odt) + (u5 * v2);
+            const double j53 = -omega_orb_sq * cos_odt;
+            const double j54 = u5 * v4;
+            sig_d5_j =
+                std::sqrt((j52 * j52 * var_d2_i) + (j53 * j53 * var_d3_i) +
+                          (j54 * j54 * var_d4_i));
+
+            const double j42 = -(omega_orb_sq * cos_odt) + (u4 * v2);
+            const double j43 = -omega_orb * sin_odt;
+            const double j44 = u4 * v4;
+            sig_d4_j =
+                std::sqrt((j42 * j42 * var_d2_i) + (j43 * j43 * var_d3_i) +
+                          (j44 * j44 * var_d4_i));
+
+            const double j32 = -(omega_orb * sin_odt) + (u3 * v2);
+            const double j33 = cos_odt;
+            const double j34 = u3 * v4;
+            sig_d3_j =
+                std::sqrt((j32 * j32 * var_d2_i) + (j33 * j33 * var_d3_i) +
+                          (j34 * j34 * var_d4_i));
+
+            const double j22 = cos_odt + (u2 * v2);
+            const double j23 = sin_odt / omega_orb;
+            const double j24 = u2 * v4;
+            sig_d2_j =
+                std::sqrt((j22 * j22 * var_d2_i) + (j23 * j23 * var_d3_i) +
+                          (j24 * j24 * var_d4_i));
+
+            const double j11 = 1.0;
+            const double j12 = sin_odt_inv_omega + (u1 * v2);
+            const double j13 = (1 - cos_odt) * inv_omega_orb_sq;
+            const double j14 = u1 * v4;
+            sig_d1_j =
+                std::sqrt((j11 * j11 * var_d1_i) + (j12 * j12 * var_d2_i) +
+                          (j13 * j13 * var_d3_i) + (j14 * j14 * var_d4_i));
+
+        } else {
+            const double sig_d2_i_cos = cos_odt * sig_d2_i;
+            const double sig_d3_i_cos = cos_odt * sig_d3_i;
+            const double sig_d2_i_sin = sin_odt * sig_d2_i;
+            const double sig_d3_i_sin = sin_odt * sig_d3_i;
+            const double sig_d3_i_1mincos =
+                (1 - cos_odt) * sig_d3_i / omega_orb_sq;
+            sig_d2_j =
+                std::sqrt((sig_d2_i_cos * sig_d2_i_cos) +
+                          ((sig_d3_i_sin * sig_d3_i_sin) / omega_orb_sq));
+            sig_d3_j =
+                std::sqrt((sig_d3_i_cos * sig_d3_i_cos) +
+                          ((sig_d2_i_sin * sig_d2_i_sin) * omega_orb_sq));
+            sig_d1_j = std::sqrt(
+                (sig_d1_i * sig_d1_i) + (sig_d3_i_1mincos * sig_d3_i_1mincos) +
+                ((sig_d2_i_sin * sig_d2_i_sin) / omega_orb_sq));
+            sig_d5_j = omega_orb_sq * sig_d3_j;
+            sig_d4_j = omega_orb_sq * sig_d2_j;
+        }
+
+        // Write back transformed values
+        leaves_batch[leaf_offset + 0]  = d5_j;
+        leaves_batch[leaf_offset + 1]  = sig_d5_j;
+        leaves_batch[leaf_offset + 2]  = d4_j;
+        leaves_batch[leaf_offset + 3]  = sig_d4_j;
+        leaves_batch[leaf_offset + 4]  = d3_j;
+        leaves_batch[leaf_offset + 5]  = sig_d3_j;
+        leaves_batch[leaf_offset + 6]  = d2_j;
+        leaves_batch[leaf_offset + 7]  = sig_d2_j;
+        leaves_batch[leaf_offset + 8]  = d1_j;
+        leaves_batch[leaf_offset + 9]  = sig_d1_j;
+        leaves_batch[leaf_offset + 10] = d0_j;
+        leaves_batch[leaf_offset + 11] = sig_d0_i;
     }
 
     // Process circular crackle indices
     for (SizeType i : idx_circular_crackle) {
         const SizeType leaf_offset = i * kLeavesStride;
 
-        const auto c_val_i = leaves_batch[leaf_offset + 0];
-        const auto j_val_i = leaves_batch[leaf_offset + 4];
-        const auto a_val_i = leaves_batch[leaf_offset + 6];
-        const auto v_val_i = leaves_batch[leaf_offset + 8];
-        const auto d_val_i = leaves_batch[leaf_offset + 10];
+        const double d5_i     = leaves_batch[leaf_offset + 0];
+        const double sig_d5_i = leaves_batch[leaf_offset + 1];
+        const double d3_i     = leaves_batch[leaf_offset + 4];
+        const double sig_d3_i = leaves_batch[leaf_offset + 5];
+        const double d2_i     = leaves_batch[leaf_offset + 6];
+        const double sig_d2_i = leaves_batch[leaf_offset + 7];
+        const double d1_i     = leaves_batch[leaf_offset + 8];
+        const double sig_d1_i = leaves_batch[leaf_offset + 9];
+        const double d0_i     = leaves_batch[leaf_offset + 10];
+        const double sig_d0_i = leaves_batch[leaf_offset + 11];
 
-        const double omega_orb_sq = -c_val_i / j_val_i;
+        const double omega_orb_sq = -d5_i / d3_i;
         const double omega_orb    = std::sqrt(omega_orb_sq);
         const double omega_dt     = omega_orb * delta_t;
         const double cos_odt      = std::cos(omega_dt);
         const double sin_odt      = std::sin(omega_dt);
 
-        // Pin-down {s, j, a}
-        const double a_val_j =
-            (a_val_i * cos_odt) + ((j_val_i / omega_orb) * sin_odt);
-        const double j_val_j =
-            (j_val_i * cos_odt) - ((a_val_i * omega_orb) * sin_odt);
-        const double s_val_j = -omega_orb_sq * a_val_j;
-        const double c_val_j = -omega_orb_sq * j_val_j;
-        // Integrate to get {v, d}
-        const double v_circ_i = -j_val_i / omega_orb_sq;
-        const double v_circ_j = -j_val_j / omega_orb_sq;
-        const double v_val_j  = v_circ_j + (v_val_i - v_circ_i);
-        const double d_circ_j = -a_val_j / omega_orb_sq;
-        const double d_circ_i = -a_val_i / omega_orb_sq;
-        const double d_val_j =
-            d_circ_j + (d_val_i - d_circ_i) + ((v_val_i - v_circ_i) * delta_t);
+        const double inv_omega_orb          = 1.0 / omega_orb;
+        const double inv_omega_orb_sq       = 1.0 / omega_orb_sq;
+        const double sin_odt_inv_omega      = sin_odt * inv_omega_orb;
+        const double d3_i_sin_odt_inv_omega = d3_i * sin_odt_inv_omega;
+        const double d2_i_omega_sin_odt     = d2_i * omega_orb * sin_odt;
 
-        // Write back transformed values (errors unchanged)
-        leaves_batch[leaf_offset + 0]  = c_val_j;
-        leaves_batch[leaf_offset + 2]  = s_val_j;
-        leaves_batch[leaf_offset + 4]  = j_val_j;
-        leaves_batch[leaf_offset + 6]  = a_val_j;
-        leaves_batch[leaf_offset + 8]  = v_val_j;
-        leaves_batch[leaf_offset + 10] = d_val_j;
+        // Pin-down {s, j, a}
+        const double d2_j = (d2_i * cos_odt) + d3_i_sin_odt_inv_omega;
+        const double d3_j = (d3_i * cos_odt) - d2_i_omega_sin_odt;
+        const double d4_j = -omega_orb_sq * d2_j;
+        const double d5_j = -omega_orb_sq * d3_j;
+        // Integrate to get {v, d}
+        const double v_circ_i = -d3_i / omega_orb_sq;
+        const double v_circ_j = -d3_j / omega_orb_sq;
+        const double d1_diff  = d1_i - v_circ_i;
+        const double d1_j     = v_circ_j + d1_diff;
+        const double d_circ_j = -d2_j / omega_orb_sq;
+        const double d_circ_i = -d2_i / omega_orb_sq;
+        const double d0_j = d_circ_j + (d0_i - d_circ_i) + (d1_diff * delta_t);
+
+        // Transform errors
+        double sig_d5_j, sig_d4_j, sig_d3_j, sig_d2_j, sig_d1_j;
+        if (use_conservative_tile) {
+            const double omega_cu     = omega_orb_sq * omega_orb;
+            const double inv_omega_cu = inv_omega_orb * inv_omega_orb_sq;
+            const double var_d1_i     = sig_d1_i * sig_d1_i;
+            const double var_d2_i     = sig_d2_i * sig_d2_i;
+            const double var_d3_i     = sig_d3_i * sig_d3_i;
+            const double var_d5_i     = sig_d5_i * sig_d5_i;
+
+            const double u2 = (omega_dt * d3_j * inv_omega_orb_sq) -
+                              (d3_i_sin_odt_inv_omega * inv_omega_orb);
+            const double u3 = -(omega_dt * d2_j) - (d2_i * sin_odt);
+            const double u4 = -(2 * omega_orb * d2_j) - (omega_orb_sq * u2);
+            const double u5 = -(2 * omega_orb * d3_j) - (omega_orb_sq * u3);
+            const double u1 =
+                (2 * (d3_j - d3_i) * inv_omega_cu) - (u3 * inv_omega_orb_sq);
+            const double v3 = -omega_orb / (2 * d3_i);
+            const double v5 = omega_orb / (2 * d5_i);
+
+            const double j52 = omega_cu * sin_odt;
+            const double j53 = -(omega_orb_sq * cos_odt) + (u5 * v3);
+            const double j55 = u5 * v5;
+            sig_d5_j =
+                std::sqrt((j52 * j52 * var_d2_i) + (j53 * j53 * var_d3_i) +
+                          (j55 * j55 * var_d5_i));
+
+            const double j42 = -omega_orb_sq * cos_odt;
+            const double j43 = -(omega_orb * sin_odt) + (u4 * v3);
+            const double j45 = u4 * v5;
+            sig_d4_j =
+                std::sqrt((j42 * j42 * var_d2_i) + (j43 * j43 * var_d3_i) +
+                          (j45 * j45 * var_d5_i));
+
+            const double j32 = -omega_orb * sin_odt;
+            const double j33 = cos_odt + (u3 * v3);
+            const double j35 = u3 * v5;
+            sig_d3_j =
+                std::sqrt((j32 * j32 * var_d2_i) + (j33 * j33 * var_d3_i) +
+                          (j35 * j35 * var_d5_i));
+
+            const double j22 = cos_odt;
+            const double j23 = (sin_odt / omega_orb) + (u2 * v3);
+            const double j25 = u2 * v5;
+            sig_d2_j =
+                std::sqrt((j22 * j22 * var_d2_i) + (j23 * j23 * var_d3_i) +
+                          (j25 * j25 * var_d5_i));
+
+            const double j11 = 1.0;
+            const double j12 = sin_odt_inv_omega;
+            const double j13 = ((1 - cos_odt) * inv_omega_orb_sq) + (u1 * v3);
+            const double j15 = u1 * v5;
+            sig_d1_j =
+                std::sqrt((j11 * j11 * var_d1_i) + (j12 * j12 * var_d2_i) +
+                          (j13 * j13 * var_d3_i) + (j15 * j15 * var_d5_i));
+
+        } else {
+            const double sig_d2_i_cos = cos_odt * sig_d2_i;
+            const double sig_d3_i_cos = cos_odt * sig_d3_i;
+            const double sig_d2_i_sin = sin_odt * sig_d2_i;
+            const double sig_d3_i_sin = sin_odt * sig_d3_i;
+            const double sig_d3_i_1mincos =
+                (1 - cos_odt) * sig_d3_i / omega_orb_sq;
+            sig_d2_j =
+                std::sqrt((sig_d2_i_cos * sig_d2_i_cos) +
+                          ((sig_d3_i_sin * sig_d3_i_sin) / omega_orb_sq));
+            sig_d3_j =
+                std::sqrt((sig_d3_i_cos * sig_d3_i_cos) +
+                          ((sig_d2_i_sin * sig_d2_i_sin) * omega_orb_sq));
+            sig_d1_j = std::sqrt(
+                (sig_d1_i * sig_d1_i) + (sig_d3_i_1mincos * sig_d3_i_1mincos) +
+                ((sig_d2_i_sin * sig_d2_i_sin) / omega_orb_sq));
+            sig_d5_j = omega_orb_sq * sig_d3_j;
+            sig_d4_j = omega_orb_sq * sig_d2_j;
+        }
+
+        // Write back transformed values
+        leaves_batch[leaf_offset + 0]  = d5_j;
+        leaves_batch[leaf_offset + 1]  = sig_d5_j;
+        leaves_batch[leaf_offset + 2]  = d4_j;
+        leaves_batch[leaf_offset + 3]  = sig_d4_j;
+        leaves_batch[leaf_offset + 4]  = d3_j;
+        leaves_batch[leaf_offset + 5]  = sig_d3_j;
+        leaves_batch[leaf_offset + 6]  = d2_j;
+        leaves_batch[leaf_offset + 7]  = sig_d2_j;
+        leaves_batch[leaf_offset + 8]  = d1_j;
+        leaves_batch[leaf_offset + 9]  = sig_d1_j;
+        leaves_batch[leaf_offset + 10] = d0_j;
+        leaves_batch[leaf_offset + 11] = sig_d0_i;
     }
 
     // Pre-compute constants to avoid repeated calculations
@@ -955,7 +1139,7 @@ void circ_taylor_transform_batch(std::span<double> leaves_batch,
                              (c_val_i * onehundred_twenty_delta_t_fifth);
 
         // Transform errors
-        double c_err_j, s_err_j, j_err_j, a_err_j, v_err_j, d_err_j;
+        double c_err_j, s_err_j, j_err_j, a_err_j, v_err_j;
         if (use_conservative_tile) {
             // Conservative: sqrt(errors^2 @ T^2.T)
             c_err_j = c_err_i;
@@ -976,15 +1160,6 @@ void circ_taylor_transform_batch(std::span<double> leaves_batch,
                  sixth_delta_t_cubed) +
                 (c_err_i * c_err_i * twenty_fourth_delta_t_fourth *
                  twenty_fourth_delta_t_fourth));
-            d_err_j = std::sqrt(
-                (d_err_i * d_err_i) + (v_err_i * v_err_i * delta_t_sq) +
-                (a_err_i * a_err_i * half_delta_t_sq * half_delta_t_sq) +
-                (j_err_i * j_err_i * sixth_delta_t_cubed *
-                 sixth_delta_t_cubed) +
-                (s_err_i * s_err_i * twenty_fourth_delta_t_fourth *
-                 twenty_fourth_delta_t_fourth) +
-                (c_err_i * c_err_i * onehundred_twenty_delta_t_fifth *
-                 onehundred_twenty_delta_t_fifth));
         } else {
             // Non-conservative: errors * |diag(T)| = errors * 1
             c_err_j = c_err_i;
@@ -992,7 +1167,6 @@ void circ_taylor_transform_batch(std::span<double> leaves_batch,
             j_err_j = j_err_i;
             a_err_j = a_err_i;
             v_err_j = v_err_i;
-            d_err_j = d_err_i;
         }
 
         // Write back transformed values
@@ -1007,20 +1181,23 @@ void circ_taylor_transform_batch(std::span<double> leaves_batch,
         leaves_batch[leaf_offset + 8]  = v_val_j;
         leaves_batch[leaf_offset + 9]  = v_err_j;
         leaves_batch[leaf_offset + 10] = d_val_j;
-        leaves_batch[leaf_offset + 11] = d_err_j;
+        leaves_batch[leaf_offset + 11] = d_err_i;
     }
 }
 
 std::vector<double>
-generate_bp_taylor_circular(std::span<const std::vector<double>> param_arr,
-                            std::span<const double> dparams,
-                            const std::vector<ParamLimitType>& param_limits,
-                            double tseg_ffa,
-                            SizeType nsegments,
-                            SizeType fold_bins,
-                            double tol_bins,
-                            SizeType ref_seg,
-                            bool use_conservative_tile) {
+generate_bp_circ_taylor(std::span<const std::vector<double>> param_arr,
+                        std::span<const double> dparams,
+                        const std::vector<ParamLimitType>& param_limits,
+                        double tseg_ffa,
+                        SizeType nsegments,
+                        SizeType nbins,
+                        double eta,
+                        SizeType ref_seg,
+                        double p_orb_min,
+                        double minimum_snap_cells,
+                        bool use_conservative_tile) {
+    constexpr double kEps              = 1e-12;
     constexpr SizeType kParamsExpected = 5;
     error_check::check_equal(param_arr.size(), kParamsExpected,
                              "param_arr must have 5 parameters");
@@ -1034,6 +1211,7 @@ generate_bp_taylor_circular(std::span<const std::vector<double>> param_arr,
 
     // Snail Scheme
     psr_utils::MiddleOutScheme scheme(nsegments, ref_seg, tseg_ffa);
+    std::vector<double> weights(n_freqs, 1.0);
     std::vector<double> branching_pattern(nsegments - 1);
 
     // Initialize dparam_cur_batch - each frequency gets the same dparams
@@ -1066,41 +1244,38 @@ generate_bp_taylor_circular(std::span<const std::vector<double>> param_arr,
             }
         }
     }
+    // Track when first snap branching occurs for each frequency
     std::vector<bool> snap_first_branched(n_freqs, false);
+    std::vector<bool> snap_active_mask(n_freqs, false);
+    std::vector<double> dparam_new_batch(n_freqs * poly_order, 0.0);
+    std::vector<double> shift_bins_batch(n_freqs * poly_order, 0.0);
+    std::vector<double> dparam_cur_next(n_freqs * poly_order, 0.0);
+    std::vector<double> n_branches(n_freqs, 1.0);
+    const auto n_params = poly_order + 1;
+    std::vector<double> dparam_d_vec(n_freqs * n_params, 0.0);
+    std::vector<SizeType> idx_circular_snap;
+    std::vector<SizeType> idx_taylor;
+    idx_circular_snap.reserve(n_freqs);
+    idx_taylor.reserve(n_freqs);
+
     for (SizeType prune_level = 1; prune_level < nsegments; ++prune_level) {
         const auto coord_next = scheme.get_coord(prune_level);
         const auto coord_cur  = scheme.get_current_coord(prune_level);
         const auto [t0_cur, t_obs_minus_t_ref] = coord_cur;
 
-        // Calculate optimal parameter steps
-        std::vector<double> dparam_new_batch(n_freqs * poly_order);
-        psr_utils::poly_taylor_step_d_vec(
-            poly_order, t_obs_minus_t_ref, fold_bins, tol_bins,
-            std::span<const double>(f0_batch),
-            std::span<double>(dparam_new_batch), 0);
-
-        // Calculate shift bins
-        std::vector<double> shift_bins_batch(n_freqs * poly_order);
+        // Calculate optimal parameter steps and shift bins
+        psr_utils::poly_taylor_step_d_vec(poly_order, t_obs_minus_t_ref, nbins,
+                                          eta, f0_batch, dparam_new_batch, 0);
         psr_utils::poly_taylor_shift_d_vec(
-            std::span<const double>(dparam_cur_batch),
-            std::span<const double>(dparam_new_batch), t_obs_minus_t_ref,
-            fold_bins, std::span<const double>(f0_batch), 0,
-            std::span<double>(shift_bins_batch), n_freqs, poly_order);
-
-        // Initialize arrays for next iteration
-        std::vector<double> dparam_cur_next(n_freqs * poly_order);
-        std::vector<SizeType> n_branch_accel(n_freqs, 1);
-        std::vector<SizeType> n_branch_snap(n_freqs, 1);
-        std::vector<double> n_branches(n_freqs, 1);
-        std::vector<double> validation_fractions(n_freqs, 1.0);
+            dparam_cur_batch, dparam_new_batch, t_obs_minus_t_ref, nbins,
+            f0_batch, 0, shift_bins_batch, n_freqs, poly_order);
 
         // Determine branching needs
-        constexpr double kEps = 1e-12;
         for (SizeType i = 0; i < n_freqs; ++i) {
             for (SizeType j = 1; j < poly_order; ++j) {
                 const auto idx = (i * poly_order) + j;
                 const auto needs_branching =
-                    shift_bins_batch[idx] >= (tol_bins - kEps);
+                    shift_bins_batch[idx] >= (eta - kEps);
                 const auto too_large_step =
                     dparam_new_batch[idx] > (param_ranges[idx] + kEps);
 
@@ -1115,34 +1290,30 @@ generate_bp_taylor_circular(std::span<const std::vector<double>> param_arr,
                 n_branches[i] *= static_cast<double>(num_points);
                 dparam_cur_next[idx] =
                     dparam_cur_batch[idx] / static_cast<double>(num_points);
-                if (j == 1) {
-                    n_branch_snap[i] *= static_cast<SizeType>(num_points);
-                } else if (j == 3) {
-                    n_branch_accel[i] *= static_cast<SizeType>(num_points);
-                }
             }
-            // Determine validation fraction
-            const bool snap_branches_now  = n_branch_snap[i] > 1;
-            const bool accel_branches_now = n_branch_accel[i] > 1;
-            if (snap_branches_now && !snap_first_branched[i]) {
-                if (accel_branches_now ||
-                    dparam_cur_batch[(i * poly_order) + 3] > 0.0) {
-                    validation_fractions[i] = 0.5;
-                } else {
-                    validation_fractions[i] = 1.0;
-                }
-                snap_first_branched[i] = true;
-            } else {
-                validation_fractions[i] = 1.0;
-            }
-            n_branches[i] *= validation_fractions[i];
         }
-        double total_branches = 0;
+        // Determine validation fraction
         for (SizeType i = 0; i < n_freqs; ++i) {
-            total_branches += n_branches[i];
+            const auto snap_val = param_limits[1][1];
+            const auto dsnap    = dparam_cur_next[(i * poly_order) + 1];
+            const auto snap_active =
+                std::abs(snap_val) > (minimum_snap_cells * (dsnap + kEps));
+            // Apply 0.5x if this is the first time snap becomes active
+            const bool just_active = snap_active && !snap_first_branched[i];
+            n_branches[i] *= just_active ? 0.5 : 1.0;
+            snap_first_branched[i] = snap_first_branched[i] || just_active;
+            snap_active_mask[i]    = snap_active;
         }
-        branching_pattern[prune_level - 1] =
-            total_branches / static_cast<double>(n_freqs);
+
+        // Compute average branching factor and update weights
+        double children = 0.0;
+        double parents  = 0.0;
+        for (SizeType i = 0; i < n_freqs; ++i) {
+            children += weights[i] * n_branches[i];
+            parents += weights[i];
+            weights[i] *= n_branches[i];
+        }
+        branching_pattern[prune_level - 1] = children / parents;
 
         // Transform dparams to the next segment
         const auto delta_t  = coord_next.first - coord_cur.first;
@@ -1154,13 +1325,72 @@ generate_bp_taylor_circular(std::span<const std::vector<double>> param_arr,
                     dparam_cur_next[(i * poly_order) + j];
             }
         }
-        auto dparam_d_vec_new = transforms::shift_taylor_errors_batch(
-            dparam_d_vec, delta_t, use_conservative_tile, n_freqs, n_params);
-        // Copy back to dparam_cur_batch (excluding last dimension)
+
         for (SizeType i = 0; i < n_freqs; ++i) {
-            for (SizeType j = 0; j < poly_order; ++j) {
-                dparam_cur_batch[(i * poly_order) + j] =
-                    dparam_d_vec_new[(i * n_params) + j];
+            if (snap_active_mask[i]) {
+                idx_circular_snap.push_back(i);
+            } else {
+                idx_taylor.push_back(i);
+            }
+        }
+
+        // Process circular snap subset
+        if (!idx_circular_snap.empty()) {
+            const auto n_snap = idx_circular_snap.size();
+
+            // Extract subset for circular snap processing
+            std::vector<double> dparam_snap_subset(n_snap * n_params);
+            for (SizeType i = 0; i < n_snap; ++i) {
+                const auto src_idx = idx_circular_snap[i];
+                for (SizeType j = 0; j < n_params; ++j) {
+                    dparam_snap_subset[(i * n_params) + j] =
+                        dparam_d_vec[(src_idx * n_params) + j];
+                }
+            }
+
+            // Apply circular transformation
+            std::vector<double> dparam_snap_new =
+                transforms::shift_taylor_circular_errors_batch(
+                    dparam_snap_subset, delta_t, p_orb_min,
+                    use_conservative_tile, n_snap, n_params);
+
+            // Copy back to dparam_cur_batch (excluding last dimension)
+            for (SizeType i = 0; i < n_snap; ++i) {
+                const auto dst_idx = idx_circular_snap[i];
+                for (SizeType j = 0; j < poly_order; ++j) {
+                    dparam_cur_batch[(dst_idx * poly_order) + j] =
+                        dparam_snap_new[(i * n_params) + j];
+                }
+            }
+        }
+
+        // Process taylor subset
+        if (!idx_taylor.empty()) {
+            const auto n_taylor = idx_taylor.size();
+
+            // Extract subset for taylor processing
+            std::vector<double> dparam_taylor_subset(n_taylor * n_params);
+            for (SizeType i = 0; i < n_taylor; ++i) {
+                const auto src_idx = idx_taylor[i];
+                for (SizeType j = 0; j < n_params; ++j) {
+                    dparam_taylor_subset[(i * n_params) + j] =
+                        dparam_d_vec[(src_idx * n_params) + j];
+                }
+            }
+
+            // Apply taylor transformation
+            std::vector<double> dparam_taylor_new =
+                transforms::shift_taylor_errors_batch(
+                    dparam_taylor_subset, delta_t, use_conservative_tile,
+                    n_taylor, n_params);
+
+            // Copy back to dparam_cur_batch (excluding last dimension)
+            for (SizeType i = 0; i < n_taylor; ++i) {
+                const auto dst_idx = idx_taylor[i];
+                for (SizeType j = 0; j < poly_order; ++j) {
+                    dparam_cur_batch[(dst_idx * poly_order) + j] =
+                        dparam_taylor_new[(i * n_params) + j];
+                }
             }
         }
     }

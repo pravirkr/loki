@@ -201,8 +201,7 @@ private:
                                        std::pair<double, double>,
                                        SizeType,
                                        SizeType,
-                                       bool,
-                                       double);
+                                       bool);
     static constexpr std::array<PolyTransformFunc, 3> kPolyTransformFuncs = {
         poly_taylor_transform_accel_batch, // nparams == 2
         poly_taylor_transform_jerk_batch,  // nparams == 3
