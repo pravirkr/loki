@@ -20,27 +20,375 @@ namespace loki::algorithms {
 
 namespace {
 
+/**
+
+// ==========================================
+// 1. Optimized Atomic Aggregation (Float)
+// ==========================================
+// Uses warp-level primitives to reduce shared memory contention
+__global__ void kernel_fold_shared_mem_warp_reduce(
+    const float* __restrict__ ts_e,
+    const float* __restrict__ ts_v,
+    const uint32_t* __restrict__ phase_map,
+    float* __restrict__ fold,
+    int nfreqs,
+    int segment_len,
+    int nbins,
+    int nsegments) {
+
+    extern __shared__ float shared_bins[]; 
+    float* shared_e = shared_bins;
+    float* shared_v = shared_bins + nbins;
+
+    const int tid = threadIdx.x;
+    const int lane_id = tid % 32;
+    const int ifreq = blockIdx.y;
+
+    // Zero shared memory
+    for (int i = tid; i < nbins; i += blockDim.x) {
+        shared_e[i] = 0.0f;
+        shared_v[i] = 0.0f;
+    }
+    __syncthreads();
+
+    // Process samples
+    for (int iseg = 0; iseg < nsegments; ++iseg) {
+        const size_t segment_offset = static_cast<size_t>(iseg) * segment_len;
+        const size_t phase_offset = static_cast<size_t>(ifreq) * segment_len;
+        
+        for (int i = tid; i < segment_len; i += blockDim.x) {
+            int bin = phase_map[phase_offset + i];
+            float val_e = ts_e[segment_offset + i];
+            float val_v = ts_v[segment_offset + i];
+
+            // Optional: Warp-level aggregation could happen here if many threads
+            // in a warp map to the same bin. For now, standard atomic is safest
+            // as collision patterns are data-dependent.
+            atomicAdd(&shared_e[bin], val_e);
+            atomicAdd(&shared_v[bin], val_v);
+        }
+    }
+    __syncthreads();
+
+    // Write back
+    const size_t out_base = (static_cast<size_t>(blockIdx.y) * 2 * nbins);
+    for (int iseg = 0; iseg < nsegments; ++iseg) {
+        const size_t seg_out = (static_cast<size_t>(iseg) * nfreqs * 2 * nbins) + out_base;
+        for (int i = tid; i < nbins; i += blockDim.x) {
+            atomicAdd(&fold[seg_out + i], shared_e[i]);
+            atomicAdd(&fold[seg_out + nbins + i], shared_v[i]);
+        }
+    }
+}
+
+// ==========================================
+// 2. Bucketed Fold Kernel (Float) - Sort Based
+// ==========================================
+// Requires pre-sorting via Thrust. 
+// Input: sorted_indices (indices of samples sorted by their phase bin)
+//        bin_offsets (start index of each bin in the sorted array)
+__global__ void kernel_fold_bucketed(
+    const float* __restrict__ ts_e,
+    const float* __restrict__ ts_v,
+    const int* __restrict__ sorted_indices, // shape: [nfreqs, segment_len]
+    const int* __restrict__ bin_offsets,    // shape: [nfreqs, nbins + 1]
+    float* __restrict__ fold,
+    int nfreqs,
+    int segment_len,
+    int nbins,
+    int nsegments) {
+
+    // One block per frequency per segment seems reasonable, or 
+    // One block per frequency, looping over segments (better for reuse)
+    const int ifreq = blockIdx.x;
+    const int tid = threadIdx.x;
+
+    if (ifreq >= nfreqs) return;
+
+    // Offsets for this frequency
+    const int* my_offsets = bin_offsets + (ifreq * (nbins + 1));
+    const int* my_indices = sorted_indices + (ifreq * segment_len);
+
+    // Each thread takes a bin (or loop if nbins > blockDim)
+    for (int bin = tid; bin < nbins; bin += blockDim.x) {
+        int start = my_offsets[bin];
+        int end = my_offsets[bin + 1];
+
+        // For each segment, accumulate this bin's samples
+        for (int iseg = 0; iseg < nsegments; ++iseg) {
+            float sum_e = 0.0f;
+            float sum_v = 0.0f;
+            const size_t seg_offset = static_cast<size_t>(iseg) * segment_len;
+
+            for (int k = start; k < end; ++k) {
+                int sample_idx = my_indices[k]; // 0..segment_len-1
+                sum_e += ts_e[seg_offset + sample_idx];
+                sum_v += ts_v[seg_offset + sample_idx];
+            }
+
+            // Write result (no atomics needed!)
+            const size_t out_idx = (static_cast<size_t>(iseg) * nfreqs * 2 * nbins) + 
+                                   (static_cast<size_t>(ifreq) * 2 * nbins) + bin;
+            fold[out_idx] = sum_e;
+            fold[out_idx + nbins] = sum_v;
+        }
+    }
+}
+
+// ==========================================
+// 3. Optimized Complex Kernel
+// ==========================================
+// uses the robust phase calculation but optimizes memory loads
+__global__ void kernel_fold_segments_complex_optimized(
+    const float* __restrict__ ts_e,
+    const float* __restrict__ ts_v,
+    ComplexTypeCUDA* __restrict__ fold,
+    const double* __restrict__ freqs,
+    int nfreqs,
+    int nsegments,
+    int segment_len,
+    int nbins,
+    double tsamp,
+    double t_ref) {
+    
+    // ... (Setup code same as robust version) ...
+    const int iseg  = static_cast<int>(blockIdx.x);
+    const int ifreq = static_cast<int>(blockIdx.y);
+    if (iseg >= nsegments || ifreq >= nfreqs) return;
+
+    const int tid       = static_cast<int>(threadIdx.x);
+    const int nbins_f   = (nbins / 2) + 1;
+    const int m         = tid + 1; // Harmonic 1..num_harms
+
+    extern __shared__ float sh[];
+    float* sh_e     = sh;
+    float* sh_v     = sh + segment_len;
+    // ... reductions buffers ...
+    float* sh_red_e = sh + (2 * segment_len);
+    float* sh_red_v = sh + (2 * segment_len) + blockDim.x;
+
+    const size_t start_idx = static_cast<size_t>(iseg) * segment_len;
+
+    // Coalesced load into shared memory
+    for (int i = tid; i < segment_len; i += blockDim.x) {
+        sh_e[i] = ts_e[start_idx + i];
+        sh_v[i] = ts_v[start_idx + i];
+    }
+    __syncthreads();
+
+    // DC Calculation (tid 0) and Reduction logic ... (Same as robust)
+    // ... (omitted for brevity, assume same reduction code) ...
+
+    if (m >= nbins_f) return; // Skip if thread is out of harmonic range
+
+    // Harmonic Processing
+    const double two_pi = 2.0 * M_PI;
+    const double freq   = freqs[ifreq];
+    const double fm     = freq * static_cast<double>(m);
+    
+    double delta_phase = -two_pi * fm * tsamp;
+    double init_phase  = two_pi * fm * t_ref;
+    
+    // Normalize to [-pi, pi] once
+    // Note: fmod is expensive, but done once per thread
+    delta_phase = remainder(delta_phase, two_pi); 
+    init_phase  = remainder(init_phase, two_pi);
+
+    const float delta_phase_f = static_cast<float>(delta_phase);
+    const float init_phase_f  = static_cast<float>(init_phase);
+
+    float acc_e_r = 0.0f;
+    float acc_e_i = 0.0f;
+    float acc_v_r = 0.0f;
+    float acc_v_i = 0.0f;
+
+    // Unroll loop slightly for ILP (Instruction Level Parallelism)
+    // Most compilers handle this, but manual unrolling can help hide fma latency
+    for (int k = 0; k < segment_len; ++k) {
+        // Direct Phase: Robust
+        const float phase = fmaf(static_cast<float>(k), delta_phase_f, init_phase_f);
+        float s, c;
+        __sincosf(phase, &s, &c);
+
+        float val_e = sh_e[k];
+        float val_v = sh_v[k];
+
+        acc_e_r = fmaf(val_e, c, acc_e_r);
+        acc_e_i = fmaf(val_e, s, acc_e_i);
+        acc_v_r = fmaf(val_v, c, acc_v_r);
+        acc_v_i = fmaf(val_v, s, acc_v_i);
+    }
+
+    // Write output
+    const size_t out_idx = (static_cast<size_t>(iseg) * nfreqs * 2 * nbins_f) + 
+                           (static_cast<size_t>(ifreq) * 2 * nbins_f);
+    
+    fold[out_idx + m] = ComplexTypeCUDA(acc_e_r, acc_e_i);
+    fold[out_idx + nbins_f + m] = ComplexTypeCUDA(acc_v_r, acc_v_i);
+}
+
+// Inside Impl class ...
+
+    // Auxiliary buffers for bucketed approach
+    thrust::device_vector<int> m_sorted_indices;
+    thrust::device_vector<int> m_bin_offsets;
+    thrust::device_vector<int> m_phase_bin_keys; // To hold keys for sorting
+
+    void prepare_buckets() {
+        size_t total_samples = m_nfreqs * m_segment_len;
+        m_sorted_indices.resize(total_samples);
+        m_phase_bin_keys.resize(total_samples);
+        m_bin_offsets.resize(m_nfreqs * (m_nbins + 1));
+
+        // 1. Initialize indices 0..segment_len-1 for each freq
+        // This is tricky: we want indices relevant to the segment.
+        // Actually, we just need a sequence 0,1,2... repeated.
+        // Let's use a transformation.
+        
+        // ... (Code to fill m_sorted_indices with 0..seg_len, 0..seg_len...)
+        
+        // 2. Copy phase map to keys
+        // m_phase_bin_keys = m_phase_map_d (cast to int if needed)
+
+        // 3. Sort by key (segmented sort is ideal, but global sort works if keys include freq info)
+        // Key = (ifreq * nbins) + phase_bin
+        // Value = sample_index
+
+        // 4. Compute offsets (histogram/lower_bound)
+    }
+// ... (previous includes)
+
+// ... (ComputePhase struct and get_phase_idx_device - keep robust version)
+
+// Optimized Complex Kernel (Robust + Fast)
+__global__ void kernel_fold_segments_complex(const float* __restrict__ ts_e,
+                                             const float* __restrict__ ts_v,
+                                             ComplexTypeCUDA* __restrict__ fold,
+                                             const double* __restrict__ freqs,
+                                             int nfreqs,
+                                             int nsegments,
+                                             int segment_len,
+                                             int nbins,
+                                             double tsamp,
+                                             double t_ref) {
+    const int iseg  = static_cast<int>(blockIdx.x);
+    const int ifreq = static_cast<int>(blockIdx.y);
+
+    if (iseg >= nsegments || ifreq >= nfreqs) return;
+
+    const int tid       = static_cast<int>(threadIdx.x);
+    const int nbins_f   = (nbins / 2) + 1;
+    const int m         = tid + 1;
+
+    // Bounds check for harmonics
+    if (m >= nbins_f && tid != 0) return; // tid 0 continues for DC
+
+    extern __shared__ float sh[];
+    float* sh_e     = sh;
+    float* sh_v     = sh + segment_len;
+    float* sh_red_e = sh + (2 * segment_len);
+    float* sh_red_v = sh + (2 * segment_len) + blockDim.x;
+
+    const size_t start_idx = static_cast<size_t>(iseg) * segment_len;
+
+    // 1. Load data into Shared Memory
+    for (int i = tid; i < segment_len; i += blockDim.x) {
+        sh_e[i] = ts_e[start_idx + i];
+        sh_v[i] = ts_v[start_idx + i];
+    }
+    __syncthreads();
+
+    // 2. Compute DC Component (Thread 0 is responsible)
+    // (Optimization: Could use warp reduction here, but block reduction is safe)
+    float local_e = 0.0f;
+    float local_v = 0.0f;
+    for (int i = tid; i < segment_len; i += blockDim.x) {
+        local_e += sh_e[i];
+        local_v += sh_v[i];
+    }
+    sh_red_e[tid] = local_e;
+    sh_red_v[tid] = local_v;
+    __syncthreads();
+
+    // Standard shared mem reduction
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            sh_red_e[tid] += sh_red_e[tid + s];
+            sh_red_v[tid] += sh_red_v[tid + s];
+        }
+        __syncthreads();
+    }
+
+    const size_t base_idx = (static_cast<size_t>(iseg) * nfreqs * 2 * nbins_f) + 
+                            (static_cast<size_t>(ifreq) * 2 * nbins_f);
+
+    if (tid == 0) {
+        fold[base_idx] = ComplexTypeCUDA(sh_red_e[0], 0.0f);
+        fold[base_idx + nbins_f] = ComplexTypeCUDA(sh_red_v[0], 0.0f);
+    }
+    
+    // 3. Compute AC Harmonics (Threads 0..nbins_f-2 map to harmonics 1..nbins_f-1)
+    if (m < nbins_f) {
+        const double two_pi = 2.0 * M_PI;
+        const double freq   = freqs[ifreq];
+        const double fm     = freq * static_cast<double>(m);
+
+        // Robust Phase Initialization
+        double d_phase = -two_pi * fm * tsamp;
+        double i_phase = two_pi * fm * t_ref;
+        
+        // Range reduction to preserve precision
+        d_phase = remainder(d_phase, two_pi);
+        i_phase = remainder(i_phase, two_pi);
+
+        const float delta_phase = static_cast<float>(d_phase);
+        const float init_phase  = static_cast<float>(i_phase);
+
+        float acc_e_r = 0.0f, acc_e_i = 0.0f;
+        float acc_v_r = 0.0f, acc_v_i = 0.0f;
+
+        // Vectorized accumulation loop
+        for (int k = 0; k < segment_len; ++k) {
+            // Direct calculation avoids drift: phi = init + k*delta
+            const float phi = fmaf(static_cast<float>(k), delta_phase, init_phase);
+            float s, c;
+            __sincosf(phi, &s, &c);
+
+            const float ve = sh_e[k];
+            const float vv = sh_v[k];
+
+            acc_e_r = fmaf(ve, c, acc_e_r);
+            acc_e_i = fmaf(ve, s, acc_e_i);
+            acc_v_r = fmaf(vv, c, acc_v_r);
+            acc_v_i = fmaf(vv, s, acc_v_i);
+        }
+
+        fold[base_idx + m] = ComplexTypeCUDA(acc_e_r, acc_e_i);
+        fold[base_idx + nbins_f + m] = ComplexTypeCUDA(acc_v_r, acc_v_i);
+    }
+}
+
+ */
+
 // CUDA device function to calculate phase index
-__device__ int get_phase_idx_device(double proper_time,
-                                    double freq,
-                                    int nbins,
-                                    double delay = 0.0) {
+__device__ int
+get_phase_idx_device(double proper_time, double freq, int nbins, double delay) {
     double norm_phase = fmod((proper_time - delay) * freq, 1.0);
     if (norm_phase < 0.0) {
         norm_phase += 1.0;
     }
     auto scaled_phase =
         static_cast<float>(norm_phase * static_cast<double>(nbins));
-    if (scaled_phase >= static_cast<float>(nbins)) {
-        scaled_phase = 0.0F;
-    }
-    const auto final_idx = __float2int_rn(scaled_phase);
+    scaled_phase =
+        (scaled_phase >= static_cast<float>(nbins)) ? 0.0F : scaled_phase;
+    auto final_idx = __float2int_rn(scaled_phase);
+    final_idx      = (final_idx >= nbins) ? 0 : final_idx;
     return final_idx;
 }
 
 // Thrust functor for computing phase indices
 struct ComputePhase {
-    const double* freq_arr;
+    const double* __restrict__ freq_arr;
     double tsamp, t_ref;
     int segment_len, nbins;
 
@@ -218,10 +566,10 @@ __global__ void kernel_fold_segments_complex(const float* __restrict__ ts_e,
     } else if (init_phase_mod > M_PI) {
         init_phase_mod -= two_pi;
     }
-    float ph_r         = cosf(static_cast<float>(init_phase_mod));
-    float ph_i         = sinf(static_cast<float>(init_phase_mod));
-    const float step_r = cosf(static_cast<float>(delta_phase));
-    const float step_i = sinf(static_cast<float>(delta_phase));
+    // Fast sincos computation
+    float ph_r, ph_i, step_r, step_i;
+    __sincosf(static_cast<float>(init_phase_mod), &ph_i, &ph_r);
+    __sincosf(static_cast<float>(delta_phase), &step_i, &step_r);
 
     float acc_e_r = 0.0F;
     float acc_e_i = 0.0F;
@@ -472,12 +820,12 @@ private:
             // Use shared memory for small bin counts
             const dim3 block_dim(256);
             const dim3 grid_dim(1, m_nfreqs);
-            const auto shared_mem_size =
+            const auto shmem_size =
                 (2 * m_nbins * static_cast<int>(sizeof(float)));
 
-            cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
-            kernel_fold_shared_mem<<<grid_dim, block_dim, shared_mem_size,
-                                     stream>>>(
+            cuda_utils::check_kernel_launch_params(grid_dim, block_dim,
+                                                   shmem_size);
+            kernel_fold_shared_mem<<<grid_dim, block_dim, shmem_size, stream>>>(
                 ts_e_d, ts_v_d, thrust::raw_pointer_cast(m_phase_map_d.data()),
                 fold_d, static_cast<int>(m_nfreqs),
                 static_cast<int>(m_segment_len), static_cast<int>(m_nbins),
@@ -504,8 +852,10 @@ private:
         const int num_harms = static_cast<int>(m_nbins_f) - 1;
         const dim3 grid(m_nsegments, m_nfreqs);
         const int block_size = num_harms;
-        const size_t shmem_size =
-            (2 * m_segment_len + (2 * block_size)) * sizeof(float);
+        const int shmem_size =
+            (2 * static_cast<int>(m_segment_len) + (2 * block_size)) *
+            sizeof(float);
+        cuda_utils::check_kernel_launch_params(grid, block_size, shmem_size);
         kernel_fold_segments_complex<<<grid, block_size, shmem_size, stream>>>(
             ts_e_d, ts_v_d, fold_d,
             thrust::raw_pointer_cast(m_freq_arr_d.data()),
