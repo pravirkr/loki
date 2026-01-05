@@ -33,14 +33,40 @@ public:
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 class FFAManagerCUDATypedImpl final : public FFAManagerCUDA::BaseImpl {
 public:
-    using HostFoldType   = typename FoldTypeTraits<FoldTypeCUDA>::HostType;
-    using DeviceFoldType = typename FoldTypeTraits<FoldTypeCUDA>::DeviceType;
+    using HostFoldType   = FoldTypeTraits<FoldTypeCUDA>::HostType;
+    using DeviceFoldType = FoldTypeTraits<FoldTypeCUDA>::DeviceType;
 
     FFAManagerCUDATypedImpl(search::PulsarSearchConfig cfg, int device_id)
         : m_base_cfg(std::move(cfg)),
-          m_region_planner(m_base_cfg),
           m_device_id(device_id) {
         cuda_utils::CudaSetDeviceGuard device_guard(m_device_id);
+        // Query CUDA memory usage
+        const auto [free_mem_gb, total_mem_gb] =
+            cuda_utils::get_cuda_memory_usage();
+
+        // Reserve memory for overhead
+        constexpr double kReservedGB = 1.0; // For CUDA runtime, kernels, etc.
+        const double usable_gpu_gb   = free_mem_gb - kReservedGB;
+
+        spdlog::info("GPU Memory: {:.2f} GB total, {:.2f} GB free, {:.2f} GB "
+                     "usable for chunking",
+                     total_mem_gb, free_mem_gb, usable_gpu_gb);
+
+        if (usable_gpu_gb < 1.0) {
+            throw std::runtime_error(
+                std::format("Insufficient GPU memory: {:.2f} GB available, "
+                            "need at least 1 GB",
+                            usable_gpu_gb));
+        }
+
+        // Override max_memory_gb for GPU-based chunking
+        auto cfg_with_gpu_mem = m_base_cfg;
+        cfg_with_gpu_mem.set_max_memory_gb(usable_gpu_gb);
+
+        // Create region planner with GPU memory limit
+        m_region_planner =
+            plans::FFARegionPlanner<HostFoldType>(cfg_with_gpu_mem);
+
         const auto& planner_stats = m_region_planner.get_stats();
         // Allocate buffers once, sized for the largest chunk
         m_ffa_workspace = FFAWorkspaceCUDA<FoldTypeCUDA>(
@@ -55,13 +81,13 @@ public:
         m_widths_d = m_base_cfg.get_scoring_widths();
 
         // Log the actual memory usage for the allocated buffers
-        spdlog::info("FFAManager allocated {:.2f} GB ({:.2f} GB buffers "
+        spdlog::info("FFAManagerCUDA allocated {:.2f} GB ({:.2f} GB buffers "
                      "+ {:.2f} GB coords + {:.2f} GB extra)",
                      planner_stats.get_manager_memory_usage(),
                      planner_stats.get_buffer_memory_usage(),
                      planner_stats.get_coord_memory_usage(),
                      planner_stats.get_extra_memory_usage());
-        spdlog::info("FFAManager will process {} chunks",
+        spdlog::info("FFAManagerCUDA will process {} chunks",
                      m_region_planner.get_nregions());
     }
 
@@ -93,9 +119,11 @@ public:
         cudaMemcpyAsync(thrust::raw_pointer_cast(m_ts_e_d.data()), ts_e.data(),
                         ts_e.size() * sizeof(float), cudaMemcpyHostToDevice,
                         stream);
+        cuda_utils::check_last_cuda_error("cudaMemcpyAsync failed");
         cudaMemcpyAsync(thrust::raw_pointer_cast(m_ts_v_d.data()), ts_v.data(),
                         ts_v.size() * sizeof(float), cudaMemcpyHostToDevice,
                         stream);
+        cuda_utils::check_last_cuda_error("cudaMemcpyAsync failed");
 
         for (const auto& cfg_cur : m_region_planner.get_cfgs()) {
             const auto& freq_limits = cfg_cur.get_param_limits().back();
@@ -165,6 +193,9 @@ private:
         cudaMemcpyAsync(
             m_scores.data(), thrust::raw_pointer_cast(m_scores_d.data()),
             n_scores * sizeof(float), cudaMemcpyDeviceToHost, stream);
+        cuda_utils::check_last_cuda_error("scores copy failed");
+        cudaStreamSynchronize(stream);
+        cuda_utils::check_last_cuda_error("stream synchronization failed");
         auto scores_span = std::span(m_scores).first(n_scores);
 
         // Filter scores and param sets

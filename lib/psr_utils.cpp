@@ -25,19 +25,13 @@ float get_phase_idx(double proper_time,
     // Calculate the total phase in cycles (can be negative or > 1)
     const double total_phase = (proper_time - delay) * freq;
     // Normalize phase to [0, 1) interval
-    double norm_phase = std::fmod(total_phase, 1.0);
-    // Handle negative phases by wrapping to positive equivalent
-    // This ensures the result is always in [0, 1)
-    if (norm_phase < 0.0) {
-        norm_phase += 1.0;
-    }
+    double norm_phase = total_phase - std::floor(total_phase);
     // Scale the normalized phase to [0, nbins) and convert to float
-    auto scaled_phase =
-        static_cast<float>(norm_phase * static_cast<double>(nbins));
-    if (scaled_phase >= static_cast<float>(nbins)) {
-        scaled_phase = 0.0F;
+    double iphase = norm_phase * static_cast<double>(nbins);
+    if (iphase >= static_cast<double>(nbins)) {
+        iphase = 0.0;
     }
-    return scaled_phase;
+    return static_cast<float>(iphase);
 }
 
 std::vector<double> poly_taylor_step_f(SizeType nparams,

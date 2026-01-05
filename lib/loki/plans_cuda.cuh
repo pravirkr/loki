@@ -2,6 +2,7 @@
 
 #include <vector>
 
+#include <cuda_runtime_api.h>
 #include <thrust/device_vector.h>
 
 #include "loki/algorithms/plans.hpp"
@@ -54,7 +55,8 @@ struct FFACoordD {
     }
 
     __host__ void copy_from_host(const std::vector<FFACoord>& coords,
-                                 SizeType n_coords) {
+                                 SizeType n_coords,
+                                 cudaStream_t stream) {
         // Extract to contiguous host arrays
         std::vector<uint32_t> i_tail_h(n_coords), i_head_h(n_coords);
         std::vector<float> shift_tail_h(n_coords), shift_head_h(n_coords);
@@ -66,13 +68,22 @@ struct FFACoordD {
             shift_head_h[i] = coords[i].shift_head;
         }
 
-        // Copy to device (thrust::copy handles host->device)
-        thrust::copy(i_tail_h.begin(), i_tail_h.end(), i_tail.begin());
-        thrust::copy(shift_tail_h.begin(), shift_tail_h.end(),
-                     shift_tail.begin());
-        thrust::copy(i_head_h.begin(), i_head_h.end(), i_head.begin());
-        thrust::copy(shift_head_h.begin(), shift_head_h.end(),
-                     shift_head.begin());
+        cudaMemcpyAsync(thrust::raw_pointer_cast(i_tail.data()),
+                        i_tail_h.data(), n_coords * sizeof(uint32_t),
+                        cudaMemcpyHostToDevice, stream);
+        cuda_utils::check_last_cuda_error("cudaMemcpyAsync failed");
+        cudaMemcpyAsync(thrust::raw_pointer_cast(shift_tail.data()),
+                        shift_tail_h.data(), n_coords * sizeof(float),
+                        cudaMemcpyHostToDevice, stream);
+        cuda_utils::check_last_cuda_error("cudaMemcpyAsync failed");
+        cudaMemcpyAsync(thrust::raw_pointer_cast(i_head.data()),
+                        i_head_h.data(), n_coords * sizeof(uint32_t),
+                        cudaMemcpyHostToDevice, stream);
+        cuda_utils::check_last_cuda_error("cudaMemcpyAsync failed");
+        cudaMemcpyAsync(thrust::raw_pointer_cast(shift_head.data()),
+                        shift_head_h.data(), n_coords * sizeof(float),
+                        cudaMemcpyHostToDevice, stream);
+        cuda_utils::check_last_cuda_error("cudaMemcpyAsync failed");
     }
 };
 
@@ -96,7 +107,8 @@ struct FFACoordFreqD {
     }
 
     __host__ void copy_from_host(const std::vector<FFACoordFreq>& coords,
-                                 SizeType n_coords) {
+                                 SizeType n_coords,
+                                 cudaStream_t stream) {
 
         std::vector<uint32_t> idx_h(n_coords);
         std::vector<float> shift_h(n_coords);
@@ -106,8 +118,14 @@ struct FFACoordFreqD {
             shift_h[i] = coords[i].shift;
         }
 
-        thrust::copy(idx_h.begin(), idx_h.end(), idx.begin());
-        thrust::copy(shift_h.begin(), shift_h.end(), shift.begin());
+        cudaMemcpyAsync(thrust::raw_pointer_cast(idx.data()), idx_h.data(),
+                        n_coords * sizeof(uint32_t), cudaMemcpyHostToDevice,
+                        stream);
+        cuda_utils::check_last_cuda_error("cudaMemcpyAsync failed");
+        cudaMemcpyAsync(thrust::raw_pointer_cast(shift.data()), shift_h.data(),
+                        n_coords * sizeof(float), cudaMemcpyHostToDevice,
+                        stream);
+        cuda_utils::check_last_cuda_error("cudaMemcpyAsync failed");
     }
 };
 

@@ -5,11 +5,7 @@
 #include <spdlog/spdlog.h>
 
 #include <cuda_runtime_api.h>
-#include <thrust/copy.h>
 #include <thrust/device_vector.h>
-#include <thrust/execution_policy.h>
-#include <thrust/iterator/counting_iterator.h>
-#include <thrust/transform.h>
 
 #include "loki/algorithms/fold.hpp"
 #include "loki/common/types.hpp"
@@ -331,12 +327,12 @@ struct FFAWorkspaceCUDA<FoldTypeCUDA>::Data {
         }
     }
 
-    void update_coords_freq_from_host(SizeType n_coords) {
-        coords_freq_d.copy_from_host(coords_freq, n_coords);
+    void update_coords_freq_from_host(SizeType n_coords, cudaStream_t stream) {
+        coords_freq_d.copy_from_host(coords_freq, n_coords, stream);
     }
 
-    void update_coords_from_host(SizeType n_coords) {
-        coords_d.copy_from_host(coords, n_coords);
+    void update_coords_from_host(SizeType n_coords, cudaStream_t stream) {
+        coords_d.copy_from_host(coords, n_coords, stream);
     }
 };
 
@@ -404,11 +400,11 @@ public:
             "FFACUDA::execute_h: fold must have size buffer_size");
 
         // Resize buffers only if needed
-        if (m_ts_e_d.size() != ts_e.size()) {
+        if (m_ts_e_d.size() < ts_e.size()) {
             m_ts_e_d.resize(ts_e.size());
             m_ts_v_d.resize(ts_v.size());
         }
-        if (m_fold_d.size() != fold.size()) {
+        if (m_fold_d.size() < fold.size()) {
             m_fold_d.resize(fold.size());
         }
         // Copy input data to device
@@ -416,10 +412,11 @@ public:
         cudaMemcpyAsync(thrust::raw_pointer_cast(m_ts_e_d.data()), ts_e.data(),
                         ts_e.size() * sizeof(float), cudaMemcpyHostToDevice,
                         stream);
+        cuda_utils::check_last_cuda_error("cudaMemcpyAsync failed");
         cudaMemcpyAsync(thrust::raw_pointer_cast(m_ts_v_d.data()), ts_v.data(),
                         ts_v.size() * sizeof(float), cudaMemcpyHostToDevice,
                         stream);
-
+        cuda_utils::check_last_cuda_error("cudaMemcpyAsync failed");
         // Execute FFA on device using persistent buffers
         execute_d(
             cuda::std::span<const float>(
@@ -431,7 +428,13 @@ public:
             stream);
 
         // Copy result back to host
-        thrust::copy(m_fold_d.begin(), m_fold_d.end(), fold.begin());
+        cudaMemcpyAsync(fold.data(), thrust::raw_pointer_cast(m_fold_d.data()),
+                        fold.size() * sizeof(DeviceFoldType),
+                        cudaMemcpyDeviceToHost, stream);
+        cuda_utils::check_last_cuda_error("cudaMemcpyAsync failed");
+        // Synchronize stream before returning to host
+        cudaStreamSynchronize(stream);
+        cuda_utils::check_last_cuda_error("cudaStreamSynchronize failed");
     }
 
     void execute_d(cuda::std::span<const float> ts_e_d,
@@ -453,10 +456,11 @@ public:
         // Resolve the coordinates into the workspace for the FFA plan
         if (m_is_freq_only) {
             m_ffa_plan.resolve_coordinates_freq(ws->coords_freq);
-            ws->update_coords_freq_from_host(m_ffa_plan.get_coord_size());
+            ws->update_coords_freq_from_host(m_ffa_plan.get_coord_size(),
+                                             stream);
         } else {
             m_ffa_plan.resolve_coordinates(ws->coords);
-            ws->update_coords_from_host(m_ffa_plan.get_coord_size());
+            ws->update_coords_from_host(m_ffa_plan.get_coord_size(), stream);
         }
 
         // Execute the FFA plan
@@ -480,11 +484,11 @@ public:
             "FFACUDA::execute_h: fold must have size 2*buffer_size");
 
         // Resize buffers only if needed
-        if (m_ts_e_d.size() != ts_e.size()) {
+        if (m_ts_e_d.size() < ts_e.size()) {
             m_ts_e_d.resize(ts_e.size());
             m_ts_v_d.resize(ts_v.size());
         }
-        if (m_fold_d_time.size() != fold.size()) {
+        if (m_fold_d_time.size() < fold.size()) {
             m_fold_d_time.resize(fold.size());
         }
         // Copy input data to device
@@ -492,10 +496,11 @@ public:
         cudaMemcpyAsync(thrust::raw_pointer_cast(m_ts_e_d.data()), ts_e.data(),
                         ts_e.size() * sizeof(float), cudaMemcpyHostToDevice,
                         stream);
+        cuda_utils::check_last_cuda_error("cudaMemcpyAsync failed");
         cudaMemcpyAsync(thrust::raw_pointer_cast(m_ts_v_d.data()), ts_v.data(),
                         ts_v.size() * sizeof(float), cudaMemcpyHostToDevice,
                         stream);
-
+        cuda_utils::check_last_cuda_error("cudaMemcpyAsync failed");
         // Execute FFA on device using persistent buffers
         execute_d(
             cuda::std::span<const float>(
@@ -508,7 +513,13 @@ public:
             stream);
 
         // Copy result back to host
-        thrust::copy(m_fold_d_time.begin(), m_fold_d_time.end(), fold.begin());
+        cudaMemcpyAsync(
+            fold.data(), thrust::raw_pointer_cast(m_fold_d_time.data()),
+            fold.size() * sizeof(float), cudaMemcpyDeviceToHost, stream);
+        cuda_utils::check_last_cuda_error("cudaMemcpyAsync failed");
+        // Synchronize stream before returning to host
+        cudaStreamSynchronize(stream);
+        cuda_utils::check_last_cuda_error("cudaStreamSynchronize failed");
     }
 
     void execute_d(cuda::std::span<const float> ts_e_d,
@@ -536,10 +547,11 @@ public:
         // Resolve the coordinates for the FFA plan
         if (m_is_freq_only) {
             m_ffa_plan.resolve_coordinates_freq(ws->coords_freq);
-            ws->update_coords_freq_from_host(m_ffa_plan.get_coord_size());
+            ws->update_coords_freq_from_host(m_ffa_plan.get_coord_size(),
+                                             stream);
         } else {
             m_ffa_plan.resolve_coordinates(ws->coords);
-            ws->update_coords_from_host(m_ffa_plan.get_coord_size());
+            ws->update_coords_from_host(m_ffa_plan.get_coord_size(), stream);
         }
 
         auto fold_complex = cuda::std::span<ComplexTypeCUDA>(

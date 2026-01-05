@@ -6,11 +6,13 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <variant>
 
 #include <cuda_runtime.h>
 #include <cufft.h>
 #include <curand.h>
+#include "loki/common/types.hpp"
 
 namespace loki::cuda_utils {
 
@@ -64,13 +66,16 @@ constexpr std::string_view cufft_error_string(cufftResult error) noexcept {
     case CUFFT_MISSING_DEPENDENCY:
         return "CUFFT_MISSING_DEPENDENCY: cuFFT is unable to find a dependency";
     case CUFFT_NVRTC_FAILURE:
-        return "CUFFT_NVRTC_FAILURE: An NVRTC failure was encountered during a cuFFT operation";
+        return "CUFFT_NVRTC_FAILURE: An NVRTC failure was encountered during a "
+               "cuFFT operation";
     case CUFFT_NVJITLINK_FAILURE:
-        return "CUFFT_NVJITLINK_FAILURE: An nvJitLink failure was encountered during a cuFFT operation";
+        return "CUFFT_NVJITLINK_FAILURE: An nvJitLink failure was encountered "
+               "during a cuFFT operation";
     case CUFFT_NVSHMEM_FAILURE:
-        return "CUFFT_NVSHMEM_FAILURE: An NVSHMEM failure was encountered during a cuFFT operation";
+        return "CUFFT_NVSHMEM_FAILURE: An NVSHMEM failure was encountered "
+               "during a cuFFT operation";
 #endif
-        default:
+    default:
         return "Unknown cuFFT error";
     }
 }
@@ -316,18 +321,31 @@ inline void check_kernel_launch_params(
 [[nodiscard]] inline std::string get_device_info() noexcept {
     int device;
     cudaDeviceProp props{};
-    if (auto err = cudaGetDevice(&device); err != cudaSuccess) {
-        return std::format("Failed to get device: {}", cudaGetErrorString(err));
-    }
-    if (auto err = cudaGetDeviceProperties(&props, device);
-        err != cudaSuccess) {
-        return std::format("Failed to get properties: {}",
-                           cudaGetErrorString(err));
-    }
+    check_cuda_call(cudaGetDevice(&device), "Failed to get device");
+    check_cuda_call(cudaGetDeviceProperties(&props, device),
+                    "Failed to get device properties");
+    return std::format(
+        "Device {}: {} (CC {}.{}), Mem: {} MiB, Shared Mem: {} bytes", device,
+        props.name, props.major, props.minor, props.totalGlobalMem >> 20U,
+        props.sharedMemPerBlock);
+}
 
-    return std::format("Device {}: {} (CC {}.{}), Mem: {} MiB", device,
-                       props.name, props.major, props.minor,
-                       props.totalGlobalMem >> 20U);
+[[nodiscard]] inline SizeType get_max_shared_memory() noexcept {
+    int device;
+    cudaDeviceProp props{};
+    check_cuda_call(cudaGetDevice(&device), "Failed to get device");
+    check_cuda_call(cudaGetDeviceProperties(&props, device),
+                    "Failed to get device properties");
+    return props.sharedMemPerBlock;
+}
+
+[[nodiscard]] inline std::pair<double, double>
+get_cuda_memory_usage() noexcept {
+    SizeType free_mem, total_mem;
+    check_cuda_call(cudaMemGetInfo(&free_mem, &total_mem),
+                    "Failed to get CUDA memory usage");
+    return {static_cast<double>(free_mem) / static_cast<double>(1ULL << 30U),
+            static_cast<double>(total_mem) / static_cast<double>(1ULL << 30U)};
 }
 
 // Cached device count

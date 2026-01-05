@@ -131,6 +131,11 @@ public:
         return 0.005 * std::pow(m_m_p_min + m_m_c_max, 1.0 / 3.0) * m_m_c_max /
                (m_m_p_min + m_m_c_max);
     }
+    void set_max_memory_gb(double max_memory_gb) noexcept {
+        error_check::check_greater(max_memory_gb, 0,
+                                   "max_memory_gb must be positive");
+        m_max_memory_gb = max_memory_gb;
+    }
     std::vector<double> get_dparams_f(double tseg_cur) const {
         const double t_ref = (m_nparams == 1) ? 0.0 : tseg_cur / 2.0;
         return psr_utils::poly_taylor_step_f(m_nparams, tseg_cur, m_nbins,
@@ -423,6 +428,9 @@ SizeType PulsarSearchConfig::get_n_scoring_widths() const noexcept {
 }
 double PulsarSearchConfig::get_x_mass_const() const noexcept {
     return m_impl->get_x_mass_const();
+}
+void PulsarSearchConfig::set_max_memory_gb(double max_memory_gb) noexcept {
+    m_impl->set_max_memory_gb(max_memory_gb);
 }
 std::vector<double>
 PulsarSearchConfig::get_dparams_f(double tseg_cur) const noexcept {

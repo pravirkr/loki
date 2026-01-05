@@ -89,7 +89,8 @@ public:
     SizeType get_prune_poly_order() const noexcept;
     /// @brief Get the minimum orbital period for the circular orbit search.
     double get_p_orb_min() const noexcept;
-    /// @brief Get the maximum mass of the companion for the circular orbit search.
+    /// @brief Get the maximum mass of the companion for the circular orbit
+    /// search.
     double get_m_c_max() const noexcept;
     /// @brief Get the minimum mass of the pulsar for the circular orbit search.
     double get_m_p_min() const noexcept;
@@ -118,6 +119,10 @@ public:
     SizeType get_n_scoring_widths() const noexcept;
     /// @brief Get the mass constant for the circular orbit search.
     double get_x_mass_const() const noexcept;
+
+    // --- Setters ---
+    /// @brief Set the maximum memory in GB (Used for GPU memory allocation).
+    void set_max_memory_gb(double max_memory_gb) noexcept;
 
     // --- Methods ---
     /// @brief Get the parameter step sizes for the f-based params.
