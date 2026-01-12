@@ -71,6 +71,7 @@ public:
     FFA& operator=(const FFA&) = delete;
 
     const plans::FFAPlan<FoldType>& get_plan() const noexcept;
+    float get_brute_fold_timing() const noexcept;
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
                  std::span<FoldType> fold);
@@ -176,6 +177,7 @@ public:
     FFACUDA& operator=(const FFACUDA&) = delete;
 
     const plans::FFAPlan<HostFoldType>& get_plan() const noexcept;
+    float get_brute_fold_timing() const noexcept;
 
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,

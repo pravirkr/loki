@@ -11,6 +11,8 @@
 
 namespace loki::plans {
 
+constexpr SizeType kFFAManagerWriteBatchSize = 1U << 16U;
+
 // FFA Coordinate plan for a single param coordinate in a single iteration
 struct FFACoord {
     uint32_t i_tail;  // Tail coordinate index in the previous iteration
@@ -213,6 +215,8 @@ public:
     SizeType get_buffer_size_time() const noexcept;
     /// @brief Get the memory usage of the FFA workspace buffer (in GB).
     float get_buffer_memory_usage() const noexcept;
+    /// @brief Get the compute FLOPS for the FFA plan (in GFLOPS).
+    float get_gflops(bool return_in_time) const noexcept;
 
 private:
     struct Impl;
@@ -239,20 +243,20 @@ private:
 bands. An octave_scale = 2.0 gives true octave spacing (each band doubles in
 period and bin count). Values < 2.0 create pseudo-octaves for smoother
 duty-cycle resolution.
- * @param nbins_max An optional maximum number of bins to cap memory usage for
- * long periods in the search range.
+ * @param nbins_max The maximum number of bins to cap memory usage for
+ * long periods in the search range. Must be >= nbins_min.
  * @return A std::vector of FFARegion structs, each defining a single FFA search
  * frequency region.
  * @throws std::invalid_argument if input parameters are illogical.
+ * @throws std::runtime_error if nbins_max < nbins_min.
  */
-std::vector<FFARegion>
-generate_ffa_regions(double p_min,
-                     double p_max,
-                     double tsamp,
-                     SizeType nbins_min,
-                     double eta_min,
-                     double octave_scale               = 2.0,
-                     std::optional<SizeType> nbins_max = std::nullopt);
+std::vector<FFARegion> generate_ffa_regions(double p_min,
+                                            double p_max,
+                                            double tsamp,
+                                            SizeType nbins_min,
+                                            double eta_min,
+                                            double octave_scale = 2.0,
+                                            SizeType nbins_max  = 1024);
 
 /**
  * @brief A class to store the size stats for FFA regions (Time or Fourier
@@ -271,7 +275,9 @@ public:
                    SizeType max_coord_size,
                    SizeType max_ncoords,
                    SizeType n_widths,
-                   SizeType n_params);
+                   SizeType n_params,
+                   SizeType n_samps,
+                   bool use_gpu);
 
     // --- Rule of five: PIMPL ---
     ~FFARegionStats();
@@ -291,8 +297,10 @@ public:
     SizeType get_max_buffer_size_time() const noexcept;
     /// @brief Get the maximum size of the scores storage.
     SizeType get_max_scores_size() const noexcept;
-    /// @brief Get the maximum size of the parameter sets storage.
-    SizeType get_max_param_sets_size() const noexcept;
+    /// @brief Get the write parameter sets storage.
+    SizeType get_write_param_sets_size() const noexcept;
+    /// @brief Get the write scores storage.
+    SizeType get_write_scores_size() const noexcept;
     /// @brief Get the memory usage of the buffer storage (in GB).
     float get_buffer_memory_usage() const noexcept;
     /// @brief Get the memory usage of the coordinate storage (in GB).
@@ -320,7 +328,8 @@ public:
      * @brief Constructs the FFA region planner from a search configuration.
      * @param cfg The pulsar search configuration object.
      */
-    explicit FFARegionPlanner(const search::PulsarSearchConfig& cfg);
+    explicit FFARegionPlanner(const search::PulsarSearchConfig& cfg,
+                              bool use_gpu = false);
 
     // --- Rule of five: PIMPL ---
     ~FFARegionPlanner();

@@ -23,9 +23,10 @@ public:
          double wtsp,
          bool use_fourier,
          int nthreads,
-         double max_memory_gb,
+         double max_process_memory_gb,
          double octave_scale,
-         std::optional<SizeType> nbins_max,
+         SizeType nbins_max,
+         SizeType nbins_min_lossy_bf,
          std::optional<SizeType> bseg_brute,
          std::optional<SizeType> bseg_ffa,
          double snr_min,
@@ -44,15 +45,19 @@ public:
           m_wtsp(wtsp),
           m_use_fourier(use_fourier),
           m_nthreads(nthreads),
-          m_max_memory_gb(max_memory_gb),
+          m_max_process_memory_gb(max_process_memory_gb),
           m_octave_scale(octave_scale),
+          m_nbins_max(nbins_max),
+          m_nbins_min_lossy_bf(nbins_min_lossy_bf),
           m_snr_min(snr_min),
           m_prune_poly_order(prune_poly_order),
           m_p_orb_min(p_orb_min),
           m_m_c_max(m_c_max),
           m_m_p_min(m_p_min),
           m_minimum_snap_cells(minimum_snap_cells),
-          m_use_conservative_tile(use_conservative_tile) {
+          m_use_conservative_tile(use_conservative_tile),
+          m_bseg_brute_explicit(bseg_brute),
+          m_bseg_ffa_explicit(bseg_ffa) {
         if (m_param_limits.empty()) {
             throw std::runtime_error("coord_limits must be non-empty");
         }
@@ -61,7 +66,6 @@ public:
         m_param_names.assign(kParamNames.end() - m_nparams, kParamNames.end());
         m_f_min      = m_param_limits[m_nparams - 1][0];
         m_f_max      = m_param_limits[m_nparams - 1][1];
-        m_nbins_max  = nbins_max.value_or(m_nbins);
         m_bseg_brute = bseg_brute.value_or(get_bseg_brute_default());
         m_bseg_ffa   = bseg_ffa.value_or(get_bseg_ffa_default());
 
@@ -101,9 +105,10 @@ public:
     double get_wtsp() const { return m_wtsp; }
     bool get_use_fourier() const { return m_use_fourier; }
     int get_nthreads() const { return m_nthreads; }
-    double get_max_memory_gb() const { return m_max_memory_gb; }
+    double get_max_process_memory_gb() const { return m_max_process_memory_gb; }
     double get_octave_scale() const { return m_octave_scale; }
     SizeType get_nbins_max() const { return m_nbins_max; }
+    SizeType get_nbins_min_lossy_bf() const { return m_nbins_min_lossy_bf; }
     SizeType get_bseg_brute() const { return m_bseg_brute; }
     SizeType get_bseg_ffa() const { return m_bseg_ffa; }
     double get_snr_min() const { return m_snr_min; }
@@ -131,10 +136,10 @@ public:
         return 0.005 * std::pow(m_m_p_min + m_m_c_max, 1.0 / 3.0) * m_m_c_max /
                (m_m_p_min + m_m_c_max);
     }
-    void set_max_memory_gb(double max_memory_gb) noexcept {
-        error_check::check_greater(max_memory_gb, 0,
-                                   "max_memory_gb must be positive");
-        m_max_memory_gb = max_memory_gb;
+    void set_max_process_memory_gb(double max_process_memory_gb) noexcept {
+        error_check::check_greater(max_process_memory_gb, 0,
+                                   "max_process_memory_gb must be positive");
+        m_max_process_memory_gb = max_process_memory_gb;
     }
     std::vector<double> get_dparams_f(double tseg_cur) const {
         const double t_ref = (m_nparams == 1) ? 0.0 : tseg_cur / 2.0;
@@ -175,11 +180,12 @@ public:
                 m_wtsp,
                 m_use_fourier,
                 m_nthreads,
-                m_max_memory_gb,
+                m_max_process_memory_gb,
                 m_octave_scale,
                 m_nbins_max,
-                m_bseg_brute,
-                m_bseg_ffa,
+                m_nbins_min_lossy_bf,
+                m_bseg_brute_explicit,
+                m_bseg_ffa_explicit,
                 m_snr_min,
                 m_prune_poly_order,
                 m_p_orb_min,
@@ -200,9 +206,10 @@ private:
     double m_wtsp;
     bool m_use_fourier;
     int m_nthreads;
-    double m_max_memory_gb;
+    double m_max_process_memory_gb;
     double m_octave_scale;
     SizeType m_nbins_max;
+    SizeType m_nbins_min_lossy_bf;
     SizeType m_bseg_brute;
     SizeType m_bseg_ffa;
     double m_snr_min;
@@ -212,6 +219,8 @@ private:
     double m_m_p_min;
     double m_minimum_snap_cells;
     bool m_use_conservative_tile;
+    std::optional<SizeType> m_bseg_brute_explicit;
+    std::optional<SizeType> m_bseg_ffa_explicit;
 
     double m_tseg_brute{};
     double m_tseg_ffa{};
@@ -228,8 +237,8 @@ private:
         error_check::check_greater(m_tsamp, 0, "tsamp must be positive");
         error_check::check_greater(m_eta, 0,
                                    "eta (tolerance bins) must be positive");
-        error_check::check_greater(m_max_memory_gb, 0,
-                                   "max_memory_gb must be positive");
+        error_check::check_greater(m_max_process_memory_gb, 0,
+                                   "max_process_memory_gb must be positive");
         error_check::check_greater_equal(
             m_nbins_max, m_nbins,
             "nbins_max must be greater than or equal to nbins");
@@ -252,12 +261,6 @@ private:
                 std::format(
                     "param_limits[{}] must be increasing (got [{}, {}])",
                     iparam, param_limit[0], param_limit[1]));
-        }
-        if (m_use_fourier) {
-            error_check::check_even(
-                m_nbins, "nbins must be even when use_fourier is true");
-            error_check::check_even(
-                m_nbins_max, "nbins_max must be even when use_fourier is true");
         }
     }
 
@@ -282,9 +285,10 @@ PulsarSearchConfig::PulsarSearchConfig(
     double wtsp,
     bool use_fourier,
     int nthreads,
-    double max_memory_gb,
+    double max_process_memory_gb,
     double octave_scale,
-    std::optional<SizeType> nbins_max,
+    SizeType nbins_max,
+    SizeType nbins_min_lossy_bf,
     std::optional<SizeType> bseg_brute,
     std::optional<SizeType> bseg_ffa,
     double snr_min,
@@ -303,9 +307,10 @@ PulsarSearchConfig::PulsarSearchConfig(
                                     wtsp,
                                     use_fourier,
                                     nthreads,
-                                    max_memory_gb,
+                                    max_process_memory_gb,
                                     octave_scale,
                                     nbins_max,
+                                    nbins_min_lossy_bf,
                                     bseg_brute,
                                     bseg_ffa,
                                     snr_min,
@@ -363,14 +368,17 @@ bool PulsarSearchConfig::get_use_fourier() const noexcept {
 int PulsarSearchConfig::get_nthreads() const noexcept {
     return m_impl->get_nthreads();
 }
-double PulsarSearchConfig::get_max_memory_gb() const noexcept {
-    return m_impl->get_max_memory_gb();
+double PulsarSearchConfig::get_max_process_memory_gb() const noexcept {
+    return m_impl->get_max_process_memory_gb();
 }
 double PulsarSearchConfig::get_octave_scale() const noexcept {
     return m_impl->get_octave_scale();
 }
 SizeType PulsarSearchConfig::get_nbins_max() const noexcept {
     return m_impl->get_nbins_max();
+}
+SizeType PulsarSearchConfig::get_nbins_min_lossy_bf() const noexcept {
+    return m_impl->get_nbins_min_lossy_bf();
 }
 SizeType PulsarSearchConfig::get_bseg_brute() const noexcept {
     return m_impl->get_bseg_brute();
@@ -429,8 +437,8 @@ SizeType PulsarSearchConfig::get_n_scoring_widths() const noexcept {
 double PulsarSearchConfig::get_x_mass_const() const noexcept {
     return m_impl->get_x_mass_const();
 }
-void PulsarSearchConfig::set_max_memory_gb(double max_memory_gb) noexcept {
-    m_impl->set_max_memory_gb(max_memory_gb);
+void PulsarSearchConfig::set_max_process_memory_gb(double max_process_memory_gb) noexcept {
+    m_impl->set_max_process_memory_gb(max_process_memory_gb);
 }
 std::vector<double>
 PulsarSearchConfig::get_dparams_f(double tseg_cur) const noexcept {

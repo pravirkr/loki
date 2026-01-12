@@ -9,13 +9,13 @@ description = "Leverage Optimal significance to unveil Keplerian orbIt pulsars"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "Pravir Kumar", email = "pravirka@gmail.com" }]
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 classifiers = [
     "Programming Language :: C++",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Operating System :: MacOS :: MacOS X",
     "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
@@ -24,10 +24,7 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Astronomy",
 ]
-dependencies = [
-    "numpy",
-    "pyloki @ git+https://github.com/pravirkr/pyloki.git",
-]
+dependencies = ["numpy", "pyloki @ git+https://github.com/pravirkr/pyloki.git"]
 
 [project.urls]
 Github = "https://github.com/pravirkr/loki"
@@ -61,10 +58,15 @@ test-command = "python -m pytest {project}/tests/python -v"
 test-skip = "pp* *-musllinux* *-manylinux_i686"
 
 [tool.ruff]
-include = ["pyproject.toml", "src/**/*.py"]
+include = [
+    "pyproject.toml",
+    "src/**/*.py",
+    "tests/**/*.py",
+    "notebooks/**/*.ipynb",
+]
 line-length = 88
 indent-width = 4
-target-version = "py311"
+target-version = "py312"
 
 [tool.ruff.format]
 quote-style = "double"
@@ -72,13 +74,37 @@ indent-style = "space"
 
 [tool.ruff.lint]
 select = ["ALL"]
-ignore = ["D1", "PLR2004", "G004"]
+ignore = [
+    "D1",
+    "ANN003",
+    "PLR2004",
+    "G004",
+    "E712",
+    "FBT001",
+    "FBT002",
+    "TD",
+    "FIX",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"notebooks/**/*.ipynb" = ["T201"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 20
 
 [tool.ruff.lint.pylint]
-max-args = 10
+max-args = 20
+max-statements = 100
+max-branches = 20
 
 [tool.ruff.lint.pydocstyle]
 convention = "numpy"
+
+[tool.ruff.lint.flake8-unused-arguments]
+ignore-variadic-names = true
+
+[tool.ruff.lint.isort]
+known-first-party = ["loki", "pyloki"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"
@@ -99,6 +125,13 @@ source = "src/dmt"
 [tool.gcovr]
 filter = ["lib/*"]
 
-[tool.mypy]
-ignore_missing_imports = true
-plugins = ["numpy.typing.mypy_plugin"]
+[tool.ty.environment]
+python-version = "3.12"
+
+[tool.ty.src]
+exclude = ["tests/**"]
+
+[tool.ty.rules]
+index-out-of-bounds = "ignore"
+unresolved-import = "ignore"
+not-iterable = "ignore"        # For Numba prange

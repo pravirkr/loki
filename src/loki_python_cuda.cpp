@@ -9,6 +9,7 @@
 #include "loki/loki.hpp"
 
 namespace loki {
+using algorithms::FFAManagerCUDA;
 using detection::DynamicThresholdSchemeCUDA;
 
 namespace py = pybind11;
@@ -192,6 +193,20 @@ PYBIND11_MODULE(libculoki, m) { // NOLINT
         },
         py::arg("ts_e"), py::arg("ts_v"), py::arg("cfg"),
         py::arg("device_id") = 0, py::arg("quiet") = false);
+
+    py::class_<FFAManagerCUDA>(m_ffa, "FFAManagerCUDA")
+        .def(py::init<const PulsarSearchConfig&, int>(), py::arg("cfg"),
+             py::arg("device_id") = 0)
+        .def(
+            "execute",
+            [](FFAManagerCUDA& self, const PyArrayT<float>& ts_e,
+               const PyArrayT<float>& ts_v, const std::string& outdir,
+               const std::string& file_prefix) {
+                self.execute(to_span<const float>(ts_e),
+                             to_span<const float>(ts_v), outdir, file_prefix);
+            },
+            py::arg("ts_e"), py::arg("ts_v"), py::arg("outdir"),
+            py::arg("file_prefix") = "test");
 }
 
 } // namespace loki

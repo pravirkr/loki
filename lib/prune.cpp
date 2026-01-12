@@ -278,7 +278,7 @@ struct IterationStats {
     SizeType n_leaves_phy = 0;
     float score_min       = std::numeric_limits<float>::max();
     float score_max       = std::numeric_limits<float>::lowest();
-    cands::TimerStats batch_timers;
+    cands::PruneTimerStats batch_timers;
 };
 
 template <typename FoldType> struct PruningWorkspace {
@@ -501,8 +501,8 @@ private:
         // Initialize snail scheme for current ref_seg
         const auto nsegments = m_ffa_plan.get_nsegments().back();
         const auto tseg      = m_ffa_plan.get_tsegments().back();
-        m_snail_scheme =
-            std::make_unique<psr_utils::MiddleOutScheme>(nsegments, ref_seg, tseg);
+        m_snail_scheme       = std::make_unique<psr_utils::MiddleOutScheme>(
+            nsegments, ref_seg, tseg);
 
         m_prune_level    = 0;
         m_prune_complete = false;
@@ -600,8 +600,8 @@ private:
         const auto coord_init = m_snail_scheme->get_coord(0);
         const auto coord_prev = m_snail_scheme->get_coord(m_prune_level - 1);
         const auto coord_next = m_snail_scheme->get_coord(m_prune_level);
-        const auto coord_cur  = m_snail_scheme->get_current_coord(m_prune_level);
-        const auto coord_add  = m_snail_scheme->get_segment_coord(m_prune_level);
+        const auto coord_cur = m_snail_scheme->get_current_coord(m_prune_level);
+        const auto coord_add = m_snail_scheme->get_segment_coord(m_prune_level);
 
         // Load fold segment for current level
         const auto ffa_fold_segment =

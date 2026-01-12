@@ -78,9 +78,10 @@ void bind_ffa_class(py::module& m, const std::string& name) {
 template <typename T>
 void bind_ffa_region_stats(py::module& m, const std::string& name) {
     py::class_<FFARegionStats<T>>(m, name.c_str())
-        .def(py::init<SizeType, SizeType, SizeType, SizeType, SizeType>(),
+        .def(py::init<SizeType, SizeType, SizeType, SizeType, SizeType, SizeType, bool>(),
              py::arg("max_buffer_size"), py::arg("max_coord_size"),
-             py::arg("max_ncoords"), py::arg("n_widths"), py::arg("n_params"))
+             py::arg("max_ncoords"), py::arg("n_widths"), py::arg("n_params"),
+             py::arg("n_samps"), py::arg("use_gpu") = false)
         .def_property_readonly("max_buffer_size",
                                &FFARegionStats<T>::get_max_buffer_size)
         .def_property_readonly("max_coord_size",
@@ -91,8 +92,10 @@ void bind_ffa_region_stats(py::module& m, const std::string& name) {
                                &FFARegionStats<T>::get_max_buffer_size_time)
         .def_property_readonly("max_scores_size",
                                &FFARegionStats<T>::get_max_scores_size)
-        .def_property_readonly("max_param_sets_size",
-                               &FFARegionStats<T>::get_max_param_sets_size)
+        .def_property_readonly("write_param_sets_size",
+                               &FFARegionStats<T>::get_write_param_sets_size)
+        .def_property_readonly("write_scores_size",
+                               &FFARegionStats<T>::get_write_scores_size)
         .def_property_readonly("buffer_memory_usage",
                                &FFARegionStats<T>::get_buffer_memory_usage)
         .def_property_readonly("coord_memory_usage",

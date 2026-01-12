@@ -364,29 +364,14 @@ void brute_fold_segment(const float* __restrict__ ts_e_seg,
         float* __restrict__ fold_v_base = fold_e_base + nbins;
 
         for (SizeType iphase = 0; iphase < nbins; ++iphase) {
-            const auto bucket_idx    = (ifreq * nbins) + iphase;
-            const auto buck_start    = offsets[bucket_idx];
-            const auto buck_end      = offsets[bucket_idx + 1];
-            const SizeType buck_size = buck_end - buck_start;
-            if (buck_size == 0) {
-                continue;
-            }
+            const auto bucket_idx                = (ifreq * nbins) + iphase;
+            const auto buck_start                = offsets[bucket_idx];
+            const auto buck_end                  = offsets[bucket_idx + 1];
+            const SizeType buck_size             = buck_end - buck_start;
             const uint32_t* __restrict__ indices = bucket_indices + buck_start;
 
             float sum_e = 0.0F, sum_v = 0.0F;
-            const SizeType main_loop = buck_size - (buck_size % kUnrollFactor);
-
-            for (SizeType i = 0; i < main_loop; i += kUnrollFactor) {
-                UNROLL_VECTORIZE
-                for (SizeType j = 0; j < kUnrollFactor; ++j) {
-                    const auto idx = indices[i + j];
-                    sum_e += ts_e_seg[idx];
-                    sum_v += ts_v_seg[idx];
-                }
-            }
-
-            // Handle remainder
-            for (SizeType i = main_loop; i < buck_size; ++i) {
+            for (SizeType i = 0; i < buck_size; ++i) {
                 const auto idx = indices[i];
                 sum_e += ts_e_seg[idx];
                 sum_v += ts_v_seg[idx];

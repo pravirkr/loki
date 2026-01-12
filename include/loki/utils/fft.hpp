@@ -75,11 +75,23 @@ void rfft_batch(std::span<float> real_input,
                 int n_real,
                 int nthreads = 1);
 
+void rfft_batch_chunked(std::span<float> real_input,
+                        std::span<ComplexType> complex_output,
+                        int batch_size,
+                        int n_real,
+                        int nthreads = 1);
+
 void irfft_batch(std::span<ComplexType> complex_input,
                  std::span<float> real_output,
                  int batch_size,
                  int n_real,
                  int nthreads = 1);
+
+void irfft_batch_chunked(std::span<ComplexType> complex_input,
+                         std::span<float> real_output,
+                         int batch_size,
+                         int n_real,
+                         int nthreads = 1);
 
 #ifdef LOKI_ENABLE_CUDA
 

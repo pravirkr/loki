@@ -2,6 +2,7 @@
 
 #include <memory>
 
+#include <fmt/ranges.h>
 #include <spdlog/spdlog.h>
 
 #include <cuda_runtime_api.h>
@@ -357,7 +358,7 @@ public:
         m_ffa_workspace_owned.validate(m_ffa_plan);
         // Initialize BruteFold
         initialize_brute_fold();
-        log_memory();
+        log_info();
     }
 
     explicit Impl(search::PulsarSearchConfig cfg,
@@ -374,7 +375,7 @@ public:
         m_ffa_workspace_external->validate(m_ffa_plan);
         // Initialize BruteFold
         initialize_brute_fold();
-        log_memory();
+        log_info();
     }
 
     ~Impl()                      = default;
@@ -385,10 +386,12 @@ public:
 
     const plans::FFAPlan<HostFoldType>& get_plan() const { return m_ffa_plan; }
 
+    float get_brute_fold_timing() const noexcept { return m_brutefold_time; }
+
     void execute_h(std::span<const float> ts_e,
                    std::span<const float> ts_v,
                    std::span<HostFoldType> fold) {
-        timing::ScopeTimer timer("FFACUDA::execute_h");
+        //timing::ScopeTimer timer("FFACUDA::execute_h");
         error_check::check_equal(
             ts_e.size(), m_cfg.get_nsamps(),
             "FFACUDA::execute_h: ts_e must have size nsamps");
@@ -441,7 +444,7 @@ public:
                    cuda::std::span<const float> ts_v_d,
                    cuda::std::span<DeviceFoldType> fold_d,
                    cudaStream_t stream) {
-        timing::ScopeTimer timer("FFACUDA::execute_d");
+        //timing::ScopeTimer timer("FFACUDA::execute_d");
         error_check::check_equal(
             ts_e_d.size(), m_cfg.get_nsamps(),
             "FFACUDA::execute_d: ts_e must have size nsamps");
@@ -472,7 +475,7 @@ public:
                    std::span<float> fold)
         requires(std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>)
     {
-        timing::ScopeTimer timer("FFACUDA::execute_h");
+        //timing::ScopeTimer timer("FFACUDA::execute_h");
         error_check::check_equal(
             ts_e.size(), m_cfg.get_nsamps(),
             "FFACUDA::execute_h: ts_e must have size nsamps");
@@ -528,7 +531,7 @@ public:
                    cudaStream_t stream)
         requires(std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>)
     {
-        timing::ScopeTimer timer("FFACUDA::execute_d");
+        //timing::ScopeTimer timer("FFACUDA::execute_d");
         const auto fold_size_time      = m_ffa_plan.get_fold_size_time();
         const auto fold_size_fourier   = m_ffa_plan.get_fold_size();
         const auto buffer_size_fourier = m_ffa_plan.get_buffer_size();
@@ -578,7 +581,12 @@ private:
     int m_device_id;
     bool m_is_freq_only;
     bool m_owns_workspace;
+
+    // Brute fold for the initial time-domain folding
     std::unique_ptr<BruteFoldCUDA<FoldTypeCUDA>> m_the_bf;
+    std::unique_ptr<BruteFoldCUDA<float>> m_the_bf_float; // For lossy init
+    bool m_use_lossy_init{false};
+    float m_brutefold_time{0.0F};
 
     // Persistent input/output buffers
     thrust::device_vector<float> m_ts_e_d;
@@ -595,7 +603,11 @@ private:
                                 : m_ffa_workspace_external->data();
     }
 
-    void log_memory() {
+    void log_info() {
+        // Log iniital and final fold shapes
+        const auto& fold_shapes = m_ffa_plan.get_fold_shapes();
+        spdlog::info("P-FFA [{}] -> [{}]", fmt::join(fold_shapes.front(), ", "),
+                     fmt::join(fold_shapes.back(), ", "));
         const auto memory_buffer_gb = m_ffa_plan.get_buffer_memory_usage();
         const auto memory_coord_gb  = m_ffa_plan.get_coord_memory_usage();
         spdlog::info("FFACUDA Memory: {:.2f} GB + {:.2f} GB (coords)",
@@ -606,7 +618,25 @@ private:
         const auto t_ref =
             m_is_freq_only ? 0.0 : m_ffa_plan.get_tsegments()[0] / 2.0;
         const auto freqs_arr = m_ffa_plan.get_params()[0].back();
-        m_the_bf             = std::make_unique<BruteFoldCUDA<FoldTypeCUDA>>(
+
+        // Check if we need lossy initialization (ComplexTypeCUDA with large
+        // nbins)
+        if constexpr (std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>) {
+            if (m_cfg.get_nbins() > m_cfg.get_nbins_min_lossy_bf()) {
+                m_use_lossy_init = true;
+                m_the_bf_float   = std::make_unique<BruteFoldCUDA<float>>(
+                    freqs_arr, m_ffa_plan.get_segment_lens()[0],
+                    m_cfg.get_nbins(), m_cfg.get_nsamps(), m_cfg.get_tsamp(),
+                    t_ref, m_device_id);
+                spdlog::debug(
+                    "Using lossy initialization (time->freq) for nbins={}",
+                    m_cfg.get_nbins());
+                return;
+            }
+        }
+
+        // Normal initialization
+        m_the_bf = std::make_unique<BruteFoldCUDA<FoldTypeCUDA>>(
             freqs_arr, m_ffa_plan.get_segment_lens()[0], m_cfg.get_nbins(),
             m_cfg.get_nsamps(), m_cfg.get_tsamp(), t_ref, m_device_id);
     }
@@ -614,11 +644,48 @@ private:
     void initialize_device(cuda::std::span<const float> ts_e_d,
                            cuda::std::span<const float> ts_v_d,
                            DeviceFoldType* init_buffer_d,
+                           DeviceFoldType* temp_buffer_d,
                            cudaStream_t stream) {
-        timing::ScopeTimer timer("FFACUDA::Impl::initialize_device");
+        timing::SimpleTimer timer;
+        timer.start();
+        if constexpr (std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>) {
+            if (m_use_lossy_init) {
+                // Lossy path: use time-domain BruteFold, then RFFT to frequency
+                // domain
+                const auto brute_fold_size_time =
+                    m_the_bf_float->get_fold_size();
+
+                // Use temp_buffer for time-domain output
+                // temp_buffer_d is DeviceFoldType*, reinterpret as float* for
+                // time-domain data
+                auto real_temp_view = cuda::std::span<float>(
+                    reinterpret_cast<float*>(temp_buffer_d),
+                    brute_fold_size_time);
+
+                m_the_bf_float->execute(ts_e_d, ts_v_d, real_temp_view, stream);
+
+                // Out-of-place RFFT from temp_buffer (real) to init_buffer
+                // (complex)
+                const auto nfft = brute_fold_size_time / m_cfg.get_nbins();
+                const auto brute_fold_size_fourier =
+                    nfft * ((m_cfg.get_nbins() / 2) + 1);
+                utils::rfft_batch_cuda(
+                    real_temp_view,
+                    cuda::std::span<ComplexTypeCUDA>(init_buffer_d,
+                                                     brute_fold_size_fourier),
+                    static_cast<int>(nfft), static_cast<int>(m_cfg.get_nbins()),
+                    stream);
+                m_brutefold_time += timer.stop();
+                return;
+            }
+        }
+        // Normal path (float or ComplexType with nbins <= 64)
         m_the_bf->execute(
             ts_e_d, ts_v_d,
             cuda::std::span(init_buffer_d, m_the_bf->get_fold_size()), stream);
+        cudaStreamSynchronize(stream);
+        cuda_utils::check_last_cuda_error("brute fold synchronization failed");
+        m_brutefold_time += timer.stop();
     }
 
     void execute_unified_device(cuda::std::span<const float> ts_e_d,
@@ -661,7 +728,7 @@ private:
         }
 
         // Initialize in the current buffer
-        initialize_device(ts_e_d, ts_v_d, current_in_ptr, stream);
+        initialize_device(ts_e_d, ts_v_d, current_in_ptr, current_out_ptr, stream);
 
         // FFA iterations
         if (m_is_freq_only) {
@@ -836,6 +903,11 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA>
 const plans::FFAPlan<typename FoldTypeTraits<FoldTypeCUDA>::HostType>&
 FFACUDA<FoldTypeCUDA>::get_plan() const noexcept {
     return m_impl->get_plan();
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+float FFACUDA<FoldTypeCUDA>::get_brute_fold_timing() const noexcept {
+    return m_impl->get_brute_fold_timing();
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>

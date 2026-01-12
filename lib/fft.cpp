@@ -13,6 +13,21 @@
 namespace loki::utils {
 
 namespace {
+
+constexpr int FFT_BATCH_SIZE_MAX = 16384; // safe, cache-friendly
+struct PlanKey {
+    int n_real;
+    int chunk;
+
+    bool operator<(const PlanKey& other) const {
+        return std::tie(n_real, chunk) < std::tie(other.n_real, other.chunk);
+    }
+};
+
+std::map<PlanKey, fftwf_plan> g_rfft_plan_cache;
+std::map<PlanKey, fftwf_plan> g_irfft_plan_cache;
+std::mutex g_plan_cache_mutex;
+
 struct FFTWManager {
     std::unordered_map<int, fftwf_plan> plan_cache;
     std::mutex mutex;
@@ -183,6 +198,11 @@ void rfft_batch(std::span<float> real_input,
                 int batch_size,
                 int n_real,
                 int nthreads) {
+    if (batch_size > FFT_BATCH_SIZE_MAX) {
+        rfft_batch_chunked(real_input, complex_output, batch_size, n_real,
+                           nthreads);
+        return;
+    }
     ensure_fftw_threading(nthreads);
     const int n_complex = (n_real / 2) + 1;
 
@@ -215,11 +235,102 @@ void rfft_batch(std::span<float> real_input,
                   n_real);
 }
 
+void rfft_batch_chunked(std::span<float> real_input,
+                        std::span<ComplexType> complex_output,
+                        int batch_size,
+                        int n_real,
+                        int nthreads) {
+    ensure_fftw_threading(nthreads);
+    const int n_complex = (n_real / 2) + 1;
+    error_check::check_equal(
+        real_input.size(), batch_size * n_real,
+        "RFFT batch: real_input size does not match batch size");
+    error_check::check_equal(
+        complex_output.size(), batch_size * n_complex,
+        "RFFT batch: complex_output size does not match batch size");
+
+    float* in_ptr = real_input.data();
+    auto* out_ptr = reinterpret_cast<fftwf_complex*>(complex_output.data());
+    // Determine chunk size - use smaller chunks for large batches
+    const int chunk_size = std::min(FFT_BATCH_SIZE_MAX, batch_size);
+    const PlanKey key{.n_real = n_real, .chunk = chunk_size};
+
+    // Get or create cached plan (thread-safe)
+    fftwf_plan plan = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_plan_cache_mutex);
+        auto it = g_rfft_plan_cache.find(key);
+        if (it != g_rfft_plan_cache.end()) {
+            plan = it->second;
+        } else {
+            // Create plan with nullptr (FFTW will not use actual data for
+            // ESTIMATE)
+            plan =
+                fftwf_plan_many_dft_r2c(1,           // rank
+                                        &key.n_real, // transform size
+                                        key.chunk,   // number of transforms
+                                        nullptr, // input (dummy for planning)
+                                        nullptr, 1, n_real, // input layout
+                                        nullptr, // output (dummy for planning)
+                                        nullptr, 1, n_complex, // output layout
+                                        FFTW_ESTIMATE          // fast planning
+                );
+
+            if (plan == nullptr) {
+                throw std::runtime_error(std::format(
+                    "Failed to create RFFT plan for n_real={}, chunk={}",
+                    n_real, chunk_size));
+            }
+
+            g_rfft_plan_cache[key] = plan;
+            spdlog::debug(
+                "RFFT: Created and cached plan for n_real={}, chunk={}", n_real,
+                chunk_size);
+        }
+    }
+    // Execute in chunks using the cached plan
+    int offset          = 0;
+    int chunks_executed = 0;
+    while (offset < batch_size) {
+        const int this_batch = std::min(chunk_size, batch_size - offset);
+
+        // For the last chunk, if size differs, we need a different plan
+        if (this_batch != chunk_size) {
+            // Small remainder - create one-time plan
+            fftwf_plan remainder_plan = fftwf_plan_many_dft_r2c(
+                1, &n_real, this_batch, nullptr, nullptr, 1, n_real, nullptr,
+                nullptr, 1, n_complex, FFTW_ESTIMATE);
+
+            if (remainder_plan == nullptr) {
+                throw std::runtime_error(
+                    "Failed to create RFFT plan for remainder");
+            }
+
+            fftwf_execute_dft_r2c(remainder_plan, in_ptr + offset * n_real,
+                                  out_ptr + offset * n_complex);
+            fftwf_destroy_plan(remainder_plan);
+        } else {
+            fftwf_execute_dft_r2c(plan, in_ptr + offset * n_real,
+                                  out_ptr + offset * n_complex);
+        }
+
+        offset += this_batch;
+        chunks_executed++;
+    }
+    spdlog::debug("RFFT batch completed: {} transforms of size {} in {} chunks",
+                  batch_size, n_real, chunks_executed);
+}
+
 void irfft_batch(std::span<ComplexType> complex_input,
                  std::span<float> real_output,
                  int batch_size,
                  int n_real,
                  int nthreads) {
+    if (batch_size > FFT_BATCH_SIZE_MAX) {
+        irfft_batch_chunked(complex_input, real_output, batch_size, n_real,
+                            nthreads);
+        return;
+    }
     ensure_fftw_threading(nthreads);
     const int n_complex = (n_real / 2) + 1;
 
@@ -259,6 +370,101 @@ void irfft_batch(std::span<ComplexType> complex_input,
     }
     spdlog::debug("IRFFT batch completed: {} transforms of size {}", batch_size,
                   n_real);
+}
+
+void irfft_batch_chunked(std::span<ComplexType> complex_input,
+                         std::span<float> real_output,
+                         int batch_size,
+                         int n_real,
+                         int nthreads) {
+    ensure_fftw_threading(nthreads);
+    const int n_complex = (n_real / 2) + 1;
+
+    error_check::check_equal(
+        real_output.size(), batch_size * n_real,
+        "IRFFT batch: real_output size does not match batch size");
+    error_check::check_equal(
+        complex_input.size(), batch_size * n_complex,
+        "IRFFT batch: complex_input size does not match batch size");
+
+    auto* in_ptr   = reinterpret_cast<fftwf_complex*>(complex_input.data());
+    float* out_ptr = real_output.data();
+
+    // Determine chunk size
+    const int chunk_size = std::min(FFT_BATCH_SIZE_MAX, batch_size);
+    const PlanKey key{n_real, chunk_size};
+
+    // Get or create cached plan (thread-safe)
+    fftwf_plan plan = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_plan_cache_mutex);
+        auto it = g_irfft_plan_cache.find(key);
+        if (it != g_irfft_plan_cache.end()) {
+            plan = it->second;
+        } else {
+            plan =
+                fftwf_plan_many_dft_c2r(1,           // rank
+                                        &key.n_real, // transform size
+                                        key.chunk,   // number of transforms
+                                        nullptr,     // input (dummy)
+                                        nullptr, 1, n_complex, // input layout
+                                        nullptr,               // output (dummy)
+                                        nullptr, 1, n_real,    // output layout
+                                        FFTW_ESTIMATE          // fast planning
+                );
+
+            if (plan == nullptr) {
+                throw std::runtime_error(std::format(
+                    "Failed to create IRFFT plan for n_real={}, chunk={}",
+                    n_real, chunk_size));
+            }
+
+            g_irfft_plan_cache[key] = plan;
+            spdlog::debug(
+                "IRFFT: Created and cached plan for n_real={}, chunk={}",
+                n_real, chunk_size);
+        }
+    }
+
+    // Execute in chunks
+    int offset          = 0;
+    int chunks_executed = 0;
+    while (offset < batch_size) {
+        const int this_batch = std::min(chunk_size, batch_size - offset);
+
+        // For the last chunk, if size differs, create one-time plan
+        if (this_batch != chunk_size) {
+            fftwf_plan remainder_plan = fftwf_plan_many_dft_c2r(
+                1, &n_real, this_batch, nullptr, nullptr, 1, n_complex, nullptr,
+                nullptr, 1, n_real, FFTW_ESTIMATE);
+
+            if (remainder_plan == nullptr) {
+                throw std::runtime_error(
+                    "Failed to create IRFFT plan for remainder");
+            }
+
+            fftwf_execute_dft_c2r(remainder_plan, in_ptr + offset * n_complex,
+                                  out_ptr + offset * n_real);
+            fftwf_destroy_plan(remainder_plan);
+        } else {
+            fftwf_execute_dft_c2r(plan, in_ptr + offset * n_complex,
+                                  out_ptr + offset * n_real);
+        }
+
+        offset += this_batch;
+        chunks_executed++;
+    }
+
+    // Normalize output (FFTW doesn't normalize inverse transforms)
+    const float norm         = 1.0F / static_cast<float>(n_real);
+    const int total_elements = batch_size * n_real;
+    for (int i = 0; i < total_elements; ++i) {
+        real_output[i] *= norm;
+    }
+
+    spdlog::debug(
+        "IRFFT batch completed: {} transforms of size {} in {} chunks",
+        batch_size, n_real, chunks_executed);
 }
 
 } // namespace loki::utils

@@ -30,9 +30,10 @@ public:
                        double wtsp                        = 1.5,
                        bool use_fourier                   = true,
                        int nthreads                       = 1,
-                       double max_memory_gb               = 8.0,
+                       double max_process_memory_gb       = 8.0,
                        double octave_scale                = 2.0,
-                       std::optional<SizeType> nbins_max  = std::nullopt,
+                       SizeType nbins_max                 = 1024,
+                       SizeType nbins_min_lossy_bf        = 64,
                        std::optional<SizeType> bseg_brute = std::nullopt,
                        std::optional<SizeType> bseg_ffa   = std::nullopt,
                        double snr_min                     = 5.0,
@@ -73,12 +74,14 @@ public:
     bool get_use_fourier() const noexcept;
     /// @brief Get the number of threads to use.
     int get_nthreads() const noexcept;
-    /// @brief Get the maximum memory in GB.
-    double get_max_memory_gb() const noexcept;
+    /// @brief Get the maximum memory per process in GB.
+    double get_max_process_memory_gb() const noexcept;
     /// @brief Get the octave scale parameter for the FFA regions.
     double get_octave_scale() const noexcept;
     /// @brief Get the maximum number of fold bins.
     SizeType get_nbins_max() const noexcept;
+    /// @brief Get the minimum number of bins for the lossy brute force search.
+    SizeType get_nbins_min_lossy_bf() const noexcept;
     /// @brief Get the number of segments for the brute force search.
     SizeType get_bseg_brute() const noexcept;
     /// @brief Get the number of segments for the FFA search.
@@ -121,8 +124,9 @@ public:
     double get_x_mass_const() const noexcept;
 
     // --- Setters ---
-    /// @brief Set the maximum memory in GB (Used for GPU memory allocation).
-    void set_max_memory_gb(double max_memory_gb) noexcept;
+    /// @brief Set the maximum memory per process in GB (Used for GPU memory
+    /// allocation).
+    void set_max_process_memory_gb(double max_process_memory_gb) noexcept;
 
     // --- Methods ---
     /// @brief Get the parameter step sizes for the f-based params.

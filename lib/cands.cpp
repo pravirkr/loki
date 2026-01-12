@@ -35,6 +35,14 @@ std::tuple<int, int> extract_ref_seg_task_id(const std::string& filename) {
     return {-1, -1};
 }
 
+// Create a compound type for FFATimerStats
+HighFive::CompoundType create_compound_ffa_timer_stats() {
+    return {{"brutefold", HighFive::create_datatype<float>()},
+            {"ffa", HighFive::create_datatype<float>()},
+            {"score", HighFive::create_datatype<float>()},
+            {"filter", HighFive::create_datatype<float>()}};
+}
+
 // Create a compound type for PruneStats
 HighFive::CompoundType create_compound_prune_stats() {
     return {{{"level", HighFive::create_datatype<SizeType>()},
@@ -48,7 +56,7 @@ HighFive::CompoundType create_compound_prune_stats() {
              {"n_leaves_surv", HighFive::create_datatype<SizeType>()}}};
 }
 
-HighFive::CompoundType create_compound_timer_stats() {
+HighFive::CompoundType create_compound_prune_timer_stats() {
     return {{"branch", HighFive::create_datatype<float>()},
             {"validate", HighFive::create_datatype<float>()},
             {"resolve", HighFive::create_datatype<float>()},
@@ -59,6 +67,118 @@ HighFive::CompoundType create_compound_timer_stats() {
 }
 
 } // namespace
+
+// --- FFATimerStats ---
+FFATimerStats::FFATimerStats() {
+    for (const auto& name : kTimerNames) {
+        m_timers[name] = 0.0F;
+    }
+}
+float& FFATimerStats::operator[](const std::string& key) {
+    return m_timers[key];
+}
+const float& FFATimerStats::operator[](const std::string& key) const {
+    return m_timers.at(key);
+}
+const float& FFATimerStats::at(const std::string& key) const {
+    return m_timers.at(key);
+}
+float& FFATimerStats::at(const std::string& key) { return m_timers.at(key); }
+bool FFATimerStats::contains(const std::string& key) const {
+    return m_timers.contains(key);
+}
+auto FFATimerStats::begin() const { return m_timers.begin(); }
+auto FFATimerStats::end() const { return m_timers.end(); }
+auto FFATimerStats::begin() { return m_timers.begin(); }
+auto FFATimerStats::end() { return m_timers.end(); }
+float FFATimerStats::total() const {
+    return std::accumulate(
+        m_timers.begin(), m_timers.end(), 0.0F,
+        [](float sum, const auto& pair) { return sum + pair.second; });
+}
+void FFATimerStats::reset() {
+    for (auto& [name, time] : m_timers) {
+        time = 0.0F;
+    }
+}
+FFATimerStats& FFATimerStats::operator+=(const FFATimerStats& other) {
+    for (const auto& [name, time] : other.m_timers) {
+        m_timers[name] += time;
+    }
+    return *this;
+}
+
+std::string FFATimerStats::get_concise_timer_summary() const {
+    const float total_time = total();
+    if (total_time == 0.0F) {
+        return "Total: 0.0s";
+    }
+
+    // Copy timers to a vector to sort them by time
+    std::vector<std::pair<std::string, float>> sorted_times(begin(), end());
+    std::ranges::sort(sorted_times, [](const auto& a, const auto& b) {
+        return a.second > b.second;
+    });
+
+    std::string breakdown;
+    int count = 0;
+    for (const auto& [name, time] : sorted_times) {
+        if (time > 0 && count < 4) {
+            if (!breakdown.empty()) {
+                breakdown += " | ";
+            }
+            breakdown +=
+                std::format("{}: {:.0f}%", name, (time / total_time) * 100.0F);
+            count++;
+        }
+    }
+    return std::format("Total: {:.1f}s ({})", total_time, breakdown);
+}
+
+// --- FFAStatsCollection ---
+void FFAStatsCollection::update_stats(const FFATimerStats& timers,
+                                      float flops) {
+    m_accumulated_timers += timers;
+    m_accumulated_flops += flops;
+}
+std::string FFAStatsCollection::get_concise_timer_summary() const {
+    const float total_time = m_accumulated_timers.total();
+    if (total_time == 0.0F) {
+        return "Total: 0.0s";
+    }
+
+    // Copy timers to a vector to sort them by time
+    std::vector<std::pair<std::string, float>> sorted_times(
+        m_accumulated_timers.begin(), m_accumulated_timers.end());
+    std::ranges::sort(sorted_times, [](const auto& a, const auto& b) {
+        return a.second > b.second;
+    });
+
+    std::string breakdown;
+    int count = 0;
+    for (const auto& [name, time] : sorted_times) {
+        if (time > 0 && count < 4) {
+            if (!breakdown.empty()) {
+                breakdown += " | ";
+            }
+            breakdown +=
+                std::format("{}: {:.0f}%", name, (time / total_time) * 100.0F);
+            count++;
+        }
+    }
+    return std::format("Total: {:.1f}s ({})", total_time, breakdown);
+}
+
+std::vector<FFATimerStatsPacked> FFAStatsCollection::get_packed_data() const {
+    std::vector<FFATimerStatsPacked> packed_timers;
+    if (m_accumulated_timers.total() > 0.0F) {
+        packed_timers.emplace_back(m_accumulated_timers.at("brutefold"),
+                                   m_accumulated_timers.at("ffa"),
+                                   m_accumulated_timers.at("score"),
+                                   m_accumulated_timers.at("filter"));
+    }
+    return packed_timers;
+}
 
 // --- PruneStats ---
 double PruneStats::lb_leaves() const noexcept {
@@ -90,38 +210,40 @@ std::string PruneStats::get_summary() const noexcept {
                        surv_frac());
 }
 
-// --- TimerStats ---
-TimerStats::TimerStats() {
+// --- PruneTimerStats ---
+PruneTimerStats::PruneTimerStats() {
     for (const auto& name : kTimerNames) {
         m_timers[name] = 0.0F;
     }
 }
-float& TimerStats::operator[](const std::string& key) { return m_timers[key]; }
-const float& TimerStats::operator[](const std::string& key) const {
+float& PruneTimerStats::operator[](const std::string& key) {
+    return m_timers[key];
+}
+const float& PruneTimerStats::operator[](const std::string& key) const {
     return m_timers.at(key);
 }
-float& TimerStats::at(const std::string& key) { return m_timers.at(key); }
-const float& TimerStats::at(const std::string& key) const {
+float& PruneTimerStats::at(const std::string& key) { return m_timers.at(key); }
+const float& PruneTimerStats::at(const std::string& key) const {
     return m_timers.at(key);
 }
-bool TimerStats::contains(const std::string& key) const {
+bool PruneTimerStats::contains(const std::string& key) const {
     return m_timers.contains(key);
 }
-auto TimerStats::begin() const { return m_timers.begin(); }
-auto TimerStats::end() const { return m_timers.end(); }
-auto TimerStats::begin() { return m_timers.begin(); }
-auto TimerStats::end() { return m_timers.end(); }
-float TimerStats::total() const {
+auto PruneTimerStats::begin() const { return m_timers.begin(); }
+auto PruneTimerStats::end() const { return m_timers.end(); }
+auto PruneTimerStats::begin() { return m_timers.begin(); }
+auto PruneTimerStats::end() { return m_timers.end(); }
+float PruneTimerStats::total() const {
     return std::accumulate(
         m_timers.begin(), m_timers.end(), 0.0F,
         [](float sum, const auto& pair) { return sum + pair.second; });
 }
-void TimerStats::reset() {
+void PruneTimerStats::reset() {
     for (auto& [name, time] : m_timers) {
         time = 0.0F;
     }
 }
-TimerStats& TimerStats::operator+=(const TimerStats& other) {
+PruneTimerStats& PruneTimerStats::operator+=(const PruneTimerStats& other) {
     for (const auto& [name, time] : other.m_timers) {
         m_timers[name] += time;
     }
@@ -133,7 +255,7 @@ SizeType PruneStatsCollection::get_nstages() const {
     return m_stats_list.size();
 }
 void PruneStatsCollection::update_stats(const PruneStats& stats,
-                                        const TimerStats& timers) {
+                                        const PruneTimerStats& timers) {
     m_stats_list.push_back(stats);
     m_accumulated_timers += timers;
 }
@@ -209,9 +331,9 @@ std::string PruneStatsCollection::get_concise_timer_summary() const {
     }
     return std::format("Total: {:.1f}s ({})", total_time, breakdown);
 }
-std::pair<std::vector<PruneStats>, std::vector<TimerStatsPacked>>
+std::pair<std::vector<PruneStats>, std::vector<PruneTimerStatsPacked>>
 PruneStatsCollection::get_packed_data() const {
-    std::vector<TimerStatsPacked> packed_timers;
+    std::vector<PruneTimerStatsPacked> packed_timers;
     if (m_accumulated_timers.total() > 0.0F) {
         packed_timers.emplace_back(m_accumulated_timers.at("branch"),
                                    m_accumulated_timers.at("validate"),
@@ -308,6 +430,12 @@ void FFAResultWriter::write_results(std::span<const double> param_sets,
         param_sets_dset.select({old_n_param_sets, 0}, {n_param_sets, n_params})
             .write_raw(param_sets.data(), HighFive::create_datatype<double>());
     }
+}
+
+void FFAResultWriter::write_ffa_stats(const FFAStatsCollection& ffa_stats) {
+    std::lock_guard<std::mutex> lock(m_hdf5_mutex);
+    m_file.createDataSet("timer_stats", ffa_stats.get_packed_data());
+    m_file.createAttribute("flops", ffa_stats.get_flops());
 }
 
 HighFive::File FFAResultWriter::open_file() const {
@@ -533,7 +661,9 @@ void merge_prune_result_files(const std::filesystem::path& results_dir,
 
 } // namespace loki::cands
 
+HIGHFIVE_REGISTER_TYPE(loki::cands::FFATimerStatsPacked,
+                       loki::cands::create_compound_ffa_timer_stats)
 HIGHFIVE_REGISTER_TYPE(loki::cands::PruneStats,
                        loki::cands::create_compound_prune_stats)
-HIGHFIVE_REGISTER_TYPE(loki::cands::TimerStatsPacked,
-                       loki::cands::create_compound_timer_stats)
+HIGHFIVE_REGISTER_TYPE(loki::cands::PruneTimerStatsPacked,
+                       loki::cands::create_compound_prune_timer_stats)
