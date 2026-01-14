@@ -9,7 +9,7 @@
 #include "loki/detection/score.hpp"
 #include "loki/search/configs.hpp"
 #include "loki/utils/fft.hpp"
-#include "loki/utils/suggestions.hpp"
+#include "loki/utils/world_tree.hpp"
 
 namespace loki::core {
 
@@ -82,6 +82,11 @@ public:
 
     virtual void pack(std::span<const FoldType> data,
                       std::span<FoldType> out) const noexcept = 0;
+
+    virtual void report(std::span<double> leaves_tree,
+                        std::pair<double, double> coord_report,
+                        SizeType n_leaves,
+                        SizeType n_params) const = 0;
 
     virtual SizeType get_branch_max() const noexcept = 0;
 
@@ -170,7 +175,7 @@ public:
               utils::WorldTree<FoldType>& world_tree) override;
 };
 
-// Specialized implementation for Polynoimal searches in Taylor Basis
+// Specialized implementation for Polynomial searches in Taylor Basis
 template <SupportedFoldType FoldType>
 class PrunePolyTaylorDPFuncts final
     : public BaseTaylorPruneDPFuncts<FoldType,
@@ -237,6 +242,11 @@ public:
                    std::pair<double, double> coord_cur,
                    SizeType n_leaves,
                    SizeType n_params) const override;
+
+    void report(std::span<double> leaves_tree,
+                std::pair<double, double> coord_report,
+                SizeType n_leaves,
+                SizeType n_params) const override;
 };
 
 // Specialized implementation for Circular orbit search in Taylor basis
@@ -284,6 +294,11 @@ public:
                    std::pair<double, double> coord_cur,
                    SizeType n_leaves,
                    SizeType n_params) const override;
+
+    void report(std::span<double> leaves_tree,
+                std::pair<double, double> coord_report,
+                SizeType n_leaves,
+                SizeType n_params) const override;
 };
 
 // Factory function to create the correct implementation based on the kind

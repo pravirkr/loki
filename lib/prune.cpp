@@ -17,7 +17,7 @@
 #include "loki/psr_utils.hpp"
 #include "loki/timing.hpp"
 #include "loki/utils.hpp"
-#include "loki/utils/suggestions.hpp"
+#include "loki/utils/world_tree.hpp"
 
 namespace loki::algorithms {
 
@@ -426,11 +426,13 @@ public:
         // Write results
         auto result_writer = cands::PruneResultWriter(
             actual_result_file, cands::PruneResultWriter::Mode::kAppend);
+        auto leaves_report = m_world_tree->get_leaves_contiguous_span();
+        m_prune_funcs->report(leaves_report, coord_mid,
+                              m_world_tree->get_size(), m_cfg.get_nparams());
         result_writer.write_run_results(
-            run_name, m_snail_scheme->get_data(),
-            m_world_tree->get_transformed(coord_mid),
-            m_world_tree->get_scores(), m_world_tree->get_size(),
-            m_cfg.get_nparams(), *m_pstats);
+            run_name, m_snail_scheme->get_data(), leaves_report,
+            m_world_tree->get_scores_contiguous_span(),
+            m_world_tree->get_size(), m_cfg.get_nparams(), *m_pstats);
 
         // Final log entries
         std::ofstream final_log(actual_log_file, std::ios::app);

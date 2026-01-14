@@ -66,27 +66,30 @@ public:
     WorldTree& operator=(const WorldTree&) = delete;
 
     // Getters
+    [[nodiscard]] const std::vector<double>& get_leaves() const noexcept;
+    [[nodiscard]] const std::vector<FoldType>& get_folds() const noexcept;
+    [[nodiscard]] const std::vector<float>& get_scores() const noexcept;
     [[nodiscard]] SizeType get_capacity() const noexcept;
     [[nodiscard]] SizeType get_nparams() const noexcept;
     [[nodiscard]] SizeType get_nbins() const noexcept;
     [[nodiscard]] std::string_view get_mode() const noexcept;
     [[nodiscard]] SizeType get_leaves_stride() const noexcept;
     [[nodiscard]] SizeType get_folds_stride() const noexcept;
-    [[nodiscard]] const std::vector<double>& get_leaves() const noexcept;
-    // Returns {span, actual_size}, where actual_size <= requested n_leaves,
-    // limited to contiguous segment before wrap.
-    std::pair<std::span<const double>, SizeType>
-    get_leaves_span(SizeType n_leaves) const;
-    [[nodiscard]] const std::vector<FoldType>& get_folds() const noexcept;
-    [[nodiscard]] std::vector<float> get_scores() const noexcept;
-
     [[nodiscard]] SizeType get_size() const noexcept;
     [[nodiscard]] SizeType get_size_old() const noexcept;
     [[nodiscard]] float get_size_lb() const noexcept;
     [[nodiscard]] float get_score_max() const noexcept;
     [[nodiscard]] float get_score_min() const noexcept;
-    [[nodiscard]] float get_score_median() const noexcept;
     [[nodiscard]] float get_memory_usage() const noexcept;
+
+    // Returns {span, actual_size}, where actual_size <= requested n_leaves,
+    // limited to contiguous segment before wrap.
+    [[nodiscard]] std::pair<std::span<const double>, SizeType>
+    get_leaves_span(SizeType n_leaves) const;
+    // Returns span over contiguous leaves (for reporting)
+    [[nodiscard]] std::span<double> get_leaves_contiguous_span() noexcept;
+    // Returns span over contiguous scores (for saving to file)
+    [[nodiscard]] std::span<float> get_scores_contiguous_span() noexcept;
 
     void set_size(SizeType size) noexcept;
     void reset() noexcept;
@@ -102,30 +105,24 @@ public:
     [[nodiscard]] std::
         tuple<std::span<const double>, std::span<const FoldType>, float>
         get_best() const;
-    // Transform the search parameters to given coordinate
-    [[nodiscard]] std::vector<double>
-    get_transformed(std::pair<double, double> coord_mid) const;
-    // Add a candidate leaf to the Tree if there is space
-    [[nodiscard]] bool add(std::span<const double> leaf,
-                           std::span<const FoldType> fold,
-                           float score);
+
     // Add an initial set of candidate leaves to the Tree
     void add_initial(std::span<const double> batch_leaves,
                      std::span<const FoldType> batch_folds,
                      std::span<const float> batch_scores,
                      SizeType slots_to_write);
+    // Add a candidate leaf to the Tree if there is space
+    [[nodiscard]] bool add(std::span<const double> leaf,
+                           std::span<const FoldType> fold,
+                           float score);
     // Add a batch of candidate leaves to the Tree if there is space
     [[nodiscard]] float add_batch(std::span<const double> batch_leaves,
                                   std::span<const FoldType> batch_folds,
                                   std::span<const float> batch_scores,
                                   float current_threshold,
                                   SizeType slots_to_write);
-    // Prune to keep only candidates with scores >= median
-    [[nodiscard]] float prune_on_overload();
     // Prune to keep only unique candidates
     void deduplicate();
-    // Deduplicate and prune to keep only candidates with scores >= median
-    [[nodiscard]] float deduplicate_and_prune_on_overload();
 
 private:
     class Impl;

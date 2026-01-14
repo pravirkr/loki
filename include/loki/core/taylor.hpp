@@ -6,7 +6,7 @@
 
 #include "loki/common/types.hpp"
 #include "loki/detection/score.hpp"
-#include "loki/utils/suggestions.hpp"
+#include "loki/utils/world_tree.hpp"
 
 namespace loki::core {
 
@@ -152,6 +152,11 @@ void poly_taylor_transform_snap_batch(std::span<double> leaves_batch,
                                       SizeType n_leaves,
                                       SizeType n_params,
                                       bool use_conservative_tile);
+
+void report_leaves_taylor_batch(std::span<double> leaves_tree,
+                                std::pair<double, double> coord_report,
+                                SizeType n_leaves,
+                                SizeType n_params);
 
 std::vector<double>
 poly_taylor_branch(std::span<const double> leaf,

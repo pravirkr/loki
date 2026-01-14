@@ -22,7 +22,7 @@
 #include "loki/psr_utils.hpp"
 #include "loki/timing.hpp"
 #include "loki/utils.hpp"
-#include "loki/utils/suggestions.hpp"
+#include "loki/utils/world_tree_cuda.cuh"
 
 namespace loki::algorithms {
 

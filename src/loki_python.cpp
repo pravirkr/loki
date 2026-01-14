@@ -534,20 +534,20 @@ PYBIND11_MODULE(libloki, m) {
 
     auto m_prune = m.def_submodule("prune", "Pruning submodule");
 
-    py::class_<utils::SuggestionTree<float>>(m_prune, "SuggestionTreeFloat")
+    py::class_<utils::WorldTree<float>>(m_prune, "WorldTreeFloat")
         .def(py::init<SizeType, SizeType, SizeType, std::string_view>(),
              py::arg("max_sugg"), py::arg("nparams"), py::arg("nbins"),
              py::arg("kind"))
         .def_property_readonly("leaves",
-                               [](const utils::SuggestionTree<float>& self) {
+                               [](const utils::WorldTree<float>& self) {
                                    return as_pyarray_ref(self.get_leaves());
                                })
         .def_property_readonly("folds",
-                               [](const utils::SuggestionTree<float>& self) {
+                               [](const utils::WorldTree<float>& self) {
                                    return as_pyarray_ref(self.get_folds());
                                })
         .def_property_readonly("scores",
-                               [](const utils::SuggestionTree<float>& self) {
+                               [](const utils::WorldTree<float>& self) {
                                    return as_pyarray_ref(self.get_scores());
                                });
 

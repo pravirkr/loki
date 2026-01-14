@@ -249,6 +249,15 @@ void PrunePolyTaylorDPFuncts<FoldType>::transform(
         this->m_cfg.get_use_conservative_tile());
 }
 
+template <SupportedFoldType FoldType>
+void PrunePolyTaylorDPFuncts<FoldType>::report(
+    std::span<double> leaves_tree,
+    std::pair<double, double> coord_report,
+    SizeType n_leaves,
+    SizeType n_params) const {
+    report_leaves_taylor_batch(leaves_tree, coord_report, n_leaves, n_params);
+}
+
 // Specialized implementation for Circular orbit search in Taylor basis
 template <SupportedFoldType FoldType>
 PruneCircTaylorDPFuncts<FoldType>::PruneCircTaylorDPFuncts(
@@ -316,6 +325,15 @@ void PruneCircTaylorDPFuncts<FoldType>::transform(
                                 n_params,
                                 this->m_cfg.get_use_conservative_tile(),
                                 this->m_cfg.get_minimum_snap_cells());
+}
+
+template <SupportedFoldType FoldType>
+void PruneCircTaylorDPFuncts<FoldType>::report(
+    std::span<double> leaves_tree,
+    std::pair<double, double> coord_report,
+    SizeType n_leaves,
+    SizeType n_params) const {
+    report_leaves_taylor_batch(leaves_tree, coord_report, n_leaves, n_params);
 }
 
 // Factory function to create the correct implementation based on the kind

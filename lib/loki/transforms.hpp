@@ -39,8 +39,4 @@ shift_taylor_circular_errors_batch(std::span<const double> taylor_error_vec,
                                    SizeType n_batch,
                                    SizeType n_params);
 
-void report_leaves_taylor_batch(std::span<double> leaves_batch,
-                                SizeType n_batch,
-                                SizeType n_params);
-
 } // namespace loki::transforms

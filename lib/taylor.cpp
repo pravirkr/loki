@@ -1000,6 +1000,42 @@ void poly_taylor_transform_snap_batch(std::span<double> leaves_batch,
     }
 }
 
+void report_leaves_taylor_batch(std::span<double> leaves_tree,
+                                std::pair<double, double> /*coord_report*/,
+                                SizeType n_leaves,
+                                SizeType n_params) {
+    constexpr SizeType kParamStride = 2U;
+    const SizeType leaves_stride    = n_params * kParamStride;
+    error_check::check_greater_equal(leaves_tree.size(),
+                                     n_leaves * leaves_stride,
+                                     "leaves_tree size not enough");
+    for (SizeType i = 0; i < n_leaves; ++i) {
+        const auto leaf_offset = i * leaves_stride;
+        const auto v_final =
+            leaves_tree[leaf_offset + ((n_params - 1) * kParamStride) + 0];
+        const auto dv_final =
+            leaves_tree[leaf_offset + ((n_params - 1) * kParamStride) + 1];
+        const auto f0_batch =
+            leaves_tree[leaf_offset + ((n_params + 1) * kParamStride) + 0];
+        const auto s_factor = 1.0 - (v_final / utils::kCval);
+        // Gauge transform + error propagation
+        for (SizeType j = 0; j < n_params - 1; ++j) {
+            const auto param_offset       = leaf_offset + (j * kParamStride);
+            const auto param_val          = leaves_tree[param_offset + 0];
+            const auto param_err          = leaves_tree[param_offset + 1];
+            leaves_tree[param_offset + 0] = param_val / s_factor;
+            leaves_tree[param_offset + 1] = std::sqrt(
+                std::pow(param_err / s_factor, 2) +
+                (std::pow(param_val / (utils::kCval * s_factor * s_factor), 2) *
+                 std::pow(dv_final, 2)));
+        }
+        leaves_tree[leaf_offset + ((n_params - 1) * kParamStride) + 0] =
+            f0_batch * s_factor;
+        leaves_tree[leaf_offset + ((n_params - 1) * kParamStride) + 1] =
+            f0_batch * dv_final / utils::kCval;
+    }
+}
+
 std::vector<double>
 poly_taylor_branch(std::span<const double> leaf,
                    std::pair<double, double> coord_cur,

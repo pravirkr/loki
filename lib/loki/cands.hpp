@@ -55,9 +55,7 @@ public:
     [[nodiscard]] const FFATimerStats& get_timers() const {
         return m_accumulated_timers;
     }
-    [[nodiscard]] float get_flops() const {
-        return m_accumulated_flops;
-    }
+    [[nodiscard]] float get_flops() const { return m_accumulated_flops; }
     [[nodiscard]] std::string get_concise_timer_summary() const;
     [[nodiscard]] std::vector<FFATimerStatsPacked> get_packed_data() const;
 
@@ -198,12 +196,12 @@ public:
     void write_metadata(const std::vector<std::string>& param_names,
                         SizeType nsegments,
                         SizeType max_sugg,
-                        const std::vector<float>& threshold_scheme);
+                        std::span<const float> threshold_scheme);
 
-    void write_run_results(const std::string& run_name,
-                           const std::vector<SizeType>& scheme,
-                           const std::vector<double>& param_sets,
-                           const std::vector<float>& scores,
+    void write_run_results(std::string_view run_name,
+                           std::span<const SizeType> snail_scheme,
+                           std::span<const double> param_sets,
+                           std::span<const float> scores,
                            SizeType n_param_sets,
                            SizeType n_params,
                            const PruneStatsCollection& pstats);

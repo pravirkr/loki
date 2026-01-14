@@ -161,38 +161,4 @@ shift_taylor_circular_errors_batch(std::span<const double> taylor_error_vec,
     return result;
 }
 
-void report_leaves_taylor_batch(std::span<double> leaves_batch,
-                                SizeType n_batch,
-                                SizeType n_params) {
-    constexpr SizeType kParamStride = 2U;
-    const SizeType leaves_stride    = (n_params + 2) * kParamStride;
-    error_check::check_equal(leaves_batch.size(), n_batch * leaves_stride,
-                             "leaves_batch size mismatch");
-    for (SizeType i = 0; i < n_batch; ++i) {
-        const auto leaf_offset = i * leaves_stride;
-        const auto v_final =
-            leaves_batch[leaf_offset + ((n_params - 1) * kParamStride) + 0];
-        const auto dv_final =
-            leaves_batch[leaf_offset + ((n_params - 1) * kParamStride) + 1];
-        const auto f0_batch =
-            leaves_batch[leaf_offset + ((n_params + 1) * kParamStride) + 0];
-        const auto s_factor = 1.0 - (v_final / utils::kCval);
-        // Gauge transform + error propagation
-        for (SizeType j = 0; j < n_params - 1; ++j) {
-            const auto param_offset        = leaf_offset + (j * kParamStride);
-            const auto param_val           = leaves_batch[param_offset + 0];
-            const auto param_err           = leaves_batch[param_offset + 1];
-            leaves_batch[param_offset + 0] = param_val / s_factor;
-            leaves_batch[param_offset + 1] = std::sqrt(
-                std::pow(param_err / s_factor, 2) +
-                (std::pow(param_val / (utils::kCval * s_factor * s_factor), 2) *
-                 std::pow(dv_final, 2)));
-        }
-        leaves_batch[leaf_offset + ((n_params - 1) * kParamStride) + 0] =
-            f0_batch * s_factor;
-        leaves_batch[leaf_offset + ((n_params - 1) * kParamStride) + 1] =
-            f0_batch * dv_final / utils::kCval;
-    }
-}
-
 } // namespace loki::transforms

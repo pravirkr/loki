@@ -1,9 +1,10 @@
-#include "loki/utils/suggestions.hpp"
+#include "loki/utils/world_tree.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <memory>
+#include <numeric>
 #include <span>
 #include <string>
 #include <string_view>
@@ -11,7 +12,6 @@
 
 #include "loki/common/types.hpp"
 #include "loki/exceptions.hpp"
-#include "loki/transforms.hpp"
 
 namespace loki::utils {
 
@@ -20,6 +20,9 @@ struct BestIndices {
     float score;
     SizeType win_idx;
 };
+
+enum class PruneMode : uint8_t { kKeepTopHalf, kMedian };
+
 } // namespace
 
 /**
@@ -60,6 +63,7 @@ public:
           m_leaves(m_capacity * m_leaves_stride, 0.0),
           m_folds(m_capacity * m_folds_stride, FoldType{}),
           m_scores(m_capacity, 0.0F),
+          m_scratch_leaves(m_capacity * (nparams * kParamStride), 0.0),
           m_scratch_scores(m_capacity, 0.0F),
           m_scratch_pending_indices(m_capacity, 0),
           m_scratch_mask(m_capacity, 0) {
@@ -78,7 +82,10 @@ public:
     Impl(Impl&&)                 = default;
     Impl& operator=(Impl&&)      = default;
 
-    // Size and capacity queries
+    // Size and getters
+    const std::vector<double>& get_leaves() const noexcept { return m_leaves; }
+    const std::vector<FoldType>& get_folds() const noexcept { return m_folds; }
+    const std::vector<float>& get_scores() const noexcept { return m_scores; }
     SizeType get_capacity() const noexcept { return m_capacity; }
     SizeType get_nparams() const noexcept { return m_nparams; }
     SizeType get_nbins() const noexcept { return m_nbins; }
@@ -89,87 +96,6 @@ public:
     SizeType get_size_old() const noexcept { return m_size_old; }
     float get_size_lb() const noexcept {
         return m_size > 0 ? std::log2(static_cast<float>(m_size)) : 0.0F;
-    }
-
-    const std::vector<double>& get_leaves() const noexcept { return m_leaves; }
-
-    /**
-     * @brief Get span over leaves for processing
-     *
-     * During updates, returns span over readable (old) region.
-     * The span may be truncated at buffer wrap point.
-     *
-     * @param n_leaves Number of leaves to access
-     * @return Pair of (span, actual_contiguous_count)
-     */
-    std::pair<std::span<const double>, SizeType>
-    get_leaves_span(SizeType n_leaves) const {
-        const SizeType available = m_size_old - m_read_consumed;
-        error_check::check_less_equal(
-            n_leaves, available,
-            "get_leaves_span: requested range exceeds available data");
-
-        // Compute physical start: relative to current head of read region
-        const auto physical_start =
-            get_circular_index(m_read_consumed, m_head, m_capacity);
-        // Compute how many contiguous elements we can take before wrap
-        const auto actual_size =
-            std::min(n_leaves, m_capacity - physical_start);
-        // Return span with correct byte size (actual_size elements, not bytes)
-        return {{m_leaves.data() + (physical_start * m_leaves_stride),
-                 actual_size * m_leaves_stride},
-                actual_size};
-    }
-
-    const std::vector<FoldType>& get_folds() const noexcept { return m_folds; }
-
-    /**
-     * @brief Get span over folds for kernel consumption
-     *
-     * @param n_folds Number of fold entries to access
-     * @return Pair of (span, actual_contiguous_count)
-     */
-    std::pair<std::span<const FoldType>, SizeType>
-    get_folds_span(SizeType n_folds) const {
-        const SizeType available = m_size_old - m_read_consumed;
-        error_check::check_less_equal(
-            n_folds, available,
-            "get_folds_span: requested range exceeds available data");
-
-        const auto physical_start =
-            get_circular_index(m_read_consumed, m_head, m_capacity);
-        const auto actual_size = std::min(n_folds, m_capacity - physical_start);
-        return {{m_folds.data() + (physical_start * m_folds_stride),
-                 actual_size * m_folds_stride},
-                actual_size};
-    }
-
-    /**
-     * @brief Get copy of current scores
-     *
-     * Returns scores for m_size elements in the current region.
-     *
-     * @return Vector of scores
-     */
-    std::vector<float> get_scores() const {
-        std::vector<float> scores(m_size);
-        if (m_size == 0) {
-            return scores;
-        }
-        const auto start_idx = get_current_start_idx();
-        // Check if data wraps around
-        if (start_idx + m_size <= m_capacity) {
-            // Contiguous case - single fast copy
-            std::copy_n(m_scores.begin() + start_idx, m_size, scores.begin());
-        } else {
-            // Wrapped case - two contiguous copies
-            const auto first_part = m_capacity - start_idx;
-            std::copy_n(m_scores.begin() + start_idx, first_part,
-                        scores.begin());
-            std::copy_n(m_scores.begin(), m_size - first_part,
-                        scores.begin() + first_part);
-        }
-        return scores;
     }
 
     /**
@@ -205,58 +131,118 @@ public:
     }
 
     /**
-     * @brief Get median score in current region
-     *
-     * Uses nth_element for O(n) complexity.
-     * For even-sized arrays, returns lower median.
-     */
-    float get_score_median() {
-        if (m_size == 0) {
-            return 0.0F;
-        }
-        copy_scores_to_scratch();
-        const auto mid = m_scratch_scores.begin() + m_size / 2;
-        std::ranges::nth_element(m_scratch_scores, mid);
-        return *mid;
-    }
-
-    /**
      * @brief Estimate memory usage in GiB
      *
      * Includes both base storage and estimated peak temporary allocations.
      */
     float get_memory_usage() const noexcept {
-        const auto base_bytes = (m_leaves.size() * sizeof(double)) +
-                                (m_folds.size() * sizeof(FoldType)) +
-                                (2 * m_scores.size() * sizeof(float)) +
-                                (m_capacity * sizeof(uint32_t)) +
-                                (m_capacity * sizeof(uint8_t));
+        const auto base_bytes =
+            (m_leaves.size() * sizeof(double)) +
+            (m_folds.size() * sizeof(FoldType)) +
+            (m_scores.size() * sizeof(float)) +
+            (m_scratch_scores.size() * sizeof(float)) +
+            (m_scratch_pending_indices.size() * sizeof(SizeType)) +
+            (m_scratch_mask.size() * sizeof(uint8_t));
         // Peak temporary allocations (worst case scenario)
-        SizeType peak_temp_bytes = 0;
-
-        // 2. get_transformed() temp allocation
+        // get_transformed() temp allocation
         const auto transform_bytes =
             m_capacity * m_leaves_stride * sizeof(double);
-        peak_temp_bytes = std::max(peak_temp_bytes, transform_bytes);
-        // 3. trim operations temp allocations
-        const auto trim_temp_bytes =
-            // idx array in trim_half
-            (m_capacity * sizeof(SizeType)) +
-            // moves vector in keep (worst case: all elements move)
-            (m_capacity * sizeof(std::pair<SizeType, SizeType>)) +
-            // best_by_key map in compute_uniqueness_mask_inplace (worst case:
-            // all unique)
-            (m_capacity * (sizeof(int64_t) + sizeof(BestIndices))) +
-            // keep_mask
-            (m_capacity * sizeof(bool));
-
-        peak_temp_bytes = std::max(peak_temp_bytes, trim_temp_bytes);
+        // best_by_key map in compute_uniqueness_mask_inplace (worst case:
+        // all unique)
+        const auto uniqueness_bytes =
+            (m_capacity * (sizeof(int64_t) + sizeof(BestIndices)));
+        const auto peak_temp_bytes =
+            std::max(transform_bytes, uniqueness_bytes);
 
         return static_cast<float>(base_bytes + peak_temp_bytes) /
                static_cast<float>(1ULL << 30U);
     }
 
+    /**
+     * @brief Get span over leaves for processing
+     *
+     * During updates, returns span over readable (old) region.
+     * The span may be truncated at buffer wrap point.
+     *
+     * @param n_leaves Number of leaves to access
+     * @return Pair of (span, actual_contiguous_count)
+     */
+    std::pair<std::span<const double>, SizeType>
+    get_leaves_span(SizeType n_leaves) const {
+        const SizeType available = m_size_old - m_read_consumed;
+        error_check::check_less_equal(
+            n_leaves, available,
+            "get_leaves_span: requested range exceeds available data");
+
+        // Compute physical start: relative to current head of read region
+        const auto physical_start =
+            get_circular_index(m_read_consumed, m_head, m_capacity);
+        // Compute how many contiguous elements we can take before wrap
+        const auto actual_size =
+            std::min(n_leaves, m_capacity - physical_start);
+        // Return span with correct byte size (actual_size elements, not bytes)
+        return {{m_leaves.data() + (physical_start * m_leaves_stride),
+                 actual_size * m_leaves_stride},
+                actual_size};
+    }
+
+    std::span<double> get_leaves_contiguous_span() noexcept {
+        const auto start_idx     = get_current_start_idx();
+        const auto report_stride = m_nparams * kParamStride;
+        // Check if data wraps around
+        if (start_idx + m_size <= m_capacity) {
+            // Contiguous case - single copy
+            for (SizeType i = 0; i < m_size; ++i) {
+                const auto src_offset = (start_idx + i) * m_leaves_stride;
+                const auto dst_offset = i * report_stride;
+                std::copy_n(m_leaves.begin() + src_offset, m_leaves_stride,
+                            m_scratch_leaves.begin() + dst_offset);
+            }
+        } else {
+            // Wrapped case - two contiguous copies
+            const auto first_part = m_capacity - start_idx;
+            for (SizeType i = 0; i < first_part; ++i) {
+                const auto src_offset = (start_idx + i) * m_leaves_stride;
+                const auto dst_offset = i * report_stride;
+                std::copy_n(m_leaves.begin() + src_offset, m_leaves_stride,
+                            m_scratch_leaves.begin() + dst_offset);
+            }
+            for (SizeType i = 0; i < m_size - first_part; ++i) {
+                const auto src_offset = i * m_leaves_stride;
+                const auto dst_offset = (first_part + i) * report_stride;
+                std::copy_n(m_leaves.begin() + src_offset, m_leaves_stride,
+                            m_scratch_leaves.begin() + dst_offset);
+            }
+        }
+        return std::span<double>(m_scratch_leaves)
+            .first(m_size * report_stride);
+    }
+
+    /**
+     * @brief Get span over contiguous scores (for saving to file)
+     *
+     * Returns span over contiguous scores for m_size elements in the current
+     * region.
+     *
+     * @return Span over contiguous scores
+     */
+    std::span<float> get_scores_contiguous_span() noexcept {
+        copy_scores_to_scratch();
+        return std::span<float>(m_scratch_scores).first(m_size);
+    }
+
     // Mutation operations
+
+    /**
+     * @brief Set size externally (for initialization)
+     */
+    void set_size(SizeType size) noexcept {
+        m_size     = size;
+        m_head     = 0;
+        m_size_old = 0;
+        error_check::check_less_equal(
+            m_size, m_capacity, "WorldTree: Invalid size after set_size()");
+    }
 
     /**
      * @brief Reset buffer to empty state
@@ -269,17 +255,6 @@ public:
         m_read_consumed = 0;
         m_write_head    = 0;
         m_write_start   = 0;
-    }
-
-    /**
-     * @brief Set size externally (for initialization)
-     */
-    void set_size(SizeType size) noexcept {
-        m_size     = size;
-        m_head     = 0;
-        m_size_old = 0;
-        error_check::check_less_equal(
-            m_size, m_capacity, "WorldTree: Invalid size after set_size()");
     }
 
     /**
@@ -349,13 +324,12 @@ public:
             physical_indices.size(), n_leaves,
             "compute_physical_indices: physical_indices size insufficient");
 
-        // logical_indices are relative to current batch span. The span starts
-        // at this physical location:
-        const auto span_start =
+        // Compute physical start: relative to current head of read region
+        const auto physical_start =
             get_circular_index(m_read_consumed, m_head, m_capacity);
         for (SizeType i = 0; i < n_leaves; ++i) {
-            physical_indices[i] =
-                get_circular_index(logical_indices[i], span_start, m_capacity);
+            physical_indices[i] = get_circular_index(
+                logical_indices[i], physical_start, m_capacity);
         }
     }
 
@@ -388,75 +362,6 @@ public:
                 max_score};
     }
 
-    std::vector<double>
-    get_transformed(std::pair<double, double> /*coord_mid*/) const {
-        // Copy all leaves rows
-        std::vector<double> contig_leaves(m_size * m_leaves_stride, 0.0);
-        const auto start_idx = get_current_start_idx();
-
-        // Check if data wraps around
-        if (start_idx + m_size <= m_capacity) {
-            // Contiguous case - single copy with stride
-            for (SizeType i = 0; i < m_size; ++i) {
-                const auto src_offset = (start_idx + i) * m_leaves_stride;
-                const auto dst_offset = i * m_leaves_stride;
-                std::copy_n(m_leaves.begin() + src_offset, m_leaves_stride,
-                            contig_leaves.begin() + dst_offset);
-            }
-        } else {
-            // Wrapped case
-            const auto first_part = m_capacity - start_idx;
-            for (SizeType i = 0; i < first_part; ++i) {
-                const auto src_offset = (start_idx + i) * m_leaves_stride;
-                const auto dst_offset = i * m_leaves_stride;
-                std::copy_n(m_leaves.begin() + src_offset, m_leaves_stride,
-                            contig_leaves.begin() + dst_offset);
-            }
-            for (SizeType i = 0; i < m_size - first_part; ++i) {
-                const auto src_offset = i * m_leaves_stride;
-                const auto dst_offset = (first_part + i) * m_leaves_stride;
-                std::copy_n(m_leaves.begin() + src_offset, m_leaves_stride,
-                            contig_leaves.begin() + dst_offset);
-            }
-        }
-        // Transform in-place
-        if (m_mode == "taylor") {
-            transforms::report_leaves_taylor_batch(contig_leaves, m_size,
-                                                   m_nparams);
-        } else if (m_mode == "chebyshev") {
-            throw std::runtime_error("Chebyshev mode not implemented.");
-        } else {
-            throw std::runtime_error(std::format(
-                "Suggestion struct mode must be taylor or chebyshev."));
-        }
-        // Report only param_sets rows
-        const auto param_sets_stride = m_nparams * kParamStride;
-        std::vector<double> contig_param_sets(m_size * param_sets_stride, 0.0);
-        for (SizeType i = 0; i < m_size; ++i) {
-            const auto src_offset = i * m_leaves_stride;
-            const auto dst_offset = i * param_sets_stride;
-            std::copy_n(contig_leaves.begin() + src_offset, param_sets_stride,
-                        contig_param_sets.begin() + dst_offset);
-        }
-        return contig_param_sets;
-    }
-
-    bool add(std::span<const double> leaf,
-             std::span<const FoldType> fold,
-             float score) {
-        if (m_size_old + m_size >= m_capacity) {
-            return false;
-        }
-        const auto write_idx = m_write_head;
-        std::ranges::copy(leaf,
-                          m_leaves.begin() + (write_idx * m_leaves_stride));
-        std::ranges::copy(fold, m_folds.begin() + (write_idx * m_folds_stride));
-        m_scores[write_idx] = score;
-        m_write_head        = get_circular_index(1, m_write_head, m_capacity);
-        ++m_size;
-        return true;
-    }
-
     /**
      * @brief Add initial batch (resets buffer first)
      */
@@ -481,6 +386,22 @@ public:
             m_size, m_capacity, "WorldTree: Invalid size after add_initial.");
     }
 
+    bool add(std::span<const double> leaf,
+             std::span<const FoldType> fold,
+             float score) {
+        if (m_size_old + m_size >= m_capacity) {
+            return false;
+        }
+        const auto write_idx = m_write_head;
+        std::ranges::copy(leaf,
+                          m_leaves.begin() + (write_idx * m_leaves_stride));
+        std::ranges::copy(fold, m_folds.begin() + (write_idx * m_folds_stride));
+        m_scores[write_idx] = score;
+        m_write_head        = get_circular_index(1, m_write_head, m_capacity);
+        ++m_size;
+        return true;
+    }
+
     /**
      * @brief Add batch during update with threshold filtering
      *
@@ -499,24 +420,41 @@ public:
             return current_threshold;
         }
         // Fast path: Check if we have enough space immediately
-        const IndexType space_left = calculate_space_left();
+        IndexType space_left = calculate_space_left();
         if (static_cast<IndexType>(slots_to_write) <= space_left) {
-            for (SizeType i = 0; i < slots_to_write; ++i) {
-                const auto write_idx  = m_write_head;
-                const auto leaves_src = i * m_leaves_stride;
-                const auto leaves_dst = write_idx * m_leaves_stride;
-                const auto folds_src  = i * m_folds_stride;
-                const auto folds_dst  = write_idx * m_folds_stride;
-                std::copy_n(batch_leaves.begin() + leaves_src, m_leaves_stride,
-                            m_leaves.begin() + leaves_dst);
-                std::copy_n(batch_folds.begin() + folds_src, m_folds_stride,
-                            m_folds.begin() + folds_dst);
-                m_scores[write_idx] = batch_scores[i];
-                m_write_head++;
-                if (m_write_head == m_capacity) {
-                    m_write_head = 0;
-                }
+            // Check if we can do contiguous copy (no wrapping)
+            if (m_write_head + slots_to_write <= m_capacity) {
+                std::copy_n(
+                    batch_leaves.begin(), slots_to_write * m_leaves_stride,
+                    m_leaves.begin() + (m_write_head * m_leaves_stride));
+                std::copy_n(batch_folds.begin(),
+                            slots_to_write * m_folds_stride,
+                            m_folds.begin() + (m_write_head * m_folds_stride));
+                std::copy_n(batch_scores.begin(), slots_to_write,
+                            m_scores.begin() + m_write_head);
+            } else {
+                // Wrapped case
+                const auto first_part  = m_capacity - m_write_head;
+                const auto second_part = slots_to_write - first_part;
+                // Copy first part: [m_write_head, m_capacity)
+                std::copy_n(batch_leaves.begin(), first_part * m_leaves_stride,
+                            m_leaves.begin() +
+                                (m_write_head * m_leaves_stride));
+                std::copy_n(batch_folds.begin(), first_part * m_folds_stride,
+                            m_folds.begin() + (m_write_head * m_folds_stride));
+                std::copy_n(batch_scores.begin(), first_part,
+                            m_scores.begin() + m_write_head);
+                // Copy second part: [0, second_part)
+                std::copy_n(batch_leaves.begin() +
+                                (first_part * m_leaves_stride),
+                            second_part * m_leaves_stride, m_leaves.begin());
+                std::copy_n(batch_folds.begin() + (first_part * m_folds_stride),
+                            second_part * m_folds_stride, m_folds.begin());
+                std::copy_n(batch_scores.begin() + first_part, second_part,
+                            m_scores.begin());
             }
+            m_write_head =
+                get_circular_index(slots_to_write, m_write_head, m_capacity);
             m_size += slots_to_write;
             return current_threshold;
         }
@@ -532,19 +470,9 @@ public:
         }
         SizeType pending_count  = slots_to_write;
         SizeType pending_offset = 0;
-
-        auto update_candidates = [&]() {
-            pending_count = 0;
-            for (SizeType i = 0; i < slots_to_write; ++i) {
-                if (batch_scores[i] >= effective_threshold) {
-                    pending_indices_span[pending_count++] = i;
-                }
-            }
-        };
-
         while (pending_offset < pending_count) {
             // Using IndexType to safely handle potential negative results
-            const IndexType space_left = calculate_space_left();
+            space_left = calculate_space_left();
 
             if (space_left < 0 ||
                 space_left > static_cast<IndexType>(m_capacity)) {
@@ -555,18 +483,25 @@ public:
             }
             if (space_left == 0) {
                 // Buffer is full, try to prune the newly added candidates.
-                const auto new_threshold = prune_on_overload();
+                const auto new_threshold =
+                    prune_on_overload(PruneMode::kMedian);
                 effective_threshold =
                     std::max(effective_threshold, new_threshold);
                 // Re-filter after new threshold
-                update_candidates();
+                SizeType new_pending = 0;
+                for (SizeType i = pending_offset; i < pending_count; ++i) {
+                    const auto idx = pending_indices_span[i];
+                    if (batch_scores[idx] >= effective_threshold) {
+                        pending_indices_span[new_pending++] = idx;
+                    }
+                }
+                pending_count  = new_pending;
                 pending_offset = 0;
                 continue; // Try again with new threshold
             }
 
-            const auto remaining = pending_count - pending_offset;
-            const auto n_to_add =
-                std::min(remaining, static_cast<SizeType>(space_left));
+            const auto n_to_add = std::min(pending_count - pending_offset,
+                                           static_cast<SizeType>(space_left));
 
             // Batched copy
             for (SizeType i = 0; i < n_to_add; ++i) {
@@ -592,141 +527,18 @@ public:
         return effective_threshold;
     }
 
-    /**
-     * @brief Prune write region by median threshold
-     * @return The median threshold used
-     */
-    float prune_on_overload() {
-        if (!m_is_updating) {
-            throw std::runtime_error(
-                "prune_on_overload: only allowed during updates");
-        }
-        if (m_size == 0) {
-            return 0.0F;
-        }
-        // Compute median score of the *newly added* candidates.
-        const float threshold = get_score_median();
-
-        // Create a boolean mask for scores >= threshold
-        std::vector<bool> keep_mask(m_size);
-        const auto regions = get_active_regions(m_scores);
-        // Fill first part of mask
-        for (size_t i = 0; i < regions.first.size(); ++i) {
-            keep_mask[i] = regions.first[i] >= threshold;
-        }
-        // Fill second part (if exists)
-        size_t offset = regions.first.size();
-        for (size_t i = 0; i < regions.second.size(); ++i) {
-            keep_mask[offset + i] = regions.second[i] >= threshold;
-        }
-        keep(keep_mask);
-        return threshold;
-    }
-
-    float prune_half() {
-        if (m_size == 0) {
-            return 0.0F;
-        }
-
-        // To guarantee progress, we will keep at most half of the
-        // candidates.
-        const SizeType n_to_keep = m_size / 2;
-        // Find the score of the (n_to_keep)-th best candidate. This will
-        // be our new threshold.
-        copy_scores_to_scratch();
-        // We want the score that keeps top n_to_keep.
-        // nth_element puts the n_to_keep-th largest element at the 'nth'
-        // position. We use greater<float> to sort descending.
-        auto nth_iter = m_scratch_scores.begin() + n_to_keep;
-        std::nth_element(m_scratch_scores.begin(), nth_iter,
-                         m_scratch_scores.end(), std::greater<float>());
-        const float threshold = *nth_iter;
-
-        // Build mask (Split loop to avoid modulo)
-        std::vector<bool> keep_mask(m_size, false);
-        SizeType kept_count = 0;
-
-        // Helper to process a region
-        auto process_region = [&](std::span<const float> score_span,
-                                  SizeType mask_offset) {
-            for (size_t i = 0; i < score_span.size(); ++i) {
-                if (score_span[i] > threshold) {
-                    keep_mask[mask_offset + i] = true;
-                    kept_count++;
-                }
-            }
-        };
-
-        const auto regions = get_active_regions(m_scores);
-        process_region(regions.first, 0);
-        if (!regions.second.empty()) {
-            process_region(regions.second, regions.first.size());
-        }
-
-        // Handle tie-breaking (fill up to n_to_keep with items == threshold)
-        if (kept_count < n_to_keep) {
-            auto fill_region = [&](std::span<const float> score_span,
-                                   SizeType mask_offset) {
-                for (size_t i = 0;
-                     i < score_span.size() && kept_count < n_to_keep; ++i) {
-                    if (!keep_mask[mask_offset + i] &&
-                        score_span[i] == threshold) {
-                        keep_mask[mask_offset + i] = true;
-                        kept_count++;
-                    }
-                }
-            };
-
-            fill_region(regions.first, 0);
-            if (!regions.second.empty()) {
-                fill_region(regions.second, regions.first.size());
-            }
-        }
-
-        keep(keep_mask);
-        return threshold;
-    }
-
     void deduplicate() {
         if (!m_is_updating) {
             throw std::runtime_error(
-                "deduplicate: only allowed during updates");
+                "WorldTree: deduplicate only allowed during updates");
         }
         if (m_size == 0) {
             return;
         }
-        const auto keep_mask = compute_uniqueness_mask_inplace();
-        keep(keep_mask);
-    }
-
-    float deduplicate_and_prune_on_overload() {
-        if (!m_is_updating) {
-            throw std::runtime_error(
-                "trim_repeats_threshold: only allowed during updates");
-        }
-        if (m_size == 0) {
-            return 0.0F;
-        }
-        auto keep_mask       = compute_uniqueness_mask_inplace();
-        const auto threshold = get_score_median();
-        const auto regions   = get_active_regions(m_scores);
-
-        auto filter_region = [&](std::span<const float> scores,
-                                 SizeType mask_offset) {
-            for (size_t i = 0; i < scores.size(); ++i) {
-                if (scores[i] < threshold) {
-                    keep_mask[mask_offset + i] = false;
-                }
-            }
-        };
-
-        // Update keep_mask to keep only scores >= threshold
-        filter_region(regions.first, 0);
-        if (!regions.second.empty()) {
-            filter_region(regions.second, regions.first.size());
-        }
-        keep(keep_mask);
-        return threshold;
+        compute_uniqueness_mask_in_scratch();
+        const auto keep_mask_span =
+            std::span<const uint8_t>(m_scratch_mask).first(m_size);
+        keep(keep_mask_span);
     }
 
 private:
@@ -754,8 +566,9 @@ private:
     SizeType m_read_consumed{0};
 
     // Scratch buffer for in-place operations
+    std::vector<double> m_scratch_leaves;
     std::vector<float> m_scratch_scores;
-    std::vector<uint32_t> m_scratch_pending_indices;
+    std::vector<SizeType> m_scratch_pending_indices;
     std::vector<uint8_t> m_scratch_mask;
 
     // Helper structure to represent the two contiguous segments
@@ -807,12 +620,15 @@ private:
 
     /**
      * @brief Calculate available space in buffer
+     * @return The number of slots available in the write region
      */
     IndexType calculate_space_left() const noexcept {
+        const auto remaining_old = static_cast<IndexType>(m_size_old) -
+                                   static_cast<IndexType>(m_read_consumed);
+        error_check::check_greater_equal(
+            remaining_old, 0, "calculate_space_left: Invalid buffer state");
         return static_cast<IndexType>(m_capacity) -
-               ((static_cast<IndexType>(m_size_old) -
-                 static_cast<IndexType>(m_read_consumed)) +
-                static_cast<IndexType>(m_size));
+               (remaining_old + static_cast<IndexType>(m_size));
     }
 
     /**
@@ -821,7 +637,7 @@ private:
      * Copies scores for m_size elements in the current region to scratch
      * buffer.
      */
-    void copy_scores_to_scratch() {
+    void copy_scores_to_scratch() noexcept {
         if (m_size == 0) {
             return;
         }
@@ -842,14 +658,106 @@ private:
     }
 
     /**
+     * @brief Get prune threshold in current region
+     *
+     * Uses nth_element for O(n) complexity.
+     */
+    float get_prune_threshold(PruneMode mode) noexcept {
+        if (m_size == 0) {
+            return 0.0F;
+        }
+        copy_scores_to_scratch();
+        const auto scores_span =
+            std::span<float>(m_scratch_scores).first(m_size);
+        const auto mid = scores_span.begin() + m_size / 2;
+        switch (mode) {
+        case PruneMode::kKeepTopHalf:
+            std::ranges::nth_element(scores_span, mid, std::greater<float>());
+            break;
+
+        case PruneMode::kMedian:
+            std::ranges::nth_element(scores_span, mid);
+            break;
+        }
+        return *mid;
+    }
+
+    /**
+     * @brief Prune write region by threshold with in-place update.
+     * @param mode The prune mode to use
+     * @return The threshold used
+     *
+     * Single-pass approach: safely compacts in-place because write never
+     * overtakes read (write_logical ≤ read_logical always holds).
+     */
+    float prune_on_overload(PruneMode mode) {
+        if (!m_is_updating) {
+            throw std::runtime_error(
+                "WorldTree: prune_on_overload only allowed during updates");
+        }
+        if (m_size == 0) {
+            return 0.0F;
+        }
+        // Compute median score of the *newly added* candidates.
+        const auto threshold    = get_prune_threshold(mode);
+        const auto start_idx    = get_current_start_idx();
+        const SizeType old_size = m_size;
+        // Use logical indices to abstract circular wrapping
+        SizeType phys_read  = start_idx;
+        SizeType phys_write = start_idx;
+        SizeType kept_count = 0;
+        // Single-pass: scan and compact in-place
+        for (SizeType read_logical = 0; read_logical < old_size;
+             ++read_logical) {
+            // Check filter condition
+            if (m_scores[phys_read] >= threshold) {
+                // Move data only if gaps were created
+                if (phys_read != phys_write) {
+                    std::copy_n(
+                        m_leaves.begin() + (phys_read * m_leaves_stride),
+                        m_leaves_stride,
+                        m_leaves.begin() + (phys_write * m_leaves_stride));
+                    std::copy_n(m_folds.begin() + (phys_read * m_folds_stride),
+                                m_folds_stride,
+                                m_folds.begin() +
+                                    (phys_write * m_folds_stride));
+                    m_scores[phys_write] = m_scores[phys_read];
+                }
+                // Advance write pointer (with wrap)
+                kept_count++;
+                phys_write++;
+                if (phys_write == m_capacity) {
+                    phys_write = 0;
+                }
+            }
+            // Always advance read pointer (with wrap)
+            phys_read++;
+            if (phys_read == m_capacity) {
+                phys_read = 0;
+            }
+        }
+
+        // Update valid size
+        m_size = kept_count;
+        // After trimming, the write head must be updated to the new end
+        if (m_is_updating) {
+            m_write_head = phys_write;
+        }
+        error_check::check_less_equal(m_size, m_capacity,
+                                      "WorldTree: Invalid size after keep");
+
+        return threshold;
+    }
+
+    /**
      * @brief Compact current region keeping only marked elements
      * using boolean mask. Only affects [start_idx, start_idx + m_size);
      * updates m_size.
      */
-    void keep(const std::vector<bool>& keep_mask) {
+    void keep(std::span<const uint8_t> keep_mask) {
         // Count how many elements to keep
         const SizeType count =
-            std::count(keep_mask.begin(), keep_mask.end(), true);
+            std::accumulate(keep_mask.begin(), keep_mask.end(), SizeType{0});
         if (count == m_size) {
             return;
         }
@@ -860,55 +768,48 @@ private:
             }
             return;
         }
-        const auto start_idx = get_current_start_idx();
-        // Collect all moves first, then do bulk operations
-        std::vector<std::pair<SizeType, SizeType>> moves;
-        moves.reserve(count);
-
-        SizeType write_idx = start_idx;
-        // Lambda to process logic over a contiguous range of physical indices
-        // associated with a contiguous range of logical indices (mask)
-        auto plan_moves = [&](SizeType phys_start, SizeType n_items,
-                              SizeType mask_offset) {
-            for (SizeType i = 0; i < n_items; ++i) {
-                if (keep_mask[mask_offset + i]) {
-                    const SizeType src_idx = phys_start + i;
-                    if (write_idx != src_idx) {
-                        moves.emplace_back(src_idx, write_idx);
-                    }
-                    write_idx++;
-                    if (write_idx == m_capacity) {
-                        write_idx = 0;
-                    }
+        const auto start_idx    = get_current_start_idx();
+        const SizeType old_size = m_size;
+        // Use logical indices to abstract circular wrapping
+        SizeType phys_read  = start_idx;
+        SizeType phys_write = start_idx;
+        SizeType kept_count = 0;
+        // Single-pass: scan and compact in-place
+        for (SizeType read_logical = 0; read_logical < old_size;
+             ++read_logical) {
+            // Check filter condition
+            if (keep_mask[phys_read] != 0U) {
+                // Move data only if gaps were created
+                if (phys_read != phys_write) {
+                    std::copy_n(
+                        m_leaves.begin() + (phys_read * m_leaves_stride),
+                        m_leaves_stride,
+                        m_leaves.begin() + (phys_write * m_leaves_stride));
+                    std::copy_n(m_folds.begin() + (phys_read * m_folds_stride),
+                                m_folds_stride,
+                                m_folds.begin() +
+                                    (phys_write * m_folds_stride));
+                    m_scores[phys_write] = m_scores[phys_read];
+                }
+                // Advance write pointer (with wrap)
+                kept_count++;
+                phys_write++;
+                if (phys_write == m_capacity) {
+                    phys_write = 0;
                 }
             }
-        };
-
-        // Split Loop
-        if (start_idx + m_size <= m_capacity) {
-            plan_moves(start_idx, m_size, 0);
-        } else {
-            const auto first_len = m_capacity - start_idx;
-            plan_moves(start_idx, first_len, 0);
-            plan_moves(0, m_size - first_len, first_len);
+            // Always advance read pointer (with wrap)
+            phys_read++;
+            if (phys_read == m_capacity) {
+                phys_read = 0;
+            }
         }
 
-        // Execute moves
-        for (const auto& [src, dst] : moves) {
-            std::copy_n(m_leaves.begin() + (src * m_leaves_stride),
-                        m_leaves_stride,
-                        m_leaves.begin() + (dst * m_leaves_stride));
-            std::copy_n(m_folds.begin() + (src * m_folds_stride),
-                        m_folds_stride,
-                        m_folds.begin() + (dst * m_folds_stride));
-            m_scores[dst] = m_scores[src];
-        }
         // Update valid size
-        m_size = count;
+        m_size = kept_count;
         // After trimming, the write head must be updated to the new end
         if (m_is_updating) {
-            m_write_head =
-                get_circular_index(m_size, m_write_start, m_capacity);
+            m_write_head = phys_write;
         }
         error_check::check_less_equal(m_size, m_capacity,
                                       "WorldTree: Invalid size after keep");
@@ -916,8 +817,10 @@ private:
 
     // Memory-efficient uniqueness detection
     // Tie-break: keep first occurrence when scores are equal.
-    std::vector<bool> compute_uniqueness_mask_inplace() {
-        std::vector<bool> keep_mask(m_size, false);
+    void compute_uniqueness_mask_in_scratch() {
+        if (m_size == 0) {
+            return;
+        }
         std::unordered_map<int64_t, BestIndices> best_by_key;
         best_by_key.reserve(m_size);
 
@@ -943,9 +846,8 @@ private:
 
         // Mark the winners
         for (const auto& kv : best_by_key) {
-            keep_mask[kv.second.win_idx] = true;
+            m_scratch_mask[kv.second.win_idx] = 1;
         }
-        return keep_mask;
     }
 
     void validate_circular_buffer_state() {
@@ -988,6 +890,18 @@ WorldTree<FoldType>&
 WorldTree<FoldType>::operator=(WorldTree<FoldType>&& other) noexcept = default;
 // Getters
 template <SupportedFoldType FoldType>
+const std::vector<double>& WorldTree<FoldType>::get_leaves() const noexcept {
+    return m_impl->get_leaves();
+}
+template <SupportedFoldType FoldType>
+const std::vector<FoldType>& WorldTree<FoldType>::get_folds() const noexcept {
+    return m_impl->get_folds();
+}
+template <SupportedFoldType FoldType>
+const std::vector<float>& WorldTree<FoldType>::get_scores() const noexcept {
+    return m_impl->get_scores();
+}
+template <SupportedFoldType FoldType>
 SizeType WorldTree<FoldType>::get_capacity() const noexcept {
     return m_impl->get_capacity();
 }
@@ -1012,23 +926,6 @@ SizeType WorldTree<FoldType>::get_folds_stride() const noexcept {
     return m_impl->get_folds_stride();
 }
 template <SupportedFoldType FoldType>
-const std::vector<double>& WorldTree<FoldType>::get_leaves() const noexcept {
-    return m_impl->get_leaves();
-}
-template <SupportedFoldType FoldType>
-std::pair<std::span<const double>, SizeType>
-WorldTree<FoldType>::get_leaves_span(SizeType n_leaves) const {
-    return m_impl->get_leaves_span(n_leaves);
-}
-template <SupportedFoldType FoldType>
-const std::vector<FoldType>& WorldTree<FoldType>::get_folds() const noexcept {
-    return m_impl->get_folds();
-}
-template <SupportedFoldType FoldType>
-std::vector<float> WorldTree<FoldType>::get_scores() const noexcept {
-    return m_impl->get_scores();
-}
-template <SupportedFoldType FoldType>
 SizeType WorldTree<FoldType>::get_size() const noexcept {
     return m_impl->get_size();
 }
@@ -1049,12 +946,21 @@ float WorldTree<FoldType>::get_score_min() const noexcept {
     return m_impl->get_score_min();
 }
 template <SupportedFoldType FoldType>
-float WorldTree<FoldType>::get_score_median() const noexcept {
-    return m_impl->get_score_median();
-}
-template <SupportedFoldType FoldType>
 float WorldTree<FoldType>::get_memory_usage() const noexcept {
     return m_impl->get_memory_usage();
+}
+template <SupportedFoldType FoldType>
+std::pair<std::span<const double>, SizeType>
+WorldTree<FoldType>::get_leaves_span(SizeType n_leaves) const {
+    return m_impl->get_leaves_span(n_leaves);
+}
+template <SupportedFoldType FoldType>
+std::span<double> WorldTree<FoldType>::get_leaves_contiguous_span() noexcept {
+    return m_impl->get_leaves_contiguous_span();
+}
+template <SupportedFoldType FoldType>
+std::span<float> WorldTree<FoldType>::get_scores_contiguous_span() noexcept {
+    return m_impl->get_scores_contiguous_span();
 }
 template <SupportedFoldType FoldType>
 void WorldTree<FoldType>::set_size(SizeType size) noexcept {
@@ -1091,11 +997,6 @@ WorldTree<FoldType>::get_best() const {
     return m_impl->get_best();
 }
 template <SupportedFoldType FoldType>
-std::vector<double> WorldTree<FoldType>::get_transformed(
-    std::pair<double, double> coord_mid) const {
-    return m_impl->get_transformed(coord_mid);
-}
-template <SupportedFoldType FoldType>
 bool WorldTree<FoldType>::add(std::span<const double> leaf,
                               std::span<const FoldType> fold,
                               float score) {
@@ -1118,18 +1019,9 @@ float WorldTree<FoldType>::add_batch(std::span<const double> batch_leaves,
     return m_impl->add_batch(batch_leaves, batch_folds, batch_scores,
                              current_threshold, slots_to_write);
 }
-template <SupportedFoldType FoldType>
-float WorldTree<FoldType>::prune_on_overload() {
-    return m_impl->prune_on_overload();
-}
 template <SupportedFoldType FoldType> void WorldTree<FoldType>::deduplicate() {
     m_impl->deduplicate();
 }
-template <SupportedFoldType FoldType>
-float WorldTree<FoldType>::deduplicate_and_prune_on_overload() {
-    return m_impl->deduplicate_and_prune_on_overload();
-}
-
 // Explicit instantiation
 template class WorldTree<float>;
 template class WorldTree<ComplexType>;

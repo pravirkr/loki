@@ -464,7 +464,7 @@ void PruneResultWriter::write_metadata(
     const std::vector<std::string>& param_names,
     SizeType nsegments,
     SizeType max_sugg,
-    const std::vector<float>& threshold_scheme) {
+    std::span<const float> threshold_scheme) {
     std::lock_guard<std::mutex> lock(m_hdf5_mutex);
 
     HighFive::File file = open_file();
@@ -484,22 +484,23 @@ void PruneResultWriter::write_metadata(
     file.createDataSet("threshold_scheme", threshold_scheme, props);
 }
 
-void PruneResultWriter::write_run_results(const std::string& run_name,
-                                          const std::vector<SizeType>& scheme,
-                                          const std::vector<double>& param_sets,
-                                          const std::vector<float>& scores,
-                                          SizeType n_param_sets,
-                                          SizeType n_params,
-                                          const PruneStatsCollection& pstats) {
+void PruneResultWriter::write_run_results(
+    std::string_view run_name,
+    std::span<const SizeType> snail_scheme,
+    std::span<const double> param_sets,
+    std::span<const float> scores,
+    SizeType n_param_sets,
+    SizeType n_params,
+    const PruneStatsCollection& pstats) {
     std::lock_guard<std::mutex> lock(m_hdf5_mutex);
 
     HighFive::File file        = open_file();
     HighFive::Group runs_group = open_runs_group(file);
-    if (runs_group.exist(run_name)) {
+    if (runs_group.exist(std::string(run_name))) {
         throw std::runtime_error(
             std::format("Run name {} already exists.", run_name));
     }
-    HighFive::Group run_group       = runs_group.createGroup(run_name);
+    HighFive::Group run_group = runs_group.createGroup(std::string(run_name));
     auto [level_stats, timer_stats] = pstats.get_packed_data();
 
     constexpr SizeType kParamStride = 2U;
@@ -534,7 +535,7 @@ void PruneResultWriter::write_run_results(const std::string& run_name,
         param_sets_dataset.write_raw(param_sets.data(),
                                      HighFive::create_datatype<double>());
     }
-    run_group.createDataSet("scheme", scheme);
+    run_group.createDataSet("snail_scheme", snail_scheme);
     run_group.createDataSet("scores", scores);
     if (!level_stats.empty()) {
         run_group.createDataSet("level_stats", level_stats);

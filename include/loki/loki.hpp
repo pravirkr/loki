@@ -12,4 +12,4 @@
 #include "loki/search/configs.hpp"        // IWYU pragma: export
 #include "loki/simulation/simulation.hpp" // IWYU pragma: export
 #include "loki/utils/fft.hpp"             // IWYU pragma: export
-#include "loki/utils/suggestions.hpp"     // IWYU pragma: export
+#include "loki/utils/world_tree.hpp"     // IWYU pragma: export
