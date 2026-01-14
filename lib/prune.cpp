@@ -16,6 +16,7 @@
 #include "loki/progress.hpp"
 #include "loki/psr_utils.hpp"
 #include "loki/timing.hpp"
+#include "loki/utils.hpp"
 #include "loki/utils/suggestions.hpp"
 
 namespace loki::algorithms {
@@ -37,7 +38,7 @@ public:
                          bool show_progress) = 0;
 };
 
-template <typename FoldType>
+template <SupportedFoldType FoldType>
 class PruningManagerTypedImpl final : public PruningManager::BaseImpl {
 public:
     PruningManagerTypedImpl(search::PulsarSearchConfig cfg,
@@ -92,7 +93,8 @@ public:
         }
 
         // Determine ref_segs to process
-        auto ref_segs_to_process = determine_ref_segs(nsegments);
+        auto ref_segs_to_process =
+            utils::determine_ref_segs(nsegments, m_n_runs, m_ref_segs);
         spdlog::info("Starting Pruning for {} runs, with {} threads",
                      ref_segs_to_process.size(), m_nthreads);
 
@@ -134,36 +136,6 @@ private:
     // std::unique_ptr<algorithms::FFA> m_the_ffa;
     // std::unique_ptr<algorithms::FFACOMPLEX> m_the_ffa_complex;
     // std::vector<FoldType> m_ffa_fold;
-
-    std::vector<SizeType> determine_ref_segs(SizeType nsegments) const {
-        // ref_segs = list(np.linspace(0, dyp.nsegments - 1, n_runs, dtype=int))
-        if (m_n_runs.has_value()) {
-            // n_runs takes precedence over ref_segs
-            const auto n_runs = m_n_runs.value();
-            if (n_runs < 1 || n_runs > nsegments) {
-                throw std::runtime_error(
-                    std::format("n_runs must be between 1 and {}, got {}",
-                                nsegments, n_runs));
-            }
-            std::vector<SizeType> ref_segs(n_runs);
-            if (n_runs == 1) {
-                ref_segs[0] = 0;
-            } else {
-                const auto denom = static_cast<double>(n_runs - 1);
-                const auto max   = static_cast<double>(nsegments - 1);
-                for (SizeType i = 0; i < n_runs; ++i) {
-                    // ties → even (to match numpy)
-                    ref_segs[i] = static_cast<SizeType>(
-                        std::rint(static_cast<double>(i) * max / denom));
-                }
-            }
-            return ref_segs;
-        }
-        if (m_ref_segs.has_value()) {
-            return m_ref_segs.value();
-        }
-        throw std::runtime_error("Either n_runs or ref_segs must be provided");
-    }
 
     void execute_single_threaded(std::span<const FoldType> ffa_fold,
                                  const plans::FFAPlan<FoldType>& ffa_plan,
@@ -271,7 +243,7 @@ private:
             tracker->stop();
         }
     }
-};
+}; // End PruningManagerTypedImpl implementation
 
 struct IterationStats {
     SizeType n_leaves     = 0;
@@ -281,7 +253,7 @@ struct IterationStats {
     cands::PruneTimerStats batch_timers;
 };
 
-template <typename FoldType> struct PruningWorkspace {
+template <SupportedFoldType FoldType> struct PruningWorkspace {
     constexpr static SizeType kLeavesParamStride = 2;
     SizeType max_batch_size;
     SizeType nparams;
@@ -341,9 +313,9 @@ template <typename FoldType> struct PruningWorkspace {
         return static_cast<float>(total_memory) /
                static_cast<float>(1ULL << 30U);
     }
-}; // End PruningManagerTypedImpl definition
+}; // End PruningWorkspace definition
 
-template <typename FoldType> class Prune<FoldType>::Impl {
+template <SupportedFoldType FoldType> class Prune<FoldType>::Impl {
 public:
     Impl(plans::FFAPlan<FoldType> ffa_plan,
          search::PulsarSearchConfig cfg,
@@ -362,10 +334,10 @@ public:
 
         // Allocate suggestion buffer
         if constexpr (std::is_same_v<FoldType, ComplexType>) {
-            m_suggestions = std::make_unique<utils::SuggestionTree<FoldType>>(
+            m_world_tree = std::make_unique<utils::WorldTree<FoldType>>(
                 m_max_sugg, m_cfg.get_nparams(), m_cfg.get_nbins_f(), kind);
         } else {
-            m_suggestions = std::make_unique<utils::SuggestionTree<FoldType>>(
+            m_world_tree = std::make_unique<utils::WorldTree<FoldType>>(
                 m_max_sugg, m_cfg.get_nparams(), m_cfg.get_nbins(), kind);
         }
 
@@ -389,7 +361,7 @@ public:
 
     SizeType get_memory_usage() const noexcept {
         return m_pruning_workspace->get_memory_usage() +
-               m_suggestions->get_memory_usage();
+               m_world_tree->get_memory_usage();
     }
 
     void execute(std::span<const FoldType> ffa_fold,
@@ -406,7 +378,7 @@ public:
         // Log detailed memory usage
         const auto memory_workspace_gb =
             m_pruning_workspace->get_memory_usage();
-        const auto memory_suggestions_gb = m_suggestions->get_memory_usage();
+        const auto memory_suggestions_gb = m_world_tree->get_memory_usage();
         spdlog::info("Pruning run {:03d}: Memory Usage: {:.2f} GB "
                      "(suggestions) + {:.2f} GB (workspace)",
                      ref_seg, memory_suggestions_gb, memory_workspace_gb);
@@ -442,8 +414,8 @@ public:
                 break;
             }
             if (bar) {
-                bar->set_score(m_suggestions->get_score_max());
-                bar->set_leaves(m_suggestions->get_nsugg_lb());
+                bar->set_score(m_world_tree->get_score_max());
+                bar->set_leaves(m_world_tree->get_size_lb());
                 bar->set_progress(iter + 1);
             }
         }
@@ -456,8 +428,8 @@ public:
             actual_result_file, cands::PruneResultWriter::Mode::kAppend);
         result_writer.write_run_results(
             run_name, m_snail_scheme->get_data(),
-            m_suggestions->get_transformed(coord_mid),
-            m_suggestions->get_scores(), m_suggestions->get_nsugg(),
+            m_world_tree->get_transformed(coord_mid),
+            m_world_tree->get_scores(), m_world_tree->get_size(),
             m_cfg.get_nparams(), *m_pstats);
 
         // Final log entries
@@ -487,16 +459,16 @@ private:
     std::unique_ptr<core::PruneDPFuncts<FoldType>> m_prune_funcs;
     std::unique_ptr<cands::PruneStatsCollection> m_pstats;
 
-    // A single, in-place (circular) suggestion buffer
-    std::unique_ptr<utils::SuggestionTree<FoldType>> m_suggestions;
+    // Active, bounded container of hierarchical search candidates
+    std::unique_ptr<utils::WorldTree<FoldType>> m_world_tree;
     std::unique_ptr<PruningWorkspace<FoldType>> m_pruning_workspace;
 
     void initialize(std::span<const FoldType> ffa_fold,
                     SizeType ref_seg,
                     const std::filesystem::path& log_file) {
         // timing::ScopeTimer timer("Prune::initialize");
-        //  Reset the suggestion buffer state
-        m_suggestions->reset();
+        //  Reset the world tree state
+        m_world_tree->reset();
 
         // Initialize snail scheme for current ref_seg
         const auto nsegments = m_ffa_plan.get_nsegments().back();
@@ -512,7 +484,7 @@ private:
         const auto fold_segment =
             m_prune_funcs->load(ffa_fold, m_snail_scheme->get_ref_idx());
         const auto coord_init = m_snail_scheme->get_coord(m_prune_level);
-        m_prune_funcs->suggest(fold_segment, coord_init, *m_suggestions);
+        m_prune_funcs->seed(fold_segment, coord_init, *m_world_tree);
 
         // Initialize the prune stats
         m_pstats = std::make_unique<cands::PruneStatsCollection>();
@@ -520,12 +492,12 @@ private:
             .level         = m_prune_level,
             .seg_idx       = m_snail_scheme->get_segment_idx(m_prune_level),
             .threshold     = 0,
-            .score_min     = m_suggestions->get_score_min(),
-            .score_max     = m_suggestions->get_score_max(),
-            .n_branches    = m_suggestions->get_nsugg(),
-            .n_leaves      = m_suggestions->get_nsugg(),
-            .n_leaves_phy  = m_suggestions->get_nsugg(),
-            .n_leaves_surv = m_suggestions->get_nsugg(),
+            .score_min     = m_world_tree->get_score_min(),
+            .score_max     = m_world_tree->get_score_max(),
+            .n_branches    = m_world_tree->get_size(),
+            .n_leaves      = m_world_tree->get_size(),
+            .n_leaves_phy  = m_world_tree->get_size(),
+            .n_leaves_surv = m_world_tree->get_size(),
         };
         m_pstats->update_stats(pstats_cur);
 
@@ -549,18 +521,18 @@ private:
         }
         // Prepare for in-place update: mark start of write region, reset size
         // for new suggestions.
-        m_suggestions->prepare_for_in_place_update();
+        m_world_tree->prepare_in_place_update();
 
         IterationStats stats;
         const auto seg_idx_cur = m_snail_scheme->get_segment_idx(m_prune_level);
         const auto threshold   = m_threshold_scheme[m_prune_level - 1];
         // Capture the number of branches *before* finalizing the update
-        const auto n_branches = m_suggestions->get_nsugg_old();
+        const auto n_branches = m_world_tree->get_size_old();
 
         execute_iteration_batched(ffa_fold, seg_idx_cur, threshold, stats);
 
         // Finalize: make new region active, defragment for contiguous access.
-        m_suggestions->finalize_in_place_update();
+        m_world_tree->finalize_in_place_update();
 
         // Update statistics
         const cands::PruneStats pstats_cur{
@@ -572,7 +544,7 @@ private:
             .n_branches    = n_branches,
             .n_leaves      = stats.n_leaves,
             .n_leaves_phy  = stats.n_leaves_phy,
-            .n_leaves_surv = m_suggestions->get_nsugg(),
+            .n_leaves_surv = m_world_tree->get_size(),
         };
         // Write stats to log
         std::ofstream log(log_file, std::ios::app);
@@ -581,7 +553,7 @@ private:
         m_pstats->update_stats(pstats_cur, stats.batch_timers);
 
         // Check if no survivors
-        if (m_suggestions->get_nsugg() == 0) {
+        if (m_world_tree->get_size() == 0) {
             m_prune_complete = true;
             spdlog::info("Pruning run complete at level {} - no survivors",
                          m_prune_level);
@@ -609,7 +581,7 @@ private:
 
         auto current_threshold = threshold;
 
-        const auto n_branches = m_suggestions->get_nsugg_old();
+        const auto n_branches = m_world_tree->get_size_old();
         const auto n_params   = m_cfg.get_nparams();
         const auto batch_size =
             std::max(1UL, std::min(m_batch_size, n_branches));
@@ -626,7 +598,7 @@ private:
             // Get contiguous span; it may be smaller if wrap occurs
             // Read from the beginning of unconsumed data
             auto [batch_leaves_span, current_batch_size] =
-                m_suggestions->get_leaves_span(this_batch_size);
+                m_world_tree->get_leaves_span(this_batch_size);
             if (current_batch_size == 0) {
                 throw std::runtime_error(
                     std::format("Loaded batch size is 0: total_processed={}, "
@@ -645,7 +617,7 @@ private:
             stats.batch_timers["branch"] += timer.stop();
             stats.n_leaves += n_leaves_batch;
             if (n_leaves_batch == 0) {
-                m_suggestions->advance_read_consumed(current_batch_size);
+                m_world_tree->consume_read(current_batch_size);
                 continue;
             }
             if (n_leaves_batch > m_pruning_workspace->max_batch_size) {
@@ -663,7 +635,7 @@ private:
             stats.batch_timers["validate"] += timer.stop();
             stats.n_leaves_phy += n_leaves_after_validation;
             if (n_leaves_after_validation == 0) {
-                m_suggestions->advance_read_consumed(current_batch_size);
+                m_world_tree->consume_read(current_batch_size);
                 continue;
             }
 
@@ -683,11 +655,11 @@ private:
 
             // Load, shift, add (Map batch_leaf_origins to global indices)
             timer.start();
-            m_suggestions->compute_physical_indices(
+            m_world_tree->compute_physical_indices(
                 batch_leaf_origins, m_pruning_workspace->batch_isuggest,
                 n_leaves_after_validation);
-            m_prune_funcs->load_shift_add(
-                m_suggestions->get_folds(), m_pruning_workspace->batch_isuggest,
+            m_prune_funcs->shift_add(
+                m_world_tree->get_folds(), m_pruning_workspace->batch_isuggest,
                 ffa_fold_segment, batch_param_idx_span, batch_phase_shift_span,
                 m_pruning_workspace->batch_folds, n_leaves_after_validation);
             stats.batch_timers["shift_add"] += timer.stop();
@@ -716,7 +688,8 @@ private:
                     .first(n_leaves_after_validation);
             SizeType n_leaves_passing = 0;
             for (SizeType i = 0; i < n_leaves_after_validation; ++i) {
-                if (batch_scores_span[i] >= threshold) {
+                if (batch_scores_span[i] >=
+                    std::max(threshold, current_threshold)) {
                     batch_passing_indices_span[n_leaves_passing] = i;
                     ++n_leaves_passing;
                 }
@@ -724,7 +697,7 @@ private:
             stats.batch_timers["filter"] += timer.stop();
 
             if (n_leaves_passing == 0) {
-                m_suggestions->advance_read_consumed(current_batch_size);
+                m_world_tree->consume_read(current_batch_size);
                 continue;
             }
             if (n_leaves_passing > m_pruning_workspace->max_batch_size) {
@@ -748,14 +721,14 @@ private:
 
             // Add batch to output suggestions
             timer.start();
-            current_threshold = m_suggestions->add_batch(
+            current_threshold = m_world_tree->add_batch(
                 m_pruning_workspace->batch_leaves,
                 m_pruning_workspace->batch_folds, batch_scores_span,
                 current_threshold, n_leaves_passing);
             stats.batch_timers["batch_add"] += timer.stop();
             // Notify the buffer that a batch of the old suggestions has been
             // consumed
-            m_suggestions->advance_read_consumed(current_batch_size);
+            m_world_tree->consume_read(current_batch_size);
         }
     }
 
@@ -801,7 +774,7 @@ void PruningManager::execute(std::span<const float> ts_e,
     m_impl->execute(ts_e, ts_v, outdir, file_prefix, kind, show_progress);
 }
 
-template <typename FoldType>
+template <SupportedFoldType FoldType>
 Prune<FoldType>::Prune(const plans::FFAPlan<FoldType>& ffa_plan,
                        const search::PulsarSearchConfig& cfg,
                        std::span<const float> threshold_scheme,
@@ -810,17 +783,17 @@ Prune<FoldType>::Prune(const plans::FFAPlan<FoldType>& ffa_plan,
                        std::string_view kind)
     : m_impl(std::make_unique<Impl>(
           ffa_plan, cfg, threshold_scheme, max_sugg, batch_size, kind)) {}
-template <typename FoldType> Prune<FoldType>::~Prune() = default;
-template <typename FoldType>
+template <SupportedFoldType FoldType> Prune<FoldType>::~Prune() = default;
+template <SupportedFoldType FoldType>
 Prune<FoldType>::Prune(Prune&& other) noexcept = default;
-template <typename FoldType>
+template <SupportedFoldType FoldType>
 Prune<FoldType>& Prune<FoldType>::operator=(Prune&& other) noexcept = default;
 
-template <typename FoldType>
+template <SupportedFoldType FoldType>
 SizeType Prune<FoldType>::get_memory_usage() const noexcept {
     return m_impl->get_memory_usage();
 }
-template <typename FoldType>
+template <SupportedFoldType FoldType>
 void Prune<FoldType>::execute(
     std::span<const FoldType> ffa_fold,
     SizeType ref_seg,

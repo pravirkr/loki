@@ -11,6 +11,7 @@
 #ifdef LOKI_ENABLE_CUDA
 #include <cuda/std/span>
 #include <cuda_runtime_api.h>
+#include <thrust/device_vector.h>
 #endif // LOKI_ENABLE_CUDA
 
 namespace loki::algorithms {
@@ -183,6 +184,10 @@ public:
                  std::span<const float> ts_v,
                  std::span<HostFoldType> fold);
 
+    void execute(std::span<const float> ts_e,
+                 std::span<const float> ts_v,
+                 cuda::std::span<DeviceFoldType> fold_d);
+
     void execute(cuda::std::span<const float> ts_e,
                  cuda::std::span<const float> ts_v,
                  cuda::std::span<DeviceFoldType> fold,
@@ -216,6 +221,14 @@ compute_ffa_cuda(std::span<const float> ts_e,
                  const search::PulsarSearchConfig& cfg,
                  int device_id,
                  bool quiet = false);
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+std::tuple<thrust::device_vector<FoldTypeCUDA>,
+           plans::FFAPlan<typename FoldTypeTraits<FoldTypeCUDA>::HostType>>
+compute_ffa_cuda_device(std::span<const float> ts_e,
+                        std::span<const float> ts_v,
+                        const search::PulsarSearchConfig& cfg,
+                        int device_id);
 
 // Convenience function to fold time series using P-FFA in the Fourier domain
 // and return the result in the time domain (floats)

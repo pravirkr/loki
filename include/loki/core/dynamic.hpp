@@ -29,6 +29,26 @@ public:
     virtual std::span<const FoldType> load(std::span<const FoldType> ffa_fold,
                                            SizeType seg_idx) const = 0;
 
+    virtual void seed(std::span<const FoldType> fold_segment,
+                      std::pair<double, double> coord_init,
+                      utils::WorldTree<FoldType>& world_tree) = 0;
+
+    virtual std::vector<SizeType> branch(std::span<const double> leaves_batch,
+                                         std::pair<double, double> coord_cur,
+                                         std::pair<double, double> coord_prev,
+                                         std::span<double> leaves_branch_batch,
+                                         SizeType n_batch,
+                                         SizeType n_params) const = 0;
+
+    virtual SizeType validate(std::span<double> leaves_batch,
+                              std::span<SizeType> leaves_origins,
+                              std::pair<double, double> coord_cur,
+                              SizeType n_leaves,
+                              SizeType) const = 0;
+
+    virtual std::tuple<std::vector<double>, std::vector<double>, double>
+    get_validation_params(std::pair<double, double> coord_add) const = 0;
+
     virtual void resolve(std::span<const double> leaves_batch,
                          std::pair<double, double> coord_add,
                          std::pair<double, double> coord_cur,
@@ -38,31 +58,17 @@ public:
                          SizeType n_leaves,
                          SizeType n_params) const = 0;
 
-    virtual std::vector<SizeType> branch(std::span<const double> leaves_batch,
-                                         std::pair<double, double> coord_cur,
-                                         std::pair<double, double> coord_prev,
-                                         std::span<double> leaves_branch_batch,
-                                         SizeType n_batch,
-                                         SizeType n_params) const = 0;
-
-    virtual void suggest(std::span<const FoldType> fold_segment,
-                         std::pair<double, double> coord_init,
-                         utils::SuggestionTree<FoldType>& sugg_tree) = 0;
+    virtual void shift_add(std::span<const FoldType> batch_folds_suggest,
+                           std::span<const SizeType> batch_isuggest,
+                           std::span<const FoldType> ffa_fold_segment,
+                           std::span<const SizeType> batch_param_idx,
+                           std::span<const float> batch_phase_shift,
+                           std::span<FoldType> batch_folds_out,
+                           SizeType n_batch) noexcept = 0;
 
     virtual void score(std::span<const FoldType> batch_folds,
                        std::span<float> batch_scores,
                        SizeType n_batch) noexcept = 0;
-
-    virtual void pack(std::span<const FoldType> data,
-                      std::span<FoldType> out) const noexcept = 0;
-
-    virtual void load_shift_add(std::span<const FoldType> batch_folds_suggest,
-                                std::span<const SizeType> batch_isuggest,
-                                std::span<const FoldType> ffa_fold_segment,
-                                std::span<const SizeType> batch_param_idx,
-                                std::span<const float> batch_phase_shift,
-                                std::span<FoldType> batch_folds_out,
-                                SizeType n_batch) noexcept = 0;
 
     virtual void transform(std::span<double> leaves_batch,
                            std::pair<double, double> coord_next,
@@ -74,14 +80,8 @@ public:
     get_transform_matrix(std::pair<double, double> coord_cur,
                          std::pair<double, double> coord_prev) const = 0;
 
-    virtual SizeType validate(std::span<double> leaves_batch,
-                              std::span<SizeType> leaves_origins,
-                              std::pair<double, double> coord_cur,
-                              SizeType n_leaves,
-                              SizeType) const = 0;
-
-    virtual std::tuple<std::vector<double>, std::vector<double>, double>
-    get_validation_params(std::pair<double, double> coord_add) const = 0;
+    virtual void pack(std::span<const FoldType> data,
+                      std::span<FoldType> out) const noexcept = 0;
 
     virtual SizeType get_branch_max() const noexcept = 0;
 
@@ -122,25 +122,6 @@ public:
     std::span<const FoldType> load(std::span<const FoldType>,
                                    SizeType) const override;
 
-    void score(std::span<const FoldType> batch_folds,
-               std::span<float> batch_scores,
-               SizeType n_batch) noexcept override;
-
-    void load_shift_add(std::span<const FoldType> batch_folds_suggest,
-                        std::span<const SizeType> batch_isuggest,
-                        std::span<const FoldType> ffa_fold_segment,
-                        std::span<const SizeType> batch_param_idx,
-                        std::span<const float> batch_phase_shift,
-                        std::span<FoldType> batch_folds_out,
-                        SizeType n_batch) noexcept override;
-
-    void pack(std::span<const FoldType> data,
-              std::span<FoldType> out) const noexcept override;
-
-    std::vector<double>
-    get_transform_matrix(std::pair<double, double> coord_cur,
-                         std::pair<double, double> coord_prev) const override;
-
     SizeType validate(std::span<double> leaves_batch,
                       std::span<SizeType> leaves_origins,
                       std::pair<double, double> coord_cur,
@@ -150,11 +131,30 @@ public:
     std::tuple<std::vector<double>, std::vector<double>, double>
     get_validation_params(std::pair<double, double> coord_add) const override;
 
+    void shift_add(std::span<const FoldType> batch_folds_suggest,
+                   std::span<const SizeType> batch_isuggest,
+                   std::span<const FoldType> ffa_fold_segment,
+                   std::span<const SizeType> batch_param_idx,
+                   std::span<const float> batch_phase_shift,
+                   std::span<FoldType> batch_folds_out,
+                   SizeType n_batch) noexcept override;
+
+    void score(std::span<const FoldType> batch_folds,
+               std::span<float> batch_scores,
+               SizeType n_batch) noexcept override;
+
+    std::vector<double>
+    get_transform_matrix(std::pair<double, double> coord_cur,
+                         std::pair<double, double> coord_prev) const override;
+
+    void pack(std::span<const FoldType> data,
+              std::span<FoldType> out) const noexcept override;
+
     SizeType get_branch_max() const noexcept override;
     std::vector<double> get_branching_pattern() const noexcept override;
 };
 
-// Intermediate base for Taylor-based methods (common suggest implementation)
+// Intermediate base for Taylor-based methods (common seed implementation)
 template <SupportedFoldType FoldType, typename Derived>
 class BaseTaylorPruneDPFuncts : public BasePruneDPFuncts<FoldType, Derived> {
 protected:
@@ -164,10 +164,10 @@ protected:
     using Base::BasePruneDPFuncts;
 
 public:
-    // Common suggest implementation for all Taylor variants
-    void suggest(std::span<const FoldType> fold_segment,
-                 std::pair<double, double> coord_init,
-                 utils::SuggestionTree<FoldType>& sugg_tree) override;
+    // Common seed implementation for all Taylor variants
+    void seed(std::span<const FoldType> fold_segment,
+              std::pair<double, double> coord_init,
+              utils::WorldTree<FoldType>& world_tree) override;
 };
 
 // Specialized implementation for Polynoimal searches in Taylor Basis
@@ -264,6 +264,12 @@ public:
                                  SizeType n_batch,
                                  SizeType n_params) const override;
 
+    SizeType validate(std::span<double> leaves_batch,
+                      std::span<SizeType> leaves_origins,
+                      std::pair<double, double> coord_cur,
+                      SizeType n_leaves,
+                      SizeType n_params) const override;
+
     void resolve(std::span<const double> leaves_batch,
                  std::pair<double, double> coord_add,
                  std::pair<double, double> coord_cur,
@@ -278,12 +284,6 @@ public:
                    std::pair<double, double> coord_cur,
                    SizeType n_leaves,
                    SizeType n_params) const override;
-
-    SizeType validate(std::span<double> leaves_batch,
-                      std::span<SizeType> leaves_origins,
-                      std::pair<double, double> coord_cur,
-                      SizeType n_leaves,
-                      SizeType n_params) const override;
 };
 
 // Factory function to create the correct implementation based on the kind

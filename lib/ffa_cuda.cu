@@ -391,7 +391,7 @@ public:
     void execute_h(std::span<const float> ts_e,
                    std::span<const float> ts_v,
                    std::span<HostFoldType> fold) {
-        //timing::ScopeTimer timer("FFACUDA::execute_h");
+        // timing::ScopeTimer timer("FFACUDA::execute_h");
         error_check::check_equal(
             ts_e.size(), m_cfg.get_nsamps(),
             "FFACUDA::execute_h: ts_e must have size nsamps");
@@ -440,11 +440,53 @@ public:
         cuda_utils::check_last_cuda_error("cudaStreamSynchronize failed");
     }
 
+    void execute_h(std::span<const float> ts_e,
+                   std::span<const float> ts_v,
+                   cuda::std::span<DeviceFoldType> fold_d) {
+        // timing::ScopeTimer timer("FFACUDA::execute_h");
+        error_check::check_equal(
+            ts_e.size(), m_cfg.get_nsamps(),
+            "FFACUDA::execute_h: ts_e must have size nsamps");
+        error_check::check_equal(
+            ts_v.size(), ts_e.size(),
+            "FFACUDA::execute_h: ts_v must have size nsamps");
+        error_check::check_equal(
+            fold_d.size(), m_ffa_plan.get_buffer_size(),
+            "FFACUDA::execute_d: fold must have size buffer_size");
+
+        // Resize buffers only if needed
+        if (m_ts_e_d.size() < ts_e.size()) {
+            m_ts_e_d.resize(ts_e.size());
+            m_ts_v_d.resize(ts_v.size());
+        }
+        // Copy input data to device
+        cudaStream_t stream = nullptr;
+        cudaMemcpyAsync(thrust::raw_pointer_cast(m_ts_e_d.data()), ts_e.data(),
+                        ts_e.size() * sizeof(float), cudaMemcpyHostToDevice,
+                        stream);
+        cuda_utils::check_last_cuda_error("cudaMemcpyAsync failed");
+        cudaMemcpyAsync(thrust::raw_pointer_cast(m_ts_v_d.data()), ts_v.data(),
+                        ts_v.size() * sizeof(float), cudaMemcpyHostToDevice,
+                        stream);
+        cuda_utils::check_last_cuda_error("cudaMemcpyAsync failed");
+        // Execute FFA on device using persistent buffers
+        execute_d(
+            cuda::std::span<const float>(
+                thrust::raw_pointer_cast(m_ts_e_d.data()), m_ts_e_d.size()),
+            cuda::std::span<const float>(
+                thrust::raw_pointer_cast(m_ts_v_d.data()), m_ts_v_d.size()),
+            fold_d, stream);
+
+        // Synchronize stream before returning to host
+        cudaStreamSynchronize(stream);
+        cuda_utils::check_last_cuda_error("cudaStreamSynchronize failed");
+    }
+
     void execute_d(cuda::std::span<const float> ts_e_d,
                    cuda::std::span<const float> ts_v_d,
                    cuda::std::span<DeviceFoldType> fold_d,
                    cudaStream_t stream) {
-        //timing::ScopeTimer timer("FFACUDA::execute_d");
+        // timing::ScopeTimer timer("FFACUDA::execute_d");
         error_check::check_equal(
             ts_e_d.size(), m_cfg.get_nsamps(),
             "FFACUDA::execute_d: ts_e must have size nsamps");
@@ -475,7 +517,7 @@ public:
                    std::span<float> fold)
         requires(std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>)
     {
-        //timing::ScopeTimer timer("FFACUDA::execute_h");
+        // timing::ScopeTimer timer("FFACUDA::execute_h");
         error_check::check_equal(
             ts_e.size(), m_cfg.get_nsamps(),
             "FFACUDA::execute_h: ts_e must have size nsamps");
@@ -531,7 +573,7 @@ public:
                    cudaStream_t stream)
         requires(std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>)
     {
-        //timing::ScopeTimer timer("FFACUDA::execute_d");
+        // timing::ScopeTimer timer("FFACUDA::execute_d");
         const auto fold_size_time      = m_ffa_plan.get_fold_size_time();
         const auto fold_size_fourier   = m_ffa_plan.get_fold_size();
         const auto buffer_size_fourier = m_ffa_plan.get_buffer_size();
@@ -728,7 +770,8 @@ private:
         }
 
         // Initialize in the current buffer
-        initialize_device(ts_e_d, ts_v_d, current_in_ptr, current_out_ptr, stream);
+        initialize_device(ts_e_d, ts_v_d, current_in_ptr, current_out_ptr,
+                          stream);
 
         // FFA iterations
         if (m_is_freq_only) {
@@ -918,6 +961,13 @@ void FFACUDA<FoldTypeCUDA>::execute(std::span<const float> ts_e,
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
+void FFACUDA<FoldTypeCUDA>::execute(std::span<const float> ts_e,
+                                    std::span<const float> ts_v,
+                                    cuda::std::span<DeviceFoldType> fold_d) {
+    m_impl->execute_h(ts_e, ts_v, fold_d);
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
 void FFACUDA<FoldTypeCUDA>::execute(cuda::std::span<const float> ts_e,
                                     cuda::std::span<const float> ts_v,
                                     cuda::std::span<DeviceFoldType> fold,
@@ -959,6 +1009,28 @@ compute_ffa_cuda(std::span<const float> ts_e,
     const auto buffer_size                       = ffa_plan.get_buffer_size();
     std::vector<HostFoldType> fold(buffer_size, HostFoldType{});
     ffa.execute(ts_e, ts_v, std::span<HostFoldType>(fold));
+    // RESIZE to actual result size
+    const auto fold_size = ffa_plan.get_fold_size();
+    fold.resize(fold_size);
+    return {std::move(fold), ffa_plan};
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+std::tuple<thrust::device_vector<FoldTypeCUDA>,
+           plans::FFAPlan<typename FoldTypeTraits<FoldTypeCUDA>::HostType>>
+compute_ffa_cuda_device(std::span<const float> ts_e,
+                        std::span<const float> ts_v,
+                        const search::PulsarSearchConfig& cfg,
+                        int device_id) {
+    using HostFoldType   = FoldTypeTraits<FoldTypeCUDA>::HostType;
+    using DeviceFoldType = FoldTypeTraits<FoldTypeCUDA>::DeviceType;
+    FFACUDA<FoldTypeCUDA> ffa(cfg, device_id);
+    const plans::FFAPlan<HostFoldType>& ffa_plan = ffa.get_plan();
+    const auto buffer_size                       = ffa_plan.get_buffer_size();
+    thrust::device_vector<DeviceFoldType> fold(buffer_size, DeviceFoldType{});
+    ffa.execute(ts_e, ts_v,
+                cuda::std::span<DeviceFoldType>(
+                    thrust::raw_pointer_cast(fold.data()), fold.size()));
     // RESIZE to actual result size
     const auto fold_size = ffa_plan.get_fold_size();
     fold.resize(fold_size);

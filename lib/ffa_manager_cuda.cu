@@ -6,7 +6,6 @@
 #include "loki/algorithms/ffa.hpp"
 #include "loki/algorithms/plans.hpp"
 #include "loki/cands.hpp"
-#include "loki/cartesian.hpp"
 #include "loki/common/types.hpp"
 #include "loki/cuda_utils.cuh"
 #include "loki/detection/score.hpp"

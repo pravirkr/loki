@@ -11,18 +11,19 @@
 namespace loki::utils {
 
 /**
- * @brief A memory-efficient circular buffer for managing search suggestions.
+ * @brief A memory-efficient circular buffer for managing hierarchical search
+ * candidates.
  *
  * This class implements a circular buffer for iterative search algorithms to
- * store, prune, and update "suggestions". It minimizes memory allocations by
+ * store, prune, and update "candidates". It minimizes memory allocations by
  * avoiding defragmentation and using in-place updates.
  *
  * **Circular Buffer Design:**
  * - Buffer is never defragmented - data remains in circular layout
- * - New suggestions are generated from old ones within the same buffer, split
+ * - New candidates are generated from old ones within the same buffer, split
  *   into a "read region" (current iteration's input) and a "write region"
  *   (next iteration's candidates).
- * - Automatic trimming when buffer fills up
+ * - Automatic pruning when buffer fills up
  *
  * **State Transitions:**
  * 1. `prepare_for_in_place_update()` - Split buffer: READ region (old) + WRITE
@@ -33,36 +34,36 @@ namespace loki::utils {
  * 4. `finalize_in_place_update()` - Promote WRITE region to be the new READ
  * region
  *
- * Suggestions struct contains following arrays:
+ * WorldTree contains following arrays:
  * - leaves: Parameter sets, shape (capacity, nparams + 2, 2)
  * - folds: Folded profiles, shape (capacity, 2, nbins)
- * - scores: Scores for each suggestion, shape (capacity)
+ * - scores: Scores for each leaf, shape (capacity)
  *
- * @tparam FoldType The type of the folded profiles.
+ * @tparam FoldType Element type for folded profiles.
  */
-template <typename FoldType = float> class SuggestionTree {
+template <SupportedFoldType FoldType = float> class WorldTree {
 public:
     /**
-     * @brief Constructor for the SuggestionTree class.
+     * @brief Constructor for the WorldTree class.
      *
      * Initializes the internal arrays with the given maximum number of
-     * suggestions, number of parameters, and number of bins.
+     * candidates, number of parameters, and number of bins.
      *
-     * @param capacity Maximum number of suggestions to hold
+     * @param capacity Maximum number of candidates to hold
      * @param nparams Number of parameters
      * @param nbins Number of bins
-     * @param mode Mode of the suggestion tree (e.g. Taylor, Chebyshev)
+     * @param mode Mode of the world tree (e.g. Taylor, Chebyshev)
      */
-    SuggestionTree(SizeType capacity,
-                   SizeType nparams,
-                   SizeType nbins,
-                   std::string_view mode);
+    WorldTree(SizeType capacity,
+              SizeType nparams,
+              SizeType nbins,
+              std::string_view mode);
 
-    ~SuggestionTree();
-    SuggestionTree(SuggestionTree&&) noexcept;
-    SuggestionTree& operator=(SuggestionTree&&) noexcept;
-    SuggestionTree(const SuggestionTree&)            = delete;
-    SuggestionTree& operator=(const SuggestionTree&) = delete;
+    ~WorldTree();
+    WorldTree(WorldTree&&) noexcept;
+    WorldTree& operator=(WorldTree&&) noexcept;
+    WorldTree(const WorldTree&)            = delete;
+    WorldTree& operator=(const WorldTree&) = delete;
 
     // Getters
     [[nodiscard]] SizeType get_capacity() const noexcept;
@@ -79,59 +80,59 @@ public:
     [[nodiscard]] const std::vector<FoldType>& get_folds() const noexcept;
     [[nodiscard]] std::vector<float> get_scores() const noexcept;
 
-    [[nodiscard]] SizeType get_nsugg() const noexcept;
-    [[nodiscard]] SizeType get_nsugg_old() const noexcept;
-    [[nodiscard]] float get_nsugg_lb() const noexcept;
+    [[nodiscard]] SizeType get_size() const noexcept;
+    [[nodiscard]] SizeType get_size_old() const noexcept;
+    [[nodiscard]] float get_size_lb() const noexcept;
     [[nodiscard]] float get_score_max() const noexcept;
     [[nodiscard]] float get_score_min() const noexcept;
     [[nodiscard]] float get_score_median() const noexcept;
     [[nodiscard]] float get_memory_usage() const noexcept;
 
-    void set_nsugg(SizeType nsugg) noexcept;
+    void set_size(SizeType size) noexcept;
     void reset() noexcept;
-    void prepare_for_in_place_update();
+    void prepare_in_place_update();
     void finalize_in_place_update();
-    void advance_read_consumed(SizeType n);
+    void consume_read(SizeType n);
 
     void compute_physical_indices(std::span<const SizeType> logical_indices,
                                   std::span<SizeType> physical_indices,
                                   SizeType n_leaves) const;
 
-    // Get the best suggestion (highest score)
+    // Get the best candidate (highest score)
     [[nodiscard]] std::
         tuple<std::span<const double>, std::span<const FoldType>, float>
         get_best() const;
     // Transform the search parameters to given coordinate
     [[nodiscard]] std::vector<double>
     get_transformed(std::pair<double, double> coord_mid) const;
-    // Add a suggestion to the struct if there is space
+    // Add a candidate leaf to the Tree if there is space
     [[nodiscard]] bool add(std::span<const double> leaf,
                            std::span<const FoldType> fold,
                            float score);
-    // Add an initial set of suggestions to the struct
+    // Add an initial set of candidate leaves to the Tree
     void add_initial(std::span<const double> batch_leaves,
                      std::span<const FoldType> batch_folds,
                      std::span<const float> batch_scores,
                      SizeType slots_to_write);
-    // Add a batch of suggestions to the struct if there is space
+    // Add a batch of candidate leaves to the Tree if there is space
     [[nodiscard]] float add_batch(std::span<const double> batch_leaves,
                                   std::span<const FoldType> batch_folds,
                                   std::span<const float> batch_scores,
                                   float current_threshold,
                                   SizeType slots_to_write);
-    // Trim to keep only suggestions with scores >= median
-    [[nodiscard]] float trim_threshold();
-    // Trim repeated suggestions
-    void trim_repeats();
-    // Trim repeated suggestions and keep only those with scores >= median
-    [[nodiscard]] float trim_repeats_threshold();
+    // Prune to keep only candidates with scores >= median
+    [[nodiscard]] float prune_on_overload();
+    // Prune to keep only unique candidates
+    void deduplicate();
+    // Deduplicate and prune to keep only candidates with scores >= median
+    [[nodiscard]] float deduplicate_and_prune_on_overload();
 
 private:
     class Impl;
     std::unique_ptr<Impl> m_impl;
 };
 
-using SuggestionTreeFloat   = SuggestionTree<float>;
-using SuggestionTreeComplex = SuggestionTree<ComplexType>;
+using WorldTreeFloat   = WorldTree<float>;
+using WorldTreeComplex = WorldTree<ComplexType>;
 
 } // namespace loki::utils

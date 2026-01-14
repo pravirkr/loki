@@ -65,25 +65,26 @@ BasePruneDPFuncts<FoldType, Derived>::load(std::span<const FoldType> ffa_fold,
 }
 
 template <SupportedFoldType FoldType, typename Derived>
-void BasePruneDPFuncts<FoldType, Derived>::score(
-    std::span<const FoldType> batch_folds,
-    std::span<float> batch_scores,
-    SizeType n_batch) noexcept {
-    if constexpr (std::is_same_v<FoldType, ComplexType>) {
-        const auto nfft = 2 * n_batch;
-        auto folds_t    = std::span<float>(m_batch_folds_buffer)
-                           .first(nfft * m_cfg.get_nbins());
-        m_irfft_executor->execute(batch_folds, folds_t, static_cast<int>(nfft));
-        detection::snr_boxcar_batch(folds_t, batch_scores, n_batch,
-                                    m_boxcar_widths_cache);
-    } else {
-        detection::snr_boxcar_batch(batch_folds, batch_scores, n_batch,
-                                    m_boxcar_widths_cache);
-    }
+SizeType BasePruneDPFuncts<FoldType, Derived>::validate(
+    std::span<double> /*leaves_batch*/,
+    std::span<SizeType> /*leaves_origins*/,
+    std::pair<double, double> /*coord_cur*/,
+    SizeType n_leaves,
+    SizeType /*n_params*/) const {
+    return n_leaves;
 }
 
 template <SupportedFoldType FoldType, typename Derived>
-void BasePruneDPFuncts<FoldType, Derived>::load_shift_add(
+std::tuple<std::vector<double>, std::vector<double>, double>
+BasePruneDPFuncts<FoldType, Derived>::get_validation_params(
+    std::pair<double, double> /*coord_add*/) const {
+    // Return empty validation parameters for Taylor variant
+    std::vector<double> empty_arr(0);
+    return std::make_tuple(empty_arr, empty_arr, 0.0);
+}
+
+template <SupportedFoldType FoldType, typename Derived>
+void BasePruneDPFuncts<FoldType, Derived>::shift_add(
     std::span<const FoldType> batch_folds_suggest,
     std::span<const SizeType> batch_isuggest,
     std::span<const FoldType> ffa_fold_segment,
@@ -107,10 +108,21 @@ void BasePruneDPFuncts<FoldType, Derived>::load_shift_add(
 }
 
 template <SupportedFoldType FoldType, typename Derived>
-void BasePruneDPFuncts<FoldType, Derived>::pack(
-    std::span<const FoldType> data, std::span<FoldType> out) const noexcept {
-    // Placeholder for future implementation
-    std::copy(data.begin(), data.end(), out.begin());
+void BasePruneDPFuncts<FoldType, Derived>::score(
+    std::span<const FoldType> batch_folds,
+    std::span<float> batch_scores,
+    SizeType n_batch) noexcept {
+    if constexpr (std::is_same_v<FoldType, ComplexType>) {
+        const auto nfft = 2 * n_batch;
+        auto folds_t    = std::span<float>(m_batch_folds_buffer)
+                           .first(nfft * m_cfg.get_nbins());
+        m_irfft_executor->execute(batch_folds, folds_t, static_cast<int>(nfft));
+        detection::snr_boxcar_batch(folds_t, batch_scores, n_batch,
+                                    m_boxcar_widths_cache);
+    } else {
+        detection::snr_boxcar_batch(batch_folds, batch_scores, n_batch,
+                                    m_boxcar_widths_cache);
+    }
 }
 
 template <SupportedFoldType FoldType, typename Derived>
@@ -128,22 +140,10 @@ std::vector<double> BasePruneDPFuncts<FoldType, Derived>::get_transform_matrix(
 }
 
 template <SupportedFoldType FoldType, typename Derived>
-SizeType BasePruneDPFuncts<FoldType, Derived>::validate(
-    std::span<double> /*leaves_batch*/,
-    std::span<SizeType> /*leaves_origins*/,
-    std::pair<double, double> /*coord_cur*/,
-    SizeType n_leaves,
-    SizeType /*n_params*/) const {
-    return n_leaves;
-}
-
-template <SupportedFoldType FoldType, typename Derived>
-std::tuple<std::vector<double>, std::vector<double>, double>
-BasePruneDPFuncts<FoldType, Derived>::get_validation_params(
-    std::pair<double, double> /*coord_add*/) const {
-    // Return empty validation parameters for Taylor variant
-    std::vector<double> empty_arr(0);
-    return std::make_tuple(empty_arr, empty_arr, 0.0);
+void BasePruneDPFuncts<FoldType, Derived>::pack(
+    std::span<const FoldType> data, std::span<FoldType> out) const noexcept {
+    // Placeholder for future implementation
+    std::copy(data.begin(), data.end(), out.begin());
 }
 
 template <SupportedFoldType FoldType, typename Derived>
@@ -160,10 +160,10 @@ BasePruneDPFuncts<FoldType, Derived>::get_branching_pattern() const noexcept {
 
 // Intermediate implementation for Taylor basis
 template <SupportedFoldType FoldType, typename Derived>
-void BaseTaylorPruneDPFuncts<FoldType, Derived>::suggest(
+void BaseTaylorPruneDPFuncts<FoldType, Derived>::seed(
     std::span<const FoldType> fold_segment,
     std::pair<double, double> coord_init,
-    utils::SuggestionTree<FoldType>& sugg_tree) {
+    utils::WorldTree<FoldType>& world_tree) {
 
     // Create scoring function based on FoldType
     detection::ScoringFunction<FoldType> scoring_func;
@@ -178,20 +178,20 @@ void BaseTaylorPruneDPFuncts<FoldType, Derived>::suggest(
                                             static_cast<int>(nfft));
             detection::snr_boxcar_batch(folds_t, out, n_batch, cache);
         };
-        poly_taylor_suggest<FoldType>(
+        poly_taylor_seed<FoldType>(
             fold_segment, coord_init, this->m_param_arr, this->m_dparams,
             this->m_cfg.get_prune_poly_order(), this->m_cfg.get_nbins_f(),
-            scoring_func, this->m_boxcar_widths_cache, sugg_tree);
+            scoring_func, this->m_boxcar_widths_cache, world_tree);
     } else {
         scoring_func = [](std::span<const FoldType> folds, std::span<float> out,
                           SizeType n_batch,
                           detection::BoxcarWidthsCache& cache) {
             detection::snr_boxcar_batch(folds, out, n_batch, cache);
         };
-        poly_taylor_suggest<FoldType>(
+        poly_taylor_seed<FoldType>(
             fold_segment, coord_init, this->m_param_arr, this->m_dparams,
             this->m_cfg.get_prune_poly_order(), this->m_cfg.get_nbins(),
-            scoring_func, this->m_boxcar_widths_cache, sugg_tree);
+            scoring_func, this->m_boxcar_widths_cache, world_tree);
     }
 }
 
@@ -277,6 +277,19 @@ std::vector<SizeType> PruneCircTaylorDPFuncts<FoldType>::branch(
 }
 
 template <SupportedFoldType FoldType>
+SizeType PruneCircTaylorDPFuncts<FoldType>::validate(
+    std::span<double> leaves_batch,
+    std::span<SizeType> leaves_origins,
+    std::pair<double, double> /*coord_cur*/,
+    SizeType n_leaves,
+    SizeType n_params) const {
+    return circ_taylor_validate_batch(leaves_batch, leaves_origins, n_leaves,
+                                      n_params, this->m_cfg.get_p_orb_min(),
+                                      this->m_cfg.get_x_mass_const(),
+                                      this->m_cfg.get_minimum_snap_cells());
+}
+
+template <SupportedFoldType FoldType>
 void PruneCircTaylorDPFuncts<FoldType>::resolve(
     std::span<const double> leaves_batch,
     std::pair<double, double> coord_add,
@@ -299,24 +312,10 @@ void PruneCircTaylorDPFuncts<FoldType>::transform(
     std::pair<double, double> coord_cur,
     SizeType n_leaves,
     SizeType n_params) const {
-    circ_taylor_transform_batch(
-        leaves_batch, coord_next, coord_cur, n_leaves, n_params,
-        this->m_cfg.get_use_conservative_tile(),
-        this->m_cfg.get_minimum_snap_cells());
-}
-
-template <SupportedFoldType FoldType>
-SizeType PruneCircTaylorDPFuncts<FoldType>::validate(
-    std::span<double> leaves_batch,
-    std::span<SizeType> leaves_origins,
-    std::pair<double, double> /*coord_cur*/,
-    SizeType n_leaves,
-    SizeType n_params) const {
-    return circ_taylor_validate_batch(
-        leaves_batch, leaves_origins, n_leaves, n_params,
-        this->m_cfg.get_p_orb_min(),
-        this->m_cfg.get_x_mass_const(),
-        this->m_cfg.get_minimum_snap_cells());
+    circ_taylor_transform_batch(leaves_batch, coord_next, coord_cur, n_leaves,
+                                n_params,
+                                this->m_cfg.get_use_conservative_tile(),
+                                this->m_cfg.get_minimum_snap_cells());
 }
 
 // Factory function to create the correct implementation based on the kind

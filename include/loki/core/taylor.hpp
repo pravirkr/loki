@@ -75,16 +75,15 @@ poly_taylor_leaves(std::span<const std::vector<double>> param_arr,
                    std::pair<double, double> coord_init);
 
 template <SupportedFoldType FoldType>
-void poly_taylor_suggest(
-    std::span<const FoldType> fold_segment,
-    std::pair<double, double> coord_init,
-    std::span<const std::vector<double>> param_arr,
-    std::span<const double> dparams,
-    SizeType poly_order,
-    SizeType nbins,
-    const detection::ScoringFunction<FoldType>& scoring_func,
-    detection::BoxcarWidthsCache& boxcar_widths_cache,
-    utils::SuggestionTree<FoldType>& sugg_tree);
+void poly_taylor_seed(std::span<const FoldType> fold_segment,
+                      std::pair<double, double> coord_init,
+                      std::span<const std::vector<double>> param_arr,
+                      std::span<const double> dparams,
+                      SizeType poly_order,
+                      SizeType nbins,
+                      const detection::ScoringFunction<FoldType>& scoring_func,
+                      detection::BoxcarWidthsCache& boxcar_widths_cache,
+                      utils::WorldTree<FoldType>& world_tree);
 
 std::vector<SizeType>
 poly_taylor_branch_batch(std::span<const double> leaves_batch,
@@ -172,7 +171,7 @@ generate_bp_poly_taylor_approx(std::span<const std::vector<double>> param_arr,
                                SizeType nbins,
                                double eta,
                                SizeType ref_seg,
-                               IndexType isuggest = 0,
+                               IndexType isuggest         = 0,
                                bool use_conservative_tile = false);
 
 // Generate an exact branching pattern for the pruning Taylor search.

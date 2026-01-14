@@ -1,7 +1,9 @@
 #include "loki/utils.hpp"
 
 #include <algorithm>
+#include <format>
 #include <numeric>
+#include <optional>
 #include <span>
 #include <stdexcept>
 
@@ -41,7 +43,8 @@ void circular_prefix_sum(std::span<const float> x, std::span<float> out) {
     for (SizeType i = nbins; i < nsum; ++i) {
         const auto wrap_count   = i / nbins;
         const auto pos_in_cycle = i % nbins;
-        out[i] = out[pos_in_cycle] + (static_cast<float>(wrap_count) * last_sum);
+        out[i] =
+            out[pos_in_cycle] + (static_cast<float>(wrap_count) * last_sum);
     }
 }
 
@@ -168,4 +171,38 @@ std::vector<double> linspace(double start,
 
     return result;
 }
+
+std::vector<SizeType>
+determine_ref_segs(SizeType nsegments,
+                   std::optional<SizeType> n_runs,
+                   std::optional<std::vector<SizeType>> ref_segs) {
+    // ref_segs = list(np.linspace(0, dyp.nsegments - 1, n_runs, dtype=int))
+    if (n_runs.has_value()) {
+        // n_runs takes precedence over ref_segs
+        const auto n_runs_val = n_runs.value();
+        if (n_runs_val < 1 || n_runs_val > nsegments) {
+            throw std::runtime_error(
+                std::format("n_runs must be between 1 and {}, got {}",
+                            nsegments, n_runs_val));
+        }
+        std::vector<SizeType> ref_segs_val(n_runs_val);
+        if (n_runs_val == 1) {
+            ref_segs_val[0] = 0;
+        } else {
+            const auto denom = static_cast<double>(n_runs_val - 1);
+            const auto max   = static_cast<double>(nsegments - 1);
+            for (SizeType i = 0; i < n_runs_val; ++i) {
+                // ties → even (to match numpy)
+                ref_segs_val[i] = static_cast<SizeType>(
+                    std::rint(static_cast<double>(i) * max / denom));
+            }
+        }
+        return ref_segs_val;
+    }
+    if (ref_segs.has_value()) {
+        return ref_segs.value();
+    }
+    throw std::runtime_error("Either n_runs or ref_segs must be provided");
+}
+
 } // namespace loki::utils

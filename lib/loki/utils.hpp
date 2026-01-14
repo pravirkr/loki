@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -110,5 +111,10 @@ std::vector<double> linspace(double start,
                              double stop,
                              SizeType num_samples = 50,
                              bool endpoint        = true) noexcept;
+
+std::vector<SizeType>
+determine_ref_segs(SizeType nsegments,
+                   std::optional<SizeType> n_runs,
+                   std::optional<std::vector<SizeType>> ref_segs);
 
 } // namespace loki::utils

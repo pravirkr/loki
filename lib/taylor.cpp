@@ -363,24 +363,23 @@ poly_taylor_leaves(std::span<const std::vector<double>> param_arr,
 }
 
 template <SupportedFoldType FoldType>
-void poly_taylor_suggest(
-    std::span<const FoldType> fold_segment,
-    std::pair<double, double> coord_init,
-    std::span<const std::vector<double>> param_arr,
-    std::span<const double> dparams,
-    SizeType poly_order,
-    SizeType nbins,
-    const detection::ScoringFunction<FoldType>& scoring_func,
-    detection::BoxcarWidthsCache& boxcar_widths_cache,
-    utils::SuggestionTree<FoldType>& sugg_tree) {
+void poly_taylor_seed(std::span<const FoldType> fold_segment,
+                      std::pair<double, double> coord_init,
+                      std::span<const std::vector<double>> param_arr,
+                      std::span<const double> dparams,
+                      SizeType poly_order,
+                      SizeType nbins,
+                      const detection::ScoringFunction<FoldType>& scoring_func,
+                      detection::BoxcarWidthsCache& boxcar_widths_cache,
+                      utils::WorldTree<FoldType>& world_tree) {
     constexpr SizeType kParamStride = 2U;
     const SizeType leaves_stride    = (poly_order + 2) * kParamStride;
     const auto n_params             = param_arr.size();
     error_check::check_equal(n_params, poly_order,
                              "n_params should be equal to poly_order");
     error_check::check_equal(
-        leaves_stride, sugg_tree.get_leaves_stride(),
-        "leaves_stride should be equal to sugg_tree.get_leaves_stride()");
+        leaves_stride, world_tree.get_leaves_stride(),
+        "leaves_stride should be equal to world_tree.get_leaves_stride()");
 
     SizeType n_leaves = 1;
     for (const auto& arr : param_arr) {
@@ -396,8 +395,8 @@ void poly_taylor_suggest(
     // Calculate scores
     std::vector<float> scores(n_leaves);
     scoring_func(fold_segment, scores, n_leaves, boxcar_widths_cache);
-    // Initialize the SuggestionStruct with the generated data
-    sugg_tree.add_initial(param_sets, fold_segment, scores, n_leaves);
+    // Initialize the WorldTree with the generated data
+    world_tree.add_initial(param_sets, fold_segment, scores, n_leaves);
 }
 
 std::vector<SizeType>
@@ -1188,7 +1187,7 @@ generate_bp_poly_taylor(std::span<const std::vector<double>> param_arr,
 
         // Compute average branching factor and update weights
         double children = 0.0;
-        double parents = 0.0;
+        double parents  = 0.0;
         for (SizeType i = 0; i < n_freqs; ++i) {
             children += weights[i] * n_branches[i];
             parents += weights[i];
@@ -1197,7 +1196,7 @@ generate_bp_poly_taylor(std::span<const std::vector<double>> param_arr,
         branching_pattern[prune_level - 1] = children / parents;
 
         // Transform dparams to the next segment
-        const auto delta_t  = coord_next.first - coord_cur.first;
+        const auto delta_t = coord_next.first - coord_cur.first;
         for (SizeType i = 0; i < n_freqs; ++i) {
             for (SizeType j = 0; j < poly_order; ++j) {
                 dparam_d_vec[(i * n_params) + j] =
@@ -1218,18 +1217,18 @@ generate_bp_poly_taylor(std::span<const std::vector<double>> param_arr,
     return branching_pattern;
 }
 
-template void poly_taylor_suggest<float>(
-    std::span<const float> fold_segment,
-    std::pair<double, double> coord_init,
-    std::span<const std::vector<double>> param_arr,
-    std::span<const double> dparams,
-    SizeType poly_order,
-    SizeType nbins,
-    const detection::ScoringFunction<float>& scoring_func,
-    detection::BoxcarWidthsCache& boxcar_widths_cache,
-    utils::SuggestionTree<float>& sugg_tree);
+template void
+poly_taylor_seed<float>(std::span<const float> fold_segment,
+                        std::pair<double, double> coord_init,
+                        std::span<const std::vector<double>> param_arr,
+                        std::span<const double> dparams,
+                        SizeType poly_order,
+                        SizeType nbins,
+                        const detection::ScoringFunction<float>& scoring_func,
+                        detection::BoxcarWidthsCache& boxcar_widths_cache,
+                        utils::WorldTree<float>& world_tree);
 
-template void poly_taylor_suggest<ComplexType>(
+template void poly_taylor_seed<ComplexType>(
     std::span<const ComplexType> fold_segment,
     std::pair<double, double> coord_init,
     std::span<const std::vector<double>> param_arr,
@@ -1238,6 +1237,6 @@ template void poly_taylor_suggest<ComplexType>(
     SizeType nbins,
     const detection::ScoringFunction<ComplexType>& scoring_func,
     detection::BoxcarWidthsCache& boxcar_widths_cache,
-    utils::SuggestionTree<ComplexType>& sugg_tree);
+    utils::WorldTree<ComplexType>& world_tree);
 
 } // namespace loki::core
