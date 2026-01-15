@@ -51,8 +51,13 @@ public:
      * @param capacity Maximum number of candidates to hold
      * @param nparams Number of parameters
      * @param nbins Number of bins
+     * @param max_batch_size Maximum number of candidates that can be added in a
+     * single batch. This is used to allocate the scratch buffer.
      */
-    WorldTree(SizeType capacity, SizeType nparams, SizeType nbins);
+    WorldTree(SizeType capacity,
+              SizeType nparams,
+              SizeType nbins,
+              SizeType max_batch_size);
 
     ~WorldTree();
     WorldTree(WorldTree&&) noexcept;
@@ -67,6 +72,7 @@ public:
     [[nodiscard]] SizeType get_capacity() const noexcept;
     [[nodiscard]] SizeType get_nparams() const noexcept;
     [[nodiscard]] SizeType get_nbins() const noexcept;
+    [[nodiscard]] SizeType get_max_batch_size() const noexcept;
     [[nodiscard]] SizeType get_leaves_stride() const noexcept;
     [[nodiscard]] SizeType get_folds_stride() const noexcept;
     [[nodiscard]] SizeType get_size() const noexcept;

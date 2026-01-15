@@ -332,18 +332,20 @@ public:
         // Setup pruning functions
         setup_pruning();
 
+        const auto branch_max     = m_prune_funcs->get_branch_max();
+        const auto max_batch_size = m_batch_size * branch_max;
         // Allocate suggestion buffer
         if constexpr (std::is_same_v<FoldType, ComplexType>) {
             m_world_tree = std::make_unique<utils::WorldTree<FoldType>>(
-                m_max_sugg, m_cfg.get_nparams(), m_cfg.get_nbins_f());
+                m_max_sugg, m_cfg.get_nparams(), m_cfg.get_nbins_f(),
+                max_batch_size);
         } else {
             m_world_tree = std::make_unique<utils::WorldTree<FoldType>>(
-                m_max_sugg, m_cfg.get_nparams(), m_cfg.get_nbins());
+                m_max_sugg, m_cfg.get_nparams(), m_cfg.get_nbins(),
+                max_batch_size);
         }
 
         // Allocate iteration workspace
-        const auto branch_max     = m_prune_funcs->get_branch_max();
-        const auto max_batch_size = m_batch_size * branch_max;
         if constexpr (std::is_same_v<FoldType, ComplexType>) {
             m_pruning_workspace = std::make_unique<PruningWorkspace<FoldType>>(
                 max_batch_size, m_cfg.get_nparams(), m_cfg.get_nbins_f());
