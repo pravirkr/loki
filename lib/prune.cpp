@@ -335,10 +335,10 @@ public:
         // Allocate suggestion buffer
         if constexpr (std::is_same_v<FoldType, ComplexType>) {
             m_world_tree = std::make_unique<utils::WorldTree<FoldType>>(
-                m_max_sugg, m_cfg.get_nparams(), m_cfg.get_nbins_f(), kind);
+                m_max_sugg, m_cfg.get_nparams(), m_cfg.get_nbins_f());
         } else {
             m_world_tree = std::make_unique<utils::WorldTree<FoldType>>(
-                m_max_sugg, m_cfg.get_nparams(), m_cfg.get_nbins(), kind);
+                m_max_sugg, m_cfg.get_nparams(), m_cfg.get_nbins());
         }
 
         // Allocate iteration workspace

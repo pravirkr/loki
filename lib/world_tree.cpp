@@ -2,12 +2,9 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstring>
 #include <memory>
 #include <numeric>
 #include <span>
-#include <string>
-#include <string_view>
 #include <unordered_map>
 
 #include "loki/common/types.hpp"
@@ -50,14 +47,10 @@ m_read_consumed).
 */
 template <SupportedFoldType FoldType> class WorldTree<FoldType>::Impl {
 public:
-    Impl(SizeType capacity,
-         SizeType nparams,
-         SizeType nbins,
-         std::string_view mode)
+    Impl(SizeType capacity, SizeType nparams, SizeType nbins)
         : m_capacity(capacity),
           m_nparams(nparams),
           m_nbins(nbins),
-          m_mode(mode),
           m_leaves_stride((nparams + 2) * kParamStride),
           m_folds_stride(2 * nbins),
           m_leaves(m_capacity * m_leaves_stride, 0.0),
@@ -89,7 +82,6 @@ public:
     SizeType get_capacity() const noexcept { return m_capacity; }
     SizeType get_nparams() const noexcept { return m_nparams; }
     SizeType get_nbins() const noexcept { return m_nbins; }
-    std::string_view get_mode() const noexcept { return m_mode; }
     SizeType get_leaves_stride() const noexcept { return m_leaves_stride; }
     SizeType get_folds_stride() const noexcept { return m_folds_stride; }
     SizeType get_size() const noexcept { return m_size; }
@@ -101,7 +93,7 @@ public:
     /**
      * @brief Get maximum score in current region
      */
-    float get_score_max() const {
+    float get_score_max() const noexcept {
         if (m_size == 0) {
             return 0.0F;
         }
@@ -117,7 +109,7 @@ public:
     /**
      * @brief Get minimum score in current region
      */
-    float get_score_min() const {
+    float get_score_min() const noexcept {
         if (m_size == 0) {
             return 0.0F;
         }
@@ -140,22 +132,16 @@ public:
             (m_leaves.size() * sizeof(double)) +
             (m_folds.size() * sizeof(FoldType)) +
             (m_scores.size() * sizeof(float)) +
+            (m_scratch_leaves.size() * sizeof(double)) +
             (m_scratch_scores.size() * sizeof(float)) +
             (m_scratch_pending_indices.size() * sizeof(SizeType)) +
             (m_scratch_mask.size() * sizeof(uint8_t));
         // Peak temporary allocations (worst case scenario)
-        // get_transformed() temp allocation
-        const auto transform_bytes =
-            m_capacity * m_leaves_stride * sizeof(double);
         // best_by_key map in compute_uniqueness_mask_inplace (worst case:
         // all unique)
-        const auto uniqueness_bytes =
-            (m_capacity * (sizeof(int64_t) + sizeof(BestIndices)));
-        const auto peak_temp_bytes =
-            std::max(transform_bytes, uniqueness_bytes);
-
-        return static_cast<float>(base_bytes + peak_temp_bytes) /
-               static_cast<float>(1ULL << 30U);
+        // const auto extra_temp_bytes =
+        //    (m_capacity * (sizeof(int64_t) + sizeof(BestIndices)));
+        return static_cast<float>(base_bytes) / static_cast<float>(1ULL << 30U);
     }
 
     /**
@@ -165,7 +151,8 @@ public:
      * The span may be truncated at buffer wrap point.
      *
      * @param n_leaves Number of leaves to access
-     * @return Pair of (span, actual_contiguous_count)
+     * @return Pair of (span, actual_size), where actual_size <= requested n_leaves,
+     * limited to contiguous segment before wrap.
      */
     std::pair<std::span<const double>, SizeType>
     get_leaves_span(SizeType n_leaves) const {
@@ -546,7 +533,6 @@ private:
     SizeType m_capacity;
     SizeType m_nparams;
     SizeType m_nbins;
-    std::string m_mode;
     SizeType m_leaves_stride{};
     SizeType m_folds_stride;
 
@@ -622,7 +608,7 @@ private:
      * @brief Calculate available space in buffer
      * @return The number of slots available in the write region
      */
-    IndexType calculate_space_left() const noexcept {
+    IndexType calculate_space_left() const {
         const auto remaining_old = static_cast<IndexType>(m_size_old) -
                                    static_cast<IndexType>(m_read_consumed);
         error_check::check_greater_equal(
@@ -878,9 +864,8 @@ private:
 template <SupportedFoldType FoldType>
 WorldTree<FoldType>::WorldTree(SizeType capacity,
                                SizeType nparams,
-                               SizeType nbins,
-                               std::string_view mode)
-    : m_impl(std::make_unique<Impl>(capacity, nparams, nbins, mode)) {}
+                               SizeType nbins)
+    : m_impl(std::make_unique<Impl>(capacity, nparams, nbins)) {}
 template <SupportedFoldType FoldType>
 WorldTree<FoldType>::~WorldTree() = default;
 template <SupportedFoldType FoldType>
@@ -906,16 +891,12 @@ SizeType WorldTree<FoldType>::get_capacity() const noexcept {
     return m_impl->get_capacity();
 }
 template <SupportedFoldType FoldType>
-size_t WorldTree<FoldType>::get_nparams() const noexcept {
+SizeType WorldTree<FoldType>::get_nparams() const noexcept {
     return m_impl->get_nparams();
 }
 template <SupportedFoldType FoldType>
 SizeType WorldTree<FoldType>::get_nbins() const noexcept {
     return m_impl->get_nbins();
-}
-template <SupportedFoldType FoldType>
-std::string_view WorldTree<FoldType>::get_mode() const noexcept {
-    return m_impl->get_mode();
 }
 template <SupportedFoldType FoldType>
 SizeType WorldTree<FoldType>::get_leaves_stride() const noexcept {

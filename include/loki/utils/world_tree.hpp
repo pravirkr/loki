@@ -2,7 +2,6 @@
 
 #include <memory>
 #include <span>
-#include <string_view>
 #include <tuple>
 #include <vector>
 
@@ -52,12 +51,8 @@ public:
      * @param capacity Maximum number of candidates to hold
      * @param nparams Number of parameters
      * @param nbins Number of bins
-     * @param mode Mode of the world tree (e.g. Taylor, Chebyshev)
      */
-    WorldTree(SizeType capacity,
-              SizeType nparams,
-              SizeType nbins,
-              std::string_view mode);
+    WorldTree(SizeType capacity, SizeType nparams, SizeType nbins);
 
     ~WorldTree();
     WorldTree(WorldTree&&) noexcept;
@@ -72,7 +67,6 @@ public:
     [[nodiscard]] SizeType get_capacity() const noexcept;
     [[nodiscard]] SizeType get_nparams() const noexcept;
     [[nodiscard]] SizeType get_nbins() const noexcept;
-    [[nodiscard]] std::string_view get_mode() const noexcept;
     [[nodiscard]] SizeType get_leaves_stride() const noexcept;
     [[nodiscard]] SizeType get_folds_stride() const noexcept;
     [[nodiscard]] SizeType get_size() const noexcept;
