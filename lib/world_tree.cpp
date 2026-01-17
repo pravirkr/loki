@@ -295,27 +295,23 @@ public:
     }
 
     /**
-     * @brief Compute physical indices from logical indices
+     * @brief Convert logical indices to physical indices
      */
-    void compute_physical_indices(std::span<const SizeType> logical_indices,
-                                  std::span<SizeType> physical_indices,
-                                  SizeType n_leaves) const {
+    void convert_to_physical_indices(std::span<SizeType> logical_indices,
+                                     SizeType n_leaves) const {
         error_check::check(
             m_is_updating,
-            "WorldTree: compute_physical_indices only valid during updates");
+            "WorldTree: convert_to_physical_indices only valid during updates");
         error_check::check_greater_equal(
             logical_indices.size(), n_leaves,
-            "compute_physical_indices: logical_indices size insufficient");
-        error_check::check_greater_equal(
-            physical_indices.size(), n_leaves,
-            "compute_physical_indices: physical_indices size insufficient");
+            "convert_to_physical_indices: n_leaves size insufficient");
 
         // Compute physical start: relative to current head of read region
         const auto physical_start =
             get_circular_index(m_read_consumed, m_head, m_capacity);
         for (SizeType i = 0; i < n_leaves; ++i) {
-            physical_indices[i] = get_circular_index(
-                logical_indices[i], physical_start, m_capacity);
+            logical_indices[i] = get_circular_index(logical_indices[i],
+                                                    physical_start, m_capacity);
         }
     }
 
@@ -970,12 +966,9 @@ void WorldTree<FoldType>::consume_read(SizeType n) {
     m_impl->consume_read(n);
 }
 template <SupportedFoldType FoldType>
-void WorldTree<FoldType>::compute_physical_indices(
-    std::span<const SizeType> logical_indices,
-    std::span<SizeType> physical_indices,
-    SizeType n_leaves) const {
-    m_impl->compute_physical_indices(logical_indices, physical_indices,
-                                     n_leaves);
+void WorldTree<FoldType>::convert_to_physical_indices(
+    std::span<SizeType> logical_indices, SizeType n_leaves) const {
+    m_impl->convert_to_physical_indices(logical_indices, n_leaves);
 }
 // Other methods
 template <SupportedFoldType FoldType>

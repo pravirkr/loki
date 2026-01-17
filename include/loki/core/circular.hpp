@@ -32,17 +32,21 @@ get_circ_taylor_mask(std::span<const double> leaves_batch,
                      SizeType n_params,
                      double minimum_snap_cells);
 
-std::vector<SizeType>
-circ_taylor_branch_batch(std::span<const double> leaves_batch,
+SizeType
+circ_taylor_branch_batch(std::span<const double> leaves_tree,
                          std::pair<double, double> coord_cur,
-                         std::span<double> leaves_branch_batch,
-                         SizeType n_batch,
+                         std::span<double> leaves_branch,
+                         std::span<SizeType> leaves_origins,
+                         SizeType n_leaves,
                          SizeType n_params,
                          SizeType nbins,
                          double eta,
                          const std::vector<ParamLimitType>& param_limits,
                          SizeType branch_max,
-                         double minimum_snap_cells);
+                         double minimum_snap_cells,
+                         std::span<double> scratch_params,
+                         std::span<double> scratch_dparams,
+                         std::span<SizeType> scratch_counts);
 
 SizeType circ_taylor_validate_batch(std::span<double> leaves_batch,
                                     std::span<SizeType> leaves_origins,

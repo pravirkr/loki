@@ -9,10 +9,28 @@
 #include <utility>
 #include <variant>
 
+#include <cub/cub.cuh>
 #include <cuda_runtime.h>
 #include <cufft.h>
 #include <curand.h>
+
 #include "loki/common/types.hpp"
+
+// Check if we are on a modern CUB version (CCCL 3.0+)
+#if CUB_VERSION >= 300000
+#include <cuda/functional>
+template <typename T> using CubMaxOp    = ::cuda::maximum<T>;
+template <typename T> using CubMinOp    = ::cuda::minimum<T>;
+template <typename T> using ThrustMaxOp = ::cuda::maximum<T>;
+template <typename T> using ThrustMinOp = ::cuda::minimum<T>;
+#else
+// Fall back to CUB operators for older CCCL
+#include <thrust/functional.h>
+template <typename T> using CubMaxOp    = cub::Max;
+template <typename T> using CubMinOp    = cub::Min;
+template <typename T> using ThrustMaxOp = thrust::maximum<T>;
+template <typename T> using ThrustMinOp = thrust::minimum<T>;
+#endif // CUB_VERSION >= 300000
 
 namespace loki::cuda_utils {
 
@@ -318,7 +336,7 @@ inline void check_kernel_launch_params(
     check_limit(shmem_size, props.sharedMemPerBlock, "Shared memory");
 }
 
-[[nodiscard]] inline std::string get_device_info() noexcept {
+[[nodiscard]] inline std::string get_device_info() {
     int device;
     cudaDeviceProp props{};
     check_cuda_call(cudaGetDevice(&device), "Failed to get device");
@@ -330,7 +348,7 @@ inline void check_kernel_launch_params(
         props.sharedMemPerBlock);
 }
 
-[[nodiscard]] inline SizeType get_max_shared_memory() noexcept {
+[[nodiscard]] inline SizeType get_max_shared_memory() {
     int device;
     cudaDeviceProp props{};
     check_cuda_call(cudaGetDevice(&device), "Failed to get device");
@@ -339,8 +357,7 @@ inline void check_kernel_launch_params(
     return props.sharedMemPerBlock;
 }
 
-[[nodiscard]] inline std::pair<double, double>
-get_cuda_memory_usage() noexcept {
+[[nodiscard]] inline std::pair<double, double> get_cuda_memory_usage() {
     SizeType free_mem, total_mem;
     check_cuda_call(cudaMemGetInfo(&free_mem, &total_mem),
                     "Failed to get CUDA memory usage");

@@ -85,14 +85,18 @@ void snr_boxcar_3d_max(std::span<const float> arr,
                        int nthreads = 1);
 
 // Compute the S/N of a batch of folded profiles
-void snr_boxcar_batch(std::span<const float> batch_folds,
-                      std::span<float> batch_scores,
+void snr_boxcar_batch(std::span<const float> folds_batch,
+                      std::span<float> scores_batch,
                       SizeType n_batch,
+                      SizeType nbins,
                       BoxcarWidthsCache& cache);
 
 template <typename FoldType>
-using ScoringFunction = std::function<void(
-    std::span<const FoldType>, std::span<float>, SizeType, BoxcarWidthsCache&)>;
+using ScoringFunction = std::function<void(std::span<const FoldType>,
+                                           std::span<float>,
+                                           SizeType,
+                                           SizeType,
+                                           BoxcarWidthsCache&)>;
 
 #ifdef LOKI_ENABLE_CUDA
 

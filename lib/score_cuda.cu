@@ -14,16 +14,6 @@
 
 namespace loki::detection {
 
-// Check if we are on a modern CUB version (CCCL 3.0+)
-#if CUB_VERSION >= 300000
-    #include <cuda/functional>
-    template <typename T>
-    using MaxOp = cuda::maximum<T>;
-#else
-    template <typename T>
-    using MaxOp = cub::Max;
-#endif
-
 namespace {
 
 // Optimized 2D max kernel using warp strategy (Assigns one warp per profile)
@@ -113,7 +103,7 @@ __global__ void snr_boxcar_kernel_warp(const float* __restrict__ arr,
             thread_max_diff = fmaxf(thread_max_diff, current_sum);
         }
         float max_diff = WarpReduce(temp_reduce[warp_id])
-                             .Reduce(thread_max_diff, MaxOp<float>());
+                             .Reduce(thread_max_diff, CubMaxOp<float>());
 
         if (lane_id == 0) {
             float snr;
@@ -135,8 +125,8 @@ __global__ void snr_boxcar_kernel_warp(const float* __restrict__ arr,
     if constexpr (FindMax) {
         __shared__
             typename WarpReduce::TempStorage temp_final[kProfilesPerBlock];
-        float final_max_snr =
-            WarpReduce(temp_final[warp_id]).Reduce(thread_max_snr, MaxOp<float>());
+        float final_max_snr = WarpReduce(temp_final[warp_id])
+                                  .Reduce(thread_max_snr, CubMaxOp<float>());
         if (lane_id == 0) {
             out[profile_idx] = final_max_snr;
         }

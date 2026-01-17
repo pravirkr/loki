@@ -471,16 +471,19 @@ void snr_boxcar_batch_kernel(const float* __restrict__ arr,
 }
 } // namespace
 
-void snr_boxcar_batch(std::span<const float> batch_folds,
-                      std::span<float> batch_scores,
+void snr_boxcar_batch(std::span<const float> folds_batch,
+                      std::span<float> scores_batch,
                       SizeType n_batch,
+                      SizeType nbins,
                       BoxcarWidthsCache& cache) {
-    error_check::check_equal(
-        batch_scores.size(), n_batch,
-        "snr_boxcar_batch: batch_scores size does not match n_batch");
-    const auto nbins = batch_folds.size() / (2 * n_batch);
-    snr_boxcar_batch_kernel(batch_folds.data(), n_batch, nbins,
-                            batch_scores.data(), cache);
+    error_check::check_greater_equal(scores_batch.size(), n_batch,
+                                     "snr_boxcar_batch: scores_batch should be "
+                                     "at least n_batch");
+    error_check::check_greater_equal(folds_batch.size(), n_batch * nbins * 2,
+                                     "snr_boxcar_batch: folds_batch should be "
+                                     "at least n_batch * nbins * 2");
+    snr_boxcar_batch_kernel(folds_batch.data(), n_batch, nbins,
+                            scores_batch.data(), cache);
 }
 
 } // namespace loki::detection

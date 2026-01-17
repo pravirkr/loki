@@ -97,9 +97,8 @@ public:
     void finalize_in_place_update();
     void consume_read(SizeType n);
 
-    void compute_physical_indices(std::span<const SizeType> logical_indices,
-                                  std::span<SizeType> physical_indices,
-                                  SizeType n_leaves) const;
+    void convert_to_physical_indices(std::span<SizeType> logical_indices,
+                                     SizeType n_leaves) const;
 
     // Get the best candidate (highest score)
     [[nodiscard]] std::

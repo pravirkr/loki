@@ -13,6 +13,7 @@
 #include "loki/cands.hpp"
 #include "loki/common/types.hpp"
 #include "loki/core/dynamic.hpp"
+#include "loki/exceptions.hpp"
 #include "loki/progress.hpp"
 #include "loki/psr_utils.hpp"
 #include "loki/timing.hpp"
@@ -255,61 +256,74 @@ struct IterationStats {
 
 template <SupportedFoldType FoldType> struct PruningWorkspace {
     constexpr static SizeType kLeavesParamStride = 2;
-    SizeType max_batch_size;
+    SizeType batch_size;
+    SizeType branch_max;
     SizeType nparams;
     SizeType nbins;
+    SizeType max_branched_leaves;
     SizeType leaves_stride{};
     SizeType folds_stride;
 
-    std::vector<double> batch_leaves;
-    std::vector<FoldType> batch_folds;
-    std::vector<float> batch_scores;
-    std::vector<SizeType> batch_param_idx;
-    std::vector<float> batch_phase_shift;
-    std::vector<SizeType> batch_isuggest;
-    std::vector<SizeType> batch_passing_indices;
+    std::vector<double> branched_leaves;
+    std::vector<FoldType> branched_folds;
+    std::vector<float> branched_scores;
+    // Scratch space for indices
+    std::vector<SizeType> branched_indices;
+    // Scratch space for resolving parameters
+    std::vector<SizeType> branched_param_idx;
+    std::vector<float> branched_phase_shift;
 
-    PruningWorkspace(SizeType max_batch_size, SizeType nparams, SizeType nbins)
-        : max_batch_size(max_batch_size),
+    // Branching workspace
+    std::vector<double> scratch_params;
+    std::vector<double> scratch_dparams;
+    std::vector<SizeType> scratch_counts;
+
+    PruningWorkspace(SizeType batch_size,
+                     SizeType branch_max,
+                     SizeType nparams,
+                     SizeType nbins)
+        : batch_size(batch_size),
+          branch_max(branch_max),
           nparams(nparams),
           nbins(nbins),
+          max_branched_leaves(batch_size * branch_max),
           leaves_stride((nparams + 2) * kLeavesParamStride),
           folds_stride(2 * nbins),
-          batch_leaves(max_batch_size * leaves_stride),
-          batch_folds(max_batch_size * folds_stride),
-          batch_scores(max_batch_size),
-          batch_param_idx(max_batch_size),
-          batch_phase_shift(max_batch_size),
-          batch_isuggest(max_batch_size),
-          batch_passing_indices(max_batch_size) {}
+          branched_leaves(max_branched_leaves * leaves_stride),
+          branched_folds(max_branched_leaves * folds_stride),
+          branched_scores(max_branched_leaves),
+          branched_indices(max_branched_leaves),
+          branched_param_idx(max_branched_leaves),
+          branched_phase_shift(max_branched_leaves),
+          scratch_params(max_branched_leaves * nparams),
+          scratch_dparams(batch_size * nparams),
+          scratch_counts(batch_size * nparams) {}
 
-    // Call this after filling batch_scores and batch_passing_indices
+    // Call this after filling branched_scores and branched_indices
     void filter_batch(SizeType n_leaves_passing) noexcept {
         for (SizeType dst_idx = 0; dst_idx < n_leaves_passing; ++dst_idx) {
-            const SizeType src_idx           = batch_passing_indices[dst_idx];
-            batch_scores[dst_idx]            = batch_scores[src_idx];
-            const SizeType leaves_src_offset = src_idx * leaves_stride;
-            const SizeType leaves_dst_offset = dst_idx * leaves_stride;
-            std::copy(batch_leaves.begin() + leaves_src_offset,
-                      batch_leaves.begin() + leaves_src_offset + leaves_stride,
-                      batch_leaves.begin() + leaves_dst_offset);
-            const SizeType folds_src_offset = src_idx * folds_stride;
-            const SizeType folds_dst_offset = dst_idx * folds_stride;
-            std::copy(batch_folds.begin() + folds_src_offset,
-                      batch_folds.begin() + folds_src_offset + folds_stride,
-                      batch_folds.begin() + folds_dst_offset);
+            const SizeType src_idx   = branched_indices[dst_idx];
+            branched_scores[dst_idx] = branched_scores[src_idx];
+            std::copy_n(branched_leaves.begin() + (src_idx * leaves_stride),
+                        leaves_stride,
+                        branched_leaves.begin() + (dst_idx * leaves_stride));
+            std::copy_n(branched_folds.begin() + (src_idx * folds_stride),
+                        folds_stride,
+                        branched_folds.begin() + (dst_idx * folds_stride));
         }
     }
 
     float get_memory_usage() const noexcept {
         const auto total_memory =
-            (batch_leaves.size() * sizeof(double)) +
-            (batch_folds.size() * sizeof(FoldType)) +
-            (batch_scores.size() * sizeof(float)) +
-            (batch_param_idx.size() * sizeof(SizeType)) +
-            (batch_phase_shift.size() * sizeof(float)) +
-            (batch_isuggest.size() * sizeof(SizeType)) +
-            (batch_passing_indices.size() * sizeof(SizeType));
+            (branched_leaves.size() * sizeof(double)) +
+            (branched_folds.size() * sizeof(FoldType)) +
+            (branched_scores.size() * sizeof(float)) +
+            (branched_indices.size() * sizeof(SizeType)) +
+            (branched_param_idx.size() * sizeof(SizeType)) +
+            (branched_phase_shift.size() * sizeof(float)) +
+            (scratch_params.size() * sizeof(double)) +
+            (scratch_dparams.size() * sizeof(double)) +
+            (scratch_counts.size() * sizeof(SizeType));
         return static_cast<float>(total_memory) /
                static_cast<float>(1ULL << 30U);
     }
@@ -348,10 +362,12 @@ public:
         // Allocate iteration workspace
         if constexpr (std::is_same_v<FoldType, ComplexType>) {
             m_pruning_workspace = std::make_unique<PruningWorkspace<FoldType>>(
-                max_batch_size, m_cfg.get_nparams(), m_cfg.get_nbins_f());
+                m_batch_size, branch_max, m_cfg.get_nparams(),
+                m_cfg.get_nbins_f());
         } else {
             m_pruning_workspace = std::make_unique<PruningWorkspace<FoldType>>(
-                max_batch_size, m_cfg.get_nparams(), m_cfg.get_nbins());
+                m_batch_size, branch_max, m_cfg.get_nparams(),
+                m_cfg.get_nbins());
         }
     }
 
@@ -517,12 +533,9 @@ private:
             return;
         }
         ++m_prune_level;
-        if (m_prune_level > m_threshold_scheme.size()) {
-            throw std::runtime_error(
-                std::format("Pruning complete - exceeded threshold scheme "
-                            "length at level {}",
-                            m_prune_level));
-        }
+        error_check::check_less_equal(
+            m_prune_level, m_threshold_scheme.size(),
+            "Pruning complete - exceeded threshold scheme length");
         // Prepare for in-place update: mark start of write region, reset size
         // for new suggestions.
         m_world_tree->prepare_in_place_update();
@@ -601,7 +614,7 @@ private:
 
             // Get contiguous span; it may be smaller if wrap occurs
             // Read from the beginning of unconsumed data
-            auto [batch_leaves_span, current_batch_size] =
+            auto [leaves_tree_span, current_batch_size] =
                 m_world_tree->get_leaves_span(this_batch_size);
             if (current_batch_size == 0) {
                 throw std::runtime_error(
@@ -613,29 +626,30 @@ private:
 
             // Branch
             timer.start();
-            auto batch_leaf_origins =
-                m_prune_funcs->branch(batch_leaves_span, coord_cur, coord_prev,
-                                      m_pruning_workspace->batch_leaves,
-                                      current_batch_size, n_params);
-            const auto n_leaves_batch = batch_leaf_origins.size();
+            const auto n_leaves_batch = m_prune_funcs->branch(
+                leaves_tree_span, coord_cur, coord_prev,
+                m_pruning_workspace->branched_leaves,
+                m_pruning_workspace->branched_indices, current_batch_size,
+                n_params, m_pruning_workspace->scratch_params,
+                m_pruning_workspace->scratch_dparams,
+                m_pruning_workspace->scratch_counts);
             stats.batch_timers["branch"] += timer.stop();
             stats.n_leaves += n_leaves_batch;
             if (n_leaves_batch == 0) {
                 m_world_tree->consume_read(current_batch_size);
                 continue;
             }
-            if (n_leaves_batch > m_pruning_workspace->max_batch_size) {
-                throw std::runtime_error(std::format(
-                    "Branch factor exceeded workspace size: n_leaves_batch={} "
-                    "> max_batch_size={}",
-                    n_leaves_batch, m_pruning_workspace->max_batch_size));
-            }
+            error_check::check_less_equal(
+                n_leaves_batch, m_pruning_workspace->max_branched_leaves,
+                "Branch factor exceeded workspace size:n_leaves_batch <= "
+                "max_branched_leaves");
 
             // Validation
             timer.start();
-            const auto n_leaves_after_validation = m_prune_funcs->validate(
-                m_pruning_workspace->batch_leaves, batch_leaf_origins,
-                coord_cur, n_leaves_batch, n_params);
+            const auto n_leaves_after_validation =
+                m_prune_funcs->validate(m_pruning_workspace->branched_leaves,
+                                        m_pruning_workspace->branched_indices,
+                                        coord_cur, n_leaves_batch, n_params);
             stats.batch_timers["validate"] += timer.stop();
             stats.n_leaves_phy += n_leaves_after_validation;
             if (n_leaves_after_validation == 0) {
@@ -645,56 +659,46 @@ private:
 
             // Resolve
             timer.start();
-            auto batch_param_idx_span =
-                std::span(m_pruning_workspace->batch_param_idx)
-                    .first(n_leaves_after_validation);
-            auto batch_phase_shift_span =
-                std::span(m_pruning_workspace->batch_phase_shift)
-                    .first(n_leaves_after_validation);
-            m_prune_funcs->resolve(m_pruning_workspace->batch_leaves, coord_add,
-                                   coord_cur, coord_init, batch_param_idx_span,
-                                   batch_phase_shift_span,
+            m_prune_funcs->resolve(m_pruning_workspace->branched_leaves,
+                                   coord_add, coord_cur, coord_init,
+                                   m_pruning_workspace->branched_param_idx,
+                                   m_pruning_workspace->branched_phase_shift,
                                    n_leaves_after_validation, n_params);
             stats.batch_timers["resolve"] += timer.stop();
 
-            // Load, shift, add (Map batch_leaf_origins to global indices)
+            // Load, shift, add (Map branched_itree to physical indices)
             timer.start();
-            m_world_tree->compute_physical_indices(
-                batch_leaf_origins, m_pruning_workspace->batch_isuggest,
+            m_world_tree->convert_to_physical_indices(
+                m_pruning_workspace->branched_indices,
                 n_leaves_after_validation);
             m_prune_funcs->shift_add(
-                m_world_tree->get_folds(), m_pruning_workspace->batch_isuggest,
-                ffa_fold_segment, batch_param_idx_span, batch_phase_shift_span,
-                m_pruning_workspace->batch_folds, n_leaves_after_validation);
+                m_world_tree->get_folds(),
+                m_pruning_workspace->branched_indices, ffa_fold_segment,
+                m_pruning_workspace->branched_param_idx,
+                m_pruning_workspace->branched_phase_shift,
+                m_pruning_workspace->branched_folds, n_leaves_after_validation);
             stats.batch_timers["shift_add"] += timer.stop();
 
             // Score
             timer.start();
-            auto batch_folds_span =
-                std::span<FoldType>(m_pruning_workspace->batch_folds)
-                    .first(n_leaves_after_validation *
-                           m_pruning_workspace->folds_stride);
-            auto batch_scores_span =
-                std::span(m_pruning_workspace->batch_scores)
-                    .first(n_leaves_after_validation);
-            m_prune_funcs->score(batch_folds_span, batch_scores_span,
+            m_prune_funcs->score(m_pruning_workspace->branched_folds,
+                                 m_pruning_workspace->branched_scores,
                                  n_leaves_after_validation);
+            auto branched_scores_span =
+                std::span<const float>(m_pruning_workspace->branched_scores)
+                    .first(n_leaves_after_validation);
             const auto [min_it, max_it] =
-                std::ranges::minmax_element(batch_scores_span);
+                std::ranges::minmax_element(branched_scores_span);
             stats.score_min = std::min(stats.score_min, *min_it);
             stats.score_max = std::max(stats.score_max, *max_it);
             stats.batch_timers["score"] += timer.stop();
 
             // Thresholding & filtering (direct memory operations)
             timer.start();
-            auto batch_passing_indices_span =
-                std::span(m_pruning_workspace->batch_passing_indices)
-                    .first(n_leaves_after_validation);
             SizeType n_leaves_passing = 0;
             for (SizeType i = 0; i < n_leaves_after_validation; ++i) {
-                if (batch_scores_span[i] >=
-                    std::max(threshold, current_threshold)) {
-                    batch_passing_indices_span[n_leaves_passing] = i;
+                if (branched_scores_span[i] >= current_threshold) {
+                    m_pruning_workspace->branched_indices[n_leaves_passing] = i;
                     ++n_leaves_passing;
                 }
             }
@@ -704,11 +708,9 @@ private:
                 m_world_tree->consume_read(current_batch_size);
                 continue;
             }
-            if (n_leaves_passing > m_pruning_workspace->max_batch_size) {
-                throw std::runtime_error(std::format(
-                    "n_leaves_passing={} > max_batch_size={}", n_leaves_passing,
-                    m_pruning_workspace->max_batch_size));
-            }
+            error_check::check_less_equal(
+                n_leaves_passing, m_pruning_workspace->max_branched_leaves,
+                "n_leaves_passing <= max_branched_leaves");
 
             timer.start();
             if (n_leaves_passing != n_leaves_after_validation) {
@@ -718,17 +720,18 @@ private:
 
             // Transform
             timer.start();
-            m_prune_funcs->transform(m_pruning_workspace->batch_leaves,
+            m_prune_funcs->transform(m_pruning_workspace->branched_leaves,
                                      coord_next, coord_cur, n_leaves_passing,
                                      n_params);
             stats.batch_timers["transform"] += timer.stop();
 
             // Add batch to output suggestions
             timer.start();
-            current_threshold = m_world_tree->add_batch(
-                m_pruning_workspace->batch_leaves,
-                m_pruning_workspace->batch_folds, batch_scores_span,
-                current_threshold, n_leaves_passing);
+            current_threshold =
+                m_world_tree->add_batch(m_pruning_workspace->branched_leaves,
+                                        m_pruning_workspace->branched_folds,
+                                        m_pruning_workspace->branched_scores,
+                                        current_threshold, n_leaves_passing);
             stats.batch_timers["batch_add"] += timer.stop();
             // Notify the buffer that a batch of the old suggestions has been
             // consumed
@@ -737,10 +740,8 @@ private:
     }
 
     void setup_pruning() {
-        if (m_cfg.get_nparams() > 5) {
-            throw std::runtime_error(
-                std::format("Pruning not supported for nparams > 5."));
-        }
+        error_check::check_less_equal(m_cfg.get_nparams(), 5,
+                                      "Pruning not supported for nparams > 5.");
         m_prune_funcs = core::create_prune_dp_functs<FoldType>(
             m_kind, m_ffa_plan.get_params().back(),
             m_ffa_plan.get_dparams_lim().back(),

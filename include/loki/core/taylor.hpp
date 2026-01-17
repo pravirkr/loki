@@ -96,6 +96,51 @@ poly_taylor_branch_batch(std::span<const double> leaves_batch,
                          const std::vector<ParamLimitType>& param_limits,
                          SizeType branch_max);
 
+SizeType
+poly_taylor_branch_accel_batch(std::span<const double> leaves_tree,
+                               std::pair<double, double> coord_cur,
+                               std::span<double> leaves_branch,
+                               std::span<SizeType> leaves_origins,
+                               SizeType n_leaves,
+                               SizeType n_params,
+                               SizeType nbins,
+                               double eta,
+                               const std::vector<ParamLimitType>& param_limits,
+                               SizeType branch_max,
+                               std::span<double> scratch_params,
+                               std::span<double> scratch_dparams,
+                               std::span<SizeType> scratch_counts);
+
+SizeType
+poly_taylor_branch_jerk_batch(std::span<const double> leaves_tree,
+                              std::pair<double, double> coord_cur,
+                              std::span<double> leaves_branch,
+                              std::span<SizeType> leaves_origins,
+                              SizeType n_leaves,
+                              SizeType n_params,
+                              SizeType nbins,
+                              double eta,
+                              const std::vector<ParamLimitType>& param_limits,
+                              SizeType branch_max,
+                              std::span<double> scratch_params,
+                              std::span<double> scratch_dparams,
+                              std::span<SizeType> scratch_counts);
+
+SizeType
+poly_taylor_branch_snap_batch(std::span<const double> leaves_tree,
+                              std::pair<double, double> coord_cur,
+                              std::span<double> leaves_branch,
+                              std::span<SizeType> leaves_origins,
+                              SizeType n_leaves,
+                              SizeType n_params,
+                              SizeType nbins,
+                              double eta,
+                              const std::vector<ParamLimitType>& param_limits,
+                              SizeType branch_max,
+                              std::span<double> scratch_params,
+                              std::span<double> scratch_dparams,
+                              std::span<SizeType> scratch_counts);
+
 void poly_taylor_resolve_accel_batch(
     std::span<const double> leaves_batch,
     std::pair<double, double> coord_add,

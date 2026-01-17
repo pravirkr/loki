@@ -33,12 +33,16 @@ public:
                       std::pair<double, double> coord_init,
                       utils::WorldTree<FoldType>& world_tree) = 0;
 
-    virtual std::vector<SizeType> branch(std::span<const double> leaves_batch,
-                                         std::pair<double, double> coord_cur,
-                                         std::pair<double, double> coord_prev,
-                                         std::span<double> leaves_branch_batch,
-                                         SizeType n_batch,
-                                         SizeType n_params) const = 0;
+    virtual SizeType branch(std::span<const double> leaves_tree,
+                            std::pair<double, double> coord_cur,
+                            std::pair<double, double> coord_prev,
+                            std::span<double> leaves_branch,
+                            std::span<SizeType> leaves_origins,
+                            SizeType n_leaves,
+                            SizeType n_params,
+                            std::span<double> scratch_params,
+                            std::span<double> scratch_dparams,
+                            std::span<SizeType> scratch_counts) const = 0;
 
     virtual SizeType validate(std::span<double> leaves_batch,
                               std::span<SizeType> leaves_origins,
@@ -66,9 +70,9 @@ public:
                            std::span<FoldType> batch_folds_out,
                            SizeType n_batch) noexcept = 0;
 
-    virtual void score(std::span<const FoldType> batch_folds,
-                       std::span<float> batch_scores,
-                       SizeType n_batch) noexcept = 0;
+    virtual void score(std::span<const FoldType> folds,
+                       std::span<float> scores,
+                       SizeType n_leaves) noexcept = 0;
 
     virtual void transform(std::span<double> leaves_batch,
                            std::pair<double, double> coord_next,
@@ -144,9 +148,9 @@ public:
                    std::span<FoldType> batch_folds_out,
                    SizeType n_batch) noexcept override;
 
-    void score(std::span<const FoldType> batch_folds,
-               std::span<float> batch_scores,
-               SizeType n_batch) noexcept override;
+    void score(std::span<const FoldType> folds,
+               std::span<float> scores,
+               SizeType n_leaves) noexcept override;
 
     std::vector<double>
     get_transform_matrix(std::pair<double, double> coord_cur,
@@ -183,6 +187,26 @@ class PrunePolyTaylorDPFuncts final
 private:
     using Base =
         BaseTaylorPruneDPFuncts<FoldType, PrunePolyTaylorDPFuncts<FoldType>>;
+
+    // Function pointers for branching different polynomial orders
+    using PolyBranchFunc = SizeType (*)(std::span<const double>,
+                                        std::pair<double, double>,
+                                        std::span<double>,
+                                        std::span<SizeType>,
+                                        SizeType,
+                                        SizeType,
+                                        SizeType,
+                                        double,
+                                        const std::vector<ParamLimitType>&,
+                                        SizeType,
+                                        std::span<double>,
+                                        std::span<double>,
+                                        std::span<SizeType>);
+    static constexpr std::array<PolyBranchFunc, 3> kPolyBranchFuncs = {
+        poly_taylor_branch_accel_batch, // nparams == 2
+        poly_taylor_branch_jerk_batch,  // nparams == 3
+        poly_taylor_branch_snap_batch,  // nparams == 4
+    };
     // Function pointers for resolving different polynomial orders
     using PolyResolveFunc = void (*)(std::span<const double>,
                                      std::pair<double, double>,
@@ -221,12 +245,16 @@ public:
                             search::PulsarSearchConfig cfg,
                             SizeType batch_size);
 
-    std::vector<SizeType> branch(std::span<const double> leaves_batch,
-                                 std::pair<double, double> coord_cur,
-                                 std::pair<double, double> coord_prev,
-                                 std::span<double> leaves_branch_batch,
-                                 SizeType n_batch,
-                                 SizeType n_params) const override;
+    SizeType branch(std::span<const double> leaves_tree,
+                    std::pair<double, double> coord_cur,
+                    std::pair<double, double> coord_prev,
+                    std::span<double> leaves_branch,
+                    std::span<SizeType> leaves_origins,
+                    SizeType n_leaves,
+                    SizeType n_params,
+                    std::span<double> scratch_params,
+                    std::span<double> scratch_dparams,
+                    std::span<SizeType> scratch_counts) const override;
 
     void resolve(std::span<const double> leaves_batch,
                  std::pair<double, double> coord_add,
@@ -267,12 +295,16 @@ public:
                             search::PulsarSearchConfig cfg,
                             SizeType batch_size);
 
-    std::vector<SizeType> branch(std::span<const double> leaves_batch,
-                                 std::pair<double, double> coord_cur,
-                                 std::pair<double, double> coord_prev,
-                                 std::span<double> leaves_branch_batch,
-                                 SizeType n_batch,
-                                 SizeType n_params) const override;
+    SizeType branch(std::span<const double> leaves_tree,
+                    std::pair<double, double> coord_cur,
+                    std::pair<double, double> coord_prev,
+                    std::span<double> leaves_branch,
+                    std::span<SizeType> leaves_origins,
+                    SizeType n_leaves,
+                    SizeType n_params,
+                    std::span<double> scratch_params,
+                    std::span<double> scratch_dparams,
+                    std::span<SizeType> scratch_counts) const override;
 
     SizeType validate(std::span<double> leaves_batch,
                       std::span<SizeType> leaves_origins,

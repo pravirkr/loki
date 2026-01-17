@@ -1,57 +1,49 @@
 #pragma once
 
 #include <algorithm>
-#include <format>
 #include <stdexcept>
 
-#include <cuda/std/complex>
 #include <cuda/std/limits>
 #include <cuda/std/span>
 
-#include <thrust/copy.h>
-#include <thrust/count.h>
+#include <thrust/device_ptr.h>
 #include <thrust/device_vector.h>
 #include <thrust/execution_policy.h>
-#include <thrust/extrema.h>
-#include <thrust/fill.h>
-#include <thrust/functional.h>
 #include <thrust/iterator/counting_iterator.h>
-#include <thrust/iterator/permutation_iterator.h>
-#include <thrust/iterator/transform_iterator.h>
-#include <thrust/partition.h>
-#include <thrust/remove.h>
+#include <thrust/reduce.h>
 #include <thrust/scan.h>
-#include <thrust/sequence.h>
 #include <thrust/sort.h>
 #include <thrust/transform.h>
 
-#include <cub/cub.cuh>
-
 #include "loki/common/types.hpp"
+#include "loki/cuda_utils.cuh"
 #include "loki/exceptions.hpp"
 
 namespace loki::utils {
 
-template <typename T>
-__global__ void k_compact_circular_in_place(const uint8_t* __restrict__ keep,
-                                            const SizeType* __restrict__ prefix,
-                                            T* __restrict__ data,
-                                            SizeType start,
-                                            SizeType capacity,
-                                            SizeType size,
-                                            SizeType stride) {
-    const auto i = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
-    if (i >= size || keep[i] == 0U)
-        return;
+namespace {
 
-    const SizeType dst_logical = prefix[i];
-    const SizeType src_lin     = start + i;
-    const SizeType dst_lin     = start + dst_logical;
-    const SizeType src_phys = src_lin < capacity ? src_lin : src_lin - capacity;
-    const SizeType dst_phys = dst_lin < capacity ? dst_lin : dst_lin - capacity;
+template <typename T>
+__global__ void compact_in_place_kernel(const uint8_t* __restrict__ keep,
+                                        const SizeType* __restrict__ prefix,
+                                        T* __restrict__ data,
+                                        int start,
+                                        int capacity,
+                                        int size,
+                                        int stride) {
+    const auto i = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
+    if (i >= size || keep[i] == 0U) {
+        return;
+    }
+
+    const int dst_logical = static_cast<int>(prefix[i]);
+    const int src_lin     = start + i;
+    const int dst_lin     = start + dst_logical;
+    const int src_phys    = src_lin < capacity ? src_lin : src_lin - capacity;
+    const int dst_phys    = dst_lin < capacity ? dst_lin : dst_lin - capacity;
     // Copy full row
-    for (SizeType j = 0; j < stride; ++j) {
-        data[dst_phys * stride + j] = data[src_phys * stride + j];
+    for (int j = 0; j < stride; ++j) {
+        data[(dst_phys * stride) + j] = data[(src_phys * stride) + j];
     }
 }
 
@@ -65,41 +57,63 @@ compact_and_copy_kernel(const double* __restrict__ batch_leaves_ptr,
                         double* __restrict__ tmp_leaves_ptr,
                         FoldTypeCUDA* __restrict__ tmp_folds_ptr,
                         float* __restrict__ tmp_scores_ptr,
-                        SizeType slots_to_write,
+                        int slots_to_write,
                         int m_leaves_stride,
                         int m_folds_stride) {
-    const auto idx = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
-    if (idx >= slots_to_write)
+    const auto idx = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
+    if (idx >= slots_to_write) {
         return;
+    }
 
     if (mask_ptr[idx] == 1U) {
-        const auto out_idx = prefix_ptr[idx];
+        const auto out_idx = static_cast<int>(prefix_ptr[idx]);
+        for (int j = 0; j < m_leaves_stride; ++j) {
+            tmp_leaves_ptr[(out_idx * m_leaves_stride) + j] =
+                batch_leaves_ptr[(idx * m_leaves_stride) + j];
+        }
 
-        for (int j = 0; j < m_leaves_stride; ++j)
-            tmp_leaves_ptr[out_idx * m_leaves_stride + j] =
-                batch_leaves_ptr[idx * m_leaves_stride + j];
-
-        for (int j = 0; j < m_folds_stride; ++j)
-            tmp_folds_ptr[out_idx * m_folds_stride + j] =
-                batch_folds_ptr[idx * m_folds_stride + j];
+        for (int j = 0; j < m_folds_stride; ++j) {
+            tmp_folds_ptr[(out_idx * m_folds_stride) + j] =
+                batch_folds_ptr[(idx * m_folds_stride) + j];
+        }
 
         tmp_scores_ptr[out_idx] = batch_scores_ptr[idx];
     }
 }
 
 struct CircularIndexFunctor {
-    SizeType start;
-    SizeType capacity;
+    int start;
+    int capacity;
 
-    __host__ __device__ CircularIndexFunctor(SizeType s, SizeType c)
-        : start(s),
-          capacity(c) {}
-
-    __host__ __device__ SizeType operator()(SizeType logical_idx) const {
-        const SizeType x = start + logical_idx;
+    __host__ __device__ int operator()(int logical_idx) const {
+        const int x = start + logical_idx;
         return (x < capacity) ? x : x - capacity;
     }
 };
+
+struct LinearMaskFunctor {
+    const float* __restrict__ scores_ptr;
+    float threshold;
+
+    __host__ __device__ uint8_t operator()(int idx) const {
+        return (scores_ptr[idx] > threshold) ? 1 : 0;
+    }
+};
+
+struct CircularMaskFunctor {
+    const float* __restrict__ scores_ptr;
+    int start;
+    int capacity;
+    float threshold;
+
+    __host__ __device__ uint8_t operator()(int logical_idx) const {
+        const int x    = start + logical_idx;
+        const int phys = (x < capacity) ? x : x - capacity;
+        return (scores_ptr[phys] > threshold) ? 1 : 0;
+    }
+};
+
+} // namespace
 
 /**
  * @brief GPU-resident circular buffer for world tree data
@@ -199,17 +213,20 @@ public:
             // Contiguous case - direct reduction
             return thrust::reduce(thrust::device, m_scores.begin() + start,
                                   m_scores.begin() + start + m_size,
-                                  -std::numeric_limits<float>::infinity(),
-                                  thrust::maximum<float>());
+                                  -cuda::std::numeric_limits<float>::infinity(),
+                                  ThrustMaxOp<float>());
         } // Wrapped case - two reductions
         const SizeType first_count = m_capacity - start;
-        float max1                 = thrust::reduce(
+
+        float max1 = thrust::reduce(
             thrust::device, m_scores.begin() + start, m_scores.end(),
-            -std::numeric_limits<float>::infinity(), thrust::maximum<float>());
-        float max2 = thrust::reduce(thrust::device, m_scores.begin(),
-                                    m_scores.begin() + (m_size - first_count),
-                                    -std::numeric_limits<float>::infinity(),
-                                    thrust::maximum<float>());
+            -cuda::std::numeric_limits<float>::infinity(),
+            ThrustMaxOp<float>());
+        float max2 =
+            thrust::reduce(thrust::device, m_scores.begin(),
+                           m_scores.begin() + (m_size - first_count),
+                           -cuda::std::numeric_limits<float>::infinity(),
+                           ThrustMaxOp<float>());
         return std::max(max1, max2);
     }
 
@@ -225,17 +242,18 @@ public:
         if (start + m_size <= m_capacity) {
             return thrust::reduce(thrust::device, m_scores.begin() + start,
                                   m_scores.begin() + start + m_size,
-                                  std::numeric_limits<float>::infinity(),
-                                  thrust::minimum<float>());
+                                  cuda::std::numeric_limits<float>::infinity(),
+                                  ThrustMinOp<float>());
         }
         const SizeType first_count = m_capacity - start;
-        float min1                 = thrust::reduce(
+
+        float min1 = thrust::reduce(
             thrust::device, m_scores.begin() + start, m_scores.end(),
-            std::numeric_limits<float>::infinity(), thrust::minimum<float>());
-        float min2 = thrust::reduce(thrust::device, m_scores.begin(),
-                                    m_scores.begin() + (m_size - first_count),
-                                    std::numeric_limits<float>::infinity(),
-                                    thrust::minimum<float>());
+            cuda::std::numeric_limits<float>::infinity(), ThrustMinOp<float>());
+        float min2 = thrust::reduce(
+            thrust::device, m_scores.begin(),
+            m_scores.begin() + (m_size - first_count),
+            cuda::std::numeric_limits<float>::infinity(), ThrustMinOp<float>());
         return std::min(min1, min2);
     }
 
@@ -435,7 +453,8 @@ public:
         const SizeType physical_start =
             get_circular_index(m_read_consumed, m_head, m_capacity);
 
-        CircularIndexFunctor functor(physical_start, m_capacity);
+        CircularIndexFunctor functor{.start = static_cast<int>(physical_start),
+                                     .capacity = static_cast<int>(m_capacity)};
         thrust::transform(thrust::device, logical_indices.begin(),
                           logical_indices.begin() +
                               static_cast<IndexType>(n_leaves),
@@ -535,20 +554,20 @@ public:
         float* __restrict__ tmp_scores_ptr =
             thrust::raw_pointer_cast(m_scratch_scores.data());
 
+        LinearMaskFunctor functor{.scores_ptr = batch_scores_ptr,
+                                  .threshold  = effective_threshold};
         thrust::transform(thrust::counting_iterator<SizeType>(0),
                           thrust::counting_iterator<SizeType>(slots_to_write),
-                          m_scratch_mask.begin(), [=] __device__(SizeType i) {
-                              return (batch_scores_ptr[i] > effective_threshold)
-                                         ? 1U
-                                         : 0U;
-                          });
+                          m_scratch_mask.begin(), functor);
         thrust::exclusive_scan(m_scratch_mask.begin(),
-                               m_scratch_mask.begin() + slots_to_write,
+                               m_scratch_mask.begin() +
+                                   static_cast<IndexType>(slots_to_write),
                                m_scratch_prefix.begin(), SizeType{0});
 
-        constexpr int THREADS = 256;
-        const int BLOCKS      = (slots_to_write + THREADS - 1) / THREADS;
-        compact_and_copy_kernel<<<BLOCKS, THREADS>>>(
+        const dim3 block_dim(256);
+        const dim3 grid_dim((slots_to_write + block_dim.x - 1) / block_dim.x);
+        cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
+        compact_and_copy_kernel<<<grid_dim, block_dim>>>(
             batch_leaves_ptr, batch_folds_ptr, batch_scores_ptr,
             m_scratch_mask.data(), m_scratch_prefix.data(), tmp_leaves_ptr,
             tmp_folds_ptr, tmp_scores_ptr, slots_to_write, m_leaves_stride,
@@ -759,16 +778,15 @@ private:
         }
 
         const SizeType start_idx = get_current_start_idx();
-        const float* __restrict__ scores_ptr =
-            thrust::raw_pointer_cast(m_scores.data());
-
         // Mark survivors (logical indices) in keep mask
-        thrust::transform(thrust::counting_iterator<SizeType>(0),
-                          thrust::counting_iterator<SizeType>(m_size),
-                          m_scratch_mask.begin(), [=] __device__(SizeType i) {
-                              SizeType phys = (start_idx + i) % m_capacity;
-                              return (scores_ptr[phys] > threshold) ? 1 : 0;
-                          });
+        CircularMaskFunctor functor{
+            .scores_ptr = thrust::raw_pointer_cast(m_scores.data()),
+            .start      = static_cast<int>(start_idx),
+            .capacity   = static_cast<int>(m_capacity),
+            .threshold  = threshold};
+        thrust::transform(thrust::counting_iterator<int>(0),
+                          thrust::counting_iterator<int>(m_size),
+                          m_scratch_mask.begin(), functor);
 
         // Exclusive prefix sum to get logical indices to keep
         thrust::exclusive_scan(m_scratch_mask.begin(),
@@ -776,19 +794,20 @@ private:
                                m_scratch_prefix.begin(), SizeType{0});
 
         // In-place compaction (three arrays)
-        constexpr int THREADS = 256;
-        const int BLOCKS      = (m_size + THREADS - 1) / THREADS;
-        k_compact_circular_in_place<<<BLOCKS, THREADS>>>(
+        const dim3 block_dim(256);
+        const dim3 grid_dim((m_size + block_dim.x - 1) / block_dim.x);
+        cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
+        compact_in_place_kernel<<<grid_dim, block_dim>>>(
             thrust::raw_pointer_cast(m_scratch_mask.data()),
             thrust::raw_pointer_cast(m_scratch_prefix.data()),
             thrust::raw_pointer_cast(m_leaves.data()), start_idx, m_capacity,
             m_size, m_leaves_stride);
-        k_compact_circular_in_place<<<BLOCKS, THREADS>>>(
+        compact_in_place_kernel<<<grid_dim, block_dim>>>(
             thrust::raw_pointer_cast(m_scratch_mask.data()),
             thrust::raw_pointer_cast(m_scratch_prefix.data()),
             thrust::raw_pointer_cast(m_folds.data()), start_idx, m_capacity,
             m_size, m_folds_stride);
-        k_compact_circular_in_place<<<BLOCKS, THREADS>>>(
+        compact_in_place_kernel<<<grid_dim, block_dim>>>(
             thrust::raw_pointer_cast(m_scratch_mask.data()),
             thrust::raw_pointer_cast(m_scratch_prefix.data()),
             thrust::raw_pointer_cast(m_scores.data()), start_idx, m_capacity,
