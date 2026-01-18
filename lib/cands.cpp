@@ -10,6 +10,7 @@
 
 #include <hdf5.h>
 #include <highfive/highfive.hpp>
+#include <highfive/span.hpp>
 
 #include "loki/common/types.hpp"
 
@@ -476,12 +477,7 @@ void PruneResultWriter::write_metadata(
     file.createAttribute("param_names", param_names);
     file.createAttribute("nsegments", nsegments);
     file.createAttribute("max_sugg", max_sugg);
-
-    HighFive::DataSetCreateProps props;
-    props.add(
-        HighFive::Chunking(std::vector<hsize_t>{threshold_scheme.size()}));
-    props.add(HighFive::Deflate(9)); // Gzip compression level 9
-    file.createDataSet("threshold_scheme", threshold_scheme, props);
+    file.createDataSet("threshold_scheme", threshold_scheme);
 }
 
 void PruneResultWriter::write_run_results(

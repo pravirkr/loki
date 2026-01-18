@@ -5,6 +5,7 @@
 #include <format>
 
 #include "loki/common/types.hpp"
+#include "loki/exceptions.hpp"
 #include "loki/math.hpp"
 #include "loki/utils.hpp"
 
@@ -14,14 +15,9 @@ float get_phase_idx(double proper_time,
                     double freq,
                     SizeType nbins,
                     double delay) {
-    if (freq <= 0.0) {
-        throw std::invalid_argument(
-            std::format("Frequency must be positive (got {})", freq));
-    }
-    if (nbins == 0) {
-        throw std::invalid_argument(
-            std::format("Number of bins must be positive (got {})", nbins));
-    }
+    error_check::check_greater_equal(freq, 0.0, "Frequency must be positive");
+    error_check::check_greater_equal(nbins, 1,
+                                     "Number of bins must be positive");
     // Calculate the total phase in cycles (can be negative or > 1)
     const double total_phase = (proper_time - delay) * freq;
     // Normalize phase to [0, 1) interval

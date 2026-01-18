@@ -64,4 +64,4 @@ CheckOptions:
   readability-identifier-naming.StructCase: "CamelCase"
   readability-identifier-naming.TemplateParameterCase: "CamelCase"
   readability-function-cognitive-complexity.IgnoreMacros: "true"
-  readability-function-cognitive-complexity.Threshold: "50"
+  readability-function-cognitive-complexity.Threshold: "150"

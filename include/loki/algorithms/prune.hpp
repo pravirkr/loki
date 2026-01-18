@@ -37,7 +37,7 @@ public:
                  std::span<const float> ts_v,
                  const std::filesystem::path& outdir = "./",
                  std::string_view file_prefix        = "test",
-                 std::string_view kind               = "taylor",
+                 std::string_view poly_basis         = "taylor",
                  bool show_progress                  = true);
 
     // Opaque handle to the implementation
@@ -52,9 +52,9 @@ public:
     Prune(const plans::FFAPlan<FoldType>& ffa_plan,
           const search::PulsarSearchConfig& cfg,
           std::span<const float> threshold_scheme,
-          SizeType max_sugg     = 1U << 18U,
-          SizeType batch_size   = 1024U,
-          std::string_view kind = "taylor");
+          SizeType max_sugg           = 1U << 18U,
+          SizeType batch_size         = 1024U,
+          std::string_view poly_basis = "taylor");
 
     ~Prune();
     Prune(Prune&&) noexcept;

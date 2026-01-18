@@ -209,44 +209,46 @@ struct FFAPlanBase::Impl {
         return coords_freq;
     }
 
-    std::vector<double> get_branching_pattern_approx(std::string_view kind,
-                                                     SizeType ref_seg,
-                                                     IndexType isuggest) const {
-        if (kind == "taylor") {
+    std::vector<double>
+    get_branching_pattern_approx(std::string_view poly_basis,
+                                 SizeType ref_seg,
+                                 IndexType isuggest) const {
+        if (poly_basis == "taylor") {
             return core::generate_bp_poly_taylor_approx(
                 params.back(), dparams_lim.back(), m_cfg.get_param_limits(),
                 m_cfg.get_tseg_ffa(), nsegments.back(), m_cfg.get_nbins(),
                 m_cfg.get_eta(), ref_seg, isuggest,
                 m_cfg.get_use_conservative_tile());
         }
-        throw std::invalid_argument(
-            "Invalid kind for branching pattern generation");
+        throw std::invalid_argument(std::format(
+            "Invalid poly_basis ({}) for branching pattern generation",
+            poly_basis));
     }
 
-    std::vector<double> get_branching_pattern(std::string_view kind,
+    std::vector<double> get_branching_pattern(std::string_view poly_basis,
                                               SizeType ref_seg) const {
-        if (kind == "taylor") {
-            return core::generate_bp_poly_taylor(
-                params.back(), dparams_lim.back(), m_cfg.get_param_limits(),
-                m_cfg.get_tseg_ffa(), nsegments.back(), m_cfg.get_nbins(),
-                m_cfg.get_eta(), ref_seg, m_cfg.get_use_conservative_tile());
+        if (poly_basis == "taylor") {
+            if (n_params <= 4) {
+                return core::generate_bp_poly_taylor(
+                    params.back(), dparams_lim.back(), m_cfg.get_param_limits(),
+                    m_cfg.get_tseg_ffa(), nsegments.back(), m_cfg.get_nbins(),
+                    m_cfg.get_eta(), ref_seg,
+                    m_cfg.get_use_conservative_tile());
+            }
+            if (n_params == 5) {
+                return core::generate_bp_circ_taylor(
+                    params.back(), dparams_lim.back(), m_cfg.get_param_limits(),
+                    m_cfg.get_tseg_ffa(), nsegments.back(), m_cfg.get_nbins(),
+                    m_cfg.get_eta(), ref_seg, m_cfg.get_p_orb_min(),
+                    m_cfg.get_minimum_snap_cells(),
+                    m_cfg.get_use_conservative_tile());
+            }
+            throw std::invalid_argument(
+                "nparams > 5 not supported for branching pattern generation");
         }
-        throw std::invalid_argument(
-            "Invalid kind for branching pattern generation");
-    }
-
-    std::vector<double> get_branching_pattern_circular(std::string_view kind,
-                                                       SizeType ref_seg) const {
-        if (kind == "taylor") {
-            return core::generate_bp_circ_taylor(
-                params.back(), dparams_lim.back(), m_cfg.get_param_limits(),
-                m_cfg.get_tseg_ffa(), nsegments.back(), m_cfg.get_nbins(),
-                m_cfg.get_eta(), ref_seg, m_cfg.get_p_orb_min(),
-                m_cfg.get_minimum_snap_cells(),
-                m_cfg.get_use_conservative_tile());
-        }
-        throw std::invalid_argument(
-            "Invalid kind for branching pattern generation");
+        throw std::invalid_argument(std::format(
+            "Invalid poly_basis ({}) for branching pattern generation",
+            poly_basis));
     }
 
 private:
@@ -1032,17 +1034,13 @@ std::vector<std::vector<FFACoordFreq>> FFAPlanBase::resolve_coordinates_freq() {
     return m_impl->resolve_coordinates_freq();
 }
 std::vector<double> FFAPlanBase::get_branching_pattern_approx(
-    std::string_view kind, SizeType ref_seg, IndexType isuggest) const {
-    return m_impl->get_branching_pattern_approx(kind, ref_seg, isuggest);
-}
-std::vector<double> FFAPlanBase::get_branching_pattern(std::string_view kind,
-                                                       SizeType ref_seg) const {
-    return m_impl->get_branching_pattern(kind, ref_seg);
+    std::string_view poly_basis, SizeType ref_seg, IndexType isuggest) const {
+    return m_impl->get_branching_pattern_approx(poly_basis, ref_seg, isuggest);
 }
 std::vector<double>
-FFAPlanBase::get_branching_pattern_circular(std::string_view kind,
-                                            SizeType ref_seg) const {
-    return m_impl->get_branching_pattern_circular(kind, ref_seg);
+FFAPlanBase::get_branching_pattern(std::string_view poly_basis,
+                                   SizeType ref_seg) const {
+    return m_impl->get_branching_pattern(poly_basis, ref_seg);
 }
 
 // --- Definitions for FFAPlan ---

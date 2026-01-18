@@ -7,6 +7,8 @@
 #include <utility>
 
 #include <BS_thread_pool.hpp>
+#include <fmt/format.h>
+#include <fmt/ranges.h>
 #include <spdlog/spdlog.h>
 
 #include "loki/algorithms/ffa.hpp"
@@ -66,7 +68,7 @@ public:
                  std::span<const float> ts_v,
                  const std::filesystem::path& outdir,
                  std::string_view file_prefix,
-                 std::string_view kind,
+                 std::string_view poly_basis,
                  bool show_progress) override {
         spdlog::info("PruningManager: Initializing with FFA");
         // Create appropriate FFA fold
@@ -112,11 +114,11 @@ public:
         // Execute based on thread count
         if (m_nthreads == 1) {
             execute_single_threaded(ffa_fold, ffa_plan, ref_segs_to_process,
-                                    outdir, log_file, result_file, kind,
+                                    outdir, log_file, result_file, poly_basis,
                                     show_progress);
         } else {
             execute_multi_threaded(ffa_fold, ffa_plan, ref_segs_to_process,
-                                   outdir, log_file, kind, show_progress);
+                                   outdir, log_file, poly_basis, show_progress);
             cands::merge_prune_result_files(outdir, log_file, result_file);
         }
         spdlog::info("Pruning complete. Results saved to {}",
@@ -336,18 +338,17 @@ public:
          std::span<const float> threshold_scheme,
          SizeType max_sugg,
          SizeType batch_size,
-         std::string_view kind)
+         std::string_view poly_basis)
         : m_ffa_plan(std::move(ffa_plan)),
           m_cfg(std::move(cfg)),
           m_threshold_scheme(threshold_scheme.begin(), threshold_scheme.end()),
           m_max_sugg(max_sugg),
           m_batch_size(batch_size),
-          m_kind(kind) {
+          m_poly_basis(poly_basis) {
         // Setup pruning functions
         setup_pruning();
 
-        const auto branch_max     = m_prune_funcs->get_branch_max();
-        const auto max_batch_size = m_batch_size * branch_max;
+        const auto max_batch_size = m_batch_size * m_branch_max;
         // Allocate suggestion buffer
         if constexpr (std::is_same_v<FoldType, ComplexType>) {
             m_world_tree = std::make_unique<utils::WorldTree<FoldType>>(
@@ -362,13 +363,18 @@ public:
         // Allocate iteration workspace
         if constexpr (std::is_same_v<FoldType, ComplexType>) {
             m_pruning_workspace = std::make_unique<PruningWorkspace<FoldType>>(
-                m_batch_size, branch_max, m_cfg.get_nparams(),
+                m_batch_size, m_branch_max, m_cfg.get_nparams(),
                 m_cfg.get_nbins_f());
         } else {
             m_pruning_workspace = std::make_unique<PruningWorkspace<FoldType>>(
-                m_batch_size, branch_max, m_cfg.get_nparams(),
+                m_batch_size, m_branch_max, m_cfg.get_nparams(),
                 m_cfg.get_nbins());
         }
+
+        // Allocate buffers for seeding the world tree and scoring
+        const auto ncoords_ffa = m_ffa_plan.get_ncoords().back();
+        m_seed_leaves.resize(ncoords_ffa * m_world_tree->get_leaves_stride());
+        m_seed_scores.resize(ncoords_ffa);
     }
 
     ~Impl()                      = default;
@@ -396,10 +402,10 @@ public:
         // Log detailed memory usage
         const auto memory_workspace_gb =
             m_pruning_workspace->get_memory_usage();
-        const auto memory_suggestions_gb = m_world_tree->get_memory_usage();
+        const auto memory_tree_gb = m_world_tree->get_memory_usage();
         spdlog::info("Pruning run {:03d}: Memory Usage: {:.2f} GB "
-                     "(suggestions) + {:.2f} GB (workspace)",
-                     ref_seg, memory_suggestions_gb, memory_workspace_gb);
+                     "(tree) + {:.2f} GB (workspace)",
+                     ref_seg, memory_tree_gb, memory_workspace_gb);
 
         // Setup log and result files
         std::filesystem::path actual_log_file =
@@ -471,8 +477,10 @@ private:
     std::vector<float> m_threshold_scheme;
     SizeType m_max_sugg;
     SizeType m_batch_size;
-    std::string_view m_kind;
+    std::string_view m_poly_basis;
 
+    std::vector<double> m_branching_pattern;
+    SizeType m_branch_max{0};
     bool m_prune_complete{false};
     SizeType m_prune_level{};
     std::unique_ptr<psr_utils::MiddleOutScheme> m_snail_scheme;
@@ -482,6 +490,10 @@ private:
     // Active, bounded container of hierarchical search candidates
     std::unique_ptr<utils::WorldTree<FoldType>> m_world_tree;
     std::unique_ptr<PruningWorkspace<FoldType>> m_pruning_workspace;
+
+    // Buffers for seeding the world tree and scoring
+    std::vector<double> m_seed_leaves;
+    std::vector<float> m_seed_scores;
 
     void initialize(std::span<const FoldType> ffa_fold,
                     SizeType ref_seg,
@@ -504,7 +516,12 @@ private:
         const auto fold_segment =
             m_prune_funcs->load(ffa_fold, m_snail_scheme->get_ref_idx());
         const auto coord_init = m_snail_scheme->get_coord(m_prune_level);
-        m_prune_funcs->seed(fold_segment, coord_init, *m_world_tree);
+        const auto n_leaves   = m_ffa_plan.get_ncoords().back();
+        m_prune_funcs->seed(fold_segment, coord_init, m_seed_leaves,
+                            m_seed_scores);
+        // Initialize the WorldTree with the generated data
+        m_world_tree->add_initial(m_seed_leaves, fold_segment, m_seed_scores,
+                                  n_leaves);
 
         // Initialize the prune stats
         m_pstats = std::make_unique<cands::PruneStatsCollection>();
@@ -611,7 +628,6 @@ private:
         while (total_processed < n_branches) {
             const SizeType remaining       = n_branches - total_processed;
             const SizeType this_batch_size = std::min(batch_size, remaining);
-
             // Get contiguous span; it may be smaller if wrap occurs
             // Read from the beginning of unconsumed data
             auto [leaves_tree_span, current_batch_size] =
@@ -742,11 +758,16 @@ private:
     void setup_pruning() {
         error_check::check_less_equal(m_cfg.get_nparams(), 5,
                                       "Pruning not supported for nparams > 5.");
+        m_branching_pattern   = m_ffa_plan.get_branching_pattern(m_poly_basis);
+        const auto branch_max = *std::ranges::max_element(m_branching_pattern);
+        m_branch_max =
+            std::max(static_cast<SizeType>(std::ceil(branch_max * 2)), 32UL);
         m_prune_funcs = core::create_prune_dp_functs<FoldType>(
-            m_kind, m_ffa_plan.get_params().back(),
+            m_poly_basis, m_ffa_plan.get_params().back(),
             m_ffa_plan.get_dparams_lim().back(),
             m_ffa_plan.get_nsegments().back(),
-            m_ffa_plan.get_tsegments().back(), m_cfg, m_batch_size);
+            m_ffa_plan.get_tsegments().back(), m_cfg, m_batch_size,
+            m_branch_max);
     }
 }; // End Prune::Impl definition
 
@@ -774,9 +795,9 @@ void PruningManager::execute(std::span<const float> ts_e,
                              std::span<const float> ts_v,
                              const std::filesystem::path& outdir,
                              std::string_view file_prefix,
-                             std::string_view kind,
+                             std::string_view poly_basis,
                              bool show_progress) {
-    m_impl->execute(ts_e, ts_v, outdir, file_prefix, kind, show_progress);
+    m_impl->execute(ts_e, ts_v, outdir, file_prefix, poly_basis, show_progress);
 }
 
 template <SupportedFoldType FoldType>
@@ -785,9 +806,9 @@ Prune<FoldType>::Prune(const plans::FFAPlan<FoldType>& ffa_plan,
                        std::span<const float> threshold_scheme,
                        SizeType max_sugg,
                        SizeType batch_size,
-                       std::string_view kind)
+                       std::string_view poly_basis)
     : m_impl(std::make_unique<Impl>(
-          ffa_plan, cfg, threshold_scheme, max_sugg, batch_size, kind)) {}
+          ffa_plan, cfg, threshold_scheme, max_sugg, batch_size, poly_basis)) {}
 template <SupportedFoldType FoldType> Prune<FoldType>::~Prune() = default;
 template <SupportedFoldType FoldType>
 Prune<FoldType>::Prune(Prune&& other) noexcept = default;

@@ -10,7 +10,6 @@
 #include <omp.h>
 #include <spdlog/spdlog.h>
 
-#include "loki/cartesian.hpp"
 #include "loki/common/types.hpp"
 #include "loki/exceptions.hpp"
 #include "loki/psr_utils.hpp"
@@ -90,383 +89,479 @@ get_circ_taylor_mask(std::span<const double> leaves_batch,
 }
 
 namespace {
-std::pair<std::vector<SizeType>, std::vector<SizeType>>
-get_circ_taylor_mask_branch(std::span<const double> leaves_params_batch,
-                            std::span<const double> leaves_dparams_batch,
-                            std::span<const uint8_t> batch_needs_crackle,
-                            SizeType n_leaves,
-                            SizeType n_params,
-                            double minimum_snap_cells) {
-    constexpr double kEps = 1e-12;
-    std::vector<SizeType> idx_expand_crackle;
-    std::vector<SizeType> idx_keep;
-
-    // Early exit: if no leaves need crackle branching, keep all
-    bool any_needs_crackle = false;
-    for (SizeType i = 0; i < n_leaves; ++i) {
-        if (batch_needs_crackle[i] != 0U) {
-            any_needs_crackle = true;
-            break;
-        }
-    }
-    if (!any_needs_crackle) {
-        idx_keep.resize(n_leaves);
-        std::iota(idx_keep.begin(), idx_keep.end(), SizeType{0});
-        return {std::move(idx_expand_crackle), std::move(idx_keep)};
-    }
-
-    // Reserve reasonable capacity (crackle branching is rare)
-    idx_expand_crackle.reserve(n_leaves / 10); // Conservative estimate
-    idx_keep.reserve(n_leaves);
-
-    for (SizeType i = 0; i < n_leaves; ++i) {
-        // Quick filter: if doesn't need crackle branching, keep it
-        if (batch_needs_crackle[i] == 0U) {
-            idx_keep.push_back(i);
-            continue;
-        }
-        const SizeType leaf_offset = i * n_params;
-        // Extract values (assuming contiguous layout)
-        const double crackle  = leaves_params_batch[leaf_offset + 0];
-        const double snap     = leaves_params_batch[leaf_offset + 1];
-        const double jerk     = leaves_params_batch[leaf_offset + 2];
-        const double dcrackle = leaves_dparams_batch[leaf_offset + 0];
-        const double dsnap    = leaves_dparams_batch[leaf_offset + 1];
-
-        // Compute significance tests
-        const double snap_threshold    = minimum_snap_cells * (dsnap + kEps);
-        const double crackle_threshold = minimum_snap_cells * (dcrackle + kEps);
-
-        const bool is_sig_snap    = std::abs(snap) > snap_threshold;
-        const bool is_sig_crackle = std::abs(crackle) > crackle_threshold;
-        // Crackle-Dominated Region (The Hole): snap weak, crackle strong
-        const bool in_the_hole = (!is_sig_snap) && is_sig_crackle;
-
-        // Physical crackle: -crackle * jerk > 0 and jerk is non-zero
-        const bool is_physical_crackle =
-            ((-crackle * jerk) > 0.0) && (std::abs(jerk) > kEps);
-
-        // Circular crackle candidate that needs branching
-        const bool mask_expand_crackle = in_the_hole && is_physical_crackle;
-
-        if (mask_expand_crackle) {
-            idx_expand_crackle.push_back(i);
-        } else {
-            idx_keep.push_back(i);
-        }
-    }
-    return {std::move(idx_expand_crackle), std::move(idx_keep)};
+inline bool is_in_hole(double d5,
+                       double d4,
+                       double d3,
+                       double d5_sig,
+                       double d4_sig,
+                       double minimum_snap_cells) noexcept {
+    constexpr double kEps          = 1e-12;
+    const double snap_threshold    = minimum_snap_cells * (d4_sig + kEps);
+    const double crackle_threshold = minimum_snap_cells * (d5_sig + kEps);
+    const bool is_sig_snap         = std::abs(d4) > snap_threshold;
+    const bool is_sig_crackle      = std::abs(d5) > crackle_threshold;
+    bool in_the_hole               = (!is_sig_snap) && is_sig_crackle;
+    const bool is_physical_crackle =
+        ((-d5 * d3) > 0.0) && (std::abs(d3) > kEps);
+    return in_the_hole && is_physical_crackle;
 }
+
 } // namespace
 
-std::vector<SizeType>
-circ_taylor_branch_batch(std::span<const double> leaves_batch,
+SizeType
+circ_taylor_branch_batch(std::span<const double> leaves_tree,
                          std::pair<double, double> coord_cur,
-                         std::span<double> leaves_branch_batch,
-                         SizeType n_batch,
+                         std::span<double> leaves_branch,
+                         std::span<SizeType> leaves_origins,
+                         SizeType n_leaves,
                          SizeType n_params,
                          SizeType nbins,
                          double eta,
                          const std::vector<ParamLimitType>& param_limits,
                          SizeType branch_max,
-                         double minimum_snap_cells) {
-    constexpr SizeType kParamsExpected = 5U;
-    constexpr SizeType kParamStride    = 2U;
-    constexpr SizeType kLeavesStride   = (kParamsExpected + 2) * kParamStride;
-    constexpr double kEps              = 1e-6;
+                         double minimum_snap_cells,
+                         std::span<double> scratch_params,
+                         std::span<double> scratch_dparams,
+                         std::span<SizeType> scratch_counts) {
+    constexpr SizeType kParams       = 5U;
+    constexpr SizeType kParamStride  = 2U;
+    constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
+    constexpr double kEps            = 1e-12;
 
-    error_check::check_equal(n_params, kParamsExpected,
+    error_check::check_equal(n_params, kParams,
                              "nparams should be 5 for circular orbit branch");
-    error_check::check_equal(leaves_batch.size(), n_batch * kLeavesStride,
+    error_check::check_equal(leaves_tree.size(), n_leaves * kLeavesStride,
                              "leaves_batch size mismatch");
-    error_check::check_greater_equal(leaves_branch_batch.size(),
-                                     n_batch * branch_max * kLeavesStride,
-                                     "leaves_branch_batch size mismatch");
-
-    const auto [t0_cur, t_obs_minus_t_ref] = coord_cur;
+    error_check::check_greater_equal(leaves_branch.size(),
+                                     n_leaves * branch_max * kLeavesStride,
+                                     "leaves_branch size mismatch");
+    error_check::check_greater_equal(leaves_origins.size(),
+                                     n_leaves * branch_max,
+                                     "leaves_origins size mismatch");
+    const auto [_, dt]   = coord_cur; // t_obs_minus_t_ref
+    const double dt2     = dt * dt;
+    const double dt3     = dt2 * dt;
+    const double dt4     = dt2 * dt2;
+    const double dt5     = dt4 * dt;
+    const double inv_dt  = 1.0 / dt;
+    const double inv_dt2 = inv_dt * inv_dt;
+    const double inv_dt3 = inv_dt2 * inv_dt;
+    const double inv_dt4 = inv_dt2 * inv_dt2;
+    const double inv_dt5 = inv_dt4 * inv_dt;
+    const auto nbins_d   = static_cast<double>(nbins);
+    const double dphi    = eta / nbins_d;
 
     // Use batch_leaves memory as workspace. Partition workspace into sections:
-    const SizeType workspace_size      = leaves_branch_batch.size();
-    const SizeType single_batch_params = n_batch * n_params;
+    const SizeType workspace_size = leaves_branch.size();
+    const SizeType batch_size     = n_leaves * kParams;
 
-    // Get spans from workspace + other vector allocations
-    std::span<double> dparam_cur_batch =
-        leaves_branch_batch.subspan(0, single_batch_params);
-    std::span<double> dparam_new_batch =
-        leaves_branch_batch.subspan(single_batch_params, single_batch_params);
-    std::span<double> shift_bins_batch = leaves_branch_batch.subspan(
-        single_batch_params * 2, single_batch_params);
-    std::span<double> f0_batch =
-        leaves_branch_batch.subspan(single_batch_params * 3, n_batch);
-    std::span<double> pad_branched_params = leaves_branch_batch.subspan(
-        (single_batch_params * 3) + n_batch, n_batch * n_params * branch_max);
-    const auto workspace_acquired_size =
-        (single_batch_params * 3) + n_batch + (n_batch * n_params * branch_max);
+    // Get spans from workspace
+    std::span<double> dparam_new = leaves_branch.subspan(0, batch_size);
+    std::span<double> shift_bins =
+        leaves_branch.subspan(batch_size, batch_size);
+    const auto workspace_acquired_size = (batch_size * 2);
     error_check::check_less_equal(workspace_acquired_size, workspace_size,
                                   "workspace size mismatch");
+    error_check::check_greater_equal(scratch_params.size(),
+                                     n_leaves * n_params * branch_max,
+                                     "scratch_params size mismatch");
+    error_check::check_greater_equal(scratch_dparams.size(),
+                                     n_leaves * n_params,
+                                     "scratch_dparams size mismatch");
+    error_check::check_greater_equal(scratch_counts.size(), n_leaves * n_params,
+                                     "scratch_counts size mismatch");
 
-    // Extract dparam_cur and f0 from leaves_batch
-    for (SizeType i = 0; i < n_batch; ++i) {
-        const SizeType param_offset = i * kLeavesStride;
-        for (SizeType j = 0; j < n_params; ++j) {
-            dparam_cur_batch[(i * n_params) + j] =
-                leaves_batch[(param_offset + (j * kParamStride)) + 1];
-        }
-        f0_batch[i] =
-            leaves_batch[param_offset + ((n_params + 1) * kParamStride)];
+    const double* __restrict leaves_tree_ptr = leaves_tree.data();
+    SizeType* __restrict leaves_origins_ptr  = leaves_origins.data();
+    double* __restrict leaves_branch_ptr     = leaves_branch.data();
+    double* __restrict dparam_new_ptr        = dparam_new.data();
+    double* __restrict shift_bins_ptr        = shift_bins.data();
+    double* __restrict scratch_params_ptr    = scratch_params.data();
+    double* __restrict scratch_dparams_ptr   = scratch_dparams.data();
+    SizeType* __restrict scratch_counts_ptr  = scratch_counts.data();
+
+    // --- Loop 1: step + shift (vectorizable) ---
+    for (SizeType i = 0; i < n_leaves; ++i) {
+        const SizeType leaf_offset = i * kLeavesStride;
+        const SizeType flat_base   = i * kParams;
+
+        const auto d5_sig_cur = leaves_tree_ptr[leaf_offset + 1];
+        const auto d4_sig_cur = leaves_tree_ptr[leaf_offset + 3];
+        const auto d3_sig_cur = leaves_tree_ptr[leaf_offset + 5];
+        const auto d2_sig_cur = leaves_tree_ptr[leaf_offset + 7];
+        const auto d1_sig_cur = leaves_tree_ptr[leaf_offset + 9];
+        const auto f0         = leaves_tree_ptr[leaf_offset + 12];
+
+        const auto dfactor    = utils::kCval / f0;
+        const auto d5_sig_new = dphi * dfactor * 1920.0 * inv_dt5;
+        const auto d4_sig_new = dphi * dfactor * 192.0 * inv_dt4;
+        const auto d3_sig_new = dphi * dfactor * 24.0 * inv_dt3;
+        const auto d2_sig_new = dphi * dfactor * 4.0 * inv_dt2;
+        const auto d1_sig_new = dphi * dfactor * 1.0 * inv_dt;
+
+        dparam_new_ptr[flat_base + 0] = d5_sig_new;
+        dparam_new_ptr[flat_base + 1] = d4_sig_new;
+        dparam_new_ptr[flat_base + 2] = d3_sig_new;
+        dparam_new_ptr[flat_base + 3] = d2_sig_new;
+        dparam_new_ptr[flat_base + 4] = d1_sig_new;
+
+        shift_bins_ptr[flat_base + 0] =
+            (d5_sig_cur - d5_sig_new) * dt5 * nbins_d / (1920.0 * dfactor);
+        shift_bins_ptr[flat_base + 1] =
+            (d4_sig_cur - d4_sig_new) * dt4 * nbins_d / (192.0 * dfactor);
+        shift_bins_ptr[flat_base + 2] =
+            (d3_sig_cur - d3_sig_new) * dt3 * nbins_d / (24.0 * dfactor);
+        shift_bins_ptr[flat_base + 3] =
+            (d2_sig_cur - d2_sig_new) * dt2 * nbins_d / (4.0 * dfactor);
+        shift_bins_ptr[flat_base + 4] =
+            (d1_sig_cur - d1_sig_new) * dt * nbins_d / (1.0 * dfactor);
     }
 
-    psr_utils::poly_taylor_step_d_vec(n_params, t_obs_minus_t_ref, nbins, eta,
-                                      f0_batch, dparam_new_batch, 0);
-    psr_utils::poly_taylor_shift_d_vec(dparam_cur_batch, dparam_new_batch,
-                                       t_obs_minus_t_ref, nbins, f0_batch, 0,
-                                       shift_bins_batch, n_batch, n_params);
+    // --- Early Exit: Check if any leaf needs branching ---
+    bool any_branching = false;
+    for (SizeType i = 0; i < n_leaves * kParams; ++i) {
+        if (shift_bins_ptr[i] >= (eta - kEps)) {
+            any_branching = true;
+            break;
+        }
+    }
+    // Fast path: no branching at all
+    if (!any_branching) {
+        std::memcpy(leaves_branch_ptr, leaves_tree_ptr,
+                    n_leaves * kLeavesStride * sizeof(double));
+        for (SizeType i = 0; i < n_leaves; ++i) {
+            leaves_origins_ptr[i] = i;
+        }
+        return n_leaves;
+    }
 
-    // --- Vectorized Padded Branching (All params except crackle) ---
-    std::vector<double> pad_branched_dparams(n_batch * n_params);
-    std::vector<SizeType> branched_counts(n_batch * n_params);
-
-    for (SizeType i = 0; i < n_batch; ++i) {
+    // --- Loop 2: branching ---
+    for (SizeType i = 0; i < n_leaves; ++i) {
         const SizeType leaf_offset = i * kLeavesStride;
-        const SizeType flat_base   = i * n_params;
+        const SizeType flat_base   = i * kParams;
 
-        for (SizeType j = 1; j < n_params; ++j) { // Skip crackle (j = 0)
-            const SizeType flat_idx     = flat_base + j;
-            const SizeType param_offset = leaf_offset + (j * kParamStride);
-            const double param_cur_val  = leaves_batch[param_offset + 0];
-            const double dparam_cur_val = dparam_cur_batch[flat_idx];
+        const auto d5_cur     = leaves_tree_ptr[leaf_offset + 0];
+        const auto d5_sig_cur = leaves_tree_ptr[leaf_offset + 1];
+        const auto d4_cur     = leaves_tree_ptr[leaf_offset + 2];
+        const auto d4_sig_cur = leaves_tree_ptr[leaf_offset + 3];
+        const auto d3_cur     = leaves_tree_ptr[leaf_offset + 4];
+        const auto d3_sig_cur = leaves_tree_ptr[leaf_offset + 5];
+        const auto d2_cur     = leaves_tree_ptr[leaf_offset + 6];
+        const auto d2_sig_cur = leaves_tree_ptr[leaf_offset + 7];
+        const auto d1_cur     = leaves_tree_ptr[leaf_offset + 8];
+        const auto d1_sig_cur = leaves_tree_ptr[leaf_offset + 9];
+        const auto f0         = leaves_tree_ptr[leaf_offset + 12];
+        const auto d4_sig_new = dparam_new_ptr[flat_base + 1];
+        const auto d3_sig_new = dparam_new_ptr[flat_base + 2];
+        const auto d2_sig_new = dparam_new_ptr[flat_base + 3];
+        const auto d1_sig_new = dparam_new_ptr[flat_base + 4];
 
-            double param_min = std::numeric_limits<double>::lowest();
-            double param_max = std::numeric_limits<double>::max();
-            if (j == n_params - 1) {
-                param_min =
-                    (1 - param_limits[j][1] / f0_batch[i]) * utils::kCval;
-                param_max =
-                    (1 - param_limits[j][0] / f0_batch[i]) * utils::kCval;
+        // Branch d5 parameter (no branching as of yet)
+        {
+            const SizeType pad_offset          = (flat_base + 0) * branch_max;
+            scratch_params_ptr[pad_offset]     = d5_cur;
+            scratch_dparams_ptr[flat_base + 0] = d5_sig_cur;
+            scratch_counts_ptr[flat_base + 0]  = 1;
+        }
+
+        // Branch d4 parameter
+        {
+            const SizeType pad_offset = (flat_base + 1) * branch_max;
+            if (shift_bins_ptr[flat_base + 1] >= (eta - kEps)) {
+                auto slice_span = std::span<double>(
+                    scratch_params_ptr + pad_offset, branch_max);
+                auto [dparam_act, count] = psr_utils::branch_param_padded(
+                    slice_span, d4_cur, d4_sig_cur, d4_sig_new,
+                    param_limits[1][0], param_limits[1][1]);
+                scratch_dparams_ptr[flat_base + 1] = dparam_act;
+                scratch_counts_ptr[flat_base + 1]  = count;
             } else {
-                const auto [pmin, pmax] = param_limits[j];
-                param_min               = pmin;
-                param_max               = pmax;
+                scratch_params_ptr[pad_offset]     = d4_cur;
+                scratch_dparams_ptr[flat_base + 1] = d4_sig_cur;
+                scratch_counts_ptr[flat_base + 1]  = 1;
             }
-            const SizeType pad_offset =
-                (i * n_params * branch_max) + (j * branch_max);
-            std::span<double> slice_span =
-                pad_branched_params.subspan(pad_offset, branch_max);
-            auto [dparam_act, count] = psr_utils::branch_param_padded(
-                slice_span, param_cur_val, dparam_cur_val,
-                dparam_new_batch[flat_idx], param_min, param_max);
+        }
 
-            pad_branched_dparams[flat_idx] = dparam_act;
-            branched_counts[flat_idx]      = count;
+        // Branch d3 parameter
+        {
+            const SizeType pad_offset = (flat_base + 2) * branch_max;
+            if (shift_bins_ptr[flat_base + 2] >= (eta - kEps)) {
+                auto slice_span = std::span<double>(
+                    scratch_params_ptr + pad_offset, branch_max);
+                auto [dparam_act, count] = psr_utils::branch_param_padded(
+                    slice_span, d3_cur, d3_sig_cur, d3_sig_new,
+                    param_limits[2][0], param_limits[2][1]);
+                scratch_dparams_ptr[flat_base + 2] = dparam_act;
+                scratch_counts_ptr[flat_base + 2]  = count;
+            } else {
+                scratch_params_ptr[pad_offset]     = d3_cur;
+                scratch_dparams_ptr[flat_base + 2] = d3_sig_cur;
+                scratch_counts_ptr[flat_base + 2]  = 1;
+            }
+        }
+
+        // Branch d2 parameter
+        {
+            const SizeType pad_offset = (flat_base + 3) * branch_max;
+            if (shift_bins_ptr[flat_base + 3] >= (eta - kEps)) {
+                auto slice_span = std::span<double>(
+                    scratch_params_ptr + pad_offset, branch_max);
+                auto [dparam_act, count] = psr_utils::branch_param_padded(
+                    slice_span, d2_cur, d2_sig_cur, d2_sig_new,
+                    param_limits[3][0], param_limits[3][1]);
+                scratch_dparams_ptr[flat_base + 3] = dparam_act;
+                scratch_counts_ptr[flat_base + 3]  = count;
+            } else {
+                scratch_params_ptr[pad_offset]     = d2_cur;
+                scratch_dparams_ptr[flat_base + 3] = d2_sig_cur;
+                scratch_counts_ptr[flat_base + 3]  = 1;
+            }
+        }
+
+        // Branch d1 parameter
+        {
+            const SizeType pad_offset = (flat_base + 4) * branch_max;
+            if (shift_bins_ptr[flat_base + 4] >= (eta - kEps)) {
+                const double d1_min =
+                    (1 - param_limits[4][1] / f0) * utils::kCval;
+                const double d1_max =
+                    (1 - param_limits[4][0] / f0) * utils::kCval;
+                auto slice_span = std::span<double>(
+                    scratch_params_ptr + pad_offset, branch_max);
+                auto [dparam_act, count] = psr_utils::branch_param_padded(
+                    slice_span, d1_cur, d1_sig_cur, d1_sig_new, d1_min, d1_max);
+                scratch_dparams_ptr[flat_base + 4] = dparam_act;
+                scratch_counts_ptr[flat_base + 4]  = count;
+            } else {
+                scratch_params_ptr[pad_offset]     = d1_cur;
+                scratch_dparams_ptr[flat_base + 4] = d1_sig_cur;
+                scratch_counts_ptr[flat_base + 4]  = 1;
+            }
         }
     }
 
-    // --- Vectorized Selection (mask non-crackle branched params) ---
-    std::vector<uint8_t> batch_needs_crackle(n_batch);
+    // --- Check if crackle branching is needed ---
+    bool any_crackle_branching = false;
+    for (SizeType i = 0; i < n_leaves; ++i) {
+        if (shift_bins_ptr[(i * kParams) + 0] >= (eta - kEps)) {
+            any_crackle_branching = true;
+            break;
+        }
+    }
 
-    for (SizeType i = 0; i < n_batch; ++i) {
-        const SizeType leaf_offset = i * kLeavesStride;
-        const SizeType flat_base   = i * n_params;
+    SizeType out_leaves = 0;
+    if (!any_crackle_branching) {
+        // FAST PATH: No crackle branching, simple 4-nested loops
+        for (SizeType i = 0; i < n_leaves; ++i) {
+            const SizeType leaf_offset = i * kLeavesStride;
+            const SizeType flat_base   = i * kParams;
+            // n_d5_branches = 1;
+            const SizeType n_d4_branches = scratch_counts_ptr[flat_base + 1];
+            const SizeType n_d3_branches = scratch_counts_ptr[flat_base + 2];
+            const SizeType n_d2_branches = scratch_counts_ptr[flat_base + 3];
+            const SizeType n_d1_branches = scratch_counts_ptr[flat_base + 4];
 
-        for (SizeType j = 0; j < n_params; ++j) {
-            const SizeType flat_idx     = flat_base + j;
-            const SizeType param_offset = leaf_offset + (j * kParamStride);
-            const double param_cur_val  = leaves_batch[param_offset + 0];
-            const double dparam_cur_val = dparam_cur_batch[flat_idx];
+            const SizeType d5_offset = (flat_base + 0) * branch_max;
+            const SizeType d4_offset = (flat_base + 1) * branch_max;
+            const SizeType d3_offset = (flat_base + 2) * branch_max;
+            const SizeType d2_offset = (flat_base + 3) * branch_max;
+            const SizeType d1_offset = (flat_base + 4) * branch_max;
 
-            const bool needs_branching =
-                shift_bins_batch[flat_idx] >= (eta - kEps);
+            for (SizeType b = 0; b < n_d4_branches; ++b) {
+                for (SizeType c = 0; c < n_d3_branches; ++c) {
+                    for (SizeType d = 0; d < n_d2_branches; ++d) {
+                        for (SizeType e = 0; e < n_d1_branches; ++e) {
+                            const SizeType bo = out_leaves * kLeavesStride;
+                            leaves_branch_ptr[bo + 0] =
+                                scratch_params_ptr[d5_offset];
+                            leaves_branch_ptr[bo + 1] =
+                                scratch_dparams_ptr[flat_base + 0];
+                            leaves_branch_ptr[bo + 2] =
+                                scratch_params_ptr[d4_offset + b];
+                            leaves_branch_ptr[bo + 3] =
+                                scratch_dparams_ptr[flat_base + 1];
+                            leaves_branch_ptr[bo + 4] =
+                                scratch_params_ptr[d3_offset + c];
+                            leaves_branch_ptr[bo + 5] =
+                                scratch_dparams_ptr[flat_base + 2];
+                            leaves_branch_ptr[bo + 6] =
+                                scratch_params_ptr[d2_offset + d];
+                            leaves_branch_ptr[bo + 7] =
+                                scratch_dparams_ptr[flat_base + 3];
+                            leaves_branch_ptr[bo + 8] =
+                                scratch_params_ptr[d1_offset + e];
+                            leaves_branch_ptr[bo + 9] =
+                                scratch_dparams_ptr[flat_base + 4];
+                            // Copy d0 and f0
+                            std::memcpy(leaves_branch_ptr + bo + 10,
+                                        leaves_tree_ptr + leaf_offset + 10,
+                                        4 * sizeof(double));
 
-            if (j == 0) {
-                // Track which batches need crackle branching
-                batch_needs_crackle[i] = needs_branching ? 1U : 0U;
+                            leaves_origins_ptr[out_leaves] = i;
+                            ++out_leaves;
+                        }
+                    }
+                }
             }
-            if (!needs_branching || j == 0) { // crackle - don't branch yet
-                const SizeType pad_offset =
-                    (i * n_params * branch_max) + (j * branch_max);
-                pad_branched_params[pad_offset] = param_cur_val;
-                pad_branched_dparams[flat_idx]  = dparam_cur_val;
-                branched_counts[flat_idx]       = 1;
+        }
+    } else {
+        // COMPLEX PATH: Crackle branching needed, inline hole checking
+        for (SizeType i = 0; i < n_leaves; ++i) {
+            const SizeType leaf_offset = i * kLeavesStride;
+            const SizeType flat_base   = i * kParams;
+
+            const bool needs_crackle =
+                shift_bins_ptr[flat_base + 0] >= (eta - kEps);
+
+            const SizeType n_d4_branches = scratch_counts_ptr[flat_base + 1];
+            const SizeType n_d3_branches = scratch_counts_ptr[flat_base + 2];
+            const SizeType n_d2_branches = scratch_counts_ptr[flat_base + 3];
+            const SizeType n_d1_branches = scratch_counts_ptr[flat_base + 4];
+
+            const SizeType d5_offset = (flat_base + 0) * branch_max;
+            const SizeType d4_offset = (flat_base + 1) * branch_max;
+            const SizeType d3_offset = (flat_base + 2) * branch_max;
+            const SizeType d2_offset = (flat_base + 3) * branch_max;
+            const SizeType d1_offset = (flat_base + 4) * branch_max;
+
+            if (!needs_crackle) {
+                for (SizeType b = 0; b < n_d4_branches; ++b) {
+                    for (SizeType c = 0; c < n_d3_branches; ++c) {
+                        for (SizeType d = 0; d < n_d2_branches; ++d) {
+                            for (SizeType e = 0; e < n_d1_branches; ++e) {
+                                const SizeType bo = out_leaves * kLeavesStride;
+                                leaves_branch_ptr[bo + 0] =
+                                    scratch_params_ptr[d5_offset];
+                                leaves_branch_ptr[bo + 1] =
+                                    scratch_dparams_ptr[flat_base + 0];
+                                leaves_branch_ptr[bo + 2] =
+                                    scratch_params_ptr[d4_offset + b];
+                                leaves_branch_ptr[bo + 3] =
+                                    scratch_dparams_ptr[flat_base + 1];
+                                leaves_branch_ptr[bo + 4] =
+                                    scratch_params_ptr[d3_offset + c];
+                                leaves_branch_ptr[bo + 5] =
+                                    scratch_dparams_ptr[flat_base + 2];
+                                leaves_branch_ptr[bo + 6] =
+                                    scratch_params_ptr[d2_offset + d];
+                                leaves_branch_ptr[bo + 7] =
+                                    scratch_dparams_ptr[flat_base + 3];
+                                leaves_branch_ptr[bo + 8] =
+                                    scratch_params_ptr[d1_offset + e];
+                                leaves_branch_ptr[bo + 9] =
+                                    scratch_dparams_ptr[flat_base + 4];
+                                std::memcpy(leaves_branch_ptr + bo + 10,
+                                            leaves_tree_ptr + leaf_offset + 10,
+                                            4 * sizeof(double));
+
+                                leaves_origins_ptr[out_leaves] = i;
+                                ++out_leaves;
+                            }
+                        }
+                    }
+                }
+            } else {
+                for (SizeType b = 0; b < n_d4_branches; ++b) {
+                    for (SizeType c = 0; c < n_d3_branches; ++c) {
+                        for (SizeType d = 0; d < n_d2_branches; ++d) {
+                            for (SizeType e = 0; e < n_d1_branches; ++e) {
+                                // Extract current combination
+                                const double d5 = scratch_params_ptr[d5_offset];
+                                const double d4 =
+                                    scratch_params_ptr[d4_offset + b];
+                                const double d3 =
+                                    scratch_params_ptr[d3_offset + c];
+                                const double d2 =
+                                    scratch_params_ptr[d2_offset + d];
+                                const double d1 =
+                                    scratch_params_ptr[d1_offset + e];
+                                const double d5_sig =
+                                    scratch_dparams_ptr[flat_base + 0];
+                                const double d4_sig =
+                                    scratch_dparams_ptr[flat_base + 1];
+                                const double d3_sig =
+                                    scratch_dparams_ptr[flat_base + 2];
+                                const double d2_sig =
+                                    scratch_dparams_ptr[flat_base + 3];
+                                const double d1_sig =
+                                    scratch_dparams_ptr[flat_base + 4];
+
+                                // Check if this combination is in "the hole"
+                                bool in_hole =
+                                    is_in_hole(d5, d4, d3, d5_sig, d4_sig,
+                                               minimum_snap_cells);
+
+                                if (in_hole) [[unlikely]] {
+                                    // Branch d5 (crackle) for this combination
+                                    const double d5_sig_new =
+                                        dparam_new_ptr[flat_base + 0];
+                                    const auto [pmin, pmax] = param_limits[0];
+                                    auto slice_span         = std::span<double>(
+                                        scratch_params_ptr + d5_offset,
+                                        branch_max);
+                                    auto [dparam_act, count] =
+                                        psr_utils::branch_param_padded(
+                                            slice_span, d5, d5_sig, d5_sig_new,
+                                            pmin, pmax);
+                                    for (SizeType a = 0; a < count; ++a) {
+                                        const SizeType bo =
+                                            out_leaves * kLeavesStride;
+
+                                        leaves_branch_ptr[bo + 0] =
+                                            scratch_params_ptr[d5_offset + a];
+                                        leaves_branch_ptr[bo + 1] = dparam_act;
+                                        leaves_branch_ptr[bo + 2] = d4;
+                                        leaves_branch_ptr[bo + 3] = d4_sig;
+                                        leaves_branch_ptr[bo + 4] = d3;
+                                        leaves_branch_ptr[bo + 5] = d3_sig;
+                                        leaves_branch_ptr[bo + 6] = d2;
+                                        leaves_branch_ptr[bo + 7] = d2_sig;
+                                        leaves_branch_ptr[bo + 8] = d1;
+                                        leaves_branch_ptr[bo + 9] = d1_sig;
+
+                                        std::memcpy(leaves_branch_ptr + bo + 10,
+                                                    leaves_tree_ptr +
+                                                        leaf_offset + 10,
+                                                    4 * sizeof(double));
+
+                                        leaves_origins_ptr[out_leaves] = i;
+                                        ++out_leaves;
+                                    }
+                                } else [[likely]] {
+                                    // Not in hole, write single leaf
+                                    const SizeType bo =
+                                        out_leaves * kLeavesStride;
+
+                                    leaves_branch_ptr[bo + 0] = d5;
+                                    leaves_branch_ptr[bo + 1] = d5_sig;
+                                    leaves_branch_ptr[bo + 2] = d4;
+                                    leaves_branch_ptr[bo + 3] = d4_sig;
+                                    leaves_branch_ptr[bo + 4] = d3;
+                                    leaves_branch_ptr[bo + 5] = d3_sig;
+                                    leaves_branch_ptr[bo + 6] = d2;
+                                    leaves_branch_ptr[bo + 7] = d2_sig;
+                                    leaves_branch_ptr[bo + 8] = d1;
+                                    leaves_branch_ptr[bo + 9] = d1_sig;
+                                    std::memcpy(leaves_branch_ptr + bo + 10,
+                                                leaves_tree_ptr + leaf_offset +
+                                                    10,
+                                                4 * sizeof(double));
+
+                                    leaves_origins_ptr[out_leaves] = i;
+                                    ++out_leaves;
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
 
-    // --- First Cartesian Product (All Except Crackle) ---
-    const auto [leaves_branch_taylor_batch, batch_origins] =
-        utils::cartesian_prod_padded(pad_branched_params, branched_counts,
-                                     n_batch, n_params, branch_max);
-    const SizeType total_intermediate_leaves = batch_origins.size();
+    error_check::check_less_equal(out_leaves, n_leaves * branch_max,
+                                  "out_leaves size mismatch");
 
-    // Create batch_needs_crackle_expanded for intermediate leaves
-    std::vector<uint8_t> batch_needs_crackle_expanded(
-        total_intermediate_leaves);
-    for (SizeType i = 0; i < total_intermediate_leaves; ++i) {
-        batch_needs_crackle_expanded[i] = batch_needs_crackle[batch_origins[i]];
-    }
-
-    // --- Classify Intermediate Leaves ---
-    const auto [idx_expand_crackle, idx_keep] = get_circ_taylor_mask_branch(
-        leaves_branch_taylor_batch, pad_branched_dparams,
-        batch_needs_crackle_expanded, total_intermediate_leaves, n_params,
-        minimum_snap_cells);
-
-    const SizeType n_keep           = idx_keep.size();
-    const SizeType n_crackle_expand = idx_expand_crackle.size();
-
-    // Early exit: No crackle branching needed
-    if (n_crackle_expand == 0) {
-        // Copy all intermediate leaves to output
-        for (SizeType i = 0; i < total_intermediate_leaves; ++i) {
-            const SizeType origin        = batch_origins[i];
-            const SizeType branch_offset = i * kLeavesStride;
-            const SizeType leaf_offset   = origin * kLeavesStride;
-
-            // Fill parameters and dparams
-            for (SizeType j = 0; j < n_params; ++j) {
-                const SizeType leaf_offset_j =
-                    branch_offset + (j * kParamStride);
-                leaves_branch_batch[leaf_offset_j + 0] =
-                    leaves_branch_taylor_batch[(i * n_params) + j];
-                leaves_branch_batch[leaf_offset_j + 1] =
-                    pad_branched_dparams[(origin * n_params) + j];
-            }
-
-            // Fill d0 and f0
-            const SizeType d0_branch_offset =
-                branch_offset + (n_params * kParamStride);
-            const SizeType f0_branch_offset = d0_branch_offset + kParamStride;
-            const SizeType d0_leaf_offset =
-                leaf_offset + (n_params * kParamStride);
-            const SizeType f0_leaf_offset = d0_leaf_offset + kParamStride;
-
-            leaves_branch_batch[d0_branch_offset + 0] =
-                leaves_batch[d0_leaf_offset + 0];
-            leaves_branch_batch[d0_branch_offset + 1] =
-                leaves_batch[d0_leaf_offset + 1];
-            leaves_branch_batch[f0_branch_offset + 0] =
-                leaves_batch[f0_leaf_offset + 0];
-            leaves_branch_batch[f0_branch_offset + 1] =
-                leaves_batch[f0_leaf_offset + 1];
-        }
-        return batch_origins;
-    }
-
-    // --- Branch crackle for idx_expand_crackle cases ---
-    std::vector<double> crackle_branched_params(n_crackle_expand * branch_max);
-    std::vector<double> crackle_branched_dparams(n_crackle_expand);
-    std::vector<SizeType> crackle_branched_counts(n_crackle_expand);
-
-    for (SizeType i = 0; i < n_crackle_expand; ++i) {
-        const SizeType leaf_idx       = idx_expand_crackle[i];
-        const SizeType orig_batch_idx = batch_origins[leaf_idx];
-
-        const double crackle_cur =
-            leaves_branch_taylor_batch[(leaf_idx * n_params) + 0];
-        const double crackle_dparam =
-            pad_branched_dparams[(orig_batch_idx * n_params) + 0];
-
-        const auto [pmin, pmax] = param_limits[0]; // crackle limits
-        std::span<double> slice_span(
-            crackle_branched_params.data() + (i * branch_max), branch_max);
-        auto [dparam_act, count] = psr_utils::branch_param_padded(
-            slice_span, crackle_cur, crackle_dparam,
-            dparam_new_batch[(orig_batch_idx * n_params) + 0], pmin, pmax);
-
-        crackle_branched_dparams[i] = dparam_act;
-        crackle_branched_counts[i]  = count;
-    }
-
-    // --- Construct Final Array ---
-    SizeType total_crackle_branches = 0;
-    for (SizeType count : crackle_branched_counts) {
-        total_crackle_branches += count;
-    }
-    const SizeType total_leaves = n_keep + total_crackle_branches;
-    std::vector<SizeType> origins_final(total_leaves);
-
-    // Copy non-crackle-branching leaves (idx_keep)
-    for (SizeType i = 0; i < n_keep; ++i) {
-        const SizeType keep_idx      = idx_keep[i];
-        const SizeType origin        = batch_origins[keep_idx];
-        const SizeType branch_offset = i * kLeavesStride;
-        const SizeType leaf_offset   = origin * kLeavesStride;
-
-        // Fill parameters and dparams
-        for (SizeType j = 0; j < n_params; ++j) {
-            const SizeType leaf_offset_j = branch_offset + (j * kParamStride);
-            leaves_branch_batch[leaf_offset_j + 0] =
-                leaves_branch_taylor_batch[(keep_idx * n_params) + j];
-            leaves_branch_batch[leaf_offset_j + 1] =
-                pad_branched_dparams[(origin * n_params) + j];
-        }
-
-        // Fill d0 and f0
-        const SizeType d0_branch_offset =
-            branch_offset + (n_params * kParamStride);
-        const SizeType f0_branch_offset = d0_branch_offset + kParamStride;
-        const SizeType d0_leaf_offset = leaf_offset + (n_params * kParamStride);
-        const SizeType f0_leaf_offset = d0_leaf_offset + kParamStride;
-
-        leaves_branch_batch[d0_branch_offset + 0] =
-            leaves_batch[d0_leaf_offset + 0];
-        leaves_branch_batch[d0_branch_offset + 1] =
-            leaves_batch[d0_leaf_offset + 1];
-        leaves_branch_batch[f0_branch_offset + 0] =
-            leaves_batch[f0_leaf_offset + 0];
-        leaves_branch_batch[f0_branch_offset + 1] =
-            leaves_batch[f0_leaf_offset + 1];
-
-        origins_final[i] = origin;
-    }
-
-    // Add crackle-branched leaves
-    SizeType current_idx = n_keep;
-    for (SizeType i = 0; i < n_crackle_expand; ++i) {
-        const SizeType count_i        = crackle_branched_counts[i];
-        const SizeType orig_leaf_idx  = idx_expand_crackle[i];
-        const SizeType orig_batch_idx = batch_origins[orig_leaf_idx];
-        const SizeType leaf_offset    = orig_batch_idx * kLeavesStride;
-
-        for (SizeType b = 0; b < count_i; ++b) {
-            const SizeType dst_offset = (current_idx + b) * kLeavesStride;
-
-            // Fill parameters (non-crackle from original leaf)
-            for (SizeType j = 0; j < n_params; ++j) {
-                const SizeType leaf_offset_j = dst_offset + (j * kParamStride);
-                leaves_branch_batch[leaf_offset_j + 0] =
-                    leaves_branch_taylor_batch[(orig_leaf_idx * n_params) + j];
-                leaves_branch_batch[leaf_offset_j + 1] =
-                    pad_branched_dparams[(orig_batch_idx * n_params) + j];
-            }
-
-            // Override crackle parameter with branched value
-            leaves_branch_batch[dst_offset + 0] =
-                crackle_branched_params[(i * branch_max) + b];
-            leaves_branch_batch[dst_offset + 1] = crackle_branched_dparams[i];
-
-            // Fill d0 and f0
-            const SizeType d0_dst_offset =
-                dst_offset + (n_params * kParamStride);
-            const SizeType f0_dst_offset = d0_dst_offset + kParamStride;
-            const SizeType d0_leaf_offset =
-                leaf_offset + (n_params * kParamStride);
-            const SizeType f0_leaf_offset = d0_leaf_offset + kParamStride;
-
-            leaves_branch_batch[d0_dst_offset + 0] =
-                leaves_batch[d0_leaf_offset + 0];
-            leaves_branch_batch[d0_dst_offset + 1] =
-                leaves_batch[d0_leaf_offset + 1];
-            leaves_branch_batch[f0_dst_offset + 0] =
-                leaves_batch[f0_leaf_offset + 0];
-            leaves_branch_batch[f0_dst_offset + 1] =
-                leaves_batch[f0_leaf_offset + 1];
-
-            origins_final[current_idx + b] = orig_batch_idx;
-        }
-        current_idx += count_i;
-    }
-
-    return origins_final;
+    return out_leaves;
 }
 
 SizeType circ_taylor_validate_batch(std::span<double> leaves_batch,

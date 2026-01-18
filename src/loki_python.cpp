@@ -412,11 +412,22 @@ PYBIND11_MODULE(libloki, m) {
                  return as_listof_pyarray(self.resolve_coordinates_freq());
              })
         .def(
-            "get_branching_pattern",
-            [](FFAPlanBase& self, std::string_view kind) {
-                return as_pyarray_ref(self.get_branching_pattern(kind));
+            "get_branching_pattern_approx",
+            [](FFAPlanBase& self, std::string_view poly_basis, SizeType ref_seg,
+               IndexType isuggest) {
+                return as_pyarray_ref(self.get_branching_pattern_approx(
+                    poly_basis, ref_seg, isuggest));
             },
-            py::arg("kind") = "taylor");
+            py::arg("poly_basis") = "taylor", py::arg("ref_seg") = 0,
+            py::arg("isuggest") = 0)
+        .def(
+            "get_branching_pattern",
+            [](FFAPlanBase& self, std::string_view poly_basis,
+               SizeType ref_seg) {
+                return as_pyarray_ref(
+                    self.get_branching_pattern(poly_basis, ref_seg));
+            },
+            py::arg("poly_basis") = "taylor", py::arg("ref_seg") = 0);
 
     bind_ffa_plan<float>(m_plans, "FFAPlanTime");
     bind_ffa_plan<ComplexType>(m_plans, "FFAPlanFourier");
@@ -535,9 +546,9 @@ PYBIND11_MODULE(libloki, m) {
     auto m_prune = m.def_submodule("prune", "Pruning submodule");
 
     py::class_<utils::WorldTree<float>>(m_prune, "WorldTreeFloat")
-        .def(py::init<SizeType, SizeType, SizeType, std::string_view>(),
-             py::arg("max_sugg"), py::arg("nparams"), py::arg("nbins"),
-             py::arg("kind"))
+        .def(py::init<SizeType, SizeType, SizeType, SizeType>(),
+             py::arg("capacity"), py::arg("nparams"), py::arg("nbins"),
+             py::arg("max_batch_size"))
         .def_property_readonly("leaves",
                                [](const utils::WorldTree<float>& self) {
                                    return as_pyarray_ref(self.get_leaves());
@@ -563,15 +574,15 @@ PYBIND11_MODULE(libloki, m) {
         .def(
             "execute",
             [](PruningManager& self, const PyArrayT<float>& ts_e,
-               const PyArrayT<float>& ts_v, const std::string& outdir,
-               const std::string& file_prefix, const std::string& kind,
+               const PyArrayT<float>& ts_v, std::string_view outdir,
+               std::string_view file_prefix, std::string_view poly_basis,
                bool show_progress) {
                 self.execute(to_span<const float>(ts_e),
                              to_span<const float>(ts_v), outdir, file_prefix,
-                             kind, show_progress);
+                             poly_basis, show_progress);
             },
             py::arg("ts_e"), py::arg("ts_v"), py::arg("outdir"),
-            py::arg("file_prefix"), py::arg("kind"),
+            py::arg("file_prefix"), py::arg("poly_basis"),
             py::arg("show_progress") = true);
 }
 } // namespace loki

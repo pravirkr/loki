@@ -755,9 +755,9 @@ private:
         // To break ties, we use the next representable value greater than the
         // topk and median scores.
         const float topk_threshold =
-            std::nextafter(kth, std::numeric_limits<float>::infinity());
+            std::nextafter(kth, std::numeric_limits<float>::max());
         const float median_threshold =
-            std::nextafter(mid, std::numeric_limits<float>::infinity());
+            std::nextafter(mid, std::numeric_limits<float>::max());
         return std::max({current_threshold, topk_threshold, median_threshold});
     }
 

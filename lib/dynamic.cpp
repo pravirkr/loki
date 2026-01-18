@@ -6,11 +6,11 @@
 
 #include <spdlog/spdlog.h>
 
-#include "loki/algorithms/plans.hpp"
 #include "loki/common/types.hpp"
 #include "loki/core/circular.hpp"
 #include "loki/core/taylor.hpp"
 #include "loki/detection/score.hpp"
+#include "loki/exceptions.hpp"
 #include "loki/kernels.hpp"
 #include "loki/search/configs.hpp"
 
@@ -24,21 +24,21 @@ BasePruneDPFuncts<FoldType, Derived>::BasePruneDPFuncts(
     SizeType nseg_ffa,
     double tseg_ffa,
     search::PulsarSearchConfig cfg,
-    SizeType batch_size)
+    SizeType batch_size,
+    SizeType branch_max)
     : m_param_arr(param_arr.begin(), param_arr.end()),
       m_dparams(dparams.begin(), dparams.end()),
       m_nseg_ffa(nseg_ffa),
       m_tseg_ffa(tseg_ffa),
       m_cfg(std::move(cfg)),
       m_batch_size(batch_size),
+      m_branch_max(branch_max),
       m_boxcar_widths_cache(m_cfg.get_scoring_widths(), m_cfg.get_nbins()) {
-    const plans::FFAPlan<FoldType> ffa_plan(m_cfg);
-    m_branching_pattern = ffa_plan.get_branching_pattern("taylor");
     if constexpr (std::is_same_v<FoldType, ComplexType>) {
         m_irfft_executor =
             std::make_unique<utils::IrfftExecutor>(m_cfg.get_nbins());
         m_shift_buffer.resize(1); // Not needed for complex
-        const auto max_batch_size = m_batch_size * get_branch_max();
+        const auto max_batch_size = m_batch_size * m_branch_max;
         m_batch_folds_buffer.resize(max_batch_size * 2 * m_cfg.get_nbins());
     } else {
         m_shift_buffer.resize(2 * m_cfg.get_nbins());
@@ -112,13 +112,18 @@ void BasePruneDPFuncts<FoldType, Derived>::score(
     std::span<const FoldType> folds,
     std::span<float> scores,
     SizeType n_leaves) noexcept {
-    const auto nbins = m_cfg.get_nbins();
+    const auto nbins   = m_cfg.get_nbins();
+    const auto nbins_f = m_cfg.get_nbins_f();
     if constexpr (std::is_same_v<FoldType, ComplexType>) {
+        // Ensure exact span for irfft transform
         const auto nfft = 2 * n_leaves;
-        auto folds_t =
+        auto folds_span =
+            std::span<const FoldType>(folds).first(n_leaves * 2 * nbins_f);
+        auto folds_t_span =
             std::span<float>(m_batch_folds_buffer).first(nfft * nbins);
-        m_irfft_executor->execute(folds, folds_t, static_cast<int>(nfft));
-        detection::snr_boxcar_batch(folds_t, scores, n_leaves, nbins,
+        m_irfft_executor->execute(folds_span, folds_t_span,
+                                  static_cast<int>(nfft));
+        detection::snr_boxcar_batch(folds_t_span, scores, n_leaves, nbins,
                                     m_boxcar_widths_cache);
     } else {
         detection::snr_boxcar_batch(folds, scores, n_leaves, nbins,
@@ -147,56 +152,40 @@ void BasePruneDPFuncts<FoldType, Derived>::pack(
     std::copy(data.begin(), data.end(), out.begin());
 }
 
-template <SupportedFoldType FoldType, typename Derived>
-SizeType BasePruneDPFuncts<FoldType, Derived>::get_branch_max() const noexcept {
-    const auto max_val = *std::ranges::max_element(m_branching_pattern);
-    return static_cast<SizeType>(std::ceil(max_val * 2));
-}
-
-template <SupportedFoldType FoldType, typename Derived>
-std::vector<double>
-BasePruneDPFuncts<FoldType, Derived>::get_branching_pattern() const noexcept {
-    return m_branching_pattern;
-}
-
 // Intermediate implementation for Taylor basis
 template <SupportedFoldType FoldType, typename Derived>
 void BaseTaylorPruneDPFuncts<FoldType, Derived>::seed(
     std::span<const FoldType> fold_segment,
     std::pair<double, double> coord_init,
-    utils::WorldTree<FoldType>& world_tree) {
+    std::span<double> seed_leaves,
+    std::span<float> seed_scores) {
 
-    // Create scoring function based on FoldType
-    detection::ScoringFunction<FoldType> scoring_func;
+    const auto n_leaves = poly_taylor_seed(this->m_param_arr, this->m_dparams,
+                                           this->m_cfg.get_prune_poly_order(),
+                                           coord_init, seed_leaves);
+    // Fold segment is (n_leaves, 2, nbins)
     const auto nbins = this->m_cfg.get_nbins();
+    error_check::check_greater_equal(seed_scores.size(), n_leaves,
+                                     "seed_scores size mismatch");
+
+    // Calculate scores
     if constexpr (std::is_same_v<FoldType, ComplexType>) {
-        scoring_func = [this](std::span<const FoldType> folds_batch,
-                              std::span<float> scores_batch, SizeType n_batch,
-                              SizeType nbins,
-                              detection::BoxcarWidthsCache& cache) {
-            const auto nfft = 2 * n_batch;
-            auto folds_t    = std::span<float>(this->m_batch_folds_buffer)
-                               .first(nfft * nbins);
-            this->m_irfft_executor->execute(folds_batch, folds_t,
-                                            static_cast<int>(nfft));
-            detection::snr_boxcar_batch(folds_t, scores_batch, n_batch, nbins,
-                                        cache);
-        };
-        poly_taylor_seed<FoldType>(
-            fold_segment, coord_init, this->m_param_arr, this->m_dparams,
-            this->m_cfg.get_prune_poly_order(), nbins, scoring_func,
-            this->m_boxcar_widths_cache, world_tree);
+        const auto nfft    = 2 * n_leaves;
+        const auto nbins_f = this->m_cfg.get_nbins_f();
+        error_check::check_equal(fold_segment.size(), n_leaves * 2 * nbins_f,
+                                 "fold_segment size mismatch");
+        auto fold_segment_t =
+            std::span<float>(this->m_batch_folds_buffer).first(nfft * nbins);
+        this->m_irfft_executor->execute(fold_segment, fold_segment_t,
+                                        static_cast<int>(nfft));
+        detection::snr_boxcar_batch(fold_segment_t, seed_scores, n_leaves,
+                                    nbins, this->m_boxcar_widths_cache);
+
     } else {
-        scoring_func = [](std::span<const FoldType> folds_batch,
-                          std::span<float> scores_batch, SizeType n_batch,
-                          SizeType nbins, detection::BoxcarWidthsCache& cache) {
-            detection::snr_boxcar_batch(folds_batch, scores_batch, n_batch,
-                                        nbins, cache);
-        };
-        poly_taylor_seed<FoldType>(
-            fold_segment, coord_init, this->m_param_arr, this->m_dparams,
-            this->m_cfg.get_prune_poly_order(), this->m_cfg.get_nbins(),
-            scoring_func, this->m_boxcar_widths_cache, world_tree);
+        error_check::check_equal(fold_segment.size(), n_leaves * 2 * nbins,
+                                 "fold_segment size mismatch");
+        detection::snr_boxcar_batch(fold_segment, seed_scores, n_leaves, nbins,
+                                    this->m_boxcar_widths_cache);
     }
 }
 
@@ -208,9 +197,15 @@ PrunePolyTaylorDPFuncts<FoldType>::PrunePolyTaylorDPFuncts(
     SizeType nseg_ffa,
     double tseg_ffa,
     search::PulsarSearchConfig cfg,
-    SizeType batch_size)
-    : Base(param_arr, dparams, nseg_ffa, tseg_ffa, std::move(cfg), batch_size) {
-}
+    SizeType batch_size,
+    SizeType branch_max)
+    : Base(param_arr,
+           dparams,
+           nseg_ffa,
+           tseg_ffa,
+           std::move(cfg),
+           batch_size,
+           branch_max) {}
 
 template <SupportedFoldType FoldType>
 SizeType PrunePolyTaylorDPFuncts<FoldType>::branch(
@@ -227,7 +222,7 @@ SizeType PrunePolyTaylorDPFuncts<FoldType>::branch(
     return kPolyBranchFuncs[this->m_cfg.get_prune_poly_order() - 2](
         leaves_tree, coord_cur, leaves_branch, leaves_origins, n_leaves,
         n_params, this->m_cfg.get_nbins(), this->m_cfg.get_eta(),
-        this->m_cfg.get_param_limits(), this->get_branch_max(), scratch_params,
+        this->m_cfg.get_param_limits(), this->m_branch_max, scratch_params,
         scratch_dparams, scratch_counts);
 }
 
@@ -276,9 +271,15 @@ PruneCircTaylorDPFuncts<FoldType>::PruneCircTaylorDPFuncts(
     SizeType nseg_ffa,
     double tseg_ffa,
     search::PulsarSearchConfig cfg,
-    SizeType batch_size)
-    : Base(param_arr, dparams, nseg_ffa, tseg_ffa, std::move(cfg), batch_size) {
-}
+    SizeType batch_size,
+    SizeType branch_max)
+    : Base(param_arr,
+           dparams,
+           nseg_ffa,
+           tseg_ffa,
+           std::move(cfg),
+           batch_size,
+           branch_max) {}
 
 template <SupportedFoldType FoldType>
 SizeType PruneCircTaylorDPFuncts<FoldType>::branch(
@@ -295,7 +296,7 @@ SizeType PruneCircTaylorDPFuncts<FoldType>::branch(
     return circ_taylor_branch_batch(
         leaves_tree, coord_cur, leaves_branch, leaves_origins, n_leaves,
         n_params, this->m_cfg.get_nbins(), this->m_cfg.get_eta(),
-        this->m_cfg.get_param_limits(), this->get_branch_max(),
+        this->m_cfg.get_param_limits(), this->m_branch_max,
         this->m_cfg.get_minimum_snap_cells(), scratch_params, scratch_dparams,
         scratch_counts);
 }
@@ -360,15 +361,18 @@ create_prune_dp_functs(std::string_view kind,
                        SizeType nseg_ffa,
                        double tseg_ffa,
                        search::PulsarSearchConfig cfg,
-                       SizeType batch_size) {
+                       SizeType batch_size,
+                       SizeType branch_max) {
     const auto n_params = cfg.get_nparams();
     if (kind == "taylor" && n_params <= 4) {
         return std::make_unique<PrunePolyTaylorDPFuncts<FoldType>>(
-            param_arr, dparams, nseg_ffa, tseg_ffa, std::move(cfg), batch_size);
+            param_arr, dparams, nseg_ffa, tseg_ffa, std::move(cfg), batch_size,
+            branch_max);
     }
     if (kind == "taylor" && n_params == 5) {
         return std::make_unique<PruneCircTaylorDPFuncts<FoldType>>(
-            param_arr, dparams, nseg_ffa, tseg_ffa, std::move(cfg), batch_size);
+            param_arr, dparams, nseg_ffa, tseg_ffa, std::move(cfg), batch_size,
+            branch_max);
     }
     throw std::runtime_error(std::format(
         "Unknown pruning kind: '{}'. Valid options: 'taylor', 'circular'",
@@ -405,6 +409,7 @@ create_prune_dp_functs<float>(std::string_view,
                               SizeType,
                               double,
                               search::PulsarSearchConfig,
+                              SizeType,
                               SizeType);
 template std::unique_ptr<PruneDPFuncts<ComplexType>>
 create_prune_dp_functs<ComplexType>(std::string_view,
@@ -413,6 +418,7 @@ create_prune_dp_functs<ComplexType>(std::string_view,
                                     SizeType,
                                     double,
                                     search::PulsarSearchConfig,
+                                    SizeType,
                                     SizeType);
 
 } // namespace loki::core

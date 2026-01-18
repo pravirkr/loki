@@ -213,8 +213,8 @@ public:
      */
     std::span<float> get_scores_contiguous_span() noexcept {
         const auto start_idx = get_current_start_idx();
-        copy_from_circular(m_scores.data() + start_idx, start_idx, m_size,
-                           SizeType{1}, m_scratch_scores.data());
+        copy_from_circular(m_scores.data(), start_idx, m_size, SizeType{1},
+                           m_scratch_scores.data());
         return {m_scratch_scores.data(), m_size};
     }
 
@@ -347,22 +347,22 @@ public:
     /**
      * @brief Add initial batch (resets buffer first)
      */
-    void add_initial(std::span<const double> batch_leaves,
-                     std::span<const FoldType> batch_folds,
-                     std::span<const float> batch_scores,
+    void add_initial(std::span<const double> leaves_batch,
+                     std::span<const FoldType> folds_batch,
+                     std::span<const float> scores_batch,
                      SizeType slots_to_write) {
         error_check::check_less_equal(
             slots_to_write, m_capacity,
             "WorldTree: Suggestions too large to add.");
-        error_check::check_equal(slots_to_write, batch_scores.size(),
+        error_check::check_equal(slots_to_write, scores_batch.size(),
                                  "slots_to_write must match batch_scores size");
 
         reset(); // Start fresh
-        std::copy_n(batch_leaves.begin(), slots_to_write * m_leaves_stride,
+        std::copy_n(leaves_batch.begin(), slots_to_write * m_leaves_stride,
                     m_leaves.begin());
-        std::copy_n(batch_folds.begin(), slots_to_write * m_folds_stride,
+        std::copy_n(folds_batch.begin(), slots_to_write * m_folds_stride,
                     m_folds.begin());
-        std::copy_n(batch_scores.begin(), slots_to_write, m_scores.begin());
+        std::copy_n(scores_batch.begin(), slots_to_write, m_scores.begin());
         m_size = slots_to_write;
         error_check::check_less_equal(
             m_size, m_capacity, "WorldTree: Invalid size after add_initial.");
@@ -392,23 +392,27 @@ public:
      * top-k threshold. Makes sure all candidates fit, reclaiming space
      * from consumed old candidates.
      */
-    float add_batch(std::span<const double> batch_leaves,
-                    std::span<const FoldType> batch_folds,
-                    std::span<const float> batch_scores,
+    float add_batch(std::span<const double> leaves_batch,
+                    std::span<const FoldType> folds_batch,
+                    std::span<const float> scores_batch,
                     float current_threshold,
                     SizeType slots_to_write) {
+        error_check::check(m_is_updating,
+                           "WorldTree: add_batch only allowed during updates");
         // Always use scores_batch to get the correct batch size
         if (slots_to_write == 0) {
             return current_threshold;
         }
         // Fast path: Check if we have enough space immediately
-        IndexType space_left = calculate_space_left();
-        if (static_cast<IndexType>(slots_to_write) <= space_left) {
-            copy_to_circular(batch_leaves.data(), m_leaves.data(), m_write_head,
+        SizeType space_left = calculate_space_left();
+        error_check::check_greater_equal(
+            space_left, 0, "WorldTree: Not enough space to add batch.");
+        if (slots_to_write <= space_left) {
+            copy_to_circular(leaves_batch.data(), m_leaves.data(), m_write_head,
                              slots_to_write, m_leaves_stride);
-            copy_to_circular(batch_folds.data(), m_folds.data(), m_write_head,
+            copy_to_circular(folds_batch.data(), m_folds.data(), m_write_head,
                              slots_to_write, m_folds_stride);
-            copy_to_circular(batch_scores.data(), m_scores.data(), m_write_head,
+            copy_to_circular(scores_batch.data(), m_scores.data(), m_write_head,
                              slots_to_write, SizeType{1});
             m_write_head =
                 get_circular_index(slots_to_write, m_write_head, m_capacity);
@@ -422,7 +426,7 @@ public:
             "WorldTree: Suggestions too large to add.");
         // Determine the Global Pruning Threshold
         const float effective_threshold = get_prune_threshold(
-            batch_scores, slots_to_write, current_threshold);
+            scores_batch, slots_to_write, current_threshold);
         // Remove old items that are strictly worse than the new global pruning
         // threshold.
         prune_on_overload(effective_threshold);
@@ -432,13 +436,12 @@ public:
             std::span(m_scratch_pending_indices.data(), slots_to_write);
         SizeType pending_count = 0;
         for (SizeType i = 0; i < slots_to_write; ++i) {
-            if (batch_scores[i] > effective_threshold) {
+            if (scores_batch[i] > effective_threshold) {
                 pending_indices[pending_count++] = i;
             }
         }
-        space_left = calculate_space_left();
-        const auto n_to_add =
-            std::min(pending_count, static_cast<SizeType>(space_left));
+        space_left          = calculate_space_left();
+        const auto n_to_add = std::min(pending_count, space_left);
         if (n_to_add == 0) {
             return effective_threshold;
         }
@@ -447,13 +450,13 @@ public:
         for (SizeType i = 0; i < n_to_add; ++i) {
             const auto src_idx = pending_indices[i];
             const auto dst_idx = m_write_head;
-            std::copy_n(batch_leaves.begin() + (src_idx * m_leaves_stride),
+            std::copy_n(leaves_batch.begin() + (src_idx * m_leaves_stride),
                         m_leaves_stride,
                         m_leaves.begin() + (dst_idx * m_leaves_stride));
-            std::copy_n(batch_folds.begin() + (src_idx * m_folds_stride),
+            std::copy_n(folds_batch.begin() + (src_idx * m_folds_stride),
                         m_folds_stride,
                         m_folds.begin() + (dst_idx * m_folds_stride));
-            m_scores[dst_idx] = batch_scores[src_idx];
+            m_scores[dst_idx] = scores_batch[src_idx];
             m_write_head++;
             if (m_write_head == m_capacity) {
                 m_write_head = 0;
@@ -612,13 +615,17 @@ private:
      * @brief Calculate available space in buffer
      * @return The number of slots available in the write region
      */
-    IndexType calculate_space_left() const {
+    SizeType calculate_space_left() const {
         const auto remaining_old = static_cast<IndexType>(m_size_old) -
                                    static_cast<IndexType>(m_read_consumed);
         error_check::check_greater_equal(
             remaining_old, 0, "calculate_space_left: Invalid buffer state");
-        return static_cast<IndexType>(m_capacity) -
-               (remaining_old + static_cast<IndexType>(m_size));
+        const auto space_left =
+            static_cast<IndexType>(m_capacity) -
+            (remaining_old + static_cast<IndexType>(m_size));
+        error_check::check_greater_equal(
+            space_left, 0, "calculate_space_left: Invalid buffer state");
+        return static_cast<SizeType>(space_left);
     }
 
     /**
@@ -627,12 +634,15 @@ private:
      * find a threshold in (Buffer + Batch) so that keeping only scores strictly
      * above it yields at most total_capacity items.
      */
-    float get_prune_threshold(std::span<const float> batch_scores,
+    float get_prune_threshold(std::span<const float> scores_batch,
                               SizeType slots_to_write,
                               float current_threshold) noexcept {
+        if (slots_to_write == 0) {
+            return current_threshold;
+        }
         const auto space_left       = calculate_space_left();
         const auto total_candidates = m_size + slots_to_write;
-        const auto total_capacity = m_size + static_cast<SizeType>(space_left);
+        const auto total_capacity   = m_size + space_left;
         if (total_candidates <= total_capacity) {
             return current_threshold;
         }
@@ -642,10 +652,10 @@ private:
         // Gather all candidates (Buffer + Batch) into scratch
         // Copy active circular buffer scores to scratch [0 ... m_size]
         const auto start_idx = get_current_start_idx();
-        copy_from_circular(m_scores.data() + start_idx, start_idx, m_size,
-                           SizeType{1}, m_scratch_scores.data());
+        copy_from_circular(m_scores.data(), start_idx, m_size, SizeType{1},
+                           m_scratch_scores.data());
         // Append batch scores [m_size ... total]
-        std::copy_n(batch_scores.begin(), slots_to_write,
+        std::copy_n(scores_batch.begin(), slots_to_write,
                     m_scratch_scores.begin() + m_size);
 
         // The item at 'total_capacity-1' (in descending order) is the smallest
@@ -657,7 +667,7 @@ private:
         // To break ties, we use the next representable value greater than the
         // topk score.
         const float topk_threshold =
-            std::nextafter(*kth, std::numeric_limits<float>::infinity());
+            std::nextafter(*kth, std::numeric_limits<float>::max());
 
         // Median score for severity (restricted range)
         auto mid = begin + total_candidates / 2;
@@ -667,7 +677,7 @@ private:
             std::nth_element(kth + 1, mid, end);
         }
         const float median_threshold =
-            std::nextafter(*mid, std::numeric_limits<float>::infinity());
+            std::nextafter(*mid, std::numeric_limits<float>::max());
         return std::max({current_threshold, topk_threshold, median_threshold});
     }
 
@@ -983,20 +993,20 @@ bool WorldTree<FoldType>::add(std::span<const double> leaf,
     return m_impl->add(leaf, fold, score);
 }
 template <SupportedFoldType FoldType>
-void WorldTree<FoldType>::add_initial(std::span<const double> batch_leaves,
-                                      std::span<const FoldType> batch_folds,
-                                      std::span<const float> batch_scores,
+void WorldTree<FoldType>::add_initial(std::span<const double> leaves_batch,
+                                      std::span<const FoldType> folds_batch,
+                                      std::span<const float> scores_batch,
                                       SizeType slots_to_write) {
-    m_impl->add_initial(batch_leaves, batch_folds, batch_scores,
+    m_impl->add_initial(leaves_batch, folds_batch, scores_batch,
                         slots_to_write);
 }
 template <SupportedFoldType FoldType>
-float WorldTree<FoldType>::add_batch(std::span<const double> batch_leaves,
-                                     std::span<const FoldType> batch_folds,
-                                     std::span<const float> batch_scores,
+float WorldTree<FoldType>::add_batch(std::span<const double> leaves_batch,
+                                     std::span<const FoldType> folds_batch,
+                                     std::span<const float> scores_batch,
                                      float current_threshold,
                                      SizeType slots_to_write) {
-    return m_impl->add_batch(batch_leaves, batch_folds, batch_scores,
+    return m_impl->add_batch(leaves_batch, folds_batch, scores_batch,
                              current_threshold, slots_to_write);
 }
 template <SupportedFoldType FoldType> void WorldTree<FoldType>::deduplicate() {

@@ -9,7 +9,6 @@
 #include "loki/detection/score.hpp"
 #include "loki/search/configs.hpp"
 #include "loki/utils/fft.hpp"
-#include "loki/utils/world_tree.hpp"
 
 namespace loki::core {
 
@@ -31,7 +30,8 @@ public:
 
     virtual void seed(std::span<const FoldType> fold_segment,
                       std::pair<double, double> coord_init,
-                      utils::WorldTree<FoldType>& world_tree) = 0;
+                      std::span<double> seed_leaves,
+                      std::span<float> seed_scores) = 0;
 
     virtual SizeType branch(std::span<const double> leaves_tree,
                             std::pair<double, double> coord_cur,
@@ -91,10 +91,6 @@ public:
                         std::pair<double, double> coord_report,
                         SizeType n_leaves,
                         SizeType n_params) const = 0;
-
-    virtual SizeType get_branch_max() const noexcept = 0;
-
-    virtual std::vector<double> get_branching_pattern() const noexcept = 0;
 };
 
 // CRTP Base class - shared functionality for all derived classes
@@ -108,7 +104,7 @@ protected:
     double m_tseg_ffa;
     search::PulsarSearchConfig m_cfg;
     SizeType m_batch_size;
-    std::vector<double> m_branching_pattern;
+    SizeType m_branch_max;
 
     // Buffer for shift-add operations
     std::vector<FoldType> m_shift_buffer;
@@ -124,7 +120,8 @@ protected:
                       SizeType nseg_ffa,
                       double tseg_ffa,
                       search::PulsarSearchConfig cfg,
-                      SizeType batch_size);
+                      SizeType batch_size,
+                      SizeType branch_max);
 
 public:
     // Common implementations shared by all variants
@@ -158,9 +155,6 @@ public:
 
     void pack(std::span<const FoldType> data,
               std::span<FoldType> out) const noexcept override;
-
-    SizeType get_branch_max() const noexcept override;
-    std::vector<double> get_branching_pattern() const noexcept override;
 };
 
 // Intermediate base for Taylor-based methods (common seed implementation)
@@ -176,7 +170,8 @@ public:
     // Common seed implementation for all Taylor variants
     void seed(std::span<const FoldType> fold_segment,
               std::pair<double, double> coord_init,
-              utils::WorldTree<FoldType>& world_tree) override;
+              std::span<double> seed_leaves,
+              std::span<float> seed_scores) override;
 };
 
 // Specialized implementation for Polynomial searches in Taylor Basis
@@ -243,7 +238,8 @@ public:
                             SizeType nseg_ffa,
                             double tseg_ffa,
                             search::PulsarSearchConfig cfg,
-                            SizeType batch_size);
+                            SizeType batch_size,
+                            SizeType branch_max);
 
     SizeType branch(std::span<const double> leaves_tree,
                     std::pair<double, double> coord_cur,
@@ -293,7 +289,8 @@ public:
                             SizeType nseg_ffa,
                             double tseg_ffa,
                             search::PulsarSearchConfig cfg,
-                            SizeType batch_size);
+                            SizeType batch_size,
+                            SizeType branch_max);
 
     SizeType branch(std::span<const double> leaves_tree,
                     std::pair<double, double> coord_cur,
@@ -342,7 +339,8 @@ create_prune_dp_functs(std::string_view kind,
                        SizeType nseg_ffa,
                        double tseg_ffa,
                        search::PulsarSearchConfig cfg,
-                       SizeType batch_size);
+                       SizeType batch_size,
+                       SizeType branch_max);
 
 // Type aliases for convenience
 using PrunePolyTaylorDPFunctsFloat   = PrunePolyTaylorDPFuncts<float>;

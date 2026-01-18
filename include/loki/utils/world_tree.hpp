@@ -106,18 +106,18 @@ public:
         get_best() const;
 
     // Add an initial set of candidate leaves to the Tree
-    void add_initial(std::span<const double> batch_leaves,
-                     std::span<const FoldType> batch_folds,
-                     std::span<const float> batch_scores,
+    void add_initial(std::span<const double> leaves_batch,
+                     std::span<const FoldType> folds_batch,
+                     std::span<const float> scores_batch,
                      SizeType slots_to_write);
     // Add a candidate leaf to the Tree if there is space
     [[nodiscard]] bool add(std::span<const double> leaf,
                            std::span<const FoldType> fold,
                            float score);
     // Add a batch of candidate leaves to the Tree if there is space
-    [[nodiscard]] float add_batch(std::span<const double> batch_leaves,
-                                  std::span<const FoldType> batch_folds,
-                                  std::span<const float> batch_scores,
+    [[nodiscard]] float add_batch(std::span<const double> leaves_batch,
+                                  std::span<const FoldType> folds_batch,
+                                  std::span<const float> scores_batch,
                                   float current_threshold,
                                   SizeType slots_to_write);
     // Prune to keep only unique candidates

@@ -138,35 +138,27 @@ public:
 
     /**
      * @brief Get the approximate branching pattern for the plan.
-     * @param kind The kind of search for the branching pattern (e.g. "taylor").
+     * @param poly_basis The polynomial basis for the branching pattern (e.g.
+     * "taylor").
      * @param ref_seg The reference segment for the branching pattern.
      * @param isuggest The index of the leaf to use for the branching pattern.
      * @return A vector of branching pattern values.
      */
     std::vector<double>
-    get_branching_pattern_approx(std::string_view kind = "taylor",
-                                 SizeType ref_seg      = 0,
-                                 IndexType isuggest    = 0) const;
+    get_branching_pattern_approx(std::string_view poly_basis = "taylor",
+                                 SizeType ref_seg            = 0,
+                                 IndexType isuggest          = 0) const;
 
     /**
      * @brief Get the exact branching pattern for the plan.
-     * @param kind The kind of search for the branching pattern (e.g. "taylor").
-     * @param ref_seg The reference segment for the branching pattern.
-     * @return A vector of branching pattern values.
-     */
-    std::vector<double> get_branching_pattern(std::string_view kind = "taylor",
-                                              SizeType ref_seg      = 0) const;
-
-    /**
-     * @brief Get the exact branching pattern for the circular orbit pruning
-     * search.
-     * @param kind The kind of search for the branching pattern (e.g. "taylor").
+     * @param poly_basis The polynomial basis for the branching pattern (e.g.
+     * "taylor").
      * @param ref_seg The reference segment for the branching pattern.
      * @return A vector of branching pattern values.
      */
     std::vector<double>
-    get_branching_pattern_circular(std::string_view kind = "taylor",
-                                   SizeType ref_seg      = 0) const;
+    get_branching_pattern(std::string_view poly_basis = "taylor",
+                          SizeType ref_seg            = 0) const;
 
 private:
     struct Impl;

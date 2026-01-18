@@ -5,8 +5,6 @@
 #include <vector>
 
 #include "loki/common/types.hpp"
-#include "loki/detection/score.hpp"
-#include "loki/utils/world_tree.hpp"
 
 namespace loki::core {
 
@@ -68,22 +66,11 @@ void ffa_taylor_resolve_crackle_batch(
     double tseg_brute,
     SizeType nbins);
 
-std::vector<double>
-poly_taylor_leaves(std::span<const std::vector<double>> param_arr,
-                   std::span<const double> dparams,
-                   SizeType poly_order,
-                   std::pair<double, double> coord_init);
-
-template <SupportedFoldType FoldType>
-void poly_taylor_seed(std::span<const FoldType> fold_segment,
-                      std::pair<double, double> coord_init,
-                      std::span<const std::vector<double>> param_arr,
-                      std::span<const double> dparams,
-                      SizeType poly_order,
-                      SizeType nbins,
-                      const detection::ScoringFunction<FoldType>& scoring_func,
-                      detection::BoxcarWidthsCache& boxcar_widths_cache,
-                      utils::WorldTree<FoldType>& world_tree);
+SizeType poly_taylor_seed(std::span<const std::vector<double>> param_arr,
+                          std::span<const double> dparams,
+                          SizeType poly_order,
+                          std::pair<double, double> coord_init,
+                          std::span<double> seed_leaves);
 
 std::vector<SizeType>
 poly_taylor_branch_batch(std::span<const double> leaves_batch,
