@@ -530,14 +530,8 @@ public:
         cuda_utils::check_last_cuda_error("cudaMemcpyAsync failed");
 
         // Execute folding kernel on device using persistent buffers
-        execute_d(
-            cuda::std::span<const float>(
-                thrust::raw_pointer_cast(m_ts_e_d.data()), m_ts_e_d.size()),
-            cuda::std::span<const float>(
-                thrust::raw_pointer_cast(m_ts_v_d.data()), m_ts_v_d.size()),
-            cuda::std::span<DeviceFoldType>(
-                thrust::raw_pointer_cast(m_fold_d.data()), m_fold_d.size()),
-            stream);
+        execute_d(cuda_utils::as_span(m_ts_e_d), cuda_utils::as_span(m_ts_v_d),
+                  cuda_utils::as_span(m_fold_d), stream);
 
         // Copy result back to host
         cudaMemcpyAsync(fold.data(), thrust::raw_pointer_cast(m_fold_d.data()),

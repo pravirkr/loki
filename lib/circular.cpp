@@ -114,7 +114,6 @@ circ_taylor_branch_batch(std::span<const double> leaves_tree,
                          std::span<double> leaves_branch,
                          std::span<SizeType> leaves_origins,
                          SizeType n_leaves,
-                         SizeType n_params,
                          SizeType nbins,
                          double eta,
                          const std::vector<ParamLimitType>& param_limits,
@@ -128,10 +127,8 @@ circ_taylor_branch_batch(std::span<const double> leaves_tree,
     constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
     constexpr double kEps            = 1e-12;
 
-    error_check::check_equal(n_params, kParams,
-                             "nparams should be 5 for circular orbit branch");
     error_check::check_equal(leaves_tree.size(), n_leaves * kLeavesStride,
-                             "leaves_batch size mismatch");
+                             "leaves_tree size mismatch");
     error_check::check_greater_equal(leaves_branch.size(),
                                      n_leaves * branch_max * kLeavesStride,
                                      "leaves_branch size mismatch");
@@ -163,12 +160,11 @@ circ_taylor_branch_batch(std::span<const double> leaves_tree,
     error_check::check_less_equal(workspace_acquired_size, workspace_size,
                                   "workspace size mismatch");
     error_check::check_greater_equal(scratch_params.size(),
-                                     n_leaves * n_params * branch_max,
+                                     n_leaves * kParams * branch_max,
                                      "scratch_params size mismatch");
-    error_check::check_greater_equal(scratch_dparams.size(),
-                                     n_leaves * n_params,
+    error_check::check_greater_equal(scratch_dparams.size(), n_leaves * kParams,
                                      "scratch_dparams size mismatch");
-    error_check::check_greater_equal(scratch_counts.size(), n_leaves * n_params,
+    error_check::check_greater_equal(scratch_counts.size(), n_leaves * kParams,
                                      "scratch_counts size mismatch");
 
     const double* __restrict leaves_tree_ptr = leaves_tree.data();
@@ -564,24 +560,21 @@ circ_taylor_branch_batch(std::span<const double> leaves_tree,
     return out_leaves;
 }
 
-SizeType circ_taylor_validate_batch(std::span<double> leaves_batch,
+SizeType circ_taylor_validate_batch(std::span<double> leaves_branch,
                                     std::span<SizeType> leaves_origins,
                                     SizeType n_leaves,
-                                    SizeType n_params,
                                     double p_orb_min,
                                     double x_mass_const,
                                     double minimum_snap_cells) {
-    constexpr SizeType kParamsExpected = 5U;
-    constexpr SizeType kParamStride    = 2U;
-    constexpr SizeType kLeavesStride   = (kParamsExpected + 2) * kParamStride;
-    constexpr double kEps              = 1e-12;
-    constexpr double kTwoThirds        = 2.0 / 3.0;
+    constexpr SizeType kParams       = 5U;
+    constexpr SizeType kParamStride  = 2U;
+    constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
+    constexpr double kEps            = 1e-12;
+    constexpr double kTwoThirds      = 2.0 / 3.0;
 
-    error_check::check_equal(n_params, kParamsExpected,
-                             "nparams should be 5 for circular orbit resolve");
-    error_check::check_greater_equal(leaves_batch.size(),
+    error_check::check_greater_equal(leaves_branch.size(),
                                      n_leaves * kLeavesStride,
-                                     "batch_leaves size mismatch");
+                                     "leaves_branch size mismatch");
 
     const double omega_max_sq = std::pow(2.0 * std::numbers::pi / p_orb_min, 2);
     std::vector<bool> mask_keep(n_leaves, false);
@@ -590,12 +583,12 @@ SizeType circ_taylor_validate_batch(std::span<double> leaves_batch,
         const SizeType leaf_offset = i * kLeavesStride;
 
         // Extract values
-        const double crackle  = leaves_batch[leaf_offset + 0];
-        const double dcrackle = leaves_batch[leaf_offset + 1];
-        const double snap     = leaves_batch[leaf_offset + 2];
-        const double dsnap    = leaves_batch[leaf_offset + 3];
-        const double jerk     = leaves_batch[leaf_offset + 4];
-        const double accel    = leaves_batch[leaf_offset + 6];
+        const double crackle  = leaves_branch[leaf_offset + 0];
+        const double dcrackle = leaves_branch[leaf_offset + 1];
+        const double snap     = leaves_branch[leaf_offset + 2];
+        const double dsnap    = leaves_branch[leaf_offset + 3];
+        const double jerk     = leaves_branch[leaf_offset + 4];
+        const double accel    = leaves_branch[leaf_offset + 6];
 
         // Classification thresholds
         const double snap_threshold    = minimum_snap_cells * (dsnap + kEps);
@@ -673,9 +666,9 @@ SizeType circ_taylor_validate_batch(std::span<double> leaves_batch,
                 const SizeType src_offset = i * kLeavesStride;
                 const SizeType dst_offset = write_idx * kLeavesStride;
                 std::copy_n(
-                    leaves_batch.begin() + static_cast<IndexType>(src_offset),
+                    leaves_branch.begin() + static_cast<IndexType>(src_offset),
                     kLeavesStride,
-                    leaves_batch.begin() + static_cast<IndexType>(dst_offset));
+                    leaves_branch.begin() + static_cast<IndexType>(dst_offset));
                 // Copy origin
                 leaves_origins[write_idx] = leaves_origins[i];
             }
@@ -686,32 +679,29 @@ SizeType circ_taylor_validate_batch(std::span<double> leaves_batch,
     return write_idx;
 }
 
-void circ_taylor_resolve_batch(std::span<const double> leaves_batch,
+void circ_taylor_resolve_batch(std::span<const double> leaves_branch,
                                std::pair<double, double> coord_add,
                                std::pair<double, double> coord_cur,
                                std::pair<double, double> coord_init,
                                std::span<const std::vector<double>> param_arr,
-                               std::span<SizeType> pindex_flat_batch,
-                               std::span<float> relative_phase_batch,
+                               std::span<SizeType> param_indices,
+                               std::span<float> phase_shift,
                                SizeType nbins,
                                SizeType n_leaves,
-                               SizeType n_params,
                                double minimum_snap_cells) {
-    constexpr SizeType kParamsExpected = 5;
-    constexpr SizeType kParamStride    = 2;
-    constexpr SizeType kLeavesStride   = (kParamsExpected + 2) * kParamStride;
+    constexpr SizeType kParams       = 5;
+    constexpr SizeType kParamStride  = 2;
+    constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
 
-    error_check::check_equal(n_params, kParamsExpected,
-                             "nparams should be 5 for circular orbit resolve");
-    error_check::check_equal(param_arr.size(), kParamsExpected,
+    error_check::check_equal(param_arr.size(), kParams,
                              "param_arr should have 5 parameters");
-    error_check::check_greater_equal(leaves_batch.size(),
+    error_check::check_greater_equal(leaves_branch.size(),
                                      n_leaves * kLeavesStride,
-                                     "batch_leaves size mismatch");
-    error_check::check_equal(pindex_flat_batch.size(), n_leaves,
-                             "pindex_flat_batch size mismatch");
-    error_check::check_equal(relative_phase_batch.size(), n_leaves,
-                             "relative_phase_batch size mismatch");
+                                     "leaves_branch size mismatch");
+    error_check::check_greater_equal(param_indices.size(), n_leaves,
+                                     "param_indices size mismatch");
+    error_check::check_greater_equal(phase_shift.size(), n_leaves,
+                                     "phase_shift size mismatch");
 
     const auto [t0_cur, scale_cur]   = coord_cur;
     const auto [t0_init, scale_init] = coord_init;
@@ -728,7 +718,7 @@ void circ_taylor_resolve_batch(std::span<const double> leaves_batch,
     const auto delta_t      = delta_t_add - delta_t_init;
 
     const auto [idx_circular_snap, idx_circular_crackle, idx_taylor] =
-        get_circ_taylor_mask(leaves_batch, n_leaves, n_params,
+        get_circ_taylor_mask(leaves_branch, n_leaves, kParams,
                              minimum_snap_cells);
 
     SizeType hint_a = 0, hint_f = 0;
@@ -736,11 +726,11 @@ void circ_taylor_resolve_batch(std::span<const double> leaves_batch,
     for (SizeType i : idx_circular_snap) {
         const SizeType leaf_offset = i * kLeavesStride;
 
-        const auto s_t_cur = leaves_batch[leaf_offset + (1 * kParamStride)];
-        const auto j_t_cur = leaves_batch[leaf_offset + (2 * kParamStride)];
-        const auto a_t_cur = leaves_batch[leaf_offset + (3 * kParamStride)];
-        const auto v_t_cur = leaves_batch[leaf_offset + (4 * kParamStride)];
-        const auto f0      = leaves_batch[leaf_offset + (6 * kParamStride)];
+        const auto s_t_cur = leaves_branch[leaf_offset + (1 * kParamStride)];
+        const auto j_t_cur = leaves_branch[leaf_offset + (2 * kParamStride)];
+        const auto a_t_cur = leaves_branch[leaf_offset + (3 * kParamStride)];
+        const auto v_t_cur = leaves_branch[leaf_offset + (4 * kParamStride)];
+        const auto f0      = leaves_branch[leaf_offset + (6 * kParamStride)];
 
         // Circular orbit mask condition
         const auto omega_orb_sq = -s_t_cur / a_t_cur;
@@ -772,7 +762,7 @@ void circ_taylor_resolve_batch(std::span<const double> leaves_batch,
         const auto delay_rel = delta_d_new * inv_c_val;
 
         // Calculate relative phase
-        relative_phase_batch[i] =
+        phase_shift[i] =
             psr_utils::get_phase_idx(delta_t, f0, nbins, delay_rel);
 
         // Find nearest grid indices (only need accel and freq)
@@ -781,7 +771,7 @@ void circ_taylor_resolve_batch(std::span<const double> leaves_batch,
         const auto idx_f =
             utils::find_nearest_sorted_idx_scan(freq_arr_grid, f_new, hint_f);
 
-        pindex_flat_batch[i] = (idx_a * n_freq) + idx_f;
+        param_indices[i] = (idx_a * n_freq) + idx_f;
     }
 
     // Reset hints
@@ -791,11 +781,11 @@ void circ_taylor_resolve_batch(std::span<const double> leaves_batch,
     for (SizeType i : idx_circular_crackle) {
         const SizeType leaf_offset = i * kLeavesStride;
 
-        const auto c_t_cur = leaves_batch[leaf_offset + (0 * kParamStride)];
-        const auto j_t_cur = leaves_batch[leaf_offset + (2 * kParamStride)];
-        const auto a_t_cur = leaves_batch[leaf_offset + (3 * kParamStride)];
-        const auto v_t_cur = leaves_batch[leaf_offset + (4 * kParamStride)];
-        const auto f0      = leaves_batch[leaf_offset + (6 * kParamStride)];
+        const auto c_t_cur = leaves_branch[leaf_offset + (0 * kParamStride)];
+        const auto j_t_cur = leaves_branch[leaf_offset + (2 * kParamStride)];
+        const auto a_t_cur = leaves_branch[leaf_offset + (3 * kParamStride)];
+        const auto v_t_cur = leaves_branch[leaf_offset + (4 * kParamStride)];
+        const auto f0      = leaves_branch[leaf_offset + (6 * kParamStride)];
 
         // Circular orbit mask condition
         const auto omega_orb_sq = -c_t_cur / a_t_cur;
@@ -827,7 +817,7 @@ void circ_taylor_resolve_batch(std::span<const double> leaves_batch,
         const auto delay_rel = delta_d_new * inv_c_val;
 
         // Calculate relative phase
-        relative_phase_batch[i] =
+        phase_shift[i] =
             psr_utils::get_phase_idx(delta_t, f0, nbins, delay_rel);
 
         // Find nearest grid indices (only need accel and freq)
@@ -836,7 +826,7 @@ void circ_taylor_resolve_batch(std::span<const double> leaves_batch,
         const auto idx_f =
             utils::find_nearest_sorted_idx_scan(freq_arr_grid, f_new, hint_f);
 
-        pindex_flat_batch[i] = (idx_a * n_freq) + idx_f;
+        param_indices[i] = (idx_a * n_freq) + idx_f;
     }
 
     // Reset hints
@@ -865,12 +855,12 @@ void circ_taylor_resolve_batch(std::span<const double> leaves_batch,
     for (SizeType i : idx_taylor) {
         const SizeType batch_offset = i * kLeavesStride;
 
-        const auto c_t_cur = leaves_batch[batch_offset + (0 * kParamStride)];
-        const auto s_t_cur = leaves_batch[batch_offset + (1 * kParamStride)];
-        const auto j_t_cur = leaves_batch[batch_offset + (2 * kParamStride)];
-        const auto a_t_cur = leaves_batch[batch_offset + (3 * kParamStride)];
-        const auto v_t_cur = leaves_batch[batch_offset + (4 * kParamStride)];
-        const auto f0      = leaves_batch[batch_offset + (6 * kParamStride)];
+        const auto c_t_cur = leaves_branch[batch_offset + (0 * kParamStride)];
+        const auto s_t_cur = leaves_branch[batch_offset + (1 * kParamStride)];
+        const auto j_t_cur = leaves_branch[batch_offset + (2 * kParamStride)];
+        const auto a_t_cur = leaves_branch[batch_offset + (3 * kParamStride)];
+        const auto v_t_cur = leaves_branch[batch_offset + (4 * kParamStride)];
+        const auto f0      = leaves_branch[batch_offset + (6 * kParamStride)];
         const auto a_new   = a_t_cur + (j_t_cur * delta_t_add) +
                            (s_t_cur * half_delta_t_add_sq) +
                            (c_t_cur * sixth_delta_t_add_cubed);
@@ -889,56 +879,53 @@ void circ_taylor_resolve_batch(std::span<const double> leaves_batch,
         const auto delay_rel = delta_d_new * inv_c_val;
 
         // Calculate relative phase
-        relative_phase_batch[i] =
+        phase_shift[i] =
             psr_utils::get_phase_idx(delta_t, f0, nbins, delay_rel);
 
         const auto idx_a =
             utils::find_nearest_sorted_idx_scan(accel_arr_grid, a_new, hint_a);
         const auto idx_f =
             utils::find_nearest_sorted_idx_scan(freq_arr_grid, f_new, hint_f);
-        pindex_flat_batch[i] = (idx_a * n_freq) + idx_f;
+        param_indices[i] = (idx_a * n_freq) + idx_f;
     }
 }
 
-void circ_taylor_transform_batch(std::span<double> leaves_batch,
+void circ_taylor_transform_batch(std::span<double> leaves_tree,
                                  std::pair<double, double> coord_next,
                                  std::pair<double, double> coord_cur,
                                  SizeType n_leaves,
-                                 SizeType n_params,
                                  bool use_conservative_tile,
                                  double minimum_snap_cells) {
-    constexpr SizeType kParamsExpected = 5;
-    constexpr SizeType kParamStride    = 2;
-    constexpr SizeType kLeavesStride   = (kParamsExpected + 2) * kParamStride;
+    constexpr SizeType kParams       = 5;
+    constexpr SizeType kParamStride  = 2;
+    constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
 
-    error_check::check_equal(n_params, kParamsExpected,
-                             "nparams should be 4 for circular transform");
-    error_check::check_greater_equal(leaves_batch.size(),
+    error_check::check_greater_equal(leaves_tree.size(),
                                      n_leaves * kLeavesStride,
-                                     "batch_leaves size mismatch");
+                                     "leaves_tree size mismatch");
 
     const auto [t0_next, scale_next] = coord_next;
     const auto [t0_cur, scale_cur]   = coord_cur;
     const auto delta_t               = t0_next - t0_cur;
 
     const auto [idx_circular_snap, idx_circular_crackle, idx_taylor] =
-        get_circ_taylor_mask(leaves_batch, n_leaves, n_params,
+        get_circ_taylor_mask(leaves_tree, n_leaves, kParams,
                              minimum_snap_cells);
 
     // Process circular indices
     for (SizeType i : idx_circular_snap) {
         const SizeType leaf_offset = i * kLeavesStride;
 
-        const double d4_i     = leaves_batch[leaf_offset + 2];
-        const double sig_d4_i = leaves_batch[leaf_offset + 3];
-        const double d3_i     = leaves_batch[leaf_offset + 4];
-        const double sig_d3_i = leaves_batch[leaf_offset + 5];
-        const double d2_i     = leaves_batch[leaf_offset + 6];
-        const double sig_d2_i = leaves_batch[leaf_offset + 7];
-        const double d1_i     = leaves_batch[leaf_offset + 8];
-        const double sig_d1_i = leaves_batch[leaf_offset + 9];
-        const double d0_i     = leaves_batch[leaf_offset + 10];
-        const double sig_d0_i = leaves_batch[leaf_offset + 11];
+        const double d4_i     = leaves_tree[leaf_offset + 2];
+        const double sig_d4_i = leaves_tree[leaf_offset + 3];
+        const double d3_i     = leaves_tree[leaf_offset + 4];
+        const double sig_d3_i = leaves_tree[leaf_offset + 5];
+        const double d2_i     = leaves_tree[leaf_offset + 6];
+        const double sig_d2_i = leaves_tree[leaf_offset + 7];
+        const double d1_i     = leaves_tree[leaf_offset + 8];
+        const double sig_d1_i = leaves_tree[leaf_offset + 9];
+        const double d0_i     = leaves_tree[leaf_offset + 10];
+        const double sig_d0_i = leaves_tree[leaf_offset + 11];
 
         const double omega_orb_sq = -d4_i / d2_i;
         const double omega_orb    = std::sqrt(omega_orb_sq);
@@ -1045,34 +1032,34 @@ void circ_taylor_transform_batch(std::span<double> leaves_batch,
         }
 
         // Write back transformed values
-        leaves_batch[leaf_offset + 0]  = d5_j;
-        leaves_batch[leaf_offset + 1]  = sig_d5_j;
-        leaves_batch[leaf_offset + 2]  = d4_j;
-        leaves_batch[leaf_offset + 3]  = sig_d4_j;
-        leaves_batch[leaf_offset + 4]  = d3_j;
-        leaves_batch[leaf_offset + 5]  = sig_d3_j;
-        leaves_batch[leaf_offset + 6]  = d2_j;
-        leaves_batch[leaf_offset + 7]  = sig_d2_j;
-        leaves_batch[leaf_offset + 8]  = d1_j;
-        leaves_batch[leaf_offset + 9]  = sig_d1_j;
-        leaves_batch[leaf_offset + 10] = d0_j;
-        leaves_batch[leaf_offset + 11] = sig_d0_i;
+        leaves_tree[leaf_offset + 0]  = d5_j;
+        leaves_tree[leaf_offset + 1]  = sig_d5_j;
+        leaves_tree[leaf_offset + 2]  = d4_j;
+        leaves_tree[leaf_offset + 3]  = sig_d4_j;
+        leaves_tree[leaf_offset + 4]  = d3_j;
+        leaves_tree[leaf_offset + 5]  = sig_d3_j;
+        leaves_tree[leaf_offset + 6]  = d2_j;
+        leaves_tree[leaf_offset + 7]  = sig_d2_j;
+        leaves_tree[leaf_offset + 8]  = d1_j;
+        leaves_tree[leaf_offset + 9]  = sig_d1_j;
+        leaves_tree[leaf_offset + 10] = d0_j;
+        leaves_tree[leaf_offset + 11] = sig_d0_i;
     }
 
     // Process circular crackle indices
     for (SizeType i : idx_circular_crackle) {
         const SizeType leaf_offset = i * kLeavesStride;
 
-        const double d5_i     = leaves_batch[leaf_offset + 0];
-        const double sig_d5_i = leaves_batch[leaf_offset + 1];
-        const double d3_i     = leaves_batch[leaf_offset + 4];
-        const double sig_d3_i = leaves_batch[leaf_offset + 5];
-        const double d2_i     = leaves_batch[leaf_offset + 6];
-        const double sig_d2_i = leaves_batch[leaf_offset + 7];
-        const double d1_i     = leaves_batch[leaf_offset + 8];
-        const double sig_d1_i = leaves_batch[leaf_offset + 9];
-        const double d0_i     = leaves_batch[leaf_offset + 10];
-        const double sig_d0_i = leaves_batch[leaf_offset + 11];
+        const double d5_i     = leaves_tree[leaf_offset + 0];
+        const double sig_d5_i = leaves_tree[leaf_offset + 1];
+        const double d3_i     = leaves_tree[leaf_offset + 4];
+        const double sig_d3_i = leaves_tree[leaf_offset + 5];
+        const double d2_i     = leaves_tree[leaf_offset + 6];
+        const double sig_d2_i = leaves_tree[leaf_offset + 7];
+        const double d1_i     = leaves_tree[leaf_offset + 8];
+        const double sig_d1_i = leaves_tree[leaf_offset + 9];
+        const double d0_i     = leaves_tree[leaf_offset + 10];
+        const double sig_d0_i = leaves_tree[leaf_offset + 11];
 
         const double omega_orb_sq = -d5_i / d3_i;
         const double omega_orb    = std::sqrt(omega_orb_sq);
@@ -1177,18 +1164,18 @@ void circ_taylor_transform_batch(std::span<double> leaves_batch,
         }
 
         // Write back transformed values
-        leaves_batch[leaf_offset + 0]  = d5_j;
-        leaves_batch[leaf_offset + 1]  = sig_d5_j;
-        leaves_batch[leaf_offset + 2]  = d4_j;
-        leaves_batch[leaf_offset + 3]  = sig_d4_j;
-        leaves_batch[leaf_offset + 4]  = d3_j;
-        leaves_batch[leaf_offset + 5]  = sig_d3_j;
-        leaves_batch[leaf_offset + 6]  = d2_j;
-        leaves_batch[leaf_offset + 7]  = sig_d2_j;
-        leaves_batch[leaf_offset + 8]  = d1_j;
-        leaves_batch[leaf_offset + 9]  = sig_d1_j;
-        leaves_batch[leaf_offset + 10] = d0_j;
-        leaves_batch[leaf_offset + 11] = sig_d0_i;
+        leaves_tree[leaf_offset + 0]  = d5_j;
+        leaves_tree[leaf_offset + 1]  = sig_d5_j;
+        leaves_tree[leaf_offset + 2]  = d4_j;
+        leaves_tree[leaf_offset + 3]  = sig_d4_j;
+        leaves_tree[leaf_offset + 4]  = d3_j;
+        leaves_tree[leaf_offset + 5]  = sig_d3_j;
+        leaves_tree[leaf_offset + 6]  = d2_j;
+        leaves_tree[leaf_offset + 7]  = sig_d2_j;
+        leaves_tree[leaf_offset + 8]  = d1_j;
+        leaves_tree[leaf_offset + 9]  = sig_d1_j;
+        leaves_tree[leaf_offset + 10] = d0_j;
+        leaves_tree[leaf_offset + 11] = sig_d0_i;
     }
 
     // Pre-compute constants to avoid repeated calculations
@@ -1203,18 +1190,18 @@ void circ_taylor_transform_batch(std::span<double> leaves_batch,
     for (SizeType i : idx_taylor) {
         const SizeType leaf_offset = i * kLeavesStride;
 
-        const auto c_val_i = leaves_batch[leaf_offset + 0];
-        const auto c_err_i = leaves_batch[leaf_offset + 1];
-        const auto s_val_i = leaves_batch[leaf_offset + 2];
-        const auto s_err_i = leaves_batch[leaf_offset + 3];
-        const auto j_val_i = leaves_batch[leaf_offset + 4];
-        const auto j_err_i = leaves_batch[leaf_offset + 5];
-        const auto a_val_i = leaves_batch[leaf_offset + 6];
-        const auto a_err_i = leaves_batch[leaf_offset + 7];
-        const auto v_val_i = leaves_batch[leaf_offset + 8];
-        const auto v_err_i = leaves_batch[leaf_offset + 9];
-        const auto d_val_i = leaves_batch[leaf_offset + 10];
-        const auto d_err_i = leaves_batch[leaf_offset + 11];
+        const auto c_val_i = leaves_tree[leaf_offset + 0];
+        const auto c_err_i = leaves_tree[leaf_offset + 1];
+        const auto s_val_i = leaves_tree[leaf_offset + 2];
+        const auto s_err_i = leaves_tree[leaf_offset + 3];
+        const auto j_val_i = leaves_tree[leaf_offset + 4];
+        const auto j_err_i = leaves_tree[leaf_offset + 5];
+        const auto a_val_i = leaves_tree[leaf_offset + 6];
+        const auto a_err_i = leaves_tree[leaf_offset + 7];
+        const auto v_val_i = leaves_tree[leaf_offset + 8];
+        const auto v_err_i = leaves_tree[leaf_offset + 9];
+        const auto d_val_i = leaves_tree[leaf_offset + 10];
+        const auto d_err_i = leaves_tree[leaf_offset + 11];
 
         const auto c_val_j = c_val_i;
         const auto s_val_j = s_val_i + (c_val_i * delta_t);
@@ -1265,18 +1252,18 @@ void circ_taylor_transform_batch(std::span<double> leaves_batch,
         }
 
         // Write back transformed values
-        leaves_batch[leaf_offset + 0]  = c_val_j;
-        leaves_batch[leaf_offset + 1]  = c_err_j;
-        leaves_batch[leaf_offset + 2]  = s_val_j;
-        leaves_batch[leaf_offset + 3]  = s_err_j;
-        leaves_batch[leaf_offset + 4]  = j_val_j;
-        leaves_batch[leaf_offset + 5]  = j_err_j;
-        leaves_batch[leaf_offset + 6]  = a_val_j;
-        leaves_batch[leaf_offset + 7]  = a_err_j;
-        leaves_batch[leaf_offset + 8]  = v_val_j;
-        leaves_batch[leaf_offset + 9]  = v_err_j;
-        leaves_batch[leaf_offset + 10] = d_val_j;
-        leaves_batch[leaf_offset + 11] = d_err_i;
+        leaves_tree[leaf_offset + 0]  = c_val_j;
+        leaves_tree[leaf_offset + 1]  = c_err_j;
+        leaves_tree[leaf_offset + 2]  = s_val_j;
+        leaves_tree[leaf_offset + 3]  = s_err_j;
+        leaves_tree[leaf_offset + 4]  = j_val_j;
+        leaves_tree[leaf_offset + 5]  = j_err_j;
+        leaves_tree[leaf_offset + 6]  = a_val_j;
+        leaves_tree[leaf_offset + 7]  = a_err_j;
+        leaves_tree[leaf_offset + 8]  = v_val_j;
+        leaves_tree[leaf_offset + 9]  = v_err_j;
+        leaves_tree[leaf_offset + 10] = d_val_j;
+        leaves_tree[leaf_offset + 11] = d_err_i;
     }
 }
 

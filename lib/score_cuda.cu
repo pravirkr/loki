@@ -133,6 +133,111 @@ __global__ void snr_boxcar_kernel_warp(const float* __restrict__ arr,
     }
 }
 
+template <uint32_t BlockThreads>
+__global__ void score_and_filter_kernel(const float* __restrict__ tree_folds,
+                                        float* __restrict__ tree_scores,
+                                        SizeType* __restrict__ tree_indices,
+                                        const SizeType* __restrict__ widths,
+                                        uint32_t nwidths,
+                                        float threshold,
+                                        uint32_t n_leaves,
+                                        uint32_t nbins,
+                                        uint32_t* n_leaves_passing) {
+    // Kernel Configuration & Indexing
+    constexpr uint32_t kWarpSize       = 32;
+    constexpr uint32_t kLeavesPerBlock = BlockThreads / kWarpSize;
+
+    const auto warp_id = threadIdx.x / kWarpSize;
+    const auto lane_id = threadIdx.x % kWarpSize;
+    const auto ileaf   = (blockIdx.x * kLeavesPerBlock) + warp_id;
+
+    if (ileaf >= n_leaves) {
+        return;
+    }
+    // Dynamic Shared Memory
+    extern __shared__ float s_mem_block[];
+    float* s_warp_data = &s_mem_block[static_cast<SizeType>(warp_id * nbins)];
+
+    using WarpScan   = cub::WarpScan<float, kWarpSize>;
+    using WarpReduce = cub::WarpReduce<float, kWarpSize>;
+    __shared__ typename WarpScan::TempStorage temp_scan[kLeavesPerBlock];
+    __shared__ typename WarpReduce::TempStorage temp_reduce[kLeavesPerBlock];
+    __shared__ typename WarpReduce::TempStorage temp_final[kLeavesPerBlock];
+
+    // Load data from global to shared memory
+    for (uint32_t j = lane_id; j < nbins; j += kWarpSize) {
+        const auto idx_e = (ileaf * 2 * nbins) + j;
+        const auto idx_v = (ileaf * 2 * nbins) + j + nbins;
+        s_warp_data[j]   = tree_folds[idx_e] / sqrtf(tree_folds[idx_v]);
+    }
+
+    // Perform warp-level complicated inclusive prefix sum
+    float running_sum     = 0.0F;
+    const auto num_chunks = (nbins + kWarpSize - 1) / kWarpSize;
+    for (uint32_t chunk = 0; chunk < num_chunks; ++chunk) {
+        const auto idx = (chunk * kWarpSize) + lane_id;
+        float val      = (idx < nbins) ? s_warp_data[idx] : 0.0F;
+        WarpScan(temp_scan[warp_id]).InclusiveSum(val, val);
+        if (idx < nbins) {
+            s_warp_data[idx] = val + running_sum;
+        }
+        float chunk_sum = __shfl_sync(0xFFFFFFFF, val, kWarpSize - 1);
+        if (lane_id == 0) {
+            running_sum += chunk_sum;
+        }
+        running_sum = __shfl_sync(0xFFFFFFFF, running_sum, 0);
+    }
+
+    // Find max SNR across all widths
+    const float total_sum = s_warp_data[nbins - 1];
+    float thread_max_snr  = -CUDART_INF_F;
+
+    for (uint32_t iw = 0; iw < nwidths; ++iw) {
+        const int w   = static_cast<int>(widths[iw]);
+        const float h = sqrtf(static_cast<float>(nbins - w) /
+                              static_cast<float>(nbins * w));
+        const float b =
+            static_cast<float>(w) * h / static_cast<float>(nbins - w);
+
+        float thread_max_diff = -CUDART_INF_F;
+        for (uint32_t j = lane_id; j < nbins; j += kWarpSize) {
+            const auto sum_before_start = (j > 0) ? s_warp_data[j - 1] : 0.0F;
+            float current_sum;
+            const auto end_idx = j + w - 1;
+            if (end_idx < nbins) {
+                // Normal case: sum from j to j+w-1
+                current_sum = s_warp_data[end_idx] - sum_before_start;
+            } else {
+                // Circular case: sum wraps around
+                current_sum = (total_sum - sum_before_start) +
+                              s_warp_data[end_idx % nbins];
+            }
+            thread_max_diff = fmaxf(thread_max_diff, current_sum);
+        }
+        const float max_diff = WarpReduce(temp_reduce[warp_id])
+                                   .Reduce(thread_max_diff, CubMaxOp<float>());
+
+        if (lane_id == 0) {
+            const float snr = ((h + b) * max_diff) - (b * total_sum);
+            thread_max_snr  = fmaxf(thread_max_snr, snr);
+        }
+    }
+
+    // Final reduction to get max SNR across all widths for this warp
+    float final_max_snr = WarpReduce(temp_final[warp_id])
+                              .Reduce(thread_max_snr, CubMaxOp<float>());
+    if (lane_id == 0) {
+        tree_scores[ileaf] = final_max_snr;
+        if (final_max_snr > threshold) {
+            cuda::atomic_ref<uint32_t, cuda::thread_scope_device> counter(
+                *n_leaves_passing);
+            const uint32_t idx =
+                counter.fetch_add(1, cuda::std::memory_order_relaxed);
+            tree_indices[idx] = ileaf;
+        }
+    }
+}
+
 // Unified launch function template
 template <bool Is3D, bool FindMax>
 void launch_snr_boxcar_kernel(cuda::std::span<const float> arr,

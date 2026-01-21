@@ -344,7 +344,8 @@ public:
           m_threshold_scheme(threshold_scheme.begin(), threshold_scheme.end()),
           m_max_sugg(max_sugg),
           m_batch_size(batch_size),
-          m_poly_basis(poly_basis) {
+          m_poly_basis(poly_basis),
+          m_total_levels(m_threshold_scheme.size()) {
         // Setup pruning functions
         setup_pruning();
 
@@ -452,7 +453,7 @@ public:
             actual_result_file, cands::PruneResultWriter::Mode::kAppend);
         auto leaves_report = m_world_tree->get_leaves_contiguous_span();
         m_prune_funcs->report(leaves_report, coord_mid,
-                              m_world_tree->get_size(), m_cfg.get_nparams());
+                              m_world_tree->get_size());
         result_writer.write_run_results(
             run_name, m_snail_scheme->get_data(), leaves_report,
             m_world_tree->get_scores_contiguous_span(),
@@ -478,6 +479,7 @@ private:
     SizeType m_max_sugg;
     SizeType m_batch_size;
     std::string_view m_poly_basis;
+    SizeType m_total_levels;
 
     std::vector<double> m_branching_pattern;
     SizeType m_branch_max{0};
@@ -512,9 +514,9 @@ private:
         m_prune_complete = false;
         spdlog::info("Pruning run {:03d}: initialized", ref_seg);
 
-        // Initialize the suggestions with the first segment
-        const auto fold_segment =
-            m_prune_funcs->load(ffa_fold, m_snail_scheme->get_ref_idx());
+        // Initialize the world tree with the first segment
+        const auto fold_segment = m_prune_funcs->load_segment(
+            ffa_fold, m_snail_scheme->get_ref_idx());
         const auto coord_init = m_snail_scheme->get_coord(m_prune_level);
         const auto n_leaves   = m_ffa_plan.get_ncoords().back();
         m_prune_funcs->seed(fold_segment, coord_init, m_seed_leaves,
@@ -611,12 +613,11 @@ private:
 
         // Load fold segment for current level
         const auto ffa_fold_segment =
-            m_prune_funcs->load(ffa_fold, seg_idx_cur);
+            m_prune_funcs->load_segment(ffa_fold, seg_idx_cur);
 
         auto current_threshold = threshold;
 
         const auto n_branches = m_world_tree->get_size_old();
-        const auto n_params   = m_cfg.get_nparams();
         const auto batch_size =
             std::max(1UL, std::min(m_batch_size, n_branches));
 
@@ -646,7 +647,7 @@ private:
                 leaves_tree_span, coord_cur, coord_prev,
                 m_pruning_workspace->branched_leaves,
                 m_pruning_workspace->branched_indices, current_batch_size,
-                n_params, m_pruning_workspace->scratch_params,
+                m_pruning_workspace->scratch_params,
                 m_pruning_workspace->scratch_dparams,
                 m_pruning_workspace->scratch_counts);
             stats.batch_timers["branch"] += timer.stop();
@@ -665,7 +666,7 @@ private:
             const auto n_leaves_after_validation =
                 m_prune_funcs->validate(m_pruning_workspace->branched_leaves,
                                         m_pruning_workspace->branched_indices,
-                                        coord_cur, n_leaves_batch, n_params);
+                                        coord_cur, n_leaves_batch);
             stats.batch_timers["validate"] += timer.stop();
             stats.n_leaves_phy += n_leaves_after_validation;
             if (n_leaves_after_validation == 0) {
@@ -679,7 +680,7 @@ private:
                                    coord_add, coord_cur, coord_init,
                                    m_pruning_workspace->branched_param_idx,
                                    m_pruning_workspace->branched_phase_shift,
-                                   n_leaves_after_validation, n_params);
+                                   n_leaves_after_validation);
             stats.batch_timers["resolve"] += timer.stop();
 
             // Load, shift, add (Map branched_itree to physical indices)
@@ -737,8 +738,7 @@ private:
             // Transform
             timer.start();
             m_prune_funcs->transform(m_pruning_workspace->branched_leaves,
-                                     coord_next, coord_cur, n_leaves_passing,
-                                     n_params);
+                                     coord_next, coord_cur, n_leaves_passing);
             stats.batch_timers["transform"] += timer.stop();
 
             // Add batch to output suggestions

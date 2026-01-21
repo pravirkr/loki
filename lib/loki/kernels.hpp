@@ -6,6 +6,12 @@
 #include "loki/algorithms/plans.hpp"
 #include "loki/common/types.hpp"
 
+#ifdef LOKI_ENABLE_CUDA
+#include <cuda/std/span>
+#include <cuda_runtime_api.h>
+#include <thrust/device_vector.h>
+#endif // LOKI_ENABLE_CUDA
+
 namespace loki::kernels {
 
 // Defined here so it does not interfer with nvcc
@@ -302,5 +308,10 @@ void shift_add_complex_recurrence_batch(
     SizeType nbins_f,
     SizeType nbins,
     SizeType nbatch) noexcept;
+
+
+#ifdef LOKI_ENABLE_CUDA
+
+#endif // LOKI_ENABLE_CUDA
 
 } // namespace loki::kernels

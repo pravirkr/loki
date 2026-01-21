@@ -74,7 +74,7 @@ public:
                  std::span<const float> ts_v,
                  const std::filesystem::path& outdir,
                  std::string_view file_prefix,
-                 std::string_view kind,
+                 std::string_view poly_basis,
                  bool show_progress) override {
         spdlog::info("PruningManagerCUDA: Initializing with FFA");
         // Create appropriate FFA fold
@@ -97,10 +97,10 @@ public:
         std::error_code ec;
         std::filesystem::create_directories(outdir, ec);
         if (!std::filesystem::exists(outdir)) {
-            throw std::runtime_error(
-                std::format("PruningManager::execute: Failed to create output "
-                            "directory '{}': {}",
-                            outdir.string(), ec.message()));
+            throw std::runtime_error(std::format(
+                "PruningManagerCUDA::execute: Failed to create output "
+                "directory '{}': {}",
+                outdir.string(), ec.message()));
         }
 
         // Determine ref_segs to process
@@ -122,13 +122,10 @@ public:
 
         auto prune =
             PruneCUDA<FoldTypeCUDA>(ffa_plan, m_cfg, m_threshold_scheme,
-                                    m_max_sugg, m_batch_size, kind);
+                                    m_max_sugg, m_batch_size, poly_basis);
         for (const auto ref_seg : ref_segs_to_process) {
-            prune.execute(cuda::std::span<const FoldTypeCUDA>(
-                              thrust::raw_pointer_cast(ffa_fold_d.data()),
-                              ffa_fold_d.size()),
-                          ref_seg, outdir, log_file, result_file,
-                          show_progress);
+            prune.execute(cuda_utils::as_span(ffa_fold_d), ref_seg, outdir,
+                          log_file, result_file, show_progress);
         }
         spdlog::info("Pruning complete. Results saved to {}",
                      result_file.string());
@@ -227,9 +224,11 @@ public:
           m_batch_size(batch_size),
           m_poly_basis(poly_basis),
           m_total_levels(m_threshold_scheme.size()) {
+        // Setup pruning functions
+        setup_pruning();
 
-        // Allocate suggestion buffer
         const auto max_batch_size = m_batch_size * m_branch_max;
+        // Allocate suggestion buffer
         if constexpr (std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>) {
             m_world_tree = std::make_unique<utils::WorldTreeCUDA<FoldTypeCUDA>>(
                 m_max_sugg, m_cfg.get_nparams(), m_cfg.get_nbins_f(),
@@ -253,12 +252,10 @@ public:
                     m_cfg.get_nbins());
         }
 
-        // Setup pruning functions
-        m_prune_funcs = std::make_unique<core::PruneDPFunctsCUDA<FoldTypeCUDA>>(
-            m_ffa_plan.get_params().back(), m_ffa_plan.get_dparams_lim().back(),
-            m_ffa_plan.get_nsegments().back(),
-            m_ffa_plan.get_tsegments().back(), m_cfg, m_batch_size,
-            m_branch_max);
+        // Allocate buffers for seeding the world tree and scoring
+        const auto ncoords_ffa = m_ffa_plan.get_ncoords().back();
+        m_seed_leaves.resize(ncoords_ffa * m_world_tree->get_leaves_stride());
+        m_seed_scores.resize(ncoords_ffa);
     }
 
     ~Impl()                      = default;
@@ -316,11 +313,13 @@ public:
         // Write results
         auto result_writer = cands::PruneResultWriter(
             actual_result_file, cands::PruneResultWriter::Mode::kAppend);
+        auto leaves_report = m_world_tree->get_leaves_contiguous_span();
+        m_prune_funcs->report(leaves_report, coord_mid,
+                              m_world_tree->get_size());
         result_writer.write_run_results(
-            run_name, m_snail_scheme->get_data(),
-            m_world_tree->get_transformed(coord_mid),
-            m_world_tree->get_scores(), m_world_tree->get_nsugg(),
-            m_cfg.get_nparams(), *m_pstats);
+            run_name, m_snail_scheme->get_data(), leaves_report,
+            m_world_tree->get_scores_contiguous_span(),
+            m_world_tree->get_size(), m_cfg.get_nparams(), *m_pstats);
 
         // Final log entries
         std::ofstream final_log(actual_log_file, std::ios::app);
@@ -355,6 +354,10 @@ private:
     std::unique_ptr<utils::WorldTreeCUDA<FoldTypeCUDA>> m_world_tree;
     std::unique_ptr<PruningWorkspaceCUDA<FoldTypeCUDA>> m_pruning_workspace;
 
+    // Buffers for seeding the world tree and scoring
+    thrust::device_vector<double> m_seed_leaves_d;
+    thrust::device_vector<float> m_seed_scores_d;
+
     void initialize(cuda::std::span<const FoldTypeCUDA> ffa_fold,
                     SizeType ref_seg,
                     const std::filesystem::path& log_file) {
@@ -372,7 +375,15 @@ private:
         spdlog::info("Pruning run {:03d}: initialized", ref_seg);
 
         // Initialize the world tree with the first segment
-        seed(ffa_fold);
+        const auto fold_segment = m_prune_funcs->load_segment(
+            ffa_fold, m_snail_scheme->get_ref_idx());
+        const auto coord_init = m_snail_scheme->get_coord(m_prune_level);
+        const auto n_leaves   = m_ffa_plan.get_ncoords().back();
+        m_prune_funcs->seed(fold_segment, coord_init, m_seed_leaves,
+                            m_seed_scores);
+        // Initialize the WorldTree with the generated data
+        m_world_tree->add_initial(m_seed_leaves, fold_segment, m_seed_scores,
+                                  n_leaves);
     }
 
     void execute_iteration(cuda::std::span<const FoldTypeCUDA> ffa_fold) {
@@ -450,11 +461,6 @@ private:
             }
             total_processed += current_batch_size;
 
-            // Branch and validate kernel
-            const auto grid  = dim3(1, 1, 1);
-            const auto block = dim3(1, 1, 1);
-            cuda_utils::check_kernel_launch_params(grid, block);
-
             const auto [n_leaves_batch, n_leaves_after_validation] =
                 m_prune_funcs->branch_and_validate(
                     leaves_tree_span, coord_cur, coord_prev,
@@ -485,10 +491,8 @@ private:
 
             // Shift and add kernel
             m_world_tree->convert_to_physical_indices(
-                cuda::std::span<SizeType>(
-                    thrust::raw_pointer_cast(
-                        m_pruning_workspace->branched_indices_d.data()),
-                    n_leaves_after_validation),
+                cuda_utils::as_span(m_pruning_workspace->branched_indices_d,
+                                    n_leaves_after_validation),
                 n_leaves_after_validation);
 
             m_prune_funcs->shift_add(
@@ -526,19 +530,10 @@ private:
 
             // Add batch to output suggestions
             current_threshold = m_world_tree->add_batch(
-                cuda::std::span<const double>(
-                    thrust::raw_pointer_cast(
-                        m_pruning_workspace->branched_leaves_d.data()),
-                    n_leaves_passing),
-                cuda::std::span<const FoldTypeCUDA>(
-                    thrust::raw_pointer_cast(
-                        m_pruning_workspace->branched_folds_d.data()),
-                    n_leaves_passing),
-                cuda::std::span<const float>(
-                    thrust::raw_pointer_cast(
-                        m_pruning_workspace->branched_scores_d.data()),
-                    n_leaves_passing),
-                current_threshold, n_leaves_passing);
+                cuda_utils::as_span(m_pruning_workspace->branched_leaves_d),
+                cuda_utils::as_span(m_pruning_workspace->branched_folds_d),
+                cuda_utils::as_span(m_pruning_workspace->branched_scores_d),
+                n_leaves_passing, current_threshold, n_leaves_passing);
 
             // Notify the buffer that a batch of the old suggestions has been
             // consumed
@@ -546,7 +541,21 @@ private:
         }
     }
 
-}; // End Prune::Impl implementation
+    void setup_pruning() {
+        error_check::check_less_equal(m_cfg.get_nparams(), 5,
+                                      "Pruning not supported for nparams > 5.");
+        m_branching_pattern   = m_ffa_plan.get_branching_pattern(m_poly_basis);
+        const auto branch_max = *std::ranges::max_element(m_branching_pattern);
+        m_branch_max =
+            std::max(static_cast<SizeType>(std::ceil(branch_max * 2)), 32UL);
+        m_prune_funcs = std::make_unique<core::PruneDPFunctsCUDA<FoldTypeCUDA>>(
+            m_ffa_plan.get_params().back(), m_ffa_plan.get_dparams_lim().back(),
+            m_ffa_plan.get_nsegments().back(),
+            m_ffa_plan.get_tsegments().back(), m_cfg, m_batch_size,
+            m_branch_max);
+    }
+
+}; // End PruneCUDA::Impl implementation
 
 PruningManagerCUDA::PruningManagerCUDA(
     const search::PulsarSearchConfig& cfg,

@@ -198,6 +198,33 @@ void irfft_batch(std::span<const ComplexType> complex_input,
 
 #ifdef LOKI_ENABLE_CUDA
 
+class IrfftExecutorCUDA {
+public:
+    explicit IrfftExecutorCUDA(int n_real,
+                               int batch_size      = 4096,
+                               cudaStream_t stream = nullptr);
+    ~IrfftExecutorCUDA();
+
+    IrfftExecutorCUDA(const IrfftExecutorCUDA&)            = delete;
+    IrfftExecutorCUDA& operator=(const IrfftExecutorCUDA&) = delete;
+    IrfftExecutorCUDA(IrfftExecutorCUDA&&)                 = delete;
+    IrfftExecutorCUDA& operator=(IrfftExecutorCUDA&&)      = delete;
+
+    void execute(cuda::std::span<const ComplexTypeCUDA> complex_input,
+                 std::span<float> real_output,
+                 int batch_size);
+
+private:
+    int m_n_real;
+    int m_n_complex;
+    int m_batch_size;
+
+    std::unordered_map<PlanKey, cufftHandle, PlanKeyHash> m_plan_cache;
+    std::mutex m_mutex;
+    cudaStream_t m_stream;
+    cufftHandle get_or_create_plan(int batch_size);
+};
+
 void rfft_batch_cuda(cuda::std::span<float> real_input,
                      cuda::std::span<ComplexTypeCUDA> complex_output,
                      int batch_size,

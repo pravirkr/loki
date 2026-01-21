@@ -1,37 +1,24 @@
 #include "loki/core/dynamic.hpp"
 
-namespace loki::core {
+#include <cuda/std/limits>
+#include <cuda/std/span>
+#include <cuda/std/type_traits>
 
-namespace {
-template <SupportedFoldTypeCUDA FoldTypeCUDA>
-__global__ void seed_kernel(const FoldTypeCUDA* __restrict__ ffa_fold,
-                            cuda::std::pair<double, double> coord_init,
-                            const double* __restrict__ param_arr,
-                            const double* __restrict__ dparams,
-                            int poly_order,
-                            int nbins,
-                            double* __restrict__ tree_leaves,
-                            FoldTypeCUDA* __restrict__ tree_folds,
-                            float* __restrict__ tree_scores,
-                            int n_leaves) {
-    const auto idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= n_leaves) {
-        return;
-    }
-    int n_param_sets = 1;
-    for (int i = 0; i < poly_order; ++i) {
-        n_param_sets *= param_arr[(i * 2)];
-    }
-    const auto param_set = idx * n_param_sets;
-    for (int i = 0; i < n_param_sets; ++i) {
-        tree_leaves[idx * n_param_sets + i] = param_arr[i][param_set + i];
-    }
-    for (int i = 0; i < nbins; ++i) {
-        tree_folds[(idx * nbins) + i] = ffa_fold[(idx * nbins) + i];
-    }
-    tree_scores[idx] = 0.0F;
-}
-} // namespace
+#include <thrust/device_ptr.h>
+#include <thrust/device_vector.h>
+#include <thrust/execution_policy.h>
+#include <thrust/iterator/counting_iterator.h>
+#include <thrust/reduce.h>
+#include <thrust/scan.h>
+#include <thrust/sort.h>
+#include <thrust/transform.h>
+
+#include "loki/common/types.hpp"
+#include "loki/cuda_utils.cuh"
+#include "loki/ep_kernels_taylor.cuh"
+#include "loki/ep_kernels_utils.cuh"
+
+namespace loki::core {
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 PruneDPFunctsCUDA<FoldTypeCUDA>::PruneDPFunctsCUDA(
@@ -42,13 +29,24 @@ PruneDPFunctsCUDA<FoldTypeCUDA>::PruneDPFunctsCUDA(
     search::PulsarSearchConfig cfg,
     SizeType batch_size,
     SizeType branch_max)
-    : m_param_arr(param_arr.begin(), param_arr.end()),
-      m_dparams(dparams.begin(), dparams.end()),
+    : m_dparams(dparams.begin(), dparams.end()),
       m_nseg_ffa(nseg_ffa),
       m_tseg_ffa(tseg_ffa),
       m_cfg(std::move(cfg)),
       m_batch_size(batch_size),
-      m_branch_max(branch_max) {
+      m_branch_max(branch_max),
+      m_poly_basis(poly_basis) {
+    // Copy param_arr to device
+    const auto& accel_arr_grid = param_arr[0];
+    const auto& freq_arr_grid  = param_arr[1];
+    m_accel_grid_d.resize(accel_arr_grid.size());
+    m_freq_grid_d.resize(freq_arr_grid.size());
+    // copy with implicit double -> float conversion
+    thrust::copy(accel_arr_grid.begin(), accel_arr_grid.end(),
+                 m_accel_grid_d.begin());
+    thrust::copy(freq_arr_grid.begin(), freq_arr_grid.end(),
+                 m_freq_grid_d.begin());
+    m_boxcar_widths_d = m_cfg.get_scoring_widths();
     if constexpr (std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>) {
         const auto max_batch_size = m_batch_size * m_branch_max;
         m_folds_buffer_d.resize(max_batch_size * 2 * m_cfg.get_nbins());
@@ -61,12 +59,9 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA>
 cuda::std::span<const FoldTypeCUDA>
 PruneDPFunctsCUDA<FoldTypeCUDA>::load_segment(
     cuda::std::span<const FoldTypeCUDA> ffa_fold, SizeType seg_idx) const {
-    SizeType n_coords = 1;
-    for (const auto& arr : m_param_arr) {
-        n_coords *= arr.size();
-    }
-    const auto nbins   = m_cfg.get_nbins();
-    const auto nbins_f = m_cfg.get_nbins_f();
+    const SizeType n_coords = m_accel_grid_d.size() * m_freq_grid_d.size();
+    const auto nbins        = m_cfg.get_nbins();
+    const auto nbins_f      = m_cfg.get_nbins_f();
     if constexpr (std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>) {
         return ffa_fold.subspan(seg_idx * n_coords * 2 * nbins_f,
                                 n_coords * 2 * nbins_f);
@@ -100,5 +95,131 @@ void PruneDPFunctsCUDA<FoldTypeCUDA>::seed(
                                         dparams, poly_order, nbins, tree_leaves,
                                         tree_folds, tree_scores, ncoords);
 }
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+std::tuple<SizeType, SizeType>
+PruneDPFunctsCUDA<FoldTypeCUDA>::branch_and_validate(
+    cuda::std::span<const double> leaves_tree,
+    std::pair<double, double> coord_cur,
+    std::pair<double, double> coord_prev,
+    cuda::std::span<double> leaves_branch,
+    cuda::std::span<SizeType> leaves_origins,
+    SizeType n_leaves,
+    cuda::std::span<double> scratch_params,
+    cuda::std::span<double> scratch_dparams,
+    cuda::std::span<SizeType> scratch_counts) const {
+    return poly_taylor_branch_and_validate_cuda(
+        leaves_tree, coord_cur, coord_prev, leaves_branch, leaves_origins,
+        n_leaves, m_cfg.get_nparams(), m_cfg.get_nbins(), m_cfg.get_eta(),
+        m_cfg.get_param_limits(), m_branch_max, scratch_params, scratch_dparams,
+        scratch_counts, stream, ctx);
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+void PruneDPFunctsCUDA<FoldTypeCUDA>::resolve(
+    cuda::std::span<const double> leaves_branch,
+    std::pair<double, double> coord_add,
+    std::pair<double, double> coord_cur,
+    std::pair<double, double> coord_init,
+    cuda::std::span<SizeType> param_indices,
+    cuda::std::span<float> phase_shift,
+    SizeType n_leaves) const {
+    return poly_taylor_resolve_cuda(
+        leaves_branch, m_accel_grid_d, m_freq_grid_d, param_indices,
+        phase_shift, coord_add, coord_cur, coord_init, m_cfg.get_nbins(),
+        n_leaves, m_cfg.get_nparams(), stream);
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+void PruneDPFunctsCUDA<FoldTypeCUDA>::shift_add(
+    cuda::std::span<const FoldTypeCUDA> folds_tree,
+    cuda::std::span<const SizeType> indices_tree,
+    cuda::std::span<const FoldTypeCUDA> folds_ffa,
+    cuda::std::span<const SizeType> indices_ffa,
+    cuda::std::span<const float> phase_shift,
+    cuda::std::span<FoldTypeCUDA> folds_out,
+    SizeType n_leaves,
+    cudaStream_t stream) noexcept {
+    if (std::is_same_v<FoldTypeCUDA, float>) {
+        const auto total_work = n_leaves * m_cfg.get_nbins();
+        const auto block_size = (total_work < 65536) ? 256 : 512;
+        const auto grid_size  = (total_work + block_size - 1) / block_size;
+        const dim3 block_dim(block_size);
+        const dim3 grid_dim(grid_size);
+        cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
+
+        shift_add_kernel<<<grid_dim, block_dim, 0, stream>>>(
+            folds_tree.data(), indices_tree.data(), folds_ffa.data(),
+            indices_ffa.data(), phase_shift.data(), folds_out.data(), n_leaves,
+            m_cfg.get_nbins());
+    } else {
+        const auto total_work = n_leaves * m_cfg.get_nbins_f();
+        const auto block_size = (total_work < 65536) ? 256 : 512;
+        const auto grid_size  = (total_work + block_size - 1) / block_size;
+        const dim3 block_dim(block_size);
+        const dim3 grid_dim(grid_size);
+        cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
+        shift_add_complex_kernel<<<grid_dim, block_dim, 0, stream>>>(
+            folds_tree.data(), indices_tree.data(), folds_ffa.data(),
+            indices_ffa.data(), phase_shift.data(), folds_out.data(), n_leaves,
+            m_cfg.get_nbins(), m_cfg.get_nbins_f());
+    }
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+SizeType PruneDPFunctsCUDA<FoldTypeCUDA>::score_and_filter(
+    cuda::std::span<const FoldTypeCUDA> folds_tree,
+    cuda::std::span<float> scores_tree,
+    cuda::std::span<SizeType> indices_tree,
+    float threshold,
+    SizeType n_leaves,
+    cudaStream_t stream) noexcept {
+    SizeType n_leaves_passing = 0;
+    uint32_t* d_n_leaves_passing;
+    cudaMallocAsync(&d_n_leaves_passing, sizeof(uint32_t), stream);
+    cudaMemsetAsync(d_n_leaves_passing, 0, sizeof(uint32_t), stream);
+
+    if (std::is_same_v<FoldTypeCUDA, float>) {
+        constexpr uint32_t kWarpKernelBlockThreads = 128;
+        constexpr uint32_t kLeavesPerBlock = kWarpKernelBlockThreads / 32;
+
+        const SizeType warp_kernel_shmem =
+            kLeavesPerBlock * m_cfg.get_nbins() * sizeof(float);
+        const dim3 block_dim(kWarpKernelBlockThreads);
+        const dim3 grid_dim((n_leaves + kLeavesPerBlock - 1) / kLeavesPerBlock);
+
+        cuda_utils::check_kernel_launch_params(grid_dim, block_dim,
+                                               warp_kernel_shmem);
+
+        score_and_filter_kernel<kWarpKernelBlockThreads>
+            <<<grid_dim, block_dim, warp_kernel_shmem, stream>>>(
+                folds_tree.data(), scores_tree.data(), indices_tree.data(),
+                m_boxcar_widths_d.data(), m_boxcar_widths_d.size(), threshold,
+                n_leaves, m_cfg.get_nbins(), d_n_leaves_passing);
+    } else {
+        throw std::invalid_argument("FoldType not implemented");
+    }
+    cudaMemcpyAsync(&n_leaves_passing, d_n_leaves_passing, sizeof(uint32_t),
+                    cudaMemcpyDeviceToHost, stream);
+    cudaFreeAsync(d_n_leaves_passing, stream);
+    cudaStreamSynchronize(stream);
+    return n_leaves_passing;
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+void PruneDPFunctsCUDA<FoldTypeCUDA>::transform(
+    cuda::std::span<double> leaves_tree,
+    std::pair<double, double> coord_next,
+    std::pair<double, double> coord_cur,
+    SizeType n_leaves,
+    cudaStream_t stream) const {
+    return poly_taylor_transform_cuda(
+        leaves_tree, coord_next, coord_cur, n_leaves, m_cfg.get_nparams(),
+        m_cfg.get_use_conservative_tile(), stream);
+}
+
+// Explicit template instantiations
+template class PruneDPFunctsCUDA<float>;
+template class PruneDPFunctsCUDA<ComplexTypeCUDA>;
 
 } // namespace loki::core

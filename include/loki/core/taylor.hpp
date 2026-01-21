@@ -6,6 +6,12 @@
 
 #include "loki/common/types.hpp"
 
+#ifdef LOKI_ENABLE_CUDA
+#include <cuda/std/span>
+#include <cuda_runtime_api.h>
+#include <thrust/device_vector.h>
+#endif // LOKI_ENABLE_CUDA
+
 namespace loki::core {
 
 // Old method (not used anymore)
@@ -89,7 +95,6 @@ poly_taylor_branch_accel_batch(std::span<const double> leaves_tree,
                                std::span<double> leaves_branch,
                                std::span<SizeType> leaves_origins,
                                SizeType n_leaves,
-                               SizeType n_params,
                                SizeType nbins,
                                double eta,
                                const std::vector<ParamLimitType>& param_limits,
@@ -104,7 +109,6 @@ poly_taylor_branch_jerk_batch(std::span<const double> leaves_tree,
                               std::span<double> leaves_branch,
                               std::span<SizeType> leaves_origins,
                               SizeType n_leaves,
-                              SizeType n_params,
                               SizeType nbins,
                               double eta,
                               const std::vector<ParamLimitType>& param_limits,
@@ -119,7 +123,6 @@ poly_taylor_branch_snap_batch(std::span<const double> leaves_tree,
                               std::span<double> leaves_branch,
                               std::span<SizeType> leaves_origins,
                               SizeType n_leaves,
-                              SizeType n_params,
                               SizeType nbins,
                               double eta,
                               const std::vector<ParamLimitType>& param_limits,
@@ -129,60 +132,54 @@ poly_taylor_branch_snap_batch(std::span<const double> leaves_tree,
                               std::span<SizeType> scratch_counts);
 
 void poly_taylor_resolve_accel_batch(
-    std::span<const double> leaves_batch,
+    std::span<const double> leaves_tree,
     std::pair<double, double> coord_add,
     std::pair<double, double> coord_cur,
     std::pair<double, double> coord_init,
     std::span<const std::vector<double>> param_arr,
-    std::span<SizeType> pindex_flat_batch,
-    std::span<float> relative_phase_batch,
+    std::span<SizeType> param_indices,
+    std::span<float> phase_shift,
     SizeType nbins,
-    SizeType n_leaves,
-    SizeType n_params);
+    SizeType n_leaves);
 
 void poly_taylor_resolve_jerk_batch(
-    std::span<const double> leaves_batch,
+    std::span<const double> leaves_tree,
     std::pair<double, double> coord_add,
     std::pair<double, double> coord_cur,
     std::pair<double, double> coord_init,
     std::span<const std::vector<double>> param_arr,
-    std::span<SizeType> pindex_flat_batch,
-    std::span<float> relative_phase_batch,
+    std::span<SizeType> param_indices,
+    std::span<float> phase_shift,
     SizeType nbins,
-    SizeType n_leaves,
-    SizeType n_params);
+    SizeType n_leaves);
 
 void poly_taylor_resolve_snap_batch(
-    std::span<const double> leaves_batch,
+    std::span<const double> leaves_tree,
     std::pair<double, double> coord_add,
     std::pair<double, double> coord_cur,
     std::pair<double, double> coord_init,
     std::span<const std::vector<double>> param_arr,
-    std::span<SizeType> pindex_flat_batch,
-    std::span<float> relative_phase_batch,
+    std::span<SizeType> param_indices,
+    std::span<float> phase_shift,
     SizeType nbins,
-    SizeType n_leaves,
-    SizeType n_params);
+    SizeType n_leaves);
 
-void poly_taylor_transform_accel_batch(std::span<double> leaves_batch,
+void poly_taylor_transform_accel_batch(std::span<double> leaves_tree,
                                        std::pair<double, double> coord_next,
                                        std::pair<double, double> coord_cur,
                                        SizeType n_leaves,
-                                       SizeType n_params,
                                        bool use_conservative_tile);
 
-void poly_taylor_transform_jerk_batch(std::span<double> leaves_batch,
+void poly_taylor_transform_jerk_batch(std::span<double> leaves_tree,
                                       std::pair<double, double> coord_next,
                                       std::pair<double, double> coord_cur,
                                       SizeType n_leaves,
-                                      SizeType n_params,
                                       bool use_conservative_tile);
 
-void poly_taylor_transform_snap_batch(std::span<double> leaves_batch,
+void poly_taylor_transform_snap_batch(std::span<double> leaves_tree,
                                       std::pair<double, double> coord_next,
                                       std::pair<double, double> coord_cur,
                                       SizeType n_leaves,
-                                      SizeType n_params,
                                       bool use_conservative_tile);
 
 void report_leaves_taylor_batch(std::span<double> leaves_tree,
@@ -222,5 +219,49 @@ generate_bp_poly_taylor(std::span<const std::vector<double>> param_arr,
                         double eta,
                         SizeType ref_seg,
                         bool use_conservative_tile = false);
+
+#ifdef LOKI_ENABLE_CUDA
+
+std::tuple<SizeType, SizeType> poly_taylor_branch_and_validate_cuda(
+    cuda::std::span<const double> leaves_tree,
+    std::pair<double, double> coord_cur,
+    cuda::std::span<double> leaves_branch,
+    cuda::std::span<SizeType> leaves_origins,
+    SizeType n_leaves,
+    SizeType n_params,
+    SizeType nbins,
+    double eta,
+    const std::vector<ParamLimitType>& param_limits,
+    SizeType branch_max,
+    cuda::std::span<double> scratch_params,
+    cuda::std::span<double> scratch_dparams,
+    cuda::std::span<SizeType> scratch_counts,
+    cudaStream_t stream,
+    CudaDeviceContext& ctx);
+
+void poly_taylor_resolve_cuda(cuda::std::span<const double> leaves_branch,
+                              cuda::std::span<const float> accel_grid,
+                              cuda::std::span<const float> freq_grid,
+                              cuda::std::span<SizeType> param_indices,
+                              cuda::std::span<float> phase_shift,
+                              std::pair<double, double> coord_add,
+                              std::pair<double, double> coord_cur,
+                              std::pair<double, double> coord_init,
+                              SizeType nbins,
+                              SizeType n_leaves,
+                              SizeType n_params,
+                              cudaStream_t stream,
+                              CudaDeviceContext& ctx);
+
+void poly_taylor_transform_cuda(cuda::std::span<double> leaves_tree,
+                                std::pair<double, double> coord_next,
+                                std::pair<double, double> coord_cur,
+                                SizeType n_leaves,
+                                SizeType n_params,
+                                bool use_conservative_tile,
+                                cudaStream_t stream,
+                                CudaDeviceContext& ctx);
+
+#endif // LOKI_ENABLE_CUDA
 
 } // namespace loki::core

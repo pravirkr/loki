@@ -300,90 +300,141 @@ inline void check_cuda_sync_error(
 }
 
 /**
- * @brief Checks kernel launch parameters against device limits before
- * launching. Throws std::runtime_error on failure.
- * @param grid Grid dimensions.
- * @param block Block dimensions.
- * @param location Source location information (automatically captured).
- * @throws std::runtime_error if dimensions exceed device limits.
+ * @brief Thread-local cached device properties for zero-overhead access.
+ * Automatically invalidated on device switches.
  */
-inline void check_kernel_launch_params(
-    dim3 grid,
-    dim3 block,
-    size_t shmem_size              = 0,
-    const std::source_location loc = std::source_location::current()) {
-    int device;
-    cudaDeviceProp props{};
-    // Get current device, check for errors
-    check_cuda_call(cudaGetDevice(&device), "Failed to get device", loc);
-    check_cuda_call(cudaGetDeviceProperties(&props, device),
-                    "Failed to get device properties", loc);
+class CudaDeviceContext {
+public:
+    // Get thread-local instance for current device
+    [[nodiscard]] static const CudaDeviceContext& get() {
+        thread_local CudaDeviceContext instance;
+        instance.refresh_if_needed();
+        return instance;
+    }
 
-    auto check_limit = [&](auto val, auto max, std::string_view dim) {
-        if (val > static_cast<unsigned>(max)) {
-            throw std::runtime_error(
-                std::format("{} dimension {} exceeds device limit {} at {}:{}",
-                            dim, val, max, loc.file_name(), loc.line()));
+    // Force refresh (useful after external device changes)
+    static void force_refresh() {
+        thread_local CudaDeviceContext instance;
+        instance.refresh();
+    }
+
+    // Accessors - zero cost, just reads cached values
+    [[nodiscard]] int get_device_id() const noexcept { return device_id_; }
+    [[nodiscard]] const cudaDeviceProp& get_properties() const noexcept {
+        return props_;
+    }
+
+    [[nodiscard]] SizeType get_max_shared_memory() const noexcept {
+        return props_.sharedMemPerBlock;
+    }
+
+    [[nodiscard]] int get_max_threads_per_block() const noexcept {
+        return props_.maxThreadsPerBlock;
+    }
+
+    [[nodiscard]] const int* get_max_threads_dim() const noexcept {
+        return props_.maxThreadsDim;
+    }
+
+    [[nodiscard]] const int* get_max_grid_size() const noexcept {
+        return props_.maxGridSize;
+    }
+
+    [[nodiscard]] std::string get_device_info() const {
+        return std::format(
+            "Device {}: {} (CC {}.{}), Mem: {} MiB, Shared Mem: {} bytes",
+            device_id_, props_.name, props_.major, props_.minor,
+            props_.totalGlobalMem >> 20U, props_.sharedMemPerBlock);
+    }
+
+    // Validation methods - compile away in release builds
+#ifndef NDEBUG
+    /**
+     * @brief Checks kernel launch parameters against device limits before
+     * launching. Throws std::runtime_error on failure.
+     * @param grid Grid dimensions.
+     * @param block Block dimensions.
+     * @param location Source location information (automatically captured).
+     * @throws std::runtime_error if dimensions exceed device limits.
+     */
+    void check_kernel_launch_params(dim3 grid,
+                                    dim3 block,
+                                    size_t shmem_size = 0,
+                                    const std::source_location loc =
+                                        std::source_location::current()) const {
+
+        auto check_limit = [&](auto val, auto max, std::string_view dim) {
+            if (val > static_cast<unsigned>(max)) {
+                throw std::runtime_error(std::format(
+                    "{} dimension {} exceeds device limit {} at {}:{}", dim,
+                    val, max, loc.file_name(), loc.line()));
+            }
+        };
+
+        check_limit(block.x, props_.maxThreadsDim[0], "Block X");
+        check_limit(block.y, props_.maxThreadsDim[1], "Block Y");
+        check_limit(block.z, props_.maxThreadsDim[2], "Block Z");
+        check_limit(block.x * block.y * block.z, props_.maxThreadsPerBlock,
+                    "Total threads");
+        check_limit(grid.x, props_.maxGridSize[0], "Grid X");
+        check_limit(grid.y, props_.maxGridSize[1], "Grid Y");
+        check_limit(grid.z, props_.maxGridSize[2], "Grid Z");
+        check_limit(shmem_size, props_.sharedMemPerBlock, "Shared memory");
+    }
+#else
+    // No-op in release builds - completely optimized away
+    constexpr void check_kernel_launch_params(
+        dim3,
+        dim3,
+        size_t = 0,
+        const std::source_location =
+            std::source_location::current()) const noexcept {}
+#endif
+
+    // Delete copy/move to enforce singleton pattern
+    CudaDeviceContext(const CudaDeviceContext&)            = delete;
+    CudaDeviceContext& operator=(const CudaDeviceContext&) = delete;
+    CudaDeviceContext(CudaDeviceContext&&)                 = delete;
+    CudaDeviceContext& operator=(CudaDeviceContext&&)      = delete;
+
+private:
+    CudaDeviceContext() { refresh(); }
+
+    void refresh() {
+        check_cuda_call(cudaGetDevice(&device_id_), "Failed to get device");
+        check_cuda_call(cudaGetDeviceProperties(&props_, device_id_),
+                        "Failed to get device properties");
+    }
+
+    void refresh_if_needed() {
+        int current_device;
+        check_cuda_call(cudaGetDevice(&current_device), "Failed to get device");
+        if (current_device != device_id_) {
+            refresh();
         }
-    };
+    }
 
-    check_limit(block.x, props.maxThreadsDim[0], "Block X");
-    check_limit(block.y, props.maxThreadsDim[1], "Block Y");
-    check_limit(block.z, props.maxThreadsDim[2], "Block Z");
-    check_limit(block.x * block.y * block.z, props.maxThreadsPerBlock,
-                "Total threads");
-    check_limit(grid.x, props.maxGridSize[0], "Grid X");
-    check_limit(grid.y, props.maxGridSize[1], "Grid Y");
-    check_limit(grid.z, props.maxGridSize[2], "Grid Z");
-    check_limit(shmem_size, props.sharedMemPerBlock, "Shared memory");
-}
+    int device_id_{-1};
+    cudaDeviceProp props_{};
+};
 
-[[nodiscard]] inline std::string get_device_info() {
-    int device;
-    cudaDeviceProp props{};
-    check_cuda_call(cudaGetDevice(&device), "Failed to get device");
-    check_cuda_call(cudaGetDeviceProperties(&props, device),
-                    "Failed to get device properties");
-    return std::format(
-        "Device {}: {} (CC {}.{}), Mem: {} MiB, Shared Mem: {} bytes", device,
-        props.name, props.major, props.minor, props.totalGlobalMem >> 20U,
-        props.sharedMemPerBlock);
-}
-
-[[nodiscard]] inline SizeType get_max_shared_memory() {
-    int device;
-    cudaDeviceProp props{};
-    check_cuda_call(cudaGetDevice(&device), "Failed to get device");
-    check_cuda_call(cudaGetDeviceProperties(&props, device),
-                    "Failed to get device properties");
-    return props.sharedMemPerBlock;
-}
-
-[[nodiscard]] inline std::pair<double, double> get_cuda_memory_usage() {
-    SizeType free_mem, total_mem;
-    check_cuda_call(cudaMemGetInfo(&free_mem, &total_mem),
-                    "Failed to get CUDA memory usage");
-    return {static_cast<double>(free_mem) / static_cast<double>(1ULL << 30U),
-            static_cast<double>(total_mem) / static_cast<double>(1ULL << 30U)};
-}
-
-// Cached device count
+// Cached device count (global, not per-thread)
 [[nodiscard]] inline int get_device_count() {
     static int count = [] {
         int device_count;
-        check_cuda_call(
-            cudaGetDeviceCount(&device_count),
-            "cudaGetDeviceCount failed: Failed to get device count");
+        check_cuda_call(cudaGetDeviceCount(&device_count),
+                        "Failed to get device count");
         return device_count;
     }();
     return count;
 }
 
+// Optimized set_device with validation
 inline void set_device(int device_id) {
     const int device_count = get_device_count();
     if (device_id < 0 || device_id >= device_count) {
         throw CudaException(cudaErrorInvalidDevice,
-                            std::format("Invalid device_id {} (0..{})",
+                            std::format("Invalid device_id {} (must be 0..{})",
                                         device_id, device_count - 1));
     }
 
@@ -391,34 +442,81 @@ inline void set_device(int device_id) {
     check_cuda_call(cudaGetDevice(&current_device_id), "cudaGetDevice failed");
 
     if (current_device_id == device_id) {
-        return;
+        return; // Already on correct device
     }
 
     check_cuda_call(cudaSetDevice(device_id),
                     std::format("cudaSetDevice({}) failed", device_id));
+
+    // Force context refresh after device switch
+    CudaDeviceContext::force_refresh();
 }
 
 /**
  * @brief RAII guard for setting and restoring the CUDA device.
+ * Provides access to cached device context for the guarded device.
  */
 class CudaSetDeviceGuard {
-    int m_previous_device_id = -1;
-
 public:
     explicit CudaSetDeviceGuard(int device_id) {
-        check_cuda_call(cudaGetDevice(&m_previous_device_id),
+        check_cuda_call(cudaGetDevice(&previous_device_id_),
                         "cudaGetDevice failed");
-        if (m_previous_device_id != device_id) {
+
+        if (previous_device_id_ != device_id) {
             set_device(device_id);
+            device_changed_ = true;
         }
     }
 
-    ~CudaSetDeviceGuard() { cudaSetDevice(m_previous_device_id); }
+    ~CudaSetDeviceGuard() {
+        if (device_changed_) {
+            // Best effort restore - don't throw in destructor
+            cudaSetDevice(previous_device_id_);
+            CudaDeviceContext::force_refresh();
+        }
+    }
+
+    // Provide access to cached context for current device
+    [[nodiscard]] const CudaDeviceContext& context() const noexcept {
+        return CudaDeviceContext::get();
+    }
+
     CudaSetDeviceGuard(const CudaSetDeviceGuard&)            = delete;
     CudaSetDeviceGuard& operator=(const CudaSetDeviceGuard&) = delete;
     CudaSetDeviceGuard(CudaSetDeviceGuard&&)                 = delete;
     CudaSetDeviceGuard& operator=(CudaSetDeviceGuard&&)      = delete;
+
+private:
+    int previous_device_id_{-1};
+    bool device_changed_{false};
 };
+
+// Standalone utility functions that use cached context
+[[nodiscard]] inline std::string get_device_info() {
+    return CudaDeviceContext::get().get_device_info();
+}
+
+[[nodiscard]] inline SizeType get_max_shared_memory() {
+    return CudaDeviceContext::get().get_max_shared_memory();
+}
+
+[[nodiscard]] inline std::pair<double, double> get_cuda_memory_usage() {
+    SizeType free_mem, total_mem;
+    check_cuda_call(cudaMemGetInfo(&free_mem, &total_mem),
+                    "Failed to get CUDA memory usage");
+    return {static_cast<double>(free_mem) / (1ULL << 30),
+            static_cast<double>(total_mem) / (1ULL << 30)};
+}
+
+// Standalone check function - delegates to context
+inline void check_kernel_launch_params(
+    dim3 grid,
+    dim3 block,
+    size_t shmem_size              = 0,
+    const std::source_location loc = std::source_location::current()) {
+    CudaDeviceContext::get().check_kernel_launch_params(grid, block, shmem_size,
+                                                        loc);
+}
 
 // Span helpers for Thrust device vectors
 template <typename T>
@@ -433,6 +531,21 @@ template <typename T>
 as_span(const thrust::device_vector<T>& v) noexcept {
     return {thrust::raw_pointer_cast(v.data()),
             static_cast<cuda::std::span<const T>::size_type>(v.size())};
+}
+
+// Overload for smaller given size
+template <typename T>
+[[nodiscard]] inline cuda::std::span<T> as_span(thrust::device_vector<T>& v,
+                                                SizeType size) noexcept {
+    return {thrust::raw_pointer_cast(v.data()),
+            static_cast<cuda::std::span<T>::size_type>(size)};
+}
+
+template <typename T>
+[[nodiscard]] inline cuda::std::span<const T>
+as_span(const thrust::device_vector<T>& v, SizeType size) noexcept {
+    return {thrust::raw_pointer_cast(v.data()),
+            static_cast<cuda::std::span<const T>::size_type>(size)};
 }
 
 // Lifetime safety: forbid temporaries

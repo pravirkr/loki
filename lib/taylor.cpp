@@ -510,7 +510,6 @@ poly_taylor_branch_accel_batch(std::span<const double> leaves_tree,
                                std::span<double> leaves_branch,
                                std::span<SizeType> leaves_origins,
                                SizeType n_leaves,
-                               SizeType n_params,
                                SizeType nbins,
                                double eta,
                                const std::vector<ParamLimitType>& param_limits,
@@ -522,8 +521,6 @@ poly_taylor_branch_accel_batch(std::span<const double> leaves_tree,
     constexpr SizeType kParamStride  = 2;
     constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
 
-    error_check::check_equal(n_params, kParams,
-                             "nparams should be 2 for accel branch");
     error_check::check_equal(leaves_tree.size(), n_leaves * kLeavesStride,
                              "leaves_tree size mismatch");
     error_check::check_greater_equal(leaves_branch.size(),
@@ -542,7 +539,7 @@ poly_taylor_branch_accel_batch(std::span<const double> leaves_tree,
 
     // Use leaves_branch memory as workspace.
     const SizeType workspace_size      = leaves_branch.size();
-    const SizeType single_batch_params = n_leaves * n_params;
+    const SizeType single_batch_params = n_leaves * kParams;
 
     // Get spans from workspace
     std::span<double> dparam_new =
@@ -553,12 +550,11 @@ poly_taylor_branch_accel_batch(std::span<const double> leaves_tree,
     error_check::check_less_equal(workspace_acquired_size, workspace_size,
                                   "workspace size mismatch");
     error_check::check_greater_equal(scratch_params.size(),
-                                     n_leaves * n_params * branch_max,
+                                     n_leaves * kParams * branch_max,
                                      "scratch_params size mismatch");
-    error_check::check_greater_equal(scratch_dparams.size(),
-                                     n_leaves * n_params,
+    error_check::check_greater_equal(scratch_dparams.size(), n_leaves * kParams,
                                      "scratch_dparams size mismatch");
-    error_check::check_greater_equal(scratch_counts.size(), n_leaves * n_params,
+    error_check::check_greater_equal(scratch_counts.size(), n_leaves * kParams,
                                      "scratch_counts size mismatch");
 
     const double* __restrict leaves_tree_ptr = leaves_tree.data();
@@ -708,7 +704,6 @@ poly_taylor_branch_jerk_batch(std::span<const double> leaves_tree,
                               std::span<double> leaves_branch,
                               std::span<SizeType> leaves_origins,
                               SizeType n_leaves,
-                              SizeType n_params,
                               SizeType nbins,
                               double eta,
                               const std::vector<ParamLimitType>& param_limits,
@@ -720,8 +715,6 @@ poly_taylor_branch_jerk_batch(std::span<const double> leaves_tree,
     constexpr SizeType kParamStride  = 2;
     constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
 
-    error_check::check_equal(n_params, kParams,
-                             "nparams should be 3 for jerk branch");
     error_check::check_equal(leaves_tree.size(), n_leaves * kLeavesStride,
                              "leaves_tree size mismatch");
     error_check::check_greater_equal(leaves_branch.size(),
@@ -742,7 +735,7 @@ poly_taylor_branch_jerk_batch(std::span<const double> leaves_tree,
 
     // Use leaves_branch memory as workspace.
     const SizeType workspace_size      = leaves_branch.size();
-    const SizeType single_batch_params = n_leaves * n_params;
+    const SizeType single_batch_params = n_leaves * kParams;
 
     // Get spans from workspace
     std::span<double> dparam_new =
@@ -753,12 +746,11 @@ poly_taylor_branch_jerk_batch(std::span<const double> leaves_tree,
     error_check::check_less_equal(workspace_acquired_size, workspace_size,
                                   "workspace size mismatch");
     error_check::check_greater_equal(scratch_params.size(),
-                                     n_leaves * n_params * branch_max,
+                                     n_leaves * kParams * branch_max,
                                      "scratch_params size mismatch");
-    error_check::check_greater_equal(scratch_dparams.size(),
-                                     n_leaves * n_params,
+    error_check::check_greater_equal(scratch_dparams.size(), n_leaves * kParams,
                                      "scratch_dparams size mismatch");
-    error_check::check_greater_equal(scratch_counts.size(), n_leaves * n_params,
+    error_check::check_greater_equal(scratch_counts.size(), n_leaves * kParams,
                                      "scratch_counts size mismatch");
 
     const double* __restrict leaves_tree_ptr = leaves_tree.data();
@@ -938,7 +930,6 @@ poly_taylor_branch_snap_batch(std::span<const double> leaves_tree,
                               std::span<double> leaves_branch,
                               std::span<SizeType> leaves_origins,
                               SizeType n_leaves,
-                              SizeType n_params,
                               SizeType nbins,
                               double eta,
                               const std::vector<ParamLimitType>& param_limits,
@@ -950,8 +941,6 @@ poly_taylor_branch_snap_batch(std::span<const double> leaves_tree,
     constexpr SizeType kParamStride  = 2;
     constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
 
-    error_check::check_equal(n_params, kParams,
-                             "nparams should be 4 for snap branch");
     error_check::check_equal(leaves_tree.size(), n_leaves * kLeavesStride,
                              "leaves_tree size mismatch");
     error_check::check_greater_equal(leaves_branch.size(),
@@ -974,7 +963,7 @@ poly_taylor_branch_snap_batch(std::span<const double> leaves_tree,
 
     // Use leaves_branch memory as workspace.
     const SizeType workspace_size      = leaves_branch.size();
-    const SizeType single_batch_params = n_leaves * n_params;
+    const SizeType single_batch_params = n_leaves * kParams;
 
     // Get spans from workspace
     std::span<double> dparam_new =
@@ -985,12 +974,11 @@ poly_taylor_branch_snap_batch(std::span<const double> leaves_tree,
     error_check::check_less_equal(workspace_acquired_size, workspace_size,
                                   "workspace size mismatch");
     error_check::check_greater_equal(scratch_params.size(),
-                                     n_leaves * n_params * branch_max,
+                                     n_leaves * kParams * branch_max,
                                      "scratch_params size mismatch");
-    error_check::check_greater_equal(scratch_dparams.size(),
-                                     n_leaves * n_params,
+    error_check::check_greater_equal(scratch_dparams.size(), n_leaves * kParams,
                                      "scratch_dparams size mismatch");
-    error_check::check_greater_equal(scratch_counts.size(), n_leaves * n_params,
+    error_check::check_greater_equal(scratch_counts.size(), n_leaves * kParams,
                                      "scratch_counts size mismatch");
 
     const double* __restrict leaves_tree_ptr = leaves_tree.data();
@@ -1200,31 +1188,28 @@ poly_taylor_branch_snap_batch(std::span<const double> leaves_tree,
 }
 
 void poly_taylor_resolve_accel_batch(
-    std::span<const double> leaves_batch,
+    std::span<const double> leaves_tree,
     std::pair<double, double> coord_add,
     std::pair<double, double> coord_cur,
     std::pair<double, double> coord_init,
     std::span<const std::vector<double>> param_arr,
-    std::span<SizeType> pindex_flat_batch,
-    std::span<float> relative_phase_batch,
+    std::span<SizeType> param_indices,
+    std::span<float> phase_shift,
     SizeType nbins,
-    SizeType n_leaves,
-    SizeType n_params) {
-    constexpr SizeType kParamsExpected = 2;
-    constexpr SizeType kParamStride    = 2;
-    constexpr SizeType kLeavesStride   = (kParamsExpected + 2) * kParamStride;
+    SizeType n_leaves) {
+    constexpr SizeType kParams       = 2;
+    constexpr SizeType kParamStride  = 2;
+    constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
 
-    error_check::check_equal(n_params, kParamsExpected,
-                             "nparams should be 2 for accel resolve");
-    error_check::check_equal(param_arr.size(), kParamsExpected,
+    error_check::check_equal(param_arr.size(), kParams,
                              "param_arr should have 2 parameters");
-    error_check::check_greater_equal(leaves_batch.size(),
+    error_check::check_greater_equal(leaves_tree.size(),
                                      n_leaves * kLeavesStride,
-                                     "batch_leaves size mismatch");
-    error_check::check_greater_equal(pindex_flat_batch.size(), n_leaves,
-                                     "param_idx_flat_batch size mismatch");
-    error_check::check_greater_equal(relative_phase_batch.size(), n_leaves,
-                                     "relative_phase_batch size mismatch");
+                                     "leaves_tree size mismatch");
+    error_check::check_greater_equal(param_indices.size(), n_leaves,
+                                     "param_indices size mismatch");
+    error_check::check_greater_equal(phase_shift.size(), n_leaves,
+                                     "phase_shift size mismatch");
 
     const auto [t0_cur, scale_cur]   = coord_cur;
     const auto [t0_init, scale_init] = coord_init;
@@ -1246,9 +1231,9 @@ void poly_taylor_resolve_accel_batch(
     for (SizeType i = 0; i < n_leaves; ++i) {
         const SizeType leaf_offset = i * kLeavesStride;
 
-        const auto a_t_cur     = leaves_batch[leaf_offset + (0 * kParamStride)];
-        const auto v_t_cur     = leaves_batch[leaf_offset + (1 * kParamStride)];
-        const auto f0          = leaves_batch[leaf_offset + (3 * kParamStride)];
+        const auto a_t_cur     = leaves_tree[leaf_offset + (0 * kParamStride)];
+        const auto v_t_cur     = leaves_tree[leaf_offset + (1 * kParamStride)];
+        const auto f0          = leaves_tree[leaf_offset + (3 * kParamStride)];
         const auto a_new       = a_t_cur;
         const auto delta_v_new = a_t_cur * delta_t;
         const auto delta_d_new =
@@ -1259,7 +1244,7 @@ void poly_taylor_resolve_accel_batch(
         const auto delay_rel = delta_d_new * utils::kInvCval;
 
         // Calculate relative phase
-        relative_phase_batch[i] =
+        phase_shift[i] =
             psr_utils::get_phase_idx(delta_t, f0, nbins, delay_rel);
 
         // Find nearest grid indices
@@ -1267,36 +1252,33 @@ void poly_taylor_resolve_accel_batch(
             utils::find_nearest_sorted_idx_scan(accel_arr_grid, a_new, hint_a);
         const auto idx_f =
             utils::find_nearest_sorted_idx_scan(freq_arr_grid, f_new, hint_f);
-        pindex_flat_batch[i] = (idx_a * n_freq) + idx_f;
+        param_indices[i] = (idx_a * n_freq) + idx_f;
     }
 }
 
 void poly_taylor_resolve_jerk_batch(
-    std::span<const double> leaves_batch,
+    std::span<const double> leaves_tree,
     std::pair<double, double> coord_add,
     std::pair<double, double> coord_cur,
     std::pair<double, double> coord_init,
     std::span<const std::vector<double>> param_arr,
-    std::span<SizeType> pindex_flat_batch,
-    std::span<float> relative_phase_batch,
+    std::span<SizeType> param_indices,
+    std::span<float> phase_shift,
     SizeType nbins,
-    SizeType n_leaves,
-    SizeType n_params) {
-    constexpr SizeType kParamsExpected = 3;
-    constexpr SizeType kParamStride    = 2;
-    constexpr SizeType kLeavesStride   = (kParamsExpected + 2) * kParamStride;
+    SizeType n_leaves) {
+    constexpr SizeType kParams       = 3;
+    constexpr SizeType kParamStride  = 2;
+    constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
 
-    error_check::check_equal(n_params, kParamsExpected,
-                             "nparams should be 3 for jerk resolve");
-    error_check::check_equal(param_arr.size(), kParamsExpected,
+    error_check::check_equal(param_arr.size(), kParams,
                              "param_arr should have 3 parameters");
-    error_check::check_greater_equal(leaves_batch.size(),
+    error_check::check_greater_equal(leaves_tree.size(),
                                      n_leaves * kLeavesStride,
-                                     "batch_leaves size mismatch");
-    error_check::check_greater_equal(pindex_flat_batch.size(), n_leaves,
-                                     "param_idx_flat_batch size mismatch");
-    error_check::check_greater_equal(relative_phase_batch.size(), n_leaves,
-                                     "relative_phase_batch size mismatch");
+                                     "leaves_tree size mismatch");
+    error_check::check_greater_equal(param_indices.size(), n_leaves,
+                                     "param_indices size mismatch");
+    error_check::check_greater_equal(phase_shift.size(), n_leaves,
+                                     "phase_shift size mismatch");
 
     const auto [t0_cur, scale_cur]   = coord_cur;
     const auto [t0_init, scale_init] = coord_init;
@@ -1322,10 +1304,10 @@ void poly_taylor_resolve_jerk_batch(
     for (SizeType i = 0; i < n_leaves; ++i) {
         const SizeType leaf_offset = i * kLeavesStride;
 
-        const auto j_t_cur = leaves_batch[leaf_offset + (0 * kParamStride)];
-        const auto a_t_cur = leaves_batch[leaf_offset + (1 * kParamStride)];
-        const auto v_t_cur = leaves_batch[leaf_offset + (2 * kParamStride)];
-        const auto f0      = leaves_batch[leaf_offset + (4 * kParamStride)];
+        const auto j_t_cur = leaves_tree[leaf_offset + (0 * kParamStride)];
+        const auto a_t_cur = leaves_tree[leaf_offset + (1 * kParamStride)];
+        const auto v_t_cur = leaves_tree[leaf_offset + (2 * kParamStride)];
+        const auto f0      = leaves_tree[leaf_offset + (4 * kParamStride)];
         const auto a_new   = a_t_cur + (j_t_cur * delta_t_add);
         const auto delta_v_new =
             (a_t_cur * delta_t) + (j_t_cur * half_delta_t_sq);
@@ -1338,7 +1320,7 @@ void poly_taylor_resolve_jerk_batch(
         const auto delay_rel = delta_d_new * utils::kInvCval;
 
         // Calculate relative phase
-        relative_phase_batch[i] =
+        phase_shift[i] =
             psr_utils::get_phase_idx(delta_t, f0, nbins, delay_rel);
 
         // Find nearest grid indices
@@ -1346,36 +1328,33 @@ void poly_taylor_resolve_jerk_batch(
             utils::find_nearest_sorted_idx_scan(accel_arr_grid, a_new, hint_a);
         const auto idx_f =
             utils::find_nearest_sorted_idx_scan(freq_arr_grid, f_new, hint_f);
-        pindex_flat_batch[i] = (idx_a * n_freq) + idx_f;
+        param_indices[i] = (idx_a * n_freq) + idx_f;
     }
 }
 
 void poly_taylor_resolve_snap_batch(
-    std::span<const double> leaves_batch,
+    std::span<const double> leaves_tree,
     std::pair<double, double> coord_add,
     std::pair<double, double> coord_cur,
     std::pair<double, double> coord_init,
     std::span<const std::vector<double>> param_arr,
-    std::span<SizeType> pindex_flat_batch,
-    std::span<float> relative_phase_batch,
+    std::span<SizeType> param_indices,
+    std::span<float> phase_shift,
     SizeType nbins,
-    SizeType n_leaves,
-    SizeType n_params) {
-    constexpr SizeType kParamsExpected = 4;
-    constexpr SizeType kParamStride    = 2;
-    constexpr SizeType kLeavesStride   = (kParamsExpected + 2) * kParamStride;
+    SizeType n_leaves) {
+    constexpr SizeType kParams       = 4;
+    constexpr SizeType kParamStride  = 2;
+    constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
 
-    error_check::check_equal(n_params, kParamsExpected,
-                             "nparams should be 4 for snap resolve");
-    error_check::check_equal(param_arr.size(), kParamsExpected,
+    error_check::check_equal(param_arr.size(), kParams,
                              "param_arr should have 4 parameters");
-    error_check::check_greater_equal(leaves_batch.size(),
+    error_check::check_greater_equal(leaves_tree.size(),
                                      n_leaves * kLeavesStride,
-                                     "batch_leaves size mismatch");
-    error_check::check_greater_equal(pindex_flat_batch.size(), n_leaves,
-                                     "param_idx_flat_batch size mismatch");
-    error_check::check_greater_equal(relative_phase_batch.size(), n_leaves,
-                                     "relative_phase_batch size mismatch");
+                                     "leaves_tree size mismatch");
+    error_check::check_greater_equal(param_indices.size(), n_leaves,
+                                     "param_indices size mismatch");
+    error_check::check_greater_equal(phase_shift.size(), n_leaves,
+                                     "phase_shift size mismatch");
 
     const auto [t0_cur, scale_cur]   = coord_cur;
     const auto [t0_init, scale_init] = coord_init;
@@ -1405,11 +1384,11 @@ void poly_taylor_resolve_snap_batch(
     for (SizeType i = 0; i < n_leaves; ++i) {
         const SizeType leaf_offset = i * kLeavesStride;
 
-        const auto s_t_cur = leaves_batch[leaf_offset + (0 * kParamStride)];
-        const auto j_t_cur = leaves_batch[leaf_offset + (1 * kParamStride)];
-        const auto a_t_cur = leaves_batch[leaf_offset + (2 * kParamStride)];
-        const auto v_t_cur = leaves_batch[leaf_offset + (3 * kParamStride)];
-        const auto f0      = leaves_batch[leaf_offset + (5 * kParamStride)];
+        const auto s_t_cur = leaves_tree[leaf_offset + (0 * kParamStride)];
+        const auto j_t_cur = leaves_tree[leaf_offset + (1 * kParamStride)];
+        const auto a_t_cur = leaves_tree[leaf_offset + (2 * kParamStride)];
+        const auto v_t_cur = leaves_tree[leaf_offset + (3 * kParamStride)];
+        const auto f0      = leaves_tree[leaf_offset + (5 * kParamStride)];
         const auto a_new =
             a_t_cur + (j_t_cur * delta_t_add) + (s_t_cur * half_delta_t_add_sq);
         const auto delta_v_new = (a_t_cur * delta_t) +
@@ -1425,7 +1404,7 @@ void poly_taylor_resolve_snap_batch(
         const auto delay_rel = delta_d_new * utils::kInvCval;
 
         // Calculate relative phase
-        relative_phase_batch[i] =
+        phase_shift[i] =
             psr_utils::get_phase_idx(delta_t, f0, nbins, delay_rel);
 
         // Find nearest grid indices
@@ -1433,23 +1412,20 @@ void poly_taylor_resolve_snap_batch(
             utils::find_nearest_sorted_idx_scan(accel_arr_grid, a_new, hint_a);
         const auto idx_f =
             utils::find_nearest_sorted_idx_scan(freq_arr_grid, f_new, hint_f);
-        pindex_flat_batch[i] = (idx_a * n_freq) + idx_f;
+        param_indices[i] = (idx_a * n_freq) + idx_f;
     }
 }
 
-void poly_taylor_transform_accel_batch(std::span<double> leaves_batch,
+void poly_taylor_transform_accel_batch(std::span<double> leaves_tree,
                                        std::pair<double, double> coord_next,
                                        std::pair<double, double> coord_cur,
                                        SizeType n_leaves,
-                                       SizeType n_params,
                                        bool use_conservative_tile) {
-    constexpr SizeType kParamsExpected = 2;
-    constexpr SizeType kParamStride    = 2;
-    constexpr SizeType kLeavesStride   = (kParamsExpected + 2) * kParamStride;
+    constexpr SizeType kParams       = 2;
+    constexpr SizeType kParamStride  = 2;
+    constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
 
-    error_check::check_equal(n_params, kParamsExpected,
-                             "nparams should be 2 for accel transform");
-    error_check::check_greater_equal(leaves_batch.size(),
+    error_check::check_greater_equal(leaves_tree.size(),
                                      n_leaves * kLeavesStride,
                                      "batch_leaves size mismatch");
 
@@ -1461,12 +1437,12 @@ void poly_taylor_transform_accel_batch(std::span<double> leaves_batch,
     for (SizeType i = 0; i < n_leaves; ++i) {
         const auto leaf_offset = i * kLeavesStride;
 
-        const auto a_val_i = leaves_batch[leaf_offset + 0];
-        const auto a_err_i = leaves_batch[leaf_offset + 1];
-        const auto v_val_i = leaves_batch[leaf_offset + 2];
-        const auto v_err_i = leaves_batch[leaf_offset + 3];
-        const auto d_val_i = leaves_batch[leaf_offset + 4];
-        const auto d_err_i = leaves_batch[leaf_offset + 5];
+        const auto a_val_i = leaves_tree[leaf_offset + 0];
+        const auto a_err_i = leaves_tree[leaf_offset + 1];
+        const auto v_val_i = leaves_tree[leaf_offset + 2];
+        const auto v_err_i = leaves_tree[leaf_offset + 3];
+        const auto d_val_i = leaves_tree[leaf_offset + 4];
+        const auto d_err_i = leaves_tree[leaf_offset + 5];
 
         const auto a_val_j = a_val_i;
         const auto v_val_j = v_val_i + (a_val_i * delta_t);
@@ -1486,28 +1462,25 @@ void poly_taylor_transform_accel_batch(std::span<double> leaves_batch,
         }
 
         // Write back transformed values
-        leaves_batch[leaf_offset + 0] = a_val_j;
-        leaves_batch[leaf_offset + 1] = a_err_j;
-        leaves_batch[leaf_offset + 2] = v_val_j;
-        leaves_batch[leaf_offset + 3] = v_err_j;
-        leaves_batch[leaf_offset + 4] = d_val_j;
-        leaves_batch[leaf_offset + 5] = d_err_i;
+        leaves_tree[leaf_offset + 0] = a_val_j;
+        leaves_tree[leaf_offset + 1] = a_err_j;
+        leaves_tree[leaf_offset + 2] = v_val_j;
+        leaves_tree[leaf_offset + 3] = v_err_j;
+        leaves_tree[leaf_offset + 4] = d_val_j;
+        leaves_tree[leaf_offset + 5] = d_err_i;
     }
 }
 
-void poly_taylor_transform_jerk_batch(std::span<double> leaves_batch,
+void poly_taylor_transform_jerk_batch(std::span<double> leaves_tree,
                                       std::pair<double, double> coord_next,
                                       std::pair<double, double> coord_cur,
                                       SizeType n_leaves,
-                                      SizeType n_params,
                                       bool use_conservative_tile) {
-    constexpr SizeType kParamsExpected = 3;
-    constexpr SizeType kParamStride    = 2;
-    constexpr SizeType kLeavesStride   = (kParamsExpected + 2) * kParamStride;
+    constexpr SizeType kParams       = 3;
+    constexpr SizeType kParamStride  = 2;
+    constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
 
-    error_check::check_equal(n_params, kParamsExpected,
-                             "nparams should be 3 for jerk transform");
-    error_check::check_greater_equal(leaves_batch.size(),
+    error_check::check_greater_equal(leaves_tree.size(),
                                      n_leaves * kLeavesStride,
                                      "batch_leaves size mismatch");
 
@@ -1521,14 +1494,14 @@ void poly_taylor_transform_jerk_batch(std::span<double> leaves_batch,
     for (SizeType i = 0; i < n_leaves; ++i) {
         const auto leaf_offset = i * kLeavesStride;
 
-        const auto j_val_i = leaves_batch[leaf_offset + 0];
-        const auto j_err_i = leaves_batch[leaf_offset + 1];
-        const auto a_val_i = leaves_batch[leaf_offset + 2];
-        const auto a_err_i = leaves_batch[leaf_offset + 3];
-        const auto v_val_i = leaves_batch[leaf_offset + 4];
-        const auto v_err_i = leaves_batch[leaf_offset + 5];
-        const auto d_val_i = leaves_batch[leaf_offset + 6];
-        const auto d_err_i = leaves_batch[leaf_offset + 7];
+        const auto j_val_i = leaves_tree[leaf_offset + 0];
+        const auto j_err_i = leaves_tree[leaf_offset + 1];
+        const auto a_val_i = leaves_tree[leaf_offset + 2];
+        const auto a_err_i = leaves_tree[leaf_offset + 3];
+        const auto v_val_i = leaves_tree[leaf_offset + 4];
+        const auto v_err_i = leaves_tree[leaf_offset + 5];
+        const auto d_val_i = leaves_tree[leaf_offset + 6];
+        const auto d_err_i = leaves_tree[leaf_offset + 7];
 
         const auto j_val_j = j_val_i;
         const auto a_val_j = a_val_i + (j_val_i * delta_t);
@@ -1555,30 +1528,27 @@ void poly_taylor_transform_jerk_batch(std::span<double> leaves_batch,
         }
 
         // Write back transformed values
-        leaves_batch[leaf_offset + 0] = j_val_j;
-        leaves_batch[leaf_offset + 1] = j_err_j;
-        leaves_batch[leaf_offset + 2] = a_val_j;
-        leaves_batch[leaf_offset + 3] = a_err_j;
-        leaves_batch[leaf_offset + 4] = v_val_j;
-        leaves_batch[leaf_offset + 5] = v_err_j;
-        leaves_batch[leaf_offset + 6] = d_val_j;
-        leaves_batch[leaf_offset + 7] = d_err_i;
+        leaves_tree[leaf_offset + 0] = j_val_j;
+        leaves_tree[leaf_offset + 1] = j_err_j;
+        leaves_tree[leaf_offset + 2] = a_val_j;
+        leaves_tree[leaf_offset + 3] = a_err_j;
+        leaves_tree[leaf_offset + 4] = v_val_j;
+        leaves_tree[leaf_offset + 5] = v_err_j;
+        leaves_tree[leaf_offset + 6] = d_val_j;
+        leaves_tree[leaf_offset + 7] = d_err_i;
     }
 }
 
-void poly_taylor_transform_snap_batch(std::span<double> leaves_batch,
+void poly_taylor_transform_snap_batch(std::span<double> leaves_tree,
                                       std::pair<double, double> coord_next,
                                       std::pair<double, double> coord_cur,
                                       SizeType n_leaves,
-                                      SizeType n_params,
                                       bool use_conservative_tile) {
-    constexpr SizeType kParamsExpected = 4;
-    constexpr SizeType kParamStride    = 2;
-    constexpr SizeType kLeavesStride   = (kParamsExpected + 2) * kParamStride;
+    constexpr SizeType kParams       = 4;
+    constexpr SizeType kParamStride  = 2;
+    constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
 
-    error_check::check_equal(n_params, kParamsExpected,
-                             "nparams should be 4 for snap transform");
-    error_check::check_greater_equal(leaves_batch.size(),
+    error_check::check_greater_equal(leaves_tree.size(),
                                      n_leaves * kLeavesStride,
                                      "batch_leaves size mismatch");
 
@@ -1594,16 +1564,16 @@ void poly_taylor_transform_snap_batch(std::span<double> leaves_batch,
     for (SizeType i = 0; i < n_leaves; ++i) {
         const auto leaf_offset = i * kLeavesStride;
 
-        const auto s_val_i = leaves_batch[leaf_offset + 0];
-        const auto s_err_i = leaves_batch[leaf_offset + 1];
-        const auto j_val_i = leaves_batch[leaf_offset + 2];
-        const auto j_err_i = leaves_batch[leaf_offset + 3];
-        const auto a_val_i = leaves_batch[leaf_offset + 4];
-        const auto a_err_i = leaves_batch[leaf_offset + 5];
-        const auto v_val_i = leaves_batch[leaf_offset + 6];
-        const auto v_err_i = leaves_batch[leaf_offset + 7];
-        const auto d_val_i = leaves_batch[leaf_offset + 8];
-        const auto d_err_i = leaves_batch[leaf_offset + 9];
+        const auto s_val_i = leaves_tree[leaf_offset + 0];
+        const auto s_err_i = leaves_tree[leaf_offset + 1];
+        const auto j_val_i = leaves_tree[leaf_offset + 2];
+        const auto j_err_i = leaves_tree[leaf_offset + 3];
+        const auto a_val_i = leaves_tree[leaf_offset + 4];
+        const auto a_err_i = leaves_tree[leaf_offset + 5];
+        const auto v_val_i = leaves_tree[leaf_offset + 6];
+        const auto v_err_i = leaves_tree[leaf_offset + 7];
+        const auto d_val_i = leaves_tree[leaf_offset + 8];
+        const auto d_err_i = leaves_tree[leaf_offset + 9];
 
         const auto s_val_j = s_val_i;
         const auto j_val_j = j_val_i + (s_val_i * delta_t);
@@ -1640,16 +1610,16 @@ void poly_taylor_transform_snap_batch(std::span<double> leaves_batch,
         }
 
         // Write back transformed values
-        leaves_batch[leaf_offset + 0] = s_val_j;
-        leaves_batch[leaf_offset + 1] = s_err_j;
-        leaves_batch[leaf_offset + 2] = j_val_j;
-        leaves_batch[leaf_offset + 3] = j_err_j;
-        leaves_batch[leaf_offset + 4] = a_val_j;
-        leaves_batch[leaf_offset + 5] = a_err_j;
-        leaves_batch[leaf_offset + 6] = v_val_j;
-        leaves_batch[leaf_offset + 7] = v_err_j;
-        leaves_batch[leaf_offset + 8] = d_val_j;
-        leaves_batch[leaf_offset + 9] = d_err_i;
+        leaves_tree[leaf_offset + 0] = s_val_j;
+        leaves_tree[leaf_offset + 1] = s_err_j;
+        leaves_tree[leaf_offset + 2] = j_val_j;
+        leaves_tree[leaf_offset + 3] = j_err_j;
+        leaves_tree[leaf_offset + 4] = a_val_j;
+        leaves_tree[leaf_offset + 5] = a_err_j;
+        leaves_tree[leaf_offset + 6] = v_val_j;
+        leaves_tree[leaf_offset + 7] = v_err_j;
+        leaves_tree[leaf_offset + 8] = d_val_j;
+        leaves_tree[leaf_offset + 9] = d_err_i;
     }
 }
 
@@ -1679,7 +1649,8 @@ void report_leaves_taylor_batch(std::span<double> leaves_tree,
             leaves_tree[param_offset + 0] = param_val / s_factor;
             leaves_tree[param_offset + 1] = std::sqrt(
                 std::pow(param_err / s_factor, 2) +
-                (std::pow(param_val * utils::kInvCval / (s_factor * s_factor), 2) *
+                (std::pow(param_val * utils::kInvCval / (s_factor * s_factor),
+                          2) *
                  std::pow(dv_final, 2)));
         }
         leaves_tree[leaf_offset + ((n_params - 1) * kParamStride) + 0] =
@@ -1759,15 +1730,15 @@ generate_bp_poly_taylor_approx(std::span<const std::vector<double>> param_arr,
 
         if (poly_order == 2) {
             poly_taylor_transform_accel_batch(leaves_arr, coord_next, coord_cur,
-                                              n_leaves_branch, poly_order,
+                                              n_leaves_branch,
                                               use_conservative_tile);
         } else if (poly_order == 3) {
             poly_taylor_transform_jerk_batch(leaves_arr, coord_next, coord_cur,
-                                             n_leaves_branch, poly_order,
+                                             n_leaves_branch,
                                              use_conservative_tile);
         } else if (poly_order == 4) {
             poly_taylor_transform_snap_batch(leaves_arr, coord_next, coord_cur,
-                                             n_leaves_branch, poly_order,
+                                             n_leaves_branch,
                                              use_conservative_tile);
         } else {
             throw std::invalid_argument("poly_order must be 2, 3, or 4 for "

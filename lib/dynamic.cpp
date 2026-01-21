@@ -37,19 +37,18 @@ BasePruneDPFuncts<FoldType, Derived>::BasePruneDPFuncts(
     if constexpr (std::is_same_v<FoldType, ComplexType>) {
         m_irfft_executor =
             std::make_unique<utils::IrfftExecutor>(m_cfg.get_nbins());
-        m_shift_buffer.resize(1); // Not needed for complex
+        m_scratch_shifts.resize(1); // Not needed for complex
         const auto max_batch_size = m_batch_size * m_branch_max;
-        m_batch_folds_buffer.resize(max_batch_size * 2 * m_cfg.get_nbins());
+        m_scratch_folds.resize(max_batch_size * 2 * m_cfg.get_nbins());
     } else {
-        m_shift_buffer.resize(2 * m_cfg.get_nbins());
-        m_batch_folds_buffer.resize(1); // Not needed for float
+        m_scratch_shifts.resize(2 * m_cfg.get_nbins());
+        m_scratch_folds.resize(1); // Not needed for float
     }
 }
 
 template <SupportedFoldType FoldType, typename Derived>
-std::span<const FoldType>
-BasePruneDPFuncts<FoldType, Derived>::load(std::span<const FoldType> ffa_fold,
-                                           SizeType seg_idx) const {
+std::span<const FoldType> BasePruneDPFuncts<FoldType, Derived>::load_segment(
+    std::span<const FoldType> ffa_fold, SizeType seg_idx) const {
     SizeType n_coords = 1;
     for (const auto& arr : m_param_arr) {
         n_coords *= arr.size();
@@ -67,11 +66,10 @@ BasePruneDPFuncts<FoldType, Derived>::load(std::span<const FoldType> ffa_fold,
 
 template <SupportedFoldType FoldType, typename Derived>
 SizeType BasePruneDPFuncts<FoldType, Derived>::validate(
-    std::span<double> /*leaves_batch*/,
+    std::span<double> /*leaves_branch*/,
     std::span<SizeType> /*leaves_origins*/,
     std::pair<double, double> /*coord_cur*/,
-    SizeType n_leaves,
-    SizeType /*n_params*/) const {
+    SizeType n_leaves) const {
     return n_leaves;
 }
 
@@ -86,32 +84,30 @@ BasePruneDPFuncts<FoldType, Derived>::get_validation_params(
 
 template <SupportedFoldType FoldType, typename Derived>
 void BasePruneDPFuncts<FoldType, Derived>::shift_add(
-    std::span<const FoldType> batch_folds_suggest,
-    std::span<const SizeType> batch_isuggest,
-    std::span<const FoldType> ffa_fold_segment,
-    std::span<const SizeType> batch_param_idx,
-    std::span<const float> batch_phase_shift,
-    std::span<FoldType> batch_folds_out,
-    SizeType n_batch) noexcept {
+    std::span<const FoldType> folds_tree,
+    std::span<const SizeType> indices_tree,
+    std::span<const FoldType> folds_ffa,
+    std::span<const SizeType> indices_ffa,
+    std::span<const float> phase_shift,
+    std::span<FoldType> folds_out,
+    SizeType n_leaves) noexcept {
     if constexpr (std::is_same_v<FoldType, ComplexType>) {
         kernels::shift_add_complex_recurrence_batch(
-            batch_folds_suggest.data(), batch_isuggest.data(),
-            ffa_fold_segment.data(), batch_param_idx.data(),
-            batch_phase_shift.data(), batch_folds_out.data(),
-            m_cfg.get_nbins_f(), m_cfg.get_nbins(), n_batch);
+            folds_tree.data(), indices_tree.data(), folds_ffa.data(),
+            indices_ffa.data(), phase_shift.data(), folds_out.data(),
+            m_cfg.get_nbins_f(), m_cfg.get_nbins(), n_leaves);
     } else {
         kernels::shift_add_buffer_batch(
-            batch_folds_suggest.data(), batch_isuggest.data(),
-            ffa_fold_segment.data(), batch_param_idx.data(),
-            batch_phase_shift.data(), batch_folds_out.data(),
-            m_shift_buffer.data(), m_cfg.get_nbins(), n_batch);
+            folds_tree.data(), indices_tree.data(), folds_ffa.data(),
+            indices_ffa.data(), phase_shift.data(), folds_out.data(),
+            m_scratch_shifts.data(), m_cfg.get_nbins(), n_leaves);
     }
 }
 
 template <SupportedFoldType FoldType, typename Derived>
 void BasePruneDPFuncts<FoldType, Derived>::score(
-    std::span<const FoldType> folds,
-    std::span<float> scores,
+    std::span<const FoldType> folds_tree,
+    std::span<float> scores_tree,
     SizeType n_leaves) noexcept {
     const auto nbins   = m_cfg.get_nbins();
     const auto nbins_f = m_cfg.get_nbins_f();
@@ -119,15 +115,15 @@ void BasePruneDPFuncts<FoldType, Derived>::score(
         // Ensure exact span for irfft transform
         const auto nfft = 2 * n_leaves;
         auto folds_span =
-            std::span<const FoldType>(folds).first(n_leaves * 2 * nbins_f);
+            std::span<const FoldType>(folds_tree).first(n_leaves * 2 * nbins_f);
         auto folds_t_span =
-            std::span<float>(m_batch_folds_buffer).first(nfft * nbins);
+            std::span<float>(m_scratch_folds).first(nfft * nbins);
         m_irfft_executor->execute(folds_span, folds_t_span,
                                   static_cast<int>(nfft));
-        detection::snr_boxcar_batch(folds_t_span, scores, n_leaves, nbins,
+        detection::snr_boxcar_batch(folds_t_span, scores_tree, n_leaves, nbins,
                                     m_boxcar_widths_cache);
     } else {
-        detection::snr_boxcar_batch(folds, scores, n_leaves, nbins,
+        detection::snr_boxcar_batch(folds_tree, scores_tree, n_leaves, nbins,
                                     m_boxcar_widths_cache);
     }
 }
@@ -138,7 +134,7 @@ std::vector<double> BasePruneDPFuncts<FoldType, Derived>::get_transform_matrix(
     std::pair<double, double> /*coord_prev*/) const {
     // Return identity matrix for Taylor variant
     // Size should match parameter dimensions (typically 4x4 for poly_order=4)
-    const SizeType size = m_cfg.get_prune_poly_order() + 1;
+    const SizeType size = m_cfg.get_nparams() + 1;
     std::vector<double> identity(size * size, 0.0);
     for (SizeType i = 0; i < size; ++i) {
         identity[(i * size) + i] = 1.0;
@@ -161,9 +157,9 @@ void BaseTaylorPruneDPFuncts<FoldType, Derived>::seed(
     std::span<double> seed_leaves,
     std::span<float> seed_scores) {
 
-    const auto n_leaves = poly_taylor_seed(this->m_param_arr, this->m_dparams,
-                                           this->m_cfg.get_prune_poly_order(),
-                                           coord_init, seed_leaves);
+    const auto n_leaves =
+        poly_taylor_seed(this->m_param_arr, this->m_dparams,
+                         this->m_cfg.get_nparams(), coord_init, seed_leaves);
     // Fold segment is (n_leaves, 2, nbins)
     const auto nbins = this->m_cfg.get_nbins();
     error_check::check_greater_equal(seed_scores.size(), n_leaves,
@@ -176,7 +172,7 @@ void BaseTaylorPruneDPFuncts<FoldType, Derived>::seed(
         error_check::check_equal(fold_segment.size(), n_leaves * 2 * nbins_f,
                                  "fold_segment size mismatch");
         auto fold_segment_t =
-            std::span<float>(this->m_batch_folds_buffer).first(nfft * nbins);
+            std::span<float>(this->m_scratch_folds).first(nfft * nbins);
         this->m_irfft_executor->execute(fold_segment, fold_segment_t,
                                         static_cast<int>(nfft));
         detection::snr_boxcar_batch(fold_segment_t, seed_scores, n_leaves,
@@ -216,42 +212,38 @@ SizeType PrunePolyTaylorDPFuncts<FoldType>::branch(
     std::span<double> leaves_branch,
     std::span<SizeType> leaves_origins,
     SizeType n_leaves,
-    SizeType n_params,
     std::span<double> scratch_params,
     std::span<double> scratch_dparams,
     std::span<SizeType> scratch_counts) const {
-    return kPolyBranchFuncs[this->m_cfg.get_prune_poly_order() - 2](
+    return kPolyBranchFuncs[this->m_cfg.get_nparams() - 2](
         leaves_tree, coord_cur, leaves_branch, leaves_origins, n_leaves,
-        n_params, this->m_cfg.get_nbins(), this->m_cfg.get_eta(),
+        this->m_cfg.get_nbins(), this->m_cfg.get_eta(),
         this->m_cfg.get_param_limits(), this->m_branch_max, scratch_params,
         scratch_dparams, scratch_counts);
 }
 
 template <SupportedFoldType FoldType>
 void PrunePolyTaylorDPFuncts<FoldType>::resolve(
-    std::span<const double> leaves_batch,
+    std::span<const double> leaves_branch,
     std::pair<double, double> coord_add,
     std::pair<double, double> coord_cur,
     std::pair<double, double> coord_init,
-    std::span<SizeType> param_idx_flat_batch,
-    std::span<float> relative_phase_batch,
-    SizeType n_leaves,
-    SizeType n_params) const {
-    kPolyResolveFuncs[this->m_cfg.get_prune_poly_order() - 2](
-        leaves_batch, coord_add, coord_cur, coord_init, this->m_param_arr,
-        param_idx_flat_batch, relative_phase_batch, this->m_cfg.get_nbins(),
-        n_leaves, n_params);
+    std::span<SizeType> param_indices,
+    std::span<float> phase_shift,
+    SizeType n_leaves) const {
+    kPolyResolveFuncs[this->m_cfg.get_nparams() - 2](
+        leaves_branch, coord_add, coord_cur, coord_init, this->m_param_arr,
+        param_indices, phase_shift, this->m_cfg.get_nbins(), n_leaves);
 }
 
 template <SupportedFoldType FoldType>
 void PrunePolyTaylorDPFuncts<FoldType>::transform(
-    std::span<double> leaves_batch,
+    std::span<double> leaves_tree,
     std::pair<double, double> coord_next,
     std::pair<double, double> coord_cur,
-    SizeType n_leaves,
-    SizeType n_params) const {
-    kPolyTransformFuncs[this->m_cfg.get_prune_poly_order() - 2](
-        leaves_batch, coord_next, coord_cur, n_leaves, n_params,
+    SizeType n_leaves) const {
+    kPolyTransformFuncs[this->m_cfg.get_nparams() - 2](
+        leaves_tree, coord_next, coord_cur, n_leaves,
         this->m_cfg.get_use_conservative_tile());
 }
 
@@ -259,9 +251,9 @@ template <SupportedFoldType FoldType>
 void PrunePolyTaylorDPFuncts<FoldType>::report(
     std::span<double> leaves_tree,
     std::pair<double, double> coord_report,
-    SizeType n_leaves,
-    SizeType n_params) const {
-    report_leaves_taylor_batch(leaves_tree, coord_report, n_leaves, n_params);
+    SizeType n_leaves) const {
+    report_leaves_taylor_batch(leaves_tree, coord_report, n_leaves,
+                               this->m_cfg.get_nparams());
 }
 
 // Specialized implementation for Circular orbit search in Taylor basis
@@ -290,13 +282,12 @@ SizeType PruneCircTaylorDPFuncts<FoldType>::branch(
     std::span<double> leaves_branch,
     std::span<SizeType> leaves_origins,
     SizeType n_leaves,
-    SizeType n_params,
     std::span<double> scratch_params,
     std::span<double> scratch_dparams,
     std::span<SizeType> scratch_counts) const {
     return circ_taylor_branch_batch(
         leaves_tree, coord_cur, leaves_branch, leaves_origins, n_leaves,
-        n_params, this->m_cfg.get_nbins(), this->m_cfg.get_eta(),
+        this->m_cfg.get_nbins(), this->m_cfg.get_eta(),
         this->m_cfg.get_param_limits(), this->m_branch_max,
         this->m_cfg.get_minimum_snap_cells(), scratch_params, scratch_dparams,
         scratch_counts);
@@ -304,42 +295,37 @@ SizeType PruneCircTaylorDPFuncts<FoldType>::branch(
 
 template <SupportedFoldType FoldType>
 SizeType PruneCircTaylorDPFuncts<FoldType>::validate(
-    std::span<double> leaves_batch,
+    std::span<double> leaves_branch,
     std::span<SizeType> leaves_origins,
     std::pair<double, double> /*coord_cur*/,
-    SizeType n_leaves,
-    SizeType n_params) const {
-    return circ_taylor_validate_batch(leaves_batch, leaves_origins, n_leaves,
-                                      n_params, this->m_cfg.get_p_orb_min(),
-                                      this->m_cfg.get_x_mass_const(),
-                                      this->m_cfg.get_minimum_snap_cells());
+    SizeType n_leaves) const {
+    return circ_taylor_validate_batch(
+        leaves_branch, leaves_origins, n_leaves, this->m_cfg.get_p_orb_min(),
+        this->m_cfg.get_x_mass_const(), this->m_cfg.get_minimum_snap_cells());
 }
 
 template <SupportedFoldType FoldType>
 void PruneCircTaylorDPFuncts<FoldType>::resolve(
-    std::span<const double> leaves_batch,
+    std::span<const double> leaves_branch,
     std::pair<double, double> coord_add,
     std::pair<double, double> coord_cur,
     std::pair<double, double> coord_init,
-    std::span<SizeType> param_idx_flat_batch,
-    std::span<float> relative_phase_batch,
-    SizeType n_leaves,
-    SizeType n_params) const {
-    circ_taylor_resolve_batch(
-        leaves_batch, coord_add, coord_cur, coord_init, this->m_param_arr,
-        param_idx_flat_batch, relative_phase_batch, this->m_cfg.get_nbins(),
-        n_leaves, n_params, this->m_cfg.get_minimum_snap_cells());
+    std::span<SizeType> param_indices,
+    std::span<float> phase_shift,
+    SizeType n_leaves) const {
+    circ_taylor_resolve_batch(leaves_branch, coord_add, coord_cur, coord_init,
+                              this->m_param_arr, param_indices, phase_shift,
+                              this->m_cfg.get_nbins(), n_leaves,
+                              this->m_cfg.get_minimum_snap_cells());
 }
 
 template <SupportedFoldType FoldType>
 void PruneCircTaylorDPFuncts<FoldType>::transform(
-    std::span<double> leaves_batch,
+    std::span<double> leaves_tree,
     std::pair<double, double> coord_next,
     std::pair<double, double> coord_cur,
-    SizeType n_leaves,
-    SizeType n_params) const {
-    circ_taylor_transform_batch(leaves_batch, coord_next, coord_cur, n_leaves,
-                                n_params,
+    SizeType n_leaves) const {
+    circ_taylor_transform_batch(leaves_tree, coord_next, coord_cur, n_leaves,
                                 this->m_cfg.get_use_conservative_tile(),
                                 this->m_cfg.get_minimum_snap_cells());
 }
@@ -348,9 +334,9 @@ template <SupportedFoldType FoldType>
 void PruneCircTaylorDPFuncts<FoldType>::report(
     std::span<double> leaves_tree,
     std::pair<double, double> coord_report,
-    SizeType n_leaves,
-    SizeType n_params) const {
-    report_leaves_taylor_batch(leaves_tree, coord_report, n_leaves, n_params);
+    SizeType n_leaves) const {
+    report_leaves_taylor_batch(leaves_tree, coord_report, n_leaves,
+                               this->m_cfg.get_nparams());
 }
 
 // Factory function to create the correct implementation based on the kind
