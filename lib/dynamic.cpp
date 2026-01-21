@@ -50,17 +50,18 @@ template <SupportedFoldType FoldType, typename Derived>
 std::span<const FoldType>
 BasePruneDPFuncts<FoldType, Derived>::load(std::span<const FoldType> ffa_fold,
                                            SizeType seg_idx) const {
-    SizeType n_param_sets = 1;
+    SizeType n_coords = 1;
     for (const auto& arr : m_param_arr) {
-        n_param_sets *= arr.size();
+        n_coords *= arr.size();
     }
+    const auto nbins   = m_cfg.get_nbins();
+    const auto nbins_f = m_cfg.get_nbins_f();
     if constexpr (std::is_same_v<FoldType, ComplexType>) {
-        return ffa_fold.subspan(seg_idx * n_param_sets * 2 *
-                                    m_cfg.get_nbins_f(),
-                                n_param_sets * 2 * m_cfg.get_nbins_f());
+        return ffa_fold.subspan(seg_idx * n_coords * 2 * nbins_f,
+                                n_coords * 2 * nbins_f);
     } else {
-        return ffa_fold.subspan(seg_idx * n_param_sets * 2 * m_cfg.get_nbins(),
-                                n_param_sets * 2 * m_cfg.get_nbins());
+        return ffa_fold.subspan(seg_idx * n_coords * 2 * nbins,
+                                n_coords * 2 * nbins);
     }
 }
 

@@ -119,7 +119,6 @@ void ffa_taylor_resolve_accel_batch(
     const auto delta_t  = (static_cast<double>(latter) - 0.5) * tsegment;
 
     // Pre-compute constants to avoid repeated calculations
-    const auto inv_c_val       = 1.0 / utils::kCval;
     const auto half_delta_t_sq = 0.5 * delta_t * delta_t;
 
     SizeType hint_a = 0;
@@ -135,8 +134,8 @@ void ffa_taylor_resolve_accel_batch(
         for (SizeType freq_idx = 0; freq_idx < n_freq; ++freq_idx) {
             const auto coord_idx = (accel_idx * n_freq) + freq_idx;
             const auto f_cur     = freq_arr_cur[freq_idx];
-            const auto f_new     = f_cur * (1.0 - v_new * inv_c_val);
-            const auto delay_rel = d_new * inv_c_val;
+            const auto f_new     = f_cur * (1.0 - v_new * utils::kInvCval);
+            const auto delay_rel = d_new * utils::kInvCval;
 
             relative_phase_batch[coord_idx] =
                 psr_utils::get_phase_idx(delta_t, f_cur, nbins, delay_rel);
@@ -181,7 +180,6 @@ void ffa_taylor_resolve_jerk_batch(
     const auto delta_t  = (static_cast<double>(latter) - 0.5) * tsegment;
 
     // Pre-compute constants to avoid repeated calculations
-    const auto inv_c_val           = 1.0 / utils::kCval;
     const auto delta_t_sq          = delta_t * delta_t;
     const auto delta_t_cubed       = delta_t_sq * delta_t;
     const auto half_delta_t_sq     = 0.5 * delta_t_sq;
@@ -241,8 +239,8 @@ void ffa_taylor_resolve_jerk_batch(
                 const auto f_cur = freq_arr_cur[freq_idx];
 
                 // Frequency-specific calculations
-                const auto f_new     = f_cur * (1.0 - v_new * inv_c_val);
-                const auto delay_rel = d_new * inv_c_val;
+                const auto f_new     = f_cur * (1.0 - v_new * utils::kInvCval);
+                const auto delay_rel = d_new * utils::kInvCval;
                 const auto relative_phase =
                     psr_utils::get_phase_idx(delta_t, f_cur, nbins, delay_rel);
 
@@ -1238,7 +1236,6 @@ void poly_taylor_resolve_accel_batch(
     const auto n_freq          = param_arr[1].size();
 
     // Pre-compute constants to avoid repeated calculations
-    const auto inv_c_val    = 1.0 / utils::kCval;
     const auto delta_t_add  = t0_add - t0_cur;
     const auto delta_t_init = t0_init - t0_cur;
     const auto delta_t      = delta_t_add - delta_t_init;
@@ -1258,8 +1255,8 @@ void poly_taylor_resolve_accel_batch(
             (v_t_cur * delta_t) + (a_t_cur * half_delta_t_sq);
         // Calculates new frequency based on the first-order Doppler
         // approximation:
-        const auto f_new     = f0 * (1.0 - delta_v_new * inv_c_val);
-        const auto delay_rel = delta_d_new * inv_c_val;
+        const auto f_new     = f0 * (1.0 - delta_v_new * utils::kInvCval);
+        const auto delay_rel = delta_d_new * utils::kInvCval;
 
         // Calculate relative phase
         relative_phase_batch[i] =
@@ -1311,7 +1308,6 @@ void poly_taylor_resolve_jerk_batch(
     const auto n_freq          = param_arr[2].size();
 
     // Pre-compute constants to avoid repeated calculations
-    const auto inv_c_val            = 1.0 / utils::kCval;
     const auto delta_t_add          = t0_add - t0_cur;
     const auto delta_t_init         = t0_init - t0_cur;
     const auto half_delta_t_add_sq  = 0.5 * delta_t_add * delta_t_add;
@@ -1338,8 +1334,8 @@ void poly_taylor_resolve_jerk_batch(
                                  (j_t_cur * sixth_delta_t_cubed);
         // Calculates new frequency based on the first-order Doppler
         // approximation:
-        const auto f_new     = f0 * (1.0 - delta_v_new * inv_c_val);
-        const auto delay_rel = delta_d_new * inv_c_val;
+        const auto f_new     = f0 * (1.0 - delta_v_new * utils::kInvCval);
+        const auto delay_rel = delta_d_new * utils::kInvCval;
 
         // Calculate relative phase
         relative_phase_batch[i] =
@@ -1391,7 +1387,6 @@ void poly_taylor_resolve_snap_batch(
     const auto n_freq          = param_arr[3].size();
 
     // Pre-compute constants to avoid repeated calculations
-    const auto inv_c_val            = 1.0 / utils::kCval;
     const auto delta_t_add          = t0_add - t0_cur;
     const auto delta_t_init         = t0_init - t0_cur;
     const auto half_delta_t_add_sq  = 0.5 * delta_t_add * delta_t_add;
@@ -1426,8 +1421,8 @@ void poly_taylor_resolve_snap_batch(
                                  (s_t_cur * twenty_fourth_delta_t_fourth);
         // Calculates new frequency based on the first-order Doppler
         // approximation:
-        const auto f_new     = f0 * (1.0 - delta_v_new * inv_c_val);
-        const auto delay_rel = delta_d_new * inv_c_val;
+        const auto f_new     = f0 * (1.0 - delta_v_new * utils::kInvCval);
+        const auto delay_rel = delta_d_new * utils::kInvCval;
 
         // Calculate relative phase
         relative_phase_batch[i] =
@@ -1675,7 +1670,7 @@ void report_leaves_taylor_batch(std::span<double> leaves_tree,
             leaves_tree[leaf_offset + ((n_params - 1) * kParamStride) + 1];
         const auto f0_batch =
             leaves_tree[leaf_offset + ((n_params + 1) * kParamStride) + 0];
-        const auto s_factor = 1.0 - (v_final / utils::kCval);
+        const auto s_factor = 1.0 - (v_final * utils::kInvCval);
         // Gauge transform + error propagation
         for (SizeType j = 0; j < n_params - 1; ++j) {
             const auto param_offset       = leaf_offset + (j * kParamStride);
@@ -1684,13 +1679,13 @@ void report_leaves_taylor_batch(std::span<double> leaves_tree,
             leaves_tree[param_offset + 0] = param_val / s_factor;
             leaves_tree[param_offset + 1] = std::sqrt(
                 std::pow(param_err / s_factor, 2) +
-                (std::pow(param_val / (utils::kCval * s_factor * s_factor), 2) *
+                (std::pow(param_val * utils::kInvCval / (s_factor * s_factor), 2) *
                  std::pow(dv_final, 2)));
         }
         leaves_tree[leaf_offset + ((n_params - 1) * kParamStride) + 0] =
             f0_batch * s_factor;
         leaves_tree[leaf_offset + ((n_params - 1) * kParamStride) + 1] =
-            f0_batch * dv_final / utils::kCval;
+            f0_batch * dv_final * utils::kInvCval;
     }
 }
 

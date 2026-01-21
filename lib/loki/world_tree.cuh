@@ -1,7 +1,6 @@
 #pragma once
 
 #include <algorithm>
-#include <stdexcept>
 
 #include <cuda/std/limits>
 #include <cuda/std/span>
@@ -263,13 +262,15 @@ public:
      * Includes both base storage and estimated peak temporary allocations.
      */
     float get_memory_usage() const noexcept {
-        const auto base_bytes = (m_leaves.size() * sizeof(double)) +
-                                (m_folds.size() * sizeof(FoldTypeCUDA)) +
-                                (m_scores.size() * sizeof(float)) +
-                                (m_scratch_leaves.size() * sizeof(double)) +
-                                (m_scratch_scores.size() * sizeof(float)) +
-                                (m_scratch_prefix.size() * sizeof(SizeType)) +
-                                (m_scratch_mask.size() * sizeof(uint8_t));
+        const auto base_bytes =
+            (m_leaves.size() * sizeof(double)) +
+            (m_folds.size() * sizeof(FoldTypeCUDA)) +
+            (m_scores.size() * sizeof(float)) +
+            (m_scratch_leaves.size() * sizeof(double)) +
+            (m_scratch_folds.size() * sizeof(FoldTypeCUDA)) +
+            (m_scratch_scores.size() * sizeof(float)) +
+            (m_scratch_prefix.size() * sizeof(SizeType)) +
+            (m_scratch_mask.size() * sizeof(uint8_t));
 
         return static_cast<float>(base_bytes) / static_cast<float>(1ULL << 30U);
     }
@@ -334,9 +335,8 @@ public:
                               src_pitch, row_bytes, second_part,
                               cudaMemcpyDeviceToDevice);
         }
-        return cuda::std::span<double>(
-                   thrust::raw_pointer_cast(m_scratch_leaves.data()))
-            .first(m_size * report_stride);
+        return {thrust::raw_pointer_cast(m_scratch_leaves.data()),
+                m_size * report_stride};
     }
 
     /**
@@ -432,22 +432,17 @@ public:
     }
 
     /**
-     * @brief Compute physical indices from logical indices
+     * @brief Convert logical indices to physical indices
      */
-    void
-    compute_physical_indices(cuda::std::span<const SizeType> logical_indices,
-                             cuda::std::span<SizeType> physical_indices,
-                             SizeType n_leaves) const {
-        if (!m_is_updating) {
-            throw std::runtime_error(
-                "compute_physical_indices: only valid during updates");
-        }
+    void convert_to_physical_indices(cuda::std::span<SizeType> logical_indices,
+                                     SizeType n_leaves) const {
+        error_check::check(
+            m_is_updating,
+            "WorldTreeCUDA: convert_to_physical_indices only valid "
+            "during updates");
         error_check::check_greater_equal(
             logical_indices.size(), n_leaves,
-            "compute_physical_indices: logical_indices size insufficient");
-        error_check::check_greater_equal(
-            physical_indices.size(), n_leaves,
-            "compute_physical_indices: physical_indices size insufficient");
+            "convert_to_physical_indices: n_leaves size insufficient");
 
         // Compute physical start: relative to current head of read region
         const SizeType physical_start =
@@ -458,33 +453,33 @@ public:
         thrust::transform(thrust::device, logical_indices.begin(),
                           logical_indices.begin() +
                               static_cast<IndexType>(n_leaves),
-                          physical_indices.begin(), functor);
+                          logical_indices.begin(), functor);
     }
 
     /**
      * @brief Add initial batch (resets buffer first)
      */
-    void add_initial(cuda::std::span<const double> batch_leaves,
-                     cuda::std::span<const FoldTypeCUDA> batch_folds,
-                     cuda::std::span<const float> batch_scores,
+    void add_initial(cuda::std::span<const double> leaves_batch,
+                     cuda::std::span<const FoldTypeCUDA> folds_batch,
+                     cuda::std::span<const float> scores_batch,
                      SizeType slots_to_write) {
         error_check::check_less_equal(
             slots_to_write, m_capacity,
             "WorldTreeCUDA: Suggestions too large to add.");
-        error_check::check_equal(slots_to_write, batch_scores.size(),
+        error_check::check_equal(slots_to_write, scores_batch.size(),
                                  "slots_to_write must match batch_scores size");
 
         reset(); // Start fresh
         cudaMemcpyAsync(thrust::raw_pointer_cast(m_leaves.data()),
-                        batch_leaves.data(),
+                        leaves_batch.data(),
                         slots_to_write * m_leaves_stride * sizeof(double),
                         cudaMemcpyDeviceToDevice);
         cudaMemcpyAsync(thrust::raw_pointer_cast(m_folds.data()),
-                        batch_folds.data(),
+                        folds_batch.data(),
                         slots_to_write * m_folds_stride * sizeof(FoldTypeCUDA),
                         cudaMemcpyDeviceToDevice);
         cudaMemcpyAsync(thrust::raw_pointer_cast(m_scores.data()),
-                        batch_scores.data(), slots_to_write * sizeof(float),
+                        scores_batch.data(), slots_to_write * sizeof(float),
                         cudaMemcpyDeviceToDevice);
         m_size = slots_to_write;
         error_check::check_less_equal(
@@ -500,20 +495,20 @@ public:
      * top-k threshold. Makes sure all candidates fit, reclaiming space
      * from consumed old candidates.
      */
-    float add_batch(cuda::std::span<const double> batch_leaves,
-                    cuda::std::span<const FoldTypeCUDA> batch_folds,
-                    cuda::std::span<const float> batch_scores,
+    float add_batch(cuda::std::span<const double> leaves_batch,
+                    cuda::std::span<const FoldTypeCUDA> folds_batch,
+                    cuda::std::span<const float> scores_batch,
                     float current_threshold,
                     SizeType slots_to_write) {
         if (slots_to_write == 0) {
             return current_threshold;
         }
-        const double* __restrict__ batch_leaves_ptr =
-            thrust::raw_pointer_cast(batch_leaves.data());
-        const FoldTypeCUDA* __restrict__ batch_folds_ptr =
-            thrust::raw_pointer_cast(batch_folds.data());
-        const float* __restrict__ batch_scores_ptr =
-            thrust::raw_pointer_cast(batch_scores.data());
+        const double* __restrict__ leaves_batch_ptr =
+            thrust::raw_pointer_cast(leaves_batch.data());
+        const FoldTypeCUDA* __restrict__ folds_batch_ptr =
+            thrust::raw_pointer_cast(folds_batch.data());
+        const float* __restrict__ scores_batch_ptr =
+            thrust::raw_pointer_cast(scores_batch.data());
         double* __restrict__ m_leaves_ptr =
             thrust::raw_pointer_cast(m_leaves.data());
         FoldTypeCUDA* __restrict__ m_folds_ptr =
@@ -522,13 +517,13 @@ public:
             thrust::raw_pointer_cast(m_scores.data());
 
         // Fast path: Check if we have enough space immediately
-        IndexType space_left = calculate_space_left();
-        if (static_cast<IndexType>(slots_to_write) <= space_left) {
-            copy_to_circular(batch_leaves_ptr, m_leaves_ptr, m_write_head,
+        SizeType space_left = calculate_space_left();
+        if (slots_to_write <= space_left) {
+            copy_to_circular(leaves_batch_ptr, m_leaves_ptr, m_write_head,
                              slots_to_write, m_leaves_stride);
-            copy_to_circular(batch_folds_ptr, m_folds_ptr, m_write_head,
+            copy_to_circular(folds_batch_ptr, m_folds_ptr, m_write_head,
                              slots_to_write, m_folds_stride);
-            copy_to_circular(batch_scores_ptr, m_scores_ptr, m_write_head,
+            copy_to_circular(scores_batch_ptr, m_scores_ptr, m_write_head,
                              slots_to_write, SizeType{1});
             m_write_head =
                 get_circular_index(slots_to_write, m_write_head, m_capacity);
@@ -542,7 +537,7 @@ public:
             "WorldTreeCUDA: Suggestions too large to add.");
         // Determine the Global Pruning Threshold
         const float effective_threshold = get_prune_threshold(
-            batch_scores, slots_to_write, current_threshold);
+            scores_batch, slots_to_write, current_threshold);
         // Remove old items that are strictly worse than the new global pruning
         // threshold.
         prune_on_overload(effective_threshold);
@@ -554,7 +549,7 @@ public:
         float* __restrict__ tmp_scores_ptr =
             thrust::raw_pointer_cast(m_scratch_scores.data());
 
-        LinearMaskFunctor functor{.scores_ptr = batch_scores_ptr,
+        LinearMaskFunctor functor{.scores_ptr = scores_batch_ptr,
                                   .threshold  = effective_threshold};
         thrust::transform(thrust::counting_iterator<SizeType>(0),
                           thrust::counting_iterator<SizeType>(slots_to_write),
@@ -568,16 +563,15 @@ public:
         const dim3 grid_dim((slots_to_write + block_dim.x - 1) / block_dim.x);
         cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
         compact_and_copy_kernel<<<grid_dim, block_dim>>>(
-            batch_leaves_ptr, batch_folds_ptr, batch_scores_ptr,
+            leaves_batch_ptr, folds_batch_ptr, scores_batch_ptr,
             m_scratch_mask.data(), m_scratch_prefix.data(), tmp_leaves_ptr,
             tmp_folds_ptr, tmp_scores_ptr, slots_to_write, m_leaves_stride,
             m_folds_stride);
         const SizeType pending_count = m_scratch_prefix[slots_to_write - 1] +
                                        m_scratch_mask[slots_to_write - 1];
 
-        space_left = calculate_space_left();
-        const auto n_to_add =
-            std::min(pending_count, static_cast<SizeType>(space_left));
+        space_left          = calculate_space_left();
+        const auto n_to_add = std::min(pending_count, space_left);
         if (n_to_add == 0) {
             return effective_threshold;
         }
@@ -705,13 +699,18 @@ private:
     /**
      * @brief Calculate available space in buffer
      */
-    IndexType calculate_space_left() const noexcept {
+    SizeType calculate_space_left() const noexcept {
         const auto remaining_old = static_cast<IndexType>(m_size_old) -
                                    static_cast<IndexType>(m_read_consumed);
         error_check::check_greater_equal(
             remaining_old, 0, "calculate_space_left: Invalid buffer state");
-        return static_cast<IndexType>(m_capacity) -
-               (remaining_old + static_cast<IndexType>(m_size));
+
+        const auto space_left =
+            static_cast<IndexType>(m_capacity) -
+            (remaining_old + static_cast<IndexType>(m_size));
+        error_check::check_greater_equal(
+            space_left, 0, "calculate_space_left: Invalid buffer state");
+        return static_cast<SizeType>(space_left);
     }
 
     /**
@@ -720,12 +719,15 @@ private:
      * find a threshold in (Buffer + Batch) so that keeping only scores strictly
      * above it yields at most total_capacity items.
      */
-    float get_prune_threshold(cuda::std::span<const float> batch_scores,
+    float get_prune_threshold(cuda::std::span<const float> scores_batch,
                               SizeType slots_to_write,
                               float current_threshold) noexcept {
+        if (slots_to_write == 0) {
+            return current_threshold;
+        }
         const auto space_left       = calculate_space_left();
         const auto total_candidates = m_size + slots_to_write;
-        const auto total_capacity = m_size + static_cast<SizeType>(space_left);
+        const auto total_capacity   = m_size + space_left;
         if (total_candidates <= total_capacity) {
             return current_threshold;
         }
@@ -741,7 +743,7 @@ private:
         // Append batch scores [m_size ... total]
         cudaMemcpyAsync(
             thrust::raw_pointer_cast(m_scratch_scores.data()) + m_size,
-            thrust::raw_pointer_cast(batch_scores.data()),
+            thrust::raw_pointer_cast(scores_batch.data()),
             slots_to_write * sizeof(float), cudaMemcpyDeviceToDevice);
 
         // The item at 'total_capacity-1' (in descending order) is the smallest

@@ -10,9 +10,11 @@
 #include <variant>
 
 #include <cub/cub.cuh>
+#include <cuda/std/span>
 #include <cuda_runtime.h>
 #include <cufft.h>
 #include <curand.h>
+#include <thrust/device_vector.h>
 
 #include "loki/common/types.hpp"
 
@@ -417,6 +419,28 @@ public:
     CudaSetDeviceGuard(CudaSetDeviceGuard&&)                 = delete;
     CudaSetDeviceGuard& operator=(CudaSetDeviceGuard&&)      = delete;
 };
+
+// Span helpers for Thrust device vectors
+template <typename T>
+[[nodiscard]] inline cuda::std::span<T>
+as_span(thrust::device_vector<T>& v) noexcept {
+    return {thrust::raw_pointer_cast(v.data()),
+            static_cast<cuda::std::span<T>::size_type>(v.size())};
+}
+
+template <typename T>
+[[nodiscard]] inline cuda::std::span<const T>
+as_span(const thrust::device_vector<T>& v) noexcept {
+    return {thrust::raw_pointer_cast(v.data()),
+            static_cast<cuda::std::span<const T>::size_type>(v.size())};
+}
+
+// Lifetime safety: forbid temporaries
+template <typename T>
+cuda::std::span<T> as_span(thrust::device_vector<T>&&) = delete;
+
+template <typename T>
+cuda::std::span<const T> as_span(const thrust::device_vector<T>&&) = delete;
 
 } // namespace
 } // namespace loki::cuda_utils

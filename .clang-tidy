@@ -33,6 +33,7 @@ Checks: >
   -readability-magic-numbers,
   -readability-suspicious-call-argument,
 
+HeaderFileExtensions: ["h", "hh", "hpp", "hxx", "cuh"]
 WarningsAsErrors: ""
 HeaderFilterRegex: ".*"
 FormatStyle: "file"

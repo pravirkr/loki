@@ -37,8 +37,8 @@ __global__ void snr_boxcar_kernel_warp(const float* __restrict__ arr,
     }
 
     // Dynamic Shared Memory
-    extern __shared__ float s_mem_block[]; // NOLINT
-    float* s_warp_data = &s_mem_block[static_cast<IndexType>(warp_id * nbins)];
+    extern __shared__ float s_mem_block[];
+    float* s_warp_data = &s_mem_block[static_cast<SizeType>(warp_id * nbins)];
 
     using WarpScan   = cub::WarpScan<float, kWarpSize>;
     using WarpReduce = cub::WarpReduce<float, kWarpSize>;
@@ -62,8 +62,8 @@ __global__ void snr_boxcar_kernel_warp(const float* __restrict__ arr,
     float running_sum    = 0.0F;
     const int num_chunks = (nbins + kWarpSize - 1) / kWarpSize;
     for (int chunk = 0; chunk < num_chunks; ++chunk) {
-        int idx   = (chunk * kWarpSize) + lane_id;
-        float val = (idx < nbins) ? s_warp_data[idx] : 0.0F;
+        const int idx = (chunk * kWarpSize) + lane_id;
+        float val     = (idx < nbins) ? s_warp_data[idx] : 0.0F;
         WarpScan(temp_scan[warp_id]).InclusiveSum(val, val);
         if (idx < nbins) {
             s_warp_data[idx] = val + running_sum;
