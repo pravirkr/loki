@@ -92,6 +92,124 @@ void generate_gaussian_templates(std::span<float> templates,
     }
 }
 
+template <bool Is3D, bool FindMax>
+void snr_boxcar_impl(const float* __restrict__ folds,
+                     SizeType nprofiles,
+                     SizeType nbins,
+                     const SizeType* __restrict__ widths,
+                     SizeType nwidths,
+                     float* __restrict__ scores,
+                     float stdnoise = 1.0F, // stdnoise is only used for 2D
+                     int nthreads   = 1) {
+    nthreads            = std::clamp(nthreads, 1, omp_get_max_threads());
+    const SizeType wmax = *std::ranges::max_element(widths, widths + nwidths);
+
+    // Precompute template parameters (h, b) for all widths
+    std::vector<float> h_vals(nwidths);
+    std::vector<float> b_vals(nwidths);
+    for (SizeType iw = 0; iw < nwidths; ++iw) {
+        const auto w = widths[iw];
+        h_vals[iw]   = std::sqrt(static_cast<float>(nbins - w) /
+                                 static_cast<float>(nbins * w));
+        b_vals[iw] =
+            static_cast<float>(w) * h_vals[iw] / static_cast<float>(nbins - w);
+    }
+    const float inv_stdnoise = Is3D ? 1.0F : (1.0F / stdnoise);
+
+#pragma omp parallel num_threads(nthreads) default(none)                       \
+    shared(folds, widths, scores, nbins, nprofiles, nwidths, wmax, h_vals,     \
+               b_vals, stdnoise)
+    {
+        // Thread-local buffers
+        std::vector<float> fold_work;
+        if constexpr (Is3D) {
+            fold_work.resize(nbins);
+        }
+        std::vector<float> psum(nbins + wmax, 0.0F);
+
+#pragma omp for
+        for (SizeType i = 0; i < nprofiles; ++i) {
+            const float* fold_ptr;
+            if constexpr (Is3D) {
+                // 3D: normalize fold from (E, V) components
+                const SizeType base_idx            = i * 2 * nbins;
+                const float* __restrict__ ts_e_ptr = folds + base_idx;
+                const float* __restrict__ ts_v_ptr = folds + base_idx + nbins;
+                float* __restrict__ fold_work_ptr  = fold_work.data();
+                for (SizeType j = 0; j < nbins; ++j) {
+                    const float inv_sqrt_v = 1.0F / std::sqrt(ts_v_ptr[j]);
+                    fold_work_ptr[j]       = ts_e_ptr[j] * inv_sqrt_v;
+                }
+                fold_ptr = fold_work_ptr;
+            } else {
+                // 2D: use fold directly
+                fold_ptr = folds + (i * nbins);
+            }
+            utils::circular_prefix_sum(fold_ptr, psum.data(), nbins,
+                                       nbins + wmax);
+            const float sum              = psum[nbins - 1];
+            float* __restrict__ psum_ptr = psum.data();
+
+            // Compute SNR for each width, find maximum
+            float max_snr = std::numeric_limits<float>::lowest();
+            for (SizeType iw = 0; iw < nwidths; ++iw) {
+                const auto dmax =
+                    utils::diff_max(psum_ptr + widths[iw], psum_ptr, nbins);
+                const float snr_base =
+                    ((h_vals[iw] + b_vals[iw]) * dmax) - (b_vals[iw] * sum);
+                const float snr = snr_base * inv_stdnoise;
+                if constexpr (FindMax) {
+                    max_snr = std::max(max_snr, snr);
+                } else {
+                    scores[(i * nwidths) + iw] = snr;
+                }
+            }
+            if constexpr (FindMax) {
+                scores[i] = max_snr;
+            }
+        }
+    }
+}
+
+void snr_boxcar_3d_max_with_cache_impl(const float* __restrict__ arr,
+                                       SizeType nprofiles,
+                                       SizeType nbins,
+                                       float* __restrict__ out,
+                                       BoxcarWidthsCache& cache) {
+    // Use precomputed values from cache
+    const auto* __restrict__ widths = cache.widths.data();
+    const auto wmax                 = cache.wmax;
+    const auto ntemplates           = cache.ntemplates;
+    const auto* __restrict__ h_vals = cache.h_vals.data();
+    const auto* __restrict__ b_vals = cache.b_vals.data();
+    auto* __restrict__ fold_norm    = cache.fold_norm_buffer.data();
+    auto* __restrict__ psum         = cache.psum_buffer.data();
+
+    for (SizeType i = 0; i < nprofiles; ++i) {
+        const SizeType base_idx            = i * 2 * nbins;
+        const float* __restrict__ ts_e_ptr = arr + base_idx;
+        const float* __restrict__ ts_v_ptr = arr + base_idx + nbins;
+        for (SizeType j = 0; j < nbins; ++j) {
+            const float inv_sqrt_v = 1.0F / std::sqrt(ts_v_ptr[j]);
+            fold_norm[j]           = ts_e_ptr[j] * inv_sqrt_v;
+        }
+        utils::circular_prefix_sum(fold_norm, psum, nbins, nbins + wmax);
+        const float sum              = psum[nbins - 1];
+        float* __restrict__ psum_ptr = psum;
+
+        // Compute SNR for each width, find maximum
+        float max_snr = std::numeric_limits<float>::lowest();
+        for (SizeType iw = 0; iw < ntemplates; ++iw) {
+            const auto dmax =
+                utils::diff_max(psum_ptr + widths[iw], psum_ptr, nbins);
+            const float snr =
+                ((h_vals[iw] + b_vals[iw]) * dmax) - (b_vals[iw] * sum);
+            max_snr = std::max(max_snr, snr);
+        }
+        out[i] = max_snr;
+    }
+}
+
 } // namespace
 
 class MatchedFilter::Impl {
@@ -248,7 +366,7 @@ void snr_boxcar_1d(std::span<const float> arr,
     error_check::check_equal(out.size(), ntemplates,
                              "snr_boxcar_1d: out size does not match");
     std::vector<float> psum(nbins + wmax);
-    utils::circular_prefix_sum(arr, std::span<float>(psum));
+    utils::circular_prefix_sum(arr.data(), psum.data(), nbins, nbins + wmax);
     const float sum              = psum[nbins - 1]; // sum of the input array
     float* __restrict__ psum_ptr = psum.data();
 
@@ -265,225 +383,88 @@ void snr_boxcar_1d(std::span<const float> arr,
     }
 }
 
-void snr_boxcar_2d_max(std::span<const float> arr,
-                       const SizeType nprofiles,
+void snr_boxcar_2d(std::span<const float> folds,
+                   std::span<const SizeType> widths,
+                   std::span<float> scores,
+                   SizeType nprofiles,
+                   SizeType nbins,
+                   float stdnoise,
+                   int nthreads) {
+    const auto nwidths = widths.size();
+    error_check::check_equal(folds.size(), (nprofiles * nbins),
+                             "snr_boxcar_2d: folds size does not match");
+    error_check::check_equal(
+        scores.size(), nprofiles * nwidths,
+        "snr_boxcar_2d: scores size does not match nprofiles * nwidths");
+    snr_boxcar_impl<false, false>(folds.data(), nprofiles, nbins, widths.data(),
+                                  nwidths, scores.data(), stdnoise, nthreads);
+}
+
+void snr_boxcar_2d_max(std::span<const float> folds,
                        std::span<const SizeType> widths,
-                       std::span<float> out,
+                       std::span<float> scores,
+                       SizeType nprofiles,
+                       SizeType nbins,
                        float stdnoise,
                        int nthreads) {
-    nthreads                  = std::clamp(nthreads, 1, omp_get_max_threads());
-    const SizeType nbins      = arr.size() / nprofiles;
-    const SizeType ntemplates = widths.size();
-    const SizeType wmax       = *std::ranges::max_element(widths);
+    const auto nwidths = widths.size();
+    error_check::check_equal(folds.size(), (nprofiles * nbins),
+                             "snr_boxcar_2d_max: arr size does not match");
     error_check::check_equal(
-        out.size(), nprofiles,
-        "snr_boxcar_2d_max: out size does not match nprofiles");
-    // Precompute template parameters (h, b) for all widths
-    std::vector<float> h_vals(ntemplates);
-    std::vector<float> b_vals(ntemplates);
-    for (SizeType iw = 0; iw < ntemplates; ++iw) {
-        const auto w = widths[iw];
-        h_vals[iw]   = std::sqrt(static_cast<float>(nbins - w) /
-                                 static_cast<float>(nbins * w));
-        b_vals[iw] =
-            static_cast<float>(w) * h_vals[iw] / static_cast<float>(nbins - w);
-    }
-#pragma omp parallel num_threads(nthreads) default(none)                       \
-    shared(arr, widths, stdnoise, out, nbins, nprofiles, ntemplates, wmax,     \
-               h_vals, b_vals)
-    {
-        // Thread-local buffer
-        std::vector<float> psum(nbins + wmax, 0.0F);
-
-#pragma omp for
-        for (SizeType i = 0; i < nprofiles; ++i) {
-            const auto fold = arr.subspan(i * nbins, nbins);
-            utils::circular_prefix_sum(fold, std::span<float>(psum));
-            const float sum              = psum[nbins - 1];
-            float* __restrict__ psum_ptr = psum.data();
-
-            // Compute SNR for each width, find maximum
-            float max_snr = std::numeric_limits<float>::lowest();
-            for (SizeType iw = 0; iw < ntemplates; ++iw) {
-                const auto dmax =
-                    utils::diff_max(psum_ptr + widths[iw], psum_ptr, nbins);
-                const float snr =
-                    (((h_vals[iw] + b_vals[iw]) * dmax) - (b_vals[iw] * sum)) /
-                    stdnoise;
-                max_snr = std::max(max_snr, snr);
-            }
-            out[i] = max_snr;
-        }
-    }
+        scores.size(), nprofiles,
+        "snr_boxcar_2d_max: scores size does not match nprofiles");
+    snr_boxcar_impl<false, true>(folds.data(), nprofiles, nbins, widths.data(),
+                                 nwidths, scores.data(), stdnoise, nthreads);
 }
 
-void snr_boxcar_3d(std::span<const float> arr,
-                   SizeType nprofiles,
+void snr_boxcar_3d(std::span<const float> folds,
                    std::span<const SizeType> widths,
-                   std::span<float> out,
+                   std::span<float> scores,
+                   SizeType nprofiles,
+                   SizeType nbins,
                    int nthreads) {
-    nthreads                  = std::clamp(nthreads, 1, omp_get_max_threads());
-    const SizeType nbins      = arr.size() / (2 * nprofiles);
-    const SizeType ntemplates = widths.size();
-    const SizeType wmax       = *std::ranges::max_element(widths);
+    const auto nwidths = widths.size();
+    error_check::check_equal(folds.size(), (nprofiles * 2 * nbins),
+                             "snr_boxcar_3d: folds size does not match");
     error_check::check_equal(
-        out.size(), nprofiles * ntemplates,
-        "snr_boxcar_3d: out size does not match nprofiles * ntemplates");
-    // Precompute template parameters (h, b) for all widths
-    std::vector<float> h_vals(ntemplates);
-    std::vector<float> b_vals(ntemplates);
-    for (SizeType iw = 0; iw < ntemplates; ++iw) {
-        const auto w = widths[iw];
-        h_vals[iw]   = std::sqrt(static_cast<float>(nbins - w) /
-                                 static_cast<float>(nbins * w));
-        b_vals[iw] =
-            static_cast<float>(w) * h_vals[iw] / static_cast<float>(nbins - w);
-    }
-#pragma omp parallel num_threads(nthreads) default(none) shared(               \
-        arr, widths, out, nbins, nprofiles, ntemplates, wmax, h_vals, b_vals)
-    {
-        // Thread-local buffers
-        std::vector<float> fold_norm(nbins, 0.0F);
-        std::vector<float> psum(nbins + wmax, 0.0F);
-
-#pragma omp for
-        for (SizeType i = 0; i < nprofiles; ++i) {
-            const SizeType base_idx            = i * 2 * nbins;
-            const float* __restrict__ ts_e_ptr = arr.data() + base_idx;
-            const float* __restrict__ ts_v_ptr = arr.data() + base_idx + nbins;
-            float* __restrict__ fold_norm_ptr  = fold_norm.data();
-            for (SizeType j = 0; j < nbins; ++j) {
-                const float inv_sqrt_v = 1.0F / std::sqrt(ts_v_ptr[j]);
-                fold_norm_ptr[j]       = ts_e_ptr[j] * inv_sqrt_v;
-            }
-            utils::circular_prefix_sum(std::span<const float>(fold_norm),
-                                       std::span<float>(psum));
-            const float sum              = psum[nbins - 1];
-            float* __restrict__ psum_ptr = psum.data();
-
-            for (SizeType iw = 0; iw < ntemplates; ++iw) {
-                const auto dmax =
-                    utils::diff_max(psum_ptr + widths[iw], psum_ptr, nbins);
-                out[(i * ntemplates) + iw] =
-                    ((h_vals[iw] + b_vals[iw]) * dmax) - (b_vals[iw] * sum);
-            }
-        }
-    }
+        scores.size(), nprofiles * nwidths,
+        "snr_boxcar_3d: scores size does not match nprofiles * nwidths");
+    snr_boxcar_impl<true, false>(folds.data(), nprofiles, nbins, widths.data(),
+                                 nwidths, scores.data(), 1.0F, nthreads);
 }
 
-void snr_boxcar_3d_max(std::span<const float> arr,
-                       SizeType nprofiles,
+void snr_boxcar_3d_max(std::span<const float> folds,
                        std::span<const SizeType> widths,
-                       std::span<float> out,
+                       std::span<float> scores,
+                       SizeType nprofiles,
+                       SizeType nbins,
                        int nthreads) {
-    nthreads                  = std::clamp(nthreads, 1, omp_get_max_threads());
-    const SizeType nbins      = arr.size() / (2 * nprofiles);
-    const SizeType ntemplates = widths.size();
-    const SizeType wmax       = *std::ranges::max_element(widths);
+    const auto nwidths = widths.size();
+    error_check::check_equal(folds.size(), (nprofiles * 2 * nbins),
+                             "snr_boxcar_3d_max: folds size does not match");
     error_check::check_equal(
-        out.size(), nprofiles,
-        "snr_boxcar_3d_max: out size do not match nprofiles");
-    // Precompute template parameters (h, b) for all widths
-    std::vector<float> h_vals(ntemplates);
-    std::vector<float> b_vals(ntemplates);
-    for (SizeType iw = 0; iw < ntemplates; ++iw) {
-        const auto w = widths[iw];
-        h_vals[iw]   = std::sqrt(static_cast<float>(nbins - w) /
-                                 static_cast<float>(nbins * w));
-        b_vals[iw] =
-            static_cast<float>(w) * h_vals[iw] / static_cast<float>(nbins - w);
-    }
-#pragma omp parallel num_threads(nthreads) default(none) shared(               \
-        arr, widths, out, nbins, nprofiles, ntemplates, wmax, h_vals, b_vals)
-    {
-        // Thread-local buffers
-        std::vector<float> fold_norm(nbins, 0.0F);
-        std::vector<float> psum(nbins + wmax, 0.0F);
+        scores.size(), nprofiles,
+        "snr_boxcar_3d_max: scores size do not match nprofiles");
 
-#pragma omp for
-        for (SizeType i = 0; i < nprofiles; ++i) {
-            const SizeType base_idx            = i * 2 * nbins;
-            const float* __restrict__ ts_e_ptr = arr.data() + base_idx;
-            const float* __restrict__ ts_v_ptr = arr.data() + base_idx + nbins;
-            float* __restrict__ fold_norm_ptr  = fold_norm.data();
-            for (SizeType j = 0; j < nbins; ++j) {
-                const float inv_sqrt_v = 1.0F / std::sqrt(ts_v_ptr[j]);
-                fold_norm_ptr[j]       = ts_e_ptr[j] * inv_sqrt_v;
-            }
-            utils::circular_prefix_sum(std::span<const float>(fold_norm),
-                                       std::span<float>(psum));
-            const float sum              = psum[nbins - 1];
-            float* __restrict__ psum_ptr = psum.data();
-
-            // Compute SNR for each width, find maximum
-            float max_snr = std::numeric_limits<float>::lowest();
-            for (SizeType iw = 0; iw < ntemplates; ++iw) {
-                const auto dmax =
-                    utils::diff_max(psum_ptr + widths[iw], psum_ptr, nbins);
-                const float snr =
-                    ((h_vals[iw] + b_vals[iw]) * dmax) - (b_vals[iw] * sum);
-                max_snr = std::max(max_snr, snr);
-            }
-            out[i] = max_snr;
-        }
-    }
+    snr_boxcar_impl<true, true>(folds.data(), nprofiles, nbins, widths.data(),
+                                nwidths, scores.data(), 1.0F, nthreads);
 }
 
-namespace {
-void snr_boxcar_batch_kernel(const float* __restrict__ arr,
-                             SizeType nprofiles,
-                             SizeType nbins,
-                             float* __restrict__ out,
-                             BoxcarWidthsCache& cache) {
-    // Use precomputed values from cache
-    const auto* __restrict__ widths = cache.widths.data();
-    const auto wmax                 = cache.wmax;
-    const auto ntemplates           = cache.ntemplates;
-    const auto* __restrict__ h_vals = cache.h_vals.data();
-    const auto* __restrict__ b_vals = cache.b_vals.data();
-    auto* __restrict__ fold_norm    = cache.fold_norm_buffer.data();
-    auto* __restrict__ psum         = cache.psum_buffer.data();
-
-    for (SizeType i = 0; i < nprofiles; ++i) {
-        const SizeType base_idx            = i * 2 * nbins;
-        const float* __restrict__ ts_e_ptr = arr + base_idx;
-        const float* __restrict__ ts_v_ptr = arr + base_idx + nbins;
-        for (SizeType j = 0; j < nbins; ++j) {
-            const float inv_sqrt_v = 1.0F / std::sqrt(ts_v_ptr[j]);
-            fold_norm[j]           = ts_e_ptr[j] * inv_sqrt_v;
-        }
-        utils::circular_prefix_sum(std::span<const float>(fold_norm, nbins),
-                                   std::span<float>(psum, nbins + wmax));
-        const float sum              = psum[nbins - 1];
-        float* __restrict__ psum_ptr = psum;
-
-        // Compute SNR for each width, find maximum
-        float max_snr = std::numeric_limits<float>::lowest();
-        for (SizeType iw = 0; iw < ntemplates; ++iw) {
-            const auto dmax =
-                utils::diff_max(psum_ptr + widths[iw], psum_ptr, nbins);
-            const float snr =
-                ((h_vals[iw] + b_vals[iw]) * dmax) - (b_vals[iw] * sum);
-            max_snr = std::max(max_snr, snr);
-        }
-        out[i] = max_snr;
-    }
-}
-} // namespace
-
-void snr_boxcar_batch(std::span<const float> folds_batch,
-                      std::span<float> scores_batch,
-                      SizeType n_batch,
-                      SizeType nbins,
-                      BoxcarWidthsCache& cache) {
-    error_check::check_greater_equal(scores_batch.size(), n_batch,
-                                     "snr_boxcar_batch: scores_batch should be "
-                                     "at least n_batch");
-    error_check::check_greater_equal(folds_batch.size(), n_batch * nbins * 2,
-                                     "snr_boxcar_batch: folds_batch should be "
-                                     "at least n_batch * nbins * 2");
-    snr_boxcar_batch_kernel(folds_batch.data(), n_batch, nbins,
-                            scores_batch.data(), cache);
+void snr_boxcar_3d_max_with_cache(std::span<const float> folds,
+                                  std::span<float> scores,
+                                  SizeType nprofiles,
+                                  SizeType nbins,
+                                  BoxcarWidthsCache& cache) {
+    error_check::check_greater_equal(
+        scores.size(), nprofiles,
+        "snr_boxcar_3d_max_with_cache: scores should be "
+        "at least nprofiles");
+    error_check::check_greater_equal(
+        folds.size(), nprofiles * 2 * nbins,
+        "snr_boxcar_3d_max_with_cache: folds should be "
+        "at least nprofiles * 2 * nbins");
+    snr_boxcar_3d_max_with_cache_impl(folds.data(), nprofiles, nbins,
+                                      scores.data(), cache);
 }
 
 } // namespace loki::detection

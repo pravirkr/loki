@@ -11,13 +11,13 @@
 namespace loki::plans {
 
 struct FFACoordDPtrs {
-    const uint32_t* i_tail;
-    const float* shift_tail;
-    const uint32_t* i_head;
-    const float* shift_head;
+    const uint32_t* __restrict__ i_tail;
+    const float* __restrict__ shift_tail;
+    const uint32_t* __restrict__ i_head;
+    const float* __restrict__ shift_head;
 
     __host__ __device__ __forceinline__ FFACoordDPtrs
-    offset(int offset_value) const {
+    offset(SizeType offset_value) const {
         return {.i_tail     = i_tail + offset_value,
                 .shift_tail = shift_tail + offset_value,
                 .i_head     = i_head + offset_value,
@@ -26,11 +26,11 @@ struct FFACoordDPtrs {
 };
 
 struct FFACoordFreqDPtrs {
-    const uint32_t* idx;
-    const float* shift;
+    const uint32_t* __restrict__ idx;
+    const float* __restrict__ shift;
 
     __host__ __device__ __forceinline__ FFACoordFreqDPtrs
-    offset(int offset_value) const {
+    offset(SizeType offset_value) const {
         return {.idx = idx + offset_value, .shift = shift + offset_value};
     }
 };

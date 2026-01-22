@@ -18,12 +18,15 @@ inline constexpr double kInvCval = 3.3356409519815204e-09; // s/m
  * @param size Number of elements to process.
  * @return  The maximum of the pair‑wise differences.
  */
-[[nodiscard]] float diff_max(const float* __restrict__ x,
-                             const float* __restrict__ y,
-                             SizeType size) noexcept;
+float diff_max(const float* __restrict__ x,
+               const float* __restrict__ y,
+               SizeType size) noexcept;
 
 // out[nsum] = x[0] + x[1] + ... + x[size-1] + x[0] + x[1] + ...
-void circular_prefix_sum(std::span<const float> x, std::span<float> out);
+void circular_prefix_sum(const float* __restrict__ x,
+                         float* __restrict__ out,
+                         SizeType nbins,
+                         SizeType nsum) noexcept;
 
 /**
  * @brief  Locate the index of the element **closest** to @p val in a sorted

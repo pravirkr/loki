@@ -1,6 +1,5 @@
 #pragma once
 
-#include <functional>
 #include <memory>
 #include <span>
 #include <string_view>
@@ -61,82 +60,101 @@ void snr_boxcar_1d(std::span<const float> arr,
                    std::span<float> out,
                    float stdnoise = 1.0F);
 
+void snr_boxcar_2d(std::span<const float> folds,
+                   std::span<const SizeType> widths,
+                   std::span<float> scores,
+                   SizeType nprofiles,
+                   SizeType nbins,
+                   float stdnoise = 1.0F,
+                   int nthreads   = 1);
+
 // Compute the Boxcar S/N of a batch of single pulse profiles with common
 // variance Useful for thresholding code
-void snr_boxcar_2d_max(std::span<const float> arr,
-                       SizeType nprofiles,
+void snr_boxcar_2d_max(std::span<const float> folds,
                        std::span<const SizeType> widths,
-                       std::span<float> out,
+                       std::span<float> scores,
+                       SizeType nprofiles,
+                       SizeType nbins,
                        float stdnoise = 1.0F,
                        int nthreads   = 1);
 
 // Compute the Boxcar S/N (for each width) of a batch of E, V folded profiles
-void snr_boxcar_3d(std::span<const float> arr,
-                   SizeType nprofiles,
+void snr_boxcar_3d(std::span<const float> folds,
                    std::span<const SizeType> widths,
-                   std::span<float> out,
+                   std::span<float> scores,
+                   SizeType nprofiles,
+                   SizeType nbins,
                    int nthreads = 1);
 
 // Compute the Boxcar S/N of a batch of E, V folded profiles
-void snr_boxcar_3d_max(std::span<const float> arr,
-                       SizeType nprofiles,
+void snr_boxcar_3d_max(std::span<const float> folds,
                        std::span<const SizeType> widths,
-                       std::span<float> out,
+                       std::span<float> scores,
+                       SizeType nprofiles,
+                       SizeType nbins,
                        int nthreads = 1);
 
 // Compute the S/N of a batch of folded profiles
-void snr_boxcar_batch(std::span<const float> folds_batch,
-                      std::span<float> scores_batch,
-                      SizeType n_batch,
-                      SizeType nbins,
-                      BoxcarWidthsCache& cache);
-
-template <typename FoldType>
-using ScoringFunction = std::function<void(std::span<const FoldType>,
-                                           std::span<float>,
-                                           SizeType,
-                                           SizeType,
-                                           BoxcarWidthsCache&)>;
+void snr_boxcar_3d_max_with_cache(std::span<const float> folds,
+                                  std::span<float> scores,
+                                  SizeType nprofiles,
+                                  SizeType nbins,
+                                  BoxcarWidthsCache& cache);
 
 #ifdef LOKI_ENABLE_CUDA
 
-void snr_boxcar_2d_max_cuda(std::span<const float> arr,
+void snr_boxcar_2d_max_cuda(std::span<const float> folds,
                             SizeType nprofiles,
+                            SizeType nbins,
                             std::span<const SizeType> widths,
-                            std::span<float> out,
+                            std::span<float> scores,
                             float stdnoise = 1.0F,
                             int device_id  = 0);
 
-void snr_boxcar_2d_max_cuda_d(cuda::std::span<const float> arr,
+void snr_boxcar_2d_max_cuda_d(cuda::std::span<const float> folds,
                               SizeType nprofiles,
+                              SizeType nbins,
                               cuda::std::span<const SizeType> widths,
-                              cuda::std::span<float> out,
-                              float stdnoise = 1.0F,
-                              int device_id  = 0);
+                              cuda::std::span<float> scores,
+                              float stdnoise      = 1.0F,
+                              cudaStream_t stream = nullptr);
 
-void snr_boxcar_3d_cuda(std::span<const float> arr,
+void snr_boxcar_3d_cuda(std::span<const float> folds,
                         SizeType nprofiles,
+                        SizeType nbins,
                         std::span<const SizeType> widths,
-                        std::span<float> out,
+                        std::span<float> scores,
                         int device_id = 0);
 
-void snr_boxcar_3d_cuda_d(cuda::std::span<const float> arr,
+void snr_boxcar_3d_cuda_d(cuda::std::span<const float> folds,
                           SizeType nprofiles,
+                          SizeType nbins,
                           cuda::std::span<const SizeType> widths,
-                          cuda::std::span<float> out,
-                          int device_id = 0);
+                          cuda::std::span<float> scores,
+                          cudaStream_t stream = nullptr);
 
-void snr_boxcar_3d_max_cuda(std::span<const float> arr,
+void snr_boxcar_3d_max_cuda(std::span<const float> folds,
                             SizeType nprofiles,
+                            SizeType nbins,
                             std::span<const SizeType> widths,
-                            std::span<float> out,
+                            std::span<float> scores,
                             int device_id = 0);
 
-void snr_boxcar_3d_max_cuda_d(cuda::std::span<const float> arr,
+void snr_boxcar_3d_max_cuda_d(cuda::std::span<const float> folds,
                               SizeType nprofiles,
+                              SizeType nbins,
                               cuda::std::span<const SizeType> widths,
-                              cuda::std::span<float> out,
-                              int device_id = 0);
+                              cuda::std::span<float> scores,
+                              cudaStream_t stream = nullptr);
+
+SizeType score_and_filter_cuda_d(cuda::std::span<const float> folds,
+                                 SizeType nprofiles,
+                                 SizeType nbins,
+                                 cuda::std::span<const SizeType> widths,
+                                 cuda::std::span<float> scores,
+                                 cuda::std::span<SizeType> indices_filtered,
+                                 float threshold,
+                                 cudaStream_t stream);
 
 #endif // LOKI_ENABLE_CUDA
 

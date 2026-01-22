@@ -140,29 +140,16 @@ void PruneDPFunctsCUDA<FoldTypeCUDA>::shift_add(
     cuda::std::span<FoldTypeCUDA> folds_out,
     SizeType n_leaves,
     cudaStream_t stream) noexcept {
-    if (std::is_same_v<FoldTypeCUDA, float>) {
-        const auto total_work = n_leaves * m_cfg.get_nbins();
-        const auto block_size = (total_work < 65536) ? 256 : 512;
-        const auto grid_size  = (total_work + block_size - 1) / block_size;
-        const dim3 block_dim(block_size);
-        const dim3 grid_dim(grid_size);
-        cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
-
-        shift_add_kernel<<<grid_dim, block_dim, 0, stream>>>(
+    if constexpr (std::is_same_v<FoldTypeCUDA, float>) {
+        kernels::shift_add_linear_batch_cuda(
             folds_tree.data(), indices_tree.data(), folds_ffa.data(),
-            indices_ffa.data(), phase_shift.data(), folds_out.data(), n_leaves,
-            m_cfg.get_nbins());
+            indices_ffa.data(), phase_shift.data(), folds_out.data(),
+            m_cfg.get_nbins(), n_leaves, stream);
     } else {
-        const auto total_work = n_leaves * m_cfg.get_nbins_f();
-        const auto block_size = (total_work < 65536) ? 256 : 512;
-        const auto grid_size  = (total_work + block_size - 1) / block_size;
-        const dim3 block_dim(block_size);
-        const dim3 grid_dim(grid_size);
-        cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
-        shift_add_complex_kernel<<<grid_dim, block_dim, 0, stream>>>(
+        return shift_add_linear_complex_batch_cuda(
             folds_tree.data(), indices_tree.data(), folds_ffa.data(),
-            indices_ffa.data(), phase_shift.data(), folds_out.data(), n_leaves,
-            m_cfg.get_nbins(), m_cfg.get_nbins_f());
+            indices_ffa.data(), phase_shift.data(), folds_out.data(),
+            m_cfg.get_nbins_f(), m_cfg.get_nbins(), n_leaves, stream);
     }
 }
 

@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <format>
-#include <numeric>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -24,27 +23,39 @@ float diff_max(const float* __restrict__ x,
     return max_diff;
 }
 
-void circular_prefix_sum(std::span<const float> x, std::span<float> out) {
-    const auto nbins = x.size();
-    const auto nsum  = out.size();
+void circular_prefix_sum(const float* __restrict__ x,
+                         float* __restrict__ out,
+                         SizeType nbins,
+                         SizeType nsum) noexcept {
     if (nbins == 0 || nsum == 0) {
         return;
     }
-    // Compute the initial prefix sum
-    const auto initial_count = std::min(nbins, nsum);
-    std::inclusive_scan(x.begin(),
-                        x.begin() + static_cast<IndexType>(initial_count),
-                        out.begin());
-    if (nsum <= nbins) {
+    // Initial prefix sum over the base cycle (as nbins < nsum)
+    out[0] = x[0];
+    for (SizeType i = 1; i < nbins; ++i) {
+        out[i] = out[i - 1] + x[i];
+    }
+    if (nsum <= nbins) [[unlikely]] {
         return;
     }
-    // Wrap around
+
+    // Wrap around - optimized for the common case where wmax < nbins
     const float last_sum = out[nbins - 1];
-    for (SizeType i = nbins; i < nsum; ++i) {
-        const auto wrap_count   = i / nbins;
-        const auto pos_in_cycle = i % nbins;
-        out[i] =
-            out[pos_in_cycle] + (static_cast<float>(wrap_count) * last_sum);
+
+    // First wrap (wrap_count = 1): most common case
+    const SizeType first_wrap_end = std::min(2 * nbins, nsum);
+    for (SizeType i = nbins; i < first_wrap_end; ++i) {
+        out[i] = out[i - nbins] + last_sum;
+    }
+
+    // Additional wraps if needed (rare)
+    if (nsum > 2 * nbins) [[unlikely]] {
+        for (SizeType i = 2 * nbins; i < nsum; ++i) {
+            const auto wrap_count   = i / nbins;
+            const auto pos_in_cycle = i % nbins;
+            out[i] =
+                out[pos_in_cycle] + (static_cast<float>(wrap_count) * last_sum);
+        }
     }
 }
 

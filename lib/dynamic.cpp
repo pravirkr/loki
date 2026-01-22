@@ -91,16 +91,17 @@ void BasePruneDPFuncts<FoldType, Derived>::shift_add(
     std::span<const float> phase_shift,
     std::span<FoldType> folds_out,
     SizeType n_leaves) noexcept {
-    if constexpr (std::is_same_v<FoldType, ComplexType>) {
-        kernels::shift_add_complex_recurrence_batch(
-            folds_tree.data(), indices_tree.data(), folds_ffa.data(),
-            indices_ffa.data(), phase_shift.data(), folds_out.data(),
-            m_cfg.get_nbins_f(), m_cfg.get_nbins(), n_leaves);
-    } else {
-        kernels::shift_add_buffer_batch(
+    if constexpr (std::is_same_v<FoldType, float>) {
+        kernels::shift_add_linear_batch(
             folds_tree.data(), indices_tree.data(), folds_ffa.data(),
             indices_ffa.data(), phase_shift.data(), folds_out.data(),
             m_scratch_shifts.data(), m_cfg.get_nbins(), n_leaves);
+
+    } else {
+        kernels::shift_add_linear_complex_batch(
+            folds_tree.data(), indices_tree.data(), folds_ffa.data(),
+            indices_ffa.data(), phase_shift.data(), folds_out.data(),
+            m_cfg.get_nbins_f(), m_cfg.get_nbins(), n_leaves);
     }
 }
 

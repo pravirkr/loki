@@ -507,18 +507,18 @@ private:
 
         // FFA iterations
         if (m_is_freq_only) {
-            auto coords_base_ptr = ws->coords_freq_d.get_raw_ptrs();
+            auto coords_base = ws->coords_freq_d.get_raw_ptrs();
             for (SizeType i_level = 1; i_level < levels; ++i_level) {
-                execute_iter_freq(current_in_ptr, current_out_ptr,
-                                  coords_base_ptr, i_level, stream);
+                execute_iter_freq(current_in_ptr, current_out_ptr, coords_base,
+                                  i_level, stream);
                 if (i_level < levels - 1) {
                     std::swap(current_in_ptr, current_out_ptr);
                 }
             }
         } else {
-            auto coords_base_ptr = ws->coords_d.get_raw_ptrs();
+            auto coords_base = ws->coords_d.get_raw_ptrs();
             for (SizeType i_level = 1; i_level < levels; ++i_level) {
-                execute_iter(current_in_ptr, current_out_ptr, coords_base_ptr,
+                execute_iter(current_in_ptr, current_out_ptr, coords_base,
                              i_level, stream);
                 if (i_level < levels - 1) {
                     std::swap(current_in_ptr, current_out_ptr);
@@ -527,88 +527,55 @@ private:
         }
     }
 
-    void
-    execute_iter_freq(DeviceFoldType* __restrict__ fold_in,
-                      DeviceFoldType* __restrict__ fold_out,
-                      plans::FFACoordFreqDPtrs* __restrict__ coords_base_ptr,
-                      SizeType i_level,
-                      cudaStream_t stream) {
-        const auto nsegments =
-            static_cast<int>(m_ffa_plan.get_fold_shapes_time()[i_level][0]);
-        const auto nbins =
-            static_cast<int>(m_ffa_plan.get_fold_shapes_time()[i_level].back());
-        const auto ncoords_cur =
-            static_cast<int>(m_ffa_plan.get_ncoords()[i_level]);
-        const auto ncoords_prev =
-            static_cast<int>(m_ffa_plan.get_ncoords()[i_level - 1]);
+    void execute_iter_freq(const DeviceFoldType* __restrict__ fold_in,
+                           DeviceFoldType* __restrict__ fold_out,
+                           plans::FFACoordFreqDPtrs coords_base,
+                           SizeType i_level,
+                           cudaStream_t stream) {
+        const auto nbins        = m_cfg.get_nbins();
+        const auto nbins_f      = m_cfg.get_nbins_f();
+        const auto nsegments    = m_ffa_plan.get_fold_shapes_time()[i_level][0];
+        const auto ncoords_cur  = m_ffa_plan.get_ncoords()[i_level];
+        const auto ncoords_prev = m_ffa_plan.get_ncoords()[i_level - 1];
         const auto ncoords_offset = m_ffa_plan.get_ncoords_offsets()[i_level];
-        const plans::FFACoordFreqDPtrs* __restrict__ coords_ptr =
-            coords_base_ptr.offset(static_cast<int>(ncoords_offset));
+        // Get the coordinates for the current level
+        const plans::FFACoordFreqDPtrs coords =
+            coords_base.offset(ncoords_offset);
 
         if constexpr (std::is_same_v<FoldTypeCUDA, float>) {
-            kernels::ffa_iter_freq_cuda(fold_in, fold_out, coords_ptr,
-                                        nsegments, nbins, ncoords_cur,
-                                        ncoords_prev, stream);
+            kernels::ffa_iter_freq_cuda(fold_in, fold_out, coords, ncoords_cur,
+                                        ncoords_prev, nsegments, nbins, stream);
 
         } else {
-            // Complex kernels
-            const int nbins_f    = (nbins / 2) + 1;
-            const int total_work = ncoords_cur * nsegments * nbins_f;
-            const int block_size = (total_work < 65536) ? 256 : 512;
-            const int grid_size  = (total_work + block_size - 1) / block_size;
-            const dim3 block_dim(block_size);
-            const dim3 grid_dim(grid_size);
-            cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
-            kernel_ffa_complex_freq_iter<<<grid_dim, block_dim, 0, stream>>>(
-                fold_in, fold_out, coords_ptr, ncoords_cur, ncoords_prev,
-                nsegments, nbins_f, nbins);
+            kernels::ffa_complex_iter_freq_cuda(
+                fold_in, fold_out, coords, ncoords_cur, ncoords_prev, nsegments,
+                nbins_f, nbins, stream);
         }
-        cuda_utils::check_last_cuda_error("FFA kernel launch failed");
     }
 
-    void execute_iter(DeviceFoldType* __restrict__ fold_in,
+    void execute_iter(const DeviceFoldType* __restrict__ fold_in,
                       DeviceFoldType* __restrict__ fold_out,
-                      plans::FFACoordDPtrs coords_base_ptr,
+                      plans::FFACoordDPtrs coords_base,
                       SizeType i_level,
                       cudaStream_t stream) {
-        const auto nsegments =
-            static_cast<int>(m_ffa_plan.get_fold_shapes_time()[i_level][0]);
-        const auto nbins =
-            static_cast<int>(m_ffa_plan.get_fold_shapes_time()[i_level].back());
-        const auto ncoords_cur =
-            static_cast<int>(m_ffa_plan.get_ncoords()[i_level]);
-        const auto ncoords_prev =
-            static_cast<int>(m_ffa_plan.get_ncoords()[i_level - 1]);
+        const auto nbins        = m_cfg.get_nbins();
+        const auto nbins_f      = m_cfg.get_nbins_f();
+        const auto nsegments    = m_ffa_plan.get_fold_shapes_time()[i_level][0];
+        const auto ncoords_cur  = m_ffa_plan.get_ncoords()[i_level];
+        const auto ncoords_prev = m_ffa_plan.get_ncoords()[i_level - 1];
         const auto ncoords_offset = m_ffa_plan.get_ncoords_offsets()[i_level];
-        const plans::FFACoordDPtrs coords_ptr =
-            coords_base_ptr.offset(static_cast<int>(ncoords_offset));
+        // Get the coordinates for the current level
+        const plans::FFACoordDPtrs coords = coords_base.offset(ncoords_offset);
 
         if constexpr (std::is_same_v<FoldTypeCUDA, float>) {
-            // Float kernels
-            const int total_work = ncoords_cur * nsegments * nbins;
-            const int block_size = (total_work < 65536) ? 256 : 512;
-            const int grid_size  = (total_work + block_size - 1) / block_size;
-            const dim3 block_dim(block_size);
-            const dim3 grid_dim(grid_size);
-            cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
-            kernel_ffa_iter<<<grid_dim, block_dim, 0, stream>>>(
-                fold_in, fold_out, coords_ptr, ncoords_cur, ncoords_prev,
-                nsegments, nbins);
+            kernels::ffa_iter_cuda(fold_in, fold_out, coords, ncoords_cur,
+                                   ncoords_prev, nsegments, nbins, stream);
 
         } else {
-            // Complex kernels
-            const int nbins_f    = (nbins / 2) + 1;
-            const int total_work = ncoords_cur * nsegments * nbins_f;
-            const int block_size = (total_work < 65536) ? 256 : 512;
-            const int grid_size  = (total_work + block_size - 1) / block_size;
-            const dim3 block_dim(block_size);
-            const dim3 grid_dim(grid_size);
-            cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
-            kernel_ffa_complex_iter<<<grid_dim, block_dim, 0, stream>>>(
-                fold_in, fold_out, coords_ptr, ncoords_cur, ncoords_prev,
-                nsegments, nbins_f, nbins);
+            kernels::ffa_complex_iter_cuda(fold_in, fold_out, coords,
+                                           ncoords_cur, ncoords_prev, nsegments,
+                                           nbins_f, nbins, stream);
         }
-        cuda_utils::check_last_cuda_error("FFA kernel launch failed");
     }
 
 }; // End FFACUDA::Impl definition

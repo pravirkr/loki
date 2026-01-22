@@ -77,21 +77,17 @@ public:
         } else {
             std::ranges::fill(fold, 0.0F);
         }
-
-        const auto* __restrict__ ts_e_ptr = ts_e.data();
-        const auto* __restrict__ ts_v_ptr = ts_v.data();
-        auto* __restrict__ fold_ptr       = fold.data();
-
-        if constexpr (std::is_same_v<FoldType, ComplexType>) {
-            kernels::brute_fold_ts_complex(ts_e_ptr, ts_v_ptr, fold_ptr,
-                                           m_freq_arr.data(), m_nfreqs,
-                                           m_nsegments, m_segment_len, m_nbins,
-                                           m_tsamp, m_t_ref, m_nthreads);
-        } else {
-            kernels::brute_fold_ts(ts_e_ptr, ts_v_ptr, fold_ptr,
+        if constexpr (std::is_same_v<FoldType, float>) {
+            kernels::brute_fold_ts(ts_e.data(), ts_v.data(), fold.data(),
                                    m_bucket_indices.data(), m_offsets.data(),
                                    m_nsegments, m_nfreqs, m_segment_len,
                                    m_nbins, m_nthreads);
+
+        } else {
+            kernels::brute_fold_ts_complex(
+                ts_e.data(), ts_v.data(), fold.data(), m_freq_arr.data(),
+                m_nfreqs, m_nsegments, m_segment_len, m_nbins, m_tsamp, m_t_ref,
+                m_nthreads);
         }
     }
 

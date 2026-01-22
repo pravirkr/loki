@@ -359,13 +359,13 @@ public:
     /**
      * @brief Checks kernel launch parameters against device limits before
      * launching. Throws std::runtime_error on failure.
-     * @param grid Grid dimensions.
-     * @param block Block dimensions.
+     * @param grid_dim Grid dimensions.
+     * @param block_dim Block dimensions.
      * @param location Source location information (automatically captured).
      * @throws std::runtime_error if dimensions exceed device limits.
      */
-    void check_kernel_launch_params(dim3 grid,
-                                    dim3 block,
+    void check_kernel_launch_params(dim3 grid_dim,
+                                    dim3 block_dim,
                                     size_t shmem_size = 0,
                                     const std::source_location loc =
                                         std::source_location::current()) const {
@@ -378,14 +378,14 @@ public:
             }
         };
 
-        check_limit(block.x, m_props.maxThreadsDim[0], "Block X");
-        check_limit(block.y, m_props.maxThreadsDim[1], "Block Y");
-        check_limit(block.z, m_props.maxThreadsDim[2], "Block Z");
-        check_limit(block.x * block.y * block.z, m_props.maxThreadsPerBlock,
-                    "Total threads");
-        check_limit(grid.x, m_props.maxGridSize[0], "Grid X");
-        check_limit(grid.y, m_props.maxGridSize[1], "Grid Y");
-        check_limit(grid.z, m_props.maxGridSize[2], "Grid Z");
+        check_limit(block_dim.x, m_props.maxThreadsDim[0], "Block X");
+        check_limit(block_dim.y, m_props.maxThreadsDim[1], "Block Y");
+        check_limit(block_dim.z, m_props.maxThreadsDim[2], "Block Z");
+        check_limit(block_dim.x * block_dim.y * block_dim.z,
+                    m_props.maxThreadsPerBlock, "Total threads");
+        check_limit(grid_dim.x, m_props.maxGridSize[0], "Grid X");
+        check_limit(grid_dim.y, m_props.maxGridSize[1], "Grid Y");
+        check_limit(grid_dim.z, m_props.maxGridSize[2], "Grid Z");
         check_limit(shmem_size, m_props.sharedMemPerBlock, "Shared memory");
     }
 #else
@@ -516,12 +516,12 @@ private:
 
 // Standalone check function - delegates to context
 inline void check_kernel_launch_params(
-    dim3 grid,
-    dim3 block,
+    dim3 grid_dim,
+    dim3 block_dim,
     size_t shmem_size              = 0,
     const std::source_location loc = std::source_location::current()) {
-    CudaDeviceContext::get().check_kernel_launch_params(grid, block, shmem_size,
-                                                        loc);
+    CudaDeviceContext::get().check_kernel_launch_params(grid_dim, block_dim,
+                                                        shmem_size, loc);
 }
 
 // Span helpers for Thrust device vectors

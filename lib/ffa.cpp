@@ -325,61 +325,82 @@ private:
         progress::ProgressGuard progress_guard(m_show_progress);
         auto bar = progress::make_ffa_bar("Computing FFA", levels - 1);
 
-        for (SizeType i_level = 1; i_level < levels; ++i_level) {
-            execute_iter(current_in_ptr, current_out_ptr, i_level);
-            // Ping-pong buffers (unless it's the final iteration)
-            if (i_level < levels - 1) {
-                std::swap(current_in_ptr, current_out_ptr);
+        if (m_is_freq_only) {
+            for (SizeType i_level = 1; i_level < levels; ++i_level) {
+                execute_iter_freq(current_in_ptr, current_out_ptr, i_level);
+                // Ping-pong buffers (unless it's the final iteration)
+                if (i_level < levels - 1) {
+                    std::swap(current_in_ptr, current_out_ptr);
+                }
+                if (m_show_progress) {
+                    bar->set_leaves(m_ffa_plan.get_ncoords_lb()[i_level]);
+                    bar->set_progress(i_level);
+                }
             }
-            if (m_show_progress) {
-                bar->set_leaves(m_ffa_plan.get_ncoords_lb()[i_level]);
-                bar->set_progress(i_level);
+        } else {
+            for (SizeType i_level = 1; i_level < levels; ++i_level) {
+                execute_iter(current_in_ptr, current_out_ptr, i_level);
+                // Ping-pong buffers (unless it's the final iteration)
+                if (i_level < levels - 1) {
+                    std::swap(current_in_ptr, current_out_ptr);
+                }
+                if (m_show_progress) {
+                    bar->set_leaves(m_ffa_plan.get_ncoords_lb()[i_level]);
+                    bar->set_progress(i_level);
+                }
             }
         }
         bar->mark_as_completed();
     }
 
+    void execute_iter_freq(const FoldType* __restrict__ fold_in,
+                           FoldType* __restrict__ fold_out,
+                           SizeType i_level) {
+        const auto nbins        = m_cfg.get_nbins();
+        const auto nbins_f      = m_cfg.get_nbins_f();
+        const auto nsegments    = m_ffa_plan.get_fold_shapes_time()[i_level][0];
+        const auto ncoords_cur  = m_ffa_plan.get_ncoords()[i_level];
+        const auto ncoords_prev = m_ffa_plan.get_ncoords()[i_level - 1];
+        const auto ncoords_offset = m_ffa_plan.get_ncoords_offsets()[i_level];
+        // Get the coordinates for the current level
+        auto* ws = get_workspace_data();
+        const auto coords_cur_span =
+            std::span(ws->coords_freq).subspan(ncoords_offset, ncoords_cur);
+
+        if constexpr (std::is_same_v<FoldType, float>) {
+            kernels::ffa_iter_freq(fold_in, fold_out, coords_cur_span.data(),
+                                   ncoords_cur, ncoords_prev, nsegments, nbins,
+                                   m_nthreads);
+        } else {
+            kernels::ffa_complex_iter_freq(
+                fold_in, fold_out, coords_cur_span.data(), ncoords_cur,
+                ncoords_prev, nsegments, nbins_f, nbins, m_nthreads);
+        }
+    }
+
     void execute_iter(const FoldType* __restrict__ fold_in,
                       FoldType* __restrict__ fold_out,
                       SizeType i_level) {
-        auto* ws             = get_workspace_data();
-        const auto nsegments = m_ffa_plan.get_fold_shapes_time()[i_level][0];
-        const auto nbins = m_ffa_plan.get_fold_shapes_time()[i_level].back();
-        const auto ncoords_cur    = m_ffa_plan.get_ncoords()[i_level];
-        const auto ncoords_prev   = m_ffa_plan.get_ncoords()[i_level - 1];
+        const auto nbins        = m_cfg.get_nbins();
+        const auto nbins_f      = m_cfg.get_nbins_f();
+        const auto nsegments    = m_ffa_plan.get_fold_shapes_time()[i_level][0];
+        const auto ncoords_cur  = m_ffa_plan.get_ncoords()[i_level];
+        const auto ncoords_prev = m_ffa_plan.get_ncoords()[i_level - 1];
         const auto ncoords_offset = m_ffa_plan.get_ncoords_offsets()[i_level];
+        // Get the coordinates for the current level
+        auto* ws = get_workspace_data();
+        const auto coords_cur_span =
+            std::span(ws->coords).subspan(ncoords_offset, ncoords_cur);
 
-        // Choose strategy based on level characteristics
         if constexpr (std::is_same_v<FoldType, float>) {
-            if (m_is_freq_only) {
-                const auto coords_cur_span =
-                    std::span(ws->coords_freq)
-                        .subspan(ncoords_offset, ncoords_cur);
-                kernels::ffa_iter_freq(fold_in, fold_out,
-                                       coords_cur_span.data(), nsegments, nbins,
-                                       ncoords_cur, ncoords_prev, m_nthreads);
-            } else {
-                const auto coords_cur_span =
-                    std::span(ws->coords).subspan(ncoords_offset, ncoords_cur);
-                kernels::ffa_iter(fold_in, fold_out, coords_cur_span.data(),
-                                  nsegments, nbins, ncoords_cur, ncoords_prev,
-                                  m_nthreads);
-            }
+            kernels::ffa_iter(fold_in, fold_out, coords_cur_span.data(),
+                              ncoords_cur, ncoords_prev, nsegments, nbins,
+                              m_nthreads);
+
         } else {
-            if (m_is_freq_only) {
-                const auto coords_cur_span =
-                    std::span(ws->coords_freq)
-                        .subspan(ncoords_offset, ncoords_cur);
-                kernels::ffa_complex_iter_freq(
-                    fold_in, fold_out, coords_cur_span.data(), nsegments, nbins,
-                    ncoords_cur, ncoords_prev, m_nthreads);
-            } else {
-                const auto coords_cur_span =
-                    std::span(ws->coords).subspan(ncoords_offset, ncoords_cur);
-                kernels::ffa_complex_iter(
-                    fold_in, fold_out, coords_cur_span.data(), nsegments, nbins,
-                    ncoords_cur, ncoords_prev, m_nthreads);
-            }
+            kernels::ffa_complex_iter(fold_in, fold_out, coords_cur_span.data(),
+                                      ncoords_cur, ncoords_prev, nsegments,
+                                      nbins_f, nbins, m_nthreads);
         }
     }
 }; // End FFA::Impl definition
