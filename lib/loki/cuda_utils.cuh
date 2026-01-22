@@ -9,7 +9,7 @@
 #include <utility>
 #include <variant>
 
-#include <cub/cub.cuh>
+#include <cub/version.cuh>
 #include <cuda/std/span>
 #include <cuda_runtime.h>
 #include <cufft.h>
@@ -21,10 +21,12 @@
 // Check if we are on a modern CUB version (CCCL 3.0+)
 #if CUB_VERSION >= 300000
 #include <cuda/functional>
+#include <cuda/std/numbers>
 template <typename T> using CubMaxOp    = ::cuda::maximum<T>;
 template <typename T> using CubMinOp    = ::cuda::minimum<T>;
 template <typename T> using ThrustMaxOp = ::cuda::maximum<T>;
 template <typename T> using ThrustMinOp = ::cuda::minimum<T>;
+inline constexpr double kPI             = cuda::std::numbers::pi_v<double>;
 #else
 // Fall back to CUB operators for older CCCL
 #include <thrust/functional.h>
@@ -32,11 +34,13 @@ template <typename T> using CubMaxOp    = cub::Max;
 template <typename T> using CubMinOp    = cub::Min;
 template <typename T> using ThrustMaxOp = thrust::maximum<T>;
 template <typename T> using ThrustMinOp = thrust::minimum<T>;
+inline constexpr double kPI             = 3.14159265358979323846; // NOLINT
 #endif // CUB_VERSION >= 300000
 
 namespace loki::cuda_utils {
 
-namespace {
+namespace detail {
+
 // Error code to string conversion
 constexpr std::string_view cufft_error_string(cufftResult error) noexcept {
     switch (error) {
@@ -138,7 +142,6 @@ constexpr std::string_view curand_error_string(curandStatus_t error) noexcept {
         return "Unknown cuRAND error";
     }
 }
-} // namespace
 
 /**
  * @brief Unified exception class for all CUDA-related library errors.
@@ -253,14 +256,17 @@ private:
     }
 };
 
-namespace {
+inline thread_local int tls_current_device = -1;
+
+} // namespace detail
+
 // Generic error checking function
 inline void
 check_cuda_call(cudaError_t result,
                 std::string_view msg     = "",
                 std::source_location loc = std::source_location::current()) {
     if (result != cudaSuccess) {
-        throw CudaException(result, msg, loc);
+        throw detail::CudaException(result, msg, loc);
     }
 }
 
@@ -269,7 +275,7 @@ check_cufft_call(cufftResult result,
                  std::string_view msg     = "",
                  std::source_location loc = std::source_location::current()) {
     if (result != CUFFT_SUCCESS) {
-        throw CudaException(result, msg, loc);
+        throw detail::CudaException(result, msg, loc);
     }
 }
 
@@ -278,7 +284,7 @@ check_curand_call(curandStatus_t result,
                   std::string_view msg     = "",
                   std::source_location loc = std::source_location::current()) {
     if (result != CURAND_STATUS_SUCCESS) {
-        throw CudaException(result, msg, loc);
+        throw detail::CudaException(result, msg, loc);
     }
 }
 
@@ -288,15 +294,8 @@ inline void check_last_cuda_error(
     std::source_location loc = std::source_location::current()) {
     cudaError_t error = cudaGetLastError();
     if (error != cudaSuccess) {
-        throw CudaException(error, msg, loc);
+        throw detail::CudaException(error, msg, loc);
     }
-}
-
-inline void check_cuda_sync_error(
-    std::string_view msg     = "",
-    std::source_location loc = std::source_location::current()) {
-    check_cuda_call(cudaDeviceSynchronize(), "Synchronization failed", loc);
-    check_last_cuda_error(msg, loc);
 }
 
 /**
@@ -305,8 +304,16 @@ inline void check_cuda_sync_error(
  */
 class CudaDeviceContext {
 public:
+    ~CudaDeviceContext()                                   = default;
+    CudaDeviceContext(const CudaDeviceContext&)            = delete;
+    CudaDeviceContext& operator=(const CudaDeviceContext&) = delete;
+    CudaDeviceContext(CudaDeviceContext&&)                 = delete;
+    CudaDeviceContext& operator=(CudaDeviceContext&&)      = delete;
+
     // Get thread-local instance for current device
     [[nodiscard]] static const CudaDeviceContext& get() {
+        assert(detail::tls_current_device >= 0 &&
+               "CUDA device guard not active");
         thread_local CudaDeviceContext instance;
         instance.refresh_if_needed();
         return instance;
@@ -319,32 +326,32 @@ public:
     }
 
     // Accessors - zero cost, just reads cached values
-    [[nodiscard]] int get_device_id() const noexcept { return device_id_; }
+    [[nodiscard]] int get_device_id() const noexcept { return m_device_id; }
     [[nodiscard]] const cudaDeviceProp& get_properties() const noexcept {
-        return props_;
+        return m_props;
     }
 
     [[nodiscard]] SizeType get_max_shared_memory() const noexcept {
-        return props_.sharedMemPerBlock;
+        return m_props.sharedMemPerBlock;
     }
 
     [[nodiscard]] int get_max_threads_per_block() const noexcept {
-        return props_.maxThreadsPerBlock;
+        return m_props.maxThreadsPerBlock;
     }
 
     [[nodiscard]] const int* get_max_threads_dim() const noexcept {
-        return props_.maxThreadsDim;
+        return m_props.maxThreadsDim;
     }
 
     [[nodiscard]] const int* get_max_grid_size() const noexcept {
-        return props_.maxGridSize;
+        return m_props.maxGridSize;
     }
 
     [[nodiscard]] std::string get_device_info() const {
         return std::format(
             "Device {}: {} (CC {}.{}), Mem: {} MiB, Shared Mem: {} bytes",
-            device_id_, props_.name, props_.major, props_.minor,
-            props_.totalGlobalMem >> 20U, props_.sharedMemPerBlock);
+            m_device_id, m_props.name, m_props.major, m_props.minor,
+            m_props.totalGlobalMem >> 20U, m_props.sharedMemPerBlock);
     }
 
     // Validation methods - compile away in release builds
@@ -371,15 +378,15 @@ public:
             }
         };
 
-        check_limit(block.x, props_.maxThreadsDim[0], "Block X");
-        check_limit(block.y, props_.maxThreadsDim[1], "Block Y");
-        check_limit(block.z, props_.maxThreadsDim[2], "Block Z");
-        check_limit(block.x * block.y * block.z, props_.maxThreadsPerBlock,
+        check_limit(block.x, m_props.maxThreadsDim[0], "Block X");
+        check_limit(block.y, m_props.maxThreadsDim[1], "Block Y");
+        check_limit(block.z, m_props.maxThreadsDim[2], "Block Z");
+        check_limit(block.x * block.y * block.z, m_props.maxThreadsPerBlock,
                     "Total threads");
-        check_limit(grid.x, props_.maxGridSize[0], "Grid X");
-        check_limit(grid.y, props_.maxGridSize[1], "Grid Y");
-        check_limit(grid.z, props_.maxGridSize[2], "Grid Z");
-        check_limit(shmem_size, props_.sharedMemPerBlock, "Shared memory");
+        check_limit(grid.x, m_props.maxGridSize[0], "Grid X");
+        check_limit(grid.y, m_props.maxGridSize[1], "Grid Y");
+        check_limit(grid.z, m_props.maxGridSize[2], "Grid Z");
+        check_limit(shmem_size, m_props.sharedMemPerBlock, "Shared memory");
     }
 #else
     // No-op in release builds - completely optimized away
@@ -391,31 +398,30 @@ public:
             std::source_location::current()) const noexcept {}
 #endif
 
-    // Delete copy/move to enforce singleton pattern
-    CudaDeviceContext(const CudaDeviceContext&)            = delete;
-    CudaDeviceContext& operator=(const CudaDeviceContext&) = delete;
-    CudaDeviceContext(CudaDeviceContext&&)                 = delete;
-    CudaDeviceContext& operator=(CudaDeviceContext&&)      = delete;
-
 private:
+    int m_device_id{-1};
+    cudaDeviceProp m_props{};
+
     CudaDeviceContext() { refresh(); }
 
     void refresh() {
-        check_cuda_call(cudaGetDevice(&device_id_), "Failed to get device");
-        check_cuda_call(cudaGetDeviceProperties(&props_, device_id_),
+        check_cuda_call(cudaGetDevice(&m_device_id), "Failed to get device");
+        check_cuda_call(cudaGetDeviceProperties(&m_props, m_device_id),
+                        "Failed to get device properties");
+    }
+
+    void refresh_from_known_device(int device_id) {
+        m_device_id = device_id;
+        check_cuda_call(cudaGetDeviceProperties(&m_props, device_id),
                         "Failed to get device properties");
     }
 
     void refresh_if_needed() {
-        int current_device;
-        check_cuda_call(cudaGetDevice(&current_device), "Failed to get device");
-        if (current_device != device_id_) {
-            refresh();
+        const int current = detail::tls_current_device;
+        if (current != m_device_id) {
+            refresh_from_known_device(current);
         }
     }
-
-    int device_id_{-1};
-    cudaDeviceProp props_{};
 };
 
 // Cached device count (global, not per-thread)
@@ -433,21 +439,21 @@ private:
 inline void set_device(int device_id) {
     const int device_count = get_device_count();
     if (device_id < 0 || device_id >= device_count) {
-        throw CudaException(cudaErrorInvalidDevice,
-                            std::format("Invalid device_id {} (must be 0..{})",
-                                        device_id, device_count - 1));
+        throw detail::CudaException(
+            cudaErrorInvalidDevice,
+            std::format("Invalid device_id {} (must be 0..{})", device_id,
+                        device_count - 1));
     }
 
-    int current_device_id;
-    check_cuda_call(cudaGetDevice(&current_device_id), "cudaGetDevice failed");
-
-    if (current_device_id == device_id) {
+    int& current = detail::tls_current_device;
+    if (current == device_id) {
         return; // Already on correct device
     }
 
     check_cuda_call(cudaSetDevice(device_id),
                     std::format("cudaSetDevice({}) failed", device_id));
 
+    current = device_id;
     // Force context refresh after device switch
     CudaDeviceContext::force_refresh();
 }
@@ -459,25 +465,25 @@ inline void set_device(int device_id) {
 class CudaSetDeviceGuard {
 public:
     explicit CudaSetDeviceGuard(int device_id) {
-        check_cuda_call(cudaGetDevice(&previous_device_id_),
-                        "cudaGetDevice failed");
+        int& current  = detail::tls_current_device;
+        m_prev_device = current;
 
-        if (previous_device_id_ != device_id) {
+        if (current != device_id) {
             set_device(device_id);
-            device_changed_ = true;
+            m_device_changed = true;
         }
     }
 
     ~CudaSetDeviceGuard() {
-        if (device_changed_) {
-            // Best effort restore - don't throw in destructor
-            cudaSetDevice(previous_device_id_);
-            CudaDeviceContext::force_refresh();
+        if (m_device_changed) {
+            cudaSetDevice(m_prev_device);
         }
     }
 
     // Provide access to cached context for current device
-    [[nodiscard]] const CudaDeviceContext& context() const noexcept {
+    [[nodiscard]] static const CudaDeviceContext& context() {
+        assert(detail::tls_current_device >= 0 &&
+               "CUDA device guard not active");
         return CudaDeviceContext::get();
     }
 
@@ -487,8 +493,8 @@ public:
     CudaSetDeviceGuard& operator=(CudaSetDeviceGuard&&)      = delete;
 
 private:
-    int previous_device_id_{-1};
-    bool device_changed_{false};
+    int m_prev_device{-1};
+    bool m_device_changed{false};
 };
 
 // Standalone utility functions that use cached context
@@ -504,8 +510,8 @@ private:
     SizeType free_mem, total_mem;
     check_cuda_call(cudaMemGetInfo(&free_mem, &total_mem),
                     "Failed to get CUDA memory usage");
-    return {static_cast<double>(free_mem) / (1ULL << 30),
-            static_cast<double>(total_mem) / (1ULL << 30)};
+    return {static_cast<double>(free_mem) / (1ULL << 30U),
+            static_cast<double>(total_mem) / (1ULL << 30U)};
 }
 
 // Standalone check function - delegates to context
@@ -555,5 +561,4 @@ cuda::std::span<T> as_span(thrust::device_vector<T>&&) = delete;
 template <typename T>
 cuda::std::span<const T> as_span(const thrust::device_vector<T>&&) = delete;
 
-} // namespace
 } // namespace loki::cuda_utils

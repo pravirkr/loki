@@ -14,39 +14,26 @@
 #include "loki/common/types.hpp"
 #include "loki/cuda_utils.cuh"
 #include "loki/exceptions.hpp"
+#include "loki/kernel_utils.cuh"
 
 namespace loki::algorithms {
 
 namespace {
 
-// CUDA device function to calculate phase index
-__device__ int
-get_phase_idx_device(double proper_time, double freq, int nbins, double delay) {
-    double norm_phase = fmod((proper_time - delay) * freq, 1.0);
-    if (norm_phase < 0.0) {
-        norm_phase += 1.0;
-    }
-    auto scaled_phase =
-        static_cast<float>(norm_phase * static_cast<double>(nbins));
-    scaled_phase =
-        (scaled_phase >= static_cast<float>(nbins)) ? 0.0F : scaled_phase;
-    auto final_idx = __float2int_rn(scaled_phase);
-    final_idx      = (final_idx >= nbins) ? 0 : final_idx;
-    return final_idx;
-}
-
 // Thrust functor for computing phase indices
 struct ComputePhase {
     const double* __restrict__ freq_arr;
     double tsamp, t_ref;
-    int segment_len, nbins;
+    uint32_t segment_len, nbins;
 
-    __device__ uint32_t operator()(int idx) const {
-        const int ifreq          = idx / segment_len;
-        const int isamp          = idx % segment_len;
+    __device__ uint32_t operator()(uint32_t idx) const {
+        const uint32_t ifreq     = idx / segment_len;
+        const uint32_t isamp     = idx - (ifreq * segment_len);
         const double proper_time = (static_cast<double>(isamp) * tsamp) - t_ref;
-        return static_cast<uint32_t>(
-            get_phase_idx_device(proper_time, freq_arr[ifreq], nbins, 0.0));
+        float phase = utils::get_phase_idx_device(proper_time, freq_arr[ifreq],
+                                                  nbins, 0.0);
+        uint32_t shift = __float2uint_rn(phase);
+        return (shift >= nbins) ? 0 : shift;
     }
 };
 
@@ -55,28 +42,28 @@ __global__ void kernel_fold_time_1d(const float* __restrict__ ts_e,
                                     const float* __restrict__ ts_v,
                                     const uint32_t* __restrict__ phase_map,
                                     float* __restrict__ fold,
-                                    int nfreqs,
-                                    int nsegments,
-                                    int segment_len,
-                                    int nbins) {
-    const auto tid = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
+                                    uint32_t nfreqs,
+                                    uint32_t nsegments,
+                                    uint32_t segment_len,
+                                    uint32_t nbins) {
+    const uint32_t tid = (blockIdx.x * blockDim.x) + threadIdx.x;
     // Total (segment, sample) pairs
-    const auto total_work = nsegments * segment_len;
+    const uint32_t total_work = nsegments * segment_len;
 
     if (tid >= total_work) {
         return;
     }
 
     // Decode thread ID to (segment, sample)
-    const int iseg  = tid / segment_len;
-    const int isamp = tid % segment_len;
+    const uint32_t iseg  = tid / segment_len;
+    const uint32_t isamp = tid - (iseg * segment_len);
 
     // Process all frequencies for this (segment, sample) pair
-    for (int ifreq = 0; ifreq < nfreqs; ++ifreq) {
-        const auto phase_idx = (ifreq * segment_len) + isamp;
-        const auto phase_bin = phase_map[phase_idx];
-        const auto ts_idx    = (iseg * segment_len) + isamp;
-        const auto fold_base_idx =
+    for (uint32_t ifreq = 0; ifreq < nfreqs; ++ifreq) {
+        const uint32_t phase_idx = (ifreq * segment_len) + isamp;
+        const uint32_t phase_bin = phase_map[phase_idx];
+        const uint32_t ts_idx    = (iseg * segment_len) + isamp;
+        const uint32_t fold_base_idx =
             (iseg * nfreqs * 2 * nbins) + (ifreq * 2 * nbins);
 
         // Atomic add (but much less contention now!)
@@ -90,23 +77,23 @@ __global__ void kernel_fold_time_2d(const float* __restrict__ ts_e,
                                     const float* __restrict__ ts_v,
                                     const uint32_t* __restrict__ phase_map,
                                     float* __restrict__ fold,
-                                    int nfreqs,
-                                    int nsegments,
-                                    int segment_len,
-                                    int nbins) {
-    const auto isamp =
-        static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
-    const auto ifreq = static_cast<int>(blockIdx.y);
+                                    uint32_t nfreqs,
+                                    uint32_t nsegments,
+                                    uint32_t segment_len,
+                                    uint32_t nbins) {
+    const uint32_t isamp = (blockIdx.x * blockDim.x) + threadIdx.x;
+    const uint32_t ifreq = blockIdx.y;
 
     if (isamp >= segment_len || ifreq >= nfreqs) {
         return;
     }
-    const auto phase_idx  = (ifreq * segment_len) + isamp;
-    const auto phase_bin  = phase_map[phase_idx];
-    const int freq_offset = ifreq * 2 * nbins;
-    for (int iseg = 0; iseg < nsegments; ++iseg) {
-        const int ts_idx        = (iseg * segment_len) + isamp;
-        const int fold_base_idx = (iseg * nfreqs * 2 * nbins) + freq_offset;
+    const uint32_t phase_idx   = (ifreq * segment_len) + isamp;
+    const uint32_t phase_bin   = phase_map[phase_idx];
+    const uint32_t freq_offset = ifreq * 2 * nbins;
+    for (uint32_t iseg = 0; iseg < nsegments; ++iseg) {
+        const uint32_t ts_idx = (iseg * segment_len) + isamp;
+        const uint32_t fold_base_idx =
+            (iseg * nfreqs * 2 * nbins) + freq_offset;
 
         atomicAdd(&fold[fold_base_idx + phase_bin], ts_e[ts_idx]);
         atomicAdd(&fold[fold_base_idx + nbins + phase_bin], ts_v[ts_idx]);
@@ -118,33 +105,34 @@ __global__ void kernel_fold_time_shmem(const float* __restrict__ ts_e,
                                        const float* __restrict__ ts_v,
                                        const uint32_t* __restrict__ phase_map,
                                        float* __restrict__ fold,
-                                       int nfreqs,
-                                       int nsegments,
-                                       int segment_len,
-                                       int nbins) {
+                                       uint32_t nfreqs,
+                                       uint32_t nsegments,
+                                       uint32_t segment_len,
+                                       uint32_t nbins) {
     // One block per frequency, each block processes all samples for that
     // frequency
-    extern __shared__ float shared_bins[]; // NOLINT
-    float* shared_e = shared_bins;         // NOLINT
-    float* shared_v = shared_bins + nbins; // NOLINT
+    extern __shared__ float shared_bins[];
+    float* shared_e = shared_bins;
+    float* shared_v = shared_bins + nbins;
 
-    const auto tid               = static_cast<int>(threadIdx.x);
-    const auto ifreq             = static_cast<int>(blockIdx.y);
-    const auto threads_per_block = static_cast<int>(blockDim.x);
+    const uint32_t tid               = threadIdx.x;
+    const uint32_t ifreq             = blockIdx.y;
+    const uint32_t threads_per_block = blockDim.x;
 
-    for (int iseg = 0; iseg < nsegments; ++iseg) {
+    for (uint32_t iseg = 0; iseg < nsegments; ++iseg) {
         // Initialize shared memory for this segment
-        for (int bin = tid; bin < nbins; bin += threads_per_block) {
+        for (uint32_t bin = tid; bin < nbins; bin += threads_per_block) {
             shared_e[bin] = 0.0F;
             shared_v[bin] = 0.0F;
         }
         __syncthreads();
 
         // Process samples for this frequency and segment
-        for (int isamp = tid; isamp < segment_len; isamp += threads_per_block) {
-            const auto phase_idx = (ifreq * segment_len) + isamp;
-            const auto phase_bin = phase_map[phase_idx];
-            const auto ts_idx    = (iseg * segment_len) + isamp;
+        for (uint32_t isamp = tid; isamp < segment_len;
+             isamp += threads_per_block) {
+            const uint32_t phase_idx = (ifreq * segment_len) + isamp;
+            const uint32_t phase_bin = phase_map[phase_idx];
+            const uint32_t ts_idx    = (iseg * segment_len) + isamp;
 
             // Accumulate in shared memory
             atomicAdd(&shared_e[phase_bin], ts_e[ts_idx]);
@@ -153,9 +141,9 @@ __global__ void kernel_fold_time_shmem(const float* __restrict__ ts_e,
         __syncthreads();
 
         // Write shared memory results to global memory for this segment
-        const auto fold_base_idx =
+        const uint32_t fold_base_idx =
             (iseg * nfreqs * 2 * nbins) + (ifreq * 2 * nbins);
-        for (int bin = tid; bin < nbins; bin += threads_per_block) {
+        for (uint32_t bin = tid; bin < nbins; bin += threads_per_block) {
             fold[fold_base_idx + bin]         = shared_e[bin];
             fold[fold_base_idx + nbins + bin] = shared_v[bin];
         }
@@ -173,16 +161,16 @@ kernel_fold_complex_one_harmonic_per_thread(const float* __restrict__ ts_e,
                                             const float* __restrict__ ts_v,
                                             ComplexTypeCUDA* __restrict__ fold,
                                             const double* __restrict__ freqs,
-                                            int nfreqs,
-                                            int nsegments,
-                                            int segment_len,
-                                            int nbins_f,
+                                            uint32_t nfreqs,
+                                            uint32_t nsegments,
+                                            uint32_t segment_len,
+                                            uint32_t nbins_f,
                                             double tsamp,
                                             double t_ref) {
-    const auto iseg      = static_cast<int>(blockIdx.x);
-    const auto ifreq     = static_cast<int>(blockIdx.y);
-    const auto tid       = static_cast<int>(threadIdx.x);
-    const auto block_dim = static_cast<int>(blockDim.x);
+    const uint32_t iseg      = blockIdx.x;
+    const uint32_t ifreq     = blockIdx.y;
+    const uint32_t tid       = threadIdx.x;
+    const uint32_t block_dim = blockDim.x;
     if (iseg >= nsegments || ifreq >= nfreqs || tid >= nbins_f) {
         return;
     }
@@ -191,8 +179,8 @@ kernel_fold_complex_one_harmonic_per_thread(const float* __restrict__ ts_e,
     float* sh_v = sh + segment_len;
 
     // Cooperative load - all threads participate
-    const int start_idx = iseg * segment_len;
-    for (int i = tid; i < segment_len; i += block_dim) {
+    const uint32_t start_idx = iseg * segment_len;
+    for (uint32_t i = tid; i < segment_len; i += block_dim) {
         sh_e[i] = ts_e[start_idx + i];
         sh_v[i] = ts_v[start_idx + i];
     }
@@ -204,7 +192,7 @@ kernel_fold_complex_one_harmonic_per_thread(const float* __restrict__ ts_e,
     // Thread 0 handles DC via reduction
     if (tid == 0) {
         float sum_e = 0.0F, sum_v = 0.0F;
-        for (int k = 0; k < segment_len; ++k) {
+        for (uint32_t k = 0; k < segment_len; ++k) {
             sum_e += sh_e[k];
             sum_v += sh_v[k];
         }
@@ -216,7 +204,7 @@ kernel_fold_complex_one_harmonic_per_thread(const float* __restrict__ ts_e,
     if (tid >= 1) {
         // Compute AC for this harmonic
         const double phase_factor =
-            2.0 * M_PI * freqs[ifreq] * static_cast<double>(tid);
+            2.0 * kPI * freqs[ifreq] * static_cast<double>(tid);
         const double init_phase  = phase_factor * t_ref;
         const double delta_phase = -phase_factor * tsamp;
         // Fast sincos computation
@@ -226,7 +214,7 @@ kernel_fold_complex_one_harmonic_per_thread(const float* __restrict__ ts_e,
         float acc_e_r = 0.0F, acc_e_i = 0.0F;
         float acc_v_r = 0.0F, acc_v_i = 0.0F;
 
-        for (int k = 0; k < segment_len; ++k) {
+        for (uint32_t k = 0; k < segment_len; ++k) {
             acc_e_r = fmaf(sh_e[k], ph_r, acc_e_r);
             acc_e_i = fmaf(sh_e[k], ph_i, acc_e_i);
             acc_v_r = fmaf(sh_v[k], ph_r, acc_v_r);
@@ -243,152 +231,58 @@ kernel_fold_complex_one_harmonic_per_thread(const float* __restrict__ ts_e,
     }
 }
 
-// =============================================================================
-// Uses shared memory for segment data when it fits
-// =============================================================================
-__global__ void
-kernel_fold_complex_unified_shmem(const float* __restrict__ ts_e,
-                                  const float* __restrict__ ts_v,
-                                  ComplexTypeCUDA* __restrict__ fold,
-                                  const double* __restrict__ freqs,
-                                  int nfreqs,
-                                  int nsegments,
-                                  int segment_len,
-                                  int nbins_f,
-                                  double tsamp,
-                                  double t_ref) {
-    const auto iseg      = static_cast<int>(blockIdx.x);
-    const auto ifreq     = static_cast<int>(blockIdx.y);
-    const auto tid       = static_cast<int>(threadIdx.x);
-    const auto block_dim = static_cast<int>(blockDim.x);
+template <bool UseShared>
+__global__ void kernel_fold_complex_unified(const float* __restrict__ ts_e,
+                                            const float* __restrict__ ts_v,
+                                            ComplexTypeCUDA* __restrict__ fold,
+                                            const double* __restrict__ freqs,
+                                            uint32_t nfreqs,
+                                            uint32_t nsegments,
+                                            uint32_t segment_len,
+                                            uint32_t nbins_f,
+                                            double tsamp,
+                                            double t_ref) {
+    const uint32_t iseg      = blockIdx.x;
+    const uint32_t ifreq     = blockIdx.y;
+    const uint32_t tid       = threadIdx.x;
+    const uint32_t block_dim = blockDim.x;
     if (iseg >= nsegments || ifreq >= nfreqs || tid >= nbins_f) {
         return;
     }
-    extern __shared__ float sh[];
-    float* sh_e = sh;
-    float* sh_v = sh + segment_len;
 
-    // Cooperative load - all threads participate
-    const int start_idx = iseg * segment_len;
-    for (int i = tid; i < segment_len; i += block_dim) {
-        sh_e[i] = ts_e[start_idx + i];
-        sh_v[i] = ts_v[start_idx + i];
+    const float* ts_e_seg;
+    const float* ts_v_seg;
+    const uint32_t start_idx = iseg * segment_len;
+    if constexpr (UseShared) {
+        extern __shared__ float sh[];
+        float* sh_e = sh;
+        float* sh_v = sh + segment_len;
+
+        // Cooperative load - all threads participate
+        for (uint32_t i = tid; i < segment_len; i += block_dim) {
+            sh_e[i] = ts_e[start_idx + i];
+            sh_v[i] = ts_v[start_idx + i];
+        }
+        __syncthreads();
+        ts_e_seg = sh_e;
+        ts_v_seg = sh_v;
+    } else {
+        ts_e_seg = ts_e + start_idx;
+        ts_v_seg = ts_v + start_idx;
     }
-    __syncthreads();
 
     const auto base_offset =
         (iseg * nfreqs * 2 * nbins_f) + (ifreq * 2 * nbins_f);
-
-    // DC Component (m=0): parallel reduction
-    float sum_e = 0.0F, sum_v = 0.0F;
-    for (int i = tid; i < segment_len; i += block_dim) {
-        sum_e += sh_e[i];
-        sum_v += sh_v[i];
-    }
-
-    // Warp reduction
-    for (int off = 16; off > 0; off >>= 1) {
-        sum_e += __shfl_down_sync(0xffffffff, sum_e, off);
-        sum_v += __shfl_down_sync(0xffffffff, sum_v, off);
-    }
-
-    // Cross-warp reduction using shared memory
-    // Reuse tail of shared memory for warp results
-    __shared__ float warp_e[32];
-    __shared__ float warp_v[32];
-
-    const int warp_id   = tid >> 5;
-    const int lane_id   = tid & 31;
-    const int num_warps = (block_dim + 31) >> 5;
-
-    if (lane_id == 0) {
-        warp_e[warp_id] = sum_e;
-        warp_v[warp_id] = sum_v;
-    }
-    __syncthreads();
-
-    // Final reduction in first warp
-    if (tid < 32) {
-        float e = (tid < num_warps) ? warp_e[tid] : 0.0f;
-        float v = (tid < num_warps) ? warp_v[tid] : 0.0f;
-
-        for (int off = 16; off > 0; off >>= 1) {
-            e += __shfl_down_sync(0xffffffff, e, off);
-            v += __shfl_down_sync(0xffffffff, v, off);
-        }
-
-        if (tid == 0) {
-            fold[base_offset]           = {e, 0.0f};
-            fold[base_offset + nbins_f] = {v, 0.0f};
-        }
-    }
-    __syncthreads();
-
-    // AC Components (m=1..num_harms): strided across threads
-    const double phase_factor = 2.0 * M_PI * freqs[ifreq];
-    for (int m = tid + 1; m < nbins_f; m += block_dim) {
-        // Initial phase: exp(i * 2π * f * m * t_ref)
-        // Step phase: exp(-i * 2π * f * m * tsamp)
-        float ph_r, ph_i, step_r, step_i;
-        __sincosf(static_cast<float>(phase_factor * m * t_ref), &ph_i, &ph_r);
-        __sincosf(static_cast<float>(-phase_factor * m * tsamp), &step_i,
-                  &step_r);
-        float acc_e_r = 0.0F, acc_e_i = 0.0F;
-        float acc_v_r = 0.0F, acc_v_i = 0.0F;
-
-        for (int k = 0; k < segment_len; ++k) {
-            acc_e_r = fmaf(sh_e[k], ph_r, acc_e_r);
-            acc_e_i = fmaf(sh_e[k], ph_i, acc_e_i);
-            acc_v_r = fmaf(sh_v[k], ph_r, acc_v_r);
-            acc_v_i = fmaf(sh_v[k], ph_i, acc_v_i);
-
-            const float new_r = (ph_r * step_r) - (ph_i * step_i);
-            const float new_i = (ph_r * step_i) + (ph_i * step_r);
-            ph_r              = new_r;
-            ph_i              = new_i;
-        }
-
-        fold[base_offset + m]           = {acc_e_r, acc_e_i};
-        fold[base_offset + nbins_f + m] = {acc_v_r, acc_v_i};
-    }
-}
-
-// =============================================================================
-// Fallback kernel: no shared memory, reads directly from global memory
-// For very large segments that don't fit in shared memory
-// =============================================================================
-__global__ void
-kernel_fold_complex_unified_global(const float* __restrict__ ts_e,
-                                   const float* __restrict__ ts_v,
-                                   ComplexTypeCUDA* __restrict__ fold,
-                                   const double* __restrict__ freqs,
-                                   int nfreqs,
-                                   int nsegments,
-                                   int segment_len,
-                                   int nbins_f,
-                                   double tsamp,
-                                   double t_ref) {
-    const auto iseg      = static_cast<int>(blockIdx.x);
-    const auto ifreq     = static_cast<int>(blockIdx.y);
-    const auto tid       = static_cast<int>(threadIdx.x);
-    const auto block_dim = static_cast<int>(blockDim.x);
-    if (iseg >= nsegments || ifreq >= nfreqs || tid >= nbins_f) {
-        return;
-    }
 
     // DC Component: parallel reduction from global memory
-    const int start_idx = iseg * segment_len;
     float sum_e = 0.0F, sum_v = 0.0F;
-    for (int i = tid; i < segment_len; i += block_dim) {
-        sum_e += ts_e[start_idx + i];
-        sum_v += ts_v[start_idx + i];
+    for (uint32_t i = tid; i < segment_len; i += block_dim) {
+        sum_e += ts_e_seg[i];
+        sum_v += ts_v_seg[i];
     }
 
-    const auto base_offset =
-        (iseg * nfreqs * 2 * nbins_f) + (ifreq * 2 * nbins_f);
-
     // Warp reduction
-    for (int off = 16; off > 0; off >>= 1) {
+    for (uint32_t off = 16; off > 0; off >>= 1U) {
         sum_e += __shfl_down_sync(0xffffffff, sum_e, off);
         sum_v += __shfl_down_sync(0xffffffff, sum_v, off);
     }
@@ -396,9 +290,9 @@ kernel_fold_complex_unified_global(const float* __restrict__ ts_e,
     __shared__ float warp_e[32];
     __shared__ float warp_v[32];
 
-    const int warp_id   = tid >> 5;
-    const int lane_id   = tid & 31;
-    const int num_warps = (block_dim + 31) >> 5;
+    const uint32_t warp_id   = tid >> 5U;
+    const uint32_t lane_id   = tid & 31U;
+    const uint32_t num_warps = (block_dim + 31U) >> 5U;
 
     if (lane_id == 0) {
         warp_e[warp_id] = sum_e;
@@ -407,24 +301,24 @@ kernel_fold_complex_unified_global(const float* __restrict__ ts_e,
     __syncthreads();
 
     if (tid < 32) {
-        float e = (tid < num_warps) ? warp_e[tid] : 0.0f;
-        float v = (tid < num_warps) ? warp_v[tid] : 0.0f;
+        float e = (tid < num_warps) ? warp_e[tid] : 0.0F;
+        float v = (tid < num_warps) ? warp_v[tid] : 0.0F;
 
-        for (int off = 16; off > 0; off >>= 1) {
+        for (uint32_t off = 16; off > 0; off >>= 1U) {
             e += __shfl_down_sync(0xffffffff, e, off);
             v += __shfl_down_sync(0xffffffff, v, off);
         }
 
         if (tid == 0) {
-            fold[base_offset]           = {e, 0.0f};
-            fold[base_offset + nbins_f] = {v, 0.0f};
+            fold[base_offset]           = {e, 0.0F};
+            fold[base_offset + nbins_f] = {v, 0.0F};
         }
     }
     __syncthreads();
 
     // AC Components
-    const double phase_factor = 2.0 * M_PI * freqs[ifreq];
-    for (int m = tid + 1; m < nbins_f; m += block_dim) {
+    const double phase_factor = 2.0 * kPI * freqs[ifreq];
+    for (uint32_t m = tid + 1; m < nbins_f; m += block_dim) {
         float ph_r, ph_i, step_r, step_i;
         __sincosf(static_cast<float>(phase_factor * m * t_ref), &ph_i, &ph_r);
         __sincosf(static_cast<float>(-phase_factor * m * tsamp), &step_i,
@@ -432,11 +326,11 @@ kernel_fold_complex_unified_global(const float* __restrict__ ts_e,
         float acc_e_r = 0.0F, acc_e_i = 0.0F;
         float acc_v_r = 0.0F, acc_v_i = 0.0F;
 
-        for (int k = 0; k < segment_len; ++k) {
-            acc_e_r = fmaf(ts_e[start_idx + k], ph_r, acc_e_r);
-            acc_e_i = fmaf(ts_e[start_idx + k], ph_i, acc_e_i);
-            acc_v_r = fmaf(ts_v[start_idx + k], ph_r, acc_v_r);
-            acc_v_i = fmaf(ts_v[start_idx + k], ph_i, acc_v_i);
+        for (uint32_t k = 0; k < segment_len; ++k) {
+            acc_e_r = fmaf(ts_e_seg[k], ph_r, acc_e_r);
+            acc_e_i = fmaf(ts_e_seg[k], ph_i, acc_e_i);
+            acc_v_r = fmaf(ts_v_seg[k], ph_r, acc_v_r);
+            acc_v_i = fmaf(ts_v_seg[k], ph_i, acc_v_i);
 
             const float new_r = (ph_r * step_r) - (ph_i * step_i);
             const float new_i = (ph_r * step_i) + (ph_i * step_r);
@@ -520,27 +414,31 @@ public:
 
         // Copy input data to device
         cudaStream_t stream = nullptr;
-        cudaMemcpyAsync(thrust::raw_pointer_cast(m_ts_e_d.data()), ts_e.data(),
-                        ts_e.size() * sizeof(float), cudaMemcpyHostToDevice,
-                        stream);
-        cuda_utils::check_last_cuda_error("cudaMemcpyAsync failed");
-        cudaMemcpyAsync(thrust::raw_pointer_cast(m_ts_v_d.data()), ts_v.data(),
-                        ts_v.size() * sizeof(float), cudaMemcpyHostToDevice,
-                        stream);
-        cuda_utils::check_last_cuda_error("cudaMemcpyAsync failed");
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(thrust::raw_pointer_cast(m_ts_e_d.data()),
+                            ts_e.data(), ts_e.size() * sizeof(float),
+                            cudaMemcpyHostToDevice, stream),
+            "cudaMemcpyAsync ts_e failed");
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(thrust::raw_pointer_cast(m_ts_v_d.data()),
+                            ts_v.data(), ts_v.size() * sizeof(float),
+                            cudaMemcpyHostToDevice, stream),
+            "cudaMemcpyAsync ts_v failed");
 
         // Execute folding kernel on device using persistent buffers
         execute_d(cuda_utils::as_span(m_ts_e_d), cuda_utils::as_span(m_ts_v_d),
                   cuda_utils::as_span(m_fold_d), stream);
 
         // Copy result back to host
-        cudaMemcpyAsync(fold.data(), thrust::raw_pointer_cast(m_fold_d.data()),
-                        fold.size() * sizeof(HostFoldType),
-                        cudaMemcpyDeviceToHost, stream);
-        cuda_utils::check_last_cuda_error("cudaMemcpyAsync failed");
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(fold.data(),
+                            thrust::raw_pointer_cast(m_fold_d.data()),
+                            fold.size() * sizeof(HostFoldType),
+                            cudaMemcpyDeviceToHost, stream),
+            "cudaMemcpyAsync fold failed");
         // Synchronize stream before returning to host
-        cudaStreamSynchronize(stream);
-        cuda_utils::check_last_cuda_error("cudaStreamSynchronize failed");
+        cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
+                                    "cudaStreamSynchronize failed");
         spdlog::debug("BruteFoldCUDA::Impl: Host execution complete");
     }
 
@@ -550,9 +448,10 @@ public:
                    cudaStream_t stream) {
         check_inputs(ts_e.size(), ts_v.size(), fold.size());
         // Ensure output fold is zeroed
-        cudaMemsetAsync(fold.data(), 0, fold.size() * sizeof(DeviceFoldType),
-                        stream);
-        cuda_utils::check_last_cuda_error("cudaMemsetAsync failed");
+        cuda_utils::check_cuda_call(
+            cudaMemsetAsync(fold.data(), 0,
+                            fold.size() * sizeof(DeviceFoldType), stream),
+            "cudaMemsetAsync fold failed");
         if constexpr (std::is_same_v<FoldTypeCUDA, float>) {
             execute_device_float(ts_e.data(), ts_v.data(), fold.data(), stream);
         } else {
@@ -603,15 +502,15 @@ private:
     }
 
     void compute_phase() {
-        const int total_elements = static_cast<int>(m_nfreqs * m_segment_len);
-        auto first               = thrust::counting_iterator<int>(0);
-        auto last = thrust::counting_iterator<int>(total_elements);
+        auto first = thrust::counting_iterator<uint32_t>(0);
+        auto last =
+            thrust::counting_iterator<uint32_t>(m_nfreqs * m_segment_len);
         ComputePhase functor{
             .freq_arr    = thrust::raw_pointer_cast(m_freq_arr_d.data()),
             .tsamp       = m_tsamp,
             .t_ref       = m_t_ref,
-            .segment_len = static_cast<int>(m_segment_len),
-            .nbins       = static_cast<int>(m_nbins),
+            .segment_len = static_cast<uint32_t>(m_segment_len),
+            .nbins       = static_cast<uint32_t>(m_nbins),
         };
         thrust::transform(thrust::device, first, last, m_phase_map_d.begin(),
                           functor);
@@ -632,9 +531,7 @@ private:
             cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
             kernel_fold_time_1d<<<grid_dim, block_dim, 0, stream>>>(
                 ts_e_d, ts_v_d, thrust::raw_pointer_cast(m_phase_map_d.data()),
-                fold_d, static_cast<int>(m_nfreqs),
-                static_cast<int>(m_nsegments), static_cast<int>(m_segment_len),
-                static_cast<int>(m_nbins));
+                fold_d, m_nfreqs, m_nsegments, m_segment_len, m_nbins);
         } else if (m_nbins <= 512 && m_nfreqs <= 65535) {
             // Use shared memory for small bin counts
             const dim3 block_dim(256);
@@ -644,9 +541,7 @@ private:
                                                    shmem_size);
             kernel_fold_time_shmem<<<grid_dim, block_dim, shmem_size, stream>>>(
                 ts_e_d, ts_v_d, thrust::raw_pointer_cast(m_phase_map_d.data()),
-                fold_d, static_cast<int>(m_nfreqs),
-                static_cast<int>(m_nsegments), static_cast<int>(m_segment_len),
-                static_cast<int>(m_nbins));
+                fold_d, m_nfreqs, m_nsegments, m_segment_len, m_nbins);
         } else {
             // Use 2D block configuration for large nfreqs
             const dim3 block_dim(256);
@@ -655,9 +550,7 @@ private:
             cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
             kernel_fold_time_2d<<<grid_dim, block_dim, 0, stream>>>(
                 ts_e_d, ts_v_d, thrust::raw_pointer_cast(m_phase_map_d.data()),
-                fold_d, static_cast<int>(m_nfreqs),
-                static_cast<int>(m_nsegments), static_cast<int>(m_segment_len),
-                static_cast<int>(m_nbins));
+                fold_d, m_nfreqs, m_nsegments, m_segment_len, m_nbins);
         }
         cuda_utils::check_last_cuda_error("kernel_fold launch failed");
     }
@@ -678,33 +571,28 @@ private:
                 kernel_fold_complex_one_harmonic_per_thread<<<
                     grid, block_size, shmem_size, stream>>>(
                     ts_e_d, ts_v_d, fold_d,
-                    thrust::raw_pointer_cast(m_freq_arr_d.data()),
-                    static_cast<int>(m_nfreqs), static_cast<int>(m_nsegments),
-                    static_cast<int>(m_segment_len),
-                    static_cast<int>(m_nbins_f), m_tsamp, m_t_ref);
+                    thrust::raw_pointer_cast(m_freq_arr_d.data()), m_nfreqs,
+                    m_nsegments, m_segment_len, m_nbins_f, m_tsamp, m_t_ref);
             } else {
                 // Strided approach for larger number of harmonics
                 const int block_size = 256;
                 cuda_utils::check_kernel_launch_params(grid, block_size,
                                                        shmem_size);
-                kernel_fold_complex_unified_shmem<<<grid, block_size,
-                                                    shmem_size, stream>>>(
-                    ts_e_d, ts_v_d, fold_d,
-                    thrust::raw_pointer_cast(m_freq_arr_d.data()),
-                    static_cast<int>(m_nfreqs), static_cast<int>(m_nsegments),
-                    static_cast<int>(m_segment_len),
-                    static_cast<int>(m_nbins_f), m_tsamp, m_t_ref);
+                kernel_fold_complex_unified<true>
+                    <<<grid, block_size, shmem_size, stream>>>(
+                        ts_e_d, ts_v_d, fold_d,
+                        thrust::raw_pointer_cast(m_freq_arr_d.data()), m_nfreqs,
+                        m_nsegments, m_segment_len, m_nbins_f, m_tsamp,
+                        m_t_ref);
             }
         } else {
             // Fallback: segment too large for shared memory
             const int block_size = 256;
             cuda_utils::check_kernel_launch_params(grid, block_size);
-            kernel_fold_complex_unified_global<<<grid, block_size, 0, stream>>>(
+            kernel_fold_complex_unified<false><<<grid, block_size, 0, stream>>>(
                 ts_e_d, ts_v_d, fold_d,
-                thrust::raw_pointer_cast(m_freq_arr_d.data()),
-                static_cast<int>(m_nfreqs), static_cast<int>(m_nsegments),
-                static_cast<int>(m_segment_len), static_cast<int>(m_nbins_f),
-                m_tsamp, m_t_ref);
+                thrust::raw_pointer_cast(m_freq_arr_d.data()), m_nfreqs,
+                m_nsegments, m_segment_len, m_nbins_f, m_tsamp, m_t_ref);
         }
 
         cuda_utils::check_last_cuda_error("execute_device_complex failed");

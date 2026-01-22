@@ -2,10 +2,11 @@
 
 #include <vector>
 
-#include <cuda_runtime_api.h>
+#include <cuda_runtime.h>
 #include <thrust/device_vector.h>
 
 #include "loki/algorithms/plans.hpp"
+#include "loki/cuda_utils.cuh"
 
 namespace loki::plans {
 
@@ -68,22 +69,26 @@ struct FFACoordD {
             shift_head_h[i] = coords[i].shift_head;
         }
 
-        cudaMemcpyAsync(thrust::raw_pointer_cast(i_tail.data()),
-                        i_tail_h.data(), n_coords * sizeof(uint32_t),
-                        cudaMemcpyHostToDevice, stream);
-        cuda_utils::check_last_cuda_error("cudaMemcpyAsync failed");
-        cudaMemcpyAsync(thrust::raw_pointer_cast(shift_tail.data()),
-                        shift_tail_h.data(), n_coords * sizeof(float),
-                        cudaMemcpyHostToDevice, stream);
-        cuda_utils::check_last_cuda_error("cudaMemcpyAsync failed");
-        cudaMemcpyAsync(thrust::raw_pointer_cast(i_head.data()),
-                        i_head_h.data(), n_coords * sizeof(uint32_t),
-                        cudaMemcpyHostToDevice, stream);
-        cuda_utils::check_last_cuda_error("cudaMemcpyAsync failed");
-        cudaMemcpyAsync(thrust::raw_pointer_cast(shift_head.data()),
-                        shift_head_h.data(), n_coords * sizeof(float),
-                        cudaMemcpyHostToDevice, stream);
-        cuda_utils::check_last_cuda_error("cudaMemcpyAsync failed");
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(thrust::raw_pointer_cast(i_tail.data()),
+                            i_tail_h.data(), n_coords * sizeof(uint32_t),
+                            cudaMemcpyHostToDevice, stream),
+            "cudaMemcpyAsync i_tail failed");
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(thrust::raw_pointer_cast(shift_tail.data()),
+                            shift_tail_h.data(), n_coords * sizeof(float),
+                            cudaMemcpyHostToDevice, stream),
+            "cudaMemcpyAsync shift_tail failed");
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(thrust::raw_pointer_cast(i_head.data()),
+                            i_head_h.data(), n_coords * sizeof(uint32_t),
+                            cudaMemcpyHostToDevice, stream),
+            "cudaMemcpyAsync i_head failed");
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(thrust::raw_pointer_cast(shift_head.data()),
+                            shift_head_h.data(), n_coords * sizeof(float),
+                            cudaMemcpyHostToDevice, stream),
+            "cudaMemcpyAsync shift_head failed");
     }
 };
 
@@ -118,14 +123,16 @@ struct FFACoordFreqD {
             shift_h[i] = coords[i].shift;
         }
 
-        cudaMemcpyAsync(thrust::raw_pointer_cast(idx.data()), idx_h.data(),
-                        n_coords * sizeof(uint32_t), cudaMemcpyHostToDevice,
-                        stream);
-        cuda_utils::check_last_cuda_error("cudaMemcpyAsync failed");
-        cudaMemcpyAsync(thrust::raw_pointer_cast(shift.data()), shift_h.data(),
-                        n_coords * sizeof(float), cudaMemcpyHostToDevice,
-                        stream);
-        cuda_utils::check_last_cuda_error("cudaMemcpyAsync failed");
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(thrust::raw_pointer_cast(idx.data()), idx_h.data(),
+                            n_coords * sizeof(uint32_t), cudaMemcpyHostToDevice,
+                            cudaMemcpyHostToDevice, stream),
+            "cudaMemcpyAsync idx failed");
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(thrust::raw_pointer_cast(shift.data()),
+                            shift_h.data(), n_coords * sizeof(float),
+                            cudaMemcpyHostToDevice, stream),
+            "cudaMemcpyAsync shift failed");
     }
 };
 

@@ -16,7 +16,6 @@
 #include <cuda/std/span>
 #include <cuda/std/utility>
 #include <cuda_runtime.h>
-#include <curanddx.hpp>
 #include <highfive/highfive.hpp>
 #include <math_constants.h>
 #include <spdlog/spdlog.h>
@@ -38,16 +37,14 @@
 #include "loki/cuda_utils.cuh"
 #include "loki/detection/scheme.hpp"
 #include "loki/detection/score.hpp"
+#include "loki/math_cuda.cuh"
 #include "loki/progress.hpp"
 #include "loki/simulation/simulation.hpp"
 #include "loki/utils.hpp"
 
 namespace loki::detection {
 
-// Define the cuRANDDx Generator Descriptor.
-using RNG = decltype(curanddx::Generator<curanddx::philox4_32>() +
-                     curanddx::PhiloxRounds<10>() +
-                     curanddx::SM<CURANDDX_SM>() + curanddx::Thread());
+using RNG = loki::math::DefaultDeviceRNG;
 
 namespace {
 
@@ -450,10 +447,8 @@ simulate_folds(const FoldsTypeDevice* __restrict__ folds_in_ptr,
                              bool add_signal) {
         const int seq_id =
             seq_id_base + ((block_id * total_elements + base_i) / 4);
-        // Generate noise using cuRANDDx (Use unique sequence ID for each
-        // element)
-        RNG rng(seed, seq_id, offset);
-        curanddx::normal<float, curanddx::box_muller> dist(0.0F, noise_stddev);
+        typename RNG::Generator rng(seed, seq_id, offset);
+        typename RNG::NormalFloat dist(0.0F, noise_stddev);
         const float4 noise = dist.generate4(rng);
 
         int trial_idx   = base_i / nbins;

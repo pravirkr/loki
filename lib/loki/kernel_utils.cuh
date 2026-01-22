@@ -95,7 +95,7 @@ binary_search_device(const float* __restrict__ arr, SizeType n, float target) {
 
 __device__ __forceinline__ float get_phase_idx_device(double proper_time,
                                                       double freq,
-                                                      SizeType nbins,
+                                                      uint32_t nbins,
                                                       double delay) {
     const double total_phase = (proper_time - delay) * freq;
     double ipart;
@@ -187,6 +187,5 @@ __device__ inline int compute_branch_count_device(double param_cur,
 
     return cuda::std::min(num_points, branch_max);
 }
-
 
 } // namespace loki::utils

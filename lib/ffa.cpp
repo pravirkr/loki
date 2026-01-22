@@ -355,54 +355,30 @@ private:
                 const auto coords_cur_span =
                     std::span(ws->coords_freq)
                         .subspan(ncoords_offset, ncoords_cur);
-                if (nsegments >= 256) {
-                    kernels::ffa_iter_segment_freq(
-                        fold_in, fold_out, coords_cur_span.data(), nsegments,
-                        nbins, ncoords_cur, ncoords_prev, m_nthreads);
-                } else {
-                    kernels::ffa_iter_standard_freq(
-                        fold_in, fold_out, coords_cur_span.data(), nsegments,
-                        nbins, ncoords_cur, ncoords_prev, m_nthreads);
-                }
+                kernels::ffa_iter_freq(fold_in, fold_out,
+                                       coords_cur_span.data(), nsegments, nbins,
+                                       ncoords_cur, ncoords_prev, m_nthreads);
             } else {
                 const auto coords_cur_span =
                     std::span(ws->coords).subspan(ncoords_offset, ncoords_cur);
-                if (nsegments >= 256) {
-                    kernels::ffa_iter_segment(
-                        fold_in, fold_out, coords_cur_span.data(), nsegments,
-                        nbins, ncoords_cur, ncoords_prev, m_nthreads);
-                } else {
-                    kernels::ffa_iter_standard(
-                        fold_in, fold_out, coords_cur_span.data(), nsegments,
-                        nbins, ncoords_cur, ncoords_prev, m_nthreads);
-                }
+                kernels::ffa_iter(fold_in, fold_out, coords_cur_span.data(),
+                                  nsegments, nbins, ncoords_cur, ncoords_prev,
+                                  m_nthreads);
             }
         } else {
             if (m_is_freq_only) {
                 const auto coords_cur_span =
                     std::span(ws->coords_freq)
                         .subspan(ncoords_offset, ncoords_cur);
-                if (nsegments >= 256) {
-                    kernels::ffa_complex_iter_segment_freq(
-                        fold_in, fold_out, coords_cur_span.data(), nsegments,
-                        nbins, ncoords_cur, ncoords_prev, m_nthreads);
-                } else {
-                    kernels::ffa_complex_iter_standard_freq(
-                        fold_in, fold_out, coords_cur_span.data(), nsegments,
-                        nbins, ncoords_cur, ncoords_prev, m_nthreads);
-                }
+                kernels::ffa_complex_iter_freq(
+                    fold_in, fold_out, coords_cur_span.data(), nsegments, nbins,
+                    ncoords_cur, ncoords_prev, m_nthreads);
             } else {
                 const auto coords_cur_span =
                     std::span(ws->coords).subspan(ncoords_offset, ncoords_cur);
-                if (nsegments >= 256) {
-                    kernels::ffa_complex_iter_segment(
-                        fold_in, fold_out, coords_cur_span.data(), nsegments,
-                        nbins, ncoords_cur, ncoords_prev, m_nthreads);
-                } else {
-                    kernels::ffa_complex_iter_standard(
-                        fold_in, fold_out, coords_cur_span.data(), nsegments,
-                        nbins, ncoords_cur, ncoords_prev, m_nthreads);
-                }
+                kernels::ffa_complex_iter(
+                    fold_in, fold_out, coords_cur_span.data(), nsegments, nbins,
+                    ncoords_cur, ncoords_prev, m_nthreads);
             }
         }
     }

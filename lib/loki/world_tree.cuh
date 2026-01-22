@@ -20,28 +20,26 @@
 
 namespace loki::utils {
 
-namespace {
-
 template <typename T>
 __global__ void compact_in_place_kernel(const uint8_t* __restrict__ keep,
-                                        const SizeType* __restrict__ prefix,
+                                        const uint32_t* __restrict__ prefix,
                                         T* __restrict__ data,
-                                        int start,
-                                        int capacity,
-                                        int size,
-                                        int stride) {
-    const auto i = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
-    if (i >= size || keep[i] == 0U) {
+                                        uint32_t start,
+                                        uint32_t capacity,
+                                        uint32_t size,
+                                        uint32_t stride) {
+    const uint32_t i = (blockIdx.x * blockDim.x) + threadIdx.x;
+    if (i >= size || keep[i] == 0) {
         return;
     }
 
-    const int dst_logical = static_cast<int>(prefix[i]);
-    const int src_lin     = start + i;
-    const int dst_lin     = start + dst_logical;
-    const int src_phys    = src_lin < capacity ? src_lin : src_lin - capacity;
-    const int dst_phys    = dst_lin < capacity ? dst_lin : dst_lin - capacity;
+    const uint32_t dst_logical = prefix[i];
+    const uint32_t src_lin     = start + i;
+    const uint32_t dst_lin     = start + dst_logical;
+    const uint32_t src_phys = src_lin < capacity ? src_lin : src_lin - capacity;
+    const uint32_t dst_phys = dst_lin < capacity ? dst_lin : dst_lin - capacity;
     // Copy full row
-    for (int j = 0; j < stride; ++j) {
+    for (uint32_t j = 0; j < stride; ++j) {
         data[(dst_phys * stride) + j] = data[(src_phys * stride) + j];
     }
 }
@@ -52,26 +50,26 @@ compact_and_copy_kernel(const double* __restrict__ batch_leaves_ptr,
                         const FoldTypeCUDA* __restrict__ batch_folds_ptr,
                         const float* __restrict__ batch_scores_ptr,
                         const uint8_t* __restrict__ mask_ptr,
-                        const SizeType* __restrict__ prefix_ptr,
+                        const uint32_t* __restrict__ prefix_ptr,
                         double* __restrict__ tmp_leaves_ptr,
                         FoldTypeCUDA* __restrict__ tmp_folds_ptr,
                         float* __restrict__ tmp_scores_ptr,
-                        int slots_to_write,
-                        int m_leaves_stride,
-                        int m_folds_stride) {
-    const auto idx = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
+                        uint32_t slots_to_write,
+                        uint32_t m_leaves_stride,
+                        uint32_t m_folds_stride) {
+    const uint32_t idx = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (idx >= slots_to_write) {
         return;
     }
 
-    if (mask_ptr[idx] == 1U) {
-        const auto out_idx = static_cast<int>(prefix_ptr[idx]);
-        for (int j = 0; j < m_leaves_stride; ++j) {
+    if (mask_ptr[idx] == 1) {
+        const uint32_t out_idx = prefix_ptr[idx];
+        for (uint32_t j = 0; j < m_leaves_stride; ++j) {
             tmp_leaves_ptr[(out_idx * m_leaves_stride) + j] =
                 batch_leaves_ptr[(idx * m_leaves_stride) + j];
         }
 
-        for (int j = 0; j < m_folds_stride; ++j) {
+        for (uint32_t j = 0; j < m_folds_stride; ++j) {
             tmp_folds_ptr[(out_idx * m_folds_stride) + j] =
                 batch_folds_ptr[(idx * m_folds_stride) + j];
         }
@@ -81,11 +79,11 @@ compact_and_copy_kernel(const double* __restrict__ batch_leaves_ptr,
 }
 
 struct CircularIndexFunctor {
-    int start;
-    int capacity;
+    uint32_t start;
+    uint32_t capacity;
 
-    __host__ __device__ int operator()(int logical_idx) const {
-        const int x = start + logical_idx;
+    __host__ __device__ uint32_t operator()(uint32_t logical_idx) const {
+        const uint32_t x = start + logical_idx;
         return (x < capacity) ? x : x - capacity;
     }
 };
@@ -94,25 +92,23 @@ struct LinearMaskFunctor {
     const float* __restrict__ scores_ptr;
     float threshold;
 
-    __host__ __device__ uint8_t operator()(int idx) const {
+    __host__ __device__ uint8_t operator()(uint32_t idx) const {
         return (scores_ptr[idx] > threshold) ? 1 : 0;
     }
 };
 
 struct CircularMaskFunctor {
     const float* __restrict__ scores_ptr;
-    int start;
-    int capacity;
+    uint32_t start;
+    uint32_t capacity;
     float threshold;
 
-    __host__ __device__ uint8_t operator()(int logical_idx) const {
-        const int x    = start + logical_idx;
-        const int phys = (x < capacity) ? x : x - capacity;
+    __host__ __device__ uint8_t operator()(uint32_t logical_idx) const {
+        const uint32_t x    = start + logical_idx;
+        const uint32_t phys = (x < capacity) ? x : x - capacity;
         return (scores_ptr[phys] > threshold) ? 1 : 0;
     }
 };
-
-} // namespace
 
 /**
  * @brief GPU-resident circular buffer for world tree data
@@ -269,7 +265,7 @@ public:
             (m_scratch_leaves.size() * sizeof(double)) +
             (m_scratch_folds.size() * sizeof(FoldTypeCUDA)) +
             (m_scratch_scores.size() * sizeof(float)) +
-            (m_scratch_prefix.size() * sizeof(SizeType)) +
+            (m_scratch_prefix.size() * sizeof(uint32_t)) +
             (m_scratch_mask.size() * sizeof(uint8_t));
 
         return static_cast<float>(base_bytes) / static_cast<float>(1ULL << 30U);
@@ -321,19 +317,25 @@ public:
         // Check if data wraps around
         if (start_idx + m_size <= m_capacity) {
             // Contiguous case - single copy
-            cudaMemcpy2DAsync(dst, dst_pitch, src + start_idx * m_leaves_stride,
-                              src_pitch, row_bytes, m_size,
-                              cudaMemcpyDeviceToDevice);
+            cuda_utils::check_cuda_call(
+                cudaMemcpy2DAsync(dst, dst_pitch,
+                                  src + start_idx * m_leaves_stride, src_pitch,
+                                  row_bytes, m_size, cudaMemcpyDeviceToDevice),
+                "cudaMemcpy2DAsync leaves failed");
         } else {
             // Wrapped case - two contiguous copies
             const auto first_part      = m_capacity - start_idx;
             const SizeType second_part = m_size - first_part;
-            cudaMemcpy2DAsync(dst, dst_pitch, src + start_idx * m_leaves_stride,
-                              src_pitch, row_bytes, first_part,
-                              cudaMemcpyDeviceToDevice);
-            cudaMemcpy2DAsync(dst + first_part * report_stride, dst_pitch, src,
-                              src_pitch, row_bytes, second_part,
-                              cudaMemcpyDeviceToDevice);
+            cuda_utils::check_cuda_call(
+                cudaMemcpy2DAsync(
+                    dst, dst_pitch, src + start_idx * m_leaves_stride,
+                    src_pitch, row_bytes, first_part, cudaMemcpyDeviceToDevice),
+                "cudaMemcpy2DAsync leaves failed");
+            cuda_utils::check_cuda_call(
+                cudaMemcpy2DAsync(dst + first_part * report_stride, dst_pitch,
+                                  src, src_pitch, row_bytes, second_part,
+                                  cudaMemcpyDeviceToDevice),
+                "cudaMemcpy2DAsync leaves failed");
         }
         return {thrust::raw_pointer_cast(m_scratch_leaves.data()),
                 m_size * report_stride};
@@ -448,8 +450,8 @@ public:
         const SizeType physical_start =
             get_circular_index(m_read_consumed, m_head, m_capacity);
 
-        CircularIndexFunctor functor{.start = static_cast<int>(physical_start),
-                                     .capacity = static_cast<int>(m_capacity)};
+        CircularIndexFunctor functor{.start    = physical_start,
+                                     .capacity = m_capacity};
         thrust::transform(thrust::device, logical_indices.begin(),
                           logical_indices.begin() +
                               static_cast<IndexType>(n_leaves),
@@ -470,17 +472,23 @@ public:
                                  "slots_to_write must match batch_scores size");
 
         reset(); // Start fresh
-        cudaMemcpyAsync(thrust::raw_pointer_cast(m_leaves.data()),
-                        leaves_batch.data(),
-                        slots_to_write * m_leaves_stride * sizeof(double),
-                        cudaMemcpyDeviceToDevice);
-        cudaMemcpyAsync(thrust::raw_pointer_cast(m_folds.data()),
-                        folds_batch.data(),
-                        slots_to_write * m_folds_stride * sizeof(FoldTypeCUDA),
-                        cudaMemcpyDeviceToDevice);
-        cudaMemcpyAsync(thrust::raw_pointer_cast(m_scores.data()),
-                        scores_batch.data(), slots_to_write * sizeof(float),
-                        cudaMemcpyDeviceToDevice);
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(thrust::raw_pointer_cast(m_leaves.data()),
+                            leaves_batch.data(),
+                            slots_to_write * m_leaves_stride * sizeof(double),
+                            cudaMemcpyDeviceToDevice),
+            "cudaMemcpyAsync leaves failed");
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(
+                thrust::raw_pointer_cast(m_folds.data()), folds_batch.data(),
+                slots_to_write * m_folds_stride * sizeof(FoldTypeCUDA),
+                cudaMemcpyDeviceToDevice),
+            "cudaMemcpyAsync folds failed");
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(thrust::raw_pointer_cast(m_scores.data()),
+                            scores_batch.data(), slots_to_write * sizeof(float),
+                            cudaMemcpyDeviceToDevice),
+            "cudaMemcpyAsync scores failed");
         m_size = slots_to_write;
         error_check::check_less_equal(
             m_size, m_capacity,
@@ -499,7 +507,8 @@ public:
                     cuda::std::span<const FoldTypeCUDA> folds_batch,
                     cuda::std::span<const float> scores_batch,
                     float current_threshold,
-                    SizeType slots_to_write) {
+                    SizeType slots_to_write,
+                    cuda_utils::CudaDeviceContext& ctx) {
         if (slots_to_write == 0) {
             return current_threshold;
         }
@@ -540,7 +549,7 @@ public:
             scores_batch, slots_to_write, current_threshold);
         // Remove old items that are strictly worse than the new global pruning
         // threshold.
-        prune_on_overload(effective_threshold);
+        prune_on_overload(effective_threshold, ctx);
 
         double* __restrict__ tmp_leaves_ptr =
             thrust::raw_pointer_cast(m_scratch_leaves.data());
@@ -551,22 +560,23 @@ public:
 
         LinearMaskFunctor functor{.scores_ptr = scores_batch_ptr,
                                   .threshold  = effective_threshold};
-        thrust::transform(thrust::counting_iterator<SizeType>(0),
-                          thrust::counting_iterator<SizeType>(slots_to_write),
+        thrust::transform(thrust::counting_iterator<uint32_t>(0),
+                          thrust::counting_iterator<uint32_t>(slots_to_write),
                           m_scratch_mask.begin(), functor);
         thrust::exclusive_scan(m_scratch_mask.begin(),
                                m_scratch_mask.begin() +
                                    static_cast<IndexType>(slots_to_write),
-                               m_scratch_prefix.begin(), SizeType{0});
+                               m_scratch_prefix.begin(), uint32_t{0});
 
         const dim3 block_dim(256);
         const dim3 grid_dim((slots_to_write + block_dim.x - 1) / block_dim.x);
-        cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
+        ctx.check_kernel_launch_params(grid_dim, block_dim);
         compact_and_copy_kernel<<<grid_dim, block_dim>>>(
             leaves_batch_ptr, folds_batch_ptr, scores_batch_ptr,
             m_scratch_mask.data(), m_scratch_prefix.data(), tmp_leaves_ptr,
             tmp_folds_ptr, tmp_scores_ptr, slots_to_write, m_leaves_stride,
             m_folds_stride);
+        cuda_utils::check_last_cuda_error("compact_and_copy_kernel failed");
         const SizeType pending_count = m_scratch_prefix[slots_to_write - 1] +
                                        m_scratch_mask[slots_to_write - 1];
 
@@ -615,7 +625,7 @@ private:
     thrust::device_vector<double> m_scratch_leaves;
     thrust::device_vector<FoldTypeCUDA> m_scratch_folds;
     thrust::device_vector<float> m_scratch_scores;
-    thrust::device_vector<SizeType> m_scratch_prefix;
+    thrust::device_vector<uint32_t> m_scratch_prefix;
     thrust::device_vector<uint8_t> m_scratch_mask;
 
     /**
@@ -637,13 +647,18 @@ private:
         const auto first_elems = first_slots * stride;
         const auto dst_offset  = dst_start_slot * stride;
 
-        cudaMemcpyAsync(dst + dst_offset, src, first_elems * sizeof(T),
-                        cudaMemcpyDeviceToDevice);
+        cuda_utils::check_cuda_call(cudaMemcpyAsync(dst + dst_offset, src,
+                                                    first_elems * sizeof(T),
+                                                    cudaMemcpyDeviceToDevice),
+                                    "cudaMemcpyAsync copy_to_circular failed");
         const auto second_slots = slots - first_slots;
         if (second_slots > 0) {
             const auto second_elems = second_slots * stride;
-            cudaMemcpyAsync(dst, src + first_elems, second_elems * sizeof(T),
-                            cudaMemcpyDeviceToDevice);
+            cuda_utils::check_cuda_call(
+                cudaMemcpyAsync(dst, src + first_elems,
+                                second_elems * sizeof(T),
+                                cudaMemcpyDeviceToDevice),
+                "cudaMemcpyAsync copy_to_circular failed");
         }
     }
 
@@ -666,13 +681,18 @@ private:
         const auto first_elems = first_slots * stride;
         const auto src_offset  = src_start_slot * stride;
 
-        cudaMemcpyAsync(dst, src + src_offset, first_elems * sizeof(T),
-                        cudaMemcpyDeviceToDevice);
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(dst, src + src_offset, first_elems * sizeof(T),
+                            cudaMemcpyDeviceToDevice),
+            "cudaMemcpyAsync copy_from_circular failed");
         const auto second_slots = slots - first_slots;
         if (second_slots > 0) {
             const auto second_elems = second_slots * stride;
-            cudaMemcpyAsync(dst + first_elems, src, second_elems * sizeof(T),
-                            cudaMemcpyDeviceToDevice);
+            cuda_utils::check_cuda_call(
+                cudaMemcpyAsync(dst + first_elems, src,
+                                second_elems * sizeof(T),
+                                cudaMemcpyDeviceToDevice),
+                "cudaMemcpyAsync copy_from_circular failed");
         }
     }
 
@@ -741,10 +761,12 @@ private:
                            m_size, SizeType{1},
                            thrust::raw_pointer_cast(m_scratch_scores.data()));
         // Append batch scores [m_size ... total]
-        cudaMemcpyAsync(
-            thrust::raw_pointer_cast(m_scratch_scores.data()) + m_size,
-            thrust::raw_pointer_cast(scores_batch.data()),
-            slots_to_write * sizeof(float), cudaMemcpyDeviceToDevice);
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(
+                thrust::raw_pointer_cast(m_scratch_scores.data()) + m_size,
+                thrust::raw_pointer_cast(scores_batch.data()),
+                slots_to_write * sizeof(float), cudaMemcpyDeviceToDevice),
+            "cudaMemcpyAsync get_prune_threshold failed");
 
         // The item at 'total_capacity-1' (in descending order) is the smallest
         // score we keep (i.e. the threshold).
@@ -771,7 +793,8 @@ private:
      * Single-pass approach: safely compacts in-place because write never
      * overtakes read (write_logical ≤ read_logical always holds).
      */
-    void prune_on_overload(float threshold) {
+    void prune_on_overload(float threshold,
+                           cuda_utils::CudaDeviceContext& ctx) {
         error_check::check(
             m_is_updating,
             "WorldTreeCUDA: prune_on_overload only allowed during updates");
@@ -783,37 +806,43 @@ private:
         // Mark survivors (logical indices) in keep mask
         CircularMaskFunctor functor{
             .scores_ptr = thrust::raw_pointer_cast(m_scores.data()),
-            .start      = static_cast<int>(start_idx),
-            .capacity   = static_cast<int>(m_capacity),
+            .start      = start_idx,
+            .capacity   = m_capacity,
             .threshold  = threshold};
-        thrust::transform(thrust::counting_iterator<int>(0),
-                          thrust::counting_iterator<int>(m_size),
+        thrust::transform(thrust::counting_iterator<uint32_t>(0),
+                          thrust::counting_iterator<uint32_t>(m_size),
                           m_scratch_mask.begin(), functor);
 
         // Exclusive prefix sum to get logical indices to keep
         thrust::exclusive_scan(m_scratch_mask.begin(),
                                m_scratch_mask.begin() + m_size,
-                               m_scratch_prefix.begin(), SizeType{0});
+                               m_scratch_prefix.begin(), uint32_t{0});
 
         // In-place compaction (three arrays)
         const dim3 block_dim(256);
         const dim3 grid_dim((m_size + block_dim.x - 1) / block_dim.x);
-        cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
+        ctx.check_kernel_launch_params(grid_dim, block_dim);
         compact_in_place_kernel<<<grid_dim, block_dim>>>(
             thrust::raw_pointer_cast(m_scratch_mask.data()),
             thrust::raw_pointer_cast(m_scratch_prefix.data()),
             thrust::raw_pointer_cast(m_leaves.data()), start_idx, m_capacity,
             m_size, m_leaves_stride);
+        cuda_utils::check_last_cuda_error(
+            "compact_in_place_kernel leaves failed");
         compact_in_place_kernel<<<grid_dim, block_dim>>>(
             thrust::raw_pointer_cast(m_scratch_mask.data()),
             thrust::raw_pointer_cast(m_scratch_prefix.data()),
             thrust::raw_pointer_cast(m_folds.data()), start_idx, m_capacity,
             m_size, m_folds_stride);
+        cuda_utils::check_last_cuda_error(
+            "compact_in_place_kernel folds failed");
         compact_in_place_kernel<<<grid_dim, block_dim>>>(
             thrust::raw_pointer_cast(m_scratch_mask.data()),
             thrust::raw_pointer_cast(m_scratch_prefix.data()),
             thrust::raw_pointer_cast(m_scores.data()), start_idx, m_capacity,
             m_size, 1);
+        cuda_utils::check_last_cuda_error(
+            "compact_in_place_kernel scores failed");
         auto last_prefix = m_scratch_prefix[m_size - 1];
         auto last_keep   = m_scratch_mask[m_size - 1];
         m_size           = last_prefix + last_keep;

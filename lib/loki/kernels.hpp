@@ -1,8 +1,5 @@
 #pragma once
 
-#include <vector>
-#include <xsimd/xsimd.hpp>
-
 #include "loki/algorithms/plans.hpp"
 #include "loki/common/types.hpp"
 
@@ -10,132 +7,11 @@
 #include <cuda/std/span>
 #include <cuda_runtime_api.h>
 #include <thrust/device_vector.h>
+
+#include "loki/plans_cuda.cuh"
 #endif // LOKI_ENABLE_CUDA
 
 namespace loki::kernels {
-
-// Defined here so it does not interfer with nvcc
-using AlignedFloatVec = std::vector<float, xsimd::aligned_allocator<float>>;
-
-/**
- * @brief Shift two float arrays and add them together.
- *
- *
- * @param data_tail  The tail of the data to shift and add (size: 2 * nbins)
- * @param phase_shift_tail  The phase shift to apply to the tail.
- * @param data_head  The head of the data to shift and add (size: 2 * nbins)
- * @param phase_shift_head  The phase shift to apply to the head.
- * @param out  The output array (size: 2 * nbins)
- * @param nbins  The number of bins in the input/output arrays.
- */
-void shift_add(const float* __restrict__ data_tail,
-               float phase_shift_tail,
-               const float* __restrict__ data_head,
-               float phase_shift_head,
-               float* __restrict__ out,
-               SizeType nbins) noexcept;
-
-/**
- * @brief Optimized version of shift_add, using a single pre-allocated buffer of
- * size 2 * nbins.
- */
-void shift_add_buffer_binary(const float* __restrict__ data_tail,
-                             float phase_shift_tail,
-                             const float* __restrict__ data_head,
-                             float phase_shift_head,
-                             float* __restrict__ out,
-                             float* __restrict__ temp_buffer,
-                             SizeType nbins) noexcept;
-
-/**
- * @brief Optimized version of shift_add_buffer, for frequency-only FFA.
- */
-void shift_add_buffer_linear(const float* __restrict__ data_tail,
-                             const float* __restrict__ data_head,
-                             float phase_shift,
-                             float* __restrict__ out,
-                             float* __restrict__ temp_buffer,
-                             SizeType nbins) noexcept;
-
-/**
- * @brief Shift two complex arrays and add them together.
- *
- *
- * @param data_tail  The tail of the data to shift and add (size: 2 * nbins_f)
- * @param phase_shift_tail  The phase shift to apply to the tail.
- * @param data_head  The head of the data to shift and add (size: 2 * nbins_f)
- * @param phase_shift_head  The phase shift to apply to the head.
- * @param out  The output array (size: 2 * nbins_f)
- * @param nbins_f  The number of bins in the input/output arrays (FFT size)
- * @param nbins  The number of original bins in the input/output arrays
- * (time-domain)
- */
-void shift_add_complex_binary(const ComplexType* __restrict__ data_tail,
-                              float phase_shift_tail,
-                              const ComplexType* __restrict__ data_head,
-                              float phase_shift_head,
-                              ComplexType* __restrict__ out,
-                              SizeType nbins_f,
-                              SizeType nbins) noexcept;
-
-/**
- * @brief Optimized version of shift_add_complex using a recurrence relation for
- * the phase. Idea here is to replace the two expensive sin/cos calls with one
- * cheaper complex multiply. Processing in blocks to remove the loop-carried
- * dependency. It uses xsimd types to guarantee vectorization and operates on
- * SIMD-sized chunks of data at a time.
- *
- * @note This is the only version that vectorizes efficiently across
- * architectures. The other versions are not vectorized.
- */
-void shift_add_complex_recurrence_binary(
-    const ComplexType* __restrict__ data_tail,
-    float phase_shift_tail,
-    const ComplexType* __restrict__ data_head,
-    float phase_shift_head,
-    ComplexType* __restrict__ out,
-    SizeType nbins_f,
-    SizeType nbins) noexcept;
-
-/**
- * @brief Shift a complex array and add it to another complex array.
- *
- *
- * @param data_tail  The tail of the data to add (size: 2 * nbins_f)
- * @param data_head  The head of the data toshift to add (size: 2 * nbins_f)
- * @param phase_shift  The phase shift to apply to the head.
- * @param out  The output array (size: 2 * nbins_f)
- * @param nbins_f  The number of bins in the input/output arrays (FFT size)
- * @param nbins  The number of original bins in the input/output arrays
- * (time-domain)
- */
-void shift_add_complex_recurrence_linear(
-    const ComplexType* __restrict__ data_tail,
-    const ComplexType* __restrict__ data_head,
-    float phase_shift,
-    ComplexType* __restrict__ out,
-    SizeType nbins_f,
-    SizeType nbins) noexcept;
-
-/**
- * @brief Brute force fold a segment of data.
- *
- *
- * @param ts_e_seg  The segment of data to fold (size: segment_len)
- * @param ts_v_seg  The segment of data to fold (size: segment_len)
- * @param fold_seg  The output array (size: nfreqs * 2 * nbins)
- * @param bucket_indices  The bucket indices (size: nfreqs * segment_len)
- * @param offsets  Prefix sum of the bucket indices (size: nfreqs * nbins + 1)
- * @param nfreqs  The number of frequencies
- * @param nbins  The number of bins in the output array
- */
-void brute_fold_segment(const float* __restrict__ ts_e_seg,
-                        const float* __restrict__ ts_v_seg,
-                        float* __restrict__ fold_seg,
-                        const uint32_t* __restrict__ bucket_indices,
-                        const SizeType* __restrict__ offsets,
-                        SizeType nfreqs,
-                        SizeType nbins) noexcept;
 
 /**
  * @brief Brute force fold a time series of data.
@@ -162,17 +38,6 @@ void brute_fold_ts(const float* __restrict__ ts_e,
                    SizeType nbins,
                    int nthreads) noexcept;
 
-void brute_fold_segment_complex(const float* __restrict__ ts_e_seg,
-                                const float* __restrict__ ts_v_seg,
-                                ComplexType* __restrict__ fold_seg,
-                                SizeType nfreqs,
-                                SizeType nbins_f,
-                                SizeType segment_len,
-                                AlignedFloatVec& delta_phasors_r,
-                                AlignedFloatVec& delta_phasors_i,
-                                AlignedFloatVec& current_phasors_r,
-                                AlignedFloatVec& current_phasors_i) noexcept;
-
 void brute_fold_ts_complex(const float* __restrict__ ts_e,
                            const float* __restrict__ ts_v,
                            ComplexType* __restrict__ fold,
@@ -185,8 +50,26 @@ void brute_fold_ts_complex(const float* __restrict__ ts_e,
                            double t_ref,
                            int nthreads) noexcept;
 
-void ffa_iter_segment(const float* __restrict__ fold_in,
-                      float* __restrict__ fold_out,
+void ffa_iter(const float* __restrict__ fold_in,
+              float* __restrict__ fold_out,
+              const plans::FFACoord* __restrict__ coords_cur,
+              SizeType nsegments,
+              SizeType nbins,
+              SizeType ncoords_cur,
+              SizeType ncoords_prev,
+              int nthreads);
+
+void ffa_iter_freq(const float* __restrict__ fold_in,
+                   float* __restrict__ fold_out,
+                   const plans::FFACoordFreq* __restrict__ coords_cur,
+                   SizeType nsegments,
+                   SizeType nbins,
+                   SizeType ncoords_cur,
+                   SizeType ncoords_prev,
+                   int nthreads);
+
+void ffa_complex_iter(const ComplexType* __restrict__ fold_in,
+                      ComplexType* __restrict__ fold_out,
                       const plans::FFACoord* __restrict__ coords_cur,
                       SizeType nsegments,
                       SizeType nbins,
@@ -194,70 +77,14 @@ void ffa_iter_segment(const float* __restrict__ fold_in,
                       SizeType ncoords_prev,
                       int nthreads);
 
-void ffa_iter_standard(const float* __restrict__ fold_in,
-                       float* __restrict__ fold_out,
-                       const plans::FFACoord* __restrict__ coords_cur,
-                       SizeType nsegments,
-                       SizeType nbins,
-                       SizeType ncoords_cur,
-                       SizeType ncoords_prev,
-                       int nthreads);
-
-void ffa_iter_segment_freq(const float* __restrict__ fold_in,
-                           float* __restrict__ fold_out,
+void ffa_complex_iter_freq(const ComplexType* __restrict__ fold_in,
+                           ComplexType* __restrict__ fold_out,
                            const plans::FFACoordFreq* __restrict__ coords_cur,
                            SizeType nsegments,
                            SizeType nbins,
                            SizeType ncoords_cur,
                            SizeType ncoords_prev,
                            int nthreads);
-
-void ffa_iter_standard_freq(const float* __restrict__ fold_in,
-                            float* __restrict__ fold_out,
-                            const plans::FFACoordFreq* __restrict__ coords_cur,
-                            SizeType nsegments,
-                            SizeType nbins,
-                            SizeType ncoords_cur,
-                            SizeType ncoords_prev,
-                            int nthreads);
-
-void ffa_complex_iter_segment(const ComplexType* __restrict__ fold_in,
-                              ComplexType* __restrict__ fold_out,
-                              const plans::FFACoord* __restrict__ coords_cur,
-                              SizeType nsegments,
-                              SizeType nbins,
-                              SizeType ncoords_cur,
-                              SizeType ncoords_prev,
-                              int nthreads);
-
-void ffa_complex_iter_standard(const ComplexType* __restrict__ fold_in,
-                               ComplexType* __restrict__ fold_out,
-                               const plans::FFACoord* __restrict__ coords_cur,
-                               SizeType nsegments,
-                               SizeType nbins,
-                               SizeType ncoords_cur,
-                               SizeType ncoords_prev,
-                               int nthreads);
-
-void ffa_complex_iter_segment_freq(
-    const ComplexType* __restrict__ fold_in,
-    ComplexType* __restrict__ fold_out,
-    const plans::FFACoordFreq* __restrict__ coords_cur,
-    SizeType nsegments,
-    SizeType nbins,
-    SizeType ncoords_cur,
-    SizeType ncoords_prev,
-    int nthreads);
-
-void ffa_complex_iter_standard_freq(
-    const ComplexType* __restrict__ fold_in,
-    ComplexType* __restrict__ fold_out,
-    const plans::FFACoordFreq* __restrict__ coords_cur,
-    SizeType nsegments,
-    SizeType nbins,
-    SizeType ncoords_cur,
-    SizeType ncoords_prev,
-    int nthreads);
 
 /**
  * @brief Shift ffa data and add it to the folds data for each batch.
@@ -309,8 +136,25 @@ void shift_add_complex_recurrence_batch(
     SizeType nbins,
     SizeType nbatch) noexcept;
 
-
 #ifdef LOKI_ENABLE_CUDA
+
+void ffa_iter_cuda(const float* __restrict__ fold_in,
+                   float* __restrict__ fold_out,
+                   const plans::FFACoordDPtrs* __restrict__ coords_cur,
+                   SizeType nsegments,
+                   SizeType nbins,
+                   SizeType ncoords_cur,
+                   SizeType ncoords_prev,
+                   cudaStream_t stream);
+
+void ffa_iter_freq_cuda(const float* __restrict__ fold_in,
+                        float* __restrict__ fold_out,
+                        const plans::FFACoordFreqDPtrs* __restrict__ coords_cur,
+                        SizeType nsegments,
+                        SizeType nbins,
+                        SizeType ncoords_cur,
+                        SizeType ncoords_prev,
+                        cudaStream_t stream);
 
 #endif // LOKI_ENABLE_CUDA
 
