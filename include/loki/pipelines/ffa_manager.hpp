@@ -8,7 +8,7 @@
 
 #ifdef LOKI_ENABLE_CUDA
 #include <cuda/std/span>
-#include <cuda_runtime_api.h>
+#include <cuda_runtime.h>
 #endif // LOKI_ENABLE_CUDA
 
 namespace loki::algorithms {

@@ -1,4 +1,4 @@
-#include "loki/kernels.hpp"
+#include "loki/kernels_cuda.cuh"
 
 #include <cuda/std/span>
 #include <cuda_runtime_api.h>
@@ -6,7 +6,6 @@
 
 #include "loki/common/types.hpp"
 #include "loki/cuda_utils.cuh"
-#include "loki/exceptions.hpp"
 
 namespace loki::kernels {
 
@@ -74,7 +73,7 @@ kernel_shift_add_linear(const float* __restrict__ folds_tree,
 }
 
 __global__ void
-kernel_shift_add_linear_complex(const ComplexTypeCUDA* __restrict__ tree_folds,
+kernel_shift_add_linear_complex(const ComplexTypeCUDA* __restrict__ folds_tree,
                                 const uint32_t* __restrict__ indices_tree,
                                 const ComplexTypeCUDA* __restrict__ folds_ffa,
                                 const uint32_t* __restrict__ indices_ffa,
@@ -118,19 +117,19 @@ kernel_shift_add_linear_complex(const ComplexTypeCUDA* __restrict__ tree_folds,
     // OPTIMIZED complex multiplication using fmaf
     // ffa_shifted_e = ffa_e * exp(-2πi * k * shift / nbins)
     const float real_ffa_e =
-        fmaf(ffa_e.real(), cos_val, -ffa_e.imag() * sin_val);
+        fmaf(ffa_e->real(), cos_val, -ffa_e->imag() * sin_val);
     const float imag_ffa_e =
-        fmaf(ffa_e.real(), sin_val, ffa_e.imag() * cos_val);
+        fmaf(ffa_e->real(), sin_val, ffa_e->imag() * cos_val);
     const float real_ffa_v =
-        fmaf(ffa_v.real(), cos_val, -ffa_v.imag() * sin_val);
+        fmaf(ffa_v->real(), cos_val, -ffa_v->imag() * sin_val);
     const float imag_ffa_v =
-        fmaf(ffa_v.real(), sin_val, ffa_v.imag() * cos_val);
+        fmaf(ffa_v->real(), sin_val, ffa_v->imag() * cos_val);
 
     // Add tree (unshifted) + ffa (shifted)
-    folds_out[out_offset + k] =
-        ComplexTypeCUDA(tree_e.real() + real_ffa_e, tree_e.imag() + imag_ffa_e);
-    folds_out[out_offset + k + nbins_f] =
-        ComplexTypeCUDA(tree_v.real() + real_ffa_v, tree_v.imag() + imag_ffa_v);
+    folds_out[out_offset + k] = ComplexTypeCUDA(tree_e->real() + real_ffa_e,
+                                                tree_e->imag() + imag_ffa_e);
+    folds_out[out_offset + k + nbins_f] = ComplexTypeCUDA(
+        tree_v->real() + real_ffa_v, tree_v->imag() + imag_ffa_v);
 }
 
 // OPTIMIZED: One thread per smallest work unit, optimized for memory coalescing
@@ -347,21 +346,21 @@ kernel_ffa_complex_iter(const ComplexTypeCUDA* __restrict__ fold_in,
     // OPTIMIZED complex multiplication using fmaf
     // tail_shifted_e = tail_e * exp(-2πi * k * shift_tail / nbins)
     const float real_tail_e =
-        fmaf(tail_e.real(), cos_tail, -tail_e.imag() * sin_tail);
+        fmaf(tail_e->real(), cos_tail, -tail_e->imag() * sin_tail);
     const float imag_tail_e =
-        fmaf(tail_e.real(), sin_tail, tail_e.imag() * cos_tail);
+        fmaf(tail_e->real(), sin_tail, tail_e->imag() * cos_tail);
     const float real_head_e =
-        fmaf(head_e.real(), cos_head, -head_e.imag() * sin_head);
+        fmaf(head_e->real(), cos_head, -head_e->imag() * sin_head);
     const float imag_head_e =
-        fmaf(head_e.real(), sin_head, head_e.imag() * cos_head);
+        fmaf(head_e->real(), sin_head, head_e->imag() * cos_head);
     const float real_tail_v =
-        fmaf(tail_v.real(), cos_tail, -tail_v.imag() * sin_tail);
+        fmaf(tail_v->real(), cos_tail, -tail_v->imag() * sin_tail);
     const float imag_tail_v =
-        fmaf(tail_v.real(), sin_tail, tail_v.imag() * cos_tail);
+        fmaf(tail_v->real(), sin_tail, tail_v->imag() * cos_tail);
     const float real_head_v =
-        fmaf(head_v.real(), cos_head, -head_v.imag() * sin_head);
+        fmaf(head_v->real(), cos_head, -head_v->imag() * sin_head);
     const float imag_head_v =
-        fmaf(head_v.real(), sin_head, head_v.imag() * cos_head);
+        fmaf(head_v->real(), sin_head, head_v->imag() * cos_head);
     // Complex addition and store results
     fold_out[out_offset_e + k] =
         ComplexTypeCUDA(real_tail_e + real_head_e, imag_tail_e + imag_head_e);
@@ -420,19 +419,19 @@ kernel_ffa_complex_freq_iter(const ComplexTypeCUDA* __restrict__ fold_in,
 
     // Apply phase shift to head only (tail stays as-is)
     const float real_head_e =
-        fmaf(head_e.real(), cos_val, -head_e.imag() * sin_val);
+        fmaf(head_e->real(), cos_val, -head_e->imag() * sin_val);
     const float imag_head_e =
-        fmaf(head_e.real(), sin_val, head_e.imag() * cos_val);
+        fmaf(head_e->real(), sin_val, head_e->imag() * cos_val);
     const float real_head_v =
-        fmaf(head_v.real(), cos_val, -head_v.imag() * sin_val);
+        fmaf(head_v->real(), cos_val, -head_v->imag() * sin_val);
     const float imag_head_v =
-        fmaf(head_v.real(), sin_val, head_v.imag() * cos_val);
+        fmaf(head_v->real(), sin_val, head_v->imag() * cos_val);
 
     // Add tail (unshifted) + head (shifted)
-    fold_out[out_offset + k] = ComplexTypeCUDA(tail_e.real() + real_head_e,
-                                               tail_e.imag() + imag_head_e);
+    fold_out[out_offset + k] = ComplexTypeCUDA(tail_e->real() + real_head_e,
+                                               tail_e->imag() + imag_head_e);
     fold_out[out_offset + k + nbins_f] = ComplexTypeCUDA(
-        tail_v.real() + real_head_v, tail_v.imag() + imag_head_v);
+        tail_v->real() + real_head_v, tail_v->imag() + imag_head_v);
 }
 
 // CUDA kernel for folding operation with 1D block configuration
@@ -754,19 +753,19 @@ void brute_fold_ts_cuda(const float* __restrict__ ts_e,
                         cudaStream_t stream) {
     // Use 1D block configuration for small nfreqs
     if (nfreqs <= 64) {
-        const auto total_work                = nsegments * segment_len;
-        constexpr SizeType threads_per_block = 512;
+        const auto total_work               = nsegments * segment_len;
+        constexpr SizeType kThreadsPerBlock = 512;
         const auto blocks_per_grid =
-            (total_work + threads_per_block - 1) / threads_per_block;
-        const dim3 block_dim(threads_per_block);
+            (total_work + kThreadsPerBlock - 1) / kThreadsPerBlock;
+        const dim3 block_dim(kThreadsPerBlock);
         const dim3 grid_dim(blocks_per_grid);
         cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
         kernel_fold_time_1d<<<grid_dim, block_dim, 0, stream>>>(
             ts_e, ts_v, phase_map, fold, nfreqs, nsegments, segment_len, nbins);
     } else if (nbins <= 512 && nfreqs <= 65535) {
         // Use shared memory for small bin counts
-        constexpr SizeType threads_per_block = 256;
-        const dim3 block_dim(threads_per_block);
+        constexpr SizeType kThreadsPerBlock = 256;
+        const dim3 block_dim(kThreadsPerBlock);
         const dim3 grid_dim(1, nfreqs);
         const auto shmem_size = 2 * nbins * sizeof(float);
         cuda_utils::check_kernel_launch_params(grid_dim, block_dim, shmem_size);
@@ -774,10 +773,10 @@ void brute_fold_ts_cuda(const float* __restrict__ ts_e,
             ts_e, ts_v, phase_map, fold, nfreqs, nsegments, segment_len, nbins);
     } else {
         // Use 2D block configuration for large nfreqs
-        constexpr SizeType threads_per_block = 256;
+        constexpr SizeType kThreadsPerBlock = 256;
         const auto blocks_per_grid_x =
-            (segment_len + threads_per_block - 1) / threads_per_block;
-        const dim3 block_dim(threads_per_block);
+            (segment_len + kThreadsPerBlock - 1) / kThreadsPerBlock;
+        const dim3 block_dim(kThreadsPerBlock);
         const dim3 grid_dim(blocks_per_grid_x, nfreqs, 1);
         cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
         kernel_fold_time_2d<<<grid_dim, block_dim, 0, stream>>>(
@@ -793,7 +792,7 @@ void brute_fold_ts_complex_cuda(const float* __restrict__ ts_e,
                                 SizeType nfreqs,
                                 SizeType nsegments,
                                 SizeType segment_len,
-                                SizeType nbins,
+                                SizeType nbins_f,
                                 double tsamp,
                                 double t_ref,
                                 cudaStream_t stream) {
@@ -813,8 +812,8 @@ void brute_fold_ts_complex_cuda(const float* __restrict__ ts_e,
                 nbins_f, tsamp, t_ref);
         } else {
             // Strided approach for larger number of harmonics
-            constexpr SizeType threads_per_block = 256;
-            const dim3 block_dim(threads_per_block);
+            constexpr SizeType kThreadsPerBlock = 256;
+            const dim3 block_dim(kThreadsPerBlock);
             const dim3 grid_dim(nsegments, nfreqs);
             cuda_utils::check_kernel_launch_params(grid_dim, block_dim,
                                                    shmem_size);
@@ -825,10 +824,10 @@ void brute_fold_ts_complex_cuda(const float* __restrict__ ts_e,
         }
     } else {
         // Fallback: segment too large for shared memory
-        constexpr SizeType threads_per_block = 256;
-        const dim3 block_dim(threads_per_block);
+        constexpr SizeType kThreadsPerBlock = 256;
+        const dim3 block_dim(kThreadsPerBlock);
         const dim3 grid_dim(nsegments, nfreqs);
-        cuda_utils::check_kernel_launch_params(grid, block_size);
+        cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
         kernel_fold_complex_unified<false><<<grid_dim, block_dim, 0, stream>>>(
             ts_e, ts_v, fold, freqs, nfreqs, nsegments, segment_len, nbins_f,
             tsamp, t_ref);
@@ -839,7 +838,7 @@ void brute_fold_ts_complex_cuda(const float* __restrict__ ts_e,
 
 void ffa_iter_cuda(const float* __restrict__ fold_in,
                    float* __restrict__ fold_out,
-                   const plans::FFACoordDPtrs coords,
+                   plans::FFACoordDPtrs coords,
                    SizeType ncoords_cur,
                    SizeType ncoords_prev,
                    SizeType nsegments,
@@ -861,7 +860,7 @@ void ffa_iter_cuda(const float* __restrict__ fold_in,
 
 void ffa_iter_freq_cuda(const float* __restrict__ fold_in,
                         float* __restrict__ fold_out,
-                        const plans::FFACoordFreqDPtrs coords,
+                        plans::FFACoordFreqDPtrs coords,
                         SizeType ncoords_cur,
                         SizeType ncoords_prev,
                         SizeType nsegments,
@@ -883,7 +882,7 @@ void ffa_iter_freq_cuda(const float* __restrict__ fold_in,
 
 void ffa_complex_iter_cuda(const ComplexTypeCUDA* __restrict__ fold_in,
                            ComplexTypeCUDA* __restrict__ fold_out,
-                           const plans::FFACoordDPtrs coords,
+                           plans::FFACoordDPtrs coords,
                            SizeType ncoords_cur,
                            SizeType ncoords_prev,
                            SizeType nsegments,
@@ -907,7 +906,7 @@ void ffa_complex_iter_cuda(const ComplexTypeCUDA* __restrict__ fold_in,
 
 void ffa_complex_iter_freq_cuda(const ComplexTypeCUDA* __restrict__ fold_in,
                                 ComplexTypeCUDA* __restrict__ fold_out,
-                                const plans::FFACoordFreqDPtrs coords,
+                                plans::FFACoordFreqDPtrs coords,
                                 SizeType ncoords_cur,
                                 SizeType ncoords_prev,
                                 SizeType nsegments,

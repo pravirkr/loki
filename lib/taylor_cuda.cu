@@ -8,6 +8,8 @@
 
 #include "loki/common/types.hpp"
 #include "loki/cuda_utils.cuh"
+#include "loki/kernel_utils.cuh"
+#include "loki/utils.hpp"
 
 namespace loki::core {
 
@@ -524,12 +526,13 @@ resolve_taylor_accel(const double* __restrict__ leaves,
     const double f_new     = f0 * (1.0 - delta_v * utils::kInvCval);
     const double delay_rel = delta_d * utils::kInvCval;
 
-    const SizeType idx_a =
-        nearest_linear_scan(accel_arr, n_accel, static_cast<float>(a_cur));
+    const SizeType idx_a = utils::nearest_linear_scan(
+        accel_arr, n_accel, static_cast<float>(a_cur));
     const SizeType idx_f =
-        lower_bound_scan(freq_arr, n_freq, static_cast<float>(f_new));
-    param_idx[tid]   = idx_a * n_freq + idx_f;
-    phase_shift[tid] = get_phase_idx_device(dt_rel, f0, nbins, delay_rel);
+        utils::lower_bound_scan(freq_arr, n_freq, static_cast<float>(f_new));
+    param_idx[tid] = idx_a * n_freq + idx_f;
+    phase_shift[tid] =
+        utils::get_phase_idx_device(dt_rel, f0, nbins, delay_rel);
 }
 
 template <bool UseShared>
@@ -586,12 +589,13 @@ resolve_taylor_jerk(const double* __restrict__ leaves,
     const double f_new     = f0 * (1.0 - delta_v * utils::kInvCval);
     const double delay_rel = delta_d * utils::kInvCval;
 
-    const SizeType idx_a =
-        nearest_linear_scan(accel_arr, n_accel, static_cast<float>(a_new));
+    const SizeType idx_a = utils::nearest_linear_scan(
+        accel_arr, n_accel, static_cast<float>(a_new));
     const SizeType idx_f =
-        lower_bound_scan(freq_arr, n_freq, static_cast<float>(f_new));
-    param_idx[tid]   = idx_a * n_freq + idx_f;
-    phase_shift[tid] = get_phase_idx_device(dt_rel, f0, nbins, delay_rel);
+        utils::lower_bound_scan(freq_arr, n_freq, static_cast<float>(f_new));
+    param_idx[tid] = idx_a * n_freq + idx_f;
+    phase_shift[tid] =
+        utils::get_phase_idx_device(dt_rel, f0, nbins, delay_rel);
 }
 
 template <bool UseShared>
@@ -653,12 +657,13 @@ resolve_taylor_snap(const double* __restrict__ leaves,
     const double f_new     = f0 * (1.0 - delta_v * utils::kInvCval);
     const double delay_rel = delta_d * utils::kInvCval;
 
-    const SizeType idx_a =
-        nearest_linear_scan(accel_arr, n_accel, static_cast<float>(a_new));
+    const SizeType idx_a = utils::nearest_linear_scan(
+        accel_arr, n_accel, static_cast<float>(a_new));
     const SizeType idx_f =
-        lower_bound_scan(freq_arr, n_freq, static_cast<float>(f_new));
-    param_idx[tid]   = idx_a * n_freq + idx_f;
-    phase_shift[tid] = get_phase_idx_device(dt_rel, f0, nbins, delay_rel);
+        utils::lower_bound_scan(freq_arr, n_freq, static_cast<float>(f_new));
+    param_idx[tid] = idx_a * n_freq + idx_f;
+    phase_shift[tid] =
+        utils::get_phase_idx_device(dt_rel, f0, nbins, delay_rel);
 }
 
 template <bool UseConservativeTile>

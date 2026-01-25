@@ -418,8 +418,9 @@ gen_next_using_thresh(const State& state_cur,
         simulate_folds(*folds_cur.folds_h0, profile, rng, manager, buffers,
                        0.0F, var_add, ntrials);
     auto scores_h0 = std::span(buffers.scores).first(folds_h0_sim->ntrials());
-    detection::snr_boxcar_2d_max(folds_h0_sim->data(), folds_h0_sim->ntrials(),
-                                 box_score_widths, scores_h0,
+    detection::snr_boxcar_2d_max(folds_h0_sim->data(), box_score_widths,
+                                 scores_h0, folds_h0_sim->ntrials(),
+                                 folds_h0_sim->nbins(),
                                  std::sqrt(folds_h0_sim->variance()));
     const auto folds_h0_sim_ntrials = folds_h0_sim->ntrials();
     auto folds_h0_pruned =
@@ -431,8 +432,9 @@ gen_next_using_thresh(const State& state_cur,
         simulate_folds(*folds_cur.folds_h1, profile, rng, manager, buffers,
                        bias_snr, var_add, ntrials);
     auto scores_h1 = std::span(buffers.scores).first(folds_h1_sim->ntrials());
-    detection::snr_boxcar_2d_max(folds_h1_sim->data(), folds_h1_sim->ntrials(),
-                                 box_score_widths, scores_h1,
+    detection::snr_boxcar_2d_max(folds_h1_sim->data(), box_score_widths,
+                                 scores_h1, folds_h1_sim->ntrials(),
+                                 folds_h1_sim->nbins(),
                                  std::sqrt(folds_h1_sim->variance()));
     const auto folds_h1_sim_ntrials = folds_h1_sim->ntrials();
     auto folds_h1_pruned =
@@ -463,8 +465,9 @@ gen_next_using_surv_prob(const State& state_cur,
         simulate_folds(*folds_cur.folds_h0, profile, rng, manager, buffers,
                        0.0F, var_add, ntrials);
     auto scores_h0 = std::span(buffers.scores).first(folds_h0_sim->ntrials());
-    detection::snr_boxcar_2d_max(folds_h0_sim->data(), folds_h0_sim->ntrials(),
-                                 box_score_widths, scores_h0,
+    detection::snr_boxcar_2d_max(folds_h0_sim->data(), box_score_widths,
+                                 scores_h0, folds_h0_sim->ntrials(),
+                                 folds_h0_sim->nbins(),
                                  std::sqrt(folds_h0_sim->variance()));
     const auto threshold_h0 =
         compute_threshold_survival(scores_h0, surv_prob_h0);
@@ -478,8 +481,9 @@ gen_next_using_surv_prob(const State& state_cur,
         simulate_folds(*folds_cur.folds_h1, profile, rng, manager, buffers,
                        bias_snr, var_add, ntrials);
     auto scores_h1 = std::span(buffers.scores).first(folds_h1_sim->ntrials());
-    detection::snr_boxcar_2d_max(folds_h1_sim->data(), folds_h1_sim->ntrials(),
-                                 box_score_widths, scores_h1,
+    detection::snr_boxcar_2d_max(folds_h1_sim->data(), box_score_widths,
+                                 scores_h1, folds_h1_sim->ntrials(),
+                                 folds_h1_sim->nbins(),
                                  std::sqrt(folds_h1_sim->variance()));
     const auto folds_h1_sim_ntrials = folds_h1_sim->ntrials();
     auto folds_h1_pruned =

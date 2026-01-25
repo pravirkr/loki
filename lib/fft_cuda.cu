@@ -18,9 +18,10 @@ namespace loki::utils {
 namespace {
 
 // Custom kernel for fused normalization
-__global__ void
-normalize_kernel(float* __restrict__ data, int total_elements, float norm) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+__global__ void normalize_kernel(float* __restrict__ data,
+                                 uint32_t total_elements,
+                                 float norm) {
+    const uint32_t idx = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (idx < total_elements) {
         data[idx] *= norm;
     }
@@ -33,23 +34,23 @@ IrfftExecutorCUDA::IrfftExecutorCUDA(int n_real,
                                      int batch_size,
                                      cudaStream_t stream)
     : m_n_real(n_real),
-      m_n_complex(n_real / 2 + 1),
+      m_n_complex((n_real / 2) + 1),
       m_batch_size(batch_size),
       m_stream(stream) {}
 
 IrfftExecutorCUDA::~IrfftExecutorCUDA() {
     const size_t num_plans = m_plan_cache.size();
-    for (auto& [key, plan] : s_plan_cache) {
+    for (auto& [key, plan] : m_plan_cache) {
         cuda_utils::check_cufft_call(cufftDestroy(plan),
                                      "IRFFT CUDA: cufftDestroy failed");
     }
-    s_plan_cache.clear();
+    m_plan_cache.clear();
     spdlog::debug("IrfftExecutorCUDA destroyed {} cached plans", num_plans);
 }
 
-IrfftExecutorCUDA::execute(cuda::std::span<const ComplexTypeCUDA> complex_input,
-                           cuda::std::span<float> real_output,
-                           int batch_size) {
+void IrfftExecutorCUDA::execute(cuda::std::span<ComplexTypeCUDA> complex_input,
+                                cuda::std::span<float> real_output,
+                                int batch_size) {
     // Input validation
     error_check::check_equal(
         real_output.size(), batch_size * m_n_real,
@@ -86,10 +87,10 @@ IrfftExecutorCUDA::execute(cuda::std::span<const ComplexTypeCUDA> complex_input,
 cufftHandle IrfftExecutorCUDA::get_or_create_plan(int batch_size) {
     const PlanKey key{.n_real = m_n_real, .batch_size = batch_size};
 
-    std::lock_guard<std::mutex> lock(s_mutex);
+    std::lock_guard<std::mutex> lock(m_mutex);
 
-    auto it = s_plan_cache.find(key);
-    if (it != s_plan_cache.end()) {
+    auto it = m_plan_cache.find(key);
+    if (it != m_plan_cache.end()) {
         spdlog::trace(
             "IrfftExecutor: Reusing cached plan for n_real={}, batch={}",
             m_n_real, batch_size);

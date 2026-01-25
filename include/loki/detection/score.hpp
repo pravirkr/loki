@@ -104,57 +104,66 @@ void snr_boxcar_3d_max_with_cache(std::span<const float> folds,
 #ifdef LOKI_ENABLE_CUDA
 
 void snr_boxcar_2d_max_cuda(std::span<const float> folds,
-                            SizeType nprofiles,
-                            SizeType nbins,
                             std::span<const SizeType> widths,
                             std::span<float> scores,
+                            SizeType nprofiles,
+                            SizeType nbins,
                             float stdnoise = 1.0F,
                             int device_id  = 0);
 
 void snr_boxcar_2d_max_cuda_d(cuda::std::span<const float> folds,
-                              SizeType nprofiles,
-                              SizeType nbins,
                               cuda::std::span<const SizeType> widths,
                               cuda::std::span<float> scores,
+                              SizeType nprofiles,
+                              SizeType nbins,
                               float stdnoise      = 1.0F,
                               cudaStream_t stream = nullptr);
 
 void snr_boxcar_3d_cuda(std::span<const float> folds,
-                        SizeType nprofiles,
-                        SizeType nbins,
                         std::span<const SizeType> widths,
                         std::span<float> scores,
+                        SizeType nprofiles,
+                        SizeType nbins,
                         int device_id = 0);
 
 void snr_boxcar_3d_cuda_d(cuda::std::span<const float> folds,
-                          SizeType nprofiles,
-                          SizeType nbins,
                           cuda::std::span<const SizeType> widths,
                           cuda::std::span<float> scores,
+                          SizeType nprofiles,
+                          SizeType nbins,
                           cudaStream_t stream = nullptr);
 
 void snr_boxcar_3d_max_cuda(std::span<const float> folds,
-                            SizeType nprofiles,
-                            SizeType nbins,
                             std::span<const SizeType> widths,
                             std::span<float> scores,
+                            SizeType nprofiles,
+                            SizeType nbins,
                             int device_id = 0);
 
 void snr_boxcar_3d_max_cuda_d(cuda::std::span<const float> folds,
-                              SizeType nprofiles,
-                              SizeType nbins,
                               cuda::std::span<const SizeType> widths,
                               cuda::std::span<float> scores,
+                              SizeType nprofiles,
+                              SizeType nbins,
                               cudaStream_t stream = nullptr);
 
 SizeType score_and_filter_cuda_d(cuda::std::span<const float> folds,
-                                 SizeType nprofiles,
-                                 SizeType nbins,
                                  cuda::std::span<const SizeType> widths,
                                  cuda::std::span<float> scores,
                                  cuda::std::span<SizeType> indices_filtered,
                                  float threshold,
+                                 SizeType nprofiles,
+                                 SizeType nbins,
                                  cudaStream_t stream);
+
+SizeType score_and_filter_max_cuda_d(cuda::std::span<const float> folds,
+                                     cuda::std::span<const SizeType> widths,
+                                     cuda::std::span<float> scores,
+                                     cuda::std::span<SizeType> indices_filtered,
+                                     float threshold,
+                                     SizeType nprofiles,
+                                     SizeType nbins,
+                                     cudaStream_t stream);
 
 #endif // LOKI_ENABLE_CUDA
 

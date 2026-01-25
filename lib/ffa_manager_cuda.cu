@@ -49,10 +49,11 @@ public:
         m_scores.resize(planner_stats.get_max_scores_size());
         m_scores_d.resize(planner_stats.get_max_scores_size());
         m_passing_indices.resize(planner_stats.get_max_scores_size());
+        m_passing_indices_d.resize(planner_stats.get_max_scores_size());
         m_write_param_sets_batch.resize(
             planner_stats.get_write_param_sets_size());
-        m_write_scores_batch.resize(planner_stats.get_write_scores_size());
         m_ffa_stats = std::make_unique<cands::FFAStatsCollection>();
+        m_n_passing_scores_per_region.resize(m_region_planner.get_nregions());
 
         // Copy scoring widths to device
         m_widths_d = m_base_cfg.get_scoring_widths();
@@ -78,7 +79,9 @@ public:
                  std::span<const float> ts_v,
                  const std::filesystem::path& outdir,
                  std::string_view file_prefix) override {
-        timing::ScopeTimer timer("FFAManagerCUDA::execute");
+        timing::SimpleTimer timer;
+        cands::FFATimerStats ffa_timer_stats_pipeline;
+        timer.start();
         // Write metadata to result file
         const std::string filebase = std::format("{}_ffa", file_prefix);
         const auto result_file =
@@ -93,32 +96,62 @@ public:
         cudaStream_t stream = nullptr;
         m_ts_e_d.resize(ts_e.size());
         m_ts_v_d.resize(ts_v.size());
-        cudaMemcpyAsync(thrust::raw_pointer_cast(m_ts_e_d.data()), ts_e.data(),
-                        ts_e.size() * sizeof(float), cudaMemcpyHostToDevice,
-                        stream);
-        cuda_utils::check_last_cuda_error("cudaMemcpyAsync failed");
-        cudaMemcpyAsync(thrust::raw_pointer_cast(m_ts_v_d.data()), ts_v.data(),
-                        ts_v.size() * sizeof(float), cudaMemcpyHostToDevice,
-                        stream);
-        cuda_utils::check_last_cuda_error("cudaMemcpyAsync failed");
-        cudaStreamSynchronize(stream);
-        cuda_utils::check_last_cuda_error(
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(thrust::raw_pointer_cast(m_ts_e_d.data()),
+                            ts_e.data(), ts_e.size() * sizeof(float),
+                            cudaMemcpyHostToDevice, stream),
+            "cudaMemcpyAsync ts_e failed");
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(thrust::raw_pointer_cast(m_ts_v_d.data()),
+                            ts_v.data(), ts_v.size() * sizeof(float),
+                            cudaMemcpyHostToDevice, stream),
+            "cudaMemcpyAsync ts_v failed");
+        cuda_utils::check_cuda_call(
+            cudaStreamSynchronize(stream),
             "Input data copy stream synchronization failed");
+        ffa_timer_stats_pipeline["io"] += timer.stop();
 
-        for (const auto& cfg_cur : m_region_planner.get_cfgs()) {
+        m_total_passing_scores       = 0; // reset total passing scores
+        const auto& ffa_regions_cfgs = m_region_planner.get_cfgs();
+        for (SizeType i = 0; i < ffa_regions_cfgs.size(); ++i) {
+            const search::PulsarSearchConfig& cfg_cur = ffa_regions_cfgs[i];
             const auto& freq_limits = cfg_cur.get_param_limits().back();
             spdlog::info("Processing chunk f0 (Hz): [{:08.3f}, {:08.3f}]",
                          freq_limits.front(), freq_limits.back());
             cands::FFATimerStats ffa_timer_stats;
-            float accumulated_flops = 0.0F;
-            execute_ffa_region(cfg_cur, writer, ffa_timer_stats,
-                               accumulated_flops, stream);
+            const SizeType n_passing =
+                execute_ffa_region(cfg_cur, ffa_timer_stats, stream);
+            m_n_passing_scores_per_region[i] = n_passing;
             // Log per-chunk timing summary
             spdlog::info("FFA Chunk: timer: {}",
                          ffa_timer_stats.get_concise_timer_summary());
             // Update accumulated stats
-            m_ffa_stats->update_stats(ffa_timer_stats, accumulated_flops);
+            m_ffa_stats->update_stats(ffa_timer_stats);
         }
+
+        // Copy scores to host
+        timer.start();
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(m_scores.data(),
+                            thrust::raw_pointer_cast(m_scores_d.data()),
+                            m_total_passing_scores * sizeof(float),
+                            cudaMemcpyDeviceToHost, stream),
+            "scores copy failed");
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(
+                m_passing_indices.data(),
+                thrust::raw_pointer_cast(m_passing_indices_d.data()),
+                m_total_passing_scores * sizeof(uint32_t),
+                cudaMemcpyDeviceToHost, stream),
+            "passing indices copy failed");
+        cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
+                                    "stream synchronization failed");
+        cuda_utils::check_cuda_call(cudaStreamDestroy(stream),
+                                    "stream destruction failed");
+
+        const float accumulated_flops = save_results(writer);
+        ffa_timer_stats_pipeline["io"] += timer.stop();
+        m_ffa_stats->update_stats(ffa_timer_stats_pipeline, accumulated_flops);
         writer.write_ffa_stats(*m_ffa_stats);
         spdlog::info("FFA Manager complete.");
         spdlog::info("FFA Manager: timer: {}",
@@ -134,7 +167,8 @@ private:
     std::vector<float> m_scores;
     std::vector<uint32_t> m_passing_indices;
     std::vector<double> m_write_param_sets_batch; // includes width
-    std::vector<float> m_write_scores_batch;      // passing scores
+    SizeType m_total_passing_scores{};
+    std::vector<SizeType> m_n_passing_scores_per_region;
 
     std::unique_ptr<cands::FFAStatsCollection> m_ffa_stats;
 
@@ -143,7 +177,8 @@ private:
     thrust::device_vector<float> m_ts_v_d;
     thrust::device_vector<float> m_fold_d_time;
     thrust::device_vector<float> m_scores_d;
-    thrust::device_vector<SizeType> m_widths_d;
+    thrust::device_vector<uint32_t> m_widths_d;
+    thrust::device_vector<uint32_t> m_passing_indices_d;
 
     // Helper function to create region planner with GPU memory considerations
     static plans::FFARegionPlanner<HostFoldType>
@@ -178,11 +213,9 @@ private:
                                                      /*use_gpu=*/true);
     }
 
-    void execute_ffa_region(const search::PulsarSearchConfig& cfg,
-                            cands::FFAResultWriter& result_writer,
-                            cands::FFATimerStats& ffa_timer_stats,
-                            float& accumulated_flops,
-                            cudaStream_t stream) {
+    SizeType execute_ffa_region(const search::PulsarSearchConfig& cfg,
+                                cands::FFATimerStats& ffa_timer_stats,
+                                cudaStream_t stream) {
         timing::SimpleTimer timer;
         // Create FFA with shared workspace
         timer.start();
@@ -191,111 +224,93 @@ private:
         const auto buffer_size_time = ffa_plan.get_buffer_size_time();
         const auto fold_size_time   = ffa_plan.get_fold_size_time();
         the_ffa.execute(
-            cuda::std::span<const float>(
-                thrust::raw_pointer_cast(m_ts_e_d.data()), m_ts_e_d.size()),
-            cuda::std::span<const float>(
-                thrust::raw_pointer_cast(m_ts_v_d.data()), m_ts_v_d.size()),
-            cuda::std::span<float>(
-                thrust::raw_pointer_cast(m_fold_d_time.data()),
-                buffer_size_time),
-            stream);
-        cudaStreamSynchronize(stream);
-        cuda_utils::check_last_cuda_error("FFA synchronization failed");
+            cuda_utils::as_span(m_ts_e_d), cuda_utils::as_span(m_ts_v_d),
+            cuda_utils::as_span(m_fold_d_time, buffer_size_time), stream);
         const auto brutefold_time = the_ffa.get_brute_fold_timing();
         ffa_timer_stats["brutefold"] += brutefold_time;
         ffa_timer_stats["ffa"] += timer.stop() - brutefold_time;
-        accumulated_flops += ffa_plan.get_gflops(/*return_in_time=*/true);
 
         // Compute scores
         timer.start();
-        const auto nsegments       = ffa_plan.get_nsegments().back();
-        const auto ncoords         = ffa_plan.get_ncoords().back();
-        const auto n_params        = m_base_cfg.get_nparams();
-        const auto& scoring_widths = m_base_cfg.get_scoring_widths();
-        const SizeType n_widths    = scoring_widths.size();
-        const auto n_scores        = ncoords * n_widths;
+        const auto nsegments = ffa_plan.get_nsegments().back();
+        const auto ncoords   = ffa_plan.get_ncoords().back();
+        const auto n_widths  = m_base_cfg.get_scoring_widths().size();
+        const auto n_scores  = ncoords * n_widths;
         error_check::check_equal(nsegments, 1U,
                                  "FFAManager::execute_ffa_region: nsegments "
                                  "must be 1 to call scoring function");
-        detection::snr_boxcar_3d_cuda_d(
-            cuda::std::span(thrust::raw_pointer_cast(m_fold_d_time.data()),
-                            fold_size_time),
-            ncoords,
-            cuda::std::span<const SizeType>(
-                thrust::raw_pointer_cast(m_widths_d.data()), m_widths_d.size()),
-            cuda::std::span<float>(thrust::raw_pointer_cast(m_scores_d.data()),
-                                   n_scores),
-            m_device_id);
-        // Synchronize to wait for kernel completion
-        cudaStreamSynchronize(stream);
-        cuda_utils::check_last_cuda_error(
-            "scoring kernel synchronization failed");
+        const SizeType n_passing = detection::score_and_filter_cuda_d(
+            cuda_utils::as_span(m_fold_d_time, fold_size_time),
+            cuda_utils::as_span(m_widths_d),
+            cuda_utils::as_span(m_scores_d, n_scores),
+            cuda_utils::as_span(m_passing_indices_d, n_scores),
+            m_base_cfg.get_snr_min(), ncoords, m_base_cfg.get_nbins(), stream);
+        m_total_passing_scores += n_passing;
 
-        // Copy scores to host
-        timer.start();
-        cudaMemcpyAsync(
-            m_scores.data(), thrust::raw_pointer_cast(m_scores_d.data()),
-            n_scores * sizeof(float), cudaMemcpyDeviceToHost, stream);
-        cuda_utils::check_last_cuda_error("scores copy failed");
-        cudaStreamSynchronize(stream);
-        cuda_utils::check_last_cuda_error("stream synchronization failed");
-        auto scores_span = std::span(m_scores).first(n_scores);
         ffa_timer_stats["score"] += timer.stop();
-        const auto score_flops =
-            (ncoords * 2) * (n_widths * 2 * m_base_cfg.get_nbins());
-        accumulated_flops += score_flops * 1e-9; // convert to GFLOPS
+        return n_passing;
+    }
 
-        // Fast scan to identify passing candidates
-        timer.start();
+    float save_results(cands::FFAResultWriter& result_writer) {
+        const auto n_params         = m_base_cfg.get_nparams();
         const SizeType total_params = n_params + 1;
-        const auto& param_arr       = ffa_plan.get_params().back();
-        const auto& param_strides   = ffa_plan.get_param_cart_strides().back();
-        const auto snr_min          = m_base_cfg.get_snr_min();
+        const auto& scoring_widths  = m_base_cfg.get_scoring_widths();
+        const SizeType n_widths     = scoring_widths.size();
 
-        SizeType n_passing = 0;
-        for (SizeType score_idx = 0; score_idx < n_scores; ++score_idx) {
-            if (scores_span[score_idx] >= snr_min) {
-                m_passing_indices[n_passing] = score_idx;
-                n_passing++;
-            }
-        }
+        float accumulated_flops      = 0.0F;
+        const auto& ffa_regions_cfgs = m_region_planner.get_cfgs();
+        for (SizeType i = 0; i < ffa_regions_cfgs.size(); ++i) {
+            const search::PulsarSearchConfig& cfg_cur = ffa_regions_cfgs[i];
+            const auto& ffa_plan  = plans::FFAPlan<HostFoldType>(cfg_cur);
+            const auto& param_arr = ffa_plan.get_params().back();
+            const auto& param_strides =
+                ffa_plan.get_param_cart_strides().back();
+            const auto n_passing = m_n_passing_scores_per_region[i];
 
-        // Process in batches and write incrementally
-        SizeType batch_start = 0;
-        while (batch_start < n_passing) {
-            const SizeType batch_end = std::min(
-                batch_start + plans::kFFAManagerWriteBatchSize, n_passing);
-            const SizeType batch_count = batch_end - batch_start;
+            // Compute flops
+            accumulated_flops += ffa_plan.get_gflops(/*return_in_time=*/true);
+            const auto ncoords = ffa_plan.get_ncoords().back();
+            const auto score_flops =
+                (ncoords * 2) * (n_widths * 2 * m_base_cfg.get_nbins());
+            accumulated_flops += score_flops * 1e-9; // convert to GFLOPS
 
-            // Fill batch buffer
-            for (SizeType i = 0; i < batch_count; ++i) {
-                const SizeType score_idx = m_passing_indices[batch_start + i];
-                const SizeType coord_idx = score_idx / n_widths;
-                const SizeType width_idx = score_idx % n_widths;
+            // Process in batches and write incrementally
+            SizeType batch_start = 0;
+            while (batch_start < n_passing) {
+                const SizeType batch_end = std::min(
+                    batch_start + plans::kFFAManagerWriteBatchSize, n_passing);
+                const SizeType batch_count = batch_end - batch_start;
 
-                // Reconstruct parameters from coord_idx using index arithmetic
-                SizeType remaining = coord_idx;
-                for (SizeType j = 0; j < n_params; ++j) {
-                    const SizeType param_idx = remaining / param_strides[j];
-                    remaining -= param_idx * param_strides[j];
-                    m_write_param_sets_batch[(i * total_params) + j] =
-                        param_arr[j][param_idx];
+                // Fill batch buffer
+                for (SizeType i = 0; i < batch_count; ++i) {
+                    const SizeType score_idx =
+                        m_passing_indices[batch_start + i];
+                    const SizeType coord_idx = score_idx / n_widths;
+                    const SizeType width_idx = score_idx % n_widths;
+
+                    // Reconstruct parameters from coord_idx using index
+                    // arithmetic
+                    SizeType remaining = coord_idx;
+                    for (SizeType j = 0; j < n_params; ++j) {
+                        const SizeType param_idx = remaining / param_strides[j];
+                        remaining -= param_idx * param_strides[j];
+                        m_write_param_sets_batch[(i * total_params) + j] =
+                            param_arr[j][param_idx];
+                    }
+                    m_write_param_sets_batch[(i * total_params) + n_params] =
+                        static_cast<double>(scoring_widths[width_idx]);
                 }
-                m_write_param_sets_batch[(i * total_params) + n_params] =
-                    static_cast<double>(scoring_widths[width_idx]);
-                m_write_scores_batch[i] = scores_span[score_idx];
+
+                // Write batch
+                result_writer.write_results(
+                    std::span(m_write_param_sets_batch)
+                        .first(batch_count * total_params),
+                    std::span(m_scores).first(batch_count), batch_count,
+                    total_params);
+                batch_start = batch_end;
             }
-
-            // Write batch
-            result_writer.write_results(
-                std::span(m_write_param_sets_batch)
-                    .first(batch_count * total_params),
-                std::span(m_write_scores_batch).first(batch_count), batch_count,
-                total_params);
-            batch_start = batch_end;
         }
-
-        ffa_timer_stats["filter"] += timer.stop();
+        return accumulated_flops;
     }
 
 }; // End FFAManagerCUDATypedImpl definition

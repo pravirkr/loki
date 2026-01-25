@@ -121,11 +121,11 @@ void BasePruneDPFuncts<FoldType, Derived>::score(
             std::span<float>(m_scratch_folds).first(nfft * nbins);
         m_irfft_executor->execute(folds_span, folds_t_span,
                                   static_cast<int>(nfft));
-        detection::snr_boxcar_batch(folds_t_span, scores_tree, n_leaves, nbins,
-                                    m_boxcar_widths_cache);
+        detection::snr_boxcar_3d_max_with_cache(
+            folds_t_span, scores_tree, n_leaves, nbins, m_boxcar_widths_cache);
     } else {
-        detection::snr_boxcar_batch(folds_tree, scores_tree, n_leaves, nbins,
-                                    m_boxcar_widths_cache);
+        detection::snr_boxcar_3d_max_with_cache(
+            folds_tree, scores_tree, n_leaves, nbins, m_boxcar_widths_cache);
     }
 }
 
@@ -176,14 +176,16 @@ void BaseTaylorPruneDPFuncts<FoldType, Derived>::seed(
             std::span<float>(this->m_scratch_folds).first(nfft * nbins);
         this->m_irfft_executor->execute(fold_segment, fold_segment_t,
                                         static_cast<int>(nfft));
-        detection::snr_boxcar_batch(fold_segment_t, seed_scores, n_leaves,
-                                    nbins, this->m_boxcar_widths_cache);
+        detection::snr_boxcar_3d_max_with_cache(fold_segment_t, seed_scores,
+                                                n_leaves, nbins,
+                                                this->m_boxcar_widths_cache);
 
     } else {
         error_check::check_equal(fold_segment.size(), n_leaves * 2 * nbins,
                                  "fold_segment size mismatch");
-        detection::snr_boxcar_batch(fold_segment, seed_scores, n_leaves, nbins,
-                                    this->m_boxcar_widths_cache);
+        detection::snr_boxcar_3d_max_with_cache(fold_segment, seed_scores,
+                                                n_leaves, nbins,
+                                                this->m_boxcar_widths_cache);
     }
 }
 

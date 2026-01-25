@@ -8,8 +8,7 @@
 
 #ifdef LOKI_ENABLE_CUDA
 #include <cuda/std/span>
-#include <cuda_runtime_api.h>
-#include <thrust/device_vector.h>
+#include <cuda_runtime.h>
 #endif // LOKI_ENABLE_CUDA
 
 namespace loki::core {
@@ -236,8 +235,7 @@ std::tuple<SizeType, SizeType> poly_taylor_branch_and_validate_cuda(
     cuda::std::span<double> scratch_params,
     cuda::std::span<double> scratch_dparams,
     cuda::std::span<SizeType> scratch_counts,
-    cudaStream_t stream,
-    CudaDeviceContext& ctx);
+    cudaStream_t stream);
 
 void poly_taylor_resolve_cuda(cuda::std::span<const double> leaves_branch,
                               cuda::std::span<const float> accel_grid,
@@ -250,8 +248,7 @@ void poly_taylor_resolve_cuda(cuda::std::span<const double> leaves_branch,
                               SizeType nbins,
                               SizeType n_leaves,
                               SizeType n_params,
-                              cudaStream_t stream,
-                              CudaDeviceContext& ctx);
+                              cudaStream_t stream);
 
 void poly_taylor_transform_cuda(cuda::std::span<double> leaves_tree,
                                 std::pair<double, double> coord_next,
@@ -259,8 +256,7 @@ void poly_taylor_transform_cuda(cuda::std::span<double> leaves_tree,
                                 SizeType n_leaves,
                                 SizeType n_params,
                                 bool use_conservative_tile,
-                                cudaStream_t stream,
-                                CudaDeviceContext& ctx);
+                                cudaStream_t stream);
 
 #endif // LOKI_ENABLE_CUDA
 

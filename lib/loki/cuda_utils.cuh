@@ -9,7 +9,7 @@
 #include <utility>
 #include <variant>
 
-#include <cub/version.cuh>
+#include <cub/cub.cuh>
 #include <cuda/std/span>
 #include <cuda_runtime.h>
 #include <cufft.h>

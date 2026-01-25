@@ -13,7 +13,7 @@
 #include "loki/cuda_utils.cuh"
 #include "loki/detection/score.hpp"
 #include "loki/exceptions.hpp"
-#include "loki/kernels.hpp"
+#include "loki/kernels_cuda.cuh"
 #include "loki/plans_cuda.cuh"
 #include "loki/timing.hpp"
 #include "loki/utils/fft.hpp"
@@ -457,8 +457,8 @@ private:
         m_the_bf->execute(
             ts_e_d, ts_v_d,
             cuda::std::span(init_buffer_d, m_the_bf->get_fold_size()), stream);
-        cudaStreamSynchronize(stream);
-        cuda_utils::check_last_cuda_error("brute fold synchronization failed");
+        cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
+                                    "brute fold synchronization failed");
         m_brutefold_time += timer.stop();
     }
 
@@ -768,8 +768,8 @@ compute_ffa_scores_cuda(std::span<const float> ts_e,
     const auto& score_widths = cfg.get_scoring_widths();
     const auto nscores       = ncoords * score_widths.size();
     std::vector<float> scores(nscores);
-    detection::snr_boxcar_3d_cuda(fold, ncoords, score_widths, scores,
-                                  device_id);
+    detection::snr_boxcar_3d_cuda(fold, score_widths, scores, ncoords,
+                                  cfg.get_nbins(), device_id);
     return {std::move(scores), ffa_plan};
 }
 

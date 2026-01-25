@@ -1,13 +1,13 @@
 #pragma once
 
-#include <cstddef>
 #include <mutex>
 #include <span>
 #include <unordered_map>
 
 #ifdef LOKI_ENABLE_CUDA
 #include <cuda/std/span>
-#include <cuda_runtime_api.h>
+#include <cuda_runtime.h>
+#include <cufft.h>
 #endif // LOKI_ENABLE_CUDA
 
 #include <fftw3.h>
@@ -210,8 +210,8 @@ public:
     IrfftExecutorCUDA(IrfftExecutorCUDA&&)                 = delete;
     IrfftExecutorCUDA& operator=(IrfftExecutorCUDA&&)      = delete;
 
-    void execute(cuda::std::span<const ComplexTypeCUDA> complex_input,
-                 std::span<float> real_output,
+    void execute(cuda::std::span<ComplexTypeCUDA> complex_input,
+                 cuda::std::span<float> real_output,
                  int batch_size);
 
 private:

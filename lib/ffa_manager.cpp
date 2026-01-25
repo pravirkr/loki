@@ -150,7 +150,8 @@ private:
                                  "must be 1 to call scoring function");
         auto scores_span = std::span(m_scores).first(n_scores);
         detection::snr_boxcar_3d(std::span(m_fold).first(fold_size_time),
-                                 ncoords, scoring_widths, scores_span,
+                                 scoring_widths, scores_span, ncoords,
+                                 m_base_cfg.get_nbins(),
                                  m_base_cfg.get_nthreads());
         ffa_timer_stats["score"] += timer.stop();
         accumulated_flops +=

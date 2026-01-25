@@ -342,76 +342,80 @@ using PruneCircTaylorDPFunctsComplex = PruneCircTaylorDPFuncts<ComplexType>;
 // Virtual Interface - for runtime polymorphism
 template <SupportedFoldTypeCUDA FoldTypeCUDA> class PruneDPFunctsCUDA {
 public:
-    PruneDPFunctsCUDA(std::span<const std::vector<double>> param_arr,
-                      std::span<const double> dparams,
-                      SizeType nseg_ffa,
-                      double tseg_ffa,
-                      search::PulsarSearchConfig cfg,
-                      SizeType batch_size,
-                      SizeType branch_max,
-                      std::string_view poly_basis);
+    virtual ~PruneDPFunctsCUDA() = default;
 
-    ~PruneDPFunctsCUDA()                                       = default;
+    // Delete copy/move for interface
+    PruneDPFunctsCUDA()                                        = default;
     PruneDPFunctsCUDA(const PruneDPFunctsCUDA&)                = delete;
     PruneDPFunctsCUDA& operator=(const PruneDPFunctsCUDA&)     = delete;
     PruneDPFunctsCUDA(PruneDPFunctsCUDA&&) noexcept            = delete;
     PruneDPFunctsCUDA& operator=(PruneDPFunctsCUDA&&) noexcept = delete;
 
-    cuda::std::span<const FoldTypeCUDA>
+    // Core interface methods - all derived classes must implement these
+    virtual cuda::std::span<const FoldTypeCUDA>
     load_segment(cuda::std::span<const FoldTypeCUDA> ffa_fold,
-                 SizeType seg_idx) const;
+                 SizeType seg_idx) const = 0;
 
-    void seed(cuda::std::span<const FoldTypeCUDA> fold_segment,
-              std::pair<double, double> coord_init,
-              cuda::std::span<double> seed_leaves,
-              cuda::std::span<float> seed_scores);
+    virtual void seed(cuda::std::span<const FoldTypeCUDA> fold_segment,
+                      std::pair<double, double> coord_init,
+                      cuda::std::span<double> seed_leaves,
+                      cuda::std::span<float> seed_scores,
+                      cudaStream_t stream) = 0;
 
-    std::tuple<SizeType, SizeType> branch_and_validate(
-        cuda::std::span<const double> leaves_tree,
-        std::pair<double, double> coord_cur,
-        std::pair<double, double> coord_prev,
-        cuda::std::span<double> leaves_branch,
-        cuda::std::span<SizeType> leaves_origins,
-        SizeType n_leaves,
-        cuda::std::span<double> scratch_params,
-        cuda::std::span<double> scratch_dparams,
-        cuda::std::span<SizeType> scratch_counts) const;
+    virtual std::tuple<SizeType, SizeType>
+    branch_and_validate(cuda::std::span<const double> leaves_tree,
+                        std::pair<double, double> coord_cur,
+                        std::pair<double, double> coord_prev,
+                        cuda::std::span<double> leaves_branch,
+                        cuda::std::span<SizeType> leaves_origins,
+                        SizeType n_leaves,
+                        cuda::std::span<double> scratch_params,
+                        cuda::std::span<double> scratch_dparams,
+                        cuda::std::span<SizeType> scratch_counts,
+                        cudaStream_t stream) const = 0;
 
-    void resolve(cuda::std::span<const double> leaves_branch,
-                 std::pair<double, double> coord_add,
-                 std::pair<double, double> coord_cur,
-                 std::pair<double, double> coord_init,
-                 cuda::std::span<SizeType> param_indices,
-                 cuda::std::span<float> phase_shift,
-                 SizeType n_leaves) const;
+    virtual void resolve(cuda::std::span<const double> leaves_branch,
+                         std::pair<double, double> coord_add,
+                         std::pair<double, double> coord_cur,
+                         std::pair<double, double> coord_init,
+                         cuda::std::span<SizeType> param_indices,
+                         cuda::std::span<float> phase_shift,
+                         SizeType n_leaves,
+                         cudaStream_t stream) const = 0;
 
-    void shift_add(cuda::std::span<const FoldTypeCUDA> folds_tree,
-                   cuda::std::span<const SizeType> indices_tree,
-                   cuda::std::span<const FoldTypeCUDA> folds_ffa,
-                   cuda::std::span<const SizeType> indices_ffa,
-                   cuda::std::span<const float> phase_shift,
-                   cuda::std::span<FoldTypeCUDA> folds_out,
-                   SizeType n_leaves,
-                   cudaStream_t stream) noexcept;
+    virtual void shift_add(cuda::std::span<const FoldTypeCUDA> folds_tree,
+                           cuda::std::span<const SizeType> indices_tree,
+                           cuda::std::span<const FoldTypeCUDA> folds_ffa,
+                           cuda::std::span<const SizeType> indices_ffa,
+                           cuda::std::span<const float> phase_shift,
+                           cuda::std::span<FoldTypeCUDA> folds_out,
+                           SizeType n_leaves,
+                           cudaStream_t stream) noexcept = 0;
 
-    SizeType score_and_filter(cuda::std::span<const FoldTypeCUDA> folds_tree,
-                              cuda::std::span<float> scores_tree,
-                              cuda::std::span<SizeType> indices_tree,
-                              float threshold,
-                              SizeType n_leaves,
-                              cudaStream_t stream) noexcept;
+    virtual SizeType
+    score_and_filter(cuda::std::span<const FoldTypeCUDA> folds_tree,
+                     cuda::std::span<float> scores_tree,
+                     cuda::std::span<SizeType> indices_tree,
+                     float threshold,
+                     SizeType n_leaves,
+                     cudaStream_t stream) noexcept = 0;
 
-    void transform(cuda::std::span<double> leaves_tree,
-                   std::pair<double, double> coord_next,
-                   std::pair<double, double> coord_cur,
-                   SizeType n_leaves,
-                   cudaStream_t stream) const;
+    virtual void transform(cuda::std::span<double> leaves_tree,
+                           std::pair<double, double> coord_next,
+                           std::pair<double, double> coord_cur,
+                           SizeType n_leaves,
+                           cudaStream_t stream) const = 0;
 
-    void report(cuda::std::span<double> leaves_tree,
-                std::pair<double, double> coord_report,
-                SizeType n_leaves) const;
+    virtual void report(cuda::std::span<double> leaves_tree,
+                        std::pair<double, double> coord_report,
+                        SizeType n_leaves,
+                        cudaStream_t stream) const = 0;
+};
 
-private:
+// CRTP Base class - shared functionality for all derived classes
+template <SupportedFoldTypeCUDA FoldTypeCUDA, typename Derived>
+class BasePruneDPFunctsCUDA : public PruneDPFunctsCUDA<FoldTypeCUDA> {
+protected:
     // Common members for all derived classes
     std::vector<double> m_dparams;
     SizeType m_nseg_ffa;
@@ -419,7 +423,6 @@ private:
     search::PulsarSearchConfig m_cfg;
     SizeType m_batch_size;
     SizeType m_branch_max;
-    std::string_view m_poly_basis;
 
     thrust::device_vector<double> m_accel_grid_d;
     thrust::device_vector<float> m_freq_grid_d;
@@ -428,7 +431,127 @@ private:
     // Buffer for ComplexType irfft transform
     thrust::device_vector<float> m_scratch_folds_d;
     std::unique_ptr<utils::IrfftExecutorCUDA> m_irfft_executor;
-};
-#endif // LOKI_ENABLE_CUDA
 
+    // Constructor for all derived classes
+    BasePruneDPFunctsCUDA(std::span<const std::vector<double>> param_arr,
+                          std::span<const double> dparams,
+                          SizeType nseg_ffa,
+                          double tseg_ffa,
+                          search::PulsarSearchConfig cfg,
+                          SizeType batch_size,
+                          SizeType branch_max);
+
+public:
+    // Common implementations shared by all variants
+    cuda::std::span<const FoldTypeCUDA>
+    load_segment(cuda::std::span<const FoldTypeCUDA> ffa_fold,
+                 SizeType seg_idx) const override;
+
+    void shift_add(cuda::std::span<const FoldTypeCUDA> folds_tree,
+                   cuda::std::span<const SizeType> indices_tree,
+                   cuda::std::span<const FoldTypeCUDA> folds_ffa,
+                   cuda::std::span<const SizeType> indices_ffa,
+                   cuda::std::span<const float> phase_shift,
+                   cuda::std::span<FoldTypeCUDA> folds_out,
+                   SizeType n_leaves,
+                   cudaStream_t stream) noexcept override;
+
+    SizeType score_and_filter(cuda::std::span<const FoldTypeCUDA> folds_tree,
+                              cuda::std::span<float> scores_tree,
+                              cuda::std::span<SizeType> indices_tree,
+                              float threshold,
+                              SizeType n_leaves,
+                              cudaStream_t stream) noexcept override;
+};
+
+// Intermediate base for Taylor-based methods (common seed implementation)
+template <SupportedFoldTypeCUDA FoldTypeCUDA, typename Derived>
+class BaseTaylorPruneDPFunctsCUDA
+    : public BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived> {
+protected:
+    using Base = BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>;
+
+    // Inherit constructor
+    using Base::BasePruneDPFunctsCUDA;
+
+public:
+    // Common seed implementation for all Taylor variants
+    void seed(cuda::std::span<const FoldTypeCUDA> fold_segment,
+              std::pair<double, double> coord_init,
+              cuda::std::span<double> seed_leaves,
+              cuda::std::span<float> seed_scores,
+              cudaStream_t stream) override;
+};
+
+// Specialized implementation for Polynomial searches in Taylor Basis
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+class PrunePolyTaylorDPFunctsCUDA final
+    : public BaseTaylorPruneDPFunctsCUDA<
+          FoldTypeCUDA,
+          PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>> {
+private:
+    using Base =
+        BaseTaylorPruneDPFunctsCUDA<FoldTypeCUDA,
+                                    PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>>;
+
+public:
+    PrunePolyTaylorDPFunctsCUDA(std::span<const std::vector<double>> param_arr,
+                                std::span<const double> dparams,
+                                SizeType nseg_ffa,
+                                double tseg_ffa,
+                                search::PulsarSearchConfig cfg,
+                                SizeType batch_size,
+                                SizeType branch_max);
+
+    std::tuple<SizeType, SizeType>
+    branch_and_validate(cuda::std::span<const double> leaves_tree,
+                        std::pair<double, double> coord_cur,
+                        std::pair<double, double> coord_prev,
+                        cuda::std::span<double> leaves_branch,
+                        cuda::std::span<SizeType> leaves_origins,
+                        SizeType n_leaves,
+                        cuda::std::span<double> scratch_params,
+                        cuda::std::span<double> scratch_dparams,
+                        cuda::std::span<SizeType> scratch_counts,
+                        cudaStream_t stream) const override;
+
+    void resolve(cuda::std::span<const double> leaves_branch,
+                 std::pair<double, double> coord_add,
+                 std::pair<double, double> coord_cur,
+                 std::pair<double, double> coord_init,
+                 cuda::std::span<SizeType> param_indices,
+                 cuda::std::span<float> phase_shift,
+                 SizeType n_leaves,
+                 cudaStream_t stream) const override;
+
+    void transform(cuda::std::span<double> leaves_tree,
+                   std::pair<double, double> coord_next,
+                   std::pair<double, double> coord_cur,
+                   SizeType n_leaves,
+                   cudaStream_t stream) const override;
+
+    void report(cuda::std::span<double> leaves_tree,
+                std::pair<double, double> coord_report,
+                SizeType n_leaves,
+                cudaStream_t stream) const override;
+};
+
+// Factory function to create the correct implementation based on the kind
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+std::unique_ptr<PruneDPFunctsCUDA<FoldTypeCUDA>>
+create_prune_dp_functs_cuda(std::string_view poly_basis,
+                            std::span<const std::vector<double>> param_arr,
+                            std::span<const double> dparams,
+                            SizeType nseg_ffa,
+                            double tseg_ffa,
+                            search::PulsarSearchConfig cfg,
+                            SizeType batch_size,
+                            SizeType branch_max);
+
+// Type aliases for convenience
+using PrunePolyTaylorDPFunctsCUDAFloat = PrunePolyTaylorDPFunctsCUDA<float>;
+using PrunePolyTaylorDPFunctsCUDAComplex =
+    PrunePolyTaylorDPFunctsCUDA<ComplexTypeCUDA>;
+
+#endif // LOKI_ENABLE_CUDA
 } // namespace loki::core

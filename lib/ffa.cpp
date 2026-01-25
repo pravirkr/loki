@@ -525,8 +525,8 @@ compute_ffa_scores(std::span<const float> ts_e,
     const auto& score_widths = cfg.get_scoring_widths();
     const auto nscores       = ncoords * score_widths.size();
     std::vector<float> scores(nscores);
-    detection::snr_boxcar_3d(fold, ncoords, score_widths, scores,
-                             cfg.get_nthreads());
+    detection::snr_boxcar_3d(fold, score_widths, scores, ncoords,
+                             cfg.get_nbins(), cfg.get_nthreads());
     return {std::move(scores), ffa_plan};
 }
 

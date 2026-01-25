@@ -1,6 +1,5 @@
 #include "loki/algorithms/fold.hpp"
 
-#include <cmath>
 #include <memory>
 
 #include <spdlog/spdlog.h>
@@ -15,7 +14,7 @@
 #include "loki/cuda_utils.cuh"
 #include "loki/exceptions.hpp"
 #include "loki/kernel_utils.cuh"
-#include "loki/kernels.hpp"
+#include "loki/kernels_cuda.cuh"
 
 namespace loki::algorithms {
 
@@ -156,7 +155,8 @@ public:
             kernels::brute_fold_ts_complex_cuda(
                 ts_e.data(), ts_v.data(), fold.data(),
                 thrust::raw_pointer_cast(m_freq_arr_d.data()), m_nfreqs,
-                m_nsegments, m_segment_len, m_nbins, m_tsamp, m_t_ref, stream);
+                m_nsegments, m_segment_len, m_nbins_f, m_tsamp, m_t_ref,
+                stream);
         }
         // Execution complete
         spdlog::debug(

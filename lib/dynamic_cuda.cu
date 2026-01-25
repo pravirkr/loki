@@ -14,14 +14,16 @@
 #include <thrust/transform.h>
 
 #include "loki/common/types.hpp"
+#include "loki/core/taylor.hpp"
 #include "loki/cuda_utils.cuh"
-#include "loki/ep_kernels_taylor.cuh"
-#include "loki/ep_kernels_utils.cuh"
+#include "loki/kernel_utils.cuh"
+#include "loki/kernels_cuda.cuh"
+#include "loki/utils/fft.hpp"
 
 namespace loki::core {
 
-template <SupportedFoldTypeCUDA FoldTypeCUDA>
-PruneDPFunctsCUDA<FoldTypeCUDA>::PruneDPFunctsCUDA(
+template <SupportedFoldTypeCUDA FoldTypeCUDA, typename Derived>
+BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::BasePruneDPFunctsCUDA(
     std::span<const std::vector<double>> param_arr,
     std::span<const double> dparams,
     SizeType nseg_ffa,
@@ -34,8 +36,7 @@ PruneDPFunctsCUDA<FoldTypeCUDA>::PruneDPFunctsCUDA(
       m_tseg_ffa(tseg_ffa),
       m_cfg(std::move(cfg)),
       m_batch_size(batch_size),
-      m_branch_max(branch_max),
-      m_poly_basis(poly_basis) {
+      m_branch_max(branch_max) {
     // Copy param_arr to device
     const auto& accel_arr_grid = param_arr[0];
     const auto& freq_arr_grid  = param_arr[1];
@@ -48,16 +49,18 @@ PruneDPFunctsCUDA<FoldTypeCUDA>::PruneDPFunctsCUDA(
                  m_freq_grid_d.begin());
     m_boxcar_widths_d = m_cfg.get_scoring_widths();
     if constexpr (std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>) {
+        m_irfft_executor =
+            std::make_unique<utils::IrfftExecutorCUDA>(m_cfg.get_nbins());
         const auto max_batch_size = m_batch_size * m_branch_max;
-        m_folds_buffer_d.resize(max_batch_size * 2 * m_cfg.get_nbins());
+        m_scratch_folds_d.resize(max_batch_size * 2 * m_cfg.get_nbins());
     } else {
-        m_folds_buffer_d.resize(1); // Not needed for float
+        m_scratch_folds_d.resize(1); // Not needed for float
     }
 }
 
-template <SupportedFoldTypeCUDA FoldTypeCUDA>
+template <SupportedFoldTypeCUDA FoldTypeCUDA, typename Derived>
 cuda::std::span<const FoldTypeCUDA>
-PruneDPFunctsCUDA<FoldTypeCUDA>::load_segment(
+BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::load_segment(
     cuda::std::span<const FoldTypeCUDA> ffa_fold, SizeType seg_idx) const {
     const SizeType n_coords = m_accel_grid_d.size() * m_freq_grid_d.size();
     const auto nbins        = m_cfg.get_nbins();
@@ -71,8 +74,61 @@ PruneDPFunctsCUDA<FoldTypeCUDA>::load_segment(
     }
 }
 
-template <SupportedFoldTypeCUDA FoldTypeCUDA>
-void PruneDPFunctsCUDA<FoldTypeCUDA>::seed(
+template <SupportedFoldTypeCUDA FoldTypeCUDA, typename Derived>
+void BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::shift_add(
+    cuda::std::span<const FoldTypeCUDA> folds_tree,
+    cuda::std::span<const SizeType> indices_tree,
+    cuda::std::span<const FoldTypeCUDA> folds_ffa,
+    cuda::std::span<const SizeType> indices_ffa,
+    cuda::std::span<const float> phase_shift,
+    cuda::std::span<FoldTypeCUDA> folds_out,
+    SizeType n_leaves,
+    cudaStream_t stream) noexcept {
+    if constexpr (std::is_same_v<FoldTypeCUDA, float>) {
+        kernels::shift_add_linear_batch_cuda(
+            folds_tree.data(), indices_tree.data(), folds_ffa.data(),
+            indices_ffa.data(), phase_shift.data(), folds_out.data(),
+            m_cfg.get_nbins(), n_leaves, stream);
+    } else {
+        return shift_add_linear_complex_batch_cuda(
+            folds_tree.data(), indices_tree.data(), folds_ffa.data(),
+            indices_ffa.data(), phase_shift.data(), folds_out.data(),
+            m_cfg.get_nbins_f(), m_cfg.get_nbins(), n_leaves, stream);
+    }
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA, typename Derived>
+SizeType BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::score_and_filter(
+    cuda::std::span<const FoldTypeCUDA> folds_tree,
+    cuda::std::span<float> scores_tree,
+    cuda::std::span<SizeType> indices_tree,
+    float threshold,
+    SizeType n_leaves,
+    cudaStream_t stream) noexcept {
+    const auto nbins   = m_cfg.get_nbins();
+    const auto nbins_f = m_cfg.get_nbins_f();
+    if constexpr (std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>) {
+        // Ensure exact span for irfft transform
+        const auto nfft = 2 * n_leaves;
+        auto folds_span = cuda::std::span<const FoldTypeCUDA>(folds_tree)
+                              .first(n_leaves * 2 * nbins_f);
+        auto folds_t_span =
+            cuda::std::span<float>(m_scratch_folds_d).first(nfft * nbins);
+        m_irfft_executor->execute(folds_span, folds_t_span,
+                                  static_cast<int>(nfft));
+        return detection::score_and_filter_max_cuda_d(folds_tree, scores_tree,
+                                                      indices_tree, threshold,
+                                                      n_leaves, nbins, stream);
+    } else {
+        return detection::score_and_filter_max_cuda_d(folds_tree, scores_tree,
+                                                      indices_tree, threshold,
+                                                      n_leaves, nbins, stream);
+    }
+}
+
+// Intermediate implementation for Taylor basis
+template <SupportedFoldTypeCUDA FoldTypeCUDA, typename Derived>
+void BaseTaylorPruneDPFunctsCUDA<FoldTypeCUDA, Derived>::seed(
     cuda::std::span<const FoldTypeCUDA> ffa_fold,
     std::pair<double, double> coord_init,
     cuda::std::span<double> seed_leaves,
@@ -96,9 +152,27 @@ void PruneDPFunctsCUDA<FoldTypeCUDA>::seed(
                                         tree_folds, tree_scores, ncoords);
 }
 
+// Specialized implementation for Polynomial searches in Taylor Basis
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>::PrunePolyTaylorDPFunctsCUDA(
+    std::span<const std::vector<double>> param_arr,
+    std::span<const double> dparams,
+    SizeType nseg_ffa,
+    double tseg_ffa,
+    search::PulsarSearchConfig cfg,
+    SizeType batch_size,
+    SizeType branch_max)
+    : Base(param_arr,
+           dparams,
+           nseg_ffa,
+           tseg_ffa,
+           std::move(cfg),
+           batch_size,
+           branch_max) {}
+
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 std::tuple<SizeType, SizeType>
-PruneDPFunctsCUDA<FoldTypeCUDA>::branch_and_validate(
+PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>::branch_and_validate(
     cuda::std::span<const double> leaves_tree,
     std::pair<double, double> coord_cur,
     std::pair<double, double> coord_prev,
@@ -112,11 +186,11 @@ PruneDPFunctsCUDA<FoldTypeCUDA>::branch_and_validate(
         leaves_tree, coord_cur, coord_prev, leaves_branch, leaves_origins,
         n_leaves, m_cfg.get_nparams(), m_cfg.get_nbins(), m_cfg.get_eta(),
         m_cfg.get_param_limits(), m_branch_max, scratch_params, scratch_dparams,
-        scratch_counts, stream, ctx);
+        scratch_counts, stream);
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
-void PruneDPFunctsCUDA<FoldTypeCUDA>::resolve(
+void PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>::resolve(
     cuda::std::span<const double> leaves_branch,
     std::pair<double, double> coord_add,
     std::pair<double, double> coord_cur,
@@ -131,70 +205,7 @@ void PruneDPFunctsCUDA<FoldTypeCUDA>::resolve(
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
-void PruneDPFunctsCUDA<FoldTypeCUDA>::shift_add(
-    cuda::std::span<const FoldTypeCUDA> folds_tree,
-    cuda::std::span<const SizeType> indices_tree,
-    cuda::std::span<const FoldTypeCUDA> folds_ffa,
-    cuda::std::span<const SizeType> indices_ffa,
-    cuda::std::span<const float> phase_shift,
-    cuda::std::span<FoldTypeCUDA> folds_out,
-    SizeType n_leaves,
-    cudaStream_t stream) noexcept {
-    if constexpr (std::is_same_v<FoldTypeCUDA, float>) {
-        kernels::shift_add_linear_batch_cuda(
-            folds_tree.data(), indices_tree.data(), folds_ffa.data(),
-            indices_ffa.data(), phase_shift.data(), folds_out.data(),
-            m_cfg.get_nbins(), n_leaves, stream);
-    } else {
-        return shift_add_linear_complex_batch_cuda(
-            folds_tree.data(), indices_tree.data(), folds_ffa.data(),
-            indices_ffa.data(), phase_shift.data(), folds_out.data(),
-            m_cfg.get_nbins_f(), m_cfg.get_nbins(), n_leaves, stream);
-    }
-}
-
-template <SupportedFoldTypeCUDA FoldTypeCUDA>
-SizeType PruneDPFunctsCUDA<FoldTypeCUDA>::score_and_filter(
-    cuda::std::span<const FoldTypeCUDA> folds_tree,
-    cuda::std::span<float> scores_tree,
-    cuda::std::span<SizeType> indices_tree,
-    float threshold,
-    SizeType n_leaves,
-    cudaStream_t stream) noexcept {
-    SizeType n_leaves_passing = 0;
-    uint32_t* d_n_leaves_passing;
-    cudaMallocAsync(&d_n_leaves_passing, sizeof(uint32_t), stream);
-    cudaMemsetAsync(d_n_leaves_passing, 0, sizeof(uint32_t), stream);
-
-    if (std::is_same_v<FoldTypeCUDA, float>) {
-        constexpr uint32_t kWarpKernelBlockThreads = 128;
-        constexpr uint32_t kLeavesPerBlock = kWarpKernelBlockThreads / 32;
-
-        const SizeType warp_kernel_shmem =
-            kLeavesPerBlock * m_cfg.get_nbins() * sizeof(float);
-        const dim3 block_dim(kWarpKernelBlockThreads);
-        const dim3 grid_dim((n_leaves + kLeavesPerBlock - 1) / kLeavesPerBlock);
-
-        cuda_utils::check_kernel_launch_params(grid_dim, block_dim,
-                                               warp_kernel_shmem);
-
-        score_and_filter_kernel<kWarpKernelBlockThreads>
-            <<<grid_dim, block_dim, warp_kernel_shmem, stream>>>(
-                folds_tree.data(), scores_tree.data(), indices_tree.data(),
-                m_boxcar_widths_d.data(), m_boxcar_widths_d.size(), threshold,
-                n_leaves, m_cfg.get_nbins(), d_n_leaves_passing);
-    } else {
-        throw std::invalid_argument("FoldType not implemented");
-    }
-    cudaMemcpyAsync(&n_leaves_passing, d_n_leaves_passing, sizeof(uint32_t),
-                    cudaMemcpyDeviceToHost, stream);
-    cudaFreeAsync(d_n_leaves_passing, stream);
-    cudaStreamSynchronize(stream);
-    return n_leaves_passing;
-}
-
-template <SupportedFoldTypeCUDA FoldTypeCUDA>
-void PruneDPFunctsCUDA<FoldTypeCUDA>::transform(
+void PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>::transform(
     cuda::std::span<double> leaves_tree,
     std::pair<double, double> coord_next,
     std::pair<double, double> coord_cur,
@@ -206,7 +217,13 @@ void PruneDPFunctsCUDA<FoldTypeCUDA>::transform(
 }
 
 // Explicit template instantiations
-template class PruneDPFunctsCUDA<float>;
-template class PruneDPFunctsCUDA<ComplexTypeCUDA>;
+// Base classes need explicit instantiation for linker
+template class BasePruneDPFuncts<float, PrunePolyTaylorDPFuncts<float>>;
+template class BasePruneDPFuncts<ComplexType,
+                                 PrunePolyTaylorDPFuncts<ComplexType>>;
+
+template class BaseTaylorPruneDPFuncts<float, PrunePolyTaylorDPFuncts<float>>;
+template class BaseTaylorPruneDPFuncts<ComplexType,
+                                       PrunePolyTaylorDPFuncts<ComplexType>>;
 
 } // namespace loki::core

@@ -19,7 +19,7 @@ struct FFATimerStatsPacked {
     float brutefold{};
     float ffa{};
     float score{};
-    float filter{};
+    float io{};
 };
 
 class FFATimerStats {
@@ -42,7 +42,7 @@ public:
 
 private:
     static constexpr std::array kTimerNames = {"brutefold", "ffa", "score",
-                                               "filter"};
+                                               "io"};
     std::map<std::string, float> m_timers;
 };
 
@@ -50,7 +50,7 @@ class FFAStatsCollection {
 public:
     FFAStatsCollection() = default;
 
-    void update_stats(const FFATimerStats& timers, float flops);
+    void update_stats(const FFATimerStats& timers, float flops = 0.0F);
     // Direct access to accumulated timers
     [[nodiscard]] const FFATimerStats& get_timers() const {
         return m_accumulated_timers;
