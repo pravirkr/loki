@@ -269,6 +269,7 @@ public:
                    SizeType n_widths,
                    SizeType n_params,
                    SizeType n_samps,
+                   SizeType max_passing_candidates,
                    bool use_gpu);
 
     // --- Rule of five: PIMPL ---
@@ -291,8 +292,6 @@ public:
     SizeType get_max_scores_size() const noexcept;
     /// @brief Get the write parameter sets storage.
     SizeType get_write_param_sets_size() const noexcept;
-    /// @brief Get the write scores storage.
-    SizeType get_write_scores_size() const noexcept;
     /// @brief Get the memory usage of the buffer storage (in GB).
     float get_buffer_memory_usage() const noexcept;
     /// @brief Get the memory usage of the coordinate storage (in GB).

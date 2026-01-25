@@ -45,15 +45,16 @@ public:
         m_ffa_workspace = FFAWorkspaceCUDA<FoldTypeCUDA>(
             planner_stats.get_max_buffer_size(),
             planner_stats.get_max_coord_size(), m_base_cfg.get_nparams());
-        m_fold_d_time.resize(planner_stats.get_max_buffer_size_time());
         m_scores.resize(planner_stats.get_max_scores_size());
-        m_scores_d.resize(planner_stats.get_max_scores_size());
         m_passing_indices.resize(planner_stats.get_max_scores_size());
-        m_passing_indices_d.resize(planner_stats.get_max_scores_size());
         m_write_param_sets_batch.resize(
             planner_stats.get_write_param_sets_size());
-        m_ffa_stats = std::make_unique<cands::FFAStatsCollection>();
         m_n_passing_scores_per_region.resize(m_region_planner.get_nregions());
+        m_ffa_stats = std::make_unique<cands::FFAStatsCollection>();
+
+        m_fold_time_d.resize(planner_stats.get_max_buffer_size_time());
+        m_scores_d.resize(planner_stats.get_max_scores_size());
+        m_passing_indices_d.resize(planner_stats.get_max_scores_size());
 
         // Copy scoring widths to device
         m_widths_d = m_base_cfg.get_scoring_widths();
@@ -146,8 +147,6 @@ public:
             "passing indices copy failed");
         cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
                                     "stream synchronization failed");
-        cuda_utils::check_cuda_call(cudaStreamDestroy(stream),
-                                    "stream destruction failed");
 
         const float accumulated_flops = save_results(writer);
         ffa_timer_stats_pipeline["io"] += timer.stop();
@@ -164,18 +163,17 @@ private:
     plans::FFARegionPlanner<HostFoldType> m_region_planner;
 
     algorithms::FFAWorkspaceCUDA<FoldTypeCUDA> m_ffa_workspace;
+    SizeType m_total_passing_scores{};
     std::vector<float> m_scores;
     std::vector<uint32_t> m_passing_indices;
     std::vector<double> m_write_param_sets_batch; // includes width
-    SizeType m_total_passing_scores{};
     std::vector<SizeType> m_n_passing_scores_per_region;
 
     std::unique_ptr<cands::FFAStatsCollection> m_ffa_stats;
-
     // Persistent input/output buffers
     thrust::device_vector<float> m_ts_e_d;
     thrust::device_vector<float> m_ts_v_d;
-    thrust::device_vector<float> m_fold_d_time;
+    thrust::device_vector<float> m_fold_time_d;
     thrust::device_vector<float> m_scores_d;
     thrust::device_vector<uint32_t> m_widths_d;
     thrust::device_vector<uint32_t> m_passing_indices_d;
@@ -225,7 +223,7 @@ private:
         const auto fold_size_time   = ffa_plan.get_fold_size_time();
         the_ffa.execute(
             cuda_utils::as_span(m_ts_e_d), cuda_utils::as_span(m_ts_v_d),
-            cuda_utils::as_span(m_fold_d_time, buffer_size_time), stream);
+            cuda_utils::as_span(m_fold_time_d, buffer_size_time), stream);
         const auto brutefold_time = the_ffa.get_brute_fold_timing();
         ffa_timer_stats["brutefold"] += brutefold_time;
         ffa_timer_stats["ffa"] += timer.stop() - brutefold_time;
@@ -234,17 +232,30 @@ private:
         timer.start();
         const auto nsegments = ffa_plan.get_nsegments().back();
         const auto ncoords   = ffa_plan.get_ncoords().back();
-        const auto n_widths  = m_base_cfg.get_scoring_widths().size();
+        const auto n_widths  = cfg.get_scoring_widths().size();
         const auto n_scores  = ncoords * n_widths;
         error_check::check_equal(nsegments, 1U,
                                  "FFAManager::execute_ffa_region: nsegments "
                                  "must be 1 to call scoring function");
+        // Calculate available space in buffers
+        const SizeType available_space =
+            m_scores_d.size() - m_total_passing_scores;
+        error_check::check_greater_equal(
+            available_space, n_scores,
+            std::format("Buffer overflow: {} candidates already accumulated, "
+                        "{} more needed, but only {} space available. "
+                        "Options: (1) Increase snr_min threshold, "
+                        "(2) Add max_passing_candidates config parameter.",
+                        m_total_passing_scores, n_scores, available_space));
+        // Pass incremental spans with offset
         const SizeType n_passing = detection::score_and_filter_cuda_d(
-            cuda_utils::as_span(m_fold_d_time, fold_size_time),
+            cuda_utils::as_span(m_fold_time_d, fold_size_time),
             cuda_utils::as_span(m_widths_d),
-            cuda_utils::as_span(m_scores_d, n_scores),
-            cuda_utils::as_span(m_passing_indices_d, n_scores),
-            m_base_cfg.get_snr_min(), ncoords, m_base_cfg.get_nbins(), stream);
+            cuda_utils::as_span(m_scores_d)
+                .subspan(m_total_passing_scores, n_scores),
+            cuda_utils::as_span(m_passing_indices_d)
+                .subspan(m_total_passing_scores, n_scores),
+            cfg.get_snr_min(), ncoords, cfg.get_nbins(), stream);
         m_total_passing_scores += n_passing;
 
         ffa_timer_stats["score"] += timer.stop();
@@ -257,8 +268,9 @@ private:
         const auto& scoring_widths  = m_base_cfg.get_scoring_widths();
         const SizeType n_widths     = scoring_widths.size();
 
-        float accumulated_flops      = 0.0F;
-        const auto& ffa_regions_cfgs = m_region_planner.get_cfgs();
+        float accumulated_flops        = 0.0F;
+        SizeType global_passing_offset = 0; // Track cumulative offset
+        const auto& ffa_regions_cfgs   = m_region_planner.get_cfgs();
         for (SizeType i = 0; i < ffa_regions_cfgs.size(); ++i) {
             const search::PulsarSearchConfig& cfg_cur = ffa_regions_cfgs[i];
             const auto& ffa_plan  = plans::FFAPlan<HostFoldType>(cfg_cur);
@@ -271,7 +283,7 @@ private:
             accumulated_flops += ffa_plan.get_gflops(/*return_in_time=*/true);
             const auto ncoords = ffa_plan.get_ncoords().back();
             const auto score_flops =
-                (ncoords * 2) * (n_widths * 2 * m_base_cfg.get_nbins());
+                (ncoords * 2) * (n_widths * 2 * cfg_cur.get_nbins());
             accumulated_flops += score_flops * 1e-9; // convert to GFLOPS
 
             // Process in batches and write incrementally
@@ -283,8 +295,10 @@ private:
 
                 // Fill batch buffer
                 for (SizeType i = 0; i < batch_count; ++i) {
-                    const SizeType score_idx =
-                        m_passing_indices[batch_start + i];
+                    // Access from global buffer with proper offset
+                    const SizeType global_idx =
+                        global_passing_offset + batch_start + i;
+                    const SizeType score_idx = m_passing_indices[global_idx];
                     const SizeType coord_idx = score_idx / n_widths;
                     const SizeType width_idx = score_idx % n_widths;
 
@@ -305,10 +319,12 @@ private:
                 result_writer.write_results(
                     std::span(m_write_param_sets_batch)
                         .first(batch_count * total_params),
-                    std::span(m_scores).first(batch_count), batch_count,
-                    total_params);
+                    std::span(m_scores).subspan(
+                        global_passing_offset + batch_start, batch_count),
+                    batch_count, total_params);
                 batch_start = batch_end;
             }
+            global_passing_offset += n_passing;
         }
         return accumulated_flops;
     }

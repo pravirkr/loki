@@ -41,7 +41,7 @@ HighFive::CompoundType create_compound_ffa_timer_stats() {
     return {{"brutefold", HighFive::create_datatype<float>()},
             {"ffa", HighFive::create_datatype<float>()},
             {"score", HighFive::create_datatype<float>()},
-            {"filter", HighFive::create_datatype<float>()}};
+            {"io", HighFive::create_datatype<float>()}};
 }
 
 // Create a compound type for PruneStats
@@ -176,7 +176,7 @@ std::vector<FFATimerStatsPacked> FFAStatsCollection::get_packed_data() const {
         packed_timers.emplace_back(m_accumulated_timers.at("brutefold"),
                                    m_accumulated_timers.at("ffa"),
                                    m_accumulated_timers.at("score"),
-                                   m_accumulated_timers.at("filter"));
+                                   m_accumulated_timers.at("io"));
     }
     return packed_timers;
 }

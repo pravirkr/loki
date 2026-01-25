@@ -31,12 +31,12 @@ PYBIND11_MODULE(libculoki, m) { // NOLINT
                 throw std::runtime_error("Input arrays cannot be empty");
             }
             const auto nprofiles = arr.shape(0);
+            const auto nbins     = arr.shape(1);
 
             auto out = PyArrayT<float>(nprofiles);
             detection::snr_boxcar_2d_max_cuda(
-                to_span<const float>(arr), nprofiles,
-                to_span<const SizeType>(widths), to_span<float>(out), stdnoise,
-                device_id);
+                to_span<const float>(arr), to_span<const SizeType>(widths),
+                to_span<float>(out), nprofiles, nbins, stdnoise, device_id);
             return out;
         },
         py::arg("arr"), py::arg("widths"), py::arg("stdnoise") = 1.0F,
@@ -53,11 +53,12 @@ PYBIND11_MODULE(libculoki, m) { // NOLINT
                 throw std::runtime_error("Input arrays cannot be empty");
             }
             const auto nprofiles = arr.shape(0);
+            const auto nbins     = arr.shape(2);
 
             auto out = PyArrayT<float>({nprofiles, widths.size()});
-            detection::snr_boxcar_3d_cuda(to_span<const float>(arr), nprofiles,
-                                          to_span<const SizeType>(widths),
-                                          to_span<float>(out), device_id);
+            detection::snr_boxcar_3d_cuda(
+                to_span<const float>(arr), to_span<const SizeType>(widths),
+                to_span<float>(out), nprofiles, nbins, device_id);
             return out;
         },
         py::arg("arr"), py::arg("widths"), py::arg("device_id") = 0);
@@ -73,12 +74,13 @@ PYBIND11_MODULE(libculoki, m) { // NOLINT
                 throw std::runtime_error("Input arrays cannot be empty");
             }
             const auto nprofiles = arr.shape(0);
+            const auto nbins     = arr.shape(2);
 
             auto out = PyArrayT<float>(nprofiles);
             detection::snr_boxcar_3d_max_cuda(to_span<const float>(arr),
-                                              nprofiles,
                                               to_span<const SizeType>(widths),
-                                              to_span<float>(out), device_id);
+                                              to_span<float>(out), nprofiles,
+                                              nbins, device_id);
             return out;
         },
         py::arg("arr"), py::arg("widths"), py::arg("device_id") = 0);

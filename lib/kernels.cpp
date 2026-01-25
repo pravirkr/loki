@@ -726,7 +726,7 @@ void ffa_iter_segment(const float* __restrict__ fold_in,
 
 #pragma omp parallel num_threads(nthreads) default(none)                       \
     shared(fold_in, fold_out, coords, ncoords_cur, ncoords_prev, nsegments,    \
-               fold_stride, seg_prev_stride, seg_out_stride)
+               nbins, fold_stride, seg_prev_stride, seg_out_stride)
     {
         // Each thread allocates its own buffer once
         std::vector<float> temp_buffer(2 * nbins);
@@ -783,7 +783,7 @@ void ffa_iter_standard(const float* __restrict__ fold_in,
 
 #pragma omp parallel num_threads(nthreads) default(none)                       \
     shared(fold_in, fold_out, coords, ncoords_cur, ncoords_prev, nsegments,    \
-               fold_stride, seg_prev_stride, seg_out_stride)
+               nbins, fold_stride, seg_prev_stride, seg_out_stride)
     {
         std::vector<float> temp_buffer(2 * nbins);
         auto* __restrict__ temp_buffer_ptr = temp_buffer.data();

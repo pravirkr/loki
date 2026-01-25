@@ -925,6 +925,52 @@ transform_taylor_kernel(double* __restrict__ leaves_tree,
 
 } // namespace
 
+void ffa_taylor_resolve_poly_cuda(
+    cuda::std::span<const double> param_arr_cur_flat,
+    cuda::std::span<const double> param_arr_prev_flat,
+    cuda::std::span<const uint32_t> param_arr_cur_count,
+    cuda::std::span<const uint32_t> param_arr_prev_count,
+    cuda::std::span<uint32_t> pindex_prev_flat_batch,
+    cuda::std::span<float> relative_phase_batch,
+    SizeType ffa_level,
+    SizeType latter,
+    double tseg_brute,
+    SizeType nbins,
+    cudaStream_t stream) {
+    // Better occupancy than 512 for many kernels
+    constexpr int kBlockSize = 256;
+    const dim3 block(kBlockSize);
+    const dim3 grid((n_leaves + kBlockSize - 1) / kBlockSize);
+    cuda_utils::check_kernel_launch_params(grid, block);
+
+    // Two-level dispatch for complete compile-time specialization
+    auto dispatch = [&]<int N, bool C>() {
+        ffa_resolve_taylor_kernel<N, C><<<grid, block, 0, stream>>>(
+            param_arr_cur_flat.data(), param_arr_prev_flat.data(),
+            param_arr_cur_count.data(), param_arr_prev_count.data(),
+            pindex_prev_flat_batch.data(), relative_phase_batch.data(),
+            ffa_level, latter, tseg_brute, nbins);
+    };
+    switch (n_params) {
+    case 2:
+        dispatch.template operator()<2, false>();
+        break;
+    case 3:
+        dispatch.template operator()<3, false>();
+        break;
+    case 4:
+        dispatch.template operator()<4, false>();
+        break;
+    case 5:
+        dispatch.template operator()<5, false>();
+        break;
+    default:
+        throw std::invalid_argument("Unsupported n_params");
+    }
+    cuda_utils::check_last_cuda_error(
+        "FFA Taylor (poly) resolve kernel launch failed");
+}
+
 std::tuple<SizeType, SizeType> poly_taylor_branch_and_validate_cuda(
     cuda::std::span<const double> leaves_tree,
     std::pair<double, double> coord_cur,

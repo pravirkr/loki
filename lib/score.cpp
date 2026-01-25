@@ -118,7 +118,7 @@ void snr_boxcar_impl(const float* __restrict__ folds,
 
 #pragma omp parallel num_threads(nthreads) default(none)                       \
     shared(folds, widths, scores, nbins, nprofiles, nwidths, wmax, h_vals,     \
-               b_vals, stdnoise)
+               b_vals, inv_stdnoise)
     {
         // Thread-local buffers
         std::vector<float> fold_work;

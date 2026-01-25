@@ -37,6 +37,7 @@ public:
                        std::optional<SizeType> bseg_brute = std::nullopt,
                        std::optional<SizeType> bseg_ffa   = std::nullopt,
                        double snr_min                     = 5.0,
+                       SizeType max_passing_candidates    = 1U << 22U, // 4M
                        SizeType prune_poly_order          = 3,
                        double p_orb_min                   = 1e-5,
                        double m_c_max                     = 10.0,
@@ -88,6 +89,8 @@ public:
     SizeType get_bseg_ffa() const noexcept;
     /// @brief Get the minimum SNR threshold.
     double get_snr_min() const noexcept;
+    /// @brief Get the maximum number of passing candidates.
+    SizeType get_max_passing_candidates() const noexcept;
     /// @brief Get the polynomial order for the EP algorithm.
     SizeType get_prune_poly_order() const noexcept;
     /// @brief Get the minimum orbital period for the circular orbit search.

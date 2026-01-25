@@ -354,8 +354,6 @@ public:
             m_props.totalGlobalMem >> 20U, m_props.sharedMemPerBlock);
     }
 
-    // Validation methods - compile away in release builds
-#ifndef NDEBUG
     /**
      * @brief Checks kernel launch parameters against device limits before
      * launching. Throws std::runtime_error on failure.
@@ -388,15 +386,6 @@ public:
         check_limit(grid_dim.z, m_props.maxGridSize[2], "Grid Z");
         check_limit(shmem_size, m_props.sharedMemPerBlock, "Shared memory");
     }
-#else
-    // No-op in release builds - completely optimized away
-    constexpr void check_kernel_launch_params(
-        dim3,
-        dim3,
-        size_t = 0,
-        const std::source_location =
-            std::source_location::current()) const noexcept {}
-#endif
 
 private:
     int m_device_id{-1};
@@ -466,6 +455,11 @@ class CudaSetDeviceGuard {
 public:
     explicit CudaSetDeviceGuard(int device_id) {
         int& current  = detail::tls_current_device;
+        // Initialize TLS once per thread from actual CUDA state.
+        if (current < 0) {
+            check_cuda_call(cudaGetDevice(&current),
+                            "cudaGetDevice failed during guard init");
+        }
         m_prev_device = current;
 
         if (current != device_id) {
@@ -475,7 +469,7 @@ public:
     }
 
     ~CudaSetDeviceGuard() {
-        if (m_device_changed) {
+        if (m_device_changed && m_prev_device >= 0) {
             cudaSetDevice(m_prev_device);
         }
     }

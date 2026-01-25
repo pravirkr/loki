@@ -132,7 +132,7 @@ kernel_shift_add_linear_complex(const ComplexTypeCUDA* __restrict__ folds_tree,
         tree_v->real() + real_ffa_v, tree_v->imag() + imag_ffa_v);
 }
 
-// OPTIMIZED: One thread per smallest work unit, optimized for memory coalescing
+// One thread per smallest work unit
 __global__ void kernel_ffa_iter(const float* __restrict__ fold_in,
                                 float* __restrict__ fold_out,
                                 const plans::FFACoordDPtrs coords,
@@ -280,6 +280,126 @@ __global__ void kernel_ffa_freq_iter(const float* __restrict__ fold_in,
     fold_out[out_offset + ibin + nbins] =
         fold_in[tail_offset + ibin + nbins] +
         fold_in[head_offset + idx_add + nbins];
+}
+
+__global__ void
+kernel_ffa_freq_iter_shared(const float* __restrict__ fold_in,
+                            float* __restrict__ fold_out,
+                            const plans::FFACoordFreqDPtrs coords,
+                            uint32_t ncoords_cur,
+                            uint32_t ncoords_prev,
+                            uint32_t nsegments,
+                            uint32_t nbins) {
+    // Strategy: Process one (icoord, iseg) pair per block
+    const uint32_t iseg = blockIdx.x;
+    const uint32_t icoord =
+        blockIdx.y + blockIdx.z * gridDim.y; // Combine y and z
+    const uint32_t tid = threadIdx.x;
+
+    if (icoord >= ncoords_cur || iseg >= nsegments || tid >= nbins) {
+        return;
+    }
+
+    // Shared memory: [head_e, head_v]
+    extern __shared__ float s_mem[];
+    float* s_head_ev = s_mem;
+
+    // Precompute coordinate data (avoid repeated access)
+    const uint32_t coord_idx = coords.idx[icoord];
+    uint32_t shift           = __float2uint_rn(coords.shift[icoord]);
+    if (shift >= nbins) {
+        shift = 0;
+    }
+
+    // Calculate offsets
+    const uint32_t total_size = 2 * nbins;
+    const uint32_t tail_offset =
+        ((iseg * 2) * ncoords_prev * total_size) + (coord_idx * total_size);
+    const uint32_t head_offset =
+        ((iseg * 2 + 1) * ncoords_prev * total_size) + (coord_idx * total_size);
+    const uint32_t out_offset =
+        (iseg * ncoords_cur * total_size) + (icoord * total_size);
+
+    // Load data from global memory with coalesced access
+    for (uint32_t i = tid; i < nbins; i += blockDim.x) {
+        uint32_t rot_idx = i + shift;
+        if (rot_idx >= nbins) {
+            rot_idx -= nbins;
+        }
+        s_head_ev[rot_idx]         = fold_in[head_offset + i];
+        s_head_ev[rot_idx + nbins] = fold_in[head_offset + i + nbins];
+    }
+    __syncthreads();
+
+    for (uint32_t i = tid; i < nbins; i += blockDim.x) {
+        fold_out[out_offset + i] = fold_in[tail_offset + i] + s_head_ev[i];
+        fold_out[out_offset + i + nbins] =
+            fold_in[tail_offset + i + nbins] + s_head_ev[i + nbins];
+    }
+}
+
+// For nbins <= 32 (warp-level communication)
+// Could be optimal (theoretically) for nbins <= 32, but we are anyway hitting a
+// memory wall, so not using it
+__global__ void kernel_ffa_freq_iter_warp(const float* __restrict__ fold_in,
+                                          float* __restrict__ fold_out,
+                                          const plans::FFACoordFreqDPtrs coords,
+                                          uint32_t ncoords_cur,
+                                          uint32_t ncoords_prev,
+                                          uint32_t nsegments,
+                                          uint32_t nbins) {
+    constexpr uint32_t kWarpSize = 32;
+    // Calculate which warp and lane this thread belongs to
+    const uint32_t global_warp_id =
+        (blockIdx.x * blockDim.x + threadIdx.x) / kWarpSize;
+    const uint32_t lane_id = threadIdx.x % kWarpSize;
+
+    // Each warp processes one (iseg, icoord) pair
+    // Decode global_warp_id to (iseg, icoord)
+    const uint32_t total_coords = ncoords_cur * nsegments;
+    if (global_warp_id >= total_coords) {
+        return;
+    }
+
+    const uint32_t icoord = global_warp_id / nsegments;
+    const uint32_t iseg   = global_warp_id % nsegments;
+
+    // Early exit for lanes beyond nbins
+    if (lane_id >= nbins) {
+        return;
+    }
+
+    // Warp-level shared memory (via shuffle)
+    const uint32_t coord_idx = coords.idx[icoord];
+    const uint32_t shift     = __float2uint_rn(coords.shift[icoord]) % nbins;
+
+    // Calculate memory offsets
+    const uint32_t total_size = 2 * nbins;
+    const uint32_t tail_offset =
+        ((iseg * 2) * ncoords_prev * total_size) + (coord_idx * total_size);
+    const uint32_t head_offset =
+        ((iseg * 2 + 1) * ncoords_prev * total_size) + (coord_idx * total_size);
+    const uint32_t out_offset =
+        (iseg * ncoords_cur * total_size) + (icoord * total_size);
+
+    // Load head data (coalesced within warp)
+    const float head_e = fold_in[head_offset + lane_id];
+    const float head_v = fold_in[head_offset + lane_id + nbins];
+
+    // Apply rotation using warp shuffle
+    // Each lane needs data from position (lane_id - shift) % nbins
+    const uint32_t src_lane =
+        (lane_id < shift) ? (lane_id + nbins - shift) : (lane_id - shift);
+
+    // Shuffle to get unrotated values
+    const float head_e_unrot = __shfl_sync(__activemask(), head_e, src_lane);
+    const float head_v_unrot = __shfl_sync(__activemask(), head_v, src_lane);
+
+    // Load tail (coalesced), add, and write (coalesced)
+    fold_out[out_offset + lane_id] =
+        fold_in[tail_offset + lane_id] + head_e_unrot;
+    fold_out[out_offset + lane_id + nbins] =
+        fold_in[tail_offset + lane_id + nbins] + head_v_unrot;
 }
 
 // OPTIMIZED: One thread per smallest work unit, optimized for memory coalescing
@@ -879,6 +999,86 @@ void ffa_iter_freq_cuda(const float* __restrict__ fold_in,
     cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
                                 "cudaStreamSynchronize failed");
 }
+
+/*
+void ffa_iter_freq_cuda(const float* __restrict__ fold_in,
+                        float* __restrict__ fold_out,
+                        plans::FFACoordFreqDPtrs coords,
+                        SizeType ncoords_cur,
+                        SizeType ncoords_prev,
+                        SizeType nsegments,
+                        SizeType nbins,
+                        cudaStream_t stream) {
+    // Strategy selection based on nbins
+    constexpr uint32_t kWarpSize           = 32;
+    constexpr uint32_t kSharedMemThreshold = 128;
+    constexpr uint32_t kMaxGridDim         = 65535;
+
+    const SizeType shmem_bytes = 2 * nbins * sizeof(float);
+    const SizeType max_shmem   = cuda_utils::get_max_shared_memory();
+
+    // Warp-shuffle for nbins <= 32
+    if (nbins <= kWarpSize) {
+        constexpr uint32_t kThreadsPerBlock = 256; // 8 warps per block
+        const uint32_t kWarpsPerBlock       = kThreadsPerBlock / kWarpSize;
+        // Total work: one warp per (iseg, icoord) pair
+        const SizeType total_warps = ncoords_cur * nsegments;
+        const SizeType total_blocks =
+            (total_warps + kWarpsPerBlock - 1) / kWarpsPerBlock;
+        const dim3 block_dim(kThreadsPerBlock);
+        const dim3 grid_dim(total_blocks);
+        cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
+        kernel_ffa_freq_iter_warp<<<grid_dim, block_dim, 0, stream>>>(
+            fold_in, fold_out, coords, ncoords_cur, ncoords_prev, nsegments,
+            nbins);
+        cuda_utils::check_last_cuda_error(
+            "FFA freq iter (warp) kernel launch failed");
+    }
+    // Shared memory for nbins >= 128
+    else if (nbins >= kSharedMemThreshold && shmem_bytes <= max_shmem) {
+        constexpr uint32_t kThreadsPerBlock = 256;
+        uint32_t grid_y, grid_z;
+        if (ncoords_cur <= kMaxGridDim) {
+            grid_y = ncoords_cur;
+            grid_z = 1;
+        } else {
+            // Split across y and z dimensions
+            grid_y = kMaxGridDim;
+            grid_z = (ncoords_cur + kMaxGridDim - 1) / kMaxGridDim;
+
+            if (grid_z > kMaxGridDim) {
+                throw std::runtime_error(std::format(
+                    "ncoords_cur={} too large: exceeds 3D grid capacity ({})",
+                    ncoords_cur, kMaxGridDim * kMaxGridDim));
+            }
+        }
+        const dim3 block_dim(kThreadsPerBlock);
+        const dim3 grid_dim(nsegments, grid_y, grid_z);
+        cuda_utils::check_kernel_launch_params(grid_dim, block_dim,
+                                               shmem_bytes);
+        kernel_ffa_freq_iter_shared<<<grid_dim, block_dim, shmem_bytes,
+                                      stream>>>(fold_in, fold_out, coords,
+                                                ncoords_cur, ncoords_prev,
+                                                nsegments, nbins);
+        cuda_utils::check_last_cuda_error(
+            "FFA freq iter (shared) kernel launch failed");
+    } else { // Fallback: shared memory too large or nbins not enough
+        const auto total_work        = ncoords_cur * nsegments * nbins;
+        const auto threads_per_block = (total_work < 65536) ? 256 : 512;
+        const auto blocks_per_grid =
+            (total_work + threads_per_block - 1) / threads_per_block;
+        const dim3 block_dim(threads_per_block);
+        const dim3 grid_dim(blocks_per_grid);
+        cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
+        kernel_ffa_freq_iter<<<grid_dim, block_dim, 0, stream>>>(
+            fold_in, fold_out, coords, ncoords_cur, ncoords_prev, nsegments,
+            nbins);
+        cuda_utils::check_last_cuda_error("FFA freq iter kernel launch failed");
+    }
+    cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
+                                "cudaStreamSynchronize failed");
+}
+*/
 
 void ffa_complex_iter_cuda(const ComplexTypeCUDA* __restrict__ fold_in,
                            ComplexTypeCUDA* __restrict__ fold_out,

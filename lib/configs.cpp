@@ -30,6 +30,7 @@ public:
          std::optional<SizeType> bseg_brute,
          std::optional<SizeType> bseg_ffa,
          double snr_min,
+         SizeType max_passing_candidates,
          SizeType prune_poly_order,
          double p_orb_min,
          double m_c_max,
@@ -50,6 +51,7 @@ public:
           m_nbins_max(nbins_max),
           m_nbins_min_lossy_bf(nbins_min_lossy_bf),
           m_snr_min(snr_min),
+          m_max_passing_candidates(max_passing_candidates),
           m_prune_poly_order(prune_poly_order),
           m_p_orb_min(p_orb_min),
           m_m_c_max(m_c_max),
@@ -112,6 +114,7 @@ public:
     SizeType get_bseg_brute() const { return m_bseg_brute; }
     SizeType get_bseg_ffa() const { return m_bseg_ffa; }
     double get_snr_min() const { return m_snr_min; }
+    SizeType get_max_passing_candidates() const { return m_max_passing_candidates; }
     SizeType get_prune_poly_order() const { return m_prune_poly_order; }
     double get_p_orb_min() const { return m_p_orb_min; }
     double get_m_c_max() const { return m_m_c_max; }
@@ -187,6 +190,7 @@ public:
                 m_bseg_brute_explicit,
                 m_bseg_ffa_explicit,
                 m_snr_min,
+                m_max_passing_candidates,
                 m_prune_poly_order,
                 m_p_orb_min,
                 m_m_c_max,
@@ -213,6 +217,7 @@ private:
     SizeType m_bseg_brute;
     SizeType m_bseg_ffa;
     double m_snr_min;
+    SizeType m_max_passing_candidates;
     SizeType m_prune_poly_order;
     double m_p_orb_min;
     double m_m_c_max;
@@ -292,6 +297,7 @@ PulsarSearchConfig::PulsarSearchConfig(
     std::optional<SizeType> bseg_brute,
     std::optional<SizeType> bseg_ffa,
     double snr_min,
+    SizeType max_passing_candidates,
     SizeType prune_poly_order,
     double p_orb_min,
     double m_c_max,
@@ -314,6 +320,7 @@ PulsarSearchConfig::PulsarSearchConfig(
                                     bseg_brute,
                                     bseg_ffa,
                                     snr_min,
+                                    max_passing_candidates,
                                     prune_poly_order,
                                     p_orb_min,
                                     m_c_max,
@@ -388,6 +395,9 @@ SizeType PulsarSearchConfig::get_bseg_ffa() const noexcept {
 }
 double PulsarSearchConfig::get_snr_min() const noexcept {
     return m_impl->get_snr_min();
+}
+SizeType PulsarSearchConfig::get_max_passing_candidates() const noexcept {
+    return m_impl->get_max_passing_candidates();
 }
 SizeType PulsarSearchConfig::get_prune_poly_order() const noexcept {
     return m_impl->get_prune_poly_order();

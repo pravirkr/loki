@@ -530,6 +530,7 @@ template <SupportedFoldType FoldType> struct FFARegionStats<FoldType>::Impl {
     SizeType n_widths{};
     SizeType n_params{};
     SizeType n_samps{}; // ts_e.size()
+    SizeType m_max_passing_candidates{};
     bool use_gpu{};
 
     Impl(SizeType max_buffer_size,
@@ -538,6 +539,7 @@ template <SupportedFoldType FoldType> struct FFARegionStats<FoldType>::Impl {
          SizeType n_widths,
          SizeType n_params,
          SizeType n_samps,
+         SizeType max_passing_candidates,
          bool use_gpu)
         : max_buffer_size(max_buffer_size),
           max_coord_size(max_coord_size),
@@ -545,6 +547,7 @@ template <SupportedFoldType FoldType> struct FFARegionStats<FoldType>::Impl {
           n_widths(n_widths),
           n_params(n_params),
           n_samps(n_samps),
+          m_max_passing_candidates(max_passing_candidates),
           use_gpu(use_gpu) {}
 
     ~Impl()                      = default;
@@ -561,13 +564,10 @@ template <SupportedFoldType FoldType> struct FFARegionStats<FoldType>::Impl {
         }
     }
     SizeType get_max_scores_size() const noexcept {
-        return max_ncoords * n_widths;
+        return std::max(max_ncoords * n_widths, m_max_passing_candidates);
     }
     SizeType get_write_param_sets_size() const noexcept {
         return kFFAManagerWriteBatchSize * (n_params + 1); // includes width
-    }
-    SizeType get_write_scores_size() const noexcept {
-        return kFFAManagerWriteBatchSize;
     }
     float get_buffer_memory_usage() const noexcept {
         return static_cast<float>(2 * max_buffer_size * sizeof(FoldType)) /
@@ -586,8 +586,7 @@ template <SupportedFoldType FoldType> struct FFARegionStats<FoldType>::Impl {
         return static_cast<float>(
                    (get_write_param_sets_size() * sizeof(double)) +
                    (get_max_scores_size() * sizeof(uint32_t)) +
-                   (get_max_scores_size() * sizeof(float)) +
-                   (get_write_scores_size() * sizeof(float))) /
+                   (get_max_scores_size() * sizeof(float))) /
                static_cast<float>(1ULL << 30U);
     }
     float get_cpu_memory_usage() const noexcept {
@@ -598,7 +597,8 @@ template <SupportedFoldType FoldType> struct FFARegionStats<FoldType>::Impl {
     float get_device_memory_usage() const noexcept {
         // ts_e_d + ts_v_d + scores_d (widths_d is negligible)
         const float device_extra_gb =
-            ((2 * n_samps + get_max_scores_size()) * sizeof(float)) /
+            ((2 * n_samps + get_max_scores_size()) * sizeof(float) +
+             (get_max_scores_size() * sizeof(uint32_t))) /
             static_cast<float>(1ULL << 30U);
         // m_fold_d_time
         const float fold_d_time_gb = get_max_buffer_size_time() *
@@ -645,7 +645,7 @@ private:
     bool m_use_gpu;
 
     std::vector<search::PulsarSearchConfig> m_cfgs;
-    FFARegionStats<FoldType> m_stats{0, 0, 0, 0, 0, 0, m_use_gpu};
+    FFARegionStats<FoldType> m_stats{0, 0, 0, 0, 0, 0, 0, m_use_gpu};
     std::vector<FFAChunkStats> m_chunk_stats;
 
     double calculate_max_drift(const search::PulsarSearchConfig& cfg) const {
@@ -719,7 +719,7 @@ private:
         m_stats = FFARegionStats<FoldType>(
             max_buffer_size, max_coord_size, max_ncoords,
             m_base_cfg.get_n_scoring_widths(), m_base_cfg.get_nparams(),
-            m_base_cfg.get_nsamps(), m_use_gpu);
+            m_base_cfg.get_nsamps(), m_base_cfg.get_max_passing_candidates(), m_use_gpu);
 
         // Log summary statistics
         log_planning_summary();
@@ -765,6 +765,7 @@ private:
                 m_base_cfg.get_n_scoring_widths(),
                 m_base_cfg.get_nparams(),
                 m_base_cfg.get_nsamps(),
+                m_base_cfg.get_max_passing_candidates(),
                 m_use_gpu};
 
             if (min_stats.get_manager_memory_usage() > effective_limit_gb) {
@@ -821,6 +822,7 @@ private:
                     m_base_cfg.get_n_scoring_widths(),
                     m_base_cfg.get_nparams(),
                     m_base_cfg.get_nsamps(),
+                    m_base_cfg.get_max_passing_candidates(),
                     m_use_gpu};
                 if (sim_stats.get_manager_memory_usage() <=
                     effective_limit_gb) {
@@ -1114,6 +1116,7 @@ FFARegionStats<FoldType>::FFARegionStats(SizeType max_buffer_size,
                                          SizeType n_widths,
                                          SizeType n_params,
                                          SizeType n_samps,
+                                         SizeType max_passing_candidates,
                                          bool use_gpu)
     : m_impl(std::make_unique<Impl>(max_buffer_size,
                                     max_coord_size,
@@ -1121,6 +1124,7 @@ FFARegionStats<FoldType>::FFARegionStats(SizeType max_buffer_size,
                                     n_widths,
                                     n_params,
                                     n_samps,
+                                    max_passing_candidates,
                                     use_gpu)) {}
 template <SupportedFoldType FoldType>
 FFARegionStats<FoldType>::~FFARegionStats() = default;
@@ -1163,10 +1167,6 @@ SizeType FFARegionStats<FoldType>::get_max_scores_size() const noexcept {
 template <SupportedFoldType FoldType>
 SizeType FFARegionStats<FoldType>::get_write_param_sets_size() const noexcept {
     return m_impl->get_write_param_sets_size();
-}
-template <SupportedFoldType FoldType>
-SizeType FFARegionStats<FoldType>::get_write_scores_size() const noexcept {
-    return m_impl->get_write_scores_size();
 }
 template <SupportedFoldType FoldType>
 float FFARegionStats<FoldType>::get_buffer_memory_usage() const noexcept {

@@ -173,10 +173,10 @@ __global__ void kernel_snr_boxcar_warp(const float* __restrict__ folds,
 // Unified launch function template
 template <bool Is3D, OutputMode Mode>
 void snr_boxcar_cuda_impl_device(cuda::std::span<const float> folds,
+                                 cuda::std::span<const uint32_t> widths,
+                                 cuda::std::span<float> scores,
                                  SizeType nprofiles,
                                  SizeType nbins,
-                                 cuda::std::span<const SizeType> widths,
-                                 cuda::std::span<float> scores,
                                  float stdnoise,
                                  cudaStream_t stream) {
     static_assert(Mode == OutputMode::kMax || Mode == OutputMode::kPerWidth,
@@ -216,23 +216,23 @@ void snr_boxcar_cuda_impl_device(cuda::std::span<const float> folds,
 // Unified host wrapper template
 template <bool Is3D, OutputMode Mode>
 void snr_boxcar_cuda_impl(std::span<const float> folds,
-                          SizeType nprofiles,
-                          SizeType nbins,
                           std::span<const SizeType> widths,
                           std::span<float> scores,
+                          SizeType nprofiles,
+                          SizeType nbins,
                           float stdnoise,
                           int device_id) {
     static_assert(Mode == OutputMode::kMax || Mode == OutputMode::kPerWidth,
                   "Filter Mode not allowed");
     cuda_utils::CudaSetDeviceGuard device_guard(device_id);
     thrust::device_vector<float> folds_d(folds.begin(), folds.end());
-    thrust::device_vector<SizeType> widths_d(widths.begin(), widths.end());
+    thrust::device_vector<uint32_t> widths_d(widths.begin(), widths.end());
     thrust::device_vector<float> scores_d(scores.size());
 
     cudaStream_t stream = nullptr;
     snr_boxcar_cuda_impl_device<Is3D, Mode>(
-        cuda_utils::as_span(folds_d), nprofiles, nbins,
-        cuda_utils::as_span(widths_d), cuda_utils::as_span(scores_d), stdnoise,
+        cuda_utils::as_span(folds_d), cuda_utils::as_span(widths_d),
+        cuda_utils::as_span(scores_d), nprofiles, nbins, stdnoise,
         stream);
 
     thrust::copy(scores_d.begin(), scores_d.end(), scores.begin());
@@ -248,18 +248,18 @@ void snr_boxcar_2d_max_cuda(std::span<const float> folds,
                             float stdnoise,
                             int device_id) {
     snr_boxcar_cuda_impl<false, OutputMode::kMax>(
-        folds, nprofiles, nbins, widths, scores, stdnoise, device_id);
+        folds, widths, scores, nprofiles, nbins, stdnoise, device_id);
 }
 
 void snr_boxcar_2d_max_cuda_d(cuda::std::span<const float> folds,
-                              cuda::std::span<const SizeType> widths,
+                              cuda::std::span<const uint32_t> widths,
                               cuda::std::span<float> scores,
                               SizeType nprofiles,
                               SizeType nbins,
                               float stdnoise,
                               cudaStream_t stream) {
     snr_boxcar_cuda_impl_device<false, OutputMode::kMax>(
-        folds, nprofiles, nbins, widths, scores, stdnoise, stream);
+        folds, widths, scores, nprofiles, nbins, stdnoise, stream);
 }
 
 void snr_boxcar_3d_cuda(std::span<const float> folds,
@@ -269,17 +269,17 @@ void snr_boxcar_3d_cuda(std::span<const float> folds,
                         SizeType nbins,
                         int device_id) {
     snr_boxcar_cuda_impl<true, OutputMode::kPerWidth>(
-        folds, nprofiles, nbins, widths, scores, 1.0F, device_id);
+        folds, widths, scores, nprofiles, nbins, 1.0F, device_id);
 }
 
 void snr_boxcar_3d_cuda_d(cuda::std::span<const float> folds,
-                          cuda::std::span<const SizeType> widths,
+                          cuda::std::span<const uint32_t> widths,
                           cuda::std::span<float> scores,
                           SizeType nprofiles,
                           SizeType nbins,
                           cudaStream_t stream) {
     snr_boxcar_cuda_impl_device<true, OutputMode::kPerWidth>(
-        folds, nprofiles, nbins, widths, scores, 1.0F, stream);
+        folds, widths, scores, nprofiles, nbins, 1.0F, stream);
 }
 
 void snr_boxcar_3d_max_cuda(std::span<const float> folds,
@@ -289,23 +289,23 @@ void snr_boxcar_3d_max_cuda(std::span<const float> folds,
                             SizeType nbins,
                             int device_id) {
     snr_boxcar_cuda_impl<true, OutputMode::kMax>(
-        folds, nprofiles, nbins, widths, scores, 1.0F, device_id);
+        folds, widths, scores, nprofiles, nbins, 1.0F, device_id);
 }
 
 void snr_boxcar_3d_max_cuda_d(cuda::std::span<const float> folds,
-                              cuda::std::span<const SizeType> widths,
+                              cuda::std::span<const uint32_t> widths,
                               cuda::std::span<float> scores,
                               SizeType nprofiles,
                               SizeType nbins,
                               cudaStream_t stream) {
     snr_boxcar_cuda_impl_device<true, OutputMode::kMax>(
-        folds, nprofiles, nbins, widths, scores, 1.0F, stream);
+        folds, widths, scores, nprofiles, nbins, 1.0F, stream);
 }
 
 SizeType score_and_filter_cuda_d(cuda::std::span<const float> folds,
-                                 cuda::std::span<const SizeType> widths,
+                                 cuda::std::span<const uint32_t> widths,
                                  cuda::std::span<float> scores,
-                                 cuda::std::span<SizeType> indices_filtered,
+                                 cuda::std::span<uint32_t> indices_filtered,
                                  float threshold,
                                  SizeType nprofiles,
                                  SizeType nbins,
@@ -349,9 +349,9 @@ SizeType score_and_filter_cuda_d(cuda::std::span<const float> folds,
 }
 
 SizeType score_and_filter_max_cuda_d(cuda::std::span<const float> folds,
-                                     cuda::std::span<const SizeType> widths,
+                                     cuda::std::span<const uint32_t> widths,
                                      cuda::std::span<float> scores,
-                                     cuda::std::span<SizeType> indices_filtered,
+                                     cuda::std::span<uint32_t> indices_filtered,
                                      float threshold,
                                      SizeType nprofiles,
                                      SizeType nbins,

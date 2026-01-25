@@ -176,7 +176,7 @@ public:
         const auto nfft = fold_size_time / m_cfg.get_nbins();
         utils::irfft_batch(
             std::span(ws->fold_internal.data(), fold_size_fourier),
-            std::span(fold.data(), fold_size_time), static_cast<int>(nfft),
+            fold.first(fold_size_time), static_cast<int>(nfft),
             static_cast<int>(m_cfg.get_nbins()), m_nthreads);
     }
 

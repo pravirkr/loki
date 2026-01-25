@@ -221,6 +221,31 @@ generate_bp_poly_taylor(std::span<const std::vector<double>> param_arr,
 
 #ifdef LOKI_ENABLE_CUDA
 
+void ffa_taylor_resolve_freq_cuda(
+    cuda::std::span<const double> param_arr_cur_flat,
+    cuda::std::span<const double> param_arr_prev_flat,
+    cuda::std::span<const uint32_t> param_arr_cur_count,
+    cuda::std::span<const uint32_t> param_arr_prev_count,
+    cuda::std::span<uint32_t> pindex_prev_flat_batch,
+    cuda::std::span<float> relative_phase_batch,
+    SizeType ffa_level,
+    double tseg_brute,
+    SizeType nbins,
+    cudaStream_t stream);
+
+void ffa_taylor_resolve_poly_cuda(
+    cuda::std::span<const double> param_arr_cur_flat,
+    cuda::std::span<const double> param_arr_prev_flat,
+    cuda::std::span<const uint32_t> param_arr_cur_count,
+    cuda::std::span<const uint32_t> param_arr_prev_count,
+    cuda::std::span<uint32_t> pindex_prev_flat_batch,
+    cuda::std::span<float> relative_phase_batch,
+    SizeType ffa_level,
+    SizeType latter,
+    double tseg_brute,
+    SizeType nbins,
+    cudaStream_t stream);
+
 std::tuple<SizeType, SizeType> poly_taylor_branch_and_validate_cuda(
     cuda::std::span<const double> leaves_tree,
     std::pair<double, double> coord_cur,

@@ -165,26 +165,30 @@ public:
         }
         // Copy input data to device
         cudaStream_t stream = nullptr;
-        cudaMemcpyAsync(thrust::raw_pointer_cast(m_ts_e_d.data()), ts_e.data(),
-                        ts_e.size() * sizeof(float), cudaMemcpyHostToDevice,
-                        stream);
-        cuda_utils::check_last_cuda_error("cudaMemcpyAsync failed");
-        cudaMemcpyAsync(thrust::raw_pointer_cast(m_ts_v_d.data()), ts_v.data(),
-                        ts_v.size() * sizeof(float), cudaMemcpyHostToDevice,
-                        stream);
-        cuda_utils::check_last_cuda_error("cudaMemcpyAsync failed");
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(thrust::raw_pointer_cast(m_ts_e_d.data()),
+                            ts_e.data(), ts_e.size() * sizeof(float),
+                            cudaMemcpyHostToDevice, stream),
+            "cudaMemcpyAsync ts_e failed");
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(thrust::raw_pointer_cast(m_ts_v_d.data()),
+                            ts_v.data(), ts_v.size() * sizeof(float),
+                            cudaMemcpyHostToDevice, stream),
+            "cudaMemcpyAsync ts_v failed");
         // Execute FFA on device using persistent buffers
         execute_d(cuda_utils::as_span(m_ts_e_d), cuda_utils::as_span(m_ts_v_d),
                   cuda_utils::as_span(m_fold_d), stream);
 
         // Copy result back to host
-        cudaMemcpyAsync(fold.data(), thrust::raw_pointer_cast(m_fold_d.data()),
-                        fold.size() * sizeof(DeviceFoldType),
-                        cudaMemcpyDeviceToHost, stream);
-        cuda_utils::check_last_cuda_error("cudaMemcpyAsync failed");
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(fold.data(),
+                            thrust::raw_pointer_cast(m_fold_d.data()),
+                            fold.size() * sizeof(DeviceFoldType),
+                            cudaMemcpyDeviceToHost, stream),
+            "cudaMemcpyAsync fold failed");
         // Synchronize stream before returning to host
-        cudaStreamSynchronize(stream);
-        cuda_utils::check_last_cuda_error("cudaStreamSynchronize failed");
+        cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
+                                    "cudaStreamSynchronize failed");
     }
 
     void execute_h(std::span<const float> ts_e,
@@ -208,21 +212,23 @@ public:
         }
         // Copy input data to device
         cudaStream_t stream = nullptr;
-        cudaMemcpyAsync(thrust::raw_pointer_cast(m_ts_e_d.data()), ts_e.data(),
-                        ts_e.size() * sizeof(float), cudaMemcpyHostToDevice,
-                        stream);
-        cuda_utils::check_last_cuda_error("cudaMemcpyAsync failed");
-        cudaMemcpyAsync(thrust::raw_pointer_cast(m_ts_v_d.data()), ts_v.data(),
-                        ts_v.size() * sizeof(float), cudaMemcpyHostToDevice,
-                        stream);
-        cuda_utils::check_last_cuda_error("cudaMemcpyAsync failed");
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(thrust::raw_pointer_cast(m_ts_e_d.data()),
+                            ts_e.data(), ts_e.size() * sizeof(float),
+                            cudaMemcpyHostToDevice, stream),
+            "cudaMemcpyAsync ts_e failed");
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(thrust::raw_pointer_cast(m_ts_v_d.data()),
+                            ts_v.data(), ts_v.size() * sizeof(float),
+                            cudaMemcpyHostToDevice, stream),
+            "cudaMemcpyAsync ts_v failed");
         // Execute FFA on device using persistent buffers
         execute_d(cuda_utils::as_span(m_ts_e_d), cuda_utils::as_span(m_ts_v_d),
                   fold_d, stream);
 
         // Synchronize stream before returning to host
-        cudaStreamSynchronize(stream);
-        cuda_utils::check_last_cuda_error("cudaStreamSynchronize failed");
+        cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
+                                    "cudaStreamSynchronize failed");
     }
 
     void execute_d(cuda::std::span<const float> ts_e_d,
@@ -281,26 +287,29 @@ public:
         }
         // Copy input data to device
         cudaStream_t stream = nullptr;
-        cudaMemcpyAsync(thrust::raw_pointer_cast(m_ts_e_d.data()), ts_e.data(),
-                        ts_e.size() * sizeof(float), cudaMemcpyHostToDevice,
-                        stream);
-        cuda_utils::check_last_cuda_error("cudaMemcpyAsync failed");
-        cudaMemcpyAsync(thrust::raw_pointer_cast(m_ts_v_d.data()), ts_v.data(),
-                        ts_v.size() * sizeof(float), cudaMemcpyHostToDevice,
-                        stream);
-        cuda_utils::check_last_cuda_error("cudaMemcpyAsync failed");
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(thrust::raw_pointer_cast(m_ts_e_d.data()),
+                            ts_e.data(), ts_e.size() * sizeof(float),
+                            cudaMemcpyHostToDevice, stream),
+            "cudaMemcpyAsync ts_e failed");
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(thrust::raw_pointer_cast(m_ts_v_d.data()),
+                            ts_v.data(), ts_v.size() * sizeof(float),
+                            cudaMemcpyHostToDevice, stream),
+            "cudaMemcpyAsync ts_v failed");
         // Execute FFA on device using persistent buffers
         execute_d(cuda_utils::as_span(m_ts_e_d), cuda_utils::as_span(m_ts_v_d),
                   cuda_utils::as_span(m_fold_d_time), stream);
 
         // Copy result back to host
-        cudaMemcpyAsync(
-            fold.data(), thrust::raw_pointer_cast(m_fold_d_time.data()),
-            fold.size() * sizeof(float), cudaMemcpyDeviceToHost, stream);
-        cuda_utils::check_last_cuda_error("cudaMemcpyAsync failed");
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(
+                fold.data(), thrust::raw_pointer_cast(m_fold_d_time.data()),
+                fold.size() * sizeof(float), cudaMemcpyDeviceToHost, stream),
+            "cudaMemcpyAsync fold failed");
         // Synchronize stream before returning to host
-        cudaStreamSynchronize(stream);
-        cuda_utils::check_last_cuda_error("cudaStreamSynchronize failed");
+        cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
+                                    "cudaStreamSynchronize failed");
     }
 
     void execute_d(cuda::std::span<const float> ts_e_d,
@@ -345,7 +354,7 @@ public:
         const auto nfft = fold_size_time / m_cfg.get_nbins();
         utils::irfft_batch_cuda(
             cuda_utils::as_span(ws->fold_internal_d, fold_size_fourier),
-            cuda_utils::as_span(fold_d, fold_size_time), static_cast<int>(nfft),
+            fold_d.first(fold_size_time), static_cast<int>(nfft),
             static_cast<int>(m_cfg.get_nbins()), stream);
     }
 

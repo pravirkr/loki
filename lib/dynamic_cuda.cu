@@ -126,6 +126,8 @@ SizeType BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::score_and_filter(
     }
 }
 
+/*
+
 // Intermediate implementation for Taylor basis
 template <SupportedFoldTypeCUDA FoldTypeCUDA, typename Derived>
 void BaseTaylorPruneDPFunctsCUDA<FoldTypeCUDA, Derived>::seed(
@@ -151,6 +153,7 @@ void BaseTaylorPruneDPFunctsCUDA<FoldTypeCUDA, Derived>::seed(
                                         dparams, poly_order, nbins, tree_leaves,
                                         tree_folds, tree_scores, ncoords);
 }
+*/
 
 // Specialized implementation for Polynomial searches in Taylor Basis
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
