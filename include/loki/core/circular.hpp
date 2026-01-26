@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "loki/common/types.hpp"
+#include "loki/utils/workspace.hpp"
 
 namespace loki::core {
 
@@ -43,9 +44,7 @@ circ_taylor_branch_batch(std::span<const double> leaves_tree,
                          const std::vector<ParamLimitType>& param_limits,
                          SizeType branch_max,
                          double minimum_snap_cells,
-                         std::span<double> scratch_params,
-                         std::span<double> scratch_dparams,
-                         std::span<SizeType> scratch_counts);
+                         utils::BranchingWorkspaceView ws);
 
 SizeType circ_taylor_validate_batch(std::span<double> leaves_branch,
                                     std::span<SizeType> leaves_origins,

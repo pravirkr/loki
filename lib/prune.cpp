@@ -20,6 +20,7 @@
 #include "loki/psr_utils.hpp"
 #include "loki/timing.hpp"
 #include "loki/utils.hpp"
+#include "loki/utils/workspace.hpp"
 #include "loki/utils/world_tree.hpp"
 
 namespace loki::algorithms {
@@ -275,11 +276,6 @@ template <SupportedFoldType FoldType> struct PruningWorkspace {
     std::vector<SizeType> branched_param_idx;
     std::vector<float> branched_phase_shift;
 
-    // Branching workspace
-    std::vector<double> scratch_params;
-    std::vector<double> scratch_dparams;
-    std::vector<SizeType> scratch_counts;
-
     PruningWorkspace(SizeType batch_size,
                      SizeType branch_max,
                      SizeType nparams,
@@ -296,10 +292,7 @@ template <SupportedFoldType FoldType> struct PruningWorkspace {
           branched_scores(max_branched_leaves),
           branched_indices(max_branched_leaves),
           branched_param_idx(max_branched_leaves),
-          branched_phase_shift(max_branched_leaves),
-          scratch_params(max_branched_leaves * nparams),
-          scratch_dparams(batch_size * nparams),
-          scratch_counts(batch_size * nparams) {}
+          branched_phase_shift(max_branched_leaves) {}
 
     // Call this after filling branched_scores and branched_indices
     void filter_batch(SizeType n_leaves_passing) noexcept {
@@ -322,10 +315,7 @@ template <SupportedFoldType FoldType> struct PruningWorkspace {
             (branched_scores.size() * sizeof(float)) +
             (branched_indices.size() * sizeof(SizeType)) +
             (branched_param_idx.size() * sizeof(SizeType)) +
-            (branched_phase_shift.size() * sizeof(float)) +
-            (scratch_params.size() * sizeof(double)) +
-            (scratch_dparams.size() * sizeof(double)) +
-            (scratch_counts.size() * sizeof(SizeType));
+            (branched_phase_shift.size() * sizeof(float));
         return static_cast<float>(total_memory) /
                static_cast<float>(1ULL << 30U);
     }
@@ -372,6 +362,9 @@ public:
                 m_cfg.get_nbins());
         }
 
+        m_branching_workspace = std::make_unique<utils::BranchingWorkspace>(
+            m_batch_size, m_branch_max, m_cfg.get_nparams());
+
         // Allocate buffers for seeding the world tree and scoring
         const auto ncoords_ffa = m_ffa_plan.get_ncoords().back();
         m_seed_leaves.resize(ncoords_ffa * m_world_tree->get_leaves_stride());
@@ -386,7 +379,8 @@ public:
 
     SizeType get_memory_usage() const noexcept {
         return m_pruning_workspace->get_memory_usage() +
-               m_world_tree->get_memory_usage();
+               m_world_tree->get_memory_usage() +
+               m_branching_workspace->get_memory_usage();
     }
 
     void execute(std::span<const FoldType> ffa_fold,
@@ -492,6 +486,7 @@ private:
     // Active, bounded container of hierarchical search candidates
     std::unique_ptr<utils::WorldTree<FoldType>> m_world_tree;
     std::unique_ptr<PruningWorkspace<FoldType>> m_pruning_workspace;
+    std::unique_ptr<utils::BranchingWorkspace> m_branching_workspace;
 
     // Buffers for seeding the world tree and scoring
     std::vector<double> m_seed_leaves;
@@ -519,8 +514,8 @@ private:
             ffa_fold, m_snail_scheme->get_ref_idx());
         const auto coord_init = m_snail_scheme->get_coord(m_prune_level);
         const auto n_leaves   = m_ffa_plan.get_ncoords().back();
-        m_prune_funcs->seed(fold_segment, coord_init, m_seed_leaves,
-                            m_seed_scores);
+        m_prune_funcs->seed(fold_segment, m_seed_leaves, m_seed_scores,
+                            coord_init);
         // Initialize the WorldTree with the generated data
         m_world_tree->add_initial(m_seed_leaves, fold_segment, m_seed_scores,
                                   n_leaves);
@@ -620,6 +615,7 @@ private:
         const auto n_branches = m_world_tree->get_size_old();
         const auto batch_size =
             std::max(1UL, std::min(m_batch_size, n_branches));
+        auto branch_ws = m_branching_workspace->get_view();
 
         timing::SimpleTimer timer;
 
@@ -644,12 +640,9 @@ private:
             // Branch
             timer.start();
             const auto n_leaves_batch = m_prune_funcs->branch(
-                leaves_tree_span, coord_cur, coord_prev,
-                m_pruning_workspace->branched_leaves,
-                m_pruning_workspace->branched_indices, current_batch_size,
-                m_pruning_workspace->scratch_params,
-                m_pruning_workspace->scratch_dparams,
-                m_pruning_workspace->scratch_counts);
+                leaves_tree_span, m_pruning_workspace->branched_leaves,
+                m_pruning_workspace->branched_indices, coord_cur, coord_prev,
+                current_batch_size, branch_ws);
             stats.batch_timers["branch"] += timer.stop();
             stats.n_leaves += n_leaves_batch;
             if (n_leaves_batch == 0) {
@@ -677,9 +670,9 @@ private:
             // Resolve
             timer.start();
             m_prune_funcs->resolve(m_pruning_workspace->branched_leaves,
-                                   coord_add, coord_cur, coord_init,
                                    m_pruning_workspace->branched_param_idx,
                                    m_pruning_workspace->branched_phase_shift,
+                                   coord_add, coord_cur, coord_init,
                                    n_leaves_after_validation);
             stats.batch_timers["resolve"] += timer.stop();
 

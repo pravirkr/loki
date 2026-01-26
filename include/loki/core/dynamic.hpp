@@ -5,10 +5,10 @@
 #include <vector>
 
 #include "loki/common/types.hpp"
-#include "loki/core/taylor.hpp"
 #include "loki/detection/score.hpp"
 #include "loki/search/configs.hpp"
 #include "loki/utils/fft.hpp"
+#include "loki/utils/workspace.hpp"
 
 #ifdef LOKI_ENABLE_CUDA
 #include <cuda/std/span>
@@ -36,19 +36,17 @@ public:
                  SizeType seg_idx) const = 0;
 
     virtual void seed(std::span<const FoldType> fold_segment,
-                      std::pair<double, double> coord_init,
                       std::span<double> seed_leaves,
-                      std::span<float> seed_scores) = 0;
+                      std::span<float> seed_scores,
+                      std::pair<double, double> coord_init) = 0;
 
     virtual SizeType branch(std::span<const double> leaves_tree,
-                            std::pair<double, double> coord_cur,
-                            std::pair<double, double> coord_prev,
                             std::span<double> leaves_branch,
                             std::span<SizeType> leaves_origins,
+                            std::pair<double, double> coord_cur,
+                            std::pair<double, double> coord_prev,
                             SizeType n_leaves,
-                            std::span<double> scratch_params,
-                            std::span<double> scratch_dparams,
-                            std::span<SizeType> scratch_counts) const = 0;
+                            utils::BranchingWorkspaceView ws) const = 0;
 
     virtual SizeType validate(std::span<double> leaves_branch,
                               std::span<SizeType> leaves_origins,
@@ -59,11 +57,11 @@ public:
     get_validation_params(std::pair<double, double> coord_add) const = 0;
 
     virtual void resolve(std::span<const double> leaves_branch,
+                         std::span<SizeType> param_indices,
+                         std::span<float> phase_shift,
                          std::pair<double, double> coord_add,
                          std::pair<double, double> coord_cur,
                          std::pair<double, double> coord_init,
-                         std::span<SizeType> param_indices,
-                         std::span<float> phase_shift,
                          SizeType n_leaves) const = 0;
 
     virtual void shift_add(std::span<const FoldType> folds_tree,
@@ -170,9 +168,9 @@ protected:
 public:
     // Common seed implementation for all Taylor variants
     void seed(std::span<const FoldType> fold_segment,
-              std::pair<double, double> coord_init,
               std::span<double> seed_leaves,
-              std::span<float> seed_scores) override;
+              std::span<float> seed_scores,
+              std::pair<double, double> coord_init) override;
 };
 
 // Specialized implementation for Polynomial searches in Taylor Basis
@@ -184,52 +182,6 @@ private:
     using Base =
         BaseTaylorPruneDPFuncts<FoldType, PrunePolyTaylorDPFuncts<FoldType>>;
 
-    // Function pointers for branching different polynomial orders
-    using PolyBranchFunc = SizeType (*)(std::span<const double>,
-                                        std::pair<double, double>,
-                                        std::span<double>,
-                                        std::span<SizeType>,
-                                        SizeType,
-                                        SizeType,
-                                        double,
-                                        const std::vector<ParamLimitType>&,
-                                        SizeType,
-                                        std::span<double>,
-                                        std::span<double>,
-                                        std::span<SizeType>);
-    static constexpr std::array<PolyBranchFunc, 3> kPolyBranchFuncs = {
-        poly_taylor_branch_accel_batch, // nparams == 2
-        poly_taylor_branch_jerk_batch,  // nparams == 3
-        poly_taylor_branch_snap_batch,  // nparams == 4
-    };
-    // Function pointers for resolving different polynomial orders
-    using PolyResolveFunc = void (*)(std::span<const double>,
-                                     std::pair<double, double>,
-                                     std::pair<double, double>,
-                                     std::pair<double, double>,
-                                     std::span<const std::vector<double>>,
-                                     std::span<SizeType>,
-                                     std::span<float>,
-                                     SizeType,
-                                     SizeType);
-    static constexpr std::array<PolyResolveFunc, 3> kPolyResolveFuncs = {
-        poly_taylor_resolve_accel_batch, // nparams == 2
-        poly_taylor_resolve_jerk_batch,  // nparams == 3
-        poly_taylor_resolve_snap_batch,  // nparams == 4
-    };
-
-    // Function pointers for Transforming different polynomial orders
-    using PolyTransformFunc = void (*)(std::span<double>,
-                                       std::pair<double, double>,
-                                       std::pair<double, double>,
-                                       SizeType,
-                                       bool);
-    static constexpr std::array<PolyTransformFunc, 3> kPolyTransformFuncs = {
-        poly_taylor_transform_accel_batch, // nparams == 2
-        poly_taylor_transform_jerk_batch,  // nparams == 3
-        poly_taylor_transform_snap_batch,  // nparams == 4
-    };
-
 public:
     PrunePolyTaylorDPFuncts(std::span<const std::vector<double>> param_arr,
                             std::span<const double> dparams,
@@ -240,21 +192,19 @@ public:
                             SizeType branch_max);
 
     SizeType branch(std::span<const double> leaves_tree,
-                    std::pair<double, double> coord_cur,
-                    std::pair<double, double> coord_prev,
                     std::span<double> leaves_branch,
                     std::span<SizeType> leaves_origins,
+                    std::pair<double, double> coord_cur,
+                    std::pair<double, double> coord_prev,
                     SizeType n_leaves,
-                    std::span<double> scratch_params,
-                    std::span<double> scratch_dparams,
-                    std::span<SizeType> scratch_counts) const override;
+                    utils::BranchingWorkspaceView ws) const override;
 
     void resolve(std::span<const double> leaves_branch,
+                 std::span<SizeType> param_indices,
+                 std::span<float> phase_shift,
                  std::pair<double, double> coord_add,
                  std::pair<double, double> coord_cur,
                  std::pair<double, double> coord_init,
-                 std::span<SizeType> param_indices,
-                 std::span<float> phase_shift,
                  SizeType n_leaves) const override;
 
     void transform(std::span<double> leaves_tree,
@@ -287,14 +237,12 @@ public:
                             SizeType branch_max);
 
     SizeType branch(std::span<const double> leaves_tree,
-                    std::pair<double, double> coord_cur,
-                    std::pair<double, double> coord_prev,
                     std::span<double> leaves_branch,
                     std::span<SizeType> leaves_origins,
+                    std::pair<double, double> coord_cur,
+                    std::pair<double, double> coord_prev,
                     SizeType n_leaves,
-                    std::span<double> scratch_params,
-                    std::span<double> scratch_dparams,
-                    std::span<SizeType> scratch_counts) const override;
+                    utils::BranchingWorkspaceView ws) const override;
 
     SizeType validate(std::span<double> leaves_branch,
                       std::span<SizeType> leaves_origins,
@@ -302,11 +250,11 @@ public:
                       SizeType n_leaves) const override;
 
     void resolve(std::span<const double> leaves_branch,
+                 std::span<SizeType> param_indices,
+                 std::span<float> phase_shift,
                  std::pair<double, double> coord_add,
                  std::pair<double, double> coord_cur,
                  std::pair<double, double> coord_init,
-                 std::span<SizeType> param_indices,
-                 std::span<float> phase_shift,
                  SizeType n_leaves) const override;
 
     void transform(std::span<double> leaves_tree,
@@ -357,36 +305,39 @@ public:
                  SizeType seg_idx) const = 0;
 
     virtual void seed(cuda::std::span<const FoldTypeCUDA> fold_segment,
-                      std::pair<double, double> coord_init,
                       cuda::std::span<double> seed_leaves,
                       cuda::std::span<float> seed_scores,
+                      std::pair<double, double> coord_init,
                       cudaStream_t stream) = 0;
 
-    virtual std::tuple<SizeType, SizeType>
-    branch_and_validate(cuda::std::span<const double> leaves_tree,
-                        std::pair<double, double> coord_cur,
-                        std::pair<double, double> coord_prev,
-                        cuda::std::span<double> leaves_branch,
-                        cuda::std::span<SizeType> leaves_origins,
-                        SizeType n_leaves,
-                        cuda::std::span<double> scratch_params,
-                        cuda::std::span<double> scratch_dparams,
-                        cuda::std::span<SizeType> scratch_counts,
-                        cudaStream_t stream) const = 0;
+    virtual SizeType branch(cuda::std::span<const double> leaves_tree,
+                            cuda::std::span<double> leaves_branch,
+                            cuda::std::span<uint32_t> leaves_origins,
+                            std::pair<double, double> coord_cur,
+                            std::pair<double, double> coord_prev,
+                            SizeType n_leaves,
+                            utils::BranchingWorkspaceCUDAView ws,
+                            cudaStream_t stream) const = 0;
+
+    virtual SizeType validate(cuda::std::span<double> leaves_branch,
+                              cuda::std::span<uint32_t> leaves_origins,
+                              std::pair<double, double> coord_cur,
+                              SizeType n_leaves,
+                              cudaStream_t stream) const = 0;
 
     virtual void resolve(cuda::std::span<const double> leaves_branch,
+                         cuda::std::span<uint32_t> param_indices,
+                         cuda::std::span<float> phase_shift,
                          std::pair<double, double> coord_add,
                          std::pair<double, double> coord_cur,
                          std::pair<double, double> coord_init,
-                         cuda::std::span<SizeType> param_indices,
-                         cuda::std::span<float> phase_shift,
                          SizeType n_leaves,
                          cudaStream_t stream) const = 0;
 
     virtual void shift_add(cuda::std::span<const FoldTypeCUDA> folds_tree,
-                           cuda::std::span<const SizeType> indices_tree,
+                           cuda::std::span<const uint32_t> indices_tree,
                            cuda::std::span<const FoldTypeCUDA> folds_ffa,
-                           cuda::std::span<const SizeType> indices_ffa,
+                           cuda::std::span<const uint32_t> indices_ffa,
                            cuda::std::span<const float> phase_shift,
                            cuda::std::span<FoldTypeCUDA> folds_out,
                            SizeType n_leaves,
@@ -395,7 +346,7 @@ public:
     virtual SizeType
     score_and_filter(cuda::std::span<const FoldTypeCUDA> folds_tree,
                      cuda::std::span<float> scores_tree,
-                     cuda::std::span<SizeType> indices_tree,
+                     cuda::std::span<uint32_t> indices_tree,
                      float threshold,
                      SizeType n_leaves,
                      cudaStream_t stream) noexcept = 0;
@@ -426,7 +377,8 @@ protected:
 
     thrust::device_vector<double> m_accel_grid_d;
     thrust::device_vector<float> m_freq_grid_d;
-    thrust::device_vector<SizeType> m_boxcar_widths_d;
+    thrust::device_vector<uint32_t> m_boxcar_widths_d;
+    thrust::device_vector<ParamLimitTypeCUDA> m_param_limits_d;
 
     // Buffer for ComplexType irfft transform
     thrust::device_vector<float> m_scratch_folds_d;
@@ -447,10 +399,16 @@ public:
     load_segment(cuda::std::span<const FoldTypeCUDA> ffa_fold,
                  SizeType seg_idx) const override;
 
+    SizeType validate(cuda::std::span<double> leaves_branch,
+                      cuda::std::span<uint32_t> leaves_origins,
+                      std::pair<double, double> coord_cur,
+                      SizeType n_leaves,
+                      cudaStream_t stream) const override;
+
     void shift_add(cuda::std::span<const FoldTypeCUDA> folds_tree,
-                   cuda::std::span<const SizeType> indices_tree,
+                   cuda::std::span<const uint32_t> indices_tree,
                    cuda::std::span<const FoldTypeCUDA> folds_ffa,
-                   cuda::std::span<const SizeType> indices_ffa,
+                   cuda::std::span<const uint32_t> indices_ffa,
                    cuda::std::span<const float> phase_shift,
                    cuda::std::span<FoldTypeCUDA> folds_out,
                    SizeType n_leaves,
@@ -458,7 +416,7 @@ public:
 
     SizeType score_and_filter(cuda::std::span<const FoldTypeCUDA> folds_tree,
                               cuda::std::span<float> scores_tree,
-                              cuda::std::span<SizeType> indices_tree,
+                              cuda::std::span<uint32_t> indices_tree,
                               float threshold,
                               SizeType n_leaves,
                               cudaStream_t stream) noexcept override;
@@ -477,9 +435,9 @@ protected:
 public:
     // Common seed implementation for all Taylor variants
     void seed(cuda::std::span<const FoldTypeCUDA> fold_segment,
-              std::pair<double, double> coord_init,
               cuda::std::span<double> seed_leaves,
               cuda::std::span<float> seed_scores,
+              std::pair<double, double> coord_init,
               cudaStream_t stream) override;
 };
 
@@ -503,24 +461,21 @@ public:
                                 SizeType batch_size,
                                 SizeType branch_max);
 
-    std::tuple<SizeType, SizeType>
-    branch_and_validate(cuda::std::span<const double> leaves_tree,
-                        std::pair<double, double> coord_cur,
-                        std::pair<double, double> coord_prev,
-                        cuda::std::span<double> leaves_branch,
-                        cuda::std::span<SizeType> leaves_origins,
-                        SizeType n_leaves,
-                        cuda::std::span<double> scratch_params,
-                        cuda::std::span<double> scratch_dparams,
-                        cuda::std::span<SizeType> scratch_counts,
-                        cudaStream_t stream) const override;
+    SizeType branch(cuda::std::span<const double> leaves_tree,
+                    cuda::std::span<double> leaves_branch,
+                    cuda::std::span<uint32_t> leaves_origins,
+                    std::pair<double, double> coord_cur,
+                    std::pair<double, double> coord_prev,
+                    SizeType n_leaves,
+                    utils::BranchingWorkspaceCUDAView ws,
+                    cudaStream_t stream) const override;
 
     void resolve(cuda::std::span<const double> leaves_branch,
+                 cuda::std::span<uint32_t> param_indices,
+                 cuda::std::span<float> phase_shift,
                  std::pair<double, double> coord_add,
                  std::pair<double, double> coord_cur,
                  std::pair<double, double> coord_init,
-                 cuda::std::span<SizeType> param_indices,
-                 cuda::std::span<float> phase_shift,
                  SizeType n_leaves,
                  cudaStream_t stream) const override;
 

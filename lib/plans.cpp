@@ -88,20 +88,6 @@ struct FFAPlanBase::Impl {
             "resolve_coordinates only supports nparams<=5. Larger values are "
             "not supported and advised.");
 
-        using ResolveFunc =
-            void (*)(std::span<const std::vector<double>>,
-                     std::span<const std::vector<double>>, std::span<uint32_t>,
-                     std::span<float>, SizeType, SizeType, double, SizeType);
-
-        constexpr std::array<ResolveFunc, 4> kResolveFuncs = {
-            core::ffa_taylor_resolve_accel_batch,   // nparams == 2
-            core::ffa_taylor_resolve_jerk_batch,    // nparams == 3
-            core::ffa_taylor_resolve_snap_batch,    // nparams == 4
-            core::ffa_taylor_resolve_crackle_batch, // nparams == 5
-        };
-
-        const auto resolve_func = kResolveFuncs[n_params - 2];
-
         // Resolve the params for the FFA plan
         const auto ncoords_max = std::ranges::max(ncoords);
         std::vector<float> relative_phase_batch(ncoords_max);
@@ -121,9 +107,10 @@ struct FFAPlanBase::Impl {
                 std::span(pindex_prev_flat).first(ncoords_cur);
 
             // Tail coordinates
-            resolve_func(params[i_level], params[i_level - 1],
-                         pindex_prev_flat_span, relative_phase_batch_span,
-                         i_level, 0, m_cfg.get_tseg_brute(), m_cfg.get_nbins());
+            core::ffa_taylor_resolve_poly_batch(
+                params[i_level], params[i_level - 1], pindex_prev_flat_span,
+                relative_phase_batch_span, i_level, 0, m_cfg.get_tseg_brute(),
+                m_cfg.get_nbins(), n_params);
             for (SizeType icoord = 0; icoord < ncoords_cur; ++icoord) {
                 const auto icoord_cur         = ncoords_offset + icoord;
                 coords[icoord_cur].i_tail     = pindex_prev_flat[icoord];
@@ -131,9 +118,10 @@ struct FFAPlanBase::Impl {
             }
 
             // Head coordinates
-            resolve_func(params[i_level], params[i_level - 1],
-                         pindex_prev_flat_span, relative_phase_batch_span,
-                         i_level, 1, m_cfg.get_tseg_brute(), m_cfg.get_nbins());
+            core::ffa_taylor_resolve_poly_batch(
+                params[i_level], params[i_level - 1], pindex_prev_flat_span,
+                relative_phase_batch_span, i_level, 1, m_cfg.get_tseg_brute(),
+                m_cfg.get_nbins(), n_params);
             for (SizeType icoord = 0; icoord < ncoords_cur; ++icoord) {
                 const auto icoord_cur         = ncoords_offset + icoord;
                 coords[icoord_cur].i_head     = pindex_prev_flat[icoord];
@@ -179,10 +167,10 @@ struct FFAPlanBase::Impl {
                 std::span(relative_phase_batch).first(ncoords_cur);
             auto pindex_prev_flat_span =
                 std::span(pindex_prev_flat).first(ncoords_cur);
-            core::ffa_taylor_resolve_freq_batch(
+            core::ffa_taylor_resolve_poly_batch(
                 params[i_level], params[i_level - 1], pindex_prev_flat_span,
-                relative_phase_batch_span, i_level, m_cfg.get_tseg_brute(),
-                m_cfg.get_nbins());
+                relative_phase_batch_span, i_level, 0, m_cfg.get_tseg_brute(),
+                m_cfg.get_nbins(), n_params);
             // Generate coordinates for the head
             for (SizeType icoord = 0; icoord < ncoords_cur; ++icoord) {
                 const auto icoord_cur         = ncoords_offset + icoord;
@@ -251,8 +239,56 @@ struct FFAPlanBase::Impl {
             poly_basis));
     }
 
+    std::vector<double> get_params_flat() const noexcept {
+        SizeType total = 0;
+        for (const auto& level : params) {
+            for (const auto& p : level) {
+                total += p.size();
+            }
+        }
+        std::vector<double> params_flat;
+        params_flat.reserve(total);
+        for (const auto& level : params) {
+            for (const auto& p : level) {
+                params_flat.insert(params_flat.end(), p.begin(), p.end());
+            }
+        }
+        return params_flat;
+    }
+
+    std::vector<SizeType> get_param_counts_flat() const noexcept {
+        std::vector<SizeType> param_counts_flat(n_levels * n_params);
+        for (SizeType i_level = 0; i_level < n_levels; ++i_level) {
+            for (SizeType i_param = 0; i_param < n_params; ++i_param) {
+                param_counts_flat[(i_level * n_params) + i_param] =
+                    params[i_level][i_param].size();
+            }
+        }
+        return param_counts_flat;
+    }
+
+    std::pair<std::vector<SizeType>, std::vector<SizeType>>
+    get_params_flat_sizes() const noexcept {
+        std::vector<SizeType> params_flat_offsets(n_levels);
+        std::vector<SizeType> params_flat_sizes(n_levels);
+        for (SizeType i_level = 0; i_level < n_levels; ++i_level) {
+            for (const auto& p : params[i_level]) {
+                params_flat_sizes[i_level] += p.size();
+            }
+            if (i_level == 0) {
+                params_flat_offsets[i_level] = 0;
+            } else {
+                params_flat_offsets[i_level] =
+                    params_flat_offsets[i_level - 1] +
+                    params_flat_sizes[i_level - 1];
+            }
+        }
+        return {params_flat_offsets, params_flat_sizes};
+    }
+
 private:
     search::PulsarSearchConfig m_cfg;
+
     void configure_plan() {
         const auto levels = m_cfg.get_niters_ffa() + 1;
         n_params          = m_cfg.get_nparams();
@@ -719,7 +755,8 @@ private:
         m_stats = FFARegionStats<FoldType>(
             max_buffer_size, max_coord_size, max_ncoords,
             m_base_cfg.get_n_scoring_widths(), m_base_cfg.get_nparams(),
-            m_base_cfg.get_nsamps(), m_base_cfg.get_max_passing_candidates(), m_use_gpu);
+            m_base_cfg.get_nsamps(), m_base_cfg.get_max_passing_candidates(),
+            m_use_gpu);
 
         // Log summary statistics
         log_planning_summary();

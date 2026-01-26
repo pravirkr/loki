@@ -6,6 +6,8 @@
 #include <thrust/device_vector.h>
 
 #include "loki/algorithms/plans.hpp"
+#include "loki/common/types.hpp"
+#include "loki/core/taylor.hpp"
 #include "loki/cuda_utils.cuh"
 
 namespace loki::plans {
@@ -136,73 +138,105 @@ struct FFACoordFreqD {
     }
 };
 
-struct FFAPlanD {
-    thrust::device_vector<double> params_d;
-    thrust::device_vector<SizeType> ncoords;
-    thrust::device_vector<SizeType> ncoords_offsets;
-    double tseg_brute;
-    SizeType nbins;
-    SizeType n_levels;
-    SizeType n_params;
+template <SupportedFoldTypeCUDA FoldTypeCUDA> struct FFAPlanCUDA {
+    using HostFoldType   = FoldTypeTraits<FoldTypeCUDA>::HostType;
+    using DeviceFoldType = FoldTypeTraits<FoldTypeCUDA>::DeviceType;
 
-    explicit FFAPlanD(const FFAPlanBase& cpu_plan)
-        : ncoords(cpu_plan.get_ncoords()),
-          ncoords_offsets(cpu_plan.get_ncoords_offsets()),
-          tseg_brute(cpu_plan.get_config().get_tseg_brute()),
-          nbins(cpu_plan.get_config().get_nbins()),
-          n_levels(cpu_plan.get_n_levels()),
-          n_params(cpu_plan.get_n_params()) {}
+    std::unique_ptr<plans::FFAPlan<HostFoldType>> m_ffa_plan;
+    thrust::device_vector<double> m_params_d;
+    thrust::device_vector<uint32_t> m_param_counts_d;
 
-    /*
+    explicit FFAPlanCUDA(const plans::FFAPlan<HostFoldType>& ffa_plan)
+        : m_ffa_plan(std::make_unique<plans::FFAPlan<HostFoldType>>(ffa_plan)) {
+        m_params_d       = m_ffa_plan->get_params_flat();
+        m_param_counts_d = m_ffa_plan->get_param_counts_flat();
+    }
+
     void resolve_coordinates(FFACoordD& coords_d, cudaStream_t stream) {
+        const auto& n_levels        = m_ffa_plan->get_n_levels();
+        const auto& n_params        = m_ffa_plan->get_n_params();
+        const auto& ncoords         = m_ffa_plan->get_ncoords();
+        const auto& ncoords_offsets = m_ffa_plan->get_ncoords_offsets();
+        const auto& tseg_brute      = m_ffa_plan->get_config().get_tseg_brute();
+        const auto& nbins           = m_ffa_plan->get_config().get_nbins();
+        const auto& [params_flat_offsets, params_flat_sizes] =
+            m_ffa_plan->get_params_flat_sizes();
+
         for (SizeType i_level = 1; i_level < n_levels; ++i_level) {
             const auto ncoords_cur = ncoords[i_level];
             const auto offset      = ncoords_offsets[i_level];
 
-            auto ptrs = coords_d.get_raw_ptrs(); // Helper to get raw ptrs
+            auto coord_ptrs = coords_d.get_raw_ptrs();
+            // Tail coordinates
+            core::ffa_taylor_resolve_poly_batch_cuda(
+                cuda_utils::as_span(m_params_d)
+                    .subspan(params_flat_offsets[i_level],
+                             params_flat_sizes[i_level]),
+                cuda_utils::as_span(m_param_counts_d)
+                    .subspan(i_level * n_params, n_params),
+                cuda_utils::as_span(m_params_d)
+                    .subspan(params_flat_offsets[i_level - 1],
+                             params_flat_sizes[i_level - 1]),
+                cuda_utils::as_span(m_param_counts_d)
+                    .subspan((i_level - 1) * n_params, n_params),
+                cuda::std::span<uint32_t>(coord_ptrs.i_tail + offset,
+                                          ncoords_cur),
+                cuda::std::span<float>(coord_ptrs.shift_tail + offset,
+                                       ncoords_cur),
+                i_level, 0, tseg_brute, nbins, n_params, stream);
 
-            // Resolve Tail (latter=0)
-
-            core::ffa_taylor_resolve_poly_cuda(
-                thrust::raw_pointer_cast(param_ptrs[i_level].data()),
-                param_sizes[i_level].data(),
-                thrust::raw_pointer_cast(param_ptrs[i_level - 1].data()),
-                param_sizes[i_level - 1].data(), ptrs.i_tail + offset,
-                ptrs.shift_tail + offset, ncoords_cur, n_params, i_level, 0,
-                tseg_brute, nbins, stream);
-
-            // Resolve Head (latter=1)
-            core::ffa_taylor_resolve_poly_cuda(
-                thrust::raw_pointer_cast(param_ptrs[i_level].data()),
-                param_sizes[i_level].data(),
-                thrust::raw_pointer_cast(param_ptrs[i_level - 1].data()),
-                param_sizes[i_level - 1].data(), ptrs.i_head + offset,
-                ptrs.shift_head + offset, ncoords_cur, n_params, i_level, 1,
-                tseg_brute, nbins, stream);
+            // Head coordinates
+            core::ffa_taylor_resolve_poly_batch_cuda(
+                cuda_utils::as_span(m_params_d)
+                    .subspan(params_flat_offsets[i_level],
+                             params_flat_sizes[i_level]),
+                cuda_utils::as_span(m_param_counts_d)
+                    .subspan(i_level * n_params, n_params),
+                cuda_utils::as_span(m_params_d)
+                    .subspan(params_flat_offsets[i_level - 1],
+                             params_flat_sizes[i_level - 1]),
+                cuda_utils::as_span(m_param_counts_d)
+                    .subspan((i_level - 1) * n_params, n_params),
+                cuda::std::span<uint32_t>(coord_ptrs.i_head + offset,
+                                          ncoords_cur),
+                cuda::std::span<float>(coord_ptrs.shift_head + offset,
+                                       ncoords_cur),
+                i_level, 1, tseg_brute, nbins, n_params, stream);
         }
     }
 
     void resolve_coordinates_freq(FFACoordFreqD& coords_d,
                                   cudaStream_t stream) {
-        if (n_params != 1)
-            return;
+        const auto& n_levels        = m_ffa_plan->get_n_levels();
+        const auto& n_params        = m_ffa_plan->get_n_params();
+        const auto& ncoords         = m_ffa_plan->get_ncoords();
+        const auto& ncoords_offsets = m_ffa_plan->get_ncoords_offsets();
+        const auto& tseg_brute      = m_ffa_plan->get_config().get_tseg_brute();
+        const auto& nbins           = m_ffa_plan->get_config().get_nbins();
+        const auto& [params_flat_offsets, params_flat_sizes] =
+            m_ffa_plan->get_params_flat_sizes();
 
         for (SizeType i_level = 1; i_level < n_levels; ++i_level) {
             const auto ncoords_cur = ncoords[i_level];
             const auto offset      = ncoords_offsets[i_level];
 
-            auto ptrs = coords_d.get_raw_ptrs();
-
-            // Frequency resolve is simpler (only 1 param)
-            core::ffa_taylor_resolve_freq_cuda(
-                thrust::raw_pointer_cast(params_storage[i_level][0].data()),
-                param_sizes[i_level][0],
-                thrust::raw_pointer_cast(params_storage[i_level - 1][0].data()),
-                param_sizes[i_level - 1][0], ptrs.idx + offset,
-                ptrs.shift + offset, i_level, tseg_brute, nbins, stream);
+            auto coord_ptrs = coords_d.get_raw_ptrs();
+            core::ffa_taylor_resolve_poly_batch_cuda(
+                cuda_utils::as_span(m_params_d)
+                    .subspan(params_flat_offsets[i_level],
+                             params_flat_sizes[i_level]),
+                cuda_utils::as_span(m_param_counts_d)
+                    .subspan(i_level * n_params, n_params),
+                cuda_utils::as_span(m_params_d)
+                    .subspan(params_flat_offsets[i_level - 1],
+                             params_flat_sizes[i_level - 1]),
+                cuda_utils::as_span(m_param_counts_d)
+                    .subspan((i_level - 1) * n_params, n_params),
+                cuda::std::span<uint32_t>(coord_ptrs.idx + offset, ncoords_cur),
+                cuda::std::span<float>(coord_ptrs.shift + offset, ncoords_cur),
+                i_level, 0, tseg_brute, nbins, n_params, stream);
         }
     }
-    */
 };
 
 } // namespace loki::plans

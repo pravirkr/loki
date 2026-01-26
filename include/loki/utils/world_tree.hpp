@@ -7,6 +7,12 @@
 
 #include "loki/common/types.hpp"
 
+#ifdef LOKI_ENABLE_CUDA
+#include <cuda/std/span>
+#include <cuda_runtime.h>
+#include <thrust/device_vector.h>
+#endif // LOKI_ENABLE_CUDA
+
 namespace loki::utils {
 
 /**
@@ -130,5 +136,80 @@ private:
 
 using WorldTreeFloat   = WorldTree<float>;
 using WorldTreeComplex = WorldTree<ComplexType>;
+
+#ifdef LOKI_ENABLE_CUDA
+template <SupportedFoldTypeCUDA FoldTypeCUDA = float> class WorldTreeCUDA {
+public:
+    WorldTreeCUDA(SizeType capacity,
+                  SizeType nparams,
+                  SizeType nbins,
+                  SizeType max_batch_size);
+
+    ~WorldTreeCUDA();
+    WorldTreeCUDA(WorldTreeCUDA&&) noexcept;
+    WorldTreeCUDA& operator=(WorldTreeCUDA&&) noexcept;
+    WorldTreeCUDA(const WorldTreeCUDA&)            = delete;
+    WorldTreeCUDA& operator=(const WorldTreeCUDA&) = delete;
+
+    // Getters
+    [[nodiscard]] cuda::std::span<const double>
+    get_leaves_span() const noexcept;
+    [[nodiscard]] cuda::std::span<const FoldTypeCUDA>
+    get_folds_span() const noexcept;
+    [[nodiscard]] cuda::std::span<const float> get_scores_span() const noexcept;
+    [[nodiscard]] SizeType get_capacity() const noexcept;
+    [[nodiscard]] SizeType get_nparams() const noexcept;
+    [[nodiscard]] SizeType get_nbins() const noexcept;
+    [[nodiscard]] SizeType get_max_batch_size() const noexcept;
+    [[nodiscard]] SizeType get_leaves_stride() const noexcept;
+    [[nodiscard]] SizeType get_folds_stride() const noexcept;
+    [[nodiscard]] SizeType get_size() const noexcept;
+    [[nodiscard]] SizeType get_size_old() const noexcept;
+    [[nodiscard]] float get_size_lb() const noexcept;
+    [[nodiscard]] float get_score_max() const noexcept;
+    [[nodiscard]] float get_score_min() const noexcept;
+    [[nodiscard]] float get_memory_usage() const noexcept;
+
+    // Returns {span, actual_size}, where actual_size <= requested n_leaves,
+    // limited to contiguous segment before wrap.
+    [[nodiscard]] std::pair<cuda::std::span<const double>, SizeType>
+    get_leaves_span(SizeType n_leaves) const;
+    // Returns span over contiguous leaves (for reporting)
+    [[nodiscard]] cuda::std::span<double> get_leaves_contiguous_span() noexcept;
+    // Returns span over contiguous scores (for saving to file)
+    [[nodiscard]] cuda::std::span<float> get_scores_contiguous_span() noexcept;
+
+    void set_size(SizeType size) noexcept;
+    void reset() noexcept;
+    void prepare_in_place_update();
+    void finalize_in_place_update();
+    void consume_read(SizeType n);
+
+    void convert_to_physical_indices(cuda::std::span<uint32_t> logical_indices,
+                                     SizeType n_leaves,
+                                     cudaStream_t stream) const;
+
+    // Add an initial set of candidate leaves to the Tree
+    void add_initial(cuda::std::span<const double> leaves_batch,
+                     cuda::std::span<const FoldTypeCUDA> folds_batch,
+                     cuda::std::span<const float> scores_batch,
+                     SizeType slots_to_write);
+    // Add a batch of candidate leaves to the Tree if there is space
+    [[nodiscard]] float
+    add_batch(cuda::std::span<const double> leaves_batch,
+              cuda::std::span<const FoldTypeCUDA> folds_batch,
+              cuda::std::span<const float> scores_batch,
+              float current_threshold,
+              SizeType slots_to_write,
+              cudaStream_t stream);
+
+private:
+    class Impl;
+    std::unique_ptr<Impl> m_impl;
+};
+
+using WorldTreeCUDAFloat   = WorldTreeCUDA<float>;
+using WorldTreeCUDAComplex = WorldTreeCUDA<ComplexTypeCUDA>;
+#endif // LOKI_ENABLE_CUDA
 
 } // namespace loki::utils

@@ -4,8 +4,7 @@
 #include <cuda/std/limits>
 #include <cuda/std/span>
 #include <cuda/std/type_traits>
-
-#include <cuda_runtime_api.h>
+#include <cuda_runtime.h>
 
 #include "loki/common/types.hpp"
 #include "loki/cuda_utils.cuh"
@@ -16,7 +15,32 @@ namespace loki::core {
 
 namespace {
 
-__global__ void poly_taylor_seed_kernel(const double* __restrict__ accel_grid,
+__device__ __forceinline__ void
+ffa_taylor_resolve_freq_batch(const double* __restrict__ param_arr_cur_flat,
+                              const uint32_t* __restrict__ param_arr_cur_count,
+                              const double* __restrict__ param_arr_prev_flat,
+                              const uint32_t* __restrict__ param_arr_prev_count,
+                              uint32_t* __restrict__ pindex_prev_flat_batch,
+                              float* __restrict__ relative_phase_batch,
+                              SizeType ffa_level,
+                              double tseg_brute,
+                              SizeType nbins) {
+    constexpr SizeType kParams = 1;
+    const uint32_t ifreq       = threadIdx.x;
+    const uint32_t n_freq      = param_arr_cur_count[0];
+    if (ifreq >= n_freq) {
+        return;
+    }
+    const auto delta_t = cuda::std::pow(2.0, ffa_level - 1) * tseg_brute;
+    const auto freq    = param_arr_cur_flat[ifreq];
+    const auto idx_f   = utils::find_nearest_sorted_idx_scan(
+        std::span(param_arr_prev_flat), freq, 0);
+    pindex_prev_flat_batch[ifreq] = idx_f;
+    relative_phase_batch[ifreq] =
+        psr_utils::get_phase_idx(delta_t, freq, nbins, 0.0);
+}
+
+__global__ void kernel_poly_taylor_seed(const double* __restrict__ accel_grid,
                                         uint32_t n_accel,
                                         const double* __restrict__ freq_grid,
                                         uint32_t n_freq,
@@ -53,23 +77,171 @@ __global__ void poly_taylor_seed_kernel(const double* __restrict__ accel_grid,
     seed_leaves[base + 7] = 0.0;
 }
 
-__global__ void
-kernel_analyze_and_branch_snap(const double* __restrict__ leaves_tree,
-                               cuda::std::pair<double, double> coord_cur,
-                               uint32_t n_leaves,
-                               uint32_t nbins,
-                               double eta,
-                               const ParamLimitType* __restrict__ param_limits,
-                               uint32_t branch_max,
-                               double* __restrict__ scratch_params,
-                               double* __restrict__ scratch_dparams,
-                               uint32_t* __restrict__ scratch_counts,
-                               uint32_t* __restrict__ leaf_branch_count,
-                               int* __restrict__ global_branch_flag) {
+__global__ void kernel_analyze_and_branch_accel(
+    const double* __restrict__ leaves_tree,
+    uint32_t n_leaves,
+    cuda::std::pair<double, double> coord_cur,
+    uint32_t nbins,
+    double eta,
+    const ParamLimitTypeCUDA* __restrict__ param_limits,
+    uint32_t branch_max,
+    utils::BranchingWorkspaceCUDAView ws,
+    int* __restrict__ global_branch_flag) {
+    constexpr SizeType kParams       = 2;
+    constexpr SizeType kParamStride  = 2;
+    constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
+
+    const uint32_t ileaf = (blockIdx.x * blockDim.x) + threadIdx.x;
+    if (ileaf >= n_leaves) {
+        return;
+    }
+
+    const uint32_t leaf_offset = ileaf * kLeavesStride;
+    const uint32_t flat_base   = ileaf * kParams;
+
+    const auto [_, dt]   = coord_cur;
+    const double dt2     = dt * dt;
+    const double inv_dt  = 1.0 / dt;
+    const double inv_dt2 = inv_dt * inv_dt;
+    const auto nbins_d   = static_cast<double>(nbins);
+    const double dphi    = eta / nbins_d;
+
+    const double d2_cur     = leaves_tree[leaf_offset + 0];
+    const double d2_sig_cur = leaves_tree[leaf_offset + 1];
+    const double d1_cur     = leaves_tree[leaf_offset + 2];
+    const double d1_sig_cur = leaves_tree[leaf_offset + 3];
+    const double f0         = leaves_tree[leaf_offset + 6];
+
+    const double dfactor    = utils::kCval / f0;
+    const double d2_sig_new = dphi * dfactor * 4.0 * inv_dt2;
+    const double d1_sig_new = dphi * dfactor * 1.0 * inv_dt;
+
+    const double shift_d2 =
+        (d2_sig_cur - d2_sig_new) * dt2 * nbins_d / (4.0 * dfactor);
+    const double shift_d1 =
+        (d1_sig_cur - d1_sig_new) * dt * nbins_d / (1.0 * dfactor);
+
+    bool branched = false;
+
+    utils::branch_one_param_padded_device(
+        0, d2_cur, d2_sig_cur, d2_sig_new, param_limits[0].min,
+        param_limits[1].max, eta, shift_d2, ws.scratch_params,
+        ws.scratch_dparams, ws.scratch_counts, flat_base, branch_max);
+    const double d1_min = (1 - param_limits[1].max / f0) * utils::kCval;
+    const double d1_max = (1 - param_limits[1].min / f0) * utils::kCval;
+    utils::branch_one_param_padded_device(
+        1, d1_cur, d1_sig_cur, d1_sig_new, d1_min, d1_max, eta, shift_d1,
+        ws.scratch_params, ws.scratch_dparams, ws.scratch_counts, flat_base,
+        branch_max);
+
+    uint32_t count = 1;
+    count *= ws.scratch_counts[flat_base + 0];
+    count *= ws.scratch_counts[flat_base + 1];
+
+    ws.leaf_branch_count[ileaf] = count;
+
+    if (branched) {
+        cuda::atomic_ref<int, cuda::thread_scope_device> flag(
+            *global_branch_flag);
+        flag.fetch_or(1, cuda::memory_order_relaxed);
+    }
+}
+
+__global__ void kernel_analyze_and_branch_jerk(
+    const double* __restrict__ leaves_tree,
+    uint32_t n_leaves,
+    cuda::std::pair<double, double> coord_cur,
+    uint32_t nbins,
+    double eta,
+    const ParamLimitTypeCUDA* __restrict__ param_limits,
+    uint32_t branch_max,
+    utils::BranchingWorkspaceCUDAView ws,
+    int* __restrict__ global_branch_flag) {
+    constexpr SizeType kParams       = 3;
+    constexpr SizeType kParamStride  = 2;
+    constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
+
+    const uint32_t ileaf = (blockIdx.x * blockDim.x) + threadIdx.x;
+    if (ileaf >= n_leaves) {
+        return;
+    }
+
+    const uint32_t leaf_offset = ileaf * kLeavesStride;
+    const uint32_t flat_base   = ileaf * kParams;
+
+    const auto [_, dt]   = coord_cur;
+    const double dt2     = dt * dt;
+    const double dt3     = dt2 * dt;
+    const double inv_dt  = 1.0 / dt;
+    const double inv_dt2 = inv_dt * inv_dt;
+    const double inv_dt3 = inv_dt2 * inv_dt;
+    const auto nbins_d   = static_cast<double>(nbins);
+    const double dphi    = eta / nbins_d;
+
+    const double d3_cur     = leaves_tree[leaf_offset + 0];
+    const double d3_sig_cur = leaves_tree[leaf_offset + 1];
+    const double d2_cur     = leaves_tree[leaf_offset + 2];
+    const double d2_sig_cur = leaves_tree[leaf_offset + 3];
+    const double d1_cur     = leaves_tree[leaf_offset + 4];
+    const double d1_sig_cur = leaves_tree[leaf_offset + 5];
+    const double f0         = leaves_tree[leaf_offset + 8];
+
+    const double dfactor    = utils::kCval / f0;
+    const double d3_sig_new = dphi * dfactor * 24.0 * inv_dt3;
+    const double d2_sig_new = dphi * dfactor * 4.0 * inv_dt2;
+    const double d1_sig_new = dphi * dfactor * 1.0 * inv_dt;
+
+    const double shift_d3 =
+        (d3_sig_cur - d3_sig_new) * dt3 * nbins_d / (24.0 * dfactor);
+    const double shift_d2 =
+        (d2_sig_cur - d2_sig_new) * dt2 * nbins_d / (4.0 * dfactor);
+    const double shift_d1 =
+        (d1_sig_cur - d1_sig_new) * dt * nbins_d / (1.0 * dfactor);
+
+    bool branched = false;
+
+    utils::branch_one_param_padded_device(
+        0, d3_cur, d3_sig_cur, d3_sig_new, param_limits[0].min,
+        param_limits[1].max, eta, shift_d3, ws.scratch_params,
+        ws.scratch_dparams, ws.scratch_counts, flat_base, branch_max);
+    utils::branch_one_param_padded_device(
+        1, d2_cur, d2_sig_cur, d2_sig_new, param_limits[1].min,
+        param_limits[2].max, eta, shift_d2, ws.scratch_params,
+        ws.scratch_dparams, ws.scratch_counts, flat_base, branch_max);
+    const double d1_min = (1 - param_limits[2].max / f0) * utils::kCval;
+    const double d1_max = (1 - param_limits[2].min / f0) * utils::kCval;
+    utils::branch_one_param_padded_device(
+        2, d1_cur, d1_sig_cur, d1_sig_new, d1_min, d1_max, eta, shift_d1,
+        ws.scratch_params, ws.scratch_dparams, ws.scratch_counts, flat_base,
+        branch_max);
+
+    uint32_t count = 1;
+    count *= ws.scratch_counts[flat_base + 0];
+    count *= ws.scratch_counts[flat_base + 1];
+    count *= ws.scratch_counts[flat_base + 2];
+
+    ws.leaf_branch_count[ileaf] = count;
+
+    if (branched) {
+        cuda::atomic_ref<int, cuda::thread_scope_device> flag(
+            *global_branch_flag);
+        flag.fetch_or(1, cuda::memory_order_relaxed);
+    }
+}
+
+__global__ void kernel_analyze_and_branch_snap(
+    const double* __restrict__ leaves_tree,
+    uint32_t n_leaves,
+    cuda::std::pair<double, double> coord_cur,
+    uint32_t nbins,
+    double eta,
+    const ParamLimitTypeCUDA* __restrict__ param_limits,
+    uint32_t branch_max,
+    utils::BranchingWorkspaceCUDAView ws,
+    int* __restrict__ global_branch_flag) {
     constexpr SizeType kParams       = 4;
     constexpr SizeType kParamStride  = 2;
     constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
-    constexpr double kEps            = 1e-12;
 
     const uint32_t ileaf = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (ileaf >= n_leaves) {
@@ -117,42 +289,32 @@ kernel_analyze_and_branch_snap(const double* __restrict__ leaves_tree,
 
     bool branched = false;
 
-    // --- per-parameter branching ---
-    auto branch_one = [&](uint32_t p, double cur, double sig_cur,
-                          double sig_new, double pmin, double pmax,
-                          double shift) {
-        const uint32_t pad_offset = (flat_base + p) * branch_max;
-        if (shift >= (eta - kEps)) {
-            branched                 = true;
-            auto [dparam_act, count] = utils::branch_param_padded_device(
-                scratch_params + pad_offset, branch_max, cur, sig_cur, sig_new,
-                pmin, pmax);
-            scratch_dparams[flat_base + p] = dparam_act;
-            scratch_counts[flat_base + p]  = count;
-        } else {
-            scratch_params[pad_offset]     = cur;
-            scratch_dparams[flat_base + p] = sig_cur;
-            scratch_counts[flat_base + p]  = 1;
-        }
-    };
-
-    branch_one(0, d4_cur, d4_sig_cur, d4_sig_new, param_limits[0][0],
-               param_limits[0][1], shift_d4);
-    branch_one(1, d3_cur, d3_sig_cur, d3_sig_new, param_limits[1][0],
-               param_limits[1][1], shift_d3);
-    branch_one(2, d2_cur, d2_sig_cur, d2_sig_new, param_limits[2][0],
-               param_limits[2][1], shift_d2);
-    const double d1_min = (1 - param_limits[3][1] / f0) * utils::kCval;
-    const double d1_max = (1 - param_limits[3][0] / f0) * utils::kCval;
-    branch_one(3, d1_cur, d1_sig_cur, d1_sig_new, d1_min, d1_max, shift_d1);
+    utils::branch_one_param_padded_device(
+        0, d4_cur, d4_sig_cur, d4_sig_new, param_limits[0].min,
+        param_limits[0].max, eta, shift_d4, ws.scratch_params,
+        ws.scratch_dparams, ws.scratch_counts, flat_base, branch_max);
+    utils::branch_one_param_padded_device(
+        1, d3_cur, d3_sig_cur, d3_sig_new, param_limits[1].min,
+        param_limits[1].max, eta, shift_d3, ws.scratch_params,
+        ws.scratch_dparams, ws.scratch_counts, flat_base, branch_max);
+    utils::branch_one_param_padded_device(
+        2, d2_cur, d2_sig_cur, d2_sig_new, param_limits[2].min,
+        param_limits[2].max, eta, shift_d2, ws.scratch_params,
+        ws.scratch_dparams, ws.scratch_counts, flat_base, branch_max);
+    const double d1_min = (1 - param_limits[3].max / f0) * utils::kCval;
+    const double d1_max = (1 - param_limits[3].min / f0) * utils::kCval;
+    utils::branch_one_param_padded_device(
+        3, d1_cur, d1_sig_cur, d1_sig_new, d1_min, d1_max, eta, shift_d1,
+        ws.scratch_params, ws.scratch_dparams, ws.scratch_counts, flat_base,
+        branch_max);
 
     uint32_t count = 1;
-    count *= scratch_counts[flat_base + 0];
-    count *= scratch_counts[flat_base + 1];
-    count *= scratch_counts[flat_base + 2];
-    count *= scratch_counts[flat_base + 3];
+    count *= ws.scratch_counts[flat_base + 0];
+    count *= ws.scratch_counts[flat_base + 1];
+    count *= ws.scratch_counts[flat_base + 2];
+    count *= ws.scratch_counts[flat_base + 3];
 
-    leaf_branch_count[ileaf] = count;
+    ws.leaf_branch_count[ileaf] = count;
 
     if (branched) {
         cuda::atomic_ref<int, cuda::thread_scope_device> flag(
@@ -161,16 +323,112 @@ kernel_analyze_and_branch_snap(const double* __restrict__ leaves_tree,
     }
 }
 
-__global__ void kernel_materialize_branches_snap(
-    const double* __restrict__ leaves_tree,
-    const double* __restrict__ scratch_params,
-    const double* __restrict__ scratch_dparams,
-    const SizeType* __restrict__ scratch_counts,
-    const SizeType* __restrict__ leaf_output_offset,
-    SizeType n_leaves,
-    SizeType branch_max,
-    double* __restrict__ leaves_branch,
-    SizeType* __restrict__ leaves_origins) {
+__global__ void
+kernel_materialize_branches_accel(const double* __restrict__ leaves_tree,
+                                  double* __restrict__ leaves_branch,
+                                  uint32_t* __restrict__ leaves_origins,
+                                  uint32_t n_leaves,
+                                  uint32_t branch_max,
+                                  utils::BranchingWorkspaceCUDAView ws) {
+    constexpr uint32_t kParams       = 2;
+    constexpr uint32_t kParamStride  = 2;
+    constexpr uint32_t kLeavesStride = (kParams + 2) * kParamStride;
+
+    const uint32_t ileaf = (blockIdx.x * blockDim.x) + threadIdx.x;
+    if (ileaf >= n_leaves) {
+        return;
+    }
+
+    const uint32_t leaf_offset   = ileaf * kLeavesStride;
+    const uint32_t flat_base     = ileaf * kParams;
+    const uint32_t n_d2_branches = ws.scratch_counts[flat_base + 1];
+    const uint32_t n_d1_branches = ws.scratch_counts[flat_base + 2];
+    const uint32_t off2          = (flat_base + 0) * branch_max;
+    const uint32_t off1          = (flat_base + 1) * branch_max;
+
+    uint32_t out = ws.leaf_output_offset[ileaf];
+
+    for (uint32_t a = 0; a < n_d2_branches; ++a) {
+        for (uint32_t b = 0; b < n_d1_branches; ++b) {
+            const uint32_t bo = out * kLeavesStride;
+
+            leaves_branch[bo + 0] = ws.scratch_params[off2 + a];
+            leaves_branch[bo + 1] = ws.scratch_dparams[flat_base + 0];
+            leaves_branch[bo + 2] = ws.scratch_params[off1 + b];
+            leaves_branch[bo + 3] = ws.scratch_dparams[flat_base + 1];
+
+// copy d0 + f0 + flag (4 doubles)
+#pragma unroll
+            for (int k = 0; k < 4; ++k) {
+                leaves_branch[bo + 4 + k] = leaves_tree[leaf_offset + 4 + k];
+            }
+
+            leaves_origins[out] = ileaf;
+            ++out;
+        }
+    }
+}
+
+__global__ void
+kernel_materialize_branches_jerk(const double* __restrict__ leaves_tree,
+                                 double* __restrict__ leaves_branch,
+                                 uint32_t* __restrict__ leaves_origins,
+                                 uint32_t n_leaves,
+                                 uint32_t branch_max,
+                                 utils::BranchingWorkspaceCUDAView ws) {
+    constexpr uint32_t kParams       = 3;
+    constexpr uint32_t kParamStride  = 2;
+    constexpr uint32_t kLeavesStride = (kParams + 2) * kParamStride;
+
+    const uint32_t ileaf = (blockIdx.x * blockDim.x) + threadIdx.x;
+    if (ileaf >= n_leaves) {
+        return;
+    }
+
+    const uint32_t leaf_offset   = ileaf * kLeavesStride;
+    const uint32_t flat_base     = ileaf * kParams;
+    const uint32_t n_d3_branches = ws.scratch_counts[flat_base + 1];
+    const uint32_t n_d2_branches = ws.scratch_counts[flat_base + 2];
+    const uint32_t n_d1_branches = ws.scratch_counts[flat_base + 3];
+    const uint32_t off3          = (flat_base + 0) * branch_max;
+    const uint32_t off2          = (flat_base + 1) * branch_max;
+    const uint32_t off1          = (flat_base + 2) * branch_max;
+
+    uint32_t out = ws.leaf_output_offset[ileaf];
+
+    for (uint32_t a = 0; a < n_d3_branches; ++a) {
+        for (uint32_t b = 0; b < n_d2_branches; ++b) {
+            for (uint32_t c = 0; c < n_d1_branches; ++c) {
+                const uint32_t bo = out * kLeavesStride;
+
+                leaves_branch[bo + 0] = ws.scratch_params[off3 + a];
+                leaves_branch[bo + 1] = ws.scratch_dparams[flat_base + 0];
+                leaves_branch[bo + 2] = ws.scratch_params[off2 + b];
+                leaves_branch[bo + 3] = ws.scratch_dparams[flat_base + 1];
+                leaves_branch[bo + 4] = ws.scratch_params[off1 + c];
+                leaves_branch[bo + 5] = ws.scratch_dparams[flat_base + 2];
+
+// copy d0 + f0 + flag (4 doubles)
+#pragma unroll
+                for (int k = 0; k < 4; ++k) {
+                    leaves_branch[bo + 6 + k] =
+                        leaves_tree[leaf_offset + 6 + k];
+                }
+
+                leaves_origins[out] = ileaf;
+                ++out;
+            }
+        }
+    }
+}
+
+__global__ void
+kernel_materialize_branches_snap(const double* __restrict__ leaves_tree,
+                                 double* __restrict__ leaves_branch,
+                                 uint32_t* __restrict__ leaves_origins,
+                                 uint32_t n_leaves,
+                                 uint32_t branch_max,
+                                 utils::BranchingWorkspaceCUDAView ws) {
     constexpr uint32_t kParams       = 4;
     constexpr uint32_t kParamStride  = 2;
     constexpr uint32_t kLeavesStride = (kParams + 2) * kParamStride;
@@ -182,16 +440,16 @@ __global__ void kernel_materialize_branches_snap(
 
     const uint32_t leaf_offset   = ileaf * kLeavesStride;
     const uint32_t flat_base     = ileaf * kParams;
-    const uint32_t n_d4_branches = scratch_counts[flat_base + 0];
-    const uint32_t n_d3_branches = scratch_counts[flat_base + 1];
-    const uint32_t n_d2_branches = scratch_counts[flat_base + 2];
-    const uint32_t n_d1_branches = scratch_counts[flat_base + 3];
+    const uint32_t n_d4_branches = ws.scratch_counts[flat_base + 0];
+    const uint32_t n_d3_branches = ws.scratch_counts[flat_base + 1];
+    const uint32_t n_d2_branches = ws.scratch_counts[flat_base + 2];
+    const uint32_t n_d1_branches = ws.scratch_counts[flat_base + 3];
     const uint32_t off4          = (flat_base + 0) * branch_max;
     const uint32_t off3          = (flat_base + 1) * branch_max;
     const uint32_t off2          = (flat_base + 2) * branch_max;
     const uint32_t off1          = (flat_base + 3) * branch_max;
 
-    uint32_t out = leaf_output_offset[ileaf];
+    uint32_t out = ws.leaf_output_offset[ileaf];
 
     for (uint32_t a = 0; a < n_d4_branches; ++a) {
         for (uint32_t b = 0; b < n_d3_branches; ++b) {
@@ -199,14 +457,14 @@ __global__ void kernel_materialize_branches_snap(
                 for (uint32_t d = 0; d < n_d1_branches; ++d) {
                     const uint32_t bo = out * kLeavesStride;
 
-                    leaves_branch[bo + 0] = scratch_params[off4 + a];
-                    leaves_branch[bo + 1] = scratch_dparams[flat_base + 0];
-                    leaves_branch[bo + 2] = scratch_params[off3 + b];
-                    leaves_branch[bo + 3] = scratch_dparams[flat_base + 1];
-                    leaves_branch[bo + 4] = scratch_params[off2 + c];
-                    leaves_branch[bo + 5] = scratch_dparams[flat_base + 2];
-                    leaves_branch[bo + 6] = scratch_params[off1 + d];
-                    leaves_branch[bo + 7] = scratch_dparams[flat_base + 3];
+                    leaves_branch[bo + 0] = ws.scratch_params[off4 + a];
+                    leaves_branch[bo + 1] = ws.scratch_dparams[flat_base + 0];
+                    leaves_branch[bo + 2] = ws.scratch_params[off3 + b];
+                    leaves_branch[bo + 3] = ws.scratch_dparams[flat_base + 1];
+                    leaves_branch[bo + 4] = ws.scratch_params[off2 + c];
+                    leaves_branch[bo + 5] = ws.scratch_dparams[flat_base + 2];
+                    leaves_branch[bo + 6] = ws.scratch_params[off1 + d];
+                    leaves_branch[bo + 7] = ws.scratch_dparams[flat_base + 3];
 
 // copy d0 + f0 + flag (4 doubles)
 #pragma unroll
@@ -248,18 +506,18 @@ resolve_load_shared(const float* __restrict__ accel_grid,
 template <bool UseShared>
 __device__ __forceinline__ void
 resolve_taylor_accel(const double* __restrict__ leaves,
-                     SizeType n_leaves,
+                     uint32_t n_leaves,
+                     const float* __restrict__ accel_grid,
+                     uint32_t n_accel,
+                     const float* __restrict__ freq_grid,
+                     uint32_t n_freq,
+                     uint32_t* __restrict__ param_idx,
+                     float* __restrict__ phase_shift,
                      cuda::std::pair<double, double> coord_add,
                      cuda::std::pair<double, double> coord_cur,
                      cuda::std::pair<double, double> coord_init,
-                     const float* __restrict__ accel_grid,
-                     SizeType n_accel,
-                     const float* __restrict__ freq_grid,
-                     SizeType n_freq,
-                     SizeType* __restrict__ param_idx,
-                     float* __restrict__ phase_shift,
-                     SizeType nbins) {
-    constexpr SizeType kLeavesStride = 8;
+                     uint32_t nbins) {
+    constexpr uint32_t kLeavesStride = 8;
     const float* accel_arr;
     const float* freq_arr;
     if constexpr (UseShared) {
@@ -292,9 +550,9 @@ resolve_taylor_accel(const double* __restrict__ leaves,
     const double f_new     = f0 * (1.0 - delta_v * utils::kInvCval);
     const double delay_rel = delta_d * utils::kInvCval;
 
-    const SizeType idx_a = utils::nearest_linear_scan(
+    const uint32_t idx_a = utils::nearest_linear_scan(
         accel_arr, n_accel, static_cast<float>(a_cur));
-    const SizeType idx_f =
+    const uint32_t idx_f =
         utils::lower_bound_scan(freq_arr, n_freq, static_cast<float>(f_new));
     param_idx[tid] = idx_a * n_freq + idx_f;
     phase_shift[tid] =
@@ -304,18 +562,18 @@ resolve_taylor_accel(const double* __restrict__ leaves,
 template <bool UseShared>
 __device__ __forceinline__ void
 resolve_taylor_jerk(const double* __restrict__ leaves,
-                    SizeType n_leaves,
+                    uint32_t n_leaves,
+                    const float* __restrict__ accel_grid,
+                    uint32_t n_accel,
+                    const float* __restrict__ freq_grid,
+                    uint32_t n_freq,
+                    uint32_t* __restrict__ param_idx,
+                    float* __restrict__ phase_shift,
                     cuda::std::pair<double, double> coord_add,
                     cuda::std::pair<double, double> coord_cur,
                     cuda::std::pair<double, double> coord_init,
-                    const float* __restrict__ accel_grid,
-                    SizeType n_accel,
-                    const float* __restrict__ freq_grid,
-                    SizeType n_freq,
-                    SizeType* __restrict__ param_idx,
-                    float* __restrict__ phase_shift,
-                    SizeType nbins) {
-    constexpr SizeType kLeavesStride = 10;
+                    uint32_t nbins) {
+    constexpr uint32_t kLeavesStride = 10;
     const float* accel_arr;
     const float* freq_arr;
     if constexpr (UseShared) {
@@ -355,9 +613,9 @@ resolve_taylor_jerk(const double* __restrict__ leaves,
     const double f_new     = f0 * (1.0 - delta_v * utils::kInvCval);
     const double delay_rel = delta_d * utils::kInvCval;
 
-    const SizeType idx_a = utils::nearest_linear_scan(
+    const uint32_t idx_a = utils::nearest_linear_scan(
         accel_arr, n_accel, static_cast<float>(a_new));
-    const SizeType idx_f =
+    const uint32_t idx_f =
         utils::lower_bound_scan(freq_arr, n_freq, static_cast<float>(f_new));
     param_idx[tid] = idx_a * n_freq + idx_f;
     phase_shift[tid] =
@@ -367,18 +625,18 @@ resolve_taylor_jerk(const double* __restrict__ leaves,
 template <bool UseShared>
 __device__ __forceinline__ void
 resolve_taylor_snap(const double* __restrict__ leaves,
-                    SizeType n_leaves,
+                    uint32_t n_leaves,
+                    const float* __restrict__ accel_grid,
+                    uint32_t n_accel,
+                    const float* __restrict__ freq_grid,
+                    uint32_t n_freq,
+                    uint32_t* __restrict__ param_idx,
+                    float* __restrict__ phase_shift,
                     cuda::std::pair<double, double> coord_add,
                     cuda::std::pair<double, double> coord_cur,
                     cuda::std::pair<double, double> coord_init,
-                    const float* __restrict__ accel_grid,
-                    SizeType n_accel,
-                    const float* __restrict__ freq_grid,
-                    SizeType n_freq,
-                    SizeType* __restrict__ param_idx,
-                    float* __restrict__ phase_shift,
-                    SizeType nbins) {
-    constexpr SizeType kLeavesStride = 12;
+                    uint32_t nbins) {
+    constexpr uint32_t kLeavesStride = 12;
     const float* accel_arr;
     const float* freq_arr;
     if constexpr (UseShared) {
@@ -423,9 +681,9 @@ resolve_taylor_snap(const double* __restrict__ leaves,
     const double f_new     = f0 * (1.0 - delta_v * utils::kInvCval);
     const double delay_rel = delta_d * utils::kInvCval;
 
-    const SizeType idx_a = utils::nearest_linear_scan(
+    const uint32_t idx_a = utils::nearest_linear_scan(
         accel_arr, n_accel, static_cast<float>(a_new));
-    const SizeType idx_f =
+    const uint32_t idx_f =
         utils::lower_bound_scan(freq_arr, n_freq, static_cast<float>(f_new));
     param_idx[tid] = idx_a * n_freq + idx_f;
     phase_shift[tid] =
@@ -599,70 +857,76 @@ transform_taylor_snap(double* __restrict__ leaves,
     leaf[9] = d0_err_i;
 }
 
-// Branch and Validate Taylor Kernel
 template <int NPARAMS>
-__global__ void
-branch_and_validate_taylor_kernel(const double* __restrict__ leaves_tree,
-                                  cuda::std::pair<double, double> coord_cur,
-                                  cuda::std::pair<double, double> coord_prev,
-                                  const double* __restrict__ branched_leaves,
-                                  const SizeType* __restrict__ branched_indices,
-                                  SizeType n_leaves,
-                                  SizeType n_leaves_after_branching,
-                                  SizeType& n_leaves_after_validation,
-                                  double* __restrict__ scratch_params,
-                                  double* __restrict__ scratch_dparams,
-                                  SizeType* __restrict__ scratch_counts) {
-    if constexpr (NPARAMS == 2) {
-        branch_and_validate_taylor_accel(
-            leaves_tree, coord_cur, coord_prev, branched_leaves,
-            branched_indices, n_leaves, n_leaves_after_branching,
-            n_leaves_after_validation, scratch_params, scratch_dparams,
-            scratch_counts);
+__global__ void kernel_ffa_resolve_taylor_poly_batch(
+    const double* __restrict__ param_arr_cur_flat,
+    const uint32_t* __restrict__ param_arr_cur_count,
+    const double* __restrict__ param_arr_prev_flat,
+    const uint32_t* __restrict__ param_arr_prev_count,
+    uint32_t* __restrict__ pindex_prev_flat_batch,
+    float* __restrict__ relative_phase_batch,
+    SizeType ffa_level,
+    SizeType latter,
+    double tseg_brute,
+    SizeType nbins,
+    SizeType n_params) {
+    if constexpr (NPARAMS == 1) {
+        ffa_resolve_taylor_freq_batch(
+            param_arr_cur_flat, param_arr_cur_count, param_arr_prev_flat,
+            param_arr_prev_count, pindex_prev_flat_batch, relative_phase_batch,
+            ffa_level, tseg_brute, nbins, n_params);
+    } else if constexpr (NPARAMS == 2) {
+        ffa_resolve_taylor_accel_batch(
+            param_arr_cur_flat, param_arr_cur_count, param_arr_prev_flat,
+            param_arr_prev_count, pindex_prev_flat_batch, relative_phase_batch,
+            ffa_level, latter, tseg_brute, nbins, n_params);
     } else if constexpr (NPARAMS == 3) {
-        branch_and_validate_taylor_jerk(
-            leaves_tree, coord_cur, coord_prev, branched_leaves,
-            branched_indices, n_leaves, n_leaves_after_branching,
-            n_leaves_after_validation, scratch_params, scratch_dparams,
-            scratch_counts);
+        ffa_resolve_taylor_jerk_batch(
+            param_arr_cur_flat, param_arr_cur_count, param_arr_prev_flat,
+            param_arr_prev_count, pindex_prev_flat_batch, relative_phase_batch,
+            ffa_level, latter, tseg_brute, nbins, n_params);
     } else if constexpr (NPARAMS == 4) {
-        branch_and_validate_taylor_snap(
-            leaves_tree, coord_cur, coord_prev, branched_leaves,
-            branched_indices, n_leaves, n_leaves_after_branching,
-            n_leaves_after_validation, scratch_params, scratch_dparams,
-            scratch_counts);
+        ffa_resolve_taylor_snap_batch(
+            param_arr_cur_flat, param_arr_cur_count, param_arr_prev_flat,
+            param_arr_prev_count, pindex_prev_flat_batch, relative_phase_batch,
+            ffa_level, latter, tseg_brute, nbins, n_params);
+    } else if constexpr (NPARAMS == 5) {
+        ffa_resolve_taylor_crackle_batch(
+            param_arr_cur_flat, param_arr_cur_count, param_arr_prev_flat,
+            param_arr_prev_count, pindex_prev_flat_batch, relative_phase_batch,
+            ffa_level, latter, tseg_brute, nbins, n_params);
     } else {
-        static_assert(NPARAMS <= 4, "Unsupported Taylor order");
+        static_assert(NPARAMS <= 5, "Unsupported Taylor order");
     }
 }
 
 // Resolve Kernel
 template <int NPARAMS, bool UseShared>
 __global__ void
-resolve_taylor_kernel(const double* __restrict__ leaves,
-                      SizeType n_leaves,
-                      cuda::std::pair<double, double> coord_add,
-                      cuda::std::pair<double, double> coord_cur,
-                      cuda::std::pair<double, double> coord_init,
-                      const float* __restrict__ accel_grid,
-                      SizeType n_accel,
-                      const float* __restrict__ freq_grid,
-                      SizeType n_freq,
-                      SizeType* __restrict__ param_idx,
-                      float* __restrict__ phase_shift,
-                      SizeType nbins) {
+kernel_poly_taylor_resolve_batch(const double* __restrict__ leaves,
+                                 SizeType n_leaves,
+                                 const float* __restrict__ accel_grid,
+                                 SizeType n_accel,
+                                 const float* __restrict__ freq_grid,
+                                 SizeType n_freq,
+                                 uint32_t* __restrict__ param_idx,
+                                 float* __restrict__ phase_shift,
+                                 cuda::std::pair<double, double> coord_add,
+                                 cuda::std::pair<double, double> coord_cur,
+                                 cuda::std::pair<double, double> coord_init,
+                                 SizeType nbins) {
     if constexpr (NPARAMS == 2) {
         resolve_taylor_accel<UseShared>(
-            leaves, n_leaves, coord_add, coord_cur, coord_init, accel_grid,
-            n_accel, freq_grid, n_freq, param_idx, phase_shift, nbins);
+            leaves, n_leaves, accel_grid, n_accel, freq_grid, n_freq, param_idx,
+            phase_shift, coord_add, coord_cur, coord_init, nbins);
     } else if constexpr (NPARAMS == 3) {
         resolve_taylor_jerk<UseShared>(
-            leaves, n_leaves, coord_add, coord_cur, coord_init, accel_grid,
-            n_accel, freq_grid, n_freq, param_idx, phase_shift, nbins);
+            leaves, n_leaves, accel_grid, n_accel, freq_grid, n_freq, param_idx,
+            phase_shift, coord_add, coord_cur, coord_init, nbins);
     } else if constexpr (NPARAMS == 4) {
         resolve_taylor_snap<UseShared>(
-            leaves, n_leaves, coord_add, coord_cur, coord_init, accel_grid,
-            n_accel, freq_grid, n_freq, param_idx, phase_shift, nbins);
+            leaves, n_leaves, accel_grid, n_accel, freq_grid, n_freq, param_idx,
+            phase_shift, coord_add, coord_cur, coord_init, nbins);
     } else {
         static_assert(NPARAMS <= 4, "Unsupported Taylor order");
     }
@@ -671,10 +935,10 @@ resolve_taylor_kernel(const double* __restrict__ leaves,
 // Transform Kernel
 template <int NPARAMS, bool UseConservativeTile>
 __global__ void
-transform_taylor_kernel(double* __restrict__ leaves_tree,
-                        SizeType n_leaves,
-                        cuda::std::pair<double, double> coord_next,
-                        cuda::std::pair<double, double> coord_cur) {
+kernel_poly_taylor_transform_batch(double* __restrict__ leaves_tree,
+                                   SizeType n_leaves,
+                                   cuda::std::pair<double, double> coord_next,
+                                   cuda::std::pair<double, double> coord_cur) {
     if constexpr (NPARAMS == 2) {
         transform_taylor_accel<UseConservativeTile>(leaves_tree, n_leaves,
                                                     coord_next, coord_cur);
@@ -689,147 +953,17 @@ transform_taylor_kernel(double* __restrict__ leaves_tree,
     }
 }
 
-} // namespace
-
-/*
-void ffa_taylor_resolve_poly_cuda(
-    cuda::std::span<const double> param_arr_cur_flat,
-    cuda::std::span<const double> param_arr_prev_flat,
-    cuda::std::span<const uint32_t> param_arr_cur_count,
-    cuda::std::span<const uint32_t> param_arr_prev_count,
-    cuda::std::span<uint32_t> pindex_prev_flat_batch,
-    cuda::std::span<float> relative_phase_batch,
-    SizeType ffa_level,
-    SizeType latter,
-    double tseg_brute,
-    SizeType nbins,
-    cudaStream_t stream) {
-    // Better occupancy than 512 for many kernels
-    constexpr int kBlockSize = 256;
-    const dim3 block(kBlockSize);
-    const dim3 grid((n_leaves + kBlockSize - 1) / kBlockSize);
-    cuda_utils::check_kernel_launch_params(grid, block);
-
-    // Two-level dispatch for complete compile-time specialization
-    auto dispatch = [&]<int N, bool C>() {
-        ffa_resolve_taylor_kernel<N, C><<<grid, block, 0, stream>>>(
-            param_arr_cur_flat.data(), param_arr_prev_flat.data(),
-            param_arr_cur_count.data(), param_arr_prev_count.data(),
-            pindex_prev_flat_batch.data(), relative_phase_batch.data(),
-            ffa_level, latter, tseg_brute, nbins);
-    };
-    switch (n_params) {
-    case 2:
-        dispatch.template operator()<2, false>();
-        break;
-    case 3:
-        dispatch.template operator()<3, false>();
-        break;
-    case 4:
-        dispatch.template operator()<4, false>();
-        break;
-    case 5:
-        dispatch.template operator()<5, false>();
-        break;
-    default:
-        throw std::invalid_argument("Unsupported n_params");
-    }
-    cuda_utils::check_last_cuda_error(
-        "FFA Taylor (poly) resolve kernel launch failed");
-}
-*/
-
-SizeType poly_taylor_seed_cuda(cuda::std::span<const double> accel_grid,
-                               cuda::std::span<const double> freq_grid,
-                               cuda::std::span<const double> dparams,
-                               std::pair<double, double> /*coord_init*/,
-                               SizeType n_params,
-                               cuda::std::span<double> seed_leaves,
-                               cudaStream_t stream) {
-    const SizeType n_leaves = accel_grid.size() * freq_grid.size();
-
-    constexpr SizeType kThreadPerBlock = 256;
-    const auto blocks_per_grid =
-        (n_leaves + kThreadPerBlock - 1) / kThreadPerBlock;
-
-    const dim3 block_dim(kThreadPerBlock);
-    const dim3 grid_dim(blocks_per_grid);
-    cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
-    poly_taylor_seed_kernel<<<grid_dim, block_dim>>>(
-        accel_grid.data(), accel_grid.size(), freq_grid.data(),
-        freq_grid.size(), dparams.data(), n_params, seed_leaves.data());
-    cuda_utils::check_last_cuda_error("Taylor seed kernel launch failed");
-    cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
-                                "cudaStreamSynchronize failed");
-    return n_leaves;
-}
-
-std::tuple<SizeType, SizeType> poly_taylor_branch_and_validate_cuda(
+SizeType poly_taylor_branch_accel_cuda(
     cuda::std::span<const double> leaves_tree,
-    std::pair<double, double> coord_cur,
     cuda::std::span<double> leaves_branch,
-    cuda::std::span<SizeType> leaves_origins,
-    SizeType n_leaves,
-    SizeType n_params,
+    cuda::std::span<uint32_t> leaves_origins,
+    std::pair<double, double> coord_cur,
     SizeType nbins,
     double eta,
-    const std::vector<ParamLimitType>& param_limits,
+    cuda::std::span<const ParamLimitTypeCUDA> param_limits,
     SizeType branch_max,
-    cuda::std::span<double> scratch_params,
-    cuda::std::span<double> scratch_dparams,
-    cuda::std::span<SizeType> scratch_counts,
-    cudaStream_t stream) {
-    // Better occupancy than 512 for many kernels
-    constexpr int kBlockSize = 256;
-    const dim3 block(kBlockSize);
-    const dim3 grid((n_leaves + kBlockSize - 1) / kBlockSize);
-    cuda_utils::check_kernel_launch_params(grid, block);
-
-    // Two-level dispatch for complete compile-time specialization
-    auto dispatch = [&]<int N>() {
-        branch_and_validate_taylor_kernel<N><<<grid, block, 0, stream>>>(
-            leaves_tree.data(), coord_cur, coord_prev, leaves_branch.data(),
-            leaves_origins.data(), n_leaves, n_leaves_after_branching,
-            n_leaves_after_validation, scratch_params.data(),
-            scratch_dparams.data(), scratch_counts.data());
-    };
-
-    // Fully specialized dispatch
-    switch (n_params) {
-    case 2:
-        dispatch.template operator()<2>();
-        break;
-    case 3:
-        dispatch.template operator()<3>();
-        break;
-    case 4:
-        dispatch.template operator()<4>();
-        break;
-    default:
-        throw std::invalid_argument("Unsupported n_params");
-    }
-    cuda_utils::check_last_cuda_error(
-        "Taylor branch and validate kernel launch failed");
-    return std::make_tuple(n_leaves_after_branching, n_leaves_after_validation);
-}
-
-SizeType poly_taylor_branch_snap_batch_cuda(
-    cuda::std::span<const double> leaves_tree,
-    std::pair<double, double> coord_cur,
-    cuda::std::span<double> leaves_branch,
-    cuda::std::span<SizeType> leaves_origins,
     SizeType n_leaves,
-    SizeType nbins,
-    double eta,
-    cuda::std::span<const ParamLimitType> param_limits,
-    SizeType branch_max,
-    cuda::std::span<double> scratch_params,
-    cuda::std::span<double> scratch_dparams,
-    cuda::std::span<uint32_t> scratch_counts,
-    cuda::std::span<uint32_t> leaf_branch_count,
-    cuda::std::span<uint32_t> leaf_output_offset,
-    void* cub_temp_storage,
-    size_t cub_temp_bytes,
+    utils::BranchingWorkspaceCUDAView ws,
     cudaStream_t stream) {
     constexpr SizeType kLeavesStride = 8;
 
@@ -850,11 +984,9 @@ SizeType poly_taylor_branch_snap_batch_cuda(
     const dim3 grid_dim(blocks_per_grid);
     cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
 
-    kernel_analyze_and_branch_snap<<<grid_dim, block_dim, 0, stream>>>(
-        leaves_tree.data(), coord_cur, n_leaves, nbins, eta,
-        param_limits.data(), branch_max, scratch_params.data(),
-        scratch_dparams.data(), scratch_counts.data(), leaf_branch_count.data(),
-        d_global_branch_flag);
+    kernel_analyze_and_branch_accel<<<grid_dim, block_dim, 0, stream>>>(
+        leaves_tree.data(), n_leaves, coord_cur, nbins, eta,
+        param_limits.data(), branch_max, ws, d_global_branch_flag);
     cuda_utils::check_last_cuda_error("Kernel 1 launch failed");
 
     // ---- check global flag ----
@@ -871,26 +1003,197 @@ SizeType poly_taylor_branch_snap_batch_cuda(
                             cudaMemcpyDeviceToDevice, stream),
             "cudaMemcpyAsync failed");
         thrust::sequence(thrust::cuda::par.on(stream), leaves_origins.data(),
-                         leaves_origins.data() + n_leaves, stream);
+                         leaves_origins.data() + n_leaves,
+                         static_cast<uint32_t>(0));
 
         return n_leaves;
     }
 
-    // ---- scan ----
-    cub::DeviceScan::ExclusiveSum(cub_temp_storage, cub_temp_bytes,
-                                  leaf_branch_count.data(),
-                                  leaf_output_offset.data(), n_leaves, stream);
-    cuda_utils::check_last_cuda_error("cub::DeviceScan::ExclusiveSum failed");
+    // scan for output offsets (leaf_output_offset)
+    cuda_utils::check_cuda_call(
+        cub::DeviceScan::ExclusiveSum(ws.cub_temp_storage, ws.cub_temp_bytes,
+                                      ws.leaf_branch_count,
+                                      ws.leaf_output_offset, n_leaves, stream),
+        "cub::DeviceScan::ExclusiveSum failed");
 
     // ---- compute output size ----
     SizeType last_offset, last_count;
     cuda_utils::check_cuda_call(
-        cudaMemcpyAsync(&last_offset,
-                        leaf_output_offset.data() + (n_leaves - 1),
+        cudaMemcpyAsync(&last_offset, ws.leaf_output_offset + (n_leaves - 1),
                         sizeof(SizeType), cudaMemcpyDeviceToHost, stream),
         "cudaMemcpyAsync failed");
     cuda_utils::check_cuda_call(
-        cudaMemcpyAsync(&last_count, leaf_branch_count.data() + (n_leaves - 1),
+        cudaMemcpyAsync(&last_count, ws.leaf_branch_count + (n_leaves - 1),
+                        sizeof(SizeType), cudaMemcpyDeviceToHost, stream),
+        "cudaMemcpyAsync failed");
+
+    SizeType out_leaves = last_offset + last_count;
+
+    // ---- Kernel 2: materialize ----
+    kernel_materialize_branches_accel<<<grid_dim, block_dim, 0, stream>>>(
+        leaves_tree.data(), leaves_branch.data(), leaves_origins.data(),
+        n_leaves, branch_max, ws);
+    cuda_utils::check_last_cuda_error("Kernel 2 launch failed");
+
+    return out_leaves;
+}
+
+SizeType poly_taylor_branch_jerk_cuda(
+    cuda::std::span<const double> leaves_tree,
+    cuda::std::span<double> leaves_branch,
+    cuda::std::span<uint32_t> leaves_origins,
+    std::pair<double, double> coord_cur,
+    SizeType nbins,
+    double eta,
+    cuda::std::span<const ParamLimitTypeCUDA> param_limits,
+    SizeType branch_max,
+    SizeType n_leaves,
+    utils::BranchingWorkspaceCUDAView ws,
+    cudaStream_t stream) {
+    constexpr SizeType kLeavesStride = 10;
+
+    int h_global_branch_flag = 0;
+    int* d_global_branch_flag;
+    cuda_utils::check_cuda_call(
+        cudaMallocAsync(&d_global_branch_flag, sizeof(int), stream),
+        "cudaMallocAsync failed");
+    cuda_utils::check_cuda_call(
+        cudaMemsetAsync(d_global_branch_flag, 0, sizeof(int), stream),
+        "cudaMemsetAsync failed");
+
+    // ---- Kernel 1: analyze + branch enumeration ----
+    constexpr SizeType kThreadsPerBlock = 256;
+    const auto blocks_per_grid =
+        (n_leaves + kThreadsPerBlock - 1) / kThreadsPerBlock;
+    const dim3 block_dim(kThreadsPerBlock);
+    const dim3 grid_dim(blocks_per_grid);
+    cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
+
+    kernel_analyze_and_branch_jerk<<<grid_dim, block_dim, 0, stream>>>(
+        leaves_tree.data(), n_leaves, coord_cur, nbins, eta,
+        param_limits.data(), branch_max, ws, d_global_branch_flag);
+    cuda_utils::check_last_cuda_error("Kernel 1 launch failed");
+
+    // ---- check global flag ----
+    cuda_utils::check_cuda_call(
+        cudaMemcpyAsync(&h_global_branch_flag, d_global_branch_flag,
+                        sizeof(int), cudaMemcpyDeviceToHost, stream),
+        "cudaMemcpyAsync failed");
+
+    if (h_global_branch_flag == 0) {
+        // FAST PATH: no branching
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(leaves_branch.data(), leaves_tree.data(),
+                            n_leaves * kLeavesStride * sizeof(double),
+                            cudaMemcpyDeviceToDevice, stream),
+            "cudaMemcpyAsync failed");
+        thrust::sequence(thrust::cuda::par.on(stream), leaves_origins.data(),
+                         leaves_origins.data() + n_leaves,
+                         static_cast<uint32_t>(0));
+
+        return n_leaves;
+    }
+
+    // scan for output offsets (leaf_output_offset)
+    cuda_utils::check_cuda_call(
+        cub::DeviceScan::ExclusiveSum(ws.cub_temp_storage, ws.cub_temp_bytes,
+                                      ws.leaf_branch_count,
+                                      ws.leaf_output_offset, n_leaves, stream),
+        "cub::DeviceScan::ExclusiveSum failed");
+
+    // ---- compute output size ----
+    SizeType last_offset, last_count;
+    cuda_utils::check_cuda_call(
+        cudaMemcpyAsync(&last_offset, ws.leaf_output_offset + (n_leaves - 1),
+                        sizeof(SizeType), cudaMemcpyDeviceToHost, stream),
+        "cudaMemcpyAsync failed");
+    cuda_utils::check_cuda_call(
+        cudaMemcpyAsync(&last_count, ws.leaf_branch_count + (n_leaves - 1),
+                        sizeof(SizeType), cudaMemcpyDeviceToHost, stream),
+        "cudaMemcpyAsync failed");
+
+    SizeType out_leaves = last_offset + last_count;
+
+    // ---- Kernel 2: materialize ----
+    kernel_materialize_branches_jerk<<<grid_dim, block_dim, 0, stream>>>(
+        leaves_tree.data(), leaves_branch.data(), leaves_origins.data(),
+        n_leaves, branch_max, ws);
+    cuda_utils::check_last_cuda_error("Kernel 2 launch failed");
+
+    return out_leaves;
+}
+
+SizeType poly_taylor_branch_snap_cuda(
+    cuda::std::span<const double> leaves_tree,
+    cuda::std::span<double> leaves_branch,
+    cuda::std::span<uint32_t> leaves_origins,
+    std::pair<double, double> coord_cur,
+    SizeType nbins,
+    double eta,
+    cuda::std::span<const ParamLimitTypeCUDA> param_limits,
+    SizeType branch_max,
+    SizeType n_leaves,
+    utils::BranchingWorkspaceCUDAView ws,
+    cudaStream_t stream) {
+    constexpr SizeType kLeavesStride = 12;
+
+    int h_global_branch_flag = 0;
+    int* d_global_branch_flag;
+    cuda_utils::check_cuda_call(
+        cudaMallocAsync(&d_global_branch_flag, sizeof(int), stream),
+        "cudaMallocAsync failed");
+    cuda_utils::check_cuda_call(
+        cudaMemsetAsync(d_global_branch_flag, 0, sizeof(int), stream),
+        "cudaMemsetAsync failed");
+
+    // ---- Kernel 1: analyze + branch enumeration ----
+    constexpr SizeType kThreadsPerBlock = 256;
+    const auto blocks_per_grid =
+        (n_leaves + kThreadsPerBlock - 1) / kThreadsPerBlock;
+    const dim3 block_dim(kThreadsPerBlock);
+    const dim3 grid_dim(blocks_per_grid);
+    cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
+
+    kernel_analyze_and_branch_snap<<<grid_dim, block_dim, 0, stream>>>(
+        leaves_tree.data(), n_leaves, coord_cur, nbins, eta,
+        param_limits.data(), branch_max, ws, d_global_branch_flag);
+    cuda_utils::check_last_cuda_error("Kernel 1 launch failed");
+
+    // ---- check global flag ----
+    cuda_utils::check_cuda_call(
+        cudaMemcpyAsync(&h_global_branch_flag, d_global_branch_flag,
+                        sizeof(int), cudaMemcpyDeviceToHost, stream),
+        "cudaMemcpyAsync failed");
+
+    if (h_global_branch_flag == 0) {
+        // FAST PATH: no branching
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(leaves_branch.data(), leaves_tree.data(),
+                            n_leaves * kLeavesStride * sizeof(double),
+                            cudaMemcpyDeviceToDevice, stream),
+            "cudaMemcpyAsync failed");
+        thrust::sequence(thrust::cuda::par.on(stream), leaves_origins.data(),
+                         leaves_origins.data() + n_leaves,
+                         static_cast<uint32_t>(0));
+
+        return n_leaves;
+    }
+
+    // scan for output offsets (leaf_output_offset)
+    cuda_utils::check_cuda_call(
+        cub::DeviceScan::ExclusiveSum(ws.cub_temp_storage, ws.cub_temp_bytes,
+                                      ws.leaf_branch_count,
+                                      ws.leaf_output_offset, n_leaves, stream),
+        "cub::DeviceScan::ExclusiveSum failed");
+
+    // ---- compute output size ----
+    SizeType last_offset, last_count;
+    cuda_utils::check_cuda_call(
+        cudaMemcpyAsync(&last_offset, ws.leaf_output_offset + (n_leaves - 1),
+                        sizeof(SizeType), cudaMemcpyDeviceToHost, stream),
+        "cudaMemcpyAsync failed");
+    cuda_utils::check_cuda_call(
+        cudaMemcpyAsync(&last_count, ws.leaf_branch_count + (n_leaves - 1),
                         sizeof(SizeType), cudaMemcpyDeviceToHost, stream),
         "cudaMemcpyAsync failed");
 
@@ -898,26 +1201,132 @@ SizeType poly_taylor_branch_snap_batch_cuda(
 
     // ---- Kernel 2: materialize ----
     kernel_materialize_branches_snap<<<grid_dim, block_dim, 0, stream>>>(
-        leaves_tree.data(), scratch_params.data(), scratch_dparams.data(),
-        scratch_counts.data(), leaf_output_offset.data(), n_leaves, branch_max,
-        leaves_branch.data(), leaves_origins.data());
+        leaves_tree.data(), leaves_branch.data(), leaves_origins.data(),
+        n_leaves, branch_max, ws);
     cuda_utils::check_last_cuda_error("Kernel 2 launch failed");
 
     return out_leaves;
 }
 
-void poly_taylor_resolve_cuda(cuda::std::span<const double> leaves_branch,
-                              cuda::std::span<const float> accel_grid,
-                              cuda::std::span<const float> freq_grid,
-                              cuda::std::span<SizeType> param_indices,
-                              cuda::std::span<float> phase_shift,
-                              std::pair<double, double> coord_add,
-                              std::pair<double, double> coord_cur,
-                              std::pair<double, double> coord_init,
-                              SizeType nbins,
-                              SizeType n_leaves,
-                              SizeType n_params,
-                              cudaStream_t stream) {
+} // namespace
+
+void ffa_taylor_resolve_poly_batch_cuda(
+    cuda::std::span<const double> param_arr_cur_flat,
+    cuda::std::span<const uint32_t> param_arr_cur_count,
+    cuda::std::span<const double> param_arr_prev_flat,
+    cuda::std::span<const uint32_t> param_arr_prev_count,
+    cuda::std::span<uint32_t> pindex_prev_flat_batch,
+    cuda::std::span<float> relative_phase_batch,
+    SizeType ffa_level,
+    SizeType latter,
+    double tseg_brute,
+    SizeType nbins,
+    SizeType n_params,
+    cudaStream_t stream) {
+    // Better occupancy than 512 for many kernels
+    constexpr int kBlockSize = 256;
+    const dim3 block(kBlockSize);
+    const dim3 grid((n_leaves + kBlockSize - 1) / kBlockSize);
+    cuda_utils::check_kernel_launch_params(grid, block);
+
+    // Two-level dispatch for complete compile-time specialization
+    auto dispatch = [&]<int N>() {
+        kernel_ffa_resolve_taylor_poly_batch<N><<<grid, block, 0, stream>>>(
+            param_arr_cur_flat.data(), param_arr_cur_count.data(),
+            param_arr_prev_flat.data(), param_arr_prev_count.data(),
+            pindex_prev_flat_batch.data(), relative_phase_batch.data(),
+            ffa_level, latter, tseg_brute, nbins, n_params);
+    };
+    switch (n_params) {
+    case 1:
+        dispatch.template operator()<1>();
+        break;
+    case 2:
+        dispatch.template operator()<2>();
+        break;
+    case 3:
+        dispatch.template operator()<3>();
+        break;
+    case 4:
+        dispatch.template operator()<4>();
+        break;
+    case 5:
+        dispatch.template operator()<5>();
+        break;
+    default:
+        throw std::invalid_argument("Unsupported n_params");
+    }
+    cuda_utils::check_last_cuda_error(
+        "FFA Taylor (poly) resolve kernel launch failed");
+}
+
+SizeType poly_taylor_seed_cuda(cuda::std::span<const double> accel_grid,
+                               cuda::std::span<const double> freq_grid,
+                               cuda::std::span<const double> dparams,
+                               cuda::std::span<double> seed_leaves,
+                               std::pair<double, double> /*coord_init*/,
+                               SizeType n_params,
+                               cudaStream_t stream) {
+    const SizeType n_leaves = accel_grid.size() * freq_grid.size();
+
+    constexpr SizeType kThreadPerBlock = 256;
+    const auto blocks_per_grid =
+        (n_leaves + kThreadPerBlock - 1) / kThreadPerBlock;
+
+    const dim3 block_dim(kThreadPerBlock);
+    const dim3 grid_dim(blocks_per_grid);
+    cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
+    kernel_poly_taylor_seed<<<grid_dim, block_dim>>>(
+        accel_grid.data(), accel_grid.size(), freq_grid.data(),
+        freq_grid.size(), dparams.data(), n_params, seed_leaves.data());
+    cuda_utils::check_last_cuda_error("Taylor seed kernel launch failed");
+    cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
+                                "cudaStreamSynchronize failed");
+    return n_leaves;
+}
+
+SizeType poly_taylor_branch_batch_cuda(
+    cuda::std::span<const double> leaves_tree,
+    cuda::std::span<double> leaves_branch,
+    cuda::std::span<uint32_t> leaves_origins,
+    std::pair<double, double> coord_cur,
+    SizeType nbins,
+    double eta,
+    cuda::std::span<const ParamLimitTypeCUDA> param_limits,
+    SizeType branch_max,
+    SizeType n_leaves,
+    SizeType n_params,
+    utils::BranchingWorkspaceCUDAView ws,
+    cudaStream_t stream) {
+    if (n_params == 2) {
+        return poly_taylor_branch_accel_cuda(
+            leaves_tree, leaves_branch, leaves_origins, coord_cur, nbins, eta,
+            param_limits, branch_max, n_leaves, ws, stream);
+    } else if (n_params == 3) {
+        return poly_taylor_branch_jerk_cuda(
+            leaves_tree, leaves_branch, leaves_origins, coord_cur, nbins, eta,
+            param_limits, branch_max, n_leaves, ws, stream);
+    } else if (n_params == 4) {
+        return poly_taylor_branch_snap_cuda(
+            leaves_tree, leaves_branch, leaves_origins, coord_cur, nbins, eta,
+            param_limits, branch_max, n_leaves, ws, stream);
+    } else {
+        throw std::invalid_argument("Unsupported n_params");
+    }
+}
+
+void poly_taylor_resolve_batch_cuda(cuda::std::span<const double> leaves_branch,
+                                    cuda::std::span<const float> accel_grid,
+                                    cuda::std::span<const float> freq_grid,
+                                    cuda::std::span<uint32_t> param_indices,
+                                    cuda::std::span<float> phase_shift,
+                                    std::pair<double, double> coord_add,
+                                    std::pair<double, double> coord_cur,
+                                    std::pair<double, double> coord_init,
+                                    SizeType nbins,
+                                    SizeType n_leaves,
+                                    SizeType n_params,
+                                    cudaStream_t stream) {
     if (n_leaves == 0) {
         return;
     }
@@ -939,10 +1348,11 @@ void poly_taylor_resolve_cuda(cuda::std::span<const double> leaves_branch,
 
     // Two-level dispatch for complete compile-time specialization
     auto dispatch = [&]<int N, bool S>() {
-        resolve_taylor_kernel<N, S><<<grid, block, shmem_bytes, stream>>>(
-            leaves_branch.data(), n_leaves, coord_add, coord_cur, coord_init,
-            accel_grid.data(), n_accel, freq_grid.data(), n_freq,
-            param_indices.data(), phase_shift.data(), nbins);
+        kernel_poly_taylor_resolve_batch<N, S>
+            <<<grid, block, shmem_bytes, stream>>>(
+                leaves_branch.data(), n_leaves, accel_grid.data(), n_accel,
+                freq_grid.data(), n_freq, param_indices.data(),
+                phase_shift.data(), coord_add, coord_cur, coord_init, nbins);
     };
 
     // Fully specialized dispatch
@@ -978,16 +1388,13 @@ void poly_taylor_resolve_cuda(cuda::std::span<const double> leaves_branch,
     cuda_utils::check_last_cuda_error("Taylor resolve kernel launch failed");
 }
 
-void poly_taylor_transform_cuda(cuda::std::span<double> leaves_tree,
-                                std::pair<double, double> coord_next,
-                                std::pair<double, double> coord_cur,
-                                SizeType n_leaves,
-                                SizeType n_params,
-                                bool use_conservative_tile,
-                                cudaStream_t stream) {
-    if (n_leaves == 0) {
-        return;
-    }
+void poly_taylor_transform_batch_cuda(cuda::std::span<double> leaves_tree,
+                                      std::pair<double, double> coord_next,
+                                      std::pair<double, double> coord_cur,
+                                      SizeType n_leaves,
+                                      SizeType n_params,
+                                      bool use_conservative_tile,
+                                      cudaStream_t stream) {
     // Better occupancy than 512 for many kernels
     constexpr int kBlockSize = 256;
     const dim3 block(kBlockSize);
@@ -996,7 +1403,7 @@ void poly_taylor_transform_cuda(cuda::std::span<double> leaves_tree,
 
     // Two-level dispatch for complete compile-time specialization
     auto dispatch = [&]<int N, bool C>() {
-        transform_taylor_kernel<N, C><<<grid, block, 0, stream>>>(
+        kernel_poly_taylor_transform_batch<N, C><<<grid, block, 0, stream>>>(
             leaves_tree.data(), n_leaves, coord_next, coord_cur);
     };
 

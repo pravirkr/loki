@@ -20,6 +20,7 @@
 
 #include "loki/common/types.hpp"
 #include "loki/cuda_utils.cuh"
+#include "loki/utils.hpp"
 
 namespace loki::utils {
 
@@ -112,7 +113,7 @@ __device__ __forceinline__ float get_phase_idx_device(double proper_time,
 }
 
 // Device helper: Branch a single parameter
-__device__ __forceinline__ cuda::std::pair<double, SizeType>
+__device__ __forceinline__ cuda::std::pair<double, uint32_t>
 branch_param_padded_device(double* __restrict__ out_values,
                            uint32_t out_size,
                            double param_cur,
@@ -120,15 +121,14 @@ branch_param_padded_device(double* __restrict__ out_values,
                            double dparam_new,
                            double param_min,
                            double param_max) {
-    constexpr double kEps    = 1e-12;
     const double param_range = (param_max - param_min) * 0.5;
-    if (dparam_new > (param_range + kEps)) {
+    if (dparam_new > (param_range + utils::kEps)) {
         out_values[0] = param_cur;
         return {dparam_new, static_cast<SizeType>(1)};
     }
 
     const auto num_points = static_cast<uint32_t>(
-        std::ceil(((dparam_cur + kEps) / dparam_new) - kEps));
+        std::ceil(((dparam_cur + utils::kEps) / dparam_new) - utils::kEps));
 
     const double confidence_const =
         0.5 + (0.5 / static_cast<double>(num_points));
@@ -146,65 +146,31 @@ branch_param_padded_device(double* __restrict__ out_values,
     return {dparam_cur / static_cast<double>(num_points), count};
 }
 
-// Helper: Compute branch count for a single parameter
-__device__ inline int compute_branch_count_device(double param_cur,
-                                                  double dparam_cur,
-                                                  double dparam_new,
-                                                  double param_min,
-                                                  double param_max,
-                                                  int branch_max) {
-    constexpr double kEps = 1e-12;
-
-    if (dparam_cur <= kEps || dparam_new <= kEps) {
-        return 1;
-    }
-
-    const double param_range = (param_max - param_min) / 2.0;
-    if (dparam_new > (param_range + kEps)) {
-        return 1;
-    }
-
-    const int num_points =
-        static_cast<int>(ceilf(((dparam_cur + kEps) / dparam_new) - kEps));
-
-    if (num_points <= 0) {
-        return 1;
-    }
-
-    return cuda::std::min(num_points, branch_max);
-}
-
-struct CubScanWorkspace {
-    void* temp_storage = nullptr;
-    size_t temp_bytes  = 0;
-    SizeType capacity  = 0;
-
-    void init(SizeType max_n) {
-        capacity = max_n;
-
-        cub::DeviceScan::ExclusiveSum(nullptr, temp_bytes, (SizeType*)nullptr,
-                                      (SizeType*)nullptr, max_n);
-
-        cudaMalloc(&temp_storage, temp_bytes);
-    }
-
-    void ensure(SizeType n) {
-        if (n <= capacity)
-            return;
-
-        if (temp_storage)
-            cudaFree(temp_storage);
-
-        cub::DeviceScan::ExclusiveSum(nullptr, temp_bytes, (SizeType*)nullptr,
-                                      (SizeType*)nullptr, n);
-
-        cudaMalloc(&temp_storage, temp_bytes);
-        capacity = n;
-    }
-
-    ~CubScanWorkspace() {
-        if (temp_storage)
-            cudaFree(temp_storage);
+__device__ __forceinline__ void
+branch_one_param_padded_device(uint32_t p,
+                               double cur,
+                               double sig_cur,
+                               double sig_new,
+                               double pmin,
+                               double pmax,
+                               double eta,
+                               double shift,
+                               double* __restrict__ scratch_params,
+                               double* __restrict__ scratch_dparams,
+                               uint32_t* __restrict__ scratch_counts,
+                               uint32_t flat_base,
+                               uint32_t branch_max) {
+    const uint32_t pad_offset = (flat_base + p) * branch_max;
+    if (shift >= (eta - utils::kEps)) {
+        auto [dparam_act, count] =
+            branch_param_padded_device(scratch_params + pad_offset, branch_max,
+                                       cur, sig_cur, sig_new, pmin, pmax);
+        scratch_dparams[flat_base + p] = dparam_act;
+        scratch_counts[flat_base + p]  = count;
+    } else {
+        scratch_params[pad_offset]     = cur;
+        scratch_dparams[flat_base + p] = sig_cur;
+        scratch_counts[flat_base + p]  = 1;
     }
 };
 

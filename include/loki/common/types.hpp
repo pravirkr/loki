@@ -29,6 +29,11 @@ concept TriviallyCopyable = std::is_trivially_copyable_v<T>;
 #ifdef LOKI_ENABLE_CUDA
 using ComplexTypeCUDA = cuda::std::complex<float>;
 
+struct ParamLimitTypeCUDA {
+    double min;
+    double max;
+};
+
 template <typename T>
 concept SupportedFoldTypeCUDA =
     std::is_same_v<T, float> || std::is_same_v<T, ComplexTypeCUDA>;

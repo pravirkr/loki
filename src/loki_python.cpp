@@ -13,6 +13,7 @@
 #include <pybind11/stl.h>
 
 #include "loki/common/types.hpp"
+#include "loki/core/taylor.hpp"
 #include "loki/psr_utils.hpp"
 #include "loki/transforms.hpp"
 
@@ -537,9 +538,10 @@ PYBIND11_MODULE(libloki, m) {
             for (const auto& arr : param_arr) {
                 param_vecs.emplace_back(arr.data(), arr.data() + arr.size());
             }
-            auto [pindex_prev, relative_phase] = core::ffa_taylor_resolve(
-                to_span<const double>(pset_cur), param_vecs, ffa_level, latter,
-                tseg_brute, nbins);
+            auto [pindex_prev, relative_phase] =
+                core::ffa_taylor_resolve_generic(
+                    to_span<const double>(pset_cur), param_vecs, ffa_level,
+                    latter, tseg_brute, nbins);
             return std::make_tuple(as_pyarray_ref(pindex_prev), relative_phase);
         },
         py::arg("pset_cur"), py::arg("param_arr"), py::arg("ffa_level"),

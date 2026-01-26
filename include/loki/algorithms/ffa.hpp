@@ -10,7 +10,7 @@
 
 #ifdef LOKI_ENABLE_CUDA
 #include <cuda/std/span>
-#include <cuda_runtime_api.h>
+#include <cuda_runtime.h>
 #include <thrust/device_vector.h>
 #endif // LOKI_ENABLE_CUDA
 

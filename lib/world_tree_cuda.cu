@@ -1,4 +1,4 @@
-#pragma once
+#include "loki/utils/world_tree.hpp"
 
 #include <algorithm>
 
@@ -19,6 +19,7 @@
 #include "loki/exceptions.hpp"
 
 namespace loki::utils {
+namespace {
 
 template <typename T>
 __global__ void compact_in_place_kernel(const uint8_t* __restrict__ keep,
@@ -109,6 +110,7 @@ struct CircularMaskFunctor {
         return (scores_ptr[phys] > threshold) ? 1 : 0;
     }
 };
+} // namespace
 
 /**
  * @brief GPU-resident circular buffer for world tree data
@@ -126,7 +128,8 @@ struct CircularMaskFunctor {
  *
  * @tparam FoldTypeCUDA Either float or ComplexTypeCUDA
  */
-template <SupportedFoldTypeCUDA FoldTypeCUDA = float> class WorldTreeCUDA {
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+class WorldTreeCUDA<FoldTypeCUDA>::Impl {
 public:
     /**
      * @brief Constructor for the WorldTreeCUDA class.
@@ -140,10 +143,10 @@ public:
      * @param max_batch_size Maximum number of candidates that can be added in a
      * single batch. This is used to allocate the scratch buffer.
      */
-    WorldTreeCUDA(SizeType capacity,
-                  SizeType nparams,
-                  SizeType nbins,
-                  SizeType max_batch_size)
+    Impl(SizeType capacity,
+         SizeType nparams,
+         SizeType nbins,
+         SizeType max_batch_size)
         : m_capacity(capacity),
           m_nparams(nparams),
           m_nbins(nbins),
@@ -167,16 +170,17 @@ public:
                                    "SuggestionTreeCUDA: nbins must be > 0");
     }
 
-    ~WorldTreeCUDA()                                   = default;
-    WorldTreeCUDA(WorldTreeCUDA&&) noexcept            = default;
-    WorldTreeCUDA& operator=(WorldTreeCUDA&&) noexcept = default;
-    WorldTreeCUDA(const WorldTreeCUDA&)                = delete;
-    WorldTreeCUDA& operator=(const WorldTreeCUDA&)     = delete;
+    ~Impl()                          = default;
+    Impl(Impl&&) noexcept            = default;
+    Impl& operator=(Impl&&) noexcept = default;
+    Impl(const Impl&)                = delete;
+    Impl& operator=(const Impl&)     = delete;
 
     // Size and capacity queries
     SizeType get_capacity() const noexcept { return m_capacity; }
     SizeType get_nparams() const noexcept { return m_nparams; }
     SizeType get_nbins() const noexcept { return m_nbins; }
+    SizeType get_max_batch_size() const noexcept { return m_max_batch_size; }
     SizeType get_leaves_stride() const noexcept { return m_leaves_stride; }
     SizeType get_folds_stride() const noexcept { return m_folds_stride; }
     SizeType get_size() const noexcept { return m_size; }
@@ -186,13 +190,13 @@ public:
     }
 
     // Get raw span of data
-    cuda::std::span<const double> get_leaves_span() noexcept {
+    cuda::std::span<const double> get_leaves_span() const noexcept {
         return {thrust::raw_pointer_cast(m_leaves.data()), m_leaves.size()};
     }
-    cuda::std::span<const FoldTypeCUDA> get_folds_span() noexcept {
+    cuda::std::span<const FoldTypeCUDA> get_folds_span() const noexcept {
         return {thrust::raw_pointer_cast(m_folds.data()), m_folds.size()};
     }
-    cuda::std::span<float> get_scores_span() noexcept {
+    cuda::std::span<const float> get_scores_span() const noexcept {
         return {thrust::raw_pointer_cast(m_scores.data()), m_scores.size()};
     }
 
@@ -436,7 +440,7 @@ public:
     /**
      * @brief Convert logical indices to physical indices
      */
-    void convert_to_physical_indices(cuda::std::span<SizeType> logical_indices,
+    void convert_to_physical_indices(cuda::std::span<uint32_t> logical_indices,
                                      SizeType n_leaves,
                                      cudaStream_t stream) const {
         error_check::check(
@@ -451,8 +455,9 @@ public:
         const SizeType physical_start =
             get_circular_index(m_read_consumed, m_head, m_capacity);
 
-        CircularIndexFunctor functor{.start    = physical_start,
-                                     .capacity = m_capacity};
+        CircularIndexFunctor functor{
+            .start    = static_cast<uint32_t>(physical_start),
+            .capacity = static_cast<uint32_t>(m_capacity)};
         thrust::transform(thrust::cuda::par.on(stream), logical_indices.begin(),
                           logical_indices.begin() +
                               static_cast<IndexType>(n_leaves),
@@ -578,7 +583,8 @@ public:
         cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
         compact_and_copy_kernel<<<grid_dim, block_dim, 0, stream>>>(
             leaves_batch_ptr, folds_batch_ptr, scores_batch_ptr,
-            m_scratch_mask.data(), m_scratch_prefix.data(), tmp_leaves_ptr,
+            thrust::raw_pointer_cast(m_scratch_mask.data()),
+            thrust::raw_pointer_cast(m_scratch_prefix.data()), tmp_leaves_ptr,
             tmp_folds_ptr, tmp_scores_ptr, slots_to_write, m_leaves_stride,
             m_folds_stride);
         cuda_utils::check_last_cuda_error("compact_and_copy_kernel failed");
@@ -799,8 +805,7 @@ private:
      * Single-pass approach: safely compacts in-place because write never
      * overtakes read (write_logical ≤ read_logical always holds).
      */
-    void prune_on_overload(float threshold,
-                           cuda_utils::CudaDeviceContext& ctx) {
+    void prune_on_overload(float threshold, cudaStream_t stream) {
         error_check::check(
             m_is_updating,
             "WorldTreeCUDA: prune_on_overload only allowed during updates");
@@ -812,37 +817,39 @@ private:
         // Mark survivors (logical indices) in keep mask
         CircularMaskFunctor functor{
             .scores_ptr = thrust::raw_pointer_cast(m_scores.data()),
-            .start      = start_idx,
-            .capacity   = m_capacity,
+            .start      = static_cast<uint32_t>(start_idx),
+            .capacity   = static_cast<uint32_t>(m_capacity),
             .threshold  = threshold};
-        thrust::transform(thrust::counting_iterator<uint32_t>(0),
+        thrust::transform(thrust::cuda::par.on(stream),
+                          thrust::counting_iterator<uint32_t>(0),
                           thrust::counting_iterator<uint32_t>(m_size),
                           m_scratch_mask.begin(), functor);
 
         // Exclusive prefix sum to get logical indices to keep
-        thrust::exclusive_scan(m_scratch_mask.begin(),
+        thrust::exclusive_scan(thrust::cuda::par.on(stream),
+                               m_scratch_mask.begin(),
                                m_scratch_mask.begin() + m_size,
                                m_scratch_prefix.begin(), uint32_t{0});
 
         // In-place compaction (three arrays)
         const dim3 block_dim(256);
         const dim3 grid_dim((m_size + block_dim.x - 1) / block_dim.x);
-        ctx.check_kernel_launch_params(grid_dim, block_dim);
-        compact_in_place_kernel<<<grid_dim, block_dim>>>(
+        cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
+        compact_in_place_kernel<<<grid_dim, block_dim, 0, stream>>>(
             thrust::raw_pointer_cast(m_scratch_mask.data()),
             thrust::raw_pointer_cast(m_scratch_prefix.data()),
             thrust::raw_pointer_cast(m_leaves.data()), start_idx, m_capacity,
             m_size, m_leaves_stride);
         cuda_utils::check_last_cuda_error(
             "compact_in_place_kernel leaves failed");
-        compact_in_place_kernel<<<grid_dim, block_dim>>>(
+        compact_in_place_kernel<<<grid_dim, block_dim, 0, stream>>>(
             thrust::raw_pointer_cast(m_scratch_mask.data()),
             thrust::raw_pointer_cast(m_scratch_prefix.data()),
             thrust::raw_pointer_cast(m_folds.data()), start_idx, m_capacity,
             m_size, m_folds_stride);
         cuda_utils::check_last_cuda_error(
             "compact_in_place_kernel folds failed");
-        compact_in_place_kernel<<<grid_dim, block_dim>>>(
+        compact_in_place_kernel<<<grid_dim, block_dim, 0, stream>>>(
             thrust::raw_pointer_cast(m_scratch_mask.data()),
             thrust::raw_pointer_cast(m_scratch_prefix.data()),
             thrust::raw_pointer_cast(m_scores.data()), start_idx, m_capacity,
@@ -878,6 +885,153 @@ private:
                                     "write_head must be within capacity");
         }
     }
-};
 
+}; // End WorldTreeCUDA::Impl definition
+
+// Public interface implementation
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+WorldTreeCUDA<FoldTypeCUDA>::WorldTreeCUDA(SizeType capacity,
+                                           SizeType nparams,
+                                           SizeType nbins,
+                                           SizeType max_batch_size)
+    : m_impl(std::make_unique<Impl>(capacity, nparams, nbins, max_batch_size)) {
+}
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+WorldTreeCUDA<FoldTypeCUDA>::~WorldTreeCUDA() = default;
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+WorldTreeCUDA<FoldTypeCUDA>::WorldTreeCUDA(WorldTreeCUDA&& other) noexcept =
+    default;
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+WorldTreeCUDA<FoldTypeCUDA>& WorldTreeCUDA<FoldTypeCUDA>::operator=(
+    WorldTreeCUDA<FoldTypeCUDA>&& other) noexcept = default;
+// Getters
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+cuda::std::span<const double>
+WorldTreeCUDA<FoldTypeCUDA>::get_leaves_span() const noexcept {
+    return m_impl->get_leaves_span();
+}
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+cuda::std::span<const FoldTypeCUDA>
+WorldTreeCUDA<FoldTypeCUDA>::get_folds_span() const noexcept {
+    return m_impl->get_folds_span();
+}
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+cuda::std::span<const float>
+WorldTreeCUDA<FoldTypeCUDA>::get_scores_span() const noexcept {
+    return m_impl->get_scores_span();
+}
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+SizeType WorldTreeCUDA<FoldTypeCUDA>::get_capacity() const noexcept {
+    return m_impl->get_capacity();
+}
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+SizeType WorldTreeCUDA<FoldTypeCUDA>::get_nparams() const noexcept {
+    return m_impl->get_nparams();
+}
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+SizeType WorldTreeCUDA<FoldTypeCUDA>::get_nbins() const noexcept {
+    return m_impl->get_nbins();
+}
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+SizeType WorldTreeCUDA<FoldTypeCUDA>::get_max_batch_size() const noexcept {
+    return m_impl->get_max_batch_size();
+}
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+SizeType WorldTreeCUDA<FoldTypeCUDA>::get_leaves_stride() const noexcept {
+    return m_impl->get_leaves_stride();
+}
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+SizeType WorldTreeCUDA<FoldTypeCUDA>::get_folds_stride() const noexcept {
+    return m_impl->get_folds_stride();
+}
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+SizeType WorldTreeCUDA<FoldTypeCUDA>::get_size() const noexcept {
+    return m_impl->get_size();
+}
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+SizeType WorldTreeCUDA<FoldTypeCUDA>::get_size_old() const noexcept {
+    return m_impl->get_size_old();
+}
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+float WorldTreeCUDA<FoldTypeCUDA>::get_size_lb() const noexcept {
+    return m_impl->get_size_lb();
+}
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+float WorldTreeCUDA<FoldTypeCUDA>::get_score_max() const noexcept {
+    return m_impl->get_score_max();
+}
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+float WorldTreeCUDA<FoldTypeCUDA>::get_score_min() const noexcept {
+    return m_impl->get_score_min();
+}
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+float WorldTreeCUDA<FoldTypeCUDA>::get_memory_usage() const noexcept {
+    return m_impl->get_memory_usage();
+}
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+std::pair<cuda::std::span<const double>, SizeType>
+WorldTreeCUDA<FoldTypeCUDA>::get_leaves_span(SizeType n_leaves) const {
+    return m_impl->get_leaves_span(n_leaves);
+}
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+cuda::std::span<double>
+WorldTreeCUDA<FoldTypeCUDA>::get_leaves_contiguous_span() noexcept {
+    return m_impl->get_leaves_contiguous_span();
+}
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+cuda::std::span<float>
+WorldTreeCUDA<FoldTypeCUDA>::get_scores_contiguous_span() noexcept {
+    return m_impl->get_scores_contiguous_span();
+}
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+void WorldTreeCUDA<FoldTypeCUDA>::set_size(SizeType size) noexcept {
+    m_impl->set_size(size);
+}
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+void WorldTreeCUDA<FoldTypeCUDA>::reset() noexcept {
+    m_impl->reset();
+}
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+void WorldTreeCUDA<FoldTypeCUDA>::prepare_in_place_update() {
+    m_impl->prepare_in_place_update();
+}
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+void WorldTreeCUDA<FoldTypeCUDA>::finalize_in_place_update() {
+    m_impl->finalize_in_place_update();
+}
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+void WorldTreeCUDA<FoldTypeCUDA>::consume_read(SizeType n) {
+    m_impl->consume_read(n);
+}
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+void WorldTreeCUDA<FoldTypeCUDA>::convert_to_physical_indices(
+    cuda::std::span<uint32_t> logical_indices,
+    SizeType n_leaves,
+    cudaStream_t stream) const {
+    m_impl->convert_to_physical_indices(logical_indices, n_leaves, stream);
+}
+// Other methods
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+void WorldTreeCUDA<FoldTypeCUDA>::add_initial(
+    cuda::std::span<const double> leaves_batch,
+    cuda::std::span<const FoldTypeCUDA> folds_batch,
+    cuda::std::span<const float> scores_batch,
+    SizeType slots_to_write) {
+    m_impl->add_initial(leaves_batch, folds_batch, scores_batch,
+                        slots_to_write);
+}
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+float WorldTreeCUDA<FoldTypeCUDA>::add_batch(
+    cuda::std::span<const double> leaves_batch,
+    cuda::std::span<const FoldTypeCUDA> folds_batch,
+    cuda::std::span<const float> scores_batch,
+    float current_threshold,
+    SizeType slots_to_write,
+    cudaStream_t stream) {
+    return m_impl->add_batch(leaves_batch, folds_batch, scores_batch,
+                             current_threshold, slots_to_write, stream);
+}
+// Explicit instantiation
+template class WorldTreeCUDA<float>;
+template class WorldTreeCUDA<ComplexTypeCUDA>;
 } // namespace loki::utils

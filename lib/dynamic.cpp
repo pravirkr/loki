@@ -154,13 +154,13 @@ void BasePruneDPFuncts<FoldType, Derived>::pack(
 template <SupportedFoldType FoldType, typename Derived>
 void BaseTaylorPruneDPFuncts<FoldType, Derived>::seed(
     std::span<const FoldType> fold_segment,
-    std::pair<double, double> coord_init,
     std::span<double> seed_leaves,
-    std::span<float> seed_scores) {
+    std::span<float> seed_scores,
+    std::pair<double, double> coord_init) {
 
     const auto n_leaves =
-        poly_taylor_seed(this->m_param_arr, this->m_dparams,
-                         this->m_cfg.get_nparams(), coord_init, seed_leaves);
+        poly_taylor_seed(this->m_param_arr, this->m_dparams, seed_leaves,
+                         coord_init, this->m_cfg.get_nparams());
     // Fold segment is (n_leaves, 2, nbins)
     const auto nbins = this->m_cfg.get_nbins();
     error_check::check_greater_equal(seed_scores.size(), n_leaves,
@@ -210,33 +210,32 @@ PrunePolyTaylorDPFuncts<FoldType>::PrunePolyTaylorDPFuncts(
 template <SupportedFoldType FoldType>
 SizeType PrunePolyTaylorDPFuncts<FoldType>::branch(
     std::span<const double> leaves_tree,
-    std::pair<double, double> coord_cur,
-    std::pair<double, double> /*coord_prev*/,
     std::span<double> leaves_branch,
     std::span<SizeType> leaves_origins,
+    std::pair<double, double> coord_cur,
+    std::pair<double, double> /*coord_prev*/,
     SizeType n_leaves,
-    std::span<double> scratch_params,
-    std::span<double> scratch_dparams,
-    std::span<SizeType> scratch_counts) const {
-    return kPolyBranchFuncs[this->m_cfg.get_nparams() - 2](
-        leaves_tree, coord_cur, leaves_branch, leaves_origins, n_leaves,
+    utils::BranchingWorkspaceView ws) const {
+    return poly_taylor_branch_batch(
+        leaves_tree, leaves_branch, leaves_origins, coord_cur,
         this->m_cfg.get_nbins(), this->m_cfg.get_eta(),
-        this->m_cfg.get_param_limits(), this->m_branch_max, scratch_params,
-        scratch_dparams, scratch_counts);
+        this->m_cfg.get_param_limits(), this->m_branch_max, n_leaves,
+        this->m_cfg.get_nparams(), ws);
 }
 
 template <SupportedFoldType FoldType>
 void PrunePolyTaylorDPFuncts<FoldType>::resolve(
     std::span<const double> leaves_branch,
+    std::span<SizeType> param_indices,
+    std::span<float> phase_shift,
     std::pair<double, double> coord_add,
     std::pair<double, double> coord_cur,
     std::pair<double, double> coord_init,
-    std::span<SizeType> param_indices,
-    std::span<float> phase_shift,
     SizeType n_leaves) const {
-    kPolyResolveFuncs[this->m_cfg.get_nparams() - 2](
-        leaves_branch, coord_add, coord_cur, coord_init, this->m_param_arr,
-        param_indices, phase_shift, this->m_cfg.get_nbins(), n_leaves);
+    poly_taylor_resolve_batch(leaves_branch, this->m_param_arr, param_indices,
+                              phase_shift, coord_add, coord_cur, coord_init,
+                              this->m_cfg.get_nbins(), n_leaves,
+                              this->m_cfg.get_nparams());
 }
 
 template <SupportedFoldType FoldType>
@@ -245,9 +244,9 @@ void PrunePolyTaylorDPFuncts<FoldType>::transform(
     std::pair<double, double> coord_next,
     std::pair<double, double> coord_cur,
     SizeType n_leaves) const {
-    kPolyTransformFuncs[this->m_cfg.get_nparams() - 2](
-        leaves_tree, coord_next, coord_cur, n_leaves,
-        this->m_cfg.get_use_conservative_tile());
+    poly_taylor_transform_batch(leaves_tree, coord_next, coord_cur, n_leaves,
+                                this->m_cfg.get_nparams(),
+                                this->m_cfg.get_use_conservative_tile());
 }
 
 template <SupportedFoldType FoldType>
@@ -255,8 +254,8 @@ void PrunePolyTaylorDPFuncts<FoldType>::report(
     std::span<double> leaves_tree,
     std::pair<double, double> coord_report,
     SizeType n_leaves) const {
-    report_leaves_taylor_batch(leaves_tree, coord_report, n_leaves,
-                               this->m_cfg.get_nparams());
+    poly_taylor_report_batch(leaves_tree, coord_report, n_leaves,
+                             this->m_cfg.get_nparams());
 }
 
 // Specialized implementation for Circular orbit search in Taylor basis
@@ -280,20 +279,17 @@ PruneCircTaylorDPFuncts<FoldType>::PruneCircTaylorDPFuncts(
 template <SupportedFoldType FoldType>
 SizeType PruneCircTaylorDPFuncts<FoldType>::branch(
     std::span<const double> leaves_tree,
-    std::pair<double, double> coord_cur,
-    std::pair<double, double> /*coord_prev*/,
     std::span<double> leaves_branch,
     std::span<SizeType> leaves_origins,
+    std::pair<double, double> coord_cur,
+    std::pair<double, double> /*coord_prev*/,
     SizeType n_leaves,
-    std::span<double> scratch_params,
-    std::span<double> scratch_dparams,
-    std::span<SizeType> scratch_counts) const {
+    utils::BranchingWorkspaceView ws) const {
     return circ_taylor_branch_batch(
         leaves_tree, coord_cur, leaves_branch, leaves_origins, n_leaves,
         this->m_cfg.get_nbins(), this->m_cfg.get_eta(),
         this->m_cfg.get_param_limits(), this->m_branch_max,
-        this->m_cfg.get_minimum_snap_cells(), scratch_params, scratch_dparams,
-        scratch_counts);
+        this->m_cfg.get_minimum_snap_cells(), ws);
 }
 
 template <SupportedFoldType FoldType>
@@ -310,11 +306,11 @@ SizeType PruneCircTaylorDPFuncts<FoldType>::validate(
 template <SupportedFoldType FoldType>
 void PruneCircTaylorDPFuncts<FoldType>::resolve(
     std::span<const double> leaves_branch,
+    std::span<SizeType> param_indices,
+    std::span<float> phase_shift,
     std::pair<double, double> coord_add,
     std::pair<double, double> coord_cur,
     std::pair<double, double> coord_init,
-    std::span<SizeType> param_indices,
-    std::span<float> phase_shift,
     SizeType n_leaves) const {
     circ_taylor_resolve_batch(leaves_branch, coord_add, coord_cur, coord_init,
                               this->m_param_arr, param_indices, phase_shift,
@@ -338,8 +334,8 @@ void PruneCircTaylorDPFuncts<FoldType>::report(
     std::span<double> leaves_tree,
     std::pair<double, double> coord_report,
     SizeType n_leaves) const {
-    report_leaves_taylor_batch(leaves_tree, coord_report, n_leaves,
-                               this->m_cfg.get_nparams());
+    poly_taylor_report_batch(leaves_tree, coord_report, n_leaves,
+                             this->m_cfg.get_nparams());
 }
 
 // Factory function to create the correct implementation based on the kind

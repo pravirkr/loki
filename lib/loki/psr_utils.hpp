@@ -111,6 +111,36 @@ branch_param_padded(std::span<double> out_values,
                     double param_min = std::numeric_limits<double>::lowest(),
                     double param_max = std::numeric_limits<double>::max());
 
+inline void branch_one_param_padded(int p,
+                                    double cur,
+                                    double sig_cur,
+                                    double sig_new,
+                                    double pmin,
+                                    double pmax,
+                                    double eta,
+                                    const double* __restrict shift_bins_ptr,
+                                    double* __restrict scratch_params_ptr,
+                                    double* __restrict scratch_dparams_ptr,
+                                    SizeType* __restrict scratch_counts_ptr,
+                                    SizeType flat_base,
+                                    SizeType branch_max) {
+    constexpr double kEps     = 1e-12;
+    const SizeType pad_offset = (flat_base + p) * branch_max;
+
+    if (shift_bins_ptr[flat_base + p] >= (eta - kEps)) {
+        auto slice =
+            std::span<double>(scratch_params_ptr + pad_offset, branch_max);
+        auto [dparam_act, count] = psr_utils::branch_param_padded(
+            slice, cur, sig_cur, sig_new, pmin, pmax);
+        scratch_dparams_ptr[flat_base + p] = dparam_act;
+        scratch_counts_ptr[flat_base + p]  = count;
+    } else {
+        scratch_params_ptr[pad_offset]     = cur;
+        scratch_dparams_ptr[flat_base + p] = sig_cur;
+        scratch_counts_ptr[flat_base + p]  = 1;
+    }
+}
+
 // Generate an evenly spaced array of values between vmin and vmax.
 std::vector<double> range_param(double vmin, double vmax, double dv);
 

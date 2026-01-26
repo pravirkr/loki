@@ -20,7 +20,7 @@
 #include "loki/cuda_utils.cuh"
 #include "loki/psr_utils.hpp"
 #include "loki/utils.hpp"
-#include "loki/world_tree.cuh"
+#include "loki/utils/world_tree.hpp"
 
 namespace loki::algorithms {
 
@@ -152,15 +152,15 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA> struct PruningWorkspaceCUDA {
     thrust::device_vector<FoldTypeCUDA> branched_folds_d;
     thrust::device_vector<float> branched_scores_d;
     // Scratch space for indices
-    thrust::device_vector<SizeType> branched_indices_d;
+    thrust::device_vector<uint32_t> branched_indices_d;
     // Scratch space for resolving parameters
-    thrust::device_vector<SizeType> branched_param_idx_d;
+    thrust::device_vector<uint32_t> branched_param_idx_d;
     thrust::device_vector<float> branched_phase_shift_d;
 
     // Scratch space for branching
     thrust::device_vector<double> scratch_params_d;
     thrust::device_vector<double> scratch_dparams_d;
-    thrust::device_vector<SizeType> scratch_counts_d;
+    thrust::device_vector<uint32_t> scratch_counts_d;
 
     PruningWorkspaceCUDA(SizeType batch_size,
                          SizeType branch_max,
@@ -247,6 +247,9 @@ public:
                     m_batch_size, m_branch_max, m_cfg.get_nparams(),
                     m_cfg.get_nbins());
         }
+
+        m_branching_workspace = std::make_unique<utils::BranchingWorkspaceCUDA>(
+            m_batch_size, m_branch_max, m_cfg.get_nparams());
 
         // Allocate buffers for seeding the world tree and scoring
         const auto ncoords_ffa = m_ffa_plan.get_ncoords().back();
@@ -351,6 +354,7 @@ private:
 
     std::unique_ptr<utils::WorldTreeCUDA<FoldTypeCUDA>> m_world_tree;
     std::unique_ptr<PruningWorkspaceCUDA<FoldTypeCUDA>> m_pruning_workspace;
+    std::unique_ptr<utils::BranchingWorkspaceCUDA> m_branching_workspace;
 
     // Buffers for seeding the world tree and scoring
     thrust::device_vector<double> m_seed_leaves_d;
@@ -377,9 +381,9 @@ private:
             ffa_fold, m_snail_scheme->get_ref_idx());
         const auto coord_init = m_snail_scheme->get_coord(m_prune_level);
         const auto n_leaves   = m_ffa_plan.get_ncoords().back();
-        m_prune_funcs->seed(fold_segment, coord_init,
-                            cuda_utils::as_span(m_seed_leaves_d),
-                            cuda_utils::as_span(m_seed_scores_d), stream);
+        m_prune_funcs->seed(fold_segment, cuda_utils::as_span(m_seed_leaves_d),
+                            cuda_utils::as_span(m_seed_scores_d), coord_init,
+                            stream);
         // Initialize the WorldTree with the generated data
         m_world_tree->add_initial(
             cuda_utils::as_span(m_seed_leaves_d), fold_segment,
@@ -443,6 +447,7 @@ private:
         const auto n_branches = m_world_tree->get_size_old();
         const auto batch_size =
             std::max(1UL, std::min(m_batch_size, n_branches));
+        auto branch_ws = m_branching_workspace->get_view();
 
         // Process branches in batches
         // Process branches in potentially split batches to handle wraps
@@ -463,18 +468,12 @@ private:
             }
             total_processed += current_batch_size;
 
-            const auto [n_leaves_batch, n_leaves_after_validation] =
-                m_prune_funcs->branch_and_validate(
-                    leaves_tree_span, coord_cur, coord_prev,
-                    cuda_utils::as_span(m_pruning_workspace->branched_leaves_d),
-                    cuda_utils::as_span(
-                        m_pruning_workspace->branched_indices_d),
-                    current_batch_size,
-                    cuda_utils::as_span(m_pruning_workspace->scratch_params_d),
-                    cuda_utils::as_span(m_pruning_workspace->scratch_dparams_d),
-                    cuda_utils::as_span(m_pruning_workspace->scratch_counts_d),
-                    stream);
-            if (n_leaves_batch == 0 || n_leaves_after_validation == 0) {
+            const auto n_leaves_batch = m_prune_funcs->branch(
+                leaves_tree_span,
+                cuda_utils::as_span(m_pruning_workspace->branched_leaves_d),
+                cuda_utils::as_span(m_pruning_workspace->branched_indices_d),
+                coord_cur, coord_prev, current_batch_size, branch_ws, stream);
+            if (n_leaves_batch == 0) {
                 m_world_tree->consume_read(current_batch_size);
                 continue;
             }
@@ -483,14 +482,24 @@ private:
                 "Branch factor exceeded workspace size:n_leaves_batch <= "
                 "max_branched_leaves");
 
+            // Validation
+            const auto n_leaves_after_validation = m_prune_funcs->validate(
+                cuda_utils::as_span(m_pruning_workspace->branched_leaves_d),
+                cuda_utils::as_span(m_pruning_workspace->branched_indices_d),
+                coord_cur, n_leaves_batch, stream);
+            if (n_leaves_after_validation == 0) {
+                m_world_tree->consume_read(current_batch_size);
+                continue;
+            }
+
             // Resolve kernel
             m_prune_funcs->resolve(
                 cuda_utils::as_span(m_pruning_workspace->branched_leaves_d),
-                coord_add, coord_cur, coord_init,
                 cuda_utils::as_span(m_pruning_workspace->branched_param_idx_d),
                 cuda_utils::as_span(
                     m_pruning_workspace->branched_phase_shift_d),
-                n_leaves_after_validation, stream);
+                coord_add, coord_cur, coord_init, n_leaves_after_validation,
+                stream);
 
             // Shift and add kernel
             m_world_tree->convert_to_physical_indices(
@@ -499,7 +508,7 @@ private:
                 n_leaves_after_validation, stream);
 
             m_prune_funcs->shift_add(
-                cuda_utils::as_span(m_world_tree->get_folds_span()),
+                m_world_tree->get_folds_span(),
                 cuda_utils::as_span(m_pruning_workspace->branched_indices_d),
                 ffa_fold_segment,
                 cuda_utils::as_span(m_pruning_workspace->branched_param_idx_d),
