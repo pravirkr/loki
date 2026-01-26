@@ -73,7 +73,7 @@ void ffa_taylor_resolve_crackle_batch(
 
 SizeType poly_taylor_seed(std::span<const std::vector<double>> param_arr,
                           std::span<const double> dparams,
-                          SizeType poly_order,
+                          SizeType n_params,
                           std::pair<double, double> coord_init,
                           std::span<double> seed_leaves);
 
@@ -232,6 +232,14 @@ void ffa_taylor_resolve_freq_cuda(
     double tseg_brute,
     SizeType nbins,
     cudaStream_t stream);
+
+SizeType poly_taylor_seed_cuda(cuda::std::span<const double> accel_grid,
+                               cuda::std::span<const double> freq_grid,
+                               cuda::std::span<const double> dparams,
+                               std::pair<double, double> coord_init,
+                               SizeType n_params,
+                               cuda::std::span<double> seed_leaves,
+                               cudaStream_t stream);
 
 void ffa_taylor_resolve_poly_cuda(
     cuda::std::span<const double> param_arr_cur_flat,

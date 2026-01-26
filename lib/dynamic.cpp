@@ -345,7 +345,7 @@ void PruneCircTaylorDPFuncts<FoldType>::report(
 // Factory function to create the correct implementation based on the kind
 template <SupportedFoldType FoldType>
 std::unique_ptr<PruneDPFuncts<FoldType>>
-create_prune_dp_functs(std::string_view kind,
+create_prune_dp_functs(std::string_view poly_basis,
                        std::span<const std::vector<double>> param_arr,
                        std::span<const double> dparams,
                        SizeType nseg_ffa,
@@ -354,19 +354,19 @@ create_prune_dp_functs(std::string_view kind,
                        SizeType batch_size,
                        SizeType branch_max) {
     const auto n_params = cfg.get_nparams();
-    if (kind == "taylor" && n_params <= 4) {
+    if (poly_basis == "taylor" && n_params <= 4) {
         return std::make_unique<PrunePolyTaylorDPFuncts<FoldType>>(
             param_arr, dparams, nseg_ffa, tseg_ffa, std::move(cfg), batch_size,
             branch_max);
     }
-    if (kind == "taylor" && n_params == 5) {
+    if (poly_basis == "taylor" && n_params == 5) {
         return std::make_unique<PruneCircTaylorDPFuncts<FoldType>>(
             param_arr, dparams, nseg_ffa, tseg_ffa, std::move(cfg), batch_size,
             branch_max);
     }
     throw std::runtime_error(std::format(
-        "Unknown pruning kind: '{}'. Valid options: 'taylor', 'circular'",
-        kind));
+        "Unknown poly_basis: '{}'. Valid options: 'taylor', 'circular'",
+        poly_basis));
 }
 
 // Explicit template instantiations

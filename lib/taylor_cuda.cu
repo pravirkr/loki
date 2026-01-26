@@ -1,5 +1,6 @@
 #include "loki/core/taylor.hpp"
 
+#include <cuda/atomic>
 #include <cuda/std/limits>
 #include <cuda/std/span>
 #include <cuda/std/type_traits>
@@ -15,445 +16,210 @@ namespace loki::core {
 
 namespace {
 
-template <SupportedFoldTypeCUDA FoldTypeCUDA>
-__global__ void seed_kernel(const FoldTypeCUDA* __restrict__ ffa_fold,
-                            cuda::std::pair<double, double> coord_init,
-                            const double* __restrict__ param_arr,
-                            const double* __restrict__ dparams,
-                            int poly_order,
-                            int nbins,
-                            double* __restrict__ tree_leaves,
-                            FoldTypeCUDA* __restrict__ tree_folds,
-                            float* __restrict__ tree_scores,
-                            int n_leaves) {
-    const auto idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= n_leaves) {
+__global__ void poly_taylor_seed_kernel(const double* __restrict__ accel_grid,
+                                        uint32_t n_accel,
+                                        const double* __restrict__ freq_grid,
+                                        uint32_t n_freq,
+                                        const double* __restrict__ dparams,
+                                        uint32_t n_params,
+                                        double* __restrict__ seed_leaves) {
+    constexpr uint32_t kParamStride = 2;
+
+    const uint32_t ileaf    = (blockIdx.x * blockDim.x) + threadIdx.x;
+    const uint32_t n_leaves = n_accel * n_freq;
+    if (ileaf >= n_leaves) {
         return;
     }
-    int n_param_sets = 1;
-    for (int i = 0; i < poly_order; ++i) {
-        n_param_sets *= param_arr[(i * 2)];
-    }
-    const auto param_set = idx * n_param_sets;
-    for (int i = 0; i < n_param_sets; ++i) {
-        tree_leaves[idx * n_param_sets + i] = param_arr[i][param_set + i];
-    }
-    for (int i = 0; i < nbins; ++i) {
-        tree_folds[(idx * nbins) + i] = ffa_fold[(idx * nbins) + i];
-    }
-    tree_scores[idx] = 0.0F;
+
+    const uint32_t accel_idx = ileaf / n_freq;
+    const uint32_t freq_idx  = ileaf % n_freq;
+
+    const double accel   = accel_grid[accel_idx];
+    const double f0      = freq_grid[freq_idx];
+    const double d_accel = dparams[n_params - 2];
+    const double df      = dparams[n_params - 1];
+
+    const uint32_t leaves_stride = (n_params + 2) * kParamStride;
+    const uint32_t base =
+        ((n_params - 2) * kParamStride) + (ileaf * leaves_stride);
+
+    seed_leaves[base + 0] = accel;
+    seed_leaves[base + 1] = d_accel;
+    seed_leaves[base + 2] = 0.0;
+    seed_leaves[base + 3] = df * (utils::kCval / f0);
+    seed_leaves[base + 4] = 0.0;
+    seed_leaves[base + 5] = 0.0;
+    seed_leaves[base + 6] = f0;
+    seed_leaves[base + 7] = 0.0;
 }
 
-// Phase 1a: Classify leaves into branching vs non-branching
 __global__ void
-compute_shift_bins_kernel(const double* __restrict__ leaves_tree,
-                          cuda::std::pair<double, double> coord_cur,
-                          double eta,
-                          SizeType nbins,
-                          SizeType n_leaves,
-                          const double* __restrict__ param_limits_d2,
-                          const double* __restrict__ param_limits_d1,
-                          uint8_t* __restrict__ branch_flags,
-                          SizeType* __restrict__ branch_counts) {
-
-    constexpr double kCval           = 299792458.0;
-    constexpr double kEps            = 1e-12;
-    constexpr SizeType kLeavesStride = 8;
-
-    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= n_leaves)
-        return;
-
-    // Load leaf data
-    const double* leaf  = &leaves_tree[tid * kLeavesStride];
-    const double d2_err = leaf[1];
-    const double d1_err = leaf[3];
-    const double f0     = leaf[6];
-
-    // Compute shift bins
-    const double dt      = coord_cur.second;
-    const double dt2     = dt * dt;
-    const double inv_dt  = 1.0 / dt;
-    const double inv_dt2 = inv_dt * inv_dt;
-    const double dphi    = eta / static_cast<double>(nbins);
-    const double dfactor = kCval / f0;
-
-    // New step sizes
-    const double d2_step = dphi * dfactor * 4.0 * inv_dt2;
-    const double d1_step = dphi * dfactor * 1.0 * inv_dt;
-
-    // Shift bins
-    const double shift_d2 = (d2_err - d2_step) * dt2 * nbins / (4.0 * dfactor);
-    const double shift_d1 = (d1_err - d1_step) * dt * nbins / (1.0 * dfactor);
-
-    const double eta_threshold = eta - kEps;
-    const bool needs_d2_branch = shift_d2 >= eta_threshold;
-    const bool needs_d1_branch = shift_d1 >= eta_threshold;
-    const bool needs_branching = needs_d2_branch || needs_d1_branch;
-
-    branch_flags[tid] = needs_branching ? 1 : 0;
-
-    if (needs_branching) {
-        // Compute branch counts
-        const double d2_val = leaf[0];
-        const double d1_val = leaf[2];
-
-        int n_d2 = 1;
-        if (needs_d2_branch) {
-            n_d2 = detail::compute_branch_count_device(d2_val, d2_err, d2_step,
-                                                       param_limits_d2[0],
-                                                       param_limits_d2[1], 16);
-        }
-
-        int n_d1 = 1;
-        if (needs_d1_branch) {
-            const double d1_min = (1.0 - param_limits_d1[1] / f0) * kCval;
-            const double d1_max = (1.0 - param_limits_d1[0] / f0) * kCval;
-            n_d1 = detail::compute_branch_count_device(d1_val, d1_err, d1_step,
-                                                       d1_min, d1_max, 16);
-        }
-
-        branch_counts[tid] = n_d2 * n_d1;
-    } else {
-        branch_counts[tid] = 1;
-    }
-}
-
-// Phase 2a: Copy non-branching leaves
-__global__ void copy_leaves_kernel(const double* __restrict__ leaves_tree,
-                                   const uint8_t* __restrict__ branch_flags,
-                                   const SizeType* __restrict__ copy_offsets,
-                                   SizeType n_leaves,
-                                   double* __restrict__ branched_leaves,
-                                   SizeType* __restrict__ branched_indices) {
-
-    constexpr SizeType kLeavesStride = 8;
-
-    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= n_leaves)
-        return;
-    if (branch_flags[tid] == 1)
-        return; // Skip branching leaves
-
-    const SizeType out_idx = copy_offsets[tid];
-    const double* src      = &leaves_tree[tid * kLeavesStride];
-    double* dst            = &branched_leaves[out_idx * kLeavesStride];
-
-// Unrolled copy (compiler optimizes to vector loads/stores)
-#pragma unroll
-    for (int i = 0; i < kLeavesStride; ++i) {
-        dst[i] = src[i];
-    }
-
-    branched_indices[out_idx] = tid;
-}
-
-// Helper: Compact branching leaf IDs
-__global__ void
-compact_branching_ids_kernel(const uint8_t* __restrict__ branch_flags,
-                             SizeType n_leaves,
-                             SizeType* __restrict__ branching_leaf_ids,
-                             SizeType* __restrict__ n_branching) {
-
-    const int tid = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
-    if (tid >= static_cast<int>(n_leaves))
-        return;
-    if (branch_flags[tid] == 0)
-        return;
-
-    const SizeType idx      = atomicAdd(n_branching, 1);
-    branching_leaf_ids[idx] = static_cast<SizeType>(tid);
-}
-
-// Phase 2b: Branch leaves that need branching
-__global__ void
-branch_leaves_kernel(const double* __restrict__ leaves_tree,
-                     const SizeType* __restrict__ branching_leaf_ids,
-                     const SizeType* __restrict__ branch_offsets,
-                     cuda::std::pair<double, double> coord_cur,
-                     double eta,
-                     SizeType nbins,
-                     SizeType n_branching_leaves,
-                     SizeType branch_max,
-                     const double* __restrict__ param_limits_d2,
-                     const double* __restrict__ param_limits_d1,
-                     double* __restrict__ branched_leaves,
-                     SizeType* __restrict__ branched_indices,
-                     SizeType n_copy_offset) {
-
-    constexpr double kCval           = 299792458.0;
-    constexpr SizeType kLeavesStride = 8;
-
-    __shared__ double s_d2_vals[16];
-    __shared__ double s_d1_vals[16];
-    __shared__ double s_d2_err, s_d1_err;
-    __shared__ double s_d0_val, s_d0_err, s_f0, s_basis;
-    __shared__ int s_n_d2, s_n_d1;
-    __shared__ SizeType s_out_base;
-    __shared__ SizeType s_leaf_idx;
-
-    const int bid        = blockIdx.x;
-    const int tid        = threadIdx.x;
-    const int block_size = blockDim.x;
-
-    if (bid >= n_branching_leaves)
-        return;
-
-    // Load leaf index
-    if (tid == 0) {
-        s_leaf_idx = branching_leaf_ids[bid];
-    }
-    __syncthreads();
-
-    const double* leaf = &leaves_tree[s_leaf_idx * kLeavesStride];
-
-    // Thread 0: Branch both parameters
-    if (tid == 0) {
-        const double d2_val      = leaf[0];
-        const double d2_err_orig = leaf[1];
-        const double d1_val      = leaf[2];
-        const double d1_err_orig = leaf[3];
-        const double f0          = leaf[6];
-
-        const double dt      = coord_cur.second;
-        const double dt2     = dt * dt;
-        const double inv_dt  = 1.0 / dt;
-        const double inv_dt2 = inv_dt * inv_dt;
-        const double dphi    = eta / static_cast<double>(nbins);
-        const double dfactor = kCval / f0;
-
-        // Compute new step sizes
-        const double d2_step = dphi * dfactor * 4.0 * inv_dt2;
-        const double d1_step = dphi * dfactor * 1.0 * inv_dt;
-
-        // Branch d2
-        s_n_d2 = detail::branch_param_padded_device(
-            s_d2_vals, d2_val, d2_err_orig, d2_step, param_limits_d2[0],
-            param_limits_d2[1], static_cast<int>(branch_max));
-        s_d2_err = d2_err_orig / static_cast<double>(s_n_d2);
-
-        // Branch d1
-        const double d1_min = (1.0 - param_limits_d1[1] / f0) * kCval;
-        const double d1_max = (1.0 - param_limits_d1[0] / f0) * kCval;
-        s_n_d1              = detail::branch_param_padded_device(
-            s_d1_vals, d1_val, d1_err_orig, d1_step, d1_min, d1_max,
-            static_cast<int>(branch_max));
-        s_d1_err = d1_err_orig / static_cast<double>(s_n_d1);
-
-        // Copy non-branching parameters
-        s_d0_val = leaf[4];
-        s_d0_err = leaf[5];
-        s_f0     = leaf[6];
-        s_basis  = leaf[7];
-
-        // Compute output base
-        s_out_base = n_copy_offset + branch_offsets[s_leaf_idx];
-    }
-    __syncthreads();
-
-    // All threads: Cartesian product
-    const int total = s_n_d2 * s_n_d1;
-    for (int idx = tid; idx < total; idx += block_size) {
-        const int i = idx / s_n_d1;
-        const int j = idx % s_n_d1;
-
-        const SizeType out_offset       = (s_out_base + idx) * kLeavesStride;
-        branched_leaves[out_offset + 0] = s_d2_vals[i];
-        branched_leaves[out_offset + 1] = s_d2_err;
-        branched_leaves[out_offset + 2] = s_d1_vals[j];
-        branched_leaves[out_offset + 3] = s_d1_err;
-        branched_leaves[out_offset + 4] = s_d0_val;
-        branched_leaves[out_offset + 5] = s_d0_err;
-        branched_leaves[out_offset + 6] = s_f0;
-        branched_leaves[out_offset + 7] = s_basis;
-
-        branched_indices[s_out_base + idx] = s_leaf_idx;
-    }
-}
-
-__device__ inline void
-branch_and_validate_taylor_accel(const double* __restrict__ leaves_tree,
-                                 cuda::std::pair<double, double> coord_cur,
-                                 cuda::std::pair<double, double> coord_prev,
-                                 double* __restrict__ branched_leaves,
-                                 SizeType* __restrict__ branched_indices,
-                                 SizeType n_leaves,
-                                 SizeType& n_leaves_after_branching,
-                                 SizeType& n_leaves_after_validation,
-                                 SizeType branch_max,
-                                 SizeType nbins,
-                                 double eta,
-                                 const double* __restrict__ param_limits_d2,
-                                 const double* __restrict__ param_limits_d1,
-                                 double* __restrict__ scratch_params,
-                                 double* __restrict__ scratch_dparams,
-                                 SizeType* __restrict__ scratch_counts) {
-    constexpr SizeType kParams       = 2;
+kernel_analyze_and_branch_snap(const double* __restrict__ leaves_tree,
+                               cuda::std::pair<double, double> coord_cur,
+                               uint32_t n_leaves,
+                               uint32_t nbins,
+                               double eta,
+                               const ParamLimitType* __restrict__ param_limits,
+                               uint32_t branch_max,
+                               double* __restrict__ scratch_params,
+                               double* __restrict__ scratch_dparams,
+                               uint32_t* __restrict__ scratch_counts,
+                               uint32_t* __restrict__ leaf_branch_count,
+                               int* __restrict__ global_branch_flag) {
+    constexpr SizeType kParams       = 4;
     constexpr SizeType kParamStride  = 2;
     constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
     constexpr double kEps            = 1e-12;
-    constexpr double kCval           = 299792458.0; // Speed of light
 
-    const auto [_, dt]         = coord_cur;
-    const double dt2           = dt * dt;
-    const double inv_dt        = 1.0 / dt;
-    const double inv_dt2       = inv_dt * inv_dt;
-    const double nbins_d       = static_cast<double>(nbins);
-    const double dphi          = eta / nbins_d;
-    const double eta_threshold = eta - kEps;
-
-    // Thread indexing
-    const int tid        = threadIdx.x;
-    const int bid        = blockIdx.x;
-    const int block_size = blockDim.x;
-
-    // Shared memory for per-block intermediate results
-    __shared__ double s_dparam_new[2];
-    __shared__ double s_shift_bins[2];
-    __shared__ SizeType s_branch_counts[2];
-    __shared__ SizeType s_block_offset;
-    __shared__ bool s_needs_branching;
-
-    // Each block processes one leaf
-    if (bid >= n_leaves)
-        return;
-
-    const SizeType leaf_idx    = bid;
-    const SizeType leaf_offset = leaf_idx * kLeavesStride;
-    const SizeType flat_base   = leaf_idx * kParams;
-
-    // --- PHASE 1: Compute step and shift (parallel across 2 params) ---
-    if (tid < kParams) {
-        const SizeType param_idx = tid;
-        const double sig_cur =
-            leaves_tree[leaf_offset + (param_idx * kParamStride) + 1];
-        const double f0      = leaves_tree[leaf_offset + 6];
-        const double dfactor = kCval / f0;
-
-        // Compute step size
-        double sig_new;
-        double shift_factor;
-        if (param_idx == 0) { // d2
-            sig_new      = dphi * dfactor * 4.0 * inv_dt2;
-            shift_factor = dt2 * nbins_d / (4.0 * dfactor);
-        } else { // d1
-            sig_new      = dphi * dfactor * 1.0 * inv_dt;
-            shift_factor = dt * nbins_d / (1.0 * dfactor);
-        }
-
-        s_dparam_new[param_idx] = sig_new;
-        s_shift_bins[param_idx] = (sig_cur - sig_new) * shift_factor;
-    }
-    __syncthreads();
-
-    // Check if any parameter needs branching
-    if (tid == 0) {
-        s_needs_branching = (s_shift_bins[0] >= eta_threshold) ||
-                            (s_shift_bins[1] >= eta_threshold);
-    }
-    __syncthreads();
-
-    // Early exit: no branching needed for this leaf
-    if (!s_needs_branching) {
-        if (tid == 0) {
-            // Copy leaf directly to output
-            const SizeType out_offset = atomicAdd(&n_leaves_after_branching, 1);
-            const SizeType out_leaf_offset = out_offset * kLeavesStride;
-
-            // Copy entire leaf
-            for (SizeType i = 0; i < kLeavesStride; ++i) {
-                branched_leaves[out_leaf_offset + i] =
-                    leaves_tree[leaf_offset + i];
-            }
-            branched_indices[out_offset] = leaf_idx;
-
-            atomicAdd(&n_leaves_after_validation, 1);
-        }
+    const uint32_t ileaf = (blockIdx.x * blockDim.x) + threadIdx.x;
+    if (ileaf >= n_leaves) {
         return;
     }
 
-    // --- PHASE 2: Branch parameters (parallel across 2 params) ---
-    if (tid < kParams) {
-        const SizeType param_idx    = tid;
-        const SizeType param_offset = leaf_offset + (param_idx * kParamStride);
-        const double param_cur      = leaves_tree[param_offset + 0];
-        const double dparam_cur     = leaves_tree[param_offset + 1];
-        const double dparam_new     = s_dparam_new[param_idx];
-        const SizeType pad_offset   = (flat_base + param_idx) * branch_max;
+    const uint32_t leaf_offset = ileaf * kLeavesStride;
+    const uint32_t flat_base   = ileaf * kParams;
 
-        if (s_shift_bins[param_idx] >= eta_threshold) {
-            // Needs branching
-            double param_min, param_max;
+    const auto [_, dt]   = coord_cur;
+    const double dt2     = dt * dt;
+    const double dt3     = dt2 * dt;
+    const double dt4     = dt2 * dt2;
+    const double inv_dt  = 1.0 / dt;
+    const double inv_dt2 = inv_dt * inv_dt;
+    const double inv_dt3 = inv_dt2 * inv_dt;
+    const double inv_dt4 = inv_dt2 * inv_dt2;
+    const auto nbins_d   = static_cast<double>(nbins);
+    const double dphi    = eta / nbins_d;
 
-            if (param_idx == 0) { // d2
-                param_min = param_limits_d2[0];
-                param_max = param_limits_d2[1];
-            } else { // d1
-                const double f0 = leaves_tree[leaf_offset + 6];
-                param_min       = (1.0 - param_limits_d1[1] / f0) * kCval;
-                param_max       = (1.0 - param_limits_d1[0] / f0) * kCval;
-            }
+    const double d4_cur     = leaves_tree[leaf_offset + 0];
+    const double d4_sig_cur = leaves_tree[leaf_offset + 1];
+    const double d3_cur     = leaves_tree[leaf_offset + 2];
+    const double d3_sig_cur = leaves_tree[leaf_offset + 3];
+    const double d2_cur     = leaves_tree[leaf_offset + 4];
+    const double d2_sig_cur = leaves_tree[leaf_offset + 5];
+    const double d1_cur     = leaves_tree[leaf_offset + 6];
+    const double d1_sig_cur = leaves_tree[leaf_offset + 7];
+    const double f0         = leaves_tree[leaf_offset + 10];
 
-            SizeType count = branch_param_padded_device(
-                scratch_params + pad_offset, param_cur, dparam_cur, dparam_new,
-                param_min, param_max, branch_max);
+    const double dfactor    = utils::kCval / f0;
+    const double d4_sig_new = dphi * dfactor * 192.0 * inv_dt4;
+    const double d3_sig_new = dphi * dfactor * 24.0 * inv_dt3;
+    const double d2_sig_new = dphi * dfactor * 4.0 * inv_dt2;
+    const double d1_sig_new = dphi * dfactor * 1.0 * inv_dt;
 
-            s_branch_counts[param_idx] = count;
+    const double shift_d4 =
+        (d4_sig_cur - d4_sig_new) * dt4 * nbins_d / (192.0 * dfactor);
+    const double shift_d3 =
+        (d3_sig_cur - d3_sig_new) * dt3 * nbins_d / (24.0 * dfactor);
+    const double shift_d2 =
+        (d2_sig_cur - d2_sig_new) * dt2 * nbins_d / (4.0 * dfactor);
+    const double shift_d1 =
+        (d1_sig_cur - d1_sig_new) * dt * nbins_d / (1.0 * dfactor);
 
-            // Compute actual dparam
-            const double dparam_act = dparam_cur / static_cast<double>(count);
-            scratch_dparams[flat_base + param_idx] = dparam_act;
+    bool branched = false;
+
+    // --- per-parameter branching ---
+    auto branch_one = [&](uint32_t p, double cur, double sig_cur,
+                          double sig_new, double pmin, double pmax,
+                          double shift) {
+        const uint32_t pad_offset = (flat_base + p) * branch_max;
+        if (shift >= (eta - kEps)) {
+            branched                 = true;
+            auto [dparam_act, count] = utils::branch_param_padded_device(
+                scratch_params + pad_offset, branch_max, cur, sig_cur, sig_new,
+                pmin, pmax);
+            scratch_dparams[flat_base + p] = dparam_act;
+            scratch_counts[flat_base + p]  = count;
         } else {
-            // No branching
-            scratch_params[pad_offset]             = param_cur;
-            scratch_dparams[flat_base + param_idx] = dparam_cur;
-            s_branch_counts[param_idx]             = 1;
+            scratch_params[pad_offset]     = cur;
+            scratch_dparams[flat_base + p] = sig_cur;
+            scratch_counts[flat_base + p]  = 1;
         }
+    };
+
+    branch_one(0, d4_cur, d4_sig_cur, d4_sig_new, param_limits[0][0],
+               param_limits[0][1], shift_d4);
+    branch_one(1, d3_cur, d3_sig_cur, d3_sig_new, param_limits[1][0],
+               param_limits[1][1], shift_d3);
+    branch_one(2, d2_cur, d2_sig_cur, d2_sig_new, param_limits[2][0],
+               param_limits[2][1], shift_d2);
+    const double d1_min = (1 - param_limits[3][1] / f0) * utils::kCval;
+    const double d1_max = (1 - param_limits[3][0] / f0) * utils::kCval;
+    branch_one(3, d1_cur, d1_sig_cur, d1_sig_new, d1_min, d1_max, shift_d1);
+
+    uint32_t count = 1;
+    count *= scratch_counts[flat_base + 0];
+    count *= scratch_counts[flat_base + 1];
+    count *= scratch_counts[flat_base + 2];
+    count *= scratch_counts[flat_base + 3];
+
+    leaf_branch_count[ileaf] = count;
+
+    if (branched) {
+        cuda::atomic_ref<int, cuda::thread_scope_device> flag(
+            *global_branch_flag);
+        flag.fetch_or(1, cuda::memory_order_relaxed);
     }
-    __syncthreads();
+}
 
-    // --- PHASE 3: Cartesian product and output ---
-    const SizeType n_d2_branches  = s_branch_counts[0];
-    const SizeType n_d1_branches  = s_branch_counts[1];
-    const SizeType total_branches = n_d2_branches * n_d1_branches;
+__global__ void kernel_materialize_branches_snap(
+    const double* __restrict__ leaves_tree,
+    const double* __restrict__ scratch_params,
+    const double* __restrict__ scratch_dparams,
+    const SizeType* __restrict__ scratch_counts,
+    const SizeType* __restrict__ leaf_output_offset,
+    SizeType n_leaves,
+    SizeType branch_max,
+    double* __restrict__ leaves_branch,
+    SizeType* __restrict__ leaves_origins) {
+    constexpr uint32_t kParams       = 4;
+    constexpr uint32_t kParamStride  = 2;
+    constexpr uint32_t kLeavesStride = (kParams + 2) * kParamStride;
 
-    // Allocate output space atomically (once per block)
-    if (tid == 0) {
-        s_block_offset = atomicAdd(&n_leaves_after_branching, total_branches);
-    }
-    __syncthreads();
-
-    const SizeType d2_offset = (flat_base + 0) * branch_max;
-    const SizeType d1_offset = (flat_base + 1) * branch_max;
-
-    // Parallel write of Cartesian product
-    // Each thread handles multiple combinations if total_branches > block_size
-    for (SizeType combo_idx = tid; combo_idx < total_branches;
-         combo_idx += block_size) {
-        const SizeType a = combo_idx / n_d1_branches;
-        const SizeType b = combo_idx % n_d1_branches;
-
-        const SizeType out_idx       = s_block_offset + combo_idx;
-        const SizeType branch_offset = out_idx * kLeavesStride;
-
-        // Fill parameters
-        branched_leaves[branch_offset + 0] = scratch_params[d2_offset + a];
-        branched_leaves[branch_offset + 1] = scratch_dparams[flat_base + 0];
-        branched_leaves[branch_offset + 2] = scratch_params[d1_offset + b];
-        branched_leaves[branch_offset + 3] = scratch_dparams[flat_base + 1];
-
-        // Copy d0 and f0 (4 doubles)
-        branched_leaves[branch_offset + 4] = leaves_tree[leaf_offset + 4];
-        branched_leaves[branch_offset + 5] = leaves_tree[leaf_offset + 5];
-        branched_leaves[branch_offset + 6] = leaves_tree[leaf_offset + 6];
-        branched_leaves[branch_offset + 7] = leaves_tree[leaf_offset + 7];
-
-        branched_indices[out_idx] = leaf_idx;
+    const uint32_t ileaf = (blockIdx.x * blockDim.x) + threadIdx.x;
+    if (ileaf >= n_leaves) {
+        return;
     }
 
-    // Update validation count (all branches are valid for Taylor)
-    if (tid == 0) {
-        atomicAdd(&n_leaves_after_validation, total_branches);
+    const uint32_t leaf_offset   = ileaf * kLeavesStride;
+    const uint32_t flat_base     = ileaf * kParams;
+    const uint32_t n_d4_branches = scratch_counts[flat_base + 0];
+    const uint32_t n_d3_branches = scratch_counts[flat_base + 1];
+    const uint32_t n_d2_branches = scratch_counts[flat_base + 2];
+    const uint32_t n_d1_branches = scratch_counts[flat_base + 3];
+    const uint32_t off4          = (flat_base + 0) * branch_max;
+    const uint32_t off3          = (flat_base + 1) * branch_max;
+    const uint32_t off2          = (flat_base + 2) * branch_max;
+    const uint32_t off1          = (flat_base + 3) * branch_max;
+
+    uint32_t out = leaf_output_offset[ileaf];
+
+    for (uint32_t a = 0; a < n_d4_branches; ++a) {
+        for (uint32_t b = 0; b < n_d3_branches; ++b) {
+            for (uint32_t c = 0; c < n_d2_branches; ++c) {
+                for (uint32_t d = 0; d < n_d1_branches; ++d) {
+                    const uint32_t bo = out * kLeavesStride;
+
+                    leaves_branch[bo + 0] = scratch_params[off4 + a];
+                    leaves_branch[bo + 1] = scratch_dparams[flat_base + 0];
+                    leaves_branch[bo + 2] = scratch_params[off3 + b];
+                    leaves_branch[bo + 3] = scratch_dparams[flat_base + 1];
+                    leaves_branch[bo + 4] = scratch_params[off2 + c];
+                    leaves_branch[bo + 5] = scratch_dparams[flat_base + 2];
+                    leaves_branch[bo + 6] = scratch_params[off1 + d];
+                    leaves_branch[bo + 7] = scratch_dparams[flat_base + 3];
+
+// copy d0 + f0 + flag (4 doubles)
+#pragma unroll
+                    for (int k = 0; k < 4; ++k) {
+                        leaves_branch[bo + 8 + k] =
+                            leaves_tree[leaf_offset + 8 + k];
+                    }
+
+                    leaves_origins[out] = ileaf;
+                    ++out;
+                }
+            }
+        }
     }
 }
 
@@ -925,6 +691,7 @@ transform_taylor_kernel(double* __restrict__ leaves_tree,
 
 } // namespace
 
+/*
 void ffa_taylor_resolve_poly_cuda(
     cuda::std::span<const double> param_arr_cur_flat,
     cuda::std::span<const double> param_arr_prev_flat,
@@ -970,6 +737,32 @@ void ffa_taylor_resolve_poly_cuda(
     cuda_utils::check_last_cuda_error(
         "FFA Taylor (poly) resolve kernel launch failed");
 }
+*/
+
+SizeType poly_taylor_seed_cuda(cuda::std::span<const double> accel_grid,
+                               cuda::std::span<const double> freq_grid,
+                               cuda::std::span<const double> dparams,
+                               std::pair<double, double> /*coord_init*/,
+                               SizeType n_params,
+                               cuda::std::span<double> seed_leaves,
+                               cudaStream_t stream) {
+    const SizeType n_leaves = accel_grid.size() * freq_grid.size();
+
+    constexpr SizeType kThreadPerBlock = 256;
+    const auto blocks_per_grid =
+        (n_leaves + kThreadPerBlock - 1) / kThreadPerBlock;
+
+    const dim3 block_dim(kThreadPerBlock);
+    const dim3 grid_dim(blocks_per_grid);
+    cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
+    poly_taylor_seed_kernel<<<grid_dim, block_dim>>>(
+        accel_grid.data(), accel_grid.size(), freq_grid.data(),
+        freq_grid.size(), dparams.data(), n_params, seed_leaves.data());
+    cuda_utils::check_last_cuda_error("Taylor seed kernel launch failed");
+    cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
+                                "cudaStreamSynchronize failed");
+    return n_leaves;
+}
 
 std::tuple<SizeType, SizeType> poly_taylor_branch_and_validate_cuda(
     cuda::std::span<const double> leaves_tree,
@@ -985,17 +778,12 @@ std::tuple<SizeType, SizeType> poly_taylor_branch_and_validate_cuda(
     cuda::std::span<double> scratch_params,
     cuda::std::span<double> scratch_dparams,
     cuda::std::span<SizeType> scratch_counts,
-    cudaStream_t stream,
-    CudaDeviceContext& ctx) {
-
-    if (n_leaves == 0) {
-        return std::make_tuple(0, 0);
-    }
+    cudaStream_t stream) {
     // Better occupancy than 512 for many kernels
     constexpr int kBlockSize = 256;
     const dim3 block(kBlockSize);
     const dim3 grid((n_leaves + kBlockSize - 1) / kBlockSize);
-    ctx.check_kernel_launch_params(grid, block);
+    cuda_utils::check_kernel_launch_params(grid, block);
 
     // Two-level dispatch for complete compile-time specialization
     auto dispatch = [&]<int N>() {
@@ -1025,6 +813,99 @@ std::tuple<SizeType, SizeType> poly_taylor_branch_and_validate_cuda(
     return std::make_tuple(n_leaves_after_branching, n_leaves_after_validation);
 }
 
+SizeType poly_taylor_branch_snap_batch_cuda(
+    cuda::std::span<const double> leaves_tree,
+    std::pair<double, double> coord_cur,
+    cuda::std::span<double> leaves_branch,
+    cuda::std::span<SizeType> leaves_origins,
+    SizeType n_leaves,
+    SizeType nbins,
+    double eta,
+    cuda::std::span<const ParamLimitType> param_limits,
+    SizeType branch_max,
+    cuda::std::span<double> scratch_params,
+    cuda::std::span<double> scratch_dparams,
+    cuda::std::span<uint32_t> scratch_counts,
+    cuda::std::span<uint32_t> leaf_branch_count,
+    cuda::std::span<uint32_t> leaf_output_offset,
+    void* cub_temp_storage,
+    size_t cub_temp_bytes,
+    cudaStream_t stream) {
+    constexpr SizeType kLeavesStride = 8;
+
+    int h_global_branch_flag = 0;
+    int* d_global_branch_flag;
+    cuda_utils::check_cuda_call(
+        cudaMallocAsync(&d_global_branch_flag, sizeof(int), stream),
+        "cudaMallocAsync failed");
+    cuda_utils::check_cuda_call(
+        cudaMemsetAsync(d_global_branch_flag, 0, sizeof(int), stream),
+        "cudaMemsetAsync failed");
+
+    // ---- Kernel 1: analyze + branch enumeration ----
+    constexpr SizeType kThreadsPerBlock = 256;
+    const auto blocks_per_grid =
+        (n_leaves + kThreadsPerBlock - 1) / kThreadsPerBlock;
+    const dim3 block_dim(kThreadsPerBlock);
+    const dim3 grid_dim(blocks_per_grid);
+    cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
+
+    kernel_analyze_and_branch_snap<<<grid_dim, block_dim, 0, stream>>>(
+        leaves_tree.data(), coord_cur, n_leaves, nbins, eta,
+        param_limits.data(), branch_max, scratch_params.data(),
+        scratch_dparams.data(), scratch_counts.data(), leaf_branch_count.data(),
+        d_global_branch_flag);
+    cuda_utils::check_last_cuda_error("Kernel 1 launch failed");
+
+    // ---- check global flag ----
+    cuda_utils::check_cuda_call(
+        cudaMemcpyAsync(&h_global_branch_flag, d_global_branch_flag,
+                        sizeof(int), cudaMemcpyDeviceToHost, stream),
+        "cudaMemcpyAsync failed");
+
+    if (h_global_branch_flag == 0) {
+        // FAST PATH: no branching
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(leaves_branch.data(), leaves_tree.data(),
+                            n_leaves * kLeavesStride * sizeof(double),
+                            cudaMemcpyDeviceToDevice, stream),
+            "cudaMemcpyAsync failed");
+        thrust::sequence(thrust::cuda::par.on(stream), leaves_origins.data(),
+                         leaves_origins.data() + n_leaves, stream);
+
+        return n_leaves;
+    }
+
+    // ---- scan ----
+    cub::DeviceScan::ExclusiveSum(cub_temp_storage, cub_temp_bytes,
+                                  leaf_branch_count.data(),
+                                  leaf_output_offset.data(), n_leaves, stream);
+    cuda_utils::check_last_cuda_error("cub::DeviceScan::ExclusiveSum failed");
+
+    // ---- compute output size ----
+    SizeType last_offset, last_count;
+    cuda_utils::check_cuda_call(
+        cudaMemcpyAsync(&last_offset,
+                        leaf_output_offset.data() + (n_leaves - 1),
+                        sizeof(SizeType), cudaMemcpyDeviceToHost, stream),
+        "cudaMemcpyAsync failed");
+    cuda_utils::check_cuda_call(
+        cudaMemcpyAsync(&last_count, leaf_branch_count.data() + (n_leaves - 1),
+                        sizeof(SizeType), cudaMemcpyDeviceToHost, stream),
+        "cudaMemcpyAsync failed");
+
+    SizeType out_leaves = last_offset + last_count;
+
+    // ---- Kernel 2: materialize ----
+    kernel_materialize_branches_snap<<<grid_dim, block_dim, 0, stream>>>(
+        leaves_tree.data(), scratch_params.data(), scratch_dparams.data(),
+        scratch_counts.data(), leaf_output_offset.data(), n_leaves, branch_max,
+        leaves_branch.data(), leaves_origins.data());
+    cuda_utils::check_last_cuda_error("Kernel 2 launch failed");
+
+    return out_leaves;
+}
+
 void poly_taylor_resolve_cuda(cuda::std::span<const double> leaves_branch,
                               cuda::std::span<const float> accel_grid,
                               cuda::std::span<const float> freq_grid,
@@ -1036,8 +917,7 @@ void poly_taylor_resolve_cuda(cuda::std::span<const double> leaves_branch,
                               SizeType nbins,
                               SizeType n_leaves,
                               SizeType n_params,
-                              cudaStream_t stream,
-                              CudaDeviceContext& ctx) {
+                              cudaStream_t stream) {
     if (n_leaves == 0) {
         return;
     }
@@ -1049,13 +929,13 @@ void poly_taylor_resolve_cuda(cuda::std::span<const double> leaves_branch,
     const dim3 grid((n_leaves + kBlockSize - 1) / kBlockSize);
 
     // Calculate Shared Memory Strategy
-    const SizeType max_shmem = ctx.get_max_shared_memory();
+    const SizeType max_shmem = cuda_utils::get_max_shared_memory();
     SizeType shmem_bytes     = (n_accel + n_freq) * sizeof(float);
     const bool use_smem      = (shmem_bytes <= max_shmem);
     if (!use_smem) {
         shmem_bytes = 0; // No shared memory needed
     }
-    ctx.check_kernel_launch_params(grid, block, shmem_bytes);
+    cuda_utils::check_kernel_launch_params(grid, block, shmem_bytes);
 
     // Two-level dispatch for complete compile-time specialization
     auto dispatch = [&]<int N, bool S>() {
@@ -1104,8 +984,7 @@ void poly_taylor_transform_cuda(cuda::std::span<double> leaves_tree,
                                 SizeType n_leaves,
                                 SizeType n_params,
                                 bool use_conservative_tile,
-                                cudaStream_t stream,
-                                CudaDeviceContext& ctx) {
+                                cudaStream_t stream) {
     if (n_leaves == 0) {
         return;
     }
@@ -1113,7 +992,7 @@ void poly_taylor_transform_cuda(cuda::std::span<double> leaves_tree,
     constexpr int kBlockSize = 256;
     const dim3 block(kBlockSize);
     const dim3 grid((n_leaves + kBlockSize - 1) / kBlockSize);
-    ctx.check_kernel_launch_params(grid, block);
+    cuda_utils::check_kernel_launch_params(grid, block);
 
     // Two-level dispatch for complete compile-time specialization
     auto dispatch = [&]<int N, bool C>() {

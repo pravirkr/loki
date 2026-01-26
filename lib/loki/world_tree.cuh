@@ -437,7 +437,8 @@ public:
      * @brief Convert logical indices to physical indices
      */
     void convert_to_physical_indices(cuda::std::span<SizeType> logical_indices,
-                                     SizeType n_leaves) const {
+                                     SizeType n_leaves,
+                                     cudaStream_t stream) const {
         error_check::check(
             m_is_updating,
             "WorldTreeCUDA: convert_to_physical_indices only valid "
@@ -452,10 +453,11 @@ public:
 
         CircularIndexFunctor functor{.start    = physical_start,
                                      .capacity = m_capacity};
-        thrust::transform(thrust::device, logical_indices.begin(),
+        thrust::transform(thrust::cuda::par.on(stream), logical_indices.begin(),
                           logical_indices.begin() +
                               static_cast<IndexType>(n_leaves),
                           logical_indices.begin(), functor);
+        cuda_utils::check_last_cuda_error("convert_to_physical_indices failed");
     }
 
     /**
@@ -508,7 +510,7 @@ public:
                     cuda::std::span<const float> scores_batch,
                     float current_threshold,
                     SizeType slots_to_write,
-                    cuda_utils::CudaDeviceContext& ctx) {
+                    cudaStream_t stream) {
         if (slots_to_write == 0) {
             return current_threshold;
         }
@@ -529,11 +531,11 @@ public:
         SizeType space_left = calculate_space_left();
         if (slots_to_write <= space_left) {
             copy_to_circular(leaves_batch_ptr, m_leaves_ptr, m_write_head,
-                             slots_to_write, m_leaves_stride);
+                             slots_to_write, m_leaves_stride, stream);
             copy_to_circular(folds_batch_ptr, m_folds_ptr, m_write_head,
-                             slots_to_write, m_folds_stride);
+                             slots_to_write, m_folds_stride, stream);
             copy_to_circular(scores_batch_ptr, m_scores_ptr, m_write_head,
-                             slots_to_write, SizeType{1});
+                             slots_to_write, SizeType{1}, stream);
             m_write_head =
                 get_circular_index(slots_to_write, m_write_head, m_capacity);
             m_size += slots_to_write;
@@ -549,7 +551,7 @@ public:
             scores_batch, slots_to_write, current_threshold);
         // Remove old items that are strictly worse than the new global pruning
         // threshold.
-        prune_on_overload(effective_threshold, ctx);
+        prune_on_overload(effective_threshold, stream);
 
         double* __restrict__ tmp_leaves_ptr =
             thrust::raw_pointer_cast(m_scratch_leaves.data());
@@ -560,18 +562,21 @@ public:
 
         LinearMaskFunctor functor{.scores_ptr = scores_batch_ptr,
                                   .threshold  = effective_threshold};
-        thrust::transform(thrust::counting_iterator<uint32_t>(0),
+        thrust::transform(thrust::cuda::par.on(stream),
+                          thrust::counting_iterator<uint32_t>(0),
                           thrust::counting_iterator<uint32_t>(slots_to_write),
                           m_scratch_mask.begin(), functor);
-        thrust::exclusive_scan(m_scratch_mask.begin(),
-                               m_scratch_mask.begin() +
-                                   static_cast<IndexType>(slots_to_write),
-                               m_scratch_prefix.begin(), uint32_t{0});
+        cuda_utils::check_last_cuda_error("LinearMaskFunctor failed");
+        thrust::exclusive_scan(
+            thrust::cuda::par.on(stream), m_scratch_mask.begin(),
+            m_scratch_mask.begin() + static_cast<IndexType>(slots_to_write),
+            m_scratch_prefix.begin(), uint32_t{0});
+        cuda_utils::check_last_cuda_error("exclusive_scan failed");
 
         const dim3 block_dim(256);
         const dim3 grid_dim((slots_to_write + block_dim.x - 1) / block_dim.x);
-        ctx.check_kernel_launch_params(grid_dim, block_dim);
-        compact_and_copy_kernel<<<grid_dim, block_dim>>>(
+        cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
+        compact_and_copy_kernel<<<grid_dim, block_dim, 0, stream>>>(
             leaves_batch_ptr, folds_batch_ptr, scores_batch_ptr,
             m_scratch_mask.data(), m_scratch_prefix.data(), tmp_leaves_ptr,
             tmp_folds_ptr, tmp_scores_ptr, slots_to_write, m_leaves_stride,
@@ -586,11 +591,11 @@ public:
             return effective_threshold;
         }
         copy_to_circular(tmp_leaves_ptr, m_leaves_ptr, m_write_head, n_to_add,
-                         m_leaves_stride);
+                         m_leaves_stride, stream);
         copy_to_circular(tmp_folds_ptr, m_folds_ptr, m_write_head, n_to_add,
-                         m_folds_stride);
+                         m_folds_stride, stream);
         copy_to_circular(tmp_scores_ptr, m_scores_ptr, m_write_head, n_to_add,
-                         SizeType{1});
+                         SizeType{1}, stream);
         m_write_head = get_circular_index(n_to_add, m_write_head, m_capacity);
         m_size += n_to_add;
         return effective_threshold;
@@ -642,22 +647,23 @@ private:
                           T* __restrict__ dst,
                           SizeType dst_start_slot,
                           SizeType slots,
-                          SizeType stride) const noexcept {
+                          SizeType stride,
+                          cudaStream_t stream) const noexcept {
         const auto first_slots = std::min(slots, m_capacity - dst_start_slot);
         const auto first_elems = first_slots * stride;
         const auto dst_offset  = dst_start_slot * stride;
 
-        cuda_utils::check_cuda_call(cudaMemcpyAsync(dst + dst_offset, src,
-                                                    first_elems * sizeof(T),
-                                                    cudaMemcpyDeviceToDevice),
-                                    "cudaMemcpyAsync copy_to_circular failed");
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(dst + dst_offset, src, first_elems * sizeof(T),
+                            cudaMemcpyDeviceToDevice, stream),
+            "cudaMemcpyAsync copy_to_circular failed");
         const auto second_slots = slots - first_slots;
         if (second_slots > 0) {
             const auto second_elems = second_slots * stride;
             cuda_utils::check_cuda_call(
                 cudaMemcpyAsync(dst, src + first_elems,
                                 second_elems * sizeof(T),
-                                cudaMemcpyDeviceToDevice),
+                                cudaMemcpyDeviceToDevice, stream),
                 "cudaMemcpyAsync copy_to_circular failed");
         }
     }

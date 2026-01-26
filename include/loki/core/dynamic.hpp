@@ -322,7 +322,7 @@ public:
 // Factory function to create the correct implementation based on the kind
 template <SupportedFoldType FoldType>
 std::unique_ptr<PruneDPFuncts<FoldType>>
-create_prune_dp_functs(std::string_view kind,
+create_prune_dp_functs(std::string_view poly_basis,
                        std::span<const std::vector<double>> param_arr,
                        std::span<const double> dparams,
                        SizeType nseg_ffa,

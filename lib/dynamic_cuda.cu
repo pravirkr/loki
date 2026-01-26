@@ -16,7 +16,7 @@
 #include "loki/common/types.hpp"
 #include "loki/core/taylor.hpp"
 #include "loki/cuda_utils.cuh"
-#include "loki/kernel_utils.cuh"
+#include "loki/exceptions.hpp"
 #include "loki/kernels_cuda.cuh"
 #include "loki/utils/fft.hpp"
 
@@ -126,34 +126,43 @@ SizeType BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::score_and_filter(
     }
 }
 
-/*
-
 // Intermediate implementation for Taylor basis
 template <SupportedFoldTypeCUDA FoldTypeCUDA, typename Derived>
 void BaseTaylorPruneDPFunctsCUDA<FoldTypeCUDA, Derived>::seed(
-    cuda::std::span<const FoldTypeCUDA> ffa_fold,
+    cuda::std::span<const FoldTypeCUDA> fold_segment,
     std::pair<double, double> coord_init,
     cuda::std::span<double> seed_leaves,
-    cuda::std::span<float> seed_scores) {
-    const auto poly_order = m_cfg.get_prune_poly_order();
-    const auto nbins      = m_cfg.get_nbins();
-    const auto seg_idx    = m_snail_scheme->get_ref_idx();
+    cuda::std::span<float> seed_scores,
+    cudaStream_t stream) {
 
-    const auto leaves_stride = m_world_tree->get_leaves_stride();
-    thrust::device_vector<double> leaves_d(ncoords * leaves_stride);
-    thrust::device_vector<float> scores_d(ncoords);
+    const auto n_leaves = poly_taylor_seed_cuda(
+        this->m_accel_grid_d, this->m_freq_grid_d, this->m_dparams, coord_init,
+        this->m_cfg.get_nparams(), seed_leaves, stream);
+    // Fold segment is (n_leaves, 2, nbins)
+    const auto nbins = this->m_cfg.get_nbins();
 
-    const auto tree_folds = load_segment(ffa_fold, seg_idx);
-    auto tree_leaves      = cuda::std::span<double>(
-        thrust::raw_pointer_cast(leaves_d.data()), ncoords * leaves_stride);
-    auto tree_scores = cuda::std::span<float>(
-        thrust::raw_pointer_cast(scores_d.data()), ncoords);
+    // Calculate scores
+    if constexpr (std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>) {
+        const auto nfft    = 2 * n_leaves;
+        const auto nbins_f = this->m_cfg.get_nbins_f();
+        error_check::check_equal(fold_segment.size(), n_leaves * 2 * nbins_f,
+                                 "fold_segment size mismatch");
+        auto fold_segment_t =
+            cuda_utils::as_span(this->m_scratch_folds_d).first(nfft * nbins);
+        this->m_irfft_executor->execute(fold_segment, fold_segment_t,
+                                        static_cast<int>(nfft));
+        detection::snr_boxcar_3d_max_cuda_d(
+            fold_segment_t, this->m_boxcar_widths_d, seed_scores, n_leaves,
+            nbins, stream);
 
-    seed_kernel<FoldTypeCUDA><<<1, 1>>>(ffa_fold, coord_init, param_arr,
-                                        dparams, poly_order, nbins, tree_leaves,
-                                        tree_folds, tree_scores, ncoords);
+    } else {
+        error_check::check_equal(fold_segment.size(), n_leaves * 2 * nbins,
+                                 "fold_segment size mismatch");
+        detection::snr_boxcar_3d_max_cuda_d(
+            fold_segment, this->m_boxcar_widths_d, seed_scores, n_leaves, nbins,
+            stream);
+    }
 }
-*/
 
 // Specialized implementation for Polynomial searches in Taylor Basis
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
@@ -184,12 +193,14 @@ PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>::branch_and_validate(
     SizeType n_leaves,
     cuda::std::span<double> scratch_params,
     cuda::std::span<double> scratch_dparams,
-    cuda::std::span<SizeType> scratch_counts) const {
+    cuda::std::span<SizeType> scratch_counts,
+    cudaStream_t stream) const {
     return poly_taylor_branch_and_validate_cuda(
         leaves_tree, coord_cur, coord_prev, leaves_branch, leaves_origins,
-        n_leaves, m_cfg.get_nparams(), m_cfg.get_nbins(), m_cfg.get_eta(),
-        m_cfg.get_param_limits(), m_branch_max, scratch_params, scratch_dparams,
-        scratch_counts, stream);
+        n_leaves, this->m_cfg.get_nparams(), this->m_cfg.get_nbins(),
+        this->m_cfg.get_eta(), this->m_cfg.get_param_limits(),
+        this->m_branch_max, scratch_params, scratch_dparams, scratch_counts,
+        stream);
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
@@ -200,11 +211,12 @@ void PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>::resolve(
     std::pair<double, double> coord_init,
     cuda::std::span<SizeType> param_indices,
     cuda::std::span<float> phase_shift,
-    SizeType n_leaves) const {
+    SizeType n_leaves,
+    cudaStream_t stream) const {
     return poly_taylor_resolve_cuda(
-        leaves_branch, m_accel_grid_d, m_freq_grid_d, param_indices,
-        phase_shift, coord_add, coord_cur, coord_init, m_cfg.get_nbins(),
-        n_leaves, m_cfg.get_nparams(), stream);
+        leaves_branch, this->m_accel_grid_d, this->m_freq_grid_d, param_indices,
+        phase_shift, coord_add, coord_cur, coord_init, this->m_cfg.get_nbins(),
+        n_leaves, this->m_cfg.get_nparams(), stream);
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
@@ -214,9 +226,30 @@ void PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>::transform(
     std::pair<double, double> coord_cur,
     SizeType n_leaves,
     cudaStream_t stream) const {
-    return poly_taylor_transform_cuda(
-        leaves_tree, coord_next, coord_cur, n_leaves, m_cfg.get_nparams(),
-        m_cfg.get_use_conservative_tile(), stream);
+    return poly_taylor_transform_cuda(leaves_tree, coord_next, coord_cur,
+                                      n_leaves, this->m_cfg.get_nparams(),
+                                      this->m_cfg.get_use_conservative_tile(),
+                                      this->m_cfg.get_nbins(), stream);
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+std::unique_ptr<PruneDPFunctsCUDA<FoldTypeCUDA>>
+create_prune_dp_functs_cuda(std::string_view poly_basis,
+                            std::span<const std::vector<double>> param_arr,
+                            std::span<const double> dparams,
+                            SizeType nseg_ffa,
+                            double tseg_ffa,
+                            search::PulsarSearchConfig cfg,
+                            SizeType batch_size,
+                            SizeType branch_max) {
+    const auto n_params = cfg.get_nparams();
+    if (poly_basis == "taylor" && n_params <= 4) {
+        return std::make_unique<PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>>(
+            param_arr, dparams, nseg_ffa, tseg_ffa, std::move(cfg), batch_size,
+            branch_max);
+    }
+    throw std::runtime_error(std::format(
+        "Unknown poly_basis: '{}'. Valid options: 'taylor'", poly_basis));
 }
 
 // Explicit template instantiations

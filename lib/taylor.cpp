@@ -317,18 +317,19 @@ void ffa_taylor_resolve_crackle_batch(
 
 SizeType poly_taylor_seed(std::span<const std::vector<double>> param_arr,
                           std::span<const double> dparams,
-                          SizeType poly_order,
+                          SizeType n_params,
                           std::pair<double, double> /*coord_init*/,
                           std::span<double> seed_leaves) {
     constexpr SizeType kParamStride = 2U;
-    const SizeType leaves_stride    = (poly_order + 2) * kParamStride;
-    const auto n_params             = param_arr.size();
-    SizeType n_leaves               = 1;
+
+    error_check::check_equal(param_arr.size(), n_params,
+                             "param_arr size mismatch");
+    const SizeType leaves_stride = (n_params + 2) * kParamStride;
+    SizeType n_leaves            = 1;
     for (const auto& arr : param_arr) {
         n_leaves *= arr.size();
     }
-    error_check::check_equal(n_params, poly_order,
-                             "n_params should be equal to poly_order");
+
     // Create parameter sets tensor: (n_param_sets, poly_order + 2, 2)
     error_check::check_greater_equal(seed_leaves.size(),
                                      n_leaves * leaves_stride,
@@ -807,6 +808,29 @@ poly_taylor_branch_jerk_batch(std::span<const double> leaves_tree,
         return n_leaves;
     }
 
+    // Per-parameter branching
+    auto branch_one = [&](int p, double cur, double sig_cur, double sig_new,
+                          double pmin, double pmax,
+                          const double* __restrict__ shift_bins_ptr,
+                          double* __restrict__ scratch_params_ptr,
+                          double* __restrict__ scratch_dparams_ptr,
+                          SizeType* __restrict__ scratch_counts_ptr,
+                          SizeType flat_base, SizeType branch_max) {
+        const SizeType pad_offset = (flat_base + p) * branch_max;
+        if (shift_bins_ptr[flat_base + p] >= (eta - kEps)) {
+            auto slice_span =
+                std::span<double>(scratch_params_ptr + pad_offset, branch_max);
+            auto [dparam_act, count] = psr_utils::branch_param_padded(
+                slice_span, cur, sig_cur, sig_new, pmin, pmax);
+            scratch_dparams_ptr[flat_base + p] = dparam_act;
+            scratch_counts_ptr[flat_base + p]  = count;
+        } else {
+            scratch_params_ptr[pad_offset]     = cur;
+            scratch_dparams_ptr[flat_base + p] = sig_cur;
+            scratch_counts_ptr[flat_base + p]  = 1;
+        }
+    };
+
     // --- Loop 2: branching ---
     for (SizeType i = 0; i < n_leaves; ++i) {
         const SizeType leaf_offset = i * kLeavesStride;
@@ -823,62 +847,20 @@ poly_taylor_branch_jerk_batch(std::span<const double> leaves_tree,
         const auto d2_sig_new = dparam_new_ptr[flat_base + 1];
         const auto d1_sig_new = dparam_new_ptr[flat_base + 2];
 
-        // Branch d3 parameter
-        {
-            const SizeType pad_offset = (flat_base + 0) * branch_max;
-            if (shift_bins_ptr[flat_base + 0] >= (eta - kEps)) {
-                auto slice_span = std::span<double>(
-                    scratch_params_ptr + pad_offset, branch_max);
-                auto [dparam_act, count] = psr_utils::branch_param_padded(
-                    slice_span, d3_cur, d3_sig_cur, d3_sig_new,
-                    param_limits[0][0], param_limits[0][1]);
-                scratch_dparams_ptr[flat_base + 0] = dparam_act;
-                scratch_counts_ptr[flat_base + 0]  = count;
-            } else {
-                scratch_params_ptr[pad_offset]     = d3_cur;
-                scratch_dparams_ptr[flat_base + 0] = d3_sig_cur;
-                scratch_counts_ptr[flat_base + 0]  = 1;
-            }
-        }
-
-        // Branch d2 parameter
-        {
-            const SizeType pad_offset = (flat_base + 1) * branch_max;
-            if (shift_bins_ptr[flat_base + 1] >= (eta - kEps)) {
-                auto slice_span = std::span<double>(
-                    scratch_params_ptr + pad_offset, branch_max);
-                auto [dparam_act, count] = psr_utils::branch_param_padded(
-                    slice_span, d2_cur, d2_sig_cur, d2_sig_new,
-                    param_limits[1][0], param_limits[1][1]);
-                scratch_dparams_ptr[flat_base + 1] = dparam_act;
-                scratch_counts_ptr[flat_base + 1]  = count;
-            } else {
-                scratch_params_ptr[pad_offset]     = d2_cur;
-                scratch_dparams_ptr[flat_base + 1] = d2_sig_cur;
-                scratch_counts_ptr[flat_base + 1]  = 1;
-            }
-        }
-
-        // Branch d1 parameter
-        {
-            const SizeType pad_offset = (flat_base + 2) * branch_max;
-            if (shift_bins_ptr[flat_base + 2] >= (eta - kEps)) {
-                const double d1_min =
-                    (1 - param_limits[2][1] / f0) * utils::kCval;
-                const double d1_max =
-                    (1 - param_limits[2][0] / f0) * utils::kCval;
-                auto slice_span = std::span<double>(
-                    scratch_params_ptr + pad_offset, branch_max);
-                auto [dparam_act, count] = psr_utils::branch_param_padded(
-                    slice_span, d1_cur, d1_sig_cur, d1_sig_new, d1_min, d1_max);
-                scratch_dparams_ptr[flat_base + 2] = dparam_act;
-                scratch_counts_ptr[flat_base + 2]  = count;
-            } else {
-                scratch_params_ptr[pad_offset]     = d1_cur;
-                scratch_dparams_ptr[flat_base + 2] = d1_sig_cur;
-                scratch_counts_ptr[flat_base + 2]  = 1;
-            }
-        }
+        // Branch d3-d1 parameters
+        branch_one(0, d3_cur, d3_sig_cur, d3_sig_new, param_limits[0][0],
+                   param_limits[0][1], shift_bins_ptr, scratch_params_ptr,
+                   scratch_dparams_ptr, scratch_counts_ptr, flat_base,
+                   branch_max);
+        branch_one(1, d2_cur, d2_sig_cur, d2_sig_new, param_limits[1][0],
+                   param_limits[1][1], shift_bins_ptr, scratch_params_ptr,
+                   scratch_dparams_ptr, scratch_counts_ptr, flat_base,
+                   branch_max);
+        const double d1_min = (1 - param_limits[2][1] / f0) * utils::kCval;
+        const double d1_max = (1 - param_limits[2][0] / f0) * utils::kCval;
+        branch_one(2, d1_cur, d1_sig_cur, d1_sig_new, d1_min, d1_max,
+                   shift_bins_ptr, scratch_params_ptr, scratch_dparams_ptr,
+                   scratch_counts_ptr, flat_base, branch_max);
     }
 
     // --- Loop 3: Fill leaves_origins (3D Cartesian product) ---
@@ -1040,6 +1022,29 @@ poly_taylor_branch_snap_batch(std::span<const double> leaves_tree,
         return n_leaves;
     }
 
+    // Per-parameter branching
+    auto branch_one = [&](int p, double cur, double sig_cur, double sig_new,
+                          double pmin, double pmax,
+                          const double* __restrict__ shift_bins_ptr,
+                          double* __restrict__ scratch_params_ptr,
+                          double* __restrict__ scratch_dparams_ptr,
+                          SizeType* __restrict__ scratch_counts_ptr,
+                          SizeType flat_base, SizeType branch_max) {
+        const SizeType pad_offset = (flat_base + p) * branch_max;
+        if (shift_bins_ptr[flat_base + p] >= (eta - kEps)) {
+            auto slice_span =
+                std::span<double>(scratch_params_ptr + pad_offset, branch_max);
+            auto [dparam_act, count] = psr_utils::branch_param_padded(
+                slice_span, cur, sig_cur, sig_new, pmin, pmax);
+            scratch_dparams_ptr[flat_base + p] = dparam_act;
+            scratch_counts_ptr[flat_base + p]  = count;
+        } else {
+            scratch_params_ptr[pad_offset]     = cur;
+            scratch_dparams_ptr[flat_base + p] = sig_cur;
+            scratch_counts_ptr[flat_base + p]  = 1;
+        }
+    };
+
     // --- Loop 2: branching ---
     for (SizeType i = 0; i < n_leaves; ++i) {
         const SizeType leaf_offset = i * kLeavesStride;
@@ -1059,80 +1064,24 @@ poly_taylor_branch_snap_batch(std::span<const double> leaves_tree,
         const auto d2_sig_new = dparam_new_ptr[flat_base + 2];
         const auto d1_sig_new = dparam_new_ptr[flat_base + 3];
 
-        // Branch d4 parameter
-        {
-            const SizeType pad_offset = (flat_base + 0) * branch_max;
-            if (shift_bins_ptr[flat_base + 0] >= (eta - kEps)) {
-                auto slice_span = std::span<double>(
-                    scratch_params_ptr + pad_offset, branch_max);
-                auto [dparam_act, count] = psr_utils::branch_param_padded(
-                    slice_span, d4_cur, d4_sig_cur, d4_sig_new,
-                    param_limits[0][0], param_limits[0][1]);
-                scratch_dparams_ptr[flat_base + 0] = dparam_act;
-                scratch_counts_ptr[flat_base + 0]  = count;
-            } else {
-                scratch_params_ptr[pad_offset]     = d4_cur;
-                scratch_dparams_ptr[flat_base + 0] = d4_sig_cur;
-                scratch_counts_ptr[flat_base + 0]  = 1;
-            }
-        }
-
-        // Branch d3 parameter
-        {
-            const SizeType pad_offset = (flat_base + 1) * branch_max;
-            if (shift_bins_ptr[flat_base + 1] >= (eta - kEps)) {
-                auto slice_span = std::span<double>(
-                    scratch_params_ptr + pad_offset, branch_max);
-                auto [dparam_act, count] = psr_utils::branch_param_padded(
-                    slice_span, d3_cur, d3_sig_cur, d3_sig_new,
-                    param_limits[1][0], param_limits[1][1]);
-                scratch_dparams_ptr[flat_base + 1] = dparam_act;
-                scratch_counts_ptr[flat_base + 1]  = count;
-            } else {
-                scratch_params_ptr[pad_offset]     = d3_cur;
-                scratch_dparams_ptr[flat_base + 1] = d3_sig_cur;
-                scratch_counts_ptr[flat_base + 1]  = 1;
-            }
-        }
-
-        // Branch d2 parameter
-        {
-            const SizeType pad_offset = (flat_base + 2) * branch_max;
-            if (shift_bins_ptr[flat_base + 2] >= (eta - kEps)) {
-                auto slice_span = std::span<double>(
-                    scratch_params_ptr + pad_offset, branch_max);
-                auto [dparam_act, count] = psr_utils::branch_param_padded(
-                    slice_span, d2_cur, d2_sig_cur, d2_sig_new,
-                    param_limits[2][0], param_limits[2][1]);
-                scratch_dparams_ptr[flat_base + 2] = dparam_act;
-                scratch_counts_ptr[flat_base + 2]  = count;
-            } else {
-                scratch_params_ptr[pad_offset]     = d2_cur;
-                scratch_dparams_ptr[flat_base + 2] = d2_sig_cur;
-                scratch_counts_ptr[flat_base + 2]  = 1;
-            }
-        }
-
-        // Branch d1 parameter
-        {
-            const SizeType pad_offset = (flat_base + 3) * branch_max;
-            if (shift_bins_ptr[flat_base + 3] >= (eta - kEps)) {
-                const double d1_min =
-                    (1 - param_limits[3][1] / f0) * utils::kCval;
-                const double d1_max =
-                    (1 - param_limits[3][0] / f0) * utils::kCval;
-                auto slice_span = std::span<double>(
-                    scratch_params_ptr + pad_offset, branch_max);
-                auto [dparam_act, count] = psr_utils::branch_param_padded(
-                    slice_span, d1_cur, d1_sig_cur, d1_sig_new, d1_min, d1_max);
-                scratch_dparams_ptr[flat_base + 3] = dparam_act;
-                scratch_counts_ptr[flat_base + 3]  = count;
-            } else {
-                scratch_params_ptr[pad_offset]     = d1_cur;
-                scratch_dparams_ptr[flat_base + 3] = d1_sig_cur;
-                scratch_counts_ptr[flat_base + 3]  = 1;
-            }
-        }
+        // Branch d4-d1 parameters
+        branch_one(0, d4_cur, d4_sig_cur, d4_sig_new, param_limits[0][0],
+                   param_limits[0][1], shift_bins_ptr, scratch_params_ptr,
+                   scratch_dparams_ptr, scratch_counts_ptr, flat_base,
+                   branch_max);
+        branch_one(1, d3_cur, d3_sig_cur, d3_sig_new, param_limits[1][0],
+                   param_limits[1][1], shift_bins_ptr, scratch_params_ptr,
+                   scratch_dparams_ptr, scratch_counts_ptr, flat_base,
+                   branch_max);
+        branch_one(2, d2_cur, d2_sig_cur, d2_sig_new, param_limits[2][0],
+                   param_limits[2][1], shift_bins_ptr, scratch_params_ptr,
+                   scratch_dparams_ptr, scratch_counts_ptr, flat_base,
+                   branch_max);
+        const double d1_min = (1 - param_limits[3][1] / f0) * utils::kCval;
+        const double d1_max = (1 - param_limits[3][0] / f0) * utils::kCval;
+        branch_one(3, d1_cur, d1_sig_cur, d1_sig_new, d1_min, d1_max,
+                   shift_bins_ptr, scratch_params_ptr, scratch_dparams_ptr,
+                   scratch_counts_ptr, flat_base, branch_max);
     }
 
     // --- Loop 3: Fill leaves_origins (4D Cartesian product) ---

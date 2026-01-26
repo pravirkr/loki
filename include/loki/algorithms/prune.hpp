@@ -104,8 +104,7 @@ public:
                  std::span<const float> ts_v,
                  const std::filesystem::path& outdir = "./",
                  std::string_view file_prefix        = "test",
-                 std::string_view kind               = "taylor",
-                 bool show_progress                  = true);
+                 std::string_view poly_basis         = "taylor");
 
     // Opaque handle to the implementation
     class BaseImpl;
@@ -124,7 +123,7 @@ public:
               std::span<const float> threshold_scheme,
               SizeType max_sugg     = 1U << 18U,
               SizeType batch_size   = 1024U,
-              std::string_view kind = "taylor");
+              std::string_view poly_basis = "taylor");
 
     ~PruneCUDA();
     PruneCUDA(PruneCUDA&&) noexcept;
@@ -139,8 +138,7 @@ public:
         SizeType ref_seg,
         const std::filesystem::path& outdir                     = "./",
         const std::optional<std::filesystem::path>& log_file    = std::nullopt,
-        const std::optional<std::filesystem::path>& result_file = std::nullopt,
-        bool show_progress                                      = true);
+        const std::optional<std::filesystem::path>& result_file = std::nullopt);
 
 private:
     class Impl;

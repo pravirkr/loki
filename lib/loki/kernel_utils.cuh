@@ -7,6 +7,7 @@
 #include <cuda/std/limits>
 #include <cuda/std/span>
 #include <cuda/std/type_traits>
+#include <cuda/std/utility>
 
 #include <thrust/device_ptr.h>
 #include <thrust/device_vector.h>
@@ -111,53 +112,38 @@ __device__ __forceinline__ float get_phase_idx_device(double proper_time,
 }
 
 // Device helper: Branch a single parameter
-__device__ __forceinline__ SizeType
+__device__ __forceinline__ cuda::std::pair<double, SizeType>
 branch_param_padded_device(double* __restrict__ out_values,
+                           uint32_t out_size,
                            double param_cur,
                            double dparam_cur,
                            double dparam_new,
                            double param_min,
-                           double param_max,
-                           int branch_max) {
-    constexpr double kEps = 1e-12;
-
-    if (dparam_cur <= kEps || dparam_new <= kEps) {
-        return 0; // Error condition
-    }
-
-    if (param_max <= param_min + kEps) {
-        return 0; // Error condition
-    }
-
-    const double param_range = (param_max - param_min) / 2.0;
+                           double param_max) {
+    constexpr double kEps    = 1e-12;
+    const double param_range = (param_max - param_min) * 0.5;
     if (dparam_new > (param_range + kEps)) {
-        // Step size too large, fallback to current value
         out_values[0] = param_cur;
-        return 1;
+        return {dparam_new, static_cast<SizeType>(1)};
     }
 
-    const int num_points =
-        static_cast<int>(ceil(((dparam_cur + kEps) / dparam_new) - kEps));
+    const auto num_points = static_cast<uint32_t>(
+        std::ceil(((dparam_cur + kEps) / dparam_new) - kEps));
 
-    if (num_points <= 0) {
-        return 0; // Error condition
-    }
-
-    const int n = num_points + 2;
     const double confidence_const =
-        0.5 * (1.0 + 1.0 / static_cast<double>(num_points));
+        0.5 + (0.5 / static_cast<double>(num_points));
     const double half_range = confidence_const * dparam_cur;
     const double start      = param_cur - half_range;
-    const double stop       = param_cur + half_range;
-    const int num_intervals = n - 1;
-    const double step = (stop - start) / static_cast<double>(num_intervals);
+    const double step =
+        (2.0 * half_range) / static_cast<double>(num_points + 1);
 
-    const int count = cuda::std::min(num_points, branch_max);
-    for (int i = 0; i < count; ++i) {
-        out_values[i] = start + (static_cast<double>(i + 1) * step);
+    const uint32_t count = min(num_points, out_size);
+#pragma unroll 4
+    for (uint32_t i = 0; i < count; ++i) {
+        out_values[i] = fma(static_cast<double>(i + 1), step, start);
     }
 
-    return count;
+    return {dparam_cur / static_cast<double>(num_points), count};
 }
 
 // Helper: Compute branch count for a single parameter
@@ -187,5 +173,39 @@ __device__ inline int compute_branch_count_device(double param_cur,
 
     return cuda::std::min(num_points, branch_max);
 }
+
+struct CubScanWorkspace {
+    void* temp_storage = nullptr;
+    size_t temp_bytes  = 0;
+    SizeType capacity  = 0;
+
+    void init(SizeType max_n) {
+        capacity = max_n;
+
+        cub::DeviceScan::ExclusiveSum(nullptr, temp_bytes, (SizeType*)nullptr,
+                                      (SizeType*)nullptr, max_n);
+
+        cudaMalloc(&temp_storage, temp_bytes);
+    }
+
+    void ensure(SizeType n) {
+        if (n <= capacity)
+            return;
+
+        if (temp_storage)
+            cudaFree(temp_storage);
+
+        cub::DeviceScan::ExclusiveSum(nullptr, temp_bytes, (SizeType*)nullptr,
+                                      (SizeType*)nullptr, n);
+
+        cudaMalloc(&temp_storage, temp_bytes);
+        capacity = n;
+    }
+
+    ~CubScanWorkspace() {
+        if (temp_storage)
+            cudaFree(temp_storage);
+    }
+};
 
 } // namespace loki::utils
