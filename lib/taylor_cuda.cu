@@ -1,3 +1,4 @@
+#include "loki/common/coord.hpp"
 #include "loki/core/taylor.hpp"
 
 #include <cuda/atomic>
@@ -5,6 +6,9 @@
 #include <cuda/std/span>
 #include <cuda/std/type_traits>
 #include <cuda_runtime.h>
+
+#include <thrust/execution_policy.h>
+#include <thrust/sequence.h>
 
 #include "loki/common/types.hpp"
 #include "loki/cuda_utils.cuh"
@@ -38,6 +42,88 @@ ffa_taylor_resolve_freq_batch(const double* __restrict__ param_arr_cur_flat,
     pindex_prev_flat_batch[ifreq] = idx_f;
     relative_phase_batch[ifreq] =
         psr_utils::get_phase_idx(delta_t, freq, nbins, 0.0);
+}
+
+template <int LATTER>
+__global__ void
+resolve_jerk_kernel(const double* __restrict__ param_arr_cur_flat,
+                    const uint32_t* __restrict__ param_arr_cur_count,
+                    const double* __restrict__ param_arr_prev_flat,
+                    const uint32_t* __restrict__ param_arr_prev_count,
+                    coord::FFACoordDPtrs coords_ptrs,
+                    SizeType ffa_level,
+                    double tseg_brute,
+                    SizeType nbins) {
+    constexpr uint32_t kParams  = 3;
+    const uint32_t n_jerk       = param_arr_cur_count[0];
+    const uint32_t n_accel      = param_arr_cur_count[1];
+    const uint32_t n_freq       = param_arr_cur_count[2];
+    const uint32_t n_jerk_prev  = param_arr_prev_count[0];
+    const uint32_t n_accel_prev = param_arr_prev_count[1];
+    const uint32_t n_freq_prev  = param_arr_prev_count[2];
+    const uint32_t ncoords      = n_jerk * n_accel * n_freq;
+
+    const uint32_t tid = (blockIdx.x * blockDim.x) + threadIdx.x;
+    if (tid >= ncoords) {
+        return;
+    }
+
+    // Decompose index (f fast moving)
+    // idx = (j * n_accel + a) * n_freq + f
+    const uint32_t freq_idx  = tid % n_freq;
+    const uint32_t accel_idx = tid / n_freq % n_accel;
+    const uint32_t jerk_idx  = tid / (n_freq * n_accel);
+
+    const double* jerk_cur_ptr   = param_arr_cur_flat;
+    const double* accel_cur_ptr  = param_arr_cur_flat + n_jerk;
+    const double* freq_cur_ptr   = param_arr_cur_flat + n_jerk + n_accel;
+    const double* jerk_prev_ptr  = param_arr_prev_flat;
+    const double* accel_prev_ptr = param_arr_prev_flat + n_jerk_prev;
+    const double* freq_prev_ptr =
+        param_arr_prev_flat + n_jerk_prev + n_accel_prev;
+    const auto j_cur = jerk_cur_ptr[jerk_idx];
+    const auto a_cur = accel_cur_ptr[accel_idx];
+    const auto f_cur = freq_cur_ptr[freq_idx];
+
+    const auto tsegment = std::pow(2.0, ffa_level - 1) * tseg_brute;
+    const auto delta_t  = (static_cast<double>(LATTER) - 0.5) * tsegment;
+
+    // Pre-compute constants to avoid repeated calculations
+    const auto delta_t_sq          = delta_t * delta_t;
+    const auto delta_t_cubed       = delta_t_sq * delta_t;
+    const auto half_delta_t_sq     = 0.5 * delta_t_sq;
+    const auto sixth_delta_t_cubed = delta_t_cubed / 6.0;
+    const auto a_new               = a_cur + (j_cur * delta_t);
+    const auto v_new = (a_cur * delta_t) + (0.5 * j_cur * delta_t_sq);
+    const auto d_new =
+        (a_cur * half_delta_t_sq) + (j_cur * sixth_delta_t_cubed);
+
+    const auto coord_idx =
+        ((jerk_idx * n_accel + accel_idx) * n_freq) + freq_idx;
+
+    // Frequency-specific calculations
+    const auto f_new     = f_cur * (1.0 - v_new * utils::kInvCval);
+    const auto delay_rel = d_new * utils::kInvCval;
+    const auto relative_phase =
+        utils::get_phase_idx_device(delta_t, f_cur, nbins, delay_rel);
+
+    const uint32_t idx_j =
+        utils::lower_bound_scan(jerk_prev_ptr, n_jerk_prev, j_cur);
+    const uint32_t idx_a =
+        utils::lower_bound_scan(accel_prev_ptr, n_accel_prev, a_new);
+    const uint32_t idx_f =
+        utils::lower_bound_scan(freq_prev_ptr, n_freq_prev, f_new);
+
+    const auto final_idx =
+        (idx_j * n_accel_prev * n_freq_prev) + (idx_a * n_freq_prev) + idx_f;
+
+    if constexpr (LATTER == 0) {
+        coords_ptrs.i_tail[tid]     = final_idx;
+        coords_ptrs.shift_tail[tid] = relative_phase;
+    } else {
+        coords_ptrs.i_head[tid]     = final_idx;
+        coords_ptrs.shift_head[tid] = relative_phase;
+    }
 }
 
 __global__ void kernel_poly_taylor_seed(const double* __restrict__ accel_grid,
@@ -540,7 +626,7 @@ resolve_taylor_accel(const double* __restrict__ leaves,
         return;
     }
 
-    const double* leaf = leaves + (tid * kLeavesStride);
+    const double* leaf = leaves + static_cast<IndexType>((tid * kLeavesStride));
     const double a_cur = leaf[0];
     const double v_cur = leaf[2];
     const double f0    = leaf[6];
@@ -600,7 +686,7 @@ resolve_taylor_jerk(const double* __restrict__ leaves,
         return;
     }
 
-    const double* leaf = leaves + (tid * kLeavesStride);
+    const double* leaf = leaves + static_cast<IndexType>(tid * kLeavesStride);
     const double j_cur = leaf[0];
     const double a_cur = leaf[2];
     const double v_cur = leaf[4];
@@ -665,7 +751,7 @@ resolve_taylor_snap(const double* __restrict__ leaves,
         return;
     }
 
-    const double* leaf = leaves + (tid * kLeavesStride);
+    const double* leaf = leaves + static_cast<IndexType>(tid * kLeavesStride);
     const double s_cur = leaf[0];
     const double j_cur = leaf[2];
     const double a_cur = leaf[4];
@@ -1315,7 +1401,7 @@ SizeType poly_taylor_branch_batch_cuda(
     }
 }
 
-void poly_taylor_resolve_batch_cuda(cuda::std::span<const double> leaves_branch,
+void poly_taylor_resolve_batch_cuda(cuda::std::span<const double> leaves_tree,
                                     cuda::std::span<const float> accel_grid,
                                     cuda::std::span<const float> freq_grid,
                                     cuda::std::span<uint32_t> param_indices,
@@ -1350,7 +1436,7 @@ void poly_taylor_resolve_batch_cuda(cuda::std::span<const double> leaves_branch,
     auto dispatch = [&]<int N, bool S>() {
         kernel_poly_taylor_resolve_batch<N, S>
             <<<grid, block, shmem_bytes, stream>>>(
-                leaves_branch.data(), n_leaves, accel_grid.data(), n_accel,
+                leaves_tree.data(), n_leaves, accel_grid.data(), n_accel,
                 freq_grid.data(), n_freq, param_indices.data(),
                 phase_shift.data(), coord_add, coord_cur, coord_init, nbins);
     };

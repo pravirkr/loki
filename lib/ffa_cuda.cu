@@ -5,7 +5,7 @@
 #include <fmt/ranges.h>
 #include <spdlog/spdlog.h>
 
-#include <cuda_runtime_api.h>
+#include <cuda_runtime.h>
 #include <thrust/device_vector.h>
 
 #include "loki/algorithms/fold.hpp"

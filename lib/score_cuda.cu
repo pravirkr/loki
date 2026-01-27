@@ -4,7 +4,6 @@
 #include <cuda/atomic>
 #include <cuda/std/atomic>
 #include <cuda/std/climits>
-#include <cuda/std/cstdint>
 #include <cuda/std/span>
 #include <cuda/std/type_traits>
 #include <cuda_runtime.h>

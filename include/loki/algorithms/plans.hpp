@@ -6,45 +6,18 @@
 #include <string_view>
 #include <vector>
 
+#include "loki/common/coord.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
+
+#ifdef LOKI_ENABLE_CUDA
+#include <cuda_runtime.h>
+#include <thrust/device_vector.h>
+#endif // LOKI_ENABLE_CUDA
 
 namespace loki::plans {
 
 constexpr SizeType kFFAManagerWriteBatchSize = 1U << 16U;
-
-// FFA Coordinate plan for a single param coordinate in a single iteration
-struct FFACoord {
-    uint32_t i_tail;  // Tail coordinate index in the previous iteration
-    float shift_tail; // Phase bin shift in the tail coordinate
-    uint32_t i_head;  // Head coordinate index in the previous iteration
-    float shift_head; // Phase bin shift in the head coordinate
-};
-
-struct FFACoordFreq {
-    uint32_t idx; // Phase bin index in the previous iteration
-    float shift;  // Phase bin shift
-};
-
-// A structure to hold the parameters for a single FFA search region.
-struct FFARegion {
-    double f_start; // Hz, inclusive (lower frequency)
-    double f_end;   // Hz, inclusive (upper frequency)
-    SizeType nbins; // fixed within region
-    double eta;     // tolerance in bins for this region
-};
-
-// A structure to hold the stats for a single FFA search chunk.
-struct FFAChunkStats {
-    double nominal_f_start;
-    double nominal_f_end;
-    double actual_f_start;
-    double actual_f_end;
-    double nominal_width;
-    double actual_width;
-    double total_memory_gb;
-    double overlap_fraction; // fraction of actual range that's overlap
-};
 
 /**
  * @brief Base class for an FFA search plan.
@@ -116,25 +89,25 @@ public:
      * @brief Resolve the coordinates for the plan.
      * @param coords A span of FFACoord objects.
      */
-    void resolve_coordinates(std::span<FFACoord> coords);
+    void resolve_coordinates(std::span<coord::FFACoord> coords);
 
     /**
      * @brief Resolve the coordinates for the plan.
      * @return A vector of vectors of FFACoord for each level.
      */
-    std::vector<std::vector<FFACoord>> resolve_coordinates();
+    std::vector<std::vector<coord::FFACoord>> resolve_coordinates();
 
     /**
      * @brief Resolve the coordinates for the plan (frequency-only coordinates).
      * @param coords_freq A span of FFACoordFreq objects.
      */
-    void resolve_coordinates_freq(std::span<FFACoordFreq> coords_freq);
+    void resolve_coordinates_freq(std::span<coord::FFACoordFreq> coords_freq);
 
     /**
      * @brief Resolve the coordinates for the plan (frequency-only coordinates).
      * @return A vector of vectors of FFACoordFreq for each level.
      */
-    std::vector<std::vector<FFACoordFreq>> resolve_coordinates_freq();
+    std::vector<std::vector<coord::FFACoordFreq>> resolve_coordinates_freq();
 
     /**
      * @brief Get the approximate branching pattern for the plan.
@@ -159,6 +132,14 @@ public:
     std::vector<double>
     get_branching_pattern(std::string_view poly_basis = "taylor",
                           SizeType ref_seg            = 0) const;
+
+    // Get the flattened parameters for CUDA plans
+    [[nodiscard]] std::vector<double> get_params_flat() const noexcept;
+    // Get the flattened parameter counts for CUDA plans
+    [[nodiscard]] std::vector<SizeType> get_param_counts_flat() const noexcept;
+    // Get the flattened parameter sizes for CUDA plans
+    [[nodiscard]] std::pair<std::vector<SizeType>, std::vector<SizeType>>
+    get_params_flat_sizes() const noexcept;
 
 private:
     struct Impl;
@@ -242,13 +223,13 @@ duty-cycle resolution.
  * @throws std::invalid_argument if input parameters are illogical.
  * @throws std::runtime_error if nbins_max < nbins_min.
  */
-std::vector<FFARegion> generate_ffa_regions(double p_min,
-                                            double p_max,
-                                            double tsamp,
-                                            SizeType nbins_min,
-                                            double eta_min,
-                                            double octave_scale = 2.0,
-                                            SizeType nbins_max  = 1024);
+std::vector<coord::FFARegion> generate_ffa_regions(double p_min,
+                                                   double p_max,
+                                                   double tsamp,
+                                                   SizeType nbins_min,
+                                                   double eta_min,
+                                                   double octave_scale = 2.0,
+                                                   SizeType nbins_max  = 1024);
 
 /**
  * @brief A class to store the size stats for FFA regions (Time or Fourier
@@ -301,7 +282,8 @@ public:
     /// @brief Get the memory usage of the FFA manager for this region (in GB).
     float get_manager_memory_usage() const noexcept;
     /// @brief Get the chunk stats for the planner.
-    [[nodiscard]] std::vector<FFAChunkStats> get_chunk_stats() const noexcept;
+    [[nodiscard]] std::vector<coord::FFAChunkStats>
+    get_chunk_stats() const noexcept;
 
 private:
     struct Impl;
@@ -342,5 +324,26 @@ private:
     class Impl;
     std::unique_ptr<Impl> m_impl;
 };
+
+#ifdef LOKI_ENABLE_CUDA
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA> class FFAPlanCUDA {
+public:
+    using HostFoldType   = FoldTypeTraits<FoldTypeCUDA>::HostType;
+    using DeviceFoldType = FoldTypeTraits<FoldTypeCUDA>::DeviceType;
+
+    explicit FFAPlanCUDA(const plans::FFAPlan<HostFoldType>& ffa_plan);
+
+    void resolve_coordinates(coord::FFACoordD& coords_d, cudaStream_t stream);
+    void resolve_coordinates_freq(coord::FFACoordFreqD& coords_d,
+                                  cudaStream_t stream);
+
+private:
+    std::unique_ptr<plans::FFAPlan<HostFoldType>> m_ffa_plan;
+    thrust::device_vector<double> m_params_d;
+    thrust::device_vector<uint32_t> m_param_counts_d;
+};
+
+#endif // LOKI_ENABLE_CUDA
 
 } // namespace loki::plans

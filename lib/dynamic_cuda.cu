@@ -4,14 +4,7 @@
 #include <cuda/std/span>
 #include <cuda/std/type_traits>
 
-#include <thrust/device_ptr.h>
-#include <thrust/device_vector.h>
-#include <thrust/execution_policy.h>
-#include <thrust/iterator/counting_iterator.h>
-#include <thrust/reduce.h>
-#include <thrust/scan.h>
-#include <thrust/sort.h>
-#include <thrust/transform.h>
+#include <thrust/copy.h>
 
 #include "loki/common/types.hpp"
 #include "loki/core/taylor.hpp"
@@ -89,7 +82,7 @@ SizeType BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::validate(
     cuda::std::span<uint32_t> /*leaves_origins*/,
     std::pair<double, double> /*coord_cur*/,
     SizeType n_leaves,
-    cudaStream_t stream) const {
+    cudaStream_t /*stream*/) const {
     return n_leaves;
 }
 

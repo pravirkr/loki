@@ -4,6 +4,7 @@
 #include <tuple>
 #include <vector>
 
+#include "loki/common/coord.hpp"
 #include "loki/common/types.hpp"
 #include "loki/utils/workspace.hpp"
 
@@ -23,11 +24,18 @@ ffa_taylor_resolve_generic(std::span<const double> pset_cur,
                            double tseg_brute,
                            SizeType nbins);
 
+void ffa_taylor_resolve_freq_batch(
+    std::span<const std::vector<double>> param_arr_cur,
+    std::span<const std::vector<double>> param_arr_prev,
+    std::span<coord::FFACoordFreq> coords,
+    SizeType ffa_level,
+    double tseg_brute,
+    SizeType nbins);
+
 void ffa_taylor_resolve_poly_batch(
     std::span<const std::vector<double>> param_arr_cur,
     std::span<const std::vector<double>> param_arr_prev,
-    std::span<uint32_t> pindex_prev_flat_batch,
-    std::span<float> relative_phase_batch,
+    std::span<coord::FFACoord> coords,
     SizeType ffa_level,
     SizeType latter,
     double tseg_brute,

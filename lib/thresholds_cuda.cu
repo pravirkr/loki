@@ -1,33 +1,29 @@
 #include "loki/detection/thresholds.hpp"
 
 #include <algorithm>
-#include <cassert>
 #include <cstdint>
-#include <fcntl.h>
 #include <filesystem>
 #include <format>
 #include <memory>
 #include <random>
 
 #include <cub/cub.cuh>
-#include <cub/version.cuh>
 #include <cuda/std/atomic>
+#include <cuda/std/climits>
 #include <cuda/std/optional>
 #include <cuda/std/span>
 #include <cuda/std/utility>
 #include <cuda_runtime.h>
 #include <highfive/highfive.hpp>
-#include <math_constants.h>
 #include <spdlog/spdlog.h>
-#include <sys/stat.h>
+
+#include <thrust/copy.h>
 #include <thrust/device_vector.h>
 #include <thrust/execution_policy.h>
 #include <thrust/fill.h>
 #include <thrust/for_each.h>
-#include <thrust/host_vector.h>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/iterator/zip_iterator.h>
-#include <thrust/memory.h>
 #include <thrust/scan.h>
 #include <thrust/sequence.h>
 #include <thrust/transform.h>
@@ -543,9 +539,9 @@ compute_trial_snr_on_demand(const float* __restrict__ trial_data,
             psum[pos_in_cycle] + (static_cast<float>(wrap_count) * total_sum);
     }
 
-    float max_snr = -CUDART_INF_F;
+    float max_snr = -cuda::std::numeric_limits<float>::infinity();
     for (int iw = 0; iw < nwidths; ++iw) {
-        float max_diff = -CUDART_INF_F;
+        float max_diff = -cuda::std::numeric_limits<float>::infinity();
         for (int j = 0; j < nbins; ++j) {
             const float diff = psum[widths[iw] + j] - psum[j];
             max_diff         = max(diff, max_diff);
@@ -626,15 +622,15 @@ __device__ float compute_trial_snr_warp_level(
     __syncthreads();
 
     // Find the maximum SNR across all boxcar widths
-    const float total_sum            = shm_warp_psum[nbins - 1];
-    float warp_max_snr               = -CUDART_INF_F;
-    const int nwidths                = box_cache.nwidths;
+    const float total_sum = shm_warp_psum[nbins - 1];
+    float warp_max_snr    = -cuda::std::numeric_limits<float>::infinity();
+    const int nwidths     = box_cache.nwidths;
     const int* __restrict__ widths   = box_cache.box_score_widths;
     const float* __restrict__ h_vals = box_cache.h_vals;
     const float* __restrict__ b_vals = box_cache.b_vals;
 
     for (int iw = 0; iw < nwidths; ++iw) {
-        float thread_max_diff = -CUDART_INF_F;
+        float thread_max_diff = -cuda::std::numeric_limits<float>::infinity();
         for (int j = lane_id; j < nbins; j += kWarpSize) {
             float sum_before_start = (j > 0) ? shm_warp_psum[j - 1] : 0.0F;
             float current_sum;

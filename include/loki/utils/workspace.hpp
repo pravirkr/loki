@@ -71,6 +71,11 @@ struct BranchingWorkspaceCUDA {
                            size_t nparams,
                            cudaStream_t stream = nullptr);
     ~BranchingWorkspaceCUDA();
+    BranchingWorkspaceCUDA(const BranchingWorkspaceCUDA&)            = delete;
+    BranchingWorkspaceCUDA& operator=(const BranchingWorkspaceCUDA&) = delete;
+    BranchingWorkspaceCUDA(BranchingWorkspaceCUDA&&) noexcept        = delete;
+    BranchingWorkspaceCUDA&
+    operator=(BranchingWorkspaceCUDA&&) noexcept = delete;
 
     [[nodiscard]] BranchingWorkspaceCUDAView get_view() noexcept;
 

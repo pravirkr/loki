@@ -4,7 +4,7 @@
 
 #include <cuda/std/complex>
 #include <cuda/std/span>
-#include <cuda_runtime_api.h>
+#include <cuda_runtime.h>
 #include <cufft.h>
 #include <thrust/device_vector.h>
 #include <thrust/execution_policy.h>

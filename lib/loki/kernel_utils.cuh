@@ -1,37 +1,22 @@
 #pragma once
 
-#include <format>
-#include <string_view>
-
-#include <cuda/atomic>
-#include <cuda/std/limits>
-#include <cuda/std/span>
-#include <cuda/std/type_traits>
+#include <cstdint>
 #include <cuda/std/utility>
 
-#include <thrust/device_ptr.h>
-#include <thrust/device_vector.h>
-#include <thrust/execution_policy.h>
-#include <thrust/iterator/counting_iterator.h>
-#include <thrust/reduce.h>
-#include <thrust/scan.h>
-#include <thrust/sort.h>
-#include <thrust/transform.h>
+#include <cuda_runtime.h>
 
-#include "loki/common/types.hpp"
-#include "loki/cuda_utils.cuh"
 #include "loki/utils.hpp"
 
 namespace loki::utils {
 
 // Nearest linear scan
-__device__ __forceinline__ SizeType
-nearest_linear_scan(const float* __restrict__ arr, SizeType n, float val) {
-    SizeType best = 0;
+__device__ __forceinline__ uint32_t
+nearest_linear_scan(const float* __restrict__ arr, uint32_t n, float val) {
+    uint32_t best = 0;
     float best_d  = fabsf(arr[0] - val);
 
 #pragma unroll
-    for (SizeType i = 1; i < n; ++i) {
+    for (uint32_t i = 1; i < n; ++i) {
         float d = fabsf(arr[i] - val);
         if (d < best_d) {
             best_d = d;
@@ -41,11 +26,11 @@ nearest_linear_scan(const float* __restrict__ arr, SizeType n, float val) {
     return best;
 }
 
-__device__ __forceinline__ SizeType
-lower_bound_scan(const float* __restrict__ arr, SizeType n, float val) {
-    SizeType l = 0, r = n;
+__device__ __forceinline__ uint32_t
+lower_bound_scanf(const float* __restrict__ arr, uint32_t n, float val) {
+    uint32_t l = 0, r = n;
     while (l < r) {
-        SizeType m = (l + r) >> 1U;
+        uint32_t m = (l + r) >> 1U;
         if (arr[m] < val) {
             l = m + 1;
         } else {
@@ -65,19 +50,43 @@ lower_bound_scan(const float* __restrict__ arr, SizeType n, float val) {
     return l;
 }
 
+__device__ __forceinline__ uint32_t
+lower_bound_scan(const double* __restrict__ arr, uint32_t n, double val) {
+    uint32_t l = 0, r = n;
+    while (l < r) {
+        uint32_t m = (l + r) >> 1U;
+        if (arr[m] < val) {
+            l = m + 1;
+        } else {
+            r = m;
+        }
+    }
+    if (l == n) {
+        return n - 1;
+    }
+    if (l > 0) {
+        const double dp = fabs(val - arr[l - 1]);
+        const double dc = fabs(arr[l] - val);
+        if (dp <= dc) {
+            --l;
+        }
+    }
+    return l;
+}
+
 // Nearest binary scan
-__device__ __forceinline__ SizeType
-binary_search_device(const float* __restrict__ arr, SizeType n, float target) {
+__device__ __forceinline__ uint32_t
+binary_search_device(const float* __restrict__ arr, uint32_t n, float target) {
     if (n == 0) {
         return 0;
     }
-    SizeType left   = 0;
-    SizeType right  = n - 1;
-    SizeType best   = 0;
+    uint32_t left   = 0;
+    uint32_t right  = n - 1;
+    uint32_t best   = 0;
     float best_dist = fabsf(arr[0] - target);
 
     while (left <= right) {
-        SizeType mid = (left + right) >> 1U;
+        uint32_t mid = (left + right) >> 1U;
         float dist   = fabsf(arr[mid] - target);
 
         if (dist < best_dist) {
@@ -124,11 +133,11 @@ branch_param_padded_device(double* __restrict__ out_values,
     const double param_range = (param_max - param_min) * 0.5;
     if (dparam_new > (param_range + utils::kEps)) {
         out_values[0] = param_cur;
-        return {dparam_new, static_cast<SizeType>(1)};
+        return {dparam_new, static_cast<uint32_t>(1)};
     }
 
     const auto num_points = static_cast<uint32_t>(
-        std::ceil(((dparam_cur + utils::kEps) / dparam_new) - utils::kEps));
+        ceil(((dparam_cur + utils::kEps) / dparam_new) - utils::kEps));
 
     const double confidence_const =
         0.5 + (0.5 / static_cast<double>(num_points));

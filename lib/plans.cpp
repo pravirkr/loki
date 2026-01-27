@@ -53,9 +53,9 @@ struct FFAPlanBase::Impl {
     float get_coord_memory_usage() const noexcept {
         SizeType total_memory;
         if (m_cfg.get_nparams() == 1) {
-            total_memory = get_coord_size() * sizeof(FFACoordFreq);
+            total_memory = get_coord_size() * sizeof(coord::FFACoordFreq);
         } else {
-            total_memory = get_coord_size() * sizeof(FFACoord);
+            total_memory = get_coord_size() * sizeof(coord::FFACoord);
         }
         return static_cast<float>(total_memory) /
                static_cast<float>(1ULL << 30U);
@@ -77,7 +77,7 @@ struct FFAPlanBase::Impl {
         return result;
     }
 
-    void resolve_coordinates(std::span<FFACoord> coords) {
+    void resolve_coordinates(std::span<coord::FFACoord> coords) {
         error_check::check_greater_equal(
             n_params, 2U,
             "resolve_coordinates only supports nparams>=2. For frequency "
@@ -100,39 +100,23 @@ struct FFAPlanBase::Impl {
         for (SizeType i_level = 1; i_level < n_levels; ++i_level) {
             const auto ncoords_cur    = ncoords[i_level];
             const auto ncoords_offset = ncoords_offsets[i_level];
-
-            auto relative_phase_batch_span =
-                std::span(relative_phase_batch).first(ncoords_cur);
-            auto pindex_prev_flat_span =
-                std::span(pindex_prev_flat).first(ncoords_cur);
+            auto coords_span = coords.subspan(ncoords_offset, ncoords_cur);
 
             // Tail coordinates
             core::ffa_taylor_resolve_poly_batch(
-                params[i_level], params[i_level - 1], pindex_prev_flat_span,
-                relative_phase_batch_span, i_level, 0, m_cfg.get_tseg_brute(),
-                m_cfg.get_nbins(), n_params);
-            for (SizeType icoord = 0; icoord < ncoords_cur; ++icoord) {
-                const auto icoord_cur         = ncoords_offset + icoord;
-                coords[icoord_cur].i_tail     = pindex_prev_flat[icoord];
-                coords[icoord_cur].shift_tail = relative_phase_batch[icoord];
-            }
+                params[i_level], params[i_level - 1], coords_span, i_level, 0,
+                m_cfg.get_tseg_brute(), m_cfg.get_nbins(), n_params);
 
             // Head coordinates
             core::ffa_taylor_resolve_poly_batch(
-                params[i_level], params[i_level - 1], pindex_prev_flat_span,
-                relative_phase_batch_span, i_level, 1, m_cfg.get_tseg_brute(),
-                m_cfg.get_nbins(), n_params);
-            for (SizeType icoord = 0; icoord < ncoords_cur; ++icoord) {
-                const auto icoord_cur         = ncoords_offset + icoord;
-                coords[icoord_cur].i_head     = pindex_prev_flat[icoord];
-                coords[icoord_cur].shift_head = relative_phase_batch[icoord];
-            }
+                params[i_level], params[i_level - 1], coords_span, i_level, 1,
+                m_cfg.get_tseg_brute(), m_cfg.get_nbins(), n_params);
         }
     }
-    std::vector<std::vector<FFACoord>> resolve_coordinates() {
-        std::vector<FFACoord> coords_flat(get_coord_size());
+    std::vector<std::vector<coord::FFACoord>> resolve_coordinates() {
+        std::vector<coord::FFACoord> coords_flat(get_coord_size());
         resolve_coordinates(coords_flat);
-        std::vector<std::vector<FFACoord>> coords(n_levels);
+        std::vector<std::vector<coord::FFACoord>> coords(n_levels);
         for (SizeType i_level = 0; i_level < n_levels; ++i_level) {
             const auto ncoords_cur    = ncoords[i_level];
             const auto ncoords_offset = ncoords_offsets[i_level];
@@ -146,15 +130,11 @@ struct FFAPlanBase::Impl {
         return coords;
     }
 
-    void resolve_coordinates_freq(std::span<FFACoordFreq> coords_freq) {
+    void resolve_coordinates_freq(std::span<coord::FFACoordFreq> coords_freq) {
         error_check::check_equal(n_params, 1,
                                  "resolve_coordinates_freq() only supports "
                                  "nparams=1");
         // Resolve the frequency coordinates for the FFA plan
-        const auto ncoords_max = std::ranges::max(ncoords);
-        std::vector<float> relative_phase_batch(ncoords_max);
-        std::vector<uint32_t> pindex_prev_flat(ncoords_max);
-
         error_check::check_greater_equal(
             coords_freq.size(), get_coord_size(),
             "FFAPlan::resolve_coordinates_freq: "
@@ -163,26 +143,17 @@ struct FFAPlanBase::Impl {
         for (SizeType i_level = 1; i_level < n_levels; ++i_level) {
             const auto ncoords_cur    = ncoords[i_level];
             const auto ncoords_offset = ncoords_offsets[i_level];
-            auto relative_phase_batch_span =
-                std::span(relative_phase_batch).first(ncoords_cur);
-            auto pindex_prev_flat_span =
-                std::span(pindex_prev_flat).first(ncoords_cur);
-            core::ffa_taylor_resolve_poly_batch(
-                params[i_level], params[i_level - 1], pindex_prev_flat_span,
-                relative_phase_batch_span, i_level, 0, m_cfg.get_tseg_brute(),
-                m_cfg.get_nbins(), n_params);
-            // Generate coordinates for the head
-            for (SizeType icoord = 0; icoord < ncoords_cur; ++icoord) {
-                const auto icoord_cur         = ncoords_offset + icoord;
-                coords_freq[icoord_cur].idx   = pindex_prev_flat[icoord];
-                coords_freq[icoord_cur].shift = relative_phase_batch[icoord];
-            }
+            auto coords_freq_span =
+                coords_freq.subspan(ncoords_offset, ncoords_cur);
+            core::ffa_taylor_resolve_freq_batch(
+                params[i_level], params[i_level - 1], coords_freq_span, i_level,
+                m_cfg.get_tseg_brute(), m_cfg.get_nbins());
         }
     }
-    std::vector<std::vector<FFACoordFreq>> resolve_coordinates_freq() {
-        std::vector<FFACoordFreq> coords_freq_flat(get_coord_size());
+    std::vector<std::vector<coord::FFACoordFreq>> resolve_coordinates_freq() {
+        std::vector<coord::FFACoordFreq> coords_freq_flat(get_coord_size());
         resolve_coordinates_freq(coords_freq_flat);
-        std::vector<std::vector<FFACoordFreq>> coords_freq(n_levels);
+        std::vector<std::vector<coord::FFACoordFreq>> coords_freq(n_levels);
         for (SizeType i_level = 0; i_level < n_levels; ++i_level) {
             const auto ncoords_cur    = ncoords[i_level];
             const auto ncoords_offset = ncoords_offsets[i_level];
@@ -517,13 +488,13 @@ private:
     }
 }; // End FFAPlan::Impl definition
 
-std::vector<FFARegion> generate_ffa_regions(double p_min,
-                                            double p_max,
-                                            double tsamp,
-                                            SizeType nbins_min,
-                                            double eta_min,
-                                            double octave_scale,
-                                            SizeType nbins_max) {
+std::vector<coord::FFARegion> generate_ffa_regions(double p_min,
+                                                   double p_max,
+                                                   double tsamp,
+                                                   SizeType nbins_min,
+                                                   double eta_min,
+                                                   double octave_scale,
+                                                   SizeType nbins_max) {
     error_check::check_greater(p_min, 0.0, "p_min must be positive.");
     error_check::check_greater(p_max, p_min, "p_max must be > p_min.");
     error_check::check_greater(tsamp, 0.0, "tsamp must be positive.");
@@ -534,7 +505,7 @@ std::vector<FFARegion> generate_ffa_regions(double p_min,
     error_check::check_greater_equal(nbins_max, nbins_min,
                                      "nbins_max must be >= nbins_min.");
 
-    std::vector<FFARegion> regions;
+    std::vector<coord::FFARegion> regions;
     SizeType nbins_cur =
         std::min(nbins_min, static_cast<SizeType>(p_min / tsamp));
     double rho = eta_min / static_cast<double>(nbins_cur);
@@ -612,9 +583,9 @@ template <SupportedFoldType FoldType> struct FFARegionStats<FoldType>::Impl {
     float get_coord_memory_usage() const noexcept {
         SizeType coord_size;
         if (n_params == 1) {
-            coord_size = max_coord_size * sizeof(FFACoordFreq);
+            coord_size = max_coord_size * sizeof(coord::FFACoordFreq);
         } else {
-            coord_size = max_coord_size * sizeof(FFACoord);
+            coord_size = max_coord_size * sizeof(coord::FFACoord);
         }
         return static_cast<float>(coord_size) / static_cast<float>(1ULL << 30U);
     }
@@ -672,7 +643,7 @@ public:
     const FFARegionStats<FoldType>& get_stats() const noexcept {
         return m_stats;
     }
-    const std::vector<FFAChunkStats>& get_chunk_stats() const noexcept {
+    const std::vector<coord::FFAChunkStats>& get_chunk_stats() const noexcept {
         return m_chunk_stats;
     }
 
@@ -682,7 +653,7 @@ private:
 
     std::vector<search::PulsarSearchConfig> m_cfgs;
     FFARegionStats<FoldType> m_stats{0, 0, 0, 0, 0, 0, 0, m_use_gpu};
-    std::vector<FFAChunkStats> m_chunk_stats;
+    std::vector<coord::FFAChunkStats> m_chunk_stats;
 
     double calculate_max_drift(const search::PulsarSearchConfig& cfg) const {
         if (cfg.get_nparams() <= 1) {
@@ -920,14 +891,14 @@ private:
             // Store config and stats
             m_cfgs.push_back(chunk_cfg);
             m_chunk_stats.push_back(
-                FFAChunkStats{.nominal_f_start  = nominal_start,
-                              .nominal_f_end    = nominal_end,
-                              .actual_f_start   = actual_start,
-                              .actual_f_end     = actual_end,
-                              .nominal_width    = nominal_width,
-                              .actual_width     = actual_width,
-                              .total_memory_gb  = chunk_memory_gb,
-                              .overlap_fraction = overlap_fraction});
+                coord::FFAChunkStats{.nominal_f_start  = nominal_start,
+                                     .nominal_f_end    = nominal_end,
+                                     .actual_f_start   = actual_start,
+                                     .actual_f_end     = actual_end,
+                                     .nominal_width    = nominal_width,
+                                     .actual_width     = actual_width,
+                                     .total_memory_gb  = chunk_memory_gb,
+                                     .overlap_fraction = overlap_fraction});
             spdlog::debug("Chunk: nominal=[{:08.3f}, {:08.3f}] ({:.3f} Hz), "
                           "actual=[{:08.3f}, {:08.3f}] ({:.3f} Hz), "
                           "overlap={:.1f}%, mem={:.2f} GB",
@@ -1059,17 +1030,18 @@ std::map<std::string, std::vector<double>>
 FFAPlanBase::get_params_dict() const {
     return m_impl->get_params_dict();
 }
-void FFAPlanBase::resolve_coordinates(std::span<FFACoord> coords) {
+void FFAPlanBase::resolve_coordinates(std::span<coord::FFACoord> coords) {
     m_impl->resolve_coordinates(coords);
 }
-std::vector<std::vector<FFACoord>> FFAPlanBase::resolve_coordinates() {
+std::vector<std::vector<coord::FFACoord>> FFAPlanBase::resolve_coordinates() {
     return m_impl->resolve_coordinates();
 }
 void FFAPlanBase::resolve_coordinates_freq(
-    std::span<FFACoordFreq> coords_freq) {
+    std::span<coord::FFACoordFreq> coords_freq) {
     m_impl->resolve_coordinates_freq(coords_freq);
 }
-std::vector<std::vector<FFACoordFreq>> FFAPlanBase::resolve_coordinates_freq() {
+std::vector<std::vector<coord::FFACoordFreq>>
+FFAPlanBase::resolve_coordinates_freq() {
     return m_impl->resolve_coordinates_freq();
 }
 std::vector<double> FFAPlanBase::get_branching_pattern_approx(
@@ -1081,7 +1053,16 @@ FFAPlanBase::get_branching_pattern(std::string_view poly_basis,
                                    SizeType ref_seg) const {
     return m_impl->get_branching_pattern(poly_basis, ref_seg);
 }
-
+std::vector<double> FFAPlanBase::get_params_flat() const noexcept {
+    return m_impl->get_params_flat();
+}
+std::vector<SizeType> FFAPlanBase::get_param_counts_flat() const noexcept {
+    return m_impl->get_param_counts_flat();
+}
+std::pair<std::vector<SizeType>, std::vector<SizeType>>
+FFAPlanBase::get_params_flat_sizes() const noexcept {
+    return m_impl->get_params_flat_sizes();
+}
 // --- Definitions for FFAPlan ---
 template <SupportedFoldType FoldType>
 FFAPlan<FoldType>::FFAPlan(const search::PulsarSearchConfig& cfg)

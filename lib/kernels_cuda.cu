@@ -1,7 +1,7 @@
 #include "loki/kernels_cuda.cuh"
 
 #include <cuda/std/span>
-#include <cuda_runtime_api.h>
+#include <cuda_runtime.h>
 #include <thrust/device_vector.h>
 
 #include "loki/common/types.hpp"
@@ -292,9 +292,9 @@ kernel_ffa_freq_iter_shared(const float* __restrict__ fold_in,
                             uint32_t nbins) {
     // Strategy: Process one (icoord, iseg) pair per block
     const uint32_t iseg = blockIdx.x;
-    const uint32_t icoord =
-        blockIdx.y + blockIdx.z * gridDim.y; // Combine y and z
-    const uint32_t tid = threadIdx.x;
+    // Combine y and z
+    const uint32_t icoord = blockIdx.y + (blockIdx.z * gridDim.y);
+    const uint32_t tid    = threadIdx.x;
 
     if (icoord >= ncoords_cur || iseg >= nsegments || tid >= nbins) {
         return;
@@ -392,8 +392,10 @@ __global__ void kernel_ffa_freq_iter_warp(const float* __restrict__ fold_in,
         (lane_id < shift) ? (lane_id + nbins - shift) : (lane_id - shift);
 
     // Shuffle to get unrotated values
-    const float head_e_unrot = __shfl_sync(__activemask(), head_e, src_lane);
-    const float head_v_unrot = __shfl_sync(__activemask(), head_v, src_lane);
+    const float head_e_unrot =
+        __shfl_sync(__activemask(), head_e, static_cast<int>(src_lane));
+    const float head_v_unrot =
+        __shfl_sync(__activemask(), head_v, static_cast<int>(src_lane));
 
     // Load tail (coalesced), add, and write (coalesced)
     fold_out[out_offset + lane_id] =

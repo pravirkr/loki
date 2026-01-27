@@ -10,6 +10,7 @@
 #include <spdlog/spdlog.h>
 
 #include "loki/cartesian.hpp"
+#include "loki/common/coord.hpp"
 #include "loki/common/types.hpp"
 #include "loki/exceptions.hpp"
 #include "loki/psr_utils.hpp"
@@ -20,47 +21,12 @@ namespace loki::core {
 
 namespace {
 
-void ffa_taylor_resolve_freq_batch(
-    std::span<const std::vector<double>> param_arr_cur,
-    std::span<const std::vector<double>> param_arr_prev,
-    std::span<uint32_t> pindex_prev_flat_batch,
-    std::span<float> relative_phase_batch,
-    SizeType ffa_level,
-    double tseg_brute,
-    SizeType nbins) {
-    const auto nparams = param_arr_prev.size();
-    error_check::check_equal(
-        nparams, param_arr_cur.size(),
-        "param_arr_cur and param_arr_prev should have the same size");
-    error_check::check_equal(nparams, 1U,
-                             "nparams should be 1 for frequency resolve");
-    const auto& freq_arr = param_arr_cur[0];
-    const auto n_freq    = freq_arr.size();
-    error_check::check_equal(pindex_prev_flat_batch.size(), n_freq,
-                             "pindex_prev_flat size mismatch");
-    error_check::check_equal(relative_phase_batch.size(), n_freq,
-                             "relative_phase_batch size mismatch");
-
-    const auto delta_t = std::pow(2.0, ffa_level - 1) * tseg_brute;
-
-    // Calculate relative phases and flattened parameter indices
-    SizeType hint_f = 0;
-    for (SizeType i = 0; i < n_freq; ++i) {
-        const auto idx_f = utils::find_nearest_sorted_idx_scan(
-            std::span(param_arr_prev[0]), freq_arr[i], hint_f);
-        pindex_prev_flat_batch[i] = static_cast<uint32_t>(idx_f);
-        relative_phase_batch[i] =
-            psr_utils::get_phase_idx(delta_t, freq_arr[i], nbins, 0.0);
-    }
-}
-
+template <int LATTER>
 void ffa_taylor_resolve_accel_batch(
     std::span<const std::vector<double>> param_arr_cur,
     std::span<const std::vector<double>> param_arr_prev,
-    std::span<uint32_t> pindex_prev_flat_batch,
-    std::span<float> relative_phase_batch,
+    std::span<coord::FFACoord> coords,
     SizeType ffa_level,
-    SizeType latter,
     double tseg_brute,
     SizeType nbins) {
     const auto nparams = param_arr_prev.size();
@@ -79,13 +45,10 @@ void ffa_taylor_resolve_accel_batch(
     const auto n_freq          = param_arr_cur[1].size();
     const auto n_freq_prev     = param_arr_prev[1].size();
     const auto ncoords         = n_accel * n_freq;
-    error_check::check_equal(pindex_prev_flat_batch.size(), ncoords,
-                             "pindex_prev_flat size mismatch");
-    error_check::check_equal(relative_phase_batch.size(), ncoords,
-                             "relative_phase_batch size mismatch");
+    error_check::check_equal(coords.size(), ncoords, "coords size mismatch");
 
     const auto tsegment = std::pow(2.0, ffa_level - 1) * tseg_brute;
-    const auto delta_t  = (static_cast<double>(latter) - 0.5) * tsegment;
+    const auto delta_t  = (static_cast<double>(LATTER) - 0.5) * tsegment;
 
     // Pre-compute constants to avoid repeated calculations
     const auto half_delta_t_sq = 0.5 * delta_t * delta_t;
@@ -106,24 +69,30 @@ void ffa_taylor_resolve_accel_batch(
             const auto f_new     = f_cur * (1.0 - v_new * utils::kInvCval);
             const auto delay_rel = d_new * utils::kInvCval;
 
-            relative_phase_batch[coord_idx] =
+            const auto relative_phase =
                 psr_utils::get_phase_idx(delta_t, f_cur, nbins, delay_rel);
             const auto idx_f = utils::find_nearest_sorted_idx_scan(
                 freq_arr_prev, f_new, hint_f);
-
-            pindex_prev_flat_batch[coord_idx] =
+            const auto final_idx =
                 static_cast<uint32_t>((idx_a * n_freq_prev) + idx_f);
+
+            if constexpr (LATTER == 0) {
+                coords[coord_idx].i_tail     = final_idx;
+                coords[coord_idx].shift_tail = relative_phase;
+            } else {
+                coords[coord_idx].i_head     = final_idx;
+                coords[coord_idx].shift_head = relative_phase;
+            }
         }
     }
 }
 
+template <int LATTER>
 void ffa_taylor_resolve_jerk_batch(
     std::span<const std::vector<double>> param_arr_cur,
     std::span<const std::vector<double>> param_arr_prev,
-    std::span<uint32_t> pindex_prev_flat_batch,
-    std::span<float> relative_phase_batch,
+    std::span<coord::FFACoord> coords,
     SizeType ffa_level,
-    SizeType latter,
     double tseg_brute,
     SizeType nbins) {
     const auto nparams = param_arr_prev.size();
@@ -140,13 +109,10 @@ void ffa_taylor_resolve_jerk_batch(
     const auto n_accel_prev = param_arr_prev[1].size();
     const auto n_freq_prev  = param_arr_prev[2].size();
 
-    error_check::check_equal(pindex_prev_flat_batch.size(), ncoords,
-                             "pindex_prev_flat size mismatch");
-    error_check::check_equal(relative_phase_batch.size(), ncoords,
-                             "relative_phase_batch size mismatch");
+    error_check::check_equal(coords.size(), ncoords, "coords size mismatch");
 
     const auto tsegment = std::pow(2.0, ffa_level - 1) * tseg_brute;
-    const auto delta_t  = (static_cast<double>(latter) - 0.5) * tsegment;
+    const auto delta_t  = (static_cast<double>(LATTER) - 0.5) * tsegment;
 
     // Pre-compute constants to avoid repeated calculations
     const auto delta_t_sq          = delta_t * delta_t;
@@ -215,22 +181,27 @@ void ffa_taylor_resolve_jerk_batch(
 
                 const auto idx_f = utils::find_nearest_sorted_idx_scan(
                     std::span(freq_arr_prev), f_new, hint_f);
-
-                pindex_prev_flat_batch[coord_idx] =
+                const auto final_idx =
                     static_cast<uint32_t>(jerk_accel_offset + idx_f);
-                relative_phase_batch[coord_idx] = relative_phase;
+
+                if constexpr (LATTER == 0) {
+                    coords[coord_idx].i_tail     = final_idx;
+                    coords[coord_idx].shift_tail = relative_phase;
+                } else {
+                    coords[coord_idx].i_head     = final_idx;
+                    coords[coord_idx].shift_head = relative_phase;
+                }
             }
         }
     }
 }
 
+template <int LATTER>
 void ffa_taylor_resolve_snap_batch(
     std::span<const std::vector<double>> param_arr_cur,
     std::span<const std::vector<double>> param_arr_prev,
-    std::span<uint32_t> pindex_prev_flat_batch,
-    std::span<float> relative_phase_batch,
+    std::span<coord::FFACoord> coords,
     SizeType ffa_level,
-    SizeType latter,
     double tseg_brute,
     SizeType nbins) {
     const auto nparams = param_arr_prev.size();
@@ -249,18 +220,17 @@ void ffa_taylor_resolve_snap_batch(
         param_arr_cur_jerk[i]  = param_arr_cur[1 + i];
         param_arr_prev_jerk[i] = param_arr_prev[1 + i];
     }
-    ffa_taylor_resolve_jerk_batch(param_arr_cur_jerk, param_arr_prev_jerk,
-                                  pindex_prev_flat_batch, relative_phase_batch,
-                                  ffa_level, latter, tseg_brute, nbins);
+    ffa_taylor_resolve_jerk_batch<LATTER>(param_arr_cur_jerk,
+                                          param_arr_prev_jerk, coords,
+                                          ffa_level, tseg_brute, nbins);
 }
 
+template <int LATTER>
 void ffa_taylor_resolve_crackle_batch(
     std::span<const std::vector<double>> param_arr_cur,
     std::span<const std::vector<double>> param_arr_prev,
-    std::span<uint32_t> pindex_prev_flat_batch,
-    std::span<float> relative_phase_batch,
+    std::span<coord::FFACoord> coords,
     SizeType ffa_level,
-    SizeType latter,
     double tseg_brute,
     SizeType nbins) {
     const auto nparams = param_arr_prev.size();
@@ -279,9 +249,9 @@ void ffa_taylor_resolve_crackle_batch(
         param_arr_cur_jerk[i]  = param_arr_cur[2 + i];
         param_arr_prev_jerk[i] = param_arr_prev[2 + i];
     }
-    ffa_taylor_resolve_jerk_batch(param_arr_cur_jerk, param_arr_prev_jerk,
-                                  pindex_prev_flat_batch, relative_phase_batch,
-                                  ffa_level, latter, tseg_brute, nbins);
+    ffa_taylor_resolve_jerk_batch<LATTER>(param_arr_cur_jerk,
+                                          param_arr_prev_jerk, coords,
+                                          ffa_level, tseg_brute, nbins);
 }
 
 SizeType
@@ -1271,39 +1241,33 @@ poly_taylor_branch_batch_impl(std::span<const double> leaves_tree,
     }
 }
 
-template <SizeType NPARAMS>
+template <SizeType NPARAMS, int LATTER>
 void ffa_taylor_resolve_poly_batch_impl(
     std::span<const std::vector<double>> param_arr_cur,
     std::span<const std::vector<double>> param_arr_prev,
-    std::span<uint32_t> pindex_prev_flat_batch,
-    std::span<float> relative_phase_batch,
+    std::span<coord::FFACoord> coords,
     SizeType ffa_level,
-    SizeType latter,
     double tseg_brute,
     SizeType nbins) {
-    static_assert(NPARAMS <= 5, "Unsupported number of parameters");
+    static_assert(NPARAMS > 1 && NPARAMS <= 5 && LATTER >= 0 && LATTER <= 1,
+                  "Unsupported number of parameters or latter");
 
-    if constexpr (NPARAMS == 1) {
-        // No usage of latter
-        ffa_taylor_resolve_freq_batch(
-            param_arr_cur, param_arr_prev, pindex_prev_flat_batch,
-            relative_phase_batch, ffa_level, tseg_brute, nbins);
-    } else if constexpr (NPARAMS == 2) {
-        ffa_taylor_resolve_accel_batch(
-            param_arr_cur, param_arr_prev, pindex_prev_flat_batch,
-            relative_phase_batch, ffa_level, latter, tseg_brute, nbins);
+    if constexpr (NPARAMS == 2) {
+        ffa_taylor_resolve_accel_batch<LATTER>(param_arr_cur, param_arr_prev,
+                                               coords, ffa_level, tseg_brute,
+                                               nbins);
     } else if constexpr (NPARAMS == 3) {
-        ffa_taylor_resolve_jerk_batch(
-            param_arr_cur, param_arr_prev, pindex_prev_flat_batch,
-            relative_phase_batch, ffa_level, latter, tseg_brute, nbins);
+        ffa_taylor_resolve_jerk_batch<LATTER>(param_arr_cur, param_arr_prev,
+                                              coords, ffa_level, tseg_brute,
+                                              nbins);
     } else if constexpr (NPARAMS == 4) {
-        ffa_taylor_resolve_snap_batch(
-            param_arr_cur, param_arr_prev, pindex_prev_flat_batch,
-            relative_phase_batch, ffa_level, latter, tseg_brute, nbins);
+        ffa_taylor_resolve_snap_batch<LATTER>(param_arr_cur, param_arr_prev,
+                                              coords, ffa_level, tseg_brute,
+                                              nbins);
     } else if constexpr (NPARAMS == 5) {
-        ffa_taylor_resolve_crackle_batch(
-            param_arr_cur, param_arr_prev, pindex_prev_flat_batch,
-            relative_phase_batch, ffa_level, latter, tseg_brute, nbins);
+        ffa_taylor_resolve_crackle_batch<LATTER>(param_arr_cur, param_arr_prev,
+                                                 coords, ffa_level, tseg_brute,
+                                                 nbins);
     }
 }
 
@@ -1389,39 +1353,85 @@ ffa_taylor_resolve_generic(std::span<const double> pset_cur,
     return {pindex_prev, relative_phase};
 }
 
+void ffa_taylor_resolve_freq_batch(
+    std::span<const std::vector<double>> param_arr_cur,
+    std::span<const std::vector<double>> param_arr_prev,
+    std::span<coord::FFACoordFreq> coords,
+    SizeType ffa_level,
+    double tseg_brute,
+    SizeType nbins) {
+    const auto nparams = param_arr_prev.size();
+    error_check::check_equal(
+        nparams, param_arr_cur.size(),
+        "param_arr_cur and param_arr_prev should have the same size");
+    error_check::check_equal(nparams, 1U,
+                             "nparams should be 1 for frequency resolve");
+    const auto& freq_arr = param_arr_cur[0];
+    const auto n_freq    = freq_arr.size();
+    error_check::check_equal(coords.size(), n_freq,
+                             "pindex_prev_flat size mismatch");
+
+    const auto delta_t = std::pow(2.0, ffa_level - 1) * tseg_brute;
+
+    // Calculate relative phases and flattened parameter indices
+    SizeType hint_f = 0;
+    for (SizeType i = 0; i < n_freq; ++i) {
+        const auto idx_f = utils::find_nearest_sorted_idx_scan(
+            std::span(param_arr_prev[0]), freq_arr[i], hint_f);
+        coords[i].idx = static_cast<uint32_t>(idx_f);
+        coords[i].shift =
+            psr_utils::get_phase_idx(delta_t, freq_arr[i], nbins, 0.0);
+    }
+}
+
 void ffa_taylor_resolve_poly_batch(
     std::span<const std::vector<double>> param_arr_cur,
     std::span<const std::vector<double>> param_arr_prev,
-    std::span<uint32_t> pindex_prev_flat_batch,
-    std::span<float> relative_phase_batch,
+    std::span<coord::FFACoord> coords,
     SizeType ffa_level,
     SizeType latter,
     double tseg_brute,
     SizeType nbins,
     SizeType n_params) {
-    auto dispatch = [&]<SizeType N>() {
-        return ffa_taylor_resolve_poly_batch_impl<N>(
-            param_arr_cur, param_arr_prev, pindex_prev_flat_batch,
-            relative_phase_batch, ffa_level, latter, tseg_brute, nbins);
+    auto dispatch = [&]<SizeType N, int L>() {
+        return ffa_taylor_resolve_poly_batch_impl<N, L>(
+            param_arr_cur, param_arr_prev, coords, ffa_level, tseg_brute,
+            nbins);
     };
-    switch (n_params) {
-    case 1:
-        dispatch.template operator()<1>();
-        break;
-    case 2:
-        dispatch.template operator()<2>();
-        break;
-    case 3:
-        dispatch.template operator()<3>();
-        break;
-    case 4:
-        dispatch.template operator()<4>();
-        break;
-    case 5:
-        dispatch.template operator()<5>();
-        break;
-    default:
-        throw std::invalid_argument("Unsupported Taylor order");
+    if (latter == 0) {
+        switch (n_params) {
+        case 2:
+            dispatch.template operator()<2, 0>();
+            break;
+        case 3:
+            dispatch.template operator()<3, 0>();
+            break;
+        case 4:
+            dispatch.template operator()<4, 0>();
+            break;
+        case 5:
+            dispatch.template operator()<5, 0>();
+            break;
+        default:
+            throw std::invalid_argument("Unsupported Taylor order");
+        }
+    } else {
+        switch (n_params) {
+        case 2:
+            dispatch.template operator()<2, 1>();
+            break;
+        case 3:
+            dispatch.template operator()<3, 1>();
+            break;
+        case 4:
+            dispatch.template operator()<4, 1>();
+            break;
+        case 5:
+            dispatch.template operator()<5, 1>();
+            break;
+        default:
+            throw std::invalid_argument("Unsupported Taylor order");
+        }
     }
 }
 
