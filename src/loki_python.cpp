@@ -12,8 +12,6 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
-#include "loki/common/types.hpp"
-#include "loki/core/taylor.hpp"
 #include "loki/psr_utils.hpp"
 #include "loki/transforms.hpp"
 
@@ -338,10 +336,10 @@ PYBIND11_MODULE(libloki, m) {
 
     // Plans submodule
     auto m_plans = m.def_submodule("plans", "Plans submodule");
-    PYBIND11_NUMPY_DTYPE(plans::FFACoord, i_tail, shift_tail, i_head,
+    PYBIND11_NUMPY_DTYPE(coord::FFACoord, i_tail, shift_tail, i_head,
                          shift_head);
-    PYBIND11_NUMPY_DTYPE(plans::FFACoordFreq, idx, shift);
-    PYBIND11_NUMPY_DTYPE(plans::FFARegion, f_start, f_end, nbins);
+    PYBIND11_NUMPY_DTYPE(coord::FFACoordFreq, idx, shift);
+    PYBIND11_NUMPY_DTYPE(coord::FFARegion, f_start, f_end, nbins);
 
     // Bind FFAPlanBase
     py::class_<FFAPlanBase>(m_plans, "FFAPlanBase")

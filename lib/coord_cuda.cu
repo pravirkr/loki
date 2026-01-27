@@ -1,6 +1,6 @@
-#pragma once
-
 #include "loki/common/coord.hpp"
+
+#include <thrust/device_ptr.h>
 #include "loki/cuda_utils.cuh"
 
 namespace loki::coord {
@@ -20,7 +20,7 @@ FFACoordFreqDPtrs::offset(SizeType offset) const noexcept {
         .idx = idx + offset, .shift = shift + offset, .size = size - offset};
 }
 
-FFACoordDPtrs FFACoordD::get_raw_ptrs() const noexcept {
+FFACoordDPtrs FFACoordD::get_raw_ptrs() noexcept {
     const SizeType n = i_tail.size();
     return {.i_tail     = thrust::raw_pointer_cast(i_tail.data()),
             .shift_tail = thrust::raw_pointer_cast(shift_tail.data()),
@@ -72,7 +72,7 @@ void FFACoordD::copy_from_host(const std::vector<FFACoord>& coords,
         "cudaMemcpyAsync shift_head failed");
 }
 
-FFACoordFreqDPtrs FFACoordFreqD::get_raw_ptrs() const noexcept {
+FFACoordFreqDPtrs FFACoordFreqD::get_raw_ptrs() noexcept {
     const SizeType n = idx.size();
     return {.idx   = thrust::raw_pointer_cast(idx.data()),
             .shift = thrust::raw_pointer_cast(shift.data()),

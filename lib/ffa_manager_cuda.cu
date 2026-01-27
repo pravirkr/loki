@@ -178,6 +178,8 @@ private:
     thrust::device_vector<uint32_t> m_widths_d;
     thrust::device_vector<uint32_t> m_passing_indices_d;
 
+    cuda_utils::DeviceCounter m_passing_counter;
+
     // Helper function to create region planner with GPU memory considerations
     static plans::FFARegionPlanner<HostFoldType>
     create_region_planner(const search::PulsarSearchConfig& base_cfg,
@@ -255,7 +257,8 @@ private:
                 .subspan(m_total_passing_scores, n_scores),
             cuda_utils::as_span(m_passing_indices_d)
                 .subspan(m_total_passing_scores, n_scores),
-            cfg.get_snr_min(), ncoords, cfg.get_nbins(), stream);
+            cfg.get_snr_min(), ncoords, cfg.get_nbins(), stream,
+            m_passing_counter);
         m_total_passing_scores += n_passing;
 
         ffa_timer_stats["score"] += timer.stop();

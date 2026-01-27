@@ -9,7 +9,6 @@
 #include <utility>
 #include <variant>
 
-#include <cub/cub.cuh>
 #include <cuda/std/span>
 #include <cuda_runtime.h>
 #include <cufft.h>
@@ -17,25 +16,6 @@
 #include <thrust/device_vector.h>
 
 #include "loki/common/types.hpp"
-
-// Check if we are on a modern CUB version (CCCL 3.0+)
-#if CUB_VERSION >= 300000
-#include <cuda/functional>
-#include <cuda/std/numbers>
-template <typename T> using CubMaxOp    = ::cuda::maximum<T>;
-template <typename T> using CubMinOp    = ::cuda::minimum<T>;
-template <typename T> using ThrustMaxOp = ::cuda::maximum<T>;
-template <typename T> using ThrustMinOp = ::cuda::minimum<T>;
-inline constexpr double kPI             = cuda::std::numbers::pi_v<double>;
-#else
-// Fall back to CUB operators for older CCCL
-#include <thrust/functional.h>
-template <typename T> using CubMaxOp    = cub::Max;
-template <typename T> using CubMinOp    = cub::Min;
-template <typename T> using ThrustMaxOp = thrust::maximum<T>;
-template <typename T> using ThrustMinOp = thrust::minimum<T>;
-inline constexpr double kPI             = 3.14159265358979323846; // NOLINT
-#endif // CUB_VERSION >= 300000
 
 namespace loki::cuda_utils {
 
@@ -454,7 +434,7 @@ inline void set_device(int device_id) {
 class CudaSetDeviceGuard {
 public:
     explicit CudaSetDeviceGuard(int device_id) {
-        int& current  = detail::tls_current_device;
+        int& current = detail::tls_current_device;
         // Initialize TLS once per thread from actual CUDA state.
         if (current < 0) {
             check_cuda_call(cudaGetDevice(&current),
@@ -554,5 +534,23 @@ cuda::std::span<T> as_span(thrust::device_vector<T>&&) = delete;
 
 template <typename T>
 cuda::std::span<const T> as_span(const thrust::device_vector<T>&&) = delete;
+
+struct DeviceCounter {
+    uint32_t* h_ptr = nullptr;
+    uint32_t* d_ptr = nullptr;
+
+    DeviceCounter() {
+        check_cuda_call(cudaMallocHost(&h_ptr, sizeof(uint32_t)),
+                        "Failed to allocate host memory for DeviceCounter");
+        check_cuda_call(cudaHostGetDevicePointer(&d_ptr, h_ptr, 0),
+                        "Failed to get device pointer for DeviceCounter");
+    }
+
+    ~DeviceCounter() { cudaFreeHost(h_ptr); }
+
+    void reset() { *h_ptr = 0; }
+
+    uint32_t value() const { return *h_ptr; }
+};
 
 } // namespace loki::cuda_utils

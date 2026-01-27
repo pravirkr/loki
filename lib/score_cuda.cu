@@ -11,6 +11,7 @@
 #include <thrust/device_vector.h>
 
 #include "loki/common/types.hpp"
+#include "loki/cub_helpers.cuh"
 #include "loki/cuda_utils.cuh"
 #include "loki/exceptions.hpp"
 
@@ -231,8 +232,7 @@ void snr_boxcar_cuda_impl(std::span<const float> folds,
     cudaStream_t stream = nullptr;
     snr_boxcar_cuda_impl_device<Is3D, Mode>(
         cuda_utils::as_span(folds_d), cuda_utils::as_span(widths_d),
-        cuda_utils::as_span(scores_d), nprofiles, nbins, stdnoise,
-        stream);
+        cuda_utils::as_span(scores_d), nprofiles, nbins, stdnoise, stream);
 
     thrust::copy(scores_d.begin(), scores_d.end(), scores.begin());
 }
@@ -308,15 +308,9 @@ SizeType score_and_filter_cuda_d(cuda::std::span<const float> folds,
                                  float threshold,
                                  SizeType nprofiles,
                                  SizeType nbins,
-                                 cudaStream_t stream) {
-    SizeType nprofiles_passing = 0;
-    uint32_t* d_nprofiles_passing;
-    cuda_utils::check_cuda_call(
-        cudaMallocAsync(&d_nprofiles_passing, sizeof(uint32_t), stream),
-        "cudaMallocAsync failed");
-    cuda_utils::check_cuda_call(
-        cudaMemsetAsync(d_nprofiles_passing, 0, sizeof(uint32_t), stream),
-        "cudaMemsetAsync failed");
+                                 cudaStream_t stream,
+                                 cuda_utils::DeviceCounter& counter) {
+    counter.reset();
 
     constexpr SizeType kWarpSize         = 32;
     constexpr SizeType kThreadsPerBlock  = 128;
@@ -332,19 +326,13 @@ SizeType score_and_filter_cuda_d(cuda::std::span<const float> folds,
                            OutputMode::kPerWidthAndFilter>
         <<<grid_dim, block_dim, shmem_size, stream>>>(
             folds.data(), nprofiles, nbins, widths.data(), widths.size(),
-            scores.data(), indices_filtered.data(), d_nprofiles_passing,
-            threshold, 1.0F);
+            scores.data(), indices_filtered.data(), counter.d_ptr, threshold,
+            1.0F);
     cuda_utils::check_last_cuda_error(
         "score_and_filter_cuda_d kernel launch failed");
-    cuda_utils::check_cuda_call(
-        cudaMemcpyAsync(&nprofiles_passing, d_nprofiles_passing,
-                        sizeof(uint32_t), cudaMemcpyDeviceToHost, stream),
-        "cudaMemcpyAsync failed");
-    cuda_utils::check_cuda_call(cudaFreeAsync(d_nprofiles_passing, stream),
-                                "cudaFreeAsync failed");
     cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
                                 "cudaStreamSynchronize failed");
-    return nprofiles_passing;
+    return counter.value();
 }
 
 SizeType score_and_filter_max_cuda_d(cuda::std::span<const float> folds,
@@ -354,15 +342,9 @@ SizeType score_and_filter_max_cuda_d(cuda::std::span<const float> folds,
                                      float threshold,
                                      SizeType nprofiles,
                                      SizeType nbins,
-                                     cudaStream_t stream) {
-    SizeType nprofiles_passing = 0;
-    uint32_t* d_nprofiles_passing;
-    cuda_utils::check_cuda_call(
-        cudaMallocAsync(&d_nprofiles_passing, sizeof(uint32_t), stream),
-        "cudaMallocAsync failed");
-    cuda_utils::check_cuda_call(
-        cudaMemsetAsync(d_nprofiles_passing, 0, sizeof(uint32_t), stream),
-        "cudaMemsetAsync failed");
+                                     cudaStream_t stream,
+                                     cuda_utils::DeviceCounter& counter) {
+    counter.reset();
 
     constexpr SizeType kWarpSize         = 32;
     constexpr SizeType kThreadsPerBlock  = 128;
@@ -377,19 +359,13 @@ SizeType score_and_filter_max_cuda_d(cuda::std::span<const float> folds,
     kernel_snr_boxcar_warp<kThreadsPerBlock, true, OutputMode::kMaxAndFilter>
         <<<grid_dim, block_dim, shmem_size, stream>>>(
             folds.data(), nprofiles, nbins, widths.data(), widths.size(),
-            scores.data(), indices_filtered.data(), d_nprofiles_passing,
-            threshold, 1.0F);
+            scores.data(), indices_filtered.data(), counter.d_ptr, threshold,
+            1.0F);
     cuda_utils::check_last_cuda_error(
         "score_and_filter_max_cuda_d kernel launch failed");
-    cuda_utils::check_cuda_call(
-        cudaMemcpyAsync(&nprofiles_passing, d_nprofiles_passing,
-                        sizeof(uint32_t), cudaMemcpyDeviceToHost, stream),
-        "cudaMemcpyAsync failed");
-    cuda_utils::check_cuda_call(cudaFreeAsync(d_nprofiles_passing, stream),
-                                "cudaFreeAsync failed");
     cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
                                 "cudaStreamSynchronize failed");
-    return nprofiles_passing;
+    return counter.value();
 }
 
 } // namespace loki::detection

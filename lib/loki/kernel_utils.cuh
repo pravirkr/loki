@@ -104,6 +104,26 @@ binary_search_device(const float* __restrict__ arr, uint32_t n, float target) {
     return best;
 }
 
+__device__ __forceinline__ uint32_t find_ffa_level(
+    const uint32_t* __restrict__ offsets, uint32_t tid, uint32_t n_levels) {
+    // offsets has size n_levels + 1
+    // offsets[0] = 0
+    // offsets[n_levels] = total_coords
+
+    uint32_t lo = 0;
+    uint32_t hi = n_levels; // invariant: tid < offsets[hi]
+
+    while (lo + 1 < hi) {
+        uint32_t mid = (lo + hi) >> 1U;
+        if (tid < offsets[mid]) {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    return lo;
+}
+
 __device__ __forceinline__ float get_phase_idx_device(double proper_time,
                                                       double freq,
                                                       uint32_t nbins,

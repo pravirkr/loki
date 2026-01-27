@@ -37,6 +37,7 @@
 #include "loki/progress.hpp"
 #include "loki/simulation/simulation.hpp"
 #include "loki/utils.hpp"
+#include "loki/cub_helpers.cuh"
 
 namespace loki::detection {
 

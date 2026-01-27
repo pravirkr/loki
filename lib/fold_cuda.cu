@@ -14,7 +14,7 @@
 #include "loki/cuda_utils.cuh"
 #include "loki/exceptions.hpp"
 #include "loki/kernel_utils.cuh"
-#include "loki/kernels_cuda.cuh"
+#include "loki/kernels.hpp"
 
 namespace loki::algorithms {
 

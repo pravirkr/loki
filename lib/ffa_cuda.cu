@@ -9,12 +9,13 @@
 #include <thrust/device_vector.h>
 
 #include "loki/algorithms/fold.hpp"
+#include "loki/algorithms/plans.hpp"
+#include "loki/common/coord.hpp"
 #include "loki/common/types.hpp"
 #include "loki/cuda_utils.cuh"
 #include "loki/detection/score.hpp"
 #include "loki/exceptions.hpp"
-#include "loki/kernels_cuda.cuh"
-#include "loki/plans_cuda.cuh"
+#include "loki/kernels.hpp"
 #include "loki/timing.hpp"
 #include "loki/utils/fft.hpp"
 
@@ -27,10 +28,10 @@ struct FFAWorkspaceCUDA<FoldTypeCUDA>::Data {
     using DeviceFoldType = FoldTypeTraits<FoldTypeCUDA>::DeviceType;
 
     thrust::device_vector<DeviceFoldType> fold_internal_d;
-    std::vector<plans::FFACoord> coords;
-    std::vector<plans::FFACoordFreq> coords_freq;
-    plans::FFACoordD coords_d;
-    plans::FFACoordFreqD coords_freq_d;
+    // std::vector<coord::FFACoord> coords;
+    // std::vector<coord::FFACoordFreq> coords_freq;
+    coord::FFACoordD coords_d;
+    coord::FFACoordFreqD coords_freq_d;
 
     Data() = default;
 
@@ -40,10 +41,10 @@ struct FFAWorkspaceCUDA<FoldTypeCUDA>::Data {
         const bool is_freq_only = ffa_plan.get_n_params() == 1;
         fold_internal_d.resize(buffer_size, DeviceFoldType{});
         if (is_freq_only) {
-            coords_freq.resize(coord_size);
+            // coords_freq.resize(coord_size);
             coords_freq_d.resize(coord_size);
         } else {
-            coords.resize(coord_size);
+            // coords.resize(coord_size);
             coords_d.resize(coord_size);
         }
     }
@@ -54,10 +55,10 @@ struct FFAWorkspaceCUDA<FoldTypeCUDA>::Data {
         const bool is_freq_only = n_params == 1;
         fold_internal_d.resize(buffer_size, DeviceFoldType{});
         if (is_freq_only) {
-            coords_freq.resize(coord_size);
+            // coords_freq.resize(coord_size);
             coords_freq_d.resize(coord_size);
         } else {
-            coords.resize(coord_size);
+            // coords.resize(coord_size);
             coords_d.resize(coord_size);
         }
     }
@@ -69,25 +70,26 @@ struct FFAWorkspaceCUDA<FoldTypeCUDA>::Data {
             fold_internal_d.size(), buffer_size,
             "FFAWorkspaceCUDA: fold_internal buffer too small");
         if (is_freq_only) {
-            error_check::check_greater_equal(coords_freq.size(),
+            error_check::check_greater_equal(coords_freq_d.idx.size(),
                                              ffa_plan.get_coord_size(),
                                              "FFAWorkspaceCUDA: coordinates "
                                              "not allocated for enough levels");
         } else {
-            error_check::check_greater_equal(coords.size(),
+            error_check::check_greater_equal(coords_d.i_tail.size(),
                                              ffa_plan.get_coord_size(),
                                              "FFAWorkspaceCUDA: coordinates "
                                              "not allocated for enough levels");
         }
     }
 
-    void update_coords_freq_from_host(SizeType n_coords, cudaStream_t stream) {
-        coords_freq_d.copy_from_host(coords_freq, n_coords, stream);
-    }
+    // void update_coords_freq_from_host(SizeType n_coords, cudaStream_t stream)
+    // {
+    //     coords_freq_d.copy_from_host(coords_freq, n_coords, stream);
+    // }
 
-    void update_coords_from_host(SizeType n_coords, cudaStream_t stream) {
-        coords_d.copy_from_host(coords, n_coords, stream);
-    }
+    // void update_coords_from_host(SizeType n_coords, cudaStream_t stream) {
+    //     coords_d.copy_from_host(coords, n_coords, stream);
+    // }
 };
 
 // FFACUDA::Impl implementation
@@ -101,6 +103,7 @@ public:
     explicit Impl(search::PulsarSearchConfig cfg, int device_id)
         : m_cfg(std::move(cfg)),
           m_ffa_plan(m_cfg),
+          m_ffa_plan_cuda(m_ffa_plan),
           m_device_id(device_id),
           m_is_freq_only(m_cfg.get_nparams() == 1),
           m_owns_workspace(true),
@@ -119,6 +122,7 @@ public:
                   int device_id)
         : m_cfg(std::move(cfg)),
           m_ffa_plan(m_cfg),
+          m_ffa_plan_cuda(m_ffa_plan),
           m_device_id(device_id),
           m_is_freq_only(m_cfg.get_nparams() == 1),
           m_owns_workspace(false),
@@ -249,12 +253,14 @@ public:
         auto* ws = get_workspace_data();
         // Resolve the coordinates into the workspace for the FFA plan
         if (m_is_freq_only) {
-            m_ffa_plan.resolve_coordinates_freq(ws->coords_freq);
-            ws->update_coords_freq_from_host(m_ffa_plan.get_coord_size(),
-                                             stream);
+            // m_ffa_plan.resolve_coordinates_freq(ws->coords_freq);
+            // ws->update_coords_freq_from_host(m_ffa_plan.get_coord_size(),
+            //                                  stream);
+            m_ffa_plan_cuda.resolve_coordinates_freq(ws->coords_freq_d, stream);
         } else {
-            m_ffa_plan.resolve_coordinates(ws->coords);
-            ws->update_coords_from_host(m_ffa_plan.get_coord_size(), stream);
+            // m_ffa_plan.resolve_coordinates(ws->coords);
+            // ws->update_coords_from_host(m_ffa_plan.get_coord_size(), stream);
+            m_ffa_plan_cuda.resolve_coordinates(ws->coords_d, stream);
         }
 
         // Execute the FFA plan
@@ -336,12 +342,14 @@ public:
         auto* ws = get_workspace_data();
         // Resolve the coordinates for the FFA plan
         if (m_is_freq_only) {
-            m_ffa_plan.resolve_coordinates_freq(ws->coords_freq);
-            ws->update_coords_freq_from_host(m_ffa_plan.get_coord_size(),
-                                             stream);
+            // m_ffa_plan.resolve_coordinates_freq(ws->coords_freq);
+            // ws->update_coords_freq_from_host(m_ffa_plan.get_coord_size(),
+            //                                  stream);
+            m_ffa_plan_cuda.resolve_coordinates_freq(ws->coords_freq_d, stream);
         } else {
-            m_ffa_plan.resolve_coordinates(ws->coords);
-            ws->update_coords_from_host(m_ffa_plan.get_coord_size(), stream);
+            // m_ffa_plan.resolve_coordinates(ws->coords);
+            // ws->update_coords_from_host(m_ffa_plan.get_coord_size(), stream);
+            m_ffa_plan_cuda.resolve_coordinates(ws->coords_d, stream);
         }
 
         auto fold_complex = cuda::std::span<ComplexTypeCUDA>(
@@ -361,6 +369,7 @@ public:
 private:
     search::PulsarSearchConfig m_cfg;
     plans::FFAPlan<HostFoldType> m_ffa_plan;
+    plans::FFAPlanCUDA<FoldTypeCUDA> m_ffa_plan_cuda;
     int m_device_id;
     bool m_is_freq_only;
     bool m_owns_workspace;
@@ -538,7 +547,7 @@ private:
 
     void execute_iter_freq(const DeviceFoldType* __restrict__ fold_in,
                            DeviceFoldType* __restrict__ fold_out,
-                           plans::FFACoordFreqDPtrs coords_base,
+                           coord::FFACoordFreqDPtrs coords_base,
                            SizeType i_level,
                            cudaStream_t stream) {
         const auto nbins        = m_cfg.get_nbins();
@@ -548,7 +557,7 @@ private:
         const auto ncoords_prev = m_ffa_plan.get_ncoords()[i_level - 1];
         const auto ncoords_offset = m_ffa_plan.get_ncoords_offsets()[i_level];
         // Get the coordinates for the current level
-        const plans::FFACoordFreqDPtrs coords =
+        const coord::FFACoordFreqDPtrs coords =
             coords_base.offset(ncoords_offset);
 
         if constexpr (std::is_same_v<FoldTypeCUDA, float>) {
@@ -564,7 +573,7 @@ private:
 
     void execute_iter(const DeviceFoldType* __restrict__ fold_in,
                       DeviceFoldType* __restrict__ fold_out,
-                      plans::FFACoordDPtrs coords_base,
+                      coord::FFACoordDPtrs coords_base,
                       SizeType i_level,
                       cudaStream_t stream) {
         const auto nbins        = m_cfg.get_nbins();
@@ -574,7 +583,7 @@ private:
         const auto ncoords_prev = m_ffa_plan.get_ncoords()[i_level - 1];
         const auto ncoords_offset = m_ffa_plan.get_ncoords_offsets()[i_level];
         // Get the coordinates for the current level
-        const plans::FFACoordDPtrs coords = coords_base.offset(ncoords_offset);
+        const coord::FFACoordDPtrs coords = coords_base.offset(ncoords_offset);
 
         if constexpr (std::is_same_v<FoldTypeCUDA, float>) {
             kernels::ffa_iter_cuda(fold_in, fold_out, coords, ncoords_cur,

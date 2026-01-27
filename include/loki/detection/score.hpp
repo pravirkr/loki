@@ -10,6 +10,7 @@
 #ifdef LOKI_ENABLE_CUDA
 #include <cuda/std/span>
 #include <cuda_runtime_api.h>
+#include "loki/cuda_utils.cuh"
 #endif // LOKI_ENABLE_CUDA
 
 namespace loki::detection {
@@ -154,7 +155,8 @@ SizeType score_and_filter_cuda_d(cuda::std::span<const float> folds,
                                  float threshold,
                                  SizeType nprofiles,
                                  SizeType nbins,
-                                 cudaStream_t stream);
+                                 cudaStream_t stream,
+                                 cuda_utils::DeviceCounter& counter);
 
 SizeType score_and_filter_max_cuda_d(cuda::std::span<const float> folds,
                                      cuda::std::span<const uint32_t> widths,
@@ -163,7 +165,8 @@ SizeType score_and_filter_max_cuda_d(cuda::std::span<const float> folds,
                                      float threshold,
                                      SizeType nprofiles,
                                      SizeType nbins,
-                                     cudaStream_t stream);
+                                     cudaStream_t stream,
+                                     cuda_utils::DeviceCounter& counter);
 
 #endif // LOKI_ENABLE_CUDA
 

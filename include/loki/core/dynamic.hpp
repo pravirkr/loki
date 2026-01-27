@@ -14,6 +14,7 @@
 #include <cuda/std/span>
 #include <cuda_runtime.h>
 #include <thrust/device_vector.h>
+#include "loki/cuda_utils.cuh"
 #endif // LOKI_ENABLE_CUDA
 
 namespace loki::core {
@@ -349,7 +350,8 @@ public:
                      cuda::std::span<uint32_t> indices_tree,
                      float threshold,
                      SizeType n_leaves,
-                     cudaStream_t stream) noexcept = 0;
+                     cudaStream_t stream,
+                     cuda_utils::DeviceCounter& counter) noexcept = 0;
 
     virtual void transform(cuda::std::span<double> leaves_tree,
                            std::pair<double, double> coord_next,
@@ -419,7 +421,8 @@ public:
                               cuda::std::span<uint32_t> indices_tree,
                               float threshold,
                               SizeType n_leaves,
-                              cudaStream_t stream) noexcept override;
+                              cudaStream_t stream,
+                              cuda_utils::DeviceCounter& counter) noexcept override;
 };
 
 // Intermediate base for Taylor-based methods (common seed implementation)

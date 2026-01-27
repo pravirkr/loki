@@ -360,6 +360,8 @@ private:
     thrust::device_vector<double> m_seed_leaves_d;
     thrust::device_vector<float> m_seed_scores_d;
 
+    cuda_utils::DeviceCounter m_passing_counter;
+
     void initialize(cuda::std::span<const FoldTypeCUDA> ffa_fold,
                     SizeType ref_seg,
                     cudaStream_t stream) {
@@ -522,7 +524,8 @@ private:
                 cuda_utils::as_span(m_pruning_workspace->branched_folds_d),
                 cuda_utils::as_span(m_pruning_workspace->branched_scores_d),
                 cuda_utils::as_span(m_pruning_workspace->branched_indices_d),
-                current_threshold, n_leaves_after_validation, stream);
+                current_threshold, n_leaves_after_validation, stream,
+                m_passing_counter);
 
             if (n_leaves_passing == 0) {
                 m_world_tree->consume_read(current_batch_size);

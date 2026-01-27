@@ -1,5 +1,6 @@
 #pragma once
 
+#include "loki/common/coord.hpp" // IWYU pragma: export
 #include "loki/common/types.hpp" // IWYU pragma: export
 
 #include "loki/algorithms/ffa.hpp"        // IWYU pragma: export
@@ -12,4 +13,4 @@
 #include "loki/search/configs.hpp"        // IWYU pragma: export
 #include "loki/simulation/simulation.hpp" // IWYU pragma: export
 #include "loki/utils/fft.hpp"             // IWYU pragma: export
-#include "loki/utils/world_tree.hpp"     // IWYU pragma: export
+#include "loki/utils/world_tree.hpp"      // IWYU pragma: export

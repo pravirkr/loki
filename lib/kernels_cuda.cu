@@ -1,4 +1,4 @@
-#include "loki/kernels_cuda.cuh"
+#include "loki/kernels.hpp"
 
 #include <cuda/std/span>
 #include <cuda_runtime.h>
@@ -6,6 +6,7 @@
 
 #include "loki/common/types.hpp"
 #include "loki/cuda_utils.cuh"
+#include "loki/cub_helpers.cuh"
 
 namespace loki::kernels {
 
@@ -135,7 +136,7 @@ kernel_shift_add_linear_complex(const ComplexTypeCUDA* __restrict__ folds_tree,
 // One thread per smallest work unit
 __global__ void kernel_ffa_iter(const float* __restrict__ fold_in,
                                 float* __restrict__ fold_out,
-                                const plans::FFACoordDPtrs coords,
+                                const coord::FFACoordDPtrs coords,
                                 uint32_t ncoords_cur,
                                 uint32_t ncoords_prev,
                                 uint32_t nsegments,
@@ -217,7 +218,7 @@ __global__ void kernel_ffa_iter(const float* __restrict__ fold_in,
 
 __global__ void kernel_ffa_freq_iter(const float* __restrict__ fold_in,
                                      float* __restrict__ fold_out,
-                                     const plans::FFACoordFreqDPtrs coords,
+                                     const coord::FFACoordFreqDPtrs coords,
                                      uint32_t ncoords_cur,
                                      uint32_t ncoords_prev,
                                      uint32_t nsegments,
@@ -285,7 +286,7 @@ __global__ void kernel_ffa_freq_iter(const float* __restrict__ fold_in,
 __global__ void
 kernel_ffa_freq_iter_shared(const float* __restrict__ fold_in,
                             float* __restrict__ fold_out,
-                            const plans::FFACoordFreqDPtrs coords,
+                            const coord::FFACoordFreqDPtrs coords,
                             uint32_t ncoords_cur,
                             uint32_t ncoords_prev,
                             uint32_t nsegments,
@@ -343,7 +344,7 @@ kernel_ffa_freq_iter_shared(const float* __restrict__ fold_in,
 // memory wall, so not using it
 __global__ void kernel_ffa_freq_iter_warp(const float* __restrict__ fold_in,
                                           float* __restrict__ fold_out,
-                                          const plans::FFACoordFreqDPtrs coords,
+                                          const coord::FFACoordFreqDPtrs coords,
                                           uint32_t ncoords_cur,
                                           uint32_t ncoords_prev,
                                           uint32_t nsegments,
@@ -408,7 +409,7 @@ __global__ void kernel_ffa_freq_iter_warp(const float* __restrict__ fold_in,
 __global__ void
 kernel_ffa_complex_iter(const ComplexTypeCUDA* __restrict__ fold_in,
                         ComplexTypeCUDA* __restrict__ fold_out,
-                        const plans::FFACoordDPtrs coords,
+                        const coord::FFACoordDPtrs coords,
                         uint32_t ncoords_cur,
                         uint32_t ncoords_prev,
                         uint32_t nsegments,
@@ -494,7 +495,7 @@ kernel_ffa_complex_iter(const ComplexTypeCUDA* __restrict__ fold_in,
 __global__ void
 kernel_ffa_complex_freq_iter(const ComplexTypeCUDA* __restrict__ fold_in,
                              ComplexTypeCUDA* __restrict__ fold_out,
-                             const plans::FFACoordFreqDPtrs coords,
+                             const coord::FFACoordFreqDPtrs coords,
                              uint32_t ncoords_cur,
                              uint32_t ncoords_prev,
                              uint32_t nsegments,
@@ -960,7 +961,7 @@ void brute_fold_ts_complex_cuda(const float* __restrict__ ts_e,
 
 void ffa_iter_cuda(const float* __restrict__ fold_in,
                    float* __restrict__ fold_out,
-                   plans::FFACoordDPtrs coords,
+                   coord::FFACoordDPtrs coords,
                    SizeType ncoords_cur,
                    SizeType ncoords_prev,
                    SizeType nsegments,
@@ -982,7 +983,7 @@ void ffa_iter_cuda(const float* __restrict__ fold_in,
 
 void ffa_iter_freq_cuda(const float* __restrict__ fold_in,
                         float* __restrict__ fold_out,
-                        plans::FFACoordFreqDPtrs coords,
+                        coord::FFACoordFreqDPtrs coords,
                         SizeType ncoords_cur,
                         SizeType ncoords_prev,
                         SizeType nsegments,
@@ -1005,7 +1006,7 @@ void ffa_iter_freq_cuda(const float* __restrict__ fold_in,
 /*
 void ffa_iter_freq_cuda(const float* __restrict__ fold_in,
                         float* __restrict__ fold_out,
-                        plans::FFACoordFreqDPtrs coords,
+                        coord::FFACoordFreqDPtrs coords,
                         SizeType ncoords_cur,
                         SizeType ncoords_prev,
                         SizeType nsegments,
@@ -1084,7 +1085,7 @@ void ffa_iter_freq_cuda(const float* __restrict__ fold_in,
 
 void ffa_complex_iter_cuda(const ComplexTypeCUDA* __restrict__ fold_in,
                            ComplexTypeCUDA* __restrict__ fold_out,
-                           plans::FFACoordDPtrs coords,
+                           coord::FFACoordDPtrs coords,
                            SizeType ncoords_cur,
                            SizeType ncoords_prev,
                            SizeType nsegments,
@@ -1108,7 +1109,7 @@ void ffa_complex_iter_cuda(const ComplexTypeCUDA* __restrict__ fold_in,
 
 void ffa_complex_iter_freq_cuda(const ComplexTypeCUDA* __restrict__ fold_in,
                                 ComplexTypeCUDA* __restrict__ fold_out,
-                                plans::FFACoordFreqDPtrs coords,
+                                coord::FFACoordFreqDPtrs coords,
                                 SizeType ncoords_cur,
                                 SizeType ncoords_prev,
                                 SizeType nsegments,

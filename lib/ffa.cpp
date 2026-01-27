@@ -24,8 +24,8 @@ namespace loki::algorithms {
 // FFAWorkspace::Data implementation
 template <SupportedFoldType FoldType> struct FFAWorkspace<FoldType>::Data {
     std::vector<FoldType> fold_internal;
-    std::vector<plans::FFACoord> coords;
-    std::vector<plans::FFACoordFreq> coords_freq;
+    std::vector<coord::FFACoord> coords;
+    std::vector<coord::FFACoordFreq> coords_freq;
 
     Data() = default;
 

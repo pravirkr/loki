@@ -10,7 +10,7 @@
 #include "loki/core/taylor.hpp"
 #include "loki/cuda_utils.cuh"
 #include "loki/exceptions.hpp"
-#include "loki/kernels_cuda.cuh"
+#include "loki/kernels.hpp"
 #include "loki/utils/fft.hpp"
 
 namespace loki::core {
@@ -116,7 +116,8 @@ SizeType BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::score_and_filter(
     cuda::std::span<uint32_t> indices_tree,
     float threshold,
     SizeType n_leaves,
-    cudaStream_t stream) noexcept {
+    cudaStream_t stream,
+    cuda_utils::DeviceCounter& counter) noexcept {
     const auto nbins   = m_cfg.get_nbins();
     const auto nbins_f = m_cfg.get_nbins_f();
     if constexpr (std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>) {
@@ -130,11 +131,13 @@ SizeType BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::score_and_filter(
                                   static_cast<int>(nfft));
         return detection::score_and_filter_max_cuda_d(
             folds_t_span, cuda_utils::as_span(this->m_boxcar_widths_d),
-            scores_tree, indices_tree, threshold, n_leaves, nbins, stream);
+            scores_tree, indices_tree, threshold, n_leaves, nbins, stream,
+            counter);
     } else {
         return detection::score_and_filter_max_cuda_d(
             folds_tree, cuda_utils::as_span(this->m_boxcar_widths_d),
-            scores_tree, indices_tree, threshold, n_leaves, nbins, stream);
+            scores_tree, indices_tree, threshold, n_leaves, nbins, stream,
+            counter);
     }
 }
 

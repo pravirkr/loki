@@ -286,6 +286,24 @@ std::pair<double, SizeType> branch_param_padded(std::span<double> out_values,
     return {dparam_new_actual, count};
 }
 
+SizeType range_param_count(double vmin, double vmax, double dv) {
+    if (vmin > vmax) {
+        throw std::invalid_argument(
+            std::format("vmin must be less than or equal to vmax (got {}, {})",
+                        vmin, vmax));
+    }
+    if (dv <= 0) {
+        throw std::invalid_argument(
+            std::format("dv must be positive (got {})", dv));
+    }
+    // Check if step size is larger than half the range
+    if (dv > (vmax - vmin) / 2.0) {
+        return 1;
+    }
+    // np.linspace(vmin, vmax, npoints + 2)[1:-1]
+    return static_cast<SizeType>((vmax - vmin) / dv);
+}
+
 std::vector<double> range_param(double vmin, double vmax, double dv) {
     if (vmin > vmax) {
         throw std::invalid_argument(
@@ -302,9 +320,14 @@ std::vector<double> range_param(double vmin, double vmax, double dv) {
     }
     // np.linspace(vmin, vmax, npoints + 2)[1:-1]
     const auto npoints = static_cast<SizeType>((vmax - vmin) / dv);
-    auto grid_points =
-        utils::linspace(vmin, vmax, npoints + 2, /*endpoint=*/true);
-    return {grid_points.begin() + 1, grid_points.end() - 1};
+
+    std::vector<double> result(npoints);
+    const auto step = (vmax - vmin) / static_cast<double>(npoints + 1);
+    // Start from i=1, end at i=total_points-1 (exclusive)
+    for (SizeType i = 0; i < npoints; ++i) {
+        result[i] = vmin + (step * static_cast<double>(i + 1));
+    }
+    return result;
 }
 
 } // namespace loki::psr_utils

@@ -15,6 +15,7 @@
 #include <thrust/transform.h>
 
 #include "loki/common/types.hpp"
+#include "loki/cub_helpers.cuh"
 #include "loki/cuda_utils.cuh"
 #include "loki/exceptions.hpp"
 

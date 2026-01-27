@@ -130,14 +130,26 @@ generate_bp_poly_taylor(std::span<const std::vector<double>> param_arr,
 
 #ifdef LOKI_ENABLE_CUDA
 
+void ffa_taylor_resolve_freq_batch_cuda(
+    cuda::std::span<const double> param_arr_flat,
+    cuda::std::span<const uint32_t> param_arr_count,
+    cuda::std::span<const uint32_t> params_flat_offsets,
+    cuda::std::span<const uint32_t> ncoords_offsets,
+    coord::FFACoordFreqDPtrs coords_ptrs,
+    SizeType n_levels,
+    SizeType ncoords_total,
+    double tseg_brute,
+    SizeType nbins,
+    cudaStream_t stream);
+
 void ffa_taylor_resolve_poly_batch_cuda(
-    cuda::std::span<const double> param_arr_cur_flat,
+    cuda::std::span<const double> param_arr_flat,
     cuda::std::span<const uint32_t> param_arr_cur_count,
-    cuda::std::span<const double> param_arr_prev_flat,
-    cuda::std::span<const uint32_t> param_arr_prev_count,
-    cuda::std::span<uint32_t> pindex_prev_flat_batch,
-    cuda::std::span<float> relative_phase_batch,
-    SizeType ffa_level,
+    cuda::std::span<const uint32_t> params_flat_offsets,
+    cuda::std::span<const uint32_t> ncoords_offsets,
+    coord::FFACoordDPtrs coords_ptrs,
+    SizeType n_levels,
+    SizeType ncoords_total,
     SizeType latter,
     double tseg_brute,
     SizeType nbins,

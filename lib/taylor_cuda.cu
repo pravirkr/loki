@@ -1,4 +1,3 @@
-#include "loki/common/coord.hpp"
 #include "loki/core/taylor.hpp"
 
 #include <cuda/atomic>
@@ -18,113 +17,6 @@
 namespace loki::core {
 
 namespace {
-
-__device__ __forceinline__ void
-ffa_taylor_resolve_freq_batch(const double* __restrict__ param_arr_cur_flat,
-                              const uint32_t* __restrict__ param_arr_cur_count,
-                              const double* __restrict__ param_arr_prev_flat,
-                              const uint32_t* __restrict__ param_arr_prev_count,
-                              uint32_t* __restrict__ pindex_prev_flat_batch,
-                              float* __restrict__ relative_phase_batch,
-                              SizeType ffa_level,
-                              double tseg_brute,
-                              SizeType nbins) {
-    constexpr SizeType kParams = 1;
-    const uint32_t ifreq       = threadIdx.x;
-    const uint32_t n_freq      = param_arr_cur_count[0];
-    if (ifreq >= n_freq) {
-        return;
-    }
-    const auto delta_t = cuda::std::pow(2.0, ffa_level - 1) * tseg_brute;
-    const auto freq    = param_arr_cur_flat[ifreq];
-    const auto idx_f   = utils::find_nearest_sorted_idx_scan(
-        std::span(param_arr_prev_flat), freq, 0);
-    pindex_prev_flat_batch[ifreq] = idx_f;
-    relative_phase_batch[ifreq] =
-        psr_utils::get_phase_idx(delta_t, freq, nbins, 0.0);
-}
-
-template <int LATTER>
-__global__ void
-resolve_jerk_kernel(const double* __restrict__ param_arr_cur_flat,
-                    const uint32_t* __restrict__ param_arr_cur_count,
-                    const double* __restrict__ param_arr_prev_flat,
-                    const uint32_t* __restrict__ param_arr_prev_count,
-                    coord::FFACoordDPtrs coords_ptrs,
-                    SizeType ffa_level,
-                    double tseg_brute,
-                    SizeType nbins) {
-    constexpr uint32_t kParams  = 3;
-    const uint32_t n_jerk       = param_arr_cur_count[0];
-    const uint32_t n_accel      = param_arr_cur_count[1];
-    const uint32_t n_freq       = param_arr_cur_count[2];
-    const uint32_t n_jerk_prev  = param_arr_prev_count[0];
-    const uint32_t n_accel_prev = param_arr_prev_count[1];
-    const uint32_t n_freq_prev  = param_arr_prev_count[2];
-    const uint32_t ncoords      = n_jerk * n_accel * n_freq;
-
-    const uint32_t tid = (blockIdx.x * blockDim.x) + threadIdx.x;
-    if (tid >= ncoords) {
-        return;
-    }
-
-    // Decompose index (f fast moving)
-    // idx = (j * n_accel + a) * n_freq + f
-    const uint32_t freq_idx  = tid % n_freq;
-    const uint32_t accel_idx = tid / n_freq % n_accel;
-    const uint32_t jerk_idx  = tid / (n_freq * n_accel);
-
-    const double* jerk_cur_ptr   = param_arr_cur_flat;
-    const double* accel_cur_ptr  = param_arr_cur_flat + n_jerk;
-    const double* freq_cur_ptr   = param_arr_cur_flat + n_jerk + n_accel;
-    const double* jerk_prev_ptr  = param_arr_prev_flat;
-    const double* accel_prev_ptr = param_arr_prev_flat + n_jerk_prev;
-    const double* freq_prev_ptr =
-        param_arr_prev_flat + n_jerk_prev + n_accel_prev;
-    const auto j_cur = jerk_cur_ptr[jerk_idx];
-    const auto a_cur = accel_cur_ptr[accel_idx];
-    const auto f_cur = freq_cur_ptr[freq_idx];
-
-    const auto tsegment = std::pow(2.0, ffa_level - 1) * tseg_brute;
-    const auto delta_t  = (static_cast<double>(LATTER) - 0.5) * tsegment;
-
-    // Pre-compute constants to avoid repeated calculations
-    const auto delta_t_sq          = delta_t * delta_t;
-    const auto delta_t_cubed       = delta_t_sq * delta_t;
-    const auto half_delta_t_sq     = 0.5 * delta_t_sq;
-    const auto sixth_delta_t_cubed = delta_t_cubed / 6.0;
-    const auto a_new               = a_cur + (j_cur * delta_t);
-    const auto v_new = (a_cur * delta_t) + (0.5 * j_cur * delta_t_sq);
-    const auto d_new =
-        (a_cur * half_delta_t_sq) + (j_cur * sixth_delta_t_cubed);
-
-    const auto coord_idx =
-        ((jerk_idx * n_accel + accel_idx) * n_freq) + freq_idx;
-
-    // Frequency-specific calculations
-    const auto f_new     = f_cur * (1.0 - v_new * utils::kInvCval);
-    const auto delay_rel = d_new * utils::kInvCval;
-    const auto relative_phase =
-        utils::get_phase_idx_device(delta_t, f_cur, nbins, delay_rel);
-
-    const uint32_t idx_j =
-        utils::lower_bound_scan(jerk_prev_ptr, n_jerk_prev, j_cur);
-    const uint32_t idx_a =
-        utils::lower_bound_scan(accel_prev_ptr, n_accel_prev, a_new);
-    const uint32_t idx_f =
-        utils::lower_bound_scan(freq_prev_ptr, n_freq_prev, f_new);
-
-    const auto final_idx =
-        (idx_j * n_accel_prev * n_freq_prev) + (idx_a * n_freq_prev) + idx_f;
-
-    if constexpr (LATTER == 0) {
-        coords_ptrs.i_tail[tid]     = final_idx;
-        coords_ptrs.shift_tail[tid] = relative_phase;
-    } else {
-        coords_ptrs.i_head[tid]     = final_idx;
-        coords_ptrs.shift_head[tid] = relative_phase;
-    }
-}
 
 __global__ void kernel_poly_taylor_seed(const double* __restrict__ accel_grid,
                                         uint32_t n_accel,
@@ -639,7 +531,7 @@ resolve_taylor_accel(const double* __restrict__ leaves,
     const uint32_t idx_a = utils::nearest_linear_scan(
         accel_arr, n_accel, static_cast<float>(a_cur));
     const uint32_t idx_f =
-        utils::lower_bound_scan(freq_arr, n_freq, static_cast<float>(f_new));
+        utils::lower_bound_scanf(freq_arr, n_freq, static_cast<float>(f_new));
     param_idx[tid] = idx_a * n_freq + idx_f;
     phase_shift[tid] =
         utils::get_phase_idx_device(dt_rel, f0, nbins, delay_rel);
@@ -702,7 +594,7 @@ resolve_taylor_jerk(const double* __restrict__ leaves,
     const uint32_t idx_a = utils::nearest_linear_scan(
         accel_arr, n_accel, static_cast<float>(a_new));
     const uint32_t idx_f =
-        utils::lower_bound_scan(freq_arr, n_freq, static_cast<float>(f_new));
+        utils::lower_bound_scanf(freq_arr, n_freq, static_cast<float>(f_new));
     param_idx[tid] = idx_a * n_freq + idx_f;
     phase_shift[tid] =
         utils::get_phase_idx_device(dt_rel, f0, nbins, delay_rel);
@@ -770,7 +662,7 @@ resolve_taylor_snap(const double* __restrict__ leaves,
     const uint32_t idx_a = utils::nearest_linear_scan(
         accel_arr, n_accel, static_cast<float>(a_new));
     const uint32_t idx_f =
-        utils::lower_bound_scan(freq_arr, n_freq, static_cast<float>(f_new));
+        utils::lower_bound_scanf(freq_arr, n_freq, static_cast<float>(f_new));
     param_idx[tid] = idx_a * n_freq + idx_f;
     phase_shift[tid] =
         utils::get_phase_idx_device(dt_rel, f0, nbins, delay_rel);
@@ -941,49 +833,6 @@ transform_taylor_snap(double* __restrict__ leaves,
     leaf[7] = d1_err_j;
     leaf[8] = d0_val_j;
     leaf[9] = d0_err_i;
-}
-
-template <int NPARAMS>
-__global__ void kernel_ffa_resolve_taylor_poly_batch(
-    const double* __restrict__ param_arr_cur_flat,
-    const uint32_t* __restrict__ param_arr_cur_count,
-    const double* __restrict__ param_arr_prev_flat,
-    const uint32_t* __restrict__ param_arr_prev_count,
-    uint32_t* __restrict__ pindex_prev_flat_batch,
-    float* __restrict__ relative_phase_batch,
-    SizeType ffa_level,
-    SizeType latter,
-    double tseg_brute,
-    SizeType nbins,
-    SizeType n_params) {
-    if constexpr (NPARAMS == 1) {
-        ffa_resolve_taylor_freq_batch(
-            param_arr_cur_flat, param_arr_cur_count, param_arr_prev_flat,
-            param_arr_prev_count, pindex_prev_flat_batch, relative_phase_batch,
-            ffa_level, tseg_brute, nbins, n_params);
-    } else if constexpr (NPARAMS == 2) {
-        ffa_resolve_taylor_accel_batch(
-            param_arr_cur_flat, param_arr_cur_count, param_arr_prev_flat,
-            param_arr_prev_count, pindex_prev_flat_batch, relative_phase_batch,
-            ffa_level, latter, tseg_brute, nbins, n_params);
-    } else if constexpr (NPARAMS == 3) {
-        ffa_resolve_taylor_jerk_batch(
-            param_arr_cur_flat, param_arr_cur_count, param_arr_prev_flat,
-            param_arr_prev_count, pindex_prev_flat_batch, relative_phase_batch,
-            ffa_level, latter, tseg_brute, nbins, n_params);
-    } else if constexpr (NPARAMS == 4) {
-        ffa_resolve_taylor_snap_batch(
-            param_arr_cur_flat, param_arr_cur_count, param_arr_prev_flat,
-            param_arr_prev_count, pindex_prev_flat_batch, relative_phase_batch,
-            ffa_level, latter, tseg_brute, nbins, n_params);
-    } else if constexpr (NPARAMS == 5) {
-        ffa_resolve_taylor_crackle_batch(
-            param_arr_cur_flat, param_arr_cur_count, param_arr_prev_flat,
-            param_arr_prev_count, pindex_prev_flat_batch, relative_phase_batch,
-            ffa_level, latter, tseg_brute, nbins, n_params);
-    } else {
-        static_assert(NPARAMS <= 5, "Unsupported Taylor order");
-    }
 }
 
 // Resolve Kernel
@@ -1295,56 +1144,6 @@ SizeType poly_taylor_branch_snap_cuda(
 }
 
 } // namespace
-
-void ffa_taylor_resolve_poly_batch_cuda(
-    cuda::std::span<const double> param_arr_cur_flat,
-    cuda::std::span<const uint32_t> param_arr_cur_count,
-    cuda::std::span<const double> param_arr_prev_flat,
-    cuda::std::span<const uint32_t> param_arr_prev_count,
-    cuda::std::span<uint32_t> pindex_prev_flat_batch,
-    cuda::std::span<float> relative_phase_batch,
-    SizeType ffa_level,
-    SizeType latter,
-    double tseg_brute,
-    SizeType nbins,
-    SizeType n_params,
-    cudaStream_t stream) {
-    // Better occupancy than 512 for many kernels
-    constexpr int kBlockSize = 256;
-    const dim3 block(kBlockSize);
-    const dim3 grid((n_leaves + kBlockSize - 1) / kBlockSize);
-    cuda_utils::check_kernel_launch_params(grid, block);
-
-    // Two-level dispatch for complete compile-time specialization
-    auto dispatch = [&]<int N>() {
-        kernel_ffa_resolve_taylor_poly_batch<N><<<grid, block, 0, stream>>>(
-            param_arr_cur_flat.data(), param_arr_cur_count.data(),
-            param_arr_prev_flat.data(), param_arr_prev_count.data(),
-            pindex_prev_flat_batch.data(), relative_phase_batch.data(),
-            ffa_level, latter, tseg_brute, nbins, n_params);
-    };
-    switch (n_params) {
-    case 1:
-        dispatch.template operator()<1>();
-        break;
-    case 2:
-        dispatch.template operator()<2>();
-        break;
-    case 3:
-        dispatch.template operator()<3>();
-        break;
-    case 4:
-        dispatch.template operator()<4>();
-        break;
-    case 5:
-        dispatch.template operator()<5>();
-        break;
-    default:
-        throw std::invalid_argument("Unsupported n_params");
-    }
-    cuda_utils::check_last_cuda_error(
-        "FFA Taylor (poly) resolve kernel launch failed");
-}
 
 SizeType poly_taylor_seed_cuda(cuda::std::span<const double> accel_grid,
                                cuda::std::span<const double> freq_grid,

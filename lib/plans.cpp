@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <numeric>
-#include <ranges>
 #include <utility>
 
 #include <spdlog/spdlog.h>
@@ -17,476 +16,530 @@
 
 namespace loki::plans {
 
-struct FFAPlanBase::Impl {
-    SizeType n_params{}; // # of parameters to search over (..., a, f)
-    SizeType n_levels{}; // # of FFA merge levels
-    std::vector<SizeType> segment_lens;    // Segment lengths
-    std::vector<SizeType> nsegments;       // # of segments
-    std::vector<double> tsegments;         // Segment lengths in seconds
-    std::vector<SizeType> ncoords;         // # of coordinates
-    std::vector<float> ncoords_lb;         // Log2 of # of coordinates
-    std::vector<SizeType> ncoords_offsets; // Offset # of coordinates
-    std::vector<std::vector<std::vector<double>>> params;  // Parameter grid
-    std::vector<std::vector<SizeType>> param_cart_strides; // Cartesian strides
-    std::vector<std::vector<double>> dparams;              // Grid step sizes
-    std::vector<std::vector<double>> dparams_lim; // Grid step size (limits)
-
-    explicit Impl(search::PulsarSearchConfig cfg) : m_cfg(std::move(cfg)) {
-        configure_plan();
-        validate_plan();
+// --- FFAPlanBase implementation ---
+FFAPlanBase::FFAPlanBase(search::PulsarSearchConfig cfg)
+    : m_cfg(std::move(cfg)) {
+    configure_base_plan();
+    validate_base_plan();
+}
+const search::PulsarSearchConfig& FFAPlanBase::get_config() const noexcept {
+    return m_cfg;
+}
+SizeType FFAPlanBase::get_n_params() const noexcept { return m_n_params; }
+SizeType FFAPlanBase::get_n_levels() const noexcept { return m_n_levels; }
+std::span<const SizeType> FFAPlanBase::get_segment_lens() const noexcept {
+    return m_segment_lens;
+}
+std::span<const SizeType> FFAPlanBase::get_nsegments() const noexcept {
+    return m_nsegments;
+}
+std::span<const double> FFAPlanBase::get_tsegments() const noexcept {
+    return m_tsegments;
+}
+std::span<const SizeType> FFAPlanBase::get_ncoords() const noexcept {
+    return m_ncoords;
+}
+std::span<const float> FFAPlanBase::get_ncoords_lb() const noexcept {
+    return m_ncoords_lb;
+}
+std::span<const SizeType> FFAPlanBase::get_ncoords_offsets() const noexcept {
+    return m_ncoords_offsets;
+}
+const std::vector<std::vector<SizeType>>&
+FFAPlanBase::get_param_counts() const noexcept {
+    return m_param_counts;
+}
+const std::vector<std::vector<SizeType>>&
+FFAPlanBase::get_param_cart_strides() const noexcept {
+    return m_param_cart_strides;
+}
+const std::vector<std::vector<double>>&
+FFAPlanBase::get_dparams() const noexcept {
+    return m_dparams;
+}
+const std::vector<std::vector<double>>&
+FFAPlanBase::get_dparams_lim() const noexcept {
+    return m_dparams_lim;
+}
+SizeType FFAPlanBase::get_coord_size() const noexcept {
+    return std::accumulate(m_ncoords.begin(), m_ncoords.end(), 0,
+                           std::plus<>());
+}
+float FFAPlanBase::get_coord_memory_usage() const noexcept {
+    SizeType total_memory;
+    if (m_cfg.get_nparams() == 1) {
+        total_memory = get_coord_size() * sizeof(coord::FFACoordFreq);
+    } else {
+        total_memory = get_coord_size() * sizeof(coord::FFACoord);
     }
+    return static_cast<float>(total_memory) / static_cast<float>(1ULL << 30U);
+}
 
-    ~Impl()                                = default;
-    Impl(Impl&& other) noexcept            = default;
-    Impl& operator=(Impl&& other) noexcept = default;
-    Impl(const Impl& other)                = default;
-    Impl& operator=(const Impl& other)     = default;
+void FFAPlanBase::configure_base_plan() {
+    const auto levels = m_cfg.get_niters_ffa() + 1;
+    m_n_params        = m_cfg.get_nparams();
+    m_n_levels        = levels;
+    m_segment_lens.resize(levels);
+    m_nsegments.resize(levels);
+    m_tsegments.resize(levels);
+    m_ncoords.resize(levels);
+    m_ncoords_lb.resize(levels);
+    m_ncoords_offsets.resize(levels + 1); // Include final sentinel
+    m_param_counts.resize(levels);
+    m_param_cart_strides.resize(levels);
+    m_dparams.resize(levels);
+    m_dparams_lim.resize(levels);
 
-    const search::PulsarSearchConfig& get_config() const noexcept {
-        return m_cfg;
-    }
+    for (SizeType i_level = 0; i_level < levels; ++i_level) {
+        const auto segment_len = m_cfg.get_bseg_brute() * (1U << i_level);
+        const auto tsegment =
+            static_cast<double>(segment_len) * m_cfg.get_tsamp();
+        const auto nsegments_cur  = m_cfg.get_nsamps() / segment_len;
+        const auto dparam_arr     = m_cfg.get_dparams(tsegment);
+        const auto dparam_arr_lim = m_cfg.get_dparams_lim(tsegment);
 
-    SizeType get_coord_size() const noexcept {
-        return std::accumulate(ncoords.begin(), ncoords.end(), 0,
-                               std::plus<>());
-    }
-    float get_coord_memory_usage() const noexcept {
-        SizeType total_memory;
-        if (m_cfg.get_nparams() == 1) {
-            total_memory = get_coord_size() * sizeof(coord::FFACoordFreq);
+        m_segment_lens[i_level] = segment_len;
+        m_nsegments[i_level]    = nsegments_cur;
+        m_tsegments[i_level]    = tsegment;
+        m_dparams[i_level]      = dparam_arr;
+        m_dparams_lim[i_level]  = dparam_arr_lim;
+        m_param_counts[i_level].resize(m_n_params);
+
+        for (SizeType iparam = 0; iparam < m_n_params; ++iparam) {
+            m_param_counts[i_level][iparam] = psr_utils::range_param_count(
+                m_cfg.get_param_limits()[iparam][0],
+                m_cfg.get_param_limits()[iparam][1], dparam_arr[iparam]);
+        }
+        m_param_cart_strides[i_level] =
+            calculate_strides(m_param_counts[i_level]);
+        m_ncoords[i_level] = std::accumulate(
+            m_param_counts[i_level].begin(), m_param_counts[i_level].end(), 1UL,
+            [](SizeType acc, SizeType param_count) {
+                return acc * param_count;
+            });
+        m_ncoords_lb[i_level] =
+            m_ncoords[i_level] > 0
+                ? std::log2(static_cast<float>(m_ncoords[i_level]))
+                : 0.0F;
+        if (i_level == 0) {
+            m_ncoords_offsets[i_level] = 0;
         } else {
-            total_memory = get_coord_size() * sizeof(coord::FFACoord);
-        }
-        return static_cast<float>(total_memory) /
-               static_cast<float>(1ULL << 30U);
-    }
-
-    // Get a dictionary of parameters for the last level of the plan
-    std::map<std::string, std::vector<double>> get_params_dict() const {
-        const auto param_names = m_cfg.get_param_names();
-        const auto params_arr  = params.back();
-        error_check::check_equal(
-            params_arr.size(), param_names.size(),
-            "Number of parameters in the last level of the "
-            "FFA plan does not match the number of parameter "
-            "names");
-        std::map<std::string, std::vector<double>> result;
-        for (SizeType i = 0; i < param_names.size(); ++i) {
-            result[param_names[i]] = params_arr[i];
-        }
-        return result;
-    }
-
-    void resolve_coordinates(std::span<coord::FFACoord> coords) {
-        error_check::check_greater_equal(
-            n_params, 2U,
-            "resolve_coordinates only supports nparams>=2. For frequency "
-            "coordinates, use resolve_coordinates_freq() instead.");
-
-        error_check::check_less_equal(
-            n_params, 5U,
-            "resolve_coordinates only supports nparams<=5. Larger values are "
-            "not supported and advised.");
-
-        // Resolve the params for the FFA plan
-        const auto ncoords_max = std::ranges::max(ncoords);
-        std::vector<float> relative_phase_batch(ncoords_max);
-        std::vector<uint32_t> pindex_prev_flat(ncoords_max);
-
-        error_check::check_greater_equal(coords.size(), get_coord_size(),
-                                         "FFAPlan::resolve_coordinates: coords "
-                                         "must have size >= coord_size");
-
-        for (SizeType i_level = 1; i_level < n_levels; ++i_level) {
-            const auto ncoords_cur    = ncoords[i_level];
-            const auto ncoords_offset = ncoords_offsets[i_level];
-            auto coords_span = coords.subspan(ncoords_offset, ncoords_cur);
-
-            // Tail coordinates
-            core::ffa_taylor_resolve_poly_batch(
-                params[i_level], params[i_level - 1], coords_span, i_level, 0,
-                m_cfg.get_tseg_brute(), m_cfg.get_nbins(), n_params);
-
-            // Head coordinates
-            core::ffa_taylor_resolve_poly_batch(
-                params[i_level], params[i_level - 1], coords_span, i_level, 1,
-                m_cfg.get_tseg_brute(), m_cfg.get_nbins(), n_params);
+            m_ncoords_offsets[i_level] =
+                m_ncoords_offsets[i_level - 1] + m_ncoords[i_level - 1];
         }
     }
-    std::vector<std::vector<coord::FFACoord>> resolve_coordinates() {
-        std::vector<coord::FFACoord> coords_flat(get_coord_size());
-        resolve_coordinates(coords_flat);
-        std::vector<std::vector<coord::FFACoord>> coords(n_levels);
-        for (SizeType i_level = 0; i_level < n_levels; ++i_level) {
-            const auto ncoords_cur    = ncoords[i_level];
-            const auto ncoords_offset = ncoords_offsets[i_level];
-            coords[i_level].resize(ncoords_cur);
-            std::copy(
-                coords_flat.begin() + static_cast<IndexType>(ncoords_offset),
-                coords_flat.begin() + static_cast<IndexType>(ncoords_offset) +
-                    static_cast<IndexType>(ncoords_cur),
-                coords[i_level].begin());
-        }
-        return coords;
-    }
+    m_ncoords_offsets[levels] =
+        m_ncoords_offsets[levels - 1] + m_ncoords[levels - 1];
+}
 
-    void resolve_coordinates_freq(std::span<coord::FFACoordFreq> coords_freq) {
-        error_check::check_equal(n_params, 1,
-                                 "resolve_coordinates_freq() only supports "
-                                 "nparams=1");
-        // Resolve the frequency coordinates for the FFA plan
-        error_check::check_greater_equal(
-            coords_freq.size(), get_coord_size(),
-            "FFAPlan::resolve_coordinates_freq: "
-            "coords_freq must have size >= coord_size");
-
-        for (SizeType i_level = 1; i_level < n_levels; ++i_level) {
-            const auto ncoords_cur    = ncoords[i_level];
-            const auto ncoords_offset = ncoords_offsets[i_level];
-            auto coords_freq_span =
-                coords_freq.subspan(ncoords_offset, ncoords_cur);
-            core::ffa_taylor_resolve_freq_batch(
-                params[i_level], params[i_level - 1], coords_freq_span, i_level,
-                m_cfg.get_tseg_brute(), m_cfg.get_nbins());
+void FFAPlanBase::validate_base_plan() const {
+    // For the first level, only the freqs array should have size > 1
+    for (SizeType iparam = 0; iparam < m_n_params - 1; ++iparam) {
+        if (m_param_counts[0][iparam] != 1) {
+            throw std::runtime_error(
+                "FFAPlan::validate_plan: Only one parameter for higher "
+                "order derivatives is supported for the initialization for "
+                "the first level");
         }
     }
-    std::vector<std::vector<coord::FFACoordFreq>> resolve_coordinates_freq() {
-        std::vector<coord::FFACoordFreq> coords_freq_flat(get_coord_size());
-        resolve_coordinates_freq(coords_freq_flat);
-        std::vector<std::vector<coord::FFACoordFreq>> coords_freq(n_levels);
-        for (SizeType i_level = 0; i_level < n_levels; ++i_level) {
-            const auto ncoords_cur    = ncoords[i_level];
-            const auto ncoords_offset = ncoords_offsets[i_level];
-            coords_freq[i_level].resize(ncoords_cur);
-            std::copy(coords_freq_flat.begin() +
-                          static_cast<IndexType>(ncoords_offset),
-                      coords_freq_flat.begin() +
-                          static_cast<IndexType>(ncoords_offset) +
-                          static_cast<IndexType>(ncoords_cur),
-                      coords_freq[i_level].begin());
+}
+std::vector<SizeType>
+FFAPlanBase::calculate_strides(std::span<const SizeType> p_arr_counts) {
+    const auto nparams = p_arr_counts.size();
+    std::vector<SizeType> strides(nparams);
+    strides[nparams - 1] = 1;
+    for (int i = static_cast<int>(nparams) - 2; i >= 0; --i) {
+        strides[i] = strides[i + 1] * p_arr_counts[i + 1];
+    }
+    return strides;
+}
+
+// --- FFAPlanMetadata implementation ---
+template <SupportedFoldType FoldType>
+FFAPlanMetadata<FoldType>::FFAPlanMetadata(search::PulsarSearchConfig cfg)
+    : FFAPlanBase(std::move(cfg)) {
+    configure_fold_shapes();
+    compute_flops();
+    validate_metadata();
+}
+template <SupportedFoldType FoldType>
+const std::vector<std::vector<SizeType>>&
+FFAPlanMetadata<FoldType>::get_fold_shapes() const noexcept {
+    return m_fold_shapes;
+}
+
+template <SupportedFoldType FoldType>
+const std::vector<std::vector<SizeType>>&
+FFAPlanMetadata<FoldType>::get_fold_shapes_time() const noexcept {
+    return m_fold_shapes_time;
+}
+template <SupportedFoldType FoldType>
+SizeType FFAPlanMetadata<FoldType>::get_brute_fold_size() const noexcept {
+    return std::accumulate(m_fold_shapes.front().begin(),
+                           m_fold_shapes.front().end(), SizeType{1},
+                           std::multiplies<>());
+}
+
+template <SupportedFoldType FoldType>
+SizeType FFAPlanMetadata<FoldType>::get_fold_size() const noexcept {
+    return std::accumulate(m_fold_shapes.back().begin(),
+                           m_fold_shapes.back().end(), SizeType{1},
+                           std::multiplies<>());
+}
+template <SupportedFoldType FoldType>
+SizeType FFAPlanMetadata<FoldType>::get_fold_size_time() const noexcept {
+    return std::accumulate(m_fold_shapes_time.back().begin(),
+                           m_fold_shapes_time.back().end(), SizeType{1},
+                           std::multiplies<>());
+}
+template <SupportedFoldType FoldType>
+SizeType FFAPlanMetadata<FoldType>::get_buffer_size() const noexcept {
+    return std::ranges::max(
+        m_fold_shapes | std::views::transform([](const auto& shape) {
+            return std::accumulate(shape.begin(), shape.end(), SizeType{1},
+                                   std::multiplies<>());
+        }));
+}
+template <SupportedFoldType FoldType>
+SizeType FFAPlanMetadata<FoldType>::get_buffer_size_time() const noexcept {
+    if constexpr (std::is_same_v<FoldType, ComplexType>) {
+        return 2 * get_buffer_size();
+    } else {
+        return get_buffer_size();
+    }
+}
+template <SupportedFoldType FoldType>
+float FFAPlanMetadata<FoldType>::get_buffer_memory_usage() const noexcept {
+    const auto total_memory = 2 * get_buffer_size() * sizeof(FoldType);
+    return static_cast<float>(total_memory) / static_cast<float>(1ULL << 30U);
+}
+template <SupportedFoldType FoldType>
+float FFAPlanMetadata<FoldType>::get_gflops(
+    bool return_in_time) const noexcept {
+    return (return_in_time ? m_flops_required_return_in_time
+                           : m_flops_required) *
+           1.0e-9F;
+}
+
+template <SupportedFoldType FoldType>
+void FFAPlanMetadata<FoldType>::configure_fold_shapes() {
+    m_fold_shapes.resize(m_n_levels);
+    m_fold_shapes_time.resize(m_n_levels);
+    for (SizeType i_level = 0; i_level < m_n_levels; ++i_level) {
+        m_fold_shapes[i_level].resize(m_n_params + 3);
+        m_fold_shapes_time[i_level].resize(m_n_params + 3);
+        m_fold_shapes[i_level][0]      = m_nsegments[i_level];
+        m_fold_shapes_time[i_level][0] = m_nsegments[i_level];
+        for (SizeType iparam = 0; iparam < m_n_params; ++iparam) {
+            m_fold_shapes[i_level][iparam + 1] =
+                m_param_counts[i_level][iparam];
+            m_fold_shapes_time[i_level][iparam + 1] =
+                m_param_counts[i_level][iparam];
         }
-        return coords_freq;
-    }
-
-    std::vector<double>
-    get_branching_pattern_approx(std::string_view poly_basis,
-                                 SizeType ref_seg,
-                                 IndexType isuggest) const {
-        if (poly_basis == "taylor") {
-            return core::generate_bp_poly_taylor_approx(
-                params.back(), dparams_lim.back(), m_cfg.get_param_limits(),
-                m_cfg.get_tseg_ffa(), nsegments.back(), m_cfg.get_nbins(),
-                m_cfg.get_eta(), ref_seg, isuggest,
-                m_cfg.get_use_conservative_tile());
-        }
-        throw std::invalid_argument(std::format(
-            "Invalid poly_basis ({}) for branching pattern generation",
-            poly_basis));
-    }
-
-    std::vector<double> get_branching_pattern(std::string_view poly_basis,
-                                              SizeType ref_seg) const {
-        if (poly_basis == "taylor") {
-            if (n_params <= 4) {
-                return core::generate_bp_poly_taylor(
-                    params.back(), dparams_lim.back(), m_cfg.get_param_limits(),
-                    m_cfg.get_tseg_ffa(), nsegments.back(), m_cfg.get_nbins(),
-                    m_cfg.get_eta(), ref_seg,
-                    m_cfg.get_use_conservative_tile());
-            }
-            if (n_params == 5) {
-                return core::generate_bp_circ_taylor(
-                    params.back(), dparams_lim.back(), m_cfg.get_param_limits(),
-                    m_cfg.get_tseg_ffa(), nsegments.back(), m_cfg.get_nbins(),
-                    m_cfg.get_eta(), ref_seg, m_cfg.get_p_orb_min(),
-                    m_cfg.get_minimum_snap_cells(),
-                    m_cfg.get_use_conservative_tile());
-            }
-            throw std::invalid_argument(
-                "nparams > 5 not supported for branching pattern generation");
-        }
-        throw std::invalid_argument(std::format(
-            "Invalid poly_basis ({}) for branching pattern generation",
-            poly_basis));
-    }
-
-    std::vector<double> get_params_flat() const noexcept {
-        SizeType total = 0;
-        for (const auto& level : params) {
-            for (const auto& p : level) {
-                total += p.size();
-            }
-        }
-        std::vector<double> params_flat;
-        params_flat.reserve(total);
-        for (const auto& level : params) {
-            for (const auto& p : level) {
-                params_flat.insert(params_flat.end(), p.begin(), p.end());
-            }
-        }
-        return params_flat;
-    }
-
-    std::vector<SizeType> get_param_counts_flat() const noexcept {
-        std::vector<SizeType> param_counts_flat(n_levels * n_params);
-        for (SizeType i_level = 0; i_level < n_levels; ++i_level) {
-            for (SizeType i_param = 0; i_param < n_params; ++i_param) {
-                param_counts_flat[(i_level * n_params) + i_param] =
-                    params[i_level][i_param].size();
-            }
-        }
-        return param_counts_flat;
-    }
-
-    std::pair<std::vector<SizeType>, std::vector<SizeType>>
-    get_params_flat_sizes() const noexcept {
-        std::vector<SizeType> params_flat_offsets(n_levels);
-        std::vector<SizeType> params_flat_sizes(n_levels);
-        for (SizeType i_level = 0; i_level < n_levels; ++i_level) {
-            for (const auto& p : params[i_level]) {
-                params_flat_sizes[i_level] += p.size();
-            }
-            if (i_level == 0) {
-                params_flat_offsets[i_level] = 0;
-            } else {
-                params_flat_offsets[i_level] =
-                    params_flat_offsets[i_level - 1] +
-                    params_flat_sizes[i_level - 1];
-            }
-        }
-        return {params_flat_offsets, params_flat_sizes};
-    }
-
-private:
-    search::PulsarSearchConfig m_cfg;
-
-    void configure_plan() {
-        const auto levels = m_cfg.get_niters_ffa() + 1;
-        n_params          = m_cfg.get_nparams();
-        n_levels          = levels;
-        segment_lens.resize(levels);
-        nsegments.resize(levels);
-        tsegments.resize(levels);
-        ncoords.resize(levels);
-        ncoords_lb.resize(levels);
-        ncoords_offsets.resize(levels);
-        params.resize(levels);
-        param_cart_strides.resize(levels);
-        dparams.resize(levels);
-        dparams_lim.resize(levels);
-
-        for (SizeType i_level = 0; i_level < levels; ++i_level) {
-            const auto segment_len = m_cfg.get_bseg_brute() * (1U << i_level);
-            const auto tsegment =
-                static_cast<double>(segment_len) * m_cfg.get_tsamp();
-            const auto nsegments_cur  = m_cfg.get_nsamps() / segment_len;
-            const auto dparam_arr     = m_cfg.get_dparams(tsegment);
-            const auto dparam_arr_lim = m_cfg.get_dparams_lim(tsegment);
-
-            segment_lens[i_level] = segment_len;
-            nsegments[i_level]    = nsegments_cur;
-            tsegments[i_level]    = tsegment;
-            dparams[i_level]      = dparam_arr;
-            dparams_lim[i_level]  = dparam_arr_lim;
-            params[i_level].resize(n_params);
-
-            for (SizeType iparam = 0; iparam < n_params; ++iparam) {
-                const auto param_arr = psr_utils::range_param(
-                    m_cfg.get_param_limits()[iparam][0],
-                    m_cfg.get_param_limits()[iparam][1], dparam_arr[iparam]);
-                params[i_level][iparam] = param_arr;
-            }
-            param_cart_strides[i_level] = calculate_strides(params[i_level]);
-            ncoords[i_level] =
-                std::accumulate(params[i_level].begin(), params[i_level].end(),
-                                1UL, [](SizeType acc, const auto& param_vec) {
-                                    return acc * param_vec.size();
-                                });
-            ncoords_lb[i_level] =
-                ncoords[i_level] > 0
-                    ? std::log2(static_cast<float>(ncoords[i_level]))
-                    : 0.0F;
-            if (i_level == 0) {
-                ncoords_offsets[i_level] = 0;
-            } else {
-                ncoords_offsets[i_level] =
-                    ncoords_offsets[i_level - 1] + ncoords[i_level - 1];
-            }
-        }
-        // Check param arr lengths for the initialization
-        if (n_params > 1) {
-            for (SizeType iparam = 0; iparam < n_params - 1; ++iparam) {
-                if (params[0][iparam].size() != 1) {
-                    throw std::runtime_error(
-                        "Only one parameter for higher order derivatives is "
-                        "supported for the initialization");
-                }
-            }
-        }
-    }
-    void validate_plan() const {
-        // For the first level, only the freqs array should have size > 1
-        for (SizeType iparam = 0; iparam < n_params - 1; ++iparam) {
-            if (params[0][iparam].size() != 1) {
-                throw std::runtime_error(
-                    "FFAPlan::validate_plan: Only one parameter for higher "
-                    "order derivatives is supported for the initialization for "
-                    "the first level");
-            }
-        }
-    }
-    static std::vector<SizeType>
-    calculate_strides(std::span<const std::vector<double>> p_arr) {
-        const auto nparams = p_arr.size();
-        std::vector<SizeType> strides(nparams);
-        strides[nparams - 1] = 1;
-        for (int i = static_cast<int>(nparams) - 2; i >= 0; --i) {
-            strides[i] = strides[i + 1] * p_arr[i + 1].size();
-        }
-        return strides;
-    }
-}; // End FFAPlanBase::Impl definition
-
-template <SupportedFoldType FoldType> struct FFAPlan<FoldType>::Impl {
-    std::vector<std::vector<SizeType>> fold_shapes; // Fold array shapes
-    std::vector<std::vector<SizeType>> fold_shapes_time;
-    SizeType flops_required{0U};
-    SizeType flops_required_return_in_time{0U};
-
-    explicit Impl(const FFAPlanBase& base_plan)
-        : m_cfg(base_plan.get_config()) {
-        configure_fold_shapes(base_plan);
-        compute_flops(base_plan);
-        validate();
-    }
-
-    ~Impl()                                = default;
-    Impl(Impl&& other) noexcept            = default;
-    Impl& operator=(Impl&& other) noexcept = default;
-    Impl(const Impl& other)                = default;
-    Impl& operator=(const Impl& other)     = default;
-
-    SizeType get_brute_fold_size() const noexcept {
-        return std::accumulate(fold_shapes.front().begin(),
-                               fold_shapes.front().end(), SizeType{1},
-                               std::multiplies<>());
-    }
-    SizeType get_fold_size() const noexcept {
-        return std::accumulate(fold_shapes.back().begin(),
-                               fold_shapes.back().end(), SizeType{1},
-                               std::multiplies<>());
-    }
-    SizeType get_fold_size_time() const noexcept {
-        return std::accumulate(fold_shapes_time.back().begin(),
-                               fold_shapes_time.back().end(), SizeType{1},
-                               std::multiplies<>());
-    }
-    SizeType get_buffer_size() const noexcept {
-        return std::ranges::max(
-            fold_shapes | std::views::transform([](const auto& shape) {
-                return std::accumulate(shape.begin(), shape.end(), SizeType{1},
-                                       std::multiplies<>());
-            }));
-    }
-    SizeType get_buffer_size_time() const noexcept {
+        m_fold_shapes[i_level][m_n_params + 1]      = 2;
+        m_fold_shapes_time[i_level][m_n_params + 1] = 2;
+        m_fold_shapes_time[i_level][m_n_params + 2] = m_cfg.get_nbins();
         if constexpr (std::is_same_v<FoldType, ComplexType>) {
-            return 2 * get_buffer_size();
+            m_fold_shapes[i_level][m_n_params + 2] = m_cfg.get_nbins_f();
         } else {
-            return get_buffer_size();
+            m_fold_shapes[i_level][m_n_params + 2] = m_cfg.get_nbins();
         }
     }
-    float get_buffer_memory_usage() const noexcept {
-        const auto total_memory = 2 * get_buffer_size() * sizeof(FoldType);
-        return static_cast<float>(total_memory) /
-               static_cast<float>(1ULL << 30U);
-    }
-    float get_gflops(bool return_in_time) const noexcept {
-        return (return_in_time ? flops_required_return_in_time
-                               : flops_required) *
-               1.0e-9F;
-    }
+}
 
-private:
-    search::PulsarSearchConfig m_cfg;
+template <SupportedFoldType FoldType>
+void FFAPlanMetadata<FoldType>::compute_flops() {
+    const auto nbins   = m_cfg.get_nbins();
+    const auto nsamps  = m_cfg.get_nsamps();
+    const auto nfreqs  = m_ncoords[0];
+    const auto nbins_f = (nbins / 2) + 1;
 
-    void configure_fold_shapes(const FFAPlanBase& base_plan) {
-        const auto n_levels = base_plan.get_n_levels();
-        const auto n_params = base_plan.get_n_params();
-        fold_shapes.resize(n_levels);
-        fold_shapes_time.resize(n_levels);
-        for (SizeType i_level = 0; i_level < n_levels; ++i_level) {
-            fold_shapes[i_level].resize(n_params + 3);
-            fold_shapes_time[i_level].resize(n_params + 3);
-            fold_shapes[i_level][0]      = base_plan.get_nsegments()[i_level];
-            fold_shapes_time[i_level][0] = base_plan.get_nsegments()[i_level];
-            for (SizeType iparam = 0; iparam < n_params; ++iparam) {
-                fold_shapes[i_level][iparam + 1] =
-                    base_plan.get_params()[i_level][iparam].size();
-                fold_shapes_time[i_level][iparam + 1] =
-                    base_plan.get_params()[i_level][iparam].size();
-            }
-            fold_shapes[i_level][n_params + 1]      = 2;
-            fold_shapes_time[i_level][n_params + 1] = 2;
-            fold_shapes_time[i_level][n_params + 2] = m_cfg.get_nbins();
-            if constexpr (std::is_same_v<FoldType, ComplexType>) {
-                fold_shapes[i_level][n_params + 2] = m_cfg.get_nbins_f();
-            } else {
-                fold_shapes[i_level][n_params + 2] = m_cfg.get_nbins();
-            }
-        }
-    }
-    void compute_flops(const FFAPlanBase& base_plan) {
-        const auto nbins    = m_cfg.get_nbins();
-        const auto nsamps   = m_cfg.get_nsamps();
-        const auto nfreqs   = base_plan.get_ncoords()[0];
-        const auto n_levels = base_plan.get_n_levels();
-        const auto nbins_f  = (nbins / 2) + 1;
-
-        SizeType flops_brutefold{0U}, flops_ffa{0U};
-        if constexpr (std::is_same_v<FoldType, ComplexType>) {
-            if (nbins > m_cfg.get_nbins_min_lossy_bf()) {
-                // O(nsamps) - Lossy BruteFold + RFFT
-                flops_brutefold =
-                    (nsamps * 2 * nfreqs) + (nfreqs * nbins * std::log2(nbins));
-            } else {
-                // Direct DFT
-                flops_brutefold = 8 * nsamps * 2 * nfreqs * nbins_f;
-            }
-            for (SizeType i_level = 1; i_level < n_levels; ++i_level) {
-                const auto nsegments   = base_plan.get_nsegments()[i_level];
-                const auto ncoords_cur = base_plan.get_ncoords()[i_level];
-                // 2 profiles (e+v) * nbins_f * 8 FLOPs per complex shift-add
-                flops_ffa += ncoords_cur * nsegments * 2 * nbins_f * 8;
-            }
+    SizeType m_flops_brutefold{0U}, m_flops_ffa{0U};
+    if constexpr (std::is_same_v<FoldType, ComplexType>) {
+        if (nbins > m_cfg.get_nbins_min_lossy_bf()) {
+            // O(nsamps) - Lossy BruteFold + RFFT
+            m_flops_brutefold =
+                (nsamps * 2 * nfreqs) + (nfreqs * nbins * std::log2(nbins));
         } else {
-            // O(nsamps)
-            flops_brutefold = (nsamps * 2 * nfreqs);
-            for (SizeType i_level = 1; i_level < n_levels; ++i_level) {
-                const auto nsegments   = base_plan.get_nsegments()[i_level];
-                const auto ncoords_cur = base_plan.get_ncoords()[i_level];
-                // 2 profiles (e+v) * nbins * 1 FLOP per add
-                flops_ffa += ncoords_cur * nsegments * 2 * nbins;
-            }
+            // Direct DFT
+            m_flops_brutefold = 8 * nsamps * 2 * nfreqs * nbins_f;
         }
-        flops_required = flops_brutefold + flops_ffa;
-        if constexpr (std::is_same_v<FoldType, ComplexType>) {
-            // IRFFT
-            const auto nfft = get_fold_size_time() / nbins;
-            flops_required_return_in_time =
-                flops_required + (nfft * nbins * std::log2(nbins));
+        for (SizeType i_level = 1; i_level < m_n_levels; ++i_level) {
+            const auto nsegments_cur = m_nsegments[i_level];
+            const auto ncoords_cur   = m_ncoords[i_level];
+            // 2 profiles (e+v) * nbins_f * 8 FLOPs per complex
+            // shift-add
+            m_flops_ffa += ncoords_cur * nsegments_cur * 2 * nbins_f * 8;
+        }
+    } else {
+        // O(nsamps)
+        m_flops_brutefold = (nsamps * 2 * nfreqs);
+        for (SizeType i_level = 1; i_level < m_n_levels; ++i_level) {
+            const auto nsegments_cur = m_nsegments[i_level];
+            const auto ncoords_cur   = m_ncoords[i_level];
+            // 2 profiles (e+v) * nbins * 1 FLOP per add
+            m_flops_ffa += ncoords_cur * nsegments_cur * 2 * nbins;
+        }
+    }
+    m_flops_required = m_flops_brutefold + m_flops_ffa;
+    if constexpr (std::is_same_v<FoldType, ComplexType>) {
+        // IRFFT
+        const auto nfft = get_fold_size_time() / nbins;
+        m_flops_required_return_in_time =
+            m_flops_required + (nfft * nbins * std::log2(nbins));
+    } else {
+        m_flops_required_return_in_time = m_flops_required;
+    }
+}
+
+template <SupportedFoldType FoldType>
+void FFAPlanMetadata<FoldType>::validate_metadata() const {
+    error_check::check(
+        get_buffer_size() > 0,
+        "FFAPlanMetadata::validate_metadata: buffer size is zero");
+    error_check::check(get_fold_size() > 0,
+                       "FFAPlanMetadata::validate_metadata: fold size is zero");
+    error_check::check(
+        get_brute_fold_size() > 0,
+        "FFAPlanMetadata::validate_metadata: brute fold size is zero");
+}
+
+// --- FFAPlan implementation ---
+template <SupportedFoldType FoldType>
+FFAPlan<FoldType>::FFAPlan(search::PulsarSearchConfig cfg)
+    : FFAPlanMetadata<FoldType>(std::move(cfg)) {
+    configure_params();
+}
+template <SupportedFoldType FoldType>
+const std::vector<std::vector<std::vector<double>>>&
+FFAPlan<FoldType>::get_params() const noexcept {
+    return m_params;
+}
+template <SupportedFoldType FoldType>
+std::map<std::string, std::vector<double>>
+FFAPlan<FoldType>::get_params_dict() const {
+    const auto param_names = this->m_cfg.get_param_names();
+    const auto params_arr  = m_params.back();
+    error_check::check_equal(params_arr.size(), param_names.size(),
+                             "Number of parameters in the last level of the "
+                             "FFA plan does not match the number of parameter "
+                             "names");
+    std::map<std::string, std::vector<double>> result;
+    for (SizeType i = 0; i < param_names.size(); ++i) {
+        result[param_names[i]] = params_arr[i];
+    }
+    return result;
+}
+
+template <SupportedFoldType FoldType>
+void FFAPlan<FoldType>::resolve_coordinates(std::span<coord::FFACoord> coords) {
+    error_check::check_greater_equal(
+        this->m_n_params, 2U,
+        "resolve_coordinates only supports nparams>=2. For frequency "
+        "coordinates, use resolve_coordinates_freq() instead.");
+
+    error_check::check_less_equal(this->m_n_params, 5U,
+                                  "resolve_coordinates only supports "
+                                  "nparams<=5. Larger values are "
+                                  "not supported and advised.");
+
+    // Resolve the params for the FFA plan
+    const auto ncoords_max = std::ranges::max(this->m_ncoords);
+    std::vector<float> relative_phase_batch(ncoords_max);
+    std::vector<uint32_t> pindex_prev_flat(ncoords_max);
+
+    error_check::check_greater_equal(coords.size(), this->get_coord_size(),
+                                     "FFAPlan::resolve_coordinates: coords "
+                                     "must have size >= coord_size");
+
+    for (SizeType i_level = 1; i_level < this->m_n_levels; ++i_level) {
+        const auto ncoords_cur    = this->m_ncoords[i_level];
+        const auto ncoords_offset = this->m_ncoords_offsets[i_level];
+        auto coords_span          = coords.subspan(ncoords_offset, ncoords_cur);
+
+        // Tail coordinates
+        core::ffa_taylor_resolve_poly_batch(
+            m_params[i_level], m_params[i_level - 1], coords_span, i_level, 0,
+            this->m_cfg.get_tseg_brute(), this->m_cfg.get_nbins(),
+            this->m_n_params);
+
+        // Head coordinates
+        core::ffa_taylor_resolve_poly_batch(
+            m_params[i_level], m_params[i_level - 1], coords_span, i_level, 1,
+            this->m_cfg.get_tseg_brute(), this->m_cfg.get_nbins(),
+            this->m_n_params);
+    }
+}
+template <SupportedFoldType FoldType>
+std::vector<std::vector<coord::FFACoord>>
+FFAPlan<FoldType>::resolve_coordinates() {
+    std::vector<coord::FFACoord> coords_flat(this->get_coord_size());
+    resolve_coordinates(coords_flat);
+    std::vector<std::vector<coord::FFACoord>> coords(this->m_n_levels);
+    for (SizeType i_level = 0; i_level < this->m_n_levels; ++i_level) {
+        const auto ncoords_cur    = this->m_ncoords[i_level];
+        const auto ncoords_offset = this->m_ncoords_offsets[i_level];
+        coords[i_level].resize(ncoords_cur);
+        std::copy(coords_flat.begin() + static_cast<IndexType>(ncoords_offset),
+                  coords_flat.begin() + static_cast<IndexType>(ncoords_offset) +
+                      static_cast<IndexType>(ncoords_cur),
+                  coords[i_level].begin());
+    }
+    return coords;
+}
+
+template <SupportedFoldType FoldType>
+void FFAPlan<FoldType>::resolve_coordinates_freq(
+    std::span<coord::FFACoordFreq> coords_freq) {
+    error_check::check_equal(this->m_n_params, 1,
+                             "resolve_coordinates_freq() only supports "
+                             "nparams=1");
+    // Resolve the frequency coordinates for the FFA plan
+    error_check::check_greater_equal(
+        coords_freq.size(), this->get_coord_size(),
+        "FFAPlan::resolve_coordinates_freq: "
+        "coords_freq must have size >= coord_size");
+
+    for (SizeType i_level = 1; i_level < this->m_n_levels; ++i_level) {
+        const auto ncoords_cur    = this->m_ncoords[i_level];
+        const auto ncoords_offset = this->m_ncoords_offsets[i_level];
+        auto coords_freq_span =
+            coords_freq.subspan(ncoords_offset, ncoords_cur);
+        core::ffa_taylor_resolve_freq_batch(
+            m_params[i_level], m_params[i_level - 1], coords_freq_span, i_level,
+            this->m_cfg.get_tseg_brute(), this->m_cfg.get_nbins());
+    }
+}
+template <SupportedFoldType FoldType>
+std::vector<std::vector<coord::FFACoordFreq>>
+FFAPlan<FoldType>::resolve_coordinates_freq() {
+    std::vector<coord::FFACoordFreq> coords_freq_flat(this->get_coord_size());
+    resolve_coordinates_freq(coords_freq_flat);
+    std::vector<std::vector<coord::FFACoordFreq>> coords_freq(this->m_n_levels);
+    for (SizeType i_level = 0; i_level < this->m_n_levels; ++i_level) {
+        const auto ncoords_cur    = this->m_ncoords[i_level];
+        const auto ncoords_offset = this->m_ncoords_offsets[i_level];
+        coords_freq[i_level].resize(ncoords_cur);
+        std::copy(
+            coords_freq_flat.begin() + static_cast<IndexType>(ncoords_offset),
+            coords_freq_flat.begin() + static_cast<IndexType>(ncoords_offset) +
+                static_cast<IndexType>(ncoords_cur),
+            coords_freq[i_level].begin());
+    }
+    return coords_freq;
+}
+
+template <SupportedFoldType FoldType>
+std::vector<double> FFAPlan<FoldType>::get_branching_pattern_approx(
+    std::string_view poly_basis, SizeType ref_seg, IndexType isuggest) const {
+    if (poly_basis == "taylor") {
+        return core::generate_bp_poly_taylor_approx(
+            m_params.back(), this->m_dparams_lim.back(),
+            this->m_cfg.get_param_limits(), this->m_cfg.get_tseg_ffa(),
+            this->m_nsegments.back(), this->m_cfg.get_nbins(),
+            this->m_cfg.get_eta(), ref_seg, isuggest,
+            this->m_cfg.get_use_conservative_tile());
+    }
+    throw std::invalid_argument(
+        std::format("Invalid poly_basis ({}) for branching pattern generation",
+                    poly_basis));
+}
+
+template <SupportedFoldType FoldType>
+std::vector<double>
+FFAPlan<FoldType>::get_branching_pattern(std::string_view poly_basis,
+                                         SizeType ref_seg) const {
+    if (poly_basis == "taylor") {
+        if (this->m_n_params <= 4) {
+            return core::generate_bp_poly_taylor(
+                m_params.back(), this->m_dparams_lim.back(),
+                this->m_cfg.get_param_limits(), this->m_cfg.get_tseg_ffa(),
+                this->m_nsegments.back(), this->m_cfg.get_nbins(),
+                this->m_cfg.get_eta(), ref_seg,
+                this->m_cfg.get_use_conservative_tile());
+        }
+        if (this->m_n_params == 5) {
+            return core::generate_bp_circ_taylor(
+                m_params.back(), this->m_dparams_lim.back(),
+                this->m_cfg.get_param_limits(), this->m_cfg.get_tseg_ffa(),
+                this->m_nsegments.back(), this->m_cfg.get_nbins(),
+                this->m_cfg.get_eta(), ref_seg, this->m_cfg.get_p_orb_min(),
+                this->m_cfg.get_minimum_snap_cells(),
+                this->m_cfg.get_use_conservative_tile());
+        }
+        throw std::invalid_argument("nparams > 5 not supported for "
+                                    "branching pattern generation");
+    }
+    throw std::invalid_argument(
+        std::format("Invalid poly_basis ({}) for branching pattern generation",
+                    poly_basis));
+}
+
+template <SupportedFoldType FoldType>
+std::vector<double> FFAPlan<FoldType>::get_params_flat() const noexcept {
+    SizeType total = 0;
+    for (const auto& level : m_params) {
+        for (const auto& p : level) {
+            total += p.size();
+        }
+    }
+    std::vector<double> params_flat;
+    params_flat.reserve(total);
+    for (const auto& level : m_params) {
+        for (const auto& p : level) {
+            params_flat.insert(params_flat.end(), p.begin(), p.end());
+        }
+    }
+    return params_flat;
+}
+
+template <SupportedFoldType FoldType>
+std::vector<SizeType>
+FFAPlan<FoldType>::get_param_counts_flat() const noexcept {
+    std::vector<SizeType> param_counts_flat(this->m_n_levels *
+                                            this->m_n_params);
+    for (SizeType i_level = 0; i_level < this->m_n_levels; ++i_level) {
+        for (SizeType i_param = 0; i_param < this->m_n_params; ++i_param) {
+            param_counts_flat[(i_level * this->m_n_params) + i_param] =
+                m_params[i_level][i_param].size();
+        }
+    }
+    return param_counts_flat;
+}
+
+template <SupportedFoldType FoldType>
+std::pair<std::vector<SizeType>, std::vector<SizeType>>
+FFAPlan<FoldType>::get_params_flat_sizes() const noexcept {
+    std::vector<SizeType> params_flat_offsets(this->m_n_levels);
+    std::vector<SizeType> params_flat_sizes(this->m_n_levels);
+    for (SizeType i_level = 0; i_level < this->m_n_levels; ++i_level) {
+        for (const auto& p : m_params[i_level]) {
+            params_flat_sizes[i_level] += p.size();
+        }
+        if (i_level == 0) {
+            params_flat_offsets[i_level] = 0;
         } else {
-            flops_required_return_in_time = flops_required;
+            params_flat_offsets[i_level] = params_flat_offsets[i_level - 1] +
+                                           params_flat_sizes[i_level - 1];
         }
     }
-    void validate() const {
-        error_check::check(get_buffer_size() > 0,
-                           "FFAPlan::validate_plan: buffer size is zero");
-        error_check::check(get_fold_size() > 0,
-                           "FFAPlan::validate_plan: fold size is zero");
-        error_check::check(get_brute_fold_size() > 0,
-                           "FFAPlan::validate_plan: brute fold size is zero");
+    return {params_flat_offsets, params_flat_sizes};
+}
+
+template <SupportedFoldType FoldType>
+void FFAPlan<FoldType>::configure_params() {
+    m_params.resize(this->m_n_levels);
+
+    for (SizeType i_level = 0; i_level < this->m_n_levels; ++i_level) {
+        m_params[i_level].resize(this->m_n_params);
+        for (SizeType iparam = 0; iparam < this->m_n_params; ++iparam) {
+            m_params[i_level][iparam] = psr_utils::range_param(
+                this->m_cfg.get_param_limits()[iparam][0],
+                this->m_cfg.get_param_limits()[iparam][1],
+                this->m_dparams[i_level][iparam]);
+        }
     }
-}; // End FFAPlan::Impl definition
+}
 
 std::vector<coord::FFARegion> generate_ffa_regions(double p_min,
                                                    double p_max,
@@ -510,8 +563,8 @@ std::vector<coord::FFARegion> generate_ffa_regions(double p_min,
         std::min(nbins_min, static_cast<SizeType>(p_min / tsamp));
     double rho = eta_min / static_cast<double>(nbins_cur);
 
-    // Core invariant: physical time width of a single folding bin (in seconds).
-    // Core invariant: duty-cycle resolution (rho) in bins.
+    // Core invariant: physical time width of a single folding bin (in
+    // seconds). Core invariant: duty-cycle resolution (rho) in bins.
     const double bin_width = p_min / static_cast<double>(nbins_cur);
     auto p_cur_low         = p_min;
     while (p_cur_low < p_max) {
@@ -683,7 +736,8 @@ private:
     }
 
     void plan_regions() {
-        // Step 1: Generate FFA regions based on frequency-dependent nbins/eta
+        // Step 1: Generate FFA regions based on frequency-dependent
+        // nbins/eta
         const double f_min     = m_base_cfg.get_f_min();
         const double f_max     = m_base_cfg.get_f_max();
         const double p_min     = 1.0 / f_max;
@@ -695,13 +749,14 @@ private:
         // Print region info
         spdlog::info("FFARegionPlanner - planned regions:");
         for (const auto& region : ffa_regions) {
-            spdlog::info(
-                "Region: f=[{:08.3f}, {:08.3f}] Hz, nbins={:04d}, eta={:04.1f}",
-                region.f_start, region.f_end, region.nbins, region.eta);
+            spdlog::info("Region: f=[{:08.3f}, {:08.3f}] Hz, nbins={:04d}, "
+                         "eta={:04.1f}",
+                         region.f_start, region.f_end, region.nbins,
+                         region.eta);
         }
 
-        // Step 2: For each region, subdivide in frequency if it doesn't fit in
-        // memory
+        // Step 2: For each region, subdivide in frequency if it doesn't fit
+        // in memory
         const auto& base_param_limits = m_base_cfg.get_param_limits();
         const auto max_drift          = calculate_max_drift(m_base_cfg);
         // Log drift information
@@ -744,7 +799,8 @@ private:
         // For GPU, this is the device memory limit. For CPU, this is the
         // process memory limit.
         const auto max_memory_gb = m_base_cfg.get_max_process_memory_gb();
-        // Reserve some headroom for OS, Python interpreter, and rounding errors
+        // Reserve some headroom for OS, Python interpreter, and rounding
+        // errors
         constexpr double kSafetyMarginGB = 0.5; // 500 MB safety margin
         const auto effective_limit_gb    = max_memory_gb - kSafetyMarginGB;
 
@@ -755,8 +811,8 @@ private:
         constexpr double kSearchTolerance = 0.01; // Binary search stop (Hz)
         constexpr SizeType kMaxProbes     = 20;   // Avoid infinite loops
 
-        // Pre-flight check: can we fit minimum viable chunk at worst case (high
-        // freq)?
+        // Pre-flight check: can we fit minimum viable chunk at worst case
+        // (high freq)?
         {
             auto min_check_limits   = param_limits;
             min_check_limits.back() = {(f_end - kMinViableRange) *
@@ -764,7 +820,7 @@ private:
                                        f_end * (1.0 + max_drift)};
             auto check_cfg =
                 m_base_cfg.get_updated_config(nbins, eta, min_check_limits);
-            plans::FFAPlan<FoldType> check_plan(check_cfg);
+            FFAPlanMetadata<FoldType> check_plan(std::move(check_cfg));
 
             FFARegionStats<FoldType> min_stats{
                 check_plan.get_buffer_size(),
@@ -782,7 +838,8 @@ private:
                     "highest frequency.\n"
                     "  Nominal range: {:.3f} Hz, with drift: {:.3f} Hz\n"
                     "  Required memory: {:.2f} GB, Available: {:.2f} GB\n"
-                    "  Suggestion: Increase max_memory_gb or reduce parameter "
+                    "  Suggestion: Increase max_memory_gb or reduce "
+                    "parameter "
                     "searchranges.",
                     kMinViableRange,
                     min_check_limits.back()[1] - min_check_limits.back()[0],
@@ -790,7 +847,8 @@ private:
             }
         }
 
-        // Reverse iteration: go from high frequency to low (f_end → f_start)
+        // Reverse iteration: go from high frequency to low (f_end →
+        // f_start)
         double current_f_end = f_end;
         while (current_f_end > f_start) {
             // Early exit for tiny remaining ranges
@@ -802,8 +860,8 @@ private:
                     f_start, current_f_end, range_width, kMinViableRange);
                 break;
             }
-            // Binary search for largest chunk that fits (working backwards from
-            // current_f_end)
+            // Binary search for largest chunk that fits (working backwards
+            // from current_f_end)
             double f_low        = f_start;
             double f_high       = current_f_end;
             double best_f_start = current_f_end; // Start from the top
@@ -822,7 +880,7 @@ private:
                 // Simulate the chunk
                 auto test_cfg = m_base_cfg.get_updated_config(
                     nbins, eta, test_param_limits);
-                plans::FFAPlan<FoldType> test_plan(test_cfg);
+                FFAPlanMetadata<FoldType> test_plan(std::move(test_cfg));
                 FFARegionStats<FoldType> sim_stats{
                     std::max(max_buffer_size, test_plan.get_buffer_size()),
                     std::max(max_coord_size, test_plan.get_coord_size()),
@@ -845,14 +903,16 @@ private:
                     // Probe lower
                     f_probe = std::max(std::midpoint(f_low, f_high), f_start);
                 } else {
-                    // Doesn't fit, need smaller chunk (go higher in frequency)
+                    // Doesn't fit, need smaller chunk (go higher in
+                    // frequency)
                     f_low   = f_probe;
                     f_probe = std::midpoint(f_low, f_high);
                 }
 
                 probe_count++;
             }
-            // Check if remaining range is too small to warrant separate chunk
+            // Check if remaining range is too small to warrant separate
+            // chunk
             const double remaining_range = best_f_start - f_start;
             if (remaining_range > 0 && remaining_range < kMinChunkSize &&
                 best_f_start < current_f_end) {
@@ -862,9 +922,11 @@ private:
             if (best_f_start >= current_f_end) {
                 throw std::runtime_error(std::format(
                     "FFARegionPlanner: Cannot fit any chunk in range "
-                    "[{:08.3f}, {:08.3f}] Hz with nbins={} into memory limit "
+                    "[{:08.3f}, {:08.3f}] Hz with nbins={} into memory "
+                    "limit "
                     "{:.2f} GB.\n"
-                    "  Suggestion: Increase max_memory_gb or reduce parameter "
+                    "  Suggestion: Increase max_memory_gb or reduce "
+                    "parameter "
                     "searchranges.",
                     f_start, current_f_end, nbins, max_memory_gb));
             }
@@ -883,7 +945,7 @@ private:
             chunk_param_limits.back() = {actual_start, actual_end};
             auto chunk_cfg =
                 m_base_cfg.get_updated_config(nbins, eta, chunk_param_limits);
-            plans::FFAPlan<FoldType> chunk_plan(chunk_cfg);
+            FFAPlanMetadata<FoldType> chunk_plan(std::move(chunk_cfg));
             const double chunk_memory_gb =
                 chunk_plan.get_buffer_memory_usage() +
                 chunk_plan.get_coord_memory_usage();
@@ -965,166 +1027,6 @@ private:
     }
 
 }; // End FFARegionPlanner::Impl definition
-
-// --- Definitions for FFAPlanBase ---
-FFAPlanBase::FFAPlanBase(const search::PulsarSearchConfig& cfg)
-    : m_impl(std::make_unique<Impl>(cfg)) {}
-FFAPlanBase::~FFAPlanBase()                                 = default;
-FFAPlanBase::FFAPlanBase(FFAPlanBase&&) noexcept            = default;
-FFAPlanBase& FFAPlanBase::operator=(FFAPlanBase&&) noexcept = default;
-FFAPlanBase::FFAPlanBase(const FFAPlanBase& other)
-    : m_impl(std::make_unique<Impl>(*other.m_impl)) {}
-
-FFAPlanBase& FFAPlanBase::operator=(const FFAPlanBase& other) {
-    if (this != &other) {
-        m_impl = std::make_unique<Impl>(*other.m_impl);
-    }
-    return *this;
-}
-SizeType FFAPlanBase::get_n_params() const noexcept { return m_impl->n_params; }
-SizeType FFAPlanBase::get_n_levels() const noexcept { return m_impl->n_levels; }
-const std::vector<SizeType>& FFAPlanBase::get_segment_lens() const noexcept {
-    return m_impl->segment_lens;
-}
-const std::vector<SizeType>& FFAPlanBase::get_nsegments() const noexcept {
-    return m_impl->nsegments;
-}
-const std::vector<double>& FFAPlanBase::get_tsegments() const noexcept {
-    return m_impl->tsegments;
-}
-const std::vector<SizeType>& FFAPlanBase::get_ncoords() const noexcept {
-    return m_impl->ncoords;
-}
-const std::vector<float>& FFAPlanBase::get_ncoords_lb() const noexcept {
-    return m_impl->ncoords_lb;
-}
-const std::vector<SizeType>& FFAPlanBase::get_ncoords_offsets() const noexcept {
-    return m_impl->ncoords_offsets;
-}
-const std::vector<std::vector<std::vector<double>>>&
-FFAPlanBase::get_params() const noexcept {
-    return m_impl->params;
-}
-const std::vector<std::vector<SizeType>>&
-FFAPlanBase::get_param_cart_strides() const noexcept {
-    return m_impl->param_cart_strides;
-}
-const std::vector<std::vector<double>>&
-FFAPlanBase::get_dparams() const noexcept {
-    return m_impl->dparams;
-}
-const std::vector<std::vector<double>>&
-FFAPlanBase::get_dparams_lim() const noexcept {
-    return m_impl->dparams_lim;
-}
-const search::PulsarSearchConfig& FFAPlanBase::get_config() const noexcept {
-    return m_impl->get_config();
-}
-SizeType FFAPlanBase::get_coord_size() const noexcept {
-    return m_impl->get_coord_size();
-}
-float FFAPlanBase::get_coord_memory_usage() const noexcept {
-    return m_impl->get_coord_memory_usage();
-}
-std::map<std::string, std::vector<double>>
-FFAPlanBase::get_params_dict() const {
-    return m_impl->get_params_dict();
-}
-void FFAPlanBase::resolve_coordinates(std::span<coord::FFACoord> coords) {
-    m_impl->resolve_coordinates(coords);
-}
-std::vector<std::vector<coord::FFACoord>> FFAPlanBase::resolve_coordinates() {
-    return m_impl->resolve_coordinates();
-}
-void FFAPlanBase::resolve_coordinates_freq(
-    std::span<coord::FFACoordFreq> coords_freq) {
-    m_impl->resolve_coordinates_freq(coords_freq);
-}
-std::vector<std::vector<coord::FFACoordFreq>>
-FFAPlanBase::resolve_coordinates_freq() {
-    return m_impl->resolve_coordinates_freq();
-}
-std::vector<double> FFAPlanBase::get_branching_pattern_approx(
-    std::string_view poly_basis, SizeType ref_seg, IndexType isuggest) const {
-    return m_impl->get_branching_pattern_approx(poly_basis, ref_seg, isuggest);
-}
-std::vector<double>
-FFAPlanBase::get_branching_pattern(std::string_view poly_basis,
-                                   SizeType ref_seg) const {
-    return m_impl->get_branching_pattern(poly_basis, ref_seg);
-}
-std::vector<double> FFAPlanBase::get_params_flat() const noexcept {
-    return m_impl->get_params_flat();
-}
-std::vector<SizeType> FFAPlanBase::get_param_counts_flat() const noexcept {
-    return m_impl->get_param_counts_flat();
-}
-std::pair<std::vector<SizeType>, std::vector<SizeType>>
-FFAPlanBase::get_params_flat_sizes() const noexcept {
-    return m_impl->get_params_flat_sizes();
-}
-// --- Definitions for FFAPlan ---
-template <SupportedFoldType FoldType>
-FFAPlan<FoldType>::FFAPlan(const search::PulsarSearchConfig& cfg)
-    : FFAPlanBase(cfg) {
-    m_impl = std::make_unique<Impl>(*this);
-}
-template <SupportedFoldType FoldType> FFAPlan<FoldType>::~FFAPlan() = default;
-template <SupportedFoldType FoldType>
-FFAPlan<FoldType>::FFAPlan(FFAPlan&&) noexcept = default;
-template <SupportedFoldType FoldType>
-FFAPlan<FoldType>& FFAPlan<FoldType>::operator=(FFAPlan&&) noexcept = default;
-template <SupportedFoldType FoldType>
-FFAPlan<FoldType>::FFAPlan(const FFAPlan& other) : FFAPlanBase(other) {
-    m_impl = std::make_unique<Impl>(*other.m_impl);
-}
-
-template <SupportedFoldType FoldType>
-FFAPlan<FoldType>& FFAPlan<FoldType>::operator=(const FFAPlan& other) {
-    if (this != &other) {
-        FFAPlanBase::operator=(other);
-        m_impl = std::make_unique<Impl>(*other.m_impl);
-    }
-    return *this;
-}
-template <SupportedFoldType FoldType>
-const std::vector<std::vector<SizeType>>&
-FFAPlan<FoldType>::get_fold_shapes() const noexcept {
-    return m_impl->fold_shapes;
-}
-template <SupportedFoldType FoldType>
-const std::vector<std::vector<SizeType>>&
-FFAPlan<FoldType>::get_fold_shapes_time() const noexcept {
-    return m_impl->fold_shapes_time;
-}
-template <SupportedFoldType FoldType>
-SizeType FFAPlan<FoldType>::get_brute_fold_size() const noexcept {
-    return m_impl->get_brute_fold_size();
-}
-template <SupportedFoldType FoldType>
-SizeType FFAPlan<FoldType>::get_fold_size() const noexcept {
-    return m_impl->get_fold_size();
-}
-template <SupportedFoldType FoldType>
-SizeType FFAPlan<FoldType>::get_fold_size_time() const noexcept {
-    return m_impl->get_fold_size_time();
-}
-template <SupportedFoldType FoldType>
-SizeType FFAPlan<FoldType>::get_buffer_size() const noexcept {
-    return m_impl->get_buffer_size();
-}
-template <SupportedFoldType FoldType>
-SizeType FFAPlan<FoldType>::get_buffer_size_time() const noexcept {
-    return m_impl->get_buffer_size_time();
-}
-template <SupportedFoldType FoldType>
-float FFAPlan<FoldType>::get_buffer_memory_usage() const noexcept {
-    return m_impl->get_buffer_memory_usage();
-}
-template <SupportedFoldType FoldType>
-float FFAPlan<FoldType>::get_gflops(bool return_in_time) const noexcept {
-    return m_impl->get_gflops(return_in_time);
-}
 
 // --- Definitions for FFARegionStats ---
 template <SupportedFoldType FoldType>
@@ -1232,6 +1134,8 @@ FFARegionPlanner<FoldType>::get_stats() const noexcept {
 }
 
 // --- Explicit template instantiations ---
+template class FFAPlanMetadata<float>;
+template class FFAPlanMetadata<ComplexType>;
 template class FFAPlan<float>;
 template class FFAPlan<ComplexType>;
 template class FFARegionStats<float>;

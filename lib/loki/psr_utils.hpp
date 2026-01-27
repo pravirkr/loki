@@ -141,6 +141,9 @@ inline void branch_one_param_padded(int p,
     }
 }
 
+// Count the number of parameters in a range.
+SizeType range_param_count(double vmin, double vmax, double dv);
+
 // Generate an evenly spaced array of values between vmin and vmax.
 std::vector<double> range_param(double vmin, double vmax, double dv);
 
