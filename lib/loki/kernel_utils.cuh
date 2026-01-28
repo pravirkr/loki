@@ -9,6 +9,15 @@
 
 namespace loki::utils {
 
+__device__ __forceinline__ double
+range_param_at_device(double vmin, double vmax, uint32_t n, uint32_t i) {
+    if (n == 1) {
+        return 0.5 * (vmin + vmax);
+    }
+    const double step = (vmax - vmin) / static_cast<double>(n + 1);
+    return vmin + step * static_cast<double>(i + 1);
+}
+
 // Nearest linear scan
 __device__ __forceinline__ uint32_t
 nearest_linear_scan(const float* __restrict__ arr, uint32_t n, float val) {

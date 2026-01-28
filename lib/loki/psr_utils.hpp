@@ -28,10 +28,24 @@ namespace loki::psr_utils {
  * @param delay A time delay offset to be added to proper_time.
  * @return The phase bin index as a float, in the range [0, nbins).
  */
-float get_phase_idx(double proper_time,
-                    double freq,
-                    SizeType nbins,
-                    double delay = 0.0);
+inline float get_phase_idx(double proper_time,
+                           double freq,
+                           SizeType nbins,
+                           double delay = 0.0) {
+    error_check::check_greater_equal(freq, 0.0, "Frequency must be positive");
+    error_check::check_greater_equal(nbins, 1,
+                                     "Number of bins must be positive");
+    // Calculate the total phase in cycles (can be negative or > 1)
+    const double total_phase = (proper_time - delay) * freq;
+    // Normalize phase to [0, 1) interval
+    double norm_phase = total_phase - std::floor(total_phase);
+    // Scale the normalized phase to [0, nbins) and convert to float
+    double iphase = norm_phase * static_cast<double>(nbins);
+    if (iphase >= static_cast<double>(nbins)) {
+        iphase = 0.0;
+    }
+    return static_cast<float>(iphase);
+}
 
 // Grid size for frequency and its derivatives {f_k, ..., f}.
 std::vector<double> poly_taylor_step_f(SizeType nparams,
@@ -146,6 +160,42 @@ SizeType range_param_count(double vmin, double vmax, double dv);
 
 // Generate an evenly spaced array of values between vmin and vmax.
 std::vector<double> range_param(double vmin, double vmax, double dv);
+
+// Compute the range_param on the fly
+inline double
+get_param_val_at_idx(const ParamLimit& limit, SizeType count, SizeType i) {
+    const double step =
+        (limit.max - limit.min) / static_cast<double>(count + 1);
+    return limit.min + (step * static_cast<double>(i + 1));
+}
+
+/**
+ * @brief Get the nearest index in a uniformly spaced grid.
+ *
+ * @param val The value to find the nearest index for.
+ * @param vmin The minimum value of the grid.
+ * @param vmax The maximum value of the grid.
+ * @param count The number of points in the grid.
+ * @return The nearest index.
+ */
+inline SizeType get_nearest_idx_analytical(double val,
+                                           const ParamLimit& limit,
+                                           SizeType count) {
+    if (count == 0) {
+        return 0;
+    }
+    const double step_inv =
+        static_cast<double>(count + 1) / (limit.max - limit.min);
+    const double raw_idx = ((val - limit.min) * step_inv) - 1.0;
+    const auto idx       = static_cast<SizeType>(std::nearbyint(raw_idx));
+    if (idx < 0) {
+        return 0;
+    }
+    if (idx >= count) {
+        return count - 1;
+    }
+    return idx;
+}
 
 /**
  * @class MiddleOutScheme

@@ -222,7 +222,7 @@ private:
     void initialize_brute_fold() {
         const auto t_ref =
             m_is_freq_only ? 0.0 : m_ffa_plan.get_tsegments()[0] / 2.0;
-        const auto freqs_arr = m_ffa_plan.get_params()[0].back();
+        const auto freqs_arr = m_ffa_plan.compute_param_grid(0).back();
 
         // Check if we need lossy initialization (ComplexType with large nbins)
         if constexpr (std::is_same_v<FoldType, ComplexType>) {

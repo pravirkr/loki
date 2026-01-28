@@ -18,7 +18,7 @@ public:
          double tsamp,
          SizeType nbins,
          double eta,
-         const std::vector<ParamLimitType>& param_limits,
+         std::span<const ParamLimit> param_limits,
          double ducy_max,
          double wtsp,
          bool use_fourier,
@@ -41,7 +41,7 @@ public:
           m_tsamp(tsamp),
           m_nbins(nbins),
           m_eta(eta),
-          m_param_limits(param_limits),
+          m_param_limits(param_limits.begin(), param_limits.end()),
           m_ducy_max(ducy_max),
           m_wtsp(wtsp),
           m_use_fourier(use_fourier),
@@ -66,8 +66,8 @@ public:
         m_nbins_f = (m_nbins / 2) + 1;
         m_nparams = m_param_limits.size();
         m_param_names.assign(kParamNames.end() - m_nparams, kParamNames.end());
-        m_f_min      = m_param_limits[m_nparams - 1][0];
-        m_f_max      = m_param_limits[m_nparams - 1][1];
+        m_f_min      = m_param_limits[m_nparams - 1].min;
+        m_f_max      = m_param_limits[m_nparams - 1].max;
         m_bseg_brute = bseg_brute.value_or(get_bseg_brute_default());
         m_bseg_ffa   = bseg_ffa.value_or(get_bseg_ffa_default());
 
@@ -100,7 +100,7 @@ public:
     SizeType get_nbins() const { return m_nbins; }
     SizeType get_nbins_f() const { return m_nbins_f; }
     double get_eta() const { return m_eta; }
-    const std::vector<ParamLimitType>& get_param_limits() const {
+    std::span<const ParamLimit> get_param_limits() const {
         return m_param_limits;
     }
     double get_ducy_max() const { return m_ducy_max; }
@@ -114,7 +114,9 @@ public:
     SizeType get_bseg_brute() const { return m_bseg_brute; }
     SizeType get_bseg_ffa() const { return m_bseg_ffa; }
     double get_snr_min() const { return m_snr_min; }
-    SizeType get_max_passing_candidates() const { return m_max_passing_candidates; }
+    SizeType get_max_passing_candidates() const {
+        return m_max_passing_candidates;
+    }
     SizeType get_prune_poly_order() const { return m_prune_poly_order; }
     double get_p_orb_min() const { return m_p_orb_min; }
     double get_m_c_max() const { return m_m_c_max; }
@@ -164,8 +166,8 @@ public:
                 dparams_lim[iparam] = dparams[iparam];
             }
             dparams_lim[iparam] =
-                std::min(dparams[iparam],
-                         m_param_limits[iparam][1] - m_param_limits[iparam][0]);
+                std::min(dparams[iparam], m_param_limits[iparam].max -
+                                              m_param_limits[iparam].min);
         }
         return dparams_lim;
     }
@@ -173,7 +175,7 @@ public:
     PulsarSearchConfig
     get_updated_config(SizeType nbins,
                        double eta,
-                       const std::vector<ParamLimitType>& param_limits) const {
+                       std::span<const ParamLimit> param_limits) const {
         return {m_nsamps,
                 m_tsamp,
                 nbins,
@@ -199,13 +201,23 @@ public:
                 m_use_conservative_tile};
     }
 
+    PulsarSearchConfig get_updated_config(SizeType nbins,
+                                          double eta,
+                                          double f_min,
+                                          double f_max) const noexcept {
+        std::vector<ParamLimit> param_limits(m_param_limits.begin(),
+                                             m_param_limits.end());
+        param_limits.back() = {.min = f_min, .max = f_max};
+        return get_updated_config(nbins, eta, param_limits);
+    }
+
 private:
     SizeType m_nsamps;
     double m_tsamp;
     SizeType m_nbins;
     SizeType m_nbins_f;
     double m_eta;
-    std::vector<ParamLimitType> m_param_limits;
+    std::vector<ParamLimit> m_param_limits;
     double m_ducy_max;
     double m_wtsp;
     bool m_use_fourier;
@@ -262,10 +274,10 @@ private:
         for (SizeType iparam = 0; iparam < m_nparams; ++iparam) {
             const auto& param_limit = m_param_limits[iparam];
             error_check::check_greater_equal(
-                param_limit[1], param_limit[0],
+                param_limit.max, param_limit.min,
                 std::format(
                     "param_limits[{}] must be increasing (got [{}, {}])",
-                    iparam, param_limit[0], param_limit[1]));
+                    iparam, param_limit.min, param_limit.max));
         }
     }
 
@@ -280,30 +292,29 @@ private:
 }; // End PulsarSearchConfig::Impl definition
 
 // --- Definitions for PulsarSearchConfig ---
-PulsarSearchConfig::PulsarSearchConfig(
-    SizeType nsamps,
-    double tsamp,
-    SizeType nbins,
-    double eta,
-    const std::vector<ParamLimitType>& param_limits,
-    double ducy_max,
-    double wtsp,
-    bool use_fourier,
-    int nthreads,
-    double max_process_memory_gb,
-    double octave_scale,
-    SizeType nbins_max,
-    SizeType nbins_min_lossy_bf,
-    std::optional<SizeType> bseg_brute,
-    std::optional<SizeType> bseg_ffa,
-    double snr_min,
-    SizeType max_passing_candidates,
-    SizeType prune_poly_order,
-    double p_orb_min,
-    double m_c_max,
-    double m_p_min,
-    double minimum_snap_cells,
-    bool use_conservative_tile)
+PulsarSearchConfig::PulsarSearchConfig(SizeType nsamps,
+                                       double tsamp,
+                                       SizeType nbins,
+                                       double eta,
+                                       std::span<const ParamLimit> param_limits,
+                                       double ducy_max,
+                                       double wtsp,
+                                       bool use_fourier,
+                                       int nthreads,
+                                       double max_process_memory_gb,
+                                       double octave_scale,
+                                       SizeType nbins_max,
+                                       SizeType nbins_min_lossy_bf,
+                                       std::optional<SizeType> bseg_brute,
+                                       std::optional<SizeType> bseg_ffa,
+                                       double snr_min,
+                                       SizeType max_passing_candidates,
+                                       SizeType prune_poly_order,
+                                       double p_orb_min,
+                                       double m_c_max,
+                                       double m_p_min,
+                                       double minimum_snap_cells,
+                                       bool use_conservative_tile)
     : m_impl(std::make_unique<Impl>(nsamps,
                                     tsamp,
                                     nbins,
@@ -359,7 +370,7 @@ SizeType PulsarSearchConfig::get_nbins_f() const noexcept {
 double PulsarSearchConfig::get_eta() const noexcept {
     return m_impl->get_eta();
 }
-const std::vector<ParamLimitType>&
+std::span<const ParamLimit>
 PulsarSearchConfig::get_param_limits() const noexcept {
     return m_impl->get_param_limits();
 }
@@ -447,7 +458,8 @@ SizeType PulsarSearchConfig::get_n_scoring_widths() const noexcept {
 double PulsarSearchConfig::get_x_mass_const() const noexcept {
     return m_impl->get_x_mass_const();
 }
-void PulsarSearchConfig::set_max_process_memory_gb(double max_process_memory_gb) noexcept {
+void PulsarSearchConfig::set_max_process_memory_gb(
+    double max_process_memory_gb) noexcept {
     m_impl->set_max_process_memory_gb(max_process_memory_gb);
 }
 std::vector<double>
@@ -465,7 +477,7 @@ PulsarSearchConfig::get_dparams_lim(double tseg_cur) const noexcept {
 PulsarSearchConfig PulsarSearchConfig::get_updated_config(
     SizeType nbins,
     double eta,
-    const std::vector<ParamLimitType>& param_limits) const noexcept {
+    std::span<const ParamLimit> param_limits) const noexcept {
     return m_impl->get_updated_config(nbins, eta, param_limits);
 }
 } // namespace loki::search

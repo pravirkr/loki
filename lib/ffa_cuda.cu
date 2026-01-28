@@ -124,44 +124,13 @@ struct FFAWorkspaceCUDA<FoldTypeCUDA>::Data {
 
     void resolve_coordinates_freq(const plans::FFAPlan<HostFoldType>& ffa_plan,
                                   cudaStream_t stream) {
-        const auto n_levels            = ffa_plan.get_n_levels();
-        const auto ncoords_total       = ffa_plan.get_coord_size();
-        const auto tseg_brute          = ffa_plan.get_config().get_tseg_brute();
-        const auto nbins               = ffa_plan.get_config().get_nbins();
-        const auto params_flat         = ffa_plan.get_params_flat();
-        const auto param_counts        = ffa_plan.get_param_counts_flat();
-        const auto params_flat_offsets = ffa_plan.get_params_flat_offsets();
-        const auto ncoords_offsets     = ffa_plan.get_ncoords_offsets();
+        copy_plan_to_device(ffa_plan, stream);
 
-        // Copy resolve ingredients to device
-        cuda_utils::check_cuda_call(
-            cudaMemcpyAsync(thrust::raw_pointer_cast(m_params_d.data()),
-                            params_flat.data(),
-                            params_flat.size() * sizeof(double),
-                            cudaMemcpyHostToDevice, stream),
-            "cudaMemcpyAsync params failed");
-        cuda_utils::check_cuda_call(
-            cudaMemcpyAsync(thrust::raw_pointer_cast(m_param_counts_d.data()),
-                            param_counts.data(),
-                            param_counts.size() * sizeof(uint32_t),
-                            cudaMemcpyHostToDevice, stream),
-            "cudaMemcpyAsync param counts failed");
-        cuda_utils::check_cuda_call(
-            cudaMemcpyAsync(
-                thrust::raw_pointer_cast(m_params_flat_offsets_d.data()),
-                params_flat_offsets.data(),
-                params_flat_offsets.size() * sizeof(uint32_t),
-                cudaMemcpyHostToDevice, stream),
-            "cudaMemcpyAsync params flat offsets failed");
-        cuda_utils::check_cuda_call(
-            cudaMemcpyAsync(
-                thrust::raw_pointer_cast(m_ncoords_offsets_d.data()),
-                ncoords_offsets.data(),
-                ncoords_offsets.size() * sizeof(uint32_t),
-                cudaMemcpyHostToDevice, stream),
-            "cudaMemcpyAsync ncoords offsets failed");
-
-        auto coord_ptrs = m_coords_freq_d.get_raw_ptrs();
+        const auto n_levels      = ffa_plan.get_n_levels();
+        const auto ncoords_total = ffa_plan.get_coord_size();
+        const auto tseg_brute    = ffa_plan.get_config().get_tseg_brute();
+        const auto nbins         = ffa_plan.get_config().get_nbins();
+        auto coord_ptrs          = m_coords_freq_d.get_raw_ptrs();
         core::ffa_taylor_resolve_freq_batch_cuda(
             cuda_utils::as_span(m_params_d),
             cuda_utils::as_span(m_param_counts_d),
@@ -172,45 +141,14 @@ struct FFAWorkspaceCUDA<FoldTypeCUDA>::Data {
 
     void resolve_coordinates(const plans::FFAPlan<HostFoldType>& ffa_plan,
                              cudaStream_t stream) {
-        const auto n_levels            = ffa_plan.get_n_levels();
-        const auto n_params            = ffa_plan.get_n_params();
-        const auto ncoords_total       = ffa_plan.get_coord_size();
-        const auto tseg_brute          = ffa_plan.get_config().get_tseg_brute();
-        const auto nbins               = ffa_plan.get_config().get_nbins();
-        const auto params_flat         = ffa_plan.get_params_flat();
-        const auto param_counts        = ffa_plan.get_param_counts_flat();
-        const auto params_flat_offsets = ffa_plan.get_params_flat_offsets();
-        const auto ncoords_offsets     = ffa_plan.get_ncoords_offsets();
+        copy_plan_to_device(ffa_plan, stream);
 
-        // Copy resolve ingredients to device
-        cuda_utils::check_cuda_call(
-            cudaMemcpyAsync(thrust::raw_pointer_cast(m_params_d.data()),
-                            params_flat.data(),
-                            params_flat.size() * sizeof(double),
-                            cudaMemcpyHostToDevice, stream),
-            "cudaMemcpyAsync params failed");
-        cuda_utils::check_cuda_call(
-            cudaMemcpyAsync(thrust::raw_pointer_cast(m_param_counts_d.data()),
-                            param_counts.data(),
-                            param_counts.size() * sizeof(uint32_t),
-                            cudaMemcpyHostToDevice, stream),
-            "cudaMemcpyAsync param counts failed");
-        cuda_utils::check_cuda_call(
-            cudaMemcpyAsync(
-                thrust::raw_pointer_cast(m_params_flat_offsets_d.data()),
-                params_flat_offsets.data(),
-                params_flat_offsets.size() * sizeof(uint32_t),
-                cudaMemcpyHostToDevice, stream),
-            "cudaMemcpyAsync params flat offsets failed");
-        cuda_utils::check_cuda_call(
-            cudaMemcpyAsync(
-                thrust::raw_pointer_cast(m_ncoords_offsets_d.data()),
-                ncoords_offsets.data(),
-                ncoords_offsets.size() * sizeof(uint32_t),
-                cudaMemcpyHostToDevice, stream),
-            "cudaMemcpyAsync ncoords offsets failed");
-
-        auto coord_ptrs = m_coords_d.get_raw_ptrs();
+        const auto n_levels      = ffa_plan.get_n_levels();
+        const auto n_params      = ffa_plan.get_n_params();
+        const auto ncoords_total = ffa_plan.get_coord_size();
+        const auto tseg_brute    = ffa_plan.get_config().get_tseg_brute();
+        const auto nbins         = ffa_plan.get_config().get_nbins();
+        auto coord_ptrs          = m_coords_d.get_raw_ptrs();
         // Tail coordinates
         core::ffa_taylor_resolve_poly_batch_cuda(
             cuda_utils::as_span(m_params_d),
@@ -226,6 +164,45 @@ struct FFAWorkspaceCUDA<FoldTypeCUDA>::Data {
             cuda_utils::as_span(m_params_flat_offsets_d),
             cuda_utils::as_span(m_ncoords_offsets_d), coord_ptrs, n_levels,
             ncoords_total, 1, tseg_brute, nbins, n_params, stream);
+    }
+
+    void copy_plan_to_device(const plans::FFAPlan<HostFoldType>& ffa_plan,
+                             cudaStream_t stream) {
+
+        const auto params_flat         = ffa_plan.get_params_flat();
+        const auto param_counts        = ffa_plan.get_param_counts_flat();
+        const auto params_flat_offsets = ffa_plan.get_params_flat_offsets();
+        const auto ncoords_offsets     = ffa_plan.get_ncoords_offsets();
+
+        // Copy resolve ingredients to device
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(thrust::raw_pointer_cast(m_params_d.data()),
+                            params_flat.data(),
+                            params_flat.size() * sizeof(double),
+                            cudaMemcpyHostToDevice, stream),
+            "cudaMemcpyAsync params failed");
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(thrust::raw_pointer_cast(m_param_counts_d.data()),
+                            param_counts.data(),
+                            param_counts.size() * sizeof(uint32_t),
+                            cudaMemcpyHostToDevice, stream),
+            "cudaMemcpyAsync param counts failed");
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(
+                thrust::raw_pointer_cast(m_params_flat_offsets_d.data()),
+                params_flat_offsets.data(),
+                params_flat_offsets.size() * sizeof(uint32_t),
+                cudaMemcpyHostToDevice, stream),
+            "cudaMemcpyAsync params flat offsets failed");
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(
+                thrust::raw_pointer_cast(m_ncoords_offsets_d.data()),
+                ncoords_offsets.data(),
+                ncoords_offsets.size() * sizeof(uint32_t),
+                cudaMemcpyHostToDevice, stream),
+            "cudaMemcpyAsync ncoords offsets failed");
+        cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
+                                    "cudaStreamSynchronize failed");
     }
 };
 

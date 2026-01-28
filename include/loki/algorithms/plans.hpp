@@ -125,6 +125,67 @@ public:
     /// @brief Get the memory usage of the coordinate storage (in GB).
     float get_coord_memory_usage() const noexcept;
 
+    // --- Methods ---
+    /**
+     * @brief Resolve the coordinates for the plan.
+     * @param coords A span of FFACoord objects.
+     */
+    void resolve_coordinates(std::span<coord::FFACoord> coords);
+
+    /**
+     * @brief Resolve the coordinates for the plan.
+     * @return A vector of vectors of FFACoord for each level.
+     */
+    std::vector<std::vector<coord::FFACoord>> resolve_coordinates();
+
+    /**
+     * @brief Resolve the coordinates for the plan (frequency-only coordinates).
+     * @param coords_freq A span of FFACoordFreq objects.
+     */
+    void resolve_coordinates_freq(std::span<coord::FFACoordFreq> coords_freq);
+
+    /**
+     * @brief Resolve the coordinates for the plan (frequency-only coordinates).
+     * @return A vector of vectors of FFACoordFreq for each level.
+     */
+    std::vector<std::vector<coord::FFACoordFreq>> resolve_coordinates_freq();
+    
+    /// @brief Compute the parameter grid for a given FFA level.
+    [[nodiscard]] std::vector<std::vector<double>>
+    compute_param_grid(SizeType ffa_level) const noexcept;
+
+    /// @brief Compute the parameter grid for the entire plan.
+    [[nodiscard]] std::vector<std::vector<std::vector<double>>>
+    compute_param_grid_full() const noexcept;
+
+    /// @brief Get a dictionary of parameters for the last level of the plan.
+    [[nodiscard]] std::map<std::string, std::vector<double>>
+    get_params_dict() const;
+
+    /**
+     * @brief Get the approximate branching pattern for the plan.
+     * @param poly_basis The polynomial basis for the branching pattern (e.g.
+     * "taylor").
+     * @param ref_seg The reference segment for the branching pattern.
+     * @param isuggest The index of the leaf to use for the branching pattern.
+     * @return A vector of branching pattern values.
+     */
+    std::vector<double>
+    get_branching_pattern_approx(std::string_view poly_basis = "taylor",
+                                 SizeType ref_seg            = 0,
+                                 IndexType isuggest          = 0) const;
+
+    /**
+     * @brief Get the exact branching pattern for the plan.
+     * @param poly_basis The polynomial basis for the branching pattern (e.g.
+     * "taylor").
+     * @param ref_seg The reference segment for the branching pattern.
+     * @return A vector of branching pattern values.
+     */
+    std::vector<double>
+    get_branching_pattern(std::string_view poly_basis = "taylor",
+                          SizeType ref_seg            = 0) const;
+
 private:
     void configure_base_plan();
     void validate_base_plan() const;
@@ -135,7 +196,7 @@ private:
 } // namespace detail
 
 /**
- * @brief A type-aware lightweight FFA plan (Time or Fourier domain).
+ * @brief A type-aware full FFA plan (Time or Fourier domain).
  * @details
  * This class inherits all common plan logic from FFAPlanBase and adds
  * type-specific data (fold shapes, etc.). This class is used to store the
@@ -144,7 +205,7 @@ private:
  * @tparam FoldType float or ComplexType.
  */
 template <SupportedFoldType FoldType>
-class FFAPlanMetadata : public detail::FFAPlanBase {
+class FFAPlan : public detail::FFAPlanBase {
 protected:
     std::vector<std::vector<SizeType>> m_fold_shapes;
     std::vector<std::vector<SizeType>> m_fold_shapes_time;
@@ -156,13 +217,13 @@ public:
      * @brief Constructs the metadata for a type-aware FFA plan.
      * @param cfg The pulsar search configuration object.
      */
-    explicit FFAPlanMetadata(search::PulsarSearchConfig cfg);
+    explicit FFAPlan(search::PulsarSearchConfig cfg);
 
-    ~FFAPlanMetadata() override                            = default;
-    FFAPlanMetadata(const FFAPlanMetadata&)                = delete;
-    FFAPlanMetadata& operator=(const FFAPlanMetadata&)     = delete;
-    FFAPlanMetadata(FFAPlanMetadata&&) noexcept            = default;
-    FFAPlanMetadata& operator=(FFAPlanMetadata&&) noexcept = default;
+    ~FFAPlan() override                    = default;
+    FFAPlan(const FFAPlan&)                = delete;
+    FFAPlan& operator=(const FFAPlan&)     = delete;
+    FFAPlan(FFAPlan&&) noexcept            = default;
+    FFAPlan& operator=(FFAPlan&&) noexcept = default;
 
     // --- Getters ---
     /// @brief Get the fold shapes for each level.
@@ -190,102 +251,15 @@ public:
     /// @brief Get the compute FLOPS for the FFA plan (in GFLOPS).
     float get_gflops(bool return_in_time) const noexcept;
 
-private:
-    void configure_fold_shapes();
-    void compute_flops();
-    void validate_metadata() const;
-};
-
-/**
- * @brief A heavy FFA plan (Time or Fourier domain).
- * @details
- * This class inherits all metadata from FFAPlanMetadata and adds
- * coordinate data. This class is used to store the
- * full FFA plan, which includes the metadata and the coordinate data.
- */
-template <SupportedFoldType FoldType>
-class FFAPlan final : public FFAPlanMetadata<FoldType> {
-protected:
-    std::vector<std::vector<std::vector<double>>> m_params; // Parameter grid
-public:
-    /**
-     * @brief Constructs the full heavy FFA plan from a search configuration.
-     * @param cfg The pulsar search configuration object.
-     */
-    explicit FFAPlan(search::PulsarSearchConfig cfg);
-
-    ~FFAPlan() override                    = default;
-    FFAPlan(const FFAPlan&)                = delete;
-    FFAPlan& operator=(const FFAPlan&)     = delete;
-    FFAPlan(FFAPlan&&) noexcept            = default;
-    FFAPlan& operator=(FFAPlan&&) noexcept = default;
-
-    /// @brief Parameter grid for each level.
-    [[nodiscard]] const std::vector<std::vector<std::vector<double>>>&
-    get_params() const noexcept {
-        return m_params;
-    }
-
-    /// @brief Get a dictionary of parameters for the last level of the plan.
-    [[nodiscard]] std::map<std::string, std::vector<double>>
-    get_params_dict() const;
-
-    // --- Methods ---
-    /**
-     * @brief Resolve the coordinates for the plan.
-     * @param coords A span of FFACoord objects.
-     */
-    void resolve_coordinates(std::span<coord::FFACoord> coords);
-
-    /**
-     * @brief Resolve the coordinates for the plan.
-     * @return A vector of vectors of FFACoord for each level.
-     */
-    std::vector<std::vector<coord::FFACoord>> resolve_coordinates();
-
-    /**
-     * @brief Resolve the coordinates for the plan (frequency-only coordinates).
-     * @param coords_freq A span of FFACoordFreq objects.
-     */
-    void resolve_coordinates_freq(std::span<coord::FFACoordFreq> coords_freq);
-
-    /**
-     * @brief Resolve the coordinates for the plan (frequency-only coordinates).
-     * @return A vector of vectors of FFACoordFreq for each level.
-     */
-    std::vector<std::vector<coord::FFACoordFreq>> resolve_coordinates_freq();
-
-    /**
-     * @brief Get the approximate branching pattern for the plan.
-     * @param poly_basis The polynomial basis for the branching pattern (e.g.
-     * "taylor").
-     * @param ref_seg The reference segment for the branching pattern.
-     * @param isuggest The index of the leaf to use for the branching pattern.
-     * @return A vector of branching pattern values.
-     */
-    std::vector<double>
-    get_branching_pattern_approx(std::string_view poly_basis = "taylor",
-                                 SizeType ref_seg            = 0,
-                                 IndexType isuggest          = 0) const;
-
-    /**
-     * @brief Get the exact branching pattern for the plan.
-     * @param poly_basis The polynomial basis for the branching pattern (e.g.
-     * "taylor").
-     * @param ref_seg The reference segment for the branching pattern.
-     * @return A vector of branching pattern values.
-     */
-    std::vector<double>
-    get_branching_pattern(std::string_view poly_basis = "taylor",
-                          SizeType ref_seg            = 0) const;
-
     // Get the flattened parameters for CUDA plans
     [[nodiscard]] std::vector<double> get_params_flat() const noexcept;
     // Get the flattened parameter counts for CUDA plans
     [[nodiscard]] std::vector<uint32_t> get_param_counts_flat() const noexcept;
 
 private:
-    void configure_params();
+    void configure_fold_shapes();
+    void compute_flops();
+    void validate_plan() const;
 };
 
 } // namespace loki::plans

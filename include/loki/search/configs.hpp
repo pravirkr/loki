@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <optional>
+#include <span>
 #include <vector>
 
 #include "loki/common/types.hpp"
@@ -25,7 +26,7 @@ public:
                        double tsamp,
                        SizeType nbins,
                        double eta,
-                       const std::vector<ParamLimitType>& param_limits,
+                       std::span<const ParamLimit> param_limits,
                        double ducy_max                    = 0.2,
                        double wtsp                        = 1.5,
                        bool use_fourier                   = true,
@@ -66,7 +67,7 @@ public:
     /// @brief Get the eta parameter.
     double get_eta() const noexcept;
     /// @brief Get the parameter limits (tuples of [min, max] values).
-    const std::vector<ParamLimitType>& get_param_limits() const noexcept;
+    std::span<const ParamLimit> get_param_limits() const noexcept;
     /// @brief Get the maximum ducy factor.
     double get_ducy_max() const noexcept;
     /// @brief Get the width scale parameter for the boxcar width trials.
@@ -144,10 +145,15 @@ public:
     get_dparams_lim(double tseg_cur) const noexcept;
 
     /// @brief Get an updated configuration with the given parameters.
-    PulsarSearchConfig get_updated_config(
-        SizeType nbins,
-        double eta,
-        const std::vector<ParamLimitType>& param_limits) const noexcept;
+    PulsarSearchConfig
+    get_updated_config(SizeType nbins,
+                       double eta,
+                       std::span<const ParamLimit> param_limits) const noexcept;
+    // Overload for only last param (frequency) limit update
+    PulsarSearchConfig get_updated_config(SizeType nbins,
+                                          double eta,
+                                          double f_min,
+                                          double f_max) const noexcept;
 
 private:
     class Impl;

@@ -7,7 +7,7 @@ name = "loki"
 version = "0.0.1"
 description = "Leverage Optimal significance to unveil Keplerian orbIt pulsars"
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
 authors = [{ name = "Pravir Kumar", email = "pravirka@gmail.com" }]
 requires-python = ">=3.12"
 classifiers = [
@@ -19,7 +19,6 @@ classifiers = [
     "Operating System :: MacOS :: MacOS X",
     "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
-    "License :: OSI Approved :: MIT License",
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Astronomy",

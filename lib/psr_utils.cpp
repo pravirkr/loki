@@ -11,25 +11,6 @@
 
 namespace loki::psr_utils {
 
-float get_phase_idx(double proper_time,
-                    double freq,
-                    SizeType nbins,
-                    double delay) {
-    error_check::check_greater_equal(freq, 0.0, "Frequency must be positive");
-    error_check::check_greater_equal(nbins, 1,
-                                     "Number of bins must be positive");
-    // Calculate the total phase in cycles (can be negative or > 1)
-    const double total_phase = (proper_time - delay) * freq;
-    // Normalize phase to [0, 1) interval
-    double norm_phase = total_phase - std::floor(total_phase);
-    // Scale the normalized phase to [0, nbins) and convert to float
-    double iphase = norm_phase * static_cast<double>(nbins);
-    if (iphase >= static_cast<double>(nbins)) {
-        iphase = 0.0;
-    }
-    return static_cast<float>(iphase);
-}
-
 std::vector<double> poly_taylor_step_f(SizeType nparams,
                                        double tobs,
                                        SizeType fold_bins,

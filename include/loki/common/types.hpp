@@ -14,10 +14,14 @@
 
 namespace loki {
 
-using SizeType       = std::size_t;
-using IndexType      = std::ptrdiff_t;
-using ComplexType    = std::complex<float>;
-using ParamLimitType = std::array<double, 2>;
+using SizeType    = std::size_t;
+using IndexType   = std::ptrdiff_t;
+using ComplexType = std::complex<float>;
+
+struct ParamLimit {
+    double min;
+    double max;
+};
 
 template <typename T>
 concept SupportedFoldType =
@@ -28,11 +32,6 @@ concept TriviallyCopyable = std::is_trivially_copyable_v<T>;
 
 #ifdef LOKI_ENABLE_CUDA
 using ComplexTypeCUDA = cuda::std::complex<float>;
-
-struct ParamLimitTypeCUDA {
-    double min;
-    double max;
-};
 
 template <typename T>
 concept SupportedFoldTypeCUDA =

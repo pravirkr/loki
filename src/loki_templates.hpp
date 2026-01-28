@@ -128,8 +128,8 @@ void bind_ffa_region_stats(py::module& m, const std::string& name) {
         .def(py::init<SizeType, SizeType, SizeType, SizeType, SizeType,
                       SizeType, SizeType, SizeType, SizeType, bool>(),
              py::arg("max_buffer_size"), py::arg("max_coord_size"),
-             py::arg("max_ncoords"), py::arg("max_ffa_levels"),
-             py::arg("max_total_params_flat_count"), py::arg("n_widths"),
+             py::arg("max_ncoords"), py::arg("max_total_params_flat_count"),
+             py::arg("max_ffa_levels"), py::arg("n_widths"),
              py::arg("n_params"), py::arg("n_samps"),
              py::arg("max_passing_candidates"), py::arg("use_gpu") = false)
         .def_property_readonly("max_buffer_size",
@@ -138,11 +138,11 @@ void bind_ffa_region_stats(py::module& m, const std::string& name) {
                                &FFARegionStats<T>::get_max_coord_size)
         .def_property_readonly("max_ncoords",
                                &FFARegionStats<T>::get_max_ncoords)
-        .def_property_readonly("max_ffa_levels",
-                               &FFARegionStats<T>::get_max_ffa_levels)
         .def_property_readonly(
             "max_total_params_flat_count",
             &FFARegionStats<T>::get_max_total_params_flat_count)
+        .def_property_readonly("max_ffa_levels",
+                               &FFARegionStats<T>::get_max_ffa_levels)
         .def_property_readonly("max_buffer_size_time",
                                &FFARegionStats<T>::get_max_buffer_size_time)
         .def_property_readonly("max_scores_size",

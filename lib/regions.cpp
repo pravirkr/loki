@@ -60,8 +60,8 @@ template <SupportedFoldType FoldType> struct FFARegionStats<FoldType>::Impl {
     SizeType max_buffer_size{};
     SizeType max_coord_size{};
     SizeType max_ncoords{}; // maximum number of coordinates in the last level
-    SizeType max_ffa_levels{};
     SizeType max_total_params_flat_count{};
+    SizeType max_ffa_levels{};
     SizeType n_widths{};
     SizeType n_params{};
     SizeType n_samps{}; // ts_e.size()
@@ -71,8 +71,8 @@ template <SupportedFoldType FoldType> struct FFARegionStats<FoldType>::Impl {
     Impl(SizeType max_buffer_size,
          SizeType max_coord_size,
          SizeType max_ncoords,
-         SizeType max_ffa_levels,
          SizeType max_total_params_flat_count,
+         SizeType max_ffa_levels,
          SizeType n_widths,
          SizeType n_params,
          SizeType n_samps,
@@ -81,8 +81,8 @@ template <SupportedFoldType FoldType> struct FFARegionStats<FoldType>::Impl {
         : max_buffer_size(max_buffer_size),
           max_coord_size(max_coord_size),
           max_ncoords(max_ncoords),
-          max_ffa_levels(max_ffa_levels),
           max_total_params_flat_count(max_total_params_flat_count),
+          max_ffa_levels(max_ffa_levels),
           n_widths(n_widths),
           n_params(n_params),
           n_samps(n_samps),
@@ -200,20 +200,20 @@ private:
             return 0.0;
         }
 
-        const auto& param_limits = cfg.get_param_limits();
+        auto param_limits = cfg.get_param_limits();
         // Drift from center to edge
         const auto t_half = cfg.get_tobs() / 2.0;
         if (cfg.get_nparams() == 2) {
-            const auto max_accel = std::max(std::abs(param_limits[0][0]),
-                                            std::abs(param_limits[0][1]));
+            const auto max_accel = std::max(std::abs(param_limits[0].min),
+                                            std::abs(param_limits[0].max));
             const auto drift     = max_accel * t_half;
             return drift / utils::kCval;
         }
         if (cfg.get_nparams() == 3) {
-            const auto max_jerk  = std::max(std::abs(param_limits[0][0]),
-                                            std::abs(param_limits[0][1]));
-            const auto max_accel = std::max(std::abs(param_limits[1][0]),
-                                            std::abs(param_limits[1][1]));
+            const auto max_jerk  = std::max(std::abs(param_limits[0].min),
+                                            std::abs(param_limits[0].max));
+            const auto max_accel = std::max(std::abs(param_limits[1].min),
+                                            std::abs(param_limits[1].max));
             const auto drift =
                 (max_accel * t_half) + (max_jerk * t_half * t_half / 2.0);
             return drift / utils::kCval;
@@ -244,8 +244,7 @@ private:
 
         // Step 2: For each region, subdivide in frequency if it doesn't fit
         // in memory
-        const auto& base_param_limits = m_base_cfg.get_param_limits();
-        const auto max_drift          = calculate_max_drift(m_base_cfg);
+        const auto max_drift = calculate_max_drift(m_base_cfg);
         // Log drift information
         if (max_drift > 0 && m_base_cfg.get_nparams() > 1) {
             spdlog::info("Drift-aware chunking: max_drift={:.6f} ({:.4f}%) "
@@ -253,41 +252,38 @@ private:
                          max_drift, max_drift * 100.0, m_base_cfg.get_tobs(),
                          m_base_cfg.get_nparams());
         }
-
         SizeType max_buffer_size{};
         SizeType max_coord_size{};
         SizeType max_ncoords{};
-        SizeType max_ffa_levels{};
         SizeType max_total_params_flat_count{};
+        SizeType max_ffa_levels{};
         for (const auto& region : ffa_regions) {
-            // Create a config for this region
-            auto region_param_limits   = base_param_limits;
-            region_param_limits.back() = {region.f_start, region.f_end};
             subdivide_region_by_memory(
-                region_param_limits, region.nbins, region.eta, max_drift,
-                max_buffer_size, max_coord_size, max_ncoords, max_ffa_levels,
-                max_total_params_flat_count);
+                region.f_start, region.f_end, region.nbins, region.eta,
+                max_drift, max_buffer_size, max_coord_size, max_ncoords,
+                max_total_params_flat_count, max_ffa_levels);
         }
         m_stats = FFARegionStats<FoldType>(
-            max_buffer_size, max_coord_size, max_ncoords, max_ffa_levels,
-            max_total_params_flat_count, m_base_cfg.get_n_scoring_widths(),
-            m_base_cfg.get_nparams(), m_base_cfg.get_nsamps(),
-            m_base_cfg.get_max_passing_candidates(), m_use_gpu);
+            max_buffer_size, max_coord_size, max_ncoords,
+            max_total_params_flat_count, max_ffa_levels,
+            m_base_cfg.get_n_scoring_widths(), m_base_cfg.get_nparams(),
+            m_base_cfg.get_nsamps(), m_base_cfg.get_max_passing_candidates(),
+            m_use_gpu);
 
         // Log summary statistics
         log_planning_summary();
     }
 
-    void
-    subdivide_region_by_memory(const std::vector<ParamLimitType>& param_limits,
-                               SizeType nbins,
-                               double eta,
-                               double max_drift,
-                               SizeType& max_buffer_size,
-                               SizeType& max_coord_size,
-                               SizeType& max_ncoords,
-                               SizeType& max_ffa_levels,
-                               SizeType& max_total_params_flat_count) {
+    void subdivide_region_by_memory(double f_start,
+                                    double f_end,
+                                    SizeType nbins,
+                                    double eta,
+                                    double max_drift,
+                                    SizeType& max_buffer_size,
+                                    SizeType& max_coord_size,
+                                    SizeType& max_ncoords,
+                                    SizeType& max_total_params_flat_count,
+                                    SizeType& max_ffa_levels) {
         // For GPU, this is the device memory limit. For CPU, this is the
         // process memory limit.
         const auto max_memory_gb = m_base_cfg.get_max_process_memory_gb();
@@ -295,8 +291,6 @@ private:
         // errors
         constexpr double kSafetyMarginGB = 0.5; // 500 MB safety margin
         const auto effective_limit_gb    = max_memory_gb - kSafetyMarginGB;
-
-        const auto [f_start, f_end] = param_limits.back();
 
         constexpr double kMinViableRange  = 0.1; // Minimum possible range in Hz
         constexpr double kMinChunkSize    = 0.01; // Merge threshold (Hz)
@@ -306,20 +300,19 @@ private:
         // Pre-flight check: can we fit minimum viable chunk at worst case
         // (high freq)?
         {
-            auto min_check_limits   = param_limits;
-            min_check_limits.back() = {(f_end - kMinViableRange) *
-                                           (1.0 - max_drift),
-                                       f_end * (1.0 + max_drift)};
-            auto check_cfg =
-                m_base_cfg.get_updated_config(nbins, eta, min_check_limits);
+            const double min_f_start =
+                (f_end - kMinViableRange) * (1.0 - max_drift);
+            const double min_f_end = f_end * (1.0 + max_drift);
+            auto check_cfg         = m_base_cfg.get_updated_config(
+                nbins, eta, min_f_start, min_f_end);
             plans::FFAPlanMetadata<FoldType> check_plan(std::move(check_cfg));
 
             FFARegionStats<FoldType> min_stats{
                 check_plan.get_buffer_size(),
                 check_plan.get_coord_size(),
                 check_plan.get_ncoords().back(),
-                check_plan.get_n_levels(),
                 check_plan.get_total_params_flat_count(),
+                check_plan.get_n_levels(),
                 m_base_cfg.get_n_scoring_widths(),
                 m_base_cfg.get_nparams(),
                 m_base_cfg.get_nsamps(),
@@ -335,8 +328,7 @@ private:
                     "  Suggestion: Increase max_memory_gb or reduce "
                     "parameter "
                     "searchranges.",
-                    kMinViableRange,
-                    min_check_limits.back()[1] - min_check_limits.back()[0],
+                    kMinViableRange, min_f_end - min_f_start,
                     min_stats.get_manager_memory_usage(), effective_limit_gb));
             }
         }
@@ -368,20 +360,18 @@ private:
             while (probe_count < kMaxProbes &&
                    (f_high - f_low) > kSearchTolerance) {
                 // Create test config for this chunk
-                auto test_param_limits   = param_limits;
-                test_param_limits.back() = {f_probe * (1.0 - max_drift),
-                                            current_f_end * (1.0 + max_drift)};
-                // Simulate the chunk
                 auto test_cfg = m_base_cfg.get_updated_config(
-                    nbins, eta, test_param_limits);
+                    nbins, eta, f_probe * (1.0 - max_drift),
+                    current_f_end * (1.0 + max_drift));
+                // Simulate the chunk
                 plans::FFAPlanMetadata<FoldType> test_plan(std::move(test_cfg));
                 FFARegionStats<FoldType> sim_stats{
                     std::max(max_buffer_size, test_plan.get_buffer_size()),
                     std::max(max_coord_size, test_plan.get_coord_size()),
                     std::max(max_ncoords, test_plan.get_ncoords().back()),
-                    std::max(max_ffa_levels, test_plan.get_n_levels()),
                     std::max(max_total_params_flat_count,
                              test_plan.get_total_params_flat_count()),
+                    std::max(max_ffa_levels, test_plan.get_n_levels()),
                     m_base_cfg.get_n_scoring_widths(),
                     m_base_cfg.get_nparams(),
                     m_base_cfg.get_nsamps(),
@@ -438,11 +428,9 @@ private:
             const double overlap_fraction =
                 (actual_width - nominal_width) / actual_width;
 
-            auto chunk_param_limits   = param_limits;
-            chunk_param_limits.back() = {actual_start, actual_end};
-            auto chunk_cfg =
-                m_base_cfg.get_updated_config(nbins, eta, chunk_param_limits);
-            plans::FFAPlanMetadata<FoldType> chunk_plan(std::move(chunk_cfg));
+            auto chunk_cfg = m_base_cfg.get_updated_config(
+                nbins, eta, actual_start, actual_end);
+            plans::FFAPlanMetadata<FoldType> chunk_plan(chunk_cfg);
             const double chunk_memory_gb =
                 chunk_plan.get_buffer_memory_usage() +
                 chunk_plan.get_coord_memory_usage();
@@ -470,11 +458,11 @@ private:
                 std::max(max_coord_size, chunk_plan.get_coord_size());
             max_ncoords =
                 std::max(max_ncoords, chunk_plan.get_ncoords().back());
-            max_ffa_levels =
-                std::max(max_ffa_levels, chunk_plan.get_n_levels());
             max_total_params_flat_count =
                 std::max(max_total_params_flat_count,
                          chunk_plan.get_total_params_flat_count());
+            max_ffa_levels =
+                std::max(max_ffa_levels, chunk_plan.get_n_levels());
             // Move to next chunk (going backwards in frequency)
             current_f_end = best_f_start;
         }
@@ -534,8 +522,8 @@ template <SupportedFoldType FoldType>
 FFARegionStats<FoldType>::FFARegionStats(SizeType max_buffer_size,
                                          SizeType max_coord_size,
                                          SizeType max_ncoords,
-                                         SizeType max_ffa_levels,
                                          SizeType max_total_params_flat_count,
+                                         SizeType max_ffa_levels,
                                          SizeType n_widths,
                                          SizeType n_params,
                                          SizeType n_samps,
@@ -544,8 +532,8 @@ FFARegionStats<FoldType>::FFARegionStats(SizeType max_buffer_size,
     : m_impl(std::make_unique<Impl>(max_buffer_size,
                                     max_coord_size,
                                     max_ncoords,
-                                    max_ffa_levels,
                                     max_total_params_flat_count,
+                                    max_ffa_levels,
                                     n_widths,
                                     n_params,
                                     n_samps,
