@@ -117,6 +117,10 @@ public:
 
     const plans::FFAPlan<FoldType>& get_plan() const { return m_ffa_plan; }
 
+    [[nodiscard]] plans::FFAPlan<FoldType> extract_plan() && noexcept {
+        return std::move(m_ffa_plan);
+    }
+
     float get_brute_fold_timing() const noexcept { return m_brutefold_time; }
 
     void execute(std::span<const float> ts_e,
@@ -449,6 +453,10 @@ const plans::FFAPlan<FoldType>& FFA<FoldType>::get_plan() const noexcept {
     return m_impl->get_plan();
 }
 template <SupportedFoldType FoldType>
+plans::FFAPlan<FoldType> FFA<FoldType>::extract_plan() && noexcept {
+    return std::move(*m_impl).extract_plan();
+}
+template <SupportedFoldType FoldType>
 float FFA<FoldType>::get_brute_fold_timing() const noexcept {
     return m_impl->get_brute_fold_timing();
 }
@@ -483,7 +491,7 @@ compute_ffa(std::span<const float> ts_e,
     // RESIZE to actual result size
     const auto fold_size = ffa_plan.get_fold_size();
     fold.resize(fold_size);
-    return {std::move(fold), ffa_plan};
+    return {std::move(fold), std::move(ffa).extract_plan()};
 }
 
 std::tuple<std::vector<float>, plans::FFAPlan<float>>
@@ -503,7 +511,7 @@ compute_ffa_fourier_return_to_time(std::span<const float> ts_e,
     fold.resize(fold_size_time);
     // Get the plan for the time domain
     plans::FFAPlan<float> ffa_plan_time(cfg);
-    return {std::move(fold), ffa_plan_time};
+    return {std::move(fold), std::move(ffa_plan_time)};
 }
 
 std::tuple<std::vector<float>, plans::FFAPlan<float>>
@@ -513,7 +521,7 @@ compute_ffa_scores(std::span<const float> ts_e,
                    bool quiet,
                    bool show_progress) {
     timing::ScopedLogLevel scoped_log_level(quiet);
-    const auto [fold, ffa_plan] =
+    auto [fold, ffa_plan] =
         cfg.get_use_fourier()
             ? compute_ffa_fourier_return_to_time(ts_e, ts_v, cfg, quiet,
                                                  show_progress)
@@ -527,7 +535,7 @@ compute_ffa_scores(std::span<const float> ts_e,
     std::vector<float> scores(nscores);
     detection::snr_boxcar_3d(fold, score_widths, scores, ncoords,
                              cfg.get_nbins(), cfg.get_nthreads());
-    return {std::move(scores), ffa_plan};
+    return {std::move(scores), std::move(ffa_plan)};
 }
 
 // Explicit instantiation

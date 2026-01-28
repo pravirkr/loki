@@ -72,6 +72,9 @@ public:
     FFA& operator=(const FFA&) = delete;
 
     const plans::FFAPlan<FoldType>& get_plan() const noexcept;
+    // Transfer ownership of the plan
+    [[nodiscard]] plans::FFAPlan<FoldType> extract_plan() && noexcept;
+
     float get_brute_fold_timing() const noexcept;
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
@@ -134,6 +137,8 @@ public:
     explicit FFAWorkspaceCUDA(const plans::FFAPlan<HostFoldType>& ffa_plan);
     FFAWorkspaceCUDA(SizeType buffer_size,
                      SizeType coord_size,
+                     SizeType total_params_flat_count,
+                     SizeType n_levels,
                      SizeType n_params);
 
     ~FFAWorkspaceCUDA();
@@ -178,6 +183,8 @@ public:
     FFACUDA& operator=(const FFACUDA&) = delete;
 
     const plans::FFAPlan<HostFoldType>& get_plan() const noexcept;
+    // Transfer ownership of the plan
+    [[nodiscard]] plans::FFAPlan<HostFoldType> extract_plan() && noexcept;
     float get_brute_fold_timing() const noexcept;
 
     void execute(std::span<const float> ts_e,

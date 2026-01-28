@@ -21,7 +21,7 @@ using algorithms::PruneFourier;
 using algorithms::PruneTime;
 using algorithms::PruningManager;
 using detection::MatchedFilter;
-using plans::FFAPlanBase;
+using plans::detail::FFAPlanBase;
 using search::PulsarSearchConfig;
 
 namespace py = pybind11;
@@ -372,10 +372,6 @@ PYBIND11_MODULE(libloki, m) {
                                    return as_pyarray_ref(
                                        self.get_ncoords_offsets());
                                })
-        .def_property_readonly("params",
-                               [](const FFAPlanBase& self) {
-                                   return as_listof_pyarray(self.get_params());
-                               })
         .def_property_readonly("param_cart_strides",
                                [](const FFAPlanBase& self) {
                                    return as_listof_pyarray(
@@ -393,50 +389,17 @@ PYBIND11_MODULE(libloki, m) {
         .def_property_readonly("config", &FFAPlanBase::get_config)
         .def_property_readonly("coord_size", &FFAPlanBase::get_coord_size)
         .def_property_readonly("coord_memory_usage",
-                               &FFAPlanBase::get_coord_memory_usage)
-        .def_property_readonly("params_dict",
-                               [](const FFAPlanBase& self) {
-                                   auto params_map = self.get_params_dict();
-                                   py::dict result;
-                                   for (const auto& [key, value] : params_map) {
-                                       result[py::str(key)] =
-                                           as_pyarray_ref(value);
-                                   }
-                                   return result;
-                               })
-        .def("resolve_coordinates",
-             [](FFAPlanBase& self) {
-                 return as_listof_pyarray(self.resolve_coordinates());
-             })
-        .def("resolve_coordinates_freq",
-             [](FFAPlanBase& self) {
-                 return as_listof_pyarray(self.resolve_coordinates_freq());
-             })
-        .def(
-            "get_branching_pattern_approx",
-            [](FFAPlanBase& self, std::string_view poly_basis, SizeType ref_seg,
-               IndexType isuggest) {
-                return as_pyarray_ref(self.get_branching_pattern_approx(
-                    poly_basis, ref_seg, isuggest));
-            },
-            py::arg("poly_basis") = "taylor", py::arg("ref_seg") = 0,
-            py::arg("isuggest") = 0)
-        .def(
-            "get_branching_pattern",
-            [](FFAPlanBase& self, std::string_view poly_basis,
-               SizeType ref_seg) {
-                return as_pyarray_ref(
-                    self.get_branching_pattern(poly_basis, ref_seg));
-            },
-            py::arg("poly_basis") = "taylor", py::arg("ref_seg") = 0);
+                               &FFAPlanBase::get_coord_memory_usage);
 
+    bind_ffa_plan_metadata<float>(m_plans, "FFAPlanMetadataTime");
+    bind_ffa_plan_metadata<ComplexType>(m_plans, "FFAPlanMetadataFourier");
     bind_ffa_plan<float>(m_plans, "FFAPlanTime");
     bind_ffa_plan<ComplexType>(m_plans, "FFAPlanFourier");
     bind_ffa_region_stats<float>(m_plans, "FFARegionStatsTime");
     bind_ffa_region_stats<ComplexType>(m_plans, "FFARegionStatsFourier");
     bind_ffa_region_planner<float>(m_plans, "FFARegionPlannerTime");
     bind_ffa_region_planner<ComplexType>(m_plans, "FFARegionPlannerFourier");
-    m_plans.def("generate_ffa_regions", &plans::generate_ffa_regions,
+    m_plans.def("generate_ffa_regions", &regions::generate_ffa_regions,
                 py::arg("p_min"), py::arg("p_max"), py::arg("tsamp"),
                 py::arg("nbins_min"), py::arg("eta_min"),
                 py::arg("growth_factor") = 2.0,
@@ -454,7 +417,7 @@ PYBIND11_MODULE(libloki, m) {
             auto [fold, ffa_plan] = algorithms::compute_ffa<float>(
                 to_span<const float>(ts_e), to_span<const float>(ts_v), cfg,
                 quiet, show_progress);
-            return std::make_tuple(as_pyarray(std::move(fold)), ffa_plan);
+            return std::make_tuple(as_pyarray(std::move(fold)), std::move(ffa_plan));
         },
         py::arg("ts_e"), py::arg("ts_v"), py::arg("cfg"),
         py::arg("quiet") = false, py::arg("show_progress") = false);
@@ -466,7 +429,7 @@ PYBIND11_MODULE(libloki, m) {
             auto [fold, ffa_plan] = algorithms::compute_ffa<ComplexType>(
                 to_span<const float>(ts_e), to_span<const float>(ts_v), cfg,
                 quiet, show_progress);
-            return std::make_tuple(as_pyarray(std::move(fold)), ffa_plan);
+            return std::make_tuple(as_pyarray(std::move(fold)), std::move(ffa_plan));
         },
         py::arg("ts_e"), py::arg("ts_v"), py::arg("cfg"),
         py::arg("quiet") = false, py::arg("show_progress") = false);
@@ -479,7 +442,7 @@ PYBIND11_MODULE(libloki, m) {
                 algorithms::compute_ffa_fourier_return_to_time(
                     to_span<const float>(ts_e), to_span<const float>(ts_v), cfg,
                     quiet, show_progress);
-            return std::make_tuple(as_pyarray(std::move(fold)), ffa_plan);
+            return std::make_tuple(as_pyarray(std::move(fold)), std::move(ffa_plan));
         },
         py::arg("ts_e"), py::arg("ts_v"), py::arg("cfg"),
         py::arg("quiet") = false, py::arg("show_progress") = false);
@@ -491,7 +454,7 @@ PYBIND11_MODULE(libloki, m) {
             auto [scores, ffa_plan] = algorithms::compute_ffa_scores(
                 to_span<const float>(ts_e), to_span<const float>(ts_v), cfg,
                 quiet, show_progress);
-            return std::make_tuple(as_pyarray(std::move(scores)), ffa_plan);
+            return std::make_tuple(as_pyarray(std::move(scores)), std::move(ffa_plan));
         },
         py::arg("ts_e"), py::arg("ts_v"), py::arg("cfg"),
         py::arg("quiet") = false, py::arg("show_progress") = false);

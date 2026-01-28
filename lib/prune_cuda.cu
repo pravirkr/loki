@@ -45,14 +45,14 @@ class PruningManagerCUDATypedImpl final : public PruningManagerCUDA::BaseImpl {
 public:
     using HostFoldType = typename FoldTypeTraits<FoldTypeCUDA>::HostType;
     PruningManagerCUDATypedImpl(search::PulsarSearchConfig cfg,
-                                const std::vector<float>& threshold_scheme,
+                                std::span<const float> threshold_scheme,
                                 std::optional<SizeType> n_runs,
                                 std::optional<std::vector<SizeType>> ref_segs,
                                 SizeType max_sugg,
                                 SizeType batch_size,
                                 int device_id)
         : m_cfg(std::move(cfg)),
-          m_threshold_scheme(threshold_scheme),
+          m_threshold_scheme(threshold_scheme.begin(), threshold_scheme.end()),
           m_n_runs(n_runs),
           m_ref_segs(std::move(ref_segs)),
           m_max_sugg(max_sugg),
@@ -80,7 +80,7 @@ public:
                                                            m_device_id);
         const thrust::device_vector<FoldTypeCUDA> ffa_fold_d =
             std::get<0>(result);
-        const plans::FFAPlan<HostFoldType> ffa_plan = std::get<1>(result);
+        plans::FFAPlan<HostFoldType> ffa_plan = std::move(std::get<1>(result));
         // Setup output files and directory
         const auto nsegments = ffa_plan.get_nsegments().back();
         const std::string filebase =
@@ -116,9 +116,9 @@ public:
         writer.write_metadata(m_cfg.get_param_names(), nsegments, m_max_sugg,
                               m_threshold_scheme);
 
-        auto prune =
-            PruneCUDA<FoldTypeCUDA>(ffa_plan, m_cfg, m_threshold_scheme,
-                                    m_max_sugg, m_batch_size, poly_basis);
+        auto prune = PruneCUDA<FoldTypeCUDA>(std::move(ffa_plan), m_cfg,
+                                             m_threshold_scheme, m_max_sugg,
+                                             m_batch_size, poly_basis);
         for (const auto ref_seg : ref_segs_to_process) {
             prune.execute(cuda_utils::as_span(ffa_fold_d), ref_seg, outdir,
                           log_file, result_file);
@@ -574,8 +574,8 @@ private:
 }; // End PruneCUDA::Impl implementation
 
 PruningManagerCUDA::PruningManagerCUDA(
-    const search::PulsarSearchConfig& cfg,
-    const std::vector<float>& threshold_scheme,
+    search::PulsarSearchConfig cfg,
+    std::span<const float> threshold_scheme,
     std::optional<SizeType> n_runs,
     std::optional<std::vector<SizeType>> ref_segs,
     SizeType max_sugg,
@@ -583,12 +583,12 @@ PruningManagerCUDA::PruningManagerCUDA(
     int device_id) {
     if (cfg.get_use_fourier()) {
         m_impl = std::make_unique<PruningManagerCUDATypedImpl<ComplexTypeCUDA>>(
-            cfg, threshold_scheme, n_runs, std::move(ref_segs), max_sugg,
-            batch_size, device_id);
+            std::move(cfg), threshold_scheme, n_runs, std::move(ref_segs),
+            max_sugg, batch_size, device_id);
     } else {
         m_impl = std::make_unique<PruningManagerCUDATypedImpl<float>>(
-            cfg, threshold_scheme, n_runs, std::move(ref_segs), max_sugg,
-            batch_size, device_id);
+            std::move(cfg), threshold_scheme, n_runs, std::move(ref_segs),
+            max_sugg, batch_size, device_id);
     }
 }
 PruningManagerCUDA::~PruningManagerCUDA() = default;
@@ -606,15 +606,18 @@ void PruningManagerCUDA::execute(std::span<const float> ts_e,
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 PruneCUDA<FoldTypeCUDA>::PruneCUDA(
-    const plans::FFAPlan<typename FoldTypeTraits<FoldTypeCUDA>::HostType>&
-        ffa_plan,
-    const search::PulsarSearchConfig& cfg,
+    plans::FFAPlan<typename FoldTypeTraits<FoldTypeCUDA>::HostType> ffa_plan,
+    search::PulsarSearchConfig cfg,
     std::span<const float> threshold_scheme,
     SizeType max_sugg,
     SizeType batch_size,
     std::string_view poly_basis)
-    : m_impl(std::make_unique<Impl>(
-          ffa_plan, cfg, threshold_scheme, max_sugg, batch_size, poly_basis)) {}
+    : m_impl(std::make_unique<Impl>(std::move(ffa_plan),
+                                    std::move(cfg),
+                                    threshold_scheme,
+                                    max_sugg,
+                                    batch_size,
+                                    poly_basis)) {}
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 PruneCUDA<FoldTypeCUDA>::~PruneCUDA() = default;
 template <SupportedFoldTypeCUDA FoldTypeCUDA>

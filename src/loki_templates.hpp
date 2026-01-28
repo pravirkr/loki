@@ -13,17 +13,18 @@ namespace loki {
 using algorithms::FFA;
 using algorithms::Prune;
 using plans::FFAPlan;
-using plans::FFAPlanBase;
-using plans::FFARegionPlanner;
-using plans::FFARegionStats;
+using plans::FFAPlanMetadata;
+using plans::detail::FFAPlanBase;
+using regions::FFARegionPlanner;
+using regions::FFARegionStats;
 using search::PulsarSearchConfig;
 
 namespace py = pybind11;
 
-// Template function to bind FFAPlan<T>
+// Template function to bind FFAPlanMetadata<T>
 template <SupportedFoldType FoldType>
-void bind_ffa_plan(py::module& m, const std::string& name) {
-    py::class_<FFAPlan<FoldType>, FFAPlanBase>(m, name.c_str())
+void bind_ffa_plan_metadata(py::module& m, const std::string& name) {
+    py::class_<FFAPlanMetadata<FoldType>, FFAPlanBase>(m, name.c_str())
         .def(py::init<PulsarSearchConfig>(), py::arg("cfg"))
         .def_property_readonly("fold_shapes",
                                [](const FFAPlan<FoldType>& self) {
@@ -41,6 +42,52 @@ void bind_ffa_plan(py::module& m, const std::string& name) {
                                &FFAPlan<FoldType>::get_buffer_size_time)
         .def_property_readonly("buffer_memory_usage",
                                &FFAPlan<FoldType>::get_buffer_memory_usage);
+}
+
+// Template function to bind FFAPlan<T>
+template <SupportedFoldType FoldType>
+void bind_ffa_plan(py::module& m, const std::string& name) {
+    py::class_<FFAPlan<FoldType>, FFAPlanMetadata<FoldType>>(m, name.c_str())
+        .def(py::init<PulsarSearchConfig>(), py::arg("cfg"))
+        .def_property_readonly("params",
+                               [](const FFAPlan<FoldType>& self) {
+                                   return as_listof_pyarray(self.get_params());
+                               })
+        .def_property_readonly("params_dict",
+                               [](const FFAPlan<FoldType>& self) {
+                                   auto params_map = self.get_params_dict();
+                                   py::dict result;
+                                   for (const auto& [key, value] : params_map) {
+                                       result[py::str(key)] =
+                                           as_pyarray_ref(value);
+                                   }
+                                   return result;
+                               })
+        .def("resolve_coordinates",
+             [](FFAPlan<FoldType>& self) {
+                 return as_listof_pyarray(self.resolve_coordinates());
+             })
+        .def("resolve_coordinates_freq",
+             [](FFAPlan<FoldType>& self) {
+                 return as_listof_pyarray(self.resolve_coordinates_freq());
+             })
+        .def(
+            "get_branching_pattern_approx",
+            [](FFAPlan<FoldType>& self, std::string_view poly_basis,
+               SizeType ref_seg, IndexType isuggest) {
+                return as_pyarray_ref(self.get_branching_pattern_approx(
+                    poly_basis, ref_seg, isuggest));
+            },
+            py::arg("poly_basis") = "taylor", py::arg("ref_seg") = 0,
+            py::arg("isuggest") = 0)
+        .def(
+            "get_branching_pattern",
+            [](FFAPlan<FoldType>& self, std::string_view poly_basis,
+               SizeType ref_seg) {
+                return as_pyarray_ref(
+                    self.get_branching_pattern(poly_basis, ref_seg));
+            },
+            py::arg("poly_basis") = "taylor", py::arg("ref_seg") = 0);
 }
 
 // Template function to bind FFA<T>
@@ -79,17 +126,23 @@ template <typename T>
 void bind_ffa_region_stats(py::module& m, const std::string& name) {
     py::class_<FFARegionStats<T>>(m, name.c_str())
         .def(py::init<SizeType, SizeType, SizeType, SizeType, SizeType,
-                      SizeType, SizeType, bool>(),
+                      SizeType, SizeType, SizeType, SizeType, bool>(),
              py::arg("max_buffer_size"), py::arg("max_coord_size"),
-             py::arg("max_ncoords"), py::arg("n_widths"), py::arg("n_params"),
-             py::arg("n_samps"), py::arg("max_passing_candidates"),
-             py::arg("use_gpu") = false)
+             py::arg("max_ncoords"), py::arg("max_ffa_levels"),
+             py::arg("max_total_params_flat_count"), py::arg("n_widths"),
+             py::arg("n_params"), py::arg("n_samps"),
+             py::arg("max_passing_candidates"), py::arg("use_gpu") = false)
         .def_property_readonly("max_buffer_size",
                                &FFARegionStats<T>::get_max_buffer_size)
         .def_property_readonly("max_coord_size",
                                &FFARegionStats<T>::get_max_coord_size)
         .def_property_readonly("max_ncoords",
                                &FFARegionStats<T>::get_max_ncoords)
+        .def_property_readonly("max_ffa_levels",
+                               &FFARegionStats<T>::get_max_ffa_levels)
+        .def_property_readonly(
+            "max_total_params_flat_count",
+            &FFARegionStats<T>::get_max_total_params_flat_count)
         .def_property_readonly("max_buffer_size_time",
                                &FFARegionStats<T>::get_max_buffer_size_time)
         .def_property_readonly("max_scores_size",

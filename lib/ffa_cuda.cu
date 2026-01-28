@@ -12,6 +12,7 @@
 #include "loki/algorithms/plans.hpp"
 #include "loki/common/coord.hpp"
 #include "loki/common/types.hpp"
+#include "loki/core/taylor.hpp"
 #include "loki/cuda_utils.cuh"
 #include "loki/detection/score.hpp"
 #include "loki/exceptions.hpp"
@@ -27,69 +28,205 @@ struct FFAWorkspaceCUDA<FoldTypeCUDA>::Data {
     using HostFoldType   = FoldTypeTraits<FoldTypeCUDA>::HostType;
     using DeviceFoldType = FoldTypeTraits<FoldTypeCUDA>::DeviceType;
 
-    thrust::device_vector<DeviceFoldType> fold_internal_d;
-    // std::vector<coord::FFACoord> coords;
-    // std::vector<coord::FFACoordFreq> coords_freq;
-    coord::FFACoordD coords_d;
-    coord::FFACoordFreqD coords_freq_d;
+    coord::FFACoordD m_coords_d;
+    coord::FFACoordFreqD m_coords_freq_d;
+
+    thrust::device_vector<DeviceFoldType> m_fold_internal_d;
+
+    // Buffers for device resolve
+    thrust::device_vector<double> m_params_d;
+    thrust::device_vector<uint32_t> m_param_counts_d;
+    thrust::device_vector<uint32_t> m_params_flat_offsets_d;
+    thrust::device_vector<uint32_t> m_ncoords_offsets_d;
 
     Data() = default;
 
     explicit Data(const plans::FFAPlan<HostFoldType>& ffa_plan) {
+        const auto n_levels = ffa_plan.get_n_levels();
+        const auto n_params = ffa_plan.get_n_params();
+        const auto total_params_flat_count =
+            ffa_plan.get_total_params_flat_count();
         const auto buffer_size  = ffa_plan.get_buffer_size();
         const auto coord_size   = ffa_plan.get_coord_size();
-        const bool is_freq_only = ffa_plan.get_n_params() == 1;
-        fold_internal_d.resize(buffer_size, DeviceFoldType{});
+        const bool is_freq_only = n_params == 1;
+        m_fold_internal_d.resize(buffer_size, DeviceFoldType{});
+        m_params_d.resize(total_params_flat_count);
+        m_param_counts_d.resize(n_levels * n_params);
+        m_params_flat_offsets_d.resize(n_levels);
+        m_ncoords_offsets_d.resize(n_levels + 1);
+
         if (is_freq_only) {
             // coords_freq.resize(coord_size);
-            coords_freq_d.resize(coord_size);
+            m_coords_freq_d.resize(coord_size);
         } else {
             // coords.resize(coord_size);
-            coords_d.resize(coord_size);
+            m_coords_d.resize(coord_size);
         }
     }
 
     explicit Data(SizeType buffer_size,
                   SizeType coord_size,
+                  SizeType total_params_flat_count,
+                  SizeType n_levels,
                   SizeType n_params) {
         const bool is_freq_only = n_params == 1;
-        fold_internal_d.resize(buffer_size, DeviceFoldType{});
+        m_fold_internal_d.resize(buffer_size, DeviceFoldType{});
+        m_params_d.resize(total_params_flat_count);
+        m_param_counts_d.resize(n_levels * n_params);
+        m_params_flat_offsets_d.resize(n_levels);
+        m_ncoords_offsets_d.resize(n_levels + 1);
+
         if (is_freq_only) {
             // coords_freq.resize(coord_size);
-            coords_freq_d.resize(coord_size);
+            m_coords_freq_d.resize(coord_size);
         } else {
             // coords.resize(coord_size);
-            coords_d.resize(coord_size);
+            m_coords_d.resize(coord_size);
         }
     }
 
     void validate(const plans::FFAPlan<HostFoldType>& ffa_plan) const {
+        const auto n_levels = ffa_plan.get_n_levels();
+        const auto n_params = ffa_plan.get_n_params();
+        const auto total_params_flat_count =
+            ffa_plan.get_total_params_flat_count();
         const auto buffer_size  = ffa_plan.get_buffer_size();
-        const bool is_freq_only = ffa_plan.get_n_params() == 1;
+        const auto coord_size   = ffa_plan.get_coord_size();
+        const bool is_freq_only = n_params == 1;
+
         error_check::check_greater_equal(
-            fold_internal_d.size(), buffer_size,
+            m_fold_internal_d.size(), buffer_size,
             "FFAWorkspaceCUDA: fold_internal buffer too small");
+        error_check::check_greater_equal(
+            m_params_d.size(), total_params_flat_count,
+            "FFAWorkspaceCUDA: params buffer too small");
+        error_check::check_greater_equal(
+            m_param_counts_d.size(), n_levels * n_params,
+            "FFAWorkspaceCUDA: param counts buffer too small");
+        error_check::check_greater_equal(
+            m_params_flat_offsets_d.size(), n_levels,
+            "FFAWorkspaceCUDA: params flat offsets buffer too small");
+        error_check::check_greater_equal(
+            m_ncoords_offsets_d.size(), n_levels + 1,
+            "FFAWorkspaceCUDA: ncoords offsets buffer too small");
         if (is_freq_only) {
-            error_check::check_greater_equal(coords_freq_d.idx.size(),
-                                             ffa_plan.get_coord_size(),
+            error_check::check_greater_equal(m_coords_freq_d.idx.size(),
+                                             coord_size,
                                              "FFAWorkspaceCUDA: coordinates "
                                              "not allocated for enough levels");
         } else {
-            error_check::check_greater_equal(coords_d.i_tail.size(),
-                                             ffa_plan.get_coord_size(),
+            error_check::check_greater_equal(m_coords_d.i_tail.size(),
+                                             coord_size,
                                              "FFAWorkspaceCUDA: coordinates "
                                              "not allocated for enough levels");
         }
     }
 
-    // void update_coords_freq_from_host(SizeType n_coords, cudaStream_t stream)
-    // {
-    //     coords_freq_d.copy_from_host(coords_freq, n_coords, stream);
-    // }
+    void resolve_coordinates_freq(const plans::FFAPlan<HostFoldType>& ffa_plan,
+                                  cudaStream_t stream) {
+        const auto n_levels            = ffa_plan.get_n_levels();
+        const auto ncoords_total       = ffa_plan.get_coord_size();
+        const auto tseg_brute          = ffa_plan.get_config().get_tseg_brute();
+        const auto nbins               = ffa_plan.get_config().get_nbins();
+        const auto params_flat         = ffa_plan.get_params_flat();
+        const auto param_counts        = ffa_plan.get_param_counts_flat();
+        const auto params_flat_offsets = ffa_plan.get_params_flat_offsets();
+        const auto ncoords_offsets     = ffa_plan.get_ncoords_offsets();
 
-    // void update_coords_from_host(SizeType n_coords, cudaStream_t stream) {
-    //     coords_d.copy_from_host(coords, n_coords, stream);
-    // }
+        // Copy resolve ingredients to device
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(thrust::raw_pointer_cast(m_params_d.data()),
+                            params_flat.data(),
+                            params_flat.size() * sizeof(double),
+                            cudaMemcpyHostToDevice, stream),
+            "cudaMemcpyAsync params failed");
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(thrust::raw_pointer_cast(m_param_counts_d.data()),
+                            param_counts.data(),
+                            param_counts.size() * sizeof(uint32_t),
+                            cudaMemcpyHostToDevice, stream),
+            "cudaMemcpyAsync param counts failed");
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(
+                thrust::raw_pointer_cast(m_params_flat_offsets_d.data()),
+                params_flat_offsets.data(),
+                params_flat_offsets.size() * sizeof(uint32_t),
+                cudaMemcpyHostToDevice, stream),
+            "cudaMemcpyAsync params flat offsets failed");
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(
+                thrust::raw_pointer_cast(m_ncoords_offsets_d.data()),
+                ncoords_offsets.data(),
+                ncoords_offsets.size() * sizeof(uint32_t),
+                cudaMemcpyHostToDevice, stream),
+            "cudaMemcpyAsync ncoords offsets failed");
+
+        auto coord_ptrs = m_coords_freq_d.get_raw_ptrs();
+        core::ffa_taylor_resolve_freq_batch_cuda(
+            cuda_utils::as_span(m_params_d),
+            cuda_utils::as_span(m_param_counts_d),
+            cuda_utils::as_span(m_params_flat_offsets_d),
+            cuda_utils::as_span(m_ncoords_offsets_d), coord_ptrs, n_levels,
+            ncoords_total, tseg_brute, nbins, stream);
+    }
+
+    void resolve_coordinates(const plans::FFAPlan<HostFoldType>& ffa_plan,
+                             cudaStream_t stream) {
+        const auto n_levels            = ffa_plan.get_n_levels();
+        const auto n_params            = ffa_plan.get_n_params();
+        const auto ncoords_total       = ffa_plan.get_coord_size();
+        const auto tseg_brute          = ffa_plan.get_config().get_tseg_brute();
+        const auto nbins               = ffa_plan.get_config().get_nbins();
+        const auto params_flat         = ffa_plan.get_params_flat();
+        const auto param_counts        = ffa_plan.get_param_counts_flat();
+        const auto params_flat_offsets = ffa_plan.get_params_flat_offsets();
+        const auto ncoords_offsets     = ffa_plan.get_ncoords_offsets();
+
+        // Copy resolve ingredients to device
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(thrust::raw_pointer_cast(m_params_d.data()),
+                            params_flat.data(),
+                            params_flat.size() * sizeof(double),
+                            cudaMemcpyHostToDevice, stream),
+            "cudaMemcpyAsync params failed");
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(thrust::raw_pointer_cast(m_param_counts_d.data()),
+                            param_counts.data(),
+                            param_counts.size() * sizeof(uint32_t),
+                            cudaMemcpyHostToDevice, stream),
+            "cudaMemcpyAsync param counts failed");
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(
+                thrust::raw_pointer_cast(m_params_flat_offsets_d.data()),
+                params_flat_offsets.data(),
+                params_flat_offsets.size() * sizeof(uint32_t),
+                cudaMemcpyHostToDevice, stream),
+            "cudaMemcpyAsync params flat offsets failed");
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(
+                thrust::raw_pointer_cast(m_ncoords_offsets_d.data()),
+                ncoords_offsets.data(),
+                ncoords_offsets.size() * sizeof(uint32_t),
+                cudaMemcpyHostToDevice, stream),
+            "cudaMemcpyAsync ncoords offsets failed");
+
+        auto coord_ptrs = m_coords_d.get_raw_ptrs();
+        // Tail coordinates
+        core::ffa_taylor_resolve_poly_batch_cuda(
+            cuda_utils::as_span(m_params_d),
+            cuda_utils::as_span(m_param_counts_d),
+            cuda_utils::as_span(m_params_flat_offsets_d),
+            cuda_utils::as_span(m_ncoords_offsets_d), coord_ptrs, n_levels,
+            ncoords_total, 0, tseg_brute, nbins, n_params, stream);
+
+        // Head coordinates
+        core::ffa_taylor_resolve_poly_batch_cuda(
+            cuda_utils::as_span(m_params_d),
+            cuda_utils::as_span(m_param_counts_d),
+            cuda_utils::as_span(m_params_flat_offsets_d),
+            cuda_utils::as_span(m_ncoords_offsets_d), coord_ptrs, n_levels,
+            ncoords_total, 1, tseg_brute, nbins, n_params, stream);
+    }
 };
 
 // FFACUDA::Impl implementation
@@ -103,7 +240,6 @@ public:
     explicit Impl(search::PulsarSearchConfig cfg, int device_id)
         : m_cfg(std::move(cfg)),
           m_ffa_plan(m_cfg),
-          m_ffa_plan_cuda(m_ffa_plan),
           m_device_id(device_id),
           m_is_freq_only(m_cfg.get_nparams() == 1),
           m_owns_workspace(true),
@@ -122,7 +258,6 @@ public:
                   int device_id)
         : m_cfg(std::move(cfg)),
           m_ffa_plan(m_cfg),
-          m_ffa_plan_cuda(m_ffa_plan),
           m_device_id(device_id),
           m_is_freq_only(m_cfg.get_nparams() == 1),
           m_owns_workspace(false),
@@ -142,6 +277,9 @@ public:
     Impl& operator=(Impl&&)      = delete;
 
     const plans::FFAPlan<HostFoldType>& get_plan() const { return m_ffa_plan; }
+    [[nodiscard]] plans::FFAPlan<HostFoldType> extract_plan() && noexcept {
+        return std::move(m_ffa_plan);
+    }
 
     float get_brute_fold_timing() const noexcept { return m_brutefold_time; }
 
@@ -253,14 +391,9 @@ public:
         auto* ws = get_workspace_data();
         // Resolve the coordinates into the workspace for the FFA plan
         if (m_is_freq_only) {
-            // m_ffa_plan.resolve_coordinates_freq(ws->coords_freq);
-            // ws->update_coords_freq_from_host(m_ffa_plan.get_coord_size(),
-            //                                  stream);
-            m_ffa_plan_cuda.resolve_coordinates_freq(ws->coords_freq_d, stream);
+            ws->resolve_coordinates_freq(m_ffa_plan, stream);
         } else {
-            // m_ffa_plan.resolve_coordinates(ws->coords);
-            // ws->update_coords_from_host(m_ffa_plan.get_coord_size(), stream);
-            m_ffa_plan_cuda.resolve_coordinates(ws->coords_d, stream);
+            ws->resolve_coordinates(m_ffa_plan, stream);
         }
 
         // Execute the FFA plan
@@ -342,14 +475,9 @@ public:
         auto* ws = get_workspace_data();
         // Resolve the coordinates for the FFA plan
         if (m_is_freq_only) {
-            // m_ffa_plan.resolve_coordinates_freq(ws->coords_freq);
-            // ws->update_coords_freq_from_host(m_ffa_plan.get_coord_size(),
-            //                                  stream);
-            m_ffa_plan_cuda.resolve_coordinates_freq(ws->coords_freq_d, stream);
+            ws->resolve_coordinates_freq(m_ffa_plan, stream);
         } else {
-            // m_ffa_plan.resolve_coordinates(ws->coords);
-            // ws->update_coords_from_host(m_ffa_plan.get_coord_size(), stream);
-            m_ffa_plan_cuda.resolve_coordinates(ws->coords_d, stream);
+            ws->resolve_coordinates(m_ffa_plan, stream);
         }
 
         auto fold_complex = cuda::std::span<ComplexTypeCUDA>(
@@ -361,7 +489,7 @@ public:
         // IRFFT
         const auto nfft = fold_size_time / m_cfg.get_nbins();
         utils::irfft_batch_cuda(
-            cuda_utils::as_span(ws->fold_internal_d, fold_size_fourier),
+            cuda_utils::as_span(ws->m_fold_internal_d, fold_size_fourier),
             fold_d.first(fold_size_time), static_cast<int>(nfft),
             static_cast<int>(m_cfg.get_nbins()), stream);
     }
@@ -369,7 +497,6 @@ public:
 private:
     search::PulsarSearchConfig m_cfg;
     plans::FFAPlan<HostFoldType> m_ffa_plan;
-    plans::FFAPlanCUDA<FoldTypeCUDA> m_ffa_plan_cuda;
     int m_device_id;
     bool m_is_freq_only;
     bool m_owns_workspace;
@@ -494,7 +621,7 @@ private:
         auto* ws = get_workspace_data();
         // Use fold_internal from workspace and output fold for ping-pong
         DeviceFoldType* fold_internal_ptr =
-            thrust::raw_pointer_cast(ws->fold_internal_d.data());
+            thrust::raw_pointer_cast(ws->m_fold_internal_d.data());
         DeviceFoldType* fold_result_ptr =
             thrust::raw_pointer_cast(fold_d.data());
 
@@ -525,7 +652,7 @@ private:
 
         // FFA iterations
         if (m_is_freq_only) {
-            auto coords_base = ws->coords_freq_d.get_raw_ptrs();
+            auto coords_base = ws->m_coords_freq_d.get_raw_ptrs();
             for (SizeType i_level = 1; i_level < levels; ++i_level) {
                 execute_iter_freq(current_in_ptr, current_out_ptr, coords_base,
                                   i_level, stream);
@@ -534,7 +661,7 @@ private:
                 }
             }
         } else {
-            auto coords_base = ws->coords_d.get_raw_ptrs();
+            auto coords_base = ws->m_coords_d.get_raw_ptrs();
             for (SizeType i_level = 1; i_level < levels; ++i_level) {
                 execute_iter(current_in_ptr, current_out_ptr, coords_base,
                              i_level, stream);
@@ -609,10 +736,17 @@ FFAWorkspaceCUDA<FoldTypeCUDA>::FFAWorkspaceCUDA(
     : m_data(std::make_unique<Data>(ffa_plan)) {}
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
-FFAWorkspaceCUDA<FoldTypeCUDA>::FFAWorkspaceCUDA(SizeType buffer_size,
-                                                 SizeType coord_size,
-                                                 SizeType n_params)
-    : m_data(std::make_unique<Data>(buffer_size, coord_size, n_params)) {}
+FFAWorkspaceCUDA<FoldTypeCUDA>::FFAWorkspaceCUDA(
+    SizeType buffer_size,
+    SizeType coord_size,
+    SizeType total_params_flat_count,
+    SizeType n_levels,
+    SizeType n_params)
+    : m_data(std::make_unique<Data>(buffer_size,
+                                    coord_size,
+                                    total_params_flat_count,
+                                    n_levels,
+                                    n_params)) {}
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 FFAWorkspaceCUDA<FoldTypeCUDA>::~FFAWorkspaceCUDA() = default;
@@ -659,7 +793,11 @@ const plans::FFAPlan<typename FoldTypeTraits<FoldTypeCUDA>::HostType>&
 FFACUDA<FoldTypeCUDA>::get_plan() const noexcept {
     return m_impl->get_plan();
 }
-
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+plans::FFAPlan<typename FoldTypeTraits<FoldTypeCUDA>::HostType>
+FFACUDA<FoldTypeCUDA>::extract_plan() && noexcept {
+    return std::move(*m_impl).extract_plan();
+}
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 float FFACUDA<FoldTypeCUDA>::get_brute_fold_timing() const noexcept {
     return m_impl->get_brute_fold_timing();
@@ -724,7 +862,7 @@ compute_ffa_cuda(std::span<const float> ts_e,
     // RESIZE to actual result size
     const auto fold_size = ffa_plan.get_fold_size();
     fold.resize(fold_size);
-    return {std::move(fold), ffa_plan};
+    return {std::move(fold), std::move(ffa).extract_plan()};
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
@@ -744,7 +882,7 @@ compute_ffa_cuda_device(std::span<const float> ts_e,
     // RESIZE to actual result size
     const auto fold_size = ffa_plan.get_fold_size();
     fold.resize(fold_size);
-    return {std::move(fold), ffa_plan};
+    return {std::move(fold), std::move(ffa).extract_plan()};
 }
 
 std::tuple<std::vector<float>, plans::FFAPlan<float>>
@@ -764,7 +902,7 @@ compute_ffa_fourier_return_to_time_cuda(std::span<const float> ts_e,
     fold.resize(fold_size_time);
     // Get the plan for the time domain
     plans::FFAPlan<float> ffa_plan_time(cfg);
-    return {std::move(fold), ffa_plan_time};
+    return {std::move(fold), std::move(ffa_plan_time)};
 }
 
 std::tuple<std::vector<float>, plans::FFAPlan<float>>
@@ -774,7 +912,7 @@ compute_ffa_scores_cuda(std::span<const float> ts_e,
                         int device_id,
                         bool quiet) {
     timing::ScopedLogLevel scoped_log_level(quiet);
-    const auto [fold, ffa_plan] =
+    auto [fold, ffa_plan] =
         cfg.get_use_fourier()
             ? compute_ffa_fourier_return_to_time_cuda(ts_e, ts_v, cfg,
                                                       device_id, quiet)
@@ -788,7 +926,7 @@ compute_ffa_scores_cuda(std::span<const float> ts_e,
     std::vector<float> scores(nscores);
     detection::snr_boxcar_3d_cuda(fold, score_widths, scores, ncoords,
                                   cfg.get_nbins(), device_id);
-    return {std::move(scores), ffa_plan};
+    return {std::move(scores), std::move(ffa_plan)};
 }
 
 // Explicit instantiation

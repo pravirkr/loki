@@ -21,8 +21,8 @@ namespace loki::algorithms {
 
 class PruningManager {
 public:
-    PruningManager(const search::PulsarSearchConfig& cfg,
-                   const std::vector<float>& threshold_scheme,
+    PruningManager(search::PulsarSearchConfig cfg,
+                   std::span<const float> threshold_scheme,
                    std::optional<SizeType> n_runs                = std::nullopt,
                    std::optional<std::vector<SizeType>> ref_segs = std::nullopt,
                    SizeType max_sugg                             = 1U << 18U,
@@ -49,8 +49,8 @@ private:
 
 template <SupportedFoldType FoldType> class Prune {
 public:
-    Prune(const plans::FFAPlan<FoldType>& ffa_plan,
-          const search::PulsarSearchConfig& cfg,
+    Prune(plans::FFAPlan<FoldType> ffa_plan,
+          search::PulsarSearchConfig cfg,
           std::span<const float> threshold_scheme,
           SizeType max_sugg           = 1U << 18U,
           SizeType batch_size         = 1024U,
@@ -87,8 +87,8 @@ using PruneFourier = Prune<ComplexType>;
 class PruningManagerCUDA {
 public:
     PruningManagerCUDA(
-        const search::PulsarSearchConfig& cfg,
-        const std::vector<float>& threshold_scheme,
+        search::PulsarSearchConfig cfg,
+        std::span<const float> threshold_scheme,
         std::optional<SizeType> n_runs                = std::nullopt,
         std::optional<std::vector<SizeType>> ref_segs = std::nullopt,
         SizeType max_sugg                             = 1U << 18U,
@@ -118,11 +118,11 @@ public:
     using HostFoldType   = typename FoldTypeTraits<FoldTypeCUDA>::HostType;
     using DeviceFoldType = typename FoldTypeTraits<FoldTypeCUDA>::DeviceType;
 
-    PruneCUDA(const plans::FFAPlan<HostFoldType>& ffa_plan,
-              const search::PulsarSearchConfig& cfg,
+    PruneCUDA(plans::FFAPlan<HostFoldType> ffa_plan,
+              search::PulsarSearchConfig cfg,
               std::span<const float> threshold_scheme,
-              SizeType max_sugg     = 1U << 18U,
-              SizeType batch_size   = 1024U,
+              SizeType max_sugg           = 1U << 18U,
+              SizeType batch_size         = 1024U,
               std::string_view poly_basis = "taylor");
 
     ~PruneCUDA();

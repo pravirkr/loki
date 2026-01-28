@@ -154,7 +154,7 @@ PYBIND11_MODULE(libculoki, m) { // NOLINT
             auto [fold, ffa_plan] = algorithms::compute_ffa_cuda<float>(
                 to_span<const float>(ts_e), to_span<const float>(ts_v), cfg,
                 device_id, quiet);
-            return std::make_tuple(as_pyarray(std::move(fold)), ffa_plan);
+            return std::make_tuple(as_pyarray(std::move(fold)), std::move(ffa_plan));
         },
         py::arg("ts_e"), py::arg("ts_v"), py::arg("cfg"),
         py::arg("device_id") = 0, py::arg("quiet") = false);
@@ -167,7 +167,7 @@ PYBIND11_MODULE(libculoki, m) { // NOLINT
                 algorithms::compute_ffa_cuda<ComplexTypeCUDA>(
                     to_span<const float>(ts_e), to_span<const float>(ts_v), cfg,
                     device_id, quiet);
-            return std::make_tuple(as_pyarray(std::move(fold)), ffa_plan);
+            return std::make_tuple(as_pyarray(std::move(fold)), std::move(ffa_plan));
         },
         py::arg("ts_e"), py::arg("ts_v"), py::arg("cfg"),
         py::arg("device_id") = 0, py::arg("quiet") = false);
@@ -179,7 +179,7 @@ PYBIND11_MODULE(libculoki, m) { // NOLINT
                 algorithms::compute_ffa_fourier_return_to_time_cuda(
                     to_span<const float>(ts_e), to_span<const float>(ts_v), cfg,
                     device_id, quiet);
-            return std::make_tuple(as_pyarray(std::move(fold)), ffa_plan);
+            return std::make_tuple(as_pyarray(std::move(fold)), std::move(ffa_plan));
         },
         py::arg("ts_e"), py::arg("ts_v"), py::arg("cfg"),
         py::arg("device_id") = 0, py::arg("quiet") = false);
@@ -191,7 +191,7 @@ PYBIND11_MODULE(libculoki, m) { // NOLINT
             auto [scores, ffa_plan] = algorithms::compute_ffa_scores_cuda(
                 to_span<const float>(ts_e), to_span<const float>(ts_v), cfg,
                 device_id, quiet);
-            return std::make_tuple(as_pyarray(std::move(scores)), ffa_plan);
+            return std::make_tuple(as_pyarray(std::move(scores)), std::move(ffa_plan));
         },
         py::arg("ts_e"), py::arg("ts_v"), py::arg("cfg"),
         py::arg("device_id") = 0, py::arg("quiet") = false);

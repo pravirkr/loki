@@ -5,6 +5,7 @@
 
 #include "loki/algorithms/ffa.hpp"
 #include "loki/algorithms/plans.hpp"
+#include "loki/algorithms/regions.hpp"
 #include "loki/cands.hpp"
 #include "loki/common/types.hpp"
 #include "loki/cuda_utils.cuh"
@@ -44,7 +45,9 @@ public:
         // Allocate buffers once, sized for the largest chunk
         m_ffa_workspace = FFAWorkspaceCUDA<FoldTypeCUDA>(
             planner_stats.get_max_buffer_size(),
-            planner_stats.get_max_coord_size(), m_base_cfg.get_nparams());
+            planner_stats.get_max_coord_size(),
+            planner_stats.get_max_total_params_flat_count(),
+            planner_stats.get_max_ffa_levels(), m_base_cfg.get_nparams());
         m_scores.resize(planner_stats.get_max_scores_size());
         m_passing_indices.resize(planner_stats.get_max_scores_size());
         m_write_param_sets_batch.resize(
@@ -160,7 +163,7 @@ public:
 private:
     search::PulsarSearchConfig m_base_cfg;
     int m_device_id;
-    plans::FFARegionPlanner<HostFoldType> m_region_planner;
+    regions::FFARegionPlanner<HostFoldType> m_region_planner;
 
     algorithms::FFAWorkspaceCUDA<FoldTypeCUDA> m_ffa_workspace;
     SizeType m_total_passing_scores{};
@@ -181,7 +184,7 @@ private:
     cuda_utils::DeviceCounter m_passing_counter;
 
     // Helper function to create region planner with GPU memory considerations
-    static plans::FFARegionPlanner<HostFoldType>
+    static regions::FFARegionPlanner<HostFoldType>
     create_region_planner(const search::PulsarSearchConfig& base_cfg,
                           int device_id) {
         cuda_utils::CudaSetDeviceGuard device_guard(device_id);
@@ -209,8 +212,8 @@ private:
         // cfg_with_gpu_mem.set_max_process_memory_gb(usable_gpu_gb);
 
         // Create region planner with GPU memory limit
-        return plans::FFARegionPlanner<HostFoldType>(cfg_with_gpu_mem,
-                                                     /*use_gpu=*/true);
+        return regions::FFARegionPlanner<HostFoldType>(cfg_with_gpu_mem,
+                                                       /*use_gpu=*/true);
     }
 
     SizeType execute_ffa_region(const search::PulsarSearchConfig& cfg,
@@ -292,8 +295,9 @@ private:
             // Process in batches and write incrementally
             SizeType batch_start = 0;
             while (batch_start < n_passing) {
-                const SizeType batch_end = std::min(
-                    batch_start + plans::kFFAManagerWriteBatchSize, n_passing);
+                const SizeType batch_end =
+                    std::min(batch_start + regions::kFFAManagerWriteBatchSize,
+                             n_passing);
                 const SizeType batch_count = batch_end - batch_start;
 
                 // Fill batch buffer

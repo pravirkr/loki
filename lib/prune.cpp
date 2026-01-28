@@ -46,13 +46,13 @@ template <SupportedFoldType FoldType>
 class PruningManagerTypedImpl final : public PruningManager::BaseImpl {
 public:
     PruningManagerTypedImpl(search::PulsarSearchConfig cfg,
-                            const std::vector<float>& threshold_scheme,
+                            std::span<const float> threshold_scheme,
                             std::optional<SizeType> n_runs,
                             std::optional<std::vector<SizeType>> ref_segs,
                             SizeType max_sugg,
                             SizeType batch_size)
         : m_cfg(std::move(cfg)),
-          m_threshold_scheme(threshold_scheme),
+          m_threshold_scheme(threshold_scheme.begin(), threshold_scheme.end()),
           m_n_runs(n_runs),
           m_ref_segs(std::move(ref_segs)),
           m_max_sugg(max_sugg),
@@ -76,8 +76,8 @@ public:
         std::tuple<std::vector<FoldType>, plans::FFAPlan<FoldType>> result =
             compute_ffa<FoldType>(ts_e, ts_v, m_cfg, /*quiet=*/false,
                                   show_progress);
-        const std::vector<FoldType> ffa_fold    = std::get<0>(result);
-        const plans::FFAPlan<FoldType> ffa_plan = std::get<1>(result);
+        const std::vector<FoldType> ffa_fold = std::get<0>(result);
+        plans::FFAPlan<FoldType> ffa_plan    = std::move(std::get<1>(result));
         // Setup output files and directory
         const auto nsegments = ffa_plan.get_nsegments().back();
         const std::string filebase =
@@ -114,11 +114,11 @@ public:
                               m_threshold_scheme);
         // Execute based on thread count
         if (m_nthreads == 1) {
-            execute_single_threaded(ffa_fold, ffa_plan, ref_segs_to_process,
+            execute_single_threaded(ffa_fold, std::move(ffa_plan), ref_segs_to_process,
                                     outdir, log_file, result_file, poly_basis,
                                     show_progress);
         } else {
-            execute_multi_threaded(ffa_fold, ffa_plan, ref_segs_to_process,
+            execute_multi_threaded(ffa_fold, std::move(ffa_plan), ref_segs_to_process,
                                    outdir, log_file, poly_basis, show_progress);
             cands::merge_prune_result_files(outdir, log_file, result_file);
         }
@@ -142,15 +142,16 @@ private:
     // std::vector<FoldType> m_ffa_fold;
 
     void execute_single_threaded(std::span<const FoldType> ffa_fold,
-                                 const plans::FFAPlan<FoldType>& ffa_plan,
+                                 plans::FFAPlan<FoldType> ffa_plan,
                                  const std::vector<SizeType>& ref_segs,
                                  const std::filesystem::path& outdir,
                                  const std::filesystem::path& log_file,
                                  const std::filesystem::path& result_file,
                                  std::string_view kind,
                                  bool show_progress) {
-        auto prune = Prune<FoldType>(ffa_plan, m_cfg, m_threshold_scheme,
-                                     m_max_sugg, m_batch_size, kind);
+        auto prune =
+            Prune<FoldType>(std::move(ffa_plan), m_cfg, m_threshold_scheme,
+                            m_max_sugg, m_batch_size, kind);
         for (const auto ref_seg : ref_segs) {
             prune.execute(ffa_fold, ref_seg, outdir, log_file, result_file,
                           /*tracker=*/nullptr, /*task_id=*/0, show_progress);
@@ -158,7 +159,7 @@ private:
     }
 
     void execute_multi_threaded(std::span<const FoldType> ffa_fold,
-                                const plans::FFAPlan<FoldType>& ffa_plan,
+                                plans::FFAPlan<FoldType> ffa_plan,
                                 const std::vector<SizeType>& ref_segs,
                                 const std::filesystem::path& outdir,
                                 const std::filesystem::path& log_file,
@@ -197,9 +198,9 @@ private:
                 [this, ref_seg, outdir, kind, tracker_ptr = tracker.get(), id,
                  show_progress, &ffa_plan, &ffa_fold]() mutable {
                     // Create a Prune instance for each thread
-                    auto prune =
-                        Prune<FoldType>(ffa_plan, m_cfg, m_threshold_scheme,
-                                        m_max_sugg, m_batch_size, kind);
+                    auto prune = Prune<FoldType>(std::move(ffa_plan), m_cfg,
+                                                 m_threshold_scheme, m_max_sugg,
+                                                 m_batch_size, kind);
 
                     prune.execute(
                         ffa_fold, ref_seg, outdir, /*log_file=*/std::nullopt,
@@ -764,20 +765,20 @@ private:
     }
 }; // End Prune::Impl definition
 
-PruningManager::PruningManager(const search::PulsarSearchConfig& cfg,
-                               const std::vector<float>& threshold_scheme,
+PruningManager::PruningManager(search::PulsarSearchConfig cfg,
+                               std::span<const float> threshold_scheme,
                                std::optional<SizeType> n_runs,
                                std::optional<std::vector<SizeType>> ref_segs,
                                SizeType max_sugg,
                                SizeType batch_size) {
     if (cfg.get_use_fourier()) {
         m_impl = std::make_unique<PruningManagerTypedImpl<ComplexType>>(
-            cfg, threshold_scheme, n_runs, std::move(ref_segs), max_sugg,
-            batch_size);
+            std::move(cfg), threshold_scheme, n_runs, std::move(ref_segs),
+            max_sugg, batch_size);
     } else {
         m_impl = std::make_unique<PruningManagerTypedImpl<float>>(
-            cfg, threshold_scheme, n_runs, std::move(ref_segs), max_sugg,
-            batch_size);
+            std::move(cfg), threshold_scheme, n_runs, std::move(ref_segs),
+            max_sugg, batch_size);
     }
 }
 PruningManager::~PruningManager()                               = default;
@@ -794,14 +795,18 @@ void PruningManager::execute(std::span<const float> ts_e,
 }
 
 template <SupportedFoldType FoldType>
-Prune<FoldType>::Prune(const plans::FFAPlan<FoldType>& ffa_plan,
-                       const search::PulsarSearchConfig& cfg,
+Prune<FoldType>::Prune(plans::FFAPlan<FoldType> ffa_plan,
+                       search::PulsarSearchConfig cfg,
                        std::span<const float> threshold_scheme,
                        SizeType max_sugg,
                        SizeType batch_size,
                        std::string_view poly_basis)
-    : m_impl(std::make_unique<Impl>(
-          ffa_plan, cfg, threshold_scheme, max_sugg, batch_size, poly_basis)) {}
+    : m_impl(std::make_unique<Impl>(std::move(ffa_plan),
+                                    std::move(cfg),
+                                    threshold_scheme,
+                                    max_sugg,
+                                    batch_size,
+                                    poly_basis)) {}
 template <SupportedFoldType FoldType> Prune<FoldType>::~Prune() = default;
 template <SupportedFoldType FoldType>
 Prune<FoldType>::Prune(Prune&& other) noexcept = default;

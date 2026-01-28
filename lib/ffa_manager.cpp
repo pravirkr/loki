@@ -9,6 +9,7 @@
 
 #include "loki/algorithms/ffa.hpp"
 #include "loki/algorithms/plans.hpp"
+#include "loki/algorithms/regions.hpp"
 #include "loki/cands.hpp"
 #include "loki/common/types.hpp"
 #include "loki/detection/score.hpp"
@@ -118,7 +119,7 @@ public:
 
 private:
     search::PulsarSearchConfig m_base_cfg;
-    plans::FFARegionPlanner<FoldType> m_region_planner;
+    regions::FFARegionPlanner<FoldType> m_region_planner;
     bool m_show_progress;
 
     algorithms::FFAWorkspace<FoldType> m_ffa_workspace;
@@ -223,8 +224,9 @@ private:
             // Process in batches and write incrementally
             SizeType batch_start = 0;
             while (batch_start < n_passing) {
-                const SizeType batch_end = std::min(
-                    batch_start + plans::kFFAManagerWriteBatchSize, n_passing);
+                const SizeType batch_end =
+                    std::min(batch_start + regions::kFFAManagerWriteBatchSize,
+                             n_passing);
                 const SizeType batch_count = batch_end - batch_start;
 
                 // Fill batch buffer
