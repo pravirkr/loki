@@ -564,7 +564,7 @@ private:
         m_branch_max =
             std::max(static_cast<SizeType>(std::ceil(branch_max * 2)), 32UL);
         m_prune_funcs = core::create_prune_dp_functs_cuda<FoldTypeCUDA>(
-            m_poly_basis, m_ffa_plan.get_params().back(),
+            m_poly_basis, m_ffa_plan.get_param_counts().back(),
             m_ffa_plan.get_dparams_lim().back(),
             m_ffa_plan.get_nsegments().back(),
             m_ffa_plan.get_tsegments().back(), m_cfg, m_batch_size,

@@ -10,8 +10,8 @@ namespace loki::utils {
 
 inline constexpr double kCval    = 299792458.0;            // m/s
 inline constexpr double kInvCval = 3.3356409519815204e-09; // s/m
-inline constexpr double kEps     = 1e-12;
-
+// To match the Python output for bitwise consistency
+inline constexpr double kEps = 1e-6; // half-up rounding
 /**
  * @brief Computes max_i(x[i] - y[i]) for two non-overlapping float arrays.
  *

@@ -30,10 +30,10 @@ struct ComputePhase {
         const uint32_t ifreq     = idx / segment_len;
         const uint32_t isamp     = idx - (ifreq * segment_len);
         const double proper_time = (static_cast<double>(isamp) * tsamp) - t_ref;
-        float phase = utils::get_phase_idx_device(proper_time, freq_arr[ifreq],
-                                                  nbins, 0.0);
-        uint32_t shift = __float2uint_rn(phase);
-        return (shift >= nbins) ? 0 : shift;
+        const float phase        = utils::get_phase_idx_device(
+            proper_time, freq_arr[ifreq], nbins, 0.0);
+        const uint32_t shift = __float2uint_rz(phase + 0.5F);
+        return (shift == nbins) ? 0 : shift;
     }
 };
 

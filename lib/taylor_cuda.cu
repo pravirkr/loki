@@ -18,41 +18,51 @@ namespace loki::core {
 
 namespace {
 
-__global__ void kernel_poly_taylor_seed(const double* __restrict__ accel_grid,
-                                        uint32_t n_accel,
-                                        const double* __restrict__ freq_grid,
-                                        uint32_t n_freq,
-                                        const double* __restrict__ dparams,
-                                        uint32_t n_params,
-                                        double* __restrict__ seed_leaves) {
+__global__ void
+kernel_poly_taylor_seed(const SizeType* __restrict__ param_grid_count_init,
+                        const double* __restrict__ dparams_init,
+                        const ParamLimit* __restrict__ param_limits,
+                        double* __restrict__ seed_leaves,
+                        uint32_t n_leaves,
+                        uint32_t n_params) {
     constexpr uint32_t kParamStride = 2;
 
-    const uint32_t ileaf    = (blockIdx.x * blockDim.x) + threadIdx.x;
-    const uint32_t n_leaves = n_accel * n_freq;
+    const uint32_t ileaf = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (ileaf >= n_leaves) {
         return;
     }
 
-    const uint32_t accel_idx = ileaf / n_freq;
-    const uint32_t freq_idx  = ileaf % n_freq;
+    const auto n_accel_init  = param_grid_count_init[n_params - 2];
+    const auto n_freq_init   = param_grid_count_init[n_params - 1];
+    const auto d_freq_cur    = dparams_init[n_params - 1];
+    const uint32_t accel_idx = ileaf / n_freq_init;
+    const uint32_t freq_idx  = ileaf % n_freq_init;
 
-    const double accel   = accel_grid[accel_idx];
-    const double f0      = freq_grid[freq_idx];
-    const double d_accel = dparams[n_params - 2];
-    const double df      = dparams[n_params - 1];
+    const double a_cur = utils::get_param_val_at_idx_device(
+        param_limits[n_params - 2].min, param_limits[n_params - 2].max,
+        n_accel_init, accel_idx);
+    const double f_cur = utils::get_param_val_at_idx_device(
+        param_limits[n_params - 1].min, param_limits[n_params - 1].max,
+        n_freq_init, freq_idx);
 
-    const uint32_t leaves_stride = (n_params + 2) * kParamStride;
-    const uint32_t base =
-        ((n_params - 2) * kParamStride) + (ileaf * leaves_stride);
-
-    seed_leaves[base + 0] = accel;
-    seed_leaves[base + 1] = d_accel;
-    seed_leaves[base + 2] = 0.0;
-    seed_leaves[base + 3] = df * (utils::kCval / f0);
-    seed_leaves[base + 4] = 0.0;
-    seed_leaves[base + 5] = 0.0;
-    seed_leaves[base + 6] = f0;
-    seed_leaves[base + 7] = 0.0;
+    const uint32_t lo = (n_params + 2) * kParamStride * ileaf;
+    // Copy till d2 (acceleration)
+    for (uint32_t j = 0; j < n_params - 1; ++j) {
+        seed_leaves[lo + (j * kParamStride) + 0] = 0.0;
+        seed_leaves[lo + (j * kParamStride) + 1] = dparams_init[j];
+    }
+    seed_leaves[lo + ((n_params - 2) * kParamStride) + 0] = a_cur;
+    // Update frequency to velocity
+    // f = f0(1 - v / C) => dv = -(C/f0) * df
+    seed_leaves[lo + ((n_params - 1) * kParamStride) + 0] = 0;
+    seed_leaves[lo + ((n_params - 1) * kParamStride) + 1] =
+        d_freq_cur * (utils::kCval / f_cur);
+    // intialize d0 (measure from t=t_init) and store f0
+    seed_leaves[lo + ((n_params + 0) * kParamStride) + 0] = 0;
+    seed_leaves[lo + ((n_params + 0) * kParamStride) + 1] = 0;
+    seed_leaves[lo + ((n_params + 1) * kParamStride) + 0] = f_cur;
+    // Store basis flag (0: Polynomial, 1: Physical)
+    seed_leaves[lo + ((n_params + 1) * kParamStride) + 1] = 0;
 }
 
 __global__ void kernel_analyze_and_branch_accel(
@@ -61,7 +71,7 @@ __global__ void kernel_analyze_and_branch_accel(
     cuda::std::pair<double, double> coord_cur,
     uint32_t nbins,
     double eta,
-    const ParamLimitTypeCUDA* __restrict__ param_limits,
+    const ParamLimit* __restrict__ param_limits,
     uint32_t branch_max,
     utils::BranchingWorkspaceCUDAView ws,
     int* __restrict__ global_branch_flag) {
@@ -131,7 +141,7 @@ __global__ void kernel_analyze_and_branch_jerk(
     cuda::std::pair<double, double> coord_cur,
     uint32_t nbins,
     double eta,
-    const ParamLimitTypeCUDA* __restrict__ param_limits,
+    const ParamLimit* __restrict__ param_limits,
     uint32_t branch_max,
     utils::BranchingWorkspaceCUDAView ws,
     int* __restrict__ global_branch_flag) {
@@ -213,7 +223,7 @@ __global__ void kernel_analyze_and_branch_snap(
     cuda::std::pair<double, double> coord_cur,
     uint32_t nbins,
     double eta,
-    const ParamLimitTypeCUDA* __restrict__ param_limits,
+    const ParamLimit* __restrict__ param_limits,
     uint32_t branch_max,
     utils::BranchingWorkspaceCUDAView ws,
     int* __restrict__ global_branch_flag) {
@@ -895,7 +905,7 @@ SizeType poly_taylor_branch_accel_cuda(
     std::pair<double, double> coord_cur,
     SizeType nbins,
     double eta,
-    cuda::std::span<const ParamLimitTypeCUDA> param_limits,
+    cuda::std::span<const ParamLimit> param_limits,
     SizeType branch_max,
     SizeType n_leaves,
     utils::BranchingWorkspaceCUDAView ws,
@@ -980,7 +990,7 @@ SizeType poly_taylor_branch_jerk_cuda(
     std::pair<double, double> coord_cur,
     SizeType nbins,
     double eta,
-    cuda::std::span<const ParamLimitTypeCUDA> param_limits,
+    cuda::std::span<const ParamLimit> param_limits,
     SizeType branch_max,
     SizeType n_leaves,
     utils::BranchingWorkspaceCUDAView ws,
@@ -1065,7 +1075,7 @@ SizeType poly_taylor_branch_snap_cuda(
     std::pair<double, double> coord_cur,
     SizeType nbins,
     double eta,
-    cuda::std::span<const ParamLimitTypeCUDA> param_limits,
+    cuda::std::span<const ParamLimit> param_limits,
     SizeType branch_max,
     SizeType n_leaves,
     utils::BranchingWorkspaceCUDAView ws,
@@ -1145,15 +1155,17 @@ SizeType poly_taylor_branch_snap_cuda(
 
 } // namespace
 
-SizeType poly_taylor_seed_cuda(cuda::std::span<const double> accel_grid,
-                               cuda::std::span<const double> freq_grid,
-                               cuda::std::span<const double> dparams,
-                               cuda::std::span<double> seed_leaves,
-                               std::pair<double, double> /*coord_init*/,
-                               SizeType n_params,
-                               cudaStream_t stream) {
-    const SizeType n_leaves = accel_grid.size() * freq_grid.size();
-
+SizeType
+poly_taylor_seed_cuda(cuda::std::span<const SizeType> param_grid_count_init,
+                      cuda::std::span<const double> dparams_init,
+                      cuda::std::span<const ParamLimit> param_limits,
+                      cuda::std::span<double> seed_leaves,
+                      SizeType n_params,
+                      cudaStream_t stream) {
+    SizeType n_leaves = 1;
+    for (const auto count : param_grid_count_init) {
+        n_leaves *= count;
+    }
     constexpr SizeType kThreadPerBlock = 256;
     const auto blocks_per_grid =
         (n_leaves + kThreadPerBlock - 1) / kThreadPerBlock;
@@ -1162,8 +1174,8 @@ SizeType poly_taylor_seed_cuda(cuda::std::span<const double> accel_grid,
     const dim3 grid_dim(blocks_per_grid);
     cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
     kernel_poly_taylor_seed<<<grid_dim, block_dim>>>(
-        accel_grid.data(), accel_grid.size(), freq_grid.data(),
-        freq_grid.size(), dparams.data(), n_params, seed_leaves.data());
+        param_grid_count_init.data(), dparams_init.data(), param_limits.data(),
+        seed_leaves.data(), n_leaves, n_params);
     cuda_utils::check_last_cuda_error("Taylor seed kernel launch failed");
     cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
                                 "cudaStreamSynchronize failed");
@@ -1177,7 +1189,7 @@ SizeType poly_taylor_branch_batch_cuda(
     std::pair<double, double> coord_cur,
     SizeType nbins,
     double eta,
-    cuda::std::span<const ParamLimitTypeCUDA> param_limits,
+    cuda::std::span<const ParamLimit> param_limits,
     SizeType branch_max,
     SizeType n_leaves,
     SizeType n_params,

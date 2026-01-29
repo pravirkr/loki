@@ -91,8 +91,7 @@ bool split_f(double df_old,
     const auto factor = std::pow(dt, k + 1) * fold_bins /
                         math::factorial(static_cast<double>(k + 1));
     const auto factor_opt = factor / std::pow(2.0, k);
-    constexpr double kEps = 1e-6;
-    return std::abs(df_old - df_new) * factor_opt > (tol_bins - kEps);
+    return std::abs(df_old - df_new) * factor_opt > (tol_bins - utils::kEps);
 }
 
 std::vector<double> poly_taylor_shift_d(std::span<const double> dparam_old,
@@ -161,31 +160,31 @@ std::tuple<std::vector<double>, double> branch_param(double param_cur,
                                                      double dparam_new,
                                                      double param_min,
                                                      double param_max) {
-    constexpr double kEps = 1e-12;
-    if (dparam_cur <= kEps || dparam_new <= kEps) {
+    if (dparam_cur <= utils::kEps || dparam_new <= utils::kEps) {
         throw std::invalid_argument(
             std::format("Both dparam_cur and dparam_new must be positive (got "
                         "{}, {})",
                         dparam_cur, dparam_new));
     }
-    if (param_max <= param_min + kEps) {
+    if (param_max <= param_min + utils::kEps) {
         throw std::invalid_argument(
             std::format("param_max must be greater than param_min (got {}, {})",
                         param_max, param_min));
     }
-    if (param_cur < (param_min + kEps) || param_cur > (param_max - kEps)) {
+    if (param_cur < (param_min + utils::kEps) ||
+        param_cur > (param_max - utils::kEps)) {
         throw std::invalid_argument(
             std::format("param_cur ({}) must be within [param_min ({}), "
                         "param_max ({})]",
                         param_cur, param_min, param_max));
     }
     const double param_range = (param_max - param_min) / 2.0;
-    if (dparam_new > (param_range + kEps)) {
+    if (dparam_new > (param_range + utils::kEps)) {
         // Step size too large, fallback to current value
         return {{param_cur}, dparam_new};
     }
-    const int num_points =
-        static_cast<int>(std::ceil(((dparam_cur + kEps) / dparam_new) - kEps));
+    const int num_points = static_cast<int>(
+        std::ceil(((dparam_cur + utils::kEps) / dparam_new) - utils::kEps));
     if (num_points <= 0) {
         throw std::invalid_argument(
             std::format("Invalid input: ensure dparam_cur > dparam_new (got "
@@ -215,28 +214,27 @@ std::pair<double, SizeType> branch_param_padded(std::span<double> out_values,
                                                 double dparam_new,
                                                 double param_min,
                                                 double param_max) {
-    constexpr double kEps = 1e-12;
-    if (dparam_cur <= kEps || dparam_new <= kEps) {
+    if (dparam_cur <= utils::kEps || dparam_new <= utils::kEps) {
         throw std::invalid_argument(
             std::format("Both dparam_cur and dparam_new must be positive (got "
                         "{}, {})",
                         dparam_cur, dparam_new));
     }
 
-    if (param_max <= param_min + kEps) {
+    if (param_max <= param_min + utils::kEps) {
         throw std::invalid_argument(
             std::format("param_max must be greater than param_min (got {}, {})",
                         param_max, param_min));
     }
     const double param_range = (param_max - param_min) / 2.0;
-    if (dparam_new > (param_range + kEps)) {
+    if (dparam_new > (param_range + utils::kEps)) {
         // Step size too large, fallback to current value
         out_values[0] = param_cur;
         return {dparam_new, 1};
     }
 
-    const auto num_points =
-        static_cast<int>(std::ceil(((dparam_cur + kEps) / dparam_new) - kEps));
+    const auto num_points = static_cast<int>(
+        std::ceil(((dparam_cur + utils::kEps) / dparam_new) - utils::kEps));
     if (num_points <= 0) {
         throw std::invalid_argument(std::format(
             "Invalid input: ensure dparam_cur > dparam_new (got {}, {})",
@@ -265,50 +263,6 @@ std::pair<double, SizeType> branch_param_padded(std::span<double> out_values,
     const double dparam_new_actual =
         dparam_cur / static_cast<double>(num_points);
     return {dparam_new_actual, count};
-}
-
-SizeType range_param_count(double vmin, double vmax, double dv) {
-    if (vmin > vmax) {
-        throw std::invalid_argument(
-            std::format("vmin must be less than or equal to vmax (got {}, {})",
-                        vmin, vmax));
-    }
-    if (dv <= 0) {
-        throw std::invalid_argument(
-            std::format("dv must be positive (got {})", dv));
-    }
-    // Check if step size is larger than half the range
-    if (dv > (vmax - vmin) / 2.0) {
-        return 1;
-    }
-    // np.linspace(vmin, vmax, npoints + 2)[1:-1]
-    return static_cast<SizeType>((vmax - vmin) / dv);
-}
-
-std::vector<double> range_param(double vmin, double vmax, double dv) {
-    if (vmin > vmax) {
-        throw std::invalid_argument(
-            std::format("vmin must be less than or equal to vmax (got {}, {})",
-                        vmin, vmax));
-    }
-    if (dv <= 0) {
-        throw std::invalid_argument(
-            std::format("dv must be positive (got {})", dv));
-    }
-    // Check if step size is larger than half the range
-    if (dv > (vmax - vmin) / 2.0) {
-        return {(vmax + vmin) / 2.0};
-    }
-    // np.linspace(vmin, vmax, npoints + 2)[1:-1]
-    const auto npoints = static_cast<SizeType>((vmax - vmin) / dv);
-
-    std::vector<double> result(npoints);
-    const auto step = (vmax - vmin) / static_cast<double>(npoints + 1);
-    // Start from i=1, end at i=total_points-1 (exclusive)
-    for (SizeType i = 0; i < npoints; ++i) {
-        result[i] = vmin + (step * static_cast<double>(i + 1));
-    }
-    return result;
 }
 
 } // namespace loki::psr_utils

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 #include "loki/common/types.hpp"
 
 #ifdef LOKI_ENABLE_CUDA

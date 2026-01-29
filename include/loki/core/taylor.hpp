@@ -44,8 +44,9 @@ void ffa_taylor_resolve_poly_batch(
     SizeType nbins,
     SizeType n_params);
 
-SizeType poly_taylor_seed(std::span<const std::vector<double>> param_arr,
-                          std::span<const double> dparams,
+SizeType poly_taylor_seed(std::span<const SizeType> param_grid_count_init,
+                          std::span<const double> dparams_init,
+                          std::span<const ParamLimit> param_limits,
                           std::span<double> seed_leaves,
                           std::pair<double, double> coord_init,
                           SizeType n_params);
@@ -73,7 +74,7 @@ SizeType poly_taylor_branch_batch(std::span<const double> leaves_tree,
                                   SizeType n_params,
                                   utils::BranchingWorkspaceView ws);
 
-void poly_taylor_resolve_batch(std::span<const double> leaves_tree,
+void poly_taylor_resolve_batch(std::span<const double> leaves_branch,
                                std::span<SizeType> param_indices,
                                std::span<float> phase_shift,
                                std::span<const ParamLimit> param_limits,
@@ -108,8 +109,8 @@ poly_taylor_branch_generic(std::span<const double> leaf,
 
 // Generate an approximate branching pattern for the pruning Taylor search.
 std::vector<double>
-generate_bp_poly_taylor_approx(std::span<const std::vector<double>> param_arr,
-                               std::span<const double> dparams,
+generate_bp_poly_taylor_approx(std::span<const SizeType> param_grid_count_init,
+                               std::span<const double> dparams_init,
                                std::span<const ParamLimit> param_limits,
                                double tseg_ffa,
                                SizeType nsegments,
@@ -157,13 +158,13 @@ void ffa_taylor_resolve_poly_batch_cuda(
     SizeType n_params,
     cudaStream_t stream);
 
-SizeType poly_taylor_seed_cuda(cuda::std::span<const double> accel_grid,
-                               cuda::std::span<const double> freq_grid,
-                               cuda::std::span<const double> dparams,
-                               cuda::std::span<double> seed_leaves,
-                               std::pair<double, double> coord_init,
-                               SizeType n_params,
-                               cudaStream_t stream);
+SizeType
+poly_taylor_seed_cuda(cuda::std::span<const SizeType> param_grid_count_init,
+                      cuda::std::span<const double> dparams_init,
+                      cuda::std::span<const ParamLimit> param_limits,
+                      cuda::std::span<double> seed_leaves,
+                      SizeType n_params,
+                      cudaStream_t stream);
 
 SizeType
 poly_taylor_branch_batch_cuda(cuda::std::span<const double> leaves_tree,

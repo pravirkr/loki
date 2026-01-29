@@ -7,6 +7,7 @@
 #include <span>
 #include <vector>
 
+#include <pybind11/functional.h>
 #include <pybind11/iostream.h>
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
@@ -21,7 +22,7 @@ using algorithms::PruneFourier;
 using algorithms::PruneTime;
 using algorithms::PruningManager;
 using detection::MatchedFilter;
-using plans::detail::FFAPlanBase;
+using plans::FFAPlanBase;
 using search::PulsarSearchConfig;
 
 namespace py = pybind11;
@@ -271,12 +272,42 @@ PYBIND11_MODULE(libloki, m) {
         py::arg("t_ref") = 0.0F, py::arg("nthreads") = 1);
 
     auto m_configs = m.def_submodule("configs", "Configs submodule");
+    PYBIND11_NUMPY_DTYPE(ParamLimit, min, max);
     py::class_<PulsarSearchConfig>(m_configs, "PulsarSearchConfig")
-        .def(py::init<SizeType, double, SizeType, double,
-                      const std::vector<ParamLimitType>&, double, double, bool,
-                      int, double, double, SizeType, SizeType,
-                      std::optional<SizeType>, std::optional<SizeType>, double,
-                      SizeType, double, double, bool>(),
+        .def(py::init(
+                 [](SizeType nsamps, double tsamp, SizeType nbins, double eta,
+                    const PyArrayT<double>& param_limits, double ducy_max,
+                    double wtsp, bool use_fourier, int nthreads,
+                    double max_process_memory_gb, double octave_scale,
+                    SizeType nbins_max, SizeType nbins_min_lossy_bf,
+                    std::optional<SizeType> bseg_brute,
+                    std::optional<SizeType> bseg_ffa, double snr_min,
+                    SizeType max_passing_candidates, SizeType prune_poly_order,
+                    double p_orb_min, double m_c_max, double m_p_min,
+                    double minimum_snap_cells, bool use_conservative_tile) {
+                     if (param_limits.ndim() != 2 ||
+                         param_limits.shape(1) != 2) {
+                         throw std::invalid_argument(
+                             "param_limits must be a 2D NumPy array with shape "
+                             "(n_params, 2)");
+                     }
+
+                     const auto n_params =
+                         static_cast<SizeType>(param_limits.shape(0));
+
+                     std::vector<ParamLimit> limits(n_params);
+                     for (SizeType i = 0; i < n_params; ++i) {
+                         limits[i] = {.min = *param_limits.data(i, 0),
+                                      .max = *param_limits.data(i, 1)};
+                     }
+                     return std::make_unique<PulsarSearchConfig>(
+                         nsamps, tsamp, nbins, eta, limits, ducy_max, wtsp,
+                         use_fourier, nthreads, max_process_memory_gb,
+                         octave_scale, nbins_max, nbins_min_lossy_bf,
+                         bseg_brute, bseg_ffa, snr_min, max_passing_candidates,
+                         prune_poly_order, p_orb_min, m_c_max, m_p_min,
+                         minimum_snap_cells, use_conservative_tile);
+                 }),
              py::arg("nsamps"), py::arg("tsamp"), py::arg("nbins"),
              py::arg("eta"), py::arg("param_limits"), py::arg("ducy_max") = 0.2,
              py::arg("wtsp") = 1.5, py::arg("use_fourier") = true,
@@ -285,9 +316,12 @@ PYBIND11_MODULE(libloki, m) {
              py::arg("nbins_min_lossy_bf") = 64,
              py::arg("bseg_brute")         = std::nullopt,
              py::arg("bseg_ffa") = std::nullopt, py::arg("snr_min") = 5.0,
+             py::arg("max_passing_candidates") = 1U << 22U, // 4M
              py::arg("prune_poly_order") = 3, py::arg("p_orb_min") = 1e-5,
-             py::arg("snap_activation_threshold") = 5.0,
-             py::arg("use_conservative_grid")     = false)
+             py::arg("m_c_max") = 10.0, py::arg("m_p_min") = 1.4,
+             py::arg("minimum_snap_cells")    = 5.0,
+             py::arg("use_conservative_tile") = false)
+
         .def_property_readonly("nsamps", &PulsarSearchConfig::get_nsamps)
         .def_property_readonly("tsamp", &PulsarSearchConfig::get_tsamp)
         .def_property_readonly("tobs", &PulsarSearchConfig::get_tobs)
@@ -295,7 +329,10 @@ PYBIND11_MODULE(libloki, m) {
         .def_property_readonly("nbins_f", &PulsarSearchConfig::get_nbins_f)
         .def_property_readonly("eta", &PulsarSearchConfig::get_eta)
         .def_property_readonly("param_limits",
-                               &PulsarSearchConfig::get_param_limits)
+                               [](const PulsarSearchConfig& self) {
+                                   return as_pyarray_ref(
+                                       self.get_param_limits());
+                               })
         .def_property_readonly("ducy_max", &PulsarSearchConfig::get_ducy_max)
         .def_property_readonly("wtsp", &PulsarSearchConfig::get_wtsp)
         .def_property_readonly("prune_poly_order",
@@ -372,6 +409,11 @@ PYBIND11_MODULE(libloki, m) {
                                    return as_pyarray_ref(
                                        self.get_ncoords_offsets());
                                })
+        .def_property_readonly("param_counts",
+                               [](const FFAPlanBase& self) {
+                                   return as_listof_pyarray(
+                                       self.get_param_counts());
+                               })
         .def_property_readonly("param_cart_strides",
                                [](const FFAPlanBase& self) {
                                    return as_listof_pyarray(
@@ -389,10 +431,52 @@ PYBIND11_MODULE(libloki, m) {
         .def_property_readonly("config", &FFAPlanBase::get_config)
         .def_property_readonly("coord_size", &FFAPlanBase::get_coord_size)
         .def_property_readonly("coord_memory_usage",
-                               &FFAPlanBase::get_coord_memory_usage);
+                               &FFAPlanBase::get_coord_memory_usage)
+        .def("resolve_coordinates",
+             [](FFAPlanBase& self) {
+                 return as_listof_pyarray(self.resolve_coordinates());
+             })
+        .def("resolve_coordinates_freq",
+             [](FFAPlanBase& self) {
+                 return as_listof_pyarray(self.resolve_coordinates_freq());
+             })
+        .def_property_readonly("param_grid",
+                               [](const FFAPlanBase& self) {
+                                   return as_listof_pyarray(
+                                       self.compute_param_grid_full());
+                               })
+        .def_property_readonly("params_dict",
+                               [](const FFAPlanBase& self) {
+                                   auto params_map = self.get_params_dict();
+                                   py::dict result;
+                                   for (const auto& [key, value] : params_map) {
+                                       result[py::str(key)] =
+                                           as_pyarray_ref(value);
+                                   }
+                                   return result;
+                               })
+        .def("compute_param_grid",
+             [](FFAPlanBase& self, SizeType ffa_level) {
+                 return as_listof_pyarray(self.compute_param_grid(ffa_level));
+             })
+        .def(
+            "get_branching_pattern_approx",
+            [](FFAPlanBase& self, std::string_view poly_basis, SizeType ref_seg,
+               IndexType isuggest) {
+                return as_pyarray_ref(self.get_branching_pattern_approx(
+                    poly_basis, ref_seg, isuggest));
+            },
+            py::arg("poly_basis") = "taylor", py::arg("ref_seg") = 0,
+            py::arg("isuggest") = 0)
+        .def(
+            "get_branching_pattern",
+            [](FFAPlanBase& self, std::string_view poly_basis,
+               SizeType ref_seg) {
+                return as_pyarray_ref(
+                    self.get_branching_pattern(poly_basis, ref_seg));
+            },
+            py::arg("poly_basis") = "taylor", py::arg("ref_seg") = 0);
 
-    bind_ffa_plan_metadata<float>(m_plans, "FFAPlanMetadataTime");
-    bind_ffa_plan_metadata<ComplexType>(m_plans, "FFAPlanMetadataFourier");
     bind_ffa_plan<float>(m_plans, "FFAPlanTime");
     bind_ffa_plan<ComplexType>(m_plans, "FFAPlanFourier");
     bind_ffa_region_stats<float>(m_plans, "FFARegionStatsTime");
@@ -417,7 +501,8 @@ PYBIND11_MODULE(libloki, m) {
             auto [fold, ffa_plan] = algorithms::compute_ffa<float>(
                 to_span<const float>(ts_e), to_span<const float>(ts_v), cfg,
                 quiet, show_progress);
-            return std::make_tuple(as_pyarray(std::move(fold)), std::move(ffa_plan));
+            return std::make_tuple(as_pyarray(std::move(fold)),
+                                   std::move(ffa_plan));
         },
         py::arg("ts_e"), py::arg("ts_v"), py::arg("cfg"),
         py::arg("quiet") = false, py::arg("show_progress") = false);
@@ -429,7 +514,8 @@ PYBIND11_MODULE(libloki, m) {
             auto [fold, ffa_plan] = algorithms::compute_ffa<ComplexType>(
                 to_span<const float>(ts_e), to_span<const float>(ts_v), cfg,
                 quiet, show_progress);
-            return std::make_tuple(as_pyarray(std::move(fold)), std::move(ffa_plan));
+            return std::make_tuple(as_pyarray(std::move(fold)),
+                                   std::move(ffa_plan));
         },
         py::arg("ts_e"), py::arg("ts_v"), py::arg("cfg"),
         py::arg("quiet") = false, py::arg("show_progress") = false);
@@ -442,7 +528,8 @@ PYBIND11_MODULE(libloki, m) {
                 algorithms::compute_ffa_fourier_return_to_time(
                     to_span<const float>(ts_e), to_span<const float>(ts_v), cfg,
                     quiet, show_progress);
-            return std::make_tuple(as_pyarray(std::move(fold)), std::move(ffa_plan));
+            return std::make_tuple(as_pyarray(std::move(fold)),
+                                   std::move(ffa_plan));
         },
         py::arg("ts_e"), py::arg("ts_v"), py::arg("cfg"),
         py::arg("quiet") = false, py::arg("show_progress") = false);
@@ -454,7 +541,8 @@ PYBIND11_MODULE(libloki, m) {
             auto [scores, ffa_plan] = algorithms::compute_ffa_scores(
                 to_span<const float>(ts_e), to_span<const float>(ts_v), cfg,
                 quiet, show_progress);
-            return std::make_tuple(as_pyarray(std::move(scores)), std::move(ffa_plan));
+            return std::make_tuple(as_pyarray(std::move(scores)),
+                                   std::move(ffa_plan));
         },
         py::arg("ts_e"), py::arg("ts_v"), py::arg("cfg"),
         py::arg("quiet") = false, py::arg("show_progress") = false);
@@ -492,21 +580,20 @@ PYBIND11_MODULE(libloki, m) {
     m_psr_utils.def(
         "ffa_taylor_resolve",
         [](const PyArrayT<double>& pset_cur,
-           const std::vector<PyArrayT<double>>& param_arr, SizeType ffa_level,
+           const PyArrayT<SizeType>& param_grid_count_prev,
+           const PyArrayT<ParamLimit>& param_limits, SizeType ffa_level,
            SizeType latter, double tseg_brute, SizeType nbins) {
-            std::vector<std::vector<double>> param_vecs;
-            param_vecs.reserve(param_arr.size());
-            for (const auto& arr : param_arr) {
-                param_vecs.emplace_back(arr.data(), arr.data() + arr.size());
-            }
             auto [pindex_prev, relative_phase] =
                 core::ffa_taylor_resolve_generic(
-                    to_span<const double>(pset_cur), param_vecs, ffa_level,
-                    latter, tseg_brute, nbins);
+                    to_span<const double>(pset_cur),
+                    to_span<const SizeType>(param_grid_count_prev),
+                    to_span<const ParamLimit>(param_limits), ffa_level, latter,
+                    tseg_brute, nbins);
             return std::make_tuple(as_pyarray_ref(pindex_prev), relative_phase);
         },
-        py::arg("pset_cur"), py::arg("param_arr"), py::arg("ffa_level"),
-        py::arg("latter"), py::arg("tseg_brute"), py::arg("nbins"));
+        py::arg("pset_cur"), py::arg("param_grid_count_prev"),
+        py::arg("param_limits"), py::arg("ffa_level"), py::arg("latter"),
+        py::arg("tseg_brute"), py::arg("nbins"));
 
     auto m_prune = m.def_submodule("prune", "Pruning submodule");
 

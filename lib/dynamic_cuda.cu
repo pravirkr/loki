@@ -17,39 +17,47 @@ namespace loki::core {
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA, typename Derived>
 BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::BasePruneDPFunctsCUDA(
-    std::span<const std::vector<double>> param_arr,
-    std::span<const double> dparams,
+    std::span<const SizeType> param_grid_count_init,
+    std::span<const double> dparams_init,
     SizeType nseg_ffa,
     double tseg_ffa,
     search::PulsarSearchConfig cfg,
     SizeType batch_size,
     SizeType branch_max)
-    : m_dparams(dparams.begin(), dparams.end()),
-      m_nseg_ffa(nseg_ffa),
+    : m_nseg_ffa(nseg_ffa),
       m_tseg_ffa(tseg_ffa),
       m_cfg(std::move(cfg)),
       m_batch_size(batch_size),
       m_branch_max(branch_max) {
-    // Copy param_arr to device
-    const auto& accel_arr_grid = param_arr[0];
-    const auto& freq_arr_grid  = param_arr[1];
-    m_accel_grid_d.resize(accel_arr_grid.size());
-    m_freq_grid_d.resize(freq_arr_grid.size());
-    // copy with implicit double -> float conversion
-    thrust::copy(accel_arr_grid.begin(), accel_arr_grid.end(),
-                 m_accel_grid_d.begin());
-    thrust::copy(freq_arr_grid.begin(), freq_arr_grid.end(),
-                 m_freq_grid_d.begin());
-    m_boxcar_widths_d = m_cfg.get_scoring_widths();
+    m_boxcar_widths_d       = m_cfg.get_scoring_widths();
+    const auto param_limits = m_cfg.get_param_limits();
 
-    std::vector<ParamLimitTypeCUDA> h_limits;
-    h_limits.resize(m_cfg.get_nparams());
-
-    for (SizeType i = 0; i < m_cfg.get_nparams(); ++i) {
-        h_limits[i].min = m_cfg.get_param_limits()[i][0];
-        h_limits[i].max = m_cfg.get_param_limits()[i][1];
+    SizeType n_coords_init = 1;
+    for (const auto count : param_grid_count_init) {
+        n_coords_init *= count;
     }
-    m_param_limits_d = h_limits;
+    m_n_coords_init = n_coords_init;
+
+    cuda_utils::check_cuda_call(
+        cudaMemcpyAsync(
+            thrust::raw_pointer_cast(m_param_grid_count_init_d.data()),
+            param_grid_count_init.data(),
+            param_grid_count_init.size() * sizeof(SizeType),
+            cudaMemcpyHostToDevice),
+        "cudaMemcpyAsync param grid count init failed");
+    cuda_utils::check_cuda_call(
+        cudaMemcpyAsync(thrust::raw_pointer_cast(m_dparams_init_d.data()),
+                        dparams_init.data(),
+                        dparams_init.size() * sizeof(double),
+                        cudaMemcpyHostToDevice),
+        "cudaMemcpyAsync dparams init failed");
+    cuda_utils::check_cuda_call(
+        cudaMemcpyAsync(thrust::raw_pointer_cast(m_param_limits_d.data()),
+                        param_limits.data(),
+                        param_limits.size() * sizeof(ParamLimit),
+                        cudaMemcpyHostToDevice),
+        "cudaMemcpyAsync param limits failed");
+
     if constexpr (std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>) {
         m_irfft_executor =
             std::make_unique<utils::IrfftExecutorCUDA>(m_cfg.get_nbins());
@@ -64,15 +72,14 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA, typename Derived>
 cuda::std::span<const FoldTypeCUDA>
 BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::load_segment(
     cuda::std::span<const FoldTypeCUDA> ffa_fold, SizeType seg_idx) const {
-    const SizeType n_coords = m_accel_grid_d.size() * m_freq_grid_d.size();
-    const auto nbins        = m_cfg.get_nbins();
-    const auto nbins_f      = m_cfg.get_nbins_f();
+    const auto nbins   = m_cfg.get_nbins();
+    const auto nbins_f = m_cfg.get_nbins_f();
     if constexpr (std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>) {
-        return ffa_fold.subspan(seg_idx * n_coords * 2 * nbins_f,
-                                n_coords * 2 * nbins_f);
+        return ffa_fold.subspan(seg_idx * m_n_coords_init * 2 * nbins_f,
+                                m_n_coords_init * 2 * nbins_f);
     } else {
-        return ffa_fold.subspan(seg_idx * n_coords * 2 * nbins,
-                                n_coords * 2 * nbins);
+        return ffa_fold.subspan(seg_idx * m_n_coords_init * 2 * nbins,
+                                m_n_coords_init * 2 * nbins);
     }
 }
 
@@ -151,8 +158,10 @@ void BaseTaylorPruneDPFunctsCUDA<FoldTypeCUDA, Derived>::seed(
     cudaStream_t stream) {
 
     const auto n_leaves = poly_taylor_seed_cuda(
-        this->m_accel_grid_d, this->m_freq_grid_d, this->m_dparams, seed_leaves,
-        coord_init, this->m_cfg.get_nparams(), stream);
+        cuda_utils::as_span(this->m_param_grid_count_init_d),
+        cuda_utils::as_span(this->m_dparams_init_d),
+        cuda_utils::as_span(this->m_param_limits_d), seed_leaves,
+        this->m_cfg.get_nparams(), stream);
     // Fold segment is (n_leaves, 2, nbins)
     const auto nbins = this->m_cfg.get_nbins();
 
@@ -182,15 +191,15 @@ void BaseTaylorPruneDPFunctsCUDA<FoldTypeCUDA, Derived>::seed(
 // Specialized implementation for Polynomial searches in Taylor Basis
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>::PrunePolyTaylorDPFunctsCUDA(
-    std::span<const std::vector<double>> param_arr,
-    std::span<const double> dparams,
+    std::span<const SizeType> param_grid_count_init,
+    std::span<const double> dparams_init,
     SizeType nseg_ffa,
     double tseg_ffa,
     search::PulsarSearchConfig cfg,
     SizeType batch_size,
     SizeType branch_max)
-    : Base(param_arr,
-           dparams,
+    : Base(param_grid_count_init,
+           dparams_init,
            nseg_ffa,
            tseg_ffa,
            std::move(cfg),
@@ -245,8 +254,8 @@ void PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>::transform(
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 std::unique_ptr<PruneDPFunctsCUDA<FoldTypeCUDA>>
 create_prune_dp_functs_cuda(std::string_view poly_basis,
-                            std::span<const std::vector<double>> param_arr,
-                            std::span<const double> dparams,
+                            std::span<const SizeType> param_grid_count_init,
+                            std::span<const double> dparams_init,
                             SizeType nseg_ffa,
                             double tseg_ffa,
                             search::PulsarSearchConfig cfg,
@@ -255,8 +264,8 @@ create_prune_dp_functs_cuda(std::string_view poly_basis,
     const auto n_params = cfg.get_nparams();
     if (poly_basis == "taylor" && n_params <= 4) {
         return std::make_unique<PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>>(
-            param_arr, dparams, nseg_ffa, tseg_ffa, std::move(cfg), batch_size,
-            branch_max);
+            param_grid_count_init, dparams_init, nseg_ffa, tseg_ffa,
+            std::move(cfg), batch_size, branch_max);
     }
     throw std::runtime_error(std::format(
         "Unknown poly_basis: '{}'. Valid options: 'taylor'", poly_basis));

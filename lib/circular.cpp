@@ -26,7 +26,6 @@ get_circ_taylor_mask(std::span<const double> leaves_batch,
     constexpr SizeType kParamsExpected = 5U;
     constexpr SizeType kParamStride    = 2U;
     constexpr SizeType kLeavesStride   = (kParamsExpected + 2) * kParamStride;
-    constexpr double kEps              = 1e-12;
 
     error_check::check_equal(n_params, kParamsExpected,
                              "nparams should be 5 for circular orbit resolve");
@@ -55,8 +54,10 @@ get_circ_taylor_mask(std::span<const double> leaves_batch,
         const auto accel    = leaves_batch[leaf_offset + 6];
 
         // Compute significance tests
-        const double snap_threshold    = minimum_snap_cells * (dsnap + kEps);
-        const double crackle_threshold = minimum_snap_cells * (dcrackle + kEps);
+        const double snap_threshold =
+            minimum_snap_cells * (dsnap + utils::kEps);
+        const double crackle_threshold =
+            minimum_snap_cells * (dcrackle + utils::kEps);
 
         const bool is_sig_snap    = std::abs(snap) > snap_threshold;
         const bool is_sig_crackle = std::abs(crackle) > crackle_threshold;
@@ -64,7 +65,7 @@ get_circ_taylor_mask(std::span<const double> leaves_batch,
         // Snap-Dominated Region: Check if implied Omega^2 = -snap/accel is
         // physical
         const bool is_physical_snap =
-            ((-snap * accel) > 0.0) && (std::abs(accel) > kEps);
+            ((-snap * accel) > 0.0) && (std::abs(accel) > utils::kEps);
         const bool mask_circular_snap = is_sig_snap && is_physical_snap;
 
         // Crackle-Dominated Region (The Hole): snap weak, crackle strong
@@ -72,7 +73,7 @@ get_circ_taylor_mask(std::span<const double> leaves_batch,
 
         // Check if implied Omega^2 = -crackle/jerk is physical
         const bool is_physical_crackle =
-            ((-crackle * jerk) > 0.0) && (std::abs(jerk) > kEps);
+            ((-crackle * jerk) > 0.0) && (std::abs(jerk) > utils::kEps);
         const bool mask_circular_crackle = in_the_hole && is_physical_crackle;
 
         // Classify
@@ -95,35 +96,33 @@ inline bool is_in_hole(double d5,
                        double d5_sig,
                        double d4_sig,
                        double minimum_snap_cells) noexcept {
-    constexpr double kEps          = 1e-12;
-    const double snap_threshold    = minimum_snap_cells * (d4_sig + kEps);
-    const double crackle_threshold = minimum_snap_cells * (d5_sig + kEps);
-    const bool is_sig_snap         = std::abs(d4) > snap_threshold;
-    const bool is_sig_crackle      = std::abs(d5) > crackle_threshold;
-    bool in_the_hole               = (!is_sig_snap) && is_sig_crackle;
+    const double snap_threshold = minimum_snap_cells * (d4_sig + utils::kEps);
+    const double crackle_threshold =
+        minimum_snap_cells * (d5_sig + utils::kEps);
+    const bool is_sig_snap    = std::abs(d4) > snap_threshold;
+    const bool is_sig_crackle = std::abs(d5) > crackle_threshold;
+    bool in_the_hole          = (!is_sig_snap) && is_sig_crackle;
     const bool is_physical_crackle =
-        ((-d5 * d3) > 0.0) && (std::abs(d3) > kEps);
+        ((-d5 * d3) > 0.0) && (std::abs(d3) > utils::kEps);
     return in_the_hole && is_physical_crackle;
 }
 
 } // namespace
 
-SizeType
-circ_taylor_branch_batch(std::span<const double> leaves_tree,
-                         std::pair<double, double> coord_cur,
-                         std::span<double> leaves_branch,
-                         std::span<SizeType> leaves_origins,
-                         SizeType n_leaves,
-                         SizeType nbins,
-                         double eta,
-                         const std::vector<ParamLimitType>& param_limits,
-                         SizeType branch_max,
-                         double minimum_snap_cells,
-                         utils::BranchingWorkspaceView ws) {
+SizeType circ_taylor_branch_batch(std::span<const double> leaves_tree,
+                                  std::pair<double, double> coord_cur,
+                                  std::span<double> leaves_branch,
+                                  std::span<SizeType> leaves_origins,
+                                  SizeType n_leaves,
+                                  SizeType nbins,
+                                  double eta,
+                                  std::span<const ParamLimit> param_limits,
+                                  SizeType branch_max,
+                                  double minimum_snap_cells,
+                                  utils::BranchingWorkspaceView ws) {
     constexpr SizeType kParams       = 5U;
     constexpr SizeType kParamStride  = 2U;
     constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
-    constexpr double kEps            = 1e-12;
 
     error_check::check_equal(leaves_tree.size(), n_leaves * kLeavesStride,
                              "leaves_tree size mismatch");
@@ -204,7 +203,7 @@ circ_taylor_branch_batch(std::span<const double> leaves_tree,
     // --- Early Exit: Check if any leaf needs branching ---
     bool any_branching = false;
     for (SizeType i = 0; i < n_leaves * kParams; ++i) {
-        if (shift_bins_ptr[i] >= (eta - kEps)) {
+        if (shift_bins_ptr[i] >= (eta - utils::kEps)) {
             any_branching = true;
             break;
         }
@@ -250,20 +249,20 @@ circ_taylor_branch_batch(std::span<const double> leaves_tree,
 
         // Branch d4-d1 parameters
         psr_utils::branch_one_param_padded(
-            1, d4_cur, d4_sig_cur, d4_sig_new, param_limits[1][0],
-            param_limits[1][1], eta, shift_bins_ptr, ws.scratch_params,
+            1, d4_cur, d4_sig_cur, d4_sig_new, param_limits[1].min,
+            param_limits[1].max, eta, shift_bins_ptr, ws.scratch_params,
             ws.scratch_dparams, ws.scratch_counts, flat_base, branch_max);
         psr_utils::branch_one_param_padded(
-            2, d3_cur, d3_sig_cur, d3_sig_new, param_limits[2][0],
-            param_limits[2][1], eta, shift_bins_ptr, ws.scratch_params,
+            2, d3_cur, d3_sig_cur, d3_sig_new, param_limits[2].min,
+            param_limits[2].max, eta, shift_bins_ptr, ws.scratch_params,
             ws.scratch_dparams, ws.scratch_counts, flat_base, branch_max);
         psr_utils::branch_one_param_padded(
-            3, d2_cur, d2_sig_cur, d2_sig_new, param_limits[3][0],
-            param_limits[3][1], eta, shift_bins_ptr, ws.scratch_params,
+            3, d2_cur, d2_sig_cur, d2_sig_new, param_limits[3].min,
+            param_limits[3].max, eta, shift_bins_ptr, ws.scratch_params,
             ws.scratch_dparams, ws.scratch_counts, flat_base, branch_max);
 
-        const double d1_min = (1 - param_limits[4][1] / f0) * utils::kCval;
-        const double d1_max = (1 - param_limits[4][0] / f0) * utils::kCval;
+        const double d1_min = (1 - param_limits[4].max / f0) * utils::kCval;
+        const double d1_max = (1 - param_limits[4].min / f0) * utils::kCval;
         psr_utils::branch_one_param_padded(
             4, d1_cur, d1_sig_cur, d1_sig_new, d1_min, d1_max, eta,
             shift_bins_ptr, ws.scratch_params, ws.scratch_dparams,
@@ -273,7 +272,7 @@ circ_taylor_branch_batch(std::span<const double> leaves_tree,
     // --- Check if crackle branching is needed ---
     bool any_crackle_branching = false;
     for (SizeType i = 0; i < n_leaves; ++i) {
-        if (shift_bins_ptr[(i * kParams) + 0] >= (eta - kEps)) {
+        if (shift_bins_ptr[(i * kParams) + 0] >= (eta - utils::kEps)) {
             any_crackle_branching = true;
             break;
         }
@@ -341,7 +340,7 @@ circ_taylor_branch_batch(std::span<const double> leaves_tree,
             const SizeType flat_base   = i * kParams;
 
             const bool needs_crackle =
-                shift_bins_ptr[flat_base + 0] >= (eta - kEps);
+                shift_bins_ptr[flat_base + 0] >= (eta - utils::kEps);
 
             const SizeType n_d4_branches = ws.scratch_counts[flat_base + 1];
             const SizeType n_d3_branches = ws.scratch_counts[flat_base + 2];
@@ -503,7 +502,6 @@ SizeType circ_taylor_validate_batch(std::span<double> leaves_branch,
     constexpr SizeType kParams       = 5U;
     constexpr SizeType kParamStride  = 2U;
     constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
-    constexpr double kEps            = 1e-12;
     constexpr double kTwoThirds      = 2.0 / 3.0;
 
     error_check::check_greater_equal(leaves_branch.size(),
@@ -525,8 +523,10 @@ SizeType circ_taylor_validate_batch(std::span<double> leaves_branch,
         const double accel    = leaves_branch[leaf_offset + 6];
 
         // Classification thresholds
-        const double snap_threshold    = minimum_snap_cells * (dsnap + kEps);
-        const double crackle_threshold = minimum_snap_cells * (dcrackle + kEps);
+        const double snap_threshold =
+            minimum_snap_cells * (dsnap + utils::kEps);
+        const double crackle_threshold =
+            minimum_snap_cells * (dcrackle + utils::kEps);
 
         const bool is_sig_snap    = std::abs(snap) > snap_threshold;
         const bool is_sig_crackle = std::abs(crackle) > crackle_threshold;
@@ -540,11 +540,11 @@ SizeType circ_taylor_validate_batch(std::span<double> leaves_branch,
 
         // 2. Snap-Dominated Region
         if (is_sig_snap) {
-            const double omega_sq = -snap / (accel + kEps);
+            const double omega_sq = -snap / (accel + utils::kEps);
 
             // Check: Physical Sign (-d4/d2 > 0)
             const bool valid_sign =
-                (omega_sq > 0.0) && (std::abs(accel) > kEps);
+                (omega_sq > 0.0) && (std::abs(accel) > utils::kEps);
 
             // Check: Max Orbital Frequency
             const bool valid_omega = omega_sq < omega_max_sq;
@@ -568,10 +568,11 @@ SizeType circ_taylor_validate_batch(std::span<double> leaves_branch,
         // Only if snap is NOT significant but crackle IS significant
         const bool is_hole = (!is_sig_snap) && is_sig_crackle;
         if (is_hole) {
-            const double omega_sq = -crackle / (jerk + kEps);
+            const double omega_sq = -crackle / (jerk + utils::kEps);
 
             // Check: Physical Sign (-d5/d3 > 0)
-            const bool valid_sign = (omega_sq > 0.0) && (std::abs(jerk) > kEps);
+            const bool valid_sign =
+                (omega_sq > 0.0) && (std::abs(jerk) > utils::kEps);
 
             // Check: Max Orbital Frequency
             const bool valid_omega = omega_sq < omega_max_sq;
@@ -613,13 +614,15 @@ SizeType circ_taylor_validate_batch(std::span<double> leaves_branch,
     return write_idx;
 }
 
-void circ_taylor_resolve_batch(std::span<const double> leaves_branch,
+void circ_taylor_resolve_batch(std::span<const double> leaves_tree,
+                               std::span<SizeType> param_indices,
+                               std::span<float> phase_shift,
+                               std::span<const ParamLimit> param_limits,
                                std::pair<double, double> coord_add,
                                std::pair<double, double> coord_cur,
                                std::pair<double, double> coord_init,
-                               std::span<const std::vector<double>> param_arr,
-                               std::span<SizeType> param_indices,
-                               std::span<float> phase_shift,
+                               SizeType n_accel_init,
+                               SizeType n_freq_init,
                                SizeType nbins,
                                SizeType n_leaves,
                                double minimum_snap_cells) {
@@ -627,44 +630,40 @@ void circ_taylor_resolve_batch(std::span<const double> leaves_branch,
     constexpr SizeType kParamStride  = 2;
     constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
 
-    error_check::check_equal(param_arr.size(), kParams,
-                             "param_arr should have 5 parameters");
-    error_check::check_greater_equal(leaves_branch.size(),
+    error_check::check_greater_equal(leaves_tree.size(),
                                      n_leaves * kLeavesStride,
-                                     "leaves_branch size mismatch");
+                                     "leaves_tree size mismatch");
     error_check::check_greater_equal(param_indices.size(), n_leaves,
                                      "param_indices size mismatch");
     error_check::check_greater_equal(phase_shift.size(), n_leaves,
                                      "phase_shift size mismatch");
+    error_check::check_equal(param_limits.size(), kParams,
+                             "param_limits size should be 5");
 
     const auto [t0_cur, scale_cur]   = coord_cur;
     const auto [t0_init, scale_init] = coord_init;
     const auto [t0_add, scale_add]   = coord_add;
 
-    // Cache-friendly access to parameter grids
-    const auto& accel_arr_grid = param_arr[3];
-    const auto& freq_arr_grid  = param_arr[4];
-    const auto n_freq          = param_arr[4].size();
+    const auto& lim_accel = param_limits[3];
+    const auto& lim_freq  = param_limits[4];
 
-    const double inv_c_val  = 1.0 / utils::kCval;
     const auto delta_t_add  = t0_add - t0_cur;
     const auto delta_t_init = t0_init - t0_cur;
     const auto delta_t      = delta_t_add - delta_t_init;
 
     const auto [idx_circular_snap, idx_circular_crackle, idx_taylor] =
-        get_circ_taylor_mask(leaves_branch, n_leaves, kParams,
+        get_circ_taylor_mask(leaves_tree, n_leaves, kParams,
                              minimum_snap_cells);
 
-    SizeType hint_a = 0, hint_f = 0;
     // Process circular indices
     for (SizeType i : idx_circular_snap) {
         const SizeType leaf_offset = i * kLeavesStride;
 
-        const auto s_t_cur = leaves_branch[leaf_offset + (1 * kParamStride)];
-        const auto j_t_cur = leaves_branch[leaf_offset + (2 * kParamStride)];
-        const auto a_t_cur = leaves_branch[leaf_offset + (3 * kParamStride)];
-        const auto v_t_cur = leaves_branch[leaf_offset + (4 * kParamStride)];
-        const auto f0      = leaves_branch[leaf_offset + (6 * kParamStride)];
+        const auto s_t_cur = leaves_tree[leaf_offset + (1 * kParamStride)];
+        const auto j_t_cur = leaves_tree[leaf_offset + (2 * kParamStride)];
+        const auto a_t_cur = leaves_tree[leaf_offset + (3 * kParamStride)];
+        const auto v_t_cur = leaves_tree[leaf_offset + (4 * kParamStride)];
+        const auto f0      = leaves_tree[leaf_offset + (6 * kParamStride)];
 
         // Circular orbit mask condition
         const auto omega_orb_sq = -s_t_cur / a_t_cur;
@@ -692,34 +691,29 @@ void circ_taylor_resolve_batch(std::span<const double> leaves_branch,
         const auto delta_d_new = (-a_t_add / omega_orb_sq) -
                                  (-a_t_init / omega_orb_sq) +
                                  ((v_t_cur + j_t_cur / omega_orb_sq) * delta_t);
-        const auto f_new     = f0 * (1.0 - delta_v_new * inv_c_val);
-        const auto delay_rel = delta_d_new * inv_c_val;
+        const auto f_new     = f0 * (1.0 - delta_v_new * utils::kInvCval);
+        const auto delay_rel = delta_d_new * utils::kInvCval;
 
         // Calculate relative phase
         phase_shift[i] =
             psr_utils::get_phase_idx(delta_t, f0, nbins, delay_rel);
-
-        // Find nearest grid indices (only need accel and freq)
-        const auto idx_a =
-            utils::find_nearest_sorted_idx_scan(accel_arr_grid, a_new, hint_a);
+        // Find nearest grid indices
+        const auto idx_a = psr_utils::get_nearest_idx_analytical(
+            a_new, lim_accel, n_accel_init);
         const auto idx_f =
-            utils::find_nearest_sorted_idx_scan(freq_arr_grid, f_new, hint_f);
-
-        param_indices[i] = (idx_a * n_freq) + idx_f;
+            psr_utils::get_nearest_idx_analytical(f_new, lim_freq, n_freq_init);
+        param_indices[i] = (idx_a * n_freq_init) + idx_f;
     }
 
-    // Reset hints
-    hint_a = 0;
-    hint_f = 0;
     // Process circular crackle indices
     for (SizeType i : idx_circular_crackle) {
         const SizeType leaf_offset = i * kLeavesStride;
 
-        const auto c_t_cur = leaves_branch[leaf_offset + (0 * kParamStride)];
-        const auto j_t_cur = leaves_branch[leaf_offset + (2 * kParamStride)];
-        const auto a_t_cur = leaves_branch[leaf_offset + (3 * kParamStride)];
-        const auto v_t_cur = leaves_branch[leaf_offset + (4 * kParamStride)];
-        const auto f0      = leaves_branch[leaf_offset + (6 * kParamStride)];
+        const auto c_t_cur = leaves_tree[leaf_offset + (0 * kParamStride)];
+        const auto j_t_cur = leaves_tree[leaf_offset + (2 * kParamStride)];
+        const auto a_t_cur = leaves_tree[leaf_offset + (3 * kParamStride)];
+        const auto v_t_cur = leaves_tree[leaf_offset + (4 * kParamStride)];
+        const auto f0      = leaves_tree[leaf_offset + (6 * kParamStride)];
 
         // Circular orbit mask condition
         const auto omega_orb_sq = -c_t_cur / a_t_cur;
@@ -747,25 +741,19 @@ void circ_taylor_resolve_batch(std::span<const double> leaves_branch,
         const auto delta_d_new = (-a_t_add / omega_orb_sq) -
                                  (-a_t_init / omega_orb_sq) +
                                  ((v_t_cur + j_t_cur / omega_orb_sq) * delta_t);
-        const auto f_new     = f0 * (1.0 - delta_v_new * inv_c_val);
-        const auto delay_rel = delta_d_new * inv_c_val;
+        const auto f_new     = f0 * (1.0 - delta_v_new * utils::kInvCval);
+        const auto delay_rel = delta_d_new * utils::kInvCval;
 
         // Calculate relative phase
         phase_shift[i] =
             psr_utils::get_phase_idx(delta_t, f0, nbins, delay_rel);
-
-        // Find nearest grid indices (only need accel and freq)
-        const auto idx_a =
-            utils::find_nearest_sorted_idx_scan(accel_arr_grid, a_new, hint_a);
+        // Find nearest grid indices
+        const auto idx_a = psr_utils::get_nearest_idx_analytical(
+            a_new, lim_accel, n_accel_init);
         const auto idx_f =
-            utils::find_nearest_sorted_idx_scan(freq_arr_grid, f_new, hint_f);
-
-        param_indices[i] = (idx_a * n_freq) + idx_f;
+            psr_utils::get_nearest_idx_analytical(f_new, lim_freq, n_freq_init);
+        param_indices[i] = (idx_a * n_freq_init) + idx_f;
     }
-
-    // Reset hints
-    hint_a = 0;
-    hint_f = 0;
 
     // Pre-compute constants to avoid repeated calculations
     const auto half_delta_t_add_sq  = 0.5 * delta_t_add * delta_t_add;
@@ -789,12 +777,12 @@ void circ_taylor_resolve_batch(std::span<const double> leaves_branch,
     for (SizeType i : idx_taylor) {
         const SizeType batch_offset = i * kLeavesStride;
 
-        const auto c_t_cur = leaves_branch[batch_offset + (0 * kParamStride)];
-        const auto s_t_cur = leaves_branch[batch_offset + (1 * kParamStride)];
-        const auto j_t_cur = leaves_branch[batch_offset + (2 * kParamStride)];
-        const auto a_t_cur = leaves_branch[batch_offset + (3 * kParamStride)];
-        const auto v_t_cur = leaves_branch[batch_offset + (4 * kParamStride)];
-        const auto f0      = leaves_branch[batch_offset + (6 * kParamStride)];
+        const auto c_t_cur = leaves_tree[batch_offset + (0 * kParamStride)];
+        const auto s_t_cur = leaves_tree[batch_offset + (1 * kParamStride)];
+        const auto j_t_cur = leaves_tree[batch_offset + (2 * kParamStride)];
+        const auto a_t_cur = leaves_tree[batch_offset + (3 * kParamStride)];
+        const auto v_t_cur = leaves_tree[batch_offset + (4 * kParamStride)];
+        const auto f0      = leaves_tree[batch_offset + (6 * kParamStride)];
         const auto a_new   = a_t_cur + (j_t_cur * delta_t_add) +
                            (s_t_cur * half_delta_t_add_sq) +
                            (c_t_cur * sixth_delta_t_add_cubed);
@@ -809,18 +797,18 @@ void circ_taylor_resolve_batch(std::span<const double> leaves_branch,
                                  (c_t_cur * onehundredtwenty_delta_t_fifth);
         // Calculates new frequency based on the first-order Doppler
         // approximation:
-        const auto f_new     = f0 * (1.0 - delta_v_new * inv_c_val);
-        const auto delay_rel = delta_d_new * inv_c_val;
+        const auto f_new     = f0 * (1.0 - delta_v_new * utils::kInvCval);
+        const auto delay_rel = delta_d_new * utils::kInvCval;
 
         // Calculate relative phase
         phase_shift[i] =
             psr_utils::get_phase_idx(delta_t, f0, nbins, delay_rel);
-
-        const auto idx_a =
-            utils::find_nearest_sorted_idx_scan(accel_arr_grid, a_new, hint_a);
+        // Find nearest grid indices
+        const auto idx_a = psr_utils::get_nearest_idx_analytical(
+            a_new, lim_accel, n_accel_init);
         const auto idx_f =
-            utils::find_nearest_sorted_idx_scan(freq_arr_grid, f_new, hint_f);
-        param_indices[i] = (idx_a * n_freq) + idx_f;
+            psr_utils::get_nearest_idx_analytical(f_new, lim_freq, n_freq_init);
+        param_indices[i] = (idx_a * n_freq_init) + idx_f;
     }
 }
 
@@ -1204,7 +1192,7 @@ void circ_taylor_transform_batch(std::span<double> leaves_tree,
 std::vector<double>
 generate_bp_circ_taylor(std::span<const std::vector<double>> param_arr,
                         std::span<const double> dparams,
-                        const std::vector<ParamLimitType>& param_limits,
+                        std::span<const ParamLimit> param_limits,
                         double tseg_ffa,
                         SizeType nsegments,
                         SizeType nbins,
@@ -1213,7 +1201,6 @@ generate_bp_circ_taylor(std::span<const std::vector<double>> param_arr,
                         double p_orb_min,
                         double minimum_snap_cells,
                         bool use_conservative_tile) {
-    constexpr double kEps              = 1e-12;
     constexpr SizeType kParamsExpected = 5;
     error_check::check_equal(param_arr.size(), kParamsExpected,
                              "param_arr must have 5 parameters");
@@ -1249,14 +1236,14 @@ generate_bp_circ_taylor(std::span<const std::vector<double>> param_arr,
         for (SizeType j = 0; j < poly_order; ++j) {
             if (j == poly_order - 1) {
                 const auto param_min =
-                    (1 - param_limits[j][1] / f0_batch[i]) * utils::kCval;
+                    (1 - param_limits[j].max / f0_batch[i]) * utils::kCval;
                 const auto param_max =
-                    (1 - param_limits[j][0] / f0_batch[i]) * utils::kCval;
+                    (1 - param_limits[j].min / f0_batch[i]) * utils::kCval;
                 param_ranges[(i * poly_order) + j] =
                     (param_max - param_min) / 2.0;
             } else {
                 param_ranges[(i * poly_order) + j] =
-                    (param_limits[j][1] - param_limits[j][0]) / 2.0;
+                    (param_limits[j].max - param_limits[j].min) / 2.0;
             }
         }
     }
@@ -1291,18 +1278,18 @@ generate_bp_circ_taylor(std::span<const std::vector<double>> param_arr,
             for (SizeType j = 1; j < poly_order; ++j) {
                 const auto idx = (i * poly_order) + j;
                 const auto needs_branching =
-                    shift_bins_batch[idx] >= (eta - kEps);
+                    shift_bins_batch[idx] >= (eta - utils::kEps);
                 const auto too_large_step =
-                    dparam_new_batch[idx] > (param_ranges[idx] + kEps);
+                    dparam_new_batch[idx] > (param_ranges[idx] + utils::kEps);
 
                 if (!needs_branching || too_large_step) {
                     dparam_cur_next[idx] = dparam_cur_batch[idx];
                     continue;
                 }
-                const auto ratio =
-                    (dparam_cur_batch[idx] + kEps) / (dparam_new_batch[idx]);
-                const auto num_points =
-                    std::max(1, static_cast<int>(std::ceil(ratio - kEps)));
+                const auto ratio = (dparam_cur_batch[idx] + utils::kEps) /
+                                   (dparam_new_batch[idx]);
+                const auto num_points = std::max(
+                    1, static_cast<int>(std::ceil(ratio - utils::kEps)));
                 n_branches[i] *= static_cast<double>(num_points);
                 dparam_cur_next[idx] =
                     dparam_cur_batch[idx] / static_cast<double>(num_points);
@@ -1310,10 +1297,11 @@ generate_bp_circ_taylor(std::span<const std::vector<double>> param_arr,
         }
         // Determine validation fraction
         for (SizeType i = 0; i < n_freqs; ++i) {
-            const auto snap_val = param_limits[1][1];
+            const auto snap_val = param_limits[1].max;
             const auto dsnap    = dparam_cur_next[(i * poly_order) + 1];
             const auto snap_active =
-                std::abs(snap_val) > (minimum_snap_cells * (dsnap + kEps));
+                std::abs(snap_val) >
+                (minimum_snap_cells * (dsnap + utils::kEps));
             // Apply 0.5x if this is the first time snap becomes active
             const bool just_active = snap_active && !snap_first_branched[i];
             n_branches[i] *= just_active ? 0.5 : 1.0;

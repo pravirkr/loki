@@ -99,14 +99,15 @@ template <SupportedFoldType FoldType, typename Derived>
 class BasePruneDPFuncts : public PruneDPFuncts<FoldType> {
 protected:
     // Common members for all derived classes
-    std::vector<std::vector<double>> m_param_arr;
-    std::vector<double> m_dparams;
+    std::vector<SizeType> m_param_grid_count_init;
+    std::vector<double> m_dparams_init;
     SizeType m_nseg_ffa;
     double m_tseg_ffa;
     search::PulsarSearchConfig m_cfg;
     SizeType m_batch_size;
     SizeType m_branch_max;
 
+    SizeType m_n_coords_init{};
     // Buffer for shift-add operations
     std::vector<FoldType> m_scratch_shifts;
     // Buffer for ComplexType irfft transform
@@ -116,8 +117,8 @@ protected:
     detection::BoxcarWidthsCache m_boxcar_widths_cache;
 
     // Constructor for all derived classes
-    BasePruneDPFuncts(std::span<const std::vector<double>> param_arr,
-                      std::span<const double> dparams,
+    BasePruneDPFuncts(std::span<const SizeType> param_grid_count_init,
+                      std::span<const double> dparams_init,
                       SizeType nseg_ffa,
                       double tseg_ffa,
                       search::PulsarSearchConfig cfg,
@@ -184,8 +185,8 @@ private:
         BaseTaylorPruneDPFuncts<FoldType, PrunePolyTaylorDPFuncts<FoldType>>;
 
 public:
-    PrunePolyTaylorDPFuncts(std::span<const std::vector<double>> param_arr,
-                            std::span<const double> dparams,
+    PrunePolyTaylorDPFuncts(std::span<const SizeType> param_grid_count_init,
+                            std::span<const double> dparams_init,
                             SizeType nseg_ffa,
                             double tseg_ffa,
                             search::PulsarSearchConfig cfg,
@@ -229,8 +230,8 @@ private:
         BaseTaylorPruneDPFuncts<FoldType, PruneCircTaylorDPFuncts<FoldType>>;
 
 public:
-    PruneCircTaylorDPFuncts(std::span<const std::vector<double>> param_arr,
-                            std::span<const double> dparams,
+    PruneCircTaylorDPFuncts(std::span<const SizeType> param_grid_count_init,
+                            std::span<const double> dparams_init,
                             SizeType nseg_ffa,
                             double tseg_ffa,
                             search::PulsarSearchConfig cfg,
@@ -272,8 +273,8 @@ public:
 template <SupportedFoldType FoldType>
 std::unique_ptr<PruneDPFuncts<FoldType>>
 create_prune_dp_functs(std::string_view poly_basis,
-                       std::span<const std::vector<double>> param_arr,
-                       std::span<const double> dparams,
+                       std::span<const SizeType> param_grid_count_init,
+                       std::span<const double> dparams_init,
                        SizeType nseg_ffa,
                        double tseg_ffa,
                        search::PulsarSearchConfig cfg,
@@ -370,24 +371,24 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA, typename Derived>
 class BasePruneDPFunctsCUDA : public PruneDPFunctsCUDA<FoldTypeCUDA> {
 protected:
     // Common members for all derived classes
-    std::vector<double> m_dparams;
     SizeType m_nseg_ffa;
     double m_tseg_ffa;
     search::PulsarSearchConfig m_cfg;
     SizeType m_batch_size;
     SizeType m_branch_max;
 
-    thrust::device_vector<double> m_accel_grid_d;
-    thrust::device_vector<float> m_freq_grid_d;
+    SizeType m_n_coords_init{};
+    thrust::device_vector<SizeType> m_param_grid_count_init_d;
+    thrust::device_vector<double> m_dparams_init_d;
+    thrust::device_vector<ParamLimit> m_param_limits_d;
     thrust::device_vector<uint32_t> m_boxcar_widths_d;
-    thrust::device_vector<ParamLimitTypeCUDA> m_param_limits_d;
 
     // Buffer for ComplexType irfft transform
     thrust::device_vector<float> m_scratch_folds_d;
     std::unique_ptr<utils::IrfftExecutorCUDA> m_irfft_executor;
 
     // Constructor for all derived classes
-    BasePruneDPFunctsCUDA(std::span<const std::vector<double>> param_arr,
+    BasePruneDPFunctsCUDA(std::span<const SizeType> param_grid_count_init,
                           std::span<const double> dparams,
                           SizeType nseg_ffa,
                           double tseg_ffa,
@@ -416,13 +417,14 @@ public:
                    SizeType n_leaves,
                    cudaStream_t stream) noexcept override;
 
-    SizeType score_and_filter(cuda::std::span<const FoldTypeCUDA> folds_tree,
-                              cuda::std::span<float> scores_tree,
-                              cuda::std::span<uint32_t> indices_tree,
-                              float threshold,
-                              SizeType n_leaves,
-                              cudaStream_t stream,
-                              cuda_utils::DeviceCounter& counter) noexcept override;
+    SizeType
+    score_and_filter(cuda::std::span<const FoldTypeCUDA> folds_tree,
+                     cuda::std::span<float> scores_tree,
+                     cuda::std::span<uint32_t> indices_tree,
+                     float threshold,
+                     SizeType n_leaves,
+                     cudaStream_t stream,
+                     cuda_utils::DeviceCounter& counter) noexcept override;
 };
 
 // Intermediate base for Taylor-based methods (common seed implementation)
@@ -456,8 +458,8 @@ private:
                                     PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>>;
 
 public:
-    PrunePolyTaylorDPFunctsCUDA(std::span<const std::vector<double>> param_arr,
-                                std::span<const double> dparams,
+    PrunePolyTaylorDPFunctsCUDA(std::span<const SizeType> param_grid_count_init,
+                                std::span<const double> dparams_init,
                                 SizeType nseg_ffa,
                                 double tseg_ffa,
                                 search::PulsarSearchConfig cfg,
@@ -498,8 +500,8 @@ public:
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 std::unique_ptr<PruneDPFunctsCUDA<FoldTypeCUDA>>
 create_prune_dp_functs_cuda(std::string_view poly_basis,
-                            std::span<const std::vector<double>> param_arr,
-                            std::span<const double> dparams,
+                            std::span<const SizeType> param_grid_count_init,
+                            std::span<const double> dparams_init,
                             SizeType nseg_ffa,
                             double tseg_ffa,
                             search::PulsarSearchConfig cfg,

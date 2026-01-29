@@ -224,12 +224,12 @@ __global__ void kernel_ffa_resolve_taylor_poly_batch(
 
     if constexpr (NPARAMS == 2) {
         ffa_taylor_resolve_accel_batch_device<LATTER>(
-            param_arr_count, ncoords_offsets, param_limits, ncoords_offsets,
-            coords_ptrs, n_levels, ncoords_total, tseg_brute, nbins);
+            param_arr_count, ncoords_offsets, param_limits, coords_ptrs,
+            n_levels, ncoords_total, tseg_brute, nbins);
     } else {
         ffa_taylor_resolve_jerk_batch_device<LATTER>(
-            param_arr_count, ncoords_offsets, param_limits, ncoords_offsets,
-            coords_ptrs, n_levels, ncoords_total, tseg_brute, nbins, NPARAMS);
+            param_arr_count, ncoords_offsets, param_limits, coords_ptrs,
+            n_levels, ncoords_total, tseg_brute, nbins, NPARAMS);
     }
 }
 
@@ -279,7 +279,7 @@ void ffa_taylor_resolve_poly_batch_cuda(
     // Two-level dispatch for complete compile-time specialization
     auto dispatch = [&]<SizeType N, int L>() {
         kernel_ffa_resolve_taylor_poly_batch<N, L><<<grid, block, 0, stream>>>(
-            param_arr_count.data(), ncoords_offsets.data(), param_limits,
+            param_arr_count.data(), ncoords_offsets.data(), param_limits.data(),
             coords_ptrs, n_levels, ncoords_total, tseg_brute, nbins);
     };
     if (latter == 0) {

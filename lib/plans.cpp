@@ -190,13 +190,12 @@ struct FFAPlanBase::Impl {
     get_branching_pattern_approx(std::string_view poly_basis,
                                  SizeType ref_seg,
                                  IndexType isuggest) const {
-        const auto param_arr = compute_param_grid(n_levels - 1);
         if (poly_basis == "taylor") {
             return core::generate_bp_poly_taylor_approx(
-                param_arr, dparams_lim[n_levels - 1], m_cfg.get_param_limits(),
-                m_cfg.get_tseg_ffa(), nsegments[n_levels - 1],
-                m_cfg.get_nbins(), m_cfg.get_eta(), ref_seg, isuggest,
-                m_cfg.get_use_conservative_tile());
+                param_counts[n_levels - 1], dparams_lim[n_levels - 1],
+                m_cfg.get_param_limits(), m_cfg.get_tseg_ffa(),
+                nsegments[n_levels - 1], m_cfg.get_nbins(), m_cfg.get_eta(),
+                ref_seg, isuggest, m_cfg.get_use_conservative_tile());
         }
         throw std::invalid_argument(std::format(
             "Invalid poly_basis ({}) for branching pattern generation",

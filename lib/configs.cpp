@@ -480,4 +480,11 @@ PulsarSearchConfig PulsarSearchConfig::get_updated_config(
     std::span<const ParamLimit> param_limits) const noexcept {
     return m_impl->get_updated_config(nbins, eta, param_limits);
 }
+PulsarSearchConfig PulsarSearchConfig::get_updated_config(
+    SizeType nbins,
+    double eta,
+    double f_min,
+    double f_max) const noexcept {
+    return m_impl->get_updated_config(nbins, eta, f_min, f_max);
+}
 } // namespace loki::search

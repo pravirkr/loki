@@ -114,12 +114,13 @@ public:
                               m_threshold_scheme);
         // Execute based on thread count
         if (m_nthreads == 1) {
-            execute_single_threaded(ffa_fold, std::move(ffa_plan), ref_segs_to_process,
-                                    outdir, log_file, result_file, poly_basis,
-                                    show_progress);
+            execute_single_threaded(ffa_fold, std::move(ffa_plan),
+                                    ref_segs_to_process, outdir, log_file,
+                                    result_file, poly_basis, show_progress);
         } else {
-            execute_multi_threaded(ffa_fold, std::move(ffa_plan), ref_segs_to_process,
-                                   outdir, log_file, poly_basis, show_progress);
+            execute_multi_threaded(ffa_fold, std::move(ffa_plan),
+                                   ref_segs_to_process, outdir, log_file,
+                                   poly_basis, show_progress);
             cands::merge_prune_result_files(outdir, log_file, result_file);
         }
         spdlog::info("Pruning complete. Results saved to {}",
@@ -757,9 +758,8 @@ private:
         m_branch_max =
             std::max(static_cast<SizeType>(std::ceil(branch_max * 2)), 32UL);
         m_prune_funcs = core::create_prune_dp_functs<FoldType>(
-            m_poly_basis, m_ffa_plan.get_params().back(),
-            m_ffa_plan.get_dparams_lim().back(),
-            m_ffa_plan.get_nsegments().back(),
+            m_poly_basis, m_ffa_plan.get_param_counts().back(),
+            m_ffa_plan.get_dparams_lim().back(), m_ffa_plan.get_nsegments().back(),
             m_ffa_plan.get_tsegments().back(), m_cfg, m_batch_size,
             m_branch_max);
     }

@@ -6,12 +6,12 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pytest
+
+import loki
 from pyloki.config import ParamLimits, PulsarSearchConfig
 from pyloki.core import fold
 from pyloki.ffa import compute_ffa
 from pyloki.io.timeseries import TimeSeries
-
-import loki
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -69,7 +69,7 @@ def test_ffa_freq(
     use_fourier: bool,
 ) -> None:
     ts_e, ts_v = mock_data
-    param_limits = [(143.0, 144.0)]
+    param_limits = np.array([[143.0, 144.0]], dtype=np.float64)
     cfg_py = PulsarSearchConfig(
         eta=1,
         param_limits=param_limits,
@@ -107,7 +107,7 @@ def test_ffa_freq_fourier_return_to_time(
     default_params: dict[str, Any],
 ) -> None:
     ts_e, ts_v = mock_data
-    param_limits = [(143.0, 144.0)]
+    param_limits = np.array([[143.0, 144.0]], dtype=np.float64)
     cfg_py = PulsarSearchConfig(
         eta=1,
         param_limits=param_limits,
@@ -124,7 +124,10 @@ def test_ffa_freq_fourier_return_to_time(
     out_py = compute_ffa(TimeSeries(ts_e, ts_v, cfg_py.tsamp), cfg_py, quiet=True)
     out_py_time = np.fft.irfft(out_py).astype(np.float32)
     out_cpp, _ = loki.ffa.compute_ffa_fourier_return_to_time(
-        ts_e, ts_v, cfg_cpp, quiet=True
+        ts_e,
+        ts_v,
+        cfg_cpp,
+        quiet=True,
     )
     np.testing.assert_array_almost_equal(
         out_cpp.reshape(out_py_time.shape),
@@ -141,7 +144,7 @@ def test_ffa_accel(
     use_fourier: bool,
 ) -> None:
     ts_e, ts_v = mock_data
-    param_limits = [(-50.0, 50.0), (143.5, 144.0)]
+    param_limits = np.array([[-50.0, 50.0], [143.5, 144.0]], dtype=np.float64)
 
     cfg_py = PulsarSearchConfig(
         eta=2,
@@ -180,7 +183,7 @@ def test_ffa_accel_fourier_return_to_time(
     default_params: dict[str, Any],
 ) -> None:
     ts_e, ts_v = mock_data
-    param_limits = [(-50.0, 50.0), (143.5, 144.0)]
+    param_limits = np.array([[-50.0, 50.0], [143.5, 144.0]], dtype=np.float64)
 
     cfg_py = PulsarSearchConfig(
         eta=2,
@@ -198,7 +201,10 @@ def test_ffa_accel_fourier_return_to_time(
     out_py = compute_ffa(TimeSeries(ts_e, ts_v, cfg_py.tsamp), cfg_py, quiet=True)
     out_py_time = np.fft.irfft(out_py).astype(np.float32)
     out_cpp, _ = loki.ffa.compute_ffa_fourier_return_to_time(
-        ts_e, ts_v, cfg_cpp, quiet=True
+        ts_e,
+        ts_v,
+        cfg_cpp,
+        quiet=True,
     )
     np.testing.assert_array_almost_equal(
         out_cpp.reshape(out_py_time.shape),
@@ -282,7 +288,10 @@ def test_ffa_jerk_fourier_return_to_time(
     out_py = compute_ffa(TimeSeries(ts_e, ts_v, cfg_py.tsamp), cfg_py, quiet=True)
     out_py_time = np.fft.irfft(out_py).astype(np.float32)
     out_cpp, _ = loki.ffa.compute_ffa_fourier_return_to_time(
-        ts_e, ts_v, cfg_cpp, quiet=True
+        ts_e,
+        ts_v,
+        cfg_cpp,
+        quiet=True,
     )
     np.testing.assert_array_almost_equal(
         out_cpp.reshape(out_py_time.shape),

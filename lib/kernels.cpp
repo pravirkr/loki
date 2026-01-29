@@ -39,11 +39,14 @@ using AlignedFloatVec = std::vector<float, xsimd::aligned_allocator<float>>;
                                        float* __restrict__ out,
                                        SizeType nbins) noexcept {
 
-    const auto shift_tail =
-        static_cast<SizeType>(std::nearbyint(phase_shift_tail)) % nbins;
-    const auto shift_head =
-        static_cast<SizeType>(std::nearbyint(phase_shift_head)) % nbins;
-
+    auto shift_tail = static_cast<SizeType>(phase_shift_tail + 0.5F);
+    if (shift_tail == nbins) {
+        shift_tail = 0;
+    }
+    auto shift_head = static_cast<SizeType>(phase_shift_head + 0.5F);
+    if (shift_head == nbins) {
+        shift_head = 0;
+    }
     const float* __restrict__ data_tail_e = data_tail;
     const float* __restrict__ data_tail_v = data_tail + nbins;
     const float* __restrict__ data_head_e = data_head;
@@ -72,12 +75,12 @@ void shift_add_binary_with_buffer(const float* __restrict__ data_tail,
                                   float* __restrict__ out,
                                   float* __restrict__ temp_buffer,
                                   SizeType nbins) noexcept {
-    auto shift_tail = static_cast<SizeType>(std::nearbyint(phase_shift_tail));
-    if (shift_tail >= nbins) {
+    auto shift_tail = static_cast<SizeType>(phase_shift_tail + 0.5F);
+    if (shift_tail == nbins) {
         shift_tail = 0;
     }
-    auto shift_head = static_cast<SizeType>(std::nearbyint(phase_shift_head));
-    if (shift_head >= nbins) {
+    auto shift_head = static_cast<SizeType>(phase_shift_head + 0.5F);
+    if (shift_head == nbins) {
         shift_head = 0;
     }
     const SizeType total_size = 2 * nbins;
@@ -118,8 +121,8 @@ void shift_add_linear_with_buffer(const float* __restrict__ data_tail,
                                   float* __restrict__ out,
                                   float* __restrict__ temp_buffer,
                                   SizeType nbins) noexcept {
-    auto shift = static_cast<SizeType>(std::nearbyint(phase_shift));
-    if (shift >= nbins) {
+    auto shift = static_cast<SizeType>(phase_shift + 0.5F);
+    if (shift == nbins) {
         shift = 0;
     }
     const SizeType total_size = 2 * nbins;

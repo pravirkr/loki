@@ -2,6 +2,7 @@
 Checks: >
   bugprone-*,
   -bugprone-easily-swappable-parameters,
+  -bugprone-incorrect-roundings,
   clang-analyzer-*,
   clang-diagnostic-*,
   concurrency-*,

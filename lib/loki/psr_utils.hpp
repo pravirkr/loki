@@ -13,6 +13,7 @@
 
 #include "loki/common/types.hpp"
 #include "loki/exceptions.hpp"
+#include "loki/utils.hpp"
 
 namespace loki::psr_utils {
 
@@ -45,6 +46,20 @@ inline float get_phase_idx(double proper_time,
         iphase = 0.0;
     }
     return static_cast<float>(iphase);
+}
+
+// When using, iphase ∈ [0, nbins), half-up rounding is intentional and
+// deterministic.
+inline uint32_t get_phase_idx_uint(double proper_time,
+                                   double freq,
+                                   SizeType nbins,
+                                   double delay = 0.0) {
+    const float iphase = get_phase_idx(proper_time, freq, nbins, delay);
+    auto iphase_int    = static_cast<uint32_t>(iphase + 0.5F);
+    if (iphase_int == nbins) {
+        iphase_int = 0;
+    }
+    return iphase_int;
 }
 
 // Grid size for frequency and its derivatives {f_k, ..., f}.
@@ -138,10 +153,9 @@ inline void branch_one_param_padded(int p,
                                     SizeType* __restrict scratch_counts_ptr,
                                     SizeType flat_base,
                                     SizeType branch_max) {
-    constexpr double kEps     = 1e-12;
     const SizeType pad_offset = (flat_base + p) * branch_max;
 
-    if (shift_bins_ptr[flat_base + p] >= (eta - kEps)) {
+    if (shift_bins_ptr[flat_base + p] >= (eta - utils::kEps)) {
         auto slice =
             std::span<double>(scratch_params_ptr + pad_offset, branch_max);
         auto [dparam_act, count] = psr_utils::branch_param_padded(
@@ -156,10 +170,36 @@ inline void branch_one_param_padded(int p,
 }
 
 // Count the number of parameters in a range.
-SizeType range_param_count(double vmin, double vmax, double dv);
+inline SizeType range_param_count(double vmin, double vmax, double dv) {
+    error_check::check_greater(vmax, vmin, "vmax must be greater than vmin");
+    error_check::check_greater(dv, 0, "dv must be positive");
+    // Check if step size is larger than half the range
+    if (dv > (vmax - vmin) / 2.0) {
+        return 1;
+    }
+    // np.linspace(vmin, vmax, npoints + 2)[1:-1]
+    return static_cast<SizeType>((vmax - vmin) / dv);
+}
 
 // Generate an evenly spaced array of values between vmin and vmax.
-std::vector<double> range_param(double vmin, double vmax, double dv);
+inline std::vector<double> range_param(double vmin, double vmax, double dv) {
+    error_check::check_greater(vmax, vmin, "vmax must be greater than vmin");
+    error_check::check_greater(dv, 0, "dv must be positive");
+    // Check if step size is larger than half the range
+    if (dv > (vmax - vmin) / 2.0) {
+        return {(vmax + vmin) / 2.0};
+    }
+    // np.linspace(vmin, vmax, npoints + 2)[1:-1]
+    const auto npoints = static_cast<SizeType>((vmax - vmin) / dv);
+
+    std::vector<double> result(npoints);
+    const auto step = (vmax - vmin) / static_cast<double>(npoints + 1);
+    // Start from i=1, end at i=total_points-1 (exclusive)
+    for (SizeType i = 0; i < npoints; ++i) {
+        result[i] = vmin + (step * static_cast<double>(i + 1));
+    }
+    return result;
+}
 
 // Compute the range_param on the fly
 inline double
@@ -187,14 +227,16 @@ inline SizeType get_nearest_idx_analytical(double val,
     const double step_inv =
         static_cast<double>(count + 1) / (limit.max - limit.min);
     const double raw_idx = ((val - limit.min) * step_inv) - 1.0;
-    const auto idx       = static_cast<SizeType>(std::nearbyint(raw_idx));
+
+    // explicit half-up
+    const auto idx = static_cast<int>(raw_idx + 0.5 + utils::kEps);
     if (idx < 0) {
         return 0;
     }
-    if (idx >= count) {
+    if (idx >= static_cast<int>(count)) {
         return count - 1;
     }
-    return idx;
+    return static_cast<SizeType>(idx);
 }
 
 /**

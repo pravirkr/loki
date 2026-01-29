@@ -5,8 +5,8 @@
 #include <thrust/device_vector.h>
 
 #include "loki/common/types.hpp"
-#include "loki/cuda_utils.cuh"
 #include "loki/cub_helpers.cuh"
+#include "loki/cuda_utils.cuh"
 
 namespace loki::kernels {
 
@@ -41,18 +41,18 @@ kernel_shift_add_linear(const float* __restrict__ folds_tree,
     if (nbins >= kWarpSize && (nbins & (kWarpSize - 1)) == 0) {
         // warp maps to a single leaf → safe to broadcast
         const uint32_t lane = threadIdx.x & (kWarpSize - 1);
+        const uint32_t mask = __activemask();
         if (lane == 0) {
-            shift = __float2uint_rn(phase_shift[ileaf]);
-            if (shift >= nbins) {
+            shift = __float2uint_rz(phase_shift[ileaf] + 0.5F);
+            if (shift == nbins) {
                 shift = 0;
             }
         }
-        const uint32_t mask = __activemask();
-        shift               = __shfl_sync(mask, shift, 0);
+        shift = __shfl_sync(mask, shift, 0);
     } else {
         // warp spans multiple leaves, must compute per-thread
-        shift = __float2uint_rn(phase_shift[ileaf]);
-        if (shift >= nbins) {
+        shift = __float2uint_rz(phase_shift[ileaf] + 0.5F);
+        if (shift == nbins) {
             shift = 0;
         }
     }
@@ -169,27 +169,30 @@ __global__ void kernel_ffa_iter(const float* __restrict__ fold_in,
     if (nbins >= kWarpSize && (nbins & (kWarpSize - 1)) == 0) {
         // warp maps to a single leaf → safe to broadcast
         const uint32_t lane = threadIdx.x & (kWarpSize - 1);
+        // MUST capture mask BEFORE the if(lane == 0) divergence.
+        // This ensures all threads in the warp participate in the shuffle.
+        const uint32_t mask = __activemask();
         if (lane == 0) {
-            shift_tail = __float2uint_rn(coords.shift_tail[icoord]);
-            shift_head = __float2uint_rn(coords.shift_head[icoord]);
-            if (shift_tail >= nbins) {
+            shift_tail = __float2uint_rz(coords.shift_tail[icoord] + 0.5F);
+            shift_head = __float2uint_rz(coords.shift_head[icoord] + 0.5F);
+            if (shift_tail == nbins) {
                 shift_tail = 0;
             }
-            if (shift_head >= nbins) {
+            if (shift_head == nbins) {
                 shift_head = 0;
             }
         }
-        const uint32_t mask = __activemask();
-        shift_tail          = __shfl_sync(mask, shift_tail, 0);
-        shift_head          = __shfl_sync(mask, shift_head, 0);
+        // Broadcast with a consistent mask to avoid undefined behavior.
+        shift_tail = __shfl_sync(mask, shift_tail, 0);
+        shift_head = __shfl_sync(mask, shift_head, 0);
     } else {
         // warp spans multiple leaves, must compute per-thread
-        shift_tail = __float2uint_rn(coords.shift_tail[icoord]);
-        shift_head = __float2uint_rn(coords.shift_head[icoord]);
-        if (shift_tail >= nbins) {
+        shift_tail = __float2uint_rz(coords.shift_tail[icoord] + 0.5F);
+        shift_head = __float2uint_rz(coords.shift_head[icoord] + 0.5F);
+        if (shift_tail == nbins) {
             shift_tail = 0;
         }
-        if (shift_head >= nbins) {
+        if (shift_head == nbins) {
             shift_head = 0;
         }
     }
@@ -247,18 +250,19 @@ __global__ void kernel_ffa_freq_iter(const float* __restrict__ fold_in,
     if (nbins >= kWarpSize && (nbins & (kWarpSize - 1)) == 0) {
         // warp maps to a single leaf → safe to broadcast
         const uint32_t lane = threadIdx.x & (kWarpSize - 1);
+        const uint32_t mask = __activemask();
         if (lane == 0) {
-            shift = __float2uint_rn(coords.shift[icoord]);
-            if (shift >= nbins) {
+            shift = __float2uint_rz(coords.shift[icoord] + 0.5F);
+            if (shift == nbins) {
                 shift = 0;
             }
         }
-        const uint32_t mask = __activemask();
-        shift               = __shfl_sync(mask, shift, 0);
+
+        shift = __shfl_sync(mask, shift, 0);
     } else {
         // warp spans multiple leaves, must compute per-thread
-        shift = __float2uint_rn(coords.shift[icoord]);
-        if (shift >= nbins) {
+        shift = __float2uint_rz(coords.shift[icoord] + 0.5F);
+        if (shift == nbins) {
             shift = 0;
         }
     }
@@ -307,8 +311,8 @@ kernel_ffa_freq_iter_shared(const float* __restrict__ fold_in,
 
     // Precompute coordinate data (avoid repeated access)
     const uint32_t coord_idx = coords.idx[icoord];
-    uint32_t shift           = __float2uint_rn(coords.shift[icoord]);
-    if (shift >= nbins) {
+    uint32_t shift           = __float2uint_rz(coords.shift[icoord] + 0.5F);
+    if (shift == nbins) {
         shift = 0;
     }
 
@@ -372,7 +376,10 @@ __global__ void kernel_ffa_freq_iter_warp(const float* __restrict__ fold_in,
 
     // Warp-level shared memory (via shuffle)
     const uint32_t coord_idx = coords.idx[icoord];
-    const uint32_t shift     = __float2uint_rn(coords.shift[icoord]) % nbins;
+    uint32_t shift           = __float2uint_rz(coords.shift[icoord] + 0.5F);
+    if (shift == nbins) {
+        shift = 0;
+    }
 
     // Calculate memory offsets
     const uint32_t total_size = 2 * nbins;
@@ -393,10 +400,11 @@ __global__ void kernel_ffa_freq_iter_warp(const float* __restrict__ fold_in,
         (lane_id < shift) ? (lane_id + nbins - shift) : (lane_id - shift);
 
     // Shuffle to get unrotated values
+    const uint32_t mask = __activemask();
     const float head_e_unrot =
-        __shfl_sync(__activemask(), head_e, static_cast<int>(src_lane));
+        __shfl_sync(mask, head_e, static_cast<int>(src_lane));
     const float head_v_unrot =
-        __shfl_sync(__activemask(), head_v, static_cast<int>(src_lane));
+        __shfl_sync(mask, head_v, static_cast<int>(src_lane));
 
     // Load tail (coalesced), add, and write (coalesced)
     fold_out[out_offset + lane_id] =

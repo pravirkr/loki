@@ -17,13 +17,30 @@
 namespace loki::cands {
 
 namespace {
-// Round-half-to-even (bankers' rounding)
+// Explicit Round-half-to-even (bankers' rounding) to match numpy.round()
+// Never use std::round() or std::nearbyint() as they are not deterministic.
 double round_dp(double x, int digits) noexcept {
     if (!std::isfinite(x)) {
         return x;
     }
+
     const double scale = std::pow(10.0, digits);
-    return std::nearbyint(x * scale) / scale;
+    const double y     = x * scale;
+
+    const double f = std::floor(y);
+    const double r = y - f;
+
+    double rounded;
+    if (r > 0.5) {
+        rounded = f + 1.0;
+    } else if (r < 0.5) {
+        rounded = f;
+    } else {
+        // exactly .5 → tie to even
+        rounded = (std::fmod(f, 2.0) == 0.0) ? f : (f + 1.0);
+    }
+
+    return rounded / scale;
 }
 
 // Returns (ref_seg, task_id) as integers, or (-1, -1) if not matched

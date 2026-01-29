@@ -19,17 +19,20 @@ __device__ __forceinline__ double get_param_val_at_idx_device(double vmin,
 
 __device__ __forceinline__ uint32_t get_nearest_idx_analytical_device(
     double val, double vmin, double vmax, uint32_t count) {
+    if (count == 0) {
+        return 0;
+    }
     const double step_inv = static_cast<double>(count + 1) / (vmax - vmin);
     const double raw_idx  = ((val - vmin) * step_inv) - 1.0;
-    const auto idx        = static_cast<uint32_t>(nearbyint(raw_idx));
-
+    // Explicit half-up rounding, signed first
+    const int idx = __double2int_rz(raw_idx + 0.5 + utils::kEps);
     if (idx < 0) {
         return 0;
     }
-    if (idx >= count) {
+    if (idx >= static_cast<int>(count)) {
         return count - 1;
     }
-    return idx;
+    return static_cast<uint32_t>(idx);
 }
 
 // Nearest linear scan

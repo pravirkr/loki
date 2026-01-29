@@ -49,6 +49,7 @@ struct FFAWorkspaceCUDA<FoldTypeCUDA>::Data {
         m_fold_internal_d.resize(buffer_size, DeviceFoldType{});
         m_param_counts_d.resize(n_levels * n_params);
         m_ncoords_offsets_d.resize(n_levels + 1);
+        m_param_limits_d.resize(n_params);
 
         if (is_freq_only) {
             // coords_freq.resize(coord_size);
@@ -67,6 +68,7 @@ struct FFAWorkspaceCUDA<FoldTypeCUDA>::Data {
         m_fold_internal_d.resize(buffer_size, DeviceFoldType{});
         m_param_counts_d.resize(n_levels * n_params);
         m_ncoords_offsets_d.resize(n_levels + 1);
+        m_param_limits_d.resize(n_params);
 
         if (is_freq_only) {
             // coords_freq.resize(coord_size);

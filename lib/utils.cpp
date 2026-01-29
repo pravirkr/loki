@@ -187,7 +187,6 @@ std::vector<SizeType>
 determine_ref_segs(SizeType nsegments,
                    std::optional<SizeType> n_runs,
                    std::optional<std::vector<SizeType>> ref_segs) {
-    // ref_segs = list(np.linspace(0, dyp.nsegments - 1, n_runs, dtype=int))
     if (n_runs.has_value()) {
         // n_runs takes precedence over ref_segs
         const auto n_runs_val = n_runs.value();
@@ -200,12 +199,10 @@ determine_ref_segs(SizeType nsegments,
         if (n_runs_val == 1) {
             ref_segs_val[0] = 0;
         } else {
-            const auto denom = static_cast<double>(n_runs_val - 1);
-            const auto max   = static_cast<double>(nsegments - 1);
+            const SizeType max   = nsegments - 1;
+            const SizeType denom = n_runs_val - 1;
             for (SizeType i = 0; i < n_runs_val; ++i) {
-                // ties → even (to match numpy)
-                ref_segs_val[i] = static_cast<SizeType>(
-                    std::rint(static_cast<double>(i) * max / denom));
+                ref_segs_val[i] = (i * max) / denom; // integer division
             }
         }
         return ref_segs_val;

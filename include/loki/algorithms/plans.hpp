@@ -157,7 +157,7 @@ public:
     explicit FFAPlan(const search::PulsarSearchConfig& cfg);
 
     // --- Rule of five: PIMPL ---
-    ~FFAPlan() override;
+    ~FFAPlan() override                    = default;
     FFAPlan(FFAPlan&&) noexcept            = default;
     FFAPlan& operator=(FFAPlan&&) noexcept = default;
     FFAPlan(const FFAPlan&)                = delete;
