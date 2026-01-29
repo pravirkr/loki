@@ -34,25 +34,20 @@ struct FFAWorkspaceCUDA<FoldTypeCUDA>::Data {
     thrust::device_vector<DeviceFoldType> m_fold_internal_d;
 
     // Buffers for device resolve
-    thrust::device_vector<double> m_params_d;
     thrust::device_vector<uint32_t> m_param_counts_d;
-    thrust::device_vector<uint32_t> m_params_flat_offsets_d;
     thrust::device_vector<uint32_t> m_ncoords_offsets_d;
+    thrust::device_vector<ParamLimit> m_param_limits_d;
 
     Data() = default;
 
     explicit Data(const plans::FFAPlan<HostFoldType>& ffa_plan) {
-        const auto n_levels = ffa_plan.get_n_levels();
-        const auto n_params = ffa_plan.get_n_params();
-        const auto total_params_flat_count =
-            ffa_plan.get_total_params_flat_count();
+        const auto n_levels     = ffa_plan.get_n_levels();
+        const auto n_params     = ffa_plan.get_n_params();
         const auto buffer_size  = ffa_plan.get_buffer_size();
         const auto coord_size   = ffa_plan.get_coord_size();
         const bool is_freq_only = n_params == 1;
         m_fold_internal_d.resize(buffer_size, DeviceFoldType{});
-        m_params_d.resize(total_params_flat_count);
         m_param_counts_d.resize(n_levels * n_params);
-        m_params_flat_offsets_d.resize(n_levels);
         m_ncoords_offsets_d.resize(n_levels + 1);
 
         if (is_freq_only) {
@@ -66,14 +61,11 @@ struct FFAWorkspaceCUDA<FoldTypeCUDA>::Data {
 
     explicit Data(SizeType buffer_size,
                   SizeType coord_size,
-                  SizeType total_params_flat_count,
                   SizeType n_levels,
                   SizeType n_params) {
         const bool is_freq_only = n_params == 1;
         m_fold_internal_d.resize(buffer_size, DeviceFoldType{});
-        m_params_d.resize(total_params_flat_count);
         m_param_counts_d.resize(n_levels * n_params);
-        m_params_flat_offsets_d.resize(n_levels);
         m_ncoords_offsets_d.resize(n_levels + 1);
 
         if (is_freq_only) {
@@ -86,10 +78,8 @@ struct FFAWorkspaceCUDA<FoldTypeCUDA>::Data {
     }
 
     void validate(const plans::FFAPlan<HostFoldType>& ffa_plan) const {
-        const auto n_levels = ffa_plan.get_n_levels();
-        const auto n_params = ffa_plan.get_n_params();
-        const auto total_params_flat_count =
-            ffa_plan.get_total_params_flat_count();
+        const auto n_levels     = ffa_plan.get_n_levels();
+        const auto n_params     = ffa_plan.get_n_params();
         const auto buffer_size  = ffa_plan.get_buffer_size();
         const auto coord_size   = ffa_plan.get_coord_size();
         const bool is_freq_only = n_params == 1;
@@ -98,14 +88,8 @@ struct FFAWorkspaceCUDA<FoldTypeCUDA>::Data {
             m_fold_internal_d.size(), buffer_size,
             "FFAWorkspaceCUDA: fold_internal buffer too small");
         error_check::check_greater_equal(
-            m_params_d.size(), total_params_flat_count,
-            "FFAWorkspaceCUDA: params buffer too small");
-        error_check::check_greater_equal(
             m_param_counts_d.size(), n_levels * n_params,
             "FFAWorkspaceCUDA: param counts buffer too small");
-        error_check::check_greater_equal(
-            m_params_flat_offsets_d.size(), n_levels,
-            "FFAWorkspaceCUDA: params flat offsets buffer too small");
         error_check::check_greater_equal(
             m_ncoords_offsets_d.size(), n_levels + 1,
             "FFAWorkspaceCUDA: ncoords offsets buffer too small");
@@ -132,10 +116,9 @@ struct FFAWorkspaceCUDA<FoldTypeCUDA>::Data {
         const auto nbins         = ffa_plan.get_config().get_nbins();
         auto coord_ptrs          = m_coords_freq_d.get_raw_ptrs();
         core::ffa_taylor_resolve_freq_batch_cuda(
-            cuda_utils::as_span(m_params_d),
             cuda_utils::as_span(m_param_counts_d),
-            cuda_utils::as_span(m_params_flat_offsets_d),
-            cuda_utils::as_span(m_ncoords_offsets_d), coord_ptrs, n_levels,
+            cuda_utils::as_span(m_ncoords_offsets_d),
+            cuda_utils::as_span(m_param_limits_d), coord_ptrs, n_levels,
             ncoords_total, tseg_brute, nbins, stream);
     }
 
@@ -151,36 +134,26 @@ struct FFAWorkspaceCUDA<FoldTypeCUDA>::Data {
         auto coord_ptrs          = m_coords_d.get_raw_ptrs();
         // Tail coordinates
         core::ffa_taylor_resolve_poly_batch_cuda(
-            cuda_utils::as_span(m_params_d),
             cuda_utils::as_span(m_param_counts_d),
-            cuda_utils::as_span(m_params_flat_offsets_d),
-            cuda_utils::as_span(m_ncoords_offsets_d), coord_ptrs, n_levels,
+            cuda_utils::as_span(m_ncoords_offsets_d),
+            cuda_utils::as_span(m_param_limits_d), coord_ptrs, n_levels,
             ncoords_total, 0, tseg_brute, nbins, n_params, stream);
 
         // Head coordinates
         core::ffa_taylor_resolve_poly_batch_cuda(
-            cuda_utils::as_span(m_params_d),
             cuda_utils::as_span(m_param_counts_d),
-            cuda_utils::as_span(m_params_flat_offsets_d),
-            cuda_utils::as_span(m_ncoords_offsets_d), coord_ptrs, n_levels,
+            cuda_utils::as_span(m_ncoords_offsets_d),
+            cuda_utils::as_span(m_param_limits_d), coord_ptrs, n_levels,
             ncoords_total, 1, tseg_brute, nbins, n_params, stream);
     }
 
     void copy_plan_to_device(const plans::FFAPlan<HostFoldType>& ffa_plan,
                              cudaStream_t stream) {
 
-        const auto params_flat         = ffa_plan.get_params_flat();
-        const auto param_counts        = ffa_plan.get_param_counts_flat();
-        const auto params_flat_offsets = ffa_plan.get_params_flat_offsets();
-        const auto ncoords_offsets     = ffa_plan.get_ncoords_offsets();
-
+        const auto param_counts    = ffa_plan.get_param_counts_flat();
+        const auto ncoords_offsets = ffa_plan.get_ncoords_offsets();
+        const auto param_limits    = ffa_plan.get_config().get_param_limits();
         // Copy resolve ingredients to device
-        cuda_utils::check_cuda_call(
-            cudaMemcpyAsync(thrust::raw_pointer_cast(m_params_d.data()),
-                            params_flat.data(),
-                            params_flat.size() * sizeof(double),
-                            cudaMemcpyHostToDevice, stream),
-            "cudaMemcpyAsync params failed");
         cuda_utils::check_cuda_call(
             cudaMemcpyAsync(thrust::raw_pointer_cast(m_param_counts_d.data()),
                             param_counts.data(),
@@ -189,18 +162,17 @@ struct FFAWorkspaceCUDA<FoldTypeCUDA>::Data {
             "cudaMemcpyAsync param counts failed");
         cuda_utils::check_cuda_call(
             cudaMemcpyAsync(
-                thrust::raw_pointer_cast(m_params_flat_offsets_d.data()),
-                params_flat_offsets.data(),
-                params_flat_offsets.size() * sizeof(uint32_t),
-                cudaMemcpyHostToDevice, stream),
-            "cudaMemcpyAsync params flat offsets failed");
-        cuda_utils::check_cuda_call(
-            cudaMemcpyAsync(
                 thrust::raw_pointer_cast(m_ncoords_offsets_d.data()),
                 ncoords_offsets.data(),
                 ncoords_offsets.size() * sizeof(uint32_t),
                 cudaMemcpyHostToDevice, stream),
             "cudaMemcpyAsync ncoords offsets failed");
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(thrust::raw_pointer_cast(m_param_limits_d.data()),
+                            param_limits.data(),
+                            param_limits.size() * sizeof(ParamLimit),
+                            cudaMemcpyHostToDevice, stream),
+            "cudaMemcpyAsync param limits failed");
         cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
                                     "cudaStreamSynchronize failed");
     }
@@ -513,7 +485,7 @@ private:
     void initialize_brute_fold() {
         const auto t_ref =
             m_is_freq_only ? 0.0 : m_ffa_plan.get_tsegments()[0] / 2.0;
-        const auto freqs_arr = m_ffa_plan.get_params()[0].back();
+        const auto freqs_arr = m_ffa_plan.compute_param_grid(0).back();
 
         // Check if we need lossy initialization (ComplexTypeCUDA with large
         // nbins)
@@ -713,17 +685,13 @@ FFAWorkspaceCUDA<FoldTypeCUDA>::FFAWorkspaceCUDA(
     : m_data(std::make_unique<Data>(ffa_plan)) {}
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
-FFAWorkspaceCUDA<FoldTypeCUDA>::FFAWorkspaceCUDA(
-    SizeType buffer_size,
-    SizeType coord_size,
-    SizeType total_params_flat_count,
-    SizeType n_levels,
-    SizeType n_params)
-    : m_data(std::make_unique<Data>(buffer_size,
-                                    coord_size,
-                                    total_params_flat_count,
-                                    n_levels,
-                                    n_params)) {}
+FFAWorkspaceCUDA<FoldTypeCUDA>::FFAWorkspaceCUDA(SizeType buffer_size,
+                                                 SizeType coord_size,
+                                                 SizeType n_levels,
+                                                 SizeType n_params)
+    : m_data(
+          std::make_unique<Data>(buffer_size, coord_size, n_levels, n_params)) {
+}
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 FFAWorkspaceCUDA<FoldTypeCUDA>::~FFAWorkspaceCUDA() = default;

@@ -21,10 +21,9 @@ namespace {
 
 template <int LATTER>
 __device__ __forceinline__ void ffa_taylor_resolve_accel_batch_device(
-    const double* __restrict__ param_arr_flat,
     const uint32_t* __restrict__ param_arr_count,
-    const uint32_t* __restrict__ params_flat_offsets,
     const uint32_t* __restrict__ ncoords_offsets,
+    const ParamLimit* __restrict__ param_limits,
     coord::FFACoordDPtrs coords_ptrs,
     uint32_t n_levels,
     uint32_t ncoords_total,
@@ -45,26 +44,21 @@ __device__ __forceinline__ void ffa_taylor_resolve_accel_batch_device(
     }
     // Decompose index (f fast moving)
     // idx = a * n_freq + f
-    const uint32_t local_tid    = tid - ncoords_offsets[i_level];
-    const uint32_t n_accel      = param_arr_count[i_level * kParams + 0];
-    const uint32_t n_freq       = param_arr_count[i_level * kParams + 1];
-    const uint32_t n_accel_prev = param_arr_count[(i_level - 1) * kParams + 0];
-    const uint32_t n_freq_prev  = param_arr_count[(i_level - 1) * kParams + 1];
-    const uint32_t freq_idx     = local_tid % n_freq;
-    const uint32_t accel_idx    = (local_tid / n_freq) % n_accel;
+    const uint32_t local_tid   = tid - ncoords_offsets[i_level];
+    const uint32_t n_accel_cur = param_arr_count[(i_level * kParams) + 0];
+    const uint32_t n_freq_cur  = param_arr_count[(i_level * kParams) + 1];
+    const uint32_t n_accel_prev =
+        param_arr_count[((i_level - 1) * kParams) + 0];
+    const uint32_t n_freq_prev = param_arr_count[((i_level - 1) * kParams) + 1];
+    const uint32_t freq_idx    = local_tid % n_freq_cur;
+    const uint32_t accel_idx   = (local_tid / n_freq_cur) % n_accel_cur;
 
-    const uint32_t level_offset_cur  = params_flat_offsets[i_level];
-    const uint32_t level_offset_prev = params_flat_offsets[i_level - 1];
+    const double a_cur = utils::get_param_val_at_idx_device(
+        param_limits[0].min, param_limits[0].max, n_accel_cur, accel_idx);
+    const double f_cur = utils::get_param_val_at_idx_device(
+        param_limits[1].min, param_limits[1].max, n_freq_cur, freq_idx);
 
-    const double* accel_cur_ptr  = param_arr_flat + level_offset_cur;
-    const double* freq_cur_ptr   = param_arr_flat + level_offset_cur + n_accel;
-    const double* accel_prev_ptr = param_arr_flat + level_offset_prev;
-    const double* freq_prev_ptr =
-        param_arr_flat + level_offset_prev + n_accel_prev;
-    const double a_cur = accel_cur_ptr[accel_idx];
-    const double f_cur = freq_cur_ptr[freq_idx];
-
-    const double tsegment   = (1.0 * (1ULL << (i_level - 1))) * tseg_brute;
+    const double tsegment   = ldexp(tseg_brute, static_cast<int>(i_level - 1));
     const double delta_t    = (static_cast<double>(LATTER) - 0.5) * tsegment;
     const double delta_t_sq = delta_t * delta_t;
     const double v_new      = (a_cur * delta_t);
@@ -76,10 +70,10 @@ __device__ __forceinline__ void ffa_taylor_resolve_accel_batch_device(
     const float relative_phase =
         utils::get_phase_idx_device(delta_t, f_cur, nbins, delay_rel);
 
-    const uint32_t idx_a =
-        utils::lower_bound_scan(accel_prev_ptr, n_accel_prev, a_cur);
-    const uint32_t idx_f =
-        utils::lower_bound_scan(freq_prev_ptr, n_freq_prev, f_new);
+    const uint32_t idx_a = utils::get_nearest_idx_analytical_device(
+        a_cur, param_limits[0].min, param_limits[0].max, n_accel_prev);
+    const uint32_t idx_f = utils::get_nearest_idx_analytical_device(
+        f_new, param_limits[1].min, param_limits[1].max, n_freq_prev);
 
     const uint32_t final_idx = (idx_a * n_freq_prev) + idx_f;
 
@@ -94,10 +88,9 @@ __device__ __forceinline__ void ffa_taylor_resolve_accel_batch_device(
 
 template <int LATTER>
 __device__ __forceinline__ void ffa_taylor_resolve_jerk_batch_device(
-    const double* __restrict__ param_arr_flat,
     const uint32_t* __restrict__ param_arr_count,
-    const uint32_t* __restrict__ params_flat_offsets,
     const uint32_t* __restrict__ ncoords_offsets,
+    const ParamLimit* __restrict__ param_limits,
     coord::FFACoordDPtrs coords_ptrs,
     uint32_t n_levels,
     uint32_t ncoords_total,
@@ -121,37 +114,30 @@ __device__ __forceinline__ void ffa_taylor_resolve_jerk_batch_device(
     // idx = (j * n_accel + a) * n_freq + f
     const uint32_t po        = param_stride - kParams;
     const uint32_t local_tid = tid - ncoords_offsets[i_level];
-    const uint32_t n_jerk  = param_arr_count[(i_level * param_stride) + po + 0];
-    const uint32_t n_accel = param_arr_count[(i_level * param_stride) + po + 1];
-    const uint32_t n_freq  = param_arr_count[(i_level * param_stride) + po + 2];
+    const uint32_t n_jerk_cur =
+        param_arr_count[(i_level * param_stride) + po + 0];
+    const uint32_t n_accel_cur =
+        param_arr_count[(i_level * param_stride) + po + 1];
+    const uint32_t n_freq_cur =
+        param_arr_count[(i_level * param_stride) + po + 2];
     const uint32_t n_jerk_prev =
-        param_arr_count[(i_level - 1) * param_stride + po + 0];
+        param_arr_count[((i_level - 1) * param_stride) + po + 0];
     const uint32_t n_accel_prev =
-        param_arr_count[(i_level - 1) * param_stride + po + 1];
+        param_arr_count[((i_level - 1) * param_stride) + po + 1];
     const uint32_t n_freq_prev =
-        param_arr_count[(i_level - 1) * param_stride + po + 2];
-    const uint32_t freq_idx  = local_tid % n_freq;
-    const uint32_t accel_idx = (local_tid / n_freq) % n_accel;
-    const uint32_t jerk_idx  = local_tid / (n_freq * n_accel);
+        param_arr_count[((i_level - 1) * param_stride) + po + 2];
+    const uint32_t freq_idx  = local_tid % n_freq_cur;
+    const uint32_t accel_idx = (local_tid / n_freq_cur) % n_accel_cur;
+    const uint32_t jerk_idx  = local_tid / (n_freq_cur * n_accel_cur);
 
-    const uint32_t level_offset_cur  = params_flat_offsets[i_level];
-    const uint32_t level_offset_prev = params_flat_offsets[i_level - 1];
+    const double j_cur = utils::get_param_val_at_idx_device(
+        param_limits[0].min, param_limits[0].max, n_jerk_cur, jerk_idx);
+    const double a_cur = utils::get_param_val_at_idx_device(
+        param_limits[1].min, param_limits[1].max, n_accel_cur, accel_idx);
+    const double f_cur = utils::get_param_val_at_idx_device(
+        param_limits[2].min, param_limits[2].max, n_freq_cur, freq_idx);
 
-    const double* jerk_cur_ptr = param_arr_flat + level_offset_cur + po;
-    const double* accel_cur_ptr =
-        param_arr_flat + level_offset_cur + po + n_jerk;
-    const double* freq_cur_ptr =
-        param_arr_flat + level_offset_cur + po + n_jerk + n_accel;
-    const double* jerk_prev_ptr = param_arr_flat + level_offset_prev + po;
-    const double* accel_prev_ptr =
-        param_arr_flat + level_offset_prev + po + n_jerk_prev;
-    const double* freq_prev_ptr =
-        param_arr_flat + level_offset_prev + po + n_jerk_prev + n_accel_prev;
-    const double j_cur = jerk_cur_ptr[jerk_idx];
-    const double a_cur = accel_cur_ptr[accel_idx];
-    const double f_cur = freq_cur_ptr[freq_idx];
-
-    const double tsegment   = (1.0 * (1ULL << (i_level - 1))) * tseg_brute;
+    const double tsegment   = ldexp(tseg_brute, static_cast<int>(i_level - 1));
     const double delta_t    = (static_cast<double>(LATTER) - 0.5) * tsegment;
     const double delta_t_sq = delta_t * delta_t;
     const double a_new      = a_cur + (j_cur * delta_t);
@@ -165,12 +151,12 @@ __device__ __forceinline__ void ffa_taylor_resolve_jerk_batch_device(
     const float relative_phase =
         utils::get_phase_idx_device(delta_t, f_cur, nbins, delay_rel);
 
-    const uint32_t idx_j =
-        utils::lower_bound_scan(jerk_prev_ptr, n_jerk_prev, j_cur);
-    const uint32_t idx_a =
-        utils::lower_bound_scan(accel_prev_ptr, n_accel_prev, a_new);
-    const uint32_t idx_f =
-        utils::lower_bound_scan(freq_prev_ptr, n_freq_prev, f_new);
+    const uint32_t idx_j = utils::get_nearest_idx_analytical_device(
+        j_cur, param_limits[0].min, param_limits[0].max, n_jerk_prev);
+    const uint32_t idx_a = utils::get_nearest_idx_analytical_device(
+        a_new, param_limits[1].min, param_limits[1].max, n_accel_prev);
+    const uint32_t idx_f = utils::get_nearest_idx_analytical_device(
+        f_new, param_limits[2].min, param_limits[2].max, n_freq_prev);
 
     const uint32_t final_idx =
         (idx_j * n_accel_prev * n_freq_prev) + (idx_a * n_freq_prev) + idx_f;
@@ -185,10 +171,9 @@ __device__ __forceinline__ void ffa_taylor_resolve_jerk_batch_device(
 }
 
 __global__ void kernel_ffa_resolve_taylor_freq_batch(
-    const double* __restrict__ param_arr_flat,
     const uint32_t* __restrict__ param_arr_count,
-    const uint32_t* __restrict__ params_flat_offsets,
     const uint32_t* __restrict__ ncoords_offsets,
+    const ParamLimit* __restrict__ param_limits,
     coord::FFACoordFreqDPtrs coords_ptrs,
     uint32_t n_levels,
     uint32_t ncoords_total,
@@ -209,31 +194,26 @@ __global__ void kernel_ffa_resolve_taylor_freq_batch(
     // Decompose index (f fast moving)
     // idx = f
     const uint32_t local_tid   = tid - ncoords_offsets[i_level];
+    const uint32_t n_freq_cur  = param_arr_count[i_level];
     const uint32_t n_freq_prev = param_arr_count[i_level - 1];
     const uint32_t freq_idx    = local_tid;
 
-    const uint32_t level_offset_cur  = params_flat_offsets[i_level];
-    const uint32_t level_offset_prev = params_flat_offsets[i_level - 1];
-
-    const double* freq_cur_ptr  = param_arr_flat + level_offset_cur;
-    const double* freq_prev_ptr = param_arr_flat + level_offset_prev;
-    const double f_cur          = freq_cur_ptr[freq_idx];
-
-    const double delta_t = pow(2.0, i_level - 1) * tseg_brute;
+    const double delta_t = ldexp(tseg_brute, static_cast<int>(i_level - 1));
+    const double f_cur   = utils::get_param_val_at_idx_device(
+        param_limits[0].min, param_limits[0].max, n_freq_cur, freq_idx);
     const float relative_phase =
         utils::get_phase_idx_device(delta_t, f_cur, nbins, 0.0);
-    const uint32_t idx_f =
-        utils::lower_bound_scan(freq_prev_ptr, n_freq_prev, f_cur);
+    const uint32_t idx_f = utils::get_nearest_idx_analytical_device(
+        f_cur, param_limits[0].min, param_limits[0].max, n_freq_prev);
     coords_ptrs.idx[tid]   = idx_f;
     coords_ptrs.shift[tid] = relative_phase;
 }
 
 template <SizeType NPARAMS, int LATTER>
 __global__ void kernel_ffa_resolve_taylor_poly_batch(
-    const double* __restrict__ param_arr_flat,
     const uint32_t* __restrict__ param_arr_count,
-    const uint32_t* __restrict__ params_flat_offsets,
     const uint32_t* __restrict__ ncoords_offsets,
+    const ParamLimit* __restrict__ param_limits,
     coord::FFACoordDPtrs coords_ptrs,
     SizeType n_levels,
     SizeType ncoords_total,
@@ -244,34 +224,21 @@ __global__ void kernel_ffa_resolve_taylor_poly_batch(
 
     if constexpr (NPARAMS == 2) {
         ffa_taylor_resolve_accel_batch_device<LATTER>(
-            param_arr_flat, param_arr_count, params_flat_offsets,
-            ncoords_offsets, coords_ptrs, n_levels, ncoords_total, tseg_brute,
-            nbins);
-    } else if constexpr (NPARAMS == 3) {
+            param_arr_count, ncoords_offsets, param_limits, ncoords_offsets,
+            coords_ptrs, n_levels, ncoords_total, tseg_brute, nbins);
+    } else {
         ffa_taylor_resolve_jerk_batch_device<LATTER>(
-            param_arr_flat, param_arr_count, params_flat_offsets,
-            ncoords_offsets, coords_ptrs, n_levels, ncoords_total, tseg_brute,
-            nbins, NPARAMS);
-    } else if constexpr (NPARAMS == 4) {
-        ffa_taylor_resolve_jerk_batch_device<LATTER>(
-            param_arr_flat, param_arr_count, params_flat_offsets,
-            ncoords_offsets, coords_ptrs, n_levels, ncoords_total, tseg_brute,
-            nbins, NPARAMS);
-    } else if constexpr (NPARAMS == 5) {
-        ffa_taylor_resolve_jerk_batch_device<LATTER>(
-            param_arr_flat, param_arr_count, params_flat_offsets,
-            ncoords_offsets, coords_ptrs, n_levels, ncoords_total, tseg_brute,
-            nbins, NPARAMS);
+            param_arr_count, ncoords_offsets, param_limits, ncoords_offsets,
+            coords_ptrs, n_levels, ncoords_total, tseg_brute, nbins, NPARAMS);
     }
 }
 
 } // namespace
 
 void ffa_taylor_resolve_freq_batch_cuda(
-    cuda::std::span<const double> param_arr_flat,
     cuda::std::span<const uint32_t> param_arr_count,
-    cuda::std::span<const uint32_t> params_flat_offsets,
     cuda::std::span<const uint32_t> ncoords_offsets,
+    cuda::std::span<const ParamLimit> param_limits,
     coord::FFACoordFreqDPtrs coords_ptrs,
     SizeType n_levels,
     SizeType ncoords_total,
@@ -285,18 +252,16 @@ void ffa_taylor_resolve_freq_batch_cuda(
     cuda_utils::check_kernel_launch_params(grid, block);
 
     kernel_ffa_resolve_taylor_freq_batch<<<grid, block, 0, stream>>>(
-        param_arr_flat.data(), param_arr_count.data(),
-        params_flat_offsets.data(), ncoords_offsets.data(), coords_ptrs,
-        n_levels, ncoords_total, tseg_brute, nbins);
+        param_arr_count.data(), ncoords_offsets.data(), param_limits.data(),
+        coords_ptrs, n_levels, ncoords_total, tseg_brute, nbins);
     cuda_utils::check_last_cuda_error(
         "FFA Taylor (freq) resolve kernel launch failed");
 }
 
 void ffa_taylor_resolve_poly_batch_cuda(
-    cuda::std::span<const double> param_arr_flat,
     cuda::std::span<const uint32_t> param_arr_count,
-    cuda::std::span<const uint32_t> params_flat_offsets,
     cuda::std::span<const uint32_t> ncoords_offsets,
+    cuda::std::span<const ParamLimit> param_limits,
     coord::FFACoordDPtrs coords_ptrs,
     SizeType n_levels,
     SizeType ncoords_total,
@@ -314,9 +279,8 @@ void ffa_taylor_resolve_poly_batch_cuda(
     // Two-level dispatch for complete compile-time specialization
     auto dispatch = [&]<SizeType N, int L>() {
         kernel_ffa_resolve_taylor_poly_batch<N, L><<<grid, block, 0, stream>>>(
-            param_arr_flat.data(), param_arr_count.data(),
-            params_flat_offsets.data(), ncoords_offsets.data(), coords_ptrs,
-            n_levels, ncoords_total, tseg_brute, nbins);
+            param_arr_count.data(), ncoords_offsets.data(), param_limits,
+            coords_ptrs, n_levels, ncoords_total, tseg_brute, nbins);
     };
     if (latter == 0) {
         switch (n_params) {

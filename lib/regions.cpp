@@ -60,7 +60,6 @@ template <SupportedFoldType FoldType> struct FFARegionStats<FoldType>::Impl {
     SizeType max_buffer_size{};
     SizeType max_coord_size{};
     SizeType max_ncoords{}; // maximum number of coordinates in the last level
-    SizeType max_total_params_flat_count{};
     SizeType max_ffa_levels{};
     SizeType n_widths{};
     SizeType n_params{};
@@ -71,7 +70,6 @@ template <SupportedFoldType FoldType> struct FFARegionStats<FoldType>::Impl {
     Impl(SizeType max_buffer_size,
          SizeType max_coord_size,
          SizeType max_ncoords,
-         SizeType max_total_params_flat_count,
          SizeType max_ffa_levels,
          SizeType n_widths,
          SizeType n_params,
@@ -81,7 +79,6 @@ template <SupportedFoldType FoldType> struct FFARegionStats<FoldType>::Impl {
         : max_buffer_size(max_buffer_size),
           max_coord_size(max_coord_size),
           max_ncoords(max_ncoords),
-          max_total_params_flat_count(max_total_params_flat_count),
           max_ffa_levels(max_ffa_levels),
           n_widths(n_widths),
           n_params(n_params),
@@ -101,9 +98,6 @@ template <SupportedFoldType FoldType> struct FFARegionStats<FoldType>::Impl {
         } else {
             return max_buffer_size;
         }
-    }
-    SizeType get_max_total_params_flat_count() const noexcept {
-        return max_total_params_flat_count;
     }
     SizeType get_max_ffa_levels() const noexcept { return max_ffa_levels; }
     SizeType get_max_scores_size() const noexcept {
@@ -143,16 +137,12 @@ template <SupportedFoldType FoldType> struct FFARegionStats<FoldType>::Impl {
             ((2 * n_samps + get_max_scores_size()) * sizeof(float) +
              (get_max_scores_size() * sizeof(uint32_t))) /
             static_cast<float>(1ULL << 30U);
-        // resolve buffers
-        const float resolve_buffers_gb = get_max_total_params_flat_count() *
-                                         sizeof(double) /
-                                         static_cast<float>(1ULL << 30U);
         // m_fold_d_time
         const float fold_d_time_gb = get_max_buffer_size_time() *
                                      sizeof(float) /
                                      static_cast<float>(1ULL << 30U);
-        return device_extra_gb + fold_d_time_gb + resolve_buffers_gb +
-               get_buffer_memory_usage() + get_coord_memory_usage();
+        return device_extra_gb + fold_d_time_gb + get_buffer_memory_usage() +
+               get_coord_memory_usage();
     }
     float get_manager_memory_usage() const noexcept {
         if (use_gpu) {
@@ -192,7 +182,7 @@ private:
     bool m_use_gpu;
 
     std::vector<search::PulsarSearchConfig> m_cfgs;
-    FFARegionStats<FoldType> m_stats{0, 0, 0, 0, 0, 0, 0, 0, 0, m_use_gpu};
+    FFARegionStats<FoldType> m_stats{0, 0, 0, 0, 0, 0, 0, 0, m_use_gpu};
     std::vector<coord::FFAChunkStats> m_chunk_stats;
 
     double calculate_max_drift(const search::PulsarSearchConfig& cfg) const {
@@ -255,17 +245,15 @@ private:
         SizeType max_buffer_size{};
         SizeType max_coord_size{};
         SizeType max_ncoords{};
-        SizeType max_total_params_flat_count{};
         SizeType max_ffa_levels{};
         for (const auto& region : ffa_regions) {
-            subdivide_region_by_memory(
-                region.f_start, region.f_end, region.nbins, region.eta,
-                max_drift, max_buffer_size, max_coord_size, max_ncoords,
-                max_total_params_flat_count, max_ffa_levels);
+            subdivide_region_by_memory(region.f_start, region.f_end,
+                                       region.nbins, region.eta, max_drift,
+                                       max_buffer_size, max_coord_size,
+                                       max_ncoords, max_ffa_levels);
         }
         m_stats = FFARegionStats<FoldType>(
-            max_buffer_size, max_coord_size, max_ncoords,
-            max_total_params_flat_count, max_ffa_levels,
+            max_buffer_size, max_coord_size, max_ncoords, max_ffa_levels,
             m_base_cfg.get_n_scoring_widths(), m_base_cfg.get_nparams(),
             m_base_cfg.get_nsamps(), m_base_cfg.get_max_passing_candidates(),
             m_use_gpu);
@@ -282,7 +270,6 @@ private:
                                     SizeType& max_buffer_size,
                                     SizeType& max_coord_size,
                                     SizeType& max_ncoords,
-                                    SizeType& max_total_params_flat_count,
                                     SizeType& max_ffa_levels) {
         // For GPU, this is the device memory limit. For CPU, this is the
         // process memory limit.
@@ -305,13 +292,12 @@ private:
             const double min_f_end = f_end * (1.0 + max_drift);
             auto check_cfg         = m_base_cfg.get_updated_config(
                 nbins, eta, min_f_start, min_f_end);
-            plans::FFAPlanMetadata<FoldType> check_plan(std::move(check_cfg));
+            plans::FFAPlan<FoldType> check_plan(std::move(check_cfg));
 
             FFARegionStats<FoldType> min_stats{
                 check_plan.get_buffer_size(),
                 check_plan.get_coord_size(),
                 check_plan.get_ncoords().back(),
-                check_plan.get_total_params_flat_count(),
                 check_plan.get_n_levels(),
                 m_base_cfg.get_n_scoring_widths(),
                 m_base_cfg.get_nparams(),
@@ -364,13 +350,11 @@ private:
                     nbins, eta, f_probe * (1.0 - max_drift),
                     current_f_end * (1.0 + max_drift));
                 // Simulate the chunk
-                plans::FFAPlanMetadata<FoldType> test_plan(std::move(test_cfg));
+                plans::FFAPlan<FoldType> test_plan(std::move(test_cfg));
                 FFARegionStats<FoldType> sim_stats{
                     std::max(max_buffer_size, test_plan.get_buffer_size()),
                     std::max(max_coord_size, test_plan.get_coord_size()),
                     std::max(max_ncoords, test_plan.get_ncoords().back()),
-                    std::max(max_total_params_flat_count,
-                             test_plan.get_total_params_flat_count()),
                     std::max(max_ffa_levels, test_plan.get_n_levels()),
                     m_base_cfg.get_n_scoring_widths(),
                     m_base_cfg.get_nparams(),
@@ -430,7 +414,7 @@ private:
 
             auto chunk_cfg = m_base_cfg.get_updated_config(
                 nbins, eta, actual_start, actual_end);
-            plans::FFAPlanMetadata<FoldType> chunk_plan(chunk_cfg);
+            plans::FFAPlan<FoldType> chunk_plan(chunk_cfg);
             const double chunk_memory_gb =
                 chunk_plan.get_buffer_memory_usage() +
                 chunk_plan.get_coord_memory_usage();
@@ -458,9 +442,6 @@ private:
                 std::max(max_coord_size, chunk_plan.get_coord_size());
             max_ncoords =
                 std::max(max_ncoords, chunk_plan.get_ncoords().back());
-            max_total_params_flat_count =
-                std::max(max_total_params_flat_count,
-                         chunk_plan.get_total_params_flat_count());
             max_ffa_levels =
                 std::max(max_ffa_levels, chunk_plan.get_n_levels());
             // Move to next chunk (going backwards in frequency)
@@ -522,7 +503,6 @@ template <SupportedFoldType FoldType>
 FFARegionStats<FoldType>::FFARegionStats(SizeType max_buffer_size,
                                          SizeType max_coord_size,
                                          SizeType max_ncoords,
-                                         SizeType max_total_params_flat_count,
                                          SizeType max_ffa_levels,
                                          SizeType n_widths,
                                          SizeType n_params,
@@ -532,7 +512,6 @@ FFARegionStats<FoldType>::FFARegionStats(SizeType max_buffer_size,
     : m_impl(std::make_unique<Impl>(max_buffer_size,
                                     max_coord_size,
                                     max_ncoords,
-                                    max_total_params_flat_count,
                                     max_ffa_levels,
                                     n_widths,
                                     n_params,
@@ -572,11 +551,6 @@ SizeType FFARegionStats<FoldType>::get_max_ncoords() const noexcept {
 template <SupportedFoldType FoldType>
 SizeType FFARegionStats<FoldType>::get_max_ffa_levels() const noexcept {
     return m_impl->get_max_ffa_levels();
-}
-template <SupportedFoldType FoldType>
-SizeType
-FFARegionStats<FoldType>::get_max_total_params_flat_count() const noexcept {
-    return m_impl->get_max_total_params_flat_count();
 }
 template <SupportedFoldType FoldType>
 SizeType FFARegionStats<FoldType>::get_max_buffer_size_time() const noexcept {

@@ -137,7 +137,6 @@ public:
     explicit FFAWorkspaceCUDA(const plans::FFAPlan<HostFoldType>& ffa_plan);
     FFAWorkspaceCUDA(SizeType buffer_size,
                      SizeType coord_size,
-                     SizeType total_params_flat_count,
                      SizeType n_levels,
                      SizeType n_params);
 

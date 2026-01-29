@@ -9,13 +9,27 @@
 
 namespace loki::utils {
 
-__device__ __forceinline__ double
-range_param_at_device(double vmin, double vmax, uint32_t n, uint32_t i) {
-    if (n == 1) {
-        return 0.5 * (vmin + vmax);
+__device__ __forceinline__ double get_param_val_at_idx_device(double vmin,
+                                                              double vmax,
+                                                              uint32_t count,
+                                                              uint32_t i) {
+    const double step = (vmax - vmin) / static_cast<double>(count + 1);
+    return vmin + (step * static_cast<double>(i + 1));
+}
+
+__device__ __forceinline__ uint32_t get_nearest_idx_analytical_device(
+    double val, double vmin, double vmax, uint32_t count) {
+    const double step_inv = static_cast<double>(count + 1) / (vmax - vmin);
+    const double raw_idx  = ((val - vmin) * step_inv) - 1.0;
+    const auto idx        = static_cast<uint32_t>(nearbyint(raw_idx));
+
+    if (idx < 0) {
+        return 0;
     }
-    const double step = (vmax - vmin) / static_cast<double>(n + 1);
-    return vmin + step * static_cast<double>(i + 1);
+    if (idx >= count) {
+        return count - 1;
+    }
+    return idx;
 }
 
 // Nearest linear scan

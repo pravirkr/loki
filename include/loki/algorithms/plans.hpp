@@ -12,116 +12,65 @@
 
 namespace loki::plans {
 
-namespace detail {
-
 /**
  * @brief Base class for an FFA search plan.
  * @details
- * This class holds all lightweight type-invariant (non-template) data and logic
+ * This class holds all type-invariant (non-template) data and logic
  * for an FFA plan. This includes parameter grid sizes and segment lengths.
  */
 class FFAPlanBase {
-protected:
-    search::PulsarSearchConfig m_cfg;
-    SizeType m_n_params{};
-    SizeType m_n_levels{};
-    std::vector<SizeType> m_segment_lens;
-    std::vector<SizeType> m_nsegments;
-    std::vector<double> m_tsegments;
-    std::vector<SizeType> m_ncoords;
-    std::vector<float> m_ncoords_lb;
-    std::vector<uint32_t> m_ncoords_offsets;
-    std::vector<uint32_t> m_params_flat_offsets;
-    std::vector<uint32_t> m_params_flat_sizes;
-    std::vector<std::vector<SizeType>> m_param_counts;
-    std::vector<std::vector<SizeType>> m_param_cart_strides;
-    std::vector<std::vector<double>> m_dparams;
-    std::vector<std::vector<double>> m_dparams_lim;
-
 public:
     /**
      * @brief Constructs the FFA plan from a search configuration.
      * @param cfg The pulsar search configuration object.
      */
-    explicit FFAPlanBase(search::PulsarSearchConfig cfg);
+    explicit FFAPlanBase(const search::PulsarSearchConfig& cfg);
 
-    virtual ~FFAPlanBase()                         = default;
-    FFAPlanBase(const FFAPlanBase&)                = delete;
-    FFAPlanBase& operator=(const FFAPlanBase&)     = delete;
-    FFAPlanBase(FFAPlanBase&&) noexcept            = default;
-    FFAPlanBase& operator=(FFAPlanBase&&) noexcept = default;
+    // --- Rule of five: PIMPL ---
+    virtual ~FFAPlanBase();
+    FFAPlanBase(FFAPlanBase&&) noexcept;
+    FFAPlanBase& operator=(FFAPlanBase&&) noexcept;
+    FFAPlanBase(const FFAPlanBase&)            = delete;
+    FFAPlanBase& operator=(const FFAPlanBase&) = delete;
 
     // --- Getters ---
     /// @brief Get the search configuration object used to build the plan.
-    [[nodiscard]] const search::PulsarSearchConfig&
-    get_config() const noexcept {
-        return m_cfg;
-    }
+    [[nodiscard]] const search::PulsarSearchConfig& get_config() const noexcept;
     /// @brief Number of parameters to search over (..., a, f).
-    SizeType get_n_params() const noexcept { return m_n_params; }
+    [[nodiscard]] SizeType get_n_params() const noexcept;
     /// @brief Number of FFA merge levels.
-    SizeType get_n_levels() const noexcept { return m_n_levels; }
+    [[nodiscard]] SizeType get_n_levels() const noexcept;
     /// @brief Segment length for each level.
-    [[nodiscard]] std::span<const SizeType> get_segment_lens() const noexcept {
-        return m_segment_lens;
-    }
+    [[nodiscard]] std::span<const SizeType> get_segment_lens() const noexcept;
     /// @brief Number of segments for each level.
-    [[nodiscard]] std::span<const SizeType> get_nsegments() const noexcept {
-        return m_nsegments;
-    }
+    [[nodiscard]] std::span<const SizeType> get_nsegments() const noexcept;
     /// @brief Segment lengths in seconds.
-    [[nodiscard]] std::span<const double> get_tsegments() const noexcept {
-        return m_tsegments;
-    }
+    [[nodiscard]] std::span<const double> get_tsegments() const noexcept;
     /// @brief Number of coordinates for each level.
-    [[nodiscard]] std::span<const SizeType> get_ncoords() const noexcept {
-        return m_ncoords;
-    }
+    [[nodiscard]] std::span<const SizeType> get_ncoords() const noexcept;
     /// @brief Log2 of number of coordinates for each level.
-    [[nodiscard]] std::span<const float> get_ncoords_lb() const noexcept {
-        return m_ncoords_lb;
-    }
+    [[nodiscard]] std::span<const float> get_ncoords_lb() const noexcept;
     /// @brief Offset number of coordinates for each level (cumulative sum)
     /// including final sentinel.
     [[nodiscard]] std::span<const uint32_t>
-    get_ncoords_offsets() const noexcept {
-        return m_ncoords_offsets;
-    }
-    /// @brief Offset of the flattened parameters counts for each level
-    /// (cumulative sum) excluding final sentinel.
-    [[nodiscard]] std::span<const uint32_t>
-    get_params_flat_offsets() const noexcept {
-        return m_params_flat_offsets;
-    }
-    /// @brief Flattened parameters counts for each level.
-    [[nodiscard]] std::span<const uint32_t>
-    get_params_flat_sizes() const noexcept {
-        return m_params_flat_sizes;
-    }
+    get_ncoords_offsets() const noexcept;
     /// @brief Parameter grid count for each parameter.
     [[nodiscard]] const std::vector<std::vector<SizeType>>&
-    get_param_counts() const noexcept {
-        return m_param_counts;
-    }
+    get_param_counts() const noexcept;
+    // Get the flattened parameter counts for CUDA plans
+    [[nodiscard]] std::span<const uint32_t>
+    get_param_counts_flat() const noexcept;
     /// @brief Cartesian strides for each parameter in the parameter grid.
     [[nodiscard]] const std::vector<std::vector<SizeType>>&
-    get_param_cart_strides() const noexcept {
-        return m_param_cart_strides;
-    }
+    get_param_cart_strides() const noexcept;
     /// @brief Grid step sizes for each parameter.
     [[nodiscard]] const std::vector<std::vector<double>>&
-    get_dparams() const noexcept {
-        return m_dparams;
-    }
+    get_dparams() const noexcept;
     /// @brief Grid step size (limited) for each parameter.
     [[nodiscard]] const std::vector<std::vector<double>>&
-    get_dparams_lim() const noexcept {
-        return m_dparams_lim;
-    }
+    get_dparams_lim() const noexcept;
     /// @brief Get the total number of coordinates across all levels.
     SizeType get_coord_size() const noexcept;
-    /// @brief Get the total number of flattened parameters counts.
-    SizeType get_total_params_flat_count() const noexcept;
     /// @brief Get the memory usage of the coordinate storage (in GB).
     float get_coord_memory_usage() const noexcept;
 
@@ -149,7 +98,7 @@ public:
      * @return A vector of vectors of FFACoordFreq for each level.
      */
     std::vector<std::vector<coord::FFACoordFreq>> resolve_coordinates_freq();
-    
+
     /// @brief Compute the parameter grid for a given FFA level.
     [[nodiscard]] std::vector<std::vector<double>>
     compute_param_grid(SizeType ffa_level) const noexcept;
@@ -187,43 +136,32 @@ public:
                           SizeType ref_seg            = 0) const;
 
 private:
-    void configure_base_plan();
-    void validate_base_plan() const;
-    static std::vector<SizeType>
-    calculate_strides(std::span<const SizeType> p_arr_counts);
+    struct Impl;
+    std::unique_ptr<Impl> m_impl;
 };
 
-} // namespace detail
-
 /**
- * @brief A type-aware full FFA plan (Time or Fourier domain).
+ * @brief A type-aware FFA plan (Time or Fourier domain).
  * @details
  * This class inherits all common plan logic from FFAPlanBase and adds
- * type-specific data (fold shapes, etc.). This class is used to store the
- * metadata for an FFA plan, which is used to store the fold shapes, etc.
+ * type-specific data.
  *
  * @tparam FoldType float or ComplexType.
  */
-template <SupportedFoldType FoldType>
-class FFAPlan : public detail::FFAPlanBase {
-protected:
-    std::vector<std::vector<SizeType>> m_fold_shapes;
-    std::vector<std::vector<SizeType>> m_fold_shapes_time;
-    SizeType m_flops_required{0U};
-    SizeType m_flops_required_return_in_time{0U};
-
+template <SupportedFoldType FoldType> class FFAPlan final : public FFAPlanBase {
 public:
     /**
-     * @brief Constructs the metadata for a type-aware FFA plan.
+     * @brief Constructs the full, type-aware plan.
      * @param cfg The pulsar search configuration object.
      */
-    explicit FFAPlan(search::PulsarSearchConfig cfg);
+    explicit FFAPlan(const search::PulsarSearchConfig& cfg);
 
-    ~FFAPlan() override                    = default;
-    FFAPlan(const FFAPlan&)                = delete;
-    FFAPlan& operator=(const FFAPlan&)     = delete;
+    // --- Rule of five: PIMPL ---
+    ~FFAPlan() override;
     FFAPlan(FFAPlan&&) noexcept            = default;
     FFAPlan& operator=(FFAPlan&&) noexcept = default;
+    FFAPlan(const FFAPlan&)                = delete;
+    FFAPlan& operator=(const FFAPlan&)     = delete;
 
     // --- Getters ---
     /// @brief Get the fold shapes for each level.
@@ -251,15 +189,15 @@ public:
     /// @brief Get the compute FLOPS for the FFA plan (in GFLOPS).
     float get_gflops(bool return_in_time) const noexcept;
 
-    // Get the flattened parameters for CUDA plans
-    [[nodiscard]] std::vector<double> get_params_flat() const noexcept;
-    // Get the flattened parameter counts for CUDA plans
-    [[nodiscard]] std::vector<uint32_t> get_param_counts_flat() const noexcept;
-
 private:
-    void configure_fold_shapes();
-    void compute_flops();
-    void validate_plan() const;
+    std::vector<std::vector<SizeType>> m_fold_shapes;
+    std::vector<std::vector<SizeType>> m_fold_shapes_time;
+    SizeType m_flops_required{0U};
+    SizeType m_flops_required_return_in_time{0U};
+
+    void configure_fold_shapes() noexcept;
+    void compute_flops() noexcept;
+    void validate() const;
 };
 
 } // namespace loki::plans

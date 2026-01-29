@@ -61,7 +61,6 @@ public:
     FFARegionStats(SizeType max_buffer_size,
                    SizeType max_coord_size,
                    SizeType max_ncoords,
-                   SizeType max_total_params_flat_count,
                    SizeType max_ffa_levels,
                    SizeType n_widths,
                    SizeType n_params,
@@ -83,8 +82,6 @@ public:
     SizeType get_max_coord_size() const noexcept;
     /// @brief Get the maximum number of coordinates in the last level.
     SizeType get_max_ncoords() const noexcept;
-    /// @brief Get the maximum total number of parameters in the flat array.
-    SizeType get_max_total_params_flat_count() const noexcept;
     /// @brief Get the maximum number of FFA levels.
     SizeType get_max_ffa_levels() const noexcept;
     /// @brief Get the maximum size of the FFA workspace buffer (time domain).

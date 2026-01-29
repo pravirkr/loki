@@ -134,10 +134,9 @@ generate_bp_poly_taylor(std::span<const std::vector<double>> param_arr,
 #ifdef LOKI_ENABLE_CUDA
 
 void ffa_taylor_resolve_freq_batch_cuda(
-    cuda::std::span<const double> param_arr_flat,
     cuda::std::span<const uint32_t> param_arr_count,
-    cuda::std::span<const uint32_t> params_flat_offsets,
     cuda::std::span<const uint32_t> ncoords_offsets,
+    cuda::std::span<const ParamLimit> param_limits,
     coord::FFACoordFreqDPtrs coords_ptrs,
     SizeType n_levels,
     SizeType ncoords_total,
@@ -146,10 +145,9 @@ void ffa_taylor_resolve_freq_batch_cuda(
     cudaStream_t stream);
 
 void ffa_taylor_resolve_poly_batch_cuda(
-    cuda::std::span<const double> param_arr_flat,
-    cuda::std::span<const uint32_t> param_arr_cur_count,
-    cuda::std::span<const uint32_t> params_flat_offsets,
+    cuda::std::span<const uint32_t> param_arr_count,
     cuda::std::span<const uint32_t> ncoords_offsets,
+    cuda::std::span<const ParamLimit> param_limits,
     coord::FFACoordDPtrs coords_ptrs,
     SizeType n_levels,
     SizeType ncoords_total,

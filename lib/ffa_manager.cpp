@@ -14,6 +14,7 @@
 #include "loki/common/types.hpp"
 #include "loki/detection/score.hpp"
 #include "loki/exceptions.hpp"
+#include "loki/psr_utils.hpp"
 #include "loki/search/configs.hpp"
 #include "loki/timing.hpp"
 
@@ -93,7 +94,7 @@ public:
             const search::PulsarSearchConfig& cfg_cur = ffa_regions_cfgs[i];
             const auto& freq_limits = cfg_cur.get_param_limits().back();
             spdlog::info("Processing chunk f0 (Hz): [{:08.3f}, {:08.3f}]",
-                         freq_limits.front(), freq_limits.back());
+                         freq_limits.min, freq_limits.max);
             cands::FFATimerStats ffa_timer_stats;
             const SizeType n_passing =
                 execute_ffa_region(ts_e, ts_v, cfg_cur, ffa_timer_stats);
@@ -208,8 +209,9 @@ private:
         const auto& ffa_regions_cfgs   = m_region_planner.get_cfgs();
         for (SizeType i = 0; i < ffa_regions_cfgs.size(); ++i) {
             const search::PulsarSearchConfig& cfg_cur = ffa_regions_cfgs[i];
-            const auto& ffa_plan  = plans::FFAPlan<FoldType>(cfg_cur);
-            const auto& param_arr = ffa_plan.get_params().back();
+            plans::FFAPlan<FoldType> ffa_plan(cfg_cur);
+            const auto& param_limits = cfg_cur.get_param_limits();
+            const auto& param_counts = ffa_plan.get_param_counts().back();
             const auto& param_strides =
                 ffa_plan.get_param_cart_strides().back();
             const auto n_passing = m_n_passing_scores_per_region[i];
@@ -245,7 +247,8 @@ private:
                         const SizeType param_idx = remaining / param_strides[j];
                         remaining -= param_idx * param_strides[j];
                         m_write_param_sets_batch[(i * total_params) + j] =
-                            param_arr[j][param_idx];
+                            psr_utils::get_param_val_at_idx(
+                                param_limits[j], param_counts[j], param_idx);
                     }
                     m_write_param_sets_batch[(i * total_params) + n_params] =
                         static_cast<double>(scoring_widths[width_idx]);
