@@ -762,15 +762,14 @@ void poly_taylor_resolve_accel_batch(std::span<const double> leaves_tree,
         const auto f_new     = f0 * (1.0 - delta_v_new * utils::kInvCval);
         const auto delay_rel = delta_d_new * utils::kInvCval;
 
-        // Calculate relative phase
-        phase_shift[i] =
-            psr_utils::get_phase_idx(delta_t, f0, nbins, delay_rel);
         // Find nearest grid indices
         const auto idx_a = psr_utils::get_nearest_idx_analytical(
             a_new, lim_accel, n_accel_init);
         const auto idx_f =
             psr_utils::get_nearest_idx_analytical(f_new, lim_freq, n_freq_init);
         param_indices[i] = (idx_a * n_freq_init) + idx_f;
+        phase_shift[i] =
+            psr_utils::get_phase_idx(delta_t, f0, nbins, delay_rel);
     }
 }
 
@@ -1680,10 +1679,10 @@ void poly_taylor_report_batch(std::span<double> leaves_tree,
             const auto param_err          = leaves_tree[param_offset + 1];
             leaves_tree[param_offset + 0] = param_val / s_factor;
             leaves_tree[param_offset + 1] = std::sqrt(
-                std::pow(param_err / s_factor, 2) +
-                (std::pow(param_val * utils::kInvCval / (s_factor * s_factor),
-                          2) *
-                 std::pow(dv_final, 2)));
+                ((param_err / s_factor) * (param_err / s_factor)) +
+                ((param_val * utils::kInvCval / (s_factor * s_factor)) *
+                 (param_val * utils::kInvCval / (s_factor * s_factor)) *
+                 (dv_final * dv_final)));
         }
         leaves_tree[leaf_offset + ((n_params - 1) * kParamStride) + 0] =
             f0_batch * s_factor;

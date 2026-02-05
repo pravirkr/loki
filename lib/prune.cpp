@@ -38,7 +38,7 @@ public:
                          std::span<const float> ts_v,
                          const std::filesystem::path& outdir,
                          std::string_view file_prefix,
-                         std::string_view kind,
+                         std::string_view poly_basis,
                          bool show_progress) = 0;
 };
 
@@ -82,9 +82,11 @@ public:
         const auto nsegments = ffa_plan.get_nsegments().back();
         const std::string filebase =
             std::format("{}_pruning_nstages_{}", file_prefix, nsegments);
-        const auto log_file = outdir / std::format("{}_log.txt", filebase);
+        const auto log_file =
+            (outdir / std::format("{}_log.txt", filebase)).lexically_normal();
         const auto result_file =
-            outdir / std::format("{}_results.h5", filebase);
+            (outdir / std::format("{}_results.h5", filebase))
+                .lexically_normal();
 
         // Create output directory
         std::error_code ec;
@@ -144,15 +146,15 @@ private:
 
     void execute_single_threaded(std::span<const FoldType> ffa_fold,
                                  plans::FFAPlan<FoldType> ffa_plan,
-                                 const std::vector<SizeType>& ref_segs,
+                                 std::span<const SizeType> ref_segs,
                                  const std::filesystem::path& outdir,
                                  const std::filesystem::path& log_file,
                                  const std::filesystem::path& result_file,
-                                 std::string_view kind,
+                                 std::string_view poly_basis,
                                  bool show_progress) {
         auto prune =
             Prune<FoldType>(std::move(ffa_plan), m_cfg, m_threshold_scheme,
-                            m_max_sugg, m_batch_size, kind);
+                            m_max_sugg, m_batch_size, poly_basis);
         for (const auto ref_seg : ref_segs) {
             prune.execute(ffa_fold, ref_seg, outdir, log_file, result_file,
                           /*tracker=*/nullptr, /*task_id=*/0, show_progress);
@@ -197,11 +199,13 @@ private:
 
             auto future = pool.submit_task(
                 [this, ref_seg, outdir, kind, tracker_ptr = tracker.get(), id,
-                 show_progress, &ffa_plan, &ffa_fold]() mutable {
+                 show_progress, &ffa_fold]() mutable {
                     // Create a Prune instance for each thread
-                    auto prune = Prune<FoldType>(std::move(ffa_plan), m_cfg,
-                                                 m_threshold_scheme, m_max_sugg,
-                                                 m_batch_size, kind);
+                    // Each thread creates its own plan from config
+                    auto ffa_plan_local = plans::FFAPlan<FoldType>(m_cfg);
+                    auto prune          = Prune<FoldType>(
+                        std::move(ffa_plan_local), m_cfg, m_threshold_scheme,
+                        m_max_sugg, m_batch_size, kind);
 
                     prune.execute(
                         ffa_fold, ref_seg, outdir, /*log_file=*/std::nullopt,
@@ -297,17 +301,26 @@ template <SupportedFoldType FoldType> struct PruningWorkspace {
           branched_phase_shift(max_branched_leaves) {}
 
     // Call this after filling branched_scores and branched_indices
-    void filter_batch(SizeType n_leaves_passing) noexcept {
-        for (SizeType dst_idx = 0; dst_idx < n_leaves_passing; ++dst_idx) {
-            const SizeType src_idx   = branched_indices[dst_idx];
-            branched_scores[dst_idx] = branched_scores[src_idx];
-            std::copy_n(branched_leaves.begin() + (src_idx * leaves_stride),
-                        leaves_stride,
-                        branched_leaves.begin() + (dst_idx * leaves_stride));
-            std::copy_n(branched_folds.begin() + (src_idx * folds_stride),
-                        folds_stride,
-                        branched_folds.begin() + (dst_idx * folds_stride));
+    SizeType filter_batch(float threshold,
+                          SizeType n_leaves_after_validation) noexcept {
+        SizeType n_leaves_passing = 0;
+        for (SizeType i = 0; i < n_leaves_after_validation; ++i) {
+            if (branched_scores[i] >= threshold) {
+                if (n_leaves_passing != i) { // Only copy if needed
+                    branched_scores[n_leaves_passing] = branched_scores[i];
+                    std::copy_n(branched_leaves.begin() + (i * leaves_stride),
+                                leaves_stride,
+                                branched_leaves.begin() +
+                                    (n_leaves_passing * leaves_stride));
+                    std::copy_n(branched_folds.begin() + (i * folds_stride),
+                                folds_stride,
+                                branched_folds.begin() +
+                                    (n_leaves_passing * folds_stride));
+                }
+                ++n_leaves_passing;
+            }
         }
+        return n_leaves_passing;
     }
 
     float get_memory_usage() const noexcept {
@@ -707,28 +720,16 @@ private:
 
             // Thresholding & filtering (direct memory operations)
             timer.start();
-            SizeType n_leaves_passing = 0;
-            for (SizeType i = 0; i < n_leaves_after_validation; ++i) {
-                if (branched_scores_span[i] >= current_threshold) {
-                    m_pruning_workspace->branched_indices[n_leaves_passing] = i;
-                    ++n_leaves_passing;
-                }
-            }
+            const SizeType n_leaves_passing = m_pruning_workspace->filter_batch(
+                current_threshold, n_leaves_after_validation);
+            error_check::check_less_equal(
+                n_leaves_passing, m_pruning_workspace->max_branched_leaves,
+                "n_leaves_passing <= max_branched_leaves");
             stats.batch_timers["filter"] += timer.stop();
-
             if (n_leaves_passing == 0) {
                 m_world_tree->consume_read(current_batch_size);
                 continue;
             }
-            error_check::check_less_equal(
-                n_leaves_passing, m_pruning_workspace->max_branched_leaves,
-                "n_leaves_passing <= max_branched_leaves");
-
-            timer.start();
-            if (n_leaves_passing != n_leaves_after_validation) {
-                m_pruning_workspace->filter_batch(n_leaves_passing);
-            }
-            stats.batch_timers["filter"] += timer.stop();
 
             // Transform
             timer.start();
@@ -759,7 +760,8 @@ private:
             std::max(static_cast<SizeType>(std::ceil(branch_max * 2)), 32UL);
         m_prune_funcs = core::create_prune_dp_functs<FoldType>(
             m_poly_basis, m_ffa_plan.get_param_counts().back(),
-            m_ffa_plan.get_dparams_lim().back(), m_ffa_plan.get_nsegments().back(),
+            m_ffa_plan.get_dparams_lim().back(),
+            m_ffa_plan.get_nsegments().back(),
             m_ffa_plan.get_tsegments().back(), m_cfg, m_batch_size,
             m_branch_max);
     }

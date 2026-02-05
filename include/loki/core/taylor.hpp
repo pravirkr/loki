@@ -11,6 +11,7 @@
 #ifdef LOKI_ENABLE_CUDA
 #include <cuda/std/span>
 #include <cuda_runtime.h>
+#include "loki/cuda_utils.cuh"
 #endif // LOKI_ENABLE_CUDA
 
 namespace loki::core {
@@ -158,13 +159,15 @@ void ffa_taylor_resolve_poly_batch_cuda(
     SizeType n_params,
     cudaStream_t stream);
 
-SizeType
-poly_taylor_seed_cuda(cuda::std::span<const SizeType> param_grid_count_init,
-                      cuda::std::span<const double> dparams_init,
-                      cuda::std::span<const ParamLimit> param_limits,
-                      cuda::std::span<double> seed_leaves,
-                      SizeType n_params,
-                      cudaStream_t stream);
+void poly_taylor_seed_cuda(
+    cuda::std::span<const SizeType> param_grid_count_init,
+    cuda::std::span<const double> dparams_init,
+    cuda::std::span<const ParamLimit> param_limits,
+    cuda::std::span<double> seed_leaves,
+    std::pair<double, double> coord_init,
+    SizeType n_leaves,
+    SizeType n_params,
+    cudaStream_t stream);
 
 SizeType
 poly_taylor_branch_batch_cuda(cuda::std::span<const double> leaves_tree,
@@ -180,26 +183,35 @@ poly_taylor_branch_batch_cuda(cuda::std::span<const double> leaves_tree,
                               utils::BranchingWorkspaceCUDAView ws,
                               cudaStream_t stream);
 
-void poly_taylor_resolve_batch_cuda(cuda::std::span<const double> leaves_tree,
-                                    cuda::std::span<const float> accel_grid,
-                                    cuda::std::span<const float> freq_grid,
-                                    cuda::std::span<uint32_t> param_indices,
-                                    cuda::std::span<float> phase_shift,
-                                    std::pair<double, double> coord_add,
-                                    std::pair<double, double> coord_cur,
-                                    std::pair<double, double> coord_init,
-                                    SizeType nbins,
-                                    SizeType n_leaves,
-                                    SizeType n_params,
-                                    cudaStream_t stream);
+void poly_taylor_resolve_batch_cuda(
+    cuda::std::span<const double> leaves_branch,
+    cuda::std::span<uint32_t> param_indices,
+    cuda::std::span<float> phase_shift,
+    cuda::std::span<const ParamLimit> param_limits,
+    std::pair<double, double> coord_add,
+    std::pair<double, double> coord_cur,
+    std::pair<double, double> coord_init,
+    SizeType n_accel_init,
+    SizeType n_freq_init,
+    SizeType nbins,
+    SizeType n_leaves,
+    SizeType n_params,
+    cudaStream_t stream);
 
 void poly_taylor_transform_batch_cuda(cuda::std::span<double> leaves_tree,
+                                      cuda::std::span<uint32_t> indices_tree,
                                       std::pair<double, double> coord_next,
                                       std::pair<double, double> coord_cur,
                                       SizeType n_leaves,
                                       SizeType n_params,
                                       bool use_conservative_tile,
                                       cudaStream_t stream);
+
+void poly_taylor_report_batch_cuda(cuda::std::span<double> leaves_tree,
+                                   std::pair<double, double> coord_report,
+                                   SizeType n_leaves,
+                                   SizeType n_params,
+                                   cudaStream_t stream);
 
 #endif // LOKI_ENABLE_CUDA
 

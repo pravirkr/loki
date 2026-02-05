@@ -117,8 +117,7 @@ void BasePruneDPFuncts<FoldType, Derived>::score(
     if constexpr (std::is_same_v<FoldType, ComplexType>) {
         // Ensure exact span for irfft transform
         const auto nfft = 2 * n_leaves;
-        auto folds_span =
-            std::span<const FoldType>(folds_tree).first(n_leaves * 2 * nbins_f);
+        auto folds_span = folds_tree.first(n_leaves * 2 * nbins_f);
         auto folds_t_span =
             std::span<float>(m_scratch_folds).first(nfft * nbins);
         m_irfft_executor->execute(folds_span, folds_t_span,

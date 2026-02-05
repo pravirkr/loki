@@ -175,10 +175,11 @@ public:
     [[nodiscard]] std::pair<cuda::std::span<const double>, SizeType>
     get_leaves_span(SizeType n_leaves) const;
     // Returns span over contiguous leaves (for reporting)
-    [[nodiscard]] cuda::std::span<double> get_leaves_contiguous_span() noexcept;
+    [[nodiscard]] cuda::std::span<double> get_leaves_contiguous_span(cudaStream_t stream) noexcept;
     // Returns span over contiguous scores (for saving to file)
-    [[nodiscard]] cuda::std::span<float> get_scores_contiguous_span() noexcept;
-
+    [[nodiscard]] cuda::std::span<float> get_scores_contiguous_span(cudaStream_t stream) noexcept;
+    [[nodiscard]] SizeType get_physical_start_idx() const;
+    
     void set_size(SizeType size) noexcept;
     void reset() noexcept;
     void prepare_in_place_update();
@@ -193,15 +194,17 @@ public:
     void add_initial(cuda::std::span<const double> leaves_batch,
                      cuda::std::span<const FoldTypeCUDA> folds_batch,
                      cuda::std::span<const float> scores_batch,
-                     SizeType slots_to_write);
-    // Add a batch of candidate leaves to the Tree if there is space
+                     SizeType slots_to_write,
+                     cudaStream_t stream);
+    // Add a batch of candidate leaves to the Tree if there is space, scattered.
     [[nodiscard]] float
-    add_batch(cuda::std::span<const double> leaves_batch,
-              cuda::std::span<const FoldTypeCUDA> folds_batch,
-              cuda::std::span<const float> scores_batch,
-              float current_threshold,
-              SizeType slots_to_write,
-              cudaStream_t stream);
+    add_batch_scattered(cuda::std::span<const double> leaves_batch,
+                        cuda::std::span<const FoldTypeCUDA> folds_batch,
+                        cuda::std::span<const float> scores_batch,
+                        cuda::std::span<const uint32_t> indices_batch,
+                        float current_threshold,
+                        SizeType slots_to_write,
+                        cudaStream_t stream);
 
 private:
     class Impl;

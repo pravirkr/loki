@@ -10,6 +10,8 @@
 #include <thrust/copy.h>
 #include <thrust/device_vector.h>
 
+#include <spdlog/spdlog.h>
+
 #include "loki/common/types.hpp"
 #include "loki/cub_helpers.cuh"
 #include "loki/cuda_utils.cuh"
@@ -170,6 +172,86 @@ __global__ void kernel_snr_boxcar_warp(const float* __restrict__ folds,
     }
 }
 
+__global__ void kernel_snr_thread(const float* __restrict__ folds,
+                                  uint32_t nprofiles,
+                                  uint32_t nbins,
+                                  const uint32_t* __restrict__ widths,
+                                  uint32_t nwidths,
+                                  float* __restrict__ scores,
+                                  uint32_t* __restrict__ indices_filtered,
+                                  uint32_t* __restrict__ nprofiles_passing,
+                                  float threshold) {
+    constexpr uint32_t kMaxBins = 1024;
+    const uint32_t profile_idx  = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (profile_idx >= nprofiles)
+        return;
+
+    // Prefix sum array - stored in local memory, L1 cached
+    float prefix[kMaxBins];
+
+    const uint32_t base             = profile_idx * 2 * nbins;
+    const float* __restrict__ e_ptr = folds + base;
+    const float* __restrict__ v_ptr = folds + base + nbins;
+
+    float running = 0.0f;
+#pragma unroll 1
+    for (uint32_t i = 0; i < nbins; ++i) {
+        running += e_ptr[i] * rsqrtf(v_ptr[i]);
+        prefix[i] = running;
+    }
+    const float total_sum = running;
+    const float nbins_f   = static_cast<float>(nbins);
+    float max_snr         = -cuda::std::numeric_limits<float>::infinity();
+
+// Loop over widths
+#pragma unroll 1
+    for (uint32_t iw = 0; iw < nwidths; ++iw) {
+        const uint32_t w          = widths[iw];
+        const float w_f           = static_cast<float>(w);
+        const float nbins_minus_w = nbins_f - w_f;
+        const float h             = sqrtf(nbins_minus_w / (nbins_f * w_f));
+        const float b             = w_f * h / nbins_minus_w;
+        const float h_plus_b      = h + b;
+        const float neg_b_total   = -b * total_sum;
+
+        float max_diff = -cuda::std::numeric_limits<float>::infinity();
+
+        // Split the sliding window loop to eliminate branch in hot path
+        // wrap_start is the first j where (j + w - 1) >= nbins
+        const uint32_t wrap_start = nbins - w + 1;
+
+        // Non-wrapping part: j + w - 1 < nbins
+        float prev = 0.0f;
+#pragma unroll 1
+        for (uint32_t j = 0; j < wrap_start; ++j) {
+            const float window_sum = prefix[j + w - 1] - prev;
+            max_diff               = fmaxf(max_diff, window_sum);
+            prev                   = prefix[j];
+        }
+
+// Wrapping part: j + w - 1 >= nbins (circular wrap)
+#pragma unroll 1
+        for (uint32_t j = wrap_start; j < nbins; ++j) {
+            const float before      = prefix[j - 1];
+            const uint32_t wrap_idx = j + w - 1 - nbins;
+            const float window_sum  = (total_sum - before) + prefix[wrap_idx];
+            max_diff                = fmaxf(max_diff, window_sum);
+        }
+
+        // SNR = (h+b)*max_diff - b*total_sum
+        // Using fmaf for fused multiply-add (single instruction)
+        const float snr = fmaf(h_plus_b, max_diff, neg_b_total);
+        max_snr         = fmaxf(max_snr, snr);
+    }
+
+    if (max_snr > threshold) {
+        const uint32_t idx    = atomicAdd(nprofiles_passing, 1);
+        indices_filtered[idx] = profile_idx;
+        scores[idx]           = max_snr;
+    }
+}
+
 // Unified launch function template
 template <bool Is3D, OutputMode Mode>
 void snr_boxcar_cuda_impl_device(cuda::std::span<const float> folds,
@@ -310,7 +392,7 @@ SizeType score_and_filter_cuda_d(cuda::std::span<const float> folds,
                                  SizeType nbins,
                                  cudaStream_t stream,
                                  cuda_utils::DeviceCounter& counter) {
-    counter.reset();
+    counter.reset(stream);
 
     constexpr SizeType kWarpSize         = 32;
     constexpr SizeType kThreadsPerBlock  = 128;
@@ -330,9 +412,7 @@ SizeType score_and_filter_cuda_d(cuda::std::span<const float> folds,
             1.0F);
     cuda_utils::check_last_cuda_error(
         "score_and_filter_cuda_d kernel launch failed");
-    cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
-                                "cudaStreamSynchronize failed");
-    return counter.value();
+    return counter.value_sync(stream);
 }
 
 SizeType score_and_filter_max_cuda_d(cuda::std::span<const float> folds,
@@ -344,7 +424,7 @@ SizeType score_and_filter_max_cuda_d(cuda::std::span<const float> folds,
                                      SizeType nbins,
                                      cudaStream_t stream,
                                      cuda_utils::DeviceCounter& counter) {
-    counter.reset();
+    counter.reset(stream);
 
     constexpr SizeType kWarpSize         = 32;
     constexpr SizeType kThreadsPerBlock  = 128;
@@ -363,9 +443,39 @@ SizeType score_and_filter_max_cuda_d(cuda::std::span<const float> folds,
             1.0F);
     cuda_utils::check_last_cuda_error(
         "score_and_filter_max_cuda_d kernel launch failed");
-    cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
-                                "cudaStreamSynchronize failed");
-    return counter.value();
+    return counter.value_sync(stream);
+}
+
+SizeType
+score_and_filter_max_cuda_thread_d(cuda::std::span<const float> folds,
+                                   cuda::std::span<const uint32_t> widths,
+                                   cuda::std::span<float> scores,
+                                   cuda::std::span<uint32_t> indices_filtered,
+                                   float threshold,
+                                   SizeType nprofiles,
+                                   SizeType nbins,
+                                   cudaStream_t stream,
+                                   cuda_utils::DeviceCounter& counter) {
+    counter.reset(stream);
+    constexpr uint32_t kMaxBins = 1024;
+    if (nbins > kMaxBins) {
+        throw std::runtime_error("nbins is too large");
+    }
+    constexpr SizeType kThreadsPerBlock = 256;
+    const SizeType blocks_per_grid =
+        (nprofiles + kThreadsPerBlock - 1) / kThreadsPerBlock;
+    const dim3 block_dim(kThreadsPerBlock);
+    const dim3 grid_dim(blocks_per_grid);
+    cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
+
+    kernel_snr_thread<<<grid_dim, block_dim, 0, stream>>>(
+        folds.data(), static_cast<uint32_t>(nprofiles),
+        static_cast<uint32_t>(nbins), widths.data(),
+        static_cast<uint32_t>(widths.size()), scores.data(),
+        indices_filtered.data(), counter.d_ptr, threshold);
+    cuda_utils::check_last_cuda_error(
+        "score_and_filter_max_cuda_thread_d launch failed");
+    return counter.value_sync(stream);
 }
 
 } // namespace loki::detection

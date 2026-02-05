@@ -10,6 +10,7 @@
 
 namespace loki {
 using algorithms::FFAManagerCUDA;
+using algorithms::PruningManagerCUDA;
 using detection::DynamicThresholdSchemeCUDA;
 
 namespace py = pybind11;
@@ -77,10 +78,9 @@ PYBIND11_MODULE(libculoki, m) { // NOLINT
             const auto nbins     = arr.shape(2);
 
             auto out = PyArrayT<float>(nprofiles);
-            detection::snr_boxcar_3d_max_cuda(to_span<const float>(arr),
-                                              to_span<const SizeType>(widths),
-                                              to_span<float>(out), nprofiles,
-                                              nbins, device_id);
+            detection::snr_boxcar_3d_max_cuda(
+                to_span<const float>(arr), to_span<const SizeType>(widths),
+                to_span<float>(out), nprofiles, nbins, device_id);
             return out;
         },
         py::arg("arr"), py::arg("widths"), py::arg("device_id") = 0);
@@ -154,7 +154,8 @@ PYBIND11_MODULE(libculoki, m) { // NOLINT
             auto [fold, ffa_plan] = algorithms::compute_ffa_cuda<float>(
                 to_span<const float>(ts_e), to_span<const float>(ts_v), cfg,
                 device_id, quiet);
-            return std::make_tuple(as_pyarray(std::move(fold)), std::move(ffa_plan));
+            return std::make_tuple(as_pyarray(std::move(fold)),
+                                   std::move(ffa_plan));
         },
         py::arg("ts_e"), py::arg("ts_v"), py::arg("cfg"),
         py::arg("device_id") = 0, py::arg("quiet") = false);
@@ -167,7 +168,8 @@ PYBIND11_MODULE(libculoki, m) { // NOLINT
                 algorithms::compute_ffa_cuda<ComplexTypeCUDA>(
                     to_span<const float>(ts_e), to_span<const float>(ts_v), cfg,
                     device_id, quiet);
-            return std::make_tuple(as_pyarray(std::move(fold)), std::move(ffa_plan));
+            return std::make_tuple(as_pyarray(std::move(fold)),
+                                   std::move(ffa_plan));
         },
         py::arg("ts_e"), py::arg("ts_v"), py::arg("cfg"),
         py::arg("device_id") = 0, py::arg("quiet") = false);
@@ -179,7 +181,8 @@ PYBIND11_MODULE(libculoki, m) { // NOLINT
                 algorithms::compute_ffa_fourier_return_to_time_cuda(
                     to_span<const float>(ts_e), to_span<const float>(ts_v), cfg,
                     device_id, quiet);
-            return std::make_tuple(as_pyarray(std::move(fold)), std::move(ffa_plan));
+            return std::make_tuple(as_pyarray(std::move(fold)),
+                                   std::move(ffa_plan));
         },
         py::arg("ts_e"), py::arg("ts_v"), py::arg("cfg"),
         py::arg("device_id") = 0, py::arg("quiet") = false);
@@ -191,7 +194,8 @@ PYBIND11_MODULE(libculoki, m) { // NOLINT
             auto [scores, ffa_plan] = algorithms::compute_ffa_scores_cuda(
                 to_span<const float>(ts_e), to_span<const float>(ts_v), cfg,
                 device_id, quiet);
-            return std::make_tuple(as_pyarray(std::move(scores)), std::move(ffa_plan));
+            return std::make_tuple(as_pyarray(std::move(scores)),
+                                   std::move(ffa_plan));
         },
         py::arg("ts_e"), py::arg("ts_v"), py::arg("cfg"),
         py::arg("device_id") = 0, py::arg("quiet") = false);
@@ -209,6 +213,30 @@ PYBIND11_MODULE(libculoki, m) { // NOLINT
             },
             py::arg("ts_e"), py::arg("ts_v"), py::arg("outdir"),
             py::arg("file_prefix") = "test");
+
+    auto m_prune = m.def_submodule("prune", "Pruning submodule");
+
+    py::class_<PruningManagerCUDA>(m_prune, "PruningManagerCUDA")
+        .def(py::init<const PulsarSearchConfig&, const std::vector<float>&,
+                      std::optional<SizeType>,
+                      std::optional<std::vector<SizeType>>, SizeType, SizeType,
+                      int>(),
+             py::arg("cfg"), py::arg("threshold_scheme"),
+             py::arg("n_runs")   = std::nullopt,
+             py::arg("ref_segs") = std::nullopt,
+             py::arg("max_sugg") = 1U << 20U, py::arg("batch_size") = 4096U,
+             py::arg("device_id") = 0)
+        .def(
+            "execute",
+            [](PruningManagerCUDA& self, const PyArrayT<float>& ts_e,
+               const PyArrayT<float>& ts_v, std::string_view outdir,
+               std::string_view file_prefix, std::string_view poly_basis) {
+                self.execute(to_span<const float>(ts_e),
+                             to_span<const float>(ts_v), outdir, file_prefix,
+                             poly_basis);
+            },
+            py::arg("ts_e"), py::arg("ts_v"), py::arg("outdir"),
+            py::arg("file_prefix"), py::arg("poly_basis"));
 }
 
 } // namespace loki

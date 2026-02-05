@@ -91,8 +91,8 @@ public:
         std::span<const float> threshold_scheme,
         std::optional<SizeType> n_runs                = std::nullopt,
         std::optional<std::vector<SizeType>> ref_segs = std::nullopt,
-        SizeType max_sugg                             = 1U << 18U,
-        SizeType batch_size                           = 1024U,
+        SizeType max_sugg                             = 1U << 20U,
+        SizeType batch_size                           = 4096U,
         int device_id                                 = 0);
     ~PruningManagerCUDA();
     PruningManagerCUDA(PruningManagerCUDA&&) noexcept;
@@ -123,7 +123,8 @@ public:
               std::span<const float> threshold_scheme,
               SizeType max_sugg           = 1U << 18U,
               SizeType batch_size         = 1024U,
-              std::string_view poly_basis = "taylor");
+              std::string_view poly_basis = "taylor",
+              int device_id               = 0);
 
     ~PruneCUDA();
     PruneCUDA(PruneCUDA&&) noexcept;
@@ -138,7 +139,8 @@ public:
         SizeType ref_seg,
         const std::filesystem::path& outdir                     = "./",
         const std::optional<std::filesystem::path>& log_file    = std::nullopt,
-        const std::optional<std::filesystem::path>& result_file = std::nullopt);
+        const std::optional<std::filesystem::path>& result_file = std::nullopt,
+        int task_id                                             = 0);
 
 private:
     class Impl;

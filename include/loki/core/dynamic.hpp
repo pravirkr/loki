@@ -319,7 +319,7 @@ public:
                             std::pair<double, double> coord_prev,
                             SizeType n_leaves,
                             utils::BranchingWorkspaceCUDAView ws,
-                            cudaStream_t stream) const = 0;
+                            cudaStream_t stream) = 0;
 
     virtual SizeType validate(cuda::std::span<double> leaves_branch,
                               cuda::std::span<uint32_t> leaves_origins,
@@ -343,6 +343,8 @@ public:
                            cuda::std::span<const float> phase_shift,
                            cuda::std::span<FoldTypeCUDA> folds_out,
                            SizeType n_leaves,
+                           SizeType physical_start_idx,
+                           SizeType capacity,
                            cudaStream_t stream) noexcept = 0;
 
     virtual SizeType
@@ -355,6 +357,7 @@ public:
                      cuda_utils::DeviceCounter& counter) noexcept = 0;
 
     virtual void transform(cuda::std::span<double> leaves_tree,
+                           cuda::std::span<uint32_t> indices_tree,
                            std::pair<double, double> coord_next,
                            std::pair<double, double> coord_cur,
                            SizeType n_leaves,
@@ -415,6 +418,8 @@ public:
                    cuda::std::span<const float> phase_shift,
                    cuda::std::span<FoldTypeCUDA> folds_out,
                    SizeType n_leaves,
+                   SizeType physical_start_idx,
+                   SizeType capacity,
                    cudaStream_t stream) noexcept override;
 
     SizeType
@@ -473,7 +478,7 @@ public:
                     std::pair<double, double> coord_prev,
                     SizeType n_leaves,
                     utils::BranchingWorkspaceCUDAView ws,
-                    cudaStream_t stream) const override;
+                    cudaStream_t stream) override;
 
     void resolve(cuda::std::span<const double> leaves_branch,
                  cuda::std::span<uint32_t> param_indices,
@@ -485,6 +490,7 @@ public:
                  cudaStream_t stream) const override;
 
     void transform(cuda::std::span<double> leaves_tree,
+                   cuda::std::span<uint32_t> indices_tree,
                    std::pair<double, double> coord_next,
                    std::pair<double, double> coord_cur,
                    SizeType n_leaves,

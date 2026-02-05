@@ -14,6 +14,8 @@
 #include <thrust/sort.h>
 #include <thrust/transform.h>
 
+#include <spdlog/spdlog.h>
+
 #include "loki/common/types.hpp"
 #include "loki/cub_helpers.cuh"
 #include "loki/cuda_utils.cuh"
@@ -48,36 +50,94 @@ __global__ void compact_in_place_kernel(const uint8_t* __restrict__ keep,
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 __global__ void
-compact_and_copy_kernel(const double* __restrict__ batch_leaves_ptr,
-                        const FoldTypeCUDA* __restrict__ batch_folds_ptr,
-                        const float* __restrict__ batch_scores_ptr,
-                        const uint8_t* __restrict__ mask_ptr,
-                        const uint32_t* __restrict__ prefix_ptr,
-                        double* __restrict__ tmp_leaves_ptr,
-                        FoldTypeCUDA* __restrict__ tmp_folds_ptr,
-                        float* __restrict__ tmp_scores_ptr,
-                        uint32_t slots_to_write,
-                        uint32_t m_leaves_stride,
-                        uint32_t m_folds_stride) {
-    const uint32_t idx = (blockIdx.x * blockDim.x) + threadIdx.x;
-    if (idx >= slots_to_write) {
+scatter_to_circular_copy_kernel(const double* __restrict__ src_leaves,
+                                const FoldTypeCUDA* __restrict__ src_folds,
+                                const float* __restrict__ src_scores,
+                                const uint32_t* __restrict__ src_indices,
+                                double* __restrict__ dst_leaves,
+                                FoldTypeCUDA* __restrict__ dst_folds,
+                                float* __restrict__ dst_scores,
+                                uint32_t dst_start_slot,
+                                uint32_t capacity,
+                                uint32_t slots_to_write,
+                                uint32_t leaves_stride,
+                                uint32_t folds_stride) {
+
+    const uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= slots_to_write)
+        return;
+
+    const uint32_t src_idx     = src_indices[tid];
+    const uint32_t dst_logical = dst_start_slot + tid;
+    const uint32_t dst_idx =
+        (dst_logical < capacity) ? dst_logical : dst_logical - capacity;
+
+    // Copy leaves (scattered read, coalesced write to circular)
+    for (uint32_t j = 0; j < leaves_stride; ++j)
+        dst_leaves[dst_idx * leaves_stride + j] =
+            src_leaves[src_idx * leaves_stride + j];
+
+    // Copy folds
+    for (uint32_t j = 0; j < folds_stride; ++j)
+        dst_folds[dst_idx * folds_stride + j] =
+            src_folds[src_idx * folds_stride + j];
+
+    // Copy score (not scattered, special case for scores)
+    dst_scores[dst_idx] = src_scores[tid];
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+__global__ void scatter_filter_to_circular_kernel(
+    const double* __restrict__ src_leaves,
+    const FoldTypeCUDA* __restrict__ src_folds,
+    const float* __restrict__ src_scores,
+    const uint32_t* __restrict__ src_indices,
+    const uint8_t* __restrict__ mask,    // NEW: filter mask
+    const uint32_t* __restrict__ prefix, // NEW: prefix scan
+    double* __restrict__ dst_leaves,
+    FoldTypeCUDA* __restrict__ dst_folds,
+    float* __restrict__ dst_scores,
+    uint32_t dst_start_slot,
+    uint32_t capacity,
+    uint32_t slots_to_write,
+    uint32_t max_output_slots,
+    uint32_t leaves_stride,
+    uint32_t folds_stride) {
+
+    const uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= slots_to_write)
+        return;
+
+    // Check if this element passes the filter
+    if (mask[tid] == 0) {
         return;
     }
 
-    if (mask_ptr[idx] == 1) {
-        const uint32_t out_idx = prefix_ptr[idx];
-        for (uint32_t j = 0; j < m_leaves_stride; ++j) {
-            tmp_leaves_ptr[(out_idx * m_leaves_stride) + j] =
-                batch_leaves_ptr[(idx * m_leaves_stride) + j];
-        }
-
-        for (uint32_t j = 0; j < m_folds_stride; ++j) {
-            tmp_folds_ptr[(out_idx * m_folds_stride) + j] =
-                batch_folds_ptr[(idx * m_folds_stride) + j];
-        }
-
-        tmp_scores_ptr[out_idx] = batch_scores_ptr[idx];
+    // Position in compacted output
+    const uint32_t out_pos = prefix[tid];
+    // Ensure we don't write past the max output slots
+    if (out_pos >= max_output_slots) {
+        return;
     }
+
+    // Double indirection: first via indices, then filtered by mask
+    const uint32_t src_idx     = src_indices[tid];
+    const uint32_t dst_logical = dst_start_slot + out_pos;
+    const uint32_t dst_idx =
+        (dst_logical < capacity) ? dst_logical : dst_logical - capacity;
+
+    // Copy leaves (double scattered read, coalesced write)
+    for (uint32_t j = 0; j < leaves_stride; ++j)
+        dst_leaves[dst_idx * leaves_stride + j] =
+            src_leaves[src_idx * leaves_stride + j];
+
+    // Copy folds
+    for (uint32_t j = 0; j < folds_stride; ++j)
+        dst_folds[dst_idx * folds_stride + j] =
+            src_folds[src_idx * folds_stride + j];
+
+    // Copy score (not doubly scattered - scores already compacted)
+    dst_scores[dst_idx] = src_scores[tid];
 }
 
 struct CircularIndexFunctor {
@@ -158,7 +218,6 @@ public:
           m_folds(m_capacity * m_folds_stride, FoldTypeCUDA{}),
           m_scores(m_capacity, 0.0F),
           m_scratch_leaves(m_capacity * (nparams * kParamStride), 0.0),
-          m_scratch_folds(max_batch_size * m_folds_stride, FoldTypeCUDA{}),
           m_scratch_scores((m_capacity + max_batch_size), 0.0F),
           m_scratch_prefix(m_capacity, 0),
           m_scratch_mask(m_capacity, 0) {
@@ -263,15 +322,13 @@ public:
      * Includes both base storage and estimated peak temporary allocations.
      */
     float get_memory_usage() const noexcept {
-        const auto base_bytes =
-            (m_leaves.size() * sizeof(double)) +
-            (m_folds.size() * sizeof(FoldTypeCUDA)) +
-            (m_scores.size() * sizeof(float)) +
-            (m_scratch_leaves.size() * sizeof(double)) +
-            (m_scratch_folds.size() * sizeof(FoldTypeCUDA)) +
-            (m_scratch_scores.size() * sizeof(float)) +
-            (m_scratch_prefix.size() * sizeof(uint32_t)) +
-            (m_scratch_mask.size() * sizeof(uint8_t));
+        const auto base_bytes = (m_leaves.size() * sizeof(double)) +
+                                (m_folds.size() * sizeof(FoldTypeCUDA)) +
+                                (m_scores.size() * sizeof(float)) +
+                                (m_scratch_leaves.size() * sizeof(double)) +
+                                (m_scratch_scores.size() * sizeof(float)) +
+                                (m_scratch_prefix.size() * sizeof(uint32_t)) +
+                                (m_scratch_mask.size() * sizeof(uint8_t));
 
         return static_cast<float>(base_bytes) / static_cast<float>(1ULL << 30U);
     }
@@ -307,7 +364,8 @@ public:
                 actual_size};
     }
 
-    cuda::std::span<double> get_leaves_contiguous_span() noexcept {
+    cuda::std::span<double>
+    get_leaves_contiguous_span(cudaStream_t stream) noexcept {
         const auto start_idx     = get_current_start_idx();
         const auto report_stride = m_nparams * kParamStride;
         const SizeType src_pitch = m_leaves_stride * sizeof(double);
@@ -325,23 +383,28 @@ public:
             cuda_utils::check_cuda_call(
                 cudaMemcpy2DAsync(dst, dst_pitch,
                                   src + start_idx * m_leaves_stride, src_pitch,
-                                  row_bytes, m_size, cudaMemcpyDeviceToDevice),
+                                  row_bytes, m_size, cudaMemcpyDeviceToDevice,
+                                  stream),
                 "cudaMemcpy2DAsync leaves failed");
         } else {
             // Wrapped case - two contiguous copies
             const auto first_part      = m_capacity - start_idx;
             const SizeType second_part = m_size - first_part;
             cuda_utils::check_cuda_call(
-                cudaMemcpy2DAsync(
-                    dst, dst_pitch, src + start_idx * m_leaves_stride,
-                    src_pitch, row_bytes, first_part, cudaMemcpyDeviceToDevice),
+                cudaMemcpy2DAsync(dst, dst_pitch,
+                                  src + start_idx * m_leaves_stride, src_pitch,
+                                  row_bytes, first_part,
+                                  cudaMemcpyDeviceToDevice, stream),
                 "cudaMemcpy2DAsync leaves failed");
             cuda_utils::check_cuda_call(
                 cudaMemcpy2DAsync(dst + first_part * report_stride, dst_pitch,
                                   src, src_pitch, row_bytes, second_part,
-                                  cudaMemcpyDeviceToDevice),
+                                  cudaMemcpyDeviceToDevice, stream),
                 "cudaMemcpy2DAsync leaves failed");
         }
+        cuda_utils::check_cuda_call(
+            cudaStreamSynchronize(stream),
+            "cudaStreamSynchronize get_leaves_contiguous_span failed");
         return {thrust::raw_pointer_cast(m_scratch_leaves.data()),
                 m_size * report_stride};
     }
@@ -354,12 +417,25 @@ public:
      *
      * @return Span over contiguous scores
      */
-    cuda::std::span<float> get_scores_contiguous_span() noexcept {
+    cuda::std::span<float>
+    get_scores_contiguous_span(cudaStream_t stream) noexcept {
         const auto start_idx = get_current_start_idx();
         copy_from_circular(thrust::raw_pointer_cast(m_scores.data()), start_idx,
                            m_size, SizeType{1},
-                           thrust::raw_pointer_cast(m_scratch_scores.data()));
+                           thrust::raw_pointer_cast(m_scratch_scores.data()),
+                           stream);
         return {thrust::raw_pointer_cast(m_scratch_scores.data()), m_size};
+    }
+
+    /**
+     * @brief Get physical start index
+     */
+    SizeType get_physical_start_idx() const {
+        error_check::check(m_is_updating,
+                           "WorldTreeCUDA: get_physical_start_idx only valid "
+                           "during updates");
+        // Compute physical start: relative to current head of read region
+        return get_circular_index(m_read_consumed, m_head, m_capacity);
     }
 
     // Mutation operations
@@ -472,7 +548,8 @@ public:
     void add_initial(cuda::std::span<const double> leaves_batch,
                      cuda::std::span<const FoldTypeCUDA> folds_batch,
                      cuda::std::span<const float> scores_batch,
-                     SizeType slots_to_write) {
+                     SizeType slots_to_write,
+                     cudaStream_t stream) {
         error_check::check_less_equal(
             slots_to_write, m_capacity,
             "WorldTreeCUDA: Suggestions too large to add.");
@@ -484,18 +561,18 @@ public:
             cudaMemcpyAsync(thrust::raw_pointer_cast(m_leaves.data()),
                             leaves_batch.data(),
                             slots_to_write * m_leaves_stride * sizeof(double),
-                            cudaMemcpyDeviceToDevice),
+                            cudaMemcpyDeviceToDevice, stream),
             "cudaMemcpyAsync leaves failed");
         cuda_utils::check_cuda_call(
             cudaMemcpyAsync(
                 thrust::raw_pointer_cast(m_folds.data()), folds_batch.data(),
                 slots_to_write * m_folds_stride * sizeof(FoldTypeCUDA),
-                cudaMemcpyDeviceToDevice),
+                cudaMemcpyDeviceToDevice, stream),
             "cudaMemcpyAsync folds failed");
         cuda_utils::check_cuda_call(
             cudaMemcpyAsync(thrust::raw_pointer_cast(m_scores.data()),
                             scores_batch.data(), slots_to_write * sizeof(float),
-                            cudaMemcpyDeviceToDevice),
+                            cudaMemcpyDeviceToDevice, stream),
             "cudaMemcpyAsync scores failed");
         m_size = slots_to_write;
         error_check::check_less_equal(
@@ -504,19 +581,23 @@ public:
     }
 
     /**
-     * @brief Add batch during update with threshold filtering
+     * @brief Add batch during update with threshold filtering, scattered.
      *
      * @return Updated threshold after any trimming
      * Adds filtered batch to write region. If full, trims write region via
      * top-k threshold. Makes sure all candidates fit, reclaiming space
      * from consumed old candidates.
+     * scores_batch is not scattered and only first slots_to_write are valid.
+     * leaves_batch and folds_batch are scattered and indices_batch is the
+     * physical indices of the leaves.
      */
-    float add_batch(cuda::std::span<const double> leaves_batch,
-                    cuda::std::span<const FoldTypeCUDA> folds_batch,
-                    cuda::std::span<const float> scores_batch,
-                    float current_threshold,
-                    SizeType slots_to_write,
-                    cudaStream_t stream) {
+    float add_batch_scattered(cuda::std::span<const double> leaves_batch,
+                              cuda::std::span<const FoldTypeCUDA> folds_batch,
+                              cuda::std::span<const float> scores_batch,
+                              cuda::std::span<const uint32_t> indices_batch,
+                              float current_threshold,
+                              SizeType slots_to_write,
+                              cudaStream_t stream) {
         if (slots_to_write == 0) {
             return current_threshold;
         }
@@ -526,6 +607,8 @@ public:
             thrust::raw_pointer_cast(folds_batch.data());
         const float* __restrict__ scores_batch_ptr =
             thrust::raw_pointer_cast(scores_batch.data());
+        const uint32_t* __restrict__ indices_batch_ptr =
+            thrust::raw_pointer_cast(indices_batch.data());
         double* __restrict__ m_leaves_ptr =
             thrust::raw_pointer_cast(m_leaves.data());
         FoldTypeCUDA* __restrict__ m_folds_ptr =
@@ -536,12 +619,20 @@ public:
         // Fast path: Check if we have enough space immediately
         SizeType space_left = calculate_space_left();
         if (slots_to_write <= space_left) {
-            copy_to_circular(leaves_batch_ptr, m_leaves_ptr, m_write_head,
-                             slots_to_write, m_leaves_stride, stream);
-            copy_to_circular(folds_batch_ptr, m_folds_ptr, m_write_head,
-                             slots_to_write, m_folds_stride, stream);
-            copy_to_circular(scores_batch_ptr, m_scores_ptr, m_write_head,
-                             slots_to_write, SizeType{1}, stream);
+            const dim3 block_dim(256);
+            const dim3 grid_dim((slots_to_write + block_dim.x - 1) /
+                                block_dim.x);
+            cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
+            scatter_to_circular_copy_kernel<<<grid_dim, block_dim, 0, stream>>>(
+                leaves_batch_ptr, folds_batch_ptr, scores_batch_ptr,
+                indices_batch_ptr, m_leaves_ptr, m_folds_ptr, m_scores_ptr,
+                m_write_head, m_capacity, slots_to_write, m_leaves_stride,
+                m_folds_stride);
+            cuda_utils::check_last_cuda_error(
+                "scatter_to_circular_copy_kernel failed");
+            cuda_utils::check_cuda_call(
+                cudaStreamSynchronize(stream),
+                "cudaStreamSynchronize scatter_to_circular_copy_kernel failed");
             m_write_head =
                 get_circular_index(slots_to_write, m_write_head, m_capacity);
             m_size += slots_to_write;
@@ -554,17 +645,10 @@ public:
             "WorldTreeCUDA: Suggestions too large to add.");
         // Determine the Global Pruning Threshold
         const float effective_threshold = get_prune_threshold(
-            scores_batch, slots_to_write, current_threshold);
+            scores_batch, slots_to_write, current_threshold, stream);
         // Remove old items that are strictly worse than the new global pruning
         // threshold.
         prune_on_overload(effective_threshold, stream);
-
-        double* __restrict__ tmp_leaves_ptr =
-            thrust::raw_pointer_cast(m_scratch_leaves.data());
-        FoldTypeCUDA* __restrict__ tmp_folds_ptr =
-            thrust::raw_pointer_cast(m_scratch_folds.data());
-        float* __restrict__ tmp_scores_ptr =
-            thrust::raw_pointer_cast(m_scratch_scores.data());
 
         LinearMaskFunctor functor{.scores_ptr = scores_batch_ptr,
                                   .threshold  = effective_threshold};
@@ -573,36 +657,43 @@ public:
                           thrust::counting_iterator<uint32_t>(slots_to_write),
                           m_scratch_mask.begin(), functor);
         cuda_utils::check_last_cuda_error("LinearMaskFunctor failed");
+        // Compute prefix scan of the mask to get the output indices
         thrust::exclusive_scan(
             thrust::cuda::par.on(stream), m_scratch_mask.begin(),
             m_scratch_mask.begin() + static_cast<IndexType>(slots_to_write),
             m_scratch_prefix.begin(), uint32_t{0});
         cuda_utils::check_last_cuda_error("exclusive_scan failed");
 
-        const dim3 block_dim(256);
-        const dim3 grid_dim((slots_to_write + block_dim.x - 1) / block_dim.x);
-        cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
-        compact_and_copy_kernel<<<grid_dim, block_dim, 0, stream>>>(
-            leaves_batch_ptr, folds_batch_ptr, scores_batch_ptr,
-            thrust::raw_pointer_cast(m_scratch_mask.data()),
-            thrust::raw_pointer_cast(m_scratch_prefix.data()), tmp_leaves_ptr,
-            tmp_folds_ptr, tmp_scores_ptr, slots_to_write, m_leaves_stride,
-            m_folds_stride);
-        cuda_utils::check_last_cuda_error("compact_and_copy_kernel failed");
         const SizeType pending_count = m_scratch_prefix[slots_to_write - 1] +
                                        m_scratch_mask[slots_to_write - 1];
 
         space_left          = calculate_space_left();
         const auto n_to_add = std::min(pending_count, space_left);
+        if (n_to_add < pending_count) {
+            spdlog::warn(
+                "WorldTreeCUDA: Unexpected pruning deficit - pending_count={}, "
+                "space_left={}, m_size={}, slots_to_write={}, threshold={}",
+                pending_count, space_left, m_size, slots_to_write,
+                effective_threshold);
+        }
         if (n_to_add == 0) {
             return effective_threshold;
         }
-        copy_to_circular(tmp_leaves_ptr, m_leaves_ptr, m_write_head, n_to_add,
-                         m_leaves_stride, stream);
-        copy_to_circular(tmp_folds_ptr, m_folds_ptr, m_write_head, n_to_add,
-                         m_folds_stride, stream);
-        copy_to_circular(tmp_scores_ptr, m_scores_ptr, m_write_head, n_to_add,
-                         SizeType{1}, stream);
+
+        const dim3 block_dim(256);
+        const dim3 grid_dim((slots_to_write + block_dim.x - 1) / block_dim.x);
+        cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
+        scatter_filter_to_circular_kernel<<<grid_dim, block_dim, 0, stream>>>(
+            leaves_batch_ptr, folds_batch_ptr, scores_batch_ptr,
+            indices_batch_ptr, thrust::raw_pointer_cast(m_scratch_mask.data()),
+            thrust::raw_pointer_cast(m_scratch_prefix.data()), m_leaves_ptr,
+            m_folds_ptr, m_scores_ptr, m_write_head, m_capacity, slots_to_write,
+            n_to_add, m_leaves_stride, m_folds_stride);
+        cuda_utils::check_last_cuda_error(
+            "scatter_filter_to_circular_kernel failed");
+        cuda_utils::check_cuda_call(
+            cudaStreamSynchronize(stream),
+            "cudaStreamSynchronize scatter_filter_to_circular_kernel failed");
         m_write_head = get_circular_index(n_to_add, m_write_head, m_capacity);
         m_size += n_to_add;
         return effective_threshold;
@@ -635,45 +726,9 @@ private:
 
     // Scratch buffer for in-place operations
     thrust::device_vector<double> m_scratch_leaves;
-    thrust::device_vector<FoldTypeCUDA> m_scratch_folds;
     thrust::device_vector<float> m_scratch_scores;
     thrust::device_vector<uint32_t> m_scratch_prefix;
     thrust::device_vector<uint8_t> m_scratch_mask;
-
-    /**
-     * @brief Copy slots from contiguous source to circular buffer
-     *
-     * @param src Source pointer (contiguous)
-     * @param dst Destination pointer (circular buffer)
-     * @param dst_start_slot Starting slot in destination (circular buffer)
-     * @param slots Number of slots to copy
-     * @param stride Stride of the elements
-     */
-    template <typename T>
-    void copy_to_circular(const T* __restrict__ src,
-                          T* __restrict__ dst,
-                          SizeType dst_start_slot,
-                          SizeType slots,
-                          SizeType stride,
-                          cudaStream_t stream) const noexcept {
-        const auto first_slots = std::min(slots, m_capacity - dst_start_slot);
-        const auto first_elems = first_slots * stride;
-        const auto dst_offset  = dst_start_slot * stride;
-
-        cuda_utils::check_cuda_call(
-            cudaMemcpyAsync(dst + dst_offset, src, first_elems * sizeof(T),
-                            cudaMemcpyDeviceToDevice, stream),
-            "cudaMemcpyAsync copy_to_circular failed");
-        const auto second_slots = slots - first_slots;
-        if (second_slots > 0) {
-            const auto second_elems = second_slots * stride;
-            cuda_utils::check_cuda_call(
-                cudaMemcpyAsync(dst, src + first_elems,
-                                second_elems * sizeof(T),
-                                cudaMemcpyDeviceToDevice, stream),
-                "cudaMemcpyAsync copy_to_circular failed");
-        }
-    }
 
     /**
      * @brief Copy slots from circular buffer to contiguous destination
@@ -689,14 +744,15 @@ private:
                             SizeType src_start_slot,
                             SizeType slots,
                             SizeType stride,
-                            T* __restrict__ dst) const noexcept {
+                            T* __restrict__ dst,
+                            cudaStream_t stream) const noexcept {
         const auto first_slots = std::min(slots, m_capacity - src_start_slot);
         const auto first_elems = first_slots * stride;
         const auto src_offset  = src_start_slot * stride;
 
         cuda_utils::check_cuda_call(
             cudaMemcpyAsync(dst, src + src_offset, first_elems * sizeof(T),
-                            cudaMemcpyDeviceToDevice),
+                            cudaMemcpyDeviceToDevice, stream),
             "cudaMemcpyAsync copy_from_circular failed");
         const auto second_slots = slots - first_slots;
         if (second_slots > 0) {
@@ -704,9 +760,12 @@ private:
             cuda_utils::check_cuda_call(
                 cudaMemcpyAsync(dst + first_elems, src,
                                 second_elems * sizeof(T),
-                                cudaMemcpyDeviceToDevice),
+                                cudaMemcpyDeviceToDevice, stream),
                 "cudaMemcpyAsync copy_from_circular failed");
         }
+        cuda_utils::check_cuda_call(
+            cudaStreamSynchronize(stream),
+            "cudaStreamSynchronize copy_from_circular failed");
     }
 
     /**
@@ -754,7 +813,8 @@ private:
      */
     float get_prune_threshold(cuda::std::span<const float> scores_batch,
                               SizeType slots_to_write,
-                              float current_threshold) noexcept {
+                              float current_threshold,
+                              cudaStream_t stream) noexcept {
         if (slots_to_write == 0) {
             return current_threshold;
         }
@@ -772,20 +832,26 @@ private:
         const auto start_idx = get_current_start_idx();
         copy_from_circular(thrust::raw_pointer_cast(m_scores.data()), start_idx,
                            m_size, SizeType{1},
-                           thrust::raw_pointer_cast(m_scratch_scores.data()));
+                           thrust::raw_pointer_cast(m_scratch_scores.data()),
+                           stream);
         // Append batch scores [m_size ... total]
         cuda_utils::check_cuda_call(
-            cudaMemcpyAsync(
-                thrust::raw_pointer_cast(m_scratch_scores.data()) + m_size,
-                thrust::raw_pointer_cast(scores_batch.data()),
-                slots_to_write * sizeof(float), cudaMemcpyDeviceToDevice),
+            cudaMemcpyAsync(thrust::raw_pointer_cast(m_scratch_scores.data()) +
+                                m_size,
+                            thrust::raw_pointer_cast(scores_batch.data()),
+                            slots_to_write * sizeof(float),
+                            cudaMemcpyDeviceToDevice, stream),
             "cudaMemcpyAsync get_prune_threshold failed");
+        cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
+                                    "cudaStreamSynchronize get_prune_threshold "
+                                    "append batch scores failed");
 
         // The item at 'total_capacity-1' (in descending order) is the smallest
         // score we keep (i.e. the threshold).
-        thrust::sort(thrust::device, m_scratch_scores.begin(),
+        thrust::sort(thrust::cuda::par.on(stream), m_scratch_scores.begin(),
                      m_scratch_scores.begin() + total_candidates,
                      cuda::std::greater<float>());
+        cuda_utils::check_last_cuda_error("thrust::sort failed");
         const float kth = m_scratch_scores[total_capacity - 1];
         // Median score for severity (restricted range)
         const float mid = m_scratch_scores[total_candidates / 2];
@@ -857,6 +923,9 @@ private:
             m_size, 1);
         cuda_utils::check_last_cuda_error(
             "compact_in_place_kernel scores failed");
+        cuda_utils::check_cuda_call(
+            cudaStreamSynchronize(stream),
+            "cudaStreamSynchronize compact_in_place_kernel scores failed");
         auto last_prefix = m_scratch_prefix[m_size - 1];
         auto last_keep   = m_scratch_mask[m_size - 1];
         m_size           = last_prefix + last_keep;
@@ -975,14 +1044,18 @@ WorldTreeCUDA<FoldTypeCUDA>::get_leaves_span(SizeType n_leaves) const {
     return m_impl->get_leaves_span(n_leaves);
 }
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
-cuda::std::span<double>
-WorldTreeCUDA<FoldTypeCUDA>::get_leaves_contiguous_span() noexcept {
-    return m_impl->get_leaves_contiguous_span();
+cuda::std::span<double> WorldTreeCUDA<FoldTypeCUDA>::get_leaves_contiguous_span(
+    cudaStream_t stream) noexcept {
+    return m_impl->get_leaves_contiguous_span(stream);
 }
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
-cuda::std::span<float>
-WorldTreeCUDA<FoldTypeCUDA>::get_scores_contiguous_span() noexcept {
-    return m_impl->get_scores_contiguous_span();
+cuda::std::span<float> WorldTreeCUDA<FoldTypeCUDA>::get_scores_contiguous_span(
+    cudaStream_t stream) noexcept {
+    return m_impl->get_scores_contiguous_span(stream);
+}
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+SizeType WorldTreeCUDA<FoldTypeCUDA>::get_physical_start_idx() const {
+    return m_impl->get_physical_start_idx();
 }
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 void WorldTreeCUDA<FoldTypeCUDA>::set_size(SizeType size) noexcept {
@@ -1017,20 +1090,23 @@ void WorldTreeCUDA<FoldTypeCUDA>::add_initial(
     cuda::std::span<const double> leaves_batch,
     cuda::std::span<const FoldTypeCUDA> folds_batch,
     cuda::std::span<const float> scores_batch,
-    SizeType slots_to_write) {
-    m_impl->add_initial(leaves_batch, folds_batch, scores_batch,
-                        slots_to_write);
+    SizeType slots_to_write,
+    cudaStream_t stream) {
+    m_impl->add_initial(leaves_batch, folds_batch, scores_batch, slots_to_write,
+                        stream);
 }
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
-float WorldTreeCUDA<FoldTypeCUDA>::add_batch(
+float WorldTreeCUDA<FoldTypeCUDA>::add_batch_scattered(
     cuda::std::span<const double> leaves_batch,
     cuda::std::span<const FoldTypeCUDA> folds_batch,
     cuda::std::span<const float> scores_batch,
+    cuda::std::span<const uint32_t> indices_batch,
     float current_threshold,
     SizeType slots_to_write,
     cudaStream_t stream) {
-    return m_impl->add_batch(leaves_batch, folds_batch, scores_batch,
-                             current_threshold, slots_to_write, stream);
+    return m_impl->add_batch_scattered(leaves_batch, folds_batch, scores_batch,
+                                       indices_batch, current_threshold,
+                                       slots_to_write, stream);
 }
 // Explicit instantiation
 template class WorldTreeCUDA<float>;

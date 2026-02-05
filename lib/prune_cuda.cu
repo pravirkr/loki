@@ -10,6 +10,7 @@
 #include <fmt/ranges.h>
 #include <spdlog/spdlog.h>
 
+#include <cuda/std/span>
 #include <cuda_runtime.h>
 #include <thrust/device_vector.h>
 
@@ -19,6 +20,7 @@
 #include "loki/core/dynamic.hpp"
 #include "loki/cuda_utils.cuh"
 #include "loki/psr_utils.hpp"
+#include "loki/timing.hpp"
 #include "loki/utils.hpp"
 #include "loki/utils/world_tree.hpp"
 
@@ -85,9 +87,11 @@ public:
         const auto nsegments = ffa_plan.get_nsegments().back();
         const std::string filebase =
             std::format("{}_pruning_nstages_{}", file_prefix, nsegments);
-        const auto log_file = outdir / std::format("{}_log.txt", filebase);
+        const auto log_file =
+            (outdir / std::format("{}_log.txt", filebase)).lexically_normal();
         const auto result_file =
-            outdir / std::format("{}_results.h5", filebase);
+            (outdir / std::format("{}_results.h5", filebase))
+                .lexically_normal();
 
         // Create output directory
         std::error_code ec;
@@ -115,13 +119,13 @@ public:
             result_file, cands::PruneResultWriter::Mode::kWrite);
         writer.write_metadata(m_cfg.get_param_names(), nsegments, m_max_sugg,
                               m_threshold_scheme);
-
-        auto prune = PruneCUDA<FoldTypeCUDA>(std::move(ffa_plan), m_cfg,
-                                             m_threshold_scheme, m_max_sugg,
-                                             m_batch_size, poly_basis);
+        auto prune = PruneCUDA<FoldTypeCUDA>(
+            std::move(ffa_plan), m_cfg, m_threshold_scheme, m_max_sugg,
+            m_batch_size, poly_basis, m_device_id);
         for (const auto ref_seg : ref_segs_to_process) {
             prune.execute(cuda_utils::as_span(ffa_fold_d), ref_seg, outdir,
-                          log_file, result_file);
+                          log_file, result_file,
+                          /*task_id=*/0);
         }
         spdlog::info("Pruning complete. Results saved to {}",
                      result_file.string());
@@ -137,6 +141,11 @@ private:
     int m_device_id;
 
 }; // End PruningManagerCUDATypedImpl implementation
+
+struct IterationStats {
+    SizeType n_leaves     = 0;
+    SizeType n_leaves_phy = 0;
+};
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA> struct PruningWorkspaceCUDA {
     constexpr static SizeType kLeavesParamStride = 2;
@@ -157,11 +166,6 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA> struct PruningWorkspaceCUDA {
     thrust::device_vector<uint32_t> branched_param_idx_d;
     thrust::device_vector<float> branched_phase_shift_d;
 
-    // Scratch space for branching
-    thrust::device_vector<double> scratch_params_d;
-    thrust::device_vector<double> scratch_dparams_d;
-    thrust::device_vector<uint32_t> scratch_counts_d;
-
     PruningWorkspaceCUDA(SizeType batch_size,
                          SizeType branch_max,
                          SizeType nparams,
@@ -178,13 +182,7 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA> struct PruningWorkspaceCUDA {
           branched_scores_d(max_branched_leaves),
           branched_indices_d(max_branched_leaves),
           branched_param_idx_d(max_branched_leaves),
-          branched_phase_shift_d(max_branched_leaves),
-          scratch_params_d(max_branched_leaves * nparams),
-          scratch_dparams_d(batch_size * nparams),
-          scratch_counts_d(batch_size * nparams) {}
-
-    // Call this after filling batch_scores and batch_passing_indices
-    void filter_batch(SizeType n_leaves_passing) noexcept;
+          branched_phase_shift_d(max_branched_leaves) {}
 
     float get_memory_usage() const noexcept {
         const auto total_memory =
@@ -193,10 +191,7 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA> struct PruningWorkspaceCUDA {
             (branched_scores_d.size() * sizeof(float)) +
             (branched_indices_d.size() * sizeof(SizeType)) +
             (branched_param_idx_d.size() * sizeof(SizeType)) +
-            (branched_phase_shift_d.size() * sizeof(float)) +
-            (scratch_params_d.size() * sizeof(double)) +
-            (scratch_dparams_d.size() * sizeof(double)) +
-            (scratch_counts_d.size() * sizeof(SizeType));
+            (branched_phase_shift_d.size() * sizeof(float));
         return static_cast<float>(total_memory) /
                static_cast<float>(1ULL << 30U);
     }
@@ -212,14 +207,17 @@ public:
          std::span<const float> threshold_scheme,
          SizeType max_sugg,
          SizeType batch_size,
-         std::string_view poly_basis)
+         std::string_view poly_basis,
+         int device_id)
         : m_ffa_plan(std::move(ffa_plan)),
           m_cfg(std::move(cfg)),
           m_threshold_scheme(threshold_scheme.begin(), threshold_scheme.end()),
           m_max_sugg(max_sugg),
           m_batch_size(batch_size),
           m_poly_basis(poly_basis),
-          m_total_levels(m_threshold_scheme.size()) {
+          m_total_levels(m_threshold_scheme.size()),
+          m_device_id(device_id) {
+        cuda_utils::CudaSetDeviceGuard device_guard(m_device_id);
         // Setup pruning functions
         setup_pruning();
 
@@ -272,8 +270,12 @@ public:
                  SizeType ref_seg,
                  const std::filesystem::path& outdir,
                  const std::optional<std::filesystem::path>& log_file,
-                 const std::optional<std::filesystem::path>& result_file) {
-        const std::string run_name = std::format("{:03d}_{:02d}", ref_seg, 0);
+                 const std::optional<std::filesystem::path>& result_file,
+                 int task_id) {
+        timing::SimpleTimer timer;
+        timer.start();
+        const std::string run_name =
+            std::format("{:03d}_{:02d}", ref_seg, task_id);
 
         // Log detailed memory usage
         const auto memory_workspace_gb =
@@ -288,24 +290,31 @@ public:
             log_file.value_or(outdir / std::format("tmp_{}_log.txt", run_name));
         std::filesystem::path actual_result_file = result_file.value_or(
             outdir / std::format("tmp_{}_results.h5", run_name));
-        std::ofstream log(actual_log_file, std::ios::app);
-        log << std::format("Pruning log for ref segment: {}\n", ref_seg);
-        log.close();
-
-        cudaStream_t stream = nullptr;
 
         const auto nsegments = m_ffa_plan.get_nsegments().back();
-        initialize(ffa_fold, ref_seg, stream);
 
+        // cudaStream_t stream = nullptr;
+        cudaStream_t stream = nullptr;
+        cuda_utils::check_cuda_call(cudaStreamCreate(&stream),
+                                    "cudaStreamCreate failed");
+        initialize(ffa_fold, ref_seg, stream);
+        spdlog::info("Pruning run {:03d}: initialized", ref_seg);
+
+        SizeType iterations_completed = 0;
         for (SizeType iter = 0; iter < nsegments - 1; ++iter) {
             execute_iteration(ffa_fold, stream);
+            iterations_completed = iter + 1;
             // Check for early termination (no survivors)
             if (m_prune_complete) {
-                spdlog::info(
-                    "Pruning terminated early at iteration {} - no survivors",
-                    iter + 1);
                 break;
             }
+        }
+
+        // Log early exit ONCE after loop if needed
+        if (m_prune_complete && iterations_completed < nsegments - 1) {
+            spdlog::info(
+                "Pruning terminated early at iteration {} - no survivors",
+                iterations_completed);
         }
 
         // Transform the suggestion params to middle of the data
@@ -314,25 +323,45 @@ public:
         // Write results
         auto result_writer = cands::PruneResultWriter(
             actual_result_file, cands::PruneResultWriter::Mode::kAppend);
-        auto leaves_report = m_world_tree->get_leaves_contiguous_span();
-        m_prune_funcs->report(leaves_report, coord_mid,
+        auto leaves_report_d_span =
+            m_world_tree->get_leaves_contiguous_span(stream);
+        m_prune_funcs->report(leaves_report_d_span, coord_mid,
                               m_world_tree->get_size(), stream);
-        result_writer.write_run_results(
-            run_name, m_snail_scheme->get_data(), leaves_report,
-            m_world_tree->get_scores_contiguous_span(),
-            m_world_tree->get_size(), m_cfg.get_nparams(), *m_pstats);
+        auto scores_report_d_span =
+            m_world_tree->get_scores_contiguous_span(stream);
+        std::vector<double> leaves_report_h(leaves_report_d_span.size());
+        std::vector<float> scores_report_h(scores_report_d_span.size());
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(scores_report_h.data(), scores_report_d_span.data(),
+                            scores_report_d_span.size() * sizeof(float),
+                            cudaMemcpyDeviceToHost, stream),
+            "cudaMemcpyAsync scores_report failed");
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(leaves_report_h.data(), leaves_report_d_span.data(),
+                            leaves_report_d_span.size() * sizeof(double),
+                            cudaMemcpyDeviceToHost, stream),
+            "cudaMemcpyAsync leaves_report failed");
+        cuda_utils::check_cuda_call(
+            cudaStreamSynchronize(stream),
+            "cudaStreamSynchronize write results failed");
+        cuda_utils::check_cuda_call(cudaStreamDestroy(stream),
+                                    "cudaStreamDestroy failed");
+        result_writer.write_run_results(run_name, m_snail_scheme->get_data(),
+                                        leaves_report_h, scores_report_h,
+                                        m_world_tree->get_size(),
+                                        m_cfg.get_nparams(), *m_pstats);
 
         // Final log entries
-        std::ofstream final_log(actual_log_file, std::ios::app);
-        final_log << std::format("Pruning run complete for ref segment {}\n",
-                                 ref_seg);
-        final_log << std::format("Time: {}\n\n", m_pstats->get_timer_summary());
-        final_log.close();
+        std::ofstream log(actual_log_file, std::ios::app);
+        log << std::format("Pruning log for ref segment: {}\n", ref_seg);
+        log << m_pstats->get_all_summaries();
+        log << std::format("Pruning run complete for ref segment {}\n",
+                           ref_seg);
+        log.close();
+
         spdlog::info("Pruning run {:03d}: complete", ref_seg);
         spdlog::info("Pruning run {:03d}: stats: {}", ref_seg,
-                     m_pstats->get_stats_summary());
-        spdlog::info("Pruning run {:03d}: timer: {}", ref_seg,
-                     m_pstats->get_concise_timer_summary());
+                     m_pstats->get_stats_summary_cuda(timer.stop()));
     }
 
 private:
@@ -343,6 +372,7 @@ private:
     SizeType m_batch_size;
     std::string_view m_poly_basis;
     SizeType m_total_levels;
+    int m_device_id;
 
     std::vector<double> m_branching_pattern;
     SizeType m_branch_max{0};
@@ -376,7 +406,6 @@ private:
 
         m_prune_level    = 0;
         m_prune_complete = false;
-        spdlog::info("Pruning run {:03d}: initialized", ref_seg);
 
         // Initialize the world tree with the first segment
         const auto fold_segment = m_prune_funcs->load_segment(
@@ -389,7 +418,22 @@ private:
         // Initialize the WorldTree with the generated data
         m_world_tree->add_initial(
             cuda_utils::as_span(m_seed_leaves_d), fold_segment,
-            cuda_utils::as_span(m_seed_scores_d), n_leaves);
+            cuda_utils::as_span(m_seed_scores_d), n_leaves, stream);
+
+        // Initialize the prune stats
+        m_pstats = std::make_unique<cands::PruneStatsCollection>();
+        const cands::PruneStats pstats_cur{
+            .level         = m_prune_level,
+            .seg_idx       = m_snail_scheme->get_segment_idx(m_prune_level),
+            .threshold     = 0,
+            .score_min     = m_world_tree->get_score_min(),
+            .score_max     = m_world_tree->get_score_max(),
+            .n_branches    = m_world_tree->get_size(),
+            .n_leaves      = m_world_tree->get_size(),
+            .n_leaves_phy  = m_world_tree->get_size(),
+            .n_leaves_surv = m_world_tree->get_size(),
+        };
+        m_pstats->update_stats(pstats_cur);
     }
 
     void execute_iteration(cuda::std::span<const FoldTypeCUDA> ffa_fold,
@@ -398,31 +442,44 @@ private:
             return;
         }
         ++m_prune_level;
-        if (m_prune_level > m_total_levels) {
-            throw std::runtime_error(
-                std::format("Pruning complete - exceeded total levels at level "
-                            "{}",
-                            m_prune_level));
-        }
+        error_check::check_less_equal(
+            m_prune_level, m_total_levels,
+            std::format("Pruning complete - exceeded total levels at level "
+                        "{}",
+                        m_prune_level));
         // Prepare for in-place update: mark start of write region, reset size
         // for new suggestions.
         m_world_tree->prepare_in_place_update();
 
+        IterationStats stats;
         const auto seg_idx_cur = m_snail_scheme->get_segment_idx(m_prune_level);
         const auto threshold   = m_threshold_scheme[m_prune_level - 1];
         // Capture the number of branches *before* finalizing the update
         const auto n_branches = m_world_tree->get_size_old();
 
-        execute_iteration_batched(ffa_fold, seg_idx_cur, threshold, stream);
+        execute_iteration_batched(ffa_fold, seg_idx_cur, threshold, stats,
+                                  stream);
 
         // Finalize: make new region active, defragment for contiguous access.
         m_world_tree->finalize_in_place_update();
 
+        // Update statistics
+        const cands::PruneStats pstats_cur{
+            .level         = m_prune_level,
+            .seg_idx       = seg_idx_cur,
+            .threshold     = threshold,
+            .score_min     = m_world_tree->get_score_min(),
+            .score_max     = m_world_tree->get_score_max(),
+            .n_branches    = n_branches,
+            .n_leaves      = stats.n_leaves,
+            .n_leaves_phy  = stats.n_leaves_phy,
+            .n_leaves_surv = m_world_tree->get_size(),
+        };
+        m_pstats->update_stats(pstats_cur);
+
         // Check if no survivors
         if (m_world_tree->get_size() == 0) {
             m_prune_complete = true;
-            spdlog::info("Pruning run complete at level {} - no survivors",
-                         m_prune_level);
             return;
         }
     }
@@ -432,6 +489,7 @@ private:
     void execute_iteration_batched(cuda::std::span<const FoldTypeCUDA> ffa_fold,
                                    SizeType seg_idx_cur,
                                    float threshold,
+                                   IterationStats& stats,
                                    cudaStream_t stream) {
         // Get coordinates
         const auto coord_init = m_snail_scheme->get_coord(0);
@@ -470,11 +528,13 @@ private:
             }
             total_processed += current_batch_size;
 
+            // Branch
             const auto n_leaves_batch = m_prune_funcs->branch(
                 leaves_tree_span,
                 cuda_utils::as_span(m_pruning_workspace->branched_leaves_d),
                 cuda_utils::as_span(m_pruning_workspace->branched_indices_d),
                 coord_cur, coord_prev, current_batch_size, branch_ws, stream);
+            stats.n_leaves += n_leaves_batch;
             if (n_leaves_batch == 0) {
                 m_world_tree->consume_read(current_batch_size);
                 continue;
@@ -489,6 +549,7 @@ private:
                 cuda_utils::as_span(m_pruning_workspace->branched_leaves_d),
                 cuda_utils::as_span(m_pruning_workspace->branched_indices_d),
                 coord_cur, n_leaves_batch, stream);
+            stats.n_leaves_phy += n_leaves_after_validation;
             if (n_leaves_after_validation == 0) {
                 m_world_tree->consume_read(current_batch_size);
                 continue;
@@ -504,11 +565,8 @@ private:
                 stream);
 
             // Shift and add kernel
-            m_world_tree->convert_to_physical_indices(
-                cuda_utils::as_span(m_pruning_workspace->branched_indices_d,
-                                    n_leaves_after_validation),
-                n_leaves_after_validation, stream);
-
+            // branched_indices_d are logical indices, convert to physical
+            // indices in shift_add kernel
             m_prune_funcs->shift_add(
                 m_world_tree->get_folds_span(),
                 cuda_utils::as_span(m_pruning_workspace->branched_indices_d),
@@ -517,7 +575,9 @@ private:
                 cuda_utils::as_span(
                     m_pruning_workspace->branched_phase_shift_d),
                 cuda_utils::as_span(m_pruning_workspace->branched_folds_d),
-                n_leaves_after_validation, stream);
+                n_leaves_after_validation,
+                m_world_tree->get_physical_start_idx(),
+                m_world_tree->get_capacity(), stream);
 
             // Score and prune kernel
             const auto n_leaves_passing = m_prune_funcs->score_and_filter(
@@ -534,20 +594,19 @@ private:
             error_check::check_less_equal(
                 n_leaves_passing, m_pruning_workspace->max_branched_leaves,
                 "n_leaves_passing <= max_branched_leaves");
-            if (n_leaves_passing != n_leaves_after_validation) {
-                m_pruning_workspace->filter_batch(n_leaves_passing);
-            }
 
             // Transform kernel
             m_prune_funcs->transform(
                 cuda_utils::as_span(m_pruning_workspace->branched_leaves_d),
+                cuda_utils::as_span(m_pruning_workspace->branched_indices_d),
                 coord_next, coord_cur, n_leaves_passing, stream);
 
             // Add batch to output suggestions
-            current_threshold = m_world_tree->add_batch(
+            current_threshold = m_world_tree->add_batch_scattered(
                 cuda_utils::as_span(m_pruning_workspace->branched_leaves_d),
                 cuda_utils::as_span(m_pruning_workspace->branched_folds_d),
                 cuda_utils::as_span(m_pruning_workspace->branched_scores_d),
+                cuda_utils::as_span(m_pruning_workspace->branched_indices_d),
                 current_threshold, n_leaves_passing, stream);
 
             // Notify the buffer that a batch of the old suggestions has been
@@ -611,13 +670,15 @@ PruneCUDA<FoldTypeCUDA>::PruneCUDA(
     std::span<const float> threshold_scheme,
     SizeType max_sugg,
     SizeType batch_size,
-    std::string_view poly_basis)
+    std::string_view poly_basis,
+    int device_id)
     : m_impl(std::make_unique<Impl>(std::move(ffa_plan),
                                     std::move(cfg),
                                     threshold_scheme,
                                     max_sugg,
                                     batch_size,
-                                    poly_basis)) {}
+                                    poly_basis,
+                                    device_id)) {}
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 PruneCUDA<FoldTypeCUDA>::~PruneCUDA() = default;
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
@@ -636,8 +697,9 @@ void PruneCUDA<FoldTypeCUDA>::execute(
     SizeType ref_seg,
     const std::filesystem::path& outdir,
     const std::optional<std::filesystem::path>& log_file,
-    const std::optional<std::filesystem::path>& result_file) {
-    m_impl->execute(ffa_fold, ref_seg, outdir, log_file, result_file);
+    const std::optional<std::filesystem::path>& result_file,
+    int task_id) {
+    m_impl->execute(ffa_fold, ref_seg, outdir, log_file, result_file, task_id);
 }
 
 template class PruneCUDA<float>;

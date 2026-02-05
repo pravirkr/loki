@@ -30,13 +30,9 @@ __global__ void normalize_kernel(float* __restrict__ data,
 } // namespace
 
 // IrfftExecutorCUDA implementation
-IrfftExecutorCUDA::IrfftExecutorCUDA(int n_real,
-                                     int batch_size,
-                                     cudaStream_t stream)
+IrfftExecutorCUDA::IrfftExecutorCUDA(int n_real)
     : m_n_real(n_real),
-      m_n_complex((n_real / 2) + 1),
-      m_batch_size(batch_size),
-      m_stream(stream) {}
+      m_n_complex((n_real / 2) + 1) {}
 
 IrfftExecutorCUDA::~IrfftExecutorCUDA() {
     const size_t num_plans = m_plan_cache.size();
@@ -48,9 +44,11 @@ IrfftExecutorCUDA::~IrfftExecutorCUDA() {
     spdlog::debug("IrfftExecutorCUDA destroyed {} cached plans", num_plans);
 }
 
-void IrfftExecutorCUDA::execute(cuda::std::span<ComplexTypeCUDA> complex_input,
-                                cuda::std::span<float> real_output,
-                                int batch_size) {
+void IrfftExecutorCUDA::execute(
+    cuda::std::span<const ComplexTypeCUDA> complex_input,
+    cuda::std::span<float> real_output,
+    int batch_size,
+    cudaStream_t stream) {
     // Input validation
     error_check::check_equal(
         real_output.size(), batch_size * m_n_real,
@@ -59,24 +57,26 @@ void IrfftExecutorCUDA::execute(cuda::std::span<ComplexTypeCUDA> complex_input,
         complex_input.size(), batch_size * m_n_complex,
         "IrfftExecutorCUDA: complex_input size does not match batch size");
 
-    auto* complex_ptr = reinterpret_cast<cufftComplex*>(complex_input.data());
-    auto* real_ptr    = real_output.data();
-    cufftHandle plan  = get_or_create_plan(batch_size);
+    auto* complex_ptr = reinterpret_cast<cufftComplex*>(
+        const_cast<ComplexTypeCUDA*>(complex_input.data())); // NOLINT
+    auto* real_ptr   = real_output.data();
+    cufftHandle plan = get_or_create_plan(batch_size, stream);
     cuda_utils::check_cufft_call(cufftExecC2R(plan, complex_ptr, real_ptr),
                                  "IrfftExecutorCUDA: cufftExecC2R failed");
 
     // Apply normalization (cuFFT C2R doesn't normalize automatically)
-    const float norm         = 1.0F / static_cast<float>(m_n_real);
-    const int total_elements = batch_size * m_n_real;
-
+    const int total_elements    = batch_size * m_n_real;
+    const float norm            = 1.0F / static_cast<float>(m_n_real);
     const int threads_per_block = 256;
-    const int num_blocks =
+    const int blocks_per_grid =
         (total_elements + threads_per_block - 1) / threads_per_block;
+    const dim3 block_dim(threads_per_block);
+    const dim3 grid_dim(blocks_per_grid);
+    cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
 
-    normalize_kernel<<<num_blocks, threads_per_block, 0, m_stream>>>(
-        real_ptr, total_elements, norm);
-    cuda_utils::check_cuda_call(
-        cudaGetLastError(),
+    normalize_kernel<<<grid_dim, block_dim, 0, stream>>>(real_ptr,
+                                                         total_elements, norm);
+    cuda_utils::check_last_cuda_error(
         "IrfftExecutorCUDA: normalize_kernel launch failed");
 
     spdlog::debug(
@@ -84,16 +84,15 @@ void IrfftExecutorCUDA::execute(cuda::std::span<ComplexTypeCUDA> complex_input,
         batch_size, m_n_real);
 }
 
-cufftHandle IrfftExecutorCUDA::get_or_create_plan(int batch_size) {
-    const PlanKey key{.n_real = m_n_real, .batch_size = batch_size};
+cufftHandle IrfftExecutorCUDA::get_or_create_plan(int batch_size,
+                                                  cudaStream_t stream) {
+    const PlanKeyDevice key{
+        .n_real = m_n_real, .batch_size = batch_size, .stream = stream};
 
     std::lock_guard<std::mutex> lock(m_mutex);
 
     auto it = m_plan_cache.find(key);
     if (it != m_plan_cache.end()) {
-        spdlog::trace(
-            "IrfftExecutor: Reusing cached plan for n_real={}, batch={}",
-            m_n_real, batch_size);
         return it->second;
     }
 
@@ -102,27 +101,15 @@ cufftHandle IrfftExecutorCUDA::get_or_create_plan(int batch_size) {
     cuda_utils::check_cufft_call(
         cufftPlan1d(&plan, m_n_real, CUFFT_C2R, batch_size),
         "IrfftExecutorCUDA: cufftPlan1d failed");
-    if (m_stream != nullptr) {
-        cuda_utils::check_cufft_call(cufftSetStream(plan, m_stream),
-                                     "IRFFT CUDA: cufftSetStream failed");
-    }
+    cuda_utils::check_cufft_call(cufftSetStream(plan, stream),
+                                 "IrfftExecutorCUDA: cufftSetStream failed");
 
     // Insert into cache
-    {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        // Check again in case another thread created it
-        auto it = m_plan_cache.find(key);
-        if (it != m_plan_cache.end()) {
-            // Another thread beat us to it, destroy our plan and return theirs
-            cufftDestroy(plan);
-            return it->second;
-        }
+    m_plan_cache.emplace(key, plan);
+    spdlog::debug("IrfftExecutorCUDA: Created and cached plan for "
+                  "n_real={}, batch={} (total plans: {})",
+                  m_n_real, batch_size, m_plan_cache.size());
 
-        m_plan_cache[key] = plan;
-        spdlog::debug("IrfftExecutorCUDA: Created and cached plan for "
-                      "n_real={}, batch={} (total plans: {})",
-                      m_n_real, batch_size, m_plan_cache.size());
-    }
     return plan;
 }
 

@@ -168,6 +168,17 @@ SizeType score_and_filter_max_cuda_d(cuda::std::span<const float> folds,
                                      cudaStream_t stream,
                                      cuda_utils::DeviceCounter& counter);
 
+SizeType
+score_and_filter_max_cuda_thread_d(cuda::std::span<const float> folds,
+                                   cuda::std::span<const uint32_t> widths,
+                                   cuda::std::span<float> scores,
+                                   cuda::std::span<uint32_t> indices_filtered,
+                                   float threshold,
+                                   SizeType nprofiles,
+                                   SizeType nbins,
+                                   cudaStream_t stream,
+                                   cuda_utils::DeviceCounter& counter);
+
 #endif // LOKI_ENABLE_CUDA
 
 } // namespace loki::detection

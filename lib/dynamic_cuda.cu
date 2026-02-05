@@ -37,6 +37,9 @@ BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::BasePruneDPFunctsCUDA(
         n_coords_init *= count;
     }
     m_n_coords_init = n_coords_init;
+    m_param_grid_count_init_d.resize(param_grid_count_init.size());
+    m_dparams_init_d.resize(dparams_init.size());
+    m_param_limits_d.resize(param_limits.size());
 
     cuda_utils::check_cuda_call(
         cudaMemcpyAsync(
@@ -102,17 +105,20 @@ void BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::shift_add(
     cuda::std::span<const float> phase_shift,
     cuda::std::span<FoldTypeCUDA> folds_out,
     SizeType n_leaves,
+    SizeType physical_start_idx,
+    SizeType capacity,
     cudaStream_t stream) noexcept {
     if constexpr (std::is_same_v<FoldTypeCUDA, float>) {
         kernels::shift_add_linear_batch_cuda(
             folds_tree.data(), indices_tree.data(), folds_ffa.data(),
             indices_ffa.data(), phase_shift.data(), folds_out.data(),
-            m_cfg.get_nbins(), n_leaves, stream);
+            m_cfg.get_nbins(), n_leaves, physical_start_idx, capacity, stream);
     } else {
-        return shift_add_linear_complex_batch_cuda(
+        kernels::shift_add_linear_complex_batch_cuda(
             folds_tree.data(), indices_tree.data(), folds_ffa.data(),
             indices_ffa.data(), phase_shift.data(), folds_out.data(),
-            m_cfg.get_nbins_f(), m_cfg.get_nbins(), n_leaves, stream);
+            m_cfg.get_nbins_f(), m_cfg.get_nbins(), n_leaves,
+            physical_start_idx, capacity, stream);
     }
 }
 
@@ -130,18 +136,17 @@ SizeType BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::score_and_filter(
     if constexpr (std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>) {
         // Ensure exact span for irfft transform
         const auto nfft = 2 * n_leaves;
-        auto folds_span = cuda::std::span<const FoldTypeCUDA>(folds_tree)
-                              .first(n_leaves * 2 * nbins_f);
+        auto folds_span = folds_tree.first(nfft * nbins_f);
         auto folds_t_span =
-            cuda::std::span<float>(m_scratch_folds_d).first(nfft * nbins);
+            cuda_utils::as_span(m_scratch_folds_d).first(nfft * nbins);
         m_irfft_executor->execute(folds_span, folds_t_span,
-                                  static_cast<int>(nfft));
-        return detection::score_and_filter_max_cuda_d(
+                                  static_cast<int>(nfft), stream);
+        return detection::score_and_filter_max_cuda_thread_d(
             folds_t_span, cuda_utils::as_span(this->m_boxcar_widths_d),
             scores_tree, indices_tree, threshold, n_leaves, nbins, stream,
             counter);
     } else {
-        return detection::score_and_filter_max_cuda_d(
+        return detection::score_and_filter_max_cuda_thread_d(
             folds_tree, cuda_utils::as_span(this->m_boxcar_widths_d),
             scores_tree, indices_tree, threshold, n_leaves, nbins, stream,
             counter);
@@ -157,34 +162,35 @@ void BaseTaylorPruneDPFunctsCUDA<FoldTypeCUDA, Derived>::seed(
     std::pair<double, double> coord_init,
     cudaStream_t stream) {
 
-    const auto n_leaves = poly_taylor_seed_cuda(
-        cuda_utils::as_span(this->m_param_grid_count_init_d),
-        cuda_utils::as_span(this->m_dparams_init_d),
-        cuda_utils::as_span(this->m_param_limits_d), seed_leaves,
-        this->m_cfg.get_nparams(), stream);
+    poly_taylor_seed_cuda(cuda_utils::as_span(this->m_param_grid_count_init_d),
+                          cuda_utils::as_span(this->m_dparams_init_d),
+                          cuda_utils::as_span(this->m_param_limits_d),
+                          seed_leaves, coord_init, this->m_n_coords_init,
+                          this->m_cfg.get_nparams(), stream);
     // Fold segment is (n_leaves, 2, nbins)
-    const auto nbins = this->m_cfg.get_nbins();
+    const auto nbins   = this->m_cfg.get_nbins();
+    const auto nbins_f = this->m_cfg.get_nbins_f();
 
     // Calculate scores
     if constexpr (std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>) {
-        const auto nfft    = 2 * n_leaves;
-        const auto nbins_f = this->m_cfg.get_nbins_f();
-        error_check::check_equal(fold_segment.size(), n_leaves * 2 * nbins_f,
+        const auto nfft = 2 * this->m_n_coords_init;
+        error_check::check_equal(fold_segment.size(), nfft * nbins_f,
                                  "fold_segment size mismatch");
-        auto fold_segment_t =
+        auto folds_t_span =
             cuda_utils::as_span(this->m_scratch_folds_d).first(nfft * nbins);
-        this->m_irfft_executor->execute(fold_segment, fold_segment_t,
-                                        static_cast<int>(nfft));
+        this->m_irfft_executor->execute(fold_segment, folds_t_span,
+                                        static_cast<int>(nfft), stream);
         detection::snr_boxcar_3d_max_cuda_d(
-            fold_segment_t, this->m_boxcar_widths_d, seed_scores, n_leaves,
-            nbins, stream);
+            folds_t_span, cuda_utils::as_span(this->m_boxcar_widths_d),
+            seed_scores, this->m_n_coords_init, nbins, stream);
 
     } else {
-        error_check::check_equal(fold_segment.size(), n_leaves * 2 * nbins,
+        error_check::check_equal(fold_segment.size(),
+                                 this->m_n_coords_init * 2 * nbins,
                                  "fold_segment size mismatch");
         detection::snr_boxcar_3d_max_cuda_d(
-            fold_segment, this->m_boxcar_widths_d, seed_scores, n_leaves, nbins,
-            stream);
+            fold_segment, cuda_utils::as_span(this->m_boxcar_widths_d),
+            seed_scores, this->m_n_coords_init, nbins, stream);
     }
 }
 
@@ -215,7 +221,7 @@ SizeType PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>::branch(
     std::pair<double, double> /*coord_prev*/,
     SizeType n_leaves,
     utils::BranchingWorkspaceCUDAView ws,
-    cudaStream_t stream) const {
+    cudaStream_t stream) {
     return poly_taylor_branch_batch_cuda(
         leaves_tree, leaves_branch, leaves_origins, coord_cur,
         this->m_cfg.get_nbins(), this->m_cfg.get_eta(),
@@ -233,22 +239,38 @@ void PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>::resolve(
     std::pair<double, double> coord_init,
     SizeType n_leaves,
     cudaStream_t stream) const {
+    const auto n_params     = this->m_cfg.get_nparams();
+    const auto n_accel_init = this->m_param_grid_count_init_d[n_params - 2];
+    const auto n_freq_init  = this->m_param_grid_count_init_d[n_params - 1];
     poly_taylor_resolve_batch_cuda(
-        leaves_branch, this->m_accel_grid_d, this->m_freq_grid_d, param_indices,
-        phase_shift, coord_add, coord_cur, coord_init, this->m_cfg.get_nbins(),
+        leaves_branch, param_indices, phase_shift,
+        cuda_utils::as_span(this->m_param_limits_d), coord_add, coord_cur,
+        coord_init, n_accel_init, n_freq_init, this->m_cfg.get_nbins(),
         n_leaves, this->m_cfg.get_nparams(), stream);
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 void PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>::transform(
     cuda::std::span<double> leaves_tree,
+    cuda::std::span<uint32_t> indices_tree,
     std::pair<double, double> coord_next,
     std::pair<double, double> coord_cur,
     SizeType n_leaves,
     cudaStream_t stream) const {
     poly_taylor_transform_batch_cuda(
-        leaves_tree, coord_next, coord_cur, n_leaves, this->m_cfg.get_nparams(),
-        this->m_cfg.get_use_conservative_tile(), stream);
+        leaves_tree, indices_tree, coord_next, coord_cur, n_leaves,
+        this->m_cfg.get_nparams(), this->m_cfg.get_use_conservative_tile(),
+        stream);
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+void PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>::report(
+    cuda::std::span<double> leaves_tree,
+    std::pair<double, double> coord_report,
+    SizeType n_leaves,
+    cudaStream_t stream) const {
+    poly_taylor_report_batch_cuda(leaves_tree, coord_report, n_leaves,
+                                  this->m_cfg.get_nparams(), stream);
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
@@ -273,12 +295,38 @@ create_prune_dp_functs_cuda(std::string_view poly_basis,
 
 // Explicit template instantiations
 // Base classes need explicit instantiation for linker
-template class BasePruneDPFuncts<float, PrunePolyTaylorDPFuncts<float>>;
-template class BasePruneDPFuncts<ComplexType,
-                                 PrunePolyTaylorDPFuncts<ComplexType>>;
+template class BasePruneDPFunctsCUDA<float, PrunePolyTaylorDPFunctsCUDA<float>>;
+template class BasePruneDPFunctsCUDA<
+    ComplexTypeCUDA,
+    PrunePolyTaylorDPFunctsCUDA<ComplexTypeCUDA>>;
 
-template class BaseTaylorPruneDPFuncts<float, PrunePolyTaylorDPFuncts<float>>;
-template class BaseTaylorPruneDPFuncts<ComplexType,
-                                       PrunePolyTaylorDPFuncts<ComplexType>>;
+template class BaseTaylorPruneDPFunctsCUDA<float,
+                                           PrunePolyTaylorDPFunctsCUDA<float>>;
+template class BaseTaylorPruneDPFunctsCUDA<
+    ComplexTypeCUDA,
+    PrunePolyTaylorDPFunctsCUDA<ComplexTypeCUDA>>;
+// Derived classes
+template class PrunePolyTaylorDPFunctsCUDA<float>;
+template class PrunePolyTaylorDPFunctsCUDA<ComplexTypeCUDA>;
+
+// Factory function instantiations
+template std::unique_ptr<PruneDPFunctsCUDA<float>>
+create_prune_dp_functs_cuda<float>(std::string_view,
+                                   std::span<const SizeType>,
+                                   std::span<const double>,
+                                   SizeType,
+                                   double,
+                                   search::PulsarSearchConfig,
+                                   SizeType,
+                                   SizeType);
+template std::unique_ptr<PruneDPFunctsCUDA<ComplexTypeCUDA>>
+create_prune_dp_functs_cuda<ComplexTypeCUDA>(std::string_view,
+                                             std::span<const SizeType>,
+                                             std::span<const double>,
+                                             SizeType,
+                                             double,
+                                             search::PulsarSearchConfig,
+                                             SizeType,
+                                             SizeType);
 
 } // namespace loki::core

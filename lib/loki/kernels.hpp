@@ -203,6 +203,8 @@ void shift_add_linear_batch_cuda(const float* __restrict__ folds_tree,
                                  float* __restrict__ folds_out,
                                  SizeType nbins,
                                  SizeType n_leaves,
+                                 SizeType physical_start_idx,
+                                 SizeType capacity,
                                  cudaStream_t stream);
 
 void shift_add_linear_complex_batch_cuda(
@@ -215,6 +217,8 @@ void shift_add_linear_complex_batch_cuda(
     SizeType nbins_f,
     SizeType nbins,
     SizeType n_leaves,
+    SizeType physical_start_idx,
+    SizeType capacity,
     cudaStream_t stream);
 
 #endif // LOKI_ENABLE_CUDA

@@ -114,7 +114,7 @@ void RfftExecutor::execute(std::span<const float> real_input,
 
         // Get cached plan for chunk size
         const int chunk_size  = m_max_chunk_size;
-        fftwf_plan chunk_plan = get_or_create_plan(chunk_size);
+        fftwf_plan chunk_plan = get_or_create_plan(chunk_size, in_ptr, out_ptr);
 
         while (offset < batch_size) {
             const int this_batch = std::min(chunk_size, batch_size - offset);
@@ -126,7 +126,10 @@ void RfftExecutor::execute(std::span<const float> real_input,
                     out_ptr + static_cast<IndexType>(offset * m_n_complex));
             } else {
                 // Remainder: get or create plan (will be cached for reuse)
-                fftwf_plan remainder_plan = get_or_create_plan(this_batch);
+                fftwf_plan remainder_plan = get_or_create_plan(
+                    this_batch,
+                    in_ptr + static_cast<IndexType>(offset * m_n_real),
+                    out_ptr + static_cast<IndexType>(offset * m_n_complex));
                 fftwf_execute_dft_r2c(
                     remainder_plan,
                     in_ptr + static_cast<IndexType>(offset * m_n_real),
@@ -141,14 +144,16 @@ void RfftExecutor::execute(std::span<const float> real_input,
                       batch_size, chunks_executed);
     } else {
         // Small batch: get or create plan (will be cached for reuse)
-        fftwf_plan plan = get_or_create_plan(batch_size);
+        fftwf_plan plan = get_or_create_plan(batch_size, in_ptr, out_ptr);
         fftwf_execute_dft_r2c(plan, in_ptr, out_ptr);
 
         spdlog::debug("RfftExecutor: Completed {} transforms", batch_size);
     }
 }
 
-fftwf_plan RfftExecutor::get_or_create_plan(int batch_size) {
+fftwf_plan RfftExecutor::get_or_create_plan(int batch_size,
+                                            float* in_ptr,
+                                            fftwf_complex* out_ptr) {
     const PlanKey key{.n_real = m_n_real, .batch_size = batch_size};
 
     std::lock_guard<std::mutex> lock(s_mutex);
@@ -166,9 +171,9 @@ fftwf_plan RfftExecutor::get_or_create_plan(int batch_size) {
         1,                       // rank
         &m_n_real,               // transform size
         batch_size,              // number of transforms
-        nullptr,                 // input (dummy)
+        in_ptr,                  // input (dummy)
         nullptr, 1, m_n_real,    // input layout: stride=1, dist=n_real
-        nullptr,                 // output (dummy)
+        out_ptr,                 // output (dummy)
         nullptr, 1, m_n_complex, // output layout: stride=1, dist=n_complex
         FFTW_ESTIMATE);          // fast planning
 
@@ -225,7 +230,7 @@ void IrfftExecutor::execute(std::span<const ComplexType> complex_input,
 
         // Get cached plan for chunk size
         const int chunk_size  = m_max_chunk_size;
-        fftwf_plan chunk_plan = get_or_create_plan(chunk_size);
+        fftwf_plan chunk_plan = get_or_create_plan(chunk_size, in_ptr, out_ptr);
 
         while (offset < batch_size) {
             const int this_batch = std::min(chunk_size, batch_size - offset);
@@ -237,7 +242,10 @@ void IrfftExecutor::execute(std::span<const ComplexType> complex_input,
                     out_ptr + static_cast<IndexType>(offset * m_n_real));
             } else {
                 // Remainder: get or create plan (will be cached for reuse)
-                fftwf_plan remainder_plan = get_or_create_plan(this_batch);
+                fftwf_plan remainder_plan = get_or_create_plan(
+                    this_batch,
+                    in_ptr + static_cast<IndexType>(offset * m_n_complex),
+                    out_ptr + static_cast<IndexType>(offset * m_n_real));
                 fftwf_execute_dft_c2r(
                     remainder_plan,
                     in_ptr + static_cast<IndexType>(offset * m_n_complex),
@@ -252,7 +260,7 @@ void IrfftExecutor::execute(std::span<const ComplexType> complex_input,
                       batch_size, chunks_executed);
     } else {
         // Small batch: get or create plan (will be cached for reuse)
-        fftwf_plan plan = get_or_create_plan(batch_size);
+        fftwf_plan plan = get_or_create_plan(batch_size, in_ptr, out_ptr);
         fftwf_execute_dft_c2r(plan, in_ptr, out_ptr);
 
         spdlog::debug("IrfftExecutor: Completed {} transforms", batch_size);
@@ -267,7 +275,9 @@ void IrfftExecutor::execute(std::span<const ComplexType> complex_input,
     }
 }
 
-fftwf_plan IrfftExecutor::get_or_create_plan(int batch_size) {
+fftwf_plan IrfftExecutor::get_or_create_plan(int batch_size,
+                                             fftwf_complex* in_ptr,
+                                             float* out_ptr) {
     const PlanKey key{.n_real = m_n_real, .batch_size = batch_size};
 
     std::lock_guard<std::mutex> lock(s_mutex);
@@ -285,9 +295,9 @@ fftwf_plan IrfftExecutor::get_or_create_plan(int batch_size) {
         1,                       // rank
         &m_n_real,               // transform size
         batch_size,              // number of transforms
-        nullptr,                 // input (dummy)
+        in_ptr,                  // input (dummy)
         nullptr, 1, m_n_complex, // input layout: stride=1, dist=n_complex
-        nullptr,                 // output (dummy)
+        out_ptr,                 // output (dummy)
         nullptr, 1, m_n_real,    // output layout: stride=1, dist=n_real
         FFTW_ESTIMATE            // fast planning
     );

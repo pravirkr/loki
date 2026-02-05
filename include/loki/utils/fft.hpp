@@ -84,7 +84,8 @@ private:
     int m_nthreads;
     int m_max_chunk_size;
 
-    fftwf_plan get_or_create_plan(int batch_size);
+    fftwf_plan
+    get_or_create_plan(int batch_size, float* in_ptr, fftwf_complex* out_ptr);
 };
 
 /**
@@ -136,7 +137,8 @@ private:
     int m_nthreads;
     int m_max_chunk_size;
 
-    fftwf_plan get_or_create_plan(int batch_size);
+    fftwf_plan
+    get_or_create_plan(int batch_size, fftwf_complex* in_ptr, float* out_ptr);
 };
 
 /**
@@ -198,11 +200,30 @@ void irfft_batch(std::span<const ComplexType> complex_input,
 
 #ifdef LOKI_ENABLE_CUDA
 
+struct PlanKeyDevice {
+    int n_real;
+    int batch_size;
+    cudaStream_t stream;
+
+    bool operator==(const PlanKeyDevice& other) const {
+        return n_real == other.n_real && batch_size == other.batch_size &&
+               stream == other.stream;
+    }
+};
+
+struct PlanKeyHashDevice {
+    SizeType operator()(const PlanKeyDevice& k) const {
+        return std::hash<int>{}(k.n_real) ^
+               (std::hash<int>{}(k.batch_size) << 1U) ^
+               (std::hash<std::uintptr_t>{}(
+                    reinterpret_cast<std::uintptr_t>(k.stream))
+                << 2U);
+    }
+};
+
 class IrfftExecutorCUDA {
 public:
-    explicit IrfftExecutorCUDA(int n_real,
-                               int batch_size      = 4096,
-                               cudaStream_t stream = nullptr);
+    explicit IrfftExecutorCUDA(int n_real);
     ~IrfftExecutorCUDA();
 
     IrfftExecutorCUDA(const IrfftExecutorCUDA&)            = delete;
@@ -210,19 +231,19 @@ public:
     IrfftExecutorCUDA(IrfftExecutorCUDA&&)                 = delete;
     IrfftExecutorCUDA& operator=(IrfftExecutorCUDA&&)      = delete;
 
-    void execute(cuda::std::span<ComplexTypeCUDA> complex_input,
+    void execute(cuda::std::span<const ComplexTypeCUDA> complex_input,
                  cuda::std::span<float> real_output,
-                 int batch_size);
+                 int batch_size,
+                 cudaStream_t stream);
 
 private:
     int m_n_real;
     int m_n_complex;
-    int m_batch_size;
 
-    std::unordered_map<PlanKey, cufftHandle, PlanKeyHash> m_plan_cache;
+    std::unordered_map<PlanKeyDevice, cufftHandle, PlanKeyHashDevice>
+        m_plan_cache;
     std::mutex m_mutex;
-    cudaStream_t m_stream;
-    cufftHandle get_or_create_plan(int batch_size);
+    cufftHandle get_or_create_plan(int batch_size, cudaStream_t stream);
 };
 
 void rfft_batch_cuda(cuda::std::span<float> real_input,

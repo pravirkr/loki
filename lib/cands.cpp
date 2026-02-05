@@ -304,6 +304,14 @@ std::string PruneStatsCollection::get_stats_summary() const {
     return std::format("Score: {:.2f}, Leaves: {:.2f}", last_stats.score_max,
                        last_stats.lb_leaves());
 }
+std::string PruneStatsCollection::get_stats_summary_cuda(float duration) const {
+    if (m_stats_list.empty()) {
+        return "No stats available. Duration: 0.0s";
+    }
+    const auto& last_stats = m_stats_list.back();
+    return std::format("Score: {:.2f}, Leaves: {:.2f}, Total: {:.2f}s",
+                       last_stats.score_max, last_stats.lb_leaves(), duration);
+}
 std::string PruneStatsCollection::get_timer_summary() const {
     const float total_time = m_accumulated_timers.total();
     if (total_time == 0.0F) {

@@ -12,6 +12,7 @@ namespace loki::kernels {
 
 namespace {
 
+// indices_tree are logical indices, convert to physical indices
 __global__ void
 kernel_shift_add_linear(const float* __restrict__ folds_tree,
                         const uint32_t* __restrict__ indices_tree,
@@ -20,7 +21,9 @@ kernel_shift_add_linear(const float* __restrict__ folds_tree,
                         const float* __restrict__ phase_shift,
                         float* __restrict__ folds_out,
                         uint32_t nbins,
-                        uint32_t n_leaves) {
+                        uint32_t n_leaves,
+                        uint32_t physical_start_idx,
+                        uint32_t capacity) {
 
     constexpr uint32_t kWarpSize = 32;
     // 1D thread mapping with optimal work distribution
@@ -59,18 +62,23 @@ kernel_shift_add_linear(const float* __restrict__ folds_tree,
     const uint32_t idx_add =
         (ibin < shift) ? (ibin + nbins - shift) : (ibin - shift);
 
-    // Calculate offsets
-    const uint32_t total_size  = 2 * nbins;
-    const uint32_t tree_offset = indices_tree[ileaf] * total_size;
-    const uint32_t ffa_offset  = indices_ffa[ileaf] * total_size;
-    const uint32_t out_offset  = ileaf * total_size;
+    const uint32_t tree_idx_logical  = indices_tree[ileaf] + physical_start_idx;
+    const uint32_t tree_idx_physical = tree_idx_logical < capacity
+                                           ? tree_idx_logical
+                                           : tree_idx_logical - capacity;
+    const uint32_t ffa_idx           = indices_ffa[ileaf];
+
+    const uint32_t stride            = 2 * nbins;
+    const float* __restrict__ tree_e = folds_tree + tree_idx_physical * stride;
+    const float* __restrict__ tree_v = tree_e + nbins;
+    const float* __restrict__ ffa_e  = folds_ffa + ffa_idx * stride;
+    const float* __restrict__ ffa_v  = ffa_e + nbins;
+    float* __restrict__ out_e        = folds_out + ileaf * stride;
+    float* __restrict__ out_v        = out_e + nbins;
 
     // Process both e and v components
-    folds_out[out_offset + ibin] =
-        folds_tree[tree_offset + ibin] + folds_ffa[ffa_offset + idx_add];
-    folds_out[out_offset + ibin + nbins] =
-        folds_tree[tree_offset + ibin + nbins] +
-        folds_ffa[ffa_offset + idx_add + nbins];
+    out_e[ibin] = tree_e[ibin] + ffa_e[idx_add];
+    out_v[ibin] = tree_v[ibin] + ffa_v[idx_add];
 }
 
 __global__ void
@@ -82,7 +90,9 @@ kernel_shift_add_linear_complex(const ComplexTypeCUDA* __restrict__ folds_tree,
                                 ComplexTypeCUDA* __restrict__ folds_out,
                                 uint32_t nbins_f,
                                 uint32_t nbins,
-                                uint32_t n_leaves) {
+                                uint32_t n_leaves,
+                                uint32_t physical_start_idx,
+                                uint32_t capacity) {
 
     const uint32_t tid        = (blockIdx.x * blockDim.x) + threadIdx.x;
     const uint32_t total_work = n_leaves * nbins_f;
@@ -102,18 +112,21 @@ kernel_shift_add_linear_complex(const ComplexTypeCUDA* __restrict__ folds_tree,
     __sincosf(phase_factor, &sin_val, &cos_val);
 
     // Calculate offsets
-    const uint32_t total_size  = 2 * nbins_f;
-    const uint32_t tree_offset = indices_tree[ileaf] * total_size;
-    const uint32_t ffa_offset  = indices_ffa[ileaf] * total_size;
-    const uint32_t out_offset  = ileaf * total_size;
+    const uint32_t tree_idx_logical  = indices_tree[ileaf] + physical_start_idx;
+    const uint32_t tree_idx_physical = tree_idx_logical < capacity
+                                           ? tree_idx_logical
+                                           : tree_idx_logical - capacity;
+    const uint32_t ffa_idx           = indices_ffa[ileaf];
 
-    // Load complex values for both e and v components
-    const ComplexTypeCUDA* __restrict__ ffa_e = folds_ffa + ffa_offset + k;
-    const ComplexTypeCUDA* __restrict__ ffa_v =
-        folds_ffa + ffa_offset + nbins_f + k;
-    const ComplexTypeCUDA* __restrict__ tree_e = folds_tree + tree_offset + k;
-    const ComplexTypeCUDA* __restrict__ tree_v =
-        folds_tree + tree_offset + nbins_f + k;
+    const uint32_t stride = 2 * nbins_f;
+    const ComplexTypeCUDA* __restrict__ tree_e =
+        folds_tree + (tree_idx_physical * stride) + k;
+    const ComplexTypeCUDA* __restrict__ tree_v = tree_e + nbins_f;
+    const ComplexTypeCUDA* __restrict__ ffa_e =
+        folds_ffa + (ffa_idx * stride) + k;
+    const ComplexTypeCUDA* __restrict__ ffa_v = ffa_e + nbins_f;
+    ComplexTypeCUDA* __restrict__ out_e       = folds_out + (ileaf * stride);
+    ComplexTypeCUDA* __restrict__ out_v       = out_e + nbins_f;
 
     // OPTIMIZED complex multiplication using fmaf
     // ffa_shifted_e = ffa_e * exp(-2πi * k * shift / nbins)
@@ -127,10 +140,10 @@ kernel_shift_add_linear_complex(const ComplexTypeCUDA* __restrict__ folds_tree,
         fmaf(ffa_v->real(), sin_val, ffa_v->imag() * cos_val);
 
     // Add tree (unshifted) + ffa (shifted)
-    folds_out[out_offset + k] = ComplexTypeCUDA(tree_e->real() + real_ffa_e,
-                                                tree_e->imag() + imag_ffa_e);
-    folds_out[out_offset + k + nbins_f] = ComplexTypeCUDA(
-        tree_v->real() + real_ffa_v, tree_v->imag() + imag_ffa_v);
+    out_e[k] = ComplexTypeCUDA(tree_e->real() + real_ffa_e,
+                               tree_e->imag() + imag_ffa_e);
+    out_v[k] = ComplexTypeCUDA(tree_v->real() + real_ffa_v,
+                               tree_v->imag() + imag_ffa_v);
 }
 
 // One thread per smallest work unit
@@ -1148,6 +1161,8 @@ void shift_add_linear_batch_cuda(const float* __restrict__ folds_tree,
                                  float* __restrict__ folds_out,
                                  SizeType nbins,
                                  SizeType n_leaves,
+                                 SizeType physical_start_idx,
+                                 SizeType capacity,
                                  cudaStream_t stream) {
     const auto total_work        = n_leaves * nbins;
     const auto threads_per_block = (total_work < 65536) ? 256 : 512;
@@ -1158,10 +1173,9 @@ void shift_add_linear_batch_cuda(const float* __restrict__ folds_tree,
     cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
     kernel_shift_add_linear<<<grid_dim, block_dim, 0, stream>>>(
         folds_tree, indices_tree, folds_ffa, indices_ffa, phase_shift,
-        folds_out, nbins, n_leaves);
+        folds_out, nbins, n_leaves, physical_start_idx, capacity);
     cuda_utils::check_last_cuda_error("kernel_shift_add_linear launch failed");
-    cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
-                                "cudaStreamSynchronize failed");
+    // No need to sync, the next kernel will do it
 }
 
 void shift_add_linear_complex_batch_cuda(
@@ -1174,6 +1188,8 @@ void shift_add_linear_complex_batch_cuda(
     SizeType nbins_f,
     SizeType nbins,
     SizeType n_leaves,
+    SizeType physical_start_idx,
+    SizeType capacity,
     cudaStream_t stream) {
     const auto total_work        = n_leaves * nbins_f;
     const auto threads_per_block = (total_work < 65536) ? 256 : 512;
@@ -1184,11 +1200,10 @@ void shift_add_linear_complex_batch_cuda(
     cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
     kernel_shift_add_linear_complex<<<grid_dim, block_dim, 0, stream>>>(
         folds_tree, indices_tree, folds_ffa, indices_ffa, phase_shift,
-        folds_out, nbins_f, nbins, n_leaves);
+        folds_out, nbins_f, nbins, n_leaves, physical_start_idx, capacity);
     cuda_utils::check_last_cuda_error(
         "kernel_shift_add_linear_complex launch failed");
-    cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
-                                "cudaStreamSynchronize failed");
+    // No need to sync, the next kernel will do it
 }
 
 } // namespace loki::kernels

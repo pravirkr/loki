@@ -132,6 +132,7 @@ public:
     [[nodiscard]] std::optional<PruneStats> get_stats(SizeType level) const;
     [[nodiscard]] std::string get_all_summaries() const;
     [[nodiscard]] std::string get_stats_summary() const;
+    [[nodiscard]] std::string get_stats_summary_cuda(float duration) const;
     [[nodiscard]] std::string get_timer_summary() const;
     [[nodiscard]] std::string get_concise_timer_summary() const;
     [[nodiscard]] std::pair<std::vector<PruneStats>,

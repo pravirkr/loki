@@ -130,6 +130,29 @@ binary_search_device(const float* __restrict__ arr, uint32_t n, float target) {
     return best;
 }
 
+// Helper: Find the index 'i' such that data[i] <= value < data[i+1]
+__device__ __forceinline__ uint32_t binary_search_cartesian(
+    const uint32_t* __restrict__ data, uint32_t n, uint32_t value) {
+    if (n == 0) {
+        return 0;
+    }
+    // Vital safety check to prevent underflow
+    if (value < data[0]) {
+        return 0;
+    }
+    uint32_t l = 0;
+    uint32_t r = n - 1;
+    while (l <= r) {
+        uint32_t mid = (l + r) >> 1;
+        if (data[mid] <= value) {
+            l = mid + 1;
+        } else {
+            r = mid - 1; // Safe because mid >= l > 0 here
+        }
+    }
+    return r;
+}
+
 __device__ __forceinline__ uint32_t find_ffa_level(
     const uint32_t* __restrict__ offsets, uint32_t tid, uint32_t n_levels) {
     // offsets has size n_levels + 1
@@ -168,20 +191,13 @@ __device__ __forceinline__ float get_phase_idx_device(double proper_time,
 }
 
 // Device helper: Branch a single parameter
+// Assumes the decision to split has already been made.
 __device__ __forceinline__ cuda::std::pair<double, uint32_t>
-branch_param_padded_device(double* __restrict__ out_values,
-                           uint32_t out_size,
-                           double param_cur,
-                           double dparam_cur,
-                           double dparam_new,
-                           double param_min,
-                           double param_max) {
-    const double param_range = (param_max - param_min) * 0.5;
-    if (dparam_new > (param_range + utils::kEps)) {
-        out_values[0] = param_cur;
-        return {dparam_new, static_cast<uint32_t>(1)};
-    }
-
+branch_param_generate_points_device(double* __restrict__ out_values,
+                                    uint32_t out_size,
+                                    double param_cur,
+                                    double dparam_cur,
+                                    double dparam_new) {
     const auto num_points = static_cast<uint32_t>(
         ceil(((dparam_cur + utils::kEps) / dparam_new) - utils::kEps));
 
@@ -189,6 +205,7 @@ branch_param_padded_device(double* __restrict__ out_values,
         0.5 + (0.5 / static_cast<double>(num_points));
     const double half_range = confidence_const * dparam_cur;
     const double start      = param_cur - half_range;
+    // We use (num_points + 1) to space them evenly within the range
     const double step =
         (2.0 * half_range) / static_cast<double>(num_points + 1);
 
@@ -197,7 +214,6 @@ branch_param_padded_device(double* __restrict__ out_values,
     for (uint32_t i = 0; i < count; ++i) {
         out_values[i] = fma(static_cast<double>(i + 1), step, start);
     }
-
     return {dparam_cur / static_cast<double>(num_points), count};
 }
 
@@ -216,13 +232,19 @@ branch_one_param_padded_device(uint32_t p,
                                uint32_t flat_base,
                                uint32_t branch_max) {
     const uint32_t pad_offset = (flat_base + p) * branch_max;
-    if (shift >= (eta - utils::kEps)) {
-        auto [dparam_act, count] =
-            branch_param_padded_device(scratch_params + pad_offset, branch_max,
-                                       cur, sig_cur, sig_new, pmin, pmax);
+    const double param_range  = (pmax - pmin) * 0.5;
+    // DECISION LOGIC:
+    // 1. Is the shift significant? (shift >= eta)
+    // 2. Is the new step size physically possible? (sig_new <= range)
+    const bool needs_branching = shift >= (eta - utils::kEps);
+    const bool is_splittable   = sig_new <= (param_range + utils::kEps);
+    if (needs_branching && is_splittable) {
+        auto [dparam_act, count] = branch_param_generate_points_device(
+            scratch_params + pad_offset, branch_max, cur, sig_cur, sig_new);
         scratch_dparams[flat_base + p] = dparam_act;
         scratch_counts[flat_base + p]  = count;
     } else {
+        // Retain OLD state (cur, sig_cur).
         scratch_params[pad_offset]     = cur;
         scratch_dparams[flat_base + p] = sig_cur;
         scratch_counts[flat_base + p]  = 1;

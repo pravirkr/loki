@@ -896,4 +896,17 @@ compute_ffa_cuda<ComplexTypeCUDA>(std::span<const float>,
                                   int,
                                   bool);
 
+template std::tuple<thrust::device_vector<float>, plans::FFAPlan<float>>
+compute_ffa_cuda_device<float>(std::span<const float>,
+                               std::span<const float>,
+                               const search::PulsarSearchConfig&,
+                               int);
+
+template std::tuple<thrust::device_vector<ComplexTypeCUDA>,
+                    plans::FFAPlan<ComplexType>>
+compute_ffa_cuda_device<ComplexTypeCUDA>(std::span<const float>,
+                                         std::span<const float>,
+                                         const search::PulsarSearchConfig&,
+                                         int);
+
 } // namespace loki::algorithms
