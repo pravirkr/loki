@@ -92,7 +92,7 @@ SizeType BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::validate(
     cuda::std::span<uint32_t> /*leaves_origins*/,
     std::pair<double, double> /*coord_cur*/,
     SizeType n_leaves,
-    cudaStream_t /*stream*/) const {
+    cudaStream_t /*stream*/) const noexcept {
     return n_leaves;
 }
 
@@ -107,7 +107,7 @@ void BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::shift_add(
     SizeType n_leaves,
     SizeType physical_start_idx,
     SizeType capacity,
-    cudaStream_t stream) noexcept {
+    cudaStream_t stream) const noexcept {
     if constexpr (std::is_same_v<FoldTypeCUDA, float>) {
         kernels::shift_add_linear_batch_cuda(
             folds_tree.data(), indices_tree.data(), folds_ffa.data(),
@@ -129,8 +129,8 @@ SizeType BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::score_and_filter(
     cuda::std::span<uint32_t> indices_tree,
     float threshold,
     SizeType n_leaves,
-    cudaStream_t stream,
-    cuda_utils::DeviceCounter& counter) noexcept {
+    utils::DeviceCounter& counter,
+    cudaStream_t stream) noexcept {
     const auto nbins   = m_cfg.get_nbins();
     const auto nbins_f = m_cfg.get_nbins_f();
     if constexpr (std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>) {
@@ -143,13 +143,13 @@ SizeType BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::score_and_filter(
                                   static_cast<int>(nfft), stream);
         return detection::score_and_filter_max_cuda_thread_d(
             folds_t_span, cuda_utils::as_span(this->m_boxcar_widths_d),
-            scores_tree, indices_tree, threshold, n_leaves, nbins, stream,
-            counter);
+            scores_tree, indices_tree, threshold, n_leaves, nbins, counter,
+            stream);
     } else {
         return detection::score_and_filter_max_cuda_thread_d(
             folds_tree, cuda_utils::as_span(this->m_boxcar_widths_d),
-            scores_tree, indices_tree, threshold, n_leaves, nbins, stream,
-            counter);
+            scores_tree, indices_tree, threshold, n_leaves, nbins, counter,
+            stream);
     }
 }
 
@@ -161,7 +161,6 @@ void BaseTaylorPruneDPFunctsCUDA<FoldTypeCUDA, Derived>::seed(
     cuda::std::span<float> seed_scores,
     std::pair<double, double> coord_init,
     cudaStream_t stream) {
-
     poly_taylor_seed_cuda(cuda_utils::as_span(this->m_param_grid_count_init_d),
                           cuda_utils::as_span(this->m_dparams_init_d),
                           cuda_utils::as_span(this->m_param_limits_d),
@@ -183,7 +182,6 @@ void BaseTaylorPruneDPFunctsCUDA<FoldTypeCUDA, Derived>::seed(
         detection::snr_boxcar_3d_max_cuda_d(
             folds_t_span, cuda_utils::as_span(this->m_boxcar_widths_d),
             seed_scores, this->m_n_coords_init, nbins, stream);
-
     } else {
         error_check::check_equal(fold_segment.size(),
                                  this->m_n_coords_init * 2 * nbins,

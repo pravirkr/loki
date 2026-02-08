@@ -189,8 +189,8 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA> struct PruningWorkspaceCUDA {
             (branched_leaves_d.size() * sizeof(double)) +
             (branched_folds_d.size() * sizeof(FoldTypeCUDA)) +
             (branched_scores_d.size() * sizeof(float)) +
-            (branched_indices_d.size() * sizeof(SizeType)) +
-            (branched_param_idx_d.size() * sizeof(SizeType)) +
+            (branched_indices_d.size() * sizeof(uint32_t)) +
+            (branched_param_idx_d.size() * sizeof(uint32_t)) +
             (branched_phase_shift_d.size() * sizeof(float));
         return static_cast<float>(total_memory) /
                static_cast<float>(1ULL << 30U);
@@ -390,7 +390,8 @@ private:
     thrust::device_vector<double> m_seed_leaves_d;
     thrust::device_vector<float> m_seed_scores_d;
 
-    cuda_utils::DeviceCounter m_passing_counter;
+    // Counter for tracking the number of passing leaves
+    utils::DeviceCounter m_passing_counter;
 
     void initialize(cuda::std::span<const FoldTypeCUDA> ffa_fold,
                     SizeType ref_seg,
@@ -584,8 +585,8 @@ private:
                 cuda_utils::as_span(m_pruning_workspace->branched_folds_d),
                 cuda_utils::as_span(m_pruning_workspace->branched_scores_d),
                 cuda_utils::as_span(m_pruning_workspace->branched_indices_d),
-                current_threshold, n_leaves_after_validation, stream,
-                m_passing_counter);
+                current_threshold, n_leaves_after_validation, m_passing_counter,
+                stream);
 
             if (n_leaves_passing == 0) {
                 m_world_tree->consume_read(current_batch_size);

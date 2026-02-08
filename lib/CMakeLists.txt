@@ -120,29 +120,32 @@ if(tomlplusplus_ADDED)
   target_include_directories(tomlplusplus INTERFACE ${tomlplusplus_SOURCE_DIR}/include)
 endif()
 
-# cuRANDDx (mathdx)
+# --- NVIDIA MathDX Configuration ---
 if(CMAKE_CUDA_COMPILER)
+  set(MATHDX_VERSION "25.12.1")
+  set(MATHDX_SUBDIR "25.12") # Redist folder uses YY.MM versioning
+
+  find_package(MathDX_SM REQUIRED)
   find_package(mathdx QUIET COMPONENTS curanddx CONFIG)
-  if(curanddx_FOUND)
-    message(STATUS "Found cuRANDDx (mathdx): ${mathdx_INCLUDE_DIRS}")
-  else()
-    message(STATUS "cuRANDDx (mathdx) not found, downloading via CPM...")
+
+  # Download components via CPM if not found
+  if(NOT curanddx_FOUND)
     CPMAddPackage(
       NAME mathdx
-      VERSION 25.01.1
-      URL https://developer.nvidia.com/downloads/compute/cuRANDDx/redist/cuRANDDx/nvidia-mathdx-25.01.1.tar.gz
+      VERSION ${MATHDX_VERSION}
+      URL "https://developer.nvidia.com/downloads/compute/cuRANDDx/redist/cuRANDDx/cuda12/nvidia-mathdx-${MATHDX_VERSION}-cuda12.tar.gz"
       DOWNLOAD_ONLY YES
     )
     if(mathdx_ADDED)
-      add_library(mathdx::curanddx INTERFACE IMPORTED GLOBAL)
-      target_include_directories(
-        mathdx::curanddx INTERFACE ${mathdx_SOURCE_DIR}/nvidia/mathdx/25.01/include
-      )
+      set(MATHDX_INCLUDE_DIR "${mathdx_SOURCE_DIR}/nvidia/mathdx/${MATHDX_SUBDIR}/include")
+
+      if(NOT curanddx_FOUND)
+        add_library(mathdx::curanddx INTERFACE IMPORTED GLOBAL)
+        target_include_directories(mathdx::curanddx INTERFACE "${MATHDX_INCLUDE_DIR}")
+        target_compile_definitions(mathdx::curanddx INTERFACE CURANDDX_SM=${MATHDX_SM})
+      endif()
     endif()
   endif()
-  # Set the SM version to your target architecture for best performance.
-  find_package(CURANDDX_SM REQUIRED)
-  target_compile_definitions(mathdx::curanddx INTERFACE CURANDDX_SM=${CURANDDX_SM})
 endif()
 
 # Code coverage setup
@@ -205,7 +208,7 @@ if(CMAKE_CUDA_COMPILER)
   target_link_libraries(
     ${LOKI_LIBRARY_NAME}
     PRIVATE ${LOKI_CUDA_OPTIONS}
-    PUBLIC CUDA::cudart CUDA::cufft mathdx::curanddx
-    PRIVATE CUDA::cuda_driver
+    PUBLIC CUDA::cudart CUDA::cufft
+    PRIVATE CUDA::cuda_driver mathdx::curanddx
   )
 endif()

@@ -26,8 +26,106 @@ __global__ void normalize_kernel(float* __restrict__ data,
         data[idx] *= norm;
     }
 }
+} // namespace
+
+/*
+// cuFFTDx descriptor
+template <uint32_t N>
+using C2R_FFT = decltype(cufftdx::Size<N>() + cufftdx::Precision<float>() +
+                         cufftdx::Type<cufftdx::fft_type::c2r>() +
+                         cufftdx::SM<CUFFTDX_SM>() + cufftdx::Block());
+
+
+
+template <class FFT>
+__launch_bounds__(FFT::max_threads_per_block) __global__
+    void irfft_c2r_kernel(const ComplexTypeCUDA* __restrict__ complex_input,
+                          float* __restrict__ real_output,
+                          const uint32_t* __restrict__ batch_counter,
+                          uint32_t max_batch) {
+    constexpr uint32_t N       = cufftdx::size_of<FFT>::value;
+    constexpr uint32_t in_len  = FFT::input_length;  // N/2+1
+    constexpr uint32_t out_len = FFT::output_length; // N
+    constexpr uint32_t stride  = FFT::stride;
+
+    const uint32_t local_fft  = threadIdx.y;
+    const uint32_t global_fft = blockIdx.x * FFT::ffts_per_block + local_fft;
+    // nfft = 2 * batch_counter
+    const uint32_t nfft_required = min(*batch_counter * 2, max_batch);
+
+    if (global_fft >= nfft_required) {
+        return;
+    }
+
+    // Register storage
+    ComplexTypeCUDA thread_data[FFT::storage_size];
+
+    // Load complex spectrum
+    const uint32_t base_in = global_fft * in_len;
+    for (uint32_t i = 0; i < FFT::input_ept; ++i) {
+        const uint32_t pos = threadIdx.x + stride * i;
+        if (pos < in_len) {
+            thread_data[i] = reinterpret_cast<const ComplexTypeCUDA*>(
+                complex_input)[base_in + pos];
+        }
+    }
+
+    // Shared memory
+    extern __shared__ __align__(alignof(float4)) unsigned char smem[];
+    auto* shared_mem = reinterpret_cast<ComplexTypeCUDA*>(smem);
+
+    static_assert(!FFT::requires_workspace,
+                  "Workspace-required FFT not supported");
+
+    // Execute IRFFT
+    FFT().execute(thread_data, shared_mem);
+
+    // Store real output with normalization
+    const float norm        = 1.0f / static_cast<float>(N);
+    const uint32_t base_out = global_fft * out_len;
+    const float* out        = reinterpret_cast<const float*>(thread_data);
+
+    for (uint32_t i = 0; i < FFT::output_ept; ++i) {
+        const uint32_t pos = threadIdx.x + stride * i;
+        if (pos < out_len) {
+            real_output[base_out + pos] = out[i] * norm;
+        }
+    }
+}
+
+template <unsigned int N> struct IrfftLauncher {
+    using FFT = C2R_FFT<N>;
+
+    static void launch(const ComplexTypeCUDA* in,
+                       float* out,
+                       const uint32_t* counter,
+                       uint32_t max_batch,
+                       cudaStream_t stream) {
+        const uint32_t blocks =
+            (max_batch + FFT::ffts_per_block - 1) / FFT::ffts_per_block;
+
+        if (blocks == 0)
+            return;
+
+        static bool configured = false;
+        if (!configured) {
+            cudaFuncSetAttribute(irfft_c2r_kernel<FFT>,
+                                 cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                 FFT::shared_memory_size);
+            configured = true;
+        }
+
+        irfft_c2r_kernel<FFT>
+            <<<blocks, FFT::block_dim, FFT::shared_memory_size, stream>>>(
+                reinterpret_cast<const ComplexTypeCUDA*>(in), out, counter,
+                max_batch);
+        cuda_utils::check_last_cuda_error(
+            "IrfftLauncher: irfft_c2r_kernel launch failed");
+    }
+};
 
 } // namespace
+*/
 
 // IrfftExecutorCUDA implementation
 IrfftExecutorCUDA::IrfftExecutorCUDA(int n_real)
@@ -112,6 +210,73 @@ cufftHandle IrfftExecutorCUDA::get_or_create_plan(int batch_size,
 
     return plan;
 }
+
+/*
+// IrfftExecutorCUDADx implementation
+IrfftExecutorCUDADx::IrfftExecutorCUDADx(int nbins, int max_leaves)
+    : m_nbins(nbins),
+      m_nbins_f(nbins / 2 + 1),
+      m_max_batch(2 * max_leaves) {
+    if (!is_supported(nbins)) {
+        throw std::runtime_error(
+            std::format("IrfftExecutorCUDADx: unsupported nbins={}", nbins));
+    }
+}
+
+bool IrfftExecutorCUDADx::is_supported(int nbins) {
+
+    switch (nbins) {
+    case 32:
+    case 64:
+    case 128:
+    case 256:
+    case 512:
+    case 1024:
+        return true;
+    default:
+        return false;
+    }
+}
+
+void IrfftExecutorCUDADx::execute_async(
+    cuda::std::span<const ComplexTypeCUDA> complex_input,
+    cuda::std::span<float> real_output,
+    const utils::DeviceCounter& batch_counter,
+    cudaStream_t stream) const {
+    const ComplexTypeCUDA* in = complex_input.data();
+    float* out                = real_output.data();
+
+    switch (m_nbins) {
+    case 32:
+        IrfftLauncher<32>::launch(in, out, batch_counter.data(), m_max_batch,
+                                  stream);
+        break;
+    case 64:
+        IrfftLauncher<64>::launch(in, out, batch_counter.data(), m_max_batch,
+                                  stream);
+        break;
+    case 128:
+        IrfftLauncher<128>::launch(in, out, batch_counter.data(), m_max_batch,
+                                   stream);
+        break;
+    case 256:
+        IrfftLauncher<256>::launch(in, out, batch_counter.data(), m_max_batch,
+                                   stream);
+        break;
+    case 512:
+        IrfftLauncher<512>::launch(in, out, batch_counter.data(), m_max_batch,
+                                   stream);
+        break;
+    case 1024:
+        IrfftLauncher<1024>::launch(in, out, batch_counter.data(), m_max_batch,
+                                    stream);
+        break;
+    default:
+        throw std::runtime_error(
+            std::format("IrfftExecutorCUDADx: unsupported nbins={}", m_nbins));
+    }
+}
+*/
 
 void rfft_batch_cuda(cuda::std::span<float> real_input,
                      cuda::std::span<ComplexTypeCUDA> complex_output,

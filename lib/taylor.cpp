@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <numeric>
 #include <span>
 #include <tuple>
 #include <utility>
@@ -929,6 +930,7 @@ void poly_taylor_resolve_snap_batch(std::span<const double> leaves_tree,
 
 template <bool UseConservativeTile>
 void poly_taylor_transform_accel_batch(std::span<double> leaves_tree,
+                                       std::span<SizeType> indices_tree,
                                        std::pair<double, double> coord_next,
                                        std::pair<double, double> coord_cur,
                                        SizeType n_leaves) {
@@ -939,6 +941,8 @@ void poly_taylor_transform_accel_batch(std::span<double> leaves_tree,
     error_check::check_greater_equal(leaves_tree.size(),
                                      n_leaves * kLeavesStride,
                                      "batch_leaves size mismatch");
+    error_check::check_greater_equal(indices_tree.size(), n_leaves,
+                                     "indices_tree size mismatch");
 
     const auto [t0_next, scale_next] = coord_next;
     const auto [t0_cur, scale_cur]   = coord_cur;
@@ -946,7 +950,8 @@ void poly_taylor_transform_accel_batch(std::span<double> leaves_tree,
     const auto delta_t         = t0_next - t0_cur;
     const auto half_delta_t_sq = 0.5 * (delta_t * delta_t);
     for (SizeType i = 0; i < n_leaves; ++i) {
-        const auto leaf_offset = i * kLeavesStride;
+        const SizeType leaf_idx = indices_tree[i];
+        const auto leaf_offset  = leaf_idx * kLeavesStride;
 
         const auto a_val_i = leaves_tree[leaf_offset + 0];
         const auto a_err_i = leaves_tree[leaf_offset + 1];
@@ -984,6 +989,7 @@ void poly_taylor_transform_accel_batch(std::span<double> leaves_tree,
 
 template <bool UseConservativeTile>
 void poly_taylor_transform_jerk_batch(std::span<double> leaves_tree,
+                                      std::span<SizeType> indices_tree,
                                       std::pair<double, double> coord_next,
                                       std::pair<double, double> coord_cur,
                                       SizeType n_leaves) {
@@ -994,6 +1000,8 @@ void poly_taylor_transform_jerk_batch(std::span<double> leaves_tree,
     error_check::check_greater_equal(leaves_tree.size(),
                                      n_leaves * kLeavesStride,
                                      "batch_leaves size mismatch");
+    error_check::check_greater_equal(indices_tree.size(), n_leaves,
+                                     "indices_tree size mismatch");
 
     const auto [t0_next, scale_next] = coord_next;
     const auto [t0_cur, scale_cur]   = coord_cur;
@@ -1003,7 +1011,8 @@ void poly_taylor_transform_jerk_batch(std::span<double> leaves_tree,
     const auto half_delta_t_sq     = 0.5 * (delta_t * delta_t);
     const auto sixth_delta_t_cubed = delta_t_sq * delta_t / 6.0;
     for (SizeType i = 0; i < n_leaves; ++i) {
-        const auto leaf_offset = i * kLeavesStride;
+        const SizeType leaf_idx = indices_tree[i];
+        const auto leaf_offset  = leaf_idx * kLeavesStride;
 
         const auto j_val_i = leaves_tree[leaf_offset + 0];
         const auto j_err_i = leaves_tree[leaf_offset + 1];
@@ -1052,6 +1061,7 @@ void poly_taylor_transform_jerk_batch(std::span<double> leaves_tree,
 
 template <bool UseConservativeTile>
 void poly_taylor_transform_snap_batch(std::span<double> leaves_tree,
+                                      std::span<SizeType> indices_tree,
                                       std::pair<double, double> coord_next,
                                       std::pair<double, double> coord_cur,
                                       SizeType n_leaves) {
@@ -1062,6 +1072,8 @@ void poly_taylor_transform_snap_batch(std::span<double> leaves_tree,
     error_check::check_greater_equal(leaves_tree.size(),
                                      n_leaves * kLeavesStride,
                                      "batch_leaves size mismatch");
+    error_check::check_greater_equal(indices_tree.size(), n_leaves,
+                                     "indices_tree size mismatch");
 
     const auto [t0_next, scale_next] = coord_next;
     const auto [t0_cur, scale_cur]   = coord_cur;
@@ -1073,7 +1085,8 @@ void poly_taylor_transform_snap_batch(std::span<double> leaves_tree,
     const auto twenty_fourth_delta_t_fourth = delta_t_sq * delta_t_sq / 24.0;
 
     for (SizeType i = 0; i < n_leaves; ++i) {
-        const auto leaf_offset = i * kLeavesStride;
+        const SizeType leaf_idx = indices_tree[i];
+        const auto leaf_offset  = leaf_idx * kLeavesStride;
 
         const auto s_val_i = leaves_tree[leaf_offset + 0];
         const auto s_err_i = leaves_tree[leaf_offset + 1];
@@ -1216,6 +1229,7 @@ void poly_taylor_resolve_batch_impl(std::span<const double> leaves_tree,
 
 template <SizeType NPARAMS, bool UseConservativeTile>
 void poly_taylor_transform_batch_impl(std::span<double> leaves_tree,
+                                      std::span<SizeType> indices_tree,
                                       std::pair<double, double> coord_next,
                                       std::pair<double, double> coord_cur,
                                       SizeType n_leaves) {
@@ -1223,13 +1237,13 @@ void poly_taylor_transform_batch_impl(std::span<double> leaves_tree,
                   "Unsupported Taylor order");
     if constexpr (NPARAMS == 2) {
         poly_taylor_transform_accel_batch<UseConservativeTile>(
-            leaves_tree, coord_next, coord_cur, n_leaves);
+            leaves_tree, indices_tree, coord_next, coord_cur, n_leaves);
     } else if constexpr (NPARAMS == 3) {
         poly_taylor_transform_jerk_batch<UseConservativeTile>(
-            leaves_tree, coord_next, coord_cur, n_leaves);
+            leaves_tree, indices_tree, coord_next, coord_cur, n_leaves);
     } else if constexpr (NPARAMS == 4) {
         poly_taylor_transform_snap_batch<UseConservativeTile>(
-            leaves_tree, coord_next, coord_cur, n_leaves);
+            leaves_tree, indices_tree, coord_next, coord_cur, n_leaves);
     }
 }
 
@@ -1614,14 +1628,15 @@ void poly_taylor_resolve_batch(std::span<const double> leaves_branch,
 }
 
 void poly_taylor_transform_batch(std::span<double> leaves_tree,
+                                 std::span<SizeType> indices_tree,
                                  std::pair<double, double> coord_next,
                                  std::pair<double, double> coord_cur,
                                  SizeType n_leaves,
                                  SizeType n_params,
                                  bool use_conservative_tile) {
     auto dispatch = [&]<SizeType N, bool C>() {
-        return poly_taylor_transform_batch_impl<N, C>(leaves_tree, coord_next,
-                                                      coord_cur, n_leaves);
+        return poly_taylor_transform_batch_impl<N, C>(
+            leaves_tree, indices_tree, coord_next, coord_cur, n_leaves);
     };
     if (use_conservative_tile) {
         switch (n_params) {
@@ -1758,10 +1773,12 @@ generate_bp_poly_taylor_approx(std::span<const SizeType> param_grid_count_init,
         auto leaves_arr       = poly_taylor_branch_generic(
             leaf_data, coord_cur, nbins, eta, param_limits, n_params);
         const auto n_leaves_branch = leaves_arr.size() / leaves_stride;
+        std::vector<SizeType> indices_branch(n_leaves_branch);
+        std::iota(indices_branch.begin(), indices_branch.end(), 0U);
         branching_pattern[prune_level - 1] =
             static_cast<double>(n_leaves_branch);
-        poly_taylor_transform_batch(leaves_arr, coord_next, coord_cur,
-                                    n_leaves_branch, n_params,
+        poly_taylor_transform_batch(leaves_arr, indices_branch, coord_next,
+                                    coord_cur, n_leaves_branch, n_params,
                                     use_conservative_tile);
         const auto leaf_start = leaves_stride * (n_leaves_branch - 1);
         std::ranges::copy(

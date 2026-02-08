@@ -182,7 +182,7 @@ __global__ void kernel_snr_thread(const float* __restrict__ folds,
                                   uint32_t* __restrict__ nprofiles_passing,
                                   float threshold) {
     constexpr uint32_t kMaxBins = 1024;
-    const uint32_t profile_idx  = blockIdx.x * blockDim.x + threadIdx.x;
+    const uint32_t profile_idx  = (blockIdx.x * blockDim.x) + threadIdx.x;
 
     if (profile_idx >= nprofiles)
         return;
@@ -244,11 +244,14 @@ __global__ void kernel_snr_thread(const float* __restrict__ folds,
         const float snr = fmaf(h_plus_b, max_diff, neg_b_total);
         max_snr         = fmaxf(max_snr, snr);
     }
+    scores[profile_idx] = max_snr;
 
-    if (max_snr > threshold) {
-        const uint32_t idx    = atomicAdd(nprofiles_passing, 1);
+    if (max_snr >= threshold) {
+        cuda::atomic_ref<uint32_t, cuda::thread_scope_device> counter(
+            *nprofiles_passing);
+        const uint32_t idx =
+            counter.fetch_add(1, cuda::std::memory_order_relaxed);
         indices_filtered[idx] = profile_idx;
-        scores[idx]           = max_snr;
     }
 }
 
@@ -391,7 +394,7 @@ SizeType score_and_filter_cuda_d(cuda::std::span<const float> folds,
                                  SizeType nprofiles,
                                  SizeType nbins,
                                  cudaStream_t stream,
-                                 cuda_utils::DeviceCounter& counter) {
+                                 utils::DeviceCounter& counter) {
     counter.reset(stream);
 
     constexpr SizeType kWarpSize         = 32;
@@ -422,8 +425,8 @@ SizeType score_and_filter_max_cuda_d(cuda::std::span<const float> folds,
                                      float threshold,
                                      SizeType nprofiles,
                                      SizeType nbins,
-                                     cudaStream_t stream,
-                                     cuda_utils::DeviceCounter& counter) {
+                                     utils::DeviceCounter& counter,
+                                     cudaStream_t stream) {
     counter.reset(stream);
 
     constexpr SizeType kWarpSize         = 32;
@@ -439,7 +442,7 @@ SizeType score_and_filter_max_cuda_d(cuda::std::span<const float> folds,
     kernel_snr_boxcar_warp<kThreadsPerBlock, true, OutputMode::kMaxAndFilter>
         <<<grid_dim, block_dim, shmem_size, stream>>>(
             folds.data(), nprofiles, nbins, widths.data(), widths.size(),
-            scores.data(), indices_filtered.data(), counter.d_ptr, threshold,
+            scores.data(), indices_filtered.data(), counter.data(), threshold,
             1.0F);
     cuda_utils::check_last_cuda_error(
         "score_and_filter_max_cuda_d kernel launch failed");
@@ -454,13 +457,10 @@ score_and_filter_max_cuda_thread_d(cuda::std::span<const float> folds,
                                    float threshold,
                                    SizeType nprofiles,
                                    SizeType nbins,
-                                   cudaStream_t stream,
-                                   cuda_utils::DeviceCounter& counter) {
+                                   utils::DeviceCounter& counter,
+                                   cudaStream_t stream) {
     counter.reset(stream);
-    constexpr uint32_t kMaxBins = 1024;
-    if (nbins > kMaxBins) {
-        throw std::runtime_error("nbins is too large");
-    }
+
     constexpr SizeType kThreadsPerBlock = 256;
     const SizeType blocks_per_grid =
         (nprofiles + kThreadsPerBlock - 1) / kThreadsPerBlock;
@@ -472,7 +472,7 @@ score_and_filter_max_cuda_thread_d(cuda::std::span<const float> folds,
         folds.data(), static_cast<uint32_t>(nprofiles),
         static_cast<uint32_t>(nbins), widths.data(),
         static_cast<uint32_t>(widths.size()), scores.data(),
-        indices_filtered.data(), counter.d_ptr, threshold);
+        indices_filtered.data(), counter.data(), threshold);
     cuda_utils::check_last_cuda_error(
         "score_and_filter_max_cuda_thread_d launch failed");
     return counter.value_sync(stream);

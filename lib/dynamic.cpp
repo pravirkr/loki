@@ -108,9 +108,11 @@ void BasePruneDPFuncts<FoldType, Derived>::shift_add(
 }
 
 template <SupportedFoldType FoldType, typename Derived>
-void BasePruneDPFuncts<FoldType, Derived>::score(
+SizeType BasePruneDPFuncts<FoldType, Derived>::score_and_filter(
     std::span<const FoldType> folds_tree,
     std::span<float> scores_tree,
+    std::span<SizeType> indices_tree,
+    float threshold,
     SizeType n_leaves) noexcept {
     const auto nbins   = m_cfg.get_nbins();
     const auto nbins_f = m_cfg.get_nbins_f();
@@ -122,11 +124,13 @@ void BasePruneDPFuncts<FoldType, Derived>::score(
             std::span<float>(m_scratch_folds).first(nfft * nbins);
         m_irfft_executor->execute(folds_span, folds_t_span,
                                   static_cast<int>(nfft));
-        detection::snr_boxcar_3d_max_with_cache(
-            folds_t_span, scores_tree, n_leaves, nbins, m_boxcar_widths_cache);
+        return detection::score_and_filter_max_with_cache(
+            folds_t_span, scores_tree, indices_tree, threshold, n_leaves, nbins,
+            m_boxcar_widths_cache);
     } else {
-        detection::snr_boxcar_3d_max_with_cache(
-            folds_tree, scores_tree, n_leaves, nbins, m_boxcar_widths_cache);
+        return detection::score_and_filter_max_with_cache(
+            folds_tree, scores_tree, indices_tree, threshold, n_leaves, nbins,
+            m_boxcar_widths_cache);
     }
 }
 
@@ -247,11 +251,12 @@ void PrunePolyTaylorDPFuncts<FoldType>::resolve(
 template <SupportedFoldType FoldType>
 void PrunePolyTaylorDPFuncts<FoldType>::transform(
     std::span<double> leaves_tree,
+    std::span<SizeType> indices_tree,
     std::pair<double, double> coord_next,
     std::pair<double, double> coord_cur,
     SizeType n_leaves) const {
-    poly_taylor_transform_batch(leaves_tree, coord_next, coord_cur, n_leaves,
-                                this->m_cfg.get_nparams(),
+    poly_taylor_transform_batch(leaves_tree, indices_tree, coord_next,
+                                coord_cur, n_leaves, this->m_cfg.get_nparams(),
                                 this->m_cfg.get_use_conservative_tile());
 }
 
@@ -331,10 +336,12 @@ void PruneCircTaylorDPFuncts<FoldType>::resolve(
 template <SupportedFoldType FoldType>
 void PruneCircTaylorDPFuncts<FoldType>::transform(
     std::span<double> leaves_tree,
+    std::span<SizeType> indices_tree,
     std::pair<double, double> coord_next,
     std::pair<double, double> coord_cur,
     SizeType n_leaves) const {
-    circ_taylor_transform_batch(leaves_tree, coord_next, coord_cur, n_leaves,
+    circ_taylor_transform_batch(leaves_tree, indices_tree, coord_next,
+                                coord_cur, n_leaves,
                                 this->m_cfg.get_use_conservative_tile(),
                                 this->m_cfg.get_minimum_snap_cells());
 }

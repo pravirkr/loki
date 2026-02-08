@@ -11,7 +11,6 @@
 #ifdef LOKI_ENABLE_CUDA
 #include <cuda/std/span>
 #include <cuda_runtime.h>
-#include "loki/cuda_utils.cuh"
 #endif // LOKI_ENABLE_CUDA
 
 namespace loki::core {
@@ -89,6 +88,7 @@ void poly_taylor_resolve_batch(std::span<const double> leaves_branch,
                                SizeType n_params);
 
 void poly_taylor_transform_batch(std::span<double> leaves_tree,
+                                 std::span<SizeType> indices_tree,
                                  std::pair<double, double> coord_next,
                                  std::pair<double, double> coord_cur,
                                  SizeType n_leaves,

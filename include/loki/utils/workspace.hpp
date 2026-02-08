@@ -82,6 +82,23 @@ struct BranchingWorkspaceCUDA {
     [[nodiscard]] float get_memory_usage() const noexcept;
 };
 
+struct DeviceCounter {
+    uint32_t* d_ptr = nullptr;
+    uint32_t* h_ptr = nullptr; // pinned
+
+    DeviceCounter();
+    ~DeviceCounter();
+    DeviceCounter(const DeviceCounter&)                      = delete;
+    DeviceCounter& operator=(const DeviceCounter&)           = delete;
+    DeviceCounter(DeviceCounter&& other) noexcept            = delete;
+    DeviceCounter& operator=(DeviceCounter&& other) noexcept = delete;
+
+    void reset(cudaStream_t stream);
+    [[nodiscard]] uint32_t* data() noexcept { return d_ptr; }
+    [[nodiscard]] const uint32_t* data() const noexcept { return d_ptr; }
+    [[nodiscard]] uint32_t value_sync(cudaStream_t stream);
+};
+
 #endif // LOKI_ENABLE_CUDA
 
 } // namespace loki::utils

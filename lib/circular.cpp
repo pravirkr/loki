@@ -19,10 +19,11 @@
 namespace loki::core {
 
 std::tuple<std::vector<SizeType>, std::vector<SizeType>, std::vector<SizeType>>
-get_circ_taylor_mask(std::span<const double> leaves_batch,
-                     SizeType n_leaves,
-                     SizeType n_params,
-                     double minimum_snap_cells) {
+get_circ_taylor_mask_scattered(std::span<const double> leaves_batch,
+                               std::span<SizeType> indices_batch,
+                               SizeType n_leaves,
+                               SizeType n_params,
+                               double minimum_snap_cells) {
     constexpr SizeType kParamsExpected = 5U;
     constexpr SizeType kParamStride    = 2U;
     constexpr SizeType kLeavesStride   = (kParamsExpected + 2) * kParamStride;
@@ -43,7 +44,8 @@ get_circ_taylor_mask(std::span<const double> leaves_batch,
     idx_taylor.reserve(n_leaves / 3);
 
     for (SizeType i = 0; i < n_leaves; ++i) {
-        const SizeType leaf_offset = i * kLeavesStride;
+        const SizeType leaf_idx    = indices_batch[i];
+        const SizeType leaf_offset = leaf_idx * kLeavesStride;
 
         // Extract values from leaves_batch
         const auto crackle  = leaves_batch[leaf_offset + 0];
@@ -78,15 +80,28 @@ get_circ_taylor_mask(std::span<const double> leaves_batch,
 
         // Classify
         if (mask_circular_snap) {
-            idx_circular_snap.push_back(i);
+            idx_circular_snap.push_back(leaf_idx);
         } else if (mask_circular_crackle) {
-            idx_circular_crackle.push_back(i);
+            idx_circular_crackle.push_back(leaf_idx);
         } else {
-            idx_taylor.push_back(i);
+            idx_taylor.push_back(leaf_idx);
         }
     }
     return {std::move(idx_circular_snap), std::move(idx_circular_crackle),
             std::move(idx_taylor)};
+}
+
+std::tuple<std::vector<SizeType>, std::vector<SizeType>, std::vector<SizeType>>
+get_circ_taylor_mask(std::span<const double> leaves_batch,
+                     SizeType n_leaves,
+                     SizeType n_params,
+                     double minimum_snap_cells) {
+    std::vector<SizeType> indices_batch(n_leaves);
+    for (SizeType i = 0; i < n_leaves; ++i) {
+        indices_batch[i] = i;
+    }
+    return get_circ_taylor_mask_scattered(leaves_batch, indices_batch, n_leaves,
+                                          n_params, minimum_snap_cells);
 }
 
 namespace {
@@ -813,6 +828,7 @@ void circ_taylor_resolve_batch(std::span<const double> leaves_tree,
 }
 
 void circ_taylor_transform_batch(std::span<double> leaves_tree,
+                                 std::span<SizeType> indices_tree,
                                  std::pair<double, double> coord_next,
                                  std::pair<double, double> coord_cur,
                                  SizeType n_leaves,
@@ -831,8 +847,8 @@ void circ_taylor_transform_batch(std::span<double> leaves_tree,
     const auto delta_t               = t0_next - t0_cur;
 
     const auto [idx_circular_snap, idx_circular_crackle, idx_taylor] =
-        get_circ_taylor_mask(leaves_tree, n_leaves, kParams,
-                             minimum_snap_cells);
+        get_circ_taylor_mask_scattered(leaves_tree, indices_tree, n_leaves,
+                                       kParams, minimum_snap_cells);
 
     // Process circular indices
     for (SizeType i : idx_circular_snap) {

@@ -535,45 +535,4 @@ cuda::std::span<T> as_span(thrust::device_vector<T>&&) = delete;
 template <typename T>
 cuda::std::span<const T> as_span(const thrust::device_vector<T>&&) = delete;
 
-struct DeviceCounter {
-    uint32_t* d_ptr = nullptr;
-
-    DeviceCounter() {
-        check_cuda_call(cudaMalloc(&d_ptr, sizeof(uint32_t)),
-                        "Failed to allocate device memory for DeviceCounter");
-    }
-
-    ~DeviceCounter() {
-        if (d_ptr) {
-            cudaFree(d_ptr);
-        }
-    }
-    DeviceCounter(const DeviceCounter&)            = delete;
-    DeviceCounter& operator=(const DeviceCounter&) = delete;
-    DeviceCounter(DeviceCounter&& other) noexcept : d_ptr(other.d_ptr) {
-        other.d_ptr = nullptr;
-    }
-    DeviceCounter& operator=(DeviceCounter&& other) noexcept {
-        if (this != &other) {
-            if (d_ptr)
-                cudaFree(d_ptr);
-            d_ptr       = other.d_ptr;
-            other.d_ptr = nullptr;
-        }
-        return *this;
-    }
-    void reset(cudaStream_t stream = 0) {
-        check_cuda_call(cudaMemsetAsync(d_ptr, 0, sizeof(uint32_t), stream),
-                        "Failed to reset DeviceCounter");
-    }
-    uint32_t value_sync(cudaStream_t stream = 0) const {
-        uint32_t h = 0;
-        check_cuda_call(cudaMemcpyAsync(&h, d_ptr, sizeof(uint32_t),
-                                        cudaMemcpyDeviceToHost, stream),
-                        "Failed to copy DeviceCounter value to host");
-        check_cuda_call(cudaStreamSynchronize(stream),
-                        "cudaStreamSynchronize failed in value_sync");
-        return h;
-    }
-};
 } // namespace loki::cuda_utils

@@ -14,7 +14,6 @@
 #include <cuda/std/span>
 #include <cuda_runtime.h>
 #include <thrust/device_vector.h>
-#include "loki/cuda_utils.cuh"
 #endif // LOKI_ENABLE_CUDA
 
 namespace loki::core {
@@ -73,11 +72,14 @@ public:
                            std::span<FoldType> folds_out,
                            SizeType n_leaves) noexcept = 0;
 
-    virtual void score(std::span<const FoldType> folds_tree,
-                       std::span<float> scores_tree,
-                       SizeType n_leaves) noexcept = 0;
+    virtual SizeType score_and_filter(std::span<const FoldType> folds_tree,
+                                      std::span<float> scores_tree,
+                                      std::span<SizeType> indices_tree,
+                                      float threshold,
+                                      SizeType n_leaves) noexcept = 0;
 
     virtual void transform(std::span<double> leaves_tree,
+                           std::span<SizeType> indices_tree,
                            std::pair<double, double> coord_next,
                            std::pair<double, double> coord_cur,
                            SizeType n_leaves) const = 0;
@@ -146,9 +148,11 @@ public:
                    std::span<FoldType> folds_out,
                    SizeType n_leaves) noexcept override;
 
-    void score(std::span<const FoldType> folds_tree,
-               std::span<float> scores_tree,
-               SizeType n_leaves) noexcept override;
+    SizeType score_and_filter(std::span<const FoldType> folds_tree,
+                              std::span<float> scores_tree,
+                              std::span<SizeType> indices_tree,
+                              float threshold,
+                              SizeType n_leaves) noexcept override;
 
     std::vector<double>
     get_transform_matrix(std::pair<double, double> coord_cur,
@@ -210,6 +214,7 @@ public:
                  SizeType n_leaves) const override;
 
     void transform(std::span<double> leaves_tree,
+                   std::span<SizeType> indices_tree,
                    std::pair<double, double> coord_next,
                    std::pair<double, double> coord_cur,
                    SizeType n_leaves) const override;
@@ -260,6 +265,7 @@ public:
                  SizeType n_leaves) const override;
 
     void transform(std::span<double> leaves_tree,
+                   std::span<SizeType> indices_tree,
                    std::pair<double, double> coord_next,
                    std::pair<double, double> coord_cur,
                    SizeType n_leaves) const override;
@@ -325,7 +331,7 @@ public:
                               cuda::std::span<uint32_t> leaves_origins,
                               std::pair<double, double> coord_cur,
                               SizeType n_leaves,
-                              cudaStream_t stream) const = 0;
+                              cudaStream_t stream) const noexcept = 0;
 
     virtual void resolve(cuda::std::span<const double> leaves_branch,
                          cuda::std::span<uint32_t> param_indices,
@@ -345,7 +351,7 @@ public:
                            SizeType n_leaves,
                            SizeType physical_start_idx,
                            SizeType capacity,
-                           cudaStream_t stream) noexcept = 0;
+                           cudaStream_t stream) const noexcept = 0;
 
     virtual SizeType
     score_and_filter(cuda::std::span<const FoldTypeCUDA> folds_tree,
@@ -353,8 +359,8 @@ public:
                      cuda::std::span<uint32_t> indices_tree,
                      float threshold,
                      SizeType n_leaves,
-                     cudaStream_t stream,
-                     cuda_utils::DeviceCounter& counter) noexcept = 0;
+                     utils::DeviceCounter& counter,
+                     cudaStream_t stream) noexcept = 0;
 
     virtual void transform(cuda::std::span<double> leaves_tree,
                            cuda::std::span<uint32_t> indices_tree,
@@ -409,7 +415,7 @@ public:
                       cuda::std::span<uint32_t> leaves_origins,
                       std::pair<double, double> coord_cur,
                       SizeType n_leaves,
-                      cudaStream_t stream) const override;
+                      cudaStream_t stream) const noexcept override;
 
     void shift_add(cuda::std::span<const FoldTypeCUDA> folds_tree,
                    cuda::std::span<const uint32_t> indices_tree,
@@ -420,16 +426,15 @@ public:
                    SizeType n_leaves,
                    SizeType physical_start_idx,
                    SizeType capacity,
-                   cudaStream_t stream) noexcept override;
+                   cudaStream_t stream) const noexcept override;
 
-    SizeType
-    score_and_filter(cuda::std::span<const FoldTypeCUDA> folds_tree,
-                     cuda::std::span<float> scores_tree,
-                     cuda::std::span<uint32_t> indices_tree,
-                     float threshold,
-                     SizeType n_leaves,
-                     cudaStream_t stream,
-                     cuda_utils::DeviceCounter& counter) noexcept override;
+    SizeType score_and_filter(cuda::std::span<const FoldTypeCUDA> folds_tree,
+                              cuda::std::span<float> scores_tree,
+                              cuda::std::span<uint32_t> indices_tree,
+                              float threshold,
+                              SizeType n_leaves,
+                              utils::DeviceCounter& counter,
+                              cudaStream_t stream) noexcept override;
 };
 
 // Intermediate base for Taylor-based methods (common seed implementation)

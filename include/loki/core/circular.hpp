@@ -19,14 +19,22 @@ namespace loki::core {
  * (secondary circular candidates)
  *   - idx_taylor: everything else (not circular)
  *
- * @param leaves_batch   Flat span of leaves (size: n_leaves * (n_params + 2) *
+ * @param leaves_batch   Flat span of leaves (size:> n_leaves * (n_params + 2) *
  * 2)
+ * @param indices_batch  Flat span of indices (size: n_leaves)
  * @param n_leaves      Number of leaves (batches)
  * @param n_params      Number of Taylor parameters
  * @param minimum_snap_cells Threshold for significant snap (default: 5.0)
  * @return std::tuple<std::vector<SizeType>, std::vector<SizeType>,
  * std::vector<SizeType>> (idx_circular_snap, idx_circular_crackle, idx_taylor)
  */
+std::tuple<std::vector<SizeType>, std::vector<SizeType>, std::vector<SizeType>>
+get_circ_taylor_mask_scattered(std::span<const double> leaves_batch,
+                               std::span<SizeType> indices_batch,
+                               SizeType n_leaves,
+                               SizeType n_params,
+                               double minimum_snap_cells);
+
 std::tuple<std::vector<SizeType>, std::vector<SizeType>, std::vector<SizeType>>
 get_circ_taylor_mask(std::span<const double> leaves_batch,
                      SizeType n_leaves,
@@ -66,6 +74,7 @@ void circ_taylor_resolve_batch(std::span<const double> leaves_tree,
                                double minimum_snap_cells);
 
 void circ_taylor_transform_batch(std::span<double> leaves_tree,
+                                 std::span<SizeType> indices_tree,
                                  std::pair<double, double> coord_next,
                                  std::pair<double, double> coord_cur,
                                  SizeType n_leaves,

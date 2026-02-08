@@ -3,6 +3,7 @@
 #include <cub/cub.cuh>
 #include <cuda_runtime.h>
 
+#include "loki/common/types.hpp"
 #include "loki/cuda_utils.cuh"
 
 namespace loki::utils {
@@ -53,6 +54,44 @@ float BranchingWorkspaceCUDA::get_memory_usage() const noexcept {
                               (leaf_output_offset.size() * sizeof(uint32_t)) +
                               (cub_temp_bytes);
     return static_cast<float>(total_memory) / static_cast<float>(1ULL << 30U);
+}
+
+// DeviceCounter implementation
+DeviceCounter::DeviceCounter() {
+    cuda_utils::check_cuda_call(
+        cudaMalloc(&d_ptr, sizeof(uint32_t)),
+        "Failed to allocate device memory for DeviceCounter");
+    cuda_utils::check_cuda_call(
+        cudaMallocHost(&h_ptr, sizeof(uint32_t)),
+        "Failed to allocate pinned memory for DeviceCounter");
+    // Safe default state
+    *h_ptr = 0;
+    cuda_utils::check_cuda_call(cudaMemset(d_ptr, 0, sizeof(uint32_t)),
+                                "Failed to initialize DeviceCounter");
+}
+
+DeviceCounter::~DeviceCounter() {
+    if (d_ptr) {
+        cudaFree(d_ptr);
+    }
+    if (h_ptr) {
+        cudaFreeHost(h_ptr);
+    }
+}
+
+void DeviceCounter::reset(cudaStream_t stream) {
+    cuda_utils::check_cuda_call(
+        cudaMemsetAsync(d_ptr, 0, sizeof(uint32_t), stream),
+        "Failed to reset DeviceCounter");
+}
+
+uint32_t DeviceCounter::value_sync(cudaStream_t stream) {
+    cuda_utils::check_cuda_call(cudaMemcpyAsync(h_ptr, d_ptr, sizeof(uint32_t),
+                                                cudaMemcpyDeviceToHost, stream),
+                                "Failed to copy DeviceCounter value to host");
+    cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
+                                "cudaStreamSynchronize failed in value_sync");
+    return *h_ptr;
 }
 
 } // namespace loki::utils

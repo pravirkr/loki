@@ -120,12 +120,15 @@ public:
     [[nodiscard]] bool add(std::span<const double> leaf,
                            std::span<const FoldType> fold,
                            float score);
-    // Add a batch of candidate leaves to the Tree if there is space
-    [[nodiscard]] float add_batch(std::span<const double> leaves_batch,
-                                  std::span<const FoldType> folds_batch,
-                                  std::span<const float> scores_batch,
-                                  float current_threshold,
-                                  SizeType slots_to_write);
+
+    // Add a batch of candidate leaves to the Tree if there is space, scattered.
+    [[nodiscard]] float
+    add_batch_scattered(std::span<const double> leaves_batch,
+                        std::span<const FoldType> folds_batch,
+                        std::span<const float> scores_batch,
+                        std::span<const SizeType> indices_batch,
+                        float current_threshold,
+                        SizeType slots_to_write);
     // Prune to keep only unique candidates
     void deduplicate();
 
@@ -175,11 +178,13 @@ public:
     [[nodiscard]] std::pair<cuda::std::span<const double>, SizeType>
     get_leaves_span(SizeType n_leaves) const;
     // Returns span over contiguous leaves (for reporting)
-    [[nodiscard]] cuda::std::span<double> get_leaves_contiguous_span(cudaStream_t stream) noexcept;
+    [[nodiscard]] cuda::std::span<double>
+    get_leaves_contiguous_span(cudaStream_t stream) noexcept;
     // Returns span over contiguous scores (for saving to file)
-    [[nodiscard]] cuda::std::span<float> get_scores_contiguous_span(cudaStream_t stream) noexcept;
+    [[nodiscard]] cuda::std::span<float>
+    get_scores_contiguous_span(cudaStream_t stream) noexcept;
     [[nodiscard]] SizeType get_physical_start_idx() const;
-    
+
     void set_size(SizeType size) noexcept;
     void reset() noexcept;
     void prepare_in_place_update();

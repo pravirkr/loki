@@ -300,29 +300,6 @@ template <SupportedFoldType FoldType> struct PruningWorkspace {
           branched_param_idx(max_branched_leaves),
           branched_phase_shift(max_branched_leaves) {}
 
-    // Call this after filling branched_scores and branched_indices
-    SizeType filter_batch(float threshold,
-                          SizeType n_leaves_after_validation) noexcept {
-        SizeType n_leaves_passing = 0;
-        for (SizeType i = 0; i < n_leaves_after_validation; ++i) {
-            if (branched_scores[i] >= threshold) {
-                if (n_leaves_passing != i) { // Only copy if needed
-                    branched_scores[n_leaves_passing] = branched_scores[i];
-                    std::copy_n(branched_leaves.begin() + (i * leaves_stride),
-                                leaves_stride,
-                                branched_leaves.begin() +
-                                    (n_leaves_passing * leaves_stride));
-                    std::copy_n(branched_folds.begin() + (i * folds_stride),
-                                folds_stride,
-                                branched_folds.begin() +
-                                    (n_leaves_passing * folds_stride));
-                }
-                ++n_leaves_passing;
-            }
-        }
-        return n_leaves_passing;
-    }
-
     float get_memory_usage() const noexcept {
         const auto total_memory =
             (branched_leaves.size() * sizeof(double)) +
@@ -704,11 +681,13 @@ private:
                 m_pruning_workspace->branched_folds, n_leaves_after_validation);
             stats.batch_timers["shift_add"] += timer.stop();
 
-            // Score
+            // Score and filter
             timer.start();
-            m_prune_funcs->score(m_pruning_workspace->branched_folds,
-                                 m_pruning_workspace->branched_scores,
-                                 n_leaves_after_validation);
+            const SizeType n_leaves_passing = m_prune_funcs->score_and_filter(
+                m_pruning_workspace->branched_folds,
+                m_pruning_workspace->branched_scores,
+                m_pruning_workspace->branched_indices, current_threshold,
+                n_leaves_after_validation);
             auto branched_scores_span =
                 std::span<const float>(m_pruning_workspace->branched_scores)
                     .first(n_leaves_after_validation);
@@ -718,32 +697,29 @@ private:
             stats.score_max = std::max(stats.score_max, *max_it);
             stats.batch_timers["score"] += timer.stop();
 
-            // Thresholding & filtering (direct memory operations)
-            timer.start();
-            const SizeType n_leaves_passing = m_pruning_workspace->filter_batch(
-                current_threshold, n_leaves_after_validation);
-            error_check::check_less_equal(
-                n_leaves_passing, m_pruning_workspace->max_branched_leaves,
-                "n_leaves_passing <= max_branched_leaves");
-            stats.batch_timers["filter"] += timer.stop();
             if (n_leaves_passing == 0) {
                 m_world_tree->consume_read(current_batch_size);
                 continue;
             }
+            error_check::check_less_equal(
+                n_leaves_passing, m_pruning_workspace->max_branched_leaves,
+                "n_leaves_passing <= max_branched_leaves");
 
             // Transform
             timer.start();
             m_prune_funcs->transform(m_pruning_workspace->branched_leaves,
+                                     m_pruning_workspace->branched_indices,
                                      coord_next, coord_cur, n_leaves_passing);
             stats.batch_timers["transform"] += timer.stop();
 
             // Add batch to output suggestions
             timer.start();
-            current_threshold =
-                m_world_tree->add_batch(m_pruning_workspace->branched_leaves,
-                                        m_pruning_workspace->branched_folds,
-                                        m_pruning_workspace->branched_scores,
-                                        current_threshold, n_leaves_passing);
+            current_threshold = m_world_tree->add_batch_scattered(
+                m_pruning_workspace->branched_leaves,
+                m_pruning_workspace->branched_folds,
+                m_pruning_workspace->branched_scores,
+                m_pruning_workspace->branched_indices, current_threshold,
+                n_leaves_passing);
             stats.batch_timers["batch_add"] += timer.stop();
             // Notify the buffer that a batch of the old suggestions has been
             // consumed

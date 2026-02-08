@@ -664,7 +664,7 @@ template <bool UseConservativeTile>
 __device__ __forceinline__ void
 transform_taylor_accel(double* __restrict__ leaves,
                        uint32_t* __restrict__ indices,
-                       SizeType n_leaves,
+                       uint32_t n_leaves,
                        cuda::std::pair<double, double> coord_next,
                        cuda::std::pair<double, double> coord_cur) {
     constexpr SizeType kLeavesStride = 8;
@@ -711,7 +711,7 @@ template <bool UseConservativeTile>
 __device__ __forceinline__ void
 transform_taylor_jerk(double* __restrict__ leaves,
                       uint32_t* __restrict__ indices,
-                      SizeType n_leaves,
+                      uint32_t n_leaves,
                       cuda::std::pair<double, double> coord_next,
                       cuda::std::pair<double, double> coord_cur) {
     constexpr SizeType kLeavesStride = 10;
@@ -768,7 +768,7 @@ template <bool UseConservativeTile>
 __device__ __forceinline__ void
 transform_taylor_snap(double* __restrict__ leaves,
                       uint32_t* __restrict__ indices,
-                      SizeType n_leaves,
+                      uint32_t n_leaves,
                       cuda::std::pair<double, double> coord_next,
                       cuda::std::pair<double, double> coord_cur) {
     constexpr SizeType kLeavesStride = 12;
@@ -846,7 +846,7 @@ kernel_poly_taylor_resolve_batch(const double* __restrict__ leaves_tree,
                                  SizeType n_accel_init,
                                  SizeType n_freq_init,
                                  SizeType nbins,
-                                 SizeType n_leaves) {
+                                 uint32_t n_leaves) {
     if constexpr (NPARAMS == 2) {
         resolve_taylor_accel(leaves_tree, param_indices, phase_shift,
                              param_limits, coord_add, coord_cur, coord_init,
@@ -869,7 +869,7 @@ template <int NPARAMS, bool UseConservativeTile>
 __global__ void
 kernel_poly_taylor_transform_batch(double* __restrict__ leaves_tree,
                                    uint32_t* __restrict__ indices_tree,
-                                   SizeType n_leaves,
+                                   uint32_t n_leaves,
                                    cuda::std::pair<double, double> coord_next,
                                    cuda::std::pair<double, double> coord_cur) {
     if constexpr (NPARAMS == 2) {
@@ -1263,17 +1263,19 @@ void poly_taylor_transform_batch_cuda(cuda::std::span<double> leaves_tree,
                                       SizeType n_params,
                                       bool use_conservative_tile,
                                       cudaStream_t stream) {
-    // Better occupancy than 512 for many kernels
-    constexpr int kBlockSize = 256;
-    const dim3 block(kBlockSize);
-    const dim3 grid((n_leaves + kBlockSize - 1) / kBlockSize);
-    cuda_utils::check_kernel_launch_params(grid, block);
+    constexpr SizeType kThreadsPerBlock = 256;
+    const SizeType blocks_per_grid =
+        (n_leaves + kThreadsPerBlock - 1) / kThreadsPerBlock;
+    const dim3 block_dim(kThreadsPerBlock);
+    const dim3 grid_dim(blocks_per_grid);
+    cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
 
     // Two-level dispatch for complete compile-time specialization
     auto dispatch = [&]<int N, bool C>() {
-        kernel_poly_taylor_transform_batch<N, C><<<grid, block, 0, stream>>>(
-            leaves_tree.data(), indices_tree.data(), n_leaves, coord_next,
-            coord_cur);
+        kernel_poly_taylor_transform_batch<N, C>
+            <<<grid_dim, block_dim, 0, stream>>>(leaves_tree.data(),
+                                                 indices_tree.data(), n_leaves,
+                                                 coord_next, coord_cur);
     };
 
     // Fully specialized dispatch

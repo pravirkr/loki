@@ -11,9 +11,10 @@
 #include "loki/cuda_utils.cuh"
 #include "loki/detection/score.hpp"
 #include "loki/exceptions.hpp"
+#include "loki/psr_utils.hpp"
 #include "loki/search/configs.hpp"
 #include "loki/timing.hpp"
-#include "loki/psr_utils.hpp"
+#include "loki/utils/workspace.hpp"
 
 namespace loki::algorithms {
 
@@ -181,7 +182,7 @@ private:
     thrust::device_vector<uint32_t> m_widths_d;
     thrust::device_vector<uint32_t> m_passing_indices_d;
 
-    cuda_utils::DeviceCounter m_passing_counter;
+    utils::DeviceCounter m_passing_counter;
 
     // Helper function to create region planner with GPU memory considerations
     static regions::FFARegionPlanner<HostFoldType>
