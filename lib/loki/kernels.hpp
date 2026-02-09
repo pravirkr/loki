@@ -5,7 +5,6 @@
 
 #ifdef LOKI_ENABLE_CUDA
 #include <cuda_runtime.h>
-#include "loki/utils/workspace.hpp"
 #endif // LOKI_ENABLE_CUDA
 
 namespace loki::kernels {

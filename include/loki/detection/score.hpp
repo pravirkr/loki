@@ -6,11 +6,12 @@
 #include <vector>
 
 #include "loki/common/types.hpp"
+#include "loki/utils/workspace.hpp"
 
 #ifdef LOKI_ENABLE_CUDA
 #include <cuda/std/span>
-#include <cuda_runtime_api.h>
-#include "loki/utils/workspace.hpp"
+#include <cuda_runtime.h>
+
 #endif // LOKI_ENABLE_CUDA
 
 namespace loki::detection {

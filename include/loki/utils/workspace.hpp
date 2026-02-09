@@ -94,7 +94,7 @@ struct DeviceCounter {
     DeviceCounter& operator=(DeviceCounter&& other) noexcept = delete;
 
     void reset(cudaStream_t stream);
-    [[nodiscard]] uint32_t* data() noexcept { return d_ptr; }
+    [[nodiscard]] uint32_t* data() noexcept { return d_ptr; } // NOLINT
     [[nodiscard]] const uint32_t* data() const noexcept { return d_ptr; }
     [[nodiscard]] uint32_t value_sync(cudaStream_t stream);
 };

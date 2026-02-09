@@ -3,7 +3,6 @@
 #include <cub/cub.cuh>
 #include <cuda_runtime.h>
 
-#include "loki/common/types.hpp"
 #include "loki/cuda_utils.cuh"
 
 namespace loki::utils {
@@ -71,21 +70,21 @@ DeviceCounter::DeviceCounter() {
 }
 
 DeviceCounter::~DeviceCounter() {
-    if (d_ptr) {
+    if (d_ptr != nullptr) {
         cudaFree(d_ptr);
     }
-    if (h_ptr) {
+    if (h_ptr != nullptr) {
         cudaFreeHost(h_ptr);
     }
 }
 
-void DeviceCounter::reset(cudaStream_t stream) {
+void DeviceCounter::reset(cudaStream_t stream) { // NOLINT
     cuda_utils::check_cuda_call(
         cudaMemsetAsync(d_ptr, 0, sizeof(uint32_t), stream),
         "Failed to reset DeviceCounter");
 }
 
-uint32_t DeviceCounter::value_sync(cudaStream_t stream) {
+uint32_t DeviceCounter::value_sync(cudaStream_t stream) { // NOLINT
     cuda_utils::check_cuda_call(cudaMemcpyAsync(h_ptr, d_ptr, sizeof(uint32_t),
                                                 cudaMemcpyDeviceToHost, stream),
                                 "Failed to copy DeviceCounter value to host");

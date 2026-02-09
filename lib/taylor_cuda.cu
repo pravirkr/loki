@@ -278,7 +278,7 @@ kernel_analyze_and_branch_snap(const double* __restrict__ leaves_tree,
 
 // Helper: Loads the output-to-input mapping into Shared Memory
 // Works for any dimension (Accel/Jerk/Snap)
-template <uint32_t kBlockSize>
+template <uint32_t KBlockSize>
 __device__ __forceinline__ void load_block_cooperative_map(
     uint32_t* __restrict__ smem_offsets, // Output: Shared mem buffer
     uint32_t& base_leaf_idx,             // Output: Base index for this block
@@ -306,14 +306,14 @@ __device__ __forceinline__ void load_block_cooperative_map(
 
     // Boundary Load (Last element for upper_bound checks)
     if (tid == 0) {
-        const uint32_t last_idx = base_leaf_idx + kBlockSize;
-        smem_offsets[kBlockSize] =
+        const uint32_t last_idx = base_leaf_idx + KBlockSize;
+        smem_offsets[KBlockSize] =
             (last_idx < n_leaves) ? global_offsets[last_idx] : 0xFFFFFFFF;
     }
     __syncthreads();
 }
 
-template <uint32_t kThreadsPerBlock>
+template <uint32_t KThreadsPerBlock>
 __global__ void
 kernel_materialize_branches_accel(const double* __restrict__ leaves_tree,
                                   double* __restrict__ leaves_branch,
@@ -327,10 +327,10 @@ kernel_materialize_branches_accel(const double* __restrict__ leaves_tree,
     constexpr uint32_t kLeavesStride = (kParams + 2) * kParamStride;
 
     // Strategy: Block-Cooperative Search
-    __shared__ uint32_t smem_offsets[kThreadsPerBlock + 2];
+    __shared__ uint32_t smem_offsets[KThreadsPerBlock + 2];
     __shared__ uint32_t base_leaf_idx;
 
-    load_block_cooperative_map<kThreadsPerBlock>(
+    load_block_cooperative_map<KThreadsPerBlock>(
         smem_offsets, base_leaf_idx, ws.leaf_output_offset, n_leaves);
 
     const uint32_t tid          = threadIdx.x;
@@ -342,7 +342,7 @@ kernel_materialize_branches_accel(const double* __restrict__ leaves_tree,
 
     // Phase 3: Shared Memory Binary Search
     const uint32_t search_len =
-        min(kThreadsPerBlock + 1, n_leaves - base_leaf_idx);
+        min(KThreadsPerBlock + 1, n_leaves - base_leaf_idx);
     const uint32_t local_leaf_idx =
         utils::binary_search_cartesian(smem_offsets, search_len, branch_ileaf);
     // Resolve actual leaf index
@@ -360,9 +360,11 @@ kernel_materialize_branches_accel(const double* __restrict__ leaves_tree,
     const uint32_t bo = branch_ileaf * kLeavesStride;
     const uint32_t lo = tree_ileaf * kLeavesStride;
 
-    leaves_branch[bo + 0] = ws.scratch_params[(flat_base + 0) * branch_max + a];
+    leaves_branch[bo + 0] =
+        ws.scratch_params[((flat_base + 0) * branch_max) + a];
     leaves_branch[bo + 1] = ws.scratch_dparams[flat_base + 0];
-    leaves_branch[bo + 2] = ws.scratch_params[(flat_base + 1) * branch_max + b];
+    leaves_branch[bo + 2] =
+        ws.scratch_params[((flat_base + 1) * branch_max) + b];
     leaves_branch[bo + 3] = ws.scratch_dparams[flat_base + 1];
 // copy d0 + f0 + flag (4 doubles) from parent tree
 #pragma unroll
@@ -372,7 +374,7 @@ kernel_materialize_branches_accel(const double* __restrict__ leaves_tree,
     leaves_origins[branch_ileaf] = tree_ileaf;
 }
 
-template <uint32_t kThreadsPerBlock>
+template <uint32_t KThreadsPerBlock>
 __global__ void
 kernel_materialize_branches_jerk(const double* __restrict__ leaves_tree,
                                  double* __restrict__ leaves_branch,
@@ -386,21 +388,22 @@ kernel_materialize_branches_jerk(const double* __restrict__ leaves_tree,
     constexpr uint32_t kLeavesStride = (kParams + 2) * kParamStride;
 
     // Strategy: Block-Cooperative Search
-    __shared__ uint32_t smem_offsets[kThreadsPerBlock + 2];
+    __shared__ uint32_t smem_offsets[KThreadsPerBlock + 2];
     __shared__ uint32_t base_leaf_idx;
 
-    load_block_cooperative_map<kThreadsPerBlock>(
+    load_block_cooperative_map<KThreadsPerBlock>(
         smem_offsets, base_leaf_idx, ws.leaf_output_offset, n_leaves);
 
     const uint32_t tid          = threadIdx.x;
     const uint32_t branch_ileaf = (blockIdx.x * blockDim.x) + tid;
 
-    if (branch_ileaf >= n_leaves_branched)
+    if (branch_ileaf >= n_leaves_branched) {
         return;
+    }
 
     // Phase 3: SMEM Search
     const uint32_t search_len =
-        min(kThreadsPerBlock + 1, n_leaves - base_leaf_idx);
+        min(KThreadsPerBlock + 1, n_leaves - base_leaf_idx);
     const uint32_t local_leaf_idx =
         utils::binary_search_cartesian(smem_offsets, search_len, branch_ileaf);
 
@@ -422,11 +425,14 @@ kernel_materialize_branches_jerk(const double* __restrict__ leaves_tree,
     const uint32_t bo = branch_ileaf * kLeavesStride;
     const uint32_t lo = tree_ileaf * kLeavesStride;
 
-    leaves_branch[bo + 0] = ws.scratch_params[(flat_base + 0) * branch_max + a];
+    leaves_branch[bo + 0] =
+        ws.scratch_params[((flat_base + 0) * branch_max) + a];
     leaves_branch[bo + 1] = ws.scratch_dparams[flat_base + 0];
-    leaves_branch[bo + 2] = ws.scratch_params[(flat_base + 1) * branch_max + b];
+    leaves_branch[bo + 2] =
+        ws.scratch_params[((flat_base + 1) * branch_max) + b];
     leaves_branch[bo + 3] = ws.scratch_dparams[flat_base + 1];
-    leaves_branch[bo + 4] = ws.scratch_params[(flat_base + 2) * branch_max + c];
+    leaves_branch[bo + 4] =
+        ws.scratch_params[((flat_base + 2) * branch_max) + c];
     leaves_branch[bo + 5] = ws.scratch_dparams[flat_base + 2];
 // copy d0 + f0 + flag (4 doubles) from parent tree
 #pragma unroll
@@ -436,7 +442,7 @@ kernel_materialize_branches_jerk(const double* __restrict__ leaves_tree,
     leaves_origins[branch_ileaf] = tree_ileaf;
 }
 
-template <uint32_t kThreadsPerBlock>
+template <uint32_t KThreadsPerBlock>
 __global__ void
 kernel_materialize_branches_snap(const double* __restrict__ leaves_tree,
                                  double* __restrict__ leaves_branch,
@@ -450,21 +456,22 @@ kernel_materialize_branches_snap(const double* __restrict__ leaves_tree,
     constexpr uint32_t kLeavesStride = (kParams + 2) * kParamStride;
 
     // Strategy: Block-Cooperative Search
-    __shared__ uint32_t smem_offsets[kThreadsPerBlock + 2];
+    __shared__ uint32_t smem_offsets[KThreadsPerBlock + 2];
     __shared__ uint32_t base_leaf_idx;
 
-    load_block_cooperative_map<kThreadsPerBlock>(
+    load_block_cooperative_map<KThreadsPerBlock>(
         smem_offsets, base_leaf_idx, ws.leaf_output_offset, n_leaves);
 
     const uint32_t tid          = threadIdx.x;
     const uint32_t branch_ileaf = (blockIdx.x * blockDim.x) + tid;
 
-    if (branch_ileaf >= n_leaves_branched)
+    if (branch_ileaf >= n_leaves_branched) {
         return;
+    }
 
     // Phase 3: SMEM Search
     const uint32_t search_len =
-        min(kThreadsPerBlock + 1, n_leaves - base_leaf_idx);
+        min(KThreadsPerBlock + 1, n_leaves - base_leaf_idx);
     const uint32_t local_leaf_idx =
         utils::binary_search_cartesian(smem_offsets, search_len, branch_ileaf);
 
@@ -489,13 +496,17 @@ kernel_materialize_branches_snap(const double* __restrict__ leaves_tree,
     const uint32_t bo = branch_ileaf * kLeavesStride;
     const uint32_t lo = tree_ileaf * kLeavesStride;
 
-    leaves_branch[bo + 0] = ws.scratch_params[(flat_base + 0) * branch_max + a];
+    leaves_branch[bo + 0] =
+        ws.scratch_params[((flat_base + 0) * branch_max) + a];
     leaves_branch[bo + 1] = ws.scratch_dparams[flat_base + 0];
-    leaves_branch[bo + 2] = ws.scratch_params[(flat_base + 1) * branch_max + b];
+    leaves_branch[bo + 2] =
+        ws.scratch_params[((flat_base + 1) * branch_max) + b];
     leaves_branch[bo + 3] = ws.scratch_dparams[flat_base + 1];
-    leaves_branch[bo + 4] = ws.scratch_params[(flat_base + 2) * branch_max + c];
+    leaves_branch[bo + 4] =
+        ws.scratch_params[((flat_base + 2) * branch_max) + c];
     leaves_branch[bo + 5] = ws.scratch_dparams[flat_base + 2];
-    leaves_branch[bo + 6] = ws.scratch_params[(flat_base + 3) * branch_max + d];
+    leaves_branch[bo + 6] =
+        ws.scratch_params[((flat_base + 3) * branch_max) + d];
     leaves_branch[bo + 7] = ws.scratch_dparams[flat_base + 3];
 
 // copy d0 + f0 + flag (4 doubles) from parent tree
@@ -663,7 +674,7 @@ resolve_taylor_snap(const double* __restrict__ leaves_tree,
 template <bool UseConservativeTile>
 __device__ __forceinline__ void
 transform_taylor_accel(double* __restrict__ leaves,
-                       uint32_t* __restrict__ indices,
+                       const uint32_t* __restrict__ indices,
                        uint32_t n_leaves,
                        cuda::std::pair<double, double> coord_next,
                        cuda::std::pair<double, double> coord_cur) {
@@ -710,7 +721,7 @@ transform_taylor_accel(double* __restrict__ leaves,
 template <bool UseConservativeTile>
 __device__ __forceinline__ void
 transform_taylor_jerk(double* __restrict__ leaves,
-                      uint32_t* __restrict__ indices,
+                      const uint32_t* __restrict__ indices,
                       uint32_t n_leaves,
                       cuda::std::pair<double, double> coord_next,
                       cuda::std::pair<double, double> coord_cur) {
@@ -767,7 +778,7 @@ transform_taylor_jerk(double* __restrict__ leaves,
 template <bool UseConservativeTile>
 __device__ __forceinline__ void
 transform_taylor_snap(double* __restrict__ leaves,
-                      uint32_t* __restrict__ indices,
+                      const uint32_t* __restrict__ indices,
                       uint32_t n_leaves,
                       cuda::std::pair<double, double> coord_next,
                       cuda::std::pair<double, double> coord_cur) {
@@ -905,7 +916,7 @@ __global__ void kernel_poly_taylor_report_batch(
         const double param_err        = leaves_tree[param_offset + 1];
         leaves_tree[param_offset + 0] = param_val / s_factor;
         leaves_tree[param_offset + 1] =
-            sqrt((param_err / s_factor) * (param_err / s_factor) +
+            sqrt(((param_err / s_factor) * (param_err / s_factor)) +
                  ((param_val * utils::kInvCval / (s_factor * s_factor)) *
                   (param_val * utils::kInvCval / (s_factor * s_factor)) *
                   (dv_final * dv_final)));
@@ -915,87 +926,9 @@ __global__ void kernel_poly_taylor_report_batch(
         f0_batch * dv_final * utils::kInvCval;
 }
 
+template <SizeType NPARAMS>
 SizeType
-poly_taylor_branch_accel_cuda(cuda::std::span<const double> leaves_tree,
-                              cuda::std::span<double> leaves_branch,
-                              cuda::std::span<uint32_t> leaves_origins,
-                              std::pair<double, double> coord_cur,
-                              SizeType nbins,
-                              double eta,
-                              cuda::std::span<const ParamLimit> param_limits,
-                              SizeType branch_max,
-                              SizeType n_leaves,
-                              utils::BranchingWorkspaceCUDAView ws,
-                              cudaStream_t stream) {
-    constexpr SizeType kLeavesStride = 8;
-
-    // ---- Kernel 1: analyze + branch enumeration ----
-    constexpr SizeType kThreadsPerBlock = 256;
-    const auto blocks_per_grid =
-        (n_leaves + kThreadsPerBlock - 1) / kThreadsPerBlock;
-    const dim3 block_dim(kThreadsPerBlock);
-    const dim3 grid_dim(blocks_per_grid);
-    cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
-
-    kernel_analyze_and_branch_accel<<<grid_dim, block_dim, 0, stream>>>(
-        leaves_tree.data(), n_leaves, coord_cur.second,
-        static_cast<double>(nbins), eta, param_limits.data(), branch_max, ws);
-    cuda_utils::check_last_cuda_error("Kernel 1 launch failed");
-
-    // compute output size and offsets (leaf_output_offset)
-    cuda_utils::check_cuda_call(
-        cub::DeviceScan::ExclusiveSum(ws.cub_temp_storage, ws.cub_temp_bytes,
-                                      ws.leaf_branch_count,
-                                      ws.leaf_output_offset, n_leaves, stream),
-        "cub::DeviceScan::ExclusiveSum failed");
-    uint32_t last_offset, last_count;
-    cuda_utils::check_cuda_call(
-        cudaMemcpyAsync(&last_offset, ws.leaf_output_offset + (n_leaves - 1),
-                        sizeof(uint32_t), cudaMemcpyDeviceToHost, stream),
-        "cudaMemcpyAsync failed");
-    cuda_utils::check_cuda_call(
-        cudaMemcpyAsync(&last_count, ws.leaf_branch_count + (n_leaves - 1),
-                        sizeof(uint32_t), cudaMemcpyDeviceToHost, stream),
-        "cudaMemcpyAsync failed");
-    // Unavoidable sync
-    cuda_utils::check_cuda_call(
-        cudaStreamSynchronize(stream),
-        "cudaStreamSynchronize branch kernel 1 (accel) failed");
-
-    const SizeType n_leaves_branched = last_offset + last_count;
-    if (n_leaves_branched == 0) {
-        return n_leaves_branched;
-    }
-    if (n_leaves_branched == n_leaves) {
-        // FAST PATH: no branching
-        cuda_utils::check_cuda_call(
-            cudaMemcpyAsync(leaves_branch.data(), leaves_tree.data(),
-                            n_leaves * kLeavesStride * sizeof(double),
-                            cudaMemcpyDeviceToDevice, stream),
-            "cudaMemcpyAsync failed");
-        thrust::sequence(thrust::cuda::par.on(stream), leaves_origins.data(),
-                         leaves_origins.data() + n_leaves,
-                         static_cast<uint32_t>(0));
-
-        return n_leaves_branched;
-    }
-
-    // ---- Kernel 2: materialize ----
-    const auto blocks_per_grid_out =
-        (n_leaves_branched + kThreadsPerBlock - 1) / kThreadsPerBlock;
-    const dim3 grid_dim_out(blocks_per_grid_out);
-    cuda_utils::check_kernel_launch_params(grid_dim_out, block_dim);
-    kernel_materialize_branches_accel<kThreadsPerBlock>
-        <<<grid_dim_out, block_dim, 0, stream>>>(
-            leaves_tree.data(), leaves_branch.data(), leaves_origins.data(),
-            n_leaves, n_leaves_branched, branch_max, ws);
-    cuda_utils::check_last_cuda_error("Kernel 2 launch failed");
-    // No need to sync, the next kernel will do it
-    return n_leaves_branched;
-}
-
-SizeType
-poly_taylor_branch_jerk_cuda(cuda::std::span<const double> leaves_tree,
+poly_taylor_branch_impl_cuda(cuda::std::span<const double> leaves_tree,
                              cuda::std::span<double> leaves_branch,
                              cuda::std::span<uint32_t> leaves_origins,
                              std::pair<double, double> coord_cur,
@@ -1006,7 +939,8 @@ poly_taylor_branch_jerk_cuda(cuda::std::span<const double> leaves_tree,
                              SizeType n_leaves,
                              utils::BranchingWorkspaceCUDAView ws,
                              cudaStream_t stream) {
-    constexpr SizeType kLeavesStride = 10;
+    static_assert(NPARAMS >= 2 && NPARAMS <= 4);
+    constexpr SizeType kLeavesStride = (NPARAMS + 2) * 2;
 
     // ---- Kernel 1: analyze + branch enumeration ----
     constexpr SizeType kThreadsPerBlock = 256;
@@ -1016,9 +950,22 @@ poly_taylor_branch_jerk_cuda(cuda::std::span<const double> leaves_tree,
     const dim3 grid_dim(blocks_per_grid);
     cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
 
-    kernel_analyze_and_branch_jerk<<<grid_dim, block_dim, 0, stream>>>(
-        leaves_tree.data(), n_leaves, coord_cur.second,
-        static_cast<double>(nbins), eta, param_limits.data(), branch_max, ws);
+    if constexpr (NPARAMS == 2) {
+        kernel_analyze_and_branch_accel<<<grid_dim, block_dim, 0, stream>>>(
+            leaves_tree.data(), n_leaves, coord_cur.second,
+            static_cast<double>(nbins), eta, param_limits.data(), branch_max,
+            ws);
+    } else if constexpr (NPARAMS == 3) {
+        kernel_analyze_and_branch_jerk<<<grid_dim, block_dim, 0, stream>>>(
+            leaves_tree.data(), n_leaves, coord_cur.second,
+            static_cast<double>(nbins), eta, param_limits.data(), branch_max,
+            ws);
+    } else {
+        kernel_analyze_and_branch_snap<<<grid_dim, block_dim, 0, stream>>>(
+            leaves_tree.data(), n_leaves, coord_cur.second,
+            static_cast<double>(nbins), eta, param_limits.data(), branch_max,
+            ws);
+    }
     cuda_utils::check_last_cuda_error("Kernel 1 launch failed");
 
     // compute output size and offsets (leaf_output_offset)
@@ -1037,10 +984,8 @@ poly_taylor_branch_jerk_cuda(cuda::std::span<const double> leaves_tree,
                         sizeof(uint32_t), cudaMemcpyDeviceToHost, stream),
         "cudaMemcpyAsync failed");
     // Unavoidable sync
-    cuda_utils::check_cuda_call(
-        cudaStreamSynchronize(stream),
-        "cudaStreamSynchronize branch kernel 1 (jerk) failed");
-
+    cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
+                                "cudaStreamSynchronize branch kernel failed");
     const SizeType n_leaves_branched = last_offset + last_count;
     if (n_leaves_branched == 0) {
         return n_leaves_branched;
@@ -1064,88 +1009,23 @@ poly_taylor_branch_jerk_cuda(cuda::std::span<const double> leaves_tree,
         (n_leaves_branched + kThreadsPerBlock - 1) / kThreadsPerBlock;
     const dim3 grid_dim_out(blocks_per_grid_out);
     cuda_utils::check_kernel_launch_params(grid_dim_out, block_dim);
-    kernel_materialize_branches_jerk<kThreadsPerBlock>
-        <<<grid_dim_out, block_dim, 0, stream>>>(
-            leaves_tree.data(), leaves_branch.data(), leaves_origins.data(),
-            n_leaves, n_leaves_branched, branch_max, ws);
-    cuda_utils::check_last_cuda_error("Kernel 2 launch failed");
-    // No need to sync, the next kernel will do it
-    return n_leaves_branched;
-}
+    if constexpr (NPARAMS == 2) {
 
-SizeType
-poly_taylor_branch_snap_cuda(cuda::std::span<const double> leaves_tree,
-                             cuda::std::span<double> leaves_branch,
-                             cuda::std::span<uint32_t> leaves_origins,
-                             std::pair<double, double> coord_cur,
-                             SizeType nbins,
-                             double eta,
-                             cuda::std::span<const ParamLimit> param_limits,
-                             SizeType branch_max,
-                             SizeType n_leaves,
-                             utils::BranchingWorkspaceCUDAView ws,
-                             cudaStream_t stream) {
-    constexpr SizeType kLeavesStride = 12;
-
-    // ---- Kernel 1: analyze + branch enumeration ----
-    constexpr SizeType kThreadsPerBlock = 256;
-    const auto blocks_per_grid =
-        (n_leaves + kThreadsPerBlock - 1) / kThreadsPerBlock;
-    const dim3 block_dim(kThreadsPerBlock);
-    const dim3 grid_dim(blocks_per_grid);
-    cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
-
-    kernel_analyze_and_branch_snap<<<grid_dim, block_dim, 0, stream>>>(
-        leaves_tree.data(), n_leaves, coord_cur.second,
-        static_cast<double>(nbins), eta, param_limits.data(), branch_max, ws);
-    cuda_utils::check_last_cuda_error("Kernel 1 launch failed");
-
-    // compute output size and offsets (leaf_output_offset)
-    cuda_utils::check_cuda_call(
-        cub::DeviceScan::ExclusiveSum(ws.cub_temp_storage, ws.cub_temp_bytes,
-                                      ws.leaf_branch_count,
-                                      ws.leaf_output_offset, n_leaves, stream),
-        "cub::DeviceScan::ExclusiveSum failed");
-    uint32_t last_offset, last_count;
-    cuda_utils::check_cuda_call(
-        cudaMemcpyAsync(&last_offset, ws.leaf_output_offset + (n_leaves - 1),
-                        sizeof(uint32_t), cudaMemcpyDeviceToHost, stream),
-        "cudaMemcpyAsync failed");
-    cuda_utils::check_cuda_call(
-        cudaMemcpyAsync(&last_count, ws.leaf_branch_count + (n_leaves - 1),
-                        sizeof(uint32_t), cudaMemcpyDeviceToHost, stream),
-        "cudaMemcpyAsync failed");
-    // Unavoidable sync
-    cuda_utils::check_cuda_call(
-        cudaStreamSynchronize(stream),
-        "cudaStreamSynchronize branch kernel 1 (snap) failed");
-    const SizeType n_leaves_branched = last_offset + last_count;
-    if (n_leaves_branched == 0) {
-        return n_leaves_branched;
+        kernel_materialize_branches_accel<kThreadsPerBlock>
+            <<<grid_dim_out, block_dim, 0, stream>>>(
+                leaves_tree.data(), leaves_branch.data(), leaves_origins.data(),
+                n_leaves, n_leaves_branched, branch_max, ws);
+    } else if constexpr (NPARAMS == 3) {
+        kernel_materialize_branches_jerk<kThreadsPerBlock>
+            <<<grid_dim_out, block_dim, 0, stream>>>(
+                leaves_tree.data(), leaves_branch.data(), leaves_origins.data(),
+                n_leaves, n_leaves_branched, branch_max, ws);
+    } else {
+        kernel_materialize_branches_snap<kThreadsPerBlock>
+            <<<grid_dim_out, block_dim, 0, stream>>>(
+                leaves_tree.data(), leaves_branch.data(), leaves_origins.data(),
+                n_leaves, n_leaves_branched, branch_max, ws);
     }
-    if (n_leaves_branched == n_leaves) {
-        // FAST PATH: no branching
-        cuda_utils::check_cuda_call(
-            cudaMemcpyAsync(leaves_branch.data(), leaves_tree.data(),
-                            n_leaves * kLeavesStride * sizeof(double),
-                            cudaMemcpyDeviceToDevice, stream),
-            "cudaMemcpyAsync failed");
-        thrust::sequence(thrust::cuda::par.on(stream), leaves_origins.data(),
-                         leaves_origins.data() + n_leaves,
-                         static_cast<uint32_t>(0));
-
-        return n_leaves_branched;
-    }
-
-    // ---- Kernel 2: materialize ----
-    const auto blocks_per_grid_out =
-        (n_leaves_branched + kThreadsPerBlock - 1) / kThreadsPerBlock;
-    const dim3 grid_dim_out(blocks_per_grid_out);
-    cuda_utils::check_kernel_launch_params(grid_dim_out, block_dim);
-    kernel_materialize_branches_snap<kThreadsPerBlock>
-        <<<grid_dim_out, block_dim, 0, stream>>>(
-            leaves_tree.data(), leaves_branch.data(), leaves_origins.data(),
-            n_leaves, n_leaves_branched, branch_max, ws);
     cuda_utils::check_last_cuda_error("Kernel 2 launch failed");
     // No need to sync, the next kernel will do it
     return n_leaves_branched;
@@ -1190,19 +1070,19 @@ poly_taylor_branch_batch_cuda(cuda::std::span<const double> leaves_tree,
                               SizeType n_params,
                               utils::BranchingWorkspaceCUDAView ws,
                               cudaStream_t stream) {
-    if (n_params == 2) {
-        return poly_taylor_branch_accel_cuda(
+    auto dispatch = [&]<SizeType N>() {
+        return poly_taylor_branch_impl_cuda<N>(
             leaves_tree, leaves_branch, leaves_origins, coord_cur, nbins, eta,
             param_limits, branch_max, n_leaves, ws, stream);
-    } else if (n_params == 3) {
-        return poly_taylor_branch_jerk_cuda(
-            leaves_tree, leaves_branch, leaves_origins, coord_cur, nbins, eta,
-            param_limits, branch_max, n_leaves, ws, stream);
-    } else if (n_params == 4) {
-        return poly_taylor_branch_snap_cuda(
-            leaves_tree, leaves_branch, leaves_origins, coord_cur, nbins, eta,
-            param_limits, branch_max, n_leaves, ws, stream);
-    } else {
+    };
+    switch (n_params) {
+    case 2:
+        return dispatch.template operator()<2>();
+    case 3:
+        return dispatch.template operator()<3>();
+    case 4:
+        return dispatch.template operator()<4>();
+    default:
         throw std::invalid_argument("Unsupported n_params");
     }
 }
@@ -1278,36 +1158,25 @@ void poly_taylor_transform_batch_cuda(cuda::std::span<double> leaves_tree,
                                                  coord_next, coord_cur);
     };
 
-    // Fully specialized dispatch
-    if (use_conservative_tile) {
+    auto launch = [&](bool conservative) {
         switch (n_params) {
         case 2:
-            dispatch.template operator()<2, true>();
+            conservative ? dispatch.template operator()<2, true>()
+                         : dispatch.template operator()<2, false>();
             break;
         case 3:
-            dispatch.template operator()<3, true>();
+            conservative ? dispatch.template operator()<3, true>()
+                         : dispatch.template operator()<3, false>();
             break;
         case 4:
-            dispatch.template operator()<4, true>();
+            conservative ? dispatch.template operator()<4, true>()
+                         : dispatch.template operator()<4, false>();
             break;
         default:
             throw std::invalid_argument("Unsupported n_params");
         }
-    } else {
-        switch (n_params) {
-        case 2:
-            dispatch.template operator()<2, false>();
-            break;
-        case 3:
-            dispatch.template operator()<3, false>();
-            break;
-        case 4:
-            dispatch.template operator()<4, false>();
-            break;
-        default:
-            throw std::invalid_argument("Unsupported n_params");
-        }
-    }
+    };
+    launch(use_conservative_tile);
     cuda_utils::check_last_cuda_error("Taylor transform kernel launch failed");
     // No need to sync, the next kernel will do it
 }

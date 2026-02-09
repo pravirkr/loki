@@ -184,8 +184,9 @@ __global__ void kernel_snr_thread(const float* __restrict__ folds,
     constexpr uint32_t kMaxBins = 1024;
     const uint32_t profile_idx  = (blockIdx.x * blockDim.x) + threadIdx.x;
 
-    if (profile_idx >= nprofiles)
+    if (profile_idx >= nprofiles) {
         return;
+    }
 
     // Prefix sum array - stored in local memory, L1 cached
     float prefix[kMaxBins];
@@ -194,26 +195,23 @@ __global__ void kernel_snr_thread(const float* __restrict__ folds,
     const float* __restrict__ e_ptr = folds + base;
     const float* __restrict__ v_ptr = folds + base + nbins;
 
-    float running = 0.0f;
+    float running = 0.0F;
 #pragma unroll 1
     for (uint32_t i = 0; i < nbins; ++i) {
         running += e_ptr[i] * rsqrtf(v_ptr[i]);
         prefix[i] = running;
     }
     const float total_sum = running;
-    const float nbins_f   = static_cast<float>(nbins);
     float max_snr         = -cuda::std::numeric_limits<float>::infinity();
 
 // Loop over widths
 #pragma unroll 1
     for (uint32_t iw = 0; iw < nwidths; ++iw) {
-        const uint32_t w          = widths[iw];
-        const float w_f           = static_cast<float>(w);
-        const float nbins_minus_w = nbins_f - w_f;
-        const float h             = sqrtf(nbins_minus_w / (nbins_f * w_f));
-        const float b             = w_f * h / nbins_minus_w;
-        const float h_plus_b      = h + b;
-        const float neg_b_total   = -b * total_sum;
+        const uint32_t w = widths[iw];
+        const float h    = sqrtf(static_cast<float>(nbins - w) /
+                                 static_cast<float>(nbins * w));
+        const float b =
+            static_cast<float>(w) * h / static_cast<float>(nbins - w);
 
         float max_diff = -cuda::std::numeric_limits<float>::infinity();
 
@@ -222,7 +220,7 @@ __global__ void kernel_snr_thread(const float* __restrict__ folds,
         const uint32_t wrap_start = nbins - w + 1;
 
         // Non-wrapping part: j + w - 1 < nbins
-        float prev = 0.0f;
+        float prev = 0.0F;
 #pragma unroll 1
         for (uint32_t j = 0; j < wrap_start; ++j) {
             const float window_sum = prefix[j + w - 1] - prev;
@@ -238,10 +236,7 @@ __global__ void kernel_snr_thread(const float* __restrict__ folds,
             const float window_sum  = (total_sum - before) + prefix[wrap_idx];
             max_diff                = fmaxf(max_diff, window_sum);
         }
-
-        // SNR = (h+b)*max_diff - b*total_sum
-        // Using fmaf for fused multiply-add (single instruction)
-        const float snr = fmaf(h_plus_b, max_diff, neg_b_total);
+        const float snr = ((h + b) * max_diff) - (b * total_sum);
         max_snr         = fmaxf(max_snr, snr);
     }
     scores[profile_idx] = max_snr;

@@ -1,6 +1,7 @@
 #include "loki/common/coord.hpp"
 
 #include <thrust/device_ptr.h>
+
 #include "loki/cuda_utils.cuh"
 
 namespace loki::coord {

@@ -7,7 +7,7 @@
 #include <cuda/std/limits>
 #include <cuda/std/span>
 
-#include <sys/types.h>
+#include <thrust/copy.h>
 #include <thrust/device_ptr.h>
 #include <thrust/device_vector.h>
 #include <thrust/execution_policy.h>
@@ -56,12 +56,12 @@ __global__ void kernel_scatter_to_circular_copy_warp_per_row(
             dst_idx -= capacity;
         }
         for (uint32_t j = lane; j < leaves_stride; j += kWarpSize) {
-            dst_leaves[dst_idx * leaves_stride + j] =
-                src_leaves[src_idx * leaves_stride + j];
+            dst_leaves[(dst_idx * leaves_stride) + j] =
+                src_leaves[(src_idx * leaves_stride) + j];
         }
         for (uint32_t j = lane; j < folds_stride; j += kWarpSize) {
-            dst_folds[dst_idx * folds_stride + j] =
-                src_folds[src_idx * folds_stride + j];
+            dst_folds[(dst_idx * folds_stride) + j] =
+                src_folds[(src_idx * folds_stride) + j];
         }
         // Score: lane 0 only
         if (lane == 0) {
@@ -71,7 +71,7 @@ __global__ void kernel_scatter_to_circular_copy_warp_per_row(
 }
 
 // Multi-warp per-row kernel (for large workloads)
-template <SizeType WARPS_PER_ROW, SupportedFoldTypeCUDA FoldTypeCUDA>
+template <SizeType WarpsPerRow, SupportedFoldTypeCUDA FoldTypeCUDA>
 __global__ void kernel_scatter_to_circular_copy_multiwarp_per_row(
     const double* __restrict__ src_leaves,
     const FoldTypeCUDA* __restrict__ src_folds,
@@ -94,9 +94,9 @@ __global__ void kernel_scatter_to_circular_copy_multiwarp_per_row(
     const uint32_t global_warp = (blockIdx.x * warps_per_block) + warp_in_block;
     const uint32_t total_warps = gridDim.x * warps_per_block;
 
-    uint32_t row              = global_warp / WARPS_PER_ROW;
-    const uint32_t subwarp    = global_warp % WARPS_PER_ROW;
-    const uint32_t row_stride = total_warps / WARPS_PER_ROW;
+    uint32_t row              = global_warp / WarpsPerRow;
+    const uint32_t subwarp    = global_warp % WarpsPerRow;
+    const uint32_t row_stride = total_warps / WarpsPerRow;
 
     for (; row < slots_to_write; row += row_stride) {
         const uint32_t src_idx = src_indices[row];
@@ -106,18 +106,18 @@ __global__ void kernel_scatter_to_circular_copy_multiwarp_per_row(
         }
         if (subwarp == 0) {
             for (uint32_t j = lane; j < leaves_stride; j += kWarpSize) {
-                dst_leaves[dst_idx * leaves_stride + j] =
-                    src_leaves[src_idx * leaves_stride + j];
+                dst_leaves[(dst_idx * leaves_stride) + j] =
+                    src_leaves[(src_idx * leaves_stride) + j];
             }
             // Score: lane 0 only
             if (lane == 0) {
                 dst_scores[dst_idx] = src_scores[src_idx];
             }
         }
-        for (uint32_t j = subwarp * 32 + lane; j < folds_stride;
-             j += WARPS_PER_ROW * kWarpSize) {
-            dst_folds[dst_idx * folds_stride + j] =
-                src_folds[src_idx * folds_stride + j];
+        for (uint32_t j = (subwarp * kWarpSize) + lane; j < folds_stride;
+             j += (WarpsPerRow * kWarpSize)) {
+            dst_folds[(dst_idx * folds_stride) + j] =
+                src_folds[(src_idx * folds_stride) + j];
         }
     }
 }
@@ -146,60 +146,6 @@ __global__ void compact_in_place_kernel(const uint8_t* __restrict__ keep,
     }
 }
 
-template <SupportedFoldTypeCUDA FoldTypeCUDA>
-__global__ void scatter_filter_to_circular_kernel(
-    const double* __restrict__ src_leaves,
-    const FoldTypeCUDA* __restrict__ src_folds,
-    const float* __restrict__ src_scores,
-    const uint32_t* __restrict__ src_indices,
-    const uint8_t* __restrict__ mask,    // NEW: filter mask
-    const uint32_t* __restrict__ prefix, // NEW: prefix scan
-    double* __restrict__ dst_leaves,
-    FoldTypeCUDA* __restrict__ dst_folds,
-    float* __restrict__ dst_scores,
-    uint32_t dst_start_slot,
-    uint32_t capacity,
-    uint32_t slots_to_write,
-    uint32_t max_output_slots,
-    uint32_t leaves_stride,
-    uint32_t folds_stride) {
-
-    const uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= slots_to_write)
-        return;
-
-    // Check if this element passes the filter
-    if (mask[tid] == 0) {
-        return;
-    }
-
-    // Position in compacted output
-    const uint32_t out_pos = prefix[tid];
-    // Ensure we don't write past the max output slots
-    if (out_pos >= max_output_slots) {
-        return;
-    }
-
-    // Double indirection: first via indices, then filtered by mask
-    const uint32_t src_idx     = src_indices[tid];
-    const uint32_t dst_logical = dst_start_slot + out_pos;
-    const uint32_t dst_idx =
-        (dst_logical < capacity) ? dst_logical : dst_logical - capacity;
-
-    // Copy leaves (double scattered read, coalesced write)
-    for (uint32_t j = 0; j < leaves_stride; ++j)
-        dst_leaves[dst_idx * leaves_stride + j] =
-            src_leaves[src_idx * leaves_stride + j];
-
-    // Copy folds
-    for (uint32_t j = 0; j < folds_stride; ++j)
-        dst_folds[dst_idx * folds_stride + j] =
-            src_folds[src_idx * folds_stride + j];
-
-    // Copy score (not doubly scattered - scores already compacted)
-    dst_scores[dst_idx] = src_scores[tid];
-}
-
 struct CircularIndexFunctor {
     uint32_t start;
     uint32_t capacity;
@@ -224,16 +170,21 @@ void scatter_to_circular_copy_cuda(const double* __restrict__ src_leaves,
                                    uint32_t leaves_stride,
                                    uint32_t folds_stride,
                                    cudaStream_t stream) {
-    constexpr SizeType KThreadsPerBlock = 256; // 8 warps
-    constexpr SizeType KWarpsPerBlock   = KThreadsPerBlock / 32;
+    constexpr SizeType kThreadsPerBlock = 256; // 8 warps
+    constexpr SizeType kWarpsPerBlock   = kThreadsPerBlock / 32;
 
-    const SizeType warps_per_row = (folds_stride > 1024)  ? 4
-                                   : (folds_stride > 512) ? 2
-                                                          : 1;
-    const SizeType work_warps    = slots_to_write * warps_per_row;
+    SizeType warps_per_row = 1;
+    if (folds_stride > 512) {
+        warps_per_row = 2;
+    }
+    if (folds_stride > 1024) {
+        warps_per_row = 4;
+    }
+
+    const SizeType work_warps = slots_to_write * warps_per_row;
     const SizeType blocks_per_grid =
-        (work_warps + KWarpsPerBlock - 1) / KWarpsPerBlock;
-    const dim3 block_dim(KThreadsPerBlock);
+        (work_warps + kWarpsPerBlock - 1) / kWarpsPerBlock;
+    const dim3 block_dim(kThreadsPerBlock);
     const dim3 grid_dim(blocks_per_grid);
     cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
     if (warps_per_row == 4) {
@@ -748,11 +699,11 @@ public:
 
         ScoreAboveThresholdFunctor functor{.scores_ptr = scores_batch.data(),
                                            .threshold  = effective_threshold};
-        const auto end_it =
-            thrust::copy_if(thrust::cuda::par.on(stream), indices_batch.begin(),
-                            indices_batch.begin() + slots_to_write,
-                            indices_batch.begin(), // stencil = src_idx
-                            m_scratch_pending_indices.begin(), functor);
+        const auto end_it = thrust::copy_if(
+            thrust::cuda::par.on(stream), indices_batch.begin(),
+            indices_batch.begin() + static_cast<IndexType>(slots_to_write),
+            indices_batch.begin(), // stencil = src_idx
+            m_scratch_pending_indices.begin(), functor);
 
         const SizeType pending_count =
             static_cast<SizeType>(end_it - m_scratch_pending_indices.begin());

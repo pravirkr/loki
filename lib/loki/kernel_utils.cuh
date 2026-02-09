@@ -143,7 +143,7 @@ __device__ __forceinline__ uint32_t binary_search_cartesian(
     uint32_t l = 0;
     uint32_t r = n - 1;
     while (l <= r) {
-        uint32_t mid = (l + r) >> 1;
+        uint32_t mid = (l + r) >> 1U;
         if (data[mid] <= value) {
             l = mid + 1;
         } else {

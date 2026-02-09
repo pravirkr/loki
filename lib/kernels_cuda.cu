@@ -68,13 +68,16 @@ kernel_shift_add_linear(const float* __restrict__ folds_tree,
                                            : tree_idx_logical - capacity;
     const uint32_t ffa_idx           = indices_ffa[ileaf];
 
-    const uint32_t stride            = 2 * nbins;
-    const float* __restrict__ tree_e = folds_tree + tree_idx_physical * stride;
+    const uint32_t stride = 2 * nbins;
+    const float* __restrict__ tree_e =
+        folds_tree + static_cast<SizeType>(tree_idx_physical * stride);
     const float* __restrict__ tree_v = tree_e + nbins;
-    const float* __restrict__ ffa_e  = folds_ffa + ffa_idx * stride;
-    const float* __restrict__ ffa_v  = ffa_e + nbins;
-    float* __restrict__ out_e        = folds_out + ileaf * stride;
-    float* __restrict__ out_v        = out_e + nbins;
+    const float* __restrict__ ffa_e =
+        folds_ffa + static_cast<SizeType>(ffa_idx * stride);
+    const float* __restrict__ ffa_v = ffa_e + nbins;
+    float* __restrict__ out_e =
+        folds_out + static_cast<SizeType>(ileaf * stride);
+    float* __restrict__ out_v = out_e + nbins;
 
     // Process both e and v components
     out_e[ibin] = tree_e[ibin] + ffa_e[idx_add];
@@ -120,13 +123,14 @@ kernel_shift_add_linear_complex(const ComplexTypeCUDA* __restrict__ folds_tree,
 
     const uint32_t stride = 2 * nbins_f;
     const ComplexTypeCUDA* __restrict__ tree_e =
-        folds_tree + (tree_idx_physical * stride) + k;
+        folds_tree + static_cast<SizeType>((tree_idx_physical * stride) + k);
     const ComplexTypeCUDA* __restrict__ tree_v = tree_e + nbins_f;
     const ComplexTypeCUDA* __restrict__ ffa_e =
-        folds_ffa + (ffa_idx * stride) + k;
+        folds_ffa + static_cast<SizeType>((ffa_idx * stride) + k);
     const ComplexTypeCUDA* __restrict__ ffa_v = ffa_e + nbins_f;
-    ComplexTypeCUDA* __restrict__ out_e       = folds_out + (ileaf * stride);
-    ComplexTypeCUDA* __restrict__ out_v       = out_e + nbins_f;
+    ComplexTypeCUDA* __restrict__ out_e =
+        folds_out + static_cast<SizeType>(ileaf * stride);
+    ComplexTypeCUDA* __restrict__ out_v = out_e + nbins_f;
 
     // OPTIMIZED complex multiplication using fmaf
     // ffa_shifted_e = ffa_e * exp(-2πi * k * shift / nbins)

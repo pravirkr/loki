@@ -1322,41 +1322,29 @@ void ffa_taylor_resolve_poly_batch(
             param_grid_count_cur, param_grid_count_prev, param_limits, coords,
             ffa_level, tseg_brute, nbins);
     };
-    if (latter == 0) {
+    auto launch = [&](bool latter) {
         switch (n_params) {
         case 2:
-            dispatch.template operator()<2, 0>();
+            latter ? dispatch.template operator()<2, 0>()
+                   : dispatch.template operator()<2, 1>();
             break;
         case 3:
-            dispatch.template operator()<3, 0>();
+            latter ? dispatch.template operator()<3, 0>()
+                   : dispatch.template operator()<3, 1>();
             break;
         case 4:
-            dispatch.template operator()<4, 0>();
+            latter ? dispatch.template operator()<4, 0>()
+                   : dispatch.template operator()<4, 1>();
             break;
         case 5:
-            dispatch.template operator()<5, 0>();
+            latter ? dispatch.template operator()<5, 0>()
+                   : dispatch.template operator()<5, 1>();
             break;
         default:
             throw std::invalid_argument("Unsupported Taylor order");
         }
-    } else {
-        switch (n_params) {
-        case 2:
-            dispatch.template operator()<2, 1>();
-            break;
-        case 3:
-            dispatch.template operator()<3, 1>();
-            break;
-        case 4:
-            dispatch.template operator()<4, 1>();
-            break;
-        case 5:
-            dispatch.template operator()<5, 1>();
-            break;
-        default:
-            throw std::invalid_argument("Unsupported Taylor order");
-        }
-    }
+    };
+    launch(latter != 0U);
 }
 
 SizeType poly_taylor_seed(std::span<const SizeType> param_grid_count_init,
@@ -1638,35 +1626,25 @@ void poly_taylor_transform_batch(std::span<double> leaves_tree,
         return poly_taylor_transform_batch_impl<N, C>(
             leaves_tree, indices_tree, coord_next, coord_cur, n_leaves);
     };
-    if (use_conservative_tile) {
+    auto launch = [&](bool conservative) {
         switch (n_params) {
         case 2:
-            dispatch.template operator()<2, true>();
+            conservative ? dispatch.template operator()<2, true>()
+                         : dispatch.template operator()<2, false>();
             break;
         case 3:
-            dispatch.template operator()<3, true>();
+            conservative ? dispatch.template operator()<3, true>()
+                         : dispatch.template operator()<3, false>();
             break;
         case 4:
-            dispatch.template operator()<4, true>();
+            conservative ? dispatch.template operator()<4, true>()
+                         : dispatch.template operator()<4, false>();
             break;
         default:
             throw std::invalid_argument("Unsupported Taylor order");
         }
-    } else {
-        switch (n_params) {
-        case 2:
-            dispatch.template operator()<2, false>();
-            break;
-        case 3:
-            dispatch.template operator()<3, false>();
-            break;
-        case 4:
-            dispatch.template operator()<4, false>();
-            break;
-        default:
-            throw std::invalid_argument("Unsupported Taylor order");
-        }
-    }
+    };
+    launch(use_conservative_tile);
 }
 
 void poly_taylor_report_batch(std::span<double> leaves_tree,
