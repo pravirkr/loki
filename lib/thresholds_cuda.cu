@@ -1,6 +1,7 @@
 #include "loki/detection/thresholds.hpp"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <format>
@@ -79,13 +80,22 @@ __device__ int find_bin_index_device(const float* __restrict__ probs,
     return nprobs - 1;
 }
 
+__device__ __forceinline__ uint64_t mix64(uint64_t x) {
+    x ^= x >> 30;
+    x *= 0xbf58476d1ce4e5b9ULL;
+    x ^= x >> 27;
+    x *= 0x94d049bb133111ebULL;
+    x ^= x >> 31;
+    return x;
+}
+
 __global__ void simulate_folds_init_kernel(float* __restrict__ folds_sim,
                                            const float* __restrict__ profile,
-                                           uint32_t nbins,
+                                           uint32_t nbins_padded,
                                            float bias_snr,
                                            float var_add,
                                            uint64_t seed,
-                                           uint64_t offset,
+                                           uint64_t rng_offset,
                                            uint32_t ntrials) {
     const uint32_t tid          = (blockIdx.x * blockDim.x) + threadIdx.x;
     const uint32_t total_trials = 2 * ntrials;
@@ -93,142 +103,42 @@ __global__ void simulate_folds_init_kernel(float* __restrict__ folds_sim,
         return;
     }
 
-    const uint32_t branch     = tid / ntrials; // 0=H0, 1=H1
-    const uint32_t trial_id   = tid % ntrials;
-    const uint32_t out_offset = branch * ntrials * nbins + trial_id * nbins;
-    const float branch_scale  = (branch == 1) ? bias_snr : 0.0F;
+    const uint32_t branch   = tid / ntrials; // 0=H0, 1=H1
+    const uint32_t trial_id = tid % ntrials;
+    const uint32_t out_offset =
+        branch * ntrials * nbins_padded + trial_id * nbins_padded;
+    const float branch_scale = (branch == 1) ? bias_snr : 0.0F;
+
+    // Standard Philox pattern - unique per thread across all launches
+    constexpr uint32_t kPhiloxSubsequences = 65536;
+    // Reserve space for counter advances (max generate4 calls per RNG)
+    // Estimate: nbins/4 + 4 for safety
+    const uint32_t max_counter_advances = (nbins_padded / 4) + 4;
+    const uint64_t global_tid           = rng_offset + tid;
+    const uint64_t noise_base           = global_tid * max_counter_advances;
 
     // Generate fold locally
     const float noise_stddev = sqrtf(var_add);
-    typename RNG::Generator rng_noise(seed, tid, offset);
+    typename RNG::Generator rng_noise(seed, noise_base % kPhiloxSubsequences,
+                                      noise_base / kPhiloxSubsequences);
     typename RNG::NormalFloat dist_noise(0.0F, noise_stddev);
 
-    const uint32_t main_loop = nbins / 4;
-    for (uint32_t j = 0; j < main_loop * 4; j += 4) {
-        float4 noise                  = dist_noise.generate4(rng_noise);
-        folds_sim[out_offset + j + 0] = noise.x + profile[j + 0] * branch_scale;
-        folds_sim[out_offset + j + 1] = noise.y + profile[j + 1] * branch_scale;
-        folds_sim[out_offset + j + 2] = noise.z + profile[j + 2] * branch_scale;
-        folds_sim[out_offset + j + 3] = noise.w + profile[j + 3] * branch_scale;
+    // all pointers are 16-byte aligned for safe float4 access
+    const uint32_t vec_count = nbins_padded / 4;
+    float4* __restrict__ out_ptr4 =
+        reinterpret_cast<float4*>(folds_sim + out_offset);
+    const float4* __restrict__ prof_ptr4 =
+        reinterpret_cast<const float4*>(profile);
+
+#pragma unroll 4
+    for (uint32_t j = 0; j < vec_count; ++j) {
+        const float4 prof  = prof_ptr4[j];
+        const float4 noise = dist_noise.generate4(rng_noise);
+        out_ptr4[j]        = make_float4(fmaf(prof.x, branch_scale, noise.x),
+                                         fmaf(prof.y, branch_scale, noise.y),
+                                         fmaf(prof.z, branch_scale, noise.z),
+                                         fmaf(prof.w, branch_scale, noise.w));
     }
-
-    // Handle remaining bins (if nbins is not multiple of 4)
-    for (uint32_t j = main_loop * 4; j < nbins; ++j) {
-        float4 noise              = dist_noise.generate4(rng_noise);
-        folds_sim[out_offset + j] = noise.x + profile[j] * branch_scale;
-    }
-}
-
-__device__ __forceinline__ bool
-snr_threshold_trial_streaming(const float* __restrict__ trial_arr,
-                              uint32_t nbins,
-                              const uint32_t* __restrict__ widths,
-                              uint32_t nwidths,
-                              float threshold,
-                              float stdnoise) {
-    const float inv_stdnoise = 1.0f / stdnoise;
-
-    // compute total_sum once (identical to prefix[nbins-1])
-    float total_sum = 0.0f;
-    for (uint32_t i = 0; i < nbins; ++i)
-        total_sum += trial_arr[i];
-
-    for (uint32_t iw = 0; iw < nwidths; ++iw) {
-        const uint32_t w = widths[iw];
-        const float h    = sqrtf(static_cast<float>(nbins - w) /
-                                 static_cast<float>(nbins * w));
-
-        const float b =
-            static_cast<float>(w) * h / static_cast<float>(nbins - w);
-
-        // --- initial window sum (j=0)
-        float window_sum = 0.0f;
-        for (uint32_t i = 0; i < w; ++i)
-            window_sum += trial_arr[i];
-
-        float max_sum = window_sum;
-
-        // --- slide through all circular positions
-        for (uint32_t j = 1; j < nbins; ++j) {
-
-            uint32_t add_idx = j + w - 1;
-            if (add_idx >= nbins)
-                add_idx -= nbins;
-
-            uint32_t sub_idx = j - 1;
-
-            window_sum += trial_arr[add_idx];
-            window_sum -= trial_arr[sub_idx];
-
-            max_sum = fmaxf(max_sum, window_sum);
-        }
-
-        const float snr =
-            (((h + b) * max_sum) - (b * total_sum)) * inv_stdnoise;
-
-        if (snr > threshold)
-            return true;
-    }
-
-    return false;
-}
-
-template <uint32_t MAX_BINS>
-__device__ __forceinline__ bool
-snr_threshold_trial(const float* __restrict__ trial_arr,
-                    uint32_t nbins,
-                    const uint32_t* __restrict__ widths,
-                    uint32_t nwidths,
-                    float threshold,
-                    float stdnoise) {
-    float prefix[MAX_BINS];
-    prefix[0] = trial_arr[0];
-    for (uint32_t i = 1; i < nbins; ++i) {
-        prefix[i] = prefix[i - 1] + trial_arr[i];
-    }
-    const float total_sum    = prefix[nbins - 1];
-    const float inv_stdnoise = 1.0f / stdnoise;
-
-    for (uint32_t iw = 0; iw < nwidths; ++iw) {
-        const uint32_t w = static_cast<uint32_t>(widths[iw]);
-        const float h    = sqrtf(static_cast<float>(nbins - w) /
-                                 static_cast<float>(nbins * w));
-        const float b =
-            static_cast<float>(w) * h / static_cast<float>(nbins - w);
-
-        float max_diff = cuda::std::numeric_limits<float>::lowest();
-
-        // Split the sliding window loop to eliminate branch in hot path
-        // A. Window starts at 0 (Special case: no subtraction)
-        // Sum = P[w-1]
-        max_diff = fmaxf(max_diff, prefix[w - 1]);
-
-        // B. Non-wrapping window: j from 1 to nbins-w
-        // Sum = P[j+w-1] - P[j-1]
-        const uint32_t loop_limit = nbins - w;
-
-        for (uint32_t j = 1; j <= loop_limit; ++j) {
-            float diff = prefix[j + w - 1] - prefix[j - 1];
-            max_diff   = fmaxf(max_diff, diff);
-        }
-
-        // C. Wrapping window: j from nbins-w+1 to nbins-1
-        // Sum = (Total - P[j-1]) + P[wrap_idx]
-        // wrap_idx = (j + w - 1) - nbins
-        for (uint32_t j = loop_limit + 1; j < nbins; ++j) {
-            float before_window = prefix[j - 1];
-            float after_wrap    = prefix[j + w - 1 - nbins];
-            float diff          = (total_sum - before_window) + after_wrap;
-            max_diff            = fmaxf(max_diff, diff);
-        }
-
-        const float snr =
-            (((h + b) * max_diff) - (b * total_sum)) * inv_stdnoise;
-        if (snr > threshold) {
-            return true;
-        }
-    }
-    return false;
 }
 
 __device__ __forceinline__ uint32_t compute_pool_grid_offset(uint32_t slot_idx,
@@ -246,11 +156,6 @@ __device__ __forceinline__ uint32_t compute_pool_ntrials_offset(
     return ((slot_idx * nprobs + prob_idx) * 2) + branch;
 }
 
-// Helper to check 16-byte alignment
-__device__ __forceinline__ bool is_aligned_float4(const void* ptr) {
-    return (reinterpret_cast<uintptr_t>(ptr) & 15) == 0;
-}
-
 __global__ __launch_bounds__(256, 4) // Hint: Max 256 threads, min 4 blocks/SM
     void simulate_folds_kernel(
         const TransitionWorkItem* __restrict__ work_items,
@@ -259,12 +164,12 @@ __global__ __launch_bounds__(256, 4) // Hint: Max 256 threads, min 4 blocks/SM
         const uint32_t* __restrict__ ntrials_current,
         float* __restrict__ scratch_folds,
         const float* __restrict__ profile,
-        uint32_t nbins,
+        uint32_t nbins_padded,
         float bias_snr,
         float var_in,
         float var_add,
         uint64_t seed,
-        uint64_t offset,
+        uint64_t rng_offset,
         uint32_t ntrials,
         uint32_t nprobs) {
     const uint32_t tid = (blockIdx.x * blockDim.x) + threadIdx.x;
@@ -282,10 +187,21 @@ __global__ __launch_bounds__(256, 4) // Hint: Max 256 threads, min 4 blocks/SM
     const uint32_t branch    = local_idx / ntrials; // 0=H0, 1=H1
     const uint32_t trial_id  = local_idx % ntrials;
 
+    // Standard Philox pattern - unique per thread across all launches
+    constexpr uint32_t kPhiloxSubsequences = 65536;
+    // Reserve space for counter advances (max generate4 calls per RNG)
+    // Estimate: nbins/4 + 4 for safety
+    const uint32_t max_counter_advances = (nbins_padded / 4) + 4;
+    const uint64_t global_tid           = rng_offset + tid;
+    // Space RNGs far enough apart to account for multiple generate4 calls
+    const uint64_t select_base = global_tid * max_counter_advances * 2;
+    const uint64_t noise_base =
+        global_tid * max_counter_advances * 2 + max_counter_advances;
+
     const TransitionWorkItem& item = work_items[work_idx];
 
     const uint32_t grid_offset_in = compute_pool_grid_offset(
-        item.jslot_prev, item.kprob, branch, nprobs, ntrials, nbins);
+        item.jslot_prev, item.kprob, branch, nprobs, ntrials, nbins_padded);
     const uint32_t ntrials_count_idx = compute_pool_ntrials_offset(
         item.jslot_prev, item.kprob, branch, nprobs);
     const uint32_t ntrials_in = ntrials_current[ntrials_count_idx];
@@ -293,88 +209,48 @@ __global__ __launch_bounds__(256, 4) // Hint: Max 256 threads, min 4 blocks/SM
     uint32_t src_trial_idx = trial_id;
     if (trial_id >= ntrials_in) {
         // We are in the "fill" zone. Pick a random source trial.
-        typename RNG::Generator rng_select(seed, trial_id, 0xCAFEBABE);
+        typename RNG::Generator rng_select(seed,
+                                           select_base % kPhiloxSubsequences,
+                                           select_base / kPhiloxSubsequences);
         typename RNG::UniformFloat dist_select(0.0F, 1.0F);
-        float4 u_vec = dist_select.generate4(rng_select);
+        const float u = dist_select.generate4(rng_select).x;
         // Map to integer index [0, ntrials_in - 1]
-        src_trial_idx = static_cast<uint32_t>(u_vec.x * ntrials_in);
-        if (src_trial_idx >= ntrials_in) {
-            src_trial_idx = ntrials_in - 1;
-        }
+        src_trial_idx =
+            min(static_cast<uint32_t>(u * ntrials_in), ntrials_in - 1u);
     }
 
-    const uint32_t in_offset         = grid_offset_in + src_trial_idx * nbins;
-    const uint32_t out_offset        = tid * nbins;
-    const float branch_scale         = (branch == 1) ? bias_snr : 0.0F;
-    const float* __restrict__ in_ptr = folds_current + in_offset;
-    float* __restrict__ out_ptr      = scratch_folds + out_offset;
+    // Compute aligned offsets (guaranteed by nbins_padded % 4 == 0)
+    const uint32_t in_offset  = grid_offset_in + src_trial_idx * nbins_padded;
+    const uint32_t out_offset = tid * nbins_padded;
+    const float branch_scale  = (branch == 1) ? bias_snr : 0.0F;
 
     const float noise_stddev = sqrtf(var_add);
-    typename RNG::Generator rng_noise(seed, tid, offset);
+    // RNG for noise generation - second stream
+    typename RNG::Generator rng_noise(seed, noise_base % kPhiloxSubsequences,
+                                      noise_base / kPhiloxSubsequences);
     typename RNG::NormalFloat dist_noise(0.0F, noise_stddev);
 
-    // Check if all pointers are 16-byte aligned for safe float4 access
-    const bool can_use_float4 = is_aligned_float4(in_ptr) &&
-                                is_aligned_float4(out_ptr) &&
-                                is_aligned_float4(profile);
-
-    if (can_use_float4 && (nbins % 4 == 0)) {
-        // FAST PATH: Vectorized float4 loads/stores
-        const float4* __restrict__ in_ptr4 =
-            reinterpret_cast<const float4*>(in_ptr);
-        float4* __restrict__ out_ptr4 = reinterpret_cast<float4*>(out_ptr);
-        const float4* __restrict__ prof_ptr4 =
-            reinterpret_cast<const float4*>(profile);
-
-        const uint32_t vec_count = nbins / 4;
+    // all pointers are 16-byte aligned for safe float4 access
+    const uint32_t vec_count = nbins_padded / 4;
+    const float4* __restrict__ in_ptr4 =
+        reinterpret_cast<const float4*>(folds_current + in_offset);
+    float4* __restrict__ out_ptr4 =
+        reinterpret_cast<float4*>(scratch_folds + out_offset);
+    const float4* __restrict__ prof_ptr4 =
+        reinterpret_cast<const float4*>(profile);
 
 #pragma unroll 4
-        for (uint32_t j = 0; j < vec_count; ++j) {
-            // Single 128-bit load instead of 4x 32-bit loads
-            const float4 data  = in_ptr4[j];
-            const float4 prof  = prof_ptr4[j];
-            const float4 noise = dist_noise.generate4(rng_noise);
+    for (uint32_t j = 0; j < vec_count; ++j) {
+        // Single 128-bit load instead of 4x 32-bit loads
+        const float4 data  = in_ptr4[j];
+        const float4 prof  = prof_ptr4[j];
+        const float4 noise = dist_noise.generate4(rng_noise);
 
-            // Compute in registers
-            out_ptr4[j] =
-                make_float4(fmaf(prof.x, branch_scale, noise.x + data.x),
-                            fmaf(prof.y, branch_scale, noise.y + data.y),
-                            fmaf(prof.z, branch_scale, noise.z + data.z),
-                            fmaf(prof.w, branch_scale, noise.w + data.w));
-        }
-    } else {
-        // SAFE PATH: Scalar loads but still vectorized RNG
-        const uint32_t vec_iters = nbins / 4;
-
-// Process 4 elements at a time with vectorized RNG
-#pragma unroll 4
-        for (uint32_t j = 0; j < vec_iters; ++j) {
-            const float4 noise = dist_noise.generate4(rng_noise);
-            const uint32_t idx = j * 4;
-
-            out_ptr[idx + 0] =
-                in_ptr[idx + 0] + noise.x + profile[idx + 0] * branch_scale;
-            out_ptr[idx + 1] =
-                in_ptr[idx + 1] + noise.y + profile[idx + 1] * branch_scale;
-            out_ptr[idx + 2] =
-                in_ptr[idx + 2] + noise.z + profile[idx + 2] * branch_scale;
-            out_ptr[idx + 3] =
-                in_ptr[idx + 3] + noise.w + profile[idx + 3] * branch_scale;
-        }
-
-        // Handle remainder (if nbins % 4 != 0)
-        const uint32_t remainder_start = vec_iters * 4;
-        if (remainder_start < nbins) {
-            const float4 noise = dist_noise.generate4(rng_noise);
-            for (uint32_t j = remainder_start; j < nbins; ++j) {
-                const uint32_t noise_idx = j - remainder_start;
-                const float n            = (noise_idx == 0)   ? noise.x
-                                           : (noise_idx == 1) ? noise.y
-                                           : (noise_idx == 2) ? noise.z
-                                                              : noise.w;
-                out_ptr[j] = in_ptr[j] + n + profile[j] * branch_scale;
-            }
-        }
+        // Compute in registers
+        out_ptr4[j] = make_float4(fmaf(prof.x, branch_scale, noise.x + data.x),
+                                  fmaf(prof.y, branch_scale, noise.y + data.y),
+                                  fmaf(prof.z, branch_scale, noise.z + data.z),
+                                  fmaf(prof.w, branch_scale, noise.w + data.w));
     }
 }
 
@@ -385,6 +261,7 @@ __global__ __launch_bounds__(256, 4) // Hint: Max 256 threads, min 4 blocks/SM
                              const float* __restrict__ scratch_folds,
                              uint32_t* __restrict__ survive_flags,
                              uint32_t nbins,
+                             uint32_t nbins_padded,
                              const uint32_t* __restrict__ widths,
                              uint32_t nwidths,
                              const float* __restrict__ thresholds,
@@ -405,7 +282,7 @@ __global__ __launch_bounds__(256, 4) // Hint: Max 256 threads, min 4 blocks/SM
 
     const TransitionWorkItem& item      = work_items[work_idx];
     const float threshold               = thresholds[item.ithres_abs];
-    const float* __restrict__ trial_arr = scratch_folds + tid * nbins;
+    const float* __restrict__ trial_arr = scratch_folds + tid * nbins_padded;
 
     // Compute SNR with early exit
     float prefix[MAX_BINS];
@@ -423,33 +300,19 @@ __global__ __launch_bounds__(256, 4) // Hint: Max 256 threads, min 4 blocks/SM
                                  static_cast<float>(nbins * w));
         const float b =
             static_cast<float>(w) * h / static_cast<float>(nbins - w);
-
         float max_diff = cuda::std::numeric_limits<float>::lowest();
+        max_diff       = fmaxf(max_diff, prefix[w - 1]);
 
-        // Split the sliding window loop to eliminate branch in hot path
-        // A. Window starts at 0 (Special case: no subtraction)
-        // Sum = P[w-1]
-        max_diff = fmaxf(max_diff, prefix[w - 1]);
-
-        // B. Non-wrapping window: j from 1 to nbins-w
-        // Sum = P[j+w-1] - P[j-1]
         const uint32_t loop_limit = nbins - w;
-
         for (uint32_t j = 1; j <= loop_limit; ++j) {
-            float diff = prefix[j + w - 1] - prefix[j - 1];
-            max_diff   = fmaxf(max_diff, diff);
+            const float diff = prefix[j + w - 1] - prefix[j - 1];
+            max_diff         = fmaxf(max_diff, diff);
         }
-
-        // C. Wrapping window: j from nbins-w+1 to nbins-1
-        // Sum = (Total - P[j-1]) + P[wrap_idx]
-        // wrap_idx = (j + w - 1) - nbins
         for (uint32_t j = loop_limit + 1; j < nbins; ++j) {
-            float before_window = prefix[j - 1];
-            float after_wrap    = prefix[j + w - 1 - nbins];
-            float diff          = (total_sum - before_window) + after_wrap;
-            max_diff            = fmaxf(max_diff, diff);
+            const float diff =
+                (total_sum - prefix[j - 1]) + prefix[j + w - 1 - nbins];
+            max_diff = fmaxf(max_diff, diff);
         }
-
         const float snr =
             (((h + b) * max_diff) - (b * total_sum)) * inv_stdnoise;
         if (snr > threshold) {
@@ -473,7 +336,7 @@ transition_decision_kernel(const TransitionWorkItem* __restrict__ work_items,
                            const float* __restrict__ thresholds,
                            const float* __restrict__ probs,
                            uint32_t ntrials,
-                           uint32_t nbins,
+                           uint32_t nbins_padded,
                            uint32_t nprobs,
                            float nbranches,
                            uint32_t stage_offset_prev,
@@ -528,9 +391,9 @@ transition_decision_kernel(const TransitionWorkItem* __restrict__ work_items,
                 existing_state = state_next;
                 should_update  = true;
                 grid_offset_h0 = compute_pool_grid_offset(
-                    item.islot_cur, iprob, 0, nprobs, ntrials, nbins);
+                    item.islot_cur, iprob, 0, nprobs, ntrials, nbins_padded);
                 grid_offset_h1 = compute_pool_grid_offset(
-                    item.islot_cur, iprob, 1, nprobs, ntrials, nbins);
+                    item.islot_cur, iprob, 1, nprobs, ntrials, nbins_padded);
                 const uint32_t ntrials_offset_h0 = compute_pool_ntrials_offset(
                     item.islot_cur, iprob, 0, nprobs);
                 const uint32_t ntrials_offset_h1 = compute_pool_ntrials_offset(
@@ -547,22 +410,24 @@ transition_decision_kernel(const TransitionWorkItem* __restrict__ work_items,
     // All threads: Cooperative sparse-to-dense copy
 
     if (should_update) {
+        const uint32_t vec_count = nbins_padded / 4;
         // Copy H0 survivors using scan-based mapping
         for (uint32_t trial = tid_in_block; trial < ntrials;
              trial += blockDim.x) {
             const uint32_t trial_idx = base_h0 + trial;
-
             if (survive_flags[trial_idx]) {
-                // Dense position = scan value relative to base
                 const uint32_t dense_idx =
                     scan_indices[trial_idx] - scan_indices[base_h0];
-
-                // Copy this trial's data
-                const uint32_t src_offset = trial_idx * nbins;
-                const uint32_t dst_offset = grid_offset_h0 + dense_idx * nbins;
-
-                for (uint32_t j = 0; j < nbins; ++j) {
-                    folds_next[dst_offset + j] = scratch_folds[src_offset + j];
+                const uint32_t src_offset = trial_idx * nbins_padded;
+                const uint32_t dst_offset =
+                    grid_offset_h0 + dense_idx * nbins_padded;
+                const float4* __restrict__ src4 =
+                    reinterpret_cast<const float4*>(scratch_folds + src_offset);
+                float4* __restrict__ dst4 =
+                    reinterpret_cast<float4*>(folds_next + dst_offset);
+#pragma unroll 4
+                for (uint32_t j = 0; j < vec_count; ++j) {
+                    dst4[j] = src4[j];
                 }
             }
         }
@@ -571,16 +436,19 @@ transition_decision_kernel(const TransitionWorkItem* __restrict__ work_items,
         for (uint32_t trial = tid_in_block; trial < ntrials;
              trial += blockDim.x) {
             const uint32_t trial_idx = base_h1 + trial;
-
             if (survive_flags[trial_idx]) {
                 const uint32_t dense_idx =
                     scan_indices[trial_idx] - scan_indices[base_h1];
-
-                const uint32_t src_offset = trial_idx * nbins;
-                const uint32_t dst_offset = grid_offset_h1 + dense_idx * nbins;
-
-                for (uint32_t j = 0; j < nbins; ++j) {
-                    folds_next[dst_offset + j] = scratch_folds[src_offset + j];
+                const uint32_t src_offset = trial_idx * nbins_padded;
+                const uint32_t dst_offset =
+                    grid_offset_h1 + dense_idx * nbins_padded;
+                const float4* __restrict__ src4 =
+                    reinterpret_cast<const float4*>(scratch_folds + src_offset);
+                float4* __restrict__ dst4 =
+                    reinterpret_cast<float4*>(folds_next + dst_offset);
+#pragma unroll 4
+                for (uint32_t j = 0; j < vec_count; ++j) {
+                    dst4[j] = src4[j];
                 }
             }
         }
@@ -596,6 +464,7 @@ void simulate_score_kernel_launcher_cuda(
     uint32_t* __restrict__ survive_flags,
     const float* __restrict__ profile,
     uint32_t nbins,
+    uint32_t nbins_padded,
     const uint32_t* __restrict__ widths,
     uint32_t nwidths,
     const float* __restrict__ thresholds,
@@ -603,7 +472,7 @@ void simulate_score_kernel_launcher_cuda(
     float var_in,
     float var_add,
     uint64_t seed,
-    uint64_t offset,
+    uint64_t rng_offset,
     uint32_t ntrials,
     uint32_t nprobs,
     cudaStream_t stream) {
@@ -618,8 +487,8 @@ void simulate_score_kernel_launcher_cuda(
 
     simulate_folds_kernel<<<grid_dim, block_dim, 0, stream>>>(
         work_items, batch_size, folds_current, ntrials_current, scratch_folds,
-        profile, nbins, bias_snr, var_in, var_add, seed, offset, ntrials,
-        nprobs);
+        profile, nbins_padded, bias_snr, var_in, var_add, seed, rng_offset,
+        ntrials, nprobs);
     cuda_utils::check_last_cuda_error("simulate_folds_kernel");
 
     auto dispatch_kernel = [&](auto... args) {
@@ -648,7 +517,8 @@ void simulate_score_kernel_launcher_cuda(
         }
     };
     dispatch_kernel(work_items, batch_size, scratch_folds, survive_flags, nbins,
-                    widths, nwidths, thresholds, var_in, var_add, ntrials);
+                    nbins_padded, widths, nwidths, thresholds, var_in, var_add,
+                    ntrials);
     cuda_utils::check_last_cuda_error("score_filter_kernel_launcher_cuda");
 }
 
@@ -765,6 +635,7 @@ public:
         : m_branching_pattern(branching_pattern.begin(),
                               branching_pattern.end()),
           m_ref_ducy(ref_ducy),
+          m_nbins(nbins),
           m_ntrials(ntrials),
           m_ducy_max(ducy_max),
           m_wtsp(wtsp),
@@ -778,12 +649,14 @@ public:
             throw std::invalid_argument("Branching pattern is empty");
         }
         // Host-side computations
-        m_profile = simulation::generate_folded_profile(nbins, ref_ducy);
+        m_nbins_padded = (m_nbins + 3) & ~3; // Nearest multiple of 4
+        std::vector<float> profile(m_nbins_padded);
+        simulation::generate_folded_profile(profile, m_nbins, ref_ducy);
+        m_profile = profile;
         m_thresholds =
             detection::compute_thresholds(0.1F, snr_final, nthresholds);
         m_probs       = detection::compute_probs(nprobs, prob_min);
         m_nprobs      = m_probs.size();
-        m_nbins       = m_profile.size();
         m_nstages     = m_branching_pattern.size();
         m_nthresholds = m_thresholds.size();
         m_box_score_widths =
@@ -797,6 +670,8 @@ public:
                 "DynamicThresholdSchemeCUDA requires at least 2 stages");
         }
 
+        m_seed = std::random_device{}();
+
         // Copy data to device
         m_thresholds_d       = m_thresholds;
         m_profile_d          = m_profile;
@@ -805,8 +680,8 @@ public:
 
         // Initialize memory management
         const auto slots_per_pool = compute_max_slots_needed();
-        m_folds_current_d.resize(slots_per_pool * m_ntrials * m_nbins);
-        m_folds_next_d.resize(slots_per_pool * m_ntrials * m_nbins);
+        m_folds_current_d.resize(slots_per_pool * m_ntrials * m_nbins_padded);
+        m_folds_next_d.resize(slots_per_pool * m_ntrials * m_nbins_padded);
         m_ntrials_current_d.resize(slots_per_pool);
         m_ntrials_next_d.resize(slots_per_pool);
         spdlog::info("Pre-allocated 2 CUDA pools of {} slots each",
@@ -821,7 +696,7 @@ public:
         const SizeType n_batch_trials = m_batch_size * 2 * m_ntrials;
         m_survive_flags_d.resize(n_batch_trials);
         m_write_indices_d.resize(n_batch_trials);
-        m_scratch_folds_d.resize(n_batch_trials * m_nbins);
+        m_scratch_folds_d.resize(n_batch_trials * m_nbins_padded);
 
         // Initialize CUB Temp Storage
         cuda_utils::check_cuda_call(
@@ -835,11 +710,11 @@ public:
 
         // Log memory usage
         const auto bytes_needed_persistent =
-            (2 * slots_per_pool * m_ntrials * m_nbins * sizeof(float)) +
+            (2 * slots_per_pool * m_ntrials * m_nbins_padded * sizeof(float)) +
             (2 * slots_per_pool * sizeof(uint32_t)) +
             (2 * grid_size * sizeof(State)) + (grid_size * sizeof(int));
         const auto bytes_needed_workspace =
-            (n_batch_trials * m_nbins * sizeof(float)) +
+            (n_batch_trials * m_nbins_padded * sizeof(float)) +
             (2 * n_batch_trials * sizeof(uint32_t));
         spdlog::info(
             "CUDA Memory usage: Allocated {:.2f} GiB (persistent) + {:.2f} "
@@ -861,8 +736,9 @@ public:
     void run(SizeType thres_neigh = 10) {
         timing::ScopeTimer timer("DynamicThresholdSchemeCUDA::run");
         spdlog::info("Running dynamic threshold scheme on CUDA");
-        const float var_init = 1.0F;
-        const float var_add  = 1.0F;
+        const float var_init           = 1.0F;
+        const float var_add            = 1.0F;
+        SizeType cumulative_rng_offset = 0;
 
         cudaStream_t stream = nullptr;
         cuda_utils::check_cuda_call(cudaStreamCreate(&stream),
@@ -870,7 +746,7 @@ public:
 
         // Initialize states
         float var_in = var_init;
-        init_states(var_init, var_add, stream);
+        init_states(var_init, var_add, cumulative_rng_offset, stream);
         var_in += var_add;
         // Swap fold grids and ntrials grids
         std::swap(m_folds_current_d, m_folds_next_d);
@@ -884,7 +760,8 @@ public:
         for (SizeType istage = 1; istage < m_nstages; ++istage) {
             thrust::fill(thrust::cuda::par.on(stream), m_ntrials_next_d.begin(),
                          m_ntrials_next_d.end(), 0u);
-            run_segment(istage, thres_neigh, var_in, var_add, stream);
+            run_segment(istage, thres_neigh, var_in, var_add,
+                        cumulative_rng_offset, stream);
             var_in += var_add;
             // Swap fold grids and ntrials grids
             std::swap(m_folds_current_d, m_folds_next_d);
@@ -959,12 +836,15 @@ private:
     std::vector<float> m_probs;
     SizeType m_nprobs;
     SizeType m_nbins;
+    SizeType m_nbins_padded;
     SizeType m_nstages;
     SizeType m_nthresholds;
     std::vector<SizeType> m_box_score_widths;
     float m_bias_snr;
     std::vector<float> m_guess_path;
     std::vector<State> m_states;
+
+    SizeType m_seed{};
 
     // Device-side data
     thrust::device_vector<float> m_thresholds_d;
@@ -1012,10 +892,11 @@ private:
         return slots_per_pool;
     }
 
-    void init_states(float var_init, float var_add, cudaStream_t stream) {
-        const uint64_t seed   = std::random_device{}();
-        const uint64_t offset = 0;
-        const auto nbranches  = m_branching_pattern[0];
+    void init_states(float var_init,
+                     float var_add,
+                     SizeType& cumulative_rng_offset,
+                     cudaStream_t stream) {
+        const auto nbranches = m_branching_pattern[0];
 
         // Simulate the initial folds
         constexpr SizeType kThreadsPerBlock = 256;
@@ -1028,9 +909,10 @@ private:
         simulate_folds_init_kernel<<<grid_dim_init, block_dim_init, 0,
                                      stream>>>(
             thrust::raw_pointer_cast(m_folds_current_d.data()),
-            thrust::raw_pointer_cast(m_profile_d.data()), m_nbins, m_bias_snr,
-            var_init, seed, offset, m_ntrials);
+            thrust::raw_pointer_cast(m_profile_d.data()), m_nbins_padded,
+            m_bias_snr, var_init, m_seed, cumulative_rng_offset, m_ntrials);
         cuda_utils::check_last_cuda_error("simulate_folds_init_kernel");
+        cumulative_rng_offset += total_work_init;
 
         // Simulate the intial state (reuse m_states_d as scratch space)
         // This will be eventually rewritten in the next stage
@@ -1053,7 +935,6 @@ private:
                           thrust::counting_iterator<uint32_t>(
                               static_cast<uint32_t>(total_transitions)),
                           work_items_d.begin(), functor_write);
-        spdlog::info("Initial work items created: {}", total_transitions);
 
         simulate_score_kernel_launcher_cuda(
             thrust::raw_pointer_cast(work_items_d.data()), total_transitions,
@@ -1062,10 +943,12 @@ private:
             thrust::raw_pointer_cast(m_scratch_folds_d.data()),
             thrust::raw_pointer_cast(m_survive_flags_d.data()),
             thrust::raw_pointer_cast(m_profile_d.data()), m_nbins,
+            m_nbins_padded,
             thrust::raw_pointer_cast(m_box_score_widths_d.data()),
             m_box_score_widths.size(),
             thrust::raw_pointer_cast(m_thresholds_d.data()), m_bias_snr,
-            var_init, var_add, seed, offset, m_ntrials, m_nprobs, stream);
+            var_init, var_add, m_seed, cumulative_rng_offset, m_ntrials,
+            m_nprobs, stream);
 
         // CUB scan
         const SizeType total_work = total_transitions * 2 * m_ntrials;
@@ -1091,11 +974,14 @@ private:
             thrust::raw_pointer_cast(m_states_d.data()),
             thrust::raw_pointer_cast(m_states_locks_d.data()),
             thrust::raw_pointer_cast(m_thresholds_d.data()),
-            thrust::raw_pointer_cast(m_probs_d.data()), m_ntrials, m_nbins,
-            m_nprobs, nbranches, dummy_stage_offset_prev, 0);
+            thrust::raw_pointer_cast(m_probs_d.data()), m_ntrials,
+            m_nbins_padded, m_nprobs, nbranches, dummy_stage_offset_prev, 0);
         cuda_utils::check_last_cuda_error("transition_decision_kernel");
         cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
                                     "cudaStreamSynchronize failed");
+        // Clear dummy state
+        m_states_d[dummy_stage_offset_prev] = State{};
+        cumulative_rng_offset += total_work;
     }
 
     std::vector<SizeType> get_current_thresholds_idx(SizeType istage) const {
@@ -1119,12 +1005,15 @@ private:
                      SizeType thres_neigh,
                      float var_in,
                      float var_add,
+                     SizeType& cumulative_rng_offset,
                      cudaStream_t stream) {
         const auto beam_idx_cur      = get_current_thresholds_idx(istage);
         const auto beam_idx_prev     = get_current_thresholds_idx(istage - 1);
         const auto stage_offset_prev = (istage - 1) * m_nthresholds * m_nprobs;
         const auto stage_offset_cur  = istage * m_nthresholds * m_nprobs;
         const auto nbranches         = m_branching_pattern[istage];
+        // Each stage gets a unique offset based on stage number
+        const SizeType total_work_max = m_batch_size * 2 * m_ntrials;
 
         std::vector<int32_t> prev_slot_of_thresh(m_nthresholds, -1);
         for (uint32_t s = 0; s < beam_idx_prev.size(); ++s) {
@@ -1201,9 +1090,6 @@ private:
         // Step 3: Process in batches
         const SizeType num_batches =
             (total_transitions + m_batch_size - 1) / m_batch_size;
-        spdlog::info(
-            "Stage {}, total transitions: {}, num batches: {}, batch size: {}",
-            istage, total_transitions, num_batches, m_batch_size);
 
         for (SizeType b = 0; b < num_batches; ++b) {
             const SizeType start = b * m_batch_size;
@@ -1213,12 +1099,11 @@ private:
             const auto work_items_span =
                 cuda_utils::as_span(work_items_d)
                     .subspan(start, current_batch_size);
+            const SizeType total_work = current_batch_size * 2 * m_ntrials;
+            const SizeType batch_rng_offset =
+                cumulative_rng_offset + (b * total_work_max);
 
             // Process this batch
-            // Generate random seed and offset
-            const uint64_t seed   = std::random_device{}();
-            const uint64_t offset = 0;
-
             simulate_score_kernel_launcher_cuda(
                 work_items_span.data(), current_batch_size,
                 thrust::raw_pointer_cast(m_folds_current_d.data()),
@@ -1226,13 +1111,14 @@ private:
                 thrust::raw_pointer_cast(m_scratch_folds_d.data()),
                 thrust::raw_pointer_cast(m_survive_flags_d.data()),
                 thrust::raw_pointer_cast(m_profile_d.data()), m_nbins,
+                m_nbins_padded,
                 thrust::raw_pointer_cast(m_box_score_widths_d.data()),
                 m_box_score_widths.size(),
                 thrust::raw_pointer_cast(m_thresholds_d.data()), m_bias_snr,
-                var_in, var_add, seed, offset, m_ntrials, m_nprobs, stream);
+                var_in, var_add, m_seed, batch_rng_offset, m_ntrials, m_nprobs,
+                stream);
 
             // CUB scan
-            const SizeType total_work = current_batch_size * 2 * m_ntrials;
             cuda_utils::check_cuda_call(
                 cub::DeviceScan::ExclusiveSum(
                     m_cub_temp_storage, m_cub_temp_bytes,
@@ -1256,12 +1142,14 @@ private:
                 thrust::raw_pointer_cast(m_states_d.data()),
                 thrust::raw_pointer_cast(m_states_locks_d.data()),
                 thrust::raw_pointer_cast(m_thresholds_d.data()),
-                thrust::raw_pointer_cast(m_probs_d.data()), m_ntrials, m_nbins,
-                m_nprobs, nbranches, stage_offset_prev, stage_offset_cur);
+                thrust::raw_pointer_cast(m_probs_d.data()), m_ntrials,
+                m_nbins_padded, m_nprobs, nbranches, stage_offset_prev,
+                stage_offset_cur);
             cuda_utils::check_last_cuda_error("transition_decision_kernel");
         }
         cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
                                     "cudaStreamSynchronize failed");
+        cumulative_rng_offset += num_batches * total_work_max;
     }
 };
 
