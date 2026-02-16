@@ -46,17 +46,35 @@ private:
     inline static bool s_enabled = true; // default: enabled
 };
 
-// Simple timer class for start/stop timing
+/**
+ * @brief High-resolution timer for measuring code sections.
+ *
+ * Uses std::chrono::steady_clock for monotonic, high-resolution timing.
+ * Not thread-safe - each thread should have its own instance.
+ */
 class SimpleTimer {
-    using Clock = std::chrono::steady_clock;
-    Clock::time_point m_start;
+    using Clock     = std::chrono::steady_clock;
+    using TimePoint = Clock::time_point;
 
 public:
-    void start() { m_start = Clock::now(); }
+    SimpleTimer() = default;
 
+    /**
+     * @brief Starts the timer.
+     */
+    void start() noexcept { m_start = Clock::now(); }
+
+    /**
+     * @brief Stops the timer and returns elapsed time in seconds.
+     * @return Elapsed time in seconds since start()
+     */
     [[nodiscard]] float stop() const {
-        return std::chrono::duration<float>(Clock::now() - m_start).count();
+        const auto end = Clock::now();
+        return std::chrono::duration<float>(end - m_start).count();
     }
+
+private:
+    TimePoint m_start{Clock::now()};
 };
 
 // ScopedLogLevel class to temporarily set the log level

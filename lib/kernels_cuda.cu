@@ -13,141 +13,112 @@ namespace loki::kernels {
 namespace {
 
 // indices_tree are logical indices, convert to physical indices
-__global__ void
-kernel_shift_add_linear(const float* __restrict__ folds_tree,
-                        const uint32_t* __restrict__ indices_tree,
-                        const float* __restrict__ folds_ffa,
-                        const uint32_t* __restrict__ indices_ffa,
-                        const float* __restrict__ phase_shift,
-                        float* __restrict__ folds_out,
-                        uint32_t nbins,
-                        uint32_t n_leaves,
-                        uint32_t physical_start_idx,
-                        uint32_t capacity) {
-
-    constexpr uint32_t kWarpSize = 32;
+__global__ __launch_bounds__(256, 4) void kernel_shift_add_linear(
+    const float* __restrict__ folds_tree,
+    const uint32_t* __restrict__ indices_tree,
+    const float* __restrict__ folds_ffa,
+    const uint32_t* __restrict__ indices_ffa,
+    const float* __restrict__ phase_shift,
+    float* __restrict__ folds_out,
+    uint32_t nbins,
+    uint32_t n_leaves,
+    uint32_t physical_start_idx,
+    uint32_t capacity) {
     // 1D thread mapping with optimal work distribution
     const uint32_t tid        = (blockIdx.x * blockDim.x) + threadIdx.x;
     const uint32_t total_work = n_leaves * nbins;
-
     if (tid >= total_work) {
         return;
     }
 
     // Decode thread ID to (ileaf, ibin)
-    const uint32_t ibin  = tid % nbins;
     const uint32_t ileaf = tid / nbins;
+    const uint32_t ibin  = tid % nbins;
 
-    uint32_t shift = 0;
-    // We can only use warp-level broadcast if each warp maps to exactly one
-    // leaf. This is true iff nbins is a multiple of warpSize.
-    if (nbins >= kWarpSize && (nbins & (kWarpSize - 1)) == 0) {
-        // warp maps to a single leaf → safe to broadcast
-        const uint32_t lane = threadIdx.x & (kWarpSize - 1);
-        const uint32_t mask = __activemask();
-        if (lane == 0) {
-            shift = __float2uint_rz(phase_shift[ileaf] + 0.5F);
-            if (shift == nbins) {
-                shift = 0;
-            }
-        }
-        shift = __shfl_sync(mask, shift, 0);
-    } else {
-        // warp spans multiple leaves, must compute per-thread
-        shift = __float2uint_rz(phase_shift[ileaf] + 0.5F);
-        if (shift == nbins) {
-            shift = 0;
-        }
+    uint32_t shift = __float2uint_rz(phase_shift[ileaf] + 0.5F);
+    if (shift == nbins) {
+        shift = 0;
     }
     const uint32_t idx_add =
         (ibin < shift) ? (ibin + nbins - shift) : (ibin - shift);
 
-    const uint32_t tree_idx_logical  = indices_tree[ileaf] + physical_start_idx;
-    const uint32_t tree_idx_physical = tree_idx_logical < capacity
-                                           ? tree_idx_logical
-                                           : tree_idx_logical - capacity;
-    const uint32_t ffa_idx           = indices_ffa[ileaf];
+    uint32_t tree_idx = indices_tree[ileaf] + physical_start_idx;
+    if (tree_idx >= capacity) {
+        tree_idx -= capacity;
+    }
+    const uint32_t ffa_idx   = indices_ffa[ileaf];
+    const uint32_t stride    = 2 * nbins;
+    const SizeType tree_base = static_cast<SizeType>(tree_idx) * stride;
+    const SizeType ffa_base  = static_cast<SizeType>(ffa_idx) * stride;
+    const SizeType out_base  = static_cast<SizeType>(ileaf) * stride;
 
-    const uint32_t stride = 2 * nbins;
-    const float* __restrict__ tree_e =
-        folds_tree + static_cast<SizeType>(tree_idx_physical * stride);
+    const float* __restrict__ tree_e = folds_tree + tree_base;
     const float* __restrict__ tree_v = tree_e + nbins;
-    const float* __restrict__ ffa_e =
-        folds_ffa + static_cast<SizeType>(ffa_idx * stride);
-    const float* __restrict__ ffa_v = ffa_e + nbins;
-    float* __restrict__ out_e =
-        folds_out + static_cast<SizeType>(ileaf * stride);
-    float* __restrict__ out_v = out_e + nbins;
+    const float* __restrict__ ffa_e  = folds_ffa + ffa_base;
+    const float* __restrict__ ffa_v  = ffa_e + nbins;
 
     // Process both e and v components
-    out_e[ibin] = tree_e[ibin] + ffa_e[idx_add];
-    out_v[ibin] = tree_v[ibin] + ffa_v[idx_add];
+    folds_out[out_base + ibin]         = tree_e[ibin] + ffa_e[idx_add];
+    folds_out[out_base + ibin + nbins] = tree_v[ibin] + ffa_v[idx_add];
 }
 
-__global__ void
-kernel_shift_add_linear_complex(const ComplexTypeCUDA* __restrict__ folds_tree,
-                                const uint32_t* __restrict__ indices_tree,
-                                const ComplexTypeCUDA* __restrict__ folds_ffa,
-                                const uint32_t* __restrict__ indices_ffa,
-                                const float* __restrict__ phase_shift,
-                                ComplexTypeCUDA* __restrict__ folds_out,
-                                uint32_t nbins_f,
-                                uint32_t nbins,
-                                uint32_t n_leaves,
-                                uint32_t physical_start_idx,
-                                uint32_t capacity) {
-
+__global__ __launch_bounds__(256, 4) void kernel_shift_add_linear_complex(
+    const ComplexTypeCUDA* __restrict__ folds_tree,
+    const uint32_t* __restrict__ indices_tree,
+    const ComplexTypeCUDA* __restrict__ folds_ffa,
+    const uint32_t* __restrict__ indices_ffa,
+    const float* __restrict__ phase_shift,
+    ComplexTypeCUDA* __restrict__ folds_out,
+    uint32_t nbins_f,
+    uint32_t nbins,
+    uint32_t n_leaves,
+    uint32_t physical_start_idx,
+    uint32_t capacity) {
+    // 1D thread mapping with optimal work distribution
     const uint32_t tid        = (blockIdx.x * blockDim.x) + threadIdx.x;
     const uint32_t total_work = n_leaves * nbins_f;
-
     if (tid >= total_work) {
         return;
     }
 
     // Decode thread ID to (ileaf, k)
-    const uint32_t k     = tid % nbins_f;
     const uint32_t ileaf = tid / nbins_f;
+    const uint32_t k     = tid % nbins_f;
 
     // Phase factor for head only: exp(-2πi * k * shift / nbins)
-    const auto phase_factor =
+    const auto phase =
         static_cast<float>(-2.0F * kPI * k * phase_shift[ileaf] / nbins);
-    float cos_val, sin_val;
-    __sincosf(phase_factor, &sin_val, &cos_val);
+    float cosv, sinv;
+    __sincosf(phase, &sinv, &cosv);
 
-    // Calculate offsets
-    const uint32_t tree_idx_logical  = indices_tree[ileaf] + physical_start_idx;
-    const uint32_t tree_idx_physical = tree_idx_logical < capacity
-                                           ? tree_idx_logical
-                                           : tree_idx_logical - capacity;
-    const uint32_t ffa_idx           = indices_ffa[ileaf];
+    // Calculate offsets (in circular tree)
+    uint32_t tree_idx = indices_tree[ileaf] + physical_start_idx;
+    if (tree_idx >= capacity) {
+        tree_idx -= capacity;
+    }
+    const uint32_t ffa_idx   = indices_ffa[ileaf];
+    const uint32_t stride    = 2 * nbins_f;
+    const SizeType tree_base = static_cast<SizeType>(tree_idx) * stride;
+    const SizeType ffa_base  = static_cast<SizeType>(ffa_idx) * stride;
+    const SizeType out_base  = static_cast<SizeType>(ileaf) * stride;
 
-    const uint32_t stride = 2 * nbins_f;
-    const ComplexTypeCUDA* __restrict__ tree_e =
-        folds_tree + static_cast<SizeType>((tree_idx_physical * stride) + k);
+    const ComplexTypeCUDA* __restrict__ tree_e = folds_tree + tree_base + k;
     const ComplexTypeCUDA* __restrict__ tree_v = tree_e + nbins_f;
-    const ComplexTypeCUDA* __restrict__ ffa_e =
-        folds_ffa + static_cast<SizeType>((ffa_idx * stride) + k);
-    const ComplexTypeCUDA* __restrict__ ffa_v = ffa_e + nbins_f;
-    ComplexTypeCUDA* __restrict__ out_e =
-        folds_out + static_cast<SizeType>(ileaf * stride);
-    ComplexTypeCUDA* __restrict__ out_v = out_e + nbins_f;
+    const ComplexTypeCUDA* __restrict__ ffa_e  = folds_ffa + ffa_base + k;
+    const ComplexTypeCUDA* __restrict__ ffa_v  = ffa_e + nbins_f;
 
     // OPTIMIZED complex multiplication using fmaf
     // ffa_shifted_e = ffa_e * exp(-2πi * k * shift / nbins)
-    const float real_ffa_e =
-        fmaf(ffa_e->real(), cos_val, -ffa_e->imag() * sin_val);
-    const float imag_ffa_e =
-        fmaf(ffa_e->real(), sin_val, ffa_e->imag() * cos_val);
-    const float real_ffa_v =
-        fmaf(ffa_v->real(), cos_val, -ffa_v->imag() * sin_val);
-    const float imag_ffa_v =
-        fmaf(ffa_v->real(), sin_val, ffa_v->imag() * cos_val);
+    const float re_ffa_e = fmaf(ffa_e->real(), cosv, -ffa_e->imag() * sinv);
+    const float im_ffa_e = fmaf(ffa_e->real(), sinv, ffa_e->imag() * cosv);
+    const float re_ffa_v = fmaf(ffa_v->real(), cosv, -ffa_v->imag() * sinv);
+    const float im_ffa_v = fmaf(ffa_v->real(), sinv, ffa_v->imag() * cosv);
 
     // Add tree (unshifted) + ffa (shifted)
-    out_e[k] = ComplexTypeCUDA(tree_e->real() + real_ffa_e,
-                               tree_e->imag() + imag_ffa_e);
-    out_v[k] = ComplexTypeCUDA(tree_v->real() + real_ffa_v,
-                               tree_v->imag() + imag_ffa_v);
+    folds_out[out_base + k] =
+        ComplexTypeCUDA(tree_e->real() + re_ffa_e, tree_e->imag() + im_ffa_e);
+    folds_out[out_base + k + nbins_f] =
+        ComplexTypeCUDA(tree_v->real() + re_ffa_v, tree_v->imag() + im_ffa_v);
 }
 
 // One thread per smallest work unit
@@ -158,12 +129,9 @@ __global__ void kernel_ffa_iter(const float* __restrict__ fold_in,
                                 uint32_t ncoords_prev,
                                 uint32_t nsegments,
                                 uint32_t nbins) {
-
-    constexpr uint32_t kWarpSize = 32;
     // 1D thread mapping with optimal work distribution
     const uint32_t tid        = (blockIdx.x * blockDim.x) + threadIdx.x;
     const uint32_t total_work = ncoords_cur * nsegments * nbins;
-
     if (tid >= total_work) {
         return;
     }
@@ -179,48 +147,22 @@ __global__ void kernel_ffa_iter(const float* __restrict__ fold_in,
     const uint32_t coord_tail = coords.i_tail[icoord];
     const uint32_t coord_head = coords.i_head[icoord];
 
-    uint32_t shift_tail = 0;
-    uint32_t shift_head = 0;
-    // We can only use warp-level broadcast if each warp maps to exactly one
-    // leaf. This is true iff nbins is a multiple of warpSize.
-    if (nbins >= kWarpSize && (nbins & (kWarpSize - 1)) == 0) {
-        // warp maps to a single leaf → safe to broadcast
-        const uint32_t lane = threadIdx.x & (kWarpSize - 1);
-        // MUST capture mask BEFORE the if(lane == 0) divergence.
-        // This ensures all threads in the warp participate in the shuffle.
-        const uint32_t mask = __activemask();
-        if (lane == 0) {
-            shift_tail = __float2uint_rz(coords.shift_tail[icoord] + 0.5F);
-            shift_head = __float2uint_rz(coords.shift_head[icoord] + 0.5F);
-            if (shift_tail == nbins) {
-                shift_tail = 0;
-            }
-            if (shift_head == nbins) {
-                shift_head = 0;
-            }
-        }
-        // Broadcast with a consistent mask to avoid undefined behavior.
-        shift_tail = __shfl_sync(mask, shift_tail, 0);
-        shift_head = __shfl_sync(mask, shift_head, 0);
-    } else {
-        // warp spans multiple leaves, must compute per-thread
-        shift_tail = __float2uint_rz(coords.shift_tail[icoord] + 0.5F);
-        shift_head = __float2uint_rz(coords.shift_head[icoord] + 0.5F);
-        if (shift_tail == nbins) {
-            shift_tail = 0;
-        }
-        if (shift_head == nbins) {
-            shift_head = 0;
-        }
+    uint32_t shift_tail = __float2uint_rz(coords.shift_tail[icoord] + 0.5F);
+    uint32_t shift_head = __float2uint_rz(coords.shift_head[icoord] + 0.5F);
+    if (shift_tail == nbins) {
+        shift_tail = 0;
+    }
+    if (shift_head == nbins) {
+        shift_head = 0;
     }
 
-    const uint32_t total_size = 2 * nbins;
     const uint32_t idx_tail =
         (ibin < shift_tail) ? (ibin + nbins - shift_tail) : (ibin - shift_tail);
     const uint32_t idx_head =
         (ibin < shift_head) ? (ibin + nbins - shift_head) : (ibin - shift_head);
 
     // Calculate offsets
+    const uint32_t total_size = 2 * nbins;
     const uint32_t tail_offset =
         ((iseg * 2) * ncoords_prev * total_size) + (coord_tail * total_size);
     const uint32_t head_offset = ((iseg * 2 + 1) * ncoords_prev * total_size) +
@@ -243,11 +185,9 @@ __global__ void kernel_ffa_freq_iter(const float* __restrict__ fold_in,
                                      uint32_t ncoords_prev,
                                      uint32_t nsegments,
                                      uint32_t nbins) {
-    constexpr uint32_t kWarpSize = 32;
     // 1D thread mapping with optimal work distribution
     const uint32_t tid        = (blockIdx.x * blockDim.x) + threadIdx.x;
     const uint32_t total_work = ncoords_cur * nsegments * nbins;
-
     if (tid >= total_work) {
         return;
     }
@@ -261,27 +201,10 @@ __global__ void kernel_ffa_freq_iter(const float* __restrict__ fold_in,
 
     // Precompute coordinate data (avoid repeated access)
     const uint32_t coord_idx = coords.idx[icoord];
-    uint32_t shift           = 0;
-    // We can only use warp-level broadcast if each warp maps to exactly one
-    // leaf. This is true iff nbins is a multiple of warpSize.
-    if (nbins >= kWarpSize && (nbins & (kWarpSize - 1)) == 0) {
-        // warp maps to a single leaf → safe to broadcast
-        const uint32_t lane = threadIdx.x & (kWarpSize - 1);
-        const uint32_t mask = __activemask();
-        if (lane == 0) {
-            shift = __float2uint_rz(coords.shift[icoord] + 0.5F);
-            if (shift == nbins) {
-                shift = 0;
-            }
-        }
 
-        shift = __shfl_sync(mask, shift, 0);
-    } else {
-        // warp spans multiple leaves, must compute per-thread
-        shift = __float2uint_rz(coords.shift[icoord] + 0.5F);
-        if (shift == nbins) {
-            shift = 0;
-        }
+    uint32_t shift = __float2uint_rz(coords.shift[icoord] + 0.5F);
+    if (shift == nbins) {
+        shift = 0;
     }
 
     const uint32_t idx_add =
@@ -440,11 +363,9 @@ kernel_ffa_complex_iter(const ComplexTypeCUDA* __restrict__ fold_in,
                         uint32_t nsegments,
                         uint32_t nbins_f,
                         uint32_t nbins) {
-
     // 1D thread mapping with optimal work distribution
     const uint32_t tid        = (blockIdx.x * blockDim.x) + threadIdx.x;
     const uint32_t total_work = ncoords_cur * nsegments * nbins_f;
-
     if (tid >= total_work) {
         return;
     }
@@ -1168,11 +1089,12 @@ void shift_add_linear_batch_cuda(const float* __restrict__ folds_tree,
                                  SizeType physical_start_idx,
                                  SizeType capacity,
                                  cudaStream_t stream) {
-    const auto total_work        = n_leaves * nbins;
-    const auto threads_per_block = (total_work < 65536) ? 256 : 512;
-    const auto blocks_per_grid =
-        (total_work + threads_per_block - 1) / threads_per_block;
-    const dim3 block_dim(threads_per_block);
+    constexpr SizeType kThreadsPerBlock = 256;
+
+    const SizeType total_work = n_leaves * nbins;
+    const SizeType blocks_per_grid =
+        (total_work + kThreadsPerBlock - 1) / kThreadsPerBlock;
+    const dim3 block_dim(kThreadsPerBlock);
     const dim3 grid_dim(blocks_per_grid);
     cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
     kernel_shift_add_linear<<<grid_dim, block_dim, 0, stream>>>(
@@ -1195,11 +1117,12 @@ void shift_add_linear_complex_batch_cuda(
     SizeType physical_start_idx,
     SizeType capacity,
     cudaStream_t stream) {
-    const auto total_work        = n_leaves * nbins_f;
-    const auto threads_per_block = (total_work < 65536) ? 256 : 512;
-    const auto blocks_per_grid =
-        (total_work + threads_per_block - 1) / threads_per_block;
-    const dim3 block_dim(threads_per_block);
+    constexpr SizeType kThreadsPerBlock = 256;
+
+    const SizeType total_work = n_leaves * nbins_f;
+    const SizeType blocks_per_grid =
+        (total_work + kThreadsPerBlock - 1) / kThreadsPerBlock;
+    const dim3 block_dim(kThreadsPerBlock);
     const dim3 grid_dim(blocks_per_grid);
     cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
     kernel_shift_add_linear_complex<<<grid_dim, block_dim, 0, stream>>>(

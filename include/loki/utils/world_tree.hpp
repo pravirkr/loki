@@ -96,6 +96,7 @@ public:
     [[nodiscard]] std::span<double> get_leaves_contiguous_span() noexcept;
     // Returns span over contiguous scores (for saving to file)
     [[nodiscard]] std::span<float> get_scores_contiguous_span() noexcept;
+    [[nodiscard]] SizeType get_physical_start_idx() const;
 
     void set_size(SizeType size) noexcept;
     void reset() noexcept;
@@ -190,10 +191,6 @@ public:
     void prepare_in_place_update();
     void finalize_in_place_update();
     void consume_read(SizeType n);
-
-    void convert_to_physical_indices(cuda::std::span<uint32_t> logical_indices,
-                                     SizeType n_leaves,
-                                     cudaStream_t stream) const;
 
     // Add an initial set of candidate leaves to the Tree
     void add_initial(cuda::std::span<const double> leaves_batch,

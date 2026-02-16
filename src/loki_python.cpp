@@ -166,26 +166,26 @@ PYBIND11_MODULE(libloki, m) {
                          threshold, cost, threshold_prev, success_h1_cumul_prev,
                          is_empty);
     py::class_<DynamicThresholdScheme>(m_thresholds, "DynamicThresholdScheme")
-        .def(py::init([](const py::array_t<float>& branching_pattern,
-                         float ref_ducy, SizeType nbins, SizeType ntrials,
-                         SizeType nprobs, float prob_min, float snr_final,
-                         SizeType nthresholds, float ducy_max, float wtsp,
-                         float beam_width, SizeType trials_start,
-                         bool use_lut_rng, int nthreads) {
-                 return std::make_unique<DynamicThresholdScheme>(
-                     std::span<const float>(branching_pattern.data(),
-                                            branching_pattern.size()),
-                     ref_ducy, nbins, ntrials, nprobs, prob_min, snr_final,
-                     nthresholds, ducy_max, wtsp, beam_width, trials_start,
-                     use_lut_rng, nthreads);
-             }),
-             py::arg("branching_pattern"), py::arg("ref_ducy"),
-             py::arg("nbins") = 64, py::arg("ntrials") = 1024,
-             py::arg("nprobs") = 10, py::arg("prob_min") = 0.05F,
-             py::arg("snr_final") = 8.0F, py::arg("nthresholds") = 100,
-             py::arg("ducy_max") = 0.3F, py::arg("wtsp") = 1.0F,
-             py::arg("beam_width") = 0.7F, py::arg("trials_start") = 1,
-             py::arg("use_lut_rng") = false, py::arg("nthreads") = 1)
+        .def(
+            py::init([](const py::array_t<float>& branching_pattern,
+                        float ref_ducy, SizeType nbins, SizeType ntrials,
+                        SizeType nprobs, float prob_min, float snr_final,
+                        SizeType nthresholds, float ducy_max, float wtsp,
+                        float beam_width, SizeType trials_start, int nthreads) {
+                return std::make_unique<DynamicThresholdScheme>(
+                    std::span<const float>(branching_pattern.data(),
+                                           branching_pattern.size()),
+                    ref_ducy, nbins, ntrials, nprobs, prob_min, snr_final,
+                    nthresholds, ducy_max, wtsp, beam_width, trials_start,
+                    nthreads);
+            }),
+            py::arg("branching_pattern"), py::arg("ref_ducy"),
+            py::arg("nbins") = 64, py::arg("ntrials") = 1024,
+            py::arg("nprobs") = 10, py::arg("prob_min") = 0.05F,
+            py::arg("snr_final") = 8.0F, py::arg("nthresholds") = 100,
+            py::arg("ducy_max") = 0.3F, py::arg("wtsp") = 1.0F,
+            py::arg("beam_width") = 0.7F, py::arg("trials_start") = 1,
+            py::arg("nthreads") = 1)
         .def("run", &DynamicThresholdScheme::run, py::arg("thres_neigh") = 10)
         .def("save", &DynamicThresholdScheme::save, py::arg("outdir") = "./")
         .def_property_readonly("nstages", &DynamicThresholdScheme::get_nstages)

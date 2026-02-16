@@ -15,24 +15,56 @@
 namespace loki::detection {
 
 struct State {
-    float success_h0{1.0F};
-    float success_h1{1.0F};
-    float complexity{1.0F};
-    float complexity_cumul{1.0F};
-    float success_h1_cumul{1.0F};
-    float nbranches{1.0F};
+    float success_h0{0.0F};
+    float success_h1{0.0F};
+    float complexity{0.0F};
+    float complexity_cumul{std::numeric_limits<float>::max()};
+    float success_h1_cumul{0.0F};
+    float nbranches{0.0F};
     float threshold{-1.0F};
-    float cost{1.0F};
+    float cost{std::numeric_limits<float>::max()};
     float threshold_prev{-1.0F};
-    float success_h1_cumul_prev{1.0F};
+    float success_h1_cumul_prev{0.0F};
     bool is_empty{true};
 
-    State() = default;
+    LOKI_HD State() = default;
 
-    State gen_next(float threshold,
-                   float success_h0,
-                   float success_h1,
-                   float nbranches) const noexcept;
+    LOKI_HD State gen_next(float threshold,
+                           float success_h0,
+                           float success_h1,
+                           float nbranches) const noexcept {
+        const auto nleaves_next = this->complexity * nbranches;
+        const auto nleaves_surv = nleaves_next * success_h0;
+        const auto complexity_cumul_next =
+            this->complexity_cumul + nleaves_next;
+        const auto success_h1_cumul_next = this->success_h1_cumul * success_h1;
+        const auto cost_next = complexity_cumul_next / success_h1_cumul_next;
+
+        // Create a new state struct
+        State state_next;
+        state_next.success_h0       = success_h0;
+        state_next.success_h1       = success_h1;
+        state_next.complexity       = nleaves_surv;
+        state_next.complexity_cumul = complexity_cumul_next;
+        state_next.success_h1_cumul = success_h1_cumul_next;
+        state_next.nbranches        = nbranches;
+        state_next.threshold        = threshold;
+        state_next.cost             = cost_next;
+        state_next.is_empty         = false;
+        // For backtracking
+        state_next.threshold_prev        = this->threshold;
+        state_next.success_h1_cumul_prev = this->success_h1_cumul;
+        return state_next;
+    }
+
+    static LOKI_HD State initial() noexcept {
+        State s;
+        s.complexity       = 1.0F;
+        s.complexity_cumul = 1.0F;
+        s.success_h1_cumul = 1.0F;
+        s.is_empty         = false;
+        return s;
+    }
 };
 
 class DynamicThresholdScheme {
@@ -49,7 +81,6 @@ public:
                            float wtsp            = 1.0F,
                            float beam_width      = 0.7F,
                            SizeType trials_start = 1,
-                           bool use_lut_rng      = false,
                            int nthreads          = 1);
     ~DynamicThresholdScheme();
     DynamicThresholdScheme(DynamicThresholdScheme&&) noexcept;
@@ -95,28 +126,6 @@ std::vector<State> determine_scheme(std::span<const float> survive_probs,
 
 #ifdef LOKI_ENABLE_CUDA
 
-struct StateD {
-    float success_h0;
-    float success_h1;
-    float complexity;
-    float complexity_cumul;
-    float success_h1_cumul;
-    float nbranches;
-    float threshold;
-    float cost;
-    float threshold_prev;
-    float success_h1_cumul_prev;
-    bool is_empty;
-
-    __host__ __device__ StateD() noexcept;
-
-    __host__ __device__ StateD gen_next(float threshold,
-                                        float success_h0,
-                                        float success_h1,
-                                        float nbranches) const noexcept;
-    __host__ __device__ State to_state() const;
-};
-
 class DynamicThresholdSchemeCUDA {
 public:
     DynamicThresholdSchemeCUDA(std::span<const float> branching_pattern,
@@ -131,6 +140,7 @@ public:
                                float wtsp            = 1.0F,
                                float beam_width      = 0.7F,
                                SizeType trials_start = 1,
+                               SizeType batch_size   = 256,
                                int device_id         = 0);
     ~DynamicThresholdSchemeCUDA();
     DynamicThresholdSchemeCUDA(DynamicThresholdSchemeCUDA&&) noexcept;

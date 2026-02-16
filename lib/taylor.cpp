@@ -103,12 +103,14 @@ void ffa_taylor_resolve_jerk_batch(
     SizeType nbins,
     SizeType param_stride) {
     constexpr SizeType kParams = 3;
-    error_check::check_equal(param_grid_count_cur.size(), kParams,
-                             "param_grid_count_cur should have 3 elements");
-    error_check::check_equal(param_grid_count_prev.size(), kParams,
-                             "param_grid_count_prev should have 3 elements");
-    error_check::check_equal(param_limits.size(), kParams,
-                             "param_limits should have 3 elements");
+    error_check::check_greater_equal(
+        param_grid_count_cur.size(), kParams,
+        "param_grid_count_cur should have 3 elements");
+    error_check::check_greater_equal(
+        param_grid_count_prev.size(), kParams,
+        "param_grid_count_prev should have 3 elements");
+    error_check::check_greater_equal(param_limits.size(), kParams,
+                                     "param_limits should have 3 elements");
     error_check::check_greater_equal(
         param_stride, kParams,
         "param_stride should be greater than or equal to 3");

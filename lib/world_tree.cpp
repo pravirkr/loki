@@ -220,6 +220,17 @@ public:
         return {m_scratch_scores.data(), m_size};
     }
 
+    /**
+     * @brief Get physical start index
+     */
+    SizeType get_physical_start_idx() const {
+        error_check::check(m_is_updating,
+                           "WorldTreeCUDA: get_physical_start_idx only valid "
+                           "during updates");
+        // Compute physical start: relative to current head of read region
+        return get_circular_index(m_read_consumed, m_head, m_capacity);
+    }
+
     // Mutation operations
 
     /**
@@ -967,6 +978,10 @@ std::span<double> WorldTree<FoldType>::get_leaves_contiguous_span() noexcept {
 template <SupportedFoldType FoldType>
 std::span<float> WorldTree<FoldType>::get_scores_contiguous_span() noexcept {
     return m_impl->get_scores_contiguous_span();
+}
+template <SupportedFoldType FoldType>
+SizeType WorldTree<FoldType>::get_physical_start_idx() const {
+    return m_impl->get_physical_start_idx();
 }
 template <SupportedFoldType FoldType>
 void WorldTree<FoldType>::set_size(SizeType size) noexcept {

@@ -11,6 +11,7 @@
 #include <hdf5.h>
 #include <highfive/highfive.hpp>
 #include <highfive/span.hpp>
+#include <omp.h>
 
 #include "loki/common/types.hpp"
 
@@ -681,6 +682,75 @@ void merge_prune_result_files(const std::filesystem::path& results_dir,
     }
 }
 
+// TimerStats class implementation
+TimerStats::TimerStats(SizeType num_threads) : m_thread_timers(num_threads) {}
+
+TimerStats::TimerMap& TimerStats::get_thread_local() {
+    const int tid = omp_get_thread_num();
+    return m_thread_timers[static_cast<SizeType>(tid)];
+}
+
+TimerStats::TimerMap TimerStats::aggregate() const {
+    TimerMap result;
+    for (const auto& thread_map : m_thread_timers) {
+        for (const auto& [name, time] : thread_map) {
+            result[name] += time;
+        }
+    }
+    return result;
+}
+
+void TimerStats::reset() {
+    for (auto& thread_map : m_thread_timers) {
+        thread_map.clear();
+    }
+}
+
+void TimerStats::merge(const TimerStats& other) {
+    const auto other_agg = other.aggregate();
+    for (const auto& [name, time] : other_agg) {
+        // Accumulate into first thread's map
+        m_thread_timers[0][name] += time;
+    }
+}
+
+std::string TimerStats::summary(float total_time) const {
+    const auto agg = aggregate();
+
+    if (agg.empty()) {
+        return "No timing data collected.";
+    }
+    const auto n_threads = m_thread_timers.size();
+
+    // Compute total from aggregated timers if not provided
+    if (total_time <= 0.0) {
+        total_time = std::accumulate(
+            agg.begin(), agg.end(), 0.0F,
+            [](float sum, const auto& p) { return sum + p.second; });
+    }
+
+    // Sort by time (descending)
+    std::vector<std::pair<std::string, float>> sorted_times(agg.begin(),
+                                                            agg.end());
+    std::ranges::sort(sorted_times, [](const auto& a, const auto& b) {
+        return a.second > b.second;
+    });
+
+    std::string breakdown;
+    int count = 0;
+    for (const auto& [name, time] : sorted_times) {
+        if (time > 0 && count < 4) {
+            if (!breakdown.empty()) {
+                breakdown += " | ";
+            }
+            breakdown += std::format(
+                "{}: {:.0f}%", name,
+                (time / (total_time * static_cast<float>(n_threads))) * 100.0F);
+            count++;
+        }
+    }
+    return std::format("Total: {:.1f}s ({})", total_time, breakdown);
+}
 } // namespace loki::cands
 
 HIGHFIVE_REGISTER_TYPE(loki::cands::FFATimerStatsPacked,

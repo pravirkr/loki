@@ -670,15 +670,14 @@ private:
 
             // Load, shift, add (Map branched_itree to physical indices)
             timer.start();
-            m_world_tree->convert_to_physical_indices(
-                m_pruning_workspace->branched_indices,
-                n_leaves_after_validation);
             m_prune_funcs->shift_add(
                 m_world_tree->get_folds(),
                 m_pruning_workspace->branched_indices, ffa_fold_segment,
                 m_pruning_workspace->branched_param_idx,
                 m_pruning_workspace->branched_phase_shift,
-                m_pruning_workspace->branched_folds, n_leaves_after_validation);
+                m_pruning_workspace->branched_folds, n_leaves_after_validation,
+                m_world_tree->get_physical_start_idx(),
+                m_world_tree->get_capacity());
             stats.batch_timers["shift_add"] += timer.stop();
 
             // Score and filter

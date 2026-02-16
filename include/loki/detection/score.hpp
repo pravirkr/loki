@@ -6,12 +6,11 @@
 #include <vector>
 
 #include "loki/common/types.hpp"
-#include "loki/utils/workspace.hpp"
 
 #ifdef LOKI_ENABLE_CUDA
 #include <cuda/std/span>
 #include <cuda_runtime.h>
-
+#include "loki/utils/workspace.hpp"
 #endif // LOKI_ENABLE_CUDA
 
 namespace loki::detection {
@@ -61,6 +60,13 @@ void snr_boxcar_1d(std::span<const float> arr,
                    std::span<const SizeType> widths,
                    std::span<float> out,
                    float stdnoise = 1.0F);
+
+// Compute the maximum Boxcar S/N of a single pulse profile with a cache
+bool snr_boxcar_threshold_with_cache(std::span<const float> arr,
+                                     SizeType nbins,
+                                     BoxcarWidthsCache& cache,
+                                     float threshold,
+                                     float stdnoise = 1.0F) noexcept;
 
 void snr_boxcar_2d(std::span<const float> folds,
                    std::span<const SizeType> widths,

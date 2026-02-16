@@ -53,27 +53,15 @@ if(NOT Boost_FOUND)
     URL https://github.com/boostorg/math/archive/refs/tags/boost-1.83.0.tar.gz
     DOWNLOAD_ONLY YES
   )
-  CPMAddPackage(
-    NAME BoostRandom
-    VERSION 1.83.0
-    URL https://github.com/boostorg/random/archive/refs/tags/boost-1.83.0.tar.gz
-    DOWNLOAD_ONLY YES
-  )
   if(BoostMath_ADDED)
     add_library(Boost::math INTERFACE IMPORTED GLOBAL)
     target_include_directories(Boost::math INTERFACE ${BoostMath_SOURCE_DIR}/include)
   endif()
-  if(BoostRandom_ADDED)
-    add_library(Boost::random INTERFACE IMPORTED GLOBAL)
-    target_include_directories(Boost::random INTERFACE ${BoostRandom_SOURCE_DIR}/include)
-  endif()
 else()
   # Use system headers
-  message(STATUS "Using system Boost headers for math+random: ${Boost_INCLUDE_DIRS}")
+  message(STATUS "Using system Boost headers for math: ${Boost_INCLUDE_DIRS}")
   add_library(Boost::math INTERFACE IMPORTED GLOBAL)
   target_include_directories(Boost::math INTERFACE ${Boost_INCLUDE_DIRS})
-  add_library(Boost::random INTERFACE IMPORTED GLOBAL)
-  target_include_directories(Boost::random INTERFACE ${Boost_INCLUDE_DIRS})
 endif()
 
 # HighFive (HDF5 C++ interface) - Depends on HDF5 found earlier
@@ -196,7 +184,6 @@ target_link_libraries(
          spdlog::spdlog_header_only
          xsimd
          Boost::math
-         Boost::random
          HighFive::HighFive
          BS_thread_pool
          tomlplusplus

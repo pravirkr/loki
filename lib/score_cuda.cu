@@ -97,7 +97,7 @@ __global__ void kernel_snr_boxcar_warp(const float* __restrict__ folds,
 
     // Find max SNR across all widths
     const float total_sum = s_warp_data[nbins - 1];
-    float thread_max_snr  = -cuda::std::numeric_limits<float>::infinity();
+    float thread_max_snr  = cuda::std::numeric_limits<float>::lowest();
 
     for (uint32_t iw = 0; iw < nwidths; ++iw) {
         const uint32_t w = widths[iw];
@@ -106,7 +106,7 @@ __global__ void kernel_snr_boxcar_warp(const float* __restrict__ folds,
         const float b =
             static_cast<float>(w) * h / static_cast<float>(nbins - w);
 
-        float thread_max_diff = -cuda::std::numeric_limits<float>::infinity();
+        float thread_max_diff = cuda::std::numeric_limits<float>::lowest();
         for (uint32_t j = lane_id; j < nbins; j += kWarpSize) {
             const float sum_before_start = (j > 0) ? s_warp_data[j - 1] : 0.0F;
             const uint32_t end_idx       = j + w - 1;
@@ -172,37 +172,37 @@ __global__ void kernel_snr_boxcar_warp(const float* __restrict__ folds,
     }
 }
 
-__global__ void kernel_snr_thread(const float* __restrict__ folds,
-                                  uint32_t nprofiles,
-                                  uint32_t nbins,
-                                  const uint32_t* __restrict__ widths,
-                                  uint32_t nwidths,
-                                  float* __restrict__ scores,
-                                  uint32_t* __restrict__ indices_filtered,
-                                  uint32_t* __restrict__ nprofiles_passing,
-                                  float threshold) {
-    constexpr uint32_t kMaxBins = 1024;
-    const uint32_t profile_idx  = (blockIdx.x * blockDim.x) + threadIdx.x;
-
+template <uint32_t MAX_BINS>
+__launch_bounds__(256, 4) // Hint: Max 256 threads, min 4 blocks/SM
+    __global__ void kernel_snr_thread(const float* __restrict__ folds,
+                                      uint32_t nprofiles,
+                                      uint32_t nbins,
+                                      const uint32_t* __restrict__ widths,
+                                      uint32_t nwidths,
+                                      float* __restrict__ scores,
+                                      uint32_t* __restrict__ indices_filtered,
+                                      uint32_t* __restrict__ nprofiles_passing,
+                                      float threshold) {
+    const uint32_t profile_idx = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (profile_idx >= nprofiles) {
         return;
     }
 
-    // Prefix sum array - stored in local memory, L1 cached
-    float prefix[kMaxBins];
+    // Stack allocation matches the template size exactly.
+    // For MAX_BINS=64, this is just 256 bytes (likely registers).
+    float prefix[MAX_BINS];
 
     const uint32_t base             = profile_idx * 2 * nbins;
     const float* __restrict__ e_ptr = folds + base;
     const float* __restrict__ v_ptr = folds + base + nbins;
 
     float running = 0.0F;
-#pragma unroll 1
     for (uint32_t i = 0; i < nbins; ++i) {
         running += e_ptr[i] * rsqrtf(v_ptr[i]);
         prefix[i] = running;
     }
     const float total_sum = running;
-    float max_snr         = -cuda::std::numeric_limits<float>::infinity();
+    float max_snr         = cuda::std::numeric_limits<float>::lowest();
 
 // Loop over widths
 #pragma unroll 1
@@ -213,7 +213,7 @@ __global__ void kernel_snr_thread(const float* __restrict__ folds,
         const float b =
             static_cast<float>(w) * h / static_cast<float>(nbins - w);
 
-        float max_diff = -cuda::std::numeric_limits<float>::infinity();
+        float max_diff = cuda::std::numeric_limits<float>::lowest();
 
         // Split the sliding window loop to eliminate branch in hot path
         // wrap_start is the first j where (j + w - 1) >= nbins
@@ -221,15 +221,13 @@ __global__ void kernel_snr_thread(const float* __restrict__ folds,
 
         // Non-wrapping part: j + w - 1 < nbins
         float prev = 0.0F;
-#pragma unroll 1
         for (uint32_t j = 0; j < wrap_start; ++j) {
             const float window_sum = prefix[j + w - 1] - prev;
             max_diff               = fmaxf(max_diff, window_sum);
             prev                   = prefix[j];
         }
 
-// Wrapping part: j + w - 1 >= nbins (circular wrap)
-#pragma unroll 1
+        // Wrapping part: j + w - 1 >= nbins (circular wrap)
         for (uint32_t j = wrap_start; j < nbins; ++j) {
             const float before      = prefix[j - 1];
             const uint32_t wrap_idx = j + w - 1 - nbins;
@@ -463,11 +461,31 @@ score_and_filter_max_cuda_thread_d(cuda::std::span<const float> folds,
     const dim3 grid_dim(blocks_per_grid);
     cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
 
-    kernel_snr_thread<<<grid_dim, block_dim, 0, stream>>>(
-        folds.data(), static_cast<uint32_t>(nprofiles),
-        static_cast<uint32_t>(nbins), widths.data(),
-        static_cast<uint32_t>(widths.size()), scores.data(),
-        indices_filtered.data(), counter.data(), threshold);
+    auto dispatch_kernel = [&](auto... args) {
+        if (nbins <= 32) {
+            kernel_snr_thread<32><<<grid_dim, block_dim, 0, stream>>>(args...);
+        } else if (nbins <= 64) {
+            kernel_snr_thread<64><<<grid_dim, block_dim, 0, stream>>>(args...);
+        } else if (nbins <= 128) {
+            kernel_snr_thread<128><<<grid_dim, block_dim, 0, stream>>>(args...);
+        } else if (nbins <= 256) {
+            kernel_snr_thread<256><<<grid_dim, block_dim, 0, stream>>>(args...);
+        } else if (nbins <= 512) {
+            kernel_snr_thread<512><<<grid_dim, block_dim, 0, stream>>>(args...);
+        } else if (nbins <= 1024) {
+            kernel_snr_thread<1024>
+                <<<grid_dim, block_dim, 0, stream>>>(args...);
+        } else {
+            throw std::runtime_error(
+                "score_and_filter_max_cuda_thread_d: nbins exceeds compiled "
+                "limit of 1024");
+        }
+    };
+
+    dispatch_kernel(folds.data(), static_cast<uint32_t>(nprofiles),
+                    static_cast<uint32_t>(nbins), widths.data(),
+                    static_cast<uint32_t>(widths.size()), scores.data(),
+                    indices_filtered.data(), counter.data(), threshold);
     cuda_utils::check_last_cuda_error(
         "score_and_filter_max_cuda_thread_d launch failed");
     return counter.value_sync(stream);

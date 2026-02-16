@@ -105,7 +105,9 @@ void shift_add_linear_batch(const float* __restrict__ folds_tree,
                             float* __restrict__ folds_out,
                             float* __restrict__ temp_buffer,
                             SizeType nbins,
-                            SizeType n_leaves) noexcept;
+                            SizeType n_leaves,
+                            SizeType physical_start_idx,
+                            SizeType capacity) noexcept;
 
 /**
  * @brief Shift complex ffa folds and add it to the complex tree folds for each
@@ -131,7 +133,9 @@ void shift_add_linear_complex_batch(const ComplexType* __restrict__ folds_tree,
                                     ComplexType* __restrict__ folds_out,
                                     SizeType nbins_f,
                                     SizeType nbins,
-                                    SizeType n_leaves) noexcept;
+                                    SizeType n_leaves,
+                                    SizeType physical_start_idx,
+                                    SizeType capacity) noexcept;
 
 #ifdef LOKI_ENABLE_CUDA
 

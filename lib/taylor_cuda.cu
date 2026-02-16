@@ -685,7 +685,7 @@ transform_taylor_accel(double* __restrict__ leaves,
         return;
     }
 
-    const double dt       = coord_next.second - coord_cur.second;
+    const double dt       = coord_next.first - coord_cur.first;
     const double half_dt2 = 0.5 * dt * dt;
 
     const uint32_t leaf_idx = indices[tid];
@@ -732,7 +732,7 @@ transform_taylor_jerk(double* __restrict__ leaves,
         return;
     }
 
-    const double dt        = coord_next.second - coord_cur.second;
+    const double dt        = coord_next.first - coord_cur.first;
     const double dt2       = dt * dt;
     const double half_dt2  = 0.5 * dt2;
     const double sixth_dt3 = (dt2 * dt) / 6.0;
@@ -789,7 +789,7 @@ transform_taylor_snap(double* __restrict__ leaves,
         return;
     }
 
-    const double dt                = coord_next.second - coord_cur.second;
+    const double dt                = coord_next.first - coord_cur.first;
     const double dt2               = dt * dt;
     const double half_dt2          = 0.5 * dt2;
     const double sixth_dt3         = (dt2 * dt) / 6.0;

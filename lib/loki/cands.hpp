@@ -227,4 +227,33 @@ private:
 void merge_prune_result_files(const std::filesystem::path& results_dir,
                               const std::filesystem::path& log_file,
                               const std::filesystem::path& result_file);
+
+/**
+ * @brief Thread-safe timing statistics collector for parallel code.
+ *
+ * Designed for OpenMP parallel regions. Each thread maintains its own
+ * timing data, which is then reduced/aggregated after the parallel region.
+ *
+ */
+class TimerStats {
+public:
+    using TimerMap = std::map<std::string, float>;
+
+    TimerStats() = default;
+    explicit TimerStats(SizeType num_threads);
+    // Returns thread-local timer map.
+    [[nodiscard]] TimerMap& get_thread_local();
+    // Aggregates timing data across all threads.
+    [[nodiscard]] TimerMap aggregate() const;
+    // Resets all timing data.
+    void reset();
+    // Merges timing data from another TimerStats instance.
+    void merge(const TimerStats& other);
+    [[nodiscard]] std::string summary(float total_time = 0.0F) const;
+
+private:
+    static constexpr std::array kTimerNames = {"random", "add_score"};
+    std::vector<TimerMap> m_thread_timers;
+};
+
 } // namespace loki::cands

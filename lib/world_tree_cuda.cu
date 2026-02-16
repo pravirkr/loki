@@ -146,16 +146,6 @@ __global__ void compact_in_place_kernel(const uint8_t* __restrict__ keep,
     }
 }
 
-struct CircularIndexFunctor {
-    uint32_t start;
-    uint32_t capacity;
-
-    __host__ __device__ uint32_t operator()(uint32_t logical_idx) const {
-        const uint32_t x = start + logical_idx;
-        return (x < capacity) ? x : x - capacity;
-    }
-};
-
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 void scatter_to_circular_copy_cuda(const double* __restrict__ src_leaves,
                                    const FoldTypeCUDA* __restrict__ src_folds,
@@ -332,20 +322,18 @@ public:
             // Contiguous case - direct reduction
             return thrust::reduce(thrust::device, m_scores.begin() + start,
                                   m_scores.begin() + start + m_size,
-                                  -cuda::std::numeric_limits<float>::infinity(),
+                                  cuda::std::numeric_limits<float>::lowest(),
                                   ThrustMaxOp<float>());
         } // Wrapped case - two reductions
         const SizeType first_count = m_capacity - start;
 
         float max1 = thrust::reduce(
             thrust::device, m_scores.begin() + start, m_scores.end(),
-            -cuda::std::numeric_limits<float>::infinity(),
-            ThrustMaxOp<float>());
-        float max2 =
-            thrust::reduce(thrust::device, m_scores.begin(),
-                           m_scores.begin() + (m_size - first_count),
-                           -cuda::std::numeric_limits<float>::infinity(),
-                           ThrustMaxOp<float>());
+            cuda::std::numeric_limits<float>::lowest(), ThrustMaxOp<float>());
+        float max2 = thrust::reduce(thrust::device, m_scores.begin(),
+                                    m_scores.begin() + (m_size - first_count),
+                                    cuda::std::numeric_limits<float>::lowest(),
+                                    ThrustMaxOp<float>());
         return std::max(max1, max2);
     }
 
@@ -361,18 +349,18 @@ public:
         if (start + m_size <= m_capacity) {
             return thrust::reduce(thrust::device, m_scores.begin() + start,
                                   m_scores.begin() + start + m_size,
-                                  cuda::std::numeric_limits<float>::infinity(),
+                                  cuda::std::numeric_limits<float>::max(),
                                   ThrustMinOp<float>());
         }
         const SizeType first_count = m_capacity - start;
 
         float min1 = thrust::reduce(
             thrust::device, m_scores.begin() + start, m_scores.end(),
-            cuda::std::numeric_limits<float>::infinity(), ThrustMinOp<float>());
-        float min2 = thrust::reduce(
-            thrust::device, m_scores.begin(),
-            m_scores.begin() + (m_size - first_count),
-            cuda::std::numeric_limits<float>::infinity(), ThrustMinOp<float>());
+            cuda::std::numeric_limits<float>::max(), ThrustMinOp<float>());
+        float min2 = thrust::reduce(thrust::device, m_scores.begin(),
+                                    m_scores.begin() + (m_size - first_count),
+                                    cuda::std::numeric_limits<float>::max(),
+                                    ThrustMinOp<float>());
         return std::min(min1, min2);
     }
 
@@ -574,34 +562,6 @@ public:
         error_check::check_less_equal(
             m_size_old - m_read_consumed + m_size, m_capacity,
             "WorldTreeCUDA: circular buffer invariant violated");
-    }
-
-    /**
-     * @brief Convert logical indices to physical indices
-     */
-    void convert_to_physical_indices(cuda::std::span<uint32_t> logical_indices,
-                                     SizeType n_leaves,
-                                     cudaStream_t stream) const {
-        error_check::check(
-            m_is_updating,
-            "WorldTreeCUDA: convert_to_physical_indices only valid "
-            "during updates");
-        error_check::check_greater_equal(
-            logical_indices.size(), n_leaves,
-            "convert_to_physical_indices: n_leaves size insufficient");
-
-        // Compute physical start: relative to current head of read region
-        const SizeType physical_start =
-            get_circular_index(m_read_consumed, m_head, m_capacity);
-
-        CircularIndexFunctor functor{
-            .start    = static_cast<uint32_t>(physical_start),
-            .capacity = static_cast<uint32_t>(m_capacity)};
-        thrust::transform(thrust::cuda::par.on(stream), logical_indices.begin(),
-                          logical_indices.begin() +
-                              static_cast<IndexType>(n_leaves),
-                          logical_indices.begin(), functor);
-        cuda_utils::check_last_cuda_error("convert_to_physical_indices failed");
     }
 
     /**
@@ -1111,13 +1071,6 @@ void WorldTreeCUDA<FoldTypeCUDA>::finalize_in_place_update() {
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 void WorldTreeCUDA<FoldTypeCUDA>::consume_read(SizeType n) {
     m_impl->consume_read(n);
-}
-template <SupportedFoldTypeCUDA FoldTypeCUDA>
-void WorldTreeCUDA<FoldTypeCUDA>::convert_to_physical_indices(
-    cuda::std::span<uint32_t> logical_indices,
-    SizeType n_leaves,
-    cudaStream_t stream) const {
-    m_impl->convert_to_physical_indices(logical_indices, n_leaves, stream);
 }
 // Other methods
 template <SupportedFoldTypeCUDA FoldTypeCUDA>

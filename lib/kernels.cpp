@@ -1220,12 +1220,19 @@ void shift_add_linear_batch(const float* __restrict__ folds_tree,
                             float* __restrict__ folds_out,
                             float* __restrict__ temp_buffer,
                             SizeType nbins,
-                            SizeType n_leaves) noexcept {
+                            SizeType n_leaves,
+                            SizeType physical_start_idx,
+                            SizeType capacity) noexcept {
     const auto total_size = 2 * nbins;
     for (SizeType ileaf = 0; ileaf < n_leaves; ++ileaf) {
+        const uint32_t tree_idx_logical =
+            indices_tree[ileaf] + physical_start_idx;
+        const uint32_t tree_idx_physical = tree_idx_logical < capacity
+                                               ? tree_idx_logical
+                                               : tree_idx_logical - capacity;
         // Get restrict pointers for current batch item
         const float* __restrict__ data_tree =
-            folds_tree + (indices_tree[ileaf] * total_size);
+            folds_tree + (tree_idx_physical * total_size);
         const float* __restrict__ data_ffa =
             folds_ffa + (indices_ffa[ileaf] * total_size);
         float* __restrict__ data_out = folds_out + (ileaf * total_size);
@@ -1242,12 +1249,19 @@ void shift_add_linear_complex_batch(const ComplexType* __restrict__ folds_tree,
                                     ComplexType* __restrict__ folds_out,
                                     SizeType nbins_f,
                                     SizeType nbins,
-                                    SizeType n_leaves) noexcept {
+                                    SizeType n_leaves,
+                                    SizeType physical_start_idx,
+                                    SizeType capacity) noexcept {
     const auto total_size = 2 * nbins_f;
     for (SizeType ileaf = 0; ileaf < n_leaves; ++ileaf) {
+        const uint32_t tree_idx_logical =
+            indices_tree[ileaf] + physical_start_idx;
+        const uint32_t tree_idx_physical = tree_idx_logical < capacity
+                                               ? tree_idx_logical
+                                               : tree_idx_logical - capacity;
         // Get restrict pointers for current batch item
         const ComplexType* __restrict__ data_tree =
-            folds_tree + (indices_tree[ileaf] * total_size);
+            folds_tree + (tree_idx_physical * total_size);
         const ComplexType* __restrict__ data_ffa =
             folds_ffa + (indices_ffa[ileaf] * total_size);
         ComplexType* __restrict__ data_out = folds_out + (ileaf * total_size);

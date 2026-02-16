@@ -169,6 +169,6 @@ struct DeviceRNGConfig {
 };
 
 // Default configuration (Philox4_32_10)
-using DefaultDeviceRNG = DeviceRNGConfig<10>;
+using DefaultDeviceRNG = DeviceRNGConfig<7>;
 
 } // namespace loki::math

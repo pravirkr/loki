@@ -62,6 +62,16 @@ inline constexpr size_t kUnrollFactor = 8;
 #define UNROLL_VECTORIZE
 #endif
 
+#if defined(LOKI_ENABLE_CUDA) && defined(__CUDACC__)
+#define LOKI_HD __host__ __device__
+#define LOKI_D __device__
+#define LOKI_H __host__
+#else
+#define LOKI_HD
+#define LOKI_D
+#define LOKI_H
+#endif
+
 inline constexpr std::array<std::string, 5> kParamNames = {
     "crackle", "snap", "jerk", "accel", "freq"};
 

@@ -70,7 +70,9 @@ public:
                            std::span<const SizeType> indices_ffa,
                            std::span<const float> phase_shift,
                            std::span<FoldType> folds_out,
-                           SizeType n_leaves) noexcept = 0;
+                           SizeType n_leaves,
+                           SizeType physical_start_idx,
+                           SizeType capacity) noexcept = 0;
 
     virtual SizeType score_and_filter(std::span<const FoldType> folds_tree,
                                       std::span<float> scores_tree,
@@ -146,7 +148,9 @@ public:
                    std::span<const SizeType> indices_ffa,
                    std::span<const float> phase_shift,
                    std::span<FoldType> folds_out,
-                   SizeType n_leaves) noexcept override;
+                   SizeType n_leaves,
+                   SizeType physical_start_idx,
+                   SizeType capacity) noexcept override;
 
     SizeType score_and_filter(std::span<const FoldType> folds_tree,
                               std::span<float> scores_tree,
