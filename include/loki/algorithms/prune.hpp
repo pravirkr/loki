@@ -14,24 +14,24 @@
 
 #ifdef LOKI_ENABLE_CUDA
 #include <cuda/std/span>
-#include <cuda_runtime_api.h>
+#include <cuda_runtime.h>
 #endif // LOKI_ENABLE_CUDA
 
 namespace loki::algorithms {
 
-class PruningManager {
+class EPMultiPass {
 public:
-    PruningManager(search::PulsarSearchConfig cfg,
-                   std::span<const float> threshold_scheme,
-                   std::optional<SizeType> n_runs                = std::nullopt,
-                   std::optional<std::vector<SizeType>> ref_segs = std::nullopt,
-                   SizeType max_sugg                             = 1U << 18U,
-                   SizeType batch_size                           = 1024U);
-    ~PruningManager();
-    PruningManager(PruningManager&&) noexcept;
-    PruningManager& operator=(PruningManager&&) noexcept;
-    PruningManager(const PruningManager&)            = delete;
-    PruningManager& operator=(const PruningManager&) = delete;
+    EPMultiPass(search::PulsarSearchConfig cfg,
+                std::span<const float> threshold_scheme,
+                std::optional<SizeType> n_runs                = std::nullopt,
+                std::optional<std::vector<SizeType>> ref_segs = std::nullopt,
+                SizeType max_sugg                             = 1U << 18U,
+                SizeType batch_size                           = 1024U);
+    ~EPMultiPass();
+    EPMultiPass(EPMultiPass&&) noexcept;
+    EPMultiPass& operator=(EPMultiPass&&) noexcept;
+    EPMultiPass(const EPMultiPass&)            = delete;
+    EPMultiPass& operator=(const EPMultiPass&) = delete;
 
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
@@ -84,9 +84,9 @@ using PruneFourier = Prune<ComplexType>;
 
 #ifdef LOKI_ENABLE_CUDA
 
-class PruningManagerCUDA {
+class EPMultiPassCUDA {
 public:
-    PruningManagerCUDA(
+    EPMultiPassCUDA(
         search::PulsarSearchConfig cfg,
         std::span<const float> threshold_scheme,
         std::optional<SizeType> n_runs                = std::nullopt,
@@ -94,11 +94,11 @@ public:
         SizeType max_sugg                             = 1U << 20U,
         SizeType batch_size                           = 4096U,
         int device_id                                 = 0);
-    ~PruningManagerCUDA();
-    PruningManagerCUDA(PruningManagerCUDA&&) noexcept;
-    PruningManagerCUDA& operator=(PruningManagerCUDA&&) noexcept;
-    PruningManagerCUDA(const PruningManagerCUDA&)            = delete;
-    PruningManagerCUDA& operator=(const PruningManagerCUDA&) = delete;
+    ~EPMultiPassCUDA();
+    EPMultiPassCUDA(EPMultiPassCUDA&&) noexcept;
+    EPMultiPassCUDA& operator=(EPMultiPassCUDA&&) noexcept;
+    EPMultiPassCUDA(const EPMultiPassCUDA&)            = delete;
+    EPMultiPassCUDA& operator=(const EPMultiPassCUDA&) = delete;
 
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,

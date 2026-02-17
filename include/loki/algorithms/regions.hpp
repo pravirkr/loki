@@ -8,7 +8,7 @@
 
 namespace loki::regions {
 
-inline constexpr SizeType kFFAManagerWriteBatchSize = 1U << 16U;
+inline constexpr SizeType kFFAFreqSweepWriteBatchSize = 1U << 16U;
 
 /**
  * @brief Generates frequency regions for an efficient FFA search.
@@ -96,8 +96,8 @@ public:
     float get_coord_memory_usage() const noexcept;
     /// @brief Get the memory usage of the scores + param sets storage (in GB).
     float get_extra_memory_usage() const noexcept;
-    /// @brief Get the memory usage of the FFA manager for this region (in GB).
-    float get_manager_memory_usage() const noexcept;
+    /// @brief Get the memory usage of the FFA freq sweep for this region (in GB).
+    float get_freq_sweep_memory_usage() const noexcept;
     /// @brief Get the chunk stats for the planner.
     [[nodiscard]] std::vector<coord::FFAChunkStats>
     get_chunk_stats() const noexcept;

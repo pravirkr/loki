@@ -17,10 +17,10 @@
 #include "loki/transforms.hpp"
 
 namespace loki {
-using algorithms::FFAManager;
+using algorithms::EPMultiPass;
+using algorithms::FFAFreqSweep;
 using algorithms::PruneFourier;
 using algorithms::PruneTime;
-using algorithms::PruningManager;
 using detection::MatchedFilter;
 using plans::FFAPlanBase;
 using search::PulsarSearchConfig;
@@ -547,12 +547,12 @@ PYBIND11_MODULE(libloki, m) {
         py::arg("ts_e"), py::arg("ts_v"), py::arg("cfg"),
         py::arg("quiet") = false, py::arg("show_progress") = false);
 
-    py::class_<FFAManager>(m_ffa, "FFAManager")
+    py::class_<FFAFreqSweep>(m_ffa, "FFAFreqSweep")
         .def(py::init<const PulsarSearchConfig&, bool>(), py::arg("cfg"),
              py::arg("show_progress") = true)
         .def(
             "execute",
-            [](FFAManager& self, const PyArrayT<float>& ts_e,
+            [](FFAFreqSweep& self, const PyArrayT<float>& ts_e,
                const PyArrayT<float>& ts_v, const std::string& outdir,
                const std::string& file_prefix) {
                 self.execute(to_span<const float>(ts_e),
@@ -614,7 +614,7 @@ PYBIND11_MODULE(libloki, m) {
                                    return as_pyarray_ref(self.get_scores());
                                });
 
-    py::class_<PruningManager>(m_prune, "PruningManager")
+    py::class_<EPMultiPass>(m_prune, "EPMultiPass")
         .def(py::init<const PulsarSearchConfig&, const std::vector<float>&,
                       std::optional<SizeType>,
                       std::optional<std::vector<SizeType>>, SizeType,
@@ -625,7 +625,7 @@ PYBIND11_MODULE(libloki, m) {
              py::arg("max_sugg") = 1U << 18U, py::arg("batch_size") = 1024U)
         .def(
             "execute",
-            [](PruningManager& self, const PyArrayT<float>& ts_e,
+            [](EPMultiPass& self, const PyArrayT<float>& ts_e,
                const PyArrayT<float>& ts_v, std::string_view outdir,
                std::string_view file_prefix, std::string_view poly_basis,
                bool show_progress) {

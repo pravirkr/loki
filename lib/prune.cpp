@@ -25,7 +25,7 @@
 
 namespace loki::algorithms {
 
-class PruningManager::BaseImpl {
+class EPMultiPass::BaseImpl {
 public:
     BaseImpl()                           = default;
     virtual ~BaseImpl()                  = default;
@@ -43,14 +43,14 @@ public:
 };
 
 template <SupportedFoldType FoldType>
-class PruningManagerTypedImpl final : public PruningManager::BaseImpl {
+class EPMultiPassTypedImpl final : public EPMultiPass::BaseImpl {
 public:
-    PruningManagerTypedImpl(search::PulsarSearchConfig cfg,
-                            std::span<const float> threshold_scheme,
-                            std::optional<SizeType> n_runs,
-                            std::optional<std::vector<SizeType>> ref_segs,
-                            SizeType max_sugg,
-                            SizeType batch_size)
+    EPMultiPassTypedImpl(search::PulsarSearchConfig cfg,
+                         std::span<const float> threshold_scheme,
+                         std::optional<SizeType> n_runs,
+                         std::optional<std::vector<SizeType>> ref_segs,
+                         SizeType max_sugg,
+                         SizeType batch_size)
         : m_cfg(std::move(cfg)),
           m_threshold_scheme(threshold_scheme.begin(), threshold_scheme.end()),
           m_n_runs(n_runs),
@@ -59,11 +59,11 @@ public:
           m_batch_size(batch_size),
           m_nthreads(m_cfg.get_nthreads()) {}
 
-    ~PruningManagerTypedImpl() final                        = default;
-    PruningManagerTypedImpl(const PruningManagerTypedImpl&) = delete;
-    PruningManagerTypedImpl& operator=(const PruningManagerTypedImpl&) = delete;
-    PruningManagerTypedImpl(PruningManagerTypedImpl&&)                 = delete;
-    PruningManagerTypedImpl& operator=(PruningManagerTypedImpl&&)      = delete;
+    ~EPMultiPassTypedImpl() final                                = default;
+    EPMultiPassTypedImpl(const EPMultiPassTypedImpl&)            = delete;
+    EPMultiPassTypedImpl& operator=(const EPMultiPassTypedImpl&) = delete;
+    EPMultiPassTypedImpl(EPMultiPassTypedImpl&&)                 = delete;
+    EPMultiPassTypedImpl& operator=(EPMultiPassTypedImpl&&)      = delete;
 
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
@@ -71,7 +71,7 @@ public:
                  std::string_view file_prefix,
                  std::string_view poly_basis,
                  bool show_progress) override {
-        spdlog::info("PruningManager: Initializing with FFA");
+        spdlog::info("EPMultiPass: Initializing with FFA");
         // Create appropriate FFA fold
         std::tuple<std::vector<FoldType>, plans::FFAPlan<FoldType>> result =
             compute_ffa<FoldType>(ts_e, ts_v, m_cfg, /*quiet=*/false,
@@ -93,7 +93,7 @@ public:
         std::filesystem::create_directories(outdir, ec);
         if (!std::filesystem::exists(outdir)) {
             throw std::runtime_error(
-                std::format("PruningManager::execute: Failed to create output "
+                std::format("EPMultiPass::execute: Failed to create output "
                             "directory '{}': {}",
                             outdir.string(), ec.message()));
         }
@@ -253,7 +253,7 @@ private:
             tracker->stop();
         }
     }
-}; // End PruningManagerTypedImpl implementation
+}; // End EPMultiPassTypedImpl implementation
 
 struct IterationStats {
     SizeType n_leaves     = 0;
@@ -263,7 +263,7 @@ struct IterationStats {
     cands::PruneTimerStats batch_timers;
 };
 
-template <SupportedFoldType FoldType> struct PruningWorkspace {
+template <SupportedFoldType FoldType> struct EPWorkspace {
     constexpr static SizeType kLeavesParamStride = 2;
     SizeType batch_size;
     SizeType branch_max;
@@ -282,10 +282,10 @@ template <SupportedFoldType FoldType> struct PruningWorkspace {
     std::vector<SizeType> branched_param_idx;
     std::vector<float> branched_phase_shift;
 
-    PruningWorkspace(SizeType batch_size,
-                     SizeType branch_max,
-                     SizeType nparams,
-                     SizeType nbins)
+    EPWorkspace(SizeType batch_size,
+                SizeType branch_max,
+                SizeType nparams,
+                SizeType nbins)
         : batch_size(batch_size),
           branch_max(branch_max),
           nparams(nparams),
@@ -311,7 +311,7 @@ template <SupportedFoldType FoldType> struct PruningWorkspace {
         return static_cast<float>(total_memory) /
                static_cast<float>(1ULL << 30U);
     }
-}; // End PruningWorkspace definition
+}; // End EPWorkspace definition
 
 template <SupportedFoldType FoldType> class Prune<FoldType>::Impl {
 public:
@@ -345,11 +345,11 @@ public:
 
         // Allocate iteration workspace
         if constexpr (std::is_same_v<FoldType, ComplexType>) {
-            m_pruning_workspace = std::make_unique<PruningWorkspace<FoldType>>(
+            m_ep_workspace = std::make_unique<EPWorkspace<FoldType>>(
                 m_batch_size, m_branch_max, m_cfg.get_nparams(),
                 m_cfg.get_nbins_f());
         } else {
-            m_pruning_workspace = std::make_unique<PruningWorkspace<FoldType>>(
+            m_ep_workspace = std::make_unique<EPWorkspace<FoldType>>(
                 m_batch_size, m_branch_max, m_cfg.get_nparams(),
                 m_cfg.get_nbins());
         }
@@ -370,7 +370,7 @@ public:
     Impl& operator=(Impl&&)      = delete;
 
     SizeType get_memory_usage() const noexcept {
-        return m_pruning_workspace->get_memory_usage() +
+        return m_ep_workspace->get_memory_usage() +
                m_world_tree->get_memory_usage() +
                m_branching_workspace->get_memory_usage();
     }
@@ -387,9 +387,8 @@ public:
             std::format("{:03d}_{:02d}", ref_seg, task_id);
 
         // Log detailed memory usage
-        const auto memory_workspace_gb =
-            m_pruning_workspace->get_memory_usage();
-        const auto memory_tree_gb = m_world_tree->get_memory_usage();
+        const auto memory_workspace_gb = m_ep_workspace->get_memory_usage();
+        const auto memory_tree_gb      = m_world_tree->get_memory_usage();
         spdlog::info("Pruning run {:03d}: Memory Usage: {:.2f} GB "
                      "(tree) + {:.2f} GB (workspace)",
                      ref_seg, memory_tree_gb, memory_workspace_gb);
@@ -477,7 +476,7 @@ private:
 
     // Active, bounded container of hierarchical search candidates
     std::unique_ptr<utils::WorldTree<FoldType>> m_world_tree;
-    std::unique_ptr<PruningWorkspace<FoldType>> m_pruning_workspace;
+    std::unique_ptr<EPWorkspace<FoldType>> m_ep_workspace;
     std::unique_ptr<utils::BranchingWorkspace> m_branching_workspace;
 
     // Buffers for seeding the world tree and scoring
@@ -632,8 +631,8 @@ private:
             // Branch
             timer.start();
             const auto n_leaves_batch = m_prune_funcs->branch(
-                leaves_tree_span, m_pruning_workspace->branched_leaves,
-                m_pruning_workspace->branched_indices, coord_cur, coord_prev,
+                leaves_tree_span, m_ep_workspace->branched_leaves,
+                m_ep_workspace->branched_indices, coord_cur, coord_prev,
                 current_batch_size, branch_ws);
             stats.batch_timers["branch"] += timer.stop();
             stats.n_leaves += n_leaves_batch;
@@ -642,16 +641,15 @@ private:
                 continue;
             }
             error_check::check_less_equal(
-                n_leaves_batch, m_pruning_workspace->max_branched_leaves,
+                n_leaves_batch, m_ep_workspace->max_branched_leaves,
                 "Branch factor exceeded workspace size:n_leaves_batch <= "
                 "max_branched_leaves");
 
             // Validation
             timer.start();
-            const auto n_leaves_after_validation =
-                m_prune_funcs->validate(m_pruning_workspace->branched_leaves,
-                                        m_pruning_workspace->branched_indices,
-                                        coord_cur, n_leaves_batch);
+            const auto n_leaves_after_validation = m_prune_funcs->validate(
+                m_ep_workspace->branched_leaves,
+                m_ep_workspace->branched_indices, coord_cur, n_leaves_batch);
             stats.batch_timers["validate"] += timer.stop();
             stats.n_leaves_phy += n_leaves_after_validation;
             if (n_leaves_after_validation == 0) {
@@ -661,9 +659,9 @@ private:
 
             // Resolve
             timer.start();
-            m_prune_funcs->resolve(m_pruning_workspace->branched_leaves,
-                                   m_pruning_workspace->branched_param_idx,
-                                   m_pruning_workspace->branched_phase_shift,
+            m_prune_funcs->resolve(m_ep_workspace->branched_leaves,
+                                   m_ep_workspace->branched_param_idx,
+                                   m_ep_workspace->branched_phase_shift,
                                    coord_add, coord_cur, coord_init,
                                    n_leaves_after_validation);
             stats.batch_timers["resolve"] += timer.stop();
@@ -671,11 +669,10 @@ private:
             // Load, shift, add (Map branched_itree to physical indices)
             timer.start();
             m_prune_funcs->shift_add(
-                m_world_tree->get_folds(),
-                m_pruning_workspace->branched_indices, ffa_fold_segment,
-                m_pruning_workspace->branched_param_idx,
-                m_pruning_workspace->branched_phase_shift,
-                m_pruning_workspace->branched_folds, n_leaves_after_validation,
+                m_world_tree->get_folds(), m_ep_workspace->branched_indices,
+                ffa_fold_segment, m_ep_workspace->branched_param_idx,
+                m_ep_workspace->branched_phase_shift,
+                m_ep_workspace->branched_folds, n_leaves_after_validation,
                 m_world_tree->get_physical_start_idx(),
                 m_world_tree->get_capacity());
             stats.batch_timers["shift_add"] += timer.stop();
@@ -683,12 +680,11 @@ private:
             // Score and filter
             timer.start();
             const SizeType n_leaves_passing = m_prune_funcs->score_and_filter(
-                m_pruning_workspace->branched_folds,
-                m_pruning_workspace->branched_scores,
-                m_pruning_workspace->branched_indices, current_threshold,
+                m_ep_workspace->branched_folds, m_ep_workspace->branched_scores,
+                m_ep_workspace->branched_indices, current_threshold,
                 n_leaves_after_validation);
             auto branched_scores_span =
-                std::span<const float>(m_pruning_workspace->branched_scores)
+                std::span<const float>(m_ep_workspace->branched_scores)
                     .first(n_leaves_after_validation);
             const auto [min_it, max_it] =
                 std::ranges::minmax_element(branched_scores_span);
@@ -701,23 +697,22 @@ private:
                 continue;
             }
             error_check::check_less_equal(
-                n_leaves_passing, m_pruning_workspace->max_branched_leaves,
+                n_leaves_passing, m_ep_workspace->max_branched_leaves,
                 "n_leaves_passing <= max_branched_leaves");
 
             // Transform
             timer.start();
-            m_prune_funcs->transform(m_pruning_workspace->branched_leaves,
-                                     m_pruning_workspace->branched_indices,
+            m_prune_funcs->transform(m_ep_workspace->branched_leaves,
+                                     m_ep_workspace->branched_indices,
                                      coord_next, coord_cur, n_leaves_passing);
             stats.batch_timers["transform"] += timer.stop();
 
             // Add batch to output suggestions
             timer.start();
             current_threshold = m_world_tree->add_batch_scattered(
-                m_pruning_workspace->branched_leaves,
-                m_pruning_workspace->branched_folds,
-                m_pruning_workspace->branched_scores,
-                m_pruning_workspace->branched_indices, current_threshold,
+                m_ep_workspace->branched_leaves, m_ep_workspace->branched_folds,
+                m_ep_workspace->branched_scores,
+                m_ep_workspace->branched_indices, current_threshold,
                 n_leaves_passing);
             stats.batch_timers["batch_add"] += timer.stop();
             // Notify the buffer that a batch of the old suggestions has been
@@ -742,32 +737,31 @@ private:
     }
 }; // End Prune::Impl definition
 
-PruningManager::PruningManager(search::PulsarSearchConfig cfg,
-                               std::span<const float> threshold_scheme,
-                               std::optional<SizeType> n_runs,
-                               std::optional<std::vector<SizeType>> ref_segs,
-                               SizeType max_sugg,
-                               SizeType batch_size) {
+EPMultiPass::EPMultiPass(search::PulsarSearchConfig cfg,
+                         std::span<const float> threshold_scheme,
+                         std::optional<SizeType> n_runs,
+                         std::optional<std::vector<SizeType>> ref_segs,
+                         SizeType max_sugg,
+                         SizeType batch_size) {
     if (cfg.get_use_fourier()) {
-        m_impl = std::make_unique<PruningManagerTypedImpl<ComplexType>>(
+        m_impl = std::make_unique<EPMultiPassTypedImpl<ComplexType>>(
             std::move(cfg), threshold_scheme, n_runs, std::move(ref_segs),
             max_sugg, batch_size);
     } else {
-        m_impl = std::make_unique<PruningManagerTypedImpl<float>>(
+        m_impl = std::make_unique<EPMultiPassTypedImpl<float>>(
             std::move(cfg), threshold_scheme, n_runs, std::move(ref_segs),
             max_sugg, batch_size);
     }
 }
-PruningManager::~PruningManager()                               = default;
-PruningManager::PruningManager(PruningManager&& other) noexcept = default;
-PruningManager&
-PruningManager::operator=(PruningManager&& other) noexcept = default;
-void PruningManager::execute(std::span<const float> ts_e,
-                             std::span<const float> ts_v,
-                             const std::filesystem::path& outdir,
-                             std::string_view file_prefix,
-                             std::string_view poly_basis,
-                             bool show_progress) {
+EPMultiPass::~EPMultiPass()                                       = default;
+EPMultiPass::EPMultiPass(EPMultiPass&& other) noexcept            = default;
+EPMultiPass& EPMultiPass::operator=(EPMultiPass&& other) noexcept = default;
+void EPMultiPass::execute(std::span<const float> ts_e,
+                          std::span<const float> ts_v,
+                          const std::filesystem::path& outdir,
+                          std::string_view file_prefix,
+                          std::string_view poly_basis,
+                          bool show_progress) {
     m_impl->execute(ts_e, ts_v, outdir, file_prefix, poly_basis, show_progress);
 }
 

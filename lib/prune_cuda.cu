@@ -26,7 +26,7 @@
 
 namespace loki::algorithms {
 
-class PruningManagerCUDA::BaseImpl {
+class EPMultiPassCUDA::BaseImpl {
 public:
     BaseImpl()                           = default;
     virtual ~BaseImpl()                  = default;
@@ -43,10 +43,10 @@ public:
 };
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
-class PruningManagerCUDATypedImpl final : public PruningManagerCUDA::BaseImpl {
+class EPMultiPassCUDATypedImpl final : public EPMultiPassCUDA::BaseImpl {
 public:
     using HostFoldType = typename FoldTypeTraits<FoldTypeCUDA>::HostType;
-    PruningManagerCUDATypedImpl(search::PulsarSearchConfig cfg,
+    EPMultiPassCUDATypedImpl(search::PulsarSearchConfig cfg,
                                 std::span<const float> threshold_scheme,
                                 std::optional<SizeType> n_runs,
                                 std::optional<std::vector<SizeType>> ref_segs,
@@ -61,20 +61,20 @@ public:
           m_batch_size(batch_size),
           m_device_id(device_id) {}
 
-    ~PruningManagerCUDATypedImpl() final                            = default;
-    PruningManagerCUDATypedImpl(const PruningManagerCUDATypedImpl&) = delete;
-    PruningManagerCUDATypedImpl&
-    operator=(const PruningManagerCUDATypedImpl&)              = delete;
-    PruningManagerCUDATypedImpl(PruningManagerCUDATypedImpl&&) = delete;
-    PruningManagerCUDATypedImpl&
-    operator=(PruningManagerCUDATypedImpl&&) = delete;
+    ~EPMultiPassCUDATypedImpl() final                            = default;
+    EPMultiPassCUDATypedImpl(const EPMultiPassCUDATypedImpl&) = delete;
+    EPMultiPassCUDATypedImpl&
+    operator=(const EPMultiPassCUDATypedImpl&)              = delete;
+    EPMultiPassCUDATypedImpl(EPMultiPassCUDATypedImpl&&) = delete;
+    EPMultiPassCUDATypedImpl&
+    operator=(EPMultiPassCUDATypedImpl&&) = delete;
 
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
                  const std::filesystem::path& outdir,
                  std::string_view file_prefix,
                  std::string_view poly_basis) override {
-        spdlog::info("PruningManagerCUDA: Initializing with FFA");
+        spdlog::info("EPMultiPassCUDA: Initializing with FFA");
         // Create appropriate FFA fold
         std::tuple<thrust::device_vector<FoldTypeCUDA>,
                    plans::FFAPlan<HostFoldType>>
@@ -98,7 +98,7 @@ public:
         std::filesystem::create_directories(outdir, ec);
         if (!std::filesystem::exists(outdir)) {
             throw std::runtime_error(std::format(
-                "PruningManagerCUDA::execute: Failed to create output "
+                "EPMultiPassCUDA::execute: Failed to create output "
                 "directory '{}': {}",
                 outdir.string(), ec.message()));
         }
@@ -140,14 +140,14 @@ private:
     SizeType m_batch_size;
     int m_device_id;
 
-}; // End PruningManagerCUDATypedImpl implementation
+}; // End EPMultiPassCUDATypedImpl implementation
 
 struct IterationStats {
     SizeType n_leaves     = 0;
     SizeType n_leaves_phy = 0;
 };
 
-template <SupportedFoldTypeCUDA FoldTypeCUDA> struct PruningWorkspaceCUDA {
+template <SupportedFoldTypeCUDA FoldTypeCUDA> struct EPWorkspaceCUDA {
     constexpr static SizeType kLeavesParamStride = 2;
     SizeType batch_size;
     SizeType branch_max;
@@ -166,7 +166,7 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA> struct PruningWorkspaceCUDA {
     thrust::device_vector<uint32_t> branched_param_idx_d;
     thrust::device_vector<float> branched_phase_shift_d;
 
-    PruningWorkspaceCUDA(SizeType batch_size,
+    EPWorkspaceCUDA(SizeType batch_size,
                          SizeType branch_max,
                          SizeType nparams,
                          SizeType nbins)
@@ -235,13 +235,13 @@ public:
 
         // Allocate iteration workspace
         if constexpr (std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>) {
-            m_pruning_workspace =
-                std::make_unique<PruningWorkspaceCUDA<FoldTypeCUDA>>(
+            m_ep_workspace =
+                std::make_unique<EPWorkspaceCUDA<FoldTypeCUDA>>(
                     m_batch_size, m_branch_max, m_cfg.get_nparams(),
                     m_cfg.get_nbins_f());
         } else {
-            m_pruning_workspace =
-                std::make_unique<PruningWorkspaceCUDA<FoldTypeCUDA>>(
+            m_ep_workspace =
+                std::make_unique<EPWorkspaceCUDA<FoldTypeCUDA>>(
                     m_batch_size, m_branch_max, m_cfg.get_nparams(),
                     m_cfg.get_nbins());
         }
@@ -262,7 +262,7 @@ public:
     Impl& operator=(Impl&&)      = delete;
 
     SizeType get_memory_usage() const noexcept {
-        return m_pruning_workspace->get_memory_usage() +
+        return m_ep_workspace->get_memory_usage() +
                m_world_tree->get_memory_usage();
     }
 
@@ -279,7 +279,7 @@ public:
 
         // Log detailed memory usage
         const auto memory_workspace_gb =
-            m_pruning_workspace->get_memory_usage();
+            m_ep_workspace->get_memory_usage();
         const auto memory_suggestions_gb = m_world_tree->get_memory_usage();
         spdlog::info("Pruning run {:03d}: Memory Usage: {:.2f} GB "
                      "(suggestions) + {:.2f} GB (workspace)",
@@ -383,7 +383,7 @@ private:
     std::unique_ptr<cands::PruneStatsCollection> m_pstats;
 
     std::unique_ptr<utils::WorldTreeCUDA<FoldTypeCUDA>> m_world_tree;
-    std::unique_ptr<PruningWorkspaceCUDA<FoldTypeCUDA>> m_pruning_workspace;
+    std::unique_ptr<EPWorkspaceCUDA<FoldTypeCUDA>> m_ep_workspace;
     std::unique_ptr<utils::BranchingWorkspaceCUDA> m_branching_workspace;
 
     // Buffers for seeding the world tree and scoring
@@ -532,8 +532,8 @@ private:
             // Branch
             const auto n_leaves_batch = m_prune_funcs->branch(
                 leaves_tree_span,
-                cuda_utils::as_span(m_pruning_workspace->branched_leaves_d),
-                cuda_utils::as_span(m_pruning_workspace->branched_indices_d),
+                cuda_utils::as_span(m_ep_workspace->branched_leaves_d),
+                cuda_utils::as_span(m_ep_workspace->branched_indices_d),
                 coord_cur, coord_prev, current_batch_size, branch_ws, stream);
             stats.n_leaves += n_leaves_batch;
             if (n_leaves_batch == 0) {
@@ -541,14 +541,14 @@ private:
                 continue;
             }
             error_check::check_less_equal(
-                n_leaves_batch, m_pruning_workspace->max_branched_leaves,
+                n_leaves_batch, m_ep_workspace->max_branched_leaves,
                 "Branch factor exceeded workspace size:n_leaves_batch <= "
                 "max_branched_leaves");
 
             // Validation
             const auto n_leaves_after_validation = m_prune_funcs->validate(
-                cuda_utils::as_span(m_pruning_workspace->branched_leaves_d),
-                cuda_utils::as_span(m_pruning_workspace->branched_indices_d),
+                cuda_utils::as_span(m_ep_workspace->branched_leaves_d),
+                cuda_utils::as_span(m_ep_workspace->branched_indices_d),
                 coord_cur, n_leaves_batch, stream);
             stats.n_leaves_phy += n_leaves_after_validation;
             if (n_leaves_after_validation == 0) {
@@ -558,10 +558,10 @@ private:
 
             // Resolve kernel
             m_prune_funcs->resolve(
-                cuda_utils::as_span(m_pruning_workspace->branched_leaves_d),
-                cuda_utils::as_span(m_pruning_workspace->branched_param_idx_d),
+                cuda_utils::as_span(m_ep_workspace->branched_leaves_d),
+                cuda_utils::as_span(m_ep_workspace->branched_param_idx_d),
                 cuda_utils::as_span(
-                    m_pruning_workspace->branched_phase_shift_d),
+                    m_ep_workspace->branched_phase_shift_d),
                 coord_add, coord_cur, coord_init, n_leaves_after_validation,
                 stream);
 
@@ -570,21 +570,21 @@ private:
             // indices in shift_add kernel
             m_prune_funcs->shift_add(
                 m_world_tree->get_folds_span(),
-                cuda_utils::as_span(m_pruning_workspace->branched_indices_d),
+                cuda_utils::as_span(m_ep_workspace->branched_indices_d),
                 ffa_fold_segment,
-                cuda_utils::as_span(m_pruning_workspace->branched_param_idx_d),
+                cuda_utils::as_span(m_ep_workspace->branched_param_idx_d),
                 cuda_utils::as_span(
-                    m_pruning_workspace->branched_phase_shift_d),
-                cuda_utils::as_span(m_pruning_workspace->branched_folds_d),
+                    m_ep_workspace->branched_phase_shift_d),
+                cuda_utils::as_span(m_ep_workspace->branched_folds_d),
                 n_leaves_after_validation,
                 m_world_tree->get_physical_start_idx(),
                 m_world_tree->get_capacity(), stream);
 
             // Score and prune kernel
             const auto n_leaves_passing = m_prune_funcs->score_and_filter(
-                cuda_utils::as_span(m_pruning_workspace->branched_folds_d),
-                cuda_utils::as_span(m_pruning_workspace->branched_scores_d),
-                cuda_utils::as_span(m_pruning_workspace->branched_indices_d),
+                cuda_utils::as_span(m_ep_workspace->branched_folds_d),
+                cuda_utils::as_span(m_ep_workspace->branched_scores_d),
+                cuda_utils::as_span(m_ep_workspace->branched_indices_d),
                 current_threshold, n_leaves_after_validation, m_passing_counter,
                 stream);
 
@@ -593,21 +593,21 @@ private:
                 continue;
             }
             error_check::check_less_equal(
-                n_leaves_passing, m_pruning_workspace->max_branched_leaves,
+                n_leaves_passing, m_ep_workspace->max_branched_leaves,
                 "n_leaves_passing <= max_branched_leaves");
 
             // Transform kernel
             m_prune_funcs->transform(
-                cuda_utils::as_span(m_pruning_workspace->branched_leaves_d),
-                cuda_utils::as_span(m_pruning_workspace->branched_indices_d),
+                cuda_utils::as_span(m_ep_workspace->branched_leaves_d),
+                cuda_utils::as_span(m_ep_workspace->branched_indices_d),
                 coord_next, coord_cur, n_leaves_passing, stream);
 
             // Add batch to output suggestions
             current_threshold = m_world_tree->add_batch_scattered(
-                cuda_utils::as_span(m_pruning_workspace->branched_leaves_d),
-                cuda_utils::as_span(m_pruning_workspace->branched_folds_d),
-                cuda_utils::as_span(m_pruning_workspace->branched_scores_d),
-                cuda_utils::as_span(m_pruning_workspace->branched_indices_d),
+                cuda_utils::as_span(m_ep_workspace->branched_leaves_d),
+                cuda_utils::as_span(m_ep_workspace->branched_folds_d),
+                cuda_utils::as_span(m_ep_workspace->branched_scores_d),
+                cuda_utils::as_span(m_ep_workspace->branched_indices_d),
                 current_threshold, n_leaves_passing, stream);
 
             // Notify the buffer that a batch of the old suggestions has been
@@ -633,7 +633,7 @@ private:
 
 }; // End PruneCUDA::Impl implementation
 
-PruningManagerCUDA::PruningManagerCUDA(
+EPMultiPassCUDA::EPMultiPassCUDA(
     search::PulsarSearchConfig cfg,
     std::span<const float> threshold_scheme,
     std::optional<SizeType> n_runs,
@@ -642,21 +642,21 @@ PruningManagerCUDA::PruningManagerCUDA(
     SizeType batch_size,
     int device_id) {
     if (cfg.get_use_fourier()) {
-        m_impl = std::make_unique<PruningManagerCUDATypedImpl<ComplexTypeCUDA>>(
+        m_impl = std::make_unique<EPMultiPassCUDATypedImpl<ComplexTypeCUDA>>(
             std::move(cfg), threshold_scheme, n_runs, std::move(ref_segs),
             max_sugg, batch_size, device_id);
     } else {
-        m_impl = std::make_unique<PruningManagerCUDATypedImpl<float>>(
+        m_impl = std::make_unique<EPMultiPassCUDATypedImpl<float>>(
             std::move(cfg), threshold_scheme, n_runs, std::move(ref_segs),
             max_sugg, batch_size, device_id);
     }
 }
-PruningManagerCUDA::~PruningManagerCUDA() = default;
-PruningManagerCUDA::PruningManagerCUDA(PruningManagerCUDA&& other) noexcept =
+EPMultiPassCUDA::~EPMultiPassCUDA() = default;
+EPMultiPassCUDA::EPMultiPassCUDA(EPMultiPassCUDA&& other) noexcept =
     default;
-PruningManagerCUDA&
-PruningManagerCUDA::operator=(PruningManagerCUDA&& other) noexcept = default;
-void PruningManagerCUDA::execute(std::span<const float> ts_e,
+EPMultiPassCUDA&
+EPMultiPassCUDA::operator=(EPMultiPassCUDA&& other) noexcept = default;
+void EPMultiPassCUDA::execute(std::span<const float> ts_e,
                                  std::span<const float> ts_v,
                                  const std::filesystem::path& outdir,
                                  std::string_view file_prefix,

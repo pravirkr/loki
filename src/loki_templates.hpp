@@ -104,8 +104,8 @@ void bind_ffa_region_stats(py::module& m, const std::string& name) {
                                &FFARegionStats<T>::get_coord_memory_usage)
         .def_property_readonly("extra_memory_usage",
                                &FFARegionStats<T>::get_extra_memory_usage)
-        .def_property_readonly("manager_memory_usage",
-                               &FFARegionStats<T>::get_manager_memory_usage);
+        .def_property_readonly("freq_sweep_memory_usage",
+                               &FFARegionStats<T>::get_freq_sweep_memory_usage);
 }
 
 // Template function to bind FFARegionPlanner<T>

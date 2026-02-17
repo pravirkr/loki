@@ -9,8 +9,8 @@
 #include "loki/loki.hpp"
 
 namespace loki {
-using algorithms::FFAManagerCUDA;
-using algorithms::PruningManagerCUDA;
+using algorithms::EPMultiPassCUDA;
+using algorithms::FFAFreqSweepCUDA;
 using detection::DynamicThresholdSchemeCUDA;
 
 namespace py = pybind11;
@@ -200,12 +200,12 @@ PYBIND11_MODULE(libculoki, m) { // NOLINT
         py::arg("ts_e"), py::arg("ts_v"), py::arg("cfg"),
         py::arg("device_id") = 0, py::arg("quiet") = false);
 
-    py::class_<FFAManagerCUDA>(m_ffa, "FFAManagerCUDA")
+    py::class_<FFAFreqSweepCUDA>(m_ffa, "FFAFreqSweepCUDA")
         .def(py::init<const PulsarSearchConfig&, int>(), py::arg("cfg"),
              py::arg("device_id") = 0)
         .def(
             "execute",
-            [](FFAManagerCUDA& self, const PyArrayT<float>& ts_e,
+            [](FFAFreqSweepCUDA& self, const PyArrayT<float>& ts_e,
                const PyArrayT<float>& ts_v, const std::string& outdir,
                const std::string& file_prefix) {
                 self.execute(to_span<const float>(ts_e),
@@ -216,7 +216,7 @@ PYBIND11_MODULE(libculoki, m) { // NOLINT
 
     auto m_prune = m.def_submodule("prune", "Pruning submodule");
 
-    py::class_<PruningManagerCUDA>(m_prune, "PruningManagerCUDA")
+    py::class_<EPMultiPassCUDA>(m_prune, "EPMultiPassCUDA")
         .def(py::init<const PulsarSearchConfig&, const std::vector<float>&,
                       std::optional<SizeType>,
                       std::optional<std::vector<SizeType>>, SizeType, SizeType,
@@ -228,7 +228,7 @@ PYBIND11_MODULE(libculoki, m) { // NOLINT
              py::arg("device_id") = 0)
         .def(
             "execute",
-            [](PruningManagerCUDA& self, const PyArrayT<float>& ts_e,
+            [](EPMultiPassCUDA& self, const PyArrayT<float>& ts_e,
                const PyArrayT<float>& ts_v, std::string_view outdir,
                std::string_view file_prefix, std::string_view poly_basis) {
                 self.execute(to_span<const float>(ts_e),

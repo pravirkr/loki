@@ -1,4 +1,4 @@
-#include "loki/pipelines/ffa_manager.hpp"
+#include "loki/pipelines/ffa_freq_sweep.hpp"
 
 #include <spdlog/spdlog.h>
 #include <thrust/device_vector.h>
@@ -18,7 +18,7 @@
 
 namespace loki::algorithms {
 
-class FFAManagerCUDA::BaseImpl {
+class FFAFreqSweepCUDA::BaseImpl {
 public:
     BaseImpl()                           = default;
     virtual ~BaseImpl()                  = default;
@@ -34,12 +34,12 @@ public:
 };
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
-class FFAManagerCUDATypedImpl final : public FFAManagerCUDA::BaseImpl {
+class FFAFreqSweepCUDATypedImpl final : public FFAFreqSweepCUDA::BaseImpl {
 public:
     using HostFoldType   = FoldTypeTraits<FoldTypeCUDA>::HostType;
     using DeviceFoldType = FoldTypeTraits<FoldTypeCUDA>::DeviceType;
 
-    FFAManagerCUDATypedImpl(search::PulsarSearchConfig cfg, int device_id)
+    FFAFreqSweepCUDATypedImpl(search::PulsarSearchConfig cfg, int device_id)
         : m_base_cfg(std::move(cfg)),
           m_device_id(device_id),
           m_region_planner(create_region_planner(m_base_cfg, m_device_id)) {
@@ -64,21 +64,22 @@ public:
         m_widths_d = m_base_cfg.get_scoring_widths();
 
         // Log the actual memory usage for the allocated buffers
-        spdlog::info("FFAManagerCUDA allocated {:.2f} GB ({:.2f} GB buffers "
+        spdlog::info("FFAFreqSweepCUDA allocated {:.2f} GB ({:.2f} GB buffers "
                      "+ {:.2f} GB coords + {:.2f} GB extra)",
-                     planner_stats.get_manager_memory_usage(),
+                     planner_stats.get_freq_sweep_memory_usage(),
                      planner_stats.get_buffer_memory_usage(),
                      planner_stats.get_coord_memory_usage(),
                      planner_stats.get_extra_memory_usage());
-        spdlog::info("FFAManagerCUDA will process {} chunks",
+        spdlog::info("FFAFreqSweepCUDA will process {} chunks",
                      m_region_planner.get_nregions());
     }
 
-    ~FFAManagerCUDATypedImpl() final                        = default;
-    FFAManagerCUDATypedImpl(const FFAManagerCUDATypedImpl&) = delete;
-    FFAManagerCUDATypedImpl& operator=(const FFAManagerCUDATypedImpl&) = delete;
-    FFAManagerCUDATypedImpl(FFAManagerCUDATypedImpl&&)                 = delete;
-    FFAManagerCUDATypedImpl& operator=(FFAManagerCUDATypedImpl&&)      = delete;
+    ~FFAFreqSweepCUDATypedImpl() final                          = default;
+    FFAFreqSweepCUDATypedImpl(const FFAFreqSweepCUDATypedImpl&) = delete;
+    FFAFreqSweepCUDATypedImpl&
+    operator=(const FFAFreqSweepCUDATypedImpl&)                       = delete;
+    FFAFreqSweepCUDATypedImpl(FFAFreqSweepCUDATypedImpl&&)            = delete;
+    FFAFreqSweepCUDATypedImpl& operator=(FFAFreqSweepCUDATypedImpl&&) = delete;
 
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
@@ -156,8 +157,8 @@ public:
         ffa_timer_stats_pipeline["io"] += timer.stop();
         m_ffa_stats->update_stats(ffa_timer_stats_pipeline, accumulated_flops);
         writer.write_ffa_stats(*m_ffa_stats);
-        spdlog::info("FFA Manager complete.");
-        spdlog::info("FFA Manager: timer: {}",
+        spdlog::info("FFA Freq Sweep complete.");
+        spdlog::info("FFA Freq Sweep: timer: {}",
                      m_ffa_stats->get_concise_timer_summary());
     }
 
@@ -240,9 +241,10 @@ private:
         const auto ncoords   = ffa_plan.get_ncoords().back();
         const auto n_widths  = cfg.get_scoring_widths().size();
         const auto n_scores  = ncoords * n_widths;
-        error_check::check_equal(nsegments, 1U,
-                                 "FFAManager::execute_ffa_region: nsegments "
-                                 "must be 1 to call scoring function");
+        error_check::check_equal(
+            nsegments, 1U,
+            "FFAFreqSweepCUDA::execute_ffa_region: nsegments "
+            "must be 1 to call scoring function");
         // Calculate available space in buffers
         const SizeType available_space =
             m_scores_d.size() - m_total_passing_scores;
@@ -298,7 +300,7 @@ private:
             SizeType batch_start = 0;
             while (batch_start < n_passing) {
                 const SizeType batch_end =
-                    std::min(batch_start + regions::kFFAManagerWriteBatchSize,
+                    std::min(batch_start + regions::kFFAFreqSweepWriteBatchSize,
                              n_passing);
                 const SizeType batch_count = batch_end - batch_start;
 
@@ -339,27 +341,27 @@ private:
         return accumulated_flops;
     }
 
-}; // End FFAManagerCUDATypedImpl definition
+}; // End FFAFreqSweepCUDATypedImpl definition
 
-FFAManagerCUDA::FFAManagerCUDA(const search::PulsarSearchConfig& cfg,
-                               int device_id) {
+FFAFreqSweepCUDA::FFAFreqSweepCUDA(const search::PulsarSearchConfig& cfg,
+                                   int device_id) {
     if (cfg.get_use_fourier()) {
-        m_impl = std::make_unique<FFAManagerCUDATypedImpl<ComplexTypeCUDA>>(
+        m_impl = std::make_unique<FFAFreqSweepCUDATypedImpl<ComplexTypeCUDA>>(
             cfg, device_id);
     } else {
         m_impl =
-            std::make_unique<FFAManagerCUDATypedImpl<float>>(cfg, device_id);
+            std::make_unique<FFAFreqSweepCUDATypedImpl<float>>(cfg, device_id);
     }
 }
-FFAManagerCUDA::~FFAManagerCUDA()                               = default;
-FFAManagerCUDA::FFAManagerCUDA(FFAManagerCUDA&& other) noexcept = default;
-FFAManagerCUDA&
-FFAManagerCUDA::operator=(FFAManagerCUDA&& other) noexcept = default;
+FFAFreqSweepCUDA::~FFAFreqSweepCUDA()                                 = default;
+FFAFreqSweepCUDA::FFAFreqSweepCUDA(FFAFreqSweepCUDA&& other) noexcept = default;
+FFAFreqSweepCUDA&
+FFAFreqSweepCUDA::operator=(FFAFreqSweepCUDA&& other) noexcept = default;
 
-void FFAManagerCUDA::execute(std::span<const float> ts_e,
-                             std::span<const float> ts_v,
-                             const std::filesystem::path& outdir,
-                             std::string_view file_prefix) {
+void FFAFreqSweepCUDA::execute(std::span<const float> ts_e,
+                               std::span<const float> ts_v,
+                               const std::filesystem::path& outdir,
+                               std::string_view file_prefix) {
     m_impl->execute(ts_e, ts_v, outdir, file_prefix);
 }
 } // namespace loki::algorithms

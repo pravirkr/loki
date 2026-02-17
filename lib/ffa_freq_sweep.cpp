@@ -1,4 +1,4 @@
-#include "loki/pipelines/ffa_manager.hpp"
+#include "loki/pipelines/ffa_freq_sweep.hpp"
 
 #include <memory>
 #include <utility>
@@ -20,7 +20,7 @@
 
 namespace loki::algorithms {
 
-class FFAManager::BaseImpl {
+class FFAFreqSweep::BaseImpl {
 public:
     BaseImpl()                           = default;
     virtual ~BaseImpl()                  = default;
@@ -36,9 +36,9 @@ public:
 };
 
 template <SupportedFoldType FoldType>
-class FFAManagerTypedImpl final : public FFAManager::BaseImpl {
+class FFAFreqSweepTypedImpl final : public FFAFreqSweep::BaseImpl {
 public:
-    FFAManagerTypedImpl(search::PulsarSearchConfig cfg, bool show_progress)
+    FFAFreqSweepTypedImpl(search::PulsarSearchConfig cfg, bool show_progress)
         : m_base_cfg(std::move(cfg)),
           m_region_planner(m_base_cfg),
           m_show_progress(show_progress) {
@@ -57,21 +57,21 @@ public:
         m_fold_time.resize(planner_stats.get_max_buffer_size_time());
 
         // Log the actual memory usage for the allocated buffers
-        spdlog::info("FFAManager allocated {:.2f} GB ({:.2f} GB buffers "
+        spdlog::info("FFAFreqSweep allocated {:.2f} GB ({:.2f} GB buffers "
                      "+ {:.2f} GB coords + {:.2f} GB extra)",
-                     planner_stats.get_manager_memory_usage(),
+                     planner_stats.get_freq_sweep_memory_usage(),
                      planner_stats.get_buffer_memory_usage(),
                      planner_stats.get_coord_memory_usage(),
                      planner_stats.get_extra_memory_usage());
-        spdlog::info("FFAManager will process {} chunks",
+        spdlog::info("FFAFreqSweep will process {} chunks",
                      m_region_planner.get_nregions());
     }
 
-    ~FFAManagerTypedImpl() final                               = default;
-    FFAManagerTypedImpl(const FFAManagerTypedImpl&)            = delete;
-    FFAManagerTypedImpl& operator=(const FFAManagerTypedImpl&) = delete;
-    FFAManagerTypedImpl(FFAManagerTypedImpl&&)                 = delete;
-    FFAManagerTypedImpl& operator=(FFAManagerTypedImpl&&)      = delete;
+    ~FFAFreqSweepTypedImpl() final                                 = default;
+    FFAFreqSweepTypedImpl(const FFAFreqSweepTypedImpl&)            = delete;
+    FFAFreqSweepTypedImpl& operator=(const FFAFreqSweepTypedImpl&) = delete;
+    FFAFreqSweepTypedImpl(FFAFreqSweepTypedImpl&&)                 = delete;
+    FFAFreqSweepTypedImpl& operator=(FFAFreqSweepTypedImpl&&)      = delete;
 
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
@@ -113,8 +113,8 @@ public:
         ffa_timer_stats_pipeline["io"] += timer.stop();
         m_ffa_stats->update_stats(ffa_timer_stats_pipeline, accumulated_flops);
         writer.write_ffa_stats(*m_ffa_stats);
-        spdlog::info("FFA Manager complete.");
-        spdlog::info("FFA Manager: timer: {}",
+        spdlog::info("FFA Freq Sweep complete.");
+        spdlog::info("FFA Freq Sweep: timer: {}",
                      m_ffa_stats->get_concise_timer_summary());
     }
 
@@ -159,7 +159,7 @@ private:
         const auto n_scores  = ncoords * n_widths;
         const auto snr_min   = cfg.get_snr_min();
         error_check::check_equal(nsegments, 1U,
-                                 "FFAManager::execute_ffa_region: nsegments "
+                                 "FFAFreqSweep::execute_ffa_region: nsegments "
                                  "must be 1 to call scoring function");
         // Calculate available space in buffers
         const SizeType available_space =
@@ -227,7 +227,7 @@ private:
             SizeType batch_start = 0;
             while (batch_start < n_passing) {
                 const SizeType batch_end =
-                    std::min(batch_start + regions::kFFAManagerWriteBatchSize,
+                    std::min(batch_start + regions::kFFAFreqSweepWriteBatchSize,
                              n_passing);
                 const SizeType batch_count = batch_end - batch_start;
 
@@ -267,26 +267,26 @@ private:
         }
         return accumulated_flops;
     }
-}; // End FFAManagerTypedImpl definition
+}; // End FFAFreqSweepTypedImpl definition
 
-FFAManager::FFAManager(const search::PulsarSearchConfig& cfg,
-                       bool show_progress) {
+FFAFreqSweep::FFAFreqSweep(const search::PulsarSearchConfig& cfg,
+                           bool show_progress) {
     if (cfg.get_use_fourier()) {
-        m_impl = std::make_unique<FFAManagerTypedImpl<ComplexType>>(
+        m_impl = std::make_unique<FFAFreqSweepTypedImpl<ComplexType>>(
             cfg, show_progress);
     } else {
         m_impl =
-            std::make_unique<FFAManagerTypedImpl<float>>(cfg, show_progress);
+            std::make_unique<FFAFreqSweepTypedImpl<float>>(cfg, show_progress);
     }
 }
-FFAManager::~FFAManager()                                      = default;
-FFAManager::FFAManager(FFAManager&& other) noexcept            = default;
-FFAManager& FFAManager::operator=(FFAManager&& other) noexcept = default;
+FFAFreqSweep::~FFAFreqSweep()                                        = default;
+FFAFreqSweep::FFAFreqSweep(FFAFreqSweep&& other) noexcept            = default;
+FFAFreqSweep& FFAFreqSweep::operator=(FFAFreqSweep&& other) noexcept = default;
 
-void FFAManager::execute(std::span<const float> ts_e,
-                         std::span<const float> ts_v,
-                         const std::filesystem::path& outdir,
-                         std::string_view file_prefix) {
+void FFAFreqSweep::execute(std::span<const float> ts_e,
+                           std::span<const float> ts_v,
+                           const std::filesystem::path& outdir,
+                           std::string_view file_prefix) {
     m_impl->execute(ts_e, ts_v, outdir, file_prefix);
 }
 } // namespace loki::algorithms

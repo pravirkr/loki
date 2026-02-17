@@ -6,16 +6,17 @@ from typing import TYPE_CHECKING
 
 import h5py
 import numpy as np
-from pyloki.utils import np_utils
-from pyloki.utils.misc import CONSOLE, get_logger
 from rich.progress import track
 
 from loki.libloki.configs import PulsarSearchConfig
 from loki.libloki.scores import generate_box_width_trials, snr_boxcar_1d
 from loki.search import ffa_search
+from pyloki.utils import np_utils, psr_utils
+from pyloki.utils.misc import CONSOLE, get_logger
 
 if TYPE_CHECKING:
     from numba import types
+
     from pyloki.io.timeseries import TimeSeries
     from pyloki.simulation.pulse import PulseSignalConfig
 
@@ -45,16 +46,14 @@ def test_sensitivity_ffa(
     )
 
     nparams = len(search_cfg.param_limits)
-    param_arr = ffa_plan.params[-1]
-    true_params_idx = [
-        np_utils.find_nearest_sorted_idx(param_arr[-1], signal_cfg.freq),
-    ]
+    true_params = [signal_cfg.freq]
     for deriv in range(2, nparams + 1):
-        idx = np_utils.find_nearest_sorted_idx(
-            param_arr[-deriv],
-            signal_cfg.mod_kwargs[nparam_to_str[deriv]],
-        )
-        true_params_idx.insert(0, idx)
+        true_params.insert(0, signal_cfg.mod_kwargs[nparam_to_str[deriv]])
+    true_params_idx = psr_utils.get_nearest_indices_analytical(
+        true_params,
+        ffa_plan.param_counts[-1],
+        search_cfg.param_limits,
+    )
     snr_dynamic = float(pgram.data[tuple(true_params_idx)].max())
     snr_empirical = pgram.find_best_params()["snr"]
     if not quiet:

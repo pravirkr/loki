@@ -104,7 +104,7 @@ template <SupportedFoldType FoldType> struct FFARegionStats<FoldType>::Impl {
         return std::max(max_ncoords * n_widths, m_max_passing_candidates);
     }
     SizeType get_write_param_sets_size() const noexcept {
-        return kFFAManagerWriteBatchSize * (n_params + 1); // includes width
+        return kFFAFreqSweepWriteBatchSize * (n_params + 1); // includes width
     }
     float get_buffer_memory_usage() const noexcept {
         return static_cast<float>(2 * max_buffer_size * sizeof(FoldType)) /
@@ -144,7 +144,7 @@ template <SupportedFoldType FoldType> struct FFARegionStats<FoldType>::Impl {
         return device_extra_gb + fold_d_time_gb + get_buffer_memory_usage() +
                get_coord_memory_usage();
     }
-    float get_manager_memory_usage() const noexcept {
+    float get_freq_sweep_memory_usage() const noexcept {
         if (use_gpu) {
             return get_device_memory_usage();
         }
@@ -305,7 +305,7 @@ private:
                 m_base_cfg.get_max_passing_candidates(),
                 m_use_gpu};
 
-            if (min_stats.get_manager_memory_usage() > effective_limit_gb) {
+            if (min_stats.get_freq_sweep_memory_usage() > effective_limit_gb) {
                 throw std::runtime_error(std::format(
                     "FFARegionPlanner: Cannot fit minimum viable chunk at "
                     "highest frequency.\n"
@@ -315,7 +315,8 @@ private:
                     "parameter "
                     "searchranges.",
                     kMinViableRange, min_f_end - min_f_start,
-                    min_stats.get_manager_memory_usage(), effective_limit_gb));
+                    min_stats.get_freq_sweep_memory_usage(),
+                    effective_limit_gb));
             }
         }
 
@@ -361,7 +362,7 @@ private:
                     m_base_cfg.get_nsamps(),
                     m_base_cfg.get_max_passing_candidates(),
                     m_use_gpu};
-                if (sim_stats.get_manager_memory_usage() <=
+                if (sim_stats.get_freq_sweep_memory_usage() <=
                     effective_limit_gb) {
                     // Fits! Try to include more (go lower in frequency)
                     best_f_start = f_probe;
@@ -491,8 +492,8 @@ private:
                      max_overlap_pct);
         spdlog::info("  Memory per chunk: avg={:.2f} GB, max={:.2f} GB",
                      avg_memory, max_memory);
-        spdlog::info("  Manager allocated: {:.2f} GB (limit: {:.2f} GB)",
-                     m_stats.get_manager_memory_usage(),
+        spdlog::info("  Freq Sweep allocated: {:.2f} GB (limit: {:.2f} GB)",
+                     m_stats.get_freq_sweep_memory_usage(),
                      m_base_cfg.get_max_process_memory_gb());
     }
 
@@ -577,8 +578,8 @@ float FFARegionStats<FoldType>::get_extra_memory_usage() const noexcept {
     return m_impl->get_extra_memory_usage();
 }
 template <SupportedFoldType FoldType>
-float FFARegionStats<FoldType>::get_manager_memory_usage() const noexcept {
-    return m_impl->get_manager_memory_usage();
+float FFARegionStats<FoldType>::get_freq_sweep_memory_usage() const noexcept {
+    return m_impl->get_freq_sweep_memory_usage();
 }
 
 // --- Definitions for FFARegionPlanner ---

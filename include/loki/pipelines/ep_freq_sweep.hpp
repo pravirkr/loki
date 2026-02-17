@@ -13,15 +13,15 @@
 
 namespace loki::algorithms {
 
-class FFAManager {
+class EPFreqSweep {
 public:
-    explicit FFAManager(const search::PulsarSearchConfig& cfg,
-                        bool show_progress = true);
-    ~FFAManager();
-    FFAManager(FFAManager&&) noexcept;
-    FFAManager& operator=(FFAManager&&) noexcept;
-    FFAManager(const FFAManager&)            = delete;
-    FFAManager& operator=(const FFAManager&) = delete;
+    explicit EPFreqSweep(const search::PulsarSearchConfig& cfg,
+                         bool show_progress = true);
+    ~EPFreqSweep();
+    EPFreqSweep(EPFreqSweep&&) noexcept;
+    EPFreqSweep& operator=(EPFreqSweep&&) noexcept;
+    EPFreqSweep(const EPFreqSweep&)      = delete;
+    EPFreqSweep& operator=(EPFreqSweep&) = delete;
 
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
@@ -37,15 +37,15 @@ private:
 
 #ifdef LOKI_ENABLE_CUDA
 
-class FFAManagerCUDA {
+class EPFreqSweepCUDA {
 public:
-    explicit FFAManagerCUDA(const search::PulsarSearchConfig& cfg,
-                            int device_id = 0);
-    ~FFAManagerCUDA();
-    FFAManagerCUDA(FFAManagerCUDA&&) noexcept;
-    FFAManagerCUDA& operator=(FFAManagerCUDA&&) noexcept;
-    FFAManagerCUDA(const FFAManagerCUDA&)            = delete;
-    FFAManagerCUDA& operator=(const FFAManagerCUDA&) = delete;
+    explicit EPFreqSweepCUDA(const search::PulsarSearchConfig& cfg,
+                             int device_id = 0);
+    ~EPFreqSweepCUDA();
+    EPFreqSweepCUDA(EPFreqSweepCUDA&&) noexcept;
+    EPFreqSweepCUDA& operator=(EPFreqSweepCUDA&&) noexcept;
+    EPFreqSweepCUDA(const EPFreqSweepCUDA&)      = delete;
+    EPFreqSweepCUDA& operator=(EPFreqSweepCUDA&) = delete;
 
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
