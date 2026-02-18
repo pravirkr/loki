@@ -50,7 +50,7 @@ template <> struct FoldTypeTraits<ComplexTypeCUDA> {
 
 #endif // LOKI_ENABLE_CUDA
 
-inline constexpr size_t kUnrollFactor = 8;
+inline constexpr SizeType kUnrollFactor = 8;
 
 #if defined(__clang__)
 #define UNROLL_VECTORIZE                                                       \
