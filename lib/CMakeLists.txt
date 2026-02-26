@@ -16,7 +16,7 @@ add_library(${PROJECT_NAME}::${LOKI_LIBRARY_NAME} ALIAS ${LOKI_LIBRARY_NAME})
 
 # System dependencies
 message(STATUS "Searching for required system dependencies...")
-find_package(OpenMP REQUIRED)
+find_package(OpenMP REQUIRED COMPONENTS CXX)
 find_package(HDF5 REQUIRED)
 find_package(FFTW REQUIRED COMPONENTS FLOAT_LIB FLOAT_OPENMP_LIB)
 
@@ -26,10 +26,22 @@ message(STATUS "Searching for CPM dependencies (will download if not found local
 # spdlog (Header-only logging library)
 CPMAddPackage(
   NAME spdlog
-  VERSION 1.15.3
-  URL https://github.com/gabime/spdlog/archive/refs/tags/v1.15.3.tar.gz
+  VERSION 1.17
+  URL https://github.com/gabime/spdlog/archive/refs/tags/v1.17.0.tar.gz
   OPTIONS "SPDLOG_INSTALL ON"
 )
+
+# CLI11
+CPMAddPackage(
+  NAME CLI11
+  VERSION 2.6.0
+  URL https://github.com/CLIUtils/CLI11/archive/refs/tags/v2.6.0.tar.gz
+  DOWNLOAD_ONLY YES EXCLUDE_FROM_ALL SYSTEM
+)
+if(CLI11_ADDED)
+  add_library(CLI11::CLI11 INTERFACE IMPORTED GLOBAL)
+  target_include_directories(CLI11::CLI11 INTERFACE ${CLI11_SOURCE_DIR}/include)
+endif()
 
 # xsimd (SIMD library) - Header-only
 CPMAddPackage(
@@ -43,34 +55,25 @@ if(xsimd_ADDED)
   target_include_directories(xsimd INTERFACE ${xsimd_SOURCE_DIR}/include)
 endif()
 
-# Try to find header-only Boost for math+random(no COMPONENTS needed)
-find_package(Boost 1.83.0 QUIET)
-if(NOT Boost_FOUND)
-  message(STATUS "Boost not found or too old, downloading Boost.Math via CPM...")
-  CPMAddPackage(
-    NAME BoostMath
-    VERSION 1.83.0
-    URL https://github.com/boostorg/math/archive/refs/tags/boost-1.83.0.tar.gz
-    DOWNLOAD_ONLY YES
-  )
-  if(BoostMath_ADDED)
-    add_library(Boost::math INTERFACE IMPORTED GLOBAL)
-    target_include_directories(Boost::math INTERFACE ${BoostMath_SOURCE_DIR}/include)
-  endif()
-else()
-  # Use system headers
-  message(STATUS "Using system Boost headers for math: ${Boost_INCLUDE_DIRS}")
-  add_library(Boost::math INTERFACE IMPORTED GLOBAL)
-  target_include_directories(Boost::math INTERFACE ${Boost_INCLUDE_DIRS})
-endif()
-
 # HighFive (HDF5 C++ interface) - Depends on HDF5 found earlier
 CPMAddPackage(
   NAME HighFive
-  VERSION 3.0.0
-  URL https://github.com/highfive-devs/highfive/archive/refs/tags/v3.0.0.tar.gz
+  VERSION 3.3.0
+  URL https://github.com/highfive-devs/highfive/archive/refs/tags/v3.3.0.tar.gz
   OPTIONS "HIGHFIVE_FIND_HDF5 ON"
 )
+
+# BoostMath - standalone header-only library
+CPMAddPackage(
+  NAME BoostMath
+  VERSION 1.90.0
+  URL https://github.com/boostorg/math/archive/refs/tags/boost-1.90.0.tar.gz
+  DOWNLOAD_ONLY YES
+)
+if(BoostMath_ADDED)
+  add_library(Boost::math INTERFACE IMPORTED GLOBAL)
+  target_include_directories(Boost::math INTERFACE ${BoostMath_SOURCE_DIR}/include)
+endif()
 
 # Thread pool
 CPMAddPackage(
@@ -82,18 +85,6 @@ CPMAddPackage(
 if(BS_thread_pool_ADDED)
   add_library(BS_thread_pool INTERFACE IMPORTED GLOBAL)
   target_include_directories(BS_thread_pool INTERFACE ${BS_thread_pool_SOURCE_DIR}/include)
-endif()
-
-# CLI11
-CPMAddPackage(
-  NAME CLI11
-  VERSION 2.5.0
-  URL https://github.com/CLIUtils/CLI11/archive/refs/tags/v2.5.0.tar.gz
-  DOWNLOAD_ONLY YES EXCLUDE_FROM_ALL SYSTEM
-)
-if(CLI11_ADDED)
-  add_library(CLI11::CLI11 INTERFACE IMPORTED GLOBAL)
-  target_include_directories(CLI11::CLI11 INTERFACE ${CLI11_SOURCE_DIR}/include)
 endif()
 
 # toml++
@@ -194,8 +185,7 @@ target_link_libraries(
 if(CMAKE_CUDA_COMPILER)
   target_link_libraries(
     ${LOKI_LIBRARY_NAME}
-    PRIVATE ${LOKI_CUDA_OPTIONS}
+    PRIVATE ${LOKI_CUDA_OPTIONS} CUDA::cuda_driver mathdx::curanddx
     PUBLIC CUDA::cudart CUDA::cufft
-    PRIVATE CUDA::cuda_driver mathdx::curanddx
   )
 endif()

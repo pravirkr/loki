@@ -1,37 +1,27 @@
-cmake_minimum_required(VERSION 3.24)
+cmake_minimum_required(VERSION 3.30)
 
 project(
   loki
-  VERSION 0.0.1
+  VERSION 0.0.2
   LANGUAGES CXX
   DESCRIPTION "A high-performance C++ Pulsar searching library"
 )
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-# Modern CMake policies
-if(POLICY CMP0146)
-  cmake_policy(SET CMP0146 NEW)
-endif()
-if(POLICY CMP0148)
-  cmake_policy(SET CMP0148 NEW)
-endif()
-if(POLICY CMP0167)
-  cmake_policy(SET CMP0167 NEW)
-endif()
 
 # Compiler version requirements
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-  if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 13.0)
+  if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 14.0)
     message(
       FATAL_ERROR
-        "GCC 13.0 or higher is required for C++20 support. Found: ${CMAKE_CXX_COMPILER_VERSION}"
+        "GCC >= 14.0 required for complete C++20 support. Found: ${CMAKE_CXX_COMPILER_VERSION}"
     )
   endif()
 elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
   if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 18.0)
     message(
       FATAL_ERROR
-        "Clang 18.0 or higher is required for C++20 support. Found: ${CMAKE_CXX_COMPILER_VERSION}"
+        "Clang >= 18.0 required for complete C++20 support. Found: ${CMAKE_CXX_COMPILER_VERSION}"
     )
   endif()
 endif()
@@ -43,6 +33,10 @@ option(BUILD_TESTING "Build tests" OFF)
 option(BUILD_BENCHMARKS "Build benchmarks" OFF)
 option(ENABLE_COVERAGE "Enable coverage reporting" OFF)
 option(ENABLE_IPO "Enable Interprocedural Optimization (Link-Time Optimization)" OFF)
+
+# CUDA (tristate: AUTO / ON / OFF)
+set(ENABLE_CUDA "AUTO" CACHE STRING "Enable CUDA support: AUTO, ON, OFF")
+set_property(CACHE ENABLE_CUDA PROPERTY STRINGS "AUTO" "ON" "OFF")
 
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 20)
@@ -80,25 +74,40 @@ endif()
 list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
 include(GNUInstallDirs) # Defines standard installation paths
 
-# Compiler flags (Interface target to hold global compile options)
+# C++ Compile Options
+# Interface target: link any library/executable to this to inherit these flags.
+# Usage: target_link_libraries(my_target PRIVATE ${LOKI_COMPILE_OPTIONS})
 set(LOKI_COMPILE_OPTIONS ${PROJECT_NAME}_COMPILE_OPTIONS)
 add_library(${LOKI_COMPILE_OPTIONS} INTERFACE)
 target_compile_options(${LOKI_COMPILE_OPTIONS} INTERFACE -Wall -Wextra -Wpedantic)
+# Note: These flags are tuned for Linux/macOS GCC/Clang.
+# Windows/MSVC is not a supported build target.
 target_compile_options(
-  ${LOKI_COMPILE_OPTIONS}
-  INTERFACE $<$<CONFIG:Debug>:-g> $<$<CONFIG:Release>:-O3;-DNDEBUG>
-            $<$<CONFIG:MinSizeRel>:-Os;-DNDEBUG>
-            $<$<AND:$<NOT:$<CONFIG:Debug>>,$<COMPILE_LANGUAGE:CXX>>:-march=native;-ffast-math>
+  ${LOKI_COMPILE_OPTIONS} INTERFACE
+  $<$<CONFIG:Debug>:-O0;-g>
+  $<$<CONFIG:Release>:-O3;-DNDEBUG;-march=native;-ffast-math>
+  $<$<CONFIG:RelWithDebInfo>:-O2;-DNDEBUG;-g>
+  $<$<CONFIG:MinSizeRel>:-Os;-DNDEBUG>
 )
 
 # Find CUDA and set up the project
-include(CheckLanguage)
-check_language(CUDA)
+if(ENABLE_CUDA STREQUAL "ON" OR ENABLE_CUDA STREQUAL "AUTO")
+  include(CheckLanguage)
+  check_language(CUDA)
+  if(CMAKE_CUDA_COMPILER)
+    enable_language(CUDA)
+  elseif(ENABLE_CUDA STREQUAL "ON")
+    message(FATAL_ERROR "CUDA was explicitly requested (ENABLE_CUDA=ON) but no CUDA compiler was found.")
+  else()
+    message(STATUS "CUDA compiler not found. Building CPU-only (ENABLE_CUDA=AUTO).")
+  endif()
+elseif(ENABLE_CUDA STREQUAL "OFF")
+  message(STATUS "CUDA disabled by user (ENABLE_CUDA=OFF).")
+endif()
 
 if(CMAKE_CUDA_COMPILER)
-  enable_language(CUDA)
   if(CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 12.6.0)
-    message(FATAL_ERROR "CUDA 12.6 or higher is required. Found: ${CMAKE_CUDA_COMPILER_VERSION}")
+    message(FATAL_ERROR "CUDA >= 12.6 required. Found: ${CMAKE_CUDA_COMPILER_VERSION}")
   endif()
   message(STATUS "Found CUDA ${CMAKE_CUDA_COMPILER_VERSION}.")
 
@@ -119,8 +128,10 @@ if(CMAKE_CUDA_COMPILER)
               --expt-extended-lambda
               --expt-relaxed-constexpr
               -Xcompiler=-Wall,-Wextra
-              $<$<CONFIG:Debug>:-G;-g>
-              $<$<CONFIG:Release>:-O3;-use_fast_math>
+              $<$<CONFIG:Debug>:-G;-g;-O0>
+              $<$<CONFIG:Release>:-O3;-use_fast_math;-DNDEBUG>
+              $<$<CONFIG:RelWithDebInfo>:-O2;-g;-lineinfo;-DNDEBUG>
+              $<$<CONFIG:MinSizeRel>:-O2;-DNDEBUG>
               >
   )
   set(CMAKE_CUDA_ARCHITECTURES native)
@@ -129,7 +140,6 @@ if(CMAKE_CUDA_COMPILER)
   set(CMAKE_CUDA_USE_RESPONSE_FILE_FOR_INCLUDES OFF)
   add_compile_definitions(LOKI_ENABLE_CUDA)
 else()
-  message(STATUS "CUDA compiler not found. GPU code will not be built.")
   remove_definitions(LOKI_ENABLE_CUDA)
 endif()
 

@@ -1,13 +1,14 @@
 [build-system]
-requires = ["scikit-build-core", "pybind11"]
+requires = ["scikit-build-core>=0.10", "pybind11>=3.0"]
 build-backend = "scikit_build_core.build"
 
 [project]
 name = "loki"
-version = "0.0.1"
+dynamic = ["version"]
 description = "Leverage Optimal significance to unveil Keplerian orbIt pulsars"
 readme = "README.md"
 license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Pravir Kumar", email = "pravirka@gmail.com" }]
 requires-python = ">=3.12"
 classifiers = [
@@ -23,33 +24,52 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Astronomy",
 ]
-dependencies = ["numpy", "pyloki @ git+https://github.com/pravirkr/pyloki.git"]
+dependencies = [
+    "numpy>=2.0",
+    "pyloki @ git+https://github.com/pravirkr/pyloki.git",
+]
 
 [project.urls]
 Github = "https://github.com/pravirkr/loki"
 
 [project.optional-dependencies]
 tests = [
-    "pytest",
+    "pytest>=9.0",
     "pytest-cov",
     "pytest-randomly",
     "pytest-sugar",
     "pytest-benchmark",
-    "mypy",
+    "pytest-mock",
 ]
-docs = ["sphinx", "sphinx-book-theme", "sphinx-click", "myst-nb", "breathe"]
-develop = ["ruff"]
+dev = ["ruff", "ty"]
+docs = [
+    "sphinx",
+    "sphinx-book-theme",
+    "sphinx-click",
+    "sphinx-copybutton",
+    "numpydoc",
+    "myst-nb",
+    "jupyter_sphinx",
+    "sphinx-design",
+]
 
 [tool.scikit-build]
-cmake.version = ">=3.15"
+cmake.version = ">=3.30"
 cmake.build-type = "Release"
-install.strip = false
+install.strip = true            # Strip debug symbols
+build-dir = "build/{wheel_tag}"
 
 [tool.scikit-build.cmake.define]
 BUILD_PYTHON = "ON"
 BUILD_TESTING = "OFF"
 BUILD_DOCS = "OFF"
+ENABLE_CUDA = "AUTO"             # Make CUDA auto-detectable
 CMAKE_BUILD_PARALLEL_LEVEL = "4"
+
+[tool.scikit-build.metadata.version]
+provider = "scikit_build_core.metadata.regex"
+input = "CMakeLists.txt"
+regex = 'project\([^)]*VERSION\s+(?P<value>[0-9][^\s)]+)'
 
 [tool.cibuildwheel]
 test-extras = "test"
@@ -105,9 +125,22 @@ ignore-variadic-names = true
 [tool.ruff.lint.isort]
 known-first-party = ["loki", "pyloki"]
 
+[tool.ty.environment]
+python-version = "3.12"
+
+[tool.ty.src]
+include = ["src"]
+exclude = ["tests/**"]
+
+[tool.ty.rules]
+index-out-of-bounds = "ignore"
+unresolved-import = "ignore"
+not-iterable = "ignore"        # For Numba prange
+
 [tool.pytest.ini_options]
-minversion = "8.0"
-testpaths = "tests/python"
+minversion = "9.0"
+addopts = ["-ra", "-q"]
+testpaths = ["tests/python"]
 
 [tool.coverage.run]
 omit = ["tests/*", "*__init__.py", "docs/*"]
@@ -119,18 +152,7 @@ ignore_errors = true
 exclude_lines = ['raise AssertionError', 'raise NotImplementedError']
 
 [tool.coverage.path]
-source = "src/dmt"
+source = ["src/"]
 
 [tool.gcovr]
 filter = ["lib/*"]
-
-[tool.ty.environment]
-python-version = "3.12"
-
-[tool.ty.src]
-exclude = ["tests/**"]
-
-[tool.ty.rules]
-index-out-of-bounds = "ignore"
-unresolved-import = "ignore"
-not-iterable = "ignore"        # For Numba prange
