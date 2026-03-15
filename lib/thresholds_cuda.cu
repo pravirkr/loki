@@ -80,15 +80,6 @@ __device__ int find_bin_index_device(const float* __restrict__ probs,
     return nprobs - 1;
 }
 
-__device__ __forceinline__ uint64_t mix64(uint64_t x) {
-    x ^= x >> 30;
-    x *= 0xbf58476d1ce4e5b9ULL;
-    x ^= x >> 27;
-    x *= 0x94d049bb133111ebULL;
-    x ^= x >> 31;
-    return x;
-}
-
 __global__ void simulate_folds_init_kernel(float* __restrict__ folds_sim,
                                            const float* __restrict__ profile,
                                            uint32_t nbins_padded,
@@ -295,7 +286,7 @@ __global__ __launch_bounds__(256, 4) // Hint: Max 256 threads, min 4 blocks/SM
 
     bool survive = false;
     for (uint32_t iw = 0; iw < nwidths; ++iw) {
-        const uint32_t w = static_cast<uint32_t>(widths[iw]);
+        const uint32_t w = widths[iw];
         const float h    = sqrtf(static_cast<float>(nbins - w) /
                                  static_cast<float>(nbins * w));
         const float b =
