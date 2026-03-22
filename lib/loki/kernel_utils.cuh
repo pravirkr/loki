@@ -222,8 +222,6 @@ branch_one_param_padded_device(uint32_t p,
                                double cur,
                                double sig_cur,
                                double sig_new,
-                               double pmin,
-                               double pmax,
                                double eta,
                                double shift,
                                double* __restrict__ scratch_params,
@@ -232,13 +230,10 @@ branch_one_param_padded_device(uint32_t p,
                                uint32_t flat_base,
                                uint32_t branch_max) {
     const uint32_t pad_offset = (flat_base + p) * branch_max;
-    const double param_range  = (pmax - pmin) * 0.5;
     // DECISION LOGIC:
     // 1. Is the shift significant? (shift >= eta)
     // 2. Is the new step size physically possible? (sig_new <= range)
-    const bool needs_branching = shift >= (eta - utils::kEps);
-    const bool is_splittable   = sig_new <= (param_range + utils::kEps);
-    if (needs_branching && is_splittable) {
+    if (shift >= (eta - utils::kEps)) {
         auto [dparam_act, count] = branch_param_generate_points_device(
             scratch_params + pad_offset, branch_max, cur, sig_cur, sig_new);
         scratch_dparams[flat_base + p] = dparam_act;
@@ -250,5 +245,42 @@ branch_one_param_padded_device(uint32_t p,
         scratch_counts[flat_base + p]  = 1;
     }
 };
+
+// Helper: Loads the output-to-input mapping into Shared Memory
+// Works for any dimension (Accel/Jerk/Snap)
+template <uint32_t KBlockSize>
+__device__ __forceinline__ void load_block_cooperative_map_device(
+    uint32_t* __restrict__ smem_offsets, // Output: Shared mem buffer
+    uint32_t& base_leaf_idx,             // Output: Base index for this block
+    const uint32_t* __restrict__ global_offsets,
+    uint32_t n_leaves) {
+    const uint32_t tid = threadIdx.x;
+
+    // Phase 1: Discovery (One thread finds the anchor)
+    if (tid == 0) {
+        const uint32_t block_out_begin = blockIdx.x * blockDim.x;
+        base_leaf_idx = utils::binary_search_cartesian(global_offsets, n_leaves,
+                                                       block_out_begin);
+    }
+    __syncthreads();
+
+    // Phase 2: Cooperative Loading
+    // Load 'kBlockSize + 1' offsets starting from base_leaf_idx
+    // to handle the full range of the block.
+    const uint32_t load_idx = base_leaf_idx + tid;
+
+    // Standard Load (Use 0xFFFFFFFF sentinel, safe assuming n_branches <
+    // UINT32_MAX)
+    smem_offsets[tid] =
+        (load_idx < n_leaves) ? global_offsets[load_idx] : 0xFFFFFFFF;
+
+    // Boundary Load (Last element for upper_bound checks)
+    if (tid == 0) {
+        const uint32_t last_idx = base_leaf_idx + KBlockSize;
+        smem_offsets[KBlockSize] =
+            (last_idx < n_leaves) ? global_offsets[last_idx] : 0xFFFFFFFF;
+    }
+    __syncthreads();
+}
 
 } // namespace loki::utils

@@ -87,11 +87,20 @@ std::vector<double> poly_taylor_step_d(SizeType nparams,
 
 void poly_taylor_step_d_vec(SizeType nparams,
                             double tobs,
-                            SizeType fold_bins,
-                            double tol_bins,
+                            SizeType nbins,
+                            double eta,
                             std::span<const double> f_max,
                             std::span<double> dparams_batch,
                             double t_ref = 0.0);
+
+void poly_taylor_step_d_vec_limited(SizeType nparams,
+                                    double tobs,
+                                    SizeType nbins,
+                                    double eta,
+                                    std::span<const double> f_max,
+                                    std::span<const ParamLimit> param_limits,
+                                    std::span<double> dparams_batch,
+                                    double t_ref = 0.0);
 
 // Check if a parameter should be split
 bool split_f(double df_old,
@@ -132,25 +141,20 @@ branch_param(double param_cur,
 // The output is written to a pre-allocated array in a slice to write into
 // (shape MAX_BRANCH_VALS,).
 // Returns the refined dparam and the number of params written.
-std::pair<double, SizeType>
-branch_param_padded(std::span<double> out_values,
-                    double param_cur,
-                    double dparam_cur,
-                    double dparam_new,
-                    double param_min = std::numeric_limits<double>::lowest(),
-                    double param_max = std::numeric_limits<double>::max());
+std::pair<double, SizeType> branch_param_padded(std::span<double> out_values,
+                                                double param_cur,
+                                                double dparam_cur,
+                                                double dparam_new);
 
-inline void branch_one_param_padded(int p,
+inline void branch_one_param_padded(SizeType p,
                                     double cur,
                                     double sig_cur,
-                                    double sig_new,
-                                    double pmin,
-                                    double pmax,
                                     double eta,
-                                    const double* __restrict shift_bins_ptr,
-                                    double* __restrict scratch_params_ptr,
-                                    double* __restrict scratch_dparams_ptr,
-                                    SizeType* __restrict scratch_counts_ptr,
+                                    const double* __restrict__ shift_bins_ptr,
+                                    const double* __restrict__ dparam_new_ptr,
+                                    double* __restrict__ scratch_params_ptr,
+                                    double* __restrict__ scratch_dparams_ptr,
+                                    SizeType* __restrict__ scratch_counts_ptr,
                                     SizeType flat_base,
                                     SizeType branch_max) {
     const SizeType pad_offset = (flat_base + p) * branch_max;
@@ -159,7 +163,7 @@ inline void branch_one_param_padded(int p,
         auto slice =
             std::span<double>(scratch_params_ptr + pad_offset, branch_max);
         auto [dparam_act, count] = psr_utils::branch_param_padded(
-            slice, cur, sig_cur, sig_new, pmin, pmax);
+            slice, cur, sig_cur, dparam_new_ptr[flat_base + p]);
         scratch_dparams_ptr[flat_base + p] = dparam_act;
         scratch_counts_ptr[flat_base + p]  = count;
     } else {

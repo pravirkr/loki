@@ -277,14 +277,14 @@ void PrunePolyTaylorDPFuncts<FoldType>::report(
 template <SupportedFoldType FoldType>
 PruneCircTaylorDPFuncts<FoldType>::PruneCircTaylorDPFuncts(
     std::span<const SizeType> param_grid_count_init,
-    std::span<const double> dparams,
+    std::span<const double> dparams_init,
     SizeType nseg_ffa,
     double tseg_ffa,
     search::PulsarSearchConfig cfg,
     SizeType batch_size,
     SizeType branch_max)
     : Base(param_grid_count_init,
-           dparams,
+           dparams_init,
            nseg_ffa,
            tseg_ffa,
            std::move(cfg),
@@ -301,9 +301,9 @@ SizeType PruneCircTaylorDPFuncts<FoldType>::branch(
     SizeType n_leaves,
     utils::BranchingWorkspaceView ws) const {
     return circ_taylor_branch_batch(
-        leaves_tree, coord_cur, leaves_branch, leaves_origins, n_leaves,
+        leaves_tree, leaves_branch, leaves_origins, coord_cur,
         this->m_cfg.get_nbins(), this->m_cfg.get_eta(),
-        this->m_cfg.get_param_limits(), this->m_branch_max,
+        this->m_cfg.get_param_limits(), this->m_branch_max, n_leaves,
         this->m_cfg.get_minimum_snap_cells(), ws);
 }
 

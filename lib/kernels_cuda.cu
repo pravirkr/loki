@@ -16,6 +16,7 @@ namespace {
 __global__ __launch_bounds__(256, 4) void kernel_shift_add_linear(
     const float* __restrict__ folds_tree,
     const uint32_t* __restrict__ indices_tree,
+    const uint8_t* __restrict__ validation_mask,
     const float* __restrict__ folds_ffa,
     const uint32_t* __restrict__ indices_ffa,
     const float* __restrict__ phase_shift,
@@ -34,6 +35,10 @@ __global__ __launch_bounds__(256, 4) void kernel_shift_add_linear(
     // Decode thread ID to (ileaf, ibin)
     const uint32_t ileaf = tid / nbins;
     const uint32_t ibin  = tid % nbins;
+
+    if (validation_mask[ileaf] == 0) {
+        return;
+    }
 
     uint32_t shift = __float2uint_rz(phase_shift[ileaf] + 0.5F);
     if (shift == nbins) {
@@ -65,6 +70,7 @@ __global__ __launch_bounds__(256, 4) void kernel_shift_add_linear(
 __global__ __launch_bounds__(256, 4) void kernel_shift_add_linear_complex(
     const ComplexTypeCUDA* __restrict__ folds_tree,
     const uint32_t* __restrict__ indices_tree,
+    const uint8_t* __restrict__ validation_mask,
     const ComplexTypeCUDA* __restrict__ folds_ffa,
     const uint32_t* __restrict__ indices_ffa,
     const float* __restrict__ phase_shift,
@@ -84,6 +90,10 @@ __global__ __launch_bounds__(256, 4) void kernel_shift_add_linear_complex(
     // Decode thread ID to (ileaf, k)
     const uint32_t ileaf = tid / nbins_f;
     const uint32_t k     = tid % nbins_f;
+
+    if (validation_mask[ileaf] == 0) {
+        return;
+    }
 
     // Phase factor for head only: exp(-2πi * k * shift / nbins)
     const auto phase =
@@ -1080,6 +1090,7 @@ void ffa_complex_iter_freq_cuda(const ComplexTypeCUDA* __restrict__ fold_in,
 
 void shift_add_linear_batch_cuda(const float* __restrict__ folds_tree,
                                  const uint32_t* __restrict__ indices_tree,
+                                 const uint8_t* __restrict__ validation_mask,
                                  const float* __restrict__ folds_ffa,
                                  const uint32_t* __restrict__ indices_ffa,
                                  const float* __restrict__ phase_shift,
@@ -1098,8 +1109,8 @@ void shift_add_linear_batch_cuda(const float* __restrict__ folds_tree,
     const dim3 grid_dim(blocks_per_grid);
     cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
     kernel_shift_add_linear<<<grid_dim, block_dim, 0, stream>>>(
-        folds_tree, indices_tree, folds_ffa, indices_ffa, phase_shift,
-        folds_out, nbins, n_leaves, physical_start_idx, capacity);
+        folds_tree, indices_tree, validation_mask, folds_ffa, indices_ffa,
+        phase_shift, folds_out, nbins, n_leaves, physical_start_idx, capacity);
     cuda_utils::check_last_cuda_error("kernel_shift_add_linear launch failed");
     // No need to sync, the next kernel will do it
 }
@@ -1107,6 +1118,7 @@ void shift_add_linear_batch_cuda(const float* __restrict__ folds_tree,
 void shift_add_linear_complex_batch_cuda(
     const ComplexTypeCUDA* __restrict__ folds_tree,
     const uint32_t* __restrict__ indices_tree,
+    const uint8_t* __restrict__ validation_mask,
     const ComplexTypeCUDA* __restrict__ folds_ffa,
     const uint32_t* __restrict__ indices_ffa,
     const float* __restrict__ phase_shift,
@@ -1126,8 +1138,9 @@ void shift_add_linear_complex_batch_cuda(
     const dim3 grid_dim(blocks_per_grid);
     cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
     kernel_shift_add_linear_complex<<<grid_dim, block_dim, 0, stream>>>(
-        folds_tree, indices_tree, folds_ffa, indices_ffa, phase_shift,
-        folds_out, nbins_f, nbins, n_leaves, physical_start_idx, capacity);
+        folds_tree, indices_tree, validation_mask, folds_ffa, indices_ffa,
+        phase_shift, folds_out, nbins_f, nbins, n_leaves, physical_start_idx,
+        capacity);
     cuda_utils::check_last_cuda_error(
         "kernel_shift_add_linear_complex launch failed");
     // No need to sync, the next kernel will do it

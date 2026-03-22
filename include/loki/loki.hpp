@@ -8,6 +8,7 @@
 #include "loki/algorithms/prune.hpp"         // IWYU pragma: export
 #include "loki/algorithms/regions.hpp"       // IWYU pragma: export
 #include "loki/core/taylor.hpp"              // IWYU pragma: export
+#include "loki/core/taylor_ffa.hpp"          // IWYU pragma: export
 #include "loki/detection/score.hpp"          // IWYU pragma: export
 #include "loki/detection/thresholds.hpp"     // IWYU pragma: export
 #include "loki/pipelines/ffa_freq_sweep.hpp" // IWYU pragma: export

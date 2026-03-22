@@ -13,6 +13,7 @@
 #include "loki/common/coord.hpp"
 #include "loki/common/types.hpp"
 #include "loki/core/taylor.hpp"
+#include "loki/core/taylor_ffa.hpp"
 #include "loki/cuda_utils.cuh"
 #include "loki/detection/score.hpp"
 #include "loki/exceptions.hpp"

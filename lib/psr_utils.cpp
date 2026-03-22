@@ -61,14 +61,14 @@ std::vector<double> poly_taylor_step_d(SizeType nparams,
 
 void poly_taylor_step_d_vec(SizeType nparams,
                             double tobs,
-                            SizeType fold_bins,
-                            double tol_bins,
+                            SizeType nbins,
+                            double eta,
                             std::span<const double> f_max,
                             std::span<double> dparams_batch,
                             double t_ref) {
 
     const auto dparams_f =
-        poly_taylor_step_f(nparams, tobs, fold_bins, tol_bins, t_ref);
+        poly_taylor_step_f(nparams, tobs, nbins, eta, t_ref);
     const auto n_batch = f_max.size();
     error_check::check_equal(dparams_batch.size(), n_batch * nparams,
                              "dparams_batch must be of size nbatch * nparams");
@@ -80,6 +80,34 @@ void poly_taylor_step_d_vec(SizeType nparams,
     }
 }
 
+void poly_taylor_step_d_vec_limited(SizeType nparams,
+                                    double tobs,
+                                    SizeType nbins,
+                                    double eta,
+                                    std::span<const double> f_max,
+                                    std::span<const ParamLimit> param_limits,
+                                    std::span<double> dparams_batch,
+                                    double t_ref) {
+
+    const auto dparams_f = poly_taylor_step_f(nparams, tobs, nbins, eta, t_ref);
+    const auto n_batch   = f_max.size();
+    error_check::check_equal(dparams_batch.size(), n_batch * nparams,
+                             "dparams_batch must be of size nbatch * nparams");
+    for (SizeType i = 0; i < n_batch; ++i) {
+        const auto factor = utils::kCval / f_max[i];
+        for (SizeType j = 0; j < nparams - 1; ++j) {
+            const double param_range =
+                (param_limits[j].max - param_limits[j].min);
+            dparams_batch[(i * nparams) + j] =
+                std::min(dparams_f[j] * factor, param_range);
+        }
+        const double d1_range = factor * (param_limits[nparams - 1].max -
+                                          param_limits[nparams - 1].min);
+        dparams_batch[(i * nparams) + nparams - 1] =
+            std::min(dparams_f[nparams - 1] * factor, d1_range);
+    }
+}
+
 bool split_f(double df_old,
              double df_new,
              double tobs_new,
@@ -87,9 +115,9 @@ bool split_f(double df_old,
              double fold_bins,
              double tol_bins,
              double t_ref) {
-    const auto dt     = tobs_new - t_ref;
-    const auto factor = std::pow(dt, k + 1) * fold_bins /
-                        math::factorial(static_cast<double>(k + 1));
+    const auto dt         = tobs_new - t_ref;
+    const auto factor     = std::pow(dt, k + 1) * fold_bins /
+                            math::factorial(static_cast<double>(k + 1));
     const auto factor_opt = factor / std::pow(2.0, k);
     return std::abs(df_old - df_new) * factor_opt > (tol_bins - utils::kEps);
 }
@@ -195,7 +223,7 @@ std::tuple<std::vector<double>, double> branch_param(double param_cur,
     // Confidence-based symmetric range shrinkage
     // 0.5 < confidence_const < 1
     const double confidence_const =
-        0.5 * (1.0 + 1.0 / static_cast<double>(num_points));
+        0.5 * (1.0 + (1.0 / static_cast<double>(num_points)));
     const double half_range = confidence_const * dparam_cur;
 
     // Generate array excluding first and last points
@@ -211,23 +239,14 @@ std::tuple<std::vector<double>, double> branch_param(double param_cur,
 std::pair<double, SizeType> branch_param_padded(std::span<double> out_values,
                                                 double param_cur,
                                                 double dparam_cur,
-                                                double dparam_new,
-                                                double param_min,
-                                                double param_max) {
+                                                double dparam_new) {
     if (dparam_cur <= utils::kEps || dparam_new <= utils::kEps) {
         throw std::invalid_argument(
             std::format("Both dparam_cur and dparam_new must be positive (got "
                         "{}, {})",
                         dparam_cur, dparam_new));
     }
-
-    if (param_max <= param_min + utils::kEps) {
-        throw std::invalid_argument(
-            std::format("param_max must be greater than param_min (got {}, {})",
-                        param_max, param_min));
-    }
-    const double param_range = (param_max - param_min) / 2.0;
-    if (dparam_new > (param_range + utils::kEps)) {
+    if (dparam_new > (dparam_cur + utils::kEps)) {
         // Step size too large, fallback to current value
         out_values[0] = param_cur;
         return {dparam_new, 1};
@@ -245,7 +264,7 @@ std::pair<double, SizeType> branch_param_padded(std::span<double> out_values,
     // 0.5 < confidence_const < 1
     const int n = num_points + 2;
     const double confidence_const =
-        0.5 * (1.0 + 1.0 / static_cast<double>(num_points));
+        0.5 * (1.0 + (1.0 / static_cast<double>(num_points)));
     const double half_range = confidence_const * dparam_cur;
     const double start      = param_cur - half_range;
     const double stop       = param_cur + half_range;

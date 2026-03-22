@@ -7,6 +7,11 @@
 #include "loki/common/types.hpp"
 #include "loki/utils/workspace.hpp"
 
+#ifdef LOKI_ENABLE_CUDA
+#include <cuda/std/span>
+#include <cuda_runtime.h>
+#endif // LOKI_ENABLE_CUDA
+
 namespace loki::core {
 
 /**
@@ -42,14 +47,14 @@ get_circ_taylor_mask(std::span<const double> leaves_batch,
                      double minimum_snap_cells);
 
 SizeType circ_taylor_branch_batch(std::span<const double> leaves_tree,
-                                  std::pair<double, double> coord_cur,
                                   std::span<double> leaves_branch,
                                   std::span<SizeType> leaves_origins,
-                                  SizeType n_leaves,
+                                  std::pair<double, double> coord_cur,
                                   SizeType nbins,
                                   double eta,
                                   std::span<const ParamLimit> param_limits,
                                   SizeType branch_max,
+                                  SizeType n_leaves,
                                   double minimum_snap_cells,
                                   utils::BranchingWorkspaceView ws);
 
@@ -90,8 +95,63 @@ generate_bp_circ_taylor(std::span<const std::vector<double>> param_arr,
                         SizeType nbins,
                         double eta,
                         SizeType ref_seg,
-                        double p_orb_min,
                         double minimum_snap_cells,
                         bool use_conservative_tile = false);
+
+#ifdef LOKI_ENABLE_CUDA
+
+SizeType
+circ_taylor_branch_batch_cuda(cuda::std::span<const double> leaves_tree,
+                              cuda::std::span<double> leaves_branch,
+                              cuda::std::span<uint32_t> leaves_origins,
+                              cuda::std::span<uint8_t> validation_mask,
+                              std::pair<double, double> coord_cur,
+                              SizeType nbins,
+                              double eta,
+                              cuda::std::span<const ParamLimit> param_limits,
+                              SizeType branch_max,
+                              SizeType n_leaves,
+                              double minimum_snap_cells,
+                              utils::BranchingWorkspaceCUDAView branch_ws,
+                              utils::CUBScratchArena& scratch_ws,
+                              cudaStream_t stream);
+
+SizeType
+circ_taylor_validate_batch_cuda(cuda::std::span<const double> leaves_branch,
+                                cuda::std::span<uint8_t> validation_mask,
+                                SizeType n_leaves,
+                                double p_orb_min,
+                                double x_mass_const,
+                                double minimum_snap_cells,
+                                utils::CUBScratchArena& scratch_ws,
+                                cudaStream_t stream);
+
+void circ_taylor_resolve_batch_cuda(
+    cuda::std::span<const double> leaves_branch,
+    cuda::std::span<const uint8_t> validation_mask,
+    cuda::std::span<uint32_t> param_indices,
+    cuda::std::span<float> phase_shift,
+    cuda::std::span<const ParamLimit> param_limits,
+    std::pair<double, double> coord_add,
+    std::pair<double, double> coord_cur,
+    std::pair<double, double> coord_init,
+    SizeType n_accel_init,
+    SizeType n_freq_init,
+    SizeType nbins,
+    SizeType n_leaves,
+    double minimum_snap_cells,
+    cudaStream_t stream);
+
+void circ_taylor_transform_batch_cuda(
+    cuda::std::span<double> leaves_tree,
+    cuda::std::span<const uint8_t> validation_mask,
+    std::pair<double, double> coord_next,
+    std::pair<double, double> coord_cur,
+    SizeType n_leaves,
+    bool use_conservative_tile,
+    double minimum_snap_cells,
+    cudaStream_t stream);
+
+#endif // LOKI_ENABLE_CUDA
 
 } // namespace loki::core

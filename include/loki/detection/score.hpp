@@ -188,11 +188,11 @@ SizeType
 score_and_filter_max_cuda_thread_d(cuda::std::span<const float> folds,
                                    cuda::std::span<const uint32_t> widths,
                                    cuda::std::span<float> scores,
-                                   cuda::std::span<uint32_t> indices_filtered,
+                                   cuda::std::span<uint8_t> validation_mask,
                                    float threshold,
                                    SizeType nprofiles,
                                    SizeType nbins,
-                                   utils::DeviceCounter& counter,
+                                   utils::CUBScratchArena& scratch_ws,
                                    cudaStream_t stream);
 
 #endif // LOKI_ENABLE_CUDA

@@ -172,7 +172,7 @@ __global__ void kernel_snr_boxcar_warp(const float* __restrict__ folds,
     }
 }
 
-template <uint32_t MAX_BINS>
+template <uint32_t MaxBins>
 __launch_bounds__(256, 4) // Hint: Max 256 threads, min 4 blocks/SM
     __global__ void kernel_snr_thread(const float* __restrict__ folds,
                                       uint32_t nprofiles,
@@ -180,17 +180,19 @@ __launch_bounds__(256, 4) // Hint: Max 256 threads, min 4 blocks/SM
                                       const uint32_t* __restrict__ widths,
                                       uint32_t nwidths,
                                       float* __restrict__ scores,
-                                      uint32_t* __restrict__ indices_filtered,
-                                      uint32_t* __restrict__ nprofiles_passing,
+                                      uint8_t* __restrict__ validation_mask,
                                       float threshold) {
     const uint32_t profile_idx = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (profile_idx >= nprofiles) {
         return;
     }
+    if (validation_mask[profile_idx] == 0) {
+        return;
+    }
 
     // Stack allocation matches the template size exactly.
     // For MAX_BINS=64, this is just 256 bytes (likely registers).
-    float prefix[MAX_BINS];
+    float prefix[MaxBins];
 
     const uint32_t base             = profile_idx * 2 * nbins;
     const float* __restrict__ e_ptr = folds + base;
@@ -238,14 +240,8 @@ __launch_bounds__(256, 4) // Hint: Max 256 threads, min 4 blocks/SM
         max_snr         = fmaxf(max_snr, snr);
     }
     scores[profile_idx] = max_snr;
-
-    if (max_snr >= threshold) {
-        cuda::atomic_ref<uint32_t, cuda::thread_scope_device> counter(
-            *nprofiles_passing);
-        const uint32_t idx =
-            counter.fetch_add(1, cuda::std::memory_order_relaxed);
-        indices_filtered[idx] = profile_idx;
-    }
+    // Set validation mask for filtered profiles
+    validation_mask[profile_idx] = (max_snr >= threshold);
 }
 
 // Unified launch function template
@@ -446,14 +442,12 @@ SizeType
 score_and_filter_max_cuda_thread_d(cuda::std::span<const float> folds,
                                    cuda::std::span<const uint32_t> widths,
                                    cuda::std::span<float> scores,
-                                   cuda::std::span<uint32_t> indices_filtered,
+                                   cuda::std::span<uint8_t> validation_mask,
                                    float threshold,
                                    SizeType nprofiles,
                                    SizeType nbins,
-                                   utils::DeviceCounter& counter,
+                                   utils::CUBScratchArena& scratch_ws,
                                    cudaStream_t stream) {
-    counter.reset(stream);
-
     constexpr SizeType kThreadsPerBlock = 256;
     const SizeType blocks_per_grid =
         (nprofiles + kThreadsPerBlock - 1) / kThreadsPerBlock;
@@ -485,10 +479,29 @@ score_and_filter_max_cuda_thread_d(cuda::std::span<const float> folds,
     dispatch_kernel(folds.data(), static_cast<uint32_t>(nprofiles),
                     static_cast<uint32_t>(nbins), widths.data(),
                     static_cast<uint32_t>(widths.size()), scores.data(),
-                    indices_filtered.data(), counter.data(), threshold);
+                    validation_mask.data(), threshold);
     cuda_utils::check_last_cuda_error(
         "score_and_filter_max_cuda_thread_d launch failed");
-    return counter.value_sync(stream);
+
+    // Count number of passing profiles
+    cuda_utils::check_cuda_call(
+        cub::DeviceReduce::Sum(
+            scratch_ws.cub_temp_storage, scratch_ws.cub_temp_bytes,
+            validation_mask.data(), scratch_ws.d_reduce_out, nprofiles, stream),
+        "cub::DeviceReduce::Sum failed");
+
+    // Copy result back
+    uint32_t nprofiles_passing = 0;
+    cuda_utils::check_cuda_call(
+        cudaMemcpyAsync(&nprofiles_passing, scratch_ws.d_reduce_out,
+                        sizeof(uint32_t), cudaMemcpyDeviceToHost, stream),
+        "cudaMemcpyAsync failed");
+
+    // You already sync elsewhere usually, but if needed:
+    cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
+                                "stream sync failed");
+
+    return nprofiles_passing;
 }
 
 } // namespace loki::detection

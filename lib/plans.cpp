@@ -7,6 +7,7 @@
 #include "loki/common/types.hpp"
 #include "loki/core/circular.hpp"
 #include "loki/core/taylor.hpp"
+#include "loki/core/taylor_ffa.hpp"
 #include "loki/exceptions.hpp"
 #include "loki/psr_utils.hpp"
 #include "loki/search/configs.hpp"
@@ -218,8 +219,7 @@ struct FFAPlanBase::Impl {
                     param_arr, dparams_lim[n_levels - 1],
                     m_cfg.get_param_limits(), m_cfg.get_tseg_ffa(),
                     nsegments[n_levels - 1], m_cfg.get_nbins(), m_cfg.get_eta(),
-                    ref_seg, m_cfg.get_p_orb_min(),
-                    m_cfg.get_minimum_snap_cells(),
+                    ref_seg, m_cfg.get_minimum_snap_cells(),
                     m_cfg.get_use_conservative_tile());
             }
             throw std::invalid_argument("nparams > 5 not supported for "

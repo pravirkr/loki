@@ -25,6 +25,18 @@
 
 namespace loki::algorithms {
 
+namespace {
+// Iteration stats for single-threaded pruning
+struct IterationStats {
+    SizeType n_leaves     = 0;
+    SizeType n_leaves_phy = 0;
+    float score_min       = std::numeric_limits<float>::max();
+    float score_max       = std::numeric_limits<float>::lowest();
+    cands::PruneTimerStats batch_timers;
+};
+
+} // End anonymous namespace
+
 class EPMultiPass::BaseImpl {
 public:
     BaseImpl()                           = default;
@@ -255,64 +267,6 @@ private:
     }
 }; // End EPMultiPassTypedImpl implementation
 
-struct IterationStats {
-    SizeType n_leaves     = 0;
-    SizeType n_leaves_phy = 0;
-    float score_min       = std::numeric_limits<float>::max();
-    float score_max       = std::numeric_limits<float>::lowest();
-    cands::PruneTimerStats batch_timers;
-};
-
-template <SupportedFoldType FoldType> struct EPWorkspace {
-    constexpr static SizeType kLeavesParamStride = 2;
-    SizeType batch_size;
-    SizeType branch_max;
-    SizeType nparams;
-    SizeType nbins;
-    SizeType max_branched_leaves;
-    SizeType leaves_stride{};
-    SizeType folds_stride;
-
-    std::vector<double> branched_leaves;
-    std::vector<FoldType> branched_folds;
-    std::vector<float> branched_scores;
-    // Scratch space for indices
-    std::vector<SizeType> branched_indices;
-    // Scratch space for resolving parameters
-    std::vector<SizeType> branched_param_idx;
-    std::vector<float> branched_phase_shift;
-
-    EPWorkspace(SizeType batch_size,
-                SizeType branch_max,
-                SizeType nparams,
-                SizeType nbins)
-        : batch_size(batch_size),
-          branch_max(branch_max),
-          nparams(nparams),
-          nbins(nbins),
-          max_branched_leaves(batch_size * branch_max),
-          leaves_stride((nparams + 2) * kLeavesParamStride),
-          folds_stride(2 * nbins),
-          branched_leaves(max_branched_leaves * leaves_stride),
-          branched_folds(max_branched_leaves * folds_stride),
-          branched_scores(max_branched_leaves),
-          branched_indices(max_branched_leaves),
-          branched_param_idx(max_branched_leaves),
-          branched_phase_shift(max_branched_leaves) {}
-
-    float get_memory_usage() const noexcept {
-        const auto total_memory =
-            (branched_leaves.size() * sizeof(double)) +
-            (branched_folds.size() * sizeof(FoldType)) +
-            (branched_scores.size() * sizeof(float)) +
-            (branched_indices.size() * sizeof(SizeType)) +
-            (branched_param_idx.size() * sizeof(SizeType)) +
-            (branched_phase_shift.size() * sizeof(float));
-        return static_cast<float>(total_memory) /
-               static_cast<float>(1ULL << 30U);
-    }
-}; // End EPWorkspace definition
-
 template <SupportedFoldType FoldType> class Prune<FoldType>::Impl {
 public:
     Impl(plans::FFAPlan<FoldType> ffa_plan,
@@ -332,30 +286,22 @@ public:
         setup_pruning();
 
         const auto max_batch_size = m_batch_size * m_branch_max;
-        // Allocate suggestion buffer
+        // Allocate suggestion buffer and iteration workspace
         if constexpr (std::is_same_v<FoldType, ComplexType>) {
             m_world_tree = std::make_unique<utils::WorldTree<FoldType>>(
                 m_max_sugg, m_cfg.get_nparams(), m_cfg.get_nbins_f(),
                 max_batch_size);
+            m_ep_workspace = std::make_unique<utils::EPWorkspace<FoldType>>(
+                m_batch_size, m_branch_max, m_cfg.get_nparams(),
+                m_cfg.get_nbins_f());
         } else {
             m_world_tree = std::make_unique<utils::WorldTree<FoldType>>(
                 m_max_sugg, m_cfg.get_nparams(), m_cfg.get_nbins(),
                 max_batch_size);
-        }
-
-        // Allocate iteration workspace
-        if constexpr (std::is_same_v<FoldType, ComplexType>) {
-            m_ep_workspace = std::make_unique<EPWorkspace<FoldType>>(
-                m_batch_size, m_branch_max, m_cfg.get_nparams(),
-                m_cfg.get_nbins_f());
-        } else {
-            m_ep_workspace = std::make_unique<EPWorkspace<FoldType>>(
+            m_ep_workspace = std::make_unique<utils::EPWorkspace<FoldType>>(
                 m_batch_size, m_branch_max, m_cfg.get_nparams(),
                 m_cfg.get_nbins());
         }
-
-        m_branching_workspace = std::make_unique<utils::BranchingWorkspace>(
-            m_batch_size, m_branch_max, m_cfg.get_nparams());
 
         // Allocate buffers for seeding the world tree and scoring
         const auto ncoords_ffa = m_ffa_plan.get_ncoords().back();
@@ -371,8 +317,7 @@ public:
 
     SizeType get_memory_usage() const noexcept {
         return m_ep_workspace->get_memory_usage() +
-               m_world_tree->get_memory_usage() +
-               m_branching_workspace->get_memory_usage();
+               m_world_tree->get_memory_usage();
     }
 
     void execute(std::span<const FoldType> ffa_fold,
@@ -476,8 +421,7 @@ private:
 
     // Active, bounded container of hierarchical search candidates
     std::unique_ptr<utils::WorldTree<FoldType>> m_world_tree;
-    std::unique_ptr<EPWorkspace<FoldType>> m_ep_workspace;
-    std::unique_ptr<utils::BranchingWorkspace> m_branching_workspace;
+    std::unique_ptr<utils::EPWorkspace<FoldType>> m_ep_workspace;
 
     // Buffers for seeding the world tree and scoring
     std::vector<double> m_seed_leaves;
@@ -606,7 +550,9 @@ private:
         const auto n_branches = m_world_tree->get_size_old();
         const auto batch_size =
             std::max(1UL, std::min(m_batch_size, n_branches));
-        auto branch_ws = m_branching_workspace->get_view();
+
+        auto branch_ws = m_ep_workspace->branch.get_view();
+        auto& prune_ws = m_ep_workspace->prune;
 
         timing::SimpleTimer timer;
 
@@ -631,8 +577,8 @@ private:
             // Branch
             timer.start();
             const auto n_leaves_batch = m_prune_funcs->branch(
-                leaves_tree_span, m_ep_workspace->branched_leaves,
-                m_ep_workspace->branched_indices, coord_cur, coord_prev,
+                leaves_tree_span, prune_ws.branched_leaves,
+                prune_ws.branched_indices, coord_cur, coord_prev,
                 current_batch_size, branch_ws);
             stats.batch_timers["branch"] += timer.stop();
             stats.n_leaves += n_leaves_batch;
@@ -641,15 +587,15 @@ private:
                 continue;
             }
             error_check::check_less_equal(
-                n_leaves_batch, m_ep_workspace->max_branched_leaves,
+                n_leaves_batch, prune_ws.max_branched_leaves,
                 "Branch factor exceeded workspace size:n_leaves_batch <= "
                 "max_branched_leaves");
 
             // Validation
             timer.start();
             const auto n_leaves_after_validation = m_prune_funcs->validate(
-                m_ep_workspace->branched_leaves,
-                m_ep_workspace->branched_indices, coord_cur, n_leaves_batch);
+                prune_ws.branched_leaves, prune_ws.branched_indices, coord_cur,
+                n_leaves_batch);
             stats.batch_timers["validate"] += timer.stop();
             stats.n_leaves_phy += n_leaves_after_validation;
             if (n_leaves_after_validation == 0) {
@@ -659,20 +605,19 @@ private:
 
             // Resolve
             timer.start();
-            m_prune_funcs->resolve(m_ep_workspace->branched_leaves,
-                                   m_ep_workspace->branched_param_idx,
-                                   m_ep_workspace->branched_phase_shift,
-                                   coord_add, coord_cur, coord_init,
-                                   n_leaves_after_validation);
+            m_prune_funcs->resolve(
+                prune_ws.branched_leaves, prune_ws.branched_param_idx,
+                prune_ws.branched_phase_shift, coord_add, coord_cur, coord_init,
+                n_leaves_after_validation);
             stats.batch_timers["resolve"] += timer.stop();
 
             // Load, shift, add (Map branched_itree to physical indices)
             timer.start();
             m_prune_funcs->shift_add(
-                m_world_tree->get_folds(), m_ep_workspace->branched_indices,
-                ffa_fold_segment, m_ep_workspace->branched_param_idx,
-                m_ep_workspace->branched_phase_shift,
-                m_ep_workspace->branched_folds, n_leaves_after_validation,
+                m_world_tree->get_folds(), prune_ws.branched_indices,
+                ffa_fold_segment, prune_ws.branched_param_idx,
+                prune_ws.branched_phase_shift, prune_ws.branched_folds,
+                n_leaves_after_validation,
                 m_world_tree->get_physical_start_idx(),
                 m_world_tree->get_capacity());
             stats.batch_timers["shift_add"] += timer.stop();
@@ -680,11 +625,11 @@ private:
             // Score and filter
             timer.start();
             const SizeType n_leaves_passing = m_prune_funcs->score_and_filter(
-                m_ep_workspace->branched_folds, m_ep_workspace->branched_scores,
-                m_ep_workspace->branched_indices, current_threshold,
+                prune_ws.branched_folds, prune_ws.branched_scores,
+                prune_ws.branched_indices, current_threshold,
                 n_leaves_after_validation);
             auto branched_scores_span =
-                std::span<const float>(m_ep_workspace->branched_scores)
+                std::span<const float>(prune_ws.branched_scores)
                     .first(n_leaves_after_validation);
             const auto [min_it, max_it] =
                 std::ranges::minmax_element(branched_scores_span);
@@ -697,23 +642,22 @@ private:
                 continue;
             }
             error_check::check_less_equal(
-                n_leaves_passing, m_ep_workspace->max_branched_leaves,
+                n_leaves_passing, prune_ws.max_branched_leaves,
                 "n_leaves_passing <= max_branched_leaves");
 
             // Transform
             timer.start();
-            m_prune_funcs->transform(m_ep_workspace->branched_leaves,
-                                     m_ep_workspace->branched_indices,
-                                     coord_next, coord_cur, n_leaves_passing);
+            m_prune_funcs->transform(prune_ws.branched_leaves,
+                                     prune_ws.branched_indices, coord_next,
+                                     coord_cur, n_leaves_passing);
             stats.batch_timers["transform"] += timer.stop();
 
             // Add batch to output suggestions
             timer.start();
             current_threshold = m_world_tree->add_batch_scattered(
-                m_ep_workspace->branched_leaves, m_ep_workspace->branched_folds,
-                m_ep_workspace->branched_scores,
-                m_ep_workspace->branched_indices, current_threshold,
-                n_leaves_passing);
+                prune_ws.branched_leaves, prune_ws.branched_folds,
+                prune_ws.branched_scores, prune_ws.branched_indices,
+                current_threshold, n_leaves_passing);
             stats.batch_timers["batch_add"] += timer.stop();
             // Notify the buffer that a batch of the old suggestions has been
             // consumed

@@ -46,7 +46,7 @@ public:
                             std::pair<double, double> coord_cur,
                             std::pair<double, double> coord_prev,
                             SizeType n_leaves,
-                            utils::BranchingWorkspaceView ws) const = 0;
+                            utils::BranchingWorkspaceView branch_ws) const = 0;
 
     virtual SizeType validate(std::span<double> leaves_branch,
                               std::span<SizeType> leaves_origins,
@@ -207,7 +207,7 @@ public:
                     std::pair<double, double> coord_cur,
                     std::pair<double, double> coord_prev,
                     SizeType n_leaves,
-                    utils::BranchingWorkspaceView ws) const override;
+                    utils::BranchingWorkspaceView branch_ws) const override;
 
     void resolve(std::span<const double> leaves_branch,
                  std::span<SizeType> param_indices,
@@ -325,19 +325,24 @@ public:
     virtual SizeType branch(cuda::std::span<const double> leaves_tree,
                             cuda::std::span<double> leaves_branch,
                             cuda::std::span<uint32_t> leaves_origins,
+                            cuda::std::span<uint8_t> validation_mask,
                             std::pair<double, double> coord_cur,
                             std::pair<double, double> coord_prev,
                             SizeType n_leaves,
-                            utils::BranchingWorkspaceCUDAView ws,
+                            utils::BranchingWorkspaceCUDAView branch_ws,
+                            utils::CUBScratchArena& scratch_ws,
                             cudaStream_t stream) = 0;
 
     virtual SizeType validate(cuda::std::span<double> leaves_branch,
                               cuda::std::span<uint32_t> leaves_origins,
+                              cuda::std::span<uint8_t> validation_mask,
                               std::pair<double, double> coord_cur,
                               SizeType n_leaves,
+                              utils::CUBScratchArena& scratch_ws,
                               cudaStream_t stream) const noexcept = 0;
 
     virtual void resolve(cuda::std::span<const double> leaves_branch,
+                         cuda::std::span<const uint8_t> validation_mask,
                          cuda::std::span<uint32_t> param_indices,
                          cuda::std::span<float> phase_shift,
                          std::pair<double, double> coord_add,
@@ -348,6 +353,7 @@ public:
 
     virtual void shift_add(cuda::std::span<const FoldTypeCUDA> folds_tree,
                            cuda::std::span<const uint32_t> indices_tree,
+                           cuda::std::span<const uint8_t> validation_mask,
                            cuda::std::span<const FoldTypeCUDA> folds_ffa,
                            cuda::std::span<const uint32_t> indices_ffa,
                            cuda::std::span<const float> phase_shift,
@@ -360,14 +366,14 @@ public:
     virtual SizeType
     score_and_filter(cuda::std::span<const FoldTypeCUDA> folds_tree,
                      cuda::std::span<float> scores_tree,
-                     cuda::std::span<uint32_t> indices_tree,
+                     cuda::std::span<uint8_t> validation_mask,
                      float threshold,
                      SizeType n_leaves,
-                     utils::DeviceCounter& counter,
+                     utils::CUBScratchArena& scratch_ws,
                      cudaStream_t stream) noexcept = 0;
 
     virtual void transform(cuda::std::span<double> leaves_tree,
-                           cuda::std::span<uint32_t> indices_tree,
+                           cuda::std::span<const uint8_t> validation_mask,
                            std::pair<double, double> coord_next,
                            std::pair<double, double> coord_cur,
                            SizeType n_leaves,
@@ -417,12 +423,15 @@ public:
 
     SizeType validate(cuda::std::span<double> leaves_branch,
                       cuda::std::span<uint32_t> leaves_origins,
+                      cuda::std::span<uint8_t> validation_mask,
                       std::pair<double, double> coord_cur,
                       SizeType n_leaves,
+                      utils::CUBScratchArena& scratch_ws,
                       cudaStream_t stream) const noexcept override;
 
     void shift_add(cuda::std::span<const FoldTypeCUDA> folds_tree,
                    cuda::std::span<const uint32_t> indices_tree,
+                   cuda::std::span<const uint8_t> validation_mask,
                    cuda::std::span<const FoldTypeCUDA> folds_ffa,
                    cuda::std::span<const uint32_t> indices_ffa,
                    cuda::std::span<const float> phase_shift,
@@ -434,10 +443,10 @@ public:
 
     SizeType score_and_filter(cuda::std::span<const FoldTypeCUDA> folds_tree,
                               cuda::std::span<float> scores_tree,
-                              cuda::std::span<uint32_t> indices_tree,
+                              cuda::std::span<uint8_t> validation_mask,
                               float threshold,
                               SizeType n_leaves,
-                              utils::DeviceCounter& counter,
+                              utils::CUBScratchArena& scratch_ws,
                               cudaStream_t stream) noexcept override;
 };
 
@@ -483,13 +492,16 @@ public:
     SizeType branch(cuda::std::span<const double> leaves_tree,
                     cuda::std::span<double> leaves_branch,
                     cuda::std::span<uint32_t> leaves_origins,
+                    cuda::std::span<uint8_t> validation_mask,
                     std::pair<double, double> coord_cur,
                     std::pair<double, double> coord_prev,
                     SizeType n_leaves,
                     utils::BranchingWorkspaceCUDAView ws,
+                    utils::CUBScratchArena& scratch_ws,
                     cudaStream_t stream) override;
 
     void resolve(cuda::std::span<const double> leaves_branch,
+                 cuda::std::span<const uint8_t> validation_mask,
                  cuda::std::span<uint32_t> param_indices,
                  cuda::std::span<float> phase_shift,
                  std::pair<double, double> coord_add,
@@ -499,7 +511,70 @@ public:
                  cudaStream_t stream) const override;
 
     void transform(cuda::std::span<double> leaves_tree,
-                   cuda::std::span<uint32_t> indices_tree,
+                   cuda::std::span<const uint8_t> validation_mask,
+                   std::pair<double, double> coord_next,
+                   std::pair<double, double> coord_cur,
+                   SizeType n_leaves,
+                   cudaStream_t stream) const override;
+
+    void report(cuda::std::span<double> leaves_tree,
+                std::pair<double, double> coord_report,
+                SizeType n_leaves,
+                cudaStream_t stream) const override;
+};
+
+// Specialized implementation for Circular orbit search in Taylor basis
+// Use only when nparams == 5
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+class PruneCircTaylorDPFunctsCUDA final
+    : public BaseTaylorPruneDPFunctsCUDA<
+          FoldTypeCUDA,
+          PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>> {
+private:
+    using Base =
+        BaseTaylorPruneDPFunctsCUDA<FoldTypeCUDA,
+                                    PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>>;
+
+public:
+    PruneCircTaylorDPFunctsCUDA(std::span<const SizeType> param_grid_count_init,
+                                std::span<const double> dparams_init,
+                                SizeType nseg_ffa,
+                                double tseg_ffa,
+                                search::PulsarSearchConfig cfg,
+                                SizeType batch_size,
+                                SizeType branch_max);
+
+    SizeType branch(cuda::std::span<const double> leaves_tree,
+                    cuda::std::span<double> leaves_branch,
+                    cuda::std::span<uint32_t> leaves_origins,
+                    cuda::std::span<uint8_t> validation_mask,
+                    std::pair<double, double> coord_cur,
+                    std::pair<double, double> coord_prev,
+                    SizeType n_leaves,
+                    utils::BranchingWorkspaceCUDAView ws,
+                    utils::CUBScratchArena& scratch_ws,
+                    cudaStream_t stream) override;
+
+    SizeType validate(cuda::std::span<double> leaves_branch,
+                      cuda::std::span<uint32_t> leaves_origins,
+                      cuda::std::span<uint8_t> validation_mask,
+                      std::pair<double, double> coord_cur,
+                      SizeType n_leaves,
+                      utils::CUBScratchArena& scratch_ws,
+                      cudaStream_t stream) const noexcept override;
+
+    void resolve(cuda::std::span<const double> leaves_branch,
+                 cuda::std::span<const uint8_t> validation_mask,
+                 cuda::std::span<uint32_t> param_indices,
+                 cuda::std::span<float> phase_shift,
+                 std::pair<double, double> coord_add,
+                 std::pair<double, double> coord_cur,
+                 std::pair<double, double> coord_init,
+                 SizeType n_leaves,
+                 cudaStream_t stream) const override;
+
+    void transform(cuda::std::span<double> leaves_tree,
+                   cuda::std::span<const uint8_t> validation_mask,
                    std::pair<double, double> coord_next,
                    std::pair<double, double> coord_cur,
                    SizeType n_leaves,
