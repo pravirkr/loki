@@ -414,6 +414,37 @@ public:
                 actual_size};
     }
 
+    /**
+     * @brief Get mutable span over leaves for processing
+     *
+     * During updates, returns span over readable (old) region.
+     * The span may be truncated at buffer wrap point.
+     *
+     * @param n_leaves Number of leaves to access
+     * @return Pair of (span, actual_size), where actual_size <= requested
+     * n_leaves, limited to contiguous segment before wrap.
+     */
+    std::pair<cuda::std::span<double>, SizeType>
+    get_leaves_span(SizeType n_leaves) {
+        const SizeType available = m_size_old - m_read_consumed;
+        error_check::check_less_equal(
+            n_leaves, available,
+            "get_leaves_span: n_leaves exceeds available space");
+
+        // Compute physical start: relative to current head of read region
+        const auto physical_start =
+            get_circular_index(m_read_consumed, m_head, m_capacity);
+        // Compute how many contiguous elements we can take before wrap
+        const auto actual_size =
+            std::min(n_leaves, m_capacity - physical_start);
+        // Return span with correct byte size (actual_size elements, not bytes)
+        return {
+            cuda::std::span<double>(thrust::raw_pointer_cast(m_leaves.data()) +
+                                        (physical_start * m_leaves_stride),
+                                    actual_size * m_leaves_stride),
+            actual_size};
+    }
+
     cuda::std::span<double>
     get_leaves_contiguous_span(cudaStream_t stream) noexcept {
         const auto start_idx     = get_current_start_idx();
@@ -1036,6 +1067,11 @@ float WorldTreeCUDA<FoldTypeCUDA>::get_memory_usage() const noexcept {
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 std::pair<cuda::std::span<const double>, SizeType>
 WorldTreeCUDA<FoldTypeCUDA>::get_leaves_span(SizeType n_leaves) const {
+    return m_impl->get_leaves_span(n_leaves);
+}
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+std::pair<cuda::std::span<double>, SizeType>
+WorldTreeCUDA<FoldTypeCUDA>::get_leaves_span(SizeType n_leaves) {
     return m_impl->get_leaves_span(n_leaves);
 }
 template <SupportedFoldTypeCUDA FoldTypeCUDA>

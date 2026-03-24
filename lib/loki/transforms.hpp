@@ -39,4 +39,17 @@ shift_taylor_circular_errors_batch(std::span<const double> taylor_error_vec,
                                    SizeType n_batch,
                                    SizeType n_params);
 
+// Only aggressive tiling is supported for Chebyshev parameters.
+void shift_cheb_errors_batch(std::span<double> cheb_error_batch,
+                             double scale_next,
+                             double scale_cur,
+                             SizeType n_batch,
+                             SizeType n_params);
+
+void taylor_to_chebyshev_limits_full(std::span<const double> taylor_limits,
+                                     SizeType n_batch,
+                                     SizeType n_params,
+                                     double ts,
+                                     std::span<double> out);
+
 } // namespace loki::transforms

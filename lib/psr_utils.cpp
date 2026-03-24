@@ -7,6 +7,7 @@
 #include "loki/common/types.hpp"
 #include "loki/exceptions.hpp"
 #include "loki/math.hpp"
+#include "loki/transforms.hpp"
 #include "loki/utils.hpp"
 
 namespace loki::psr_utils {
@@ -67,9 +68,8 @@ void poly_taylor_step_d_vec(SizeType nparams,
                             std::span<double> dparams_batch,
                             double t_ref) {
 
-    const auto dparams_f =
-        poly_taylor_step_f(nparams, tobs, nbins, eta, t_ref);
-    const auto n_batch = f_max.size();
+    const auto dparams_f = poly_taylor_step_f(nparams, tobs, nbins, eta, t_ref);
+    const auto n_batch   = f_max.size();
     error_check::check_equal(dparams_batch.size(), n_batch * nparams,
                              "dparams_batch must be of size nbatch * nparams");
     for (SizeType i = 0; i < n_batch; ++i) {
@@ -112,20 +112,20 @@ bool split_f(double df_old,
              double df_new,
              double tobs_new,
              SizeType k,
-             double fold_bins,
-             double tol_bins,
+             double nbins,
+             double eta,
              double t_ref) {
     const auto dt         = tobs_new - t_ref;
-    const auto factor     = std::pow(dt, k + 1) * fold_bins /
+    const auto factor     = std::pow(dt, k + 1) * nbins /
                             math::factorial(static_cast<double>(k + 1));
     const auto factor_opt = factor / std::pow(2.0, k);
-    return std::abs(df_old - df_new) * factor_opt > (tol_bins - utils::kEps);
+    return std::abs(df_old - df_new) * factor_opt > (eta - utils::kEps);
 }
 
 std::vector<double> poly_taylor_shift_d(std::span<const double> dparam_old,
                                         std::span<const double> dparam_new,
                                         double tobs_new,
-                                        SizeType fold_bins,
+                                        SizeType nbins,
                                         double f_cur,
                                         double t_ref) {
     const auto n_params = dparam_old.size();
@@ -134,7 +134,7 @@ std::vector<double> poly_taylor_shift_d(std::span<const double> dparam_old,
     for (SizeType i = 0; i < n_params; ++i) {
         const auto orth_factor = std::pow(2.0, i);
         auto factor =
-            std::pow(dt, i + 1) * static_cast<double>(fold_bins) /
+            std::pow(dt, i + 1) * static_cast<double>(nbins) /
             (math::factorial(static_cast<double>(i + 1)) * orth_factor);
         shift[n_params - 1 - i] = std::abs(dparam_old[i] - dparam_new[i]) *
                                   factor * (f_cur / utils::kCval);
@@ -145,15 +145,15 @@ std::vector<double> poly_taylor_shift_d(std::span<const double> dparam_old,
 void poly_taylor_shift_d_vec(std::span<const double> dparam_old,
                              std::span<const double> dparam_new,
                              double tobs_new,
-                             SizeType fold_bins,
+                             SizeType nbins,
                              std::span<const double> f_cur,
                              double t_ref,
                              std::span<double> shift_bins_batch,
                              SizeType nbatch,
                              SizeType nparams) {
 
-    const auto dt          = tobs_new - t_ref;
-    const auto fold_bins_d = static_cast<double>(fold_bins);
+    const auto dt      = tobs_new - t_ref;
+    const auto nbins_d = static_cast<double>(nbins);
     error_check::check_equal(
         shift_bins_batch.size(), nbatch * nparams,
         "shift_bins_batch must be of size nbatch * nparams");
@@ -172,9 +172,77 @@ void poly_taylor_shift_d_vec(std::span<const double> dparam_old,
     // Optimized computation
     for (SizeType i = 0; i < nparams; ++i) {
         const auto k            = nparams - 1 - i;
-        const auto factor_base  = dt_powers[k] * fold_bins_d / factorials[k];
+        const auto factor_base  = dt_powers[k] * nbins_d / factorials[k];
         const auto factor_opt   = factor_base / std::pow(2.0, k);
         const auto scale_factor = factor_opt / utils::kCval;
+        for (SizeType batch_idx = 0; batch_idx < nbatch; ++batch_idx) {
+            const SizeType idx    = (batch_idx * nparams) + i;
+            const double diff     = std::abs(dparam_old[idx] - dparam_new[idx]);
+            shift_bins_batch[idx] = diff * scale_factor * f_cur[batch_idx];
+        }
+    }
+}
+
+void poly_cheb_step_vec_limited(SizeType n_params,
+                                double scale_cur,
+                                SizeType nbins,
+                                double eta,
+                                std::span<const double> f0_batch,
+                                std::span<const ParamLimit> param_limits,
+                                std::span<double> dparams_batch) {
+    const auto n_batch = f0_batch.size();
+    const auto dphi    = eta / static_cast<double>(nbins);
+    error_check::check_equal(
+        dparams_batch.size(), n_batch * n_params,
+        "dparams_batch must be of size n_batch * n_params");
+    // Build taylor_limits: shape [n_batch, n_params, 2]
+    std::vector<double> taylor_limits(n_batch * n_params * 2);
+    for (SizeType i = 0; i < n_batch; ++i) {
+        const double f0 = f0_batch[i];
+        for (SizeType j = 0; j < n_params - 1; ++j) {
+            taylor_limits[(((i * n_params) + j) * 2) + 0] = param_limits[j].min;
+            taylor_limits[(((i * n_params) + j) * 2) + 1] = param_limits[j].max;
+        }
+        const SizeType last = n_params - 1;
+        taylor_limits[(((i * n_params) + last) * 2) + 0] =
+            (1.0 - (param_limits[last].max / f0)) * utils::kCval;
+        taylor_limits[(((i * n_params) + last) * 2) + 1] =
+            (1.0 - (param_limits[last].min / f0)) * utils::kCval;
+    }
+
+    std::vector<double> cheby_limits(n_batch * n_params * 2);
+    transforms::taylor_to_chebyshev_limits_full(
+        taylor_limits, n_batch, n_params, scale_cur, cheby_limits);
+
+    // Compute dparams and clamp against Chebyshev ranges
+    for (SizeType i = 0; i < n_batch; ++i) {
+        const double factor = utils::kCval / f0_batch[i];
+        for (SizeType j = 0; j < n_params; ++j) {
+            const double dparam_unclamped = dphi * factor;
+            const double cheby_min =
+                cheby_limits[(((i * n_params) + j) * 2) + 0];
+            const double cheby_max =
+                cheby_limits[(((i * n_params) + j) * 2) + 1];
+            const double cheby_range = cheby_max - cheby_min;
+            dparams_batch[((i * n_params) + j)] =
+                std::min(dparam_unclamped, cheby_range);
+        }
+    }
+}
+
+void poly_cheb_shift_vec(std::span<const double> dparam_old,
+                         std::span<const double> dparam_new,
+                         SizeType nbins,
+                         std::span<const double> f_cur,
+                         std::span<double> shift_bins_batch,
+                         SizeType nbatch,
+                         SizeType nparams) {
+    const auto nbins_d = static_cast<double>(nbins);
+    error_check::check_equal(
+        shift_bins_batch.size(), nbatch * nparams,
+        "shift_bins_batch must be of size nbatch * nparams");
+    for (SizeType i = 0; i < nparams; ++i) {
+        const auto scale_factor = nbins_d / utils::kCval;
         for (SizeType batch_idx = 0; batch_idx < nbatch; ++batch_idx) {
             const SizeType idx    = (batch_idx * nparams) + i;
             const double diff     = std::abs(dparam_old[idx] - dparam_new[idx]);

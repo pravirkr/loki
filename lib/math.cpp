@@ -2,6 +2,22 @@
 
 namespace loki::math {
 
+namespace {
+
+// Compute the connection coefficient S_{k,m}.
+double compute_connection_coefficient_s(SizeType k, SizeType m) {
+    // Check if k-m is even and m <= k
+    if (m > k || ((k - m) % 2 != 0)) {
+        return 0.0;
+    }
+    const SizeType n        = (k - m) / 2;
+    const SizeType delta_m0 = (m == 0) ? 1 : 0;
+    // 2^(1 - k - delta_m0)
+    const double factor = std::ldexp(1.0, static_cast<int>(1 - k - delta_m0));
+    return factor * boost::math::binomial_coefficient<double>(k, n);
+}
+} // namespace
+
 std::vector<float> generate_cheb_table(SizeType order_max, SizeType n_derivs) {
     const SizeType dim1       = n_derivs + 1;
     const SizeType dim2       = order_max + 1;
@@ -122,6 +138,25 @@ generalized_cheb_pols(SizeType poly_order, float t0, float scale) {
     }
 
     return result;
+}
+
+std::vector<double> compute_connection_matrix_s(SizeType k_max,
+                                                SizeType coeff_order) noexcept {
+
+    const SizeType n_params = k_max + 1;
+    std::vector<double> mat(n_params * n_params, 0.0);
+
+    for (SizeType k = 0; k < n_params; ++k) {
+        for (SizeType m = 0; m <= k; ++m) {
+            const double val = compute_connection_coefficient_s(k, m);
+            // ascending: m = 0 → k
+            // descending: m = k → 0
+            const SizeType col = (coeff_order == 0) ? m : (k - m);
+
+            mat[(k * n_params) + col] = val;
+        }
+    }
+    return mat;
 }
 
 } // namespace loki::math

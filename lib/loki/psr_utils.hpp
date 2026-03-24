@@ -107,27 +107,43 @@ bool split_f(double df_old,
              double df_new,
              double tobs_new,
              SizeType k,
-             double fold_bins,
-             double tol_bins,
+             double nbins,
+             double eta,
              double t_ref = 0.0);
 
 // Compute the bin shift for parameters {d_k,... d_2, f}.
 std::vector<double> poly_taylor_shift_d(std::span<const double> dparam_old,
                                         std::span<const double> dparam_new,
                                         double tobs_new,
-                                        SizeType fold_bins,
+                                        SizeType nbins,
                                         double f_cur,
                                         double t_ref = 0.0);
 
 void poly_taylor_shift_d_vec(std::span<const double> dparam_old,
                              std::span<const double> dparam_new,
                              double tobs_new,
-                             SizeType fold_bins,
+                             SizeType nbins,
                              std::span<const double> f_cur,
                              double t_ref,
                              std::span<double> shift_bins_batch,
                              SizeType nbatch,
                              SizeType nparams);
+
+void poly_cheb_step_vec_limited(SizeType n_params,
+                                double scale_cur,
+                                SizeType nbins,
+                                double eta,
+                                std::span<const double> f0_batch,
+                                std::span<const ParamLimit> param_limits,
+                                std::span<double> dparams_batch);
+
+void poly_cheb_shift_vec(std::span<const double> dparam_old,
+                         std::span<const double> dparam_new,
+                         SizeType nbins,
+                         std::span<const double> f_cur,
+                         std::span<double> shift_bins_batch,
+                         SizeType nbatch,
+                         SizeType nparams);
 
 // Refine a parameter range around a current value with a finer step size.
 std::tuple<std::vector<double>, double>

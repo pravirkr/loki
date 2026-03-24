@@ -183,6 +183,31 @@ public:
                 actual_size};
     }
 
+    /**
+     * @brief Get a mutable span over leaves for processing
+     *
+     * @param n_leaves Number of leaves to access
+     * @return Pair of (span, actual_size), where actual_size <= requested
+     * n_leaves, limited to contiguous segment before wrap.
+     */
+    std::pair<std::span<double>, SizeType> get_leaves_span(SizeType n_leaves) {
+        const SizeType available = m_size_old - m_read_consumed;
+        error_check::check_less_equal(
+            n_leaves, available,
+            "get_leaves_span: requested range exceeds available data");
+
+        // Compute physical start: relative to current head of read region
+        const auto physical_start =
+            get_circular_index(m_read_consumed, m_head, m_capacity);
+        // Compute how many contiguous elements we can take before wrap
+        const auto actual_size =
+            std::min(n_leaves, m_capacity - physical_start);
+        // Return span with correct byte size (actual_size elements, not bytes)
+        return {{m_leaves.data() + (physical_start * m_leaves_stride),
+                 actual_size * m_leaves_stride},
+                actual_size};
+    }
+
     std::span<double> get_leaves_contiguous_span() noexcept {
         const auto start_idx     = get_current_start_idx();
         const auto report_stride = m_nparams * kParamStride;
@@ -969,6 +994,11 @@ float WorldTree<FoldType>::get_memory_usage() const noexcept {
 template <SupportedFoldType FoldType>
 std::pair<std::span<const double>, SizeType>
 WorldTree<FoldType>::get_leaves_span(SizeType n_leaves) const {
+    return m_impl->get_leaves_span(n_leaves);
+}
+template <SupportedFoldType FoldType>
+std::pair<std::span<double>, SizeType>
+WorldTree<FoldType>::get_leaves_span(SizeType n_leaves) {
     return m_impl->get_leaves_span(n_leaves);
 }
 template <SupportedFoldType FoldType>

@@ -161,4 +161,116 @@ shift_taylor_circular_errors_batch(std::span<const double> taylor_error_vec,
     return result;
 }
 
+void shift_cheb_errors_batch(std::span<double> cheb_error_batch,
+                             double scale_next,
+                             double scale_cur,
+                             SizeType n_batch,
+                             SizeType n_params) {
+    const auto p = scale_next / scale_cur;
+    for (SizeType i_batch = 0; i_batch < n_batch; ++i_batch) {
+        const SizeType batch_offset = i_batch * n_params;
+        for (SizeType i = 0; i < n_params; ++i) {
+            const auto k = n_params - i;
+            cheb_error_batch[batch_offset + i] =
+                cheb_error_batch[batch_offset + i] * std::pow(p, k);
+        }
+    }
+}
+
+void taylor_to_chebyshev_limits_full(std::span<const double> taylor_limits,
+                                     SizeType n_batch,
+                                     SizeType n_params,
+                                     double ts,
+                                     std::span<double> out) {
+    auto tl = [&](SizeType i, SizeType j, SizeType k) -> double {
+        return taylor_limits[(((i * n_params) + j) * 2) + k];
+    };
+    auto ol = [&](SizeType i, SizeType j, SizeType k) -> double& {
+        return out[(((i * n_params) + j) * 2) + k];
+    };
+
+    const double ts2 = ts * ts;
+    const double ts3 = ts2 * ts;
+    const double ts4 = ts3 * ts;
+    const double ts5 = ts4 * ts;
+
+    if (n_params == 2) {
+        for (SizeType i = 0; i < n_batch; ++i) {
+            const double d1_min = tl(i, 1, 0) * ts;
+            const double d1_max = tl(i, 1, 1) * ts;
+            const double d2_min = tl(i, 0, 0) * ts2 * 0.5;
+            const double d2_max = tl(i, 0, 1) * ts2 * 0.5;
+            ol(i, 1, 0)         = d1_min;
+            ol(i, 1, 1)         = d1_max;
+            ol(i, 0, 0)         = 0.5 * d2_min;
+            ol(i, 0, 1)         = 0.5 * d2_max;
+        }
+        return;
+    }
+    if (n_params == 3) {
+        for (SizeType i = 0; i < n_batch; ++i) {
+            const double d1_min = tl(i, 2, 0) * ts;
+            const double d1_max = tl(i, 2, 1) * ts;
+            const double d2_min = tl(i, 1, 0) * ts2 * 0.5;
+            const double d2_max = tl(i, 1, 1) * ts2 * 0.5;
+            const double d3_min = tl(i, 0, 0) * ts3 / 6.0;
+            const double d3_max = tl(i, 0, 1) * ts3 / 6.0;
+            ol(i, 2, 0)         = d1_min + (0.75 * d3_min);
+            ol(i, 2, 1)         = d1_max + (0.75 * d3_max);
+            ol(i, 1, 0)         = 0.5 * d2_min;
+            ol(i, 1, 1)         = 0.5 * d2_max;
+            ol(i, 0, 0)         = 0.25 * d3_min;
+            ol(i, 0, 1)         = 0.25 * d3_max;
+        }
+        return;
+    }
+    if (n_params == 4) {
+        for (SizeType i = 0; i < n_batch; ++i) {
+            const double d1_min = tl(i, 3, 0) * ts;
+            const double d1_max = tl(i, 3, 1) * ts;
+            const double d2_min = tl(i, 2, 0) * ts2 * 0.5;
+            const double d2_max = tl(i, 2, 1) * ts2 * 0.5;
+            const double d3_min = tl(i, 1, 0) * ts3 / 6.0;
+            const double d3_max = tl(i, 1, 1) * ts3 / 6.0;
+            const double d4_min = tl(i, 0, 0) * ts4 / 24.0;
+            const double d4_max = tl(i, 0, 1) * ts4 / 24.0;
+            ol(i, 3, 0)         = d1_min + (0.75 * d3_min);
+            ol(i, 3, 1)         = d1_max + (0.75 * d3_max);
+            ol(i, 2, 0)         = (0.5 * d2_min) + (0.5 * d4_min);
+            ol(i, 2, 1)         = (0.5 * d2_max) + (0.5 * d4_max);
+            ol(i, 1, 0)         = 0.25 * d3_min;
+            ol(i, 1, 1)         = 0.25 * d3_max;
+            ol(i, 0, 0)         = 0.125 * d4_min;
+            ol(i, 0, 1)         = 0.125 * d4_max;
+        }
+        return;
+    }
+    if (n_params == 5) {
+        for (SizeType i = 0; i < n_batch; ++i) {
+            const double d1_min = tl(i, 4, 0) * ts;
+            const double d1_max = tl(i, 4, 1) * ts;
+            const double d2_min = tl(i, 3, 0) * ts2 * 0.5;
+            const double d2_max = tl(i, 3, 1) * ts2 * 0.5;
+            const double d3_min = tl(i, 2, 0) * ts3 / 6.0;
+            const double d3_max = tl(i, 2, 1) * ts3 / 6.0;
+            const double d4_min = tl(i, 1, 0) * ts4 / 24.0;
+            const double d4_max = tl(i, 1, 1) * ts4 / 24.0;
+            const double d5_min = tl(i, 0, 0) * ts5 / 120.0;
+            const double d5_max = tl(i, 0, 1) * ts5 / 120.0;
+            ol(i, 4, 0)         = d1_min + (0.75 * d3_min) + (0.625 * d5_min);
+            ol(i, 4, 1)         = d1_max + (0.75 * d3_max) + (0.625 * d5_max);
+            ol(i, 3, 0)         = (0.5 * d2_min) + (0.5 * d4_min);
+            ol(i, 3, 1)         = (0.5 * d2_max) + (0.5 * d4_max);
+            ol(i, 2, 0)         = (0.25 * d3_min) + (0.3125 * d5_min);
+            ol(i, 2, 1)         = (0.25 * d3_max) + (0.3125 * d5_max);
+            ol(i, 1, 0)         = 0.125 * d4_min;
+            ol(i, 1, 1)         = 0.125 * d4_max;
+            ol(i, 0, 0)         = 0.0625 * d5_min;
+            ol(i, 0, 1)         = 0.0625 * d5_max;
+        }
+        return;
+    }
+    throw std::invalid_argument("n_params > 5 not supported");
+}
+
 } // namespace loki::transforms

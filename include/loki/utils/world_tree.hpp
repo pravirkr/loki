@@ -92,6 +92,8 @@ public:
     // limited to contiguous segment before wrap.
     [[nodiscard]] std::pair<std::span<const double>, SizeType>
     get_leaves_span(SizeType n_leaves) const;
+    [[nodiscard]] std::pair<std::span<double>, SizeType>
+    get_leaves_span(SizeType n_leaves);
     // Returns span over contiguous leaves (for reporting)
     [[nodiscard]] std::span<double> get_leaves_contiguous_span() noexcept;
     // Returns span over contiguous scores (for saving to file)
@@ -178,6 +180,8 @@ public:
     // limited to contiguous segment before wrap.
     [[nodiscard]] std::pair<cuda::std::span<const double>, SizeType>
     get_leaves_span(SizeType n_leaves) const;
+    [[nodiscard]] std::pair<cuda::std::span<double>, SizeType>
+    get_leaves_span(SizeType n_leaves);
     // Returns span over contiguous leaves (for reporting)
     [[nodiscard]] cuda::std::span<double>
     get_leaves_contiguous_span(cudaStream_t stream) noexcept;

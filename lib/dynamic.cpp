@@ -7,6 +7,7 @@
 #include <spdlog/spdlog.h>
 
 #include "loki/common/types.hpp"
+#include "loki/core/chebyshev.hpp"
 #include "loki/core/circular.hpp"
 #include "loki/core/taylor.hpp"
 #include "loki/detection/score.hpp"
@@ -199,6 +200,46 @@ void BaseTaylorPruneDPFuncts<FoldType, Derived>::seed(
     }
 }
 
+// Intermediate implementation for Chebyshev basis
+template <SupportedFoldType FoldType, typename Derived>
+void BaseChebyshevPruneDPFuncts<FoldType, Derived>::seed(
+    std::span<const FoldType> fold_segment,
+    std::span<double> seed_leaves,
+    std::span<float> seed_scores,
+    std::pair<double, double> coord_init) {
+
+    const auto n_leaves =
+        poly_chebyshev_seed(this->m_param_grid_count_init, this->m_dparams_init,
+                            this->m_cfg.get_param_limits(), seed_leaves,
+                            coord_init, this->m_cfg.get_nparams());
+    // Fold segment is (n_leaves, 2, nbins)
+    const auto nbins = this->m_cfg.get_nbins();
+    error_check::check_greater_equal(seed_scores.size(), n_leaves,
+                                     "seed_scores size mismatch");
+
+    // Calculate scores
+    if constexpr (std::is_same_v<FoldType, ComplexType>) {
+        const auto nfft    = 2 * n_leaves;
+        const auto nbins_f = this->m_cfg.get_nbins_f();
+        error_check::check_equal(fold_segment.size(), n_leaves * 2 * nbins_f,
+                                 "fold_segment size mismatch");
+        auto fold_segment_t =
+            std::span<float>(this->m_scratch_folds).first(nfft * nbins);
+        this->m_irfft_executor->execute(fold_segment, fold_segment_t,
+                                        static_cast<int>(nfft));
+        detection::snr_boxcar_3d_max_with_cache(fold_segment_t, seed_scores,
+                                                n_leaves, nbins,
+                                                this->m_boxcar_widths_cache);
+
+    } else {
+        error_check::check_equal(fold_segment.size(), n_leaves * 2 * nbins,
+                                 "fold_segment size mismatch");
+        detection::snr_boxcar_3d_max_with_cache(fold_segment, seed_scores,
+                                                n_leaves, nbins,
+                                                this->m_boxcar_widths_cache);
+    }
+}
+
 // Specialized implementation for Polynomial searches in Taylor Basis
 template <SupportedFoldType FoldType>
 PrunePolyTaylorDPFuncts<FoldType>::PrunePolyTaylorDPFuncts(
@@ -219,7 +260,7 @@ PrunePolyTaylorDPFuncts<FoldType>::PrunePolyTaylorDPFuncts(
 
 template <SupportedFoldType FoldType>
 SizeType PrunePolyTaylorDPFuncts<FoldType>::branch(
-    std::span<const double> leaves_tree,
+    std::span<double> leaves_tree,
     std::span<double> leaves_branch,
     std::span<SizeType> leaves_origins,
     std::pair<double, double> coord_cur,
@@ -273,6 +314,84 @@ void PrunePolyTaylorDPFuncts<FoldType>::report(
                              this->m_cfg.get_nparams());
 }
 
+// Specialized implementation for Polynomial searches in Chebyshev Basis
+template <SupportedFoldType FoldType>
+PrunePolyChebyshevDPFuncts<FoldType>::PrunePolyChebyshevDPFuncts(
+    std::span<const SizeType> param_grid_count_init,
+    std::span<const double> dparams,
+    SizeType nseg_ffa,
+    double tseg_ffa,
+    search::PulsarSearchConfig cfg,
+    SizeType batch_size,
+    SizeType branch_max)
+    : Base(param_grid_count_init,
+           dparams,
+           nseg_ffa,
+           tseg_ffa,
+           std::move(cfg),
+           batch_size,
+           branch_max) {}
+
+template <SupportedFoldType FoldType>
+SizeType PrunePolyChebyshevDPFuncts<FoldType>::branch(
+    std::span<double> leaves_tree,
+    std::span<double> leaves_branch,
+    std::span<SizeType> leaves_origins,
+    std::pair<double, double> coord_cur,
+    std::pair<double, double> coord_prev,
+    SizeType n_leaves,
+    utils::BranchingWorkspaceView ws) const {
+    return poly_chebyshev_branch_batch(
+        leaves_tree, leaves_branch, leaves_origins, coord_cur, coord_prev,
+        this->m_cfg.get_nbins(), this->m_cfg.get_eta(),
+        this->m_cfg.get_param_limits(), this->m_branch_max, n_leaves,
+        this->m_cfg.get_nparams(), ws);
+}
+
+template <SupportedFoldType FoldType>
+void PrunePolyChebyshevDPFuncts<FoldType>::resolve(
+    std::span<const double> leaves_branch,
+    std::span<SizeType> param_indices,
+    std::span<float> phase_shift,
+    std::pair<double, double> coord_add,
+    std::pair<double, double> coord_cur,
+    std::pair<double, double> coord_init,
+    SizeType n_leaves) const {
+    const auto n_params     = this->m_cfg.get_nparams();
+    const auto n_accel_init = this->m_param_grid_count_init[n_params - 2];
+    const auto n_freq_init  = this->m_param_grid_count_init[n_params - 1];
+    poly_chebyshev_resolve_batch(leaves_branch, param_indices, phase_shift,
+                                 this->m_cfg.get_param_limits(), coord_add,
+                                 coord_cur, coord_init, n_accel_init,
+                                 n_freq_init, this->m_cfg.get_nbins(), n_leaves,
+                                 this->m_cfg.get_nparams());
+}
+
+template <SupportedFoldType FoldType>
+void PrunePolyChebyshevDPFuncts<FoldType>::transform(
+    std::span<double> leaves_tree,
+    std::span<SizeType> indices_tree,
+    std::pair<double, double> coord_next,
+    std::pair<double, double> coord_cur,
+    SizeType n_leaves) const {
+    if (this->m_cfg.get_use_conservative_tile()) {
+        throw std::logic_error(
+            "Conservative tile not implemented for Chebyshev basis");
+    }
+    poly_chebyshev_transform_batch(leaves_tree, indices_tree, coord_next,
+                                   coord_cur, n_leaves,
+                                   this->m_cfg.get_nparams());
+}
+
+template <SupportedFoldType FoldType>
+void PrunePolyChebyshevDPFuncts<FoldType>::report(
+    std::span<double> leaves_tree,
+    std::pair<double, double> coord_report,
+    SizeType n_leaves) const {
+    poly_chebyshev_report_batch(leaves_tree, coord_report, n_leaves,
+                                this->m_cfg.get_nparams());
+}
+
 // Specialized implementation for Circular orbit search in Taylor basis
 template <SupportedFoldType FoldType>
 PruneCircTaylorDPFuncts<FoldType>::PruneCircTaylorDPFuncts(
@@ -293,7 +412,7 @@ PruneCircTaylorDPFuncts<FoldType>::PruneCircTaylorDPFuncts(
 
 template <SupportedFoldType FoldType>
 SizeType PruneCircTaylorDPFuncts<FoldType>::branch(
-    std::span<const double> leaves_tree,
+    std::span<double> leaves_tree,
     std::span<double> leaves_branch,
     std::span<SizeType> leaves_origins,
     std::pair<double, double> coord_cur,
@@ -381,9 +500,15 @@ create_prune_dp_functs(std::string_view poly_basis,
             param_grid_count_init, dparams_init, nseg_ffa, tseg_ffa,
             std::move(cfg), batch_size, branch_max);
     }
-    throw std::runtime_error(std::format(
-        "Unknown poly_basis: '{}'. Valid options: 'taylor', 'circular'",
-        poly_basis));
+    if (poly_basis == "chebyshev" && n_params <= 4) {
+        return std::make_unique<PrunePolyChebyshevDPFuncts<FoldType>>(
+            param_grid_count_init, dparams_init, nseg_ffa, tseg_ffa,
+            std::move(cfg), batch_size, branch_max);
+    }
+    throw std::runtime_error(
+        std::format("Unknown poly_basis: '{}'. Valid options: 'taylor', "
+                    "'chebyshev', 'circular'",
+                    poly_basis));
 }
 
 // Explicit template instantiations
@@ -402,11 +527,18 @@ template class BaseTaylorPruneDPFuncts<float, PruneCircTaylorDPFuncts<float>>;
 template class BaseTaylorPruneDPFuncts<ComplexType,
                                        PruneCircTaylorDPFuncts<ComplexType>>;
 
+template class BaseChebyshevPruneDPFuncts<float,
+                                          PrunePolyChebyshevDPFuncts<float>>;
+template class BaseChebyshevPruneDPFuncts<
+    ComplexType,
+    PrunePolyChebyshevDPFuncts<ComplexType>>;
 // Derived classes
 template class PrunePolyTaylorDPFuncts<float>;
 template class PrunePolyTaylorDPFuncts<ComplexType>;
 template class PruneCircTaylorDPFuncts<float>;
 template class PruneCircTaylorDPFuncts<ComplexType>;
+template class PrunePolyChebyshevDPFuncts<float>;
+template class PrunePolyChebyshevDPFuncts<ComplexType>;
 
 // Factory function instantiations
 template std::unique_ptr<PruneDPFuncts<float>>

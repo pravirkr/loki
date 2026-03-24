@@ -160,6 +160,13 @@ constexpr bool is_power_of_two(SizeType n) noexcept {
     return (n != 0U) && ((n & (n - 1)) == 0U);
 }
 
+// Compute the connection matrix S for the Chebyshev polynomials.
+// @param k_max Maximum polynomial order.
+// @param coeff_order  0=ascending, 1=descending
+// @return 2D matrix of shape (k_max + 1, k_max + 1).
+std::vector<double>
+compute_connection_matrix_s(SizeType k_max, SizeType coeff_order = 1U) noexcept;
+
 using StatTables = StatLookupTables<float>;
 
 // A minimal PCG32 random number generator.

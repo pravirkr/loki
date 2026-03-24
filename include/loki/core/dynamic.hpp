@@ -40,7 +40,7 @@ public:
                       std::span<float> seed_scores,
                       std::pair<double, double> coord_init) = 0;
 
-    virtual SizeType branch(std::span<const double> leaves_tree,
+    virtual SizeType branch(std::span<double> leaves_tree,
                             std::span<double> leaves_branch,
                             std::span<SizeType> leaves_origins,
                             std::pair<double, double> coord_cur,
@@ -183,6 +183,23 @@ public:
               std::pair<double, double> coord_init) override;
 };
 
+// Intermediate base for Chebyshev-based methods (common seed implementation)
+template <SupportedFoldType FoldType, typename Derived>
+class BaseChebyshevPruneDPFuncts : public BasePruneDPFuncts<FoldType, Derived> {
+protected:
+    using Base = BasePruneDPFuncts<FoldType, Derived>;
+
+    // Inherit constructor
+    using Base::BasePruneDPFuncts;
+
+public:
+    // Common seed implementation for all Taylor variants
+    void seed(std::span<const FoldType> fold_segment,
+              std::span<double> seed_leaves,
+              std::span<float> seed_scores,
+              std::pair<double, double> coord_init) override;
+};
+
 // Specialized implementation for Polynomial searches in Taylor Basis
 template <SupportedFoldType FoldType>
 class PrunePolyTaylorDPFuncts final
@@ -201,7 +218,53 @@ public:
                             SizeType batch_size,
                             SizeType branch_max);
 
-    SizeType branch(std::span<const double> leaves_tree,
+    SizeType branch(std::span<double> leaves_tree,
+                    std::span<double> leaves_branch,
+                    std::span<SizeType> leaves_origins,
+                    std::pair<double, double> coord_cur,
+                    std::pair<double, double> coord_prev,
+                    SizeType n_leaves,
+                    utils::BranchingWorkspaceView branch_ws) const override;
+
+    void resolve(std::span<const double> leaves_branch,
+                 std::span<SizeType> param_indices,
+                 std::span<float> phase_shift,
+                 std::pair<double, double> coord_add,
+                 std::pair<double, double> coord_cur,
+                 std::pair<double, double> coord_init,
+                 SizeType n_leaves) const override;
+
+    void transform(std::span<double> leaves_tree,
+                   std::span<SizeType> indices_tree,
+                   std::pair<double, double> coord_next,
+                   std::pair<double, double> coord_cur,
+                   SizeType n_leaves) const override;
+
+    void report(std::span<double> leaves_tree,
+                std::pair<double, double> coord_report,
+                SizeType n_leaves) const override;
+};
+
+// Specialized implementation for Polynomial searches in Chebyshev Basis
+template <SupportedFoldType FoldType>
+class PrunePolyChebyshevDPFuncts final
+    : public BaseChebyshevPruneDPFuncts<FoldType,
+                                        PrunePolyChebyshevDPFuncts<FoldType>> {
+private:
+    using Base =
+        BaseChebyshevPruneDPFuncts<FoldType,
+                                   PrunePolyChebyshevDPFuncts<FoldType>>;
+
+public:
+    PrunePolyChebyshevDPFuncts(std::span<const SizeType> param_grid_count_init,
+                               std::span<const double> dparams_init,
+                               SizeType nseg_ffa,
+                               double tseg_ffa,
+                               search::PulsarSearchConfig cfg,
+                               SizeType batch_size,
+                               SizeType branch_max);
+
+    SizeType branch(std::span<double> leaves_tree,
                     std::span<double> leaves_branch,
                     std::span<SizeType> leaves_origins,
                     std::pair<double, double> coord_cur,
@@ -247,7 +310,7 @@ public:
                             SizeType batch_size,
                             SizeType branch_max);
 
-    SizeType branch(std::span<const double> leaves_tree,
+    SizeType branch(std::span<double> leaves_tree,
                     std::span<double> leaves_branch,
                     std::span<SizeType> leaves_origins,
                     std::pair<double, double> coord_cur,

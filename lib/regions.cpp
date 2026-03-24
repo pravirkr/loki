@@ -44,12 +44,18 @@ std::vector<coord::FFARegion> generate_ffa_regions(double p_min,
         auto nbins_k = nbins_cur;
         if (nbins_k >= nbins_max) {
             double eta_k = std::round(rho * static_cast<double>(nbins_max));
-            regions.push_back({1.0 / p_max, 1.0 / p_cur_low, nbins_max, eta_k});
+            regions.push_back({.f_start = 1.0 / p_max,
+                               .f_end   = 1.0 / p_cur_low,
+                               .nbins   = nbins_max,
+                               .eta     = eta_k});
             break;
         }
         const double p_cur_high = std::min(p_cur_low * octave_scale, p_max);
         double eta_k            = rho * static_cast<double>(nbins_k);
-        regions.push_back({1.0 / p_cur_high, 1.0 / p_cur_low, nbins_k, eta_k});
+        regions.push_back({.f_start = 1.0 / p_cur_high,
+                           .f_end   = 1.0 / p_cur_low,
+                           .nbins   = nbins_k,
+                           .eta     = eta_k});
         p_cur_low = p_cur_high;
         nbins_cur = static_cast<SizeType>(p_cur_low / bin_width);
     }
@@ -134,7 +140,7 @@ template <SupportedFoldType FoldType> struct FFARegionStats<FoldType>::Impl {
     float get_device_memory_usage() const noexcept {
         // ts_e_d + ts_v_d + scores_d (widths_d is negligible)
         const float device_extra_gb =
-            ((2 * n_samps + get_max_scores_size()) * sizeof(float) +
+            ((((2 * n_samps) + get_max_scores_size()) * sizeof(float)) +
              (get_max_scores_size() * sizeof(uint32_t))) /
             static_cast<float>(1ULL << 30U);
         // m_fold_d_time
@@ -213,6 +219,9 @@ private:
     }
 
     void plan_regions() {
+        m_cfgs.clear();
+        m_chunk_stats.clear();
+
         // Step 1: Generate FFA regions based on frequency-dependent
         // nbins/eta
         const double f_min     = m_base_cfg.get_f_min();
@@ -271,6 +280,10 @@ private:
                                     SizeType& max_coord_size,
                                     SizeType& max_ncoords,
                                     SizeType& max_ffa_levels) {
+        const double region_span = f_end - f_start;
+        if (region_span <= 0.0) {
+            return;
+        }
         // For GPU, this is the device memory limit. For CPU, this is the
         // process memory limit.
         const auto max_memory_gb = m_base_cfg.get_max_process_memory_gb();
@@ -278,43 +291,57 @@ private:
         // errors
         constexpr double kSafetyMarginGB = 0.5; // 500 MB safety margin
         const auto effective_limit_gb    = max_memory_gb - kSafetyMarginGB;
+        if (effective_limit_gb <= 0.0) {
+            throw std::runtime_error(std::format(
+                "FFARegionPlanner: max_process_memory_gb ({:.2f} GB) must be "
+                "greater than the safety margin ({:.2f} GB).",
+                max_memory_gb, kSafetyMarginGB));
+        }
 
-        constexpr double kMinViableRange  = 0.1; // Minimum possible range in Hz
+        // Smallest *nominal* chunk width (Hz) used in preflight: scales with
+        // octave width so low-frequency vs high-frequency searches behave
+        // reasonably.
+        constexpr double kMinViableRel     = 0.001; // 0.1% of region
+        constexpr double kMinViableFloorHz = 1e-1;
+        const double min_viable_nominal =
+            std::max(kMinViableRel * region_span, kMinViableFloorHz);
         constexpr double kMinChunkSize    = 0.01; // Merge threshold (Hz)
         constexpr double kSearchTolerance = 0.01; // Binary search stop (Hz)
         constexpr SizeType kMaxProbes     = 20;   // Avoid infinite loops
 
-        // Pre-flight check: can we fit minimum viable chunk at worst case
-        // (high freq)?
-        {
-            const double min_f_start =
-                (f_end - kMinViableRange) * (1.0 - max_drift);
-            const double min_f_end = f_end * (1.0 + max_drift);
-            auto check_cfg         = m_base_cfg.get_updated_config(
-                nbins, eta, min_f_start, min_f_end);
-            plans::FFAPlan<FoldType> check_plan(std::move(check_cfg));
-
-            FFARegionStats<FoldType> min_stats{
-                check_plan.get_buffer_size(),
-                check_plan.get_coord_size(),
-                check_plan.get_ncoords().back(),
-                check_plan.get_n_levels(),
+        auto make_stats = [&](const plans::FFAPlan<FoldType>& plan) {
+            return FFARegionStats<FoldType>{
+                plan.get_buffer_size(),
+                plan.get_coord_size(),
+                plan.get_ncoords().back(),
+                plan.get_n_levels(),
                 m_base_cfg.get_n_scoring_widths(),
                 m_base_cfg.get_nparams(),
                 m_base_cfg.get_nsamps(),
                 m_base_cfg.get_max_passing_candidates(),
                 m_use_gpu};
+        };
 
+        // Pre-flight check: can we fit minimum viable chunk at worst case
+        // (high freq)?
+        {
+            const double min_f_start =
+                (f_end - min_viable_nominal) * (1.0 - max_drift);
+            const double min_f_end = f_end * (1.0 + max_drift);
+            auto check_cfg         = m_base_cfg.get_updated_config(
+                nbins, eta, min_f_start, min_f_end);
+            plans::FFAPlan<FoldType> check_plan(std::move(check_cfg));
+            const auto min_stats = make_stats(check_plan);
             if (min_stats.get_freq_sweep_memory_usage() > effective_limit_gb) {
                 throw std::runtime_error(std::format(
                     "FFARegionPlanner: Cannot fit minimum viable chunk at "
                     "highest frequency.\n"
-                    "  Nominal range: {:.3f} Hz, with drift: {:.3f} Hz\n"
+                    "  Nominal range: {:.3f} Hz, drift-expanded span: {:.3f} "
+                    "Hz\n"
                     "  Required memory: {:.2f} GB, Available: {:.2f} GB\n"
                     "  Suggestion: Increase max_memory_gb or reduce "
-                    "parameter "
-                    "searchranges.",
-                    kMinViableRange, min_f_end - min_f_start,
+                    "parameter search ranges.",
+                    min_viable_nominal, min_f_end - min_f_start,
                     min_stats.get_freq_sweep_memory_usage(),
                     effective_limit_gb));
             }
@@ -326,62 +353,77 @@ private:
         while (current_f_end > f_start) {
             // Early exit for tiny remaining ranges
             const double range_width = current_f_end - f_start;
-            if (range_width < kMinViableRange) {
-                spdlog::debug(
-                    "Skipping remaining range [{:08.3f}, {:08.3f}] Hz "
-                    "(only {:.3f} Hz wide, below minimum {:.3f} Hz)",
-                    f_start, current_f_end, range_width, kMinViableRange);
+            if (range_width <= 0.0) {
                 break;
             }
-            // Binary search for largest chunk that fits (working backwards
-            // from current_f_end)
-            double f_low        = f_start;
-            double f_high       = current_f_end;
             double best_f_start = current_f_end; // Start from the top
-
-            // Start with a Heuristic probe (10% of remaining range or 1 Hz)
-            double f_probe = std::max(
-                current_f_end - std::max(0.1 * range_width, 1.0), f_start);
-            SizeType probe_count = 0;
-
-            while (probe_count < kMaxProbes &&
-                   (f_high - f_low) > kSearchTolerance) {
-                // Create test config for this chunk
+            if (range_width <= kSearchTolerance) {
                 auto test_cfg = m_base_cfg.get_updated_config(
-                    nbins, eta, f_probe * (1.0 - max_drift),
+                    nbins, eta, f_start * (1.0 - max_drift),
                     current_f_end * (1.0 + max_drift));
-                // Simulate the chunk
                 plans::FFAPlan<FoldType> test_plan(std::move(test_cfg));
-                FFARegionStats<FoldType> sim_stats{
-                    std::max(max_buffer_size, test_plan.get_buffer_size()),
-                    std::max(max_coord_size, test_plan.get_coord_size()),
-                    std::max(max_ncoords, test_plan.get_ncoords().back()),
-                    std::max(max_ffa_levels, test_plan.get_n_levels()),
-                    m_base_cfg.get_n_scoring_widths(),
-                    m_base_cfg.get_nparams(),
-                    m_base_cfg.get_nsamps(),
-                    m_base_cfg.get_max_passing_candidates(),
-                    m_use_gpu};
-                if (sim_stats.get_freq_sweep_memory_usage() <=
+                const auto test_stats = make_stats(test_plan);
+                if (test_stats.get_freq_sweep_memory_usage() >
                     effective_limit_gb) {
-                    // Fits! Try to include more (go lower in frequency)
-                    best_f_start = f_probe;
-                    f_high       = f_probe;
-
-                    if (f_probe <= f_start + kSearchTolerance) {
-                        best_f_start = f_start; // Close enough, use f_start
-                        break;
-                    }
-                    // Probe lower
-                    f_probe = std::max(std::midpoint(f_low, f_high), f_start);
-                } else {
-                    // Doesn't fit, need smaller chunk (go higher in
-                    // frequency)
-                    f_low   = f_probe;
-                    f_probe = std::midpoint(f_low, f_high);
+                    throw std::runtime_error(std::format(
+                        "FFARegionPlanner: Cannot fit remaining sub-band "
+                        "[{:08.3f}, {:08.3f}] Hz (width {:.4g} Hz) within "
+                        "effective memory limit {:.2f} GB.",
+                        f_start, current_f_end, range_width,
+                        effective_limit_gb));
                 }
+                best_f_start = f_start;
+            } else {
+                // Binary search for largest chunk that fits (working backwards
+                // from current_f_end)
+                double f_low  = f_start;
+                double f_high = current_f_end;
 
-                probe_count++;
+                // Start with a Heuristic probe (10% of remaining range or 1 Hz)
+                double f_probe = std::max(
+                    current_f_end - std::max(0.1 * range_width, 1.0), f_start);
+                SizeType probe_count = 0;
+
+                while (probe_count < kMaxProbes &&
+                       (f_high - f_low) > kSearchTolerance) {
+                    // Create test config for this chunk
+                    auto test_cfg = m_base_cfg.get_updated_config(
+                        nbins, eta, f_probe * (1.0 - max_drift),
+                        current_f_end * (1.0 + max_drift));
+                    // Simulate the chunk
+                    plans::FFAPlan<FoldType> test_plan(std::move(test_cfg));
+                    FFARegionStats<FoldType> sim_stats{
+                        std::max(max_buffer_size, test_plan.get_buffer_size()),
+                        std::max(max_coord_size, test_plan.get_coord_size()),
+                        std::max(max_ncoords, test_plan.get_ncoords().back()),
+                        std::max(max_ffa_levels, test_plan.get_n_levels()),
+                        m_base_cfg.get_n_scoring_widths(),
+                        m_base_cfg.get_nparams(),
+                        m_base_cfg.get_nsamps(),
+                        m_base_cfg.get_max_passing_candidates(),
+                        m_use_gpu};
+                    if (sim_stats.get_freq_sweep_memory_usage() <=
+                        effective_limit_gb) {
+                        // Fits! Try to include more (go lower in frequency)
+                        best_f_start = f_probe;
+                        f_high       = f_probe;
+
+                        if (f_probe <= f_start + kSearchTolerance) {
+                            best_f_start = f_start; // Close enough, use f_start
+                            break;
+                        }
+                        // Probe lower
+                        f_probe =
+                            std::max(std::midpoint(f_low, f_high), f_start);
+                    } else {
+                        // Doesn't fit, need smaller chunk (go higher in
+                        // frequency)
+                        f_low   = f_probe;
+                        f_probe = std::midpoint(f_low, f_high);
+                    }
+
+                    ++probe_count;
+                }
             }
             // Check if remaining range is too small to warrant separate
             // chunk
@@ -395,11 +437,9 @@ private:
                 throw std::runtime_error(std::format(
                     "FFARegionPlanner: Cannot fit any chunk in range "
                     "[{:08.3f}, {:08.3f}] Hz with nbins={} into memory "
-                    "limit "
-                    "{:.2f} GB.\n"
+                    "limit {:.2f} GB.\n"
                     "  Suggestion: Increase max_memory_gb or reduce "
-                    "parameter "
-                    "searchranges.",
+                    "parameter searchranges.",
                     f_start, current_f_end, nbins, max_memory_gb));
             }
 
@@ -416,6 +456,19 @@ private:
             auto chunk_cfg = m_base_cfg.get_updated_config(
                 nbins, eta, actual_start, actual_end);
             plans::FFAPlan<FoldType> chunk_plan(chunk_cfg);
+            auto chunk_stats = make_stats(chunk_plan);
+            if (chunk_stats.get_freq_sweep_memory_usage() >
+                effective_limit_gb) {
+                throw std::runtime_error(std::format(
+                    "FFARegionPlanner: Chunk exceeds effective memory limit "
+                    "(e.g. remainder merge crossing a grid step).\n"
+                    "  Nominal [{:.8f}, {:.8f}] Hz\n"
+                    "  Required {:.2f} GB, limit {:.2f} GB",
+                    nominal_start, nominal_end,
+                    chunk_stats.get_freq_sweep_memory_usage(),
+                    effective_limit_gb));
+            }
+
             const double chunk_memory_gb =
                 chunk_plan.get_buffer_memory_usage() +
                 chunk_plan.get_coord_memory_usage();
