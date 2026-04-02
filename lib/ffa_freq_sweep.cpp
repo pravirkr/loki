@@ -8,15 +8,16 @@
 #include <spdlog/spdlog.h>
 
 #include "loki/algorithms/ffa.hpp"
-#include "loki/algorithms/plans.hpp"
 #include "loki/algorithms/regions.hpp"
 #include "loki/cands.hpp"
+#include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
 #include "loki/detection/score.hpp"
 #include "loki/exceptions.hpp"
 #include "loki/psr_utils.hpp"
 #include "loki/search/configs.hpp"
 #include "loki/timing.hpp"
+#include "loki/utils/workspace.hpp"
 
 namespace loki::algorithms {
 
@@ -35,6 +36,7 @@ public:
                          std::string_view file_prefix) = 0;
 };
 
+namespace {
 template <SupportedFoldType FoldType>
 class FFAFreqSweepTypedImpl final : public FFAFreqSweep::BaseImpl {
 public:
@@ -44,7 +46,7 @@ public:
           m_show_progress(show_progress) {
         const auto& planner_stats = m_region_planner.get_stats();
         // Allocate buffers once, sized for the largest chunk
-        m_ffa_workspace = FFAWorkspace<FoldType>(
+        m_ffa_workspace = memory::FFAWorkspace<FoldType>(
             planner_stats.get_max_buffer_size(),
             planner_stats.get_max_coord_size(), m_base_cfg.get_nparams());
         m_scores.resize(planner_stats.get_max_scores_size());
@@ -52,8 +54,6 @@ public:
         m_write_param_sets_batch.resize(
             planner_stats.get_write_param_sets_size());
         m_n_passing_scores_per_region.resize(m_region_planner.get_nregions());
-        m_ffa_stats = std::make_unique<cands::FFAStatsCollection>();
-
         m_fold_time.resize(planner_stats.get_max_buffer_size_time());
 
         // Log the actual memory usage for the allocated buffers
@@ -103,7 +103,7 @@ public:
             spdlog::info("FFA Chunk: timer: {}",
                          ffa_timer_stats.get_concise_timer_summary());
             // Update accumulated stats
-            m_ffa_stats->update_stats(ffa_timer_stats);
+            m_ffa_stats.update_stats(ffa_timer_stats);
         }
 
         // Save results
@@ -111,11 +111,11 @@ public:
         cands::FFATimerStats ffa_timer_stats_pipeline;
         const float accumulated_flops = save_results(writer);
         ffa_timer_stats_pipeline["io"] += timer.stop();
-        m_ffa_stats->update_stats(ffa_timer_stats_pipeline, accumulated_flops);
-        writer.write_ffa_stats(*m_ffa_stats);
+        m_ffa_stats.update_stats(ffa_timer_stats_pipeline, accumulated_flops);
+        writer.write_ffa_stats(m_ffa_stats);
         spdlog::info("FFA Freq Sweep complete.");
         spdlog::info("FFA Freq Sweep: timer: {}",
-                     m_ffa_stats->get_concise_timer_summary());
+                     m_ffa_stats.get_concise_timer_summary());
     }
 
 private:
@@ -123,14 +123,14 @@ private:
     regions::FFARegionPlanner<FoldType> m_region_planner;
     bool m_show_progress;
 
-    algorithms::FFAWorkspace<FoldType> m_ffa_workspace;
+    memory::FFAWorkspace<FoldType> m_ffa_workspace;
     SizeType m_total_passing_scores{};
     std::vector<float> m_scores;
     std::vector<uint32_t> m_passing_indices;
     std::vector<double> m_write_param_sets_batch; // includes width
     std::vector<SizeType> m_n_passing_scores_per_region;
 
-    std::unique_ptr<cands::FFAStatsCollection> m_ffa_stats;
+    cands::FFAStatsCollection m_ffa_stats;
     // Persistent input/output buffers
     std::vector<float> m_fold_time;
 
@@ -141,7 +141,7 @@ private:
         timing::SimpleTimer timer;
         // Create FFA with shared workspace
         timer.start();
-        auto the_ffa = FFA<FoldType>(cfg, m_ffa_workspace, m_show_progress);
+        auto the_ffa = FFA<FoldType>(m_ffa_workspace, cfg, m_show_progress);
         const plans::FFAPlan<FoldType>& ffa_plan = the_ffa.get_plan();
         const auto buffer_size_time = ffa_plan.get_buffer_size_time();
         const auto fold_size_time   = ffa_plan.get_fold_size_time();
@@ -268,6 +268,7 @@ private:
         return accumulated_flops;
     }
 }; // End FFAFreqSweepTypedImpl definition
+} // End anonymous namespace
 
 FFAFreqSweep::FFAFreqSweep(const search::PulsarSearchConfig& cfg,
                            bool show_progress) {

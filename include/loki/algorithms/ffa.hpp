@@ -4,9 +4,10 @@
 #include <span>
 #include <vector>
 
-#include "loki/algorithms/plans.hpp"
+#include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
+#include "loki/utils/workspace.hpp"
 
 #ifdef LOKI_ENABLE_CUDA
 #include <cuda/std/span>
@@ -15,37 +16,6 @@
 #endif // LOKI_ENABLE_CUDA
 
 namespace loki::algorithms {
-
-/**
- * @brief Workspace for FFA buffers (can be reused across multiple FFA
- * instances).
- *
- * @tparam FoldType float or ComplexType.
- */
-template <SupportedFoldType FoldType> class FFAWorkspace {
-public:
-    FFAWorkspace();
-    explicit FFAWorkspace(const plans::FFAPlan<FoldType>& ffa_plan);
-    FFAWorkspace(SizeType buffer_size, SizeType coord_size, SizeType n_params);
-
-    // --- Rule of five: PIMPL ---
-    ~FFAWorkspace();
-    FFAWorkspace(FFAWorkspace&&) noexcept;
-    FFAWorkspace& operator=(FFAWorkspace&&) noexcept;
-    FFAWorkspace(const FFAWorkspace&)            = delete;
-    FFAWorkspace& operator=(const FFAWorkspace&) = delete;
-
-    // --- Methods ---
-    void validate(const plans::FFAPlan<FoldType>& ffa_plan) const;
-
-    // Internal data access - Data struct defined in ffa.cpp
-    struct Data;
-    [[nodiscard]] Data* data() noexcept { return m_data.get(); }
-    [[nodiscard]] const Data* data() const noexcept { return m_data.get(); }
-
-private:
-    std::unique_ptr<Data> m_data;
-};
 
 /**
  * @brief Hierarchial P-FFA folding algorithm for Pulsar Search
@@ -60,8 +30,8 @@ public:
                  bool show_progress = true);
 
     // Pipeline-based FFA constructor uses external workspace
-    explicit FFA(const search::PulsarSearchConfig& cfg,
-                 FFAWorkspace<FoldType>& workspace,
+    explicit FFA(memory::FFAWorkspace<FoldType>& workspace,
+                 const search::PulsarSearchConfig& cfg,
                  bool show_progress = true);
 
     // --- Rule of five: PIMPL ---
@@ -123,56 +93,21 @@ compute_ffa_scores(std::span<const float> ts_e,
 #ifdef LOKI_ENABLE_CUDA
 
 /**
- * @brief Workspace for CUDA FFA buffers (can be reused across multiple FFA
- * instances)
- *
- * @tparam FoldTypeCUDA Device fold type (float or ComplexTypeCUDA)
- */
-template <SupportedFoldTypeCUDA FoldTypeCUDA> class FFAWorkspaceCUDA {
-public:
-    using HostFoldType   = typename FoldTypeTraits<FoldTypeCUDA>::HostType;
-    using DeviceFoldType = typename FoldTypeTraits<FoldTypeCUDA>::DeviceType;
-
-    FFAWorkspaceCUDA();
-    explicit FFAWorkspaceCUDA(const plans::FFAPlan<HostFoldType>& ffa_plan);
-    FFAWorkspaceCUDA(SizeType buffer_size,
-                     SizeType coord_size,
-                     SizeType n_levels,
-                     SizeType n_params);
-
-    ~FFAWorkspaceCUDA();
-    FFAWorkspaceCUDA(FFAWorkspaceCUDA&&) noexcept;
-    FFAWorkspaceCUDA& operator=(FFAWorkspaceCUDA&&) noexcept;
-    FFAWorkspaceCUDA(const FFAWorkspaceCUDA&)            = delete;
-    FFAWorkspaceCUDA& operator=(const FFAWorkspaceCUDA&) = delete;
-
-    void validate(const plans::FFAPlan<HostFoldType>& ffa_plan) const;
-
-    // Internal data access - Data struct defined in ffa_cuda.cu
-    struct Data;
-    [[nodiscard]] Data* data() noexcept { return m_data.get(); }
-    [[nodiscard]] const Data* data() const noexcept { return m_data.get(); }
-
-private:
-    std::unique_ptr<Data> m_data;
-};
-
-/**
  * @brief FFA algorithm for Pulsar Search on CUDA
  *
  * @tparam FoldTypeCUDA Device fold type (float or ComplexTypeCUDA)
  */
 template <SupportedFoldTypeCUDA FoldTypeCUDA> class FFACUDA {
 public:
-    using HostFoldType   = typename FoldTypeTraits<FoldTypeCUDA>::HostType;
-    using DeviceFoldType = typename FoldTypeTraits<FoldTypeCUDA>::DeviceType;
+    using HostFoldT   = HostFoldType<FoldTypeCUDA>;
+    using DeviceFoldT = DeviceFoldType<FoldTypeCUDA>;
 
     // Constructor with owned workspace
     explicit FFACUDA(const search::PulsarSearchConfig& cfg, int device_id = 0);
 
     // Constructor with external workspace (for pipeline use)
-    explicit FFACUDA(const search::PulsarSearchConfig& cfg,
-                     FFAWorkspaceCUDA<FoldTypeCUDA>& workspace,
+    explicit FFACUDA(memory::FFAWorkspaceCUDA<FoldTypeCUDA>& workspace,
+                     const search::PulsarSearchConfig& cfg,
                      int device_id = 0);
 
     ~FFACUDA();
@@ -181,22 +116,22 @@ public:
     FFACUDA(const FFACUDA&)            = delete;
     FFACUDA& operator=(const FFACUDA&) = delete;
 
-    const plans::FFAPlan<HostFoldType>& get_plan() const noexcept;
+    const plans::FFAPlan<HostFoldT>& get_plan() const noexcept;
     // Transfer ownership of the plan
-    [[nodiscard]] plans::FFAPlan<HostFoldType> extract_plan() && noexcept;
+    [[nodiscard]] plans::FFAPlan<HostFoldT> extract_plan() && noexcept;
     float get_brute_fold_timing() const noexcept;
 
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
-                 std::span<HostFoldType> fold);
+                 std::span<HostFoldT> fold);
 
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
-                 cuda::std::span<DeviceFoldType> fold_d);
+                 cuda::std::span<DeviceFoldT> fold_d);
 
     void execute(cuda::std::span<const float> ts_e,
                  cuda::std::span<const float> ts_v,
-                 cuda::std::span<DeviceFoldType> fold,
+                 cuda::std::span<DeviceFoldT> fold,
                  cudaStream_t stream);
 
     // This overload is ONLY enabled when FoldTypeCUDA is ComplexTypeCUDA
@@ -220,8 +155,8 @@ private:
 // Convenience function to fold time series using P-FFA (both time and Fourier
 // domains)
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
-std::tuple<std::vector<typename FoldTypeTraits<FoldTypeCUDA>::HostType>,
-           plans::FFAPlan<typename FoldTypeTraits<FoldTypeCUDA>::HostType>>
+std::tuple<std::vector<HostFoldType<FoldTypeCUDA>>,
+           plans::FFAPlan<HostFoldType<FoldTypeCUDA>>>
 compute_ffa_cuda(std::span<const float> ts_e,
                  std::span<const float> ts_v,
                  const search::PulsarSearchConfig& cfg,
@@ -230,7 +165,7 @@ compute_ffa_cuda(std::span<const float> ts_e,
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 std::tuple<thrust::device_vector<FoldTypeCUDA>,
-           plans::FFAPlan<typename FoldTypeTraits<FoldTypeCUDA>::HostType>>
+           plans::FFAPlan<HostFoldType<FoldTypeCUDA>>>
 compute_ffa_cuda_device(std::span<const float> ts_e,
                         std::span<const float> ts_v,
                         const search::PulsarSearchConfig& cfg,

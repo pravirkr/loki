@@ -2,7 +2,9 @@
 
 #include <vector>
 
+#include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
+#include "loki/utils/world_tree.hpp"
 
 #ifdef LOKI_ENABLE_CUDA
 #include <cuda/std/span>
@@ -10,50 +12,77 @@
 #include <thrust/device_vector.h>
 #endif // LOKI_ENABLE_CUDA
 
-namespace loki::utils {
+namespace loki::memory {
 
-struct BranchingWorkspaceView {
-    double* __restrict__ scratch_params;
-    double* __restrict__ scratch_dparams;
-    SizeType* __restrict__ scratch_counts;
+// Workspace containers are structs to reduce boilerplate code
+
+/**
+ * @brief Workspace for FFA buffers (can be reused across multiple FFA
+ * instances).
+ *
+ * @tparam FoldType float or ComplexType.
+ */
+template <SupportedFoldType FoldType> struct FFAWorkspace {
+    std::vector<FoldType> fold_internal;
+    std::vector<coord::FFACoord> coords;
+    std::vector<coord::FFACoordFreq> coords_freq;
+
+    FFAWorkspace() = default;
+    explicit FFAWorkspace(const plans::FFAPlan<FoldType>& ffa_plan);
+    FFAWorkspace(SizeType buffer_size, SizeType coord_size, SizeType n_params);
+
+    ~FFAWorkspace() = default;
+
+    FFAWorkspace(const FFAWorkspace&)                = delete;
+    FFAWorkspace& operator=(const FFAWorkspace&)     = delete;
+    FFAWorkspace(FFAWorkspace&&) noexcept            = default;
+    FFAWorkspace& operator=(FFAWorkspace&&) noexcept = default;
+
+    void validate(const plans::FFAPlan<FoldType>& ffa_plan) const;
 };
 
+/**
+ * @brief Scratch space for Branch function in EP algorithm.
+ *
+ */
 struct BranchingWorkspace {
     std::vector<double> scratch_params;
     std::vector<double> scratch_dparams;
     std::vector<SizeType> scratch_counts;
 
+    BranchingWorkspace() = default;
     BranchingWorkspace(SizeType batch_size,
                        SizeType branch_max,
-                       SizeType nparams)
-        : scratch_params(batch_size * nparams * branch_max),
-          scratch_dparams(batch_size * nparams),
-          scratch_counts(batch_size * nparams) {}
+                       SizeType n_params);
 
-    [[nodiscard]] BranchingWorkspaceView get_view() noexcept {
-        return BranchingWorkspaceView{.scratch_params  = scratch_params.data(),
-                                      .scratch_dparams = scratch_dparams.data(),
-                                      .scratch_counts  = scratch_counts.data()};
-    }
+    ~BranchingWorkspace() = default;
 
-    [[nodiscard]] float get_memory_usage() const noexcept {
-        const auto total_memory = (scratch_params.size() * sizeof(double)) +
-                                  (scratch_dparams.size() * sizeof(double)) +
-                                  (scratch_counts.size() * sizeof(SizeType));
-        return static_cast<float>(total_memory) /
-               static_cast<float>(1ULL << 30U);
-    }
+    BranchingWorkspace(const BranchingWorkspace&)                = delete;
+    BranchingWorkspace& operator=(const BranchingWorkspace&)     = delete;
+    BranchingWorkspace(BranchingWorkspace&&) noexcept            = default;
+    BranchingWorkspace& operator=(BranchingWorkspace&&) noexcept = default;
+
+    [[nodiscard]] float get_memory_usage() const noexcept;
+
+    void
+    validate(SizeType batch_size, SizeType branch_max, SizeType nparams) const;
 };
 
+/**
+ * @brief Workspace for Prune buffers (can be reused across multiple Prune
+ * instances).
+ *
+ * @tparam FoldType float or ComplexType.
+ */
 template <SupportedFoldType FoldType> struct PruneWorkspace {
     constexpr static SizeType kLeavesParamStride = 2;
-    SizeType batch_size;
-    SizeType branch_max;
-    SizeType nparams;
-    SizeType nbins;
-    SizeType max_branched_leaves;
-    SizeType leaves_stride;
-    SizeType folds_stride;
+    SizeType batch_size{};
+    SizeType branch_max{};
+    SizeType nparams{};
+    SizeType nbins{};
+    SizeType max_branched_leaves{};
+    SizeType leaves_stride{};
+    SizeType folds_stride{};
 
     std::vector<double> branched_leaves;
     std::vector<FoldType> branched_folds;
@@ -64,75 +93,108 @@ template <SupportedFoldType FoldType> struct PruneWorkspace {
     std::vector<SizeType> branched_param_idx;
     std::vector<float> branched_phase_shift;
 
+    PruneWorkspace() = default;
     PruneWorkspace(SizeType batch_size,
                    SizeType branch_max,
                    SizeType nparams,
-                   SizeType nbins)
-        : batch_size(batch_size),
-          branch_max(branch_max),
-          nparams(nparams),
-          nbins(nbins),
-          max_branched_leaves(batch_size * branch_max),
-          leaves_stride((nparams + 2) * kLeavesParamStride),
-          folds_stride(2 * nbins),
-          branched_leaves(max_branched_leaves * leaves_stride),
-          branched_folds(max_branched_leaves * folds_stride),
-          branched_scores(max_branched_leaves),
-          branched_indices(max_branched_leaves),
-          branched_param_idx(max_branched_leaves),
-          branched_phase_shift(max_branched_leaves) {}
+                   SizeType nbins);
 
-    float get_memory_usage() const noexcept {
-        const auto total_memory =
-            (branched_leaves.size() * sizeof(double)) +
-            (branched_folds.size() * sizeof(FoldType)) +
-            (branched_scores.size() * sizeof(float)) +
-            (branched_indices.size() * sizeof(SizeType)) +
-            (branched_param_idx.size() * sizeof(SizeType)) +
-            (branched_phase_shift.size() * sizeof(float));
-        return static_cast<float>(total_memory) /
-               static_cast<float>(1ULL << 30U);
-    }
+    ~PruneWorkspace() = default;
+
+    PruneWorkspace(const PruneWorkspace&)                = delete;
+    PruneWorkspace& operator=(const PruneWorkspace&)     = delete;
+    PruneWorkspace(PruneWorkspace&&) noexcept            = default;
+    PruneWorkspace& operator=(PruneWorkspace&&) noexcept = default;
+
+    [[nodiscard]] float get_memory_usage() const noexcept;
+
+    void validate(SizeType batch_size, SizeType branch_max) const;
 }; // End PruneWorkspace definition
 
+/**
+ * @brief Workspace for EPMultiPass buffers (can be reused across multiple Prune
+ * instances or across repeated EPMultiPass::execute calls).
+ *
+ * @tparam FoldType float or ComplexType.
+ */
 template <SupportedFoldType FoldType> struct EPWorkspace {
+    WorldTree<FoldType> world_tree;
     PruneWorkspace<FoldType> prune;
     BranchingWorkspace branch;
 
+    std::vector<double> seed_leaves;
+    std::vector<float> seed_scores;
+
+    EPWorkspace() = default;
     EPWorkspace(SizeType batch_size,
                 SizeType branch_max,
+                SizeType max_sugg,
+                SizeType ncoords_ffa,
                 SizeType nparams,
-                SizeType nbins)
-        : prune(batch_size, branch_max, nparams, nbins),
-          branch(batch_size, branch_max, nparams) {}
+                SizeType nbins);
 
-    [[nodiscard]] float get_memory_usage() const noexcept {
-        return prune.get_memory_usage() + branch.get_memory_usage();
-    }
+    ~EPWorkspace() = default;
+    // Non-copyable, non-movable: pass by reference only
+    EPWorkspace(const EPWorkspace&)                = delete;
+    EPWorkspace& operator=(const EPWorkspace&)     = delete;
+    EPWorkspace(EPWorkspace&&) noexcept            = default;
+    EPWorkspace& operator=(EPWorkspace&&) noexcept = default;
+
+    [[nodiscard]] float get_memory_usage() const noexcept;
+
+    void validate(SizeType batch_size,
+                  SizeType branch_max,
+                  SizeType max_sugg,
+                  SizeType ncoords_ffa,
+                  SizeType nparams,
+                  SizeType nbins) const;
 }; // End EPWorkspace definition
 
 #ifdef LOKI_ENABLE_CUDA
 
-struct CUBScratchArena {
-    void* cub_temp_storage  = nullptr;
-    SizeType cub_temp_bytes = 0;
-    uint32_t* d_reduce_out  = nullptr;
-    cudaStream_t m_stream   = nullptr;
+/**
+ * @brief Workspace for CUDA FFA buffers (can be reused across multiple FFA
+ * instances)
+ *
+ * @tparam FoldTypeCUDA Device fold type (float or ComplexTypeCUDA)
+ */
+template <SupportedFoldTypeCUDA FoldTypeCUDA> struct FFAWorkspaceCUDA {
+public:
+    using HostFoldT   = HostFoldType<FoldTypeCUDA>;
+    using DeviceFoldT = DeviceFoldType<FoldTypeCUDA>;
 
-    CUBScratchArena(SizeType batch_size,
-                    SizeType branch_max,
-                    cudaStream_t stream);
-    ~CUBScratchArena();
-    CUBScratchArena(const CUBScratchArena&)                = delete;
-    CUBScratchArena& operator=(const CUBScratchArena&)     = delete;
-    CUBScratchArena(CUBScratchArena&&) noexcept            = delete;
-    CUBScratchArena& operator=(CUBScratchArena&&) noexcept = delete;
+    thrust::device_vector<DeviceFoldT> fold_internal_d;
+    coord::FFACoordD coords_d;
+    coord::FFACoordFreqD coords_freq_d;
 
-    [[nodiscard]] float get_memory_usage() const noexcept;
+    FFAWorkspaceCUDA() = default;
+    explicit FFAWorkspaceCUDA(const plans::FFAPlan<HostFoldT>& ffa_plan);
+    FFAWorkspaceCUDA(SizeType buffer_size,
+                     SizeType coord_size,
+                     SizeType n_levels,
+                     SizeType n_params);
 
-    void convert_mask_to_indices(cuda::std::span<const uint8_t> validation_mask,
-                                 cuda::std::span<uint32_t> indices,
-                                 SizeType n_leaves);
+    ~FFAWorkspaceCUDA() = default;
+
+    FFAWorkspaceCUDA(const FFAWorkspaceCUDA&)                = delete;
+    FFAWorkspaceCUDA& operator=(const FFAWorkspaceCUDA&)     = delete;
+    FFAWorkspaceCUDA(FFAWorkspaceCUDA&&) noexcept            = default;
+    FFAWorkspaceCUDA& operator=(FFAWorkspaceCUDA&&) noexcept = default;
+
+    void validate(const plans::FFAPlan<HostFoldT>& ffa_plan) const;
+    void resolve_coordinates_freq(const plans::FFAPlan<HostFoldT>& ffa_plan,
+                                  cudaStream_t stream);
+    void resolve_coordinates(const plans::FFAPlan<HostFoldT>& ffa_plan,
+                             cudaStream_t stream);
+
+private:
+    // Buffers for device resolve
+    thrust::device_vector<uint32_t> m_param_counts_d;
+    thrust::device_vector<uint32_t> m_ncoords_offsets_d;
+    thrust::device_vector<ParamLimit> m_param_limits_d;
+
+    void copy_plan_to_device(const plans::FFAPlan<HostFoldT>& ffa_plan,
+                             cudaStream_t stream);
 };
 
 struct BranchingWorkspaceCUDAView {
@@ -150,22 +212,34 @@ struct BranchingWorkspaceCUDA {
     thrust::device_vector<uint32_t> leaf_branch_count;
     thrust::device_vector<uint32_t> leaf_output_offset;
 
+    BranchingWorkspaceCUDA() = default;
     BranchingWorkspaceCUDA(SizeType batch_size,
                            SizeType branch_max,
                            SizeType nparams);
+
+    ~BranchingWorkspaceCUDA() = default;
+
+    BranchingWorkspaceCUDA(const BranchingWorkspaceCUDA&)            = delete;
+    BranchingWorkspaceCUDA& operator=(const BranchingWorkspaceCUDA&) = delete;
+    BranchingWorkspaceCUDA(BranchingWorkspaceCUDA&&) noexcept        = default;
+    BranchingWorkspaceCUDA&
+    operator=(BranchingWorkspaceCUDA&&) noexcept = default;
+
     [[nodiscard]] BranchingWorkspaceCUDAView get_view() noexcept;
     [[nodiscard]] float get_memory_usage() const noexcept;
+    void
+    validate(SizeType batch_size, SizeType branch_max, SizeType nparams) const;
 };
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA> struct PruneWorkspaceCUDA {
     constexpr static SizeType kLeavesParamStride = 2;
-    SizeType batch_size;
-    SizeType branch_max;
-    SizeType nparams;
-    SizeType nbins;
-    SizeType max_branched_leaves;
-    SizeType leaves_stride;
-    SizeType folds_stride;
+    SizeType batch_size{};
+    SizeType branch_max{};
+    SizeType nparams{};
+    SizeType nbins{};
+    SizeType max_branched_leaves{};
+    SizeType leaves_stride{};
+    SizeType folds_stride{};
 
     thrust::device_vector<double> branched_leaves_d;
     thrust::device_vector<FoldTypeCUDA> branched_folds_d;
@@ -178,32 +252,79 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA> struct PruneWorkspaceCUDA {
     // Scratch space for validation mask
     thrust::device_vector<uint8_t> validation_mask_d;
 
+    PruneWorkspaceCUDA() = default;
     PruneWorkspaceCUDA(SizeType batch_size,
                        SizeType branch_max,
                        SizeType nparams,
                        SizeType nbins);
+    ~PruneWorkspaceCUDA() = default;
+
+    PruneWorkspaceCUDA(const PruneWorkspaceCUDA&)                = delete;
+    PruneWorkspaceCUDA& operator=(const PruneWorkspaceCUDA&)     = delete;
+    PruneWorkspaceCUDA(PruneWorkspaceCUDA&&) noexcept            = default;
+    PruneWorkspaceCUDA& operator=(PruneWorkspaceCUDA&&) noexcept = default;
 
     [[nodiscard]] float get_memory_usage() const noexcept;
+    void validate(SizeType batch_size, SizeType branch_max) const;
+
+}; // End PruneWorkspaceCUDA definition
+
+struct CUBScratchArena {
+    void* cub_temp_storage  = nullptr;
+    SizeType cub_temp_bytes = 0;
+    uint32_t* d_reduce_out  = nullptr;
+    cudaStream_t stream     = nullptr;
+
+    CUBScratchArena() = default;
+    CUBScratchArena(SizeType batch_size,
+                    SizeType branch_max,
+                    cudaStream_t stream = nullptr);
+    ~CUBScratchArena();
+    // Non-copyable: device memory ownership is non-shared
+    CUBScratchArena(const CUBScratchArena&)            = delete;
+    CUBScratchArena& operator=(const CUBScratchArena&) = delete;
+    // Movable: transfers ownership, poisons source
+    CUBScratchArena(CUBScratchArena&&) noexcept;
+    CUBScratchArena& operator=(CUBScratchArena&&) noexcept;
+
+    [[nodiscard]] float get_memory_usage() const noexcept;
+
+    void convert_mask_to_indices(cuda::std::span<const uint8_t> validation_mask,
+                                 cuda::std::span<uint32_t> indices,
+                                 SizeType n_leaves);
 };
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA> struct EPWorkspaceCUDA {
+    WorldTreeCUDA<FoldTypeCUDA> world_tree;
     PruneWorkspaceCUDA<FoldTypeCUDA> prune;
     BranchingWorkspaceCUDA branch;
     CUBScratchArena scratch;
 
+    thrust::device_vector<double> seed_leaves_d;
+    thrust::device_vector<float> seed_scores_d;
+
+    EPWorkspaceCUDA() = default;
     EPWorkspaceCUDA(SizeType batch_size,
                     SizeType branch_max,
+                    SizeType max_sugg,
+                    SizeType ncoords_ffa,
                     SizeType nparams,
                     SizeType nbins,
-                    cudaStream_t stream = nullptr)
-        : prune(batch_size, branch_max, nparams, nbins),
-          branch(batch_size, branch_max, nparams),
-          scratch(batch_size, branch_max, stream) {}
+                    cudaStream_t stream = nullptr);
 
-    [[nodiscard]] float get_memory_usage() const noexcept {
-        return prune.get_memory_usage() + branch.get_memory_usage() +
-               scratch.get_memory_usage();
-    }
+    ~EPWorkspaceCUDA();
+    EPWorkspaceCUDA(const EPWorkspaceCUDA&)                = delete;
+    EPWorkspaceCUDA& operator=(const EPWorkspaceCUDA&)     = delete;
+    EPWorkspaceCUDA(EPWorkspaceCUDA&&) noexcept;
+    EPWorkspaceCUDA& operator=(EPWorkspaceCUDA&&) noexcept;
+
+    [[nodiscard]] float get_memory_usage() const noexcept;
+    void validate(SizeType batch_size,
+                  SizeType branch_max,
+                  SizeType max_sugg,
+                  SizeType ncoords_ffa,
+                  SizeType nparams,
+                  SizeType nbins) const;
 };
 
 struct DeviceCounter {
@@ -225,4 +346,4 @@ struct DeviceCounter {
 
 #endif // LOKI_ENABLE_CUDA
 
-} // namespace loki::utils
+} // namespace loki::memory

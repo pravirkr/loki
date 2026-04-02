@@ -10,7 +10,7 @@
 #include "loki/common/types.hpp"
 #include "loki/exceptions.hpp"
 
-namespace loki::utils {
+namespace loki::math {
 
 namespace {
 
@@ -386,4 +386,4 @@ void irfft_batch(std::span<const ComplexType> complex_input,
     executor.execute(complex_input, real_output, batch_size);
 }
 
-} // namespace loki::utils
+} // namespace loki::math

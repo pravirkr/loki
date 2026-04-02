@@ -48,6 +48,12 @@ template <> struct FoldTypeTraits<ComplexTypeCUDA> {
     using DeviceType = ComplexTypeCUDA;
 };
 
+template <SupportedFoldTypeCUDA T>
+using HostFoldType = typename FoldTypeTraits<T>::HostType;
+
+template <SupportedFoldTypeCUDA T>
+using DeviceFoldType = typename FoldTypeTraits<T>::DeviceType;
+
 #endif // LOKI_ENABLE_CUDA
 
 inline constexpr SizeType kUnrollFactor = 8;

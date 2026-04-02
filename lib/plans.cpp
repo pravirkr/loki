@@ -1,4 +1,4 @@
-#include "loki/algorithms/plans.hpp"
+#include "loki/common/plans.hpp"
 
 #include <algorithm>
 #include <numeric>

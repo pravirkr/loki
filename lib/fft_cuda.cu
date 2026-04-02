@@ -13,7 +13,7 @@
 #include "loki/cuda_utils.cuh"
 #include "loki/exceptions.hpp"
 
-namespace loki::utils {
+namespace loki::math {
 
 namespace {
 
@@ -362,4 +362,4 @@ void irfft_batch_cuda(cuda::std::span<ComplexTypeCUDA> complex_input,
                   batch_size, n_real);
 }
 
-} // namespace loki::utils
+} // namespace loki::math

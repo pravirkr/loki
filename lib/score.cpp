@@ -272,7 +272,7 @@ public:
           m_shape(shape),
           m_nbins_pow2(std::bit_ceil(m_nbins)),
           m_ntemplates(widths_arr.size()),
-          m_fft2d(utils::FFT2D(m_nprofiles, m_ntemplates, m_nbins_pow2)) {
+          m_fft2d(math::FFT2D(m_nprofiles, m_ntemplates, m_nbins_pow2)) {
         // Allocate memory for the templates
         m_templates.resize(m_ntemplates * m_nbins_pow2, 0.0F);
         m_arr_padded.resize(nprofiles * m_nbins_pow2, 0.0F);
@@ -330,7 +330,7 @@ private:
     std::vector<float> m_snr_arr;
 
     // FFTW plans
-    utils::FFT2D m_fft2d;
+    math::FFT2D m_fft2d;
 
     void initialise_templates() {
         if (m_shape == "gaussian") {
@@ -427,7 +427,7 @@ void snr_boxcar_1d(std::span<const float> arr,
         const float b =
             static_cast<float>(w) * h / static_cast<float>(nbins - w);
         const float dmax = utils::diff_max(psum_ptr + w, psum_ptr, nbins);
-        out[iw]          = ((h + b) * dmax - b * sum) / stdnoise;
+        out[iw]          = (((h + b) * dmax) - (b * sum)) / stdnoise;
     }
 }
 

@@ -74,8 +74,8 @@ kernel_analyze_and_branch_circular(const double* __restrict__ leaves_tree,
                                    double eta,
                                    const ParamLimit* __restrict__ param_limits,
                                    uint32_t branch_max,
-                                   utils::BranchingWorkspaceCUDAView branch_ws,
-                                   utils::CUBScratchArena& scratch_ws) {
+                                   memory::BranchingWorkspaceCUDAView branch_ws,
+                                   memory::CUBScratchArena& scratch_ws) {
     constexpr SizeType kParams       = 5;
     constexpr SizeType kParamStride  = 2;
     constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
@@ -184,7 +184,7 @@ __global__ void kernel_materialize_branches_circular(
     uint32_t n_leaves,
     uint32_t n_leaves_branched,
     SizeType branch_max,
-    utils::BranchingWorkspaceCUDAView branch_ws) {
+    memory::BranchingWorkspaceCUDAView branch_ws) {
     constexpr uint32_t kParams       = 5;
     constexpr uint32_t kParamStride  = 2;
     constexpr uint32_t kLeavesStride = (kParams + 2) * kParamStride;
@@ -614,8 +614,8 @@ circ_taylor_branch_batch_cuda(cuda::std::span<const double> leaves_tree,
                               SizeType branch_max,
                               SizeType n_leaves,
                               double minimum_snap_cells,
-                              utils::BranchingWorkspaceCUDAView branch_ws,
-                              utils::CUBScratchArena& scratch_ws,
+                              memory::BranchingWorkspaceCUDAView branch_ws,
+                              memory::CUBScratchArena& scratch_ws,
                               cudaStream_t stream) {
     constexpr SizeType kLeavesStride = 14;
 
@@ -739,7 +739,7 @@ circ_taylor_validate_batch_cuda(cuda::std::span<const double> leaves_branch,
                                 double p_orb_min,
                                 double x_mass_const,
                                 double minimum_snap_cells,
-                                utils::CUBScratchArena& scratch_ws,
+                                memory::CUBScratchArena& scratch_ws,
                                 cudaStream_t stream) {
     constexpr SizeType kThreadsPerBlock = 256;
     const auto blocks_per_grid =

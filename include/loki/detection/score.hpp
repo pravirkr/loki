@@ -172,7 +172,7 @@ SizeType score_and_filter_cuda_d(cuda::std::span<const float> folds,
                                  SizeType nprofiles,
                                  SizeType nbins,
                                  cudaStream_t stream,
-                                 utils::DeviceCounter& counter);
+                                 memory::DeviceCounter& counter);
 
 SizeType score_and_filter_max_cuda_d(cuda::std::span<const float> folds,
                                      cuda::std::span<const uint32_t> widths,
@@ -181,7 +181,7 @@ SizeType score_and_filter_max_cuda_d(cuda::std::span<const float> folds,
                                      float threshold,
                                      SizeType nprofiles,
                                      SizeType nbins,
-                                     utils::DeviceCounter& counter,
+                                     memory::DeviceCounter& counter,
                                      cudaStream_t stream);
 
 SizeType
@@ -192,7 +192,7 @@ score_and_filter_max_cuda_thread_d(cuda::std::span<const float> folds,
                                    float threshold,
                                    SizeType nprofiles,
                                    SizeType nbins,
-                                   utils::CUBScratchArena& scratch_ws,
+                                   memory::CUBScratchArena& scratch_ws,
                                    cudaStream_t stream);
 
 #endif // LOKI_ENABLE_CUDA

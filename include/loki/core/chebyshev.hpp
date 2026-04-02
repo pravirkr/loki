@@ -30,7 +30,7 @@ SizeType poly_chebyshev_branch_batch(std::span<double> leaves_tree,
                                      SizeType branch_max,
                                      SizeType n_leaves,
                                      SizeType n_params,
-                                     utils::BranchingWorkspaceView ws);
+                                     memory::BranchingWorkspace& branch_ws);
 
 void poly_chebyshev_resolve_batch(std::span<const double> leaves_branch,
                                   std::span<SizeType> param_indices,
@@ -106,8 +106,8 @@ poly_chebyshev_branch_batch_cuda(cuda::std::span<const double> leaves_tree,
                                  SizeType branch_max,
                                  SizeType n_leaves,
                                  SizeType n_params,
-                                 utils::BranchingWorkspaceCUDAView branch_ws,
-                                 utils::CUBScratchArena& scratch_ws,
+                                 memory::BranchingWorkspaceCUDAView branch_ws,
+                                 memory::CUBScratchArena& scratch_ws,
                                  cudaStream_t stream);
 
 void poly_chebyshev_resolve_batch_cuda(

@@ -64,7 +64,7 @@ BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::BasePruneDPFunctsCUDA(
 
     if constexpr (std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>) {
         m_irfft_executor =
-            std::make_unique<utils::IrfftExecutorCUDA>(m_cfg.get_nbins());
+            std::make_unique<math::IrfftExecutorCUDA>(m_cfg.get_nbins());
         const auto max_batch_size = m_batch_size * m_branch_max;
         m_scratch_folds_d.resize(max_batch_size * 2 * m_cfg.get_nbins());
     } else {
@@ -94,7 +94,7 @@ SizeType BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::validate(
     cuda::std::span<uint8_t> /*validation_mask*/,
     std::pair<double, double> /*coord_cur*/,
     SizeType n_leaves,
-    utils::CUBScratchArena& /*scratch_ws*/,
+    memory::CUBScratchArena& /*scratch_ws*/,
     cudaStream_t /*stream*/) const noexcept {
     return n_leaves;
 }
@@ -134,7 +134,7 @@ SizeType BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::score_and_filter(
     cuda::std::span<uint8_t> validation_mask,
     float threshold,
     SizeType n_leaves,
-    utils::CUBScratchArena& scratch_ws,
+    memory::CUBScratchArena& scratch_ws,
     cudaStream_t stream) noexcept {
     const auto nbins   = m_cfg.get_nbins();
     const auto nbins_f = m_cfg.get_nbins_f();
@@ -224,8 +224,8 @@ SizeType PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>::branch(
     std::pair<double, double> coord_cur,
     std::pair<double, double> /*coord_prev*/,
     SizeType n_leaves,
-    utils::BranchingWorkspaceCUDAView branch_ws,
-    utils::CUBScratchArena& scratch_ws,
+    memory::BranchingWorkspaceCUDAView branch_ws,
+    memory::CUBScratchArena& scratch_ws,
     cudaStream_t stream) {
     return poly_taylor_branch_batch_cuda(
         leaves_tree, leaves_branch, leaves_origins, validation_mask, coord_cur,
@@ -306,8 +306,8 @@ SizeType PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>::branch(
     std::pair<double, double> coord_cur,
     std::pair<double, double> /*coord_prev*/,
     SizeType n_leaves,
-    utils::BranchingWorkspaceCUDAView branch_ws,
-    utils::CUBScratchArena& scratch_ws,
+    memory::BranchingWorkspaceCUDAView branch_ws,
+    memory::CUBScratchArena& scratch_ws,
     cudaStream_t stream) {
     return circ_taylor_branch_batch_cuda(
         leaves_tree, leaves_branch, leaves_origins, validation_mask, coord_cur,
@@ -324,7 +324,7 @@ SizeType PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>::validate(
     cuda::std::span<uint8_t> validation_mask,
     std::pair<double, double> /*coord_cur*/,
     SizeType n_leaves,
-    utils::CUBScratchArena& scratch_ws,
+    memory::CUBScratchArena& scratch_ws,
     cudaStream_t stream) const noexcept {
     return circ_taylor_validate_batch_cuda(
         leaves_branch, validation_mask, n_leaves, this->m_cfg.get_p_orb_min(),

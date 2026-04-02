@@ -46,7 +46,7 @@ public:
                             std::pair<double, double> coord_cur,
                             std::pair<double, double> coord_prev,
                             SizeType n_leaves,
-                            utils::BranchingWorkspaceView branch_ws) const = 0;
+                            memory::BranchingWorkspace& branch_ws) const = 0;
 
     virtual SizeType validate(std::span<double> leaves_branch,
                               std::span<SizeType> leaves_origins,
@@ -116,7 +116,7 @@ protected:
     std::vector<FoldType> m_scratch_shifts;
     // Buffer for ComplexType irfft transform
     std::vector<float> m_scratch_folds;
-    std::unique_ptr<utils::IrfftExecutor> m_irfft_executor;
+    std::unique_ptr<math::IrfftExecutor> m_irfft_executor;
     // Cache for snr_boxcar_batch
     detection::BoxcarWidthsCache m_boxcar_widths_cache;
 
@@ -224,7 +224,7 @@ public:
                     std::pair<double, double> coord_cur,
                     std::pair<double, double> coord_prev,
                     SizeType n_leaves,
-                    utils::BranchingWorkspaceView branch_ws) const override;
+                    memory::BranchingWorkspace& branch_ws) const override;
 
     void resolve(std::span<const double> leaves_branch,
                  std::span<SizeType> param_indices,
@@ -270,7 +270,7 @@ public:
                     std::pair<double, double> coord_cur,
                     std::pair<double, double> coord_prev,
                     SizeType n_leaves,
-                    utils::BranchingWorkspaceView branch_ws) const override;
+                    memory::BranchingWorkspace& branch_ws) const override;
 
     void resolve(std::span<const double> leaves_branch,
                  std::span<SizeType> param_indices,
@@ -316,7 +316,7 @@ public:
                     std::pair<double, double> coord_cur,
                     std::pair<double, double> coord_prev,
                     SizeType n_leaves,
-                    utils::BranchingWorkspaceView ws) const override;
+                    memory::BranchingWorkspace& branch_ws) const override;
 
     SizeType validate(std::span<double> leaves_branch,
                       std::span<SizeType> leaves_origins,
@@ -392,8 +392,8 @@ public:
                             std::pair<double, double> coord_cur,
                             std::pair<double, double> coord_prev,
                             SizeType n_leaves,
-                            utils::BranchingWorkspaceCUDAView branch_ws,
-                            utils::CUBScratchArena& scratch_ws,
+                            memory::BranchingWorkspaceCUDAView branch_ws,
+                            memory::CUBScratchArena& scratch_ws,
                             cudaStream_t stream) = 0;
 
     virtual SizeType validate(cuda::std::span<double> leaves_branch,
@@ -401,7 +401,7 @@ public:
                               cuda::std::span<uint8_t> validation_mask,
                               std::pair<double, double> coord_cur,
                               SizeType n_leaves,
-                              utils::CUBScratchArena& scratch_ws,
+                              memory::CUBScratchArena& scratch_ws,
                               cudaStream_t stream) const noexcept = 0;
 
     virtual void resolve(cuda::std::span<const double> leaves_branch,
@@ -432,7 +432,7 @@ public:
                      cuda::std::span<uint8_t> validation_mask,
                      float threshold,
                      SizeType n_leaves,
-                     utils::CUBScratchArena& scratch_ws,
+                     memory::CUBScratchArena& scratch_ws,
                      cudaStream_t stream) noexcept = 0;
 
     virtual void transform(cuda::std::span<double> leaves_tree,
@@ -467,7 +467,7 @@ protected:
 
     // Buffer for ComplexType irfft transform
     thrust::device_vector<float> m_scratch_folds_d;
-    std::unique_ptr<utils::IrfftExecutorCUDA> m_irfft_executor;
+    std::unique_ptr<math::IrfftExecutorCUDA> m_irfft_executor;
 
     // Constructor for all derived classes
     BasePruneDPFunctsCUDA(std::span<const SizeType> param_grid_count_init,
@@ -489,7 +489,7 @@ public:
                       cuda::std::span<uint8_t> validation_mask,
                       std::pair<double, double> coord_cur,
                       SizeType n_leaves,
-                      utils::CUBScratchArena& scratch_ws,
+                      memory::CUBScratchArena& scratch_ws,
                       cudaStream_t stream) const noexcept override;
 
     void shift_add(cuda::std::span<const FoldTypeCUDA> folds_tree,
@@ -509,7 +509,7 @@ public:
                               cuda::std::span<uint8_t> validation_mask,
                               float threshold,
                               SizeType n_leaves,
-                              utils::CUBScratchArena& scratch_ws,
+                              memory::CUBScratchArena& scratch_ws,
                               cudaStream_t stream) noexcept override;
 };
 
@@ -559,8 +559,8 @@ public:
                     std::pair<double, double> coord_cur,
                     std::pair<double, double> coord_prev,
                     SizeType n_leaves,
-                    utils::BranchingWorkspaceCUDAView ws,
-                    utils::CUBScratchArena& scratch_ws,
+                    memory::BranchingWorkspaceCUDAView ws,
+                    memory::CUBScratchArena& scratch_ws,
                     cudaStream_t stream) override;
 
     void resolve(cuda::std::span<const double> leaves_branch,
@@ -614,8 +614,8 @@ public:
                     std::pair<double, double> coord_cur,
                     std::pair<double, double> coord_prev,
                     SizeType n_leaves,
-                    utils::BranchingWorkspaceCUDAView ws,
-                    utils::CUBScratchArena& scratch_ws,
+                    memory::BranchingWorkspaceCUDAView ws,
+                    memory::CUBScratchArena& scratch_ws,
                     cudaStream_t stream) override;
 
     SizeType validate(cuda::std::span<double> leaves_branch,
@@ -623,7 +623,7 @@ public:
                       cuda::std::span<uint8_t> validation_mask,
                       std::pair<double, double> coord_cur,
                       SizeType n_leaves,
-                      utils::CUBScratchArena& scratch_ws,
+                      memory::CUBScratchArena& scratch_ws,
                       cudaStream_t stream) const noexcept override;
 
     void resolve(cuda::std::span<const double> leaves_branch,

@@ -266,6 +266,7 @@ inline SizeType get_nearest_idx_analytical(double val,
  */
 class MiddleOutScheme {
 public:
+    MiddleOutScheme() = default;
     MiddleOutScheme(SizeType nsegments, SizeType ref_idx, double tsegment = 1.0)
         : m_nsegments(nsegments),
           m_ref_idx(ref_idx),
@@ -412,9 +413,9 @@ public:
     [[nodiscard]] SizeType size() const { return m_nsegments; }
 
 private:
-    SizeType m_nsegments;
-    SizeType m_ref_idx;
-    double m_tsegment;
+    SizeType m_nsegments{};
+    SizeType m_ref_idx{};
+    double m_tsegment{};
     std::vector<SizeType> m_data;
 };
 

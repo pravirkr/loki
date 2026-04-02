@@ -14,7 +14,7 @@
 
 #include "loki/common/types.hpp"
 
-namespace loki::utils {
+namespace loki::math {
 
 // Forward declare for global FFTW initialization
 void ensure_fftw_threading(int nthreads = 1);
@@ -260,4 +260,4 @@ void irfft_batch_cuda(cuda::std::span<ComplexTypeCUDA> complex_input,
 
 #endif // LOKI_ENABLE_CUDA
 
-} // namespace loki::utils
+} // namespace loki::math

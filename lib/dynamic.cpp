@@ -43,7 +43,7 @@ BasePruneDPFuncts<FoldType, Derived>::BasePruneDPFuncts(
     m_n_coords_init = n_coords_init;
     if constexpr (std::is_same_v<FoldType, ComplexType>) {
         m_irfft_executor =
-            std::make_unique<utils::IrfftExecutor>(m_cfg.get_nbins());
+            std::make_unique<math::IrfftExecutor>(m_cfg.get_nbins());
         m_scratch_shifts.resize(1); // Not needed for complex
         const auto max_batch_size = m_batch_size * m_branch_max;
         m_scratch_folds.resize(max_batch_size * 2 * m_cfg.get_nbins());
@@ -266,12 +266,12 @@ SizeType PrunePolyTaylorDPFuncts<FoldType>::branch(
     std::pair<double, double> coord_cur,
     std::pair<double, double> /*coord_prev*/,
     SizeType n_leaves,
-    utils::BranchingWorkspaceView ws) const {
+    memory::BranchingWorkspace& branch_ws) const {
     return poly_taylor_branch_batch(
         leaves_tree, leaves_branch, leaves_origins, coord_cur,
         this->m_cfg.get_nbins(), this->m_cfg.get_eta(),
         this->m_cfg.get_param_limits(), this->m_branch_max, n_leaves,
-        this->m_cfg.get_nparams(), ws);
+        this->m_cfg.get_nparams(), branch_ws);
 }
 
 template <SupportedFoldType FoldType>
@@ -340,12 +340,12 @@ SizeType PrunePolyChebyshevDPFuncts<FoldType>::branch(
     std::pair<double, double> coord_cur,
     std::pair<double, double> coord_prev,
     SizeType n_leaves,
-    utils::BranchingWorkspaceView ws) const {
+    memory::BranchingWorkspace& branch_ws) const {
     return poly_chebyshev_branch_batch(
         leaves_tree, leaves_branch, leaves_origins, coord_cur, coord_prev,
         this->m_cfg.get_nbins(), this->m_cfg.get_eta(),
         this->m_cfg.get_param_limits(), this->m_branch_max, n_leaves,
-        this->m_cfg.get_nparams(), ws);
+        this->m_cfg.get_nparams(), branch_ws);
 }
 
 template <SupportedFoldType FoldType>
@@ -418,12 +418,12 @@ SizeType PruneCircTaylorDPFuncts<FoldType>::branch(
     std::pair<double, double> coord_cur,
     std::pair<double, double> /*coord_prev*/,
     SizeType n_leaves,
-    utils::BranchingWorkspaceView ws) const {
+    memory::BranchingWorkspace& branch_ws) const {
     return circ_taylor_branch_batch(
         leaves_tree, leaves_branch, leaves_origins, coord_cur,
         this->m_cfg.get_nbins(), this->m_cfg.get_eta(),
         this->m_cfg.get_param_limits(), this->m_branch_max, n_leaves,
-        this->m_cfg.get_minimum_snap_cells(), ws);
+        this->m_cfg.get_minimum_snap_cells(), branch_ws);
 }
 
 template <SupportedFoldType FoldType>

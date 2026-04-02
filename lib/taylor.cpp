@@ -14,6 +14,7 @@
 #include "loki/psr_utils.hpp"
 #include "loki/transforms.hpp"
 #include "loki/utils.hpp"
+#include "loki/utils/workspace.hpp"
 
 namespace loki::core {
 
@@ -29,7 +30,7 @@ poly_taylor_branch_accel_batch(std::span<const double> leaves_tree,
                                std::span<const ParamLimit> param_limits,
                                SizeType branch_max,
                                SizeType n_leaves,
-                               utils::BranchingWorkspaceView branch_ws) {
+                               memory::BranchingWorkspace& branch_ws) {
     constexpr SizeType kParams       = 2;
     constexpr SizeType kParamStride  = 2;
     constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
@@ -69,6 +70,9 @@ poly_taylor_branch_accel_batch(std::span<const double> leaves_tree,
     double* __restrict__ leaves_branch_ptr     = leaves_branch.data();
     double* __restrict__ dparam_new_ptr        = dparam_new.data();
     double* __restrict__ shift_bins_ptr        = shift_bins.data();
+    double* __restrict__ scratch_params   = branch_ws.scratch_params.data();
+    double* __restrict__ scratch_dparams  = branch_ws.scratch_dparams.data();
+    SizeType* __restrict__ scratch_counts = branch_ws.scratch_counts.data();
 
     // Step + Shift
     for (SizeType i = 0; i < n_leaves; ++i) {
@@ -126,12 +130,10 @@ poly_taylor_branch_accel_batch(std::span<const double> leaves_tree,
         // Branch d2-d1 parameters
         psr_utils::branch_one_param_padded(
             0, d2_cur, d2_sig_cur, eta, shift_bins_ptr, dparam_new_ptr,
-            branch_ws.scratch_params, branch_ws.scratch_dparams,
-            branch_ws.scratch_counts, fb, branch_max);
+            scratch_params, scratch_dparams, scratch_counts, fb, branch_max);
         psr_utils::branch_one_param_padded(
             1, d1_cur, d1_sig_cur, eta, shift_bins_ptr, dparam_new_ptr,
-            branch_ws.scratch_params, branch_ws.scratch_dparams,
-            branch_ws.scratch_counts, fb, branch_max);
+            scratch_params, scratch_dparams, scratch_counts, fb, branch_max);
     }
 
     // Fill leaves_origins
@@ -139,20 +141,18 @@ poly_taylor_branch_accel_batch(std::span<const double> leaves_tree,
     for (SizeType i = 0; i < n_leaves; ++i) {
         const SizeType lo            = i * kLeavesStride;
         const SizeType fb            = i * kParams;
-        const SizeType n_d2_branches = branch_ws.scratch_counts[fb + 0];
-        const SizeType n_d1_branches = branch_ws.scratch_counts[fb + 1];
+        const SizeType n_d2_branches = scratch_counts[fb + 0];
+        const SizeType n_d1_branches = scratch_counts[fb + 1];
         const SizeType d2_offset     = (fb + 0) * branch_max;
         const SizeType d1_offset     = (fb + 1) * branch_max;
 
         for (SizeType a = 0; a < n_d2_branches; ++a) {
             for (SizeType b = 0; b < n_d1_branches; ++b) {
-                const SizeType bo = out_leaves * kLeavesStride;
-                leaves_branch_ptr[bo + 0] =
-                    branch_ws.scratch_params[d2_offset + a];
-                leaves_branch_ptr[bo + 1] = branch_ws.scratch_dparams[fb + 0];
-                leaves_branch_ptr[bo + 2] =
-                    branch_ws.scratch_params[d1_offset + b];
-                leaves_branch_ptr[bo + 3] = branch_ws.scratch_dparams[fb + 1];
+                const SizeType bo         = out_leaves * kLeavesStride;
+                leaves_branch_ptr[bo + 0] = scratch_params[d2_offset + a];
+                leaves_branch_ptr[bo + 1] = scratch_dparams[fb + 0];
+                leaves_branch_ptr[bo + 2] = scratch_params[d1_offset + b];
+                leaves_branch_ptr[bo + 3] = scratch_dparams[fb + 1];
                 // Fill d0 and f0 directly from leaves_tree
                 std::memcpy(leaves_branch_ptr + bo + 4,
                             leaves_tree_ptr + lo + 4, 4 * sizeof(double));
@@ -166,17 +166,16 @@ poly_taylor_branch_accel_batch(std::span<const double> leaves_tree,
     return out_leaves;
 }
 
-SizeType
-poly_taylor_branch_jerk_batch(std::span<const double> leaves_tree,
-                              std::span<double> leaves_branch,
-                              std::span<SizeType> leaves_origins,
-                              std::pair<double, double> coord_cur,
-                              SizeType nbins,
-                              double eta,
-                              std::span<const ParamLimit> param_limits,
-                              SizeType branch_max,
-                              SizeType n_leaves,
-                              utils::BranchingWorkspaceView branch_ws) {
+SizeType poly_taylor_branch_jerk_batch(std::span<const double> leaves_tree,
+                                       std::span<double> leaves_branch,
+                                       std::span<SizeType> leaves_origins,
+                                       std::pair<double, double> coord_cur,
+                                       SizeType nbins,
+                                       double eta,
+                                       std::span<const ParamLimit> param_limits,
+                                       SizeType branch_max,
+                                       SizeType n_leaves,
+                                       memory::BranchingWorkspace& branch_ws) {
     constexpr SizeType kParams       = 3;
     constexpr SizeType kParamStride  = 2;
     constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
@@ -219,6 +218,9 @@ poly_taylor_branch_jerk_batch(std::span<const double> leaves_tree,
     double* __restrict__ leaves_branch_ptr     = leaves_branch.data();
     double* __restrict__ dparam_new_ptr        = dparam_new.data();
     double* __restrict__ shift_bins_ptr        = shift_bins.data();
+    double* __restrict__ scratch_params   = branch_ws.scratch_params.data();
+    double* __restrict__ scratch_dparams  = branch_ws.scratch_dparams.data();
+    SizeType* __restrict__ scratch_counts = branch_ws.scratch_counts.data();
 
     // Step + Shift
     for (SizeType i = 0; i < n_leaves; ++i) {
@@ -281,16 +283,13 @@ poly_taylor_branch_jerk_batch(std::span<const double> leaves_tree,
         // Branch d3-d1 parameters
         psr_utils::branch_one_param_padded(
             0, d3_cur, d3_sig_cur, eta, shift_bins_ptr, dparam_new_ptr,
-            branch_ws.scratch_params, branch_ws.scratch_dparams,
-            branch_ws.scratch_counts, fb, branch_max);
+            scratch_params, scratch_dparams, scratch_counts, fb, branch_max);
         psr_utils::branch_one_param_padded(
             1, d2_cur, d2_sig_cur, eta, shift_bins_ptr, dparam_new_ptr,
-            branch_ws.scratch_params, branch_ws.scratch_dparams,
-            branch_ws.scratch_counts, fb, branch_max);
+            scratch_params, scratch_dparams, scratch_counts, fb, branch_max);
         psr_utils::branch_one_param_padded(
             2, d1_cur, d1_sig_cur, eta, shift_bins_ptr, dparam_new_ptr,
-            branch_ws.scratch_params, branch_ws.scratch_dparams,
-            branch_ws.scratch_counts, fb, branch_max);
+            scratch_params, scratch_dparams, scratch_counts, fb, branch_max);
     }
 
     // Fill leaves_origins
@@ -298,9 +297,9 @@ poly_taylor_branch_jerk_batch(std::span<const double> leaves_tree,
     for (SizeType i = 0; i < n_leaves; ++i) {
         const SizeType lo            = i * kLeavesStride;
         const SizeType fb            = i * kParams;
-        const SizeType n_d3_branches = branch_ws.scratch_counts[fb + 0];
-        const SizeType n_d2_branches = branch_ws.scratch_counts[fb + 1];
-        const SizeType n_d1_branches = branch_ws.scratch_counts[fb + 2];
+        const SizeType n_d3_branches = scratch_counts[fb + 0];
+        const SizeType n_d2_branches = scratch_counts[fb + 1];
+        const SizeType n_d1_branches = scratch_counts[fb + 2];
         const SizeType d3_offset     = (fb + 0) * branch_max;
         const SizeType d2_offset     = (fb + 1) * branch_max;
         const SizeType d1_offset     = (fb + 2) * branch_max;
@@ -308,19 +307,13 @@ poly_taylor_branch_jerk_batch(std::span<const double> leaves_tree,
         for (SizeType a = 0; a < n_d3_branches; ++a) {
             for (SizeType b = 0; b < n_d2_branches; ++b) {
                 for (SizeType c = 0; c < n_d1_branches; ++c) {
-                    const SizeType bo = out_leaves * kLeavesStride;
-                    leaves_branch_ptr[bo + 0] =
-                        branch_ws.scratch_params[d3_offset + a];
-                    leaves_branch_ptr[bo + 1] =
-                        branch_ws.scratch_dparams[fb + 0];
-                    leaves_branch_ptr[bo + 2] =
-                        branch_ws.scratch_params[d2_offset + b];
-                    leaves_branch_ptr[bo + 3] =
-                        branch_ws.scratch_dparams[fb + 1];
-                    leaves_branch_ptr[bo + 4] =
-                        branch_ws.scratch_params[d1_offset + c];
-                    leaves_branch_ptr[bo + 5] =
-                        branch_ws.scratch_dparams[fb + 2];
+                    const SizeType bo         = out_leaves * kLeavesStride;
+                    leaves_branch_ptr[bo + 0] = scratch_params[d3_offset + a];
+                    leaves_branch_ptr[bo + 1] = scratch_dparams[fb + 0];
+                    leaves_branch_ptr[bo + 2] = scratch_params[d2_offset + b];
+                    leaves_branch_ptr[bo + 3] = scratch_dparams[fb + 1];
+                    leaves_branch_ptr[bo + 4] = scratch_params[d1_offset + c];
+                    leaves_branch_ptr[bo + 5] = scratch_dparams[fb + 2];
                     // Fill d0 and f0 directly from leaves_tree
                     std::memcpy(leaves_branch_ptr + bo + 6,
                                 leaves_tree_ptr + lo + 6, 4 * sizeof(double));
@@ -335,17 +328,16 @@ poly_taylor_branch_jerk_batch(std::span<const double> leaves_tree,
     return out_leaves;
 }
 
-SizeType
-poly_taylor_branch_snap_batch(std::span<const double> leaves_tree,
-                              std::span<double> leaves_branch,
-                              std::span<SizeType> leaves_origins,
-                              std::pair<double, double> coord_cur,
-                              SizeType nbins,
-                              double eta,
-                              std::span<const ParamLimit> param_limits,
-                              SizeType branch_max,
-                              SizeType n_leaves,
-                              utils::BranchingWorkspaceView branch_ws) {
+SizeType poly_taylor_branch_snap_batch(std::span<const double> leaves_tree,
+                                       std::span<double> leaves_branch,
+                                       std::span<SizeType> leaves_origins,
+                                       std::pair<double, double> coord_cur,
+                                       SizeType nbins,
+                                       double eta,
+                                       std::span<const ParamLimit> param_limits,
+                                       SizeType branch_max,
+                                       SizeType n_leaves,
+                                       memory::BranchingWorkspace& branch_ws) {
     constexpr SizeType kParams       = 4;
     constexpr SizeType kParamStride  = 2;
     constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
@@ -391,6 +383,9 @@ poly_taylor_branch_snap_batch(std::span<const double> leaves_tree,
     double* __restrict__ leaves_branch_ptr     = leaves_branch.data();
     double* __restrict__ dparam_new_ptr        = dparam_new.data();
     double* __restrict__ shift_bins_ptr        = shift_bins.data();
+    double* __restrict__ scratch_params   = branch_ws.scratch_params.data();
+    double* __restrict__ scratch_dparams  = branch_ws.scratch_dparams.data();
+    SizeType* __restrict__ scratch_counts = branch_ws.scratch_counts.data();
 
     // Step + Shift
     for (SizeType i = 0; i < n_leaves; ++i) {
@@ -460,20 +455,16 @@ poly_taylor_branch_snap_batch(std::span<const double> leaves_tree,
         // Branch d4-d1 parameters
         psr_utils::branch_one_param_padded(
             0, d4_cur, d4_sig_cur, eta, shift_bins_ptr, dparam_new_ptr,
-            branch_ws.scratch_params, branch_ws.scratch_dparams,
-            branch_ws.scratch_counts, fb, branch_max);
+            scratch_params, scratch_dparams, scratch_counts, fb, branch_max);
         psr_utils::branch_one_param_padded(
             1, d3_cur, d3_sig_cur, eta, shift_bins_ptr, dparam_new_ptr,
-            branch_ws.scratch_params, branch_ws.scratch_dparams,
-            branch_ws.scratch_counts, fb, branch_max);
+            scratch_params, scratch_dparams, scratch_counts, fb, branch_max);
         psr_utils::branch_one_param_padded(
             2, d2_cur, d2_sig_cur, eta, shift_bins_ptr, dparam_new_ptr,
-            branch_ws.scratch_params, branch_ws.scratch_dparams,
-            branch_ws.scratch_counts, fb, branch_max);
+            scratch_params, scratch_dparams, scratch_counts, fb, branch_max);
         psr_utils::branch_one_param_padded(
             3, d1_cur, d1_sig_cur, eta, shift_bins_ptr, dparam_new_ptr,
-            branch_ws.scratch_params, branch_ws.scratch_dparams,
-            branch_ws.scratch_counts, fb, branch_max);
+            scratch_params, scratch_dparams, scratch_counts, fb, branch_max);
     }
 
     // Fill leaves_origins
@@ -481,10 +472,10 @@ poly_taylor_branch_snap_batch(std::span<const double> leaves_tree,
     for (SizeType i = 0; i < n_leaves; ++i) {
         const SizeType lo            = i * kLeavesStride;
         const SizeType fb            = i * kParams;
-        const SizeType n_d4_branches = branch_ws.scratch_counts[fb + 0];
-        const SizeType n_d3_branches = branch_ws.scratch_counts[fb + 1];
-        const SizeType n_d2_branches = branch_ws.scratch_counts[fb + 2];
-        const SizeType n_d1_branches = branch_ws.scratch_counts[fb + 3];
+        const SizeType n_d4_branches = scratch_counts[fb + 0];
+        const SizeType n_d3_branches = scratch_counts[fb + 1];
+        const SizeType n_d2_branches = scratch_counts[fb + 2];
+        const SizeType n_d1_branches = scratch_counts[fb + 3];
         const SizeType d4_offset     = (fb + 0) * branch_max;
         const SizeType d3_offset     = (fb + 1) * branch_max;
         const SizeType d2_offset     = (fb + 2) * branch_max;
@@ -496,21 +487,17 @@ poly_taylor_branch_snap_batch(std::span<const double> leaves_tree,
                     for (SizeType d = 0; d < n_d1_branches; ++d) {
                         const SizeType bo = out_leaves * kLeavesStride;
                         leaves_branch_ptr[bo + 0] =
-                            branch_ws.scratch_params[d4_offset + a];
-                        leaves_branch_ptr[bo + 1] =
-                            branch_ws.scratch_dparams[fb + 0];
+                            scratch_params[d4_offset + a];
+                        leaves_branch_ptr[bo + 1] = scratch_dparams[fb + 0];
                         leaves_branch_ptr[bo + 2] =
-                            branch_ws.scratch_params[d3_offset + b];
-                        leaves_branch_ptr[bo + 3] =
-                            branch_ws.scratch_dparams[fb + 1];
+                            scratch_params[d3_offset + b];
+                        leaves_branch_ptr[bo + 3] = scratch_dparams[fb + 1];
                         leaves_branch_ptr[bo + 4] =
-                            branch_ws.scratch_params[d2_offset + c];
-                        leaves_branch_ptr[bo + 5] =
-                            branch_ws.scratch_dparams[fb + 2];
+                            scratch_params[d2_offset + c];
+                        leaves_branch_ptr[bo + 5] = scratch_dparams[fb + 2];
                         leaves_branch_ptr[bo + 6] =
-                            branch_ws.scratch_params[d1_offset + d];
-                        leaves_branch_ptr[bo + 7] =
-                            branch_ws.scratch_dparams[fb + 3];
+                            scratch_params[d1_offset + d];
+                        leaves_branch_ptr[bo + 7] = scratch_dparams[fb + 3];
                         // Fill d0 and f0 directly from leaves_tree
                         std::memcpy(leaves_branch_ptr + bo + 8,
                                     leaves_tree_ptr + lo + 8,
@@ -938,17 +925,16 @@ void poly_taylor_transform_snap_batch(std::span<double> leaves_tree,
 }
 
 template <SizeType NPARAMS>
-SizeType
-poly_taylor_branch_batch_impl(std::span<const double> leaves_tree,
-                              std::span<double> leaves_branch,
-                              std::span<SizeType> leaves_origins,
-                              std::pair<double, double> coord_cur,
-                              SizeType nbins,
-                              double eta,
-                              std::span<const ParamLimit> param_limits,
-                              SizeType branch_max,
-                              SizeType n_leaves,
-                              utils::BranchingWorkspaceView branch_ws) {
+SizeType poly_taylor_branch_batch_impl(std::span<const double> leaves_tree,
+                                       std::span<double> leaves_branch,
+                                       std::span<SizeType> leaves_origins,
+                                       std::pair<double, double> coord_cur,
+                                       SizeType nbins,
+                                       double eta,
+                                       std::span<const ParamLimit> param_limits,
+                                       SizeType branch_max,
+                                       SizeType n_leaves,
+                                       memory::BranchingWorkspace& branch_ws) {
     static_assert(NPARAMS == 2 || NPARAMS == 3 || NPARAMS == 4,
                   "Unsupported Taylor order");
     if constexpr (NPARAMS == 2) {
@@ -1217,7 +1203,7 @@ SizeType poly_taylor_branch_batch(std::span<const double> leaves_tree,
                                   SizeType branch_max,
                                   SizeType n_leaves,
                                   SizeType n_params,
-                                  utils::BranchingWorkspaceView branch_ws) {
+                                  memory::BranchingWorkspace& branch_ws) {
 
     auto dispatch = [&]<SizeType N>() {
         return poly_taylor_branch_batch_impl<N>(

@@ -15,6 +15,7 @@
 #include "loki/psr_utils.hpp"
 #include "loki/transforms.hpp"
 #include "loki/utils.hpp"
+#include "loki/utils/workspace.hpp"
 
 namespace loki::core {
 
@@ -131,7 +132,7 @@ SizeType circ_taylor_branch_batch(std::span<const double> leaves_tree,
                                   SizeType branch_max,
                                   SizeType n_leaves,
                                   double minimum_snap_cells,
-                                  utils::BranchingWorkspaceView ws) {
+                                  memory::BranchingWorkspace& branch_ws) {
     constexpr SizeType kParams       = 5U;
     constexpr SizeType kParamStride  = 2U;
     constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
@@ -179,6 +180,9 @@ SizeType circ_taylor_branch_batch(std::span<const double> leaves_tree,
     double* __restrict__ leaves_branch_ptr     = leaves_branch.data();
     double* __restrict__ dparam_new_ptr        = dparam_new.data();
     double* __restrict__ shift_bins_ptr        = shift_bins.data();
+    double* __restrict__ scratch_params   = branch_ws.scratch_params.data();
+    double* __restrict__ scratch_dparams  = branch_ws.scratch_dparams.data();
+    SizeType* __restrict__ scratch_counts = branch_ws.scratch_counts.data();
 
     // Loop 1: step + shift (vectorizable)
     for (SizeType i = 0; i < n_leaves; ++i) {
@@ -255,29 +259,25 @@ SizeType circ_taylor_branch_batch(std::span<const double> leaves_tree,
 
         // Branch d5 parameter (no branching as of yet)
         {
-            const SizeType pad_offset     = (fb + 0) * branch_max;
-            ws.scratch_params[pad_offset] = d5_cur;
-            ws.scratch_dparams[fb + 0]    = d5_sig_cur;
-            ws.scratch_counts[fb + 0]     = 1;
+            const SizeType pad_offset  = (fb + 0) * branch_max;
+            scratch_params[pad_offset] = d5_cur;
+            scratch_dparams[fb + 0]    = d5_sig_cur;
+            scratch_counts[fb + 0]     = 1;
         }
 
         // Branch d4-d1 parameters
         psr_utils::branch_one_param_padded(
             1, d4_cur, d4_sig_cur, eta, shift_bins_ptr, dparam_new_ptr,
-            ws.scratch_params, ws.scratch_dparams, ws.scratch_counts, fb,
-            branch_max);
+            scratch_params, scratch_dparams, scratch_counts, fb, branch_max);
         psr_utils::branch_one_param_padded(
             2, d3_cur, d3_sig_cur, eta, shift_bins_ptr, dparam_new_ptr,
-            ws.scratch_params, ws.scratch_dparams, ws.scratch_counts, fb,
-            branch_max);
+            scratch_params, scratch_dparams, scratch_counts, fb, branch_max);
         psr_utils::branch_one_param_padded(
             3, d2_cur, d2_sig_cur, eta, shift_bins_ptr, dparam_new_ptr,
-            ws.scratch_params, ws.scratch_dparams, ws.scratch_counts, fb,
-            branch_max);
+            scratch_params, scratch_dparams, scratch_counts, fb, branch_max);
         psr_utils::branch_one_param_padded(
             4, d1_cur, d1_sig_cur, eta, shift_bins_ptr, dparam_new_ptr,
-            ws.scratch_params, ws.scratch_dparams, ws.scratch_counts, fb,
-            branch_max);
+            scratch_params, scratch_dparams, scratch_counts, fb, branch_max);
     }
 
     // Loop 3: Branching d4-d1, write every (d4×d3×d2×d1) combo as a complete
@@ -287,15 +287,15 @@ SizeType circ_taylor_branch_batch(std::span<const double> leaves_tree,
         const SizeType lo = i * kLeavesStride;
         const SizeType fb = i * kParams;
 
-        const double d5_sig   = ws.scratch_dparams[fb + 0]; // = d5_sig_cur
-        const double d4_sig   = ws.scratch_dparams[fb + 1];
-        const double d3_sig   = ws.scratch_dparams[fb + 2];
-        const double d2_sig   = ws.scratch_dparams[fb + 3];
-        const double d1_sig   = ws.scratch_dparams[fb + 4];
-        const SizeType n_d4   = ws.scratch_counts[fb + 1];
-        const SizeType n_d3   = ws.scratch_counts[fb + 2];
-        const SizeType n_d2   = ws.scratch_counts[fb + 3];
-        const SizeType n_d1   = ws.scratch_counts[fb + 4];
+        const double d5_sig   = scratch_dparams[fb + 0]; // = d5_sig_cur
+        const double d4_sig   = scratch_dparams[fb + 1];
+        const double d3_sig   = scratch_dparams[fb + 2];
+        const double d2_sig   = scratch_dparams[fb + 3];
+        const double d1_sig   = scratch_dparams[fb + 4];
+        const SizeType n_d4   = scratch_counts[fb + 1];
+        const SizeType n_d3   = scratch_counts[fb + 2];
+        const SizeType n_d2   = scratch_counts[fb + 3];
+        const SizeType n_d1   = scratch_counts[fb + 4];
         const SizeType d5_off = (fb + 0) * branch_max;
         const SizeType d4_off = (fb + 1) * branch_max;
         const SizeType d3_off = (fb + 2) * branch_max;
@@ -308,15 +308,16 @@ SizeType circ_taylor_branch_batch(std::span<const double> leaves_tree,
                     for (SizeType e = 0; e < n_d1; ++e) {
                         const SizeType bo = out_leaves * kLeavesStride;
                         double* __restrict__ out_ptr = leaves_branch_ptr + bo;
-                        out_ptr[0] = ws.scratch_params[d5_off];
+
+                        out_ptr[0] = scratch_params[d5_off];
                         out_ptr[1] = d5_sig;
-                        out_ptr[2] = ws.scratch_params[d4_off + b];
+                        out_ptr[2] = scratch_params[d4_off + b];
                         out_ptr[3] = d4_sig;
-                        out_ptr[4] = ws.scratch_params[d3_off + c];
+                        out_ptr[4] = scratch_params[d3_off + c];
                         out_ptr[5] = d3_sig;
-                        out_ptr[6] = ws.scratch_params[d2_off + d];
+                        out_ptr[6] = scratch_params[d2_off + d];
                         out_ptr[7] = d2_sig;
-                        out_ptr[8] = ws.scratch_params[d1_off + e];
+                        out_ptr[8] = scratch_params[d1_off + e];
                         out_ptr[9] = d1_sig;
                         // Copy d0 and f0
                         std::memcpy(out_ptr + 10, leaves_tree_ptr + lo + 10,
@@ -373,15 +374,14 @@ SizeType circ_taylor_branch_batch(std::span<const double> leaves_tree,
         // fully consumed by Loop 3, safe to overwrite per-leaf here.
         psr_utils::branch_one_param_padded(
             0, d5_cur, d5_sig_cur, eta, shift_bins_ptr, dparam_new_ptr,
-            ws.scratch_params, ws.scratch_dparams, ws.scratch_counts, fb,
-            branch_max);
+            scratch_params, scratch_dparams, scratch_counts, fb, branch_max);
 
-        const SizeType n_d5   = ws.scratch_counts[fb + 0];
+        const SizeType n_d5   = scratch_counts[fb + 0];
         const SizeType d5_off = (fb + 0) * branch_max;
 
         // Overwrite slot i with first crackle branch
-        leaf[0] = ws.scratch_params[d5_off];
-        leaf[1] = ws.scratch_dparams[fb + 0];
+        leaf[0] = scratch_params[d5_off];
+        leaf[1] = scratch_dparams[fb + 0];
 
         // Append remaining crackle branches at the tail
         for (SizeType a = 1; a < n_d5; ++a) [[unlikely]] {
@@ -390,7 +390,7 @@ SizeType circ_taylor_branch_batch(std::span<const double> leaves_tree,
 
             // Full copy of this leaf, then patch d5
             std::memcpy(out, leaf, kLeavesStride * sizeof(double));
-            out[0] = ws.scratch_params[d5_off + a];
+            out[0] = scratch_params[d5_off + a];
             // out[1] = dparam_act already copied from leaf[1]
 
             leaves_origins_ptr[out_leaves] = origin;

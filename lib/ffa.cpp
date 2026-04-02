@@ -18,92 +18,42 @@
 #include "loki/search/configs.hpp"
 #include "loki/timing.hpp"
 #include "loki/utils/fft.hpp"
+#include "loki/utils/workspace.hpp"
 
 namespace loki::algorithms {
-
-// FFAWorkspace::Data implementation
-template <SupportedFoldType FoldType> struct FFAWorkspace<FoldType>::Data {
-    std::vector<FoldType> fold_internal;
-    std::vector<coord::FFACoord> coords;
-    std::vector<coord::FFACoordFreq> coords_freq;
-
-    Data() = default;
-
-    explicit Data(const plans::FFAPlan<FoldType>& ffa_plan) {
-        const auto buffer_size  = ffa_plan.get_buffer_size();
-        const auto coord_size   = ffa_plan.get_coord_size();
-        const bool is_freq_only = ffa_plan.get_n_params() == 1;
-        fold_internal.resize(buffer_size, FoldType{});
-        if (is_freq_only) {
-            coords_freq.resize(coord_size);
-        } else {
-            coords.resize(coord_size);
-        }
-    }
-
-    explicit Data(SizeType buffer_size,
-                  SizeType coord_size,
-                  SizeType n_params) {
-        const bool is_freq_only = n_params == 1;
-        fold_internal.resize(buffer_size, FoldType{});
-        if (is_freq_only) {
-            coords_freq.resize(coord_size);
-        } else {
-            coords.resize(coord_size);
-        }
-    }
-
-    void validate(const plans::FFAPlan<FoldType>& ffa_plan) const {
-        const auto buffer_size  = ffa_plan.get_buffer_size();
-        const bool is_freq_only = ffa_plan.get_n_params() == 1;
-        error_check::check_greater_equal(
-            fold_internal.size(), buffer_size,
-            "FFAWorkspace: fold_internal buffer too small");
-        if (is_freq_only) {
-            error_check::check_greater_equal(
-                coords_freq.size(), ffa_plan.get_coord_size(),
-                "FFAWorkspace: coordinates not allocated for enough levels");
-        } else {
-            error_check::check_greater_equal(
-                coords.size(), ffa_plan.get_coord_size(),
-                "FFAWorkspace: coordinates not allocated for enough levels");
-        }
-    }
-};
 
 // FFA::Impl implementation
 template <SupportedFoldType FoldType> class FFA<FoldType>::Impl {
 public:
-    using WorkspaceData = FFAWorkspace<FoldType>::Data;
-
     explicit Impl(search::PulsarSearchConfig cfg, bool show_progress)
         : m_cfg(std::move(cfg)),
           m_show_progress(show_progress),
           m_ffa_plan(m_cfg),
           m_nthreads(m_cfg.get_nthreads()),
           m_is_freq_only(m_cfg.get_nparams() == 1),
-          m_owns_workspace(true),
-          m_ffa_workspace_owned(m_ffa_plan),
-          m_ffa_workspace_external(nullptr) {
+          m_workspace_storage(m_ffa_plan),
+          m_workspace_ptr(&m_workspace_storage) {
         // Validate workspace
-        m_ffa_workspace_owned.validate(m_ffa_plan);
+        const auto& ws = get_workspace();
+        ws.validate(m_ffa_plan);
         // Initialize BruteFold
         initialize_brute_fold();
         log_info();
     }
 
-    explicit Impl(search::PulsarSearchConfig cfg,
-                  FFAWorkspace<FoldType>& workspace,
+    explicit Impl(memory::FFAWorkspace<FoldType>& workspace,
+                  search::PulsarSearchConfig cfg,
                   bool show_progress)
         : m_cfg(std::move(cfg)),
           m_show_progress(show_progress),
           m_ffa_plan(m_cfg),
           m_nthreads(m_cfg.get_nthreads()),
           m_is_freq_only(m_cfg.get_nparams() == 1),
-          m_owns_workspace(false),
-          m_ffa_workspace_external(&workspace) {
+          m_workspace_storage(),
+          m_workspace_ptr(&workspace) {
         // Validate workspace
-        m_ffa_workspace_external->validate(m_ffa_plan);
+        const auto& ws = get_workspace();
+        ws.validate(m_ffa_plan);
         // Initialize BruteFold
         initialize_brute_fold();
         log_info();
@@ -134,12 +84,12 @@ public:
             fold.size(), m_ffa_plan.get_buffer_size(),
             "FFA::execute: fold must have size buffer_size");
 
-        auto* ws = get_workspace_data();
+        auto& ws = get_workspace();
         // Resolve the coordinates into the workspace for the FFA plan
         if (m_is_freq_only) {
-            m_ffa_plan.resolve_coordinates_freq(ws->coords_freq);
+            m_ffa_plan.resolve_coordinates_freq(ws.coords_freq);
         } else {
-            m_ffa_plan.resolve_coordinates(ws->coords);
+            m_ffa_plan.resolve_coordinates(ws.coords);
         }
 
         // Execute the FFA plan
@@ -163,12 +113,12 @@ public:
                                  "FFA::execute: fold must have "
                                  "size 2*buffer_size_fourier");
 
-        auto* ws = get_workspace_data();
+        auto& ws = get_workspace();
         // Resolve the coordinates for the FFA plan
         if (m_is_freq_only) {
-            m_ffa_plan.resolve_coordinates_freq(ws->coords_freq);
+            m_ffa_plan.resolve_coordinates_freq(ws.coords_freq);
         } else {
-            m_ffa_plan.resolve_coordinates(ws->coords);
+            m_ffa_plan.resolve_coordinates(ws.coords);
         }
 
         auto fold_complex = std::span<ComplexType>(
@@ -178,10 +128,9 @@ public:
                         /*output_in_internal_buffer=*/true);
         // IRFFT
         const auto nfft = fold_size_time / m_cfg.get_nbins();
-        utils::irfft_batch(
-            std::span(ws->fold_internal.data(), fold_size_fourier),
-            fold.first(fold_size_time), static_cast<int>(nfft),
-            static_cast<int>(m_cfg.get_nbins()), m_nthreads);
+        math::irfft_batch(std::span(ws.fold_internal).first(fold_size_fourier),
+                          fold.first(fold_size_time), static_cast<int>(nfft),
+                          static_cast<int>(m_cfg.get_nbins()), m_nthreads);
     }
 
 private:
@@ -190,7 +139,6 @@ private:
     plans::FFAPlan<FoldType> m_ffa_plan;
     int m_nthreads;
     bool m_is_freq_only;
-    bool m_owns_workspace;
 
     // Brute fold for the initial time-domain folding
     std::unique_ptr<BruteFold<FoldType>> m_the_bf;
@@ -199,12 +147,16 @@ private:
     float m_brutefold_time{0.0F};
 
     // FFA workspace ownership
-    FFAWorkspace<FoldType> m_ffa_workspace_owned;
-    FFAWorkspace<FoldType>* m_ffa_workspace_external;
+    memory::FFAWorkspace<FoldType> m_workspace_storage;
+    // The observer pointer that always points to the active workspace.
+    memory::FFAWorkspace<FoldType>* m_workspace_ptr{nullptr};
 
-    WorkspaceData* get_workspace_data() noexcept {
-        return m_owns_workspace ? m_ffa_workspace_owned.data()
-                                : m_ffa_workspace_external->data();
+    [[nodiscard]] memory::FFAWorkspace<FoldType>& get_workspace() noexcept {
+        return *m_workspace_ptr;
+    }
+    [[nodiscard]] const memory::FFAWorkspace<FoldType>&
+    get_workspace() const noexcept {
+        return *m_workspace_ptr;
     }
 
     void log_info() {
@@ -271,12 +223,12 @@ private:
                 const auto nfft = brute_fold_size_time / m_cfg.get_nbins();
                 const auto brute_fold_size_fourier =
                     nfft * ((m_cfg.get_nbins() / 2) + 1);
-                utils::rfft_batch(real_temp_view,
-                                  std::span<ComplexType>(
-                                      init_buffer, brute_fold_size_fourier),
-                                  static_cast<int>(nfft),
-                                  static_cast<int>(m_cfg.get_nbins()),
-                                  m_nthreads);
+                math::rfft_batch(real_temp_view,
+                                 std::span<ComplexType>(
+                                     init_buffer, brute_fold_size_fourier),
+                                 static_cast<int>(nfft),
+                                 static_cast<int>(m_cfg.get_nbins()),
+                                 m_nthreads);
                 m_brutefold_time += timer.stop();
                 return;
             }
@@ -297,9 +249,9 @@ private:
             "FFA::execute_unified: levels must be greater than or equal "
             "to 2");
 
-        auto* ws = get_workspace_data();
+        auto& ws = get_workspace();
         // Use fold_internal from workspace and output fold for ping-pong
-        FoldType* fold_internal_ptr = ws->fold_internal.data();
+        FoldType* fold_internal_ptr = ws.fold_internal.data();
         FoldType* fold_result_ptr   = fold.data();
 
         FoldType* current_in_ptr  = nullptr;
@@ -367,10 +319,9 @@ private:
         const auto ncoords_prev = m_ffa_plan.get_ncoords()[i_level - 1];
         const auto ncoords_offset = m_ffa_plan.get_ncoords_offsets()[i_level];
         // Get the coordinates for the current level
-        auto* ws = get_workspace_data();
-        const auto coords_cur_span =
-            std::span(ws->coords_freq).subspan(ncoords_offset, ncoords_cur);
-
+        const auto& ws = get_workspace();
+        auto coords_cur_span =
+            std::span(ws.coords_freq).subspan(ncoords_offset, ncoords_cur);
         if constexpr (std::is_same_v<FoldType, float>) {
             kernels::ffa_iter_freq(fold_in, fold_out, coords_cur_span.data(),
                                    ncoords_cur, ncoords_prev, nsegments, nbins,
@@ -392,9 +343,9 @@ private:
         const auto ncoords_prev = m_ffa_plan.get_ncoords()[i_level - 1];
         const auto ncoords_offset = m_ffa_plan.get_ncoords_offsets()[i_level];
         // Get the coordinates for the current level
-        auto* ws = get_workspace_data();
-        const auto coords_cur_span =
-            std::span(ws->coords).subspan(ncoords_offset, ncoords_cur);
+        const auto& ws = get_workspace();
+        auto coords_cur_span =
+            std::span(ws.coords).subspan(ncoords_offset, ncoords_cur);
 
         if constexpr (std::is_same_v<FoldType, float>) {
             kernels::ffa_iter(fold_in, fold_out, coords_cur_span.data(),
@@ -409,39 +360,15 @@ private:
     }
 }; // End FFA::Impl definition
 
-// --- Definitions for FFAWorkspace ---
-template <SupportedFoldType FoldType>
-FFAWorkspace<FoldType>::FFAWorkspace() : m_data(std::make_unique<Data>()) {}
-template <SupportedFoldType FoldType>
-FFAWorkspace<FoldType>::FFAWorkspace(const plans::FFAPlan<FoldType>& ffa_plan)
-    : m_data(std::make_unique<Data>(ffa_plan)) {}
-template <SupportedFoldType FoldType>
-FFAWorkspace<FoldType>::FFAWorkspace(SizeType buffer_size,
-                                     SizeType coord_size,
-                                     SizeType n_params)
-    : m_data(std::make_unique<Data>(buffer_size, coord_size, n_params)) {}
-template <SupportedFoldType FoldType>
-FFAWorkspace<FoldType>::~FFAWorkspace() = default;
-template <SupportedFoldType FoldType>
-FFAWorkspace<FoldType>::FFAWorkspace(FFAWorkspace&& other) noexcept = default;
-template <SupportedFoldType FoldType>
-FFAWorkspace<FoldType>&
-FFAWorkspace<FoldType>::operator=(FFAWorkspace&& other) noexcept = default;
-template <SupportedFoldType FoldType>
-void FFAWorkspace<FoldType>::validate(
-    const plans::FFAPlan<FoldType>& ffa_plan) const {
-    m_data->validate(ffa_plan);
-}
-
 // --- Definitions for FFA ---
 template <SupportedFoldType FoldType>
 FFA<FoldType>::FFA(const search::PulsarSearchConfig& cfg, bool show_progress)
     : m_impl(std::make_unique<Impl>(cfg, show_progress)) {}
 template <SupportedFoldType FoldType>
-FFA<FoldType>::FFA(const search::PulsarSearchConfig& cfg,
-                   FFAWorkspace<FoldType>& workspace,
+FFA<FoldType>::FFA(memory::FFAWorkspace<FoldType>& workspace,
+                   const search::PulsarSearchConfig& cfg,
                    bool show_progress)
-    : m_impl(std::make_unique<Impl>(cfg, workspace, show_progress)) {}
+    : m_impl(std::make_unique<Impl>(workspace, cfg, show_progress)) {}
 template <SupportedFoldType FoldType> FFA<FoldType>::~FFA() = default;
 template <SupportedFoldType FoldType>
 FFA<FoldType>::FFA(FFA&& other) noexcept = default;
@@ -539,8 +466,6 @@ compute_ffa_scores(std::span<const float> ts_e,
 }
 
 // Explicit instantiation
-template class FFAWorkspace<float>;
-template class FFAWorkspace<ComplexType>;
 template class FFA<float>;
 template class FFA<ComplexType>;
 

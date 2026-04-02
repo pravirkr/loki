@@ -9,7 +9,6 @@
 #include "loki/loki.hpp"
 
 namespace loki {
-using algorithms::EPMultiPassCUDA;
 using algorithms::FFAFreqSweepCUDA;
 using detection::DynamicThresholdSchemeCUDA;
 
@@ -216,27 +215,9 @@ PYBIND11_MODULE(libculoki, m) { // NOLINT
 
     auto m_prune = m.def_submodule("prune", "Pruning submodule");
 
-    py::class_<EPMultiPassCUDA>(m_prune, "EPMultiPassCUDA")
-        .def(py::init<const PulsarSearchConfig&, const std::vector<float>&,
-                      std::optional<SizeType>,
-                      std::optional<std::vector<SizeType>>, SizeType, SizeType,
-                      int>(),
-             py::arg("cfg"), py::arg("threshold_scheme"),
-             py::arg("n_runs")   = std::nullopt,
-             py::arg("ref_segs") = std::nullopt,
-             py::arg("max_sugg") = 1U << 20U, py::arg("batch_size") = 4096U,
-             py::arg("device_id") = 0)
-        .def(
-            "execute",
-            [](EPMultiPassCUDA& self, const PyArrayT<float>& ts_e,
-               const PyArrayT<float>& ts_v, std::string_view outdir,
-               std::string_view file_prefix, std::string_view poly_basis) {
-                self.execute(to_span<const float>(ts_e),
-                             to_span<const float>(ts_v), outdir, file_prefix,
-                             poly_basis);
-            },
-            py::arg("ts_e"), py::arg("ts_v"), py::arg("outdir"),
-            py::arg("file_prefix"), py::arg("poly_basis"));
+    bind_ep_multi_pass_cuda_class<float>(m_prune, "EPMultiPassTimeCUDA");
+    bind_ep_multi_pass_cuda_class<ComplexTypeCUDA>(m_prune,
+                                                   "EPMultiPassFourierCUDA");
 }
 
 } // namespace loki

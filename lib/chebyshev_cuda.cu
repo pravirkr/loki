@@ -361,15 +361,15 @@ kernel_poly_taylor_seed(const SizeType* __restrict__ param_grid_count_init,
     seed_leaves[lo + ((n_params + 1) * kParamStride) + 1] = 0;
 }
 
-__global__ void
-kernel_analyze_and_branch_accel(const double* __restrict__ leaves_tree,
-                                uint32_t n_leaves,
-                                double dt,
-                                double nbins,
-                                double eta,
-                                const ParamLimit* __restrict__ param_limits,
-                                uint32_t branch_max,
-                                utils::BranchingWorkspaceCUDAView branch_ws) {
+__device__ __forceinline__ void analyze_and_branch_chebyshev_accel(
+    const double* __restrict__ leaves_tree,
+    uint32_t n_leaves,
+    cuda::std::pair<double, double> coord_cur,
+    double nbins,
+    double eta,
+    const ParamLimit* __restrict__ param_limits,
+    uint32_t branch_max,
+    memory::BranchingWorkspaceCUDAView branch_ws) {
     constexpr SizeType kParams       = 2;
     constexpr SizeType kParamStride  = 2;
     constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
@@ -382,39 +382,35 @@ kernel_analyze_and_branch_accel(const double* __restrict__ leaves_tree,
     const uint32_t lo = ileaf * kLeavesStride;
     const uint32_t fb = ileaf * kParams;
 
-    const double dt2     = dt * dt;
-    const double inv_dt  = 1.0 / dt;
-    const double inv_dt2 = inv_dt * inv_dt;
-    const double dphi    = eta / nbins;
+    const double alpha_2_cur     = leaves_tree[lo + 0];
+    const double alpha_2_sig_cur = leaves_tree[lo + 1];
+    const double alpha_1_cur     = leaves_tree[lo + 2];
+    const double alpha_1_sig_cur = leaves_tree[lo + 3];
+    const double f0              = leaves_tree[lo + 6];
 
-    const double d2_cur     = leaves_tree[lo + 0];
-    const double d2_sig_cur = leaves_tree[lo + 1];
-    const double d1_cur     = leaves_tree[lo + 2];
-    const double d1_sig_cur = leaves_tree[lo + 3];
-    const double f0         = leaves_tree[lo + 6];
+    const double ts        = coord_cur.second;
+    const double ts2       = ts * ts;
+    const double dphi      = eta / nbins;
+    const double dfactor   = utils::kCval / f0;
+    const double base_step = dphi * dfactor;
+    const double inv_base  = nbins / dfactor;
 
-    const double dfactor = utils::kCval / f0;
-    double d2_sig_new    = dphi * dfactor * 4.0 * inv_dt2;
-    double d1_sig_new    = dphi * dfactor * 1.0 * inv_dt;
+    const double d2_range        = param_limits[0].max - param_limits[0].min;
+    const double f0_range        = param_limits[1].max - param_limits[1].min;
+    const double alpha_2_range   = 0.25 * d2_range * ts2;
+    const double alpha_1_range   = dfactor * f0_range * ts;
+    const double alpha_2_sig_new = cuda::std::min(base_step, alpha_2_range);
+    const double alpha_1_sig_new = cuda::std::min(base_step, alpha_1_range);
 
-    const double d2_range = param_limits[0].max - param_limits[0].min;
-    const double d1_range =
-        dfactor * (param_limits[1].max - param_limits[1].min);
-
-    d2_sig_new = cuda::std::min(d2_sig_new, d2_range);
-    d1_sig_new = cuda::std::min(d1_sig_new, d1_range);
-
-    const double shift_d2 =
-        (d2_sig_cur - d2_sig_new) * dt2 * nbins / (4.0 * dfactor);
-    const double shift_d1 =
-        (d1_sig_cur - d1_sig_new) * dt * nbins / (1.0 * dfactor);
+    const double shift_alpha_2 = (alpha_2_sig_cur - alpha_2_sig_new) * inv_base;
+    const double shift_alpha_1 = (alpha_1_sig_cur - alpha_1_sig_new) * inv_base;
 
     utils::branch_one_param_padded_device(
-        0, d2_cur, d2_sig_cur, d2_sig_new, eta, shift_d2,
+        0, alpha_2_cur, alpha_2_sig_cur, alpha_2_sig_new, eta, shift_alpha_2,
         branch_ws.scratch_params, branch_ws.scratch_dparams,
         branch_ws.scratch_counts, fb, branch_max);
     utils::branch_one_param_padded_device(
-        1, d1_cur, d1_sig_cur, d1_sig_new, eta, shift_d1,
+        1, alpha_1_cur, alpha_1_sig_cur, alpha_1_sig_new, eta, shift_alpha_1,
         branch_ws.scratch_params, branch_ws.scratch_dparams,
         branch_ws.scratch_counts, fb, branch_max);
 
@@ -424,15 +420,15 @@ kernel_analyze_and_branch_accel(const double* __restrict__ leaves_tree,
     branch_ws.leaf_branch_count[ileaf] = c0 * c1;
 }
 
-__global__ void
-kernel_analyze_and_branch_jerk(const double* __restrict__ leaves_tree,
-                               uint32_t n_leaves,
-                               double dt,
-                               double nbins,
-                               double eta,
-                               const ParamLimit* __restrict__ param_limits,
-                               uint32_t branch_max,
-                               utils::BranchingWorkspaceCUDAView branch_ws) {
+__device__ __forceinline__ void analyze_and_branch_chebyshev_jerk(
+    const double* __restrict__ leaves_tree,
+    uint32_t n_leaves,
+    cuda::std::pair<double, double> coord_cur,
+    double nbins,
+    double eta,
+    const ParamLimit* __restrict__ param_limits,
+    uint32_t branch_max,
+    memory::BranchingWorkspaceCUDAView branch_ws) {
     constexpr SizeType kParams       = 3;
     constexpr SizeType kParamStride  = 2;
     constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
@@ -445,52 +441,47 @@ kernel_analyze_and_branch_jerk(const double* __restrict__ leaves_tree,
     const uint32_t lo = ileaf * kLeavesStride;
     const uint32_t fb = ileaf * kParams;
 
-    const double dt2     = dt * dt;
-    const double dt3     = dt2 * dt;
-    const double inv_dt  = 1.0 / dt;
-    const double inv_dt2 = inv_dt * inv_dt;
-    const double inv_dt3 = inv_dt2 * inv_dt;
-    const double dphi    = eta / nbins;
+    const double alpha_3_cur     = leaves_tree[lo + 0];
+    const double alpha_3_sig_cur = leaves_tree[lo + 1];
+    const double alpha_2_cur     = leaves_tree[lo + 2];
+    const double alpha_2_sig_cur = leaves_tree[lo + 3];
+    const double alpha_1_cur     = leaves_tree[lo + 4];
+    const double alpha_1_sig_cur = leaves_tree[lo + 5];
+    const double f0              = leaves_tree[lo + 8];
 
-    const double d3_cur     = leaves_tree[lo + 0];
-    const double d3_sig_cur = leaves_tree[lo + 1];
-    const double d2_cur     = leaves_tree[lo + 2];
-    const double d2_sig_cur = leaves_tree[lo + 3];
-    const double d1_cur     = leaves_tree[lo + 4];
-    const double d1_sig_cur = leaves_tree[lo + 5];
-    const double f0         = leaves_tree[lo + 8];
+    const double ts        = coord_cur.second;
+    const double ts2       = ts * ts;
+    const double ts3       = ts2 * ts;
+    const double dphi      = eta / nbins;
+    const double dfactor   = utils::kCval / f0;
+    const double base_step = dphi * dfactor;
+    const double inv_base  = nbins / dfactor;
 
-    const double dfactor = utils::kCval / f0;
-    double d3_sig_new    = dphi * dfactor * 24.0 * inv_dt3;
-    double d2_sig_new    = dphi * dfactor * 4.0 * inv_dt2;
-    double d1_sig_new    = dphi * dfactor * 1.0 * inv_dt;
+    const double d3_range      = param_limits[0].max - param_limits[0].min;
+    const double d2_range      = param_limits[1].max - param_limits[1].min;
+    const double f0_range      = param_limits[2].max - param_limits[2].min;
+    const double alpha_3_range = d3_range * ts3 / 24.0;
+    const double alpha_2_range = d2_range * ts2 / 4.0;
+    const double alpha_1_range =
+        (dfactor * f0_range * ts) + (d3_range * ts3 / 8.0);
+    const double alpha_3_sig_new = cuda::std::min(base_step, alpha_3_range);
+    const double alpha_2_sig_new = cuda::std::min(base_step, alpha_2_range);
+    const double alpha_1_sig_new = cuda::std::min(base_step, alpha_1_range);
 
-    const double d3_range = param_limits[0].max - param_limits[0].min;
-    const double d2_range = param_limits[1].max - param_limits[1].min;
-    const double d1_range =
-        dfactor * (param_limits[2].max - param_limits[2].min);
-
-    d3_sig_new = cuda::std::min(d3_sig_new, d3_range);
-    d2_sig_new = cuda::std::min(d2_sig_new, d2_range);
-    d1_sig_new = cuda::std::min(d1_sig_new, d1_range);
-
-    const double shift_d3 =
-        (d3_sig_cur - d3_sig_new) * dt3 * nbins / (24.0 * dfactor);
-    const double shift_d2 =
-        (d2_sig_cur - d2_sig_new) * dt2 * nbins / (4.0 * dfactor);
-    const double shift_d1 =
-        (d1_sig_cur - d1_sig_new) * dt * nbins / (1.0 * dfactor);
+    const double shift_alpha_3 = (alpha_3_sig_cur - alpha_3_sig_new) * inv_base;
+    const double shift_alpha_2 = (alpha_2_sig_cur - alpha_2_sig_new) * inv_base;
+    const double shift_alpha_1 = (alpha_1_sig_cur - alpha_1_sig_new) * inv_base;
 
     utils::branch_one_param_padded_device(
-        0, d3_cur, d3_sig_cur, d3_sig_new, eta, shift_d3,
+        0, alpha_3_cur, alpha_3_sig_cur, alpha_3_sig_new, eta, shift_alpha_3,
         branch_ws.scratch_params, branch_ws.scratch_dparams,
         branch_ws.scratch_counts, fb, branch_max);
     utils::branch_one_param_padded_device(
-        1, d2_cur, d2_sig_cur, d2_sig_new, eta, shift_d2,
+        1, alpha_2_cur, alpha_2_sig_cur, alpha_2_sig_new, eta, shift_alpha_2,
         branch_ws.scratch_params, branch_ws.scratch_dparams,
         branch_ws.scratch_counts, fb, branch_max);
     utils::branch_one_param_padded_device(
-        2, d1_cur, d1_sig_cur, d1_sig_new, eta, shift_d1,
+        2, alpha_1_cur, alpha_1_sig_cur, alpha_1_sig_new, eta, shift_alpha_1,
         branch_ws.scratch_params, branch_ws.scratch_dparams,
         branch_ws.scratch_counts, fb, branch_max);
 
@@ -501,15 +492,15 @@ kernel_analyze_and_branch_jerk(const double* __restrict__ leaves_tree,
     branch_ws.leaf_branch_count[ileaf] = c0 * c1 * c2;
 }
 
-__global__ void
-kernel_analyze_and_branch_snap(const double* __restrict__ leaves_tree,
-                               uint32_t n_leaves,
-                               double dt,
-                               double nbins,
-                               double eta,
-                               const ParamLimit* __restrict__ param_limits,
-                               uint32_t branch_max,
-                               utils::BranchingWorkspaceCUDAView branch_ws) {
+__device__ __forceinline__ void analyze_and_branch_chebyshev_snap(
+    const double* __restrict__ leaves_tree,
+    uint32_t n_leaves,
+    cuda::std::pair<double, double> coord_cur,
+    double nbins,
+    double eta,
+    const ParamLimit* __restrict__ param_limits,
+    uint32_t branch_max,
+    memory::BranchingWorkspaceCUDAView branch_ws) {
     constexpr SizeType kParams       = 4;
     constexpr SizeType kParamStride  = 2;
     constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
@@ -522,65 +513,59 @@ kernel_analyze_and_branch_snap(const double* __restrict__ leaves_tree,
     const uint32_t lo = ileaf * kLeavesStride;
     const uint32_t fb = ileaf * kParams;
 
-    const double dt2     = dt * dt;
-    const double dt3     = dt2 * dt;
-    const double dt4     = dt2 * dt2;
-    const double inv_dt  = 1.0 / dt;
-    const double inv_dt2 = inv_dt * inv_dt;
-    const double inv_dt3 = inv_dt2 * inv_dt;
-    const double inv_dt4 = inv_dt2 * inv_dt2;
-    const double dphi    = eta / nbins;
+    const double alpha_4_cur     = leaves_tree[lo + 0];
+    const double alpha_4_sig_cur = leaves_tree[lo + 1];
+    const double alpha_3_cur     = leaves_tree[lo + 2];
+    const double alpha_3_sig_cur = leaves_tree[lo + 3];
+    const double alpha_2_cur     = leaves_tree[lo + 4];
+    const double alpha_2_sig_cur = leaves_tree[lo + 5];
+    const double alpha_1_cur     = leaves_tree[lo + 6];
+    const double alpha_1_sig_cur = leaves_tree[lo + 7];
+    const double f0              = leaves_tree[lo + 10];
 
-    const double d4_cur     = leaves_tree[lo + 0];
-    const double d4_sig_cur = leaves_tree[lo + 1];
-    const double d3_cur     = leaves_tree[lo + 2];
-    const double d3_sig_cur = leaves_tree[lo + 3];
-    const double d2_cur     = leaves_tree[lo + 4];
-    const double d2_sig_cur = leaves_tree[lo + 5];
-    const double d1_cur     = leaves_tree[lo + 6];
-    const double d1_sig_cur = leaves_tree[lo + 7];
-    const double f0         = leaves_tree[lo + 10];
+    const double ts        = coord_cur.second;
+    const double ts2       = ts * ts;
+    const double ts3       = ts2 * ts;
+    const double ts4       = ts2 * ts2;
+    const double dphi      = eta / nbins;
+    const double dfactor   = utils::kCval / f0;
+    const double base_step = dphi * dfactor;
+    const double inv_base  = nbins / dfactor;
 
-    const double dfactor = utils::kCval / f0;
-    double d4_sig_new    = dphi * dfactor * 192.0 * inv_dt4;
-    double d3_sig_new    = dphi * dfactor * 24.0 * inv_dt3;
-    double d2_sig_new    = dphi * dfactor * 4.0 * inv_dt2;
-    double d1_sig_new    = dphi * dfactor * 1.0 * inv_dt;
+    const double d4_range      = param_limits[0].max - param_limits[0].min;
+    const double d3_range      = param_limits[1].max - param_limits[1].min;
+    const double d2_range      = param_limits[2].max - param_limits[2].min;
+    const double f0_range      = param_limits[3].max - param_limits[3].min;
+    const double alpha_4_range = d4_range * ts4 / 192.0;
+    const double alpha_3_range = d3_range * ts3 / 24.0;
+    const double alpha_2_range =
+        (d2_range * ts2 / 4.0) + (d4_range * ts4 / 48.0);
+    const double alpha_1_range =
+        (dfactor * f0_range * ts) + (d3_range * ts3 / 8.0);
+    const double alpha_4_sig_new = cuda::std::min(base_step, alpha_4_range);
+    const double alpha_3_sig_new = cuda::std::min(base_step, alpha_3_range);
+    const double alpha_2_sig_new = cuda::std::min(base_step, alpha_2_range);
+    const double alpha_1_sig_new = cuda::std::min(base_step, alpha_1_range);
 
-    const double d4_range = param_limits[0].max - param_limits[0].min;
-    const double d3_range = param_limits[1].max - param_limits[1].min;
-    const double d2_range = param_limits[2].max - param_limits[2].min;
-    const double d1_range =
-        dfactor * (param_limits[3].max - param_limits[3].min);
-
-    d4_sig_new = cuda::std::min(d4_sig_new, d4_range);
-    d3_sig_new = cuda::std::min(d3_sig_new, d3_range);
-    d2_sig_new = cuda::std::min(d2_sig_new, d2_range);
-    d1_sig_new = cuda::std::min(d1_sig_new, d1_range);
-
-    const double shift_d4 =
-        (d4_sig_cur - d4_sig_new) * dt4 * nbins / (192.0 * dfactor);
-    const double shift_d3 =
-        (d3_sig_cur - d3_sig_new) * dt3 * nbins / (24.0 * dfactor);
-    const double shift_d2 =
-        (d2_sig_cur - d2_sig_new) * dt2 * nbins / (4.0 * dfactor);
-    const double shift_d1 =
-        (d1_sig_cur - d1_sig_new) * dt * nbins / (1.0 * dfactor);
+    const double shift_alpha_4 = (alpha_4_sig_cur - alpha_4_sig_new) * inv_base;
+    const double shift_alpha_3 = (alpha_3_sig_cur - alpha_3_sig_new) * inv_base;
+    const double shift_alpha_2 = (alpha_2_sig_cur - alpha_2_sig_new) * inv_base;
+    const double shift_alpha_1 = (alpha_1_sig_cur - alpha_1_sig_new) * inv_base;
 
     utils::branch_one_param_padded_device(
-        0, d4_cur, d4_sig_cur, d4_sig_new, eta, shift_d4,
+        0, alpha_4_cur, alpha_4_sig_cur, alpha_4_sig_new, eta, shift_alpha_4,
         branch_ws.scratch_params, branch_ws.scratch_dparams,
         branch_ws.scratch_counts, fb, branch_max);
     utils::branch_one_param_padded_device(
-        1, d3_cur, d3_sig_cur, d3_sig_new, eta, shift_d3,
+        1, alpha_3_cur, alpha_3_sig_cur, alpha_3_sig_new, eta, shift_alpha_3,
         branch_ws.scratch_params, branch_ws.scratch_dparams,
         branch_ws.scratch_counts, fb, branch_max);
     utils::branch_one_param_padded_device(
-        2, d2_cur, d2_sig_cur, d2_sig_new, eta, shift_d2,
+        2, alpha_2_cur, alpha_2_sig_cur, alpha_2_sig_new, eta, shift_alpha_2,
         branch_ws.scratch_params, branch_ws.scratch_dparams,
         branch_ws.scratch_counts, fb, branch_max);
     utils::branch_one_param_padded_device(
-        3, d1_cur, d1_sig_cur, d1_sig_new, eta, shift_d1,
+        3, alpha_1_cur, alpha_1_sig_cur, alpha_1_sig_new, eta, shift_alpha_1,
         branch_ws.scratch_params, branch_ws.scratch_dparams,
         branch_ws.scratch_counts, fb, branch_max);
 
@@ -593,14 +578,14 @@ kernel_analyze_and_branch_snap(const double* __restrict__ leaves_tree,
 }
 
 template <uint32_t KThreadsPerBlock>
-__global__ void
-kernel_materialize_branches_accel(const double* __restrict__ leaves_tree,
-                                  double* __restrict__ leaves_branch,
-                                  uint32_t* __restrict__ leaves_origins,
-                                  uint32_t n_leaves,
-                                  uint32_t n_leaves_branched,
-                                  uint32_t branch_max,
-                                  utils::BranchingWorkspaceCUDAView branch_ws) {
+__device__ __forceinline__ void
+materialize_branches_accel(const double* __restrict__ leaves_tree,
+                           double* __restrict__ leaves_branch,
+                           uint32_t* __restrict__ leaves_origins,
+                           uint32_t n_leaves,
+                           uint32_t n_leaves_branched,
+                           uint32_t branch_max,
+                           memory::BranchingWorkspaceCUDAView branch_ws) {
     constexpr uint32_t kParams       = 2;
     constexpr uint32_t kParamStride  = 2;
     constexpr uint32_t kLeavesStride = (kParams + 2) * kParamStride;
@@ -654,14 +639,14 @@ kernel_materialize_branches_accel(const double* __restrict__ leaves_tree,
 }
 
 template <uint32_t KThreadsPerBlock>
-__global__ void
-kernel_materialize_branches_jerk(const double* __restrict__ leaves_tree,
-                                 double* __restrict__ leaves_branch,
-                                 uint32_t* __restrict__ leaves_origins,
-                                 uint32_t n_leaves,
-                                 uint32_t n_leaves_branched,
-                                 uint32_t branch_max,
-                                 utils::BranchingWorkspaceCUDAView branch_ws) {
+__device__ __forceinline__ void
+materialize_branches_jerk(const double* __restrict__ leaves_tree,
+                          double* __restrict__ leaves_branch,
+                          uint32_t* __restrict__ leaves_origins,
+                          uint32_t n_leaves,
+                          uint32_t n_leaves_branched,
+                          uint32_t branch_max,
+                          memory::BranchingWorkspaceCUDAView branch_ws) {
     constexpr uint32_t kParams       = 3;
     constexpr uint32_t kParamStride  = 2;
     constexpr uint32_t kLeavesStride = (kParams + 2) * kParamStride;
@@ -722,14 +707,14 @@ kernel_materialize_branches_jerk(const double* __restrict__ leaves_tree,
 }
 
 template <uint32_t KThreadsPerBlock>
-__global__ void
-kernel_materialize_branches_snap(const double* __restrict__ leaves_tree,
-                                 double* __restrict__ leaves_branch,
-                                 uint32_t* __restrict__ leaves_origins,
-                                 uint32_t n_leaves,
-                                 uint32_t n_leaves_branched,
-                                 uint32_t branch_max,
-                                 utils::BranchingWorkspaceCUDAView branch_ws) {
+__device__ __forceinline__ void
+materialize_branches_snap(const double* __restrict__ leaves_tree,
+                          double* __restrict__ leaves_branch,
+                          uint32_t* __restrict__ leaves_origins,
+                          uint32_t n_leaves,
+                          uint32_t n_leaves_branched,
+                          uint32_t branch_max,
+                          memory::BranchingWorkspaceCUDAView branch_ws) {
     constexpr uint32_t kParams       = 4;
     constexpr uint32_t kParamStride  = 2;
     constexpr uint32_t kLeavesStride = (kParams + 2) * kParamStride;
@@ -1068,7 +1053,6 @@ transform_chebyshev_jerk(double* __restrict__ leaves_tree,
     leaves_tree[lo + 5] = p * alpha_1_err_i;
 }
 
-template <bool UseConservativeTile>
 __device__ __forceinline__ void
 transform_chebyshev_snap(double* __restrict__ leaves_tree,
                          const uint8_t* __restrict__ validation_mask,
@@ -1130,6 +1114,61 @@ transform_chebyshev_snap(double* __restrict__ leaves_tree,
     leaves_tree[lo + 3] = p3 * alpha_3_err_i;
     leaves_tree[lo + 5] = p2 * alpha_2_err_i;
     leaves_tree[lo + 7] = p * alpha_1_err_i;
+}
+
+// Branch (analyze) Kernel
+template <int NPARAMS>
+__global__ void kernel_poly_chebyshev_analyze_and_branch_batch(
+    const double* __restrict__ leaves_tree,
+    uint32_t n_leaves,
+    cuda::std::pair<double, double> coord_cur,
+    double nbins,
+    double eta,
+    const ParamLimit* __restrict__ param_limits,
+    uint32_t branch_max,
+    memory::BranchingWorkspaceCUDAView branch_ws) {
+    if constexpr (NPARAMS == 2) {
+        analyze_and_branch_chebyshev_accel(leaves_tree, n_leaves, coord_cur,
+                                           nbins, eta, param_limits, branch_max,
+                                           branch_ws);
+    } else if constexpr (NPARAMS == 3) {
+        analyze_and_branch_chebyshev_jerk(leaves_tree, n_leaves, coord_cur,
+                                          nbins, eta, param_limits, branch_max,
+                                          branch_ws);
+    } else if constexpr (NPARAMS == 4) {
+        analyze_and_branch_chebyshev_snap(leaves_tree, n_leaves, coord_cur,
+                                          nbins, eta, param_limits, branch_max,
+                                          branch_ws);
+    } else {
+        static_assert(NPARAMS <= 4, "Unsupported Chebyshev order");
+    }
+}
+
+// Branch (materialize) Kernel
+template <int NPARAMS, uint32_t KThreadsPerBlock>
+__global__ void kernel_poly_chebyshev_materialize_branches_batch(
+    const double* __restrict__ leaves_tree,
+    double* __restrict__ leaves_branch,
+    uint32_t* __restrict__ leaves_origins,
+    uint32_t n_leaves,
+    uint32_t n_leaves_branched,
+    uint32_t branch_max,
+    memory::BranchingWorkspaceCUDAView branch_ws) {
+    if constexpr (NPARAMS == 2) {
+        materialize_branches_accel<KThreadsPerBlock>(
+            leaves_tree, leaves_branch, leaves_origins, n_leaves,
+            n_leaves_branched, branch_max, branch_ws);
+    } else if constexpr (NPARAMS == 3) {
+        materialize_branches_jerk<KThreadsPerBlock>(
+            leaves_tree, leaves_branch, leaves_origins, n_leaves,
+            n_leaves_branched, branch_max, branch_ws);
+    } else if constexpr (NPARAMS == 4) {
+        materialize_branches_snap<KThreadsPerBlock>(
+            leaves_tree, leaves_branch, leaves_origins, n_leaves,
+            n_leaves_branched, branch_max, branch_ws);
+    } else {
+        static_assert(NPARAMS <= 4, "Unsupported Chebyshev order");
+    }
 }
 
 // Resolve Kernel
@@ -1252,123 +1291,6 @@ kernel_poly_taylor_to_cheby_batch(double* __restrict__ leaves_tree,
     }
 }
 
-template <SizeType NPARAMS>
-SizeType
-poly_taylor_branch_impl_cuda(cuda::std::span<const double> leaves_tree,
-                             cuda::std::span<double> leaves_branch,
-                             cuda::std::span<uint32_t> leaves_origins,
-                             cuda::std::span<uint8_t> validation_mask,
-                             std::pair<double, double> coord_cur,
-                             SizeType nbins,
-                             double eta,
-                             cuda::std::span<const ParamLimit> param_limits,
-                             SizeType branch_max,
-                             SizeType n_leaves,
-                             utils::BranchingWorkspaceCUDAView branch_ws,
-                             utils::CUBScratchArena& scratch_ws,
-                             cudaStream_t stream) {
-    static_assert(NPARAMS >= 2 && NPARAMS <= 4);
-    constexpr SizeType kLeavesStride = (NPARAMS + 2) * 2;
-
-    // ---- Kernel 1: analyze + branch enumeration ----
-    constexpr SizeType kThreadsPerBlock = 256;
-    const auto blocks_per_grid =
-        (n_leaves + kThreadsPerBlock - 1) / kThreadsPerBlock;
-    const dim3 block_dim(kThreadsPerBlock);
-    const dim3 grid_dim(blocks_per_grid);
-    cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
-
-    if constexpr (NPARAMS == 2) {
-        kernel_analyze_and_branch_accel<<<grid_dim, block_dim, 0, stream>>>(
-            leaves_tree.data(), n_leaves, coord_cur.second,
-            static_cast<double>(nbins), eta, param_limits.data(), branch_max,
-            branch_ws);
-    } else if constexpr (NPARAMS == 3) {
-        kernel_analyze_and_branch_jerk<<<grid_dim, block_dim, 0, stream>>>(
-            leaves_tree.data(), n_leaves, coord_cur.second,
-            static_cast<double>(nbins), eta, param_limits.data(), branch_max,
-            branch_ws);
-    } else {
-        kernel_analyze_and_branch_snap<<<grid_dim, block_dim, 0, stream>>>(
-            leaves_tree.data(), n_leaves, coord_cur.second,
-            static_cast<double>(nbins), eta, param_limits.data(), branch_max,
-            branch_ws);
-    }
-    cuda_utils::check_last_cuda_error("Kernel 1 launch failed");
-
-    // compute output size and offsets (leaf_output_offset)
-    cuda_utils::check_cuda_call(
-        cub::DeviceScan::ExclusiveSum(
-            scratch_ws.cub_temp_storage, scratch_ws.cub_temp_bytes,
-            branch_ws.leaf_branch_count, branch_ws.leaf_output_offset, n_leaves,
-            stream),
-        "cub::DeviceScan::ExclusiveSum failed");
-    uint32_t last_offset, last_count;
-    cuda_utils::check_cuda_call(
-        cudaMemcpyAsync(&last_offset,
-                        branch_ws.leaf_output_offset + (n_leaves - 1),
-                        sizeof(uint32_t), cudaMemcpyDeviceToHost, stream),
-        "cudaMemcpyAsync failed");
-    cuda_utils::check_cuda_call(
-        cudaMemcpyAsync(&last_count,
-                        branch_ws.leaf_branch_count + (n_leaves - 1),
-                        sizeof(uint32_t), cudaMemcpyDeviceToHost, stream),
-        "cudaMemcpyAsync failed");
-    // Unavoidable sync
-    cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
-                                "cudaStreamSynchronize branch kernel failed");
-    const SizeType n_leaves_branched = last_offset + last_count;
-    if (n_leaves_branched == 0) {
-        return n_leaves_branched;
-    }
-
-    // Set validation mask for produced outputs
-    cuda_utils::check_cuda_call(
-        cudaMemsetAsync(validation_mask.data(), 1,
-                        n_leaves_branched * sizeof(uint8_t), stream),
-        "cudaMemsetAsync failed");
-
-    if (n_leaves_branched == n_leaves) {
-        // FAST PATH: no branching
-        cuda_utils::check_cuda_call(
-            cudaMemcpyAsync(leaves_branch.data(), leaves_tree.data(),
-                            n_leaves * kLeavesStride * sizeof(double),
-                            cudaMemcpyDeviceToDevice, stream),
-            "cudaMemcpyAsync failed");
-        thrust::sequence(thrust::cuda::par.on(stream), leaves_origins.data(),
-                         leaves_origins.data() + n_leaves,
-                         static_cast<uint32_t>(0));
-
-        return n_leaves_branched;
-    }
-
-    // ---- Kernel 2: materialize ----
-    const auto blocks_per_grid_out =
-        (n_leaves_branched + kThreadsPerBlock - 1) / kThreadsPerBlock;
-    const dim3 grid_dim_out(blocks_per_grid_out);
-    cuda_utils::check_kernel_launch_params(grid_dim_out, block_dim);
-    if constexpr (NPARAMS == 2) {
-
-        kernel_materialize_branches_accel<kThreadsPerBlock>
-            <<<grid_dim_out, block_dim, 0, stream>>>(
-                leaves_tree.data(), leaves_branch.data(), leaves_origins.data(),
-                n_leaves, n_leaves_branched, branch_max, branch_ws);
-    } else if constexpr (NPARAMS == 3) {
-        kernel_materialize_branches_jerk<kThreadsPerBlock>
-            <<<grid_dim_out, block_dim, 0, stream>>>(
-                leaves_tree.data(), leaves_branch.data(), leaves_origins.data(),
-                n_leaves, n_leaves_branched, branch_max, branch_ws);
-    } else {
-        kernel_materialize_branches_snap<kThreadsPerBlock>
-            <<<grid_dim_out, block_dim, 0, stream>>>(
-                leaves_tree.data(), leaves_branch.data(), leaves_origins.data(),
-                n_leaves, n_leaves_branched, branch_max, branch_ws);
-    }
-    cuda_utils::check_last_cuda_error("Kernel 2 launch failed");
-    // No need to sync, the next kernel will do it
-    return n_leaves_branched;
-}
-
 } // namespace
 
 void poly_chebyshev_seed_cuda(
@@ -1387,9 +1309,9 @@ void poly_chebyshev_seed_cuda(
     const dim3 block_dim(kThreadPerBlock);
     const dim3 grid_dim(blocks_per_grid);
     cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
-    kernel_poly_chebyshev_seed<<<grid_dim, block_dim, 0, stream>>>(
+    kernel_poly_taylor_seed<<<grid_dim, block_dim, 0, stream>>>(
         param_grid_count_init.data(), dparams_init.data(), param_limits.data(),
-        seed_leaves.data(), coord_init, n_leaves, n_params);
+        seed_leaves.data(), n_leaves, n_params);
     cuda_utils::check_last_cuda_error("Chebyshev seed kernel launch failed");
 
     // Convert to Chebyshev basis
@@ -1432,25 +1354,150 @@ poly_chebyshev_branch_batch_cuda(cuda::std::span<double> leaves_tree,
                                  SizeType branch_max,
                                  SizeType n_leaves,
                                  SizeType n_params,
-                                 utils::BranchingWorkspaceCUDAView branch_ws,
-                                 utils::CUBScratchArena& scratch_ws,
+                                 memory::BranchingWorkspaceCUDAView branch_ws,
+                                 memory::CUBScratchArena& scratch_ws,
                                  cudaStream_t stream) {
-    auto dispatch = [&]<SizeType N>() {
-        return poly_taylor_branch_impl_cuda<N>(
-            leaves_tree, leaves_branch, leaves_origins, validation_mask,
-            coord_cur, nbins, eta, param_limits, branch_max, n_leaves,
-            branch_ws, scratch_ws, stream);
+    const SizeType leaves_stride = (n_params + 2) * 2;
+
+    // Set validation mask for input leaves
+    cuda_utils::check_cuda_call(cudaMemsetAsync(validation_mask.data(), 1,
+                                                n_leaves * sizeof(uint8_t),
+                                                stream),
+                                "cudaMemsetAsync failed");
+
+    // ---- Kernel 0: Transform leaves ----
+    constexpr SizeType kThreadsPerBlock = 256;
+    const auto blocks_per_grid =
+        (n_leaves + kThreadsPerBlock - 1) / kThreadsPerBlock;
+    const dim3 block_dim(kThreadsPerBlock);
+    const dim3 grid_dim(blocks_per_grid);
+    cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
+
+    auto dispatch_transform = [&]<int N>() {
+        kernel_poly_chebyshev_transform_batch<N>
+            <<<grid_dim, block_dim, 0, stream>>>(
+                leaves_tree.data(), validation_mask.data(), n_leaves, coord_cur,
+                coord_prev);
     };
+
     switch (n_params) {
     case 2:
-        return dispatch.template operator()<2>();
+        dispatch_transform.template operator()<2>();
+        break;
     case 3:
-        return dispatch.template operator()<3>();
+        dispatch_transform.template operator()<3>();
+        break;
     case 4:
-        return dispatch.template operator()<4>();
+        dispatch_transform.template operator()<4>();
+        break;
     default:
         throw std::invalid_argument("Unsupported n_params");
     }
+    cuda_utils::check_last_cuda_error(
+        "kernel_poly_chebyshev_transform_batch kernel launch failed");
+
+    // ---- Kernel 1: Analyze + Branch Enumeration ----
+    auto dispatch_analyze = [&]<int N>() {
+        kernel_poly_chebyshev_analyze_and_branch_batch<N>
+            <<<grid_dim, block_dim, 0, stream>>>(
+                leaves_tree.data(), n_leaves, coord_cur,
+                static_cast<double>(nbins), eta, param_limits.data(),
+                branch_max, branch_ws);
+    };
+
+    switch (n_params) {
+    case 2:
+        dispatch_analyze.template operator()<2>();
+        break;
+    case 3:
+        dispatch_analyze.template operator()<3>();
+        break;
+    case 4:
+        dispatch_analyze.template operator()<4>();
+        break;
+    default:
+        throw std::invalid_argument("Unsupported n_params");
+    }
+    cuda_utils::check_last_cuda_error(
+        "kernel_poly_chebyshev_analyze_and_branch_batch kernel launch failed");
+
+    // compute output size and offsets (leaf_output_offset)
+    cuda_utils::check_cuda_call(
+        cub::DeviceScan::ExclusiveSum(
+            scratch_ws.cub_temp_storage, scratch_ws.cub_temp_bytes,
+            branch_ws.leaf_branch_count, branch_ws.leaf_output_offset, n_leaves,
+            stream),
+        "cub::DeviceScan::ExclusiveSum failed");
+    uint32_t last_offset, last_count;
+    cuda_utils::check_cuda_call(
+        cudaMemcpyAsync(&last_offset,
+                        branch_ws.leaf_output_offset + (n_leaves - 1),
+                        sizeof(uint32_t), cudaMemcpyDeviceToHost, stream),
+        "cudaMemcpyAsync failed");
+    cuda_utils::check_cuda_call(
+        cudaMemcpyAsync(&last_count,
+                        branch_ws.leaf_branch_count + (n_leaves - 1),
+                        sizeof(uint32_t), cudaMemcpyDeviceToHost, stream),
+        "cudaMemcpyAsync failed");
+    // Unavoidable sync
+    cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
+                                "cudaStreamSynchronize branch kernel failed");
+    const SizeType n_leaves_branched = last_offset + last_count;
+    if (n_leaves_branched == 0) {
+        return n_leaves_branched;
+    }
+
+    // Set validation mask for produced outputs
+    cuda_utils::check_cuda_call(
+        cudaMemsetAsync(validation_mask.data(), 1,
+                        n_leaves_branched * sizeof(uint8_t), stream),
+        "cudaMemsetAsync failed");
+
+    if (n_leaves_branched == n_leaves) {
+        // FAST PATH: no branching
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(leaves_branch.data(), leaves_tree.data(),
+                            n_leaves * leaves_stride * sizeof(double),
+                            cudaMemcpyDeviceToDevice, stream),
+            "cudaMemcpyAsync failed");
+        thrust::sequence(thrust::cuda::par.on(stream), leaves_origins.data(),
+                         leaves_origins.data() + n_leaves,
+                         static_cast<uint32_t>(0));
+
+        return n_leaves_branched;
+    }
+
+    // ---- Kernel 2: materialize ----
+    const auto blocks_per_grid_out =
+        (n_leaves_branched + kThreadsPerBlock - 1) / kThreadsPerBlock;
+    const dim3 grid_dim_out(blocks_per_grid_out);
+    cuda_utils::check_kernel_launch_params(grid_dim_out, block_dim);
+
+    // Two-level dispatch - kThreadsPerBlock is constexpr, so this is legal
+    auto dispatch_materialize = [&]<int N>() {
+        kernel_poly_chebyshev_materialize_branches_batch<N, kThreadsPerBlock>
+            <<<grid_dim_out, block_dim, 0, stream>>>(
+                leaves_tree.data(), leaves_branch.data(), leaves_origins.data(),
+                n_leaves, n_leaves_branched, branch_max, branch_ws);
+    };
+
+    switch (n_params) {
+    case 2:
+        dispatch_materialize.template operator()<2>();
+        break;
+    case 3:
+        dispatch_materialize.template operator()<3>();
+        break;
+    case 4:
+        dispatch_materialize.template operator()<4>();
+        break;
+    default:
+        throw std::invalid_argument("Unsupported n_params");
+    }
+    cuda_utils::check_last_cuda_error("kernel_poly_chebyshev_materialize_"
+                                      "branches_batch kernel launch failed");
+    // No need to sync, the next kernel will do it
+    return n_leaves_branched;
 }
 
 void poly_chebyshev_resolve_batch_cuda(
@@ -1546,7 +1593,7 @@ void poly_chebyshev_transform_batch_cuda(
 }
 
 void poly_taylor_report_batch_cuda(cuda::std::span<double> leaves_tree,
-                                   std::pair<double, double> /*coord_report*/,
+                                   std::pair<double, double> coord_report,
                                    SizeType n_leaves,
                                    SizeType n_params,
                                    cudaStream_t stream) {

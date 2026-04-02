@@ -17,10 +17,7 @@
 #include "loki/transforms.hpp"
 
 namespace loki {
-using algorithms::EPMultiPass;
 using algorithms::FFAFreqSweep;
-using algorithms::PruneFourier;
-using algorithms::PruneTime;
 using detection::MatchedFilter;
 using plans::FFAPlanBase;
 using search::PulsarSearchConfig;
@@ -597,44 +594,25 @@ PYBIND11_MODULE(libloki, m) {
 
     auto m_prune = m.def_submodule("prune", "Pruning submodule");
 
-    py::class_<utils::WorldTree<float>>(m_prune, "WorldTreeFloat")
+    py::class_<memory::WorldTree<float>>(m_prune, "WorldTreeFloat")
         .def(py::init<SizeType, SizeType, SizeType, SizeType>(),
              py::arg("capacity"), py::arg("nparams"), py::arg("nbins"),
              py::arg("max_batch_size"))
         .def_property_readonly("leaves",
-                               [](const utils::WorldTree<float>& self) {
+                               [](const memory::WorldTree<float>& self) {
                                    return as_pyarray_ref(self.get_leaves());
                                })
         .def_property_readonly("folds",
-                               [](const utils::WorldTree<float>& self) {
+                               [](const memory::WorldTree<float>& self) {
                                    return as_pyarray_ref(self.get_folds());
                                })
         .def_property_readonly("scores",
-                               [](const utils::WorldTree<float>& self) {
+                               [](const memory::WorldTree<float>& self) {
                                    return as_pyarray_ref(self.get_scores());
                                });
 
-    py::class_<EPMultiPass>(m_prune, "EPMultiPass")
-        .def(py::init<const PulsarSearchConfig&, const std::vector<float>&,
-                      std::optional<SizeType>,
-                      std::optional<std::vector<SizeType>>, SizeType,
-                      SizeType>(),
-             py::arg("cfg"), py::arg("threshold_scheme"),
-             py::arg("n_runs")   = std::nullopt,
-             py::arg("ref_segs") = std::nullopt,
-             py::arg("max_sugg") = 1U << 18U, py::arg("batch_size") = 1024U)
-        .def(
-            "execute",
-            [](EPMultiPass& self, const PyArrayT<float>& ts_e,
-               const PyArrayT<float>& ts_v, std::string_view outdir,
-               std::string_view file_prefix, std::string_view poly_basis,
-               bool show_progress) {
-                self.execute(to_span<const float>(ts_e),
-                             to_span<const float>(ts_v), outdir, file_prefix,
-                             poly_basis, show_progress);
-            },
-            py::arg("ts_e"), py::arg("ts_v"), py::arg("outdir"),
-            py::arg("file_prefix"), py::arg("poly_basis"),
-            py::arg("show_progress") = true);
+    // EP submodule
+    bind_ep_multi_pass<float>(m_prune, "EPMultiPassTime");
+    bind_ep_multi_pass<ComplexType>(m_prune, "EPMultiPassFourier");
 }
 } // namespace loki

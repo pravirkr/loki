@@ -4,9 +4,9 @@
 #include <thrust/device_vector.h>
 
 #include "loki/algorithms/ffa.hpp"
-#include "loki/algorithms/plans.hpp"
 #include "loki/algorithms/regions.hpp"
 #include "loki/cands.hpp"
+#include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
 #include "loki/cuda_utils.cuh"
 #include "loki/detection/score.hpp"
@@ -36,8 +36,8 @@ public:
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 class FFAFreqSweepCUDATypedImpl final : public FFAFreqSweepCUDA::BaseImpl {
 public:
-    using HostFoldType   = FoldTypeTraits<FoldTypeCUDA>::HostType;
-    using DeviceFoldType = FoldTypeTraits<FoldTypeCUDA>::DeviceType;
+    using HostFoldT   = HostFoldType<FoldTypeCUDA>;
+    using DeviceFoldT = DeviceFoldType<FoldTypeCUDA>;
 
     FFAFreqSweepCUDATypedImpl(search::PulsarSearchConfig cfg, int device_id)
         : m_base_cfg(std::move(cfg)),
@@ -45,7 +45,7 @@ public:
           m_region_planner(create_region_planner(m_base_cfg, m_device_id)) {
         const auto& planner_stats = m_region_planner.get_stats();
         // Allocate buffers once, sized for the largest chunk
-        m_ffa_workspace = FFAWorkspaceCUDA<FoldTypeCUDA>(
+        m_ffa_workspace = memory::FFAWorkspaceCUDA<FoldTypeCUDA>(
             planner_stats.get_max_buffer_size(),
             planner_stats.get_max_coord_size(),
             planner_stats.get_max_ffa_levels(), m_base_cfg.get_nparams());
@@ -165,9 +165,9 @@ public:
 private:
     search::PulsarSearchConfig m_base_cfg;
     int m_device_id;
-    regions::FFARegionPlanner<HostFoldType> m_region_planner;
+    regions::FFARegionPlanner<HostFoldT> m_region_planner;
 
-    algorithms::FFAWorkspaceCUDA<FoldTypeCUDA> m_ffa_workspace;
+    memory::FFAWorkspaceCUDA<FoldTypeCUDA> m_ffa_workspace;
     SizeType m_total_passing_scores{};
     std::vector<float> m_scores;
     std::vector<uint32_t> m_passing_indices;
@@ -183,10 +183,10 @@ private:
     thrust::device_vector<uint32_t> m_widths_d;
     thrust::device_vector<uint32_t> m_passing_indices_d;
 
-    utils::DeviceCounter m_passing_counter;
+    memory::DeviceCounter m_passing_counter;
 
     // Helper function to create region planner with GPU memory considerations
-    static regions::FFARegionPlanner<HostFoldType>
+    static regions::FFARegionPlanner<HostFoldT>
     create_region_planner(const search::PulsarSearchConfig& base_cfg,
                           int device_id) {
         cuda_utils::CudaSetDeviceGuard device_guard(device_id);
@@ -214,8 +214,8 @@ private:
         // cfg_with_gpu_mem.set_max_process_memory_gb(usable_gpu_gb);
 
         // Create region planner with GPU memory limit
-        return regions::FFARegionPlanner<HostFoldType>(cfg_with_gpu_mem,
-                                                       /*use_gpu=*/true);
+        return regions::FFARegionPlanner<HostFoldT>(cfg_with_gpu_mem,
+                                                    /*use_gpu=*/true);
     }
 
     SizeType execute_ffa_region(const search::PulsarSearchConfig& cfg,
@@ -224,8 +224,8 @@ private:
         timing::SimpleTimer timer;
         // Create FFA with shared workspace
         timer.start();
-        auto the_ffa = FFACUDA<FoldTypeCUDA>(cfg, m_ffa_workspace, m_device_id);
-        const plans::FFAPlan<HostFoldType>& ffa_plan = the_ffa.get_plan();
+        auto the_ffa = FFACUDA<FoldTypeCUDA>(m_ffa_workspace, cfg, m_device_id);
+        const plans::FFAPlan<HostFoldT>& ffa_plan = the_ffa.get_plan();
         const auto buffer_size_time = ffa_plan.get_buffer_size_time();
         const auto fold_size_time   = ffa_plan.get_fold_size_time();
         the_ffa.execute(
@@ -282,7 +282,7 @@ private:
         const auto& ffa_regions_cfgs   = m_region_planner.get_cfgs();
         for (SizeType i = 0; i < ffa_regions_cfgs.size(); ++i) {
             const search::PulsarSearchConfig& cfg_cur = ffa_regions_cfgs[i];
-            plans::FFAPlan<HostFoldType> ffa_plan(cfg_cur);
+            plans::FFAPlan<HostFoldT> ffa_plan(cfg_cur);
             const auto& param_limits = cfg_cur.get_param_limits();
             const auto& param_counts = ffa_plan.get_param_counts().back();
             const auto& param_strides =

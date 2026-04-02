@@ -10,8 +10,8 @@
 #include "loki/loki.hpp"
 
 namespace loki {
+using algorithms::EPMultiPass;
 using algorithms::FFA;
-using algorithms::Prune;
 using plans::FFAPlan;
 using plans::FFAPlanBase;
 using regions::FFARegionPlanner;
@@ -116,6 +116,35 @@ void bind_ffa_region_planner(py::module& m, const std::string& name) {
         .def_property_readonly("cfgs", &FFARegionPlanner<T>::get_cfgs)
         .def_property_readonly("nregions", &FFARegionPlanner<T>::get_nregions)
         .def_property_readonly("stats", &FFARegionPlanner<T>::get_stats);
+}
+
+// Template function to bind EPMultiPass<T>
+template <SupportedFoldType FoldType>
+void bind_ep_multi_pass(py::module& m, const std::string& name) {
+    auto cls =
+        py::class_<EPMultiPass<FoldType>>(m, name.c_str())
+            .def(py::init<const PulsarSearchConfig&, const std::vector<float>&,
+                          std::optional<SizeType>,
+                          std::optional<std::vector<SizeType>>, SizeType,
+                          SizeType, std::string_view, bool>(),
+                 py::arg("cfg"), py::arg("threshold_scheme"),
+                 py::arg("n_runs")   = std::nullopt,
+                 py::arg("ref_segs") = std::nullopt,
+                 py::arg("max_sugg") = 1U << 18U, py::arg("batch_size") = 1024U,
+                 py::arg("poly_basis")    = "taylor",
+                 py::arg("show_progress") = true);
+
+    // Standard execute
+    cls.def(
+        "execute",
+        [](EPMultiPass<FoldType>& self, const PyArrayT<float>& ts_e,
+           const PyArrayT<float>& ts_v, std::string_view outdir,
+           std::string_view file_prefix) {
+            self.execute(to_span<const float>(ts_e), to_span<const float>(ts_v),
+                         outdir, file_prefix);
+        },
+        py::arg("ts_e"), py::arg("ts_v"), py::arg("outdir"),
+        py::arg("file_prefix"));
 }
 
 } // namespace loki

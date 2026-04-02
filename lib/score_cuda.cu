@@ -16,6 +16,7 @@
 #include "loki/cub_helpers.cuh"
 #include "loki/cuda_utils.cuh"
 #include "loki/exceptions.hpp"
+#include "loki/utils/workspace.hpp"
 
 namespace loki::detection {
 
@@ -383,7 +384,7 @@ SizeType score_and_filter_cuda_d(cuda::std::span<const float> folds,
                                  SizeType nprofiles,
                                  SizeType nbins,
                                  cudaStream_t stream,
-                                 utils::DeviceCounter& counter) {
+                                 memory::DeviceCounter& counter) {
     counter.reset(stream);
 
     constexpr SizeType kWarpSize         = 32;
@@ -414,7 +415,7 @@ SizeType score_and_filter_max_cuda_d(cuda::std::span<const float> folds,
                                      float threshold,
                                      SizeType nprofiles,
                                      SizeType nbins,
-                                     utils::DeviceCounter& counter,
+                                     memory::DeviceCounter& counter,
                                      cudaStream_t stream) {
     counter.reset(stream);
 
@@ -446,7 +447,7 @@ score_and_filter_max_cuda_thread_d(cuda::std::span<const float> folds,
                                    float threshold,
                                    SizeType nprofiles,
                                    SizeType nbins,
-                                   utils::CUBScratchArena& scratch_ws,
+                                   memory::CUBScratchArena& scratch_ws,
                                    cudaStream_t stream) {
     constexpr SizeType kThreadsPerBlock = 256;
     const SizeType blocks_per_grid =

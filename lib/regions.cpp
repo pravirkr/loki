@@ -6,7 +6,7 @@
 
 #include <spdlog/spdlog.h>
 
-#include "loki/algorithms/plans.hpp"
+#include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
 #include "loki/exceptions.hpp"
 #include "loki/search/configs.hpp"

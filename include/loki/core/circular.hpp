@@ -56,7 +56,7 @@ SizeType circ_taylor_branch_batch(std::span<const double> leaves_tree,
                                   SizeType branch_max,
                                   SizeType n_leaves,
                                   double minimum_snap_cells,
-                                  utils::BranchingWorkspaceView ws);
+                                  memory::BranchingWorkspace& branch_ws);
 
 SizeType circ_taylor_validate_batch(std::span<double> leaves_branch,
                                     std::span<SizeType> leaves_origins,
@@ -112,8 +112,8 @@ circ_taylor_branch_batch_cuda(cuda::std::span<const double> leaves_tree,
                               SizeType branch_max,
                               SizeType n_leaves,
                               double minimum_snap_cells,
-                              utils::BranchingWorkspaceCUDAView branch_ws,
-                              utils::CUBScratchArena& scratch_ws,
+                              memory::BranchingWorkspaceCUDAView branch_ws,
+                              memory::CUBScratchArena& scratch_ws,
                               cudaStream_t stream);
 
 SizeType
@@ -123,7 +123,7 @@ circ_taylor_validate_batch_cuda(cuda::std::span<const double> leaves_branch,
                                 double p_orb_min,
                                 double x_mass_const,
                                 double minimum_snap_cells,
-                                utils::CUBScratchArena& scratch_ws,
+                                memory::CUBScratchArena& scratch_ws,
                                 cudaStream_t stream);
 
 void circ_taylor_resolve_batch_cuda(

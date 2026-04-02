@@ -74,7 +74,7 @@ kernel_analyze_and_branch_accel(const double* __restrict__ leaves_tree,
                                 double eta,
                                 const ParamLimit* __restrict__ param_limits,
                                 uint32_t branch_max,
-                                utils::BranchingWorkspaceCUDAView branch_ws) {
+                                memory::BranchingWorkspaceCUDAView branch_ws) {
     constexpr SizeType kParams       = 2;
     constexpr SizeType kParamStride  = 2;
     constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
@@ -137,7 +137,7 @@ kernel_analyze_and_branch_jerk(const double* __restrict__ leaves_tree,
                                double eta,
                                const ParamLimit* __restrict__ param_limits,
                                uint32_t branch_max,
-                               utils::BranchingWorkspaceCUDAView branch_ws) {
+                               memory::BranchingWorkspaceCUDAView branch_ws) {
     constexpr SizeType kParams       = 3;
     constexpr SizeType kParamStride  = 2;
     constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
@@ -214,7 +214,7 @@ kernel_analyze_and_branch_snap(const double* __restrict__ leaves_tree,
                                double eta,
                                const ParamLimit* __restrict__ param_limits,
                                uint32_t branch_max,
-                               utils::BranchingWorkspaceCUDAView branch_ws) {
+                               memory::BranchingWorkspaceCUDAView branch_ws) {
     constexpr SizeType kParams       = 4;
     constexpr SizeType kParamStride  = 2;
     constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
@@ -298,14 +298,14 @@ kernel_analyze_and_branch_snap(const double* __restrict__ leaves_tree,
 }
 
 template <uint32_t KThreadsPerBlock>
-__global__ void
-kernel_materialize_branches_accel(const double* __restrict__ leaves_tree,
-                                  double* __restrict__ leaves_branch,
-                                  uint32_t* __restrict__ leaves_origins,
-                                  uint32_t n_leaves,
-                                  uint32_t n_leaves_branched,
-                                  uint32_t branch_max,
-                                  utils::BranchingWorkspaceCUDAView branch_ws) {
+__global__ void kernel_materialize_branches_accel(
+    const double* __restrict__ leaves_tree,
+    double* __restrict__ leaves_branch,
+    uint32_t* __restrict__ leaves_origins,
+    uint32_t n_leaves,
+    uint32_t n_leaves_branched,
+    uint32_t branch_max,
+    memory::BranchingWorkspaceCUDAView branch_ws) {
     constexpr uint32_t kParams       = 2;
     constexpr uint32_t kParamStride  = 2;
     constexpr uint32_t kLeavesStride = (kParams + 2) * kParamStride;
@@ -366,7 +366,7 @@ kernel_materialize_branches_jerk(const double* __restrict__ leaves_tree,
                                  uint32_t n_leaves,
                                  uint32_t n_leaves_branched,
                                  uint32_t branch_max,
-                                 utils::BranchingWorkspaceCUDAView branch_ws) {
+                                 memory::BranchingWorkspaceCUDAView branch_ws) {
     constexpr uint32_t kParams       = 3;
     constexpr uint32_t kParamStride  = 2;
     constexpr uint32_t kLeavesStride = (kParams + 2) * kParamStride;
@@ -434,7 +434,7 @@ kernel_materialize_branches_snap(const double* __restrict__ leaves_tree,
                                  uint32_t n_leaves,
                                  uint32_t n_leaves_branched,
                                  uint32_t branch_max,
-                                 utils::BranchingWorkspaceCUDAView branch_ws) {
+                                 memory::BranchingWorkspaceCUDAView branch_ws) {
     constexpr uint32_t kParams       = 4;
     constexpr uint32_t kParamStride  = 2;
     constexpr uint32_t kLeavesStride = (kParams + 2) * kParamStride;
@@ -937,8 +937,8 @@ poly_taylor_branch_impl_cuda(cuda::std::span<const double> leaves_tree,
                              cuda::std::span<const ParamLimit> param_limits,
                              SizeType branch_max,
                              SizeType n_leaves,
-                             utils::BranchingWorkspaceCUDAView branch_ws,
-                             utils::CUBScratchArena& scratch_ws,
+                             memory::BranchingWorkspaceCUDAView branch_ws,
+                             memory::CUBScratchArena& scratch_ws,
                              cudaStream_t stream) {
     static_assert(NPARAMS >= 2 && NPARAMS <= 4);
     constexpr SizeType kLeavesStride = (NPARAMS + 2) * 2;
@@ -1080,8 +1080,8 @@ poly_taylor_branch_batch_cuda(cuda::std::span<const double> leaves_tree,
                               SizeType branch_max,
                               SizeType n_leaves,
                               SizeType n_params,
-                              utils::BranchingWorkspaceCUDAView branch_ws,
-                              utils::CUBScratchArena& scratch_ws,
+                              memory::BranchingWorkspaceCUDAView branch_ws,
+                              memory::CUBScratchArena& scratch_ws,
                               cudaStream_t stream) {
     auto dispatch = [&]<SizeType N>() {
         return poly_taylor_branch_impl_cuda<N>(
