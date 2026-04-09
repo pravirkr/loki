@@ -17,16 +17,12 @@ namespace loki::core {
 
 namespace {
 
-void poly_cheby_to_taylor_accel_batch(std::span<double> leaves_tree,
-                                      std::pair<double, double> coord_report,
-                                      SizeType n_leaves) {
+void poly_cheby_to_taylor_accel_batch(double* __restrict__ leaves_tree,
+                                      SizeType n_leaves,
+                                      std::pair<double, double> coord_report) {
     constexpr SizeType kParams       = 2;
     constexpr SizeType kParamStride  = 2;
     constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
-
-    error_check::check_greater_equal(leaves_tree.size(),
-                                     n_leaves * kLeavesStride,
-                                     "batch_leaves size mismatch");
 
     const double ts      = coord_report.second;
     const double inv_ts  = 1.0 / ts;
@@ -58,16 +54,12 @@ void poly_cheby_to_taylor_accel_batch(std::span<double> leaves_tree,
     }
 }
 
-void poly_taylor_to_cheby_accel_batch(std::span<double> leaves_tree,
-                                      std::pair<double, double> coord_init,
-                                      SizeType n_leaves) {
+void poly_taylor_to_cheby_accel_batch(double* __restrict__ leaves_tree,
+                                      SizeType n_leaves,
+                                      std::pair<double, double> coord_init) {
     constexpr SizeType kParams       = 2;
     constexpr SizeType kParamStride  = 2;
     constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
-
-    error_check::check_greater_equal(leaves_tree.size(),
-                                     n_leaves * kLeavesStride,
-                                     "batch_leaves size mismatch");
 
     const double ts  = coord_init.second;
     const double ts2 = ts * ts;
@@ -99,16 +91,12 @@ void poly_taylor_to_cheby_accel_batch(std::span<double> leaves_tree,
     }
 }
 
-void poly_cheby_to_taylor_jerk_batch(std::span<double> leaves_tree,
-                                     std::pair<double, double> coord_report,
-                                     SizeType n_leaves) {
+void poly_cheby_to_taylor_jerk_batch(double* __restrict__ leaves_tree,
+                                     SizeType n_leaves,
+                                     std::pair<double, double> coord_report) {
     constexpr SizeType kParams       = 3;
     constexpr SizeType kParamStride  = 2;
     constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
-
-    error_check::check_greater_equal(leaves_tree.size(),
-                                     n_leaves * kLeavesStride,
-                                     "batch_leaves size mismatch");
 
     const double ts      = coord_report.second;
     const double inv_ts  = 1.0 / ts;
@@ -153,16 +141,12 @@ void poly_cheby_to_taylor_jerk_batch(std::span<double> leaves_tree,
     }
 }
 
-void poly_taylor_to_cheby_jerk_batch(std::span<double> leaves_tree,
-                                     std::pair<double, double> coord_init,
-                                     SizeType n_leaves) {
+void poly_taylor_to_cheby_jerk_batch(double* __restrict__ leaves_tree,
+                                     SizeType n_leaves,
+                                     std::pair<double, double> coord_init) {
     constexpr SizeType kParams       = 3;
     constexpr SizeType kParamStride  = 2;
     constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
-
-    error_check::check_greater_equal(leaves_tree.size(),
-                                     n_leaves * kLeavesStride,
-                                     "batch_leaves size mismatch");
 
     const double ts  = coord_init.second;
     const double ts2 = ts * ts;
@@ -203,16 +187,12 @@ void poly_taylor_to_cheby_jerk_batch(std::span<double> leaves_tree,
     }
 }
 
-void poly_cheby_to_taylor_snap_batch(std::span<double> leaves_tree,
-                                     std::pair<double, double> coord_report,
-                                     SizeType n_leaves) {
+void poly_cheby_to_taylor_snap_batch(double* __restrict__ leaves_tree,
+                                     SizeType n_leaves,
+                                     std::pair<double, double> coord_report) {
     constexpr SizeType kParams       = 4;
     constexpr SizeType kParamStride  = 2;
     constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
-
-    error_check::check_greater_equal(leaves_tree.size(),
-                                     n_leaves * kLeavesStride,
-                                     "batch_leaves size mismatch");
 
     const double ts      = coord_report.second;
     const double inv_ts  = 1.0 / ts;
@@ -271,16 +251,12 @@ void poly_cheby_to_taylor_snap_batch(std::span<double> leaves_tree,
     }
 }
 
-void poly_taylor_to_cheby_snap_batch(std::span<double> leaves_tree,
-                                     std::pair<double, double> coord_init,
-                                     SizeType n_leaves) {
+void poly_taylor_to_cheby_snap_batch(double* __restrict__ leaves_tree,
+                                     SizeType n_leaves,
+                                     std::pair<double, double> coord_init) {
     constexpr SizeType kParams       = 4;
     constexpr SizeType kParamStride  = 2;
     constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
-
-    error_check::check_greater_equal(leaves_tree.size(),
-                                     n_leaves * kLeavesStride,
-                                     "batch_leaves size mismatch");
 
     const double ts  = coord_init.second;
     const double ts2 = ts * ts;
@@ -571,18 +547,16 @@ poly_chebyshev_branch_accel_batch(std::span<double> leaves_tree,
         const auto dfactor   = utils::kCval / f0;
         const auto base_step = dphi * dfactor;
         // Compute steps
-        const auto alpha_1_range   = dfactor * f0_range * ts;
-        const auto alpha_2_sig_new = std::min(base_step, alpha_2_range);
-        const auto alpha_1_sig_new = std::min(base_step, alpha_1_range);
-        dparam_new_ptr[fb + 0]     = alpha_2_sig_new;
-        dparam_new_ptr[fb + 1]     = alpha_1_sig_new;
+        const auto alpha_1_range = dfactor * f0_range * ts;
+        dparam_new_ptr[fb + 0]   = std::min(base_step, alpha_2_range);
+        dparam_new_ptr[fb + 1]   = std::min(base_step, alpha_1_range);
 
         // Compute shift bins
         const double inv_base = nbins_d / dfactor;
         shift_bins_ptr[fb + 0] =
-            std::abs(alpha_2_sig_cur - alpha_2_sig_new) * inv_base;
+            std::abs(alpha_2_sig_cur - base_step) * inv_base;
         shift_bins_ptr[fb + 1] =
-            std::abs(alpha_1_sig_cur - alpha_1_sig_new) * inv_base;
+            std::abs(alpha_1_sig_cur - base_step) * inv_base;
     }
 
     // Early Exit: Check if any leaf needs branching
@@ -704,8 +678,8 @@ poly_chebyshev_branch_jerk_batch(std::span<double> leaves_tree,
     for (SizeType i = 0; i < n_leaves; ++i) {
         indices_tree[i] = i;
     }
-    poly_chebyshev_transform_accel_batch(leaves_tree, indices_tree, coord_cur,
-                                         coord_prev, n_leaves);
+    poly_chebyshev_transform_jerk_batch(leaves_tree, indices_tree, coord_cur,
+                                        coord_prev, n_leaves);
 
     const double* __restrict__ leaves_tree_ptr = leaves_tree.data();
     SizeType* __restrict__ leaves_origins_ptr  = leaves_origins.data();
@@ -732,21 +706,18 @@ poly_chebyshev_branch_jerk_batch(std::span<double> leaves_tree,
         // Compute steps
         const auto alpha_1_range =
             (dfactor * f0_range * ts) + (d3_range * ts3 / 8.0);
-        const auto alpha_3_sig_new = std::min(base_step, alpha_3_range);
-        const auto alpha_2_sig_new = std::min(base_step, alpha_2_range);
-        const auto alpha_1_sig_new = std::min(base_step, alpha_1_range);
-        dparam_new_ptr[fb + 0]     = alpha_3_sig_new;
-        dparam_new_ptr[fb + 1]     = alpha_2_sig_new;
-        dparam_new_ptr[fb + 2]     = alpha_1_sig_new;
+        dparam_new_ptr[fb + 0] = std::min(base_step, alpha_3_range);
+        dparam_new_ptr[fb + 1] = std::min(base_step, alpha_2_range);
+        dparam_new_ptr[fb + 2] = std::min(base_step, alpha_1_range);
 
         // Compute shift bins
         const double inv_base = nbins_d / dfactor;
         shift_bins_ptr[fb + 0] =
-            std::abs(alpha_3_sig_cur - alpha_3_sig_new) * inv_base;
+            std::abs(alpha_3_sig_cur - base_step) * inv_base;
         shift_bins_ptr[fb + 1] =
-            std::abs(alpha_2_sig_cur - alpha_2_sig_new) * inv_base;
+            std::abs(alpha_2_sig_cur - base_step) * inv_base;
         shift_bins_ptr[fb + 2] =
-            std::abs(alpha_1_sig_cur - alpha_1_sig_new) * inv_base;
+            std::abs(alpha_1_sig_cur - base_step) * inv_base;
     }
 
     // Early Exit: Check if any leaf needs branching
@@ -883,7 +854,7 @@ poly_chebyshev_branch_snap_batch(std::span<double> leaves_tree,
     for (SizeType i = 0; i < n_leaves; ++i) {
         indices_tree[i] = i;
     }
-    poly_chebyshev_transform_accel_batch(leaves_tree, indices_tree, coord_cur,
+    poly_chebyshev_transform_snap_batch(leaves_tree, indices_tree, coord_cur,
                                          coord_prev, n_leaves);
 
     const double* __restrict__ leaves_tree_ptr = leaves_tree.data();
@@ -912,25 +883,21 @@ poly_chebyshev_branch_snap_batch(std::span<double> leaves_tree,
         // Compute steps
         const auto alpha_1_range =
             (dfactor * f0_range * ts) + (d3_range * ts3 / 8.0);
-        const auto alpha_4_sig_new = std::min(base_step, alpha_4_range);
-        const auto alpha_3_sig_new = std::min(base_step, alpha_3_range);
-        const auto alpha_2_sig_new = std::min(base_step, alpha_2_range);
-        const auto alpha_1_sig_new = std::min(base_step, alpha_1_range);
-        dparam_new_ptr[fb + 0]     = alpha_4_sig_new;
-        dparam_new_ptr[fb + 1]     = alpha_3_sig_new;
-        dparam_new_ptr[fb + 2]     = alpha_2_sig_new;
-        dparam_new_ptr[fb + 3]     = alpha_1_sig_new;
+        dparam_new_ptr[fb + 0] = std::min(base_step, alpha_4_range);
+        dparam_new_ptr[fb + 1] = std::min(base_step, alpha_3_range);
+        dparam_new_ptr[fb + 2] = std::min(base_step, alpha_2_range);
+        dparam_new_ptr[fb + 3] = std::min(base_step, alpha_1_range);
 
         // Compute shift bins
         const double inv_base = nbins_d / dfactor;
         shift_bins_ptr[fb + 0] =
-            std::abs(alpha_4_sig_cur - alpha_4_sig_new) * inv_base;
+            std::abs(alpha_4_sig_cur - base_step) * inv_base;
         shift_bins_ptr[fb + 1] =
-            std::abs(alpha_3_sig_cur - alpha_3_sig_new) * inv_base;
+            std::abs(alpha_3_sig_cur - base_step) * inv_base;
         shift_bins_ptr[fb + 2] =
-            std::abs(alpha_2_sig_cur - alpha_2_sig_new) * inv_base;
+            std::abs(alpha_2_sig_cur - base_step) * inv_base;
         shift_bins_ptr[fb + 3] =
-            std::abs(alpha_1_sig_cur - alpha_1_sig_new) * inv_base;
+            std::abs(alpha_1_sig_cur - base_step) * inv_base;
     }
 
     // Early Exit: Check if any leaf needs branching
@@ -1334,11 +1301,14 @@ void poly_cheby_to_taylor_batch_impl(std::span<double> leaves_tree,
     static_assert(NPARAMS == 2 || NPARAMS == 3 || NPARAMS == 4,
                   "Unsupported Chebyshev order");
     if constexpr (NPARAMS == 2) {
-        poly_cheby_to_taylor_accel_batch(leaves_tree, coord_report, n_leaves);
+        poly_cheby_to_taylor_accel_batch(leaves_tree.data(), n_leaves,
+                                         coord_report);
     } else if constexpr (NPARAMS == 3) {
-        poly_cheby_to_taylor_jerk_batch(leaves_tree, coord_report, n_leaves);
+        poly_cheby_to_taylor_jerk_batch(leaves_tree.data(), n_leaves,
+                                        coord_report);
     } else if constexpr (NPARAMS == 4) {
-        poly_cheby_to_taylor_snap_batch(leaves_tree, coord_report, n_leaves);
+        poly_cheby_to_taylor_snap_batch(leaves_tree.data(), n_leaves,
+                                        coord_report);
     }
 }
 
@@ -1349,11 +1319,14 @@ void poly_taylor_to_cheby_batch_impl(std::span<double> leaves_tree,
     static_assert(NPARAMS == 2 || NPARAMS == 3 || NPARAMS == 4,
                   "Unsupported Taylor order");
     if constexpr (NPARAMS == 2) {
-        poly_taylor_to_cheby_accel_batch(leaves_tree, coord_init, n_leaves);
+        poly_taylor_to_cheby_accel_batch(leaves_tree.data(), n_leaves,
+                                         coord_init);
     } else if constexpr (NPARAMS == 3) {
-        poly_taylor_to_cheby_jerk_batch(leaves_tree, coord_init, n_leaves);
+        poly_taylor_to_cheby_jerk_batch(leaves_tree.data(), n_leaves,
+                                        coord_init);
     } else if constexpr (NPARAMS == 4) {
-        poly_taylor_to_cheby_snap_batch(leaves_tree, coord_init, n_leaves);
+        poly_taylor_to_cheby_snap_batch(leaves_tree.data(), n_leaves,
+                                        coord_init);
     }
 }
 
@@ -1534,6 +1507,11 @@ void poly_chebyshev_report_batch(std::span<double> leaves_tree,
                                  std::pair<double, double> coord_report,
                                  SizeType n_leaves,
                                  SizeType n_params) {
+    constexpr SizeType kParamStride = 2U;
+    const SizeType leaves_stride    = (n_params + 2) * kParamStride;
+    error_check::check_greater_equal(leaves_tree.size(),
+                                     n_leaves * leaves_stride,
+                                     "leaves_tree size not enough");
     auto dispatch = [&]<SizeType N>() {
         return poly_cheby_to_taylor_batch_impl<N>(leaves_tree, coord_report,
                                                   n_leaves);
@@ -1683,12 +1661,14 @@ generate_bp_poly_chebyshev(std::span<const std::vector<double>> param_arr,
                                             n_params);
 
         // Calculate optimal parameter steps and shift bins
-        psr_utils::poly_cheb_step_vec_limited(n_params, scale_cur, nbins, eta,
-                                              f0_batch, param_limits,
-                                              dparam_new_batch);
+        psr_utils::poly_cheb_step_vec(n_params, nbins, eta, f0_batch,
+                                      dparam_new_batch);
         psr_utils::poly_cheb_shift_vec(dparam_cur_batch, dparam_new_batch,
                                        nbins, f0_batch, shift_bins_batch,
                                        n_freqs, n_params);
+        psr_utils::poly_cheb_step_vec_limited(n_params, scale_cur, nbins, eta,
+                                              f0_batch, param_limits,
+                                              dparam_new_batch);
 
         std::ranges::fill(n_branches, 1.0);
         // Determine branching needs

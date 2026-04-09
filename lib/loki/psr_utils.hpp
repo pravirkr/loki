@@ -129,6 +129,12 @@ void poly_taylor_shift_d_vec(std::span<const double> dparam_old,
                              SizeType nbatch,
                              SizeType nparams);
 
+void poly_cheb_step_vec(SizeType n_params,
+                        SizeType nbins,
+                        double eta,
+                        std::span<const double> f0_batch,
+                        std::span<double> dparams_batch);
+
 void poly_cheb_step_vec_limited(SizeType n_params,
                                 double scale_cur,
                                 SizeType nbins,
@@ -160,7 +166,17 @@ branch_param(double param_cur,
 std::pair<double, SizeType> branch_param_padded(std::span<double> out_values,
                                                 double param_cur,
                                                 double dparam_cur,
-                                                double dparam_new);
+                                                double dparam_new,
+                                                SizeType branch_max);
+
+std::pair<double, SizeType> branch_dparam_crackle(double dparam_cur,
+                                                  double dparam_new,
+                                                  SizeType branch_max);
+
+void branch_crackle_padded(std::span<double> out_values,
+                           double param_cur,
+                           double dparam_cur,
+                           SizeType num_points);
 
 inline void branch_one_param_padded(SizeType p,
                                     double cur,
@@ -178,8 +194,8 @@ inline void branch_one_param_padded(SizeType p,
     if (shift_bins_ptr[flat_base + p] >= (eta - utils::kEps)) {
         auto slice =
             std::span<double>(scratch_params_ptr + pad_offset, branch_max);
-        auto [dparam_act, count] = psr_utils::branch_param_padded(
-            slice, cur, sig_cur, dparam_new_ptr[flat_base + p]);
+        auto [dparam_act, count] = branch_param_padded(
+            slice, cur, sig_cur, dparam_new_ptr[flat_base + p], branch_max);
         scratch_dparams_ptr[flat_base + p] = dparam_act;
         scratch_counts_ptr[flat_base + p]  = count;
     } else {
@@ -187,6 +203,32 @@ inline void branch_one_param_padded(SizeType p,
         scratch_dparams_ptr[flat_base + p] = sig_cur;
         scratch_counts_ptr[flat_base + p]  = 1;
     }
+}
+
+inline void
+branch_one_param_padded_crackle(SizeType p,
+                                double cur,
+                                double sig_cur,
+                                double eta,
+                                const double* __restrict__ shift_bins_ptr,
+                                const double* __restrict__ dparam_new_ptr,
+                                double* __restrict__ scratch_params_ptr,
+                                double* __restrict__ scratch_dparams_ptr,
+                                SizeType* __restrict__ scratch_counts_ptr,
+                                SizeType flat_base,
+                                SizeType branch_max) {
+    const SizeType pad_offset = (flat_base + p) * branch_max;
+
+    if (shift_bins_ptr[flat_base + p] >= (eta - utils::kEps)) {
+        auto [dparam_act, count] = branch_dparam_crackle(
+            sig_cur, dparam_new_ptr[flat_base + p], branch_max);
+        scratch_dparams_ptr[flat_base + p] = dparam_act;
+        scratch_counts_ptr[flat_base + p]  = count;
+    } else {
+        scratch_dparams_ptr[flat_base + p] = sig_cur;
+        scratch_counts_ptr[flat_base + p]  = 1;
+    }
+    scratch_params_ptr[pad_offset] = cur;
 }
 
 // Count the number of parameters in a range.

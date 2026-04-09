@@ -52,7 +52,7 @@ std::vector<coord::FFARegion> generate_ffa_regions(double p_min,
  * This class stores the size stats for FFA regions for a given search
  * configuration.
  */
-template <SupportedFoldType FoldType> class FFARegionStats {
+class FFARegionStats {
 public:
     /**
      * @brief Constructs the FFA region stats from a search configuration.
@@ -66,24 +66,24 @@ public:
                    SizeType n_params,
                    SizeType n_samps,
                    SizeType max_passing_candidates,
+                   bool use_fourier,
                    bool use_gpu);
 
-    // --- Rule of five: PIMPL ---
-    ~FFARegionStats();
-    FFARegionStats(FFARegionStats&&) noexcept;
-    FFARegionStats& operator=(FFARegionStats&&) noexcept;
-    FFARegionStats(const FFARegionStats&);
-    FFARegionStats& operator=(const FFARegionStats&);
+    ~FFARegionStats()                                    = default;
+    FFARegionStats(FFARegionStats&&) noexcept            = default;
+    FFARegionStats& operator=(FFARegionStats&&) noexcept = default;
+    FFARegionStats(const FFARegionStats&)                = default;
+    FFARegionStats& operator=(const FFARegionStats&)     = default;
 
     // --- Getters ---
     /// @brief Get the maximum size of the FFA workspace buffer.
-    SizeType get_max_buffer_size() const noexcept;
+    SizeType get_max_buffer_size() const noexcept { return m_max_buffer_size; }
     /// @brief Get the maximum size of the coordinate storage.
-    SizeType get_max_coord_size() const noexcept;
+    SizeType get_max_coord_size() const noexcept { return m_max_coord_size; }
     /// @brief Get the maximum number of coordinates in the last level.
-    SizeType get_max_ncoords() const noexcept;
+    SizeType get_max_ncoords() const noexcept { return m_max_ncoords; }
     /// @brief Get the maximum number of FFA levels.
-    SizeType get_max_ffa_levels() const noexcept;
+    SizeType get_max_ffa_levels() const noexcept { return m_max_ffa_levels; }
     /// @brief Get the maximum size of the FFA workspace buffer (time domain).
     SizeType get_max_buffer_size_time() const noexcept;
     /// @brief Get the maximum size of the scores storage.
@@ -96,15 +96,26 @@ public:
     float get_coord_memory_usage() const noexcept;
     /// @brief Get the memory usage of the scores + param sets storage (in GB).
     float get_extra_memory_usage() const noexcept;
-    /// @brief Get the memory usage of the FFA freq sweep for this region (in GB).
+    float get_cpu_memory_usage() const noexcept;
+    float get_device_memory_usage() const noexcept;
+    /// @brief Get the memory usage of the FFA freq sweep for this region (in
+    /// GB).
     float get_freq_sweep_memory_usage() const noexcept;
     /// @brief Get the chunk stats for the planner.
     [[nodiscard]] std::vector<coord::FFAChunkStats>
     get_chunk_stats() const noexcept;
 
 private:
-    struct Impl;
-    std::unique_ptr<Impl> m_impl;
+    SizeType m_max_buffer_size;
+    SizeType m_max_coord_size;
+    SizeType m_max_ncoords; // maximum number of coordinates in the last level
+    SizeType m_max_ffa_levels;
+    SizeType m_n_widths;
+    SizeType m_n_params;
+    SizeType m_n_samps; // ts_e.size()
+    SizeType m_max_passing_candidates;
+    bool m_use_fourier;
+    bool m_use_gpu;
 };
 
 /**
@@ -135,7 +146,7 @@ public:
     /// @brief Get the number of regions.
     SizeType get_nregions() const noexcept;
     /// @brief Get the stats for the planner.
-    [[nodiscard]] const FFARegionStats<FoldType>& get_stats() const noexcept;
+    [[nodiscard]] const FFARegionStats& get_stats() const noexcept;
 
 private:
     class Impl;

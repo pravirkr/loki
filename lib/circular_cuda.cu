@@ -30,23 +30,17 @@ get_circ_taylor_mask_device(double crackle,
                             double accel,
                             double minimum_snap_cells) {
     const bool is_sig_snap =
-        std::abs(snap) > (minimum_snap_cells * (dsnap + utils::kEps));
-    if (!is_sig_snap) {
-        return 0;
-    }
-    const bool is_physical_snap = ((-snap * accel) > 0.0) &&
-                                  (std::abs(accel) > utils::kEps) &&
-                                  (std::abs(snap) > utils::kEps);
+        fabs(snap) > (minimum_snap_cells * (dsnap + utils::kEps));
+    const bool is_physical_snap =
+        ((-snap * accel) > 0.0) && (fabs(accel) > utils::kEps);
     if (is_sig_snap && is_physical_snap) {
         return 1;
     }
     const bool is_sig_crackle =
-        std::abs(crackle) > (minimum_snap_cells * (dcrackle + utils::kEps));
-    const bool is_physical_crackle = ((-crackle * jerk) > 0.0) &&
-                                     (std::abs(jerk) > utils::kEps) &&
-                                     (std::abs(crackle) > utils::kEps);
-    if (is_sig_snap && !is_physical_snap && is_sig_crackle &&
-        is_physical_crackle) {
+        fabs(crackle) > (minimum_snap_cells * (dcrackle + utils::kEps));
+    const bool is_physical_crackle =
+        ((-crackle * jerk) > 0.0) && (fabs(jerk) > utils::kEps);
+    if (is_sig_crackle && is_physical_crackle) {
         return 2;
     }
     return 0;
@@ -59,11 +53,11 @@ is_in_hole_device(double snap,
                   double accel,
                   double minimum_snap_cells) noexcept {
     const bool is_sig_snap =
-        abs(snap) > (minimum_snap_cells * (dsnap + utils::kEps));
-    const bool is_stable_snap =
-        (abs(accel) > utils::kEps) && (abs(snap) > utils::kEps);
-    const bool is_stable_jerk = abs(jerk) > utils::kEps;
-    return is_sig_snap && (!is_stable_snap) && is_stable_jerk;
+        fabs(snap) > (minimum_snap_cells * (dsnap + utils::kEps));
+    const bool is_physical_snap =
+        ((-snap * accel) > 0.0) && (fabs(accel) > utils::kEps);
+    const bool is_stable_jerk = fabs(jerk) > utils::kEps;
+    return is_sig_snap && (!is_physical_snap) && is_stable_jerk;
 }
 
 __global__ void
@@ -111,7 +105,22 @@ kernel_analyze_and_branch_circular(const double* __restrict__ leaves_tree,
     const double d1_sig_cur = leaves_tree[lo + 9];
     const double f0         = leaves_tree[lo + 12];
 
-    const double dfactor  = utils::kCval / f0;
+    const double dfactor    = utils::kCval / f0;
+    const double d5_sig_new = dphi * dfactor * 1920.0 * inv_dt5;
+    const double d4_sig_new = dphi * dfactor * 192.0 * inv_dt4;
+    const double d3_sig_new = dphi * dfactor * 24.0 * inv_dt3;
+    const double d2_sig_new = dphi * dfactor * 4.0 * inv_dt2;
+    const double d1_sig_new = dphi * dfactor * 1.0 * inv_dt;
+
+    double shift_d5 =
+        (d5_sig_cur - d5_sig_new) * dt5 * nbins / (1920.0 * dfactor);
+    double shift_d4 =
+        (d4_sig_cur - d4_sig_new) * dt4 * nbins / (192.0 * dfactor);
+    double shift_d3 =
+        (d3_sig_cur - d3_sig_new) * dt3 * nbins / (24.0 * dfactor);
+    double shift_d2 = (d2_sig_cur - d2_sig_new) * dt2 * nbins / (4.0 * dfactor);
+    double shift_d1 = (d1_sig_cur - d1_sig_new) * dt * nbins / (1.0 * dfactor);
+
     const double d5_range = param_limits[0].max - param_limits[0].min;
     const double d4_range = param_limits[1].max - param_limits[1].min;
     const double d3_range = param_limits[2].max - param_limits[2].min;
@@ -119,27 +128,11 @@ kernel_analyze_and_branch_circular(const double* __restrict__ leaves_tree,
     const double d1_range =
         dfactor * (param_limits[4].max - param_limits[4].min);
 
-    const double d5_sig_new =
-        cuda::std::min(dphi * dfactor * 1920.0 * inv_dt5, d5_range);
-    const double d4_sig_new =
-        cuda::std::min(dphi * dfactor * 192.0 * inv_dt4, d4_range);
-    const double d3_sig_new =
-        cuda::std::min(dphi * dfactor * 24.0 * inv_dt3, d3_range);
-    const double d2_sig_new =
-        cuda::std::min(dphi * dfactor * 4.0 * inv_dt2, d2_range);
-    const double d1_sig_new =
-        cuda::std::min(dphi * dfactor * 1.0 * inv_dt, d1_range);
-
-    const double shift_d5 =
-        (d5_sig_cur - d5_sig_new) * dt5 * nbins / (1920.0 * dfactor);
-    const double shift_d4 =
-        (d4_sig_cur - d4_sig_new) * dt4 * nbins / (192.0 * dfactor);
-    const double shift_d3 =
-        (d3_sig_cur - d3_sig_new) * dt3 * nbins / (24.0 * dfactor);
-    const double shift_d2 =
-        (d2_sig_cur - d2_sig_new) * dt2 * nbins / (4.0 * dfactor);
-    const double shift_d1 =
-        (d1_sig_cur - d1_sig_new) * dt * nbins / (1.0 * dfactor);
+    d5_sig_new = cuda::std::min(d5_sig_new, d5_range);
+    d4_sig_new = cuda::std::min(d4_sig_new, d4_range);
+    d3_sig_new = cuda::std::min(d3_sig_new, d3_range);
+    d2_sig_new = cuda::std::min(d2_sig_new, d2_range);
+    d1_sig_new = cuda::std::min(d1_sig_new, d1_range);
 
     // Store d5 as single entry in scratch (count=1)
     const uint32_t pad_offset            = (fb + 0) * branch_max;
@@ -362,12 +355,16 @@ kernel_validate_branches_circular(const double* __restrict__ leaves_branch,
     const double omega_max_sq = pow(2.0 * M_PI / p_orb_min, 2);
     const bool is_sig_snap =
         fabs(snap) > (minimum_snap_cells * (dsnap + utils::kEps));
-    const bool snap_possible =
-        (fabs(accel) > utils::kEps) && (fabs(snap) > utils::kEps);
-    const bool sign_valid  = (-snap * accel) > 0.0;
-    const bool snap_region = is_sig_snap && snap_possible && sign_valid;
+    const bool snap_possible   = (fabs(accel) > utils::kEps);
+    const bool sign_valid      = (-snap * accel) > 0.0;
+    const bool snap_unphysical = is_sig_snap && snap_possible && !sign_valid;
+    const bool snap_region     = is_sig_snap && snap_possible && sign_valid;
+    if (snap_unphysical) {
+        validation_mask[tid] = 0U; // kill outright
+        return;
+    }
     if (!snap_region) {
-        validation_mask[tid] = 1U;
+        validation_mask[tid] = 1U; // hole region — always preserve
         return;
     }
     // Inside snap_region: omega_sq is guaranteed positive
@@ -377,9 +374,7 @@ kernel_validate_branches_circular(const double* __restrict__ leaves_branch,
     const bool valid_omega = omega_sq < omega_max_sq;
     // |d2| < x * omega^(4/3)
     const bool valid_accel = fabs(accel) <= limit_accel;
-    // |d3| < |d2| * omega  =>  d3^2 < d2^2 * omega^2
-    const bool valid_jerk = (jerk * jerk) <= (accel * accel * omega_sq);
-    validation_mask[tid]  = (valid_omega && valid_accel && valid_jerk) ? 1 : 0;
+    validation_mask[tid]   = (valid_omega && valid_accel) ? 1 : 0;
 }
 
 __global__ void

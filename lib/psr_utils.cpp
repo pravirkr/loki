@@ -183,6 +183,24 @@ void poly_taylor_shift_d_vec(std::span<const double> dparam_old,
     }
 }
 
+void poly_cheb_step_vec(SizeType n_params,
+                        SizeType nbins,
+                        double eta,
+                        std::span<const double> f0_batch,
+                        std::span<double> dparams_batch) {
+    const auto n_batch = f0_batch.size();
+    const auto dphi    = eta / static_cast<double>(nbins);
+    error_check::check_equal(
+        dparams_batch.size(), n_batch * n_params,
+        "dparams_batch must be of size n_batch * n_params");
+    for (SizeType i = 0; i < n_batch; ++i) {
+        const double factor = utils::kCval / f0_batch[i];
+        for (SizeType j = 0; j < n_params; ++j) {
+            dparams_batch[((i * n_params) + j)] = dphi * factor;
+        }
+    }
+}
+
 void poly_cheb_step_vec_limited(SizeType n_params,
                                 double scale_cur,
                                 SizeType nbins,
@@ -307,26 +325,21 @@ std::tuple<std::vector<double>, double> branch_param(double param_cur,
 std::pair<double, SizeType> branch_param_padded(std::span<double> out_values,
                                                 double param_cur,
                                                 double dparam_cur,
-                                                double dparam_new) {
+                                                double dparam_new,
+                                                SizeType branch_max) {
     if (dparam_cur <= utils::kEps || dparam_new <= utils::kEps) {
         throw std::invalid_argument(
             std::format("Both dparam_cur and dparam_new must be positive (got "
                         "{}, {})",
                         dparam_cur, dparam_new));
     }
-    if (dparam_new > (dparam_cur + utils::kEps)) {
-        // Step size too large, fallback to current value
-        out_values[0] = param_cur;
-        return {dparam_new, 1};
-    }
-
     const auto num_points = static_cast<int>(
         std::ceil(((dparam_cur + utils::kEps) / dparam_new) - utils::kEps));
-    if (num_points <= 0) {
-        throw std::invalid_argument(std::format(
-            "Invalid input: ensure dparam_cur > dparam_new (got {}, {})",
-            dparam_cur, dparam_new));
-    }
+    error_check::check_greater(
+        num_points, 0,
+        std::format("num_points must be positive. Invalid input: ensure "
+                    "dparam_cur > dparam_new (got {}, {})",
+                    dparam_cur, dparam_new));
 
     // Calculate the actual branched values
     // 0.5 < confidence_const < 1
@@ -339,17 +352,66 @@ std::pair<double, SizeType> branch_param_padded(std::span<double> out_values,
     const int num_intervals = n - 1;
     const double step = (stop - start) / static_cast<double>(num_intervals);
 
+    error_check::check_less_equal(num_points, static_cast<int>(branch_max),
+                                  "num_points must be less than or equal to "
+                                  "branch_max");
+
     // Generate points and fill the start of the padded array
-    const SizeType count =
-        std::min(static_cast<SizeType>(num_points), out_values.size());
-    for (SizeType i = 0; i < count; ++i) {
+    for (SizeType i = 0; i < static_cast<SizeType>(num_points); ++i) {
         out_values[i] = start + (static_cast<double>(i + 1) * step);
     }
 
     // Calculate actual dparam based on generated points
     const double dparam_new_actual =
         dparam_cur / static_cast<double>(num_points);
-    return {dparam_new_actual, count};
+    return {dparam_new_actual, num_points};
+}
+
+std::pair<double, SizeType> branch_dparam_crackle(double dparam_cur,
+                                                  double dparam_new,
+                                                  SizeType branch_max) {
+    if (dparam_cur <= utils::kEps || dparam_new <= utils::kEps) {
+        throw std::invalid_argument(
+            std::format("Both dparam_cur and dparam_new must be positive (got "
+                        "{}, {})",
+                        dparam_cur, dparam_new));
+    }
+    const auto num_points = static_cast<int>(
+        std::ceil(((dparam_cur + utils::kEps) / dparam_new) - utils::kEps));
+    error_check::check_greater(
+        num_points, 0,
+        std::format("num_points must be positive. Invalid input: ensure "
+                    "dparam_cur > dparam_new (got {}, {})",
+                    dparam_cur, dparam_new));
+    error_check::check_less_equal(num_points, static_cast<int>(branch_max),
+                                  "num_points must be less than or equal to "
+                                  "branch_max");
+
+    // Calculate actual dparam based on generated points
+    const double dparam_new_actual =
+        dparam_cur / static_cast<double>(num_points);
+    return {dparam_new_actual, num_points};
+}
+
+void branch_crackle_padded(std::span<double> out_values,
+                           double param_cur,
+                           double dparam_cur,
+                           SizeType num_points) {
+    // Calculate the actual branched values
+    // 0.5 < confidence_const < 1
+    const auto n = num_points + 2;
+    const double confidence_const =
+        0.5 * (1.0 + (1.0 / static_cast<double>(num_points)));
+    const double half_range  = confidence_const * dparam_cur;
+    const double start       = param_cur - half_range;
+    const double stop        = param_cur + half_range;
+    const auto num_intervals = n - 1;
+    const double step = (stop - start) / static_cast<double>(num_intervals);
+
+    // Generate points and fill the start of the padded array
+    for (SizeType i = 0; i < num_points; ++i) {
+        out_values[i] = start + (static_cast<double>(i + 1) * step);
+    }
 }
 
 } // namespace loki::psr_utils

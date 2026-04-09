@@ -49,6 +49,8 @@ struct BranchingWorkspace {
     std::vector<double> scratch_params;
     std::vector<double> scratch_dparams;
     std::vector<SizeType> scratch_counts;
+    std::vector<double> tmp_dparam_new;
+    std::vector<double> tmp_shift_bins;
 
     BranchingWorkspace() = default;
     BranchingWorkspace(SizeType batch_size,
@@ -313,8 +315,8 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA> struct EPWorkspaceCUDA {
                     cudaStream_t stream = nullptr);
 
     ~EPWorkspaceCUDA();
-    EPWorkspaceCUDA(const EPWorkspaceCUDA&)                = delete;
-    EPWorkspaceCUDA& operator=(const EPWorkspaceCUDA&)     = delete;
+    EPWorkspaceCUDA(const EPWorkspaceCUDA&)            = delete;
+    EPWorkspaceCUDA& operator=(const EPWorkspaceCUDA&) = delete;
     EPWorkspaceCUDA(EPWorkspaceCUDA&&) noexcept;
     EPWorkspaceCUDA& operator=(EPWorkspaceCUDA&&) noexcept;
 

@@ -14,6 +14,8 @@
 #include <omp.h>
 
 #include "loki/common/types.hpp"
+#include "loki/exceptions.hpp"
+#include "loki/utils/world_tree.hpp"
 
 namespace loki::cands {
 
@@ -201,7 +203,7 @@ std::vector<FFATimerStatsPacked> FFAStatsCollection::get_packed_data() const {
 
 // --- PruneStats ---
 double PruneStats::lb_leaves() const noexcept {
-    return round_dp(std::log2(static_cast<double>(n_leaves_phy)), 2);
+    return round_dp(std::log2(static_cast<double>(n_leaves)), 2);
 }
 double PruneStats::lb_leaves_phys() const noexcept {
     return round_dp(std::log2(static_cast<double>(n_leaves_phy)), 2);
@@ -509,9 +511,9 @@ void PruneResultWriter::write_metadata(
 void PruneResultWriter::write_run_results(
     std::string_view run_name,
     std::span<const SizeType> snail_scheme,
-    std::span<const double> param_sets,
-    std::span<const float> scores,
-    SizeType n_param_sets,
+    memory::CircularView<double> leaves_view,
+    memory::CircularView<float> scores_view,
+    SizeType n_leaves,
     SizeType n_params,
     const PruneStatsCollection& pstats) {
     std::lock_guard<std::mutex> lock(m_hdf5_mutex);
@@ -525,40 +527,58 @@ void PruneResultWriter::write_run_results(
     HighFive::Group run_group = runs_group.createGroup(std::string(run_name));
     auto [level_stats, timer_stats] = pstats.get_packed_data();
 
-    constexpr SizeType kParamStride = 2U;
-    // Validate param_sets dimensions
-    if (!param_sets.empty()) {
-        const auto expected_size = n_param_sets * n_params * kParamStride;
-        if (param_sets.size() != expected_size) {
-            throw std::invalid_argument(std::format(
-                "param_sets size does not match the expected dimension: {} != "
-                "({} * {} * {})",
-                param_sets.size(), n_param_sets, n_params, kParamStride));
-        }
-    }
-    // Write only n_params rows
-    const std::vector<SizeType> param_sets_dims = {n_param_sets, n_params,
+    constexpr SizeType kParamStride             = 2U;
+    const auto leaves_stride                    = (n_params + 2) * kParamStride;
+    const std::vector<SizeType> param_sets_dims = {n_leaves, n_params + 2,
                                                    kParamStride};
     HighFive::DataSpace param_sets_space(param_sets_dims);
     HighFive::DataSetCreateProps props;
-    if (!param_sets.empty()) {
+    if (n_leaves > 0) {
         const auto chunk_n_param_sets =
-            static_cast<hsize_t>(std::min(1024UL, n_param_sets));
-        const std::vector<hsize_t> chunk_dims = {chunk_n_param_sets, n_params,
-                                                 kParamStride};
+            static_cast<hsize_t>(std::min(1024UL, n_leaves));
+        const std::vector<hsize_t> chunk_dims = {chunk_n_param_sets,
+                                                 n_params + 2, kParamStride};
         props.add(HighFive::Chunking(chunk_dims));
         props.add(HighFive::Deflate(9));
     }
-    auto param_sets_dataset =
+    auto param_ds =
         run_group.createDataSet("param_sets", param_sets_space,
                                 HighFive::create_datatype<double>(), props);
-    if (!param_sets.empty()) {
-        // This allows writing flat data directly to multidimensional datasets
-        param_sets_dataset.write_raw(param_sets.data(),
-                                     HighFive::create_datatype<double>());
+    const auto n1 = leaves_view.first.size() / leaves_stride;
+    const auto n2 = leaves_view.second.size() / leaves_stride;
+    error_check::check_equal(n1 + n2, n_leaves,
+                             "write_run_results: circular view size mismatch");
+
+    // Proper 3D hyperslab writes:
+    if (n1 > 0) {
+        param_ds.select({0UL, 0UL, 0UL}, {n1, n_params + 2, kParamStride})
+            .write_raw(leaves_view.first.data(),
+                       HighFive::create_datatype<double>());
     }
+    if (n2 > 0) {
+        param_ds.select({n1, 0UL, 0UL}, {n2, n_params + 2, kParamStride})
+            .write_raw(leaves_view.second.data(),
+                       HighFive::create_datatype<double>());
+    }
+
+    // --- scores dataset ---
+    auto scores_ds =
+        run_group.createDataSet("scores", HighFive::DataSpace({n_leaves}),
+                                HighFive::create_datatype<float>());
+
+    auto write_chunk_score = [&](std::span<const float> chunk, size_t offset) {
+        if (!chunk.empty()) {
+            scores_ds.select({offset}, {chunk.size()})
+                .write_raw(chunk.data(), HighFive::create_datatype<float>());
+        }
+    };
+
+    SizeType offset_s = 0;
+    write_chunk_score(scores_view.first, offset_s);
+    offset_s += scores_view.first.size();
+    write_chunk_score(scores_view.second, offset_s);
+
     run_group.createDataSet("snail_scheme", snail_scheme);
-    run_group.createDataSet("scores", scores);
     if (!level_stats.empty()) {
         run_group.createDataSet("level_stats", level_stats);
     }

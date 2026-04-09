@@ -135,14 +135,23 @@ public:
         // Write results
         auto result_writer = cands::PruneResultWriter(
             actual_result_file, cands::PruneResultWriter::Mode::kAppend);
-        auto& ws_final     = get_workspace();
-        auto leaves_report = ws_final.world_tree.get_leaves_contiguous_span();
-        m_prune_funcs->report(leaves_report, coord_mid,
-                              ws_final.world_tree.get_size());
-        result_writer.write_run_results(
-            run_name, m_snail_scheme.get_data(), leaves_report,
-            ws_final.world_tree.get_scores_contiguous_span(),
-            ws_final.world_tree.get_size(), m_cfg.get_nparams(), m_pstats);
+        auto& ws_final         = get_workspace();
+        auto& world_tree_final = ws_final.world_tree;
+        memory::CircularView<double> leaves_view =
+            world_tree_final.get_leaves_circular_view();
+        memory::CircularView<float> scores_view =
+            world_tree_final.get_scores_circular_view();
+        const auto leaves_stride = world_tree_final.get_leaves_stride();
+        const auto n_leaves      = world_tree_final.get_size();
+        const auto n1            = leaves_view.first.size() / leaves_stride;
+        const auto n2            = leaves_view.second.size() / leaves_stride;
+        m_prune_funcs->report(leaves_view.first, coord_mid, n1);
+        if (n2 > 0) {
+            m_prune_funcs->report(leaves_view.second, coord_mid, n2);
+        }
+        result_writer.write_run_results(run_name, m_snail_scheme.get_data(),
+                                        leaves_view, scores_view, n_leaves,
+                                        m_cfg.get_nparams(), m_pstats);
 
         // Final log entries
         std::ofstream final_log(actual_log_file, std::ios::app);

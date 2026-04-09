@@ -1,6 +1,7 @@
 #include "loki/search/configs.hpp"
 
 #include <format>
+#include <numbers>
 #include <omp.h>
 
 #include <spdlog/spdlog.h>
@@ -138,9 +139,11 @@ public:
 
     // Methods
     double get_x_mass_const() const {
-        return 0.005 * std::pow(m_m_p_min + m_m_c_max, 1.0 / 3.0) * m_m_c_max /
-               (m_m_p_min + m_m_c_max);
+        return utils::kCval * 0.005 * 1.1 *
+               std::pow(2 * std::numbers::pi, 2.0 / 3.0) * m_m_c_max /
+               std::pow(m_m_p_min + m_m_c_max, 2.0 / 3.0);
     }
+
     void set_max_process_memory_gb(double max_process_memory_gb) noexcept {
         error_check::check_greater(max_process_memory_gb, 0,
                                    "max_process_memory_gb must be positive");
@@ -481,10 +484,7 @@ PulsarSearchConfig PulsarSearchConfig::get_updated_config(
     return m_impl->get_updated_config(nbins, eta, param_limits);
 }
 PulsarSearchConfig PulsarSearchConfig::get_updated_config(
-    SizeType nbins,
-    double eta,
-    double f_min,
-    double f_max) const noexcept {
+    SizeType nbins, double eta, double f_min, double f_max) const noexcept {
     return m_impl->get_updated_config(nbins, eta, f_min, f_max);
 }
 } // namespace loki::search

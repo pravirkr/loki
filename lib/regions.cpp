@@ -62,101 +62,83 @@ std::vector<coord::FFARegion> generate_ffa_regions(double p_min,
     return regions;
 }
 
-template <SupportedFoldType FoldType> struct FFARegionStats<FoldType>::Impl {
-    SizeType max_buffer_size{};
-    SizeType max_coord_size{};
-    SizeType max_ncoords{}; // maximum number of coordinates in the last level
-    SizeType max_ffa_levels{};
-    SizeType n_widths{};
-    SizeType n_params{};
-    SizeType n_samps{}; // ts_e.size()
-    SizeType m_max_passing_candidates{};
-    bool use_gpu{};
+// --- FFARegionStats Implementation ---
 
-    Impl(SizeType max_buffer_size,
-         SizeType max_coord_size,
-         SizeType max_ncoords,
-         SizeType max_ffa_levels,
-         SizeType n_widths,
-         SizeType n_params,
-         SizeType n_samps,
-         SizeType max_passing_candidates,
-         bool use_gpu)
-        : max_buffer_size(max_buffer_size),
-          max_coord_size(max_coord_size),
-          max_ncoords(max_ncoords),
-          max_ffa_levels(max_ffa_levels),
-          n_widths(n_widths),
-          n_params(n_params),
-          n_samps(n_samps),
-          m_max_passing_candidates(max_passing_candidates),
-          use_gpu(use_gpu) {}
+FFARegionStats::FFARegionStats(SizeType max_buffer_size,
+                               SizeType max_coord_size,
+                               SizeType max_ncoords,
+                               SizeType max_ffa_levels,
+                               SizeType n_widths,
+                               SizeType n_params,
+                               SizeType n_samps,
+                               SizeType max_passing_candidates,
+                               bool use_fourier,
+                               bool use_gpu)
+    : m_max_buffer_size(max_buffer_size),
+      m_max_coord_size(max_coord_size),
+      m_max_ncoords(max_ncoords),
+      m_max_ffa_levels(max_ffa_levels),
+      m_n_widths(n_widths),
+      m_n_params(n_params),
+      m_n_samps(n_samps),
+      m_max_passing_candidates(max_passing_candidates),
+      m_use_fourier(use_fourier),
+      m_use_gpu(use_gpu) {}
 
-    ~Impl()                      = default;
-    Impl(const Impl&)            = default;
-    Impl& operator=(const Impl&) = default;
-    Impl(Impl&&)                 = default;
-    Impl& operator=(Impl&&)      = default;
-
-    SizeType get_max_buffer_size_time() const noexcept {
-        if constexpr (std::is_same_v<FoldType, ComplexType>) {
-            return 2 * max_buffer_size;
-        } else {
-            return max_buffer_size;
-        }
+SizeType FFARegionStats::get_max_buffer_size_time() const noexcept {
+    return m_use_fourier ? 2 * m_max_buffer_size : m_max_buffer_size;
+}
+SizeType FFARegionStats::get_max_scores_size() const noexcept {
+    return std::max(m_max_ncoords * m_n_widths, m_max_passing_candidates);
+}
+SizeType FFARegionStats::get_write_param_sets_size() const noexcept {
+    return kFFAFreqSweepWriteBatchSize * (m_n_params + 1); // includes width
+}
+float FFARegionStats::get_buffer_memory_usage() const noexcept {
+    const auto fold_bytes = m_use_fourier ? sizeof(ComplexType) : sizeof(float);
+    return static_cast<float>(2 * m_max_buffer_size * fold_bytes) /
+           static_cast<float>(1ULL << 30U);
+}
+float FFARegionStats::get_coord_memory_usage() const noexcept {
+    SizeType coord_size;
+    if (m_n_params == 1) {
+        coord_size = m_max_coord_size * sizeof(coord::FFACoordFreq);
+    } else {
+        coord_size = m_max_coord_size * sizeof(coord::FFACoord);
     }
-    SizeType get_max_ffa_levels() const noexcept { return max_ffa_levels; }
-    SizeType get_max_scores_size() const noexcept {
-        return std::max(max_ncoords * n_widths, m_max_passing_candidates);
+    return static_cast<float>(coord_size) / static_cast<float>(1ULL << 30U);
+}
+float FFARegionStats::get_extra_memory_usage() const noexcept {
+    return static_cast<float>((get_write_param_sets_size() * sizeof(double)) +
+                              (get_max_scores_size() * sizeof(uint32_t)) +
+                              (get_max_scores_size() * sizeof(float))) /
+           static_cast<float>(1ULL << 30U);
+}
+float FFARegionStats::get_cpu_memory_usage() const noexcept {
+    return get_buffer_memory_usage() + get_coord_memory_usage() +
+           get_extra_memory_usage();
+}
+// Use this for GPU memory usage calculation
+float FFARegionStats::get_device_memory_usage() const noexcept {
+    // ts_e_d + ts_v_d + scores_d (widths_d is negligible)
+    const float device_extra_gb =
+        static_cast<float>(
+            (((2 * m_n_samps) + get_max_scores_size()) * sizeof(float)) +
+            (get_max_scores_size() * sizeof(uint32_t))) /
+        static_cast<float>(1ULL << 30U);
+    // m_fold_d_time
+    const float fold_d_time_gb =
+        static_cast<float>(get_max_buffer_size_time() * sizeof(float)) /
+        static_cast<float>(1ULL << 30U);
+    return device_extra_gb + fold_d_time_gb + get_buffer_memory_usage() +
+           get_coord_memory_usage();
+}
+float FFARegionStats::get_freq_sweep_memory_usage() const noexcept {
+    if (m_use_gpu) {
+        return get_device_memory_usage();
     }
-    SizeType get_write_param_sets_size() const noexcept {
-        return kFFAFreqSweepWriteBatchSize * (n_params + 1); // includes width
-    }
-    float get_buffer_memory_usage() const noexcept {
-        return static_cast<float>(2 * max_buffer_size * sizeof(FoldType)) /
-               static_cast<float>(1ULL << 30U);
-    }
-    float get_coord_memory_usage() const noexcept {
-        SizeType coord_size;
-        if (n_params == 1) {
-            coord_size = max_coord_size * sizeof(coord::FFACoordFreq);
-        } else {
-            coord_size = max_coord_size * sizeof(coord::FFACoord);
-        }
-        return static_cast<float>(coord_size) / static_cast<float>(1ULL << 30U);
-    }
-    float get_extra_memory_usage() const noexcept {
-        return static_cast<float>(
-                   (get_write_param_sets_size() * sizeof(double)) +
-                   (get_max_scores_size() * sizeof(uint32_t)) +
-                   (get_max_scores_size() * sizeof(float))) /
-               static_cast<float>(1ULL << 30U);
-    }
-    float get_cpu_memory_usage() const noexcept {
-        return get_buffer_memory_usage() + get_coord_memory_usage() +
-               get_extra_memory_usage();
-    }
-    // Use this for GPU memory usage calculation
-    float get_device_memory_usage() const noexcept {
-        // ts_e_d + ts_v_d + scores_d (widths_d is negligible)
-        const float device_extra_gb =
-            ((((2 * n_samps) + get_max_scores_size()) * sizeof(float)) +
-             (get_max_scores_size() * sizeof(uint32_t))) /
-            static_cast<float>(1ULL << 30U);
-        // m_fold_d_time
-        const float fold_d_time_gb = get_max_buffer_size_time() *
-                                     sizeof(float) /
-                                     static_cast<float>(1ULL << 30U);
-        return device_extra_gb + fold_d_time_gb + get_buffer_memory_usage() +
-               get_coord_memory_usage();
-    }
-    float get_freq_sweep_memory_usage() const noexcept {
-        if (use_gpu) {
-            return get_device_memory_usage();
-        }
-        return get_cpu_memory_usage();
-    }
-}; // End FFARegionStats::Impl definition
+    return get_cpu_memory_usage();
+}
 
 template <SupportedFoldType FoldType> class FFARegionPlanner<FoldType>::Impl {
 public:
@@ -176,9 +158,7 @@ public:
         return m_cfgs;
     }
     SizeType get_nregions() const noexcept { return m_cfgs.size(); }
-    const FFARegionStats<FoldType>& get_stats() const noexcept {
-        return m_stats;
-    }
+    const FFARegionStats& get_stats() const noexcept { return m_stats; }
     const std::vector<coord::FFAChunkStats>& get_chunk_stats() const noexcept {
         return m_chunk_stats;
     }
@@ -188,7 +168,8 @@ private:
     bool m_use_gpu;
 
     std::vector<search::PulsarSearchConfig> m_cfgs;
-    FFARegionStats<FoldType> m_stats{0, 0, 0, 0, 0, 0, 0, 0, m_use_gpu};
+    FFARegionStats m_stats{
+        0, 0, 0, 0, 0, 0, 0, 0, m_base_cfg.get_use_fourier(), m_use_gpu};
     std::vector<coord::FFAChunkStats> m_chunk_stats;
 
     double calculate_max_drift(const search::PulsarSearchConfig& cfg) const {
@@ -261,11 +242,11 @@ private:
                                        max_buffer_size, max_coord_size,
                                        max_ncoords, max_ffa_levels);
         }
-        m_stats = FFARegionStats<FoldType>(
+        m_stats = FFARegionStats(
             max_buffer_size, max_coord_size, max_ncoords, max_ffa_levels,
             m_base_cfg.get_n_scoring_widths(), m_base_cfg.get_nparams(),
             m_base_cfg.get_nsamps(), m_base_cfg.get_max_passing_candidates(),
-            m_use_gpu);
+            m_base_cfg.get_use_fourier(), m_use_gpu);
 
         // Log summary statistics
         log_planning_summary();
@@ -310,16 +291,16 @@ private:
         constexpr SizeType kMaxProbes     = 20;   // Avoid infinite loops
 
         auto make_stats = [&](const plans::FFAPlan<FoldType>& plan) {
-            return FFARegionStats<FoldType>{
-                plan.get_buffer_size(),
-                plan.get_coord_size(),
-                plan.get_ncoords().back(),
-                plan.get_n_levels(),
-                m_base_cfg.get_n_scoring_widths(),
-                m_base_cfg.get_nparams(),
-                m_base_cfg.get_nsamps(),
-                m_base_cfg.get_max_passing_candidates(),
-                m_use_gpu};
+            return FFARegionStats{plan.get_buffer_size(),
+                                  plan.get_coord_size(),
+                                  plan.get_ncoords().back(),
+                                  plan.get_n_levels(),
+                                  m_base_cfg.get_n_scoring_widths(),
+                                  m_base_cfg.get_nparams(),
+                                  m_base_cfg.get_nsamps(),
+                                  m_base_cfg.get_max_passing_candidates(),
+                                  m_base_cfg.get_use_fourier(),
+                                  m_use_gpu};
         };
 
         // Pre-flight check: can we fit minimum viable chunk at worst case
@@ -392,7 +373,7 @@ private:
                         current_f_end * (1.0 + max_drift));
                     // Simulate the chunk
                     plans::FFAPlan<FoldType> test_plan(std::move(test_cfg));
-                    FFARegionStats<FoldType> sim_stats{
+                    FFARegionStats sim_stats{
                         std::max(max_buffer_size, test_plan.get_buffer_size()),
                         std::max(max_coord_size, test_plan.get_coord_size()),
                         std::max(max_ncoords, test_plan.get_ncoords().back()),
@@ -401,6 +382,7 @@ private:
                         m_base_cfg.get_nparams(),
                         m_base_cfg.get_nsamps(),
                         m_base_cfg.get_max_passing_candidates(),
+                        m_base_cfg.get_use_fourier(),
                         m_use_gpu};
                     if (sim_stats.get_freq_sweep_memory_usage() <=
                         effective_limit_gb) {
@@ -552,89 +534,6 @@ private:
 
 }; // End FFARegionPlanner::Impl definition
 
-// --- Definitions for FFARegionStats ---
-template <SupportedFoldType FoldType>
-FFARegionStats<FoldType>::FFARegionStats(SizeType max_buffer_size,
-                                         SizeType max_coord_size,
-                                         SizeType max_ncoords,
-                                         SizeType max_ffa_levels,
-                                         SizeType n_widths,
-                                         SizeType n_params,
-                                         SizeType n_samps,
-                                         SizeType max_passing_candidates,
-                                         bool use_gpu)
-    : m_impl(std::make_unique<Impl>(max_buffer_size,
-                                    max_coord_size,
-                                    max_ncoords,
-                                    max_ffa_levels,
-                                    n_widths,
-                                    n_params,
-                                    n_samps,
-                                    max_passing_candidates,
-                                    use_gpu)) {}
-template <SupportedFoldType FoldType>
-FFARegionStats<FoldType>::~FFARegionStats() = default;
-template <SupportedFoldType FoldType>
-FFARegionStats<FoldType>::FFARegionStats(FFARegionStats&&) noexcept = default;
-template <SupportedFoldType FoldType>
-FFARegionStats<FoldType>&
-FFARegionStats<FoldType>::operator=(FFARegionStats&&) noexcept = default;
-template <SupportedFoldType FoldType>
-FFARegionStats<FoldType>::FFARegionStats(const FFARegionStats& other)
-    : m_impl(std::make_unique<Impl>(*other.m_impl)) {}
-template <SupportedFoldType FoldType>
-FFARegionStats<FoldType>&
-FFARegionStats<FoldType>::operator=(const FFARegionStats& other) {
-    if (this != &other) {
-        m_impl = std::make_unique<Impl>(*other.m_impl);
-    }
-    return *this;
-}
-template <SupportedFoldType FoldType>
-SizeType FFARegionStats<FoldType>::get_max_buffer_size() const noexcept {
-    return m_impl->max_buffer_size;
-}
-template <SupportedFoldType FoldType>
-SizeType FFARegionStats<FoldType>::get_max_coord_size() const noexcept {
-    return m_impl->max_coord_size;
-}
-template <SupportedFoldType FoldType>
-SizeType FFARegionStats<FoldType>::get_max_ncoords() const noexcept {
-    return m_impl->max_ncoords;
-}
-template <SupportedFoldType FoldType>
-SizeType FFARegionStats<FoldType>::get_max_ffa_levels() const noexcept {
-    return m_impl->get_max_ffa_levels();
-}
-template <SupportedFoldType FoldType>
-SizeType FFARegionStats<FoldType>::get_max_buffer_size_time() const noexcept {
-    return m_impl->get_max_buffer_size_time();
-}
-template <SupportedFoldType FoldType>
-SizeType FFARegionStats<FoldType>::get_max_scores_size() const noexcept {
-    return m_impl->get_max_scores_size();
-}
-template <SupportedFoldType FoldType>
-SizeType FFARegionStats<FoldType>::get_write_param_sets_size() const noexcept {
-    return m_impl->get_write_param_sets_size();
-}
-template <SupportedFoldType FoldType>
-float FFARegionStats<FoldType>::get_buffer_memory_usage() const noexcept {
-    return m_impl->get_buffer_memory_usage();
-}
-template <SupportedFoldType FoldType>
-float FFARegionStats<FoldType>::get_coord_memory_usage() const noexcept {
-    return m_impl->get_coord_memory_usage();
-}
-template <SupportedFoldType FoldType>
-float FFARegionStats<FoldType>::get_extra_memory_usage() const noexcept {
-    return m_impl->get_extra_memory_usage();
-}
-template <SupportedFoldType FoldType>
-float FFARegionStats<FoldType>::get_freq_sweep_memory_usage() const noexcept {
-    return m_impl->get_freq_sweep_memory_usage();
-}
-
 // --- Definitions for FFARegionPlanner ---
 template <SupportedFoldType FoldType>
 FFARegionPlanner<FoldType>::FFARegionPlanner(
@@ -658,13 +557,10 @@ SizeType FFARegionPlanner<FoldType>::get_nregions() const noexcept {
     return m_impl->get_nregions();
 }
 template <SupportedFoldType FoldType>
-const FFARegionStats<FoldType>&
-FFARegionPlanner<FoldType>::get_stats() const noexcept {
+const FFARegionStats& FFARegionPlanner<FoldType>::get_stats() const noexcept {
     return m_impl->get_stats();
 }
 
-template class FFARegionStats<float>;
-template class FFARegionStats<ComplexType>;
 template class FFARegionPlanner<float>;
 template class FFARegionPlanner<ComplexType>;
 

@@ -56,12 +56,16 @@ BranchingWorkspace::BranchingWorkspace(SizeType batch_size,
                                        SizeType n_params)
     : scratch_params(batch_size * n_params * branch_max),
       scratch_dparams(batch_size * n_params),
-      scratch_counts(batch_size * n_params) {}
+      scratch_counts(batch_size * n_params),
+      tmp_dparam_new(batch_size * n_params),
+      tmp_shift_bins(batch_size * n_params) {}
 
 [[nodiscard]] float BranchingWorkspace::get_memory_usage() const noexcept {
     const auto total_memory = (scratch_params.size() * sizeof(double)) +
                               (scratch_dparams.size() * sizeof(double)) +
-                              (scratch_counts.size() * sizeof(SizeType));
+                              (scratch_counts.size() * sizeof(SizeType)) +
+                              (tmp_dparam_new.size() * sizeof(double)) +
+                              (tmp_shift_bins.size() * sizeof(double));
     return static_cast<float>(total_memory) / static_cast<float>(1ULL << 30U);
 }
 
@@ -77,6 +81,12 @@ void BranchingWorkspace::validate(SizeType batch_size,
     error_check::check_equal(
         scratch_counts.size(), batch_size * nparams,
         "BranchingWorkspace: scratch_counts size is too small");
+    error_check::check_equal(
+        tmp_dparam_new.size(), batch_size * nparams,
+        "BranchingWorkspace: tmp_dparam_new size is too small");
+    error_check::check_equal(
+        tmp_shift_bins.size(), batch_size * nparams,
+        "BranchingWorkspace: tmp_shift_bins size is too small");
 }
 
 // --- PruneWorkspace implementation ---

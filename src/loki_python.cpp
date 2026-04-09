@@ -20,6 +20,7 @@ namespace loki {
 using algorithms::FFAFreqSweep;
 using detection::MatchedFilter;
 using plans::FFAPlanBase;
+using regions::FFARegionStats;
 using search::PulsarSearchConfig;
 
 namespace py = pybind11;
@@ -474,10 +475,39 @@ PYBIND11_MODULE(libloki, m) {
             },
             py::arg("poly_basis") = "taylor", py::arg("ref_seg") = 0);
 
+    // Bind FFARegionPlanner
+    py::class_<FFARegionStats>(m_plans, "FFARegionStats")
+        .def(py::init<SizeType, SizeType, SizeType, SizeType, SizeType,
+                      SizeType, SizeType, SizeType, bool, bool>(),
+             py::arg("max_buffer_size"), py::arg("max_coord_size"),
+             py::arg("max_ncoords"), py::arg("max_ffa_levels"),
+             py::arg("n_widths"), py::arg("n_params"), py::arg("n_samps"),
+             py::arg("max_passing_candidates"), py::arg("use_fourier"),
+             py::arg("use_gpu") = false)
+        .def_property_readonly("max_buffer_size",
+                               &FFARegionStats::get_max_buffer_size)
+        .def_property_readonly("max_coord_size",
+                               &FFARegionStats::get_max_coord_size)
+        .def_property_readonly("max_ncoords", &FFARegionStats::get_max_ncoords)
+        .def_property_readonly("max_ffa_levels",
+                               &FFARegionStats::get_max_ffa_levels)
+        .def_property_readonly("max_buffer_size_time",
+                               &FFARegionStats::get_max_buffer_size_time)
+        .def_property_readonly("max_scores_size",
+                               &FFARegionStats::get_max_scores_size)
+        .def_property_readonly("write_param_sets_size",
+                               &FFARegionStats::get_write_param_sets_size)
+        .def_property_readonly("buffer_memory_usage",
+                               &FFARegionStats::get_buffer_memory_usage)
+        .def_property_readonly("coord_memory_usage",
+                               &FFARegionStats::get_coord_memory_usage)
+        .def_property_readonly("extra_memory_usage",
+                               &FFARegionStats::get_extra_memory_usage)
+        .def_property_readonly("freq_sweep_memory_usage",
+                               &FFARegionStats::get_freq_sweep_memory_usage);
+
     bind_ffa_plan<float>(m_plans, "FFAPlanTime");
     bind_ffa_plan<ComplexType>(m_plans, "FFAPlanFourier");
-    bind_ffa_region_stats<float>(m_plans, "FFARegionStatsTime");
-    bind_ffa_region_stats<ComplexType>(m_plans, "FFARegionStatsFourier");
     bind_ffa_region_planner<float>(m_plans, "FFARegionPlannerTime");
     bind_ffa_region_planner<ComplexType>(m_plans, "FFARegionPlannerFourier");
     m_plans.def("generate_ffa_regions", &regions::generate_ffa_regions,

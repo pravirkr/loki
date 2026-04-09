@@ -11,7 +11,7 @@ namespace loki::utils {
 inline constexpr double kCval    = 299792458.0;            // m/s
 inline constexpr double kInvCval = 3.3356409519815204e-09; // s/m
 // To match the Python output for bitwise consistency
-inline constexpr double kEps = 1e-6; // half-up rounding
+inline constexpr double kEps = 1e-12; // half-up rounding
 
 constexpr float to_gib(SizeType bytes) noexcept {
     return static_cast<float>(bytes) / 1024.0F / 1024.0F / 1024.0F;

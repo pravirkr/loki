@@ -1141,7 +1141,7 @@ poly_taylor_branch_batch_generic(std::span<const double> leaves_batch,
                     pad_branched_params.subspan(pad_offset, branch_max);
                 auto [dparam_act, count] = psr_utils::branch_param_padded(
                     slice_span, param_cur_val, dparam_cur_val,
-                    dparam_new_batch[flat_idx]);
+                    dparam_new_batch[flat_idx], branch_max);
 
                 pad_branched_dparams[flat_idx] = dparam_act;
                 branched_counts[flat_idx]      = count;
@@ -1294,7 +1294,7 @@ void poly_taylor_report_batch(std::span<double> leaves_tree,
                               SizeType n_leaves,
                               SizeType n_params) {
     constexpr SizeType kParamStride = 2U;
-    const SizeType leaves_stride    = n_params * kParamStride;
+    const SizeType leaves_stride    = (n_params + 2) * kParamStride;
     error_check::check_greater_equal(leaves_tree.size(),
                                      n_leaves * leaves_stride,
                                      "leaves_tree size not enough");
@@ -1451,13 +1451,15 @@ generate_bp_poly_taylor(std::span<const std::vector<double>> param_arr,
         const auto coord_cur  = snail_scheme.get_current_coord(prune_level);
         const auto [_, t_obs_minus_t_ref] = coord_cur;
 
-        // Calculate optimal parameter steps and shift bins
-        psr_utils::poly_taylor_step_d_vec_limited(
-            n_params, t_obs_minus_t_ref, nbins, eta, f0_batch, param_limits,
-            dparam_new_batch, 0);
+        // Calculate optimal parameter steps and shift
+        psr_utils::poly_taylor_step_d_vec(n_params, t_obs_minus_t_ref, nbins,
+                                          eta, f0_batch, dparam_new_batch, 0);
         psr_utils::poly_taylor_shift_d_vec(
             dparam_cur_batch, dparam_new_batch, t_obs_minus_t_ref, nbins,
             f0_batch, 0, shift_bins_batch, n_freqs, n_params);
+        psr_utils::poly_taylor_step_d_vec_limited(
+            n_params, t_obs_minus_t_ref, nbins, eta, f0_batch, param_limits,
+            dparam_new_batch, 0);
 
         std::ranges::fill(n_branches, 1.0);
         // Determine branching needs

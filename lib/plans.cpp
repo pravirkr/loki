@@ -5,6 +5,7 @@
 #include <utility>
 
 #include "loki/common/types.hpp"
+#include "loki/core/chebyshev.hpp"
 #include "loki/core/circular.hpp"
 #include "loki/core/taylor.hpp"
 #include "loki/core/taylor_ffa.hpp"
@@ -198,6 +199,18 @@ struct FFAPlanBase::Impl {
                 nsegments[n_levels - 1], m_cfg.get_nbins(), m_cfg.get_eta(),
                 ref_seg, isuggest, m_cfg.get_use_conservative_tile());
         }
+        if (poly_basis == "chebyshev") {
+            if (m_cfg.get_use_conservative_tile()) {
+                throw std::invalid_argument(
+                    "Conservative tile is not supported for chebyshev "
+                    "branching pattern generation");
+            }
+            return core::generate_bp_poly_chebyshev_approx(
+                param_counts[n_levels - 1], dparams_lim[n_levels - 1],
+                m_cfg.get_param_limits(), m_cfg.get_tseg_ffa(),
+                nsegments[n_levels - 1], m_cfg.get_nbins(), m_cfg.get_eta(),
+                ref_seg, isuggest);
+        }
         throw std::invalid_argument(std::format(
             "Invalid poly_basis ({}) for branching pattern generation",
             poly_basis));
@@ -224,6 +237,25 @@ struct FFAPlanBase::Impl {
             }
             throw std::invalid_argument("nparams > 5 not supported for "
                                         "branching pattern generation");
+        }
+        if (poly_basis == "chebyshev") {
+            if (m_cfg.get_use_conservative_tile()) {
+                throw std::invalid_argument(
+                    "Conservative tile is not supported for chebyshev "
+                    "branching pattern generation");
+            }
+            if (n_params == 5) {
+                throw std::invalid_argument(
+                    "nparams > 5 not supported for "
+                    "branching pattern for chebyshev basis");
+            }
+            if (n_params <= 4) {
+                return core::generate_bp_poly_chebyshev(
+                    param_arr, dparams_lim[n_levels - 1],
+                    m_cfg.get_param_limits(), m_cfg.get_tseg_ffa(),
+                    nsegments[n_levels - 1], m_cfg.get_nbins(), m_cfg.get_eta(),
+                    ref_seg);
+            }
         }
         throw std::invalid_argument(std::format(
             "Invalid poly_basis ({}) for branching pattern generation",

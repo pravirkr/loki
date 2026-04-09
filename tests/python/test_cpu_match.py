@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import pytest
 
-import loki
+from loki import libloki
 from pyloki.config import ParamLimits, PulsarSearchConfig
 from pyloki.core import fold
 from pyloki.ffa import compute_ffa
@@ -20,8 +20,8 @@ if TYPE_CHECKING:
 @pytest.mark.parametrize(
     ("py_fn", "cpp_fn", "decimal"),
     [
-        (fold.brutefold_start, loki.fold.compute_brute_fold_time, 5),
-        (fold.brutefold_start_complex, loki.fold.compute_brute_fold_fourier, 2),
+        (fold.brutefold_start, libloki.fold.compute_brute_fold_time, 5),
+        (fold.brutefold_start_complex, libloki.fold.compute_brute_fold_fourier, 2),
     ],
 )
 def test_brute_fold_variants(
@@ -76,7 +76,7 @@ def test_ffa_freq(
         use_fourier=use_fourier,
         **default_params,
     )
-    cfg_cpp = loki.configs.PulsarSearchConfig(
+    cfg_cpp = libloki.configs.PulsarSearchConfig(
         eta=1,
         param_limits=param_limits,
         use_fourier=use_fourier,
@@ -86,7 +86,7 @@ def test_ffa_freq(
     out_py = compute_ffa(TimeSeries(ts_e, ts_v, cfg_py.tsamp), cfg_py, quiet=True)
 
     if use_fourier:
-        out_cpp, _ = loki.ffa.compute_ffa_fourier(ts_e, ts_v, cfg_cpp, quiet=True)
+        out_cpp, _ = libloki.ffa.compute_ffa_fourier(ts_e, ts_v, cfg_cpp, quiet=True)
         np.testing.assert_allclose(
             out_cpp.reshape(out_py.shape),
             out_py,
@@ -94,7 +94,7 @@ def test_ffa_freq(
             atol=2.0,
         )
     else:
-        out_cpp, _ = loki.ffa.compute_ffa_time(ts_e, ts_v, cfg_cpp, quiet=True)
+        out_cpp, _ = libloki.ffa.compute_ffa_time(ts_e, ts_v, cfg_cpp, quiet=True)
         np.testing.assert_array_almost_equal(
             out_cpp.reshape(out_py.shape),
             out_py,
@@ -114,7 +114,7 @@ def test_ffa_freq_fourier_return_to_time(
         use_fourier=True,
         **default_params,
     )
-    cfg_cpp = loki.configs.PulsarSearchConfig(
+    cfg_cpp = libloki.configs.PulsarSearchConfig(
         eta=1,
         param_limits=param_limits,
         use_fourier=True,
@@ -123,7 +123,7 @@ def test_ffa_freq_fourier_return_to_time(
     )
     out_py = compute_ffa(TimeSeries(ts_e, ts_v, cfg_py.tsamp), cfg_py, quiet=True)
     out_py_time = np.fft.irfft(out_py).astype(np.float32)
-    out_cpp, _ = loki.ffa.compute_ffa_fourier_return_to_time(
+    out_cpp, _ = libloki.ffa.compute_ffa_fourier_return_to_time(
         ts_e,
         ts_v,
         cfg_cpp,
@@ -152,7 +152,7 @@ def test_ffa_accel(
         use_fourier=use_fourier,
         **default_params,
     )
-    cfg_cpp = loki.configs.PulsarSearchConfig(
+    cfg_cpp = libloki.configs.PulsarSearchConfig(
         eta=2,
         param_limits=param_limits,
         use_fourier=use_fourier,
@@ -162,7 +162,7 @@ def test_ffa_accel(
     out_py = compute_ffa(TimeSeries(ts_e, ts_v, cfg_py.tsamp), cfg_py, quiet=True)
 
     if use_fourier:
-        out_cpp, _ = loki.ffa.compute_ffa_fourier(ts_e, ts_v, cfg_cpp, quiet=True)
+        out_cpp, _ = libloki.ffa.compute_ffa_fourier(ts_e, ts_v, cfg_cpp, quiet=True)
         np.testing.assert_allclose(
             out_cpp.reshape(out_py.shape),
             out_py,
@@ -170,7 +170,7 @@ def test_ffa_accel(
             atol=2.0,
         )
     else:
-        out_cpp, _ = loki.ffa.compute_ffa_time(ts_e, ts_v, cfg_cpp, quiet=True)
+        out_cpp, _ = libloki.ffa.compute_ffa_time(ts_e, ts_v, cfg_cpp, quiet=True)
         np.testing.assert_array_almost_equal(
             out_cpp.reshape(out_py.shape),
             out_py,
@@ -191,7 +191,7 @@ def test_ffa_accel_fourier_return_to_time(
         use_fourier=True,
         **default_params,
     )
-    cfg_cpp = loki.configs.PulsarSearchConfig(
+    cfg_cpp = libloki.configs.PulsarSearchConfig(
         eta=2,
         param_limits=param_limits,
         use_fourier=True,
@@ -200,7 +200,7 @@ def test_ffa_accel_fourier_return_to_time(
     )
     out_py = compute_ffa(TimeSeries(ts_e, ts_v, cfg_py.tsamp), cfg_py, quiet=True)
     out_py_time = np.fft.irfft(out_py).astype(np.float32)
-    out_cpp, _ = loki.ffa.compute_ffa_fourier_return_to_time(
+    out_cpp, _ = libloki.ffa.compute_ffa_fourier_return_to_time(
         ts_e,
         ts_v,
         cfg_cpp,
@@ -234,7 +234,7 @@ def test_ffa_jerk(
         **default_params,
     )
 
-    cfg_cpp = loki.configs.PulsarSearchConfig(
+    cfg_cpp = libloki.configs.PulsarSearchConfig(
         eta=4,
         param_limits=param_limits.limits,
         use_fourier=use_fourier,
@@ -244,7 +244,7 @@ def test_ffa_jerk(
     out_py = compute_ffa(TimeSeries(ts_e, ts_v, cfg_py.tsamp), cfg_py, quiet=True)
 
     if use_fourier:
-        out_cpp, _ = loki.ffa.compute_ffa_fourier(ts_e, ts_v, cfg_cpp, quiet=True)
+        out_cpp, _ = libloki.ffa.compute_ffa_fourier(ts_e, ts_v, cfg_cpp, quiet=True)
         np.testing.assert_allclose(
             out_cpp.reshape(out_py.shape),
             out_py,
@@ -252,7 +252,7 @@ def test_ffa_jerk(
             atol=2.0,
         )
     else:
-        out_cpp, _ = loki.ffa.compute_ffa_time(ts_e, ts_v, cfg_cpp, quiet=True)
+        out_cpp, _ = libloki.ffa.compute_ffa_time(ts_e, ts_v, cfg_cpp, quiet=True)
         np.testing.assert_array_almost_equal(
             out_cpp.reshape(out_py.shape),
             out_py,
@@ -278,7 +278,7 @@ def test_ffa_jerk_fourier_return_to_time(
         **default_params,
     )
 
-    cfg_cpp = loki.configs.PulsarSearchConfig(
+    cfg_cpp = libloki.configs.PulsarSearchConfig(
         eta=4,
         param_limits=param_limits.limits,
         use_fourier=True,
@@ -287,7 +287,7 @@ def test_ffa_jerk_fourier_return_to_time(
     )
     out_py = compute_ffa(TimeSeries(ts_e, ts_v, cfg_py.tsamp), cfg_py, quiet=True)
     out_py_time = np.fft.irfft(out_py).astype(np.float32)
-    out_cpp, _ = loki.ffa.compute_ffa_fourier_return_to_time(
+    out_cpp, _ = libloki.ffa.compute_ffa_fourier_return_to_time(
         ts_e,
         ts_v,
         cfg_cpp,

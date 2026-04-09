@@ -15,7 +15,6 @@ using algorithms::FFA;
 using plans::FFAPlan;
 using plans::FFAPlanBase;
 using regions::FFARegionPlanner;
-using regions::FFARegionStats;
 using search::PulsarSearchConfig;
 
 namespace py = pybind11;
@@ -72,40 +71,6 @@ void bind_ffa_class(py::module& m, const std::string& name) {
             },
             py::arg("ts_e"), py::arg("ts_v"), py::arg("fold"));
     }
-}
-
-// Template function to bind FFARegionStats<T>
-template <typename T>
-void bind_ffa_region_stats(py::module& m, const std::string& name) {
-    py::class_<FFARegionStats<T>>(m, name.c_str())
-        .def(py::init<SizeType, SizeType, SizeType, SizeType, SizeType,
-                      SizeType, SizeType, SizeType, bool>(),
-             py::arg("max_buffer_size"), py::arg("max_coord_size"),
-             py::arg("max_ncoords"), py::arg("max_ffa_levels"),
-             py::arg("n_widths"), py::arg("n_params"), py::arg("n_samps"),
-             py::arg("max_passing_candidates"), py::arg("use_gpu") = false)
-        .def_property_readonly("max_buffer_size",
-                               &FFARegionStats<T>::get_max_buffer_size)
-        .def_property_readonly("max_coord_size",
-                               &FFARegionStats<T>::get_max_coord_size)
-        .def_property_readonly("max_ncoords",
-                               &FFARegionStats<T>::get_max_ncoords)
-        .def_property_readonly("max_ffa_levels",
-                               &FFARegionStats<T>::get_max_ffa_levels)
-        .def_property_readonly("max_buffer_size_time",
-                               &FFARegionStats<T>::get_max_buffer_size_time)
-        .def_property_readonly("max_scores_size",
-                               &FFARegionStats<T>::get_max_scores_size)
-        .def_property_readonly("write_param_sets_size",
-                               &FFARegionStats<T>::get_write_param_sets_size)
-        .def_property_readonly("buffer_memory_usage",
-                               &FFARegionStats<T>::get_buffer_memory_usage)
-        .def_property_readonly("coord_memory_usage",
-                               &FFARegionStats<T>::get_coord_memory_usage)
-        .def_property_readonly("extra_memory_usage",
-                               &FFARegionStats<T>::get_extra_memory_usage)
-        .def_property_readonly("freq_sweep_memory_usage",
-                               &FFARegionStats<T>::get_freq_sweep_memory_usage);
 }
 
 // Template function to bind FFARegionPlanner<T>

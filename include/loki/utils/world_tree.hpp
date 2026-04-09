@@ -134,18 +134,17 @@ public:
      */
     [[nodiscard]] std::pair<std::span<double>, SizeType>
     get_leaves_span(SizeType n_leaves);
-    // Returns span over contiguous leaves (for reporting)
-    [[nodiscard]] std::span<double> get_leaves_contiguous_span() noexcept;
+    /// @brief Returns a zero-copy two-part view of the leaves circular buffer
+    /// (for in-place reporting). Both spans point directly into m_leaves.
+    [[nodiscard]] CircularView<double> get_leaves_circular_view() noexcept;
+    [[nodiscard]] CircularView<const double>
+    get_leaves_circular_view() const noexcept;
 
-    /**
-     * @brief Get span over contiguous scores (for saving to file)
-     *
-     * Returns span over contiguous scores for m_size elements in the current
-     * region.
-     *
-     * @return Span over contiguous scores
-     */
-    [[nodiscard]] std::span<float> get_scores_contiguous_span() noexcept;
+    /// @brief Returns a zero-copy two-part view of the scores circular buffer
+    /// (for saving to file). Both spans point directly into m_scores.
+    [[nodiscard]] CircularView<float> get_scores_circular_view() noexcept;
+    [[nodiscard]] CircularView<const float>
+    get_scores_circular_view() const noexcept;
 
     /// @brief Get physical start index
     [[nodiscard]] SizeType get_physical_start_idx() const;
@@ -243,16 +242,14 @@ private:
     SizeType m_read_consumed{0};
 
     // Scratch buffer for in-place operations
-    std::vector<double> m_scratch_leaves;
     std::vector<float> m_scratch_scores;
     std::vector<SizeType> m_scratch_pending_indices;
     std::vector<uint8_t> m_scratch_mask;
 
     // Generic helper to get active regions for any vector
     template <typename T>
-    CircularView<const T>
-    get_active_regions(const std::vector<T>& arr,
-                       SizeType stride = 1) const noexcept;
+    CircularView<T> get_active_regions(std::span<T> arr,
+                                       SizeType stride = 1) const noexcept;
 
     /**
      * @brief Copy slots from contiguous source to circular buffer

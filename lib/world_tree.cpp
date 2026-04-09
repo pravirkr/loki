@@ -59,7 +59,6 @@ WorldTree<FoldType>::WorldTree(SizeType capacity,
       m_leaves(m_capacity * m_leaves_stride, 0.0),
       m_folds(m_capacity * m_folds_stride, FoldType{}),
       m_scores(m_capacity, 0.0F),
-      m_scratch_leaves(m_capacity * (nparams * kParamStride), 0.0),
       m_scratch_scores((m_capacity + max_batch_size), 0.0F),
       m_scratch_pending_indices(max_batch_size, 0),
       m_scratch_mask(m_capacity, 0) {
@@ -86,8 +85,8 @@ float WorldTree<FoldType>::get_score_max() const noexcept {
     if (m_size == 0) {
         return 0.0F;
     }
-    const auto regions = get_active_regions(m_scores);
-    float max_val      = *std::ranges::max_element(regions.first);
+    auto regions  = get_active_regions(std::span<const float>(m_scores));
+    float max_val = *std::ranges::max_element(regions.first);
     if (!regions.second.empty()) {
         max_val = std::max(max_val, *std::ranges::max_element(regions.second));
     }
@@ -99,8 +98,8 @@ float WorldTree<FoldType>::get_score_min() const noexcept {
     if (m_size == 0) {
         return 0.0F;
     }
-    const auto regions = get_active_regions(m_scores);
-    float min_val      = *std::ranges::min_element(regions.first);
+    auto regions  = get_active_regions(std::span<const float>(m_scores));
+    float min_val = *std::ranges::min_element(regions.first);
     if (!regions.second.empty()) {
         min_val = std::min(min_val, *std::ranges::min_element(regions.second));
     }
@@ -113,7 +112,6 @@ float WorldTree<FoldType>::get_memory_usage() const noexcept {
         (m_leaves.size() * sizeof(double)) +
         (m_folds.size() * sizeof(FoldType)) +
         (m_scores.size() * sizeof(float)) +
-        (m_scratch_leaves.size() * sizeof(double)) +
         (m_scratch_scores.size() * sizeof(float)) +
         (m_scratch_pending_indices.size() * sizeof(SizeType)) +
         (m_scratch_mask.size() * sizeof(uint8_t));
@@ -164,40 +162,29 @@ WorldTree<FoldType>::get_leaves_span(SizeType n_leaves) {
 }
 
 template <SupportedFoldType FoldType>
-std::span<double> WorldTree<FoldType>::get_leaves_contiguous_span() noexcept {
-    const auto start_idx     = get_current_start_idx();
-    const auto report_stride = m_nparams * kParamStride;
-    const auto first_part    = std::min(m_size, m_capacity - start_idx);
-    for (SizeType i = 0; i < first_part; ++i) {
-        const auto src_offset = (start_idx + i) * m_leaves_stride;
-        const auto dst_offset = i * report_stride;
-        std::copy_n(m_leaves.begin() + src_offset, report_stride,
-                    m_scratch_leaves.begin() + dst_offset);
-    }
-    const auto second_part = m_size - first_part;
-    if (second_part > 0) {
-        for (SizeType i = 0; i < second_part; ++i) {
-            const auto src_offset = i * m_leaves_stride;
-            const auto dst_offset = (first_part + i) * report_stride;
-            std::copy_n(m_leaves.begin() + src_offset, report_stride,
-                        m_scratch_leaves.begin() + dst_offset);
-        }
-    }
-    return {m_scratch_leaves.data(), m_size * report_stride};
+CircularView<double> WorldTree<FoldType>::get_leaves_circular_view() noexcept {
+    return get_active_regions(std::span(m_leaves), m_leaves_stride);
+}
+template <SupportedFoldType FoldType>
+CircularView<const double>
+WorldTree<FoldType>::get_leaves_circular_view() const noexcept {
+    return get_active_regions(std::span(m_leaves), m_leaves_stride);
 }
 
 template <SupportedFoldType FoldType>
-std::span<float> WorldTree<FoldType>::get_scores_contiguous_span() noexcept {
-    const auto start_idx = get_current_start_idx();
-    copy_from_circular(m_scores.data(), start_idx, m_size, SizeType{1},
-                       m_scratch_scores.data());
-    return {m_scratch_scores.data(), m_size};
+CircularView<float> WorldTree<FoldType>::get_scores_circular_view() noexcept {
+    return get_active_regions(std::span(m_scores), SizeType{1});
+}
+template <SupportedFoldType FoldType>
+CircularView<const float>
+WorldTree<FoldType>::get_scores_circular_view() const noexcept {
+    return get_active_regions(std::span(m_scores), SizeType{1});
 }
 
 template <SupportedFoldType FoldType>
 SizeType WorldTree<FoldType>::get_physical_start_idx() const {
     error_check::check(m_is_updating,
-                       "WorldTreeCUDA: get_physical_start_idx only valid "
+                       "WorldTree: get_physical_start_idx only valid "
                        "during updates");
     // Compute physical start: relative to current head of read region
     return get_circular_index(m_read_consumed, m_head, m_capacity);
@@ -290,7 +277,7 @@ WorldTree<FoldType>::get_best() const {
         return {{}, {}, 0.0F};
     }
 
-    const auto regions = get_active_regions(m_scores);
+    auto regions = get_active_regions(std::span<const float>(m_scores));
     // Find max iterator in first region
     auto it1              = std::ranges::max_element(regions.first);
     float max_score       = *it1;
@@ -440,9 +427,6 @@ void WorldTree<FoldType>::validate(SizeType capacity,
                                      "WorldTree: folds size mismatch");
     error_check::check_greater_equal(m_scores.size(), capacity,
                                      "WorldTree: scores size mismatch");
-    error_check::check_greater_equal(m_scratch_leaves.size(),
-                                     capacity * nparams,
-                                     "WorldTree: scratch_leaves size mismatch");
     error_check::check_greater_equal(m_scratch_scores.size(),
                                      capacity + max_batch_size,
                                      "WorldTree: scratch_scores size mismatch");
@@ -456,8 +440,8 @@ void WorldTree<FoldType>::validate(SizeType capacity,
 // Generic helper to get active regions for any vector
 template <SupportedFoldType FoldType>
 template <typename T>
-CircularView<const T>
-WorldTree<FoldType>::get_active_regions(const std::vector<T>& arr,
+CircularView<T>
+WorldTree<FoldType>::get_active_regions(std::span<T> arr,
                                         SizeType stride) const noexcept {
     if (m_size == 0) {
         return {{}, {}};

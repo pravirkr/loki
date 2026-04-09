@@ -102,17 +102,17 @@ kernel_analyze_and_branch_accel(const double* __restrict__ leaves_tree,
     double d2_sig_new    = dphi * dfactor * 4.0 * inv_dt2;
     double d1_sig_new    = dphi * dfactor * 1.0 * inv_dt;
 
+    const double shift_d2 =
+        (d2_sig_cur - d2_sig_new) * dt2 * nbins / (4.0 * dfactor);
+    const double shift_d1 =
+        (d1_sig_cur - d1_sig_new) * dt * nbins / (1.0 * dfactor);
+
     const double d2_range = param_limits[0].max - param_limits[0].min;
     const double d1_range =
         dfactor * (param_limits[1].max - param_limits[1].min);
 
     d2_sig_new = cuda::std::min(d2_sig_new, d2_range);
     d1_sig_new = cuda::std::min(d1_sig_new, d1_range);
-
-    const double shift_d2 =
-        (d2_sig_cur - d2_sig_new) * dt2 * nbins / (4.0 * dfactor);
-    const double shift_d1 =
-        (d1_sig_cur - d1_sig_new) * dt * nbins / (1.0 * dfactor);
 
     utils::branch_one_param_padded_device(
         0, d2_cur, d2_sig_cur, d2_sig_new, eta, shift_d2,
@@ -170,6 +170,13 @@ kernel_analyze_and_branch_jerk(const double* __restrict__ leaves_tree,
     double d2_sig_new    = dphi * dfactor * 4.0 * inv_dt2;
     double d1_sig_new    = dphi * dfactor * 1.0 * inv_dt;
 
+    const double shift_d3 =
+        (d3_sig_cur - d3_sig_new) * dt3 * nbins / (24.0 * dfactor);
+    const double shift_d2 =
+        (d2_sig_cur - d2_sig_new) * dt2 * nbins / (4.0 * dfactor);
+    const double shift_d1 =
+        (d1_sig_cur - d1_sig_new) * dt * nbins / (1.0 * dfactor);
+
     const double d3_range = param_limits[0].max - param_limits[0].min;
     const double d2_range = param_limits[1].max - param_limits[1].min;
     const double d1_range =
@@ -178,13 +185,6 @@ kernel_analyze_and_branch_jerk(const double* __restrict__ leaves_tree,
     d3_sig_new = cuda::std::min(d3_sig_new, d3_range);
     d2_sig_new = cuda::std::min(d2_sig_new, d2_range);
     d1_sig_new = cuda::std::min(d1_sig_new, d1_range);
-
-    const double shift_d3 =
-        (d3_sig_cur - d3_sig_new) * dt3 * nbins / (24.0 * dfactor);
-    const double shift_d2 =
-        (d2_sig_cur - d2_sig_new) * dt2 * nbins / (4.0 * dfactor);
-    const double shift_d1 =
-        (d1_sig_cur - d1_sig_new) * dt * nbins / (1.0 * dfactor);
 
     utils::branch_one_param_padded_device(
         0, d3_cur, d3_sig_cur, d3_sig_new, eta, shift_d3,
@@ -252,6 +252,15 @@ kernel_analyze_and_branch_snap(const double* __restrict__ leaves_tree,
     double d2_sig_new    = dphi * dfactor * 4.0 * inv_dt2;
     double d1_sig_new    = dphi * dfactor * 1.0 * inv_dt;
 
+    const double shift_d4 =
+        (d4_sig_cur - d4_sig_new) * dt4 * nbins / (192.0 * dfactor);
+    const double shift_d3 =
+        (d3_sig_cur - d3_sig_new) * dt3 * nbins / (24.0 * dfactor);
+    const double shift_d2 =
+        (d2_sig_cur - d2_sig_new) * dt2 * nbins / (4.0 * dfactor);
+    const double shift_d1 =
+        (d1_sig_cur - d1_sig_new) * dt * nbins / (1.0 * dfactor);
+
     const double d4_range = param_limits[0].max - param_limits[0].min;
     const double d3_range = param_limits[1].max - param_limits[1].min;
     const double d2_range = param_limits[2].max - param_limits[2].min;
@@ -262,15 +271,6 @@ kernel_analyze_and_branch_snap(const double* __restrict__ leaves_tree,
     d3_sig_new = cuda::std::min(d3_sig_new, d3_range);
     d2_sig_new = cuda::std::min(d2_sig_new, d2_range);
     d1_sig_new = cuda::std::min(d1_sig_new, d1_range);
-
-    const double shift_d4 =
-        (d4_sig_cur - d4_sig_new) * dt4 * nbins / (192.0 * dfactor);
-    const double shift_d3 =
-        (d3_sig_cur - d3_sig_new) * dt3 * nbins / (24.0 * dfactor);
-    const double shift_d2 =
-        (d2_sig_cur - d2_sig_new) * dt2 * nbins / (4.0 * dfactor);
-    const double shift_d1 =
-        (d1_sig_cur - d1_sig_new) * dt * nbins / (1.0 * dfactor);
 
     utils::branch_one_param_padded_device(
         0, d4_cur, d4_sig_cur, d4_sig_new, eta, shift_d4,

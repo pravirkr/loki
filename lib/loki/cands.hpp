@@ -12,6 +12,7 @@
 #include <highfive/highfive.hpp>
 
 #include "loki/common/types.hpp"
+#include "loki/utils/world_tree.hpp"
 
 namespace loki::cands {
 
@@ -201,9 +202,9 @@ public:
 
     void write_run_results(std::string_view run_name,
                            std::span<const SizeType> snail_scheme,
-                           std::span<const double> param_sets,
-                           std::span<const float> scores,
-                           SizeType n_param_sets,
+                           memory::CircularView<double> leaves_view,
+                           memory::CircularView<float> scores_view,
+                           SizeType n_leaves,
                            SizeType n_params,
                            const PruneStatsCollection& pstats);
 

@@ -402,8 +402,8 @@ __device__ __forceinline__ void analyze_and_branch_chebyshev_accel(
     const double alpha_2_sig_new = cuda::std::min(base_step, alpha_2_range);
     const double alpha_1_sig_new = cuda::std::min(base_step, alpha_1_range);
 
-    const double shift_alpha_2 = (alpha_2_sig_cur - alpha_2_sig_new) * inv_base;
-    const double shift_alpha_1 = (alpha_1_sig_cur - alpha_1_sig_new) * inv_base;
+    const double shift_alpha_2 = (alpha_2_sig_cur - base_step) * inv_base;
+    const double shift_alpha_1 = (alpha_1_sig_cur - base_step) * inv_base;
 
     utils::branch_one_param_padded_device(
         0, alpha_2_cur, alpha_2_sig_cur, alpha_2_sig_new, eta, shift_alpha_2,
@@ -468,9 +468,9 @@ __device__ __forceinline__ void analyze_and_branch_chebyshev_jerk(
     const double alpha_2_sig_new = cuda::std::min(base_step, alpha_2_range);
     const double alpha_1_sig_new = cuda::std::min(base_step, alpha_1_range);
 
-    const double shift_alpha_3 = (alpha_3_sig_cur - alpha_3_sig_new) * inv_base;
-    const double shift_alpha_2 = (alpha_2_sig_cur - alpha_2_sig_new) * inv_base;
-    const double shift_alpha_1 = (alpha_1_sig_cur - alpha_1_sig_new) * inv_base;
+    const double shift_alpha_3 = (alpha_3_sig_cur - base_step) * inv_base;
+    const double shift_alpha_2 = (alpha_2_sig_cur - base_step) * inv_base;
+    const double shift_alpha_1 = (alpha_1_sig_cur - base_step) * inv_base;
 
     utils::branch_one_param_padded_device(
         0, alpha_3_cur, alpha_3_sig_cur, alpha_3_sig_new, eta, shift_alpha_3,
@@ -547,10 +547,10 @@ __device__ __forceinline__ void analyze_and_branch_chebyshev_snap(
     const double alpha_2_sig_new = cuda::std::min(base_step, alpha_2_range);
     const double alpha_1_sig_new = cuda::std::min(base_step, alpha_1_range);
 
-    const double shift_alpha_4 = (alpha_4_sig_cur - alpha_4_sig_new) * inv_base;
-    const double shift_alpha_3 = (alpha_3_sig_cur - alpha_3_sig_new) * inv_base;
-    const double shift_alpha_2 = (alpha_2_sig_cur - alpha_2_sig_new) * inv_base;
-    const double shift_alpha_1 = (alpha_1_sig_cur - alpha_1_sig_new) * inv_base;
+    const double shift_alpha_4 = (alpha_4_sig_cur - base_step) * inv_base;
+    const double shift_alpha_3 = (alpha_3_sig_cur - base_step) * inv_base;
+    const double shift_alpha_2 = (alpha_2_sig_cur - base_step) * inv_base;
+    const double shift_alpha_1 = (alpha_1_sig_cur - base_step) * inv_base;
 
     utils::branch_one_param_padded_device(
         0, alpha_4_cur, alpha_4_sig_cur, alpha_4_sig_new, eta, shift_alpha_4,
