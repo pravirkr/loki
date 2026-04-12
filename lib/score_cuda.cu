@@ -175,19 +175,22 @@ __global__ void kernel_snr_boxcar_warp(const float* __restrict__ folds,
 
 template <uint32_t MaxBins>
 __launch_bounds__(256, 4) // Hint: Max 256 threads, min 4 blocks/SM
-    __global__ void kernel_snr_thread(const float* __restrict__ folds,
-                                      uint32_t nprofiles,
-                                      uint32_t nbins,
-                                      const uint32_t* __restrict__ widths,
-                                      uint32_t nwidths,
-                                      float* __restrict__ scores,
-                                      uint8_t* __restrict__ validation_mask,
-                                      float threshold) {
+    __global__
+    void kernel_snr_thread(const float* __restrict__ folds,
+                           uint32_t nprofiles,
+                           uint32_t nbins,
+                           const uint32_t* __restrict__ widths,
+                           uint32_t nwidths,
+                           float* __restrict__ scores,
+                           const uint8_t* __restrict__ validation_mask,
+                           uint8_t* __restrict__ filtered_mask,
+                           float threshold) {
     const uint32_t profile_idx = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (profile_idx >= nprofiles) {
         return;
     }
     if (validation_mask[profile_idx] == 0) {
+        filtered_mask[profile_idx] = 0;
         return;
     }
 
@@ -242,7 +245,7 @@ __launch_bounds__(256, 4) // Hint: Max 256 threads, min 4 blocks/SM
     }
     scores[profile_idx] = max_snr;
     // Set validation mask for filtered profiles
-    validation_mask[profile_idx] = (max_snr >= threshold);
+    filtered_mask[profile_idx] = (max_snr >= threshold);
 }
 
 // Unified launch function template
@@ -439,16 +442,17 @@ SizeType score_and_filter_max_cuda_d(cuda::std::span<const float> folds,
     return counter.value_sync(stream);
 }
 
-SizeType
-score_and_filter_max_cuda_thread_d(cuda::std::span<const float> folds,
-                                   cuda::std::span<const uint32_t> widths,
-                                   cuda::std::span<float> scores,
-                                   cuda::std::span<uint8_t> validation_mask,
-                                   float threshold,
-                                   SizeType nprofiles,
-                                   SizeType nbins,
-                                   memory::CUBScratchArena& scratch_ws,
-                                   cudaStream_t stream) {
+SizeType score_and_filter_max_cuda_thread_d(
+    cuda::std::span<const float> folds,
+    cuda::std::span<const uint32_t> widths,
+    cuda::std::span<float> scores,
+    cuda::std::span<const uint8_t> validation_mask,
+    cuda::std::span<uint8_t> filtered_mask,
+    float threshold,
+    SizeType nprofiles,
+    SizeType nbins,
+    memory::CUBScratchArena& scratch_ws,
+    cudaStream_t stream) {
     constexpr SizeType kThreadsPerBlock = 256;
     const SizeType blocks_per_grid =
         (nprofiles + kThreadsPerBlock - 1) / kThreadsPerBlock;
@@ -480,15 +484,18 @@ score_and_filter_max_cuda_thread_d(cuda::std::span<const float> folds,
     dispatch_kernel(folds.data(), static_cast<uint32_t>(nprofiles),
                     static_cast<uint32_t>(nbins), widths.data(),
                     static_cast<uint32_t>(widths.size()), scores.data(),
-                    validation_mask.data(), threshold);
+                    validation_mask.data(), filtered_mask.data(), threshold);
     cuda_utils::check_last_cuda_error(
         "score_and_filter_max_cuda_thread_d launch failed");
 
     // Count number of passing profiles
+
+    auto transform_it =
+        thrust::make_transform_iterator(filtered_mask.data(), Uint8ToUint32{});
     cuda_utils::check_cuda_call(
-        cub::DeviceReduce::Sum(
-            scratch_ws.cub_temp_storage, scratch_ws.cub_temp_bytes,
-            validation_mask.data(), scratch_ws.d_reduce_out, nprofiles, stream),
+        cub::DeviceReduce::Sum(scratch_ws.cub_temp_storage,
+                               scratch_ws.cub_temp_bytes, transform_it,
+                               scratch_ws.d_reduce_out, nprofiles, stream),
         "cub::DeviceReduce::Sum failed");
 
     // Copy result back

@@ -207,11 +207,14 @@ void BaseChebyshevPruneDPFuncts<FoldType, Derived>::seed(
     std::span<double> seed_leaves,
     std::span<float> seed_scores,
     std::pair<double, double> coord_init) {
-
+    // First seed in Taylor basis
     const auto n_leaves =
-        poly_chebyshev_seed(this->m_param_grid_count_init, this->m_dparams_init,
-                            this->m_cfg.get_param_limits(), seed_leaves,
-                            coord_init, this->m_cfg.get_nparams());
+        poly_taylor_seed(this->m_param_grid_count_init, this->m_dparams_init,
+                         this->m_cfg.get_param_limits(), seed_leaves,
+                         coord_init, this->m_cfg.get_nparams());
+    // Then convert to Chebyshev basis
+    poly_taylor_to_cheby_batch(seed_leaves, coord_init, n_leaves,
+                               this->m_cfg.get_nparams());
     // Fold segment is (n_leaves, 2, nbins)
     const auto nbins = this->m_cfg.get_nbins();
     error_check::check_greater_equal(seed_scores.size(), n_leaves,
@@ -388,8 +391,12 @@ void PrunePolyChebyshevDPFuncts<FoldType>::report(
     std::span<double> leaves_tree,
     std::pair<double, double> coord_report,
     SizeType n_leaves) const {
-    poly_chebyshev_report_batch(leaves_tree, coord_report, n_leaves,
-                                this->m_cfg.get_nparams());
+    // First convert the Chebyshev leaves to Taylor leaves
+    poly_cheby_to_taylor_batch(leaves_tree, coord_report, n_leaves,
+                               this->m_cfg.get_nparams());
+    // Now call the Taylor report batch
+    poly_taylor_report_batch(leaves_tree, coord_report, n_leaves,
+                             this->m_cfg.get_nparams());
 }
 
 // Specialized implementation for Circular orbit search in Taylor basis
@@ -505,10 +512,9 @@ create_prune_dp_functs(std::string_view poly_basis,
             param_grid_count_init, dparams_init, nseg_ffa, tseg_ffa,
             std::move(cfg), batch_size, branch_max);
     }
-    throw std::runtime_error(
-        std::format("Unknown poly_basis: '{}'. Valid options: 'taylor', "
-                    "'chebyshev', 'circular'",
-                    poly_basis));
+    throw std::runtime_error(std::format(
+        "Unknown poly_basis: '{}'. Valid options: 'taylor', 'chebyshev'",
+        poly_basis));
 }
 
 // Explicit template instantiations

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <span>
 #include <tuple>
 #include <vector>
@@ -110,7 +111,7 @@ public:
     [[nodiscard]] float get_score_min() const noexcept;
     /// @brief Estimate memory usage in GiB, includes both base storage and
     // estimated peak temporary allocations (scratch buffer).
-    [[nodiscard]] float get_memory_usage() const noexcept;
+    [[nodiscard]] float get_memory_usage_gib() const noexcept;
 
     /**
      * @brief Get span over leaves for processing
@@ -318,6 +319,7 @@ private:
      * strictly above it yields at most total_capacity items.
      */
     float get_prune_threshold(std::span<const float> scores_batch,
+                              std::span<const SizeType> indices_batch,
                               SizeType slots_to_write,
                               float current_threshold) noexcept;
 
@@ -348,6 +350,13 @@ using WorldTreeFloat   = WorldTree<float>;
 using WorldTreeComplex = WorldTree<ComplexType>;
 
 #ifdef LOKI_ENABLE_CUDA
+
+// Helper structure to represent the two contiguous segments
+// of a circular buffer.
+template <typename T> struct CircularViewCUDA {
+    cuda::std::span<T> first;
+    cuda::std::span<T> second; // Empty if buffer doesn't wrap
+};
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA = float> class WorldTreeCUDA {
 public:
@@ -400,12 +409,12 @@ public:
     /// @brief Get size in log2(size), useful for reporting.
     [[nodiscard]] float get_size_lb() const noexcept;
     /// @brief Get maximum score in current region
-    [[nodiscard]] float get_score_max() const noexcept;
+    [[nodiscard]] float get_score_max(cudaStream_t stream) const noexcept;
     /// @brief Get minimum score in current region
-    [[nodiscard]] float get_score_min() const noexcept;
+    [[nodiscard]] float get_score_min(cudaStream_t stream) const noexcept;
     /// @brief Estimate GPU memory usage in GiB, includes both base storage and
     /// estimated peak temporary allocations.
-    [[nodiscard]] float get_memory_usage() const noexcept;
+    [[nodiscard]] float get_memory_usage_gib() const noexcept;
 
     /**
      * @brief Get span over leaves for processing
@@ -433,20 +442,17 @@ public:
     [[nodiscard]] std::pair<cuda::std::span<double>, SizeType>
     get_leaves_span(SizeType n_leaves);
 
-    /// @brief Returns span over contiguous leaves (for reporting)
-    [[nodiscard]] cuda::std::span<double>
-    get_leaves_contiguous_span(cudaStream_t stream) noexcept;
+    /// @brief Returns a zero-copy two-part view of the leaves circular buffer
+    /// (for in-place reporting). Both spans point directly into m_leaves.
+    [[nodiscard]] CircularViewCUDA<double> get_leaves_circular_view() noexcept;
+    [[nodiscard]] CircularViewCUDA<const double>
+    get_leaves_circular_view() const noexcept;
 
-    /**
-     * @brief Get span over contiguous scores (for saving to file)
-     *
-     * Returns span over contiguous scores for m_size elements in the current
-     * region.
-     *
-     * @return Span over contiguous scores
-     */
-    [[nodiscard]] cuda::std::span<float>
-    get_scores_contiguous_span(cudaStream_t stream) noexcept;
+    /// @brief Returns a zero-copy two-part view of the scores circular buffer
+    /// (for saving to file). Both spans point directly into m_scores.
+    [[nodiscard]] CircularViewCUDA<float> get_scores_circular_view() noexcept;
+    [[nodiscard]] CircularViewCUDA<const float>
+    get_scores_circular_view() const noexcept;
 
     /// @brief Get physical start index
     [[nodiscard]] SizeType get_physical_start_idx() const;
@@ -522,11 +528,15 @@ private:
     SizeType m_read_consumed{0};
 
     // Scratch buffer for in-place operations
-    thrust::device_vector<double> m_scratch_leaves;
     thrust::device_vector<float> m_scratch_scores;
-    thrust::device_vector<uint32_t> m_scratch_pending_indices;
-    thrust::device_vector<uint32_t> m_scratch_prefix;
+    thrust::device_vector<uint32_t> m_scratch_indices_1;
+    thrust::device_vector<uint32_t> m_scratch_indices_2;
     thrust::device_vector<uint8_t> m_scratch_mask;
+
+    // Generic helper to get active regions for any vector
+    template <typename T>
+    CircularViewCUDA<T> get_active_regions(cuda::std::span<T> arr,
+                                           SizeType stride = 1) const noexcept;
 
     /**
      * @brief Copy slots from circular buffer to contiguous destination
@@ -573,6 +583,7 @@ private:
      * above it yields at most total_capacity items.
      */
     float get_prune_threshold(cuda::std::span<const float> scores_batch,
+                              cuda::std::span<const uint32_t> indices_batch,
                               SizeType slots_to_write,
                               float current_threshold,
                               cudaStream_t stream) noexcept;

@@ -1,6 +1,7 @@
 #include "loki/core/circular.hpp"
 
 #include <algorithm>
+#include <cstring>
 #include <numbers>
 #include <span>
 #include <tuple>
@@ -55,12 +56,11 @@ get_circ_taylor_mask_scattered(std::span<const double> leaves_batch,
         const auto accel    = leaves_batch[lo + 6];
 
         // Determine whether snap is significantly measured
-        const bool is_sig_snap =
-            std::abs(snap) > (minimum_snap_cells * (dsnap + utils::kEps));
+        const bool is_sig_snap = std::abs(snap) > (minimum_snap_cells * dsnap);
         // Snap-Dominated Region: Check if implied Omega^2 = -snap/accel is
         // physical
         const bool is_physical_snap =
-            ((-snap * accel) > 0.0) && (std::abs(accel) > utils::kEps);
+            ((-snap * accel) > 0.0) && (std::abs(accel) > utils::kZeroEps);
 
         if (is_sig_snap && is_physical_snap) {
             idx_circular_snap.push_back(leaf_idx);
@@ -69,10 +69,10 @@ get_circ_taylor_mask_scattered(std::span<const double> leaves_batch,
 
         // Crackle-Dominated Region: Check if crackle is significantly measured
         const bool is_sig_crackle =
-            std::abs(crackle) > (minimum_snap_cells * (dcrackle + utils::kEps));
+            std::abs(crackle) > (minimum_snap_cells * dcrackle);
         // Check if implied Omega^2 = -crackle/jerk is physical
         const bool is_physical_crackle =
-            ((-crackle * jerk) > 0.0) && (std::abs(jerk) > utils::kEps);
+            ((-crackle * jerk) > 0.0) && (std::abs(jerk) > utils::kZeroEps);
         if (is_sig_crackle && is_physical_crackle) {
             idx_circular_crackle.push_back(leaf_idx);
         } else {
@@ -102,11 +102,10 @@ inline bool is_in_hole(double snap,
                        double jerk,
                        double accel,
                        double minimum_snap_cells) noexcept {
-    const bool is_sig_snap =
-        std::abs(snap) > (minimum_snap_cells * (dsnap + utils::kEps));
+    const bool is_sig_snap = std::abs(snap) > (minimum_snap_cells * dsnap);
     const bool is_physical_snap =
-        ((-snap * accel) > 0.0) && (std::abs(accel) > utils::kEps);
-    const bool is_stable_jerk = std::abs(jerk) > utils::kEps;
+        ((-snap * accel) > 0.0) && (std::abs(accel) > utils::kZeroEps);
+    const bool is_stable_jerk = std::abs(jerk) > utils::kZeroEps;
     return is_sig_snap && (!is_physical_snap) && is_stable_jerk;
 }
 
@@ -135,6 +134,13 @@ SizeType circ_taylor_branch_batch(std::span<const double> leaves_tree,
     error_check::check_greater_equal(leaves_origins.size(),
                                      n_leaves * branch_max,
                                      "leaves_origins size mismatch");
+
+    error_check::check_greater_equal(branch_ws.scratch_params.size(),
+                                     n_leaves * kParams * branch_max,
+                                     "Workspace scratch_params too small");
+    error_check::check_greater_equal(branch_ws.scratch_shifts.size(),
+                                     n_leaves * kParams,
+                                     "Workspace scratch_shifts too small");
     const auto [_, dt]    = coord_cur; // t_obs - t_ref
     const double dt2      = dt * dt;
     const double dt3      = dt2 * dt;
@@ -153,8 +159,14 @@ SizeType circ_taylor_branch_batch(std::span<const double> leaves_tree,
     const double d2_range = param_limits[3].max - param_limits[3].min;
     const double f0_range = param_limits[4].max - param_limits[4].min;
 
-    // Cannot use leaves_branch as workspace because it is overwritten in the
-    // crackle branching loop.
+    // Use leaves_branch memory as workspace.
+    const SizeType workspace_size      = leaves_branch.size();
+    const SizeType single_batch_params = n_leaves * kParams;
+    // Get spans from workspace
+    std::span<double> dparam_new =
+        leaves_branch.subspan(0, single_batch_params);
+    error_check::check_less_equal(single_batch_params, workspace_size,
+                                  "workspace size mismatch");
 
     const double* __restrict__ leaves_tree_ptr = leaves_tree.data();
     SizeType* __restrict__ leaves_origins_ptr  = leaves_origins.data();
@@ -162,8 +174,8 @@ SizeType circ_taylor_branch_batch(std::span<const double> leaves_tree,
     double* __restrict__ scratch_params   = branch_ws.scratch_params.data();
     double* __restrict__ scratch_dparams  = branch_ws.scratch_dparams.data();
     SizeType* __restrict__ scratch_counts = branch_ws.scratch_counts.data();
-    double* __restrict__ dparam_new_ptr   = branch_ws.tmp_dparam_new.data();
-    double* __restrict__ shift_bins_ptr   = branch_ws.tmp_shift_bins.data();
+    double* __restrict__ shift_bins_ptr   = branch_ws.scratch_shifts.data();
+    double* __restrict__ dparam_new_ptr   = dparam_new.data();
 
     // Loop 1: step + shift (vectorizable)
     for (SizeType i = 0; i < n_leaves; ++i) {
@@ -191,23 +203,23 @@ SizeType circ_taylor_branch_batch(std::span<const double> leaves_tree,
         dparam_new_ptr[fb + 3] = std::min(d2_sig_new, d2_range);
         dparam_new_ptr[fb + 4] = std::min(d1_sig_new, d1_range);
 
-        shift_bins_ptr[fb + 0] =
-            (d5_sig_cur - d5_sig_new) * dt5 * nbins_d / (1920.0 * dfactor);
-        shift_bins_ptr[fb + 1] =
-            (d4_sig_cur - d4_sig_new) * dt4 * nbins_d / (192.0 * dfactor);
-        shift_bins_ptr[fb + 2] =
-            (d3_sig_cur - d3_sig_new) * dt3 * nbins_d / (24.0 * dfactor);
+        shift_bins_ptr[fb + 0] = std::abs(d5_sig_cur - d5_sig_new) * dt5 *
+                                 nbins_d / (1920.0 * dfactor);
+        shift_bins_ptr[fb + 1] = std::abs(d4_sig_cur - d4_sig_new) * dt4 *
+                                 nbins_d / (192.0 * dfactor);
+        shift_bins_ptr[fb + 2] = std::abs(d3_sig_cur - d3_sig_new) * dt3 *
+                                 nbins_d / (24.0 * dfactor);
         shift_bins_ptr[fb + 3] =
-            (d2_sig_cur - d2_sig_new) * dt2 * nbins_d / (4.0 * dfactor);
+            std::abs(d2_sig_cur - d2_sig_new) * dt2 * nbins_d / (4.0 * dfactor);
         shift_bins_ptr[fb + 4] =
-            (d1_sig_cur - d1_sig_new) * dt * nbins_d / (1.0 * dfactor);
+            std::abs(d1_sig_cur - d1_sig_new) * dt * nbins_d / (1.0 * dfactor);
     }
 
     // EXIT A — no branching at all: fast memcpy path
     {
         bool any_branching = false;
         for (SizeType i = 0; i < n_leaves * kParams; ++i) {
-            if (shift_bins_ptr[i] >= (eta - utils::kEps)) {
+            if (shift_bins_ptr[i] >= (eta - utils::kFloatEps)) {
                 any_branching = true;
                 break;
             }
@@ -312,7 +324,7 @@ SizeType circ_taylor_branch_batch(std::span<const double> leaves_tree,
     {
         bool any_crackle = false;
         for (SizeType i = 0; i < n_leaves; ++i) {
-            if (shift_bins_ptr[(i * kParams) + 0] >= (eta - utils::kEps)) {
+            if (shift_bins_ptr[(i * kParams) + 0] >= (eta - utils::kFloatEps)) {
                 any_crackle = true;
                 break;
             }
@@ -328,43 +340,40 @@ SizeType circ_taylor_branch_batch(std::span<const double> leaves_tree,
     // the hole region, replace its d5 value in-place with the first crackle
     // child and append the remaining (n_d5 - 1) crackle children at the tail.
     const SizeType base_out = out_leaves; // snapshot — do not modify in loop
+    auto slice_span         = std::span<double>(scratch_params, branch_max);
     for (SizeType i = 0; i < base_out; ++i) {
         const SizeType lo         = i * kLeavesStride;
         double* __restrict__ leaf = leaves_branch_ptr + lo;
 
         // Retrieve origin leaf index to look up d5_sig_new
-        const SizeType origin = leaves_origins_ptr[i];
-        const SizeType fb     = origin * kParams;
-        const SizeType n_d5   = scratch_counts[fb + 0];
+        const SizeType origin    = leaves_origins_ptr[i];
+        const SizeType origin_lo = origin * kLeavesStride;
+        const SizeType fb        = origin * kParams;
+        const SizeType n_d5      = scratch_counts[fb + 0];
 
         const bool in_hole =
             is_in_hole(leaf[2], leaf[3], leaf[4], leaf[6], minimum_snap_cells);
         const bool need_branching =
-            shift_bins_ptr[fb + 0] >= (eta - utils::kEps);
+            shift_bins_ptr[fb + 0] >= (eta - utils::kFloatEps);
         if (!in_hole || !need_branching || n_d5 == 1) [[likely]] {
             continue;
         }
 
-        const SizeType d5_off   = (fb + 0) * branch_max;
-        const double d5_val_cur = leaves_tree_ptr[(origin * kLeavesStride) + 0];
-        const double d5_sig_cur = leaves_tree_ptr[(origin * kLeavesStride) + 1];
-        auto slice = std::span<double>(scratch_params + d5_off, branch_max);
+        const double d5_val_parent = leaves_tree_ptr[origin_lo + 0];
+        const double d5_sig_parent = leaves_tree_ptr[origin_lo + 1];
+        psr_utils::branch_crackle_padded(slice_span, d5_val_parent,
+                                         d5_sig_parent, n_d5);
 
-        // Reuse scratch_params[d5_off] as temporary buffer — scratch is
-        // fully consumed by Loop 3, safe to overwrite per-leaf here.
-        psr_utils::branch_crackle_padded(slice, d5_val_cur, d5_sig_cur, n_d5);
-
-        // Overwrite slot i with first crackle branch, dparam already computed
-        // in Loop 3
-        leaf[0] = scratch_params[d5_off];
-        // Append remaining crackle branches at the tail
+        // Overwrite slot i with first crackle branch, dparam already
+        // computed in Loop 3. Append remaining crackle branches at the tail
+        leaf[0] = slice_span[0];
         for (SizeType a = 1; a < n_d5; ++a) [[unlikely]] {
             const SizeType bo        = out_leaves * kLeavesStride;
             double* __restrict__ out = leaves_branch_ptr + bo;
 
             // Full copy of this leaf, then patch d5
             std::memcpy(out, leaf, kLeavesStride * sizeof(double));
-            out[0] = scratch_params[d5_off + a];
+            out[0] = slice_span[a];
 
             leaves_origins_ptr[out_leaves] = origin;
             ++out_leaves;
@@ -402,9 +411,8 @@ SizeType circ_taylor_validate_batch(std::span<double> leaves_branch,
         const double accel = leaves_branch[lo + 6];
 
         // Determine whether snap is significantly measured
-        const bool is_sig_snap =
-            std::abs(snap) > (minimum_snap_cells * (dsnap + utils::kEps));
-        const bool snap_possible = (std::abs(accel) > utils::kEps);
+        const bool is_sig_snap = std::abs(snap) > (minimum_snap_cells * dsnap);
+        const bool snap_possible = (std::abs(accel) > utils::kZeroEps);
         const bool sign_valid    = (-snap * accel) > 0.0;
         const bool snap_unphysical =
             is_sig_snap && snap_possible && !sign_valid;
@@ -420,7 +428,7 @@ SizeType circ_taylor_validate_batch(std::span<double> leaves_branch,
         // snap_region: apply physical validity checks
         const double omega_sq = -snap / accel;
         const double limit_accel =
-            x_mass_const * (std::pow(omega_sq, kTwoThirds) + utils::kEps);
+            x_mass_const * std::pow(omega_sq, kTwoThirds);
 
         const bool valid_omega = omega_sq < omega_max_sq;
         // |d2| < x * omega^(4/3)
@@ -561,7 +569,7 @@ void circ_taylor_resolve_batch(std::span<const double> leaves_tree,
         const auto f0      = leaves_tree[lo + 12];
 
         // Circular orbit mask condition
-        const auto omega_orb_sq = -c_t_cur / a_t_cur;
+        const auto omega_orb_sq = -c_t_cur / j_t_cur;
         const auto omega_orb    = std::sqrt(omega_orb_sq);
         // Evolve the phase to the new time t_j = t_i + delta_t
         const auto omega_dt_add = omega_orb * dt_add;
@@ -881,14 +889,14 @@ generate_bp_circ_taylor(std::span<const std::vector<double>> param_arr,
         for (SizeType i = 0; i < n_freqs; ++i) {
             for (SizeType j = 1; j < n_params; ++j) {
                 const auto idx = (i * n_params) + j;
-                if (shift_bins_batch[idx] < (eta - utils::kEps)) {
+                if (shift_bins_batch[idx] < (eta - utils::kFloatEps)) {
                     dparam_cur_next[idx] = dparam_cur_batch[idx];
                     continue;
                 }
-                const auto ratio      = (dparam_cur_batch[idx] + utils::kEps) /
-                                        (dparam_new_batch[idx]);
+                const auto ratio =
+                    (dparam_cur_batch[idx]) / (dparam_new_batch[idx]);
                 const auto num_points = std::max(
-                    1, static_cast<int>(std::ceil(ratio - utils::kEps)));
+                    1, static_cast<int>(std::ceil(ratio - utils::kFloatEps)));
                 n_branches[i] *= static_cast<double>(num_points);
                 dparam_cur_next[idx] =
                     dparam_cur_batch[idx] / static_cast<double>(num_points);
@@ -899,8 +907,7 @@ generate_bp_circ_taylor(std::span<const std::vector<double>> param_arr,
             const auto snap_val = param_limits[1].max;
             const auto dsnap    = dparam_cur_next[(i * n_params) + 1];
             const auto snap_active =
-                std::abs(snap_val) >
-                (minimum_snap_cells * (dsnap + utils::kEps));
+                std::abs(snap_val) > (minimum_snap_cells * dsnap);
             // Apply 0.5x if this is the first time snap becomes active
             const bool just_active = snap_active && !snap_first_branched[i];
             n_branches[i] *= just_active ? 0.5 : 1.0;

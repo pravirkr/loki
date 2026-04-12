@@ -12,12 +12,10 @@
 
 namespace loki::core {
 
-SizeType poly_chebyshev_seed(std::span<const SizeType> param_grid_count_init,
-                             std::span<const double> dparams_init,
-                             std::span<const ParamLimit> param_limits,
-                             std::span<double> seed_leaves,
-                             std::pair<double, double> coord_init,
-                             SizeType n_params);
+void poly_taylor_to_cheby_batch(std::span<double> seed_leaves,
+                                std::pair<double, double> coord_init,
+                                SizeType n_leaves,
+                                SizeType n_params);
 
 SizeType poly_chebyshev_branch_batch(std::span<double> leaves_tree,
                                      std::span<double> leaves_branch,
@@ -52,10 +50,10 @@ void poly_chebyshev_transform_batch(std::span<double> leaves_tree,
                                     SizeType n_leaves,
                                     SizeType n_params);
 
-void poly_chebyshev_report_batch(std::span<double> leaves_tree,
-                                 std::pair<double, double> coord_report,
-                                 SizeType n_leaves,
-                                 SizeType n_params);
+void poly_cheby_to_taylor_batch(std::span<double> leaves_tree,
+                                std::pair<double, double> coord_report,
+                                SizeType n_leaves,
+                                SizeType n_params);
 
 // Generate an approximate branching pattern for the pruning Chebyshev search.
 std::vector<double> generate_bp_poly_chebyshev_approx(
@@ -83,18 +81,14 @@ generate_bp_poly_chebyshev(std::span<const std::vector<double>> param_arr,
 
 #ifdef LOKI_ENABLE_CUDA
 
-void poly_chebyshev_seed_cuda(
-    cuda::std::span<const SizeType> param_grid_count_init,
-    cuda::std::span<const double> dparams_init,
-    cuda::std::span<const ParamLimit> param_limits,
-    cuda::std::span<double> seed_leaves,
-    std::pair<double, double> coord_init,
-    SizeType n_leaves,
-    SizeType n_params,
-    cudaStream_t stream);
+void poly_taylor_to_cheby_batch_cuda(cuda::std::span<double> seed_leaves,
+                                     std::pair<double, double> coord_init,
+                                     SizeType n_leaves,
+                                     SizeType n_params,
+                                     cudaStream_t stream);
 
 SizeType
-poly_chebyshev_branch_batch_cuda(cuda::std::span<const double> leaves_tree,
+poly_chebyshev_branch_batch_cuda(cuda::std::span<double> leaves_tree,
                                  cuda::std::span<double> leaves_branch,
                                  cuda::std::span<uint32_t> leaves_origins,
                                  cuda::std::span<uint8_t> validation_mask,
@@ -135,11 +129,11 @@ void poly_chebyshev_transform_batch_cuda(
     SizeType n_params,
     cudaStream_t stream);
 
-void poly_chebyshev_report_batch_cuda(cuda::std::span<double> leaves_tree,
-                                      std::pair<double, double> coord_report,
-                                      SizeType n_leaves,
-                                      SizeType n_params,
-                                      cudaStream_t stream);
+void poly_cheby_to_taylor_batch_cuda(cuda::std::span<double> leaves_tree,
+                                     std::pair<double, double> coord_report,
+                                     SizeType n_leaves,
+                                     SizeType n_params,
+                                     cudaStream_t stream);
 
 #endif // LOKI_ENABLE_CUDA
 

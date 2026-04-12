@@ -57,15 +57,13 @@ BranchingWorkspace::BranchingWorkspace(SizeType batch_size,
     : scratch_params(batch_size * n_params * branch_max),
       scratch_dparams(batch_size * n_params),
       scratch_counts(batch_size * n_params),
-      tmp_dparam_new(batch_size * n_params),
-      tmp_shift_bins(batch_size * n_params) {}
+      scratch_shifts(batch_size * n_params) {}
 
-[[nodiscard]] float BranchingWorkspace::get_memory_usage() const noexcept {
+[[nodiscard]] float BranchingWorkspace::get_memory_usage_gib() const noexcept {
     const auto total_memory = (scratch_params.size() * sizeof(double)) +
                               (scratch_dparams.size() * sizeof(double)) +
                               (scratch_counts.size() * sizeof(SizeType)) +
-                              (tmp_dparam_new.size() * sizeof(double)) +
-                              (tmp_shift_bins.size() * sizeof(double));
+                              (scratch_shifts.size() * sizeof(double));
     return static_cast<float>(total_memory) / static_cast<float>(1ULL << 30U);
 }
 
@@ -82,11 +80,8 @@ void BranchingWorkspace::validate(SizeType batch_size,
         scratch_counts.size(), batch_size * nparams,
         "BranchingWorkspace: scratch_counts size is too small");
     error_check::check_equal(
-        tmp_dparam_new.size(), batch_size * nparams,
-        "BranchingWorkspace: tmp_dparam_new size is too small");
-    error_check::check_equal(
-        tmp_shift_bins.size(), batch_size * nparams,
-        "BranchingWorkspace: tmp_shift_bins size is too small");
+        scratch_shifts.size(), batch_size * nparams,
+        "BranchingWorkspace: scratch_shifts size is too small");
 }
 
 // --- PruneWorkspace implementation ---
@@ -110,7 +105,7 @@ PruneWorkspace<FoldType>::PruneWorkspace(SizeType batch_size,
       branched_phase_shift(max_branched_leaves) {}
 
 template <SupportedFoldType FoldType>
-float PruneWorkspace<FoldType>::get_memory_usage() const noexcept {
+float PruneWorkspace<FoldType>::get_memory_usage_gib() const noexcept {
     const auto total_memory = (branched_leaves.size() * sizeof(double)) +
                               (branched_folds.size() * sizeof(FoldType)) +
                               (branched_scores.size() * sizeof(float)) +
@@ -159,9 +154,10 @@ EPWorkspace<FoldType>::EPWorkspace(SizeType batch_size,
 }
 
 template <SupportedFoldType FoldType>
-float EPWorkspace<FoldType>::get_memory_usage() const noexcept {
-    const auto base_gb = world_tree.get_memory_usage() +
-                         prune.get_memory_usage() + branch.get_memory_usage();
+float EPWorkspace<FoldType>::get_memory_usage_gib() const noexcept {
+    const auto base_gb      = world_tree.get_memory_usage_gib() +
+                              prune.get_memory_usage_gib() +
+                              branch.get_memory_usage_gib();
     const auto extra_memory = (seed_leaves.size() * sizeof(double)) +
                               (seed_scores.size() * sizeof(float));
     const auto extra_gb =

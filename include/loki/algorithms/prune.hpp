@@ -82,9 +82,12 @@ public:
         std::string_view poly_basis                   = "taylor",
         int device_id                                 = 0);
 
-    // Pipeline-based EP constructor uses external workspace
+    // Pipeline-based EP: upstream owns workspace; must pass the same
+    // cudaStream_t used to construct EPWorkspaceCUDA (so CUBScratchArena
+    // alloc/free and kernels match).
     EPMultiPassCUDA(
         memory::EPWorkspaceCUDA<FoldTypeCUDA>& workspace,
+        cudaStream_t execution_stream,
         search::PulsarSearchConfig cfg,
         std::span<const float> threshold_scheme,
         std::optional<SizeType> n_runs                = std::nullopt,

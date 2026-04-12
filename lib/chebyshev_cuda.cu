@@ -314,53 +314,6 @@ taylor_to_cheby_snap(double* __restrict__ leaves_tree,
         sqrt((d0_err * d0_err) + (e2_2 * e2_2) + (e4_0 * e4_0));
 }
 
-__global__ void
-kernel_poly_taylor_seed(const SizeType* __restrict__ param_grid_count_init,
-                        const double* __restrict__ dparams_init,
-                        const ParamLimit* __restrict__ param_limits,
-                        double* __restrict__ seed_leaves,
-                        uint32_t n_leaves,
-                        uint32_t n_params) {
-    constexpr uint32_t kParamStride = 2;
-
-    const uint32_t ileaf = (blockIdx.x * blockDim.x) + threadIdx.x;
-    if (ileaf >= n_leaves) {
-        return;
-    }
-
-    const auto n_accel_init  = param_grid_count_init[n_params - 2];
-    const auto n_freq_init   = param_grid_count_init[n_params - 1];
-    const auto d_freq_cur    = dparams_init[n_params - 1];
-    const uint32_t accel_idx = ileaf / n_freq_init;
-    const uint32_t freq_idx  = ileaf % n_freq_init;
-
-    const double a_cur = utils::get_param_val_at_idx_device(
-        param_limits[n_params - 2].min, param_limits[n_params - 2].max,
-        n_accel_init, accel_idx);
-    const double f_cur = utils::get_param_val_at_idx_device(
-        param_limits[n_params - 1].min, param_limits[n_params - 1].max,
-        n_freq_init, freq_idx);
-
-    const uint32_t lo = (n_params + 2) * kParamStride * ileaf;
-    // Copy till d2 (acceleration)
-    for (uint32_t j = 0; j < n_params - 1; ++j) {
-        seed_leaves[lo + (j * kParamStride) + 0] = 0.0;
-        seed_leaves[lo + (j * kParamStride) + 1] = dparams_init[j];
-    }
-    seed_leaves[lo + ((n_params - 2) * kParamStride) + 0] = a_cur;
-    // Update frequency to velocity
-    // f = f0(1 - v / C) => dv = -(C/f0) * df
-    seed_leaves[lo + ((n_params - 1) * kParamStride) + 0] = 0;
-    seed_leaves[lo + ((n_params - 1) * kParamStride) + 1] =
-        d_freq_cur * (utils::kCval / f_cur);
-    // intialize d0 (measure from t=t_init) and store f0
-    seed_leaves[lo + ((n_params + 0) * kParamStride) + 0] = 0;
-    seed_leaves[lo + ((n_params + 0) * kParamStride) + 1] = 0;
-    seed_leaves[lo + ((n_params + 1) * kParamStride) + 0] = f_cur;
-    // Store basis flag (0: Polynomial, 1: Physical)
-    seed_leaves[lo + ((n_params + 1) * kParamStride) + 1] = 0;
-}
-
 __device__ __forceinline__ void analyze_and_branch_chebyshev_accel(
     const double* __restrict__ leaves_tree,
     uint32_t n_leaves,
@@ -1228,35 +1181,6 @@ __global__ void kernel_poly_chebyshev_transform_batch(
     }
 }
 
-__global__ void kernel_poly_taylor_report_batch(
-    double* __restrict__ leaves_tree, uint32_t n_leaves, uint32_t n_params) {
-    const uint32_t tid = (blockIdx.x * blockDim.x) + threadIdx.x;
-    if (tid >= n_leaves) {
-        return;
-    }
-    const uint32_t leaves_stride = n_params * 2;
-    const uint32_t leaf_offset   = tid * leaves_stride;
-    const double v_final  = leaves_tree[leaf_offset + ((n_params - 1) * 2) + 0];
-    const double dv_final = leaves_tree[leaf_offset + ((n_params - 1) * 2) + 1];
-    const double f0_batch = leaves_tree[leaf_offset + ((n_params + 1) * 2) + 0];
-    const double s_factor = 1.0 - (v_final * utils::kInvCval);
-    // Gauge transform + error propagation
-    for (uint32_t j = 0; j < n_params - 1; ++j) {
-        const uint32_t param_offset   = leaf_offset + (j * 2);
-        const double param_val        = leaves_tree[param_offset + 0];
-        const double param_err        = leaves_tree[param_offset + 1];
-        leaves_tree[param_offset + 0] = param_val / s_factor;
-        leaves_tree[param_offset + 1] =
-            sqrt(((param_err / s_factor) * (param_err / s_factor)) +
-                 ((param_val * utils::kInvCval / (s_factor * s_factor)) *
-                  (param_val * utils::kInvCval / (s_factor * s_factor)) *
-                  (dv_final * dv_final)));
-    }
-    leaves_tree[leaf_offset + ((n_params - 1) * 2) + 0] = f0_batch * s_factor;
-    leaves_tree[leaf_offset + ((n_params - 1) * 2) + 1] =
-        f0_batch * dv_final * utils::kInvCval;
-}
-
 // Chebyshev to Taylor Transform Kernel
 template <int NPARAMS>
 __global__ void kernel_poly_cheby_to_taylor_batch(
@@ -1293,15 +1217,11 @@ kernel_poly_taylor_to_cheby_batch(double* __restrict__ leaves_tree,
 
 } // namespace
 
-void poly_chebyshev_seed_cuda(
-    cuda::std::span<const SizeType> param_grid_count_init,
-    cuda::std::span<const double> dparams_init,
-    cuda::std::span<const ParamLimit> param_limits,
-    cuda::std::span<double> seed_leaves,
-    std::pair<double, double> coord_init,
-    SizeType n_leaves,
-    SizeType n_params,
-    cudaStream_t stream) {
+void poly_taylor_to_cheby_batch_cuda(cuda::std::span<double> seed_leaves,
+                                     std::pair<double, double> coord_init,
+                                     SizeType n_leaves,
+                                     SizeType n_params,
+                                     cudaStream_t stream) {
     constexpr SizeType kThreadPerBlock = 256;
     const auto blocks_per_grid =
         (n_leaves + kThreadPerBlock - 1) / kThreadPerBlock;
@@ -1309,10 +1229,6 @@ void poly_chebyshev_seed_cuda(
     const dim3 block_dim(kThreadPerBlock);
     const dim3 grid_dim(blocks_per_grid);
     cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
-    kernel_poly_taylor_seed<<<grid_dim, block_dim, 0, stream>>>(
-        param_grid_count_init.data(), dparams_init.data(), param_limits.data(),
-        seed_leaves.data(), n_leaves, n_params);
-    cuda_utils::check_last_cuda_error("Chebyshev seed kernel launch failed");
 
     // Convert to Chebyshev basis
     auto dispatch = [&]<int N>() {
@@ -1337,8 +1253,7 @@ void poly_chebyshev_seed_cuda(
 
     cuda_utils::check_last_cuda_error(
         "kernel_poly_taylor_to_cheby_batch kernel launch failed");
-    cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
-                                "cudaStreamSynchronize seed kernel failed");
+    // No need to sync, the next kernel will do it
 }
 
 SizeType
@@ -1592,11 +1507,11 @@ void poly_chebyshev_transform_batch_cuda(
     // No need to sync, the next kernel will do it
 }
 
-void poly_taylor_report_batch_cuda(cuda::std::span<double> leaves_tree,
-                                   std::pair<double, double> coord_report,
-                                   SizeType n_leaves,
-                                   SizeType n_params,
-                                   cudaStream_t stream) {
+void poly_cheby_to_taylor_batch_cuda(cuda::std::span<double> leaves_tree,
+                                     std::pair<double, double> coord_report,
+                                     SizeType n_leaves,
+                                     SizeType n_params,
+                                     cudaStream_t stream) {
     // Better occupancy than 512 for many kernels
     constexpr int kBlockSize = 256;
     const dim3 block(kBlockSize);
@@ -1625,12 +1540,7 @@ void poly_taylor_report_batch_cuda(cuda::std::span<double> leaves_tree,
 
     cuda_utils::check_last_cuda_error(
         "kernel_poly_cheby_to_taylor_batch kernel launch failed");
-
-    kernel_poly_taylor_report_batch<<<grid, block, 0, stream>>>(
-        leaves_tree.data(), n_leaves, n_params);
-    cuda_utils::check_last_cuda_error("Taylor report kernel launch failed");
-    cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
-                                "cudaStreamSynchronize report kernel failed");
+    // No need to sync, the next kernel will do it
 }
 
 } // namespace loki::core

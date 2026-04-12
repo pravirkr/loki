@@ -23,6 +23,12 @@ struct ParamLimit {
     double max;
 };
 
+/// Holds the minimum and maximum of a set of float scores.
+struct MinMaxFloat {
+    float min;
+    float max;
+};
+
 template <typename T>
 concept SupportedFoldType =
     std::is_same_v<T, float> || std::is_same_v<T, ComplexType>;

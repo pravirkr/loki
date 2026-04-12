@@ -7,9 +7,11 @@
 #include <cuda/std/limits>
 #include <cuda/std/span>
 #include <thrust/copy.h>
+#include <thrust/count.h>
 #include <thrust/device_ptr.h>
 #include <thrust/device_vector.h>
 #include <thrust/execution_policy.h>
+#include <thrust/gather.h>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/reduce.h>
 #include <thrust/scan.h>
@@ -24,124 +26,173 @@
 namespace loki::memory {
 namespace {
 
-// Warp-per-row kernel (for most workloads)
-template <SupportedFoldTypeCUDA FoldTypeCUDA>
-__global__ void kernel_scatter_to_circular_copy_warp_per_row(
-    const double* __restrict__ src_leaves,
-    const FoldTypeCUDA* __restrict__ src_folds,
-    const float* __restrict__ src_scores,
-    const uint32_t* __restrict__ src_indices,
-    double* __restrict__ dst_leaves,
-    FoldTypeCUDA* __restrict__ dst_folds,
-    float* __restrict__ dst_scores,
-    uint32_t dst_start_slot,
-    uint32_t capacity,
-    uint32_t slots_to_write,
-    uint32_t leaves_stride,
-    uint32_t folds_stride) {
-    constexpr uint32_t kWarpSize = 32;
-
-    const uint32_t lane            = threadIdx.x & (kWarpSize - 1);
-    const uint32_t warp_in_block   = threadIdx.x / kWarpSize;
-    const uint32_t warps_per_block = blockDim.x / kWarpSize;
-
-    const uint32_t global_warp = (blockIdx.x * warps_per_block) + warp_in_block;
-    const uint32_t total_warps = gridDim.x * warps_per_block;
-
-    for (uint32_t row = global_warp; row < slots_to_write; row += total_warps) {
-        const uint32_t src_idx = src_indices[row];
-        uint32_t dst_idx       = dst_start_slot + row;
-        if (dst_idx >= capacity) {
-            dst_idx -= capacity;
-        }
-        for (uint32_t j = lane; j < leaves_stride; j += kWarpSize) {
-            dst_leaves[(dst_idx * leaves_stride) + j] =
-                src_leaves[(src_idx * leaves_stride) + j];
-        }
-        for (uint32_t j = lane; j < folds_stride; j += kWarpSize) {
-            dst_folds[(dst_idx * folds_stride) + j] =
-                src_folds[(src_idx * folds_stride) + j];
-        }
-        // Score: lane 0 only
-        if (lane == 0) {
-            dst_scores[dst_idx] = src_scores[src_idx];
-        }
-    }
+/**
+ * @brief Resolves a logical index to a physical circular buffer index.
+ * @note This is strictly a 1-to-1 mapping as long as logical < capacity.
+ */
+__host__ __device__ __forceinline__ uint32_t
+get_phys_idx_device(uint32_t logical, uint32_t start, uint32_t capacity) {
+    uint32_t x = start + logical;
+    return (x < capacity) ? x : x - capacity;
 }
 
+struct KeepPredicate {
+    const float* __restrict__ scores;
+    uint32_t start;
+    uint32_t capacity;
+    float threshold;
+
+    __host__ __device__ bool operator()(uint32_t logical_idx) const {
+        const uint32_t phys_idx =
+            get_phys_idx_device(logical_idx, start, capacity);
+        return scores[phys_idx] > threshold;
+    }
+};
+
+struct NotKeepPredicate {
+    KeepPredicate inner;
+    __host__ __device__ bool operator()(uint32_t i) const { return !inner(i); }
+};
+
+struct ScoreAboveThresholdFunctor {
+    const float* __restrict__ scores;
+    float threshold;
+
+    __host__ __device__ bool operator()(uint32_t idx) const {
+        return scores[idx] >= threshold;
+    }
+};
+
+// Warp-per-row kernel (for most workloads)
 // Multi-warp per-row kernel (for large workloads)
 template <SizeType WarpsPerRow, SupportedFoldTypeCUDA FoldTypeCUDA>
-__global__ void kernel_scatter_to_circular_copy_multiwarp_per_row(
-    const double* __restrict__ src_leaves,
-    const FoldTypeCUDA* __restrict__ src_folds,
-    const float* __restrict__ src_scores,
-    const uint32_t* __restrict__ src_indices,
-    double* __restrict__ dst_leaves,
-    FoldTypeCUDA* __restrict__ dst_folds,
-    float* __restrict__ dst_scores,
-    uint32_t dst_start_slot,
-    uint32_t capacity,
-    uint32_t slots_to_write,
-    uint32_t leaves_stride,
-    uint32_t folds_stride) {
+__global__ void kernel_rowwise(const double* __restrict__ src_leaves,
+                               double* __restrict__ dst_leaves,
+                               const FoldTypeCUDA* __restrict__ src_folds,
+                               FoldTypeCUDA* __restrict__ dst_folds,
+                               const float* __restrict__ src_scores,
+                               float* __restrict__ dst_scores,
+                               const uint32_t* __restrict__ src_indices,
+                               uint32_t dst_start_slot,
+                               uint32_t capacity,
+                               uint32_t slots_to_write,
+                               uint32_t leaves_stride,
+                               uint32_t folds_stride) {
     constexpr uint32_t kWarpSize = 32;
+    constexpr bool kMultiWarp    = (WarpsPerRow > 1);
 
     const uint32_t lane            = threadIdx.x & (kWarpSize - 1);
     const uint32_t warp_in_block   = threadIdx.x / kWarpSize;
     const uint32_t warps_per_block = blockDim.x / kWarpSize;
-
     const uint32_t global_warp = (blockIdx.x * warps_per_block) + warp_in_block;
     const uint32_t total_warps = gridDim.x * warps_per_block;
 
-    uint32_t row              = global_warp / WarpsPerRow;
-    const uint32_t subwarp    = global_warp % WarpsPerRow;
-    const uint32_t row_stride = total_warps / WarpsPerRow;
+    uint32_t row, subwarp, row_stride;
+    if constexpr (kMultiWarp) {
+        row        = global_warp / WarpsPerRow;
+        subwarp    = global_warp % WarpsPerRow;
+        row_stride = total_warps / WarpsPerRow;
+    } else {
+        row        = global_warp;
+        subwarp    = 0;
+        row_stride = total_warps;
+    }
 
     for (; row < slots_to_write; row += row_stride) {
+        const uint32_t dst_idx =
+            get_phys_idx_device(row, dst_start_slot, capacity);
         const uint32_t src_idx = src_indices[row];
-        uint32_t dst_idx       = dst_start_slot + row;
-        if (dst_idx >= capacity) {
-            dst_idx -= capacity;
-        }
-        if (subwarp == 0) {
+
+        if (!kMultiWarp || subwarp == 0) {
             for (uint32_t j = lane; j < leaves_stride; j += kWarpSize) {
-                dst_leaves[(dst_idx * leaves_stride) + j] =
-                    src_leaves[(src_idx * leaves_stride) + j];
+                dst_leaves[dst_idx * leaves_stride + j] =
+                    src_leaves[src_idx * leaves_stride + j];
             }
-            // Score: lane 0 only
             if (lane == 0) {
                 dst_scores[dst_idx] = src_scores[src_idx];
             }
         }
-        for (uint32_t j = (subwarp * kWarpSize) + lane; j < folds_stride;
-             j += (WarpsPerRow * kWarpSize)) {
-            dst_folds[(dst_idx * folds_stride) + j] =
-                src_folds[(src_idx * folds_stride) + j];
+
+        if constexpr (kMultiWarp) {
+            for (uint32_t j = subwarp * kWarpSize + lane; j < folds_stride;
+                 j += WarpsPerRow * kWarpSize) {
+                dst_folds[dst_idx * folds_stride + j] =
+                    src_folds[src_idx * folds_stride + j];
+            }
+        } else {
+            for (uint32_t j = lane; j < folds_stride; j += kWarpSize) {
+                dst_folds[dst_idx * folds_stride + j] =
+                    src_folds[src_idx * folds_stride + j];
+            }
         }
     }
 }
 
-template <typename T>
-__global__ void compact_in_place_kernel(const uint8_t* __restrict__ keep,
-                                        const uint32_t* __restrict__ prefix,
-                                        T* __restrict__ data,
-                                        uint32_t start,
-                                        uint32_t capacity,
-                                        uint32_t size,
-                                        uint32_t stride) {
-    const uint32_t i = (blockIdx.x * blockDim.x) + threadIdx.x;
-    if (i >= size || keep[i] == 0) {
-        return;
+/**
+ * @brief In-place rowwise copy: same buffers for read and write (distinct
+ * indices per row). Separate from kernel_rowwise so we use one __restrict__
+ * pointer per buffer and avoid -Wrestrict when src/dst base addresses would
+ * alias.
+ */
+template <SizeType WarpsPerRow, SupportedFoldTypeCUDA FoldTypeCUDA>
+__global__ void kernel_rowwise_inplace(const uint32_t* __restrict__ holes,
+                                       const uint32_t* __restrict__ survivors,
+                                       double* __restrict__ leaves,
+                                       FoldTypeCUDA* __restrict__ folds,
+                                       float* __restrict__ scores,
+                                       uint32_t start,
+                                       uint32_t capacity,
+                                       uint32_t swap_count,
+                                       uint32_t leaves_stride,
+                                       uint32_t folds_stride) {
+    constexpr uint32_t kWarpSize = 32;
+    constexpr bool kMultiWarp    = (WarpsPerRow > 1);
+
+    const uint32_t lane            = threadIdx.x & (kWarpSize - 1);
+    const uint32_t warp_in_block   = threadIdx.x / kWarpSize;
+    const uint32_t warps_per_block = blockDim.x / kWarpSize;
+    const uint32_t global_warp = (blockIdx.x * warps_per_block) + warp_in_block;
+    const uint32_t total_warps = gridDim.x * warps_per_block;
+
+    uint32_t row, subwarp, row_stride;
+    if constexpr (kMultiWarp) {
+        row        = global_warp / WarpsPerRow;
+        subwarp    = global_warp % WarpsPerRow;
+        row_stride = total_warps / WarpsPerRow;
+    } else {
+        row        = global_warp;
+        subwarp    = 0;
+        row_stride = total_warps;
     }
 
-    const uint32_t dst_logical = prefix[i];
-    const uint32_t src_lin     = start + i;
-    const uint32_t dst_lin     = start + dst_logical;
-    const uint32_t src_phys = src_lin < capacity ? src_lin : src_lin - capacity;
-    const uint32_t dst_phys = dst_lin < capacity ? dst_lin : dst_lin - capacity;
-    // Copy full row
-    for (uint32_t j = 0; j < stride; ++j) {
-        data[(dst_phys * stride) + j] = data[(src_phys * stride) + j];
+    for (; row < swap_count; row += row_stride) {
+        const uint32_t dst_idx =
+            get_phys_idx_device(holes[row], start, capacity);
+        const uint32_t src_idx =
+            get_phys_idx_device(survivors[row], start, capacity);
+
+        if (!kMultiWarp || subwarp == 0) {
+            for (uint32_t j = lane; j < leaves_stride; j += kWarpSize) {
+                leaves[dst_idx * leaves_stride + j] =
+                    leaves[src_idx * leaves_stride + j];
+            }
+            if (lane == 0) {
+                scores[dst_idx] = scores[src_idx];
+            }
+        }
+
+        if constexpr (kMultiWarp) {
+            for (uint32_t j = subwarp * kWarpSize + lane; j < folds_stride;
+                 j += WarpsPerRow * kWarpSize) {
+                folds[dst_idx * folds_stride + j] =
+                    folds[src_idx * folds_stride + j];
+            }
+        } else {
+            for (uint32_t j = lane; j < folds_stride; j += kWarpSize) {
+                folds[dst_idx * folds_stride + j] =
+                    folds[src_idx * folds_stride + j];
+            }
+        }
     }
 }
 
@@ -169,56 +220,93 @@ void scatter_to_circular_copy_cuda(const double* __restrict__ src_leaves,
     if (folds_stride > 1024) {
         warps_per_row = 4;
     }
-
     const SizeType work_warps = slots_to_write * warps_per_row;
     const SizeType blocks_per_grid =
         (work_warps + kWarpsPerBlock - 1) / kWarpsPerBlock;
     const dim3 block_dim(kThreadsPerBlock);
     const dim3 grid_dim(blocks_per_grid);
     cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
+
     if (warps_per_row == 4) {
-        kernel_scatter_to_circular_copy_multiwarp_per_row<4, FoldTypeCUDA>
-            <<<grid_dim, block_dim, 0, stream>>>(
-                src_leaves, src_folds, src_scores, src_indices, dst_leaves,
-                dst_folds, dst_scores, dst_start_slot, capacity, slots_to_write,
-                leaves_stride, folds_stride);
+        kernel_rowwise<4, FoldTypeCUDA><<<grid_dim, block_dim, 0, stream>>>(
+            src_leaves, dst_leaves, src_folds, dst_folds, src_scores,
+            dst_scores, src_indices, dst_start_slot, capacity, slots_to_write,
+            leaves_stride, folds_stride);
     } else if (warps_per_row == 2) {
-        kernel_scatter_to_circular_copy_multiwarp_per_row<2, FoldTypeCUDA>
-            <<<grid_dim, block_dim, 0, stream>>>(
-                src_leaves, src_folds, src_scores, src_indices, dst_leaves,
-                dst_folds, dst_scores, dst_start_slot, capacity, slots_to_write,
-                leaves_stride, folds_stride);
+        kernel_rowwise<2, FoldTypeCUDA><<<grid_dim, block_dim, 0, stream>>>(
+            src_leaves, dst_leaves, src_folds, dst_folds, src_scores,
+            dst_scores, src_indices, dst_start_slot, capacity, slots_to_write,
+            leaves_stride, folds_stride);
     } else {
-        kernel_scatter_to_circular_copy_warp_per_row<FoldTypeCUDA>
-            <<<grid_dim, block_dim, 0, stream>>>(
-                src_leaves, src_folds, src_scores, src_indices, dst_leaves,
-                dst_folds, dst_scores, dst_start_slot, capacity, slots_to_write,
-                leaves_stride, folds_stride);
+        kernel_rowwise<1, FoldTypeCUDA><<<grid_dim, block_dim, 0, stream>>>(
+            src_leaves, dst_leaves, src_folds, dst_folds, src_scores,
+            dst_scores, src_indices, dst_start_slot, capacity, slots_to_write,
+            leaves_stride, folds_stride);
     }
     cuda_utils::check_last_cuda_error("scatter_to_circular_copy_cuda failed");
 }
 
-struct ScoreAboveThresholdFunctor {
-    const float* __restrict__ scores_ptr;
-    float threshold;
-
-    __host__ __device__ bool operator()(uint32_t idx) const {
-        return scores_ptr[idx] >= threshold;
+/**
+ * @brief Fused kernel to atomically move a payload (leaves, folds, scores).
+ * * SAFETY INVARIANT:
+ * The `holes` array exclusively contains logical indices < K.
+ * The `survivors` array exclusively contains logical indices >= K.
+ * Because N <= capacity, the mapping to physical indices is strictly injective.
+ * Therefore, `dst` can NEVER equal `src`, making Write-After-Read (WAR)
+ * impossible.
+ */
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+void fused_move_pairs_cuda(const uint32_t* __restrict__ holes,
+                           const uint32_t* __restrict__ survivors,
+                           double* __restrict__ leaves,
+                           FoldTypeCUDA* __restrict__ folds,
+                           float* __restrict__ scores,
+                           uint32_t start,
+                           uint32_t capacity,
+                           uint32_t swap_count,
+                           uint32_t leaves_stride,
+                           uint32_t folds_stride,
+                           cudaStream_t stream) {
+    if (swap_count == 0) {
+        return;
     }
-};
+    constexpr SizeType kThreadsPerBlock = 256; // 8 warps
+    constexpr SizeType kWarpsPerBlock   = kThreadsPerBlock / 32;
 
-struct CircularMaskFunctor {
-    const float* __restrict__ scores_ptr;
-    uint32_t start;
-    uint32_t capacity;
-    float threshold;
-
-    __host__ __device__ uint8_t operator()(uint32_t logical_idx) const {
-        const uint32_t x    = start + logical_idx;
-        const uint32_t phys = (x < capacity) ? x : x - capacity;
-        return (scores_ptr[phys] > threshold) ? 1 : 0;
+    SizeType warps_per_row = 1;
+    if (folds_stride > 512) {
+        warps_per_row = 2;
     }
-};
+    if (folds_stride > 1024) {
+        warps_per_row = 4;
+    }
+
+    const SizeType work_warps = swap_count * warps_per_row;
+    const SizeType blocks_per_grid =
+        (work_warps + kWarpsPerBlock - 1) / kWarpsPerBlock;
+    const dim3 block_dim(kThreadsPerBlock);
+    const dim3 grid_dim(blocks_per_grid);
+    cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
+
+    if (warps_per_row == 4) {
+        kernel_rowwise_inplace<4, FoldTypeCUDA>
+            <<<grid_dim, block_dim, 0, stream>>>(
+                holes, survivors, leaves, folds, scores, start, capacity,
+                swap_count, leaves_stride, folds_stride);
+    } else if (warps_per_row == 2) {
+        kernel_rowwise_inplace<2, FoldTypeCUDA>
+            <<<grid_dim, block_dim, 0, stream>>>(
+                holes, survivors, leaves, folds, scores, start, capacity,
+                swap_count, leaves_stride, folds_stride);
+    } else {
+        kernel_rowwise_inplace<1, FoldTypeCUDA>
+            <<<grid_dim, block_dim, 0, stream>>>(
+                holes, survivors, leaves, folds, scores, start, capacity,
+                swap_count, leaves_stride, folds_stride);
+    }
+    cuda_utils::check_last_cuda_error("fused_move_pairs_cuda failed");
+}
+
 } // namespace
 
 /**
@@ -251,18 +339,20 @@ WorldTreeCUDA<FoldTypeCUDA>::WorldTreeCUDA(SizeType capacity,
       m_leaves(m_capacity * m_leaves_stride, 0.0),
       m_folds(m_capacity * m_folds_stride, FoldTypeCUDA{}),
       m_scores(m_capacity, 0.0F),
-      m_scratch_leaves(m_capacity * (nparams * kParamStride), 0.0),
       m_scratch_scores((m_capacity + max_batch_size), 0.0F),
-      m_scratch_pending_indices(max_batch_size, 0),
-      m_scratch_prefix(m_capacity, 0),
+      m_scratch_indices_1(m_capacity, 0),
+      m_scratch_indices_2(m_capacity, 0),
       m_scratch_mask(m_capacity, 0) {
     // Validate inputs
     error_check::check_greater(m_capacity, SizeType{0},
-                               "SuggestionTreeCUDA: capacity must be > 0");
+                               "WorldTreeCUDA: capacity must be > 0");
     error_check::check_greater(m_nparams, SizeType{0},
-                               "SuggestionTreeCUDA: nparams must be > 0");
+                               "WorldTreeCUDA: nparams must be > 0");
     error_check::check_greater(m_nbins, SizeType{0},
-                               "SuggestionTreeCUDA: nbins must be > 0");
+                               "WorldTreeCUDA: nbins must be > 0");
+    error_check::check_greater(
+        m_capacity, m_max_batch_size,
+        "WorldTreeCUDA: capacity must be > max_batch_size");
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
@@ -274,80 +364,72 @@ float WorldTreeCUDA<FoldTypeCUDA>::get_size_lb() const noexcept {
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 cuda::std::span<const double>
 WorldTreeCUDA<FoldTypeCUDA>::get_leaves_span() const noexcept {
-    return {thrust::raw_pointer_cast(m_leaves.data()), m_leaves.size()};
+    return cuda_utils::as_span(m_leaves);
 }
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 cuda::std::span<const FoldTypeCUDA>
 WorldTreeCUDA<FoldTypeCUDA>::get_folds_span() const noexcept {
-    return {thrust::raw_pointer_cast(m_folds.data()), m_folds.size()};
+    return cuda_utils::as_span(m_folds);
 }
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 cuda::std::span<const float>
 WorldTreeCUDA<FoldTypeCUDA>::get_scores_span() const noexcept {
-    return {thrust::raw_pointer_cast(m_scores.data()), m_scores.size()};
+    return cuda_utils::as_span(m_scores);
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
-float WorldTreeCUDA<FoldTypeCUDA>::get_score_max() const noexcept {
+float WorldTreeCUDA<FoldTypeCUDA>::get_score_max(
+    cudaStream_t stream) const noexcept {
     if (m_size == 0) {
         return 0.0F;
     }
-    const SizeType start = get_current_start_idx();
-    if (start + m_size <= m_capacity) {
-        // Contiguous case - direct reduction
-        return thrust::reduce(thrust::device, m_scores.begin() + start,
-                              m_scores.begin() + start + m_size,
-                              cuda::std::numeric_limits<float>::lowest(),
-                              ThrustMaxOp<float>());
-    } // Wrapped case - two reductions
-    const SizeType first_count = m_capacity - start;
-
-    float max1 = thrust::reduce(
-        thrust::device, m_scores.begin() + start, m_scores.end(),
+    auto regions =
+        get_active_regions(cuda_utils::as_span(m_scores), SizeType{1});
+    float max_val = thrust::reduce(
+        thrust::cuda::par.on(stream), regions.first.data(),
+        regions.first.data() + regions.first.size(),
         cuda::std::numeric_limits<float>::lowest(), ThrustMaxOp<float>());
-    float max2 = thrust::reduce(thrust::device, m_scores.begin(),
-                                m_scores.begin() + (m_size - first_count),
-                                cuda::std::numeric_limits<float>::lowest(),
-                                ThrustMaxOp<float>());
-    return std::max(max1, max2);
+    if (!regions.second.empty()) {
+        const float max_val2 = thrust::reduce(
+            thrust::cuda::par.on(stream), regions.second.data(),
+            regions.second.data() + regions.second.size(),
+            cuda::std::numeric_limits<float>::lowest(), ThrustMaxOp<float>());
+        max_val = cuda::std::max(max_val, max_val2);
+    }
+    return max_val;
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
-float WorldTreeCUDA<FoldTypeCUDA>::get_score_min() const noexcept {
+float WorldTreeCUDA<FoldTypeCUDA>::get_score_min(
+    cudaStream_t stream) const noexcept {
     if (m_size == 0) {
         return 0.0F;
     }
-    const SizeType start = get_current_start_idx();
-
-    if (start + m_size <= m_capacity) {
-        return thrust::reduce(thrust::device, m_scores.begin() + start,
-                              m_scores.begin() + start + m_size,
-                              cuda::std::numeric_limits<float>::max(),
-                              ThrustMinOp<float>());
-    }
-    const SizeType first_count = m_capacity - start;
-
-    float min1 = thrust::reduce(
-        thrust::device, m_scores.begin() + start, m_scores.end(),
+    auto regions =
+        get_active_regions(cuda_utils::as_span(m_scores), SizeType{1});
+    float min_val = thrust::reduce(
+        thrust::cuda::par.on(stream), regions.first.data(),
+        regions.first.data() + regions.first.size(),
         cuda::std::numeric_limits<float>::max(), ThrustMinOp<float>());
-    float min2 = thrust::reduce(thrust::device, m_scores.begin(),
-                                m_scores.begin() + (m_size - first_count),
-                                cuda::std::numeric_limits<float>::max(),
-                                ThrustMinOp<float>());
-    return std::min(min1, min2);
+    if (!regions.second.empty()) {
+        const float min_val2 = thrust::reduce(
+            thrust::cuda::par.on(stream), regions.second.data(),
+            regions.second.data() + regions.second.size(),
+            cuda::std::numeric_limits<float>::max(), ThrustMinOp<float>());
+        min_val = cuda::std::min(min_val, min_val2);
+    }
+    return min_val;
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
-float WorldTreeCUDA<FoldTypeCUDA>::get_memory_usage() const noexcept {
-    const auto base_bytes =
-        (m_leaves.size() * sizeof(double)) +
-        (m_folds.size() * sizeof(FoldTypeCUDA)) +
-        (m_scores.size() * sizeof(float)) +
-        (m_scratch_leaves.size() * sizeof(double)) +
-        (m_scratch_scores.size() * sizeof(float)) +
-        (m_scratch_pending_indices.size() * sizeof(uint32_t)) +
-        (m_scratch_prefix.size() * sizeof(uint32_t)) +
-        (m_scratch_mask.size() * sizeof(uint8_t));
+float WorldTreeCUDA<FoldTypeCUDA>::get_memory_usage_gib() const noexcept {
+    const auto base_bytes = (m_leaves.size() * sizeof(double)) +
+                            (m_folds.size() * sizeof(FoldTypeCUDA)) +
+                            (m_scores.size() * sizeof(float)) +
+                            (m_scratch_scores.size() * sizeof(float)) +
+                            (m_scratch_indices_1.size() * sizeof(uint32_t)) +
+                            (m_scratch_indices_2.size() * sizeof(uint32_t)) +
+                            (m_scratch_mask.size() * sizeof(uint8_t));
 
     return static_cast<float>(base_bytes) / static_cast<float>(1ULL << 30U);
 }
@@ -394,56 +476,25 @@ WorldTreeCUDA<FoldTypeCUDA>::get_leaves_span(SizeType n_leaves) {
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
-cuda::std::span<double> WorldTreeCUDA<FoldTypeCUDA>::get_leaves_contiguous_span(
-    cudaStream_t stream) noexcept {
-    const auto start_idx     = get_current_start_idx();
-    const auto report_stride = m_nparams * kParamStride;
-    const SizeType src_pitch = m_leaves_stride * sizeof(double);
-    const SizeType dst_pitch = report_stride * sizeof(double);
-    const SizeType row_bytes = report_stride * sizeof(double);
-
-    const double* __restrict__ src = thrust::raw_pointer_cast(m_leaves.data());
-    double* __restrict__ dst =
-        thrust::raw_pointer_cast(m_scratch_leaves.data());
-
-    // Check if data wraps around
-    if (start_idx + m_size <= m_capacity) {
-        // Contiguous case - single copy
-        cuda_utils::check_cuda_call(
-            cudaMemcpy2DAsync(dst, dst_pitch, src + start_idx * m_leaves_stride,
-                              src_pitch, row_bytes, m_size,
-                              cudaMemcpyDeviceToDevice, stream),
-            "cudaMemcpy2DAsync leaves failed");
-    } else {
-        // Wrapped case - two contiguous copies
-        const auto first_part      = m_capacity - start_idx;
-        const SizeType second_part = m_size - first_part;
-        cuda_utils::check_cuda_call(
-            cudaMemcpy2DAsync(dst, dst_pitch, src + start_idx * m_leaves_stride,
-                              src_pitch, row_bytes, first_part,
-                              cudaMemcpyDeviceToDevice, stream),
-            "cudaMemcpy2DAsync leaves failed");
-        cuda_utils::check_cuda_call(
-            cudaMemcpy2DAsync(dst + first_part * report_stride, dst_pitch, src,
-                              src_pitch, row_bytes, second_part,
-                              cudaMemcpyDeviceToDevice, stream),
-            "cudaMemcpy2DAsync leaves failed");
-    }
-    cuda_utils::check_cuda_call(
-        cudaStreamSynchronize(stream),
-        "cudaStreamSynchronize get_leaves_contiguous_span failed");
-    return {thrust::raw_pointer_cast(m_scratch_leaves.data()),
-            m_size * report_stride};
+CircularViewCUDA<double>
+WorldTreeCUDA<FoldTypeCUDA>::get_leaves_circular_view() noexcept {
+    return get_active_regions(cuda_utils::as_span(m_leaves), m_leaves_stride);
+}
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+CircularViewCUDA<const double>
+WorldTreeCUDA<FoldTypeCUDA>::get_leaves_circular_view() const noexcept {
+    return get_active_regions(cuda_utils::as_span(m_leaves), m_leaves_stride);
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
-cuda::std::span<float> WorldTreeCUDA<FoldTypeCUDA>::get_scores_contiguous_span(
-    cudaStream_t stream) noexcept {
-    const auto start_idx = get_current_start_idx();
-    copy_from_circular(
-        thrust::raw_pointer_cast(m_scores.data()), start_idx, m_size,
-        SizeType{1}, thrust::raw_pointer_cast(m_scratch_scores.data()), stream);
-    return {thrust::raw_pointer_cast(m_scratch_scores.data()), m_size};
+CircularViewCUDA<float>
+WorldTreeCUDA<FoldTypeCUDA>::get_scores_circular_view() noexcept {
+    return get_active_regions(cuda_utils::as_span(m_scores), SizeType{1});
+}
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+CircularViewCUDA<const float>
+WorldTreeCUDA<FoldTypeCUDA>::get_scores_circular_view() const noexcept {
+    return get_active_regions(cuda_utils::as_span(m_scores), SizeType{1});
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
@@ -594,21 +645,23 @@ float WorldTreeCUDA<FoldTypeCUDA>::add_batch_scattered(
         "WorldTreeCUDA: Suggestions too large to add.");
     // Determine the Global Pruning Threshold
     const float effective_threshold = get_prune_threshold(
-        scores_batch, slots_to_write, current_threshold, stream);
+        scores_batch, indices_batch, slots_to_write, current_threshold, stream);
     // Remove old items that are strictly worse than the new global pruning
     // threshold.
     prune_on_overload(effective_threshold, stream);
 
-    ScoreAboveThresholdFunctor functor{.scores_ptr = scores_batch.data(),
-                                       .threshold  = effective_threshold};
+    uint32_t* __restrict__ m_scratch_pending_indices =
+        thrust::raw_pointer_cast(m_scratch_indices_1.data());
+    ScoreAboveThresholdFunctor functor{.scores    = scores_batch.data(),
+                                       .threshold = effective_threshold};
     const auto end_it = thrust::copy_if(
         thrust::cuda::par.on(stream), indices_batch.begin(),
         indices_batch.begin() + static_cast<IndexType>(slots_to_write),
         indices_batch.begin(), // stencil = src_idx
-        m_scratch_pending_indices.begin(), functor);
+        m_scratch_pending_indices, functor);
 
     const SizeType pending_count =
-        static_cast<SizeType>(end_it - m_scratch_pending_indices.begin());
+        static_cast<SizeType>(end_it - m_scratch_pending_indices);
 
     space_left          = calculate_space_left();
     const auto n_to_add = std::min(pending_count, space_left);
@@ -624,9 +677,9 @@ float WorldTreeCUDA<FoldTypeCUDA>::add_batch_scattered(
     }
     scatter_to_circular_copy_cuda(
         leaves_batch.data(), folds_batch.data(), scores_batch.data(),
-        thrust::raw_pointer_cast(m_scratch_pending_indices.data()),
-        m_leaves_ptr, m_folds_ptr, m_scores_ptr, m_write_head, m_capacity,
-        n_to_add, m_leaves_stride, m_folds_stride, stream);
+        m_scratch_pending_indices, m_leaves_ptr, m_folds_ptr, m_scores_ptr,
+        m_write_head, m_capacity, n_to_add, m_leaves_stride, m_folds_stride,
+        stream);
     cuda_utils::check_cuda_call(
         cudaStreamSynchronize(stream),
         "cudaStreamSynchronize scatter_to_circular_copy_cuda failed");
@@ -652,20 +705,39 @@ void WorldTreeCUDA<FoldTypeCUDA>::validate(SizeType capacity,
     error_check::check_greater_equal(m_scores.size(), capacity,
                                      "WorldTreeCUDA: scores size mismatch");
     error_check::check_greater_equal(
-        m_scratch_leaves.size(), capacity * nparams,
-        "WorldTreeCUDA: scratch_leaves size mismatch");
-    error_check::check_greater_equal(
         m_scratch_scores.size(), capacity + max_batch_size,
         "WorldTreeCUDA: scratch_scores size mismatch");
     error_check::check_greater_equal(
-        m_scratch_pending_indices.size(), max_batch_size,
-        "WorldTreeCUDA: scratch_pending_indices size mismatch");
+        m_scratch_indices_1.size(), capacity,
+        "WorldTreeCUDA: scratch_indices_1 size mismatch");
     error_check::check_greater_equal(
-        m_scratch_prefix.size(), capacity,
-        "WorldTreeCUDA: scratch_prefix size mismatch");
+        m_scratch_indices_2.size(), capacity,
+        "WorldTreeCUDA: scratch_indices_2 size mismatch");
     error_check::check_greater_equal(
         m_scratch_mask.size(), capacity,
         "WorldTreeCUDA: scratch_mask size mismatch");
+}
+
+// Generic helper to get active regions for any vector
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+template <typename T>
+CircularViewCUDA<T> WorldTreeCUDA<FoldTypeCUDA>::get_active_regions(
+    cuda::std::span<T> arr, SizeType stride) const noexcept {
+    if (m_size == 0) {
+        return {cuda::std::span<T>{}, cuda::std::span<T>{}};
+    }
+
+    const auto start = get_current_start_idx();
+    // Handle stride for leaves/folds
+    const auto start_offset = start * stride;
+    if (start + m_size <= m_capacity) {
+        return {cuda::std::span<T>{arr.data() + start_offset, m_size * stride},
+                cuda::std::span<T>{}};
+    }
+    const auto first_count  = m_capacity - start;
+    const auto second_count = m_size - first_count;
+    return {cuda::std::span<T>{arr.data() + start_offset, first_count * stride},
+            cuda::std::span<T>{arr.data(), second_count * stride}};
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
@@ -726,6 +798,7 @@ SizeType WorldTreeCUDA<FoldTypeCUDA>::calculate_space_left() const noexcept {
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 float WorldTreeCUDA<FoldTypeCUDA>::get_prune_threshold(
     cuda::std::span<const float> scores_batch,
+    cuda::std::span<const uint32_t> indices_batch,
     SizeType slots_to_write,
     float current_threshold,
     cudaStream_t stream) noexcept {
@@ -748,15 +821,9 @@ float WorldTreeCUDA<FoldTypeCUDA>::get_prune_threshold(
         thrust::raw_pointer_cast(m_scores.data()), start_idx, m_size,
         SizeType{1}, thrust::raw_pointer_cast(m_scratch_scores.data()), stream);
     // Append batch scores [m_size ... total]
-    cuda_utils::check_cuda_call(
-        cudaMemcpyAsync(
-            thrust::raw_pointer_cast(m_scratch_scores.data()) + m_size,
-            thrust::raw_pointer_cast(scores_batch.data()),
-            slots_to_write * sizeof(float), cudaMemcpyDeviceToDevice, stream),
-        "cudaMemcpyAsync get_prune_threshold failed");
-    cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
-                                "cudaStreamSynchronize get_prune_threshold "
-                                "append batch scores failed");
+    thrust::gather(thrust::cuda::par.on(stream), indices_batch.begin(),
+                   indices_batch.begin() + slots_to_write, scores_batch.begin(),
+                   m_scratch_scores.begin() + m_size);
 
     // The item at 'total_capacity-1' (in descending order) is the smallest
     // score we keep (i.e. the threshold).
@@ -764,6 +831,9 @@ float WorldTreeCUDA<FoldTypeCUDA>::get_prune_threshold(
                  m_scratch_scores.begin() + total_candidates,
                  cuda::std::greater<float>());
     cuda_utils::check_last_cuda_error("thrust::sort failed");
+    cuda_utils::check_cuda_call(
+        cudaStreamSynchronize(stream),
+        "cudaStreamSynchronize get_prune_threshold failed");
     const float kth = m_scratch_scores[total_capacity - 1];
     // Median score for severity (restricted range)
     const float mid = m_scratch_scores[total_candidates / 2];
@@ -782,56 +852,68 @@ void WorldTreeCUDA<FoldTypeCUDA>::prune_on_overload(float threshold,
     error_check::check(
         m_is_updating,
         "WorldTreeCUDA: prune_on_overload only allowed during updates");
+
+    error_check::check_less_equal(
+        m_size, m_capacity,
+        "WorldTreeCUDA: Fatal state. m_size strictly must be <= m_capacity for "
+        "injective mapping.");
+
     if (m_size == 0) {
         return;
     }
 
     const SizeType start_idx = get_current_start_idx();
-    // Mark survivors (logical indices) in keep mask
-    CircularMaskFunctor functor{.scores_ptr =
-                                    thrust::raw_pointer_cast(m_scores.data()),
-                                .start     = static_cast<uint32_t>(start_idx),
-                                .capacity  = static_cast<uint32_t>(m_capacity),
-                                .threshold = threshold};
-    thrust::transform(thrust::cuda::par.on(stream),
-                      thrust::counting_iterator<uint32_t>(0),
-                      thrust::counting_iterator<uint32_t>(m_size),
-                      m_scratch_mask.begin(), functor);
 
-    // Exclusive prefix sum to get logical indices to keep
-    thrust::exclusive_scan(thrust::cuda::par.on(stream), m_scratch_mask.begin(),
-                           m_scratch_mask.begin() + m_size,
-                           m_scratch_prefix.begin(), uint32_t{0});
+    auto begin = thrust::make_counting_iterator<uint32_t>(0);
+    auto end   = begin + static_cast<uint32_t>(m_size);
+    KeepPredicate keep_pred{.scores = thrust::raw_pointer_cast(m_scores.data()),
+                            .start  = static_cast<uint32_t>(start_idx),
+                            .capacity  = static_cast<uint32_t>(m_capacity),
+                            .threshold = threshold};
+    NotKeepPredicate not_keep_pred{.inner = keep_pred};
+    // Count how many elements survive. This defines our 'Keep Zone' [0, kept).
+    const uint32_t kept =
+        thrust::count_if(thrust::cuda::par.on(stream), begin, end, keep_pred);
 
-    // In-place compaction (three arrays)
-    const dim3 block_dim(256);
-    const dim3 grid_dim((m_size + block_dim.x - 1) / block_dim.x);
-    cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
-    compact_in_place_kernel<<<grid_dim, block_dim, 0, stream>>>(
-        thrust::raw_pointer_cast(m_scratch_mask.data()),
-        thrust::raw_pointer_cast(m_scratch_prefix.data()),
-        thrust::raw_pointer_cast(m_leaves.data()), start_idx, m_capacity,
-        m_size, m_leaves_stride);
-    cuda_utils::check_last_cuda_error("compact_in_place_kernel leaves failed");
-    compact_in_place_kernel<<<grid_dim, block_dim, 0, stream>>>(
-        thrust::raw_pointer_cast(m_scratch_mask.data()),
-        thrust::raw_pointer_cast(m_scratch_prefix.data()),
-        thrust::raw_pointer_cast(m_folds.data()), start_idx, m_capacity, m_size,
-        m_folds_stride);
-    cuda_utils::check_last_cuda_error("compact_in_place_kernel folds failed");
-    compact_in_place_kernel<<<grid_dim, block_dim, 0, stream>>>(
-        thrust::raw_pointer_cast(m_scratch_mask.data()),
-        thrust::raw_pointer_cast(m_scratch_prefix.data()),
-        thrust::raw_pointer_cast(m_scores.data()), start_idx, m_capacity,
-        m_size, 1);
-    cuda_utils::check_last_cuda_error("compact_in_place_kernel scores failed");
-    cuda_utils::check_cuda_call(
-        cudaStreamSynchronize(stream),
-        "cudaStreamSynchronize compact_in_place_kernel scores failed");
-    auto last_prefix = m_scratch_prefix[m_size - 1];
-    auto last_keep   = m_scratch_mask[m_size - 1];
-    m_size           = last_prefix + last_keep;
-    m_write_head     = get_circular_index(m_size, start_idx, m_capacity);
+    if (kept == 0) {
+        m_size       = 0;
+        m_write_head = start_idx;
+        return;
+    }
+    if (kept == m_size) {
+        return;
+    }
+
+    // Use "kept" slots in the scratch buffer for holes and survivors
+    uint32_t* __restrict__ d_holes =
+        thrust::raw_pointer_cast(m_scratch_indices_1.data());
+    uint32_t* __restrict__ d_survivors =
+        thrust::raw_pointer_cast(m_scratch_indices_2.data());
+
+    // Disjoint Set Extraction
+    // Extract "Holes" strictly from the Keep Zone [0, kept)
+    auto holes_end = thrust::copy_if(thrust::cuda::par.on(stream), begin,
+                                     begin + kept, d_holes, not_keep_pred);
+
+    const auto swap_count = static_cast<uint32_t>(holes_end - d_holes);
+    if (swap_count > 0) {
+        // Extract "Stranded Survivors" strictly from the Discard Zone [kept,
+        // size) Mathematically, the number of stranded survivors EXACTLY equals
+        // the number of holes.
+        thrust::copy_if(thrust::cuda::par.on(stream), begin + kept,
+                        begin + m_size, d_survivors, keep_pred);
+
+        fused_move_pairs_cuda<FoldTypeCUDA>(
+            d_holes, d_survivors, thrust::raw_pointer_cast(m_leaves.data()),
+            thrust::raw_pointer_cast(m_folds.data()),
+            thrust::raw_pointer_cast(m_scores.data()),
+            static_cast<uint32_t>(start_idx), m_capacity, swap_count,
+            m_leaves_stride, m_folds_stride, stream);
+    }
+    // The buffer is now perfectly packed from logical index 0 to kept-1.
+    m_size       = kept;
+    m_write_head = get_circular_index(kept, start_idx, m_capacity);
+
     error_check::check_less_equal(
         m_size, m_capacity,
         "WorldTreeCUDA: Invalid size after prune_on_overload");

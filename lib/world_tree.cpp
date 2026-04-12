@@ -107,7 +107,7 @@ float WorldTree<FoldType>::get_score_min() const noexcept {
 }
 
 template <SupportedFoldType FoldType>
-float WorldTree<FoldType>::get_memory_usage() const noexcept {
+float WorldTree<FoldType>::get_memory_usage_gib() const noexcept {
     const auto base_bytes =
         (m_leaves.size() * sizeof(double)) +
         (m_folds.size() * sizeof(FoldType)) +
@@ -367,7 +367,7 @@ float WorldTree<FoldType>::add_batch_scattered(
                                   "WorldTree: Suggestions too large to add.");
     // Determine the Global Pruning Threshold
     const float effective_threshold =
-        get_prune_threshold(scores_batch, slots_to_write, current_threshold);
+        get_prune_threshold(scores_batch, indices_batch, slots_to_write, current_threshold);
     // Remove old items that are strictly worse than the new global pruning
     // threshold.
     prune_on_overload(effective_threshold);
@@ -548,6 +548,7 @@ SizeType WorldTree<FoldType>::calculate_space_left() const {
 template <SupportedFoldType FoldType>
 float WorldTree<FoldType>::get_prune_threshold(
     std::span<const float> scores_batch,
+    std::span<const SizeType> indices_batch,
     SizeType slots_to_write,
     float current_threshold) noexcept {
     if (slots_to_write == 0) {
@@ -568,8 +569,9 @@ float WorldTree<FoldType>::get_prune_threshold(
     copy_from_circular(m_scores.data(), start_idx, m_size, SizeType{1},
                        m_scratch_scores.data());
     // Append batch scores [m_size ... total]
-    std::copy_n(scores_batch.begin(), slots_to_write,
-                m_scratch_scores.begin() + m_size);
+    for (SizeType i = 0; i < slots_to_write; ++i) {
+        m_scratch_scores[m_size + i] = scores_batch[indices_batch[i]];
+    }
 
     // The item at 'total_capacity-1' (in descending order) is the
     // smallest score we keep (i.e. the threshold).

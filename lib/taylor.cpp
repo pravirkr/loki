@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <numeric>
 #include <span>
 #include <tuple>
@@ -59,20 +60,17 @@ poly_taylor_branch_accel_batch(std::span<const double> leaves_tree,
     // Get spans from workspace
     std::span<double> dparam_new =
         leaves_branch.subspan(0, single_batch_params);
-    std::span<double> shift_bins =
-        leaves_branch.subspan(single_batch_params, single_batch_params);
-    const auto workspace_acquired_size = (single_batch_params * 2);
-    error_check::check_less_equal(workspace_acquired_size, workspace_size,
+    error_check::check_less_equal(single_batch_params, workspace_size,
                                   "workspace size mismatch");
 
     const double* __restrict__ leaves_tree_ptr = leaves_tree.data();
     SizeType* __restrict__ leaves_origins_ptr  = leaves_origins.data();
     double* __restrict__ leaves_branch_ptr     = leaves_branch.data();
-    double* __restrict__ dparam_new_ptr        = dparam_new.data();
-    double* __restrict__ shift_bins_ptr        = shift_bins.data();
     double* __restrict__ scratch_params   = branch_ws.scratch_params.data();
     double* __restrict__ scratch_dparams  = branch_ws.scratch_dparams.data();
     SizeType* __restrict__ scratch_counts = branch_ws.scratch_counts.data();
+    double* __restrict__ shift_bins_ptr   = branch_ws.scratch_shifts.data();
+    double* __restrict__ dparam_new_ptr   = dparam_new.data();
 
     // Step + Shift
     for (SizeType i = 0; i < n_leaves; ++i) {
@@ -95,15 +93,15 @@ poly_taylor_branch_accel_batch(std::span<const double> leaves_tree,
 
         // Compute shift bins
         shift_bins_ptr[fb + 0] =
-            (d2_sig_cur - d2_sig_new) * dt2 * nbins_d / (4.0 * dfactor);
+            std::abs(d2_sig_cur - d2_sig_new) * dt2 * nbins_d / (4.0 * dfactor);
         shift_bins_ptr[fb + 1] =
-            (d1_sig_cur - d1_sig_new) * dt * nbins_d / (1.0 * dfactor);
+            std::abs(d1_sig_cur - d1_sig_new) * dt * nbins_d / (1.0 * dfactor);
     }
 
     // Early Exit: Check if any leaf needs branching
     bool any_branching = false;
     for (SizeType i = 0; i < n_leaves * kParams; ++i) {
-        if (shift_bins_ptr[i] >= (eta - utils::kEps)) {
+        if (shift_bins_ptr[i] >= (eta - utils::kFloatEps)) {
             any_branching = true;
             break;
         }
@@ -207,20 +205,17 @@ SizeType poly_taylor_branch_jerk_batch(std::span<const double> leaves_tree,
     // Get spans from workspace
     std::span<double> dparam_new =
         leaves_branch.subspan(0, single_batch_params);
-    std::span<double> shift_bins =
-        leaves_branch.subspan(single_batch_params, single_batch_params);
-    const auto workspace_acquired_size = (single_batch_params * 2);
-    error_check::check_less_equal(workspace_acquired_size, workspace_size,
+    error_check::check_less_equal(single_batch_params, workspace_size,
                                   "workspace size mismatch");
 
     const double* __restrict__ leaves_tree_ptr = leaves_tree.data();
     SizeType* __restrict__ leaves_origins_ptr  = leaves_origins.data();
     double* __restrict__ leaves_branch_ptr     = leaves_branch.data();
-    double* __restrict__ dparam_new_ptr        = dparam_new.data();
-    double* __restrict__ shift_bins_ptr        = shift_bins.data();
     double* __restrict__ scratch_params   = branch_ws.scratch_params.data();
     double* __restrict__ scratch_dparams  = branch_ws.scratch_dparams.data();
     SizeType* __restrict__ scratch_counts = branch_ws.scratch_counts.data();
+    double* __restrict__ shift_bins_ptr   = branch_ws.scratch_shifts.data();
+    double* __restrict__ dparam_new_ptr   = dparam_new.data();
 
     // Step + Shift
     for (SizeType i = 0; i < n_leaves; ++i) {
@@ -243,18 +238,18 @@ SizeType poly_taylor_branch_jerk_batch(std::span<const double> leaves_tree,
         dparam_new_ptr[fb + 1] = std::min(d2_sig_new, d2_range);
         dparam_new_ptr[fb + 2] = std::min(d1_sig_new, d1_range);
 
-        shift_bins_ptr[fb + 0] =
-            (d3_sig_cur - d3_sig_new) * dt3 * nbins_d / (24.0 * dfactor);
+        shift_bins_ptr[fb + 0] = std::abs(d3_sig_cur - d3_sig_new) * dt3 *
+                                 nbins_d / (24.0 * dfactor);
         shift_bins_ptr[fb + 1] =
-            (d2_sig_cur - d2_sig_new) * dt2 * nbins_d / (4.0 * dfactor);
+            std::abs(d2_sig_cur - d2_sig_new) * dt2 * nbins_d / (4.0 * dfactor);
         shift_bins_ptr[fb + 2] =
-            (d1_sig_cur - d1_sig_new) * dt * nbins_d / (1.0 * dfactor);
+            std::abs(d1_sig_cur - d1_sig_new) * dt * nbins_d / (1.0 * dfactor);
     }
 
     // Early Exit: Check if any leaf needs branching
     bool any_branching = false;
     for (SizeType i = 0; i < n_leaves * kParams; ++i) {
-        if (shift_bins_ptr[i] >= (eta - utils::kEps)) {
+        if (shift_bins_ptr[i] >= (eta - utils::kFloatEps)) {
             any_branching = true;
             break;
         }
@@ -372,20 +367,17 @@ SizeType poly_taylor_branch_snap_batch(std::span<const double> leaves_tree,
     // Get spans from workspace
     std::span<double> dparam_new =
         leaves_branch.subspan(0, single_batch_params);
-    std::span<double> shift_bins =
-        leaves_branch.subspan(single_batch_params, single_batch_params);
-    const auto workspace_acquired_size = (single_batch_params * 2);
-    error_check::check_less_equal(workspace_acquired_size, workspace_size,
+    error_check::check_less_equal(single_batch_params, workspace_size,
                                   "workspace size mismatch");
 
     const double* __restrict__ leaves_tree_ptr = leaves_tree.data();
     SizeType* __restrict__ leaves_origins_ptr  = leaves_origins.data();
     double* __restrict__ leaves_branch_ptr     = leaves_branch.data();
-    double* __restrict__ dparam_new_ptr        = dparam_new.data();
-    double* __restrict__ shift_bins_ptr        = shift_bins.data();
     double* __restrict__ scratch_params   = branch_ws.scratch_params.data();
     double* __restrict__ scratch_dparams  = branch_ws.scratch_dparams.data();
     SizeType* __restrict__ scratch_counts = branch_ws.scratch_counts.data();
+    double* __restrict__ shift_bins_ptr   = branch_ws.scratch_shifts.data();
+    double* __restrict__ dparam_new_ptr   = dparam_new.data();
 
     // Step + Shift
     for (SizeType i = 0; i < n_leaves; ++i) {
@@ -411,20 +403,20 @@ SizeType poly_taylor_branch_snap_batch(std::span<const double> leaves_tree,
         dparam_new_ptr[fb + 2] = std::min(d2_sig_new, d2_range);
         dparam_new_ptr[fb + 3] = std::min(d1_sig_new, d1_range);
 
-        shift_bins_ptr[fb + 0] =
-            (d4_sig_cur - d4_sig_new) * dt4 * nbins_d / (192.0 * dfactor);
-        shift_bins_ptr[fb + 1] =
-            (d3_sig_cur - d3_sig_new) * dt3 * nbins_d / (24.0 * dfactor);
+        shift_bins_ptr[fb + 0] = std::abs(d4_sig_cur - d4_sig_new) * dt4 *
+                                 nbins_d / (192.0 * dfactor);
+        shift_bins_ptr[fb + 1] = std::abs(d3_sig_cur - d3_sig_new) * dt3 *
+                                 nbins_d / (24.0 * dfactor);
         shift_bins_ptr[fb + 2] =
-            (d2_sig_cur - d2_sig_new) * dt2 * nbins_d / (4.0 * dfactor);
+            std::abs(d2_sig_cur - d2_sig_new) * dt2 * nbins_d / (4.0 * dfactor);
         shift_bins_ptr[fb + 3] =
-            (d1_sig_cur - d1_sig_new) * dt * nbins_d / (1.0 * dfactor);
+            std::abs(d1_sig_cur - d1_sig_new) * dt * nbins_d / (1.0 * dfactor);
     }
 
     // Early Exit: Check if any leaf needs branching
     bool any_branching = false;
     for (SizeType i = 0; i < n_leaves * kParams; ++i) {
-        if (shift_bins_ptr[i] >= (eta - utils::kEps)) {
+        if (shift_bins_ptr[i] >= (eta - utils::kFloatEps)) {
             any_branching = true;
             break;
         }
@@ -1136,7 +1128,7 @@ poly_taylor_branch_batch_generic(std::span<const double> leaves_batch,
             const SizeType pad_offset =
                 (i * n_params * branch_max) + (j * branch_max);
 
-            if (shift_bins_batch[flat_idx] >= (eta - utils::kEps)) {
+            if (shift_bins_batch[flat_idx] >= (eta - utils::kFloatEps)) {
                 std::span<double> slice_span =
                     pad_branched_params.subspan(pad_offset, branch_max);
                 auto [dparam_act, count] = psr_utils::branch_param_padded(
@@ -1466,14 +1458,14 @@ generate_bp_poly_taylor(std::span<const std::vector<double>> param_arr,
         for (SizeType i = 0; i < n_freqs; ++i) {
             for (SizeType j = 0; j < n_params; ++j) {
                 const auto idx = (i * n_params) + j;
-                if (shift_bins_batch[idx] < (eta - utils::kEps)) {
+                if (shift_bins_batch[idx] < (eta - utils::kFloatEps)) {
                     dparam_cur_next[idx] = dparam_cur_batch[idx];
                     continue;
                 }
-                const auto ratio      = (dparam_cur_batch[idx] + utils::kEps) /
-                                        (dparam_new_batch[idx]);
+                const auto ratio =
+                    (dparam_cur_batch[idx]) / (dparam_new_batch[idx]);
                 const auto num_points = std::max(
-                    1, static_cast<int>(std::ceil(ratio - utils::kEps)));
+                    1, static_cast<int>(std::ceil(ratio - utils::kFloatEps)));
                 n_branches[i] *= static_cast<double>(num_points);
                 dparam_cur_next[idx] =
                     dparam_cur_batch[idx] / static_cast<double>(num_points);

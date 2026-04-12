@@ -6,12 +6,11 @@
 #include <cuda/std/span>
 #include <cuda/std/type_traits>
 #include <cuda_runtime.h>
-
-#include <sys/types.h>
 #include <thrust/execution_policy.h>
 #include <thrust/sequence.h>
 
 #include "loki/common/types.hpp"
+#include "loki/cub_helpers.cuh"
 #include "loki/cuda_utils.cuh"
 #include "loki/kernel_utils.cuh"
 #include "loki/utils.hpp"
@@ -29,17 +28,15 @@ get_circ_taylor_mask_device(double crackle,
                             double jerk,
                             double accel,
                             double minimum_snap_cells) {
-    const bool is_sig_snap =
-        fabs(snap) > (minimum_snap_cells * (dsnap + utils::kEps));
+    const bool is_sig_snap = fabs(snap) > (minimum_snap_cells * dsnap);
     const bool is_physical_snap =
-        ((-snap * accel) > 0.0) && (fabs(accel) > utils::kEps);
+        ((-snap * accel) > 0.0) && (fabs(accel) > utils::kZeroEps);
     if (is_sig_snap && is_physical_snap) {
         return 1;
     }
-    const bool is_sig_crackle =
-        fabs(crackle) > (minimum_snap_cells * (dcrackle + utils::kEps));
+    const bool is_sig_crackle = fabs(crackle) > (minimum_snap_cells * dcrackle);
     const bool is_physical_crackle =
-        ((-crackle * jerk) > 0.0) && (fabs(jerk) > utils::kEps);
+        ((-crackle * jerk) > 0.0) && (fabs(jerk) > utils::kZeroEps);
     if (is_sig_crackle && is_physical_crackle) {
         return 2;
     }
@@ -52,11 +49,10 @@ is_in_hole_device(double snap,
                   double jerk,
                   double accel,
                   double minimum_snap_cells) noexcept {
-    const bool is_sig_snap =
-        fabs(snap) > (minimum_snap_cells * (dsnap + utils::kEps));
+    const bool is_sig_snap = fabs(snap) > (minimum_snap_cells * dsnap);
     const bool is_physical_snap =
-        ((-snap * accel) > 0.0) && (fabs(accel) > utils::kEps);
-    const bool is_stable_jerk = fabs(jerk) > utils::kEps;
+        ((-snap * accel) > 0.0) && (fabs(accel) > utils::kZeroEps);
+    const bool is_stable_jerk = fabs(jerk) > utils::kZeroEps;
     return is_sig_snap && (!is_physical_snap) && is_stable_jerk;
 }
 
@@ -105,21 +101,23 @@ kernel_analyze_and_branch_circular(const double* __restrict__ leaves_tree,
     const double d1_sig_cur = leaves_tree[lo + 9];
     const double f0         = leaves_tree[lo + 12];
 
-    const double dfactor    = utils::kCval / f0;
-    const double d5_sig_new = dphi * dfactor * 1920.0 * inv_dt5;
-    const double d4_sig_new = dphi * dfactor * 192.0 * inv_dt4;
-    const double d3_sig_new = dphi * dfactor * 24.0 * inv_dt3;
-    const double d2_sig_new = dphi * dfactor * 4.0 * inv_dt2;
-    const double d1_sig_new = dphi * dfactor * 1.0 * inv_dt;
+    const double dfactor = utils::kCval / f0;
+    double d5_sig_new    = dphi * dfactor * 1920.0 * inv_dt5;
+    double d4_sig_new    = dphi * dfactor * 192.0 * inv_dt4;
+    double d3_sig_new    = dphi * dfactor * 24.0 * inv_dt3;
+    double d2_sig_new    = dphi * dfactor * 4.0 * inv_dt2;
+    double d1_sig_new    = dphi * dfactor * 1.0 * inv_dt;
 
-    double shift_d5 =
-        (d5_sig_cur - d5_sig_new) * dt5 * nbins / (1920.0 * dfactor);
-    double shift_d4 =
-        (d4_sig_cur - d4_sig_new) * dt4 * nbins / (192.0 * dfactor);
-    double shift_d3 =
-        (d3_sig_cur - d3_sig_new) * dt3 * nbins / (24.0 * dfactor);
-    double shift_d2 = (d2_sig_cur - d2_sig_new) * dt2 * nbins / (4.0 * dfactor);
-    double shift_d1 = (d1_sig_cur - d1_sig_new) * dt * nbins / (1.0 * dfactor);
+    const double shift_d5 =
+        fabs(d5_sig_cur - d5_sig_new) * dt5 * nbins / (1920.0 * dfactor);
+    const double shift_d4 =
+        fabs(d4_sig_cur - d4_sig_new) * dt4 * nbins / (192.0 * dfactor);
+    const double shift_d3 =
+        fabs(d3_sig_cur - d3_sig_new) * dt3 * nbins / (24.0 * dfactor);
+    const double shift_d2 =
+        fabs(d2_sig_cur - d2_sig_new) * dt2 * nbins / (4.0 * dfactor);
+    const double shift_d1 =
+        fabs(d1_sig_cur - d1_sig_new) * dt * nbins / (1.0 * dfactor);
 
     const double d5_range = param_limits[0].max - param_limits[0].min;
     const double d4_range = param_limits[1].max - param_limits[1].min;
@@ -134,11 +132,11 @@ kernel_analyze_and_branch_circular(const double* __restrict__ leaves_tree,
     d2_sig_new = cuda::std::min(d2_sig_new, d2_range);
     d1_sig_new = cuda::std::min(d1_sig_new, d1_range);
 
-    // Store d5 as single entry in scratch (count=1)
-    const uint32_t pad_offset            = (fb + 0) * branch_max;
-    branch_ws.scratch_params[pad_offset] = d5_cur;
-    branch_ws.scratch_dparams[fb + 0]    = d5_sig_cur;
-    branch_ws.scratch_counts[fb + 0]     = 1;
+    // Store d5 as single entry in scratch
+    utils::branch_one_param_padded_crackle_device(
+        0, d5_cur, d5_sig_cur, d5_sig_new, eta, shift_d5,
+        branch_ws.scratch_params, branch_ws.scratch_dparams,
+        branch_ws.scratch_counts, fb, branch_max);
 
     // Branch d4–d1 into scratch workspace
     utils::branch_one_param_padded_device(
@@ -164,7 +162,7 @@ kernel_analyze_and_branch_circular(const double* __restrict__ leaves_tree,
     const uint32_t c4 = branch_ws.scratch_counts[fb + 4];
 
     branch_ws.leaf_branch_count[ileaf] = c1 * c2 * c3 * c4;
-    if (shift_d5 >= (eta - utils::kEps)) {
+    if (shift_d5 >= (eta - utils::kFloatEps)) {
         atomicOr(scratch_ws.d_reduce_out, 1U);
     }
 }
@@ -251,19 +249,19 @@ __global__ void kernel_materialize_branches_circular(
 }
 
 __global__ void
-kernel_expand_crackle_holes(double* __restrict__ leaves_branch,
+kernel_expand_crackle_holes(const double* __restrict__ leaves_tree,
+                            double* __restrict__ leaves_branch,
                             uint32_t* __restrict__ leaves_origins,
                             uint32_t n_leaves_branched,
                             double dt,
                             double nbins,
                             double eta,
-                            const ParamLimit* __restrict__ param_limits,
                             double minimum_snap_cells,
-                            uint32_t* __restrict__ out_count) {
+                            uint32_t* __restrict__ out_count,
+                            memory::BranchingWorkspaceCUDAView branch_ws) {
     constexpr uint32_t kParams       = 5;
     constexpr uint32_t kParamStride  = 2;
     constexpr uint32_t kLeavesStride = (kParams + 2) * kParamStride;
-    constexpr uint32_t kMaxCrackle   = 16;
 
     const uint32_t i = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (i >= n_leaves_branched) {
@@ -272,63 +270,55 @@ kernel_expand_crackle_holes(double* __restrict__ leaves_branch,
 
     const uint32_t bo         = i * kLeavesStride;
     double* __restrict__ leaf = leaves_branch + bo;
+    const uint32_t origin     = leaves_origins[i];
+    const uint32_t origin_lo  = origin * kLeavesStride;
+    const uint32_t fb         = origin * kParams;
+    const uint32_t n_d5       = branch_ws.scratch_counts[fb + 0];
 
-    if (!is_in_hole_device(leaf[2], leaf[3], leaf[4], leaf[6],
-                           minimum_snap_cells)) {
+    const bool in_hole = is_in_hole_device(leaf[2], leaf[3], leaf[4], leaf[6],
+                                           minimum_snap_cells);
+
+    if (!in_hole || n_d5 == 1) {
+        return;
+    }
+    const double d5_val_parent = leaves_tree[origin_lo + 0];
+    const double d5_sig_parent = leaves_tree[origin_lo + 1];
+    const double f0            = leaves_tree[origin_lo + 12];
+    // Recompute shift_d5 from parent
+    const double inv_dt     = 1.0 / dt;
+    const double dt5        = dt * dt * dt * dt * dt;
+    const double inv_dt5    = inv_dt * inv_dt * inv_dt * inv_dt * inv_dt;
+    const double dphi       = eta / nbins;
+    const double dfactor    = utils::kCval / f0;
+    const double d5_sig_new = dphi * dfactor * 1920.0 * inv_dt5;
+    const double shift_d5 =
+        fabs(d5_sig_parent - d5_sig_new) * dt5 * nbins / (1920.0 * dfactor);
+
+    if (shift_d5 < (eta - utils::kFloatEps)) {
         return;
     }
 
-    const uint32_t origin   = leaves_origins[i];
-    const double d5_cur     = leaf[0];
-    const double d5_sig_cur = leaf[1];
+    const double confidence_const = 0.5 + (0.5 / static_cast<double>(n_d5));
+    const double half_range       = confidence_const * d5_sig_parent;
+    const double start            = d5_val_parent - half_range;
+    const double step = (2.0 * half_range) / static_cast<double>(n_d5 + 1);
 
-    // Recompute d5_sig_new and shift_d5
-    const double f0       = leaf[12];
-    const double dt5      = dt * dt * dt * dt * dt;
-    const double inv_dt5  = 1.0 / dt5;
-    const double dphi     = eta / nbins;
-    const double dfactor  = utils::kCval / f0;
-    const double d5_range = param_limits[0].max - param_limits[0].min;
-    const double d5_sig_new =
-        cuda::std::min(dphi * dfactor * 1920.0 * inv_dt5, d5_range);
-    const double shift_d5 =
-        (d5_sig_cur - d5_sig_new) * dt5 * nbins / (1920.0 * dfactor);
+    // Overwrite slot i in-place with first crackle child
+    leaf[0]                   = fma(1.0, step, start);
+    const uint32_t extra      = n_d5 - 1;
+    const uint32_t tail_start = atomicAdd(out_count, extra);
 
-    // Per-thread register buffer — no scratch, no race
-    double local_d5_vals[kMaxCrackle];
-    uint32_t n_d5;
-    double dparam_act;
-    if (shift_d5 >= (eta - utils::kEps)) {
-        auto [act, count] = utils::branch_param_generate_points_device(
-            local_d5_vals, kMaxCrackle, d5_cur, d5_sig_cur, d5_sig_new);
-        dparam_act = act;
-        n_d5       = count;
-    } else {
-        local_d5_vals[0] = d5_cur;
-        dparam_act       = d5_sig_cur;
-        n_d5             = 1;
-    }
-    assert(n_d5 <= kMaxCrackle); // catches misconfiguration early
-
-    // Overwrite slot i in-place
-    leaf[0] = local_d5_vals[0];
-    leaf[1] = dparam_act;
-
-    if (n_d5 > 1) {
-        const uint32_t extra      = n_d5 - 1;
-        const uint32_t tail_start = atomicAdd(out_count, extra);
-
-        for (uint32_t a = 1; a < n_d5; ++a) {
-            double* __restrict__ tout =
-                leaves_branch +
-                static_cast<IndexType>((tail_start + a - 1) * kLeavesStride);
+    for (uint32_t a = 1; a < n_d5; ++a) {
+        const uint32_t write_idx = tail_start + a - 1;
+        double* __restrict__ tout =
+            leaves_branch + static_cast<IndexType>(write_idx * kLeavesStride);
 #pragma unroll
-            for (uint32_t k = 0; k < kLeavesStride; ++k) {
-                tout[k] = leaf[k];
-            }
-            tout[0]                            = local_d5_vals[a];
-            leaves_origins[tail_start + a - 1] = origin;
+        for (uint32_t k = 0; k < kLeavesStride; ++k) {
+            tout[k] = leaf[k];
         }
+        // Patch d5
+        tout[0] = fma(static_cast<double>(a + 1), step, start);
+        leaves_origins[write_idx] = origin;
     }
 }
 
@@ -349,13 +339,11 @@ kernel_validate_branches_circular(const double* __restrict__ leaves_branch,
     const uint32_t lo  = tid * kLeavesStride;
     const double snap  = leaves_branch[lo + 2];
     const double dsnap = leaves_branch[lo + 3];
-    const double jerk  = leaves_branch[lo + 4];
     const double accel = leaves_branch[lo + 6];
 
-    const double omega_max_sq = pow(2.0 * M_PI / p_orb_min, 2);
-    const bool is_sig_snap =
-        fabs(snap) > (minimum_snap_cells * (dsnap + utils::kEps));
-    const bool snap_possible   = (fabs(accel) > utils::kEps);
+    const double omega_max_sq  = pow(2.0 * M_PI / p_orb_min, 2);
+    const bool is_sig_snap     = fabs(snap) > (minimum_snap_cells * dsnap);
+    const bool snap_possible   = (fabs(accel) > utils::kZeroEps);
     const bool sign_valid      = (-snap * accel) > 0.0;
     const bool snap_unphysical = is_sig_snap && snap_possible && !sign_valid;
     const bool snap_region     = is_sig_snap && snap_possible && sign_valid;
@@ -368,10 +356,9 @@ kernel_validate_branches_circular(const double* __restrict__ leaves_branch,
         return;
     }
     // Inside snap_region: omega_sq is guaranteed positive
-    const double omega_sq = -snap / accel;
-    const double limit_accel =
-        x_mass_const * (pow(omega_sq, 2.0 / 3.0) + utils::kEps);
-    const bool valid_omega = omega_sq < omega_max_sq;
+    const double omega_sq    = -snap / accel;
+    const double limit_accel = x_mass_const * pow(omega_sq, 2.0 / 3.0);
+    const bool valid_omega   = omega_sq < omega_max_sq;
     // |d2| < x * omega^(4/3)
     const bool valid_accel = fabs(accel) <= limit_accel;
     validation_mask[tid]   = (valid_omega && valid_accel) ? 1 : 0;
@@ -441,7 +428,7 @@ kernel_circ_taylor_resolve_batch(const double* __restrict__ leaves_tree,
                   (c_t_cur * onehundred_twenty_dt5);
     } else {
         const double omega_orb_sq =
-            mask_circular == 1 ? -s_t_cur / a_t_cur : -c_t_cur / a_t_cur;
+            mask_circular == 1 ? -s_t_cur / a_t_cur : -c_t_cur / j_t_cur;
         const double omega_orb = std::sqrt(omega_orb_sq);
         // Evolve the phase to the new time t_j = t_i + delta_t
         const double omega_dt_add = omega_orb * dt_add;
@@ -514,7 +501,7 @@ kernel_circ_taylor_transform_batch(double* __restrict__ leaves_tree,
     const double d0_val_i = leaves_tree[lo + 10];
     const double d0_err_i = leaves_tree[lo + 11];
 
-    const bool mask_circular =
+    const uint32_t mask_circular =
         get_circ_taylor_mask_device(d5_val_i, d5_err_i, d4_val_i, d4_err_i,
                                     d3_val_i, d2_val_i, minimum_snap_cells);
 
@@ -663,13 +650,7 @@ circ_taylor_branch_batch_cuda(cuda::std::span<const double> leaves_tree,
         return n_leaves_branched;
     }
 
-    // Set validation mask for produced outputs
-    cuda_utils::check_cuda_call(
-        cudaMemsetAsync(validation_mask.data(), 1,
-                        n_leaves_branched * sizeof(uint8_t), stream),
-        "cudaMemsetAsync failed");
-
-    if (n_leaves_branched == n_leaves) {
+    if (n_leaves_branched == n_leaves && has_crackle == 0) {
         // FAST PATH: no branching
         cuda_utils::check_cuda_call(
             cudaMemcpyAsync(leaves_branch.data(), leaves_tree.data(),
@@ -679,6 +660,11 @@ circ_taylor_branch_batch_cuda(cuda::std::span<const double> leaves_tree,
         thrust::sequence(thrust::cuda::par.on(stream), leaves_origins.data(),
                          leaves_origins.data() + n_leaves,
                          static_cast<uint32_t>(0));
+        // Set validation mask for produced outputs
+        cuda_utils::check_cuda_call(
+            cudaMemsetAsync(validation_mask.data(), 1,
+                            n_leaves_branched * sizeof(uint8_t), stream),
+            "cudaMemsetAsync failed");
 
         return n_leaves_branched;
     }
@@ -696,6 +682,11 @@ circ_taylor_branch_batch_cuda(cuda::std::span<const double> leaves_tree,
 
     // ---- Kernel 3: expand crackle holes ----
     if (has_crackle == 0) {
+        // Set validation mask for produced outputs
+        cuda_utils::check_cuda_call(
+            cudaMemsetAsync(validation_mask.data(), 1,
+                            n_leaves_branched * sizeof(uint8_t), stream),
+            "cudaMemsetAsync failed");
         return n_leaves_branched;
     }
     // Init out_count = n_leaves_branched
@@ -709,9 +700,9 @@ circ_taylor_branch_batch_cuda(cuda::std::span<const double> leaves_tree,
     const dim3 grid_dim_3(blocks_per_grid_3);
     cuda_utils::check_kernel_launch_params(grid_dim_3, block_dim);
     kernel_expand_crackle_holes<<<grid_dim_3, block_dim, 0, stream>>>(
-        leaves_branch.data(), leaves_origins.data(), n_leaves_branched,
-        coord_cur.second, static_cast<double>(nbins), eta, param_limits.data(),
-        minimum_snap_cells, scratch_ws.d_reduce_out);
+        leaves_tree.data(), leaves_branch.data(), leaves_origins.data(),
+        n_leaves_branched, coord_cur.second, static_cast<double>(nbins), eta,
+        minimum_snap_cells, scratch_ws.d_reduce_out, branch_ws);
     cuda_utils::check_last_cuda_error("Kernel 3 launch failed");
 
     // Sync + read back final count
@@ -724,6 +715,12 @@ circ_taylor_branch_batch_cuda(cuda::std::span<const double> leaves_tree,
     // Unavoidable sync
     cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
                                 "cudaStreamSynchronize kernel 3 failed");
+
+    // Set validation mask for produced outputs
+    cuda_utils::check_cuda_call(cudaMemsetAsync(validation_mask.data(), 1,
+                                                final_count * sizeof(uint8_t),
+                                                stream),
+                                "cudaMemsetAsync failed");
     return final_count;
 }
 
@@ -749,10 +746,13 @@ circ_taylor_validate_batch_cuda(cuda::std::span<const double> leaves_branch,
         "kernel_validate_branches_circular launch failed");
 
     // Count number of passing profiles
+    auto transform_it = thrust::make_transform_iterator(validation_mask.data(),
+                                                        Uint8ToUint32{});
+
     cuda_utils::check_cuda_call(
-        cub::DeviceReduce::Sum(
-            scratch_ws.cub_temp_storage, scratch_ws.cub_temp_bytes,
-            validation_mask.data(), scratch_ws.d_reduce_out, n_leaves, stream),
+        cub::DeviceReduce::Sum(scratch_ws.cub_temp_storage,
+                               scratch_ws.cub_temp_bytes, transform_it,
+                               scratch_ws.d_reduce_out, n_leaves, stream),
         "cub::DeviceReduce::Sum failed");
 
     // Copy result back

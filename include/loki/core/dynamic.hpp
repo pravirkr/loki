@@ -193,7 +193,6 @@ protected:
     using Base::BasePruneDPFuncts;
 
 public:
-    // Common seed implementation for all Taylor variants
     void seed(std::span<const FoldType> fold_segment,
               std::span<double> seed_leaves,
               std::span<float> seed_scores,
@@ -385,7 +384,7 @@ public:
                       std::pair<double, double> coord_init,
                       cudaStream_t stream) = 0;
 
-    virtual SizeType branch(cuda::std::span<const double> leaves_tree,
+    virtual SizeType branch(cuda::std::span<double> leaves_tree,
                             cuda::std::span<double> leaves_branch,
                             cuda::std::span<uint32_t> leaves_origins,
                             cuda::std::span<uint8_t> validation_mask,
@@ -429,7 +428,8 @@ public:
     virtual SizeType
     score_and_filter(cuda::std::span<const FoldTypeCUDA> folds_tree,
                      cuda::std::span<float> scores_tree,
-                     cuda::std::span<uint8_t> validation_mask,
+                     cuda::std::span<const uint8_t> validation_mask,
+                     cuda::std::span<uint8_t> filtered_mask,
                      float threshold,
                      SizeType n_leaves,
                      memory::CUBScratchArena& scratch_ws,
@@ -506,7 +506,8 @@ public:
 
     SizeType score_and_filter(cuda::std::span<const FoldTypeCUDA> folds_tree,
                               cuda::std::span<float> scores_tree,
-                              cuda::std::span<uint8_t> validation_mask,
+                              cuda::std::span<const uint8_t> validation_mask,
+                              cuda::std::span<uint8_t> filtered_mask,
                               float threshold,
                               SizeType n_leaves,
                               memory::CUBScratchArena& scratch_ws,
@@ -525,6 +526,24 @@ protected:
 
 public:
     // Common seed implementation for all Taylor variants
+    void seed(cuda::std::span<const FoldTypeCUDA> fold_segment,
+              cuda::std::span<double> seed_leaves,
+              cuda::std::span<float> seed_scores,
+              std::pair<double, double> coord_init,
+              cudaStream_t stream) override;
+};
+
+// Intermediate base for Chebyshev-based methods (common seed implementation)
+template <SupportedFoldTypeCUDA FoldTypeCUDA, typename Derived>
+class BaseChebyshevPruneDPFunctsCUDA
+    : public BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived> {
+protected:
+    using Base = BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>;
+
+    // Inherit constructor
+    using Base::BasePruneDPFunctsCUDA;
+
+public:
     void seed(cuda::std::span<const FoldTypeCUDA> fold_segment,
               cuda::std::span<double> seed_leaves,
               cuda::std::span<float> seed_scores,
@@ -552,7 +571,62 @@ public:
                                 SizeType batch_size,
                                 SizeType branch_max);
 
-    SizeType branch(cuda::std::span<const double> leaves_tree,
+    SizeType branch(cuda::std::span<double> leaves_tree,
+                    cuda::std::span<double> leaves_branch,
+                    cuda::std::span<uint32_t> leaves_origins,
+                    cuda::std::span<uint8_t> validation_mask,
+                    std::pair<double, double> coord_cur,
+                    std::pair<double, double> coord_prev,
+                    SizeType n_leaves,
+                    memory::BranchingWorkspaceCUDAView ws,
+                    memory::CUBScratchArena& scratch_ws,
+                    cudaStream_t stream) override;
+
+    void resolve(cuda::std::span<const double> leaves_branch,
+                 cuda::std::span<const uint8_t> validation_mask,
+                 cuda::std::span<uint32_t> param_indices,
+                 cuda::std::span<float> phase_shift,
+                 std::pair<double, double> coord_add,
+                 std::pair<double, double> coord_cur,
+                 std::pair<double, double> coord_init,
+                 SizeType n_leaves,
+                 cudaStream_t stream) const override;
+
+    void transform(cuda::std::span<double> leaves_tree,
+                   cuda::std::span<const uint8_t> validation_mask,
+                   std::pair<double, double> coord_next,
+                   std::pair<double, double> coord_cur,
+                   SizeType n_leaves,
+                   cudaStream_t stream) const override;
+
+    void report(cuda::std::span<double> leaves_tree,
+                std::pair<double, double> coord_report,
+                SizeType n_leaves,
+                cudaStream_t stream) const override;
+};
+
+// Specialized implementation for Polynomial searches in Chebyshev Basis
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+class PrunePolyChebyshevDPFunctsCUDA final
+    : public BaseChebyshevPruneDPFunctsCUDA<
+          FoldTypeCUDA,
+          PrunePolyChebyshevDPFunctsCUDA<FoldTypeCUDA>> {
+private:
+    using Base = BaseChebyshevPruneDPFunctsCUDA<
+        FoldTypeCUDA,
+        PrunePolyChebyshevDPFunctsCUDA<FoldTypeCUDA>>;
+
+public:
+    PrunePolyChebyshevDPFunctsCUDA(
+        std::span<const SizeType> param_grid_count_init,
+        std::span<const double> dparams_init,
+        SizeType nseg_ffa,
+        double tseg_ffa,
+        search::PulsarSearchConfig cfg,
+        SizeType batch_size,
+        SizeType branch_max);
+
+    SizeType branch(cuda::std::span<double> leaves_tree,
                     cuda::std::span<double> leaves_branch,
                     cuda::std::span<uint32_t> leaves_origins,
                     cuda::std::span<uint8_t> validation_mask,
@@ -607,7 +681,7 @@ public:
                                 SizeType batch_size,
                                 SizeType branch_max);
 
-    SizeType branch(cuda::std::span<const double> leaves_tree,
+    SizeType branch(cuda::std::span<double> leaves_tree,
                     cuda::std::span<double> leaves_branch,
                     cuda::std::span<uint32_t> leaves_origins,
                     cuda::std::span<uint8_t> validation_mask,

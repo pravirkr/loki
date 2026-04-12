@@ -70,7 +70,7 @@ public:
     PruneImpl& operator=(PruneImpl&&)      = delete;
 
     SizeType get_memory_usage() const noexcept {
-        return get_workspace().get_memory_usage();
+        return get_workspace().get_memory_usage_gib();
     }
 
     void execute(std::span<const FoldType> ffa_fold,
@@ -86,8 +86,8 @@ public:
 
         // Log detailed memory usage
         const auto& ws                 = get_workspace();
-        const auto memory_workspace_gb = ws.prune.get_memory_usage();
-        const auto memory_tree_gb      = ws.world_tree.get_memory_usage();
+        const auto memory_workspace_gb = ws.prune.get_memory_usage_gib();
+        const auto memory_tree_gb      = ws.world_tree.get_memory_usage_gib();
         spdlog::info("Pruning run {:03d}: Memory Usage: {:.2f} GB "
                      "(tree) + {:.2f} GB (workspace)",
                      ref_seg, memory_tree_gb, memory_workspace_gb);

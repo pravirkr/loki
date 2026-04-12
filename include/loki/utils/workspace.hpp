@@ -49,8 +49,7 @@ struct BranchingWorkspace {
     std::vector<double> scratch_params;
     std::vector<double> scratch_dparams;
     std::vector<SizeType> scratch_counts;
-    std::vector<double> tmp_dparam_new;
-    std::vector<double> tmp_shift_bins;
+    std::vector<double> scratch_shifts;
 
     BranchingWorkspace() = default;
     BranchingWorkspace(SizeType batch_size,
@@ -64,7 +63,7 @@ struct BranchingWorkspace {
     BranchingWorkspace(BranchingWorkspace&&) noexcept            = default;
     BranchingWorkspace& operator=(BranchingWorkspace&&) noexcept = default;
 
-    [[nodiscard]] float get_memory_usage() const noexcept;
+    [[nodiscard]] float get_memory_usage_gib() const noexcept;
 
     void
     validate(SizeType batch_size, SizeType branch_max, SizeType nparams) const;
@@ -108,7 +107,7 @@ template <SupportedFoldType FoldType> struct PruneWorkspace {
     PruneWorkspace(PruneWorkspace&&) noexcept            = default;
     PruneWorkspace& operator=(PruneWorkspace&&) noexcept = default;
 
-    [[nodiscard]] float get_memory_usage() const noexcept;
+    [[nodiscard]] float get_memory_usage_gib() const noexcept;
 
     void validate(SizeType batch_size, SizeType branch_max) const;
 }; // End PruneWorkspace definition
@@ -142,7 +141,7 @@ template <SupportedFoldType FoldType> struct EPWorkspace {
     EPWorkspace(EPWorkspace&&) noexcept            = default;
     EPWorkspace& operator=(EPWorkspace&&) noexcept = default;
 
-    [[nodiscard]] float get_memory_usage() const noexcept;
+    [[nodiscard]] float get_memory_usage_gib() const noexcept;
 
     void validate(SizeType batch_size,
                   SizeType branch_max,
@@ -228,7 +227,7 @@ struct BranchingWorkspaceCUDA {
     operator=(BranchingWorkspaceCUDA&&) noexcept = default;
 
     [[nodiscard]] BranchingWorkspaceCUDAView get_view() noexcept;
-    [[nodiscard]] float get_memory_usage() const noexcept;
+    [[nodiscard]] float get_memory_usage_gib() const noexcept;
     void
     validate(SizeType batch_size, SizeType branch_max, SizeType nparams) const;
 };
@@ -253,6 +252,7 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA> struct PruneWorkspaceCUDA {
     thrust::device_vector<float> branched_phase_shift_d;
     // Scratch space for validation mask
     thrust::device_vector<uint8_t> validation_mask_d;
+    thrust::device_vector<uint8_t> filtered_mask_d;
 
     PruneWorkspaceCUDA() = default;
     PruneWorkspaceCUDA(SizeType batch_size,
@@ -266,21 +266,23 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA> struct PruneWorkspaceCUDA {
     PruneWorkspaceCUDA(PruneWorkspaceCUDA&&) noexcept            = default;
     PruneWorkspaceCUDA& operator=(PruneWorkspaceCUDA&&) noexcept = default;
 
-    [[nodiscard]] float get_memory_usage() const noexcept;
+    [[nodiscard]] float get_memory_usage_gib() const noexcept;
     void validate(SizeType batch_size, SizeType branch_max) const;
 
 }; // End PruneWorkspaceCUDA definition
 
 struct CUBScratchArena {
-    void* cub_temp_storage  = nullptr;
-    SizeType cub_temp_bytes = 0;
-    uint32_t* d_reduce_out  = nullptr;
-    cudaStream_t stream     = nullptr;
+    void* cub_temp_storage    = nullptr;
+    SizeType cub_temp_bytes   = 0;
+    uint32_t* d_reduce_out    = nullptr;
+    MinMaxFloat* d_minmax_out = nullptr;
+    SizeType max_n_leaves     = 0;
 
     CUBScratchArena() = default;
     CUBScratchArena(SizeType batch_size,
                     SizeType branch_max,
                     cudaStream_t stream = nullptr);
+    /// Synchronously frees all device allocations (stream-independent).
     ~CUBScratchArena();
     // Non-copyable: device memory ownership is non-shared
     CUBScratchArena(const CUBScratchArena&)            = delete;
@@ -289,11 +291,19 @@ struct CUBScratchArena {
     CUBScratchArena(CUBScratchArena&&) noexcept;
     CUBScratchArena& operator=(CUBScratchArena&&) noexcept;
 
-    [[nodiscard]] float get_memory_usage() const noexcept;
+    /// Returns the size of the CUB temp-storage allocation in gibibytes.
+    [[nodiscard]] float get_memory_usage_gib() const noexcept;
 
     void convert_mask_to_indices(cuda::std::span<const uint8_t> validation_mask,
                                  cuda::std::span<uint32_t> indices,
-                                 SizeType n_leaves);
+                                 SizeType n_leaves,
+                                 cudaStream_t stream);
+
+    void compute_min_max_scores(cuda::std::span<const float> scores,
+                                cuda::std::span<const uint8_t> mask,
+                                MinMaxFloat* h_minmax_out,
+                                SizeType n_leaves,
+                                cudaStream_t stream);
 };
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA> struct EPWorkspaceCUDA {
@@ -320,7 +330,7 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA> struct EPWorkspaceCUDA {
     EPWorkspaceCUDA(EPWorkspaceCUDA&&) noexcept;
     EPWorkspaceCUDA& operator=(EPWorkspaceCUDA&&) noexcept;
 
-    [[nodiscard]] float get_memory_usage() const noexcept;
+    [[nodiscard]] float get_memory_usage_gib() const noexcept;
     void validate(SizeType batch_size,
                   SizeType branch_max,
                   SizeType max_sugg,

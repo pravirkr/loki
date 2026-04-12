@@ -131,11 +131,14 @@ __device__ __forceinline__ void ffa_taylor_resolve_jerk_batch_device(
     const uint32_t jerk_idx  = local_tid / (n_freq_cur * n_accel_cur);
 
     const double j_cur = utils::get_param_val_at_idx_device(
-        param_limits[0].min, param_limits[0].max, n_jerk_cur, jerk_idx);
+        param_limits[po + 0].min, param_limits[po + 0].max, n_jerk_cur,
+        jerk_idx);
     const double a_cur = utils::get_param_val_at_idx_device(
-        param_limits[1].min, param_limits[1].max, n_accel_cur, accel_idx);
+        param_limits[po + 1].min, param_limits[po + 1].max, n_accel_cur,
+        accel_idx);
     const double f_cur = utils::get_param_val_at_idx_device(
-        param_limits[2].min, param_limits[2].max, n_freq_cur, freq_idx);
+        param_limits[po + 2].min, param_limits[po + 2].max, n_freq_cur,
+        freq_idx);
 
     const double tsegment   = ldexp(tseg_brute, static_cast<int>(i_level - 1));
     const double delta_t    = (static_cast<double>(LATTER) - 0.5) * tsegment;
@@ -152,11 +155,11 @@ __device__ __forceinline__ void ffa_taylor_resolve_jerk_batch_device(
         utils::get_phase_idx_device(delta_t, f_cur, nbins, delay_rel);
 
     const uint32_t idx_j = utils::get_nearest_idx_analytical_device(
-        j_cur, param_limits[0].min, param_limits[0].max, n_jerk_prev);
+        j_cur, param_limits[po + 0].min, param_limits[po + 0].max, n_jerk_prev);
     const uint32_t idx_a = utils::get_nearest_idx_analytical_device(
-        a_new, param_limits[1].min, param_limits[1].max, n_accel_prev);
+        a_new, param_limits[po + 1].min, param_limits[po + 1].max, n_accel_prev);
     const uint32_t idx_f = utils::get_nearest_idx_analytical_device(
-        f_new, param_limits[2].min, param_limits[2].max, n_freq_prev);
+        f_new, param_limits[po + 2].min, param_limits[po + 2].max, n_freq_prev);
 
     const uint32_t final_idx =
         (idx_j * n_accel_prev * n_freq_prev) + (idx_a * n_freq_prev) + idx_f;

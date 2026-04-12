@@ -7,6 +7,7 @@
 #include <thrust/copy.h>
 
 #include "loki/common/types.hpp"
+#include "loki/core/chebyshev.hpp"
 #include "loki/core/circular.hpp"
 #include "loki/core/taylor.hpp"
 #include "loki/cuda_utils.cuh"
@@ -131,7 +132,8 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA, typename Derived>
 SizeType BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::score_and_filter(
     cuda::std::span<const FoldTypeCUDA> folds_tree,
     cuda::std::span<float> scores_tree,
-    cuda::std::span<uint8_t> validation_mask,
+    cuda::std::span<const uint8_t> validation_mask,
+    cuda::std::span<uint8_t> filtered_mask,
     float threshold,
     SizeType n_leaves,
     memory::CUBScratchArena& scratch_ws,
@@ -148,13 +150,13 @@ SizeType BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::score_and_filter(
                                   static_cast<int>(nfft), stream);
         return detection::score_and_filter_max_cuda_thread_d(
             folds_t_span, cuda_utils::as_span(this->m_boxcar_widths_d),
-            scores_tree, validation_mask, threshold, n_leaves, nbins,
-            scratch_ws, stream);
+            scores_tree, validation_mask, filtered_mask, threshold, n_leaves,
+            nbins, scratch_ws, stream);
     } else {
         return detection::score_and_filter_max_cuda_thread_d(
             folds_tree, cuda_utils::as_span(this->m_boxcar_widths_d),
-            scores_tree, validation_mask, threshold, n_leaves, nbins,
-            scratch_ws, stream);
+            scores_tree, validation_mask, filtered_mask, threshold, n_leaves,
+            nbins, scratch_ws, stream);
     }
 }
 
@@ -171,6 +173,50 @@ void BaseTaylorPruneDPFunctsCUDA<FoldTypeCUDA, Derived>::seed(
                           cuda_utils::as_span(this->m_param_limits_d),
                           seed_leaves, coord_init, this->m_n_coords_init,
                           this->m_cfg.get_nparams(), stream);
+    // Fold segment is (n_leaves, 2, nbins)
+    const auto nbins   = this->m_cfg.get_nbins();
+    const auto nbins_f = this->m_cfg.get_nbins_f();
+
+    // Calculate scores
+    if constexpr (std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>) {
+        const auto nfft = 2 * this->m_n_coords_init;
+        error_check::check_equal(fold_segment.size(), nfft * nbins_f,
+                                 "fold_segment size mismatch");
+        auto folds_t_span =
+            cuda_utils::as_span(this->m_scratch_folds_d).first(nfft * nbins);
+        this->m_irfft_executor->execute(fold_segment, folds_t_span,
+                                        static_cast<int>(nfft), stream);
+        detection::snr_boxcar_3d_max_cuda_d(
+            folds_t_span, cuda_utils::as_span(this->m_boxcar_widths_d),
+            seed_scores, this->m_n_coords_init, nbins, stream);
+    } else {
+        error_check::check_equal(fold_segment.size(),
+                                 this->m_n_coords_init * 2 * nbins,
+                                 "fold_segment size mismatch");
+        detection::snr_boxcar_3d_max_cuda_d(
+            fold_segment, cuda_utils::as_span(this->m_boxcar_widths_d),
+            seed_scores, this->m_n_coords_init, nbins, stream);
+    }
+}
+
+// Intermediate implementation for Taylor basis
+template <SupportedFoldTypeCUDA FoldTypeCUDA, typename Derived>
+void BaseChebyshevPruneDPFunctsCUDA<FoldTypeCUDA, Derived>::seed(
+    cuda::std::span<const FoldTypeCUDA> fold_segment,
+    cuda::std::span<double> seed_leaves,
+    cuda::std::span<float> seed_scores,
+    std::pair<double, double> coord_init,
+    cudaStream_t stream) {
+    // First seed in Taylor basis
+    poly_taylor_seed_cuda(cuda_utils::as_span(this->m_param_grid_count_init_d),
+                          cuda_utils::as_span(this->m_dparams_init_d),
+                          cuda_utils::as_span(this->m_param_limits_d),
+                          seed_leaves, coord_init, this->m_n_coords_init,
+                          this->m_cfg.get_nparams(), stream);
+    // Then convert to Chebyshev basis
+    poly_taylor_to_cheby_batch_cuda(seed_leaves, coord_init,
+                                    this->m_n_coords_init,
+                                    this->m_cfg.get_nparams(), stream);
     // Fold segment is (n_leaves, 2, nbins)
     const auto nbins   = this->m_cfg.get_nbins();
     const auto nbins_f = this->m_cfg.get_nbins_f();
@@ -217,7 +263,7 @@ PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>::PrunePolyTaylorDPFunctsCUDA(
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 SizeType PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>::branch(
-    cuda::std::span<const double> leaves_tree,
+    cuda::std::span<double> leaves_tree,
     cuda::std::span<double> leaves_branch,
     cuda::std::span<uint32_t> leaves_origins,
     cuda::std::span<uint8_t> validation_mask,
@@ -275,6 +321,101 @@ void PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>::report(
     std::pair<double, double> coord_report,
     SizeType n_leaves,
     cudaStream_t stream) const {
+    if (n_leaves == 0) {
+        return;
+    }
+    poly_taylor_report_batch_cuda(leaves_tree, coord_report, n_leaves,
+                                  this->m_cfg.get_nparams(), stream);
+}
+
+// Specialized implementation for Polynomial searches in Chebyshev Basis
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+PrunePolyChebyshevDPFunctsCUDA<FoldTypeCUDA>::PrunePolyChebyshevDPFunctsCUDA(
+    std::span<const SizeType> param_grid_count_init,
+    std::span<const double> dparams_init,
+    SizeType nseg_ffa,
+    double tseg_ffa,
+    search::PulsarSearchConfig cfg,
+    SizeType batch_size,
+    SizeType branch_max)
+    : Base(param_grid_count_init,
+           dparams_init,
+           nseg_ffa,
+           tseg_ffa,
+           std::move(cfg),
+           batch_size,
+           branch_max) {}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+SizeType PrunePolyChebyshevDPFunctsCUDA<FoldTypeCUDA>::branch(
+    cuda::std::span<double> leaves_tree,
+    cuda::std::span<double> leaves_branch,
+    cuda::std::span<uint32_t> leaves_origins,
+    cuda::std::span<uint8_t> validation_mask,
+    std::pair<double, double> coord_cur,
+    std::pair<double, double> coord_prev,
+    SizeType n_leaves,
+    memory::BranchingWorkspaceCUDAView branch_ws,
+    memory::CUBScratchArena& scratch_ws,
+    cudaStream_t stream) {
+    return poly_chebyshev_branch_batch_cuda(
+        leaves_tree, leaves_branch, leaves_origins, validation_mask, coord_cur,
+        coord_prev, this->m_cfg.get_nbins(), this->m_cfg.get_eta(),
+        cuda_utils::as_span(this->m_param_limits_d), this->m_branch_max,
+        n_leaves, this->m_cfg.get_nparams(), branch_ws, scratch_ws, stream);
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+void PrunePolyChebyshevDPFunctsCUDA<FoldTypeCUDA>::resolve(
+    cuda::std::span<const double> leaves_branch,
+    cuda::std::span<const uint8_t> validation_mask,
+    cuda::std::span<uint32_t> param_indices,
+    cuda::std::span<float> phase_shift,
+    std::pair<double, double> coord_add,
+    std::pair<double, double> coord_cur,
+    std::pair<double, double> coord_init,
+    SizeType n_leaves,
+    cudaStream_t stream) const {
+    const auto n_params     = this->m_cfg.get_nparams();
+    const auto n_accel_init = this->m_param_grid_count_init_d[n_params - 2];
+    const auto n_freq_init  = this->m_param_grid_count_init_d[n_params - 1];
+    poly_chebyshev_resolve_batch_cuda(
+        leaves_branch, validation_mask, param_indices, phase_shift,
+        cuda_utils::as_span(this->m_param_limits_d), coord_add, coord_cur,
+        coord_init, n_accel_init, n_freq_init, this->m_cfg.get_nbins(),
+        n_leaves, this->m_cfg.get_nparams(), stream);
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+void PrunePolyChebyshevDPFunctsCUDA<FoldTypeCUDA>::transform(
+    cuda::std::span<double> leaves_tree,
+    cuda::std::span<const uint8_t> validation_mask,
+    std::pair<double, double> coord_next,
+    std::pair<double, double> coord_cur,
+    SizeType n_leaves,
+    cudaStream_t stream) const {
+    if (this->m_cfg.get_use_conservative_tile()) {
+        throw std::logic_error(
+            "Conservative tile not implemented for Chebyshev basis");
+    }
+    poly_chebyshev_transform_batch_cuda(leaves_tree, validation_mask,
+                                        coord_next, coord_cur, n_leaves,
+                                        this->m_cfg.get_nparams(), stream);
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+void PrunePolyChebyshevDPFunctsCUDA<FoldTypeCUDA>::report(
+    cuda::std::span<double> leaves_tree,
+    std::pair<double, double> coord_report,
+    SizeType n_leaves,
+    cudaStream_t stream) const {
+    if (n_leaves == 0) {
+        return;
+    }
+    // First convert the Chebyshev leaves to Taylor leaves
+    poly_cheby_to_taylor_batch_cuda(leaves_tree, coord_report, n_leaves,
+                                    this->m_cfg.get_nparams(), stream);
+    // Now call the Taylor report batch
     poly_taylor_report_batch_cuda(leaves_tree, coord_report, n_leaves,
                                   this->m_cfg.get_nparams(), stream);
 }
@@ -299,7 +440,7 @@ PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>::PruneCircTaylorDPFunctsCUDA(
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 SizeType PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>::branch(
-    cuda::std::span<const double> leaves_tree,
+    cuda::std::span<double> leaves_tree,
     cuda::std::span<double> leaves_branch,
     cuda::std::span<uint32_t> leaves_origins,
     cuda::std::span<uint8_t> validation_mask,
@@ -373,6 +514,9 @@ void PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>::report(
     std::pair<double, double> coord_report,
     SizeType n_leaves,
     cudaStream_t stream) const {
+    if (n_leaves == 0) {
+        return;
+    }
     poly_taylor_report_batch_cuda(leaves_tree, coord_report, n_leaves,
                                   this->m_cfg.get_nparams(), stream);
 }
@@ -398,8 +542,14 @@ create_prune_dp_functs_cuda(std::string_view poly_basis,
             param_grid_count_init, dparams_init, nseg_ffa, tseg_ffa,
             std::move(cfg), batch_size, branch_max);
     }
+    if (poly_basis == "chebyshev" && n_params <= 4) {
+        return std::make_unique<PrunePolyChebyshevDPFunctsCUDA<FoldTypeCUDA>>(
+            param_grid_count_init, dparams_init, nseg_ffa, tseg_ffa,
+            std::move(cfg), batch_size, branch_max);
+    }
     throw std::runtime_error(std::format(
-        "Unknown poly_basis: '{}'. Valid options: 'taylor'", poly_basis));
+        "Unknown poly_basis: '{}'. Valid options: 'taylor', 'chebyshev'",
+        poly_basis));
 }
 
 // Explicit template instantiations
@@ -423,11 +573,20 @@ template class BaseTaylorPruneDPFunctsCUDA<
     ComplexTypeCUDA,
     PruneCircTaylorDPFunctsCUDA<ComplexTypeCUDA>>;
 
+template class BaseChebyshevPruneDPFunctsCUDA<
+    float,
+    PrunePolyChebyshevDPFunctsCUDA<float>>;
+template class BaseChebyshevPruneDPFunctsCUDA<
+    ComplexTypeCUDA,
+    PrunePolyChebyshevDPFunctsCUDA<ComplexTypeCUDA>>;
+
 // Derived classes
 template class PrunePolyTaylorDPFunctsCUDA<float>;
 template class PrunePolyTaylorDPFunctsCUDA<ComplexTypeCUDA>;
 template class PruneCircTaylorDPFunctsCUDA<float>;
 template class PruneCircTaylorDPFunctsCUDA<ComplexTypeCUDA>;
+template class PrunePolyChebyshevDPFunctsCUDA<float>;
+template class PrunePolyChebyshevDPFunctsCUDA<ComplexTypeCUDA>;
 
 // Factory function instantiations
 template std::unique_ptr<PruneDPFunctsCUDA<float>>

@@ -6,10 +6,9 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pytest
-from pyloki.config import ParamLimits
 
-import loki
-from loki import libculoki
+from loki import libculoki, libloki
+from pyloki.config import ParamLimits
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -19,12 +18,12 @@ if TYPE_CHECKING:
     ("cpp_fn", "cuda_fn", "decimal"),
     [
         (
-            loki.fold.compute_brute_fold_time,
+            libloki.fold.compute_brute_fold_time,
             libculoki.fold.compute_brute_fold_time_cuda,
             5,
         ),
         (
-            loki.fold.compute_brute_fold_fourier,
+            libloki.fold.compute_brute_fold_fourier,
             libculoki.fold.compute_brute_fold_fourier_cuda,
             1,
         ),
@@ -74,7 +73,7 @@ def test_ffa_freq_cuda(
 ) -> None:
     ts_e, ts_v = mock_data
     param_limits = [(143.0, 144.0)]
-    cfg = loki.configs.PulsarSearchConfig(
+    cfg = libloki.configs.PulsarSearchConfig(
         eta=1,
         param_limits=param_limits,
         use_fourier=use_fourier,
@@ -82,19 +81,25 @@ def test_ffa_freq_cuda(
         **default_params,
     )
     if use_fourier:
-        out_cpu, _ = loki.ffa.compute_ffa_fourier(ts_e, ts_v, cfg, quiet=True)
+        out_cpu, _ = libloki.ffa.compute_ffa_fourier(ts_e, ts_v, cfg, quiet=True)
         out_cuda, _ = libculoki.ffa.compute_ffa_fourier_cuda(
-            ts_e, ts_v, cfg, device_id=0, quiet=True
+            ts_e,
+            ts_v,
+            cfg,
+            device_id=0,
+            quiet=True,
         )
         np.testing.assert_allclose(out_cuda, out_cpu, atol=5.0)
     else:
-        out_cpu, _ = loki.ffa.compute_ffa_time(ts_e, ts_v, cfg, quiet=True)
+        out_cpu, _ = libloki.ffa.compute_ffa_time(ts_e, ts_v, cfg, quiet=True)
         out_cuda, _ = libculoki.ffa.compute_ffa_time_cuda(
-            ts_e, ts_v, cfg, device_id=0, quiet=True
+            ts_e,
+            ts_v,
+            cfg,
+            device_id=0,
+            quiet=True,
         )
         np.testing.assert_array_almost_equal(out_cuda, out_cpu, decimal=3)
-
-    
 
 
 def test_ffa_freq_fourier_return_to_time_cuda(
@@ -103,18 +108,25 @@ def test_ffa_freq_fourier_return_to_time_cuda(
 ) -> None:
     ts_e, ts_v = mock_data
     param_limits = [(143.0, 144.0)]
-    cfg = loki.configs.PulsarSearchConfig(
+    cfg = libloki.configs.PulsarSearchConfig(
         eta=1,
         param_limits=param_limits,
         use_fourier=True,
         nthreads=8,
         **default_params,
     )
-    out_cpu, _ = loki.ffa.compute_ffa_fourier_return_to_time(
-        ts_e, ts_v, cfg, quiet=True
+    out_cpu, _ = libloki.ffa.compute_ffa_fourier_return_to_time(
+        ts_e,
+        ts_v,
+        cfg,
+        quiet=True,
     )
     out_cuda, _ = libculoki.ffa.compute_ffa_fourier_return_to_time_cuda(
-        ts_e, ts_v, cfg, device_id=0, quiet=True
+        ts_e,
+        ts_v,
+        cfg,
+        device_id=0,
+        quiet=True,
     )
     np.testing.assert_allclose(out_cuda, out_cpu, rtol=0.05, atol=1.0)
 
@@ -129,7 +141,7 @@ def test_ffa_accel_cuda_vs_cpu(
     """Test CUDA FFA matches CPU for acceleration search."""
     ts_e, ts_v = mock_data
     param_limits = [(-50.0, 50.0), (143.5, 144.0)]
-    cfg = loki.configs.PulsarSearchConfig(
+    cfg = libloki.configs.PulsarSearchConfig(
         eta=2,
         param_limits=param_limits,
         use_fourier=use_fourier,
@@ -137,15 +149,23 @@ def test_ffa_accel_cuda_vs_cpu(
         **default_params,
     )
     if use_fourier:
-        out_cpu, _ = loki.ffa.compute_ffa_fourier(ts_e, ts_v, cfg, quiet=True)
+        out_cpu, _ = libloki.ffa.compute_ffa_fourier(ts_e, ts_v, cfg, quiet=True)
         out_cuda, _ = libculoki.ffa.compute_ffa_fourier_cuda(
-            ts_e, ts_v, cfg, device_id=0, quiet=True
+            ts_e,
+            ts_v,
+            cfg,
+            device_id=0,
+            quiet=True,
         )
         np.testing.assert_allclose(out_cuda, out_cpu, atol=5.0)
     else:
-        out_cpu, _ = loki.ffa.compute_ffa_time(ts_e, ts_v, cfg, quiet=True)
+        out_cpu, _ = libloki.ffa.compute_ffa_time(ts_e, ts_v, cfg, quiet=True)
         out_cuda, _ = libculoki.ffa.compute_ffa_time_cuda(
-            ts_e, ts_v, cfg, device_id=0, quiet=True
+            ts_e,
+            ts_v,
+            cfg,
+            device_id=0,
+            quiet=True,
         )
         np.testing.assert_array_almost_equal(out_cuda, out_cpu, decimal=3)
 
@@ -156,18 +176,25 @@ def test_ffa_accel_fourier_return_to_time_cuda(
 ) -> None:
     ts_e, ts_v = mock_data
     param_limits = [(-50.0, 50.0), (143.5, 144.0)]
-    cfg = loki.configs.PulsarSearchConfig(
+    cfg = libloki.configs.PulsarSearchConfig(
         eta=2,
         param_limits=param_limits,
         use_fourier=True,
         nthreads=8,
         **default_params,
     )
-    out_cpu, _ = loki.ffa.compute_ffa_fourier_return_to_time(
-        ts_e, ts_v, cfg, quiet=True
+    out_cpu, _ = libloki.ffa.compute_ffa_fourier_return_to_time(
+        ts_e,
+        ts_v,
+        cfg,
+        quiet=True,
     )
     out_cuda, _ = libculoki.ffa.compute_ffa_fourier_return_to_time_cuda(
-        ts_e, ts_v, cfg, device_id=0, quiet=True
+        ts_e,
+        ts_v,
+        cfg,
+        device_id=0,
+        quiet=True,
     )
     np.testing.assert_allclose(out_cuda, out_cpu, rtol=0.05, atol=1.0)
 
@@ -185,7 +212,7 @@ def test_ffa_jerk_cuda(
         (-1, 1),
         default_params["nsamps"] * default_params["tsamp"],
     )
-    cfg = loki.configs.PulsarSearchConfig(
+    cfg = libloki.configs.PulsarSearchConfig(
         eta=1,
         param_limits=param_limits.limits,
         use_fourier=use_fourier,
@@ -193,15 +220,23 @@ def test_ffa_jerk_cuda(
         **default_params,
     )
     if use_fourier:
-        out_cpu, _ = loki.ffa.compute_ffa_fourier(ts_e, ts_v, cfg, quiet=True)
+        out_cpu, _ = libloki.ffa.compute_ffa_fourier(ts_e, ts_v, cfg, quiet=True)
         out_cuda, _ = libculoki.ffa.compute_ffa_fourier_cuda(
-            ts_e, ts_v, cfg, device_id=0, quiet=True
+            ts_e,
+            ts_v,
+            cfg,
+            device_id=0,
+            quiet=True,
         )
         np.testing.assert_allclose(out_cuda, out_cpu, atol=5.0)
     else:
-        out_cpu, _ = loki.ffa.compute_ffa_time(ts_e, ts_v, cfg, quiet=True)
+        out_cpu, _ = libloki.ffa.compute_ffa_time(ts_e, ts_v, cfg, quiet=True)
         out_cuda, _ = libculoki.ffa.compute_ffa_time_cuda(
-            ts_e, ts_v, cfg, device_id=0, quiet=True
+            ts_e,
+            ts_v,
+            cfg,
+            device_id=0,
+            quiet=True,
         )
         np.testing.assert_array_almost_equal(out_cuda, out_cpu, decimal=3)
 
@@ -216,17 +251,24 @@ def test_ffa_jerk_fourier_return_to_time_cuda(
         (-1, 1),
         default_params["nsamps"] * default_params["tsamp"],
     )
-    cfg = loki.configs.PulsarSearchConfig(
+    cfg = libloki.configs.PulsarSearchConfig(
         eta=4,
         param_limits=param_limits.limits,
         use_fourier=True,
         nthreads=8,
         **default_params,
     )
-    out_cpu, _ = loki.ffa.compute_ffa_fourier_return_to_time(
-        ts_e, ts_v, cfg, quiet=True
+    out_cpu, _ = libloki.ffa.compute_ffa_fourier_return_to_time(
+        ts_e,
+        ts_v,
+        cfg,
+        quiet=True,
     )
     out_cuda, _ = libculoki.ffa.compute_ffa_fourier_return_to_time_cuda(
-        ts_e, ts_v, cfg, device_id=0, quiet=True
+        ts_e,
+        ts_v,
+        cfg,
+        device_id=0,
+        quiet=True,
     )
     np.testing.assert_allclose(out_cuda, out_cpu, atol=1.0)

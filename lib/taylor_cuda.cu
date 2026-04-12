@@ -103,9 +103,9 @@ kernel_analyze_and_branch_accel(const double* __restrict__ leaves_tree,
     double d1_sig_new    = dphi * dfactor * 1.0 * inv_dt;
 
     const double shift_d2 =
-        (d2_sig_cur - d2_sig_new) * dt2 * nbins / (4.0 * dfactor);
+        fabs(d2_sig_cur - d2_sig_new) * dt2 * nbins / (4.0 * dfactor);
     const double shift_d1 =
-        (d1_sig_cur - d1_sig_new) * dt * nbins / (1.0 * dfactor);
+        fabs(d1_sig_cur - d1_sig_new) * dt * nbins / (1.0 * dfactor);
 
     const double d2_range = param_limits[0].max - param_limits[0].min;
     const double d1_range =
@@ -171,11 +171,11 @@ kernel_analyze_and_branch_jerk(const double* __restrict__ leaves_tree,
     double d1_sig_new    = dphi * dfactor * 1.0 * inv_dt;
 
     const double shift_d3 =
-        (d3_sig_cur - d3_sig_new) * dt3 * nbins / (24.0 * dfactor);
+        fabs(d3_sig_cur - d3_sig_new) * dt3 * nbins / (24.0 * dfactor);
     const double shift_d2 =
-        (d2_sig_cur - d2_sig_new) * dt2 * nbins / (4.0 * dfactor);
+        fabs(d2_sig_cur - d2_sig_new) * dt2 * nbins / (4.0 * dfactor);
     const double shift_d1 =
-        (d1_sig_cur - d1_sig_new) * dt * nbins / (1.0 * dfactor);
+        fabs(d1_sig_cur - d1_sig_new) * dt * nbins / (1.0 * dfactor);
 
     const double d3_range = param_limits[0].max - param_limits[0].min;
     const double d2_range = param_limits[1].max - param_limits[1].min;
@@ -253,13 +253,13 @@ kernel_analyze_and_branch_snap(const double* __restrict__ leaves_tree,
     double d1_sig_new    = dphi * dfactor * 1.0 * inv_dt;
 
     const double shift_d4 =
-        (d4_sig_cur - d4_sig_new) * dt4 * nbins / (192.0 * dfactor);
+        fabs(d4_sig_cur - d4_sig_new) * dt4 * nbins / (192.0 * dfactor);
     const double shift_d3 =
-        (d3_sig_cur - d3_sig_new) * dt3 * nbins / (24.0 * dfactor);
+        fabs(d3_sig_cur - d3_sig_new) * dt3 * nbins / (24.0 * dfactor);
     const double shift_d2 =
-        (d2_sig_cur - d2_sig_new) * dt2 * nbins / (4.0 * dfactor);
+        fabs(d2_sig_cur - d2_sig_new) * dt2 * nbins / (4.0 * dfactor);
     const double shift_d1 =
-        (d1_sig_cur - d1_sig_new) * dt * nbins / (1.0 * dfactor);
+        fabs(d1_sig_cur - d1_sig_new) * dt * nbins / (1.0 * dfactor);
 
     const double d4_range = param_limits[0].max - param_limits[0].min;
     const double d3_range = param_limits[1].max - param_limits[1].min;
@@ -902,15 +902,19 @@ __global__ void kernel_poly_taylor_report_batch(
     if (tid >= n_leaves) {
         return;
     }
-    const uint32_t leaves_stride = n_params * 2;
-    const uint32_t leaf_offset   = tid * leaves_stride;
-    const double v_final  = leaves_tree[leaf_offset + ((n_params - 1) * 2) + 0];
-    const double dv_final = leaves_tree[leaf_offset + ((n_params - 1) * 2) + 1];
-    const double f0_batch = leaves_tree[leaf_offset + ((n_params + 1) * 2) + 0];
+    constexpr SizeType kParamStride = 2U;
+    const uint32_t leaves_stride    = (n_params + 2) * kParamStride;
+    const uint32_t leaf_offset      = tid * leaves_stride;
+    const double v_final =
+        leaves_tree[leaf_offset + ((n_params - 1) * kParamStride) + 0];
+    const double dv_final =
+        leaves_tree[leaf_offset + ((n_params - 1) * kParamStride) + 1];
+    const double f0_batch =
+        leaves_tree[leaf_offset + ((n_params + 1) * kParamStride) + 0];
     const double s_factor = 1.0 - (v_final * utils::kInvCval);
     // Gauge transform + error propagation
     for (uint32_t j = 0; j < n_params - 1; ++j) {
-        const uint32_t param_offset   = leaf_offset + (j * 2);
+        const uint32_t param_offset   = leaf_offset + (j * kParamStride);
         const double param_val        = leaves_tree[param_offset + 0];
         const double param_err        = leaves_tree[param_offset + 1];
         leaves_tree[param_offset + 0] = param_val / s_factor;
@@ -920,8 +924,9 @@ __global__ void kernel_poly_taylor_report_batch(
                   (param_val * utils::kInvCval / (s_factor * s_factor)) *
                   (dv_final * dv_final)));
     }
-    leaves_tree[leaf_offset + ((n_params - 1) * 2) + 0] = f0_batch * s_factor;
-    leaves_tree[leaf_offset + ((n_params - 1) * 2) + 1] =
+    leaves_tree[leaf_offset + ((n_params - 1) * kParamStride) + 0] =
+        f0_batch * s_factor;
+    leaves_tree[leaf_offset + ((n_params - 1) * kParamStride) + 1] =
         f0_batch * dv_final * utils::kInvCval;
 }
 
@@ -1064,8 +1069,7 @@ void poly_taylor_seed_cuda(
         param_grid_count_init.data(), dparams_init.data(), param_limits.data(),
         seed_leaves.data(), n_leaves, n_params);
     cuda_utils::check_last_cuda_error("Taylor seed kernel launch failed");
-    cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
-                                "cudaStreamSynchronize seed kernel failed");
+    // No need to sync, the next kernel will do it
 }
 
 SizeType
@@ -1202,6 +1206,9 @@ void poly_taylor_report_batch_cuda(cuda::std::span<double> leaves_tree,
                                    SizeType n_leaves,
                                    SizeType n_params,
                                    cudaStream_t stream) {
+    if (n_leaves == 0) {
+        return;
+    }
     // Better occupancy than 512 for many kernels
     constexpr int kBlockSize = 256;
     const dim3 block(kBlockSize);
@@ -1210,8 +1217,7 @@ void poly_taylor_report_batch_cuda(cuda::std::span<double> leaves_tree,
     kernel_poly_taylor_report_batch<<<grid, block, 0, stream>>>(
         leaves_tree.data(), n_leaves, n_params);
     cuda_utils::check_last_cuda_error("Taylor report kernel launch failed");
-    cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
-                                "cudaStreamSynchronize report kernel failed");
+    // No need to sync, the next kernel will do it
 }
 
 } // namespace loki::core

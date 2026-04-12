@@ -191,7 +191,7 @@ inline void branch_one_param_padded(SizeType p,
                                     SizeType branch_max) {
     const SizeType pad_offset = (flat_base + p) * branch_max;
 
-    if (shift_bins_ptr[flat_base + p] >= (eta - utils::kEps)) {
+    if (shift_bins_ptr[flat_base + p] >= (eta - utils::kFloatEps)) {
         auto slice =
             std::span<double>(scratch_params_ptr + pad_offset, branch_max);
         auto [dparam_act, count] = branch_param_padded(
@@ -219,7 +219,7 @@ branch_one_param_padded_crackle(SizeType p,
                                 SizeType branch_max) {
     const SizeType pad_offset = (flat_base + p) * branch_max;
 
-    if (shift_bins_ptr[flat_base + p] >= (eta - utils::kEps)) {
+    if (shift_bins_ptr[flat_base + p] >= (eta - utils::kFloatEps)) {
         auto [dparam_act, count] = branch_dparam_crackle(
             sig_cur, dparam_new_ptr[flat_base + p], branch_max);
         scratch_dparams_ptr[flat_base + p] = dparam_act;
@@ -291,7 +291,7 @@ inline SizeType get_nearest_idx_analytical(double val,
     const double raw_idx = ((val - limit.min) * step_inv) - 1.0;
 
     // explicit half-up
-    const auto idx = static_cast<int>(raw_idx + 0.5 + utils::kEps);
+    const auto idx = static_cast<int>(raw_idx + 0.5 + utils::kFloatEps);
     if (idx < 0) {
         return 0;
     }

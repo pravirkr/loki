@@ -25,7 +25,7 @@ __device__ __forceinline__ uint32_t get_nearest_idx_analytical_device(
     const double step_inv = static_cast<double>(count + 1) / (vmax - vmin);
     const double raw_idx  = ((val - vmin) * step_inv) - 1.0;
     // Explicit half-up rounding, signed first
-    const int idx = __double2int_rz(raw_idx + 0.5 + utils::kEps);
+    const int idx = __double2int_rz(raw_idx + 0.5 + utils::kFloatEps);
     if (idx < 0) {
         return 0;
     }
@@ -173,10 +173,10 @@ __device__ __forceinline__ uint32_t find_ffa_level(
     return lo;
 }
 
-__device__ __forceinline__ float get_phase_idx_device(double proper_time,
-                                                      double freq,
-                                                      uint32_t nbins,
-                                                      double delay) {
+__device__ __forceinline__ float get_phase_idx_device1(double proper_time,
+                                                       double freq,
+                                                       uint32_t nbins,
+                                                       double delay) {
     const double total_phase = (proper_time - delay) * freq;
     double ipart;
     double norm_phase = modf(total_phase, &ipart);
@@ -184,6 +184,19 @@ __device__ __forceinline__ float get_phase_idx_device(double proper_time,
         norm_phase += 1.0;
     }
     double iphase = norm_phase * static_cast<double>(nbins);
+    if (iphase >= static_cast<double>(nbins)) {
+        iphase = 0.0;
+    }
+    return static_cast<float>(iphase);
+}
+
+__device__ __forceinline__ float get_phase_idx_device(double proper_time,
+                                                      double freq,
+                                                      uint32_t nbins,
+                                                      double delay) {
+    const double total_phase = (proper_time - delay) * freq;
+    const double norm_phase  = total_phase - floor(total_phase);
+    double iphase            = norm_phase * static_cast<double>(nbins);
     if (iphase >= static_cast<double>(nbins)) {
         iphase = 0.0;
     }
@@ -199,7 +212,7 @@ branch_param_generate_points_device(double* __restrict__ out_values,
                                     double dparam_cur,
                                     double dparam_new) {
     const auto num_points = static_cast<uint32_t>(
-        ceil(((dparam_cur + utils::kEps) / dparam_new) - utils::kEps));
+        ceil((dparam_cur / dparam_new) - utils::kFloatEps));
 
     const double confidence_const =
         0.5 + (0.5 / static_cast<double>(num_points));
@@ -209,12 +222,11 @@ branch_param_generate_points_device(double* __restrict__ out_values,
     const double step =
         (2.0 * half_range) / static_cast<double>(num_points + 1);
 
-    const uint32_t count = min(num_points, out_size);
 #pragma unroll 4
-    for (uint32_t i = 0; i < count; ++i) {
+    for (uint32_t i = 0; i < num_points; ++i) {
         out_values[i] = fma(static_cast<double>(i + 1), step, start);
     }
-    return {dparam_cur / static_cast<double>(num_points), count};
+    return {dparam_cur / static_cast<double>(num_points), num_points};
 }
 
 __device__ __forceinline__ void
@@ -233,7 +245,7 @@ branch_one_param_padded_device(uint32_t p,
     // DECISION LOGIC:
     // 1. Is the shift significant? (shift >= eta)
     // 2. Is the new step size physically possible? (sig_new <= range)
-    if (shift >= (eta - utils::kEps)) {
+    if (shift >= (eta - utils::kFloatEps)) {
         auto [dparam_act, count] = branch_param_generate_points_device(
             scratch_params + pad_offset, branch_max, cur, sig_cur, sig_new);
         scratch_dparams[flat_base + p] = dparam_act;
@@ -244,6 +256,32 @@ branch_one_param_padded_device(uint32_t p,
         scratch_dparams[flat_base + p] = sig_cur;
         scratch_counts[flat_base + p]  = 1;
     }
+};
+
+__device__ __forceinline__ void
+branch_one_param_padded_crackle_device(uint32_t p,
+                                       double cur,
+                                       double sig_cur,
+                                       double sig_new,
+                                       double eta,
+                                       double shift,
+                                       double* __restrict__ scratch_params,
+                                       double* __restrict__ scratch_dparams,
+                                       uint32_t* __restrict__ scratch_counts,
+                                       uint32_t flat_base,
+                                       uint32_t branch_max) {
+    const uint32_t pad_offset = (flat_base + p) * branch_max;
+    if (shift >= (eta - utils::kFloatEps)) {
+        const auto num_points =
+            static_cast<uint32_t>(ceil((sig_cur / sig_new) - utils::kFloatEps));
+        scratch_dparams[flat_base + p] =
+            sig_cur / static_cast<double>(num_points);
+        scratch_counts[flat_base + p] = num_points;
+    } else {
+        scratch_dparams[flat_base + p] = sig_cur;
+        scratch_counts[flat_base + p]  = 1;
+    }
+    scratch_params[pad_offset] = cur;
 };
 
 // Helper: Loads the output-to-input mapping into Shared Memory

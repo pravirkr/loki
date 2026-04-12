@@ -119,7 +119,7 @@ bool split_f(double df_old,
     const auto factor     = std::pow(dt, k + 1) * nbins /
                             math::factorial(static_cast<double>(k + 1));
     const auto factor_opt = factor / std::pow(2.0, k);
-    return std::abs(df_old - df_new) * factor_opt > (eta - utils::kEps);
+    return std::abs(df_old - df_new) * factor_opt > (eta - utils::kFloatEps);
 }
 
 std::vector<double> poly_taylor_shift_d(std::span<const double> dparam_old,
@@ -274,31 +274,31 @@ std::tuple<std::vector<double>, double> branch_param(double param_cur,
                                                      double dparam_new,
                                                      double param_min,
                                                      double param_max) {
-    if (dparam_cur <= utils::kEps || dparam_new <= utils::kEps) {
+    if (dparam_cur <= utils::kZeroEps || dparam_new <= utils::kZeroEps) {
         throw std::invalid_argument(
             std::format("Both dparam_cur and dparam_new must be positive (got "
                         "{}, {})",
                         dparam_cur, dparam_new));
     }
-    if (param_max <= param_min + utils::kEps) {
+    if (param_max <= param_min) {
         throw std::invalid_argument(
             std::format("param_max must be greater than param_min (got {}, {})",
                         param_max, param_min));
     }
-    if (param_cur < (param_min + utils::kEps) ||
-        param_cur > (param_max - utils::kEps)) {
+    if (param_cur < (param_min + utils::kZeroEps) ||
+        param_cur > (param_max - utils::kZeroEps)) {
         throw std::invalid_argument(
             std::format("param_cur ({}) must be within [param_min ({}), "
                         "param_max ({})]",
                         param_cur, param_min, param_max));
     }
     const double param_range = (param_max - param_min) / 2.0;
-    if (dparam_new > (param_range + utils::kEps)) {
+    if (dparam_new > (param_range + utils::kZeroEps)) {
         // Step size too large, fallback to current value
         return {{param_cur}, dparam_new};
     }
     const int num_points = static_cast<int>(
-        std::ceil(((dparam_cur + utils::kEps) / dparam_new) - utils::kEps));
+        std::ceil((dparam_cur / dparam_new) - utils::kFloatEps));
     if (num_points <= 0) {
         throw std::invalid_argument(
             std::format("Invalid input: ensure dparam_cur > dparam_new (got "
@@ -327,14 +327,14 @@ std::pair<double, SizeType> branch_param_padded(std::span<double> out_values,
                                                 double dparam_cur,
                                                 double dparam_new,
                                                 SizeType branch_max) {
-    if (dparam_cur <= utils::kEps || dparam_new <= utils::kEps) {
+    if (dparam_cur <= utils::kZeroEps || dparam_new <= utils::kZeroEps) {
         throw std::invalid_argument(
             std::format("Both dparam_cur and dparam_new must be positive (got "
                         "{}, {})",
                         dparam_cur, dparam_new));
     }
     const auto num_points = static_cast<int>(
-        std::ceil(((dparam_cur + utils::kEps) / dparam_new) - utils::kEps));
+        std::ceil((dparam_cur / dparam_new) - utils::kFloatEps));
     error_check::check_greater(
         num_points, 0,
         std::format("num_points must be positive. Invalid input: ensure "
@@ -343,14 +343,12 @@ std::pair<double, SizeType> branch_param_padded(std::span<double> out_values,
 
     // Calculate the actual branched values
     // 0.5 < confidence_const < 1
-    const int n = num_points + 2;
     const double confidence_const =
-        0.5 * (1.0 + (1.0 / static_cast<double>(num_points)));
+        0.5 + (0.5 / static_cast<double>(num_points));
     const double half_range = confidence_const * dparam_cur;
     const double start      = param_cur - half_range;
-    const double stop       = param_cur + half_range;
-    const int num_intervals = n - 1;
-    const double step = (stop - start) / static_cast<double>(num_intervals);
+    const double step =
+        (2.0 * half_range) / static_cast<double>(num_points + 1);
 
     error_check::check_less_equal(num_points, static_cast<int>(branch_max),
                                   "num_points must be less than or equal to "
@@ -370,14 +368,14 @@ std::pair<double, SizeType> branch_param_padded(std::span<double> out_values,
 std::pair<double, SizeType> branch_dparam_crackle(double dparam_cur,
                                                   double dparam_new,
                                                   SizeType branch_max) {
-    if (dparam_cur <= utils::kEps || dparam_new <= utils::kEps) {
+    if (dparam_cur <= utils::kZeroEps || dparam_new <= utils::kZeroEps) {
         throw std::invalid_argument(
             std::format("Both dparam_cur and dparam_new must be positive (got "
                         "{}, {})",
                         dparam_cur, dparam_new));
     }
     const auto num_points = static_cast<int>(
-        std::ceil(((dparam_cur + utils::kEps) / dparam_new) - utils::kEps));
+        std::ceil((dparam_cur / dparam_new) - utils::kFloatEps));
     error_check::check_greater(
         num_points, 0,
         std::format("num_points must be positive. Invalid input: ensure "
@@ -399,14 +397,13 @@ void branch_crackle_padded(std::span<double> out_values,
                            SizeType num_points) {
     // Calculate the actual branched values
     // 0.5 < confidence_const < 1
-    const auto n = num_points + 2;
     const double confidence_const =
-        0.5 * (1.0 + (1.0 / static_cast<double>(num_points)));
-    const double half_range  = confidence_const * dparam_cur;
-    const double start       = param_cur - half_range;
-    const double stop        = param_cur + half_range;
-    const auto num_intervals = n - 1;
-    const double step = (stop - start) / static_cast<double>(num_intervals);
+        0.5 + (0.5 / static_cast<double>(num_points));
+    const double half_range = confidence_const * dparam_cur;
+    const double start      = param_cur - half_range;
+    // We use (num_points + 1) to space them evenly within the range
+    const double step =
+        (2.0 * half_range) / static_cast<double>(num_points + 1);
 
     // Generate points and fill the start of the padded array
     for (SizeType i = 0; i < num_points; ++i) {

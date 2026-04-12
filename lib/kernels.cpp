@@ -643,7 +643,7 @@ void ffa_iter_segment_freq(const float* __restrict__ fold_in,
                         ((iseg * 2) * seg_prev_stride) +
                         (static_cast<SizeType>(coord_cur->idx) * fold_stride);
                     const auto head_offset =
-                        ((iseg * 2 + 1) * seg_prev_stride) +
+                        (((iseg * 2) + 1) * seg_prev_stride) +
                         (static_cast<SizeType>(coord_cur->idx) * fold_stride);
                     const auto out_offset =
                         (iseg * seg_out_stride) + (icoord * fold_stride);
@@ -695,7 +695,7 @@ void ffa_iter_standard_freq(const float* __restrict__ fold_in,
                         ((iseg * 2) * seg_prev_stride) +
                         (static_cast<SizeType>(coord_cur->idx) * fold_stride);
                     const auto head_offset =
-                        ((iseg * 2 + 1) * seg_prev_stride) +
+                        (((iseg * 2) + 1) * seg_prev_stride) +
                         (static_cast<SizeType>(coord_cur->idx) * fold_stride);
                     const auto out_offset =
                         (iseg * seg_out_stride) + (icoord * fold_stride);
@@ -751,7 +751,7 @@ void ffa_iter_segment(const float* __restrict__ fold_in,
                         (static_cast<SizeType>(coord_cur->i_tail) *
                          fold_stride);
                     const auto head_offset =
-                        ((iseg * 2 + 1) * seg_prev_stride) +
+                        (((iseg * 2) + 1) * seg_prev_stride) +
                         (static_cast<SizeType>(coord_cur->i_head) *
                          fold_stride);
                     const auto out_offset =
@@ -806,7 +806,7 @@ void ffa_iter_standard(const float* __restrict__ fold_in,
                         (static_cast<SizeType>(coord_cur->i_tail) *
                          fold_stride);
                     const auto head_offset =
-                        ((iseg * 2 + 1) * seg_prev_stride) +
+                        (((iseg * 2) + 1) * seg_prev_stride) +
                         (static_cast<SizeType>(coord_cur->i_head) *
                          fold_stride);
                     const auto out_offset =
@@ -857,7 +857,7 @@ void ffa_complex_iter_segment(const ComplexType* __restrict__ fold_in,
                     ((iseg * 2) * seg_prev_stride) +
                     (static_cast<SizeType>(coord_cur->i_tail) * fold_stride);
                 const auto head_offset =
-                    ((iseg * 2 + 1) * seg_prev_stride) +
+                    (((iseg * 2) + 1) * seg_prev_stride) +
                     (static_cast<SizeType>(coord_cur->i_head) * fold_stride);
                 const auto out_offset =
                     (iseg * seg_out_stride) + (icoord * fold_stride);
@@ -902,7 +902,7 @@ void ffa_complex_iter_standard(const ComplexType* __restrict__ fold_in,
                     ((iseg * 2) * seg_prev_stride) +
                     (static_cast<SizeType>(coord_cur->i_tail) * fold_stride);
                 const auto head_offset =
-                    ((iseg * 2 + 1) * seg_prev_stride) +
+                    (((iseg * 2) + 1) * seg_prev_stride) +
                     (static_cast<SizeType>(coord_cur->i_head) * fold_stride);
                 const auto out_offset =
                     (iseg * seg_out_stride) + (icoord * fold_stride);
@@ -951,7 +951,7 @@ void ffa_complex_iter_segment_freq(
                     ((iseg * 2) * seg_prev_stride) +
                     (static_cast<SizeType>(coord_cur->idx) * fold_stride);
                 const auto head_offset =
-                    ((iseg * 2 + 1) * seg_prev_stride) +
+                    (((iseg * 2) + 1) * seg_prev_stride) +
                     (static_cast<SizeType>(coord_cur->idx) * fold_stride);
                 const auto out_offset =
                     (iseg * seg_out_stride) + (icoord * fold_stride);
@@ -997,7 +997,7 @@ void ffa_complex_iter_standard_freq(
                     ((iseg * 2) * seg_prev_stride) +
                     (static_cast<SizeType>(coord_cur->idx) * fold_stride);
                 const auto head_offset =
-                    ((iseg * 2 + 1) * seg_prev_stride) +
+                    (((iseg * 2) + 1) * seg_prev_stride) +
                     (static_cast<SizeType>(coord_cur->idx) * fold_stride);
                 const auto out_offset =
                     (iseg * seg_out_stride) + (icoord * fold_stride);
