@@ -316,6 +316,71 @@ void PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>::transform(
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
+void PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>::ascend(
+    cuda::std::span<const FoldTypeCUDA> folds_ffa,
+    cuda::std::span<const double> leaves_tree,
+    cuda::std::span<FoldTypeCUDA> folds_tree,
+    cuda::std::span<float> scores_tree,
+    cuda::std::span<float> scores_ep_tree,
+    cuda::std::span<const uint32_t> idx_segments,
+    cuda::std::span<const cuda::std::pair<double, double>> coord_segments,
+    std::pair<double, double> coord_cur,
+    cuda::std::span<uint32_t> scratch_param_indices,
+    cuda::std::span<float> scratch_phase_shift,
+    SizeType n_leaves,
+    cudaStream_t stream) {
+    const auto n_params      = this->m_cfg.get_nparams();
+    const auto n_accel_init  = this->m_param_grid_count_init_d[n_params - 2];
+    const auto n_freq_init   = this->m_param_grid_count_init_d[n_params - 1];
+    const auto nbins         = this->m_cfg.get_nbins();
+    const auto nbins_f       = this->m_cfg.get_nbins_f();
+    const auto n_segments    = idx_segments.size();
+    const auto n_coords_init = this->m_n_coords_init;
+
+    poly_taylor_ascend_resolve_batch_cuda(
+        leaves_tree, scratch_param_indices, scratch_phase_shift,
+        cuda_utils::as_span(this->m_param_limits_d), coord_segments, coord_cur,
+        n_accel_init, n_freq_init, nbins, n_leaves, n_params, n_segments,
+        stream);
+
+    // Copy scores to scores_ep for future backup
+    cuda_utils::check_cuda_call(
+        cudaMemcpyAsync(scores_ep_tree.data(), scores_tree.data(),
+                        n_leaves * sizeof(float), cudaMemcpyDeviceToDevice,
+                        stream),
+        "cudaMemcpyAsync scores_ep_tree failed");
+
+    // Calculate scores
+    if constexpr (std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>) {
+        error_check::check_equal(folds_tree.size(), n_leaves * 2 * nbins_f,
+                                 "fold_segment size mismatch");
+        kernels::shift_add_ascend_linear_complex_batch_cuda(
+            folds_ffa.data(), idx_segments.data(), scratch_param_indices.data(),
+            scratch_phase_shift.data(), folds_tree.data(), nbins_f, nbins,
+            n_coords_init, n_leaves, n_segments, stream);
+        const auto nfft = 2 * n_leaves;
+        auto folds_t_span =
+            cuda_utils::as_span(this->m_scratch_folds_d).first(nfft * nbins);
+        this->m_irfft_executor->execute(folds_tree, folds_t_span,
+                                        static_cast<int>(nfft), stream);
+        detection::snr_boxcar_3d_max_cuda_d(
+            folds_t_span, cuda_utils::as_span(this->m_boxcar_widths_d),
+            scores_tree, n_leaves, nbins, stream);
+
+    } else {
+        error_check::check_equal(folds_tree.size(), n_leaves * 2 * nbins,
+                                 "fold_segment size mismatch");
+        kernels::shift_add_ascend_linear_batch_cuda(
+            folds_ffa.data(), idx_segments.data(), scratch_param_indices.data(),
+            scratch_phase_shift.data(), folds_tree.data(), nbins, n_coords_init,
+            n_leaves, n_segments, stream);
+        detection::snr_boxcar_3d_max_cuda_d(
+            folds_tree, cuda_utils::as_span(this->m_boxcar_widths_d),
+            scores_tree, n_leaves, nbins, stream);
+    }
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
 void PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>::report(
     cuda::std::span<double> leaves_tree,
     std::pair<double, double> coord_report,
@@ -401,6 +466,71 @@ void PrunePolyChebyshevDPFunctsCUDA<FoldTypeCUDA>::transform(
     poly_chebyshev_transform_batch_cuda(leaves_tree, validation_mask,
                                         coord_next, coord_cur, n_leaves,
                                         this->m_cfg.get_nparams(), stream);
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+void PrunePolyChebyshevDPFunctsCUDA<FoldTypeCUDA>::ascend(
+    cuda::std::span<const FoldTypeCUDA> folds_ffa,
+    cuda::std::span<const double> leaves_tree,
+    cuda::std::span<FoldTypeCUDA> folds_tree,
+    cuda::std::span<float> scores_tree,
+    cuda::std::span<float> scores_ep_tree,
+    cuda::std::span<const uint32_t> idx_segments,
+    cuda::std::span<const cuda::std::pair<double, double>> coord_segments,
+    std::pair<double, double> coord_cur,
+    cuda::std::span<uint32_t> scratch_param_indices,
+    cuda::std::span<float> scratch_phase_shift,
+    SizeType n_leaves,
+    cudaStream_t stream) {
+    const auto n_params      = this->m_cfg.get_nparams();
+    const auto n_accel_init  = this->m_param_grid_count_init_d[n_params - 2];
+    const auto n_freq_init   = this->m_param_grid_count_init_d[n_params - 1];
+    const auto nbins         = this->m_cfg.get_nbins();
+    const auto nbins_f       = this->m_cfg.get_nbins_f();
+    const auto n_segments    = idx_segments.size();
+    const auto n_coords_init = this->m_n_coords_init;
+
+    poly_chebyshev_ascend_resolve_batch_cuda(
+        leaves_tree, scratch_param_indices, scratch_phase_shift,
+        cuda_utils::as_span(this->m_param_limits_d), coord_segments, coord_cur,
+        n_accel_init, n_freq_init, nbins, n_leaves, n_params, n_segments,
+        stream);
+
+    // Copy scores to scores_ep for future backup
+    cuda_utils::check_cuda_call(
+        cudaMemcpyAsync(scores_ep_tree.data(), scores_tree.data(),
+                        n_leaves * sizeof(float), cudaMemcpyDeviceToDevice,
+                        stream),
+        "cudaMemcpyAsync scores_ep_tree failed");
+
+    // Calculate scores
+    if constexpr (std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>) {
+        error_check::check_equal(folds_tree.size(), n_leaves * 2 * nbins_f,
+                                 "fold_segment size mismatch");
+        kernels::shift_add_ascend_linear_complex_batch_cuda(
+            folds_ffa.data(), idx_segments.data(), scratch_param_indices.data(),
+            scratch_phase_shift.data(), folds_tree.data(), nbins_f, nbins,
+            n_coords_init, n_leaves, n_segments, stream);
+        const auto nfft = 2 * n_leaves;
+        auto folds_t_span =
+            cuda_utils::as_span(this->m_scratch_folds_d).first(nfft * nbins);
+        this->m_irfft_executor->execute(folds_tree, folds_t_span,
+                                        static_cast<int>(nfft), stream);
+        detection::snr_boxcar_3d_max_cuda_d(
+            folds_t_span, cuda_utils::as_span(this->m_boxcar_widths_d),
+            scores_tree, n_leaves, nbins, stream);
+
+    } else {
+        error_check::check_equal(folds_tree.size(), n_leaves * 2 * nbins,
+                                 "fold_segment size mismatch");
+        kernels::shift_add_ascend_linear_batch_cuda(
+            folds_ffa.data(), idx_segments.data(), scratch_param_indices.data(),
+            scratch_phase_shift.data(), folds_tree.data(), nbins, n_coords_init,
+            n_leaves, n_segments, stream);
+        detection::snr_boxcar_3d_max_cuda_d(
+            folds_tree, cuda_utils::as_span(this->m_boxcar_widths_d),
+            scores_tree, n_leaves, nbins, stream);
+    }
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
@@ -506,6 +636,71 @@ void PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>::transform(
         leaves_tree, validation_mask, coord_next, coord_cur, n_leaves,
         this->m_cfg.get_use_conservative_tile(),
         this->m_cfg.get_minimum_snap_cells(), stream);
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+void PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>::ascend(
+    cuda::std::span<const FoldTypeCUDA> folds_ffa,
+    cuda::std::span<const double> leaves_tree,
+    cuda::std::span<FoldTypeCUDA> folds_tree,
+    cuda::std::span<float> scores_tree,
+    cuda::std::span<float> scores_ep_tree,
+    cuda::std::span<const uint32_t> idx_segments,
+    cuda::std::span<const cuda::std::pair<double, double>> coord_segments,
+    std::pair<double, double> coord_cur,
+    cuda::std::span<uint32_t> scratch_param_indices,
+    cuda::std::span<float> scratch_phase_shift,
+    SizeType n_leaves,
+    cudaStream_t stream) {
+    const auto n_params      = this->m_cfg.get_nparams();
+    const auto n_accel_init  = this->m_param_grid_count_init_d[n_params - 2];
+    const auto n_freq_init   = this->m_param_grid_count_init_d[n_params - 1];
+    const auto nbins         = this->m_cfg.get_nbins();
+    const auto nbins_f       = this->m_cfg.get_nbins_f();
+    const auto n_segments    = idx_segments.size();
+    const auto n_coords_init = this->m_n_coords_init;
+
+    circ_taylor_ascend_resolve_batch_cuda(
+        leaves_tree, scratch_param_indices, scratch_phase_shift,
+        cuda_utils::as_span(this->m_param_limits_d), coord_segments, coord_cur,
+        n_accel_init, n_freq_init, nbins, n_leaves, n_segments,
+        this->m_cfg.get_minimum_snap_cells(), stream);
+
+    // Copy scores to scores_ep for future backup
+    cuda_utils::check_cuda_call(
+        cudaMemcpyAsync(scores_ep_tree.data(), scores_tree.data(),
+                        n_leaves * sizeof(float), cudaMemcpyDeviceToDevice,
+                        stream),
+        "cudaMemcpyAsync scores_ep_tree failed");
+
+    // Calculate scores
+    if constexpr (std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>) {
+        error_check::check_equal(folds_tree.size(), n_leaves * 2 * nbins_f,
+                                 "fold_segment size mismatch");
+        kernels::shift_add_ascend_linear_complex_batch_cuda(
+            folds_ffa.data(), idx_segments.data(), scratch_param_indices.data(),
+            scratch_phase_shift.data(), folds_tree.data(), nbins_f, nbins,
+            n_coords_init, n_leaves, n_segments, stream);
+        const auto nfft = 2 * n_leaves;
+        auto folds_t_span =
+            cuda_utils::as_span(this->m_scratch_folds_d).first(nfft * nbins);
+        this->m_irfft_executor->execute(folds_tree, folds_t_span,
+                                        static_cast<int>(nfft), stream);
+        detection::snr_boxcar_3d_max_cuda_d(
+            folds_t_span, cuda_utils::as_span(this->m_boxcar_widths_d),
+            scores_tree, n_leaves, nbins, stream);
+
+    } else {
+        error_check::check_equal(folds_tree.size(), n_leaves * 2 * nbins,
+                                 "fold_segment size mismatch");
+        kernels::shift_add_ascend_linear_batch_cuda(
+            folds_ffa.data(), idx_segments.data(), scratch_param_indices.data(),
+            scratch_phase_shift.data(), folds_tree.data(), nbins, n_coords_init,
+            n_leaves, n_segments, stream);
+        detection::snr_boxcar_3d_max_cuda_d(
+            folds_tree, cuda_utils::as_span(this->m_boxcar_widths_d),
+            scores_tree, n_leaves, nbins, stream);
+    }
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>

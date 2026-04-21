@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <span>
 #include <utility>
 
 #include <BS_thread_pool.hpp>
@@ -129,29 +130,11 @@ public:
             }
         }
 
-        // Transform the suggestion params to middle of the data
-        const auto coord_mid = m_snail_scheme.get_coord(m_prune_level);
+        // Ascend survivors to the middle of the data
+        ascend_survivors_batched(ffa_fold);
 
-        // Write results
-        auto result_writer = cands::PruneResultWriter(
-            actual_result_file, cands::PruneResultWriter::Mode::kAppend);
-        auto& ws_final         = get_workspace();
-        auto& world_tree_final = ws_final.world_tree;
-        memory::CircularView<double> leaves_view =
-            world_tree_final.get_leaves_circular_view();
-        memory::CircularView<float> scores_view =
-            world_tree_final.get_scores_circular_view();
-        const auto leaves_stride = world_tree_final.get_leaves_stride();
-        const auto n_leaves      = world_tree_final.get_size();
-        const auto n1            = leaves_view.first.size() / leaves_stride;
-        const auto n2            = leaves_view.second.size() / leaves_stride;
-        m_prune_funcs->report(leaves_view.first, coord_mid, n1);
-        if (n2 > 0) {
-            m_prune_funcs->report(leaves_view.second, coord_mid, n2);
-        }
-        result_writer.write_run_results(run_name, m_snail_scheme.get_data(),
-                                        leaves_view, scores_view, n_leaves,
-                                        m_cfg.get_nparams(), m_pstats);
+        // Write results (after transforming to middle of the data)
+        report_survivors(actual_result_file, run_name);
 
         // Final log entries
         std::ofstream final_log(actual_log_file, std::ios::app);
@@ -238,6 +221,110 @@ private:
         std::ofstream log(log_file, std::ios::app);
         log << pstats_cur.get_summary();
         log.close();
+    }
+
+    void ascend_survivors_batched(std::span<const FoldType> ffa_fold) {
+        if (m_prune_complete) {
+            return;
+        }
+        auto& ws               = get_workspace();
+        auto& world_tree       = ws.world_tree;
+        const auto n_survivors = world_tree.get_size();
+        if (n_survivors == 0) {
+            return;
+        }
+        auto& prune_ws       = ws.prune;
+        const auto coord_mid = m_snail_scheme.get_coord(m_prune_level);
+        const auto [idx_segments, coord_segments] =
+            m_snail_scheme.get_segment_coords_so_far(m_prune_level);
+        const auto batch_cap =
+            std::max(SizeType{1}, std::min(m_batch_size, n_survivors));
+
+        memory::CircularView<double> leaves_cv =
+            world_tree.get_leaves_circular_view();
+        memory::CircularView<FoldType> folds_cv =
+            world_tree.get_folds_circular_view();
+        memory::CircularView<float> scores_cv =
+            world_tree.get_scores_circular_view();
+        memory::CircularView<float> scores_ep_cv =
+            world_tree.get_scores_ep_circular_view();
+
+        const auto leaves_stride = world_tree.get_leaves_stride();
+        const auto folds_stride  = world_tree.get_folds_stride();
+
+        auto process_region = [&](std::span<const double> leaves_region,
+                                  std::span<FoldType> folds_region,
+                                  std::span<float> scores_region,
+                                  std::span<float> scores_ep_region) {
+            if (leaves_region.empty()) {
+                return;
+            }
+            error_check::check_equal(
+                leaves_region.size() % leaves_stride, SizeType{0},
+                "ascend_survivors_batched: leaves segment not stride-aligned");
+            const auto n_leaves_region = leaves_region.size() / leaves_stride;
+            error_check::check_equal(
+                folds_region.size(), n_leaves_region * folds_stride,
+                "ascend_survivors_batched: folds/leaves leaf count mismatch");
+            error_check::check_equal(
+                scores_region.size(), n_leaves_region,
+                "ascend_survivors_batched: scores/leaves leaf count mismatch");
+            error_check::check_equal(
+                scores_ep_region.size(), n_leaves_region,
+                "ascend_survivors_batched: scores_ep/leaves leaf count "
+                "mismatch");
+
+            for (SizeType off = 0; off < n_leaves_region; off += batch_cap) {
+                const auto chunk = std::min(batch_cap, n_leaves_region - off);
+                m_prune_funcs->ascend(
+                    ffa_fold,
+                    leaves_region.subspan(off * leaves_stride,
+                                          chunk * leaves_stride),
+                    folds_region.subspan(off * folds_stride,
+                                         chunk * folds_stride),
+                    scores_region.subspan(off, chunk),
+                    scores_ep_region.subspan(off, chunk), idx_segments,
+                    coord_segments, coord_mid, prune_ws.branched_param_idx,
+                    prune_ws.branched_phase_shift, chunk);
+            }
+        };
+
+        process_region(leaves_cv.first, folds_cv.first, scores_cv.first,
+                       scores_ep_cv.first);
+        process_region(leaves_cv.second, folds_cv.second, scores_cv.second,
+                       scores_ep_cv.second);
+    }
+
+    void report_survivors(const std::filesystem::path& actual_result_file,
+                          std::string_view run_name) {
+        auto& ws            = get_workspace();
+        auto& world_tree    = ws.world_tree;
+        const auto n_leaves = world_tree.get_size();
+
+        memory::CircularView<double> leaves_view =
+            world_tree.get_leaves_circular_view();
+        memory::CircularView<float> scores_view =
+            world_tree.get_scores_circular_view();
+        memory::CircularView<float> scores_ep_view =
+            world_tree.get_scores_ep_circular_view();
+
+        if (n_leaves > 0) {
+            // Transform the suggestion params to middle of the data
+            const auto coord_mid     = m_snail_scheme.get_coord(m_prune_level);
+            const auto leaves_stride = world_tree.get_leaves_stride();
+            const auto n1            = leaves_view.first.size() / leaves_stride;
+            const auto n2 = leaves_view.second.size() / leaves_stride;
+            m_prune_funcs->report(leaves_view.first, coord_mid, n1);
+            if (n2 > 0) {
+                m_prune_funcs->report(leaves_view.second, coord_mid, n2);
+            }
+        }
+        // Write results
+        auto result_writer = cands::PruneResultWriter(
+            actual_result_file, cands::PruneResultWriter::Mode::kAppend);
+        result_writer.write_run_results(
+            run_name, m_snail_scheme.get_data(), leaves_view, scores_view,
+            scores_ep_view, n_leaves, m_cfg.get_nparams(), m_pstats);
     }
 
     void execute_iteration(std::span<const FoldType> ffa_fold,
@@ -465,19 +552,20 @@ public:
             std::max(static_cast<SizeType>(std::ceil(branch_max * 2)), 32UL);
 
         // Allocate workspaces
+        const auto nsegments = m_ffa_plan.get_nsegments().back();
         m_workspace_storage.reserve(m_nthreads);
         const auto ncoords_ffa = m_ffa_plan.get_ncoords().back();
         if constexpr (std::is_same_v<FoldType, ComplexType>) {
             for (SizeType i = 0; i < static_cast<SizeType>(m_nthreads); ++i) {
                 m_workspace_storage.emplace_back(
                     m_batch_size, m_branch_max, m_max_sugg, ncoords_ffa,
-                    m_cfg.get_nparams(), m_cfg.get_nbins_f());
+                    m_cfg.get_nparams(), m_cfg.get_nbins_f(), nsegments);
             }
         } else {
             for (SizeType i = 0; i < static_cast<SizeType>(m_nthreads); ++i) {
                 m_workspace_storage.emplace_back(
                     m_batch_size, m_branch_max, m_max_sugg, ncoords_ffa,
-                    m_cfg.get_nparams(), m_cfg.get_nbins());
+                    m_cfg.get_nparams(), m_cfg.get_nbins(), nsegments);
             }
         }
         // Validate storage
@@ -520,6 +608,7 @@ public:
             std::max(static_cast<SizeType>(std::ceil(branch_max * 2)), 32UL);
         // Validate workspaces
         const auto ncoords_ffa = m_ffa_plan.get_ncoords().back();
+        const auto nsegments   = m_ffa_plan.get_nsegments().back();
         error_check::check_greater_equal(
             m_workspaces_view.size(), static_cast<SizeType>(m_nthreads),
             "EPMultiPass: Provided external workspaces is less than requested "
@@ -529,7 +618,7 @@ public:
                                    : m_cfg.get_nbins();
         for (const auto& ws : m_workspaces_view) {
             ws.validate(m_batch_size, m_branch_max, m_max_sugg, ncoords_ffa,
-                        m_cfg.get_nparams(), nbins);
+                        m_cfg.get_nparams(), nbins, nsegments);
         }
     }
 

@@ -59,6 +59,7 @@ WorldTree<FoldType>::WorldTree(SizeType capacity,
       m_leaves(m_capacity * m_leaves_stride, 0.0),
       m_folds(m_capacity * m_folds_stride, FoldType{}),
       m_scores(m_capacity, 0.0F),
+      m_scores_ep(m_capacity, 0.0F),
       m_scratch_scores((m_capacity + max_batch_size), 0.0F),
       m_scratch_pending_indices(max_batch_size, 0),
       m_scratch_mask(m_capacity, 0) {
@@ -170,6 +171,15 @@ CircularView<const double>
 WorldTree<FoldType>::get_leaves_circular_view() const noexcept {
     return get_active_regions(std::span(m_leaves), m_leaves_stride);
 }
+template <SupportedFoldType FoldType>
+CircularView<FoldType> WorldTree<FoldType>::get_folds_circular_view() noexcept {
+    return get_active_regions(std::span(m_folds), m_folds_stride);
+}
+template <SupportedFoldType FoldType>
+CircularView<const FoldType>
+WorldTree<FoldType>::get_folds_circular_view() const noexcept {
+    return get_active_regions(std::span(m_folds), m_folds_stride);
+}
 
 template <SupportedFoldType FoldType>
 CircularView<float> WorldTree<FoldType>::get_scores_circular_view() noexcept {
@@ -179,6 +189,17 @@ template <SupportedFoldType FoldType>
 CircularView<const float>
 WorldTree<FoldType>::get_scores_circular_view() const noexcept {
     return get_active_regions(std::span(m_scores), SizeType{1});
+}
+
+template <SupportedFoldType FoldType>
+CircularView<float>
+WorldTree<FoldType>::get_scores_ep_circular_view() noexcept {
+    return get_active_regions(std::span(m_scores_ep), SizeType{1});
+}
+template <SupportedFoldType FoldType>
+CircularView<const float>
+WorldTree<FoldType>::get_scores_ep_circular_view() const noexcept {
+    return get_active_regions(std::span(m_scores_ep), SizeType{1});
 }
 
 template <SupportedFoldType FoldType>
@@ -366,8 +387,8 @@ float WorldTree<FoldType>::add_batch_scattered(
     error_check::check_less_equal(slots_to_write, m_max_batch_size,
                                   "WorldTree: Suggestions too large to add.");
     // Determine the Global Pruning Threshold
-    const float effective_threshold =
-        get_prune_threshold(scores_batch, indices_batch, slots_to_write, current_threshold);
+    const float effective_threshold = get_prune_threshold(
+        scores_batch, indices_batch, slots_to_write, current_threshold);
     // Remove old items that are strictly worse than the new global pruning
     // threshold.
     prune_on_overload(effective_threshold);

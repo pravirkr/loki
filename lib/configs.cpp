@@ -285,7 +285,7 @@ private:
     }
 
     SizeType get_bseg_brute_default() const {
-        const SizeType init_levels = (m_nparams == 1) ? 1 : 5;
+        const SizeType init_levels = (m_nparams == 1) ? 1 : 1;
         const auto levels          = static_cast<SizeType>(
             std::log2(static_cast<double>(m_nsamps) * m_tsamp * m_f_min));
         return static_cast<SizeType>(m_nsamps / (1U << (levels - init_levels)));

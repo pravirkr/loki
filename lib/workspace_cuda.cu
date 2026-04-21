@@ -213,20 +213,24 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA>
 PruneWorkspaceCUDA<FoldTypeCUDA>::PruneWorkspaceCUDA(SizeType batch_size,
                                                      SizeType branch_max,
                                                      SizeType nparams,
-                                                     SizeType nbins)
+                                                     SizeType nbins,
+                                                     SizeType nsegments)
     : batch_size(batch_size),
       branch_max(branch_max),
       nparams(nparams),
       nbins(nbins),
+      nsegments(nsegments),
       max_branched_leaves(batch_size * branch_max),
+      max_branched_param_idx(
+          std::max(max_branched_leaves, nsegments * batch_size)),
       leaves_stride((nparams + 2) * kLeavesParamStride),
       folds_stride(2 * nbins),
       branched_leaves_d(max_branched_leaves * leaves_stride),
       branched_folds_d(max_branched_leaves * folds_stride),
       branched_scores_d(max_branched_leaves),
       branched_indices_d(max_branched_leaves),
-      branched_param_idx_d(max_branched_leaves),
-      branched_phase_shift_d(max_branched_leaves),
+      branched_param_idx_d(max_branched_param_idx),
+      branched_phase_shift_d(max_branched_param_idx),
       validation_mask_d(max_branched_leaves),
       filtered_mask_d(max_branched_leaves) {}
 
@@ -245,7 +249,10 @@ float PruneWorkspaceCUDA<FoldTypeCUDA>::get_memory_usage_gib() const noexcept {
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 void PruneWorkspaceCUDA<FoldTypeCUDA>::validate(SizeType batch_size,
-                                                SizeType branch_max) const {
+                                                SizeType branch_max,
+                                                SizeType nsegments) const {
+    const auto max_branched_param_idx =
+        std::max(batch_size * branch_max, nsegments * batch_size);
     error_check::check_equal(
         branched_leaves_d.size(), batch_size * branch_max * leaves_stride,
         "PruneWorkspaceCUDA: branched_leaves_d size is too small");
@@ -259,10 +266,10 @@ void PruneWorkspaceCUDA<FoldTypeCUDA>::validate(SizeType batch_size,
         branched_indices_d.size(), batch_size * branch_max,
         "PruneWorkspaceCUDA: branched_indices_d size is too small");
     error_check::check_equal(
-        branched_param_idx_d.size(), batch_size * branch_max,
+        branched_param_idx_d.size(), max_branched_param_idx,
         "PruneWorkspaceCUDA: branched_param_idx_d size is too small");
     error_check::check_equal(
-        branched_phase_shift_d.size(), batch_size * branch_max,
+        branched_phase_shift_d.size(), max_branched_param_idx,
         "PruneWorkspaceCUDA: branched_phase_shift_d size is too small");
     error_check::check_equal(
         validation_mask_d.size(), batch_size * branch_max,
@@ -432,20 +439,23 @@ EPWorkspaceCUDA<FoldTypeCUDA>::EPWorkspaceCUDA(SizeType batch_size,
                                                SizeType ncoords_ffa,
                                                SizeType nparams,
                                                SizeType nbins,
+                                               SizeType nsegments,
                                                cudaStream_t stream)
     : world_tree(max_sugg, nparams, nbins, batch_size * branch_max),
-      prune(batch_size, branch_max, nparams, nbins),
+      prune(batch_size, branch_max, nparams, nbins, nsegments),
       branch(batch_size, branch_max, nparams),
       scratch(batch_size, branch_max, stream) {
     seed_leaves_d.resize(ncoords_ffa * world_tree.get_leaves_stride());
     seed_scores_d.resize(ncoords_ffa);
+    idx_segments_d.resize(nsegments);
+    coord_segments_d.resize(nsegments);
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 float EPWorkspaceCUDA<FoldTypeCUDA>::get_memory_usage_gib() const noexcept {
-    const auto base_gb = world_tree.get_memory_usage_gib() +
-                         prune.get_memory_usage_gib() + branch.get_memory_usage_gib() +
-                         scratch.get_memory_usage_gib();
+    const auto base_gb =
+        world_tree.get_memory_usage_gib() + prune.get_memory_usage_gib() +
+        branch.get_memory_usage_gib() + scratch.get_memory_usage_gib();
     const auto extra_gb =
         static_cast<float>(seed_leaves_d.size() * sizeof(double) +
                            seed_scores_d.size() * sizeof(float)) /
@@ -459,7 +469,8 @@ void EPWorkspaceCUDA<FoldTypeCUDA>::validate(SizeType batch_size,
                                              SizeType max_sugg,
                                              SizeType ncoords_ffa,
                                              SizeType nparams,
-                                             SizeType nbins) const {
+                                             SizeType nbins,
+                                             SizeType nsegments) const {
     const auto leaves_stride = (nparams + 2) * 2;
     error_check::check_greater_equal(
         seed_scores_d.size(), ncoords_ffa,
@@ -467,7 +478,7 @@ void EPWorkspaceCUDA<FoldTypeCUDA>::validate(SizeType batch_size,
     error_check::check_equal(seed_leaves_d.size(), ncoords_ffa * leaves_stride,
                              "EPWorkspaceCUDA: seed_leaves size is too small");
     world_tree.validate(max_sugg, nparams, nbins, batch_size * branch_max);
-    prune.validate(batch_size, branch_max);
+    prune.validate(batch_size, branch_max, nsegments);
     branch.validate(batch_size, branch_max, nparams);
 }
 

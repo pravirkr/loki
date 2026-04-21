@@ -33,8 +33,9 @@ __global__ __launch_bounds__(256, 4) void kernel_shift_add_linear(
     }
 
     // Decode thread ID to (ileaf, ibin)
-    const uint32_t ileaf = tid / nbins;
-    const uint32_t ibin  = tid % nbins;
+    const uint32_t ileaf  = tid / nbins;
+    const uint32_t ibin   = tid % nbins;
+    const uint32_t stride = 2 * nbins;
 
     if (validation_mask[ileaf] == 0) {
         return;
@@ -51,8 +52,8 @@ __global__ __launch_bounds__(256, 4) void kernel_shift_add_linear(
     if (tree_idx >= capacity) {
         tree_idx -= capacity;
     }
-    const uint32_t ffa_idx   = indices_ffa[ileaf];
-    const uint32_t stride    = 2 * nbins;
+    const uint32_t ffa_idx = indices_ffa[ileaf];
+
     const SizeType tree_base = static_cast<SizeType>(tree_idx) * stride;
     const SizeType ffa_base  = static_cast<SizeType>(ffa_idx) * stride;
     const SizeType out_base  = static_cast<SizeType>(ileaf) * stride;
@@ -65,6 +66,75 @@ __global__ __launch_bounds__(256, 4) void kernel_shift_add_linear(
     // Process both e and v components
     folds_out[out_base + ibin]         = tree_e[ibin] + ffa_e[idx_add];
     folds_out[out_base + ibin + nbins] = tree_v[ibin] + ffa_v[idx_add];
+}
+
+__global__ __launch_bounds__(256, 4) void kernel_shift_add_ascend_linear(
+    const float* __restrict__ folds_ffa,
+    const uint32_t* __restrict__ indices_segment,
+    const uint32_t* __restrict__ indices_ffa,
+    const float* __restrict__ phase_shift,
+    float* __restrict__ folds_tree,
+    uint32_t nbins,
+    uint32_t n_coords_init,
+    uint32_t n_leaves,
+    uint32_t n_segments) {
+
+    // Each thread handles one (ileaf, ibin) pair
+    const uint32_t tid        = (blockIdx.x * blockDim.x) + threadIdx.x;
+    const uint32_t total_work = n_leaves * nbins;
+    if (tid >= total_work) {
+        return;
+    }
+
+    // Decode thread ID to (ileaf, ibin)
+    const uint32_t ileaf  = tid / nbins;
+    const uint32_t ibin   = tid % nbins;
+    const uint32_t stride = 2 * nbins;
+
+    // Base pointer for this leaf's output (e and v components)
+    float* __restrict__ out_e =
+        folds_tree + (static_cast<SizeType>(ileaf) * stride);
+    float* __restrict__ out_v = out_e + nbins;
+
+    // Zero-initialize: each thread zeroes its own two elements (e and v bins)
+    // This replaces the memset in the CPU code, done per-thread so no race
+    // condition
+    out_e[ibin] = 0.0F;
+    out_v[ibin] = 0.0F;
+
+    // Accumulate over all segments (loop-carried dependency on out, but
+    // each thread owns its (ileaf, ibin) exclusively — no races)
+    for (uint32_t iseg = 0; iseg < n_segments; ++iseg) {
+        // phase_shift and indices_ffa are laid out [iseg * n_leaves + ileaf]
+        const uint32_t leaf_seg_idx = iseg * n_leaves + ileaf;
+        const uint32_t ffa_idx_seg  = indices_ffa[leaf_seg_idx];
+        const uint32_t segment_idx  = indices_segment[iseg];
+
+        // Compute circular shift amount (same rounding as CPU)
+        uint32_t shift = __float2uint_rz(phase_shift[leaf_seg_idx] + 0.5F);
+        if (shift == nbins) {
+            shift = 0;
+        }
+
+        // Circular shift: CPU does a right-rotate of data_head by `shift`.
+        // After rotation, output[ibin] = data_head[(ibin - shift + nbins) %
+        // nbins] i.e. we read from idx_add in the *original* (unrotated) array.
+        const uint32_t idx_add =
+            (ibin < shift) ? (ibin + nbins - shift) : (ibin - shift);
+
+        // folds_ffa layout: [segment_idx * n_coords_init * stride + ffa_idx_seg
+        // * stride]
+        const SizeType ffa_base =
+            static_cast<SizeType>(segment_idx) * n_coords_init * stride +
+            static_cast<SizeType>(ffa_idx_seg) * stride;
+
+        const float* __restrict__ ffa_e = folds_ffa + ffa_base;
+        const float* __restrict__ ffa_v = ffa_e + nbins;
+
+        // Accumulate shifted ffa into output (+=, not =)
+        out_e[ibin] += ffa_e[idx_add];
+        out_v[ibin] += ffa_v[idx_add];
+    }
 }
 
 __global__ __launch_bounds__(256, 4) void kernel_shift_add_linear_complex(
@@ -88,8 +158,9 @@ __global__ __launch_bounds__(256, 4) void kernel_shift_add_linear_complex(
     }
 
     // Decode thread ID to (ileaf, k)
-    const uint32_t ileaf = tid / nbins_f;
-    const uint32_t k     = tid % nbins_f;
+    const uint32_t ileaf  = tid / nbins_f;
+    const uint32_t k      = tid % nbins_f;
+    const uint32_t stride = 2 * nbins_f;
 
     if (validation_mask[ileaf] == 0) {
         return;
@@ -106,8 +177,8 @@ __global__ __launch_bounds__(256, 4) void kernel_shift_add_linear_complex(
     if (tree_idx >= capacity) {
         tree_idx -= capacity;
     }
-    const uint32_t ffa_idx   = indices_ffa[ileaf];
-    const uint32_t stride    = 2 * nbins_f;
+    const uint32_t ffa_idx = indices_ffa[ileaf];
+
     const SizeType tree_base = static_cast<SizeType>(tree_idx) * stride;
     const SizeType ffa_base  = static_cast<SizeType>(ffa_idx) * stride;
     const SizeType out_base  = static_cast<SizeType>(ileaf) * stride;
@@ -129,6 +200,80 @@ __global__ __launch_bounds__(256, 4) void kernel_shift_add_linear_complex(
         ComplexTypeCUDA(tree_e->real() + re_ffa_e, tree_e->imag() + im_ffa_e);
     folds_out[out_base + k + nbins_f] =
         ComplexTypeCUDA(tree_v->real() + re_ffa_v, tree_v->imag() + im_ffa_v);
+}
+
+__global__
+__launch_bounds__(256, 4) void kernel_shift_add_ascend_linear_complex(
+    const ComplexTypeCUDA* __restrict__ folds_ffa,
+    const uint32_t* __restrict__ indices_segment,
+    const uint32_t* __restrict__ indices_ffa,
+    const float* __restrict__ phase_shift,
+    ComplexTypeCUDA* __restrict__ folds_tree,
+    uint32_t nbins_f,
+    uint32_t nbins,
+    uint32_t n_coords_init,
+    uint32_t n_leaves,
+    uint32_t n_segments) {
+
+    const uint32_t tid        = (blockIdx.x * blockDim.x) + threadIdx.x;
+    const uint32_t total_work = n_leaves * nbins_f;
+    if (tid >= total_work) {
+        return;
+    }
+
+    const uint32_t ileaf  = tid / nbins_f;
+    const uint32_t k      = tid % nbins_f;
+    const uint32_t stride = 2 * nbins_f;
+
+    // Pointers to this leaf's output (e and v components)
+    // Each thread owns exactly these two elements — no races
+    ComplexTypeCUDA* __restrict__ out_e =
+        folds_tree + static_cast<SizeType>(ileaf) * stride;
+    ComplexTypeCUDA* __restrict__ out_v = out_e + nbins_f;
+
+    // Zero-initialize: replaces the CPU memset, race-free per thread
+    out_e[k] = ComplexTypeCUDA(0.0F, 0.0F);
+    out_v[k] = ComplexTypeCUDA(0.0F, 0.0F);
+
+    // Accumulate over all segments
+    // Each segment contributes: ffa[k] * exp(-2πi * k * phase_shift / nbins)
+    for (uint32_t iseg = 0; iseg < n_segments; ++iseg) {
+        const uint32_t leaf_seg_idx = iseg * n_leaves + ileaf;
+        const uint32_t ffa_idx_seg  = indices_ffa[leaf_seg_idx];
+        const uint32_t segment_idx  = indices_segment[iseg];
+
+        // Phase factor: same formula as old kernel, but phase_shift is now
+        // the fractional bin shift (not an index), matching CPU semantics
+        // exp(-2πi * k * phase_shift / nbins)
+        const float phase = -2.0F * kPI * static_cast<float>(k) *
+                            phase_shift[leaf_seg_idx] /
+                            static_cast<float>(nbins);
+        float cosv, sinv;
+        __sincosf(phase, &sinv, &cosv);
+
+        // folds_ffa layout: segment_idx * n_coords_init * stride + ffa_idx_seg
+        // * stride
+        const SizeType ffa_base =
+            static_cast<SizeType>(segment_idx) * n_coords_init * stride +
+            static_cast<SizeType>(ffa_idx_seg) * stride;
+
+        const ComplexTypeCUDA* __restrict__ ffa_e = folds_ffa + ffa_base + k;
+        const ComplexTypeCUDA* __restrict__ ffa_v = ffa_e + nbins_f;
+
+        // Complex multiply-accumulate using fmaf for FMA fusion:
+        // out += ffa * (cosv + i*sinv)
+        // Re(ffa * phasor) = Re(ffa)*cosv - Im(ffa)*sinv
+        // Im(ffa * phasor) = Re(ffa)*sinv + Im(ffa)*cosv
+        const float re_e = fmaf(ffa_e->real(), cosv, -ffa_e->imag() * sinv);
+        const float im_e = fmaf(ffa_e->real(), sinv, ffa_e->imag() * cosv);
+        const float re_v = fmaf(ffa_v->real(), cosv, -ffa_v->imag() * sinv);
+        const float im_v = fmaf(ffa_v->real(), sinv, ffa_v->imag() * cosv);
+
+        out_e[k] =
+            ComplexTypeCUDA(out_e[k].real() + re_e, out_e[k].imag() + im_e);
+        out_v[k] =
+            ComplexTypeCUDA(out_v[k].real() + re_v, out_v[k].imag() + im_v);
+    }
 }
 
 // One thread per smallest work unit
@@ -1143,6 +1288,61 @@ void shift_add_linear_complex_batch_cuda(
         capacity);
     cuda_utils::check_last_cuda_error(
         "kernel_shift_add_linear_complex launch failed");
+    // No need to sync, the next kernel will do it
+}
+
+void shift_add_ascend_linear_batch_cuda(
+    const float* __restrict__ folds_ffa,
+    const uint32_t* __restrict__ indices_segment,
+    const uint32_t* __restrict__ indices_ffa,
+    const float* __restrict__ phase_shift,
+    float* __restrict__ folds_tree,
+    SizeType nbins,
+    SizeType n_coords_init,
+    SizeType n_leaves,
+    SizeType n_segments,
+    cudaStream_t stream) {
+    constexpr SizeType kThreadsPerBlock = 256;
+
+    const SizeType total_work = n_leaves * nbins;
+    const SizeType blocks_per_grid =
+        (total_work + kThreadsPerBlock - 1) / kThreadsPerBlock;
+    const dim3 block_dim(kThreadsPerBlock);
+    const dim3 grid_dim(blocks_per_grid);
+    cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
+    kernel_shift_add_ascend_linear<<<grid_dim, block_dim, 0, stream>>>(
+        folds_ffa, indices_segment, indices_ffa, phase_shift, folds_tree, nbins,
+        n_coords_init, n_leaves, n_segments);
+    cuda_utils::check_last_cuda_error(
+        "kernel_shift_add_ascend_linear launch failed");
+    // No need to sync, the next kernel will do it
+}
+
+void shift_add_ascend_linear_complex_batch_cuda(
+    const ComplexTypeCUDA* __restrict__ folds_ffa,
+    const uint32_t* __restrict__ indices_segment,
+    const uint32_t* __restrict__ indices_ffa,
+    const float* __restrict__ phase_shift,
+    ComplexTypeCUDA* __restrict__ folds_tree,
+    SizeType nbins_f,
+    SizeType nbins,
+    SizeType n_coords_init,
+    SizeType n_leaves,
+    SizeType n_segments,
+    cudaStream_t stream) {
+    constexpr SizeType kThreadsPerBlock = 256;
+
+    const SizeType total_work = n_leaves * nbins_f;
+    const SizeType blocks_per_grid =
+        (total_work + kThreadsPerBlock - 1) / kThreadsPerBlock;
+    const dim3 block_dim(kThreadsPerBlock);
+    const dim3 grid_dim(blocks_per_grid);
+    cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
+    kernel_shift_add_ascend_linear_complex<<<grid_dim, block_dim, 0, stream>>>(
+        folds_ffa, indices_segment, indices_ffa, phase_shift, folds_tree,
+        nbins_f, nbins, n_coords_init, n_leaves, n_segments);
+    cuda_utils::check_last_cuda_error(
+        "kernel_shift_add_ascend_linear_complex launch failed");
     // No need to sync, the next kernel will do it
 }
 

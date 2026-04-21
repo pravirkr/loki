@@ -1,3 +1,4 @@
+#include "loki/common/types.hpp"
 #include "loki/utils/fft.hpp"
 
 #include <spdlog/spdlog.h>
@@ -280,10 +281,10 @@ void IrfftExecutorCUDADx::execute_async(
 
 void rfft_batch_cuda(cuda::std::span<float> real_input,
                      cuda::std::span<ComplexTypeCUDA> complex_output,
-                     int batch_size,
-                     int n_real,
+                     SizeType batch_size,
+                     SizeType n_real,
                      cudaStream_t stream) {
-    int n_complex = (n_real / 2) + 1;
+    const SizeType n_complex = (n_real / 2) + 1;
 
     // Input validation
     error_check::check_equal(
@@ -296,28 +297,69 @@ void rfft_batch_cuda(cuda::std::span<float> real_input,
     auto* real_ptr    = real_input.data();
     auto* complex_ptr = reinterpret_cast<cufftComplex*>(complex_output.data());
 
-    cufftHandle plan;
-    cuda_utils::check_cufft_call(
-        cufftPlan1d(&plan, n_real, CUFFT_R2C, batch_size),
-        "RFFT CUDA: cufftPlan1d failed");
-    if (stream != nullptr) {
-        cuda_utils::check_cufft_call(cufftSetStream(plan, stream),
-                                     "RFFT CUDA: cufftSetStream failed");
+    // ---- Chunking strategy ----
+    const SizeType max_chunk_batch = 1'000'000;
+    cufftHandle plan               = 0;
+    SizeType current_plan_batch    = 0;
+
+    for (SizeType offset = 0; offset < batch_size; offset += max_chunk_batch) {
+        const SizeType remaining   = batch_size - offset;
+        const SizeType chunk_batch = std::min(max_chunk_batch, remaining);
+
+        // ---- cuFFT int limits ----
+        if (chunk_batch >
+            static_cast<SizeType>(std::numeric_limits<int>::max())) {
+            throw std::runtime_error("Chunk batch exceeds cuFFT int limit");
+        }
+        if (n_real > static_cast<SizeType>(std::numeric_limits<int>::max())) {
+            throw std::runtime_error("n_real exceeds cuFFT int limit");
+        }
+
+        // ---- (Re)create plan if needed ----
+        if (plan == 0 || current_plan_batch != chunk_batch) {
+            if (plan != 0) {
+                cuda_utils::check_cufft_call(cufftDestroy(plan),
+                                             "RFFT CUDA: cufftDestroy failed");
+            }
+
+            cuda_utils::check_cufft_call(
+                cufftPlan1d(&plan, static_cast<int>(n_real), CUFFT_R2C,
+                            static_cast<int>(chunk_batch)),
+                "RFFT CUDA: cufftPlan1d failed");
+
+            if (stream != nullptr) {
+                cuda_utils::check_cufft_call(
+                    cufftSetStream(plan, stream),
+                    "RFFT CUDA: cufftSetStream failed");
+            }
+            current_plan_batch = chunk_batch;
+        }
+
+        // ---- Compute offsets ----
+        float* chunk_real           = real_ptr + offset * n_real;
+        cufftComplex* chunk_complex = complex_ptr + offset * n_complex;
+        // ---- Execute FFT ----
+        cuda_utils::check_cufft_call(
+            cufftExecR2C(plan, chunk_real, chunk_complex),
+            "RFFT CUDA: cufftExecR2C failed");
     }
-    cuda_utils::check_cufft_call(cufftExecR2C(plan, real_ptr, complex_ptr),
-                                 "RFFT CUDA: cufftExecR2C failed");
-    cuda_utils::check_cufft_call(cufftDestroy(plan),
-                                 "RFFT CUDA: cufftDestroy failed");
-    spdlog::debug("RFFT CUDA batch completed: {} transforms of size {}",
-                  batch_size, n_real);
+
+    if (plan != 0) {
+        cuda_utils::check_cufft_call(cufftDestroy(plan),
+                                     "RFFT CUDA: cufftDestroy failed");
+    }
+
+    spdlog::debug(
+        "RFFT CUDA batch completed: {} transforms of size {} (chunked)",
+        batch_size, n_real);
 }
 
 void irfft_batch_cuda(cuda::std::span<ComplexTypeCUDA> complex_input,
                       cuda::std::span<float> real_output,
-                      int batch_size,
-                      int n_real,
+                      SizeType batch_size,
+                      SizeType n_real,
                       cudaStream_t stream) {
-    const int n_complex = (n_real / 2) + 1;
+    const SizeType n_complex = (n_real / 2) + 1;
 
     // Input validation
     error_check::check_equal(
@@ -330,36 +372,79 @@ void irfft_batch_cuda(cuda::std::span<ComplexTypeCUDA> complex_input,
     auto* complex_ptr = reinterpret_cast<cufftComplex*>(complex_input.data());
     auto* real_ptr    = real_output.data();
 
-    // Create cuFFT plan
-    cufftHandle plan;
-    cuda_utils::check_cufft_call(
-        cufftPlan1d(&plan, n_real, CUFFT_C2R, batch_size),
-        "IRFFT CUDA: cufftPlan1d failed");
-    if (stream != nullptr) {
-        cuda_utils::check_cufft_call(cufftSetStream(plan, stream),
-                                     "IRFFT CUDA: cufftSetStream failed");
-    }
-    cuda_utils::check_cufft_call(cufftExecC2R(plan, complex_ptr, real_ptr),
-                                 "IRFFT CUDA: cufftExecC2R failed");
-    cuda_utils::check_cufft_call(cufftDestroy(plan),
-                                 "IRFFT CUDA: cufftDestroy failed");
-    // Apply normalization (cuFFT C2R doesn't normalize automatically)
-    const float norm         = 1.0F / static_cast<float>(n_real);
-    const int total_elements = batch_size * n_real;
+    // ---- Chunking strategy ----
+    const SizeType max_chunk_batch = 1'000'000;
+    const float norm               = 1.0f / static_cast<float>(n_real);
 
-    // Use thrust for efficient GPU normalization
-    if (stream != nullptr) {
-        thrust::transform(thrust::cuda::par.on(stream), real_ptr,
-                          real_ptr + total_elements, real_ptr,
-                          [norm] __device__(float x) { return x * norm; });
-    } else {
-        thrust::transform(thrust::device, real_ptr, real_ptr + total_elements,
-                          real_ptr,
-                          [norm] __device__(float x) { return x * norm; });
+    cufftHandle plan            = 0;
+    SizeType current_plan_batch = 0;
+
+    for (SizeType offset = 0; offset < batch_size; offset += max_chunk_batch) {
+        const SizeType remaining   = batch_size - offset;
+        const SizeType chunk_batch = std::min(max_chunk_batch, remaining);
+
+        // cuFFT API uses int -> must check
+        if (chunk_batch >
+            static_cast<SizeType>(std::numeric_limits<int>::max())) {
+            throw std::runtime_error("Chunk batch exceeds cuFFT int limit");
+        }
+        if (n_real > static_cast<SizeType>(std::numeric_limits<int>::max())) {
+            throw std::runtime_error("n_real exceeds cuFFT int limit");
+        }
+
+        // ---- (Re)create plan only if batch size changed ----
+        if (plan == 0 || current_plan_batch != chunk_batch) {
+            if (plan != 0) {
+                cuda_utils::check_cufft_call(cufftDestroy(plan),
+                                             "IRFFT CUDA: cufftDestroy failed");
+            }
+
+            cuda_utils::check_cufft_call(
+                cufftPlan1d(&plan, static_cast<int>(n_real), CUFFT_C2R,
+                            static_cast<int>(chunk_batch)),
+                "IRFFT CUDA: cufftPlan1d failed");
+
+            if (stream != nullptr) {
+                cuda_utils::check_cufft_call(
+                    cufftSetStream(plan, stream),
+                    "IRFFT CUDA: cufftSetStream failed");
+            }
+
+            current_plan_batch = chunk_batch;
+        }
+
+        // ---- Compute offsets ----
+        cufftComplex* chunk_complex = complex_ptr + offset * n_complex;
+
+        float* chunk_real = real_ptr + offset * n_real;
+
+        // ---- Execute FFT ----
+        cuda_utils::check_cufft_call(
+            cufftExecC2R(plan, chunk_complex, chunk_real),
+            "IRFFT CUDA: cufftExecC2R failed");
+
+        // ---- Normalize ----
+        const SizeType chunk_elements = chunk_batch * n_real;
+
+        if (stream != nullptr) {
+            thrust::transform(thrust::cuda::par.on(stream), chunk_real,
+                              chunk_real + chunk_elements, chunk_real,
+                              [norm] __device__(float x) { return x * norm; });
+        } else {
+            thrust::transform(thrust::device, chunk_real,
+                              chunk_real + chunk_elements, chunk_real,
+                              [norm] __device__(float x) { return x * norm; });
+        }
     }
 
-    spdlog::debug("IRFFT CUDA batch completed: {} transforms of size {}",
-                  batch_size, n_real);
+    if (plan != 0) {
+        cuda_utils::check_cufft_call(cufftDestroy(plan),
+                                     "IRFFT CUDA: cufftDestroy failed");
+    }
+
+    spdlog::debug(
+        "IRFFT CUDA batch completed: {} transforms of size {} (chunked)",
+        batch_size, n_real);
 }
 
 } // namespace loki::math

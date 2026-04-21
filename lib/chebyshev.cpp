@@ -1040,7 +1040,7 @@ void poly_chebyshev_resolve_accel_batch(
         const auto alpha_2 = leaves_tree[lo + 0];
         const auto alpha_1 = leaves_tree[lo + 2];
         const auto f0      = leaves_tree[lo + 6];
-        const auto a_new   = 2.0 * alpha_2 * inv_ts2;
+        const auto a_new   = 4.0 * alpha_2 * inv_ts2;
         const auto delta_v = 4.0 * alpha_2 * inv_ts2 * dt;
         const auto delta_d =
             (alpha_1 * inv_ts * dt) + (2.0 * alpha_2 * inv_ts2 * dt2);
@@ -1110,7 +1110,7 @@ void poly_chebyshev_resolve_jerk_batch(std::span<const double> leaves_tree,
         const auto alpha_1 = leaves_tree[lo + 4];
         const auto f0      = leaves_tree[lo + 8];
         const auto a_new =
-            ((2.0 * alpha_2) + (12.0 * alpha_3 * (dt_add * inv_ts))) * inv_ts2;
+            (4.0 * alpha_2 * inv_ts2) + (24.0 * alpha_3 * dt_add * inv_ts3);
         const auto delta_v = ((4.0 * alpha_2 * inv_ts2) * dt) +
                              ((12.0 * alpha_3 * inv_ts3) * dt2);
         const auto delta_d = ((alpha_1 - (3.0 * alpha_3)) * inv_ts * dt) +
@@ -1185,11 +1185,9 @@ void poly_chebyshev_resolve_snap_batch(std::span<const double> leaves_tree,
         const auto alpha_2 = leaves_tree[lo + 4];
         const auto alpha_1 = leaves_tree[lo + 6];
         const auto f0      = leaves_tree[lo + 10];
-        const auto a_new =
-            ((2.0 * alpha_2) + (12.0 * alpha_3 * (dt_add * inv_ts)) +
-             (48.0 * alpha_4 * (dt_add * inv_ts) * (dt_add * inv_ts)) -
-             (8.0 * alpha_4)) *
-            inv_ts2;
+        const auto a_new   = (((4.0 * alpha_2) - (16.0 * alpha_4)) * inv_ts2) +
+                             (24.0 * alpha_3 * dt_add * inv_ts3) +
+                             (96.0 * alpha_4 * dt2_add * inv_ts4);
         const auto delta_v =
             (((4.0 * alpha_2) - (16.0 * alpha_4)) * inv_ts2 * dt) +
             ((12.0 * alpha_3 * inv_ts3) * dt2) +
@@ -1204,6 +1202,216 @@ void poly_chebyshev_resolve_snap_batch(std::span<const double> leaves_tree,
         // approximation:
         const auto f_new     = f0 * (1.0 - (delta_v * utils::kInvCval));
         const auto delay_rel = delta_d * utils::kInvCval;
+
+        // Calculate relative phase
+        phase_shift[i] = psr_utils::get_phase_idx(dt, f0, nbins, delay_rel);
+        // Find nearest grid indices
+        const auto idx_a = psr_utils::get_nearest_idx_analytical(
+            a_new, lim_accel, n_accel_init);
+        const auto idx_f =
+            psr_utils::get_nearest_idx_analytical(f_new, lim_freq, n_freq_init);
+        param_indices[i] = (idx_a * n_freq_init) + idx_f;
+    }
+}
+
+void poly_chebyshev_ascend_resolve_accel_batch(
+    std::span<const double> leaves_tree,
+    std::span<SizeType> param_indices,
+    std::span<float> phase_shift,
+    std::span<const ParamLimit> param_limits,
+    std::pair<double, double> coord_seg,
+    std::pair<double, double> coord_cur,
+    SizeType n_accel_init,
+    SizeType n_freq_init,
+    SizeType nbins,
+    SizeType n_leaves) {
+    constexpr SizeType kParams       = 2;
+    constexpr SizeType kParamStride  = 2;
+    constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
+
+    error_check::check_greater_equal(leaves_tree.size(),
+                                     n_leaves * kLeavesStride,
+                                     "leaves_tree size mismatch");
+    error_check::check_greater_equal(param_indices.size(), n_leaves,
+                                     "param_indices size mismatch");
+    error_check::check_greater_equal(phase_shift.size(), n_leaves,
+                                     "phase_shift size mismatch");
+    error_check::check_equal(param_limits.size(), kParams,
+                             "param_limits size mismatch");
+
+    const auto [t0_cur, scale_cur] = coord_cur;
+    const auto [t0_seg, scale_seg] = coord_seg;
+
+    const auto& lim_accel = param_limits[0];
+    const auto& lim_freq  = param_limits[1];
+
+    // Pre-compute constants
+    const auto dt      = t0_seg - t0_cur;
+    const auto dt2     = dt * dt;
+    const auto inv_ts  = 1.0 / scale_cur;
+    const auto inv_ts2 = inv_ts * inv_ts;
+
+    for (SizeType i = 0; i < n_leaves; ++i) {
+        const auto lo      = i * kLeavesStride;
+        const auto alpha_2 = leaves_tree[lo + 0];
+        const auto alpha_1 = leaves_tree[lo + 2];
+        const auto alpha_0 = leaves_tree[lo + 4];
+        const auto f0      = leaves_tree[lo + 6];
+        const auto a_new   = 4.0 * alpha_2 * inv_ts2;
+        const auto v_new = (alpha_1 * inv_ts) + (4.0 * alpha_2 * inv_ts2 * dt);
+        const auto d_new = (alpha_0 - alpha_2) + (alpha_1 * inv_ts * dt) +
+                           (2.0 * alpha_2 * inv_ts2 * dt2);
+        // Calculates new frequency based on the first-order Doppler
+        // approximation:
+        const auto f_new     = f0 * (1.0 - (v_new * utils::kInvCval));
+        const auto delay_rel = d_new * utils::kInvCval;
+
+        // Find nearest grid indices
+        const auto idx_a = psr_utils::get_nearest_idx_analytical(
+            a_new, lim_accel, n_accel_init);
+        const auto idx_f =
+            psr_utils::get_nearest_idx_analytical(f_new, lim_freq, n_freq_init);
+        param_indices[i] = (idx_a * n_freq_init) + idx_f;
+        phase_shift[i]   = psr_utils::get_phase_idx(dt, f0, nbins, delay_rel);
+    }
+}
+
+void poly_chebyshev_ascend_resolve_jerk_batch(
+    std::span<const double> leaves_tree,
+    std::span<SizeType> param_indices,
+    std::span<float> phase_shift,
+    std::span<const ParamLimit> param_limits,
+    std::pair<double, double> coord_seg,
+    std::pair<double, double> coord_cur,
+    SizeType n_accel_init,
+    SizeType n_freq_init,
+    SizeType nbins,
+    SizeType n_leaves) {
+    constexpr SizeType kParams       = 3;
+    constexpr SizeType kParamStride  = 2;
+    constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
+
+    error_check::check_greater_equal(leaves_tree.size(),
+                                     n_leaves * kLeavesStride,
+                                     "leaves_tree size mismatch");
+    error_check::check_greater_equal(param_indices.size(), n_leaves,
+                                     "param_indices size mismatch");
+    error_check::check_greater_equal(phase_shift.size(), n_leaves,
+                                     "phase_shift size mismatch");
+    error_check::check_equal(param_limits.size(), kParams,
+                             "param_limits size mismatch");
+
+    const auto [t0_cur, scale_cur] = coord_cur;
+    const auto [t0_seg, scale_seg] = coord_seg;
+
+    const auto& lim_accel = param_limits[1];
+    const auto& lim_freq  = param_limits[2];
+
+    // Pre-compute constants to avoid repeated calculations
+    const auto dt      = t0_seg - t0_cur;
+    const auto dt2     = dt * dt;
+    const auto dt3     = dt2 * dt;
+    const auto inv_ts  = 1.0 / scale_cur;
+    const auto inv_ts2 = inv_ts * inv_ts;
+    const auto inv_ts3 = inv_ts2 * inv_ts;
+
+    for (SizeType i = 0; i < n_leaves; ++i) {
+        const auto lo      = i * kLeavesStride;
+        const auto alpha_3 = leaves_tree[lo + 0];
+        const auto alpha_2 = leaves_tree[lo + 2];
+        const auto alpha_1 = leaves_tree[lo + 4];
+        const auto alpha_0 = leaves_tree[lo + 6];
+        const auto f0      = leaves_tree[lo + 8];
+        const auto a_new =
+            (4.0 * alpha_2 * inv_ts2) + (24.0 * alpha_3 * dt * inv_ts3);
+        const auto v_new = ((alpha_1 - (3.0 * alpha_3)) * inv_ts) +
+                           (4.0 * alpha_2 * inv_ts2 * dt) +
+                           (12.0 * alpha_3 * inv_ts3 * dt2);
+        const auto d_new =
+            (alpha_0 - alpha_2) + ((alpha_1 - (3.0 * alpha_3)) * dt * inv_ts) +
+            (2.0 * alpha_2 * inv_ts2 * dt2) + (4.0 * alpha_3 * inv_ts3 * dt3);
+        // Calculates new frequency based on the first-order Doppler
+        // approximation:
+        const auto f_new     = f0 * (1.0 - (v_new * utils::kInvCval));
+        const auto delay_rel = d_new * utils::kInvCval;
+
+        // Calculate relative phase
+        phase_shift[i] = psr_utils::get_phase_idx(dt, f0, nbins, delay_rel);
+        // Find nearest grid indices
+        const auto idx_a = psr_utils::get_nearest_idx_analytical(
+            a_new, lim_accel, n_accel_init);
+        const auto idx_f =
+            psr_utils::get_nearest_idx_analytical(f_new, lim_freq, n_freq_init);
+        param_indices[i] = (idx_a * n_freq_init) + idx_f;
+    }
+}
+
+void poly_chebyshev_ascend_resolve_snap_batch(
+    std::span<const double> leaves_tree,
+    std::span<SizeType> param_indices,
+    std::span<float> phase_shift,
+    std::span<const ParamLimit> param_limits,
+    std::pair<double, double> coord_seg,
+    std::pair<double, double> coord_cur,
+    SizeType n_accel_init,
+    SizeType n_freq_init,
+    SizeType nbins,
+    SizeType n_leaves) {
+    constexpr SizeType kParams       = 4;
+    constexpr SizeType kParamStride  = 2;
+    constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
+
+    error_check::check_greater_equal(leaves_tree.size(),
+                                     n_leaves * kLeavesStride,
+                                     "leaves_tree size mismatch");
+    error_check::check_greater_equal(param_indices.size(), n_leaves,
+                                     "param_indices size mismatch");
+    error_check::check_greater_equal(phase_shift.size(), n_leaves,
+                                     "phase_shift size mismatch");
+    error_check::check_equal(param_limits.size(), kParams,
+                             "param_limits size mismatch");
+
+    const auto [t0_cur, scale_cur] = coord_cur;
+    const auto [t0_seg, scale_seg] = coord_seg;
+
+    const auto& lim_accel = param_limits[2];
+    const auto& lim_freq  = param_limits[3];
+
+    // Pre-compute constants to avoid repeated calculations
+    const auto dt      = t0_seg - t0_cur;
+    const auto dt2     = dt * dt;
+    const auto dt3     = dt2 * dt;
+    const auto dt4     = dt3 * dt;
+    const auto inv_ts  = 1.0 / scale_cur;
+    const auto inv_ts2 = inv_ts * inv_ts;
+    const auto inv_ts3 = inv_ts2 * inv_ts;
+    const auto inv_ts4 = inv_ts3 * inv_ts;
+
+    for (SizeType i = 0; i < n_leaves; ++i) {
+        const auto lo      = i * kLeavesStride;
+        const auto alpha_4 = leaves_tree[lo + 0];
+        const auto alpha_3 = leaves_tree[lo + 2];
+        const auto alpha_2 = leaves_tree[lo + 4];
+        const auto alpha_1 = leaves_tree[lo + 6];
+        const auto alpha_0 = leaves_tree[lo + 8];
+        const auto f0      = leaves_tree[lo + 10];
+        const auto a_new   = (((4.0 * alpha_2) - (16.0 * alpha_4)) * inv_ts2) +
+                             (24.0 * alpha_3 * dt * inv_ts3) +
+                             (96.0 * alpha_4 * dt2 * inv_ts4);
+        const auto v_new =
+            ((alpha_1 - (3.0 * alpha_3)) * inv_ts) +
+            (((4.0 * alpha_2) - (16.0 * alpha_4)) * dt * inv_ts2) +
+            (12.0 * alpha_3 * dt2 * inv_ts3) + (32.0 * alpha_4 * dt3 * inv_ts4);
+
+        const auto d_new =
+            (alpha_0 - alpha_2 + alpha_4) +
+            ((alpha_1 - (3.0 * alpha_3)) * dt * inv_ts) +
+            (((2.0 * alpha_2) - (8.0 * alpha_4)) * dt2 * inv_ts2) +
+            (4.0 * alpha_3 * dt3 * inv_ts3) + (8.0 * alpha_4 * dt4 * inv_ts4);
+        // Calculates new frequency based on the first-order Doppler
+        // approximation:
+        const auto f_new     = f0 * (1.0 - (v_new * utils::kInvCval));
+        const auto delay_rel = d_new * utils::kInvCval;
 
         // Calculate relative phase
         phase_shift[i] = psr_utils::get_phase_idx(dt, f0, nbins, delay_rel);
@@ -1272,6 +1480,35 @@ void poly_chebyshev_resolve_batch_impl(std::span<const double> leaves_tree,
         poly_chebyshev_resolve_snap_batch(
             leaves_tree, param_indices, phase_shift, param_limits, coord_add,
             coord_cur, coord_init, n_accel_init, n_freq_init, nbins, n_leaves);
+    }
+}
+
+template <SizeType NPARAMS>
+void poly_chebyshev_ascend_resolve_batch_impl(
+    std::span<const double> leaves_branch,
+    std::span<SizeType> param_indices,
+    std::span<float> phase_shift,
+    std::span<const ParamLimit> param_limits,
+    std::pair<double, double> coord_seg,
+    std::pair<double, double> coord_cur,
+    SizeType n_accel_init,
+    SizeType n_freq_init,
+    SizeType nbins,
+    SizeType n_leaves) {
+    static_assert(NPARAMS == 2 || NPARAMS == 3 || NPARAMS == 4,
+                  "Unsupported Taylor order");
+    if constexpr (NPARAMS == 2) {
+        poly_chebyshev_ascend_resolve_accel_batch(
+            leaves_branch, param_indices, phase_shift, param_limits, coord_seg,
+            coord_cur, n_accel_init, n_freq_init, nbins, n_leaves);
+    } else if constexpr (NPARAMS == 3) {
+        poly_chebyshev_ascend_resolve_jerk_batch(
+            leaves_branch, param_indices, phase_shift, param_limits, coord_seg,
+            coord_cur, n_accel_init, n_freq_init, nbins, n_leaves);
+    } else if constexpr (NPARAMS == 4) {
+        poly_chebyshev_ascend_resolve_snap_batch(
+            leaves_branch, param_indices, phase_shift, param_limits, coord_seg,
+            coord_cur, n_accel_init, n_freq_init, nbins, n_leaves);
     }
 }
 
@@ -1419,6 +1656,53 @@ void poly_chebyshev_resolve_batch(std::span<const double> leaves_branch,
         break;
     default:
         throw std::invalid_argument("Unsupported Taylor order");
+    }
+}
+
+void poly_chebyshev_ascend_resolve_batch(
+    std::span<const double> leaves_branch,
+    std::span<SizeType> param_indices,
+    std::span<float> phase_shift,
+    std::span<const ParamLimit> param_limits,
+    std::span<const std::pair<double, double>> coord_segments,
+    std::pair<double, double> coord_cur,
+    SizeType n_accel_init,
+    SizeType n_freq_init,
+    SizeType nbins,
+    SizeType n_leaves,
+    SizeType n_params,
+    SizeType n_segments) {
+    error_check::check_greater_equal(param_indices.size(),
+                                     n_leaves * n_segments,
+                                     "param_indices size mismatch");
+    error_check::check_greater_equal(phase_shift.size(), n_leaves * n_segments,
+                                     "phase_shift size mismatch");
+    error_check::check_equal(coord_segments.size(), n_segments,
+                             "coord_segments size mismatch");
+    auto dispatch = [&]<SizeType N>() {
+        for (SizeType iseg = 0; iseg < n_segments; ++iseg) {
+            auto param_indices_seg =
+                param_indices.subspan(iseg * n_leaves, n_leaves);
+            auto phase_shift_seg =
+                phase_shift.subspan(iseg * n_leaves, n_leaves);
+            poly_chebyshev_ascend_resolve_batch_impl<N>(
+                leaves_branch, param_indices_seg, phase_shift_seg, param_limits,
+                coord_segments[iseg], coord_cur, n_accel_init, n_freq_init,
+                nbins, n_leaves);
+        }
+    };
+    switch (n_params) {
+    case 2:
+        dispatch.template operator()<2>();
+        break;
+    case 3:
+        dispatch.template operator()<3>();
+        break;
+    case 4:
+        dispatch.template operator()<4>();
+        break;
+    default:
+        throw std::invalid_argument("Unsupported Chebyshev order");
     }
 }
 

@@ -89,20 +89,24 @@ template <SupportedFoldType FoldType>
 PruneWorkspace<FoldType>::PruneWorkspace(SizeType batch_size,
                                          SizeType branch_max,
                                          SizeType nparams,
-                                         SizeType nbins)
+                                         SizeType nbins,
+                                         SizeType nsegments)
     : batch_size(batch_size),
       branch_max(branch_max),
       nparams(nparams),
       nbins(nbins),
+      nsegments(nsegments),
       max_branched_leaves(batch_size * branch_max),
+      max_branched_param_idx(
+          std::max(max_branched_leaves, nsegments * batch_size)),
       leaves_stride((nparams + 2) * kLeavesParamStride),
       folds_stride(2 * nbins),
       branched_leaves(max_branched_leaves * leaves_stride),
       branched_folds(max_branched_leaves * folds_stride),
       branched_scores(max_branched_leaves),
       branched_indices(max_branched_leaves),
-      branched_param_idx(max_branched_leaves),
-      branched_phase_shift(max_branched_leaves) {}
+      branched_param_idx(max_branched_param_idx),
+      branched_phase_shift(max_branched_param_idx) {}
 
 template <SupportedFoldType FoldType>
 float PruneWorkspace<FoldType>::get_memory_usage_gib() const noexcept {
@@ -117,7 +121,10 @@ float PruneWorkspace<FoldType>::get_memory_usage_gib() const noexcept {
 
 template <SupportedFoldType FoldType>
 void PruneWorkspace<FoldType>::validate(SizeType batch_size,
-                                        SizeType branch_max) const {
+                                        SizeType branch_max,
+                                        SizeType nsegments) const {
+    const auto max_branched_param_idx =
+        std::max(batch_size * branch_max, nsegments * batch_size);
     error_check::check_equal(
         branched_leaves.size(), batch_size * branch_max * leaves_stride,
         "PruneWorkspace: branched_leaves size is too small");
@@ -131,10 +138,10 @@ void PruneWorkspace<FoldType>::validate(SizeType batch_size,
         branched_indices.size(), batch_size * branch_max,
         "PruneWorkspace: branched_indices size is too small");
     error_check::check_equal(
-        branched_param_idx.size(), batch_size * branch_max,
+        branched_param_idx.size(), max_branched_param_idx,
         "PruneWorkspace: branched_param_idx size is too small");
     error_check::check_equal(
-        branched_phase_shift.size(), batch_size * branch_max,
+        branched_phase_shift.size(), max_branched_param_idx,
         "PruneWorkspace: branched_phase_shift size is too small");
 }
 
@@ -145,9 +152,10 @@ EPWorkspace<FoldType>::EPWorkspace(SizeType batch_size,
                                    SizeType max_sugg,
                                    SizeType ncoords_ffa,
                                    SizeType nparams,
-                                   SizeType nbins)
+                                   SizeType nbins,
+                                   SizeType nsegments)
     : world_tree(max_sugg, nparams, nbins, batch_size * branch_max),
-      prune(batch_size, branch_max, nparams, nbins),
+      prune(batch_size, branch_max, nparams, nbins, nsegments),
       branch(batch_size, branch_max, nparams) {
     seed_leaves.resize(ncoords_ffa * world_tree.get_leaves_stride());
     seed_scores.resize(ncoords_ffa);
@@ -171,7 +179,8 @@ void EPWorkspace<FoldType>::validate(SizeType batch_size,
                                      SizeType max_sugg,
                                      SizeType ncoords_ffa,
                                      SizeType nparams,
-                                     SizeType nbins) const {
+                                     SizeType nbins,
+                                     SizeType nsegments) const {
     const auto leaves_stride = (nparams + 2) * 2;
     error_check::check_greater_equal(
         seed_scores.size(), ncoords_ffa,
@@ -179,7 +188,7 @@ void EPWorkspace<FoldType>::validate(SizeType batch_size,
     error_check::check_equal(seed_leaves.size(), ncoords_ffa * leaves_stride,
                              "EPWorkspace: seed_leaves size is too small");
     world_tree.validate(max_sugg, nparams, nbins, batch_size * branch_max);
-    prune.validate(batch_size, branch_max);
+    prune.validate(batch_size, branch_max, nsegments);
     branch.validate(batch_size, branch_max, nparams);
 }
 

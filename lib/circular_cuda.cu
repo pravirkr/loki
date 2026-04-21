@@ -462,6 +462,92 @@ kernel_circ_taylor_resolve_batch(const double* __restrict__ leaves_tree,
     phase_shift[tid]   = utils::get_phase_idx_device(dt, f0, nbins, delay_rel);
 }
 
+__global__ void kernel_circ_taylor_ascend_resolve_batch(
+    const double* __restrict__ leaves_tree,
+    uint32_t* __restrict__ param_indices,
+    float* __restrict__ phase_shift,
+    const ParamLimit* __restrict__ param_limits,
+    const cuda::std::pair<double, double>* __restrict__ coord_segments,
+    cuda::std::pair<double, double> coord_cur,
+    uint32_t n_accel_init,
+    uint32_t n_freq_init,
+    uint32_t nbins,
+    uint32_t n_leaves,
+    uint32_t n_segments,
+    double minimum_snap_cells) {
+    constexpr uint32_t kLeavesStride = 14;
+
+    const uint32_t iseg = blockIdx.y;
+    if (iseg >= n_segments) {
+        return;
+    }
+    const uint32_t tid = (blockIdx.x * blockDim.x) + threadIdx.x;
+    if (tid >= n_leaves) {
+        return;
+    }
+
+    // Compute locally
+    const double dt        = coord_segments[iseg].first - coord_cur.first;
+    const double dt2       = dt * dt;
+    const double half_dt2  = 0.5 * dt2;
+    const double sixth_dt3 = dt2 * dt / 6.0;
+    const double twenty_fourth_dt4     = dt2 * dt2 / 24.0;
+    const double onehundred_twenty_dt5 = (dt2 * dt2 * dt) / 120.0;
+
+    const uint32_t lo   = tid * kLeavesStride;
+    const double c_cur  = leaves_tree[lo + 0];
+    const double dc_cur = leaves_tree[lo + 1];
+    const double s_cur  = leaves_tree[lo + 2];
+    const double ds_cur = leaves_tree[lo + 3];
+    const double j_cur  = leaves_tree[lo + 4];
+    const double a_cur  = leaves_tree[lo + 6];
+    const double v_cur  = leaves_tree[lo + 8];
+    const double d_cur  = leaves_tree[lo + 10];
+    const double f0     = leaves_tree[lo + 12];
+
+    double a_new, v_new, d_new;
+    const uint32_t mask_circular =
+        get_circ_taylor_mask_device(c_cur, dc_cur, s_cur, ds_cur,
+                                    j_cur, a_cur, minimum_snap_cells);
+    if (mask_circular == 0) {
+        a_new = a_cur + (j_cur * dt) + (s_cur * half_dt2) + (c_cur * sixth_dt3);
+        v_new = v_cur + (a_cur * dt) + (j_cur * half_dt2) +
+                (s_cur * sixth_dt3) + (c_cur * twenty_fourth_dt4);
+        d_new = d_cur + (v_cur * dt) + (a_cur * half_dt2) +
+                (j_cur * sixth_dt3) + (s_cur * twenty_fourth_dt4) +
+                (c_cur * onehundred_twenty_dt5);
+    } else {
+        const double omega_orb_sq =
+            mask_circular == 1 ? -s_cur / a_cur : -c_cur / j_cur;
+        const double omega_orb = std::sqrt(omega_orb_sq);
+        // Evolve the phase to the new time t_j = t_i + delta_t
+        const double omega_dt = omega_orb * dt;
+        const double cos_odt  = std::cos(omega_dt);
+        const double sin_odt  = std::sin(omega_dt);
+        a_new = (a_cur * cos_odt) + ((j_cur / omega_orb) * sin_odt);
+        const double j_new =
+            (j_cur * cos_odt) - ((a_cur * omega_orb) * sin_odt);
+        const double v_circ_cur = -j_cur / omega_orb_sq;
+        const double v_circ_new = -j_new / omega_orb_sq;
+        const double d_circ_new = -a_new / omega_orb_sq;
+        const double d_circ_cur = -a_cur / omega_orb_sq;
+        v_new                   = v_circ_new + (v_cur - v_circ_cur);
+        d_new = d_circ_new + (d_cur - d_circ_cur) + ((v_cur - v_circ_cur) * dt);
+    }
+    const double f_new     = f0 * (1.0 - (v_new * utils::kInvCval));
+    const double delay_rel = d_new * utils::kInvCval;
+
+    const uint32_t idx_a = utils::get_nearest_idx_analytical_device(
+        a_new, param_limits[3].min, param_limits[3].max, n_accel_init);
+    const uint32_t idx_f = utils::get_nearest_idx_analytical_device(
+        f_new, param_limits[4].min, param_limits[4].max, n_freq_init);
+
+    const uint32_t out_idx = (iseg * n_leaves) + tid;
+    param_indices[out_idx] = (idx_a * n_freq_init) + idx_f;
+    phase_shift[out_idx] =
+        utils::get_phase_idx_device(dt, f0, nbins, delay_rel);
+}
+
 template <bool UseConservativeTile>
 __global__ void
 kernel_circ_taylor_transform_batch(double* __restrict__ leaves_tree,
@@ -797,6 +883,37 @@ void circ_taylor_resolve_batch_cuda(
         minimum_snap_cells);
     cuda_utils::check_last_cuda_error(
         "Circular Taylor resolve kernel launch failed");
+    // No need to sync, the next kernel will do it
+}
+
+void circ_taylor_ascend_resolve_batch_cuda(
+    cuda::std::span<const double> leaves_tree,
+    cuda::std::span<uint32_t> param_indices,
+    cuda::std::span<float> phase_shift,
+    cuda::std::span<const ParamLimit> param_limits,
+    cuda::std::span<const cuda::std::pair<double, double>> coord_segments,
+    std::pair<double, double> coord_cur,
+    SizeType n_accel_init,
+    SizeType n_freq_init,
+    SizeType nbins,
+    SizeType n_leaves,
+    SizeType n_segments,
+    double minimum_snap_cells,
+    cudaStream_t stream) {
+    constexpr SizeType kThreadsPerBlock = 256;
+    const auto blocks_per_grid =
+        (n_leaves + kThreadsPerBlock - 1) / kThreadsPerBlock;
+    const dim3 block_dim(kThreadsPerBlock);
+    const dim3 grid_dim(static_cast<uint32_t>(blocks_per_grid),
+                        static_cast<uint32_t>(n_segments));
+    cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
+
+    kernel_circ_taylor_ascend_resolve_batch<<<grid_dim, block_dim, 0, stream>>>(
+        leaves_tree.data(), param_indices.data(), phase_shift.data(),
+        param_limits.data(), coord_segments.data(), coord_cur, n_accel_init,
+        n_freq_init, nbins, n_leaves, n_segments, minimum_snap_cells);
+    cuda_utils::check_last_cuda_error(
+        "Circular Taylor ascend resolve kernel launch failed");
     // No need to sync, the next kernel will do it
 }
 

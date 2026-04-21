@@ -839,6 +839,150 @@ transform_taylor_snap(double* __restrict__ leaves_tree,
     leaves_tree[lo + 9] = d0_err_i;
 }
 
+__device__ __forceinline__ void
+ascend_resolve_taylor_accel(const double* __restrict__ leaves_branch,
+                            uint32_t* __restrict__ param_indices,
+                            float* __restrict__ phase_shift,
+                            const ParamLimit* __restrict__ param_limits,
+                            cuda::std::pair<double, double> coord_seg,
+                            cuda::std::pair<double, double> coord_cur,
+                            uint32_t n_accel_init,
+                            uint32_t n_freq_init,
+                            uint32_t nbins,
+                            uint32_t n_leaves,
+                            uint32_t iseg) {
+    constexpr uint32_t kLeavesStride = 8;
+
+    const uint32_t tid = (blockIdx.x * blockDim.x) + threadIdx.x;
+    if (tid >= n_leaves) {
+        return;
+    }
+
+    const double dt       = coord_seg.first - coord_cur.first;
+    const double half_dt2 = 0.5 * dt * dt;
+
+    const uint32_t lo  = tid * kLeavesStride;
+    const double a_cur = leaves_branch[lo + 0];
+    const double v_cur = leaves_branch[lo + 2];
+    const double d_cur = leaves_branch[lo + 4];
+    const double f0    = leaves_branch[lo + 6];
+
+    const double a_new     = a_cur;
+    const double v_new     = v_cur + (a_cur * dt);
+    const double d_new     = d_cur + (v_cur * dt) + (a_cur * half_dt2);
+    const double f_new     = f0 * (1.0 - (v_new * utils::kInvCval));
+    const double delay_rel = d_new * utils::kInvCval;
+
+    const uint32_t idx_a = utils::get_nearest_idx_analytical_device(
+        a_new, param_limits[0].min, param_limits[0].max, n_accel_init);
+    const uint32_t idx_f = utils::get_nearest_idx_analytical_device(
+        f_new, param_limits[1].min, param_limits[1].max, n_freq_init);
+
+    const uint32_t out_idx = (iseg * n_leaves) + tid;
+    param_indices[out_idx] = (idx_a * n_freq_init) + idx_f;
+    phase_shift[out_idx] =
+        utils::get_phase_idx_device(dt, f0, nbins, delay_rel);
+}
+
+__device__ __forceinline__ void
+ascend_resolve_taylor_jerk(const double* __restrict__ leaves_branch,
+                           uint32_t* __restrict__ param_indices,
+                           float* __restrict__ phase_shift,
+                           const ParamLimit* __restrict__ param_limits,
+                           cuda::std::pair<double, double> coord_seg,
+                           cuda::std::pair<double, double> coord_cur,
+                           uint32_t n_accel_init,
+                           uint32_t n_freq_init,
+                           uint32_t nbins,
+                           uint32_t n_leaves,
+                           uint32_t iseg) {
+    constexpr uint32_t kLeavesStride = 10;
+
+    const uint32_t tid = (blockIdx.x * blockDim.x) + threadIdx.x;
+    if (tid >= n_leaves) {
+        return;
+    }
+
+    const double dt        = coord_seg.first - coord_cur.first;
+    const double half_dt2  = 0.5 * dt * dt;
+    const double sixth_dt3 = (half_dt2 * dt) / 3.0;
+
+    const uint32_t lo  = tid * kLeavesStride;
+    const double j_cur = leaves_branch[lo + 0];
+    const double a_cur = leaves_branch[lo + 2];
+    const double v_cur = leaves_branch[lo + 4];
+    const double d_cur = leaves_branch[lo + 6];
+    const double f0    = leaves_branch[lo + 8];
+
+    const double a_new = a_cur + (j_cur * dt);
+    const double v_new = v_cur + (a_cur * dt) + (j_cur * half_dt2);
+    const double d_new =
+        d_cur + (v_cur * dt) + (a_cur * half_dt2) + (j_cur * sixth_dt3);
+    const double f_new     = f0 * (1.0 - (v_new * utils::kInvCval));
+    const double delay_rel = d_new * utils::kInvCval;
+
+    const uint32_t idx_a = utils::get_nearest_idx_analytical_device(
+        a_new, param_limits[1].min, param_limits[1].max, n_accel_init);
+    const uint32_t idx_f = utils::get_nearest_idx_analytical_device(
+        f_new, param_limits[2].min, param_limits[2].max, n_freq_init);
+
+    const uint32_t out_idx = (iseg * n_leaves) + tid;
+    param_indices[out_idx] = (idx_a * n_freq_init) + idx_f;
+    phase_shift[out_idx] =
+        utils::get_phase_idx_device(dt, f0, nbins, delay_rel);
+}
+
+__device__ __forceinline__ void
+ascend_resolve_taylor_snap(const double* __restrict__ leaves_branch,
+                           uint32_t* __restrict__ param_indices,
+                           float* __restrict__ phase_shift,
+                           const ParamLimit* __restrict__ param_limits,
+                           cuda::std::pair<double, double> coord_seg,
+                           cuda::std::pair<double, double> coord_cur,
+                           uint32_t n_accel_init,
+                           uint32_t n_freq_init,
+                           uint32_t nbins,
+                           uint32_t n_leaves,
+                           uint32_t iseg) {
+    constexpr uint32_t kLeavesStride = 12;
+
+    const uint32_t tid = (blockIdx.x * blockDim.x) + threadIdx.x;
+    if (tid >= n_leaves) {
+        return;
+    }
+
+    const double dt                = coord_seg.first - coord_cur.first;
+    const double half_dt2          = 0.5 * dt * dt;
+    const double sixth_dt3         = (half_dt2 * dt) / 3.0;
+    const double twenty_fourth_dt4 = (half_dt2 * half_dt2) / 6.0;
+
+    const uint32_t lo  = tid * kLeavesStride;
+    const double s_cur = leaves_branch[lo + 0];
+    const double j_cur = leaves_branch[lo + 2];
+    const double a_cur = leaves_branch[lo + 4];
+    const double v_cur = leaves_branch[lo + 6];
+    const double d_cur = leaves_branch[lo + 8];
+    const double f0    = leaves_branch[lo + 10];
+
+    const double a_new = a_cur + (j_cur * dt) + (s_cur * half_dt2);
+    const double v_new =
+        v_cur + (a_cur * dt) + (j_cur * half_dt2) + (s_cur * sixth_dt3);
+    const double d_new     = d_cur + (v_cur * dt) + (a_cur * half_dt2) +
+                             (j_cur * sixth_dt3) + (s_cur * twenty_fourth_dt4);
+    const double f_new     = f0 * (1.0 - (v_new * utils::kInvCval));
+    const double delay_rel = d_new * utils::kInvCval;
+
+    const uint32_t idx_a = utils::get_nearest_idx_analytical_device(
+        a_new, param_limits[2].min, param_limits[2].max, n_accel_init);
+    const uint32_t idx_f = utils::get_nearest_idx_analytical_device(
+        f_new, param_limits[3].min, param_limits[3].max, n_freq_init);
+
+    const uint32_t out_idx = (iseg * n_leaves) + tid;
+    param_indices[out_idx] = (idx_a * n_freq_init) + idx_f;
+    phase_shift[out_idx] =
+        utils::get_phase_idx_device(dt, f0, nbins, delay_rel);
+}
+
 // Resolve Kernel
 template <int NPARAMS>
 __global__ void
@@ -871,6 +1015,47 @@ kernel_poly_taylor_resolve_batch(const double* __restrict__ leaves_tree,
                             n_leaves);
     } else {
         static_assert(NPARAMS <= 4, "Unsupported Taylor order");
+    }
+}
+
+// Ascend-Resolve Kernel. Grid 2D: x dimension covers n_leaves, y dimension
+// covers n_segments. Each (leaf, segment) thread writes its own output slot
+// at index (iseg * n_leaves + tid).
+template <int NPARAMS>
+__global__ void kernel_poly_taylor_ascend_resolve_batch(
+    const double* __restrict__ leaves_branch,
+    uint32_t* __restrict__ param_indices,
+    float* __restrict__ phase_shift,
+    const ParamLimit* __restrict__ param_limits,
+    const cuda::std::pair<double, double>* __restrict__ coord_segments,
+    cuda::std::pair<double, double> coord_cur,
+    SizeType n_accel_init,
+    SizeType n_freq_init,
+    SizeType nbins,
+    uint32_t n_leaves,
+    uint32_t n_segments) {
+    const uint32_t iseg = blockIdx.y;
+    if (iseg >= n_segments) {
+        return;
+    }
+
+    if constexpr (NPARAMS == 2) {
+        ascend_resolve_taylor_accel(leaves_branch, param_indices, phase_shift,
+                                    param_limits, coord_segments[iseg],
+                                    coord_cur, n_accel_init, n_freq_init, nbins,
+                                    n_leaves, iseg);
+    } else if constexpr (NPARAMS == 3) {
+        ascend_resolve_taylor_jerk(leaves_branch, param_indices, phase_shift,
+                                   param_limits, coord_segments[iseg],
+                                   coord_cur, n_accel_init, n_freq_init, nbins,
+                                   n_leaves, iseg);
+    } else if constexpr (NPARAMS == 4) {
+        ascend_resolve_taylor_snap(leaves_branch, param_indices, phase_shift,
+                                   param_limits, coord_segments[iseg],
+                                   coord_cur, n_accel_init, n_freq_init, nbins,
+                                   n_leaves, iseg);
+    } else {
+        static_assert(NPARAMS >= 2 && NPARAMS <= 4, "Unsupported Taylor order");
     }
 }
 
@@ -1151,6 +1336,60 @@ void poly_taylor_resolve_batch_cuda(
     }
 
     cuda_utils::check_last_cuda_error("Taylor resolve kernel launch failed");
+    // No need to sync, the next kernel will do it
+}
+
+void poly_taylor_ascend_resolve_batch_cuda(
+    cuda::std::span<const double> leaves_branch,
+    cuda::std::span<uint32_t> param_indices,
+    cuda::std::span<float> phase_shift,
+    cuda::std::span<const ParamLimit> param_limits,
+    cuda::std::span<const cuda::std::pair<double, double>> coord_segments,
+    std::pair<double, double> coord_cur,
+    SizeType n_accel_init,
+    SizeType n_freq_init,
+    SizeType nbins,
+    SizeType n_leaves,
+    SizeType n_params,
+    SizeType n_segments,
+    cudaStream_t stream) {
+    if (n_leaves == 0 || n_segments == 0) {
+        return;
+    }
+    constexpr SizeType kThreadsPerBlock = 256;
+    const auto blocks_per_grid =
+        (n_leaves + kThreadsPerBlock - 1) / kThreadsPerBlock;
+    const dim3 block_dim(kThreadsPerBlock);
+    const dim3 grid_dim(static_cast<uint32_t>(blocks_per_grid),
+                        static_cast<uint32_t>(n_segments));
+    cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
+
+    auto dispatch = [&]<int N>() {
+        kernel_poly_taylor_ascend_resolve_batch<N>
+            <<<grid_dim, block_dim, 0, stream>>>(
+                leaves_branch.data(), param_indices.data(), phase_shift.data(),
+                param_limits.data(), coord_segments.data(), coord_cur,
+                n_accel_init, n_freq_init, nbins,
+                static_cast<uint32_t>(n_leaves),
+                static_cast<uint32_t>(n_segments));
+    };
+
+    switch (n_params) {
+    case 2:
+        dispatch.template operator()<2>();
+        break;
+    case 3:
+        dispatch.template operator()<3>();
+        break;
+    case 4:
+        dispatch.template operator()<4>();
+        break;
+    default:
+        throw std::invalid_argument("Unsupported n_params");
+    }
+
+    cuda_utils::check_last_cuda_error(
+        "Taylor ascend resolve kernel launch failed");
     // No need to sync, the next kernel will do it
 }
 

@@ -81,7 +81,9 @@ template <SupportedFoldType FoldType> struct PruneWorkspace {
     SizeType branch_max{};
     SizeType nparams{};
     SizeType nbins{};
+    SizeType nsegments{};
     SizeType max_branched_leaves{};
+    SizeType max_branched_param_idx{};
     SizeType leaves_stride{};
     SizeType folds_stride{};
 
@@ -98,7 +100,8 @@ template <SupportedFoldType FoldType> struct PruneWorkspace {
     PruneWorkspace(SizeType batch_size,
                    SizeType branch_max,
                    SizeType nparams,
-                   SizeType nbins);
+                   SizeType nbins,
+                   SizeType nsegments);
 
     ~PruneWorkspace() = default;
 
@@ -109,7 +112,9 @@ template <SupportedFoldType FoldType> struct PruneWorkspace {
 
     [[nodiscard]] float get_memory_usage_gib() const noexcept;
 
-    void validate(SizeType batch_size, SizeType branch_max) const;
+    void validate(SizeType batch_size,
+                  SizeType branch_max,
+                  SizeType nsegments) const;
 }; // End PruneWorkspace definition
 
 /**
@@ -132,7 +137,8 @@ template <SupportedFoldType FoldType> struct EPWorkspace {
                 SizeType max_sugg,
                 SizeType ncoords_ffa,
                 SizeType nparams,
-                SizeType nbins);
+                SizeType nbins,
+                SizeType nsegments);
 
     ~EPWorkspace() = default;
     // Non-copyable, non-movable: pass by reference only
@@ -148,7 +154,8 @@ template <SupportedFoldType FoldType> struct EPWorkspace {
                   SizeType max_sugg,
                   SizeType ncoords_ffa,
                   SizeType nparams,
-                  SizeType nbins) const;
+                  SizeType nbins,
+                  SizeType nsegments) const;
 }; // End EPWorkspace definition
 
 #ifdef LOKI_ENABLE_CUDA
@@ -238,7 +245,9 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA> struct PruneWorkspaceCUDA {
     SizeType branch_max{};
     SizeType nparams{};
     SizeType nbins{};
+    SizeType nsegments{};
     SizeType max_branched_leaves{};
+    SizeType max_branched_param_idx{};
     SizeType leaves_stride{};
     SizeType folds_stride{};
 
@@ -258,7 +267,8 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA> struct PruneWorkspaceCUDA {
     PruneWorkspaceCUDA(SizeType batch_size,
                        SizeType branch_max,
                        SizeType nparams,
-                       SizeType nbins);
+                       SizeType nbins,
+                       SizeType nsegments);
     ~PruneWorkspaceCUDA() = default;
 
     PruneWorkspaceCUDA(const PruneWorkspaceCUDA&)                = delete;
@@ -267,7 +277,9 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA> struct PruneWorkspaceCUDA {
     PruneWorkspaceCUDA& operator=(PruneWorkspaceCUDA&&) noexcept = default;
 
     [[nodiscard]] float get_memory_usage_gib() const noexcept;
-    void validate(SizeType batch_size, SizeType branch_max) const;
+    void validate(SizeType batch_size,
+                  SizeType branch_max,
+                  SizeType nsegments) const;
 
 }; // End PruneWorkspaceCUDA definition
 
@@ -314,6 +326,9 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA> struct EPWorkspaceCUDA {
 
     thrust::device_vector<double> seed_leaves_d;
     thrust::device_vector<float> seed_scores_d;
+    // Device containers for get_segment_coords_so_far
+    thrust::device_vector<uint32_t> idx_segments_d;
+    thrust::device_vector<cuda::std::pair<double, double>> coord_segments_d;
 
     EPWorkspaceCUDA() = default;
     EPWorkspaceCUDA(SizeType batch_size,
@@ -322,6 +337,7 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA> struct EPWorkspaceCUDA {
                     SizeType ncoords_ffa,
                     SizeType nparams,
                     SizeType nbins,
+                    SizeType nsegments,
                     cudaStream_t stream = nullptr);
 
     ~EPWorkspaceCUDA();
@@ -336,7 +352,8 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA> struct EPWorkspaceCUDA {
                   SizeType max_sugg,
                   SizeType ncoords_ffa,
                   SizeType nparams,
-                  SizeType nbins) const;
+                  SizeType nbins,
+                  SizeType nsegments) const;
 };
 
 struct DeviceCounter {

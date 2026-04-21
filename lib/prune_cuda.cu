@@ -167,66 +167,11 @@ public:
                 iterations_completed);
         }
 
-        // Transform the suggestion params to middle of the data
-        const auto coord_mid = m_snail_scheme.get_coord(m_prune_level);
+        // Ascend survivors to the middle of the data
+        ascend_survivors_batched(ffa_fold, m_stream);
 
-        // Write results
-        auto result_writer = cands::PruneResultWriter(
-            actual_result_file, cands::PruneResultWriter::Mode::kAppend);
-        auto& ws_final         = get_workspace();
-        auto& world_tree_final = ws_final.world_tree;
-        memory::CircularViewCUDA<double> leaves_view =
-            world_tree_final.get_leaves_circular_view();
-        memory::CircularViewCUDA<float> scores_view =
-            world_tree_final.get_scores_circular_view();
-        const auto leaves_stride = world_tree_final.get_leaves_stride();
-        const auto n_leaves      = world_tree_final.get_size();
-        const auto n1            = leaves_view.first.size() / leaves_stride;
-        const auto n2            = leaves_view.second.size() / leaves_stride;
-        m_prune_funcs->report(leaves_view.first, coord_mid, n1, m_stream);
-        if (n2 > 0) {
-            m_prune_funcs->report(leaves_view.second, coord_mid, n2, m_stream);
-        }
-        std::vector<double> leaves_report_h(n_leaves * leaves_stride);
-        std::vector<float> scores_report_h(n_leaves);
-        cuda_utils::check_cuda_call(
-            cudaMemcpyAsync(leaves_report_h.data(), leaves_view.first.data(),
-                            (n1 * leaves_stride) * sizeof(double),
-                            cudaMemcpyDeviceToHost, m_stream),
-            "cudaMemcpyAsync leaves_report failed");
-        if (n2 > 0) {
-            cuda_utils::check_cuda_call(
-                cudaMemcpyAsync(leaves_report_h.data() + (n1 * leaves_stride),
-                                leaves_view.second.data(),
-                                (n2 * leaves_stride) * sizeof(double),
-                                cudaMemcpyDeviceToHost, m_stream),
-                "cudaMemcpyAsync leaves_report failed");
-        }
-        cuda_utils::check_cuda_call(
-            cudaMemcpyAsync(scores_report_h.data(), scores_view.first.data(),
-                            n1 * sizeof(float), cudaMemcpyDeviceToHost,
-                            m_stream),
-            "cudaMemcpyAsync scores_report part 1 failed");
-        if (n2 > 0) {
-            cuda_utils::check_cuda_call(
-                cudaMemcpyAsync(scores_report_h.data() + n1,
-                                scores_view.second.data(), n2 * sizeof(float),
-                                cudaMemcpyDeviceToHost, m_stream),
-                "cudaMemcpyAsync scores_report part 2 failed");
-        }
-
-        cuda_utils::check_cuda_call(
-            cudaStreamSynchronize(m_stream),
-            "cudaStreamSynchronize write results failed");
-
-        // Both host vectors are now contiguous — wrap as single-span views
-        memory::CircularView<double> leaves_report_view{
-            std::span<double>(leaves_report_h), std::span<double>{}};
-        memory::CircularView<float> scores_report_view{
-            std::span<float>(scores_report_h), std::span<float>{}};
-        result_writer.write_run_results(
-            run_name, m_snail_scheme.get_data(), leaves_report_view,
-            scores_report_view, n_leaves, m_cfg.get_nparams(), m_pstats);
+        // Write results (after transforming to middle of the data)
+        report_survivors(actual_result_file, run_name);
 
         // Final log entries
         std::ofstream log(actual_log_file, std::ios::app);
@@ -314,6 +259,179 @@ private:
             .n_leaves_surv = world_tree.get_size(),
         };
         m_pstats.update_stats(pstats_cur);
+    }
+
+    void ascend_survivors_batched(cuda::std::span<const FoldTypeCUDA> ffa_fold,
+                                  cudaStream_t stream) {
+        if (m_prune_complete) {
+            return;
+        }
+        auto& ws               = get_workspace();
+        auto& world_tree       = ws.world_tree;
+        const auto n_survivors = world_tree.get_size();
+        if (n_survivors == 0) {
+            return;
+        }
+        auto& prune_ws       = ws.prune;
+        const auto coord_mid = m_snail_scheme.get_coord(m_prune_level);
+        const auto [idx_segments, coord_segments] =
+            m_snail_scheme.get_segment_coords_so_far(m_prune_level);
+        const auto batch_cap =
+            std::max(SizeType{1}, std::min(m_batch_size, n_survivors));
+
+        // Copy the segment coordinates to the device
+        thrust::copy(thrust::cuda::par.on(stream), idx_segments.begin(),
+                     idx_segments.end(), ws.idx_segments_d.begin());
+        thrust::copy(thrust::cuda::par.on(stream), coord_segments.begin(),
+                     coord_segments.end(), ws.coord_segments_d.begin());
+
+        memory::CircularViewCUDA<double> leaves_cv =
+            world_tree.get_leaves_circular_view();
+        memory::CircularViewCUDA<FoldTypeCUDA> folds_cv =
+            world_tree.get_folds_circular_view();
+        memory::CircularViewCUDA<float> scores_cv =
+            world_tree.get_scores_circular_view();
+        memory::CircularViewCUDA<float> scores_ep_cv =
+            world_tree.get_scores_ep_circular_view();
+
+        const auto leaves_stride = world_tree.get_leaves_stride();
+        const auto folds_stride  = world_tree.get_folds_stride();
+
+        auto process_region = [&](cuda::std::span<const double> leaves_region,
+                                  cuda::std::span<FoldTypeCUDA> folds_region,
+                                  cuda::std::span<float> scores_region,
+                                  cuda::std::span<float> scores_ep_region) {
+            if (leaves_region.empty()) {
+                return;
+            }
+            error_check::check_equal(
+                leaves_region.size() % leaves_stride, SizeType{0},
+                "ascend_survivors_batched: leaves segment not stride-aligned");
+            const auto n_leaves_region = leaves_region.size() / leaves_stride;
+            error_check::check_equal(
+                folds_region.size(), n_leaves_region * folds_stride,
+                "ascend_survivors_batched: folds/leaves leaf count mismatch");
+            error_check::check_equal(
+                scores_region.size(), n_leaves_region,
+                "ascend_survivors_batched: scores/leaves leaf count mismatch");
+            error_check::check_equal(
+                scores_ep_region.size(), n_leaves_region,
+                "ascend_survivors_batched: scores_ep/leaves leaf count "
+                "mismatch");
+
+            for (SizeType off = 0; off < n_leaves_region; off += batch_cap) {
+                const auto chunk = std::min(batch_cap, n_leaves_region - off);
+                m_prune_funcs->ascend(
+                    ffa_fold,
+                    leaves_region.subspan(off * leaves_stride,
+                                          chunk * leaves_stride),
+                    folds_region.subspan(off * folds_stride,
+                                         chunk * folds_stride),
+                    scores_region.subspan(off, chunk),
+                    scores_ep_region.subspan(off, chunk),
+                    cuda_utils::as_span(ws.idx_segments_d),
+                    cuda_utils::as_span(ws.coord_segments_d), coord_mid,
+                    cuda_utils::as_span(prune_ws.branched_param_idx_d),
+                    cuda_utils::as_span(prune_ws.branched_phase_shift_d), chunk,
+                    stream);
+            }
+        };
+
+        process_region(leaves_cv.first, folds_cv.first, scores_cv.first,
+                       scores_ep_cv.first);
+        process_region(leaves_cv.second, folds_cv.second, scores_cv.second,
+                       scores_ep_cv.second);
+    }
+
+    void report_survivors(const std::filesystem::path& actual_result_file,
+                          std::string_view run_name) {
+        auto& ws         = get_workspace();
+        auto& world_tree = ws.world_tree;
+
+        memory::CircularViewCUDA<double> leaves_view =
+            world_tree.get_leaves_circular_view();
+        memory::CircularViewCUDA<float> scores_view =
+            world_tree.get_scores_circular_view();
+        memory::CircularViewCUDA<float> scores_ep_view =
+            world_tree.get_scores_ep_circular_view();
+
+        const auto n_leaves      = world_tree.get_size();
+        const auto leaves_stride = world_tree.get_leaves_stride();
+        const auto coord_mid     = m_snail_scheme.get_coord(m_prune_level);
+        const auto n1            = leaves_view.first.size() / leaves_stride;
+        const auto n2            = leaves_view.second.size() / leaves_stride;
+
+        if (n_leaves > 0) {
+            // Transform the suggestion params to middle of the data
+            m_prune_funcs->report(leaves_view.first, coord_mid, n1, m_stream);
+            if (n2 > 0) {
+                m_prune_funcs->report(leaves_view.second, coord_mid, n2,
+                                      m_stream);
+            }
+        }
+
+        // Copy the results to the host
+        std::vector<double> leaves_report_h(n_leaves * leaves_stride);
+        std::vector<float> scores_report_h(n_leaves);
+        std::vector<float> scores_ep_report_h(n_leaves);
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(leaves_report_h.data(), leaves_view.first.data(),
+                            (n1 * leaves_stride) * sizeof(double),
+                            cudaMemcpyDeviceToHost, m_stream),
+            "cudaMemcpyAsync leaves_report failed");
+        if (n2 > 0) {
+            cuda_utils::check_cuda_call(
+                cudaMemcpyAsync(leaves_report_h.data() + (n1 * leaves_stride),
+                                leaves_view.second.data(),
+                                (n2 * leaves_stride) * sizeof(double),
+                                cudaMemcpyDeviceToHost, m_stream),
+                "cudaMemcpyAsync leaves_report failed");
+        }
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(scores_report_h.data(), scores_view.first.data(),
+                            n1 * sizeof(float), cudaMemcpyDeviceToHost,
+                            m_stream),
+            "cudaMemcpyAsync scores_report part 1 failed");
+        if (n2 > 0) {
+            cuda_utils::check_cuda_call(
+                cudaMemcpyAsync(scores_report_h.data() + n1,
+                                scores_view.second.data(), n2 * sizeof(float),
+                                cudaMemcpyDeviceToHost, m_stream),
+                "cudaMemcpyAsync scores_report part 2 failed");
+        }
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(scores_ep_report_h.data(),
+                            scores_ep_view.first.data(), n1 * sizeof(float),
+                            cudaMemcpyDeviceToHost, m_stream),
+            "cudaMemcpyAsync scores_ep_report part 1 failed");
+        if (n2 > 0) {
+            cuda_utils::check_cuda_call(
+                cudaMemcpyAsync(scores_ep_report_h.data() + n1,
+                                scores_ep_view.second.data(),
+                                n2 * sizeof(float), cudaMemcpyDeviceToHost,
+                                m_stream),
+                "cudaMemcpyAsync scores_ep_report part 2 failed");
+        }
+
+        cuda_utils::check_cuda_call(
+            cudaStreamSynchronize(m_stream),
+            "cudaStreamSynchronize write results failed");
+
+        // Both host vectors are now contiguous — wrap as single-span views
+        memory::CircularView<double> leaves_report_view{
+            std::span<double>(leaves_report_h), std::span<double>{}};
+        memory::CircularView<float> scores_report_view{
+            std::span<float>(scores_report_h), std::span<float>{}};
+        memory::CircularView<float> scores_ep_report_view{
+            std::span<float>(scores_ep_report_h), std::span<float>{}};
+
+        // Write results
+        auto result_writer = cands::PruneResultWriter(
+            actual_result_file, cands::PruneResultWriter::Mode::kAppend);
+        result_writer.write_run_results(run_name, m_snail_scheme.get_data(),
+                                        leaves_report_view, scores_report_view,
+                                        scores_ep_report_view, n_leaves,
+                                        m_cfg.get_nparams(), m_pstats);
     }
 
     void execute_iteration(cuda::std::span<const FoldTypeCUDA> ffa_fold,
@@ -560,16 +678,18 @@ public:
                               std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>
                                   ? m_cfg.get_nbins_f()
                                   : m_cfg.get_nbins(),
+                              m_ffa_plan.get_nsegments().back(),
                               m_execution_stream.get()),
           m_workspace_ptr(&m_workspace_storage) {
         // Validate workspace
         const auto ncoords_ffa = m_ffa_plan.get_ncoords().back();
+        const auto nsegments   = m_ffa_plan.get_nsegments().back();
         const auto nbins       = std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>
                                      ? m_cfg.get_nbins_f()
                                      : m_cfg.get_nbins();
         const auto& ws         = get_workspace();
         ws.validate(m_batch_size, m_branch_max, m_max_sugg, ncoords_ffa,
-                    m_cfg.get_nparams(), nbins);
+                    m_cfg.get_nparams(), nbins, nsegments);
     }
 
     Impl(memory::EPWorkspaceCUDA<FoldTypeCUDA>& workspace,
@@ -603,11 +723,12 @@ public:
         // Validate workspaces
         const auto& ws         = get_workspace();
         const auto ncoords_ffa = m_ffa_plan.get_ncoords().back();
+        const auto nsegments   = m_ffa_plan.get_nsegments().back();
         const SizeType nbins   = std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>
                                      ? m_cfg.get_nbins_f()
                                      : m_cfg.get_nbins();
         ws.validate(m_batch_size, m_branch_max, m_max_sugg, ncoords_ffa,
-                    m_cfg.get_nparams(), nbins);
+                    m_cfg.get_nparams(), nbins, nsegments);
     }
 
     ~Impl()                      = default;

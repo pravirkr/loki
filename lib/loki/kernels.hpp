@@ -137,6 +137,29 @@ void shift_add_linear_complex_batch(const ComplexType* __restrict__ folds_tree,
                                     SizeType physical_start_idx,
                                     SizeType capacity) noexcept;
 
+void shift_add_ascend_linear_batch(const float* __restrict__ folds_ffa,
+                                   const SizeType* __restrict__ indices_segment,
+                                   const SizeType* __restrict__ indices_ffa,
+                                   const float* __restrict__ phase_shift,
+                                   float* __restrict__ folds_tree,
+                                   float* __restrict__ temp_buffer,
+                                   SizeType nbins,
+                                   SizeType n_coords_init,
+                                   SizeType n_leaves,
+                                   SizeType n_segments) noexcept;
+
+void shift_add_ascend_linear_complex_batch(
+    const ComplexType* __restrict__ folds_ffa,
+    const SizeType* __restrict__ indices_segment,
+    const SizeType* __restrict__ indices_ffa,
+    const float* __restrict__ phase_shift,
+    ComplexType* __restrict__ folds_tree,
+    SizeType nbins_f,
+    SizeType nbins,
+    SizeType n_coords_init,
+    SizeType n_leaves,
+    SizeType n_segments) noexcept;
+
 #ifdef LOKI_ENABLE_CUDA
 
 void brute_fold_ts_cuda(const float* __restrict__ ts_e,
@@ -225,6 +248,31 @@ void shift_add_linear_complex_batch_cuda(
     SizeType n_leaves,
     SizeType physical_start_idx,
     SizeType capacity,
+    cudaStream_t stream);
+
+void shift_add_ascend_linear_batch_cuda(
+    const float* __restrict__ folds_ffa,
+    const uint32_t* __restrict__ indices_segment,
+    const uint32_t* __restrict__ indices_ffa,
+    const float* __restrict__ phase_shift,
+    float* __restrict__ folds_tree,
+    SizeType nbins,
+    SizeType n_coords_init,
+    SizeType n_leaves,
+    SizeType n_segments,
+    cudaStream_t stream);
+
+void shift_add_ascend_linear_complex_batch_cuda(
+    const ComplexTypeCUDA* __restrict__ folds_ffa,
+    const uint32_t* __restrict__ indices_segment,
+    const uint32_t* __restrict__ indices_ffa,
+    const float* __restrict__ phase_shift,
+    ComplexTypeCUDA* __restrict__ folds_tree,
+    SizeType nbins_f,
+    SizeType nbins,
+    SizeType n_coords_init,
+    SizeType n_leaves,
+    SizeType n_segments,
     cudaStream_t stream);
 
 #endif // LOKI_ENABLE_CUDA

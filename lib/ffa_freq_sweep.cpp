@@ -162,16 +162,16 @@ private:
                                  "FFAFreqSweep::execute_ffa_region: nsegments "
                                  "must be 1 to call scoring function");
         // Calculate available space in buffers
-        const SizeType available_space =
-            m_scores.size() - m_total_passing_scores;
-        error_check::check_greater_equal(
-            available_space, n_scores,
-            std::format(
-                "Buffer overflow: {} candidates already accumulated, "
-                "up to {} more could pass in this region, but only {} space "
-                "available. Options: (1) Increase snr_min threshold (current: "
-                "{:.2f}), (2) Increase max_passing_candidates config.",
-                m_total_passing_scores, n_scores, available_space, snr_min));
+        //const SizeType available_space =
+        //    m_scores.size() - m_total_passing_scores;
+        //error_check::check_greater_equal(
+        //    available_space, n_scores,
+        //    std::format(
+        //        "Buffer overflow: {} candidates already accumulated, "
+        //        "up to {} more could pass in this region, but only {} space "
+        //        "available. Options: (1) Increase snr_min threshold (current: "
+        //        "{:.2f}), (2) Increase max_passing_candidates config.",
+        //        m_total_passing_scores, n_scores, available_space, snr_min));
         // Pass incremental spans with offset
         auto scores_span =
             std::span(m_scores).subspan(m_total_passing_scores, n_scores);

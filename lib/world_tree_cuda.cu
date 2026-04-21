@@ -339,6 +339,7 @@ WorldTreeCUDA<FoldTypeCUDA>::WorldTreeCUDA(SizeType capacity,
       m_leaves(m_capacity * m_leaves_stride, 0.0),
       m_folds(m_capacity * m_folds_stride, FoldTypeCUDA{}),
       m_scores(m_capacity, 0.0F),
+      m_scores_ep(m_capacity, 0.0F),
       m_scratch_scores((m_capacity + max_batch_size), 0.0F),
       m_scratch_indices_1(m_capacity, 0),
       m_scratch_indices_2(m_capacity, 0),
@@ -487,6 +488,16 @@ WorldTreeCUDA<FoldTypeCUDA>::get_leaves_circular_view() const noexcept {
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
+CircularViewCUDA<FoldTypeCUDA>
+WorldTreeCUDA<FoldTypeCUDA>::get_folds_circular_view() noexcept {
+    return get_active_regions(cuda_utils::as_span(m_folds), m_folds_stride);
+}
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+CircularViewCUDA<const FoldTypeCUDA>
+WorldTreeCUDA<FoldTypeCUDA>::get_folds_circular_view() const noexcept {
+    return get_active_regions(cuda_utils::as_span(m_folds), m_folds_stride);
+}
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
 CircularViewCUDA<float>
 WorldTreeCUDA<FoldTypeCUDA>::get_scores_circular_view() noexcept {
     return get_active_regions(cuda_utils::as_span(m_scores), SizeType{1});
@@ -495,6 +506,17 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA>
 CircularViewCUDA<const float>
 WorldTreeCUDA<FoldTypeCUDA>::get_scores_circular_view() const noexcept {
     return get_active_regions(cuda_utils::as_span(m_scores), SizeType{1});
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+CircularViewCUDA<float>
+WorldTreeCUDA<FoldTypeCUDA>::get_scores_ep_circular_view() noexcept {
+    return get_active_regions(cuda_utils::as_span(m_scores_ep), SizeType{1});
+}
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+CircularViewCUDA<const float>
+WorldTreeCUDA<FoldTypeCUDA>::get_scores_ep_circular_view() const noexcept {
+    return get_active_regions(cuda_utils::as_span(m_scores_ep), SizeType{1});
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>

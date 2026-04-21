@@ -141,11 +141,23 @@ public:
     [[nodiscard]] CircularView<const double>
     get_leaves_circular_view() const noexcept;
 
+    /// @brief Returns a zero-copy two-part view of the leaves circular buffer
+    /// (for in-place reporting). Both spans point directly into m_leaves.
+    [[nodiscard]] CircularView<FoldType> get_folds_circular_view() noexcept;
+    [[nodiscard]] CircularView<const FoldType>
+    get_folds_circular_view() const noexcept;
+
     /// @brief Returns a zero-copy two-part view of the scores circular buffer
     /// (for saving to file). Both spans point directly into m_scores.
     [[nodiscard]] CircularView<float> get_scores_circular_view() noexcept;
     [[nodiscard]] CircularView<const float>
     get_scores_circular_view() const noexcept;
+
+    /// @brief Returns a zero-copy two-part view of the scores circular buffer
+    /// (for saving to file). Both spans point directly into m_scores.
+    [[nodiscard]] CircularView<float> get_scores_ep_circular_view() noexcept;
+    [[nodiscard]] CircularView<const float>
+    get_scores_ep_circular_view() const noexcept;
 
     /// @brief Get physical start index
     [[nodiscard]] SizeType get_physical_start_idx() const;
@@ -230,6 +242,7 @@ private:
     std::vector<double> m_leaves;  // Shape: (capacity, nparams + 2, 2)
     std::vector<FoldType> m_folds; // Shape: (capacity, 2, nbins)
     std::vector<float> m_scores;   // Shape: (capacity)
+    std::vector<float> m_scores_ep; // Shape: (capacity)
 
     // Circular buffer state
     bool m_is_updating{false};
@@ -448,11 +461,19 @@ public:
     [[nodiscard]] CircularViewCUDA<const double>
     get_leaves_circular_view() const noexcept;
 
+    [[nodiscard]] CircularViewCUDA<FoldTypeCUDA> get_folds_circular_view() noexcept;
+    [[nodiscard]] CircularViewCUDA<const FoldTypeCUDA>
+    get_folds_circular_view() const noexcept;
+
     /// @brief Returns a zero-copy two-part view of the scores circular buffer
     /// (for saving to file). Both spans point directly into m_scores.
     [[nodiscard]] CircularViewCUDA<float> get_scores_circular_view() noexcept;
     [[nodiscard]] CircularViewCUDA<const float>
     get_scores_circular_view() const noexcept;
+
+    [[nodiscard]] CircularViewCUDA<float> get_scores_ep_circular_view() noexcept;
+    [[nodiscard]] CircularViewCUDA<const float>
+    get_scores_ep_circular_view() const noexcept;
 
     /// @brief Get physical start index
     [[nodiscard]] SizeType get_physical_start_idx() const;
@@ -517,6 +538,7 @@ private:
     thrust::device_vector<double> m_leaves;
     thrust::device_vector<FoldTypeCUDA> m_folds;
     thrust::device_vector<float> m_scores;
+    thrust::device_vector<float> m_scores_ep;
 
     // Circular buffer state (host-side tracking)
     bool m_is_updating{false};

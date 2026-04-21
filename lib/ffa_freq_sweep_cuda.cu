@@ -248,13 +248,13 @@ private:
         // Calculate available space in buffers
         const SizeType available_space =
             m_scores_d.size() - m_total_passing_scores;
-        error_check::check_greater_equal(
-            available_space, n_scores,
-            std::format("Buffer overflow: {} candidates already accumulated, "
-                        "{} more needed, but only {} space available. "
-                        "Options: (1) Increase snr_min threshold, "
-                        "(2) Add max_passing_candidates config parameter.",
-                        m_total_passing_scores, n_scores, available_space));
+        //error_check::check_greater_equal(
+        //    available_space, n_scores,
+        //    std::format("Buffer overflow: {} candidates already accumulated, "
+        //                "{} more needed, but only {} space available. "
+        //                "Options: (1) Increase snr_min threshold, "
+        //                "(2) Add max_passing_candidates config parameter.",
+        //                m_total_passing_scores, n_scores, available_space));
         // Pass incremental spans with offset
         const SizeType n_passing = detection::score_and_filter_cuda_d(
             cuda_utils::as_span(m_fold_time_d, fold_size_time),

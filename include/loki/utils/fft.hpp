@@ -26,6 +26,10 @@ struct PlanKey {
     bool operator==(const PlanKey& other) const {
         return n_real == other.n_real && batch_size == other.batch_size;
     }
+    bool operator<(const PlanKey& other) const {
+        return n_real < other.n_real ||
+               (n_real == other.n_real && batch_size < other.batch_size);
+    }
 };
 
 struct PlanKeyHash {
@@ -173,30 +177,29 @@ private:
     fftwf_plan m_plan_inverse;
 };
 
-// Convenience functions (thin wrappers around executors)
-/**
- * @brief Convenience function for one-off forward FFT batches
- *
- * Creates temporary RfftExecutor. For repeated calls with same n_real,
- * prefer creating RfftExecutor once and reusing it.
- */
-void rfft_batch(std::span<const float> real_input,
+void rfft_batch(std::span<float> real_input,
                 std::span<ComplexType> complex_output,
                 int batch_size,
                 int n_real,
                 int nthreads = 1);
 
-/**
- * @brief Convenience function for one-off inverse FFT batches
- *
- * Creates temporary IrfftExecutor. For repeated calls with same n_real,
- * prefer creating IrfftExecutor once and reusing it.
- */
-void irfft_batch(std::span<const ComplexType> complex_input,
+void rfft_batch_chunked(std::span<float> real_input,
+                        std::span<ComplexType> complex_output,
+                        int batch_size,
+                        int n_real,
+                        int nthreads = 1);
+
+void irfft_batch(std::span<ComplexType> complex_input,
                  std::span<float> real_output,
                  int batch_size,
                  int n_real,
                  int nthreads = 1);
+
+void irfft_batch_chunked(std::span<ComplexType> complex_input,
+                         std::span<float> real_output,
+                         int batch_size,
+                         int n_real,
+                         int nthreads = 1);
 
 #ifdef LOKI_ENABLE_CUDA
 
@@ -248,14 +251,14 @@ private:
 
 void rfft_batch_cuda(cuda::std::span<float> real_input,
                      cuda::std::span<ComplexTypeCUDA> complex_output,
-                     int batch_size,
-                     int n_real,
+                     SizeType batch_size,
+                     SizeType n_real,
                      cudaStream_t stream = nullptr);
 
 void irfft_batch_cuda(cuda::std::span<ComplexTypeCUDA> complex_input,
                       cuda::std::span<float> real_output,
-                      int batch_size,
-                      int n_real,
+                      SizeType batch_size,
+                      SizeType n_real,
                       cudaStream_t stream = nullptr);
 
 #endif // LOKI_ENABLE_CUDA

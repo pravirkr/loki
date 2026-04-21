@@ -78,6 +78,20 @@ void circ_taylor_resolve_batch(std::span<const double> leaves_tree,
                                SizeType n_leaves,
                                double minimum_snap_cells);
 
+void circ_taylor_ascend_resolve_batch(
+    std::span<const double> leaves_tree,
+    std::span<SizeType> param_indices,
+    std::span<float> phase_shift,
+    std::span<const ParamLimit> param_limits,
+    std::span<const std::pair<double, double>> coord_segments,
+    std::pair<double, double> coord_cur,
+    SizeType n_accel_init,
+    SizeType n_freq_init,
+    SizeType nbins,
+    SizeType n_leaves,
+    SizeType n_segments,
+    double minimum_snap_cells);
+
 void circ_taylor_transform_batch(std::span<double> leaves_tree,
                                  std::span<SizeType> indices_tree,
                                  std::pair<double, double> coord_next,
@@ -139,6 +153,21 @@ void circ_taylor_resolve_batch_cuda(
     SizeType n_freq_init,
     SizeType nbins,
     SizeType n_leaves,
+    double minimum_snap_cells,
+    cudaStream_t stream);
+
+void circ_taylor_ascend_resolve_batch_cuda(
+    cuda::std::span<const double> leaves_tree,
+    cuda::std::span<uint32_t> param_indices,
+    cuda::std::span<float> phase_shift,
+    cuda::std::span<const ParamLimit> param_limits,
+    cuda::std::span<const cuda::std::pair<double, double>> coord_segments,
+    std::pair<double, double> coord_cur,
+    SizeType n_accel_init,
+    SizeType n_freq_init,
+    SizeType nbins,
+    SizeType n_leaves,
+    SizeType n_segments,
     double minimum_snap_cells,
     cudaStream_t stream);
 

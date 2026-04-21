@@ -93,6 +93,19 @@ public:
     virtual void pack(std::span<const FoldType> data,
                       std::span<FoldType> out) const noexcept = 0;
 
+    virtual void
+    ascend(std::span<const FoldType> folds_ffa,
+           std::span<const double> leaves_tree,
+           std::span<FoldType> folds_tree,
+           std::span<float> scores_tree,
+           std::span<float> scores_ep_tree,
+           std::span<const SizeType> idx_segments,
+           std::span<const std::pair<double, double>> coord_segments,
+           std::pair<double, double> coord_cur,
+           std::span<SizeType> scratch_param_indices,
+           std::span<float> scratch_phase_shift,
+           SizeType n_leaves) = 0;
+
     virtual void report(std::span<double> leaves_tree,
                         std::pair<double, double> coord_report,
                         SizeType n_leaves) const = 0;
@@ -239,6 +252,18 @@ public:
                    std::pair<double, double> coord_cur,
                    SizeType n_leaves) const override;
 
+    void ascend(std::span<const FoldType> folds_ffa,
+                std::span<const double> leaves_tree,
+                std::span<FoldType> folds_tree,
+                std::span<float> scores_tree,
+                std::span<float> scores_ep_tree,
+                std::span<const SizeType> idx_segments,
+                std::span<const std::pair<double, double>> coord_segments,
+                std::pair<double, double> coord_cur,
+                std::span<SizeType> scratch_param_indices,
+                std::span<float> scratch_phase_shift,
+                SizeType n_leaves) override;
+
     void report(std::span<double> leaves_tree,
                 std::pair<double, double> coord_report,
                 SizeType n_leaves) const override;
@@ -284,6 +309,18 @@ public:
                    std::pair<double, double> coord_next,
                    std::pair<double, double> coord_cur,
                    SizeType n_leaves) const override;
+
+    void ascend(std::span<const FoldType> folds_ffa,
+                std::span<const double> leaves_tree,
+                std::span<FoldType> folds_tree,
+                std::span<float> scores_tree,
+                std::span<float> scores_ep_tree,
+                std::span<const SizeType> idx_segments,
+                std::span<const std::pair<double, double>> coord_segments,
+                std::pair<double, double> coord_cur,
+                std::span<SizeType> scratch_param_indices,
+                std::span<float> scratch_phase_shift,
+                SizeType n_leaves) override;
 
     void report(std::span<double> leaves_tree,
                 std::pair<double, double> coord_report,
@@ -335,6 +372,18 @@ public:
                    std::pair<double, double> coord_next,
                    std::pair<double, double> coord_cur,
                    SizeType n_leaves) const override;
+
+    void ascend(std::span<const FoldType> folds_ffa,
+                std::span<const double> leaves_tree,
+                std::span<FoldType> folds_tree,
+                std::span<float> scores_tree,
+                std::span<float> scores_ep_tree,
+                std::span<const SizeType> idx_segments,
+                std::span<const std::pair<double, double>> coord_segments,
+                std::pair<double, double> coord_cur,
+                std::span<SizeType> scratch_param_indices,
+                std::span<float> scratch_phase_shift,
+                SizeType n_leaves) override;
 
     void report(std::span<double> leaves_tree,
                 std::pair<double, double> coord_report,
@@ -441,6 +490,20 @@ public:
                            std::pair<double, double> coord_cur,
                            SizeType n_leaves,
                            cudaStream_t stream) const = 0;
+
+    virtual void ascend(
+        cuda::std::span<const FoldTypeCUDA> folds_ffa,
+        cuda::std::span<const double> leaves_tree,
+        cuda::std::span<FoldTypeCUDA> folds_tree,
+        cuda::std::span<float> scores_tree,
+        cuda::std::span<float> scores_ep_tree,
+        cuda::std::span<const uint32_t> idx_segments,
+        cuda::std::span<const cuda::std::pair<double, double>> coord_segments,
+        std::pair<double, double> coord_cur,
+        cuda::std::span<uint32_t> scratch_param_indices,
+        cuda::std::span<float> scratch_phase_shift,
+        SizeType n_leaves,
+        cudaStream_t stream) = 0;
 
     virtual void report(cuda::std::span<double> leaves_tree,
                         std::pair<double, double> coord_report,
@@ -599,6 +662,20 @@ public:
                    SizeType n_leaves,
                    cudaStream_t stream) const override;
 
+    void ascend(
+        cuda::std::span<const FoldTypeCUDA> folds_ffa,
+        cuda::std::span<const double> leaves_tree,
+        cuda::std::span<FoldTypeCUDA> folds_tree,
+        cuda::std::span<float> scores_tree,
+        cuda::std::span<float> scores_ep_tree,
+        cuda::std::span<const uint32_t> idx_segments,
+        cuda::std::span<const cuda::std::pair<double, double>> coord_segments,
+        std::pair<double, double> coord_cur,
+        cuda::std::span<uint32_t> scratch_param_indices,
+        cuda::std::span<float> scratch_phase_shift,
+        SizeType n_leaves,
+        cudaStream_t stream) override;
+
     void report(cuda::std::span<double> leaves_tree,
                 std::pair<double, double> coord_report,
                 SizeType n_leaves,
@@ -653,6 +730,20 @@ public:
                    std::pair<double, double> coord_cur,
                    SizeType n_leaves,
                    cudaStream_t stream) const override;
+
+    void ascend(
+        cuda::std::span<const FoldTypeCUDA> folds_ffa,
+        cuda::std::span<const double> leaves_tree,
+        cuda::std::span<FoldTypeCUDA> folds_tree,
+        cuda::std::span<float> scores_tree,
+        cuda::std::span<float> scores_ep_tree,
+        cuda::std::span<const uint32_t> idx_segments,
+        cuda::std::span<const cuda::std::pair<double, double>> coord_segments,
+        std::pair<double, double> coord_cur,
+        cuda::std::span<uint32_t> scratch_param_indices,
+        cuda::std::span<float> scratch_phase_shift,
+        SizeType n_leaves,
+        cudaStream_t stream) override;
 
     void report(cuda::std::span<double> leaves_tree,
                 std::pair<double, double> coord_report,
@@ -716,6 +807,20 @@ public:
                    std::pair<double, double> coord_cur,
                    SizeType n_leaves,
                    cudaStream_t stream) const override;
+
+    void ascend(
+        cuda::std::span<const FoldTypeCUDA> folds_ffa,
+        cuda::std::span<const double> leaves_tree,
+        cuda::std::span<FoldTypeCUDA> folds_tree,
+        cuda::std::span<float> scores_tree,
+        cuda::std::span<float> scores_ep_tree,
+        cuda::std::span<const uint32_t> idx_segments,
+        cuda::std::span<const cuda::std::pair<double, double>> coord_segments,
+        std::pair<double, double> coord_cur,
+        cuda::std::span<uint32_t> scratch_param_indices,
+        cuda::std::span<float> scratch_phase_shift,
+        SizeType n_leaves,
+        cudaStream_t stream) override;
 
     void report(cuda::std::span<double> leaves_tree,
                 std::pair<double, double> coord_report,

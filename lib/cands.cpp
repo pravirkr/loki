@@ -513,6 +513,7 @@ void PruneResultWriter::write_run_results(
     std::span<const SizeType> snail_scheme,
     memory::CircularView<double> leaves_view,
     memory::CircularView<float> scores_view,
+    memory::CircularView<float> scores_ep_view,
     SizeType n_leaves,
     SizeType n_params,
     const PruneStatsCollection& pstats) {
@@ -573,10 +574,26 @@ void PruneResultWriter::write_run_results(
         }
     };
 
+    auto scores_ep_ds =
+        run_group.createDataSet("scores_ep", HighFive::DataSpace({n_leaves}),
+                                HighFive::create_datatype<float>());
+
+    auto write_chunk_scores_ep = [&](std::span<const float> chunk,
+                                     size_t offset) {
+        if (!chunk.empty()) {
+            scores_ep_ds.select({offset}, {chunk.size()})
+                .write_raw(chunk.data(), HighFive::create_datatype<float>());
+        }
+    };
+
     SizeType offset_s = 0;
     write_chunk_score(scores_view.first, offset_s);
     offset_s += scores_view.first.size();
     write_chunk_score(scores_view.second, offset_s);
+    offset_s = 0;
+    write_chunk_scores_ep(scores_ep_view.first, offset_s);
+    offset_s += scores_ep_view.first.size();
+    write_chunk_scores_ep(scores_ep_view.second, offset_s);
 
     run_group.createDataSet("snail_scheme", snail_scheme);
     if (!level_stats.empty()) {

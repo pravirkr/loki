@@ -640,6 +640,178 @@ void circ_taylor_resolve_batch(std::span<const double> leaves_tree,
     }
 }
 
+void circ_taylor_ascend_resolve_batch(
+    std::span<const double> leaves_tree,
+    std::span<SizeType> param_indices,
+    std::span<float> phase_shift,
+    std::span<const ParamLimit> param_limits,
+    std::span<const std::pair<double, double>> coord_segments,
+    std::pair<double, double> coord_cur,
+    SizeType n_accel_init,
+    SizeType n_freq_init,
+    SizeType nbins,
+    SizeType n_leaves,
+    SizeType n_segments,
+    double minimum_snap_cells) {
+    constexpr SizeType kParams       = 5;
+    constexpr SizeType kParamStride  = 2;
+    constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
+
+    error_check::check_greater_equal(param_indices.size(),
+                                     n_leaves * n_segments,
+                                     "param_indices size mismatch");
+    error_check::check_greater_equal(phase_shift.size(), n_leaves * n_segments,
+                                     "phase_shift size mismatch");
+    error_check::check_equal(coord_segments.size(), n_segments,
+                             "coord_segments size mismatch");
+    error_check::check_greater_equal(leaves_tree.size(),
+                                     n_leaves * kLeavesStride,
+                                     "leaves_tree size mismatch");
+    error_check::check_equal(param_limits.size(), kParams,
+                             "param_limits size should be 5");
+
+    const auto& lim_accel = param_limits[3];
+    const auto& lim_freq  = param_limits[4];
+    const auto [idx_circular_snap, idx_circular_crackle, idx_taylor] =
+        get_circ_taylor_mask(leaves_tree, n_leaves, kParams,
+                             minimum_snap_cells);
+
+    for (SizeType i = 0; i < n_segments; ++i) {
+        auto param_indices_seg = param_indices.subspan(i * n_leaves, n_leaves);
+        auto phase_shift_seg   = phase_shift.subspan(i * n_leaves, n_leaves);
+
+        const auto [t0_cur, scale_cur] = coord_cur;
+        const auto [t0_seg, scale_seg] = coord_segments[i];
+
+        // Pre-compute constants to avoid repeated calculations
+        const double dt                    = t0_seg - t0_cur;
+        const double dt2                   = dt * dt;
+        const double half_dt2              = 0.5 * dt2;
+        const double sixth_dt3             = dt2 * dt / 6.0;
+        const double twenty_fourth_dt4     = dt2 * dt2 / 24.0;
+        const double onehundred_twenty_dt5 = (dt2 * dt2 * dt) / 120.0;
+
+        // Process circular indices
+        for (SizeType i : idx_circular_snap) {
+            const SizeType lo  = i * kLeavesStride;
+            const double s_cur = leaves_tree[lo + 2];
+            const double j_cur = leaves_tree[lo + 4];
+            const double a_cur = leaves_tree[lo + 6];
+            const double v_cur = leaves_tree[lo + 8];
+            const double d_cur = leaves_tree[lo + 10];
+            const double f0    = leaves_tree[lo + 12];
+
+            // Circular orbit mask condition
+            const double omega_orb_sq = -s_cur / a_cur;
+            const double omega_orb    = std::sqrt(omega_orb_sq);
+            // Evolve the phase to the new time t_j = t_i + delta_t
+            const double omega_dt = omega_orb * dt;
+            const double cos_odt  = std::cos(omega_dt);
+            const double sin_odt  = std::sin(omega_dt);
+            const double a_new =
+                (a_cur * cos_odt) + (j_cur * sin_odt / omega_orb);
+            const double j_new =
+                (j_cur * cos_odt) - (a_cur * sin_odt * omega_orb);
+            const double v_circ_cur = -j_cur / omega_orb_sq;
+            const double v_circ_new = -j_new / omega_orb_sq;
+            const double d_circ_new = -a_new / omega_orb_sq;
+            const double d_circ_cur = -a_cur / omega_orb_sq;
+            const double v_new      = v_circ_new + (v_cur - v_circ_cur);
+            const double d_new =
+                d_circ_new + (d_cur - d_circ_cur) + ((v_cur - v_circ_cur) * dt);
+            const double f_new     = f0 * (1.0 - (v_new * utils::kInvCval));
+            const double delay_rel = d_new * utils::kInvCval;
+
+            // Calculate relative phase
+            phase_shift_seg[i] =
+                psr_utils::get_phase_idx(dt, f0, nbins, delay_rel);
+            // Find nearest grid indices
+            const auto idx_a = psr_utils::get_nearest_idx_analytical(
+                a_new, lim_accel, n_accel_init);
+            const auto idx_f = psr_utils::get_nearest_idx_analytical(
+                f_new, lim_freq, n_freq_init);
+            param_indices_seg[i] = (idx_a * n_freq_init) + idx_f;
+        }
+
+        // Process circular crackle indices
+        for (SizeType i : idx_circular_crackle) {
+            const SizeType lo  = i * kLeavesStride;
+            const double c_cur = leaves_tree[lo + 0];
+            const double j_cur = leaves_tree[lo + 4];
+            const double a_cur = leaves_tree[lo + 6];
+            const double v_cur = leaves_tree[lo + 8];
+            const double d_cur = leaves_tree[lo + 10];
+            const double f0    = leaves_tree[lo + 12];
+
+            // Circular orbit mask condition
+            const double omega_orb_sq = -c_cur / j_cur;
+            const double omega_orb    = std::sqrt(omega_orb_sq);
+            // Evolve the phase to the new time t_j = t_i + delta_t
+            const double omega_dt = omega_orb * dt;
+            const double cos_odt  = std::cos(omega_dt);
+            const double sin_odt  = std::sin(omega_dt);
+            const double a_new =
+                (a_cur * cos_odt) + (j_cur * sin_odt / omega_orb);
+            const double j_new =
+                (j_cur * cos_odt) - (a_cur * sin_odt * omega_orb);
+            const double v_circ_cur = -j_cur / omega_orb_sq;
+            const double v_circ_new = -j_new / omega_orb_sq;
+            const double d_circ_new = -a_new / omega_orb_sq;
+            const double d_circ_cur = -a_cur / omega_orb_sq;
+            const double v_new      = v_circ_new + (v_cur - v_circ_cur);
+            const double d_new =
+                d_circ_new + (d_cur - d_circ_cur) + ((v_cur - v_circ_cur) * dt);
+            const double f_new     = f0 * (1.0 - (v_new * utils::kInvCval));
+            const double delay_rel = d_new * utils::kInvCval;
+
+            // Calculate relative phase
+            phase_shift_seg[i] =
+                psr_utils::get_phase_idx(dt, f0, nbins, delay_rel);
+            // Find nearest grid indices
+            const auto idx_a = psr_utils::get_nearest_idx_analytical(
+                a_new, lim_accel, n_accel_init);
+            const auto idx_f = psr_utils::get_nearest_idx_analytical(
+                f_new, lim_freq, n_freq_init);
+            param_indices_seg[i] = (idx_a * n_freq_init) + idx_f;
+        }
+
+        // Process taylor indices
+        for (SizeType i : idx_taylor) {
+            const SizeType lo  = i * kLeavesStride;
+            const double c_cur = leaves_tree[lo + 0];
+            const double s_cur = leaves_tree[lo + 2];
+            const double j_cur = leaves_tree[lo + 4];
+            const double a_cur = leaves_tree[lo + 6];
+            const double v_cur = leaves_tree[lo + 8];
+            const double d_cur = leaves_tree[lo + 10];
+            const double f0    = leaves_tree[lo + 12];
+            const double a_new =
+                a_cur + (j_cur * dt) + (s_cur * half_dt2) + (c_cur * sixth_dt3);
+            const double v_new = v_cur + (a_cur * dt) + (j_cur * half_dt2) +
+                                 (s_cur * sixth_dt3) +
+                                 (c_cur * twenty_fourth_dt4);
+            const double d_new = d_cur + (v_cur * dt) + (a_cur * half_dt2) +
+                                 (j_cur * sixth_dt3) +
+                                 (s_cur * twenty_fourth_dt4) +
+                                 (c_cur * onehundred_twenty_dt5);
+            // Calculates new frequency based on the first-order Doppler
+            // approximation:
+            const double f_new     = f0 * (1.0 - (v_new * utils::kInvCval));
+            const double delay_rel = d_new * utils::kInvCval;
+
+            // Calculate relative phase
+            phase_shift_seg[i] =
+                psr_utils::get_phase_idx(dt, f0, nbins, delay_rel);
+            // Find nearest grid indices
+            const auto idx_a = psr_utils::get_nearest_idx_analytical(
+                a_new, lim_accel, n_accel_init);
+            const auto idx_f = psr_utils::get_nearest_idx_analytical(
+                f_new, lim_freq, n_freq_init);
+            param_indices_seg[i] = (idx_a * n_freq_init) + idx_f;
+        }
+    }
+}
+
 void circ_taylor_transform_batch(std::span<double> leaves_tree,
                                  std::span<SizeType> indices_tree,
                                  std::pair<double, double> coord_next,

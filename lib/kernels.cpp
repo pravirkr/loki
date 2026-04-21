@@ -145,6 +145,36 @@ void shift_add_linear_with_buffer(const float* __restrict__ data_tail,
     }
 }
 
+
+void shift_add_linear_with_buffer_inplace(const float* __restrict__ data_head,
+                                          float phase_shift,
+                                          float* __restrict__ out,
+                                          float* __restrict__ temp_buffer,
+                                          SizeType nbins) noexcept {
+    auto shift = static_cast<SizeType>(phase_shift + 0.5F);
+    if (shift == nbins) {
+        shift = 0;
+    }
+    const SizeType total_size = 2 * nbins;
+    // Optimized circular shift: rotate data_head into temp buffer
+    // Right shift by 'shift' positions
+    const auto shift_size = nbins - shift;
+
+    // Copy last shift_size elements to beginning
+    std::memcpy(temp_buffer + shift, data_head, sizeof(float) * shift_size);
+    // Copy first shift elements to end
+    std::memcpy(temp_buffer, data_head + shift_size, sizeof(float) * shift);
+    std::memcpy(temp_buffer + nbins + shift, data_head + nbins,
+                sizeof(float) * shift_size);
+    std::memcpy(temp_buffer + nbins, data_head + nbins + shift_size,
+                sizeof(float) * shift);
+
+    // Perform the final addition in a single loop
+    for (SizeType j = 0; j < total_size; ++j) {
+        out[j] += temp_buffer[j];
+    }
+}
+
 /**
  * @brief Shift two complex arrays and add them together.
  *
@@ -417,6 +447,89 @@ void shift_add_complex_recurrence_linear(
         for (; k < nbins_f; ++k) {
             out_e[k] = data_tail_e[k] + data_head_e[k] * current_phase;
             out_v[k] = data_tail_v[k] + data_head_v[k] * current_phase;
+            current_phase *= delta_phase;
+        }
+    }
+}
+
+void shift_add_complex_recurrence_linear_inplace(
+    const ComplexType* __restrict__ data_head,
+    float phase_shift,
+    ComplexType* __restrict__ out,
+    SizeType nbins_f,
+    SizeType nbins) noexcept {
+    // On the fly phase computation is faster than precomputed phase steps on
+    // Intel CPUs.
+    using BatchType                  = xsimd::batch<ComplexType>;
+    static constexpr auto kBatchSize = BatchType::size;
+
+    const ComplexType* __restrict__ data_head_e = data_head;
+    const ComplexType* __restrict__ data_head_v = data_head + nbins_f;
+    ComplexType* __restrict__ out_e             = out;
+    ComplexType* __restrict__ out_v             = out + nbins_f;
+
+    // Calculate the constant phase step per iteration
+    const auto phase_step_angle =
+        -2.0 * std::numbers::pi * phase_shift / static_cast<float>(nbins);
+
+    // This is the complex number we will multiply by in each iteration
+    const ComplexType delta_phase = {
+        static_cast<float>(std::cos(phase_step_angle)),
+        static_cast<float>(std::sin(phase_step_angle))};
+
+    // Phase steps within a SIMD block: [d^0, d^1, d^2, d^3]
+    std::array<ComplexType, kBatchSize> delta_vec_std;
+    delta_vec_std[0] = {1.0F, 0.0F};
+    for (size_t i = 1; i < kBatchSize; ++i) {
+        delta_vec_std[i] = delta_vec_std[i - 1] * delta_phase;
+    }
+
+    // Load the phase steps into SIMD registers
+    const auto delta_vec = xsimd::load_unaligned(delta_vec_std.data());
+
+    // Phase step between SIMD blocks: d^SIMD_WIDTH
+    const ComplexType delta_block = delta_vec_std.back() * delta_phase;
+
+    // Initial phase for k=0 is exp(i*0) = 1 + 0i
+    ComplexType current_block_start_phase = {1.0F, 0.0F};
+
+    auto accumulate_inplace = [&](SizeType k, const BatchType& phase) {
+        const auto out_e_data  = xsimd::load_unaligned(&out_e[k]);
+        const auto head_e_data = xsimd::load_unaligned(&data_head_e[k]);
+        (out_e_data + head_e_data * phase).store_unaligned(&out_e[k]);
+        const auto out_v_data  = xsimd::load_unaligned(&out_v[k]);
+        const auto head_v_data = xsimd::load_unaligned(&data_head_v[k]);
+        (out_v_data + head_v_data * phase).store_unaligned(&out_v[k]);
+    };
+
+    // First process two batches at a time to maximize throughput
+    SizeType k = 0;
+    for (; k + (2 * kBatchSize) <= nbins_f; k += 2 * kBatchSize) {
+        const BatchType phase0 =
+            xsimd::broadcast(current_block_start_phase) * delta_vec;
+        accumulate_inplace(k, phase0);
+        current_block_start_phase *= delta_block;
+        const BatchType phase1 =
+            xsimd::broadcast(current_block_start_phase) * delta_vec;
+        accumulate_inplace(k + kBatchSize, phase1);
+        current_block_start_phase *= delta_block;
+    }
+
+    // Process the remaining batches
+    if (k + kBatchSize <= nbins_f) {
+        const BatchType phase =
+            xsimd::broadcast(current_block_start_phase) * delta_vec;
+        accumulate_inplace(k, phase);
+        k += kBatchSize;
+        current_block_start_phase *= delta_block;
+    }
+
+    // Scalar remainder part
+    if (k < nbins_f) {
+        ComplexType current_phase = current_block_start_phase;
+        for (; k < nbins_f; ++k) {
+            out_e[k] += data_head_e[k] * current_phase;
+            out_v[k] += data_head_v[k] * current_phase;
             current_phase *= delta_phase;
         }
     }
@@ -1267,6 +1380,67 @@ void shift_add_linear_complex_batch(const ComplexType* __restrict__ folds_tree,
         ComplexType* __restrict__ data_out = folds_out + (ileaf * total_size);
         shift_add_complex_recurrence_linear(
             data_tree, data_ffa, phase_shift[ileaf], data_out, nbins_f, nbins);
+    }
+}
+
+// Overwrite folds_tree
+// indices_ffa and phase_shift are stored with n_segments as first dimension
+// Second dimension is n_leaves, but batched, so call to this function
+// should be in the same loop as the one that computes the phase shifts
+void shift_add_ascend_linear_batch(const float* __restrict__ folds_ffa,
+                                   const SizeType* __restrict__ indices_segment,
+                                   const SizeType* __restrict__ indices_ffa,
+                                   const float* __restrict__ phase_shift,
+                                   float* __restrict__ folds_tree,
+                                   float* __restrict__ temp_buffer,
+                                   SizeType nbins,
+                                   SizeType n_coords_init,
+                                   SizeType n_leaves,
+                                   SizeType n_segments) noexcept {
+    const auto total_size = 2 * nbins;
+    for (SizeType ileaf = 0; ileaf < n_leaves; ++ileaf) {
+        float* __restrict__ data_tree = folds_tree + (ileaf * total_size);
+        // Fill it with zero to avoid accumulation of garbage values
+        std::fill(data_tree, data_tree + total_size, 0.0F);
+        for (SizeType iseg = 0; iseg < n_segments; ++iseg) {
+            const auto segment_idx     = indices_segment[iseg];
+            const auto phase_shift_seg = phase_shift[(iseg * n_leaves) + ileaf];
+            const auto ffa_idx_seg     = indices_ffa[(iseg * n_leaves) + ileaf];
+            const float* __restrict__ data_ffa =
+                folds_ffa + (segment_idx * n_coords_init * total_size) +
+                (ffa_idx_seg * total_size);
+            shift_add_linear_with_buffer_inplace(data_ffa, phase_shift_seg,
+                                                 data_tree, temp_buffer, nbins);
+        }
+    }
+}
+
+void shift_add_ascend_linear_complex_batch(
+    const ComplexType* __restrict__ folds_ffa,
+    const SizeType* __restrict__ indices_segment,
+    const SizeType* __restrict__ indices_ffa,
+    const float* __restrict__ phase_shift,
+    ComplexType* __restrict__ folds_tree,
+    SizeType nbins_f,
+    SizeType nbins,
+    SizeType n_coords_init,
+    SizeType n_leaves,
+    SizeType n_segments) noexcept {
+    const auto total_size = 2 * nbins_f;
+    for (SizeType ileaf = 0; ileaf < n_leaves; ++ileaf) {
+        ComplexType* __restrict__ data_tree = folds_tree + (ileaf * total_size);
+        // Fill it with zero to avoid accumulation of garbage values
+        std::fill(data_tree, data_tree + total_size, ComplexType{0.0F, 0.0F});
+        for (SizeType iseg = 0; iseg < n_segments; ++iseg) {
+            const auto segment_idx     = indices_segment[iseg];
+            const auto phase_shift_seg = phase_shift[(iseg * n_leaves) + ileaf];
+            const auto ffa_idx_seg     = indices_ffa[(iseg * n_leaves) + ileaf];
+            const ComplexType* __restrict__ data_ffa =
+                folds_ffa + (segment_idx * n_coords_init * total_size) +
+                (ffa_idx_seg * total_size);
+            shift_add_complex_recurrence_linear_inplace(
+                data_ffa, phase_shift_seg, data_tree, nbins_f, nbins);
+        }
     }
 }
 

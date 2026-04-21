@@ -309,6 +309,68 @@ void PrunePolyTaylorDPFuncts<FoldType>::transform(
 }
 
 template <SupportedFoldType FoldType>
+void PrunePolyTaylorDPFuncts<FoldType>::ascend(
+    std::span<const FoldType> folds_ffa,
+    std::span<const double> leaves_tree,
+    std::span<FoldType> folds_tree,
+    std::span<float> scores_tree,
+    std::span<float> scores_ep_tree,
+    std::span<const SizeType> idx_segments,
+    std::span<const std::pair<double, double>> coord_segments,
+    std::pair<double, double> coord_cur,
+    std::span<SizeType> scratch_param_indices,
+    std::span<float> scratch_phase_shift,
+    SizeType n_leaves) {
+    const auto n_params      = this->m_cfg.get_nparams();
+    const auto n_accel_init  = this->m_param_grid_count_init[n_params - 2];
+    const auto n_freq_init   = this->m_param_grid_count_init[n_params - 1];
+    const auto nbins         = this->m_cfg.get_nbins();
+    const auto nbins_f       = this->m_cfg.get_nbins_f();
+    const auto n_segments    = idx_segments.size();
+    const auto n_coords_init = this->m_n_coords_init;
+
+    poly_taylor_ascend_resolve_batch(
+        leaves_tree, scratch_param_indices, scratch_phase_shift,
+        this->m_cfg.get_param_limits(), coord_segments, coord_cur, n_accel_init,
+        n_freq_init, nbins, n_leaves, n_params, n_segments);
+
+    // Copy scores to scores_ep for future backup
+    for (SizeType ileaf = 0; ileaf < n_leaves; ++ileaf) {
+        scores_ep_tree[ileaf] = scores_tree[ileaf];
+    }
+
+    // Calculate scores
+    if constexpr (std::is_same_v<FoldType, ComplexType>) {
+        error_check::check_equal(folds_tree.size(), n_leaves * 2 * nbins_f,
+                                 "fold_segment size mismatch");
+        kernels::shift_add_ascend_linear_complex_batch(
+            folds_ffa.data(), idx_segments.data(), scratch_param_indices.data(),
+            scratch_phase_shift.data(), folds_tree.data(), nbins_f, nbins,
+            n_coords_init, n_leaves, n_segments);
+        const auto nfft = 2 * n_leaves;
+        auto fold_segment_t =
+            std::span<float>(this->m_scratch_folds).first(nfft * nbins);
+        this->m_irfft_executor->execute(folds_tree, fold_segment_t,
+                                        static_cast<int>(nfft));
+        detection::snr_boxcar_3d_max_with_cache(fold_segment_t, scores_tree,
+                                                n_leaves, nbins,
+                                                this->m_boxcar_widths_cache);
+
+    } else {
+        error_check::check_equal(folds_tree.size(), n_leaves * 2 * nbins,
+                                 "fold_segment size mismatch");
+        kernels::shift_add_ascend_linear_batch(
+            folds_ffa.data(), idx_segments.data(), scratch_param_indices.data(),
+            scratch_phase_shift.data(), folds_tree.data(),
+            this->m_scratch_shifts.data(), nbins, n_coords_init, n_leaves,
+            n_segments);
+        detection::snr_boxcar_3d_max_with_cache(folds_tree, scores_tree,
+                                                n_leaves, nbins,
+                                                this->m_boxcar_widths_cache);
+    }
+}
+
+template <SupportedFoldType FoldType>
 void PrunePolyTaylorDPFuncts<FoldType>::report(
     std::span<double> leaves_tree,
     std::pair<double, double> coord_report,
@@ -384,6 +446,66 @@ void PrunePolyChebyshevDPFuncts<FoldType>::transform(
     poly_chebyshev_transform_batch(leaves_tree, indices_tree, coord_next,
                                    coord_cur, n_leaves,
                                    this->m_cfg.get_nparams());
+}
+
+template <SupportedFoldType FoldType>
+void PrunePolyChebyshevDPFuncts<FoldType>::ascend(
+    std::span<const FoldType> folds_ffa,
+    std::span<const double> leaves_tree,
+    std::span<FoldType> folds_tree,
+    std::span<float> scores_tree,
+    std::span<float> scores_ep_tree,
+    std::span<const SizeType> idx_segments,
+    std::span<const std::pair<double, double>> coord_segments,
+    std::pair<double, double> coord_cur,
+    std::span<SizeType> scratch_param_indices,
+    std::span<float> scratch_phase_shift,
+    SizeType n_leaves) {
+    const auto n_params     = this->m_cfg.get_nparams();
+    const auto n_accel_init = this->m_param_grid_count_init[n_params - 2];
+    const auto n_freq_init  = this->m_param_grid_count_init[n_params - 1];
+    const auto nbins        = this->m_cfg.get_nbins();
+    const auto nbins_f      = this->m_cfg.get_nbins_f();
+    const auto n_segments   = idx_segments.size();
+
+    poly_chebyshev_ascend_resolve_batch(
+        leaves_tree, scratch_param_indices, scratch_phase_shift,
+        this->m_cfg.get_param_limits(), coord_segments, coord_cur, n_accel_init,
+        n_freq_init, this->m_cfg.get_nbins(), n_leaves,
+        this->m_cfg.get_nparams(), n_segments);
+
+    // Copy scores to scores_ep for future backup
+    std::ranges::copy(scores_tree, scores_ep_tree.begin());
+
+    // Calculate scores
+    if constexpr (std::is_same_v<FoldType, ComplexType>) {
+        error_check::check_equal(folds_tree.size(), n_leaves * 2 * nbins_f,
+                                 "fold_segment size mismatch");
+        kernels::shift_add_ascend_linear_complex_batch(
+            folds_ffa.data(), idx_segments.data(), scratch_param_indices.data(),
+            scratch_phase_shift.data(), folds_tree.data(), nbins_f, nbins,
+            this->m_n_coords_init, n_leaves, n_segments);
+        const auto nfft = 2 * n_leaves;
+        auto fold_segment_t =
+            std::span<float>(this->m_scratch_folds).first(nfft * nbins);
+        this->m_irfft_executor->execute(folds_tree, fold_segment_t,
+                                        static_cast<int>(nfft));
+        detection::snr_boxcar_3d_max_with_cache(fold_segment_t, scores_tree,
+                                                n_leaves, nbins,
+                                                this->m_boxcar_widths_cache);
+
+    } else {
+        error_check::check_equal(folds_tree.size(), n_leaves * 2 * nbins,
+                                 "fold_segment size mismatch");
+        kernels::shift_add_ascend_linear_batch(
+            folds_ffa.data(), idx_segments.data(), scratch_param_indices.data(),
+            scratch_phase_shift.data(), folds_tree.data(),
+            this->m_scratch_shifts.data(), nbins, this->m_n_coords_init,
+            n_leaves, n_segments);
+        detection::snr_boxcar_3d_max_with_cache(folds_tree, scores_tree,
+                                                n_leaves, nbins,
+                                                this->m_boxcar_widths_cache);
+    }
 }
 
 template <SupportedFoldType FoldType>
@@ -474,6 +596,66 @@ void PruneCircTaylorDPFuncts<FoldType>::transform(
                                 coord_cur, n_leaves,
                                 this->m_cfg.get_use_conservative_tile(),
                                 this->m_cfg.get_minimum_snap_cells());
+}
+
+template <SupportedFoldType FoldType>
+void PruneCircTaylorDPFuncts<FoldType>::ascend(
+    std::span<const FoldType> folds_ffa,
+    std::span<const double> leaves_tree,
+    std::span<FoldType> folds_tree,
+    std::span<float> scores_tree,
+    std::span<float> scores_ep_tree,
+    std::span<const SizeType> idx_segments,
+    std::span<const std::pair<double, double>> coord_segments,
+    std::pair<double, double> coord_cur,
+    std::span<SizeType> scratch_param_indices,
+    std::span<float> scratch_phase_shift,
+    SizeType n_leaves) {
+    const auto n_params     = this->m_cfg.get_nparams();
+    const auto n_accel_init = this->m_param_grid_count_init[n_params - 2];
+    const auto n_freq_init  = this->m_param_grid_count_init[n_params - 1];
+    const auto nbins        = this->m_cfg.get_nbins();
+    const auto nbins_f      = this->m_cfg.get_nbins_f();
+    const auto n_segments   = idx_segments.size();
+
+    circ_taylor_ascend_resolve_batch(
+        leaves_tree, scratch_param_indices, scratch_phase_shift,
+        this->m_cfg.get_param_limits(), coord_segments, coord_cur, n_accel_init,
+        n_freq_init, this->m_cfg.get_nbins(), n_leaves, n_segments,
+        this->m_cfg.get_minimum_snap_cells());
+
+    // Copy scores to scores_ep for future backup
+    std::ranges::copy(scores_tree, scores_ep_tree.begin());
+
+    // Calculate scores
+    if constexpr (std::is_same_v<FoldType, ComplexType>) {
+        error_check::check_equal(folds_tree.size(), n_leaves * 2 * nbins_f,
+                                 "fold_segment size mismatch");
+        kernels::shift_add_ascend_linear_complex_batch(
+            folds_ffa.data(), idx_segments.data(), scratch_param_indices.data(),
+            scratch_phase_shift.data(), folds_tree.data(), nbins_f, nbins,
+            this->m_n_coords_init, n_leaves, n_segments);
+        const auto nfft = 2 * n_leaves;
+        auto fold_segment_t =
+            std::span<float>(this->m_scratch_folds).first(nfft * nbins);
+        this->m_irfft_executor->execute(folds_tree, fold_segment_t,
+                                        static_cast<int>(nfft));
+        detection::snr_boxcar_3d_max_with_cache(fold_segment_t, scores_tree,
+                                                n_leaves, nbins,
+                                                this->m_boxcar_widths_cache);
+
+    } else {
+        error_check::check_equal(folds_tree.size(), n_leaves * 2 * nbins,
+                                 "fold_segment size mismatch");
+        kernels::shift_add_ascend_linear_batch(
+            folds_ffa.data(), idx_segments.data(), scratch_param_indices.data(),
+            scratch_phase_shift.data(), folds_tree.data(),
+            this->m_scratch_shifts.data(), nbins, this->m_n_coords_init,
+            n_leaves, n_segments);
+        detection::snr_boxcar_3d_max_with_cache(folds_tree, scores_tree,
+                                                n_leaves, nbins,
+                                                this->m_boxcar_widths_cache);
+    }
 }
 
 template <SupportedFoldType FoldType>

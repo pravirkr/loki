@@ -56,6 +56,20 @@ void poly_taylor_resolve_batch(std::span<const double> leaves_branch,
                                SizeType n_leaves,
                                SizeType n_params);
 
+void poly_taylor_ascend_resolve_batch(
+    std::span<const double> leaves_branch,
+    std::span<SizeType> param_indices,
+    std::span<float> phase_shift,
+    std::span<const ParamLimit> param_limits,
+    std::span<const std::pair<double, double>> coord_segments,
+    std::pair<double, double> coord_cur,
+    SizeType n_accel_init,
+    SizeType n_freq_init,
+    SizeType nbins,
+    SizeType n_leaves,
+    SizeType n_params,
+    SizeType n_segments);
+
 void poly_taylor_transform_batch(std::span<double> leaves_tree,
                                  std::span<SizeType> indices_tree,
                                  std::pair<double, double> coord_next,
@@ -137,6 +151,21 @@ void poly_taylor_resolve_batch_cuda(
     SizeType nbins,
     SizeType n_leaves,
     SizeType n_params,
+    cudaStream_t stream);
+
+void poly_taylor_ascend_resolve_batch_cuda(
+    cuda::std::span<const double> leaves_branch,
+    cuda::std::span<uint32_t> param_indices,
+    cuda::std::span<float> phase_shift,
+    cuda::std::span<const ParamLimit> param_limits,
+    cuda::std::span<const cuda::std::pair<double, double>> coord_segments,
+    std::pair<double, double> coord_cur,
+    SizeType n_accel_init,
+    SizeType n_freq_init,
+    SizeType nbins,
+    SizeType n_leaves,
+    SizeType n_params,
+    SizeType n_segments,
     cudaStream_t stream);
 
 void poly_taylor_transform_batch_cuda(

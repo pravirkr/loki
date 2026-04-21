@@ -204,6 +204,7 @@ public:
                            std::span<const SizeType> snail_scheme,
                            memory::CircularView<double> leaves_view,
                            memory::CircularView<float> scores_view,
+                           memory::CircularView<float> scores_ep_view,
                            SizeType n_leaves,
                            SizeType n_params,
                            const PruneStatsCollection& pstats);

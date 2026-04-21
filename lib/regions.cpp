@@ -127,10 +127,10 @@ float FFARegionStats::get_device_memory_usage() const noexcept {
             (get_max_scores_size() * sizeof(uint32_t))) /
         static_cast<float>(1ULL << 30U);
     // m_fold_d_time
-    const float fold_d_time_gb =
-        static_cast<float>(get_max_buffer_size_time() * sizeof(float)) /
-        static_cast<float>(1ULL << 30U);
-    return device_extra_gb + fold_d_time_gb + get_buffer_memory_usage() +
+    // const float fold_d_time_gb =
+    //    static_cast<float>(get_max_buffer_size_time() * sizeof(float)) /
+    //    static_cast<float>(1ULL << 30U);
+    return device_extra_gb + get_buffer_memory_usage() +
            get_coord_memory_usage();
 }
 float FFARegionStats::get_freq_sweep_memory_usage() const noexcept {
@@ -282,10 +282,11 @@ private:
         // Smallest *nominal* chunk width (Hz) used in preflight: scales with
         // octave width so low-frequency vs high-frequency searches behave
         // reasonably.
-        constexpr double kMinViableRel     = 0.001; // 0.1% of region
-        constexpr double kMinViableFloorHz = 1e-1;
-        const double min_viable_nominal =
-            std::max(kMinViableRel * region_span, kMinViableFloorHz);
+        // constexpr double kMinViableRel     = 0.0005; // 0.05% of region
+        constexpr double kMinViableFloorHz = 0.01;
+        // const double min_viable_nominal =
+        //     std::max(kMinViableRel * region_span, kMinViableFloorHz);
+        const double min_viable_nominal   = kMinViableFloorHz;
         constexpr double kMinChunkSize    = 0.01; // Merge threshold (Hz)
         constexpr double kSearchTolerance = 0.01; // Binary search stop (Hz)
         constexpr SizeType kMaxProbes     = 20;   // Avoid infinite loops
