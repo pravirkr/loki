@@ -21,17 +21,15 @@ namespace loki::core {
 
 namespace {
 
-SizeType
-poly_taylor_branch_accel_batch(std::span<const double> leaves_tree,
-                               std::span<double> leaves_branch,
-                               std::span<SizeType> leaves_origins,
-                               std::pair<double, double> coord_cur,
-                               SizeType nbins,
-                               double eta,
-                               std::span<const ParamLimit> param_limits,
-                               SizeType branch_max,
-                               SizeType n_leaves,
-                               memory::BranchingWorkspace& branch_ws) {
+SizeType poly_taylor_branch_accel_batch(std::span<const double> leaves_tree,
+                                        std::span<double> leaves_branch,
+                                        std::span<SizeType> leaves_origins,
+                                        std::pair<double, double> coord_cur,
+                                        SizeType nbins,
+                                        double eta,
+                                        SizeType branch_max,
+                                        SizeType n_leaves,
+                                        memory::BranchingWorkspace& branch_ws) {
     constexpr SizeType kParams       = 2;
     constexpr SizeType kParamStride  = 2;
     constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
@@ -44,14 +42,12 @@ poly_taylor_branch_accel_batch(std::span<const double> leaves_tree,
     error_check::check_greater_equal(leaves_origins.size(),
                                      n_leaves * branch_max,
                                      "leaves_origins size mismatch");
-    const auto [_, dt]    = coord_cur; // t_obs_minus_t_ref
-    const double dt2      = dt * dt;
-    const double inv_dt   = 1.0 / dt;
-    const double inv_dt2  = inv_dt * inv_dt;
-    const auto nbins_d    = static_cast<double>(nbins);
-    const double dphi     = eta / nbins_d;
-    const double d2_range = param_limits[0].max - param_limits[0].min;
-    const double f0_range = param_limits[1].max - param_limits[1].min;
+    const auto [_, dt]   = coord_cur; // t_obs_minus_t_ref
+    const double dt2     = dt * dt;
+    const double inv_dt  = 1.0 / dt;
+    const double inv_dt2 = inv_dt * inv_dt;
+    const auto nbins_d   = static_cast<double>(nbins);
+    const double dphi    = eta / nbins_d;
 
     // Use leaves_branch memory as workspace.
     const SizeType workspace_size      = leaves_branch.size();
@@ -87,9 +83,8 @@ poly_taylor_branch_accel_batch(std::span<const double> leaves_tree,
         const auto d1_sig_new = dphi * dfactor * 1.0 * inv_dt;
 
         // Compute new dparams with limited range
-        const auto d1_range    = dfactor * f0_range;
-        dparam_new_ptr[fb + 0] = std::min(d2_sig_new, d2_range);
-        dparam_new_ptr[fb + 1] = std::min(d1_sig_new, d1_range);
+        dparam_new_ptr[fb + 0] = d2_sig_new;
+        dparam_new_ptr[fb + 1] = d1_sig_new;
 
         // Compute shift bins
         shift_bins_ptr[fb + 0] =
@@ -170,7 +165,6 @@ SizeType poly_taylor_branch_jerk_batch(std::span<const double> leaves_tree,
                                        std::pair<double, double> coord_cur,
                                        SizeType nbins,
                                        double eta,
-                                       std::span<const ParamLimit> param_limits,
                                        SizeType branch_max,
                                        SizeType n_leaves,
                                        memory::BranchingWorkspace& branch_ws) {
@@ -186,17 +180,14 @@ SizeType poly_taylor_branch_jerk_batch(std::span<const double> leaves_tree,
     error_check::check_greater_equal(leaves_origins.size(),
                                      n_leaves * branch_max,
                                      "leaves_origins size mismatch");
-    const auto [_, dt]    = coord_cur; // t_obs_minus_t_ref
-    const double dt2      = dt * dt;
-    const double dt3      = dt2 * dt;
-    const double inv_dt   = 1.0 / dt;
-    const double inv_dt2  = inv_dt * inv_dt;
-    const double inv_dt3  = inv_dt2 * inv_dt;
-    const auto nbins_d    = static_cast<double>(nbins);
-    const double dphi     = eta / nbins_d;
-    const double d3_range = param_limits[0].max - param_limits[0].min;
-    const double d2_range = param_limits[1].max - param_limits[1].min;
-    const double f0_range = param_limits[2].max - param_limits[2].min;
+    const auto [_, dt]   = coord_cur; // t_obs_minus_t_ref
+    const double dt2     = dt * dt;
+    const double dt3     = dt2 * dt;
+    const double inv_dt  = 1.0 / dt;
+    const double inv_dt2 = inv_dt * inv_dt;
+    const double inv_dt3 = inv_dt2 * inv_dt;
+    const auto nbins_d   = static_cast<double>(nbins);
+    const double dphi    = eta / nbins_d;
 
     // Use leaves_branch memory as workspace.
     const SizeType workspace_size      = leaves_branch.size();
@@ -233,10 +224,9 @@ SizeType poly_taylor_branch_jerk_batch(std::span<const double> leaves_tree,
         const auto d1_sig_new = dphi * dfactor * 1.0 * inv_dt;
 
         // Compute new dparams with limited range
-        const auto d1_range    = dfactor * f0_range;
-        dparam_new_ptr[fb + 0] = std::min(d3_sig_new, d3_range);
-        dparam_new_ptr[fb + 1] = std::min(d2_sig_new, d2_range);
-        dparam_new_ptr[fb + 2] = std::min(d1_sig_new, d1_range);
+        dparam_new_ptr[fb + 0] = d3_sig_new;
+        dparam_new_ptr[fb + 1] = d2_sig_new;
+        dparam_new_ptr[fb + 2] = d1_sig_new;
 
         shift_bins_ptr[fb + 0] = std::abs(d3_sig_cur - d3_sig_new) * dt3 *
                                  nbins_d / (24.0 * dfactor);
@@ -329,7 +319,6 @@ SizeType poly_taylor_branch_snap_batch(std::span<const double> leaves_tree,
                                        std::pair<double, double> coord_cur,
                                        SizeType nbins,
                                        double eta,
-                                       std::span<const ParamLimit> param_limits,
                                        SizeType branch_max,
                                        SizeType n_leaves,
                                        memory::BranchingWorkspace& branch_ws) {
@@ -345,20 +334,16 @@ SizeType poly_taylor_branch_snap_batch(std::span<const double> leaves_tree,
     error_check::check_greater_equal(leaves_origins.size(),
                                      n_leaves * branch_max,
                                      "leaves_origins size mismatch");
-    const auto [_, dt]    = coord_cur; // t_obs_minus_t_ref
-    const double dt2      = dt * dt;
-    const double dt3      = dt2 * dt;
-    const double dt4      = dt2 * dt2;
-    const double inv_dt   = 1.0 / dt;
-    const double inv_dt2  = inv_dt * inv_dt;
-    const double inv_dt3  = inv_dt2 * inv_dt;
-    const double inv_dt4  = inv_dt2 * inv_dt2;
-    const auto nbins_d    = static_cast<double>(nbins);
-    const double dphi     = eta / nbins_d;
-    const double d4_range = param_limits[0].max - param_limits[0].min;
-    const double d3_range = param_limits[1].max - param_limits[1].min;
-    const double d2_range = param_limits[2].max - param_limits[2].min;
-    const double f0_range = param_limits[3].max - param_limits[3].min;
+    const auto [_, dt]   = coord_cur; // t_obs_minus_t_ref
+    const double dt2     = dt * dt;
+    const double dt3     = dt2 * dt;
+    const double dt4     = dt2 * dt2;
+    const double inv_dt  = 1.0 / dt;
+    const double inv_dt2 = inv_dt * inv_dt;
+    const double inv_dt3 = inv_dt2 * inv_dt;
+    const double inv_dt4 = inv_dt2 * inv_dt2;
+    const auto nbins_d   = static_cast<double>(nbins);
+    const double dphi    = eta / nbins_d;
 
     // Use leaves_branch memory as workspace.
     const SizeType workspace_size      = leaves_branch.size();
@@ -396,12 +381,10 @@ SizeType poly_taylor_branch_snap_batch(std::span<const double> leaves_tree,
         const auto d2_sig_new = dphi * dfactor * 4.0 * inv_dt2;
         const auto d1_sig_new = dphi * dfactor * 1.0 * inv_dt;
 
-        // Compute new dparams with limited range
-        const auto d1_range    = dfactor * f0_range;
-        dparam_new_ptr[fb + 0] = std::min(d4_sig_new, d4_range);
-        dparam_new_ptr[fb + 1] = std::min(d3_sig_new, d3_range);
-        dparam_new_ptr[fb + 2] = std::min(d2_sig_new, d2_range);
-        dparam_new_ptr[fb + 3] = std::min(d1_sig_new, d1_range);
+        dparam_new_ptr[fb + 0] = d4_sig_new;
+        dparam_new_ptr[fb + 1] = d3_sig_new;
+        dparam_new_ptr[fb + 2] = d2_sig_new;
+        dparam_new_ptr[fb + 3] = d1_sig_new;
 
         shift_bins_ptr[fb + 0] = std::abs(d4_sig_cur - d4_sig_new) * dt4 *
                                  nbins_d / (192.0 * dfactor);
@@ -1111,7 +1094,6 @@ SizeType poly_taylor_branch_batch_impl(std::span<const double> leaves_tree,
                                        std::pair<double, double> coord_cur,
                                        SizeType nbins,
                                        double eta,
-                                       std::span<const ParamLimit> param_limits,
                                        SizeType branch_max,
                                        SizeType n_leaves,
                                        memory::BranchingWorkspace& branch_ws) {
@@ -1120,15 +1102,15 @@ SizeType poly_taylor_branch_batch_impl(std::span<const double> leaves_tree,
     if constexpr (NPARAMS == 2) {
         return poly_taylor_branch_accel_batch(
             leaves_tree, leaves_branch, leaves_origins, coord_cur, nbins, eta,
-            param_limits, branch_max, n_leaves, branch_ws);
+            branch_max, n_leaves, branch_ws);
     } else if constexpr (NPARAMS == 3) {
         return poly_taylor_branch_jerk_batch(
             leaves_tree, leaves_branch, leaves_origins, coord_cur, nbins, eta,
-            param_limits, branch_max, n_leaves, branch_ws);
+            branch_max, n_leaves, branch_ws);
     } else if constexpr (NPARAMS == 4) {
         return poly_taylor_branch_snap_batch(
             leaves_tree, leaves_branch, leaves_origins, coord_cur, nbins, eta,
-            param_limits, branch_max, n_leaves, branch_ws);
+            branch_max, n_leaves, branch_ws);
     }
 }
 
@@ -1280,7 +1262,6 @@ poly_taylor_branch_batch_generic(std::span<const double> leaves_batch,
                                  std::span<double> leaves_branch_batch,
                                  SizeType nbins,
                                  double eta,
-                                 std::span<const ParamLimit> param_limits,
                                  SizeType branch_max,
                                  SizeType n_leaves,
                                  SizeType n_params) {
@@ -1325,9 +1306,8 @@ poly_taylor_branch_batch_generic(std::span<const double> leaves_batch,
             leaves_batch[param_offset + ((n_params + 1) * kParamStride)];
     }
 
-    psr_utils::poly_taylor_step_d_vec_limited(
-        n_params, t_obs_minus_t_ref, nbins, eta, f0_batch, param_limits,
-        dparam_new_batch, 0);
+    psr_utils::poly_taylor_step_d_vec(n_params, t_obs_minus_t_ref, nbins, eta,
+                                      f0_batch, dparam_new_batch, 0);
     psr_utils::poly_taylor_shift_d_vec(dparam_cur_batch, dparam_new_batch,
                                        t_obs_minus_t_ref, nbins, f0_batch, 0,
                                        shift_bins_batch, n_leaves, n_params);
@@ -1408,7 +1388,6 @@ SizeType poly_taylor_branch_batch(std::span<const double> leaves_tree,
                                   std::pair<double, double> coord_cur,
                                   SizeType nbins,
                                   double eta,
-                                  std::span<const ParamLimit> param_limits,
                                   SizeType branch_max,
                                   SizeType n_leaves,
                                   SizeType n_params,
@@ -1417,7 +1396,7 @@ SizeType poly_taylor_branch_batch(std::span<const double> leaves_tree,
     auto dispatch = [&]<SizeType N>() {
         return poly_taylor_branch_batch_impl<N>(
             leaves_tree, leaves_branch, leaves_origins, coord_cur, nbins, eta,
-            param_limits, branch_max, n_leaves, branch_ws);
+            branch_max, n_leaves, branch_ws);
     };
     switch (n_params) {
     case 2:
@@ -1634,8 +1613,8 @@ generate_bp_poly_taylor_approx(std::span<const SizeType> param_grid_count_init,
         const auto coord_next    = snail_scheme.get_coord(prune_level);
         const auto coord_cur     = snail_scheme.get_current_coord(prune_level);
         const auto batch_origins = poly_taylor_branch_batch_generic(
-            leaf_data, coord_cur, branch_leaves, nbins, eta, param_limits,
-            branch_max, 1, n_params);
+            leaf_data, coord_cur, branch_leaves, nbins, eta, branch_max, 1,
+            n_params);
         const auto n_leaves_branch = batch_origins.size();
         auto leaves_span =
             std::span(branch_leaves).first(n_leaves_branch * leaves_stride);
@@ -1663,7 +1642,6 @@ generate_bp_poly_taylor_approx(std::span<const SizeType> param_grid_count_init,
 std::vector<double>
 generate_bp_poly_taylor(std::span<const std::vector<double>> param_arr,
                         std::span<const double> dparams,
-                        std::span<const ParamLimit> param_limits,
                         double tseg_ffa,
                         SizeType nsegments,
                         SizeType nbins,
@@ -1672,9 +1650,6 @@ generate_bp_poly_taylor(std::span<const std::vector<double>> param_arr,
                         bool use_conservative_tile) {
     error_check::check_equal(param_arr.size(), dparams.size(),
                              "param_arr and dparams must have the same size");
-    error_check::check_equal(
-        param_arr.size(), param_limits.size(),
-        "param_arr and param_limits must have the same size");
     const auto n_params  = dparams.size();
     const auto& f0_batch = param_arr.back(); // Last array is frequency
     const auto n_freqs   = f0_batch.size();  // Number of frequency bins
@@ -1715,9 +1690,6 @@ generate_bp_poly_taylor(std::span<const std::vector<double>> param_arr,
         psr_utils::poly_taylor_shift_d_vec(
             dparam_cur_batch, dparam_new_batch, t_obs_minus_t_ref, nbins,
             f0_batch, 0, shift_bins_batch, n_freqs, n_params);
-        psr_utils::poly_taylor_step_d_vec_limited(
-            n_params, t_obs_minus_t_ref, nbins, eta, f0_batch, param_limits,
-            dparam_new_batch, 0);
 
         std::ranges::fill(n_branches, 1.0);
         // Determine branching needs
@@ -1730,8 +1702,9 @@ generate_bp_poly_taylor(std::span<const std::vector<double>> param_arr,
                 }
                 const auto ratio =
                     (dparam_cur_batch[idx]) / (dparam_new_batch[idx]);
-                const auto num_points = std::max(
-                    1, static_cast<int>(std::ceil(ratio - utils::kFloatEps)));
+                const SizeType num_points = std::max(
+                    1UL,
+                    static_cast<SizeType>(std::ceil(ratio - utils::kFloatEps)));
                 n_branches[i] *= static_cast<double>(num_points);
                 dparam_cur_next[idx] =
                     dparam_cur_batch[idx] / static_cast<double>(num_points);

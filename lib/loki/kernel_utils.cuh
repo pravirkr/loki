@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cuda/std/cmath>
 #include <cuda/std/utility>
 
 #include <cuda_runtime.h>
@@ -13,19 +14,21 @@ __device__ __forceinline__ double get_param_val_at_idx_device(double vmin,
                                                               double vmax,
                                                               uint32_t count,
                                                               uint32_t i) {
-    const double step = (vmax - vmin) / static_cast<double>(count + 1);
-    return vmin + (step * static_cast<double>(i + 1));
+    if (count <= 1) {
+        return (vmax + vmin) / 2.0;
+    }
+    const double dv_actual = (vmax - vmin) / static_cast<double>(count);
+    return vmin + (dv_actual * (static_cast<double>(i) + 0.5));
 }
 
 __device__ __forceinline__ uint32_t get_nearest_idx_analytical_device(
     double val, double vmin, double vmax, uint32_t count) {
-    if (count == 0) {
+    if (count <= 1) {
         return 0;
     }
-    const double step_inv = static_cast<double>(count + 1) / (vmax - vmin);
-    const double raw_idx  = ((val - vmin) * step_inv) - 1.0;
-    // Explicit half-up rounding, signed first
-    const int idx = __double2int_rz(raw_idx + 0.5 + utils::kFloatEps);
+    const double raw_idx =
+        static_cast<double>(count) * (val - vmin) / (vmax - vmin);
+    const auto idx = static_cast<int>(raw_idx + utils::kFloatEps);
     if (idx < 0) {
         return 0;
     }
@@ -211,22 +214,29 @@ branch_param_generate_points_device(double* __restrict__ out_values,
                                     double param_cur,
                                     double dparam_cur,
                                     double dparam_new) {
-    const auto num_points = static_cast<uint32_t>(
-        ceil((dparam_cur / dparam_new) - utils::kFloatEps));
+    const double ratio = dparam_cur / dparam_new;
+    uint32_t num_points;
+    if (ratio <= 1.0) {
+        num_points = 1;
+    } else {
+        num_points =
+            static_cast<uint32_t>(cuda::std::ceil(ratio - utils::kFloatEps));
+    }
+    // Exact physical span of the newly created child cells
+    const double dparam_new_actual =
+        dparam_cur / static_cast<double>(num_points);
 
-    const double confidence_const =
-        0.5 + (0.5 / static_cast<double>(num_points));
-    const double half_range = confidence_const * dparam_cur;
-    const double start      = param_cur - half_range;
-    // We use (num_points + 1) to space them evenly within the range
-    const double step =
-        (2.0 * half_range) / static_cast<double>(num_points + 1);
+    // Find the absolute minimum boundary of the parent cell
+    const double parent_min = param_cur - (dparam_cur / 2.0);
+    // Place the center of the first child cell exactly half a sub-span inward
+    const double first_center = parent_min + (dparam_new_actual / 2.0);
 
 #pragma unroll 4
     for (uint32_t i = 0; i < num_points; ++i) {
-        out_values[i] = fma(static_cast<double>(i + 1), step, start);
+        out_values[i] =
+            fma(static_cast<double>(i), dparam_new_actual, first_center);
     }
-    return {dparam_cur / static_cast<double>(num_points), num_points};
+    return {dparam_new_actual, num_points};
 }
 
 __device__ __forceinline__ void
@@ -272,8 +282,14 @@ branch_one_param_padded_crackle_device(uint32_t p,
                                        uint32_t branch_max) {
     const uint32_t pad_offset = (flat_base + p) * branch_max;
     if (shift >= (eta - utils::kFloatEps)) {
-        const auto num_points =
-            static_cast<uint32_t>(ceil((sig_cur / sig_new) - utils::kFloatEps));
+        const double ratio = sig_cur / sig_new;
+        uint32_t num_points;
+        if (ratio <= 1.0) {
+            num_points = 1;
+        } else {
+            num_points = static_cast<uint32_t>(
+                cuda::std::ceil(ratio - utils::kFloatEps));
+        }
         scratch_dparams[flat_base + p] =
             sig_cur / static_cast<double>(num_points);
         scratch_counts[flat_base + p] = num_points;

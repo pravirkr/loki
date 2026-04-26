@@ -480,7 +480,6 @@ poly_chebyshev_branch_accel_batch(std::span<double> leaves_tree,
                                   std::pair<double, double> coord_prev,
                                   SizeType nbins,
                                   double eta,
-                                  std::span<const ParamLimit> param_limits,
                                   SizeType branch_max,
                                   SizeType n_leaves,
                                   memory::BranchingWorkspace& branch_ws) {
@@ -496,14 +495,8 @@ poly_chebyshev_branch_accel_batch(std::span<double> leaves_tree,
     error_check::check_greater_equal(leaves_origins.size(),
                                      n_leaves * branch_max,
                                      "leaves_origins size mismatch");
-    const auto [_, ts] = coord_cur; // scale_cur
-    const double ts2   = ts * ts;
     const auto nbins_d = static_cast<double>(nbins);
     const double dphi  = eta / nbins_d;
-
-    const double d2_range      = param_limits[0].max - param_limits[0].min;
-    const double f0_range      = param_limits[1].max - param_limits[1].min;
-    const double alpha_2_range = 0.25 * d2_range * ts2;
 
     // Use leaves_branch memory as workspace.
     const SizeType workspace_size      = leaves_branch.size();
@@ -548,9 +541,8 @@ poly_chebyshev_branch_accel_batch(std::span<double> leaves_tree,
         const auto dfactor   = utils::kCval / f0;
         const auto base_step = dphi * dfactor;
         // Compute steps
-        const auto alpha_1_range = dfactor * f0_range * ts;
-        dparam_new_ptr[fb + 0]   = std::min(base_step, alpha_2_range);
-        dparam_new_ptr[fb + 1]   = std::min(base_step, alpha_1_range);
+        dparam_new_ptr[fb + 0] = base_step;
+        dparam_new_ptr[fb + 1] = base_step;
 
         // Compute shift bins
         const double inv_base = nbins_d / dfactor;
@@ -634,7 +626,6 @@ poly_chebyshev_branch_jerk_batch(std::span<double> leaves_tree,
                                  std::pair<double, double> coord_prev,
                                  SizeType nbins,
                                  double eta,
-                                 std::span<const ParamLimit> param_limits,
                                  SizeType branch_max,
                                  SizeType n_leaves,
                                  memory::BranchingWorkspace& branch_ws) {
@@ -650,17 +641,8 @@ poly_chebyshev_branch_jerk_batch(std::span<double> leaves_tree,
     error_check::check_greater_equal(leaves_origins.size(),
                                      n_leaves * branch_max,
                                      "leaves_origins size mismatch");
-    const auto [_, ts] = coord_cur; // scale_cur
-    const double ts2   = ts * ts;
-    const double ts3   = ts2 * ts;
     const auto nbins_d = static_cast<double>(nbins);
     const double dphi  = eta / nbins_d;
-
-    const double d3_range      = param_limits[0].max - param_limits[0].min;
-    const double d2_range      = param_limits[1].max - param_limits[1].min;
-    const double f0_range      = param_limits[2].max - param_limits[2].min;
-    const double alpha_3_range = d3_range * ts3 / 24.0;
-    const double alpha_2_range = d2_range * ts2 / 4.0;
 
     // Use leaves_branch memory as workspace.
     const SizeType workspace_size      = leaves_branch.size();
@@ -705,11 +687,9 @@ poly_chebyshev_branch_jerk_batch(std::span<double> leaves_tree,
         const auto dfactor   = utils::kCval / f0;
         const auto base_step = dphi * dfactor;
         // Compute steps
-        const auto alpha_1_range =
-            (dfactor * f0_range * ts) + (d3_range * ts3 / 8.0);
-        dparam_new_ptr[fb + 0] = std::min(base_step, alpha_3_range);
-        dparam_new_ptr[fb + 1] = std::min(base_step, alpha_2_range);
-        dparam_new_ptr[fb + 2] = std::min(base_step, alpha_1_range);
+        dparam_new_ptr[fb + 0] = base_step;
+        dparam_new_ptr[fb + 1] = base_step;
+        dparam_new_ptr[fb + 2] = base_step;
 
         // Compute shift bins
         const double inv_base = nbins_d / dfactor;
@@ -806,7 +786,6 @@ poly_chebyshev_branch_snap_batch(std::span<double> leaves_tree,
                                  std::pair<double, double> coord_prev,
                                  SizeType nbins,
                                  double eta,
-                                 std::span<const ParamLimit> param_limits,
                                  SizeType branch_max,
                                  SizeType n_leaves,
                                  memory::BranchingWorkspace& branch_ws) {
@@ -822,21 +801,8 @@ poly_chebyshev_branch_snap_batch(std::span<double> leaves_tree,
     error_check::check_greater_equal(leaves_origins.size(),
                                      n_leaves * branch_max,
                                      "leaves_origins size mismatch");
-    const auto [_, ts] = coord_cur; // scale_cur
-    const double ts2   = ts * ts;
-    const double ts3   = ts2 * ts;
-    const double ts4   = ts2 * ts2;
     const auto nbins_d = static_cast<double>(nbins);
     const double dphi  = eta / nbins_d;
-
-    const double d4_range      = param_limits[0].max - param_limits[0].min;
-    const double d3_range      = param_limits[1].max - param_limits[1].min;
-    const double d2_range      = param_limits[2].max - param_limits[2].min;
-    const double f0_range      = param_limits[3].max - param_limits[3].min;
-    const double alpha_4_range = d4_range * ts4 / 192.0;
-    const double alpha_3_range = d3_range * ts3 / 24.0;
-    const double alpha_2_range =
-        (d2_range * ts2 / 4.0) + (d4_range * ts4 / 48.0);
 
     // Use leaves_branch memory as workspace.
     const SizeType workspace_size      = leaves_branch.size();
@@ -882,12 +848,10 @@ poly_chebyshev_branch_snap_batch(std::span<double> leaves_tree,
         const auto dfactor   = utils::kCval / f0;
         const auto base_step = dphi * dfactor;
         // Compute steps
-        const auto alpha_1_range =
-            (dfactor * f0_range * ts) + (d3_range * ts3 / 8.0);
-        dparam_new_ptr[fb + 0] = std::min(base_step, alpha_4_range);
-        dparam_new_ptr[fb + 1] = std::min(base_step, alpha_3_range);
-        dparam_new_ptr[fb + 2] = std::min(base_step, alpha_2_range);
-        dparam_new_ptr[fb + 3] = std::min(base_step, alpha_1_range);
+        dparam_new_ptr[fb + 0] = base_step;
+        dparam_new_ptr[fb + 1] = base_step;
+        dparam_new_ptr[fb + 2] = base_step;
+        dparam_new_ptr[fb + 3] = base_step;
 
         // Compute shift bins
         const double inv_base = nbins_d / dfactor;
@@ -1433,7 +1397,6 @@ poly_chebyshev_branch_batch_impl(std::span<double> leaves_tree,
                                  std::pair<double, double> coord_prev,
                                  SizeType nbins,
                                  double eta,
-                                 std::span<const ParamLimit> param_limits,
                                  SizeType branch_max,
                                  SizeType n_leaves,
                                  memory::BranchingWorkspace& branch_ws) {
@@ -1442,15 +1405,15 @@ poly_chebyshev_branch_batch_impl(std::span<double> leaves_tree,
     if constexpr (NPARAMS == 2) {
         return poly_chebyshev_branch_accel_batch(
             leaves_tree, leaves_branch, leaves_origins, coord_cur, coord_prev,
-            nbins, eta, param_limits, branch_max, n_leaves, branch_ws);
+            nbins, eta, branch_max, n_leaves, branch_ws);
     } else if constexpr (NPARAMS == 3) {
         return poly_chebyshev_branch_jerk_batch(
             leaves_tree, leaves_branch, leaves_origins, coord_cur, coord_prev,
-            nbins, eta, param_limits, branch_max, n_leaves, branch_ws);
+            nbins, eta, branch_max, n_leaves, branch_ws);
     } else if constexpr (NPARAMS == 4) {
         return poly_chebyshev_branch_snap_batch(
             leaves_tree, leaves_branch, leaves_origins, coord_cur, coord_prev,
-            nbins, eta, param_limits, branch_max, n_leaves, branch_ws);
+            nbins, eta, branch_max, n_leaves, branch_ws);
     }
 }
 
@@ -1601,7 +1564,6 @@ SizeType poly_chebyshev_branch_batch(std::span<double> leaves_tree,
                                      std::pair<double, double> coord_prev,
                                      SizeType nbins,
                                      double eta,
-                                     std::span<const ParamLimit> param_limits,
                                      SizeType branch_max,
                                      SizeType n_leaves,
                                      SizeType n_params,
@@ -1610,7 +1572,7 @@ SizeType poly_chebyshev_branch_batch(std::span<double> leaves_tree,
     auto dispatch = [&]<SizeType N>() {
         return poly_chebyshev_branch_batch_impl<N>(
             leaves_tree, leaves_branch, leaves_origins, coord_cur, coord_prev,
-            nbins, eta, param_limits, branch_max, n_leaves, branch_ws);
+            nbins, eta, branch_max, n_leaves, branch_ws);
     };
     switch (n_params) {
     case 2:
@@ -1808,7 +1770,7 @@ std::vector<double> generate_bp_poly_chebyshev_approx(
         const auto coord_cur  = snail_scheme.get_current_coord(prune_level);
         const auto n_leaves_branch = poly_chebyshev_branch_batch(
             leaf_data, branch_leaves, leaf_origins, coord_cur, coord_prev,
-            nbins, eta, param_limits, branch_max, 1, n_params, branch_ws);
+            nbins, eta, branch_max, 1, n_params, branch_ws);
         auto leaves_span =
             std::span(branch_leaves).first(n_leaves_branch * leaves_stride);
         std::vector<SizeType> indices_branch(n_leaves_branch);
@@ -1834,7 +1796,6 @@ std::vector<double> generate_bp_poly_chebyshev_approx(
 std::vector<double>
 generate_bp_poly_chebyshev(std::span<const std::vector<double>> param_arr,
                            std::span<const double> dparams,
-                           std::span<const ParamLimit> param_limits,
                            double tseg_ffa,
                            SizeType nsegments,
                            SizeType nbins,
@@ -1842,15 +1803,13 @@ generate_bp_poly_chebyshev(std::span<const std::vector<double>> param_arr,
                            SizeType ref_seg) {
     error_check::check_equal(param_arr.size(), dparams.size(),
                              "param_arr and dparams must have the same size");
-    error_check::check_equal(
-        param_arr.size(), param_limits.size(),
-        "param_arr and param_limits must have the same size");
     const auto n_params  = dparams.size();
     const auto& f0_batch = param_arr.back(); // Last array is frequency
     const auto n_freqs   = f0_batch.size();  // Number of frequency bins
 
     // Snail Scheme
     psr_utils::MiddleOutScheme snail_scheme(nsegments, ref_seg, tseg_ffa);
+    const auto coord_init = snail_scheme.get_coord(0);
     std::vector<double> weights(n_freqs, 1.0);
     std::vector<double> branching_pattern(nsegments - 1);
 
@@ -1866,6 +1825,8 @@ generate_bp_poly_chebyshev(std::span<const std::vector<double>> param_arr,
             dparam_cur_batch[(i * n_params) + n_params - 1] *
             (utils::kCval / f0_batch[i]);
     }
+    transforms::taylor_to_cheby_errors_batch(
+        dparam_cur_batch, coord_init.second, n_freqs, n_params);
 
     std::vector<double> dparam_new_batch(n_freqs * n_params, 0.0);
     std::vector<double> shift_bins_batch(n_freqs * n_params, 0.0);
@@ -1873,11 +1834,9 @@ generate_bp_poly_chebyshev(std::span<const std::vector<double>> param_arr,
     std::vector<double> n_branches(n_freqs, 1);
 
     for (SizeType prune_level = 1; prune_level < nsegments; ++prune_level) {
-        const auto coord_prev     = snail_scheme.get_coord(prune_level - 1);
-        const auto coord_next     = snail_scheme.get_coord(prune_level);
-        const auto coord_cur      = snail_scheme.get_current_coord(prune_level);
-        const auto [_, scale_cur] = coord_cur;
-
+        const auto coord_prev = snail_scheme.get_coord(prune_level - 1);
+        const auto coord_next = snail_scheme.get_coord(prune_level);
+        const auto coord_cur  = snail_scheme.get_current_coord(prune_level);
         // Transform the parameters to coord_cur domain
         transforms::shift_cheb_errors_batch(dparam_cur_batch, coord_cur.second,
                                             coord_prev.second, n_freqs,
@@ -1889,9 +1848,6 @@ generate_bp_poly_chebyshev(std::span<const std::vector<double>> param_arr,
         psr_utils::poly_cheb_shift_vec(dparam_cur_batch, dparam_new_batch,
                                        nbins, f0_batch, shift_bins_batch,
                                        n_freqs, n_params);
-        psr_utils::poly_cheb_step_vec_limited(n_params, scale_cur, nbins, eta,
-                                              f0_batch, param_limits,
-                                              dparam_new_batch);
 
         std::ranges::fill(n_branches, 1.0);
         // Determine branching needs
@@ -1904,8 +1860,9 @@ generate_bp_poly_chebyshev(std::span<const std::vector<double>> param_arr,
                 }
                 const auto ratio =
                     (dparam_cur_batch[idx]) / (dparam_new_batch[idx]);
-                const auto num_points = std::max(
-                    1, static_cast<int>(std::ceil(ratio - utils::kFloatEps)));
+                const SizeType num_points = std::max(
+                    1UL,
+                    static_cast<SizeType>(std::ceil(ratio - utils::kFloatEps)));
                 n_branches[i] *= static_cast<double>(num_points);
                 dparam_cur_next[idx] =
                     dparam_cur_batch[idx] / static_cast<double>(num_points);

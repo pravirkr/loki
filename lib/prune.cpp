@@ -58,7 +58,7 @@ public:
                                       "Pruning not supported for nparams > 5.");
         m_prune_funcs = core::create_prune_dp_functs<FoldType>(
             m_poly_basis, m_ffa_plan.get_param_counts().back(),
-            m_ffa_plan.get_dparams_lim().back(),
+            m_ffa_plan.get_dparams_actual().back(),
             m_ffa_plan.get_nsegments().back(),
             m_ffa_plan.get_tsegments().back(), m_cfg, m_batch_size,
             m_branch_max);
@@ -662,7 +662,7 @@ public:
 
         // Determine ref_segs to process
         auto ref_segs_to_process =
-            utils::determine_ref_segs(nsegments, m_n_runs, m_ref_segs);
+            utils::determine_ref_segs_pareto(nsegments, m_n_runs, m_ref_segs);
         spdlog::info("Starting Pruning for {} runs, with {} threads",
                      ref_segs_to_process.size(), m_nthreads);
 

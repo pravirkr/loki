@@ -12,6 +12,13 @@
 
 namespace loki::utils {
 
+namespace {
+// Deterministic integer rounding: round(num / den)
+SizeType round_div(SizeType num, SizeType den) {
+    return (num + (den / 2)) / den;
+}
+} // namespace
+
 float diff_max(const float* __restrict__ x,
                const float* __restrict__ y,
                SizeType size) noexcept {
@@ -206,6 +213,43 @@ determine_ref_segs(SizeType nsegments,
             }
         }
         return ref_segs_val;
+    }
+    if (ref_segs.has_value()) {
+        return ref_segs.value();
+    }
+    throw std::runtime_error("Either n_runs or ref_segs must be provided");
+}
+
+std::vector<SizeType>
+determine_ref_segs_pareto(SizeType nsegments,
+                          std::optional<SizeType> n_runs,
+                          std::optional<std::vector<SizeType>> ref_segs) {
+    if (n_runs.has_value()) {
+        // n_runs takes precedence over ref_segs
+        const auto n_runs_val = n_runs.value();
+        if (n_runs_val < 1 || n_runs_val > nsegments) {
+            throw std::runtime_error(
+                std::format("n_runs must be between 1 and {}, got {}",
+                            nsegments, n_runs_val));
+        }
+        // Special case: single anchor → center
+        if (n_runs_val == 1) {
+            return {nsegments / 2};
+        }
+        // margin = round((M - 1) / (2 * n))
+        const SizeType margin = round_div(nsegments - 1, 2 * n_runs_val);
+        const SizeType lo = margin;
+        const SizeType hi = nsegments - 1 - margin;
+        const SizeType denom = n_runs_val - 1;
+
+        std::vector<SizeType> result;
+        result.reserve(n_runs_val);
+        // Single rational form
+        for (SizeType i = 0; i < n_runs_val; ++i) {
+            SizeType val = round_div(((denom - i) * lo) + (i * hi), denom);
+            result.push_back(val);
+        }
+        return result;
     }
     if (ref_segs.has_value()) {
         return ref_segs.value();

@@ -161,18 +161,26 @@ public:
                                                m_eta, m_f_max, t_ref);
     }
 
-    std::vector<double> get_dparams_lim(double tseg_cur) const {
-        const std::vector<double> dparams = get_dparams(tseg_cur);
-        std::vector<double> dparams_lim(dparams.size());
+    std::vector<double> get_dparams_actual(double tseg_cur) const {
+        const std::vector<SizeType> param_grid_count =
+            get_param_grid_count(tseg_cur);
+        std::vector<double> dparams_act(m_nparams);
         for (SizeType iparam = 0; iparam < m_nparams; ++iparam) {
-            if (iparam == m_nparams - 1) {
-                dparams_lim[iparam] = dparams[iparam];
-            }
-            dparams_lim[iparam] =
-                std::min(dparams[iparam], m_param_limits[iparam].max -
-                                              m_param_limits[iparam].min);
+            dparams_act[iparam] =
+                (m_param_limits[iparam].max - m_param_limits[iparam].min) /
+                static_cast<double>(param_grid_count[iparam]);
         }
-        return dparams_lim;
+        return dparams_act;
+    }
+    std::vector<SizeType> get_param_grid_count(double tseg_cur) const {
+        const std::vector<double> dparams = get_dparams(tseg_cur);
+        std::vector<SizeType> count(m_nparams);
+        for (SizeType iparam = 0; iparam < m_nparams; ++iparam) {
+            count[iparam] = psr_utils::range_param_count(
+                m_param_limits[iparam].min, m_param_limits[iparam].max,
+                dparams[iparam]);
+        }
+        return count;
     }
 
     PulsarSearchConfig
@@ -285,7 +293,7 @@ private:
     }
 
     SizeType get_bseg_brute_default() const {
-        const SizeType init_levels = (m_nparams == 1) ? 1 : 1;
+        const SizeType init_levels = (m_nparams == 1) ? 1 : 2;
         const auto levels          = static_cast<SizeType>(
             std::log2(static_cast<double>(m_nsamps) * m_tsamp * m_f_min));
         return static_cast<SizeType>(m_nsamps / (1U << (levels - init_levels)));
@@ -474,8 +482,12 @@ PulsarSearchConfig::get_dparams(double tseg_cur) const noexcept {
     return m_impl->get_dparams(tseg_cur);
 }
 std::vector<double>
-PulsarSearchConfig::get_dparams_lim(double tseg_cur) const noexcept {
-    return m_impl->get_dparams_lim(tseg_cur);
+PulsarSearchConfig::get_dparams_actual(double tseg_cur) const noexcept {
+    return m_impl->get_dparams_actual(tseg_cur);
+}
+std::vector<SizeType>
+PulsarSearchConfig::get_param_grid_count(double tseg_cur) const noexcept {
+    return m_impl->get_param_grid_count(tseg_cur);
 }
 PulsarSearchConfig PulsarSearchConfig::get_updated_config(
     SizeType nbins,

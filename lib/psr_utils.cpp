@@ -7,7 +7,6 @@
 #include "loki/common/types.hpp"
 #include "loki/exceptions.hpp"
 #include "loki/math.hpp"
-#include "loki/transforms.hpp"
 #include "loki/utils.hpp"
 
 namespace loki::psr_utils {
@@ -77,34 +76,6 @@ void poly_taylor_step_d_vec(SizeType nparams,
         for (SizeType j = 0; j < nparams; ++j) {
             dparams_batch[(i * nparams) + j] = dparams_f[j] * factor;
         }
-    }
-}
-
-void poly_taylor_step_d_vec_limited(SizeType nparams,
-                                    double tobs,
-                                    SizeType nbins,
-                                    double eta,
-                                    std::span<const double> f_max,
-                                    std::span<const ParamLimit> param_limits,
-                                    std::span<double> dparams_batch,
-                                    double t_ref) {
-
-    const auto dparams_f = poly_taylor_step_f(nparams, tobs, nbins, eta, t_ref);
-    const auto n_batch   = f_max.size();
-    error_check::check_equal(dparams_batch.size(), n_batch * nparams,
-                             "dparams_batch must be of size nbatch * nparams");
-    for (SizeType i = 0; i < n_batch; ++i) {
-        const auto factor = utils::kCval / f_max[i];
-        for (SizeType j = 0; j < nparams - 1; ++j) {
-            const double param_range =
-                (param_limits[j].max - param_limits[j].min);
-            dparams_batch[(i * nparams) + j] =
-                std::min(dparams_f[j] * factor, param_range);
-        }
-        const double d1_range = factor * (param_limits[nparams - 1].max -
-                                          param_limits[nparams - 1].min);
-        dparams_batch[(i * nparams) + nparams - 1] =
-            std::min(dparams_f[nparams - 1] * factor, d1_range);
     }
 }
 
@@ -201,53 +172,6 @@ void poly_cheb_step_vec(SizeType n_params,
     }
 }
 
-void poly_cheb_step_vec_limited(SizeType n_params,
-                                double scale_cur,
-                                SizeType nbins,
-                                double eta,
-                                std::span<const double> f0_batch,
-                                std::span<const ParamLimit> param_limits,
-                                std::span<double> dparams_batch) {
-    const auto n_batch = f0_batch.size();
-    const auto dphi    = eta / static_cast<double>(nbins);
-    error_check::check_equal(
-        dparams_batch.size(), n_batch * n_params,
-        "dparams_batch must be of size n_batch * n_params");
-    // Build taylor_limits: shape [n_batch, n_params, 2]
-    std::vector<double> taylor_limits(n_batch * n_params * 2);
-    for (SizeType i = 0; i < n_batch; ++i) {
-        const double f0 = f0_batch[i];
-        for (SizeType j = 0; j < n_params - 1; ++j) {
-            taylor_limits[(((i * n_params) + j) * 2) + 0] = param_limits[j].min;
-            taylor_limits[(((i * n_params) + j) * 2) + 1] = param_limits[j].max;
-        }
-        const SizeType last = n_params - 1;
-        taylor_limits[(((i * n_params) + last) * 2) + 0] =
-            (1.0 - (param_limits[last].max / f0)) * utils::kCval;
-        taylor_limits[(((i * n_params) + last) * 2) + 1] =
-            (1.0 - (param_limits[last].min / f0)) * utils::kCval;
-    }
-
-    std::vector<double> cheby_limits(n_batch * n_params * 2);
-    transforms::taylor_to_chebyshev_limits_full(
-        taylor_limits, n_batch, n_params, scale_cur, cheby_limits);
-
-    // Compute dparams and clamp against Chebyshev ranges
-    for (SizeType i = 0; i < n_batch; ++i) {
-        const double factor = utils::kCval / f0_batch[i];
-        for (SizeType j = 0; j < n_params; ++j) {
-            const double dparam_unclamped = dphi * factor;
-            const double cheby_min =
-                cheby_limits[(((i * n_params) + j) * 2) + 0];
-            const double cheby_max =
-                cheby_limits[(((i * n_params) + j) * 2) + 1];
-            const double cheby_range = cheby_max - cheby_min;
-            dparams_batch[((i * n_params) + j)] =
-                std::min(dparam_unclamped, cheby_range);
-        }
-    }
-}
-
 void poly_cheb_shift_vec(std::span<const double> dparam_old,
                          std::span<const double> dparam_new,
                          SizeType nbins,
@@ -269,57 +193,34 @@ void poly_cheb_shift_vec(std::span<const double> dparam_old,
     }
 }
 
-std::tuple<std::vector<double>, double> branch_param(double param_cur,
-                                                     double dparam_cur,
-                                                     double dparam_new,
-                                                     double param_min,
-                                                     double param_max) {
+std::tuple<std::vector<double>, double>
+branch_param(double param_cur, double dparam_cur, double dparam_new) {
     if (dparam_cur <= utils::kZeroEps || dparam_new <= utils::kZeroEps) {
         throw std::invalid_argument(
             std::format("Both dparam_cur and dparam_new must be positive (got "
                         "{}, {})",
                         dparam_cur, dparam_new));
     }
-    if (param_max <= param_min) {
-        throw std::invalid_argument(
-            std::format("param_max must be greater than param_min (got {}, {})",
-                        param_max, param_min));
-    }
-    if (param_cur < (param_min + utils::kZeroEps) ||
-        param_cur > (param_max - utils::kZeroEps)) {
-        throw std::invalid_argument(
-            std::format("param_cur ({}) must be within [param_min ({}), "
-                        "param_max ({})]",
-                        param_cur, param_min, param_max));
-    }
-    const double param_range = (param_max - param_min) / 2.0;
-    if (dparam_new > (param_range + utils::kZeroEps)) {
-        // Step size too large, fallback to current value
-        return {{param_cur}, dparam_new};
-    }
-    const int num_points = static_cast<int>(
-        std::ceil((dparam_cur / dparam_new) - utils::kFloatEps));
-    if (num_points <= 0) {
-        throw std::invalid_argument(
-            std::format("Invalid input: ensure dparam_cur > dparam_new (got "
-                        "{}, {})",
-                        dparam_cur, dparam_new));
-    }
-
-    // Confidence-based symmetric range shrinkage
-    // 0.5 < confidence_const < 1
-    const double confidence_const =
-        0.5 * (1.0 + (1.0 / static_cast<double>(num_points)));
-    const double half_range = confidence_const * dparam_cur;
-
-    // Generate array excluding first and last points
-    const int n = num_points + 2;
-    auto grid_points =
-        utils::linspace(param_cur - half_range, param_cur + half_range, n);
+    // How many target spans fit inside the parent span?
+    // If dparam_new >= dparam_cur, then num_points = 1
+    const double ratio        = dparam_cur / dparam_new;
+    const SizeType num_points = std::max(
+        1UL, static_cast<SizeType>(std::ceil(ratio - utils::kFloatEps)));
+    // Exact physical span of the newly created child cells
     const double dparam_new_actual =
         dparam_cur / static_cast<double>(num_points);
-    return {std::vector<double>(grid_points.begin() + 1, grid_points.end() - 1),
-            dparam_new_actual};
+
+    // Find the absolute minimum boundary of the parent cell
+    const double parent_min = param_cur - (dparam_cur / 2.0);
+    // Place the center of the first child cell exactly half a sub-span inward
+    const double first_center = parent_min + (dparam_new_actual / 2.0);
+    // Generate all child centers
+    std::vector<double> out_values(num_points, 0.0);
+    for (SizeType i = 0; i < num_points; ++i) {
+        out_values[i] =
+            first_center + (static_cast<double>(i) * dparam_new_actual);
+    }
+    return {out_values, dparam_new_actual};
 }
 
 std::pair<double, SizeType> branch_param_padded(std::span<double> out_values,
@@ -333,35 +234,27 @@ std::pair<double, SizeType> branch_param_padded(std::span<double> out_values,
                         "{}, {})",
                         dparam_cur, dparam_new));
     }
-    const auto num_points = static_cast<int>(
-        std::ceil((dparam_cur / dparam_new) - utils::kFloatEps));
-    error_check::check_greater(
-        num_points, 0,
-        std::format("num_points must be positive. Invalid input: ensure "
-                    "dparam_cur > dparam_new (got {}, {})",
-                    dparam_cur, dparam_new));
-
-    // Calculate the actual branched values
-    // 0.5 < confidence_const < 1
-    const double confidence_const =
-        0.5 + (0.5 / static_cast<double>(num_points));
-    const double half_range = confidence_const * dparam_cur;
-    const double start      = param_cur - half_range;
-    const double step =
-        (2.0 * half_range) / static_cast<double>(num_points + 1);
-
-    error_check::check_less_equal(num_points, static_cast<int>(branch_max),
+    // How many target spans fit inside the parent span?
+    // If dparam_new >= dparam_cur, then num_points = 1
+    const double ratio        = dparam_cur / dparam_new;
+    const SizeType num_points = std::max(
+        1UL, static_cast<SizeType>(std::ceil(ratio - utils::kFloatEps)));
+    error_check::check_less_equal(num_points, branch_max,
                                   "num_points must be less than or equal to "
                                   "branch_max");
-
-    // Generate points and fill the start of the padded array
-    for (SizeType i = 0; i < static_cast<SizeType>(num_points); ++i) {
-        out_values[i] = start + (static_cast<double>(i + 1) * step);
-    }
-
-    // Calculate actual dparam based on generated points
+    // Exact physical span of the newly created child cells
     const double dparam_new_actual =
         dparam_cur / static_cast<double>(num_points);
+
+    // Find the absolute minimum boundary of the parent cell
+    const double parent_min = param_cur - (dparam_cur / 2.0);
+    // Place the center of the first child cell exactly half a sub-span inward
+    const double first_center = parent_min + (dparam_new_actual / 2.0);
+    // Generate all child centers
+    for (SizeType i = 0; i < num_points; ++i) {
+        out_values[i] =
+            first_center + (static_cast<double>(i) * dparam_new_actual);
+    }
     return {dparam_new_actual, num_points};
 }
 
@@ -374,17 +267,12 @@ std::pair<double, SizeType> branch_dparam_crackle(double dparam_cur,
                         "{}, {})",
                         dparam_cur, dparam_new));
     }
-    const auto num_points = static_cast<int>(
-        std::ceil((dparam_cur / dparam_new) - utils::kFloatEps));
-    error_check::check_greater(
-        num_points, 0,
-        std::format("num_points must be positive. Invalid input: ensure "
-                    "dparam_cur > dparam_new (got {}, {})",
-                    dparam_cur, dparam_new));
-    error_check::check_less_equal(num_points, static_cast<int>(branch_max),
+    const double ratio        = dparam_cur / dparam_new;
+    const SizeType num_points = std::max(
+        1UL, static_cast<SizeType>(std::ceil(ratio - utils::kFloatEps)));
+    error_check::check_less_equal(num_points, branch_max,
                                   "num_points must be less than or equal to "
                                   "branch_max");
-
     // Calculate actual dparam based on generated points
     const double dparam_new_actual =
         dparam_cur / static_cast<double>(num_points);
@@ -395,19 +283,20 @@ void branch_crackle_padded(std::span<double> out_values,
                            double param_cur,
                            double dparam_cur,
                            SizeType num_points) {
-    // Calculate the actual branched values
-    // 0.5 < confidence_const < 1
-    const double confidence_const =
-        0.5 + (0.5 / static_cast<double>(num_points));
-    const double half_range = confidence_const * dparam_cur;
-    const double start      = param_cur - half_range;
-    // We use (num_points + 1) to space them evenly within the range
-    const double step =
-        (2.0 * half_range) / static_cast<double>(num_points + 1);
+    // Exact physical span of the newly created child cells
+    const double dparam_new_actual =
+        dparam_cur / static_cast<double>(num_points);
+
+    // Find the absolute minimum boundary of the parent cell
+    const double parent_min = param_cur - (dparam_cur / 2.0);
+    // Place the center of the first child cell exactly half a sub-span inward
+    const double first_center = parent_min + (dparam_new_actual / 2.0);
+    // Generate all child centers
 
     // Generate points and fill the start of the padded array
     for (SizeType i = 0; i < num_points; ++i) {
-        out_values[i] = start + (static_cast<double>(i + 1) * step);
+        out_values[i] =
+            first_center + (static_cast<double>(i) * dparam_new_actual);
     }
 }
 

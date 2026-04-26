@@ -117,7 +117,6 @@ SizeType circ_taylor_branch_batch(std::span<const double> leaves_tree,
                                   std::pair<double, double> coord_cur,
                                   SizeType nbins,
                                   double eta,
-                                  std::span<const ParamLimit> param_limits,
                                   SizeType branch_max,
                                   SizeType n_leaves,
                                   double minimum_snap_cells,
@@ -141,23 +140,18 @@ SizeType circ_taylor_branch_batch(std::span<const double> leaves_tree,
     error_check::check_greater_equal(branch_ws.scratch_shifts.size(),
                                      n_leaves * kParams,
                                      "Workspace scratch_shifts too small");
-    const auto [_, dt]    = coord_cur; // t_obs - t_ref
-    const double dt2      = dt * dt;
-    const double dt3      = dt2 * dt;
-    const double dt4      = dt2 * dt2;
-    const double dt5      = dt4 * dt;
-    const double inv_dt   = 1.0 / dt;
-    const double inv_dt2  = inv_dt * inv_dt;
-    const double inv_dt3  = inv_dt2 * inv_dt;
-    const double inv_dt4  = inv_dt2 * inv_dt2;
-    const double inv_dt5  = inv_dt4 * inv_dt;
-    const auto nbins_d    = static_cast<double>(nbins);
-    const double dphi     = eta / nbins_d;
-    const double d5_range = param_limits[0].max - param_limits[0].min;
-    const double d4_range = param_limits[1].max - param_limits[1].min;
-    const double d3_range = param_limits[2].max - param_limits[2].min;
-    const double d2_range = param_limits[3].max - param_limits[3].min;
-    const double f0_range = param_limits[4].max - param_limits[4].min;
+    const auto [_, dt]   = coord_cur; // t_obs - t_ref
+    const double dt2     = dt * dt;
+    const double dt3     = dt2 * dt;
+    const double dt4     = dt2 * dt2;
+    const double dt5     = dt4 * dt;
+    const double inv_dt  = 1.0 / dt;
+    const double inv_dt2 = inv_dt * inv_dt;
+    const double inv_dt3 = inv_dt2 * inv_dt;
+    const double inv_dt4 = inv_dt2 * inv_dt2;
+    const double inv_dt5 = inv_dt4 * inv_dt;
+    const auto nbins_d   = static_cast<double>(nbins);
+    const double dphi    = eta / nbins_d;
 
     // Use leaves_branch memory as workspace.
     const SizeType workspace_size      = leaves_branch.size();
@@ -190,18 +184,17 @@ SizeType circ_taylor_branch_batch(std::span<const double> leaves_tree,
         const auto f0         = leaves_tree_ptr[lo + 12];
 
         const auto dfactor    = utils::kCval / f0;
-        const auto d1_range   = dfactor * f0_range;
         const auto d5_sig_new = dphi * dfactor * 1920.0 * inv_dt5;
         const auto d4_sig_new = dphi * dfactor * 192.0 * inv_dt4;
         const auto d3_sig_new = dphi * dfactor * 24.0 * inv_dt3;
         const auto d2_sig_new = dphi * dfactor * 4.0 * inv_dt2;
         const auto d1_sig_new = dphi * dfactor * 1.0 * inv_dt;
 
-        dparam_new_ptr[fb + 0] = std::min(d5_sig_new, d5_range);
-        dparam_new_ptr[fb + 1] = std::min(d4_sig_new, d4_range);
-        dparam_new_ptr[fb + 2] = std::min(d3_sig_new, d3_range);
-        dparam_new_ptr[fb + 3] = std::min(d2_sig_new, d2_range);
-        dparam_new_ptr[fb + 4] = std::min(d1_sig_new, d1_range);
+        dparam_new_ptr[fb + 0] = d5_sig_new;
+        dparam_new_ptr[fb + 1] = d4_sig_new;
+        dparam_new_ptr[fb + 2] = d3_sig_new;
+        dparam_new_ptr[fb + 3] = d2_sig_new;
+        dparam_new_ptr[fb + 4] = d1_sig_new;
 
         shift_bins_ptr[fb + 0] = std::abs(d5_sig_cur - d5_sig_new) * dt5 *
                                  nbins_d / (1920.0 * dfactor);
@@ -994,21 +987,17 @@ void circ_taylor_transform_batch(std::span<double> leaves_tree,
 std::vector<double>
 generate_bp_circ_taylor(std::span<const std::vector<double>> param_arr,
                         std::span<const double> dparams,
-                        std::span<const ParamLimit> param_limits,
                         double tseg_ffa,
                         SizeType nsegments,
                         SizeType nbins,
                         double eta,
                         SizeType ref_seg,
-                        double minimum_snap_cells,
                         bool use_conservative_tile) {
     constexpr SizeType kParamsExpected = 5;
     error_check::check_equal(param_arr.size(), kParamsExpected,
                              "param_arr must have 5 parameters");
     error_check::check_equal(dparams.size(), kParamsExpected,
                              "dparams must have 5 parameters");
-    error_check::check_equal(param_limits.size(), kParamsExpected,
-                             "param_limits must have 5 parameters");
     const auto n_params  = dparams.size();
     const auto& f0_batch = param_arr.back(); // Last array is frequency
     const auto n_freqs   = f0_batch.size();  // Number of frequency bins
@@ -1038,6 +1027,7 @@ generate_bp_circ_taylor(std::span<const std::vector<double>> param_arr,
     std::vector<double> shift_bins_batch(n_freqs * n_params, 0.0);
     std::vector<double> dparam_cur_next(n_freqs * n_params, 0.0);
     std::vector<double> n_branches(n_freqs, 1.0);
+    std::vector<double> n_branches_snap(n_freqs, 1.0);
     const auto n_params_d = n_params + 1;
     std::vector<double> dparam_d_vec(n_freqs * n_params_d, 0.0);
 
@@ -1052,11 +1042,9 @@ generate_bp_circ_taylor(std::span<const std::vector<double>> param_arr,
         psr_utils::poly_taylor_shift_d_vec(
             dparam_cur_batch, dparam_new_batch, t_obs_minus_t_ref, nbins,
             f0_batch, 0, shift_bins_batch, n_freqs, n_params);
-        psr_utils::poly_taylor_step_d_vec_limited(
-            n_params, t_obs_minus_t_ref, nbins, eta, f0_batch, param_limits,
-            dparam_new_batch, 0);
 
         std::ranges::fill(n_branches, 1.0);
+        std::ranges::fill(n_branches_snap, 1.0);
         // Determine branching needs
         for (SizeType i = 0; i < n_freqs; ++i) {
             for (SizeType j = 1; j < n_params; ++j) {
@@ -1067,19 +1055,20 @@ generate_bp_circ_taylor(std::span<const std::vector<double>> param_arr,
                 }
                 const auto ratio =
                     (dparam_cur_batch[idx]) / (dparam_new_batch[idx]);
-                const auto num_points = std::max(
-                    1, static_cast<int>(std::ceil(ratio - utils::kFloatEps)));
+                const SizeType num_points = std::max(
+                    1UL,
+                    static_cast<SizeType>(std::ceil(ratio - utils::kFloatEps)));
                 n_branches[i] *= static_cast<double>(num_points);
                 dparam_cur_next[idx] =
                     dparam_cur_batch[idx] / static_cast<double>(num_points);
+                if (j == 1) {
+                    n_branches_snap[i] *= static_cast<double>(num_points);
+                }
             }
         }
         // Determine validation fraction
         for (SizeType i = 0; i < n_freqs; ++i) {
-            const auto snap_val = param_limits[1].max;
-            const auto dsnap    = dparam_cur_next[(i * n_params) + 1];
-            const auto snap_active =
-                std::abs(snap_val) > (minimum_snap_cells * dsnap);
+            const auto snap_active = n_branches_snap[i] > 1.0;
             // Apply 0.5x if this is the first time snap becomes active
             const bool just_active = snap_active && !snap_first_branched[i];
             n_branches[i] *= just_active ? 0.5 : 1.0;

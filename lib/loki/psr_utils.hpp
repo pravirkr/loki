@@ -1,8 +1,8 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <format>
-#include <limits>
 #include <numeric>
 #include <ranges>
 #include <span>
@@ -93,15 +93,6 @@ void poly_taylor_step_d_vec(SizeType nparams,
                             std::span<double> dparams_batch,
                             double t_ref = 0.0);
 
-void poly_taylor_step_d_vec_limited(SizeType nparams,
-                                    double tobs,
-                                    SizeType nbins,
-                                    double eta,
-                                    std::span<const double> f_max,
-                                    std::span<const ParamLimit> param_limits,
-                                    std::span<double> dparams_batch,
-                                    double t_ref = 0.0);
-
 // Check if a parameter should be split
 bool split_f(double df_old,
              double df_new,
@@ -135,14 +126,6 @@ void poly_cheb_step_vec(SizeType n_params,
                         std::span<const double> f0_batch,
                         std::span<double> dparams_batch);
 
-void poly_cheb_step_vec_limited(SizeType n_params,
-                                double scale_cur,
-                                SizeType nbins,
-                                double eta,
-                                std::span<const double> f0_batch,
-                                std::span<const ParamLimit> param_limits,
-                                std::span<double> dparams_batch);
-
 void poly_cheb_shift_vec(std::span<const double> dparam_old,
                          std::span<const double> dparam_new,
                          SizeType nbins,
@@ -151,13 +134,30 @@ void poly_cheb_shift_vec(std::span<const double> dparam_old,
                          SizeType nbatch,
                          SizeType nparams);
 
-// Refine a parameter range around a current value with a finer step size.
+/**
+ * @brief Perfectly sub-divide a parent parameter cell into contiguous child cells.
+ *
+ * DESIGN NOTE: Exact Contiguous Splitting
+ * This physically partitions the parent cell into `num_points` equal sub-cells.
+ * The outermost edges of the extreme child cells sit perfectly flush with the
+ * boundaries of the parent cell, ensuring zero overlap and zero gaps between
+ * adjacent branches in the hierarchical tree.
+ *
+ * The function assumes that parameter values outside the allowed search
+ * domain will be handled elsewhere (e.g. in the FFA init step). Therefore
+ * it does not enforce parameter limits internally.
+ *
+ * @param param_cur Current parameter value (centre of the parent cell).
+ * @param dparam_cur Current grid spacing of the parameter dimension. Should be trunctaed as per
+ * search range.
+ * @param dparam_new Desired grid spacing for the refined search stage. The actual spacing
+ * used may differ slightly in order to maintain symmetry.
+ * @return std::tuple<std::vector<double>, double> Array of new parameter values
+ * for the child cells and the actual grid spacing used for the refined search
+ * stage.
+ */
 std::tuple<std::vector<double>, double>
-branch_param(double param_cur,
-             double dparam_cur,
-             double dparam_new,
-             double param_min = std::numeric_limits<double>::lowest(),
-             double param_max = std::numeric_limits<double>::max());
+branch_param(double param_cur, double dparam_cur, double dparam_new);
 
 // Refine a parameter range around a current value with a finer step size.
 // The output is written to a pre-allocated array in a slice to write into
@@ -235,40 +235,61 @@ branch_one_param_padded_crackle(SizeType p,
 inline SizeType range_param_count(double vmin, double vmax, double dv) {
     error_check::check_greater(vmax, vmin, "vmax must be greater than vmin");
     error_check::check_greater(dv, 0, "dv must be positive");
-    // Check if step size is larger than half the range
-    if (dv > (vmax - vmin) / 2.0) {
+    if (dv >= (vmax - vmin)) {
         return 1;
     }
-    // np.linspace(vmin, vmax, npoints + 2)[1:-1]
-    return static_cast<SizeType>((vmax - vmin) / dv);
+    return static_cast<SizeType>(std::ceil((vmax - vmin) / dv));
 }
 
-// Generate an evenly spaced array of values between vmin and vmax.
+/**
+ * @brief Generate an array of cell centres that perfectly tile the parameter
+ * space.
+ *
+ * @param vmin Minimum boundary of the parameter space.
+ * @param vmax Maximum boundary of the parameter space.
+ * @param dv Desired step size. Actual spacing will be <= dv to ensure perfect
+ * tiling.
+ * @return Array of cell centres uniformly spaced.
+ */
 inline std::vector<double> range_param(double vmin, double vmax, double dv) {
     error_check::check_greater(vmax, vmin, "vmax must be greater than vmin");
     error_check::check_greater(dv, 0, "dv must be positive");
-    // Check if step size is larger than half the range
-    if (dv > (vmax - vmin) / 2.0) {
+    if (dv >= (vmax - vmin)) {
         return {(vmax + vmin) / 2.0};
     }
-    // np.linspace(vmin, vmax, npoints + 2)[1:-1]
-    const auto npoints = static_cast<SizeType>((vmax - vmin) / dv);
+    const auto npoints = static_cast<SizeType>(std::ceil((vmax - vmin) / dv));
+    const double dv_actual = (vmax - vmin) / static_cast<double>(npoints);
 
     std::vector<double> result(npoints);
-    const auto step = (vmax - vmin) / static_cast<double>(npoints + 1);
-    // Start from i=1, end at i=total_points-1 (exclusive)
+    const double start = vmin + (0.5 * dv_actual);
+    // np.linspace(vmin + (dv_actual / 2.0), vmax - (dv_actual / 2.0), npoints)
     for (SizeType i = 0; i < npoints; ++i) {
-        result[i] = vmin + (step * static_cast<double>(i + 1));
+        result[i] = start + (dv_actual * static_cast<double>(i));
     }
     return result;
 }
 
-// Compute the range_param on the fly
+/**
+ * @brief Compute the parameter value at a specific grid index on the fly.
+ *
+ * This lazily evaluates the exact contiguous tiling geometry without allocating
+ * the full array.
+ *
+ * @param limit The parameter limits (min and max).
+ * @param count The total number of points in the grid.
+ * @param i The target index.
+ * @return The physical centre value of the cell at index i.
+ */
 inline double
 get_param_val_at_idx(const ParamLimit& limit, SizeType count, SizeType i) {
-    const double step =
-        (limit.max - limit.min) / static_cast<double>(count + 1);
-    return limit.min + (step * static_cast<double>(i + 1));
+    // Safeguard against 0 or 1 point grids (center the point exactly in the
+    // middle)
+    if (count <= 1) {
+        return (limit.max + limit.min) / 2.0;
+    }
+    const double dv_actual =
+        (limit.max - limit.min) / static_cast<double>(count);
+    return limit.min + (dv_actual * (static_cast<double>(i) + 0.5));
 }
 
 /**
@@ -283,15 +304,12 @@ get_param_val_at_idx(const ParamLimit& limit, SizeType count, SizeType i) {
 inline SizeType get_nearest_idx_analytical(double val,
                                            const ParamLimit& limit,
                                            SizeType count) {
-    if (count == 0) {
+    if (count <= 1) {
         return 0;
     }
-    const double step_inv =
-        static_cast<double>(count + 1) / (limit.max - limit.min);
-    const double raw_idx = ((val - limit.min) * step_inv) - 1.0;
-
-    // explicit half-up
-    const auto idx = static_cast<int>(raw_idx + 0.5 + utils::kFloatEps);
+    const double raw_idx = static_cast<double>(count) * (val - limit.min) /
+                           (limit.max - limit.min);
+    const auto idx       = static_cast<int>(raw_idx + utils::kFloatEps);
     if (idx < 0) {
         return 0;
     }

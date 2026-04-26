@@ -66,9 +66,9 @@ public:
     /// @brief Grid step sizes for each parameter.
     [[nodiscard]] const std::vector<std::vector<double>>&
     get_dparams() const noexcept;
-    /// @brief Grid step size (limited) for each parameter.
+    /// @brief Grid step size (actual) for each parameter.
     [[nodiscard]] const std::vector<std::vector<double>>&
-    get_dparams_lim() const noexcept;
+    get_dparams_actual() const noexcept;
     /// @brief Get the total number of coordinates across all levels.
     SizeType get_coord_size() const noexcept;
     /// @brief Get the memory usage of the coordinate storage (in GB).

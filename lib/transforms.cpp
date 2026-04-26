@@ -177,6 +177,64 @@ void shift_cheb_errors_batch(std::span<double> cheb_error_batch,
     }
 }
 
+void taylor_to_cheby_errors_batch(std::span<double> taylor_error_batch,
+                                  double ts,
+                                  SizeType n_batch,
+                                  SizeType n_params) {
+    const double ts2  = ts * ts;
+    const double ts3  = ts2 * ts;
+    const double ts4  = ts3 * ts;
+    const double w2_2 = (ts2 / 2.0) * 0.5;
+    const double w4_4 = (ts4 / 24.0) * 0.125;
+    const double w3_3 = (ts3 / 6.0) * 0.25;
+    const double w4_2 = (ts4 / 24.0) * 0.5;
+    const double w3_1 = (ts3 / 6.0) * 0.75;
+
+    if (n_params == 2) {
+        for (SizeType i = 0; i < n_batch; ++i) {
+            const double d2_err = taylor_error_batch[(i * n_params) + 0];
+            const double d1_err = taylor_error_batch[(i * n_params) + 1];
+            taylor_error_batch[(i * n_params) + 0] = d2_err * w2_2;
+            taylor_error_batch[(i * n_params) + 1] = d1_err * ts;
+        }
+        return;
+    }
+    if (n_params == 3) {
+        for (SizeType i = 0; i < n_batch; ++i) {
+            const double d3_err = taylor_error_batch[(i * n_params) + 0];
+            const double d2_err = taylor_error_batch[(i * n_params) + 1];
+            const double d1_err = taylor_error_batch[(i * n_params) + 2];
+            const double e3_1   = d3_err * w3_1;
+            const double e1_ts  = d1_err * ts;
+            taylor_error_batch[(i * n_params) + 0] = d3_err * w3_3;
+            taylor_error_batch[(i * n_params) + 1] = d2_err * w2_2;
+            taylor_error_batch[(i * n_params) + 2] =
+                std::sqrt((e1_ts * e1_ts) + (e3_1 * e3_1));
+        }
+        return;
+    }
+    if (n_params == 4) {
+        for (SizeType i = 0; i < n_batch; ++i) {
+            const double d4_err = taylor_error_batch[(i * n_params) + 0];
+            const double d3_err = taylor_error_batch[(i * n_params) + 1];
+            const double d2_err = taylor_error_batch[(i * n_params) + 2];
+            const double d1_err = taylor_error_batch[(i * n_params) + 3];
+            const double e4_2  = d4_err * w4_2;
+            const double e2_2  = d2_err * w2_2;
+            const double e3_1  = d3_err * w3_1;
+            const double e1_ts = d1_err * ts;
+            taylor_error_batch[(i * n_params) + 0] = d4_err * w4_4;
+            taylor_error_batch[(i * n_params) + 1] = d3_err * w3_3;
+            taylor_error_batch[(i * n_params) + 2] =
+                std::sqrt((e2_2 * e2_2) + (e4_2 * e4_2));
+            taylor_error_batch[(i * n_params) + 3] =
+                std::sqrt((e1_ts * e1_ts) + (e3_1 * e3_1));
+        }
+        return;
+    }
+    throw std::invalid_argument("n_params > 4 not supported");
+}
+
 void taylor_to_chebyshev_limits_full(std::span<const double> taylor_limits,
                                      SizeType n_batch,
                                      SizeType n_params,

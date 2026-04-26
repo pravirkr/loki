@@ -128,4 +128,9 @@ determine_ref_segs(SizeType nsegments,
                    std::optional<SizeType> n_runs,
                    std::optional<std::vector<SizeType>> ref_segs);
 
+std::vector<SizeType>
+determine_ref_segs_pareto(SizeType nsegments,
+                          std::optional<SizeType> n_runs,
+                          std::optional<std::vector<SizeType>> ref_segs);
+
 } // namespace loki::utils

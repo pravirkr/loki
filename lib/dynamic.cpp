@@ -272,9 +272,8 @@ SizeType PrunePolyTaylorDPFuncts<FoldType>::branch(
     memory::BranchingWorkspace& branch_ws) const {
     return poly_taylor_branch_batch(
         leaves_tree, leaves_branch, leaves_origins, coord_cur,
-        this->m_cfg.get_nbins(), this->m_cfg.get_eta(),
-        this->m_cfg.get_param_limits(), this->m_branch_max, n_leaves,
-        this->m_cfg.get_nparams(), branch_ws);
+        this->m_cfg.get_nbins(), this->m_cfg.get_eta(), this->m_branch_max,
+        n_leaves, this->m_cfg.get_nparams(), branch_ws);
 }
 
 template <SupportedFoldType FoldType>
@@ -408,9 +407,8 @@ SizeType PrunePolyChebyshevDPFuncts<FoldType>::branch(
     memory::BranchingWorkspace& branch_ws) const {
     return poly_chebyshev_branch_batch(
         leaves_tree, leaves_branch, leaves_origins, coord_cur, coord_prev,
-        this->m_cfg.get_nbins(), this->m_cfg.get_eta(),
-        this->m_cfg.get_param_limits(), this->m_branch_max, n_leaves,
-        this->m_cfg.get_nparams(), branch_ws);
+        this->m_cfg.get_nbins(), this->m_cfg.get_eta(), this->m_branch_max,
+        n_leaves, this->m_cfg.get_nparams(), branch_ws);
 }
 
 template <SupportedFoldType FoldType>
@@ -550,9 +548,8 @@ SizeType PruneCircTaylorDPFuncts<FoldType>::branch(
     memory::BranchingWorkspace& branch_ws) const {
     return circ_taylor_branch_batch(
         leaves_tree, leaves_branch, leaves_origins, coord_cur,
-        this->m_cfg.get_nbins(), this->m_cfg.get_eta(),
-        this->m_cfg.get_param_limits(), this->m_branch_max, n_leaves,
-        this->m_cfg.get_minimum_snap_cells(), branch_ws);
+        this->m_cfg.get_nbins(), this->m_cfg.get_eta(), this->m_branch_max,
+        n_leaves, this->m_cfg.get_minimum_snap_cells(), branch_ws);
 }
 
 template <SupportedFoldType FoldType>

@@ -275,8 +275,7 @@ SizeType PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>::branch(
     cudaStream_t stream) {
     return poly_taylor_branch_batch_cuda(
         leaves_tree, leaves_branch, leaves_origins, validation_mask, coord_cur,
-        this->m_cfg.get_nbins(), this->m_cfg.get_eta(),
-        cuda_utils::as_span(this->m_param_limits_d), this->m_branch_max,
+        this->m_cfg.get_nbins(), this->m_cfg.get_eta(), this->m_branch_max,
         n_leaves, this->m_cfg.get_nparams(), branch_ws, scratch_ws, stream);
 }
 
@@ -426,8 +425,8 @@ SizeType PrunePolyChebyshevDPFunctsCUDA<FoldTypeCUDA>::branch(
     return poly_chebyshev_branch_batch_cuda(
         leaves_tree, leaves_branch, leaves_origins, validation_mask, coord_cur,
         coord_prev, this->m_cfg.get_nbins(), this->m_cfg.get_eta(),
-        cuda_utils::as_span(this->m_param_limits_d), this->m_branch_max,
-        n_leaves, this->m_cfg.get_nparams(), branch_ws, scratch_ws, stream);
+        this->m_branch_max, n_leaves, this->m_cfg.get_nparams(), branch_ws,
+        scratch_ws, stream);
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
@@ -582,8 +581,7 @@ SizeType PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>::branch(
     cudaStream_t stream) {
     return circ_taylor_branch_batch_cuda(
         leaves_tree, leaves_branch, leaves_origins, validation_mask, coord_cur,
-        this->m_cfg.get_nbins(), this->m_cfg.get_eta(),
-        cuda_utils::as_span(this->m_param_limits_d), this->m_branch_max,
+        this->m_cfg.get_nbins(), this->m_cfg.get_eta(), this->m_branch_max,
         n_leaves, this->m_cfg.get_minimum_snap_cells(), branch_ws, scratch_ws,
         stream);
 }

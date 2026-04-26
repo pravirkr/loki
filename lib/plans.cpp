@@ -28,7 +28,7 @@ struct FFAPlanBase::Impl {
     std::vector<std::vector<SizeType>> param_counts; // param count per level
     std::vector<std::vector<SizeType>> param_cart_strides; // Cartesian strides
     std::vector<std::vector<double>> dparams;              // Grid step sizes
-    std::vector<std::vector<double>> dparams_lim; // Grid step size (limits)
+    std::vector<std::vector<double>> dparams_act; // Grid step size (actual)
 
     explicit Impl(search::PulsarSearchConfig cfg) : m_cfg(std::move(cfg)) {
         configure_plan();
@@ -194,7 +194,7 @@ struct FFAPlanBase::Impl {
                                  IndexType isuggest) const {
         if (poly_basis == "taylor") {
             return core::generate_bp_poly_taylor_approx(
-                param_counts[n_levels - 1], dparams_lim[n_levels - 1],
+                param_counts[n_levels - 1], dparams_act[n_levels - 1],
                 m_cfg.get_param_limits(), m_cfg.get_tseg_ffa(),
                 nsegments[n_levels - 1], m_cfg.get_nbins(), m_cfg.get_eta(),
                 ref_seg, isuggest, m_cfg.get_use_conservative_tile());
@@ -206,7 +206,7 @@ struct FFAPlanBase::Impl {
                     "branching pattern generation");
             }
             return core::generate_bp_poly_chebyshev_approx(
-                param_counts[n_levels - 1], dparams_lim[n_levels - 1],
+                param_counts[n_levels - 1], dparams_act[n_levels - 1],
                 m_cfg.get_param_limits(), m_cfg.get_tseg_ffa(),
                 nsegments[n_levels - 1], m_cfg.get_nbins(), m_cfg.get_eta(),
                 ref_seg, isuggest);
@@ -222,18 +222,15 @@ struct FFAPlanBase::Impl {
         if (poly_basis == "taylor") {
             if (n_params <= 4) {
                 return core::generate_bp_poly_taylor(
-                    param_arr, dparams_lim[n_levels - 1],
-                    m_cfg.get_param_limits(), m_cfg.get_tseg_ffa(),
+                    param_arr, dparams_act[n_levels - 1], m_cfg.get_tseg_ffa(),
                     nsegments[n_levels - 1], m_cfg.get_nbins(), m_cfg.get_eta(),
                     ref_seg, m_cfg.get_use_conservative_tile());
             }
             if (n_params == 5) {
                 return core::generate_bp_circ_taylor(
-                    param_arr, dparams_lim[n_levels - 1],
-                    m_cfg.get_param_limits(), m_cfg.get_tseg_ffa(),
+                    param_arr, dparams_act[n_levels - 1], m_cfg.get_tseg_ffa(),
                     nsegments[n_levels - 1], m_cfg.get_nbins(), m_cfg.get_eta(),
-                    ref_seg, m_cfg.get_minimum_snap_cells(),
-                    m_cfg.get_use_conservative_tile());
+                    ref_seg, m_cfg.get_use_conservative_tile());
             }
             throw std::invalid_argument("nparams > 5 not supported for "
                                         "branching pattern generation");
@@ -251,8 +248,7 @@ struct FFAPlanBase::Impl {
             }
             if (n_params <= 4) {
                 return core::generate_bp_poly_chebyshev(
-                    param_arr, dparams_lim[n_levels - 1],
-                    m_cfg.get_param_limits(), m_cfg.get_tseg_ffa(),
+                    param_arr, dparams_act[n_levels - 1], m_cfg.get_tseg_ffa(),
                     nsegments[n_levels - 1], m_cfg.get_nbins(), m_cfg.get_eta(),
                     ref_seg);
             }
@@ -279,28 +275,27 @@ private:
         param_counts.resize(levels);
         param_cart_strides.resize(levels);
         dparams.resize(levels);
-        dparams_lim.resize(levels);
+        dparams_act.resize(levels);
 
         for (SizeType i_level = 0; i_level < levels; ++i_level) {
             const auto segment_len = m_cfg.get_bseg_brute() * (1U << i_level);
             const auto tsegment =
                 static_cast<double>(segment_len) * m_cfg.get_tsamp();
-            const auto nsegments_cur  = m_cfg.get_nsamps() / segment_len;
-            const auto dparam_arr     = m_cfg.get_dparams(tsegment);
-            const auto dparam_arr_lim = m_cfg.get_dparams_lim(tsegment);
+            const auto nsegments_cur    = m_cfg.get_nsamps() / segment_len;
+            const auto dparam_arr       = m_cfg.get_dparams(tsegment);
+            const auto dparam_arr_act   = m_cfg.get_dparams_actual(tsegment);
+            const auto param_grid_count = m_cfg.get_param_grid_count(tsegment);
 
             segment_lens[i_level] = segment_len;
             nsegments[i_level]    = nsegments_cur;
             tsegments[i_level]    = tsegment;
             dparams[i_level]      = dparam_arr;
-            dparams_lim[i_level]  = dparam_arr_lim;
+            dparams_act[i_level]  = dparam_arr_act;
             param_counts[i_level].resize(n_params);
 
             SizeType ncoords_level = 1;
             for (SizeType iparam = 0; iparam < n_params; ++iparam) {
-                const auto param_size_cur = psr_utils::range_param_count(
-                    m_cfg.get_param_limits()[iparam].min,
-                    m_cfg.get_param_limits()[iparam].max, dparam_arr[iparam]);
+                const auto param_size_cur     = param_grid_count[iparam];
                 param_counts[i_level][iparam] = param_size_cur;
                 ncoords_level *= param_size_cur;
                 param_counts_flat[(i_level * n_params) + iparam] =
@@ -394,8 +389,8 @@ FFAPlanBase::get_dparams() const noexcept {
     return m_impl->dparams;
 }
 const std::vector<std::vector<double>>&
-FFAPlanBase::get_dparams_lim() const noexcept {
-    return m_impl->dparams_lim;
+FFAPlanBase::get_dparams_actual() const noexcept {
+    return m_impl->dparams_act;
 }
 SizeType FFAPlanBase::get_coord_size() const noexcept {
     return m_impl->get_coord_size();

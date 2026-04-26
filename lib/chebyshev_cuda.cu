@@ -320,7 +320,6 @@ __device__ __forceinline__ void analyze_and_branch_chebyshev_accel(
     cuda::std::pair<double, double> coord_cur,
     double nbins,
     double eta,
-    const ParamLimit* __restrict__ param_limits,
     uint32_t branch_max,
     memory::BranchingWorkspaceCUDAView branch_ws) {
     constexpr SizeType kParams       = 2;
@@ -341,29 +340,20 @@ __device__ __forceinline__ void analyze_and_branch_chebyshev_accel(
     const double alpha_1_sig_cur = leaves_tree[lo + 3];
     const double f0              = leaves_tree[lo + 6];
 
-    const double ts        = coord_cur.second;
-    const double ts2       = ts * ts;
     const double dphi      = eta / nbins;
     const double dfactor   = utils::kCval / f0;
     const double base_step = dphi * dfactor;
     const double inv_base  = nbins / dfactor;
 
-    const double d2_range        = param_limits[0].max - param_limits[0].min;
-    const double f0_range        = param_limits[1].max - param_limits[1].min;
-    const double alpha_2_range   = 0.25 * d2_range * ts2;
-    const double alpha_1_range   = dfactor * f0_range * ts;
-    const double alpha_2_sig_new = cuda::std::min(base_step, alpha_2_range);
-    const double alpha_1_sig_new = cuda::std::min(base_step, alpha_1_range);
-
     const double shift_alpha_2 = (alpha_2_sig_cur - base_step) * inv_base;
     const double shift_alpha_1 = (alpha_1_sig_cur - base_step) * inv_base;
 
     utils::branch_one_param_padded_device(
-        0, alpha_2_cur, alpha_2_sig_cur, alpha_2_sig_new, eta, shift_alpha_2,
+        0, alpha_2_cur, alpha_2_sig_cur, base_step, eta, shift_alpha_2,
         branch_ws.scratch_params, branch_ws.scratch_dparams,
         branch_ws.scratch_counts, fb, branch_max);
     utils::branch_one_param_padded_device(
-        1, alpha_1_cur, alpha_1_sig_cur, alpha_1_sig_new, eta, shift_alpha_1,
+        1, alpha_1_cur, alpha_1_sig_cur, base_step, eta, shift_alpha_1,
         branch_ws.scratch_params, branch_ws.scratch_dparams,
         branch_ws.scratch_counts, fb, branch_max);
 
@@ -379,7 +369,6 @@ __device__ __forceinline__ void analyze_and_branch_chebyshev_jerk(
     cuda::std::pair<double, double> coord_cur,
     double nbins,
     double eta,
-    const ParamLimit* __restrict__ param_limits,
     uint32_t branch_max,
     memory::BranchingWorkspaceCUDAView branch_ws) {
     constexpr SizeType kParams       = 3;
@@ -410,31 +399,20 @@ __device__ __forceinline__ void analyze_and_branch_chebyshev_jerk(
     const double base_step = dphi * dfactor;
     const double inv_base  = nbins / dfactor;
 
-    const double d3_range      = param_limits[0].max - param_limits[0].min;
-    const double d2_range      = param_limits[1].max - param_limits[1].min;
-    const double f0_range      = param_limits[2].max - param_limits[2].min;
-    const double alpha_3_range = d3_range * ts3 / 24.0;
-    const double alpha_2_range = d2_range * ts2 / 4.0;
-    const double alpha_1_range =
-        (dfactor * f0_range * ts) + (d3_range * ts3 / 8.0);
-    const double alpha_3_sig_new = cuda::std::min(base_step, alpha_3_range);
-    const double alpha_2_sig_new = cuda::std::min(base_step, alpha_2_range);
-    const double alpha_1_sig_new = cuda::std::min(base_step, alpha_1_range);
-
     const double shift_alpha_3 = (alpha_3_sig_cur - base_step) * inv_base;
     const double shift_alpha_2 = (alpha_2_sig_cur - base_step) * inv_base;
     const double shift_alpha_1 = (alpha_1_sig_cur - base_step) * inv_base;
 
     utils::branch_one_param_padded_device(
-        0, alpha_3_cur, alpha_3_sig_cur, alpha_3_sig_new, eta, shift_alpha_3,
+        0, alpha_3_cur, alpha_3_sig_cur, base_step, eta, shift_alpha_3,
         branch_ws.scratch_params, branch_ws.scratch_dparams,
         branch_ws.scratch_counts, fb, branch_max);
     utils::branch_one_param_padded_device(
-        1, alpha_2_cur, alpha_2_sig_cur, alpha_2_sig_new, eta, shift_alpha_2,
+        1, alpha_2_cur, alpha_2_sig_cur, base_step, eta, shift_alpha_2,
         branch_ws.scratch_params, branch_ws.scratch_dparams,
         branch_ws.scratch_counts, fb, branch_max);
     utils::branch_one_param_padded_device(
-        2, alpha_1_cur, alpha_1_sig_cur, alpha_1_sig_new, eta, shift_alpha_1,
+        2, alpha_1_cur, alpha_1_sig_cur, base_step, eta, shift_alpha_1,
         branch_ws.scratch_params, branch_ws.scratch_dparams,
         branch_ws.scratch_counts, fb, branch_max);
 
@@ -451,7 +429,6 @@ __device__ __forceinline__ void analyze_and_branch_chebyshev_snap(
     cuda::std::pair<double, double> coord_cur,
     double nbins,
     double eta,
-    const ParamLimit* __restrict__ param_limits,
     uint32_t branch_max,
     memory::BranchingWorkspaceCUDAView branch_ws) {
     constexpr SizeType kParams       = 4;
@@ -485,40 +462,25 @@ __device__ __forceinline__ void analyze_and_branch_chebyshev_snap(
     const double base_step = dphi * dfactor;
     const double inv_base  = nbins / dfactor;
 
-    const double d4_range      = param_limits[0].max - param_limits[0].min;
-    const double d3_range      = param_limits[1].max - param_limits[1].min;
-    const double d2_range      = param_limits[2].max - param_limits[2].min;
-    const double f0_range      = param_limits[3].max - param_limits[3].min;
-    const double alpha_4_range = d4_range * ts4 / 192.0;
-    const double alpha_3_range = d3_range * ts3 / 24.0;
-    const double alpha_2_range =
-        (d2_range * ts2 / 4.0) + (d4_range * ts4 / 48.0);
-    const double alpha_1_range =
-        (dfactor * f0_range * ts) + (d3_range * ts3 / 8.0);
-    const double alpha_4_sig_new = cuda::std::min(base_step, alpha_4_range);
-    const double alpha_3_sig_new = cuda::std::min(base_step, alpha_3_range);
-    const double alpha_2_sig_new = cuda::std::min(base_step, alpha_2_range);
-    const double alpha_1_sig_new = cuda::std::min(base_step, alpha_1_range);
-
     const double shift_alpha_4 = (alpha_4_sig_cur - base_step) * inv_base;
     const double shift_alpha_3 = (alpha_3_sig_cur - base_step) * inv_base;
     const double shift_alpha_2 = (alpha_2_sig_cur - base_step) * inv_base;
     const double shift_alpha_1 = (alpha_1_sig_cur - base_step) * inv_base;
 
     utils::branch_one_param_padded_device(
-        0, alpha_4_cur, alpha_4_sig_cur, alpha_4_sig_new, eta, shift_alpha_4,
+        0, alpha_4_cur, alpha_4_sig_cur, base_step, eta, shift_alpha_4,
         branch_ws.scratch_params, branch_ws.scratch_dparams,
         branch_ws.scratch_counts, fb, branch_max);
     utils::branch_one_param_padded_device(
-        1, alpha_3_cur, alpha_3_sig_cur, alpha_3_sig_new, eta, shift_alpha_3,
+        1, alpha_3_cur, alpha_3_sig_cur, base_step, eta, shift_alpha_3,
         branch_ws.scratch_params, branch_ws.scratch_dparams,
         branch_ws.scratch_counts, fb, branch_max);
     utils::branch_one_param_padded_device(
-        2, alpha_2_cur, alpha_2_sig_cur, alpha_2_sig_new, eta, shift_alpha_2,
+        2, alpha_2_cur, alpha_2_sig_cur, base_step, eta, shift_alpha_2,
         branch_ws.scratch_params, branch_ws.scratch_dparams,
         branch_ws.scratch_counts, fb, branch_max);
     utils::branch_one_param_padded_device(
-        3, alpha_1_cur, alpha_1_sig_cur, alpha_1_sig_new, eta, shift_alpha_1,
+        3, alpha_1_cur, alpha_1_sig_cur, base_step, eta, shift_alpha_1,
         branch_ws.scratch_params, branch_ws.scratch_dparams,
         branch_ws.scratch_counts, fb, branch_max);
 
@@ -1247,21 +1209,17 @@ __global__ void kernel_poly_chebyshev_analyze_and_branch_batch(
     cuda::std::pair<double, double> coord_cur,
     double nbins,
     double eta,
-    const ParamLimit* __restrict__ param_limits,
     uint32_t branch_max,
     memory::BranchingWorkspaceCUDAView branch_ws) {
     if constexpr (NPARAMS == 2) {
         analyze_and_branch_chebyshev_accel(leaves_tree, n_leaves, coord_cur,
-                                           nbins, eta, param_limits, branch_max,
-                                           branch_ws);
+                                           nbins, eta, branch_max, branch_ws);
     } else if constexpr (NPARAMS == 3) {
         analyze_and_branch_chebyshev_jerk(leaves_tree, n_leaves, coord_cur,
-                                          nbins, eta, param_limits, branch_max,
-                                          branch_ws);
+                                          nbins, eta, branch_max, branch_ws);
     } else if constexpr (NPARAMS == 4) {
         analyze_and_branch_chebyshev_snap(leaves_tree, n_leaves, coord_cur,
-                                          nbins, eta, param_limits, branch_max,
-                                          branch_ws);
+                                          nbins, eta, branch_max, branch_ws);
     } else {
         static_assert(NPARAMS <= 4, "Unsupported Chebyshev order");
     }
@@ -1473,7 +1431,6 @@ poly_chebyshev_branch_batch_cuda(cuda::std::span<double> leaves_tree,
                                  std::pair<double, double> coord_prev,
                                  SizeType nbins,
                                  double eta,
-                                 cuda::std::span<const ParamLimit> param_limits,
                                  SizeType branch_max,
                                  SizeType n_leaves,
                                  SizeType n_params,
@@ -1524,8 +1481,7 @@ poly_chebyshev_branch_batch_cuda(cuda::std::span<double> leaves_tree,
         kernel_poly_chebyshev_analyze_and_branch_batch<N>
             <<<grid_dim, block_dim, 0, stream>>>(
                 leaves_tree.data(), n_leaves, coord_cur,
-                static_cast<double>(nbins), eta, param_limits.data(),
-                branch_max, branch_ws);
+                static_cast<double>(nbins), eta, branch_max, branch_ws);
     };
 
     switch (n_params) {

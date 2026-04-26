@@ -366,7 +366,7 @@ PYBIND11_MODULE(libloki, m) {
         .def("dparams_f", &PulsarSearchConfig::get_dparams_f,
              py::arg("tseg_cur"))
         .def("dparams", &PulsarSearchConfig::get_dparams, py::arg("tseg_cur"))
-        .def("dparams_lim", &PulsarSearchConfig::get_dparams_lim,
+        .def("dparams_actual", &PulsarSearchConfig::get_dparams_actual,
              py::arg("tseg_cur"));
 
     // Plans submodule
@@ -421,10 +421,10 @@ PYBIND11_MODULE(libloki, m) {
                                [](const FFAPlanBase& self) {
                                    return as_listof_pyarray(self.get_dparams());
                                })
-        .def_property_readonly("dparams_lim",
+        .def_property_readonly("dparams_actual",
                                [](const FFAPlanBase& self) {
                                    return as_listof_pyarray(
-                                       self.get_dparams_lim());
+                                       self.get_dparams_actual());
                                })
         .def_property_readonly("config", &FFAPlanBase::get_config)
         .def_property_readonly("coord_size", &FFAPlanBase::get_coord_size)

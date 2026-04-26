@@ -62,7 +62,6 @@ kernel_analyze_and_branch_circular(const double* __restrict__ leaves_tree,
                                    double dt,
                                    double nbins,
                                    double eta,
-                                   const ParamLimit* __restrict__ param_limits,
                                    uint32_t branch_max,
                                    memory::BranchingWorkspaceCUDAView branch_ws,
                                    memory::CUBScratchArena& scratch_ws) {
@@ -101,13 +100,12 @@ kernel_analyze_and_branch_circular(const double* __restrict__ leaves_tree,
     const double d1_sig_cur = leaves_tree[lo + 9];
     const double f0         = leaves_tree[lo + 12];
 
-    const double dfactor = utils::kCval / f0;
-    double d5_sig_new    = dphi * dfactor * 1920.0 * inv_dt5;
-    double d4_sig_new    = dphi * dfactor * 192.0 * inv_dt4;
-    double d3_sig_new    = dphi * dfactor * 24.0 * inv_dt3;
-    double d2_sig_new    = dphi * dfactor * 4.0 * inv_dt2;
-    double d1_sig_new    = dphi * dfactor * 1.0 * inv_dt;
-
+    const double dfactor    = utils::kCval / f0;
+    const double d5_sig_new = dphi * dfactor * 1920.0 * inv_dt5;
+    const double d4_sig_new = dphi * dfactor * 192.0 * inv_dt4;
+    const double d3_sig_new = dphi * dfactor * 24.0 * inv_dt3;
+    const double d2_sig_new = dphi * dfactor * 4.0 * inv_dt2;
+    const double d1_sig_new = dphi * dfactor * 1.0 * inv_dt;
     const double shift_d5 =
         fabs(d5_sig_cur - d5_sig_new) * dt5 * nbins / (1920.0 * dfactor);
     const double shift_d4 =
@@ -118,19 +116,6 @@ kernel_analyze_and_branch_circular(const double* __restrict__ leaves_tree,
         fabs(d2_sig_cur - d2_sig_new) * dt2 * nbins / (4.0 * dfactor);
     const double shift_d1 =
         fabs(d1_sig_cur - d1_sig_new) * dt * nbins / (1.0 * dfactor);
-
-    const double d5_range = param_limits[0].max - param_limits[0].min;
-    const double d4_range = param_limits[1].max - param_limits[1].min;
-    const double d3_range = param_limits[2].max - param_limits[2].min;
-    const double d2_range = param_limits[3].max - param_limits[3].min;
-    const double d1_range =
-        dfactor * (param_limits[4].max - param_limits[4].min);
-
-    d5_sig_new = cuda::std::min(d5_sig_new, d5_range);
-    d4_sig_new = cuda::std::min(d4_sig_new, d4_range);
-    d3_sig_new = cuda::std::min(d3_sig_new, d3_range);
-    d2_sig_new = cuda::std::min(d2_sig_new, d2_range);
-    d1_sig_new = cuda::std::min(d1_sig_new, d1_range);
 
     // Store d5 as single entry in scratch
     utils::branch_one_param_padded_crackle_device(
@@ -268,12 +253,12 @@ kernel_expand_crackle_holes(const double* __restrict__ leaves_tree,
         return;
     }
 
-    const uint32_t bo         = i * kLeavesStride;
-    double* __restrict__ leaf = leaves_branch + bo;
-    const uint32_t origin     = leaves_origins[i];
-    const uint32_t origin_lo  = origin * kLeavesStride;
-    const uint32_t fb         = origin * kParams;
-    const uint32_t n_d5       = branch_ws.scratch_counts[fb + 0];
+    const uint32_t bo          = i * kLeavesStride;
+    double* __restrict__ leaf  = leaves_branch + bo;
+    const uint32_t origin      = leaves_origins[i];
+    const uint32_t origin_lo   = origin * kLeavesStride;
+    const uint32_t fb          = origin * kParams;
+    const uint32_t n_d5        = branch_ws.scratch_counts[fb + 0];
 
     const bool in_hole = is_in_hole_device(leaf[2], leaf[3], leaf[4], leaf[6],
                                            minimum_snap_cells);
@@ -298,13 +283,15 @@ kernel_expand_crackle_holes(const double* __restrict__ leaves_tree,
         return;
     }
 
-    const double confidence_const = 0.5 + (0.5 / static_cast<double>(n_d5));
-    const double half_range       = confidence_const * d5_sig_parent;
-    const double start            = d5_val_parent - half_range;
-    const double step = (2.0 * half_range) / static_cast<double>(n_d5 + 1);
+    // Exact physical span of the newly created child cells
+    const double d5_sig_actual = branch_ws.scratch_dparams[fb + 0];
+    // Find the absolute minimum boundary of the parent cell
+    const double parent_min = d5_val_parent - (d5_sig_parent / 2.0);
+    // Place the center of the first child cell exactly half a sub-span inward
+    const double first_center = parent_min + (d5_sig_actual / 2.0);
 
     // Overwrite slot i in-place with first crackle child
-    leaf[0]                   = fma(1.0, step, start);
+    leaf[0]                   = fma(0.0, d5_sig_actual, first_center);
     const uint32_t extra      = n_d5 - 1;
     const uint32_t tail_start = atomicAdd(out_count, extra);
 
@@ -317,7 +304,7 @@ kernel_expand_crackle_holes(const double* __restrict__ leaves_tree,
             tout[k] = leaf[k];
         }
         // Patch d5
-        tout[0] = fma(static_cast<double>(a + 1), step, start);
+        tout[0] = fma(static_cast<double>(a), d5_sig_actual, first_center);
         leaves_origins[write_idx] = origin;
     }
 }
@@ -506,9 +493,8 @@ __global__ void kernel_circ_taylor_ascend_resolve_batch(
     const double f0     = leaves_tree[lo + 12];
 
     double a_new, v_new, d_new;
-    const uint32_t mask_circular =
-        get_circ_taylor_mask_device(c_cur, dc_cur, s_cur, ds_cur,
-                                    j_cur, a_cur, minimum_snap_cells);
+    const uint32_t mask_circular = get_circ_taylor_mask_device(
+        c_cur, dc_cur, s_cur, ds_cur, j_cur, a_cur, minimum_snap_cells);
     if (mask_circular == 0) {
         a_new = a_cur + (j_cur * dt) + (s_cur * half_dt2) + (c_cur * sixth_dt3);
         v_new = v_cur + (a_cur * dt) + (j_cur * half_dt2) +
@@ -678,7 +664,6 @@ circ_taylor_branch_batch_cuda(cuda::std::span<const double> leaves_tree,
                               std::pair<double, double> coord_cur,
                               SizeType nbins,
                               double eta,
-                              cuda::std::span<const ParamLimit> param_limits,
                               SizeType branch_max,
                               SizeType n_leaves,
                               double minimum_snap_cells,
@@ -702,8 +687,7 @@ circ_taylor_branch_batch_cuda(cuda::std::span<const double> leaves_tree,
 
     kernel_analyze_and_branch_circular<<<grid_dim, block_dim, 0, stream>>>(
         leaves_tree.data(), n_leaves, coord_cur.second,
-        static_cast<double>(nbins), eta, param_limits.data(), branch_max,
-        branch_ws, scratch_ws);
+        static_cast<double>(nbins), eta, branch_max, branch_ws, scratch_ws);
     cuda_utils::check_last_cuda_error("Kernel 1 launch failed");
 
     // compute output size and offsets (leaf_output_offset)

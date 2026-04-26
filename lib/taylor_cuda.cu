@@ -72,7 +72,6 @@ kernel_analyze_and_branch_accel(const double* __restrict__ leaves_tree,
                                 double dt,
                                 double nbins,
                                 double eta,
-                                const ParamLimit* __restrict__ param_limits,
                                 uint32_t branch_max,
                                 memory::BranchingWorkspaceCUDAView branch_ws) {
     constexpr SizeType kParams       = 2;
@@ -98,21 +97,13 @@ kernel_analyze_and_branch_accel(const double* __restrict__ leaves_tree,
     const double d1_sig_cur = leaves_tree[lo + 3];
     const double f0         = leaves_tree[lo + 6];
 
-    const double dfactor = utils::kCval / f0;
-    double d2_sig_new    = dphi * dfactor * 4.0 * inv_dt2;
-    double d1_sig_new    = dphi * dfactor * 1.0 * inv_dt;
-
+    const double dfactor    = utils::kCval / f0;
+    const double d2_sig_new = dphi * dfactor * 4.0 * inv_dt2;
+    const double d1_sig_new = dphi * dfactor * 1.0 * inv_dt;
     const double shift_d2 =
         fabs(d2_sig_cur - d2_sig_new) * dt2 * nbins / (4.0 * dfactor);
     const double shift_d1 =
         fabs(d1_sig_cur - d1_sig_new) * dt * nbins / (1.0 * dfactor);
-
-    const double d2_range = param_limits[0].max - param_limits[0].min;
-    const double d1_range =
-        dfactor * (param_limits[1].max - param_limits[1].min);
-
-    d2_sig_new = cuda::std::min(d2_sig_new, d2_range);
-    d1_sig_new = cuda::std::min(d1_sig_new, d1_range);
 
     utils::branch_one_param_padded_device(
         0, d2_cur, d2_sig_cur, d2_sig_new, eta, shift_d2,
@@ -135,7 +126,6 @@ kernel_analyze_and_branch_jerk(const double* __restrict__ leaves_tree,
                                double dt,
                                double nbins,
                                double eta,
-                               const ParamLimit* __restrict__ param_limits,
                                uint32_t branch_max,
                                memory::BranchingWorkspaceCUDAView branch_ws) {
     constexpr SizeType kParams       = 3;
@@ -165,26 +155,16 @@ kernel_analyze_and_branch_jerk(const double* __restrict__ leaves_tree,
     const double d1_sig_cur = leaves_tree[lo + 5];
     const double f0         = leaves_tree[lo + 8];
 
-    const double dfactor = utils::kCval / f0;
-    double d3_sig_new    = dphi * dfactor * 24.0 * inv_dt3;
-    double d2_sig_new    = dphi * dfactor * 4.0 * inv_dt2;
-    double d1_sig_new    = dphi * dfactor * 1.0 * inv_dt;
-
+    const double dfactor    = utils::kCval / f0;
+    const double d3_sig_new = dphi * dfactor * 24.0 * inv_dt3;
+    const double d2_sig_new = dphi * dfactor * 4.0 * inv_dt2;
+    const double d1_sig_new = dphi * dfactor * 1.0 * inv_dt;
     const double shift_d3 =
         fabs(d3_sig_cur - d3_sig_new) * dt3 * nbins / (24.0 * dfactor);
     const double shift_d2 =
         fabs(d2_sig_cur - d2_sig_new) * dt2 * nbins / (4.0 * dfactor);
     const double shift_d1 =
         fabs(d1_sig_cur - d1_sig_new) * dt * nbins / (1.0 * dfactor);
-
-    const double d3_range = param_limits[0].max - param_limits[0].min;
-    const double d2_range = param_limits[1].max - param_limits[1].min;
-    const double d1_range =
-        dfactor * (param_limits[2].max - param_limits[2].min);
-
-    d3_sig_new = cuda::std::min(d3_sig_new, d3_range);
-    d2_sig_new = cuda::std::min(d2_sig_new, d2_range);
-    d1_sig_new = cuda::std::min(d1_sig_new, d1_range);
 
     utils::branch_one_param_padded_device(
         0, d3_cur, d3_sig_cur, d3_sig_new, eta, shift_d3,
@@ -212,7 +192,6 @@ kernel_analyze_and_branch_snap(const double* __restrict__ leaves_tree,
                                double dt,
                                double nbins,
                                double eta,
-                               const ParamLimit* __restrict__ param_limits,
                                uint32_t branch_max,
                                memory::BranchingWorkspaceCUDAView branch_ws) {
     constexpr SizeType kParams       = 4;
@@ -246,12 +225,11 @@ kernel_analyze_and_branch_snap(const double* __restrict__ leaves_tree,
     const double d1_sig_cur = leaves_tree[lo + 7];
     const double f0         = leaves_tree[lo + 10];
 
-    const double dfactor = utils::kCval / f0;
-    double d4_sig_new    = dphi * dfactor * 192.0 * inv_dt4;
-    double d3_sig_new    = dphi * dfactor * 24.0 * inv_dt3;
-    double d2_sig_new    = dphi * dfactor * 4.0 * inv_dt2;
-    double d1_sig_new    = dphi * dfactor * 1.0 * inv_dt;
-
+    const double dfactor    = utils::kCval / f0;
+    const double d4_sig_new = dphi * dfactor * 192.0 * inv_dt4;
+    const double d3_sig_new = dphi * dfactor * 24.0 * inv_dt3;
+    const double d2_sig_new = dphi * dfactor * 4.0 * inv_dt2;
+    const double d1_sig_new = dphi * dfactor * 1.0 * inv_dt;
     const double shift_d4 =
         fabs(d4_sig_cur - d4_sig_new) * dt4 * nbins / (192.0 * dfactor);
     const double shift_d3 =
@@ -260,17 +238,6 @@ kernel_analyze_and_branch_snap(const double* __restrict__ leaves_tree,
         fabs(d2_sig_cur - d2_sig_new) * dt2 * nbins / (4.0 * dfactor);
     const double shift_d1 =
         fabs(d1_sig_cur - d1_sig_new) * dt * nbins / (1.0 * dfactor);
-
-    const double d4_range = param_limits[0].max - param_limits[0].min;
-    const double d3_range = param_limits[1].max - param_limits[1].min;
-    const double d2_range = param_limits[2].max - param_limits[2].min;
-    const double d1_range =
-        dfactor * (param_limits[3].max - param_limits[3].min);
-
-    d4_sig_new = cuda::std::min(d4_sig_new, d4_range);
-    d3_sig_new = cuda::std::min(d3_sig_new, d3_range);
-    d2_sig_new = cuda::std::min(d2_sig_new, d2_range);
-    d1_sig_new = cuda::std::min(d1_sig_new, d1_range);
 
     utils::branch_one_param_padded_device(
         0, d4_cur, d4_sig_cur, d4_sig_new, eta, shift_d4,
@@ -1124,7 +1091,6 @@ poly_taylor_branch_impl_cuda(cuda::std::span<const double> leaves_tree,
                              std::pair<double, double> coord_cur,
                              SizeType nbins,
                              double eta,
-                             cuda::std::span<const ParamLimit> param_limits,
                              SizeType branch_max,
                              SizeType n_leaves,
                              memory::BranchingWorkspaceCUDAView branch_ws,
@@ -1144,18 +1110,15 @@ poly_taylor_branch_impl_cuda(cuda::std::span<const double> leaves_tree,
     if constexpr (NPARAMS == 2) {
         kernel_analyze_and_branch_accel<<<grid_dim, block_dim, 0, stream>>>(
             leaves_tree.data(), n_leaves, coord_cur.second,
-            static_cast<double>(nbins), eta, param_limits.data(), branch_max,
-            branch_ws);
+            static_cast<double>(nbins), eta, branch_max, branch_ws);
     } else if constexpr (NPARAMS == 3) {
         kernel_analyze_and_branch_jerk<<<grid_dim, block_dim, 0, stream>>>(
             leaves_tree.data(), n_leaves, coord_cur.second,
-            static_cast<double>(nbins), eta, param_limits.data(), branch_max,
-            branch_ws);
+            static_cast<double>(nbins), eta, branch_max, branch_ws);
     } else {
         kernel_analyze_and_branch_snap<<<grid_dim, block_dim, 0, stream>>>(
             leaves_tree.data(), n_leaves, coord_cur.second,
-            static_cast<double>(nbins), eta, param_limits.data(), branch_max,
-            branch_ws);
+            static_cast<double>(nbins), eta, branch_max, branch_ws);
     }
     cuda_utils::check_last_cuda_error("Kernel 1 launch failed");
 
@@ -1265,7 +1228,6 @@ poly_taylor_branch_batch_cuda(cuda::std::span<const double> leaves_tree,
                               std::pair<double, double> coord_cur,
                               SizeType nbins,
                               double eta,
-                              cuda::std::span<const ParamLimit> param_limits,
                               SizeType branch_max,
                               SizeType n_leaves,
                               SizeType n_params,
@@ -1275,8 +1237,8 @@ poly_taylor_branch_batch_cuda(cuda::std::span<const double> leaves_tree,
     auto dispatch = [&]<SizeType N>() {
         return poly_taylor_branch_impl_cuda<N>(
             leaves_tree, leaves_branch, leaves_origins, validation_mask,
-            coord_cur, nbins, eta, param_limits, branch_max, n_leaves,
-            branch_ws, scratch_ws, stream);
+            coord_cur, nbins, eta, branch_max, n_leaves, branch_ws, scratch_ws,
+            stream);
     };
     switch (n_params) {
     case 2:

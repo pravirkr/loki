@@ -139,10 +139,13 @@ public:
     /// @brief Get the parameter step sizes for the {f,d} based params.
     [[nodiscard]] std::vector<double>
     get_dparams(double tseg_cur) const noexcept;
-    /// @brief Get the parameter step sizes (limited) for the {f,d} based
+    /// @brief Get the parameter step sizes (actual) for the {f,d} based
     /// params.
     [[nodiscard]] std::vector<double>
-    get_dparams_lim(double tseg_cur) const noexcept;
+    get_dparams_actual(double tseg_cur) const noexcept;
+    /// @brief Get the number of grid points for the {f,d} based params.
+    [[nodiscard]] std::vector<SizeType>
+    get_param_grid_count(double tseg_cur) const noexcept;
 
     /// @brief Get an updated configuration with the given parameters.
     PulsarSearchConfig
