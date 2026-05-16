@@ -110,7 +110,10 @@ PYBIND11_MODULE(libculoki, m) { // NOLINT
         .def("run", &DynamicThresholdSchemeCUDA::run,
              py::arg("thres_neigh") = 10)
         .def("save", &DynamicThresholdSchemeCUDA::save,
-             py::arg("outdir") = "./");
+             py::arg("outdir") = "./")
+        .def("get_best_path_thresholds",
+             &DynamicThresholdSchemeCUDA::get_best_path_thresholds,
+             py::arg("min_pd") = 0.1);
 
     auto m_fold = m.def_submodule("fold", "Fold submodule");
     m_fold.def(

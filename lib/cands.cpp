@@ -508,12 +508,19 @@ void PruneResultWriter::write_metadata(
     file.createDataSet("threshold_scheme", threshold_scheme);
 }
 
+void PruneResultWriter::write_runtime(float runtime) {
+    std::lock_guard<std::mutex> lock(m_hdf5_mutex);
+    HighFive::File file = open_file();
+    file.createAttribute("final_runtime", runtime);
+}
+
 void PruneResultWriter::write_run_results(
     std::string_view run_name,
     std::span<const SizeType> snail_scheme,
     memory::CircularView<double> leaves_view,
     memory::CircularView<float> scores_view,
     memory::CircularView<float> scores_ep_view,
+    double total_pruning_gflops,
     SizeType n_leaves,
     SizeType n_params,
     const PruneStatsCollection& pstats) {
@@ -526,6 +533,9 @@ void PruneResultWriter::write_run_results(
             std::format("Run name {} already exists.", run_name));
     }
     HighFive::Group run_group = runs_group.createGroup(std::string(run_name));
+    
+    run_group.createAttribute("total_pruning_gflops", total_pruning_gflops);
+
     auto [level_stats, timer_stats] = pstats.get_packed_data();
 
     constexpr SizeType kParamStride             = 2U;

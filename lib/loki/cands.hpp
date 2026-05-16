@@ -199,12 +199,15 @@ public:
                         SizeType nsegments,
                         SizeType max_sugg,
                         std::span<const float> threshold_scheme);
+    
+    void write_runtime(float runtime);
 
     void write_run_results(std::string_view run_name,
                            std::span<const SizeType> snail_scheme,
                            memory::CircularView<double> leaves_view,
                            memory::CircularView<float> scores_view,
                            memory::CircularView<float> scores_ep_view,
+                           double total_pruning_gflops,
                            SizeType n_leaves,
                            SizeType n_params,
                            const PruneStatsCollection& pstats);

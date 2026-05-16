@@ -164,6 +164,26 @@ std::vector<SizeType> find_neighbouring_indices(
     return result;
 }
 
+SizeType find_nearest_index(std::span<const float> range,
+                             float value) noexcept {
+    SizeType best_idx = 0;
+    float best_dist   = std::fabs(range[0] - value);
+    for (SizeType i = 1; i < range.size(); ++i) {
+        const float d = std::fabs(range[i] - value);
+        if (d < best_dist) {
+            best_dist = d;
+            best_idx  = i;
+        }
+    }
+    return best_idx;
+}
+
+IndexType find_lower_bin_index(std::span<const float> range,
+                               float value) noexcept {
+    const auto it = std::ranges::upper_bound(range, value);
+    return std::distance(range.begin(), it) - 1;
+}
+
 std::vector<double> linspace(double start,
                              double stop,
                              SizeType num_samples,
@@ -238,9 +258,9 @@ determine_ref_segs_pareto(SizeType nsegments,
         }
         // margin = round((M - 1) / (2 * n))
         const SizeType margin = round_div(nsegments - 1, 2 * n_runs_val);
-        const SizeType lo = margin;
-        const SizeType hi = nsegments - 1 - margin;
-        const SizeType denom = n_runs_val - 1;
+        const SizeType lo     = margin;
+        const SizeType hi     = nsegments - 1 - margin;
+        const SizeType denom  = n_runs_val - 1;
 
         std::vector<SizeType> result;
         result.reserve(n_runs_val);

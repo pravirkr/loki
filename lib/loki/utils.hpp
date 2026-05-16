@@ -106,6 +106,32 @@ std::vector<SizeType> find_neighbouring_indices(
     std::span<const SizeType> indices, SizeType target_idx, SizeType num);
 
 /**
+ * @brief Find the index of the element closest to a given value.
+ *
+ * Computes the index i such that |range[i] - value| is minimized.
+ *
+ * @param range Non-empty span of values.
+ * @param value Target value.
+ * @return Index of the closest element in the range.
+ *
+ */
+SizeType find_nearest_index(std::span<const float> range, float value) noexcept;
+
+/**
+ * @brief Find the lower-bin index for a value in a sorted range.
+ *
+ *
+ * @param range Sorted (ascending) span of values.
+ * @param value Query value.
+ * @return Index of the lower bin (i such that range[i] <= value < range[i+1])
+ * @note Returns -1 if value < range[0] (intentional sentinel for underflow)
+ * @note Returns range.size() - 1 if value >= range.back()
+ *
+ */
+IndexType find_lower_bin_index(std::span<const float> range,
+                               float value) noexcept;
+
+/**
  * @brief  Generate `num_samples` evenly spaced points in [`start`, `stop`].
  *
  * @param   start        First value (included).

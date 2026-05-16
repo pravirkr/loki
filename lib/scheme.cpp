@@ -1,8 +1,17 @@
-#include "loki/detection/scheme.hpp"
+#include "loki/scheme.hpp"
 
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <stdexcept>
+#include <string>
+
+#include "loki/detection/thresholds.hpp"
+#include "loki/exceptions.hpp"
 #include "loki/math.hpp"
+#include "loki/utils.hpp"
 
-namespace loki::detection {
+namespace loki::detection::detail {
 
 std::vector<float>
 compute_thresholds(float snr_start, float snr_final, SizeType nthresholds) {
@@ -16,12 +25,10 @@ compute_thresholds(float snr_start, float snr_final, SizeType nthresholds) {
 }
 
 std::vector<float> compute_probs(SizeType nprobs, float prob_min) {
-    if (nprobs <= 1) {
-        throw std::invalid_argument("Number of probabilities must be > 1");
-    }
-    if (prob_min <= 0.0F || prob_min >= 1.0F) {
-        throw std::invalid_argument("Probability must be in the range (0, 1)");
-    }
+    error_check::check_greater(nprobs, 1,
+                               "Number of probabilities must be > 1");
+    error_check::check_less(prob_min, 1.0F, "Probability must be < 1");
+    error_check::check_greater(prob_min, 0.0F, "Probability must be > 0");
     std::vector<float> probs(nprobs);
     const float log_prob_min = std::log10(prob_min);
     const float step = (0.0F - log_prob_min) / static_cast<float>(nprobs - 1);
@@ -33,9 +40,10 @@ std::vector<float> compute_probs(SizeType nprobs, float prob_min) {
 }
 
 std::vector<float> compute_probs_linear(SizeType nprobs, float prob_min) {
-    if (nprobs <= 1) {
-        throw std::invalid_argument("Number of probabilities must be > 1");
-    }
+    error_check::check_greater(nprobs, 1,
+                               "Number of probabilities must be > 1");
+    error_check::check_less(prob_min, 1.0F, "Probability must be < 1");
+    error_check::check_greater(prob_min, 0.0F, "Probability must be > 0");
     std::vector<float> probs(nprobs);
     float step = (1.0F - prob_min) / static_cast<float>(nprobs - 1);
 
@@ -87,4 +95,80 @@ std::vector<float> guess_scheme(SizeType nstages,
     return result;
 }
 
-} // namespace loki::detection
+std::vector<float> get_best_path_thresholds(std::span<const State> states,
+                                            std::span<const float> thresholds,
+                                            std::span<const float> probs,
+                                            SizeType nstages,
+                                            SizeType nthresholds,
+                                            SizeType nprobs,
+                                            float min_pd) {
+    error_check::check_greater(nstages, 0, "nstages must be positive");
+    if (thresholds.empty() || probs.empty()) {
+        throw std::invalid_argument(
+            "get_best_path_thresholds: thresholds and probs must be "
+            "non-empty");
+    }
+    error_check::check_equal(
+        states.size(), nstages * nthresholds * nprobs,
+        "states span size does not match nstages × nthresholds × nprobs");
+
+    const SizeType stage_last = (nstages - 1) * nthresholds * nprobs;
+    const State* best         = nullptr;
+    float best_cost           = std::numeric_limits<float>::max();
+
+    for (SizeType i = 0; i < nthresholds * nprobs; ++i) {
+        const State& s = states[stage_last + i];
+        if (s.is_empty) {
+            continue;
+        }
+        if (s.success_h1_cumul < min_pd) {
+            continue;
+        }
+        if (s.cost < best_cost) {
+            best_cost = s.cost;
+            best      = &s;
+        }
+    }
+
+    if (best == nullptr) {
+        return {};
+    }
+
+    std::vector<const State*> backward;
+    backward.reserve(nstages);
+    backward.push_back(best);
+
+    float prev_threshold        = best->threshold_prev;
+    float prev_success_h1_cumul = best->success_h1_cumul_prev;
+
+    for (SizeType k = 0; k + 1 < nstages; ++k) {
+        const SizeType istage = nstages - 2 - k;
+        const SizeType ithres =
+            utils::find_nearest_index(thresholds, prev_threshold);
+        const IndexType iprob =
+            utils::find_lower_bin_index(probs, prev_success_h1_cumul);
+        error_check::check_range(iprob, nprobs,
+                                 "probability bin index out of range");
+        const auto flat_idx = (istage * nthresholds * nprobs) +
+                              (ithres * nprobs) + static_cast<SizeType>(iprob);
+        const State& prev_state = states[flat_idx];
+        if (prev_state.is_empty) {
+            throw std::runtime_error(
+                "get_best_path_thresholds: backtracking failed (empty state) "
+                "at stage " +
+                std::to_string(istage));
+        }
+        backward.push_back(&prev_state);
+        prev_threshold        = prev_state.threshold_prev;
+        prev_success_h1_cumul = prev_state.success_h1_cumul_prev;
+    }
+
+    std::vector<float> out;
+    out.reserve(nstages);
+    for (auto it = backward.rbegin(); it != backward.rend(); ++it) {
+        out.push_back((*it)->threshold);
+    }
+    return out;
+}
+
+} // namespace loki::detection::detail

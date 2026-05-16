@@ -425,13 +425,109 @@ private:
         memory::CircularView<float> scores_ep_report_view{
             std::span<float>(scores_ep_report_h), std::span<float>{}};
 
+        const auto total_pruning_gflops = compute_total_prune_gflops();
         // Write results
         auto result_writer = cands::PruneResultWriter(
             actual_result_file, cands::PruneResultWriter::Mode::kAppend);
-        result_writer.write_run_results(run_name, m_snail_scheme.get_data(),
-                                        leaves_report_view, scores_report_view,
-                                        scores_ep_report_view, n_leaves,
-                                        m_cfg.get_nparams(), m_pstats);
+        result_writer.write_run_results(
+            run_name, m_snail_scheme.get_data(), leaves_report_view,
+            scores_report_view, scores_ep_report_view, total_pruning_gflops,
+            n_leaves, m_cfg.get_nparams(), m_pstats);
+    }
+
+    [[nodiscard]] double compute_total_prune_gflops() const {
+        const auto packed_stats = m_pstats.get_packed_data();
+        const auto& level_stats = packed_stats.first;
+        if (level_stats.empty()) {
+            return 0.0;
+        }
+
+        const auto n_params = static_cast<double>(m_cfg.get_nparams());
+        const auto nbins    = static_cast<double>(m_cfg.get_nbins());
+        const auto nbins_f  = static_cast<double>(m_cfg.get_nbins_f());
+        const auto n_widths = static_cast<double>(m_cfg.get_n_scoring_widths());
+        const auto conservative_tile =
+            static_cast<double>(m_cfg.get_use_conservative_tile());
+
+        auto score_flops = [&](double n_leaves) {
+            return (n_leaves * 2.0) * (n_widths * 2.0 * nbins);
+        };
+        auto irfft_flops = [&](double n_leaves) {
+            if constexpr (std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>) {
+                return (2.0 * n_leaves) * nbins * std::log2(nbins);
+            } else {
+                return 0.0;
+            }
+        };
+        auto shift_add_flops = [&](double n_leaves) {
+            if constexpr (std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>) {
+                return n_leaves * 2.0 * nbins_f * 8.0;
+            } else {
+                return n_leaves * 2.0 * nbins;
+            }
+        };
+
+        auto branch_flops = [&](double n_branches, double n_leaves) {
+            // Dominant Taylor branch arithmetic: per-parameter step/shift work
+            // over input branches plus child-center generation over outputs.
+            return (n_branches * n_params * 10.0) + (n_leaves * n_params * 2.0);
+        };
+        auto resolve_flops = [&](double n_leaves) {
+            // Polynomial propagation to acceleration/frequency plus phase and
+            // nearest-grid arithmetic. The order-dependent part scales with
+            // the number of Taylor parameters.
+            return n_leaves * ((6.0 * n_params) + 16.0);
+        };
+        auto transform_flops = [&](double n_leaves) {
+            // Value propagation is triangular in the Taylor order; conservative
+            // tiles also propagate uncertainty with squared terms and sqrt.
+            const auto value_flops = n_params * (n_params + 1.0);
+            const auto error_flops =
+                conservative_tile * n_params * ((2.0 * n_params) + 1.0);
+            return n_leaves * (value_flops + error_flops);
+        };
+        auto report_flops = [&](double n_leaves) {
+            // Gauge transform and error propagation for all non-frequency
+            // parameters, plus final frequency/error conversion.
+            return n_leaves * (((n_params - 1.0) * 12.0) + 4.0);
+        };
+
+        double total_flops = 0.0;
+        for (const auto& stats : level_stats) {
+            const auto n_branches    = static_cast<double>(stats.n_branches);
+            const auto n_leaves      = static_cast<double>(stats.n_leaves);
+            const auto n_leaves_phy  = static_cast<double>(stats.n_leaves_phy);
+            const auto n_leaves_surv = static_cast<double>(stats.n_leaves_surv);
+
+            if (stats.level == 0) {
+                total_flops += irfft_flops(n_leaves_surv);
+                total_flops += score_flops(n_leaves_surv);
+                continue;
+            }
+
+            total_flops += branch_flops(n_branches, n_leaves);
+            total_flops += resolve_flops(n_leaves_phy);
+            total_flops += shift_add_flops(n_leaves_phy);
+            total_flops += irfft_flops(n_leaves_phy);
+            total_flops += score_flops(n_leaves_phy);
+            total_flops += transform_flops(n_leaves_surv);
+        }
+
+        const auto& final_stats = level_stats.back();
+        const auto n_final_survivors =
+            static_cast<double>(final_stats.n_leaves_surv);
+        const auto segment_coords =
+            m_snail_scheme.get_segment_coords_so_far(m_prune_level);
+        const auto n_segments =
+            static_cast<double>(segment_coords.first.size());
+
+        total_flops += n_segments * resolve_flops(n_final_survivors);
+        total_flops += n_segments * shift_add_flops(n_final_survivors);
+        total_flops += irfft_flops(n_final_survivors);
+        total_flops += score_flops(n_final_survivors);
+        total_flops += report_flops(n_final_survivors);
+
+        return total_flops * 1.0e-9;
     }
 
     void execute_iteration(cuda::std::span<const FoldTypeCUDA> ffa_fold,
@@ -741,6 +837,8 @@ public:
                  std::span<const float> ts_v,
                  const std::filesystem::path& outdir,
                  std::string_view file_prefix) {
+        timing::SimpleTimer timer;
+        timer.start();
         spdlog::info("EPMultiPassCUDA: Initializing with FFA");
         // Create appropriate FFA fold
         std::tuple<thrust::device_vector<FoldTypeCUDA>,
@@ -795,8 +893,14 @@ public:
                           log_file, result_file,
                           /*task_id=*/0);
         }
+        const auto ep_time = timer.stop();
+        // Write final runtime to result file
+        auto writer_final = cands::PruneResultWriter(
+            result_file, cands::PruneResultWriter::Mode::kAppend);
+        writer_final.write_runtime(ep_time);
         spdlog::info("Pruning complete. Results saved to {}",
                      result_file.string());
+        spdlog::info("Pruning time: {:.2f} seconds", ep_time);
     }
 
 private:

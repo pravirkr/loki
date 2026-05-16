@@ -100,6 +100,7 @@ public:
     std::vector<State> get_states() const;
     void run(SizeType thres_neigh = 10);
     std::string save(const std::string& outdir = "./") const;
+    std::vector<float> get_best_path_thresholds(float min_pd = 0.1F) const;
 
 private:
     class Impl;
@@ -152,6 +153,7 @@ public:
 
     void run(SizeType thres_neigh = 10);
     std::string save(const std::string& outdir = "./") const;
+    std::vector<float> get_best_path_thresholds(float min_pd = 0.1F) const;
 
 private:
     class Impl;

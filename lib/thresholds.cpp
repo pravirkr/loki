@@ -19,11 +19,11 @@
 
 #include "loki/cands.hpp"
 #include "loki/common/types.hpp"
-#include "loki/detection/scheme.hpp"
 #include "loki/detection/score.hpp"
 #include "loki/exceptions.hpp"
 #include "loki/math.hpp"
 #include "loki/progress.hpp"
+#include "loki/scheme.hpp"
 #include "loki/simulation/simulation.hpp"
 #include "loki/timing.hpp"
 #include "loki/utils.hpp"
@@ -310,11 +310,6 @@ struct ThreadLocalBuffers {
           scores(max_ntrials) {}
 };
 
-IndexType find_bin_index(std::span<const float> bins, float value) {
-    auto it = std::ranges::upper_bound(bins, value);
-    return std::distance(bins.begin(), it) - 1;
-}
-
 std::unique_ptr<FoldVectorHandle>
 simulate_folds(const FoldVectorHandle& folds_in,
                std::span<const float> profile,
@@ -587,13 +582,12 @@ public:
         if (m_branching_pattern.empty()) {
             throw std::invalid_argument("Branching pattern is empty");
         }
-        m_profile = simulation::generate_folded_profile(nbins, ref_ducy);
-        m_thresholds =
-            detection::compute_thresholds(0.1F, snr_final, nthresholds);
-        m_probs       = detection::compute_probs(nprobs, prob_min);
-        m_nprobs      = m_probs.size();
-        m_nbins       = m_profile.size();
-        m_nstages     = m_branching_pattern.size();
+        m_profile    = simulation::generate_folded_profile(nbins, ref_ducy);
+        m_thresholds = detail::compute_thresholds(0.1F, snr_final, nthresholds);
+        m_probs      = detail::compute_probs(nprobs, prob_min);
+        m_nprobs     = m_probs.size();
+        m_nbins      = m_profile.size();
+        m_nstages    = m_branching_pattern.size();
         m_nthresholds = m_thresholds.size();
         m_box_score_widths =
             detection::generate_box_width_trials(m_nbins, m_ducy_max, m_wtsp);
@@ -601,7 +595,7 @@ public:
         m_timer_stats = cands::TimerStats(m_nthreads);
 
         m_bias_snr   = snr_final / static_cast<float>(std::sqrt(m_nstages + 1));
-        m_guess_path = detection::guess_scheme(
+        m_guess_path = detail::guess_scheme(
             m_nstages, snr_final, m_branching_pattern, m_trials_start);
 
         m_rng = std::make_unique<math::ThreadLocalNormalRNG>(
@@ -640,6 +634,12 @@ public:
         return m_box_score_widths;
     }
     std::vector<State> get_states() const { return m_states; }
+
+    std::vector<float> get_best_path_thresholds(float min_pd) const {
+        return detail::get_best_path_thresholds(
+            std::span<const State>(m_states.data(), m_states.size()),
+            m_thresholds, m_probs, m_nstages, m_nthresholds, m_nprobs, min_pd);
+    }
 
     // Methods
     void run(SizeType thres_neigh = 10) {
@@ -793,8 +793,8 @@ private:
                 *m_manager, *buffers_ptr, *boxcar_widths_cache_ptr,
                 thread_timers, 1.0F, m_ntrials);
 
-            const auto iprob =
-                find_bin_index(m_probs, cur_state.success_h1_cumul);
+            const auto iprob = utils::find_lower_bin_index(
+                m_probs, cur_state.success_h1_cumul);
             if (iprob < 0 || iprob >= static_cast<IndexType>(m_nprobs)) {
                 continue;
             }
@@ -879,8 +879,8 @@ private:
                                 *boxcar_widths_cache_ptr, thread_timers, 1.0F,
                                 m_ntrials);
 
-                        const auto iprob =
-                            find_bin_index(m_probs, cur_state.success_h1_cumul);
+                        const auto iprob = utils::find_lower_bin_index(
+                            m_probs, cur_state.success_h1_cumul);
                         if (iprob < 0 ||
                             iprob >= static_cast<IndexType>(m_nprobs)) {
                             continue;
@@ -967,6 +967,12 @@ std::vector<SizeType> DynamicThresholdScheme::get_box_score_widths() const {
 std::vector<State> DynamicThresholdScheme::get_states() const {
     return m_impl->get_states();
 }
+
+std::vector<float>
+DynamicThresholdScheme::get_best_path_thresholds(float min_pd) const {
+    return m_impl->get_best_path_thresholds(min_pd);
+}
+
 void DynamicThresholdScheme::run(SizeType thres_neigh) {
     m_impl->run(thres_neigh);
 }

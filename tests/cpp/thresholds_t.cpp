@@ -32,5 +32,9 @@ TEST_CASE("DynamicThresholdScheme", "[thresholds]") {
         std::vector<float> thresholds = dyn_scheme.get_thresholds();
         REQUIRE(thresholds.size() == nthresholds);
     }
+    SECTION("get_best_path_thresholds before run") {
+        std::vector<double> path = dyn_scheme.get_best_path_thresholds();
+        REQUIRE(path.empty());
+    }
 }
 } // namespace loki

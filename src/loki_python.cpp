@@ -209,7 +209,10 @@ PYBIND11_MODULE(libloki, m) {
                                })
         .def("get_states", [](DynamicThresholdScheme& self) {
             return as_pyarray(self.get_states());
-        });
+        })
+        .def("get_best_path_thresholds",
+             &DynamicThresholdScheme::get_best_path_thresholds,
+             py::arg("min_pd") = 0.1);
     m_thresholds.def(
         "evaluate_scheme",
         [](const PyArrayT<float>& thresholds,

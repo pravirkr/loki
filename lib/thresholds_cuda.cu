@@ -33,10 +33,10 @@
 #include "loki/common/types.hpp"
 #include "loki/cub_helpers.cuh"
 #include "loki/cuda_utils.cuh"
-#include "loki/detection/scheme.hpp"
 #include "loki/detection/score.hpp"
 #include "loki/math_cuda.cuh"
 #include "loki/progress.hpp"
+#include "loki/scheme.hpp"
 #include "loki/simulation/simulation.hpp"
 #include "loki/timing.hpp"
 #include "loki/utils.hpp"
@@ -354,10 +354,10 @@ transition_decision_kernel(const TransitionWorkItem* __restrict__ work_items,
         const uint32_t last_h0 = base_h0 + ntrials - 1;
         const uint32_t last_h1 = base_h1 + ntrials - 1;
 
-        count_h0 = scan_indices[last_h0] - scan_indices[base_h0] +
-                   survive_flags[last_h0];
-        count_h1 = scan_indices[last_h1] - scan_indices[base_h1] +
-                   survive_flags[last_h1];
+        count_h0            = scan_indices[last_h0] - scan_indices[base_h0] +
+                              survive_flags[last_h0];
+        count_h1            = scan_indices[last_h1] - scan_indices[base_h1] +
+                              survive_flags[last_h1];
         const float succ_h0 = static_cast<float>(count_h0) / ntrials;
         const float succ_h1 = static_cast<float>(count_h1) / ntrials;
 
@@ -643,17 +643,16 @@ public:
         m_nbins_padded = (m_nbins + 3) & ~3; // Nearest multiple of 4
         std::vector<float> profile(m_nbins_padded);
         simulation::generate_folded_profile(profile, m_nbins, ref_ducy);
-        m_profile = profile;
-        m_thresholds =
-            detection::compute_thresholds(0.1F, snr_final, nthresholds);
-        m_probs       = detection::compute_probs(nprobs, prob_min);
-        m_nprobs      = m_probs.size();
-        m_nstages     = m_branching_pattern.size();
+        m_profile    = profile;
+        m_thresholds = detail::compute_thresholds(0.1F, snr_final, nthresholds);
+        m_probs      = detail::compute_probs(nprobs, prob_min);
+        m_nprobs     = m_probs.size();
+        m_nstages    = m_branching_pattern.size();
         m_nthresholds = m_thresholds.size();
         m_box_score_widths =
             detection::generate_box_width_trials(m_nbins, m_ducy_max, m_wtsp);
         m_bias_snr   = snr_final / static_cast<float>(std::sqrt(m_nstages + 1));
-        m_guess_path = detection::guess_scheme(
+        m_guess_path = detail::guess_scheme(
             m_nstages, snr_final, m_branching_pattern, m_trials_start);
 
         if (m_nstages < 2) {
@@ -808,6 +807,12 @@ public:
         dataset.write_raw(m_states.data());
         spdlog::info("Saved dynamic threshold scheme to {}", filepath.string());
         return filepath.string();
+    }
+
+    std::vector<float> get_best_path_thresholds(float min_pd) const {
+        return detail::get_best_path_thresholds(
+            std::span<const State>(m_states.data(), m_states.size()),
+            m_thresholds, m_probs, m_nstages, m_nthresholds, m_nprobs, min_pd);
     }
 
 private:
@@ -1184,6 +1189,11 @@ void DynamicThresholdSchemeCUDA::run(SizeType thres_neigh) {
 }
 std::string DynamicThresholdSchemeCUDA::save(const std::string& outdir) const {
     return m_impl->save(outdir);
+}
+
+std::vector<float>
+DynamicThresholdSchemeCUDA::get_best_path_thresholds(float min_pd) const {
+    return m_impl->get_best_path_thresholds(min_pd);
 }
 
 } // namespace loki::detection

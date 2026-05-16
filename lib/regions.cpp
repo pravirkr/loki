@@ -14,6 +14,20 @@
 
 namespace loki::regions {
 
+namespace {
+// Cached evaluation of a candidate chunk. Holds the plan-derived sizes
+// so the chunk can be finalized without re-simulating.
+struct ChunkEval {
+    search::PulsarSearchConfig cfg;
+    SizeType buffer_size;
+    SizeType coord_size;
+    SizeType ncoords;
+    SizeType ffa_levels;
+    double chunk_only_memory_gb; // For logging/stats.
+    double allocated_memory_gb;  // With accumulated maxima
+};
+} // namespace
+
 std::vector<coord::FFARegion> generate_ffa_regions(double p_min,
                                                    double p_max,
                                                    double tsamp,
@@ -226,6 +240,13 @@ private:
         // in memory
         const auto max_drift = calculate_max_drift(m_base_cfg);
         // Log drift information
+        if (max_drift < 0.0 || max_drift >= 1.0) {
+            throw std::runtime_error(std::format(
+                "FFARegionPlanner: max_drift must be in [0, 1); got {:.6f}. "
+                "This typically indicates a parameter range that is too large "
+                "for the observation duration.",
+                max_drift));
+        }
         if (max_drift > 0 && m_base_cfg.get_nparams() > 1) {
             spdlog::info("Drift-aware chunking: max_drift={:.6f} ({:.4f}%) "
                          "for tobs={:.1f}s, n_params={}",
@@ -261,9 +282,15 @@ private:
                                     SizeType& max_coord_size,
                                     SizeType& max_ncoords,
                                     SizeType& max_ffa_levels) {
-        const double region_span = f_end - f_start;
-        if (region_span <= 0.0) {
-            return;
+        if (f_end <= f_start) {
+            return; // Empty or inverted region; nothing to do.
+        }
+        if (f_start * (1.0 - max_drift) <= 0.0) {
+            throw std::runtime_error(std::format(
+                "FFARegionPlanner: drift expansion would push f_start "
+                "({:.6f} Hz) to a non-positive frequency (drift={:.6f}). "
+                "Reduce parameter ranges or raise f_min.",
+                f_start, max_drift));
         }
         // For GPU, this is the device memory limit. For CPU, this is the
         // process memory limit.
@@ -274,28 +301,25 @@ private:
         const auto effective_limit_gb    = max_memory_gb - kSafetyMarginGB;
         if (effective_limit_gb <= 0.0) {
             throw std::runtime_error(std::format(
-                "FFARegionPlanner: max_process_memory_gb ({:.2f} GB) must be "
-                "greater than the safety margin ({:.2f} GB).",
+                "FFARegionPlanner: max_process_memory_gb ({:.2f} GB) must "
+                "exceed the safety margin ({:.2f} GB).",
                 max_memory_gb, kSafetyMarginGB));
         }
 
-        // Smallest *nominal* chunk width (Hz) used in preflight: scales with
-        // octave width so low-frequency vs high-frequency searches behave
-        // reasonably.
-        // constexpr double kMinViableRel     = 0.0005; // 0.05% of region
-        constexpr double kMinViableFloorHz = 0.01;
-        // const double min_viable_nominal =
-        //     std::max(kMinViableRel * region_span, kMinViableFloorHz);
-        const double min_viable_nominal   = kMinViableFloorHz;
-        constexpr double kMinChunkSize    = 0.01; // Merge threshold (Hz)
-        constexpr double kSearchTolerance = 0.01; // Binary search stop (Hz)
-        constexpr SizeType kMaxProbes     = 20;   // Avoid infinite loops
+        constexpr double kRelativeTolerance   = 1.0e-4;
+        constexpr double kAbsoluteToleranceHz = 1.0e-2;
+        constexpr SizeType kMaxBisectionSteps = 50;
 
-        auto make_stats = [&](const plans::FFAPlan<FoldType>& plan) {
-            return FFARegionStats{plan.get_buffer_size(),
-                                  plan.get_coord_size(),
-                                  plan.get_ncoords().back(),
-                                  plan.get_n_levels(),
+        const double region_span = f_end - f_start;
+        const double boundary_tolerance =
+            std::max(kAbsoluteToleranceHz, kRelativeTolerance * region_span);
+
+        auto stats_for = [&](SizeType buf, SizeType coord, SizeType nc,
+                             SizeType lv) {
+            return FFARegionStats{buf,
+                                  coord,
+                                  nc,
+                                  lv,
                                   m_base_cfg.get_n_scoring_widths(),
                                   m_base_cfg.get_nparams(),
                                   m_base_cfg.get_nsamps(),
@@ -304,130 +328,159 @@ private:
                                   m_use_gpu};
         };
 
-        // Pre-flight check: can we fit minimum viable chunk at worst case
-        // (high freq)?
-        {
-            const double min_f_start =
-                (f_end - min_viable_nominal) * (1.0 - max_drift);
-            const double min_f_end = f_end * (1.0 + max_drift);
-            auto check_cfg         = m_base_cfg.get_updated_config(
-                nbins, eta, min_f_start, min_f_end);
-            plans::FFAPlan<FoldType> check_plan(std::move(check_cfg));
-            const auto min_stats = make_stats(check_plan);
-            if (min_stats.get_freq_sweep_memory_usage() > effective_limit_gb) {
+        // The single point of contact with the (currently cheap, future
+        // expensive) memory model. Future surrogate-model work plugs in here.
+        auto evaluate_chunk = [&](double nominal_start,
+                                  double nominal_end) -> ChunkEval {
+            if (nominal_end <= nominal_start) {
+                throw std::runtime_error(
+                    std::format("FFARegionPlanner: zero/negative-width chunk "
+                                "[{:.8f}, {:.8f}] Hz.",
+                                nominal_start, nominal_end));
+            }
+            const double actual_start = nominal_start * (1.0 - max_drift);
+            const double actual_end   = nominal_end * (1.0 + max_drift);
+            if (actual_start <= 0.0 || actual_end <= actual_start) {
+                throw std::runtime_error(std::format(
+                    "FFARegionPlanner: invalid drift-expanded range "
+                    "[{:.8f}, {:.8f}] Hz from nominal [{:.8f}, {:.8f}] Hz.",
+                    actual_start, actual_end, nominal_start, nominal_end));
+            }
+
+            auto cfg = m_base_cfg.get_updated_config(nbins, eta, actual_start,
+                                                     actual_end);
+            plans::FFAPlan<FoldType> plan(cfg);
+
+            const SizeType buf   = plan.get_buffer_size();
+            const SizeType coord = plan.get_coord_size();
+            const SizeType nc    = plan.get_ncoords().back();
+            const SizeType lv    = plan.get_n_levels();
+
+            const double chunk_only_gb =
+                stats_for(buf, coord, nc, lv).get_freq_sweep_memory_usage();
+
+            // Workspace is sized by max over all chunks; fit must use that.
+            const double allocated_gb =
+                stats_for(std::max(max_buffer_size, buf),
+                          std::max(max_coord_size, coord),
+                          std::max(max_ncoords, nc),
+                          std::max(max_ffa_levels, lv))
+                    .get_freq_sweep_memory_usage();
+
+            return ChunkEval{.cfg                  = std::move(cfg),
+                             .buffer_size          = buf,
+                             .coord_size           = coord,
+                             .ncoords              = nc,
+                             .ffa_levels           = lv,
+                             .chunk_only_memory_gb = chunk_only_gb,
+                             .allocated_memory_gb  = allocated_gb};
+        };
+
+        auto fits = [&](const ChunkEval& e) {
+            return e.allocated_memory_gb <= effective_limit_gb;
+        };
+
+        // Bisect over chunk *width* (anchored at current_f_end) to find the
+        // largest fitting width.
+        auto find_boundary_bisect =
+            [&](double current_f_end, double min_width, ChunkEval min_eval,
+                double max_width) -> std::pair<double, ChunkEval> {
+            double lo_width = min_width; // known fits
+            double hi_width = max_width; // known fails
+            ChunkEval best  = std::move(min_eval);
+
+            for (SizeType step = 0; step < kMaxBisectionSteps &&
+                                    (hi_width - lo_width) > boundary_tolerance;
+                 ++step) {
+
+                const double mid_width   = std::midpoint(lo_width, hi_width);
+                const double probe_start = current_f_end - mid_width;
+                auto probe = evaluate_chunk(probe_start, current_f_end);
+
+                if (fits(probe)) {
+                    lo_width = mid_width;
+                    best     = std::move(probe);
+                } else {
+                    hi_width = mid_width;
+                }
+            }
+            return {current_f_end - lo_width, std::move(best)};
+        };
+
+        // Find the largest fitting chunk ending at `current_f_end`.
+        auto find_largest_fitting_chunk =
+            [&](double current_f_end) -> std::pair<double, ChunkEval> {
+            const double remaining_width = current_f_end - f_start;
+
+            // Fast path: the entire remaining range fits.
+            auto full_eval = evaluate_chunk(f_start, current_f_end);
+            if (fits(full_eval)) {
+                return {f_start, std::move(full_eval)};
+            }
+            // Minimum-viable chunk width: the smallest chunk we will ever
+            // produce. If even this doesn't fit, the search is too memory-bound
+            // for FFA to be a valid algorithm here.
+            const double min_chunk_width =
+                std::min(remaining_width, kAbsoluteToleranceHz);
+            const double min_probe_start = current_f_end - min_chunk_width;
+            auto min_eval = evaluate_chunk(min_probe_start, current_f_end);
+            if (!fits(min_eval)) {
+                const auto drift_span = (current_f_end * (1.0 + max_drift)) -
+                                        (min_probe_start * (1.0 - max_drift));
                 throw std::runtime_error(std::format(
                     "FFARegionPlanner: Cannot fit minimum viable chunk at "
-                    "highest frequency.\n"
+                    "at the top of [{:08.3f}, {:08.3f}] Hz.\n"
                     "  Nominal range: {:.3f} Hz, drift-expanded span: {:.3f} "
                     "Hz\n"
                     "  Required memory: {:.2f} GB, Available: {:.2f} GB\n"
                     "  Suggestion: Increase max_memory_gb or reduce "
                     "parameter search ranges.",
-                    min_viable_nominal, min_f_end - min_f_start,
-                    min_stats.get_freq_sweep_memory_usage(),
-                    effective_limit_gb));
+                    f_start, current_f_end, kAbsoluteToleranceHz, drift_span,
+                    min_eval.allocated_memory_gb, effective_limit_gb));
             }
-        }
 
-        // Reverse iteration: go from high frequency to low (f_end →
-        // f_start)
+            return find_boundary_bisect(current_f_end, min_chunk_width,
+                                        std::move(min_eval), remaining_width);
+        };
+
+        // Sliver merge: if the bisection produced a tiny low-frequency
+        // remainder, attempt to absorb it into the current chunk.
+        constexpr double kSliverWidthFactor = 4.0; // sliver up to 4x tolerance
+        auto try_absorb_sliver =
+            [&](double current_f_end, double nominal_start,
+                ChunkEval bisect_eval) -> std::pair<double, ChunkEval> {
+            const double remainder_width = nominal_start - f_start;
+            const double sliver_threshold =
+                kSliverWidthFactor * boundary_tolerance;
+
+            if (remainder_width <= 0.0 || remainder_width > sliver_threshold) {
+                return {nominal_start, std::move(bisect_eval)};
+            }
+
+            // Evaluate the merged chunk. If it fits, prefer it.
+            auto merged_eval = evaluate_chunk(f_start, current_f_end);
+            if (fits(merged_eval)) {
+                return {f_start, std::move(merged_eval)};
+            }
+            return {nominal_start, std::move(bisect_eval)};
+        };
+
+        // Main covering loop
         double current_f_end = f_end;
         while (current_f_end > f_start) {
-            // Early exit for tiny remaining ranges
-            const double range_width = current_f_end - f_start;
-            if (range_width <= 0.0) {
-                break;
-            }
-            double best_f_start = current_f_end; // Start from the top
-            if (range_width <= kSearchTolerance) {
-                auto test_cfg = m_base_cfg.get_updated_config(
-                    nbins, eta, f_start * (1.0 - max_drift),
-                    current_f_end * (1.0 + max_drift));
-                plans::FFAPlan<FoldType> test_plan(std::move(test_cfg));
-                const auto test_stats = make_stats(test_plan);
-                if (test_stats.get_freq_sweep_memory_usage() >
-                    effective_limit_gb) {
-                    throw std::runtime_error(std::format(
-                        "FFARegionPlanner: Cannot fit remaining sub-band "
-                        "[{:08.3f}, {:08.3f}] Hz (width {:.4g} Hz) within "
-                        "effective memory limit {:.2f} GB.",
-                        f_start, current_f_end, range_width,
-                        effective_limit_gb));
-                }
-                best_f_start = f_start;
-            } else {
-                // Binary search for largest chunk that fits (working backwards
-                // from current_f_end)
-                double f_low  = f_start;
-                double f_high = current_f_end;
-
-                // Start with a Heuristic probe (10% of remaining range or 1 Hz)
-                double f_probe = std::max(
-                    current_f_end - std::max(0.1 * range_width, 1.0), f_start);
-                SizeType probe_count = 0;
-
-                while (probe_count < kMaxProbes &&
-                       (f_high - f_low) > kSearchTolerance) {
-                    // Create test config for this chunk
-                    auto test_cfg = m_base_cfg.get_updated_config(
-                        nbins, eta, f_probe * (1.0 - max_drift),
-                        current_f_end * (1.0 + max_drift));
-                    // Simulate the chunk
-                    plans::FFAPlan<FoldType> test_plan(std::move(test_cfg));
-                    FFARegionStats sim_stats{
-                        std::max(max_buffer_size, test_plan.get_buffer_size()),
-                        std::max(max_coord_size, test_plan.get_coord_size()),
-                        std::max(max_ncoords, test_plan.get_ncoords().back()),
-                        std::max(max_ffa_levels, test_plan.get_n_levels()),
-                        m_base_cfg.get_n_scoring_widths(),
-                        m_base_cfg.get_nparams(),
-                        m_base_cfg.get_nsamps(),
-                        m_base_cfg.get_max_passing_candidates(),
-                        m_base_cfg.get_use_fourier(),
-                        m_use_gpu};
-                    if (sim_stats.get_freq_sweep_memory_usage() <=
-                        effective_limit_gb) {
-                        // Fits! Try to include more (go lower in frequency)
-                        best_f_start = f_probe;
-                        f_high       = f_probe;
-
-                        if (f_probe <= f_start + kSearchTolerance) {
-                            best_f_start = f_start; // Close enough, use f_start
-                            break;
-                        }
-                        // Probe lower
-                        f_probe =
-                            std::max(std::midpoint(f_low, f_high), f_start);
-                    } else {
-                        // Doesn't fit, need smaller chunk (go higher in
-                        // frequency)
-                        f_low   = f_probe;
-                        f_probe = std::midpoint(f_low, f_high);
-                    }
-
-                    ++probe_count;
-                }
-            }
-            // Check if remaining range is too small to warrant separate
-            // chunk
-            const double remaining_range = best_f_start - f_start;
-            if (remaining_range > 0 && remaining_range < kMinChunkSize &&
-                best_f_start < current_f_end) {
-                // Extend current chunk to include small remainder
-                best_f_start = f_start;
-            }
-            if (best_f_start >= current_f_end) {
+            auto [nominal_start, eval] =
+                find_largest_fitting_chunk(current_f_end);
+            std::tie(nominal_start, eval) = try_absorb_sliver(
+                current_f_end, nominal_start, std::move(eval));
+            // Defensive: bisection is guaranteed to make progress because the
+            // minimum-width probe fits. If this triggers, there's a logic bug.
+            if (nominal_start >= current_f_end) {
                 throw std::runtime_error(std::format(
-                    "FFARegionPlanner: Cannot fit any chunk in range "
-                    "[{:08.3f}, {:08.3f}] Hz with nbins={} into memory "
-                    "limit {:.2f} GB.\n"
-                    "  Suggestion: Increase max_memory_gb or reduce "
-                    "parameter searchranges.",
-                    f_start, current_f_end, nbins, max_memory_gb));
+                    "FFARegionPlanner: no progress in [{:08.3f}, {:08.3f}] Hz "
+                    "with nbins={}. This is a planner bug.",
+                    f_start, current_f_end, nbins));
             }
 
-            // Finalize this chunk
-            const double nominal_start = best_f_start;
             const double nominal_end   = current_f_end;
             const double nominal_width = nominal_end - nominal_start;
             const double actual_start  = nominal_start * (1.0 - max_drift);
@@ -436,53 +489,30 @@ private:
             const double overlap_fraction =
                 (actual_width - nominal_width) / actual_width;
 
-            auto chunk_cfg = m_base_cfg.get_updated_config(
-                nbins, eta, actual_start, actual_end);
-            plans::FFAPlan<FoldType> chunk_plan(chunk_cfg);
-            auto chunk_stats = make_stats(chunk_plan);
-            if (chunk_stats.get_freq_sweep_memory_usage() >
-                effective_limit_gb) {
-                throw std::runtime_error(std::format(
-                    "FFARegionPlanner: Chunk exceeds effective memory limit "
-                    "(e.g. remainder merge crossing a grid step).\n"
-                    "  Nominal [{:.8f}, {:.8f}] Hz\n"
-                    "  Required {:.2f} GB, limit {:.2f} GB",
-                    nominal_start, nominal_end,
-                    chunk_stats.get_freq_sweep_memory_usage(),
-                    effective_limit_gb));
-            }
+            m_cfgs.push_back(eval.cfg);
+            m_chunk_stats.push_back(coord::FFAChunkStats{
+                .nominal_f_start  = nominal_start,
+                .nominal_f_end    = nominal_end,
+                .actual_f_start   = actual_start,
+                .actual_f_end     = actual_end,
+                .nominal_width    = nominal_width,
+                .actual_width     = actual_width,
+                .total_memory_gb  = eval.chunk_only_memory_gb,
+                .overlap_fraction = overlap_fraction});
 
-            const double chunk_memory_gb =
-                chunk_plan.get_buffer_memory_usage() +
-                chunk_plan.get_coord_memory_usage();
-
-            // Store config and stats
-            m_cfgs.push_back(chunk_cfg);
-            m_chunk_stats.push_back(
-                coord::FFAChunkStats{.nominal_f_start  = nominal_start,
-                                     .nominal_f_end    = nominal_end,
-                                     .actual_f_start   = actual_start,
-                                     .actual_f_end     = actual_end,
-                                     .nominal_width    = nominal_width,
-                                     .actual_width     = actual_width,
-                                     .total_memory_gb  = chunk_memory_gb,
-                                     .overlap_fraction = overlap_fraction});
             spdlog::debug("Chunk: nominal=[{:08.3f}, {:08.3f}] ({:.3f} Hz), "
                           "actual=[{:08.3f}, {:08.3f}] ({:.3f} Hz), "
                           "overlap={:.1f}%, mem={:.2f} GB",
                           nominal_start, nominal_end, nominal_width,
                           actual_start, actual_end, actual_width,
-                          overlap_fraction * 100.0, chunk_memory_gb);
-            max_buffer_size =
-                std::max(max_buffer_size, chunk_plan.get_buffer_size());
-            max_coord_size =
-                std::max(max_coord_size, chunk_plan.get_coord_size());
-            max_ncoords =
-                std::max(max_ncoords, chunk_plan.get_ncoords().back());
-            max_ffa_levels =
-                std::max(max_ffa_levels, chunk_plan.get_n_levels());
-            // Move to next chunk (going backwards in frequency)
-            current_f_end = best_f_start;
+                          overlap_fraction * 100.0, eval.chunk_only_memory_gb);
+
+            max_buffer_size = std::max(max_buffer_size, eval.buffer_size);
+            max_coord_size  = std::max(max_coord_size, eval.coord_size);
+            max_ncoords     = std::max(max_ncoords, eval.ncoords);
+            max_ffa_levels  = std::max(max_ffa_levels, eval.ffa_levels);
+
+            current_f_end = nominal_start;
         }
     }
 
@@ -491,43 +521,62 @@ private:
             return;
         }
 
-        // Compute aggregate statistics
+        // Aggregate metrics. We need both bulk-behavior summaries (median,
+        // p95) and outlier callouts (max, count of slivers) because a single
+        // sliver can skew mean/max and mislead readers.
+        const SizeType n = m_chunk_stats.size();
+        std::vector<double> overlaps_pct;
+        std::vector<double> memories_gb;
+        overlaps_pct.reserve(n);
+        memories_gb.reserve(n);
+
         double total_nominal_width = 0.0;
         double total_actual_width  = 0.0;
-        double max_memory          = 0.0;
-        double avg_memory          = 0.0;
-        double max_overlap_pct     = 0.0;
-        double avg_overlap_pct     = 0.0;
 
-        for (const auto& stat : m_chunk_stats) {
-            total_nominal_width += stat.nominal_width;
-            total_actual_width += stat.actual_width;
-            max_memory = std::max(max_memory, stat.total_memory_gb);
-            avg_memory += stat.total_memory_gb;
-            max_overlap_pct =
-                std::max(max_overlap_pct, stat.overlap_fraction * 100.0);
-            avg_overlap_pct += stat.overlap_fraction * 100.0;
+        for (const auto& s : m_chunk_stats) {
+            overlaps_pct.push_back(s.overlap_fraction * 100.0);
+            memories_gb.push_back(s.total_memory_gb);
+            total_nominal_width += s.nominal_width;
+            total_actual_width += s.actual_width;
         }
-        avg_memory /= static_cast<float>(m_chunk_stats.size());
-        avg_overlap_pct /= static_cast<double>(m_chunk_stats.size());
+
+        auto percentile = [](std::vector<double>& v, double p) {
+            // Linear-interpolation percentile on a sorted copy. p in [0, 100].
+            if (v.empty()) {
+                return 0.0;
+            }
+            std::ranges::sort(v);
+            const double rank = (p / 100.0) * static_cast<double>(v.size() - 1);
+            const auto lo     = static_cast<SizeType>(std::floor(rank));
+            const auto hi     = static_cast<SizeType>(std::ceil(rank));
+            const double frac = rank - static_cast<double>(lo);
+            return v[lo] + (frac * (v[hi] - v[lo]));
+        };
+
+        const double overlap_p50 = percentile(overlaps_pct, 50.0);
+        const double overlap_p95 = percentile(overlaps_pct, 95.0);
+        const double overlap_max =
+            overlaps_pct.back(); // sorted by percentile()
+        const double memory_p50 = percentile(memories_gb, 50.0);
+        const double memory_p95 = percentile(memories_gb, 95.0);
+        const double memory_max = memories_gb.back();
 
         const double redundancy_factor =
             total_actual_width / total_nominal_width;
-        if (m_use_gpu) {
-            spdlog::info("FFARegionPlanner - GPU Summary:");
-        } else {
-            spdlog::info("FFARegionPlanner - CPU Summary:");
-        }
-        spdlog::info("  Total chunks: {}", m_chunk_stats.size());
-        spdlog::info(
-            "  Nominal coverage: {:.3f} Hz, Actual coverage: {:.3f} Hz",
-            total_nominal_width, total_actual_width);
-        spdlog::info("  Redundancy factor: {:.3f}x ({:.1f}% extra computation)",
-                     redundancy_factor, (redundancy_factor - 1.0) * 100.0);
-        spdlog::info("  Overlap: avg={:.1f}%, max={:.1f}%", avg_overlap_pct,
-                     max_overlap_pct);
-        spdlog::info("  Memory per chunk: avg={:.2f} GB, max={:.2f} GB",
-                     avg_memory, max_memory);
+
+        spdlog::info("FFARegionPlanner - {} Summary:",
+                     m_use_gpu ? "GPU" : "CPU");
+        spdlog::info("  Total chunks: {}", n);
+        spdlog::info("  Coverage: nominal={:.3f} Hz, actual={:.3f} Hz "
+                     "(redundancy {:.2f}x, +{:.1f}% computation)",
+                     total_nominal_width, total_actual_width, redundancy_factor,
+                     (redundancy_factor - 1.0) * 100.0);
+        spdlog::info("  Overlap per chunk: p50={:.1f}%, p95={:.1f}%, "
+                     "max={:.1f}%",
+                     overlap_p50, overlap_p95, overlap_max);
+        spdlog::info("  Memory per chunk: p50={:.2f} GB, p95={:.2f} GB, "
+                     "max={:.2f} GB",
+                     memory_p50, memory_p95, memory_max);
         spdlog::info("  Freq Sweep allocated: {:.2f} GB (limit: {:.2f} GB)",
                      m_stats.get_freq_sweep_memory_usage(),
                      m_base_cfg.get_max_process_memory_gb());
