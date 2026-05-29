@@ -44,7 +44,8 @@ public:
                        double m_c_max                     = 10.0,
                        double m_p_min                     = 1.4,
                        double minimum_snap_cells          = 5.0,
-                       bool use_conservative_tile         = false);
+                       bool use_conservative_tile         = false,
+                       bool use_boxcar_kadane             = false);
 
     // --- Rule of five: PIMPL ---
     ~PulsarSearchConfig();
@@ -106,6 +107,8 @@ public:
     double get_minimum_snap_cells() const noexcept;
     /// @brief Get whether to use the conservative tile.
     bool get_use_conservative_tile() const noexcept;
+    /// @brief Get whether to use the boxcar kadane.
+    bool get_use_boxcar_kadane() const noexcept;
     /// @brief Get the segment length for the brute force search.
     double get_tseg_brute() const noexcept;
     /// @brief Get the segment length for the FFA search.
@@ -124,6 +127,10 @@ public:
     [[nodiscard]] std::vector<SizeType> get_scoring_widths() const noexcept;
     /// @brief Get the number of scoring widths.
     SizeType get_n_scoring_widths() const noexcept;
+    /// @brief Get the boxcar kadane biases.
+    [[nodiscard]] std::vector<float> get_boxcar_kadane_biases() const noexcept;
+    /// @brief Get the number of boxcar kadane biases.
+    SizeType get_n_boxcar_kadane_biases() const noexcept;
     /// @brief Get the mass constant for the circular orbit search.
     double get_x_mass_const() const noexcept;
 

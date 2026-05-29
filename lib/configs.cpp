@@ -37,7 +37,8 @@ public:
          double m_c_max,
          double m_p_min,
          double minimum_snap_cells,
-         bool use_conservative_tile)
+         bool use_conservative_tile,
+         bool use_boxcar_kadane)
         : m_nsamps(nsamps),
           m_tsamp(tsamp),
           m_nbins(nbins),
@@ -59,6 +60,7 @@ public:
           m_m_p_min(m_p_min),
           m_minimum_snap_cells(minimum_snap_cells),
           m_use_conservative_tile(use_conservative_tile),
+          m_use_boxcar_kadane(use_boxcar_kadane),
           m_bseg_brute_explicit(bseg_brute),
           m_bseg_ffa_explicit(bseg_ffa) {
         if (m_param_limits.empty()) {
@@ -81,6 +83,7 @@ public:
                                             static_cast<double>(m_bseg_brute)));
         m_scoring_widths =
             detection::generate_box_width_trials(m_nbins, m_ducy_max, m_wtsp);
+        m_boxcar_kadane_biases = {1.42F, 0.76F, 0.41F};
 
         spdlog::debug(
             "PulsarSearchConfigClass: nsamps={}, tsamp={}, nbins={}, eta={}, "
@@ -124,6 +127,7 @@ public:
     double get_m_p_min() const { return m_m_p_min; }
     double get_minimum_snap_cells() const { return m_minimum_snap_cells; }
     bool get_use_conservative_tile() const { return m_use_conservative_tile; }
+    bool get_use_boxcar_kadane() const { return m_use_boxcar_kadane; }
 
     double get_tseg_brute() const { return m_tseg_brute; }
     double get_tseg_ffa() const { return m_tseg_ffa; }
@@ -136,6 +140,10 @@ public:
         return m_scoring_widths;
     }
     SizeType get_n_scoring_widths() const { return m_scoring_widths.size(); }
+    std::vector<float> get_boxcar_kadane_biases() const {
+        return m_boxcar_kadane_biases;
+    }
+    SizeType get_n_boxcar_kadane_biases() const { return m_boxcar_kadane_biases.size(); }
 
     // Methods
     double get_x_mass_const() const {
@@ -209,7 +217,8 @@ public:
                 m_m_c_max,
                 m_m_p_min,
                 m_minimum_snap_cells,
-                m_use_conservative_tile};
+                m_use_conservative_tile,
+                m_use_boxcar_kadane};
     }
 
     PulsarSearchConfig get_updated_config(SizeType nbins,
@@ -247,6 +256,7 @@ private:
     double m_m_p_min;
     double m_minimum_snap_cells;
     bool m_use_conservative_tile;
+    bool m_use_boxcar_kadane;
     std::optional<SizeType> m_bseg_brute_explicit;
     std::optional<SizeType> m_bseg_ffa_explicit;
 
@@ -258,6 +268,7 @@ private:
     double m_f_min{};
     double m_f_max{};
     std::vector<SizeType> m_scoring_widths;
+    std::vector<float> m_boxcar_kadane_biases;
 
     void validate() const {
         error_check::check_greater(m_nsamps, 0, "nsamps must be positive");
@@ -325,7 +336,8 @@ PulsarSearchConfig::PulsarSearchConfig(SizeType nsamps,
                                        double m_c_max,
                                        double m_p_min,
                                        double minimum_snap_cells,
-                                       bool use_conservative_tile)
+                                       bool use_conservative_tile,
+                                       bool use_boxcar_kadane)
     : m_impl(std::make_unique<Impl>(nsamps,
                                     tsamp,
                                     nbins,
@@ -348,7 +360,8 @@ PulsarSearchConfig::PulsarSearchConfig(SizeType nsamps,
                                     m_c_max,
                                     m_p_min,
                                     minimum_snap_cells,
-                                    use_conservative_tile)) {}
+                                    use_conservative_tile,
+                                    use_boxcar_kadane)) {}
 PulsarSearchConfig::~PulsarSearchConfig()                             = default;
 PulsarSearchConfig::PulsarSearchConfig(PulsarSearchConfig&&) noexcept = default;
 PulsarSearchConfig&
@@ -439,6 +452,9 @@ double PulsarSearchConfig::get_minimum_snap_cells() const noexcept {
 bool PulsarSearchConfig::get_use_conservative_tile() const noexcept {
     return m_impl->get_use_conservative_tile();
 }
+bool PulsarSearchConfig::get_use_boxcar_kadane() const noexcept {
+    return m_impl->get_use_boxcar_kadane();
+}
 double PulsarSearchConfig::get_tseg_brute() const noexcept {
     return m_impl->get_tseg_brute();
 }
@@ -465,6 +481,12 @@ std::vector<SizeType> PulsarSearchConfig::get_scoring_widths() const noexcept {
 }
 SizeType PulsarSearchConfig::get_n_scoring_widths() const noexcept {
     return m_impl->get_n_scoring_widths();
+}
+std::vector<float> PulsarSearchConfig::get_boxcar_kadane_biases() const noexcept {
+    return m_impl->get_boxcar_kadane_biases();
+}
+SizeType PulsarSearchConfig::get_n_boxcar_kadane_biases() const noexcept {
+    return m_impl->get_n_boxcar_kadane_biases();
 }
 double PulsarSearchConfig::get_x_mass_const() const noexcept {
     return m_impl->get_x_mass_const();

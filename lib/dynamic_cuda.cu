@@ -31,8 +31,9 @@ BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::BasePruneDPFunctsCUDA(
       m_cfg(std::move(cfg)),
       m_batch_size(batch_size),
       m_branch_max(branch_max) {
-    m_boxcar_widths_d       = m_cfg.get_scoring_widths();
-    const auto param_limits = m_cfg.get_param_limits();
+    m_boxcar_widths_d        = m_cfg.get_scoring_widths();
+    m_boxcar_kadane_biases_d = m_cfg.get_boxcar_kadane_biases();
+    const auto param_limits  = m_cfg.get_param_limits();
 
     SizeType n_coords_init = 1;
     for (const auto count : param_grid_count_init) {
@@ -148,12 +149,25 @@ SizeType BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::score_and_filter(
             cuda_utils::as_span(m_scratch_folds_d).first(nfft * nbins);
         m_irfft_executor->execute(folds_span, folds_t_span,
                                   static_cast<int>(nfft), stream);
-        return detection::score_and_filter_max_cuda_thread_d(
+        if (m_cfg.get_use_boxcar_kadane()) {
+            return detection::score_and_filter_max_cuda_kadane_d(
+                folds_t_span,
+                cuda_utils::as_span(this->m_boxcar_kadane_biases_d),
+                scores_tree, validation_mask, filtered_mask, threshold,
+                n_leaves, nbins, scratch_ws, stream);
+        }
+        return detection::score_and_filter_max_cuda_d(
             folds_t_span, cuda_utils::as_span(this->m_boxcar_widths_d),
             scores_tree, validation_mask, filtered_mask, threshold, n_leaves,
             nbins, scratch_ws, stream);
     } else {
-        return detection::score_and_filter_max_cuda_thread_d(
+        if (m_cfg.get_use_boxcar_kadane()) {
+            return detection::score_and_filter_max_cuda_kadane_d(
+                folds_tree, cuda_utils::as_span(this->m_boxcar_kadane_biases_d),
+                scores_tree, validation_mask, filtered_mask, threshold,
+                n_leaves, nbins, scratch_ws, stream);
+        }
+        return detection::score_and_filter_max_cuda_d(
             folds_tree, cuda_utils::as_span(this->m_boxcar_widths_d),
             scores_tree, validation_mask, filtered_mask, threshold, n_leaves,
             nbins, scratch_ws, stream);

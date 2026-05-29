@@ -62,17 +62,28 @@ using DeviceFoldType = typename FoldTypeTraits<T>::DeviceType;
 
 #endif // LOKI_ENABLE_CUDA
 
+// NOLINTBEGIN(cppcoreguidelines-macro-usage)
+// Helper macro for stringification
+#define STRINGIFY(x) STRINGIFY_(x)
+#define STRINGIFY_(x) #x
+
 inline constexpr SizeType kUnrollFactor = 8;
 
 #if defined(__clang__)
-#define UNROLL_VECTORIZE                                                       \
-    _Pragma("clang loop unroll_count(kUnrollFactor) vectorize(enable)")
+#define UNROLL_N(N) _Pragma(STRINGIFY(clang loop unroll_count(N)))
+#define UNROLL_VECTORIZE_N(N)                                                  \
+    _Pragma(STRINGIFY(clang loop unroll_count(N) vectorize(enable)))
 #elif defined(__GNUC__)
-#define UNROLL_VECTORIZE                                                       \
-    _Pragma("GCC unroll kUnrollFactor") _Pragma("GCC ivdep")
+#define UNROLL_N(N) _Pragma(STRINGIFY(GCC unroll N))
+#define UNROLL_VECTORIZE_N(N)                                                  \
+    _Pragma(STRINGIFY(GCC unroll N)) _Pragma("GCC ivdep")
 #else
-#define UNROLL_VECTORIZE
+#define UNROLL_N(N)
+#define UNROLL_VECTORIZE_N(N)
 #endif
+
+#define UNROLL_VECTORIZE UNROLL_VECTORIZE_N(kUnrollFactor)
+// NOLINTEND(cppcoreguidelines-macro-usage)
 
 #if defined(LOKI_ENABLE_CUDA) && defined(__CUDACC__)
 #define LOKI_HD __host__ __device__

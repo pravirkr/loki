@@ -35,7 +35,9 @@ BasePruneDPFuncts<FoldType, Derived>::BasePruneDPFuncts(
       m_cfg(std::move(cfg)),
       m_batch_size(batch_size),
       m_branch_max(branch_max),
-      m_boxcar_widths_cache(m_cfg.get_scoring_widths(), m_cfg.get_nbins()) {
+      m_boxcar_widths_cache(m_cfg.get_scoring_widths(), m_cfg.get_nbins()),
+      m_boxcar_kadane_cache(m_cfg.get_boxcar_kadane_biases(),
+                            m_cfg.get_nbins()) {
     SizeType n_coords_init = 1;
     for (const auto count : m_param_grid_count_init) {
         n_coords_init *= count;
@@ -129,10 +131,20 @@ SizeType BasePruneDPFuncts<FoldType, Derived>::score_and_filter(
             std::span<float>(m_scratch_folds).first(nfft * nbins);
         m_irfft_executor->execute(folds_span, folds_t_span,
                                   static_cast<int>(nfft));
+        if (m_cfg.get_use_boxcar_kadane()) {
+            return detection::score_and_filter_max_kadane_with_cache(
+                folds_t_span, scores_tree, indices_tree, threshold, n_leaves,
+                nbins, m_boxcar_kadane_cache);
+        }
         return detection::score_and_filter_max_with_cache(
             folds_t_span, scores_tree, indices_tree, threshold, n_leaves, nbins,
             m_boxcar_widths_cache);
     } else {
+        if (m_cfg.get_use_boxcar_kadane()) {
+            return detection::score_and_filter_max_kadane_with_cache(
+                folds_tree, scores_tree, indices_tree, threshold, n_leaves,
+                nbins, m_boxcar_kadane_cache);
+        }
         return detection::score_and_filter_max_with_cache(
             folds_tree, scores_tree, indices_tree, threshold, n_leaves, nbins,
             m_boxcar_widths_cache);

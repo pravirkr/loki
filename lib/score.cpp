@@ -171,53 +171,14 @@ void snr_boxcar_impl(const float* __restrict__ folds,
     }
 }
 
-void snr_boxcar_3d_max_with_cache_impl(const float* __restrict__ arr,
-                                       SizeType nprofiles,
-                                       SizeType nbins,
-                                       float* __restrict__ out,
-                                       BoxcarWidthsCache& cache) {
-    // Use precomputed values from cache
-    const auto* __restrict__ widths = cache.widths.data();
-    const auto wmax                 = cache.wmax;
-    const auto ntemplates           = cache.ntemplates;
-    const auto* __restrict__ h_vals = cache.h_vals.data();
-    const auto* __restrict__ b_vals = cache.b_vals.data();
-    auto* __restrict__ fold_norm    = cache.fold_norm_buffer.data();
-    auto* __restrict__ psum         = cache.psum_buffer.data();
-
-    for (SizeType i = 0; i < nprofiles; ++i) {
-        const SizeType base_idx            = i * 2 * nbins;
-        const float* __restrict__ ts_e_ptr = arr + base_idx;
-        const float* __restrict__ ts_v_ptr = arr + base_idx + nbins;
-        for (SizeType j = 0; j < nbins; ++j) {
-            const float inv_sqrt_v = 1.0F / std::sqrt(ts_v_ptr[j]);
-            fold_norm[j]           = ts_e_ptr[j] * inv_sqrt_v;
-        }
-        utils::circular_prefix_sum(fold_norm, psum, nbins, nbins + wmax);
-        const float sum              = psum[nbins - 1];
-        float* __restrict__ psum_ptr = psum;
-
-        // Compute SNR for each width, find maximum
-        float max_snr = std::numeric_limits<float>::lowest();
-        for (SizeType iw = 0; iw < ntemplates; ++iw) {
-            const auto dmax =
-                utils::diff_max(psum_ptr + widths[iw], psum_ptr, nbins);
-            const float snr =
-                ((h_vals[iw] + b_vals[iw]) * dmax) - (b_vals[iw] * sum);
-            max_snr = std::max(max_snr, snr);
-        }
-        out[i] = max_snr;
-    }
-}
-
 SizeType
-score_and_filter_max_with_cache_impl(const float* __restrict__ arr,
-                                     SizeType nprofiles,
-                                     SizeType nbins,
-                                     float* __restrict__ out,
-                                     SizeType* __restrict__ indices_filtered,
-                                     float threshold,
-                                     BoxcarWidthsCache& cache) {
+snr_boxcar_3d_max_with_cache_impl(const float* __restrict__ arr,
+                                  SizeType nprofiles,
+                                  SizeType nbins,
+                                  float* __restrict__ out,
+                                  SizeType* __restrict__ indices_filtered,
+                                  float threshold,
+                                  BoxcarWidthsCache& cache) {
     // Use precomputed values from cache
     const auto* __restrict__ widths = cache.widths.data();
     const auto wmax                 = cache.wmax;
@@ -227,36 +188,34 @@ score_and_filter_max_with_cache_impl(const float* __restrict__ arr,
     auto* __restrict__ fold_norm    = cache.fold_norm_buffer.data();
     auto* __restrict__ psum         = cache.psum_buffer.data();
 
+    const bool do_filter       = (indices_filtered != nullptr);
     SizeType nprofiles_passing = 0;
     for (SizeType i = 0; i < nprofiles; ++i) {
         const SizeType base_idx            = i * 2 * nbins;
         const float* __restrict__ ts_e_ptr = arr + base_idx;
         const float* __restrict__ ts_v_ptr = arr + base_idx + nbins;
         for (SizeType j = 0; j < nbins; ++j) {
-            const float inv_sqrt_v = 1.0F / std::sqrt(ts_v_ptr[j]);
-            fold_norm[j]           = ts_e_ptr[j] * inv_sqrt_v;
+            fold_norm[j] = ts_e_ptr[j] / std::sqrt(ts_v_ptr[j]);
         }
         utils::circular_prefix_sum(fold_norm, psum, nbins, nbins + wmax);
-        const float sum              = psum[nbins - 1];
-        float* __restrict__ psum_ptr = psum;
+        const float sum = psum[nbins - 1];
 
         // Compute SNR for each width, find maximum
         float max_snr = std::numeric_limits<float>::lowest();
         for (SizeType iw = 0; iw < ntemplates; ++iw) {
-            const auto dmax =
-                utils::diff_max(psum_ptr + widths[iw], psum_ptr, nbins);
+            const auto dmax = utils::diff_max(psum + widths[iw], psum, nbins);
             const float snr =
                 ((h_vals[iw] + b_vals[iw]) * dmax) - (b_vals[iw] * sum);
             max_snr = std::max(max_snr, snr);
         }
         out[i] = max_snr;
-        if (max_snr >= threshold) {
+        if (do_filter && (max_snr >= threshold)) {
             indices_filtered[nprofiles_passing] = i;
             ++nprofiles_passing;
         }
     }
     return nprofiles_passing;
-} // End score_and_filter_max_with_cache_impl definition
+} // End snr_boxcar_3d_max_with_cache_impl definition
 
 } // namespace
 
@@ -387,6 +346,7 @@ BoxcarWidthsCache::BoxcarWidthsCache(std::span<const SizeType> widths,
             static_cast<float>(w) * h_vals[iw] / static_cast<float>(nbins - w);
     }
 }
+
 std::vector<SizeType>
 generate_box_width_trials(SizeType fold_bins, double ducy_max, double wtsp) {
     const auto wmax = static_cast<SizeType>(
@@ -542,7 +502,7 @@ void snr_boxcar_3d_max_with_cache(std::span<const float> folds,
         "snr_boxcar_3d_max_with_cache: folds should be "
         "at least nprofiles * 2 * nbins");
     snr_boxcar_3d_max_with_cache_impl(folds.data(), nprofiles, nbins,
-                                      scores.data(), cache);
+                                      scores.data(), nullptr, 0.0F, cache);
 }
 
 SizeType score_and_filter_max_with_cache(std::span<const float> folds,
@@ -563,7 +523,7 @@ SizeType score_and_filter_max_with_cache(std::span<const float> folds,
         folds.size(), nprofiles * 2 * nbins,
         "score_and_filter_max_with_cache: folds should be at least nprofiles * "
         "2 * nbins");
-    return score_and_filter_max_with_cache_impl(
+    return snr_boxcar_3d_max_with_cache_impl(
         folds.data(), nprofiles, nbins, scores.data(), indices_filtered.data(),
         threshold, cache);
 }

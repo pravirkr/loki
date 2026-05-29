@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "loki/common/types.hpp"
+#include "loki/detection/kadane.hpp"
 #include "loki/detection/score.hpp"
 #include "loki/search/configs.hpp"
 #include "loki/utils/fft.hpp"
@@ -132,6 +133,7 @@ protected:
     std::unique_ptr<math::IrfftExecutor> m_irfft_executor;
     // Cache for snr_boxcar_batch
     detection::BoxcarWidthsCache m_boxcar_widths_cache;
+    detection::BoxcarKadaneCache m_boxcar_kadane_cache;
 
     // Constructor for all derived classes
     BasePruneDPFuncts(std::span<const SizeType> param_grid_count_init,
@@ -527,6 +529,7 @@ protected:
     thrust::device_vector<double> m_dparams_init_d;
     thrust::device_vector<ParamLimit> m_param_limits_d;
     thrust::device_vector<uint32_t> m_boxcar_widths_d;
+    thrust::device_vector<float> m_boxcar_kadane_biases_d;
 
     // Buffer for ComplexType irfft transform
     thrust::device_vector<float> m_scratch_folds_d;

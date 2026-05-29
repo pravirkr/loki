@@ -342,11 +342,19 @@ private:
         const auto nbins    = static_cast<double>(m_cfg.get_nbins());
         const auto nbins_f  = static_cast<double>(m_cfg.get_nbins_f());
         const auto n_widths = static_cast<double>(m_cfg.get_n_scoring_widths());
+        const auto n_biases =
+            static_cast<double>(m_cfg.get_n_boxcar_kadane_biases());
         const auto conservative_tile =
             static_cast<double>(m_cfg.get_use_conservative_tile());
 
         auto score_flops = [&](double n_leaves) {
-            return (n_leaves * 2.0) * (n_widths * 2.0 * nbins);
+            return n_leaves *
+                   ((3.0 * nbins) +
+                    (n_widths * ((2.0 * nbins) + (nbins / 4) + 11.0)));
+        };
+        auto score_flops_kadane = [&](double n_leaves) {
+            return n_leaves * (((3.0 * nbins) + 1.0) +
+                               (n_biases * ((4.0 * nbins) + 11.0)));
         };
         auto irfft_flops = [&](double n_leaves) {
             if constexpr (std::is_same_v<FoldType, ComplexType>) {
@@ -405,7 +413,11 @@ private:
             total_flops += resolve_flops(n_leaves_phy);
             total_flops += shift_add_flops(n_leaves_phy);
             total_flops += irfft_flops(n_leaves_phy);
-            total_flops += score_flops(n_leaves_phy);
+            if (m_cfg.get_use_boxcar_kadane()) {
+                total_flops += score_flops_kadane(n_leaves_phy);
+            } else {
+                total_flops += score_flops(n_leaves_phy);
+            }
             total_flops += transform_flops(n_leaves_surv);
         }
 

@@ -174,27 +174,17 @@ SizeType score_and_filter_cuda_d(cuda::std::span<const float> folds,
                                  cudaStream_t stream,
                                  memory::DeviceCounter& counter);
 
-SizeType score_and_filter_max_cuda_d(cuda::std::span<const float> folds,
-                                     cuda::std::span<const uint32_t> widths,
-                                     cuda::std::span<float> scores,
-                                     cuda::std::span<uint32_t> indices_filtered,
-                                     float threshold,
-                                     SizeType nprofiles,
-                                     SizeType nbins,
-                                     memory::DeviceCounter& counter,
-                                     cudaStream_t stream);
-
 SizeType
-score_and_filter_max_cuda_thread_d(cuda::std::span<const float> folds,
-                                   cuda::std::span<const uint32_t> widths,
-                                   cuda::std::span<float> scores,
-                                   cuda::std::span<const uint8_t> validation_mask,
-                                   cuda::std::span<uint8_t> filtered_mask,
-                                   float threshold,
-                                   SizeType nprofiles,
-                                   SizeType nbins,
-                                   memory::CUBScratchArena& scratch_ws,
-                                   cudaStream_t stream);
+score_and_filter_max_cuda_d(cuda::std::span<const float> folds,
+                            cuda::std::span<const uint32_t> widths,
+                            cuda::std::span<float> scores,
+                            cuda::std::span<const uint8_t> validation_mask,
+                            cuda::std::span<uint8_t> filtered_mask,
+                            float threshold,
+                            SizeType nprofiles,
+                            SizeType nbins,
+                            memory::CUBScratchArena& scratch_ws,
+                            cudaStream_t stream);
 
 #endif // LOKI_ENABLE_CUDA
 
