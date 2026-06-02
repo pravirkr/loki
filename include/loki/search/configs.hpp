@@ -43,7 +43,8 @@ public:
                        double p_orb_min                   = 1e-5,
                        double m_c_max                     = 10.0,
                        double m_p_min                     = 1.4,
-                       double minimum_snap_cells          = 5.0,
+                       double propagator_significance     = 2.0,
+                       double validation_significance     = 5.0,
                        bool use_conservative_tile         = false,
                        bool use_boxcar_kadane             = false);
 
@@ -102,9 +103,10 @@ public:
     double get_m_c_max() const noexcept;
     /// @brief Get the minimum mass of the pulsar for the circular orbit search.
     double get_m_p_min() const noexcept;
-    /// @brief Get the minimum number of snap cells required for the circular
-    /// orbit search to be considered active.
-    double get_minimum_snap_cells() const noexcept;
+    /// @brief Get the propagator significance for the circular orbit search.
+    double get_propagator_significance() const noexcept;
+    /// @brief Get the validation significance for the circular orbit search.
+    double get_validation_significance() const noexcept;
     /// @brief Get whether to use the conservative tile.
     bool get_use_conservative_tile() const noexcept;
     /// @brief Get whether to use the boxcar kadane.

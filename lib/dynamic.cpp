@@ -561,7 +561,7 @@ SizeType PruneCircTaylorDPFuncts<FoldType>::branch(
     return circ_taylor_branch_batch(
         leaves_tree, leaves_branch, leaves_origins, coord_cur,
         this->m_cfg.get_nbins(), this->m_cfg.get_eta(), this->m_branch_max,
-        n_leaves, this->m_cfg.get_minimum_snap_cells(), branch_ws);
+        n_leaves, this->m_cfg.get_propagator_significance(), branch_ws);
 }
 
 template <SupportedFoldType FoldType>
@@ -572,7 +572,7 @@ SizeType PruneCircTaylorDPFuncts<FoldType>::validate(
     SizeType n_leaves) const {
     return circ_taylor_validate_batch(
         leaves_branch, leaves_origins, n_leaves, this->m_cfg.get_p_orb_min(),
-        this->m_cfg.get_x_mass_const(), this->m_cfg.get_minimum_snap_cells());
+        this->m_cfg.get_x_mass_const(), this->m_cfg.get_validation_significance());
 }
 
 template <SupportedFoldType FoldType>
@@ -591,7 +591,7 @@ void PruneCircTaylorDPFuncts<FoldType>::resolve(
                               this->m_cfg.get_param_limits(), coord_add,
                               coord_cur, coord_init, n_accel_init, n_freq_init,
                               this->m_cfg.get_nbins(), n_leaves,
-                              this->m_cfg.get_minimum_snap_cells());
+                              this->m_cfg.get_propagator_significance());
 }
 
 template <SupportedFoldType FoldType>
@@ -604,7 +604,7 @@ void PruneCircTaylorDPFuncts<FoldType>::transform(
     circ_taylor_transform_batch(leaves_tree, indices_tree, coord_next,
                                 coord_cur, n_leaves,
                                 this->m_cfg.get_use_conservative_tile(),
-                                this->m_cfg.get_minimum_snap_cells());
+                                this->m_cfg.get_propagator_significance());
 }
 
 template <SupportedFoldType FoldType>
@@ -631,7 +631,7 @@ void PruneCircTaylorDPFuncts<FoldType>::ascend(
         leaves_tree, scratch_param_indices, scratch_phase_shift,
         this->m_cfg.get_param_limits(), coord_segments, coord_cur, n_accel_init,
         n_freq_init, this->m_cfg.get_nbins(), n_leaves, n_segments,
-        this->m_cfg.get_minimum_snap_cells());
+        this->m_cfg.get_propagator_significance());
 
     // Copy scores to scores_ep for future backup
     std::ranges::copy(scores_tree, scores_ep_tree.begin());

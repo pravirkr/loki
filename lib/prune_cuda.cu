@@ -28,12 +28,6 @@
 namespace loki::algorithms {
 
 namespace {
-struct IterationStats {
-    SizeType n_leaves     = 0;
-    SizeType n_leaves_phy = 0;
-    float score_min       = std::numeric_limits<float>::max();
-    float score_max       = std::numeric_limits<float>::lowest();
-};
 
 struct ExecutionStream {
     cudaStream_t stream{nullptr};
@@ -122,6 +116,7 @@ public:
 
     void execute(cuda::std::span<const FoldTypeCUDA> ffa_fold,
                  SizeType ref_seg,
+                 std::span<const SizeType> ascend_levels,
                  const std::filesystem::path& outdir,
                  const std::optional<std::filesystem::path>& log_file,
                  const std::optional<std::filesystem::path>& result_file,
@@ -158,6 +153,12 @@ public:
             if (m_prune_complete) {
                 break;
             }
+            // Should we reintegrate survivors at this level?
+            if (!ascend_levels.empty() &&
+                std::ranges::find(ascend_levels, m_prune_level) !=
+                    ascend_levels.end()) {
+                ascend_survivors_batched(ffa_fold, m_stream);
+            }
         }
 
         // Log early exit ONCE after loop if needed
@@ -167,8 +168,12 @@ public:
                 iterations_completed);
         }
 
-        // Ascend survivors to the middle of the data
-        ascend_survivors_batched(ffa_fold, m_stream);
+        // Final ascend if needed
+        if (ascend_levels.empty() ||
+            std::ranges::find(ascend_levels, m_prune_level) ==
+                ascend_levels.end()) {
+            ascend_survivors_batched(ffa_fold, m_stream);
+        }
 
         // Write results (after transforming to middle of the data)
         report_survivors(actual_result_file, run_name);
@@ -278,6 +283,7 @@ private:
             m_snail_scheme.get_segment_coords_so_far(m_prune_level);
         const auto batch_cap =
             std::max(SizeType{1}, std::min(m_batch_size, n_survivors));
+        const auto n_segments_so_far = idx_segments.size();
 
         // Copy the segment coordinates to the device
         thrust::copy(thrust::cuda::par.on(stream), idx_segments.begin(),
@@ -329,8 +335,11 @@ private:
                                          chunk * folds_stride),
                     scores_region.subspan(off, chunk),
                     scores_ep_region.subspan(off, chunk),
-                    cuda_utils::as_span(ws.idx_segments_d),
-                    cuda_utils::as_span(ws.coord_segments_d), coord_mid,
+                    cuda_utils::as_span(ws.idx_segments_d)
+                        .first(n_segments_so_far),
+                    cuda_utils::as_span(ws.coord_segments_d)
+                        .first(n_segments_so_far),
+                    coord_mid,
                     cuda_utils::as_span(prune_ws.branched_param_idx_d),
                     cuda_utils::as_span(prune_ws.branched_phase_shift_d), chunk,
                     stream);
@@ -547,7 +556,7 @@ private:
         // for new suggestions.
         world_tree.prepare_in_place_update();
 
-        IterationStats stats;
+        cands::PruneIterationStats stats;
         const auto seg_idx_cur = m_snail_scheme.get_segment_idx(m_prune_level);
         const auto threshold   = m_threshold_scheme[m_prune_level - 1];
         // Capture the number of branches *before* finalizing the update
@@ -560,6 +569,7 @@ private:
         world_tree.finalize_in_place_update();
 
         // Update statistics
+        stats.norm_scores(world_tree.get_size());
         const cands::PruneStats pstats_cur{
             .level         = m_prune_level,
             .seg_idx       = seg_idx_cur,
@@ -585,7 +595,7 @@ private:
     void execute_iteration_batched(cuda::std::span<const FoldTypeCUDA> ffa_fold,
                                    SizeType seg_idx_cur,
                                    float threshold,
-                                   IterationStats& stats,
+                                   cands::PruneIterationStats& stats,
                                    cudaStream_t stream) {
 
         auto& ws            = get_workspace();
@@ -747,6 +757,7 @@ public:
          std::span<const float> threshold_scheme,
          std::optional<SizeType> n_runs,
          std::optional<std::vector<SizeType>> ref_segs,
+         std::span<const SizeType> ascend_levels,
          SizeType max_sugg,
          SizeType batch_size,
          std::string_view poly_basis,
@@ -755,6 +766,7 @@ public:
           m_threshold_scheme(threshold_scheme.begin(), threshold_scheme.end()),
           m_n_runs(n_runs),
           m_ref_segs(std::move(ref_segs)),
+          m_ascend_levels(ascend_levels.begin(), ascend_levels.end()),
           m_max_sugg(max_sugg),
           m_batch_size(batch_size),
           m_poly_basis(poly_basis),
@@ -794,6 +806,7 @@ public:
          std::span<const float> threshold_scheme,
          std::optional<SizeType> n_runs,
          std::optional<std::vector<SizeType>> ref_segs,
+         std::span<const SizeType> ascend_levels,
          SizeType max_sugg,
          SizeType batch_size,
          std::string_view poly_basis,
@@ -802,6 +815,7 @@ public:
           m_threshold_scheme(threshold_scheme.begin(), threshold_scheme.end()),
           m_n_runs(n_runs),
           m_ref_segs(std::move(ref_segs)),
+          m_ascend_levels(ascend_levels.begin(), ascend_levels.end()),
           m_max_sugg(max_sugg),
           m_batch_size(batch_size),
           m_poly_basis(poly_basis),
@@ -889,8 +903,8 @@ public:
             ws, m_cfg, m_threshold_scheme, m_max_sugg, m_batch_size,
             m_branch_max, m_poly_basis, m_device_id, m_execution_stream.get());
         for (const auto ref_seg : ref_segs_to_process) {
-            prune.execute(cuda_utils::as_span(ffa_fold_d), ref_seg, outdir,
-                          log_file, result_file,
+            prune.execute(cuda_utils::as_span(ffa_fold_d), ref_seg,
+                          m_ascend_levels, outdir, log_file, result_file,
                           /*task_id=*/0);
         }
         const auto ep_time = timer.stop();
@@ -908,6 +922,7 @@ private:
     std::vector<float> m_threshold_scheme;
     std::optional<SizeType> m_n_runs;
     std::optional<std::vector<SizeType>> m_ref_segs;
+    std::vector<SizeType> m_ascend_levels;
     SizeType m_max_sugg;
     SizeType m_batch_size;
     std::string m_poly_basis;
@@ -941,6 +956,7 @@ EPMultiPassCUDA<FoldTypeCUDA>::EPMultiPassCUDA(
     std::span<const float> threshold_scheme,
     std::optional<SizeType> n_runs,
     std::optional<std::vector<SizeType>> ref_segs,
+    std::span<const SizeType> ascend_levels,
     SizeType max_sugg,
     SizeType batch_size,
     std::string_view poly_basis,
@@ -949,6 +965,7 @@ EPMultiPassCUDA<FoldTypeCUDA>::EPMultiPassCUDA(
                                     threshold_scheme,
                                     n_runs,
                                     std::move(ref_segs),
+                                    ascend_levels,
                                     max_sugg,
                                     batch_size,
                                     poly_basis,
@@ -962,6 +979,7 @@ EPMultiPassCUDA<FoldTypeCUDA>::EPMultiPassCUDA(
     std::span<const float> threshold_scheme,
     std::optional<SizeType> n_runs,
     std::optional<std::vector<SizeType>> ref_segs,
+    std::span<const SizeType> ascend_levels,
     SizeType max_sugg,
     SizeType batch_size,
     std::string_view poly_basis,
@@ -972,6 +990,7 @@ EPMultiPassCUDA<FoldTypeCUDA>::EPMultiPassCUDA(
                                     threshold_scheme,
                                     n_runs,
                                     std::move(ref_segs),
+                                    ascend_levels,
                                     max_sugg,
                                     batch_size,
                                     poly_basis,

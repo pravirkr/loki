@@ -56,11 +56,13 @@ void bind_ep_multi_pass_cuda_class(py::module& m, const std::string& name) {
         py::class_<EPMultiPassCUDA<FoldTypeCUDA>>(m, name.c_str())
             .def(py::init<const PulsarSearchConfig&, const std::vector<float>&,
                           std::optional<SizeType>,
-                          std::optional<std::vector<SizeType>>, SizeType,
-                          SizeType, std::string_view, int>(),
+                          std::optional<std::vector<SizeType>>,
+                          const std::vector<SizeType>&, SizeType, SizeType,
+                          std::string_view, int>(),
                  py::arg("cfg"), py::arg("threshold_scheme"),
-                 py::arg("n_runs")   = std::nullopt,
-                 py::arg("ref_segs") = std::nullopt,
+                 py::arg("n_runs")        = std::nullopt,
+                 py::arg("ref_segs")      = std::nullopt,
+                 py::arg("ascend_levels") = std::vector<SizeType>(),
                  py::arg("max_sugg") = 1U << 20U, py::arg("batch_size") = 4096U,
                  py::arg("poly_basis") = "taylor", py::arg("device_id") = 0);
     // Standard execute

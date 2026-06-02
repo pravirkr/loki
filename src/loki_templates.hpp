@@ -90,11 +90,13 @@ void bind_ep_multi_pass(py::module& m, const std::string& name) {
         py::class_<EPMultiPass<FoldType>>(m, name.c_str())
             .def(py::init<const PulsarSearchConfig&, const std::vector<float>&,
                           std::optional<SizeType>,
-                          std::optional<std::vector<SizeType>>, SizeType,
-                          SizeType, std::string_view, bool>(),
+                          std::optional<std::vector<SizeType>>,
+                          const std::vector<SizeType>&, SizeType, SizeType,
+                          std::string_view, bool>(),
                  py::arg("cfg"), py::arg("threshold_scheme"),
-                 py::arg("n_runs")   = std::nullopt,
-                 py::arg("ref_segs") = std::nullopt,
+                 py::arg("n_runs")        = std::nullopt,
+                 py::arg("ref_segs")      = std::nullopt,
+                 py::arg("ascend_levels") = std::vector<SizeType>(),
                  py::arg("max_sugg") = 1U << 18U, py::arg("batch_size") = 1024U,
                  py::arg("poly_basis")    = "taylor",
                  py::arg("show_progress") = true);

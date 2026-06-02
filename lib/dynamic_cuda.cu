@@ -596,7 +596,7 @@ SizeType PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>::branch(
     return circ_taylor_branch_batch_cuda(
         leaves_tree, leaves_branch, leaves_origins, validation_mask, coord_cur,
         this->m_cfg.get_nbins(), this->m_cfg.get_eta(), this->m_branch_max,
-        n_leaves, this->m_cfg.get_minimum_snap_cells(), branch_ws, scratch_ws,
+        n_leaves, this->m_cfg.get_propagator_significance(), branch_ws, scratch_ws,
         stream);
 }
 
@@ -611,7 +611,7 @@ SizeType PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>::validate(
     cudaStream_t stream) const noexcept {
     return circ_taylor_validate_batch_cuda(
         leaves_branch, validation_mask, n_leaves, this->m_cfg.get_p_orb_min(),
-        this->m_cfg.get_x_mass_const(), this->m_cfg.get_minimum_snap_cells(),
+        this->m_cfg.get_x_mass_const(), this->m_cfg.get_validation_significance(),
         scratch_ws, stream);
 }
 
@@ -633,7 +633,7 @@ void PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>::resolve(
         leaves_branch, validation_mask, param_indices, phase_shift,
         cuda_utils::as_span(this->m_param_limits_d), coord_add, coord_cur,
         coord_init, n_accel_init, n_freq_init, this->m_cfg.get_nbins(),
-        n_leaves, this->m_cfg.get_minimum_snap_cells(), stream);
+        n_leaves, this->m_cfg.get_propagator_significance(), stream);
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
@@ -647,7 +647,7 @@ void PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>::transform(
     circ_taylor_transform_batch_cuda(
         leaves_tree, validation_mask, coord_next, coord_cur, n_leaves,
         this->m_cfg.get_use_conservative_tile(),
-        this->m_cfg.get_minimum_snap_cells(), stream);
+        this->m_cfg.get_propagator_significance(), stream);
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
@@ -676,7 +676,7 @@ void PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>::ascend(
         leaves_tree, scratch_param_indices, scratch_phase_shift,
         cuda_utils::as_span(this->m_param_limits_d), coord_segments, coord_cur,
         n_accel_init, n_freq_init, nbins, n_leaves, n_segments,
-        this->m_cfg.get_minimum_snap_cells(), stream);
+        this->m_cfg.get_propagator_significance(), stream);
 
     // Copy scores to scores_ep for future backup
     cuda_utils::check_cuda_call(

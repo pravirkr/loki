@@ -1,7 +1,6 @@
 #include "loki/search/configs.hpp"
 
 #include <format>
-#include <numbers>
 #include <omp.h>
 
 #include <spdlog/spdlog.h>
@@ -10,6 +9,7 @@
 #include "loki/detection/score.hpp"
 #include "loki/exceptions.hpp"
 #include "loki/psr_utils.hpp"
+#include "loki/utils.hpp"
 
 namespace loki::search {
 
@@ -36,7 +36,8 @@ public:
          double p_orb_min,
          double m_c_max,
          double m_p_min,
-         double minimum_snap_cells,
+         double propagator_significance,
+         double validation_significance,
          bool use_conservative_tile,
          bool use_boxcar_kadane)
         : m_nsamps(nsamps),
@@ -58,7 +59,8 @@ public:
           m_p_orb_min(p_orb_min),
           m_m_c_max(m_c_max),
           m_m_p_min(m_p_min),
-          m_minimum_snap_cells(minimum_snap_cells),
+          m_propagator_significance(propagator_significance),
+          m_validation_significance(validation_significance),
           m_use_conservative_tile(use_conservative_tile),
           m_use_boxcar_kadane(use_boxcar_kadane),
           m_bseg_brute_explicit(bseg_brute),
@@ -90,11 +92,12 @@ public:
             "ducy_max={}, wtsp={}, use_fourier={}, nthreads={}, snr_min={}, "
             "prune_poly_order={}, "
             "bseg_brute={}, bseg_ffa={}, p_orb_min={}, "
-            "minimum_snap_cells={}, use_conservative_tile={}",
+            "propagator_significance={}, validation_significance={}, "
+            "use_conservative_tile={}",
             m_nsamps, m_tsamp, m_nbins, m_eta, m_ducy_max, m_wtsp,
             m_use_fourier, m_nthreads, m_snr_min, m_prune_poly_order,
-            m_bseg_brute, m_bseg_ffa, m_p_orb_min, m_minimum_snap_cells,
-            m_use_conservative_tile);
+            m_bseg_brute, m_bseg_ffa, m_p_orb_min, m_propagator_significance,
+            m_validation_significance, m_use_conservative_tile);
     }
 
     // Getters
@@ -125,7 +128,12 @@ public:
     double get_p_orb_min() const { return m_p_orb_min; }
     double get_m_c_max() const { return m_m_c_max; }
     double get_m_p_min() const { return m_m_p_min; }
-    double get_minimum_snap_cells() const { return m_minimum_snap_cells; }
+    double get_propagator_significance() const {
+        return m_propagator_significance;
+    }
+    double get_validation_significance() const {
+        return m_validation_significance;
+    }
     bool get_use_conservative_tile() const { return m_use_conservative_tile; }
     bool get_use_boxcar_kadane() const { return m_use_boxcar_kadane; }
 
@@ -143,12 +151,14 @@ public:
     std::vector<float> get_boxcar_kadane_biases() const {
         return m_boxcar_kadane_biases;
     }
-    SizeType get_n_boxcar_kadane_biases() const { return m_boxcar_kadane_biases.size(); }
+    SizeType get_n_boxcar_kadane_biases() const {
+        return m_boxcar_kadane_biases.size();
+    }
 
     // Methods
     double get_x_mass_const() const {
-        return utils::kCval * 0.005 * 1.1 *
-               std::pow(2 * std::numbers::pi, 2.0 / 3.0) * m_m_c_max /
+        const double safety = 1.1;
+        return utils::kGMsunOneThird * safety * m_m_c_max /
                std::pow(m_m_p_min + m_m_c_max, 2.0 / 3.0);
     }
 
@@ -216,7 +226,8 @@ public:
                 m_p_orb_min,
                 m_m_c_max,
                 m_m_p_min,
-                m_minimum_snap_cells,
+                m_propagator_significance,
+                m_validation_significance,
                 m_use_conservative_tile,
                 m_use_boxcar_kadane};
     }
@@ -254,7 +265,8 @@ private:
     double m_p_orb_min;
     double m_m_c_max;
     double m_m_p_min;
-    double m_minimum_snap_cells;
+    double m_propagator_significance;
+    double m_validation_significance;
     bool m_use_conservative_tile;
     bool m_use_boxcar_kadane;
     std::optional<SizeType> m_bseg_brute_explicit;
@@ -335,7 +347,8 @@ PulsarSearchConfig::PulsarSearchConfig(SizeType nsamps,
                                        double p_orb_min,
                                        double m_c_max,
                                        double m_p_min,
-                                       double minimum_snap_cells,
+                                       double propagator_significance,
+                                       double validation_significance,
                                        bool use_conservative_tile,
                                        bool use_boxcar_kadane)
     : m_impl(std::make_unique<Impl>(nsamps,
@@ -359,7 +372,8 @@ PulsarSearchConfig::PulsarSearchConfig(SizeType nsamps,
                                     p_orb_min,
                                     m_c_max,
                                     m_p_min,
-                                    minimum_snap_cells,
+                                    propagator_significance,
+                                    validation_significance,
                                     use_conservative_tile,
                                     use_boxcar_kadane)) {}
 PulsarSearchConfig::~PulsarSearchConfig()                             = default;
@@ -446,8 +460,11 @@ double PulsarSearchConfig::get_m_c_max() const noexcept {
 double PulsarSearchConfig::get_m_p_min() const noexcept {
     return m_impl->get_m_p_min();
 }
-double PulsarSearchConfig::get_minimum_snap_cells() const noexcept {
-    return m_impl->get_minimum_snap_cells();
+double PulsarSearchConfig::get_propagator_significance() const noexcept {
+    return m_impl->get_propagator_significance();
+}
+double PulsarSearchConfig::get_validation_significance() const noexcept {
+    return m_impl->get_validation_significance();
 }
 bool PulsarSearchConfig::get_use_conservative_tile() const noexcept {
     return m_impl->get_use_conservative_tile();
@@ -482,7 +499,8 @@ std::vector<SizeType> PulsarSearchConfig::get_scoring_widths() const noexcept {
 SizeType PulsarSearchConfig::get_n_scoring_widths() const noexcept {
     return m_impl->get_n_scoring_widths();
 }
-std::vector<float> PulsarSearchConfig::get_boxcar_kadane_biases() const noexcept {
+std::vector<float>
+PulsarSearchConfig::get_boxcar_kadane_biases() const noexcept {
     return m_impl->get_boxcar_kadane_biases();
 }
 SizeType PulsarSearchConfig::get_n_boxcar_kadane_biases() const noexcept {

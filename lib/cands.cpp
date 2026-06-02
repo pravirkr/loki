@@ -533,7 +533,7 @@ void PruneResultWriter::write_run_results(
             std::format("Run name {} already exists.", run_name));
     }
     HighFive::Group run_group = runs_group.createGroup(std::string(run_name));
-    
+
     run_group.createAttribute("total_pruning_gflops", total_pruning_gflops);
 
     auto [level_stats, timer_stats] = pstats.get_packed_data();

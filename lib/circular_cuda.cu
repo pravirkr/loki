@@ -22,22 +22,22 @@ namespace {
 // 0: Taylor, 1: Circular Snap, 2: Circular Crackle
 __device__ __forceinline__ uint32_t
 get_circ_taylor_mask_device(double crackle,
-                            double dcrackle,
                             double snap,
                             double dsnap,
                             double jerk,
+                            double djerk,
                             double accel,
-                            double minimum_snap_cells) {
-    const bool is_sig_snap = fabs(snap) > (minimum_snap_cells * dsnap);
-    const bool is_physical_snap =
-        ((-snap * accel) > 0.0) && (fabs(accel) > utils::kZeroEps);
-    if (is_sig_snap && is_physical_snap) {
+                            double daccel,
+                            double propagator_significance) {
+    const bool is_sig_snap  = fabs(snap) > (propagator_significance * dsnap);
+    const bool is_sig_accel = fabs(accel) > (propagator_significance * daccel);
+    const bool is_physical_snap = (-snap * accel) > 0.0;
+    if (is_sig_snap && is_sig_accel && is_physical_snap) {
         return 1;
     }
-    const bool is_sig_crackle = fabs(crackle) > (minimum_snap_cells * dcrackle);
-    const bool is_physical_crackle =
-        ((-crackle * jerk) > 0.0) && (fabs(jerk) > utils::kZeroEps);
-    if (is_sig_crackle && is_physical_crackle) {
+    const bool is_sig_jerk = fabs(jerk) > (propagator_significance * djerk);
+    const bool is_physical_crackle = (-crackle * jerk) > 0.0;
+    if (is_sig_jerk && is_physical_crackle) {
         return 2;
     }
     return 0;
@@ -47,13 +47,17 @@ __device__ __forceinline__ bool
 is_in_hole_device(double snap,
                   double dsnap,
                   double jerk,
+                  double djerk,
                   double accel,
-                  double minimum_snap_cells) noexcept {
-    const bool is_sig_snap = fabs(snap) > (minimum_snap_cells * dsnap);
-    const bool is_physical_snap =
-        ((-snap * accel) > 0.0) && (fabs(accel) > utils::kZeroEps);
-    const bool is_stable_jerk = fabs(jerk) > utils::kZeroEps;
-    return is_sig_snap && (!is_physical_snap) && is_stable_jerk;
+                  double daccel,
+                  double propagator_significance) noexcept {
+    const bool is_sig_snap  = fabs(snap) > (propagator_significance * dsnap);
+    const bool is_sig_accel = fabs(accel) > (propagator_significance * daccel);
+    const bool is_physical_snap = (-snap * accel) > 0.0;
+    const bool is_sig_jerk = fabs(jerk) > (propagator_significance * djerk);
+    const bool mask_circular_snap =
+        is_sig_snap && is_sig_accel && is_physical_snap;
+    return (!mask_circular_snap) && is_sig_jerk;
 }
 
 __global__ void
@@ -241,7 +245,7 @@ kernel_expand_crackle_holes(const double* __restrict__ leaves_tree,
                             double dt,
                             double nbins,
                             double eta,
-                            double minimum_snap_cells,
+                            double propagator_significance,
                             uint32_t* __restrict__ out_count,
                             memory::BranchingWorkspaceCUDAView branch_ws) {
     constexpr uint32_t kParams       = 5;
@@ -253,15 +257,16 @@ kernel_expand_crackle_holes(const double* __restrict__ leaves_tree,
         return;
     }
 
-    const uint32_t bo          = i * kLeavesStride;
-    double* __restrict__ leaf  = leaves_branch + bo;
-    const uint32_t origin      = leaves_origins[i];
-    const uint32_t origin_lo   = origin * kLeavesStride;
-    const uint32_t fb          = origin * kParams;
-    const uint32_t n_d5        = branch_ws.scratch_counts[fb + 0];
+    const uint32_t bo         = i * kLeavesStride;
+    double* __restrict__ leaf = leaves_branch + bo;
+    const uint32_t origin     = leaves_origins[i];
+    const uint32_t origin_lo  = origin * kLeavesStride;
+    const uint32_t fb         = origin * kParams;
+    const uint32_t n_d5       = branch_ws.scratch_counts[fb + 0];
 
-    const bool in_hole = is_in_hole_device(leaf[2], leaf[3], leaf[4], leaf[6],
-                                           minimum_snap_cells);
+    const bool in_hole =
+        is_in_hole_device(leaf[2], leaf[3], leaf[4], leaf[5], leaf[6], leaf[7],
+                          propagator_significance);
 
     if (!in_hole || n_d5 == 1) {
         return;
@@ -315,7 +320,7 @@ kernel_validate_branches_circular(const double* __restrict__ leaves_branch,
                                   uint32_t n_leaves,
                                   double p_orb_min,
                                   double x_mass_const,
-                                  double minimum_snap_cells) {
+                                  double validation_significance) {
     constexpr uint32_t kLeavesStride = 14;
 
     const uint32_t tid = (blockIdx.x * blockDim.x) + threadIdx.x;
@@ -323,17 +328,19 @@ kernel_validate_branches_circular(const double* __restrict__ leaves_branch,
         return;
     }
 
-    const uint32_t lo  = tid * kLeavesStride;
-    const double snap  = leaves_branch[lo + 2];
-    const double dsnap = leaves_branch[lo + 3];
-    const double accel = leaves_branch[lo + 6];
+    const uint32_t lo   = tid * kLeavesStride;
+    const double snap   = leaves_branch[lo + 2];
+    const double dsnap  = leaves_branch[lo + 3];
+    const double accel  = leaves_branch[lo + 6];
+    const double daccel = leaves_branch[lo + 7];
 
-    const double omega_max_sq  = pow(2.0 * M_PI / p_orb_min, 2);
-    const bool is_sig_snap     = fabs(snap) > (minimum_snap_cells * dsnap);
-    const bool snap_possible   = (fabs(accel) > utils::kZeroEps);
-    const bool sign_valid      = (-snap * accel) > 0.0;
-    const bool snap_unphysical = is_sig_snap && snap_possible && !sign_valid;
-    const bool snap_region     = is_sig_snap && snap_possible && sign_valid;
+    const double omega_max_sq = pow(2.0 * M_PI / p_orb_min, 2);
+    const bool is_sig_snap    = fabs(snap) > (validation_significance * dsnap);
+    const bool is_sig_accel = fabs(accel) > (validation_significance * daccel);
+    const bool is_physical_snap = (-snap * accel) > 0.0;
+    const bool snap_unphysical =
+        is_sig_snap && is_sig_accel && !is_physical_snap;
+    const bool snap_region = is_sig_snap && is_sig_accel && is_physical_snap;
     if (snap_unphysical) {
         validation_mask[tid] = 0U; // kill outright
         return;
@@ -364,7 +371,7 @@ kernel_circ_taylor_resolve_batch(const double* __restrict__ leaves_tree,
                                  uint32_t n_freq_init,
                                  uint32_t nbins,
                                  uint32_t n_leaves,
-                                 double minimum_snap_cells) {
+                                 double propagator_significance) {
     constexpr uint32_t kLeavesStride = 14;
 
     // Compute locally
@@ -393,18 +400,19 @@ kernel_circ_taylor_resolve_batch(const double* __restrict__ leaves_tree,
 
     const uint32_t lo     = tid * kLeavesStride;
     const double c_t_cur  = leaves_tree[lo + 0];
-    const double dc_t_cur = leaves_tree[lo + 1];
     const double s_t_cur  = leaves_tree[lo + 2];
     const double ds_t_cur = leaves_tree[lo + 3];
     const double j_t_cur  = leaves_tree[lo + 4];
+    const double dj_t_cur = leaves_tree[lo + 5];
     const double a_t_cur  = leaves_tree[lo + 6];
+    const double da_t_cur = leaves_tree[lo + 7];
     const double v_t_cur  = leaves_tree[lo + 8];
     const double f0       = leaves_tree[lo + 12];
 
     double a_new, delta_v, delta_d;
-    const uint32_t mask_circular =
-        get_circ_taylor_mask_device(c_t_cur, dc_t_cur, s_t_cur, ds_t_cur,
-                                    j_t_cur, a_t_cur, minimum_snap_cells);
+    const uint32_t mask_circular = get_circ_taylor_mask_device(
+        c_t_cur, s_t_cur, ds_t_cur, j_t_cur, dj_t_cur, a_t_cur, da_t_cur,
+        propagator_significance);
     if (mask_circular == 0) {
         a_new   = a_t_cur + (j_t_cur * dt_add) + (s_t_cur * half_dt2_add) +
                   (c_t_cur * sixth_dt3_add);
@@ -461,7 +469,7 @@ __global__ void kernel_circ_taylor_ascend_resolve_batch(
     uint32_t nbins,
     uint32_t n_leaves,
     uint32_t n_segments,
-    double minimum_snap_cells) {
+    double propagator_significance) {
     constexpr uint32_t kLeavesStride = 14;
 
     const uint32_t iseg = blockIdx.y;
@@ -483,18 +491,20 @@ __global__ void kernel_circ_taylor_ascend_resolve_batch(
 
     const uint32_t lo   = tid * kLeavesStride;
     const double c_cur  = leaves_tree[lo + 0];
-    const double dc_cur = leaves_tree[lo + 1];
     const double s_cur  = leaves_tree[lo + 2];
     const double ds_cur = leaves_tree[lo + 3];
     const double j_cur  = leaves_tree[lo + 4];
+    const double dj_cur = leaves_tree[lo + 5];
     const double a_cur  = leaves_tree[lo + 6];
+    const double da_cur = leaves_tree[lo + 7];
     const double v_cur  = leaves_tree[lo + 8];
     const double d_cur  = leaves_tree[lo + 10];
     const double f0     = leaves_tree[lo + 12];
 
     double a_new, v_new, d_new;
-    const uint32_t mask_circular = get_circ_taylor_mask_device(
-        c_cur, dc_cur, s_cur, ds_cur, j_cur, a_cur, minimum_snap_cells);
+    const uint32_t mask_circular =
+        get_circ_taylor_mask_device(c_cur, s_cur, ds_cur, j_cur, dj_cur,
+                                    a_cur, da_cur, propagator_significance);
     if (mask_circular == 0) {
         a_new = a_cur + (j_cur * dt) + (s_cur * half_dt2) + (c_cur * sixth_dt3);
         v_new = v_cur + (a_cur * dt) + (j_cur * half_dt2) +
@@ -541,7 +551,7 @@ kernel_circ_taylor_transform_batch(double* __restrict__ leaves_tree,
                                    uint32_t n_leaves,
                                    cuda::std::pair<double, double> coord_next,
                                    cuda::std::pair<double, double> coord_cur,
-                                   double minimum_snap_cells) {
+                                   double propagator_significance) {
     constexpr uint32_t kLeavesStride = 14;
 
     const uint32_t tid = (blockIdx.x * blockDim.x) + threadIdx.x;
@@ -573,9 +583,9 @@ kernel_circ_taylor_transform_batch(double* __restrict__ leaves_tree,
     const double d0_val_i = leaves_tree[lo + 10];
     const double d0_err_i = leaves_tree[lo + 11];
 
-    const uint32_t mask_circular =
-        get_circ_taylor_mask_device(d5_val_i, d5_err_i, d4_val_i, d4_err_i,
-                                    d3_val_i, d2_val_i, minimum_snap_cells);
+    const uint32_t mask_circular = get_circ_taylor_mask_device(
+        d5_val_i, d4_val_i, d4_err_i, d3_val_i, d3_err_i, d2_val_i, d2_err_i,
+        propagator_significance);
 
     if (mask_circular == 0) {
         leaves_tree[lo + 0] = d5_val_i;
@@ -666,7 +676,7 @@ circ_taylor_branch_batch_cuda(cuda::std::span<const double> leaves_tree,
                               double eta,
                               SizeType branch_max,
                               SizeType n_leaves,
-                              double minimum_snap_cells,
+                              double propagator_significance,
                               memory::BranchingWorkspaceCUDAView branch_ws,
                               memory::CUBScratchArena& scratch_ws,
                               cudaStream_t stream) {
@@ -772,7 +782,7 @@ circ_taylor_branch_batch_cuda(cuda::std::span<const double> leaves_tree,
     kernel_expand_crackle_holes<<<grid_dim_3, block_dim, 0, stream>>>(
         leaves_tree.data(), leaves_branch.data(), leaves_origins.data(),
         n_leaves_branched, coord_cur.second, static_cast<double>(nbins), eta,
-        minimum_snap_cells, scratch_ws.d_reduce_out, branch_ws);
+        propagator_significance, scratch_ws.d_reduce_out, branch_ws);
     cuda_utils::check_last_cuda_error("Kernel 3 launch failed");
 
     // Sync + read back final count
@@ -800,7 +810,7 @@ circ_taylor_validate_batch_cuda(cuda::std::span<const double> leaves_branch,
                                 SizeType n_leaves,
                                 double p_orb_min,
                                 double x_mass_const,
-                                double minimum_snap_cells,
+                                double validation_significance,
                                 memory::CUBScratchArena& scratch_ws,
                                 cudaStream_t stream) {
     constexpr SizeType kThreadsPerBlock = 256;
@@ -811,7 +821,7 @@ circ_taylor_validate_batch_cuda(cuda::std::span<const double> leaves_branch,
     cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
     kernel_validate_branches_circular<<<grid_dim, block_dim, 0, stream>>>(
         leaves_branch.data(), validation_mask.data(), n_leaves, p_orb_min,
-        x_mass_const, minimum_snap_cells);
+        x_mass_const, validation_significance);
     cuda_utils::check_last_cuda_error(
         "kernel_validate_branches_circular launch failed");
 
@@ -851,7 +861,7 @@ void circ_taylor_resolve_batch_cuda(
     SizeType n_freq_init,
     SizeType nbins,
     SizeType n_leaves,
-    double minimum_snap_cells,
+    double propagator_significance,
     cudaStream_t stream) {
     constexpr SizeType kThreadsPerBlock = 256;
     const auto blocks_per_grid =
@@ -864,7 +874,7 @@ void circ_taylor_resolve_batch_cuda(
         leaves_branch.data(), validation_mask.data(), param_indices.data(),
         phase_shift.data(), param_limits.data(), coord_add, coord_cur,
         coord_init, n_accel_init, n_freq_init, nbins, n_leaves,
-        minimum_snap_cells);
+        propagator_significance);
     cuda_utils::check_last_cuda_error(
         "Circular Taylor resolve kernel launch failed");
     // No need to sync, the next kernel will do it
@@ -882,7 +892,7 @@ void circ_taylor_ascend_resolve_batch_cuda(
     SizeType nbins,
     SizeType n_leaves,
     SizeType n_segments,
-    double minimum_snap_cells,
+    double propagator_significance,
     cudaStream_t stream) {
     constexpr SizeType kThreadsPerBlock = 256;
     const auto blocks_per_grid =
@@ -895,7 +905,7 @@ void circ_taylor_ascend_resolve_batch_cuda(
     kernel_circ_taylor_ascend_resolve_batch<<<grid_dim, block_dim, 0, stream>>>(
         leaves_tree.data(), param_indices.data(), phase_shift.data(),
         param_limits.data(), coord_segments.data(), coord_cur, n_accel_init,
-        n_freq_init, nbins, n_leaves, n_segments, minimum_snap_cells);
+        n_freq_init, nbins, n_leaves, n_segments, propagator_significance);
     cuda_utils::check_last_cuda_error(
         "Circular Taylor ascend resolve kernel launch failed");
     // No need to sync, the next kernel will do it
@@ -908,7 +918,7 @@ void circ_taylor_transform_batch_cuda(
     std::pair<double, double> coord_cur,
     SizeType n_leaves,
     bool use_conservative_tile,
-    double minimum_snap_cells,
+    double propagator_significance,
     cudaStream_t stream) {
     constexpr SizeType kThreadsPerBlock = 256;
     const SizeType blocks_per_grid =
@@ -921,12 +931,12 @@ void circ_taylor_transform_batch_cuda(
         kernel_circ_taylor_transform_batch<true>
             <<<grid_dim, block_dim, 0, stream>>>(
                 leaves_tree.data(), validation_mask.data(), n_leaves,
-                coord_next, coord_cur, minimum_snap_cells);
+                coord_next, coord_cur, propagator_significance);
     } else {
         kernel_circ_taylor_transform_batch<false>
             <<<grid_dim, block_dim, 0, stream>>>(
                 leaves_tree.data(), validation_mask.data(), n_leaves,
-                coord_next, coord_cur, minimum_snap_cells);
+                coord_next, coord_cur, propagator_significance);
     }
     cuda_utils::check_last_cuda_error(
         "Circular Taylor transform kernel launch failed");

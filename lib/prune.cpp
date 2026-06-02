@@ -28,14 +28,6 @@
 namespace loki::algorithms {
 
 namespace {
-// Iteration stats for single-threaded pruning
-struct IterationStats {
-    SizeType n_leaves     = 0;
-    SizeType n_leaves_phy = 0;
-    float score_min       = std::numeric_limits<float>::max();
-    float score_max       = std::numeric_limits<float>::lowest();
-    cands::PruneTimerStats batch_timers;
-};
 
 template <SupportedFoldType FoldType> class PruneImpl {
 public:
@@ -78,6 +70,7 @@ public:
 
     void execute(std::span<const FoldType> ffa_fold,
                  SizeType ref_seg,
+                 std::span<const SizeType> ascend_levels,
                  const std::filesystem::path& outdir,
                  const std::optional<std::filesystem::path>& log_file,
                  const std::optional<std::filesystem::path>& result_file,
@@ -125,6 +118,12 @@ public:
                     iter + 1);
                 break;
             }
+            // Should we reintegrate survivors at this level?
+            if (!ascend_levels.empty() &&
+                std::ranges::find(ascend_levels, m_prune_level) !=
+                    ascend_levels.end()) {
+                ascend_survivors_batched(ffa_fold);
+            }
             if (bar) {
                 bar->set_score(ws.world_tree.get_score_max());
                 bar->set_leaves(ws.world_tree.get_size_lb());
@@ -132,8 +131,12 @@ public:
             }
         }
 
-        // Ascend survivors to the middle of the data
-        ascend_survivors_batched(ffa_fold);
+        // Final ascend if needed
+        if (ascend_levels.empty() ||
+            std::ranges::find(ascend_levels, m_prune_level) ==
+                ascend_levels.end()) {
+            ascend_survivors_batched(ffa_fold);
+        }
 
         // Write results (after transforming to middle of the data)
         report_survivors(actual_result_file, run_name);
@@ -235,6 +238,7 @@ private:
         if (n_survivors == 0) {
             return;
         }
+        spdlog::info("Ascending survivors at level {}", m_prune_level);
         auto& prune_ws       = ws.prune;
         const auto coord_mid = m_snail_scheme.get_coord(m_prune_level);
         const auto [idx_segments, coord_segments] =
@@ -454,7 +458,7 @@ private:
         // for new suggestions.
         world_tree.prepare_in_place_update();
 
-        IterationStats stats;
+        cands::PruneIterationStats stats;
         const auto seg_idx_cur = m_snail_scheme.get_segment_idx(m_prune_level);
         const auto threshold   = m_threshold_scheme[m_prune_level - 1];
         // Capture the number of branches *before* finalizing the update
@@ -466,6 +470,7 @@ private:
         world_tree.finalize_in_place_update();
 
         // Update statistics
+        stats.norm_scores(world_tree.get_size());
         const cands::PruneStats pstats_cur{
             .level         = m_prune_level,
             .seg_idx       = seg_idx_cur,
@@ -498,7 +503,7 @@ private:
     void execute_iteration_batched(std::span<const FoldType> ffa_fold,
                                    SizeType seg_idx_cur,
                                    float threshold,
-                                   IterationStats& stats) {
+                                   cands::PruneIterationStats& stats) {
         auto& ws         = get_workspace();
         auto& world_tree = ws.world_tree;
         auto& prune_ws   = ws.prune;
@@ -642,6 +647,7 @@ public:
          std::span<const float> threshold_scheme,
          std::optional<SizeType> n_runs,
          std::optional<std::vector<SizeType>> ref_segs,
+         std::span<const SizeType> ascend_levels,
          SizeType max_sugg,
          SizeType batch_size,
          std::string_view poly_basis,
@@ -650,6 +656,7 @@ public:
           m_threshold_scheme(threshold_scheme.begin(), threshold_scheme.end()),
           m_n_runs(n_runs),
           m_ref_segs(std::move(ref_segs)),
+          m_ascend_levels(ascend_levels.begin(), ascend_levels.end()),
           m_max_sugg(max_sugg),
           m_batch_size(batch_size),
           m_poly_basis(poly_basis),
@@ -697,6 +704,7 @@ public:
          std::span<const float> threshold_scheme,
          std::optional<SizeType> n_runs,
          std::optional<std::vector<SizeType>> ref_segs,
+         std::span<const SizeType> ascend_levels,
          SizeType max_sugg,
          SizeType batch_size,
          std::string_view poly_basis,
@@ -706,6 +714,7 @@ public:
           m_threshold_scheme(threshold_scheme.begin(), threshold_scheme.end()),
           m_n_runs(n_runs),
           m_ref_segs(std::move(ref_segs)),
+          m_ascend_levels(ascend_levels.begin(), ascend_levels.end()),
           m_max_sugg(max_sugg),
           m_batch_size(batch_size),
           m_poly_basis(poly_basis),
@@ -817,6 +826,7 @@ private:
     std::vector<float> m_threshold_scheme;
     std::optional<SizeType> m_n_runs;
     std::optional<std::vector<SizeType>> m_ref_segs;
+    std::vector<SizeType> m_ascend_levels;
     SizeType m_max_sugg;
     SizeType m_batch_size;
     std::string m_poly_basis;
@@ -843,7 +853,8 @@ private:
             PruneImpl<FoldType>(ws, m_cfg, m_threshold_scheme, m_max_sugg,
                                 m_batch_size, m_branch_max, m_poly_basis);
         for (const auto ref_seg : ref_segs) {
-            prune.execute(ffa_fold, ref_seg, outdir, log_file, result_file,
+            prune.execute(ffa_fold, ref_seg, m_ascend_levels, outdir, log_file,
+                          result_file,
                           /*tracker=*/nullptr, /*task_id=*/0, m_show_progress);
         }
     }
@@ -891,7 +902,8 @@ private:
                                                  m_branch_max, m_poly_basis);
 
                 prune.execute(
-                    ffa_fold, ref_seg, outdir, /*log_file=*/std::nullopt,
+                    ffa_fold, ref_seg, m_ascend_levels, outdir,
+                    /*log_file=*/std::nullopt,
                     /*result_file=*/std::nullopt, /*tracker=*/tracker_ptr,
                     /*task_id=*/id, /*show_progress=*/m_show_progress);
             });
@@ -945,6 +957,7 @@ EPMultiPass<FoldType>::EPMultiPass(
     std::span<const float> threshold_scheme,
     std::optional<SizeType> n_runs,
     std::optional<std::vector<SizeType>> ref_segs,
+    std::span<const SizeType> ascend_levels,
     SizeType max_sugg,
     SizeType batch_size,
     std::string_view poly_basis,
@@ -953,6 +966,7 @@ EPMultiPass<FoldType>::EPMultiPass(
                                     threshold_scheme,
                                     n_runs,
                                     std::move(ref_segs),
+                                    ascend_levels,
                                     max_sugg,
                                     batch_size,
                                     poly_basis,
@@ -964,6 +978,7 @@ EPMultiPass<FoldType>::EPMultiPass(
     std::span<const float> threshold_scheme,
     std::optional<SizeType> n_runs,
     std::optional<std::vector<SizeType>> ref_segs,
+    std::span<const SizeType> ascend_levels,
     SizeType max_sugg,
     SizeType batch_size,
     std::string_view poly_basis,
@@ -973,6 +988,7 @@ EPMultiPass<FoldType>::EPMultiPass(
                                     threshold_scheme,
                                     n_runs,
                                     std::move(ref_segs),
+                                    ascend_levels,
                                     max_sugg,
                                     batch_size,
                                     poly_basis,

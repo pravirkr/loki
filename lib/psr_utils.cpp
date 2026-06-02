@@ -195,7 +195,7 @@ void poly_cheb_shift_vec(std::span<const double> dparam_old,
 
 std::tuple<std::vector<double>, double>
 branch_param(double param_cur, double dparam_cur, double dparam_new) {
-    if (dparam_cur <= utils::kZeroEps || dparam_new <= utils::kZeroEps) {
+    if (dparam_cur <= 0.0 || dparam_new <= 0.0) {
         throw std::invalid_argument(
             std::format("Both dparam_cur and dparam_new must be positive (got "
                         "{}, {})",
@@ -228,7 +228,7 @@ std::pair<double, SizeType> branch_param_padded(std::span<double> out_values,
                                                 double dparam_cur,
                                                 double dparam_new,
                                                 SizeType branch_max) {
-    if (dparam_cur <= utils::kZeroEps || dparam_new <= utils::kZeroEps) {
+    if (dparam_cur <= 0.0 || dparam_new <= 0.0) {
         throw std::invalid_argument(
             std::format("Both dparam_cur and dparam_new must be positive (got "
                         "{}, {})",
@@ -261,7 +261,7 @@ std::pair<double, SizeType> branch_param_padded(std::span<double> out_values,
 std::pair<double, SizeType> branch_dparam_crackle(double dparam_cur,
                                                   double dparam_new,
                                                   SizeType branch_max) {
-    if (dparam_cur <= utils::kZeroEps || dparam_new <= utils::kZeroEps) {
+    if (dparam_cur <= 0.0 || dparam_new <= 0.0) {
         throw std::invalid_argument(
             std::format("Both dparam_cur and dparam_new must be positive (got "
                         "{}, {})",

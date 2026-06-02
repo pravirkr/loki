@@ -25,7 +25,7 @@ get_circ_taylor_mask_scattered(std::span<const double> leaves_batch,
                                std::span<SizeType> indices_batch,
                                SizeType n_leaves,
                                SizeType n_params,
-                               double minimum_snap_cells) {
+                               double propagator_significance) {
     constexpr SizeType kParamsExpected = 5U;
     constexpr SizeType kParamStride    = 2U;
     constexpr SizeType kLeavesStride   = (kParamsExpected + 2) * kParamStride;
@@ -49,31 +49,34 @@ get_circ_taylor_mask_scattered(std::span<const double> leaves_batch,
         const auto leaf_idx = indices_batch[i];
         const auto lo       = leaf_idx * kLeavesStride;
         const auto crackle  = leaves_batch[lo + 0];
-        const auto dcrackle = leaves_batch[lo + 1];
         const auto snap     = leaves_batch[lo + 2];
         const auto dsnap    = leaves_batch[lo + 3];
         const auto jerk     = leaves_batch[lo + 4];
+        const auto djerk    = leaves_batch[lo + 5];
         const auto accel    = leaves_batch[lo + 6];
+        const auto daccel   = leaves_batch[lo + 7];
 
-        // Determine whether snap is significantly measured
-        const bool is_sig_snap = std::abs(snap) > (minimum_snap_cells * dsnap);
+        // Determine whether snap and accel are significantly measured
+        const bool is_sig_snap =
+            std::abs(snap) > (propagator_significance * dsnap);
+        const bool is_sig_accel =
+            std::abs(accel) > (propagator_significance * daccel);
         // Snap-Dominated Region: Check if implied Omega^2 = -snap/accel is
         // physical
-        const bool is_physical_snap =
-            ((-snap * accel) > 0.0) && (std::abs(accel) > utils::kZeroEps);
+        const bool is_physical_snap = (-snap * accel) > 0.0;
 
-        if (is_sig_snap && is_physical_snap) {
+        if (is_sig_snap && is_sig_accel && is_physical_snap) {
             idx_circular_snap.push_back(leaf_idx);
             continue;
         }
 
-        // Crackle-Dominated Region: Check if crackle is significantly measured
-        const bool is_sig_crackle =
-            std::abs(crackle) > (minimum_snap_cells * dcrackle);
+        // Crackle-Dominated Region: Check if jerk is significantly measured
+        // we do not check crackle and accept any crackle as last resort
+        const bool is_sig_jerk =
+            std::abs(jerk) > (propagator_significance * djerk);
         // Check if implied Omega^2 = -crackle/jerk is physical
-        const bool is_physical_crackle =
-            ((-crackle * jerk) > 0.0) && (std::abs(jerk) > utils::kZeroEps);
-        if (is_sig_crackle && is_physical_crackle) {
+        const bool is_physical_crackle = (-crackle * jerk) > 0.0;
+        if (is_sig_jerk && is_physical_crackle) {
             idx_circular_crackle.push_back(leaf_idx);
         } else {
             idx_taylor.push_back(leaf_idx);
@@ -87,26 +90,31 @@ std::tuple<std::vector<SizeType>, std::vector<SizeType>, std::vector<SizeType>>
 get_circ_taylor_mask(std::span<const double> leaves_batch,
                      SizeType n_leaves,
                      SizeType n_params,
-                     double minimum_snap_cells) {
+                     double propagator_significance) {
     std::vector<SizeType> indices_batch(n_leaves);
     for (SizeType i = 0; i < n_leaves; ++i) {
         indices_batch[i] = i;
     }
     return get_circ_taylor_mask_scattered(leaves_batch, indices_batch, n_leaves,
-                                          n_params, minimum_snap_cells);
+                                          n_params, propagator_significance);
 }
 
 namespace {
 inline bool is_in_hole(double snap,
                        double dsnap,
                        double jerk,
+                       double djerk,
                        double accel,
-                       double minimum_snap_cells) noexcept {
-    const bool is_sig_snap = std::abs(snap) > (minimum_snap_cells * dsnap);
-    const bool is_physical_snap =
-        ((-snap * accel) > 0.0) && (std::abs(accel) > utils::kZeroEps);
-    const bool is_stable_jerk = std::abs(jerk) > utils::kZeroEps;
-    return is_sig_snap && (!is_physical_snap) && is_stable_jerk;
+                       double daccel,
+                       double propagator_significance) noexcept {
+    const bool is_sig_snap = std::abs(snap) > (propagator_significance * dsnap);
+    const bool is_sig_accel =
+        std::abs(accel) > (propagator_significance * daccel);
+    const bool is_physical_snap = (-snap * accel) > 0.0;
+    const bool is_sig_jerk = std::abs(jerk) > (propagator_significance * djerk);
+    const bool mask_circular_snap =
+        is_sig_snap && is_sig_accel && is_physical_snap;
+    return (!mask_circular_snap) && is_sig_jerk;
 }
 
 } // namespace
@@ -119,7 +127,7 @@ SizeType circ_taylor_branch_batch(std::span<const double> leaves_tree,
                                   double eta,
                                   SizeType branch_max,
                                   SizeType n_leaves,
-                                  double minimum_snap_cells,
+                                  double propagator_significance,
                                   memory::BranchingWorkspace& branch_ws) {
     constexpr SizeType kParams       = 5U;
     constexpr SizeType kParamStride  = 2U;
@@ -345,7 +353,8 @@ SizeType circ_taylor_branch_batch(std::span<const double> leaves_tree,
         const SizeType n_d5      = scratch_counts[fb + 0];
 
         const bool in_hole =
-            is_in_hole(leaf[2], leaf[3], leaf[4], leaf[6], minimum_snap_cells);
+            is_in_hole(leaf[2], leaf[3], leaf[4], leaf[5], leaf[6], leaf[7],
+                       propagator_significance);
         const bool need_branching =
             shift_bins_ptr[fb + 0] >= (eta - utils::kFloatEps);
         if (!in_hole || !need_branching || n_d5 == 1) [[likely]] {
@@ -384,7 +393,7 @@ SizeType circ_taylor_validate_batch(std::span<double> leaves_branch,
                                     SizeType n_leaves,
                                     double p_orb_min,
                                     double x_mass_const,
-                                    double minimum_snap_cells) {
+                                    double validation_significance) {
     constexpr SizeType kParams       = 5U;
     constexpr SizeType kParamStride  = 2U;
     constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
@@ -398,18 +407,22 @@ SizeType circ_taylor_validate_batch(std::span<double> leaves_branch,
     std::vector<bool> mask_keep(n_leaves, false);
 
     for (SizeType i = 0; i < n_leaves; ++i) {
-        const SizeType lo  = i * kLeavesStride;
-        const double snap  = leaves_branch[lo + 2];
-        const double dsnap = leaves_branch[lo + 3];
-        const double accel = leaves_branch[lo + 6];
+        const SizeType lo   = i * kLeavesStride;
+        const double snap   = leaves_branch[lo + 2];
+        const double dsnap  = leaves_branch[lo + 3];
+        const double accel  = leaves_branch[lo + 6];
+        const double daccel = leaves_branch[lo + 7];
 
         // Determine whether snap is significantly measured
-        const bool is_sig_snap = std::abs(snap) > (minimum_snap_cells * dsnap);
-        const bool snap_possible = (std::abs(accel) > utils::kZeroEps);
-        const bool sign_valid    = (-snap * accel) > 0.0;
+        const bool is_sig_snap =
+            std::abs(snap) > (validation_significance * dsnap);
+        const bool is_sig_accel =
+            std::abs(accel) > (validation_significance * daccel);
+        const bool is_physical_snap = (-snap * accel) > 0.0;
         const bool snap_unphysical =
-            is_sig_snap && snap_possible && !sign_valid;
-        const bool snap_region = is_sig_snap && snap_possible && sign_valid;
+            is_sig_snap && is_sig_accel && !is_physical_snap;
+        const bool snap_region =
+            is_sig_snap && is_sig_accel && is_physical_snap;
         if (snap_unphysical) {
             mask_keep[i] = false; // kill outright
             continue;
@@ -462,7 +475,7 @@ void circ_taylor_resolve_batch(std::span<const double> leaves_tree,
                                SizeType n_freq_init,
                                SizeType nbins,
                                SizeType n_leaves,
-                               double minimum_snap_cells) {
+                               double propagator_significance) {
     constexpr SizeType kParams       = 5;
     constexpr SizeType kParamStride  = 2;
     constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
@@ -502,7 +515,7 @@ void circ_taylor_resolve_batch(std::span<const double> leaves_tree,
 
     const auto [idx_circular_snap, idx_circular_crackle, idx_taylor] =
         get_circ_taylor_mask(leaves_tree, n_leaves, kParams,
-                             minimum_snap_cells);
+                             propagator_significance);
 
     // Process circular indices
     for (SizeType i : idx_circular_snap) {
@@ -645,7 +658,7 @@ void circ_taylor_ascend_resolve_batch(
     SizeType nbins,
     SizeType n_leaves,
     SizeType n_segments,
-    double minimum_snap_cells) {
+    double propagator_significance) {
     constexpr SizeType kParams       = 5;
     constexpr SizeType kParamStride  = 2;
     constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
@@ -667,7 +680,7 @@ void circ_taylor_ascend_resolve_batch(
     const auto& lim_freq  = param_limits[4];
     const auto [idx_circular_snap, idx_circular_crackle, idx_taylor] =
         get_circ_taylor_mask(leaves_tree, n_leaves, kParams,
-                             minimum_snap_cells);
+                             propagator_significance);
 
     for (SizeType i = 0; i < n_segments; ++i) {
         auto param_indices_seg = param_indices.subspan(i * n_leaves, n_leaves);
@@ -811,7 +824,7 @@ void circ_taylor_transform_batch(std::span<double> leaves_tree,
                                  std::pair<double, double> coord_cur,
                                  SizeType n_leaves,
                                  bool use_conservative_tile,
-                                 double minimum_snap_cells) {
+                                 double propagator_significance) {
     constexpr SizeType kParams       = 5;
     constexpr SizeType kParamStride  = 2;
     constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
@@ -834,7 +847,7 @@ void circ_taylor_transform_batch(std::span<double> leaves_tree,
 
     const auto [idx_circular_snap, idx_circular_crackle, idx_taylor] =
         get_circ_taylor_mask_scattered(leaves_tree, indices_tree, n_leaves,
-                                       kParams, minimum_snap_cells);
+                                       kParams, propagator_significance);
 
     // Process circular indices
     for (SizeType i : idx_circular_snap) {

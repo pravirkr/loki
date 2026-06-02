@@ -10,9 +10,10 @@ namespace loki::utils {
 
 inline constexpr double kCval    = 299792458.0;            // m/s
 inline constexpr double kInvCval = 3.3356409519815204e-09; // s/m
+// Cube root of the solar gravitational parameter μ⊙ = G M⊙. Units: m s^(-2/3).
+inline constexpr double kGMsunOneThird = 5.10078726793173e6;
 // To match the Python output for bitwise consistency
-inline constexpr double kFloatEps = 1e-6;  // half-up rounding
-inline constexpr double kZeroEps  = 1e-12; // zero comparison
+inline constexpr double kFloatEps = 1e-6; // half-up rounding
 
 constexpr float to_gib(SizeType bytes) noexcept {
     return static_cast<float>(bytes) / 1024.0F / 1024.0F / 1024.0F;

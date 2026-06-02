@@ -29,7 +29,8 @@ namespace loki::core {
  * @param indices_batch  Flat span of indices (size: n_leaves)
  * @param n_leaves      Number of leaves (batches)
  * @param n_params      Number of Taylor parameters
- * @param minimum_snap_cells Threshold for significant snap (default: 5.0)
+ * @param propagator_significance Minimum significance level for the propagator.
+ Gatekeeping the circular classification. Ideally should be greater than 2.
  * @return std::tuple<std::vector<SizeType>, std::vector<SizeType>,
  * std::vector<SizeType>> (idx_circular_snap, idx_circular_crackle, idx_taylor)
  */
@@ -38,13 +39,13 @@ get_circ_taylor_mask_scattered(std::span<const double> leaves_batch,
                                std::span<SizeType> indices_batch,
                                SizeType n_leaves,
                                SizeType n_params,
-                               double minimum_snap_cells);
+                               double propagator_significance);
 
 std::tuple<std::vector<SizeType>, std::vector<SizeType>, std::vector<SizeType>>
 get_circ_taylor_mask(std::span<const double> leaves_batch,
                      SizeType n_leaves,
                      SizeType n_params,
-                     double minimum_snap_cells);
+                     double propagator_significance);
 
 SizeType circ_taylor_branch_batch(std::span<const double> leaves_tree,
                                   std::span<double> leaves_branch,
@@ -54,7 +55,7 @@ SizeType circ_taylor_branch_batch(std::span<const double> leaves_tree,
                                   double eta,
                                   SizeType branch_max,
                                   SizeType n_leaves,
-                                  double minimum_snap_cells,
+                                  double propagator_significance,
                                   memory::BranchingWorkspace& branch_ws);
 
 SizeType circ_taylor_validate_batch(std::span<double> leaves_branch,
@@ -62,7 +63,7 @@ SizeType circ_taylor_validate_batch(std::span<double> leaves_branch,
                                     SizeType n_leaves,
                                     double p_orb_min,
                                     double x_mass_const,
-                                    double minimum_snap_cells);
+                                    double validation_significance);
 
 void circ_taylor_resolve_batch(std::span<const double> leaves_tree,
                                std::span<SizeType> param_indices,
@@ -75,7 +76,7 @@ void circ_taylor_resolve_batch(std::span<const double> leaves_tree,
                                SizeType n_freq_init,
                                SizeType nbins,
                                SizeType n_leaves,
-                               double minimum_snap_cells);
+                               double propagator_significance);
 
 void circ_taylor_ascend_resolve_batch(
     std::span<const double> leaves_tree,
@@ -89,7 +90,7 @@ void circ_taylor_ascend_resolve_batch(
     SizeType nbins,
     SizeType n_leaves,
     SizeType n_segments,
-    double minimum_snap_cells);
+    double propagator_significance);
 
 void circ_taylor_transform_batch(std::span<double> leaves_tree,
                                  std::span<SizeType> indices_tree,
@@ -97,7 +98,7 @@ void circ_taylor_transform_batch(std::span<double> leaves_tree,
                                  std::pair<double, double> coord_cur,
                                  SizeType n_leaves,
                                  bool use_conservative_tile,
-                                 double minimum_snap_cells);
+                                 double propagator_significance);
 
 std::vector<double>
 generate_bp_circ_taylor(std::span<const std::vector<double>> param_arr,
@@ -121,7 +122,7 @@ circ_taylor_branch_batch_cuda(cuda::std::span<const double> leaves_tree,
                               double eta,
                               SizeType branch_max,
                               SizeType n_leaves,
-                              double minimum_snap_cells,
+                              double propagator_significance,
                               memory::BranchingWorkspaceCUDAView branch_ws,
                               memory::CUBScratchArena& scratch_ws,
                               cudaStream_t stream);
@@ -132,7 +133,7 @@ circ_taylor_validate_batch_cuda(cuda::std::span<const double> leaves_branch,
                                 SizeType n_leaves,
                                 double p_orb_min,
                                 double x_mass_const,
-                                double minimum_snap_cells,
+                                double validation_significance,
                                 memory::CUBScratchArena& scratch_ws,
                                 cudaStream_t stream);
 
@@ -149,7 +150,7 @@ void circ_taylor_resolve_batch_cuda(
     SizeType n_freq_init,
     SizeType nbins,
     SizeType n_leaves,
-    double minimum_snap_cells,
+    double propagator_significance,
     cudaStream_t stream);
 
 void circ_taylor_ascend_resolve_batch_cuda(
@@ -164,7 +165,7 @@ void circ_taylor_ascend_resolve_batch_cuda(
     SizeType nbins,
     SizeType n_leaves,
     SizeType n_segments,
-    double minimum_snap_cells,
+    double propagator_significance,
     cudaStream_t stream);
 
 void circ_taylor_transform_batch_cuda(
@@ -174,7 +175,7 @@ void circ_taylor_transform_batch_cuda(
     std::pair<double, double> coord_cur,
     SizeType n_leaves,
     bool use_conservative_tile,
-    double minimum_snap_cells,
+    double propagator_significance,
     cudaStream_t stream);
 
 #endif // LOKI_ENABLE_CUDA

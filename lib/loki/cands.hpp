@@ -119,6 +119,26 @@ private:
     std::map<std::string, float> m_timers;
 };
 
+// Iteration stats for pruning
+struct PruneIterationStats {
+    SizeType n_leaves     = 0;
+    SizeType n_leaves_phy = 0;
+    float score_min       = std::numeric_limits<float>::max();
+    float score_max       = std::numeric_limits<float>::lowest();
+    PruneTimerStats batch_timers;
+
+    void norm_scores(SizeType n_leaves_surv) {
+        if (n_leaves_surv == 0) {
+            if (score_min == std::numeric_limits<float>::max()) {
+                score_min = 0.0F;
+            }
+            if (score_max == std::numeric_limits<float>::lowest()) {
+                score_max = 0.0F;
+            }
+        }
+    }
+};
+
 class PruneStatsCollection {
 public:
     PruneStatsCollection() = default;
@@ -199,7 +219,7 @@ public:
                         SizeType nsegments,
                         SizeType max_sugg,
                         std::span<const float> threshold_scheme);
-    
+
     void write_runtime(float runtime);
 
     void write_run_results(std::string_view run_name,
