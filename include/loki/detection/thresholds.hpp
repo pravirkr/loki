@@ -1,5 +1,6 @@
 #pragma once
 
+#include <format>
 #include <memory>
 #include <span>
 #include <string>
@@ -13,6 +14,23 @@
 #endif // LOKI_ENABLE_CUDA
 
 namespace loki::detection {
+
+enum class DynamicThresholdMode : uint8_t { kLegacy, kImproved };
+
+inline DynamicThresholdMode
+dynamic_threshold_mode_from_string(std::string_view s) {
+    if (s == "legacy") {
+        return DynamicThresholdMode::kLegacy;
+    }
+    if (s == "improved") {
+        return DynamicThresholdMode::kImproved;
+    }
+    throw std::invalid_argument(std::format("unknown mode: {}", s));
+}
+
+inline std::string mode_to_string(DynamicThresholdMode m) {
+    return m == DynamicThresholdMode::kLegacy ? "legacy" : "improved";
+}
 
 struct State {
     float success_h0{0.0F};
@@ -81,6 +99,7 @@ public:
                            float wtsp            = 1.0F,
                            float beam_width      = 0.7F,
                            SizeType trials_start = 1,
+                           std::string_view mode = "legacy",
                            int nthreads          = 1);
     ~DynamicThresholdScheme();
     DynamicThresholdScheme(DynamicThresholdScheme&&) noexcept;
@@ -141,6 +160,7 @@ public:
                                float wtsp            = 1.0F,
                                float beam_width      = 0.7F,
                                SizeType trials_start = 1,
+                               std::string_view mode = "legacy",
                                SizeType batch_size   = 256,
                                int device_id         = 0);
     ~DynamicThresholdSchemeCUDA();

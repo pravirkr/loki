@@ -34,6 +34,65 @@ namespace {
 class DualPoolFoldManager;
 
 /**
+ * Handle to a pre-allocated score vector (one float per trial).
+ */
+class ScoreVectorHandle {
+public:
+    ScoreVectorHandle(float* data,
+                      SizeType actual_count,
+                      SizeType capacity,
+                      DualPoolFoldManager* manager)
+        : m_data(data),
+          m_count(actual_count),
+          m_capacity(capacity),
+          m_manager(manager) {}
+
+    ScoreVectorHandle(const ScoreVectorHandle&)            = delete;
+    ScoreVectorHandle& operator=(const ScoreVectorHandle&) = delete;
+
+    ScoreVectorHandle(ScoreVectorHandle&& other) noexcept
+        : m_data(other.m_data),
+          m_count(other.m_count),
+          m_capacity(other.m_capacity),
+          m_manager(other.m_manager) {
+        other.m_manager = nullptr;
+    }
+
+    ScoreVectorHandle& operator=(ScoreVectorHandle&& other) noexcept {
+        if (this != &other) {
+            release();
+            m_data          = other.m_data;
+            m_count         = other.m_count;
+            m_capacity      = other.m_capacity;
+            m_manager       = other.m_manager;
+            other.m_manager = nullptr;
+        }
+        return *this;
+    }
+
+    ~ScoreVectorHandle() { release(); }
+
+    [[nodiscard]] std::span<float> data() noexcept { return {m_data, m_count}; }
+    [[nodiscard]] std::span<const float> data() const noexcept {
+        return {m_data, m_count};
+    }
+    [[nodiscard]] SizeType count() const noexcept { return m_count; }
+    [[nodiscard]] SizeType capacity() const noexcept { return m_capacity; }
+    void set_count(SizeType count) noexcept {
+        assert(count <= m_capacity);
+        m_count = count;
+    }
+
+private:
+    void release() noexcept;
+
+    float* m_data;
+    SizeType m_count;
+    SizeType m_capacity;
+    DualPoolFoldManager* m_manager;
+};
+
+/**
  * Handle to a pre-allocated FoldVector. Its destructor automatically returns
  * the memory to the manager.
  */
@@ -89,12 +148,21 @@ public:
     }
     SizeType ntrials() const { return m_actual_ntrials; }
     SizeType nbins() const { return m_nbins; }
+    SizeType capacity_ntrials() const { return m_capacity_ntrials; }
     float variance() const { return m_variance; }
     void set_ntrials(SizeType ntrials) {
         assert(ntrials <= m_capacity_ntrials);
         m_actual_ntrials = ntrials;
     }
     void set_variance(float variance) { m_variance = variance; }
+
+    /**
+     * Writable view of the full pool slot (capacity trials), for filling before
+     * the logical trial count is known. Prefer data() once ntrials is set.
+     */
+    std::span<float> slot_data() noexcept {
+        return {m_data, m_capacity_ntrials * m_nbins};
+    }
 
 private:
     void release() noexcept; // Implemented after DualPoolFoldManager
@@ -133,20 +201,31 @@ struct Pool {
 /**
  * A thread-safe, pre-allocated memory manager using a dual-pool (ping-pong)
  * buffering strategy to improve cache locality.
+ *
+ * Manages two slot types: fold profiles (ntrials x nbins) and per-trial scores
+ * (ntrials). Score pools are optional (score_slots_per_pool == 0 in legacy
+ * mode).
  */
 class DualPoolFoldManager {
 public:
     DualPoolFoldManager(SizeType nbins,
                         SizeType max_ntrials_per_slot,
-                        SizeType slots_per_pool)
+                        SizeType fold_slots_per_pool,
+                        SizeType score_slots_per_pool = 0)
         : m_nbins(nbins),
           m_max_ntrials(max_ntrials_per_slot),
-          m_slot_size_floats(m_max_ntrials * nbins),
-          m_slots_per_pool(slots_per_pool),
-          m_pool_a(slots_per_pool, m_slot_size_floats),
-          m_pool_b(slots_per_pool, m_slot_size_floats),
-          m_pool_out(&m_pool_a),
-          m_pool_in(&m_pool_b) {}
+          m_fold_slot_size_floats(m_max_ntrials * nbins),
+          m_score_slot_size_floats(m_max_ntrials),
+          m_fold_slots_per_pool(fold_slots_per_pool),
+          m_score_slots_per_pool(score_slots_per_pool),
+          m_fold_pool_a(fold_slots_per_pool, m_fold_slot_size_floats),
+          m_fold_pool_b(fold_slots_per_pool, m_fold_slot_size_floats),
+          m_fold_pool_out(&m_fold_pool_a),
+          m_fold_pool_in(&m_fold_pool_b),
+          m_score_pool_a(score_slots_per_pool, m_score_slot_size_floats),
+          m_score_pool_b(score_slots_per_pool, m_score_slot_size_floats),
+          m_score_pool_out(&m_score_pool_a),
+          m_score_pool_in(&m_score_pool_b) {}
 
     DualPoolFoldManager(const DualPoolFoldManager&)            = delete;
     DualPoolFoldManager& operator=(const DualPoolFoldManager&) = delete;
@@ -162,91 +241,170 @@ public:
     allocate(SizeType ntrials = 0, float variance = 0.0F) {
         std::lock_guard<std::mutex> lock(m_mutex);
 
-        if (m_pool_out->free_count == 0) {
-            spdlog::error("Pool exhausted! Active slots: {}, Max slots: {}",
-                          m_slots_per_pool - m_pool_out->free_count,
-                          m_slots_per_pool);
+        if (m_fold_pool_out->free_count == 0) {
+            spdlog::error(
+                "Fold pool exhausted! Active slots: {}, Max slots: {}",
+                m_fold_slots_per_pool - m_fold_pool_out->free_count,
+                m_fold_slots_per_pool);
             throw std::runtime_error(
-                "DualPoolFoldManager 'out' pool exhausted!");
+                "DualPoolFoldManager fold 'out' pool exhausted!");
         }
 
-        const auto slot_idx = m_pool_out->free_slots[--m_pool_out->free_count];
-        m_pool_out->slot_occupied[slot_idx] = 1; // 1 for true
+        const auto slot_idx =
+            m_fold_pool_out->free_slots[--m_fold_pool_out->free_count];
+        m_fold_pool_out->slot_occupied[slot_idx] = 1;
 
-        auto slot_span = m_pool_out->get_slot(slot_idx, m_slot_size_floats);
+        auto slot_span =
+            m_fold_pool_out->get_slot(slot_idx, m_fold_slot_size_floats);
         return std::make_unique<FoldVectorHandle>(
             slot_span.data(), ntrials, m_max_ntrials, m_nbins, variance, this);
     }
 
     /**
-     * Deallocates a handle's memory, returning it to the correct pool's free
-     * list.
+     * Allocates a score vector from the current score "out" pool.
+     */
+    [[nodiscard]] std::unique_ptr<ScoreVectorHandle>
+    allocate_scores(SizeType count = 0) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+
+        if (m_score_slots_per_pool == 0) {
+            throw std::runtime_error(
+                "DualPoolFoldManager score pool is not configured");
+        }
+        if (m_score_pool_out->free_count == 0) {
+            spdlog::error(
+                "Score pool exhausted! Active slots: {}, Max slots: {}",
+                m_score_slots_per_pool - m_score_pool_out->free_count,
+                m_score_slots_per_pool);
+            throw std::runtime_error(
+                "DualPoolFoldManager score 'out' pool exhausted!");
+        }
+
+        const auto slot_idx =
+            m_score_pool_out->free_slots[--m_score_pool_out->free_count];
+        m_score_pool_out->slot_occupied[slot_idx] = 1;
+
+        auto slot_span =
+            m_score_pool_out->get_slot(slot_idx, m_score_slot_size_floats);
+        return std::make_unique<ScoreVectorHandle>(slot_span.data(), count,
+                                                   m_max_ntrials, this);
+    }
+
+    /**
+     * Deallocates a fold handle's memory, returning it to the correct pool.
      */
     void deallocate(const float* data_ptr) noexcept {
         std::lock_guard<std::mutex> lock(m_mutex);
 
-        // Determine which pool the pointer belongs to and release it.
         Pool* target_pool = nullptr;
-        if (data_ptr >= m_pool_a.data.data() &&
-            data_ptr < m_pool_a.data.data() + m_pool_a.data.size()) {
-            target_pool = &m_pool_a;
-        } else if (data_ptr >= m_pool_b.data.data() &&
-                   data_ptr < m_pool_b.data.data() + m_pool_b.data.size()) {
-            target_pool = &m_pool_b;
+        if (data_ptr >= m_fold_pool_a.data.data() &&
+            data_ptr < m_fold_pool_a.data.data() + m_fold_pool_a.data.size()) {
+            target_pool = &m_fold_pool_a;
+        } else if (data_ptr >= m_fold_pool_b.data.data() &&
+                   data_ptr <
+                       m_fold_pool_b.data.data() + m_fold_pool_b.data.size()) {
+            target_pool = &m_fold_pool_b;
         } else {
             assert(false &&
-                   "Attempted to deallocate memory not owned by this manager.");
+                   "Attempted to deallocate fold memory not owned by manager.");
             std::terminate();
         }
-        deallocate_from_pool(data_ptr, *target_pool);
+        deallocate_from_pool(data_ptr, *target_pool, m_fold_slot_size_floats,
+                             m_fold_slots_per_pool);
     }
 
     /**
-     * Swaps the roles of the "in" and "out" pools.
+     * Deallocates a score handle's memory, returning it to the correct pool.
+     */
+    void deallocate_scores(const float* data_ptr) noexcept {
+        std::lock_guard<std::mutex> lock(m_mutex);
+
+        Pool* target_pool = nullptr;
+        if (data_ptr >= m_score_pool_a.data.data() &&
+            data_ptr <
+                m_score_pool_a.data.data() + m_score_pool_a.data.size()) {
+            target_pool = &m_score_pool_a;
+        } else if (data_ptr >= m_score_pool_b.data.data() &&
+                   data_ptr < m_score_pool_b.data.data() +
+                                  m_score_pool_b.data.size()) {
+            target_pool = &m_score_pool_b;
+        } else {
+            assert(false && "Attempted to deallocate score memory not owned by "
+                            "manager.");
+            std::terminate();
+        }
+        deallocate_from_pool(data_ptr, *target_pool, m_score_slot_size_floats,
+                             m_score_slots_per_pool);
+    }
+
+    /**
+     * Swaps the roles of the "in" and "out" pools (folds and scores).
      */
     void swap_pools() {
         std::lock_guard<std::mutex> lock(m_mutex);
-        std::swap(m_pool_in, m_pool_out);
+        std::swap(m_fold_pool_in, m_fold_pool_out);
+        std::swap(m_score_pool_in, m_score_pool_out);
     }
 
     /**
-     * Returns the total memory size of the two pools.
+     * Returns the total memory size of the two fold pools and score pools.
      */
     [[nodiscard]] SizeType get_memory_size() const noexcept {
-        return 2 * m_slots_per_pool * m_slot_size_floats * sizeof(float);
+        const auto fold_bytes =
+            2 * m_fold_slots_per_pool * m_fold_slot_size_floats * sizeof(float);
+        const auto score_bytes = 2 * m_score_slots_per_pool *
+                                 m_score_slot_size_floats * sizeof(float);
+        return fold_bytes + score_bytes;
     }
 
 private:
-    void deallocate_from_pool(const float* data_ptr,
-                              Pool& pool) const noexcept {
-        // Calculate slot index from pointer offset
+    static void deallocate_from_pool(const float* data_ptr,
+                                     Pool& pool,
+                                     SizeType slot_size_floats,
+                                     SizeType slots_per_pool) noexcept {
         const auto float_offset = std::distance(
             static_cast<const float*>(pool.data.data()), data_ptr);
         const auto slot_idx =
-            static_cast<SizeType>(float_offset) / m_slot_size_floats;
+            static_cast<SizeType>(float_offset) / slot_size_floats;
 
-        assert(slot_idx < m_slots_per_pool);
+        assert(slot_idx < slots_per_pool);
         assert(pool.slot_occupied[slot_idx] &&
                "Attempting to deallocate a free slot");
 
-        pool.slot_occupied[slot_idx]       = 0;        // 0 for false
-        pool.free_slots[pool.free_count++] = slot_idx; // LIFO push
+        pool.slot_occupied[slot_idx]       = 0;
+        pool.free_slots[pool.free_count++] = slot_idx;
     }
 
-    // Config
     SizeType m_nbins;
     SizeType m_max_ntrials;
-    SizeType m_slot_size_floats;
-    SizeType m_slots_per_pool;
+    SizeType m_fold_slot_size_floats;
+    SizeType m_score_slot_size_floats;
+    SizeType m_fold_slots_per_pool;
+    SizeType m_score_slots_per_pool;
     mutable std::mutex m_mutex;
-    // Pool data
-    Pool m_pool_a;
-    Pool m_pool_b;
 
-    // Pointers to current in/out pools
-    Pool* m_pool_out;
-    Pool* m_pool_in;
+    Pool m_fold_pool_a;
+    Pool m_fold_pool_b;
+    Pool* m_fold_pool_out;
+    Pool* m_fold_pool_in;
+
+    Pool m_score_pool_a;
+    Pool m_score_pool_b;
+    Pool* m_score_pool_out;
+    Pool* m_score_pool_in;
 };
+
+inline void ScoreVectorHandle::release() noexcept {
+    if (m_manager != nullptr) {
+        try {
+            m_manager->deallocate_scores(m_data);
+        } catch (...) {
+            assert(false && "Exception in ScoreVectorHandle::release");
+            std::terminate();
+        }
+        m_manager = nullptr;
+    }
+}
 
 inline void FoldVectorHandle::release() noexcept {
     if (m_manager != nullptr) {
@@ -263,14 +421,26 @@ inline void FoldVectorHandle::release() noexcept {
 struct FoldsType {
     std::unique_ptr<FoldVectorHandle> folds_h0;
     std::unique_ptr<FoldVectorHandle> folds_h1;
+    std::unique_ptr<ScoreVectorHandle> scores_h0;
+    std::unique_ptr<ScoreVectorHandle> scores_h1;
 
     FoldsType() = default;
     FoldsType(std::unique_ptr<FoldVectorHandle> h0,
               std::unique_ptr<FoldVectorHandle> h1)
         : folds_h0(std::move(h0)),
           folds_h1(std::move(h1)) {}
+    FoldsType(std::unique_ptr<FoldVectorHandle> h0,
+              std::unique_ptr<FoldVectorHandle> h1,
+              std::unique_ptr<ScoreVectorHandle> scores_h0_in,
+              std::unique_ptr<ScoreVectorHandle> scores_h1_in)
+        : folds_h0(std::move(h0)),
+          folds_h1(std::move(h1)),
+          scores_h0(std::move(scores_h0_in)),
+          scores_h1(std::move(scores_h1_in)) {}
 
     bool is_valid() const noexcept { return folds_h0 && folds_h1; }
+
+    bool has_scores() const noexcept { return scores_h0 && scores_h1; }
 
     bool is_empty() const noexcept {
         return !is_valid() || folds_h0->data().empty() ||
@@ -280,6 +450,8 @@ struct FoldsType {
     void invalidate() noexcept {
         folds_h0.reset();
         folds_h1.reset();
+        scores_h0.reset();
+        scores_h1.reset();
     }
 
     FoldsType(const FoldsType&)            = delete;
@@ -316,30 +488,39 @@ simulate_folds(const FoldVectorHandle& folds_in,
                math::ThreadLocalNormalRNG& rng,
                DualPoolFoldManager& manager,
                ThreadLocalBuffers& buffers,
-               float bias_snr   = 0.0F,
-               float var_add    = 1.0F,
-               SizeType ntrials = 1024) {
+               float bias_snr                             = 0.0F,
+               float var_add                              = 1.0F,
+               SizeType ntrials                           = 1024,
+               cands::TimerStats::TimerMap* thread_timers = nullptr) {
+    timing::SimpleTimer timer;
     const auto ntrials_in = folds_in.ntrials();
     const auto nbins      = folds_in.nbins();
 
     if (ntrials_in == 0) {
         throw std::invalid_argument("No trials in the input folds");
     }
-    // Allocate output
+    if (thread_timers != nullptr) {
+        timer.start();
+    }
     auto folds_out   = manager.allocate(ntrials);
     auto input_data  = folds_in.data();
     auto output_data = folds_out->data();
 
-    // Scale profile by bias_snr
     auto profile_scaled = std::span(buffers.profile_scaled).first(nbins);
     std::ranges::transform(profile, profile_scaled.begin(),
                            [bias_snr](float x) { return x * bias_snr; });
-    // Generate noise
+    if (thread_timers != nullptr) {
+        (*thread_timers)["io"] += timer.stop();
+        timer.start();
+    }
     auto noise = std::span(buffers.noise).first(ntrials * nbins);
     rng.generate(noise, 0.0F, std::sqrt(var_add));
+    if (thread_timers != nullptr) {
+        (*thread_timers)["random"] += timer.stop();
+        timer.start();
+    }
     const float var_new = folds_in.variance() + var_add;
 
-    // Fill output data
     for (SizeType i = 0; i < ntrials; ++i) {
         const SizeType source_trial_idx =
             (i < ntrials_in) ? i : rng.uniform_index(ntrials_in - 1);
@@ -350,6 +531,9 @@ simulate_folds(const FoldVectorHandle& folds_in,
                                           noise[out_offset + j] +
                                           profile_scaled[j];
         }
+    }
+    if (thread_timers != nullptr) {
+        (*thread_timers)["add_score"] += timer.stop();
     }
     folds_out->set_variance(var_new);
     return folds_out;
@@ -472,6 +656,135 @@ void prune_folds(FoldVectorHandle& folds_in,
 }
 
 std::pair<State, FoldsType>
+transition_state(const State& state_cur,
+                 const FoldsType& folds_cur,
+                 float threshold,
+                 float nbranches,
+                 DualPoolFoldManager& manager,
+                 cands::TimerStats::TimerMap* thread_timers = nullptr) {
+    error_check::check(folds_cur.has_scores(),
+                       "transition_state requires pre-computed scores");
+
+    timing::SimpleTimer timer;
+    if (thread_timers != nullptr) {
+        timer.start();
+    }
+
+    const auto ntrials_h0 = folds_cur.folds_h0->ntrials();
+    const auto ntrials_h1 = folds_cur.folds_h1->ntrials();
+    const auto nbins      = folds_cur.folds_h0->nbins();
+    const float variance  = folds_cur.folds_h0->variance();
+
+    // Grab a full pool slot; logical size is set after compaction below.
+    // Cannot prune sim_folds in place: the same parent is shared across many
+    // threshold transitions in run_segment_improved.
+    auto folds_h0_out = manager.allocate(ntrials_h0, variance);
+    auto folds_h1_out = manager.allocate(ntrials_h1, variance);
+
+    const auto h0_in     = folds_cur.folds_h0->data();
+    const auto h1_in     = folds_cur.folds_h1->data();
+    const auto scores_h0 = folds_cur.scores_h0->data();
+    const auto scores_h1 = folds_cur.scores_h1->data();
+    auto h0_out          = folds_h0_out->data();
+    auto h1_out          = folds_h1_out->data();
+
+    SizeType n_surv_h0 = 0;
+    for (SizeType i = 0; i < ntrials_h0; ++i) {
+        if (scores_h0[i] > threshold) {
+            const auto in_offset  = i * nbins;
+            const auto out_offset = n_surv_h0 * nbins;
+            std::copy_n(h0_in.begin() + static_cast<IndexType>(in_offset),
+                        nbins,
+                        h0_out.begin() + static_cast<IndexType>(out_offset));
+            ++n_surv_h0;
+        }
+    }
+
+    SizeType n_surv_h1 = 0;
+    for (SizeType i = 0; i < ntrials_h1; ++i) {
+        if (scores_h1[i] > threshold) {
+            const auto in_offset  = i * nbins;
+            const auto out_offset = n_surv_h1 * nbins;
+            std::copy_n(h1_in.begin() + static_cast<IndexType>(in_offset),
+                        nbins,
+                        h1_out.begin() + static_cast<IndexType>(out_offset));
+            ++n_surv_h1;
+        }
+    }
+
+    folds_h0_out->set_ntrials(n_surv_h0);
+    folds_h1_out->set_ntrials(n_surv_h1);
+
+    if (thread_timers != nullptr) {
+        (*thread_timers)["io"] += timer.stop();
+    }
+
+    const float success_h0 =
+        static_cast<float>(n_surv_h0) / static_cast<float>(ntrials_h0);
+    const float success_h1 =
+        static_cast<float>(n_surv_h1) / static_cast<float>(ntrials_h1);
+
+    // Persistent storage only needs pruned folds; scores are stage-local.
+    return {state_cur.gen_next(threshold, success_h0, success_h1, nbranches),
+            FoldsType{std::move(folds_h0_out), std::move(folds_h1_out)}};
+}
+
+FoldsType
+simulate_and_score(const FoldsType& folds_cur,
+                   std::span<const float> profile,
+                   math::ThreadLocalNormalRNG& rng,
+                   DualPoolFoldManager& manager,
+                   ThreadLocalBuffers& buffers,
+                   std::span<const SizeType> box_score_widths,
+                   float bias_snr,
+                   float var_add,
+                   SizeType ntrials,
+                   cands::TimerStats::TimerMap* thread_timers = nullptr) {
+    timing::SimpleTimer timer;
+
+    auto folds_h0 =
+        simulate_folds(*folds_cur.folds_h0, profile, rng, manager, buffers,
+                       0.0F, var_add, ntrials, thread_timers);
+    if (thread_timers != nullptr) {
+        timer.start();
+    }
+    auto scores_h0 = manager.allocate_scores(folds_h0->ntrials());
+    if (thread_timers != nullptr) {
+        (*thread_timers)["io"] += timer.stop();
+        timer.start();
+    }
+    detection::snr_boxcar_2d_max(folds_h0->data(), box_score_widths,
+                                 scores_h0->data(), folds_h0->ntrials(),
+                                 folds_h0->nbins(),
+                                 std::sqrt(folds_h0->variance()));
+    if (thread_timers != nullptr) {
+        (*thread_timers)["add_score"] += timer.stop();
+    }
+
+    auto folds_h1 =
+        simulate_folds(*folds_cur.folds_h1, profile, rng, manager, buffers,
+                       bias_snr, var_add, ntrials, thread_timers);
+    if (thread_timers != nullptr) {
+        timer.start();
+    }
+    auto scores_h1 = manager.allocate_scores(folds_h1->ntrials());
+    if (thread_timers != nullptr) {
+        (*thread_timers)["io"] += timer.stop();
+        timer.start();
+    }
+    detection::snr_boxcar_2d_max(folds_h1->data(), box_score_widths,
+                                 scores_h1->data(), folds_h1->ntrials(),
+                                 folds_h1->nbins(),
+                                 std::sqrt(folds_h1->variance()));
+    if (thread_timers != nullptr) {
+        (*thread_timers)["add_score"] += timer.stop();
+    }
+
+    return FoldsType{std::move(folds_h0), std::move(folds_h1),
+                     std::move(scores_h0), std::move(scores_h1)};
+}
+
+std::pair<State, FoldsType>
 gen_next_using_thresh(const State& state_cur,
                       const FoldsType& folds_cur,
                       float threshold,
@@ -569,6 +882,7 @@ public:
          float wtsp,
          float beam_width,
          SizeType trials_start,
+         std::string_view mode,
          int nthreads)
         : m_branching_pattern(branching_pattern.begin(),
                               branching_pattern.end()),
@@ -578,6 +892,7 @@ public:
           m_wtsp(wtsp),
           m_beam_width(beam_width),
           m_trials_start(trials_start),
+          m_mode(dynamic_threshold_mode_from_string(mode)),
           m_nthreads(nthreads) {
         if (m_branching_pattern.empty()) {
             throw std::invalid_argument("Branching pattern is empty");
@@ -601,18 +916,25 @@ public:
         m_rng = std::make_unique<math::ThreadLocalNormalRNG>(
             std::random_device{}());
 
-        const auto slots_per_pool = compute_max_allocations_needed();
-        m_manager = std::make_unique<DualPoolFoldManager>(m_nbins, m_ntrials,
-                                                          slots_per_pool);
+        const auto [fold_slots_per_pool, score_slots_per_pool] =
+            compute_max_allocations_needed();
+        m_manager = std::make_unique<DualPoolFoldManager>(
+            m_nbins, m_ntrials, fold_slots_per_pool, score_slots_per_pool);
         const auto pool_memory_size = m_manager->get_memory_size();
         const auto pool_memory_size_gb =
             static_cast<float>(pool_memory_size) / 1024.0F / 1024.0F / 1024.0F;
-        spdlog::info("Pre-allocated 2 pools of {} slots ({:.2f} GB)",
-                     slots_per_pool, pool_memory_size_gb);
+        spdlog::info("Pre-allocated 2 fold pools of {} slots and 2 score pools "
+                     "of {} slots ({:.2f} GB)",
+                     fold_slots_per_pool, score_slots_per_pool,
+                     pool_memory_size_gb);
         m_folds_current.resize(m_nthresholds * m_nprobs);
         m_folds_next.resize(m_nthresholds * m_nprobs);
         m_states.resize(m_nstages * m_nthresholds * m_nprobs, State{});
-        init_states();
+        if (m_mode == DynamicThresholdMode::kImproved) {
+            init_states_improved();
+        } else {
+            init_states_legacy();
+        }
     }
     ~Impl()                          = default;
     Impl(const Impl&)                = delete;
@@ -643,7 +965,8 @@ public:
 
     // Methods
     void run(SizeType thres_neigh = 10) {
-        spdlog::info("Running dynamic threshold scheme");
+        const auto mode_label = mode_to_string(m_mode);
+        spdlog::info("Running dynamic threshold scheme ({} mode)", mode_label);
 
         m_timer_stats.reset();
         timing::SimpleTimer total_timer;
@@ -654,7 +977,11 @@ public:
             progress::make_standard_bar("Computing scheme", m_nstages - 1);
 
         for (SizeType istage = 1; istage < m_nstages; ++istage) {
-            run_segment(istage, thres_neigh);
+            if (m_mode == DynamicThresholdMode::kImproved) {
+                run_segment_improved(istage, thres_neigh);
+            } else {
+                run_segment_legacy(istage, thres_neigh);
+            }
             m_manager->swap_pools();
             std::swap(m_folds_current, m_folds_next);
             // Release memory slots
@@ -687,6 +1014,7 @@ public:
         file.createAttribute("ducy_max", m_ducy_max);
         file.createAttribute("wtsp", m_wtsp);
         file.createAttribute("beam_width", m_beam_width);
+        file.createAttribute("mode", mode_to_string(m_mode));
 
         // Create dataset creation property list and enable compression
         HighFive::DataSetCreateProps props;
@@ -720,6 +1048,7 @@ private:
     float m_wtsp;
     float m_beam_width;
     SizeType m_trials_start;
+    DynamicThresholdMode m_mode;
     int m_nthreads;
 
     std::vector<float> m_profile;
@@ -740,7 +1069,7 @@ private:
     FoldGrid m_folds_current;
     FoldGrid m_folds_next;
 
-    SizeType compute_max_allocations_needed() {
+    std::pair<SizeType, SizeType> compute_max_allocations_needed() {
         SizeType max_active_per_stage = 0;
         for (SizeType istage = 0; istage < m_nstages; ++istage) {
             auto active_thresholds = get_current_thresholds_idx(istage);
@@ -749,42 +1078,61 @@ private:
         }
         // h0 + h1 per cell
         const auto max_persistent = max_active_per_stage * m_nprobs * 2;
-        // 2 simulated folds per transition
         const auto max_temporary  = m_nthreads * 2;
-        const auto slots_per_pool = max_persistent + max_temporary;
-        spdlog::info("Allocation analysis: {} active thresholds max, {} prob "
-                     "bins, {} threads",
-                     max_active_per_stage, m_nprobs, m_nthreads);
-        spdlog::info("Need {} persistent + {} temporary = {} slots per pool",
-                     max_persistent, max_temporary, slots_per_pool);
-        return slots_per_pool;
+        SizeType fold_slots       = max_persistent + max_temporary;
+        SizeType score_slots      = 0;
+
+        if (m_mode == DynamicThresholdMode::kImproved) {
+            // Full simulated folds (h0 + h1) per parent state in the beam
+            const auto max_sim_folds = max_active_per_stage * m_nprobs * 2;
+            fold_slots += max_sim_folds;
+            // Scores only live in stage-local sim_folds (h0 + h1 per parent)
+            score_slots = max_sim_folds;
+            spdlog::info("Allocation analysis (improved): {} active thresholds "
+                         "max, {} prob bins, {} threads",
+                         max_active_per_stage, m_nprobs, m_nthreads);
+            spdlog::info("Fold pool: {} persistent + {} sim_folds + {} "
+                         "temporary = {} slots",
+                         max_persistent, max_sim_folds, max_temporary,
+                         fold_slots);
+            spdlog::info("Score pool: {} stage-local slots", score_slots);
+        } else {
+            spdlog::info("Allocation analysis: {} active thresholds max, {} "
+                         "prob bins, {} threads",
+                         max_active_per_stage, m_nprobs, m_nthreads);
+            spdlog::info(
+                "Need {} persistent + {} temporary = {} fold slots per pool",
+                max_persistent, max_temporary, fold_slots);
+        }
+        return {fold_slots, score_slots};
     }
 
-    void init_states() {
+    FoldsType create_initial_fold_state(ThreadLocalBuffers& buffers) {
         const float var_init = 1.0F;
-        // Create initial fold vectors
-        auto folds_h0_init = m_manager->allocate(m_ntrials);
-        auto folds_h1_init = m_manager->allocate(m_ntrials);
+        auto folds_h0_init   = m_manager->allocate(m_ntrials);
+        auto folds_h1_init   = m_manager->allocate(m_ntrials);
         std::ranges::fill(folds_h0_init->data(), 0.0F);
         std::ranges::fill(folds_h1_init->data(), 0.0F);
 
+        auto folds_h0_sim =
+            simulate_folds(*folds_h0_init, m_profile, *m_rng, *m_manager,
+                           buffers, 0.0F, var_init, m_ntrials);
+        auto folds_h1_sim =
+            simulate_folds(*folds_h1_init, m_profile, *m_rng, *m_manager,
+                           buffers, m_bias_snr, var_init, m_ntrials);
+        return FoldsType{std::move(folds_h0_sim), std::move(folds_h1_sim)};
+    }
+
+    void init_states_legacy() {
         auto buffers_ptr =
             std::make_unique<ThreadLocalBuffers>(m_nbins, m_ntrials);
         auto boxcar_widths_cache_ptr =
             std::make_unique<detection::BoxcarWidthsCache>(m_box_score_widths,
                                                            m_nbins);
-        // Simulate the initial folds
-        auto folds_h0_sim =
-            simulate_folds(*folds_h0_init, m_profile, *m_rng, *m_manager,
-                           *buffers_ptr, 0.0F, var_init, m_ntrials);
-        auto folds_h1_sim =
-            simulate_folds(*folds_h1_init, m_profile, *m_rng, *m_manager,
-                           *buffers_ptr, m_bias_snr, var_init, m_ntrials);
 
-        State initial_state = State::initial();
-        FoldsType fold_state{std::move(folds_h0_sim), std::move(folds_h1_sim)};
+        const auto fold_state     = create_initial_fold_state(*buffers_ptr);
+        State initial_state       = State::initial();
         const auto thresholds_idx = get_current_thresholds_idx(0);
-        // Dummy timer object to avoid compiler warning
         cands::TimerStats::TimerMap thread_timers;
         for (SizeType ithres : thresholds_idx) {
             auto [cur_state, cur_fold_state] = gen_next_using_thresh(
@@ -792,6 +1140,33 @@ private:
                 m_branching_pattern[0], m_bias_snr, m_profile, *m_rng,
                 *m_manager, *buffers_ptr, *boxcar_widths_cache_ptr,
                 thread_timers, 1.0F, m_ntrials);
+
+            const auto iprob = utils::find_lower_bin_index(
+                m_probs, cur_state.success_h1_cumul);
+            if (iprob < 0 || iprob >= static_cast<IndexType>(m_nprobs)) {
+                continue;
+            }
+            const auto fold_idx       = (ithres * m_nprobs) + iprob;
+            m_states[fold_idx]        = cur_state;
+            m_folds_current[fold_idx] = std::move(cur_fold_state);
+        }
+    }
+
+    void init_states_improved() {
+        auto buffers_ptr =
+            std::make_unique<ThreadLocalBuffers>(m_nbins, m_ntrials);
+
+        const auto fold_state     = create_initial_fold_state(*buffers_ptr);
+        State initial_state       = State::initial();
+        const auto fold_sim_state = simulate_and_score(
+            fold_state, m_profile, *m_rng, *m_manager, *buffers_ptr,
+            m_box_score_widths, m_bias_snr, 1.0F, m_ntrials);
+
+        const auto thresholds_idx = get_current_thresholds_idx(0);
+        for (SizeType ithres : thresholds_idx) {
+            auto [cur_state, cur_fold_state] = transition_state(
+                initial_state, fold_sim_state, m_thresholds[ithres],
+                m_branching_pattern[0], *m_manager);
 
             const auto iprob = utils::find_lower_bin_index(
                 m_probs, cur_state.success_h1_cumul);
@@ -822,8 +1197,8 @@ private:
         return result;
     }
 
-    // Run a segment of the dynamic threshold scheme
-    void run_segment(SizeType istage, SizeType thres_neigh = 10) {
+    // Run a segment of the dynamic threshold scheme (legacy mode)
+    void run_segment_legacy(SizeType istage, SizeType thres_neigh = 10) {
         const auto beam_idx_cur      = get_current_thresholds_idx(istage);
         const auto beam_idx_prev     = get_current_thresholds_idx(istage - 1);
         const auto stage_offset_prev = (istage - 1) * m_nthresholds * m_nprobs;
@@ -905,6 +1280,116 @@ private:
         // Merge this segment's stats into global
         m_timer_stats.merge(segment_stats);
     }
+
+    FoldGrid
+    pre_simulate_stage_folds(const std::vector<SizeType>& beam_idx_prev,
+                             SizeType istage,
+                             cands::TimerStats& segment_stats) {
+        FoldGrid sim_folds(m_nthresholds * m_nprobs);
+        const auto stage_offset_prev = (istage - 1) * m_nthresholds * m_nprobs;
+        const auto n_beam            = beam_idx_prev.size();
+        const auto n_work            = n_beam * m_nprobs;
+
+#pragma omp parallel num_threads(m_nthreads)
+        {
+            static thread_local std::unique_ptr<ThreadLocalBuffers> buffers_ptr;
+            if (!buffers_ptr) {
+                buffers_ptr =
+                    std::make_unique<ThreadLocalBuffers>(m_nbins, m_ntrials);
+            }
+
+            auto& thread_timers = segment_stats.get_thread_local();
+#pragma omp for schedule(dynamic)
+            for (SizeType ii = 0; ii < n_work; ++ii) {
+                const auto kprob    = ii % m_nprobs;
+                const auto ibeam    = ii / m_nprobs;
+                const auto jthresh  = beam_idx_prev[ibeam];
+                const auto fold_idx = (jthresh * m_nprobs) + kprob;
+
+                const auto prev_state = m_states[stage_offset_prev + fold_idx];
+                if (prev_state.is_empty) {
+                    continue;
+                }
+                const auto& prev_fold_state = m_folds_current[fold_idx];
+                if (!prev_fold_state.is_valid() || prev_fold_state.is_empty()) {
+                    continue;
+                }
+
+                sim_folds[fold_idx] = simulate_and_score(
+                    prev_fold_state, m_profile, *m_rng, *m_manager,
+                    *buffers_ptr, m_box_score_widths, m_bias_snr, 1.0F,
+                    m_ntrials, &thread_timers);
+            }
+        }
+        return sim_folds;
+    }
+
+    // Run a segment using pre-simulated folds (improved mode)
+    void run_segment_improved(SizeType istage, SizeType thres_neigh = 10) {
+        const auto beam_idx_cur      = get_current_thresholds_idx(istage);
+        const auto beam_idx_prev     = get_current_thresholds_idx(istage - 1);
+        const auto stage_offset_prev = (istage - 1) * m_nthresholds * m_nprobs;
+        const auto stage_offset_cur  = istage * m_nthresholds * m_nprobs;
+
+        cands::TimerStats segment_stats(m_nthreads);
+        const auto sim_folds =
+            pre_simulate_stage_folds(beam_idx_prev, istage, segment_stats);
+
+#pragma omp parallel num_threads(m_nthreads)
+        {
+            auto& thread_timers = segment_stats.get_thread_local();
+#pragma omp for schedule(dynamic)
+            for (SizeType i = 0; i < beam_idx_cur.size(); ++i) {
+                const auto ithres = beam_idx_cur[i];
+                const auto neighbour_beam_indices =
+                    utils::find_neighbouring_indices(beam_idx_prev, ithres,
+                                                     thres_neigh);
+                for (SizeType jthresh : neighbour_beam_indices) {
+                    for (SizeType kprob = 0; kprob < m_nprobs; ++kprob) {
+                        const auto prev_fold_idx = (jthresh * m_nprobs) + kprob;
+                        const auto prev_state =
+                            m_states[stage_offset_prev + prev_fold_idx];
+
+                        if (prev_state.is_empty) {
+                            continue;
+                        }
+                        const auto& prev_sim_fold = sim_folds[prev_fold_idx];
+                        if (!prev_sim_fold.is_valid() ||
+                            prev_sim_fold.is_empty() ||
+                            !prev_sim_fold.has_scores()) {
+                            continue;
+                        }
+
+                        auto [cur_state, cur_fold_state] = transition_state(
+                            prev_state, prev_sim_fold, m_thresholds[ithres],
+                            m_branching_pattern[istage], *m_manager,
+                            &thread_timers);
+
+                        const auto iprob = utils::find_lower_bin_index(
+                            m_probs, cur_state.success_h1_cumul);
+                        if (iprob < 0 ||
+                            iprob >= static_cast<IndexType>(m_nprobs)) {
+                            continue;
+                        }
+
+                        const auto cur_idx       = (ithres * m_nprobs) + iprob;
+                        const auto cur_state_idx = stage_offset_cur + cur_idx;
+
+                        State& existing_state     = m_states[cur_state_idx];
+                        FoldsType& existing_folds = m_folds_next[cur_idx];
+
+                        if (existing_state.is_empty ||
+                            cur_state.complexity_cumul <
+                                existing_state.complexity_cumul) {
+                            existing_state = cur_state;
+                            existing_folds = std::move(cur_fold_state);
+                        }
+                    }
+                }
+            }
+        }
+        m_timer_stats.merge(segment_stats);
+    }
 }; // End DynamicThresholdScheme::Impl definition
 
 DynamicThresholdScheme::DynamicThresholdScheme(
@@ -920,6 +1405,7 @@ DynamicThresholdScheme::DynamicThresholdScheme(
     float wtsp,
     float beam_width,
     SizeType trials_start,
+    std::string_view mode,
     int nthreads)
     : m_impl(std::make_unique<Impl>(branching_pattern,
                                     ref_ducy,
@@ -933,6 +1419,7 @@ DynamicThresholdScheme::DynamicThresholdScheme(
                                     wtsp,
                                     beam_width,
                                     trials_start,
+                                    mode,
                                     nthreads)) {}
 DynamicThresholdScheme::~DynamicThresholdScheme() = default;
 DynamicThresholdScheme::DynamicThresholdScheme(

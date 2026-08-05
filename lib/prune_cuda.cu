@@ -884,7 +884,7 @@ public:
 
         // Determine ref_segs to process
         auto ref_segs_to_process =
-            utils::determine_ref_segs_pareto(nsegments, m_n_runs, m_ref_segs);
+            utils::determine_ref_segs(nsegments, m_n_runs, m_ref_segs);
         spdlog::info("Starting Pruning for {} runs, on CUDA device {}",
                      ref_segs_to_process.size(), m_device_id);
 

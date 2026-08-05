@@ -147,6 +147,57 @@ __device__ __forceinline__ uint32_t compute_pool_ntrials_offset(
     return ((slot_idx * nprobs + prob_idx) * 2) + branch;
 }
 
+__device__ __forceinline__ uint32_t
+compute_pool_scores_offset(uint32_t slot_idx,
+                           uint32_t prob_idx,
+                           uint32_t branch,
+                           uint32_t trial_id,
+                           uint32_t nprobs,
+                           uint32_t ntrials) {
+    return (((slot_idx * nprobs + prob_idx) * 2) + branch) * ntrials + trial_id;
+}
+
+template <uint32_t MAX_BINS>
+__device__ __forceinline__ float
+max_boxcar_snr(const float* __restrict__ trial_arr,
+               uint32_t nbins,
+               const uint32_t* __restrict__ widths,
+               uint32_t nwidths,
+               float inv_stdnoise) {
+    float prefix[MAX_BINS];
+    prefix[0] = trial_arr[0];
+    for (uint32_t i = 1; i < nbins; ++i) {
+        prefix[i] = prefix[i - 1] + trial_arr[i];
+    }
+    const float total_sum = prefix[nbins - 1];
+
+    float max_snr = cuda::std::numeric_limits<float>::lowest();
+    for (uint32_t iw = 0; iw < nwidths; ++iw) {
+        const uint32_t w = widths[iw];
+        const float h    = sqrtf(static_cast<float>(nbins - w) /
+                                 static_cast<float>(nbins * w));
+        const float b =
+            static_cast<float>(w) * h / static_cast<float>(nbins - w);
+        float max_diff = cuda::std::numeric_limits<float>::lowest();
+        max_diff       = fmaxf(max_diff, prefix[w - 1]);
+
+        const uint32_t loop_limit = nbins - w;
+        for (uint32_t j = 1; j <= loop_limit; ++j) {
+            const float diff = prefix[j + w - 1] - prefix[j - 1];
+            max_diff         = fmaxf(max_diff, diff);
+        }
+        for (uint32_t j = loop_limit + 1; j < nbins; ++j) {
+            const float diff =
+                (total_sum - prefix[j - 1]) + prefix[j + w - 1 - nbins];
+            max_diff = fmaxf(max_diff, diff);
+        }
+        const float snr =
+            (((h + b) * max_diff) - (b * total_sum)) * inv_stdnoise;
+        max_snr = fmaxf(max_snr, snr);
+    }
+    return max_snr;
+}
+
 __global__ __launch_bounds__(256, 4) // Hint: Max 256 threads, min 4 blocks/SM
     void simulate_folds_kernel(
         const TransitionWorkItem* __restrict__ work_items,
@@ -154,6 +205,7 @@ __global__ __launch_bounds__(256, 4) // Hint: Max 256 threads, min 4 blocks/SM
         const float* __restrict__ folds_current,
         const uint32_t* __restrict__ ntrials_current,
         float* __restrict__ scratch_folds,
+        float* __restrict__ grid_folds,
         const float* __restrict__ profile,
         uint32_t nbins_padded,
         float bias_snr,
@@ -211,9 +263,16 @@ __global__ __launch_bounds__(256, 4) // Hint: Max 256 threads, min 4 blocks/SM
     }
 
     // Compute aligned offsets (guaranteed by nbins_padded % 4 == 0)
-    const uint32_t in_offset  = grid_offset_in + src_trial_idx * nbins_padded;
-    const uint32_t out_offset = tid * nbins_padded;
-    const float branch_scale  = (branch == 1) ? bias_snr : 0.0F;
+    const uint32_t in_offset = grid_offset_in + src_trial_idx * nbins_padded;
+    uint32_t out_offset      = tid * nbins_padded;
+    float* out_base          = scratch_folds;
+    if (grid_folds != nullptr) {
+        const uint32_t grid_offset_out = compute_pool_grid_offset(
+            item.jslot_prev, item.kprob, branch, nprobs, ntrials, nbins_padded);
+        out_offset = grid_offset_out + trial_id * nbins_padded;
+        out_base   = grid_folds;
+    }
+    const float branch_scale = (branch == 1) ? bias_snr : 0.0F;
 
     const float noise_stddev = sqrtf(var_add);
     // RNG for noise generation - second stream
@@ -226,7 +285,7 @@ __global__ __launch_bounds__(256, 4) // Hint: Max 256 threads, min 4 blocks/SM
     const float4* __restrict__ in_ptr4 =
         reinterpret_cast<const float4*>(folds_current + in_offset);
     float4* __restrict__ out_ptr4 =
-        reinterpret_cast<float4*>(scratch_folds + out_offset);
+        reinterpret_cast<float4*>(out_base + out_offset);
     const float4* __restrict__ prof_ptr4 =
         reinterpret_cast<const float4*>(profile);
 
@@ -275,49 +334,94 @@ __global__ __launch_bounds__(256, 4) // Hint: Max 256 threads, min 4 blocks/SM
     const float threshold               = thresholds[item.ithres_abs];
     const float* __restrict__ trial_arr = scratch_folds + tid * nbins_padded;
 
-    // Compute SNR with early exit
-    float prefix[MAX_BINS];
-    prefix[0] = trial_arr[0];
-    for (uint32_t i = 1; i < nbins; ++i) {
-        prefix[i] = prefix[i - 1] + trial_arr[i];
-    }
-    const float total_sum    = prefix[nbins - 1];
-    const float inv_stdnoise = 1.0f / sqrtf(var_in + var_add);
+    const float max_snr = max_boxcar_snr<MAX_BINS>(
+        trial_arr, nbins, widths, nwidths, 1.0f / sqrtf(var_in + var_add));
+    survive_flags[tid] = max_snr > threshold ? 1u : 0u;
+}
 
-    bool survive = false;
-    for (uint32_t iw = 0; iw < nwidths; ++iw) {
-        const uint32_t w = widths[iw];
-        const float h    = sqrtf(static_cast<float>(nbins - w) /
-                                 static_cast<float>(nbins * w));
-        const float b =
-            static_cast<float>(w) * h / static_cast<float>(nbins - w);
-        float max_diff = cuda::std::numeric_limits<float>::lowest();
-        max_diff       = fmaxf(max_diff, prefix[w - 1]);
+template <uint32_t MAX_BINS>
+__global__ __launch_bounds__(256, 4) void score_only_kernel(
+    const TransitionWorkItem* __restrict__ work_items,
+    uint32_t batch_size,
+    const float* __restrict__ scratch_folds,
+    const float* __restrict__ grid_folds,
+    float* __restrict__ scratch_scores,
+    float* __restrict__ grid_scores,
+    uint32_t nbins,
+    uint32_t nbins_padded,
+    const uint32_t* __restrict__ widths,
+    uint32_t nwidths,
+    float var_in,
+    float var_add,
+    uint32_t ntrials,
+    uint32_t nprobs) {
+    const uint32_t tid = (blockIdx.x * blockDim.x) + threadIdx.x;
 
-        const uint32_t loop_limit = nbins - w;
-        for (uint32_t j = 1; j <= loop_limit; ++j) {
-            const float diff = prefix[j + w - 1] - prefix[j - 1];
-            max_diff         = fmaxf(max_diff, diff);
-        }
-        for (uint32_t j = loop_limit + 1; j < nbins; ++j) {
-            const float diff =
-                (total_sum - prefix[j - 1]) + prefix[j + w - 1 - nbins];
-            max_diff = fmaxf(max_diff, diff);
-        }
-        const float snr =
-            (((h + b) * max_diff) - (b * total_sum)) * inv_stdnoise;
-        if (snr > threshold) {
-            survive = true;
-            break;
-        }
+    const uint32_t trials_per_item = 2 * ntrials;
+    const uint32_t total_trials    = batch_size * trials_per_item;
+    if (tid >= total_trials) {
+        return;
     }
-    survive_flags[tid] = survive ? 1u : 0u;
+
+    const uint32_t work_idx  = tid / trials_per_item;
+    const uint32_t local_idx = tid % trials_per_item;
+    const uint32_t branch    = local_idx / ntrials;
+    const uint32_t trial_id  = local_idx % ntrials;
+
+    const TransitionWorkItem& item = work_items[work_idx];
+    const uint32_t trial_offset =
+        grid_folds != nullptr
+            ? compute_pool_grid_offset(item.jslot_prev, item.kprob, branch,
+                                       nprobs, ntrials, nbins_padded) +
+                  trial_id * nbins_padded
+            : tid * nbins_padded;
+    const float* __restrict__ trial_arr = (grid_folds != nullptr)
+                                              ? grid_folds + trial_offset
+                                              : scratch_folds + trial_offset;
+    const float max_snr                 = max_boxcar_snr<MAX_BINS>(
+        trial_arr, nbins, widths, nwidths, 1.0f / sqrtf(var_in + var_add));
+
+    if (grid_scores != nullptr) {
+        const uint32_t score_offset = compute_pool_scores_offset(
+            item.jslot_prev, item.kprob, branch, trial_id, nprobs, ntrials);
+        grid_scores[score_offset] = max_snr;
+    } else if (scratch_scores != nullptr) {
+        scratch_scores[tid] = max_snr;
+    }
+}
+
+__global__ __launch_bounds__(256, 4) void score_threshold_kernel(
+    const TransitionWorkItem* __restrict__ work_items,
+    uint32_t batch_size,
+    const float* __restrict__ grid_scores,
+    const float* __restrict__ thresholds,
+    uint32_t* __restrict__ survive_flags,
+    uint32_t ntrials,
+    uint32_t nprobs) {
+    const uint32_t tid = (blockIdx.x * blockDim.x) + threadIdx.x;
+
+    const uint32_t trials_per_item = 2 * ntrials;
+    const uint32_t total_trials    = batch_size * trials_per_item;
+    if (tid >= total_trials) {
+        return;
+    }
+
+    const uint32_t work_idx  = tid / trials_per_item;
+    const uint32_t local_idx = tid % trials_per_item;
+    const uint32_t branch    = local_idx / ntrials;
+    const uint32_t trial_id  = local_idx % ntrials;
+
+    const TransitionWorkItem& item = work_items[work_idx];
+    const float threshold          = thresholds[item.ithres_abs];
+    const uint32_t score_offset    = compute_pool_scores_offset(
+        item.jslot_prev, item.kprob, branch, trial_id, nprobs, ntrials);
+    survive_flags[tid] = grid_scores[score_offset] > threshold ? 1u : 0u;
 }
 
 __global__ void
 transition_decision_kernel(const TransitionWorkItem* __restrict__ work_items,
                            uint32_t batch_size,
-                           const float* __restrict__ scratch_folds,
+                           const float* __restrict__ folds_source,
                            const uint32_t* __restrict__ scan_indices,
                            const uint32_t* __restrict__ survive_flags,
                            float* __restrict__ folds_next,
@@ -331,20 +435,25 @@ transition_decision_kernel(const TransitionWorkItem* __restrict__ work_items,
                            uint32_t nprobs,
                            float nbranches,
                            uint32_t stage_offset_prev,
-                           uint32_t stage_offset_cur) {
+                           uint32_t stage_offset_cur,
+                           bool source_is_grid) {
     const uint32_t work_idx     = blockIdx.x + (blockIdx.y * gridDim.x);
     const uint32_t tid_in_block = threadIdx.x;
     if (work_idx >= batch_size) {
         return;
     }
     __shared__ bool should_update;
+    __shared__ bool use_grid_source;
     __shared__ uint32_t count_h0, count_h1;
-    __shared__ uint32_t base_h0, base_h1; // Base indices in scratch
+    __shared__ uint32_t base_h0, base_h1;
     __shared__ uint32_t grid_offset_h0, grid_offset_h1;
+    __shared__ TransitionWorkItem item_shared;
 
     // Thread 0: Decision logic
     if (tid_in_block == 0) {
-        const TransitionWorkItem& item = work_items[work_idx];
+        item_shared                    = work_items[work_idx];
+        use_grid_source                = source_is_grid;
+        const TransitionWorkItem& item = item_shared;
         const float threshold          = thresholds[item.ithres_abs];
         const uint32_t trials_per_item = 2 * ntrials;
 
@@ -409,11 +518,17 @@ transition_decision_kernel(const TransitionWorkItem* __restrict__ work_items,
             if (survive_flags[trial_idx]) {
                 const uint32_t dense_idx =
                     scan_indices[trial_idx] - scan_indices[base_h0];
-                const uint32_t src_offset = trial_idx * nbins_padded;
+                const uint32_t src_offset =
+                    use_grid_source
+                        ? compute_pool_grid_offset(
+                              item_shared.jslot_prev, item_shared.kprob, 0u,
+                              nprobs, ntrials, nbins_padded) +
+                              trial * nbins_padded
+                        : trial_idx * nbins_padded;
                 const uint32_t dst_offset =
                     grid_offset_h0 + dense_idx * nbins_padded;
                 const float4* __restrict__ src4 =
-                    reinterpret_cast<const float4*>(scratch_folds + src_offset);
+                    reinterpret_cast<const float4*>(folds_source + src_offset);
                 float4* __restrict__ dst4 =
                     reinterpret_cast<float4*>(folds_next + dst_offset);
 #pragma unroll 4
@@ -430,11 +545,17 @@ transition_decision_kernel(const TransitionWorkItem* __restrict__ work_items,
             if (survive_flags[trial_idx]) {
                 const uint32_t dense_idx =
                     scan_indices[trial_idx] - scan_indices[base_h1];
-                const uint32_t src_offset = trial_idx * nbins_padded;
+                const uint32_t src_offset =
+                    use_grid_source
+                        ? compute_pool_grid_offset(
+                              item_shared.jslot_prev, item_shared.kprob, 1u,
+                              nprobs, ntrials, nbins_padded) +
+                              trial * nbins_padded
+                        : trial_idx * nbins_padded;
                 const uint32_t dst_offset =
                     grid_offset_h1 + dense_idx * nbins_padded;
                 const float4* __restrict__ src4 =
-                    reinterpret_cast<const float4*>(scratch_folds + src_offset);
+                    reinterpret_cast<const float4*>(folds_source + src_offset);
                 float4* __restrict__ dst4 =
                     reinterpret_cast<float4*>(folds_next + dst_offset);
 #pragma unroll 4
@@ -478,11 +599,11 @@ void simulate_score_kernel_launcher_cuda(
 
     simulate_folds_kernel<<<grid_dim, block_dim, 0, stream>>>(
         work_items, batch_size, folds_current, ntrials_current, scratch_folds,
-        profile, nbins_padded, bias_snr, var_in, var_add, seed, rng_offset,
-        ntrials, nprobs);
+        nullptr, profile, nbins_padded, bias_snr, var_in, var_add, seed,
+        rng_offset, ntrials, nprobs);
     cuda_utils::check_last_cuda_error("simulate_folds_kernel");
 
-    auto dispatch_kernel = [&](auto... args) {
+    auto dispatch_score_filter = [&](auto... args) {
         if (nbins <= 32) {
             score_filter_kernel<32>
                 <<<grid_dim, block_dim, 0, stream>>>(args...);
@@ -507,10 +628,126 @@ void simulate_score_kernel_launcher_cuda(
                 "limit of 1024");
         }
     };
-    dispatch_kernel(work_items, batch_size, scratch_folds, survive_flags, nbins,
-                    nbins_padded, widths, nwidths, thresholds, var_in, var_add,
-                    ntrials);
+    dispatch_score_filter(work_items, batch_size, scratch_folds, survive_flags,
+                          nbins, nbins_padded, widths, nwidths, thresholds,
+                          var_in, var_add, ntrials);
     cuda_utils::check_last_cuda_error("score_filter_kernel_launcher_cuda");
+}
+
+void simulate_score_store_launcher_cuda(
+    const TransitionWorkItem* __restrict__ work_items,
+    uint32_t batch_size,
+    const float* __restrict__ folds_current,
+    const uint32_t* __restrict__ ntrials_current,
+    float* __restrict__ scratch_folds,
+    float* __restrict__ grid_folds,
+    float* __restrict__ grid_scores,
+    const float* __restrict__ profile,
+    uint32_t nbins,
+    uint32_t nbins_padded,
+    const uint32_t* __restrict__ widths,
+    uint32_t nwidths,
+    float bias_snr,
+    float var_in,
+    float var_add,
+    uint64_t seed,
+    uint64_t rng_offset,
+    uint32_t ntrials,
+    uint32_t nprobs,
+    cudaStream_t stream) {
+
+    constexpr SizeType kThreadsPerBlock = 256;
+    const SizeType total_work           = batch_size * 2 * ntrials;
+    const SizeType blocks_per_grid =
+        (total_work + kThreadsPerBlock - 1) / kThreadsPerBlock;
+    const dim3 block_dim(kThreadsPerBlock);
+    const dim3 grid_dim(blocks_per_grid);
+    cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
+
+    simulate_folds_kernel<<<grid_dim, block_dim, 0, stream>>>(
+        work_items, batch_size, folds_current, ntrials_current, scratch_folds,
+        grid_folds, profile, nbins_padded, bias_snr, var_in, var_add, seed,
+        rng_offset, ntrials, nprobs);
+    cuda_utils::check_last_cuda_error("simulate_folds_kernel");
+
+    auto dispatch_score_only = [&](auto... args) {
+        if (nbins <= 32) {
+            score_only_kernel<32><<<grid_dim, block_dim, 0, stream>>>(args...);
+        } else if (nbins <= 64) {
+            score_only_kernel<64><<<grid_dim, block_dim, 0, stream>>>(args...);
+        } else if (nbins <= 128) {
+            score_only_kernel<128><<<grid_dim, block_dim, 0, stream>>>(args...);
+        } else if (nbins <= 256) {
+            score_only_kernel<256><<<grid_dim, block_dim, 0, stream>>>(args...);
+        } else if (nbins <= 512) {
+            score_only_kernel<512><<<grid_dim, block_dim, 0, stream>>>(args...);
+        } else if (nbins <= 1024) {
+            score_only_kernel<1024>
+                <<<grid_dim, block_dim, 0, stream>>>(args...);
+        } else {
+            throw std::runtime_error(
+                "simulate_score_store_launcher_cuda: nbins exceeds compiled "
+                "limit of 1024");
+        }
+    };
+    dispatch_score_only(work_items, batch_size, scratch_folds, grid_folds,
+                        nullptr, grid_scores, nbins, nbins_padded, widths,
+                        nwidths, var_in, var_add, ntrials, nprobs);
+    cuda_utils::check_last_cuda_error("simulate_score_store_launcher_cuda");
+}
+
+void score_threshold_launcher_cuda(
+    const TransitionWorkItem* __restrict__ work_items,
+    uint32_t batch_size,
+    const float* __restrict__ grid_scores,
+    const float* __restrict__ thresholds,
+    uint32_t* __restrict__ survive_flags,
+    uint32_t ntrials,
+    uint32_t nprobs,
+    cudaStream_t stream) {
+    constexpr SizeType kThreadsPerBlock = 256;
+    const SizeType total_work           = batch_size * 2 * ntrials;
+    const SizeType blocks_per_grid =
+        (total_work + kThreadsPerBlock - 1) / kThreadsPerBlock;
+    const dim3 block_dim(kThreadsPerBlock);
+    const dim3 grid_dim(blocks_per_grid);
+    cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
+
+    score_threshold_kernel<<<grid_dim, block_dim, 0, stream>>>(
+        work_items, batch_size, grid_scores, thresholds, survive_flags, ntrials,
+        nprobs);
+    cuda_utils::check_last_cuda_error("score_threshold_launcher_cuda");
+}
+
+void transition_decision_launcher_cuda(const TransitionWorkItem* work_items,
+                                       uint32_t batch_size,
+                                       const float* folds_source,
+                                       const uint32_t* scan_indices,
+                                       const uint32_t* survive_flags,
+                                       float* folds_next,
+                                       uint32_t* ntrials_next,
+                                       State* states,
+                                       int* locks,
+                                       const float* thresholds,
+                                       const float* probs,
+                                       uint32_t ntrials,
+                                       uint32_t nbins_padded,
+                                       uint32_t nprobs,
+                                       float nbranches,
+                                       uint32_t stage_offset_prev,
+                                       uint32_t stage_offset_cur,
+                                       bool source_is_grid,
+                                       cudaStream_t stream) {
+    constexpr SizeType kThreadsPerBlock = 256;
+    dim3 block_dim(kThreadsPerBlock);
+    dim3 grid_dim(batch_size);
+    cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
+    transition_decision_kernel<<<grid_dim, block_dim, 0, stream>>>(
+        work_items, batch_size, folds_source, scan_indices, survive_flags,
+        folds_next, ntrials_next, states, locks, thresholds, probs, ntrials,
+        nbins_padded, nprobs, nbranches, stage_offset_prev, stage_offset_cur,
+        source_is_grid);
+    cuda_utils::check_last_cuda_error("transition_decision_kernel");
 }
 
 struct CountValidTransitionsFunctor {
@@ -589,6 +826,93 @@ struct WriteValidInitialTransitionsFunctor {
     }
 };
 
+struct ParentCandidate {
+    uint32_t jslot_prev;
+    uint32_t jthres_abs;
+    uint32_t kprob;
+};
+
+struct IsValidParentFunctor {
+    const State* __restrict__ states_ptr;
+    const uint32_t* __restrict__ ntrials_current;
+    uint32_t stage_offset_prev;
+    uint32_t nprobs;
+
+    __device__ uint32_t operator()(const ParentCandidate& cand) const {
+        const uint32_t idx =
+            stage_offset_prev + (cand.jthres_abs * nprobs) + cand.kprob;
+        if (states_ptr[idx].is_empty) {
+            return 0u;
+        }
+        const uint32_t ntrials_offset_h0 =
+            compute_pool_ntrials_offset(cand.jslot_prev, cand.kprob, 0, nprobs);
+        const uint32_t ntrials_offset_h1 =
+            compute_pool_ntrials_offset(cand.jslot_prev, cand.kprob, 1, nprobs);
+        if (ntrials_current[ntrials_offset_h0] == 0 ||
+            ntrials_current[ntrials_offset_h1] == 0) {
+            return 0u;
+        }
+        return 1u;
+    }
+};
+
+struct WriteParentSimFunctor {
+    const ParentCandidate* __restrict__ candidates_ptr;
+    const uint32_t* __restrict__ counts_ptr;
+    const uint32_t* __restrict__ offsets_ptr;
+    TransitionWorkItem* __restrict__ out_ptr;
+
+    __device__ void operator()(uint32_t cand_id) const {
+        if (counts_ptr[cand_id] == 0u) {
+            return;
+        }
+        const ParentCandidate& cand   = candidates_ptr[cand_id];
+        out_ptr[offsets_ptr[cand_id]] = TransitionWorkItem{
+            0u, 0u, cand.jthres_abs, cand.jslot_prev, cand.kprob};
+    }
+};
+
+void pre_simulate_parents_cuda(const TransitionWorkItem* parent_items_d,
+                               uint32_t n_parents,
+                               const float* folds_current,
+                               const uint32_t* ntrials_current,
+                               float* scratch_folds,
+                               float* sim_folds,
+                               float* sim_scores,
+                               const float* profile,
+                               uint32_t nbins,
+                               uint32_t nbins_padded,
+                               const uint32_t* widths,
+                               uint32_t nwidths,
+                               float bias_snr,
+                               float var_in,
+                               float var_add,
+                               uint64_t seed,
+                               uint64_t& cumulative_rng_offset,
+                               uint32_t ntrials,
+                               uint32_t nprobs,
+                               uint32_t batch_size,
+                               cudaStream_t stream) {
+    if (n_parents == 0) {
+        return;
+    }
+    const uint32_t num_batches    = (n_parents + batch_size - 1) / batch_size;
+    const SizeType total_work_max = batch_size * 2 * ntrials;
+    for (uint32_t b = 0; b < num_batches; ++b) {
+        const uint32_t start = b * batch_size;
+        const uint32_t end   = std::min(start + batch_size, n_parents);
+        const uint32_t current_batch_size = end - start;
+        const SizeType batch_rng_offset =
+            cumulative_rng_offset + (b * total_work_max);
+        simulate_score_store_launcher_cuda(
+            parent_items_d + start, current_batch_size, folds_current,
+            ntrials_current, scratch_folds, sim_folds, sim_scores, profile,
+            nbins, nbins_padded, widths, nwidths, bias_snr, var_in, var_add,
+            seed, batch_rng_offset, ntrials, nprobs, stream);
+    }
+    cumulative_rng_offset += num_batches * total_work_max;
+}
+
 // Create a compound type for State
 HighFive::CompoundType create_compound_state() {
     return {{"success_h0", HighFive::create_datatype<float>()},
@@ -621,6 +945,7 @@ public:
          float wtsp,
          float beam_width,
          SizeType trials_start,
+         std::string_view mode,
          SizeType batch_size,
          int device_id)
         : m_branching_pattern(branching_pattern.begin(),
@@ -632,6 +957,7 @@ public:
           m_wtsp(wtsp),
           m_beam_width(beam_width),
           m_trials_start(trials_start),
+          m_mode(dynamic_threshold_mode_from_string(mode)),
           m_batch_size(batch_size),
           m_device_id(device_id) {
 
@@ -670,10 +996,23 @@ public:
 
         // Initialize memory management
         const auto slots_per_pool = compute_max_slots_needed();
-        m_folds_current_d.resize(slots_per_pool * m_ntrials * m_nbins_padded);
-        m_folds_next_d.resize(slots_per_pool * m_ntrials * m_nbins_padded);
-        m_ntrials_current_d.resize(slots_per_pool);
-        m_ntrials_next_d.resize(slots_per_pool);
+        const auto fold_cells     = slots_per_pool;
+        m_folds_current_d.resize(fold_cells * m_ntrials * m_nbins_padded);
+        m_folds_next_d.resize(fold_cells * m_ntrials * m_nbins_padded);
+        m_ntrials_current_d.resize(fold_cells);
+        m_ntrials_next_d.resize(fold_cells);
+        if (m_mode == DynamicThresholdMode::kImproved) {
+            m_sim_folds_d.resize(fold_cells * m_ntrials * m_nbins_padded);
+            m_sim_scores_d.resize(fold_cells * m_ntrials);
+            spdlog::info(
+                "Pre-allocated improved-mode sim cache: {} fold cells "
+                "({:.2f} GiB folds + {:.2f} MiB scores)",
+                fold_cells,
+                utils::to_gib(static_cast<SizeType>(fold_cells) * m_ntrials *
+                              m_nbins_padded * sizeof(float)),
+                static_cast<float>(fold_cells * m_ntrials * sizeof(float)) /
+                    (1024.0F * 1024.0F));
+        }
         spdlog::info("Pre-allocated 2 CUDA pools of {} slots each",
                      slots_per_pool);
 
@@ -700,9 +1039,13 @@ public:
 
         // Log memory usage
         const auto bytes_needed_persistent =
-            (2 * slots_per_pool * m_ntrials * m_nbins_padded * sizeof(float)) +
-            (2 * slots_per_pool * sizeof(uint32_t)) +
-            (2 * grid_size * sizeof(State)) + (grid_size * sizeof(int));
+            (2 * fold_cells * m_ntrials * m_nbins_padded * sizeof(float)) +
+            (2 * fold_cells * sizeof(uint32_t)) +
+            (2 * grid_size * sizeof(State)) + (grid_size * sizeof(int)) +
+            (m_mode == DynamicThresholdMode::kImproved
+                 ? (fold_cells * m_ntrials * m_nbins_padded * sizeof(float)) +
+                       (fold_cells * m_ntrials * sizeof(float))
+                 : 0);
         const auto bytes_needed_workspace =
             (n_batch_trials * m_nbins_padded * sizeof(float)) +
             (2 * n_batch_trials * sizeof(uint32_t));
@@ -725,7 +1068,8 @@ public:
     // Methods
     void run(SizeType thres_neigh = 10) {
         timing::ScopeTimer timer("DynamicThresholdSchemeCUDA::run");
-        spdlog::info("Running dynamic threshold scheme on CUDA");
+        spdlog::info("Running dynamic threshold scheme on CUDA ({} mode)",
+                     mode_to_string(m_mode));
         const float var_init           = 1.0F;
         const float var_add            = 1.0F;
         SizeType cumulative_rng_offset = 0;
@@ -734,11 +1078,14 @@ public:
         cuda_utils::check_cuda_call(cudaStreamCreate(&stream),
                                     "cudaStreamCreate failed");
 
-        // Initialize states
         float var_in = var_init;
-        init_states(var_init, var_add, cumulative_rng_offset, stream);
+        if (m_mode == DynamicThresholdMode::kImproved) {
+            init_states_improved(var_init, var_add, cumulative_rng_offset,
+                                 stream);
+        } else {
+            init_states(var_init, var_add, cumulative_rng_offset, stream);
+        }
         var_in += var_add;
-        // Swap fold grids and ntrials grids
         std::swap(m_folds_current_d, m_folds_next_d);
         std::swap(m_ntrials_current_d, m_ntrials_next_d);
 
@@ -750,10 +1097,14 @@ public:
         for (SizeType istage = 1; istage < m_nstages; ++istage) {
             thrust::fill(thrust::cuda::par.on(stream), m_ntrials_next_d.begin(),
                          m_ntrials_next_d.end(), 0u);
-            run_segment(istage, thres_neigh, var_in, var_add,
-                        cumulative_rng_offset, stream);
+            if (m_mode == DynamicThresholdMode::kImproved) {
+                run_segment_improved(istage, thres_neigh, var_in, var_add,
+                                     cumulative_rng_offset, stream);
+            } else {
+                run_segment(istage, thres_neigh, var_in, var_add,
+                            cumulative_rng_offset, stream);
+            }
             var_in += var_add;
-            // Swap fold grids and ntrials grids
             std::swap(m_folds_current_d, m_folds_next_d);
             std::swap(m_ntrials_current_d, m_ntrials_next_d);
             if (show_progress) {
@@ -784,6 +1135,7 @@ public:
         file.createAttribute("ducy_max", m_ducy_max);
         file.createAttribute("wtsp", m_wtsp);
         file.createAttribute("beam_width", m_beam_width);
+        file.createAttribute("mode", mode_to_string(m_mode));
 
         // Create dataset creation property list and enable compression
         HighFive::DataSetCreateProps props;
@@ -824,6 +1176,7 @@ private:
     float m_wtsp;
     float m_beam_width;
     SizeType m_trials_start;
+    DynamicThresholdMode m_mode;
     SizeType m_batch_size;
     int m_device_id;
 
@@ -859,6 +1212,10 @@ private:
     //        Each grid cell has 2 counts: [count_h0, count_h1]
     thrust::device_vector<uint32_t> m_ntrials_current_d;
     thrust::device_vector<uint32_t> m_ntrials_next_d;
+
+    // Stage-local simulated folds/scores (improved mode only)
+    thrust::device_vector<float> m_sim_folds_d;
+    thrust::device_vector<float> m_sim_scores_d;
 
     // Per-Batch Scratch Buffers (reallocated each batch)
     // Shape: [batch_size × 2 × ntrials × nbins]
@@ -960,7 +1317,7 @@ private:
         dim3 block_dim(kThreadsPerBlock);
         dim3 grid_dim(total_transitions);
         cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
-        transition_decision_kernel<<<grid_dim, block_dim, 0, stream>>>(
+        transition_decision_launcher_cuda(
             thrust::raw_pointer_cast(work_items_d.data()), total_transitions,
             thrust::raw_pointer_cast(m_scratch_folds_d.data()),
             thrust::raw_pointer_cast(m_write_indices_d.data()),
@@ -971,13 +1328,344 @@ private:
             thrust::raw_pointer_cast(m_states_locks_d.data()),
             thrust::raw_pointer_cast(m_thresholds_d.data()),
             thrust::raw_pointer_cast(m_probs_d.data()), m_ntrials,
-            m_nbins_padded, m_nprobs, nbranches, dummy_stage_offset_prev, 0);
-        cuda_utils::check_last_cuda_error("transition_decision_kernel");
+            m_nbins_padded, m_nprobs, nbranches, dummy_stage_offset_prev, 0,
+            false, stream);
         cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
                                     "cudaStreamSynchronize failed");
         // Clear dummy state
         m_states_d[dummy_stage_offset_prev] = State{};
         cumulative_rng_offset += total_work;
+    }
+
+    void init_states_improved(float var_init,
+                              float var_add,
+                              SizeType& cumulative_rng_offset,
+                              cudaStream_t stream) {
+        const auto nbranches = m_branching_pattern[0];
+
+        constexpr SizeType kThreadsPerBlock = 256;
+        const SizeType total_work_init      = 2 * m_ntrials;
+        const SizeType blocks_per_grid_init =
+            (total_work_init + kThreadsPerBlock - 1) / kThreadsPerBlock;
+        const dim3 block_dim_init(kThreadsPerBlock);
+        const dim3 grid_dim_init(blocks_per_grid_init);
+        cuda_utils::check_kernel_launch_params(grid_dim_init, block_dim_init);
+        simulate_folds_init_kernel<<<grid_dim_init, block_dim_init, 0,
+                                     stream>>>(
+            thrust::raw_pointer_cast(m_folds_current_d.data()),
+            thrust::raw_pointer_cast(m_profile_d.data()), m_nbins_padded,
+            m_bias_snr, var_init, m_seed, cumulative_rng_offset, m_ntrials);
+        cuda_utils::check_last_cuda_error("simulate_folds_init_kernel");
+        cumulative_rng_offset += total_work_init;
+
+        const auto dummy_stage_offset_prev  = 1 * m_nthresholds * m_nprobs;
+        m_states_d[dummy_stage_offset_prev] = State::initial();
+        m_ntrials_current_d[0]              = m_ntrials;
+        m_ntrials_current_d[1]              = m_ntrials;
+
+        TransitionWorkItem parent_item{0u, 0u, 0u, 0u, 0u};
+        thrust::device_vector<TransitionWorkItem> parent_items_d(1,
+                                                                 parent_item);
+        simulate_score_store_launcher_cuda(
+            thrust::raw_pointer_cast(parent_items_d.data()), 1,
+            thrust::raw_pointer_cast(m_folds_current_d.data()),
+            thrust::raw_pointer_cast(m_ntrials_current_d.data()),
+            thrust::raw_pointer_cast(m_scratch_folds_d.data()),
+            thrust::raw_pointer_cast(m_sim_folds_d.data()),
+            thrust::raw_pointer_cast(m_sim_scores_d.data()),
+            thrust::raw_pointer_cast(m_profile_d.data()), m_nbins,
+            m_nbins_padded,
+            thrust::raw_pointer_cast(m_box_score_widths_d.data()),
+            m_box_score_widths.size(), m_bias_snr, var_init, var_add, m_seed,
+            cumulative_rng_offset, m_ntrials, m_nprobs, stream);
+        cumulative_rng_offset += 2 * m_ntrials;
+
+        const auto thresholds_idx    = get_current_thresholds_idx(0);
+        const auto total_transitions = thresholds_idx.size();
+        thrust::device_vector<uint32_t> thresholds_idx_d = thresholds_idx;
+        thrust::device_vector<TransitionWorkItem> work_items_d(
+            total_transitions);
+        WriteValidInitialTransitionsFunctor functor_write{
+            .th_indices_ptr =
+                thrust::raw_pointer_cast(thresholds_idx_d.data())};
+        thrust::transform(thrust::cuda::par.on(stream),
+                          thrust::counting_iterator<uint32_t>(0),
+                          thrust::counting_iterator<uint32_t>(
+                              static_cast<uint32_t>(total_transitions)),
+                          work_items_d.begin(), functor_write);
+
+        score_threshold_launcher_cuda(
+            thrust::raw_pointer_cast(work_items_d.data()), total_transitions,
+            thrust::raw_pointer_cast(m_sim_scores_d.data()),
+            thrust::raw_pointer_cast(m_thresholds_d.data()),
+            thrust::raw_pointer_cast(m_survive_flags_d.data()), m_ntrials,
+            m_nprobs, stream);
+
+        const SizeType total_work = total_transitions * 2 * m_ntrials;
+        cuda_utils::check_cuda_call(
+            cub::DeviceScan::ExclusiveSum(
+                m_cub_temp_storage, m_cub_temp_bytes,
+                thrust::raw_pointer_cast(m_survive_flags_d.data()),
+                thrust::raw_pointer_cast(m_write_indices_d.data()), total_work,
+                stream),
+            "cub::DeviceScan::ExclusiveSum failed");
+
+        transition_decision_launcher_cuda(
+            thrust::raw_pointer_cast(work_items_d.data()), total_transitions,
+            thrust::raw_pointer_cast(m_sim_folds_d.data()),
+            thrust::raw_pointer_cast(m_write_indices_d.data()),
+            thrust::raw_pointer_cast(m_survive_flags_d.data()),
+            thrust::raw_pointer_cast(m_folds_next_d.data()),
+            thrust::raw_pointer_cast(m_ntrials_next_d.data()),
+            thrust::raw_pointer_cast(m_states_d.data()),
+            thrust::raw_pointer_cast(m_states_locks_d.data()),
+            thrust::raw_pointer_cast(m_thresholds_d.data()),
+            thrust::raw_pointer_cast(m_probs_d.data()), m_ntrials,
+            m_nbins_padded, m_nprobs, nbranches, dummy_stage_offset_prev, 0,
+            true, stream);
+        cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
+                                    "cudaStreamSynchronize failed");
+        m_states_d[dummy_stage_offset_prev] = State{};
+    }
+
+    std::vector<ParentCandidate>
+    build_parent_candidates(const std::vector<SizeType>& beam_idx_prev) const {
+        std::vector<ParentCandidate> candidates;
+        candidates.reserve(beam_idx_prev.size() * m_nprobs);
+        for (SizeType jslot = 0; jslot < beam_idx_prev.size(); ++jslot) {
+            const auto jthres = static_cast<uint32_t>(beam_idx_prev[jslot]);
+            for (SizeType kprob = 0; kprob < m_nprobs; ++kprob) {
+                candidates.push_back(
+                    ParentCandidate{static_cast<uint32_t>(jslot), jthres,
+                                    static_cast<uint32_t>(kprob)});
+            }
+        }
+        return candidates;
+    }
+
+    void pre_simulate_stage_parents(const std::vector<SizeType>& beam_idx_prev,
+                                    uint32_t stage_offset_prev,
+                                    float var_in,
+                                    float var_add,
+                                    SizeType& cumulative_rng_offset,
+                                    cudaStream_t stream) {
+        const auto candidates   = build_parent_candidates(beam_idx_prev);
+        const auto n_candidates = candidates.size();
+        thrust::device_vector<ParentCandidate> candidates_d = candidates;
+        thrust::device_vector<uint32_t> parent_counts_d(n_candidates);
+
+        IsValidParentFunctor functor_count{
+            .states_ptr = thrust::raw_pointer_cast(m_states_d.data()),
+            .ntrials_current =
+                thrust::raw_pointer_cast(m_ntrials_current_d.data()),
+            .stage_offset_prev = stage_offset_prev,
+            .nprobs            = static_cast<uint32_t>(m_nprobs)};
+        thrust::transform(thrust::cuda::par.on(stream), candidates_d.begin(),
+                          candidates_d.end(), parent_counts_d.begin(),
+                          functor_count);
+
+        thrust::device_vector<uint32_t> parent_offsets_d(n_candidates);
+        thrust::exclusive_scan(thrust::cuda::par.on(stream),
+                               parent_counts_d.begin(), parent_counts_d.end(),
+                               parent_offsets_d.begin(), uint32_t{0});
+        const SizeType n_parents = thrust::reduce(
+            thrust::cuda::par.on(stream), parent_counts_d.begin(),
+            parent_counts_d.end(), SizeType{0});
+        if (n_parents == 0) {
+            return;
+        }
+
+        thrust::device_vector<TransitionWorkItem> parent_items_d(n_parents);
+        WriteParentSimFunctor functor_write{
+            .candidates_ptr = thrust::raw_pointer_cast(candidates_d.data()),
+            .counts_ptr     = thrust::raw_pointer_cast(parent_counts_d.data()),
+            .offsets_ptr    = thrust::raw_pointer_cast(parent_offsets_d.data()),
+            .out_ptr        = thrust::raw_pointer_cast(parent_items_d.data())};
+        thrust::for_each(thrust::cuda::par.on(stream),
+                         thrust::counting_iterator<SizeType>(0),
+                         thrust::counting_iterator<SizeType>(n_candidates),
+                         functor_write);
+
+        pre_simulate_parents_cuda(
+            thrust::raw_pointer_cast(parent_items_d.data()),
+            static_cast<uint32_t>(n_parents),
+            thrust::raw_pointer_cast(m_folds_current_d.data()),
+            thrust::raw_pointer_cast(m_ntrials_current_d.data()),
+            thrust::raw_pointer_cast(m_scratch_folds_d.data()),
+            thrust::raw_pointer_cast(m_sim_folds_d.data()),
+            thrust::raw_pointer_cast(m_sim_scores_d.data()),
+            thrust::raw_pointer_cast(m_profile_d.data()), m_nbins,
+            m_nbins_padded,
+            thrust::raw_pointer_cast(m_box_score_widths_d.data()),
+            m_box_score_widths.size(), m_bias_snr, var_in, var_add, m_seed,
+            cumulative_rng_offset, m_ntrials, m_nprobs, m_batch_size, stream);
+    }
+
+    void
+    run_transition_batches(cuda::std::span<const TransitionWorkItem> work_items,
+                           SizeType total_transitions,
+                           float var_in,
+                           float var_add,
+                           SizeType& cumulative_rng_offset,
+                           uint32_t stage_offset_prev,
+                           uint32_t stage_offset_cur,
+                           float nbranches,
+                           bool source_is_grid,
+                           cudaStream_t stream) {
+        const SizeType num_batches =
+            (total_transitions + m_batch_size - 1) / m_batch_size;
+        const SizeType total_work_max = m_batch_size * 2 * m_ntrials;
+
+        for (SizeType b = 0; b < num_batches; ++b) {
+            const SizeType start = b * m_batch_size;
+            const SizeType end =
+                std::min(start + m_batch_size, total_transitions);
+            const SizeType current_batch_size = end - start;
+            const auto work_items_span =
+                work_items.subspan(start, current_batch_size);
+            const SizeType total_work = current_batch_size * 2 * m_ntrials;
+            const SizeType batch_rng_offset =
+                cumulative_rng_offset + (b * total_work_max);
+
+            if (source_is_grid) {
+                score_threshold_launcher_cuda(
+                    work_items_span.data(),
+                    static_cast<uint32_t>(current_batch_size),
+                    thrust::raw_pointer_cast(m_sim_scores_d.data()),
+                    thrust::raw_pointer_cast(m_thresholds_d.data()),
+                    thrust::raw_pointer_cast(m_survive_flags_d.data()),
+                    m_ntrials, m_nprobs, stream);
+            } else {
+                simulate_score_kernel_launcher_cuda(
+                    work_items_span.data(),
+                    static_cast<uint32_t>(current_batch_size),
+                    thrust::raw_pointer_cast(m_folds_current_d.data()),
+                    thrust::raw_pointer_cast(m_ntrials_current_d.data()),
+                    thrust::raw_pointer_cast(m_scratch_folds_d.data()),
+                    thrust::raw_pointer_cast(m_survive_flags_d.data()),
+                    thrust::raw_pointer_cast(m_profile_d.data()), m_nbins,
+                    m_nbins_padded,
+                    thrust::raw_pointer_cast(m_box_score_widths_d.data()),
+                    m_box_score_widths.size(),
+                    thrust::raw_pointer_cast(m_thresholds_d.data()), m_bias_snr,
+                    var_in, var_add, m_seed, batch_rng_offset, m_ntrials,
+                    m_nprobs, stream);
+            }
+
+            cuda_utils::check_cuda_call(
+                cub::DeviceScan::ExclusiveSum(
+                    m_cub_temp_storage, m_cub_temp_bytes,
+                    thrust::raw_pointer_cast(m_survive_flags_d.data()),
+                    thrust::raw_pointer_cast(m_write_indices_d.data()),
+                    total_work, stream),
+                "cub::DeviceScan::ExclusiveSum failed");
+
+            transition_decision_launcher_cuda(
+                work_items_span.data(),
+                static_cast<uint32_t>(current_batch_size),
+                source_is_grid
+                    ? thrust::raw_pointer_cast(m_sim_folds_d.data())
+                    : thrust::raw_pointer_cast(m_scratch_folds_d.data()),
+                thrust::raw_pointer_cast(m_write_indices_d.data()),
+                thrust::raw_pointer_cast(m_survive_flags_d.data()),
+                thrust::raw_pointer_cast(m_folds_next_d.data()),
+                thrust::raw_pointer_cast(m_ntrials_next_d.data()),
+                thrust::raw_pointer_cast(m_states_d.data()),
+                thrust::raw_pointer_cast(m_states_locks_d.data()),
+                thrust::raw_pointer_cast(m_thresholds_d.data()),
+                thrust::raw_pointer_cast(m_probs_d.data()), m_ntrials,
+                m_nbins_padded, m_nprobs, nbranches, stage_offset_prev,
+                stage_offset_cur, source_is_grid, stream);
+        }
+        cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
+                                    "cudaStreamSynchronize failed");
+        if (!source_is_grid) {
+            cumulative_rng_offset += num_batches * total_work_max;
+        }
+    }
+
+    struct StageTransitionPlan {
+        thrust::device_vector<TransitionWorkItem> work_items_d;
+        SizeType total_transitions{0};
+    };
+
+    StageTransitionPlan prepare_stage_transitions(SizeType istage,
+                                                  SizeType thres_neigh,
+                                                  cudaStream_t stream) const {
+        const auto beam_idx_cur  = get_current_thresholds_idx(istage);
+        const auto beam_idx_prev = get_current_thresholds_idx(istage - 1);
+        const auto stage_offset_prev =
+            static_cast<uint32_t>((istage - 1) * m_nthresholds * m_nprobs);
+
+        std::vector<int32_t> prev_slot_of_thresh(m_nthresholds, -1);
+        for (uint32_t s = 0; s < beam_idx_prev.size(); ++s) {
+            prev_slot_of_thresh[beam_idx_prev[s]] = static_cast<int32_t>(s);
+        }
+
+        std::vector<ThresholdPairItem> threshold_pairs;
+        threshold_pairs.reserve(beam_idx_cur.size() * thres_neigh * m_nprobs);
+        for (SizeType islot = 0; islot < beam_idx_cur.size(); ++islot) {
+            const auto ithres = beam_idx_cur[islot];
+            const auto neighbour_beam_indices =
+                utils::find_neighbouring_indices(beam_idx_prev, ithres,
+                                                 thres_neigh);
+            for (SizeType jthres : neighbour_beam_indices) {
+                const int32_t jslot = prev_slot_of_thresh[jthres];
+                if (jslot < 0) {
+                    continue;
+                }
+                threshold_pairs.emplace_back(static_cast<uint32_t>(ithres),
+                                             static_cast<uint32_t>(islot),
+                                             static_cast<uint32_t>(jthres),
+                                             static_cast<uint32_t>(jslot));
+            }
+        }
+        const SizeType n_pairs = threshold_pairs.size();
+
+        thrust::device_vector<ThresholdPairItem> threshold_pairs_d =
+            threshold_pairs;
+        thrust::device_vector<SizeType> transition_counts_d(n_pairs);
+
+        CountValidTransitionsFunctor functor_count{
+            .states_ptr = thrust::raw_pointer_cast(m_states_d.data()),
+            .ntrials_current =
+                thrust::raw_pointer_cast(m_ntrials_current_d.data()),
+            .stage_offset_prev = stage_offset_prev,
+            .nprobs            = static_cast<uint32_t>(m_nprobs)};
+        thrust::transform(thrust::cuda::par.on(stream),
+                          threshold_pairs_d.begin(), threshold_pairs_d.end(),
+                          transition_counts_d.begin(), functor_count);
+
+        thrust::device_vector<uint32_t> offsets_d(n_pairs);
+        thrust::exclusive_scan(
+            thrust::cuda::par.on(stream), transition_counts_d.begin(),
+            transition_counts_d.end(), offsets_d.begin(), uint32_t{0});
+        const SizeType total_transitions = thrust::reduce(
+            thrust::cuda::par.on(stream), transition_counts_d.begin(),
+            transition_counts_d.end(), SizeType{0});
+
+        StageTransitionPlan plan;
+        plan.total_transitions = total_transitions;
+        if (total_transitions == 0) {
+            return plan;
+        }
+
+        plan.work_items_d.resize(total_transitions);
+        WriteValidTransitionsFunctor functor_write{
+            .pairs_ptr   = thrust::raw_pointer_cast(threshold_pairs_d.data()),
+            .offsets_ptr = thrust::raw_pointer_cast(offsets_d.data()),
+            .out_ptr     = thrust::raw_pointer_cast(plan.work_items_d.data()),
+            .states_ptr  = thrust::raw_pointer_cast(m_states_d.data()),
+            .ntrials_current =
+                thrust::raw_pointer_cast(m_ntrials_current_d.data()),
+            .stage_offset_prev = stage_offset_prev,
+            .nprobs            = static_cast<uint32_t>(m_nprobs)};
+
+        thrust::for_each(thrust::cuda::par.on(stream),
+                         thrust::counting_iterator<SizeType>(0),
+                         thrust::counting_iterator<SizeType>(n_pairs),
+                         functor_write);
+        return plan;
     }
 
     std::vector<SizeType> get_current_thresholds_idx(SizeType istage) const {
@@ -1003,149 +1691,49 @@ private:
                      float var_add,
                      SizeType& cumulative_rng_offset,
                      cudaStream_t stream) {
-        const auto beam_idx_cur      = get_current_thresholds_idx(istage);
+        const auto stage_offset_prev = (istage - 1) * m_nthresholds * m_nprobs;
+        const auto stage_offset_cur  = istage * m_nthresholds * m_nprobs;
+        const auto nbranches         = m_branching_pattern[istage];
+
+        const auto plan =
+            prepare_stage_transitions(istage, thres_neigh, stream);
+        if (plan.total_transitions == 0) {
+            return;
+        }
+
+        run_transition_batches(
+            cuda_utils::as_span(plan.work_items_d), plan.total_transitions,
+            var_in, var_add, cumulative_rng_offset,
+            static_cast<uint32_t>(stage_offset_prev),
+            static_cast<uint32_t>(stage_offset_cur), nbranches, false, stream);
+    }
+
+    void run_segment_improved(SizeType istage,
+                              SizeType thres_neigh,
+                              float var_in,
+                              float var_add,
+                              SizeType& cumulative_rng_offset,
+                              cudaStream_t stream) {
         const auto beam_idx_prev     = get_current_thresholds_idx(istage - 1);
         const auto stage_offset_prev = (istage - 1) * m_nthresholds * m_nprobs;
         const auto stage_offset_cur  = istage * m_nthresholds * m_nprobs;
         const auto nbranches         = m_branching_pattern[istage];
-        // Each stage gets a unique offset based on stage number
-        const SizeType total_work_max = m_batch_size * 2 * m_ntrials;
 
-        std::vector<int32_t> prev_slot_of_thresh(m_nthresholds, -1);
-        for (uint32_t s = 0; s < beam_idx_prev.size(); ++s) {
-            prev_slot_of_thresh[beam_idx_prev[s]] = static_cast<int32_t>(s);
-        }
+        pre_simulate_stage_parents(
+            beam_idx_prev, static_cast<uint32_t>(stage_offset_prev), var_in,
+            var_add, cumulative_rng_offset, stream);
 
-        // Step 1: Generate all possible (ithres, jthres) pairs
-        std::vector<ThresholdPairItem> threshold_pairs;
-        threshold_pairs.reserve(beam_idx_cur.size() * thres_neigh * m_nprobs);
-        for (SizeType islot = 0; islot < beam_idx_cur.size(); ++islot) {
-            const auto ithres = beam_idx_cur[islot];
-            const auto neighbour_beam_indices =
-                utils::find_neighbouring_indices(beam_idx_prev, ithres,
-                                                 thres_neigh);
-            for (SizeType jthres : neighbour_beam_indices) {
-                const int32_t jslot = prev_slot_of_thresh[jthres];
-                if (jslot < 0) {
-                    continue;
-                }
-                threshold_pairs.emplace_back(static_cast<uint32_t>(ithres),
-                                             static_cast<uint32_t>(islot),
-                                             static_cast<uint32_t>(jthres),
-                                             static_cast<uint32_t>(jslot));
-            }
-        }
-        const SizeType n_pairs = threshold_pairs.size();
-
-        // Step 2: Count valid transitions (fast pass)
-        thrust::device_vector<ThresholdPairItem> threshold_pairs_d =
-            threshold_pairs;
-        thrust::device_vector<SizeType> transition_counts_d(n_pairs);
-
-        // Count transitions per pair
-        CountValidTransitionsFunctor functor_count{
-            .states_ptr = thrust::raw_pointer_cast(m_states_d.data()),
-            .ntrials_current =
-                thrust::raw_pointer_cast(m_ntrials_current_d.data()),
-            .stage_offset_prev = static_cast<uint32_t>(stage_offset_prev),
-            .nprobs            = static_cast<uint32_t>(m_nprobs)};
-        thrust::transform(thrust::cuda::par.on(stream),
-                          threshold_pairs_d.begin(), threshold_pairs_d.end(),
-                          transition_counts_d.begin(), functor_count);
-
-        // Compute prefix sum for offsets
-        thrust::device_vector<uint32_t> offsets_d(n_pairs);
-        thrust::exclusive_scan(
-            thrust::cuda::par.on(stream), transition_counts_d.begin(),
-            transition_counts_d.end(), offsets_d.begin(), uint32_t{0});
-        const SizeType total_transitions = thrust::reduce(
-            thrust::cuda::par.on(stream), transition_counts_d.begin(),
-            transition_counts_d.end(), SizeType{0});
-
-        if (total_transitions == 0) {
+        const auto plan =
+            prepare_stage_transitions(istage, thres_neigh, stream);
+        if (plan.total_transitions == 0) {
             return;
         }
 
-        thrust::device_vector<TransitionWorkItem> work_items_d(
-            total_transitions);
-        WriteValidTransitionsFunctor functor_write{
-            .pairs_ptr   = thrust::raw_pointer_cast(threshold_pairs_d.data()),
-            .offsets_ptr = thrust::raw_pointer_cast(offsets_d.data()),
-            .out_ptr     = thrust::raw_pointer_cast(work_items_d.data()),
-            .states_ptr  = thrust::raw_pointer_cast(m_states_d.data()),
-            .ntrials_current =
-                thrust::raw_pointer_cast(m_ntrials_current_d.data()),
-            .stage_offset_prev = static_cast<uint32_t>(stage_offset_prev),
-            .nprobs            = static_cast<uint32_t>(m_nprobs)};
-
-        thrust::for_each(thrust::cuda::par.on(stream),
-                         thrust::counting_iterator<SizeType>(0),
-                         thrust::counting_iterator<SizeType>(n_pairs),
-                         functor_write);
-
-        // Step 3: Process in batches
-        const SizeType num_batches =
-            (total_transitions + m_batch_size - 1) / m_batch_size;
-
-        for (SizeType b = 0; b < num_batches; ++b) {
-            const SizeType start = b * m_batch_size;
-            const SizeType end =
-                std::min(start + m_batch_size, total_transitions);
-            const SizeType current_batch_size = end - start;
-            const auto work_items_span =
-                cuda_utils::as_span(work_items_d)
-                    .subspan(start, current_batch_size);
-            const SizeType total_work = current_batch_size * 2 * m_ntrials;
-            const SizeType batch_rng_offset =
-                cumulative_rng_offset + (b * total_work_max);
-
-            // Process this batch
-            simulate_score_kernel_launcher_cuda(
-                work_items_span.data(), current_batch_size,
-                thrust::raw_pointer_cast(m_folds_current_d.data()),
-                thrust::raw_pointer_cast(m_ntrials_current_d.data()),
-                thrust::raw_pointer_cast(m_scratch_folds_d.data()),
-                thrust::raw_pointer_cast(m_survive_flags_d.data()),
-                thrust::raw_pointer_cast(m_profile_d.data()), m_nbins,
-                m_nbins_padded,
-                thrust::raw_pointer_cast(m_box_score_widths_d.data()),
-                m_box_score_widths.size(),
-                thrust::raw_pointer_cast(m_thresholds_d.data()), m_bias_snr,
-                var_in, var_add, m_seed, batch_rng_offset, m_ntrials, m_nprobs,
-                stream);
-
-            // CUB scan
-            cuda_utils::check_cuda_call(
-                cub::DeviceScan::ExclusiveSum(
-                    m_cub_temp_storage, m_cub_temp_bytes,
-                    thrust::raw_pointer_cast(m_survive_flags_d.data()),
-                    thrust::raw_pointer_cast(m_write_indices_d.data()),
-                    total_work, stream),
-                "cub::DeviceScan::ExclusiveSum failed");
-
-            // Transition decision (1 block per transition)
-            constexpr SizeType kThreadsPerBlock = 256;
-            dim3 block_dim(kThreadsPerBlock);
-            dim3 grid_dim(current_batch_size);
-            cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
-            transition_decision_kernel<<<grid_dim, block_dim, 0, stream>>>(
-                work_items_span.data(), current_batch_size,
-                thrust::raw_pointer_cast(m_scratch_folds_d.data()),
-                thrust::raw_pointer_cast(m_write_indices_d.data()),
-                thrust::raw_pointer_cast(m_survive_flags_d.data()),
-                thrust::raw_pointer_cast(m_folds_next_d.data()),
-                thrust::raw_pointer_cast(m_ntrials_next_d.data()),
-                thrust::raw_pointer_cast(m_states_d.data()),
-                thrust::raw_pointer_cast(m_states_locks_d.data()),
-                thrust::raw_pointer_cast(m_thresholds_d.data()),
-                thrust::raw_pointer_cast(m_probs_d.data()), m_ntrials,
-                m_nbins_padded, m_nprobs, nbranches, stage_offset_prev,
-                stage_offset_cur);
-            cuda_utils::check_last_cuda_error("transition_decision_kernel");
-        }
-        cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
-                                    "cudaStreamSynchronize failed");
-        cumulative_rng_offset += num_batches * total_work_max;
+        run_transition_batches(
+            cuda_utils::as_span(plan.work_items_d), plan.total_transitions,
+            var_in, var_add, cumulative_rng_offset,
+            static_cast<uint32_t>(stage_offset_prev),
+            static_cast<uint32_t>(stage_offset_cur), nbranches, true, stream);
     }
 };
 
@@ -1162,6 +1750,7 @@ DynamicThresholdSchemeCUDA::DynamicThresholdSchemeCUDA(
     float wtsp,
     float beam_width,
     SizeType trials_start,
+    std::string_view mode,
     SizeType batch_size,
     int device_id)
     : m_impl(std::make_unique<Impl>(branching_pattern,
@@ -1176,6 +1765,7 @@ DynamicThresholdSchemeCUDA::DynamicThresholdSchemeCUDA(
                                     wtsp,
                                     beam_width,
                                     trials_start,
+                                    mode,
                                     batch_size,
                                     device_id)) {}
 DynamicThresholdSchemeCUDA::~DynamicThresholdSchemeCUDA() = default;
