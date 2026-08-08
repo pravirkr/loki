@@ -93,6 +93,20 @@ target_compile_options(
 # Find CUDA and set up the project
 if(ENABLE_CUDA STREQUAL "ON" OR ENABLE_CUDA STREQUAL "AUTO")
   include(CheckLanguage)
+  # nvcc usually lives outside the default PATH (/usr/local/cuda/bin), and build
+  # front-ends (pip, uv, pixi) do not always forward the interactive shell's PATH,
+  # so check_language(CUDA) can report NOTFOUND on a machine that has CUDA. Seed
+  # CUDACXX from the conventional locations first; check_language still validates.
+  if(NOT DEFINED CMAKE_CUDA_COMPILER AND NOT DEFINED ENV{CUDACXX})
+    find_program(
+      LOKI_NVCC_EXECUTABLE nvcc
+      HINTS ENV CUDA_PATH ENV CUDA_HOME ENV CUDA_ROOT /usr/local/cuda /opt/cuda
+      PATH_SUFFIXES bin
+    )
+    if(LOKI_NVCC_EXECUTABLE)
+      set(ENV{CUDACXX} "${LOKI_NVCC_EXECUTABLE}")
+    endif()
+  endif()
   check_language(CUDA)
   if(CMAKE_CUDA_COMPILER)
     enable_language(CUDA)
