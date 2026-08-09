@@ -156,3 +156,20 @@ source = ["src/"]
 
 [tool.gcovr]
 filter = ["lib/*"]
+
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[tool.pixi.pypi-dependencies]
+loki = { path = ".", editable = true }
+# pyloki imports scipy but does not declare it as a dependency.
+scipy = ">=1.14"
+
+[tool.pixi.environments]
+default = { solve-group = "default" }
+dev = { features = ["dev"], solve-group = "default" }
+docs = { features = ["docs"], solve-group = "default" }
+tests = { features = ["tests"], solve-group = "default" }
+
+[tool.pixi.tasks]

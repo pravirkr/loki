@@ -23,12 +23,23 @@ find_package(FFTW REQUIRED COMPONENTS FLOAT_LIB FLOAT_OPENMP_LIB)
 # CPM Dependencies
 message(STATUS "Searching for CPM dependencies (will download if not found locally)...")
 
-# spdlog (Header-only logging library)
+# fmt (Formatting library). Sources include <fmt/...> directly, so it must be an
+# explicit dependency rather than relying on spdlog's bundled copy. Keep the version
+# in sync with the fmt bundled by spdlog below.
+CPMAddPackage(
+  NAME fmt
+  VERSION 12.1.0
+  URL https://github.com/fmtlib/fmt/archive/refs/tags/12.1.0.tar.gz
+  OPTIONS "FMT_INSTALL ON"
+)
+
+# spdlog (Header-only logging library). Uses the fmt above instead of its bundled copy,
+# so that a single fmt is visible in translation units including both.
 CPMAddPackage(
   NAME spdlog
   VERSION 1.17
   URL https://github.com/gabime/spdlog/archive/refs/tags/v1.17.0.tar.gz
-  OPTIONS "SPDLOG_INSTALL ON"
+  OPTIONS "SPDLOG_INSTALL ON" "SPDLOG_FMT_EXTERNAL_HO ON"
 )
 
 # CLI11
@@ -73,6 +84,13 @@ CPMAddPackage(
 if(BoostMath_ADDED)
   add_library(Boost::math INTERFACE IMPORTED GLOBAL)
   target_include_directories(Boost::math INTERFACE ${BoostMath_SOURCE_DIR}/include)
+  # Only boostorg/math is downloaded, never the rest of Boost. Boost.Math's
+  # is_standalone.hpp decides standalone mode with __has_include(<boost/config.hpp>),
+  # so on a host that happens to have a *system* Boost it defers to that instead.
+  # With a Boost older than 1.72 (e.g. RHEL 8 ships 1.66) BOOST_IF_CONSTEXPR is
+  # undefined there, BOOST_MATH_IF_CONSTEXPR expands to nothing, and every header
+  # using it fails with "expected ';' before '{' token". Force standalone mode.
+  target_compile_definitions(Boost::math INTERFACE BOOST_MATH_STANDALONE)
 endif()
 
 # Thread pool
@@ -172,6 +190,7 @@ target_link_libraries(
          HDF5::HDF5
          FFTW::Float
          FFTW::FloatOpenMP
+         fmt::fmt-header-only
          spdlog::spdlog_header_only
          xsimd
          Boost::math
