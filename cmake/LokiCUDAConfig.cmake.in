@@ -1,0 +1,4 @@
+# Substituted at configure time: ON when loki was built with CUDA, otherwise OFF.
+if(@LOKI_BUILT_WITH_CUDA@)
+  find_dependency(CUDAToolkit)
+endif()

@@ -8,6 +8,8 @@
 
 #include <fmt/color.h>
 #include <fmt/format.h>
+#include <spdlog/details/os.h>
+#include <spdlog/spdlog.h>
 
 namespace loki::progress {
 
@@ -35,7 +37,7 @@ std::string format_duration(std::chrono::duration<Rep, Period> dur) {
     auto secs      = std::chrono::floor<std::chrono::seconds>(ns);
     const auto hms = std::chrono::hh_mm_ss{secs};
     auto days      = std::chrono::duration_cast<
-             std::chrono::duration<int, std::ratio<86400>>>(secs);
+        std::chrono::duration<int, std::ratio<86400>>>(secs);
 
     std::string result;
 
@@ -114,7 +116,7 @@ std::string BarColumn::render(const ProgressBar& bar) {
 
     double progress_fraction = static_cast<double>(bar.get_progress()) /
                                static_cast<double>(bar.get_max_progress());
-    progress_fraction = std::clamp(progress_fraction, 0.0, 1.0);
+    progress_fraction        = std::clamp(progress_fraction, 0.0, 1.0);
 
     const int completed_width = static_cast<int>(m_width * progress_fraction);
     const auto part1 = details::repeat_unicode(kBarChar, completed_width);

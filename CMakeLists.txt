@@ -24,27 +24,51 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
         "Clang >= 18.0 required for complete C++20 support. Found: ${CMAKE_CXX_COMPILER_VERSION}"
     )
   endif()
+else()
+  message(
+    WARNING
+      "Compiler '${CMAKE_CXX_COMPILER_ID}' is not officially tested. Proceed at your own risk."
+  )
 endif()
 
-# Configuration options
-option(BUILD_DOCS "Build documentation" OFF)
-option(BUILD_PYTHON "Build Python bindings" ON)
-option(BUILD_TESTING "Build tests" OFF)
-option(BUILD_BENCHMARKS "Build benchmarks" OFF)
-option(ENABLE_COVERAGE "Enable coverage reporting" OFF)
-option(ENABLE_IPO "Enable Interprocedural Optimization (Link-Time Optimization)" OFF)
+# loki configuration options
+option(LOKI_BUILD_DOCS "Build documentation" OFF)
+option(LOKI_BUILD_PYTHON "Build Python bindings" ON)
+option(LOKI_BUILD_TESTING "Build C++ tests" OFF)
+option(LOKI_BUILD_BENCHMARKS "Build benchmarks" OFF)
+option(LOKI_ENABLE_COVERAGE "Enable coverage reporting" OFF)
+option(LOKI_ENABLE_IPO "Enable interprocedural optimization (LTO) on Release builds" OFF)
+option(LOKI_ENABLE_NATIVE_ARCH "Use -march=native in Release builds" ON)
+option(LOKI_USE_SYSTEM_DEPS "Prefer compatible system packages over pinned bundled dependencies"
+       OFF
+)
+# BUILD_SHARED_LIBS is a standard CMake option (ON = shared loki, OFF = static loki).
+option(BUILD_SHARED_LIBS "Build shared libraries" ON)
 
-# CUDA (tristate: AUTO / ON / OFF)
-set(ENABLE_CUDA "AUTO" CACHE STRING "Enable CUDA support: AUTO, ON, OFF")
-set_property(CACHE ENABLE_CUDA PROPERTY STRINGS "AUTO" "ON" "OFF")
+# CUDA tristate: AUTO / ON / OFF
+set(LOKI_CUDA
+    "AUTO"
+    CACHE STRING
+          "CUDA build mode: AUTO (use GPU if toolchain found), ON (require GPU), OFF (CPU only)"
+)
+set_property(CACHE LOKI_CUDA PROPERTY STRINGS "AUTO" "ON" "OFF")
+if(NOT LOKI_CUDA MATCHES "^(AUTO|ON|OFF)$")
+  message(FATAL_ERROR "LOKI_CUDA must be AUTO, ON, or OFF. Got: '${LOKI_CUDA}'.")
+endif()
 
-# Set C++ standard
+# GPU architecture(s) for nvcc ("native" = detect from local GPU at build time).
+set(LOKI_CUDA_ARCHITECTURES
+    "native"
+    CACHE STRING "CUDA architectures passed to CMAKE_CUDA_ARCHITECTURES (e.g. native, 80, 86;90)"
+)
+
+# C++20 for the whole project.
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-set(CMAKE_POSITION_INDEPENDENT_CODE ON) # Required for shared libraries
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# Set default build type
+# Default to Release when no build type is specified (packaging-friendly).
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   message(STATUS "Setting build type to 'Release' as none was specified.")
   set(CMAKE_BUILD_TYPE
@@ -56,51 +80,51 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   )
 endif()
 
-# Interprocedural Optimization (IPO/LTO)
-if(CMAKE_BUILD_TYPE MATCHES "Release" AND ENABLE_IPO)
+# Optional LTO for Release builds.
+if(CMAKE_BUILD_TYPE MATCHES "Release" AND LOKI_ENABLE_IPO)
   include(CheckIPOSupported)
   check_ipo_supported(RESULT ipo_supported)
   if(ipo_supported)
     set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
     message(STATUS "IPO/LTO enabled for Release build.")
   else()
-    message(WARNING "IPO/LTO requested but not supported.")
+    message(FATAL_ERROR "LOKI_ENABLE_IPO=ON but IPO/LTO is not supported by this toolchain.")
   endif()
 else()
   set(CMAKE_INTERPROCEDURAL_OPTIMIZATION FALSE)
 endif()
 
-# Project structure and paths
 list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
-include(GNUInstallDirs) # Defines standard installation paths
+include(GNUInstallDirs)
 
-# C++ Compile Options
+# Internal compile-option interface (build tree only — not exported on install).
 # Interface target: link any library/executable to this to inherit these flags.
 # Usage: target_link_libraries(my_target PRIVATE ${LOKI_COMPILE_OPTIONS})
-set(LOKI_COMPILE_OPTIONS ${PROJECT_NAME}_COMPILE_OPTIONS)
+set(LOKI_COMPILE_OPTIONS ${PROJECT_NAME}_compile_options)
 add_library(${LOKI_COMPILE_OPTIONS} INTERFACE)
 target_compile_options(${LOKI_COMPILE_OPTIONS} INTERFACE -Wall -Wextra -Wpedantic)
-# Note: These flags are tuned for Linux/macOS GCC/Clang.
-# Windows/MSVC is not a supported build target.
 target_compile_options(
-  ${LOKI_COMPILE_OPTIONS} INTERFACE
-  $<$<CONFIG:Debug>:-O0;-g>
-  $<$<CONFIG:Release>:-O3;-DNDEBUG;-march=native;-ffast-math>
-  $<$<CONFIG:RelWithDebInfo>:-O2;-DNDEBUG;-g>
-  $<$<CONFIG:MinSizeRel>:-Os;-DNDEBUG>
+  ${LOKI_COMPILE_OPTIONS}
+  INTERFACE $<$<CONFIG:Debug>:-O0;-g> $<$<CONFIG:Release>:-O3;-DNDEBUG;-ffast-math>
+            $<$<AND:$<CONFIG:Release>,$<BOOL:${LOKI_ENABLE_NATIVE_ARCH}>>:-march=native>
+            $<$<CONFIG:RelWithDebInfo>:-O2;-DNDEBUG;-g> $<$<CONFIG:MinSizeRel>:-Os;-DNDEBUG>
 )
 
-# Find CUDA and set up the project
-if(ENABLE_CUDA STREQUAL "ON" OR ENABLE_CUDA STREQUAL "AUTO")
+# CUDA toolchain detection (LOKI_CUDA user option; LOKI_ENABLE_CUDA is the C++ macro).
+if(LOKI_CUDA STREQUAL "ON" OR LOKI_CUDA STREQUAL "AUTO")
   include(CheckLanguage)
-  # nvcc usually lives outside the default PATH (/usr/local/cuda/bin), and build
-  # front-ends (pip, uv, pixi) do not always forward the interactive shell's PATH,
-  # so check_language(CUDA) can report NOTFOUND on a machine that has CUDA. Seed
-  # CUDACXX from the conventional locations first; check_language still validates.
+  # nvcc usually lives outside the default PATH; seed CUDACXX before check_language.
   if(NOT DEFINED CMAKE_CUDA_COMPILER AND NOT DEFINED ENV{CUDACXX})
     find_program(
       LOKI_NVCC_EXECUTABLE nvcc
-      HINTS ENV CUDA_PATH ENV CUDA_HOME ENV CUDA_ROOT /usr/local/cuda /opt/cuda
+      HINTS ENV
+            CUDA_PATH
+            ENV
+            CUDA_HOME
+            ENV
+            CUDA_ROOT
+            /usr/local/cuda
+            /opt/cuda
       PATH_SUFFIXES bin
     )
     if(LOKI_NVCC_EXECUTABLE)
@@ -110,13 +134,39 @@ if(ENABLE_CUDA STREQUAL "ON" OR ENABLE_CUDA STREQUAL "AUTO")
   check_language(CUDA)
   if(CMAKE_CUDA_COMPILER)
     enable_language(CUDA)
-  elseif(ENABLE_CUDA STREQUAL "ON")
-    message(FATAL_ERROR "CUDA was explicitly requested (ENABLE_CUDA=ON) but no CUDA compiler was found.")
+  elseif(LOKI_CUDA STREQUAL "ON")
+    message(
+      FATAL_ERROR
+        "LOKI_CUDA=ON but no CUDA compiler (nvcc) was found. Install CUDA >= 12.6 or use LOKI_CUDA=AUTO/OFF."
+    )
   else()
-    message(STATUS "CUDA compiler not found. Building CPU-only (ENABLE_CUDA=AUTO).")
+    message(STATUS "CUDA compiler not found. Building CPU-only (LOKI_CUDA=AUTO).")
   endif()
-elseif(ENABLE_CUDA STREQUAL "OFF")
-  message(STATUS "CUDA disabled by user (ENABLE_CUDA=OFF).")
+elseif(LOKI_CUDA STREQUAL "OFF")
+  message(STATUS "CUDA disabled by user (LOKI_CUDA=OFF). Building CPU-only.")
+endif()
+
+# When CUDA is explicitly required, verify a driver/GPU is present (not just nvcc).
+if(CMAKE_CUDA_COMPILER AND LOKI_CUDA STREQUAL "ON")
+  find_program(LOKI_NVIDIA_SMI nvidia-smi)
+  if(NOT LOKI_NVIDIA_SMI)
+    message(
+      FATAL_ERROR
+        "LOKI_CUDA=ON but nvidia-smi was not found. An NVIDIA driver and GPU are required."
+    )
+  endif()
+  execute_process(
+    COMMAND ${LOKI_NVIDIA_SMI} --query-gpu=name --format=csv,noheader
+    OUTPUT_VARIABLE _loki_gpu_names
+    RESULT_VARIABLE _loki_gpu_status
+    OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET
+  )
+  if(NOT _loki_gpu_status EQUAL 0 OR _loki_gpu_names STREQUAL "")
+    message(
+      FATAL_ERROR "LOKI_CUDA=ON but nvidia-smi reports no usable GPU. Check driver installation."
+    )
+  endif()
+  message(STATUS "LOKI_CUDA=ON: detected GPU(s): ${_loki_gpu_names}")
 endif()
 
 if(CMAKE_CUDA_COMPILER)
@@ -132,8 +182,7 @@ if(CMAKE_CUDA_COMPILER)
   set(CMAKE_CUDA_STANDARD_REQUIRED ON)
   set(CMAKE_CUDA_EXTENSIONS OFF)
 
-  # Define a target for CUDA compilation options
-  set(LOKI_CUDA_OPTIONS ${PROJECT_NAME}_CUDA_OPTIONS)
+  set(LOKI_CUDA_OPTIONS ${PROJECT_NAME}_cuda_options)
   add_library(${LOKI_CUDA_OPTIONS} INTERFACE)
   target_compile_options(
     ${LOKI_CUDA_OPTIONS}
@@ -148,19 +197,16 @@ if(CMAKE_CUDA_COMPILER)
               $<$<CONFIG:MinSizeRel>:-O2;-DNDEBUG>
               >
   )
-  set(CMAKE_CUDA_ARCHITECTURES native)
-  message(STATUS "CUDA Architectures: ${CMAKE_CUDA_ARCHITECTURES}")
+  set(CMAKE_CUDA_ARCHITECTURES "${LOKI_CUDA_ARCHITECTURES}")
+  message(STATUS "CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
   # Disable response files for better IDE integration
   set(CMAKE_CUDA_USE_RESPONSE_FILE_FOR_INCLUDES OFF)
-  add_compile_definitions(LOKI_ENABLE_CUDA)
-else()
-  remove_definitions(LOKI_ENABLE_CUDA)
 endif()
 
-# CPM.cmake Setup
+# CPM: bundled deps by default; LOKI_USE_SYSTEM_DEPS=ON prefers find_package first.
 include(cmake/CPM.cmake)
 set(CPM_USE_LOCAL_PACKAGES
-    ON
+    ${LOKI_USE_SYSTEM_DEPS}
     CACHE BOOL "Try to find packages locally before downloading" FORCE
 )
 if(DEFINED ENV{CPM_SOURCE_CACHE})
@@ -170,24 +216,33 @@ if(DEFINED ENV{CPM_SOURCE_CACHE})
   )
 endif()
 
-# Define library names and Add subdirectories
+# Target naming: library target is `loki`, exported alias is `loki::loki`.
 set(LOKI_LIBRARY_NAME ${PROJECT_NAME})
-set(LOKI_PYTHON_LIBRARY_NAME libloki)
+set(LOKI_CMAKE_PACKAGE_DIR "${CMAKE_INSTALL_LIBDIR}/cmake/${PROJECT_NAME}")
+
 add_subdirectory(lib)
-if(BUILD_PYTHON)
+if(LOKI_BUILD_PYTHON)
   add_subdirectory(src)
 endif()
-if(BUILD_TESTING)
+if(LOKI_BUILD_TESTING)
+  enable_testing()
   add_subdirectory(tests/cpp)
 endif()
-if(BUILD_BENCHMARKS)
+if(LOKI_BUILD_BENCHMARKS)
   add_subdirectory(bench)
 endif()
 
-# Install targets
+# Install / export: find_package(loki) + target loki::loki
+include(CMakePackageConfigHelpers)
+
+set(LOKI_BUILT_WITH_CUDA OFF)
+if(CMAKE_CUDA_COMPILER)
+  set(LOKI_BUILT_WITH_CUDA ON)
+endif()
+
 install(
-  TARGETS ${LOKI_LIBRARY_NAME} ${LOKI_COMPILE_OPTIONS} coverage_config
-  EXPORT ${PROJECT_NAME}Targets
+  TARGETS ${LOKI_LIBRARY_NAME}
+  EXPORT lokiTargets
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
@@ -195,27 +250,52 @@ install(
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
 
-# Also install CUDA options if available
 if(CMAKE_CUDA_COMPILER)
-  install(TARGETS ${LOKI_CUDA_OPTIONS} EXPORT ${PROJECT_NAME}Targets)
+  install(TARGETS ${LOKI_CUDA_OPTIONS} EXPORT lokiTargets)
 endif()
 
-# Install coverage config if enabled
-if(ENABLE_COVERAGE)
-  install(TARGETS coverage_config EXPORT ${PROJECT_NAME}Targets)
-endif()
-
-# Install headers
-install(DIRECTORY ${CMAKE_SOURCE_DIR}/include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-
-# Generate and install export file
 install(
-  EXPORT ${PROJECT_NAME}Targets
-  FILE ${PROJECT_NAME}Targets.cmake
-  NAMESPACE ${PROJECT_NAME}::
-  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/${PROJECT_NAME}
+  DIRECTORY ${PROJECT_SOURCE_DIR}/include/
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+  PATTERN ".DS_Store" EXCLUDE
 )
 
-# Feature summary
+install(
+  EXPORT lokiTargets
+  FILE lokiTargets.cmake
+  NAMESPACE ${PROJECT_NAME}::
+  DESTINATION ${LOKI_CMAKE_PACKAGE_DIR}
+)
+
+configure_file(
+  ${PROJECT_SOURCE_DIR}/cmake/LokiCUDAConfig.cmake.in
+  ${CMAKE_CURRENT_BINARY_DIR}/lokiCUDAConfig.cmake @ONLY
+)
+
+configure_package_config_file(
+  ${PROJECT_SOURCE_DIR}/cmake/LokiConfig.cmake.in ${CMAKE_CURRENT_BINARY_DIR}/lokiConfig.cmake
+  INSTALL_DESTINATION ${LOKI_CMAKE_PACKAGE_DIR}
+)
+
+write_basic_package_version_file(
+  ${CMAKE_CURRENT_BINARY_DIR}/lokiConfigVersion.cmake
+  VERSION ${PROJECT_VERSION}
+  COMPATIBILITY SameMajorVersion
+)
+
+install(
+  FILES ${CMAKE_CURRENT_BINARY_DIR}/lokiConfig.cmake
+        ${CMAKE_CURRENT_BINARY_DIR}/lokiConfigVersion.cmake
+        ${CMAKE_CURRENT_BINARY_DIR}/lokiCUDAConfig.cmake DESTINATION ${LOKI_CMAKE_PACKAGE_DIR}
+)
+
 include(FeatureSummary)
 feature_summary(WHAT ALL)
+
+if(CMAKE_CUDA_COMPILER)
+  message(
+    STATUS "loki build mode: CPU + CUDA (LOKI_CUDA=${LOKI_CUDA}, LOKI_ENABLE_CUDA macro defined)"
+  )
+else()
+  message(STATUS "loki build mode: CPU-only (LOKI_CUDA=${LOKI_CUDA})")
+endif()

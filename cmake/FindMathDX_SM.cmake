@@ -9,21 +9,35 @@ if(MathDX_SM_FIND_INCLUDED)
 endif()
 set(MathDX_SM_FIND_INCLUDED TRUE)
 
-# 1. Prioritize CMAKE_CUDA_ARCHITECTURES (if set by user or project)
-if(NOT DEFINED MATHDX_SM AND DEFINED CMAKE_CUDA_ARCHITECTURES)
-  # Take the first architecture if multiple are specified (MathDX templates need a single SM)
-  list(GET CMAKE_CUDA_ARCHITECTURES 0 _target_arch)
-  # Remove 'sm_' or 'compute_' prefix if present
+# 1. User override or CMAKE_CUDA_ARCHITECTURES (first entry wins for MathDX).
+# Take the first architecture if multiple are specified (MathDX templates need a single SM)
+if(NOT MATHDX_SM
+   AND DEFINED LOKI_CUDA_ARCHITECTURES
+   AND NOT LOKI_CUDA_ARCHITECTURES STREQUAL "native"
+)
+  list(GET LOKI_CUDA_ARCHITECTURES 0 _target_arch)
   string(REGEX MATCH "[0-9]+" _arch_digits "${_target_arch}")
-  set(MATHDX_SM "${_arch_digits}0")
+  if(_arch_digits)
+    set(MATHDX_SM "${_arch_digits}0")
+  endif()
+elseif(
+  NOT MATHDX_SM
+  AND DEFINED CMAKE_CUDA_ARCHITECTURES
+  AND NOT CMAKE_CUDA_ARCHITECTURES STREQUAL "native"
+)
+  list(GET CMAKE_CUDA_ARCHITECTURES 0 _target_arch)
+  string(REGEX MATCH "[0-9]+" _arch_digits "${_target_arch}")
+  if(_arch_digits)
+    set(MATHDX_SM "${_arch_digits}0")
+  endif()
 endif()
 
-# 2. Fallback to nvidia-smi if still not found
+# 2. Query the local GPU via nvidia-smi.
 if(NOT MATHDX_SM)
-  find_program(_NVSMI_EXECUTABLE nvidia-smi)
-  if(_NVSMI_EXECUTABLE)
+  find_program(_LOKI_NVSMI_EXECUTABLE nvidia-smi)
+  if(_LOKI_NVSMI_EXECUTABLE)
     execute_process(
-      COMMAND ${_NVSMI_EXECUTABLE} --query-gpu=compute_cap --format=csv,noheader
+      COMMAND ${_LOKI_NVSMI_EXECUTABLE} --query-gpu=compute_cap --format=csv,noheader
       OUTPUT_VARIABLE _smi_output
       RESULT_VARIABLE _smi_status
       OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET
@@ -34,17 +48,25 @@ if(NOT MATHDX_SM)
   endif()
 endif()
 
-# 3. Final Fallback/Error
+# 3. Fail or fall back depending on whether CUDA was explicitly requested.
 if(NOT MATHDX_SM)
-  message(WARNING "MathDX_SM: Could not detect GPU architecture. Defaulting to 800. "
-                  "Set -DCMAKE_CUDA_ARCHITECTURES=80 or -DMATHDX_SM=800 manually."
-  )
-  set(MATHDX_SM "800")
+  if(LOKI_CUDA STREQUAL "ON")
+    message(
+      FATAL_ERROR
+        "LOKI_CUDA=ON but GPU compute capability could not be detected. "
+        "Ensure nvidia-smi works, or set -DLOKI_CUDA_ARCHITECTURES=80 (or -DMATHDX_SM=800)."
+    )
+  else()
+    set(MATHDX_SM "800")
+    message(
+      WARNING
+        "MathDX: GPU architecture not detected (LOKI_CUDA=AUTO). Defaulting MATHDX_SM=${MATHDX_SM}."
+    )
+  endif()
 endif()
 
-# Export variables for the components
 set(MATHDX_SM
     ${MATHDX_SM}
-    CACHE STRING "MathDx SM architecture value"
+    CACHE STRING "MathDx SM architecture value for cuRANDDx"
 )
 set(MathDX_SM_FOUND TRUE)

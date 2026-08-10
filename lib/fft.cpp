@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <format>
+#include <map>
 #include <mutex>
 
 #include <omp.h>
@@ -582,10 +583,10 @@ void irfft_batch_chunked(std::span<ComplexType> complex_input,
             plan = it->second;
         } else {
             plan =
-                fftwf_plan_many_dft_c2r(1,           // rank
-                                        &key.n_real, // transform size
-                                        key.batch_size,   // number of transforms
-                                        nullptr,     // input (dummy)
+                fftwf_plan_many_dft_c2r(1,              // rank
+                                        &key.n_real,    // transform size
+                                        key.batch_size, // number of transforms
+                                        nullptr,        // input (dummy)
                                         nullptr, 1, n_complex, // input layout
                                         nullptr,               // output (dummy)
                                         nullptr, 1, n_real,    // output layout

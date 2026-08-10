@@ -1,0 +1,18 @@
+
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}")
+
+# Hard system dependencies required by every loki build.
+find_dependency(OpenMP)
+find_dependency(HDF5)
+find_dependency(FFTW COMPONENTS FLOAT_LIB FLOAT_OPENMP_LIB)
+
+# CUDA is only required when this loki build was configured with CUDA support.
+include("${CMAKE_CURRENT_LIST_DIR}/lokiCUDAConfig.cmake")
+
+include("${CMAKE_CURRENT_LIST_DIR}/lokiTargets.cmake")
+
+check_required_components(loki)

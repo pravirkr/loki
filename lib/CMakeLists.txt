@@ -1,169 +1,48 @@
-# Define the library
+# Collect CPU sources (*.cpp) via GLOB; CUDA *.cu files added when nvcc is available.
 file(GLOB LOKI_LIBRARY_CXX_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
+if(LOKI_LIBRARY_CXX_SOURCES STREQUAL "")
+  message(FATAL_ERROR "No C++ sources (*.cpp) found in ${CMAKE_CURRENT_SOURCE_DIR}.")
+endif()
 set(LOKI_LIBRARY_ALL_SOURCES ${LOKI_LIBRARY_CXX_SOURCES})
 
-# Add CUDA sources if available
 if(CMAKE_CUDA_COMPILER)
   file(GLOB LOKI_LIBRARY_CUDA_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*.cu)
+  if(LOKI_LIBRARY_CUDA_SOURCES STREQUAL "")
+    message(
+      FATAL_ERROR
+        "LOKI_CUDA enabled but no CUDA sources (*.cu) found in ${CMAKE_CURRENT_SOURCE_DIR}."
+    )
+  endif()
   list(APPEND LOKI_LIBRARY_ALL_SOURCES ${LOKI_LIBRARY_CUDA_SOURCES})
-
-  # Explicitly set CUDA files to be compiled with CUDA
   set_source_files_properties(${LOKI_LIBRARY_CUDA_SOURCES} PROPERTIES LANGUAGE CUDA)
 endif()
 
 add_library(${LOKI_LIBRARY_NAME} ${LOKI_LIBRARY_ALL_SOURCES})
 add_library(${PROJECT_NAME}::${LOKI_LIBRARY_NAME} ALIAS ${LOKI_LIBRARY_NAME})
 
-# System dependencies
-message(STATUS "Searching for required system dependencies...")
-find_package(OpenMP REQUIRED COMPONENTS CXX)
-find_package(HDF5 REQUIRED)
-find_package(FFTW REQUIRED COMPONENTS FLOAT_LIB FLOAT_OPENMP_LIB)
+target_compile_features(${LOKI_LIBRARY_NAME} PUBLIC cxx_std_20)
 
-# CPM Dependencies
-message(STATUS "Searching for CPM dependencies (will download if not found locally)...")
-
-# fmt (Formatting library). Sources include <fmt/...> directly, so it must be an
-# explicit dependency rather than relying on spdlog's bundled copy. Keep the version
-# in sync with the fmt bundled by spdlog below.
-CPMAddPackage(
-  NAME fmt
-  VERSION 12.1.0
-  URL https://github.com/fmtlib/fmt/archive/refs/tags/12.1.0.tar.gz
-  OPTIONS "FMT_INSTALL ON"
-)
-
-# spdlog (Header-only logging library). Uses the fmt above instead of its bundled copy,
-# so that a single fmt is visible in translation units including both.
-CPMAddPackage(
-  NAME spdlog
-  VERSION 1.17
-  URL https://github.com/gabime/spdlog/archive/refs/tags/v1.17.0.tar.gz
-  OPTIONS "SPDLOG_INSTALL ON" "SPDLOG_FMT_EXTERNAL_HO ON"
-)
-
-# CLI11
-CPMAddPackage(
-  NAME CLI11
-  VERSION 2.6.0
-  URL https://github.com/CLIUtils/CLI11/archive/refs/tags/v2.6.0.tar.gz
-  DOWNLOAD_ONLY YES EXCLUDE_FROM_ALL SYSTEM
-)
-if(CLI11_ADDED)
-  add_library(CLI11::CLI11 INTERFACE IMPORTED GLOBAL)
-  target_include_directories(CLI11::CLI11 INTERFACE ${CLI11_SOURCE_DIR}/include)
-endif()
-
-# xsimd (SIMD library) - Header-only
-CPMAddPackage(
-  NAME xsimd
-  VERSION 13.2.0
-  URL https://github.com/xtensor-stack/xsimd/archive/refs/tags/13.2.0.tar.gz
-  DOWNLOAD_ONLY YES
-)
-if(xsimd_ADDED)
-  add_library(xsimd INTERFACE IMPORTED GLOBAL)
-  target_include_directories(xsimd INTERFACE ${xsimd_SOURCE_DIR}/include)
-endif()
-
-# HighFive (HDF5 C++ interface) - Depends on HDF5 found earlier
-CPMAddPackage(
-  NAME HighFive
-  VERSION 3.3.0
-  URL https://github.com/highfive-devs/highfive/archive/refs/tags/v3.3.0.tar.gz
-  OPTIONS "HIGHFIVE_FIND_HDF5 ON"
-)
-
-# BoostMath - standalone header-only library
-CPMAddPackage(
-  NAME BoostMath
-  VERSION 1.90.0
-  URL https://github.com/boostorg/math/archive/refs/tags/boost-1.90.0.tar.gz
-  DOWNLOAD_ONLY YES
-)
-if(BoostMath_ADDED)
-  add_library(Boost::math INTERFACE IMPORTED GLOBAL)
-  target_include_directories(Boost::math INTERFACE ${BoostMath_SOURCE_DIR}/include)
-  # Only boostorg/math is downloaded, never the rest of Boost. Boost.Math's
-  # is_standalone.hpp decides standalone mode with __has_include(<boost/config.hpp>),
-  # so on a host that happens to have a *system* Boost it defers to that instead.
-  # With a Boost older than 1.72 (e.g. RHEL 8 ships 1.66) BOOST_IF_CONSTEXPR is
-  # undefined there, BOOST_MATH_IF_CONSTEXPR expands to nothing, and every header
-  # using it fails with "expected ';' before '{' token". Force standalone mode.
-  target_compile_definitions(Boost::math INTERFACE BOOST_MATH_STANDALONE)
-endif()
-
-# Thread pool
-CPMAddPackage(
-  NAME BS_thread_pool
-  VERSION 5.0.0
-  URL https://github.com/bshoshany/thread-pool/archive/refs/tags/v5.0.0.tar.gz
-  DOWNLOAD_ONLY YES EXCLUDE_FROM_ALL SYSTEM
-)
-if(BS_thread_pool_ADDED)
-  add_library(BS_thread_pool INTERFACE IMPORTED GLOBAL)
-  target_include_directories(BS_thread_pool INTERFACE ${BS_thread_pool_SOURCE_DIR}/include)
-endif()
-
-# toml++
-CPMAddPackage(
-  NAME tomlplusplus
-  VERSION 3.4.0
-  URL https://github.com/marzer/tomlplusplus/archive/refs/tags/v3.4.0.tar.gz
-  DOWNLOAD_ONLY YES EXCLUDE_FROM_ALL SYSTEM
-)
-if(tomlplusplus_ADDED)
-  add_library(tomlplusplus INTERFACE IMPORTED GLOBAL)
-  target_include_directories(tomlplusplus INTERFACE ${tomlplusplus_SOURCE_DIR}/include)
-endif()
-
-# --- NVIDIA MathDX Configuration ---
+# C++ code uses #ifdef LOKI_ENABLE_CUDA for optional GPU API (preprocessor macro, not a CMake option).
 if(CMAKE_CUDA_COMPILER)
-  set(MATHDX_VERSION "25.12.1")
-  set(MATHDX_SUBDIR "25.12") # Redist folder uses YY.MM versioning
-
-  find_package(MathDX_SM REQUIRED)
-  find_package(mathdx QUIET COMPONENTS curanddx CONFIG)
-
-  # Download components via CPM if not found
-  if(NOT curanddx_FOUND)
-    CPMAddPackage(
-      NAME mathdx
-      VERSION ${MATHDX_VERSION}
-      URL "https://developer.nvidia.com/downloads/compute/cuRANDDx/redist/cuRANDDx/cuda12/nvidia-mathdx-${MATHDX_VERSION}-cuda12.tar.gz"
-      DOWNLOAD_ONLY YES
-    )
-    if(mathdx_ADDED)
-      set(MATHDX_INCLUDE_DIR "${mathdx_SOURCE_DIR}/nvidia/mathdx/${MATHDX_SUBDIR}/include")
-
-      if(NOT curanddx_FOUND)
-        add_library(mathdx::curanddx INTERFACE IMPORTED GLOBAL)
-        target_include_directories(mathdx::curanddx INTERFACE "${MATHDX_INCLUDE_DIR}")
-        target_compile_definitions(mathdx::curanddx INTERFACE CURANDDX_SM=${MATHDX_SM})
-      endif()
-    endif()
-  endif()
+  target_compile_definitions(${LOKI_LIBRARY_NAME} PUBLIC LOKI_ENABLE_CUDA)
 endif()
 
-# Code coverage setup
-if(ENABLE_COVERAGE)
+# Dependencies
+include(${PROJECT_SOURCE_DIR}/cmake/LokiDependencies.cmake)
+if(CMAKE_CUDA_COMPILER)
+  include(${PROJECT_SOURCE_DIR}/cmake/LokiCUDADependencies.cmake)
+endif()
+
+if(LOKI_ENABLE_COVERAGE)
   if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    add_library(coverage_config INTERFACE)
-    target_compile_options(coverage_config INTERFACE -O0 -g --coverage)
-    target_link_options(coverage_config INTERFACE --coverage)
+    target_compile_options(${LOKI_LIBRARY_NAME} PRIVATE -O0 -g --coverage)
+    target_link_options(${LOKI_LIBRARY_NAME} PRIVATE --coverage)
     message(STATUS "Code coverage enabled.")
   else()
     message(
-      WARNING "Code coverage requested, but not supported for compiler ${CMAKE_CXX_COMPILER_ID}."
+      FATAL_ERROR "LOKI_ENABLE_COVERAGE=ON is not supported for compiler ${CMAKE_CXX_COMPILER_ID}."
     )
-    set(ENABLE_COVERAGE
-        OFF
-        CACHE BOOL "" FORCE
-    )
-    add_library(coverage_config INTERFACE)
   endif()
-else()
-  add_library(coverage_config INTERFACE)
 endif()
 
 # Set include directories
@@ -182,25 +61,30 @@ if(CMAKE_CUDA_COMPILER)
   target_include_directories(${LOKI_LIBRARY_NAME} PUBLIC ${CUDAToolkit_INCLUDE_DIRS})
 endif()
 
-# Link libraries
+# Header-only internal deps: BUILD_INTERFACE only (never exported to consumers).
 target_link_libraries(
   ${LOKI_LIBRARY_NAME}
-  PRIVATE ${LOKI_COMPILE_OPTIONS} coverage_config
-  PUBLIC OpenMP::OpenMP_CXX
-         HDF5::HDF5
-         FFTW::Float
-         FFTW::FloatOpenMP
-         fmt::fmt-header-only
-         spdlog::spdlog_header_only
-         xsimd
-         Boost::math
-         HighFive::HighFive
-         BS_thread_pool
-         tomlplusplus
-         CLI11::CLI11
+  PRIVATE ${LOKI_COMPILE_OPTIONS}
+          $<BUILD_INTERFACE:CLI11::CLI11>
+          $<BUILD_INTERFACE:xsimd>
+          $<BUILD_INTERFACE:Boost::math>
+          $<BUILD_INTERFACE:BS_thread_pool>
+          $<BUILD_INTERFACE:tomlplusplus>
+          $<BUILD_INTERFACE:HighFive::HighFive>
+          $<BUILD_INTERFACE:fmt::fmt-header-only>
+          $<BUILD_INTERFACE:spdlog::spdlog_header_only>
 )
 
-# Add CUDA options and libraries when available
+# System/runtime deps: PRIVATE for shared loki, PUBLIC for static loki.
+if(BUILD_SHARED_LIBS)
+  target_link_libraries(${LOKI_LIBRARY_NAME} PRIVATE OpenMP::OpenMP_CXX HDF5::HDF5)
+  target_link_libraries(${LOKI_LIBRARY_NAME} PUBLIC FFTW::Float FFTW::FloatOpenMP)
+else()
+  target_link_libraries(
+    ${LOKI_LIBRARY_NAME} PUBLIC OpenMP::OpenMP_CXX HDF5::HDF5 FFTW::Float FFTW::FloatOpenMP
+  )
+endif()
+
 if(CMAKE_CUDA_COMPILER)
   target_link_libraries(
     ${LOKI_LIBRARY_NAME}

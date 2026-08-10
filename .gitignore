@@ -208,6 +208,7 @@ __pycache__/
 .Python
 build/
 build2/
+build*/
 develop-eggs/
 dist/
 downloads/

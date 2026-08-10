@@ -1,7 +1,12 @@
 set(PYBIND11_FINDPYTHON ON)
+find_package(
+  Python
+  COMPONENTS Interpreter Development
+  REQUIRED
+)
 find_package(pybind11 CONFIG REQUIRED)
 
-# CPU module
+# CPU Python extension module (libloki).
 set(LOKI_PYMODULE_NAME lib${LOKI_LIBRARY_NAME})
 pybind11_add_module(${LOKI_PYMODULE_NAME} loki_python.cpp)
 target_include_directories(
@@ -12,7 +17,7 @@ target_link_libraries(
 )
 install(TARGETS ${LOKI_PYMODULE_NAME} DESTINATION ${LOKI_LIBRARY_NAME})
 
-# GPU module (if CUDA is available)
+# GPU Python extension module (libculoki) — only when the CUDA toolchain is active.
 if(CMAKE_CUDA_COMPILER)
   set(LOKI_PYGPUMODULE_NAME libcu${LOKI_LIBRARY_NAME})
   pybind11_add_module(${LOKI_PYGPUMODULE_NAME} loki_python_cuda.cpp)
@@ -20,7 +25,8 @@ if(CMAKE_CUDA_COMPILER)
     target_include_directories(${LOKI_PYGPUMODULE_NAME} PUBLIC "${CUDAToolkit_INCLUDE_DIRS}/cccl")
   endif()
   target_include_directories(
-    ${LOKI_PYGPUMODULE_NAME} PUBLIC ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/lib ${CUDAToolkit_INCLUDE_DIRS}
+    ${LOKI_PYGPUMODULE_NAME} PUBLIC ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/lib
+                                    ${CUDAToolkit_INCLUDE_DIRS}
   )
   target_link_libraries(
     ${LOKI_PYGPUMODULE_NAME}
@@ -28,4 +34,10 @@ if(CMAKE_CUDA_COMPILER)
     PRIVATE ${LOKI_CUDA_OPTIONS}
   )
   install(TARGETS ${LOKI_PYGPUMODULE_NAME} DESTINATION ${LOKI_LIBRARY_NAME})
+elseif(LOKI_CUDA STREQUAL "ON")
+  message(
+    FATAL_ERROR
+      "LOKI_CUDA=ON with LOKI_BUILD_PYTHON=ON requires the GPU Python module (libculoki), "
+      "but CUDA was not configured successfully."
+  )
 endif()

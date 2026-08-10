@@ -18,7 +18,6 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
     "Operating System :: MacOS :: MacOS X",
-    "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
@@ -60,10 +59,16 @@ install.strip = true            # Strip debug symbols
 build-dir = "build/{wheel_tag}"
 
 [tool.scikit-build.cmake.define]
-BUILD_PYTHON = "ON"
-BUILD_TESTING = "OFF"
-BUILD_DOCS = "OFF"
-ENABLE_CUDA = "AUTO"             # Make CUDA auto-detectable
+LOKI_BUILD_PYTHON = "ON"
+LOKI_BUILD_TESTING = "OFF"
+LOKI_BUILD_DOCS = "OFF"
+LOKI_BUILD_BENCHMARKS = "OFF"
+LOKI_CUDA = "AUTO"
+LOKI_USE_SYSTEM_DEPS = "OFF"
+LOKI_ENABLE_NATIVE_ARCH = "ON"
+LOKI_ENABLE_COVERAGE = "OFF"
+LOKI_ENABLE_IPO = "OFF"
+BUILD_SHARED_LIBS = "ON"
 CMAKE_BUILD_PARALLEL_LEVEL = "4"
 
 [tool.scikit-build.metadata.version]
@@ -75,6 +80,13 @@ regex = 'project\([^)]*VERSION\s+(?P<value>[0-9][^\s)]+)'
 test-extras = "test"
 test-command = "python -m pytest {project}/tests/python -v"
 test-skip = "pp* *-musllinux* *-manylinux_i686"
+
+[tool.cibuildwheel.linux]
+# Wheels must run on machines other than the builder — no -march=native, pinned CPM deps.
+environment = { LOKI_ENABLE_NATIVE_ARCH = "OFF", LOKI_USE_SYSTEM_DEPS = "OFF", LOKI_CUDA = "AUTO" }
+
+[tool.cibuildwheel.macos]
+environment = { LOKI_ENABLE_NATIVE_ARCH = "OFF", LOKI_USE_SYSTEM_DEPS = "OFF", LOKI_CUDA = "OFF" }
 
 [tool.ruff]
 include = [
@@ -159,7 +171,7 @@ filter = ["lib/*"]
 
 [tool.pixi.workspace]
 channels = ["conda-forge"]
-platforms = ["linux-64"]
+platforms = ["linux-64","osx-arm64"]
 
 [tool.pixi.pypi-dependencies]
 loki = { path = ".", editable = true }
