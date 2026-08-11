@@ -53,7 +53,7 @@ docs = [
 ]
 
 [tool.scikit-build]
-cmake.version = ">=3.30"
+cmake.version = ">=3.18"
 cmake.build-type = "Release"
 install.strip = true            # Strip debug symbols
 build-dir = "build/{wheel_tag}"

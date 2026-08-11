@@ -5,10 +5,10 @@
 #include <cuda/std/span>
 #include <cuda_runtime.h>
 #include <curand.h>
-#include <curanddx.hpp>
 
 #include "loki/common/types.hpp"
 #include "loki/cuda_utils.cuh"
+#include "loki/device_rng.cuh"
 
 namespace loki::math {
 
@@ -150,25 +150,5 @@ private:
     cudaStream_t m_stream{nullptr};
     bool m_owns_stream{false};
 };
-
-/**
- * @brief cuRANDDx generator configuration for high-performance per-thread RNG.
- *
- * @tparam Rounds Number of Philox rounds
- * @tparam SM Target SM architecture
- */
-template <uint32_t Rounds = 10, uint32_t SM = CURANDDX_SM>
-struct DeviceRNGConfig {
-    using Generator = decltype(curanddx::Generator<curanddx::philox4_32>() +
-                               curanddx::PhiloxRounds<Rounds>() +
-                               curanddx::SM<SM>() + curanddx::Thread());
-
-    // Aliases for common distributions
-    using NormalFloat  = curanddx::normal<float, curanddx::box_muller>;
-    using UniformFloat = curanddx::uniform<float>;
-};
-
-// Default configuration (Philox4_32_10)
-using DefaultDeviceRNG = DeviceRNGConfig<7>;
 
 } // namespace loki::math

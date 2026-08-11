@@ -82,7 +82,7 @@ SizeType score_and_filter_max_kadane_with_cache_impl(
         simd_utils::transpose<BatchType>(temp_fn_ptr, transposed_fn_ptr, nbins);
 
         // Step 2: init Kadane state for all biases
-        UNROLL_VECTORIZE_N(NBiases)
+        UNROLL_VECTORIZE // Cannot use UNROLL_VECTORIZE_N(NBiases) for gcc < 14.0
         for (SizeType k = 0; k < NBiases; ++k) {
             max_sum[k] = batch_neg_inf;
             cur_max[k] = batch_zero;
@@ -100,7 +100,7 @@ SizeType score_and_filter_max_kadane_with_cache_impl(
                 BatchType::load_aligned(&transposed_fn[j * kBatchSize]) -
                 mean_val;
 
-            UNROLL_VECTORIZE_N(NBiases)
+            UNROLL_VECTORIZE
             for (SizeType k = 0; k < NBiases; ++k) {
                 BatchType val = val_base - BatchType(biases[k]);
 
@@ -128,7 +128,7 @@ SizeType score_and_filter_max_kadane_with_cache_impl(
         // Step 4: compute SNR from Kadane results
         BatchType max_snr = batch_neg_inf;
 
-        UNROLL_VECTORIZE_N(NBiases)
+        UNROLL_VECTORIZE
         for (SizeType k = 0; k < NBiases; ++k) {
             const BatchType bias(biases[k]);
             BatchType best_biased_sum     = max_sum[k];
