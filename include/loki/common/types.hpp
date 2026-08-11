@@ -84,6 +84,7 @@ inline constexpr SizeType kUnrollFactor = 8;
 
 #define UNROLL_VECTORIZE UNROLL_VECTORIZE_N(kUnrollFactor)
 // NOLINTEND(cppcoreguidelines-macro-usage)
+// UNROLL_VECTORIZE_N is not supported for gcc < 14.0
 
 #if defined(LOKI_ENABLE_CUDA) && defined(__CUDACC__)
 #define LOKI_HD __host__ __device__

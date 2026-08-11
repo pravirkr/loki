@@ -10,9 +10,9 @@ A high-performance **C++20** pulsar searching library with **Python bindings**. 
 
 ### Compilers
 
-- **GCC >= 14** or **Clang >= 18** (C++20 support required)
+- **GCC >= 13.2** or **Clang >= 18** (C++20 support required)
 - **CUDA >= 12.6** *(optional, for GPU acceleration)*
-- **CMake >= 3.30**
+- **CMake >= 3.18**
 - **Python >= 3.12** *(for Python bindings)*
 
 MSVC is not supported.
@@ -23,15 +23,29 @@ These are **never** downloaded by loki and must be discoverable by CMake on your
 
 | Library | Minimum Version | conda-forge install |
 | --------- | ----------------- | --------------------- |
-| HDF5 | 2.0 | `mamba install hdf5` |
-| FFTW (float + OpenMP) | 3.3 | `mamba install fftw` |
-| OpenMP | 5.0 | `mamba install libomp` *(macOS)* / `libgomp` *(Linux)* |
-| CMake | 3.30 | `conda install cmake>=3.30` |
-| Ninja | any | `conda install ninja` |
-| GCC 14 | 14.0 | `conda install gcc>=14 gxx>=14` *(Linux)* |
-| Python | 3.12 | `conda install python>=3.12` |
+| HDF5 | - | `mamba install hdf5` |
+| FFTW (float + OpenMP) | - | `mamba install fftw` |
+| OpenMP | - | `mamba install libomp` *(macOS)* / `libgomp` *(Linux)* |
+| CMake | 3.18 | `mamba install cmake>=3.18` |
+| Ninja | - | `mamba install ninja` |
+| GCC | 13.2 | `mamba install gcc>=13.2 gxx>=13.2` *(Linux)* |
+| Python | 3.12 | `mamba install python>=3.12` |
 
 Header-only C++ dependencies (fmt, spdlog, HighFive, CLI11, xsimd, etc.) are fetched automatically via [CPM.cmake](https://github.com/cpm-cmake/CPM.cmake) unless `LOKI_USE_SYSTEM_DEPS=ON`.
+
+### GPU and toolchain support policy
+
+Frozen minimum requirements for CUDA builds:
+
+| Component | Minimum |
+| --------- | ------- |
+| CUDA Toolkit | 12.6 |
+| GCC (when used as nvcc host compiler) | 13.2 |
+| CMake | 3.18 |
+| GPU compute capability | **sm_50** (Maxwell) |
+
+- CUDA Toolkit 12.6+, with a host compiler supported by that toolkit.
+- For CUDA 12.6 specifically: GCC 7.3–13.2, or Clang 7–18.
 
 ---
 
@@ -42,10 +56,10 @@ Header-only C++ dependencies (fmt, spdlog, HighFive, CLI11, xsimd, etc.) are fet
 Best for using loki from Python in a conda environment. Builds `libloki` (CPU) and, when CUDA is available, `libculoki` (GPU).
 
 ```bash
-mamba create -n loki python=3.12
-mamba activate loki
-mamba install -c conda-forge cmake>=3.30 ninja hdf5 fftw libomp  # macOS
-# Linux: also install gcc>=14 gxx>=14
+mamba create -n loki_env python=3.12
+mamba activate loki_env
+mamba install -c conda-forge cmake>=3.18 ninja hdf5 fftw libomp  # macOS
+# Linux: also install gcc>=13.2 gxx>=13.2
 
 export CPM_SOURCE_CACHE="$HOME/.cache/CPM"   # optional; avoids re-downloading CPM deps
 
@@ -120,7 +134,7 @@ Project-specific options use the **`LOKI_`** prefix. Standard CMake options keep
 | Option | Default | Description |
 | -------- | ----------------- | --------------------- |
 | **`LOKI_CUDA`** | `AUTO` | CUDA build mode: `AUTO`, `ON`, or `OFF` |
-| **`LOKI_CUDA_ARCHITECTURES`** | `native` | Passed to `CMAKE_CUDA_ARCHITECTURES` (`native`, `80`, `86;90`, …) |
+| **`LOKI_CUDA_ARCHITECTURES`** | `native` | Passed to `CMAKE_CUDA_ARCHITECTURES` (`native`, `61;80`, `all-major`, …). Minimum supported GPU: **sm_50**. |
 | **`LOKI_ENABLE_NATIVE_ARCH`** | `ON` | Add `-march=native` in Release builds |
 | **`LOKI_USE_SYSTEM_DEPS`** | `OFF` | Prefer system CPM packages over pinned downloads |
 | **`LOKI_BUILD_PYTHON`** | `ON` | Build Python extension modules |
@@ -137,14 +151,11 @@ Project-specific options use the **`LOKI_`** prefix. Standard CMake options keep
 - **CPU+GPU** (`LOKI_CUDA=AUTO` or `ON` with working toolchain): `.cpp` **and** `.cu` in one library; `LOKI_ENABLE_CUDA` defined; Python gets `libloki` + `libculoki`.
 - The library is always usable on CPU; GPU code paths are compiled only when CUDA is enabled at configure time.
 
-### `LOKI_CUDA` vs `LOKI_ENABLE_CUDA`
+### GPU architecture
 
-| Name | Layer | Purpose |
-| -------- | ----------------- | --------------------- |
-| **`LOKI_CUDA`** | CMake cache (`AUTO`/`ON`/`OFF`) | **User** control of GPU build |
-| **`LOKI_ENABLE_CUDA`** | C/C++ preprocessor macro | **Internal** `#ifdef` in headers/sources |
-
-You configure **`LOKI_CUDA`**; the build system defines **`LOKI_ENABLE_CUDA`** when appropriate. No need to change application code when switching CPU/GPU builds.
+- **Minimum GPU:** sm_50 (Maxwell). CMake rejects lower values in `LOKI_CUDA_ARCHITECTURES`.
+- **Fat binaries:** pass multiple SMs, e.g. `-DLOKI_CUDA_ARCHITECTURES='61;80'` or `all-major`.
+- **MathDX / cuRANDDx** is downloaded and linked only when any target arch is sm_70+ and `LOKI_FORCE_CURAND_RNG=OFF`.
 
 ---
 

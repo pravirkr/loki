@@ -88,7 +88,8 @@ endif()
 if(CMAKE_CUDA_COMPILER)
   target_link_libraries(
     ${LOKI_LIBRARY_NAME}
-    PRIVATE ${LOKI_CUDA_OPTIONS} CUDA::cuda_driver mathdx::curanddx
+    PRIVATE ${LOKI_CUDA_OPTIONS} CUDA::cuda_driver CUDA::curand
+            $<$<BOOL:${LOKI_NEEDS_CURANDDX}>:mathdx::curanddx>
     PUBLIC CUDA::cudart CUDA::cufft
   )
 endif()

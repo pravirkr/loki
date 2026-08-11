@@ -18,7 +18,6 @@
 #include <highfive/highfive.hpp>
 #include <spdlog/spdlog.h>
 
-#include <thrust/copy.h>
 #include <thrust/device_vector.h>
 #include <thrust/execution_policy.h>
 #include <thrust/fill.h>
@@ -34,6 +33,7 @@
 #include "loki/cub_helpers.cuh"
 #include "loki/cuda_utils.cuh"
 #include "loki/detection/score.hpp"
+#include "loki/device_rng.cuh"
 #include "loki/math_cuda.cuh"
 #include "loki/progress.hpp"
 #include "loki/scheme.hpp"
@@ -1113,8 +1113,14 @@ public:
         }
         bar.mark_as_completed();
         // Copy final states back to host
-        thrust::copy(thrust::cuda::par.on(stream), m_states_d.begin(),
-                     m_states_d.end(), m_states.begin());
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(m_states.data(),
+                            thrust::raw_pointer_cast(m_states_d.data()),
+                            m_states.size() * sizeof(State),
+                            cudaMemcpyDeviceToHost, stream),
+            "cudaMemcpyAsync failed");
+        cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
+                                    "cudaStreamSynchronize failed");
         cuda_utils::check_cuda_call(cudaStreamDestroy(stream),
                                     "cudaStreamDestroy failed");
     }
@@ -1614,10 +1620,10 @@ private:
                 if (jslot < 0) {
                     continue;
                 }
-                threshold_pairs.emplace_back(static_cast<uint32_t>(ithres),
-                                             static_cast<uint32_t>(islot),
-                                             static_cast<uint32_t>(jthres),
-                                             static_cast<uint32_t>(jslot));
+                threshold_pairs.push_back(ThresholdPairItem{
+                    static_cast<uint32_t>(ithres), static_cast<uint32_t>(islot),
+                    static_cast<uint32_t>(jthres),
+                    static_cast<uint32_t>(jslot)});
             }
         }
         const SizeType n_pairs = threshold_pairs.size();

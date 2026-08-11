@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.30)
+cmake_minimum_required(VERSION 3.18)
 
 project(
   loki
@@ -11,10 +11,10 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Compiler version requirements
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-  if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 14.0)
+  if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 13.2)
     message(
       FATAL_ERROR
-        "GCC >= 14.0 required for complete C++20 support. Found: ${CMAKE_CXX_COMPILER_VERSION}"
+        "GCC >= 13.2 required for complete C++20 support. Found: ${CMAKE_CXX_COMPILER_VERSION}"
     )
   endif()
 elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
@@ -60,6 +60,12 @@ endif()
 set(LOKI_CUDA_ARCHITECTURES
     "native"
     CACHE STRING "CUDA architectures passed to CMAKE_CUDA_ARCHITECTURES (e.g. native, 80, 86;90)"
+)
+
+# Force stock cuRAND Philox device RNG on all GPU architectures (disables cuRANDDx).
+set(LOKI_FORCE_CURAND_RNG
+    OFF
+    CACHE BOOL "Use stock cuRAND Philox device RNG on all GPUs instead of cuRANDDx on sm_70+"
 )
 
 # C++20 for the whole project.
@@ -197,6 +203,13 @@ if(CMAKE_CUDA_COMPILER)
               $<$<CONFIG:MinSizeRel>:-O2;-DNDEBUG>
               >
   )
+  if(LOKI_FORCE_CURAND_RNG)
+    target_compile_definitions(${LOKI_CUDA_OPTIONS} INTERFACE LOKI_FORCE_CURAND_RNG)
+  endif()
+
+  include(${PROJECT_SOURCE_DIR}/cmake/LokiCUDAArch.cmake)
+  loki_validate_cuda_architectures()
+
   set(CMAKE_CUDA_ARCHITECTURES "${LOKI_CUDA_ARCHITECTURES}")
   message(STATUS "CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
   # Disable response files for better IDE integration

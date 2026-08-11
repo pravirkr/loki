@@ -1,5 +1,12 @@
 # CUDA-only dependencies (cuRANDDx / MathDX). Included only when nvcc is active.
 
+if(NOT LOKI_NEEDS_CURANDDX)
+  message(
+    STATUS "Skipping MathDX/cuRANDDx download (no sm_70+ targets or LOKI_FORCE_CURAND_RNG=ON)."
+  )
+  return()
+endif()
+
 # MathDX - NVIDIA MathDX library
 set(MATHDX_VERSION "25.12.1")
 set(MATHDX_SUBDIR "25.12") # Redist folder uses YY.MM versioning
