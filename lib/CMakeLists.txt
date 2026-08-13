@@ -78,11 +78,9 @@ target_link_libraries(
 # System/runtime deps: PRIVATE for shared loki, PUBLIC for static loki.
 if(BUILD_SHARED_LIBS)
   target_link_libraries(${LOKI_LIBRARY_NAME} PRIVATE OpenMP::OpenMP_CXX HDF5::HDF5)
-  target_link_libraries(${LOKI_LIBRARY_NAME} PUBLIC FFTW::Float FFTW::FloatOpenMP)
+  target_link_libraries(${LOKI_LIBRARY_NAME} PUBLIC FFTW::Float)
 else()
-  target_link_libraries(
-    ${LOKI_LIBRARY_NAME} PUBLIC OpenMP::OpenMP_CXX HDF5::HDF5 FFTW::Float FFTW::FloatOpenMP
-  )
+  target_link_libraries(${LOKI_LIBRARY_NAME} PUBLIC OpenMP::OpenMP_CXX HDF5::HDF5 FFTW::Float)
 endif()
 
 if(CMAKE_CUDA_COMPILER)

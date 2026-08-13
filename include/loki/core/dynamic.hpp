@@ -79,7 +79,7 @@ public:
                                       std::span<float> scores_tree,
                                       std::span<SizeType> indices_tree,
                                       float threshold,
-                                      SizeType n_leaves) noexcept = 0;
+                                      SizeType n_leaves) = 0;
 
     virtual void transform(std::span<double> leaves_tree,
                            std::span<SizeType> indices_tree,
@@ -130,7 +130,7 @@ protected:
     std::vector<FoldType> m_scratch_shifts;
     // Buffer for ComplexType irfft transform
     std::vector<float> m_scratch_folds;
-    std::unique_ptr<math::IrfftExecutor> m_irfft_executor;
+    math::FFTWManager m_fft_manager;
     // Cache for snr_boxcar_batch
     detection::BoxcarWidthsCache m_boxcar_widths_cache;
     detection::BoxcarKadaneCache m_boxcar_kadane_cache;
@@ -171,7 +171,7 @@ public:
                               std::span<float> scores_tree,
                               std::span<SizeType> indices_tree,
                               float threshold,
-                              SizeType n_leaves) noexcept override;
+                              SizeType n_leaves) override;
 
     std::vector<double>
     get_transform_matrix(std::pair<double, double> coord_cur,

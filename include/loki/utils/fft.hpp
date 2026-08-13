@@ -1,10 +1,14 @@
 #pragma once
 
-#include <mutex>
+#include <memory>
 #include <span>
-#include <unordered_map>
 
 #ifdef LOKI_ENABLE_CUDA
+#include <cstdint>
+#include <functional>
+#include <mutex>
+#include <unordered_map>
+
 #include <cuda/std/span>
 #include <cuda_runtime.h>
 #include <cufft.h>
@@ -16,134 +20,7 @@
 
 namespace loki::math {
 
-// Forward declare for global FFTW initialization
-void ensure_fftw_threading(int nthreads = 1);
-
-struct PlanKey {
-    int n_real;
-    int batch_size;
-
-    bool operator==(const PlanKey& other) const {
-        return n_real == other.n_real && batch_size == other.batch_size;
-    }
-    bool operator<(const PlanKey& other) const {
-        return n_real < other.n_real ||
-               (n_real == other.n_real && batch_size < other.batch_size);
-    }
-};
-
-struct PlanKeyHash {
-    SizeType operator()(const PlanKey& k) const {
-        return std::hash<int>{}(k.n_real) ^
-               (std::hash<int>{}(k.batch_size) << 1U);
-    }
-};
-
-/**
- * @brief RAII wrapper for FFTW forward transforms (R2C)
- *
- * Manages FFTW plans for real-to-complex transforms with automatic cleanup.
- * Plans are cached per chunk size for optimal reuse across batches.
- * Thread-safe for concurrent execution calls.
- */
-class RfftExecutor {
-public:
-    /**
-     * @brief Construct executor for given transform size
-     * @param n_real Size of real input (output will be n_real/2+1 complex)
-     * @param nthreads Number of threads to use for FFTW (default: 1)
-     * @param max_chunk_size Maximum batch size for plan caching (default:
-     * 16384)
-     */
-    explicit RfftExecutor(int n_real,
-                          int nthreads       = 1,
-                          int max_chunk_size = 16384);
-    ~RfftExecutor() = default;
-
-    RfftExecutor(const RfftExecutor&)            = delete;
-    RfftExecutor& operator=(const RfftExecutor&) = delete;
-    RfftExecutor(RfftExecutor&&)                 = delete;
-    RfftExecutor& operator=(RfftExecutor&&)      = delete;
-
-    /**
-     * @brief Execute forward FFT on batch of real inputs
-     * @param real_input Real input array [batch_size * n_real]
-     * @param complex_output Complex output array [batch_size * n_complex]
-     * @param batch_size Number of transforms to perform
-     *
-     * Automatically chunks large batches for optimal performance.
-     * Plans are cached for the chunk size and reused.
-     */
-    void execute(std::span<const float> real_input,
-                 std::span<ComplexType> complex_output,
-                 int batch_size);
-
-    inline static std::unordered_map<PlanKey, fftwf_plan, PlanKeyHash>
-        s_plan_cache;
-    inline static std::mutex s_mutex;
-
-private:
-    int m_n_real;
-    int m_n_complex;
-    int m_nthreads;
-    int m_max_chunk_size;
-
-    fftwf_plan
-    get_or_create_plan(int batch_size, float* in_ptr, fftwf_complex* out_ptr);
-};
-
-/**
- * @brief RAII wrapper for FFTW inverse transforms (C2R)
- *
- * Manages FFTW plans for complex-to-real transforms with automatic cleanup.
- * Plans are cached per chunk size for optimal reuse across batches.
- * Thread-safe for concurrent execution calls.
- */
-class IrfftExecutor {
-public:
-    /**
-     * @brief Construct executor for given transform size
-     * @param n_real Size of real output (input will be n_real/2+1 complex)
-     * @param nthreads Number of threads to use for FFTW (default: 1)
-     * @param max_chunk_size Maximum batch size for plan caching (default:
-     * 16384)
-     */
-    explicit IrfftExecutor(int n_real,
-                           int nthreads       = 1,
-                           int max_chunk_size = 16384);
-    ~IrfftExecutor() = default;
-
-    IrfftExecutor(const IrfftExecutor&)            = delete;
-    IrfftExecutor& operator=(const IrfftExecutor&) = delete;
-    IrfftExecutor(IrfftExecutor&&)                 = delete;
-    IrfftExecutor& operator=(IrfftExecutor&&)      = delete;
-
-    /**
-     * @brief Execute inverse FFT on batch of complex inputs
-     * @param complex_input Complex input array [batch_size * n_complex]
-     * @param real_output Real output array [batch_size * n_real]
-     * @param batch_size Number of transforms to perform
-     *
-     * Automatically chunks large batches and normalizes output.
-     * Plans are cached for the chunk size and reused.
-     */
-    void execute(std::span<const ComplexType> complex_input,
-                 std::span<float> real_output,
-                 int batch_size);
-
-    inline static std::unordered_map<PlanKey, fftwf_plan, PlanKeyHash>
-        s_plan_cache;
-    inline static std::mutex s_mutex;
-
-private:
-    int m_n_real;
-    int m_n_complex;
-    int m_nthreads;
-    int m_max_chunk_size;
-
-    fftwf_plan
-    get_or_create_plan(int batch_size, fftwf_complex* in_ptr, float* out_ptr);
-};
+inline constexpr int kFFTBatchSizeMax = 16384;
 
 /**
  * @brief 2D FFT for circular convolution
@@ -177,29 +54,131 @@ private:
     fftwf_plan m_plan_inverse;
 };
 
-void rfft_batch(std::span<float> real_input,
+/**
+ * @brief Owns optional FFTW plan caches and runs batched R2C / C2R 1D FFTs.
+ *
+ * Empty manager (default): each rfft_batch / irfft_batch call creates
+ * 1–3 ephemeral plans, executes with OpenMP over balanced batch slices,
+ * and destroys the plans before returning. Optimal for a one-shot FFA.
+ *
+ * After prepare_plans: a power-of-two howmany ladder (1, 2, …, 16384) is
+ * stored per n_real. Subsequent calls reuse those plans and decompose
+ * each thread's slice via its binary representation.
+ *
+ * After prepare_exact_plans: no ladder is built. Each distinct howmany
+ * encountered at execute time is planned once and cached lazily (suitable
+ * for fixed n_real with varying batch sizes, e.g. EP pruning).
+ *
+ * Planner create/destroy is serialized via a library-wide mutex.
+ * Execute of a cached plan from multiple OpenMP threads is safe as long
+ * as input/output slices do not overlap.
+ */
+class FFTWManager {
+public:
+    FFTWManager();
+    ~FFTWManager();
+
+    FFTWManager(FFTWManager&&) noexcept;
+    FFTWManager& operator=(FFTWManager&&) noexcept;
+    FFTWManager(const FFTWManager&)            = delete;
+    FFTWManager& operator=(const FFTWManager&) = delete;
+
+    /**
+     * @brief Pre-build R2C and C2R plans for each distinct n_real.
+     *
+     * howmany values are 1, 2, 4, …, @p max_howmany. @p max_howmany must
+     * be a positive power of two (default 16384). If @p n_real is already
+     * prepared with the same @p max_howmany, the call is a no-op. If
+     * @p max_howmany is larger than the stored ceiling, missing ladder
+     * rungs are appended. Shrinking @p max_howmany throws.
+     */
+    void prepare_plans(std::span<const SizeType> n_reals,
+                       SizeType max_howmany = kFFTBatchSizeMax);
+
+    /**
+     * @brief Register @p n_real for lazy exact-howmany IRFFT caching.
+     *
+     * Does not pre-build plans. At irfft_batch execute time each distinct
+     * howmany value (up to @p max_howmany per chunk) is planned once and
+     * retained on this manager. rfft_batch is not supported in this mode.
+     * Use with @c nthreads=1 for workloads such as EP pruning where batch
+     * size varies but n_real is fixed.
+     */
+    void prepare_exact_plans(std::span<const SizeType> n_reals,
+                             SizeType max_howmany = kFFTBatchSizeMax);
+
+    void rfft_batch(std::span<const float> real_input,
+                    std::span<ComplexType> complex_output,
+                    SizeType batch_size,
+                    SizeType n_real,
+                    int nthreads = 1);
+
+    /**
+     * @brief Batched complex-to-real FFT with optional plan cache.
+     *
+     * 1D C2R defaults to destroying its input; this path plans with
+     * FFTW_PRESERVE_INPUT so @p complex_input is left unchanged. Applies
+     * the 1/n_real normalization that FFTW omits on C2R.
+     */
+    void irfft_batch(std::span<const ComplexType> complex_input,
+                     std::span<float> real_output,
+                     SizeType batch_size,
+                     SizeType n_real,
+                     int nthreads = 1);
+
+    [[nodiscard]] bool has_prepared(SizeType n_real) const noexcept;
+    [[nodiscard]] SizeType n_cached_plans() const noexcept;
+
+private:
+    class Impl;
+    std::unique_ptr<Impl> m_impl;
+};
+
+// Helper functions for convenience
+
+/**
+ * @brief Batched real-to-complex FFT, self-contained and OpenMP-parallel.
+ *
+ * Splits @p batch_size evenly across @p nthreads, then caps each thread's
+ * slice into howmany ≤ 16384. Creates one single-threaded FFTW plan per
+ * distinct howmany, executes them in an OpenMP loop (same plan reused
+ * concurrently on non-overlapping slices), and destroys every plan before
+ * returning. Does not use a process-wide plan cache. Planner create/destroy
+ * is serialized via a library-wide mutex. Execute is not locked.
+ *
+ * @param real_input Real input array [batch_size * n_real]
+ * @param complex_output Complex output array [batch_size * (n_real/2+1)]
+ * @param batch_size Number of transforms (any positive integer)
+ * @param n_real Length of each real transform (typically 32–1024)
+ * @param nthreads Number of OpenMP threads (default: 1)
+ */
+void rfft_batch(std::span<const float> real_input,
                 std::span<ComplexType> complex_output,
-                int batch_size,
-                int n_real,
+                SizeType batch_size,
+                SizeType n_real,
                 int nthreads = 1);
 
-void rfft_batch_chunked(std::span<float> real_input,
-                        std::span<ComplexType> complex_output,
-                        int batch_size,
-                        int n_real,
-                        int nthreads = 1);
-
-void irfft_batch(std::span<ComplexType> complex_input,
+/**
+ * @brief Batched complex-to-real FFT, self-contained and OpenMP-parallel.
+ *
+ * Same scheduling as rfft_batch: splits @p batch_size evenly across
+ * @p nthreads, caps each slice at howmany ≤ 16384, creates one
+ * single-threaded FFTW plan per distinct howmany, executes in OpenMP,
+ * and destroys every plan before returning. Applies the 1/n_real
+ * normalization that FFTW omits on C2R. Plans with FFTW_PRESERVE_INPUT
+ * so 1D C2R leaves @p complex_input unchanged.
+ *
+ * @param complex_input Complex input array [batch_size * (n_real/2+1)]
+ * @param real_output Real output array [batch_size * n_real]
+ * @param batch_size Number of transforms (any positive integer)
+ * @param n_real Length of each real transform (typically 32–1024)
+ * @param nthreads Number of OpenMP threads (default: 1)
+ */
+void irfft_batch(std::span<const ComplexType> complex_input,
                  std::span<float> real_output,
-                 int batch_size,
-                 int n_real,
+                 SizeType batch_size,
+                 SizeType n_real,
                  int nthreads = 1);
-
-void irfft_batch_chunked(std::span<ComplexType> complex_input,
-                         std::span<float> real_output,
-                         int batch_size,
-                         int n_real,
-                         int nthreads = 1);
 
 #ifdef LOKI_ENABLE_CUDA
 

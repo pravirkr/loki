@@ -18,7 +18,7 @@
 message(STATUS "Searching for required system dependencies...")
 find_package(OpenMP REQUIRED COMPONENTS CXX)
 find_package(HDF5 REQUIRED) # For HighFive
-find_package(FFTW REQUIRED COMPONENTS FLOAT_LIB FLOAT_OPENMP_LIB)
+find_package(FFTW REQUIRED COMPONENTS FLOAT_LIB)
 
 # -----------------------------------------------------------------------
 # 2. CPM-managed dependencies (pinned versions, bundled by default)

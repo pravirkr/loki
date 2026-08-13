@@ -7,6 +7,7 @@
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
+#include "loki/utils/fft.hpp"
 #include "loki/utils/workspace.hpp"
 
 #ifdef LOKI_ENABLE_CUDA
@@ -25,12 +26,13 @@ namespace loki::algorithms {
  */
 template <SupportedFoldType FoldType> class FFA {
 public:
-    // Chunked FFA constructor (owns workspace)
+    // Chunked FFA constructor (owns workspace and an empty FFTWManager)
     explicit FFA(const search::PulsarSearchConfig& cfg,
                  bool show_progress = true);
 
-    // Pipeline-based FFA constructor uses external workspace
+    // Pipeline-based FFA constructor uses external workspace and FFTWManager
     explicit FFA(memory::FFAWorkspace<FoldType>& workspace,
+                 math::FFTWManager& fft_manager,
                  const search::PulsarSearchConfig& cfg,
                  bool show_progress = true);
 
