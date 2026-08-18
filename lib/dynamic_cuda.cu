@@ -25,12 +25,14 @@ BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::BasePruneDPFunctsCUDA(
     double tseg_ffa,
     search::PulsarSearchConfig cfg,
     SizeType batch_size,
-    SizeType branch_max)
+    SizeType branch_max,
+    int device_id)
     : m_nseg_ffa(nseg_ffa),
       m_tseg_ffa(tseg_ffa),
       m_cfg(std::move(cfg)),
       m_batch_size(batch_size),
-      m_branch_max(branch_max) {
+      m_branch_max(branch_max),
+      m_fft_manager(device_id) {
     m_boxcar_widths_d        = m_cfg.get_scoring_widths();
     m_boxcar_kadane_biases_d = m_cfg.get_boxcar_kadane_biases();
     const auto param_limits  = m_cfg.get_param_limits();
@@ -65,13 +67,51 @@ BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::BasePruneDPFunctsCUDA(
         "cudaMemcpyAsync param limits failed");
 
     if constexpr (std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>) {
-        m_irfft_executor =
-            std::make_unique<math::IrfftExecutorCUDA>(m_cfg.get_nbins());
-        const auto max_batch_size = m_batch_size * m_branch_max;
-        m_scratch_folds_d.resize(max_batch_size * 2 * m_cfg.get_nbins());
+        const auto nbins = m_cfg.get_nbins();
+        m_fft_manager.prepare_exact_plans(std::span<const SizeType>(&nbins, 1));
+        const auto max_nfft =
+            std::max(2 * m_batch_size * m_branch_max, 2 * m_n_coords_init);
+        const auto nbins_f = m_cfg.get_nbins_f();
+        m_scratch_folds_c_d.resize(max_nfft * nbins_f);
+        m_scratch_folds_r_d.resize(max_nfft * nbins);
     } else {
-        m_scratch_folds_d.resize(1); // Not needed for float
+        m_scratch_folds_c_d.resize(1); // Not needed for float
+        m_scratch_folds_r_d.resize(1); // Not needed for float
     }
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA, typename Derived>
+void BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::irfft_for_scoring(
+    cuda::std::span<const ComplexTypeCUDA> src,
+    SizeType nfft,
+    cuda::std::span<float> dst,
+    cudaStream_t stream)
+    requires(std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>)
+{
+    const auto nbins     = m_cfg.get_nbins();
+    const auto nbins_f   = m_cfg.get_nbins_f();
+    const auto n_complex = nfft * nbins_f;
+    auto scratch = cuda_utils::as_span(m_scratch_folds_c_d).first(n_complex);
+    cuda_utils::check_cuda_call(
+        cudaMemcpyAsync(scratch.data(), src.data(),
+                        n_complex * sizeof(ComplexTypeCUDA),
+                        cudaMemcpyDeviceToDevice, stream),
+        "irfft_for_scoring: d2d copy failed");
+    m_fft_manager.irfft_batch(scratch, dst.first(nfft * nbins), nfft, nbins,
+                              stream);
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA, typename Derived>
+float BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::get_irfft_scratch_memory_gib()
+    const noexcept {
+    if constexpr (std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>) {
+        const auto bytes =
+            (m_scratch_folds_c_d.size() * sizeof(ComplexTypeCUDA)) +
+            (m_scratch_folds_r_d.size() * sizeof(float));
+        return static_cast<float>(bytes) /
+               static_cast<float>(1ULL << 30U);
+    }
+    return 0.0F;
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA, typename Derived>
@@ -146,9 +186,8 @@ SizeType BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::score_and_filter(
         const auto nfft = 2 * n_leaves;
         auto folds_span = folds_tree.first(nfft * nbins_f);
         auto folds_t_span =
-            cuda_utils::as_span(m_scratch_folds_d).first(nfft * nbins);
-        m_irfft_executor->execute(folds_span, folds_t_span,
-                                  static_cast<int>(nfft), stream);
+            cuda_utils::as_span(m_scratch_folds_r_d).first(nfft * nbins);
+        irfft_for_scoring(folds_span, nfft, folds_t_span, stream);
         if (m_cfg.get_use_boxcar_kadane()) {
             return detection::score_and_filter_max_cuda_kadane_d(
                 folds_t_span,
@@ -197,9 +236,8 @@ void BaseTaylorPruneDPFunctsCUDA<FoldTypeCUDA, Derived>::seed(
         error_check::check_equal(fold_segment.size(), nfft * nbins_f,
                                  "fold_segment size mismatch");
         auto folds_t_span =
-            cuda_utils::as_span(this->m_scratch_folds_d).first(nfft * nbins);
-        this->m_irfft_executor->execute(fold_segment, folds_t_span,
-                                        static_cast<int>(nfft), stream);
+            cuda_utils::as_span(this->m_scratch_folds_r_d).first(nfft * nbins);
+        this->irfft_for_scoring(fold_segment, nfft, folds_t_span, stream);
         detection::snr_boxcar_3d_max_cuda_d(
             folds_t_span, cuda_utils::as_span(this->m_boxcar_widths_d),
             seed_scores, this->m_n_coords_init, nbins, stream);
@@ -241,9 +279,8 @@ void BaseChebyshevPruneDPFunctsCUDA<FoldTypeCUDA, Derived>::seed(
         error_check::check_equal(fold_segment.size(), nfft * nbins_f,
                                  "fold_segment size mismatch");
         auto folds_t_span =
-            cuda_utils::as_span(this->m_scratch_folds_d).first(nfft * nbins);
-        this->m_irfft_executor->execute(fold_segment, folds_t_span,
-                                        static_cast<int>(nfft), stream);
+            cuda_utils::as_span(this->m_scratch_folds_r_d).first(nfft * nbins);
+        this->irfft_for_scoring(fold_segment, nfft, folds_t_span, stream);
         detection::snr_boxcar_3d_max_cuda_d(
             folds_t_span, cuda_utils::as_span(this->m_boxcar_widths_d),
             seed_scores, this->m_n_coords_init, nbins, stream);
@@ -266,14 +303,16 @@ PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>::PrunePolyTaylorDPFunctsCUDA(
     double tseg_ffa,
     search::PulsarSearchConfig cfg,
     SizeType batch_size,
-    SizeType branch_max)
+    SizeType branch_max,
+    int device_id)
     : Base(param_grid_count_init,
            dparams_init,
            nseg_ffa,
            tseg_ffa,
            std::move(cfg),
            batch_size,
-           branch_max) {}
+           branch_max,
+           device_id) {}
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 SizeType PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>::branch(
@@ -373,9 +412,8 @@ void PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>::ascend(
             n_coords_init, n_leaves, n_segments, stream);
         const auto nfft = 2 * n_leaves;
         auto folds_t_span =
-            cuda_utils::as_span(this->m_scratch_folds_d).first(nfft * nbins);
-        this->m_irfft_executor->execute(folds_tree, folds_t_span,
-                                        static_cast<int>(nfft), stream);
+            cuda_utils::as_span(this->m_scratch_folds_r_d).first(nfft * nbins);
+        this->irfft_for_scoring(folds_tree, nfft, folds_t_span, stream);
         detection::snr_boxcar_3d_max_cuda_d(
             folds_t_span, cuda_utils::as_span(this->m_boxcar_widths_d),
             scores_tree, n_leaves, nbins, stream);
@@ -415,14 +453,16 @@ PrunePolyChebyshevDPFunctsCUDA<FoldTypeCUDA>::PrunePolyChebyshevDPFunctsCUDA(
     double tseg_ffa,
     search::PulsarSearchConfig cfg,
     SizeType batch_size,
-    SizeType branch_max)
+    SizeType branch_max,
+    int device_id)
     : Base(param_grid_count_init,
            dparams_init,
            nseg_ffa,
            tseg_ffa,
            std::move(cfg),
            batch_size,
-           branch_max) {}
+           branch_max,
+           device_id) {}
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 SizeType PrunePolyChebyshevDPFunctsCUDA<FoldTypeCUDA>::branch(
@@ -526,9 +566,8 @@ void PrunePolyChebyshevDPFunctsCUDA<FoldTypeCUDA>::ascend(
             n_coords_init, n_leaves, n_segments, stream);
         const auto nfft = 2 * n_leaves;
         auto folds_t_span =
-            cuda_utils::as_span(this->m_scratch_folds_d).first(nfft * nbins);
-        this->m_irfft_executor->execute(folds_tree, folds_t_span,
-                                        static_cast<int>(nfft), stream);
+            cuda_utils::as_span(this->m_scratch_folds_r_d).first(nfft * nbins);
+        this->irfft_for_scoring(folds_tree, nfft, folds_t_span, stream);
         detection::snr_boxcar_3d_max_cuda_d(
             folds_t_span, cuda_utils::as_span(this->m_boxcar_widths_d),
             scores_tree, n_leaves, nbins, stream);
@@ -572,14 +611,16 @@ PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>::PruneCircTaylorDPFunctsCUDA(
     double tseg_ffa,
     search::PulsarSearchConfig cfg,
     SizeType batch_size,
-    SizeType branch_max)
+    SizeType branch_max,
+    int device_id)
     : Base(param_grid_count_init,
            dparams_init,
            nseg_ffa,
            tseg_ffa,
            std::move(cfg),
            batch_size,
-           branch_max) {}
+           branch_max,
+           device_id) {}
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 SizeType PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>::branch(
@@ -596,8 +637,8 @@ SizeType PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>::branch(
     return circ_taylor_branch_batch_cuda(
         leaves_tree, leaves_branch, leaves_origins, validation_mask, coord_cur,
         this->m_cfg.get_nbins(), this->m_cfg.get_eta(), this->m_branch_max,
-        n_leaves, this->m_cfg.get_propagator_significance(), branch_ws, scratch_ws,
-        stream);
+        n_leaves, this->m_cfg.get_propagator_significance(), branch_ws,
+        scratch_ws, stream);
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
@@ -611,8 +652,8 @@ SizeType PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>::validate(
     cudaStream_t stream) const noexcept {
     return circ_taylor_validate_batch_cuda(
         leaves_branch, validation_mask, n_leaves, this->m_cfg.get_p_orb_min(),
-        this->m_cfg.get_x_mass_const(), this->m_cfg.get_validation_significance(),
-        scratch_ws, stream);
+        this->m_cfg.get_x_mass_const(),
+        this->m_cfg.get_validation_significance(), scratch_ws, stream);
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
@@ -695,9 +736,8 @@ void PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>::ascend(
             n_coords_init, n_leaves, n_segments, stream);
         const auto nfft = 2 * n_leaves;
         auto folds_t_span =
-            cuda_utils::as_span(this->m_scratch_folds_d).first(nfft * nbins);
-        this->m_irfft_executor->execute(folds_tree, folds_t_span,
-                                        static_cast<int>(nfft), stream);
+            cuda_utils::as_span(this->m_scratch_folds_r_d).first(nfft * nbins);
+        this->irfft_for_scoring(folds_tree, nfft, folds_t_span, stream);
         detection::snr_boxcar_3d_max_cuda_d(
             folds_t_span, cuda_utils::as_span(this->m_boxcar_widths_d),
             scores_tree, n_leaves, nbins, stream);
@@ -737,22 +777,23 @@ create_prune_dp_functs_cuda(std::string_view poly_basis,
                             double tseg_ffa,
                             search::PulsarSearchConfig cfg,
                             SizeType batch_size,
-                            SizeType branch_max) {
+                            SizeType branch_max,
+                            int device_id) {
     const auto n_params = cfg.get_nparams();
     if (poly_basis == "taylor" && n_params <= 4) {
         return std::make_unique<PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>>(
             param_grid_count_init, dparams_init, nseg_ffa, tseg_ffa,
-            std::move(cfg), batch_size, branch_max);
+            std::move(cfg), batch_size, branch_max, device_id);
     }
     if (poly_basis == "taylor" && n_params == 5) {
         return std::make_unique<PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>>(
             param_grid_count_init, dparams_init, nseg_ffa, tseg_ffa,
-            std::move(cfg), batch_size, branch_max);
+            std::move(cfg), batch_size, branch_max, device_id);
     }
     if (poly_basis == "chebyshev" && n_params <= 4) {
         return std::make_unique<PrunePolyChebyshevDPFunctsCUDA<FoldTypeCUDA>>(
             param_grid_count_init, dparams_init, nseg_ffa, tseg_ffa,
-            std::move(cfg), batch_size, branch_max);
+            std::move(cfg), batch_size, branch_max, device_id);
     }
     throw std::runtime_error(std::format(
         "Unknown poly_basis: '{}'. Valid options: 'taylor', 'chebyshev'",
@@ -804,7 +845,8 @@ create_prune_dp_functs_cuda<float>(std::string_view,
                                    double,
                                    search::PulsarSearchConfig,
                                    SizeType,
-                                   SizeType);
+                                   SizeType,
+                                   int);
 template std::unique_ptr<PruneDPFunctsCUDA<ComplexTypeCUDA>>
 create_prune_dp_functs_cuda<ComplexTypeCUDA>(std::string_view,
                                              std::span<const SizeType>,
@@ -813,6 +855,7 @@ create_prune_dp_functs_cuda<ComplexTypeCUDA>(std::string_view,
                                              double,
                                              search::PulsarSearchConfig,
                                              SizeType,
-                                             SizeType);
+                                             SizeType,
+                                             int);
 
 } // namespace loki::core

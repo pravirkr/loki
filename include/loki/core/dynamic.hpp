@@ -110,6 +110,11 @@ public:
     virtual void report(std::span<double> leaves_tree,
                         std::pair<double, double> coord_report,
                         SizeType n_leaves) const = 0;
+
+    /** IRFFT scoring scratch (complex + real), zero for float EP. */
+    [[nodiscard]] virtual float get_irfft_scratch_memory_gib() const noexcept {
+        return 0.0F;
+    }
 };
 
 // CRTP Base class - shared functionality for all derived classes
@@ -128,8 +133,10 @@ protected:
     SizeType m_n_coords_init{};
     // Buffer for shift-add operations
     std::vector<FoldType> m_scratch_shifts;
-    // Buffer for ComplexType irfft transform
-    std::vector<float> m_scratch_folds;
+    // IRFFT scratch: complex copy (C2R overwrites input) + real output for
+    // scoring
+    std::vector<ComplexType> m_scratch_folds_c;
+    std::vector<float> m_scratch_folds_r;
     math::FFTWManager m_fft_manager;
     // Cache for snr_boxcar_batch
     detection::BoxcarWidthsCache m_boxcar_widths_cache;
@@ -143,6 +150,12 @@ protected:
                       search::PulsarSearchConfig cfg,
                       SizeType batch_size,
                       SizeType branch_max);
+
+    /** Copy complex folds to scratch, IRFFT to @p dst (ComplexType EP only). */
+    void irfft_for_scoring(std::span<const ComplexType> src,
+                           SizeType nfft,
+                           std::span<float> dst)
+        requires(std::is_same_v<FoldType, ComplexType>);
 
 public:
     // Common implementations shared by all variants
@@ -179,6 +192,8 @@ public:
 
     void pack(std::span<const FoldType> data,
               std::span<FoldType> out) const noexcept override;
+
+    [[nodiscard]] float get_irfft_scratch_memory_gib() const noexcept override;
 };
 
 // Intermediate base for Taylor-based methods (common seed implementation)
@@ -511,6 +526,11 @@ public:
                         std::pair<double, double> coord_report,
                         SizeType n_leaves,
                         cudaStream_t stream) const = 0;
+
+    /** IRFFT scoring scratch (complex + real), zero for float EP. */
+    [[nodiscard]] virtual float get_irfft_scratch_memory_gib() const noexcept {
+        return 0.0F;
+    }
 };
 
 // CRTP Base class - shared functionality for all derived classes
@@ -523,6 +543,7 @@ protected:
     search::PulsarSearchConfig m_cfg;
     SizeType m_batch_size;
     SizeType m_branch_max;
+    math::CUFFTManager m_fft_manager;
 
     SizeType m_n_coords_init{};
     thrust::device_vector<SizeType> m_param_grid_count_init_d;
@@ -531,9 +552,10 @@ protected:
     thrust::device_vector<uint32_t> m_boxcar_widths_d;
     thrust::device_vector<float> m_boxcar_kadane_biases_d;
 
-    // Buffer for ComplexType irfft transform
-    thrust::device_vector<float> m_scratch_folds_d;
-    std::unique_ptr<math::IrfftExecutorCUDA> m_irfft_executor;
+    // IRFFT scratch: complex copy (C2R overwrites input) + real output for
+    // scoring
+    thrust::device_vector<ComplexTypeCUDA> m_scratch_folds_c_d;
+    thrust::device_vector<float> m_scratch_folds_r_d;
 
     // Constructor for all derived classes
     BasePruneDPFunctsCUDA(std::span<const SizeType> param_grid_count_init,
@@ -542,7 +564,15 @@ protected:
                           double tseg_ffa,
                           search::PulsarSearchConfig cfg,
                           SizeType batch_size,
-                          SizeType branch_max);
+                          SizeType branch_max,
+                          int device_id = 0);
+
+    /** Copy complex folds to scratch, IRFFT to @p dst (ComplexType EP only). */
+    void irfft_for_scoring(cuda::std::span<const ComplexTypeCUDA> src,
+                           SizeType nfft,
+                           cuda::std::span<float> dst,
+                           cudaStream_t stream)
+        requires(std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>);
 
 public:
     // Common implementations shared by all variants
@@ -578,6 +608,8 @@ public:
                               SizeType n_leaves,
                               memory::CUBScratchArena& scratch_ws,
                               cudaStream_t stream) noexcept override;
+
+    [[nodiscard]] float get_irfft_scratch_memory_gib() const noexcept override;
 };
 
 // Intermediate base for Taylor-based methods (common seed implementation)
@@ -635,7 +667,8 @@ public:
                                 double tseg_ffa,
                                 search::PulsarSearchConfig cfg,
                                 SizeType batch_size,
-                                SizeType branch_max);
+                                SizeType branch_max,
+                                int device_id = 0);
 
     SizeType branch(cuda::std::span<double> leaves_tree,
                     cuda::std::span<double> leaves_branch,
@@ -704,7 +737,8 @@ public:
         double tseg_ffa,
         search::PulsarSearchConfig cfg,
         SizeType batch_size,
-        SizeType branch_max);
+        SizeType branch_max,
+        int device_id = 0);
 
     SizeType branch(cuda::std::span<double> leaves_tree,
                     cuda::std::span<double> leaves_branch,
@@ -773,7 +807,8 @@ public:
                                 double tseg_ffa,
                                 search::PulsarSearchConfig cfg,
                                 SizeType batch_size,
-                                SizeType branch_max);
+                                SizeType branch_max,
+                                int device_id = 0);
 
     SizeType branch(cuda::std::span<double> leaves_tree,
                     cuda::std::span<double> leaves_branch,
@@ -841,7 +876,8 @@ create_prune_dp_functs_cuda(std::string_view poly_basis,
                             double tseg_ffa,
                             search::PulsarSearchConfig cfg,
                             SizeType batch_size,
-                            SizeType branch_max);
+                            SizeType branch_max,
+                            int device_id = 0);
 
 // Type aliases for convenience
 using PrunePolyTaylorDPFunctsCUDAFloat = PrunePolyTaylorDPFunctsCUDA<float>;

@@ -149,6 +149,8 @@ template <SupportedFoldType FoldType> struct EPWorkspace {
 
     [[nodiscard]] float get_memory_usage_gib() const noexcept;
 
+    [[nodiscard]] float get_seed_memory_usage_gib() const noexcept;
+
     void validate(SizeType batch_size,
                   SizeType branch_max,
                   SizeType max_sugg,
@@ -347,6 +349,11 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA> struct EPWorkspaceCUDA {
     EPWorkspaceCUDA& operator=(EPWorkspaceCUDA&&) noexcept;
 
     [[nodiscard]] float get_memory_usage_gib() const noexcept;
+
+    [[nodiscard]] float get_seed_memory_usage_gib() const noexcept;
+
+    [[nodiscard]] float get_segment_coords_memory_usage_gib() const noexcept;
+
     void validate(SizeType batch_size,
                   SizeType branch_max,
                   SizeType max_sugg,

@@ -389,7 +389,9 @@ CUBScratchArena& CUBScratchArena::operator=(CUBScratchArena&& other) noexcept {
 }
 
 float CUBScratchArena::get_memory_usage_gib() const noexcept {
-    return static_cast<float>(cub_temp_bytes) / static_cast<float>(1ULL << 30U);
+    const auto bytes =
+        cub_temp_bytes + sizeof(uint32_t) + sizeof(MinMaxFloat);
+    return static_cast<float>(bytes) / static_cast<float>(1ULL << 30U);
 }
 
 void CUBScratchArena::convert_mask_to_indices(
@@ -452,15 +454,30 @@ EPWorkspaceCUDA<FoldTypeCUDA>::EPWorkspaceCUDA(SizeType batch_size,
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
+float EPWorkspaceCUDA<FoldTypeCUDA>::get_seed_memory_usage_gib()
+    const noexcept {
+    const auto bytes =
+        (seed_leaves_d.size() * sizeof(double)) +
+        (seed_scores_d.size() * sizeof(float));
+    return static_cast<float>(bytes) / static_cast<float>(1ULL << 30U);
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+float EPWorkspaceCUDA<FoldTypeCUDA>::get_segment_coords_memory_usage_gib()
+    const noexcept {
+    const auto bytes =
+        (idx_segments_d.size() * sizeof(uint32_t)) +
+        (coord_segments_d.size() *
+         sizeof(cuda::std::pair<double, double>));
+    return static_cast<float>(bytes) / static_cast<float>(1ULL << 30U);
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
 float EPWorkspaceCUDA<FoldTypeCUDA>::get_memory_usage_gib() const noexcept {
-    const auto base_gb =
-        world_tree.get_memory_usage_gib() + prune.get_memory_usage_gib() +
-        branch.get_memory_usage_gib() + scratch.get_memory_usage_gib();
-    const auto extra_gb =
-        static_cast<float>(seed_leaves_d.size() * sizeof(double) +
-                           seed_scores_d.size() * sizeof(float)) /
-        static_cast<float>(1ULL << 30U);
-    return base_gb + extra_gb;
+    return world_tree.get_memory_usage_gib() + prune.get_memory_usage_gib() +
+           branch.get_memory_usage_gib() + scratch.get_memory_usage_gib() +
+           get_seed_memory_usage_gib() +
+           get_segment_coords_memory_usage_gib();
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>

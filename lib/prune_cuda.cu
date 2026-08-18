@@ -101,7 +101,7 @@ public:
             m_ffa_plan.get_dparams_actual().back(),
             m_ffa_plan.get_nsegments().back(),
             m_ffa_plan.get_tsegments().back(), m_cfg, m_batch_size,
-            m_branch_max);
+            m_branch_max, m_device_id);
     }
 
     ~PruneCUDAImpl()                               = default;
@@ -110,8 +110,9 @@ public:
     PruneCUDAImpl(PruneCUDAImpl&&)                 = delete;
     PruneCUDAImpl& operator=(PruneCUDAImpl&&)      = delete;
 
-    SizeType get_memory_usage() const noexcept {
-        return get_workspace().get_memory_usage_gib();
+    [[nodiscard]] float get_memory_usage_gib() const noexcept {
+        return get_workspace().get_memory_usage_gib() +
+               m_prune_funcs->get_irfft_scratch_memory_gib();
     }
 
     void execute(cuda::std::span<const FoldTypeCUDA> ffa_fold,
@@ -126,13 +127,17 @@ public:
         const std::string run_name =
             std::format("{:03d}_{:02d}", ref_seg, task_id);
 
-        // Log detailed memory usage
-        const auto& ws                   = get_workspace();
-        const auto memory_workspace_gb   = ws.prune.get_memory_usage_gib();
-        const auto memory_suggestions_gb = ws.world_tree.get_memory_usage_gib();
-        spdlog::info("Pruning run {:03d}: Memory Usage: {:.2f} GB "
-                     "(suggestions) + {:.2f} GB (workspace)",
-                     ref_seg, memory_suggestions_gb, memory_workspace_gb);
+        const auto& ws                     = get_workspace();
+        const auto memory_tree_gb          = ws.world_tree.get_memory_usage_gib();
+        const auto memory_workspace_gb     = ws.prune.get_memory_usage_gib();
+        const auto memory_irfft_scratch_gb =
+            m_prune_funcs->get_irfft_scratch_memory_gib();
+        const auto memory_total_gb         = get_memory_usage_gib();
+        spdlog::info(
+            "Pruning run {:03d}: Memory Usage: {:.2f} GB total "
+            "({:.2f} GB tree + {:.2f} GB workspace + {:.3f} GB irfft scratch)",
+            ref_seg, memory_total_gb, memory_tree_gb, memory_workspace_gb,
+            memory_irfft_scratch_gb);
 
         // Setup log and result files
         std::filesystem::path actual_log_file =

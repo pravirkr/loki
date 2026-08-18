@@ -104,11 +104,17 @@ public:
     using HostFoldT   = HostFoldType<FoldTypeCUDA>;
     using DeviceFoldT = DeviceFoldType<FoldTypeCUDA>;
 
-    // Constructor with owned workspace
+    // Constructor with owned workspace and empty CUFFTManager
     explicit FFACUDA(const search::PulsarSearchConfig& cfg, int device_id = 0);
 
-    // Constructor with external workspace (for pipeline use)
+    // Constructor with external workspace (owns an empty CUFFTManager)
     explicit FFACUDA(memory::FFAWorkspaceCUDA<FoldTypeCUDA>& workspace,
+                     const search::PulsarSearchConfig& cfg,
+                     int device_id = 0);
+
+    // Pipeline constructor: external workspace and CUFFTManager
+    explicit FFACUDA(memory::FFAWorkspaceCUDA<FoldTypeCUDA>& workspace,
+                     math::CUFFTManager& fft_manager,
                      const search::PulsarSearchConfig& cfg,
                      int device_id = 0);
 

@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <bit>
 #include <cassert>
-#include <cstddef>
 #include <format>
 #include <limits>
 #include <memory>
@@ -190,8 +189,7 @@ FFTWPlan make_rfft_plan(SizeType n_real, SizeType n_complex, SizeType howmany) {
             nullptr, 1, n_real_i,    // input layout: stride=1, dist=n_real
             nullptr,                 // output (dummy for planning)
             nullptr, 1, n_complex_i, // output layout: stride=1, dist=n_complex
-            // 1D r2c preserves input by default; the flag makes that explicit.
-            FFTW_ESTIMATE | FFTW_PRESERVE_INPUT);
+            FFTW_ESTIMATE);
     }
     if (raw == nullptr) {
         throw std::runtime_error(
@@ -207,8 +205,6 @@ make_irfft_plan(SizeType n_real, SizeType n_complex, SizeType howmany) {
     const int n_complex_i = static_cast<int>(n_complex);
     const int howmany_i   = howmany_to_fftw(howmany);
     fftwf_plan raw        = nullptr;
-    // 1D c2r defaults to destroying input. FFTW_PRESERVE_INPUT selects a
-    // buffered algorithm so the spectrum can be passed as const.
     {
         std::scoped_lock lock(fftw_planner_mutex());
         raw = fftwf_plan_many_dft_c2r(
@@ -219,7 +215,7 @@ make_irfft_plan(SizeType n_real, SizeType n_complex, SizeType howmany) {
             nullptr, 1, n_complex_i, // input layout: stride=1, dist=n_complex
             nullptr,                 // output (dummy for planning)
             nullptr, 1, n_real_i,    // output layout: stride=1, dist=n_real
-            FFTW_ESTIMATE | FFTW_PRESERVE_INPUT);
+            FFTW_ESTIMATE);
     }
     if (raw == nullptr) {
         throw std::runtime_error(
@@ -598,7 +594,7 @@ SizeType FFTWManager::n_cached_plans() const noexcept {
     return n_plans;
 }
 
-void FFTWManager::rfft_batch(std::span<const float> real_input,
+void FFTWManager::rfft_batch(std::span<float> real_input,
                              std::span<ComplexType> complex_output,
                              SizeType batch_size,
                              SizeType n_real,
@@ -627,9 +623,8 @@ void FFTWManager::rfft_batch(std::span<const float> real_input,
         std::min(static_cast<SizeType>(nthreads), batch_size);
     const auto slices = build_batch_slices(batch_size, n_workers);
 
-    // FFTW's C API is not const-correct. 1D r2c with FFTW_PRESERVE_INPUT
-    // does not write the input, so this const_cast is an API workaround.
-    auto* in_ptr  = const_cast<float*>(real_input.data()); // NOLINT
+    // May overwrite real input. Be prepared to make a copy if needed.
+    auto* in_ptr  = real_input.data();
     auto* out_ptr = reinterpret_cast<fftwf_complex*>(complex_output.data());
 
     if (has_prepared(n_real)) {
@@ -663,7 +658,7 @@ void FFTWManager::rfft_batch(std::span<const float> real_input,
                            n_complex, local_plans);
 }
 
-void FFTWManager::irfft_batch(std::span<const ComplexType> complex_input,
+void FFTWManager::irfft_batch(std::span<ComplexType> complex_input,
                               std::span<float> real_output,
                               SizeType batch_size,
                               SizeType n_real,
@@ -693,10 +688,8 @@ void FFTWManager::irfft_batch(std::span<const ComplexType> complex_input,
     const auto slices = build_batch_slices(batch_size, n_workers);
     const float norm  = 1.0F / static_cast<float>(n_real);
 
-    // FFTW's C API is not const-correct. 1D c2r with FFTW_PRESERVE_INPUT
-    // does not write the input, so this const_cast is an API workaround.
-    auto* in_ptr = reinterpret_cast<fftwf_complex*>(
-        const_cast<ComplexType*>(complex_input.data())); // NOLINT
+    // May overwrite complex input. Be prepared to make a copy if needed.
+    auto* in_ptr  = reinterpret_cast<fftwf_complex*>(complex_input.data());
     auto* out_ptr = real_output.data();
 
     if (has_prepared(n_real)) {
@@ -782,7 +775,7 @@ void FFT2D::circular_convolve(std::span<float> n1,
     fftwf_execute_dft_c2r(m_plan_inverse, m_n1n2_fft, out.data());
 }
 
-void rfft_batch(std::span<const float> real_input,
+void rfft_batch(std::span<float> real_input,
                 std::span<ComplexType> complex_output,
                 SizeType batch_size,
                 SizeType n_real,
@@ -792,7 +785,7 @@ void rfft_batch(std::span<const float> real_input,
                        nthreads);
 }
 
-void irfft_batch(std::span<const ComplexType> complex_input,
+void irfft_batch(std::span<ComplexType> complex_input,
                  std::span<float> real_output,
                  SizeType batch_size,
                  SizeType n_real,
