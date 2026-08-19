@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include <fftw3.h>
 #include <omp.h>
 #include <spdlog/spdlog.h>
 
@@ -725,54 +726,102 @@ void FFTWManager::irfft_batch(std::span<ComplexType> complex_input,
 }
 
 // --- FFT2D Implementation ---
+
+class FFT2D::Impl {
+public:
+    Impl(SizeType n1x, SizeType n2x, SizeType ny)
+        : m_n1x(n1x),
+          m_n2x(n2x),
+          m_ny(ny),
+          m_fft_size((m_ny / 2) + 1),
+          m_n1_fft(fftwf_alloc_complex(n1x * m_fft_size)),
+          m_n2_fft(fftwf_alloc_complex(n2x * m_fft_size)),
+          m_n1n2_fft(fftwf_alloc_complex(n1x * n2x * m_fft_size)),
+          m_plan_forward(make_2d_r2c_plan(n1x, m_ny)),
+          m_plan_inverse(make_2d_c2r_plan(n1x, m_ny)) {
+        if (m_n1_fft == nullptr || m_n2_fft == nullptr ||
+            m_n1n2_fft == nullptr) {
+            throw std::runtime_error("FFT2D: FFTW buffer allocation failed");
+        }
+    }
+
+    ~Impl() {
+        fftwf_free(m_n1_fft);
+        fftwf_free(m_n2_fft);
+        fftwf_free(m_n1n2_fft);
+    }
+
+    Impl(const Impl&)            = delete;
+    Impl& operator=(const Impl&) = delete;
+    Impl(Impl&&)                 = delete;
+    Impl& operator=(Impl&&)      = delete;
+
+    void circular_convolve(std::span<float> n1,
+                             std::span<float> n2,
+                             std::span<float> out) {
+        fftwf_execute_dft_r2c(m_plan_forward.get(), n1.data(), m_n1_fft);
+        fftwf_execute_dft_r2c(m_plan_forward.get(), n2.data(), m_n2_fft);
+        for (SizeType i = 0; i < m_n1x * m_n2x * m_fft_size; ++i) {
+            const SizeType idx_n1 =
+                ((i / (m_n2x * m_fft_size)) * m_fft_size) + (i % m_fft_size);
+            const SizeType idx_n2 = ((i / m_fft_size) % m_n2x * m_fft_size) +
+                                    (i % m_fft_size);
+            m_n1n2_fft[i][0] = (m_n1_fft[idx_n1][0] * m_n2_fft[idx_n2][0]) -
+                               (m_n1_fft[idx_n1][1] * m_n2_fft[idx_n2][1]);
+            m_n1n2_fft[i][1] = (m_n1_fft[idx_n1][0] * m_n2_fft[idx_n2][1]) +
+                               (m_n1_fft[idx_n1][1] * m_n2_fft[idx_n2][0]);
+        }
+        fftwf_execute_dft_c2r(m_plan_inverse.get(), m_n1n2_fft, out.data());
+    }
+
+private:
+    static FFTWPlan make_2d_r2c_plan(SizeType n1x, SizeType ny) {
+        fftwf_plan raw = nullptr;
+        {
+            std::scoped_lock lock(fftw_planner_mutex());
+            raw = fftwf_plan_dft_r2c_2d(static_cast<int>(n1x),
+                                          static_cast<int>(ny),
+                                          nullptr,
+                                          nullptr,
+                                          FFTW_ESTIMATE);
+        }
+        return FFTWPlan{raw};
+    }
+
+    static FFTWPlan make_2d_c2r_plan(SizeType n1x, SizeType ny) {
+        fftwf_plan raw = nullptr;
+        {
+            std::scoped_lock lock(fftw_planner_mutex());
+            raw = fftwf_plan_dft_c2r_2d(static_cast<int>(n1x),
+                                        static_cast<int>(ny),
+                                        nullptr,
+                                        nullptr,
+                                        FFTW_ESTIMATE);
+        }
+        return FFTWPlan{raw};
+    }
+
+    SizeType m_n1x;
+    SizeType m_n2x;
+    SizeType m_ny;
+    SizeType m_fft_size;
+
+    fftwf_complex* m_n1_fft;
+    fftwf_complex* m_n2_fft;
+    fftwf_complex* m_n1n2_fft;
+    FFTWPlan m_plan_forward;
+    FFTWPlan m_plan_inverse;
+};
+
 FFT2D::FFT2D(SizeType n1x, SizeType n2x, SizeType ny)
-    : m_n1x(n1x),
-      m_n2x(n2x),
-      m_ny(ny),
-      m_fft_size((m_ny / 2) + 1),
-      m_n1_fft(fftwf_alloc_complex(n1x * m_fft_size)),
-      m_n2_fft(fftwf_alloc_complex(n2x * m_fft_size)),
-      m_n1n2_fft(fftwf_alloc_complex(n1x * n2x * m_fft_size)),
-      m_plan_forward(fftwf_plan_dft_r2c_2d(static_cast<int>(n1x),
-                                           static_cast<int>(m_ny),
-                                           nullptr,
-                                           nullptr,
-                                           FFTW_ESTIMATE)),
-      m_plan_inverse(fftwf_plan_dft_c2r_2d(static_cast<int>(n1x),
-                                           static_cast<int>(m_ny),
-                                           nullptr,
-                                           nullptr,
-                                           FFTW_ESTIMATE)) {
+    : m_impl(std::make_unique<Impl>(n1x, n2x, ny)) {}
 
-      };
-
-FFT2D::~FFT2D() {
-    fftwf_free(m_n1_fft);
-    fftwf_free(m_n2_fft);
-    fftwf_free(m_n1n2_fft);
-    fftwf_destroy_plan(m_plan_forward);
-    fftwf_destroy_plan(m_plan_inverse);
-}
+FFT2D::~FFT2D() = default;
 
 void FFT2D::circular_convolve(std::span<float> n1,
                               std::span<float> n2,
                               std::span<float> out) {
-    // Forward FFT
-    fftwf_execute_dft_r2c(m_plan_forward, n1.data(), m_n1_fft);
-    fftwf_execute_dft_r2c(m_plan_forward, n2.data(), m_n2_fft);
-    // Multiply the FFTs
-    for (SizeType i = 0; i < m_n1x * m_n2x * m_fft_size; ++i) {
-        const SizeType idx_n1 =
-            ((i / (m_n2x * m_fft_size)) * m_fft_size) + (i % m_fft_size);
-        const SizeType idx_n2 =
-            ((i / m_fft_size) % m_n2x * m_fft_size) + (i % m_fft_size);
-        m_n1n2_fft[i][0] = (m_n1_fft[idx_n1][0] * m_n2_fft[idx_n2][0]) -
-                           (m_n1_fft[idx_n1][1] * m_n2_fft[idx_n2][1]);
-        m_n1n2_fft[i][1] = (m_n1_fft[idx_n1][0] * m_n2_fft[idx_n2][1]) +
-                           (m_n1_fft[idx_n1][1] * m_n2_fft[idx_n2][0]);
-    }
-    // Inverse FFT
-    fftwf_execute_dft_c2r(m_plan_inverse, m_n1n2_fft, out.data());
+    m_impl->circular_convolve(n1, n2, out);
 }
 
 void rfft_batch(std::span<float> real_input,

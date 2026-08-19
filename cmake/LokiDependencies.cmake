@@ -3,7 +3,9 @@
 #
 # Design rules:
 #   1. OpenMP, HDF5, and FFTW are hard system dependencies — never fetched.
-#   2. FFTW is exposed in loki's public API -> always linked PUBLIC.
+#   2. FFTW is internal (pimpl in lib/fft.cpp). Linked PRIVATE for shared loki;
+#      for static loki it is linked with LINK_ONLY so consumers resolve symbols
+#      without inheriting fftw3.h include paths.
 #   3. OpenMP and HDF5 are internal. For a SHARED loki they are linked PRIVATE;
 #      for STATIC loki they are linked PUBLIC so consumers can resolve symbols.
 #   4. fmt and spdlog are CPM-pinned header-only libraries (single translation

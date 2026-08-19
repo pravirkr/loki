@@ -34,6 +34,19 @@ void brute_fold_ts(const float* __restrict__ ts_e,
                    SizeType nbins,
                    int nthreads) noexcept;
 
+// Fallback implementation
+void brute_fold_ts_complex_xsimd(const float* __restrict__ ts_e,
+                                 const float* __restrict__ ts_v,
+                                 ComplexType* __restrict__ fold,
+                                 const double* __restrict__ freqs,
+                                 SizeType nfreqs,
+                                 SizeType nsegments,
+                                 SizeType segment_len,
+                                 SizeType nbins,
+                                 double tsamp,
+                                 double t_ref,
+                                 int nthreads) noexcept;
+
 void brute_fold_ts_complex(const float* __restrict__ ts_e,
                            const float* __restrict__ ts_v,
                            ComplexType* __restrict__ fold,

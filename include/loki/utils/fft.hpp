@@ -8,8 +8,6 @@
 #include <cuda_runtime.h>
 #endif // LOKI_ENABLE_CUDA
 
-#include <fftw3.h>
-
 #include "loki/common/types.hpp"
 
 namespace loki::math {
@@ -36,16 +34,8 @@ public:
                            std::span<float> out);
 
 private:
-    SizeType m_n1x;
-    SizeType m_n2x;
-    SizeType m_ny;
-    SizeType m_fft_size;
-
-    fftwf_complex* m_n1_fft;
-    fftwf_complex* m_n2_fft;
-    fftwf_complex* m_n1n2_fft;
-    fftwf_plan m_plan_forward;
-    fftwf_plan m_plan_inverse;
+    class Impl;
+    std::unique_ptr<Impl> m_impl;
 };
 
 /**
