@@ -37,7 +37,9 @@ public:
           m_device_id(device_id),
           m_is_freq_only(m_cfg.get_nparams() == 1),
           m_workspace_storage(m_ffa_plan),
-          m_workspace_ptr(&m_workspace_storage) {
+          m_workspace_ptr(&m_workspace_storage),
+          m_fft_storage(device_id),
+          m_fft_ptr(&m_fft_storage) {
         cuda_utils::CudaSetDeviceGuard device_guard(m_device_id);
         // Validate workspace
         const auto& ws = get_workspace();
@@ -55,7 +57,30 @@ public:
           m_device_id(device_id),
           m_is_freq_only(m_cfg.get_nparams() == 1),
           m_workspace_storage(),
-          m_workspace_ptr(&workspace) {
+          m_workspace_ptr(&workspace),
+          m_fft_storage(device_id),
+          m_fft_ptr(&m_fft_storage) {
+        cuda_utils::CudaSetDeviceGuard device_guard(m_device_id);
+        // Validate workspace
+        const auto& ws = get_workspace();
+        ws.validate(m_ffa_plan);
+        // Initialize BruteFold
+        initialize_brute_fold();
+        log_info();
+    }
+
+    explicit Impl(memory::FFAWorkspaceCUDA<FoldTypeCUDA>& workspace,
+                  math::CUFFTManager& fft_manager,
+                  search::PulsarSearchConfig cfg,
+                  int device_id)
+        : m_cfg(std::move(cfg)),
+          m_ffa_plan(m_cfg),
+          m_device_id(device_id),
+          m_is_freq_only(m_cfg.get_nparams() == 1),
+          m_workspace_storage(),
+          m_workspace_ptr(&workspace),
+          m_fft_storage(device_id),
+          m_fft_ptr(&fft_manager) {
         cuda_utils::CudaSetDeviceGuard device_guard(m_device_id);
         // Validate workspace
         const auto& ws = get_workspace();
@@ -283,10 +308,9 @@ public:
                                /*output_in_internal_buffer=*/true);
         // IRFFT
         const auto nfft = fold_size_time / m_cfg.get_nbins();
-        math::irfft_batch_cuda(
+        get_fft().irfft_batch(
             cuda_utils::as_span(ws.fold_internal_d).first(fold_size_fourier),
-            fold_d.first(fold_size_time), static_cast<int>(nfft),
-            static_cast<int>(m_cfg.get_nbins()), stream);
+            fold_d.first(fold_size_time), nfft, m_cfg.get_nbins(), stream);
     }
 
 private:
@@ -312,6 +336,9 @@ private:
     // The observer pointer that always points to the active workspace.
     memory::FFAWorkspaceCUDA<FoldTypeCUDA>* m_workspace_ptr{nullptr};
 
+    math::CUFFTManager m_fft_storage;
+    math::CUFFTManager* m_fft_ptr{nullptr};
+
     [[nodiscard]] memory::FFAWorkspaceCUDA<FoldTypeCUDA>&
     get_workspace() noexcept {
         return *m_workspace_ptr;
@@ -320,6 +347,7 @@ private:
     get_workspace() const noexcept {
         return *m_workspace_ptr;
     }
+    [[nodiscard]] math::CUFFTManager& get_fft() noexcept { return *m_fft_ptr; }
 
     void log_info() {
         // Log iniital and final fold shapes
@@ -387,12 +415,11 @@ private:
                 const auto nfft = brute_fold_size_time / m_cfg.get_nbins();
                 const auto brute_fold_size_fourier =
                     nfft * ((m_cfg.get_nbins() / 2) + 1);
-                math::rfft_batch_cuda(
+                get_fft().rfft_batch(
                     real_temp_view,
                     cuda::std::span<ComplexTypeCUDA>(init_buffer_d,
                                                      brute_fold_size_fourier),
-                    static_cast<int>(nfft), static_cast<int>(m_cfg.get_nbins()),
-                    stream);
+                    nfft, m_cfg.get_nbins(), stream);
                 m_brutefold_time += timer.stop();
                 return;
             }
@@ -535,6 +562,14 @@ FFACUDA<FoldTypeCUDA>::FFACUDA(
     const search::PulsarSearchConfig& cfg,
     int device_id)
     : m_impl(std::make_unique<Impl>(workspace, cfg, device_id)) {}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+FFACUDA<FoldTypeCUDA>::FFACUDA(
+    memory::FFAWorkspaceCUDA<FoldTypeCUDA>& workspace,
+    math::CUFFTManager& fft_manager,
+    const search::PulsarSearchConfig& cfg,
+    int device_id)
+    : m_impl(std::make_unique<Impl>(workspace, fft_manager, cfg, device_id)) {}
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 FFACUDA<FoldTypeCUDA>::~FFACUDA() = default;

@@ -32,7 +32,9 @@ public:
           m_nthreads(m_cfg.get_nthreads()),
           m_is_freq_only(m_cfg.get_nparams() == 1),
           m_workspace_storage(m_ffa_plan),
-          m_workspace_ptr(&m_workspace_storage) {
+          m_workspace_ptr(&m_workspace_storage),
+          m_fft_storage(),
+          m_fft_ptr(&m_fft_storage) {
         // Validate workspace
         const auto& ws = get_workspace();
         ws.validate(m_ffa_plan);
@@ -42,6 +44,7 @@ public:
     }
 
     explicit Impl(memory::FFAWorkspace<FoldType>& workspace,
+                  math::FFTWManager& fft_manager,
                   search::PulsarSearchConfig cfg,
                   bool show_progress)
         : m_cfg(std::move(cfg)),
@@ -50,7 +53,9 @@ public:
           m_nthreads(m_cfg.get_nthreads()),
           m_is_freq_only(m_cfg.get_nparams() == 1),
           m_workspace_storage(),
-          m_workspace_ptr(&workspace) {
+          m_workspace_ptr(&workspace),
+          m_fft_storage(),
+          m_fft_ptr(&fft_manager) {
         // Validate workspace
         const auto& ws = get_workspace();
         ws.validate(m_ffa_plan);
@@ -128,9 +133,9 @@ public:
                         /*output_in_internal_buffer=*/true);
         // IRFFT
         const auto nfft = fold_size_time / m_cfg.get_nbins();
-        math::irfft_batch(std::span(ws.fold_internal).first(fold_size_fourier),
-                          fold.first(fold_size_time), static_cast<int>(nfft),
-                          static_cast<int>(m_cfg.get_nbins()), m_nthreads);
+        get_fft().irfft_batch(
+            std::span(ws.fold_internal).first(fold_size_fourier),
+            fold.first(fold_size_time), nfft, m_cfg.get_nbins(), m_nthreads);
     }
 
 private:
@@ -151,6 +156,9 @@ private:
     // The observer pointer that always points to the active workspace.
     memory::FFAWorkspace<FoldType>* m_workspace_ptr{nullptr};
 
+    math::FFTWManager m_fft_storage;
+    math::FFTWManager* m_fft_ptr{nullptr};
+
     [[nodiscard]] memory::FFAWorkspace<FoldType>& get_workspace() noexcept {
         return *m_workspace_ptr;
     }
@@ -158,6 +166,7 @@ private:
     get_workspace() const noexcept {
         return *m_workspace_ptr;
     }
+    [[nodiscard]] math::FFTWManager& get_fft() noexcept { return *m_fft_ptr; }
 
     void log_info() {
         // Log iniital and final fold shapes
@@ -223,12 +232,10 @@ private:
                 const auto nfft = brute_fold_size_time / m_cfg.get_nbins();
                 const auto brute_fold_size_fourier =
                     nfft * ((m_cfg.get_nbins() / 2) + 1);
-                math::rfft_batch(real_temp_view,
-                                 std::span<ComplexType>(
-                                     init_buffer, brute_fold_size_fourier),
-                                 static_cast<int>(nfft),
-                                 static_cast<int>(m_cfg.get_nbins()),
-                                 m_nthreads);
+                get_fft().rfft_batch(real_temp_view,
+                                     std::span<ComplexType>(
+                                         init_buffer, brute_fold_size_fourier),
+                                     nfft, m_cfg.get_nbins(), m_nthreads);
                 m_brutefold_time += timer.stop();
                 return;
             }
@@ -366,9 +373,11 @@ FFA<FoldType>::FFA(const search::PulsarSearchConfig& cfg, bool show_progress)
     : m_impl(std::make_unique<Impl>(cfg, show_progress)) {}
 template <SupportedFoldType FoldType>
 FFA<FoldType>::FFA(memory::FFAWorkspace<FoldType>& workspace,
+                   math::FFTWManager& fft_manager,
                    const search::PulsarSearchConfig& cfg,
                    bool show_progress)
-    : m_impl(std::make_unique<Impl>(workspace, cfg, show_progress)) {}
+    : m_impl(
+          std::make_unique<Impl>(workspace, fft_manager, cfg, show_progress)) {}
 template <SupportedFoldType FoldType> FFA<FoldType>::~FFA() = default;
 template <SupportedFoldType FoldType>
 FFA<FoldType>::FFA(FFA&& other) noexcept = default;

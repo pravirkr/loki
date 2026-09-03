@@ -222,7 +222,8 @@ def test_ffa_jerk(
 ) -> None:
     ts_e, ts_v = mock_data
     param_limits = ParamLimits.from_upper(
-        [-0.5, -50.0, 143.5],
+        143.5,
+        [-0.5, -50.0],
         (-1, 1),
         default_params["nsamps"] * default_params["tsamp"],
     )
@@ -266,7 +267,8 @@ def test_ffa_jerk_fourier_return_to_time(
 ) -> None:
     ts_e, ts_v = mock_data
     param_limits = ParamLimits.from_upper(
-        [-0.5, -50.0, 143.5],
+        143.5,
+        [-0.5, -50.0],
         (-1, 1),
         default_params["nsamps"] * default_params["tsamp"],
     )

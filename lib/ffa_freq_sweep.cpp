@@ -17,6 +17,7 @@
 #include "loki/psr_utils.hpp"
 #include "loki/search/configs.hpp"
 #include "loki/timing.hpp"
+#include "loki/utils/fft.hpp"
 #include "loki/utils/workspace.hpp"
 
 namespace loki::algorithms {
@@ -49,6 +50,15 @@ public:
         m_ffa_workspace = memory::FFAWorkspace<FoldType>(
             planner_stats.get_max_buffer_size(),
             planner_stats.get_max_coord_size(), m_base_cfg.get_nparams());
+        if constexpr (std::is_same_v<FoldType, ComplexType>) {
+            const auto& cfgs = m_region_planner.get_cfgs();
+            std::vector<SizeType> n_reals;
+            n_reals.reserve(cfgs.size());
+            for (const auto& cfg : cfgs) {
+                n_reals.push_back(cfg.get_nbins());
+            }
+            m_fft_manager.prepare_plans(n_reals);
+        }
         m_scores.resize(planner_stats.get_max_scores_size());
         m_passing_indices.resize(planner_stats.get_max_scores_size());
         m_write_param_sets_batch.resize(
@@ -124,6 +134,7 @@ private:
     bool m_show_progress;
 
     memory::FFAWorkspace<FoldType> m_ffa_workspace;
+    math::FFTWManager m_fft_manager;
     SizeType m_total_passing_scores{};
     std::vector<float> m_scores;
     std::vector<uint32_t> m_passing_indices;
@@ -141,7 +152,8 @@ private:
         timing::SimpleTimer timer;
         // Create FFA with shared workspace
         timer.start();
-        auto the_ffa = FFA<FoldType>(m_ffa_workspace, cfg, m_show_progress);
+        auto the_ffa =
+            FFA<FoldType>(m_ffa_workspace, m_fft_manager, cfg, m_show_progress);
         const plans::FFAPlan<FoldType>& ffa_plan = the_ffa.get_plan();
         const auto buffer_size_time = ffa_plan.get_buffer_size_time();
         const auto fold_size_time   = ffa_plan.get_fold_size_time();

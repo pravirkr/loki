@@ -1,7 +1,7 @@
 # Catch2 test framework (CPM).
 CPMFindPackage(
   NAME Catch2
-  VERSION 3.8.0
+  VERSION 3.16.0
   GITHUB_REPOSITORY catchorg/Catch2
   OPTIONS "CATCH_INSTALL_DOCS OFF" "CATCH_INSTALL_EXTRAS OFF"
 )
@@ -17,6 +17,8 @@ list(APPEND CMAKE_MODULE_PATH ${Catch2_SOURCE_DIR}/extras)
 include(CTest)
 include(Catch)
 
+find_package(OpenMP REQUIRED COMPONENTS CXX)
+
 set(LOKI_TEST_TARGET ${LOKI_LIBRARY_NAME}_tests)
 file(GLOB LOKI_TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp")
 if(LOKI_TEST_SOURCES STREQUAL "")
@@ -31,6 +33,8 @@ target_include_directories(
 target_link_libraries(
   ${LOKI_TEST_TARGET} PRIVATE ${PROJECT_NAME}::${LOKI_LIBRARY_NAME} ${LOKI_COMPILE_OPTIONS}
                               Catch2::Catch2WithMain
+                              Boost::math
+                              OpenMP::OpenMP_CXX
 )
 
 catch_discover_tests(${LOKI_TEST_TARGET})

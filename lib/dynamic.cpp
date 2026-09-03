@@ -42,17 +42,47 @@ BasePruneDPFuncts<FoldType, Derived>::BasePruneDPFuncts(
     for (const auto count : m_param_grid_count_init) {
         n_coords_init *= count;
     }
-    m_n_coords_init = n_coords_init;
+    const auto nbins = m_cfg.get_nbins();
+    m_n_coords_init  = n_coords_init;
     if constexpr (std::is_same_v<FoldType, ComplexType>) {
-        m_irfft_executor =
-            std::make_unique<math::IrfftExecutor>(m_cfg.get_nbins());
+        m_fft_manager.prepare_exact_plans(std::span<const SizeType>(&nbins, 1));
         m_scratch_shifts.resize(1); // Not needed for complex
-        const auto max_batch_size = m_batch_size * m_branch_max;
-        m_scratch_folds.resize(max_batch_size * 2 * m_cfg.get_nbins());
+        const auto max_nfft =
+            std::max(2 * m_batch_size * m_branch_max, 2 * m_n_coords_init);
+        const auto nbins_f = m_cfg.get_nbins_f();
+        m_scratch_folds_c.resize(max_nfft * nbins_f);
+        m_scratch_folds_r.resize(max_nfft * nbins);
     } else {
-        m_scratch_shifts.resize(2 * m_cfg.get_nbins());
-        m_scratch_folds.resize(1); // Not needed for float
+        m_scratch_shifts.resize(2 * nbins);
+        m_scratch_folds_c.resize(1); // Not needed for float
+        m_scratch_folds_r.resize(1); // Not needed for float
     }
+}
+
+template <SupportedFoldType FoldType, typename Derived>
+void BasePruneDPFuncts<FoldType, Derived>::irfft_for_scoring(
+    std::span<const ComplexType> src, SizeType nfft, std::span<float> dst)
+    requires(std::is_same_v<FoldType, ComplexType>)
+{
+    const auto nbins     = m_cfg.get_nbins();
+    const auto nbins_f   = m_cfg.get_nbins_f();
+    const auto n_complex = nfft * nbins_f;
+    auto scratch         = std::span(m_scratch_folds_c).first(n_complex);
+    std::copy(src.begin(), src.begin() + n_complex, scratch.begin());
+    m_fft_manager.irfft_batch(scratch, dst.first(nfft * nbins), nfft, nbins, 1);
+}
+
+template <SupportedFoldType FoldType, typename Derived>
+float BasePruneDPFuncts<FoldType, Derived>::get_irfft_scratch_memory_gib()
+    const noexcept {
+    if constexpr (std::is_same_v<FoldType, ComplexType>) {
+        const auto bytes =
+            (m_scratch_folds_c.size() * sizeof(ComplexType)) +
+            (m_scratch_folds_r.size() * sizeof(float));
+        return static_cast<float>(bytes) /
+               static_cast<float>(1ULL << 30U);
+    }
+    return 0.0F;
 }
 
 template <SupportedFoldType FoldType, typename Derived>
@@ -120,7 +150,7 @@ SizeType BasePruneDPFuncts<FoldType, Derived>::score_and_filter(
     std::span<float> scores_tree,
     std::span<SizeType> indices_tree,
     float threshold,
-    SizeType n_leaves) noexcept {
+    SizeType n_leaves) {
     const auto nbins   = m_cfg.get_nbins();
     const auto nbins_f = m_cfg.get_nbins_f();
     if constexpr (std::is_same_v<FoldType, ComplexType>) {
@@ -128,9 +158,8 @@ SizeType BasePruneDPFuncts<FoldType, Derived>::score_and_filter(
         const auto nfft = 2 * n_leaves;
         auto folds_span = folds_tree.first(n_leaves * 2 * nbins_f);
         auto folds_t_span =
-            std::span<float>(m_scratch_folds).first(nfft * nbins);
-        m_irfft_executor->execute(folds_span, folds_t_span,
-                                  static_cast<int>(nfft));
+            std::span<float>(m_scratch_folds_r).first(nfft * nbins);
+        irfft_for_scoring(folds_span, nfft, folds_t_span);
         if (m_cfg.get_use_boxcar_kadane()) {
             return detection::score_and_filter_max_kadane_with_cache(
                 folds_t_span, scores_tree, indices_tree, threshold, n_leaves,
@@ -196,9 +225,8 @@ void BaseTaylorPruneDPFuncts<FoldType, Derived>::seed(
         error_check::check_equal(fold_segment.size(), n_leaves * 2 * nbins_f,
                                  "fold_segment size mismatch");
         auto fold_segment_t =
-            std::span<float>(this->m_scratch_folds).first(nfft * nbins);
-        this->m_irfft_executor->execute(fold_segment, fold_segment_t,
-                                        static_cast<int>(nfft));
+            std::span<float>(this->m_scratch_folds_r).first(nfft * nbins);
+        this->irfft_for_scoring(fold_segment, nfft, fold_segment_t);
         detection::snr_boxcar_3d_max_with_cache(fold_segment_t, seed_scores,
                                                 n_leaves, nbins,
                                                 this->m_boxcar_widths_cache);
@@ -239,9 +267,8 @@ void BaseChebyshevPruneDPFuncts<FoldType, Derived>::seed(
         error_check::check_equal(fold_segment.size(), n_leaves * 2 * nbins_f,
                                  "fold_segment size mismatch");
         auto fold_segment_t =
-            std::span<float>(this->m_scratch_folds).first(nfft * nbins);
-        this->m_irfft_executor->execute(fold_segment, fold_segment_t,
-                                        static_cast<int>(nfft));
+            std::span<float>(this->m_scratch_folds_r).first(nfft * nbins);
+        this->irfft_for_scoring(fold_segment, nfft, fold_segment_t);
         detection::snr_boxcar_3d_max_with_cache(fold_segment_t, seed_scores,
                                                 n_leaves, nbins,
                                                 this->m_boxcar_widths_cache);
@@ -360,9 +387,8 @@ void PrunePolyTaylorDPFuncts<FoldType>::ascend(
             n_coords_init, n_leaves, n_segments);
         const auto nfft = 2 * n_leaves;
         auto fold_segment_t =
-            std::span<float>(this->m_scratch_folds).first(nfft * nbins);
-        this->m_irfft_executor->execute(folds_tree, fold_segment_t,
-                                        static_cast<int>(nfft));
+            std::span<float>(this->m_scratch_folds_r).first(nfft * nbins);
+        this->irfft_for_scoring(folds_tree, nfft, fold_segment_t);
         detection::snr_boxcar_3d_max_with_cache(fold_segment_t, scores_tree,
                                                 n_leaves, nbins,
                                                 this->m_boxcar_widths_cache);
@@ -497,9 +523,8 @@ void PrunePolyChebyshevDPFuncts<FoldType>::ascend(
             this->m_n_coords_init, n_leaves, n_segments);
         const auto nfft = 2 * n_leaves;
         auto fold_segment_t =
-            std::span<float>(this->m_scratch_folds).first(nfft * nbins);
-        this->m_irfft_executor->execute(folds_tree, fold_segment_t,
-                                        static_cast<int>(nfft));
+            std::span<float>(this->m_scratch_folds_r).first(nfft * nbins);
+        this->irfft_for_scoring(folds_tree, nfft, fold_segment_t);
         detection::snr_boxcar_3d_max_with_cache(fold_segment_t, scores_tree,
                                                 n_leaves, nbins,
                                                 this->m_boxcar_widths_cache);
@@ -572,7 +597,8 @@ SizeType PruneCircTaylorDPFuncts<FoldType>::validate(
     SizeType n_leaves) const {
     return circ_taylor_validate_batch(
         leaves_branch, leaves_origins, n_leaves, this->m_cfg.get_p_orb_min(),
-        this->m_cfg.get_x_mass_const(), this->m_cfg.get_validation_significance());
+        this->m_cfg.get_x_mass_const(),
+        this->m_cfg.get_validation_significance());
 }
 
 template <SupportedFoldType FoldType>
@@ -646,9 +672,8 @@ void PruneCircTaylorDPFuncts<FoldType>::ascend(
             this->m_n_coords_init, n_leaves, n_segments);
         const auto nfft = 2 * n_leaves;
         auto fold_segment_t =
-            std::span<float>(this->m_scratch_folds).first(nfft * nbins);
-        this->m_irfft_executor->execute(folds_tree, fold_segment_t,
-                                        static_cast<int>(nfft));
+            std::span<float>(this->m_scratch_folds_r).first(nfft * nbins);
+        this->irfft_for_scoring(folds_tree, nfft, fold_segment_t);
         detection::snr_boxcar_3d_max_with_cache(fold_segment_t, scores_tree,
                                                 n_leaves, nbins,
                                                 this->m_boxcar_widths_cache);

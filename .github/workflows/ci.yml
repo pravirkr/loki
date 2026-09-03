@@ -1,0 +1,125 @@
+name: GitHub CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Portable CI builds; cache CPM downloads across jobs.
+  CPM_SOURCE_CACHE: ${{ github.workspace }}/.cache/cpm
+  LOKI_CUDA: OFF
+  LOKI_ENABLE_NATIVE_ARCH: OFF
+
+jobs:
+  cpp:
+    name: C++ (${{ matrix.compiler }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [g++-14, clang++-18]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check CPU Info (Linux)
+        run: |
+          lscpu
+          cat /proc/cpuinfo | grep flags | head -n 1
+          cat /proc/cpuinfo | grep "cpu MHz" | head -n 1
+
+      - name: Install system dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y --no-install-recommends \
+            cmake \
+            ninja-build \
+            libhdf5-dev \
+            libfftw3-dev \
+            libomp-dev \
+            gcc-14 \
+            g++-14 \
+            clang-18
+
+      - name: Cache CPM dependencies
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.CPM_SOURCE_CACHE }}
+          key: cpm-${{ runner.os }}-${{ hashFiles('cmake/LokiDependencies.cmake', 'cmake/CPM.cmake') }}
+          restore-keys: |
+            cpm-${{ runner.os }}-
+
+      - name: Configure CMake
+        run: |
+          cmake -S . -B build -G Ninja \
+          -DCMAKE_CXX_COMPILER="${{ matrix.compiler }}" \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DLOKI_BUILD_PYTHON=OFF \
+          -DLOKI_BUILD_TESTING=ON \
+          -DLOKI_BUILD_DOCS=OFF \
+          -DLOKI_BUILD_BENCHMARKS=OFF \
+          -DLOKI_CUDA=OFF \
+          -DLOKI_ENABLE_NATIVE_ARCH=OFF \
+          -DLOKI_USE_SYSTEM_DEPS=OFF
+
+      - name: Build
+        run: cmake --build build --parallel "$(nproc)"
+
+      - name: Run C++ tests
+        run: ctest --test-dir build --output-on-failure
+
+  python:
+    name: Python (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12"]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install system build dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            ninja-build \
+            libhdf5-dev \
+            libfftw3-dev \
+            libomp-dev \
+            git
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python-version }}
+
+      - name: Cache CPM dependencies
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.CPM_SOURCE_CACHE }}
+          key: cpm-${{ runner.os }}-${{ hashFiles('cmake/LokiDependencies.cmake', 'cmake/CPM.cmake') }}
+          restore-keys: |
+            cpm-${{ runner.os }}-
+
+      - name: Install package and test dependencies
+        run: uv sync --extra tests
+        env:
+          # scikit-build-core honours CMAKE_ARGS when compiling the extension.
+          CMAKE_ARGS: >-
+            -DLOKI_CUDA=OFF
+            -DLOKI_BUILD_TESTING=OFF
+
+      - name: Run Python tests (CPU)
+        run: uv run pytest tests/python/test_cpu_match.py

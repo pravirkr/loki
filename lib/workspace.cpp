@@ -162,15 +162,17 @@ EPWorkspace<FoldType>::EPWorkspace(SizeType batch_size,
 }
 
 template <SupportedFoldType FoldType>
+float EPWorkspace<FoldType>::get_seed_memory_usage_gib() const noexcept {
+    const auto bytes =
+        (seed_leaves.size() * sizeof(double)) + (seed_scores.size() * sizeof(float));
+    return static_cast<float>(bytes) / static_cast<float>(1ULL << 30U);
+}
+
+template <SupportedFoldType FoldType>
 float EPWorkspace<FoldType>::get_memory_usage_gib() const noexcept {
-    const auto base_gb      = world_tree.get_memory_usage_gib() +
-                              prune.get_memory_usage_gib() +
-                              branch.get_memory_usage_gib();
-    const auto extra_memory = (seed_leaves.size() * sizeof(double)) +
-                              (seed_scores.size() * sizeof(float));
-    const auto extra_gb =
-        static_cast<float>(extra_memory) / static_cast<float>(1ULL << 30U);
-    return base_gb + extra_gb;
+    return world_tree.get_memory_usage_gib() +
+           prune.get_memory_usage_gib() + branch.get_memory_usage_gib() +
+           get_seed_memory_usage_gib();
 }
 
 template <SupportedFoldType FoldType>

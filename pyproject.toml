@@ -68,7 +68,7 @@ LOKI_USE_SYSTEM_DEPS = "OFF"
 LOKI_ENABLE_NATIVE_ARCH = "ON"
 LOKI_ENABLE_COVERAGE = "OFF"
 LOKI_ENABLE_IPO = "OFF"
-BUILD_SHARED_LIBS = "ON"
+BUILD_SHARED_LIBS = "OFF"
 CMAKE_BUILD_PARALLEL_LEVEL = "4"
 
 [tool.scikit-build.metadata.version]
@@ -108,6 +108,7 @@ select = ["ALL"]
 ignore = [
     "D1",
     "ANN003",
+    "CPY001",
     "PLR2004",
     "G004",
     "E712",
@@ -171,12 +172,13 @@ filter = ["lib/*"]
 
 [tool.pixi.workspace]
 channels = ["conda-forge"]
-platforms = ["linux-64","osx-arm64"]
+platforms = [
+    "linux-64",
+    { platform = "osx-arm64", macos = "14.0" },
+]
 
 [tool.pixi.pypi-dependencies]
 loki = { path = ".", editable = true }
-# pyloki imports scipy but does not declare it as a dependency.
-scipy = ">=1.14"
 
 [tool.pixi.environments]
 default = { solve-group = "default" }

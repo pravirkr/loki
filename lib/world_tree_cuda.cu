@@ -427,6 +427,7 @@ float WorldTreeCUDA<FoldTypeCUDA>::get_memory_usage_gib() const noexcept {
     const auto base_bytes = (m_leaves.size() * sizeof(double)) +
                             (m_folds.size() * sizeof(FoldTypeCUDA)) +
                             (m_scores.size() * sizeof(float)) +
+                            (m_scores_ep.size() * sizeof(float)) +
                             (m_scratch_scores.size() * sizeof(float)) +
                             (m_scratch_indices_1.size() * sizeof(uint32_t)) +
                             (m_scratch_indices_2.size() * sizeof(uint32_t)) +

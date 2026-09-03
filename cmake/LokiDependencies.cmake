@@ -3,7 +3,9 @@
 #
 # Design rules:
 #   1. OpenMP, HDF5, and FFTW are hard system dependencies — never fetched.
-#   2. FFTW is exposed in loki's public API -> always linked PUBLIC.
+#   2. FFTW is internal (pimpl in lib/fft.cpp). Linked PRIVATE for shared loki;
+#      for static loki it is linked with LINK_ONLY so consumers resolve symbols
+#      without inheriting fftw3.h include paths.
 #   3. OpenMP and HDF5 are internal. For a SHARED loki they are linked PRIVATE;
 #      for STATIC loki they are linked PUBLIC so consumers can resolve symbols.
 #   4. fmt and spdlog are CPM-pinned header-only libraries (single translation
@@ -18,7 +20,7 @@
 message(STATUS "Searching for required system dependencies...")
 find_package(OpenMP REQUIRED COMPONENTS CXX)
 find_package(HDF5 REQUIRED) # For HighFive
-find_package(FFTW REQUIRED COMPONENTS FLOAT_LIB FLOAT_OPENMP_LIB)
+find_package(FFTW REQUIRED COMPONENTS FLOAT_LIB)
 
 # -----------------------------------------------------------------------
 # 2. CPM-managed dependencies (pinned versions, bundled by default)
@@ -75,8 +77,8 @@ endif()
 # xsimd (SIMD library) - Header-only
 CPMAddPackage(
   NAME xsimd
-  VERSION 13.2.0
-  URL https://github.com/xtensor-stack/xsimd/archive/refs/tags/13.2.0.tar.gz
+  VERSION 14.0.0
+  URL https://github.com/xtensor-stack/xsimd/archive/refs/tags/14.0.0.tar.gz
   DOWNLOAD_ONLY YES
   EXCLUDE_FROM_ALL YES
   SYSTEM YES
@@ -120,8 +122,8 @@ endif()
 
 CPMAddPackage(
   NAME CLI11
-  VERSION 2.6.0
-  URL https://github.com/CLIUtils/CLI11/archive/refs/tags/v2.6.0.tar.gz
+  VERSION 2.7.0
+  URL https://github.com/CLIUtils/CLI11/archive/refs/tags/v2.7.0.tar.gz
   DOWNLOAD_ONLY YES
   EXCLUDE_FROM_ALL YES
   SYSTEM YES
@@ -135,8 +137,8 @@ endif()
 
 CPMAddPackage(
   NAME BoostMath
-  VERSION 1.90.0
-  URL https://github.com/boostorg/math/archive/refs/tags/boost-1.90.0.tar.gz
+  VERSION 1.92.0
+  URL https://github.com/boostorg/math/archive/refs/tags/boost-1.92.0.tar.gz
   DOWNLOAD_ONLY YES
   EXCLUDE_FROM_ALL YES
   SYSTEM YES

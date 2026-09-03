@@ -15,6 +15,7 @@
 
 #include "loki/common/types.hpp"
 #include "loki/exceptions.hpp"
+#include "loki/utils.hpp"
 #include "loki/utils/world_tree.hpp"
 
 namespace loki::cands {
@@ -23,7 +24,7 @@ namespace {
 // Explicit Round-half-to-even (bankers' rounding) to match numpy.round()
 // Never use std::round() or std::nearbyint() as they are not deterministic.
 double round_dp(double x, int digits) noexcept {
-    if (!std::isfinite(x)) {
+    if (!utils::is_finite(x)) {
         return x;
     }
 
@@ -58,33 +59,39 @@ std::tuple<int, int> extract_ref_seg_task_id(const std::string& filename) {
 
 // Create a compound type for FFATimerStats
 HighFive::CompoundType create_compound_ffa_timer_stats() {
-    return {{"brutefold", HighFive::create_datatype<float>()},
-            {"ffa", HighFive::create_datatype<float>()},
-            {"score", HighFive::create_datatype<float>()},
-            {"io", HighFive::create_datatype<float>()}};
+    return {
+        {"brutefold", HighFive::create_datatype<float>()},
+        {"ffa", HighFive::create_datatype<float>()},
+        {"score", HighFive::create_datatype<float>()},
+        {"io", HighFive::create_datatype<float>()},
+    };
 }
 
 // Create a compound type for PruneStats
 HighFive::CompoundType create_compound_prune_stats() {
-    return {{{"level", HighFive::create_datatype<SizeType>()},
-             {"seg_idx", HighFive::create_datatype<SizeType>()},
-             {"threshold", HighFive::create_datatype<float>()},
-             {"score_min", HighFive::create_datatype<float>()},
-             {"score_max", HighFive::create_datatype<float>()},
-             {"n_branches", HighFive::create_datatype<SizeType>()},
-             {"n_leaves", HighFive::create_datatype<SizeType>()},
-             {"n_leaves_phy", HighFive::create_datatype<SizeType>()},
-             {"n_leaves_surv", HighFive::create_datatype<SizeType>()}}};
+    return {
+        {"level", HighFive::create_datatype<SizeType>()},
+        {"seg_idx", HighFive::create_datatype<SizeType>()},
+        {"threshold", HighFive::create_datatype<float>()},
+        {"score_min", HighFive::create_datatype<float>()},
+        {"score_max", HighFive::create_datatype<float>()},
+        {"n_branches", HighFive::create_datatype<SizeType>()},
+        {"n_leaves", HighFive::create_datatype<SizeType>()},
+        {"n_leaves_phy", HighFive::create_datatype<SizeType>()},
+        {"n_leaves_surv", HighFive::create_datatype<SizeType>()},
+    };
 }
 
 HighFive::CompoundType create_compound_prune_timer_stats() {
-    return {{"branch", HighFive::create_datatype<float>()},
-            {"validate", HighFive::create_datatype<float>()},
-            {"resolve", HighFive::create_datatype<float>()},
-            {"shift_add", HighFive::create_datatype<float>()},
-            {"score", HighFive::create_datatype<float>()},
-            {"transform", HighFive::create_datatype<float>()},
-            {"threshold", HighFive::create_datatype<float>()}};
+    return {
+        {"branch", HighFive::create_datatype<float>()},
+        {"validate", HighFive::create_datatype<float>()},
+        {"resolve", HighFive::create_datatype<float>()},
+        {"shift_add", HighFive::create_datatype<float>()},
+        {"score", HighFive::create_datatype<float>()},
+        {"transform", HighFive::create_datatype<float>()},
+        {"threshold", HighFive::create_datatype<float>()},
+    };
 }
 
 } // namespace
@@ -540,15 +547,21 @@ void PruneResultWriter::write_run_results(
 
     constexpr SizeType kParamStride             = 2U;
     const auto leaves_stride                    = (n_params + 2) * kParamStride;
-    const std::vector<SizeType> param_sets_dims = {n_leaves, n_params + 2,
-                                                   kParamStride};
+    const std::vector<SizeType> param_sets_dims = {
+        n_leaves,
+        n_params + 2,
+        kParamStride,
+    };
     HighFive::DataSpace param_sets_space(param_sets_dims);
     HighFive::DataSetCreateProps props;
     if (n_leaves > 0) {
         const auto chunk_n_param_sets =
             static_cast<hsize_t>(std::min(1024UL, n_leaves));
-        const std::vector<hsize_t> chunk_dims = {chunk_n_param_sets,
-                                                 n_params + 2, kParamStride};
+        const std::vector<hsize_t> chunk_dims = {
+            chunk_n_param_sets,
+            n_params + 2,
+            kParamStride,
+        };
         props.add(HighFive::Chunking(chunk_dims));
         props.add(HighFive::Deflate(9));
     }

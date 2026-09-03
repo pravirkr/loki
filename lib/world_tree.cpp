@@ -113,6 +113,7 @@ float WorldTree<FoldType>::get_memory_usage_gib() const noexcept {
         (m_leaves.size() * sizeof(double)) +
         (m_folds.size() * sizeof(FoldType)) +
         (m_scores.size() * sizeof(float)) +
+        (m_scores_ep.size() * sizeof(float)) +
         (m_scratch_scores.size() * sizeof(float)) +
         (m_scratch_pending_indices.size() * sizeof(SizeType)) +
         (m_scratch_mask.size() * sizeof(uint8_t));

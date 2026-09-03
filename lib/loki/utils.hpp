@@ -1,5 +1,7 @@
 #pragma once
 
+#include <bit>
+#include <cstdint>
 #include <optional>
 #include <span>
 #include <vector>
@@ -14,6 +16,34 @@ inline constexpr double kInvCval = 3.3356409519815204e-09; // s/m
 inline constexpr double kGMsunOneThird = 5.10078726793173e6;
 // To match the Python output for bitwise consistency
 inline constexpr double kFloatEps = 1e-6; // half-up rounding
+
+/**
+ * @brief IEEE-754 finite check that remains valid with -ffast-math.
+ *
+ * std::isfinite relies on floating-point exception semantics that
+ * -ffast-math disables; inspect exponent bits directly instead.
+ */
+[[nodiscard]] constexpr bool is_finite(float x) noexcept {
+    const auto bits = std::bit_cast<uint32_t>(x);
+    return (bits & 0x7F800000U) != 0x7F800000U;
+}
+
+[[nodiscard]] constexpr bool is_finite(double x) noexcept {
+    const auto bits = std::bit_cast<uint64_t>(x);
+    return (bits & 0x7FF0000000000000ULL) != 0x7FF0000000000000ULL;
+}
+
+/**
+ * @brief IEEE-754 NaN check that remains valid with -ffast-math.
+ */
+[[nodiscard]] constexpr bool is_nan(float x) noexcept {
+    return (std::bit_cast<uint32_t>(x) & 0x7FFFFFFFU) > 0x7F800000U;
+}
+
+[[nodiscard]] constexpr bool is_nan(double x) noexcept {
+    return (std::bit_cast<uint64_t>(x) & 0x7FFFFFFFFFFFFFFFULL) >
+           0x7FF0000000000000ULL;
+}
 
 constexpr float to_gib(SizeType bytes) noexcept {
     return static_cast<float>(bytes) / 1024.0F / 1024.0F / 1024.0F;

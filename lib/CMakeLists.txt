@@ -64,7 +64,7 @@ endif()
 # Header-only internal deps: BUILD_INTERFACE only (never exported to consumers).
 target_link_libraries(
   ${LOKI_LIBRARY_NAME}
-  PRIVATE ${LOKI_COMPILE_OPTIONS}
+  PRIVATE $<BUILD_INTERFACE:${LOKI_COMPILE_OPTIONS}>
           $<BUILD_INTERFACE:CLI11::CLI11>
           $<BUILD_INTERFACE:xsimd>
           $<BUILD_INTERFACE:Boost::math>
@@ -77,11 +77,10 @@ target_link_libraries(
 
 # System/runtime deps: PRIVATE for shared loki, PUBLIC for static loki.
 if(BUILD_SHARED_LIBS)
-  target_link_libraries(${LOKI_LIBRARY_NAME} PRIVATE OpenMP::OpenMP_CXX HDF5::HDF5)
-  target_link_libraries(${LOKI_LIBRARY_NAME} PUBLIC FFTW::Float FFTW::FloatOpenMP)
+  target_link_libraries(${LOKI_LIBRARY_NAME} PRIVATE OpenMP::OpenMP_CXX HDF5::HDF5 FFTW::Float)
 else()
   target_link_libraries(
-    ${LOKI_LIBRARY_NAME} PUBLIC OpenMP::OpenMP_CXX HDF5::HDF5 FFTW::Float FFTW::FloatOpenMP
+    ${LOKI_LIBRARY_NAME} PUBLIC OpenMP::OpenMP_CXX HDF5::HDF5 $<LINK_ONLY:FFTW::Float>
   )
 endif()
 

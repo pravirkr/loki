@@ -38,8 +38,9 @@ void circular_prefix_sum(const float* __restrict__ x,
         return;
     }
     // Initial prefix sum over the base cycle (as nbins < nsum)
+    const SizeType first_pass = std::min(nbins, nsum);
     out[0] = x[0];
-    for (SizeType i = 1; i < nbins; ++i) {
+    for (SizeType i = 1; i < first_pass; ++i) {
         out[i] = out[i - 1] + x[i];
     }
     if (nsum <= nbins) [[unlikely]] {
@@ -73,7 +74,7 @@ SizeType find_nearest_sorted_idx(std::span<const double> arr_sorted,
     if (arr_sorted.empty()) {
         throw std::invalid_argument("find_nearest_sorted_idx: array is empty");
     }
-    if (std::isnan(val)) {
+    if (utils::is_nan(val)) {
         throw std::invalid_argument("find_nearest_sorted_idx: val is NaN");
     }
     const auto it = std::ranges::lower_bound(arr_sorted, val);
@@ -104,7 +105,7 @@ SizeType find_nearest_sorted_idx_scan(std::span<const double> arr_sorted,
         throw std::invalid_argument(
             "find_nearest_sorted_idx_scan: array is empty");
     }
-    if (std::isnan(val)) {
+    if (utils::is_nan(val)) {
         throw std::invalid_argument("find_nearest_sorted_idx_scan: val is NaN");
     }
 
