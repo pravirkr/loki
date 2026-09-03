@@ -17,6 +17,30 @@
 
 namespace loki::core {
 
+namespace {
+
+/** Copy complex folds to scratch and IRFFT (cuFFT C2R overwrites input). */
+void irfft_folds_for_scoring(math::CUFFTManager& fft_manager,
+                             thrust::device_vector<ComplexTypeCUDA>& scratch_c,
+                             cuda::std::span<const ComplexTypeCUDA> src,
+                             SizeType nfft,
+                             cuda::std::span<float> dst,
+                             SizeType nbins,
+                             SizeType nbins_f,
+                             cudaStream_t stream) {
+    const auto n_complex = nfft * nbins_f;
+    auto scratch         = cuda_utils::as_span(scratch_c).first(n_complex);
+    cuda_utils::check_cuda_call(
+        cudaMemcpyAsync(scratch.data(), src.data(),
+                        n_complex * sizeof(ComplexTypeCUDA),
+                        cudaMemcpyDeviceToDevice, stream),
+        "irfft_for_scoring: d2d copy failed");
+    fft_manager.irfft_batch(scratch, dst.first(nfft * nbins), nfft, nbins,
+                            stream);
+}
+
+} // namespace
+
 template <SupportedFoldTypeCUDA FoldTypeCUDA, typename Derived>
 BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::BasePruneDPFunctsCUDA(
     std::span<const SizeType> param_grid_count_init,
@@ -88,17 +112,8 @@ void BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::irfft_for_scoring(
     cudaStream_t stream)
     requires(std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>)
 {
-    const auto nbins     = m_cfg.get_nbins();
-    const auto nbins_f   = m_cfg.get_nbins_f();
-    const auto n_complex = nfft * nbins_f;
-    auto scratch = cuda_utils::as_span(m_scratch_folds_c_d).first(n_complex);
-    cuda_utils::check_cuda_call(
-        cudaMemcpyAsync(scratch.data(), src.data(),
-                        n_complex * sizeof(ComplexTypeCUDA),
-                        cudaMemcpyDeviceToDevice, stream),
-        "irfft_for_scoring: d2d copy failed");
-    m_fft_manager.irfft_batch(scratch, dst.first(nfft * nbins), nfft, nbins,
-                              stream);
+    irfft_folds_for_scoring(m_fft_manager, m_scratch_folds_c_d, src, nfft, dst,
+                            m_cfg.get_nbins(), m_cfg.get_nbins_f(), stream);
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA, typename Derived>
@@ -237,7 +252,9 @@ void BaseTaylorPruneDPFunctsCUDA<FoldTypeCUDA, Derived>::seed(
                                  "fold_segment size mismatch");
         auto folds_t_span =
             cuda_utils::as_span(this->m_scratch_folds_r_d).first(nfft * nbins);
-        this->irfft_for_scoring(fold_segment, nfft, folds_t_span, stream);
+        irfft_folds_for_scoring(this->m_fft_manager, this->m_scratch_folds_c_d,
+                                fold_segment, nfft, folds_t_span, nbins,
+                                nbins_f, stream);
         detection::snr_boxcar_3d_max_cuda_d(
             folds_t_span, cuda_utils::as_span(this->m_boxcar_widths_d),
             seed_scores, this->m_n_coords_init, nbins, stream);
@@ -280,7 +297,9 @@ void BaseChebyshevPruneDPFunctsCUDA<FoldTypeCUDA, Derived>::seed(
                                  "fold_segment size mismatch");
         auto folds_t_span =
             cuda_utils::as_span(this->m_scratch_folds_r_d).first(nfft * nbins);
-        this->irfft_for_scoring(fold_segment, nfft, folds_t_span, stream);
+        irfft_folds_for_scoring(this->m_fft_manager, this->m_scratch_folds_c_d,
+                                fold_segment, nfft, folds_t_span, nbins,
+                                nbins_f, stream);
         detection::snr_boxcar_3d_max_cuda_d(
             folds_t_span, cuda_utils::as_span(this->m_boxcar_widths_d),
             seed_scores, this->m_n_coords_init, nbins, stream);
@@ -413,7 +432,9 @@ void PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>::ascend(
         const auto nfft = 2 * n_leaves;
         auto folds_t_span =
             cuda_utils::as_span(this->m_scratch_folds_r_d).first(nfft * nbins);
-        this->irfft_for_scoring(folds_tree, nfft, folds_t_span, stream);
+        irfft_folds_for_scoring(this->m_fft_manager, this->m_scratch_folds_c_d,
+                                folds_tree, nfft, folds_t_span, nbins, nbins_f,
+                                stream);
         detection::snr_boxcar_3d_max_cuda_d(
             folds_t_span, cuda_utils::as_span(this->m_boxcar_widths_d),
             scores_tree, n_leaves, nbins, stream);
@@ -567,7 +588,9 @@ void PrunePolyChebyshevDPFunctsCUDA<FoldTypeCUDA>::ascend(
         const auto nfft = 2 * n_leaves;
         auto folds_t_span =
             cuda_utils::as_span(this->m_scratch_folds_r_d).first(nfft * nbins);
-        this->irfft_for_scoring(folds_tree, nfft, folds_t_span, stream);
+        irfft_folds_for_scoring(this->m_fft_manager, this->m_scratch_folds_c_d,
+                                folds_tree, nfft, folds_t_span, nbins, nbins_f,
+                                stream);
         detection::snr_boxcar_3d_max_cuda_d(
             folds_t_span, cuda_utils::as_span(this->m_boxcar_widths_d),
             scores_tree, n_leaves, nbins, stream);
@@ -737,7 +760,9 @@ void PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>::ascend(
         const auto nfft = 2 * n_leaves;
         auto folds_t_span =
             cuda_utils::as_span(this->m_scratch_folds_r_d).first(nfft * nbins);
-        this->irfft_for_scoring(folds_tree, nfft, folds_t_span, stream);
+        irfft_folds_for_scoring(this->m_fft_manager, this->m_scratch_folds_c_d,
+                                folds_tree, nfft, folds_t_span, nbins, nbins_f,
+                                stream);
         detection::snr_boxcar_3d_max_cuda_d(
             folds_t_span, cuda_utils::as_span(this->m_boxcar_widths_d),
             scores_tree, n_leaves, nbins, stream);

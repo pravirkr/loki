@@ -204,6 +204,7 @@ protected:
 
     // Inherit constructor
     using Base::BasePruneDPFuncts;
+    using Base::irfft_for_scoring;
 
 public:
     // Common seed implementation for all Taylor variants
@@ -221,6 +222,7 @@ protected:
 
     // Inherit constructor
     using Base::BasePruneDPFuncts;
+    using Base::irfft_for_scoring;
 
 public:
     void seed(std::span<const FoldType> fold_segment,
