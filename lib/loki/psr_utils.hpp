@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <format>
 #include <numeric>
 #include <ranges>
@@ -135,7 +136,8 @@ void poly_cheb_shift_vec(std::span<const double> dparam_old,
                          SizeType nparams);
 
 /**
- * @brief Perfectly sub-divide a parent parameter cell into contiguous child cells.
+ * @brief Perfectly sub-divide a parent parameter cell into contiguous child
+ * cells.
  *
  * DESIGN NOTE: Exact Contiguous Splitting
  * This physically partitions the parent cell into `num_points` equal sub-cells.
@@ -148,10 +150,10 @@ void poly_cheb_shift_vec(std::span<const double> dparam_old,
  * it does not enforce parameter limits internally.
  *
  * @param param_cur Current parameter value (centre of the parent cell).
- * @param dparam_cur Current grid spacing of the parameter dimension. Should be trunctaed as per
- * search range.
- * @param dparam_new Desired grid spacing for the refined search stage. The actual spacing
- * used may differ slightly in order to maintain symmetry.
+ * @param dparam_cur Current grid spacing of the parameter dimension. Should be
+ * trunctaed as per search range.
+ * @param dparam_new Desired grid spacing for the refined search stage. The
+ * actual spacing used may differ slightly in order to maintain symmetry.
  * @return std::tuple<std::vector<double>, double> Array of new parameter values
  * for the child cells and the actual grid spacing used for the refined search
  * stage.

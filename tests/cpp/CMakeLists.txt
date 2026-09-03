@@ -31,6 +31,7 @@ target_include_directories(
 target_link_libraries(
   ${LOKI_TEST_TARGET} PRIVATE ${PROJECT_NAME}::${LOKI_LIBRARY_NAME} ${LOKI_COMPILE_OPTIONS}
                               Catch2::Catch2WithMain
+                              Boost::math
 )
 
 catch_discover_tests(${LOKI_TEST_TARGET})
