@@ -7,6 +7,8 @@ find_package(
 find_package(pybind11 CONFIG REQUIRED)
 
 # CPU Python extension module (libloki).
+# loki is built as a static archive when LOKI_BUILD_PYTHON=ON; symbols are
+# embedded in the extension module at link time.
 set(LOKI_PYMODULE_NAME lib${LOKI_LIBRARY_NAME})
 pybind11_add_module(${LOKI_PYMODULE_NAME} loki_python.cpp)
 target_include_directories(

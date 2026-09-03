@@ -45,6 +45,16 @@ option(LOKI_USE_SYSTEM_DEPS "Prefer compatible system packages over pinned bundl
 # BUILD_SHARED_LIBS is a standard CMake option (ON = shared loki, OFF = static loki).
 option(BUILD_SHARED_LIBS "Build shared libraries" ON)
 
+# Python extensions are installed as a single module file; embed loki statically
+# instead of shipping a separate libloki.so plus loader search-path tweaks.
+if(LOKI_BUILD_PYTHON AND BUILD_SHARED_LIBS)
+  message(
+    FATAL_ERROR
+      "LOKI_BUILD_PYTHON=ON requires BUILD_SHARED_LIBS=OFF. "
+      "Python wheels should statically link loki into libloki.cpython-*.so."
+  )
+endif()
+
 # CUDA tristate: AUTO / ON / OFF
 set(LOKI_CUDA
     "AUTO"

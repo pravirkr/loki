@@ -1,4 +1,4 @@
-#include <cmath>
+#include <algorithm>
 #include <numeric>
 #include <vector>
 
@@ -6,6 +6,7 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include "loki/math.hpp"
+#include "loki/utils.hpp"
 
 using Catch::Matchers::WithinAbs;
 using Catch::Matchers::WithinRel;
@@ -42,11 +43,12 @@ TEST_CASE("StatLookupTables exact reference", "[math]") {
     // Full table construction can overflow in Boost for extreme tail values;
     // smoke-test the exact reference helpers used to build the LUT.
     SECTION("norm_isf is finite at moderate minus_logsf") {
-        REQUIRE(std::isfinite(loki::math::StatTables::exact_norm_isf(1.0F)));
+        REQUIRE(loki::utils::is_finite(
+            loki::math::StatTables::exact_norm_isf(1.0F)));
     }
 
     SECTION("chi_sq_minus_logsf is finite for valid input") {
-        REQUIRE(std::isfinite(
+        REQUIRE(loki::utils::is_finite(
             loki::math::StatTables::exact_chi_sq_minus_logsf(5.0F, 4)));
     }
 
@@ -78,9 +80,8 @@ TEST_CASE("ThreadLocalNormalRNG", "[math]") {
         loki::math::ThreadLocalNormalRNG rng(12345U);
         std::vector<float> samples(128);
         rng.generate(samples, 2.0F, 0.5F);
-        for (float sample : samples) {
-            REQUIRE(std::isfinite(sample));
-        }
+        REQUIRE(std::ranges::all_of(
+            samples, [](float s) { return loki::utils::is_finite(s); }));
         const float mean =
             std::accumulate(samples.begin(), samples.end(), 0.0F) /
             static_cast<float>(samples.size());

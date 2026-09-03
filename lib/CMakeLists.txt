@@ -64,7 +64,7 @@ endif()
 # Header-only internal deps: BUILD_INTERFACE only (never exported to consumers).
 target_link_libraries(
   ${LOKI_LIBRARY_NAME}
-  PRIVATE ${LOKI_COMPILE_OPTIONS}
+  PRIVATE $<BUILD_INTERFACE:${LOKI_COMPILE_OPTIONS}>
           $<BUILD_INTERFACE:CLI11::CLI11>
           $<BUILD_INTERFACE:xsimd>
           $<BUILD_INTERFACE:Boost::math>

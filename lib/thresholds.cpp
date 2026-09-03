@@ -239,7 +239,7 @@ public:
      */
     [[nodiscard]] std::unique_ptr<FoldVectorHandle>
     allocate(SizeType ntrials = 0, float variance = 0.0F) {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::scoped_lock lock(m_mutex);
 
         if (m_fold_pool_out->free_count == 0) {
             spdlog::error(
@@ -294,7 +294,7 @@ public:
      * Deallocates a fold handle's memory, returning it to the correct pool.
      */
     void deallocate(const float* data_ptr) noexcept {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::scoped_lock lock(m_mutex);
 
         Pool* target_pool = nullptr;
         if (data_ptr >= m_fold_pool_a.data.data() &&
@@ -317,7 +317,7 @@ public:
      * Deallocates a score handle's memory, returning it to the correct pool.
      */
     void deallocate_scores(const float* data_ptr) noexcept {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::scoped_lock lock(m_mutex);
 
         Pool* target_pool = nullptr;
         if (data_ptr >= m_score_pool_a.data.data() &&
@@ -341,7 +341,7 @@ public:
      * Swaps the roles of the "in" and "out" pools (folds and scores).
      */
     void swap_pools() {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::scoped_lock lock(m_mutex);
         std::swap(m_fold_pool_in, m_fold_pool_out);
         std::swap(m_score_pool_in, m_score_pool_out);
     }
@@ -852,17 +852,19 @@ gen_next_using_surv_prob(const State& state_cur,
 
 // Create a compound type for State
 HighFive::CompoundType create_compound_state() {
-    return {{"success_h0", HighFive::create_datatype<float>()},
-            {"success_h1", HighFive::create_datatype<float>()},
-            {"complexity", HighFive::create_datatype<float>()},
-            {"complexity_cumul", HighFive::create_datatype<float>()},
-            {"success_h1_cumul", HighFive::create_datatype<float>()},
-            {"nbranches", HighFive::create_datatype<float>()},
-            {"threshold", HighFive::create_datatype<float>()},
-            {"cost", HighFive::create_datatype<float>()},
-            {"threshold_prev", HighFive::create_datatype<float>()},
-            {"success_h1_cumul_prev", HighFive::create_datatype<float>()},
-            {"is_empty", HighFive::create_datatype<bool>()}};
+    return {
+        {"success_h0", HighFive::create_datatype<float>()},
+        {"success_h1", HighFive::create_datatype<float>()},
+        {"complexity", HighFive::create_datatype<float>()},
+        {"complexity_cumul", HighFive::create_datatype<float>()},
+        {"success_h1_cumul", HighFive::create_datatype<float>()},
+        {"nbranches", HighFive::create_datatype<float>()},
+        {"threshold", HighFive::create_datatype<float>()},
+        {"cost", HighFive::create_datatype<float>()},
+        {"threshold_prev", HighFive::create_datatype<float>()},
+        {"success_h1_cumul_prev", HighFive::create_datatype<float>()},
+        {"is_empty", HighFive::create_datatype<bool>()},
+    };
 }
 
 } // namespace

@@ -74,7 +74,7 @@ SizeType find_nearest_sorted_idx(std::span<const double> arr_sorted,
     if (arr_sorted.empty()) {
         throw std::invalid_argument("find_nearest_sorted_idx: array is empty");
     }
-    if (std::isnan(val)) {
+    if (utils::is_nan(val)) {
         throw std::invalid_argument("find_nearest_sorted_idx: val is NaN");
     }
     const auto it = std::ranges::lower_bound(arr_sorted, val);
@@ -105,7 +105,7 @@ SizeType find_nearest_sorted_idx_scan(std::span<const double> arr_sorted,
         throw std::invalid_argument(
             "find_nearest_sorted_idx_scan: array is empty");
     }
-    if (std::isnan(val)) {
+    if (utils::is_nan(val)) {
         throw std::invalid_argument("find_nearest_sorted_idx_scan: val is NaN");
     }
 

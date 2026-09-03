@@ -143,7 +143,7 @@ Project-specific options use the **`LOKI_`** prefix. Standard CMake options keep
 | **`LOKI_BUILD_DOCS`** | `OFF` | Build documentation |
 | **`LOKI_ENABLE_COVERAGE`** | `OFF` | Compile with `--coverage` |
 | **`LOKI_ENABLE_IPO`** | `OFF` | Link-time optimization (Release) |
-| **`BUILD_SHARED_LIBS`** | `ON` | `ON` = shared `libloki`, `OFF` = static `libloki.a` |
+| **`BUILD_SHARED_LIBS`** | `ON` (C++ only) | `ON` = shared `libloki`; `OFF` = static `libloki.a`. Forced `OFF` when `LOKI_BUILD_PYTHON=ON`. |
 
 ### CPU vs GPU vs CPU+GPU
 
@@ -159,13 +159,16 @@ Project-specific options use the **`LOKI_`** prefix. Standard CMake options keep
 
 ---
 
-## Python vs static libraries on macOS
+## Python bindings and `BUILD_SHARED_LIBS`
 
-Python modules are built as **shared bundles** (`.so`). With **`BUILD_SHARED_LIBS=ON`** (default for pip installs), `libloki` is a shared library the extension links against cleanly.
+Pip/scikit-build sets **`BUILD_SHARED_LIBS=OFF`**. The C++ core is linked **statically** into each Python extension (`libloki.cpython-*.so`, and `libculoki` when CUDA is enabled). The wheel therefore ships a single importable module per backend — no separate `libloki.so` and no custom loader paths.
 
-With **`BUILD_SHARED_LIBS=OFF`**, loki becomes a static archive (`.a`). Embedding static libraries into macOS Python extensions often causes **duplicate or unresolved symbols** at link time because the linker treats bundles differently from normal executables. For Python bindings, keep **`BUILD_SHARED_LIBS=ON`**.
+For **C++-only** builds (`LOKI_BUILD_PYTHON=OFF`), either shared or static `loki` is fine:
 
-For pure C++ static linking (`LOKI_BUILD_PYTHON=OFF`), `BUILD_SHARED_LIBS=OFF` is fine.
+- **`BUILD_SHARED_LIBS=ON`** (default): shared `libloki.so` for `find_package(loki)`.
+- **`BUILD_SHARED_LIBS=OFF`**: static `libloki.a`.
+
+Do not combine **`LOKI_BUILD_PYTHON=ON`** with **`BUILD_SHARED_LIBS=ON`**; CMake will fail with an explicit error.
 
 ---
 
