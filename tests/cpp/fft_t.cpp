@@ -1,10 +1,12 @@
 #include <algorithm>
 #include <cmath>
+#include <numbers>
 #include <span>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include <catch2/matchers/catch_matchers_range_equals.hpp>
 
 #include "loki/common/types.hpp"
 #include "loki/exceptions.hpp"
@@ -17,6 +19,7 @@
 #include "loki/cuda_utils.cuh"
 #endif // LOKI_ENABLE_CUDA
 
+using Catch::Matchers::RangeEquals;
 using Catch::Matchers::WithinAbs;
 using loki::ComplexType;
 using loki::SizeType;
@@ -25,13 +28,48 @@ using loki::math::irfft_batch;
 using loki::math::kFFTBatchSizeMax;
 using loki::math::rfft_batch;
 
+#ifdef LOKI_ENABLE_CUDA
+using loki::ComplexTypeCUDA;
+#endif
+
 namespace {
+
+// Moderate batch for fast unit tests; stress cases use kFFTBatchSizeMax.
+constexpr SizeType kFFTTestBatch = 256;
+constexpr float kFftTol          = 1e-4F;
+constexpr float kFftRepeatTol    = 1e-5F;
+
+auto float_near(float margin) {
+    return [margin](float actual, float expected) {
+        return WithinAbs(expected, margin).match(actual);
+    };
+}
+
+auto complex_near(float margin) {
+    return [margin](const ComplexType& actual, const ComplexType& expected) {
+        return WithinAbs(expected.real(), margin).match(actual.real()) &&
+               WithinAbs(expected.imag(), margin).match(actual.imag());
+    };
+}
+
+#ifdef LOKI_ENABLE_CUDA
+auto cuda_complex_near(float margin) {
+    return [margin](const ComplexTypeCUDA& actual, const ComplexType& expected) {
+        return WithinAbs(expected.real(), margin).match(actual.real()) &&
+               WithinAbs(expected.imag(), margin).match(actual.imag());
+    };
+}
+
+auto cuda_complex_eq(const ComplexTypeCUDA& lhs, const ComplexTypeCUDA& rhs) {
+    return lhs.real() == rhs.real() && lhs.imag() == rhs.imag();
+}
+#endif
 
 std::vector<float> make_sine_batch(SizeType batch_size, SizeType n_real) {
     std::vector<float> data(batch_size * n_real);
     for (SizeType b = 0; b < batch_size; ++b) {
         for (SizeType i = 0; i < n_real; ++i) {
-            data[(b * n_real) + i] = std::sin(2.0F * static_cast<float>(M_PI) *
+            data[(b * n_real) + i] = std::sin(2.0F * std::numbers::pi_v<float> *
                                               static_cast<float>(i + 1 + b) /
                                               static_cast<float>(n_real));
         }
@@ -39,37 +77,24 @@ std::vector<float> make_sine_batch(SizeType batch_size, SizeType n_real) {
     return data;
 }
 
-void require_reals_equal(std::span<const float> lhs,
-                         std::span<const float> rhs) {
-    REQUIRE(lhs.size() == rhs.size());
-    for (SizeType i = 0; i < lhs.size(); ++i) {
-        REQUIRE(lhs[i] == rhs[i]);
-    }
-}
-
-void require_spectra_equal(std::span<const ComplexType> lhs,
-                           std::span<const ComplexType> rhs) {
-    REQUIRE(lhs.size() == rhs.size());
-    for (SizeType i = 0; i < lhs.size(); ++i) {
-        REQUIRE(lhs[i] == rhs[i]);
-    }
-}
-
 void require_round_trip(std::span<const float> real_in,
                         std::span<const float> recovered) {
-    REQUIRE(real_in.size() == recovered.size());
-    for (SizeType i = 0; i < real_in.size(); ++i) {
-        REQUIRE_THAT(recovered[i], WithinAbs(real_in[i], 1e-4F));
-    }
+    REQUIRE_THAT(recovered, RangeEquals(real_in, float_near(kFftTol)));
+}
+
+void require_reals_near(std::span<const float> lhs,
+                        std::span<const float> rhs,
+                        float margin) {
+    REQUIRE_THAT(lhs, RangeEquals(rhs, float_near(margin)));
 }
 
 } // namespace
 
 TEST_CASE("FFTWManager max_howmany caps cached decomposition",
           "[fft][FFTWManager]") {
-    constexpr SizeType n_real      = 64;
-    constexpr SizeType batch_size  = 5000;
-    constexpr SizeType max_howmany = 256;
+    const SizeType n_real      = 64;
+    const SizeType batch_size  = 512;
+    const SizeType max_howmany = 256;
 
     auto real_in = make_sine_batch(batch_size, n_real);
     std::vector<ComplexType> cached_out(batch_size * ((n_real / 2) + 1));
@@ -84,17 +109,12 @@ TEST_CASE("FFTWManager max_howmany caps cached decomposition",
     FFTWManager ephemeral;
     ephemeral.rfft_batch(real_in, ephemeral_out, batch_size, n_real, 8);
 
-    for (SizeType i = 0; i < cached_out.size(); ++i) {
-        REQUIRE_THAT(cached_out[i].real(),
-                     WithinAbs(ephemeral_out[i].real(), 1e-4F));
-        REQUIRE_THAT(cached_out[i].imag(),
-                     WithinAbs(ephemeral_out[i].imag(), 1e-4F));
-    }
+    REQUIRE_THAT(cached_out, RangeEquals(ephemeral_out, complex_near(kFftTol)));
 }
 
 TEST_CASE("FFTWManager round-trip with prepared cache", "[fft][FFTWManager]") {
-    constexpr SizeType n_real     = 64;
-    constexpr SizeType batch_size = 32;
+    const SizeType n_real     = 64;
+    const SizeType batch_size = 32;
 
     auto real_in = make_sine_batch(batch_size, n_real);
     std::vector<ComplexType> spectrum(batch_size * ((n_real / 2) + 1));
@@ -110,7 +130,7 @@ TEST_CASE("FFTWManager round-trip with prepared cache", "[fft][FFTWManager]") {
 
 TEST_CASE("FFTWManager prepare_plans extend and reject shrink",
           "[fft][FFTWManager]") {
-    constexpr SizeType n_real = 64;
+    const SizeType n_real = 64;
 
     FFTWManager manager;
     manager.prepare_plans(std::span<const SizeType>(&n_real, 1), 256);
@@ -119,8 +139,7 @@ TEST_CASE("FFTWManager prepare_plans extend and reject shrink",
     manager.prepare_plans(std::span<const SizeType>(&n_real, 1), 256);
     REQUIRE(manager.n_cached_plans() == plans_after_first);
 
-    manager.prepare_plans(std::span<const SizeType>(&n_real, 1),
-                          kFFTBatchSizeMax);
+    manager.prepare_plans(std::span<const SizeType>(&n_real, 1), 1024);
     REQUIRE(manager.n_cached_plans() > plans_after_first);
 
     REQUIRE_THROWS_AS(
@@ -129,8 +148,8 @@ TEST_CASE("FFTWManager prepare_plans extend and reject shrink",
 }
 
 TEST_CASE("FFTWManager rfft preserves real input", "[fft][FFTWManager]") {
-    constexpr SizeType n_real     = 64;
-    constexpr SizeType batch_size = 40;
+    const SizeType n_real     = 64;
+    const SizeType batch_size = 40;
 
     auto real_in           = make_sine_batch(batch_size, n_real);
     const auto real_before = real_in;
@@ -139,20 +158,20 @@ TEST_CASE("FFTWManager rfft preserves real input", "[fft][FFTWManager]") {
     SECTION("ephemeral") {
         FFTWManager manager;
         manager.rfft_batch(real_in, spectrum, batch_size, n_real, 4);
-        require_reals_equal(real_in, real_before);
+        REQUIRE_THAT(real_in, RangeEquals(real_before));
     }
     SECTION("ladder") {
         FFTWManager manager;
         manager.prepare_plans(std::span<const SizeType>(&n_real, 1), 16);
         manager.rfft_batch(real_in, spectrum, batch_size, n_real, 4);
-        require_reals_equal(real_in, real_before);
+        REQUIRE_THAT(real_in, RangeEquals(real_before));
     }
 }
 
 TEST_CASE("FFTWManager irfft round-trip without PRESERVE_INPUT",
           "[fft][FFTWManager]") {
-    constexpr SizeType n_real     = 64;
-    constexpr SizeType batch_size = 40;
+    const SizeType n_real     = 64;
+    const SizeType batch_size = 40;
 
     auto real_in = make_sine_batch(batch_size, n_real);
     std::vector<ComplexType> spectrum(batch_size * ((n_real / 2) + 1));
@@ -184,9 +203,9 @@ TEST_CASE("FFTWManager irfft round-trip without PRESERVE_INPUT",
 }
 
 TEST_CASE("FFTWManager preserves input when batch exceeds kFFTBatchSizeMax",
-          "[fft][FFTWManager]") {
-    constexpr SizeType n_real     = 32;
-    constexpr SizeType batch_size = kFFTBatchSizeMax + 1;
+          "[fft][FFTWManager][stress]") {
+    const SizeType n_real     = 32;
+    const SizeType batch_size = kFFTBatchSizeMax + 1;
 
     auto real_in           = make_sine_batch(batch_size, n_real);
     const auto real_before = real_in;
@@ -195,19 +214,19 @@ TEST_CASE("FFTWManager preserves input when batch exceeds kFFTBatchSizeMax",
 
     FFTWManager manager;
     manager.rfft_batch(real_in, spectrum, batch_size, n_real, 8);
-    require_reals_equal(real_in, real_before);
+    REQUIRE_THAT(real_in, RangeEquals(real_before));
 
-    const auto spectrum_before = spectrum;
+    const auto spectrum_before                = spectrum;
     std::vector<ComplexType> spectrum_scratch = spectrum;
     manager.irfft_batch(spectrum_scratch, recovered, batch_size, n_real, 8);
-    require_spectra_equal(spectrum, spectrum_before);
+    REQUIRE_THAT(spectrum, RangeEquals(spectrum_before));
     require_round_trip(real_in, recovered);
 }
 
 TEST_CASE("FFTWManager exact-howmany lazy cache reuses plans",
           "[fft][FFTWManager]") {
-    constexpr SizeType n_real     = 64;
-    constexpr SizeType batch_size = 200;
+    const SizeType n_real     = 64;
+    const SizeType batch_size = 200;
 
     auto real_in = make_sine_batch(batch_size, n_real);
     std::vector<ComplexType> spectrum(batch_size * ((n_real / 2) + 1));
@@ -228,15 +247,14 @@ TEST_CASE("FFTWManager exact-howmany lazy cache reuses plans",
     manager.irfft_batch(spectrum, recovered_b, batch_size, n_real, 1);
     REQUIRE(manager.n_cached_plans() == 1);
 
-    for (SizeType i = 0; i < recovered_a.size(); ++i) {
-        REQUIRE_THAT(recovered_b[i], WithinAbs(recovered_a[i], 1e-5F));
-    }
+    require_reals_near(recovered_b, recovered_a, kFftRepeatTol);
 }
 
 TEST_CASE("FFTWManager exact-howmany caches two chunk sizes",
           "[fft][FFTWManager]") {
-    constexpr SizeType n_real     = 32;
-    constexpr SizeType batch_size = kFFTBatchSizeMax + 1;
+    const SizeType n_real      = 32;
+    const SizeType max_howmany = 128;
+    const SizeType batch_size  = 200;
 
     auto real_in = make_sine_batch(batch_size, n_real);
     std::vector<ComplexType> spectrum(batch_size * ((n_real / 2) + 1));
@@ -246,19 +264,20 @@ TEST_CASE("FFTWManager exact-howmany caches two chunk sizes",
     spectral.rfft_batch(real_in, spectrum, batch_size, n_real, 1);
 
     FFTWManager manager;
-    manager.prepare_exact_plans(std::span<const SizeType>(&n_real, 1));
-    const auto spectrum_before = spectrum;
+    manager.prepare_exact_plans(std::span<const SizeType>(&n_real, 1),
+                                max_howmany);
+    const auto spectrum_before                = spectrum;
     std::vector<ComplexType> spectrum_scratch = spectrum;
     manager.irfft_batch(spectrum_scratch, recovered, batch_size, n_real, 1);
     REQUIRE(manager.n_cached_plans() == 2);
-    require_spectra_equal(spectrum, spectrum_before);
+    REQUIRE_THAT(spectrum, RangeEquals(spectrum_before));
 
     spectral.rfft_batch(real_in, spectrum, batch_size, n_real, 1);
     const auto spectrum_before_b = spectrum;
-    spectrum_scratch = spectrum;
+    spectrum_scratch             = spectrum;
     manager.irfft_batch(spectrum_scratch, recovered, batch_size, n_real, 1);
     REQUIRE(manager.n_cached_plans() == 2);
-    require_spectra_equal(spectrum, spectrum_before_b);
+    REQUIRE_THAT(spectrum, RangeEquals(spectrum_before_b));
 
     REQUIRE_THROWS_AS(
         manager.rfft_batch(real_in, spectrum, batch_size, n_real, 1),
@@ -266,7 +285,7 @@ TEST_CASE("FFTWManager exact-howmany caches two chunk sizes",
 }
 
 TEST_CASE("FFTWManager exact vs ladder mode conflict", "[fft][FFTWManager]") {
-    constexpr SizeType n_real = 64;
+    const SizeType n_real = 64;
     FFTWManager manager;
     manager.prepare_exact_plans(std::span<const SizeType>(&n_real, 1));
     REQUIRE_THROWS_AS(
@@ -275,29 +294,31 @@ TEST_CASE("FFTWManager exact vs ladder mode conflict", "[fft][FFTWManager]") {
 }
 
 TEST_CASE("FFTWManager chunking and empty batch", "[fft][FFTWManager]") {
-    constexpr SizeType n_real = 64;
+    const SizeType n_real = 64;
 
     SECTION("nthreads greater than batch_size") {
-        constexpr SizeType batch_size = 3;
-        auto real_in                  = make_sine_batch(batch_size, n_real);
-        const auto real_before        = real_in;
+        const SizeType batch_size = 3;
+        auto real_in              = make_sine_batch(batch_size, n_real);
+        const auto real_before    = real_in;
         std::vector<ComplexType> spectrum(batch_size * ((n_real / 2) + 1));
         std::vector<float> recovered(batch_size * n_real);
 
         FFTWManager manager;
         manager.rfft_batch(real_in, spectrum, batch_size, n_real, 8);
-        require_reals_equal(real_in, real_before);
+        REQUIRE_THAT(real_in, RangeEquals(real_before));
         manager.irfft_batch(spectrum, recovered, batch_size, n_real, 8);
         require_round_trip(real_in, recovered);
     }
 
-    SECTION("batch_size just below kFFTBatchSizeMax") {
-        constexpr SizeType batch_size = kFFTBatchSizeMax - 1;
-        auto real_in                  = make_sine_batch(batch_size, n_real);
+    SECTION("batch larger than single worker chunk round-trips") {
+        const SizeType batch_size = kFFTTestBatch;
+        auto real_in              = make_sine_batch(batch_size, n_real);
         std::vector<ComplexType> spectrum(batch_size * ((n_real / 2) + 1));
+        std::vector<float> recovered(batch_size * n_real);
         FFTWManager manager;
         manager.rfft_batch(real_in, spectrum, batch_size, n_real, 4);
-        REQUIRE(spectrum.size() == batch_size * ((n_real / 2) + 1));
+        manager.irfft_batch(spectrum, recovered, batch_size, n_real, 4);
+        require_round_trip(real_in, recovered);
     }
 
     SECTION("batch_size zero is a no-op") {
@@ -309,16 +330,16 @@ TEST_CASE("FFTWManager chunking and empty batch", "[fft][FFTWManager]") {
     }
 
     SECTION("odd n_real") {
-        constexpr SizeType odd_n      = 33;
-        constexpr SizeType batch_size = 8;
-        auto real_in                  = make_sine_batch(batch_size, odd_n);
-        const auto real_before        = real_in;
+        const SizeType odd_n      = 33;
+        const SizeType batch_size = 8;
+        auto real_in              = make_sine_batch(batch_size, odd_n);
+        const auto real_before    = real_in;
         std::vector<ComplexType> spectrum(batch_size * ((odd_n / 2) + 1));
         std::vector<float> recovered(batch_size * odd_n);
 
         FFTWManager manager;
         manager.rfft_batch(real_in, spectrum, batch_size, odd_n, 2);
-        require_reals_equal(real_in, real_before);
+        REQUIRE_THAT(real_in, RangeEquals(real_before));
         manager.irfft_batch(spectrum, recovered, batch_size, odd_n, 2);
         require_round_trip(real_in, recovered);
     }
@@ -326,8 +347,8 @@ TEST_CASE("FFTWManager chunking and empty batch", "[fft][FFTWManager]") {
 
 TEST_CASE("FFTWManager rfft preserves real input; irfft round-trip",
           "[fft][FFTWManager]") {
-    constexpr SizeType n_real     = 64;
-    constexpr SizeType batch_size = 16;
+    const SizeType n_real     = 64;
+    const SizeType batch_size = 16;
 
     auto real_in           = make_sine_batch(batch_size, n_real);
     const auto real_before = real_in;
@@ -335,7 +356,7 @@ TEST_CASE("FFTWManager rfft preserves real input; irfft round-trip",
     std::vector<float> recovered(batch_size * n_real);
 
     rfft_batch(real_in, spectrum, batch_size, n_real, 2);
-    require_reals_equal(real_in, real_before);
+    REQUIRE_THAT(real_in, RangeEquals(real_before));
 
     irfft_batch(spectrum, recovered, batch_size, n_real, 2);
     require_round_trip(real_in, recovered);
@@ -343,8 +364,8 @@ TEST_CASE("FFTWManager rfft preserves real input; irfft round-trip",
 
 TEST_CASE("EP-style copy before irfft preserves source spectrum",
           "[fft][FFTWManager]") {
-    constexpr SizeType n_real     = 64;
-    constexpr SizeType batch_size = 16;
+    const SizeType n_real     = 64;
+    const SizeType batch_size = 16;
 
     auto real_in = make_sine_batch(batch_size, n_real);
     std::vector<ComplexType> spectrum(batch_size * ((n_real / 2) + 1));
@@ -360,13 +381,12 @@ TEST_CASE("EP-style copy before irfft preserves source spectrum",
     std::copy(spectrum.begin(), spectrum.end(), spectrum_scratch.begin());
     manager.irfft_batch(spectrum_scratch, recovered, batch_size, n_real, 1);
 
-    require_spectra_equal(spectrum, spectrum_before);
+    REQUIRE_THAT(spectrum, RangeEquals(spectrum_before));
     require_round_trip(real_in, recovered);
 }
 
 #ifdef LOKI_ENABLE_CUDA
 
-using loki::ComplexTypeCUDA;
 using loki::math::CUFFTManager;
 using loki::math::irfft_batch_cuda;
 using loki::math::rfft_batch_cuda;
@@ -415,10 +435,7 @@ TEST_CASE("CUFFTManager round-trip matches FFTWManager",
     thrust::copy(d_spec.begin(), d_spec.end(), gpu_spec.begin());
     thrust::copy(d_recovered.begin(), d_recovered.end(), gpu_recovered.begin());
 
-    for (SizeType i = 0; i < cpu_spec.size(); ++i) {
-        REQUIRE_THAT(gpu_spec[i].real(), WithinAbs(cpu_spec[i].real(), 1e-4F));
-        REQUIRE_THAT(gpu_spec[i].imag(), WithinAbs(cpu_spec[i].imag(), 1e-4F));
-    }
+    REQUIRE_THAT(gpu_spec, RangeEquals(cpu_spec, cuda_complex_near(kFftTol)));
     require_round_trip(real_in, gpu_recovered);
     require_round_trip(cpu_recovered, gpu_recovered);
 }
@@ -590,9 +607,7 @@ TEST_CASE("CUFFTManager exact-batch lazy cache reuses plans",
                  recovered_a.begin());
     thrust::copy(d_recovered_b.begin(), d_recovered_b.end(),
                  recovered_b.begin());
-    for (SizeType i = 0; i < recovered_a.size(); ++i) {
-        REQUIRE_THAT(recovered_b[i], WithinAbs(recovered_a[i], 1e-5F));
-    }
+    require_reals_near(recovered_b, recovered_a, kFftRepeatTol);
 }
 
 TEST_CASE("CUFFTManager exact-batch caches two chunk sizes",
@@ -611,7 +626,7 @@ TEST_CASE("CUFFTManager exact-batch caches two chunk sizes",
     thrust::device_vector<float> d_real(real_in.begin(), real_in.end());
     thrust::device_vector<ComplexTypeCUDA> d_spec(batch_size * n_complex);
     thrust::device_vector<ComplexTypeCUDA> d_spec_scratch(batch_size *
-                                                         n_complex);
+                                                          n_complex);
     thrust::device_vector<float> d_recovered(batch_size * n_real);
 
     CUFFTManager spectral(0);
@@ -629,10 +644,7 @@ TEST_CASE("CUFFTManager exact-batch caches two chunk sizes",
 
     std::vector<ComplexTypeCUDA> spec_after(batch_size * n_complex);
     thrust::copy(d_spec.begin(), d_spec.end(), spec_after.begin());
-    for (SizeType i = 0; i < spec_before.size(); ++i) {
-        REQUIRE(spec_before[i].real() == spec_after[i].real());
-        REQUIRE(spec_before[i].imag() == spec_after[i].imag());
-    }
+    REQUIRE_THAT(spec_after, RangeEquals(spec_before, cuda_complex_eq));
 
     std::vector<float> gpu_recovered(batch_size * n_real);
     thrust::copy(d_recovered.begin(), d_recovered.end(), gpu_recovered.begin());
@@ -645,10 +657,10 @@ TEST_CASE("CUFFTManager exact-batch caches two chunk sizes",
                     loki::cuda_utils::as_span(d_recovered), batch_size, n_real);
     REQUIRE(gpu.n_cached_plans() == 2);
 
-    REQUIRE_THROWS_AS(
-        gpu.rfft_batch(loki::cuda_utils::as_span(d_real),
-                       loki::cuda_utils::as_span(d_spec), batch_size, n_real),
-        loki::error_check::DetailedException);
+    REQUIRE_THROWS_AS(gpu.rfft_batch(loki::cuda_utils::as_span(d_real),
+                                     loki::cuda_utils::as_span(d_spec),
+                                     batch_size, n_real),
+                      loki::error_check::DetailedException);
 }
 
 TEST_CASE("CUFFTManager exact vs max-batch mode conflict",

@@ -14,7 +14,6 @@
 #include <boost/math/special_functions/binomial.hpp>
 #include <boost/math/special_functions/factorials.hpp>
 #include <omp.h>
-#include <xsimd/xsimd.hpp>
 
 #include "loki/common/types.hpp"
 

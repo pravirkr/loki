@@ -29,6 +29,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Check CPU Info (Linux)
+        run: |
+          lscpu
+          cat /proc/cpuinfo | grep flags | head -n 1
+          cat /proc/cpuinfo | grep "cpu MHz" | head -n 1
+
       - name: Install system dependencies
         run: |
           sudo apt update

@@ -1268,8 +1268,8 @@ void brute_fold_ts_complex(const float* __restrict__ ts_e,
         }
     }
 #else
-    brute_fold_segment_xsimd(ts_e, ts_v, fold, freqs, nfreqs, nsegments,
-                             segment_len, nbins, tsamp, t_ref, nthreads);
+    brute_fold_ts_complex_xsimd(ts_e, ts_v, fold, freqs, nfreqs, nsegments,
+                                segment_len, nbins, tsamp, t_ref, nthreads);
 #endif
 }
 

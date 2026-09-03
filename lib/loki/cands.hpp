@@ -3,6 +3,7 @@
 #include <array>
 #include <filesystem>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
@@ -42,8 +43,12 @@ public:
     [[nodiscard]] std::string get_concise_timer_summary() const;
 
 private:
-    static constexpr std::array kTimerNames = {"brutefold", "ffa", "score",
-                                               "io"};
+    static constexpr std::array kTimerNames = {
+        "brutefold",
+        "ffa",
+        "score",
+        "io",
+    };
     std::map<std::string, float> m_timers;
 };
 
@@ -114,7 +119,8 @@ public:
 private:
     static constexpr std::array kTimerNames = {
         "branch", "validate",  "resolve",   "shift_add",
-        "score",  "threshold", "transform", "batch_add"};
+        "score",  "threshold", "transform", "batch_add",
+    };
 
     std::map<std::string, float> m_timers;
 };

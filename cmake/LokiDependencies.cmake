@@ -77,8 +77,8 @@ endif()
 # xsimd (SIMD library) - Header-only
 CPMAddPackage(
   NAME xsimd
-  VERSION 13.2.0
-  URL https://github.com/xtensor-stack/xsimd/archive/refs/tags/13.2.0.tar.gz
+  VERSION 14.0.0
+  URL https://github.com/xtensor-stack/xsimd/archive/refs/tags/14.0.0.tar.gz
   DOWNLOAD_ONLY YES
   EXCLUDE_FROM_ALL YES
   SYSTEM YES
@@ -122,8 +122,8 @@ endif()
 
 CPMAddPackage(
   NAME CLI11
-  VERSION 2.6.0
-  URL https://github.com/CLIUtils/CLI11/archive/refs/tags/v2.6.0.tar.gz
+  VERSION 2.7.0
+  URL https://github.com/CLIUtils/CLI11/archive/refs/tags/v2.7.0.tar.gz
   DOWNLOAD_ONLY YES
   EXCLUDE_FROM_ALL YES
   SYSTEM YES
@@ -137,8 +137,8 @@ endif()
 
 CPMAddPackage(
   NAME BoostMath
-  VERSION 1.90.0
-  URL https://github.com/boostorg/math/archive/refs/tags/boost-1.90.0.tar.gz
+  VERSION 1.92.0
+  URL https://github.com/boostorg/math/archive/refs/tags/boost-1.92.0.tar.gz
   DOWNLOAD_ONLY YES
   EXCLUDE_FROM_ALL YES
   SYSTEM YES

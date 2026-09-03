@@ -1,7 +1,7 @@
 # Catch2 test framework (CPM).
 CPMFindPackage(
   NAME Catch2
-  VERSION 3.8.0
+  VERSION 3.16.0
   GITHUB_REPOSITORY catchorg/Catch2
   OPTIONS "CATCH_INSTALL_DOCS OFF" "CATCH_INSTALL_EXTRAS OFF"
 )

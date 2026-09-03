@@ -38,8 +38,9 @@ void circular_prefix_sum(const float* __restrict__ x,
         return;
     }
     // Initial prefix sum over the base cycle (as nbins < nsum)
+    const SizeType first_pass = std::min(nbins, nsum);
     out[0] = x[0];
-    for (SizeType i = 1; i < nbins; ++i) {
+    for (SizeType i = 1; i < first_pass; ++i) {
         out[i] = out[i - 1] + x[i];
     }
     if (nsum <= nbins) [[unlikely]] {
