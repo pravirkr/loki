@@ -391,8 +391,10 @@ FFAResultWriter::FFAResultWriter(std::filesystem::path filename, Mode mode)
 
 void FFAResultWriter::write_metadata(
     const std::vector<std::string>& param_names,
-    const std::vector<SizeType>& scoring_widths) {
-    std::lock_guard<std::mutex> lock(m_hdf5_mutex);
+    SizeType nbins,
+    double ducy_max,
+    double wtsp) {
+    std::scoped_lock lock(m_hdf5_mutex);
 
     if (m_file.exist("ffa_version")) {
         throw std::runtime_error("FFA metadata already exists in file. Use "
@@ -400,7 +402,9 @@ void FFAResultWriter::write_metadata(
     }
     m_file.createAttribute("ffa_version", "1.0.0-cpp");
     m_file.createAttribute("param_names", param_names);
-    m_file.createAttribute("scoring_widths", scoring_widths);
+    m_file.createAttribute("nbins", nbins);
+    m_file.createAttribute("ducy_max", ducy_max);
+    m_file.createAttribute("wtsp", wtsp);
 }
 
 void FFAResultWriter::write_results(std::span<const double> param_sets,
@@ -410,7 +414,7 @@ void FFAResultWriter::write_results(std::span<const double> param_sets,
     if (n_param_sets == 0) {
         return;
     }
-    std::lock_guard<std::mutex> lock(m_hdf5_mutex);
+    std::scoped_lock lock(m_hdf5_mutex);
 
     // Validate param_sets dimensions
     if (!param_sets.empty()) {
@@ -501,7 +505,7 @@ void PruneResultWriter::write_metadata(
     SizeType nsegments,
     SizeType max_sugg,
     std::span<const float> threshold_scheme) {
-    std::lock_guard<std::mutex> lock(m_hdf5_mutex);
+    std::scoped_lock lock(m_hdf5_mutex);
 
     HighFive::File file = open_file();
     if (file.exist("pruning_version")) {

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <vector>
 
 #include "loki/common/coord.hpp"
@@ -13,29 +14,24 @@ inline constexpr SizeType kFFAFreqSweepWriteBatchSize = 1U << 16U;
 /**
  * @brief Generates frequency regions for an efficient FFA search.
  *
- * This function divides a wide frequency search range into smaller, contiguous
- * chunks. The core principle is to maintain a nearly constant physical time
- * resolution per folding bin, ensuring consistent sensitivity to a given pulse
- * duty cycle across the search. The number of bins grows with the frequency
- * until an optional maximum is reached.
+ * Divides a period range into contiguous bands that keep a nearly constant
+ * physical time resolution per folding bin. Bin count grows with period until
+ * `nbins_max`. Requested `nbins_min` must fit in `p_min / tsamp` or the
+ * function throws.
  *
- * @param p_min The minimum period of the entire search range (in seconds).
- * @param p_max The maximum period of the entire search range (in seconds).
- * @param tsamp The sampling interval of the input data (in seconds).
- * @param nbins_min The minimum number of folding bins to use for the shortest
- * period in the search range.
- * @param eta_min The minimum tolerance in bins for the shortest period in the
- * search range. Must be positive.
+ * @param p_min Minimum period (seconds). Must exceed 2*tsamp (Nyquist) and
+ * satisfy p_min >= nbins_min * tsamp.
+ * @param p_max Maximum period (seconds). Must be > p_min.
+ * @param tsamp Sampling interval (seconds).
+ * @param nbins_min Folding bins at the shortest period. Must be >= 2.
+ * @param eta_min Tolerance in bins at the shortest period. Must be positive.
  * @param octave_scale multiplicative factor between successive FFA search
-bands. An octave_scale = 2.0 gives true octave spacing (each band doubles in
-period and bin count). Values < 2.0 create pseudo-octaves for smoother
-duty-cycle resolution.
- * @param nbins_max The maximum number of bins to cap memory usage for
- * long periods in the search range. Must be >= nbins_min.
- * @return A std::vector of FFARegion structs, each defining a single FFA search
- * frequency region.
- * @throws std::invalid_argument if input parameters are illogical.
- * @throws std::runtime_error if nbins_max < nbins_min.
+ * bands. An octave_scale = 2.0 gives true octave spacing (each band doubles in
+ * period and bin count). Values in (1.0, 2.0) create pseudo-octaves for
+ * smoother duty-cycle resolution. Must be strictly > 1.0.
+ * @param nbins_max Cap on folding bins for long periods. Must be >= nbins_min.
+ * @return Contiguous FFARegion bands covering [1/p_max, 1/p_min] Hz.
+ * @throws std::runtime_error if the inputs are illogical.
  */
 std::vector<coord::FFARegion> generate_ffa_regions(double p_min,
                                                    double p_max,
@@ -62,7 +58,7 @@ public:
                    SizeType max_coord_size,
                    SizeType max_ncoords,
                    SizeType max_ffa_levels,
-                   SizeType n_widths,
+                   SizeType max_scores_scratch,
                    SizeType n_params,
                    SizeType n_samps,
                    SizeType max_passing_candidates,
@@ -86,16 +82,25 @@ public:
     SizeType get_max_ffa_levels() const noexcept { return m_max_ffa_levels; }
     /// @brief Get the maximum size of the FFA workspace buffer (time domain).
     SizeType get_max_buffer_size_time() const noexcept;
-    /// @brief Get the maximum size of the scores storage.
-    SizeType get_max_scores_size() const noexcept;
+    /// @brief Get the per-chunk raw score scratch size.
+    /// @details max over chunks of ncoords * n_widths(nbins). The boxcar
+    /// width count is derived from nbins, which varies between regions, so
+    /// this is not simply max_ncoords times the base width count.
+    SizeType get_max_scores_scratch_size() const noexcept;
+    /// @brief Get the capacity of the surviving-candidate accumulator.
+    SizeType get_max_candidates() const noexcept;
     /// @brief Get the write parameter sets storage.
     SizeType get_write_param_sets_size() const noexcept;
     /// @brief Get the memory usage of the buffer storage (in GB).
     float get_buffer_memory_usage() const noexcept;
     /// @brief Get the memory usage of the coordinate storage (in GB).
     float get_coord_memory_usage() const noexcept;
-    /// @brief Get the memory usage of the scores + param sets storage (in GB).
+    /// @brief Get the host memory usage of the score scratch, candidate
+    /// accumulator and write staging (in GB).
     float get_extra_memory_usage() const noexcept;
+    /// @brief Get the device memory usage of the timeseries and per-chunk
+    /// score scratch (in GB). Excludes the host-side candidate accumulator.
+    float get_device_extra_memory_usage() const noexcept;
     float get_cpu_memory_usage() const noexcept;
     float get_device_memory_usage() const noexcept;
     /// @brief Get the memory usage of the FFA freq sweep for this region (in
@@ -110,7 +115,7 @@ private:
     SizeType m_max_coord_size;
     SizeType m_max_ncoords; // maximum number of coordinates in the last level
     SizeType m_max_ffa_levels;
-    SizeType m_n_widths;
+    SizeType m_max_scores_scratch; // max over chunks of ncoords * n_widths
     SizeType m_n_params;
     SizeType m_n_samps; // ts_e.size()
     SizeType m_max_passing_candidates;
@@ -121,7 +126,16 @@ private:
 /**
  * @brief A planner for FFA regions (Time or Fourier domain).
  * @details
- * This class plans the FFA regions for a given search configuration.
+ * This class plans the FFA regions for a given search configuration. Each
+ * frequency searchregion produced by generate_ffa_regions() is
+ * subdivided into memory-bounded chunks by bisecting the region's frequency
+ * width; nbins/eta and every other search parameter (e.g. acceleration,
+ * jerk) are held fixed within a region and are never altered by this
+ * subdivision.
+ *
+ * The planner also accounts for Doppler/drift expansion of each chunk's
+ * frequency window when nparams > 1 (derived from the acceleration/jerk
+ * entries of param_limits and tobs).
  */
 template <SupportedFoldType FoldType> class FFARegionPlanner {
 public:

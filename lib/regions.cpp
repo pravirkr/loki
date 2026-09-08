@@ -1,6 +1,8 @@
 #include "loki/algorithms/regions.hpp"
 
 #include <algorithm>
+#include <cmath>
+#include <format>
 #include <numeric>
 #include <utility>
 
@@ -23,9 +25,39 @@ struct ChunkEval {
     SizeType coord_size;
     SizeType ncoords;
     SizeType ffa_levels;
+    SizeType scores_scratch;     // ncoords * n_widths for THIS chunk's nbins
     double chunk_only_memory_gb; // For logging/stats.
     double allocated_memory_gb;  // With accumulated maxima
 };
+
+// Running maxima over all accepted chunks. The shared workspace and scratch
+// buffers are sized from these, so every probe must be tested against them
+// rather than against the chunk in isolation.
+struct PlanMaxima {
+    SizeType buffer_size{};
+    SizeType coord_size{};
+    SizeType ncoords{};
+    SizeType ffa_levels{};
+    SizeType scores_scratch{};
+
+    void absorb(const PlanMaxima& other) noexcept {
+        buffer_size    = std::max(buffer_size, other.buffer_size);
+        coord_size     = std::max(coord_size, other.coord_size);
+        ncoords        = std::max(ncoords, other.ncoords);
+        ffa_levels     = std::max(ffa_levels, other.ffa_levels);
+        scores_scratch = std::max(scores_scratch, other.scores_scratch);
+    }
+};
+
+PlanMaxima to_maxima(const ChunkEval& eval) noexcept {
+    return {
+        .buffer_size    = eval.buffer_size,
+        .coord_size     = eval.coord_size,
+        .ncoords        = eval.ncoords,
+        .ffa_levels     = eval.ffa_levels,
+        .scores_scratch = eval.scores_scratch,
+    };
+}
 } // namespace
 
 std::vector<coord::FFARegion> generate_ffa_regions(double p_min,
@@ -38,40 +70,58 @@ std::vector<coord::FFARegion> generate_ffa_regions(double p_min,
     error_check::check_greater(p_min, 0.0, "p_min must be positive.");
     error_check::check_greater(p_max, p_min, "p_max must be > p_min.");
     error_check::check_greater(tsamp, 0.0, "tsamp must be positive.");
-    error_check::check_greater_equal(nbins_min, 2, "nbins_min must be >= 2.");
+    error_check::check_greater_equal(nbins_min, SizeType{2},
+                                     "nbins_min must be >= 2.");
     error_check::check_greater(eta_min, 0.0, "eta_min must be positive.");
-    error_check::check_greater_equal(octave_scale, 1.0,
-                                     "octave_scale must be >= 1.0.");
+    error_check::check_greater(
+        static_cast<double>(nbins_min), eta_min,
+        "eta_min must be < nbins_min (duty cycle rho < 1).");
+    error_check::check_greater(octave_scale, 1.0,
+                               "octave_scale must be strictly > 1.0.");
     error_check::check_greater_equal(nbins_max, nbins_min,
                                      "nbins_max must be >= nbins_min.");
+    error_check::check_greater(
+        p_min, 2.0 * tsamp,
+        std::format("p_min ({:.9f} s) must exceed 2*tsamp ({:.9f} s); the "
+                    "requested f_max = {:.6f} Hz meets or exceeds the "
+                    "Nyquist frequency ({:.6f} Hz) for tsamp={:.9f} s. "
+                    "Lower f_max (raise p_min) or use a finer tsamp.",
+                    p_min, 2.0 * tsamp, 1.0 / p_min, 1.0 / (2.0 * tsamp),
+                    tsamp));
+
+    // t_W = max(P_min / b_min, t_s). Finest physical bin width in the plan.
+    // rho = eta_0 / b_min. Held fixed; eta_k = rho * N_{b,k}.
+    const double t_w = std::max(p_min / static_cast<double>(nbins_min), tsamp);
+    const double rho = eta_min / static_cast<double>(nbins_min);
 
     std::vector<coord::FFARegion> regions;
-    SizeType nbins_cur =
-        std::min(nbins_min, static_cast<SizeType>(p_min / tsamp));
-    double rho = eta_min / static_cast<double>(nbins_cur);
-
-    // Core invariant: physical time width of a single folding bin (in
-    // seconds). Core invariant: duty-cycle resolution (rho) in bins.
-    const double bin_width = p_min / static_cast<double>(nbins_cur);
-    auto p_cur_low         = p_min;
+    double p_cur_low = p_min;
     while (p_cur_low < p_max) {
-        auto nbins_k = nbins_cur;
+        auto nbins_k = static_cast<SizeType>(std::round(
+            std::min(p_cur_low / t_w, static_cast<double>(nbins_max))));
+        nbins_k      = std::clamp(nbins_k, SizeType{2}, nbins_max);
         if (nbins_k >= nbins_max) {
-            double eta_k = std::round(rho * static_cast<double>(nbins_max));
-            regions.push_back({.f_start = 1.0 / p_max,
-                               .f_end   = 1.0 / p_cur_low,
-                               .nbins   = nbins_max,
-                               .eta     = eta_k});
+            regions.push_back({
+                .f_start = 1.0 / p_max,
+                .f_end   = 1.0 / p_cur_low,
+                .nbins   = nbins_max,
+                .eta     = rho * static_cast<double>(nbins_max),
+            });
             break;
         }
         const double p_cur_high = std::min(p_cur_low * octave_scale, p_max);
-        double eta_k            = rho * static_cast<double>(nbins_k);
-        regions.push_back({.f_start = 1.0 / p_cur_high,
-                           .f_end   = 1.0 / p_cur_low,
-                           .nbins   = nbins_k,
-                           .eta     = eta_k});
+        error_check::check_greater(
+            p_cur_high, p_cur_low,
+            std::format("Period grid stalled at P={:.17g} s with "
+                        "octave_scale={:.17g}.",
+                        p_cur_low, octave_scale));
+        regions.push_back({
+            .f_start = 1.0 / p_cur_high,
+            .f_end   = 1.0 / p_cur_low,
+            .nbins   = nbins_k,
+            .eta     = rho * static_cast<double>(nbins_k),
+        });
         p_cur_low = p_cur_high;
-        nbins_cur = static_cast<SizeType>(p_cur_low / bin_width);
     }
     return regions;
 }
@@ -82,7 +132,7 @@ FFARegionStats::FFARegionStats(SizeType max_buffer_size,
                                SizeType max_coord_size,
                                SizeType max_ncoords,
                                SizeType max_ffa_levels,
-                               SizeType n_widths,
+                               SizeType max_scores_scratch,
                                SizeType n_params,
                                SizeType n_samps,
                                SizeType max_passing_candidates,
@@ -92,7 +142,7 @@ FFARegionStats::FFARegionStats(SizeType max_buffer_size,
       m_max_coord_size(max_coord_size),
       m_max_ncoords(max_ncoords),
       m_max_ffa_levels(max_ffa_levels),
-      m_n_widths(n_widths),
+      m_max_scores_scratch(max_scores_scratch),
       m_n_params(n_params),
       m_n_samps(n_samps),
       m_max_passing_candidates(max_passing_candidates),
@@ -102,8 +152,11 @@ FFARegionStats::FFARegionStats(SizeType max_buffer_size,
 SizeType FFARegionStats::get_max_buffer_size_time() const noexcept {
     return m_use_fourier ? 2 * m_max_buffer_size : m_max_buffer_size;
 }
-SizeType FFARegionStats::get_max_scores_size() const noexcept {
-    return std::max(m_max_ncoords * m_n_widths, m_max_passing_candidates);
+SizeType FFARegionStats::get_max_scores_scratch_size() const noexcept {
+    return m_max_scores_scratch;
+}
+SizeType FFARegionStats::get_max_candidates() const noexcept {
+    return m_max_passing_candidates;
 }
 SizeType FFARegionStats::get_write_param_sets_size() const noexcept {
     return kFFAFreqSweepWriteBatchSize * (m_n_params + 1); // includes width
@@ -123,9 +176,22 @@ float FFARegionStats::get_coord_memory_usage() const noexcept {
     return static_cast<float>(coord_size) / static_cast<float>(1ULL << 30U);
 }
 float FFARegionStats::get_extra_memory_usage() const noexcept {
+    // Per-chunk raw score scratch, plus the fixed-capacity candidate
+    // accumulator (score + local index + region id), plus the write staging.
+    constexpr SizeType kBytesPerCandidate =
+        sizeof(float) + (2 * sizeof(uint32_t));
     return static_cast<float>((get_write_param_sets_size() * sizeof(double)) +
-                              (get_max_scores_size() * sizeof(uint32_t)) +
-                              (get_max_scores_size() * sizeof(float))) /
+                              (get_max_scores_scratch_size() * sizeof(float)) +
+                              (get_max_candidates() * kBytesPerCandidate)) /
+           static_cast<float>(1ULL << 30U);
+}
+float FFARegionStats::get_device_extra_memory_usage() const noexcept {
+    // ts_e_d + ts_v_d + per-chunk scores_d and passing_indices_d scratch
+    // (widths_d is negligible). The candidate accumulator lives on the host.
+    return static_cast<float>(
+               (((2 * m_n_samps) + get_max_scores_scratch_size()) *
+                sizeof(float)) +
+               (get_max_scores_scratch_size() * sizeof(uint32_t))) /
            static_cast<float>(1ULL << 30U);
 }
 float FFARegionStats::get_cpu_memory_usage() const noexcept {
@@ -134,17 +200,7 @@ float FFARegionStats::get_cpu_memory_usage() const noexcept {
 }
 // Use this for GPU memory usage calculation
 float FFARegionStats::get_device_memory_usage() const noexcept {
-    // ts_e_d + ts_v_d + scores_d (widths_d is negligible)
-    const float device_extra_gb =
-        static_cast<float>(
-            (((2 * m_n_samps) + get_max_scores_size()) * sizeof(float)) +
-            (get_max_scores_size() * sizeof(uint32_t))) /
-        static_cast<float>(1ULL << 30U);
-    // m_fold_d_time
-    // const float fold_d_time_gb =
-    //    static_cast<float>(get_max_buffer_size_time() * sizeof(float)) /
-    //    static_cast<float>(1ULL << 30U);
-    return device_extra_gb + get_buffer_memory_usage() +
+    return get_device_extra_memory_usage() + get_buffer_memory_usage() +
            get_coord_memory_usage();
 }
 float FFARegionStats::get_freq_sweep_memory_usage() const noexcept {
@@ -248,24 +304,20 @@ private:
                 max_drift));
         }
         if (max_drift > 0 && m_base_cfg.get_nparams() > 1) {
-            spdlog::info("Drift-aware chunking: max_drift={:.6f} ({:.4f}%) "
-                         "for tobs={:.1f}s, n_params={}",
+            spdlog::info("Drift-aware chunking: max_drift={:.6f} "
+                         "({:.4f}%) for tobs={:.1f}s, n_params={}",
                          max_drift, max_drift * 100.0, m_base_cfg.get_tobs(),
                          m_base_cfg.get_nparams());
         }
-        SizeType max_buffer_size{};
-        SizeType max_coord_size{};
-        SizeType max_ncoords{};
-        SizeType max_ffa_levels{};
+        PlanMaxima maxima;
         for (const auto& region : ffa_regions) {
             subdivide_region_by_memory(region.f_start, region.f_end,
                                        region.nbins, region.eta, max_drift,
-                                       max_buffer_size, max_coord_size,
-                                       max_ncoords, max_ffa_levels);
+                                       maxima);
         }
         m_stats = FFARegionStats(
-            max_buffer_size, max_coord_size, max_ncoords, max_ffa_levels,
-            m_base_cfg.get_n_scoring_widths(), m_base_cfg.get_nparams(),
+            maxima.buffer_size, maxima.coord_size, maxima.ncoords,
+            maxima.ffa_levels, maxima.scores_scratch, m_base_cfg.get_nparams(),
             m_base_cfg.get_nsamps(), m_base_cfg.get_max_passing_candidates(),
             m_base_cfg.get_use_fourier(), m_use_gpu);
 
@@ -278,10 +330,7 @@ private:
                                     SizeType nbins,
                                     double eta,
                                     double max_drift,
-                                    SizeType& max_buffer_size,
-                                    SizeType& max_coord_size,
-                                    SizeType& max_ncoords,
-                                    SizeType& max_ffa_levels) {
+                                    PlanMaxima& maxima) {
         if (f_end <= f_start) {
             return; // Empty or inverted region; nothing to do.
         }
@@ -306,21 +355,26 @@ private:
                 max_memory_gb, kSafetyMarginGB));
         }
 
-        constexpr double kRelativeTolerance   = 1.0e-4;
-        constexpr double kAbsoluteToleranceHz = 1.0e-2;
+        constexpr double kRelativeTolerance = 1.0e-4;
+        // Convergence tolerance for the frequency-width *bisection search*
+        // (Hz). This only controls how precisely we locate the largest
+        // fitting chunk width.
+        constexpr double kBisectionToleranceHz = 1.0e-2;
+        // The minimal chunk size (Hz) below which the planner will never
+        // subdivide further.
+        constexpr double kMinChunkWidthHz     = 1.0e-2;
         constexpr SizeType kMaxBisectionSteps = 50;
 
         const double region_span = f_end - f_start;
         const double boundary_tolerance =
-            std::max(kAbsoluteToleranceHz, kRelativeTolerance * region_span);
+            std::max(kBisectionToleranceHz, kRelativeTolerance * region_span);
 
-        auto stats_for = [&](SizeType buf, SizeType coord, SizeType nc,
-                             SizeType lv) {
-            return FFARegionStats{buf,
-                                  coord,
-                                  nc,
-                                  lv,
-                                  m_base_cfg.get_n_scoring_widths(),
+        auto stats_for = [&](const PlanMaxima& m) {
+            return FFARegionStats{m.buffer_size,
+                                  m.coord_size,
+                                  m.ncoords,
+                                  m.ffa_levels,
+                                  m.scores_scratch,
                                   m_base_cfg.get_nparams(),
                                   m_base_cfg.get_nsamps(),
                                   m_base_cfg.get_max_passing_candidates(),
@@ -355,25 +409,36 @@ private:
             const SizeType coord = plan.get_coord_size();
             const SizeType nc    = plan.get_ncoords().back();
             const SizeType lv    = plan.get_n_levels();
+            // Width count follows nbins, which is fixed within a region but
+            // differs between regions, so it must come from the chunk config.
+            const SizeType scratch = nc * cfg.get_n_scoring_widths();
 
+            const PlanMaxima chunk_only{
+                .buffer_size    = buf,
+                .coord_size     = coord,
+                .ncoords        = nc,
+                .ffa_levels     = lv,
+                .scores_scratch = scratch,
+            };
             const double chunk_only_gb =
-                stats_for(buf, coord, nc, lv).get_freq_sweep_memory_usage();
+                stats_for(chunk_only).get_freq_sweep_memory_usage();
 
             // Workspace is sized by max over all chunks; fit must use that.
+            PlanMaxima allocated = maxima;
+            allocated.absorb(chunk_only);
             const double allocated_gb =
-                stats_for(std::max(max_buffer_size, buf),
-                          std::max(max_coord_size, coord),
-                          std::max(max_ncoords, nc),
-                          std::max(max_ffa_levels, lv))
-                    .get_freq_sweep_memory_usage();
+                stats_for(allocated).get_freq_sweep_memory_usage();
 
-            return ChunkEval{.cfg                  = std::move(cfg),
-                             .buffer_size          = buf,
-                             .coord_size           = coord,
-                             .ncoords              = nc,
-                             .ffa_levels           = lv,
-                             .chunk_only_memory_gb = chunk_only_gb,
-                             .allocated_memory_gb  = allocated_gb};
+            return ChunkEval{
+                .cfg                  = std::move(cfg),
+                .buffer_size          = buf,
+                .coord_size           = coord,
+                .ncoords              = nc,
+                .ffa_levels           = lv,
+                .scores_scratch       = scratch,
+                .chunk_only_memory_gb = chunk_only_gb,
+                .allocated_memory_gb  = allocated_gb,
+            };
         };
 
         auto fits = [&](const ChunkEval& e) {
@@ -421,7 +486,7 @@ private:
             // produce. If even this doesn't fit, the search is too memory-bound
             // for FFA to be a valid algorithm here.
             const double min_chunk_width =
-                std::min(remaining_width, kAbsoluteToleranceHz);
+                std::min(remaining_width, kMinChunkWidthHz);
             const double min_probe_start = current_f_end - min_chunk_width;
             auto min_eval = evaluate_chunk(min_probe_start, current_f_end);
             if (!fits(min_eval)) {
@@ -429,13 +494,13 @@ private:
                                         (min_probe_start * (1.0 - max_drift));
                 throw std::runtime_error(std::format(
                     "FFARegionPlanner: Cannot fit minimum viable chunk at "
-                    "at the top of [{:08.3f}, {:08.3f}] Hz.\n"
+                    "the top of [{:08.3f}, {:08.3f}] Hz.\n"
                     "  Nominal range: {:.3f} Hz, drift-expanded span: {:.3f} "
                     "Hz\n"
                     "  Required memory: {:.2f} GB, Available: {:.2f} GB\n"
                     "  Suggestion: Increase max_memory_gb or reduce "
                     "parameter search ranges.",
-                    f_start, current_f_end, kAbsoluteToleranceHz, drift_span,
+                    f_start, current_f_end, min_chunk_width, drift_span,
                     min_eval.allocated_memory_gb, effective_limit_gb));
             }
 
@@ -498,7 +563,8 @@ private:
                 .nominal_width    = nominal_width,
                 .actual_width     = actual_width,
                 .total_memory_gb  = eval.chunk_only_memory_gb,
-                .overlap_fraction = overlap_fraction});
+                .overlap_fraction = overlap_fraction,
+            });
 
             spdlog::debug("Chunk: nominal=[{:08.3f}, {:08.3f}] ({:.3f} Hz), "
                           "actual=[{:08.3f}, {:08.3f}] ({:.3f} Hz), "
@@ -507,10 +573,7 @@ private:
                           actual_start, actual_end, actual_width,
                           overlap_fraction * 100.0, eval.chunk_only_memory_gb);
 
-            max_buffer_size = std::max(max_buffer_size, eval.buffer_size);
-            max_coord_size  = std::max(max_coord_size, eval.coord_size);
-            max_ncoords     = std::max(max_ncoords, eval.ncoords);
-            max_ffa_levels  = std::max(max_ffa_levels, eval.ffa_levels);
+            maxima.absorb(to_maxima(eval));
 
             current_f_end = nominal_start;
         }

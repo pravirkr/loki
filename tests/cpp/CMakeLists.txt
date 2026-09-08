@@ -35,6 +35,7 @@ target_link_libraries(
                               Catch2::Catch2WithMain
                               Boost::math
                               OpenMP::OpenMP_CXX
+                              HighFive::HighFive
 )
 
 catch_discover_tests(${LOKI_TEST_TARGET})

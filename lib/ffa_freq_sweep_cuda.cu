@@ -1,5 +1,6 @@
 #include "loki/pipelines/ffa_freq_sweep.hpp"
 
+#include <algorithm>
 #include <type_traits>
 #include <vector>
 
@@ -14,7 +15,7 @@
 #include "loki/cuda_utils.cuh"
 #include "loki/detection/score.hpp"
 #include "loki/exceptions.hpp"
-#include "loki/psr_utils.hpp"
+#include "loki/ffa_sweep_candidates.hpp"
 #include "loki/search/configs.hpp"
 #include "loki/timing.hpp"
 #include "loki/utils/fft.hpp"
@@ -47,6 +48,9 @@ public:
         : m_base_cfg(std::move(cfg)),
           m_device_id(device_id),
           m_region_planner(create_region_planner(m_base_cfg, m_device_id)),
+          m_region_decode(build_region_decode_table<HostFoldT>(
+              m_region_planner.get_cfgs())),
+          m_cands(m_region_planner.get_stats().get_max_candidates()),
           m_fft_manager(device_id) {
         const auto& planner_stats = m_region_planner.get_stats();
         // Allocate buffers once, sized for the largest chunk
@@ -63,19 +67,19 @@ public:
             }
             m_fft_manager.prepare_plans(n_reals);
         }
-        m_scores.resize(planner_stats.get_max_scores_size());
-        m_passing_indices.resize(planner_stats.get_max_scores_size());
+        const auto scratch_size = planner_stats.get_max_scores_scratch_size();
+        m_scores_staging.resize(scratch_size);
+        m_indices_staging.resize(scratch_size);
         m_write_param_sets_batch.resize(
             planner_stats.get_write_param_sets_size());
-        m_n_passing_scores_per_region.resize(m_region_planner.get_nregions());
         m_ffa_stats = std::make_unique<cands::FFAStatsCollection>();
 
         m_fold_time_d.resize(planner_stats.get_max_buffer_size_time());
-        m_scores_d.resize(planner_stats.get_max_scores_size());
-        m_passing_indices_d.resize(planner_stats.get_max_scores_size());
-
-        // Copy scoring widths to device
-        m_widths_d = m_base_cfg.get_scoring_widths();
+        // The filter kernel claims output slots with an unbounded atomic, so
+        // the device buffers must cover the worst case of every score passing.
+        m_scores_d.resize(scratch_size);
+        m_passing_indices_d.resize(scratch_size);
+        validate_scratch_sizes(scratch_size);
 
         // Log the actual memory usage for the allocated buffers
         spdlog::info("FFAFreqSweepCUDA allocated {:.2f} GB ({:.2f} GB buffers "
@@ -83,9 +87,10 @@ public:
                      planner_stats.get_freq_sweep_memory_usage(),
                      planner_stats.get_buffer_memory_usage(),
                      planner_stats.get_coord_memory_usage(),
-                     planner_stats.get_extra_memory_usage());
-        spdlog::info("FFAFreqSweepCUDA will process {} chunks",
-                     m_region_planner.get_nregions());
+                     planner_stats.get_device_extra_memory_usage());
+        spdlog::info("FFAFreqSweepCUDA will process {} chunks, keeping up to "
+                     "{} candidates in RAM before flushing to disk",
+                     m_region_planner.get_nregions(), m_cands.get_capacity());
     }
 
     ~FFAFreqSweepCUDATypedImpl() final                          = default;
@@ -102,6 +107,11 @@ public:
         timing::SimpleTimer timer;
         cands::FFATimerStats ffa_timer_stats_pipeline;
         timer.start();
+        // Reset accumulated state so repeated execute() calls are independent
+        m_ffa_stats = std::make_unique<cands::FFAStatsCollection>();
+        m_cands.clear();
+        m_total_passing_scores = 0;
+
         // Write metadata to result file
         const std::string filebase = std::format("{}_ffa", file_prefix);
         const auto result_file =
@@ -110,7 +120,8 @@ public:
             result_file, cands::FFAResultWriter::Mode::kWrite);
         auto param_names = m_base_cfg.get_param_names();
         param_names.emplace_back("width");
-        writer.write_metadata(param_names, m_base_cfg.get_scoring_widths());
+        writer.write_metadata(param_names, m_base_cfg.get_nbins(),
+                              m_base_cfg.get_ducy_max(), m_base_cfg.get_wtsp());
 
         // Copy input data to device
         cudaStream_t stream = nullptr;
@@ -131,7 +142,7 @@ public:
             "Input data copy stream synchronization failed");
         ffa_timer_stats_pipeline["io"] += timer.stop();
 
-        m_total_passing_scores       = 0; // reset total passing scores
+        double accumulated_flops     = 0.0;
         const auto& ffa_regions_cfgs = m_region_planner.get_cfgs();
         for (SizeType i = 0; i < ffa_regions_cfgs.size(); ++i) {
             const search::PulsarSearchConfig& cfg_cur = ffa_regions_cfgs[i];
@@ -139,9 +150,8 @@ public:
             spdlog::info("Processing chunk f0 (Hz): [{:08.3f}, {:08.3f}]",
                          freq_limits.min, freq_limits.max);
             cands::FFATimerStats ffa_timer_stats;
-            const SizeType n_passing =
-                execute_ffa_region(cfg_cur, ffa_timer_stats, stream);
-            m_n_passing_scores_per_region[i] = n_passing;
+            execute_ffa_region(cfg_cur, i, writer, ffa_timer_stats, stream);
+            accumulated_flops += m_region_decode[i].gflops;
             // Log per-chunk timing summary
             spdlog::info("FFA Chunk: timer: {}",
                          ffa_timer_stats.get_concise_timer_summary());
@@ -149,29 +159,16 @@ public:
             m_ffa_stats->update_stats(ffa_timer_stats);
         }
 
-        // Copy scores to host
+        // Drain whatever is still in RAM
         timer.start();
-        cuda_utils::check_cuda_call(
-            cudaMemcpyAsync(m_scores.data(),
-                            thrust::raw_pointer_cast(m_scores_d.data()),
-                            m_total_passing_scores * sizeof(float),
-                            cudaMemcpyDeviceToHost, stream),
-            "scores copy failed");
-        cuda_utils::check_cuda_call(
-            cudaMemcpyAsync(
-                m_passing_indices.data(),
-                thrust::raw_pointer_cast(m_passing_indices_d.data()),
-                m_total_passing_scores * sizeof(uint32_t),
-                cudaMemcpyDeviceToHost, stream),
-            "passing indices copy failed");
-        cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
-                                    "stream synchronization failed");
-
-        const float accumulated_flops = save_results(writer);
+        flush_candidates(m_cands, m_region_decode, writer,
+                         m_write_param_sets_batch, m_base_cfg.get_nparams());
         ffa_timer_stats_pipeline["io"] += timer.stop();
-        m_ffa_stats->update_stats(ffa_timer_stats_pipeline, accumulated_flops);
+        m_ffa_stats->update_stats(ffa_timer_stats_pipeline,
+                                  static_cast<float>(accumulated_flops));
         writer.write_ffa_stats(*m_ffa_stats);
-        spdlog::info("FFA Freq Sweep complete.");
+        spdlog::info("FFA Freq Sweep complete: {} candidates above S/N {:.2f}",
+                     m_total_passing_scores, m_base_cfg.get_snr_min());
         spdlog::info("FFA Freq Sweep: timer: {}",
                      m_ffa_stats->get_concise_timer_summary());
     }
@@ -180,14 +177,17 @@ private:
     search::PulsarSearchConfig m_base_cfg;
     int m_device_id;
     regions::FFARegionPlanner<HostFoldT> m_region_planner;
+    std::vector<RegionDecode> m_region_decode;
+    // Fixed-capacity accumulator; drained to disk whenever it fills up.
+    CandidateBuffer m_cands;
 
     memory::FFAWorkspaceCUDA<FoldTypeCUDA> m_ffa_workspace;
     math::CUFFTManager m_fft_manager;
     SizeType m_total_passing_scores{};
-    std::vector<float> m_scores;
-    std::vector<uint32_t> m_passing_indices;
+    // Host staging for one chunk's compacted device output.
+    std::vector<float> m_scores_staging;
+    std::vector<uint32_t> m_indices_staging;
     std::vector<double> m_write_param_sets_batch; // includes width
-    std::vector<SizeType> m_n_passing_scores_per_region;
 
     std::unique_ptr<cands::FFAStatsCollection> m_ffa_stats;
     // Persistent input/output buffers
@@ -224,18 +224,25 @@ private:
                             usable_gpu_gb));
         }
 
-        // Override max_process_memory_gb for GPU-based chunking
+        const double user_limit   = base_cfg.get_max_process_memory_gb();
+        const double gpu_limit_gb = std::min(user_limit, usable_gpu_gb);
+        spdlog::info("Using {:.2f} GB GPU chunking budget (user limit {:.2f} "
+                     "GB, usable GPU {:.2f} GB)",
+                     gpu_limit_gb, user_limit, usable_gpu_gb);
+
         auto cfg_with_gpu_mem = base_cfg;
-        // cfg_with_gpu_mem.set_max_process_memory_gb(usable_gpu_gb);
+        cfg_with_gpu_mem.set_max_process_memory_gb(gpu_limit_gb);
 
         // Create region planner with GPU memory limit
         return regions::FFARegionPlanner<HostFoldT>(cfg_with_gpu_mem,
                                                     /*use_gpu=*/true);
     }
 
-    SizeType execute_ffa_region(const search::PulsarSearchConfig& cfg,
-                                cands::FFATimerStats& ffa_timer_stats,
-                                cudaStream_t stream) {
+    void execute_ffa_region(const search::PulsarSearchConfig& cfg,
+                            SizeType region_id,
+                            cands::FFAResultWriter& writer,
+                            cands::FFATimerStats& ffa_timer_stats,
+                            cudaStream_t stream) {
         timing::SimpleTimer timer;
         // Create FFA with shared workspace
         timer.start();
@@ -253,108 +260,97 @@ private:
 
         // Compute scores
         timer.start();
-        const auto nsegments = ffa_plan.get_nsegments().back();
-        const auto ncoords   = ffa_plan.get_ncoords().back();
-        const auto n_widths  = cfg.get_scoring_widths().size();
-        const auto n_scores  = ncoords * n_widths;
+        const auto& dec     = m_region_decode[region_id];
+        const auto n_scores = dec.get_n_scores();
         error_check::check_equal(
-            nsegments, 1U,
+            dec.nsegments, SizeType{1},
             "FFAFreqSweepCUDA::execute_ffa_region: nsegments "
             "must be 1 to call scoring function");
-        // Calculate available space in buffers
-        const SizeType available_space =
-            m_scores_d.size() - m_total_passing_scores;
-        //error_check::check_greater_equal(
-        //    available_space, n_scores,
-        //    std::format("Buffer overflow: {} candidates already accumulated, "
-        //                "{} more needed, but only {} space available. "
-        //                "Options: (1) Increase snr_min threshold, "
-        //                "(2) Add max_passing_candidates config parameter.",
-        //                m_total_passing_scores, n_scores, available_space));
-        // Pass incremental spans with offset
+        // The decode strides must describe the fold layout we just produced.
+        error_check::check_equal(ffa_plan.get_ncoords().back(), dec.ncoords,
+                                 "FFAFreqSweepCUDA::execute_ffa_region: decode "
+                                 "table is out of sync with the FFA plan");
+        // Boxcar widths follow nbins, which differs between regions, so they
+        // must be re-uploaded per chunk rather than once at construction.
+        m_widths_d = dec.widths;
+
+        // Device buffers are per-chunk scratch: the offset no longer depends
+        // on how many candidates have already survived.
         const SizeType n_passing = detection::score_and_filter_cuda_d(
             cuda_utils::as_span(m_fold_time_d, fold_size_time),
             cuda_utils::as_span(m_widths_d),
-            cuda_utils::as_span(m_scores_d)
-                .subspan(m_total_passing_scores, n_scores),
-            cuda_utils::as_span(m_passing_indices_d)
-                .subspan(m_total_passing_scores, n_scores),
-            cfg.get_snr_min(), ncoords, cfg.get_nbins(), stream,
-            m_passing_counter);
-        m_total_passing_scores += n_passing;
-
+            cuda_utils::as_span(m_scores_d, n_scores),
+            cuda_utils::as_span(m_passing_indices_d, n_scores),
+            static_cast<float>(cfg.get_snr_min()), dec.ncoords, dec.nbins,
+            stream, m_passing_counter);
         ffa_timer_stats["score"] += timer.stop();
-        return n_passing;
+
+        timer.start();
+        copy_candidates_to_host(n_passing, region_id, writer, stream);
+        m_total_passing_scores += n_passing;
+        ffa_timer_stats["io"] += timer.stop();
     }
 
-    float save_results(cands::FFAResultWriter& result_writer) {
-        const auto n_params         = m_base_cfg.get_nparams();
-        const SizeType total_params = n_params + 1;
-        const auto& scoring_widths  = m_base_cfg.get_scoring_widths();
-        const SizeType n_widths     = scoring_widths.size();
-
-        float accumulated_flops        = 0.0F;
-        SizeType global_passing_offset = 0; // Track cumulative offset
-        const auto& ffa_regions_cfgs   = m_region_planner.get_cfgs();
-        for (SizeType i = 0; i < ffa_regions_cfgs.size(); ++i) {
-            const search::PulsarSearchConfig& cfg_cur = ffa_regions_cfgs[i];
-            plans::FFAPlan<HostFoldT> ffa_plan(cfg_cur);
-            const auto& param_limits = cfg_cur.get_param_limits();
-            const auto& param_counts = ffa_plan.get_param_counts().back();
-            const auto& param_strides =
-                ffa_plan.get_param_cart_strides().back();
-            const auto n_passing = m_n_passing_scores_per_region[i];
-
-            // Compute flops
-            accumulated_flops += ffa_plan.get_gflops(/*return_in_time=*/true);
-            const auto ncoords = ffa_plan.get_ncoords().back();
-            const auto score_flops =
-                (ncoords * 2) * (n_widths * 2 * cfg_cur.get_nbins());
-            accumulated_flops += score_flops * 1e-9; // convert to GFLOPS
-
-            // Process in batches and write incrementally
-            SizeType batch_start = 0;
-            while (batch_start < n_passing) {
-                const SizeType batch_end =
-                    std::min(batch_start + regions::kFFAFreqSweepWriteBatchSize,
-                             n_passing);
-                const SizeType batch_count = batch_end - batch_start;
-
-                // Fill batch buffer
-                for (SizeType i = 0; i < batch_count; ++i) {
-                    // Access from global buffer with proper offset
-                    const SizeType global_idx =
-                        global_passing_offset + batch_start + i;
-                    const SizeType score_idx = m_passing_indices[global_idx];
-                    const SizeType coord_idx = score_idx / n_widths;
-                    const SizeType width_idx = score_idx % n_widths;
-
-                    // Reconstruct parameters from coord_idx using index
-                    // arithmetic
-                    SizeType remaining = coord_idx;
-                    for (SizeType j = 0; j < n_params; ++j) {
-                        const SizeType param_idx = remaining / param_strides[j];
-                        remaining -= param_idx * param_strides[j];
-                        m_write_param_sets_batch[(i * total_params) + j] =
-                            psr_utils::get_param_val_at_idx(
-                                param_limits[j], param_counts[j], param_idx);
-                    }
-                    m_write_param_sets_batch[(i * total_params) + n_params] =
-                        static_cast<double>(scoring_widths[width_idx]);
-                }
-
-                // Write batch
-                result_writer.write_results(
-                    std::span(m_write_param_sets_batch)
-                        .first(batch_count * total_params),
-                    std::span(m_scores).subspan(
-                        global_passing_offset + batch_start, batch_count),
-                    batch_count, total_params);
-                batch_start = batch_end;
-            }
-            global_passing_offset += n_passing;
+    /**
+     * @brief Move this chunk's compacted candidates from device to the host
+     * accumulator, draining the accumulator whenever it fills up.
+     *
+     * @note The filter kernel claims output slots via atomicAdd, so the order
+     * within a chunk (and hence the row order in the result file) is not
+     * reproducible run to run.
+     */
+    void copy_candidates_to_host(SizeType n_passing,
+                                 SizeType region_id,
+                                 cands::FFAResultWriter& writer,
+                                 cudaStream_t stream) {
+        if (n_passing == 0) {
+            return;
         }
-        return accumulated_flops;
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(m_scores_staging.data(),
+                            thrust::raw_pointer_cast(m_scores_d.data()),
+                            n_passing * sizeof(float), cudaMemcpyDeviceToHost,
+                            stream),
+            "scores copy failed");
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(
+                m_indices_staging.data(),
+                thrust::raw_pointer_cast(m_passing_indices_d.data()),
+                n_passing * sizeof(uint32_t), cudaMemcpyDeviceToHost, stream),
+            "passing indices copy failed");
+        cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
+                                    "stream synchronization failed");
+
+        SizeType copied = 0;
+        while (copied < n_passing) {
+            if (m_cands.is_full()) {
+                flush_candidates(m_cands, m_region_decode, writer,
+                                 m_write_param_sets_batch,
+                                 m_base_cfg.get_nparams());
+            }
+            const SizeType chunk =
+                std::min(m_cands.get_space(), n_passing - copied);
+            std::copy_n(m_scores_staging.begin() +
+                            static_cast<IndexType>(copied),
+                        chunk, m_cands.get_scores_tail(chunk).begin());
+            std::copy_n(m_indices_staging.begin() +
+                            static_cast<IndexType>(copied),
+                        chunk, m_cands.get_indices_tail(chunk).begin());
+            m_cands.commit(chunk, static_cast<uint32_t>(region_id));
+            copied += chunk;
+        }
+    }
+
+    /// @brief Assert the planner-derived scratch sizes cover every chunk.
+    void validate_scratch_sizes(SizeType scratch_size) const {
+        for (SizeType i = 0; i < m_region_decode.size(); ++i) {
+            error_check::check_less_equal(
+                m_region_decode[i].get_n_scores(), scratch_size,
+                std::format("FFAFreqSweepCUDA: chunk {} needs {} score slots "
+                            "but the planner only sized the scratch for {}",
+                            i, m_region_decode[i].get_n_scores(),
+                            scratch_size));
+        }
     }
 
 }; // End FFAFreqSweepCUDATypedImpl definition

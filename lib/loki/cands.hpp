@@ -191,7 +191,9 @@ public:
     FFAResultWriter& operator=(FFAResultWriter&&)      = delete;
 
     void write_metadata(const std::vector<std::string>& param_names,
-                        const std::vector<SizeType>& scoring_widths);
+                        SizeType nbins,
+                        double ducy_max,
+                        double wtsp);
 
     void write_results(std::span<const double> param_sets,
                        std::span<const float> scores,

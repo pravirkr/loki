@@ -499,9 +499,9 @@ PYBIND11_MODULE(libloki, m) {
                       SizeType, SizeType, SizeType, bool, bool>(),
              py::arg("max_buffer_size"), py::arg("max_coord_size"),
              py::arg("max_ncoords"), py::arg("max_ffa_levels"),
-             py::arg("n_widths"), py::arg("n_params"), py::arg("n_samps"),
-             py::arg("max_passing_candidates"), py::arg("use_fourier"),
-             py::arg("use_gpu") = false)
+             py::arg("max_scores_scratch"), py::arg("n_params"),
+             py::arg("n_samps"), py::arg("max_passing_candidates"),
+             py::arg("use_fourier"), py::arg("use_gpu") = false)
         .def_property_readonly("max_buffer_size",
                                &FFARegionStats::get_max_buffer_size)
         .def_property_readonly("max_coord_size",
@@ -511,8 +511,10 @@ PYBIND11_MODULE(libloki, m) {
                                &FFARegionStats::get_max_ffa_levels)
         .def_property_readonly("max_buffer_size_time",
                                &FFARegionStats::get_max_buffer_size_time)
-        .def_property_readonly("max_scores_size",
-                               &FFARegionStats::get_max_scores_size)
+        .def_property_readonly("max_scores_scratch_size",
+                               &FFARegionStats::get_max_scores_scratch_size)
+        .def_property_readonly("max_candidates",
+                               &FFARegionStats::get_max_candidates)
         .def_property_readonly("write_param_sets_size",
                                &FFARegionStats::get_write_param_sets_size)
         .def_property_readonly("buffer_memory_usage",
@@ -521,6 +523,8 @@ PYBIND11_MODULE(libloki, m) {
                                &FFARegionStats::get_coord_memory_usage)
         .def_property_readonly("extra_memory_usage",
                                &FFARegionStats::get_extra_memory_usage)
+        .def_property_readonly("device_extra_memory_usage",
+                               &FFARegionStats::get_device_extra_memory_usage)
         .def_property_readonly("freq_sweep_memory_usage",
                                &FFARegionStats::get_freq_sweep_memory_usage);
 
@@ -531,8 +535,7 @@ PYBIND11_MODULE(libloki, m) {
     m_plans.def("generate_ffa_regions", &regions::generate_ffa_regions,
                 py::arg("p_min"), py::arg("p_max"), py::arg("tsamp"),
                 py::arg("nbins_min"), py::arg("eta_min"),
-                py::arg("growth_factor") = 2.0,
-                py::arg("nbins_max")     = std::nullopt);
+                py::arg("octave_scale") = 2.0, py::arg("nbins_max") = 1024);
 
     // FFA submodule
     auto m_ffa = m.def_submodule("ffa", "FFA submodule");

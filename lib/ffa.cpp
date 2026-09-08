@@ -33,7 +33,6 @@ public:
           m_is_freq_only(m_cfg.get_nparams() == 1),
           m_workspace_storage(m_ffa_plan),
           m_workspace_ptr(&m_workspace_storage),
-          m_fft_storage(),
           m_fft_ptr(&m_fft_storage) {
         // Validate workspace
         const auto& ws = get_workspace();
@@ -54,7 +53,6 @@ public:
           m_is_freq_only(m_cfg.get_nparams() == 1),
           m_workspace_storage(),
           m_workspace_ptr(&workspace),
-          m_fft_storage(),
           m_fft_ptr(&fft_manager) {
         // Validate workspace
         const auto& ws = get_workspace();

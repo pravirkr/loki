@@ -235,7 +235,7 @@ public:
     PulsarSearchConfig get_updated_config(SizeType nbins,
                                           double eta,
                                           double f_min,
-                                          double f_max) const noexcept {
+                                          double f_max) const {
         std::vector<ParamLimit> param_limits(m_param_limits.begin(),
                                              m_param_limits.end());
         param_limits.back() = {.min = f_min, .max = f_max};
@@ -532,11 +532,13 @@ PulsarSearchConfig::get_param_grid_count(double tseg_cur) const noexcept {
 PulsarSearchConfig PulsarSearchConfig::get_updated_config(
     SizeType nbins,
     double eta,
-    std::span<const ParamLimit> param_limits) const noexcept {
+    std::span<const ParamLimit> param_limits) const {
     return m_impl->get_updated_config(nbins, eta, param_limits);
 }
-PulsarSearchConfig PulsarSearchConfig::get_updated_config(
-    SizeType nbins, double eta, double f_min, double f_max) const noexcept {
+PulsarSearchConfig PulsarSearchConfig::get_updated_config(SizeType nbins,
+                                                          double eta,
+                                                          double f_min,
+                                                          double f_max) const {
     return m_impl->get_updated_config(nbins, eta, f_min, f_max);
 }
 } // namespace loki::search

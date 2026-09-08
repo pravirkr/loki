@@ -1,7 +1,11 @@
 #include "loki/common/plans.hpp"
 
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
 #include <numeric>
+#include <span>
+#include <type_traits>
 #include <utility>
 
 #include "loki/common/types.hpp"
@@ -46,19 +50,17 @@ struct FFAPlanBase::Impl {
     }
 
     SizeType get_coord_size() const noexcept {
-        return std::accumulate(ncoords.begin(), ncoords.end(), 0,
+        return std::accumulate(ncoords.begin(), ncoords.end(), SizeType{0},
                                std::plus<>());
     }
 
     float get_coord_memory_usage() const noexcept {
-        SizeType total_memory;
-        if (m_cfg.get_nparams() == 1) {
-            total_memory = get_coord_size() * sizeof(coord::FFACoordFreq);
-        } else {
-            total_memory = get_coord_size() * sizeof(coord::FFACoord);
-        }
-        return static_cast<float>(total_memory) /
-               static_cast<float>(1ULL << 30U);
+        const auto elem_bytes = (m_cfg.get_nparams() == 1)
+                                    ? sizeof(coord::FFACoordFreq)
+                                    : sizeof(coord::FFACoord);
+        const double bytes    = static_cast<double>(get_coord_size()) *
+                                static_cast<double>(elem_bytes);
+        return static_cast<float>(bytes / static_cast<double>(1ULL << 30U));
     }
 
     void resolve_coordinates(std::span<coord::FFACoord> coords) {

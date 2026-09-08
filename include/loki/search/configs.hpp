@@ -160,12 +160,12 @@ public:
     PulsarSearchConfig
     get_updated_config(SizeType nbins,
                        double eta,
-                       std::span<const ParamLimit> param_limits) const noexcept;
+                       std::span<const ParamLimit> param_limits) const;
     // Overload for only last param (frequency) limit update
     PulsarSearchConfig get_updated_config(SizeType nbins,
                                           double eta,
                                           double f_min,
-                                          double f_max) const noexcept;
+                                          double f_max) const;
 
 private:
     class Impl;
