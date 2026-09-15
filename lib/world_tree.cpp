@@ -322,6 +322,32 @@ WorldTree<FoldType>::get_best() const {
             max_score};
 }
 
+template <SupportedFoldType FoldType> bool WorldTree<FoldType>::drop_best() {
+    if (m_size == 0) {
+        return false;
+    }
+    auto regions    = get_active_regions(std::span<const float>(m_scores));
+    auto it1        = std::ranges::max_element(regions.first);
+    float max_score = *it1;
+    SizeType best_logical =
+        static_cast<SizeType>(std::distance(regions.first.begin(), it1));
+    if (!regions.second.empty()) {
+        auto it2 = std::ranges::max_element(regions.second);
+        if (*it2 > max_score) {
+            best_logical = regions.first.size() +
+                           static_cast<SizeType>(
+                               std::distance(regions.second.begin(), it2));
+        }
+    }
+    error_check::check_greater_equal(m_scratch_mask.size(), m_size,
+                                     "WorldTree: scratch_mask too small for "
+                                     "drop_best");
+    std::fill_n(m_scratch_mask.begin(), m_size, uint8_t{1});
+    m_scratch_mask[best_logical] = 0;
+    keep(std::span<const uint8_t>(m_scratch_mask.data(), m_size));
+    return true;
+}
+
 template <SupportedFoldType FoldType>
 void WorldTree<FoldType>::add_initial(std::span<const double> leaves_batch,
                                       std::span<const FoldType> folds_batch,
@@ -341,6 +367,40 @@ void WorldTree<FoldType>::add_initial(std::span<const double> leaves_batch,
     m_size = slots_to_write;
     error_check::check_less_equal(m_size, m_capacity,
                                   "WorldTree: Invalid size after add_initial.");
+}
+
+template <SupportedFoldType FoldType>
+void WorldTree<FoldType>::add_initial_scattered(
+    std::span<const double> leaves_batch,
+    std::span<const FoldType> folds_batch,
+    std::span<const float> scores_batch,
+    std::span<const SizeType> indices_batch,
+    SizeType slots_to_write) {
+    error_check::check_less_equal(slots_to_write, m_capacity,
+                                  "WorldTree: Suggestions too large to add.");
+    error_check::check_greater_equal(
+        indices_batch.size(), slots_to_write,
+        "add_initial_scattered: indices_batch smaller than slots_to_write");
+    if (slots_to_write > 0) {
+        const auto max_idx =
+            *std::ranges::max_element(indices_batch.first(slots_to_write));
+        error_check::check_less(max_idx, scores_batch.size(),
+                                "add_initial_scattered: index out of range "
+                                "for scores_batch");
+        error_check::check_greater_equal(
+            leaves_batch.size(), (max_idx + 1) * m_leaves_stride,
+            "add_initial_scattered: index out of range for leaves_batch");
+        error_check::check_greater_equal(
+            folds_batch.size(), (max_idx + 1) * m_folds_stride,
+            "add_initial_scattered: index out of range for folds_batch");
+    }
+    reset(); // Start fresh; write head is at slot 0
+    scatter_to_circular_copy(leaves_batch.data(), folds_batch.data(),
+                             scores_batch.data(), indices_batch.data(),
+                             slots_to_write);
+    error_check::check_equal(m_size, slots_to_write,
+                             "WorldTree: Invalid size after "
+                             "add_initial_scattered.");
 }
 
 template <SupportedFoldType FoldType>

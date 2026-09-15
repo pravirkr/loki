@@ -95,6 +95,9 @@ template <SupportedFoldType FoldType> struct PruneWorkspace {
     // Scratch space for resolving parameters
     std::vector<SizeType> branched_param_idx;
     std::vector<float> branched_phase_shift;
+    // Scratch space for the parent (tree) score of each branched leaf, used by
+    // the stage-consistency veto.
+    std::vector<float> branched_parent_scores;
 
     PruneWorkspace() = default;
     PruneWorkspace(SizeType batch_size,
@@ -130,6 +133,8 @@ template <SupportedFoldType FoldType> struct EPWorkspace {
 
     std::vector<double> seed_leaves;
     std::vector<float> seed_scores;
+    // Indices of the seeds surviving the pulsar mask (size ncoords_ffa).
+    std::vector<SizeType> seed_keep_indices;
 
     EPWorkspace() = default;
     EPWorkspace(SizeType batch_size,

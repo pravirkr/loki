@@ -2,6 +2,9 @@
 
 #include "pybind_utils.hpp"
 
+#include <format>
+#include <limits>
+
 #include <pybind11/iostream.h>
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
@@ -83,6 +86,121 @@ void bind_ffa_region_planner(py::module& m, const std::string& name) {
         .def_property_readonly("stats", &FFARegionPlanner<T>::get_stats);
 }
 
+// Bind the RFI-control configuration types used by EPMultiPass
+inline void bind_prune_rfi(py::module& m) {
+    using algorithms::kBirdieAccelPad;
+    using algorithms::kHarvestDisabled;
+    using algorithms::make_birdie_window;
+    using algorithms::make_default_harvest_scheme;
+    using algorithms::make_harvest_window;
+    using algorithms::make_pulsar_window;
+    using algorithms::ParamWindow;
+    using algorithms::PruneRFIConfig;
+
+    m.attr("HARVEST_DISABLED") = kHarvestDisabled;
+    m.attr("BIRDIE_ACCEL_PAD") = kBirdieAccelPad;
+
+    py::class_<ParamWindow>(m, "ParamWindow",
+                            "Exclusion window in physical units (Hz, m/s^2). "
+                            "The default acceleration range covers the whole "
+                            "grid.")
+        .def(py::init([](double f_lo, double f_hi, double a_lo, double a_hi) {
+                 return ParamWindow{
+                     .f_lo = f_lo, .f_hi = f_hi, .a_lo = a_lo, .a_hi = a_hi,};
+             }),
+             py::arg("f_lo"), py::arg("f_hi"),
+             py::arg("a_lo") = std::numeric_limits<double>::lowest(),
+             py::arg("a_hi") = std::numeric_limits<double>::max())
+        .def_readwrite("f_lo", &ParamWindow::f_lo)
+        .def_readwrite("f_hi", &ParamWindow::f_hi)
+        .def_readwrite("a_lo", &ParamWindow::a_lo)
+        .def_readwrite("a_hi", &ParamWindow::a_hi)
+        .def("__repr__", [](const ParamWindow& w) {
+            return std::format(
+                "ParamWindow(f_lo={}, f_hi={}, a_lo={}, a_hi={})", w.f_lo,
+                w.f_hi, w.a_lo, w.a_hi);
+        });
+
+    py::class_<PruneRFIConfig>(m, "PruneRFIConfig",
+                               "RFI-control configuration for the EP pruning "
+                               "search (pulsar mask, early harvesting, "
+                               "stage-consistency veto). All mechanisms are "
+                               "opt-in.")
+        .def(py::init([](std::vector<ParamWindow> pulsar_mask,
+                         SizeType n_harmonics, std::vector<float> harvest_scheme,
+                         double harvest_mask_ntiles, SizeType max_harvests,
+                         bool harvest_store_folds, bool impulsive_veto,
+                         double impulsive_kappa, SizeType impulsive_min_level,
+                         float impulsive_min_snr) {
+                 PruneRFIConfig cfg;
+                 cfg.pulsar_mask         = std::move(pulsar_mask);
+                 cfg.n_harmonics         = n_harmonics;
+                 cfg.harvest_scheme      = std::move(harvest_scheme);
+                 cfg.harvest_mask_ntiles = harvest_mask_ntiles;
+                 cfg.max_harvests        = max_harvests;
+                 cfg.harvest_store_folds = harvest_store_folds;
+                 cfg.impulsive_veto      = impulsive_veto;
+                 cfg.impulsive_kappa     = impulsive_kappa;
+                 cfg.impulsive_min_level = impulsive_min_level;
+                 cfg.impulsive_min_snr   = impulsive_min_snr;
+                 return cfg;
+             }),
+             py::kw_only(),
+             py::arg("pulsar_mask")         = std::vector<ParamWindow>(),
+             py::arg("n_harmonics")         = 0U,
+             py::arg("harvest_scheme")      = std::vector<float>(),
+             py::arg("harvest_mask_ntiles") = 4.0,
+             py::arg("max_harvests")        = 4096U,
+             py::arg("harvest_store_folds") = true,
+             py::arg("impulsive_veto")      = false,
+             py::arg("impulsive_kappa")     = 6.0,
+             py::arg("impulsive_min_level") = 6U,
+             py::arg("impulsive_min_snr")   = 8.0F)
+        .def_readwrite("pulsar_mask", &PruneRFIConfig::pulsar_mask)
+        .def_readwrite("n_harmonics", &PruneRFIConfig::n_harmonics)
+        .def_readwrite("harvest_scheme", &PruneRFIConfig::harvest_scheme)
+        .def_readwrite("harvest_mask_ntiles",
+                       &PruneRFIConfig::harvest_mask_ntiles)
+        .def_readwrite("max_harvests", &PruneRFIConfig::max_harvests)
+        .def_readwrite("harvest_store_folds",
+                       &PruneRFIConfig::harvest_store_folds)
+        .def_readwrite("impulsive_veto", &PruneRFIConfig::impulsive_veto)
+        .def_readwrite("impulsive_kappa", &PruneRFIConfig::impulsive_kappa)
+        .def_readwrite("impulsive_min_level",
+                       &PruneRFIConfig::impulsive_min_level)
+        .def_readwrite("impulsive_min_snr", &PruneRFIConfig::impulsive_min_snr)
+        .def("validate", &PruneRFIConfig::validate, py::arg("nsegments"))
+        .def_property_readonly("is_active", &PruneRFIConfig::is_active)
+        .def_property_readonly("has_harvest", &PruneRFIConfig::has_harvest);
+
+    m.def("make_pulsar_window", &make_pulsar_window, py::arg("f"), py::arg("a"),
+          py::arg("tobs"), py::arg("f_pad") = 0.0,
+          py::arg("a_pad") = std::numeric_limits<double>::max(),
+          "Exclusion window covering the full Doppler sweep of a source (f, a) "
+          "over an observation of length tobs, padded by f_pad (Hz) and a_pad "
+          "(m/s^2; default masks all accelerations).");
+
+    m.def("make_birdie_window", &make_birdie_window, py::arg("f"),
+          py::arg("f_pad"), py::arg("a_pad") = kBirdieAccelPad,
+          "Exclusion window for a terrestrial (zero-acceleration) birdie.");
+
+    m.def("make_harvest_window", &make_harvest_window, py::arg("f"),
+          py::arg("a"), py::arg("df"), py::arg("da"), py::arg("t_ref"),
+          py::arg("tobs"), py::arg("ntiles"),
+          "Exclusion window around a harvested candidate.");
+
+    m.def(
+        "make_default_harvest_scheme",
+        [](const std::vector<float>& threshold_scheme, SizeType min_level,
+           float offset, float min_snr) {
+            return make_default_harvest_scheme(threshold_scheme, min_level,
+                                               offset, min_snr);
+        },
+        py::arg("threshold_scheme"), py::arg("min_level") = 10U,
+        py::arg("offset") = 10.0F, py::arg("min_snr") = 15.0F,
+        "Conservative harvest scheme derived from the threshold scheme.");
+}
+
 // Template function to bind EPMultiPass<T>
 template <SupportedFoldType FoldType>
 void bind_ep_multi_pass(py::module& m, const std::string& name) {
@@ -92,14 +210,15 @@ void bind_ep_multi_pass(py::module& m, const std::string& name) {
                           std::optional<SizeType>,
                           std::optional<std::vector<SizeType>>,
                           const std::vector<SizeType>&, SizeType, SizeType,
-                          std::string_view, bool>(),
+                          std::string_view, bool, algorithms::PruneRFIConfig>(),
                  py::arg("cfg"), py::arg("threshold_scheme"),
                  py::arg("n_runs")        = std::nullopt,
                  py::arg("ref_segs")      = std::nullopt,
                  py::arg("ascend_levels") = std::vector<SizeType>(),
                  py::arg("max_sugg") = 1U << 18U, py::arg("batch_size") = 1024U,
                  py::arg("poly_basis")    = "taylor",
-                 py::arg("show_progress") = true);
+                 py::arg("show_progress") = true,
+                 py::arg("rfi_config")    = algorithms::PruneRFIConfig());
 
     // Standard execute
     cls.def(

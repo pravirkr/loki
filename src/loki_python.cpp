@@ -663,6 +663,7 @@ PYBIND11_MODULE(libloki, m) {
                                });
 
     // EP submodule
+    bind_prune_rfi(m_prune);
     bind_ep_multi_pass<float>(m_prune, "EPMultiPassTime");
     bind_ep_multi_pass<ComplexType>(m_prune, "EPMultiPassFourier");
 }

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -15,11 +16,13 @@
 #include <spdlog/spdlog.h>
 
 #include "loki/algorithms/ffa.hpp"
+#include "loki/algorithms/prune_rfi.hpp"
 #include "loki/cands.hpp"
 #include "loki/common/types.hpp"
 #include "loki/core/dynamic.hpp"
 #include "loki/exceptions.hpp"
 #include "loki/progress.hpp"
+#include "loki/prune_mask.hpp"
 #include "loki/psr_utils.hpp"
 #include "loki/timing.hpp"
 #include "loki/utils.hpp"
@@ -28,6 +31,10 @@
 namespace loki::algorithms {
 
 namespace {
+
+// Number of individual harvests echoed to the log at info level per run;
+// beyond this only per-level summaries are emitted.
+constexpr SizeType kMaxHarvestLogLines = 16;
 
 template <SupportedFoldType FoldType> class PruneImpl {
 public:
@@ -38,7 +45,9 @@ public:
               SizeType max_sugg,
               SizeType batch_size,
               SizeType branch_max,
-              std::string_view poly_basis)
+              std::string_view poly_basis,
+              const PruneRFIConfig& rfi_config,
+              const GridMask& mask_base)
         : m_workspace_ptr(&workspace),
           m_cfg(std::move(cfg)),
           m_ffa_plan(m_cfg),
@@ -47,7 +56,9 @@ public:
           m_batch_size(batch_size),
           m_branch_max(branch_max),
           m_poly_basis(poly_basis),
-          m_total_levels(m_threshold_scheme.size()) {
+          m_total_levels(m_threshold_scheme.size()),
+          m_rfi(&rfi_config),
+          m_mask_base(&mask_base) {
         error_check::check_less_equal(m_cfg.get_nparams(), 5,
                                       "Pruning not supported for nparams > 5.");
         m_prune_funcs = core::create_prune_dp_functs<FoldType>(
@@ -56,6 +67,16 @@ public:
             m_ffa_plan.get_nsegments().back(),
             m_ffa_plan.get_tsegments().back(), m_cfg, m_batch_size,
             m_branch_max);
+        const auto n_params = m_cfg.get_nparams();
+        error_check::check_equal(
+            m_mask_base->get_n_accel(),
+            m_ffa_plan.get_param_counts().back()[n_params - 2],
+            "PruneImpl: mask acceleration grid does not match the FFA plan");
+        error_check::check_equal(
+            m_mask_base->get_n_freq(),
+            m_ffa_plan.get_param_counts().back()[n_params - 1],
+            "PruneImpl: mask frequency grid does not match the FFA plan");
+        m_leaf_scratch.resize(m_workspace_ptr->world_tree.get_leaves_stride());
     }
 
     ~PruneImpl()                           = default;
@@ -178,12 +199,40 @@ private:
     cands::PruneStatsCollection m_pstats;
     std::unique_ptr<core::PruneDPFuncts<FoldType>> m_prune_funcs;
 
+    // RFI control (see PruneRFIConfig). The base mask is shared (read-only)
+    // across runs; m_mask is the per-run overlay that also accumulates the
+    // windows of harvested candidates.
+    const PruneRFIConfig* m_rfi;
+    const GridMask* m_mask_base;
+    GridMask m_mask;
+    cands::HarvestBuffer<FoldType> m_harvest;
+    SizeType m_n_harvested_total{}; ///< Includes harvests beyond the cap
+    std::vector<double> m_leaf_scratch;
+
     [[nodiscard]] memory::EPWorkspace<FoldType>& get_workspace() noexcept {
         return *m_workspace_ptr;
     }
     [[nodiscard]] const memory::EPWorkspace<FoldType>&
     get_workspace() const noexcept {
         return *m_workspace_ptr;
+    }
+
+    /// Duration of the data covered by the middle-out scheme (seconds).
+    [[nodiscard]] double get_tobs_scheme() const noexcept {
+        return static_cast<double>(m_ffa_plan.get_nsegments().back()) *
+               m_ffa_plan.get_tsegments().back();
+    }
+
+    [[nodiscard]] bool veto_enabled_at_level(SizeType level) const noexcept {
+        return m_rfi->impulsive_veto && level >= m_rfi->impulsive_min_level;
+    }
+
+    [[nodiscard]] float get_harvest_threshold(SizeType level) const noexcept {
+        if (m_rfi->harvest_scheme.empty() ||
+            level > m_rfi->harvest_scheme.size()) {
+            return kHarvestDisabled;
+        }
+        return m_rfi->harvest_scheme[level - 1];
     }
 
     void initialize(std::span<const FoldType> ffa_fold,
@@ -200,6 +249,13 @@ private:
 
         m_prune_level    = 0;
         m_prune_complete = false;
+
+        // Per-run RFI state: start from the shared static mask
+        m_mask.assign(*m_mask_base);
+        m_harvest = cands::HarvestBuffer<FoldType>(
+            world_tree.get_leaves_stride(), world_tree.get_folds_stride(),
+            m_rfi->harvest_store_folds);
+        m_n_harvested_total = 0;
         spdlog::info("Pruning run {:03d}: initialized", ref_seg);
 
         // Initialize the world tree with the first segment
@@ -209,21 +265,36 @@ private:
         const auto n_leaves   = m_ffa_plan.get_ncoords().back();
         m_prune_funcs->seed(fold_segment, ws.seed_leaves, ws.seed_scores,
                             coord_init);
-        world_tree.add_initial(ws.seed_leaves, fold_segment, ws.seed_scores,
-                               n_leaves);
+        SizeType n_seeds_masked = 0;
+        if (m_mask.empty()) {
+            world_tree.add_initial(ws.seed_leaves, fold_segment, ws.seed_scores,
+                                   n_leaves);
+        } else {
+            // Seed leaf i sits on base-grid cell i: drop the masked ones.
+            const auto n_keep =
+                m_mask.select_seeds(ws.seed_keep_indices, n_leaves);
+            n_seeds_masked = n_leaves - n_keep;
+            world_tree.add_initial_scattered(ws.seed_leaves, fold_segment,
+                                             ws.seed_scores,
+                                             ws.seed_keep_indices, n_keep);
+            spdlog::info("Pruning run {:03d}: pulsar mask removed {} of {} "
+                         "seeds ({} grid cells masked)",
+                         ref_seg, n_seeds_masked, n_leaves, m_mask.count());
+        }
 
         // Initialize the prune stats
         m_pstats = cands::PruneStatsCollection();
         const cands::PruneStats pstats_cur{
-            .level         = m_prune_level,
-            .seg_idx       = m_snail_scheme.get_segment_idx(m_prune_level),
-            .threshold     = 0,
-            .score_min     = world_tree.get_score_min(),
-            .score_max     = world_tree.get_score_max(),
-            .n_branches    = world_tree.get_size(),
-            .n_leaves      = world_tree.get_size(),
-            .n_leaves_phy  = world_tree.get_size(),
-            .n_leaves_surv = world_tree.get_size(),
+            .level           = m_prune_level,
+            .seg_idx         = m_snail_scheme.get_segment_idx(m_prune_level),
+            .threshold       = 0,
+            .score_min       = world_tree.get_score_min(),
+            .score_max       = world_tree.get_score_max(),
+            .n_branches      = n_leaves,
+            .n_leaves        = n_leaves,
+            .n_leaves_phy    = world_tree.get_size(),
+            .n_leaves_surv   = world_tree.get_size(),
+            .n_leaves_masked = n_seeds_masked,
         };
         m_pstats.update_stats(pstats_cur);
 
@@ -340,6 +411,10 @@ private:
             run_name, m_snail_scheme.get_data(), leaves_view, scores_view,
             scores_ep_view, total_pruning_gflops, n_leaves, m_cfg.get_nparams(),
             m_pstats);
+        if (m_rfi->has_harvest()) {
+            result_writer.write_run_harvest(
+                run_name, m_harvest, m_cfg.get_nparams(), m_n_harvested_total);
+        }
     }
 
     [[nodiscard]] double compute_total_prune_gflops() const {
@@ -420,8 +495,11 @@ private:
                 continue;
             }
 
+            // n_leaves_phy is the post-mask count: masked leaves are resolved
+            // but never shift-added or scored.
             total_flops += branch_flops(n_branches, n_leaves);
-            total_flops += resolve_flops(n_leaves_phy);
+            total_flops +=
+                resolve_flops(static_cast<double>(stats.n_leaves_resolved));
             total_flops += shift_add_flops(n_leaves_phy);
             total_flops += irfft_flops(n_leaves_phy);
             if (m_cfg.get_use_boxcar_kadane()) {
@@ -479,21 +557,31 @@ private:
         // Update statistics
         stats.norm_scores(world_tree.get_size());
         const cands::PruneStats pstats_cur{
-            .level         = m_prune_level,
-            .seg_idx       = seg_idx_cur,
-            .threshold     = threshold,
-            .score_min     = stats.score_min,
-            .score_max     = stats.score_max,
-            .n_branches    = n_branches,
-            .n_leaves      = stats.n_leaves,
-            .n_leaves_phy  = stats.n_leaves_phy,
-            .n_leaves_surv = world_tree.get_size(),
+            .level             = m_prune_level,
+            .seg_idx           = seg_idx_cur,
+            .threshold         = threshold,
+            .score_min         = stats.score_min,
+            .score_max         = stats.score_max,
+            .n_branches        = n_branches,
+            .n_leaves          = stats.n_leaves,
+            .n_leaves_resolved = stats.n_leaves_resolved,
+            .n_leaves_phy      = stats.n_leaves_phy,
+            .n_leaves_surv     = world_tree.get_size(),
+            .n_leaves_masked   = stats.n_leaves_masked,
+            .n_leaves_vetoed   = stats.n_leaves_vetoed,
+            .n_harvested       = stats.n_harvested,
         };
         // Write stats to log
         std::ofstream log(log_file, std::ios::app);
         log << pstats_cur.get_summary();
         log.close();
         m_pstats.update_stats(pstats_cur, stats.batch_timers);
+        if (stats.n_harvested > 0) {
+            spdlog::info("Pruning level {:3d}: harvested {} candidate(s) "
+                         "(run total {}, recorded {}, mask cells {})",
+                         m_prune_level, stats.n_harvested, m_n_harvested_total,
+                         m_harvest.size(), m_mask.count());
+        }
 
         // Check if no survivors
         if (world_tree.get_size() == 0) {
@@ -532,6 +620,16 @@ private:
         const auto n_branches = world_tree.get_size_old();
         const auto batch_size =
             std::max(1UL, std::min(m_batch_size, n_branches));
+
+        // RFI-control state for this level
+        const auto leaves_stride     = world_tree.get_leaves_stride();
+        const bool veto_active       = veto_enabled_at_level(m_prune_level);
+        const auto harvest_threshold = get_harvest_threshold(m_prune_level);
+        const bool harvest_active    = is_harvest_enabled(harvest_threshold);
+        // The post-score pass is only needed when it can remove leaves; the
+        // mask itself is applied before shift-add (and only grows here through
+        // harvesting).
+        const bool post_score_active = veto_active || harvest_active;
 
         timing::SimpleTimer timer;
 
@@ -576,7 +674,6 @@ private:
                 prune_ws.branched_leaves, prune_ws.branched_indices, coord_cur,
                 n_leaves_batch);
             stats.batch_timers["validate"] += timer.stop();
-            stats.n_leaves_phy += n_leaves_after_validation;
             if (n_leaves_after_validation == 0) {
                 world_tree.consume_read(current_batch_size);
                 continue;
@@ -589,6 +686,40 @@ private:
                 prune_ws.branched_phase_shift, coord_add, coord_cur, coord_init,
                 n_leaves_after_validation);
             stats.batch_timers["resolve"] += timer.stop();
+            stats.n_leaves_resolved += n_leaves_after_validation;
+
+            // Pulsar mask: drop leaves resolving to a masked base-grid cell
+            // before the expensive shift-add and scoring stages.
+            auto n_leaves_active = n_leaves_after_validation;
+            if (!m_mask.empty()) {
+                timer.start();
+                n_leaves_active = m_mask.filter_resolved(
+                    prune_ws.branched_leaves, prune_ws.branched_indices,
+                    prune_ws.branched_param_idx, prune_ws.branched_phase_shift,
+                    leaves_stride, n_leaves_after_validation);
+                stats.n_leaves_masked +=
+                    n_leaves_after_validation - n_leaves_active;
+                stats.batch_timers["rfi"] += timer.stop();
+            }
+            stats.n_leaves_phy += n_leaves_active;
+            if (n_leaves_active == 0) {
+                world_tree.consume_read(current_batch_size);
+                continue;
+            }
+
+            // Stage-consistency veto needs the parent score of each leaf;
+            // gather it now while branched_indices still holds tree origins
+            // (score_and_filter overwrites them with passing local ids).
+            const auto physical_start_idx = world_tree.get_physical_start_idx();
+            const auto capacity           = world_tree.get_capacity();
+            if (veto_active) {
+                timer.start();
+                gather_parent_scores(
+                    world_tree.get_scores(), prune_ws.branched_indices,
+                    prune_ws.branched_parent_scores, n_leaves_active,
+                    physical_start_idx, capacity);
+                stats.batch_timers["rfi"] += timer.stop();
+            }
 
             // Load, shift, add (Map branched_itree to physical indices)
             timer.start();
@@ -596,24 +727,31 @@ private:
                 world_tree.get_folds(), prune_ws.branched_indices,
                 ffa_fold_segment, prune_ws.branched_param_idx,
                 prune_ws.branched_phase_shift, prune_ws.branched_folds,
-                n_leaves_after_validation, world_tree.get_physical_start_idx(),
-                world_tree.get_capacity());
+                n_leaves_active, physical_start_idx, capacity);
             stats.batch_timers["shift_add"] += timer.stop();
 
             // Score and filter
             timer.start();
-            const SizeType n_leaves_passing = m_prune_funcs->score_and_filter(
+            SizeType n_leaves_passing = m_prune_funcs->score_and_filter(
                 prune_ws.branched_folds, prune_ws.branched_scores,
-                prune_ws.branched_indices, current_threshold,
-                n_leaves_after_validation);
+                prune_ws.branched_indices, current_threshold, n_leaves_active);
             auto branched_scores_span =
                 std::span<const float>(prune_ws.branched_scores)
-                    .first(n_leaves_after_validation);
+                    .first(n_leaves_active);
             const auto [min_it, max_it] =
                 std::ranges::minmax_element(branched_scores_span);
             stats.score_min = std::min(stats.score_min, *min_it);
             stats.score_max = std::max(stats.score_max, *max_it);
             stats.batch_timers["score"] += timer.stop();
+
+            // Veto and early harvest on the passing list (index-only work)
+            if (post_score_active && n_leaves_passing > 0) {
+                timer.start();
+                n_leaves_passing = apply_rfi_post_score(
+                    prune_ws, coord_cur, seg_idx_cur, veto_active,
+                    harvest_threshold, n_leaves_passing, stats);
+                stats.batch_timers["rfi"] += timer.stop();
+            }
 
             if (n_leaves_passing == 0) {
                 world_tree.consume_read(current_batch_size);
@@ -642,6 +780,152 @@ private:
             world_tree.consume_read(current_batch_size);
         }
     }
+
+    // Gather the tree score of the parent of each branched leaf. Uses the same
+    // logical -> physical circular index mapping as shift_add.
+    static void gather_parent_scores(std::span<const float> tree_scores,
+                                     std::span<const SizeType> origins,
+                                     std::span<float> parent_scores,
+                                     SizeType n_leaves,
+                                     SizeType physical_start_idx,
+                                     SizeType capacity) noexcept {
+        for (SizeType i = 0; i < n_leaves; ++i) {
+            const auto logical = origins[i] + physical_start_idx;
+            const auto physical =
+                logical < capacity ? logical : logical - capacity;
+            parent_scores[i] = tree_scores[physical];
+        }
+    }
+
+    /**
+     * @brief Veto and early-harvest over passing leaves.
+     *
+     * @details Operates on `branched_indices[0..n_passing)`, which after
+     * score_and_filter() holds the local ids of the leaves above threshold.
+     * Leaves are sorted by score descending so the brightest member of a
+     * cluster is harvested. Then: (1) drop if the cell is already masked,
+     * (2) drop if the stage-consistency veto fires, (3) harvest leaves at or
+     * above the harvest threshold. The index list is compacted in place so that
+     * transform()/add_batch_scattered() only see survivors.
+     *
+     * @return Number of surviving leaves.
+     */
+    SizeType apply_rfi_post_score(memory::PruneWorkspace<FoldType>& prune_ws,
+                                  std::pair<double, double> coord_cur,
+                                  SizeType seg_idx_cur,
+                                  bool veto_active,
+                                  float harvest_threshold,
+                                  SizeType n_passing,
+                                  cands::PruneIterationStats& stats) {
+        auto& indices         = prune_ws.branched_indices;
+        const auto& scores    = prune_ws.branched_scores;
+        const auto& parents   = prune_ws.branched_parent_scores;
+        const auto& param_idx = prune_ws.branched_param_idx;
+        const auto n_seg      = m_prune_level; // segments in the parent
+        const bool harvest_on = is_harvest_enabled(harvest_threshold);
+        const auto n_cells    = m_mask.get_n_cells();
+
+        auto first = indices.begin();
+        auto last  = first + static_cast<std::ptrdiff_t>(n_passing);
+        std::stable_sort(first, last, [&](SizeType lhs, SizeType rhs) {
+            return scores[lhs] > scores[rhs];
+        });
+
+        auto cell_masked = [&](SizeType local_idx) {
+            if (!harvest_on) {
+                return false;
+            }
+            const auto cell = param_idx[local_idx];
+            return cell < n_cells && m_mask.is_masked(cell);
+        };
+
+        // (1) already-masked cells, (2) impulsive veto
+        SizeType write = 0;
+        for (SizeType k = 0; k < n_passing; ++k) {
+            const auto idx = indices[k];
+            if (cell_masked(idx)) {
+                continue;
+            }
+            if (veto_active &&
+                is_impulsive_segment(scores[idx], parents[idx], n_seg,
+                                     m_rfi->impulsive_kappa,
+                                     m_rfi->impulsive_min_snr)) {
+                ++stats.n_leaves_vetoed;
+                continue;
+            }
+            indices[write++] = idx;
+        }
+        n_passing = write;
+
+        // (3) early harvest (mask is live, so same-batch neighbours of a
+        // just-harvested source are dropped without a second recording)
+        write = 0;
+        for (SizeType k = 0; k < n_passing; ++k) {
+            const auto idx   = indices[k];
+            const auto score = scores[idx];
+            if (cell_masked(idx)) {
+                continue;
+            }
+            if (harvest_on && score >= harvest_threshold) {
+                harvest_leaf(prune_ws, idx, score, coord_cur, seg_idx_cur);
+                ++stats.n_harvested;
+                continue;
+            }
+            indices[write++] = idx;
+        }
+        return write;
+    }
+
+    /// Record a harvested leaf from the branch workspace and extend the mask.
+    void harvest_leaf(const memory::PruneWorkspace<FoldType>& prune_ws,
+                      SizeType idx,
+                      float score,
+                      std::pair<double, double> coord_cur,
+                      SizeType seg_idx_cur) {
+        const auto leaves_stride = prune_ws.leaves_stride;
+        const auto folds_stride  = prune_ws.folds_stride;
+        const auto leaf_src = std::span<const double>(prune_ws.branched_leaves)
+                                  .subspan(idx * leaves_stride, leaves_stride);
+        const auto fold_src = std::span<const FoldType>(prune_ws.branched_folds)
+                                  .subspan(idx * folds_stride, folds_stride);
+        harvest_candidate(leaf_src, fold_src, score, coord_cur, seg_idx_cur);
+    }
+
+    /// Convert a leaf to physical parameters, record it, and widen the mask.
+    void harvest_candidate(std::span<const double> leaf,
+                           std::span<const FoldType> fold,
+                           float score,
+                           std::pair<double, double> coord_cur,
+                           SizeType seg_idx_cur) {
+        constexpr SizeType kParamStride = 2U;
+        const auto n_params             = m_cfg.get_nparams();
+
+        std::ranges::copy(leaf, m_leaf_scratch.begin());
+        m_prune_funcs->report(m_leaf_scratch, coord_cur, 1);
+        const auto a = m_leaf_scratch[(n_params - 2) * kParamStride];
+        const auto da =
+            std::abs(m_leaf_scratch[((n_params - 2) * kParamStride) + 1]);
+        const auto f = m_leaf_scratch[(n_params - 1) * kParamStride];
+        const auto df =
+            std::abs(m_leaf_scratch[((n_params - 1) * kParamStride) + 1]);
+        const auto t_ref = coord_cur.first;
+
+        const auto window = make_harvest_window(
+            f, a, df, da, t_ref, get_tobs_scheme(), m_rfi->harvest_mask_ntiles);
+        m_mask.add_window(window, m_rfi->n_harmonics);
+        ++m_n_harvested_total;
+
+        if (m_harvest.size() < m_rfi->max_harvests) {
+            m_harvest.push(m_leaf_scratch, fold, score, m_prune_level,
+                           seg_idx_cur, t_ref);
+            if (m_harvest.size() <= kMaxHarvestLogLines) {
+                spdlog::info("Pruning level {:3d}: harvested candidate "
+                             "score {:.2f}, f = {:.9f} Hz, a = {:.4e} m/s^2 "
+                             "(t_ref = {:.1f} s)",
+                             m_prune_level, score, f, a, t_ref);
+            }
+        }
+    }
 }; // End Prune::Impl definition
 
 } // End anonymous namespace
@@ -658,7 +942,8 @@ public:
          SizeType max_sugg,
          SizeType batch_size,
          std::string_view poly_basis,
-         bool show_progress)
+         bool show_progress,
+         PruneRFIConfig rfi_config)
         : m_cfg(std::move(cfg)),
           m_threshold_scheme(threshold_scheme.begin(), threshold_scheme.end()),
           m_n_runs(n_runs),
@@ -668,6 +953,7 @@ public:
           m_batch_size(batch_size),
           m_poly_basis(poly_basis),
           m_show_progress(show_progress),
+          m_rfi_config(std::move(rfi_config)),
           m_ffa_plan(m_cfg),
           m_nthreads(m_cfg.get_nthreads()) {
         // Create branching pattern and branch max
@@ -678,6 +964,7 @@ public:
 
         // Allocate workspaces
         const auto nsegments = m_ffa_plan.get_nsegments().back();
+        setup_rfi_control(nsegments);
         m_workspace_storage.reserve(m_nthreads);
         const auto ncoords_ffa = m_ffa_plan.get_ncoords().back();
         if constexpr (std::is_same_v<FoldType, ComplexType>) {
@@ -715,7 +1002,8 @@ public:
          SizeType max_sugg,
          SizeType batch_size,
          std::string_view poly_basis,
-         bool show_progress)
+         bool show_progress,
+         PruneRFIConfig rfi_config)
         : m_workspaces_view(external_workspaces),
           m_cfg(std::move(cfg)),
           m_threshold_scheme(threshold_scheme.begin(), threshold_scheme.end()),
@@ -726,6 +1014,7 @@ public:
           m_batch_size(batch_size),
           m_poly_basis(poly_basis),
           m_show_progress(show_progress),
+          m_rfi_config(std::move(rfi_config)),
           m_ffa_plan(m_cfg),
           m_nthreads(m_cfg.get_nthreads()) {
         // Create branching pattern and branch max
@@ -736,6 +1025,7 @@ public:
         // Validate workspaces
         const auto ncoords_ffa = m_ffa_plan.get_ncoords().back();
         const auto nsegments   = m_ffa_plan.get_nsegments().back();
+        setup_rfi_control(nsegments);
         error_check::check_greater_equal(
             m_workspaces_view.size(), static_cast<SizeType>(m_nthreads),
             "EPMultiPass: Provided external workspaces is less than requested "
@@ -804,7 +1094,7 @@ public:
         auto writer = cands::PruneResultWriter(
             result_file, cands::PruneResultWriter::Mode::kWrite);
         writer.write_metadata(m_cfg.get_param_names(), nsegments, m_max_sugg,
-                              m_threshold_scheme);
+                              m_threshold_scheme, m_rfi_config);
         // Execute based on thread count
         if (m_nthreads == 1) {
             execute_single_threaded(ffa_fold, ref_segs_to_process, outdir,
@@ -838,11 +1128,14 @@ private:
     SizeType m_batch_size;
     std::string m_poly_basis;
     bool m_show_progress;
+    PruneRFIConfig m_rfi_config;
 
     plans::FFAPlan<FoldType> m_ffa_plan;
     int m_nthreads;
     std::vector<double> m_branching_pattern;
     SizeType m_branch_max{0};
+    // Static pulsar mask on the FFA base grid, shared read-only by all runs
+    GridMask m_mask_base;
 
     // Safely get the workspace for a specific thread index
     [[nodiscard]] memory::EPWorkspace<FoldType>&
@@ -850,15 +1143,41 @@ private:
         return m_workspaces_view[thread_idx];
     }
 
+    // Validate the RFI configuration and rasterise the static pulsar mask
+    // onto the (accel, freq) grid that resolve() snaps to.
+    void setup_rfi_control(SizeType nsegments) {
+        m_rfi_config.validate(nsegments);
+        const auto n_params = m_cfg.get_nparams();
+        error_check::check_greater_equal(
+            n_params, SizeType{2},
+            "EPMultiPass: pruning requires at least 2 parameters");
+        const auto& counts = m_ffa_plan.get_param_counts().back();
+        const auto limits  = m_cfg.get_param_limits();
+        m_mask_base = GridMask(limits[n_params - 2], counts[n_params - 2],
+                               limits[n_params - 1], counts[n_params - 1]);
+        m_mask_base.add_windows(m_rfi_config.pulsar_mask,
+                                m_rfi_config.n_harmonics);
+        if (m_rfi_config.is_active()) {
+            spdlog::info(
+                "EPMultiPass: RFI control: {} mask window(s) ({} harmonics) "
+                "-> {} of {} grid cells masked; harvesting {}; impulsive "
+                "veto {}",
+                m_rfi_config.pulsar_mask.size(), m_rfi_config.n_harmonics,
+                m_mask_base.count(), m_mask_base.get_n_cells(),
+                m_rfi_config.has_harvest() ? "on" : "off",
+                m_rfi_config.impulsive_veto ? "on" : "off");
+        }
+    }
+
     void execute_single_threaded(std::span<const FoldType> ffa_fold,
                                  std::span<const SizeType> ref_segs,
                                  const std::filesystem::path& outdir,
                                  const std::filesystem::path& log_file,
                                  const std::filesystem::path& result_file) {
-        auto& ws = get_thread_workspace(0);
-        auto prune =
-            PruneImpl<FoldType>(ws, m_cfg, m_threshold_scheme, m_max_sugg,
-                                m_batch_size, m_branch_max, m_poly_basis);
+        auto& ws   = get_thread_workspace(0);
+        auto prune = PruneImpl<FoldType>(
+            ws, m_cfg, m_threshold_scheme, m_max_sugg, m_batch_size,
+            m_branch_max, m_poly_basis, m_rfi_config, m_mask_base);
         for (const auto ref_seg : ref_segs) {
             prune.execute(ffa_fold, ref_seg, m_ascend_levels, outdir, log_file,
                           result_file,
@@ -904,9 +1223,9 @@ private:
                                             &ffa_fold]() mutable {
                 const auto thread_idx = BS::this_thread::get_index().value();
                 auto& ws              = get_thread_workspace(thread_idx);
-                auto prune = PruneImpl<FoldType>(ws, m_cfg, m_threshold_scheme,
-                                                 m_max_sugg, m_batch_size,
-                                                 m_branch_max, m_poly_basis);
+                auto prune            = PruneImpl<FoldType>(
+                    ws, m_cfg, m_threshold_scheme, m_max_sugg, m_batch_size,
+                    m_branch_max, m_poly_basis, m_rfi_config, m_mask_base);
 
                 prune.execute(
                     ffa_fold, ref_seg, m_ascend_levels, outdir,
@@ -968,7 +1287,8 @@ EPMultiPass<FoldType>::EPMultiPass(
     SizeType max_sugg,
     SizeType batch_size,
     std::string_view poly_basis,
-    bool show_progress)
+    bool show_progress,
+    PruneRFIConfig rfi_config)
     : m_impl(std::make_unique<Impl>(std::move(cfg),
                                     threshold_scheme,
                                     n_runs,
@@ -977,7 +1297,8 @@ EPMultiPass<FoldType>::EPMultiPass(
                                     max_sugg,
                                     batch_size,
                                     poly_basis,
-                                    show_progress)) {}
+                                    show_progress,
+                                    std::move(rfi_config))) {}
 template <SupportedFoldType FoldType>
 EPMultiPass<FoldType>::EPMultiPass(
     std::span<memory::EPWorkspace<FoldType>> workspaces,
@@ -989,7 +1310,8 @@ EPMultiPass<FoldType>::EPMultiPass(
     SizeType max_sugg,
     SizeType batch_size,
     std::string_view poly_basis,
-    bool show_progress)
+    bool show_progress,
+    PruneRFIConfig rfi_config)
     : m_impl(std::make_unique<Impl>(workspaces,
                                     std::move(cfg),
                                     threshold_scheme,
@@ -999,7 +1321,8 @@ EPMultiPass<FoldType>::EPMultiPass(
                                     max_sugg,
                                     batch_size,
                                     poly_basis,
-                                    show_progress)) {}
+                                    show_progress,
+                                    std::move(rfi_config))) {}
 template <SupportedFoldType FoldType>
 EPMultiPass<FoldType>::~EPMultiPass() = default;
 template <SupportedFoldType FoldType>

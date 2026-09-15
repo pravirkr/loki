@@ -77,8 +77,12 @@ HighFive::CompoundType create_compound_prune_stats() {
         {"score_max", HighFive::create_datatype<float>()},
         {"n_branches", HighFive::create_datatype<SizeType>()},
         {"n_leaves", HighFive::create_datatype<SizeType>()},
+        {"n_leaves_resolved", HighFive::create_datatype<SizeType>()},
         {"n_leaves_phy", HighFive::create_datatype<SizeType>()},
         {"n_leaves_surv", HighFive::create_datatype<SizeType>()},
+        {"n_leaves_masked", HighFive::create_datatype<SizeType>()},
+        {"n_leaves_vetoed", HighFive::create_datatype<SizeType>()},
+        {"n_harvested", HighFive::create_datatype<SizeType>()},
     };
 }
 
@@ -91,6 +95,7 @@ HighFive::CompoundType create_compound_prune_timer_stats() {
         {"score", HighFive::create_datatype<float>()},
         {"transform", HighFive::create_datatype<float>()},
         {"threshold", HighFive::create_datatype<float>()},
+        {"rfi", HighFive::create_datatype<float>()},
     };
 }
 
@@ -210,9 +215,15 @@ std::vector<FFATimerStatsPacked> FFAStatsCollection::get_packed_data() const {
 
 // --- PruneStats ---
 double PruneStats::lb_leaves() const noexcept {
+    if (n_leaves == 0) {
+        return 0.0;
+    }
     return round_dp(std::log2(static_cast<double>(n_leaves)), 2);
 }
 double PruneStats::lb_leaves_phys() const noexcept {
+    if (n_leaves_phy == 0) {
+        return 0.0;
+    }
     return round_dp(std::log2(static_cast<double>(n_leaves_phy)), 2);
 }
 double PruneStats::branch_frac() const noexcept {
@@ -224,18 +235,28 @@ double PruneStats::phys_frac() const noexcept {
         static_cast<double>(n_leaves_phy) / static_cast<double>(n_leaves), 2);
 }
 double PruneStats::surv_frac() const noexcept {
+    if (n_leaves_phy == 0) {
+        return 0.0;
+    }
     return round_dp(static_cast<double>(n_leaves_surv) /
                         static_cast<double>(n_leaves_phy),
                     2);
 }
 std::string PruneStats::get_summary() const noexcept {
-    return std::format("Prune level: {:3d}, seg_idx: {:3d}, leaves: {:5.2f}, "
-                       "leaves_phys: {:5.2f}, branch_frac: {:5.2f},"
-                       "score thresh: {:5.2f}, max: {:5.2f}, min: {:5.2f}, "
-                       "P(surv): {:4.2f}\n",
-                       level, seg_idx, lb_leaves(), lb_leaves_phys(),
-                       branch_frac(), threshold, score_max, score_min,
-                       surv_frac());
+    std::string summary = std::format(
+        "Prune level: {:3d}, seg_idx: {:3d}, leaves: {:5.2f}, "
+        "leaves_phys: {:5.2f}, branch_frac: {:5.2f},"
+        "score thresh: {:5.2f}, max: {:5.2f}, min: {:5.2f}, "
+        "P(surv): {:4.2f}",
+        level, seg_idx, lb_leaves(), lb_leaves_phys(), branch_frac(), threshold,
+        score_max, score_min, surv_frac());
+    if (n_leaves_masked > 0 || n_leaves_vetoed > 0 || n_harvested > 0) {
+        summary += std::format(
+            ", masked: {}, vetoed: {}, harvested: {}",
+            n_leaves_masked, n_leaves_vetoed, n_harvested);
+    }
+    summary += "\n";
+    return summary;
 }
 
 // --- PruneTimerStats ---
@@ -311,8 +332,21 @@ std::string PruneStatsCollection::get_stats_summary() const {
         return "No stats available.";
     }
     const auto& last_stats = m_stats_list.back();
-    return std::format("Score: {:.2f}, Leaves: {:.2f}", last_stats.score_max,
-                       last_stats.lb_leaves());
+    SizeType n_masked      = 0;
+    SizeType n_vetoed      = 0;
+    SizeType n_harvested   = 0;
+    for (const auto& stats : m_stats_list) {
+        n_masked += stats.n_leaves_masked;
+        n_vetoed += stats.n_leaves_vetoed;
+        n_harvested += stats.n_harvested;
+    }
+    auto summary = std::format("Score: {:.2f}, Leaves: {:.2f}",
+                               last_stats.score_max, last_stats.lb_leaves());
+    if (n_masked > 0 || n_vetoed > 0 || n_harvested > 0) {
+        summary += std::format(", masked: {}, vetoed: {}, harvested: {}",
+                               n_masked, n_vetoed, n_harvested);
+    }
+    return summary;
 }
 std::string PruneStatsCollection::get_stats_summary_cuda(float duration) const {
     if (m_stats_list.empty()) {
@@ -377,10 +411,78 @@ PruneStatsCollection::get_packed_data() const {
                                    m_accumulated_timers.at("shift_add"),
                                    m_accumulated_timers.at("score"),
                                    m_accumulated_timers.at("transform"),
-                                   m_accumulated_timers.at("batch_add"));
+                                   m_accumulated_timers.at("batch_add"),
+                                   m_accumulated_timers.at("rfi"));
     }
     return {m_stats_list, packed_timers};
 }
+
+namespace {
+// Create a 1D dataset from a span, tolerating empty input (HDF5 allows a
+// zero-sized simple dataspace, but no data may be written to it).
+template <typename T>
+void create_1d_dataset(HighFive::Group& group,
+                       const std::string& name,
+                       std::span<const T> data) {
+    auto ds = group.createDataSet(name, HighFive::DataSpace({data.size()}),
+                                  HighFive::create_datatype<T>());
+    if (!data.empty()) {
+        ds.write_raw(data.data(), HighFive::create_datatype<T>());
+    }
+}
+} // namespace
+
+// --- HarvestBuffer ---
+template <SupportedFoldType FoldType>
+HarvestBuffer<FoldType>::HarvestBuffer(SizeType leaves_stride,
+                                       SizeType folds_stride,
+                                       bool store_folds)
+    : m_leaves_stride(leaves_stride),
+      m_folds_stride(folds_stride),
+      m_store_folds(store_folds) {
+    error_check::check_greater(leaves_stride, SizeType{0},
+                               "HarvestBuffer: leaves_stride must be > 0");
+    error_check::check_greater(folds_stride, SizeType{0},
+                               "HarvestBuffer: folds_stride must be > 0");
+}
+
+template <SupportedFoldType FoldType>
+void HarvestBuffer<FoldType>::clear() noexcept {
+    m_size = 0;
+    m_leaves.clear();
+    m_folds.clear();
+    m_scores.clear();
+    m_levels.clear();
+    m_seg_idx.clear();
+    m_t_ref.clear();
+}
+
+template <SupportedFoldType FoldType>
+void HarvestBuffer<FoldType>::push(std::span<const double> leaf,
+                                   std::span<const FoldType> fold,
+                                   float score,
+                                   SizeType level,
+                                   SizeType seg_idx,
+                                   double t_ref) {
+    error_check::check_greater_equal(leaf.size(), m_leaves_stride,
+                                     "HarvestBuffer::push: leaf too small");
+    m_leaves.insert(m_leaves.end(), leaf.begin(),
+                    leaf.begin() + static_cast<IndexType>(m_leaves_stride));
+    if (m_store_folds) {
+        error_check::check_greater_equal(fold.size(), m_folds_stride,
+                                         "HarvestBuffer::push: fold too small");
+        m_folds.insert(m_folds.end(), fold.begin(),
+                       fold.begin() + static_cast<IndexType>(m_folds_stride));
+    }
+    m_scores.push_back(score);
+    m_levels.push_back(level);
+    m_seg_idx.push_back(seg_idx);
+    m_t_ref.push_back(t_ref);
+    ++m_size;
+}
+
+template class HarvestBuffer<float>;
+template class HarvestBuffer<ComplexType>;
 
 // --- FFAResultWriter ---
 FFAResultWriter::FFAResultWriter(std::filesystem::path filename, Mode mode)
@@ -504,7 +606,8 @@ void PruneResultWriter::write_metadata(
     const std::vector<std::string>& param_names,
     SizeType nsegments,
     SizeType max_sugg,
-    std::span<const float> threshold_scheme) {
+    std::span<const float> threshold_scheme,
+    const algorithms::PruneRFIConfig& rfi_config) {
     std::scoped_lock lock(m_hdf5_mutex);
 
     HighFive::File file = open_file();
@@ -517,7 +620,114 @@ void PruneResultWriter::write_metadata(
     file.createAttribute("nsegments", nsegments);
     file.createAttribute("max_sugg", max_sugg);
     file.createDataSet("threshold_scheme", threshold_scheme);
+
+    // RFI-control configuration
+    HighFive::Group rfi  = file.createGroup("rfi_config");
+    const auto n_windows = rfi_config.pulsar_mask.size();
+    std::vector<double> windows_flat(n_windows * 4);
+    for (SizeType i = 0; i < n_windows; ++i) {
+        const auto& w             = rfi_config.pulsar_mask[i];
+        windows_flat[(i * 4) + 0] = w.f_lo;
+        windows_flat[(i * 4) + 1] = w.f_hi;
+        windows_flat[(i * 4) + 2] = w.a_lo;
+        windows_flat[(i * 4) + 3] = w.a_hi;
+    }
+    auto mask_ds =
+        rfi.createDataSet("pulsar_mask", HighFive::DataSpace({n_windows, 4UL}),
+                          HighFive::create_datatype<double>());
+    if (n_windows > 0) {
+        mask_ds.write_raw(windows_flat.data(),
+                          HighFive::create_datatype<double>());
+    }
+    create_1d_dataset<float>(rfi, "harvest_scheme", rfi_config.harvest_scheme);
+    rfi.createAttribute("n_harmonics", rfi_config.n_harmonics);
+    rfi.createAttribute("harvest_mask_ntiles", rfi_config.harvest_mask_ntiles);
+    rfi.createAttribute("max_harvests", rfi_config.max_harvests);
+    rfi.createAttribute("harvest_store_folds",
+                        static_cast<uint8_t>(rfi_config.harvest_store_folds));
+    rfi.createAttribute("impulsive_veto",
+                        static_cast<uint8_t>(rfi_config.impulsive_veto));
+    rfi.createAttribute("impulsive_kappa", rfi_config.impulsive_kappa);
+    rfi.createAttribute("impulsive_min_level", rfi_config.impulsive_min_level);
+    rfi.createAttribute("impulsive_min_snr", rfi_config.impulsive_min_snr);
 }
+
+template <SupportedFoldType FoldType>
+void PruneResultWriter::write_run_harvest(
+    std::string_view run_name,
+    const HarvestBuffer<FoldType>& harvest,
+    SizeType n_params,
+    SizeType n_harvested_total) {
+    std::lock_guard<std::mutex> lock(m_hdf5_mutex);
+
+    HighFive::File file        = open_file();
+    HighFive::Group runs_group = open_runs_group(file);
+    if (!runs_group.exist(std::string(run_name))) {
+        throw std::runtime_error(
+            std::format("write_run_harvest: run {} does not exist; call "
+                        "write_run_results first.",
+                        run_name));
+    }
+    HighFive::Group run_group = runs_group.getGroup(std::string(run_name));
+    if (run_group.exist("harvest")) {
+        throw std::runtime_error(std::format(
+            "write_run_harvest: harvest group already exists for run {}.",
+            run_name));
+    }
+    HighFive::Group hg = run_group.createGroup("harvest");
+    hg.createAttribute("n_harvested_total", n_harvested_total);
+
+    constexpr SizeType kParamStride = 2U;
+    const auto n                    = harvest.size();
+    const auto leaves_stride        = (n_params + 2) * kParamStride;
+    error_check::check_equal(harvest.get_leaves_stride(), leaves_stride,
+                             "write_run_harvest: leaves stride mismatch");
+
+    // --- param_sets ---
+    HighFive::DataSetCreateProps param_props;
+    if (n > 0) {
+        param_props.add(
+            HighFive::Chunking({static_cast<hsize_t>(std::min(1024UL, n)),
+                                n_params + 2, kParamStride}));
+        param_props.add(HighFive::Deflate(9));
+    }
+    auto param_ds = hg.createDataSet(
+        "param_sets", HighFive::DataSpace({n, n_params + 2, kParamStride}),
+        HighFive::create_datatype<double>(), param_props);
+    if (n > 0) {
+        param_ds.write_raw(harvest.get_leaves().data(),
+                           HighFive::create_datatype<double>());
+    }
+    // --- scalar per-record datasets ---
+    create_1d_dataset<float>(hg, "scores", harvest.get_scores());
+    create_1d_dataset<SizeType>(hg, "levels", harvest.get_levels());
+    create_1d_dataset<SizeType>(hg, "seg_idx", harvest.get_seg_idx());
+    create_1d_dataset<double>(hg, "t_ref", harvest.get_t_ref());
+
+    // --- folds (optional) ---
+    if (harvest.stores_folds()) {
+        const auto folds_stride = harvest.get_folds_stride();
+        const auto nbins_fold   = folds_stride / 2;
+        HighFive::DataSetCreateProps fold_props;
+        if (n > 0) {
+            fold_props.add(HighFive::Chunking(
+                {static_cast<hsize_t>(std::min(256UL, n)), 2UL, nbins_fold}));
+            fold_props.add(HighFive::Deflate(6));
+        }
+        auto folds_ds =
+            hg.createDataSet("folds", HighFive::DataSpace({n, 2UL, nbins_fold}),
+                             HighFive::create_datatype<FoldType>(), fold_props);
+        if (n > 0) {
+            folds_ds.write_raw(harvest.get_folds().data(),
+                               HighFive::create_datatype<FoldType>());
+        }
+    }
+}
+
+template void PruneResultWriter::write_run_harvest<float>(
+    std::string_view, const HarvestBuffer<float>&, SizeType, SizeType);
+template void PruneResultWriter::write_run_harvest<ComplexType>(
+    std::string_view, const HarvestBuffer<ComplexType>&, SizeType, SizeType);
 
 void PruneResultWriter::write_runtime(float runtime) {
     std::lock_guard<std::mutex> lock(m_hdf5_mutex);

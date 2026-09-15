@@ -7,6 +7,7 @@
 #include <string_view>
 #include <vector>
 
+#include "loki/algorithms/prune_rfi.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
 #include "loki/utils/workspace.hpp"
@@ -35,7 +36,8 @@ public:
                 SizeType max_sugg                             = 1U << 18U,
                 SizeType batch_size                           = 1024U,
                 std::string_view poly_basis                   = "taylor",
-                bool show_progress                            = true);
+                bool show_progress                            = true,
+                PruneRFIConfig rfi_config                     = {});
 
     // Pipeline-based EP constructor uses external workspace
     EPMultiPass(std::span<memory::EPWorkspace<FoldType>> workspaces,
@@ -47,7 +49,8 @@ public:
                 SizeType max_sugg                             = 1U << 18U,
                 SizeType batch_size                           = 1024U,
                 std::string_view poly_basis                   = "taylor",
-                bool show_progress                            = true);
+                bool show_progress                            = true,
+                PruneRFIConfig rfi_config                     = {});
 
     // --- Rule of five: PIMPL ---
     ~EPMultiPass();
