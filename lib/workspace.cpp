@@ -70,16 +70,16 @@ BranchingWorkspace::BranchingWorkspace(SizeType batch_size,
 void BranchingWorkspace::validate(SizeType batch_size,
                                   SizeType branch_max,
                                   SizeType nparams) const {
-    error_check::check_equal(
+    error_check::check_greater_equal(
         scratch_params.size(), batch_size * nparams * branch_max,
         "BranchingWorkspace: scratch_params size is too small");
-    error_check::check_equal(
+    error_check::check_greater_equal(
         scratch_dparams.size(), batch_size * nparams,
         "BranchingWorkspace: scratch_dparams size is too small");
-    error_check::check_equal(
+    error_check::check_greater_equal(
         scratch_counts.size(), batch_size * nparams,
         "BranchingWorkspace: scratch_counts size is too small");
-    error_check::check_equal(
+    error_check::check_greater_equal(
         scratch_shifts.size(), batch_size * nparams,
         "BranchingWorkspace: scratch_shifts size is too small");
 }
@@ -111,14 +111,13 @@ PruneWorkspace<FoldType>::PruneWorkspace(SizeType batch_size,
 
 template <SupportedFoldType FoldType>
 float PruneWorkspace<FoldType>::get_memory_usage_gib() const noexcept {
-    const auto total_memory =
-        (branched_leaves.size() * sizeof(double)) +
-        (branched_folds.size() * sizeof(FoldType)) +
-        (branched_scores.size() * sizeof(float)) +
-        (branched_indices.size() * sizeof(SizeType)) +
-        (branched_param_idx.size() * sizeof(SizeType)) +
-        (branched_phase_shift.size() * sizeof(float)) +
-        (branched_parent_scores.size() * sizeof(float));
+    const auto total_memory = (branched_leaves.size() * sizeof(double)) +
+                              (branched_folds.size() * sizeof(FoldType)) +
+                              (branched_scores.size() * sizeof(float)) +
+                              (branched_indices.size() * sizeof(SizeType)) +
+                              (branched_param_idx.size() * sizeof(SizeType)) +
+                              (branched_phase_shift.size() * sizeof(float)) +
+                              (branched_parent_scores.size() * sizeof(float));
     return static_cast<float>(total_memory) / static_cast<float>(1ULL << 30U);
 }
 
@@ -128,25 +127,25 @@ void PruneWorkspace<FoldType>::validate(SizeType batch_size,
                                         SizeType nsegments) const {
     const auto max_branched_param_idx =
         std::max(batch_size * branch_max, nsegments * batch_size);
-    error_check::check_equal(
+    error_check::check_greater_equal(
         branched_leaves.size(), batch_size * branch_max * leaves_stride,
         "PruneWorkspace: branched_leaves size is too small");
-    error_check::check_equal(
+    error_check::check_greater_equal(
         branched_folds.size(), batch_size * branch_max * folds_stride,
         "PruneWorkspace: branched_folds size is too small");
-    error_check::check_equal(
+    error_check::check_greater_equal(
         branched_scores.size(), batch_size * branch_max,
         "PruneWorkspace: branched_scores size is too small");
-    error_check::check_equal(
+    error_check::check_greater_equal(
         branched_indices.size(), batch_size * branch_max,
         "PruneWorkspace: branched_indices size is too small");
-    error_check::check_equal(
+    error_check::check_greater_equal(
         branched_param_idx.size(), max_branched_param_idx,
         "PruneWorkspace: branched_param_idx size is too small");
-    error_check::check_equal(
+    error_check::check_greater_equal(
         branched_phase_shift.size(), max_branched_param_idx,
         "PruneWorkspace: branched_phase_shift size is too small");
-    error_check::check_equal(
+    error_check::check_greater_equal(
         branched_parent_scores.size(), batch_size * branch_max,
         "PruneWorkspace: branched_parent_scores size is too small");
 }
@@ -178,9 +177,8 @@ float EPWorkspace<FoldType>::get_seed_memory_usage_gib() const noexcept {
 
 template <SupportedFoldType FoldType>
 float EPWorkspace<FoldType>::get_memory_usage_gib() const noexcept {
-    return world_tree.get_memory_usage_gib() +
-           prune.get_memory_usage_gib() + branch.get_memory_usage_gib() +
-           get_seed_memory_usage_gib();
+    return world_tree.get_memory_usage_gib() + prune.get_memory_usage_gib() +
+           branch.get_memory_usage_gib() + get_seed_memory_usage_gib();
 }
 
 template <SupportedFoldType FoldType>
@@ -195,8 +193,9 @@ void EPWorkspace<FoldType>::validate(SizeType batch_size,
     error_check::check_greater_equal(
         seed_scores.size(), ncoords_ffa,
         "EPWorkspace: seed_scores size is too small");
-    error_check::check_equal(seed_leaves.size(), ncoords_ffa * leaves_stride,
-                             "EPWorkspace: seed_leaves size is too small");
+    error_check::check_greater_equal(
+        seed_leaves.size(), ncoords_ffa * leaves_stride,
+        "EPWorkspace: seed_leaves size is too small");
     error_check::check_greater_equal(
         seed_keep_indices.size(), ncoords_ffa,
         "EPWorkspace: seed_keep_indices size is too small");

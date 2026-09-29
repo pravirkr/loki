@@ -499,11 +499,14 @@ void WorldTree<FoldType>::validate(SizeType capacity,
                                    SizeType nparams,
                                    SizeType nbins,
                                    SizeType max_batch_size) const {
-    error_check::check_equal(m_capacity, capacity,
-                             "WorldTree: capacity mismatch");
+    error_check::check_greater_equal(m_capacity, capacity,
+                                     "WorldTree: capacity too small");
     error_check::check_equal(m_nparams, nparams, "WorldTree: nparams mismatch");
     error_check::check_equal(m_nbins, nbins, "WorldTree: nbins mismatch");
-    error_check::check_greater_equal(m_leaves.size(), capacity * (nparams + 2),
+    error_check::check_greater_equal(m_max_batch_size, max_batch_size,
+                                     "WorldTree: max_batch_size too small");
+    error_check::check_greater_equal(m_leaves.size(),
+                                     capacity * (nparams + 2) * kParamStride,
                                      "WorldTree: leaves size mismatch");
     error_check::check_greater_equal(m_folds.size(), capacity * 2 * nbins,
                                      "WorldTree: folds size mismatch");

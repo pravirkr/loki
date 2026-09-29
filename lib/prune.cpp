@@ -990,6 +990,13 @@ public:
         // m_workspaces_view is set. Both move and copy of Impl are deleted to
         // enforce this.
         m_workspaces_view = std::span(m_workspace_storage);
+
+        // Allocate internal FFA resources
+        m_ffa_workspace_storage = memory::FFAWorkspace<FoldType>(m_ffa_plan);
+        m_ffa_workspace_ptr     = &m_ffa_workspace_storage;
+        m_fft_ptr               = &m_fft_storage;
+        m_ffa_fold_storage.resize(m_ffa_plan.get_buffer_size(), FoldType{});
+        m_ffa_fold_span = std::span(m_ffa_fold_storage);
     }
 
     // External workspace constructor
@@ -1037,6 +1044,73 @@ public:
             ws.validate(m_batch_size, m_branch_max, m_max_sugg, ncoords_ffa,
                         m_cfg.get_nparams(), nbins, nsegments);
         }
+
+        // Allocate internal FFA resources
+        m_ffa_workspace_storage = memory::FFAWorkspace<FoldType>(m_ffa_plan);
+        m_ffa_workspace_ptr     = &m_ffa_workspace_storage;
+        m_fft_ptr               = &m_fft_storage;
+        m_ffa_fold_storage.resize(m_ffa_plan.get_buffer_size(), FoldType{});
+        m_ffa_fold_span = std::span(m_ffa_fold_storage);
+    }
+
+    // Fully external pipeline constructor: external EP workspaces, external
+    // FFA workspace & fold buffer
+    Impl(std::span<memory::EPWorkspace<FoldType>> external_workspaces,
+         memory::FFAWorkspace<FoldType>& external_ffa_workspace,
+         math::FFTWManager& external_fft_manager,
+         std::span<FoldType> external_ffa_fold,
+         search::PulsarSearchConfig cfg,
+         std::span<const float> threshold_scheme,
+         std::optional<SizeType> n_runs,
+         std::optional<std::vector<SizeType>> ref_segs,
+         std::span<const SizeType> ascend_levels,
+         SizeType max_sugg,
+         SizeType batch_size,
+         std::string_view poly_basis,
+         bool show_progress,
+         PruneRFIConfig rfi_config)
+        : m_workspaces_view(external_workspaces),
+          m_ffa_workspace_ptr(&external_ffa_workspace),
+          m_fft_ptr(&external_fft_manager),
+          m_ffa_fold_span(external_ffa_fold),
+          m_cfg(std::move(cfg)),
+          m_threshold_scheme(threshold_scheme.begin(), threshold_scheme.end()),
+          m_n_runs(n_runs),
+          m_ref_segs(std::move(ref_segs)),
+          m_ascend_levels(ascend_levels.begin(), ascend_levels.end()),
+          m_max_sugg(max_sugg),
+          m_batch_size(batch_size),
+          m_poly_basis(poly_basis),
+          m_show_progress(show_progress),
+          m_rfi_config(std::move(rfi_config)),
+          m_ffa_plan(m_cfg),
+          m_nthreads(m_cfg.get_nthreads()) {
+        // Create branching pattern and branch max
+        m_branching_pattern   = m_ffa_plan.get_branching_pattern(m_poly_basis);
+        const auto branch_max = *std::ranges::max_element(m_branching_pattern);
+        m_branch_max =
+            std::max(static_cast<SizeType>(std::ceil(branch_max * 2)), 32UL);
+        // Validate workspaces
+        const auto ncoords_ffa = m_ffa_plan.get_ncoords().back();
+        const auto nsegments   = m_ffa_plan.get_nsegments().back();
+        setup_rfi_control(nsegments);
+        error_check::check_greater_equal(
+            m_workspaces_view.size(), static_cast<SizeType>(m_nthreads),
+            "EPMultiPass: Provided external workspaces is less than requested "
+            "nthreads.");
+        const SizeType nbins = std::is_same_v<FoldType, ComplexType>
+                                   ? m_cfg.get_nbins_f()
+                                   : m_cfg.get_nbins();
+        for (const auto& ws : m_workspaces_view) {
+            ws.validate(m_batch_size, m_branch_max, m_max_sugg, ncoords_ffa,
+                        m_cfg.get_nparams(), nbins, nsegments);
+        }
+
+        // Validate external FFA resources
+        m_ffa_workspace_ptr->validate(m_ffa_plan);
+        error_check::check_greater_equal(
+            m_ffa_fold_span.size(), m_ffa_plan.get_buffer_size(),
+            "EPMultiPass: Provided external ffa_fold buffer is too small");
     }
 
     ~Impl()                      = default;
@@ -1052,15 +1126,18 @@ public:
         timing::SimpleTimer timer;
         timer.start();
         spdlog::info("EPMultiPass: Initializing with FFA");
-        // Create appropriate FFA fold
-        std::tuple<std::vector<FoldType>, plans::FFAPlan<FoldType>> result =
-            compute_ffa<FoldType>(ts_e, ts_v, m_cfg, /*quiet=*/false,
-                                  m_show_progress);
-        const std::vector<FoldType> ffa_fold = std::get<0>(result);
-        plans::FFAPlan<FoldType> ffa_plan    = std::move(std::get<1>(result));
+
+        auto ffa = FFA<FoldType>(*m_ffa_workspace_ptr, *m_fft_ptr, m_cfg,
+                                 m_show_progress);
+        const auto buffer_size = m_ffa_plan.get_buffer_size();
+        const auto fold_size   = m_ffa_plan.get_fold_size();
+        auto fold_span         = m_ffa_fold_span.first(buffer_size);
+        ffa.execute(ts_e, ts_v, fold_span);
+        const auto ffa_fold =
+            std::span<const FoldType>(fold_span).first(fold_size);
 
         // Setup output files and directory
-        const auto nsegments = ffa_plan.get_nsegments().back();
+        const auto nsegments = m_ffa_plan.get_nsegments().back();
         const std::string filebase =
             std::format("{}_pruning_nstages_{}", file_prefix, nsegments);
         const auto log_file =
@@ -1118,6 +1195,14 @@ private:
     // Pool of owned workspaces
     std::vector<memory::EPWorkspace<FoldType>> m_workspace_storage;
     std::span<memory::EPWorkspace<FoldType>> m_workspaces_view;
+
+    // FFA resources (either owned or non-owning external references)
+    memory::FFAWorkspace<FoldType> m_ffa_workspace_storage;
+    memory::FFAWorkspace<FoldType>* m_ffa_workspace_ptr{nullptr};
+    math::FFTWManager m_fft_storage;
+    math::FFTWManager* m_fft_ptr{nullptr};
+    std::vector<FoldType> m_ffa_fold_storage;
+    std::span<FoldType> m_ffa_fold_span;
 
     search::PulsarSearchConfig m_cfg;
     std::vector<float> m_threshold_scheme;
@@ -1313,6 +1398,36 @@ EPMultiPass<FoldType>::EPMultiPass(
     bool show_progress,
     PruneRFIConfig rfi_config)
     : m_impl(std::make_unique<Impl>(workspaces,
+                                    std::move(cfg),
+                                    threshold_scheme,
+                                    n_runs,
+                                    std::move(ref_segs),
+                                    ascend_levels,
+                                    max_sugg,
+                                    batch_size,
+                                    poly_basis,
+                                    show_progress,
+                                    std::move(rfi_config))) {}
+template <SupportedFoldType FoldType>
+EPMultiPass<FoldType>::EPMultiPass(
+    std::span<memory::EPWorkspace<FoldType>> workspaces,
+    memory::FFAWorkspace<FoldType>& ffa_workspace,
+    math::FFTWManager& fft_manager,
+    std::span<FoldType> ffa_fold,
+    search::PulsarSearchConfig cfg,
+    std::span<const float> threshold_scheme,
+    std::optional<SizeType> n_runs,
+    std::optional<std::vector<SizeType>> ref_segs,
+    std::span<const SizeType> ascend_levels,
+    SizeType max_sugg,
+    SizeType batch_size,
+    std::string_view poly_basis,
+    bool show_progress,
+    PruneRFIConfig rfi_config)
+    : m_impl(std::make_unique<Impl>(workspaces,
+                                    ffa_workspace,
+                                    fft_manager,
+                                    ffa_fold,
                                     std::move(cfg),
                                     threshold_scheme,
                                     n_runs,

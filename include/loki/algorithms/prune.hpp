@@ -10,6 +10,7 @@
 #include "loki/algorithms/prune_rfi.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
+#include "loki/utils/fft.hpp"
 #include "loki/utils/workspace.hpp"
 
 #ifdef LOKI_ENABLE_CUDA
@@ -41,6 +42,23 @@ public:
 
     // Pipeline-based EP constructor uses external workspace
     EPMultiPass(std::span<memory::EPWorkspace<FoldType>> workspaces,
+                search::PulsarSearchConfig cfg,
+                std::span<const float> threshold_scheme,
+                std::optional<SizeType> n_runs                = std::nullopt,
+                std::optional<std::vector<SizeType>> ref_segs = std::nullopt,
+                std::span<const SizeType> ascend_levels       = {},
+                SizeType max_sugg                             = 1U << 18U,
+                SizeType batch_size                           = 1024U,
+                std::string_view poly_basis                   = "taylor",
+                bool show_progress                            = true,
+                PruneRFIConfig rfi_config                     = {});
+
+    // Fully external pipeline constructor: external EP workspaces, external FFA
+    // workspace & fold buffer
+    EPMultiPass(std::span<memory::EPWorkspace<FoldType>> workspaces,
+                memory::FFAWorkspace<FoldType>& ffa_workspace,
+                math::FFTWManager& fft_manager,
+                std::span<FoldType> ffa_fold,
                 search::PulsarSearchConfig cfg,
                 std::span<const float> threshold_scheme,
                 std::optional<SizeType> n_runs                = std::nullopt,

@@ -17,6 +17,7 @@ using algorithms::EPMultiPass;
 using algorithms::FFA;
 using plans::FFAPlan;
 using plans::FFAPlanBase;
+using regions::EPRegionPlanner;
 using regions::FFARegionPlanner;
 using search::PulsarSearchConfig;
 
@@ -86,6 +87,33 @@ void bind_ffa_region_planner(py::module& m, const std::string& name) {
         .def_property_readonly("stats", &FFARegionPlanner<T>::get_stats);
 }
 
+// Template function to bind EPRegionPlanner<T>
+template <SupportedFoldType FoldType>
+void bind_ep_region_planner(py::module& m, const std::string& name) {
+    py::class_<EPRegionPlanner<FoldType>>(m, name.c_str())
+        .def(py::init<const PulsarSearchConfig&, float, std::string_view, float,
+                      const std::optional<std::filesystem::path>&>(),
+             py::arg("cfg"), py::arg("min_pd") = 0.1F,
+             py::arg("poly_basis") = "taylor", py::arg("ref_ducy") = 0.1F,
+             py::arg("plan_cache_file") = std::nullopt)
+        .def_property_readonly("chunk_cfgs",
+                               &EPRegionPlanner<FoldType>::get_chunk_cfgs)
+        .def_property_readonly("nchunks",
+                               &EPRegionPlanner<FoldType>::get_nchunks)
+        .def_property_readonly("stats", &EPRegionPlanner<FoldType>::get_stats)
+        .def(
+            "save_cache",
+            [](const EPRegionPlanner<FoldType>& self,
+               const std::string& filepath) { self.save_cache(filepath); },
+            py::arg("filepath"))
+        .def(
+            "load_cache",
+            [](EPRegionPlanner<FoldType>& self, const std::string& filepath) {
+                self.load_cache(filepath);
+            },
+            py::arg("filepath"));
+}
+
 // Bind the RFI-control configuration types used by EPMultiPass
 inline void bind_prune_rfi(py::module& m) {
     using algorithms::kBirdieAccelPad;
@@ -106,7 +134,11 @@ inline void bind_prune_rfi(py::module& m) {
                             "grid.")
         .def(py::init([](double f_lo, double f_hi, double a_lo, double a_hi) {
                  return ParamWindow{
-                     .f_lo = f_lo, .f_hi = f_hi, .a_lo = a_lo, .a_hi = a_hi,};
+                     .f_lo = f_lo,
+                     .f_hi = f_hi,
+                     .a_lo = a_lo,
+                     .a_hi = a_hi,
+                 };
              }),
              py::arg("f_lo"), py::arg("f_hi"),
              py::arg("a_lo") = std::numeric_limits<double>::lowest(),
@@ -126,36 +158,35 @@ inline void bind_prune_rfi(py::module& m) {
                                "search (pulsar mask, early harvesting, "
                                "stage-consistency veto). All mechanisms are "
                                "opt-in.")
-        .def(py::init([](std::vector<ParamWindow> pulsar_mask,
-                         SizeType n_harmonics, std::vector<float> harvest_scheme,
-                         double harvest_mask_ntiles, SizeType max_harvests,
-                         bool harvest_store_folds, bool impulsive_veto,
-                         double impulsive_kappa, SizeType impulsive_min_level,
-                         float impulsive_min_snr) {
-                 PruneRFIConfig cfg;
-                 cfg.pulsar_mask         = std::move(pulsar_mask);
-                 cfg.n_harmonics         = n_harmonics;
-                 cfg.harvest_scheme      = std::move(harvest_scheme);
-                 cfg.harvest_mask_ntiles = harvest_mask_ntiles;
-                 cfg.max_harvests        = max_harvests;
-                 cfg.harvest_store_folds = harvest_store_folds;
-                 cfg.impulsive_veto      = impulsive_veto;
-                 cfg.impulsive_kappa     = impulsive_kappa;
-                 cfg.impulsive_min_level = impulsive_min_level;
-                 cfg.impulsive_min_snr   = impulsive_min_snr;
-                 return cfg;
-             }),
-             py::kw_only(),
-             py::arg("pulsar_mask")         = std::vector<ParamWindow>(),
-             py::arg("n_harmonics")         = 0U,
-             py::arg("harvest_scheme")      = std::vector<float>(),
-             py::arg("harvest_mask_ntiles") = 4.0,
-             py::arg("max_harvests")        = 4096U,
-             py::arg("harvest_store_folds") = true,
-             py::arg("impulsive_veto")      = false,
-             py::arg("impulsive_kappa")     = 6.0,
-             py::arg("impulsive_min_level") = 6U,
-             py::arg("impulsive_min_snr")   = 8.0F)
+        .def(
+            py::init([](std::vector<ParamWindow> pulsar_mask,
+                        SizeType n_harmonics, std::vector<float> harvest_scheme,
+                        double harvest_mask_ntiles, SizeType max_harvests,
+                        bool harvest_store_folds, bool impulsive_veto,
+                        double impulsive_kappa, SizeType impulsive_min_level,
+                        float impulsive_min_snr) {
+                PruneRFIConfig cfg;
+                cfg.pulsar_mask         = std::move(pulsar_mask);
+                cfg.n_harmonics         = n_harmonics;
+                cfg.harvest_scheme      = std::move(harvest_scheme);
+                cfg.harvest_mask_ntiles = harvest_mask_ntiles;
+                cfg.max_harvests        = max_harvests;
+                cfg.harvest_store_folds = harvest_store_folds;
+                cfg.impulsive_veto      = impulsive_veto;
+                cfg.impulsive_kappa     = impulsive_kappa;
+                cfg.impulsive_min_level = impulsive_min_level;
+                cfg.impulsive_min_snr   = impulsive_min_snr;
+                return cfg;
+            }),
+            py::kw_only(), py::arg("pulsar_mask") = std::vector<ParamWindow>(),
+            py::arg("n_harmonics")         = 0U,
+            py::arg("harvest_scheme")      = std::vector<float>(),
+            py::arg("harvest_mask_ntiles") = 4.0,
+            py::arg("max_harvests")        = 4096U,
+            py::arg("harvest_store_folds") = true,
+            py::arg("impulsive_veto") = false, py::arg("impulsive_kappa") = 6.0,
+            py::arg("impulsive_min_level") = 6U,
+            py::arg("impulsive_min_snr")   = 8.0F)
         .def_readwrite("pulsar_mask", &PruneRFIConfig::pulsar_mask)
         .def_readwrite("n_harmonics", &PruneRFIConfig::n_harmonics)
         .def_readwrite("harvest_scheme", &PruneRFIConfig::harvest_scheme)

@@ -17,9 +17,13 @@
 #include "loki/transforms.hpp"
 
 namespace loki {
+using algorithms::EPFreqSweep;
 using algorithms::FFAFreqSweep;
 using detection::MatchedFilter;
 using plans::FFAPlanBase;
+using regions::EPChunkConfig;
+using regions::EPChunkStats;
+using regions::EPRegionStats;
 using regions::FFARegionStats;
 using search::PulsarSearchConfig;
 
@@ -666,5 +670,83 @@ PYBIND11_MODULE(libloki, m) {
     bind_prune_rfi(m_prune);
     bind_ep_multi_pass<float>(m_prune, "EPMultiPassTime");
     bind_ep_multi_pass<ComplexType>(m_prune, "EPMultiPassFourier");
+
+    py::class_<EPChunkConfig>(m_prune, "EPChunkConfig")
+        .def_readonly("cfg", &EPChunkConfig::cfg)
+        .def_readonly("threshold_scheme", &EPChunkConfig::threshold_scheme)
+        .def_readonly("branching_pattern", &EPChunkConfig::branching_pattern)
+        .def_readonly("max_sugg", &EPChunkConfig::max_sugg)
+        .def_readonly("branch_max", &EPChunkConfig::branch_max)
+        .def_readonly("nominal_f_start", &EPChunkConfig::nominal_f_start)
+        .def_readonly("nominal_f_end", &EPChunkConfig::nominal_f_end)
+        .def_readonly("actual_f_start", &EPChunkConfig::actual_f_start)
+        .def_readonly("actual_f_end", &EPChunkConfig::actual_f_end)
+        .def_readonly("peak_complexity", &EPChunkConfig::peak_complexity)
+        .def_readonly("chunk_memory_gb", &EPChunkConfig::chunk_memory_gb)
+        .def_readonly("nsegments", &EPChunkConfig::nsegments)
+        .def_readonly("ncoords", &EPChunkConfig::ncoords)
+        .def_readonly("buffer_size", &EPChunkConfig::buffer_size)
+        .def_readonly("coord_size", &EPChunkConfig::coord_size)
+        .def_readonly("fold_size", &EPChunkConfig::fold_size);
+
+    py::class_<EPChunkStats>(m_prune, "EPChunkStats")
+        .def_readonly("chunk_id", &EPChunkStats::chunk_id)
+        .def_readonly("nominal_f_start", &EPChunkStats::nominal_f_start)
+        .def_readonly("nominal_f_end", &EPChunkStats::nominal_f_end)
+        .def_readonly("actual_f_start", &EPChunkStats::actual_f_start)
+        .def_readonly("actual_f_end", &EPChunkStats::actual_f_end)
+        .def_readonly("nominal_width", &EPChunkStats::nominal_width)
+        .def_readonly("actual_width", &EPChunkStats::actual_width)
+        .def_readonly("nbins", &EPChunkStats::nbins)
+        .def_readonly("eta", &EPChunkStats::eta)
+        .def_readonly("ncoords", &EPChunkStats::ncoords)
+        .def_readonly("max_sugg", &EPChunkStats::max_sugg)
+        .def_readonly("branch_max", &EPChunkStats::branch_max)
+        .def_readonly("peak_complexity", &EPChunkStats::peak_complexity)
+        .def_readonly("memory_gb", &EPChunkStats::memory_gb)
+        .def_readonly("overlap_fraction", &EPChunkStats::overlap_fraction);
+
+    py::class_<EPRegionStats>(m_prune, "EPRegionStats")
+        .def_property_readonly("max_sugg", &EPRegionStats::get_max_sugg)
+        .def_property_readonly("max_ncoords", &EPRegionStats::get_max_ncoords)
+        .def_property_readonly("max_branch_max",
+                               &EPRegionStats::get_max_branch_max)
+        .def_property_readonly("max_memory_gb",
+                               &EPRegionStats::get_max_memory_gb)
+        .def_property_readonly("max_buffer_size",
+                               &EPRegionStats::get_max_buffer_size)
+        .def_property_readonly("max_coord_size",
+                               &EPRegionStats::get_max_coord_size)
+        .def_property_readonly("max_fold_size",
+                               &EPRegionStats::get_max_fold_size)
+        .def_property_readonly("nchunks", &EPRegionStats::get_nchunks)
+        .def_property_readonly("chunk_stats", &EPRegionStats::get_chunk_stats);
+
+    bind_ep_region_planner<float>(m_prune, "EPRegionPlannerTime");
+    bind_ep_region_planner<ComplexType>(m_prune, "EPRegionPlannerFourier");
+
+    py::class_<EPFreqSweep>(m_prune, "EPFreqSweep")
+        .def(py::init<const PulsarSearchConfig&, bool, float, std::string_view,
+                      float, algorithms::PruneRFIConfig,
+                      const std::optional<std::filesystem::path>&,
+                      std::optional<SizeType>,
+                      std::optional<std::vector<SizeType>>>(),
+             py::arg("cfg"), py::arg("show_progress") = true,
+             py::arg("min_pd") = 0.1F, py::arg("poly_basis") = "taylor",
+             py::arg("ref_ducy")        = 0.1F,
+             py::arg("rfi_config")      = algorithms::PruneRFIConfig(),
+             py::arg("plan_cache_file") = std::nullopt,
+             py::arg("n_runs")          = std::nullopt,
+             py::arg("ref_segs")        = std::nullopt)
+        .def(
+            "execute",
+            [](EPFreqSweep& self, const PyArrayT<float>& ts_e,
+               const PyArrayT<float>& ts_v, const std::string& outdir,
+               const std::string& file_prefix) {
+                self.execute(to_span<const float>(ts_e),
+                             to_span<const float>(ts_v), outdir, file_prefix);
+            },
+            py::arg("ts_e"), py::arg("ts_v"), py::arg("outdir") = "./",
+            py::arg("file_prefix") = "test");
 }
 } // namespace loki
