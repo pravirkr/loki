@@ -96,12 +96,38 @@ def test_ffa_freq_sweep(
 def test_ffa_freq_sweep_buffer(
     pulsar_data: tuple[np.ndarray, np.ndarray],
     sweep_params: dict[str, Any],
+    tmp_path: Path,
 ) -> None:
     ts_e, ts_v = pulsar_data
     cfg = libloki.configs.PulsarSearchConfig(snr_min=SNR_MIN, **sweep_params)
     planner = libloki.plans.FFARegionPlannerFourier(cfg)
+    expected = chunk_rows(ts_e, ts_v, planner.cfgs)
+    # Room for exactly the passing candidates on top of the largest chunk
+    cfg = libloki.configs.PulsarSearchConfig(
+        snr_min=SNR_MIN,
+        max_passing_candidates=len(expected),
+        **sweep_params,
+    )
+    out = sweep_rows(ts_e, ts_v, cfg, tmp_path)
+    np.testing.assert_allclose(out, expected, rtol=1e-5)
     nscores = [
         libloki.ffa.compute_ffa_scores(ts_e, ts_v, c, quiet=True)[0].size
         for c in planner.cfgs
     ]
     np.testing.assert_equal(planner.stats.max_nscores, max(nscores))
+
+
+def test_ffa_freq_sweep_too_many_candidates(
+    pulsar_data: tuple[np.ndarray, np.ndarray],
+    sweep_params: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    ts_e, ts_v = pulsar_data
+    cfg = libloki.configs.PulsarSearchConfig(
+        snr_min=0.0,
+        max_passing_candidates=1000,
+        **sweep_params,
+    )
+    sweep = libloki.ffa.FFAFreqSweep(cfg, show_progress=False)
+    with pytest.raises(RuntimeError, match="max_passing_candidates"):
+        sweep.execute(ts_e, ts_v, outdir=str(tmp_path), file_prefix="test")

@@ -104,7 +104,8 @@ SizeType FFARegionStats::get_max_buffer_size_time() const noexcept {
     return m_use_fourier ? 2 * m_max_buffer_size : m_max_buffer_size;
 }
 SizeType FFARegionStats::get_max_scores_size() const noexcept {
-    return std::max(m_max_nscores, m_max_passing_candidates);
+    // A chunk is scored in place after the candidates that already passed
+    return m_max_nscores + m_max_passing_candidates;
 }
 SizeType FFARegionStats::get_write_param_sets_size() const noexcept {
     return kFFAFreqSweepWriteBatchSize * (m_n_params + 1); // includes width
