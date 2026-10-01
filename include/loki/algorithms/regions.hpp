@@ -62,7 +62,7 @@ public:
                    SizeType max_coord_size,
                    SizeType max_ncoords,
                    SizeType max_ffa_levels,
-                   SizeType n_widths,
+                   SizeType max_nscores,
                    SizeType n_params,
                    SizeType n_samps,
                    SizeType max_passing_candidates,
@@ -84,6 +84,8 @@ public:
     SizeType get_max_ncoords() const noexcept { return m_max_ncoords; }
     /// @brief Get the maximum number of FFA levels.
     SizeType get_max_ffa_levels() const noexcept { return m_max_ffa_levels; }
+    /// @brief Get the maximum number of scores (ncoords x widths) in a chunk.
+    SizeType get_max_nscores() const noexcept { return m_max_nscores; }
     /// @brief Get the maximum size of the FFA workspace buffer (time domain).
     SizeType get_max_buffer_size_time() const noexcept;
     /// @brief Get the maximum size of the scores storage.
@@ -110,7 +112,7 @@ private:
     SizeType m_max_coord_size;
     SizeType m_max_ncoords; // maximum number of coordinates in the last level
     SizeType m_max_ffa_levels;
-    SizeType m_n_widths;
+    SizeType m_max_nscores; // maximum number of scores in a chunk
     SizeType m_n_params;
     SizeType m_n_samps; // ts_e.size()
     SizeType m_max_passing_candidates;

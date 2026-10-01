@@ -23,6 +23,7 @@ struct ChunkEval {
     SizeType coord_size;
     SizeType ncoords;
     SizeType ffa_levels;
+    SizeType nscores;
     double chunk_only_memory_gb; // For logging/stats.
     double allocated_memory_gb;  // With accumulated maxima
 };
@@ -82,7 +83,7 @@ FFARegionStats::FFARegionStats(SizeType max_buffer_size,
                                SizeType max_coord_size,
                                SizeType max_ncoords,
                                SizeType max_ffa_levels,
-                               SizeType n_widths,
+                               SizeType max_nscores,
                                SizeType n_params,
                                SizeType n_samps,
                                SizeType max_passing_candidates,
@@ -92,7 +93,7 @@ FFARegionStats::FFARegionStats(SizeType max_buffer_size,
       m_max_coord_size(max_coord_size),
       m_max_ncoords(max_ncoords),
       m_max_ffa_levels(max_ffa_levels),
-      m_n_widths(n_widths),
+      m_max_nscores(max_nscores),
       m_n_params(n_params),
       m_n_samps(n_samps),
       m_max_passing_candidates(max_passing_candidates),
@@ -103,7 +104,7 @@ SizeType FFARegionStats::get_max_buffer_size_time() const noexcept {
     return m_use_fourier ? 2 * m_max_buffer_size : m_max_buffer_size;
 }
 SizeType FFARegionStats::get_max_scores_size() const noexcept {
-    return std::max(m_max_ncoords * m_n_widths, m_max_passing_candidates);
+    return std::max(m_max_nscores, m_max_passing_candidates);
 }
 SizeType FFARegionStats::get_write_param_sets_size() const noexcept {
     return kFFAFreqSweepWriteBatchSize * (m_n_params + 1); // includes width
@@ -257,16 +258,17 @@ private:
         SizeType max_coord_size{};
         SizeType max_ncoords{};
         SizeType max_ffa_levels{};
+        SizeType max_nscores{};
         for (const auto& region : ffa_regions) {
-            subdivide_region_by_memory(region.f_start, region.f_end,
-                                       region.nbins, region.eta, max_drift,
-                                       max_buffer_size, max_coord_size,
-                                       max_ncoords, max_ffa_levels);
+            subdivide_region_by_memory(
+                region.f_start, region.f_end, region.nbins, region.eta,
+                max_drift, max_buffer_size, max_coord_size, max_ncoords,
+                max_ffa_levels, max_nscores);
         }
         m_stats = FFARegionStats(
             max_buffer_size, max_coord_size, max_ncoords, max_ffa_levels,
-            m_base_cfg.get_n_scoring_widths(), m_base_cfg.get_nparams(),
-            m_base_cfg.get_nsamps(), m_base_cfg.get_max_passing_candidates(),
+            max_nscores, m_base_cfg.get_nparams(), m_base_cfg.get_nsamps(),
+            m_base_cfg.get_max_passing_candidates(),
             m_base_cfg.get_use_fourier(), m_use_gpu);
 
         // Log summary statistics
@@ -281,7 +283,8 @@ private:
                                     SizeType& max_buffer_size,
                                     SizeType& max_coord_size,
                                     SizeType& max_ncoords,
-                                    SizeType& max_ffa_levels) {
+                                    SizeType& max_ffa_levels,
+                                    SizeType& max_nscores) {
         if (f_end <= f_start) {
             return; // Empty or inverted region; nothing to do.
         }
@@ -315,12 +318,12 @@ private:
             std::max(kAbsoluteToleranceHz, kRelativeTolerance * region_span);
 
         auto stats_for = [&](SizeType buf, SizeType coord, SizeType nc,
-                             SizeType lv) {
+                             SizeType lv, SizeType ns) {
             return FFARegionStats{buf,
                                   coord,
                                   nc,
                                   lv,
-                                  m_base_cfg.get_n_scoring_widths(),
+                                  ns,
                                   m_base_cfg.get_nparams(),
                                   m_base_cfg.get_nsamps(),
                                   m_base_cfg.get_max_passing_candidates(),
@@ -355,16 +358,17 @@ private:
             const SizeType coord = plan.get_coord_size();
             const SizeType nc    = plan.get_ncoords().back();
             const SizeType lv    = plan.get_n_levels();
+            const SizeType ns    = nc * cfg.get_n_scoring_widths();
 
             const double chunk_only_gb =
-                stats_for(buf, coord, nc, lv).get_freq_sweep_memory_usage();
+                stats_for(buf, coord, nc, lv, ns).get_freq_sweep_memory_usage();
 
             // Workspace is sized by max over all chunks; fit must use that.
             const double allocated_gb =
-                stats_for(std::max(max_buffer_size, buf),
-                          std::max(max_coord_size, coord),
-                          std::max(max_ncoords, nc),
-                          std::max(max_ffa_levels, lv))
+                stats_for(
+                    std::max(max_buffer_size, buf),
+                    std::max(max_coord_size, coord), std::max(max_ncoords, nc),
+                    std::max(max_ffa_levels, lv), std::max(max_nscores, ns))
                     .get_freq_sweep_memory_usage();
 
             return ChunkEval{.cfg                  = std::move(cfg),
@@ -372,6 +376,7 @@ private:
                              .coord_size           = coord,
                              .ncoords              = nc,
                              .ffa_levels           = lv,
+                             .nscores              = ns,
                              .chunk_only_memory_gb = chunk_only_gb,
                              .allocated_memory_gb  = allocated_gb};
         };
@@ -511,6 +516,7 @@ private:
             max_coord_size  = std::max(max_coord_size, eval.coord_size);
             max_ncoords     = std::max(max_ncoords, eval.ncoords);
             max_ffa_levels  = std::max(max_ffa_levels, eval.ffa_levels);
+            max_nscores     = std::max(max_nscores, eval.nscores);
 
             current_f_end = nominal_start;
         }

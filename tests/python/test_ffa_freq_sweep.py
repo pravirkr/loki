@@ -91,3 +91,17 @@ def test_ffa_freq_sweep(
     np.testing.assert_allclose(out[:, 2], expected[:, 2], rtol=1e-5)
     best_freq = out[np.argmax(out[:, 2]), 0]
     np.testing.assert_allclose(best_freq, F_INJ, atol=1 / (NSAMPS * TSAMP))
+
+
+def test_ffa_freq_sweep_buffer(
+    pulsar_data: tuple[np.ndarray, np.ndarray],
+    sweep_params: dict[str, Any],
+) -> None:
+    ts_e, ts_v = pulsar_data
+    cfg = libloki.configs.PulsarSearchConfig(snr_min=SNR_MIN, **sweep_params)
+    planner = libloki.plans.FFARegionPlannerFourier(cfg)
+    nscores = [
+        libloki.ffa.compute_ffa_scores(ts_e, ts_v, c, quiet=True)[0].size
+        for c in planner.cfgs
+    ]
+    np.testing.assert_equal(planner.stats.max_nscores, max(nscores))

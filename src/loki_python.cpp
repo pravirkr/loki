@@ -499,7 +499,7 @@ PYBIND11_MODULE(libloki, m) {
                       SizeType, SizeType, SizeType, bool, bool>(),
              py::arg("max_buffer_size"), py::arg("max_coord_size"),
              py::arg("max_ncoords"), py::arg("max_ffa_levels"),
-             py::arg("n_widths"), py::arg("n_params"), py::arg("n_samps"),
+             py::arg("max_nscores"), py::arg("n_params"), py::arg("n_samps"),
              py::arg("max_passing_candidates"), py::arg("use_fourier"),
              py::arg("use_gpu") = false)
         .def_property_readonly("max_buffer_size",
@@ -509,6 +509,7 @@ PYBIND11_MODULE(libloki, m) {
         .def_property_readonly("max_ncoords", &FFARegionStats::get_max_ncoords)
         .def_property_readonly("max_ffa_levels",
                                &FFARegionStats::get_max_ffa_levels)
+        .def_property_readonly("max_nscores", &FFARegionStats::get_max_nscores)
         .def_property_readonly("max_buffer_size_time",
                                &FFARegionStats::get_max_buffer_size_time)
         .def_property_readonly("max_scores_size",
