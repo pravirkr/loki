@@ -10,6 +10,7 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <highfive/highfive.hpp>
 
 #include "loki/algorithms/ep_regions.hpp"
@@ -200,7 +201,11 @@ TEST_CASE("EPFreqSweep executes sweep and writes unified results file",
     std::error_code ec;
     std::filesystem::remove_all(outdir, ec);
 
-    const auto cfg          = make_test_cfg(4.0, 140.0, 142.0);
+    // 140-142 Hz is one FFA region, 70-145 Hz is two (32 and 64 bins)
+    const auto [f_min, f_max, nregions] = GENERATE(
+        table<double, double, SizeType>({{140.0, 142.0, 1}, {70.0, 145.0, 2}}));
+    CAPTURE(f_min, f_max);
+    const auto cfg          = make_test_cfg(4.0, f_min, f_max);
     const auto [ts_e, ts_v] = make_noise_series(cfg.get_nsamps());
 
     // Run only 1 reference segment for fast test execution
@@ -231,6 +236,7 @@ TEST_CASE("EPFreqSweep executes sweep and writes unified results file",
     REQUIRE(h5.exist("chunks"));
     auto chunks_grp = h5.getGroup("chunks");
 
+    std::set<SizeType> region_nbins;
     for (SizeType i = 0; i < nchunks; ++i) {
         const auto chunk_name = std::format("chunk_{:04d}", i);
         REQUIRE(chunks_grp.exist(chunk_name));
@@ -242,7 +248,12 @@ TEST_CASE("EPFreqSweep executes sweep and writes unified results file",
         CHECK(chunk_grp.exist("threshold_scheme"));
         CHECK(chunk_grp.exist("branching_pattern"));
         CHECK(chunk_grp.exist("runs"));
+
+        SizeType nbins{};
+        chunk_grp.getAttribute("nbins").read(nbins);
+        region_nbins.insert(nbins);
     }
+    CHECK(region_nbins.size() == nregions);
 
     // Verify temporary per-chunk directory was cleaned up
     const auto tmp_dir = outdir / std::format(".tmp_{}_ep_chunks", file_prefix);
