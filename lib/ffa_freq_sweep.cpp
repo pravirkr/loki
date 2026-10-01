@@ -213,14 +213,15 @@ private:
     float save_results(cands::FFAResultWriter& result_writer) {
         const auto n_params         = m_base_cfg.get_nparams();
         const SizeType total_params = n_params + 1;
-        const auto& scoring_widths  = m_base_cfg.get_scoring_widths();
-        const SizeType n_widths     = scoring_widths.size();
 
         float accumulated_flops        = 0.0F;
         SizeType global_passing_offset = 0; // Track cumulative offset
         const auto& ffa_regions_cfgs   = m_region_planner.get_cfgs();
         for (SizeType i = 0; i < ffa_regions_cfgs.size(); ++i) {
             const search::PulsarSearchConfig& cfg_cur = ffa_regions_cfgs[i];
+            // Scores are laid out with this chunk's widths
+            const auto& scoring_widths = cfg_cur.get_scoring_widths();
+            const SizeType n_widths    = scoring_widths.size();
             plans::FFAPlan<FoldType> ffa_plan(cfg_cur);
             const auto& param_limits = cfg_cur.get_param_limits();
             const auto& param_counts = ffa_plan.get_param_counts().back();
