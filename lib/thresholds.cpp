@@ -1288,11 +1288,9 @@ private:
 
 #pragma omp parallel num_threads(m_nthreads)
         {
-            static thread_local std::unique_ptr<ThreadLocalBuffers> buffers_ptr;
-            if (!buffers_ptr) {
-                buffers_ptr =
-                    std::make_unique<ThreadLocalBuffers>(m_nbins, m_ntrials);
-            }
+            // Not thread_local: it would keep an earlier scheme's sizes
+            auto buffers_ptr =
+                std::make_unique<ThreadLocalBuffers>(m_nbins, m_ntrials);
 
             auto& thread_timers = segment_stats.get_thread_local();
 #pragma omp for schedule(dynamic)
