@@ -3,6 +3,7 @@
 #include <format>
 #include <optional>
 #include <random>
+#include <set>
 #include <string>
 #include <thread>
 #include <utility>
@@ -82,6 +83,21 @@ TEST_CASE("EPRegionPlanner plans valid memory-bounded chunks",
         CHECK(!chunk.branching_pattern.empty());
         CHECK(chunk.peak_complexity >= 1.0);
     }
+}
+
+TEST_CASE("EPRegionPlanner plans a band spanning two FFA regions",
+          "[ep_freq_sweep]") {
+    // 70-145 Hz spans two period octaves: 32 bins above 72.5 Hz, 64 below
+    const auto cfg = make_test_cfg(4.0, 70.0, 145.0);
+    EPRegionPlanner<float> planner(cfg, /*min_pd=*/0.1F, "taylor",
+                                   /*ref_ducy=*/0.1F);
+
+    std::set<SizeType> region_nbins;
+    for (const auto& chunk : planner.get_chunk_cfgs()) {
+        region_nbins.insert(chunk.cfg.get_nbins());
+        CHECK(!chunk.threshold_scheme.empty());
+    }
+    CHECK(region_nbins == std::set<SizeType>{32U, 64U});
 }
 
 TEST_CASE("EPRegionPlanner HDF5 cache round-trip and validation",
