@@ -12,9 +12,12 @@
 #include "loki/core/taylor_ffa.hpp"          // IWYU pragma: export
 #include "loki/detection/score.hpp"          // IWYU pragma: export
 #include "loki/detection/thresholds.hpp"     // IWYU pragma: export
+#include "loki/io/timeseries.hpp"            // IWYU pragma: export
 #include "loki/pipelines/ep_freq_sweep.hpp"  // IWYU pragma: export
 #include "loki/pipelines/ffa_freq_sweep.hpp" // IWYU pragma: export
 #include "loki/search/configs.hpp"           // IWYU pragma: export
+#include "loki/simulation/modulate.hpp"      // IWYU pragma: export
+#include "loki/simulation/pulse.hpp"         // IWYU pragma: export
 #include "loki/simulation/simulation.hpp"    // IWYU pragma: export
 #include "loki/utils/fft.hpp"                // IWYU pragma: export
 #include "loki/utils/world_tree.hpp"         // IWYU pragma: export

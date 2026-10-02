@@ -10,8 +10,8 @@
 #      for STATIC loki they are linked PUBLIC so consumers can resolve symbols.
 #   4. fmt and spdlog are CPM-pinned header-only libraries (single translation
 #      unit, no version skew with libc++ std::format instantiations).
-#   5. CLI11, xsimd, Boost::math, BS_thread_pool, tomlplusplus, and HighFive are
-#      header-only internal dependencies -> BUILD_INTERFACE only.
+#   5. CLI11, xsimd, Boost::math, BS_thread_pool, tomlplusplus, HighFive, and
+#      psrio are header-only internal dependencies -> BUILD_INTERFACE only.
 #=============================================================================
 
 # -----------------------------------------------------------------------
@@ -30,6 +30,21 @@ if(LOKI_USE_SYSTEM_DEPS)
 else()
   message(STATUS "LOKI_USE_SYSTEM_DEPS=OFF: using pinned CPM dependencies.")
 endif()
+
+# psrio — header-only SIGPROC/PRESTO reader. CPM adds the subdirectory so the
+# psrio::psrio interface target (include path and C++20) is available.
+CPMAddPackage(
+  NAME psrio
+  VERSION 0.2.0
+  URL https://github.com/pravirkr/psrio/archive/refs/tags/v0.2.0.tar.gz
+  OPTIONS "PSRIO_BUILD_TESTS OFF"
+  EXCLUDE_FROM_ALL YES
+  SYSTEM YES
+)
+if(NOT TARGET psrio::psrio)
+  message(FATAL_ERROR "psrio::psrio target not available after CPM setup.")
+endif()
+
 
 # fmt — keep version in sync with spdlog's expected fmt release.
 CPMAddPackage(

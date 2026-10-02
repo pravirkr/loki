@@ -73,6 +73,7 @@ target_link_libraries(
           $<BUILD_INTERFACE:HighFive::HighFive>
           $<BUILD_INTERFACE:fmt::fmt-header-only>
           $<BUILD_INTERFACE:spdlog::spdlog_header_only>
+          $<BUILD_INTERFACE:psrio::psrio>
 )
 
 # System/runtime deps: PRIVATE for shared loki, PUBLIC for static loki.
