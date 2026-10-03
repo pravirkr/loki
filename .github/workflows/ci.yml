@@ -149,4 +149,4 @@ jobs:
             -DLOKI_BUILD_TESTING=OFF
 
       - name: Run Python tests (CPU)
-        run: uv run pytest tests/python/test_cpu_match.py
+        run: uv run pytest tests/python/test_cpu_match.py tests/python/test_ffa_recovery.py

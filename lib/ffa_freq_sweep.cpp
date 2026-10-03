@@ -71,8 +71,6 @@ public:
         m_width_batch.resize(regions::kFFAFreqSweepWriteBatchSize);
         m_nbins_batch.resize(regions::kFFAFreqSweepWriteBatchSize);
         m_fold_time.resize(planner_stats.get_max_buffer_size_time());
-        m_filtered_indices.resize(
-            planner_stats.get_max_scores_scratch_size());
         validate_scratch_sizes();
 
         if (m_base_cfg.get_use_boxcar_kadane()) {
@@ -166,7 +164,6 @@ private:
     SizeType m_total_passing_scores{};
     // Per-chunk raw score scratch; overwritten by every chunk.
     std::vector<float> m_scores_chunk;
-    std::vector<SizeType> m_filtered_indices;
     std::vector<double> m_write_param_sets_batch;
     std::vector<std::uint16_t> m_width_batch;
     std::vector<std::uint16_t> m_nbins_batch;
@@ -223,15 +220,17 @@ private:
         // accumulator is separate, so this span never depends on how many
         // candidates have already survived.
         const auto scores_span = std::span(m_scores_chunk).first(n_scores);
-        detection::BoxcarWidthsCache width_cache(dec.widths, dec.nbins);
-        const SizeType n_passing = detection::score_and_filter_max_with_cache(
-            std::span(m_fold_time).first(fold_size_time), scores_span,
-            std::span(m_filtered_indices).first(dec.ncoords), snr_min,
-            dec.ncoords, dec.nbins, width_cache);
+        // One score per (coordinate, boxcar width). The index is
+        // coord * n_widths + width, which flush_candidates decodes.
+        detection::snr_boxcar_3d(std::span(m_fold_time).first(fold_size_time),
+                                 dec.widths, scores_span, dec.ncoords,
+                                 dec.nbins, cfg.get_nthreads());
 
-        // Survivors are in ascending profile index order (serial filter scan).
-        for (SizeType pass_idx = 0; pass_idx < n_passing; ++pass_idx) {
-            const SizeType score_idx = m_filtered_indices[pass_idx];
+        SizeType n_passing = 0;
+        for (SizeType score_idx = 0; score_idx < n_scores; ++score_idx) {
+            if (scores_span[score_idx] < snr_min) {
+                continue;
+            }
             if (m_cands.is_full()) {
                 ffa_timer_stats["score"] += timer.stop();
                 timer.start();
@@ -244,6 +243,7 @@ private:
             m_cands.push(scores_span[score_idx],
                          static_cast<uint32_t>(score_idx),
                          static_cast<uint32_t>(region_id));
+            ++n_passing;
         }
         m_total_passing_scores += n_passing;
 
