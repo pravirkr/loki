@@ -40,3 +40,21 @@ target_link_libraries(
 )
 
 catch_discover_tests(${LOKI_TEST_TARGET})
+
+if(LOKI_BUILD_APPLICATIONS AND TARGET loki_app)
+  set(LOKI_FFA_CLI_CONFIG ${CMAKE_CURRENT_BINARY_DIR}/loki_cli_dry_run.toml)
+  file(WRITE ${LOKI_FFA_CLI_CONFIG}
+       "[search]\nf_min = 1.0\nf_max = 10.0\nnbins = 64\n[performance]\nnthreads = 1\nmax_process_memory_gb = 4.0\n"
+  )
+  add_test(
+    NAME loki_search_ffa_dry_run
+    COMMAND $<TARGET_FILE:loki_app> search ffa --config ${LOKI_FFA_CLI_CONFIG}
+            --dry-run
+  )
+  add_test(
+    NAME loki_search_ffa_bad_config
+    COMMAND $<TARGET_FILE:loki_app> search ffa --config
+            ${CMAKE_CURRENT_BINARY_DIR}/missing_ffa.toml --dry-run
+  )
+  set_tests_properties(loki_search_ffa_bad_config PROPERTIES WILL_FAIL TRUE)
+endif()

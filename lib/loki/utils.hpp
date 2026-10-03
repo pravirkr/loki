@@ -45,12 +45,6 @@ inline constexpr double kFloatEps = 1e-6; // half-up rounding
            0x7FF0000000000000ULL;
 }
 
-/// @brief True when @p score is finite and meets the detection threshold.
-[[nodiscard]] constexpr bool score_passes_threshold(float score,
-                                                    float snr_min) noexcept {
-    return is_finite(score) && score >= snr_min;
-}
-
 constexpr float to_gib(SizeType bytes) noexcept {
     return static_cast<float>(bytes) / 1024.0F / 1024.0F / 1024.0F;
 }

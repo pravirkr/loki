@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <numeric>
 #include <type_traits>
 #include <vector>
 
@@ -134,25 +133,8 @@ public:
             outdir / std::format("{}_results.h5", filebase);
         auto writer = cands::FFAResultWriter(
             result_file, cands::FFAResultWriter::Mode::kWrite);
-        cands::FFAResultMetadata meta;
-        meta.param_names  = m_base_cfg.get_param_names();
-        meta.config_toml  = std::string(config_toml);
-        meta.tsamp        = m_base_cfg.get_tsamp();
-        meta.nsamps       = m_base_cfg.get_nsamps();
-        meta.tobs         = m_base_cfg.get_tobs();
-        meta.f_min        = m_base_cfg.get_f_min();
-        meta.f_max        = m_base_cfg.get_f_max();
-        meta.snr_min      = m_base_cfg.get_snr_min();
-        meta.ducy_max     = m_base_cfg.get_ducy_max();
-        meta.wtsp         = m_base_cfg.get_wtsp();
-        meta.nbins_min    = m_base_cfg.get_nbins();
-        meta.nbins_max    = m_base_cfg.get_nbins_max();
-        meta.octave_scale = m_base_cfg.get_octave_scale();
-        meta.eta          = m_base_cfg.get_eta();
-        meta.use_fourier  = m_base_cfg.get_use_fourier();
-        meta.bseg_brute   = std::optional{m_base_cfg.get_bseg_brute()};
-        meta.bseg_ffa     = std::optional{m_base_cfg.get_bseg_ffa()};
-        writer.write_metadata(meta);
+        writer.write_metadata(
+            cands::FFAResultMetadata(m_base_cfg, config_toml));
 
         // Copy input data to device
         cudaStream_t stream = m_stream;
@@ -358,20 +340,6 @@ private:
             "passing indices copy failed");
         cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
                                     "stream synchronization failed");
-
-        std::vector<uint32_t> order(n_passing);
-        std::iota(order.begin(), order.end(), 0U);
-        std::ranges::sort(order, [&](uint32_t a, uint32_t b) {
-            return m_indices_staging[a] < m_indices_staging[b];
-        });
-        std::vector<float> scores_sorted(n_passing);
-        std::vector<uint32_t> indices_sorted(n_passing);
-        for (SizeType i = 0; i < n_passing; ++i) {
-            scores_sorted[i]  = m_scores_staging[order[i]];
-            indices_sorted[i] = m_indices_staging[order[i]];
-        }
-        m_scores_staging.swap(scores_sorted);
-        m_indices_staging.swap(indices_sorted);
 
         SizeType copied = 0;
         while (copied < n_passing) {

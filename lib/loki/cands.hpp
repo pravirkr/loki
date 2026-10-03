@@ -8,6 +8,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -15,6 +16,7 @@
 
 #include "loki/algorithms/prune_rfi.hpp"
 #include "loki/common/types.hpp"
+#include "loki/search/configs.hpp"
 #include "loki/utils/world_tree.hpp"
 
 namespace loki::cands {
@@ -76,17 +78,17 @@ struct PruneStats {
     SizeType level{};
     SizeType seg_idx{};
     float threshold{};
-    float score_min        = 0.0;
-    float score_max        = 0.0;
-    SizeType n_branches    = 1;
-    SizeType n_leaves      = 1;
+    float score_min            = 0.0;
+    float score_max            = 0.0;
+    SizeType n_branches        = 1;
+    SizeType n_leaves          = 1;
     SizeType n_leaves_resolved = 1;
-    SizeType n_leaves_phy  = 1;
-    SizeType n_leaves_surv = 1;
+    SizeType n_leaves_phy      = 1;
+    SizeType n_leaves_surv     = 1;
     // RFI-control diagnostics (all zero when the mechanisms are disabled)
-    SizeType n_leaves_masked    = 0; ///< Rejected by the pulsar mask
-    SizeType n_leaves_vetoed    = 0; ///< Rejected by the stage-consistency veto
-    SizeType n_harvested        = 0; ///< Removed from the tree by early harvest
+    SizeType n_leaves_masked = 0; ///< Rejected by the pulsar mask
+    SizeType n_leaves_vetoed = 0; ///< Rejected by the stage-consistency veto
+    SizeType n_harvested     = 0; ///< Removed from the tree by early harvest
 
     [[nodiscard]] double lb_leaves() const noexcept;
     [[nodiscard]] double lb_leaves_phys() const noexcept;
@@ -135,14 +137,14 @@ private:
 
 // Iteration stats for pruning
 struct PruneIterationStats {
-    SizeType n_leaves           = 0;
-    SizeType n_leaves_resolved  = 0;
-    SizeType n_leaves_phy       = 0;
-    SizeType n_leaves_masked    = 0;
-    SizeType n_leaves_vetoed    = 0;
-    SizeType n_harvested        = 0;
-    float score_min             = std::numeric_limits<float>::max();
-    float score_max             = std::numeric_limits<float>::lowest();
+    SizeType n_leaves          = 0;
+    SizeType n_leaves_resolved = 0;
+    SizeType n_leaves_phy      = 0;
+    SizeType n_leaves_masked   = 0;
+    SizeType n_leaves_vetoed   = 0;
+    SizeType n_harvested       = 0;
+    float score_min            = std::numeric_limits<float>::max();
+    float score_max            = std::numeric_limits<float>::lowest();
     PruneTimerStats batch_timers;
 
     void norm_scores(SizeType n_leaves_surv) {
@@ -261,6 +263,10 @@ using HarvestBufferComplex = HarvestBuffer<ComplexType>;
 
 /// Metadata written once at the start of an FFA frequency-sweep result file.
 struct FFAResultMetadata {
+    FFAResultMetadata() = default;
+    explicit FFAResultMetadata(const search::FFASearchConfig& cfg,
+                               std::string_view config_toml = {});
+
     std::vector<std::string> param_names;
     std::string config_toml;
     double tsamp{};

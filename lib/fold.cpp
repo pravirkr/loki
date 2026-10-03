@@ -113,6 +113,7 @@ private:
     void compute_phase_time_domain() {
         const SizeType total_buckets = m_nfreqs * m_nbins;
         std::vector<SizeType> counts(total_buckets, 0);
+#pragma omp parallel for schedule(static) num_threads(m_nthreads)
         for (SizeType ifreq = 0; ifreq < m_nfreqs; ++ifreq) {
             const auto freq_offset_in = ifreq * m_segment_len;
             for (SizeType isamp = 0; isamp < m_segment_len; ++isamp) {
@@ -131,12 +132,14 @@ private:
         }
         // Second pass: fill the indices
         std::vector<SizeType> writers = m_offsets; // Copy for writing positions
+#pragma omp parallel for schedule(static) num_threads(m_nthreads)
         for (SizeType ifreq = 0; ifreq < m_nfreqs; ++ifreq) {
             const auto freq_offset_in = ifreq * m_segment_len;
             for (SizeType isamp = 0; isamp < m_segment_len; ++isamp) {
                 const auto iphase     = m_phase_map[freq_offset_in + isamp];
                 const auto bucket_idx = (ifreq * m_nbins) + iphase;
-                m_bucket_indices[writers[bucket_idx]++] = isamp;
+                m_bucket_indices[writers[bucket_idx]++] =
+                    static_cast<uint32_t>(isamp);
             }
         }
     }

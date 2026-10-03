@@ -1,6 +1,7 @@
 #include "loki/search/configs.hpp"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cmath>
 #include <cstdint>
@@ -8,6 +9,7 @@
 #include <format>
 #include <fstream>
 #include <optional>
+#include <ranges>
 #include <span>
 #include <string>
 #include <string_view>
@@ -24,6 +26,100 @@
 #include "loki/utils.hpp"
 
 namespace loki::search {
+
+namespace {
+
+[[nodiscard]] bool is_allowed_key(std::string_view key,
+                                  std::span<const std::string_view> allowed) {
+    return std::ranges::any_of(
+        allowed, [&](std::string_view candidate) { return key == candidate; });
+}
+
+void collect_unknown_keys(const toml::table& table,
+                          std::span<const std::string_view> allowed,
+                          std::string_view table_path,
+                          std::vector<std::string>& errors) {
+    for (const auto& [key, _] : table) {
+        if (!is_allowed_key(key.str(), allowed)) {
+            errors.push_back(std::format("{}.{}: unknown key", table_path,
+                                         key.str()));
+        }
+    }
+}
+
+void validate_ffa_toml_document(const toml::table& root) {
+    static constexpr std::array kTopLevel{
+        std::string_view{"input"}, std::string_view{"search"},
+        std::string_view{"performance"}, std::string_view{"output"},
+        std::string_view{"cuda"}};
+    static constexpr std::array kInputKeys{
+        std::string_view{"timeseries"}, std::string_view{"preprocess"},
+        std::string_view{"filter_window"}, std::string_view{"nsamps"},
+        std::string_view{"tsamp"}, std::string_view{"dt"}};
+    static constexpr std::array kSearchKeys{
+        std::string_view{"f_min"}, std::string_view{"f_max"},
+        std::string_view{"acc_min"}, std::string_view{"acc_max"},
+        std::string_view{"jerk_min"}, std::string_view{"jerk_max"},
+        std::string_view{"nbins"}, std::string_view{"eta"},
+        std::string_view{"ducy_max"}, std::string_view{"wtsp"},
+        std::string_view{"snr_min"}, std::string_view{"use_fourier"},
+        std::string_view{"use_boxcar_kadane"}};
+    static constexpr std::array kPerformanceKeys{
+        std::string_view{"nthreads"},
+        std::string_view{"max_process_memory_gb"},
+        std::string_view{"octave_scale"}, std::string_view{"nbins_max"},
+        std::string_view{"nbins_min_lossy_bf"}, std::string_view{"bseg_brute"},
+        std::string_view{"bseg_ffa"},
+        std::string_view{"max_passing_candidates"},
+        std::string_view{"use_cuda"}, std::string_view{"device_id"}};
+    static constexpr std::array kOutputKeys{std::string_view{"outdir"},
+                                              std::string_view{"prefix"}};
+    static constexpr std::array kCudaKeys{std::string_view{"enable"},
+                                          std::string_view{"device_id"}};
+
+    std::vector<std::string> errors;
+    for (const auto& [key, _] : root) {
+        if (!is_allowed_key(key.str(), kTopLevel)) {
+            errors.push_back(
+                std::format("unknown top-level key '{}'", key.str()));
+        }
+    }
+    if (const auto* input = root["input"].as_table()) {
+        collect_unknown_keys(*input, kInputKeys, "input", errors);
+    }
+    if (const auto* search = root["search"].as_table()) {
+        collect_unknown_keys(*search, kSearchKeys, "search", errors);
+    }
+    if (const auto* perf = root["performance"].as_table()) {
+        collect_unknown_keys(*perf, kPerformanceKeys, "performance", errors);
+    }
+    if (const auto* output = root["output"].as_table()) {
+        collect_unknown_keys(*output, kOutputKeys, "output", errors);
+    }
+    if (const auto* cuda = root["cuda"].as_table()) {
+        collect_unknown_keys(*cuda, kCudaKeys, "cuda", errors);
+    }
+    if (!errors.empty()) {
+        std::string message = errors.front();
+        for (std::size_t i = 1; i < errors.size(); ++i) {
+            message += "; ";
+            message += errors[i];
+        }
+        throw std::invalid_argument(
+            std::format("Invalid FFA TOML config: {}", message));
+    }
+}
+
+[[nodiscard]] int64_t require_non_negative_int64(int64_t value,
+                                                 std::string_view path) {
+    if (value < 0) {
+        throw std::invalid_argument(
+            std::format("{} must be non-negative (got {})", path, value));
+    }
+    return value;
+}
+
+} // namespace
 
 // ==============================================================================
 // FFATomlConfig Implementation
@@ -128,6 +224,7 @@ void FFATomlConfig::write_default(const std::filesystem::path& path) {
 FFATomlConfig FFATomlConfig::from_string(std::string_view toml_content) {
     try {
         const toml::table tbl = toml::parse(toml_content);
+        validate_ffa_toml_document(tbl);
         FFATomlConfig cfg;
 
         // [input] table
@@ -142,7 +239,8 @@ FFATomlConfig FFATomlConfig::from_string(std::string_view toml_content) {
                 cfg.filter_window = *val;
             }
             if (auto val = (*input)["nsamps"].value<int64_t>()) {
-                cfg.nsamps = static_cast<SizeType>(*val);
+                cfg.nsamps = static_cast<SizeType>(
+                    require_non_negative_int64(*val, "input.nsamps"));
             }
             if (auto val = (*input)["tsamp"].value<double>()) {
                 cfg.tsamp = *val;
@@ -172,7 +270,8 @@ FFATomlConfig FFATomlConfig::from_string(std::string_view toml_content) {
                 cfg.jerk_max = *val;
             }
             if (auto val = (*search)["nbins"].value<int64_t>()) {
-                cfg.nbins = static_cast<SizeType>(*val);
+                cfg.nbins = static_cast<SizeType>(
+                    require_non_negative_int64(*val, "search.nbins"));
             }
             if (auto val = (*search)["eta"].value<double>()) {
                 cfg.eta = *val;
@@ -197,7 +296,8 @@ FFATomlConfig FFATomlConfig::from_string(std::string_view toml_content) {
         // [performance] table
         if (const auto* perf = tbl["performance"].as_table()) {
             if (auto val = (*perf)["nthreads"].value<int64_t>()) {
-                cfg.nthreads = static_cast<int>(*val);
+                cfg.nthreads = static_cast<int>(
+                    require_non_negative_int64(*val, "performance.nthreads"));
             }
             if (auto val = (*perf)["max_process_memory_gb"].value<double>()) {
                 cfg.max_process_memory_gb = *val;
@@ -206,25 +306,33 @@ FFATomlConfig FFATomlConfig::from_string(std::string_view toml_content) {
                 cfg.octave_scale = *val;
             }
             if (auto val = (*perf)["nbins_max"].value<int64_t>()) {
-                cfg.nbins_max = static_cast<SizeType>(*val);
+                cfg.nbins_max = static_cast<SizeType>(
+                    require_non_negative_int64(*val, "performance.nbins_max"));
             }
             if (auto val = (*perf)["nbins_min_lossy_bf"].value<int64_t>()) {
-                cfg.nbins_min_lossy_bf = static_cast<SizeType>(*val);
+                cfg.nbins_min_lossy_bf = static_cast<SizeType>(
+                    require_non_negative_int64(*val,
+                                               "performance.nbins_min_lossy_bf"));
             }
             if (auto val = (*perf)["bseg_brute"].value<int64_t>()) {
-                cfg.bseg_brute = static_cast<SizeType>(*val);
+                cfg.bseg_brute = static_cast<SizeType>(
+                    require_non_negative_int64(*val, "performance.bseg_brute"));
             }
             if (auto val = (*perf)["bseg_ffa"].value<int64_t>()) {
-                cfg.bseg_ffa = static_cast<SizeType>(*val);
+                cfg.bseg_ffa = static_cast<SizeType>(
+                    require_non_negative_int64(*val, "performance.bseg_ffa"));
             }
             if (auto val = (*perf)["max_passing_candidates"].value<int64_t>()) {
-                cfg.max_passing_candidates = static_cast<SizeType>(*val);
+                cfg.max_passing_candidates = static_cast<SizeType>(
+                    require_non_negative_int64(
+                        *val, "performance.max_passing_candidates"));
             }
             if (auto val = (*perf)["use_cuda"].value<bool>()) {
                 cfg.use_cuda = *val;
             }
             if (auto val = (*perf)["device_id"].value<int64_t>()) {
-                cfg.device_id = static_cast<int>(*val);
+                cfg.device_id = static_cast<int>(
+                    require_non_negative_int64(*val, "performance.device_id"));
             }
         }
 
@@ -244,7 +352,8 @@ FFATomlConfig FFATomlConfig::from_string(std::string_view toml_content) {
                 cfg.use_cuda = *val;
             }
             if (auto val = (*cuda)["device_id"].value<int64_t>()) {
-                cfg.device_id = static_cast<int>(*val);
+                cfg.device_id = static_cast<int>(
+                    require_non_negative_int64(*val, "cuda.device_id"));
             }
         }
 
@@ -303,6 +412,12 @@ FFATomlConfig::to_search_config(std::optional<SizeType> override_nsamps,
         limits.push_back({.min = f_min, .max = f_max});
     } else {
         limits.push_back({.min = f_min, .max = f_max});
+    }
+
+    if (use_boxcar_kadane) {
+        throw std::invalid_argument(
+            "use_boxcar_kadane is not supported for FFA frequency sweep "
+            "(multi-width boxcar decoding is required)");
     }
 
     const int effective_nthreads =

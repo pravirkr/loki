@@ -6,18 +6,37 @@
 #include <cmath>
 #include <cstdint>
 #include <iterator>
+#include <format>
 #include <memory>
 #include <set>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include <psrio/psrio.hpp>
 
+#include "loki/common/types.hpp"
 #include "loki/exceptions.hpp"
+#include "loki/utils.hpp"
 
 namespace loki::io {
 namespace {
+
+void validate_ingress_arrays(std::span<const float> ts_e,
+                             std::span<const float> ts_v) {
+    for (SizeType i = 0; i < ts_e.size(); ++i) {
+        if (!utils::is_finite(ts_e[i])) {
+            throw std::invalid_argument(
+                std::format("ts_e[{}] is not finite", i));
+        }
+        if (!utils::is_finite(ts_v[i]) || ts_v[i] <= 0.0F) {
+            throw std::invalid_argument(
+                std::format("ts_v[{}] must be finite and positive (got {})", i,
+                            ts_v[i]));
+        }
+    }
+}
 
 constexpr double kIqrScale = 1.349;
 constexpr double kMadScale = 1.4826;
@@ -260,6 +279,7 @@ TimeSeries::TimeSeries(std::vector<float> ts_e,
                        "ts_e and ts_v must have the same length");
     error_check::check(!ts_e.empty(), "timeseries is empty");
     error_check::check(is_finite_double(dt) && dt > 0.0, "dt must be positive");
+    validate_ingress_arrays(ts_e, ts_v);
     m_impl->header.tsamp     = dt;
     m_impl->header.nsamples  = ts_e.size();
     m_impl->header.nbits     = 32;

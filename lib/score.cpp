@@ -138,7 +138,7 @@ void snr_boxcar_impl(const float* __restrict__ folds,
                 float* __restrict__ fold_work_ptr  = fold_work.data();
                 for (SizeType j = 0; j < nbins; ++j) {
                     const float v = ts_v_ptr[j];
-                    if (v <= 0.0F || !utils::is_finite(v)) {
+                    if (v <= 0.0F) {
                         fold_work_ptr[j] = 0.0F;
                     } else {
                         fold_work_ptr[j] = ts_e_ptr[j] / std::sqrt(v);
@@ -200,7 +200,7 @@ snr_boxcar_3d_max_with_cache_impl(const float* __restrict__ arr,
         const float* __restrict__ ts_v_ptr = arr + base_idx + nbins;
         for (SizeType j = 0; j < nbins; ++j) {
             const float v = ts_v_ptr[j];
-            if (v <= 0.0F || !utils::is_finite(v)) {
+            if (v <= 0.0F) {
                 fold_norm[j] = 0.0F;
             } else {
                 fold_norm[j] = ts_e_ptr[j] / std::sqrt(v);
@@ -218,7 +218,7 @@ snr_boxcar_3d_max_with_cache_impl(const float* __restrict__ arr,
             max_snr = std::max(max_snr, snr);
         }
         out[i] = max_snr;
-        if (do_filter && utils::score_passes_threshold(max_snr, threshold)) {
+        if (do_filter && max_snr >= threshold) {
             indices_filtered[nprofiles_passing] = i;
             ++nprofiles_passing;
         }

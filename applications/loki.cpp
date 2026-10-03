@@ -218,7 +218,7 @@ int run_simulate(double period,
     return 0;
 }
 
-enum class NsampsPolicy { kFail, kTruncate, kPad };
+enum class NsampsPolicy { kFail, kTruncate };
 
 std::string read_text_file(const std::filesystem::path& path) {
     std::ifstream in(path);
@@ -278,6 +278,7 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
     read_opts.preprocess    = toml_cfg.preprocess;
     read_opts.filter_window = toml_cfg.filter_window;
     SPDLOG_INFO("Loading timeseries from: {}", ts_path.string());
+    // FFA assumes finite ts_e and positive ts_v (enforced in TimeSeries).
     auto ts = loki::io::TimeSeries::read(ts_path, read_opts);
     SPDLOG_INFO(
         "Loaded timeseries: nsamps = {}, dt = {:.6e} s, tobs = {:.2f} s",
@@ -289,7 +290,7 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
         if (nsamps_policy == NsampsPolicy::kFail) {
             throw std::invalid_argument(std::format(
                 "Timeseries length {} is not a power of 2; use --nsamps-policy "
-                "truncate or pad",
+                "truncate",
                 actual_nsamps));
         }
         if (nsamps_policy == NsampsPolicy::kTruncate) {
@@ -298,10 +299,6 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
                 "to {}",
                 actual_nsamps, pow2_nsamps);
             actual_nsamps = pow2_nsamps;
-        } else {
-            throw std::invalid_argument(
-                "Padding to power-of-two length is not implemented yet; use "
-                "truncate");
         }
     }
 
@@ -579,15 +576,11 @@ int main(int argc, char** argv) {
     grp_search->add_flag(
         "--fourier,!--time", ffa_cfg.use_fourier,
         "Use Fourier-domain FFA folding (default) or Time-domain folding");
-    grp_search->add_flag("--kadane,!--boxcar", ffa_cfg.use_boxcar_kadane,
-                         "Use Kadane peak scoring (unsupported for FFA sweep; "
-                         "error at runtime)");
-
     ffa->add_flag("--dry-run", ffa_dry_run,
                   "Validate config and memory planner without loading data");
     ffa->add_option(
         "--nsamps-policy", nsamps_policy_str,
-        "When nsamps is not a power of 2: fail (default), truncate, or pad");
+        "When nsamps is not a power of 2: fail (default) or truncate");
 
     auto* grp_perf = ffa->add_option_group("Performance & Limits");
     grp_perf->add_option(
@@ -672,11 +665,9 @@ int main(int argc, char** argv) {
             NsampsPolicy policy = NsampsPolicy::kFail;
             if (nsamps_policy_str == "truncate") {
                 policy = NsampsPolicy::kTruncate;
-            } else if (nsamps_policy_str == "pad") {
-                policy = NsampsPolicy::kPad;
             } else if (nsamps_policy_str != "fail") {
                 throw std::invalid_argument(
-                    "--nsamps-policy must be fail, truncate, or pad");
+                    "--nsamps-policy must be fail or truncate");
             }
 
             return run_search_ffa(ffa_cfg, config_toml, ffa_dry_run, policy);

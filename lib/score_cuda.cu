@@ -23,8 +23,8 @@ namespace loki::detection {
 
 namespace {
 
-__device__ __forceinline__ bool is_finite_device(float x) {
-    return (__float_as_uint(x) & 0x7F800000U) != 0x7F800000U;
+__device__ __forceinline__ float fold_norm_bin(float e, float v) {
+    return (v > 0.0F) ? (e * rsqrtf(v)) : 0.0F;
 }
 
 enum class OutputMode : uint8_t {
@@ -107,7 +107,7 @@ __global__ void kernel_snr_boxcar_warp(const float* __restrict__ folds,
         // Zero-pad out-of-range lanes
         float val;
         if constexpr (Is3D) {
-            val = (idx < nbins) ? e_ptr[idx] * rsqrtf(v_ptr[idx]) : 0.0F;
+            val = (idx < nbins) ? fold_norm_bin(e_ptr[idx], v_ptr[idx]) : 0.0F;
         } else {
             val = (idx < nbins) ? e_ptr[idx] : 0.0F;
         }
@@ -152,7 +152,7 @@ __global__ void kernel_snr_boxcar_warp(const float* __restrict__ folds,
                 max_snr = fmaxf(max_snr, snr);
             } else {
                 if constexpr (Mode == OutputMode::kPerWidthAndFilter) {
-                    if (is_finite_device(snr) && snr >= threshold) {
+                    if (snr >= threshold) {
                         cuda::atomic_ref<uint32_t, cuda::thread_scope_device>
                             counter(*nprofiles_passing);
                         const uint32_t idx = counter.fetch_add(
@@ -172,7 +172,7 @@ __global__ void kernel_snr_boxcar_warp(const float* __restrict__ folds,
                   Mode == OutputMode::kMaxAndFilter) {
         if (lane_id == 0) {
             if constexpr (Mode == OutputMode::kMaxAndFilter) {
-                if (is_finite_device(max_snr) && max_snr >= threshold) {
+                if (max_snr >= threshold) {
                     cuda::atomic_ref<uint32_t, cuda::thread_scope_device>
                         counter(*nprofiles_passing);
                     const uint32_t idx =
@@ -221,7 +221,7 @@ __launch_bounds__(256, 4) // Hint: Max 256 threads, min 4 blocks/SM
 #pragma unroll 8
     for (int i = 0; i < nbins; ++i) {
         if constexpr (Is3D) {
-            running += e_ptr[i] * rsqrtf(v_ptr[i]);
+            running += fold_norm_bin(e_ptr[i], v_ptr[i]);
         } else {
             running += e_ptr[i];
         }
@@ -280,7 +280,7 @@ __launch_bounds__(256, 4) // Hint: Max 256 threads, min 4 blocks/SM
     if constexpr (Mode == OutputMode::kMax ||
                   Mode == OutputMode::kMaxAndFilter) {
         if constexpr (Mode == OutputMode::kMaxAndFilter) {
-            if (is_finite_device(max_snr) && max_snr >= threshold) {
+            if (max_snr >= threshold) {
                 cuda::atomic_ref<uint32_t, cuda::thread_scope_device> counter(
                     *nprofiles_passing);
                 const uint32_t idx =
@@ -336,7 +336,7 @@ kernel_snr_boxcar_filter_warp(const float* __restrict__ folds,
     for (int chunk = 0; chunk < num_chunks; ++chunk) {
         const int idx = (chunk * kWarpSize) + lane_id;
         // Zero-pad out-of-range lanes
-        float val = (idx < nbins) ? e_ptr[idx] * rsqrtf(v_ptr[idx]) : 0.0F;
+        float val = (idx < nbins) ? fold_norm_bin(e_ptr[idx], v_ptr[idx]) : 0.0F;
         // Warp-local inclusive scan
         val = warp_inclusive_scan(val);
         val += running_sum;
@@ -379,7 +379,7 @@ kernel_snr_boxcar_filter_warp(const float* __restrict__ folds,
     if (lane_id == 0) {
         scores[profile_idx]        = max_snr;
         filtered_mask[profile_idx] =
-            (is_finite_device(max_snr) && max_snr >= threshold);
+            (max_snr >= threshold);
     }
 }
 
@@ -417,7 +417,7 @@ __launch_bounds__(256, 4) // Hint: Max 256 threads, min 4 blocks/SM
     float running = 0.0F;
 #pragma unroll 8
     for (int i = 0; i < nbins; ++i) {
-        running += e_ptr[i] * rsqrtf(v_ptr[i]);
+        running += fold_norm_bin(e_ptr[i], v_ptr[i]);
         psum[i + 1] = running;
     }
     const float total_sum = running;
@@ -455,7 +455,7 @@ __launch_bounds__(256, 4) // Hint: Max 256 threads, min 4 blocks/SM
     scores[profile_idx] = max_snr;
     // Set validation mask for filtered profiles
     filtered_mask[profile_idx] =
-        (is_finite_device(max_snr) && max_snr >= threshold);
+        (max_snr >= threshold);
 }
 
 // Unified launch function template

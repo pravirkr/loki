@@ -23,6 +23,10 @@ enum class ScaleMethod : std::uint8_t { kStd, kIqr, kMad };
  * median and z-scored. `get_ts_e()` is that series and `get_ts_v()` is 1.
  * When `preprocess` is false, `get_ts_e()` is the payload converted to float32
  * and `get_ts_v()` is still 1.
+ *
+ * Construction requires finite `ts_e` and strictly positive finite `ts_v` on
+ * every sample. The FFA pipeline relies on this at ingress; scoring only
+ * guards non-positive *fold-bin* variance when normalizing profiles.
  */
 struct ReadOptions {
     bool preprocess{true};

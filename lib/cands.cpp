@@ -15,6 +15,7 @@
 
 #include "loki/common/types.hpp"
 #include "loki/exceptions.hpp"
+#include "loki/search/configs.hpp"
 #include "loki/utils.hpp"
 #include "loki/utils/world_tree.hpp"
 
@@ -251,9 +252,8 @@ std::string PruneStats::get_summary() const noexcept {
         level, seg_idx, lb_leaves(), lb_leaves_phys(), branch_frac(), threshold,
         score_max, score_min, surv_frac());
     if (n_leaves_masked > 0 || n_leaves_vetoed > 0 || n_harvested > 0) {
-        summary += std::format(
-            ", masked: {}, vetoed: {}, harvested: {}",
-            n_leaves_masked, n_leaves_vetoed, n_harvested);
+        summary += std::format(", masked: {}, vetoed: {}, harvested: {}",
+                               n_leaves_masked, n_leaves_vetoed, n_harvested);
     }
     summary += "\n";
     return summary;
@@ -540,12 +540,12 @@ void FFAResultWriter::ensure_datasets(SizeType n_params) {
     if (m_datasets_initialized) {
         return;
     }
-    m_n_params = n_params;
+    m_n_params           = n_params;
     const auto row_props = make_row_chunk_props();
 
     HighFive::DataSpace snr_space({0}, {HighFive::DataSpace::UNLIMITED});
-    m_file->createDataSet("snr", snr_space,
-                          HighFive::create_datatype<float>(), row_props);
+    m_file->createDataSet("snr", snr_space, HighFive::create_datatype<float>(),
+                          row_props);
 
     HighFive::DataSpace param_space({0, n_params},
                                     {HighFive::DataSpace::UNLIMITED, n_params});
@@ -558,14 +558,36 @@ void FFAResultWriter::ensure_datasets(SizeType n_params) {
 
     HighFive::DataSpace width_space({0}, {HighFive::DataSpace::UNLIMITED});
     m_file->createDataSet("width", width_space,
-                          HighFive::create_datatype<std::uint16_t>(), row_props);
+                          HighFive::create_datatype<std::uint16_t>(),
+                          row_props);
 
     HighFive::DataSpace nbins_space({0}, {HighFive::DataSpace::UNLIMITED});
     m_file->createDataSet("nbins", nbins_space,
-                          HighFive::create_datatype<std::uint16_t>(), row_props);
+                          HighFive::create_datatype<std::uint16_t>(),
+                          row_props);
 
     m_datasets_initialized = true;
 }
+
+FFAResultMetadata::FFAResultMetadata(const search::FFASearchConfig& cfg,
+                                     std::string_view config_toml)
+    : param_names(cfg.get_param_names()),
+      config_toml(config_toml),
+      tsamp(cfg.get_tsamp()),
+      nsamps(cfg.get_nsamps()),
+      tobs(cfg.get_tobs()),
+      f_min(cfg.get_f_min()),
+      f_max(cfg.get_f_max()),
+      snr_min(cfg.get_snr_min()),
+      ducy_max(cfg.get_ducy_max()),
+      wtsp(cfg.get_wtsp()),
+      nbins_min(cfg.get_nbins()),
+      nbins_max(cfg.get_nbins_max()),
+      octave_scale(cfg.get_octave_scale()),
+      eta(cfg.get_eta()),
+      use_fourier(cfg.get_use_fourier()),
+      bseg_brute(cfg.get_bseg_brute()),
+      bseg_ffa(cfg.get_bseg_ffa()) {}
 
 void FFAResultWriter::write_metadata(const FFAResultMetadata& metadata) {
     std::scoped_lock lock(m_hdf5_mutex);
@@ -613,9 +635,9 @@ void FFAResultWriter::write_results(std::span<const double> param_sets,
     ensure_datasets(n_params);
 
     if (param_sets.size() != n_param_sets * n_params) {
-        throw std::invalid_argument(std::format(
-            "param_sets size does not match ({} != {} * {})", param_sets.size(),
-            n_param_sets, n_params));
+        throw std::invalid_argument(
+            std::format("param_sets size does not match ({} != {} * {})",
+                        param_sets.size(), n_param_sets, n_params));
     }
     if (scores.size() != n_param_sets || widths_bins.size() != n_param_sets ||
         nbins.size() != n_param_sets) {
@@ -635,11 +657,12 @@ void FFAResultWriter::write_results(std::span<const double> param_sets,
     append_1d("snr", scores.data(), HighFive::create_datatype<float>());
     append_1d("width", widths_bins.data(),
               HighFive::create_datatype<std::uint16_t>());
-    append_1d("nbins", nbins.data(), HighFive::create_datatype<std::uint16_t>());
+    append_1d("nbins", nbins.data(),
+              HighFive::create_datatype<std::uint16_t>());
 
-    auto param_dset       = m_file->getDataSet("param_sets");
-    const auto old_dims   = param_dset.getSpace().getDimensions();
-    const auto old_rows   = old_dims.empty() ? 0UL : old_dims[0];
+    auto param_dset     = m_file->getDataSet("param_sets");
+    const auto old_dims = param_dset.getSpace().getDimensions();
+    const auto old_rows = old_dims.empty() ? 0UL : old_dims[0];
     param_dset.resize({old_rows + n_param_sets, n_params});
     param_dset.select({old_rows, 0}, {n_param_sets, n_params})
         .write_raw(param_sets.data(), HighFive::create_datatype<double>());
