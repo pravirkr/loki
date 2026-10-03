@@ -36,6 +36,7 @@ target_link_libraries(
                               Boost::math
                               OpenMP::OpenMP_CXX
                               HighFive::HighFive
+                              $<BUILD_INTERFACE:tomlplusplus>
 )
 
 catch_discover_tests(${LOKI_TEST_TARGET})

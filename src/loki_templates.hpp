@@ -19,6 +19,7 @@ using plans::FFAPlan;
 using plans::FFAPlanBase;
 using regions::EPRegionPlanner;
 using regions::FFARegionPlanner;
+using search::FFASearchConfig;
 using search::PulsarSearchConfig;
 
 namespace py = pybind11;
@@ -27,7 +28,7 @@ namespace py = pybind11;
 template <SupportedFoldType FoldType>
 void bind_ffa_plan(py::module& m, const std::string& name) {
     py::class_<FFAPlan<FoldType>, FFAPlanBase>(m, name.c_str())
-        .def(py::init<PulsarSearchConfig>(), py::arg("cfg"))
+        .def(py::init<FFASearchConfig>(), py::arg("cfg"))
         .def_property_readonly("fold_shapes",
                                [](const FFAPlan<FoldType>& self) {
                                    return as_listof_pyarray(
@@ -81,7 +82,7 @@ void bind_ffa_class(py::module& m, const std::string& name) {
 template <typename T>
 void bind_ffa_region_planner(py::module& m, const std::string& name) {
     py::class_<FFARegionPlanner<T>>(m, name.c_str())
-        .def(py::init<PulsarSearchConfig>(), py::arg("cfg"))
+        .def(py::init<FFASearchConfig>(), py::arg("cfg"))
         .def_property_readonly("cfgs", &FFARegionPlanner<T>::get_cfgs)
         .def_property_readonly("nregions", &FFARegionPlanner<T>::get_nregions)
         .def_property_readonly("stats", &FFARegionPlanner<T>::get_stats);

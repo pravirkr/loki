@@ -41,7 +41,7 @@ namespace {
 template <SupportedFoldType FoldType>
 class FFAFreqSweepTypedImpl final : public FFAFreqSweep::BaseImpl {
 public:
-    FFAFreqSweepTypedImpl(search::PulsarSearchConfig cfg, bool show_progress)
+    FFAFreqSweepTypedImpl(search::FFASearchConfig cfg, bool show_progress)
         : m_base_cfg(std::move(cfg)),
           m_region_planner(m_base_cfg),
           m_region_decode(
@@ -113,7 +113,7 @@ public:
         double accumulated_flops     = 0.0;
         const auto& ffa_regions_cfgs = m_region_planner.get_cfgs();
         for (SizeType i = 0; i < ffa_regions_cfgs.size(); ++i) {
-            const search::PulsarSearchConfig& cfg_cur = ffa_regions_cfgs[i];
+            const search::FFASearchConfig& cfg_cur = ffa_regions_cfgs[i];
             const auto& freq_limits = cfg_cur.get_param_limits().back();
             spdlog::info("Processing chunk f0 (Hz): [{:08.3f}, {:08.3f}]",
                          freq_limits.min, freq_limits.max);
@@ -142,7 +142,7 @@ public:
     }
 
 private:
-    search::PulsarSearchConfig m_base_cfg;
+    search::FFASearchConfig m_base_cfg;
     regions::FFARegionPlanner<FoldType> m_region_planner;
     std::vector<RegionDecode> m_region_decode;
     // Fixed-capacity accumulator; drained to disk whenever it fills up.
@@ -174,7 +174,7 @@ private:
 
     void execute_ffa_region(std::span<const float> ts_e,
                             std::span<const float> ts_v,
-                            const search::PulsarSearchConfig& cfg,
+                            const search::FFASearchConfig& cfg,
                             SizeType region_id,
                             cands::FFAResultWriter& writer,
                             cands::FFATimerStats& ffa_timer_stats) {
@@ -242,7 +242,7 @@ private:
 }; // End FFAFreqSweepTypedImpl definition
 } // End anonymous namespace
 
-FFAFreqSweep::FFAFreqSweep(const search::PulsarSearchConfig& cfg,
+FFAFreqSweep::FFAFreqSweep(const search::FFASearchConfig& cfg,
                            bool show_progress) {
     if (cfg.get_use_fourier()) {
         m_impl = std::make_unique<FFAFreqSweepTypedImpl<ComplexType>>(

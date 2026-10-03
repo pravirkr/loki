@@ -34,7 +34,7 @@ struct FFAPlanBase::Impl {
     std::vector<std::vector<double>> dparams;              // Grid step sizes
     std::vector<std::vector<double>> dparams_act; // Grid step size (actual)
 
-    explicit Impl(search::PulsarSearchConfig cfg) : m_cfg(std::move(cfg)) {
+    explicit Impl(search::FFASearchConfig cfg) : m_cfg(std::move(cfg)) {
         configure_plan();
         validate_plan();
     }
@@ -45,7 +45,7 @@ struct FFAPlanBase::Impl {
     Impl(const Impl& other)                = default;
     Impl& operator=(const Impl& other)     = default;
 
-    const search::PulsarSearchConfig& get_config() const noexcept {
+    const search::FFASearchConfig& get_config() const noexcept {
         return m_cfg;
     }
 
@@ -261,7 +261,7 @@ struct FFAPlanBase::Impl {
     }
 
 private:
-    search::PulsarSearchConfig m_cfg;
+    search::FFASearchConfig m_cfg;
 
     void configure_plan() {
         const auto levels = m_cfg.get_niters_ffa() + 1;
@@ -346,13 +346,13 @@ private:
 }; // End FFAPlanBase::Impl definition
 
 // --- Definitions for FFAPlanBase ---
-FFAPlanBase::FFAPlanBase(const search::PulsarSearchConfig& cfg)
+FFAPlanBase::FFAPlanBase(const search::FFASearchConfig& cfg)
     : m_impl(std::make_unique<Impl>(cfg)) {}
 FFAPlanBase::~FFAPlanBase()                                 = default;
 FFAPlanBase::FFAPlanBase(FFAPlanBase&&) noexcept            = default;
 FFAPlanBase& FFAPlanBase::operator=(FFAPlanBase&&) noexcept = default;
 
-const search::PulsarSearchConfig& FFAPlanBase::get_config() const noexcept {
+const search::FFASearchConfig& FFAPlanBase::get_config() const noexcept {
     return m_impl->get_config();
 }
 SizeType FFAPlanBase::get_n_params() const noexcept { return m_impl->n_params; }
@@ -438,7 +438,7 @@ FFAPlanBase::get_branching_pattern(std::string_view poly_basis,
 
 // --- Implementation for FFAPlan ---
 template <SupportedFoldType FoldType>
-FFAPlan<FoldType>::FFAPlan(const search::PulsarSearchConfig& cfg)
+FFAPlan<FoldType>::FFAPlan(const search::FFASearchConfig& cfg)
     : FFAPlanBase(cfg) {
     configure_fold_shapes();
     compute_flops();

@@ -26,6 +26,7 @@ using regions::EPChunkConfig;
 using regions::EPChunkStats;
 using regions::EPRegionStats;
 using regions::FFARegionStats;
+using search::FFASearchConfig;
 using search::PulsarSearchConfig;
 
 namespace py = pybind11;
@@ -280,7 +281,102 @@ PYBIND11_MODULE(libloki, m) {
 
     auto m_configs = m.def_submodule("configs", "Configs submodule");
     PYBIND11_NUMPY_DTYPE(ParamLimit, min, max);
-    py::class_<PulsarSearchConfig>(m_configs, "PulsarSearchConfig")
+
+    py::class_<FFASearchConfig>(m_configs, "FFASearchConfig")
+        .def(py::init(
+                 [](SizeType nsamps, double tsamp, SizeType nbins, double eta,
+                    const PyArrayT<double>& param_limits, double ducy_max,
+                    double wtsp, bool use_fourier, int nthreads,
+                    double max_process_memory_gb, double octave_scale,
+                    SizeType nbins_max, SizeType nbins_min_lossy_bf,
+                    std::optional<SizeType> bseg_brute,
+                    std::optional<SizeType> bseg_ffa, double snr_min,
+                    SizeType max_passing_candidates,
+                    bool use_boxcar_kadane) {
+                     if (param_limits.ndim() != 2 ||
+                         param_limits.shape(1) != 2) {
+                         throw std::invalid_argument(
+                             "param_limits must be a 2D NumPy array with shape "
+                             "(n_params, 2)");
+                     }
+
+                     const auto n_params =
+                         static_cast<SizeType>(param_limits.shape(0));
+
+                     std::vector<ParamLimit> limits(n_params);
+                     for (SizeType i = 0; i < n_params; ++i) {
+                         limits[i] = {.min = *param_limits.data(i, 0),
+                                      .max = *param_limits.data(i, 1)};
+                     }
+                     return std::make_unique<FFASearchConfig>(
+                         nsamps, tsamp, nbins, eta, limits, ducy_max, wtsp,
+                         use_fourier, nthreads, max_process_memory_gb,
+                         octave_scale, nbins_max, nbins_min_lossy_bf,
+                         bseg_brute, bseg_ffa, snr_min, max_passing_candidates,
+                         use_boxcar_kadane);
+                 }),
+             py::arg("nsamps"), py::arg("tsamp"), py::arg("nbins"),
+             py::arg("eta"), py::arg("param_limits"), py::arg("ducy_max") = 0.2,
+             py::arg("wtsp") = 1.5, py::arg("use_fourier") = true,
+             py::arg("nthreads") = 1, py::arg("max_process_memory_gb") = 8.0,
+             py::arg("octave_scale") = 2.0, py::arg("nbins_max") = 1024,
+             py::arg("nbins_min_lossy_bf") = 64,
+             py::arg("bseg_brute")         = std::nullopt,
+             py::arg("bseg_ffa") = std::nullopt, py::arg("snr_min") = 5.0,
+             py::arg("max_passing_candidates") = 1U << 22U, // 4M
+             py::arg("use_boxcar_kadane")       = false)
+        .def_property_readonly("nsamps", &FFASearchConfig::get_nsamps)
+        .def_property_readonly("tsamp", &FFASearchConfig::get_tsamp)
+        .def_property_readonly("tobs", &FFASearchConfig::get_tobs)
+        .def_property_readonly("nbins", &FFASearchConfig::get_nbins)
+        .def_property_readonly("nbins_f", &FFASearchConfig::get_nbins_f)
+        .def_property_readonly("eta", &FFASearchConfig::get_eta)
+        .def_property_readonly("param_limits",
+                               [](const FFASearchConfig& self) {
+                                   return as_pyarray_ref(
+                                       self.get_param_limits());
+                               })
+        .def_property_readonly("ducy_max", &FFASearchConfig::get_ducy_max)
+        .def_property_readonly("wtsp", &FFASearchConfig::get_wtsp)
+        .def_property_readonly("bseg_brute",
+                               &FFASearchConfig::get_bseg_brute)
+        .def_property_readonly("bseg_ffa", &FFASearchConfig::get_bseg_ffa)
+        .def_property_readonly("use_fourier",
+                               &FFASearchConfig::get_use_fourier)
+        .def_property_readonly("use_conservative_tile",
+                               &FFASearchConfig::get_use_conservative_tile)
+        .def_property_readonly("nthreads", &FFASearchConfig::get_nthreads)
+        .def_property_readonly("tseg_brute",
+                               &FFASearchConfig::get_tseg_brute)
+        .def_property_readonly("tseg_ffa", &FFASearchConfig::get_tseg_ffa)
+        .def_property_readonly("niters_ffa",
+                               &FFASearchConfig::get_niters_ffa)
+        .def_property_readonly("nparams", &FFASearchConfig::get_nparams)
+        .def_property_readonly("param_names",
+                               &FFASearchConfig::get_param_names)
+        .def_property_readonly("f_min", &FFASearchConfig::get_f_min)
+        .def_property_readonly("f_max", &FFASearchConfig::get_f_max)
+        .def_property_readonly("score_widths",
+                               [](const FFASearchConfig& self) {
+                                   return as_pyarray_ref(
+                                       self.get_scoring_widths());
+                               })
+        .def_property_readonly("n_scoring_widths",
+                               &FFASearchConfig::get_n_scoring_widths)
+        .def_property_readonly("boxcar_kadane_biases",
+                               [](const FFASearchConfig& self) {
+                                   return as_pyarray_ref(
+                                       self.get_boxcar_kadane_biases());
+                               })
+        .def_property_readonly("n_boxcar_kadane_biases",
+                               &FFASearchConfig::get_n_boxcar_kadane_biases)
+        .def("dparams_f", &FFASearchConfig::get_dparams_f,
+             py::arg("tseg_cur"))
+        .def("dparams", &FFASearchConfig::get_dparams, py::arg("tseg_cur"))
+        .def("dparams_actual", &FFASearchConfig::get_dparams_actual,
+             py::arg("tseg_cur"));
+
+    py::class_<PulsarSearchConfig, FFASearchConfig>(m_configs, "PulsarSearchConfig")
         .def(py::init(
                  [](SizeType nsamps, double tsamp, SizeType nbins, double eta,
                     const PyArrayT<double>& param_limits, double ducy_max,
@@ -333,64 +429,19 @@ PYBIND11_MODULE(libloki, m) {
              py::arg("validation_significance") = 5.0,
              py::arg("use_conservative_tile")   = false,
              py::arg("use_boxcar_kadane")       = false)
-
-        .def_property_readonly("nsamps", &PulsarSearchConfig::get_nsamps)
-        .def_property_readonly("tsamp", &PulsarSearchConfig::get_tsamp)
-        .def_property_readonly("tobs", &PulsarSearchConfig::get_tobs)
-        .def_property_readonly("nbins", &PulsarSearchConfig::get_nbins)
-        .def_property_readonly("nbins_f", &PulsarSearchConfig::get_nbins_f)
-        .def_property_readonly("eta", &PulsarSearchConfig::get_eta)
-        .def_property_readonly("param_limits",
-                               [](const PulsarSearchConfig& self) {
-                                   return as_pyarray_ref(
-                                       self.get_param_limits());
-                               })
-        .def_property_readonly("ducy_max", &PulsarSearchConfig::get_ducy_max)
-        .def_property_readonly("wtsp", &PulsarSearchConfig::get_wtsp)
         .def_property_readonly("prune_poly_order",
                                &PulsarSearchConfig::get_prune_poly_order)
-        .def_property_readonly("bseg_brute",
-                               &PulsarSearchConfig::get_bseg_brute)
-        .def_property_readonly("bseg_ffa", &PulsarSearchConfig::get_bseg_ffa)
         .def_property_readonly("p_orb_min", &PulsarSearchConfig::get_p_orb_min)
+        .def_property_readonly("m_c_max", &PulsarSearchConfig::get_m_c_max)
+        .def_property_readonly("m_p_min", &PulsarSearchConfig::get_m_p_min)
         .def_property_readonly("propagator_significance",
                                &PulsarSearchConfig::get_propagator_significance)
         .def_property_readonly("validation_significance",
                                &PulsarSearchConfig::get_validation_significance)
-        .def_property_readonly("use_fourier",
-                               &PulsarSearchConfig::get_use_fourier)
-        .def_property_readonly("use_conservative_tile",
-                               &PulsarSearchConfig::get_use_conservative_tile)
-        .def_property_readonly("nthreads", &PulsarSearchConfig::get_nthreads)
-        .def_property_readonly("tseg_brute",
-                               &PulsarSearchConfig::get_tseg_brute)
-        .def_property_readonly("tseg_ffa", &PulsarSearchConfig::get_tseg_ffa)
-        .def_property_readonly("niters_ffa",
-                               &PulsarSearchConfig::get_niters_ffa)
-        .def_property_readonly("nparams", &PulsarSearchConfig::get_nparams)
-        .def_property_readonly("param_names",
-                               &PulsarSearchConfig::get_param_names)
-        .def_property_readonly("f_min", &PulsarSearchConfig::get_f_min)
-        .def_property_readonly("f_max", &PulsarSearchConfig::get_f_max)
-        .def_property_readonly("score_widths",
-                               [](const PulsarSearchConfig& self) {
-                                   return as_pyarray_ref(
-                                       self.get_scoring_widths());
-                               })
-        .def_property_readonly("n_scoring_widths",
-                               &PulsarSearchConfig::get_n_scoring_widths)
-        .def_property_readonly("boxcar_kadane_biases",
-                               [](const PulsarSearchConfig& self) {
-                                   return as_pyarray_ref(
-                                       self.get_boxcar_kadane_biases());
-                               })
-        .def_property_readonly("n_boxcar_kadane_biases",
-                               &PulsarSearchConfig::get_n_boxcar_kadane_biases)
-        .def("dparams_f", &PulsarSearchConfig::get_dparams_f,
-             py::arg("tseg_cur"))
-        .def("dparams", &PulsarSearchConfig::get_dparams, py::arg("tseg_cur"))
-        .def("dparams_actual", &PulsarSearchConfig::get_dparams_actual,
-             py::arg("tseg_cur"));
+        .def_property_readonly("x_mass_const",
+                               &PulsarSearchConfig::get_x_mass_const);
+
+    m_configs.attr("EPSearchConfig") = m_configs.attr("PulsarSearchConfig");
 
     // Plans submodule
     auto m_plans = m.def_submodule("plans", "Plans submodule");
@@ -401,7 +452,7 @@ PYBIND11_MODULE(libloki, m) {
 
     // Bind FFAPlanBase
     py::class_<FFAPlanBase>(m_plans, "FFAPlanBase")
-        .def(py::init<PulsarSearchConfig>(), py::arg("cfg"))
+        .def(py::init<FFASearchConfig>(), py::arg("cfg"))
         .def_property_readonly("n_params", &FFAPlanBase::get_n_params)
         .def_property_readonly("n_levels", &FFAPlanBase::get_n_levels)
         .def_property_readonly("segment_lens",
@@ -550,7 +601,7 @@ PYBIND11_MODULE(libloki, m) {
     m_ffa.def(
         "compute_ffa_time",
         [](const PyArrayT<float>& ts_e, const PyArrayT<float>& ts_v,
-           const PulsarSearchConfig& cfg, bool quiet, bool show_progress) {
+           const FFASearchConfig& cfg, bool quiet, bool show_progress) {
             auto [fold, ffa_plan] = algorithms::compute_ffa<float>(
                 to_span<const float>(ts_e), to_span<const float>(ts_v), cfg,
                 quiet, show_progress);
@@ -563,7 +614,7 @@ PYBIND11_MODULE(libloki, m) {
     m_ffa.def(
         "compute_ffa_fourier",
         [](const PyArrayT<float>& ts_e, const PyArrayT<float>& ts_v,
-           const PulsarSearchConfig& cfg, bool quiet, bool show_progress) {
+           const FFASearchConfig& cfg, bool quiet, bool show_progress) {
             auto [fold, ffa_plan] = algorithms::compute_ffa<ComplexType>(
                 to_span<const float>(ts_e), to_span<const float>(ts_v), cfg,
                 quiet, show_progress);
@@ -576,7 +627,7 @@ PYBIND11_MODULE(libloki, m) {
     m_ffa.def(
         "compute_ffa_fourier_return_to_time",
         [](const PyArrayT<float>& ts_e, const PyArrayT<float>& ts_v,
-           const PulsarSearchConfig& cfg, bool quiet, bool show_progress) {
+           const FFASearchConfig& cfg, bool quiet, bool show_progress) {
             auto [fold, ffa_plan] =
                 algorithms::compute_ffa_fourier_return_to_time(
                     to_span<const float>(ts_e), to_span<const float>(ts_v), cfg,
@@ -590,7 +641,7 @@ PYBIND11_MODULE(libloki, m) {
     m_ffa.def(
         "compute_ffa_scores",
         [](const PyArrayT<float>& ts_e, const PyArrayT<float>& ts_v,
-           const PulsarSearchConfig& cfg, bool quiet, bool show_progress) {
+           const FFASearchConfig& cfg, bool quiet, bool show_progress) {
             auto [scores, ffa_plan] = algorithms::compute_ffa_scores(
                 to_span<const float>(ts_e), to_span<const float>(ts_v), cfg,
                 quiet, show_progress);
@@ -601,7 +652,7 @@ PYBIND11_MODULE(libloki, m) {
         py::arg("quiet") = false, py::arg("show_progress") = false);
 
     py::class_<FFAFreqSweep>(m_ffa, "FFAFreqSweep")
-        .def(py::init<const PulsarSearchConfig&, bool>(), py::arg("cfg"),
+        .def(py::init<const FFASearchConfig&, bool>(), py::arg("cfg"),
              py::arg("show_progress") = true)
         .def(
             "execute",

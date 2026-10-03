@@ -52,7 +52,7 @@ struct RegionDecode {
  */
 template <SupportedFoldType FoldType>
 std::vector<RegionDecode>
-build_region_decode_table(std::span<const search::PulsarSearchConfig> cfgs) {
+build_region_decode_table(std::span<const search::FFASearchConfig> cfgs) {
     std::vector<RegionDecode> table;
     table.reserve(cfgs.size());
     for (const auto& cfg : cfgs) {

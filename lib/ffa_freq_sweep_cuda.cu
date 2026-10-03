@@ -44,7 +44,7 @@ public:
     using HostFoldT   = HostFoldType<FoldTypeCUDA>;
     using DeviceFoldT = DeviceFoldType<FoldTypeCUDA>;
 
-    FFAFreqSweepCUDATypedImpl(search::PulsarSearchConfig cfg, int device_id)
+    FFAFreqSweepCUDATypedImpl(search::FFASearchConfig cfg, int device_id)
         : m_base_cfg(std::move(cfg)),
           m_device_id(device_id),
           m_region_planner(create_region_planner(m_base_cfg, m_device_id)),
@@ -145,7 +145,7 @@ public:
         double accumulated_flops     = 0.0;
         const auto& ffa_regions_cfgs = m_region_planner.get_cfgs();
         for (SizeType i = 0; i < ffa_regions_cfgs.size(); ++i) {
-            const search::PulsarSearchConfig& cfg_cur = ffa_regions_cfgs[i];
+            const search::FFASearchConfig& cfg_cur = ffa_regions_cfgs[i];
             const auto& freq_limits = cfg_cur.get_param_limits().back();
             spdlog::info("Processing chunk f0 (Hz): [{:08.3f}, {:08.3f}]",
                          freq_limits.min, freq_limits.max);
@@ -174,7 +174,7 @@ public:
     }
 
 private:
-    search::PulsarSearchConfig m_base_cfg;
+    search::FFASearchConfig m_base_cfg;
     int m_device_id;
     regions::FFARegionPlanner<HostFoldT> m_region_planner;
     std::vector<RegionDecode> m_region_decode;
@@ -202,7 +202,7 @@ private:
 
     // Helper function to create region planner with GPU memory considerations
     static regions::FFARegionPlanner<HostFoldT>
-    create_region_planner(const search::PulsarSearchConfig& base_cfg,
+    create_region_planner(const search::FFASearchConfig& base_cfg,
                           int device_id) {
         cuda_utils::CudaSetDeviceGuard device_guard(device_id);
         // Query CUDA memory usage
@@ -238,7 +238,7 @@ private:
                                                     /*use_gpu=*/true);
     }
 
-    void execute_ffa_region(const search::PulsarSearchConfig& cfg,
+    void execute_ffa_region(const search::FFASearchConfig& cfg,
                             SizeType region_id,
                             cands::FFAResultWriter& writer,
                             cands::FFATimerStats& ffa_timer_stats,
@@ -355,7 +355,7 @@ private:
 
 }; // End FFAFreqSweepCUDATypedImpl definition
 
-FFAFreqSweepCUDA::FFAFreqSweepCUDA(const search::PulsarSearchConfig& cfg,
+FFAFreqSweepCUDA::FFAFreqSweepCUDA(const search::FFASearchConfig& cfg,
                                    int device_id) {
     if (cfg.get_use_fourier()) {
         m_impl = std::make_unique<FFAFreqSweepCUDATypedImpl<ComplexTypeCUDA>>(

@@ -20,7 +20,7 @@ namespace {
 // Cached evaluation of a candidate chunk. Holds the plan-derived sizes
 // so the chunk can be finalized without re-simulating.
 struct ChunkEval {
-    search::PulsarSearchConfig cfg;
+    search::FFASearchConfig cfg;
     SizeType buffer_size;
     SizeType coord_size;
     SizeType ncoords;
@@ -88,6 +88,15 @@ std::vector<coord::FFARegion> generate_ffa_regions(double p_min,
                     "Lower f_max (raise p_min) or use a finer tsamp.",
                     p_min, 2.0 * tsamp, 1.0 / p_min, 1.0 / (2.0 * tsamp),
                     tsamp));
+    error_check::check_greater_equal(
+        p_min, static_cast<double>(nbins_min) * tsamp,
+        std::format("p_min ({:.9f} s) must be >= nbins_min ({}) * tsamp "
+                    "({:.9f} s) = {:.9f} s; "
+                    "the requested f_max = {:.6f} Hz allows fewer than "
+                    "nbins_min samples per period. "
+                    "Lower f_max or decrease nbins_min.",
+                    p_min, nbins_min, tsamp,
+                    static_cast<double>(nbins_min) * tsamp, 1.0 / p_min));
 
     // t_W = max(P_min / b_min, t_s). Finest physical bin width in the plan.
     // rho = eta_0 / b_min. Held fixed; eta_k = rho * N_{b,k}.
@@ -212,7 +221,7 @@ float FFARegionStats::get_freq_sweep_memory_usage() const noexcept {
 
 template <SupportedFoldType FoldType> class FFARegionPlanner<FoldType>::Impl {
 public:
-    explicit Impl(search::PulsarSearchConfig cfg, bool use_gpu)
+    explicit Impl(search::FFASearchConfig cfg, bool use_gpu)
         : m_base_cfg(std::move(cfg)),
           m_use_gpu(use_gpu) {
         plan_regions();
@@ -224,7 +233,7 @@ public:
     Impl(Impl&&)                 = delete;
     Impl& operator=(Impl&&)      = delete;
 
-    const std::vector<search::PulsarSearchConfig>& get_cfgs() const noexcept {
+    const std::vector<search::FFASearchConfig>& get_cfgs() const noexcept {
         return m_cfgs;
     }
     SizeType get_nregions() const noexcept { return m_cfgs.size(); }
@@ -234,15 +243,15 @@ public:
     }
 
 private:
-    search::PulsarSearchConfig m_base_cfg;
+    search::FFASearchConfig m_base_cfg;
     bool m_use_gpu;
 
-    std::vector<search::PulsarSearchConfig> m_cfgs;
+    std::vector<search::FFASearchConfig> m_cfgs;
     FFARegionStats m_stats{
         0, 0, 0, 0, 0, 0, 0, 0, m_base_cfg.get_use_fourier(), m_use_gpu};
     std::vector<coord::FFAChunkStats> m_chunk_stats;
 
-    double calculate_max_drift(const search::PulsarSearchConfig& cfg) const {
+    double calculate_max_drift(const search::FFASearchConfig& cfg) const {
         if (cfg.get_nparams() <= 1) {
             return 0.0;
         }
@@ -649,8 +658,8 @@ private:
 
 // --- Definitions for FFARegionPlanner ---
 template <SupportedFoldType FoldType>
-FFARegionPlanner<FoldType>::FFARegionPlanner(
-    const search::PulsarSearchConfig& cfg, bool use_gpu)
+FFARegionPlanner<FoldType>::FFARegionPlanner(const search::FFASearchConfig& cfg,
+                                             bool use_gpu)
     : m_impl(std::make_unique<Impl>(cfg, use_gpu)) {}
 template <SupportedFoldType FoldType>
 FFARegionPlanner<FoldType>::~FFARegionPlanner() = default;
@@ -661,7 +670,7 @@ template <SupportedFoldType FoldType>
 FFARegionPlanner<FoldType>& FFARegionPlanner<FoldType>::operator=(
     FFARegionPlanner<FoldType>&&) noexcept = default;
 template <SupportedFoldType FoldType>
-const std::vector<search::PulsarSearchConfig>&
+const std::vector<search::FFASearchConfig>&
 FFARegionPlanner<FoldType>::get_cfgs() const noexcept {
     return m_impl->get_cfgs();
 }

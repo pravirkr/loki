@@ -31,7 +31,7 @@ public:
     using HostFoldT   = HostFoldType<FoldTypeCUDA>;
     using DeviceFoldT = DeviceFoldType<FoldTypeCUDA>;
 
-    explicit Impl(search::PulsarSearchConfig cfg, int device_id)
+    explicit Impl(search::FFASearchConfig cfg, int device_id)
         : m_cfg(std::move(cfg)),
           m_ffa_plan(m_cfg),
           m_device_id(device_id),
@@ -50,7 +50,7 @@ public:
     }
 
     explicit Impl(memory::FFAWorkspaceCUDA<FoldTypeCUDA>& workspace,
-                  search::PulsarSearchConfig cfg,
+                  search::FFASearchConfig cfg,
                   int device_id)
         : m_cfg(std::move(cfg)),
           m_ffa_plan(m_cfg),
@@ -71,7 +71,7 @@ public:
 
     explicit Impl(memory::FFAWorkspaceCUDA<FoldTypeCUDA>& workspace,
                   math::CUFFTManager& fft_manager,
-                  search::PulsarSearchConfig cfg,
+                  search::FFASearchConfig cfg,
                   int device_id)
         : m_cfg(std::move(cfg)),
           m_ffa_plan(m_cfg),
@@ -314,7 +314,7 @@ public:
     }
 
 private:
-    search::PulsarSearchConfig m_cfg;
+    search::FFASearchConfig m_cfg;
     plans::FFAPlan<HostFoldT> m_ffa_plan;
     int m_device_id;
     bool m_is_freq_only;
@@ -552,14 +552,14 @@ private:
 
 // --- Definitions for FFACUDA ---
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
-FFACUDA<FoldTypeCUDA>::FFACUDA(const search::PulsarSearchConfig& cfg,
+FFACUDA<FoldTypeCUDA>::FFACUDA(const search::FFASearchConfig& cfg,
                                int device_id)
     : m_impl(std::make_unique<Impl>(cfg, device_id)) {}
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 FFACUDA<FoldTypeCUDA>::FFACUDA(
     memory::FFAWorkspaceCUDA<FoldTypeCUDA>& workspace,
-    const search::PulsarSearchConfig& cfg,
+    const search::FFASearchConfig& cfg,
     int device_id)
     : m_impl(std::make_unique<Impl>(workspace, cfg, device_id)) {}
 
@@ -567,7 +567,7 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA>
 FFACUDA<FoldTypeCUDA>::FFACUDA(
     memory::FFAWorkspaceCUDA<FoldTypeCUDA>& workspace,
     math::CUFFTManager& fft_manager,
-    const search::PulsarSearchConfig& cfg,
+    const search::FFASearchConfig& cfg,
     int device_id)
     : m_impl(std::make_unique<Impl>(workspace, fft_manager, cfg, device_id)) {}
 
@@ -646,7 +646,7 @@ std::tuple<std::vector<HostFoldType<FoldTypeCUDA>>,
            plans::FFAPlan<HostFoldType<FoldTypeCUDA>>>
 compute_ffa_cuda(std::span<const float> ts_e,
                  std::span<const float> ts_v,
-                 const search::PulsarSearchConfig& cfg,
+                 const search::FFASearchConfig& cfg,
                  int device_id,
                  bool quiet) {
     using HostFoldT = HostFoldType<FoldTypeCUDA>;
@@ -667,7 +667,7 @@ std::tuple<thrust::device_vector<FoldTypeCUDA>,
            plans::FFAPlan<HostFoldType<FoldTypeCUDA>>>
 compute_ffa_cuda_device(std::span<const float> ts_e,
                         std::span<const float> ts_v,
-                        const search::PulsarSearchConfig& cfg,
+                        const search::FFASearchConfig& cfg,
                         int device_id) {
     using HostFoldT   = HostFoldType<FoldTypeCUDA>;
     using DeviceFoldT = DeviceFoldType<FoldTypeCUDA>;
@@ -685,7 +685,7 @@ compute_ffa_cuda_device(std::span<const float> ts_e,
 std::tuple<std::vector<float>, plans::FFAPlan<float>>
 compute_ffa_fourier_return_to_time_cuda(std::span<const float> ts_e,
                                         std::span<const float> ts_v,
-                                        const search::PulsarSearchConfig& cfg,
+                                        const search::FFASearchConfig& cfg,
                                         int device_id,
                                         bool quiet) {
     timing::ScopedLogLevel scoped_log_level(quiet);
@@ -705,7 +705,7 @@ compute_ffa_fourier_return_to_time_cuda(std::span<const float> ts_e,
 std::tuple<std::vector<float>, plans::FFAPlan<float>>
 compute_ffa_scores_cuda(std::span<const float> ts_e,
                         std::span<const float> ts_v,
-                        const search::PulsarSearchConfig& cfg,
+                        const search::FFASearchConfig& cfg,
                         int device_id,
                         bool quiet) {
     timing::ScopedLogLevel scoped_log_level(quiet);
@@ -733,28 +733,28 @@ template class FFACUDA<ComplexTypeCUDA>;
 template std::tuple<std::vector<float>, plans::FFAPlan<float>>
 compute_ffa_cuda<float>(std::span<const float>,
                         std::span<const float>,
-                        const search::PulsarSearchConfig&,
+                        const search::FFASearchConfig&,
                         int,
                         bool);
 
 template std::tuple<std::vector<ComplexType>, plans::FFAPlan<ComplexType>>
 compute_ffa_cuda<ComplexTypeCUDA>(std::span<const float>,
                                   std::span<const float>,
-                                  const search::PulsarSearchConfig&,
+                                  const search::FFASearchConfig&,
                                   int,
                                   bool);
 
 template std::tuple<thrust::device_vector<float>, plans::FFAPlan<float>>
 compute_ffa_cuda_device<float>(std::span<const float>,
                                std::span<const float>,
-                               const search::PulsarSearchConfig&,
+                               const search::FFASearchConfig&,
                                int);
 
 template std::tuple<thrust::device_vector<ComplexTypeCUDA>,
                     plans::FFAPlan<ComplexType>>
 compute_ffa_cuda_device<ComplexTypeCUDA>(std::span<const float>,
                                          std::span<const float>,
-                                         const search::PulsarSearchConfig&,
+                                         const search::FFASearchConfig&,
                                          int);
 
 } // namespace loki::algorithms

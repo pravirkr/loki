@@ -15,7 +15,7 @@ namespace loki::algorithms {
 
 class FFAFreqSweep {
 public:
-    explicit FFAFreqSweep(const search::PulsarSearchConfig& cfg,
+    explicit FFAFreqSweep(const search::FFASearchConfig& cfg,
                           bool show_progress = true);
     ~FFAFreqSweep();
     FFAFreqSweep(FFAFreqSweep&&) noexcept;
@@ -39,7 +39,7 @@ private:
 
 class FFAFreqSweepCUDA {
 public:
-    explicit FFAFreqSweepCUDA(const search::PulsarSearchConfig& cfg,
+    explicit FFAFreqSweepCUDA(const search::FFASearchConfig& cfg,
                               int device_id = 0);
     ~FFAFreqSweepCUDA();
     FFAFreqSweepCUDA(FFAFreqSweepCUDA&&) noexcept;

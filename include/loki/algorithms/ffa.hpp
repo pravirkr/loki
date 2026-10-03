@@ -27,13 +27,13 @@ namespace loki::algorithms {
 template <SupportedFoldType FoldType> class FFA {
 public:
     // Chunked FFA constructor (owns workspace and an empty FFTWManager)
-    explicit FFA(const search::PulsarSearchConfig& cfg,
+    explicit FFA(const search::FFASearchConfig& cfg,
                  bool show_progress = true);
 
     // Pipeline-based FFA constructor uses external workspace and FFTWManager
     explicit FFA(memory::FFAWorkspace<FoldType>& workspace,
                  math::FFTWManager& fft_manager,
-                 const search::PulsarSearchConfig& cfg,
+                 const search::FFASearchConfig& cfg,
                  bool show_progress = true);
 
     // --- Rule of five: PIMPL ---
@@ -72,7 +72,7 @@ template <SupportedFoldType FoldType>
 std::tuple<std::vector<FoldType>, plans::FFAPlan<FoldType>>
 compute_ffa(std::span<const float> ts_e,
             std::span<const float> ts_v,
-            const search::PulsarSearchConfig& cfg,
+            const search::FFASearchConfig& cfg,
             bool quiet         = false,
             bool show_progress = false);
 
@@ -81,14 +81,14 @@ compute_ffa(std::span<const float> ts_e,
 std::tuple<std::vector<float>, plans::FFAPlan<float>>
 compute_ffa_fourier_return_to_time(std::span<const float> ts_e,
                                    std::span<const float> ts_v,
-                                   const search::PulsarSearchConfig& cfg,
+                                   const search::FFASearchConfig& cfg,
                                    bool quiet         = false,
                                    bool show_progress = false);
 
 std::tuple<std::vector<float>, plans::FFAPlan<float>>
 compute_ffa_scores(std::span<const float> ts_e,
                    std::span<const float> ts_v,
-                   const search::PulsarSearchConfig& cfg,
+                   const search::FFASearchConfig& cfg,
                    bool quiet         = false,
                    bool show_progress = false);
 
@@ -105,17 +105,17 @@ public:
     using DeviceFoldT = DeviceFoldType<FoldTypeCUDA>;
 
     // Constructor with owned workspace and empty CUFFTManager
-    explicit FFACUDA(const search::PulsarSearchConfig& cfg, int device_id = 0);
+    explicit FFACUDA(const search::FFASearchConfig& cfg, int device_id = 0);
 
     // Constructor with external workspace (owns an empty CUFFTManager)
     explicit FFACUDA(memory::FFAWorkspaceCUDA<FoldTypeCUDA>& workspace,
-                     const search::PulsarSearchConfig& cfg,
+                     const search::FFASearchConfig& cfg,
                      int device_id = 0);
 
     // Pipeline constructor: external workspace and CUFFTManager
     explicit FFACUDA(memory::FFAWorkspaceCUDA<FoldTypeCUDA>& workspace,
                      math::CUFFTManager& fft_manager,
-                     const search::PulsarSearchConfig& cfg,
+                     const search::FFASearchConfig& cfg,
                      int device_id = 0);
 
     ~FFACUDA();
@@ -167,7 +167,7 @@ std::tuple<std::vector<HostFoldType<FoldTypeCUDA>>,
            plans::FFAPlan<HostFoldType<FoldTypeCUDA>>>
 compute_ffa_cuda(std::span<const float> ts_e,
                  std::span<const float> ts_v,
-                 const search::PulsarSearchConfig& cfg,
+                 const search::FFASearchConfig& cfg,
                  int device_id,
                  bool quiet = false);
 
@@ -176,7 +176,7 @@ std::tuple<thrust::device_vector<FoldTypeCUDA>,
            plans::FFAPlan<HostFoldType<FoldTypeCUDA>>>
 compute_ffa_cuda_device(std::span<const float> ts_e,
                         std::span<const float> ts_v,
-                        const search::PulsarSearchConfig& cfg,
+                        const search::FFASearchConfig& cfg,
                         int device_id);
 
 // Convenience function to fold time series using P-FFA in the Fourier domain
@@ -184,14 +184,14 @@ compute_ffa_cuda_device(std::span<const float> ts_e,
 std::tuple<std::vector<float>, plans::FFAPlan<float>>
 compute_ffa_fourier_return_to_time_cuda(std::span<const float> ts_e,
                                         std::span<const float> ts_v,
-                                        const search::PulsarSearchConfig& cfg,
+                                        const search::FFASearchConfig& cfg,
                                         int device_id,
                                         bool quiet = false);
 
 std::tuple<std::vector<float>, plans::FFAPlan<float>>
 compute_ffa_scores_cuda(std::span<const float> ts_e,
                         std::span<const float> ts_v,
-                        const search::PulsarSearchConfig& cfg,
+                        const search::FFASearchConfig& cfg,
                         int device_id,
                         bool quiet = false);
 #endif // LOKI_ENABLE_CUDA

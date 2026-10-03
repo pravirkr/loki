@@ -141,9 +141,9 @@ template <SupportedFoldType FoldType> class FFARegionPlanner {
 public:
     /**
      * @brief Constructs the FFA region planner from a search configuration.
-     * @param cfg The pulsar search configuration object.
+     * @param cfg The FFA search configuration object.
      */
-    explicit FFARegionPlanner(const search::PulsarSearchConfig& cfg,
+    explicit FFARegionPlanner(const search::FFASearchConfig& cfg,
                               bool use_gpu = false);
 
     // --- Rule of five: PIMPL ---
@@ -155,7 +155,7 @@ public:
 
     // --- Getters ---
     /// @brief Get the search configurations for each region.
-    [[nodiscard]] const std::vector<search::PulsarSearchConfig>&
+    [[nodiscard]] const std::vector<search::FFASearchConfig>&
     get_cfgs() const noexcept;
     /// @brief Get the number of regions.
     SizeType get_nregions() const noexcept;

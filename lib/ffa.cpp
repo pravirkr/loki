@@ -25,7 +25,7 @@ namespace loki::algorithms {
 // FFA::Impl implementation
 template <SupportedFoldType FoldType> class FFA<FoldType>::Impl {
 public:
-    explicit Impl(search::PulsarSearchConfig cfg, bool show_progress)
+    explicit Impl(search::FFASearchConfig cfg, bool show_progress)
         : m_cfg(std::move(cfg)),
           m_show_progress(show_progress),
           m_ffa_plan(m_cfg),
@@ -44,7 +44,7 @@ public:
 
     explicit Impl(memory::FFAWorkspace<FoldType>& workspace,
                   math::FFTWManager& fft_manager,
-                  search::PulsarSearchConfig cfg,
+                  search::FFASearchConfig cfg,
                   bool show_progress)
         : m_cfg(std::move(cfg)),
           m_show_progress(show_progress),
@@ -137,7 +137,7 @@ public:
     }
 
 private:
-    search::PulsarSearchConfig m_cfg;
+    search::FFASearchConfig m_cfg;
     bool m_show_progress;
     plans::FFAPlan<FoldType> m_ffa_plan;
     int m_nthreads;
@@ -367,12 +367,12 @@ private:
 
 // --- Definitions for FFA ---
 template <SupportedFoldType FoldType>
-FFA<FoldType>::FFA(const search::PulsarSearchConfig& cfg, bool show_progress)
+FFA<FoldType>::FFA(const search::FFASearchConfig& cfg, bool show_progress)
     : m_impl(std::make_unique<Impl>(cfg, show_progress)) {}
 template <SupportedFoldType FoldType>
 FFA<FoldType>::FFA(memory::FFAWorkspace<FoldType>& workspace,
                    math::FFTWManager& fft_manager,
-                   const search::PulsarSearchConfig& cfg,
+                   const search::FFASearchConfig& cfg,
                    bool show_progress)
     : m_impl(
           std::make_unique<Impl>(workspace, fft_manager, cfg, show_progress)) {}
@@ -413,7 +413,7 @@ template <SupportedFoldType FoldType>
 std::tuple<std::vector<FoldType>, plans::FFAPlan<FoldType>>
 compute_ffa(std::span<const float> ts_e,
             std::span<const float> ts_v,
-            const search::PulsarSearchConfig& cfg,
+            const search::FFASearchConfig& cfg,
             bool quiet,
             bool show_progress) {
     timing::ScopedLogLevel scoped_log_level(quiet);
@@ -431,7 +431,7 @@ compute_ffa(std::span<const float> ts_e,
 std::tuple<std::vector<float>, plans::FFAPlan<float>>
 compute_ffa_fourier_return_to_time(std::span<const float> ts_e,
                                    std::span<const float> ts_v,
-                                   const search::PulsarSearchConfig& cfg,
+                                   const search::FFASearchConfig& cfg,
                                    bool quiet,
                                    bool show_progress) {
     timing::ScopedLogLevel scoped_log_level(quiet);
@@ -451,7 +451,7 @@ compute_ffa_fourier_return_to_time(std::span<const float> ts_e,
 std::tuple<std::vector<float>, plans::FFAPlan<float>>
 compute_ffa_scores(std::span<const float> ts_e,
                    std::span<const float> ts_v,
-                   const search::PulsarSearchConfig& cfg,
+                   const search::FFASearchConfig& cfg,
                    bool quiet,
                    bool show_progress) {
     timing::ScopedLogLevel scoped_log_level(quiet);
@@ -479,13 +479,13 @@ template class FFA<ComplexType>;
 template std::tuple<std::vector<float>, plans::FFAPlan<float>>
 compute_ffa(std::span<const float>,
             std::span<const float>,
-            const search::PulsarSearchConfig&,
+            const search::FFASearchConfig&,
             bool,
             bool);
 template std::tuple<std::vector<ComplexType>, plans::FFAPlan<ComplexType>>
 compute_ffa(std::span<const float>,
             std::span<const float>,
-            const search::PulsarSearchConfig&,
+            const search::FFASearchConfig&,
             bool,
             bool);
 
