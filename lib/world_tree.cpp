@@ -355,8 +355,9 @@ void WorldTree<FoldType>::add_initial(std::span<const double> leaves_batch,
                                       SizeType slots_to_write) {
     error_check::check_less_equal(slots_to_write, m_capacity,
                                   "WorldTree: Suggestions too large to add.");
-    error_check::check_equal(slots_to_write, scores_batch.size(),
-                             "slots_to_write must match batch_scores size");
+    error_check::check_greater_equal(
+        scores_batch.size(), slots_to_write,
+        "add_initial: scores_batch smaller than slots_to_write");
 
     reset(); // Start fresh
     std::copy_n(leaves_batch.begin(), slots_to_write * m_leaves_stride,
