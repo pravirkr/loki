@@ -191,19 +191,22 @@ private:
  * @param buf The candidate buffer to drain.
  * @param decode_table Per-chunk decode tables, indexed by region id.
  * @param writer The destination result file.
- * @param param_sets_scratch Staging buffer of size batch * (n_params + 1).
- * @param n_params Number of search parameters (excluding the width column).
+ * @param param_sets_scratch Staging buffer of size batch * n_params.
+ * @param width_scratch Staging buffer of size batch (width in bins).
+ * @param nbins_scratch Staging buffer of size batch (fold bins for chunk).
+ * @param n_params Number of search parameters.
  */
 inline void flush_candidates(CandidateBuffer& buf,
                              std::span<const RegionDecode> decode_table,
                              cands::FFAResultWriter& writer,
                              std::span<double> param_sets_scratch,
+                             std::span<std::uint16_t> width_scratch,
+                             std::span<std::uint16_t> nbins_scratch,
                              SizeType n_params) {
     if (buf.get_size() == 0) {
         return;
     }
-    const SizeType total_params = n_params + 1; // includes width
-    const SizeType batch_max    = param_sets_scratch.size() / total_params;
+    const SizeType batch_max = param_sets_scratch.size() / n_params;
     error_check::check_greater(batch_max, SizeType{0},
                                "flush_candidates: param_sets_scratch is too "
                                "small to hold a single candidate");
@@ -230,18 +233,20 @@ inline void flush_candidates(CandidateBuffer& buf,
             for (SizeType j = 0; j < n_params; ++j) {
                 const SizeType param_idx = remaining / dec.param_strides[j];
                 remaining -= param_idx * dec.param_strides[j];
-                param_sets_scratch[(k * total_params) + j] =
+                param_sets_scratch[(k * n_params) + j] =
                     psr_utils::get_param_val_at_idx(
                         dec.param_limits[j], dec.param_counts[j], param_idx);
             }
-            param_sets_scratch[(k * total_params) + n_params] =
-                static_cast<double>(dec.widths[width_idx]);
+            width_scratch[k] =
+                static_cast<std::uint16_t>(dec.widths[width_idx]);
+            nbins_scratch[k] = static_cast<std::uint16_t>(dec.nbins);
         }
 
         writer.write_results(
-            param_sets_scratch.first(batch_count * total_params),
-            scores.subspan(batch_start, batch_count), batch_count,
-            total_params);
+            param_sets_scratch.first(batch_count * n_params),
+            scores.subspan(batch_start, batch_count),
+            width_scratch.first(batch_count), nbins_scratch.first(batch_count),
+            batch_count, n_params);
         batch_start += batch_count;
     }
     buf.clear();

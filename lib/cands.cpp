@@ -484,117 +484,193 @@ void HarvestBuffer<FoldType>::push(std::span<const double> leaf,
 template class HarvestBuffer<float>;
 template class HarvestBuffer<ComplexType>;
 
+namespace {
+constexpr std::size_t kH5ChunkRows = 65536;
+constexpr int kH5DeflateLevel      = 3;
+
+HighFive::DataSetCreateProps make_row_chunk_props() {
+    HighFive::DataSetCreateProps props;
+    props.add(HighFive::Chunking({kH5ChunkRows}));
+    props.add(HighFive::Shuffle());
+    props.add(HighFive::Deflate(kH5DeflateLevel));
+    return props;
+}
+} // namespace
+
+HighFive::File FFAResultWriter::open_file() const {
+    HighFive::File::AccessMode open_mode;
+    if (m_mode == Mode::kWrite) {
+        open_mode = HighFive::File::Overwrite;
+    } else if (std::filesystem::exists(m_open_path)) {
+        open_mode = HighFive::File::ReadWrite;
+    } else {
+        open_mode = HighFive::File::Create;
+    }
+
+    HighFive::File file(m_open_path.string(), open_mode);
+    if (!file.isValid()) {
+        throw std::runtime_error("Failed to create valid HDF5 file");
+    }
+    return file;
+}
+
 // --- FFAResultWriter ---
 FFAResultWriter::FFAResultWriter(std::filesystem::path filename, Mode mode)
-    : m_filepath(std::move(filename)),
+    : m_final_path(std::move(filename)),
       m_mode(mode),
-      m_datasets_initialized(false),
-      m_file(open_file()) {}
-
-void FFAResultWriter::write_metadata(
-    const std::vector<std::string>& param_names,
-    SizeType nbins,
-    double ducy_max,
-    double wtsp) {
-    std::scoped_lock lock(m_hdf5_mutex);
-
-    if (m_file.exist("ffa_version")) {
-        throw std::runtime_error("FFA metadata already exists in file. Use "
-                                 "append mode or new file.");
+      m_open_path(m_mode == Mode::kWrite
+                      ? std::filesystem::path(m_final_path.string() + ".tmp")
+                      : m_final_path) {
+    if (m_mode == Mode::kWrite && std::filesystem::exists(m_open_path)) {
+        std::filesystem::remove(m_open_path);
     }
-    m_file.createAttribute("ffa_version", "1.0.0-cpp");
-    m_file.createAttribute("param_names", param_names);
-    m_file.createAttribute("nbins", nbins);
-    m_file.createAttribute("ducy_max", ducy_max);
-    m_file.createAttribute("wtsp", wtsp);
+    m_file.emplace(open_file());
+}
+
+FFAResultWriter::~FFAResultWriter() {
+    try {
+        if (!m_finalized) {
+            finalize();
+        }
+    } catch (...) {
+    }
+}
+
+void FFAResultWriter::ensure_datasets(SizeType n_params) {
+    if (m_datasets_initialized) {
+        return;
+    }
+    m_n_params = n_params;
+    const auto row_props = make_row_chunk_props();
+
+    HighFive::DataSpace snr_space({0}, {HighFive::DataSpace::UNLIMITED});
+    m_file->createDataSet("snr", snr_space,
+                          HighFive::create_datatype<float>(), row_props);
+
+    HighFive::DataSpace param_space({0, n_params},
+                                    {HighFive::DataSpace::UNLIMITED, n_params});
+    HighFive::DataSetCreateProps param_props;
+    param_props.add(HighFive::Chunking({kH5ChunkRows, n_params}));
+    param_props.add(HighFive::Shuffle());
+    param_props.add(HighFive::Deflate(kH5DeflateLevel));
+    m_file->createDataSet("param_sets", param_space,
+                          HighFive::create_datatype<double>(), param_props);
+
+    HighFive::DataSpace width_space({0}, {HighFive::DataSpace::UNLIMITED});
+    m_file->createDataSet("width", width_space,
+                          HighFive::create_datatype<std::uint16_t>(), row_props);
+
+    HighFive::DataSpace nbins_space({0}, {HighFive::DataSpace::UNLIMITED});
+    m_file->createDataSet("nbins", nbins_space,
+                          HighFive::create_datatype<std::uint16_t>(), row_props);
+
+    m_datasets_initialized = true;
+}
+
+void FFAResultWriter::write_metadata(const FFAResultMetadata& metadata) {
+    std::scoped_lock lock(m_hdf5_mutex);
+    if (m_metadata_written) {
+        throw std::runtime_error("FFA metadata already written.");
+    }
+    ensure_datasets(metadata.param_names.size());
+
+    m_file->createAttribute("ffa_version", "0.1.0-cpp");
+    m_file->createAttribute("complete", static_cast<int>(0));
+    m_file->createAttribute("param_names", metadata.param_names);
+    m_file->createAttribute("config_toml", metadata.config_toml);
+    m_file->createAttribute("tsamp", metadata.tsamp);
+    m_file->createAttribute("nsamps", metadata.nsamps);
+    m_file->createAttribute("tobs", metadata.tobs);
+    m_file->createAttribute("f_min", metadata.f_min);
+    m_file->createAttribute("f_max", metadata.f_max);
+    m_file->createAttribute("snr_min", metadata.snr_min);
+    m_file->createAttribute("ducy_max", metadata.ducy_max);
+    m_file->createAttribute("wtsp", metadata.wtsp);
+    m_file->createAttribute("nbins_min", metadata.nbins_min);
+    m_file->createAttribute("nbins_max", metadata.nbins_max);
+    m_file->createAttribute("octave_scale", metadata.octave_scale);
+    m_file->createAttribute("eta", metadata.eta);
+    m_file->createAttribute("use_fourier", metadata.use_fourier);
+    if (metadata.bseg_brute.has_value()) {
+        m_file->createAttribute("bseg_brute", *metadata.bseg_brute);
+    }
+    if (metadata.bseg_ffa.has_value()) {
+        m_file->createAttribute("bseg_ffa", *metadata.bseg_ffa);
+    }
+    m_metadata_written = true;
 }
 
 void FFAResultWriter::write_results(std::span<const double> param_sets,
                                     std::span<const float> scores,
+                                    std::span<const std::uint16_t> widths_bins,
+                                    std::span<const std::uint16_t> nbins,
                                     SizeType n_param_sets,
                                     SizeType n_params) {
     if (n_param_sets == 0) {
         return;
     }
     std::scoped_lock lock(m_hdf5_mutex);
+    ensure_datasets(n_params);
 
-    // Validate param_sets dimensions
-    if (!param_sets.empty()) {
-        const auto expected_size = n_param_sets * n_params;
-        if (param_sets.size() != expected_size) {
-            throw std::invalid_argument(std::format(
-                "param_sets size does not match the expected dimension: {} != "
-                "({} * {})",
-                param_sets.size(), n_param_sets, n_params));
-        }
+    if (param_sets.size() != n_param_sets * n_params) {
+        throw std::invalid_argument(std::format(
+            "param_sets size does not match ({} != {} * {})", param_sets.size(),
+            n_param_sets, n_params));
+    }
+    if (scores.size() != n_param_sets || widths_bins.size() != n_param_sets ||
+        nbins.size() != n_param_sets) {
+        throw std::invalid_argument(
+            "scores/width/nbins length must match n_param_sets");
     }
 
-    if (!m_datasets_initialized) {
-        // Initialize datasets for the first time
-        HighFive::DataSpace snr_space({n_param_sets},
-                                      {HighFive::DataSpace::UNLIMITED});
-        HighFive::DataSetCreateProps snr_props;
-        snr_props.add(HighFive::Chunking({std::min(1024UL, n_param_sets)}));
-        snr_props.add(HighFive::Deflate(9));
-        auto snr_dset = m_file.createDataSet(
-            "snr", snr_space, HighFive::create_datatype<float>(), snr_props);
-        snr_dset.write_raw(scores.data(), HighFive::create_datatype<float>());
+    auto append_1d = [&](const std::string& name, const void* data,
+                         const HighFive::DataType& dtype) {
+        auto dset           = m_file->getDataSet(name);
+        const auto old_dims = dset.getSpace().getDimensions();
+        const auto old_rows = old_dims.empty() ? 0UL : old_dims[0];
+        dset.resize({old_rows + n_param_sets});
+        dset.select({old_rows}, {n_param_sets}).write_raw(data, dtype);
+    };
 
-        HighFive::DataSpace param_sets_space(
-            {n_param_sets, n_params},
-            {HighFive::DataSpace::UNLIMITED, n_params});
-        HighFive::DataSetCreateProps param_props;
-        if (!param_sets.empty()) {
-            param_props.add(
-                HighFive::Chunking({std::min(1024UL, n_param_sets), n_params}));
-            param_props.add(HighFive::Deflate(9));
-        }
-        auto param_sets_dset = m_file.createDataSet(
-            "param_sets", param_sets_space, HighFive::create_datatype<double>(),
-            param_props);
-        if (!param_sets.empty()) {
-            // This allows writing flat data directly to multidimensional
-            // datasets
-            param_sets_dset.write_raw(param_sets.data(),
-                                      HighFive::create_datatype<double>());
-        }
-        m_datasets_initialized = true;
-    } else {
-        // Append to existing datasets
-        auto snr_dset           = m_file.getDataSet("snr");
-        auto old_snr_dims       = snr_dset.getSpace().getDimensions();
-        size_t old_n_param_sets = old_snr_dims[0];
-        snr_dset.resize({old_n_param_sets + n_param_sets});
-        snr_dset.select({old_n_param_sets}, {n_param_sets})
-            .write_raw(scores.data(), HighFive::create_datatype<float>());
-        auto param_sets_dset = m_file.getDataSet("param_sets");
-        param_sets_dset.resize({old_n_param_sets + n_param_sets, n_params});
-        param_sets_dset.select({old_n_param_sets, 0}, {n_param_sets, n_params})
-            .write_raw(param_sets.data(), HighFive::create_datatype<double>());
+    append_1d("snr", scores.data(), HighFive::create_datatype<float>());
+    append_1d("width", widths_bins.data(),
+              HighFive::create_datatype<std::uint16_t>());
+    append_1d("nbins", nbins.data(), HighFive::create_datatype<std::uint16_t>());
+
+    auto param_dset       = m_file->getDataSet("param_sets");
+    const auto old_dims   = param_dset.getSpace().getDimensions();
+    const auto old_rows   = old_dims.empty() ? 0UL : old_dims[0];
+    param_dset.resize({old_rows + n_param_sets, n_params});
+    param_dset.select({old_rows, 0}, {n_param_sets, n_params})
+        .write_raw(param_sets.data(), HighFive::create_datatype<double>());
+}
+
+void FFAResultWriter::finalize() {
+    if (m_finalized) {
+        return;
     }
+    std::scoped_lock lock(m_hdf5_mutex);
+    if (m_mode == Mode::kWrite) {
+        if (!m_metadata_written) {
+            throw std::runtime_error(
+                "FFAResultWriter::finalize called before write_metadata");
+        }
+        if (m_file->hasAttribute("complete")) {
+            m_file->getAttribute("complete").write(static_cast<int>(1));
+        } else {
+            m_file->createAttribute("complete", static_cast<int>(1));
+        }
+        m_file->flush();
+        m_file.reset();
+        std::filesystem::rename(m_open_path, m_final_path);
+    }
+    m_finalized = true;
 }
 
 void FFAResultWriter::write_ffa_stats(const FFAStatsCollection& ffa_stats) {
     std::lock_guard<std::mutex> lock(m_hdf5_mutex);
-    m_file.createDataSet("timer_stats", ffa_stats.get_packed_data());
-    m_file.createAttribute("flops", ffa_stats.get_flops());
-}
-
-HighFive::File FFAResultWriter::open_file() const {
-    HighFive::File::AccessMode open_mode;
-    if (m_mode == Mode::kWrite) {
-        open_mode = HighFive::File::Overwrite;
-    } else if (std::filesystem::exists(m_filepath)) {
-        open_mode = HighFive::File::ReadWrite;
-    } else {
-        open_mode = HighFive::File::Create;
-    }
-
-    HighFive::File file(m_filepath.string(), open_mode);
-    if (!file.isValid()) {
-        throw std::runtime_error("Failed to create valid HDF5 file");
-    }
-    return file;
+    m_file->createDataSet("timer_stats", ffa_stats.get_packed_data());
+    m_file->createAttribute("flops", ffa_stats.get_flops());
 }
 
 // --- PruneResultWriter ---

@@ -16,6 +16,7 @@
 
 using loki::ParamLimit;
 using loki::SizeType;
+using loki::cands::FFAResultMetadata;
 using loki::algorithms::CandidateBuffer;
 using loki::algorithms::FFAFreqSweep;
 using loki::algorithms::flush_candidates;
@@ -53,12 +54,16 @@ std::vector<RegionDecode> make_decode_table() {
 struct WrittenResults {
     std::vector<double> param_sets;
     std::vector<float> snr;
+    std::vector<std::uint16_t> width;
+    std::vector<std::uint16_t> nbins;
 };
 
 WrittenResults read_results(const std::filesystem::path& path) {
     const HighFive::File file(path.string(), HighFive::File::ReadOnly);
     WrittenResults out;
     file.getDataSet("snr").read(out.snr);
+    file.getDataSet("width").read(out.width);
+    file.getDataSet("nbins").read(out.nbins);
     std::vector<std::vector<double>> rows;
     file.getDataSet("param_sets").read(rows);
     for (const auto& row : rows) {
@@ -75,22 +80,33 @@ WrittenResults run_sweep(SizeType capacity,
     CandidateBuffer buf(capacity);
     auto writer = loki::cands::FFAResultWriter(
         path, loki::cands::FFAResultWriter::Mode::kWrite);
-    writer.write_metadata({"freq", "width"}, table[0].nbins, 0.2, 1.5);
+    FFAResultMetadata meta;
+    meta.param_names = {"freq"};
+    meta.nbins_min   = table[0].nbins;
+    meta.nbins_max   = table[0].nbins;
+    meta.ducy_max    = 0.2;
+    meta.wtsp        = 1.5;
+    writer.write_metadata(meta);
 
     constexpr SizeType kNParams = 1;
-    std::vector<double> scratch(64 * (kNParams + 1));
+    std::vector<double> scratch(64 * kNParams);
+    std::vector<std::uint16_t> width_scratch(64);
+    std::vector<std::uint16_t> nbins_scratch(64);
 
     for (SizeType region = 0; region < table.size(); ++region) {
         const auto n_scores = table[region].get_n_scores();
         for (SizeType s = 0; s < n_scores; ++s) {
             if (buf.is_full()) {
-                flush_candidates(buf, table, writer, scratch, kNParams);
+                flush_candidates(buf, table, writer, scratch, width_scratch,
+                                 nbins_scratch, kNParams);
             }
             buf.push(static_cast<float>(s) + (100.0F * region),
                      static_cast<uint32_t>(s), static_cast<uint32_t>(region));
         }
     }
-    flush_candidates(buf, table, writer, scratch, kNParams);
+    flush_candidates(buf, table, writer, scratch, width_scratch, nbins_scratch,
+                     kNParams);
+    writer.finalize();
     return read_results(path);
 }
 
@@ -103,10 +119,18 @@ WrittenResults run_sweep_bulk(SizeType capacity,
     CandidateBuffer buf(capacity);
     auto writer = loki::cands::FFAResultWriter(
         path, loki::cands::FFAResultWriter::Mode::kWrite);
-    writer.write_metadata({"freq", "width"}, table[0].nbins, 0.2, 1.5);
+    FFAResultMetadata meta;
+    meta.param_names = {"freq"};
+    meta.nbins_min   = table[0].nbins;
+    meta.nbins_max   = table[0].nbins;
+    meta.ducy_max    = 0.2;
+    meta.wtsp        = 1.5;
+    writer.write_metadata(meta);
 
     constexpr SizeType kNParams = 1;
-    std::vector<double> scratch(64 * (kNParams + 1));
+    std::vector<double> scratch(64 * kNParams);
+    std::vector<std::uint16_t> width_scratch(64);
+    std::vector<std::uint16_t> nbins_scratch(64);
 
     for (SizeType region = 0; region < table.size(); ++region) {
         const auto n_passing = table[region].get_n_scores();
@@ -120,7 +144,8 @@ WrittenResults run_sweep_bulk(SizeType capacity,
         SizeType copied = 0;
         while (copied < n_passing) {
             if (buf.is_full()) {
-                flush_candidates(buf, table, writer, scratch, kNParams);
+                flush_candidates(buf, table, writer, scratch, width_scratch,
+                                 nbins_scratch, kNParams);
             }
             const SizeType n = std::min(buf.get_space(), n_passing - copied);
             std::copy_n(scores.begin() + static_cast<loki::IndexType>(copied),
@@ -131,7 +156,9 @@ WrittenResults run_sweep_bulk(SizeType capacity,
             copied += n;
         }
     }
-    flush_candidates(buf, table, writer, scratch, kNParams);
+    flush_candidates(buf, table, writer, scratch, width_scratch, nbins_scratch,
+                     kNParams);
+    writer.finalize();
     return read_results(path);
 }
 
@@ -275,8 +302,7 @@ TEST_CASE("A real multi-chunk sweep is unaffected by accumulator capacity",
     const auto best = std::ranges::max_element(single.snr);
     const auto best_row =
         static_cast<SizeType>(std::distance(single.snr.begin(), best));
-    const SizeType n_cols = single.param_sets.size() / single.snr.size();
-    const double best_f0  = single.param_sets[best_row * n_cols];
+    const double best_f0 = single.param_sets[best_row];
     REQUIRE(std::abs(best_f0 - kInjectedF0) < 1.0);
 
     const auto tmp = std::filesystem::temp_directory_path();
@@ -296,21 +322,19 @@ TEST_CASE("Candidates decode against their own chunk's width set",
     }
     const auto written = run_sweep(total, table, path);
 
-    // Row layout is [freq, width]; chunk 0 has 5 widths and chunk 1 has 2, so
-    // decoding both with a single width count would mislabel one of them.
     const auto& wide = table[0];
     for (SizeType s = 0; s < wide.get_n_scores(); ++s) {
-        const auto expected_width =
-            static_cast<double>(wide.widths[s % wide.n_widths]);
-        REQUIRE(written.param_sets[(s * 2) + 1] == expected_width);
+        const auto expected_width = wide.widths[s % wide.n_widths];
+        REQUIRE(written.width[s] == expected_width);
+        REQUIRE(written.nbins[s] == wide.nbins);
     }
 
     const auto& narrow = table[1];
     const auto offset  = wide.get_n_scores();
     for (SizeType s = 0; s < narrow.get_n_scores(); ++s) {
-        const auto expected_width =
-            static_cast<double>(narrow.widths[s % narrow.n_widths]);
-        REQUIRE(written.param_sets[((offset + s) * 2) + 1] == expected_width);
+        const auto expected_width = narrow.widths[s % narrow.n_widths];
+        REQUIRE(written.width[offset + s] == expected_width);
+        REQUIRE(written.nbins[offset + s] == narrow.nbins);
     }
 
     std::filesystem::remove(path);

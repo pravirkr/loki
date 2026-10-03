@@ -137,8 +137,12 @@ void snr_boxcar_impl(const float* __restrict__ folds,
                 const float* __restrict__ ts_v_ptr = folds + base_idx + nbins;
                 float* __restrict__ fold_work_ptr  = fold_work.data();
                 for (SizeType j = 0; j < nbins; ++j) {
-                    const float inv_sqrt_v = 1.0F / std::sqrt(ts_v_ptr[j]);
-                    fold_work_ptr[j]       = ts_e_ptr[j] * inv_sqrt_v;
+                    const float v = ts_v_ptr[j];
+                    if (v <= 0.0F || !utils::is_finite(v)) {
+                        fold_work_ptr[j] = 0.0F;
+                    } else {
+                        fold_work_ptr[j] = ts_e_ptr[j] / std::sqrt(v);
+                    }
                 }
                 fold_ptr = fold_work_ptr;
             } else {
@@ -195,7 +199,12 @@ snr_boxcar_3d_max_with_cache_impl(const float* __restrict__ arr,
         const float* __restrict__ ts_e_ptr = arr + base_idx;
         const float* __restrict__ ts_v_ptr = arr + base_idx + nbins;
         for (SizeType j = 0; j < nbins; ++j) {
-            fold_norm[j] = ts_e_ptr[j] / std::sqrt(ts_v_ptr[j]);
+            const float v = ts_v_ptr[j];
+            if (v <= 0.0F || !utils::is_finite(v)) {
+                fold_norm[j] = 0.0F;
+            } else {
+                fold_norm[j] = ts_e_ptr[j] / std::sqrt(v);
+            }
         }
         utils::circular_prefix_sum(fold_norm, psum, nbins, nbins + wmax);
         const float sum = psum[nbins - 1];
@@ -209,7 +218,7 @@ snr_boxcar_3d_max_with_cache_impl(const float* __restrict__ arr,
             max_snr = std::max(max_snr, snr);
         }
         out[i] = max_snr;
-        if (do_filter && (max_snr >= threshold)) {
+        if (do_filter && utils::score_passes_threshold(max_snr, threshold)) {
             indices_filtered[nprofiles_passing] = i;
             ++nprofiles_passing;
         }

@@ -30,7 +30,8 @@ void ffa_taylor_resolve_freq_batch(SizeType n_freqs_cur,
                                    std::span<coord::FFACoordFreq> coords,
                                    SizeType ffa_level,
                                    double tseg_brute,
-                                   SizeType nbins);
+                                   SizeType nbins,
+                                   int nthreads);
 
 void ffa_taylor_resolve_poly_batch(
     std::span<const SizeType> param_grid_count_cur,
@@ -41,7 +42,8 @@ void ffa_taylor_resolve_poly_batch(
     SizeType latter,
     double tseg_brute,
     SizeType nbins,
-    SizeType n_params);
+    SizeType n_params,
+    int nthreads);
 
 #ifdef LOKI_ENABLE_CUDA
 

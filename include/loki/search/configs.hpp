@@ -42,7 +42,7 @@ struct FFATomlConfig {
     // [performance]
     std::optional<SizeType> nsamps;
     std::optional<double> tsamp;
-    int nthreads{1};
+    int nthreads{0}; // 0 = hardware concurrency
     double max_process_memory_gb{8.0};
     double octave_scale{2.0};
     SizeType nbins_max{1024};
@@ -146,7 +146,7 @@ public:
     SizeType get_n_boxcar_kadane_biases() const noexcept;
 
     // --- Setters ---
-    void set_max_process_memory_gb(double max_process_memory_gb) noexcept;
+    void set_max_process_memory_gb(double max_process_memory_gb);
 
     // --- Methods ---
     [[nodiscard]] std::vector<double>

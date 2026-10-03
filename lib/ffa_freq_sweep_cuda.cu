@@ -1,6 +1,8 @@
 #include "loki/pipelines/ffa_freq_sweep.hpp"
 
 #include <algorithm>
+#include <cstdint>
+#include <numeric>
 #include <type_traits>
 #include <vector>
 
@@ -35,7 +37,8 @@ public:
     virtual void execute(std::span<const float> ts_e,
                          std::span<const float> ts_v,
                          const std::filesystem::path& outdir,
-                         std::string_view file_prefix) = 0;
+                         std::string_view file_prefix,
+                         std::string_view config_toml) = 0;
 };
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
@@ -72,7 +75,15 @@ public:
         m_indices_staging.resize(scratch_size);
         m_write_param_sets_batch.resize(
             planner_stats.get_write_param_sets_size());
+        m_width_batch.resize(regions::kFFAFreqSweepWriteBatchSize);
+        m_nbins_batch.resize(regions::kFFAFreqSweepWriteBatchSize);
         m_ffa_stats = std::make_unique<cands::FFAStatsCollection>();
+        cuda_utils::check_cuda_call(cudaStreamCreate(&m_stream),
+                                    "cudaStreamCreate failed");
+        if (m_base_cfg.get_use_boxcar_kadane()) {
+            throw std::invalid_argument(
+                "use_boxcar_kadane is not supported for FFA frequency sweep");
+        }
 
         m_fold_time_d.resize(planner_stats.get_max_buffer_size_time());
         // The filter kernel claims output slots with an unbounded atomic, so
@@ -93,7 +104,11 @@ public:
                      m_region_planner.get_nregions(), m_cands.get_capacity());
     }
 
-    ~FFAFreqSweepCUDATypedImpl() final                          = default;
+    ~FFAFreqSweepCUDATypedImpl() final {
+        if (m_stream != nullptr) {
+            cudaStreamDestroy(m_stream);
+        }
+    }
     FFAFreqSweepCUDATypedImpl(const FFAFreqSweepCUDATypedImpl&) = delete;
     FFAFreqSweepCUDATypedImpl&
     operator=(const FFAFreqSweepCUDATypedImpl&)                       = delete;
@@ -103,7 +118,8 @@ public:
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
                  const std::filesystem::path& outdir,
-                 std::string_view file_prefix) override {
+                 std::string_view file_prefix,
+                 std::string_view config_toml) override {
         timing::SimpleTimer timer;
         cands::FFATimerStats ffa_timer_stats_pipeline;
         timer.start();
@@ -118,13 +134,28 @@ public:
             outdir / std::format("{}_results.h5", filebase);
         auto writer = cands::FFAResultWriter(
             result_file, cands::FFAResultWriter::Mode::kWrite);
-        auto param_names = m_base_cfg.get_param_names();
-        param_names.emplace_back("width");
-        writer.write_metadata(param_names, m_base_cfg.get_nbins(),
-                              m_base_cfg.get_ducy_max(), m_base_cfg.get_wtsp());
+        cands::FFAResultMetadata meta;
+        meta.param_names  = m_base_cfg.get_param_names();
+        meta.config_toml  = std::string(config_toml);
+        meta.tsamp        = m_base_cfg.get_tsamp();
+        meta.nsamps       = m_base_cfg.get_nsamps();
+        meta.tobs         = m_base_cfg.get_tobs();
+        meta.f_min        = m_base_cfg.get_f_min();
+        meta.f_max        = m_base_cfg.get_f_max();
+        meta.snr_min      = m_base_cfg.get_snr_min();
+        meta.ducy_max     = m_base_cfg.get_ducy_max();
+        meta.wtsp         = m_base_cfg.get_wtsp();
+        meta.nbins_min    = m_base_cfg.get_nbins();
+        meta.nbins_max    = m_base_cfg.get_nbins_max();
+        meta.octave_scale = m_base_cfg.get_octave_scale();
+        meta.eta          = m_base_cfg.get_eta();
+        meta.use_fourier  = m_base_cfg.get_use_fourier();
+        meta.bseg_brute   = std::optional{m_base_cfg.get_bseg_brute()};
+        meta.bseg_ffa     = std::optional{m_base_cfg.get_bseg_ffa()};
+        writer.write_metadata(meta);
 
         // Copy input data to device
-        cudaStream_t stream = nullptr;
+        cudaStream_t stream = m_stream;
         m_ts_e_d.resize(ts_e.size());
         m_ts_v_d.resize(ts_v.size());
         cuda_utils::check_cuda_call(
@@ -162,11 +193,13 @@ public:
         // Drain whatever is still in RAM
         timer.start();
         flush_candidates(m_cands, m_region_decode, writer,
-                         m_write_param_sets_batch, m_base_cfg.get_nparams());
+                         m_write_param_sets_batch, m_width_batch, m_nbins_batch,
+                         m_base_cfg.get_nparams());
         ffa_timer_stats_pipeline["io"] += timer.stop();
         m_ffa_stats->update_stats(ffa_timer_stats_pipeline,
                                   static_cast<float>(accumulated_flops));
         writer.write_ffa_stats(*m_ffa_stats);
+        writer.finalize();
         spdlog::info("FFA Freq Sweep complete: {} candidates above S/N {:.2f}",
                      m_total_passing_scores, m_base_cfg.get_snr_min());
         spdlog::info("FFA Freq Sweep: timer: {}",
@@ -187,7 +220,10 @@ private:
     // Host staging for one chunk's compacted device output.
     std::vector<float> m_scores_staging;
     std::vector<uint32_t> m_indices_staging;
-    std::vector<double> m_write_param_sets_batch; // includes width
+    std::vector<double> m_write_param_sets_batch;
+    std::vector<std::uint16_t> m_width_batch;
+    std::vector<std::uint16_t> m_nbins_batch;
+    cudaStream_t m_stream{nullptr};
 
     std::unique_ptr<cands::FFAStatsCollection> m_ffa_stats;
     // Persistent input/output buffers
@@ -254,6 +290,8 @@ private:
         the_ffa.execute(
             cuda_utils::as_span(m_ts_e_d), cuda_utils::as_span(m_ts_v_d),
             cuda_utils::as_span(m_fold_time_d, buffer_size_time), stream);
+        cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
+                                    "FFA chunk synchronization failed");
         const auto brutefold_time = the_ffa.get_brute_fold_timing();
         ffa_timer_stats["brutefold"] += brutefold_time;
         ffa_timer_stats["ffa"] += timer.stop() - brutefold_time;
@@ -321,12 +359,26 @@ private:
         cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
                                     "stream synchronization failed");
 
+        std::vector<uint32_t> order(n_passing);
+        std::iota(order.begin(), order.end(), 0U);
+        std::ranges::sort(order, [&](uint32_t a, uint32_t b) {
+            return m_indices_staging[a] < m_indices_staging[b];
+        });
+        std::vector<float> scores_sorted(n_passing);
+        std::vector<uint32_t> indices_sorted(n_passing);
+        for (SizeType i = 0; i < n_passing; ++i) {
+            scores_sorted[i]  = m_scores_staging[order[i]];
+            indices_sorted[i] = m_indices_staging[order[i]];
+        }
+        m_scores_staging.swap(scores_sorted);
+        m_indices_staging.swap(indices_sorted);
+
         SizeType copied = 0;
         while (copied < n_passing) {
             if (m_cands.is_full()) {
                 flush_candidates(m_cands, m_region_decode, writer,
-                                 m_write_param_sets_batch,
-                                 m_base_cfg.get_nparams());
+                                 m_write_param_sets_batch, m_width_batch,
+                                 m_nbins_batch, m_base_cfg.get_nparams());
             }
             const SizeType chunk =
                 std::min(m_cands.get_space(), n_passing - copied);
@@ -373,7 +425,8 @@ FFAFreqSweepCUDA::operator=(FFAFreqSweepCUDA&& other) noexcept = default;
 void FFAFreqSweepCUDA::execute(std::span<const float> ts_e,
                                std::span<const float> ts_v,
                                const std::filesystem::path& outdir,
-                               std::string_view file_prefix) {
-    m_impl->execute(ts_e, ts_v, outdir, file_prefix);
+                               std::string_view file_prefix,
+                               std::string_view config_toml) {
+    m_impl->execute(ts_e, ts_v, outdir, file_prefix, config_toml);
 }
 } // namespace loki::algorithms

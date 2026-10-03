@@ -66,16 +66,14 @@ TEST_CASE("generate_ffa_regions rejects f_max at/above the Nyquist frequency",
     // this silently truncated nbins_cur to 0, propagating division-by-zero
     // (inf/nan) through every downstream region instead of failing clearly.
     constexpr double kTsamp = 1e-3;
-    REQUIRE_THROWS_AS(
-        generate_ffa_regions(/*p_min=*/2.0 * kTsamp, /*p_max=*/1.0, kTsamp, 32,
-                             1.0),
-        std::runtime_error);
+    REQUIRE_THROWS_AS(generate_ffa_regions(/*p_min=*/2.0 * kTsamp,
+                                           /*p_max=*/1.0, kTsamp, 32, 1.0),
+                      std::runtime_error);
     // Comfortably above the Nyquist limit must still throw if it can't
     // resolve at least 2 samples per bin for the requested nbins_min.
-    REQUIRE_THROWS_AS(
-        generate_ffa_regions(/*p_min=*/1.5 * kTsamp, /*p_max=*/1.0, kTsamp, 32,
-                             1.0),
-        std::runtime_error);
+    REQUIRE_THROWS_AS(generate_ffa_regions(/*p_min=*/1.5 * kTsamp,
+                                           /*p_max=*/1.0, kTsamp, 32, 1.0),
+                      std::runtime_error);
     // Comfortably above both Nyquist and nbins_min*tsamp must succeed.
     REQUIRE_NOTHROW(generate_ffa_regions(/*p_min=*/40.0 * kTsamp,
                                          /*p_max=*/1.0, kTsamp, 32, 1.0));
@@ -136,7 +134,7 @@ TEST_CASE("FFARegionPlanner fails fast with an actionable diagnostic when "
     try {
         FFARegionPlanner<ComplexType> planner(cfg);
     } catch (const std::runtime_error& err) {
-        threw                  = true;
+        threw                 = true;
         const std::string msg = err.what();
         CHECK_THAT(msg, ContainsSubstring("Cannot fit minimum viable chunk"));
         CHECK_THAT(msg, ContainsSubstring("drift"));
@@ -149,8 +147,8 @@ TEST_CASE("FFARegionPlanner succeeds for a modest, physically reasonable "
           "[regions]") {
     // Regression guard: a small, realistic search should still plan
     // successfully after the hardening changes above.
-    constexpr SizeType kNsamps = 1U << 14U; // 16384 samples
-    constexpr double kTsamp    = 1e-3;      // tobs ~= 16.384 s
+    constexpr SizeType kNsamps                 = 1U << 14U; // 16384 samples
+    constexpr double kTsamp                    = 1e-3;      // tobs ~= 16.384 s
     const std::vector<ParamLimit> param_limits = {
         {.min = -10.0, .max = 10.0}, // acceleration (m/s^2), realistic
         {.min = 1.0, .max = 20.0},   // frequency (Hz); p_min >= nbins*tsamp
@@ -168,7 +166,7 @@ TEST_CASE("FFARegionPlanner does not fail for drift above the suspicious "
     // above the 1% "suspicious" warning threshold but nowhere near the
     // 100%-of-c hard error: this must only warn, never throw.
     constexpr SizeType kNsamps = 1U << 14U;
-    constexpr double kTsamp    = 100.0 / static_cast<double>(kNsamps); // tobs=100s
+    constexpr double kTsamp = 100.0 / static_cast<double>(kNsamps); // tobs=100s
     constexpr double kAccel = 299800.0; // m/s^2 (unphysically large, by design)
     const std::vector<ParamLimit> param_limits = {
         {.min = -kAccel, .max = kAccel},
@@ -212,17 +210,19 @@ TEST_CASE("FFARegionPlanner splits a band when the full range exceeds memory",
         {.min = -200.0, .max = 200.0},
         {.min = 40.0, .max = 80.0},
     };
-    // 0.7 GB cap -> 0.2 GB effective after the 0.5 GB safety margin. The
-    // full [40, 80] Hz band is ~0.39 GB, so the planner must bisect.
+    // 0.65 GB cap forces bisection once workspace + ts are accounted for.
     const PulsarSearchConfig cfg(kNsamps, kTsamp, /*nbins=*/32, /*eta=*/0.25,
-                                 param_limits, 0.2, 1.5, true, 1, 0.7);
+                                 param_limits, 0.2, 1.5, true, 1, 0.65);
 
     const auto bands =
         generate_ffa_regions(1.0 / 80.0, 1.0 / 40.0, kTsamp, 32, 0.25, 2.0);
     REQUIRE(bands.size() == 1);
     FFARegionPlanner<ComplexType> planner(cfg);
     REQUIRE(planner.get_nregions() > 1);
-    constexpr double kEffectiveLimitGB = 0.7 - 0.5;
+    const double k_input_gb =
+        (static_cast<double>(kNsamps) * 2.0 * sizeof(float)) /
+        static_cast<double>(1ULL << 30U);
+    const double k_sweep_budget_gb = 0.65 - 0.5 - k_input_gb;
     CHECK(planner.get_stats().get_freq_sweep_memory_usage() <=
-          kEffectiveLimitGB + 1.0e-6);
+          k_sweep_budget_gb + 1.0e-3);
 }

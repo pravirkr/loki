@@ -85,13 +85,15 @@ struct FFAPlanBase::Impl {
             core::ffa_taylor_resolve_poly_batch(
                 param_counts[i_level], param_counts[i_level - 1],
                 m_cfg.get_param_limits(), coords_span, i_level, 0,
-                m_cfg.get_tseg_brute(), m_cfg.get_nbins(), n_params);
+                m_cfg.get_tseg_brute(), m_cfg.get_nbins(), n_params,
+                m_cfg.get_nthreads());
 
             // Head coordinates
             core::ffa_taylor_resolve_poly_batch(
                 param_counts[i_level], param_counts[i_level - 1],
                 m_cfg.get_param_limits(), coords_span, i_level, 1,
-                m_cfg.get_tseg_brute(), m_cfg.get_nbins(), n_params);
+                m_cfg.get_tseg_brute(), m_cfg.get_nbins(), n_params,
+                m_cfg.get_nthreads());
         }
     }
     std::vector<std::vector<coord::FFACoord>> resolve_coordinates() {
@@ -129,7 +131,7 @@ struct FFAPlanBase::Impl {
             core::ffa_taylor_resolve_freq_batch(
                 param_counts[i_level][0], param_counts[i_level - 1][0],
                 m_cfg.get_param_limits()[0], coords_freq_span, i_level,
-                m_cfg.get_tseg_brute(), m_cfg.get_nbins());
+                m_cfg.get_tseg_brute(), m_cfg.get_nbins(), m_cfg.get_nthreads());
         }
     }
 

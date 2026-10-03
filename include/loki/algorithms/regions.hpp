@@ -63,7 +63,8 @@ public:
                    SizeType n_samps,
                    SizeType max_passing_candidates,
                    bool use_fourier,
-                   bool use_gpu);
+                   bool use_gpu,
+                   SizeType max_brutefold_bytes = 0);
 
     ~FFARegionStats()                                    = default;
     FFARegionStats(FFARegionStats&&) noexcept            = default;
@@ -98,6 +99,10 @@ public:
     /// @brief Get the host memory usage of the score scratch, candidate
     /// accumulator and write staging (in GB).
     float get_extra_memory_usage() const noexcept;
+    /// @brief Peak BruteFold lookup-table bytes (shared across chunks).
+    float get_brutefold_memory_usage() const noexcept;
+    /// @brief Resident input timeseries (ts_e + ts_v) in GB.
+    float get_input_memory_usage() const noexcept;
     /// @brief Get the device memory usage of the timeseries and per-chunk
     /// score scratch (in GB). Excludes the host-side candidate accumulator.
     float get_device_extra_memory_usage() const noexcept;
@@ -121,6 +126,7 @@ private:
     SizeType m_max_passing_candidates;
     bool m_use_fourier;
     bool m_use_gpu;
+    SizeType m_max_brutefold_bytes{};
 };
 
 /**

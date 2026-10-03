@@ -420,6 +420,8 @@ private:
                     cuda::std::span<ComplexTypeCUDA>(init_buffer_d,
                                                      brute_fold_size_fourier),
                     nfft, m_cfg.get_nbins(), stream);
+                cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
+                                            "lossy brute fold sync failed");
                 m_brutefold_time += timer.stop();
                 return;
             }

@@ -305,6 +305,9 @@ FFATomlConfig::to_search_config(std::optional<SizeType> override_nsamps,
         limits.push_back({.min = f_min, .max = f_max});
     }
 
+    const int effective_nthreads =
+        nthreads <= 0 ? omp_get_max_threads() : nthreads;
+
     return {final_nsamps,
             final_tsamp,
             nbins,
@@ -313,7 +316,7 @@ FFATomlConfig::to_search_config(std::optional<SizeType> override_nsamps,
             ducy_max,
             wtsp,
             use_fourier,
-            nthreads,
+            effective_nthreads,
             max_process_memory_gb,
             octave_scale,
             nbins_max,
@@ -439,7 +442,7 @@ public:
         return m_boxcar_kadane_biases.size();
     }
 
-    void set_max_process_memory_gb(double max_process_memory_gb) noexcept {
+    void set_max_process_memory_gb(double max_process_memory_gb) {
         error_check::check_greater(max_process_memory_gb, 0,
                                    "max_process_memory_gb must be positive");
         m_max_process_memory_gb = max_process_memory_gb;
@@ -554,6 +557,10 @@ private:
         error_check::check_greater(m_tsamp, 0, "tsamp must be positive");
         error_check::check_greater(m_eta, 0,
                                    "eta (tolerance bins) must be positive");
+        error_check::check_greater(m_ducy_max, 0.0, "ducy_max must be positive");
+        error_check::check_less_equal(m_ducy_max, 1.0,
+                                      "ducy_max must be <= 1.0");
+        error_check::check_greater(m_wtsp, 1.0, "wtsp must be > 1.0");
         error_check::check_greater(m_max_process_memory_gb, 0,
                                    "max_process_memory_gb must be positive");
         error_check::check_greater_equal(
@@ -744,7 +751,7 @@ SizeType FFASearchConfig::get_n_boxcar_kadane_biases() const noexcept {
     return m_impl->get_n_boxcar_kadane_biases();
 }
 void FFASearchConfig::set_max_process_memory_gb(
-    double max_process_memory_gb) noexcept {
+    double max_process_memory_gb) {
     m_impl->set_max_process_memory_gb(max_process_memory_gb);
 }
 std::vector<double>

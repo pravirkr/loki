@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <memory>
 #include <span>
+#include <string_view>
 
 #include "loki/search/configs.hpp"
 
@@ -26,7 +27,8 @@ public:
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
                  const std::filesystem::path& outdir = "./",
-                 std::string_view file_prefix        = "test");
+                 std::string_view file_prefix        = "test",
+                 std::string_view config_toml        = {});
 
     // Opaque handle to the implementation
     class BaseImpl;
@@ -50,7 +52,8 @@ public:
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
                  const std::filesystem::path& outdir = "./",
-                 std::string_view file_prefix        = "test");
+                 std::string_view file_prefix        = "test",
+                 std::string_view config_toml        = {});
 
     // Opaque handle to the implementation
     class BaseImpl;

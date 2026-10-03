@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cstdint>
 #include <filesystem>
 #include <map>
 #include <mutex>
@@ -258,6 +259,27 @@ private:
 using HarvestBufferFloat   = HarvestBuffer<float>;
 using HarvestBufferComplex = HarvestBuffer<ComplexType>;
 
+/// Metadata written once at the start of an FFA frequency-sweep result file.
+struct FFAResultMetadata {
+    std::vector<std::string> param_names;
+    std::string config_toml;
+    double tsamp{};
+    SizeType nsamps{};
+    double tobs{};
+    double f_min{};
+    double f_max{};
+    double snr_min{};
+    double ducy_max{};
+    double wtsp{};
+    SizeType nbins_min{};
+    SizeType nbins_max{};
+    double octave_scale{};
+    double eta{};
+    bool use_fourier{};
+    std::optional<SizeType> bseg_brute;
+    std::optional<SizeType> bseg_ffa;
+};
+
 class FFAResultWriter {
 public:
     enum class Mode : std::uint8_t { kWrite, kAppend };
@@ -270,32 +292,38 @@ public:
      */
     explicit FFAResultWriter(std::filesystem::path filename,
                              Mode mode = Mode::kWrite);
-    ~FFAResultWriter() = default;
+    ~FFAResultWriter();
     // Disable copy/move constructors and operators
     FFAResultWriter(const FFAResultWriter&)            = delete;
     FFAResultWriter& operator=(const FFAResultWriter&) = delete;
     FFAResultWriter(FFAResultWriter&&)                 = delete;
     FFAResultWriter& operator=(FFAResultWriter&&)      = delete;
 
-    void write_metadata(const std::vector<std::string>& param_names,
-                        SizeType nbins,
-                        double ducy_max,
-                        double wtsp);
+    void write_metadata(const FFAResultMetadata& metadata);
 
     void write_results(std::span<const double> param_sets,
                        std::span<const float> scores,
+                       std::span<const std::uint16_t> widths_bins,
+                       std::span<const std::uint16_t> nbins,
                        SizeType n_param_sets,
                        SizeType n_params);
     void write_ffa_stats(const FFAStatsCollection& ffa_stats);
+    /// Commit the temporary file and atomically rename to the final path.
+    void finalize();
 
 private:
-    std::filesystem::path m_filepath;
+    std::filesystem::path m_final_path;
     Mode m_mode;
+    std::filesystem::path m_open_path;
     inline static std::mutex m_hdf5_mutex;
-    bool m_datasets_initialized;
+    bool m_datasets_initialized{false};
+    bool m_metadata_written{false};
+    bool m_finalized{false};
+    SizeType m_n_params{0};
 
-    HighFive::File m_file;
+    std::optional<HighFive::File> m_file;
     HighFive::File open_file() const;
+    void ensure_datasets(SizeType n_params);
 };
 
 class PruneResultWriter {

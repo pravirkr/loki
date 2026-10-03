@@ -17,6 +17,7 @@
 #include "loki/ffa_sweep_candidates.hpp"
 #include "loki/search/configs.hpp"
 #include "loki/timing.hpp"
+#include "loki/utils.hpp"
 #include "loki/utils/fft.hpp"
 #include "loki/utils/workspace.hpp"
 
@@ -34,7 +35,8 @@ public:
     virtual void execute(std::span<const float> ts_e,
                          std::span<const float> ts_v,
                          const std::filesystem::path& outdir,
-                         std::string_view file_prefix) = 0;
+                         std::string_view file_prefix,
+                         std::string_view config_toml) = 0;
 };
 
 namespace {
@@ -67,8 +69,16 @@ public:
         m_scores_chunk.resize(planner_stats.get_max_scores_scratch_size());
         m_write_param_sets_batch.resize(
             planner_stats.get_write_param_sets_size());
+        m_width_batch.resize(regions::kFFAFreqSweepWriteBatchSize);
+        m_nbins_batch.resize(regions::kFFAFreqSweepWriteBatchSize);
         m_fold_time.resize(planner_stats.get_max_buffer_size_time());
         validate_scratch_sizes();
+
+        if (m_base_cfg.get_use_boxcar_kadane()) {
+            throw std::invalid_argument(
+                "use_boxcar_kadane is not supported for FFA frequency sweep "
+                "(multi-width boxcar decoding is required)");
+        }
 
         // Log the actual memory usage for the allocated buffers
         spdlog::info("FFAFreqSweep allocated {:.2f} GB ({:.2f} GB buffers "
@@ -91,7 +101,8 @@ public:
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
                  const std::filesystem::path& outdir,
-                 std::string_view file_prefix) override {
+                 std::string_view file_prefix,
+                 std::string_view config_toml = {}) override {
         timing::SimpleTimer timer;
         // Reset accumulated state so repeated execute() calls are independent
         m_ffa_stats = cands::FFAStatsCollection();
@@ -104,10 +115,25 @@ public:
             outdir / std::format("{}_results.h5", filebase);
         auto writer = cands::FFAResultWriter(
             result_file, cands::FFAResultWriter::Mode::kWrite);
-        auto param_names = m_base_cfg.get_param_names();
-        param_names.emplace_back("width");
-        writer.write_metadata(param_names, m_base_cfg.get_nbins(),
-                              m_base_cfg.get_ducy_max(), m_base_cfg.get_wtsp());
+        cands::FFAResultMetadata meta;
+        meta.param_names   = m_base_cfg.get_param_names();
+        meta.config_toml   = std::string(config_toml);
+        meta.tsamp         = m_base_cfg.get_tsamp();
+        meta.nsamps        = m_base_cfg.get_nsamps();
+        meta.tobs          = m_base_cfg.get_tobs();
+        meta.f_min         = m_base_cfg.get_f_min();
+        meta.f_max         = m_base_cfg.get_f_max();
+        meta.snr_min       = m_base_cfg.get_snr_min();
+        meta.ducy_max      = m_base_cfg.get_ducy_max();
+        meta.wtsp          = m_base_cfg.get_wtsp();
+        meta.nbins_min     = m_base_cfg.get_nbins();
+        meta.nbins_max     = m_base_cfg.get_nbins_max();
+        meta.octave_scale  = m_base_cfg.get_octave_scale();
+        meta.eta           = m_base_cfg.get_eta();
+        meta.use_fourier   = m_base_cfg.get_use_fourier();
+        meta.bseg_brute    = std::optional{m_base_cfg.get_bseg_brute()};
+        meta.bseg_ffa      = std::optional{m_base_cfg.get_bseg_ffa()};
+        writer.write_metadata(meta);
 
         cands::FFATimerStats ffa_timer_stats_pipeline;
         double accumulated_flops     = 0.0;
@@ -130,11 +156,13 @@ public:
         // Drain whatever is still in RAM
         timer.start();
         flush_candidates(m_cands, m_region_decode, writer,
-                         m_write_param_sets_batch, m_base_cfg.get_nparams());
+                         m_write_param_sets_batch, m_width_batch, m_nbins_batch,
+                         m_base_cfg.get_nparams());
         ffa_timer_stats_pipeline["io"] += timer.stop();
         m_ffa_stats.update_stats(ffa_timer_stats_pipeline,
                                  static_cast<float>(accumulated_flops));
         writer.write_ffa_stats(m_ffa_stats);
+        writer.finalize();
         spdlog::info("FFA Freq Sweep complete: {} candidates above S/N {:.2f}",
                      m_total_passing_scores, m_base_cfg.get_snr_min());
         spdlog::info("FFA Freq Sweep: timer: {}",
@@ -154,7 +182,9 @@ private:
     SizeType m_total_passing_scores{};
     // Per-chunk raw score scratch; overwritten by every chunk.
     std::vector<float> m_scores_chunk;
-    std::vector<double> m_write_param_sets_batch; // includes width
+    std::vector<double> m_write_param_sets_batch;
+    std::vector<std::uint16_t> m_width_batch;
+    std::vector<std::uint16_t> m_nbins_batch;
 
     cands::FFAStatsCollection m_ffa_stats;
     // Persistent input/output buffers
@@ -217,15 +247,15 @@ private:
         // overrun it, and survivors stay in ascending score index order.
         SizeType n_passing = 0;
         for (SizeType score_idx = 0; score_idx < n_scores; ++score_idx) {
-            if (scores_span[score_idx] < snr_min) {
+            if (!utils::score_passes_threshold(scores_span[score_idx], snr_min)) {
                 continue;
             }
             if (m_cands.is_full()) {
                 ffa_timer_stats["score"] += timer.stop();
                 timer.start();
                 flush_candidates(m_cands, m_region_decode, writer,
-                                 m_write_param_sets_batch,
-                                 m_base_cfg.get_nparams());
+                                 m_write_param_sets_batch, m_width_batch,
+                                 m_nbins_batch, m_base_cfg.get_nparams());
                 ffa_timer_stats["io"] += timer.stop();
                 timer.start();
             }
@@ -259,7 +289,8 @@ FFAFreqSweep& FFAFreqSweep::operator=(FFAFreqSweep&& other) noexcept = default;
 void FFAFreqSweep::execute(std::span<const float> ts_e,
                            std::span<const float> ts_v,
                            const std::filesystem::path& outdir,
-                           std::string_view file_prefix) {
-    m_impl->execute(ts_e, ts_v, outdir, file_prefix);
+                           std::string_view file_prefix,
+                           std::string_view config_toml) {
+    m_impl->execute(ts_e, ts_v, outdir, file_prefix, config_toml);
 }
 } // namespace loki::algorithms
