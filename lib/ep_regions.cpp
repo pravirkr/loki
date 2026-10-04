@@ -559,21 +559,24 @@ private:
                              chunk_stats);
         }
 
-        m_stats = EPRegionStats(
-            maxima.max_sugg, maxima.ncoords,
+        // Before chunk_stats is moved from: argument order is unspecified
+        const auto max_branch_max_all =
             chunk_stats.empty()
                 ? SizeType{0}
                 : std::ranges::max_element(chunk_stats, {},
                                            &EPChunkStats::branch_max)
-                      ->branch_max,
+                      ->branch_max;
+        const auto max_memory_gb_all =
             chunk_stats.empty()
                 ? 0.0F
                 : static_cast<float>(
                       std::ranges::max_element(chunk_stats, {},
                                                &EPChunkStats::memory_gb)
-                          ->memory_gb),
-            maxima.buffer_size, maxima.coord_size, maxima.fold_size,
-            std::move(chunk_stats));
+                          ->memory_gb);
+        m_stats = EPRegionStats(maxima.max_sugg, maxima.ncoords,
+                                max_branch_max_all, max_memory_gb_all,
+                                maxima.buffer_size, maxima.coord_size,
+                                maxima.fold_size, std::move(chunk_stats));
 
         spdlog::info(
             "EPRegionPlanner complete: {} chunks planned, max_sugg={}, "
