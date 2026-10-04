@@ -1,9 +1,13 @@
+#include <algorithm>
+#include <cmath>
 #include <limits>
+#include <random>
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include "loki/detection/score.hpp"
 #include "loki/detection/thresholds.hpp"
 
 using Catch::Matchers::WithinRel;
@@ -117,6 +121,34 @@ TEST_CASE("evaluate_scheme and determine_scheme start from the initial state",
         REQUIRE_FALSE(states[1].is_empty);
         REQUIRE(states[1].success_h1_cumul == 0.0F);
         REQUIRE(states[2].is_empty);
+    }
+}
+
+TEST_CASE("snr_boxcar_max_with_cache matches the boxcar S/N", "[thresholds]") {
+    constexpr SizeType kNbins     = 32;
+    constexpr SizeType kNprofiles = 64;
+    const auto widths             = detection::generate_box_width_trials(
+        kNbins, /*ducy_max=*/0.3, /*wtsp=*/1.0);
+    detection::BoxcarWidthsCache cache(widths, kNbins);
+    // Same arithmetic as snr_boxcar_1d, up to rounding in the prefix sums
+    const float tol =
+        static_cast<float>(kNbins) * std::numeric_limits<float>::epsilon();
+    std::mt19937 rng(42);
+    std::normal_distribution<float> normal;
+    std::vector<float> profile(kNbins);
+    std::vector<float> snr(widths.size());
+    for (SizeType i = 0; i < kNprofiles; ++i) {
+        std::ranges::generate(profile, [&] { return normal(rng); });
+        detection::snr_boxcar_1d(profile, widths, snr);
+        const float snr_max =
+            detection::snr_boxcar_max_with_cache(profile, kNbins, cache);
+        REQUIRE_THAT(snr_max, WithinRel(std::ranges::max(snr), tol));
+        // The threshold test passes just below the maximum, not at it
+        REQUIRE_FALSE(detection::snr_boxcar_threshold_with_cache(
+            profile, kNbins, cache, snr_max));
+        REQUIRE(detection::snr_boxcar_threshold_with_cache(
+            profile, kNbins, cache,
+            std::nextafter(snr_max, std::numeric_limits<float>::lowest())));
     }
 }
 } // namespace loki

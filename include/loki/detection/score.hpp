@@ -69,6 +69,12 @@ bool snr_boxcar_threshold_with_cache(std::span<const float> arr,
                                      float threshold,
                                      float stdnoise = 1.0F) noexcept;
 
+// Compute the maximum Boxcar S/N of a single pulse profile with a cache
+float snr_boxcar_max_with_cache(std::span<const float> arr,
+                                SizeType nbins,
+                                BoxcarWidthsCache& cache,
+                                float stdnoise = 1.0F) noexcept;
+
 void snr_boxcar_2d(std::span<const float> folds,
                    std::span<const SizeType> widths,
                    std::span<float> scores,

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <limits>
 #include <numbers>
 #include <numeric>
 #include <span>
@@ -438,6 +439,32 @@ bool snr_boxcar_threshold_with_cache(std::span<const float> arr,
         }
     }
     return false;
+}
+
+float snr_boxcar_max_with_cache(std::span<const float> arr,
+                                SizeType nbins,
+                                BoxcarWidthsCache& cache,
+                                float stdnoise) noexcept {
+    const SizeType* __restrict__ widths = cache.widths.data();
+    const SizeType wmax                 = cache.wmax;
+    const SizeType ntemplates           = cache.ntemplates;
+    const float* __restrict__ h_vals    = cache.h_vals.data();
+    const float* __restrict__ b_vals    = cache.b_vals.data();
+    float* __restrict__ psum            = cache.psum_buffer.data();
+    const float* __restrict__ arr_ptr   = arr.data();
+
+    utils::circular_prefix_sum(arr_ptr, psum, nbins, nbins + wmax);
+    const float sum = psum[nbins - 1];
+
+    float snr_max = std::numeric_limits<float>::lowest();
+    for (SizeType iw = 0; iw < ntemplates; ++iw) {
+        const auto dmax = utils::diff_max(psum + widths[iw], psum, nbins);
+        const float snr =
+            (((h_vals[iw] + b_vals[iw]) * dmax) - (b_vals[iw] * sum)) /
+            stdnoise;
+        snr_max = std::max(snr_max, snr);
+    }
+    return snr_max;
 }
 
 void snr_boxcar_2d(std::span<const float> folds,
