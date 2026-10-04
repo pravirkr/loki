@@ -24,6 +24,19 @@ struct FFACoordFreq {
     float shift;  // Phase bin shift
 };
 
+/**
+ * @brief One contiguous run of samples that land in the same phase bin.
+ *
+ * Runs of one frequency are ordered and cover a brute-fold segment without
+ * gaps: the first run starts at sample 0 and each run ends at `end`
+ * (exclusive). Phase is linear in time, so each visit to a bin (including
+ * after a wrap) is one run.
+ */
+struct PhaseRun {
+    uint32_t end; ///< Exclusive sample index within the segment.
+    uint32_t bin; ///< Phase bin in `[0, nbins)`.
+};
+
 // A structure to hold the parameters for a single FFA search region.
 struct FFARegion {
     double f_start; // Hz, inclusive (lower frequency)

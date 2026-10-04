@@ -22,9 +22,9 @@ class FFAPlanBase {
 public:
     /**
      * @brief Constructs the FFA plan from a search configuration.
-     * @param cfg The pulsar search configuration object.
+     * @param cfg The FFA search configuration object.
      */
-    explicit FFAPlanBase(const search::PulsarSearchConfig& cfg);
+    explicit FFAPlanBase(const search::FFASearchConfig& cfg);
 
     // --- Rule of five: PIMPL ---
     virtual ~FFAPlanBase();
@@ -35,7 +35,7 @@ public:
 
     // --- Getters ---
     /// @brief Get the search configuration object used to build the plan.
-    [[nodiscard]] const search::PulsarSearchConfig& get_config() const noexcept;
+    [[nodiscard]] const search::FFASearchConfig& get_config() const noexcept;
     /// @brief Number of parameters to search over (..., a, f).
     [[nodiscard]] SizeType get_n_params() const noexcept;
     /// @brief Number of FFA merge levels.
@@ -152,9 +152,9 @@ template <SupportedFoldType FoldType> class FFAPlan final : public FFAPlanBase {
 public:
     /**
      * @brief Constructs the full, type-aware plan.
-     * @param cfg The pulsar search configuration object.
+     * @param cfg The FFA search configuration object.
      */
-    explicit FFAPlan(const search::PulsarSearchConfig& cfg);
+    explicit FFAPlan(const search::FFASearchConfig& cfg);
 
     // --- Rule of five: PIMPL ---
     ~FFAPlan() override                    = default;

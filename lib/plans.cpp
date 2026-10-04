@@ -1,7 +1,11 @@
 #include "loki/common/plans.hpp"
 
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
 #include <numeric>
+#include <span>
+#include <type_traits>
 #include <utility>
 
 #include "loki/common/types.hpp"
@@ -30,7 +34,7 @@ struct FFAPlanBase::Impl {
     std::vector<std::vector<double>> dparams;              // Grid step sizes
     std::vector<std::vector<double>> dparams_act; // Grid step size (actual)
 
-    explicit Impl(search::PulsarSearchConfig cfg) : m_cfg(std::move(cfg)) {
+    explicit Impl(search::FFASearchConfig cfg) : m_cfg(std::move(cfg)) {
         configure_plan();
         validate_plan();
     }
@@ -41,24 +45,22 @@ struct FFAPlanBase::Impl {
     Impl(const Impl& other)                = default;
     Impl& operator=(const Impl& other)     = default;
 
-    const search::PulsarSearchConfig& get_config() const noexcept {
+    const search::FFASearchConfig& get_config() const noexcept {
         return m_cfg;
     }
 
     SizeType get_coord_size() const noexcept {
-        return std::accumulate(ncoords.begin(), ncoords.end(), 0,
+        return std::accumulate(ncoords.begin(), ncoords.end(), SizeType{0},
                                std::plus<>());
     }
 
     float get_coord_memory_usage() const noexcept {
-        SizeType total_memory;
-        if (m_cfg.get_nparams() == 1) {
-            total_memory = get_coord_size() * sizeof(coord::FFACoordFreq);
-        } else {
-            total_memory = get_coord_size() * sizeof(coord::FFACoord);
-        }
-        return static_cast<float>(total_memory) /
-               static_cast<float>(1ULL << 30U);
+        const auto elem_bytes = (m_cfg.get_nparams() == 1)
+                                    ? sizeof(coord::FFACoordFreq)
+                                    : sizeof(coord::FFACoord);
+        const double bytes    = static_cast<double>(get_coord_size()) *
+                                static_cast<double>(elem_bytes);
+        return static_cast<float>(bytes / static_cast<double>(1ULL << 30U));
     }
 
     void resolve_coordinates(std::span<coord::FFACoord> coords) {
@@ -83,13 +85,15 @@ struct FFAPlanBase::Impl {
             core::ffa_taylor_resolve_poly_batch(
                 param_counts[i_level], param_counts[i_level - 1],
                 m_cfg.get_param_limits(), coords_span, i_level, 0,
-                m_cfg.get_tseg_brute(), m_cfg.get_nbins(), n_params);
+                m_cfg.get_tseg_brute(), m_cfg.get_nbins(), n_params,
+                m_cfg.get_nthreads());
 
             // Head coordinates
             core::ffa_taylor_resolve_poly_batch(
                 param_counts[i_level], param_counts[i_level - 1],
                 m_cfg.get_param_limits(), coords_span, i_level, 1,
-                m_cfg.get_tseg_brute(), m_cfg.get_nbins(), n_params);
+                m_cfg.get_tseg_brute(), m_cfg.get_nbins(), n_params,
+                m_cfg.get_nthreads());
         }
     }
     std::vector<std::vector<coord::FFACoord>> resolve_coordinates() {
@@ -127,7 +131,7 @@ struct FFAPlanBase::Impl {
             core::ffa_taylor_resolve_freq_batch(
                 param_counts[i_level][0], param_counts[i_level - 1][0],
                 m_cfg.get_param_limits()[0], coords_freq_span, i_level,
-                m_cfg.get_tseg_brute(), m_cfg.get_nbins());
+                m_cfg.get_tseg_brute(), m_cfg.get_nbins(), m_cfg.get_nthreads());
         }
     }
 
@@ -259,7 +263,7 @@ struct FFAPlanBase::Impl {
     }
 
 private:
-    search::PulsarSearchConfig m_cfg;
+    search::FFASearchConfig m_cfg;
 
     void configure_plan() {
         const auto levels = m_cfg.get_niters_ffa() + 1;
@@ -344,13 +348,13 @@ private:
 }; // End FFAPlanBase::Impl definition
 
 // --- Definitions for FFAPlanBase ---
-FFAPlanBase::FFAPlanBase(const search::PulsarSearchConfig& cfg)
+FFAPlanBase::FFAPlanBase(const search::FFASearchConfig& cfg)
     : m_impl(std::make_unique<Impl>(cfg)) {}
 FFAPlanBase::~FFAPlanBase()                                 = default;
 FFAPlanBase::FFAPlanBase(FFAPlanBase&&) noexcept            = default;
 FFAPlanBase& FFAPlanBase::operator=(FFAPlanBase&&) noexcept = default;
 
-const search::PulsarSearchConfig& FFAPlanBase::get_config() const noexcept {
+const search::FFASearchConfig& FFAPlanBase::get_config() const noexcept {
     return m_impl->get_config();
 }
 SizeType FFAPlanBase::get_n_params() const noexcept { return m_impl->n_params; }
@@ -436,7 +440,7 @@ FFAPlanBase::get_branching_pattern(std::string_view poly_basis,
 
 // --- Implementation for FFAPlan ---
 template <SupportedFoldType FoldType>
-FFAPlan<FoldType>::FFAPlan(const search::PulsarSearchConfig& cfg)
+FFAPlan<FoldType>::FFAPlan(const search::FFASearchConfig& cfg)
     : FFAPlanBase(cfg) {
     configure_fold_shapes();
     compute_flops();

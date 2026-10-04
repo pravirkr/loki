@@ -13,6 +13,7 @@
 #include <spdlog/spdlog.h>
 
 #include "loki/common/types.hpp"
+#include "loki/cuda/index_limits.hpp"
 #include "loki/cub_helpers.cuh"
 #include "loki/cuda_utils.cuh"
 #include "loki/exceptions.hpp"
@@ -21,6 +22,10 @@
 namespace loki::detection {
 
 namespace {
+
+__device__ __forceinline__ float fold_norm_bin(float e, float v) {
+    return (v > 0.0F) ? (e * rsqrtf(v)) : 0.0F;
+}
 
 enum class OutputMode : uint8_t {
     kMax          = 0, // Max SNR for each profile
@@ -87,8 +92,8 @@ __global__ void kernel_snr_boxcar_warp(const float* __restrict__ folds,
     extern __shared__ float s_psum[]; // NOLINT
     float* s_psum_warp = s_psum + (warp_id * nbins);
 
-    const float* __restrict__ e_ptr =
-        folds + (profile_idx * (Is3D ? 2 : 1) * nbins);
+    const int fold_stride = (Is3D ? 2 : 1) * nbins;
+    const float* __restrict__ e_ptr = folds + (profile_idx * fold_stride);
     const float* __restrict__ v_ptr = e_ptr + nbins; // only used in Is3D path
 
     // stdnoise is only used for 2D
@@ -102,7 +107,7 @@ __global__ void kernel_snr_boxcar_warp(const float* __restrict__ folds,
         // Zero-pad out-of-range lanes
         float val;
         if constexpr (Is3D) {
-            val = (idx < nbins) ? e_ptr[idx] * rsqrtf(v_ptr[idx]) : 0.0F;
+            val = (idx < nbins) ? fold_norm_bin(e_ptr[idx], v_ptr[idx]) : 0.0F;
         } else {
             val = (idx < nbins) ? e_ptr[idx] : 0.0F;
         }
@@ -206,8 +211,8 @@ __launch_bounds__(256, 4) // Hint: Max 256 threads, min 4 blocks/SM
     float psum[MaxBins + 1];
     psum[0] = 0.0F;
 
-    const float* __restrict__ e_ptr =
-        folds + (profile_idx * (Is3D ? 2 : 1) * nbins);
+    const int fold_stride = (Is3D ? 2 : 1) * nbins;
+    const float* __restrict__ e_ptr = folds + (profile_idx * fold_stride);
     const float* __restrict__ v_ptr = e_ptr + nbins; // only used in Is3D path
 
     const float inv_stdnoise = Is3D ? 1.0F : (1.0F / stdnoise);
@@ -216,7 +221,7 @@ __launch_bounds__(256, 4) // Hint: Max 256 threads, min 4 blocks/SM
 #pragma unroll 8
     for (int i = 0; i < nbins; ++i) {
         if constexpr (Is3D) {
-            running += e_ptr[i] * rsqrtf(v_ptr[i]);
+            running += fold_norm_bin(e_ptr[i], v_ptr[i]);
         } else {
             running += e_ptr[i];
         }
@@ -321,7 +326,8 @@ kernel_snr_boxcar_filter_warp(const float* __restrict__ folds,
     extern __shared__ float s_psum[]; // NOLINT
     float* s_psum_warp = s_psum + (warp_id * nbins);
 
-    const float* __restrict__ e_ptr = folds + (profile_idx * 2 * nbins);
+    const int fold_stride = 2 * nbins;
+    const float* __restrict__ e_ptr = folds + (profile_idx * fold_stride);
     const float* __restrict__ v_ptr = e_ptr + nbins;
 
     // Perform warp-level complicated inclusive prefix sum
@@ -330,7 +336,7 @@ kernel_snr_boxcar_filter_warp(const float* __restrict__ folds,
     for (int chunk = 0; chunk < num_chunks; ++chunk) {
         const int idx = (chunk * kWarpSize) + lane_id;
         // Zero-pad out-of-range lanes
-        float val = (idx < nbins) ? e_ptr[idx] * rsqrtf(v_ptr[idx]) : 0.0F;
+        float val = (idx < nbins) ? fold_norm_bin(e_ptr[idx], v_ptr[idx]) : 0.0F;
         // Warp-local inclusive scan
         val = warp_inclusive_scan(val);
         val += running_sum;
@@ -372,7 +378,8 @@ kernel_snr_boxcar_filter_warp(const float* __restrict__ folds,
     // Final reduction to get max SNR across all widths for this warp
     if (lane_id == 0) {
         scores[profile_idx]        = max_snr;
-        filtered_mask[profile_idx] = (max_snr >= threshold);
+        filtered_mask[profile_idx] =
+            (max_snr >= threshold);
     }
 }
 
@@ -403,13 +410,14 @@ __launch_bounds__(256, 4) // Hint: Max 256 threads, min 4 blocks/SM
     float psum[MaxBins + 1];
     psum[0] = 0.0F;
 
-    const float* __restrict__ e_ptr = folds + (profile_idx * 2 * nbins);
+    const int fold_stride = 2 * nbins;
+    const float* __restrict__ e_ptr = folds + (profile_idx * fold_stride);
     const float* __restrict__ v_ptr = e_ptr + nbins;
 
     float running = 0.0F;
 #pragma unroll 8
     for (int i = 0; i < nbins; ++i) {
-        running += e_ptr[i] * rsqrtf(v_ptr[i]);
+        running += fold_norm_bin(e_ptr[i], v_ptr[i]);
         psum[i + 1] = running;
     }
     const float total_sum = running;
@@ -446,7 +454,8 @@ __launch_bounds__(256, 4) // Hint: Max 256 threads, min 4 blocks/SM
     }
     scores[profile_idx] = max_snr;
     // Set validation mask for filtered profiles
-    filtered_mask[profile_idx] = (max_snr >= threshold);
+    filtered_mask[profile_idx] =
+        (max_snr >= threshold);
 }
 
 // Unified launch function template
@@ -624,6 +633,8 @@ SizeType score_and_filter_cuda_d(cuda::std::span<const float> folds,
                                  SizeType nbins,
                                  cudaStream_t stream,
                                  memory::DeviceCounter& counter) {
+    cuda_index_limits::validate_chunk_cuda_index_limits(
+        {folds.size(), nprofiles, nbins, widths.size(), 1, 1});
     counter.reset(stream);
 
     // Dispatch mechanism: Use thread-based when nbins<=64 and nprofiles>=2^16

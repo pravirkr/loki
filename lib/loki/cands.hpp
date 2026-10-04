@@ -1,18 +1,22 @@
 #pragma once
 
 #include <array>
+#include <cstdint>
 #include <filesystem>
 #include <map>
 #include <mutex>
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 #include <highfive/highfive.hpp>
 
+#include "loki/algorithms/prune_rfi.hpp"
 #include "loki/common/types.hpp"
+#include "loki/search/configs.hpp"
 #include "loki/utils/world_tree.hpp"
 
 namespace loki::cands {
@@ -74,12 +78,17 @@ struct PruneStats {
     SizeType level{};
     SizeType seg_idx{};
     float threshold{};
-    float score_min        = 0.0;
-    float score_max        = 0.0;
-    SizeType n_branches    = 1;
-    SizeType n_leaves      = 1;
-    SizeType n_leaves_phy  = 1;
-    SizeType n_leaves_surv = 1;
+    float score_min            = 0.0;
+    float score_max            = 0.0;
+    SizeType n_branches        = 1;
+    SizeType n_leaves          = 1;
+    SizeType n_leaves_resolved = 1;
+    SizeType n_leaves_phy      = 1;
+    SizeType n_leaves_surv     = 1;
+    // RFI-control diagnostics (all zero when the mechanisms are disabled)
+    SizeType n_leaves_masked = 0; ///< Rejected by the pulsar mask
+    SizeType n_leaves_vetoed = 0; ///< Rejected by the stage-consistency veto
+    SizeType n_harvested     = 0; ///< Removed from the tree by early harvest
 
     [[nodiscard]] double lb_leaves() const noexcept;
     [[nodiscard]] double lb_leaves_phys() const noexcept;
@@ -97,6 +106,7 @@ struct PruneTimerStatsPacked {
     float score{};
     float transform{};
     float threshold{};
+    float rfi{};
 };
 
 class PruneTimerStats {
@@ -118,8 +128,8 @@ public:
 
 private:
     static constexpr std::array kTimerNames = {
-        "branch", "validate",  "resolve",   "shift_add",
-        "score",  "threshold", "transform", "batch_add",
+        "branch",    "validate",  "resolve",   "shift_add", "score",
+        "threshold", "transform", "batch_add", "rfi",
     };
 
     std::map<std::string, float> m_timers;
@@ -127,10 +137,14 @@ private:
 
 // Iteration stats for pruning
 struct PruneIterationStats {
-    SizeType n_leaves     = 0;
-    SizeType n_leaves_phy = 0;
-    float score_min       = std::numeric_limits<float>::max();
-    float score_max       = std::numeric_limits<float>::lowest();
+    SizeType n_leaves          = 0;
+    SizeType n_leaves_resolved = 0;
+    SizeType n_leaves_phy      = 0;
+    SizeType n_leaves_masked   = 0;
+    SizeType n_leaves_vetoed   = 0;
+    SizeType n_harvested       = 0;
+    float score_min            = std::numeric_limits<float>::max();
+    float score_max            = std::numeric_limits<float>::lowest();
     PruneTimerStats batch_timers;
 
     void norm_scores(SizeType n_leaves_surv) {
@@ -171,6 +185,107 @@ private:
     PruneTimerStats m_accumulated_timers;
 };
 
+/**
+ * @brief Growable store of candidates harvested early from the EP tree.
+ *
+ * @details Each record holds the leaf parameters (already converted to
+ * physical units at the leaf's reference time), the score, the pruning level
+ * and segment index at which it was harvested, the reference time, and
+ * optionally the folded profile. Storage grows with the number of harvests,
+ * so memory scales with actual detections rather than the configured cap.
+ */
+template <SupportedFoldType FoldType> class HarvestBuffer {
+public:
+    HarvestBuffer() = default;
+    HarvestBuffer(SizeType leaves_stride,
+                  SizeType folds_stride,
+                  bool store_folds);
+
+    [[nodiscard]] SizeType size() const noexcept { return m_size; }
+    [[nodiscard]] bool empty() const noexcept { return m_size == 0; }
+    [[nodiscard]] SizeType get_leaves_stride() const noexcept {
+        return m_leaves_stride;
+    }
+    [[nodiscard]] SizeType get_folds_stride() const noexcept {
+        return m_folds_stride;
+    }
+    [[nodiscard]] bool stores_folds() const noexcept { return m_store_folds; }
+
+    void clear() noexcept;
+
+    /**
+     * @brief Append one record.
+     * @param leaf Leaf parameters (leaves_stride doubles).
+     * @param fold Folded profile (folds_stride elements); ignored unless
+     * folds are stored.
+     */
+    void push(std::span<const double> leaf,
+              std::span<const FoldType> fold,
+              float score,
+              SizeType level,
+              SizeType seg_idx,
+              double t_ref);
+
+    [[nodiscard]] std::span<const double> get_leaves() const noexcept {
+        return m_leaves;
+    }
+    [[nodiscard]] std::span<const FoldType> get_folds() const noexcept {
+        return m_folds;
+    }
+    [[nodiscard]] std::span<const float> get_scores() const noexcept {
+        return m_scores;
+    }
+    [[nodiscard]] std::span<const SizeType> get_levels() const noexcept {
+        return m_levels;
+    }
+    [[nodiscard]] std::span<const SizeType> get_seg_idx() const noexcept {
+        return m_seg_idx;
+    }
+    [[nodiscard]] std::span<const double> get_t_ref() const noexcept {
+        return m_t_ref;
+    }
+
+private:
+    SizeType m_leaves_stride{};
+    SizeType m_folds_stride{};
+    bool m_store_folds{false};
+    SizeType m_size{};
+    std::vector<double> m_leaves;
+    std::vector<FoldType> m_folds;
+    std::vector<float> m_scores;
+    std::vector<SizeType> m_levels;
+    std::vector<SizeType> m_seg_idx;
+    std::vector<double> m_t_ref;
+};
+
+using HarvestBufferFloat   = HarvestBuffer<float>;
+using HarvestBufferComplex = HarvestBuffer<ComplexType>;
+
+/// Metadata written once at the start of an FFA frequency-sweep result file.
+struct FFAResultMetadata {
+    FFAResultMetadata() = default;
+    explicit FFAResultMetadata(const search::FFASearchConfig& cfg,
+                               std::string_view config_toml = {});
+
+    std::vector<std::string> param_names;
+    std::string config_toml;
+    double tsamp{};
+    SizeType nsamps{};
+    double tobs{};
+    double f_min{};
+    double f_max{};
+    double snr_min{};
+    double ducy_max{};
+    double wtsp{};
+    SizeType nbins_min{};
+    SizeType nbins_max{};
+    double octave_scale{};
+    double eta{};
+    bool use_fourier{};
+    std::optional<SizeType> bseg_brute;
+    std::optional<SizeType> bseg_ffa;
+};
+
 class FFAResultWriter {
 public:
     enum class Mode : std::uint8_t { kWrite, kAppend };
@@ -183,30 +298,38 @@ public:
      */
     explicit FFAResultWriter(std::filesystem::path filename,
                              Mode mode = Mode::kWrite);
-    ~FFAResultWriter() = default;
+    ~FFAResultWriter();
     // Disable copy/move constructors and operators
     FFAResultWriter(const FFAResultWriter&)            = delete;
     FFAResultWriter& operator=(const FFAResultWriter&) = delete;
     FFAResultWriter(FFAResultWriter&&)                 = delete;
     FFAResultWriter& operator=(FFAResultWriter&&)      = delete;
 
-    void write_metadata(const std::vector<std::string>& param_names,
-                        const std::vector<SizeType>& scoring_widths);
+    void write_metadata(const FFAResultMetadata& metadata);
 
     void write_results(std::span<const double> param_sets,
                        std::span<const float> scores,
+                       std::span<const std::uint16_t> widths_bins,
+                       std::span<const std::uint16_t> nbins,
                        SizeType n_param_sets,
                        SizeType n_params);
     void write_ffa_stats(const FFAStatsCollection& ffa_stats);
+    /// Commit the temporary file and atomically rename to the final path.
+    void finalize();
 
 private:
-    std::filesystem::path m_filepath;
+    std::filesystem::path m_final_path;
     Mode m_mode;
+    std::filesystem::path m_open_path;
     inline static std::mutex m_hdf5_mutex;
-    bool m_datasets_initialized;
+    bool m_datasets_initialized{false};
+    bool m_metadata_written{false};
+    bool m_finalized{false};
+    SizeType m_n_params{0};
 
-    HighFive::File m_file;
+    std::optional<HighFive::File> m_file;
     HighFive::File open_file() const;
+    void ensure_datasets(SizeType n_params);
 };
 
 class PruneResultWriter {
@@ -224,9 +347,26 @@ public:
     void write_metadata(const std::vector<std::string>& param_names,
                         SizeType nsegments,
                         SizeType max_sugg,
-                        std::span<const float> threshold_scheme);
+                        std::span<const float> threshold_scheme,
+                        const algorithms::PruneRFIConfig& rfi_config = {});
 
     void write_runtime(float runtime);
+
+    /**
+     * @brief Write the harvested candidates of a run under
+     * `runs/<run_name>/harvest`.
+     *
+     * @details Must be called after write_run_results() for the same run.
+     * Datasets: param_sets (n, n_params + 2, 2), scores, levels, seg_idx,
+     * t_ref, and folds (n, 2, nbins) when the buffer stores folds. The
+     * attribute `n_harvested_total` records all harvests including those
+     * beyond the recording cap.
+     */
+    template <SupportedFoldType FoldType>
+    void write_run_harvest(std::string_view run_name,
+                           const HarvestBuffer<FoldType>& harvest,
+                           SizeType n_params,
+                           SizeType n_harvested_total);
 
     void write_run_results(std::string_view run_name,
                            std::span<const SizeType> snail_scheme,

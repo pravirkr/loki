@@ -36,6 +36,7 @@ option(LOKI_BUILD_DOCS "Build documentation" OFF)
 option(LOKI_BUILD_PYTHON "Build Python bindings" ON)
 option(LOKI_BUILD_TESTING "Build C++ tests" OFF)
 option(LOKI_BUILD_BENCHMARKS "Build benchmarks" OFF)
+option(LOKI_BUILD_APPLICATIONS "Build command-line applications" ON)
 option(LOKI_ENABLE_COVERAGE "Enable coverage reporting" OFF)
 option(LOKI_ENABLE_IPO "Enable interprocedural optimization (LTO) on Release builds" OFF)
 option(LOKI_ENABLE_NATIVE_ARCH "Use -march=native in Release builds" ON)
@@ -43,7 +44,7 @@ option(LOKI_USE_SYSTEM_DEPS "Prefer compatible system packages over pinned bundl
        OFF
 )
 # BUILD_SHARED_LIBS is a standard CMake option (ON = shared loki, OFF = static loki).
-option(BUILD_SHARED_LIBS "Build shared libraries" ON)
+option(BUILD_SHARED_LIBS "Build shared libraries" OFF)
 
 # Python extensions are installed as a single module file; embed loki statically
 # instead of shipping a separate libloki.so plus loader search-path tweaks.
@@ -244,6 +245,9 @@ set(LOKI_LIBRARY_NAME ${PROJECT_NAME})
 set(LOKI_CMAKE_PACKAGE_DIR "${CMAKE_INSTALL_LIBDIR}/cmake/${PROJECT_NAME}")
 
 add_subdirectory(lib)
+if(LOKI_BUILD_APPLICATIONS)
+  add_subdirectory(applications)
+endif()
 if(LOKI_BUILD_PYTHON)
   add_subdirectory(src)
 endif()

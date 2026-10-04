@@ -1,6 +1,8 @@
 #include "loki/algorithms/fold.hpp"
 
 #include <algorithm>
+#include <limits>
+
 #include <omp.h>
 
 #include "loki/common/types.hpp"
@@ -36,10 +38,6 @@ public:
         m_nsegments = m_nsamps / m_segment_len;
         m_nbins_f   = (nbins / 2) + 1;
         if constexpr (std::is_same_v<FoldType, float>) {
-            // Allocate and compute phase map for time domain
-            m_phase_map.resize(m_nfreqs * m_segment_len);
-            m_bucket_indices.resize(m_nfreqs * m_segment_len);
-            m_offsets.resize((m_nfreqs * m_nbins) + 1);
             compute_phase_time_domain();
         }
     }
@@ -79,7 +77,7 @@ public:
         }
         if constexpr (std::is_same_v<FoldType, float>) {
             kernels::brute_fold_ts(ts_e.data(), ts_v.data(), fold.data(),
-                                   m_bucket_indices.data(), m_offsets.data(),
+                                   m_runs.data(), m_run_offsets.data(),
                                    m_nsegments, m_nfreqs, m_segment_len,
                                    m_nbins, m_nthreads);
 
@@ -89,6 +87,54 @@ public:
                 m_nfreqs, m_nsegments, m_segment_len, m_nbins, m_tsamp, m_t_ref,
                 m_nthreads);
         }
+    }
+
+    void execute_fused_freq(
+        std::span<const float> ts_e,
+        std::span<const float> ts_v,
+        std::span<float> fold_out,
+        std::span<const coord::FFACoordFreq* const> coords_levels,
+        std::span<const SizeType> ncoords,
+        SizeType nlevels)
+        requires(std::is_same_v<FoldType, float>)
+    {
+        error_check::check_equal(
+            ts_e.size(), m_nsamps,
+            "BruteFold::Impl::execute_fused_freq: ts_e must have size nsamps");
+        error_check::check_equal(ts_v.size(), ts_e.size(),
+                                 "BruteFold::Impl::execute_fused_freq: ts_v "
+                                 "must have size nsamps");
+        error_check::check_greater_equal(
+            nlevels, 1,
+            "BruteFold::Impl::execute_fused_freq: nlevels must be >= 1");
+        error_check::check_equal(
+            m_nsegments % (SizeType{1} << nlevels), 0,
+            "BruteFold::Impl::execute_fused_freq: nsegments must be a "
+            "multiple of 2^nlevels");
+        error_check::check_greater_equal(
+            coords_levels.size(), nlevels + 1,
+            "BruteFold::Impl::execute_fused_freq: coords_levels too short");
+        error_check::check_greater_equal(
+            ncoords.size(), nlevels + 1,
+            "BruteFold::Impl::execute_fused_freq: ncoords too short");
+        error_check::check_equal(ncoords[0], m_nfreqs,
+                                 "BruteFold::Impl::execute_fused_freq: "
+                                 "ncoords[0] must equal nfreqs");
+        error_check::check_equal(
+            fold_out.size(),
+            (m_nsegments >> nlevels) * ncoords[nlevels] * 2 * m_nbins,
+            "BruteFold::Impl::execute_fused_freq: fold_out has wrong size");
+        kernels::brute_fold_ffa_fused_freq(
+            ts_e.data(), ts_v.data(), fold_out.data(), m_runs.data(),
+            m_run_offsets.data(), coords_levels.data(), ncoords.data(),
+            m_nsegments, m_nfreqs, m_segment_len, m_nbins, nlevels, m_nthreads);
+    }
+
+    [[nodiscard]] std::span<const coord::PhaseRun> runs() const noexcept {
+        return m_runs;
+    }
+    [[nodiscard]] std::span<const SizeType> run_offsets() const noexcept {
+        return m_run_offsets;
     }
 
 private:
@@ -104,40 +150,67 @@ private:
     SizeType m_nsegments;
     SizeType m_nbins_f;
 
-    // Time domain only
-    std::vector<uint32_t> m_phase_map;
-    std::vector<uint32_t> m_bucket_indices;
-    std::vector<SizeType> m_offsets;
+    // Time domain only. One (end, bin) per contiguous phase run.
+    std::vector<coord::PhaseRun> m_runs;
+    std::vector<SizeType> m_run_offsets;
 
-    // Time domain only
+    /// Build the run table and check it reproduces the per-sample phase map.
     void compute_phase_time_domain() {
-        const SizeType total_buckets = m_nfreqs * m_nbins;
-        std::vector<SizeType> counts(total_buckets, 0);
+        error_check::check_less_equal(
+            m_segment_len,
+            static_cast<SizeType>(std::numeric_limits<uint32_t>::max()),
+            "BruteFold segment length does not fit in a phase-run index");
+        m_run_offsets.assign(m_nfreqs + 1, 0);
+        std::vector<SizeType> counts(m_nfreqs, 0);
+#pragma omp parallel for schedule(static) num_threads(m_nthreads)
         for (SizeType ifreq = 0; ifreq < m_nfreqs; ++ifreq) {
-            const auto freq_offset_in = ifreq * m_segment_len;
+            uint32_t prev_bin = std::numeric_limits<uint32_t>::max();
+            SizeType nruns    = 0;
             for (SizeType isamp = 0; isamp < m_segment_len; ++isamp) {
                 const auto proper_time =
                     (static_cast<double>(isamp) * m_tsamp) - m_t_ref;
                 const uint32_t iphase = psr_utils::get_phase_idx_uint(
                     proper_time, m_freq_arr[ifreq], m_nbins, 0.0);
-                m_phase_map[freq_offset_in + isamp] = iphase;
-                const auto bucket_idx = (ifreq * m_nbins) + iphase;
-                ++counts[bucket_idx];
+                if (iphase != prev_bin) {
+                    ++nruns;
+                    prev_bin = iphase;
+                }
             }
+            counts[ifreq] = nruns;
         }
-        // Compute prefix sum for offsets
-        for (SizeType i = 1; i <= total_buckets; ++i) {
-            m_offsets[i] = m_offsets[i - 1] + counts[i - 1];
-        }
-        // Second pass: fill the indices
-        std::vector<SizeType> writers = m_offsets; // Copy for writing positions
         for (SizeType ifreq = 0; ifreq < m_nfreqs; ++ifreq) {
-            const auto freq_offset_in = ifreq * m_segment_len;
+            m_run_offsets[ifreq + 1] = m_run_offsets[ifreq] + counts[ifreq];
+        }
+        m_runs.resize(m_run_offsets.back());
+#pragma omp parallel for schedule(static) num_threads(m_nthreads)
+        for (SizeType ifreq = 0; ifreq < m_nfreqs; ++ifreq) {
+            coord::PhaseRun* out = m_runs.data() + m_run_offsets[ifreq];
+            uint32_t prev_bin    = std::numeric_limits<uint32_t>::max();
+            uint32_t run_end     = 0;
+            SizeType written     = 0;
             for (SizeType isamp = 0; isamp < m_segment_len; ++isamp) {
-                const auto iphase     = m_phase_map[freq_offset_in + isamp];
-                const auto bucket_idx = (ifreq * m_nbins) + iphase;
-                m_bucket_indices[writers[bucket_idx]++] = isamp;
+                const auto proper_time =
+                    (static_cast<double>(isamp) * m_tsamp) - m_t_ref;
+                const uint32_t iphase = psr_utils::get_phase_idx_uint(
+                    proper_time, m_freq_arr[ifreq], m_nbins, 0.0);
+                if (iphase != prev_bin) {
+                    if (prev_bin != std::numeric_limits<uint32_t>::max()) {
+                        out[written++] = {run_end, prev_bin};
+                    }
+                    prev_bin = iphase;
+                }
+                run_end = static_cast<uint32_t>(isamp + 1);
             }
+            if (m_segment_len > 0) {
+                out[written++] = {run_end, prev_bin};
+            }
+            // Contiguous cover of the segment: the runs abut and end at B.
+            error_check::check_equal(
+                written, counts[ifreq],
+                "BruteFold phase runs do not match the counted run total");
+            error_check::check_equal(
+                static_cast<SizeType>(run_end), m_segment_len,
+                "BruteFold phase runs do not cover the segment");
         }
     }
 
@@ -170,6 +243,34 @@ void BruteFold<FoldType>::execute(std::span<const float> ts_e,
                                   std::span<const float> ts_v,
                                   std::span<FoldType> fold) {
     m_impl->execute(ts_e, ts_v, fold);
+}
+
+template <SupportedFoldType FoldType>
+std::span<const coord::PhaseRun> BruteFold<FoldType>::runs() const
+    requires(std::is_same_v<FoldType, float>)
+{
+    return m_impl->runs();
+}
+
+template <SupportedFoldType FoldType>
+std::span<const SizeType> BruteFold<FoldType>::run_offsets() const
+    requires(std::is_same_v<FoldType, float>)
+{
+    return m_impl->run_offsets();
+}
+
+template <SupportedFoldType FoldType>
+void BruteFold<FoldType>::execute_fused_freq(
+    std::span<const float> ts_e,
+    std::span<const float> ts_v,
+    std::span<float> fold_out,
+    std::span<const coord::FFACoordFreq* const> coords_levels,
+    std::span<const SizeType> ncoords,
+    SizeType nlevels)
+    requires(std::is_same_v<FoldType, float>)
+{
+    m_impl->execute_fused_freq(ts_e, ts_v, fold_out, coords_levels, ncoords,
+                               nlevels);
 }
 
 template <SupportedFoldType FoldType>

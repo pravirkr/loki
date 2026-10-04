@@ -9,6 +9,36 @@
 
 namespace loki::kernels {
 
+using PhaseRun = coord::PhaseRun;
+
+/**
+ * @brief Optional per-tile score hook for the top of a cone band.
+ *
+ * Called from inside the band's OpenMP region, once per output-frequency
+ * tile of one output segment. `profiles` holds `nprofiles` packed
+ * energy/variance folds starting at global coordinate `coord_begin`.
+ * Implementations must be thread-safe (typically thread-local output).
+ */
+using ConeScoreFn = void (*)(const float* profiles,
+                             SizeType coord_begin,
+                             SizeType nprofiles,
+                             SizeType nbins,
+                             void* ctx);
+
+/**
+ * @brief Sum of per-thread seconds inside one cone band.
+ *
+ * Divide by the band's wall time only after scaling by the fraction of
+ * thread-time each bucket represents; the fields themselves are not wall
+ * times.
+ */
+struct ConeBandThreadSeconds {
+    double brute{0};       ///< Sum of per-thread brute-fold seconds.
+    double merge{0};       ///< Sum of per-thread merge seconds.
+    double score{0};       ///< Sum of per-thread score-hook seconds.
+    double prefix_wall{0}; ///< Wall-clock seconds of a shared prefix build.
+};
+
 /**
  * @brief Brute force fold a time series of data.
  *
@@ -26,13 +56,115 @@ namespace loki::kernels {
 void brute_fold_ts(const float* __restrict__ ts_e,
                    const float* __restrict__ ts_v,
                    float* __restrict__ fold,
-                   const uint32_t* __restrict__ bucket_indices,
-                   const SizeType* __restrict__ offsets,
+                   const PhaseRun* __restrict__ runs,
+                   const SizeType* __restrict__ run_offsets,
                    SizeType nsegments,
                    SizeType nfreqs,
                    SizeType segment_len,
                    SizeType nbins,
                    int nthreads) noexcept;
+
+/**
+ * @brief Fused time-domain brute fold + first `nlevels` frequency-only FFA
+ * merge levels, processed tile by tile so the intermediate levels stay in
+ * cache. Bit-exact with brute_fold_ts followed by `nlevels` calls of
+ * ffa_iter_freq.
+ *
+ * A tile is 2^nlevels adjacent brute-fold segments. The result is the FFA
+ * level-`nlevels` fold (nsegments >> nlevels segments, ncoords[nlevels]
+ * profiles each).
+ *
+ * @param fold_out  Level-`nlevels` output (size: (nsegments >> nlevels) *
+ *                  ncoords[nlevels] * 2 * nbins)
+ * @param runs  Phase runs for every frequency (same table for every segment)
+ * @param run_offsets  `nfreqs + 1` offsets into `runs`
+ * @param coords_levels  coords_levels[j] points to the level-j coordinates,
+ *                       j = 1..nlevels (index 0 is unused)
+ * @param ncoords  Profiles per segment at levels 0..nlevels
+ * @param nsegments  Brute-fold segments; must be a multiple of 2^nlevels
+ */
+void brute_fold_ffa_fused_freq(const float* __restrict__ ts_e,
+                               const float* __restrict__ ts_v,
+                               float* __restrict__ fold_out,
+                               const PhaseRun* __restrict__ runs,
+                               const SizeType* __restrict__ run_offsets,
+                               const coord::FFACoordFreq* const* coords_levels,
+                               const SizeType* ncoords,
+                               SizeType nsegments,
+                               SizeType nfreqs,
+                               SizeType segment_len,
+                               SizeType nbins,
+                               SizeType nlevels,
+                               int nthreads) noexcept;
+
+/**
+ * @brief Working-set size, in floats, of one frequency tile of a cone band.
+ *
+ * A cone band folds `k_levels` merge steps for a tile of `tile_coords`
+ * output coordinates entirely in scratch. Because `coords[i].idx` is
+ * monotone, the profiles a tile needs at every lower level are a contiguous
+ * index range, read off the first and last coordinate of the tile. The
+ * scratch holds the widest of those ranges (two ping-pong copies are paid
+ * by the caller). Returns 0 when any level in the band is not monotone, in
+ * which case the band must not run.
+ *
+ * Halo: a window of W consecutive coordinates maps to
+ * `idx(last) - idx(first) + 1` profiles, which is about `W / 2` when the
+ * frequency grid doubles each level, plus a one-bin rounding fringe that
+ * grows like `2^(k-j)` at band-local level j. For `tile_coords = 512` and
+ * `k_levels <= 6` that fringe is a few percent of the tile.
+ *
+ * @param coords_levels  `coords_levels[j]` is band-local level j, j = 1..k
+ *                       (index 0 is unused)
+ * @param ncoords        Profile counts at band-local levels 0..k
+ */
+[[nodiscard]] SizeType
+cone_band_working_floats(const coord::FFACoordFreq* const* coords_levels,
+                         const SizeType* ncoords,
+                         SizeType k_levels,
+                         SizeType tile_coords,
+                         SizeType nbins) noexcept;
+
+/**
+ * @brief Execute one frequency-tiled cone band of a frequency-only FFA.
+ *
+ * The band covers `k_levels` merges. Input is either a materialized fold
+ * level (`level_in`, layout `[nsegments_in, ncoords[0], 2, nbins]`) or, when
+ * `level_in` is null, the time series folded with `runs` (the bottom band).
+ * Output tiles are packed back into `level_out` with the same layout at
+ * `nsegments_in >> k_levels` segments. Tiles partition the output coordinates,
+ * so writes do not overlap. Each tile's scratch is fixed (see
+ * cone_band_working_floats), which keeps memory predictable and maps a tile
+ * onto one GPU thread block.
+ *
+ * The bottom band walks segment-groups first (`2^k_levels` input segments)
+ * so the group's prefix sums stay in cache across every frequency tile of
+ * that group. Level 0 of the band is never written to DRAM.
+ *
+ * `score_fn`, when set, is invoked on each output tile while it is still in
+ * scratch. Pass a null `level_out` to skip materialising the band output
+ * (the top band of a scored search).
+ *
+ * @param thread_seconds  Optional accumulator of per-thread brute, merge and
+ *                        score seconds. Not wall-clock time.
+ */
+void ffa_cone_band_freq(const float* level_in,
+                        const float* ts_e,
+                        const float* ts_v,
+                        const PhaseRun* runs,
+                        const SizeType* run_offsets,
+                        SizeType segment_len,
+                        float* level_out,
+                        const coord::FFACoordFreq* const* coords_levels,
+                        const SizeType* ncoords,
+                        SizeType nsegments_in,
+                        SizeType nbins,
+                        SizeType k_levels,
+                        SizeType tile_coords,
+                        ConeScoreFn score_fn,
+                        void* score_ctx,
+                        ConeBandThreadSeconds* thread_seconds,
+                        int nthreads);
 
 // Fallback implementation
 void brute_fold_ts_complex_xsimd(const float* __restrict__ ts_e,

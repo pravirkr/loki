@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <span>
 #include <string_view>
@@ -85,6 +86,26 @@ void snr_boxcar_2d_max(std::span<const float> folds,
                        SizeType nbins,
                        float stdnoise = 1.0F,
                        int nthreads   = 1);
+
+/// One boxcar S/N that passed a threshold. `score_index` is
+/// `profile * nwidths + width_index`, matching the dense `snr_boxcar_3d`
+/// layout.
+struct SnrHit {
+    uint32_t score_index{0};
+    float snr{0.0F};
+};
+
+/// Append thresholded boxcar S/N hits for a packed tile of E/V profiles.
+/// `psum` must hold `nbins + max(widths)` floats. Hits are appended in
+/// profile-major, width-minor order.
+void append_snr_boxcar_3d_hits(const float* folds,
+                               SizeType profile_base,
+                               SizeType nprofiles,
+                               SizeType nbins,
+                               std::span<const SizeType> widths,
+                               float threshold,
+                               std::span<float> psum,
+                               std::vector<SnrHit>& hits);
 
 // Compute the Boxcar S/N (for each width) of a batch of E, V folded profiles
 void snr_boxcar_3d(std::span<const float> folds,

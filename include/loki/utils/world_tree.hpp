@@ -191,12 +191,36 @@ public:
         get_best() const;
 
     /**
+     * @brief Remove the current highest-score candidate.
+     *
+     * @details Used by overload-triggered harvesting: the bright leaf is
+     * recorded and masked, then dropped so it cannot keep branching. Tie-break
+     * keeps the first maximum. No-op on an empty tree.
+     *
+     * @return True if a candidate was removed.
+     */
+    bool drop_best();
+
+    /**
      * @brief Add initial batch (resets buffer first)
      */
     void add_initial(std::span<const double> leaves_batch,
                      std::span<const FoldType> folds_batch,
                      std::span<const float> scores_batch,
                      SizeType slots_to_write);
+    /**
+     * @brief Add a selected subset of an initial batch (resets buffer first).
+     *
+     * @details Copies the `slots_to_write` candidates whose source indices
+     * are listed in `indices_batch` from the (possibly larger) contiguous
+     * batch arrays. Used to seed the tree with masked seeds removed without
+     * compacting the read-only FFA fold segment.
+     */
+    void add_initial_scattered(std::span<const double> leaves_batch,
+                               std::span<const FoldType> folds_batch,
+                               std::span<const float> scores_batch,
+                               std::span<const SizeType> indices_batch,
+                               SizeType slots_to_write);
     // Add a candidate leaf to the Tree if there is space
     [[nodiscard]] bool add(std::span<const double> leaf,
                            std::span<const FoldType> fold,
@@ -239,9 +263,9 @@ private:
     SizeType m_folds_stride{};
 
     // Host-side storage
-    std::vector<double> m_leaves;  // Shape: (capacity, nparams + 2, 2)
-    std::vector<FoldType> m_folds; // Shape: (capacity, 2, nbins)
-    std::vector<float> m_scores;   // Shape: (capacity)
+    std::vector<double> m_leaves;   // Shape: (capacity, nparams + 2, 2)
+    std::vector<FoldType> m_folds;  // Shape: (capacity, 2, nbins)
+    std::vector<float> m_scores;    // Shape: (capacity)
     std::vector<float> m_scores_ep; // Shape: (capacity)
 
     // Circular buffer state
@@ -461,7 +485,8 @@ public:
     [[nodiscard]] CircularViewCUDA<const double>
     get_leaves_circular_view() const noexcept;
 
-    [[nodiscard]] CircularViewCUDA<FoldTypeCUDA> get_folds_circular_view() noexcept;
+    [[nodiscard]] CircularViewCUDA<FoldTypeCUDA>
+    get_folds_circular_view() noexcept;
     [[nodiscard]] CircularViewCUDA<const FoldTypeCUDA>
     get_folds_circular_view() const noexcept;
 
@@ -471,7 +496,8 @@ public:
     [[nodiscard]] CircularViewCUDA<const float>
     get_scores_circular_view() const noexcept;
 
-    [[nodiscard]] CircularViewCUDA<float> get_scores_ep_circular_view() noexcept;
+    [[nodiscard]] CircularViewCUDA<float>
+    get_scores_ep_circular_view() noexcept;
     [[nodiscard]] CircularViewCUDA<const float>
     get_scores_ep_circular_view() const noexcept;
 

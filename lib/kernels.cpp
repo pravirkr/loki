@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <numbers>
@@ -9,6 +10,10 @@
 
 #include <omp.h>
 #include <xsimd/xsimd.hpp>
+
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>
+#endif
 
 #include "loki/brute_fold_intrinsics.hpp"
 #include "loki/common/coord.hpp"
@@ -113,66 +118,76 @@ void shift_add_binary_with_buffer(const float* __restrict__ data_tail,
 }
 
 /**
- * @brief Optimized version of shift_add_binary, using a single pre-allocated
- * buffer of size 2 * nbins and shift in only one direction.
+ * @brief Right-rotate `head` by `shift` bins and add it to `tail`.
+ *
+ * out[j] = tail[j] + head[(j - shift) mod nbins], for one channel. Two
+ * contiguous loops (the wrapped prefix, then the in-order suffix) so the
+ * add stream-vectorizes without a temporary buffer.
+ */
+inline void shift_add_channel(const float* __restrict__ tail,
+                              const float* __restrict__ head,
+                              float* __restrict__ out,
+                              SizeType shift,
+                              SizeType nbins) noexcept {
+    const SizeType wrapped = nbins - shift;
+#pragma omp simd
+    for (SizeType j = 0; j < shift; ++j) {
+        out[j] = tail[j] + head[wrapped + j];
+    }
+#pragma omp simd
+    for (SizeType j = shift; j < nbins; ++j) {
+        out[j] = tail[j] + head[j - shift];
+    }
+}
+
+inline void shift_add_channel_inplace(const float* __restrict__ head,
+                                      float* __restrict__ out,
+                                      SizeType shift,
+                                      SizeType nbins) noexcept {
+    const SizeType wrapped = nbins - shift;
+#pragma omp simd
+    for (SizeType j = 0; j < shift; ++j) {
+        out[j] += head[wrapped + j];
+    }
+#pragma omp simd
+    for (SizeType j = shift; j < nbins; ++j) {
+        out[j] += head[j - shift];
+    }
+}
+
+[[nodiscard]] inline SizeType phase_shift_bins(float phase_shift,
+                                               SizeType nbins) noexcept {
+    auto shift = static_cast<SizeType>(phase_shift + 0.5F);
+    if (shift == nbins) {
+        shift = 0;
+    }
+    return shift;
+}
+
+/**
+ * @brief Add a rotated head profile (energy and variance) onto the tail.
+ *
+ * Equivalent to the previous rotate-into-temp-buffer implementation. Both
+ * channels are independent contiguous adds.
  */
 void shift_add_linear_with_buffer(const float* __restrict__ data_tail,
                                   const float* __restrict__ data_head,
                                   float phase_shift,
                                   float* __restrict__ out,
-                                  float* __restrict__ temp_buffer,
                                   SizeType nbins) noexcept {
-    auto shift = static_cast<SizeType>(phase_shift + 0.5F);
-    if (shift == nbins) {
-        shift = 0;
-    }
-    const SizeType total_size = 2 * nbins;
-    // Optimized circular shift: rotate data_head into temp buffer
-    // Right shift by 'shift' positions
-    const auto shift_size = nbins - shift;
-
-    // Copy last shift_size elements to beginning
-    std::memcpy(temp_buffer + shift, data_head, sizeof(float) * shift_size);
-    // Copy first shift elements to end
-    std::memcpy(temp_buffer, data_head + shift_size, sizeof(float) * shift);
-    std::memcpy(temp_buffer + nbins + shift, data_head + nbins,
-                sizeof(float) * shift_size);
-    std::memcpy(temp_buffer + nbins, data_head + nbins + shift_size,
-                sizeof(float) * shift);
-
-    // Perform the final addition in a single loop
-    for (SizeType j = 0; j < total_size; ++j) {
-        out[j] = data_tail[j] + temp_buffer[j];
-    }
+    const SizeType shift = phase_shift_bins(phase_shift, nbins);
+    shift_add_channel(data_tail, data_head, out, shift, nbins);
+    shift_add_channel(data_tail + nbins, data_head + nbins, out + nbins, shift,
+                      nbins);
 }
 
 void shift_add_linear_with_buffer_inplace(const float* __restrict__ data_head,
                                           float phase_shift,
                                           float* __restrict__ out,
-                                          float* __restrict__ temp_buffer,
                                           SizeType nbins) noexcept {
-    auto shift = static_cast<SizeType>(phase_shift + 0.5F);
-    if (shift == nbins) {
-        shift = 0;
-    }
-    const SizeType total_size = 2 * nbins;
-    // Optimized circular shift: rotate data_head into temp buffer
-    // Right shift by 'shift' positions
-    const auto shift_size = nbins - shift;
-
-    // Copy last shift_size elements to beginning
-    std::memcpy(temp_buffer + shift, data_head, sizeof(float) * shift_size);
-    // Copy first shift elements to end
-    std::memcpy(temp_buffer, data_head + shift_size, sizeof(float) * shift);
-    std::memcpy(temp_buffer + nbins + shift, data_head + nbins,
-                sizeof(float) * shift_size);
-    std::memcpy(temp_buffer + nbins, data_head + nbins + shift_size,
-                sizeof(float) * shift);
-
-    // Perform the final addition in a single loop
-    for (SizeType j = 0; j < total_size; ++j) {
-        out[j] += temp_buffer[j];
-    }
+    const SizeType shift = phase_shift_bins(phase_shift, nbins);
+    shift_add_channel_inplace(data_head, out, shift, nbins);
+    shift_add_channel_inplace(data_head + nbins, out + nbins, shift, nbins);
 }
 
 /**
@@ -535,50 +550,6 @@ void shift_add_complex_recurrence_linear_inplace(
     }
 }
 
-/**
- * @brief Brute force fold a segment of data.
- *
- *
- * @param ts_e_seg  The segment of data to fold (size: segment_len)
- * @param ts_v_seg  The segment of data to fold (size: segment_len)
- * @param fold_seg  The output array (size: nfreqs * 2 * nbins)
- * @param bucket_indices  The bucket indices (size: nfreqs * segment_len)
- * @param offsets  Prefix sum of the bucket indices (size: nfreqs * nbins + 1)
- * @param nfreqs  The number of frequencies
- * @param nbins  The number of bins in the output array
- */
-void brute_fold_segment(const float* __restrict__ ts_e_seg,
-                        const float* __restrict__ ts_v_seg,
-                        float* __restrict__ fold_seg,
-                        const uint32_t* __restrict__ bucket_indices,
-                        const SizeType* __restrict__ offsets,
-                        SizeType nfreqs,
-                        SizeType nbins) noexcept {
-    for (SizeType ifreq = 0; ifreq < nfreqs; ++ifreq) {
-        const auto freq_offset_out      = ifreq * 2 * nbins;
-        float* __restrict__ fold_e_base = fold_seg + freq_offset_out;
-        float* __restrict__ fold_v_base = fold_e_base + nbins;
-
-        for (SizeType iphase = 0; iphase < nbins; ++iphase) {
-            const auto bucket_idx                = (ifreq * nbins) + iphase;
-            const auto buck_start                = offsets[bucket_idx];
-            const auto buck_end                  = offsets[bucket_idx + 1];
-            const SizeType buck_size             = buck_end - buck_start;
-            const uint32_t* __restrict__ indices = bucket_indices + buck_start;
-
-            float sum_e = 0.0F, sum_v = 0.0F;
-            for (SizeType i = 0; i < buck_size; ++i) {
-                const auto idx = indices[i];
-                sum_e += ts_e_seg[idx];
-                sum_v += ts_v_seg[idx];
-            }
-
-            fold_e_base[iphase] = sum_e;
-            fold_v_base[iphase] = sum_v;
-        }
-    }
-}
-
 // One-shot m=1 phasor table. Double phase, scalar libm; OpenMP over
 // frequencies.
 void precompute_base_phasors_scalar(float* __restrict__ delta_r,
@@ -736,6 +707,36 @@ void brute_fold_segment_complex_xsimd(
     }
 }
 
+/**
+ * @brief Merge one pair of adjacent segments of a frequency-only FFA level.
+ *
+ * @param fold_tail_seg  Level-(l-1) segment 2*s (ncoords_prev profiles).
+ * @param fold_head_seg  Level-(l-1) segment 2*s+1 (ncoords_prev profiles).
+ * @param fold_out_seg   Level-l segment s (ncoords_cur profiles).
+ */
+inline void
+ffa_merge_segment_freq(const float* __restrict__ fold_tail_seg,
+                       const float* __restrict__ fold_head_seg,
+                       float* __restrict__ fold_out_seg,
+                       const coord::FFACoordFreq* __restrict__ coords,
+                       SizeType ncoords_cur,
+                       SizeType nbins) noexcept {
+    constexpr SizeType kBlockSize = 32;
+    const SizeType fold_stride    = 2 * nbins;
+    for (SizeType icoord_block = 0; icoord_block < ncoords_cur;
+         icoord_block += kBlockSize) {
+        const auto block_end = std::min(icoord_block + kBlockSize, ncoords_cur);
+        for (SizeType icoord = icoord_block; icoord < block_end; ++icoord) {
+            const auto* __restrict__ coord_cur = &coords[icoord];
+            const auto prev_offset =
+                static_cast<SizeType>(coord_cur->idx) * fold_stride;
+            shift_add_linear_with_buffer(
+                fold_tail_seg + prev_offset, fold_head_seg + prev_offset,
+                coord_cur->shift, fold_out_seg + (icoord * fold_stride), nbins);
+        }
+    }
+}
+
 void ffa_iter_segment_freq(const float* __restrict__ fold_in,
                            float* __restrict__ fold_out,
                            const coord::FFACoordFreq* __restrict__ coords,
@@ -746,47 +747,20 @@ void ffa_iter_segment_freq(const float* __restrict__ fold_in,
                            int nthreads) noexcept {
     nthreads = std::clamp(nthreads, 1, omp_get_max_threads());
     // Process one segment at a time to keep data in cache
-    constexpr SizeType kBlockSize  = 32;
     const SizeType fold_stride     = 2 * nbins;
     const SizeType seg_prev_stride = ncoords_prev * fold_stride;
     const SizeType seg_out_stride  = ncoords_cur * fold_stride;
 
 #pragma omp parallel num_threads(nthreads) default(none)                       \
-    shared(fold_in, fold_out, coords, ncoords_cur, ncoords_prev, nsegments,    \
-               nbins, fold_stride, seg_prev_stride, seg_out_stride)
+    shared(fold_in, fold_out, coords, ncoords_cur, nsegments, nbins,           \
+               seg_prev_stride, seg_out_stride)
     {
-        // Each thread allocates its own buffer once
-        std::vector<float> temp_buffer(2 * nbins);
-        auto* __restrict__ temp_buffer_ptr = temp_buffer.data();
-
-#pragma omp for
+#pragma omp for schedule(static)
         for (SizeType iseg = 0; iseg < nsegments; ++iseg) {
-            // Process coordinates in blocks within each segment
-            for (SizeType icoord_block = 0; icoord_block < ncoords_cur;
-                 icoord_block += kBlockSize) {
-                const auto block_end =
-                    std::min(icoord_block + kBlockSize, ncoords_cur);
-                for (SizeType icoord = icoord_block; icoord < block_end;
-                     ++icoord) {
-                    const auto* __restrict__ coord_cur = &coords[icoord];
-                    const auto tail_offset =
-                        ((iseg * 2) * seg_prev_stride) +
-                        (static_cast<SizeType>(coord_cur->idx) * fold_stride);
-                    const auto head_offset =
-                        (((iseg * 2) + 1) * seg_prev_stride) +
-                        (static_cast<SizeType>(coord_cur->idx) * fold_stride);
-                    const auto out_offset =
-                        (iseg * seg_out_stride) + (icoord * fold_stride);
-
-                    const auto* __restrict__ fold_tail = &fold_in[tail_offset];
-                    const auto* __restrict__ fold_head = &fold_in[head_offset];
-                    auto* __restrict__ fold_sum        = &fold_out[out_offset];
-
-                    shift_add_linear_with_buffer(fold_tail, fold_head,
-                                                 coord_cur->shift, fold_sum,
-                                                 temp_buffer_ptr, nbins);
-                }
-            }
+            ffa_merge_segment_freq(
+                fold_in + ((iseg * 2) * seg_prev_stride),
+                fold_in + (((iseg * 2) + 1) * seg_prev_stride),
+                fold_out + (iseg * seg_out_stride), coords, ncoords_cur, nbins);
         }
     }
 }
@@ -806,13 +780,10 @@ void ffa_iter_standard_freq(const float* __restrict__ fold_in,
     const SizeType seg_out_stride  = ncoords_cur * fold_stride;
 
 #pragma omp parallel num_threads(nthreads) default(none)                       \
-    shared(fold_in, fold_out, coords, ncoords_cur, ncoords_prev, nsegments,    \
-               nbins, fold_stride, seg_prev_stride, seg_out_stride)
+    shared(fold_in, fold_out, coords, ncoords_cur, nsegments, nbins,           \
+               fold_stride, seg_prev_stride, seg_out_stride)
     {
-        std::vector<float> temp_buffer(2 * nbins);
-        auto* __restrict__ temp_buffer_ptr = temp_buffer.data();
-
-#pragma omp for
+#pragma omp for schedule(static)
         for (SizeType icoord_block = 0; icoord_block < ncoords_cur;
              icoord_block += kBlockSize) {
             const auto block_end =
@@ -836,7 +807,7 @@ void ffa_iter_standard_freq(const float* __restrict__ fold_in,
 
                     shift_add_linear_with_buffer(fold_tail, fold_head,
                                                  coord_cur->shift, fold_sum,
-                                                 temp_buffer_ptr, nbins);
+                                                 nbins);
                 }
             }
         }
@@ -1144,29 +1115,326 @@ void ffa_complex_iter_standard_freq(
     }
 }
 
+void fill_segment_prefix(const float* __restrict__ src,
+                         double* __restrict__ dst,
+                         SizeType n) noexcept {
+    double acc = 0.0;
+    dst[0]     = 0.0;
+    for (SizeType i = 0; i < n; ++i) {
+        acc += static_cast<double>(src[i]);
+        dst[static_cast<SizeType>(i) + 1] = acc;
+    }
+}
+
+/// Fold coordinates `[coord_begin, coord_end)` from prefix sums into a packed
+/// `[ncoords, 2, nbins]` buffer. Each bin is the float-rounded double sum of
+/// its runs, accumulated when a bin is visited more than once.
+void brute_fold_runs_range(const double* __restrict__ prefix_e,
+                           const double* __restrict__ prefix_v,
+                           float* __restrict__ fold_packed,
+                           const PhaseRun* __restrict__ runs,
+                           const SizeType* __restrict__ run_offsets,
+                           SizeType coord_begin,
+                           SizeType coord_end,
+                           SizeType nbins) noexcept {
+    const SizeType ncoords     = coord_end - coord_begin;
+    const SizeType fold_stride = 2 * nbins;
+    std::fill(fold_packed, fold_packed + (ncoords * fold_stride), 0.0F);
+    for (SizeType local = 0; local < ncoords; ++local) {
+        const SizeType ifreq       = coord_begin + local;
+        float* __restrict__ fold_e = fold_packed + (local * fold_stride);
+        float* __restrict__ fold_v = fold_e + nbins;
+        const PhaseRun* run        = runs + run_offsets[ifreq];
+        const PhaseRun* run_end    = runs + run_offsets[ifreq + 1];
+        uint32_t start             = 0;
+        for (; run != run_end; ++run) {
+            const auto end = run->end;
+            fold_e[run->bin] +=
+                static_cast<float>(prefix_e[end] - prefix_e[start]);
+            fold_v[run->bin] +=
+                static_cast<float>(prefix_v[end] - prefix_v[start]);
+            start = end;
+        }
+    }
+}
+
+#if defined(__AVX2__)
+/// 4-segment batched brute fold using AVX2 SIMD on pre-interleaved prefixes.
+/// Folds 4 segments simultaneously into fold_buf, then applies an SSE 4x4
+/// matrix transpose into standard [iseg, ncoords, 2, nbins] layout.
+void brute_fold_runs_range_4seg(const double* __restrict__ p4_e,
+                                const double* __restrict__ p4_v,
+                                float* __restrict__ cur_base,
+                                float* __restrict__ fold_buf,
+                                SizeType seg_stride,
+                                const PhaseRun* __restrict__ runs,
+                                const SizeType* __restrict__ run_offsets,
+                                SizeType coord_begin,
+                                SizeType coord_end,
+                                SizeType nbins) noexcept {
+    const SizeType ncoords       = coord_end - coord_begin;
+    const SizeType total_bins    = 2 * nbins;
+    const SizeType fold_stride_4 = total_bins * 4;
+
+    float* dst0 = cur_base;
+    float* dst1 = cur_base + seg_stride;
+    float* dst2 = cur_base + 2 * seg_stride;
+    float* dst3 = cur_base + 3 * seg_stride;
+
+    for (SizeType local = 0; local < ncoords; ++local) {
+        std::fill(fold_buf, fold_buf + fold_stride_4, 0.0F);
+
+        float* __restrict__ fe = fold_buf;
+        float* __restrict__ fv = fe + (nbins * 4);
+
+        const SizeType ifreq    = coord_begin + local;
+        const PhaseRun* run     = runs + run_offsets[ifreq];
+        const PhaseRun* run_end = runs + run_offsets[ifreq + 1];
+
+        __m256d prev_e = _mm256_loadu_pd(p4_e);
+        __m256d prev_v = _mm256_loadu_pd(p4_v);
+
+        for (; run + 2 <= run_end; run += 2) {
+            const auto end0 = run[0].end;
+            const auto bin0 = run[0].bin;
+            const auto end1 = run[1].end;
+            const auto bin1 = run[1].bin;
+
+            __m256d cur_e0 = _mm256_loadu_pd(p4_e + end0 * 4);
+            __m256d cur_v0 = _mm256_loadu_pd(p4_v + end0 * 4);
+            __m256d cur_e1 = _mm256_loadu_pd(p4_e + end1 * 4);
+            __m256d cur_v1 = _mm256_loadu_pd(p4_v + end1 * 4);
+
+            __m256d diff_e0 = _mm256_sub_pd(cur_e0, prev_e);
+            __m256d diff_v0 = _mm256_sub_pd(cur_v0, prev_v);
+            __m256d diff_e1 = _mm256_sub_pd(cur_e1, cur_e0);
+            __m256d diff_v1 = _mm256_sub_pd(cur_v1, cur_v0);
+
+            prev_e = cur_e1;
+            prev_v = cur_v1;
+
+            __m128 de0 = _mm256_cvtpd_ps(diff_e0);
+            __m128 dv0 = _mm256_cvtpd_ps(diff_v0);
+            __m128 de1 = _mm256_cvtpd_ps(diff_e1);
+            __m128 dv1 = _mm256_cvtpd_ps(diff_v1);
+
+            __m128 old_e0 = _mm_loadu_ps(fe + bin0 * 4);
+            __m128 old_v0 = _mm_loadu_ps(fv + bin0 * 4);
+            __m128 old_e1 = _mm_loadu_ps(fe + bin1 * 4);
+            __m128 old_v1 = _mm_loadu_ps(fv + bin1 * 4);
+
+            _mm_storeu_ps(fe + bin0 * 4, _mm_add_ps(old_e0, de0));
+            _mm_storeu_ps(fv + bin0 * 4, _mm_add_ps(old_v0, dv0));
+            _mm_storeu_ps(fe + bin1 * 4, _mm_add_ps(old_e1, de1));
+            _mm_storeu_ps(fv + bin1 * 4, _mm_add_ps(old_v1, dv1));
+        }
+
+        for (; run != run_end; ++run) {
+            const auto end = run->end;
+            const auto bin = run->bin;
+
+            __m256d cur_e = _mm256_loadu_pd(p4_e + end * 4);
+            __m256d cur_v = _mm256_loadu_pd(p4_v + end * 4);
+
+            __m256d diff_e_d = _mm256_sub_pd(cur_e, prev_e);
+            __m256d diff_v_d = _mm256_sub_pd(cur_v, prev_v);
+
+            prev_e = cur_e;
+            prev_v = cur_v;
+
+            __m128 diff_e = _mm256_cvtpd_ps(diff_e_d);
+            __m128 diff_v = _mm256_cvtpd_ps(diff_v_d);
+
+            __m128 old_e = _mm_loadu_ps(fe + bin * 4);
+            __m128 old_v = _mm_loadu_ps(fv + bin * 4);
+
+            _mm_storeu_ps(fe + bin * 4, _mm_add_ps(old_e, diff_e));
+            _mm_storeu_ps(fv + bin * 4, _mm_add_ps(old_v, diff_v));
+        }
+
+        const SizeType off = local * total_bins;
+        float* d0          = dst0 + off;
+        float* d1          = dst1 + off;
+        float* d2          = dst2 + off;
+        float* d3          = dst3 + off;
+
+        SizeType b = 0;
+        for (; b + 4 <= total_bins; b += 4) {
+            __m128 r0 = _mm_loadu_ps(fold_buf + (b + 0) * 4);
+            __m128 r1 = _mm_loadu_ps(fold_buf + (b + 1) * 4);
+            __m128 r2 = _mm_loadu_ps(fold_buf + (b + 2) * 4);
+            __m128 r3 = _mm_loadu_ps(fold_buf + (b + 3) * 4);
+
+            _MM_TRANSPOSE4_PS(r0, r1, r2, r3);
+
+            _mm_storeu_ps(d0 + b, r0);
+            _mm_storeu_ps(d1 + b, r1);
+            _mm_storeu_ps(d2 + b, r2);
+            _mm_storeu_ps(d3 + b, r3);
+        }
+        for (; b < total_bins; ++b) {
+            d0[b] = fold_buf[b * 4 + 0];
+            d1[b] = fold_buf[b * 4 + 1];
+            d2[b] = fold_buf[b * 4 + 2];
+            d3[b] = fold_buf[b * 4 + 3];
+        }
+    }
+}
+#endif
+
+[[nodiscard]] bool coords_idx_monotone(const coord::FFACoordFreq* coords,
+                                       SizeType n) noexcept {
+    for (SizeType i = 1; i < n; ++i) {
+        if (coords[i].idx < coords[i - 1].idx) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// Widest `idx` span of any `window` consecutive coordinates. Monotone idx.
+[[nodiscard]] SizeType max_idx_span(const coord::FFACoordFreq* coords,
+                                    SizeType n,
+                                    SizeType window) noexcept {
+    if (n == 0 || window == 0) {
+        return 0;
+    }
+    window        = std::min(window, n);
+    SizeType best = 0;
+    for (SizeType i = 0; i + window <= n; ++i) {
+        const SizeType span =
+            static_cast<SizeType>(coords[i + window - 1].idx) -
+            static_cast<SizeType>(coords[i].idx) + 1;
+        best = std::max(best, span);
+    }
+    return best;
+}
+
+struct CoordRange {
+    SizeType lo{0};
+    SizeType hi{0};
+};
+
+void tile_input_ranges(const coord::FFACoordFreq* const* coords_levels,
+                       SizeType k_levels,
+                       SizeType coord_begin,
+                       SizeType coord_end,
+                       CoordRange* ranges) noexcept {
+    ranges[k_levels] = {coord_begin, coord_end};
+    for (SizeType level = k_levels; level >= 1; --level) {
+        const auto* coords   = coords_levels[level];
+        const SizeType lo    = ranges[level].lo;
+        const SizeType hi    = ranges[level].hi;
+        ranges[level - 1].lo = static_cast<SizeType>(coords[lo].idx);
+        ranges[level - 1].hi = static_cast<SizeType>(coords[hi - 1].idx) + 1;
+    }
+}
+
 } // namespace
 
 void brute_fold_ts(const float* __restrict__ ts_e,
                    const float* __restrict__ ts_v,
                    float* __restrict__ fold,
-                   const uint32_t* __restrict__ bucket_indices,
-                   const SizeType* __restrict__ offsets,
+                   const PhaseRun* __restrict__ runs,
+                   const SizeType* __restrict__ run_offsets,
                    SizeType nsegments,
                    SizeType nfreqs,
                    SizeType segment_len,
                    SizeType nbins,
                    int nthreads) noexcept {
     nthreads = std::clamp(nthreads, 1, omp_get_max_threads());
-#pragma omp parallel for num_threads(nthreads) default(none)                   \
-    shared(ts_e, ts_v, fold, bucket_indices, offsets, nsegments, nfreqs,       \
+#pragma omp parallel num_threads(nthreads) default(none)                       \
+    shared(ts_e, ts_v, fold, runs, run_offsets, nsegments, nfreqs,             \
                segment_len, nbins)
-    for (SizeType iseg = 0; iseg < nsegments; ++iseg) {
-        const auto start_idx              = iseg * segment_len;
-        const auto* __restrict__ ts_e_seg = ts_e + start_idx;
-        const auto* __restrict__ ts_v_seg = ts_v + start_idx;
-        auto* __restrict__ fold_seg       = fold + (iseg * nfreqs * 2 * nbins);
-        brute_fold_segment(ts_e_seg, ts_v_seg, fold_seg, bucket_indices,
-                           offsets, nfreqs, nbins);
+    {
+        std::vector<double> prefix_e(segment_len + 1);
+        std::vector<double> prefix_v(segment_len + 1);
+#pragma omp for schedule(static)
+        for (SizeType iseg = 0; iseg < nsegments; ++iseg) {
+            const auto start_idx              = iseg * segment_len;
+            const auto* __restrict__ ts_e_seg = ts_e + start_idx;
+            const auto* __restrict__ ts_v_seg = ts_v + start_idx;
+            fill_segment_prefix(ts_e_seg, prefix_e.data(), segment_len);
+            fill_segment_prefix(ts_v_seg, prefix_v.data(), segment_len);
+            auto* __restrict__ fold_seg = fold + (iseg * nfreqs * 2 * nbins);
+            brute_fold_runs_range(prefix_e.data(), prefix_v.data(), fold_seg,
+                                  runs, run_offsets, 0, nfreqs, nbins);
+        }
+    }
+}
+
+void brute_fold_ffa_fused_freq(const float* __restrict__ ts_e,
+                               const float* __restrict__ ts_v,
+                               float* __restrict__ fold_out,
+                               const PhaseRun* __restrict__ runs,
+                               const SizeType* __restrict__ run_offsets,
+                               const coord::FFACoordFreq* const* coords_levels,
+                               const SizeType* ncoords,
+                               SizeType nsegments,
+                               SizeType nfreqs,
+                               SizeType segment_len,
+                               SizeType nbins,
+                               SizeType nlevels,
+                               int nthreads) noexcept {
+    nthreads = std::clamp(nthreads, 1, omp_get_max_threads());
+    const SizeType tile_segments = SizeType{1} << nlevels;
+    const SizeType ntiles        = nsegments >> nlevels;
+    const SizeType fold_stride   = 2 * nbins;
+    // Largest per-level working set of one tile (floats). Profiles at level j
+    // number (tile_segments >> j) * ncoords[j].
+    SizeType tile_floats = 0;
+    for (SizeType j = 0; j <= nlevels; ++j) {
+        tile_floats = std::max(tile_floats,
+                               (tile_segments >> j) * ncoords[j] * fold_stride);
+    }
+    const SizeType out_tile_stride = ncoords[nlevels] * fold_stride;
+    const SizeType prefix_stride   = segment_len + 1;
+
+#pragma omp parallel num_threads(nthreads) default(none)                       \
+    shared(ts_e, ts_v, fold_out, runs, run_offsets, coords_levels, ncoords,    \
+               nfreqs, segment_len, nbins, nlevels, tile_segments, ntiles,     \
+               fold_stride, tile_floats, out_tile_stride, prefix_stride)
+    {
+        std::vector<float> scratch_a(tile_floats);
+        std::vector<float> scratch_b(tile_floats);
+        std::vector<double> prefix_e(tile_segments * prefix_stride);
+        std::vector<double> prefix_v(tile_segments * prefix_stride);
+
+#pragma omp for schedule(static)
+        for (SizeType itile = 0; itile < ntiles; ++itile) {
+            float* cur  = scratch_a.data();
+            float* next = scratch_b.data();
+            for (SizeType iseg = 0; iseg < tile_segments; ++iseg) {
+                const auto start_idx =
+                    ((itile * tile_segments) + iseg) * segment_len;
+                fill_segment_prefix(ts_e + start_idx,
+                                    prefix_e.data() + (iseg * prefix_stride),
+                                    segment_len);
+                fill_segment_prefix(ts_v + start_idx,
+                                    prefix_v.data() + (iseg * prefix_stride),
+                                    segment_len);
+                brute_fold_runs_range(prefix_e.data() + (iseg * prefix_stride),
+                                      prefix_v.data() + (iseg * prefix_stride),
+                                      cur + (iseg * nfreqs * fold_stride), runs,
+                                      run_offsets, 0, nfreqs, nbins);
+            }
+            for (SizeType j = 1; j <= nlevels; ++j) {
+                const SizeType nseg_out      = tile_segments >> j;
+                const SizeType seg_prev_strd = ncoords[j - 1] * fold_stride;
+                const SizeType seg_out_strd  = ncoords[j] * fold_stride;
+                float* out_base = (j == nlevels)
+                                      ? fold_out + (itile * out_tile_stride)
+                                      : next;
+                for (SizeType iseg = 0; iseg < nseg_out; ++iseg) {
+                    ffa_merge_segment_freq(
+                        cur + ((iseg * 2) * seg_prev_strd),
+                        cur + (((iseg * 2) + 1) * seg_prev_strd),
+                        out_base + (iseg * seg_out_strd), coords_levels[j],
+                        ncoords[j], nbins);
+                }
+                std::swap(cur, next);
+            }
+        }
     }
 }
 
@@ -1368,6 +1636,7 @@ void shift_add_linear_batch(const float* __restrict__ folds_tree,
                             SizeType n_leaves,
                             SizeType physical_start_idx,
                             SizeType capacity) noexcept {
+    (void)temp_buffer;
     const auto total_size = 2 * nbins;
     for (SizeType ileaf = 0; ileaf < n_leaves; ++ileaf) {
         const uint32_t tree_idx_logical =
@@ -1382,7 +1651,7 @@ void shift_add_linear_batch(const float* __restrict__ folds_tree,
             folds_ffa + (indices_ffa[ileaf] * total_size);
         float* __restrict__ data_out = folds_out + (ileaf * total_size);
         shift_add_linear_with_buffer(data_tree, data_ffa, phase_shift[ileaf],
-                                     data_out, temp_buffer, nbins);
+                                     data_out, nbins);
     }
 }
 
@@ -1429,6 +1698,7 @@ void shift_add_ascend_linear_batch(const float* __restrict__ folds_ffa,
                                    SizeType n_coords_init,
                                    SizeType n_leaves,
                                    SizeType n_segments) noexcept {
+    (void)temp_buffer;
     const auto total_size = 2 * nbins;
     for (SizeType ileaf = 0; ileaf < n_leaves; ++ileaf) {
         float* __restrict__ data_tree = folds_tree + (ileaf * total_size);
@@ -1442,7 +1712,7 @@ void shift_add_ascend_linear_batch(const float* __restrict__ folds_ffa,
                 folds_ffa + (segment_idx * n_coords_init * total_size) +
                 (ffa_idx_seg * total_size);
             shift_add_linear_with_buffer_inplace(data_ffa, phase_shift_seg,
-                                                 data_tree, temp_buffer, nbins);
+                                                 data_tree, nbins);
         }
     }
 }
@@ -1472,6 +1742,417 @@ void shift_add_ascend_linear_complex_batch(
                 (ffa_idx_seg * total_size);
             shift_add_complex_recurrence_linear_inplace(
                 data_ffa, phase_shift_seg, data_tree, nbins_f, nbins);
+        }
+    }
+}
+
+namespace {
+
+using ConeClock = std::chrono::steady_clock;
+
+[[nodiscard]] double cone_seconds(ConeClock::time_point start) noexcept {
+    return std::chrono::duration<double>(ConeClock::now() - start).count();
+}
+
+void cone_execute_tile(float* scratch_a,
+                       float* scratch_b,
+                       const float* level_in,
+                       const double* prefix_e,
+                       const double* prefix_v,
+                       const PhaseRun* runs,
+                       const SizeType* run_offsets,
+                       SizeType prefix_stride,
+                       float* level_out,
+                       const coord::FFACoordFreq* const* coords_levels,
+                       const SizeType* ncoords,
+                       SizeType group,
+                       SizeType coord_begin,
+                       SizeType coord_end,
+                       SizeType nbins,
+                       SizeType k_levels,
+                       ConeScoreFn score_fn,
+                       void* score_ctx,
+                       bool time_it,
+                       double* brute_s,
+                       double* merge_s,
+                       double* score_s,
+                       [[maybe_unused]] const double* p4_e = nullptr,
+                       [[maybe_unused]] const double* p4_v = nullptr) {
+    const SizeType fold_stride = 2 * nbins;
+    CoordRange ranges[17];
+    tile_input_ranges(coords_levels, k_levels, coord_begin, coord_end, ranges);
+
+    float* cur            = scratch_a;
+    float* next           = scratch_b;
+    const SizeType nseg0  = SizeType{1} << k_levels;
+    const SizeType width0 = ranges[0].hi - ranges[0].lo;
+    const auto level_start =
+        time_it ? ConeClock::now() : ConeClock::time_point{};
+
+    if (level_in == nullptr) {
+        SizeType iseg = 0;
+#if defined(__AVX2__)
+        if (p4_e != nullptr && p4_v != nullptr && scratch_b != nullptr) {
+            for (; iseg + 4 <= nseg0; iseg += 4) {
+                brute_fold_runs_range_4seg(p4_e + (iseg * prefix_stride),
+                                           p4_v + (iseg * prefix_stride),
+                                           cur + (iseg * width0 * fold_stride),
+                                           scratch_b, width0 * fold_stride,
+                                           runs, run_offsets, ranges[0].lo,
+                                           ranges[0].hi, nbins);
+            }
+        }
+#endif
+        for (; iseg < nseg0; ++iseg) {
+            brute_fold_runs_range(prefix_e + (iseg * prefix_stride),
+                                  prefix_v + (iseg * prefix_stride),
+                                  cur + (iseg * width0 * fold_stride), runs,
+                                  run_offsets, ranges[0].lo, ranges[0].hi,
+                                  nbins);
+        }
+        if (time_it) {
+            *brute_s += cone_seconds(level_start);
+        }
+    } else {
+        const SizeType in_seg_stride = ncoords[0] * fold_stride;
+        const SizeType nbytes        = width0 * fold_stride * sizeof(float);
+        for (SizeType iseg = 0; iseg < nseg0; ++iseg) {
+            const SizeType global_seg = (group * nseg0) + iseg;
+            const float* src = level_in + (global_seg * in_seg_stride) +
+                               (ranges[0].lo * fold_stride);
+            std::memcpy(cur + (iseg * width0 * fold_stride), src, nbytes);
+        }
+        if (time_it) {
+            *merge_s += cone_seconds(level_start);
+        }
+    }
+
+    auto merge_start = time_it ? ConeClock::now() : ConeClock::time_point{};
+    for (SizeType level = 1; level <= k_levels; ++level) {
+        const SizeType nseg_in    = SizeType{1} << (k_levels - (level - 1));
+        const SizeType nseg_out   = nseg_in >> 1;
+        const SizeType width_prev = ranges[level - 1].hi - ranges[level - 1].lo;
+        const SizeType width_cur  = ranges[level].hi - ranges[level].lo;
+        const SizeType seg_prev   = width_prev * fold_stride;
+        const SizeType seg_out    = width_cur * fold_stride;
+        const auto* coords        = coords_levels[level];
+        const SizeType base       = ranges[level].lo;
+        const SizeType prev_base  = ranges[level - 1].lo;
+        for (SizeType iseg = 0; iseg < nseg_out; ++iseg) {
+            const float* tail = cur + ((iseg * 2) * seg_prev);
+            const float* head = cur + (((iseg * 2) + 1) * seg_prev);
+            float* out        = next + (iseg * seg_out);
+            for (SizeType local = 0; local < width_cur; ++local) {
+                const SizeType global = base + local;
+                const SizeType prev =
+                    static_cast<SizeType>(coords[global].idx) - prev_base;
+                shift_add_linear_with_buffer(
+                    tail + (prev * fold_stride), head + (prev * fold_stride),
+                    coords[global].shift, out + (local * fold_stride), nbins);
+            }
+        }
+        std::swap(cur, next);
+    }
+    if (time_it) {
+        *merge_s += cone_seconds(merge_start);
+    }
+
+    const SizeType width_k = ranges[k_levels].hi - ranges[k_levels].lo;
+    if (level_out != nullptr) {
+        const SizeType out_seg_stride = ncoords[k_levels] * fold_stride;
+        float* dst                    = level_out + (group * out_seg_stride) +
+                                        (ranges[k_levels].lo * fold_stride);
+        std::memcpy(dst, cur, width_k * fold_stride * sizeof(float));
+    }
+    if (score_fn != nullptr) {
+        const auto score_start =
+            time_it ? ConeClock::now() : ConeClock::time_point{};
+        score_fn(cur, ranges[k_levels].lo, width_k, nbins, score_ctx);
+        if (time_it) {
+            *score_s += cone_seconds(score_start);
+        }
+    }
+}
+
+} // namespace
+
+SizeType
+cone_band_working_floats(const coord::FFACoordFreq* const* coords_levels,
+                         const SizeType* ncoords,
+                         SizeType k_levels,
+                         SizeType tile_coords,
+                         SizeType nbins) noexcept {
+    if (k_levels == 0 || k_levels > 16 || tile_coords == 0 || nbins == 0 ||
+        ncoords == nullptr || coords_levels == nullptr) {
+        return 0;
+    }
+    const SizeType top = std::min(tile_coords, ncoords[k_levels]);
+    if (top == 0) {
+        return 0;
+    }
+    std::array<SizeType, 17> widths{};
+    widths[k_levels] = top;
+    for (SizeType level = k_levels; level >= 1; --level) {
+        const auto* coords = coords_levels[level];
+        const SizeType n   = ncoords[level];
+        if (coords == nullptr || n == 0 || !coords_idx_monotone(coords, n)) {
+            return 0;
+        }
+        widths[level - 1] = max_idx_span(coords, n, widths[level]);
+        if (widths[level - 1] == 0) {
+            return 0;
+        }
+    }
+    SizeType floats = 0;
+    for (SizeType level = 0; level <= k_levels; ++level) {
+        const SizeType nseg = SizeType{1} << (k_levels - level);
+        floats = std::max(floats, nseg * widths[level] * 2 * nbins);
+    }
+    return floats;
+}
+
+void ffa_cone_band_freq(const float* level_in,
+                        const float* ts_e,
+                        const float* ts_v,
+                        const PhaseRun* runs,
+                        const SizeType* run_offsets,
+                        SizeType segment_len,
+                        float* level_out,
+                        const coord::FFACoordFreq* const* coords_levels,
+                        const SizeType* ncoords,
+                        SizeType nsegments_in,
+                        SizeType nbins,
+                        SizeType k_levels,
+                        SizeType tile_coords,
+                        ConeScoreFn score_fn,
+                        void* score_ctx,
+                        ConeBandThreadSeconds* thread_seconds,
+                        int nthreads) {
+    if (k_levels == 0 || k_levels > 16 || tile_coords == 0 ||
+        nsegments_in == 0 || ncoords == nullptr) {
+        return;
+    }
+    const SizeType nseg_group = SizeType{1} << k_levels;
+    if ((nsegments_in % nseg_group) != 0) {
+        return;
+    }
+    nthreads                   = std::clamp(nthreads, 1, omp_get_max_threads());
+    const SizeType nseg_out    = nsegments_in >> k_levels;
+    const SizeType ncoords_top = ncoords[k_levels];
+    const SizeType scratch_floats = cone_band_working_floats(
+        coords_levels, ncoords, k_levels, tile_coords, nbins);
+    if (scratch_floats == 0 || ncoords_top == 0 || nseg_out == 0) {
+        return;
+    }
+    const bool bottom            = level_in == nullptr;
+    const bool parallel_groups   = nseg_out >= static_cast<SizeType>(nthreads);
+    const bool time_it           = thread_seconds != nullptr;
+    const SizeType prefix_stride = segment_len + 1;
+
+    std::vector<double> shared_prefix_e;
+    std::vector<double> shared_prefix_v;
+    std::vector<double> shared_p4_e;
+    std::vector<double> shared_p4_v;
+    if (bottom && !parallel_groups) {
+        const auto prefix_start = ConeClock::now();
+        shared_prefix_e.resize(nsegments_in * prefix_stride);
+        shared_prefix_v.resize(nsegments_in * prefix_stride);
+#if defined(__AVX2__)
+        shared_p4_e.resize(nsegments_in * prefix_stride);
+        shared_p4_v.resize(nsegments_in * prefix_stride);
+#endif
+#pragma omp parallel for schedule(static) num_threads(nthreads) default(none)  \
+    shared(ts_e, ts_v, shared_prefix_e, shared_prefix_v, nsegments_in,         \
+               segment_len, prefix_stride)
+        for (SizeType iseg = 0; iseg < nsegments_in; ++iseg) {
+            fill_segment_prefix(ts_e + (iseg * segment_len),
+                                shared_prefix_e.data() + (iseg * prefix_stride),
+                                segment_len);
+            fill_segment_prefix(ts_v + (iseg * segment_len),
+                                shared_prefix_v.data() + (iseg * prefix_stride),
+                                segment_len);
+        }
+#if defined(__AVX2__)
+        const SizeType n_prefix = segment_len + 1;
+        const SizeType nbatches = nsegments_in / 4;
+#pragma omp parallel for schedule(static) num_threads(nthreads) default(none)  \
+    shared(shared_prefix_e, shared_prefix_v, shared_p4_e, shared_p4_v,         \
+               nbatches, prefix_stride, n_prefix)
+        for (SizeType ibatch = 0; ibatch < nbatches; ++ibatch) {
+            const SizeType iseg = ibatch * 4;
+            const double* pe0 =
+                shared_prefix_e.data() + (iseg + 0) * prefix_stride;
+            const double* pe1 =
+                shared_prefix_e.data() + (iseg + 1) * prefix_stride;
+            const double* pe2 =
+                shared_prefix_e.data() + (iseg + 2) * prefix_stride;
+            const double* pe3 =
+                shared_prefix_e.data() + (iseg + 3) * prefix_stride;
+            double* dst_e = shared_p4_e.data() + (iseg * prefix_stride);
+
+            const double* pv0 =
+                shared_prefix_v.data() + (iseg + 0) * prefix_stride;
+            const double* pv1 =
+                shared_prefix_v.data() + (iseg + 1) * prefix_stride;
+            const double* pv2 =
+                shared_prefix_v.data() + (iseg + 2) * prefix_stride;
+            const double* pv3 =
+                shared_prefix_v.data() + (iseg + 3) * prefix_stride;
+            double* dst_v = shared_p4_v.data() + (iseg * prefix_stride);
+
+            for (SizeType i = 0; i < n_prefix; ++i) {
+                dst_e[i * 4 + 0] = pe0[i];
+                dst_e[i * 4 + 1] = pe1[i];
+                dst_e[i * 4 + 2] = pe2[i];
+                dst_e[i * 4 + 3] = pe3[i];
+
+                dst_v[i * 4 + 0] = pv0[i];
+                dst_v[i * 4 + 1] = pv1[i];
+                dst_v[i * 4 + 2] = pv2[i];
+                dst_v[i * 4 + 3] = pv3[i];
+            }
+        }
+#endif
+        if (time_it) {
+            thread_seconds->prefix_wall += cone_seconds(prefix_start);
+        }
+    }
+
+#pragma omp parallel num_threads(nthreads) default(none) shared(               \
+        level_in, ts_e, ts_v, runs, run_offsets, level_out, coords_levels,     \
+            ncoords, nbins, k_levels, tile_coords, score_fn, score_ctx,        \
+            thread_seconds, nseg_group, nseg_out, ncoords_top, scratch_floats, \
+            bottom, parallel_groups, time_it, prefix_stride, segment_len,      \
+            shared_prefix_e, shared_prefix_v, shared_p4_e, shared_p4_v)
+    {
+        double brute_local = 0.0;
+        double merge_local = 0.0;
+        double score_local = 0.0;
+        std::vector<float> scratch_a(scratch_floats);
+        std::vector<float> scratch_b(scratch_floats);
+        std::vector<double> prefix_e;
+        std::vector<double> prefix_v;
+        std::vector<double> p4_e;
+        std::vector<double> p4_v;
+        if (bottom && parallel_groups) {
+            prefix_e.resize(nseg_group * prefix_stride);
+            prefix_v.resize(nseg_group * prefix_stride);
+#if defined(__AVX2__)
+            p4_e.resize(nseg_group * prefix_stride);
+            p4_v.resize(nseg_group * prefix_stride);
+#endif
+        }
+
+        if (parallel_groups) {
+#pragma omp for schedule(static)
+            for (SizeType group = 0; group < nseg_out; ++group) {
+                if (bottom) {
+                    const auto prefix_start =
+                        time_it ? ConeClock::now() : ConeClock::time_point{};
+                    const SizeType seg0 = group * nseg_group;
+                    for (SizeType iseg = 0; iseg < nseg_group; ++iseg) {
+                        const SizeType global_seg = seg0 + iseg;
+                        fill_segment_prefix(ts_e + (global_seg * segment_len),
+                                            prefix_e.data() +
+                                                (iseg * prefix_stride),
+                                            segment_len);
+                        fill_segment_prefix(ts_v + (global_seg * segment_len),
+                                            prefix_v.data() +
+                                                (iseg * prefix_stride),
+                                            segment_len);
+                    }
+#if defined(__AVX2__)
+                    const SizeType n_prefix = segment_len + 1;
+                    for (SizeType iseg = 0; iseg + 4 <= nseg_group; iseg += 4) {
+                        const double* pe0 =
+                            prefix_e.data() + (iseg + 0) * prefix_stride;
+                        const double* pe1 =
+                            prefix_e.data() + (iseg + 1) * prefix_stride;
+                        const double* pe2 =
+                            prefix_e.data() + (iseg + 2) * prefix_stride;
+                        const double* pe3 =
+                            prefix_e.data() + (iseg + 3) * prefix_stride;
+                        double* dst_e = p4_e.data() + (iseg * prefix_stride);
+
+                        const double* pv0 =
+                            prefix_v.data() + (iseg + 0) * prefix_stride;
+                        const double* pv1 =
+                            prefix_v.data() + (iseg + 1) * prefix_stride;
+                        const double* pv2 =
+                            prefix_v.data() + (iseg + 2) * prefix_stride;
+                        const double* pv3 =
+                            prefix_v.data() + (iseg + 3) * prefix_stride;
+                        double* dst_v = p4_v.data() + (iseg * prefix_stride);
+
+                        for (SizeType i = 0; i < n_prefix; ++i) {
+                            dst_e[i * 4 + 0] = pe0[i];
+                            dst_e[i * 4 + 1] = pe1[i];
+                            dst_e[i * 4 + 2] = pe2[i];
+                            dst_e[i * 4 + 3] = pe3[i];
+
+                            dst_v[i * 4 + 0] = pv0[i];
+                            dst_v[i * 4 + 1] = pv1[i];
+                            dst_v[i * 4 + 2] = pv2[i];
+                            dst_v[i * 4 + 3] = pv3[i];
+                        }
+                    }
+#endif
+                    if (time_it) {
+                        brute_local += cone_seconds(prefix_start);
+                    }
+                }
+                for (SizeType coord0 = 0; coord0 < ncoords_top;
+                     coord0 += tile_coords) {
+                    const SizeType coord1 =
+                        std::min(coord0 + tile_coords, ncoords_top);
+                    cone_execute_tile(
+                        scratch_a.data(), scratch_b.data(), level_in,
+                        bottom ? prefix_e.data() : nullptr,
+                        bottom ? prefix_v.data() : nullptr, runs, run_offsets,
+                        prefix_stride, level_out, coords_levels, ncoords, group,
+                        coord0, coord1, nbins, k_levels, score_fn, score_ctx,
+                        time_it, &brute_local, &merge_local, &score_local,
+                        bottom ? p4_e.data() : nullptr,
+                        bottom ? p4_v.data() : nullptr);
+                }
+            }
+        } else {
+#pragma omp for schedule(static)
+            for (SizeType coord0 = 0; coord0 < ncoords_top;
+                 coord0 += tile_coords) {
+                const SizeType coord1 =
+                    std::min(coord0 + tile_coords, ncoords_top);
+                for (SizeType group = 0; group < nseg_out; ++group) {
+                    const double* pe  = nullptr;
+                    const double* pv  = nullptr;
+                    const double* p4e = nullptr;
+                    const double* p4v = nullptr;
+                    if (bottom) {
+                        const SizeType off = group * nseg_group * prefix_stride;
+                        pe                 = shared_prefix_e.data() + off;
+                        pv                 = shared_prefix_v.data() + off;
+#if defined(__AVX2__)
+                        p4e = shared_p4_e.data() + off;
+                        p4v = shared_p4_v.data() + off;
+#endif
+                    }
+                    cone_execute_tile(
+                        scratch_a.data(), scratch_b.data(), level_in, pe, pv,
+                        runs, run_offsets, prefix_stride, level_out,
+                        coords_levels, ncoords, group, coord0, coord1, nbins,
+                        k_levels, score_fn, score_ctx, time_it, &brute_local,
+                        &merge_local, &score_local, p4e, p4v);
+                }
+            }
+        }
+
+        if (time_it) {
+#pragma omp critical
+            {
+                thread_seconds->brute += brute_local;
+                thread_seconds->merge += merge_local;
+                thread_seconds->score += score_local;
+            }
         }
     }
 }

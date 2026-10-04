@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <memory>
 #include <span>
+#include <string_view>
 
 #include "loki/search/configs.hpp"
 
@@ -15,7 +16,7 @@ namespace loki::algorithms {
 
 class FFAFreqSweep {
 public:
-    explicit FFAFreqSweep(const search::PulsarSearchConfig& cfg,
+    explicit FFAFreqSweep(const search::FFASearchConfig& cfg,
                           bool show_progress = true);
     ~FFAFreqSweep();
     FFAFreqSweep(FFAFreqSweep&&) noexcept;
@@ -26,7 +27,8 @@ public:
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
                  const std::filesystem::path& outdir = "./",
-                 std::string_view file_prefix        = "test");
+                 std::string_view file_prefix        = "test",
+                 std::string_view config_toml        = {});
 
     // Opaque handle to the implementation
     class BaseImpl;
@@ -39,7 +41,7 @@ private:
 
 class FFAFreqSweepCUDA {
 public:
-    explicit FFAFreqSweepCUDA(const search::PulsarSearchConfig& cfg,
+    explicit FFAFreqSweepCUDA(const search::FFASearchConfig& cfg,
                               int device_id = 0);
     ~FFAFreqSweepCUDA();
     FFAFreqSweepCUDA(FFAFreqSweepCUDA&&) noexcept;
@@ -50,7 +52,8 @@ public:
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
                  const std::filesystem::path& outdir = "./",
-                 std::string_view file_prefix        = "test");
+                 std::string_view file_prefix        = "test",
+                 std::string_view config_toml        = {});
 
     // Opaque handle to the implementation
     class BaseImpl;

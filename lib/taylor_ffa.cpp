@@ -1,6 +1,8 @@
 #include "loki/core/taylor_ffa.hpp"
 
+#include <algorithm>
 #include <cmath>
+#include <omp.h>
 #include <span>
 #include <tuple>
 #include <vector>
@@ -252,7 +254,9 @@ void ffa_taylor_resolve_freq_batch(SizeType n_freqs_cur,
                                    std::span<coord::FFACoordFreq> coords,
                                    SizeType ffa_level,
                                    double tseg_brute,
-                                   SizeType nbins) {
+                                   SizeType nbins,
+                                   int nthreads) {
+    nthreads = std::clamp(nthreads, 1, omp_get_max_threads());
     error_check::check_equal(coords.size(), n_freqs_cur,
                              "coords size mismatch");
 
@@ -260,6 +264,7 @@ void ffa_taylor_resolve_freq_batch(SizeType n_freqs_cur,
         std::ldexp(tseg_brute, static_cast<int>(ffa_level - 1));
 
     // Calculate relative phases and flattened parameter indices
+#pragma omp parallel for schedule(static) num_threads(nthreads)
     for (SizeType i = 0; i < n_freqs_cur; ++i) {
         const double f_cur =
             psr_utils::get_param_val_at_idx(lim_freq, n_freqs_cur, i);
@@ -279,7 +284,9 @@ void ffa_taylor_resolve_poly_batch(
     SizeType latter,
     double tseg_brute,
     SizeType nbins,
-    SizeType n_params) {
+    SizeType n_params,
+    int nthreads) {
+    (void)nthreads;
     auto dispatch = [&]<SizeType N, int L>() {
         return ffa_taylor_resolve_poly_batch_impl<N, L>(
             param_grid_count_cur, param_grid_count_prev, param_limits, coords,

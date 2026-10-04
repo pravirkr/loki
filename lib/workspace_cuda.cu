@@ -501,12 +501,20 @@ void EPWorkspaceCUDA<FoldTypeCUDA>::validate(SizeType batch_size,
 
 // DeviceCounter implementation
 DeviceCounter::DeviceCounter() {
+    d_ptr = nullptr;
+    h_ptr = nullptr;
     cuda_utils::check_cuda_call(
         cudaMalloc(&d_ptr, sizeof(uint32_t)),
         "Failed to allocate device memory for DeviceCounter");
-    cuda_utils::check_cuda_call(
-        cudaMallocHost(&h_ptr, sizeof(uint32_t)),
-        "Failed to allocate pinned memory for DeviceCounter");
+    try {
+        cuda_utils::check_cuda_call(
+            cudaMallocHost(&h_ptr, sizeof(uint32_t)),
+            "Failed to allocate pinned memory for DeviceCounter");
+    } catch (...) {
+        cudaFree(d_ptr);
+        d_ptr = nullptr;
+        throw;
+    }
     // Safe default state
     *h_ptr = 0;
     cuda_utils::check_cuda_call(cudaMemset(d_ptr, 0, sizeof(uint32_t)),

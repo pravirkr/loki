@@ -75,6 +75,33 @@ jobs:
       - name: Run C++ tests
         run: ctest --test-dir build --output-on-failure
 
+  cpp-sanitizer:
+    name: C++ ASan/UBSan (g++-14)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y --no-install-recommends cmake ninja-build libhdf5-dev \
+            libfftw3-dev libomp-dev gcc-14 g++-14
+      - name: Configure with sanitizers
+        run: |
+          cmake -S . -B build-asan -G Ninja \
+            -DCMAKE_CXX_COMPILER=g++-14 \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DLOKI_BUILD_PYTHON=OFF \
+            -DLOKI_BUILD_TESTING=ON \
+            -DLOKI_BUILD_APPLICATIONS=ON \
+            -DLOKI_CUDA=OFF \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+      - name: Build and test
+        run: |
+          cmake --build build-asan --parallel "$(nproc)"
+          ctest --test-dir build-asan --output-on-failure
+
   python:
     name: Python (${{ matrix.python-version }})
     runs-on: ubuntu-latest
@@ -122,4 +149,4 @@ jobs:
             -DLOKI_BUILD_TESTING=OFF
 
       - name: Run Python tests (CPU)
-        run: uv run pytest tests/python/test_cpu_match.py
+        run: uv run pytest tests/python/test_cpu_match.py tests/python/test_ffa_recovery.py
