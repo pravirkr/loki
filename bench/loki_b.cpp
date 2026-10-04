@@ -62,8 +62,8 @@ BENCHMARK_DEFINE_F(ScoresFixture, BM_loki_snr_1d)(benchmark::State& state) {
     std::iota(widths.begin(), widths.end(), 1);
     std::vector<float> out(widths.size());
     for (auto _ : state) {
-        detection::snr_1d(std::span(arr), std::span(widths), std::span(out),
-                          1.0F);
+        detection::snr_boxcar_1d(std::span(arr), std::span(widths),
+                                 std::span(out), 1.0F);
     }
 }
 
@@ -77,8 +77,8 @@ BENCHMARK_DEFINE_F(ScoresFixture2D,
     std::iota(widths.begin(), widths.end(), 1);
     std::vector<float> out(nprofiles * widths.size());
     for (auto _ : state) {
-        detection::snr_2d(std::span(arr), nprofiles, std::span(widths),
-                          std::span(out), 1.0F);
+        detection::snr_boxcar_2d(std::span(arr), std::span(widths),
+                                 std::span(out), nprofiles, nsamps, 1.0F, 1);
     }
 }
 
@@ -92,8 +92,8 @@ BENCHMARK_DEFINE_F(ScoresFixture2D,
     std::iota(widths.begin(), widths.end(), 1);
     std::vector<float> out(nprofiles * widths.size());
     for (auto _ : state) {
-        detection::snr_2d(std::span(arr), nprofiles, std::span(widths),
-                          std::span(out), 1.0F);
+        detection::snr_boxcar_2d(std::span(arr), std::span(widths),
+                                 std::span(out), nprofiles, nsamps, 1.0F, 8);
     }
 }
 
