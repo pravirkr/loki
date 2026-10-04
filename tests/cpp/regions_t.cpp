@@ -226,3 +226,24 @@ TEST_CASE("FFARegionPlanner splits a band when the full range exceeds memory",
     CHECK(planner.get_stats().get_freq_sweep_memory_usage() <=
           k_sweep_budget_gb + 1.0e-3);
 }
+
+TEST_CASE("generate_ffa_regions splits a capped bin count into octave bands",
+          "[regions]") {
+    // p_min is exactly nbins_max samples of the finest bin, so nbins hits the
+    // cap immediately. The long-period tail must still be octave bands so each
+    // one can pick its own brute-fold segment length.
+    constexpr double kTsamp = 6.4e-5;
+    const auto regions      = generate_ffa_regions(
+        /*p_min=*/0.1, /*p_max=*/1.0, kTsamp, /*nbins_min=*/256,
+        /*eta_min=*/1.0, /*octave_scale=*/2.0, /*nbins_max=*/256);
+    REQUIRE(regions.size() == 4);
+    constexpr double kTol = 1e-9;
+    CHECK(std::abs(regions.front().f_end - 10.0) < kTol);
+    CHECK(std::abs(regions.back().f_start - 1.0) < kTol);
+    for (const auto& region : regions) {
+        CHECK(region.nbins == 256);
+    }
+    for (SizeType i = 0; i + 1 < regions.size(); ++i) {
+        CHECK(std::abs(regions[i].f_start - regions[i + 1].f_end) < kTol);
+    }
+}

@@ -10,9 +10,9 @@
 
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
+#include "loki/cuda/index_limits.hpp"
 #include "loki/exceptions.hpp"
 #include "loki/search/configs.hpp"
-#include "loki/cuda/index_limits.hpp"
 #include "loki/utils.hpp"
 
 namespace loki::regions {
@@ -20,9 +20,9 @@ namespace loki::regions {
 namespace {
 
 SizeType estimate_brutefold_table_bytes(bool use_fourier,
-                                      SizeType nfreqs,
-                                      SizeType segment_len,
-                                      SizeType nbins) noexcept {
+                                        SizeType nfreqs,
+                                        SizeType segment_len,
+                                        SizeType nbins) noexcept {
     if (nfreqs == 0 || segment_len == 0) {
         return 0;
     }
@@ -30,9 +30,12 @@ SizeType estimate_brutefold_table_bytes(bool use_fourier,
         // delta_phasors_r/i allocated during Fourier brute-fold init.
         return 2ULL * sizeof(float) * nfreqs * segment_len;
     }
-    const SizeType phase_elems = nfreqs * segment_len;
-    return (2ULL * sizeof(std::uint32_t) * phase_elems) +
-           (sizeof(SizeType) * ((nfreqs * nbins) + 1ULL));
+    // Upper bound on the phase-run table: one (end, bin) pair per sample,
+    // plus the per-frequency offsets. A period-capped segment stores far
+    // fewer runs (about nbins per frequency).
+    (void)nbins;
+    return (sizeof(std::uint32_t) * 2ULL * nfreqs * segment_len) +
+           (sizeof(SizeType) * (nfreqs + 1ULL));
 }
 
 SizeType estimate_gpu_brutefold_bytes(SizeType nfreqs,
@@ -48,7 +51,7 @@ struct ChunkEval {
     SizeType coord_size;
     SizeType ncoords;
     SizeType ffa_levels;
-    SizeType scores_scratch;     // ncoords * n_widths for THIS chunk's nbins
+    SizeType scores_scratch; // ncoords * n_widths for THIS chunk's nbins
     SizeType brutefold_bytes;
     double chunk_only_memory_gb; // For logging/stats.
     double allocated_memory_gb;  // With accumulated maxima
@@ -66,23 +69,22 @@ struct PlanMaxima {
     SizeType brutefold_bytes{};
 
     void absorb(const PlanMaxima& other) noexcept {
-        buffer_size    = std::max(buffer_size, other.buffer_size);
-        coord_size     = std::max(coord_size, other.coord_size);
-        ncoords        = std::max(ncoords, other.ncoords);
-        ffa_levels     = std::max(ffa_levels, other.ffa_levels);
-        scores_scratch = std::max(scores_scratch, other.scores_scratch);
-        brutefold_bytes =
-            std::max(brutefold_bytes, other.brutefold_bytes);
+        buffer_size     = std::max(buffer_size, other.buffer_size);
+        coord_size      = std::max(coord_size, other.coord_size);
+        ncoords         = std::max(ncoords, other.ncoords);
+        ffa_levels      = std::max(ffa_levels, other.ffa_levels);
+        scores_scratch  = std::max(scores_scratch, other.scores_scratch);
+        brutefold_bytes = std::max(brutefold_bytes, other.brutefold_bytes);
     }
 };
 
 PlanMaxima to_maxima(const ChunkEval& eval) noexcept {
     return {
-        .buffer_size    = eval.buffer_size,
-        .coord_size     = eval.coord_size,
-        .ncoords        = eval.ncoords,
-        .ffa_levels     = eval.ffa_levels,
-        .scores_scratch = eval.scores_scratch,
+        .buffer_size     = eval.buffer_size,
+        .coord_size      = eval.coord_size,
+        .ncoords         = eval.ncoords,
+        .ffa_levels      = eval.ffa_levels,
+        .scores_scratch  = eval.scores_scratch,
         .brutefold_bytes = eval.brutefold_bytes,
     };
 }
@@ -138,12 +140,26 @@ std::vector<coord::FFARegion> generate_ffa_regions(double p_min,
             std::min(p_cur_low / t_w, static_cast<double>(nbins_max))));
         nbins_k      = std::clamp(nbins_k, SizeType{2}, nbins_max);
         if (nbins_k >= nbins_max) {
-            regions.push_back({
-                .f_start = 1.0 / p_max,
-                .f_end   = 1.0 / p_cur_low,
-                .nbins   = nbins_max,
-                .eta     = rho * static_cast<double>(nbins_max),
-            });
+            // The bin count is capped, but each octave still gets its own
+            // brute-fold segment length (about one to two periods at the
+            // band's f_max). One region for the whole capped tail would force
+            // every slow frequency to use the segment length of the fastest.
+            while (p_cur_low < p_max) {
+                const double p_cur_high =
+                    std::min(p_cur_low * octave_scale, p_max);
+                error_check::check_greater(
+                    p_cur_high, p_cur_low,
+                    std::format("Period grid stalled at P={:.17g} s with "
+                                "octave_scale={:.17g}.",
+                                p_cur_low, octave_scale));
+                regions.push_back({
+                    .f_start = 1.0 / p_cur_high,
+                    .f_end   = 1.0 / p_cur_low,
+                    .nbins   = nbins_max,
+                    .eta     = rho * static_cast<double>(nbins_max),
+                });
+                p_cur_low = p_cur_high;
+            }
             break;
         }
         const double p_cur_high = std::min(p_cur_low * octave_scale, p_max);
@@ -288,17 +304,8 @@ private:
     bool m_use_gpu;
 
     std::vector<search::FFASearchConfig> m_cfgs;
-    FFARegionStats m_stats{0,
-                           0,
-                           0,
-                           0,
-                           0,
-                           0,
-                           0,
-                           0,
-                           m_base_cfg.get_use_fourier(),
-                           m_use_gpu,
-                           0};
+    FFARegionStats m_stats{
+        0, 0, 0, 0, 0, 0, 0, 0, m_base_cfg.get_use_fourier(), m_use_gpu, 0};
     std::vector<coord::FFAChunkStats> m_chunk_stats;
 
     double calculate_max_drift(const search::FFASearchConfig& cfg) const {
@@ -406,7 +413,7 @@ private:
         // Reserve some headroom for OS, Python interpreter, and rounding
         // errors
         constexpr double kSafetyMarginGB = 0.5; // 500 MB safety margin
-        double effective_limit_gb = max_memory_gb - kSafetyMarginGB;
+        double effective_limit_gb        = max_memory_gb - kSafetyMarginGB;
         if (!m_use_gpu) {
             const double input_gb =
                 static_cast<double>(m_base_cfg.get_nsamps()) * 2.0 *
@@ -482,11 +489,10 @@ private:
             const SizeType seg0    = plan.get_segment_lens().front();
             const SizeType nfreqs0 = plan.get_param_counts().front().back();
             const SizeType bf_bytes =
-                m_use_gpu
-                    ? estimate_gpu_brutefold_bytes(nfreqs0, seg0)
-                    : estimate_brutefold_table_bytes(
-                          m_base_cfg.get_use_fourier(), nfreqs0, seg0,
-                          cfg.get_nbins());
+                m_use_gpu ? estimate_gpu_brutefold_bytes(nfreqs0, seg0)
+                          : estimate_brutefold_table_bytes(
+                                m_base_cfg.get_use_fourier(), nfreqs0, seg0,
+                                cfg.get_nbins());
 
             const PlanMaxima chunk_only{
                 .buffer_size     = buf,
@@ -528,12 +534,9 @@ private:
                 const SizeType seg0    = plan.get_segment_lens().front();
                 const SizeType nfreqs0 = plan.get_param_counts().front().back();
                 const cuda_index_limits::ChunkIndexUsage usage{
-                    e.buffer_size,
-                    e.ncoords,
-                    cfg.get_nbins(),
-                    cfg.get_n_scoring_widths(),
-                    nfreqs0,
-                    seg0};
+                    e.buffer_size,   e.ncoords,
+                    cfg.get_nbins(), cfg.get_n_scoring_widths(),
+                    nfreqs0,         seg0};
                 if (cuda_index_limits::chunk_exceeds_cuda_index_limits(usage)) {
                     return false;
                 }

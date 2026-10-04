@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <utility>
+#include <vector>
 
 #include <fmt/ranges.h>
 #include <omp.h>
@@ -65,12 +66,18 @@ public:
             }
             m_fft_manager.prepare_plans(n_reals);
         }
-        m_scores_chunk.resize(planner_stats.get_max_scores_scratch_size());
         m_write_param_sets_batch.resize(
             planner_stats.get_write_param_sets_size());
         m_width_batch.resize(regions::kFFAFreqSweepWriteBatchSize);
         m_nbins_batch.resize(regions::kFFAFreqSweepWriteBatchSize);
-        m_fold_time.resize(planner_stats.get_max_buffer_size_time());
+        // Frequency-only time-domain chunks score inside the top cone band,
+        // so the final fold and the dense score array are not allocated.
+        const bool score_in_band =
+            !m_base_cfg.get_use_fourier() && m_base_cfg.get_nparams() == 1;
+        if (!score_in_band) {
+            m_scores_chunk.resize(planner_stats.get_max_scores_scratch_size());
+            m_fold_time.resize(planner_stats.get_max_buffer_size_time());
+        }
         validate_scratch_sizes();
 
         if (m_base_cfg.get_use_boxcar_kadane()) {
@@ -174,6 +181,9 @@ private:
 
     /// @brief Assert the planner-derived scratch sizes cover every chunk.
     void validate_scratch_sizes() const {
+        if (m_scores_chunk.empty()) {
+            return;
+        }
         for (SizeType i = 0; i < m_region_decode.size(); ++i) {
             error_check::check_less_equal(
                 m_region_decode[i].get_n_scores(), m_scores_chunk.size(),
@@ -196,26 +206,78 @@ private:
         auto the_ffa =
             FFA<FoldType>(m_ffa_workspace, m_fft_manager, cfg, m_show_progress);
         const plans::FFAPlan<FoldType>& ffa_plan = the_ffa.get_plan();
+        const auto& dec                          = m_region_decode[region_id];
+        const auto snr_min = static_cast<float>(cfg.get_snr_min());
+        error_check::check_equal(dec.nsegments, SizeType{1},
+                                 "FFAFreqSweep::execute_ffa_region: nsegments "
+                                 "must be 1 to call scoring function");
+        error_check::check_equal(ffa_plan.get_ncoords().back(), dec.ncoords,
+                                 "FFAFreqSweep::execute_ffa_region: decode "
+                                 "table is out of sync with the FFA plan");
+        if constexpr (std::is_same_v<FoldType, float>) {
+            if (cfg.get_nparams() == 1) {
+                std::vector<detection::SnrHit> hits;
+                the_ffa.execute_scored(ts_e, ts_v, snr_min, dec.widths, hits);
+                const auto brutefold_time = the_ffa.get_brute_fold_timing();
+                const auto score_in_band  = the_ffa.get_last_score_timing();
+                const auto wall           = timer.stop();
+                const auto ffa_time =
+                    std::max(0.0F, wall - brutefold_time - score_in_band);
+                ffa_timer_stats["brutefold"] += brutefold_time;
+                ffa_timer_stats["ffa"] += ffa_time;
+                spdlog::info(
+                    "FFA Chunk detail: nbins={} bseg_brute={} levels={} "
+                    "fuse_levels={} nfreqs0={} ncoords_top={} "
+                    "brutefold_s={:.4f} brute_table_s={:.4f} ffa_s={:.4f}",
+                    cfg.get_nbins(), cfg.get_bseg_brute(),
+                    ffa_plan.get_n_levels(), the_ffa.get_last_fuse_levels(),
+                    ffa_plan.get_ncoords().front(),
+                    ffa_plan.get_ncoords().back(), brutefold_time,
+                    the_ffa.get_brute_fold_init_timing(), ffa_time);
+                timer.start();
+                SizeType n_passing = 0;
+                for (const auto& hit : hits) {
+                    if (m_cands.is_full()) {
+                        ffa_timer_stats["score"] += timer.stop();
+                        timer.start();
+                        flush_candidates(m_cands, m_region_decode, writer,
+                                         m_write_param_sets_batch,
+                                         m_width_batch, m_nbins_batch,
+                                         m_base_cfg.get_nparams());
+                        ffa_timer_stats["io"] += timer.stop();
+                        timer.start();
+                    }
+                    m_cands.push(hit.snr, hit.score_index,
+                                 static_cast<uint32_t>(region_id));
+                    ++n_passing;
+                }
+                m_total_passing_scores += n_passing;
+                ffa_timer_stats["score"] += timer.stop() + score_in_band;
+                return;
+            }
+        }
         const auto buffer_size_time = ffa_plan.get_buffer_size_time();
         const auto fold_size_time   = ffa_plan.get_fold_size_time();
         the_ffa.execute(ts_e, ts_v,
                         std::span(m_fold_time).first(buffer_size_time));
         const auto brutefold_time = the_ffa.get_brute_fold_timing();
         ffa_timer_stats["brutefold"] += brutefold_time;
-        ffa_timer_stats["ffa"] += timer.stop() - brutefold_time;
+        const auto ffa_time = timer.stop() - brutefold_time;
+        ffa_timer_stats["ffa"] += ffa_time;
+        // Machine-parsable per-chunk breakdown (used by the bseg_brute sweep
+        // benchmark). brutefold_s includes brute_table_s.
+        spdlog::info(
+            "FFA Chunk detail: nbins={} bseg_brute={} levels={} fuse_levels={} "
+            "nfreqs0={} ncoords_top={} brutefold_s={:.4f} brute_table_s={:.4f} "
+            "ffa_s={:.4f}",
+            cfg.get_nbins(), cfg.get_bseg_brute(), ffa_plan.get_n_levels(),
+            the_ffa.get_last_fuse_levels(), ffa_plan.get_ncoords().front(),
+            ffa_plan.get_ncoords().back(), brutefold_time,
+            the_ffa.get_brute_fold_init_timing(), ffa_time);
 
         // Compute scores
         timer.start();
-        const auto& dec     = m_region_decode[region_id];
         const auto n_scores = dec.get_n_scores();
-        const auto snr_min  = static_cast<float>(cfg.get_snr_min());
-        error_check::check_equal(dec.nsegments, SizeType{1},
-                                 "FFAFreqSweep::execute_ffa_region: nsegments "
-                                 "must be 1 to call scoring function");
-        // The decode strides must describe the fold layout we just produced.
-        error_check::check_equal(ffa_plan.get_ncoords().back(), dec.ncoords,
-                                 "FFAFreqSweep::execute_ffa_region: decode "
-                                 "table is out of sync with the FFA plan");
         // Scratch is sized by the planner for the largest chunk; the
         // accumulator is separate, so this span never depends on how many
         // candidates have already survived.

@@ -1,11 +1,13 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <span>
 #include <vector>
 
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
+#include "loki/detection/score.hpp"
 #include "loki/search/configs.hpp"
 #include "loki/utils/fft.hpp"
 #include "loki/utils/workspace.hpp"
@@ -27,8 +29,7 @@ namespace loki::algorithms {
 template <SupportedFoldType FoldType> class FFA {
 public:
     // Chunked FFA constructor (owns workspace and an empty FFTWManager)
-    explicit FFA(const search::FFASearchConfig& cfg,
-                 bool show_progress = true);
+    explicit FFA(const search::FFASearchConfig& cfg, bool show_progress = true);
 
     // Pipeline-based FFA constructor uses external workspace and FFTWManager
     explicit FFA(memory::FFAWorkspace<FoldType>& workspace,
@@ -47,7 +48,38 @@ public:
     // Transfer ownership of the plan
     [[nodiscard]] plans::FFAPlan<FoldType> extract_plan() && noexcept;
 
+    /// Total brute-fold time (table build + execute), in seconds.
     float get_brute_fold_timing() const noexcept;
+    /// Brute-fold table-build time only (included in the total), in seconds.
+    float get_brute_fold_init_timing() const noexcept;
+    /**
+     * @brief Override the number of merge levels fused into the brute fold.
+     *
+     * By default the level count is chosen automatically (time-domain,
+     * frequency-only FFA only; 0 disables fusion). Mainly useful for tests and
+     * benchmarks. Values are clamped to the number of merge levels. Ignored
+     * (fusion stays off) for paths where fusion does not apply.
+     */
+    void set_fuse_levels(std::optional<SizeType> fuse_levels) noexcept;
+    /// Merge levels fused on the most recent execute() (0 if fusion was off).
+    [[nodiscard]] SizeType get_last_fuse_levels() const noexcept;
+    /// Boxcar time included in the most recent execute_scored(), in seconds.
+    [[nodiscard]] float get_last_score_timing() const noexcept;
+    /**
+     * @brief Fold and emit thresholded boxcar hits without storing the final
+     * fold.
+     *
+     * Time-domain, frequency-only searches score each top-level frequency
+     * tile while it is still in the cone-band scratch. `hits` are appended in
+     * score-index order (`profile * nwidths + width`). Other FFA paths
+     * materialise the fold and score it the same way, so the hit list matches
+     * `snr_boxcar_3d` followed by a threshold scan.
+     */
+    void execute_scored(std::span<const float> ts_e,
+                        std::span<const float> ts_v,
+                        float threshold,
+                        std::span<const SizeType> widths,
+                        std::vector<detection::SnrHit>& hits);
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
                  std::span<FoldType> fold);

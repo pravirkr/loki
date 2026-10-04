@@ -9,7 +9,6 @@
 #include <format>
 #include <fstream>
 #include <optional>
-#include <ranges>
 #include <span>
 #include <string>
 #include <string_view>
@@ -41,8 +40,8 @@ void collect_unknown_keys(const toml::table& table,
                           std::vector<std::string>& errors) {
     for (const auto& [key, _] : table) {
         if (!is_allowed_key(key.str(), allowed)) {
-            errors.push_back(std::format("{}.{}: unknown key", table_path,
-                                         key.str()));
+            errors.push_back(
+                std::format("{}.{}: unknown key", table_path, key.str()));
         }
     }
 }
@@ -53,27 +52,36 @@ void validate_ffa_toml_document(const toml::table& root) {
         std::string_view{"performance"}, std::string_view{"output"},
         std::string_view{"cuda"}};
     static constexpr std::array kInputKeys{
-        std::string_view{"timeseries"}, std::string_view{"preprocess"},
+        std::string_view{"timeseries"},    std::string_view{"preprocess"},
         std::string_view{"filter_window"}, std::string_view{"nsamps"},
-        std::string_view{"tsamp"}, std::string_view{"dt"}};
+        std::string_view{"tsamp"},         std::string_view{"dt"}};
     static constexpr std::array kSearchKeys{
-        std::string_view{"f_min"}, std::string_view{"f_max"},
-        std::string_view{"acc_min"}, std::string_view{"acc_max"},
-        std::string_view{"jerk_min"}, std::string_view{"jerk_max"},
-        std::string_view{"nbins"}, std::string_view{"eta"},
-        std::string_view{"ducy_max"}, std::string_view{"wtsp"},
-        std::string_view{"snr_min"}, std::string_view{"use_fourier"},
+        std::string_view{"f_min"},
+        std::string_view{"f_max"},
+        std::string_view{"acc_min"},
+        std::string_view{"acc_max"},
+        std::string_view{"jerk_min"},
+        std::string_view{"jerk_max"},
+        std::string_view{"nbins"},
+        std::string_view{"eta"},
+        std::string_view{"ducy_max"},
+        std::string_view{"wtsp"},
+        std::string_view{"snr_min"},
+        std::string_view{"use_fourier"},
         std::string_view{"use_boxcar_kadane"}};
     static constexpr std::array kPerformanceKeys{
         std::string_view{"nthreads"},
         std::string_view{"max_process_memory_gb"},
-        std::string_view{"octave_scale"}, std::string_view{"nbins_max"},
-        std::string_view{"nbins_min_lossy_bf"}, std::string_view{"bseg_brute"},
+        std::string_view{"octave_scale"},
+        std::string_view{"nbins_max"},
+        std::string_view{"nbins_min_lossy_bf"},
+        std::string_view{"bseg_brute"},
         std::string_view{"bseg_ffa"},
         std::string_view{"max_passing_candidates"},
-        std::string_view{"use_cuda"}, std::string_view{"device_id"}};
+        std::string_view{"use_cuda"},
+        std::string_view{"device_id"}};
     static constexpr std::array kOutputKeys{std::string_view{"outdir"},
-                                              std::string_view{"prefix"}};
+                                            std::string_view{"prefix"}};
     static constexpr std::array kCudaKeys{std::string_view{"enable"},
                                           std::string_view{"device_id"}};
 
@@ -310,9 +318,9 @@ FFATomlConfig FFATomlConfig::from_string(std::string_view toml_content) {
                     require_non_negative_int64(*val, "performance.nbins_max"));
             }
             if (auto val = (*perf)["nbins_min_lossy_bf"].value<int64_t>()) {
-                cfg.nbins_min_lossy_bf = static_cast<SizeType>(
-                    require_non_negative_int64(*val,
-                                               "performance.nbins_min_lossy_bf"));
+                cfg.nbins_min_lossy_bf =
+                    static_cast<SizeType>(require_non_negative_int64(
+                        *val, "performance.nbins_min_lossy_bf"));
             }
             if (auto val = (*perf)["bseg_brute"].value<int64_t>()) {
                 cfg.bseg_brute = static_cast<SizeType>(
@@ -323,8 +331,8 @@ FFATomlConfig FFATomlConfig::from_string(std::string_view toml_content) {
                     require_non_negative_int64(*val, "performance.bseg_ffa"));
             }
             if (auto val = (*perf)["max_passing_candidates"].value<int64_t>()) {
-                cfg.max_passing_candidates = static_cast<SizeType>(
-                    require_non_negative_int64(
+                cfg.max_passing_candidates =
+                    static_cast<SizeType>(require_non_negative_int64(
                         *val, "performance.max_passing_candidates"));
             }
             if (auto val = (*perf)["use_cuda"].value<bool>()) {
@@ -446,6 +454,47 @@ FFATomlConfig::to_search_config(std::optional<SizeType> override_nsamps,
 // ==============================================================================
 // FFASearchConfig::Impl Definition
 // ==============================================================================
+
+namespace {
+
+/**
+ * @brief Relative cost weights for the bseg_brute selector.
+ *
+ * All weights are expressed in units of one time-domain brute-fold
+ * gather-add ("brute op"). They were fitted with bench/bseg_brute_sweep.py +
+ * bench/fit_cost_model.py (Apple M1 Pro, 8 threads, nsamps = 2^21 / 2^23,
+ * 1-488 Hz, nbins 32-1024). The optimum is flat (within ~5% over a factor of
+ * two in B), so the weights only need to be roughly right; use an explicit
+ * `bseg_brute` to override on unusual hardware or backends.
+ *
+ * - brute_op:  cost per brute op. For the direct-DFT Fourier brute fold one
+ *              "op" is a (sample, frequency, Fourier bin) triple.
+ * - table:     cost per (frequency, sample) lookup-table entry built when the
+ *              BruteFold is constructed (measured ~28 brute ops/entry).
+ * - merge_op:  cost per merge element-op, i.e. per
+ *              2 * ncoords * nsegments * width.
+ */
+struct BsegCostWeights {
+    double brute_op;
+    double table;
+    double merge_op;
+};
+
+// Time-domain FFA. The run-length brute fold makes the segment length a
+// period cap (see select_bseg_brute_by_cost) rather than a fitted trade
+// against gather-adds. These weights remain for the direct-DFT comparison
+// and for bench/fit_cost_model.py; the time-domain selector does not use
+// them to pick B inside the cap.
+constexpr BsegCostWeights kBsegWeightsTime{1.0, 0.25, 4.0};
+// Fourier FFA with lossy init (time-domain brute fold + RFFT): complex merge
+// is ~5x a brute gather-add per Fourier bin.
+constexpr BsegCostWeights kBsegWeightsFourierLossy{1.0, 28.0, 5.2};
+// Fourier FFA with the direct-DFT brute fold (nbins <= nbins_min_lossy_bf):
+// the SIMD DFT is ~0.27 gather-adds per (sample, freq, bin), a complex merge
+// ~4.9 per Fourier bin.
+constexpr BsegCostWeights kBsegWeightsFourierDirect{0.27, 0.0, 4.9};
+
+} // namespace
 
 class FFASearchConfig::Impl {
 public:
@@ -672,7 +721,8 @@ private:
         error_check::check_greater(m_tsamp, 0, "tsamp must be positive");
         error_check::check_greater(m_eta, 0,
                                    "eta (tolerance bins) must be positive");
-        error_check::check_greater(m_ducy_max, 0.0, "ducy_max must be positive");
+        error_check::check_greater(m_ducy_max, 0.0,
+                                   "ducy_max must be positive");
         error_check::check_less_equal(m_ducy_max, 1.0,
                                       "ducy_max must be <= 1.0");
         error_check::check_greater(m_wtsp, 1.0, "wtsp must be > 1.0");
@@ -707,7 +757,181 @@ private:
         }
     }
 
+    /**
+     * @brief Default brute-fold segment length (the FFA entry level).
+     *
+     * Chosen by a cost model (see select_bseg_brute_by_cost). The previous
+     * "two cycles at f_min" heuristic is kept as a fallback for degenerate
+     * configurations (e.g. nsamps that is not a power of two, which validate()
+     * rejects anyway, or parameter ranges the grid-count helpers refuse).
+     */
     SizeType get_bseg_brute_default() const {
+        try {
+            if (const auto bseg = select_bseg_brute_by_cost()) {
+                return *bseg;
+            }
+        } catch (const std::exception& ex) {
+            spdlog::debug("bseg_brute cost model unavailable ({}); using "
+                          "legacy heuristic",
+                          ex.what());
+        }
+        return get_bseg_brute_legacy();
+    }
+
+    /**
+     * @brief Pick the power-of-two brute segment length B minimising
+     * W_brute * brute_ops(B) + W_table * F0 * B + W_merge * merge_ops(B).
+     *
+     * - Brute fold at segment length B costs ~2 * nsamps * F(B) gather-adds,
+     *   where F(B) is the level-0 frequency grid size (proportional to B).
+     * - Every FFA merge level costs ~2 * ncoords * nsegments * width element
+     *   ops (width = nbins, or nbins_f for the Fourier domain). For a
+     *   frequency-only search F * N is constant, so each level costs the same.
+     * - Halving B halves the brute cost and adds one merge level, which pays
+     *   off while B > ~2 * W_merge/W_brute * width. This makes B track the
+     *   number of bins (samples per bin) instead of the number of cycles at
+     *   f_min, so slow-pulsar chunks with a capped nbins no longer pay for a
+     *   huge brute fold and a B^2 index table.
+     *
+     * Level counts come from the real parameter grids, so higher-order
+     * searches and the F>=1 floor are handled, and candidates that violate
+     * the "level 0 has a single higher-order trial" plan constraint are
+     * skipped. Returns std::nullopt if no candidate is valid.
+     */
+    [[nodiscard]] std::optional<SizeType> select_bseg_brute_by_cost() const {
+        if (m_nsamps < 4 || !std::has_single_bit(m_nsamps)) {
+            return std::nullopt;
+        }
+        const SizeType bseg_ffa_cap = m_bseg_ffa_explicit.value_or(m_nsamps);
+        if (bseg_ffa_cap < 2 || !std::has_single_bit(bseg_ffa_cap) ||
+            bseg_ffa_cap > m_nsamps) {
+            return std::nullopt;
+        }
+        const auto k_max =
+            static_cast<SizeType>(std::countr_zero(bseg_ffa_cap));
+        // B must stay below nsamps (validate) and below the FFA segment cap.
+        const SizeType k_brute_max = std::min(
+            k_max, static_cast<SizeType>(std::countr_zero(m_nsamps)) - 1);
+
+        const bool direct_dft =
+            m_use_fourier && m_nbins <= m_nbins_min_lossy_bf;
+        const BsegCostWeights& w =
+            !m_use_fourier ? kBsegWeightsTime
+                           : (direct_dft ? kBsegWeightsFourierDirect
+                                         : kBsegWeightsFourierLossy);
+        const auto width =
+            static_cast<double>(m_use_fourier ? m_nbins_f : m_nbins);
+        const auto nsamps = static_cast<double>(m_nsamps);
+
+        // Grid counts per segment length 2^k samples, k = 1..k_max.
+        std::vector<std::vector<SizeType>> counts(k_max + 1);
+        std::vector<double> merge_elems(k_max + 1, 0.0);
+        for (SizeType k = 1; k <= k_max; ++k) {
+            const double tseg = static_cast<double>(SizeType{1} << k) * m_tsamp;
+            counts[k]         = get_param_grid_count(tseg);
+            double ncoords    = 1.0;
+            for (const auto c : counts[k]) {
+                ncoords *= static_cast<double>(c);
+            }
+            const double nsegments = nsamps / static_cast<double>(1ULL << k);
+            merge_elems[k]         = ncoords * nsegments * 2.0 * width;
+        }
+        // Suffix sums: merge work of all levels above k.
+        std::vector<double> merge_above(k_max + 2, 0.0);
+        for (SizeType k = k_max; k >= 1; --k) {
+            merge_above[k - 1] = merge_above[k] + merge_elems[k];
+        }
+
+        // Time-domain and lossy-Fourier folds use the run-length kernel. Its
+        // cost per frequency is ~nbins * ceil(B / P), so a segment of one to
+        // two periods at f_max costs about one merge level and keeps the tree
+        // as shallow as riptide's downsampling. Take the largest power of two
+        // inside that cap. The 16*nbins guard below is only for the direct DFT.
+        if (!direct_dft) {
+            const double cap_samples = 2.0 / (m_tsamp * m_f_max);
+            std::optional<SizeType> largest_under_cap;
+            std::optional<SizeType> smallest_valid;
+            for (SizeType k = 1; k <= k_brute_max; ++k) {
+                const auto bseg_k = SizeType{1} << k;
+                const auto& c0    = counts[k];
+                const bool single_higher_order =
+                    std::all_of(c0.begin(), c0.end() - 1,
+                                [](SizeType count) { return count == 1; });
+                if (!single_higher_order) {
+                    continue;
+                }
+                if (!smallest_valid.has_value()) {
+                    smallest_valid = bseg_k;
+                }
+                if (static_cast<double>(bseg_k) <= cap_samples) {
+                    largest_under_cap = bseg_k;
+                }
+            }
+            const auto chosen = largest_under_cap.has_value()
+                                    ? largest_under_cap
+                                    : smallest_valid;
+            if (chosen.has_value()) {
+                spdlog::debug(
+                    "bseg_brute period cap: nbins={}, f=[{:.4g}, {:.4g}] Hz "
+                    "-> bseg_brute={} (cap {:.0f} samples, {:.2f} periods)",
+                    m_nbins, m_f_min, m_f_max, *chosen, cap_samples,
+                    static_cast<double>(*chosen) * m_tsamp * m_f_max);
+                return chosen;
+            }
+        }
+
+        // Beyond ~16 bins' worth of samples a larger B can no longer pay for
+        // itself (the measured optimum is 4-8 * nbins). Without this guard a
+        // very narrow chunk, where F(B) floors at 1, would pick an enormous B
+        // and make its brute-fold table (and plan shape) larger than that of
+        // the wider chunks around it, breaking the planner's assumption that
+        // narrowing a chunk never increases its memory. Fall back to the
+        // unrestricted scan only if the guard leaves no valid candidate.
+        constexpr SizeType kMaxBsegPerBin = 16;
+        const SizeType bseg_guard         = kMaxBsegPerBin * m_nbins;
+
+        std::optional<SizeType> best;
+        double best_cost = 0.0;
+        for (const bool guarded : {true, false}) {
+            for (SizeType k = 1; k <= k_brute_max; ++k) {
+                const auto bseg_k = SizeType{1} << k;
+                if (guarded && bseg_k > bseg_guard) {
+                    break;
+                }
+                const auto& c0 = counts[k];
+                // validate_plan(): level 0 may only have a frequency grid.
+                const bool single_higher_order =
+                    std::all_of(c0.begin(), c0.end() - 1,
+                                [](SizeType count) { return count == 1; });
+                if (!single_higher_order) {
+                    continue;
+                }
+                const auto nfreqs0 = static_cast<double>(c0.back());
+                const auto bseg    = static_cast<double>(bseg_k);
+                const double brute_ops =
+                    2.0 * nsamps * nfreqs0 * (direct_dft ? width : 1.0);
+                const double cost = (w.brute_op * brute_ops) +
+                                    (w.table * nfreqs0 * bseg) +
+                                    (w.merge_op * merge_above[k]);
+                if (!best.has_value() || cost <= best_cost) {
+                    best      = bseg_k;
+                    best_cost = cost;
+                }
+            }
+            if (best.has_value()) {
+                break;
+            }
+        }
+        if (best.has_value()) {
+            spdlog::debug("bseg_brute cost model: nbins={}, f=[{:.4g}, "
+                          "{:.4g}] Hz -> bseg_brute={} (model cost {:.3e})",
+                          m_nbins, m_f_min, m_f_max, *best, best_cost);
+        }
+        return best;
+    }
+
+    /// Legacy heuristic: roughly two cycles at f_min (four for nparams > 1).
+    SizeType get_bseg_brute_legacy() const {
         const auto tobs   = static_cast<double>(m_nsamps) * m_tsamp;
         const auto cycles = tobs * m_f_min;
         if (cycles <= 1.0) {
@@ -865,8 +1089,7 @@ std::vector<float> FFASearchConfig::get_boxcar_kadane_biases() const noexcept {
 SizeType FFASearchConfig::get_n_boxcar_kadane_biases() const noexcept {
     return m_impl->get_n_boxcar_kadane_biases();
 }
-void FFASearchConfig::set_max_process_memory_gb(
-    double max_process_memory_gb) {
+void FFASearchConfig::set_max_process_memory_gb(double max_process_memory_gb) {
     m_impl->set_max_process_memory_gb(max_process_memory_gb);
 }
 std::vector<double>

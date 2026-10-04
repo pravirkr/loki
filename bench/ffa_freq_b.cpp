@@ -2,6 +2,7 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <regex>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -88,11 +89,14 @@ void dump_timeseries_once() {
     dumped = true;
 }
 
+// bseg_brute == 0 keeps the library default (cost-model selector); any other
+// value is forwarded as performance.bseg_brute for every chunk.
 void write_search_config(const std::filesystem::path& path,
                          const std::filesystem::path& timeseries,
                          const std::filesystem::path& outdir,
                          std::string_view prefix,
-                         bool use_fourier) {
+                         bool use_fourier,
+                         long bseg_brute = 0) {
     std::ofstream output(path);
     if (!output.is_open()) {
         throw std::runtime_error("failed to write FFA bench TOML");
@@ -122,15 +126,45 @@ void write_search_config(const std::filesystem::path& path,
                           "octave_scale = 1.5\n"
                           "nbins_max = 1024\n"
                           "nbins_min_lossy_bf = 32\n"
+                          "{}"
                           "\n"
                           "[output]\n"
                           "outdir = \"{}\"\n"
                           "prefix = \"{}\"\n",
                           timeseries.string(), use_fourier ? "true" : "false",
+                          bseg_brute > 0
+                              ? std::format("bseg_brute = {}\n", bseg_brute)
+                              : std::string{},
                           outdir.string(), prefix);
 }
 
-void run_freq_search(benchmark::State& state, bool use_fourier) {
+struct SweepTimers {
+    double brutefold_s{0.0}; // includes table build
+    double brute_table_s{0.0};
+    double merge_s{0.0};
+};
+
+// Sums the per-chunk "FFA Chunk detail" lines emitted by the frequency sweep.
+[[nodiscard]] SweepTimers parse_sweep_timers(const std::filesystem::path& log) {
+    SweepTimers total;
+    std::ifstream input(log);
+    static const std::regex kChunk(
+        R"(FFA Chunk detail: .*brutefold_s=([0-9.]+) brute_table_s=([0-9.]+) ffa_s=([0-9.]+))");
+    std::string line;
+    while (std::getline(input, line)) {
+        std::smatch match;
+        if (std::regex_search(line, match, kChunk)) {
+            total.brutefold_s += std::stod(match[1]);
+            total.brute_table_s += std::stod(match[2]);
+            total.merge_s += std::stod(match[3]);
+        }
+    }
+    return total;
+}
+
+void run_freq_search(benchmark::State& state,
+                     bool use_fourier,
+                     long bseg_brute = 0) {
     try {
         dump_timeseries_once();
     } catch (const std::exception& ex) {
@@ -138,15 +172,17 @@ void run_freq_search(benchmark::State& state, bool use_fourier) {
         return;
     }
 
-    const std::string_view tag = use_fourier ? "fourier" : "time";
-    const auto case_dir        = temp_root().root / tag;
-    const auto outdir          = case_dir / "out";
-    const auto config_path     = case_dir / "config.toml";
-    const auto log_path        = case_dir / "search.log";
+    const std::string tag =
+        std::string(use_fourier ? "fourier" : "time") +
+        (bseg_brute > 0 ? std::format("_bseg{}", bseg_brute) : std::string{});
+    const auto case_dir    = temp_root().root / tag;
+    const auto outdir      = case_dir / "out";
+    const auto config_path = case_dir / "config.toml";
+    const auto log_path    = case_dir / "search.log";
     std::filesystem::create_directories(outdir);
     try {
         write_search_config(config_path, temp_root().timeseries, outdir, tag,
-                            use_fourier);
+                            use_fourier, bseg_brute);
     } catch (const std::exception& ex) {
         state.SkipWithError(ex.what());
         return;
@@ -164,6 +200,13 @@ void run_freq_search(benchmark::State& state, bool use_fourier) {
             break;
         }
     }
+    const auto timers = parse_sweep_timers(log_path);
+    state.counters["brutefold_s"]   = timers.brutefold_s;
+    state.counters["brute_table_s"] = timers.brute_table_s;
+    state.counters["merge_s"]       = timers.merge_s;
+    const auto denom                = timers.brutefold_s + timers.merge_s;
+    state.counters["brute_share"] =
+        denom > 0.0 ? timers.brutefold_s / denom : 0.0;
 }
 
 void ffa_freq_time(benchmark::State& state) { run_freq_search(state, false); }
@@ -179,6 +222,38 @@ BENCHMARK(ffa_freq_time)
 
 BENCHMARK(ffa_freq_fourier)
     ->Name("BM_FFA_Freq/fourier")
+    ->Iterations(1)
+    ->Repetitions(1)
+    ->UseRealTime()
+    ->Unit(benchmark::kSecond);
+
+// bseg_brute sweep: Arg(0) is the library default, other values override
+// performance.bseg_brute for every chunk. Per-chunk detail (brute / table /
+// merge time) is reported as counters; see also bench/bseg_brute_sweep.py for
+// the per-chunk breakdown.
+void ffa_freq_time_bseg(benchmark::State& state) {
+    run_freq_search(state, false, state.range(0));
+}
+void ffa_freq_fourier_bseg(benchmark::State& state) {
+    run_freq_search(state, true, state.range(0));
+}
+
+BENCHMARK(ffa_freq_time_bseg)
+    ->Name("BM_FFA_Freq_Bseg/time")
+    ->Arg(0)
+    ->Arg(256)
+    ->Arg(1024)
+    ->Arg(4096)
+    ->Iterations(1)
+    ->Repetitions(1)
+    ->UseRealTime()
+    ->Unit(benchmark::kSecond);
+
+BENCHMARK(ffa_freq_fourier_bseg)
+    ->Name("BM_FFA_Freq_Bseg/fourier")
+    ->Arg(0)
+    ->Arg(256)
+    ->Arg(1024)
     ->Iterations(1)
     ->Repetitions(1)
     ->UseRealTime()

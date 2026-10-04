@@ -16,8 +16,10 @@ inline constexpr SizeType kFFAFreqSweepWriteBatchSize = 1U << 16U;
  *
  * Divides a period range into contiguous bands that keep a nearly constant
  * physical time resolution per folding bin. Bin count grows with period until
- * `nbins_max`. Requested `nbins_min` must fit in `p_min / tsamp` or the
- * function throws.
+ * `nbins_max`. Once the cap is hit, the remaining period range is still split
+ * by `octave_scale`, so each sub-band can choose its own brute-fold segment
+ * length. Requested `nbins_min` must fit in `p_min / tsamp` or the function
+ * throws.
  *
  * @param p_min Minimum period (seconds). Must exceed 2*tsamp (Nyquist) and
  * satisfy p_min >= nbins_min * tsamp.
