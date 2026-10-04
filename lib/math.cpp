@@ -13,6 +13,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <omp.h>
@@ -206,8 +207,8 @@ constexpr SizeType kMinChunkWindows = 8;
  */
 [[nodiscard]] inline SizeType reflect_index(std::int64_t k,
                                             SizeType n) noexcept {
-    const auto period = static_cast<std::int64_t>(2 * n);
-    auto m            = k % period;
+    const std::int64_t period = 2 * static_cast<std::int64_t>(n);
+    auto m                    = k % period;
     if (m < 0) {
         m += period;
     }
@@ -326,7 +327,7 @@ public:
     }
 
     void init(const float* ring, SizeType w) {
-        m_val = const_cast<float*>(ring);
+        m_val = ring;
         std::vector<std::uint32_t> order(w);
         std::iota(order.begin(), order.end(), std::uint32_t{0});
         std::ranges::sort(order, [ring](std::uint32_t a, std::uint32_t b) {
@@ -434,7 +435,7 @@ private:
     }
 
     SizeType m_n_lo;
-    float* m_val{nullptr};
+    const float* m_val{nullptr};
     std::vector<std::uint32_t> m_lo;
     std::vector<std::uint32_t> m_hi;
     mutable std::vector<std::uint32_t> m_pos;
@@ -469,8 +470,8 @@ void filter_chunks(const float* x,
     // Never more threads than requested, and no thread without a worthwhile
     // chunk of work.
     const int team = static_cast<int>(
-        std::min<SizeType>(std::max<SizeType>(n / min_chunk, 1),
-                           static_cast<SizeType>(std::max(nthreads, 1))));
+        std::clamp(n / min_chunk, SizeType{1},
+                   static_cast<SizeType>(std::max(nthreads, 1))));
 #pragma omp parallel num_threads(team)
     {
         const auto nt       = static_cast<SizeType>(omp_get_num_threads());
@@ -482,7 +483,7 @@ void filter_chunks(const float* x,
 
         std::vector<float> ring(w);
         std::vector<float> tail(right);
-        auto window = make_window();
+        auto window = std::forward<MakeWindow>(make_window)();
         if (b < e) {
             gather_reflected(x, n,
                              static_cast<std::int64_t>(b) -
