@@ -259,17 +259,6 @@ if(LOKI_BUILD_BENCHMARKS)
   add_subdirectory(bench)
 endif()
 
-# Optional riptide stage bench. Kept out of bench/*.cpp so the benchmark glob
-# does not compile riptide's C++11 headers under loki's warning flags.
-set(LOKI_RIPTIDE_DIR
-    ""
-    CACHE PATH
-          "Path to a riptide source tree. When set, build riptide_stage_bench."
-)
-if(LOKI_RIPTIDE_DIR)
-  add_subdirectory(bench/riptide)
-endif()
-
 # Install / export: find_package(loki) + target loki::loki
 include(CMakePackageConfigHelpers)
 

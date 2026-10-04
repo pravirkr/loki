@@ -1,14 +1,11 @@
 #include "loki/io/timeseries.hpp"
 
 #include <algorithm>
-#include <bit>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
-#include <iterator>
 #include <format>
 #include <memory>
-#include <set>
 #include <span>
 #include <string>
 #include <utility>
@@ -18,6 +15,7 @@
 
 #include "loki/common/types.hpp"
 #include "loki/exceptions.hpp"
+#include "loki/math.hpp"
 #include "loki/utils.hpp"
 
 namespace loki::io {
@@ -31,19 +29,10 @@ void validate_ingress_arrays(std::span<const float> ts_e,
                 std::format("ts_e[{}] is not finite", i));
         }
         if (!utils::is_finite(ts_v[i]) || ts_v[i] <= 0.0F) {
-            throw std::invalid_argument(
-                std::format("ts_v[{}] must be finite and positive (got {})", i,
-                            ts_v[i]));
+            throw std::invalid_argument(std::format(
+                "ts_v[{}] must be finite and positive (got {})", i, ts_v[i]));
         }
     }
-}
-
-constexpr double kIqrScale = 1.349;
-constexpr double kMadScale = 1.4826;
-
-[[nodiscard]] bool is_finite_double(double value) noexcept {
-    const auto bits = std::bit_cast<std::uint64_t>(value);
-    return (bits & 0x7FF0000000000000ULL) != 0x7FF0000000000000ULL;
 }
 
 [[nodiscard]] std::string lower_ext(const std::filesystem::path& path) {
@@ -90,176 +79,38 @@ template <typename F> auto call_psrio(F&& fn) -> decltype(fn()) {
     throw error_check::DetailedException("unhandled timeseries path");
 }
 
-class WindowMedian {
-public:
-    void add(float value) {
-        if (m_lo.empty() || value <= *m_lo.rbegin()) {
-            m_lo.insert(value);
-        } else {
-            m_hi.insert(value);
-        }
-        rebalance();
+/// Window length in samples for a filter window given in seconds.
+[[nodiscard]] SizeType
+window_in_samples(double window_sec, double tsamp, SizeType n) {
+    const double bins = window_sec / tsamp;
+    if (bins >= static_cast<double>(n)) {
+        return n;
     }
+    return bins >= 1.0 ? static_cast<SizeType>(std::llround(bins)) : 1;
+}
 
-    void remove(float value) {
-        const auto lower = m_lo.find(value);
-        if (lower != m_lo.end()) {
-            m_lo.erase(lower);
-        } else {
-            const auto upper = m_hi.find(value);
-            if (upper == m_hi.end()) {
-                throw error_check::DetailedException(
-                    "running median lost a sample");
-            }
-            m_hi.erase(upper);
-        }
-        rebalance();
-    }
-
-    [[nodiscard]] double median() const {
-        if (m_lo.empty()) {
-            throw error_check::DetailedException(
-                "running median window is empty");
-        }
-        if (m_lo.size() == m_hi.size()) {
-            return 0.5 * (static_cast<double>(*m_lo.rbegin()) +
-                          static_cast<double>(*m_hi.begin()));
-        }
-        return static_cast<double>(*m_lo.rbegin());
-    }
-
-private:
-    void rebalance() {
-        while (m_lo.size() > m_hi.size() + 1) {
-            m_hi.insert(*m_lo.rbegin());
-            m_lo.erase(std::prev(m_lo.end()));
-        }
-        while (m_hi.size() > m_lo.size()) {
-            m_lo.insert(*m_hi.begin());
-            m_hi.erase(m_hi.begin());
-        }
-    }
-
-    std::multiset<float> m_lo;
-    std::multiset<float> m_hi;
-};
-
-void subtract_running_median(std::span<float> samples,
-                             double window_sec,
-                             double tsamp) {
-    if (window_sec < 0.0) {
+/// Remove the running-median baseline and z-score, both in place.
+void preprocess_samples(std::span<float> samples,
+                        double tsamp,
+                        const ReadOptions& options) {
+    if (options.filter_window < 0.0) {
         throw error_check::DetailedException(
             "filter window must be non-negative");
     }
-    const SizeType n = samples.size();
-    if (n == 0) {
+    if (samples.empty()) {
         return;
     }
-    SizeType window   = 1;
-    const double bins = window_sec / tsamp;
-    if (bins > static_cast<double>(n)) {
-        window = n;
-    } else if (bins >= 1.0) {
-        window = static_cast<SizeType>(std::llround(bins));
-    }
-    const SizeType radius_left  = (window - 1) / 2;
-    const SizeType radius_right = window - radius_left - 1;
-    WindowMedian median;
-    SizeType left  = 0;
-    SizeType right = std::min(n - 1, radius_right);
-    for (SizeType i = left; i <= right; ++i) {
-        median.add(samples[i]);
-    }
-    std::vector<double> baseline(n);
-    for (SizeType i = 0; i < n; ++i) {
-        baseline[i] = median.median();
-        if (i + 1 == n) {
-            break;
-        }
-        const SizeType next_left =
-            (i + 1 > radius_left) ? (i + 1 - radius_left) : 0;
-        const SizeType next_right = std::min(n - 1, i + 1 + radius_right);
-        while (left < next_left) {
-            median.remove(samples[left]);
-            ++left;
-        }
-        while (right < next_right) {
-            ++right;
-            median.add(samples[right]);
+    if (options.filter_window > 0.0) {
+        const SizeType window =
+            window_in_samples(options.filter_window, tsamp, samples.size());
+        if (window > 1) {
+            math::subtract_running_filter(
+                samples, window, math::FilterMethod::kMedian,
+                options.fast_median, options.fast_median_min_points,
+                options.nthreads);
         }
     }
-    for (SizeType i = 0; i < n; ++i) {
-        samples[i] =
-            static_cast<float>(static_cast<double>(samples[i]) - baseline[i]);
-    }
-}
-
-[[nodiscard]] double percentile_sorted(const std::vector<float>& sorted,
-                                       double q) {
-    if (sorted.empty()) {
-        return 0.0;
-    }
-    const double index = (static_cast<double>(sorted.size()) - 1.0) * q;
-    const auto low     = static_cast<SizeType>(std::floor(index));
-    const auto high    = static_cast<SizeType>(std::ceil(index));
-    const double frac  = index - static_cast<double>(low);
-    return (static_cast<double>(sorted[low]) * (1.0 - frac)) +
-           (static_cast<double>(sorted[high]) * frac);
-}
-
-[[nodiscard]] double location_of(std::span<const float> samples,
-                                 LocMethod method) {
-    if (method == LocMethod::kMean) {
-        double sum = 0.0;
-        for (float sample : samples) {
-            sum += static_cast<double>(sample);
-        }
-        return sum / static_cast<double>(samples.size());
-    }
-    std::vector<float> sorted(samples.begin(), samples.end());
-    std::ranges::sort(sorted);
-    return percentile_sorted(sorted, 0.5);
-}
-
-[[nodiscard]] double scale_of(std::span<const float> samples,
-                              ScaleMethod method) {
-    if (method == ScaleMethod::kStd) {
-        const double mean = location_of(samples, LocMethod::kMean);
-        double accum      = 0.0;
-        for (float sample : samples) {
-            const double delta = static_cast<double>(sample) - mean;
-            accum += delta * delta;
-        }
-        return std::sqrt(accum / static_cast<double>(samples.size()));
-    }
-    std::vector<float> sorted(samples.begin(), samples.end());
-    std::ranges::sort(sorted);
-    if (method == ScaleMethod::kIqr) {
-        const double q75 = percentile_sorted(sorted, 0.75);
-        const double q25 = percentile_sorted(sorted, 0.25);
-        return (q75 - q25) / kIqrScale;
-    }
-    const double med = percentile_sorted(sorted, 0.5);
-    std::vector<float> absdev(sorted.size());
-    std::ranges::transform(sorted, absdev.begin(), [med](float sample) {
-        return static_cast<float>(std::abs(static_cast<double>(sample) - med));
-    });
-    std::ranges::sort(absdev);
-    return percentile_sorted(absdev, 0.5) * kMadScale;
-}
-
-void zscore(std::span<float> samples, LocMethod loc, ScaleMethod scale) {
-    const double location    = location_of(samples, loc);
-    const double scale_value = scale_of(samples, scale);
-    for (float& sample : samples) {
-        sample = static_cast<float>(static_cast<double>(sample) - location);
-    }
-    if (!(scale_value > 0.0) || !is_finite_double(scale_value)) {
-        return;
-    }
-    for (float& sample : samples) {
-        sample = static_cast<float>(static_cast<double>(sample) / scale_value);
-    }
+    math::zscore(samples, options.loc, options.scale, options.nthreads);
 }
 
 } // namespace
@@ -278,7 +129,7 @@ TimeSeries::TimeSeries(std::vector<float> ts_e,
     error_check::check(ts_e.size() == ts_v.size(),
                        "ts_e and ts_v must have the same length");
     error_check::check(!ts_e.empty(), "timeseries is empty");
-    error_check::check(is_finite_double(dt) && dt > 0.0, "dt must be positive");
+    error_check::check(utils::is_finite(dt) && dt > 0.0, "dt must be positive");
     validate_ingress_arrays(ts_e, ts_v);
     m_impl->header.tsamp     = dt;
     m_impl->header.nsamples  = ts_e.size();
@@ -332,8 +183,7 @@ TimeSeries TimeSeries::read(const std::filesystem::path& path,
     psrio::Header header        = raw.header();
     std::vector<float> samples(raw.data().begin(), raw.data().end());
     if (options.preprocess) {
-        subtract_running_median(samples, options.filter_window, header.tsamp);
-        zscore(samples, options.loc, options.scale);
+        preprocess_samples(samples, header.tsamp, options);
     }
     std::vector<float> variance(samples.size(), 1.0F);
     TimeSeries series(std::move(samples), std::move(variance), header.tsamp);
@@ -345,7 +195,7 @@ TimeSeries TimeSeries::read(const std::filesystem::path& path,
 }
 
 void TimeSeries::write(const std::filesystem::path& path) const {
-    error_check::check(is_finite_double(m_impl->header.tsamp) &&
+    error_check::check(utils::is_finite(m_impl->header.tsamp) &&
                            m_impl->header.tsamp > 0.0,
                        "tsamp must be positive");
     psrio::Header header = m_impl->header;

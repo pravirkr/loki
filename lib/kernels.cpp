@@ -11,6 +11,10 @@
 #include <omp.h>
 #include <xsimd/xsimd.hpp>
 
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>
+#endif
+
 #include "loki/brute_fold_intrinsics.hpp"
 #include "loki/common/coord.hpp"
 #include "loki/common/types.hpp"
@@ -1154,6 +1158,130 @@ void brute_fold_runs_range(const double* __restrict__ prefix_e,
     }
 }
 
+#if defined(__AVX2__)
+/// 4-segment batched brute fold using AVX2 SIMD on pre-interleaved prefixes.
+/// Folds 4 segments simultaneously into fold_buf, then applies an SSE 4x4
+/// matrix transpose into standard [iseg, ncoords, 2, nbins] layout.
+void brute_fold_runs_range_4seg(const double* __restrict__ p4_e,
+                                const double* __restrict__ p4_v,
+                                float* __restrict__ cur_base,
+                                float* __restrict__ fold_buf,
+                                SizeType seg_stride,
+                                const PhaseRun* __restrict__ runs,
+                                const SizeType* __restrict__ run_offsets,
+                                SizeType coord_begin,
+                                SizeType coord_end,
+                                SizeType nbins) noexcept {
+    const SizeType ncoords       = coord_end - coord_begin;
+    const SizeType total_bins    = 2 * nbins;
+    const SizeType fold_stride_4 = total_bins * 4;
+
+    float* dst0 = cur_base;
+    float* dst1 = cur_base + seg_stride;
+    float* dst2 = cur_base + 2 * seg_stride;
+    float* dst3 = cur_base + 3 * seg_stride;
+
+    for (SizeType local = 0; local < ncoords; ++local) {
+        std::fill(fold_buf, fold_buf + fold_stride_4, 0.0F);
+
+        float* __restrict__ fe = fold_buf;
+        float* __restrict__ fv = fe + (nbins * 4);
+
+        const SizeType ifreq    = coord_begin + local;
+        const PhaseRun* run     = runs + run_offsets[ifreq];
+        const PhaseRun* run_end = runs + run_offsets[ifreq + 1];
+
+        __m256d prev_e = _mm256_loadu_pd(p4_e);
+        __m256d prev_v = _mm256_loadu_pd(p4_v);
+
+        for (; run + 2 <= run_end; run += 2) {
+            const auto end0 = run[0].end;
+            const auto bin0 = run[0].bin;
+            const auto end1 = run[1].end;
+            const auto bin1 = run[1].bin;
+
+            __m256d cur_e0 = _mm256_loadu_pd(p4_e + end0 * 4);
+            __m256d cur_v0 = _mm256_loadu_pd(p4_v + end0 * 4);
+            __m256d cur_e1 = _mm256_loadu_pd(p4_e + end1 * 4);
+            __m256d cur_v1 = _mm256_loadu_pd(p4_v + end1 * 4);
+
+            __m256d diff_e0 = _mm256_sub_pd(cur_e0, prev_e);
+            __m256d diff_v0 = _mm256_sub_pd(cur_v0, prev_v);
+            __m256d diff_e1 = _mm256_sub_pd(cur_e1, cur_e0);
+            __m256d diff_v1 = _mm256_sub_pd(cur_v1, cur_v0);
+
+            prev_e = cur_e1;
+            prev_v = cur_v1;
+
+            __m128 de0 = _mm256_cvtpd_ps(diff_e0);
+            __m128 dv0 = _mm256_cvtpd_ps(diff_v0);
+            __m128 de1 = _mm256_cvtpd_ps(diff_e1);
+            __m128 dv1 = _mm256_cvtpd_ps(diff_v1);
+
+            __m128 old_e0 = _mm_loadu_ps(fe + bin0 * 4);
+            __m128 old_v0 = _mm_loadu_ps(fv + bin0 * 4);
+            __m128 old_e1 = _mm_loadu_ps(fe + bin1 * 4);
+            __m128 old_v1 = _mm_loadu_ps(fv + bin1 * 4);
+
+            _mm_storeu_ps(fe + bin0 * 4, _mm_add_ps(old_e0, de0));
+            _mm_storeu_ps(fv + bin0 * 4, _mm_add_ps(old_v0, dv0));
+            _mm_storeu_ps(fe + bin1 * 4, _mm_add_ps(old_e1, de1));
+            _mm_storeu_ps(fv + bin1 * 4, _mm_add_ps(old_v1, dv1));
+        }
+
+        for (; run != run_end; ++run) {
+            const auto end = run->end;
+            const auto bin = run->bin;
+
+            __m256d cur_e = _mm256_loadu_pd(p4_e + end * 4);
+            __m256d cur_v = _mm256_loadu_pd(p4_v + end * 4);
+
+            __m256d diff_e_d = _mm256_sub_pd(cur_e, prev_e);
+            __m256d diff_v_d = _mm256_sub_pd(cur_v, prev_v);
+
+            prev_e = cur_e;
+            prev_v = cur_v;
+
+            __m128 diff_e = _mm256_cvtpd_ps(diff_e_d);
+            __m128 diff_v = _mm256_cvtpd_ps(diff_v_d);
+
+            __m128 old_e = _mm_loadu_ps(fe + bin * 4);
+            __m128 old_v = _mm_loadu_ps(fv + bin * 4);
+
+            _mm_storeu_ps(fe + bin * 4, _mm_add_ps(old_e, diff_e));
+            _mm_storeu_ps(fv + bin * 4, _mm_add_ps(old_v, diff_v));
+        }
+
+        const SizeType off = local * total_bins;
+        float* d0          = dst0 + off;
+        float* d1          = dst1 + off;
+        float* d2          = dst2 + off;
+        float* d3          = dst3 + off;
+
+        SizeType b = 0;
+        for (; b + 4 <= total_bins; b += 4) {
+            __m128 r0 = _mm_loadu_ps(fold_buf + (b + 0) * 4);
+            __m128 r1 = _mm_loadu_ps(fold_buf + (b + 1) * 4);
+            __m128 r2 = _mm_loadu_ps(fold_buf + (b + 2) * 4);
+            __m128 r3 = _mm_loadu_ps(fold_buf + (b + 3) * 4);
+
+            _MM_TRANSPOSE4_PS(r0, r1, r2, r3);
+
+            _mm_storeu_ps(d0 + b, r0);
+            _mm_storeu_ps(d1 + b, r1);
+            _mm_storeu_ps(d2 + b, r2);
+            _mm_storeu_ps(d3 + b, r3);
+        }
+        for (; b < total_bins; ++b) {
+            d0[b] = fold_buf[b * 4 + 0];
+            d1[b] = fold_buf[b * 4 + 1];
+            d2[b] = fold_buf[b * 4 + 2];
+            d3[b] = fold_buf[b * 4 + 3];
+        }
+    }
+}
+#endif
+
 [[nodiscard]] bool coords_idx_monotone(const coord::FFACoordFreq* coords,
                                        SizeType n) noexcept {
     for (SizeType i = 1; i < n; ++i) {
@@ -1647,7 +1775,9 @@ void cone_execute_tile(float* scratch_a,
                        bool time_it,
                        double* brute_s,
                        double* merge_s,
-                       double* score_s) {
+                       double* score_s,
+                       [[maybe_unused]] const double* p4_e = nullptr,
+                       [[maybe_unused]] const double* p4_v = nullptr) {
     const SizeType fold_stride = 2 * nbins;
     CoordRange ranges[17];
     tile_input_ranges(coords_levels, k_levels, coord_begin, coord_end, ranges);
@@ -1660,7 +1790,20 @@ void cone_execute_tile(float* scratch_a,
         time_it ? ConeClock::now() : ConeClock::time_point{};
 
     if (level_in == nullptr) {
-        for (SizeType iseg = 0; iseg < nseg0; ++iseg) {
+        SizeType iseg = 0;
+#if defined(__AVX2__)
+        if (p4_e != nullptr && p4_v != nullptr && scratch_b != nullptr) {
+            for (; iseg + 4 <= nseg0; iseg += 4) {
+                brute_fold_runs_range_4seg(p4_e + (iseg * prefix_stride),
+                                           p4_v + (iseg * prefix_stride),
+                                           cur + (iseg * width0 * fold_stride),
+                                           scratch_b, width0 * fold_stride,
+                                           runs, run_offsets, ranges[0].lo,
+                                           ranges[0].hi, nbins);
+            }
+        }
+#endif
+        for (; iseg < nseg0; ++iseg) {
             brute_fold_runs_range(prefix_e + (iseg * prefix_stride),
                                   prefix_v + (iseg * prefix_stride),
                                   cur + (iseg * width0 * fold_stride), runs,
@@ -1808,10 +1951,16 @@ void ffa_cone_band_freq(const float* level_in,
 
     std::vector<double> shared_prefix_e;
     std::vector<double> shared_prefix_v;
+    std::vector<double> shared_p4_e;
+    std::vector<double> shared_p4_v;
     if (bottom && !parallel_groups) {
         const auto prefix_start = ConeClock::now();
         shared_prefix_e.resize(nsegments_in * prefix_stride);
         shared_prefix_v.resize(nsegments_in * prefix_stride);
+#if defined(__AVX2__)
+        shared_p4_e.resize(nsegments_in * prefix_stride);
+        shared_p4_v.resize(nsegments_in * prefix_stride);
+#endif
 #pragma omp parallel for schedule(static) num_threads(nthreads) default(none)  \
     shared(ts_e, ts_v, shared_prefix_e, shared_prefix_v, nsegments_in,         \
                segment_len, prefix_stride)
@@ -1823,17 +1972,58 @@ void ffa_cone_band_freq(const float* level_in,
                                 shared_prefix_v.data() + (iseg * prefix_stride),
                                 segment_len);
         }
+#if defined(__AVX2__)
+        const SizeType n_prefix = segment_len + 1;
+        const SizeType nbatches = nsegments_in / 4;
+#pragma omp parallel for schedule(static) num_threads(nthreads) default(none)  \
+    shared(shared_prefix_e, shared_prefix_v, shared_p4_e, shared_p4_v,         \
+               nbatches, prefix_stride, n_prefix)
+        for (SizeType ibatch = 0; ibatch < nbatches; ++ibatch) {
+            const SizeType iseg = ibatch * 4;
+            const double* pe0 =
+                shared_prefix_e.data() + (iseg + 0) * prefix_stride;
+            const double* pe1 =
+                shared_prefix_e.data() + (iseg + 1) * prefix_stride;
+            const double* pe2 =
+                shared_prefix_e.data() + (iseg + 2) * prefix_stride;
+            const double* pe3 =
+                shared_prefix_e.data() + (iseg + 3) * prefix_stride;
+            double* dst_e = shared_p4_e.data() + (iseg * prefix_stride);
+
+            const double* pv0 =
+                shared_prefix_v.data() + (iseg + 0) * prefix_stride;
+            const double* pv1 =
+                shared_prefix_v.data() + (iseg + 1) * prefix_stride;
+            const double* pv2 =
+                shared_prefix_v.data() + (iseg + 2) * prefix_stride;
+            const double* pv3 =
+                shared_prefix_v.data() + (iseg + 3) * prefix_stride;
+            double* dst_v = shared_p4_v.data() + (iseg * prefix_stride);
+
+            for (SizeType i = 0; i < n_prefix; ++i) {
+                dst_e[i * 4 + 0] = pe0[i];
+                dst_e[i * 4 + 1] = pe1[i];
+                dst_e[i * 4 + 2] = pe2[i];
+                dst_e[i * 4 + 3] = pe3[i];
+
+                dst_v[i * 4 + 0] = pv0[i];
+                dst_v[i * 4 + 1] = pv1[i];
+                dst_v[i * 4 + 2] = pv2[i];
+                dst_v[i * 4 + 3] = pv3[i];
+            }
+        }
+#endif
         if (time_it) {
             thread_seconds->prefix_wall += cone_seconds(prefix_start);
         }
     }
 
-#pragma omp parallel num_threads(nthreads) default(none)                       \
-    shared(level_in, ts_e, ts_v, runs, run_offsets, level_out, coords_levels,  \
-               ncoords, nbins, k_levels, tile_coords, score_fn, score_ctx,     \
-               thread_seconds, nseg_group, nseg_out, ncoords_top,              \
-               scratch_floats, bottom, parallel_groups, time_it,               \
-               prefix_stride, segment_len, shared_prefix_e, shared_prefix_v)
+#pragma omp parallel num_threads(nthreads) default(none) shared(               \
+        level_in, ts_e, ts_v, runs, run_offsets, level_out, coords_levels,     \
+            ncoords, nbins, k_levels, tile_coords, score_fn, score_ctx,        \
+            thread_seconds, nseg_group, nseg_out, ncoords_top, scratch_floats, \
+            bottom, parallel_groups, time_it, prefix_stride, segment_len,      \
+            shared_prefix_e, shared_prefix_v, shared_p4_e, shared_p4_v)
     {
         double brute_local = 0.0;
         double merge_local = 0.0;
@@ -1842,9 +2032,15 @@ void ffa_cone_band_freq(const float* level_in,
         std::vector<float> scratch_b(scratch_floats);
         std::vector<double> prefix_e;
         std::vector<double> prefix_v;
+        std::vector<double> p4_e;
+        std::vector<double> p4_v;
         if (bottom && parallel_groups) {
             prefix_e.resize(nseg_group * prefix_stride);
             prefix_v.resize(nseg_group * prefix_stride);
+#if defined(__AVX2__)
+            p4_e.resize(nseg_group * prefix_stride);
+            p4_v.resize(nseg_group * prefix_stride);
+#endif
         }
 
         if (parallel_groups) {
@@ -1865,6 +2061,42 @@ void ffa_cone_band_freq(const float* level_in,
                                                 (iseg * prefix_stride),
                                             segment_len);
                     }
+#if defined(__AVX2__)
+                    const SizeType n_prefix = segment_len + 1;
+                    for (SizeType iseg = 0; iseg + 4 <= nseg_group; iseg += 4) {
+                        const double* pe0 =
+                            prefix_e.data() + (iseg + 0) * prefix_stride;
+                        const double* pe1 =
+                            prefix_e.data() + (iseg + 1) * prefix_stride;
+                        const double* pe2 =
+                            prefix_e.data() + (iseg + 2) * prefix_stride;
+                        const double* pe3 =
+                            prefix_e.data() + (iseg + 3) * prefix_stride;
+                        double* dst_e = p4_e.data() + (iseg * prefix_stride);
+
+                        const double* pv0 =
+                            prefix_v.data() + (iseg + 0) * prefix_stride;
+                        const double* pv1 =
+                            prefix_v.data() + (iseg + 1) * prefix_stride;
+                        const double* pv2 =
+                            prefix_v.data() + (iseg + 2) * prefix_stride;
+                        const double* pv3 =
+                            prefix_v.data() + (iseg + 3) * prefix_stride;
+                        double* dst_v = p4_v.data() + (iseg * prefix_stride);
+
+                        for (SizeType i = 0; i < n_prefix; ++i) {
+                            dst_e[i * 4 + 0] = pe0[i];
+                            dst_e[i * 4 + 1] = pe1[i];
+                            dst_e[i * 4 + 2] = pe2[i];
+                            dst_e[i * 4 + 3] = pe3[i];
+
+                            dst_v[i * 4 + 0] = pv0[i];
+                            dst_v[i * 4 + 1] = pv1[i];
+                            dst_v[i * 4 + 2] = pv2[i];
+                            dst_v[i * 4 + 3] = pv3[i];
+                        }
+                    }
+#endif
                     if (time_it) {
                         brute_local += cone_seconds(prefix_start);
                     }
@@ -1879,7 +2111,9 @@ void ffa_cone_band_freq(const float* level_in,
                         bottom ? prefix_v.data() : nullptr, runs, run_offsets,
                         prefix_stride, level_out, coords_levels, ncoords, group,
                         coord0, coord1, nbins, k_levels, score_fn, score_ctx,
-                        time_it, &brute_local, &merge_local, &score_local);
+                        time_it, &brute_local, &merge_local, &score_local,
+                        bottom ? p4_e.data() : nullptr,
+                        bottom ? p4_v.data() : nullptr);
                 }
             }
         } else {
@@ -1889,19 +2123,25 @@ void ffa_cone_band_freq(const float* level_in,
                 const SizeType coord1 =
                     std::min(coord0 + tile_coords, ncoords_top);
                 for (SizeType group = 0; group < nseg_out; ++group) {
-                    const double* pe = nullptr;
-                    const double* pv = nullptr;
+                    const double* pe  = nullptr;
+                    const double* pv  = nullptr;
+                    const double* p4e = nullptr;
+                    const double* p4v = nullptr;
                     if (bottom) {
                         const SizeType off = group * nseg_group * prefix_stride;
                         pe                 = shared_prefix_e.data() + off;
                         pv                 = shared_prefix_v.data() + off;
+#if defined(__AVX2__)
+                        p4e = shared_p4_e.data() + off;
+                        p4v = shared_p4_v.data() + off;
+#endif
                     }
-                    cone_execute_tile(scratch_a.data(), scratch_b.data(),
-                                      level_in, pe, pv, runs, run_offsets,
-                                      prefix_stride, level_out, coords_levels,
-                                      ncoords, group, coord0, coord1, nbins,
-                                      k_levels, score_fn, score_ctx, time_it,
-                                      &brute_local, &merge_local, &score_local);
+                    cone_execute_tile(
+                        scratch_a.data(), scratch_b.data(), level_in, pe, pv,
+                        runs, run_offsets, prefix_stride, level_out,
+                        coords_levels, ncoords, group, coord0, coord1, nbins,
+                        k_levels, score_fn, score_ctx, time_it, &brute_local,
+                        &merge_local, &score_local, p4e, p4v);
                 }
             }
         }

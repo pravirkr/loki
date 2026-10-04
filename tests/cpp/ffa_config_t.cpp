@@ -240,6 +240,8 @@ TEST_CASE("FFATomlConfig default generation and parsing", "[config][toml]") {
     auto cfg = loki::search::FFATomlConfig::from_string(default_toml);
     REQUIRE(cfg.timeseries_path == "input.tim");
     REQUIRE(cfg.preprocess == true);
+    REQUIRE(cfg.fast_median == true);
+    REQUIRE(cfg.fast_median_min_points == 101);
     REQUIRE_THAT(cfg.f_min, WithinAbs(0.5, 1e-9));
     REQUIRE_THAT(cfg.f_max, WithinAbs(100.0, 1e-9));
     REQUIRE(cfg.nbins == 64);

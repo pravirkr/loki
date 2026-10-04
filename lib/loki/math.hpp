@@ -1,12 +1,16 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <concepts>
 #include <cstdint>
+#include <limits>
+#include <mutex>
 #include <random>
 #include <span>
 #include <stdexcept>
+#include <type_traits>
 #include <vector>
 
 #include <boost/math/distributions/chi_squared.hpp>
@@ -386,5 +390,151 @@ private:
         }
     }
 };
+
+// ---------------------------------------------------------------------------
+// 1D float32 running filters and z-score normalisation (implemented in
+// math.cpp).
+// ---------------------------------------------------------------------------
+
+// Threading: every function below takes the number of OpenMP threads to use
+// (\p nthreads, values < 1 are treated as 1). The count is passed explicitly
+// to each parallel region; it is never clamped to the machine's thread count.
+
+/// Statistic computed over each sliding window by running_filter().
+enum class FilterMethod : std::uint8_t { kMean, kMedian };
+
+/**
+ * @brief Left/right scale of a distribution.
+ *
+ * Symmetric estimators (std, IQR, MAD) report the same value on both sides.
+ * Double MAD reports the scale of the values below and above the median.
+ */
+struct ScaleEstimate {
+    double left;
+    double right;
+};
+
+/// Location and scale used by zscore().
+struct ZScoreResult {
+    double loc;
+    ScaleEstimate scale;
+};
+
+namespace detail {
+/// Algorithm switch points. Exposed so tests and benchmarks can force each
+/// code path; the defaults are tuned by bench/running_filter_b.cpp.
+struct Tuning {
+    /// Windows >= this use the double-heap median; smaller use a sorted array.
+    /// bench/running_filter_b.cpp: the heap wins from w = 5 upwards.
+    SizeType heap_window{8};
+    /// Order statistics on arrays >= this use the parallel radix select.
+    SizeType radix_select_size{1U << 16U};
+};
+Tuning& tuning() noexcept;
+} // namespace detail
+
+/**
+ * @brief Sliding-window mean or median of a 1D series.
+ *
+ * Output \c i is the statistic over the \c window samples
+ * <tt>in[i - window/2 .. i - window/2 + window - 1]</tt>. Samples outside the
+ * series are obtained by reflecting about the edges (numpy "symmetric"
+ * padding, so the edge sample is repeated). For an odd window the window is
+ * centred; for an even window it extends one more sample to the left. The
+ * median of an even window is the mean of the two middle values. A window
+ * longer than the series is allowed.
+ *
+ * Median results are exact and independent of the number of OpenMP threads.
+ * The mean uses a double precision running sum seeded per thread chunk.
+ *
+ * @param in Input samples. Must be finite (the build uses -ffast-math).
+ * @param out Output, same length as \p in. Must not overlap \p in.
+ * @param window Window length in samples (>= 1).
+ * @param method Statistic to compute.
+ * @throws std::invalid_argument on empty input, size mismatch, aliasing or a
+ * zero window.
+ */
+void running_filter(std::span<const float> in,
+                    std::span<float> out,
+                    SizeType window,
+                    FilterMethod method = FilterMethod::kMean,
+                    int nthreads        = 1);
+
+/**
+ * @brief Approximate running_filter() for long windows.
+ *
+ * Block-averages the input by <tt>ds = window / min_points</tt>, applies
+ * running_filter() with width \p min_points to the short series and linearly
+ * interpolates the result back (edges are clamped). The effective window is
+ * <tt>ds * min_points</tt>. Falls back to the exact filter when
+ * <tt>ds == 1</tt> or the series has fewer than \p min_points blocks.
+ *
+ * @throws std::invalid_argument as running_filter(), or if min_points is 0.
+ */
+void running_filter_fast(std::span<const float> in,
+                         std::span<float> out,
+                         SizeType window,
+                         FilterMethod method = FilterMethod::kMean,
+                         SizeType min_points = 101,
+                         int nthreads        = 1);
+
+/**
+ * @brief In-place baseline removal: <tt>x[i] -= running_filter(x)[i]</tt>.
+ *
+ * Gives exactly the same result as subtracting the output of
+ * running_filter() / running_filter_fast() but needs no series-sized scratch
+ * buffer in the exact path and only a short array in the fast path.
+ *
+ * @param x Series, modified in place.
+ * @param window Window length in samples (>= 1).
+ * @param method Statistic to subtract.
+ * @param fast Use the approximate running_filter_fast().
+ * @param min_points See running_filter_fast().
+ */
+void subtract_running_filter(std::span<float> x,
+                             SizeType window,
+                             FilterMethod method = FilterMethod::kMedian,
+                             bool fast           = true,
+                             SizeType min_points = 101,
+                             int nthreads        = 1);
+
+/**
+ * @brief Location of a series (0 for LocMethod::kNone).
+ * @throws std::invalid_argument if \p x is empty.
+ */
+[[nodiscard]] double
+estimate_loc(std::span<const float> x, LocMethod method, int nthreads = 1);
+
+/**
+ * @brief Scale of a series, normalised to the standard deviation of a
+ * Gaussian (1 for ScaleMethod::kNone).
+ *
+ * - kStd: population standard deviation.
+ * - kIqr: (q75 - q25) / 1.3490, linear-interpolated quantiles.
+ * - kMad: 1.4826 * median(|x - median|); when that is zero, the mean absolute
+ *   deviation from the median divided by sqrt(2/pi).
+ * - kDoubleMad: MAD of the samples <= median (left) and >= median (right),
+ *   each with the same zero fallback.
+ *
+ * @throws std::invalid_argument if \p x is empty.
+ */
+[[nodiscard]] ScaleEstimate estimate_scale(std::span<const float> x,
+                                           ScaleMethod method,
+                                           int nthreads = 1);
+
+/**
+ * @brief In-place z-score: <tt>x = (x - loc) / scale</tt>.
+ *
+ * A scale that is not strictly positive and finite leaves the series centred
+ * but unscaled. For kDoubleMad the left scale is used for samples below the
+ * location and the right scale otherwise.
+ *
+ * @return The location and scale that were estimated.
+ * @throws std::invalid_argument if \p x is empty.
+ */
+ZScoreResult zscore(std::span<float> x,
+                    LocMethod loc,
+                    ScaleMethod scale,
+                    int nthreads = 1);
 
 } // namespace loki::math

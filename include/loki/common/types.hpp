@@ -3,6 +3,7 @@
 #include <array>
 #include <complex>
 #include <cstddef>
+#include <cstdint>
 #include <type_traits>
 
 #ifdef LOKI_ENABLE_CUDA
@@ -98,5 +99,18 @@ inline constexpr SizeType kUnrollFactor = 8;
 
 inline constexpr std::array<std::string, 5> kParamNames = {
     "crackle", "snap", "jerk", "accel", "freq"};
+
+/// Location estimate used when normalising a loaded timeseries.
+/// kNone leaves the location at 0.
+enum class LocMethod : std::uint8_t { kMean, kMedian, kNone };
+
+/// Scale estimate used when normalising a loaded timeseries.
+/// kNone leaves the scale at 1.
+enum class ScaleMethod : std::uint8_t { kStd, kIqr, kMad, kDoubleMad, kNone };
+
+/// Gaussian consistency constants: IQR of N(0,1) is Phi^-1(0.75) - Phi^-1(0.25);
+/// kMadScale is 1 / Phi^-1(0.75).
+inline constexpr double kIqrScale = 1.3489795003921634;
+inline constexpr double kMadScale = 1.482602218505602;
 
 } // namespace loki

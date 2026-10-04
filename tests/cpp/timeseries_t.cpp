@@ -115,8 +115,8 @@ TEST_CASE("timeseries z-score scales a varying series", "[io]") {
     loki::io::ReadOptions options;
     options.preprocess    = true;
     options.filter_window = 100.0;
-    options.loc           = loki::io::LocMethod::kMean;
-    options.scale         = loki::io::ScaleMethod::kStd;
+    options.loc           = loki::LocMethod::kMean;
+    options.scale         = loki::ScaleMethod::kStd;
     const auto loaded     = loki::io::TimeSeries::read(path, options);
 
     double mean  = 0.0;
