@@ -473,13 +473,15 @@ struct ThreadLocalBuffers {
     std::vector<float> profile_scaled;
     std::vector<float> noise;
     std::vector<float> scores;
+    std::vector<float> fold_best;
     FoldsType folds_h0;
     FoldsType folds_h1;
 
     ThreadLocalBuffers(SizeType nbins, SizeType max_ntrials)
         : profile_scaled(nbins),
           noise(max_ntrials * nbins),
-          scores(max_ntrials) {}
+          scores(max_ntrials),
+          fold_best(nbins) {}
 };
 
 std::unique_ptr<FoldVectorHandle>
@@ -548,6 +550,7 @@ simulate_score_prune_fused(const FoldVectorHandle& folds_in,
                            BoxcarWidthsCache& box_cache,
                            float threshold,
                            cands::TimerStats::TimerMap& thread_timers,
+                           bool keep_best,
                            float bias_snr   = 0.0F,
                            float var_add    = 1.0F,
                            SizeType ntrials = 1024) {
@@ -581,6 +584,8 @@ simulate_score_prune_fused(const FoldVectorHandle& folds_in,
     const float var_new      = folds_in.variance() + var_add;
     const float stdnoise     = std::sqrt(var_new);
     SizeType ntrials_success = 0;
+    auto fold_best           = std::span(buffers.fold_best).first(nbins);
+    float snr_best           = std::numeric_limits<float>::lowest();
 
     float* __restrict__ out_ptr = output_data.data();
     for (SizeType i = 0; i < ntrials; ++i) {
@@ -597,14 +602,30 @@ simulate_score_prune_fused(const FoldVectorHandle& folds_in,
                                       profile_scaled[j];
         }
         // Compute SNR
-        const bool snr_above_threshold =
-            detection::snr_boxcar_threshold_with_cache(
-                std::span<const float>(out_ptr + out_offset, nbins), nbins,
-                box_cache, threshold, stdnoise);
+        const auto fold = std::span<const float>(out_ptr + out_offset, nbins);
+        bool snr_above_threshold = false;
+        if (keep_best && ntrials_success == 0) {
+            // Until a trial passes, keep a copy of the best that fails
+            const float snr = detection::snr_boxcar_max_with_cache(
+                fold, nbins, box_cache, stdnoise);
+            snr_above_threshold = snr > threshold;
+            if (!snr_above_threshold && snr > snr_best) {
+                snr_best = snr;
+                std::ranges::copy(fold, fold_best.begin());
+            }
+        } else {
+            snr_above_threshold = detection::snr_boxcar_threshold_with_cache(
+                fold, nbins, box_cache, threshold, stdnoise);
+        }
         // Prune if SNR is below threshold
         if (snr_above_threshold) {
             ++ntrials_success;
         }
+    }
+    // None passed: the best stands in, at the resolution of one trial
+    if (keep_best && ntrials_success == 0) {
+        std::ranges::copy(fold_best, out_ptr);
+        ntrials_success = 1;
     }
     thread_timers["add_score"] += timer.stop();
     const float success =
@@ -698,6 +719,14 @@ transition_state(const State& state_cur,
                         h0_out.begin() + static_cast<IndexType>(out_offset));
             ++n_surv_h0;
         }
+    }
+    // None passed: the best stands in, at the resolution of one trial
+    if (n_surv_h0 == 0) {
+        const auto ibest = static_cast<SizeType>(std::distance(
+            scores_h0.begin(), std::ranges::max_element(scores_h0)));
+        std::copy_n(h0_in.begin() + static_cast<IndexType>(ibest * nbins),
+                    nbins, h0_out.begin());
+        n_surv_h0 = 1;
     }
 
     SizeType n_surv_h1 = 0;
@@ -800,10 +829,11 @@ gen_next_using_thresh(const State& state_cur,
                       SizeType ntrials = 1024) {
     auto [folds_h0_pruned, success_h0] = simulate_score_prune_fused(
         *folds_cur.folds_h0, profile, rng, manager, buffers, box_cache,
-        threshold, thread_timers, 0.0F, var_add, ntrials);
+        threshold, thread_timers, /*keep_best=*/true, 0.0F, var_add, ntrials);
     auto [folds_h1_pruned, success_h1] = simulate_score_prune_fused(
         *folds_cur.folds_h1, profile, rng, manager, buffers, box_cache,
-        threshold, thread_timers, bias_snr, var_add, ntrials);
+        threshold, thread_timers, /*keep_best=*/false, bias_snr, var_add,
+        ntrials);
     const auto state_next =
         state_cur.gen_next(threshold, success_h0, success_h1, nbranches);
     return {state_next,
@@ -842,7 +872,8 @@ gen_next_using_surv_prob(const State& state_cur,
 
     auto [folds_h1_pruned, success_h1] = simulate_score_prune_fused(
         *folds_cur.folds_h1, profile, rng, manager, buffers, box_cache,
-        threshold_h0, thread_timers, bias_snr, var_add, ntrials);
+        threshold_h0, thread_timers, /*keep_best=*/false, bias_snr, var_add,
+        ntrials);
 
     const auto state_next =
         state_cur.gen_next(threshold_h0, success_h0, success_h1, nbranches);

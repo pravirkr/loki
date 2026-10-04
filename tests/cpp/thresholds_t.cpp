@@ -151,4 +151,58 @@ TEST_CASE("snr_boxcar_max_with_cache matches the boxcar S/N", "[thresholds]") {
             std::nextafter(snr_max, std::numeric_limits<float>::lowest())));
     }
 }
+
+TEST_CASE("DynamicThresholdScheme keeps a noise trial when none passes",
+          "[thresholds]") {
+    // Stage 0's beam is far above the noise and well below the signal
+    const std::vector<float> branching_pattern(7, 3.0F);
+    constexpr SizeType kNtrials = 1024;
+    constexpr float kSnrFinal   = 16.0F;
+    const auto* mode            = GENERATE("legacy", "improved");
+    CAPTURE(mode);
+    detection::DynamicThresholdScheme dyn_scheme(
+        branching_pattern, /*ref_ducy=*/0.1F, /*nbins=*/32, kNtrials,
+        /*nprobs=*/10, /*prob_min=*/0.05F, kSnrFinal, /*nthresholds=*/100,
+        /*ducy_max=*/0.3F, /*wtsp=*/1.0F, /*beam_width=*/0.7F,
+        /*trials_start=*/1, mode, /*nthreads=*/4);
+    dyn_scheme.run();
+    REQUIRE(dyn_scheme.get_best_path_thresholds().size() ==
+            branching_pattern.size());
+    // Noise survival is floored at one trial, and stage 0 needs the floor
+    float success_h0_min = 1.0F;
+    for (const auto& state : dyn_scheme.get_states()) {
+        if (!state.is_empty) {
+            success_h0_min = std::min(success_h0_min, state.success_h0);
+        }
+    }
+    REQUIRE(success_h0_min == 1.0F / static_cast<float>(kNtrials));
+}
+
+TEST_CASE("evaluate_scheme keeps a noise trial when none passes",
+          "[thresholds]") {
+    // Stage 1 prunes every noise trial and keeps every signal trial: its
+    // threshold is half the signal's S/N there, from 3 of nstages + 1 segments
+    const std::vector<float> branching_pattern(7, 3.0F);
+    const auto nstages          = branching_pattern.size();
+    constexpr SizeType kNtrials = 1024;
+    constexpr float kSnrFinal   = 40.0F;
+    const float snr_stage1 =
+        kSnrFinal * std::sqrt(3.0F / static_cast<float>(nstages + 1));
+    std::vector<float> thresholds(nstages,
+                                  std::numeric_limits<float>::lowest());
+    thresholds[1]     = snr_stage1 / 2.0F;
+    const auto states = detection::evaluate_scheme(
+        thresholds, branching_pattern, /*ref_ducy=*/0.1F, /*nbins=*/32,
+        kNtrials, kSnrFinal);
+    REQUIRE(states[1].success_h0 == 1.0F / static_cast<float>(kNtrials));
+    REQUIRE(states[1].success_h1 == 1.0F);
+    // Later stages keep every trial, so the floored noise branches on
+    for (SizeType i = 2; i < nstages; ++i) {
+        CAPTURE(i);
+        REQUIRE_FALSE(states[i].is_empty);
+        REQUIRE(states[i].complexity ==
+                states[i - 1].complexity * branching_pattern[i]);
+        REQUIRE(states[i].success_h1_cumul == 1.0F);
+    }
+}
 } // namespace loki
