@@ -262,6 +262,28 @@ public:
         generate_impl(out.data(), out.size(), mean, stddev);
     }
 
+    /// Fills `out` from `rng` using the shared normal lookup table.
+    /// Does not touch the thread-local generator, so each caller can own a
+    /// stream. Same interpolation as `generate`.
+    static void generate_with(PCG32& rng,
+                              std::span<float> out,
+                              float mean,
+                              float stddev) noexcept {
+        std::call_once(s_lut_init_flag, &ThreadLocalNormalRNG::init_lut);
+        const auto max_idx = static_cast<float>(s_lut.size() - 2);
+        const float* __restrict__ lut_ptr = s_lut.data();
+        float* __restrict__ out_ptr       = out.data();
+        for (SizeType i = 0; i < out.size(); ++i) {
+            const float u_scaled =
+                static_cast<float>(rng()) * kInvU32 * max_idx;
+            const auto idx   = static_cast<SizeType>(u_scaled);
+            const float frac = u_scaled - static_cast<float>(idx);
+            const float z =
+                std::fma(frac, lut_ptr[idx + 1] - lut_ptr[idx], lut_ptr[idx]);
+            out_ptr[i] = std::fma(z, stddev, mean);
+        }
+    }
+
     // Generate a random index in [0, max_value]
     [[nodiscard]] SizeType uniform_index(SizeType max_value) const noexcept {
         auto& rng = get_thread_rng(m_base_seed);

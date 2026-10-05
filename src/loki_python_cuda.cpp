@@ -1,6 +1,9 @@
 #include "loki_templates_cuda.cuh"
 #include "pybind_utils.hpp"
 
+#include <cstddef>
+#include <cstring>
+
 #include <pybind11/iostream.h>
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
@@ -93,13 +96,13 @@ PYBIND11_MODULE(libculoki, m) { // NOLINT
                          SizeType nthresholds, float ducy_max, float wtsp,
                          float beam_width, SizeType trials_start,
                          std::string_view mode, SizeType batch_size,
-                         int device_id) {
+                         int device_id, std::optional<uint64_t> seed) {
                  return std::make_unique<DynamicThresholdSchemeCUDA>(
                      std::span<const float>(branching_pattern.data(),
                                             branching_pattern.size()),
                      ref_ducy, nbins, ntrials, nprobs, prob_min, snr_final,
                      nthresholds, ducy_max, wtsp, beam_width, trials_start,
-                     mode, batch_size, device_id);
+                     mode, batch_size, device_id, seed);
              }),
              py::arg("branching_pattern"), py::arg("ref_ducy"),
              py::arg("nbins") = 64, py::arg("ntrials") = 1024,
@@ -108,14 +111,103 @@ PYBIND11_MODULE(libculoki, m) { // NOLINT
              py::arg("ducy_max") = 0.3F, py::arg("wtsp") = 1.0F,
              py::arg("beam_width") = 0.7F, py::arg("trials_start") = 1,
              py::arg("mode") = "legacy", py::arg("batch_size") = 256,
-             py::arg("device_id") = 0)
+             py::arg("device_id") = 0, py::arg("seed") = py::none())
         .def("run", &DynamicThresholdSchemeCUDA::run,
-             py::arg("thres_neigh") = 10)
+             py::arg("thres_neigh") = 10,
+             "Operational search. Deterministic per (seed, mode, batch_size, "
+             "toolchain). The path from get_best_path_thresholds is used "
+             "immediately. In-run cost and success_h1_cumul are optimistic.")
         .def("save", &DynamicThresholdSchemeCUDA::save,
              py::arg("outdir") = "./")
         .def("get_best_path_thresholds",
              &DynamicThresholdSchemeCUDA::get_best_path_thresholds,
-             py::arg("min_pd") = 0.1);
+             py::arg("min_pd") = 0.1,
+             "Thresholds the live search should use. Not a re-scored path.")
+        .def("evaluate",
+             [](const DynamicThresholdSchemeCUDA& self,
+                const py::array_t<float>& thresholds, SizeType ntrials,
+                std::optional<uint64_t> seed) {
+                 const auto states = self.evaluate(
+                     std::span<const float>(thresholds.data(),
+                                            static_cast<size_t>(thresholds.size())),
+                     ntrials, seed);
+                 using detection::State;
+                 py::list names;
+                 py::list formats;
+                 py::list offsets;
+                 const auto add = [&](const char* name, const char* fmt,
+                                      std::size_t offset) {
+                     names.append(name);
+                     formats.append(fmt);
+                     offsets.append(offset);
+                 };
+                 add("success_h0", "f4", offsetof(State, success_h0));
+                 add("success_h1", "f4", offsetof(State, success_h1));
+                 add("complexity", "f4", offsetof(State, complexity));
+                 add("complexity_cumul", "f4", offsetof(State, complexity_cumul));
+                 add("success_h1_cumul", "f4", offsetof(State, success_h1_cumul));
+                 add("nbranches", "f4", offsetof(State, nbranches));
+                 add("threshold", "f4", offsetof(State, threshold));
+                 add("cost", "f4", offsetof(State, cost));
+                 add("threshold_prev", "f4", offsetof(State, threshold_prev));
+                 add("success_h1_cumul_prev", "f4",
+                     offsetof(State, success_h1_cumul_prev));
+                 add("is_empty", "?", offsetof(State, is_empty));
+                 py::array out(py::dtype(names, formats, offsets, sizeof(State)),
+                               std::vector<py::ssize_t>{
+                                   static_cast<py::ssize_t>(states.size())});
+                 if (!states.empty()) {
+                     std::memcpy(out.mutable_data(), states.data(),
+                                 states.size() * sizeof(State));
+                 }
+                 return out;
+             },
+             py::arg("thresholds"), py::arg("ntrials"),
+             py::arg("seed") = py::none(),
+             "Reporting only. Does not change the grid from run() and is not "
+             "part of the on-the-fly pipeline. Pass a seed different from run().")
+        .def_property_readonly("thresholds",
+                               [](const DynamicThresholdSchemeCUDA& self) {
+                                   return as_pyarray(self.get_thresholds());
+                               })
+        .def_property_readonly("probs",
+                               [](const DynamicThresholdSchemeCUDA& self) {
+                                   return as_pyarray(self.get_probs());
+                               })
+        .def("get_states", [](const DynamicThresholdSchemeCUDA& self) {
+            // Same structured layout as libloki's State dtype, built here
+            // explicitly: registering State with PYBIND11_NUMPY_DTYPE in both
+            // extension modules would clash in the shared numpy internals.
+            using detection::State;
+            py::list names;
+            py::list formats;
+            py::list offsets;
+            const auto add = [&](const char* name, const char* fmt,
+                                 std::size_t offset) {
+                names.append(name);
+                formats.append(fmt);
+                offsets.append(offset);
+            };
+            add("success_h0", "f4", offsetof(State, success_h0));
+            add("success_h1", "f4", offsetof(State, success_h1));
+            add("complexity", "f4", offsetof(State, complexity));
+            add("complexity_cumul", "f4", offsetof(State, complexity_cumul));
+            add("success_h1_cumul", "f4", offsetof(State, success_h1_cumul));
+            add("nbranches", "f4", offsetof(State, nbranches));
+            add("threshold", "f4", offsetof(State, threshold));
+            add("cost", "f4", offsetof(State, cost));
+            add("threshold_prev", "f4", offsetof(State, threshold_prev));
+            add("success_h1_cumul_prev", "f4",
+                offsetof(State, success_h1_cumul_prev));
+            add("is_empty", "?", offsetof(State, is_empty));
+            const auto states = self.get_states();
+            py::array out(py::dtype(names, formats, offsets, sizeof(State)),
+                          std::vector<py::ssize_t>{
+                              static_cast<py::ssize_t>(states.size())});
+            std::memcpy(out.mutable_data(), states.data(),
+                        states.size() * sizeof(State));
+            return out;
+        });
 
     auto m_fold = m.def_submodule("fold", "Fold submodule");
     m_fold.def(

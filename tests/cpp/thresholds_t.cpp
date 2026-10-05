@@ -1,3 +1,6 @@
+#include <bit>
+#include <cstdint>
+
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 
@@ -47,4 +50,43 @@ TEST_CASE("DynamicThresholdScheme runs back to back with different nbins",
                 branching_pattern.size());
     }
 }
+
+namespace {
+
+bool same_state_bits(const detection::State& a, const detection::State& b) {
+    const auto f = [](float x) { return std::bit_cast<uint32_t>(x); };
+    return f(a.success_h0) == f(b.success_h0) &&
+           f(a.success_h1) == f(b.success_h1) &&
+           f(a.complexity) == f(b.complexity) &&
+           f(a.complexity_cumul) == f(b.complexity_cumul) &&
+           f(a.success_h1_cumul) == f(b.success_h1_cumul) &&
+           f(a.cost) == f(b.cost) && f(a.threshold) == f(b.threshold) &&
+           a.is_empty == b.is_empty;
+}
+
+} // namespace
+
+TEST_CASE("DynamicThresholdScheme evaluate does not depend on thread count",
+          "[thresholds]") {
+    const std::vector<float> branching(8, 2.0F);
+    auto make = [&](int nthreads) {
+        return detection::DynamicThresholdScheme(
+            branching, 0.1F, 32, 64, 6, 0.05F, 8.0F, 24, 0.3F, 1.0F, 1.2F, 1,
+            "improved", nthreads, 17);
+    };
+    auto one   = make(1);
+    auto eight = make(8);
+    one.run(4);
+    const auto path = one.get_best_path_thresholds();
+    REQUIRE(path.size() == branching.size());
+    const auto eval_a = one.evaluate(path, 256, 3);
+    const auto eval_b = eight.evaluate(path, 256, 3);
+    REQUIRE(eval_a.size() == eval_b.size());
+    for (SizeType i = 0; i < eval_a.size(); ++i) {
+        REQUIRE(same_state_bits(eval_a[i], eval_b[i]));
+    }
+    REQUIRE_FALSE(eval_a.front().is_empty);
+    REQUIRE_FALSE(eval_a.back().is_empty);
+}
+
 } // namespace loki

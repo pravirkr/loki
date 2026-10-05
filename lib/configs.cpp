@@ -844,9 +844,9 @@ private:
 
         // Time-domain and lossy-Fourier folds use the run-length kernel. Its
         // cost per frequency is ~nbins * ceil(B / P), so a segment of one to
-        // two periods at f_max costs about one merge level and keeps the tree
-        // as shallow as riptide's downsampling. Take the largest power of two
-        // inside that cap. The 16*nbins guard below is only for the direct DFT.
+        // two periods at f_max costs about one merge level. Take the largest
+        // power of two inside that cap. The 16*nbins guard below is only for
+        // the direct DFT.
         if (!direct_dft) {
             const double cap_samples = 2.0 / (m_tsamp * m_f_max);
             std::optional<SizeType> largest_under_cap;
