@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <cstdint>
 #include <exception>
 #include <filesystem>
 #include <format>
@@ -11,6 +12,8 @@
 #include <random>
 #include <span>
 #include <stdexcept>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 #include <highfive/highfive.hpp>
@@ -850,6 +853,38 @@ gen_next_using_surv_prob(const State& state_cur,
             FoldsType{std::move(folds_h0_sim), std::move(folds_h1_pruned)}};
 }
 
+uint64_t mix64(uint64_t x) noexcept {
+    x += 0x9e3779b97f4a7c15ULL;
+    x = (x ^ (x >> 30U)) * 0xbf58476d1ce4e5b9ULL;
+    x = (x ^ (x >> 27U)) * 0x94d049bb133111ebULL;
+    return x ^ (x >> 31U);
+}
+
+math::PCG32 make_pcg(uint64_t seed,
+                     uint32_t purpose,
+                     uint32_t stage,
+                     uint32_t parent,
+                     uint32_t branch,
+                     uint32_t trial) {
+    uint64_t mixed = mix64(seed ^ (static_cast<uint64_t>(purpose) << 48U));
+    mixed          = mix64(mixed ^ (static_cast<uint64_t>(stage) << 32U));
+    mixed          = mix64(mixed ^ parent);
+    mixed = mix64(mixed ^ ((static_cast<uint64_t>(branch) << 40U) ^ trial));
+    return math::PCG32(mixed, mix64(mixed ^ 0xda3e39cb94b95bdbULL));
+}
+
+float unit_interval(math::PCG32& rng) noexcept {
+    return static_cast<float>(rng() >> 8U) * (1.0F / 16777216.0F);
+}
+
+void fill_standard_normals(math::PCG32& rng,
+                           float* dst,
+                           SizeType n,
+                           float stddev) {
+    math::ThreadLocalNormalRNG::generate_with(rng, std::span<float>(dst, n),
+                                              0.0F, stddev);
+}
+
 // Create a compound type for State
 HighFive::CompoundType create_compound_state() {
     return {
@@ -885,7 +920,8 @@ public:
          float beam_width,
          SizeType trials_start,
          std::string_view mode,
-         int nthreads)
+         int nthreads,
+         std::optional<uint64_t> seed)
         : m_branching_pattern(branching_pattern.begin(),
                               branching_pattern.end()),
           m_ref_ducy(ref_ducy),
@@ -915,27 +951,30 @@ public:
         m_guess_path = detail::guess_scheme(
             m_nstages, snr_final, m_branching_pattern, m_trials_start);
 
-        m_rng = std::make_unique<math::ThreadLocalNormalRNG>(
-            std::random_device{}());
+        m_seed = seed.value_or(std::random_device{}());
+        m_rng  = std::make_unique<math::ThreadLocalNormalRNG>(m_seed);
 
-        const auto [fold_slots_per_pool, score_slots_per_pool] =
-            compute_max_allocations_needed();
-        m_manager = std::make_unique<DualPoolFoldManager>(
-            m_nbins, m_ntrials, fold_slots_per_pool, score_slots_per_pool);
-        const auto pool_memory_size = m_manager->get_memory_size();
-        const auto pool_memory_size_gb =
-            static_cast<float>(pool_memory_size) / 1024.0F / 1024.0F / 1024.0F;
-        spdlog::info("Pre-allocated 2 fold pools of {} slots and 2 score pools "
-                     "of {} slots ({:.2f} GB)",
-                     fold_slots_per_pool, score_slots_per_pool,
-                     pool_memory_size_gb);
-        m_folds_current.resize(m_nthresholds * m_nprobs);
-        m_folds_next.resize(m_nthresholds * m_nprobs);
         m_states.resize(m_nstages * m_nthresholds * m_nprobs, State{});
-        if (m_mode == DynamicThresholdMode::kImproved) {
-            init_states_improved();
-        } else {
-            init_states_legacy();
+        {
+            const auto [fold_slots_per_pool, score_slots_per_pool] =
+                compute_max_allocations_needed();
+            m_manager = std::make_unique<DualPoolFoldManager>(
+                m_nbins, m_ntrials, fold_slots_per_pool, score_slots_per_pool);
+            const auto pool_memory_size = m_manager->get_memory_size();
+            const auto pool_memory_size_gb =
+                static_cast<float>(pool_memory_size) / 1024.0F / 1024.0F /
+                1024.0F;
+            spdlog::info(
+                "Pre-allocated 2 fold pools of {} slots and 2 score pools "
+                "of {} slots ({:.2f} GB)",
+                fold_slots_per_pool, score_slots_per_pool, pool_memory_size_gb);
+            m_folds_current.resize(m_nthresholds * m_nprobs);
+            m_folds_next.resize(m_nthresholds * m_nprobs);
+            if (m_mode == DynamicThresholdMode::kImproved) {
+                init_states_improved();
+            } else {
+                init_states_legacy();
+            }
         }
     }
     ~Impl()                          = default;
@@ -981,14 +1020,18 @@ public:
         for (SizeType istage = 1; istage < m_nstages; ++istage) {
             if (m_mode == DynamicThresholdMode::kImproved) {
                 run_segment_improved(istage, thres_neigh);
+                m_manager->swap_pools();
+                std::swap(m_folds_current, m_folds_next);
+                for (auto& fold_opt : m_folds_next) {
+                    fold_opt.invalidate();
+                }
             } else {
                 run_segment_legacy(istage, thres_neigh);
-            }
-            m_manager->swap_pools();
-            std::swap(m_folds_current, m_folds_next);
-            // Release memory slots
-            for (auto& fold_opt : m_folds_next) {
-                fold_opt.invalidate();
+                m_manager->swap_pools();
+                std::swap(m_folds_current, m_folds_next);
+                for (auto& fold_opt : m_folds_next) {
+                    fold_opt.invalidate();
+                }
             }
             bar.set_progress(istage);
         }
@@ -1002,10 +1045,11 @@ public:
     // Save
     std::string save(const std::string& outdir = "./") const {
         const std::filesystem::path filebase = std::format(
-            "dynscheme_nstages_{:03d}_nthresh_{:03d}_nprobs_{:03d}_"
+            "dynscheme_{}_nstages_{:03d}_nthresh_{:03d}_nprobs_{:03d}_"
             "ntrials_{:04d}_snr_{:04.1f}_ducy_{:04.2f}_beam_{:03.1f}.h5",
-            m_nstages, m_nthresholds, m_nprobs, m_ntrials, m_thresholds.back(),
-            m_ref_ducy, m_beam_width);
+            mode_to_string(m_mode), m_nstages, m_nthresholds, m_nprobs,
+            m_ntrials, m_thresholds.back(), m_ref_ducy, m_beam_width);
+        std::filesystem::create_directories(outdir);
         const std::filesystem::path filepath =
             std::filesystem::path(outdir) / filebase;
         HighFive::File file(filepath, HighFive::File::Overwrite);
@@ -1017,6 +1061,8 @@ public:
         file.createAttribute("wtsp", m_wtsp);
         file.createAttribute("beam_width", m_beam_width);
         file.createAttribute("mode", mode_to_string(m_mode));
+        file.createAttribute("seed", m_seed);
+        file.createAttribute("nthreads", m_nthreads);
 
         // Create dataset creation property list and enable compression
         HighFive::DataSetCreateProps props;
@@ -1042,6 +1088,126 @@ public:
         return filepath.string();
     }
 
+    std::vector<State> evaluate(std::span<const float> thresholds,
+                                SizeType ntrials,
+                                std::optional<uint64_t> seed) const {
+        if (thresholds.size() != m_nstages) {
+            throw std::invalid_argument(
+                "DynamicThresholdScheme::evaluate: need one threshold per "
+                "stage");
+        }
+        if (ntrials == 0 || ntrials > (SizeType{1} << 20U)) {
+            throw std::invalid_argument(
+                "DynamicThresholdScheme::evaluate: ntrials must be in "
+                "[1, 2^20]");
+        }
+        const uint64_t eval_seed = seed.value_or(std::random_device{}());
+        const auto ntrials_u     = static_cast<uint32_t>(ntrials);
+        const SizeType nbins     = m_nbins;
+        std::vector<float> folds(2 * ntrials * nbins, 0.0F);
+        std::vector<float> generated(2 * ntrials * nbins, 0.0F);
+        std::vector<float> noise(2 * ntrials * nbins, 0.0F);
+        std::vector<float> scores(2 * ntrials, 0.0F);
+        std::array<uint32_t, 2> n_in = {ntrials_u, ntrials_u};
+
+        for (uint32_t branch = 0; branch < 2; ++branch) {
+            for (uint32_t trial = 0; trial < ntrials_u; ++trial) {
+                auto rng = make_pcg(eval_seed, 0U, 0U, 0U, branch, trial);
+                float* dst =
+                    folds.data() + (((branch * ntrials) + trial) * nbins);
+                fill_standard_normals(rng, dst, nbins, 1.0F);
+                if (branch == 1) {
+                    for (SizeType j = 0; j < nbins; ++j) {
+                        dst[j] += m_profile[j] * m_bias_snr;
+                    }
+                }
+            }
+        }
+
+        std::vector<State> states(m_nstages);
+        State prev   = State::initial();
+        float var_in = 1.0F;
+        for (SizeType istage = 0; istage < m_nstages; ++istage) {
+            for (uint32_t branch = 0; branch < 2; ++branch) {
+                for (uint32_t trial = 0; trial < ntrials_u; ++trial) {
+                    auto rng =
+                        make_pcg(eval_seed, 2U, static_cast<uint32_t>(istage),
+                                 0U, branch, trial);
+                    fill_standard_normals(
+                        rng,
+                        noise.data() + (((branch * ntrials) + trial) * nbins),
+                        nbins, 1.0F);
+                }
+            }
+            for (uint32_t branch = 0; branch < 2; ++branch) {
+                const uint32_t nsurv = n_in[branch];
+                const float scale    = (branch == 1) ? m_bias_snr : 0.0F;
+                for (uint32_t trial = 0; trial < ntrials_u; ++trial) {
+                    uint32_t src = trial;
+                    if (trial >= nsurv) {
+                        auto boot = make_pcg(eval_seed, 3U,
+                                             static_cast<uint32_t>(istage), 0U,
+                                             branch, trial);
+                        const float draw = unit_interval(boot);
+                        src = std::min(static_cast<uint32_t>(
+                                           draw * static_cast<float>(nsurv)),
+                                       nsurv - 1U);
+                    }
+                    const float* in =
+                        folds.data() + (((branch * ntrials) + src) * nbins);
+                    const float* nz =
+                        noise.data() + (((branch * ntrials) + trial) * nbins);
+                    float* out = generated.data() +
+                                 (((branch * ntrials) + trial) * nbins);
+                    for (SizeType j = 0; j < nbins; ++j) {
+                        out[j] = in[j] + nz[j] + (scale * m_profile[j]);
+                    }
+                }
+            }
+            const float stdnoise = std::sqrt(var_in + 1.0F);
+            for (uint32_t branch = 0; branch < 2; ++branch) {
+                detection::snr_boxcar_2d_max(
+                    std::span<const float>(generated.data() +
+                                               (branch * ntrials * nbins),
+                                           ntrials * nbins),
+                    m_box_score_widths,
+                    std::span<float>(scores.data() + (branch * ntrials),
+                                     ntrials),
+                    ntrials, nbins, stdnoise, 1);
+            }
+            std::array<uint32_t, 2> counts = {0, 0};
+            for (uint32_t branch = 0; branch < 2; ++branch) {
+                const float* branch_scores = scores.data() + (branch * ntrials);
+                uint32_t n                 = 0;
+                for (uint32_t trial = 0; trial < ntrials_u; ++trial) {
+                    if (branch_scores[trial] > thresholds[istage]) {
+                        const float* src =
+                            generated.data() +
+                            (((branch * ntrials) + trial) * nbins);
+                        float* dst =
+                            folds.data() + (((branch * ntrials) + n) * nbins);
+                        std::copy_n(src, nbins, dst);
+                        ++n;
+                    }
+                }
+                counts[branch] = n;
+                n_in[branch]   = n;
+            }
+            const auto ntrials_f = static_cast<float>(ntrials);
+            State next           = prev.gen_next(
+                thresholds[istage], static_cast<float>(counts[0]) / ntrials_f,
+                static_cast<float>(counts[1]) / ntrials_f,
+                m_branching_pattern[istage]);
+            states[istage] = next;
+            prev           = next;
+            var_in += 1.0F;
+            if (counts[0] == 0 || counts[1] == 0) {
+                break;
+            }
+        }
+        return states;
+    }
+
 private:
     std::vector<float> m_branching_pattern;
     float m_ref_ducy;
@@ -1052,6 +1218,7 @@ private:
     SizeType m_trials_start;
     DynamicThresholdMode m_mode;
     int m_nthreads;
+    uint64_t m_seed{0};
 
     std::vector<float> m_profile;
     std::vector<float> m_thresholds;
@@ -1145,7 +1312,7 @@ private:
 
             const auto iprob = utils::find_lower_bin_index(
                 m_probs, cur_state.success_h1_cumul);
-            if (iprob < 0 || iprob >= static_cast<IndexType>(m_nprobs)) {
+            if (iprob < 0 || std::cmp_greater_equal(iprob ,m_nprobs)) {
                 continue;
             }
             const auto fold_idx       = (ithres * m_nprobs) + iprob;
@@ -1172,7 +1339,7 @@ private:
 
             const auto iprob = utils::find_lower_bin_index(
                 m_probs, cur_state.success_h1_cumul);
-            if (iprob < 0 || iprob >= static_cast<IndexType>(m_nprobs)) {
+            if (iprob < 0 || std::cmp_greater_equal(iprob ,m_nprobs)) {
                 continue;
             }
             const auto fold_idx       = (ithres * m_nprobs) + iprob;
@@ -1253,7 +1420,7 @@ private:
                         const auto iprob = utils::find_lower_bin_index(
                             m_probs, cur_state.success_h1_cumul);
                         if (iprob < 0 ||
-                            iprob >= static_cast<IndexType>(m_nprobs)) {
+                            std::cmp_greater_equal(iprob ,m_nprobs)) {
                             continue;
                         }
 
@@ -1384,6 +1551,7 @@ private:
         }
         m_timer_stats.merge(segment_stats);
     }
+
 }; // End DynamicThresholdScheme::Impl definition
 
 DynamicThresholdScheme::DynamicThresholdScheme(
@@ -1400,7 +1568,8 @@ DynamicThresholdScheme::DynamicThresholdScheme(
     float beam_width,
     SizeType trials_start,
     std::string_view mode,
-    int nthreads)
+    int nthreads,
+    std::optional<uint64_t> seed)
     : m_impl(std::make_unique<Impl>(branching_pattern,
                                     ref_ducy,
                                     nbins,
@@ -1414,7 +1583,8 @@ DynamicThresholdScheme::DynamicThresholdScheme(
                                     beam_width,
                                     trials_start,
                                     mode,
-                                    nthreads)) {}
+                                    nthreads,
+                                    seed)) {}
 DynamicThresholdScheme::~DynamicThresholdScheme() = default;
 DynamicThresholdScheme::DynamicThresholdScheme(
     DynamicThresholdScheme&&) noexcept = default;
@@ -1456,6 +1626,12 @@ DynamicThresholdScheme::get_best_path_thresholds(float min_pd) const {
 
 void DynamicThresholdScheme::run(SizeType thres_neigh) {
     m_impl->run(thres_neigh);
+}
+std::vector<State>
+DynamicThresholdScheme::evaluate(std::span<const float> thresholds,
+                                 SizeType ntrials,
+                                 std::optional<uint64_t> seed) const {
+    return m_impl->evaluate(thresholds, ntrials, seed);
 }
 std::string DynamicThresholdScheme::save(const std::string& outdir) const {
     return m_impl->save(outdir);

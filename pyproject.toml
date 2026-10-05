@@ -120,6 +120,7 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "notebooks/**/*.ipynb" = ["T201"]
+"bench/**/*.py" = ["INP001", "T201"]
 
 [tool.ruff.lint.mccabe]
 max-complexity = 20
@@ -154,6 +155,9 @@ not-iterable = "ignore"        # For Numba prange
 minversion = "9.0"
 addopts = ["-ra", "-q"]
 testpaths = ["tests/python"]
+markers = [
+  "slow: long or GPU-heavy checks; run with pytest -m slow",
+]
 
 [tool.coverage.run]
 omit = ["tests/*", "*__init__.py", "docs/*"]

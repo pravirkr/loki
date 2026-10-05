@@ -371,6 +371,12 @@ poetry.toml
 
 # claude
 CLAUDE.md
+.claude/
+tmp_files/
+
+# DynamicThresholdScheme script outputs (regenerate locally)
+bench/scripts/golden/
+bench/scripts/results/
 
 # LSP config files
 pyrightconfig.json
