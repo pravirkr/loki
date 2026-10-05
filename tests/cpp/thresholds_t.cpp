@@ -1,9 +1,9 @@
 #include <algorithm>
+#include <bit>
 #include <cmath>
+#include <cstdint>
 #include <limits>
 #include <random>
-#include <bit>
-#include <cstdint>
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
@@ -207,6 +207,7 @@ TEST_CASE("evaluate_scheme keeps a noise trial when none passes",
         REQUIRE(states[i].success_h1_cumul == 1.0F);
     }
 }
+
 namespace {
 
 bool same_state_bits(const detection::State& a, const detection::State& b) {
