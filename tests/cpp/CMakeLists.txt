@@ -26,6 +26,13 @@ if(LOKI_TEST_SOURCES STREQUAL "")
 endif()
 
 add_executable(${LOKI_TEST_TARGET} ${LOKI_TEST_SOURCES})
+# fft_t.cpp uses Thrust device vectors. nvcc must compile that translation
+# unit; a host-only compile fails to build loki_tests when CUDA is on.
+if(CMAKE_CUDA_COMPILER)
+  set_source_files_properties(
+    ${CMAKE_CURRENT_SOURCE_DIR}/fft_t.cpp PROPERTIES LANGUAGE CUDA
+  )
+endif()
 
 target_include_directories(
   ${LOKI_TEST_TARGET} PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/lib
