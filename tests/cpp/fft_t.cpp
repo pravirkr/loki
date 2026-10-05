@@ -490,7 +490,7 @@ TEST_CASE("CUFFTManager leftover chunk and plan reuse", "[fft][CUFFTManager]") {
     REQUIRE(gpu.n_cached_plans() == 4);
 }
 
-TEST_CASE("CUFFTManager C2R overwrites complex input", "[fft][CUFFTManager]") {
+TEST_CASE("CUFFTManager C2R keeps complex input", "[fft][CUFFTManager]") {
     if (!cuda_device_available()) {
         SKIP("No CUDA device");
     }
@@ -526,7 +526,8 @@ TEST_CASE("CUFFTManager C2R overwrites complex input", "[fft][CUFFTManager]") {
             break;
         }
     }
-    REQUIRE(overwritten);
+    // Out-of-place C2R writes the real buffer and leaves the spectrum alone.
+    REQUIRE_FALSE(overwritten);
 }
 
 TEST_CASE("CUFFTManager empty batch is a no-op", "[fft][CUFFTManager]") {

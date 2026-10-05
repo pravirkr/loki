@@ -175,13 +175,14 @@ PYBIND11_MODULE(libloki, m) {
                          SizeType nprobs, float prob_min, float snr_final,
                          SizeType nthresholds, float ducy_max, float wtsp,
                          float beam_width, SizeType trials_start,
-                         std::string_view mode, int nthreads) {
+                         std::string_view mode, int nthreads,
+                         std::optional<uint64_t> seed) {
                  return std::make_unique<DynamicThresholdScheme>(
                      std::span<const float>(branching_pattern.data(),
                                             branching_pattern.size()),
                      ref_ducy, nbins, ntrials, nprobs, prob_min, snr_final,
                      nthresholds, ducy_max, wtsp, beam_width, trials_start,
-                     mode, nthreads);
+                     mode, nthreads, seed);
              }),
              py::arg("branching_pattern"), py::arg("ref_ducy"),
              py::arg("nbins") = 64, py::arg("ntrials") = 1024,
@@ -189,8 +190,12 @@ PYBIND11_MODULE(libloki, m) {
              py::arg("snr_final") = 8.0F, py::arg("nthresholds") = 100,
              py::arg("ducy_max") = 0.3F, py::arg("wtsp") = 1.0F,
              py::arg("beam_width") = 0.7F, py::arg("trials_start") = 1,
-             py::arg("mode") = "legacy", py::arg("nthreads") = 1)
-        .def("run", &DynamicThresholdScheme::run, py::arg("thres_neigh") = 10)
+             py::arg("mode") = "legacy", py::arg("nthreads") = 1,
+             py::arg("seed") = py::none())
+        .def("run", &DynamicThresholdScheme::run, py::arg("thres_neigh") = 10,
+             "Operational search. The path from get_best_path_thresholds is "
+             "used immediately. In-run cost and success_h1_cumul are "
+             "optimistic Monte Carlo estimates.")
         .def("save", &DynamicThresholdScheme::save, py::arg("outdir") = "./")
         .def_property_readonly("nstages", &DynamicThresholdScheme::get_nstages)
         .def_property_readonly("nthresholds",
@@ -219,7 +224,19 @@ PYBIND11_MODULE(libloki, m) {
              })
         .def("get_best_path_thresholds",
              &DynamicThresholdScheme::get_best_path_thresholds,
-             py::arg("min_pd") = 0.1);
+             py::arg("min_pd") = 0.1,
+             "Thresholds the live search should use. Not a re-scored path.")
+        .def("evaluate",
+             [](const DynamicThresholdScheme& self,
+                const PyArrayT<float>& thresholds, SizeType ntrials,
+                std::optional<uint64_t> seed) {
+                 return as_pyarray(self.evaluate(
+                     to_span<const float>(thresholds), ntrials, seed));
+             },
+             py::arg("thresholds"), py::arg("ntrials"),
+             py::arg("seed") = py::none(),
+             "Reporting only. Does not change the path and is not part of "
+             "the on-the-fly pipeline. Pass a seed different from run().");
     m_thresholds.def(
         "evaluate_scheme",
         [](const PyArrayT<float>& thresholds,
