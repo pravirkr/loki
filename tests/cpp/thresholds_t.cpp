@@ -1,10 +1,15 @@
+#include <algorithm>
 #include <bit>
+#include <cmath>
 #include <cstdint>
+#include <limits>
+#include <random>
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include "loki/detection/score.hpp"
 #include "loki/detection/thresholds.hpp"
 
 using Catch::Matchers::WithinRel;
@@ -120,6 +125,89 @@ TEST_CASE("evaluate_scheme and determine_scheme start from the initial state",
         REQUIRE(states[2].is_empty);
     }
 }
+
+TEST_CASE("snr_boxcar_max_with_cache matches the boxcar S/N", "[thresholds]") {
+    constexpr SizeType kNbins     = 32;
+    constexpr SizeType kNprofiles = 64;
+    const auto widths             = detection::generate_box_width_trials(
+        kNbins, /*ducy_max=*/0.3, /*wtsp=*/1.0);
+    detection::BoxcarWidthsCache cache(widths, kNbins);
+    // Same arithmetic as snr_boxcar_1d, up to rounding in the prefix sums
+    const float tol =
+        static_cast<float>(kNbins) * std::numeric_limits<float>::epsilon();
+    std::mt19937 rng(42);
+    std::normal_distribution<float> normal;
+    std::vector<float> profile(kNbins);
+    std::vector<float> snr(widths.size());
+    for (SizeType i = 0; i < kNprofiles; ++i) {
+        std::ranges::generate(profile, [&] { return normal(rng); });
+        detection::snr_boxcar_1d(profile, widths, snr);
+        const float snr_max =
+            detection::snr_boxcar_max_with_cache(profile, kNbins, cache);
+        REQUIRE_THAT(snr_max, WithinRel(std::ranges::max(snr), tol));
+        // The threshold test passes just below the maximum, not at it
+        REQUIRE_FALSE(detection::snr_boxcar_threshold_with_cache(
+            profile, kNbins, cache, snr_max));
+        REQUIRE(detection::snr_boxcar_threshold_with_cache(
+            profile, kNbins, cache,
+            std::nextafter(snr_max, std::numeric_limits<float>::lowest())));
+    }
+}
+
+TEST_CASE("DynamicThresholdScheme keeps a noise trial when none passes",
+          "[thresholds]") {
+    // Stage 0's beam is far above the noise and well below the signal
+    const std::vector<float> branching_pattern(7, 3.0F);
+    constexpr SizeType kNtrials = 1024;
+    constexpr float kSnrFinal   = 16.0F;
+    const auto* mode            = GENERATE("legacy", "improved");
+    CAPTURE(mode);
+    detection::DynamicThresholdScheme dyn_scheme(
+        branching_pattern, /*ref_ducy=*/0.1F, /*nbins=*/32, kNtrials,
+        /*nprobs=*/10, /*prob_min=*/0.05F, kSnrFinal, /*nthresholds=*/100,
+        /*ducy_max=*/0.3F, /*wtsp=*/1.0F, /*beam_width=*/0.7F,
+        /*trials_start=*/1, mode, /*nthreads=*/4);
+    dyn_scheme.run();
+    REQUIRE(dyn_scheme.get_best_path_thresholds().size() ==
+            branching_pattern.size());
+    // Noise survival is floored at one trial, and stage 0 needs the floor
+    float success_h0_min = 1.0F;
+    for (const auto& state : dyn_scheme.get_states()) {
+        if (!state.is_empty) {
+            success_h0_min = std::min(success_h0_min, state.success_h0);
+        }
+    }
+    REQUIRE(success_h0_min == 1.0F / static_cast<float>(kNtrials));
+}
+
+TEST_CASE("evaluate_scheme keeps a noise trial when none passes",
+          "[thresholds]") {
+    // Stage 1 prunes every noise trial and keeps every signal trial: its
+    // threshold is half the signal's S/N there, from 3 of nstages + 1 segments
+    const std::vector<float> branching_pattern(7, 3.0F);
+    const auto nstages          = branching_pattern.size();
+    constexpr SizeType kNtrials = 1024;
+    constexpr float kSnrFinal   = 40.0F;
+    const float snr_stage1 =
+        kSnrFinal * std::sqrt(3.0F / static_cast<float>(nstages + 1));
+    std::vector<float> thresholds(nstages,
+                                  std::numeric_limits<float>::lowest());
+    thresholds[1]     = snr_stage1 / 2.0F;
+    const auto states = detection::evaluate_scheme(
+        thresholds, branching_pattern, /*ref_ducy=*/0.1F, /*nbins=*/32,
+        kNtrials, kSnrFinal);
+    REQUIRE(states[1].success_h0 == 1.0F / static_cast<float>(kNtrials));
+    REQUIRE(states[1].success_h1 == 1.0F);
+    // Later stages keep every trial, so the floored noise branches on
+    for (SizeType i = 2; i < nstages; ++i) {
+        CAPTURE(i);
+        REQUIRE_FALSE(states[i].is_empty);
+        REQUIRE(states[i].complexity ==
+                states[i - 1].complexity * branching_pattern[i]);
+        REQUIRE(states[i].success_h1_cumul == 1.0F);
+    }
+}
+
 namespace {
 
 bool same_state_bits(const detection::State& a, const detection::State& b) {
@@ -134,6 +222,36 @@ bool same_state_bits(const detection::State& a, const detection::State& b) {
 }
 
 } // namespace
+
+TEST_CASE("DynamicThresholdScheme::evaluate keeps a noise trial",
+          "[thresholds]") {
+    // As for evaluate_scheme: stage 1 prunes every noise trial and keeps every
+    // signal trial
+    const std::vector<float> branching_pattern(7, 3.0F);
+    const auto nstages          = branching_pattern.size();
+    constexpr SizeType kNtrials = 1024;
+    constexpr float kSnrFinal   = 40.0F;
+    const float snr_stage1 =
+        kSnrFinal * std::sqrt(3.0F / static_cast<float>(nstages + 1));
+    detection::DynamicThresholdScheme dyn_scheme(
+        branching_pattern, /*ref_ducy=*/0.1F, /*nbins=*/32, kNtrials,
+        /*nprobs=*/10, /*prob_min=*/0.05F, kSnrFinal, /*nthresholds=*/100,
+        /*ducy_max=*/0.3F, /*wtsp=*/1.0F, /*beam_width=*/0.7F,
+        /*trials_start=*/1, "improved", /*nthreads=*/1, /*seed=*/17);
+    std::vector<float> thresholds(nstages,
+                                  std::numeric_limits<float>::lowest());
+    thresholds[1]     = snr_stage1 / 2.0F;
+    const auto states = dyn_scheme.evaluate(thresholds, kNtrials, 3);
+    REQUIRE(states[1].success_h0 == 1.0F / static_cast<float>(kNtrials));
+    REQUIRE(states[1].success_h1 == 1.0F);
+    for (SizeType i = 2; i < nstages; ++i) {
+        CAPTURE(i);
+        REQUIRE_FALSE(states[i].is_empty);
+        REQUIRE(states[i].complexity ==
+                states[i - 1].complexity * branching_pattern[i]);
+        REQUIRE(states[i].success_h1_cumul == 1.0F);
+    }
+}
 
 TEST_CASE("DynamicThresholdScheme evaluate does not depend on thread count",
           "[thresholds]") {
