@@ -3,8 +3,11 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include "loki/detection/thresholds.hpp"
+
+using Catch::Matchers::WithinRel;
 
 namespace loki {
 TEST_CASE("DynamicThresholdScheme construction rejects invalid input",
@@ -51,6 +54,72 @@ TEST_CASE("DynamicThresholdScheme runs back to back with different nbins",
     }
 }
 
+TEST_CASE("evaluate_scheme and determine_scheme start from the initial state",
+          "[thresholds]") {
+    const std::vector<float> branching_pattern = {2.0F, 3.0F, 4.0F};
+    const auto nstages                         = branching_pattern.size();
+    const float tol =
+        static_cast<float>(nstages) * std::numeric_limits<float>::epsilon();
+    constexpr float kRefDucy    = 0.1F;
+    constexpr SizeType kNbins   = 32;
+    constexpr SizeType kNtrials = 1024;
+
+    // Cumulative fields follow from the per-stage ones, from State::initial()
+    const auto check_cumulative =
+        [&](const std::vector<detection::State>& states) {
+            REQUIRE(states.size() == nstages);
+            float complexity       = 1.0F;
+            float complexity_cumul = 1.0F;
+            float success_h1_cumul = 1.0F;
+            for (SizeType i = 0; i < nstages; ++i) {
+                CAPTURE(i);
+                REQUIRE_FALSE(states[i].is_empty);
+                complexity_cumul += complexity * branching_pattern[i];
+                complexity *= branching_pattern[i] * states[i].success_h0;
+                success_h1_cumul *= states[i].success_h1;
+                REQUIRE_THAT(states[i].complexity, WithinRel(complexity, tol));
+                REQUIRE_THAT(states[i].complexity_cumul,
+                             WithinRel(complexity_cumul, tol));
+                REQUIRE_THAT(states[i].success_h1_cumul,
+                             WithinRel(success_h1_cumul, tol));
+            }
+        };
+
+    SECTION("evaluate_scheme, every trial survives") {
+        const std::vector<float> thresholds(
+            nstages, std::numeric_limits<float>::lowest());
+        const auto states = detection::evaluate_scheme(
+            thresholds, branching_pattern, kRefDucy, kNbins, kNtrials);
+        check_cumulative(states);
+        float nleaves = 1.0F;
+        for (SizeType i = 0; i < nstages; ++i) {
+            nleaves *= branching_pattern[i];
+            REQUIRE(states[i].complexity == nleaves);
+            REQUIRE(states[i].success_h1_cumul == 1.0F);
+        }
+    }
+    SECTION("evaluate_scheme, pruning path") {
+        const std::vector<float> thresholds = {1.0F, 2.0F, 3.0F};
+        check_cumulative(detection::evaluate_scheme(
+            thresholds, branching_pattern, kRefDucy, kNbins, kNtrials));
+    }
+    SECTION("determine_scheme") {
+        const std::vector<float> survive_probs(nstages, 0.5F);
+        check_cumulative(detection::determine_scheme(
+            survive_probs, branching_pattern, kRefDucy, kNbins, kNtrials));
+    }
+    SECTION("stages after a path dies stay empty") {
+        const std::vector<float> thresholds = {
+            std::numeric_limits<float>::lowest(),
+            std::numeric_limits<float>::max(),
+            std::numeric_limits<float>::lowest()};
+        const auto states = detection::evaluate_scheme(
+            thresholds, branching_pattern, kRefDucy, kNbins, kNtrials);
+        REQUIRE_FALSE(states[1].is_empty);
+        REQUIRE(states[1].success_h1_cumul == 0.0F);
+        REQUIRE(states[2].is_empty);
+    }
+}
 namespace {
 
 bool same_state_bits(const detection::State& a, const detection::State& b) {

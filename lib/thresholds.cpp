@@ -1659,8 +1659,9 @@ std::vector<State> evaluate_scheme(std::span<const float> thresholds,
     const auto bias_snr =
         snr_final / std::sqrt(static_cast<float>(nstages + 1));
     const float var_init = 1.0F;
-    State initial_state;
-    std::vector<State> states(nstages, initial_state);
+    const auto initial_state = State::initial();
+    // Stages after the path stops stay empty
+    std::vector<State> states(nstages);
 
     const auto slots_per_pool = 10;
     auto manager =
@@ -1743,8 +1744,9 @@ std::vector<State> determine_scheme(std::span<const float> survive_probs,
     const auto bias_snr =
         snr_final / std::sqrt(static_cast<float>(nstages + 1));
     const float var_init = 1.0F;
-    State initial_state;
-    std::vector<State> states(nstages, initial_state);
+    const auto initial_state = State::initial();
+    // Stages after the path stops stay empty
+    std::vector<State> states(nstages);
 
     const auto slots_per_pool = 10;
     auto manager =

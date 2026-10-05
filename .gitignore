@@ -430,3 +430,5 @@ $RECYCLE.BIN/
 # pixi environments
 .pixi/*
 !.pixi/config.toml
+
+tmp_files/

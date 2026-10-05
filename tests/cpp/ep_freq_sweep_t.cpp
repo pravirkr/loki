@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <format>
@@ -99,6 +100,26 @@ TEST_CASE("EPRegionPlanner plans a band spanning two FFA regions",
         CHECK(!chunk.threshold_scheme.empty());
     }
     CHECK(region_nbins == std::set<SizeType>{32U, 64U});
+}
+
+TEST_CASE("EPRegionPlanner stats report the maxima over its chunks",
+          "[ep_freq_sweep]") {
+    const auto cfg = make_test_cfg(4.0, 70.0, 145.0);
+    EPRegionPlanner<float> planner(cfg, /*min_pd=*/0.1F, "taylor",
+                                   /*ref_ducy=*/0.1F);
+    const auto& stats = planner.get_stats();
+    REQUIRE(stats.get_chunk_stats().size() == planner.get_nchunks());
+
+    SizeType branch_max = 0;
+    double memory_gb    = 0.0;
+    for (const auto& chunk : stats.get_chunk_stats()) {
+        branch_max = std::max(branch_max, chunk.branch_max);
+        memory_gb  = std::max(memory_gb, chunk.memory_gb);
+    }
+    REQUIRE(branch_max > 0);
+    REQUIRE(memory_gb > 0.0);
+    CHECK(stats.get_max_branch_max() == branch_max);
+    CHECK(stats.get_max_memory_gb() == static_cast<float>(memory_gb));
 }
 
 TEST_CASE("EPRegionPlanner HDF5 cache round-trip and validation",

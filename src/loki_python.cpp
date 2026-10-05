@@ -819,19 +819,26 @@ PYBIND11_MODULE(libloki, m) {
             py::arg("file_prefix") = "test");
 
     auto m_io = m.def_submodule("io", "Timeseries I/O");
-    py::enum_<io::LocMethod>(m_io, "LocMethod")
-        .value("Mean", io::LocMethod::kMean)
-        .value("Median", io::LocMethod::kMedian);
-    py::enum_<io::ScaleMethod>(m_io, "ScaleMethod")
-        .value("Std", io::ScaleMethod::kStd)
-        .value("Iqr", io::ScaleMethod::kIqr)
-        .value("Mad", io::ScaleMethod::kMad);
+    py::enum_<LocMethod>(m_io, "LocMethod")
+        .value("Mean", LocMethod::kMean)
+        .value("Median", LocMethod::kMedian)
+        .value("None", LocMethod::kNone);
+    py::enum_<ScaleMethod>(m_io, "ScaleMethod")
+        .value("Std", ScaleMethod::kStd)
+        .value("Iqr", ScaleMethod::kIqr)
+        .value("Mad", ScaleMethod::kMad)
+        .value("DoubleMad", ScaleMethod::kDoubleMad)
+        .value("None", ScaleMethod::kNone);
     py::class_<io::ReadOptions>(m_io, "ReadOptions")
         .def(py::init<>())
         .def_readwrite("preprocess", &io::ReadOptions::preprocess)
         .def_readwrite("filter_window", &io::ReadOptions::filter_window)
         .def_readwrite("loc", &io::ReadOptions::loc)
-        .def_readwrite("scale", &io::ReadOptions::scale);
+        .def_readwrite("scale", &io::ReadOptions::scale)
+        .def_readwrite("fast_median", &io::ReadOptions::fast_median)
+        .def_readwrite("fast_median_min_points",
+                       &io::ReadOptions::fast_median_min_points)
+        .def_readwrite("nthreads", &io::ReadOptions::nthreads);
     auto timeseries_view = [](py::object self, std::span<float> data) {
         return py::array_t<float>(
             py::array::ShapeContainer{static_cast<py::ssize_t>(data.size())},

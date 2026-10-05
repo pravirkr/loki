@@ -22,6 +22,10 @@ struct FFATomlConfig {
     std::string timeseries_path;
     bool preprocess{true};
     double filter_window{1.0};
+    /// Block-averaged running median for long windows. False keeps the exact
+    /// filter. See loki::math::subtract_running_filter.
+    bool fast_median{true};
+    SizeType fast_median_min_points{101};
 
     // [search]
     double f_min{0.5};

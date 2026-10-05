@@ -52,9 +52,14 @@ void validate_ffa_toml_document(const toml::table& root) {
         std::string_view{"performance"}, std::string_view{"output"},
         std::string_view{"cuda"}};
     static constexpr std::array kInputKeys{
-        std::string_view{"timeseries"},    std::string_view{"preprocess"},
-        std::string_view{"filter_window"}, std::string_view{"nsamps"},
-        std::string_view{"tsamp"},         std::string_view{"dt"}};
+        std::string_view{"timeseries"},
+        std::string_view{"preprocess"},
+        std::string_view{"filter_window"},
+        std::string_view{"fast_median"},
+        std::string_view{"fast_median_min_points"},
+        std::string_view{"nsamps"},
+        std::string_view{"tsamp"},
+        std::string_view{"dt"}};
     static constexpr std::array kSearchKeys{
         std::string_view{"f_min"},
         std::string_view{"f_max"},
@@ -147,6 +152,11 @@ preprocess = true
 
 # Running median filter window in seconds (used if preprocess = true)
 filter_window = 1.0
+
+# Approximate long running-median windows by block averaging. Set false for
+# the exact sliding median. fast_median_min_points is the short-series width.
+fast_median = true
+fast_median_min_points = 101
 
 [search]
 # Search frequency range in Hz (Period P = 1 / f)
@@ -245,6 +255,19 @@ FFATomlConfig FFATomlConfig::from_string(std::string_view toml_content) {
             }
             if (auto val = (*input)["filter_window"].value<double>()) {
                 cfg.filter_window = *val;
+            }
+            if (auto val = (*input)["fast_median"].value<bool>()) {
+                cfg.fast_median = *val;
+            }
+            if (auto val =
+                    (*input)["fast_median_min_points"].value<int64_t>()) {
+                const auto points = require_non_negative_int64(
+                    *val, "input.fast_median_min_points");
+                if (points < 1) {
+                    throw std::invalid_argument(
+                        "input.fast_median_min_points must be >= 1");
+                }
+                cfg.fast_median_min_points = static_cast<SizeType>(points);
             }
             if (auto val = (*input)["nsamps"].value<int64_t>()) {
                 cfg.nsamps = static_cast<SizeType>(

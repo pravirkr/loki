@@ -1,6 +1,5 @@
 #pragma once
 
-#include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <span>
@@ -10,17 +9,13 @@
 
 namespace loki::io {
 
-/// Location estimate used when normalising a loaded timeseries.
-enum class LocMethod : std::uint8_t { kMean, kMedian };
-
-/// Scale estimate used when normalising a loaded timeseries.
-enum class ScaleMethod : std::uint8_t { kStd, kIqr, kMad };
-
 /**
  * @brief Options for TimeSeries::read.
  *
  * When `preprocess` is true the payload is baseline-subtracted with a sliding
- * median and z-scored. `get_ts_e()` is that series and `get_ts_v()` is 1.
+ * median and z-scored. Windows long enough for `fast_median` use a
+ * block-averaged approximation; set `fast_median` false for the exact filter.
+ * `get_ts_e()` is that series and `get_ts_v()` is 1.
  * When `preprocess` is false, `get_ts_e()` is the payload converted to float32
  * and `get_ts_v()` is still 1.
  *
@@ -33,6 +28,10 @@ struct ReadOptions {
     double filter_window{1.0};
     LocMethod loc{LocMethod::kMean};
     ScaleMethod scale{ScaleMethod::kIqr};
+    bool fast_median{true};
+    size_t fast_median_min_points{101};
+    /// OpenMP threads used by preprocessing (values < 1 are treated as 1).
+    int nthreads{1};
 };
 
 /**

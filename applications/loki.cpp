@@ -14,6 +14,7 @@
 #include <highfive/highfive.hpp>
 #include <spdlog/spdlog.h>
 #include <toml++/toml.hpp>
+#include <omp.h>
 
 #include "loki/common/types.hpp"
 #include "loki/io/timeseries.hpp"
@@ -275,8 +276,13 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
     }
 
     loki::io::ReadOptions read_opts;
-    read_opts.preprocess    = toml_cfg.preprocess;
-    read_opts.filter_window = toml_cfg.filter_window;
+    read_opts.preprocess             = toml_cfg.preprocess;
+    read_opts.filter_window          = toml_cfg.filter_window;
+    read_opts.fast_median            = toml_cfg.fast_median;
+    read_opts.fast_median_min_points = toml_cfg.fast_median_min_points;
+    // Config value 0 means "use all hardware threads".
+    read_opts.nthreads = toml_cfg.nthreads <= 0 ? omp_get_max_threads()
+                                                : toml_cfg.nthreads;
     SPDLOG_INFO("Loading timeseries from: {}", ts_path.string());
     // FFA assumes finite ts_e and positive ts_v (enforced in TimeSeries).
     auto ts = loki::io::TimeSeries::read(ts_path, read_opts);
@@ -547,6 +553,12 @@ int main(int argc, char** argv) {
     grp_io->add_option(
         "--filter-window", ffa_cfg.filter_window,
         "Running median filter window in seconds for baseline detrending");
+    grp_io->add_flag("--fast-median,!--no-fast-median", ffa_cfg.fast_median,
+                     "Approximate long running-median windows by block "
+                     "averaging (default: on)");
+    grp_io->add_option("--fast-median-min-points",
+                       ffa_cfg.fast_median_min_points,
+                       "Width of the short series used by --fast-median");
 
     auto* grp_range = ffa->add_option_group("Search Parameter Range");
     grp_range->add_option("--fmin", ffa_cfg.f_min,

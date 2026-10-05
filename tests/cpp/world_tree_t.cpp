@@ -1,5 +1,6 @@
 #include <complex>
 #include <numeric>
+#include <span>
 #include <vector>
 
 #include <catch2/catch_template_test_macros.hpp>
@@ -135,5 +136,27 @@ TEMPLATE_TEST_CASE("WorldTree::add_initial_scattered matches add_initial",
         std::vector<SizeType> too_short{0, 1};
         REQUIRE_THROWS(
             tree_sc.add_initial_scattered(leaves, folds, scores, too_short, 3));
+    }
+
+    SECTION("add_initial takes the leading seeds of a larger batch") {
+        // A sweep sizes its seed buffers for its largest chunk
+        constexpr SizeType kNUsed = 25;
+        tree_sc.add_initial(leaves, folds, scores, kNUsed);
+        REQUIRE(tree_sc.get_size() == kNUsed);
+        for (SizeType i = 0; i < kNUsed; ++i) {
+            REQUIRE(tree_sc.get_scores()[i] == scores[i]);
+            for (SizeType j = 0; j < leaves_stride; ++j) {
+                REQUIRE(tree_sc.get_leaves()[(i * leaves_stride) + j] ==
+                        leaves[(i * leaves_stride) + j]);
+            }
+            for (SizeType j = 0; j < folds_stride; ++j) {
+                REQUIRE(tree_sc.get_folds()[(i * folds_stride) + j] ==
+                        folds[(i * folds_stride) + j]);
+            }
+        }
+        REQUIRE(tree_sc.get_score_max() == scores[kNUsed - 1]);
+        REQUIRE_THROWS(tree_sc.add_initial(
+            leaves, folds, std::span<const float>(scores).first(kNUsed - 1),
+            kNUsed));
     }
 }
