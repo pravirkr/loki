@@ -222,6 +222,36 @@ bool same_state_bits(const detection::State& a, const detection::State& b) {
 
 } // namespace
 
+TEST_CASE("DynamicThresholdScheme::evaluate keeps a noise trial",
+          "[thresholds]") {
+    // As for evaluate_scheme: stage 1 prunes every noise trial and keeps every
+    // signal trial
+    const std::vector<float> branching_pattern(7, 3.0F);
+    const auto nstages          = branching_pattern.size();
+    constexpr SizeType kNtrials = 1024;
+    constexpr float kSnrFinal   = 40.0F;
+    const float snr_stage1 =
+        kSnrFinal * std::sqrt(3.0F / static_cast<float>(nstages + 1));
+    detection::DynamicThresholdScheme dyn_scheme(
+        branching_pattern, /*ref_ducy=*/0.1F, /*nbins=*/32, kNtrials,
+        /*nprobs=*/10, /*prob_min=*/0.05F, kSnrFinal, /*nthresholds=*/100,
+        /*ducy_max=*/0.3F, /*wtsp=*/1.0F, /*beam_width=*/0.7F,
+        /*trials_start=*/1, "improved", /*nthreads=*/1, /*seed=*/17);
+    std::vector<float> thresholds(nstages,
+                                  std::numeric_limits<float>::lowest());
+    thresholds[1]     = snr_stage1 / 2.0F;
+    const auto states = dyn_scheme.evaluate(thresholds, kNtrials, 3);
+    REQUIRE(states[1].success_h0 == 1.0F / static_cast<float>(kNtrials));
+    REQUIRE(states[1].success_h1 == 1.0F);
+    for (SizeType i = 2; i < nstages; ++i) {
+        CAPTURE(i);
+        REQUIRE_FALSE(states[i].is_empty);
+        REQUIRE(states[i].complexity ==
+                states[i - 1].complexity * branching_pattern[i]);
+        REQUIRE(states[i].success_h1_cumul == 1.0F);
+    }
+}
+
 TEST_CASE("DynamicThresholdScheme evaluate does not depend on thread count",
           "[thresholds]") {
     const std::vector<float> branching(8, 2.0F);

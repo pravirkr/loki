@@ -1221,6 +1221,16 @@ public:
                         ++n;
                     }
                 }
+                // No H0 survivor: keep the best noise trial, counted as one
+                if (branch == 0 && n == 0) {
+                    const auto best = static_cast<uint32_t>(
+                        std::max_element(branch_scores,
+                                         branch_scores + ntrials) -
+                        branch_scores);
+                    std::copy_n(generated.data() + (best * nbins), nbins,
+                                folds.data());
+                    n = 1;
+                }
                 counts[branch] = n;
                 n_in[branch]   = n;
             }
@@ -1232,7 +1242,7 @@ public:
             states[istage] = next;
             prev           = next;
             var_in += 1.0F;
-            if (counts[0] == 0 || counts[1] == 0) {
+            if (counts[1] == 0) {
                 break;
             }
         }
