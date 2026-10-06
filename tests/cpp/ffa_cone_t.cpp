@@ -7,11 +7,11 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "detail/psr_utils.hpp"
 #include "loki/algorithms/ffa.hpp"
 #include "loki/algorithms/fold.hpp"
 #include "loki/common/types.hpp"
 #include "loki/detection/score.hpp"
-#include "loki/psr_utils.hpp"
 #include "loki/search/configs.hpp"
 
 using loki::ParamLimit;
@@ -125,9 +125,9 @@ TEST_CASE("Run-length brute fold matches a direct bin sum within tolerance",
         ts_v[i] = 1.0F;
     }
     const std::vector<double> freqs = {8.0, 11.5, 14.0};
-    const auto got = compute_brute_fold<float>(ts_e, ts_v, freqs, kSeg, kBins,
-                                               kTsamp, /*t_ref=*/0.0,
-                                               /*nthreads=*/1);
+    const auto got =
+        compute_brute_fold<float>(ts_e, ts_v, freqs, kSeg, kBins, kTsamp,
+                                  /*t_ref=*/0.0, loki::Exec::cpu(1));
     const SizeType nseg = kNsamps / kSeg;
     std::vector<float> ref(nseg * freqs.size() * 2 * kBins, 0.0F);
     for (SizeType iseg = 0; iseg < nseg; ++iseg) {
@@ -174,7 +174,7 @@ TEST_CASE("execute_scored matches a threshold scan of snr_boxcar_3d",
     const auto widths  = cfg.get_scoring_widths();
     std::vector<float> scores(ncoords * widths.size());
     snr_boxcar_3d(std::span<const float>(fold).first(ncoords * 2 * nbins),
-                  widths, scores, ncoords, nbins, /*nthreads=*/1);
+                  widths, scores, ncoords, nbins, loki::Exec::cpu(1));
     constexpr float kThreshold = 1.5F;
     std::vector<loki::detection::SnrHit> expected;
     for (SizeType i = 0; i < scores.size(); ++i) {

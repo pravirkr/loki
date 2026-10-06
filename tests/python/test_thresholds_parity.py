@@ -10,11 +10,14 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from loki import libculoki, libloki
+from loki import libloki
 
 pytestmark = [
     pytest.mark.slow,
-    pytest.mark.skipif(libculoki is None, reason="CUDA backend not built"),
+    pytest.mark.skipif(
+        "cuda" not in libloki.available_backends(),
+        reason="CUDA backend not built",
+    ),
 ]
 
 BP = np.array(
@@ -61,8 +64,8 @@ def test_cpu_cuda_stage0_survival_parity(mode: str) -> None:
         cpu = libloki.thresholds.DynamicThresholdScheme(
             BP, mode=mode, seed=seed, nthreads=8, **KW
         )
-        gpu = libculoki.thresholds.DynamicThresholdSchemeCUDA(
-            BP, mode=mode, seed=seed, **KW
+        gpu = libloki.thresholds.DynamicThresholdScheme(
+            BP, mode=mode, seed=seed, backend="cuda", **KW
         )
         cpu.run(thres_neigh=THRES_NEIGH)
         gpu.run(thres_neigh=THRES_NEIGH)

@@ -1,18 +1,18 @@
 #pragma once
 
+#include <cstdint>
 #include <format>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
+#include "loki/common/backend.hpp"
 #include "loki/common/types.hpp"
-
-#ifdef LOKI_ENABLE_CUDA
-#include <cuda/std/span>
-#include <cuda_runtime.h>
-#endif // LOKI_ENABLE_CUDA
 
 namespace loki::detection {
 
@@ -129,21 +129,24 @@ struct State {
 
 class DynamicThresholdScheme {
 public:
+    /// @p batch_size is used by the GPU backends only; @p exec.nthreads by
+    /// the CPU backend only.
     DynamicThresholdScheme(std::span<const float> branching_pattern,
                            float ref_ducy,
-                           SizeType nbins        = 64,
-                           SizeType ntrials      = 1024,
-                           SizeType nprobs       = 10,
-                           float prob_min        = 0.05F,
-                           float snr_final       = 8.0F,
-                           SizeType nthresholds  = 100,
-                           float ducy_max        = 0.3F,
-                           float wtsp            = 1.0F,
-                           float beam_width      = 0.7F,
-                           SizeType trials_start = 1,
-                           std::string_view mode = "legacy",
-                           int nthreads          = 1,
-                           std::optional<uint64_t> seed = std::nullopt);
+                           SizeType nbins               = 64,
+                           SizeType ntrials             = 1024,
+                           SizeType nprobs              = 10,
+                           float prob_min               = 0.05F,
+                           float snr_final              = 8.0F,
+                           SizeType nthresholds         = 100,
+                           float ducy_max               = 0.3F,
+                           float wtsp                   = 1.0F,
+                           float beam_width             = 0.7F,
+                           SizeType trials_start        = 1,
+                           std::string_view mode        = "legacy",
+                           std::optional<uint64_t> seed = std::nullopt,
+                           SizeType batch_size          = 256,
+                           Exec exec                    = {});
     ~DynamicThresholdScheme();
     DynamicThresholdScheme(DynamicThresholdScheme&&) noexcept;
     DynamicThresholdScheme& operator=(DynamicThresholdScheme&&) noexcept;
@@ -169,9 +172,10 @@ public:
     /// differ from the search. Unset `seed` draws a random one; pass a seed
     /// different from the search seed. Deterministic per (seed, thresholds,
     /// ntrials). Each trial has its own stream.
-    std::vector<State> evaluate(std::span<const float> thresholds,
-                                SizeType ntrials,
-                                std::optional<uint64_t> seed = std::nullopt) const;
+    std::vector<State>
+    evaluate(std::span<const float> thresholds,
+             SizeType ntrials,
+             std::optional<uint64_t> seed = std::nullopt) const;
     std::string save(const std::string& outdir = "./") const;
     std::vector<float> get_best_path_thresholds(float min_pd = 0.1F) const;
 
@@ -197,62 +201,5 @@ std::vector<State> determine_scheme(std::span<const float> survive_probs,
                                     float snr_final  = 8.0F,
                                     float ducy_max   = 0.3F,
                                     float wtsp       = 1.0F);
-
-#ifdef LOKI_ENABLE_CUDA
-
-class DynamicThresholdSchemeCUDA {
-public:
-    DynamicThresholdSchemeCUDA(std::span<const float> branching_pattern,
-                               float ref_ducy,
-                               SizeType nbins        = 64,
-                               SizeType ntrials      = 1024,
-                               SizeType nprobs       = 10,
-                               float prob_min        = 0.05F,
-                               float snr_final       = 8.0F,
-                               SizeType nthresholds  = 100,
-                               float ducy_max        = 0.3F,
-                               float wtsp            = 1.0F,
-                               float beam_width      = 0.7F,
-                               SizeType trials_start = 1,
-                               std::string_view mode = "legacy",
-                               SizeType batch_size   = 256,
-                               int device_id         = 0,
-                               std::optional<uint64_t> seed = std::nullopt);
-    ~DynamicThresholdSchemeCUDA();
-    DynamicThresholdSchemeCUDA(DynamicThresholdSchemeCUDA&&) noexcept;
-    DynamicThresholdSchemeCUDA&
-    operator=(DynamicThresholdSchemeCUDA&&) noexcept;
-    DynamicThresholdSchemeCUDA(const DynamicThresholdSchemeCUDA&) = delete;
-    DynamicThresholdSchemeCUDA&
-    operator=(const DynamicThresholdSchemeCUDA&) = delete;
-
-    /// Search. Deterministic per (seed, mode, batch_size, toolchain), including
-    /// across GPU architectures with that toolchain. batch_size affects how
-    /// cumulative Philox stream indices are assigned per stage. In-run cost
-    /// and success_h1_cumul are optimistic Monte Carlo estimates (winner's
-    /// curse). The returned path is what live pruning uses; it is not
-    /// re-scored first.
-    void run(SizeType thres_neigh = 10);
-    /// Reporting only. Fresh Monte Carlo of one threshold per stage, using
-    /// this object's profile and boxcar widths. Does not modify the grid from
-    /// run() and is not part of the on-the-fly pipeline. `ntrials` may differ
-    /// from the search. Unset `seed` draws a random one; pass a seed different
-    /// from the search seed. Deterministic per (seed, thresholds, ntrials).
-    std::vector<State> evaluate(std::span<const float> thresholds,
-                                SizeType ntrials,
-                                std::optional<uint64_t> seed = std::nullopt) const;
-    std::string save(const std::string& outdir = "./") const;
-    std::vector<float> get_best_path_thresholds(float min_pd = 0.1F) const;
-    /// State grid of the last run, [nstages x nthresholds x nprobs].
-    std::vector<State> get_states() const;
-    std::vector<float> get_thresholds() const;
-    std::vector<float> get_probs() const;
-
-private:
-    class Impl;
-    std::unique_ptr<Impl> m_impl;
-};
-
-#endif // LOKI_ENABLE_CUDA
 
 } // namespace loki::detection

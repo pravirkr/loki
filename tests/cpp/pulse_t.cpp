@@ -6,8 +6,8 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include "loki/detection/score.hpp"
-#include "loki/psr_utils.hpp"
-#include "loki/pulse_detail.hpp"
+#include "detail/psr_utils.hpp"
+#include "simulation/pulse_detail.hpp"
 #include "loki/simulation/pulse.hpp"
 
 using Catch::Matchers::WithinAbs;

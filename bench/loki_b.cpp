@@ -78,7 +78,8 @@ BENCHMARK_DEFINE_F(ScoresFixture2D,
     std::vector<float> out(nprofiles * widths.size());
     for (auto _ : state) {
         detection::snr_boxcar_2d(std::span(arr), std::span(widths),
-                                 std::span(out), nprofiles, nsamps, 1.0F, 1);
+                                 std::span(out), nprofiles, nsamps, 1.0F,
+                                 loki::Exec::cpu(1));
     }
 }
 
@@ -93,7 +94,8 @@ BENCHMARK_DEFINE_F(ScoresFixture2D,
     std::vector<float> out(nprofiles * widths.size());
     for (auto _ : state) {
         detection::snr_boxcar_2d(std::span(arr), std::span(widths),
-                                 std::span(out), nprofiles, nsamps, 1.0F, 8);
+                                 std::span(out), nprofiles, nsamps, 1.0F,
+                                 loki::Exec::cpu(8));
     }
 }
 

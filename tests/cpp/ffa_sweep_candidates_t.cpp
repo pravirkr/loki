@@ -8,19 +8,19 @@
 #include <catch2/catch_test_macros.hpp>
 #include <highfive/highfive.hpp>
 
-#include "loki/cands.hpp"
+#include "search/cands.hpp"
 #include "loki/common/types.hpp"
-#include "loki/ffa_sweep_candidates.hpp"
+#include "search/ffa_sweep_candidates.hpp"
 #include "loki/pipelines/ffa_freq_sweep.hpp"
 #include "loki/search/configs.hpp"
 
 using loki::ParamLimit;
 using loki::SizeType;
-using loki::cands::FFAResultMetadata;
 using loki::algorithms::CandidateBuffer;
 using loki::algorithms::FFAFreqSweep;
 using loki::algorithms::flush_candidates;
 using loki::algorithms::RegionDecode;
+using loki::cands::FFAResultMetadata;
 using loki::search::PulsarSearchConfig;
 
 namespace {
@@ -110,9 +110,9 @@ WrittenResults run_sweep(SizeType capacity,
     return read_results(path);
 }
 
-// Mirrors FFAFreqSweepCUDA::copy_candidates_to_host: a chunk's compacted
-// results arrive as one block and are appended in space()-sized slices, with
-// a flush whenever the buffer fills.
+// Mirrors the CUDA frequency sweep's copy_candidates_to_host: a chunk's
+// compacted results arrive as one block and are appended in space()-sized
+// slices, with a flush whenever the buffer fills.
 WrittenResults run_sweep_bulk(SizeType capacity,
                               std::span<const RegionDecode> table,
                               const std::filesystem::path& path) {

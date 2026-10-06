@@ -53,7 +53,7 @@ Frozen minimum requirements for CUDA builds:
 
 ### Mode A — Python (`uv pip install`) *(recommended for pipelines)*
 
-Best for using loki from Python in a conda environment. Builds `libloki` (CPU) and, when CUDA is available, `libculoki` (GPU).
+Best for using loki from Python in a conda environment. Builds one extension, `libloki`. CPU and CUDA are selected at call time with `backend="cpu"` or `backend="cuda"`.
 
 ```bash
 mamba create -n loki_env python=3.12
@@ -123,7 +123,17 @@ find_package(loki CONFIG REQUIRED)
 target_link_libraries(my_app PRIVATE loki::loki)
 ```
 
-When loki was built **with CUDA**, the installed package also requires `CUDAToolkit` and defines the preprocessor macro **`LOKI_ENABLE_CUDA`** on the `loki::loki` target so GPU declarations in public headers are visible.
+When loki was built **with CUDA**, the same `loki::loki` target contains the GPU engines. Callers pass `loki::Exec::cpu()` or `loki::Exec::cuda(device)` (Python: `backend="cpu"` / `backend="cuda"`, `device=0`). `loki::available_backends()` reports which backends this build contains. The installed headers are identical in every build and include no CUDA header; the backend macros are private to the library.
+
+Pipelines that run many searches can allocate buffers once and share them:
+
+```cpp
+loki::memory::FFAWorkspace<float> ws(plan, loki::Exec::cuda(0));
+loki::math::FFTManager fft(loki::Exec::cuda(0));
+loki::algorithms::FFA<float> ffa(ws, fft, cfg, loki::Exec::cuda(0));
+```
+
+The library layout and the rules for adding algorithms or backends are in [`docs/architecture.md`](docs/architecture.md).
 
 ---
 
@@ -143,13 +153,13 @@ Project-specific options use the **`LOKI_`** prefix. Standard CMake options keep
 | **`LOKI_BUILD_DOCS`** | `OFF` | Build documentation |
 | **`LOKI_ENABLE_COVERAGE`** | `OFF` | Compile with `--coverage` |
 | **`LOKI_ENABLE_IPO`** | `OFF` | Link-time optimization (Release) |
-| **`BUILD_SHARED_LIBS`** | `ON` (C++ only) | `ON` = shared `libloki`; `OFF` = static `libloki.a`. Forced `OFF` when `LOKI_BUILD_PYTHON=ON`. |
+| **`BUILD_SHARED_LIBS`** | `OFF` | `ON` = shared `libloki`; `OFF` = static `libloki.a`. Must be `OFF` when `LOKI_BUILD_PYTHON=ON`. |
 
 ### CPU vs GPU vs CPU+GPU
 
-- **CPU-only** (`LOKI_CUDA=OFF`): all `.cpp` sources; no `.cu`; no `LOKI_ENABLE_CUDA` macro; Python module `libloki` only.
-- **CPU+GPU** (`LOKI_CUDA=AUTO` or `ON` with working toolchain): `.cpp` **and** `.cu` in one library; `LOKI_ENABLE_CUDA` defined; Python gets `libloki` + `libculoki`.
-- The library is always usable on CPU; GPU code paths are compiled only when CUDA is enabled at configure time.
+- **CPU-only** (`LOKI_CUDA=OFF`): all `.cpp` sources; no `.cu`; Python module `libloki` only. `available_backends()` is `["cpu"]`.
+- **CPU+GPU** (`LOKI_CUDA=AUTO` or `ON` with a working toolchain): `lib/**/*.cpp` and `lib/cuda/*.cu` in one library and one Python module, `libloki`. `available_backends()` is `["cpu", "cuda"]`.
+- The library is always usable on CPU. GPU code paths are compiled only when CUDA is enabled at configure time, and selected per call with `Exec` / `backend`.
 
 ### GPU architecture
 
@@ -161,12 +171,12 @@ Project-specific options use the **`LOKI_`** prefix. Standard CMake options keep
 
 ## Python bindings and `BUILD_SHARED_LIBS`
 
-Pip/scikit-build sets **`BUILD_SHARED_LIBS=OFF`**. The C++ core is linked **statically** into each Python extension (`libloki.cpython-*.so`, and `libculoki` when CUDA is enabled). The wheel therefore ships a single importable module per backend — no separate `libloki.so` and no custom loader paths.
+Pip/scikit-build sets **`BUILD_SHARED_LIBS=OFF`**. The C++ core is linked **statically** into the Python extension `libloki.cpython-*.so`. The wheel ships that one importable module — no separate `libloki.so` and no custom loader paths. CUDA support, when built, lives in the same module.
 
 For **C++-only** builds (`LOKI_BUILD_PYTHON=OFF`), either shared or static `loki` is fine:
 
-- **`BUILD_SHARED_LIBS=ON`** (default): shared `libloki.so` for `find_package(loki)`.
-- **`BUILD_SHARED_LIBS=OFF`**: static `libloki.a`.
+- **`BUILD_SHARED_LIBS=ON`**: shared `libloki.so` for `find_package(loki)`.
+- **`BUILD_SHARED_LIBS=OFF`** (default): static `libloki.a`.
 
 Do not combine **`LOKI_BUILD_PYTHON=ON`** with **`BUILD_SHARED_LIBS=ON`**; CMake will fail with an explicit error.
 

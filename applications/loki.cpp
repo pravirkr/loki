@@ -241,25 +241,19 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
                         toml_cfg.f_min, toml_cfg.f_max));
     }
 
-#ifndef LOKI_ENABLE_CUDA
-    if (toml_cfg.use_cuda) {
+    if (toml_cfg.use_cuda && !loki::is_available(loki::Backend::kCUDA)) {
         throw std::runtime_error(
             "--cuda was requested but this build has LOKI_CUDA=OFF");
     }
-#endif
 
     const auto preview_cfg = toml_cfg.to_search_config(
         toml_cfg.nsamps.value_or(1U << 21U), toml_cfg.tsamp.value_or(6.4e-5));
     if (dry_run) {
-#ifdef LOKI_ENABLE_CUDA
-        if (toml_cfg.use_cuda) {
-            loki::algorithms::FFAFreqSweepCUDA dry(preview_cfg,
-                                                   toml_cfg.device_id);
-        } else
-#endif
-        {
-            loki::algorithms::FFAFreqSweep dry(preview_cfg, false);
-        }
+        const auto exec = toml_cfg.use_cuda
+                              ? loki::Exec::cuda(toml_cfg.device_id)
+                              : loki::Exec::cpu();
+        loki::algorithms::FFAFreqSweep dry(preview_cfg, /*show_progress=*/false,
+                                           exec);
         SPDLOG_INFO("Dry run complete: planner constructed successfully.");
         return 0;
     }
@@ -318,21 +312,16 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
                 toml_cfg.f_min, toml_cfg.f_max, ffa_cfg.get_nbins(),
                 ffa_cfg.get_eta(), ffa_cfg.get_snr_min());
 
-#ifdef LOKI_ENABLE_CUDA
-    if (toml_cfg.use_cuda) {
+    // The CPU thread count travels in ffa_cfg; Exec only picks the backend.
+    const auto exec = toml_cfg.use_cuda ? loki::Exec::cuda(toml_cfg.device_id)
+                                        : loki::Exec::cpu();
+    if (exec.backend == loki::Backend::kCUDA) {
         SPDLOG_INFO("Using CUDA backend on device {}", toml_cfg.device_id);
-        loki::algorithms::FFAFreqSweepCUDA sweep(ffa_cfg, toml_cfg.device_id);
-        sweep.execute(ts.get_ts_e().first(actual_nsamps),
-                      ts.get_ts_v().first(actual_nsamps), outdir_path,
-                      toml_cfg.prefix, config_toml);
-    } else
-#endif
-    {
-        loki::algorithms::FFAFreqSweep sweep(ffa_cfg, true);
-        sweep.execute(ts.get_ts_e().first(actual_nsamps),
-                      ts.get_ts_v().first(actual_nsamps), outdir_path,
-                      toml_cfg.prefix, config_toml);
     }
+    loki::algorithms::FFAFreqSweep sweep(ffa_cfg, /*show_progress=*/true, exec);
+    sweep.execute(ts.get_ts_e().first(actual_nsamps),
+                  ts.get_ts_v().first(actual_nsamps), outdir_path,
+                  toml_cfg.prefix, config_toml);
 
     const auto result_file =
         outdir_path / std::format("{}_ffa_results.h5", toml_cfg.prefix);
@@ -611,13 +600,12 @@ int main(int argc, char** argv) {
         "--max-passing-candidates", ffa_cfg.max_passing_candidates,
         "Maximum candidate buffer capacity (default: 4194304)");
 
-#ifdef LOKI_ENABLE_CUDA
+    // Always listed; a CPU-only build rejects --cuda at run time.
     auto* grp_cuda = ffa->add_option_group("CUDA Options");
     grp_cuda->add_flag("--cuda", ffa_cfg.use_cuda,
                        "Execute FFA sweep on NVIDIA GPU using CUDA");
     grp_cuda->add_option("--device", ffa_cfg.device_id,
                          "CUDA GPU device index (default: 0)");
-#endif
 
     CLI11_PARSE(app, argc, argv);
 

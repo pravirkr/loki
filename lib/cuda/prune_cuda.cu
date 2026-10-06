@@ -1,0 +1,1171 @@
+#include "cuda/ffa_cuda.cuh"
+#include "loki/algorithms/prune.hpp"
+#include "cuda/prune_cuda.cuh"
+
+#include <algorithm>
+#include <filesystem>
+#include <format>
+#include <fstream>
+#include <memory>
+#include <stdexcept>
+#include <utility>
+
+#include <fmt/ranges.h>
+#include <spdlog/spdlog.h>
+
+#include <cuda/std/span>
+#include <cuda_runtime.h>
+#include <thrust/device_vector.h>
+
+#include "loki/algorithms/ffa.hpp"
+#include "search/cands.hpp"
+#include "loki/common/types.hpp"
+#include "cuda/dynamic_cuda.cuh"
+#include "cuda/cuda_utils.cuh"
+#include "algorithms/prune_engine.hpp"
+#include "detail/psr_utils.hpp"
+#include "detail/timing.hpp"
+#include "detail/utils.hpp"
+#include "cuda/world_tree_cuda.cuh"
+
+namespace loki::algorithms {
+
+namespace {
+
+struct ExecutionStream {
+    cudaStream_t stream{nullptr};
+    bool owns{false};
+
+    explicit ExecutionStream(int device_id) {
+        cuda_utils::CudaSetDeviceGuard guard(device_id);
+        cuda_utils::check_cuda_call(cudaStreamCreate(&stream),
+                                    "EPMultiPassCudaCore: cudaStreamCreate failed");
+        owns = true;
+    }
+
+    explicit ExecutionStream(cudaStream_t external_stream)
+        : stream(external_stream),
+          owns(false) {
+        if (stream == nullptr) {
+            throw std::invalid_argument(
+                "EPMultiPassCudaCore: execution_stream must be non-null when using "
+                "an external EPWorkspaceCUDA");
+        }
+    }
+
+    ~ExecutionStream() {
+        if (owns && stream != nullptr) {
+            cuda_utils::check_cuda_call(
+                cudaStreamSynchronize(stream),
+                "EPMultiPassCudaCore: cudaStreamSynchronize before destroy failed");
+            cuda_utils::check_cuda_call(
+                cudaStreamDestroy(stream),
+                "EPMultiPassCudaCore: cudaStreamDestroy failed");
+        }
+    }
+
+    ExecutionStream(const ExecutionStream&)            = delete;
+    ExecutionStream& operator=(const ExecutionStream&) = delete;
+    ExecutionStream(ExecutionStream&&)                 = delete;
+    ExecutionStream& operator=(ExecutionStream&&)      = delete;
+
+    [[nodiscard]] cudaStream_t get() const noexcept { return stream; }
+};
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA> class PruneCUDAImpl {
+public:
+    using HostFoldT   = HostFoldType<FoldTypeCUDA>;
+    using DeviceFoldT = DeviceFoldType<FoldTypeCUDA>;
+    PruneCUDAImpl(memory::EPWorkspaceCUDA<FoldTypeCUDA>& workspace,
+                  search::PulsarSearchConfig cfg,
+                  std::span<const float> threshold_scheme,
+                  SizeType max_sugg,
+                  SizeType batch_size,
+                  SizeType branch_max,
+                  std::string_view poly_basis,
+                  int device_id,
+                  cudaStream_t stream)
+        : m_workspace_ptr(&workspace),
+          m_cfg(std::move(cfg)),
+          m_ffa_plan(m_cfg),
+          m_threshold_scheme(threshold_scheme.begin(), threshold_scheme.end()),
+          m_max_sugg(max_sugg),
+          m_batch_size(batch_size),
+          m_branch_max(branch_max),
+          m_poly_basis(poly_basis),
+          m_total_levels(m_threshold_scheme.size()),
+          m_device_id(device_id),
+          m_stream(stream) {
+        cuda_utils::CudaSetDeviceGuard device_guard(m_device_id);
+        error_check::check_less_equal(m_cfg.get_nparams(), 5,
+                                      "Pruning not supported for nparams > 5.");
+        m_prune_funcs = core::create_prune_dp_functs_cuda<FoldTypeCUDA>(
+            m_poly_basis, m_ffa_plan.get_param_counts().back(),
+            m_ffa_plan.get_dparams_actual().back(),
+            m_ffa_plan.get_nsegments().back(),
+            m_ffa_plan.get_tsegments().back(), m_cfg, m_batch_size,
+            m_branch_max, m_device_id);
+    }
+
+    ~PruneCUDAImpl()                               = default;
+    PruneCUDAImpl(const PruneCUDAImpl&)            = delete;
+    PruneCUDAImpl& operator=(const PruneCUDAImpl&) = delete;
+    PruneCUDAImpl(PruneCUDAImpl&&)                 = delete;
+    PruneCUDAImpl& operator=(PruneCUDAImpl&&)      = delete;
+
+    [[nodiscard]] float get_memory_usage_gib() const noexcept {
+        return get_workspace().get_memory_usage_gib() +
+               m_prune_funcs->get_irfft_scratch_memory_gib();
+    }
+
+    void execute(cuda::std::span<const FoldTypeCUDA> ffa_fold,
+                 SizeType ref_seg,
+                 std::span<const SizeType> ascend_levels,
+                 const std::filesystem::path& outdir,
+                 const std::optional<std::filesystem::path>& log_file,
+                 const std::optional<std::filesystem::path>& result_file,
+                 int task_id) {
+        timing::SimpleTimer timer;
+        timer.start();
+        const std::string run_name =
+            std::format("{:03d}_{:02d}", ref_seg, task_id);
+
+        const auto& ws                 = get_workspace();
+        const auto memory_tree_gb      = ws.world_tree.get_memory_usage_gib();
+        const auto memory_workspace_gb = ws.prune.get_memory_usage_gib();
+        const auto memory_irfft_scratch_gb =
+            m_prune_funcs->get_irfft_scratch_memory_gib();
+        const auto memory_total_gb = get_memory_usage_gib();
+        spdlog::info(
+            "Pruning run {:03d}: Memory Usage: {:.2f} GB total "
+            "({:.2f} GB tree + {:.2f} GB workspace + {:.3f} GB irfft scratch)",
+            ref_seg, memory_total_gb, memory_tree_gb, memory_workspace_gb,
+            memory_irfft_scratch_gb);
+
+        // Setup log and result files
+        std::filesystem::path actual_log_file =
+            log_file.value_or(outdir / std::format("tmp_{}_log.txt", run_name));
+        std::filesystem::path actual_result_file = result_file.value_or(
+            outdir / std::format("tmp_{}_results.h5", run_name));
+
+        const auto nsegments = m_ffa_plan.get_nsegments().back();
+
+        initialize(ffa_fold, ref_seg, m_stream);
+        spdlog::info("Pruning run {:03d}: initialized", ref_seg);
+
+        SizeType iterations_completed = 0;
+        for (SizeType iter = 0; iter < nsegments - 1; ++iter) {
+            execute_iteration(ffa_fold, m_stream);
+            iterations_completed = iter + 1;
+            // Check for early termination (no survivors)
+            if (m_prune_complete) {
+                break;
+            }
+            // Should we reintegrate survivors at this level?
+            if (!ascend_levels.empty() &&
+                std::ranges::find(ascend_levels, m_prune_level) !=
+                    ascend_levels.end()) {
+                ascend_survivors_batched(ffa_fold, m_stream);
+            }
+        }
+
+        // Log early exit ONCE after loop if needed
+        if (m_prune_complete && iterations_completed < nsegments - 1) {
+            spdlog::info(
+                "Pruning terminated early at iteration {} - no survivors",
+                iterations_completed);
+        }
+
+        // Final ascend if needed
+        if (ascend_levels.empty() ||
+            std::ranges::find(ascend_levels, m_prune_level) ==
+                ascend_levels.end()) {
+            ascend_survivors_batched(ffa_fold, m_stream);
+        }
+
+        // Write results (after transforming to middle of the data)
+        report_survivors(actual_result_file, run_name);
+
+        // Final log entries
+        std::ofstream log(actual_log_file, std::ios::app);
+        log << std::format("Pruning log for ref segment: {}\n", ref_seg);
+        log << m_pstats.get_all_summaries();
+        log << std::format("Pruning run complete for ref segment {}\n",
+                           ref_seg);
+        log.close();
+
+        spdlog::info("Pruning run {:03d}: complete", ref_seg);
+        spdlog::info("Pruning run {:03d}: stats: {}", ref_seg,
+                     m_pstats.get_stats_summary_cuda(timer.stop()));
+    }
+
+private:
+    // The observer pointer that always points to the active workspace.
+    memory::EPWorkspaceCUDA<FoldTypeCUDA>* m_workspace_ptr{nullptr};
+
+    search::PulsarSearchConfig m_cfg;
+    plans::FFAPlan<HostFoldT> m_ffa_plan;
+    std::vector<float> m_threshold_scheme;
+    SizeType m_max_sugg;
+    SizeType m_batch_size;
+    SizeType m_branch_max;
+    std::string_view m_poly_basis;
+    SizeType m_total_levels;
+    int m_device_id;
+    cudaStream_t m_stream{nullptr};
+
+    bool m_prune_complete{false};
+    SizeType m_prune_level{};
+    psr_utils::MiddleOutScheme m_snail_scheme;
+    cands::PruneStatsCollection m_pstats;
+    std::unique_ptr<core::PruneDPFunctsCUDA<FoldTypeCUDA>> m_prune_funcs;
+
+    [[nodiscard]] memory::EPWorkspaceCUDA<FoldTypeCUDA>&
+    get_workspace() noexcept {
+        return *m_workspace_ptr;
+    }
+    [[nodiscard]] const memory::EPWorkspaceCUDA<FoldTypeCUDA>&
+    get_workspace() const noexcept {
+        return *m_workspace_ptr;
+    }
+
+    void initialize(cuda::std::span<const FoldTypeCUDA> ffa_fold,
+                    SizeType ref_seg,
+                    cudaStream_t stream) {
+        //  Reset the suggestion buffer state
+        auto& ws         = get_workspace();
+        auto& world_tree = ws.world_tree;
+        world_tree.reset();
+
+        // Initialize snail scheme for current ref_seg
+        const auto nsegments = m_ffa_plan.get_nsegments().back();
+        const auto tseg      = m_ffa_plan.get_tsegments().back();
+        m_snail_scheme = psr_utils::MiddleOutScheme(nsegments, ref_seg, tseg);
+
+        m_prune_level    = 0;
+        m_prune_complete = false;
+
+        // Initialize the world tree with the first segment
+        const auto fold_segment =
+            m_prune_funcs->load_segment(ffa_fold, m_snail_scheme.get_ref_idx());
+        const auto coord_init = m_snail_scheme.get_coord(m_prune_level);
+        const auto n_leaves   = m_ffa_plan.get_ncoords().back();
+        m_prune_funcs->seed(fold_segment, cuda_utils::as_span(ws.seed_leaves_d),
+                            cuda_utils::as_span(ws.seed_scores_d), coord_init,
+                            stream);
+        // Initialize the WorldTree with the generated data
+        world_tree.add_initial(
+            cuda_utils::as_span(ws.seed_leaves_d), fold_segment,
+            cuda_utils::as_span(ws.seed_scores_d), n_leaves, stream);
+
+        // Initialize the prune stats
+        m_pstats = cands::PruneStatsCollection();
+        const cands::PruneStats pstats_cur{
+            .level         = m_prune_level,
+            .seg_idx       = m_snail_scheme.get_segment_idx(m_prune_level),
+            .threshold     = 0,
+            .score_min     = world_tree.get_score_min(stream),
+            .score_max     = world_tree.get_score_max(stream),
+            .n_branches    = world_tree.get_size(),
+            .n_leaves      = world_tree.get_size(),
+            .n_leaves_phy  = world_tree.get_size(),
+            .n_leaves_surv = world_tree.get_size(),
+        };
+        m_pstats.update_stats(pstats_cur);
+    }
+
+    void ascend_survivors_batched(cuda::std::span<const FoldTypeCUDA> ffa_fold,
+                                  cudaStream_t stream) {
+        if (m_prune_complete) {
+            return;
+        }
+        auto& ws               = get_workspace();
+        auto& world_tree       = ws.world_tree;
+        const auto n_survivors = world_tree.get_size();
+        if (n_survivors == 0) {
+            return;
+        }
+        auto& prune_ws       = ws.prune;
+        const auto coord_mid = m_snail_scheme.get_coord(m_prune_level);
+        const auto [idx_segments, coord_segments] =
+            m_snail_scheme.get_segment_coords_so_far(m_prune_level);
+        const auto batch_cap =
+            std::max(SizeType{1}, std::min(m_batch_size, n_survivors));
+        const auto n_segments_so_far = idx_segments.size();
+
+        // Copy the segment coordinates to the device
+        thrust::copy(thrust::cuda::par.on(stream), idx_segments.begin(),
+                     idx_segments.end(), ws.idx_segments_d.begin());
+        thrust::copy(thrust::cuda::par.on(stream), coord_segments.begin(),
+                     coord_segments.end(), ws.coord_segments_d.begin());
+
+        memory::CircularViewCUDA<double> leaves_cv =
+            world_tree.get_leaves_circular_view();
+        memory::CircularViewCUDA<FoldTypeCUDA> folds_cv =
+            world_tree.get_folds_circular_view();
+        memory::CircularViewCUDA<float> scores_cv =
+            world_tree.get_scores_circular_view();
+        memory::CircularViewCUDA<float> scores_ep_cv =
+            world_tree.get_scores_ep_circular_view();
+
+        const auto leaves_stride = world_tree.get_leaves_stride();
+        const auto folds_stride  = world_tree.get_folds_stride();
+
+        auto process_region = [&](cuda::std::span<const double> leaves_region,
+                                  cuda::std::span<FoldTypeCUDA> folds_region,
+                                  cuda::std::span<float> scores_region,
+                                  cuda::std::span<float> scores_ep_region) {
+            if (leaves_region.empty()) {
+                return;
+            }
+            error_check::check_equal(
+                leaves_region.size() % leaves_stride, SizeType{0},
+                "ascend_survivors_batched: leaves segment not stride-aligned");
+            const auto n_leaves_region = leaves_region.size() / leaves_stride;
+            error_check::check_equal(
+                folds_region.size(), n_leaves_region * folds_stride,
+                "ascend_survivors_batched: folds/leaves leaf count mismatch");
+            error_check::check_equal(
+                scores_region.size(), n_leaves_region,
+                "ascend_survivors_batched: scores/leaves leaf count mismatch");
+            error_check::check_equal(
+                scores_ep_region.size(), n_leaves_region,
+                "ascend_survivors_batched: scores_ep/leaves leaf count "
+                "mismatch");
+
+            for (SizeType off = 0; off < n_leaves_region; off += batch_cap) {
+                const auto chunk = std::min(batch_cap, n_leaves_region - off);
+                m_prune_funcs->ascend(
+                    ffa_fold,
+                    leaves_region.subspan(off * leaves_stride,
+                                          chunk * leaves_stride),
+                    folds_region.subspan(off * folds_stride,
+                                         chunk * folds_stride),
+                    scores_region.subspan(off, chunk),
+                    scores_ep_region.subspan(off, chunk),
+                    cuda_utils::as_span(ws.idx_segments_d)
+                        .first(n_segments_so_far),
+                    cuda_utils::as_span(ws.coord_segments_d)
+                        .first(n_segments_so_far),
+                    coord_mid,
+                    cuda_utils::as_span(prune_ws.branched_param_idx_d),
+                    cuda_utils::as_span(prune_ws.branched_phase_shift_d), chunk,
+                    stream);
+            }
+        };
+
+        process_region(leaves_cv.first, folds_cv.first, scores_cv.first,
+                       scores_ep_cv.first);
+        process_region(leaves_cv.second, folds_cv.second, scores_cv.second,
+                       scores_ep_cv.second);
+    }
+
+    void report_survivors(const std::filesystem::path& actual_result_file,
+                          std::string_view run_name) {
+        auto& ws         = get_workspace();
+        auto& world_tree = ws.world_tree;
+
+        memory::CircularViewCUDA<double> leaves_view =
+            world_tree.get_leaves_circular_view();
+        memory::CircularViewCUDA<float> scores_view =
+            world_tree.get_scores_circular_view();
+        memory::CircularViewCUDA<float> scores_ep_view =
+            world_tree.get_scores_ep_circular_view();
+
+        const auto n_leaves      = world_tree.get_size();
+        const auto leaves_stride = world_tree.get_leaves_stride();
+        const auto coord_mid     = m_snail_scheme.get_coord(m_prune_level);
+        const auto n1            = leaves_view.first.size() / leaves_stride;
+        const auto n2            = leaves_view.second.size() / leaves_stride;
+
+        if (n_leaves > 0) {
+            // Transform the suggestion params to middle of the data
+            m_prune_funcs->report(leaves_view.first, coord_mid, n1, m_stream);
+            if (n2 > 0) {
+                m_prune_funcs->report(leaves_view.second, coord_mid, n2,
+                                      m_stream);
+            }
+        }
+
+        // Copy the results to the host
+        std::vector<double> leaves_report_h(n_leaves * leaves_stride);
+        std::vector<float> scores_report_h(n_leaves);
+        std::vector<float> scores_ep_report_h(n_leaves);
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(leaves_report_h.data(), leaves_view.first.data(),
+                            (n1 * leaves_stride) * sizeof(double),
+                            cudaMemcpyDeviceToHost, m_stream),
+            "cudaMemcpyAsync leaves_report failed");
+        if (n2 > 0) {
+            cuda_utils::check_cuda_call(
+                cudaMemcpyAsync(leaves_report_h.data() + (n1 * leaves_stride),
+                                leaves_view.second.data(),
+                                (n2 * leaves_stride) * sizeof(double),
+                                cudaMemcpyDeviceToHost, m_stream),
+                "cudaMemcpyAsync leaves_report failed");
+        }
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(scores_report_h.data(), scores_view.first.data(),
+                            n1 * sizeof(float), cudaMemcpyDeviceToHost,
+                            m_stream),
+            "cudaMemcpyAsync scores_report part 1 failed");
+        if (n2 > 0) {
+            cuda_utils::check_cuda_call(
+                cudaMemcpyAsync(scores_report_h.data() + n1,
+                                scores_view.second.data(), n2 * sizeof(float),
+                                cudaMemcpyDeviceToHost, m_stream),
+                "cudaMemcpyAsync scores_report part 2 failed");
+        }
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(scores_ep_report_h.data(),
+                            scores_ep_view.first.data(), n1 * sizeof(float),
+                            cudaMemcpyDeviceToHost, m_stream),
+            "cudaMemcpyAsync scores_ep_report part 1 failed");
+        if (n2 > 0) {
+            cuda_utils::check_cuda_call(
+                cudaMemcpyAsync(scores_ep_report_h.data() + n1,
+                                scores_ep_view.second.data(),
+                                n2 * sizeof(float), cudaMemcpyDeviceToHost,
+                                m_stream),
+                "cudaMemcpyAsync scores_ep_report part 2 failed");
+        }
+
+        cuda_utils::check_cuda_call(
+            cudaStreamSynchronize(m_stream),
+            "cudaStreamSynchronize write results failed");
+
+        // Both host vectors are now contiguous — wrap as single-span views
+        memory::CircularView<double> leaves_report_view{
+            std::span<double>(leaves_report_h), std::span<double>{}};
+        memory::CircularView<float> scores_report_view{
+            std::span<float>(scores_report_h), std::span<float>{}};
+        memory::CircularView<float> scores_ep_report_view{
+            std::span<float>(scores_ep_report_h), std::span<float>{}};
+
+        const auto total_pruning_gflops = compute_total_prune_gflops();
+        // Write results
+        auto result_writer = cands::PruneResultWriter(
+            actual_result_file, cands::PruneResultWriter::Mode::kAppend);
+        result_writer.write_run_results(
+            run_name, m_snail_scheme.get_data(), leaves_report_view,
+            scores_report_view, scores_ep_report_view, total_pruning_gflops,
+            n_leaves, m_cfg.get_nparams(), m_pstats);
+    }
+
+    [[nodiscard]] double compute_total_prune_gflops() const {
+        const auto packed_stats = m_pstats.get_packed_data();
+        const auto& level_stats = packed_stats.first;
+        if (level_stats.empty()) {
+            return 0.0;
+        }
+
+        const auto n_params = static_cast<double>(m_cfg.get_nparams());
+        const auto nbins    = static_cast<double>(m_cfg.get_nbins());
+        const auto nbins_f  = static_cast<double>(m_cfg.get_nbins_f());
+        const auto n_widths = static_cast<double>(m_cfg.get_n_scoring_widths());
+        const auto conservative_tile =
+            static_cast<double>(m_cfg.get_use_conservative_tile());
+
+        auto score_flops = [&](double n_leaves) {
+            return (n_leaves * 2.0) * (n_widths * 2.0 * nbins);
+        };
+        auto irfft_flops = [&](double n_leaves) {
+            if constexpr (std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>) {
+                return (2.0 * n_leaves) * nbins * std::log2(nbins);
+            } else {
+                return 0.0;
+            }
+        };
+        auto shift_add_flops = [&](double n_leaves) {
+            if constexpr (std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>) {
+                return n_leaves * 2.0 * nbins_f * 8.0;
+            } else {
+                return n_leaves * 2.0 * nbins;
+            }
+        };
+
+        auto branch_flops = [&](double n_branches, double n_leaves) {
+            // Dominant Taylor branch arithmetic: per-parameter step/shift work
+            // over input branches plus child-center generation over outputs.
+            return (n_branches * n_params * 10.0) + (n_leaves * n_params * 2.0);
+        };
+        auto resolve_flops = [&](double n_leaves) {
+            // Polynomial propagation to acceleration/frequency plus phase and
+            // nearest-grid arithmetic. The order-dependent part scales with
+            // the number of Taylor parameters.
+            return n_leaves * ((6.0 * n_params) + 16.0);
+        };
+        auto transform_flops = [&](double n_leaves) {
+            // Value propagation is triangular in the Taylor order; conservative
+            // tiles also propagate uncertainty with squared terms and sqrt.
+            const auto value_flops = n_params * (n_params + 1.0);
+            const auto error_flops =
+                conservative_tile * n_params * ((2.0 * n_params) + 1.0);
+            return n_leaves * (value_flops + error_flops);
+        };
+        auto report_flops = [&](double n_leaves) {
+            // Gauge transform and error propagation for all non-frequency
+            // parameters, plus final frequency/error conversion.
+            return n_leaves * (((n_params - 1.0) * 12.0) + 4.0);
+        };
+
+        double total_flops = 0.0;
+        for (const auto& stats : level_stats) {
+            const auto n_branches    = static_cast<double>(stats.n_branches);
+            const auto n_leaves      = static_cast<double>(stats.n_leaves);
+            const auto n_leaves_phy  = static_cast<double>(stats.n_leaves_phy);
+            const auto n_leaves_surv = static_cast<double>(stats.n_leaves_surv);
+
+            if (stats.level == 0) {
+                total_flops += irfft_flops(n_leaves_surv);
+                total_flops += score_flops(n_leaves_surv);
+                continue;
+            }
+
+            total_flops += branch_flops(n_branches, n_leaves);
+            total_flops += resolve_flops(n_leaves_phy);
+            total_flops += shift_add_flops(n_leaves_phy);
+            total_flops += irfft_flops(n_leaves_phy);
+            total_flops += score_flops(n_leaves_phy);
+            total_flops += transform_flops(n_leaves_surv);
+        }
+
+        const auto& final_stats = level_stats.back();
+        const auto n_final_survivors =
+            static_cast<double>(final_stats.n_leaves_surv);
+        const auto segment_coords =
+            m_snail_scheme.get_segment_coords_so_far(m_prune_level);
+        const auto n_segments =
+            static_cast<double>(segment_coords.first.size());
+
+        total_flops += n_segments * resolve_flops(n_final_survivors);
+        total_flops += n_segments * shift_add_flops(n_final_survivors);
+        total_flops += irfft_flops(n_final_survivors);
+        total_flops += score_flops(n_final_survivors);
+        total_flops += report_flops(n_final_survivors);
+
+        return total_flops * 1.0e-9;
+    }
+
+    void execute_iteration(cuda::std::span<const FoldTypeCUDA> ffa_fold,
+                           cudaStream_t stream) {
+        if (m_prune_complete) {
+            return;
+        }
+        ++m_prune_level;
+        error_check::check_less_equal(
+            m_prune_level, m_total_levels,
+            std::format("Pruning complete - exceeded total levels at level "
+                        "{}",
+                        m_prune_level));
+        auto& ws         = get_workspace();
+        auto& world_tree = ws.world_tree;
+        // Prepare for in-place update: mark start of write region, reset size
+        // for new suggestions.
+        world_tree.prepare_in_place_update();
+
+        cands::PruneIterationStats stats;
+        const auto seg_idx_cur = m_snail_scheme.get_segment_idx(m_prune_level);
+        const auto threshold   = m_threshold_scheme[m_prune_level - 1];
+        // Capture the number of branches *before* finalizing the update
+        const auto n_branches = world_tree.get_size_old();
+
+        execute_iteration_batched(ffa_fold, seg_idx_cur, threshold, stats,
+                                  stream);
+
+        // Finalize: make new region active, defragment for contiguous access.
+        world_tree.finalize_in_place_update();
+
+        // Update statistics
+        stats.norm_scores(world_tree.get_size());
+        const cands::PruneStats pstats_cur{
+            .level         = m_prune_level,
+            .seg_idx       = seg_idx_cur,
+            .threshold     = threshold,
+            .score_min     = stats.score_min,
+            .score_max     = stats.score_max,
+            .n_branches    = n_branches,
+            .n_leaves      = stats.n_leaves,
+            .n_leaves_phy  = stats.n_leaves_phy,
+            .n_leaves_surv = world_tree.get_size(),
+        };
+        m_pstats.update_stats(pstats_cur);
+
+        // Check if no survivors
+        if (world_tree.get_size() == 0) {
+            m_prune_complete = true;
+            return;
+        }
+    }
+
+    // Iteration flow: Branch -> Validate -> Resolve -> Load/Shift/Add -> Score
+    // -> Filter -> Transform -> Add to buffer.
+    void execute_iteration_batched(cuda::std::span<const FoldTypeCUDA> ffa_fold,
+                                   SizeType seg_idx_cur,
+                                   float threshold,
+                                   cands::PruneIterationStats& stats,
+                                   cudaStream_t stream) {
+
+        auto& ws            = get_workspace();
+        auto& world_tree    = ws.world_tree;
+        auto& prune_ws      = ws.prune;
+        auto& scratch_ws    = ws.scratch;
+        auto branch_ws_view = ws.branch.get_view();
+
+        // Get coordinates
+        const auto coord_init = m_snail_scheme.get_coord(0);
+        const auto coord_prev = m_snail_scheme.get_coord(m_prune_level - 1);
+        const auto coord_next = m_snail_scheme.get_coord(m_prune_level);
+        const auto coord_cur  = m_snail_scheme.get_current_coord(m_prune_level);
+        const auto coord_add  = m_snail_scheme.get_segment_coord(m_prune_level);
+
+        // Load fold segment for current level
+        const auto ffa_fold_segment =
+            m_prune_funcs->load_segment(ffa_fold, seg_idx_cur);
+
+        auto current_threshold = threshold;
+
+        const auto n_branches = world_tree.get_size_old();
+        const auto batch_size =
+            std::max(1UL, std::min(m_batch_size, n_branches));
+
+        // Process branches in batches
+        // Process branches in potentially split batches to handle wraps
+        SizeType total_processed = 0;
+        while (total_processed < n_branches) {
+            const SizeType remaining       = n_branches - total_processed;
+            const SizeType this_batch_size = std::min(batch_size, remaining);
+
+            // Get contiguous span; it may be smaller if wrap occurs
+            // Read from the beginning of unconsumed data
+            auto [leaves_tree_span, current_batch_size] =
+                world_tree.get_leaves_span(this_batch_size);
+            if (current_batch_size == 0) {
+                throw std::runtime_error(
+                    std::format("Loaded batch size is 0: total_processed={}, "
+                                "this_batch_size={}, remaining={}",
+                                total_processed, this_batch_size, remaining));
+            }
+            total_processed += current_batch_size;
+
+            // Branch
+            const auto n_leaves_batch = m_prune_funcs->branch(
+                leaves_tree_span,
+                cuda_utils::as_span(prune_ws.branched_leaves_d),
+                cuda_utils::as_span(prune_ws.branched_indices_d),
+                cuda_utils::as_span(prune_ws.validation_mask_d), coord_cur,
+                coord_prev, current_batch_size, branch_ws_view, scratch_ws,
+                stream);
+            stats.n_leaves += n_leaves_batch;
+            if (n_leaves_batch == 0) {
+                world_tree.consume_read(current_batch_size);
+                continue;
+            }
+            error_check::check_less_equal(
+                n_leaves_batch, prune_ws.max_branched_leaves,
+                "Branch factor exceeded workspace size:n_leaves_batch <= "
+                "max_branched_leaves");
+
+            // Validation
+            const auto n_leaves_after_validation = m_prune_funcs->validate(
+                cuda_utils::as_span(prune_ws.branched_leaves_d),
+                cuda_utils::as_span(prune_ws.branched_indices_d),
+                cuda_utils::as_span(prune_ws.validation_mask_d), coord_cur,
+                n_leaves_batch, scratch_ws, stream);
+            stats.n_leaves_phy += n_leaves_after_validation;
+            if (n_leaves_after_validation == 0) {
+                world_tree.consume_read(current_batch_size);
+                continue;
+            }
+
+            // Resolve kernel
+            m_prune_funcs->resolve(
+                cuda_utils::as_span(prune_ws.branched_leaves_d),
+                cuda_utils::as_span(prune_ws.validation_mask_d),
+                cuda_utils::as_span(prune_ws.branched_param_idx_d),
+                cuda_utils::as_span(prune_ws.branched_phase_shift_d), coord_add,
+                coord_cur, coord_init, n_leaves_batch, stream);
+
+            // Shift and add kernel
+            // branched_indices_d are logical indices, convert to physical
+            // indices in shift_add kernel
+            m_prune_funcs->shift_add(
+                world_tree.get_folds_span(),
+                cuda_utils::as_span(prune_ws.branched_indices_d),
+                cuda_utils::as_span(prune_ws.validation_mask_d),
+                ffa_fold_segment,
+                cuda_utils::as_span(prune_ws.branched_param_idx_d),
+                cuda_utils::as_span(prune_ws.branched_phase_shift_d),
+                cuda_utils::as_span(prune_ws.branched_folds_d), n_leaves_batch,
+                world_tree.get_physical_start_idx(), world_tree.get_capacity(),
+                stream);
+
+            // Score and prune kernel
+            const auto n_leaves_passing = m_prune_funcs->score_and_filter(
+                cuda_utils::as_span(prune_ws.branched_folds_d),
+                cuda_utils::as_span(prune_ws.branched_scores_d),
+                cuda_utils::as_span(prune_ws.validation_mask_d),
+                cuda_utils::as_span(prune_ws.filtered_mask_d),
+                current_threshold, n_leaves_batch, scratch_ws, stream);
+
+            // Compute min and max scores
+            MinMaxFloat minmax_scores;
+            scratch_ws.compute_min_max_scores(
+                cuda_utils::as_span(prune_ws.branched_scores_d),
+                cuda_utils::as_span(prune_ws.validation_mask_d), &minmax_scores,
+                n_leaves_batch, stream);
+            stats.score_min = std::min(stats.score_min, minmax_scores.min);
+            stats.score_max = std::max(stats.score_max, minmax_scores.max);
+
+            if (n_leaves_passing == 0) {
+                world_tree.consume_read(current_batch_size);
+                continue;
+            }
+            error_check::check_less_equal(
+                n_leaves_passing, prune_ws.max_branched_leaves,
+                "n_leaves_passing <= max_branched_leaves");
+
+            // Transform kernel
+            m_prune_funcs->transform(
+                cuda_utils::as_span(prune_ws.branched_leaves_d),
+                cuda_utils::as_span(prune_ws.filtered_mask_d), coord_next,
+                coord_cur, n_leaves_batch, stream);
+
+            // Convert validation mask to indices
+            scratch_ws.convert_mask_to_indices(
+                cuda_utils::as_span(prune_ws.filtered_mask_d),
+                cuda_utils::as_span(prune_ws.branched_indices_d),
+                n_leaves_batch, stream);
+
+            // Add batch to output suggestions
+            current_threshold = world_tree.add_batch_scattered(
+                cuda_utils::as_span(prune_ws.branched_leaves_d),
+                cuda_utils::as_span(prune_ws.branched_folds_d),
+                cuda_utils::as_span(prune_ws.branched_scores_d),
+                cuda_utils::as_span(prune_ws.branched_indices_d),
+                current_threshold, n_leaves_passing, stream);
+
+            // Notify the buffer that a batch of the old suggestions has been
+            // consumed
+            world_tree.consume_read(current_batch_size);
+        }
+    }
+
+}; // End PruneCUDAImpl implementation
+
+} // End of anonymous namespace
+
+// EPMultiPassCudaCore::Impl implementation
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+class EPMultiPassCudaCore<FoldTypeCUDA>::Impl {
+public:
+    using HostFoldT = HostFoldType<FoldTypeCUDA>;
+
+    Impl(search::PulsarSearchConfig cfg,
+         std::span<const float> threshold_scheme,
+         std::optional<SizeType> n_runs,
+         std::optional<std::vector<SizeType>> ref_segs,
+         std::span<const SizeType> ascend_levels,
+         SizeType max_sugg,
+         SizeType batch_size,
+         std::string_view poly_basis,
+         int device_id)
+        : m_cfg(std::move(cfg)),
+          m_threshold_scheme(threshold_scheme.begin(), threshold_scheme.end()),
+          m_n_runs(n_runs),
+          m_ref_segs(std::move(ref_segs)),
+          m_ascend_levels(ascend_levels.begin(), ascend_levels.end()),
+          m_max_sugg(max_sugg),
+          m_batch_size(batch_size),
+          m_poly_basis(poly_basis),
+          m_device_id(device_id),
+          m_execution_stream(device_id),
+          m_ffa_plan(m_cfg),
+          m_branching_pattern(m_ffa_plan.get_branching_pattern(m_poly_basis)),
+          m_branch_max(
+              std::max(static_cast<SizeType>(std::ceil(
+                           *std::ranges::max_element(m_branching_pattern) * 2)),
+                       32UL)),
+          m_workspace_storage(m_batch_size,
+                              m_branch_max,
+                              m_max_sugg,
+                              m_ffa_plan.get_ncoords().back(),
+                              m_cfg.get_nparams(),
+                              std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>
+                                  ? m_cfg.get_nbins_f()
+                                  : m_cfg.get_nbins(),
+                              m_ffa_plan.get_nsegments().back(),
+                              m_execution_stream.get()),
+          m_workspace_ptr(&m_workspace_storage) {
+        // Validate workspace
+        const auto ncoords_ffa = m_ffa_plan.get_ncoords().back();
+        const auto nsegments   = m_ffa_plan.get_nsegments().back();
+        const auto nbins       = std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>
+                                     ? m_cfg.get_nbins_f()
+                                     : m_cfg.get_nbins();
+        const auto& ws         = get_workspace();
+        ws.validate(m_batch_size, m_branch_max, m_max_sugg, ncoords_ffa,
+                    m_cfg.get_nparams(), nbins, nsegments);
+    }
+
+    Impl(memory::EPWorkspaceCUDA<FoldTypeCUDA>& workspace,
+         cudaStream_t execution_stream,
+         search::PulsarSearchConfig cfg,
+         std::span<const float> threshold_scheme,
+         std::optional<SizeType> n_runs,
+         std::optional<std::vector<SizeType>> ref_segs,
+         std::span<const SizeType> ascend_levels,
+         SizeType max_sugg,
+         SizeType batch_size,
+         std::string_view poly_basis,
+         int device_id)
+        : m_cfg(std::move(cfg)),
+          m_threshold_scheme(threshold_scheme.begin(), threshold_scheme.end()),
+          m_n_runs(n_runs),
+          m_ref_segs(std::move(ref_segs)),
+          m_ascend_levels(ascend_levels.begin(), ascend_levels.end()),
+          m_max_sugg(max_sugg),
+          m_batch_size(batch_size),
+          m_poly_basis(poly_basis),
+          m_device_id(device_id),
+          m_execution_stream(execution_stream),
+          m_ffa_plan(m_cfg),
+          m_workspace_storage(),
+          m_workspace_ptr(&workspace) {
+        // Create branching pattern and branch max
+        m_branching_pattern   = m_ffa_plan.get_branching_pattern(m_poly_basis);
+        const auto branch_max = *std::ranges::max_element(m_branching_pattern);
+        m_branch_max =
+            std::max(static_cast<SizeType>(std::ceil(branch_max * 2)), 32UL);
+
+        // Validate workspaces
+        const auto& ws         = get_workspace();
+        const auto ncoords_ffa = m_ffa_plan.get_ncoords().back();
+        const auto nsegments   = m_ffa_plan.get_nsegments().back();
+        const SizeType nbins   = std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>
+                                     ? m_cfg.get_nbins_f()
+                                     : m_cfg.get_nbins();
+        ws.validate(m_batch_size, m_branch_max, m_max_sugg, ncoords_ffa,
+                    m_cfg.get_nparams(), nbins, nsegments);
+    }
+
+    ~Impl()                      = default;
+    Impl(const Impl&)            = delete;
+    Impl& operator=(const Impl&) = delete;
+    Impl(Impl&&)                 = delete;
+    Impl& operator=(Impl&&)      = delete;
+
+    void execute(std::span<const float> ts_e,
+                 std::span<const float> ts_v,
+                 const std::filesystem::path& outdir,
+                 std::string_view file_prefix) {
+        timing::SimpleTimer timer;
+        timer.start();
+        spdlog::info("EPMultiPassCudaCore: Initializing with FFA");
+        // Create appropriate FFA fold
+        std::tuple<thrust::device_vector<FoldTypeCUDA>,
+                   plans::FFAPlan<HostFoldT>>
+            result = compute_ffa_cuda_device<FoldTypeCUDA>(ts_e, ts_v, m_cfg,
+                                                           m_device_id);
+        const thrust::device_vector<FoldTypeCUDA> ffa_fold_d =
+            std::get<0>(result);
+        plans::FFAPlan<HostFoldT> ffa_plan = std::move(std::get<1>(result));
+        // Setup output files and directory
+        const auto nsegments = ffa_plan.get_nsegments().back();
+        const std::string filebase =
+            std::format("{}_pruning_nstages_{}", file_prefix, nsegments);
+        const auto log_file =
+            (outdir / std::format("{}_log.txt", filebase)).lexically_normal();
+        const auto result_file =
+            (outdir / std::format("{}_results.h5", filebase))
+                .lexically_normal();
+
+        // Create output directory
+        std::error_code ec;
+        std::filesystem::create_directories(outdir, ec);
+        if (!std::filesystem::exists(outdir)) {
+            throw std::runtime_error(
+                std::format("EPMultiPassCudaCore::execute: Failed to create output "
+                            "directory '{}': {}",
+                            outdir.string(), ec.message()));
+        }
+
+        // Determine ref_segs to process
+        auto ref_segs_to_process =
+            utils::determine_ref_segs(nsegments, m_n_runs, m_ref_segs);
+        spdlog::info("Starting Pruning for {} runs, on CUDA device {}",
+                     ref_segs_to_process.size(), m_device_id);
+
+        // Initialize log file
+        std::ofstream log(log_file);
+        log << "Pruning log\n";
+        log.close();
+
+        // Write metadata to result file
+        auto writer = cands::PruneResultWriter(
+            result_file, cands::PruneResultWriter::Mode::kWrite);
+        writer.write_metadata(m_cfg.get_param_names(), nsegments, m_max_sugg,
+                              m_threshold_scheme);
+        auto& ws   = get_workspace();
+        auto prune = PruneCUDAImpl<FoldTypeCUDA>(
+            ws, m_cfg, m_threshold_scheme, m_max_sugg, m_batch_size,
+            m_branch_max, m_poly_basis, m_device_id, m_execution_stream.get());
+        for (const auto ref_seg : ref_segs_to_process) {
+            prune.execute(cuda_utils::as_span(ffa_fold_d), ref_seg,
+                          m_ascend_levels, outdir, log_file, result_file,
+                          /*task_id=*/0);
+        }
+        const auto ep_time = timer.stop();
+        // Write final runtime to result file
+        auto writer_final = cands::PruneResultWriter(
+            result_file, cands::PruneResultWriter::Mode::kAppend);
+        writer_final.write_runtime(ep_time);
+        spdlog::info("Pruning complete. Results saved to {}",
+                     result_file.string());
+        spdlog::info("Pruning time: {:.2f} seconds", ep_time);
+    }
+
+private:
+    search::PulsarSearchConfig m_cfg;
+    std::vector<float> m_threshold_scheme;
+    std::optional<SizeType> m_n_runs;
+    std::optional<std::vector<SizeType>> m_ref_segs;
+    std::vector<SizeType> m_ascend_levels;
+    SizeType m_max_sugg;
+    SizeType m_batch_size;
+    std::string m_poly_basis;
+    int m_device_id;
+
+    plans::FFAPlan<HostFoldT> m_ffa_plan;
+    std::vector<double> m_branching_pattern;
+    SizeType m_branch_max{0};
+
+    // EP workspace ownership
+    ExecutionStream m_execution_stream;
+    memory::EPWorkspaceCUDA<FoldTypeCUDA> m_workspace_storage;
+    // The observer pointer that always points to the active workspace.
+    memory::EPWorkspaceCUDA<FoldTypeCUDA>* m_workspace_ptr{nullptr};
+
+    [[nodiscard]] memory::EPWorkspaceCUDA<FoldTypeCUDA>&
+    get_workspace() noexcept {
+        return *m_workspace_ptr;
+    }
+    [[nodiscard]] const memory::EPWorkspaceCUDA<FoldTypeCUDA>&
+    get_workspace() const noexcept {
+        return *m_workspace_ptr;
+    }
+
+}; // End EPMultiPassCudaCore::Impl implementation
+
+// --- Definitions for EPMultiPassCudaCore ---
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+EPMultiPassCudaCore<FoldTypeCUDA>::EPMultiPassCudaCore(
+    search::PulsarSearchConfig cfg,
+    std::span<const float> threshold_scheme,
+    std::optional<SizeType> n_runs,
+    std::optional<std::vector<SizeType>> ref_segs,
+    std::span<const SizeType> ascend_levels,
+    SizeType max_sugg,
+    SizeType batch_size,
+    std::string_view poly_basis,
+    int device_id)
+    : m_impl(std::make_unique<Impl>(std::move(cfg),
+                                    threshold_scheme,
+                                    n_runs,
+                                    std::move(ref_segs),
+                                    ascend_levels,
+                                    max_sugg,
+                                    batch_size,
+                                    poly_basis,
+                                    device_id)) {}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+EPMultiPassCudaCore<FoldTypeCUDA>::EPMultiPassCudaCore(
+    memory::EPWorkspaceCUDA<FoldTypeCUDA>& workspace,
+    cudaStream_t execution_stream,
+    search::PulsarSearchConfig cfg,
+    std::span<const float> threshold_scheme,
+    std::optional<SizeType> n_runs,
+    std::optional<std::vector<SizeType>> ref_segs,
+    std::span<const SizeType> ascend_levels,
+    SizeType max_sugg,
+    SizeType batch_size,
+    std::string_view poly_basis,
+    int device_id)
+    : m_impl(std::make_unique<Impl>(workspace,
+                                    execution_stream,
+                                    std::move(cfg),
+                                    threshold_scheme,
+                                    n_runs,
+                                    std::move(ref_segs),
+                                    ascend_levels,
+                                    max_sugg,
+                                    batch_size,
+                                    poly_basis,
+                                    device_id)) {}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+EPMultiPassCudaCore<FoldTypeCUDA>::~EPMultiPassCudaCore() = default;
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+EPMultiPassCudaCore<FoldTypeCUDA>::EPMultiPassCudaCore(
+    EPMultiPassCudaCore<FoldTypeCUDA>&& other) noexcept = default;
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+EPMultiPassCudaCore<FoldTypeCUDA>& EPMultiPassCudaCore<FoldTypeCUDA>::operator=(
+    EPMultiPassCudaCore<FoldTypeCUDA>&& other) noexcept = default;
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+void EPMultiPassCudaCore<FoldTypeCUDA>::execute(std::span<const float> ts_e,
+                                            std::span<const float> ts_v,
+                                            const std::filesystem::path& outdir,
+                                            std::string_view file_prefix) {
+    m_impl->execute(ts_e, ts_v, outdir, file_prefix);
+}
+
+// Explicit instantiation
+template class EPMultiPassCudaCore<float>;
+template class EPMultiPassCudaCore<ComplexTypeCUDA>;
+
+template <SupportedFoldType FoldType>
+class EPMultiPassCudaEngine : public detail::EPMultiPassEngine<FoldType> {
+    using FoldTypeCUDA = CudaFoldType<FoldType>;
+
+public:
+    /// Runs on the caller's device workspace, on the default stream (the
+    /// stream the public EPWorkspace handle was built on).
+    EPMultiPassCudaEngine(memory::EPWorkspaceCUDA<FoldTypeCUDA>& workspace,
+                          search::PulsarSearchConfig cfg,
+                          std::span<const float> threshold_scheme,
+                          std::optional<SizeType> n_runs,
+                          std::optional<std::vector<SizeType>> ref_segs,
+                          std::span<const SizeType> ascend_levels,
+                          SizeType max_sugg,
+                          SizeType batch_size,
+                          std::string_view poly_basis,
+                          int device_id)
+        : m_impl(workspace,
+                 /*execution_stream=*/nullptr,
+                 std::move(cfg),
+                 threshold_scheme,
+                 n_runs,
+                 std::move(ref_segs),
+                 ascend_levels,
+                 max_sugg,
+                 batch_size,
+                 poly_basis,
+                 device_id) {}
+
+    EPMultiPassCudaEngine(search::PulsarSearchConfig cfg,
+                          std::span<const float> threshold_scheme,
+                          std::optional<SizeType> n_runs,
+                          std::optional<std::vector<SizeType>> ref_segs,
+                          std::span<const SizeType> ascend_levels,
+                          SizeType max_sugg,
+                          SizeType batch_size,
+                          std::string_view poly_basis,
+                          int device_id)
+        : m_impl(std::move(cfg),
+                 threshold_scheme,
+                 n_runs,
+                 std::move(ref_segs),
+                 ascend_levels,
+                 max_sugg,
+                 batch_size,
+                 poly_basis,
+                 device_id) {}
+
+    void execute(std::span<const float> ts_e,
+                 std::span<const float> ts_v,
+                 const std::filesystem::path& outdir,
+                 std::string_view file_prefix) override {
+        m_impl.execute(ts_e, ts_v, outdir, file_prefix);
+    }
+
+private:
+    typename EPMultiPassCudaCore<FoldTypeCUDA>::Impl m_impl;
+};
+
+namespace detail {
+
+template <SupportedFoldType FoldType>
+std::unique_ptr<EPMultiPassEngine<FoldType>>
+make_ep_gpu(search::PulsarSearchConfig cfg,
+             std::span<const float> threshold_scheme,
+             std::optional<SizeType> n_runs,
+             std::optional<std::vector<SizeType>> ref_segs,
+             std::span<const SizeType> ascend_levels,
+             SizeType max_sugg,
+             SizeType batch_size,
+             std::string_view poly_basis,
+             int device_id) {
+    return std::make_unique<EPMultiPassCudaEngine<FoldType>>(
+        std::move(cfg), threshold_scheme, n_runs, std::move(ref_segs),
+        ascend_levels, max_sugg, batch_size, poly_basis, device_id);
+}
+
+template <SupportedFoldType FoldType>
+std::unique_ptr<EPMultiPassEngine<FoldType>>
+make_ep_gpu(memory::EPWorkspace<FoldType>& workspace,
+            search::PulsarSearchConfig cfg,
+            std::span<const float> threshold_scheme,
+            std::optional<SizeType> n_runs,
+            std::optional<std::vector<SizeType>> ref_segs,
+            std::span<const SizeType> ascend_levels,
+            SizeType max_sugg,
+            SizeType batch_size,
+            std::string_view poly_basis,
+            int device_id) {
+    return std::make_unique<EPMultiPassCudaEngine<FoldType>>(
+        memory::detail::cuda_workspace(workspace, "EPMultiPass"),
+        std::move(cfg), threshold_scheme, n_runs, std::move(ref_segs),
+        ascend_levels, max_sugg, batch_size, poly_basis, device_id);
+}
+
+template std::unique_ptr<EPMultiPassEngine<float>>
+make_ep_gpu<float>(memory::EPWorkspace<float>&,
+                 search::PulsarSearchConfig,
+                 std::span<const float>,
+                 std::optional<SizeType>,
+                 std::optional<std::vector<SizeType>>,
+                 std::span<const SizeType>,
+                 SizeType,
+                 SizeType,
+                 std::string_view,
+                 int);
+
+template std::unique_ptr<EPMultiPassEngine<ComplexType>>
+make_ep_gpu<ComplexType>(memory::EPWorkspace<ComplexType>&,
+                 search::PulsarSearchConfig,
+                 std::span<const float>,
+                 std::optional<SizeType>,
+                 std::optional<std::vector<SizeType>>,
+                 std::span<const SizeType>,
+                 SizeType,
+                 SizeType,
+                 std::string_view,
+                 int);
+
+template std::unique_ptr<EPMultiPassEngine<float>>
+make_ep_gpu<float>(search::PulsarSearchConfig,
+                    std::span<const float>,
+                    std::optional<SizeType>,
+                    std::optional<std::vector<SizeType>>,
+                    std::span<const SizeType>,
+                    SizeType,
+                    SizeType,
+                    std::string_view,
+                    int);
+
+template std::unique_ptr<EPMultiPassEngine<ComplexType>>
+make_ep_gpu<ComplexType>(search::PulsarSearchConfig,
+                          std::span<const float>,
+                          std::optional<SizeType>,
+                          std::optional<std::vector<SizeType>>,
+                          std::span<const SizeType>,
+                          SizeType,
+                          SizeType,
+                          std::string_view,
+                          int);
+
+} // namespace detail
+
+} // namespace loki::algorithms

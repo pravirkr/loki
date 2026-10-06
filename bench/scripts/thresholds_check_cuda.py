@@ -1,4 +1,4 @@
-"""Production driver for DynamicThresholdSchemeCUDA.
+"""Production driver for the CUDA DynamicThresholdScheme.
 
 Operational row: run() then get_best_path_thresholds(). That path is what a
 live search uses immediately. Its cost and detection probability are the
@@ -11,7 +11,7 @@ from __future__ import annotations
 import numpy as np
 from _branching import BRANCHING_PROD
 
-from loki import libculoki
+from loki import libloki
 
 BP = BRANCHING_PROD[:127]
 SEARCH_SEED = 1
@@ -44,9 +44,10 @@ def terminal(states: np.ndarray, nstages: int, nthr: int, nprobs: int) -> dict |
 
 
 def main() -> None:
-    scheme = libculoki.thresholds.DynamicThresholdSchemeCUDA(
+    scheme = libloki.thresholds.DynamicThresholdScheme(
         BP,
         seed=SEARCH_SEED,
+        backend="cuda",
         batch_size=256,
         **KW,
     )

@@ -7,11 +7,11 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include "detail/psr_utils.hpp"
+#include "detail/utils.hpp"
 #include "loki/algorithms/prune_rfi.hpp"
 #include "loki/common/types.hpp"
-#include "loki/prune_mask.hpp"
-#include "loki/psr_utils.hpp"
-#include "loki/utils.hpp"
+#include "search/prune_mask.hpp"
 
 using loki::ParamLimit;
 using loki::SizeType;

@@ -34,11 +34,10 @@ if(CMAKE_CUDA_COMPILER)
   )
 endif()
 
-target_include_directories(
-  ${LOKI_TEST_TARGET} PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/lib
-)
+# White-box tests may include private headers via loki::internal.
 target_link_libraries(
-  ${LOKI_TEST_TARGET} PRIVATE ${PROJECT_NAME}::${LOKI_LIBRARY_NAME} ${LOKI_COMPILE_OPTIONS}
+  ${LOKI_TEST_TARGET} PRIVATE ${PROJECT_NAME}::${LOKI_LIBRARY_NAME} ${PROJECT_NAME}::internal
+                              ${LOKI_COMPILE_OPTIONS}
                               Catch2::Catch2WithMain
                               Boost::math
                               OpenMP::OpenMP_CXX

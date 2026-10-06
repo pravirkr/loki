@@ -25,7 +25,8 @@ TEST_CASE("DynamicThresholdScheme getters", "[thresholds]") {
     constexpr SizeType kNthresholds            = 20;
     detection::DynamicThresholdScheme dyn_scheme(
         branching_pattern, 0.5F, kNbins, kNtrials, kNprobs, 0.1F, 6.0F,
-        kNthresholds, 0.3F, 1.0F, 0.7F, 0, "legacy", 1);
+        kNthresholds, 0.3F, 1.0F, 0.7F, 0, "legacy", /*seed=*/std::nullopt,
+        /*batch_size=*/256, loki::Exec::cpu(1));
 
     REQUIRE(dyn_scheme.get_branching_pattern() == branching_pattern);
     REQUIRE(dyn_scheme.get_profile().size() == kNbins);
@@ -47,7 +48,8 @@ TEST_CASE("DynamicThresholdScheme runs back to back with different nbins",
         CAPTURE(mode, nbins);
         detection::DynamicThresholdScheme dyn_scheme(
             branching_pattern, 0.1F, nbins, 1024, 10, 0.05F, 8.0F, 100, 0.3F,
-            1.0F, 0.7F, 1, mode, 4);
+            1.0F, 0.7F, 1, mode, /*seed=*/std::nullopt, /*batch_size=*/256,
+            loki::Exec::cpu(4));
         dyn_scheme.run();
         REQUIRE(dyn_scheme.get_best_path_thresholds().size() ==
                 branching_pattern.size());
@@ -141,7 +143,8 @@ TEST_CASE("DynamicThresholdScheme evaluate does not depend on thread count",
     auto make = [&](int nthreads) {
         return detection::DynamicThresholdScheme(
             branching, 0.1F, 32, 64, 6, 0.05F, 8.0F, 24, 0.3F, 1.0F, 1.2F, 1,
-            "improved", nthreads, 17);
+            "improved", /*seed=*/17, /*batch_size=*/256,
+            loki::Exec::cpu(nthreads));
     };
     auto one   = make(1);
     auto eight = make(8);

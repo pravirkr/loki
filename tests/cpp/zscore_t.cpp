@@ -9,7 +9,7 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include "loki/common/types.hpp"
-#include "loki/math.hpp"
+#include "detail/math.hpp"
 #include "math_test_utils.hpp"
 
 using Catch::Matchers::WithinAbs;

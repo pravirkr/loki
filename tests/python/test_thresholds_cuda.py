@@ -5,9 +5,12 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from loki import libculoki, libloki
+from loki import libloki
 
-pytestmark = pytest.mark.skipif(libculoki is None, reason="CUDA backend not built")
+pytestmark = pytest.mark.skipif(
+    "cuda" not in libloki.available_backends(),
+    reason="CUDA backend not built",
+)
 
 BRANCHING = np.array(
     [4.0, 9.0, 1.0, 2.25575101, 3.98980204, 3.0, 2.80514208, 3.20839363,
@@ -31,8 +34,8 @@ THRES_NEIGH = 6
 
 
 def _scheme(mode: str, seed: int | None, **kwargs: object):  # noqa: ANN202
-    return libculoki.thresholds.DynamicThresholdSchemeCUDA(
-        BRANCHING, mode=mode, seed=seed, **{**SCHEME_KW, **kwargs}
+    return libloki.thresholds.DynamicThresholdScheme(
+        BRANCHING, mode=mode, seed=seed, backend="cuda", **{**SCHEME_KW, **kwargs}
     )
 
 
@@ -130,10 +133,10 @@ def test_evaluate_is_reproducible_and_leaves_the_grid_alone(mode: str) -> None:
 
 def test_rejects_invalid_branching() -> None:
     with pytest.raises(ValueError):  # noqa: PT011
-        libculoki.thresholds.DynamicThresholdSchemeCUDA(
-            np.array([2.0, np.nan, 2.0], dtype=np.float32), 0.1
+        libloki.thresholds.DynamicThresholdScheme(
+            np.array([2.0, np.nan, 2.0], dtype=np.float32), 0.1, backend="cuda"
         )
     with pytest.raises(ValueError):  # noqa: PT011
-        libculoki.thresholds.DynamicThresholdSchemeCUDA(
-            np.array([2.0], dtype=np.float32), 0.1
+        libloki.thresholds.DynamicThresholdScheme(
+            np.array([2.0], dtype=np.float32), 0.1, backend="cuda"
         )

@@ -4,7 +4,7 @@
 #include <benchmark/benchmark.h>
 
 #include "loki/common/types.hpp"
-#include "loki/math.hpp"
+#include "detail/math.hpp"
 
 namespace {
 

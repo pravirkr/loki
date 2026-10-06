@@ -70,3 +70,5 @@ CheckOptions:
   readability-identifier-naming.TemplateParameterCase: "CamelCase"
   readability-function-cognitive-complexity.IgnoreMacros: "true"
   readability-function-cognitive-complexity.Threshold: "150"
+  readability-trailing-comma.SingleLineCommaPolicy: Ignore
+

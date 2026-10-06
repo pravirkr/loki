@@ -7,33 +7,24 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import pytest
 
-from loki import libculoki, libloki
+from loki import libloki
 from pyloki.config import ParamLimits
+
+if "cuda" not in libloki.available_backends():
+    pytest.skip("CUDA backend not built", allow_module_level=True)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
 
 @pytest.mark.parametrize(
-    ("cpp_fn", "cuda_fn", "decimal"),
-    [
-        (
-            libloki.fold.compute_brute_fold_time,
-            libculoki.fold.compute_brute_fold_time_cuda,
-            5,
-        ),
-        (
-            libloki.fold.compute_brute_fold_fourier,
-            libculoki.fold.compute_brute_fold_fourier_cuda,
-            1,
-        ),
-    ],
+    ("kind", "decimal"),
+    [("time", 5), ("fourier", 1)],
 )
 def test_brute_fold_variants_cuda(
     mock_data: tuple[np.ndarray, np.ndarray],
     default_params: dict[str, Any],
-    cpp_fn: Callable,
-    cuda_fn: Callable,
+    kind: str,
     decimal: int,
 ) -> None:
     """Test CUDA brute fold matches CPU version."""
@@ -41,7 +32,12 @@ def test_brute_fold_variants_cuda(
     freqs_arr = np.linspace(140, 145, 50)
     segment_len = default_params["nsamps"] // 2**13
     t_ref = 0.0
-    out_cpp = cpp_fn(
+    fold_fn: Callable = (
+        libloki.fold.compute_brute_fold_time
+        if kind == "time"
+        else libloki.fold.compute_brute_fold_fourier
+    )
+    out_cpp = fold_fn(
         ts_e,
         ts_v,
         freqs_arr,
@@ -51,7 +47,7 @@ def test_brute_fold_variants_cuda(
         t_ref=t_ref,
         nthreads=8,
     )
-    out_cuda = cuda_fn(
+    out_cuda = fold_fn(
         ts_e,
         ts_v,
         freqs_arr,
@@ -59,7 +55,8 @@ def test_brute_fold_variants_cuda(
         nbins=default_params["nbins"],
         tsamp=default_params["tsamp"],
         t_ref=t_ref,
-        device_id=0,
+        backend="cuda",
+        device=0,
     )
     np.testing.assert_array_almost_equal(out_cuda, out_cpp, decimal=decimal)
 
@@ -82,22 +79,24 @@ def test_ffa_freq_cuda(
     )
     if use_fourier:
         out_cpu, _ = libloki.ffa.compute_ffa_fourier(ts_e, ts_v, cfg, quiet=True)
-        out_cuda, _ = libculoki.ffa.compute_ffa_fourier_cuda(
+        out_cuda, _ = libloki.ffa.compute_ffa_fourier(
             ts_e,
             ts_v,
             cfg,
-            device_id=0,
             quiet=True,
+            backend="cuda",
+            device=0,
         )
         np.testing.assert_allclose(out_cuda, out_cpu, atol=5.0)
     else:
         out_cpu, _ = libloki.ffa.compute_ffa_time(ts_e, ts_v, cfg, quiet=True)
-        out_cuda, _ = libculoki.ffa.compute_ffa_time_cuda(
+        out_cuda, _ = libloki.ffa.compute_ffa_time(
             ts_e,
             ts_v,
             cfg,
-            device_id=0,
             quiet=True,
+            backend="cuda",
+            device=0,
         )
         np.testing.assert_array_almost_equal(out_cuda, out_cpu, decimal=3)
 
@@ -121,12 +120,13 @@ def test_ffa_freq_fourier_return_to_time_cuda(
         cfg,
         quiet=True,
     )
-    out_cuda, _ = libculoki.ffa.compute_ffa_fourier_return_to_time_cuda(
+    out_cuda, _ = libloki.ffa.compute_ffa_fourier_return_to_time(
         ts_e,
         ts_v,
         cfg,
-        device_id=0,
         quiet=True,
+        backend="cuda",
+        device=0,
     )
     np.testing.assert_allclose(out_cuda, out_cpu, rtol=0.05, atol=1.0)
 
@@ -150,22 +150,24 @@ def test_ffa_accel_cuda_vs_cpu(
     )
     if use_fourier:
         out_cpu, _ = libloki.ffa.compute_ffa_fourier(ts_e, ts_v, cfg, quiet=True)
-        out_cuda, _ = libculoki.ffa.compute_ffa_fourier_cuda(
+        out_cuda, _ = libloki.ffa.compute_ffa_fourier(
             ts_e,
             ts_v,
             cfg,
-            device_id=0,
             quiet=True,
+            backend="cuda",
+            device=0,
         )
         np.testing.assert_allclose(out_cuda, out_cpu, atol=5.0)
     else:
         out_cpu, _ = libloki.ffa.compute_ffa_time(ts_e, ts_v, cfg, quiet=True)
-        out_cuda, _ = libculoki.ffa.compute_ffa_time_cuda(
+        out_cuda, _ = libloki.ffa.compute_ffa_time(
             ts_e,
             ts_v,
             cfg,
-            device_id=0,
             quiet=True,
+            backend="cuda",
+            device=0,
         )
         np.testing.assert_array_almost_equal(out_cuda, out_cpu, decimal=3)
 
@@ -189,12 +191,13 @@ def test_ffa_accel_fourier_return_to_time_cuda(
         cfg,
         quiet=True,
     )
-    out_cuda, _ = libculoki.ffa.compute_ffa_fourier_return_to_time_cuda(
+    out_cuda, _ = libloki.ffa.compute_ffa_fourier_return_to_time(
         ts_e,
         ts_v,
         cfg,
-        device_id=0,
         quiet=True,
+        backend="cuda",
+        device=0,
     )
     np.testing.assert_allclose(out_cuda, out_cpu, rtol=0.05, atol=1.0)
 
@@ -221,22 +224,24 @@ def test_ffa_jerk_cuda(
     )
     if use_fourier:
         out_cpu, _ = libloki.ffa.compute_ffa_fourier(ts_e, ts_v, cfg, quiet=True)
-        out_cuda, _ = libculoki.ffa.compute_ffa_fourier_cuda(
+        out_cuda, _ = libloki.ffa.compute_ffa_fourier(
             ts_e,
             ts_v,
             cfg,
-            device_id=0,
             quiet=True,
+            backend="cuda",
+            device=0,
         )
         np.testing.assert_allclose(out_cuda, out_cpu, atol=5.0)
     else:
         out_cpu, _ = libloki.ffa.compute_ffa_time(ts_e, ts_v, cfg, quiet=True)
-        out_cuda, _ = libculoki.ffa.compute_ffa_time_cuda(
+        out_cuda, _ = libloki.ffa.compute_ffa_time(
             ts_e,
             ts_v,
             cfg,
-            device_id=0,
             quiet=True,
+            backend="cuda",
+            device=0,
         )
         np.testing.assert_array_almost_equal(out_cuda, out_cpu, decimal=3)
 
@@ -264,11 +269,12 @@ def test_ffa_jerk_fourier_return_to_time_cuda(
         cfg,
         quiet=True,
     )
-    out_cuda, _ = libculoki.ffa.compute_ffa_fourier_return_to_time_cuda(
+    out_cuda, _ = libloki.ffa.compute_ffa_fourier_return_to_time(
         ts_e,
         ts_v,
         cfg,
-        device_id=0,
         quiet=True,
+        backend="cuda",
+        device=0,
     )
     np.testing.assert_allclose(out_cuda, out_cpu, atol=1.0)

@@ -7,7 +7,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "loki/common/types.hpp"
-#include "loki/utils/world_tree.hpp"
+#include "utils/world_tree.hpp"
 
 using loki::ComplexType;
 using loki::SizeType;

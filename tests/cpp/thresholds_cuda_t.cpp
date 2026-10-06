@@ -16,31 +16,32 @@
 namespace loki {
 namespace {
 
-using detection::DynamicThresholdSchemeCUDA;
+using detection::DynamicThresholdScheme;
 using detection::State;
 
 // First 24 stages of a production-like branching pattern.
 const std::vector<float> kBranching = {
-    4.0F, 9.0F, 1.0F, 2.25575101F, 3.98980204F, 3.0F, 2.80514208F, 3.20839363F,
-    1.0F, 1.0F, 3.0F, 1.0F, 1.0F, 2.25575101F, 1.99490102F, 3.0F,
-    1.0F, 3.0F, 1.0F, 3.0F, 1.0F, 1.0F, 2.80514208F, 1.06946454F};
+    4.0F, 9.0F,        1.0F,        2.25575101F, 3.98980204F,
+    3.0F, 2.80514208F, 3.20839363F, 1.0F,        1.0F,
+    3.0F, 1.0F,        1.0F,        2.25575101F, 1.99490102F,
+    3.0F, 1.0F,        3.0F,        1.0F,        3.0F,
+    1.0F, 1.0F,        2.80514208F, 1.06946454F};
 
 constexpr SizeType kNtrials     = 256;
 constexpr SizeType kNprobs      = 12;
 constexpr SizeType kNthresholds = 60;
 constexpr SizeType kThresNeigh  = 6;
 
-DynamicThresholdSchemeCUDA make_scheme(std::string_view mode,
-                                       std::optional<uint64_t> seed,
-                                       SizeType nbins       = 64,
-                                       SizeType batch_size  = 256,
-                                       float beam_width     = 1.5F,
-                                       std::span<const float> branching =
-                                           kBranching) {
-    return DynamicThresholdSchemeCUDA(branching, 0.1F, nbins, kNtrials,
-                                      kNprobs, 0.05F, 8.0F, kNthresholds, 0.3F,
-                                      1.2F, beam_width, 1, mode, batch_size, 0,
-                                      seed);
+DynamicThresholdScheme
+make_scheme(std::string_view mode,
+            std::optional<uint64_t> seed,
+            SizeType nbins                   = 64,
+            SizeType batch_size              = 256,
+            float beam_width                 = 1.5F,
+            std::span<const float> branching = kBranching) {
+    return DynamicThresholdScheme(
+        branching, 0.1F, nbins, kNtrials, kNprobs, 0.05F, 8.0F, kNthresholds,
+        0.3F, 1.2F, beam_width, 1, mode, seed, batch_size, Exec::cuda());
 }
 
 // Field-wise bitwise equality (ignores the struct's padding bytes).
@@ -60,10 +61,9 @@ bool same_bits(const State& a, const State& b) {
 
 bool same_bits(const std::vector<State>& a, const std::vector<State>& b) {
     return a.size() == b.size() &&
-           std::equal(a.begin(), a.end(), b.begin(),
-                      [](const State& x, const State& y) {
-                          return same_bits(x, y);
-                      });
+           std::equal(
+               a.begin(), a.end(), b.begin(),
+               [](const State& x, const State& y) { return same_bits(x, y); });
 }
 
 SizeType count_nonempty(const std::vector<State>& states) {
@@ -73,7 +73,7 @@ SizeType count_nonempty(const std::vector<State>& states) {
 
 } // namespace
 
-TEST_CASE("DynamicThresholdSchemeCUDA is bit-reproducible for a fixed seed",
+TEST_CASE("CUDA DynamicThresholdScheme is bit-reproducible for a fixed seed",
           "[thresholds][cuda]") {
     const auto* mode = GENERATE("legacy", "improved");
     CAPTURE(mode);
@@ -97,7 +97,7 @@ TEST_CASE("DynamicThresholdSchemeCUDA is bit-reproducible for a fixed seed",
     REQUIRE_FALSE(same_bits(states_a, scheme_c.get_states()));
 }
 
-TEST_CASE("DynamicThresholdSchemeCUDA states are self-consistent",
+TEST_CASE("CUDA DynamicThresholdScheme states are self-consistent",
           "[thresholds][cuda]") {
     const auto* mode    = GENERATE("legacy", "improved");
     const SizeType nbin = GENERATE(SizeType{32}, SizeType{50}, SizeType{64});
@@ -169,7 +169,7 @@ TEST_CASE("DynamicThresholdSchemeCUDA states are self-consistent",
     REQUIRE(scheme.get_best_path_thresholds().size() == nst);
 }
 
-TEST_CASE("DynamicThresholdSchemeCUDA batch_size only shifts RNG streams",
+TEST_CASE("CUDA DynamicThresholdScheme batch_size only shifts RNG streams",
           "[thresholds][cuda]") {
     // batch_size is kept in the RNG offset bookkeeping for compatibility, so
     // results change with it, but each setting stays reproducible and valid.
@@ -185,16 +185,15 @@ TEST_CASE("DynamicThresholdSchemeCUDA batch_size only shifts RNG streams",
     }
 }
 
-TEST_CASE("DynamicThresholdSchemeCUDA rejects invalid input",
+TEST_CASE("CUDA DynamicThresholdScheme rejects invalid input",
           "[thresholds][cuda]") {
     const auto make = [](std::span<const float> branching, SizeType nbins,
                          float prob_min, float ducy_max, float beam_width,
                          SizeType batch_size) {
-        return DynamicThresholdSchemeCUDA(branching, 0.1F, nbins, kNtrials,
-                                          kNprobs, prob_min, 8.0F,
-                                          kNthresholds, ducy_max, 1.2F,
-                                          beam_width, 1, "improved",
-                                          batch_size, 0, 1);
+        return DynamicThresholdScheme(branching, 0.1F, nbins, kNtrials, kNprobs,
+                                      prob_min, 8.0F, kNthresholds, ducy_max,
+                                      1.2F, beam_width, 1, "improved",
+                                      /*seed=*/1, batch_size, Exec::cuda());
     };
     const std::vector<float> one_stage = {2.0F};
     const std::vector<float> negative  = {2.0F, -1.0F, 2.0F};
@@ -202,8 +201,9 @@ TEST_CASE("DynamicThresholdSchemeCUDA rejects invalid input",
         2.0F, std::numeric_limits<float>::quiet_NaN(), 2.0F};
     const std::span<const float> ok(kBranching);
 
-    REQUIRE_THROWS_AS(make(std::span<const float>{}, 64, 0.05F, 0.3F, 1.5F, 256),
-                      std::invalid_argument);
+    REQUIRE_THROWS_AS(
+        make(std::span<const float>{}, 64, 0.05F, 0.3F, 1.5F, 256),
+        std::invalid_argument);
     REQUIRE_THROWS_AS(make(one_stage, 64, 0.05F, 0.3F, 1.5F, 256),
                       std::invalid_argument);
     REQUIRE_THROWS_AS(make(negative, 64, 0.05F, 0.3F, 1.5F, 256),
@@ -229,7 +229,7 @@ TEST_CASE("DynamicThresholdSchemeCUDA rejects invalid input",
     REQUIRE_THROWS_AS(scheme.run(0), std::invalid_argument);
 }
 
-TEST_CASE("DynamicThresholdSchemeCUDA evaluate rescores a path",
+TEST_CASE("CUDA DynamicThresholdScheme evaluate rescores a path",
           "[thresholds][cuda]") {
     auto scheme = make_scheme("improved", 7);
     scheme.run(kThresNeigh);

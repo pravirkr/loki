@@ -9,7 +9,7 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <omp.h>
 
-#include "loki/math.hpp"
+#include "detail/math.hpp"
 #include "math_test_utils.hpp"
 
 using loki::SizeType;

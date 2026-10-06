@@ -315,10 +315,15 @@ write_basic_package_version_file(
   COMPATIBILITY SameMajorVersion
 )
 
+# FindFFTW.cmake ships with the package: lokiConfig.cmake calls
+# find_dependency(FFTW) for static builds and adds its own directory to
+# CMAKE_MODULE_PATH.
 install(
   FILES ${CMAKE_CURRENT_BINARY_DIR}/lokiConfig.cmake
         ${CMAKE_CURRENT_BINARY_DIR}/lokiConfigVersion.cmake
-        ${CMAKE_CURRENT_BINARY_DIR}/lokiCUDAConfig.cmake DESTINATION ${LOKI_CMAKE_PACKAGE_DIR}
+        ${CMAKE_CURRENT_BINARY_DIR}/lokiCUDAConfig.cmake
+        ${PROJECT_SOURCE_DIR}/cmake/FindFFTW.cmake
+  DESTINATION ${LOKI_CMAKE_PACKAGE_DIR}
 )
 
 include(FeatureSummary)
@@ -326,7 +331,7 @@ feature_summary(WHAT ALL)
 
 if(CMAKE_CUDA_COMPILER)
   message(
-    STATUS "loki build mode: CPU + CUDA (LOKI_CUDA=${LOKI_CUDA}, LOKI_ENABLE_CUDA macro defined)"
+    STATUS "loki build mode: CPU + CUDA (LOKI_CUDA=${LOKI_CUDA}; backends chosen at run time via Exec)"
   )
 else()
   message(STATUS "loki build mode: CPU-only (LOKI_CUDA=${LOKI_CUDA})")

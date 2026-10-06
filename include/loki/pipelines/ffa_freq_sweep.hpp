@@ -5,19 +5,25 @@
 #include <span>
 #include <string_view>
 
+#include "loki/common/backend.hpp"
+#include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
-
-#ifdef LOKI_ENABLE_CUDA
-#include <cuda/std/span>
-#include <cuda_runtime.h>
-#endif // LOKI_ENABLE_CUDA
 
 namespace loki::algorithms {
 
+/**
+ * @brief FFA search over a frequency range, split into regions that share one
+ * workspace and FFT plan cache. Writes candidates to an HDF5 file.
+ *
+ * The CPU thread count comes from @p cfg; @p exec selects the backend and
+ * device.
+ */
 class FFAFreqSweep {
 public:
     explicit FFAFreqSweep(const search::FFASearchConfig& cfg,
-                          bool show_progress = true);
+                          bool show_progress = true,
+                          Exec exec          = {});
+
     ~FFAFreqSweep();
     FFAFreqSweep(FFAFreqSweep&&) noexcept;
     FFAFreqSweep& operator=(FFAFreqSweep&&) noexcept;
@@ -30,38 +36,9 @@ public:
                  std::string_view file_prefix        = "test",
                  std::string_view config_toml        = {});
 
-    // Opaque handle to the implementation
-    class BaseImpl;
-
 private:
-    std::unique_ptr<BaseImpl> m_impl;
+    class Impl;
+    std::unique_ptr<Impl> m_impl;
 };
-
-#ifdef LOKI_ENABLE_CUDA
-
-class FFAFreqSweepCUDA {
-public:
-    explicit FFAFreqSweepCUDA(const search::FFASearchConfig& cfg,
-                              int device_id = 0);
-    ~FFAFreqSweepCUDA();
-    FFAFreqSweepCUDA(FFAFreqSweepCUDA&&) noexcept;
-    FFAFreqSweepCUDA& operator=(FFAFreqSweepCUDA&&) noexcept;
-    FFAFreqSweepCUDA(const FFAFreqSweepCUDA&)            = delete;
-    FFAFreqSweepCUDA& operator=(const FFAFreqSweepCUDA&) = delete;
-
-    void execute(std::span<const float> ts_e,
-                 std::span<const float> ts_v,
-                 const std::filesystem::path& outdir = "./",
-                 std::string_view file_prefix        = "test",
-                 std::string_view config_toml        = {});
-
-    // Opaque handle to the implementation
-    class BaseImpl;
-
-private:
-    std::unique_ptr<BaseImpl> m_impl;
-};
-
-#endif // LOKI_ENABLE_CUDA
 
 } // namespace loki::algorithms

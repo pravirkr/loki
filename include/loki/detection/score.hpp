@@ -6,13 +6,8 @@
 #include <string_view>
 #include <vector>
 
+#include "loki/common/backend.hpp"
 #include "loki/common/types.hpp"
-
-#ifdef LOKI_ENABLE_CUDA
-#include <cuda/std/span>
-#include <cuda_runtime.h>
-#include "loki/utils/workspace.hpp"
-#endif // LOKI_ENABLE_CUDA
 
 namespace loki::detection {
 
@@ -75,7 +70,7 @@ void snr_boxcar_2d(std::span<const float> folds,
                    SizeType nprofiles,
                    SizeType nbins,
                    float stdnoise = 1.0F,
-                   int nthreads   = 1);
+                   Exec exec      = {});
 
 // Compute the Boxcar S/N of a batch of single pulse profiles with common
 // variance Useful for thresholding code
@@ -85,7 +80,15 @@ void snr_boxcar_2d_max(std::span<const float> folds,
                        SizeType nprofiles,
                        SizeType nbins,
                        float stdnoise = 1.0F,
-                       int nthreads   = 1);
+                       Exec exec      = {});
+
+void snr_boxcar_2d_max(DeviceSpan<const float> folds,
+                       DeviceSpan<const uint32_t> widths,
+                       DeviceSpan<float> scores,
+                       SizeType nprofiles,
+                       SizeType nbins,
+                       float stdnoise = 1.0F,
+                       Stream stream  = {});
 
 /// One boxcar S/N that passed a threshold. `score_index` is
 /// `profile * nwidths + width_index`, matching the dense `snr_boxcar_3d`
@@ -113,7 +116,14 @@ void snr_boxcar_3d(std::span<const float> folds,
                    std::span<float> scores,
                    SizeType nprofiles,
                    SizeType nbins,
-                   int nthreads = 1);
+                   Exec exec = {});
+
+void snr_boxcar_3d(DeviceSpan<const float> folds,
+                   DeviceSpan<const uint32_t> widths,
+                   DeviceSpan<float> scores,
+                   SizeType nprofiles,
+                   SizeType nbins,
+                   Stream stream = {});
 
 // Compute the Boxcar S/N of a batch of E, V folded profiles
 void snr_boxcar_3d_max(std::span<const float> folds,
@@ -121,7 +131,14 @@ void snr_boxcar_3d_max(std::span<const float> folds,
                        std::span<float> scores,
                        SizeType nprofiles,
                        SizeType nbins,
-                       int nthreads = 1);
+                       Exec exec = {});
+
+void snr_boxcar_3d_max(DeviceSpan<const float> folds,
+                       DeviceSpan<const uint32_t> widths,
+                       DeviceSpan<float> scores,
+                       SizeType nprofiles,
+                       SizeType nbins,
+                       Stream stream = {});
 
 // Compute the S/N of a batch of folded profiles
 void snr_boxcar_3d_max_with_cache(std::span<const float> folds,
@@ -138,75 +155,5 @@ SizeType score_and_filter_max_with_cache(std::span<const float> folds,
                                          SizeType nprofiles,
                                          SizeType nbins,
                                          BoxcarWidthsCache& cache);
-
-#ifdef LOKI_ENABLE_CUDA
-
-void snr_boxcar_2d_max_cuda(std::span<const float> folds,
-                            std::span<const SizeType> widths,
-                            std::span<float> scores,
-                            SizeType nprofiles,
-                            SizeType nbins,
-                            float stdnoise = 1.0F,
-                            int device_id  = 0);
-
-void snr_boxcar_2d_max_cuda_d(cuda::std::span<const float> folds,
-                              cuda::std::span<const uint32_t> widths,
-                              cuda::std::span<float> scores,
-                              SizeType nprofiles,
-                              SizeType nbins,
-                              float stdnoise      = 1.0F,
-                              cudaStream_t stream = nullptr);
-
-void snr_boxcar_3d_cuda(std::span<const float> folds,
-                        std::span<const SizeType> widths,
-                        std::span<float> scores,
-                        SizeType nprofiles,
-                        SizeType nbins,
-                        int device_id = 0);
-
-void snr_boxcar_3d_cuda_d(cuda::std::span<const float> folds,
-                          cuda::std::span<const uint32_t> widths,
-                          cuda::std::span<float> scores,
-                          SizeType nprofiles,
-                          SizeType nbins,
-                          cudaStream_t stream = nullptr);
-
-void snr_boxcar_3d_max_cuda(std::span<const float> folds,
-                            std::span<const SizeType> widths,
-                            std::span<float> scores,
-                            SizeType nprofiles,
-                            SizeType nbins,
-                            int device_id = 0);
-
-void snr_boxcar_3d_max_cuda_d(cuda::std::span<const float> folds,
-                              cuda::std::span<const uint32_t> widths,
-                              cuda::std::span<float> scores,
-                              SizeType nprofiles,
-                              SizeType nbins,
-                              cudaStream_t stream = nullptr);
-
-SizeType score_and_filter_cuda_d(cuda::std::span<const float> folds,
-                                 cuda::std::span<const uint32_t> widths,
-                                 cuda::std::span<float> scores,
-                                 cuda::std::span<uint32_t> indices_filtered,
-                                 float threshold,
-                                 SizeType nprofiles,
-                                 SizeType nbins,
-                                 cudaStream_t stream,
-                                 memory::DeviceCounter& counter);
-
-SizeType
-score_and_filter_max_cuda_d(cuda::std::span<const float> folds,
-                            cuda::std::span<const uint32_t> widths,
-                            cuda::std::span<float> scores,
-                            cuda::std::span<const uint8_t> validation_mask,
-                            cuda::std::span<uint8_t> filtered_mask,
-                            float threshold,
-                            SizeType nprofiles,
-                            SizeType nbins,
-                            memory::CUBScratchArena& scratch_ws,
-                            cudaStream_t stream);
-
-#endif // LOKI_ENABLE_CUDA
 
 } // namespace loki::detection

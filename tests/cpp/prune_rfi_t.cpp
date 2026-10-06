@@ -11,12 +11,13 @@
 
 #include "loki/algorithms/prune.hpp"
 #include "loki/algorithms/prune_rfi.hpp"
-#include "loki/cands.hpp"
+#include "search/cands.hpp"
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
-#include "loki/utils/world_tree.hpp"
+#include "utils/world_tree.hpp"
 
+using loki::Exec;
 using loki::ParamLimit;
 using loki::SizeType;
 using loki::algorithms::EPMultiPassTime;
@@ -297,5 +298,37 @@ TEST_CASE("EPMultiPassTime with make_default_harvest_scheme runs cleanly",
 
     const auto path = result_path(outdir, "cpp_default_harvest", nsegments);
     REQUIRE(std::filesystem::exists(path));
+}
+
+TEST_CASE("EPMultiPass backend dispatch", "[prune][backend]") {
+    auto cfg = make_small_cfg();
+    const auto nsegments =
+        loki::plans::FFAPlan<float>(cfg).get_nsegments().back();
+    const std::vector<float> thresholds(nsegments - 1, 1.5F);
+    const std::vector<SizeType> ref_segs{nsegments / 2};
+    auto [ts_e, ts_v] = make_noise_series(cfg.get_nsamps(), 99);
+
+    SECTION("Exec::cpu") {
+        const auto outdir =
+            std::filesystem::temp_directory_path() / "loki_ep_backend_cpu";
+        std::filesystem::create_directories(outdir);
+        EPMultiPassTime ep(cfg, thresholds, /*n_runs=*/std::nullopt, ref_segs,
+                           /*ascend_levels=*/{}, /*max_sugg=*/1U << 14U,
+                           /*batch_size=*/256, "taylor", /*show_progress=*/false,
+                           {}, Exec::cpu(1));
+        REQUIRE_NOTHROW(ep.execute(ts_e, ts_v, outdir, "cpu_dispatch"));
+        std::filesystem::remove_all(outdir);
+    }
+
+    SECTION("Exec::cuda availability check") {
+#ifndef LOKI_ENABLE_CUDA
+        REQUIRE_THROWS_AS(
+            EPMultiPassTime(cfg, thresholds, /*n_runs=*/std::nullopt, ref_segs,
+                            /*ascend_levels=*/{}, /*max_sugg=*/1U << 14U,
+                            /*batch_size=*/256, "taylor", /*show_progress=*/false,
+                            {}, Exec::cuda(0)),
+            std::invalid_argument);
+#endif
+    }
 }
 

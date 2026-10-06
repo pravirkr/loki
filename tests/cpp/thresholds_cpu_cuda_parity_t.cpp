@@ -17,15 +17,14 @@ namespace loki {
 namespace {
 
 using detection::DynamicThresholdScheme;
-using detection::DynamicThresholdSchemeCUDA;
 using detection::State;
 
-constexpr SizeType kNtrials       = 1024;
-constexpr SizeType kNprobs        = 12;
-constexpr SizeType kNthresholds   = 60;
-constexpr SizeType kThresNeigh    = 6;
-constexpr int kCpuThreads         = 8;
-constexpr float kSurvivalTol      = 0.10F;
+constexpr SizeType kNtrials     = 1024;
+constexpr SizeType kNprobs      = 12;
+constexpr SizeType kNthresholds = 60;
+constexpr SizeType kThresNeigh  = 6;
+constexpr int kCpuThreads       = 8;
+constexpr float kSurvivalTol    = 0.10F;
 
 const std::vector<float> kBranching = {
     4.0F, 9.0F, 1.0F, 2.25575101F, 3.98980204F, 3.0F, 2.80514208F, 3.20839363F};
@@ -33,13 +32,13 @@ const std::vector<float> kBranching = {
 DynamicThresholdScheme make_cpu(std::string_view mode, uint64_t seed) {
     return DynamicThresholdScheme(kBranching, 0.1F, 64, kNtrials, kNprobs,
                                   0.05F, 8.0F, kNthresholds, 0.3F, 1.2F, 1.5F,
-                                  1, mode, kCpuThreads, seed);
+                                  1, mode, seed, 256, Exec::cpu(kCpuThreads));
 }
 
-DynamicThresholdSchemeCUDA make_cuda(std::string_view mode, uint64_t seed) {
-    return DynamicThresholdSchemeCUDA(
-        kBranching, 0.1F, 64, kNtrials, kNprobs, 0.05F, 8.0F, kNthresholds,
-        0.3F, 1.2F, 1.5F, 1, mode, 256, 0, seed);
+DynamicThresholdScheme make_cuda(std::string_view mode, uint64_t seed) {
+    return DynamicThresholdScheme(kBranching, 0.1F, 64, kNtrials, kNprobs,
+                                  0.05F, 8.0F, kNthresholds, 0.3F, 1.2F, 1.5F,
+                                  1, mode, seed, 256, Exec::cuda());
 }
 
 using SurvivalPair = std::pair<float, float>;
@@ -60,10 +59,11 @@ stage0_survival_by_threshold(std::span<const State> states) {
     return out;
 }
 
-SurvivalPair mean_over_seeds(
-    const std::vector<std::map<SizeType, SurvivalPair>>& by_seed, SizeType ithr) {
-    float h0 = 0.0F;
-    float h1 = 0.0F;
+SurvivalPair
+mean_over_seeds(const std::vector<std::map<SizeType, SurvivalPair>>& by_seed,
+                SizeType ithr) {
+    float h0   = 0.0F;
+    float h1   = 0.0F;
     SizeType n = 0;
     for (const auto& m : by_seed) {
         const auto it = m.find(ithr);

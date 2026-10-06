@@ -5,8 +5,19 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <span>
+#include <string_view>
+
+#include "loki/common/backend.hpp"
 
 namespace py = pybind11;
+
+/// Python-facing backend selection: `backend="cpu" | "cuda"` and `device=`
+/// are keyword-only on every binding. Unknown names raise ValueError.
+inline loki::Exec
+make_exec(std::string_view backend, int device = 0, int nthreads = 1) {
+    const auto b = loki::parse_backend(backend);
+    return {.backend = b, .nthreads = nthreads, .device = device};
+}
 
 template <typename T>
 using PyArrayT = py::array_t<T, py::array::c_style | py::array::forcecast>;

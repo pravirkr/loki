@@ -1,4 +1,4 @@
-"""Bit-exact CUDA golden harness for DynamicThresholdSchemeCUDA.
+"""Bit-exact CUDA golden harness for DynamicThresholdScheme.
 
 Commands:
     make   write ``golden/<config>.npz`` (states + best path)
@@ -22,7 +22,7 @@ import h5py
 import numpy as np
 from _branching import BRANCHING_PROD, PROD_KW, SMALL_KW
 
-from loki import libculoki
+from loki import libloki
 
 HERE = pathlib.Path(__file__).resolve().parent
 GOLDEN_DIR = HERE / "golden"
@@ -85,7 +85,9 @@ def run_config(
     kw = dict(kw)
     if batch_size is not None:
         kw["batch_size"] = batch_size
-    dyn = libculoki.thresholds.DynamicThresholdSchemeCUDA(bp, seed=seed, **kw)
+    dyn = libloki.thresholds.DynamicThresholdScheme(
+        bp, seed=seed, backend="cuda", **kw
+    )
     t0 = time.perf_counter()
     dyn.run(thres_neigh=neigh)
     dt = time.perf_counter() - t0
