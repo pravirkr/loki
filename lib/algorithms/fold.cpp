@@ -6,10 +6,11 @@
 #include <type_traits>
 #include <vector>
 
-#include "algorithms/fold_engine.hpp"
-#include "common/dispatch.hpp"
 #include "loki/common/backend.hpp"
 #include "loki/common/types.hpp"
+
+#include "lib/algorithms/fold_engine.hpp"
+#include "lib/common/dispatch.hpp"
 
 namespace loki::algorithms {
 

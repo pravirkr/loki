@@ -6,9 +6,9 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include "loki/detection/score.hpp"
-#include "detail/psr_utils.hpp"
-#include "simulation/pulse_detail.hpp"
 #include "loki/simulation/pulse.hpp"
+#include "lib/detail/psr_utils.hpp"
+#include "lib/simulation/pulse_detail.hpp"
 
 using Catch::Matchers::WithinAbs;
 namespace detail = loki::simulation::detail;

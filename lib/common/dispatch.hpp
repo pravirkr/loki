@@ -10,6 +10,7 @@
  * backend-neutral and compiles in every build.
  */
 
+#include <initializer_list>
 #include <string_view>
 
 #include "loki/common/backend.hpp"
@@ -41,6 +42,12 @@ void check_device(const Device& view,
                   Backend backend,
                   int device,
                   std::string_view what);
+
+/// For device-memory free functions, which have no instance to own a device:
+/// every view that states its device must state the same one. Returns that
+/// device, or a default Device (`id < 0`) when no view states one.
+Device common_device(std::initializer_list<Device> views,
+                     std::string_view what);
 
 /// Rejects a shared resource (workspace, FFT manager) that was built for a
 /// different backend or device than the algorithm using it.

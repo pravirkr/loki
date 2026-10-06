@@ -1,5 +1,5 @@
-#include "cuda/kadane_cuda.cuh"
-#include "detection/kadane.hpp"
+#include "lib/cuda/kadane_cuda.cuh"
+#include "lib/detection/kadane.hpp"
 
 #include <cuda/atomic>
 #include <cuda/std/atomic>
@@ -12,11 +12,11 @@
 
 #include <spdlog/spdlog.h>
 
-#include "cuda/cub_helpers.cuh"
-#include "cuda/cuda_utils.cuh"
-#include "cuda/workspace_cuda.cuh"
-#include "detail/error_check.hpp"
 #include "loki/common/types.hpp"
+#include "lib/cuda/cub_helpers.cuh"
+#include "lib/cuda/cuda_utils.cuh"
+#include "lib/cuda/workspace_cuda.cuh"
+#include "lib/detail/error_check.hpp"
 
 namespace loki::detection {
 

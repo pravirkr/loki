@@ -1,6 +1,6 @@
-#include "cuda/ffa_cuda.cuh"
 #include "loki/algorithms/prune.hpp"
-#include "cuda/prune_cuda.cuh"
+#include "lib/cuda/ffa_cuda.cuh"
+#include "lib/cuda/prune_cuda.cuh"
 
 #include <algorithm>
 #include <filesystem>
@@ -19,15 +19,15 @@
 #include <thrust/device_vector.h>
 
 #include "loki/algorithms/ffa.hpp"
-#include "search/cands.hpp"
 #include "loki/common/types.hpp"
-#include "cuda/dynamic_cuda.cuh"
-#include "cuda/cuda_utils.cuh"
-#include "algorithms/prune_engine.hpp"
-#include "detail/psr_utils.hpp"
-#include "detail/timing.hpp"
-#include "detail/utils.hpp"
-#include "cuda/world_tree_cuda.cuh"
+#include "lib/algorithms/prune_engine.hpp"
+#include "lib/cuda/cuda_utils.cuh"
+#include "lib/cuda/dynamic_cuda.cuh"
+#include "lib/cuda/world_tree_cuda.cuh"
+#include "lib/detail/psr_utils.hpp"
+#include "lib/detail/timing.hpp"
+#include "lib/detail/utils.hpp"
+#include "lib/search/cands.hpp"
 
 namespace loki::algorithms {
 

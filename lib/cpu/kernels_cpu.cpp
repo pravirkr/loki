@@ -1,4 +1,4 @@
-#include "core/kernels.hpp"
+#include "lib/core/kernels.hpp"
 
 #include <algorithm>
 #include <array>
@@ -15,9 +15,9 @@
 #include <immintrin.h>
 #endif
 
-#include "cpu/brute_fold_intrinsics.hpp"
 #include "loki/common/coord.hpp"
 #include "loki/common/types.hpp"
+#include "lib/cpu/brute_fold_intrinsics.hpp"
 
 namespace loki::core {
 

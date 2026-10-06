@@ -17,11 +17,11 @@
 #include <cuda_runtime.h>
 #include <thrust/device_vector.h>
 
-#include "cuda/fft_cuda.cuh"
-#include "cuda/workspace_cuda.cuh"
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
+#include "lib/cuda/fft_cuda.cuh"
+#include "lib/cuda/workspace_cuda.cuh"
 
 namespace loki::algorithms {
 

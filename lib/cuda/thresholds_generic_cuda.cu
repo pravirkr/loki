@@ -1,7 +1,7 @@
 // Explicit instantiations of the GenericScorer kernels of the CUDA
 // DynamicThresholdScheme; see cuda/thresholds_kernels_cuda.cuh.
 
-#include "cuda/thresholds_kernels_cuda.cuh"
+#include "lib/cuda/thresholds_kernels_cuda.cuh"
 
 namespace loki::detection::detail {
 

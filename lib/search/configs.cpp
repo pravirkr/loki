@@ -18,11 +18,12 @@
 #include <spdlog/spdlog.h>
 #include <toml++/toml.hpp>
 
-#include "detail/error_check.hpp"
-#include "detail/psr_utils.hpp"
-#include "detail/utils.hpp"
+#include "loki/common/backend.hpp"
 #include "loki/common/types.hpp"
 #include "loki/detection/score.hpp"
+#include "lib/detail/error_check.hpp"
+#include "lib/detail/psr_utils.hpp"
+#include "lib/detail/utils.hpp"
 
 namespace loki::search {
 
@@ -34,14 +35,32 @@ namespace {
         allowed, [&](std::string_view candidate) { return key == candidate; });
 }
 
+/// Keys removed from the schema, with what replaces them.
+[[nodiscard]] std::string_view removed_key_hint(std::string_view path) {
+    if (path == "cuda" || path.starts_with("cuda.")) {
+        return "the [cuda] table was removed; use [performance] backend = "
+               "\"cuda\" and device = <id>";
+    }
+    if (path == "performance.use_cuda") {
+        return "use performance.backend = \"cuda\"";
+    }
+    if (path == "performance.device_id") {
+        return "use performance.device";
+    }
+    return {};
+}
+
 void collect_unknown_keys(const toml::table& table,
                           std::span<const std::string_view> allowed,
                           std::string_view table_path,
                           std::vector<std::string>& errors) {
     for (const auto& [key, _] : table) {
         if (!is_allowed_key(key.str(), allowed)) {
-            errors.push_back(
-                std::format("{}.{}: unknown key", table_path, key.str()));
+            const auto path = std::format("{}.{}", table_path, key.str());
+            const auto hint = removed_key_hint(path);
+            errors.push_back(hint.empty()
+                                 ? std::format("{}: unknown key", path)
+                                 : std::format("{}: {}", path, hint));
         }
     }
 }
@@ -49,8 +68,7 @@ void collect_unknown_keys(const toml::table& table,
 void validate_ffa_toml_document(const toml::table& root) {
     static constexpr std::array kTopLevel{
         std::string_view{"input"}, std::string_view{"search"},
-        std::string_view{"performance"}, std::string_view{"output"},
-        std::string_view{"cuda"}};
+        std::string_view{"performance"}, std::string_view{"output"}};
     static constexpr std::array kInputKeys{
         std::string_view{"timeseries"},
         std::string_view{"preprocess"},
@@ -76,25 +94,26 @@ void validate_ffa_toml_document(const toml::table& root) {
         std::string_view{"use_boxcar_kadane"}};
     static constexpr std::array kPerformanceKeys{
         std::string_view{"nthreads"},
+        std::string_view{"backend"},
+        std::string_view{"device"},
         std::string_view{"max_process_memory_gb"},
         std::string_view{"octave_scale"},
         std::string_view{"nbins_max"},
         std::string_view{"nbins_min_lossy_bf"},
         std::string_view{"bseg_brute"},
         std::string_view{"bseg_ffa"},
-        std::string_view{"max_passing_candidates"},
-        std::string_view{"use_cuda"},
-        std::string_view{"device_id"}};
+        std::string_view{"max_passing_candidates"}};
     static constexpr std::array kOutputKeys{std::string_view{"outdir"},
                                             std::string_view{"prefix"}};
-    static constexpr std::array kCudaKeys{std::string_view{"enable"},
-                                          std::string_view{"device_id"}};
 
     std::vector<std::string> errors;
     for (const auto& [key, _] : root) {
         if (!is_allowed_key(key.str(), kTopLevel)) {
+            const auto hint = removed_key_hint(key.str());
             errors.push_back(
-                std::format("unknown top-level key '{}'", key.str()));
+                hint.empty()
+                    ? std::format("unknown top-level key '{}'", key.str())
+                    : std::format("{}: {}", key.str(), hint));
         }
     }
     if (const auto* input = root["input"].as_table()) {
@@ -108,9 +127,6 @@ void validate_ffa_toml_document(const toml::table& root) {
     }
     if (const auto* output = root["output"].as_table()) {
         collect_unknown_keys(*output, kOutputKeys, "output", errors);
-    }
-    if (const auto* cuda = root["cuda"].as_table()) {
-        collect_unknown_keys(*cuda, kCudaKeys, "cuda", errors);
     }
     if (!errors.empty()) {
         std::string message = errors.front();
@@ -211,11 +227,11 @@ nbins_min_lossy_bf = 64
 # Maximum candidate buffer capacity held in memory before streaming to disk
 max_passing_candidates = 4194304
 
-# Run FFA on NVIDIA GPU (requires CUDA-enabled Loki build)
-use_cuda = false
+# Execution backend: "cpu", or "cuda" (requires a CUDA-enabled Loki build)
+backend = "cpu"
 
-# GPU device ID
-device_id = 0
+# GPU device ordinal, used when backend = "cuda"
+device = 0
 
 [output]
 # Directory where candidate HDF5 file will be saved
@@ -358,12 +374,12 @@ FFATomlConfig FFATomlConfig::from_string(std::string_view toml_content) {
                     static_cast<SizeType>(require_non_negative_int64(
                         *val, "performance.max_passing_candidates"));
             }
-            if (auto val = (*perf)["use_cuda"].value<bool>()) {
-                cfg.use_cuda = *val;
+            if (auto val = (*perf)["backend"].value<std::string>()) {
+                cfg.backend = parse_backend(*val);
             }
-            if (auto val = (*perf)["device_id"].value<int64_t>()) {
-                cfg.device_id = static_cast<int>(
-                    require_non_negative_int64(*val, "performance.device_id"));
+            if (auto val = (*perf)["device"].value<int64_t>()) {
+                cfg.device = static_cast<int>(
+                    require_non_negative_int64(*val, "performance.device"));
             }
         }
 
@@ -374,17 +390,6 @@ FFATomlConfig FFATomlConfig::from_string(std::string_view toml_content) {
             }
             if (auto val = (*output)["prefix"].value<std::string>()) {
                 cfg.prefix = *val;
-            }
-        }
-
-        // [cuda] table
-        if (const auto* cuda = tbl["cuda"].as_table()) {
-            if (auto val = (*cuda)["enable"].value<bool>()) {
-                cfg.use_cuda = *val;
-            }
-            if (auto val = (*cuda)["device_id"].value<int64_t>()) {
-                cfg.device_id = static_cast<int>(
-                    require_non_negative_int64(*val, "cuda.device_id"));
             }
         }
 

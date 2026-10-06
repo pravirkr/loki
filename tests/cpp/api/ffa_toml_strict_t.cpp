@@ -1,5 +1,8 @@
+#include <string>
+
 #include <catch2/catch_test_macros.hpp>
 
+#include "loki/common/backend.hpp"
 #include "loki/search/configs.hpp"
 
 TEST_CASE("FFATomlConfig rejects unknown keys", "[config][ffa]") {
@@ -60,4 +63,50 @@ use_boxcar_kadane = true
 )";
     const auto cfg         = loki::search::FFATomlConfig::from_string(toml);
     REQUIRE_THROWS_AS(cfg.to_search_config(), std::invalid_argument);
+}
+
+TEST_CASE("FFATomlConfig reads the execution backend", "[config][ffa]") {
+    const std::string toml = R"(
+[search]
+f_min = 1.0
+f_max = 10.0
+nbins = 64
+[performance]
+backend = "cuda"
+device = 1
+)";
+    const auto cfg         = loki::search::FFATomlConfig::from_string(toml);
+    REQUIRE(cfg.backend == loki::Backend::kCUDA);
+    REQUIRE(cfg.device == 1);
+
+    const auto defaults = loki::search::FFATomlConfig::from_string("");
+    REQUIRE(defaults.backend == loki::Backend::kCPU);
+    REQUIRE(defaults.device == 0);
+}
+
+TEST_CASE("FFATomlConfig rejects an unknown backend name", "[config][ffa]") {
+    const std::string toml = R"(
+[performance]
+backend = "gpu"
+)";
+    REQUIRE_THROWS_AS(loki::search::FFATomlConfig::from_string(toml),
+                      std::invalid_argument);
+}
+
+TEST_CASE("FFATomlConfig rejects the removed CUDA keys with a hint",
+          "[config][ffa]") {
+    const auto message_for = [](const std::string& toml) -> std::string {
+        try {
+            (void)loki::search::FFATomlConfig::from_string(toml);
+        } catch (const std::invalid_argument& err) {
+            return err.what();
+        }
+        return {};
+    };
+    REQUIRE(message_for("[cuda]\nenable = true\n").find("backend") !=
+            std::string::npos);
+    REQUIRE(message_for("[performance]\nuse_cuda = true\n")
+                .find("performance.backend") != std::string::npos);
+    REQUIRE(message_for("[performance]\ndevice_id = 0\n")
+                .find("performance.device") != std::string::npos);
 }

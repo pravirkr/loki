@@ -5,8 +5,8 @@
 #include <format>
 #include <limits>
 
-#include "detail/error_check.hpp"
-#include "detail/utils.hpp"
+#include "lib/detail/error_check.hpp"
+#include "lib/detail/utils.hpp"
 
 namespace loki::algorithms {
 

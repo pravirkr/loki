@@ -1,9 +1,9 @@
 #include <span>
 
-#include "detail/error_check.hpp"
-#include "detection/boxcar_kernels.hpp"
-#include "detection/score_engine.hpp"
 #include "loki/common/types.hpp"
+#include "lib/detail/error_check.hpp"
+#include "lib/cpu/boxcar_kernels.hpp"
+#include "lib/detection/score_engine.hpp"
 
 namespace loki::detection {
 

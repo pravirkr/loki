@@ -23,13 +23,13 @@
 #include <cuda/std/limits>
 #include <cuda_runtime.h>
 
-#include "cuda/device_rng.cuh"
 #include "loki/common/types.hpp"
 #include "loki/detection/thresholds.hpp"
+#include "lib/cuda/device_rng.cuh"
 
 namespace loki::detection::detail {
 
-using RNG = loki::math::DefaultDeviceRNG;
+using RNG = loki::device_rng::DefaultDeviceRNG;
 
 struct ThresholdPairItem {
     uint32_t ithres_abs;

@@ -8,24 +8,24 @@
 #include <utility>
 #include <vector>
 
-#include "algorithms/prune_engine.hpp"
-#include "common/dispatch.hpp"
 #include "loki/algorithms/prune_rfi.hpp"
 #include "loki/common/backend.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
 #include "loki/utils/workspace.hpp"
-#include "utils/workspace_impl.hpp"
+#include "lib/algorithms/prune_engine.hpp"
+#include "lib/common/dispatch.hpp"
+#include "lib/utils/workspace_impl.hpp"
 
 namespace loki::algorithms {
 
 namespace {
 
 /// The GPU engine has no RFI controls yet; refuse rather than ignore them.
-[[maybe_unused]] void check_gpu_supports(const PruneRFIConfig& rfi_config) {
+[[maybe_unused]] void check_gpu_supports(const PruneRFIConfig& rfi_config,
+                                         Backend backend) {
     if (rfi_config.is_active()) {
-        loki::detail::throw_unimplemented("EPMultiPass (rfi_config)",
-                                          Backend::kCUDA);
+        loki::detail::throw_unimplemented("EPMultiPass (rfi_config)", backend);
     }
 }
 
@@ -51,7 +51,7 @@ make_ep_engine(search::PulsarSearchConfig cfg,
     }
 #ifdef LOKI_ENABLE_GPU
     if (exec.backend == loki::detail::kGPUBackend) {
-        check_gpu_supports(rfi_config);
+        check_gpu_supports(rfi_config, exec.backend);
         return detail::make_ep_gpu<FoldType>(
             std::move(cfg), threshold_scheme, n_runs, std::move(ref_segs),
             ascend_levels, max_sugg, batch_size, poly_basis, exec.device);
@@ -93,7 +93,7 @@ make_ep_engine(std::span<memory::EPWorkspace<FoldType>> workspaces,
     }
 #ifdef LOKI_ENABLE_GPU
     if (exec.backend == loki::detail::kGPUBackend) {
-        check_gpu_supports(rfi_config);
+        check_gpu_supports(rfi_config, exec.backend);
         if (workspaces.size() != 1) {
             throw std::invalid_argument(
                 "EPMultiPass: the GPU backend runs on a single stream and "

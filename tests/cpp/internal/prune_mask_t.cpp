@@ -7,11 +7,11 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
-#include "detail/psr_utils.hpp"
-#include "detail/utils.hpp"
 #include "loki/algorithms/prune_rfi.hpp"
 #include "loki/common/types.hpp"
-#include "search/prune_mask.hpp"
+#include "lib/detail/psr_utils.hpp"
+#include "lib/detail/utils.hpp"
+#include "lib/search/prune_mask.hpp"
 
 using loki::ParamLimit;
 using loki::SizeType;
@@ -26,7 +26,9 @@ using loki::algorithms::PruneRFIConfig;
 
 namespace {
 
-constexpr double kInf = std::numeric_limits<double>::infinity();
+// Open bounds use the same sentinels as ParamWindow's defaults: Release
+// builds use -ffast-math, where infinities are undefined behaviour.
+constexpr double kUnbounded = std::numeric_limits<double>::max();
 
 const ParamLimit kLimAccel{.min = -100.0, .max = 100.0};
 const ParamLimit kLimFreq{.min = 100.0, .max = 200.0};
@@ -134,7 +136,7 @@ TEST_CASE("GridMask: disjoint windows are ignored", "[prune_mask]") {
     mask.add_window(ParamWindow{
         .f_lo = 150.0, .f_hi = 151.0, .a_lo = 200.0, .a_hi = 300.0});
     mask.add_window(ParamWindow{
-        .f_lo = 150.0, .f_hi = 151.0, .a_lo = -kInf, .a_hi = -150.0});
+        .f_lo = 150.0, .f_hi = 151.0, .a_lo = std::numeric_limits<double>::lowest(), .a_hi = -150.0});
     REQUIRE(mask.empty());
     REQUIRE(mask.get_n_windows() == 0);
 }
@@ -212,8 +214,8 @@ TEST_CASE("GridMask: is_masked matches brute force on random windows",
         const auto wa = width(rng) * 10.0;
         ParamWindow w{.f_lo = f, .f_hi = f + wf, .a_lo = a, .a_hi = a + wa};
         if (i % 5 == 0) {
-            w.a_lo = -kInf;
-            w.a_hi = kInf;
+            w.a_lo = std::numeric_limits<double>::lowest();
+            w.a_hi = kUnbounded;
         }
         windows.push_back(w);
         mask.add_window(w);

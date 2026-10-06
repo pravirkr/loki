@@ -1,6 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
-#include "detail/index_limits.hpp"
+#include "lib/detail/index_limits.hpp"
 
 using loki::index_limits::ChunkIndexUsage;
 using loki::index_limits::chunk_exceeds_cuda_index_limits;

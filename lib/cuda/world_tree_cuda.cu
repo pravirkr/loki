@@ -1,4 +1,4 @@
-#include "cuda/world_tree_cuda.cuh"
+#include "lib/cuda/world_tree_cuda.cuh"
 
 #include <algorithm>
 
@@ -18,10 +18,10 @@
 #include <thrust/sort.h>
 #include <thrust/transform.h>
 
-#include "cuda/cub_helpers.cuh"
-#include "cuda/cuda_utils.cuh"
-#include "detail/error_check.hpp"
 #include "loki/common/types.hpp"
+#include "lib/cuda/cub_helpers.cuh"
+#include "lib/cuda/cuda_utils.cuh"
+#include "lib/detail/error_check.hpp"
 
 namespace loki::memory {
 namespace {

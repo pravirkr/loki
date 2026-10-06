@@ -7,12 +7,12 @@
 
 #include <catch2/catch_test_macros.hpp>
 
-#include "detail/psr_utils.hpp"
 #include "loki/algorithms/ffa.hpp"
 #include "loki/algorithms/fold.hpp"
 #include "loki/common/types.hpp"
 #include "loki/detection/score.hpp"
 #include "loki/search/configs.hpp"
+#include "lib/detail/psr_utils.hpp"
 
 using loki::ParamLimit;
 using loki::SizeType;

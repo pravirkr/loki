@@ -8,11 +8,29 @@ AlignConsecutiveAssignments:
   Enabled: true
 BinPackParameters: false
 DerivePointerAlignment: false
+# Include order (docs/architecture.md, rule 5). Each group is its own block,
+# separated by a blank line and sorted alphabetically, which is also what
+# clang-tidy's llvm-include-order expects:
+#   0. the file's own header ("main" include, matched by IncludeIsMainRegex)
+#   1. C++ standard library        <vector>, <cstdint>
+#   2. system and third-party      <omp.h>, <fmt/format.h>, <cuda_runtime.h>
+#   3. Loki public headers         "loki/..."
+#   4. Loki private headers        "lib/..."
+#   5. other local headers         "bind.hpp", "math_test_utils.hpp"
+IncludeBlocks: Regroup
+IncludeIsMainRegex: "(_cpu|_cuda|_t)?$"
+IncludeIsMainSourceRegex: '(\.cu)$'
 IncludeCategories:
-  - Regex: "^<.*" # System and third-party headers
+  - Regex: '^<[a-z0-9_]+>$'
     Priority: 1
-  - Regex: '^".*"' # Project headers
+  - Regex: '^<.*>$'
     Priority: 2
+  - Regex: '^"loki/'
+    Priority: 3
+  - Regex: '^"lib/'
+    Priority: 4
+  - Regex: '^".*"'
+    Priority: 5
 PackConstructorInitializers: CurrentLine
 PointerAlignment: Left
 SortIncludes: CaseSensitive

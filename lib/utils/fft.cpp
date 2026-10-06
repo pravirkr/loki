@@ -6,8 +6,8 @@
 #include <stdexcept>
 #include <string_view>
 
-#include "common/dispatch.hpp"
-#include "utils/fft_impl.hpp"
+#include "lib/common/dispatch.hpp"
+#include "lib/utils/fft_impl.hpp"
 
 namespace loki::math {
 

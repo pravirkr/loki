@@ -5,12 +5,12 @@
 
 #include <omp.h>
 
-#include "algorithms/fold_engine.hpp"
-#include "common/dispatch.hpp"
-#include "core/kernels.hpp"
-#include "detail/error_check.hpp"
-#include "detail/psr_utils.hpp"
 #include "loki/common/types.hpp"
+#include "lib/algorithms/fold_engine.hpp"
+#include "lib/common/dispatch.hpp"
+#include "lib/core/kernels.hpp"
+#include "lib/detail/error_check.hpp"
+#include "lib/detail/psr_utils.hpp"
 
 namespace loki::algorithms {
 

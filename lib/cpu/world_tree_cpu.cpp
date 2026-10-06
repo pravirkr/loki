@@ -1,4 +1,4 @@
-#include "utils/world_tree.hpp"
+#include "lib/utils/world_tree.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -9,8 +9,8 @@
 
 #include <spdlog/spdlog.h>
 
-#include "detail/error_check.hpp"
 #include "loki/common/types.hpp"
+#include "lib/detail/error_check.hpp"
 
 namespace loki::memory {
 

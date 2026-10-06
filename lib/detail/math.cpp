@@ -1,4 +1,4 @@
-#include "detail/math.hpp"
+#include "lib/detail/math.hpp"
 
 #include <algorithm>
 #include <array>
@@ -18,8 +18,8 @@
 
 #include <omp.h>
 
-#include "detail/utils.hpp"
 #include "loki/common/types.hpp"
+#include "lib/detail/utils.hpp"
 
 namespace loki::math {
 

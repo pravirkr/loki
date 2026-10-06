@@ -13,8 +13,8 @@
 
 #include <omp.h>
 
-#include "detail/utils.hpp"
 #include "loki/common/types.hpp"
+#include "lib/detail/utils.hpp"
 
 namespace loki::detection::detail {
 

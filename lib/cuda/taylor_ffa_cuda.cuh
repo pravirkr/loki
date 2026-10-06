@@ -9,9 +9,9 @@
 #include <cuda/std/span>
 #include <cuda_runtime.h>
 
-#include "core/taylor_ffa.hpp"
-#include "cuda/coord_cuda.cuh"
-#include "cuda/types_cuda.cuh"
+#include "lib/core/taylor_ffa.hpp"
+#include "lib/cuda/coord_cuda.cuh"
+#include "lib/cuda/types_cuda.cuh"
 
 namespace loki::core {
 

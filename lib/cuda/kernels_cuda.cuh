@@ -8,9 +8,9 @@
 
 #include <cuda_runtime.h>
 
-#include "core/kernels.hpp"
-#include "cuda/coord_cuda.cuh"
-#include "cuda/types_cuda.cuh"
+#include "lib/core/kernels.hpp"
+#include "lib/cuda/coord_cuda.cuh"
+#include "lib/cuda/types_cuda.cuh"
 
 namespace loki::core {
 

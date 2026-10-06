@@ -29,15 +29,15 @@
 #include <thrust/transform.h>
 
 #include "loki/common/types.hpp"
-#include "cuda/cuda_utils.cuh"
 #include "loki/detection/score.hpp"
-#include "cuda/device_rng.cuh"
-#include "cuda/thresholds_kernels_cuda.cuh"
-#include "detection/thresholds_engine.hpp"
-#include "detection/scheme.hpp"
 #include "loki/simulation/simulation.hpp"
-#include "detail/timing.hpp"
-#include "detail/utils.hpp"
+#include "lib/cuda/cuda_utils.cuh"
+#include "lib/cuda/device_rng.cuh"
+#include "lib/cuda/thresholds_kernels_cuda.cuh"
+#include "lib/detail/timing.hpp"
+#include "lib/detail/utils.hpp"
+#include "lib/detection/scheme.hpp"
+#include "lib/detection/thresholds_engine.hpp"
 
 namespace loki::detection {
 

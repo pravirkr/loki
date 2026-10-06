@@ -1,15 +1,15 @@
-#include "detail/psr_utils.hpp"
+#include "lib/detail/psr_utils.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <format>
 
-#include "core/transforms.hpp"
-#include "detail/error_check.hpp"
-#include "detail/math.hpp"
-#include "detail/utils.hpp"
 #include "loki/common/types.hpp"
 #include "loki/utils/psr_utils.hpp"
+#include "lib/core/transforms.hpp"
+#include "lib/detail/error_check.hpp"
+#include "lib/detail/math.hpp"
+#include "lib/detail/utils.hpp"
 
 namespace loki::psr_utils {
 

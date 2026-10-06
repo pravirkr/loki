@@ -8,22 +8,22 @@
 #include <omp.h>
 #include <spdlog/spdlog.h>
 
-#include "algorithms/ffa_engine.hpp"
-#include "common/dispatch.hpp"
-#include "detail/error_check.hpp"
-#include "detail/timing.hpp"
-#include "detection/score_engine.hpp"
 #include "loki/algorithms/ffa.hpp"
 #include "loki/algorithms/regions.hpp"
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
 #include "loki/detection/score.hpp"
 #include "loki/search/configs.hpp"
-#include "pipelines/ffa_freq_sweep_engine.hpp"
-#include "search/cands.hpp"
-#include "search/ffa_sweep_candidates.hpp"
-#include "utils/fft_impl.hpp"
-#include "utils/workspace_impl.hpp"
+#include "lib/algorithms/ffa_engine.hpp"
+#include "lib/common/dispatch.hpp"
+#include "lib/detail/error_check.hpp"
+#include "lib/detail/timing.hpp"
+#include "lib/detection/score_engine.hpp"
+#include "lib/pipelines/ffa_freq_sweep_engine.hpp"
+#include "lib/search/cands.hpp"
+#include "lib/search/ffa_sweep_candidates.hpp"
+#include "lib/utils/fft_impl.hpp"
+#include "lib/utils/workspace_impl.hpp"
 
 namespace loki::pipelines {
 

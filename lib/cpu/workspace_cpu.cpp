@@ -1,6 +1,6 @@
-#include "utils/workspace_impl.hpp"
+#include "lib/utils/workspace_impl.hpp"
 
-#include "detail/error_check.hpp"
+#include "lib/detail/error_check.hpp"
 
 namespace loki::memory {
 

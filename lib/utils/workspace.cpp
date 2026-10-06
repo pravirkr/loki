@@ -5,8 +5,8 @@
 #include <stdexcept>
 #include <string_view>
 
-#include "common/dispatch.hpp"
-#include "utils/workspace_impl.hpp"
+#include "lib/common/dispatch.hpp"
+#include "lib/utils/workspace_impl.hpp"
 
 namespace loki::memory {
 

@@ -9,16 +9,16 @@
 #include <catch2/matchers/catch_matchers_range_equals.hpp>
 
 #include "loki/common/types.hpp"
-#include "detail/error_check.hpp"
-#include "utils/fft_impl.hpp"
+#include "lib/detail/error_check.hpp"
+#include "lib/utils/fft_impl.hpp"
 
 #ifdef LOKI_ENABLE_CUDA
 #include <thrust/copy.h>
 #include <thrust/device_vector.h>
 
-#include "cuda/cuda_utils.cuh"
-#include "cuda/fft_cuda.cuh"
-#include "cuda/types_cuda.cuh"
+#include "lib/cuda/cuda_utils.cuh"
+#include "lib/cuda/fft_cuda.cuh"
+#include "lib/cuda/types_cuda.cuh"
 #endif // LOKI_ENABLE_CUDA
 
 using Catch::Matchers::RangeEquals;

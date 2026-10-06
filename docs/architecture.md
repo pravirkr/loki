@@ -46,7 +46,12 @@ lib/
 src/
   loki_python.cpp             PYBIND11_MODULE: calls one bind_<submodule>() per submodule
   bindings/bind_<sub>.cpp     one file per Python submodule
-tests/cpp/*_t.cpp             Catch2 tests (may use private headers via loki::internal)
+tests/
+  cpp/api/*_t.cpp             black-box Catch2 tests: public headers only (loki_api_tests)
+  cpp/internal/*_t.cpp        white-box Catch2 tests of private code (loki_internal_tests)
+  consumer/                   find_package(loki) project built against an install (CI)
+  python/                     pytest suite for libloki
+scripts/check_architecture.sh the mechanical checks for these rules (pre-commit and CI)
 ```
 
 Domains are `algorithms`, `common`, `detection`, `io`, `pipelines`, `search`,
@@ -113,6 +118,18 @@ Domains are `algorithms`, `common`, `detection`, `io`, `pipelines`, `search`,
   `throw_unavailable`. Both are `[[noreturn]]` and live in
   `lib/common/dispatch.hpp`.
 - Every `DeviceSpan` overload of a facade calls `check_device` on its views.
+- Free functions that dispatch (e.g. `snr_boxcar_*` in
+  `lib/detection/score.cpp`) have no engine object. Each one follows the same
+  three branches inline: CPU, then the GPU branch under `#ifdef
+  LOKI_ENABLE_GPU`, then `throw_unavailable`. Their `DeviceSpan` overloads
+  first call `common_device(...)` so that all views agree on one device. In a
+  build without a GPU backend they throw `throw_unavailable(..., kCUDA)`.
+- A public free function that is CPU-only by design (no `Exec`, e.g.
+  `MatchedFilter`, `append_snr_boxcar_3d_hits`) may be defined in its facade
+  `.cpp`. Kernels it shares with a CPU engine go in a `lib/cpu/` header (e.g.
+  `cpu/boxcar_kernels.hpp`).
+- Name GPU-only checks after `kGPUBackend` or the caller's `exec.backend`,
+  never a hard-coded `Backend::kCUDA`, so a HIP build reuses them.
 - A CPU engine whose `execute(DeviceSpan...)` cannot work throws
   `throw_no_device_memory`.
 
@@ -120,19 +137,44 @@ Domains are `algorithms`, `common`, `detection`, `io`, `pipelines`, `search`,
 
 - `LOKI_ENABLE_GPU` (any GPU backend) and `LOKI_ENABLE_CUDA` (which backend)
   are PRIVATE compile definitions of `loki`. They never reach consumers.
-- `LOKI_ENABLE_GPU` appears only in `make_*_engine` functions, in the handle
-  constructors in `lib/utils/`, in `lib/common/backend.cpp` and
-  `lib/common/dispatch.hpp`, and in tests.
+- `LOKI_ENABLE_GPU` appears only in the dispatch code of facade `.cpp` files
+  in `lib/<domain>/` (`make_*_engine` functions and dispatching free
+  functions), in the handle constructors in `lib/utils/`, in
+  `lib/common/backend.cpp` and `lib/common/dispatch.hpp`, and in
+  `tests/cpp/internal/`. Never in a header, in `lib/cpu/`, in `include/`, or
+  in API tests.
 - Code in `lib/cuda/` is compiled only for GPU builds and needs no guard.
 - `LOKI_HD` in `types.hpp` is keyed on `__CUDACC__`, not on the backend, so
   the public header is still identical in every build.
 
 ### 5. Private headers
 
-- Private headers are included without the `loki/` prefix, relative to `lib/`:
-  `"detail/math.hpp"`, `"cuda/cuda_utils.cuh"`, `"algorithms/ffa_engine.hpp"`.
-  So `#include "loki/..."` always means public and anything else means
-  private.
+- Every repository header is included by its path from the repository root,
+  in one of exactly two forms:
+  - public: `#include "loki/algorithms/ffa.hpp"` (resolved in `include/`);
+  - private: `#include "lib/detail/math.hpp"`, `"lib/cuda/cuda_utils.cuh"`,
+    `"lib/algorithms/ffa_engine.hpp"`.
+
+  The prefix alone tells a reader whether a header is part of the installed
+  API. The `lib/` prefix cannot collide with public headers or with system
+  directories such as CUDA's `cuda/`. Private headers stay next to the `.cpp`
+  that implements them. A bare `"file.hpp"` is allowed only for a header in
+  the same directory (e.g. a test helper).
+- Include order is enforced by `.clang-format` (`IncludeBlocks: Regroup`).
+  Each group is its own block, separated by a blank line and sorted
+  alphabetically:
+  1. the file's own header: `foo.hpp` for `foo.cpp`, `foo_cpu.cpp`,
+     `foo_cuda.cu` or `foo_t.cpp`;
+  2. the C++ standard library (`<vector>`, `<cstdint>`);
+  3. system and third-party headers (`<omp.h>`, `<fmt/format.h>`,
+     `<cuda_runtime.h>`, `<catch2/...>`);
+  4. public Loki headers (`"loki/..."`);
+  5. private Loki headers (`"lib/..."`);
+  6. other same-directory headers.
+
+  Because each group is a separate block, clang-tidy's
+  `llvm-include-order` (which sorts within a block) agrees with
+  clang-format. Do not reorder includes by hand; run clang-format.
 - `.hpp` files are host C++. Device declarations, Thrust containers and CUDA
   types go in `lib/cuda/*.cuh`. For example `core/taylor.hpp` declares the
   host functions, and `cuda/taylor_cuda.cuh` declares the device ones.
@@ -142,10 +184,21 @@ Domains are `algorithms`, `common`, `detection`, `io`, `pipelines`, `search`,
 ### 6. Consumers inside the repository
 
 - `applications/` and `src/` (Python) use public headers only.
-- `tests/cpp` and `bench` link `loki::internal`, an in-tree INTERFACE target
-  that is never installed. It adds `lib/` to the include path, along with the
-  backend macros and the CUDA headers, for white-box tests. Do not add `lib/`
-  to an include path by hand.
+- C++ tests come in two executables, and the build enforces the boundary:
+  - `tests/cpp/api/` (`loki_api_tests`) links only `loki::loki`, exactly like
+    a downstream project. A `"lib/..."` include there fails to compile.
+    Prefer an API test: it exercises behaviour through the public API and
+    survives internal refactors.
+  - `tests/cpp/internal/` (`loki_internal_tests`) and `bench/` link
+    `loki::internal`, an in-tree INTERFACE target that is never installed.
+    It adds the repository root (for `"lib/..."`), the backend macros and
+    the CUDA headers. Use it only for private code the public API cannot
+    reach or cannot test precisely: math helpers, HDF5 writers, FFT plan
+    caches, masks, kernels.
+  - Do not add `lib/` or the repository root to an include path by hand.
+- `tests/consumer/` is a separate CMake project that builds against an
+  installed Loki with `find_package(loki)`. CI runs it, so the installed
+  package keeps working for downstream users.
 - GPU tests are gated at run time, so a CPU-only build reports them as
   skipped instead of compiling them away:
   `if (!loki::is_available(Backend::kCUDA)) { SKIP("..."); }`. Use
@@ -162,7 +215,7 @@ Domains are `algorithms`, `common`, `detection`, `io`, `pipelines`, `search`,
 The namespace follows the directory. Public headers:
 
 | Directory | Namespace |
-|---|---|
+| ----------- | ----------- |
 | `include/loki/algorithms/` | `loki::algorithms` |
 | `include/loki/pipelines/` | `loki::pipelines` |
 | `include/loki/detection/`, `io/`, `search/`, `simulation/` | `loki::<directory>` |
@@ -190,7 +243,10 @@ Private code:
   `detail/utils.hpp` uses `loki::utils`, `detail/error_check.hpp` uses
   `loki::error_check`, `detail/timing.hpp` uses `loki::timing`,
   `cuda/cuda_utils.cuh` uses `loki::cuda_utils`, `cuda/cub_helpers.cuh` uses
-  `loki::cub_helpers`, `cpu/simd_utils.hpp` uses `loki::simd_utils`. The
+  `loki::cub_helpers`, `cuda/device_rng.cuh` uses `loki::device_rng`,
+  `cpu/simd_utils.hpp` uses `loki::simd_utils`,
+  `cpu/brute_fold_intrinsics.hpp` uses `loki::brute_fold_intrinsics`,
+  `detail/progress.hpp` uses `loki::progress`. The
   device companion of a host header uses the host header's namespace:
   `cuda/kernel_utils.cuh` uses `loki::utils`, `cuda/types_cuda.cuh` uses
   `loki`, `cuda/coord_cuda.cuh` uses `loki::coord`.
@@ -217,8 +273,9 @@ Private code:
    facade calls `throw_unimplemented` for the GPU backend.
 6. `src/bindings/bind_<domain>.cpp`: the binding. Use `py::kw_only()` before
    `backend` / `device`, and build the `Exec` with `make_exec(backend, device)`.
-7. `tests/cpp/foo_t.cpp`: a CPU test. Gate CUDA checks with
-   `loki::is_available(Backend::kCUDA)` and `SKIP`.
+7. `tests/cpp/api/foo_t.cpp`: a CPU test through the public API. Gate CUDA
+   checks with `loki::is_available(Backend::kCUDA)` and `SKIP`. Add a
+   `tests/cpp/internal/` test only for private helpers the API cannot reach.
 
 No CMake edit is needed: the globs pick up the new files.
 
@@ -236,29 +293,42 @@ No CMake edit is needed: the globs pick up the new files.
 The facades do not change: they already dispatch on `kGPUBackend` through
 `make_*_gpu`. One GPU backend is compiled per build.
 
+## Numerics
+
+- Release builds compile with `-ffast-math` (see `loki_compile_options` in
+  `CMakeLists.txt`). Library and test code must not rely on IEEE
+  infinities, NaN propagation or `std::isfinite`:
+  - use `utils::is_finite` / `utils::is_nan` (`lib/detail/utils.hpp`), which
+    inspect the bits;
+  - use sentinels such as `std::numeric_limits<T>::max()` / `lowest()` for
+    open bounds (as `ParamWindow` does), never `infinity()`.
+- Because of `-ffast-math`, OpenMP reductions and vectorisation, results may
+  differ in the last bits between compilers, thread counts and CPUs. The
+  thread count is part of the reproducibility key
+  (`DynamicThresholdScheme` documents this).
+- On the GPU, the time-domain brute fold accumulates with float `atomicAdd`
+  and is not bit-reproducible run to run (rule 6). Every other path is
+  deterministic for a fixed seed.
+- Whether `-ffast-math` should be narrowed to the kernel translation units is
+  a numerics decision for a later cycle. It is not a layout question.
+
 ## Checks
 
+All rule checks are scripted:
+
 ```bash
-# Public headers carry no GPU code
-grep -rnE "cuda_runtime|thrust/|cuda/std|LOKI_ENABLE" include/   # expect nothing
-
-# Private headers are never included through the public prefix
-grep -rnE '#include "loki/(core|detail|cuda)/' lib src tests bench applications   # expect nothing
-
-# Each public header compiles on its own, without lib/ or backend macros
-for h in $(cd include && find loki -name '*.hpp'); do
-  echo "#include \"$h\"" | c++ -std=c++20 -fsyntax-only -Iinclude -x c++ -
-done
-
-# Public headers open only the namespaces rule 7 allows   # expect nothing
-for h in $(find include/loki -mindepth 2 -name '*.hpp'); do
-  d=$(basename "$(dirname "$h")")
-  case $d in
-    common) ok='loki|loki::plans|loki::coord' ;;
-    utils)  ok='loki::math|loki::memory|loki::psr_utils|loki::detail' ;;
-    *)      ok="loki::$d" ;;
-  esac
-  grep -oE '^namespace [A-Za-z_:]+' "$h" | awk '{print $2}' |
-    grep -vxE "$ok" | sed "s|^|$h: |"
-done
+scripts/check_architecture.sh             # CXX=<compiler> to choose the compiler
+SKIP_COMPILE=1 scripts/check_architecture.sh   # skip the header compile
 ```
+
+The script checks that:
+
+- public headers carry no GPU code and no backend macro;
+- repository includes are `"loki/..."` or `"lib/..."` (or same-directory);
+- `"lib/..."` never appears in `include/`, `src/`, `applications/` or
+  `tests/cpp/api/`;
+- `LOKI_ENABLE_*` appears only where rule 4 allows it;
+- public headers open only the namespaces rule 7 allows;
+- every public header compiles on its own.
+
+A new rule should come with a new check in the script.

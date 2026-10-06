@@ -1,4 +1,4 @@
-#include "cuda/fft_cuda.cuh"
+#include "lib/cuda/fft_cuda.cuh"
 
 #include <algorithm>
 #include <array>
@@ -19,9 +19,9 @@
 #include <cuda_runtime.h>
 #include <cufft.h>
 
-#include "cuda/cuda_utils.cuh"
-#include "cuda/workspace_cuda.cuh"
-#include "detail/error_check.hpp"
+#include "lib/cuda/cuda_utils.cuh"
+#include "lib/cuda/workspace_cuda.cuh"
+#include "lib/detail/error_check.hpp"
 
 namespace loki::math {
 

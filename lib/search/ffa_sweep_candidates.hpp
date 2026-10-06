@@ -8,12 +8,12 @@
 #include <utility>
 #include <vector>
 
-#include "search/cands.hpp"
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
-#include "detail/error_check.hpp"
-#include "detail/psr_utils.hpp"
 #include "loki/search/configs.hpp"
+#include "lib/detail/error_check.hpp"
+#include "lib/detail/psr_utils.hpp"
+#include "lib/search/cands.hpp"
 
 namespace loki::search {
 

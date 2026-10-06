@@ -1,4 +1,4 @@
-#include "core/chebyshev.hpp"
+#include "lib/core/chebyshev.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -6,13 +6,13 @@
 #include <span>
 #include <utility>
 
-#include "core/taylor.hpp"
-#include "core/transforms.hpp"
-#include "detail/error_check.hpp"
-#include "detail/psr_utils.hpp"
-#include "detail/utils.hpp"
 #include "loki/common/types.hpp"
-#include "utils/workspace_impl.hpp"
+#include "lib/core/taylor.hpp"
+#include "lib/core/transforms.hpp"
+#include "lib/detail/error_check.hpp"
+#include "lib/detail/psr_utils.hpp"
+#include "lib/detail/utils.hpp"
+#include "lib/utils/workspace_impl.hpp"
 
 namespace loki::core {
 

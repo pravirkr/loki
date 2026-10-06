@@ -1,4 +1,4 @@
-#include "core/taylor.hpp"
+#include "lib/core/taylor.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -9,13 +9,13 @@
 #include <utility>
 #include <vector>
 
-#include "core/cartesian.hpp"
-#include "core/transforms.hpp"
-#include "detail/error_check.hpp"
-#include "detail/psr_utils.hpp"
-#include "detail/utils.hpp"
 #include "loki/common/types.hpp"
-#include "utils/workspace_impl.hpp"
+#include "lib/core/cartesian.hpp"
+#include "lib/core/transforms.hpp"
+#include "lib/detail/error_check.hpp"
+#include "lib/detail/psr_utils.hpp"
+#include "lib/detail/utils.hpp"
+#include "lib/utils/workspace_impl.hpp"
 
 namespace loki::core {
 

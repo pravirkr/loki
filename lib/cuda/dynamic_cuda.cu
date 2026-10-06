@@ -1,4 +1,4 @@
-#include "cuda/dynamic_cuda.cuh"
+#include "lib/cuda/dynamic_cuda.cuh"
 
 #include <cuda/std/limits>
 #include <cuda/std/span>
@@ -7,15 +7,15 @@
 #include <thrust/copy.h>
 
 #include "loki/common/types.hpp"
-#include "cuda/chebyshev_cuda.cuh"
-#include "cuda/circular_cuda.cuh"
-#include "cuda/taylor_cuda.cuh"
-#include "cuda/cuda_utils.cuh"
-#include "detail/error_check.hpp"
-#include "cuda/kernels_cuda.cuh"
-#include "cuda/fft_cuda.cuh"
-#include "cuda/score_cuda.cuh"
-#include "cuda/kadane_cuda.cuh"
+#include "lib/cuda/chebyshev_cuda.cuh"
+#include "lib/cuda/circular_cuda.cuh"
+#include "lib/cuda/cuda_utils.cuh"
+#include "lib/cuda/fft_cuda.cuh"
+#include "lib/cuda/kadane_cuda.cuh"
+#include "lib/cuda/kernels_cuda.cuh"
+#include "lib/cuda/score_cuda.cuh"
+#include "lib/cuda/taylor_cuda.cuh"
+#include "lib/detail/error_check.hpp"
 
 namespace loki::core {
 

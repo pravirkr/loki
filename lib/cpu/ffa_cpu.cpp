@@ -15,19 +15,20 @@
 #include <omp.h>
 #include <spdlog/spdlog.h>
 
-#include "algorithms/ffa_engine.hpp"
-#include "common/dispatch.hpp"
-#include "core/kernels.hpp"
-#include "detail/error_check.hpp"
-#include "detail/progress.hpp"
-#include "detail/timing.hpp"
-#include "detection/score_engine.hpp"
 #include "loki/algorithms/fold.hpp"
 #include "loki/common/types.hpp"
 #include "loki/detection/score.hpp"
 #include "loki/search/configs.hpp"
-#include "utils/fft_impl.hpp"
-#include "utils/workspace_impl.hpp"
+
+#include "lib/algorithms/ffa_engine.hpp"
+#include "lib/common/dispatch.hpp"
+#include "lib/core/kernels.hpp"
+#include "lib/detail/error_check.hpp"
+#include "lib/detail/progress.hpp"
+#include "lib/detail/timing.hpp"
+#include "lib/detection/score_engine.hpp"
+#include "lib/utils/fft_impl.hpp"
+#include "lib/utils/workspace_impl.hpp"
 
 namespace loki::algorithms {
 
@@ -971,8 +972,8 @@ private:
             std::span(ws.coords_freq).subspan(ncoords_offset, ncoords_cur);
         if constexpr (std::is_same_v<FoldType, float>) {
             core::ffa_iter_freq(fold_in, fold_out, coords_cur_span.data(),
-                                   ncoords_cur, ncoords_prev, nsegments, nbins,
-                                   m_nthreads);
+                                ncoords_cur, ncoords_prev, nsegments, nbins,
+                                m_nthreads);
         } else {
             core::ffa_complex_iter_freq(
                 fold_in, fold_out, coords_cur_span.data(), ncoords_cur,
@@ -996,13 +997,13 @@ private:
 
         if constexpr (std::is_same_v<FoldType, float>) {
             core::ffa_iter(fold_in, fold_out, coords_cur_span.data(),
-                              ncoords_cur, ncoords_prev, nsegments, nbins,
-                              m_nthreads);
+                           ncoords_cur, ncoords_prev, nsegments, nbins,
+                           m_nthreads);
 
         } else {
             core::ffa_complex_iter(fold_in, fold_out, coords_cur_span.data(),
-                                      ncoords_cur, ncoords_prev, nsegments,
-                                      nbins_f, nbins, m_nthreads);
+                                   ncoords_cur, ncoords_prev, nsegments,
+                                   nbins_f, nbins, m_nthreads);
         }
     }
 }; // End FFACpuEngine definition

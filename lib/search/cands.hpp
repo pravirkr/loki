@@ -17,7 +17,7 @@
 #include "loki/algorithms/prune_rfi.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
-#include "utils/world_tree.hpp"
+#include "lib/utils/world_tree.hpp"
 
 namespace loki::search {
 

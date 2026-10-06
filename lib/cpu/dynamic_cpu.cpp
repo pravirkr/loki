@@ -1,4 +1,4 @@
-#include "core/dynamic.hpp"
+#include "lib/core/dynamic.hpp"
 
 #include <algorithm>
 #include <span>
@@ -7,13 +7,13 @@
 #include <spdlog/spdlog.h>
 
 #include "loki/common/types.hpp"
-#include "core/chebyshev.hpp"
-#include "core/circular.hpp"
-#include "core/taylor.hpp"
 #include "loki/detection/score.hpp"
-#include "detail/error_check.hpp"
-#include "core/kernels.hpp"
 #include "loki/search/configs.hpp"
+#include "lib/core/chebyshev.hpp"
+#include "lib/core/circular.hpp"
+#include "lib/core/kernels.hpp"
+#include "lib/core/taylor.hpp"
+#include "lib/detail/error_check.hpp"
 
 namespace loki::core {
 

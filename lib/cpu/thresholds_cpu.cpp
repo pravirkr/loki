@@ -20,19 +20,19 @@
 #include <omp.h>
 #include <spdlog/spdlog.h>
 
-#include "search/cands.hpp"
 #include "loki/common/types.hpp"
 #include "loki/detection/score.hpp"
-#include "detection/score_engine.hpp"
-#include "detection/thresholds_engine.hpp"
-#include "common/dispatch.hpp"
-#include "detail/error_check.hpp"
-#include "detail/math.hpp"
-#include "detail/progress.hpp"
-#include "detection/scheme.hpp"
 #include "loki/simulation/simulation.hpp"
-#include "detail/timing.hpp"
-#include "detail/utils.hpp"
+#include "lib/common/dispatch.hpp"
+#include "lib/detail/error_check.hpp"
+#include "lib/detail/math.hpp"
+#include "lib/detail/progress.hpp"
+#include "lib/detail/timing.hpp"
+#include "lib/detail/utils.hpp"
+#include "lib/detection/scheme.hpp"
+#include "lib/detection/score_engine.hpp"
+#include "lib/detection/thresholds_engine.hpp"
+#include "lib/search/cands.hpp"
 
 namespace loki::detection {
 

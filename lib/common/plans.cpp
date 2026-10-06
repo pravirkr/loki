@@ -9,13 +9,13 @@
 #include <utility>
 
 #include "loki/common/types.hpp"
-#include "core/chebyshev.hpp"
-#include "core/circular.hpp"
-#include "core/taylor.hpp"
-#include "core/taylor_ffa.hpp"
-#include "detail/error_check.hpp"
-#include "detail/psr_utils.hpp"
 #include "loki/search/configs.hpp"
+#include "lib/core/chebyshev.hpp"
+#include "lib/core/circular.hpp"
+#include "lib/core/taylor.hpp"
+#include "lib/core/taylor_ffa.hpp"
+#include "lib/detail/error_check.hpp"
+#include "lib/detail/psr_utils.hpp"
 
 namespace loki::plans {
 

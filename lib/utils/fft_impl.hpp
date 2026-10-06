@@ -10,10 +10,11 @@
 #include <span>
 #include <string_view>
 
-#include "common/dispatch.hpp"
 #include "loki/common/backend.hpp"
 #include "loki/common/types.hpp"
 #include "loki/utils/fft.hpp"
+
+#include "lib/common/dispatch.hpp"
 
 namespace loki::math {
 

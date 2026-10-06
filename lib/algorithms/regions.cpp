@@ -8,12 +8,12 @@
 
 #include <spdlog/spdlog.h>
 
-#include "detail/error_check.hpp"
-#include "detail/index_limits.hpp"
-#include "detail/utils.hpp"
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
+#include "lib/detail/error_check.hpp"
+#include "lib/detail/index_limits.hpp"
+#include "lib/detail/utils.hpp"
 
 namespace loki::algorithms {
 

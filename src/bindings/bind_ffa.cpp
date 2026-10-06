@@ -1,5 +1,3 @@
-#include "bindings/bind.hpp"
-
 #include <cstddef>
 #include <span>
 #include <string>
@@ -13,21 +11,22 @@
 #include <pybind11/stl/filesystem.h>
 
 #include "loki/loki.hpp"
+
+#include "bindings/bind.hpp"
 #include "loki_templates.hpp"
 #include "pybind_utils.hpp"
 
 namespace loki {
-using pipelines::EPFreqSweep;
-using pipelines::FFAFreqSweep;
-using detection::MatchedFilter;
-using plans::FFAPlanBase;
 using algorithms::EPChunkConfig;
 using algorithms::EPChunkStats;
 using algorithms::EPRegionStats;
 using algorithms::FFARegionStats;
+using detection::MatchedFilter;
+using pipelines::EPFreqSweep;
+using pipelines::FFAFreqSweep;
+using plans::FFAPlanBase;
 using search::FFASearchConfig;
 using search::PulsarSearchConfig;
-
 
 namespace py = pybind11;
 
@@ -49,8 +48,7 @@ void bind_ffa(py::module_& m) {
         },
         py::arg("ts_e"), py::arg("ts_v"), py::arg("cfg"),
         py::arg("quiet") = false, py::arg("show_progress") = false,
-        py::kw_only(), py::arg("backend") = "cpu",
-        py::arg("device") = 0);
+        py::kw_only(), py::arg("backend") = "cpu", py::arg("device") = 0);
 
     m_ffa.def(
         "compute_ffa_fourier",
@@ -65,8 +63,7 @@ void bind_ffa(py::module_& m) {
         },
         py::arg("ts_e"), py::arg("ts_v"), py::arg("cfg"),
         py::arg("quiet") = false, py::arg("show_progress") = false,
-        py::kw_only(), py::arg("backend") = "cpu",
-        py::arg("device") = 0);
+        py::kw_only(), py::arg("backend") = "cpu", py::arg("device") = 0);
 
     m_ffa.def(
         "compute_ffa_fourier_return_to_time",
@@ -76,15 +73,13 @@ void bind_ffa(py::module_& m) {
             auto [fold, ffa_plan] =
                 algorithms::compute_ffa_fourier_return_to_time(
                     to_span<const float>(ts_e), to_span<const float>(ts_v), cfg,
-                    quiet, show_progress,
-                    make_exec(backend, device));
+                    quiet, show_progress, make_exec(backend, device));
             return std::make_tuple(as_pyarray(std::move(fold)),
                                    std::move(ffa_plan));
         },
         py::arg("ts_e"), py::arg("ts_v"), py::arg("cfg"),
         py::arg("quiet") = false, py::arg("show_progress") = false,
-        py::kw_only(), py::arg("backend") = "cpu",
-        py::arg("device") = 0);
+        py::kw_only(), py::arg("backend") = "cpu", py::arg("device") = 0);
 
     m_ffa.def(
         "compute_ffa_scores",
@@ -99,19 +94,16 @@ void bind_ffa(py::module_& m) {
         },
         py::arg("ts_e"), py::arg("ts_v"), py::arg("cfg"),
         py::arg("quiet") = false, py::arg("show_progress") = false,
-        py::kw_only(), py::arg("backend") = "cpu",
-        py::arg("device") = 0);
+        py::kw_only(), py::arg("backend") = "cpu", py::arg("device") = 0);
 
     py::class_<FFAFreqSweep>(m_ffa, "FFAFreqSweep")
-        .def(
-            py::init([](const FFASearchConfig& cfg, bool show_progress,
-                        std::string_view backend, int device) {
-                return std::make_unique<FFAFreqSweep>(
-                    cfg, show_progress, make_exec(backend, device));
-            }),
-            py::arg("cfg"), py::arg("show_progress") = true,
-            py::kw_only(), py::arg("backend") = "cpu",
-            py::arg("device") = 0)
+        .def(py::init([](const FFASearchConfig& cfg, bool show_progress,
+                         std::string_view backend, int device) {
+                 return std::make_unique<FFAFreqSweep>(
+                     cfg, show_progress, make_exec(backend, device));
+             }),
+             py::arg("cfg"), py::arg("show_progress") = true, py::kw_only(),
+             py::arg("backend") = "cpu", py::arg("device") = 0)
         .def(
             "execute",
             [](FFAFreqSweep& self, const PyArrayT<float>& ts_e,

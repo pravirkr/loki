@@ -1,4 +1,4 @@
-#include "detection/scheme.hpp"
+#include "lib/detection/scheme.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -6,10 +6,10 @@
 #include <stdexcept>
 #include <string>
 
-#include "detail/error_check.hpp"
-#include "detail/math.hpp"
-#include "detail/utils.hpp"
 #include "loki/detection/thresholds.hpp"
+#include "lib/detail/error_check.hpp"
+#include "lib/detail/math.hpp"
+#include "lib/detail/utils.hpp"
 
 namespace loki::detection::detail {
 

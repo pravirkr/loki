@@ -1,0 +1,62 @@
+minimum_pre_commit_version: "3.5.0"
+
+exclude: ^(build[^/]*|tmp_files|\.cache|\.venv)/
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: check-yaml
+        # .clang-format uses multiple YAML documents (global + Language: Cpp).
+        exclude: ^\.clang-format$
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=1024]
+      - id: check-case-conflict
+
+  # C++/CUDA formatting. The pinned clang-format is installed by pre-commit,
+  # so every machine formats identically regardless of the local LLVM.
+  - repo: https://github.com/pre-commit/mirrors-clang-format
+    rev: v23.1.1
+    hooks:
+      - id: clang-format
+        types_or: [c++, c, cuda]
+        files: ^(include|lib|src|tests|bench|applications)/
+
+  - repo: https://github.com/cheshirekow/cmake-format-precommit
+    rev: v0.6.13
+    hooks:
+      - id: cmake-format
+        additional_dependencies: [pyyaml]
+        args: [--config-files=.cmake-format.yaml]
+        exclude: cmake/CPM\.cmake$
+      - id: cmake-lint
+        additional_dependencies: [pyyaml]
+        args: [--config-files=.cmake-format.yaml]
+        exclude: cmake/(CPM|FindFFTW)\.cmake$
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.8
+    hooks:
+      - id: ruff-check
+        types_or: [python, pyi]
+        files: ^(src/|pyproject\.toml)
+        args: [--fix]
+      - id: ruff-format
+        types_or: [python, pyi]
+
+  # Layout, include and namespace rules from docs/architecture.md. The
+  # standalone-header compile runs in CI; locally it is skipped for speed.
+  - repo: local
+    hooks:
+      - id: check-architecture
+        name: architecture rules (docs/architecture.md)
+        entry: env SKIP_COMPILE=1 scripts/check_architecture.sh
+        language: system
+        pass_filenames: false
+        files: ^(include|lib|src|tests|bench|applications)/

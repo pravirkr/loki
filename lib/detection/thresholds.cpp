@@ -10,8 +10,8 @@
 
 #include "loki/common/backend.hpp"
 #include "loki/common/types.hpp"
-#include "common/dispatch.hpp"
-#include "detection/thresholds_engine.hpp"
+#include "lib/common/dispatch.hpp"
+#include "lib/detection/thresholds_engine.hpp"
 
 namespace loki::detection {
 

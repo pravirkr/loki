@@ -8,13 +8,13 @@
 #include <span>
 #include <stdexcept>
 
-#include "common/dispatch.hpp"
-#include "detail/error_check.hpp"
-#include "detail/utils.hpp"
-#include "detection/boxcar_kernels.hpp"
-#include "detection/score_engine.hpp"
 #include "loki/common/types.hpp"
-#include "utils/fft_impl.hpp"
+#include "lib/common/dispatch.hpp"
+#include "lib/detail/error_check.hpp"
+#include "lib/detail/utils.hpp"
+#include "lib/cpu/boxcar_kernels.hpp"
+#include "lib/detection/score_engine.hpp"
+#include "lib/utils/fft_impl.hpp"
 
 namespace loki::detection {
 
@@ -389,18 +389,17 @@ void snr_boxcar_2d_max(DeviceSpan<const float> folds,
                        SizeType nbins,
                        float stdnoise,
                        Stream stream) {
+    loki::detail::common_device({folds.device, widths.device, scores.device},
+                                "snr_boxcar_2d_max");
 #ifdef LOKI_ENABLE_GPU
     detail::snr_boxcar_2d_max_gpu(folds, widths, scores, nprofiles, nbins,
                                   stdnoise, stream);
 #else
-    (void)folds;
-    (void)widths;
-    (void)scores;
     (void)nprofiles;
     (void)nbins;
     (void)stdnoise;
     (void)stream;
-    loki::detail::throw_no_device_memory("snr_boxcar_2d_max", Backend::kCPU);
+    loki::detail::throw_unavailable("snr_boxcar_2d_max", Backend::kCUDA);
 #endif
 }
 
@@ -431,16 +430,15 @@ void snr_boxcar_3d(DeviceSpan<const float> folds,
                    SizeType nprofiles,
                    SizeType nbins,
                    Stream stream) {
+    loki::detail::common_device({folds.device, widths.device, scores.device},
+                                "snr_boxcar_3d");
 #ifdef LOKI_ENABLE_GPU
     detail::snr_boxcar_3d_gpu(folds, widths, scores, nprofiles, nbins, stream);
 #else
-    (void)folds;
-    (void)widths;
-    (void)scores;
     (void)nprofiles;
     (void)nbins;
     (void)stream;
-    loki::detail::throw_no_device_memory("snr_boxcar_3d", Backend::kCPU);
+    loki::detail::throw_unavailable("snr_boxcar_3d", Backend::kCUDA);
 #endif
 }
 
@@ -518,17 +516,16 @@ void snr_boxcar_3d_max(DeviceSpan<const float> folds,
                        SizeType nprofiles,
                        SizeType nbins,
                        Stream stream) {
+    loki::detail::common_device({folds.device, widths.device, scores.device},
+                                "snr_boxcar_3d_max");
 #ifdef LOKI_ENABLE_GPU
     detail::snr_boxcar_3d_max_gpu(folds, widths, scores, nprofiles, nbins,
                                   stream);
 #else
-    (void)folds;
-    (void)widths;
-    (void)scores;
     (void)nprofiles;
     (void)nbins;
     (void)stream;
-    loki::detail::throw_no_device_memory("snr_boxcar_3d_max", Backend::kCPU);
+    loki::detail::throw_unavailable("snr_boxcar_3d_max", Backend::kCUDA);
 #endif
 }
 

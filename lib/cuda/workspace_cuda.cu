@@ -1,4 +1,4 @@
-#include "cuda/workspace_cuda.cuh"
+#include "lib/cuda/workspace_cuda.cuh"
 
 #include <algorithm>
 #include <memory>
@@ -6,10 +6,10 @@
 #include <cuda_runtime.h>
 #include <utility>
 
-#include "cuda/taylor_ffa_cuda.cuh"
-#include "cuda/cub_helpers.cuh"
-#include "cuda/cuda_utils.cuh"
-#include "detail/error_check.hpp"
+#include "lib/cuda/cub_helpers.cuh"
+#include "lib/cuda/cuda_utils.cuh"
+#include "lib/cuda/taylor_ffa_cuda.cuh"
+#include "lib/detail/error_check.hpp"
 
 namespace loki::memory {
 

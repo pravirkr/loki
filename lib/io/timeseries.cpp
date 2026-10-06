@@ -13,10 +13,10 @@
 
 #include <psrio/psrio.hpp>
 
-#include "detail/error_check.hpp"
-#include "detail/math.hpp"
-#include "detail/utils.hpp"
 #include "loki/common/types.hpp"
+#include "lib/detail/error_check.hpp"
+#include "lib/detail/math.hpp"
+#include "lib/detail/utils.hpp"
 
 namespace loki::io {
 namespace {

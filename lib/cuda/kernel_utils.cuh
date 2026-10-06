@@ -6,7 +6,7 @@
 
 #include <cuda_runtime.h>
 
-#include "detail/utils.hpp"
+#include "lib/detail/utils.hpp"
 
 namespace loki::utils {
 

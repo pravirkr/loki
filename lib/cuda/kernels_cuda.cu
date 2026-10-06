@@ -1,12 +1,12 @@
-#include "cuda/kernels_cuda.cuh"
+#include "lib/cuda/kernels_cuda.cuh"
 
 #include <cuda/std/span>
 #include <cuda_runtime.h>
 #include <thrust/device_vector.h>
 
-#include "cuda/cub_helpers.cuh"
-#include "cuda/cuda_utils.cuh"
 #include "loki/common/types.hpp"
+#include "lib/cuda/cub_helpers.cuh"
+#include "lib/cuda/cuda_utils.cuh"
 
 namespace loki::core {
 

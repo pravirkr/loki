@@ -12,9 +12,9 @@
 #include <utility>
 #include <vector>
 
-#include "detail/error_check.hpp"
-#include "detail/utils.hpp"
 #include "loki/common/types.hpp"
+#include "lib/detail/error_check.hpp"
+#include "lib/detail/utils.hpp"
 
 namespace loki::psr_utils {
 

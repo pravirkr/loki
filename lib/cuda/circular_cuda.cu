@@ -1,4 +1,4 @@
-#include "cuda/circular_cuda.cuh"
+#include "lib/cuda/circular_cuda.cuh"
 
 #include <cstdint>
 #include <cuda/atomic>
@@ -10,10 +10,10 @@
 #include <thrust/sequence.h>
 
 #include "loki/common/types.hpp"
-#include "cuda/cub_helpers.cuh"
-#include "cuda/cuda_utils.cuh"
-#include "cuda/kernel_utils.cuh"
-#include "detail/utils.hpp"
+#include "lib/cuda/cub_helpers.cuh"
+#include "lib/cuda/cuda_utils.cuh"
+#include "lib/cuda/kernel_utils.cuh"
+#include "lib/detail/utils.hpp"
 
 namespace loki::core {
 

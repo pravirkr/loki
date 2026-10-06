@@ -5,8 +5,8 @@
 #include <string>
 #include <vector>
 
-#include "detail/math.hpp"
 #include "loki/common/types.hpp"
+#include "lib/detail/math.hpp"
 
 namespace loki::test {
 

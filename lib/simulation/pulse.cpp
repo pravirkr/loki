@@ -9,10 +9,10 @@
 #include <vector>
 
 #include "loki/detection/score.hpp"
-#include "detail/error_check.hpp"
-#include "detail/math.hpp"
-#include "detail/psr_utils.hpp"
-#include "simulation/pulse_detail.hpp"
+#include "lib/detail/error_check.hpp"
+#include "lib/detail/math.hpp"
+#include "lib/detail/psr_utils.hpp"
+#include "lib/simulation/pulse_detail.hpp"
 
 namespace loki::simulation {
 namespace {

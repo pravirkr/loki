@@ -12,7 +12,7 @@ A high-performance **C++20** pulsar searching library with **Python bindings**. 
 
 - **GCC >= 13.2** or **Clang >= 18** (C++20 support required)
 - **CUDA >= 12.6** *(optional, for GPU acceleration)*
-- **CMake >= 3.18**
+- **CMake >= 3.25**
 - **Python >= 3.12** *(for Python bindings)*
 
 MSVC is not supported.
@@ -26,7 +26,7 @@ These are **never** downloaded by loki and must be discoverable by CMake on your
 | HDF5 | - | `mamba install hdf5` |
 | FFTW (float + OpenMP) | - | `mamba install fftw` |
 | OpenMP | - | `mamba install libomp` *(macOS)* / `libgomp` *(Linux)* |
-| CMake | 3.18 | `mamba install cmake>=3.18` |
+| CMake | 3.25 | `mamba install cmake>=3.25` |
 | Ninja | - | `mamba install ninja` |
 | GCC | 13.2 | `mamba install gcc>=13.2 gxx>=13.2` *(Linux)* |
 | Python | 3.12 | `mamba install python>=3.12` |
@@ -41,7 +41,7 @@ Frozen minimum requirements for CUDA builds:
 | --------- | ------- |
 | CUDA Toolkit | 12.6 |
 | GCC (when used as nvcc host compiler) | 13.2 |
-| CMake | 3.18 |
+| CMake | 3.25 |
 | GPU compute capability | **sm_50** (Maxwell) |
 
 - CUDA Toolkit 12.6+, with a host compiler supported by that toolkit.
@@ -58,7 +58,7 @@ Best for using loki from Python in a conda environment. Builds one extension, `l
 ```bash
 mamba create -n loki_env python=3.12
 mamba activate loki_env
-mamba install -c conda-forge cmake>=3.18 ninja hdf5 fftw libomp  # macOS
+mamba install -c conda-forge cmake>=3.25 ninja hdf5 fftw libomp  # macOS
 # Linux: also install gcc>=13.2 gxx>=13.2
 
 export CPM_SOURCE_CACHE="$HOME/.cache/CPM"   # optional; avoids re-downloading CPM deps

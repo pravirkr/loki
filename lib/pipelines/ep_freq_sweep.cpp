@@ -8,12 +8,12 @@
 #include <utility>
 #include <vector>
 
-#include "common/dispatch.hpp"
 #include "loki/algorithms/prune_rfi.hpp"
 #include "loki/common/backend.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
-#include "pipelines/ep_freq_sweep_engine.hpp"
+#include "lib/common/dispatch.hpp"
+#include "lib/pipelines/ep_freq_sweep_engine.hpp"
 
 namespace loki::pipelines {
 

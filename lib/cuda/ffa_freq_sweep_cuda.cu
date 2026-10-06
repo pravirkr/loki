@@ -8,22 +8,22 @@
 #include <spdlog/spdlog.h>
 #include <thrust/device_vector.h>
 
-#include "cuda/cuda_utils.cuh"
-#include "cuda/ffa_cuda.cuh"
-#include "cuda/fft_cuda.cuh"
-#include "cuda/score_cuda.cuh"
-#include "cuda/workspace_cuda.cuh"
-#include "detail/error_check.hpp"
-#include "detail/timing.hpp"
 #include "loki/algorithms/ffa.hpp"
 #include "loki/algorithms/regions.hpp"
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
 #include "loki/detection/score.hpp"
 #include "loki/search/configs.hpp"
-#include "pipelines/ffa_freq_sweep_engine.hpp"
-#include "search/cands.hpp"
-#include "search/ffa_sweep_candidates.hpp"
+#include "lib/cuda/cuda_utils.cuh"
+#include "lib/cuda/ffa_cuda.cuh"
+#include "lib/cuda/fft_cuda.cuh"
+#include "lib/cuda/score_cuda.cuh"
+#include "lib/cuda/workspace_cuda.cuh"
+#include "lib/detail/error_check.hpp"
+#include "lib/detail/timing.hpp"
+#include "lib/pipelines/ffa_freq_sweep_engine.hpp"
+#include "lib/search/cands.hpp"
+#include "lib/search/ffa_sweep_candidates.hpp"
 
 namespace loki::pipelines {
 

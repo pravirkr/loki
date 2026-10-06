@@ -15,21 +15,21 @@
 #include <fmt/ranges.h>
 #include <spdlog/spdlog.h>
 
-#include "algorithms/ffa_engine.hpp"
-#include "algorithms/prune_engine.hpp"
-#include "common/dispatch.hpp"
-#include "core/dynamic.hpp"
-#include "detail/error_check.hpp"
-#include "detail/progress.hpp"
-#include "detail/psr_utils.hpp"
-#include "detail/timing.hpp"
-#include "detail/utils.hpp"
 #include "loki/algorithms/ffa.hpp"
 #include "loki/algorithms/prune_rfi.hpp"
 #include "loki/common/types.hpp"
-#include "search/cands.hpp"
-#include "search/prune_mask.hpp"
-#include "utils/workspace_impl.hpp"
+#include "lib/algorithms/ffa_engine.hpp"
+#include "lib/algorithms/prune_engine.hpp"
+#include "lib/common/dispatch.hpp"
+#include "lib/core/dynamic.hpp"
+#include "lib/detail/error_check.hpp"
+#include "lib/detail/progress.hpp"
+#include "lib/detail/psr_utils.hpp"
+#include "lib/detail/timing.hpp"
+#include "lib/detail/utils.hpp"
+#include "lib/search/cands.hpp"
+#include "lib/search/prune_mask.hpp"
+#include "lib/utils/workspace_impl.hpp"
 
 namespace loki::algorithms {
 

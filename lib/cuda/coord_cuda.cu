@@ -1,8 +1,8 @@
-#include "cuda/coord_cuda.cuh"
+#include "lib/cuda/coord_cuda.cuh"
 
 #include <thrust/device_ptr.h>
 
-#include "cuda/cuda_utils.cuh"
+#include "lib/cuda/cuda_utils.cuh"
 
 namespace loki::coord {
 

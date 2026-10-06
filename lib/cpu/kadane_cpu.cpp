@@ -1,4 +1,4 @@
-#include "detection/kadane.hpp"
+#include "lib/detection/kadane.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -9,8 +9,8 @@
 #include <xsimd/xsimd.hpp>
 
 #include "loki/common/types.hpp"
-#include "detail/error_check.hpp"
-#include "cpu/simd_utils.hpp"
+#include "lib/cpu/simd_utils.hpp"
+#include "lib/detail/error_check.hpp"
 
 namespace loki::detection {
 namespace {

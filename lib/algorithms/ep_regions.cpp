@@ -11,12 +11,12 @@
 #include <highfive/highfive.hpp>
 #include <spdlog/spdlog.h>
 
-#include "detail/utils.hpp"
 #include "loki/algorithms/regions.hpp"
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
 #include "loki/detection/thresholds.hpp"
 #include "loki/search/configs.hpp"
+#include "lib/detail/utils.hpp"
 
 namespace loki::algorithms {
 

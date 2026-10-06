@@ -10,12 +10,13 @@
 #include <string_view>
 #include <vector>
 
-#include "common/dispatch.hpp"
 #include "loki/common/backend.hpp"
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
 #include "loki/utils/workspace.hpp"
-#include "utils/world_tree.hpp"
+
+#include "lib/common/dispatch.hpp"
+#include "lib/utils/world_tree.hpp"
 
 namespace loki::memory {
 

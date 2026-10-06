@@ -6,10 +6,10 @@
 #include <string_view>
 #include <utility>
 
-#include "common/dispatch.hpp"
 #include "loki/common/backend.hpp"
 #include "loki/search/configs.hpp"
-#include "pipelines/ffa_freq_sweep_engine.hpp"
+#include "lib/common/dispatch.hpp"
+#include "lib/pipelines/ffa_freq_sweep_engine.hpp"
 
 namespace loki::pipelines {
 

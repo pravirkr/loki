@@ -15,8 +15,8 @@
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
-#include "search/cands.hpp"
-#include "utils/world_tree.hpp"
+#include "lib/search/cands.hpp"
+#include "lib/utils/world_tree.hpp"
 
 using loki::Exec;
 using loki::ParamLimit;

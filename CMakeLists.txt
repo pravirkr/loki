@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.18)
+cmake_minimum_required(VERSION 3.25...3.31)
 
 project(
   loki
@@ -8,6 +8,16 @@ project(
 )
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# Compiler cache: speeds up rebuilds (CUDA translation units especially).
+option(LOKI_USE_CCACHE "Use ccache as the compiler launcher when it is found" ON)
+if(LOKI_USE_CCACHE AND NOT CMAKE_CXX_COMPILER_LAUNCHER)
+  find_program(LOKI_CCACHE_PROGRAM ccache)
+  if(LOKI_CCACHE_PROGRAM)
+    set(CMAKE_CXX_COMPILER_LAUNCHER ${LOKI_CCACHE_PROGRAM})
+    set(CMAKE_CUDA_COMPILER_LAUNCHER ${LOKI_CCACHE_PROGRAM})
+  endif()
+endif()
 
 # Compiler version requirements
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
@@ -49,10 +59,8 @@ option(BUILD_SHARED_LIBS "Build shared libraries" OFF)
 # Python extensions are installed as a single module file; embed loki statically
 # instead of shipping a separate libloki.so plus loader search-path tweaks.
 if(LOKI_BUILD_PYTHON AND BUILD_SHARED_LIBS)
-  message(
-    FATAL_ERROR
-      "LOKI_BUILD_PYTHON=ON requires BUILD_SHARED_LIBS=OFF. "
-      "Python wheels should statically link loki into libloki.cpython-*.so."
+  message(FATAL_ERROR "LOKI_BUILD_PYTHON=ON requires BUILD_SHARED_LIBS=OFF. "
+                      "Python wheels should statically link loki into libloki.cpython-*.so."
   )
 endif()
 
@@ -321,8 +329,7 @@ write_basic_package_version_file(
 install(
   FILES ${CMAKE_CURRENT_BINARY_DIR}/lokiConfig.cmake
         ${CMAKE_CURRENT_BINARY_DIR}/lokiConfigVersion.cmake
-        ${CMAKE_CURRENT_BINARY_DIR}/lokiCUDAConfig.cmake
-        ${PROJECT_SOURCE_DIR}/cmake/FindFFTW.cmake
+        ${CMAKE_CURRENT_BINARY_DIR}/lokiCUDAConfig.cmake ${PROJECT_SOURCE_DIR}/cmake/FindFFTW.cmake
   DESTINATION ${LOKI_CMAKE_PACKAGE_DIR}
 )
 
@@ -331,7 +338,8 @@ feature_summary(WHAT ALL)
 
 if(CMAKE_CUDA_COMPILER)
   message(
-    STATUS "loki build mode: CPU + CUDA (LOKI_CUDA=${LOKI_CUDA}; backends chosen at run time via Exec)"
+    STATUS
+      "loki build mode: CPU + CUDA (LOKI_CUDA=${LOKI_CUDA}; backends chosen at run time via Exec)"
   )
 else()
   message(STATUS "loki build mode: CPU-only (LOKI_CUDA=${LOKI_CUDA})")

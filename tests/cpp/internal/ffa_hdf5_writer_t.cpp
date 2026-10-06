@@ -4,7 +4,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <highfive/highfive.hpp>
 
-#include "search/cands.hpp"
+#include "lib/search/cands.hpp"
 
 using loki::search::FFAResultMetadata;
 using loki::search::FFAResultWriter;

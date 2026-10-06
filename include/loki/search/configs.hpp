@@ -8,6 +8,7 @@
 #include <string_view>
 #include <vector>
 
+#include "loki/common/backend.hpp"
 #include "loki/common/types.hpp"
 
 namespace loki::search {
@@ -47,6 +48,8 @@ struct FFATomlConfig {
     std::optional<SizeType> nsamps;
     std::optional<double> tsamp;
     int nthreads{0}; // 0 = hardware concurrency
+    Backend backend{Backend::kCPU}; // "cpu" | "cuda"
+    int device{0};                  // GPU ordinal, used by GPU backends
     double max_process_memory_gb{8.0};
     double octave_scale{2.0};
     SizeType nbins_max{1024};
@@ -58,10 +61,6 @@ struct FFATomlConfig {
     // [output]
     std::string outdir{"./"};
     std::string prefix{"loki"};
-
-    // [cuda]
-    bool use_cuda{false};
-    int device_id{0};
 
     /// @brief Convert parsed TOML parameters into an FFASearchConfig.
     [[nodiscard]] FFASearchConfig

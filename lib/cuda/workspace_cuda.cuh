@@ -19,14 +19,14 @@
 #include <string_view>
 #include <utility>
 
-#include "common/dispatch.hpp"
-#include "cuda/coord_cuda.cuh"
-#include "cuda/types_cuda.cuh"
-#include "cuda/world_tree_cuda.cuh"
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
 #include "loki/utils/workspace.hpp"
-#include "utils/workspace_impl.hpp"
+#include "lib/common/dispatch.hpp"
+#include "lib/cuda/coord_cuda.cuh"
+#include "lib/cuda/types_cuda.cuh"
+#include "lib/cuda/world_tree_cuda.cuh"
+#include "lib/utils/workspace_impl.hpp"
 
 namespace loki::memory {
 

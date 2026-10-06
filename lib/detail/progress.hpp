@@ -20,14 +20,15 @@
 
 namespace loki::progress {
 
-namespace tva_colors {
+namespace detail {
+// Progress-bar palette.
 constexpr auto kOrange      = fmt::color{0xFF8C42};
 constexpr auto kAmber       = fmt::color{0xFFB366};
 constexpr auto kDarkOrange  = fmt::color{0xE6722A};
 constexpr auto kBrightGreen = fmt::color{0x66BB6A};
 constexpr auto kBackground  = fmt::color{0x3A3A3A};
 constexpr auto kRed         = fmt::color{0xF92672};
-} // namespace tva_colors
+} // namespace detail
 
 struct Style {
     fmt::text_style value;
@@ -65,7 +66,7 @@ private:
 class SpinnerColumn : public Column {
 public:
     explicit SpinnerColumn(
-        Style style         = {.value = fmt::fg(tva_colors::kOrange)},
+        Style style         = {.value = fmt::fg(detail::kOrange)},
         bool use_tva_frames = false)
         : Column(style),
           m_use_tva_frames(use_tva_frames) {}
@@ -90,8 +91,8 @@ class BarColumn : public Column {
 public:
     explicit BarColumn(
         int width              = 40,
-        Style style            = {.value = fmt::fg(tva_colors::kRed)},
-        Style background_style = {.value = fmt::fg(tva_colors::kBackground)})
+        Style style            = {.value = fmt::fg(detail::kRed)},
+        Style background_style = {.value = fmt::fg(detail::kBackground)})
         : Column(style),
           m_width(width),
           m_background_style(background_style) {}
@@ -108,7 +109,7 @@ private:
 class PercentageColumn : public Column {
 public:
     explicit PercentageColumn(
-        Style style = {.value = fmt::fg(tva_colors::kAmber)})
+        Style style = {.value = fmt::fg(detail::kAmber)})
         : Column(style) {}
     std::string render(const ProgressBar& bar) override;
 };
@@ -116,7 +117,7 @@ public:
 class TimeStatsColumn : public Column {
 public:
     explicit TimeStatsColumn(
-        Style style = {.value = fmt::fg(tva_colors::kDarkOrange)})
+        Style style = {.value = fmt::fg(detail::kDarkOrange)})
         : Column(style) {}
     std::string render(const ProgressBar& bar) override;
 };
@@ -132,7 +133,7 @@ public:
 class LeavesColumn : public Column {
 public:
     explicit LeavesColumn(
-        Style style = {.value = fmt::fg(tva_colors::kBrightGreen)})
+        Style style = {.value = fmt::fg(detail::kBrightGreen)})
         : Column(style) {}
     std::string render(const ProgressBar& bar) override;
 };

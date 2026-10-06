@@ -1,12 +1,13 @@
-#include <catch2/catch_approx.hpp>
-#include <catch2/catch_test_macros.hpp>
+#include "loki/algorithms/fold.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <random>
 #include <vector>
 
-#include "loki/algorithms/fold.hpp"
+#include <catch2/catch_approx.hpp>
+#include <catch2/catch_test_macros.hpp>
+
 #include "loki/common/backend.hpp"
 #include "loki/common/types.hpp"
 

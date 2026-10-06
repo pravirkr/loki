@@ -1,4 +1,4 @@
-#include "search/prune_mask.hpp"
+#include "lib/search/prune_mask.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -8,9 +8,9 @@
 #include <span>
 #include <utility>
 
-#include "detail/error_check.hpp"
-#include "detail/psr_utils.hpp"
-#include "detail/utils.hpp"
+#include "lib/detail/error_check.hpp"
+#include "lib/detail/psr_utils.hpp"
+#include "lib/detail/utils.hpp"
 
 namespace loki::search {
 

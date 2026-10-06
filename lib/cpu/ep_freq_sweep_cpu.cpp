@@ -12,15 +12,15 @@
 #include <highfive/highfive.hpp>
 #include <spdlog/spdlog.h>
 
-#include "algorithms/prune_engine.hpp"
-#include "common/dispatch.hpp"
-#include "detail/timing.hpp"
 #include "loki/algorithms/ep_regions.hpp"
 #include "loki/algorithms/prune.hpp"
 #include "loki/common/types.hpp"
-#include "pipelines/ep_freq_sweep_engine.hpp"
-#include "utils/fft_impl.hpp"
-#include "utils/workspace_impl.hpp"
+#include "lib/algorithms/prune_engine.hpp"
+#include "lib/common/dispatch.hpp"
+#include "lib/detail/timing.hpp"
+#include "lib/pipelines/ep_freq_sweep_engine.hpp"
+#include "lib/utils/fft_impl.hpp"
+#include "lib/utils/workspace_impl.hpp"
 
 namespace loki::pipelines {
 

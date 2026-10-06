@@ -9,11 +9,6 @@
 #include <utility>
 #include <vector>
 
-#include "algorithms/ffa_engine.hpp"
-#include "common/dispatch.hpp"
-#include "detail/error_check.hpp"
-#include "detail/timing.hpp"
-#include "detection/score_engine.hpp"
 #include "loki/common/backend.hpp"
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
@@ -21,8 +16,14 @@
 #include "loki/search/configs.hpp"
 #include "loki/utils/fft.hpp"
 #include "loki/utils/workspace.hpp"
-#include "utils/fft_impl.hpp"
-#include "utils/workspace_impl.hpp"
+
+#include "lib/algorithms/ffa_engine.hpp"
+#include "lib/common/dispatch.hpp"
+#include "lib/detail/error_check.hpp"
+#include "lib/detail/timing.hpp"
+#include "lib/detection/score_engine.hpp"
+#include "lib/utils/fft_impl.hpp"
+#include "lib/utils/workspace_impl.hpp"
 
 namespace loki::algorithms {
 

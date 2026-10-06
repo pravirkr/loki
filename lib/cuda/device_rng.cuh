@@ -10,7 +10,7 @@
 
 #include <curanddx.hpp>
 
-namespace loki::math {
+namespace loki::device_rng {
 
 /**
  * @brief cuRANDDx generator configuration for high-performance per-thread RNG.
@@ -31,14 +31,14 @@ struct DeviceRNGConfig {
     using UniformFloat = curanddx::uniform<float>;
 };
 
-} // namespace loki::math
+} // namespace loki::device_rng
 
 #else
 
 #include <curand.h>
 #include <curand_kernel.h>
 
-namespace loki::math {
+namespace loki::device_rng {
     namespace detail {
 
 /**
@@ -107,12 +107,12 @@ struct DeviceRNGConfig {
     using UniformFloat = detail::CurandUniformFloat;
 };
 
-} // namespace loki::math
+} // namespace loki::device_rng
 
 #endif
 
-namespace loki::math {
+namespace loki::device_rng {
 /// Default per-thread RNG: Philox 7 rounds on sm_70+ (cuRANDDx), Philox-10 otherwise.
 using DefaultDeviceRNG = DeviceRNGConfig<7>;
 
-} // namespace loki::math
+} // namespace loki::device_rng

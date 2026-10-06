@@ -1,4 +1,4 @@
-#include "search/cands.hpp"
+#include "lib/search/cands.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -13,11 +13,11 @@
 #include <highfive/span.hpp>
 #include <omp.h>
 
-#include "detail/error_check.hpp"
-#include "detail/utils.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
-#include "utils/world_tree.hpp"
+#include "lib/detail/error_check.hpp"
+#include "lib/detail/utils.hpp"
+#include "lib/utils/world_tree.hpp"
 
 namespace loki::search {
 

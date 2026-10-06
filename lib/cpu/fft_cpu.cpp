@@ -1,4 +1,4 @@
-#include "utils/fft_impl.hpp"
+#include "lib/utils/fft_impl.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -17,7 +17,7 @@
 #include <spdlog/spdlog.h>
 
 #include "loki/common/types.hpp"
-#include "detail/error_check.hpp"
+#include "lib/detail/error_check.hpp"
 
 namespace loki::math {
 

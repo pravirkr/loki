@@ -15,10 +15,10 @@
 #include <stdexcept>
 #include <string_view>
 
-#include "cuda/types_cuda.cuh"
 #include "loki/common/types.hpp"
 #include "loki/utils/fft.hpp"
-#include "utils/fft_impl.hpp"
+#include "lib/cuda/types_cuda.cuh"
+#include "lib/utils/fft_impl.hpp"
 
 namespace loki::math {
 

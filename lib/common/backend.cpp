@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <format>
+#include <initializer_list>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -9,7 +10,7 @@
 
 #include <spdlog/spdlog.h>
 
-#include "common/dispatch.hpp"
+#include "lib/common/dispatch.hpp"
 
 namespace loki {
 
@@ -96,6 +97,25 @@ void check_device(const Device& view,
             "{}: memory is on {}:{} but this instance runs on {}:{}", what,
             to_string(view.backend), view.id, to_string(backend), device));
     }
+}
+
+Device common_device(std::initializer_list<Device> views,
+                     std::string_view what) {
+    Device common{};
+    for (const auto& view : views) {
+        if (view.id < 0) {
+            continue;
+        }
+        if (common.id < 0) {
+            common = view;
+        } else if (view.backend != common.backend || view.id != common.id) {
+            throw std::invalid_argument(std::format(
+                "{}: device views are on different devices ({}:{} and {}:{})",
+                what, to_string(common.backend), common.id,
+                to_string(view.backend), view.id));
+        }
+    }
+    return common;
 }
 
 void check_same_exec(const Exec& resource,

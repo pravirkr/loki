@@ -1,4 +1,4 @@
-#include "detail/progress.hpp"
+#include "lib/detail/progress.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -184,10 +184,10 @@ ProgressBar::ProgressBar(std::string_view prefix,
       m_is_managed(managed) {
     add_column(std::make_unique<TextColumn>(
         prefix,
-        Style{.value = fmt::fg(tva_colors::kOrange) | fmt::emphasis::bold}));
+        Style{.value = fmt::fg(detail::kOrange) | fmt::emphasis::bold}));
     add_column(std::make_unique<TextColumn>(" "));
     add_column(std::make_unique<SpinnerColumn>(
-        Style{.value = fmt::fg(tva_colors::kOrange)},
+        Style{.value = fmt::fg(detail::kOrange)},
         /*use_tva_frames=*/true));
     add_column(std::make_unique<TextColumn>(" "));
     add_column(std::make_unique<BarColumn>(bar_width));

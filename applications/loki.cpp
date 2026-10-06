@@ -12,9 +12,9 @@
 
 #include <CLI/CLI.hpp>
 #include <highfive/highfive.hpp>
+#include <omp.h>
 #include <spdlog/spdlog.h>
 #include <toml++/toml.hpp>
-#include <omp.h>
 
 #include "loki/common/types.hpp"
 #include "loki/io/timeseries.hpp"
@@ -241,19 +241,21 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
                         toml_cfg.f_min, toml_cfg.f_max));
     }
 
-    if (toml_cfg.use_cuda && !loki::is_available(loki::Backend::kCUDA)) {
-        throw std::runtime_error(
-            "--cuda was requested but this build has LOKI_CUDA=OFF");
+    // The CPU thread count travels in the search config; Exec only picks the
+    // backend and device. Construction rejects a backend this build lacks.
+    const loki::Exec exec{
+        .backend = toml_cfg.backend, .nthreads = 1, .device = toml_cfg.device};
+    if (!loki::is_available(exec.backend)) {
+        throw std::runtime_error(std::format(
+            "backend '{}' was requested but this build does not contain it",
+            loki::to_string(exec.backend)));
     }
 
     const auto preview_cfg = toml_cfg.to_search_config(
         toml_cfg.nsamps.value_or(1U << 21U), toml_cfg.tsamp.value_or(6.4e-5));
     if (dry_run) {
-        const auto exec = toml_cfg.use_cuda
-                              ? loki::Exec::cuda(toml_cfg.device_id)
-                              : loki::Exec::cpu();
         loki::pipelines::FFAFreqSweep dry(preview_cfg, /*show_progress=*/false,
-                                           exec);
+                                          exec);
         SPDLOG_INFO("Dry run complete: planner constructed successfully.");
         return 0;
     }
@@ -275,8 +277,8 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
     read_opts.fast_median            = toml_cfg.fast_median;
     read_opts.fast_median_min_points = toml_cfg.fast_median_min_points;
     // Config value 0 means "use all hardware threads".
-    read_opts.nthreads = toml_cfg.nthreads <= 0 ? omp_get_max_threads()
-                                                : toml_cfg.nthreads;
+    read_opts.nthreads =
+        toml_cfg.nthreads <= 0 ? omp_get_max_threads() : toml_cfg.nthreads;
     SPDLOG_INFO("Loading timeseries from: {}", ts_path.string());
     // FFA assumes finite ts_e and positive ts_v (enforced in TimeSeries).
     auto ts = loki::io::TimeSeries::read(ts_path, read_opts);
@@ -312,11 +314,9 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
                 toml_cfg.f_min, toml_cfg.f_max, ffa_cfg.get_nbins(),
                 ffa_cfg.get_eta(), ffa_cfg.get_snr_min());
 
-    // The CPU thread count travels in ffa_cfg; Exec only picks the backend.
-    const auto exec = toml_cfg.use_cuda ? loki::Exec::cuda(toml_cfg.device_id)
-                                        : loki::Exec::cpu();
-    if (exec.backend == loki::Backend::kCUDA) {
-        SPDLOG_INFO("Using CUDA backend on device {}", toml_cfg.device_id);
+    if (exec.backend != loki::Backend::kCPU) {
+        SPDLOG_INFO("Using {} backend on device {}",
+                    loki::to_string(exec.backend), exec.device);
     }
     loki::pipelines::FFAFreqSweep sweep(ffa_cfg, /*show_progress=*/true, exec);
     sweep.execute(ts.get_ts_e().first(actual_nsamps),
@@ -600,14 +600,20 @@ int main(int argc, char** argv) {
         "--max-passing-candidates", ffa_cfg.max_passing_candidates,
         "Maximum candidate buffer capacity (default: 4194304)");
 
-    // Always listed; a CPU-only build rejects --cuda at run time.
-    auto* grp_cuda = ffa->add_option_group("CUDA Options");
-    grp_cuda->add_flag("--cuda", ffa_cfg.use_cuda,
-                       "Execute FFA sweep on NVIDIA GPU using CUDA");
-    grp_cuda->add_option("--device", ffa_cfg.device_id,
-                         "CUDA GPU device index (default: 0)");
+    // Always listed; a build without the chosen backend rejects it at run
+    // time with the list of available backends.
+    std::string backend_name;
+    grp_perf
+        ->add_option("--backend", backend_name,
+                     "Execution backend: cpu or cuda (default: cpu)")
+        ->transform(CLI::IsMember({"cpu", "cuda"}, CLI::ignore_case));
+    grp_perf->add_option("--device", ffa_cfg.device,
+                         "GPU device ordinal for --backend cuda (default: 0)");
 
     CLI11_PARSE(app, argc, argv);
+    if (!backend_name.empty()) {
+        ffa_cfg.backend = loki::parse_backend(backend_name);
+    }
 
     try {
         if (simulate->parsed()) {

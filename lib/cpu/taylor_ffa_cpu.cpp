@@ -1,4 +1,4 @@
-#include "core/taylor_ffa.hpp"
+#include "lib/core/taylor_ffa.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -7,12 +7,12 @@
 #include <tuple>
 #include <vector>
 
-#include "core/transforms.hpp"
-#include "detail/error_check.hpp"
-#include "detail/psr_utils.hpp"
-#include "detail/utils.hpp"
 #include "loki/common/coord.hpp"
 #include "loki/common/types.hpp"
+#include "lib/core/transforms.hpp"
+#include "lib/detail/error_check.hpp"
+#include "lib/detail/psr_utils.hpp"
+#include "lib/detail/utils.hpp"
 
 namespace loki::core {
 

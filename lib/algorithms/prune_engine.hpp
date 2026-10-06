@@ -16,8 +16,8 @@
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
 #include "loki/utils/workspace.hpp"
-#include "utils/fft_impl.hpp"
-#include "utils/workspace_impl.hpp"
+#include "lib/utils/fft_impl.hpp"
+#include "lib/utils/workspace_impl.hpp"
 
 namespace loki::algorithms::detail {
 

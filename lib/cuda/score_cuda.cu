@@ -13,13 +13,13 @@
 #include <spdlog/spdlog.h>
 
 #include "loki/common/types.hpp"
-#include "detail/index_limits.hpp"
-#include "cuda/cub_helpers.cuh"
-#include "cuda/cuda_utils.cuh"
-#include "detection/score_engine.hpp"
-#include "detail/error_check.hpp"
-#include "cuda/workspace_cuda.cuh"
-#include "cuda/score_cuda.cuh"
+#include "lib/cuda/cub_helpers.cuh"
+#include "lib/cuda/cuda_utils.cuh"
+#include "lib/cuda/score_cuda.cuh"
+#include "lib/cuda/workspace_cuda.cuh"
+#include "lib/detail/error_check.hpp"
+#include "lib/detail/index_limits.hpp"
+#include "lib/detection/score_engine.hpp"
 
 namespace loki::detection {
 

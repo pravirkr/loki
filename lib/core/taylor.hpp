@@ -4,7 +4,7 @@
 #include <vector>
 
 #include "loki/common/types.hpp"
-#include "utils/workspace_impl.hpp"
+#include "lib/utils/workspace_impl.hpp"
 
 namespace loki::core {
 

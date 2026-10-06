@@ -10,10 +10,10 @@
 #include <cuda_runtime.h>
 #include <thrust/device_vector.h>
 
-#include "core/dynamic.hpp"
-#include "cuda/fft_cuda.cuh"
-#include "cuda/types_cuda.cuh"
-#include "cuda/workspace_cuda.cuh"
+#include "lib/core/dynamic.hpp"
+#include "lib/cuda/fft_cuda.cuh"
+#include "lib/cuda/types_cuda.cuh"
+#include "lib/cuda/workspace_cuda.cuh"
 
 namespace loki::core {
 

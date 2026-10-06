@@ -11,12 +11,12 @@
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/transform.h>
 
-#include "algorithms/fold_engine.hpp"
-#include "cuda/cuda_utils.cuh"
-#include "cuda/kernel_utils.cuh"
-#include "cuda/kernels_cuda.cuh"
-#include "detail/error_check.hpp"
 #include "loki/common/types.hpp"
+#include "lib/algorithms/fold_engine.hpp"
+#include "lib/cuda/cuda_utils.cuh"
+#include "lib/cuda/kernel_utils.cuh"
+#include "lib/cuda/kernels_cuda.cuh"
+#include "lib/detail/error_check.hpp"
 
 namespace loki::algorithms {
 

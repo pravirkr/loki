@@ -10,12 +10,7 @@ endif()
 set(LOKI_LIBRARY_ALL_SOURCES ${LOKI_LIBRARY_CXX_SOURCES})
 
 if(CMAKE_CUDA_COMPILER)
-  file(
-    GLOB
-    LOKI_LIBRARY_CUDA_SOURCES
-    CONFIGURE_DEPENDS
-    ${CMAKE_CURRENT_SOURCE_DIR}/cuda/*.cu
-  )
+  file(GLOB LOKI_LIBRARY_CUDA_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/cuda/*.cu)
   if(LOKI_LIBRARY_CUDA_SOURCES STREQUAL "")
     message(
       FATAL_ERROR
@@ -39,7 +34,10 @@ set(LOKI_BACKEND_DEFINITIONS "")
 if(CMAKE_CUDA_COMPILER)
   list(APPEND LOKI_BACKEND_DEFINITIONS LOKI_ENABLE_CUDA LOKI_ENABLE_GPU)
 endif()
-set(LOKI_BACKEND_DEFINITIONS ${LOKI_BACKEND_DEFINITIONS} PARENT_SCOPE)
+set(LOKI_BACKEND_DEFINITIONS
+    ${LOKI_BACKEND_DEFINITIONS}
+    PARENT_SCOPE
+)
 target_compile_definitions(${LOKI_LIBRARY_NAME} PRIVATE ${LOKI_BACKEND_DEFINITIONS})
 
 # Dependencies
@@ -60,12 +58,13 @@ if(LOKI_ENABLE_COVERAGE)
   endif()
 endif()
 
-# Set include directories
+# Include roots: public headers as "loki/...", private headers relative to the
+# repository root as "lib/..." (see docs/architecture.md, rule 5).
 target_include_directories(
   ${LOKI_LIBRARY_NAME}
   PUBLIC $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include/>
          $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
-  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+  PRIVATE ${PROJECT_SOURCE_DIR}
 )
 
 # CUDA headers are used by lib/cuda/ only; public headers never include them.
@@ -103,9 +102,8 @@ endif()
 
 if(CMAKE_CUDA_COMPILER)
   target_link_libraries(
-    ${LOKI_LIBRARY_NAME}
-    PRIVATE ${LOKI_CUDA_OPTIONS} CUDA::cuda_driver CUDA::curand
-            $<$<BOOL:${LOKI_NEEDS_CURANDDX}>:mathdx::curanddx>
+    ${LOKI_LIBRARY_NAME} PRIVATE ${LOKI_CUDA_OPTIONS} CUDA::cuda_driver CUDA::curand
+                                 $<$<BOOL:${LOKI_NEEDS_CURANDDX}>:mathdx::curanddx>
   )
   # Runtime libraries: PRIVATE for shared loki, link-only PUBLIC for static loki.
   if(BUILD_SHARED_LIBS)
@@ -121,10 +119,8 @@ endif()
 # the backend macros, and the CUDA headers. Never installed or exported.
 add_library(${LOKI_LIBRARY_NAME}_internal INTERFACE)
 add_library(${PROJECT_NAME}::internal ALIAS ${LOKI_LIBRARY_NAME}_internal)
-target_include_directories(${LOKI_LIBRARY_NAME}_internal INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
-target_compile_definitions(
-  ${LOKI_LIBRARY_NAME}_internal INTERFACE ${LOKI_BACKEND_DEFINITIONS}
-)
+target_include_directories(${LOKI_LIBRARY_NAME}_internal INTERFACE ${PROJECT_SOURCE_DIR})
+target_compile_definitions(${LOKI_LIBRARY_NAME}_internal INTERFACE ${LOKI_BACKEND_DEFINITIONS})
 if(CMAKE_CUDA_COMPILER)
   target_include_directories(
     ${LOKI_LIBRARY_NAME}_internal SYSTEM INTERFACE ${LOKI_CUDA_INCLUDE_DIRS}
