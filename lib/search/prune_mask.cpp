@@ -8,11 +8,11 @@
 #include <span>
 #include <utility>
 
-#include "detail/exceptions.hpp"
+#include "detail/error_check.hpp"
 #include "detail/psr_utils.hpp"
 #include "detail/utils.hpp"
 
-namespace loki::algorithms {
+namespace loki::search {
 
 namespace {
 
@@ -95,7 +95,7 @@ void GridMask::add_window_single(double f_lo,
     ++m_n_windows;
 }
 
-void GridMask::add_window(const ParamWindow& window, SizeType n_harmonics) {
+void GridMask::add_window(const algorithms::ParamWindow& window, SizeType n_harmonics) {
     error_check::check(!utils::is_nan(window.f_lo) &&
                            !utils::is_nan(window.f_hi),
                        "GridMask::add_window: frequency bounds must not be "
@@ -116,7 +116,7 @@ void GridMask::add_window(const ParamWindow& window, SizeType n_harmonics) {
     }
 }
 
-void GridMask::add_windows(std::span<const ParamWindow> windows,
+void GridMask::add_windows(std::span<const algorithms::ParamWindow> windows,
                            SizeType n_harmonics) {
     for (const auto& w : windows) {
         add_window(w, n_harmonics);
@@ -206,4 +206,4 @@ SizeType GridMask::select_seeds(std::span<SizeType> keep_indices,
     return n_keep;
 }
 
-} // namespace loki::algorithms
+} // namespace loki::search

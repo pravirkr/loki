@@ -12,7 +12,7 @@
 #include <spdlog/spdlog.h>
 
 #include "core/transforms.hpp"
-#include "detail/exceptions.hpp"
+#include "detail/error_check.hpp"
 #include "detail/psr_utils.hpp"
 #include "detail/utils.hpp"
 #include "loki/common/types.hpp"
@@ -1107,7 +1107,7 @@ generate_bp_circ_taylor(std::span<const std::vector<double>> param_arr,
                     dparam_cur_next[(i * n_params) + j];
             }
         }
-        auto dparam_d_vec_new = transforms::shift_taylor_errors_batch(
+        auto dparam_d_vec_new = core::shift_taylor_errors_batch(
             dparam_d_vec, delta_t, use_conservative_tile, n_freqs, n_params_d);
         // Copy back to dparam_cur_batch (excluding last dimension)
         for (SizeType i = 0; i < n_freqs; ++i) {

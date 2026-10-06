@@ -17,7 +17,7 @@
 #include "cuda/cub_helpers.cuh"
 #include "cuda/cuda_utils.cuh"
 #include "detection/score_engine.hpp"
-#include "detail/exceptions.hpp"
+#include "detail/error_check.hpp"
 #include "cuda/workspace_cuda.cuh"
 #include "cuda/score_cuda.cuh"
 
@@ -681,7 +681,7 @@ SizeType score_and_filter_cuda_d(cuda::std::span<const float> folds,
                                  SizeType nbins,
                                  cudaStream_t stream,
                                  memory::DeviceCounter& counter) {
-    cuda_index_limits::validate_chunk_cuda_index_limits(
+    index_limits::validate_chunk_cuda_index_limits(
         {folds.size(), nprofiles, nbins, widths.size(), 1, 1});
     counter.reset(stream);
 
@@ -809,7 +809,7 @@ score_and_filter_max_cuda_d(cuda::std::span<const float> folds,
     // Count number of passing profiles
 
     auto transform_it =
-        thrust::make_transform_iterator(filtered_mask.data(), Uint8ToUint32{});
+        thrust::make_transform_iterator(filtered_mask.data(), cub_helpers::Uint8ToUint32{});
     cuda_utils::check_cuda_call(
         cub::DeviceReduce::Sum(scratch_ws.cub_temp_storage,
                                scratch_ws.cub_temp_bytes, transform_it,

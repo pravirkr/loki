@@ -13,7 +13,7 @@
 #include "core/circular.hpp"
 #include "core/taylor.hpp"
 #include "core/taylor_ffa.hpp"
-#include "detail/exceptions.hpp"
+#include "detail/error_check.hpp"
 #include "detail/psr_utils.hpp"
 #include "loki/search/configs.hpp"
 

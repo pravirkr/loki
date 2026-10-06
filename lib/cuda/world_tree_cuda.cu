@@ -20,7 +20,7 @@
 
 #include "cuda/cub_helpers.cuh"
 #include "cuda/cuda_utils.cuh"
-#include "detail/exceptions.hpp"
+#include "detail/error_check.hpp"
 #include "loki/common/types.hpp"
 
 namespace loki::memory {
@@ -389,12 +389,12 @@ float WorldTreeCUDA<FoldTypeCUDA>::get_score_max(
     float max_val = thrust::reduce(
         thrust::cuda::par.on(stream), regions.first.data(),
         regions.first.data() + regions.first.size(),
-        cuda::std::numeric_limits<float>::lowest(), ThrustMaxOp<float>());
+        cuda::std::numeric_limits<float>::lowest(), cub_helpers::ThrustMaxOp<float>());
     if (!regions.second.empty()) {
         const float max_val2 = thrust::reduce(
             thrust::cuda::par.on(stream), regions.second.data(),
             regions.second.data() + regions.second.size(),
-            cuda::std::numeric_limits<float>::lowest(), ThrustMaxOp<float>());
+            cuda::std::numeric_limits<float>::lowest(), cub_helpers::ThrustMaxOp<float>());
         max_val = cuda::std::max(max_val, max_val2);
     }
     return max_val;
@@ -411,12 +411,12 @@ float WorldTreeCUDA<FoldTypeCUDA>::get_score_min(
     float min_val = thrust::reduce(
         thrust::cuda::par.on(stream), regions.first.data(),
         regions.first.data() + regions.first.size(),
-        cuda::std::numeric_limits<float>::max(), ThrustMinOp<float>());
+        cuda::std::numeric_limits<float>::max(), cub_helpers::ThrustMinOp<float>());
     if (!regions.second.empty()) {
         const float min_val2 = thrust::reduce(
             thrust::cuda::par.on(stream), regions.second.data(),
             regions.second.data() + regions.second.size(),
-            cuda::std::numeric_limits<float>::max(), ThrustMinOp<float>());
+            cuda::std::numeric_limits<float>::max(), cub_helpers::ThrustMinOp<float>());
         min_val = cuda::std::min(min_val, min_val2);
     }
     return min_val;

@@ -157,6 +157,47 @@ Domains are `algorithms`, `common`, `detection`, `io`, `pipelines`, `search`,
   (time-domain FFA folds, scores, `level_stats.score_max`) vary from run to
   run at the float32 rounding level. Compare those with a tolerance.
 
+### 7. Namespaces
+
+The namespace follows the directory. Public headers:
+
+| Directory | Namespace |
+|---|---|
+| `include/loki/algorithms/` | `loki::algorithms` |
+| `include/loki/pipelines/` | `loki::pipelines` |
+| `include/loki/detection/`, `io/`, `search/`, `simulation/` | `loki::<directory>` |
+| `include/loki/common/` | `loki`, except `plans.hpp` (`loki::plans`) and `coord.hpp` (`loki::coord`) |
+| `include/loki/utils/` | one namespace per header: `fft.hpp` uses `loki::math`, `workspace.hpp` uses `loki::memory`, `psr_utils.hpp` uses `loki::psr_utils` |
+
+The `common/` and `utils/` exceptions are part of the frozen API. Do not add
+more: a new public header takes the namespace of its directory.
+
+Private code:
+
+- `lib/<domain>/` uses the public namespace of that domain. So does the
+  `lib/cpu/` and `lib/cuda/` code that implements it. For example,
+  `lib/cuda/prune_cuda.cu` is `loki::algorithms`, and
+  `lib/cpu/ffa_freq_sweep_cpu.cpp` is `loki::pipelines`. Code in
+  `lib/utils/` uses the namespace of the handle it backs (`loki::math` or
+  `loki::memory`).
+- Engine interfaces and the `make_*_cpu` / `make_*_gpu` factories live in
+  `loki::<domain>::detail`. `loki::detail` holds only the cross-domain
+  helpers in `lib/common/dispatch.hpp` (`throw_unavailable`,
+  `HandleAccess`, `DeviceStorage`, ...).
+- `lib/core/` (kinematics, kernel entry points, transforms) and its device
+  halves in `lib/cuda/*_cuda.cuh` use `loki::core`.
+- Low-level helper headers use a namespace named after the header:
+  `detail/utils.hpp` uses `loki::utils`, `detail/error_check.hpp` uses
+  `loki::error_check`, `detail/timing.hpp` uses `loki::timing`,
+  `cuda/cuda_utils.cuh` uses `loki::cuda_utils`, `cuda/cub_helpers.cuh` uses
+  `loki::cub_helpers`, `cpu/simd_utils.hpp` uses `loki::simd_utils`. The
+  device companion of a host header uses the host header's namespace:
+  `cuda/kernel_utils.cuh` uses `loki::utils`, `cuda/types_cuda.cuh` uses
+  `loki`, `cuda/coord_cuda.cuh` uses `loki::coord`.
+- Code private to one translation unit goes in an anonymous namespace.
+  Implementation helpers shared inside a namespace `N` go in `N::detail`.
+  Never use `details`, and never put a name in the global namespace.
+
 ## Recipes
 
 ### Adding an algorithm `Foo`
@@ -207,5 +248,17 @@ grep -rnE '#include "loki/(core|detail|cuda)/' lib src tests bench applications 
 # Each public header compiles on its own, without lib/ or backend macros
 for h in $(cd include && find loki -name '*.hpp'); do
   echo "#include \"$h\"" | c++ -std=c++20 -fsyntax-only -Iinclude -x c++ -
+done
+
+# Public headers open only the namespaces rule 7 allows   # expect nothing
+for h in $(find include/loki -mindepth 2 -name '*.hpp'); do
+  d=$(basename "$(dirname "$h")")
+  case $d in
+    common) ok='loki|loki::plans|loki::coord' ;;
+    utils)  ok='loki::math|loki::memory|loki::psr_utils|loki::detail' ;;
+    *)      ok="loki::$d" ;;
+  esac
+  grep -oE '^namespace [A-Za-z_:]+' "$h" | awk '{print $2}' |
+    grep -vxE "$ok" | sed "s|^|$h: |"
 done
 ```

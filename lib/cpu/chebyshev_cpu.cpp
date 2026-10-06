@@ -8,7 +8,7 @@
 
 #include "core/taylor.hpp"
 #include "core/transforms.hpp"
-#include "detail/exceptions.hpp"
+#include "detail/error_check.hpp"
 #include "detail/psr_utils.hpp"
 #include "detail/utils.hpp"
 #include "loki/common/types.hpp"
@@ -1825,7 +1825,7 @@ generate_bp_poly_chebyshev(std::span<const std::vector<double>> param_arr,
             dparam_cur_batch[(i * n_params) + n_params - 1] *
             (utils::kCval / f0_batch[i]);
     }
-    transforms::taylor_to_cheby_errors_batch(
+    core::taylor_to_cheby_errors_batch(
         dparam_cur_batch, coord_init.second, n_freqs, n_params);
 
     std::vector<double> dparam_new_batch(n_freqs * n_params, 0.0);
@@ -1838,7 +1838,7 @@ generate_bp_poly_chebyshev(std::span<const std::vector<double>> param_arr,
         const auto coord_next = snail_scheme.get_coord(prune_level);
         const auto coord_cur  = snail_scheme.get_current_coord(prune_level);
         // Transform the parameters to coord_cur domain
-        transforms::shift_cheb_errors_batch(dparam_cur_batch, coord_cur.second,
+        core::shift_cheb_errors_batch(dparam_cur_batch, coord_cur.second,
                                             coord_prev.second, n_freqs,
                                             n_params);
 
@@ -1880,7 +1880,7 @@ generate_bp_poly_chebyshev(std::span<const std::vector<double>> param_arr,
         branching_pattern[prune_level - 1] = children / parents;
 
         // Transform dparams to the next segment
-        transforms::shift_cheb_errors_batch(dparam_cur_next, coord_next.second,
+        core::shift_cheb_errors_batch(dparam_cur_next, coord_next.second,
                                             coord_cur.second, n_freqs,
                                             n_params);
         std::ranges::copy(dparam_cur_next, dparam_cur_batch.begin());

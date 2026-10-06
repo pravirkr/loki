@@ -13,13 +13,13 @@
 #include <highfive/span.hpp>
 #include <omp.h>
 
-#include "detail/exceptions.hpp"
+#include "detail/error_check.hpp"
 #include "detail/utils.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
 #include "utils/world_tree.hpp"
 
-namespace loki::cands {
+namespace loki::search {
 
 namespace {
 // Explicit Round-half-to-even (bankers' rounding) to match numpy.round()
@@ -1124,11 +1124,11 @@ std::string TimerStats::summary(float total_time) const {
     }
     return std::format("Total: {:.1f}s ({})", total_time, breakdown);
 }
-} // namespace loki::cands
+} // namespace loki::search
 
-HIGHFIVE_REGISTER_TYPE(loki::cands::FFATimerStatsPacked,
-                       loki::cands::create_compound_ffa_timer_stats)
-HIGHFIVE_REGISTER_TYPE(loki::cands::PruneStats,
-                       loki::cands::create_compound_prune_stats)
-HIGHFIVE_REGISTER_TYPE(loki::cands::PruneTimerStatsPacked,
-                       loki::cands::create_compound_prune_timer_stats)
+HIGHFIVE_REGISTER_TYPE(loki::search::FFATimerStatsPacked,
+                       loki::search::create_compound_ffa_timer_stats)
+HIGHFIVE_REGISTER_TYPE(loki::search::PruneStats,
+                       loki::search::create_compound_prune_stats)
+HIGHFIVE_REGISTER_TYPE(loki::search::PruneTimerStatsPacked,
+                       loki::search::create_compound_prune_timer_stats)

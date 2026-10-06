@@ -17,14 +17,14 @@
 #include "pybind_utils.hpp"
 
 namespace loki {
-using algorithms::EPFreqSweep;
-using algorithms::FFAFreqSweep;
+using pipelines::EPFreqSweep;
+using pipelines::FFAFreqSweep;
 using detection::MatchedFilter;
 using plans::FFAPlanBase;
-using regions::EPChunkConfig;
-using regions::EPChunkStats;
-using regions::EPRegionStats;
-using regions::FFARegionStats;
+using algorithms::EPChunkConfig;
+using algorithms::EPChunkStats;
+using algorithms::EPRegionStats;
+using algorithms::FFARegionStats;
 using search::FFASearchConfig;
 using search::PulsarSearchConfig;
 
@@ -176,7 +176,7 @@ void bind_plans(py::module_& m) {
     bind_ffa_plan<ComplexType>(m_plans, "FFAPlanFourier");
     bind_ffa_region_planner<float>(m_plans, "FFARegionPlannerTime");
     bind_ffa_region_planner<ComplexType>(m_plans, "FFARegionPlannerFourier");
-    m_plans.def("generate_ffa_regions", &regions::generate_ffa_regions,
+    m_plans.def("generate_ffa_regions", &algorithms::generate_ffa_regions,
                 py::arg("p_min"), py::arg("p_max"), py::arg("tsamp"),
                 py::arg("nbins_min"), py::arg("eta_min"),
                 py::arg("octave_scale") = 2.0, py::arg("nbins_max") = 1024);

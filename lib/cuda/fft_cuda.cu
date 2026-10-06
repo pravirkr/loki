@@ -21,7 +21,7 @@
 
 #include "cuda/cuda_utils.cuh"
 #include "cuda/workspace_cuda.cuh"
-#include "detail/exceptions.hpp"
+#include "detail/error_check.hpp"
 
 namespace loki::math {
 

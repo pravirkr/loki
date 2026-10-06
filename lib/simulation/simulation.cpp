@@ -6,7 +6,7 @@
 #include <numeric>
 #include <vector>
 
-#include "detail/exceptions.hpp"
+#include "detail/error_check.hpp"
 
 namespace loki::simulation {
 void generate_folded_profile(std::span<float> profile,

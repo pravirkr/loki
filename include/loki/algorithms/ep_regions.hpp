@@ -9,7 +9,7 @@
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
 
-namespace loki::regions {
+namespace loki::algorithms {
 
 /**
  * @brief Configuration and threshold scheme for a single EP chunk.
@@ -167,4 +167,4 @@ private:
     std::unique_ptr<Impl> m_impl;
 };
 
-} // namespace loki::regions
+} // namespace loki::algorithms

@@ -18,7 +18,7 @@
 #include "algorithms/ffa_engine.hpp"
 #include "common/dispatch.hpp"
 #include "core/kernels.hpp"
-#include "detail/exceptions.hpp"
+#include "detail/error_check.hpp"
 #include "detail/progress.hpp"
 #include "detail/timing.hpp"
 #include "detection/score_engine.hpp"
@@ -370,7 +370,7 @@ private:
     }
 
     void account_cone_band(float wall_s,
-                           const kernels::ConeBandThreadSeconds& stats) {
+                           const core::ConeBandThreadSeconds& stats) {
         const double thread_sum = stats.brute + stats.merge + stats.score;
         const double wall       = static_cast<double>(wall_s);
         const double prefix     = stats.prefix_wall;
@@ -509,8 +509,8 @@ private:
                             ws.coords_freq.data() + offsets[step.done + j];
                     }
                     const bool bottom = step.done == 0;
-                    kernels::ConeBandThreadSeconds stats;
-                    kernels::ffa_cone_band_freq(
+                    core::ConeBandThreadSeconds stats;
+                    core::ffa_cone_band_freq(
                         bottom ? nullptr : current, ts_e.data(), ts_v.data(),
                         run_span.data(), offset_span.data(), seg_len, dest,
                         coords.data(), counts.data(), shapes[step.done][0],
@@ -661,7 +661,7 @@ private:
             for (SizeType itile = 0; itile < ntiles; ++itile) {
                 const SizeType tile =
                     tile_forced == 0 ? kTiles[itile] : tile_forced;
-                const SizeType floats = kernels::cone_band_working_floats(
+                const SizeType floats = core::cone_band_working_floats(
                     coords.data(), counts.data(), k, tile, nbins);
                 if (floats == 0) {
                     continue;
@@ -970,11 +970,11 @@ private:
         auto coords_cur_span =
             std::span(ws.coords_freq).subspan(ncoords_offset, ncoords_cur);
         if constexpr (std::is_same_v<FoldType, float>) {
-            kernels::ffa_iter_freq(fold_in, fold_out, coords_cur_span.data(),
+            core::ffa_iter_freq(fold_in, fold_out, coords_cur_span.data(),
                                    ncoords_cur, ncoords_prev, nsegments, nbins,
                                    m_nthreads);
         } else {
-            kernels::ffa_complex_iter_freq(
+            core::ffa_complex_iter_freq(
                 fold_in, fold_out, coords_cur_span.data(), ncoords_cur,
                 ncoords_prev, nsegments, nbins_f, nbins, m_nthreads);
         }
@@ -995,12 +995,12 @@ private:
             std::span(ws.coords).subspan(ncoords_offset, ncoords_cur);
 
         if constexpr (std::is_same_v<FoldType, float>) {
-            kernels::ffa_iter(fold_in, fold_out, coords_cur_span.data(),
+            core::ffa_iter(fold_in, fold_out, coords_cur_span.data(),
                               ncoords_cur, ncoords_prev, nsegments, nbins,
                               m_nthreads);
 
         } else {
-            kernels::ffa_complex_iter(fold_in, fold_out, coords_cur_span.data(),
+            core::ffa_complex_iter(fold_in, fold_out, coords_cur_span.data(),
                                       ncoords_cur, ncoords_prev, nsegments,
                                       nbins_f, nbins, m_nthreads);
         }

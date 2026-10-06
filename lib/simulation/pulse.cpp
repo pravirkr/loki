@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "loki/detection/score.hpp"
-#include "detail/exceptions.hpp"
+#include "detail/error_check.hpp"
 #include "detail/math.hpp"
 #include "detail/psr_utils.hpp"
 #include "simulation/pulse_detail.hpp"

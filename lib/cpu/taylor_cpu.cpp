@@ -11,7 +11,7 @@
 
 #include "core/cartesian.hpp"
 #include "core/transforms.hpp"
-#include "detail/exceptions.hpp"
+#include "detail/error_check.hpp"
 #include "detail/psr_utils.hpp"
 #include "detail/utils.hpp"
 #include "loki/common/types.hpp"
@@ -1345,7 +1345,7 @@ poly_taylor_branch_batch_generic(std::span<const double> leaves_batch,
 
     // Use the existing robust Cartesian product function
     const auto [leaves_branch_taylor_batch, batch_origins] =
-        utils::cartesian_prod_padded(pad_branched_params, branched_counts,
+        cartesian_prod_padded(pad_branched_params, branched_counts,
                                      n_leaves, n_params, branch_max);
     const SizeType total_leaves = batch_origins.size();
 
@@ -1729,7 +1729,7 @@ generate_bp_poly_taylor(std::span<const std::vector<double>> param_arr,
                     dparam_cur_next[(i * n_params) + j];
             }
         }
-        auto dparam_d_vec_new = transforms::shift_taylor_errors_batch(
+        auto dparam_d_vec_new = core::shift_taylor_errors_batch(
             dparam_d_vec, delta_t, use_conservative_tile, n_freqs, n_params_d);
         // Copy back to dparam_cur_batch (excluding last dimension)
         for (SizeType i = 0; i < n_freqs; ++i) {

@@ -15,7 +15,7 @@
 
 using loki::ParamLimit;
 using loki::SizeType;
-using loki::algorithms::GridMask;
+using loki::search::GridMask;
 using loki::algorithms::is_impulsive_segment;
 using loki::algorithms::kBirdieAccelPad;
 using loki::algorithms::make_birdie_window;

@@ -5,7 +5,7 @@
 #include <format>
 
 #include "core/transforms.hpp"
-#include "detail/exceptions.hpp"
+#include "detail/error_check.hpp"
 #include "detail/math.hpp"
 #include "detail/utils.hpp"
 #include "loki/common/types.hpp"
@@ -313,7 +313,7 @@ float phase_index(double proper_time,
 
 std::tuple<std::vector<double>, double>
 shift_taylor_params_d_f(std::span<const double> param_vec, double delta_t) {
-    return transforms::shift_taylor_params_d_f(param_vec, delta_t);
+    return core::shift_taylor_params_d_f(param_vec, delta_t);
 }
 
 } // namespace loki::psr_utils

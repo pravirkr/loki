@@ -22,14 +22,14 @@
 #include "utils/fft_impl.hpp"
 #include "utils/workspace_impl.hpp"
 
-namespace loki::algorithms {
+namespace loki::pipelines {
 
 namespace {
 
 double
 merge_ep_sweep_results(const std::filesystem::path& tmp_dir,
                        const std::filesystem::path& result_file,
-                       const std::vector<regions::EPChunkConfig>& chunk_cfgs,
+                       const std::vector<algorithms::EPChunkConfig>& chunk_cfgs,
                        const search::PulsarSearchConfig& base_cfg,
                        float min_pd,
                        std::string_view poly_basis,
@@ -117,7 +117,7 @@ public:
         float min_pd,
         std::string_view poly_basis,
         float ref_ducy,
-        PruneRFIConfig rfi_config,
+        algorithms::PruneRFIConfig rfi_config,
         const std::optional<std::filesystem::path>& plan_cache_file,
         std::optional<SizeType> n_runs,
         std::optional<std::vector<SizeType>> ref_segs)
@@ -265,7 +265,7 @@ public:
                 const std::string chunk_prefix = std::format("chunk_{:04d}", i);
                 // Internal pipeline: build the CPU engine directly on the
                 // shared workspaces, FFA buffers and plan cache.
-                const auto chunk_ep = detail::make_ep_cpu<FoldType>(
+                const auto chunk_ep = algorithms::detail::make_ep_cpu<FoldType>(
                     std::span(workspace_ptrs), m_ffa_workspace, m_fft_manager,
                     std::span(m_ffa_fold), chunk.cfg, chunk.threshold_scheme,
                     m_n_runs, m_ref_segs,
@@ -301,10 +301,10 @@ private:
     float m_min_pd;
     std::string m_poly_basis;
     float m_ref_ducy;
-    PruneRFIConfig m_rfi_config;
+    algorithms::PruneRFIConfig m_rfi_config;
     std::optional<SizeType> m_n_runs;
     std::optional<std::vector<SizeType>> m_ref_segs;
-    regions::EPRegionPlanner<FoldType> m_region_planner;
+    algorithms::EPRegionPlanner<FoldType> m_region_planner;
 
     memory::FFAWorkspaceCPU<FoldType> m_ffa_workspace;
     math::FFTWManager m_fft_manager;
@@ -320,7 +320,7 @@ std::unique_ptr<EPFreqSweepEngine> make_ep_freq_sweep_cpu(
     float min_pd,
     std::string_view poly_basis,
     float ref_ducy,
-    const PruneRFIConfig& rfi_config,
+    const algorithms::PruneRFIConfig& rfi_config,
     const std::optional<std::filesystem::path>& plan_cache_file,
     std::optional<SizeType> n_runs,
     std::optional<std::vector<SizeType>> ref_segs) {
@@ -335,4 +335,4 @@ std::unique_ptr<EPFreqSweepEngine> make_ep_freq_sweep_cpu(
 }
 } // namespace detail
 
-} // namespace loki::algorithms
+} // namespace loki::pipelines

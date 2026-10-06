@@ -12,7 +12,7 @@
 
 #include "loki/common/types.hpp"
 
-namespace loki::utils {
+namespace loki::core {
 
 /**
  * @brief Proxy for the current combination in the Cartesian product.
@@ -315,7 +315,7 @@ cartesian_prod_padded(std::span<const double> padded_arrays,
 
     return {std::move(cart_prod), std::move(origins)};
 }
-} // namespace loki::utils
+} // namespace loki::core
 
 // ------------------------------------------------------------------------
 // Example usage:

@@ -9,7 +9,7 @@
 #include <catch2/matchers/catch_matchers_range_equals.hpp>
 
 #include "loki/common/types.hpp"
-#include "detail/exceptions.hpp"
+#include "detail/error_check.hpp"
 #include "utils/fft_impl.hpp"
 
 #ifdef LOKI_ENABLE_CUDA

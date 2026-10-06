@@ -7,7 +7,7 @@
 
 #include "loki/common/types.hpp"
 
-namespace loki::cuda_index_limits {
+namespace loki::index_limits {
 
 /// Largest fold-buffer length addressable with uint32_t element indices in FFA
 /// CUDA kernels.
@@ -68,4 +68,4 @@ inline void validate_chunk_cuda_index_limits(const ChunkIndexUsage& u) {
     }
 }
 
-} // namespace loki::cuda_index_limits
+} // namespace loki::index_limits

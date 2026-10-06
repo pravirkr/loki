@@ -8,7 +8,7 @@
 #include <vector>
 
 #include "core/transforms.hpp"
-#include "detail/exceptions.hpp"
+#include "detail/error_check.hpp"
 #include "detail/psr_utils.hpp"
 #include "detail/utils.hpp"
 #include "loki/common/coord.hpp"
@@ -235,7 +235,7 @@ ffa_taylor_resolve_generic(std::span<const double> pset_cur,
     } else {
         delta_t = (static_cast<double>(latter) - 0.5) * tsegment;
         std::tie(pset_prev, delay) =
-            transforms::shift_taylor_params_d_f(pset_cur, delta_t);
+            core::shift_taylor_params_d_f(pset_cur, delta_t);
     }
     const auto relative_phase =
         psr_utils::get_phase_idx(delta_t, pset_cur[nparams - 1], nbins, delay);

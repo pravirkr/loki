@@ -8,7 +8,7 @@
 #include "cuda/cuda_utils.cuh"
 #include "loki/common/types.hpp"
 
-namespace loki::kernels {
+namespace loki::core {
 
 namespace {
 
@@ -168,7 +168,7 @@ __global__ __launch_bounds__(256, 4) void kernel_shift_add_linear_complex(
 
     // Phase factor for head only: exp(-2πi * k * shift / nbins)
     const auto phase =
-        static_cast<float>(-2.0F * kPI * k * phase_shift[ileaf] / nbins);
+        static_cast<float>(-2.0F * cub_helpers::kPI * k * phase_shift[ileaf] / nbins);
     float cosv, sinv;
     __sincosf(phase, &sinv, &cosv);
 
@@ -245,7 +245,7 @@ __launch_bounds__(256, 4) void kernel_shift_add_ascend_linear_complex(
         // Phase factor: same formula as old kernel, but phase_shift is now
         // the fractional bin shift (not an index), matching CPU semantics
         // exp(-2πi * k * phase_shift / nbins)
-        const float phase = -2.0F * kPI * static_cast<float>(k) *
+        const float phase = -2.0F * cub_helpers::kPI * static_cast<float>(k) *
                             phase_shift[leaf_seg_idx] /
                             static_cast<float>(nbins);
         float cosv, sinv;
@@ -540,9 +540,9 @@ kernel_ffa_complex_iter(const ComplexTypeCUDA* __restrict__ fold_in,
 
     // Precompute phase factors: exp(-2πi * k * shift / nbins)
     const auto phase_factor_tail =
-        static_cast<float>(-2.0F * kPI * k * shift_tail / nbins);
+        static_cast<float>(-2.0F * cub_helpers::kPI * k * shift_tail / nbins);
     const auto phase_factor_head =
-        static_cast<float>(-2.0F * kPI * k * shift_head / nbins);
+        static_cast<float>(-2.0F * cub_helpers::kPI * k * shift_head / nbins);
     // Fast sincos computation
     float cos_tail, sin_tail, cos_head, sin_head;
     __sincosf(phase_factor_tail, &sin_tail, &cos_tail);
@@ -621,7 +621,7 @@ kernel_ffa_complex_freq_iter(const ComplexTypeCUDA* __restrict__ fold_in,
 
     // Phase factor for head only: exp(-2πi * k * shift / nbins)
     const auto phase_factor =
-        static_cast<float>(-2.0F * kPI * k * shift / nbins);
+        static_cast<float>(-2.0F * cub_helpers::kPI * k * shift / nbins);
     float cos_val, sin_val;
     __sincosf(phase_factor, &sin_val, &cos_val);
 
@@ -825,7 +825,7 @@ kernel_fold_complex_one_harmonic_per_thread(const float* __restrict__ ts_e,
     if (tid >= 1) {
         // Compute AC for this harmonic
         const double phase_factor =
-            2.0 * kPI * freqs[ifreq] * static_cast<double>(tid);
+            2.0 * cub_helpers::kPI * freqs[ifreq] * static_cast<double>(tid);
         const double init_phase  = phase_factor * t_ref;
         const double delta_phase = -phase_factor * tsamp;
         // Fast sincos computation
@@ -938,7 +938,7 @@ __global__ void kernel_fold_complex_unified(const float* __restrict__ ts_e,
     __syncthreads();
 
     // AC Components
-    const double phase_factor = 2.0 * kPI * freqs[ifreq];
+    const double phase_factor = 2.0 * cub_helpers::kPI * freqs[ifreq];
     for (uint32_t m = tid + 1; m < nbins_f; m += block_dim) {
         float ph_r, ph_i, step_r, step_i;
         __sincosf(static_cast<float>(phase_factor * m * t_ref), &ph_i, &ph_r);
@@ -1346,4 +1346,4 @@ void shift_add_ascend_linear_complex_batch_cuda(
     // No need to sync, the next kernel will do it
 }
 
-} // namespace loki::kernels
+} // namespace loki::core

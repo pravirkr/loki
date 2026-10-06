@@ -7,7 +7,7 @@
 #include "loki/algorithms/prune_rfi.hpp"
 #include "loki/common/types.hpp"
 
-namespace loki::algorithms {
+namespace loki::search {
 
 /**
  * @brief Exclusion mask over the FFA base grid used by the EP search.
@@ -73,10 +73,10 @@ public:
      * frequency range is also scaled by `k` and `1/k`; the acceleration range
      * is kept (kinematic units are harmonic-invariant).
      */
-    void add_window(const ParamWindow& window, SizeType n_harmonics = 0);
+    void add_window(const algorithms::ParamWindow& window, SizeType n_harmonics = 0);
 
     /// @brief Rasterise a set of windows.
-    void add_windows(std::span<const ParamWindow> windows,
+    void add_windows(std::span<const algorithms::ParamWindow> windows,
                      SizeType n_harmonics = 0);
 
     /**
@@ -133,4 +133,4 @@ private:
     void set_range(SizeType lo, SizeType hi) noexcept;
 };
 
-} // namespace loki::algorithms
+} // namespace loki::search

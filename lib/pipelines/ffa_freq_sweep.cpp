@@ -11,7 +11,7 @@
 #include "loki/search/configs.hpp"
 #include "pipelines/ffa_freq_sweep_engine.hpp"
 
-namespace loki::algorithms {
+namespace loki::pipelines {
 
 namespace {
 
@@ -55,4 +55,4 @@ void FFAFreqSweep::execute(std::span<const float> ts_e,
                            std::string_view config_toml) {
     m_impl->m_engine->execute(ts_e, ts_v, outdir, file_prefix, config_toml);
 }
-} // namespace loki::algorithms
+} // namespace loki::pipelines

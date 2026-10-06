@@ -6,7 +6,7 @@
 
 #include "loki/common/types.hpp"
 
-namespace loki::transforms {
+namespace loki::core {
 
 std::vector<std::vector<double>> precompute_shift_matrix(SizeType nparams,
                                                          double delta_t);
@@ -58,4 +58,4 @@ void taylor_to_chebyshev_limits_full(std::span<const double> taylor_limits,
                                      double ts,
                                      std::span<double> out);
 
-} // namespace loki::transforms
+} // namespace loki::core

@@ -11,7 +11,7 @@
 #include "core/circular.hpp"
 #include "core/taylor.hpp"
 #include "loki/detection/score.hpp"
-#include "detail/exceptions.hpp"
+#include "detail/error_check.hpp"
 #include "core/kernels.hpp"
 #include "loki/search/configs.hpp"
 
@@ -129,14 +129,14 @@ void BasePruneDPFuncts<FoldType, Derived>::shift_add(
     SizeType physical_start_idx,
     SizeType capacity) noexcept {
     if constexpr (std::is_same_v<FoldType, float>) {
-        kernels::shift_add_linear_batch(
+        core::shift_add_linear_batch(
             folds_tree.data(), indices_tree.data(), folds_ffa.data(),
             indices_ffa.data(), phase_shift.data(), folds_out.data(),
             m_scratch_shifts.data(), m_cfg.get_nbins(), n_leaves,
             physical_start_idx, capacity);
 
     } else {
-        kernels::shift_add_linear_complex_batch(
+        core::shift_add_linear_complex_batch(
             folds_tree.data(), indices_tree.data(), folds_ffa.data(),
             indices_ffa.data(), phase_shift.data(), folds_out.data(),
             m_cfg.get_nbins_f(), m_cfg.get_nbins(), n_leaves,
@@ -381,7 +381,7 @@ void PrunePolyTaylorDPFuncts<FoldType>::ascend(
     if constexpr (std::is_same_v<FoldType, ComplexType>) {
         error_check::check_equal(folds_tree.size(), n_leaves * 2 * nbins_f,
                                  "fold_segment size mismatch");
-        kernels::shift_add_ascend_linear_complex_batch(
+        core::shift_add_ascend_linear_complex_batch(
             folds_ffa.data(), idx_segments.data(), scratch_param_indices.data(),
             scratch_phase_shift.data(), folds_tree.data(), nbins_f, nbins,
             n_coords_init, n_leaves, n_segments);
@@ -396,7 +396,7 @@ void PrunePolyTaylorDPFuncts<FoldType>::ascend(
     } else {
         error_check::check_equal(folds_tree.size(), n_leaves * 2 * nbins,
                                  "fold_segment size mismatch");
-        kernels::shift_add_ascend_linear_batch(
+        core::shift_add_ascend_linear_batch(
             folds_ffa.data(), idx_segments.data(), scratch_param_indices.data(),
             scratch_phase_shift.data(), folds_tree.data(),
             this->m_scratch_shifts.data(), nbins, n_coords_init, n_leaves,
@@ -517,7 +517,7 @@ void PrunePolyChebyshevDPFuncts<FoldType>::ascend(
     if constexpr (std::is_same_v<FoldType, ComplexType>) {
         error_check::check_equal(folds_tree.size(), n_leaves * 2 * nbins_f,
                                  "fold_segment size mismatch");
-        kernels::shift_add_ascend_linear_complex_batch(
+        core::shift_add_ascend_linear_complex_batch(
             folds_ffa.data(), idx_segments.data(), scratch_param_indices.data(),
             scratch_phase_shift.data(), folds_tree.data(), nbins_f, nbins,
             this->m_n_coords_init, n_leaves, n_segments);
@@ -532,7 +532,7 @@ void PrunePolyChebyshevDPFuncts<FoldType>::ascend(
     } else {
         error_check::check_equal(folds_tree.size(), n_leaves * 2 * nbins,
                                  "fold_segment size mismatch");
-        kernels::shift_add_ascend_linear_batch(
+        core::shift_add_ascend_linear_batch(
             folds_ffa.data(), idx_segments.data(), scratch_param_indices.data(),
             scratch_phase_shift.data(), folds_tree.data(),
             this->m_scratch_shifts.data(), nbins, this->m_n_coords_init,
@@ -666,7 +666,7 @@ void PruneCircTaylorDPFuncts<FoldType>::ascend(
     if constexpr (std::is_same_v<FoldType, ComplexType>) {
         error_check::check_equal(folds_tree.size(), n_leaves * 2 * nbins_f,
                                  "fold_segment size mismatch");
-        kernels::shift_add_ascend_linear_complex_batch(
+        core::shift_add_ascend_linear_complex_batch(
             folds_ffa.data(), idx_segments.data(), scratch_param_indices.data(),
             scratch_phase_shift.data(), folds_tree.data(), nbins_f, nbins,
             this->m_n_coords_init, n_leaves, n_segments);
@@ -681,7 +681,7 @@ void PruneCircTaylorDPFuncts<FoldType>::ascend(
     } else {
         error_check::check_equal(folds_tree.size(), n_leaves * 2 * nbins,
                                  "fold_segment size mismatch");
-        kernels::shift_add_ascend_linear_batch(
+        core::shift_add_ascend_linear_batch(
             folds_ffa.data(), idx_segments.data(), scratch_param_indices.data(),
             scratch_phase_shift.data(), folds_tree.data(),
             this->m_scratch_shifts.data(), nbins, this->m_n_coords_init,

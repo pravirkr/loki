@@ -17,7 +17,7 @@
 #include "cuda/taylor_cuda.cuh"
 #include "cuda/taylor_ffa_cuda.cuh"
 #include "cuda/workspace_cuda.cuh"
-#include "detail/exceptions.hpp"
+#include "detail/error_check.hpp"
 #include "detail/timing.hpp"
 #include "detection/score_engine.hpp"
 #include "loki/algorithms/fold.hpp"
@@ -528,11 +528,11 @@ private:
             coords_base.offset(ncoords_offset);
 
         if constexpr (std::is_same_v<FoldTypeCUDA, float>) {
-            kernels::ffa_iter_freq_cuda(fold_in, fold_out, coords, ncoords_cur,
+            core::ffa_iter_freq_cuda(fold_in, fold_out, coords, ncoords_cur,
                                         ncoords_prev, nsegments, nbins, stream);
 
         } else {
-            kernels::ffa_complex_iter_freq_cuda(
+            core::ffa_complex_iter_freq_cuda(
                 fold_in, fold_out, coords, ncoords_cur, ncoords_prev, nsegments,
                 nbins_f, nbins, stream);
         }
@@ -553,11 +553,11 @@ private:
         const coord::FFACoordDPtrs coords = coords_base.offset(ncoords_offset);
 
         if constexpr (std::is_same_v<FoldTypeCUDA, float>) {
-            kernels::ffa_iter_cuda(fold_in, fold_out, coords, ncoords_cur,
+            core::ffa_iter_cuda(fold_in, fold_out, coords, ncoords_cur,
                                    ncoords_prev, nsegments, nbins, stream);
 
         } else {
-            kernels::ffa_complex_iter_cuda(fold_in, fold_out, coords,
+            core::ffa_complex_iter_cuda(fold_in, fold_out, coords,
                                            ncoords_cur, ncoords_prev, nsegments,
                                            nbins_f, nbins, stream);
         }

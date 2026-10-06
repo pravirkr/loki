@@ -1,6 +1,6 @@
 #include <span>
 
-#include "detail/exceptions.hpp"
+#include "detail/error_check.hpp"
 #include "detection/boxcar_kernels.hpp"
 #include "detection/score_engine.hpp"
 #include "loki/common/types.hpp"

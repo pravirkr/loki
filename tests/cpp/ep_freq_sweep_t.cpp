@@ -21,8 +21,8 @@
 
 using loki::ParamLimit;
 using loki::SizeType;
-using loki::algorithms::EPFreqSweep;
-using loki::regions::EPRegionPlanner;
+using loki::pipelines::EPFreqSweep;
+using loki::algorithms::EPRegionPlanner;
 using loki::search::PulsarSearchConfig;
 
 namespace {

@@ -18,7 +18,7 @@
 #include "loki/detection/thresholds.hpp"
 #include "loki/search/configs.hpp"
 
-namespace loki::regions {
+namespace loki::algorithms {
 
 namespace {
 
@@ -895,4 +895,4 @@ void EPRegionPlanner<FoldType>::load_cache(
 template class EPRegionPlanner<float>;
 template class EPRegionPlanner<ComplexType>;
 
-} // namespace loki::regions
+} // namespace loki::algorithms

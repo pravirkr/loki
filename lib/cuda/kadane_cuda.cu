@@ -15,7 +15,7 @@
 #include "cuda/cub_helpers.cuh"
 #include "cuda/cuda_utils.cuh"
 #include "cuda/workspace_cuda.cuh"
-#include "detail/exceptions.hpp"
+#include "detail/error_check.hpp"
 #include "loki/common/types.hpp"
 
 namespace loki::detection {
@@ -634,7 +634,7 @@ SizeType score_and_filter_max_cuda_kadane_d(
     // Count number of passing profiles
 
     auto transform_it =
-        thrust::make_transform_iterator(filtered_mask.data(), Uint8ToUint32{});
+        thrust::make_transform_iterator(filtered_mask.data(), cub_helpers::Uint8ToUint32{});
     cuda_utils::check_cuda_call(
         cub::DeviceReduce::Sum(scratch_ws.cub_temp_storage,
                                scratch_ws.cub_temp_bytes, transform_it,

@@ -827,7 +827,7 @@ circ_taylor_validate_batch_cuda(cuda::std::span<const double> leaves_branch,
 
     // Count number of passing profiles
     auto transform_it = thrust::make_transform_iterator(validation_mask.data(),
-                                                        Uint8ToUint32{});
+                                                        cub_helpers::Uint8ToUint32{});
 
     cuda_utils::check_cuda_call(
         cub::DeviceReduce::Sum(scratch_ws.cub_temp_storage,

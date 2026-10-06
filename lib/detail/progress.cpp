@@ -13,7 +13,7 @@
 
 namespace loki::progress {
 
-namespace details {
+namespace detail {
 namespace {
 
 void show_console_cursor(bool const show) {
@@ -54,7 +54,7 @@ std::string format_duration(std::chrono::duration<Rep, Period> dur) {
 }
 
 } // namespace
-} // namespace details
+} // namespace detail
 
 // --- Column Implementations ---
 std::string TextColumn::render(const ProgressBar& /*bar*/) {
@@ -95,7 +95,7 @@ std::string BarColumn::render_pulse(const ProgressBar& bar) const {
     for (int i = 0; i < m_width; ++i) {
         pulse_bar[i] = kBarChar[0];
     }
-    std::string p1 = details::repeat_unicode(kBarChar, m_width);
+    std::string p1 = detail::repeat_unicode(kBarChar, m_width);
 
     std::string result;
     result += fmt::format("{}", fmt::styled(p1.substr(0, pulse_position),
@@ -119,9 +119,9 @@ std::string BarColumn::render(const ProgressBar& bar) {
     progress_fraction        = std::clamp(progress_fraction, 0.0, 1.0);
 
     const int completed_width = static_cast<int>(m_width * progress_fraction);
-    const auto part1 = details::repeat_unicode(kBarChar, completed_width);
+    const auto part1 = detail::repeat_unicode(kBarChar, completed_width);
     const auto part2 =
-        details::repeat_unicode(kBarChar, m_width - completed_width);
+        detail::repeat_unicode(kBarChar, m_width - completed_width);
 
     return fmt::format("{}{}", fmt::styled(part1, m_style.value),
                        fmt::styled(part2, m_background_style.value));
@@ -155,11 +155,11 @@ std::string TimeStatsColumn::render(const ProgressBar& bar) {
                            static_cast<double>(progress)));
         const auto remaining =
             std::max(estimated_total - elapsed, std::chrono::nanoseconds{0});
-        return details::format_duration(remaining);
+        return detail::format_duration(remaining);
     };
 
     const auto rendered =
-        fmt::format("[{}<{}]", details::format_duration(elapsed), eta_str());
+        fmt::format("[{}<{}]", detail::format_duration(elapsed), eta_str());
     return fmt::format("{}", fmt::styled(rendered, m_style.value));
 }
 
@@ -273,7 +273,7 @@ void ProgressBar::print_progress() {
     }
 
     std::ostream& os = std::cout;
-    details::erase_line();
+    detail::erase_line();
 
     // Transient behavior: only print if not completed, or if not transient
     if (!is_completed()) {
@@ -375,7 +375,7 @@ MultiprocessProgressTracker::~MultiprocessProgressTracker() {
 void MultiprocessProgressTracker::start() {
     std::lock_guard<std::mutex> lock(m_control_mutex);
     if (!m_running.load() && !m_permanently_stopped.load()) {
-        details::show_console_cursor(false);
+        detail::show_console_cursor(false);
         m_running.store(true);
         m_render_thread =
             std::thread(&MultiprocessProgressTracker::render_loop, this);
@@ -399,7 +399,7 @@ void MultiprocessProgressTracker::stop() {
         render_frame(true); // Final render to flush logs
         clear_progress_lines();
         std::cout << std::flush;
-        details::show_console_cursor(true);
+        detail::show_console_cursor(true);
         m_permanently_stopped.store(true);
     }
 }
@@ -532,13 +532,13 @@ void MultiprocessProgressTracker::render_frame(bool is_final_render) {
 
 ProgressGuard::ProgressGuard(bool show) : m_show(show) {
     if (m_show) {
-        details::show_console_cursor(false);
+        detail::show_console_cursor(false);
     }
 }
 
 ProgressGuard::~ProgressGuard() {
     if (m_show) {
-        details::show_console_cursor(true);
+        detail::show_console_cursor(true);
     }
 }
 

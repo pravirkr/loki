@@ -11,11 +11,11 @@
 #include "search/cands.hpp"
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
-#include "detail/exceptions.hpp"
+#include "detail/error_check.hpp"
 #include "detail/psr_utils.hpp"
 #include "loki/search/configs.hpp"
 
-namespace loki::algorithms {
+namespace loki::search {
 
 /**
  * @brief Everything needed to turn a flat score index back into a parameter
@@ -198,7 +198,7 @@ private:
  */
 inline void flush_candidates(CandidateBuffer& buf,
                              std::span<const RegionDecode> decode_table,
-                             cands::FFAResultWriter& writer,
+                             search::FFAResultWriter& writer,
                              std::span<double> param_sets_scratch,
                              std::span<std::uint16_t> width_scratch,
                              std::span<std::uint16_t> nbins_scratch,
@@ -252,4 +252,4 @@ inline void flush_candidates(CandidateBuffer& buf,
     buf.clear();
 }
 
-} // namespace loki::algorithms
+} // namespace loki::search

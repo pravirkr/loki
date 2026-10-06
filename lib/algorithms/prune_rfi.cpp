@@ -5,7 +5,7 @@
 #include <format>
 #include <limits>
 
-#include "detail/exceptions.hpp"
+#include "detail/error_check.hpp"
 #include "detail/utils.hpp"
 
 namespace loki::algorithms {

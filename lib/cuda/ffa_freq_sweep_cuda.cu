@@ -13,7 +13,7 @@
 #include "cuda/fft_cuda.cuh"
 #include "cuda/score_cuda.cuh"
 #include "cuda/workspace_cuda.cuh"
-#include "detail/exceptions.hpp"
+#include "detail/error_check.hpp"
 #include "detail/timing.hpp"
 #include "loki/algorithms/ffa.hpp"
 #include "loki/algorithms/regions.hpp"
@@ -25,7 +25,7 @@
 #include "search/cands.hpp"
 #include "search/ffa_sweep_candidates.hpp"
 
-namespace loki::algorithms {
+namespace loki::pipelines {
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 class FFAFreqSweepCudaEngine final : public detail::FFAFreqSweepEngine {
@@ -61,9 +61,9 @@ public:
         m_indices_staging.resize(scratch_size);
         m_write_param_sets_batch.resize(
             planner_stats.get_write_param_sets_size());
-        m_width_batch.resize(regions::kFFAFreqSweepWriteBatchSize);
-        m_nbins_batch.resize(regions::kFFAFreqSweepWriteBatchSize);
-        m_ffa_stats = std::make_unique<cands::FFAStatsCollection>();
+        m_width_batch.resize(algorithms::kFFAFreqSweepWriteBatchSize);
+        m_nbins_batch.resize(algorithms::kFFAFreqSweepWriteBatchSize);
+        m_ffa_stats = std::make_unique<search::FFAStatsCollection>();
         cuda_utils::check_cuda_call(cudaStreamCreate(&m_stream),
                                     "cudaStreamCreate failed");
         if (m_base_cfg.get_use_boxcar_kadane()) {
@@ -106,10 +106,10 @@ public:
                  std::string_view file_prefix,
                  std::string_view config_toml) override {
         timing::SimpleTimer timer;
-        cands::FFATimerStats ffa_timer_stats_pipeline;
+        search::FFATimerStats ffa_timer_stats_pipeline;
         timer.start();
         // Reset accumulated state so repeated execute() calls are independent
-        m_ffa_stats = std::make_unique<cands::FFAStatsCollection>();
+        m_ffa_stats = std::make_unique<search::FFAStatsCollection>();
         m_cands.clear();
         m_total_passing_scores = 0;
 
@@ -117,10 +117,10 @@ public:
         const std::string filebase = std::format("{}_ffa", file_prefix);
         const auto result_file =
             outdir / std::format("{}_results.h5", filebase);
-        auto writer = cands::FFAResultWriter(
-            result_file, cands::FFAResultWriter::Mode::kWrite);
+        auto writer = search::FFAResultWriter(
+            result_file, search::FFAResultWriter::Mode::kWrite);
         writer.write_metadata(
-            cands::FFAResultMetadata(m_base_cfg, config_toml));
+            search::FFAResultMetadata(m_base_cfg, config_toml));
 
         // Copy input data to device
         cudaStream_t stream = m_stream;
@@ -148,7 +148,7 @@ public:
             const auto& freq_limits = cfg_cur.get_param_limits().back();
             spdlog::info("Processing chunk f0 (Hz): [{:08.3f}, {:08.3f}]",
                          freq_limits.min, freq_limits.max);
-            cands::FFATimerStats ffa_timer_stats;
+            search::FFATimerStats ffa_timer_stats;
             execute_ffa_region(cfg_cur, i, writer, ffa_timer_stats, stream);
             accumulated_flops += m_region_decode[i].gflops;
             // Log per-chunk timing summary
@@ -160,7 +160,7 @@ public:
 
         // Drain whatever is still in RAM
         timer.start();
-        flush_candidates(m_cands, m_region_decode, writer,
+        search::flush_candidates(m_cands, m_region_decode, writer,
                          m_write_param_sets_batch, m_width_batch, m_nbins_batch,
                          m_base_cfg.get_nparams());
         ffa_timer_stats_pipeline["io"] += timer.stop();
@@ -177,10 +177,10 @@ public:
 private:
     search::FFASearchConfig m_base_cfg;
     int m_device_id;
-    regions::FFARegionPlanner<HostFoldT> m_region_planner;
-    std::vector<RegionDecode> m_region_decode;
+    algorithms::FFARegionPlanner<HostFoldT> m_region_planner;
+    std::vector<search::RegionDecode> m_region_decode;
     // Fixed-capacity accumulator; drained to disk whenever it fills up.
-    CandidateBuffer m_cands;
+    search::CandidateBuffer m_cands;
 
     memory::FFAWorkspaceCUDA<FoldTypeCUDA> m_ffa_workspace;
     math::CUFFTManager m_fft_manager;
@@ -193,7 +193,7 @@ private:
     std::vector<std::uint16_t> m_nbins_batch;
     cudaStream_t m_stream{nullptr};
 
-    std::unique_ptr<cands::FFAStatsCollection> m_ffa_stats;
+    std::unique_ptr<search::FFAStatsCollection> m_ffa_stats;
     // Persistent input/output buffers
     thrust::device_vector<float> m_ts_e_d;
     thrust::device_vector<float> m_ts_v_d;
@@ -205,7 +205,7 @@ private:
     memory::DeviceCounter m_passing_counter;
 
     // Helper function to create region planner with GPU memory considerations
-    static regions::FFARegionPlanner<HostFoldT>
+    static algorithms::FFARegionPlanner<HostFoldT>
     create_region_planner(const search::FFASearchConfig& base_cfg,
                           int device_id) {
         cuda_utils::CudaSetDeviceGuard device_guard(device_id);
@@ -238,19 +238,19 @@ private:
         cfg_with_gpu_mem.set_max_process_memory_gb(gpu_limit_gb);
 
         // Create region planner with GPU memory limit
-        return regions::FFARegionPlanner<HostFoldT>(cfg_with_gpu_mem,
+        return algorithms::FFARegionPlanner<HostFoldT>(cfg_with_gpu_mem,
                                                     /*use_gpu=*/true);
     }
 
     void execute_ffa_region(const search::FFASearchConfig& cfg,
                             SizeType region_id,
-                            cands::FFAResultWriter& writer,
-                            cands::FFATimerStats& ffa_timer_stats,
+                            search::FFAResultWriter& writer,
+                            search::FFATimerStats& ffa_timer_stats,
                             cudaStream_t stream) {
         timing::SimpleTimer timer;
         // Create FFA with shared workspace
         timer.start();
-        auto the_ffa = FFACudaCore<FoldTypeCUDA>(m_ffa_workspace, m_fft_manager,
+        auto the_ffa = algorithms::FFACudaCore<FoldTypeCUDA>(m_ffa_workspace, m_fft_manager,
                                                  cfg, m_device_id);
         const plans::FFAPlan<HostFoldT>& ffa_plan = the_ffa.get_plan();
         const auto buffer_size_time = ffa_plan.get_buffer_size_time();
@@ -306,7 +306,7 @@ private:
      */
     void copy_candidates_to_host(SizeType n_passing,
                                  SizeType region_id,
-                                 cands::FFAResultWriter& writer,
+                                 search::FFAResultWriter& writer,
                                  cudaStream_t stream) {
         if (n_passing == 0) {
             return;
@@ -329,7 +329,7 @@ private:
         SizeType copied = 0;
         while (copied < n_passing) {
             if (m_cands.is_full()) {
-                flush_candidates(m_cands, m_region_decode, writer,
+                search::flush_candidates(m_cands, m_region_decode, writer,
                                  m_write_param_sets_batch, m_width_batch,
                                  m_nbins_batch, m_base_cfg.get_nparams());
             }
@@ -372,4 +372,4 @@ std::unique_ptr<FFAFreqSweepEngine> make_ffa_freq_sweep_gpu(
 }
 } // namespace detail
 
-} // namespace loki::algorithms
+} // namespace loki::pipelines

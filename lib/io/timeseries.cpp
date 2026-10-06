@@ -13,7 +13,7 @@
 
 #include <psrio/psrio.hpp>
 
-#include "detail/exceptions.hpp"
+#include "detail/error_check.hpp"
 #include "detail/math.hpp"
 #include "detail/utils.hpp"
 #include "loki/common/types.hpp"

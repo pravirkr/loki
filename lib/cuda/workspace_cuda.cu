@@ -9,7 +9,7 @@
 #include "cuda/taylor_ffa_cuda.cuh"
 #include "cuda/cub_helpers.cuh"
 #include "cuda/cuda_utils.cuh"
-#include "detail/exceptions.hpp"
+#include "detail/error_check.hpp"
 
 namespace loki::memory {
 
@@ -288,7 +288,7 @@ CUBScratchArena::CUBScratchArena(SizeType batch_size,
 
     // 1a. DeviceReduce::Sum (uint8 mask → uint32 count via cast iterator)
     auto dummy_cast_it = thrust::make_transform_iterator(
-        static_cast<const uint8_t*>(nullptr), Uint8ToUint32{});
+        static_cast<const uint8_t*>(nullptr), cub_helpers::Uint8ToUint32{});
     SizeType reduce_bytes = 0;
     cuda_utils::check_cuda_call(
         cub::DeviceReduce::Sum(nullptr, reduce_bytes, dummy_cast_it,
@@ -318,7 +318,7 @@ CUBScratchArena::CUBScratchArena(SizeType batch_size,
     // 1d. DeviceReduce::Reduce (masked min/max over float scores)
     auto dummy_minmax_it =
         thrust::make_transform_iterator(thrust::make_counting_iterator<int>(0),
-                                        ScoreToMinMaxFloat{nullptr, nullptr});
+                                        cub_helpers::ScoreToMinMaxFloat{nullptr, nullptr});
     const MinMaxFloat minmax_identity{std::numeric_limits<float>::max(),
                                       std::numeric_limits<float>::lowest()};
     SizeType reduce_bytes_minmax = 0;
@@ -326,7 +326,7 @@ CUBScratchArena::CUBScratchArena(SizeType batch_size,
         cub::DeviceReduce::Reduce(nullptr, reduce_bytes_minmax, dummy_minmax_it,
                                   static_cast<MinMaxFloat*>(nullptr),
                                   static_cast<int>(max_n_leaves),
-                                  MinMaxReduce{}, minmax_identity, stream),
+                                  cub_helpers::MinMaxReduce{}, minmax_identity, stream),
         "cub::DeviceReduce::Reduce sizing failed");
 
     // ---- 2. Allocate a single buffer large enough for all operations -------
@@ -417,13 +417,13 @@ void CUBScratchArena::compute_min_max_scores(
     cudaStream_t stream) {
     auto counting_it  = thrust::make_counting_iterator<int>(0);
     auto transform_it = thrust::make_transform_iterator(
-        counting_it, ScoreToMinMaxFloat{scores.data(), mask.data()});
+        counting_it, cub_helpers::ScoreToMinMaxFloat{scores.data(), mask.data()});
     const MinMaxFloat identity{std::numeric_limits<float>::max(),
                                std::numeric_limits<float>::lowest()};
     cuda_utils::check_cuda_call(
         cub::DeviceReduce::Reduce(
             cub_temp_storage, cub_temp_bytes, transform_it, d_minmax_out,
-            static_cast<int>(n_leaves), MinMaxReduce{}, identity, stream),
+            static_cast<int>(n_leaves), cub_helpers::MinMaxReduce{}, identity, stream),
         "cub::DeviceReduce::Reduce failed");
     cuda_utils::check_cuda_call(cudaMemcpyAsync(h_minmax_out, d_minmax_out,
                                                 sizeof(MinMaxFloat),

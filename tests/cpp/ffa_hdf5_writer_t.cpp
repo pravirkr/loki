@@ -6,8 +6,8 @@
 
 #include "search/cands.hpp"
 
-using loki::cands::FFAResultMetadata;
-using loki::cands::FFAResultWriter;
+using loki::search::FFAResultMetadata;
+using loki::search::FFAResultWriter;
 
 TEST_CASE("FFAResultWriter creates datasets and completes atomically",
           "[ffa][hdf5]") {

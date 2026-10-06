@@ -252,7 +252,7 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
         const auto exec = toml_cfg.use_cuda
                               ? loki::Exec::cuda(toml_cfg.device_id)
                               : loki::Exec::cpu();
-        loki::algorithms::FFAFreqSweep dry(preview_cfg, /*show_progress=*/false,
+        loki::pipelines::FFAFreqSweep dry(preview_cfg, /*show_progress=*/false,
                                            exec);
         SPDLOG_INFO("Dry run complete: planner constructed successfully.");
         return 0;
@@ -318,7 +318,7 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
     if (exec.backend == loki::Backend::kCUDA) {
         SPDLOG_INFO("Using CUDA backend on device {}", toml_cfg.device_id);
     }
-    loki::algorithms::FFAFreqSweep sweep(ffa_cfg, /*show_progress=*/true, exec);
+    loki::pipelines::FFAFreqSweep sweep(ffa_cfg, /*show_progress=*/true, exec);
     sweep.execute(ts.get_ts_e().first(actual_nsamps),
                   ts.get_ts_v().first(actual_nsamps), outdir_path,
                   toml_cfg.prefix, config_toml);

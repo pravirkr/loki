@@ -14,8 +14,8 @@ using Catch::Matchers::ContainsSubstring;
 using loki::ComplexType;
 using loki::ParamLimit;
 using loki::SizeType;
-using loki::regions::FFARegionPlanner;
-using loki::regions::generate_ffa_regions;
+using loki::algorithms::FFARegionPlanner;
+using loki::algorithms::generate_ffa_regions;
 using loki::search::PulsarSearchConfig;
 
 // --- generate_ffa_regions: correctness / foolproof-ness guards ---

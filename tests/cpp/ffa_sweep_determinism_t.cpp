@@ -12,7 +12,7 @@
 
 using loki::ParamLimit;
 using loki::SizeType;
-using loki::algorithms::FFAFreqSweep;
+using loki::pipelines::FFAFreqSweep;
 using loki::search::PulsarSearchConfig;
 
 namespace {

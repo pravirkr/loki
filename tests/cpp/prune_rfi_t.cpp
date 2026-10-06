@@ -24,9 +24,9 @@ using loki::SizeType;
 using loki::algorithms::EPMultiPassTime;
 using loki::algorithms::ParamWindow;
 using loki::algorithms::PruneRFIConfig;
-using loki::cands::HarvestBuffer;
-using loki::cands::PruneResultWriter;
-using loki::cands::PruneStatsCollection;
+using loki::search::HarvestBuffer;
+using loki::search::PruneResultWriter;
+using loki::search::PruneStatsCollection;
 using loki::memory::CircularView;
 using loki::search::PulsarSearchConfig;
 
@@ -91,7 +91,7 @@ TEST_CASE("HarvestBuffer stores optional folds", "[prune_rfi]") {
 }
 
 TEST_CASE("PruneStats RFI summaries", "[prune_rfi]") {
-    loki::cands::PruneStats stats{};
+    loki::search::PruneStats stats{};
     stats.n_leaves_phy  = 0;
     stats.n_leaves_surv = 0;
     REQUIRE(stats.surv_frac() == 0.0);
@@ -103,7 +103,7 @@ TEST_CASE("PruneStats RFI summaries", "[prune_rfi]") {
     REQUIRE(stats.get_summary().find("masked: 2") != std::string::npos);
     REQUIRE(stats.get_summary().find("harvested: 1") != std::string::npos);
 
-    loki::cands::PruneStatsCollection coll;
+    loki::search::PruneStatsCollection coll;
     coll.update_stats(stats);
     const auto summary = coll.get_stats_summary();
     REQUIRE(summary.find("masked: 2") != std::string::npos);

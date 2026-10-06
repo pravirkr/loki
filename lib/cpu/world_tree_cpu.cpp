@@ -9,7 +9,7 @@
 
 #include <spdlog/spdlog.h>
 
-#include "detail/exceptions.hpp"
+#include "detail/error_check.hpp"
 #include "loki/common/types.hpp"
 
 namespace loki::memory {

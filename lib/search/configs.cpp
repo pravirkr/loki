@@ -18,7 +18,7 @@
 #include <spdlog/spdlog.h>
 #include <toml++/toml.hpp>
 
-#include "detail/exceptions.hpp"
+#include "detail/error_check.hpp"
 #include "detail/psr_utils.hpp"
 #include "detail/utils.hpp"
 #include "loki/common/types.hpp"

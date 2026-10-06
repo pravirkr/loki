@@ -4,7 +4,7 @@
 #include <numbers>
 #include <utility>
 
-#include "detail/exceptions.hpp"
+#include "detail/error_check.hpp"
 #include "detail/utils.hpp"
 
 namespace loki::simulation {

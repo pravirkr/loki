@@ -218,7 +218,7 @@ private:
     bool m_prune_complete{false};
     SizeType m_prune_level{};
     psr_utils::MiddleOutScheme m_snail_scheme;
-    cands::PruneStatsCollection m_pstats;
+    search::PruneStatsCollection m_pstats;
     std::unique_ptr<core::PruneDPFunctsCUDA<FoldTypeCUDA>> m_prune_funcs;
 
     [[nodiscard]] memory::EPWorkspaceCUDA<FoldTypeCUDA>&
@@ -260,8 +260,8 @@ private:
             cuda_utils::as_span(ws.seed_scores_d), n_leaves, stream);
 
         // Initialize the prune stats
-        m_pstats = cands::PruneStatsCollection();
-        const cands::PruneStats pstats_cur{
+        m_pstats = search::PruneStatsCollection();
+        const search::PruneStats pstats_cur{
             .level         = m_prune_level,
             .seg_idx       = m_snail_scheme.get_segment_idx(m_prune_level),
             .threshold     = 0,
@@ -445,8 +445,8 @@ private:
 
         const auto total_pruning_gflops = compute_total_prune_gflops();
         // Write results
-        auto result_writer = cands::PruneResultWriter(
-            actual_result_file, cands::PruneResultWriter::Mode::kAppend);
+        auto result_writer = search::PruneResultWriter(
+            actual_result_file, search::PruneResultWriter::Mode::kAppend);
         result_writer.write_run_results(
             run_name, m_snail_scheme.get_data(), leaves_report_view,
             scores_report_view, scores_ep_report_view, total_pruning_gflops,
@@ -565,7 +565,7 @@ private:
         // for new suggestions.
         world_tree.prepare_in_place_update();
 
-        cands::PruneIterationStats stats;
+        search::PruneIterationStats stats;
         const auto seg_idx_cur = m_snail_scheme.get_segment_idx(m_prune_level);
         const auto threshold   = m_threshold_scheme[m_prune_level - 1];
         // Capture the number of branches *before* finalizing the update
@@ -579,7 +579,7 @@ private:
 
         // Update statistics
         stats.norm_scores(world_tree.get_size());
-        const cands::PruneStats pstats_cur{
+        const search::PruneStats pstats_cur{
             .level         = m_prune_level,
             .seg_idx       = seg_idx_cur,
             .threshold     = threshold,
@@ -604,7 +604,7 @@ private:
     void execute_iteration_batched(cuda::std::span<const FoldTypeCUDA> ffa_fold,
                                    SizeType seg_idx_cur,
                                    float threshold,
-                                   cands::PruneIterationStats& stats,
+                                   search::PruneIterationStats& stats,
                                    cudaStream_t stream) {
 
         auto& ws            = get_workspace();
@@ -903,8 +903,8 @@ public:
         log.close();
 
         // Write metadata to result file
-        auto writer = cands::PruneResultWriter(
-            result_file, cands::PruneResultWriter::Mode::kWrite);
+        auto writer = search::PruneResultWriter(
+            result_file, search::PruneResultWriter::Mode::kWrite);
         writer.write_metadata(m_cfg.get_param_names(), nsegments, m_max_sugg,
                               m_threshold_scheme);
         auto& ws   = get_workspace();
@@ -918,8 +918,8 @@ public:
         }
         const auto ep_time = timer.stop();
         // Write final runtime to result file
-        auto writer_final = cands::PruneResultWriter(
-            result_file, cands::PruneResultWriter::Mode::kAppend);
+        auto writer_final = search::PruneResultWriter(
+            result_file, search::PruneResultWriter::Mode::kAppend);
         writer_final.write_runtime(ep_time);
         spdlog::info("Pruning complete. Results saved to {}",
                      result_file.string());

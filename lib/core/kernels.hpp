@@ -3,7 +3,7 @@
 #include "loki/common/coord.hpp"
 #include "loki/common/types.hpp"
 
-namespace loki::kernels {
+namespace loki::core {
 
 using PhaseRun = coord::PhaseRun;
 
@@ -301,4 +301,4 @@ void shift_add_ascend_linear_complex_batch(
     SizeType n_leaves,
     SizeType n_segments) noexcept;
 
-} // namespace loki::kernels
+} // namespace loki::core

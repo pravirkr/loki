@@ -9,7 +9,7 @@
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
 
-namespace loki::algorithms {
+namespace loki::pipelines {
 
 /**
  * @brief FFA search over a frequency range, split into regions that share one
@@ -41,4 +41,4 @@ private:
     std::unique_ptr<Impl> m_impl;
 };
 
-} // namespace loki::algorithms
+} // namespace loki::pipelines

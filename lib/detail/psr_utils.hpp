@@ -12,7 +12,7 @@
 #include <utility>
 #include <vector>
 
-#include "detail/exceptions.hpp"
+#include "detail/error_check.hpp"
 #include "detail/utils.hpp"
 #include "loki/common/types.hpp"
 

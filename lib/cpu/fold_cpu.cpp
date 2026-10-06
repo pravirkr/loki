@@ -8,7 +8,7 @@
 #include "algorithms/fold_engine.hpp"
 #include "common/dispatch.hpp"
 #include "core/kernels.hpp"
-#include "detail/exceptions.hpp"
+#include "detail/error_check.hpp"
 #include "detail/psr_utils.hpp"
 #include "loki/common/types.hpp"
 
@@ -79,13 +79,13 @@ public:
             std::ranges::fill(fold, 0.0F);
         }
         if constexpr (std::is_same_v<FoldType, float>) {
-            kernels::brute_fold_ts(ts_e.data(), ts_v.data(), fold.data(),
+            core::brute_fold_ts(ts_e.data(), ts_v.data(), fold.data(),
                                    m_runs.data(), m_run_offsets.data(),
                                    m_nsegments, m_nfreqs, m_segment_len,
                                    m_nbins, m_nthreads);
 
         } else {
-            kernels::brute_fold_ts_complex(
+            core::brute_fold_ts_complex(
                 ts_e.data(), ts_v.data(), fold.data(), m_freq_arr.data(),
                 m_nfreqs, m_nsegments, m_segment_len, m_nbins, m_tsamp, m_t_ref,
                 m_nthreads);
@@ -136,7 +136,7 @@ public:
                                          ncoords[nlevels] * 2 * m_nbins,
                                      "BruteFoldCpuEngine::execute_fused_freq: "
                                      "fold_out has wrong size");
-            kernels::brute_fold_ffa_fused_freq(
+            core::brute_fold_ffa_fused_freq(
                 ts_e.data(), ts_v.data(), fold_out.data(), m_runs.data(),
                 m_run_offsets.data(), coords_levels.data(), ncoords.data(),
                 m_nsegments, m_nfreqs, m_segment_len, m_nbins, nlevels,

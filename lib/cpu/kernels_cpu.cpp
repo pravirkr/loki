@@ -19,7 +19,7 @@
 #include "loki/common/coord.hpp"
 #include "loki/common/types.hpp"
 
-namespace loki::kernels {
+namespace loki::core {
 
 namespace {
 
@@ -2157,4 +2157,4 @@ void ffa_cone_band_freq(const float* level_in,
     }
 }
 
-} // namespace loki::kernels
+} // namespace loki::core

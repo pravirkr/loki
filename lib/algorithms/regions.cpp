@@ -8,14 +8,14 @@
 
 #include <spdlog/spdlog.h>
 
-#include "detail/exceptions.hpp"
+#include "detail/error_check.hpp"
 #include "detail/index_limits.hpp"
 #include "detail/utils.hpp"
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
 
-namespace loki::regions {
+namespace loki::algorithms {
 
 namespace {
 
@@ -533,11 +533,11 @@ private:
                 plans::FFAPlan<FoldType> plan(cfg);
                 const SizeType seg0    = plan.get_segment_lens().front();
                 const SizeType nfreqs0 = plan.get_param_counts().front().back();
-                const cuda_index_limits::ChunkIndexUsage usage{
+                const index_limits::ChunkIndexUsage usage{
                     e.buffer_size,   e.ncoords,
                     cfg.get_nbins(), cfg.get_n_scoring_widths(),
                     nfreqs0,         seg0};
-                if (cuda_index_limits::chunk_exceeds_cuda_index_limits(usage)) {
+                if (index_limits::chunk_exceeds_cuda_index_limits(usage)) {
                     return false;
                 }
             }
@@ -776,4 +776,4 @@ const FFARegionStats& FFARegionPlanner<FoldType>::get_stats() const noexcept {
 template class FFARegionPlanner<float>;
 template class FFARegionPlanner<ComplexType>;
 
-} // namespace loki::regions
+} // namespace loki::algorithms

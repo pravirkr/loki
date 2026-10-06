@@ -16,11 +16,11 @@
 
 using loki::ParamLimit;
 using loki::SizeType;
-using loki::algorithms::CandidateBuffer;
-using loki::algorithms::FFAFreqSweep;
-using loki::algorithms::flush_candidates;
-using loki::algorithms::RegionDecode;
-using loki::cands::FFAResultMetadata;
+using loki::search::CandidateBuffer;
+using loki::pipelines::FFAFreqSweep;
+using loki::search::flush_candidates;
+using loki::search::RegionDecode;
+using loki::search::FFAResultMetadata;
 using loki::search::PulsarSearchConfig;
 
 namespace {
@@ -78,8 +78,8 @@ WrittenResults run_sweep(SizeType capacity,
                          std::span<const RegionDecode> table,
                          const std::filesystem::path& path) {
     CandidateBuffer buf(capacity);
-    auto writer = loki::cands::FFAResultWriter(
-        path, loki::cands::FFAResultWriter::Mode::kWrite);
+    auto writer = loki::search::FFAResultWriter(
+        path, loki::search::FFAResultWriter::Mode::kWrite);
     FFAResultMetadata meta;
     meta.param_names = {"freq"};
     meta.nbins_min   = table[0].nbins;
@@ -117,8 +117,8 @@ WrittenResults run_sweep_bulk(SizeType capacity,
                               std::span<const RegionDecode> table,
                               const std::filesystem::path& path) {
     CandidateBuffer buf(capacity);
-    auto writer = loki::cands::FFAResultWriter(
-        path, loki::cands::FFAResultWriter::Mode::kWrite);
+    auto writer = loki::search::FFAResultWriter(
+        path, loki::search::FFAResultWriter::Mode::kWrite);
     FFAResultMetadata meta;
     meta.param_names = {"freq"};
     meta.nbins_min   = table[0].nbins;

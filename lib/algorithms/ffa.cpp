@@ -11,7 +11,7 @@
 
 #include "algorithms/ffa_engine.hpp"
 #include "common/dispatch.hpp"
-#include "detail/exceptions.hpp"
+#include "detail/error_check.hpp"
 #include "detail/timing.hpp"
 #include "detection/score_engine.hpp"
 #include "loki/common/backend.hpp"

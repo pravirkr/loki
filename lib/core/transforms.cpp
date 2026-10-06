@@ -5,11 +5,11 @@
 #include <numbers>
 
 #include "loki/common/types.hpp"
-#include "detail/exceptions.hpp"
+#include "detail/error_check.hpp"
 #include "detail/math.hpp"
 #include "detail/utils.hpp"
 
-namespace loki::transforms {
+namespace loki::core {
 
 std::vector<std::vector<double>> precompute_shift_matrix(SizeType nparams,
                                                          double delta_t) {
@@ -331,4 +331,4 @@ void taylor_to_chebyshev_limits_full(std::span<const double> taylor_limits,
     throw std::invalid_argument("n_params > 5 not supported");
 }
 
-} // namespace loki::transforms
+} // namespace loki::core

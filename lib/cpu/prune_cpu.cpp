@@ -19,7 +19,7 @@
 #include "algorithms/prune_engine.hpp"
 #include "common/dispatch.hpp"
 #include "core/dynamic.hpp"
-#include "detail/exceptions.hpp"
+#include "detail/error_check.hpp"
 #include "detail/progress.hpp"
 #include "detail/psr_utils.hpp"
 #include "detail/timing.hpp"
@@ -50,7 +50,7 @@ public:
               SizeType branch_max,
               std::string_view poly_basis,
               const PruneRFIConfig& rfi_config,
-              const GridMask& mask_base)
+              const search::GridMask& mask_base)
         : m_workspace_ptr(&workspace),
           m_cfg(std::move(cfg)),
           m_ffa_plan(m_cfg),
@@ -199,16 +199,16 @@ private:
     bool m_prune_complete{false};
     SizeType m_prune_level{};
     psr_utils::MiddleOutScheme m_snail_scheme;
-    cands::PruneStatsCollection m_pstats;
+    search::PruneStatsCollection m_pstats;
     std::unique_ptr<core::PruneDPFuncts<FoldType>> m_prune_funcs;
 
     // RFI control (see PruneRFIConfig). The base mask is shared (read-only)
     // across runs; m_mask is the per-run overlay that also accumulates the
     // windows of harvested candidates.
     const PruneRFIConfig* m_rfi;
-    const GridMask* m_mask_base;
-    GridMask m_mask;
-    cands::HarvestBuffer<FoldType> m_harvest;
+    const search::GridMask* m_mask_base;
+    search::GridMask m_mask;
+    search::HarvestBuffer<FoldType> m_harvest;
     SizeType m_n_harvested_total{}; ///< Includes harvests beyond the cap
     std::vector<double> m_leaf_scratch;
 
@@ -255,7 +255,7 @@ private:
 
         // Per-run RFI state: start from the shared static mask
         m_mask.assign(*m_mask_base);
-        m_harvest = cands::HarvestBuffer<FoldType>(
+        m_harvest = search::HarvestBuffer<FoldType>(
             world_tree.get_leaves_stride(), world_tree.get_folds_stride(),
             m_rfi->harvest_store_folds);
         m_n_harvested_total = 0;
@@ -286,8 +286,8 @@ private:
         }
 
         // Initialize the prune stats
-        m_pstats = cands::PruneStatsCollection();
-        const cands::PruneStats pstats_cur{
+        m_pstats = search::PruneStatsCollection();
+        const search::PruneStats pstats_cur{
             .level           = m_prune_level,
             .seg_idx         = m_snail_scheme.get_segment_idx(m_prune_level),
             .threshold       = 0,
@@ -408,8 +408,8 @@ private:
         }
         const auto total_pruning_gflops = compute_total_prune_gflops();
         // Write results
-        auto result_writer = cands::PruneResultWriter(
-            actual_result_file, cands::PruneResultWriter::Mode::kAppend);
+        auto result_writer = search::PruneResultWriter(
+            actual_result_file, search::PruneResultWriter::Mode::kAppend);
         result_writer.write_run_results(
             run_name, m_snail_scheme.get_data(), leaves_view, scores_view,
             scores_ep_view, total_pruning_gflops, n_leaves, m_cfg.get_nparams(),
@@ -546,7 +546,7 @@ private:
         // for new suggestions.
         world_tree.prepare_in_place_update();
 
-        cands::PruneIterationStats stats;
+        search::PruneIterationStats stats;
         const auto seg_idx_cur = m_snail_scheme.get_segment_idx(m_prune_level);
         const auto threshold   = m_threshold_scheme[m_prune_level - 1];
         // Capture the number of branches *before* finalizing the update
@@ -559,7 +559,7 @@ private:
 
         // Update statistics
         stats.norm_scores(world_tree.get_size());
-        const cands::PruneStats pstats_cur{
+        const search::PruneStats pstats_cur{
             .level             = m_prune_level,
             .seg_idx           = seg_idx_cur,
             .threshold         = threshold,
@@ -601,7 +601,7 @@ private:
     void execute_iteration_batched(std::span<const FoldType> ffa_fold,
                                    SizeType seg_idx_cur,
                                    float threshold,
-                                   cands::PruneIterationStats& stats) {
+                                   search::PruneIterationStats& stats) {
         auto& ws         = get_workspace();
         auto& world_tree = ws.world_tree;
         auto& prune_ws   = ws.prune;
@@ -819,7 +819,7 @@ private:
                                   bool veto_active,
                                   float harvest_threshold,
                                   SizeType n_passing,
-                                  cands::PruneIterationStats& stats) {
+                                  search::PruneIterationStats& stats) {
         auto& indices         = prune_ws.branched_indices;
         const auto& scores    = prune_ws.branched_scores;
         const auto& parents   = prune_ws.branched_parent_scores;
@@ -1177,8 +1177,8 @@ public:
         log.close();
 
         // Write metadata to result file
-        auto writer = cands::PruneResultWriter(
-            result_file, cands::PruneResultWriter::Mode::kWrite);
+        auto writer = search::PruneResultWriter(
+            result_file, search::PruneResultWriter::Mode::kWrite);
         writer.write_metadata(m_cfg.get_param_names(), nsegments, m_max_sugg,
                               m_threshold_scheme, m_rfi_config);
         // Execute based on thread count
@@ -1188,12 +1188,12 @@ public:
         } else {
             execute_multi_threaded(ffa_fold, ref_segs_to_process, outdir,
                                    log_file);
-            cands::merge_prune_result_files(outdir, log_file, result_file);
+            search::merge_prune_result_files(outdir, log_file, result_file);
         }
         const auto ep_time = timer.stop();
         // Write final runtime to result file
-        auto writer_final = cands::PruneResultWriter(
-            result_file, cands::PruneResultWriter::Mode::kAppend);
+        auto writer_final = search::PruneResultWriter(
+            result_file, search::PruneResultWriter::Mode::kAppend);
         writer_final.write_runtime(ep_time);
         spdlog::info("Pruning complete. Results saved to {}",
                      result_file.string());
@@ -1230,7 +1230,7 @@ private:
     std::vector<double> m_branching_pattern;
     SizeType m_branch_max{0};
     // Static pulsar mask on the FFA base grid, shared read-only by all runs
-    GridMask m_mask_base;
+    search::GridMask m_mask_base;
 
     // Safely get the workspace for a specific thread index
     [[nodiscard]] memory::EPWorkspaceCPU<FoldType>&
@@ -1248,7 +1248,7 @@ private:
             "EPMultiPass: pruning requires at least 2 parameters");
         const auto& counts = m_ffa_plan.get_param_counts().back();
         const auto limits  = m_cfg.get_param_limits();
-        m_mask_base = GridMask(limits[n_params - 2], counts[n_params - 2],
+        m_mask_base = search::GridMask(limits[n_params - 2], counts[n_params - 2],
                                limits[n_params - 1], counts[n_params - 1]);
         m_mask_base.add_windows(m_rfi_config.pulsar_mask,
                                 m_rfi_config.n_harmonics);

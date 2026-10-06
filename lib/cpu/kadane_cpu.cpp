@@ -9,7 +9,7 @@
 #include <xsimd/xsimd.hpp>
 
 #include "loki/common/types.hpp"
-#include "detail/exceptions.hpp"
+#include "detail/error_check.hpp"
 #include "cpu/simd_utils.hpp"
 
 namespace loki::detection {

@@ -19,7 +19,7 @@
 #include "loki/search/configs.hpp"
 #include "utils/world_tree.hpp"
 
-namespace loki::cands {
+namespace loki::search {
 
 struct FFATimerStatsPacked {
     float brutefold{};
@@ -427,4 +427,4 @@ private:
     std::vector<TimerMap> m_thread_timers;
 };
 
-} // namespace loki::cands
+} // namespace loki::search

@@ -10,7 +10,7 @@
 
 #include "algorithms/ffa_engine.hpp"
 #include "common/dispatch.hpp"
-#include "detail/exceptions.hpp"
+#include "detail/error_check.hpp"
 #include "detail/timing.hpp"
 #include "detection/score_engine.hpp"
 #include "loki/algorithms/ffa.hpp"
@@ -25,7 +25,7 @@
 #include "utils/fft_impl.hpp"
 #include "utils/workspace_impl.hpp"
 
-namespace loki::algorithms {
+namespace loki::pipelines {
 
 namespace {
 template <SupportedFoldType FoldType>
@@ -56,8 +56,8 @@ public:
         }
         m_write_param_sets_batch.resize(
             planner_stats.get_write_param_sets_size());
-        m_width_batch.resize(regions::kFFAFreqSweepWriteBatchSize);
-        m_nbins_batch.resize(regions::kFFAFreqSweepWriteBatchSize);
+        m_width_batch.resize(algorithms::kFFAFreqSweepWriteBatchSize);
+        m_nbins_batch.resize(algorithms::kFFAFreqSweepWriteBatchSize);
         // Frequency-only time-domain chunks score inside the top cone band,
         // so the final fold and the dense score array are not allocated.
         const bool score_in_band =
@@ -99,7 +99,7 @@ public:
                  std::string_view config_toml = {}) override {
         timing::SimpleTimer timer;
         // Reset accumulated state so repeated execute() calls are independent
-        m_ffa_stats = cands::FFAStatsCollection();
+        m_ffa_stats = search::FFAStatsCollection();
         m_cands.clear();
         m_total_passing_scores = 0;
 
@@ -107,12 +107,12 @@ public:
         const std::string filebase = std::format("{}_ffa", file_prefix);
         const auto result_file =
             outdir / std::format("{}_results.h5", filebase);
-        auto writer = cands::FFAResultWriter(
-            result_file, cands::FFAResultWriter::Mode::kWrite);
+        auto writer = search::FFAResultWriter(
+            result_file, search::FFAResultWriter::Mode::kWrite);
         writer.write_metadata(
-            cands::FFAResultMetadata(m_base_cfg, config_toml));
+            search::FFAResultMetadata(m_base_cfg, config_toml));
 
-        cands::FFATimerStats ffa_timer_stats_pipeline;
+        search::FFATimerStats ffa_timer_stats_pipeline;
         double accumulated_flops     = 0.0;
         const auto& ffa_regions_cfgs = m_region_planner.get_cfgs();
         for (SizeType i = 0; i < ffa_regions_cfgs.size(); ++i) {
@@ -120,7 +120,7 @@ public:
             const auto& freq_limits = cfg_cur.get_param_limits().back();
             spdlog::info("Processing chunk f0 (Hz): [{:08.3f}, {:08.3f}]",
                          freq_limits.min, freq_limits.max);
-            cands::FFATimerStats ffa_timer_stats;
+            search::FFATimerStats ffa_timer_stats;
             execute_ffa_region(ts_e, ts_v, cfg_cur, i, writer, ffa_timer_stats);
             accumulated_flops += m_region_decode[i].gflops;
             // Log per-chunk timing summary
@@ -132,7 +132,7 @@ public:
 
         // Drain whatever is still in RAM
         timer.start();
-        flush_candidates(m_cands, m_region_decode, writer,
+        search::flush_candidates(m_cands, m_region_decode, writer,
                          m_write_param_sets_batch, m_width_batch, m_nbins_batch,
                          m_base_cfg.get_nparams());
         ffa_timer_stats_pipeline["io"] += timer.stop();
@@ -148,10 +148,10 @@ public:
 
 private:
     search::FFASearchConfig m_base_cfg;
-    regions::FFARegionPlanner<FoldType> m_region_planner;
-    std::vector<RegionDecode> m_region_decode;
+    algorithms::FFARegionPlanner<FoldType> m_region_planner;
+    std::vector<search::RegionDecode> m_region_decode;
     // Fixed-capacity accumulator; drained to disk whenever it fills up.
-    CandidateBuffer m_cands;
+    search::CandidateBuffer m_cands;
     bool m_show_progress;
 
     memory::FFAWorkspaceCPU<FoldType> m_ffa_workspace;
@@ -163,7 +163,7 @@ private:
     std::vector<std::uint16_t> m_width_batch;
     std::vector<std::uint16_t> m_nbins_batch;
 
-    cands::FFAStatsCollection m_ffa_stats;
+    search::FFAStatsCollection m_ffa_stats;
     // Persistent input/output buffers
     std::vector<float> m_fold_time;
 
@@ -186,14 +186,14 @@ private:
                             std::span<const float> ts_v,
                             const search::FFASearchConfig& cfg,
                             SizeType region_id,
-                            cands::FFAResultWriter& writer,
-                            cands::FFATimerStats& ffa_timer_stats) {
+                            search::FFAResultWriter& writer,
+                            search::FFATimerStats& ffa_timer_stats) {
         timing::SimpleTimer timer;
         // Create FFA with shared workspace
         timer.start();
         // Internal pipeline: build the CPU engine directly on the shared
         // workspace and plan cache (no facade, no dispatch).
-        const auto ffa_engine = detail::make_ffa_cpu<FoldType>(
+        const auto ffa_engine = algorithms::detail::make_ffa_cpu<FoldType>(
             m_ffa_workspace, m_fft_manager, cfg, m_show_progress);
         auto& the_ffa                            = *ffa_engine;
         const plans::FFAPlan<FoldType>& ffa_plan = the_ffa.get_plan();
@@ -231,7 +231,7 @@ private:
                     if (m_cands.is_full()) {
                         ffa_timer_stats["score"] += timer.stop();
                         timer.start();
-                        flush_candidates(m_cands, m_region_decode, writer,
+                        search::flush_candidates(m_cands, m_region_decode, writer,
                                          m_write_param_sets_batch,
                                          m_width_batch, m_nbins_batch,
                                          m_base_cfg.get_nparams());
@@ -278,7 +278,7 @@ private:
         // candidates have already survived.
         const auto scores_span = std::span(m_scores_chunk).first(n_scores);
         // One score per (coordinate, boxcar width). The index is
-        // coord * n_widths + width, which flush_candidates decodes.
+        // coord * n_widths + width, which search::flush_candidates decodes.
         detection::detail::snr_boxcar_3d_cpu(
             std::span(m_fold_time).first(fold_size_time), dec.widths,
             scores_span, dec.ncoords, dec.nbins, cfg.get_nthreads());
@@ -291,7 +291,7 @@ private:
             if (m_cands.is_full()) {
                 ffa_timer_stats["score"] += timer.stop();
                 timer.start();
-                flush_candidates(m_cands, m_region_decode, writer,
+                search::flush_candidates(m_cands, m_region_decode, writer,
                                  m_write_param_sets_batch, m_width_batch,
                                  m_nbins_batch, m_base_cfg.get_nparams());
                 ffa_timer_stats["io"] += timer.stop();
@@ -322,4 +322,4 @@ make_ffa_freq_sweep_cpu(const search::FFASearchConfig& cfg,
 }
 } // namespace detail
 
-} // namespace loki::algorithms
+} // namespace loki::pipelines

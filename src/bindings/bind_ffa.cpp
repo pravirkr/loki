@@ -17,14 +17,14 @@
 #include "pybind_utils.hpp"
 
 namespace loki {
-using algorithms::EPFreqSweep;
-using algorithms::FFAFreqSweep;
+using pipelines::EPFreqSweep;
+using pipelines::FFAFreqSweep;
 using detection::MatchedFilter;
 using plans::FFAPlanBase;
-using regions::EPChunkConfig;
-using regions::EPChunkStats;
-using regions::EPRegionStats;
-using regions::FFARegionStats;
+using algorithms::EPChunkConfig;
+using algorithms::EPChunkStats;
+using algorithms::EPRegionStats;
+using algorithms::FFARegionStats;
 using search::FFASearchConfig;
 using search::PulsarSearchConfig;
 

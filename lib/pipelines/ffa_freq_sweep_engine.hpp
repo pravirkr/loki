@@ -12,7 +12,7 @@
 
 #include "loki/search/configs.hpp"
 
-namespace loki::algorithms::detail {
+namespace loki::pipelines::detail {
 
 // make_*_cpu is defined in lib/cpu/, make_*_gpu in lib/cuda/ (GPU builds only).
 
@@ -33,4 +33,4 @@ make_ffa_freq_sweep_cpu(const search::FFASearchConfig& cfg, bool show_progress);
 std::unique_ptr<FFAFreqSweepEngine> make_ffa_freq_sweep_gpu(
     const search::FFASearchConfig& cfg, int device_id, bool show_progress);
 
-} // namespace loki::algorithms::detail
+} // namespace loki::pipelines::detail

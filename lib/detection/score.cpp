@@ -9,7 +9,7 @@
 #include <stdexcept>
 
 #include "common/dispatch.hpp"
-#include "detail/exceptions.hpp"
+#include "detail/error_check.hpp"
 #include "detail/utils.hpp"
 #include "detection/boxcar_kernels.hpp"
 #include "detection/score_engine.hpp"

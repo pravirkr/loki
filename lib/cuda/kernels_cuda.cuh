@@ -12,7 +12,7 @@
 #include "cuda/coord_cuda.cuh"
 #include "cuda/types_cuda.cuh"
 
-namespace loki::kernels {
+namespace loki::core {
 
 void brute_fold_ts_cuda(const float* __restrict__ ts_e,
                         const float* __restrict__ ts_v,
@@ -127,4 +127,4 @@ void shift_add_ascend_linear_complex_batch_cuda(
     SizeType n_segments,
     cudaStream_t stream);
 
-} // namespace loki::kernels
+} // namespace loki::core

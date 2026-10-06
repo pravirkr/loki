@@ -5,13 +5,21 @@
 // Check if we are on a modern CUB version (CCCL 2.8+)
 #if CUB_VERSION >= 200800
 #include <cuda/functional>
+#else
+#include <thrust/functional.h>
+#endif // CUB_VERSION >= 200800
+
+#include "loki/common/types.hpp"
+
+namespace loki::cub_helpers {
+
+#if CUB_VERSION >= 200800
 template <typename T> using CubMaxOp    = ::cuda::maximum<T>;
 template <typename T> using CubMinOp    = ::cuda::minimum<T>;
 template <typename T> using ThrustMaxOp = ::cuda::maximum<T>;
 template <typename T> using ThrustMinOp = ::cuda::minimum<T>;
 #else
 // Fall back to CUB operators for older CCCL
-#include <thrust/functional.h>
 template <typename T> using CubMaxOp    = cub::Max;
 template <typename T> using CubMinOp    = cub::Min;
 template <typename T> using ThrustMaxOp = thrust::maximum<T>;
@@ -20,9 +28,6 @@ template <typename T> using ThrustMinOp = thrust::minimum<T>;
 
 inline constexpr double kPI = 3.14159265358979323846; // NOLINT
 
-#include "loki/common/types.hpp"
-
-namespace loki {
 // ---------------------------------------------------------------------------
 // Functor: uint8_t → uint32_t
 //
@@ -54,4 +59,4 @@ struct ScoreToMinMaxFloat {
                                      std::numeric_limits<float>::lowest()};
     }
 };
-} // namespace loki
+} // namespace loki::cub_helpers

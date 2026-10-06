@@ -15,7 +15,7 @@
 #include "cuda/cuda_utils.cuh"
 #include "cuda/kernel_utils.cuh"
 #include "cuda/kernels_cuda.cuh"
-#include "detail/exceptions.hpp"
+#include "detail/error_check.hpp"
 #include "loki/common/types.hpp"
 
 namespace loki::algorithms {
@@ -215,12 +215,12 @@ private:
                             fold.size() * sizeof(DeviceFoldType), stream),
             "cudaMemsetAsync fold failed");
         if constexpr (std::is_same_v<FoldType, float>) {
-            kernels::brute_fold_ts_cuda(
+            core::brute_fold_ts_cuda(
                 ts_e.data(), ts_v.data(), fold.data(),
                 thrust::raw_pointer_cast(m_phase_map_d.data()), m_nsegments,
                 m_nfreqs, m_segment_len, m_nbins, stream);
         } else {
-            kernels::brute_fold_ts_complex_cuda(
+            core::brute_fold_ts_complex_cuda(
                 ts_e.data(), ts_v.data(), fold.data(),
                 thrust::raw_pointer_cast(m_freq_arr_d.data()), m_nfreqs,
                 m_nsegments, m_segment_len, m_nbins_f, m_tsamp, m_t_ref,

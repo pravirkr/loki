@@ -11,7 +11,7 @@
 #include "cuda/circular_cuda.cuh"
 #include "cuda/taylor_cuda.cuh"
 #include "cuda/cuda_utils.cuh"
-#include "detail/exceptions.hpp"
+#include "detail/error_check.hpp"
 #include "cuda/kernels_cuda.cuh"
 #include "cuda/fft_cuda.cuh"
 #include "cuda/score_cuda.cuh"
@@ -172,13 +172,13 @@ void BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::shift_add(
     SizeType capacity,
     cudaStream_t stream) const noexcept {
     if constexpr (std::is_same_v<FoldTypeCUDA, float>) {
-        kernels::shift_add_linear_batch_cuda(
+        core::shift_add_linear_batch_cuda(
             folds_tree.data(), indices_tree.data(), validation_mask.data(),
             folds_ffa.data(), indices_ffa.data(), phase_shift.data(),
             folds_out.data(), m_cfg.get_nbins(), n_leaves, physical_start_idx,
             capacity, stream);
     } else {
-        kernels::shift_add_linear_complex_batch_cuda(
+        core::shift_add_linear_complex_batch_cuda(
             folds_tree.data(), indices_tree.data(), validation_mask.data(),
             folds_ffa.data(), indices_ffa.data(), phase_shift.data(),
             folds_out.data(), m_cfg.get_nbins_f(), m_cfg.get_nbins(), n_leaves,
@@ -427,7 +427,7 @@ void PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>::ascend(
     if constexpr (std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>) {
         error_check::check_equal(folds_tree.size(), n_leaves * 2 * nbins_f,
                                  "fold_segment size mismatch");
-        kernels::shift_add_ascend_linear_complex_batch_cuda(
+        core::shift_add_ascend_linear_complex_batch_cuda(
             folds_ffa.data(), idx_segments.data(), scratch_param_indices.data(),
             scratch_phase_shift.data(), folds_tree.data(), nbins_f, nbins,
             n_coords_init, n_leaves, n_segments, stream);
@@ -444,7 +444,7 @@ void PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>::ascend(
     } else {
         error_check::check_equal(folds_tree.size(), n_leaves * 2 * nbins,
                                  "fold_segment size mismatch");
-        kernels::shift_add_ascend_linear_batch_cuda(
+        core::shift_add_ascend_linear_batch_cuda(
             folds_ffa.data(), idx_segments.data(), scratch_param_indices.data(),
             scratch_phase_shift.data(), folds_tree.data(), nbins, n_coords_init,
             n_leaves, n_segments, stream);
@@ -583,7 +583,7 @@ void PrunePolyChebyshevDPFunctsCUDA<FoldTypeCUDA>::ascend(
     if constexpr (std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>) {
         error_check::check_equal(folds_tree.size(), n_leaves * 2 * nbins_f,
                                  "fold_segment size mismatch");
-        kernels::shift_add_ascend_linear_complex_batch_cuda(
+        core::shift_add_ascend_linear_complex_batch_cuda(
             folds_ffa.data(), idx_segments.data(), scratch_param_indices.data(),
             scratch_phase_shift.data(), folds_tree.data(), nbins_f, nbins,
             n_coords_init, n_leaves, n_segments, stream);
@@ -600,7 +600,7 @@ void PrunePolyChebyshevDPFunctsCUDA<FoldTypeCUDA>::ascend(
     } else {
         error_check::check_equal(folds_tree.size(), n_leaves * 2 * nbins,
                                  "fold_segment size mismatch");
-        kernels::shift_add_ascend_linear_batch_cuda(
+        core::shift_add_ascend_linear_batch_cuda(
             folds_ffa.data(), idx_segments.data(), scratch_param_indices.data(),
             scratch_phase_shift.data(), folds_tree.data(), nbins, n_coords_init,
             n_leaves, n_segments, stream);
@@ -755,7 +755,7 @@ void PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>::ascend(
     if constexpr (std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>) {
         error_check::check_equal(folds_tree.size(), n_leaves * 2 * nbins_f,
                                  "fold_segment size mismatch");
-        kernels::shift_add_ascend_linear_complex_batch_cuda(
+        core::shift_add_ascend_linear_complex_batch_cuda(
             folds_ffa.data(), idx_segments.data(), scratch_param_indices.data(),
             scratch_phase_shift.data(), folds_tree.data(), nbins_f, nbins,
             n_coords_init, n_leaves, n_segments, stream);
@@ -772,7 +772,7 @@ void PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>::ascend(
     } else {
         error_check::check_equal(folds_tree.size(), n_leaves * 2 * nbins,
                                  "fold_segment size mismatch");
-        kernels::shift_add_ascend_linear_batch_cuda(
+        core::shift_add_ascend_linear_batch_cuda(
             folds_ffa.data(), idx_segments.data(), scratch_param_indices.data(),
             scratch_phase_shift.data(), folds_tree.data(), nbins, n_coords_init,
             n_leaves, n_segments, stream);

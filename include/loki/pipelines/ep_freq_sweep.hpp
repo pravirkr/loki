@@ -12,7 +12,7 @@
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
 
-namespace loki::algorithms {
+namespace loki::pipelines {
 
 /**
  * @brief Frequency sweep pipeline for Extreme Pruning (EP) search.
@@ -33,7 +33,7 @@ public:
         float min_pd                = 0.1F,
         std::string_view poly_basis = "taylor",
         float ref_ducy              = 0.1F,
-        PruneRFIConfig rfi_config   = {},
+        algorithms::PruneRFIConfig rfi_config   = {},
         const std::optional<std::filesystem::path>& plan_cache_file =
             std::nullopt,
         std::optional<SizeType> n_runs                = std::nullopt,
@@ -56,4 +56,4 @@ private:
     std::unique_ptr<Impl> m_impl;
 };
 
-} // namespace loki::algorithms
+} // namespace loki::pipelines

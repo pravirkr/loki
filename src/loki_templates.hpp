@@ -17,8 +17,8 @@ using algorithms::EPMultiPass;
 using algorithms::FFA;
 using plans::FFAPlan;
 using plans::FFAPlanBase;
-using regions::EPRegionPlanner;
-using regions::FFARegionPlanner;
+using algorithms::EPRegionPlanner;
+using algorithms::FFARegionPlanner;
 using search::FFASearchConfig;
 using search::PulsarSearchConfig;
 

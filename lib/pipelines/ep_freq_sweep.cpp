@@ -15,7 +15,7 @@
 #include "loki/search/configs.hpp"
 #include "pipelines/ep_freq_sweep_engine.hpp"
 
-namespace loki::algorithms {
+namespace loki::pipelines {
 
 namespace {
 
@@ -25,7 +25,7 @@ std::unique_ptr<detail::EPFreqSweepEngine> make_ep_freq_sweep_engine(
     float min_pd,
     std::string_view poly_basis,
     float ref_ducy,
-    const PruneRFIConfig& rfi_config,
+    const algorithms::PruneRFIConfig& rfi_config,
     const std::optional<std::filesystem::path>& plan_cache_file,
     std::optional<SizeType> n_runs,
     std::optional<std::vector<SizeType>> ref_segs,
@@ -59,7 +59,7 @@ EPFreqSweep::EPFreqSweep(
     float min_pd,
     std::string_view poly_basis,
     float ref_ducy,
-    PruneRFIConfig rfi_config,
+    algorithms::PruneRFIConfig rfi_config,
     const std::optional<std::filesystem::path>& plan_cache_file,
     std::optional<SizeType> n_runs,
     std::optional<std::vector<SizeType>> ref_segs,
@@ -87,4 +87,4 @@ void EPFreqSweep::execute(std::span<const float> ts_e,
     m_impl->m_engine->execute(ts_e, ts_v, outdir, file_prefix);
 }
 
-} // namespace loki::algorithms
+} // namespace loki::pipelines

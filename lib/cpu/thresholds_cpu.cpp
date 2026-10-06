@@ -26,7 +26,7 @@
 #include "detection/score_engine.hpp"
 #include "detection/thresholds_engine.hpp"
 #include "common/dispatch.hpp"
-#include "detail/exceptions.hpp"
+#include "detail/error_check.hpp"
 #include "detail/math.hpp"
 #include "detail/progress.hpp"
 #include "detection/scheme.hpp"
@@ -499,7 +499,7 @@ simulate_folds(const FoldVectorHandle& folds_in,
                float bias_snr                             = 0.0F,
                float var_add                              = 1.0F,
                SizeType ntrials                           = 1024,
-               cands::TimerStats::TimerMap* thread_timers = nullptr) {
+               search::TimerStats::TimerMap* thread_timers = nullptr) {
     timing::SimpleTimer timer;
     const auto ntrials_in = folds_in.ntrials();
     const auto nbins      = folds_in.nbins();
@@ -555,7 +555,7 @@ simulate_score_prune_fused(const FoldVectorHandle& folds_in,
                            ThreadLocalBuffers& buffers,
                            BoxcarWidthsCache& box_cache,
                            float threshold,
-                           cands::TimerStats::TimerMap& thread_timers,
+                           search::TimerStats::TimerMap& thread_timers,
                            float bias_snr   = 0.0F,
                            float var_add    = 1.0F,
                            SizeType ntrials = 1024) {
@@ -669,7 +669,7 @@ transition_state(const State& state_cur,
                  float threshold,
                  float nbranches,
                  DualPoolFoldManager& manager,
-                 cands::TimerStats::TimerMap* thread_timers = nullptr) {
+                 search::TimerStats::TimerMap* thread_timers = nullptr) {
     error_check::check(folds_cur.has_scores(),
                        "transition_state requires pre-computed scores");
 
@@ -747,7 +747,7 @@ simulate_and_score(const FoldsType& folds_cur,
                    float bias_snr,
                    float var_add,
                    SizeType ntrials,
-                   cands::TimerStats::TimerMap* thread_timers = nullptr) {
+                   search::TimerStats::TimerMap* thread_timers = nullptr) {
     timing::SimpleTimer timer;
 
     auto folds_h0 =
@@ -803,7 +803,7 @@ gen_next_using_thresh(const State& state_cur,
                       DualPoolFoldManager& manager,
                       ThreadLocalBuffers& buffers,
                       BoxcarWidthsCache& box_cache,
-                      cands::TimerStats::TimerMap& thread_timers,
+                      search::TimerStats::TimerMap& thread_timers,
                       float var_add    = 1.0F,
                       SizeType ntrials = 1024) {
     auto [folds_h0_pruned, success_h0] = simulate_score_prune_fused(
@@ -830,7 +830,7 @@ gen_next_using_surv_prob(const State& state_cur,
                          DualPoolFoldManager& manager,
                          ThreadLocalBuffers& buffers,
                          BoxcarWidthsCache& box_cache,
-                         cands::TimerStats::TimerMap& thread_timers,
+                         search::TimerStats::TimerMap& thread_timers,
                          float var_add    = 1.0F,
                          SizeType ntrials = 1024) {
     auto folds_h0_sim =
@@ -950,7 +950,7 @@ public:
         m_box_score_widths =
             detection::generate_box_width_trials(m_nbins, m_ducy_max, m_wtsp);
         m_nthreads    = std::clamp(m_nthreads, 1, omp_get_max_threads());
-        m_timer_stats = cands::TimerStats(m_nthreads);
+        m_timer_stats = search::TimerStats(m_nthreads);
 
         m_bias_snr   = snr_final / static_cast<float>(std::sqrt(m_nstages + 1));
         m_guess_path = detail::guess_scheme(
@@ -1237,7 +1237,7 @@ private:
     std::vector<float> m_guess_path;
     std::vector<State> m_states;
 
-    cands::TimerStats m_timer_stats;
+    search::TimerStats m_timer_stats;
     std::unique_ptr<math::ThreadLocalNormalRNG> m_rng;
     std::unique_ptr<DualPoolFoldManager> m_manager;
     FoldGrid m_folds_current;
@@ -1307,7 +1307,7 @@ private:
         const auto fold_state     = create_initial_fold_state(*buffers_ptr);
         State initial_state       = State::initial();
         const auto thresholds_idx = get_current_thresholds_idx(0);
-        cands::TimerStats::TimerMap thread_timers;
+        search::TimerStats::TimerMap thread_timers;
         for (SizeType ithres : thresholds_idx) {
             auto [cur_state, cur_fold_state] = gen_next_using_thresh(
                 initial_state, fold_state, m_thresholds[ithres],
@@ -1379,7 +1379,7 @@ private:
         const auto stage_offset_cur  = istage * m_nthresholds * m_nprobs;
 
         // Local stats for this segment
-        cands::TimerStats segment_stats(m_nthreads);
+        search::TimerStats segment_stats(m_nthreads);
 
 #pragma omp parallel num_threads(m_nthreads)
         {
@@ -1452,7 +1452,7 @@ private:
     FoldGrid
     pre_simulate_stage_folds(const std::vector<SizeType>& beam_idx_prev,
                              SizeType istage,
-                             cands::TimerStats& segment_stats) {
+                             search::TimerStats& segment_stats) {
         FoldGrid sim_folds(m_nthresholds * m_nprobs);
         const auto stage_offset_prev = (istage - 1) * m_nthresholds * m_nprobs;
         const auto n_beam            = beam_idx_prev.size();
@@ -1497,7 +1497,7 @@ private:
         const auto stage_offset_prev = (istage - 1) * m_nthresholds * m_nprobs;
         const auto stage_offset_cur  = istage * m_nthresholds * m_nprobs;
 
-        cands::TimerStats segment_stats(m_nthreads);
+        search::TimerStats segment_stats(m_nthreads);
         const auto sim_folds =
             pre_simulate_stage_folds(beam_idx_prev, istage, segment_stats);
 
@@ -1632,7 +1632,7 @@ std::vector<State> evaluate_scheme(std::span<const float> thresholds,
     FoldsType initial_fold_state{std::move(folds_h0_sim),
                                  std::move(folds_h1_sim)};
     // Dummy timer object to avoid compiler warning
-    cands::TimerStats::TimerMap thread_timers;
+    search::TimerStats::TimerMap thread_timers;
     for (SizeType istage = 0; istage < nstages; ++istage) {
         const auto prev_state =
             (istage == 0) ? initial_state : states[istage - 1];
@@ -1717,7 +1717,7 @@ std::vector<State> determine_scheme(std::span<const float> survive_probs,
     FoldsType initial_fold_state{std::move(folds_h0_sim),
                                  std::move(folds_h1_sim)};
     // Dummy timer object to avoid compiler warning
-    cands::TimerStats::TimerMap thread_timers;
+    search::TimerStats::TimerMap thread_timers;
     for (SizeType istage = 0; istage < nstages; ++istage) {
         const auto prev_state =
             (istage == 0) ? initial_state : states[istage - 1];
