@@ -1,3 +1,5 @@
+// NOLINTBEGIN(misc-include-cleaner) -- CPU engine; symbols via private/engine
+// headers.
 #include "lib/core/chebyshev.hpp"
 
 #include <algorithm>
@@ -7,6 +9,7 @@
 #include <utility>
 
 #include "loki/common/types.hpp"
+
 #include "lib/core/taylor.hpp"
 #include "lib/core/transforms.hpp"
 #include "lib/detail/error_check.hpp"
@@ -503,16 +506,17 @@ poly_chebyshev_branch_accel_batch(std::span<double> leaves_tree,
     const SizeType single_batch_params = n_leaves * kParams;
 
     // Get spans from workspace
-    std::span<double> dparam_new =
+    std::span<double> const dparam_new =
         leaves_branch.subspan(0, single_batch_params);
-    std::span<double> shift_bins =
+    std::span<double> const shift_bins =
         leaves_branch.subspan(single_batch_params, single_batch_params);
     const auto workspace_acquired_size = (single_batch_params * 2);
     error_check::check_less_equal(workspace_acquired_size, workspace_size,
                                   "workspace size mismatch");
 
     // Transform the parameters to coord_cur domain
-    std::span<SizeType> indices_tree = leaves_origins.subspan(0, n_leaves);
+    std::span<SizeType> const indices_tree =
+        leaves_origins.subspan(0, n_leaves);
     for (SizeType i = 0; i < n_leaves; ++i) {
         indices_tree[i] = i;
     }
@@ -649,15 +653,16 @@ poly_chebyshev_branch_jerk_batch(std::span<double> leaves_tree,
     const SizeType single_batch_params = n_leaves * kParams;
 
     // Get spans from workspace
-    std::span<double> dparam_new =
+    std::span<double> const dparam_new =
         leaves_branch.subspan(0, single_batch_params);
-    std::span<double> shift_bins =
+    std::span<double> const shift_bins =
         leaves_branch.subspan(single_batch_params, single_batch_params);
     const auto workspace_acquired_size = (single_batch_params * 2);
     error_check::check_less_equal(workspace_acquired_size, workspace_size,
                                   "workspace size mismatch");
     // Transform the parameters to coord_cur domain
-    std::span<SizeType> indices_tree = leaves_origins.subspan(0, n_leaves);
+    std::span<SizeType> const indices_tree =
+        leaves_origins.subspan(0, n_leaves);
     for (SizeType i = 0; i < n_leaves; ++i) {
         indices_tree[i] = i;
     }
@@ -809,15 +814,16 @@ poly_chebyshev_branch_snap_batch(std::span<double> leaves_tree,
     const SizeType single_batch_params = n_leaves * kParams;
 
     // Get spans from workspace
-    std::span<double> dparam_new =
+    std::span<double> const dparam_new =
         leaves_branch.subspan(0, single_batch_params);
-    std::span<double> shift_bins =
+    std::span<double> const shift_bins =
         leaves_branch.subspan(single_batch_params, single_batch_params);
     const auto workspace_acquired_size = (single_batch_params * 2);
     error_check::check_less_equal(workspace_acquired_size, workspace_size,
                                   "workspace size mismatch");
     // Transform the parameters to coord_cur domain
-    std::span<SizeType> indices_tree = leaves_origins.subspan(0, n_leaves);
+    std::span<SizeType> const indices_tree =
+        leaves_origins.subspan(0, n_leaves);
     for (SizeType i = 0; i < n_leaves; ++i) {
         indices_tree[i] = i;
     }
@@ -1538,7 +1544,7 @@ void poly_taylor_to_cheby_batch(std::span<double> seed_leaves,
                                 SizeType n_leaves,
                                 SizeType n_params) {
     // Convert to Chebyshev basis
-    auto dispatch = [&]<SizeType N>() {
+    auto const dispatch = [&]<SizeType N> {
         return poly_taylor_to_cheby_batch_impl<N>(seed_leaves, coord_init,
                                                   n_leaves);
     };
@@ -1569,7 +1575,7 @@ SizeType poly_chebyshev_branch_batch(std::span<double> leaves_tree,
                                      SizeType n_params,
                                      memory::BranchingWorkspace& branch_ws) {
 
-    auto dispatch = [&]<SizeType N>() {
+    auto const dispatch = [&]<SizeType N> {
         return poly_chebyshev_branch_batch_impl<N>(
             leaves_tree, leaves_branch, leaves_origins, coord_cur, coord_prev,
             nbins, eta, branch_max, n_leaves, branch_ws);
@@ -1601,7 +1607,7 @@ void poly_chebyshev_resolve_batch(std::span<const double> leaves_branch,
                                   SizeType nbins,
                                   SizeType n_leaves,
                                   SizeType n_params) {
-    auto dispatch = [&]<SizeType N>() {
+    auto const dispatch = [&]<SizeType N> {
         return poly_chebyshev_resolve_batch_impl<N>(
             leaves_branch, param_indices, phase_shift, param_limits, coord_add,
             coord_cur, coord_init, n_accel_init, n_freq_init, nbins, n_leaves);
@@ -1641,11 +1647,11 @@ void poly_chebyshev_ascend_resolve_batch(
                                      "phase_shift size mismatch");
     error_check::check_equal(coord_segments.size(), n_segments,
                              "coord_segments size mismatch");
-    auto dispatch = [&]<SizeType N>() {
+    auto const dispatch = [&]<SizeType N> {
         for (SizeType iseg = 0; iseg < n_segments; ++iseg) {
-            auto param_indices_seg =
+            auto const param_indices_seg =
                 param_indices.subspan(iseg * n_leaves, n_leaves);
-            auto phase_shift_seg =
+            auto const phase_shift_seg =
                 phase_shift.subspan(iseg * n_leaves, n_leaves);
             poly_chebyshev_ascend_resolve_batch_impl<N>(
                 leaves_branch, param_indices_seg, phase_shift_seg, param_limits,
@@ -1674,7 +1680,7 @@ void poly_chebyshev_transform_batch(std::span<double> leaves_tree,
                                     std::pair<double, double> coord_cur,
                                     SizeType n_leaves,
                                     SizeType n_params) {
-    auto dispatch = [&]<SizeType N>() {
+    auto const dispatch = [&]<SizeType N> {
         return poly_chebyshev_transform_batch_impl<N>(
             leaves_tree, indices_tree, coord_next, coord_cur, n_leaves);
     };
@@ -1697,7 +1703,7 @@ void poly_cheby_to_taylor_batch(std::span<double> leaves_tree,
                                 std::pair<double, double> coord_report,
                                 SizeType n_leaves,
                                 SizeType n_params) {
-    auto dispatch = [&]<SizeType N>() {
+    auto const dispatch = [&]<SizeType N> {
         return poly_cheby_to_taylor_batch_impl<N>(leaves_tree, coord_report,
                                                   n_leaves);
     };
@@ -1740,7 +1746,7 @@ std::vector<double> generate_bp_poly_chebyshev_approx(
     std::vector<SizeType> leaf_origins(branch_max);
     memory::BranchingWorkspace branch_ws(1, branch_max, n_params);
 
-    psr_utils::MiddleOutScheme snail_scheme(nsegments, ref_seg, tseg_ffa);
+    psr_utils::MiddleOutScheme const snail_scheme(nsegments, ref_seg, tseg_ffa);
     const auto coord_init = snail_scheme.get_coord(0);
     SizeType n_leaves     = 1;
     for (const auto count : param_grid_count_init) {
@@ -1761,8 +1767,8 @@ std::vector<double> generate_bp_poly_chebyshev_approx(
     error_check::check_less(isuggest, n_leaves,
                             "isuggest must be less than n_leaves");
     // Copy isuggest-th leaf to leaf_data
-    auto leaf = std::span(seed_leaves)
-                    .subspan((leaves_stride * isuggest), leaves_stride);
+    auto const leaf = std::span(seed_leaves)
+                          .subspan((leaves_stride * isuggest), leaves_stride);
     std::ranges::copy(leaf, leaf_data.begin());
     for (SizeType prune_level = 1; prune_level < nsegments; ++prune_level) {
         const auto coord_prev = snail_scheme.get_coord(prune_level - 1);
@@ -1771,7 +1777,7 @@ std::vector<double> generate_bp_poly_chebyshev_approx(
         const auto n_leaves_branch = poly_chebyshev_branch_batch(
             leaf_data, branch_leaves, leaf_origins, coord_cur, coord_prev,
             nbins, eta, branch_max, 1, n_params, branch_ws);
-        auto leaves_span =
+        auto const leaves_span =
             std::span(branch_leaves).first(n_leaves_branch * leaves_stride);
         std::vector<SizeType> indices_branch(n_leaves_branch);
         std::iota(indices_branch.begin(), indices_branch.end(), 0U);
@@ -1780,7 +1786,8 @@ std::vector<double> generate_bp_poly_chebyshev_approx(
         poly_chebyshev_transform_batch(leaves_span, indices_branch, coord_next,
                                        coord_cur, n_leaves_branch, n_params);
         // Copy first leaf to leaf_data
-        auto first_leaf_span = std::span(branch_leaves).first(leaves_stride);
+        auto const first_leaf_span =
+            std::span(branch_leaves).first(leaves_stride);
         std::ranges::copy(first_leaf_span, leaf_data.begin());
     }
     // Check if any branches is truncated due to branch_max
@@ -1808,7 +1815,7 @@ generate_bp_poly_chebyshev(std::span<const std::vector<double>> param_arr,
     const auto n_freqs   = f0_batch.size();  // Number of frequency bins
 
     // Snail Scheme
-    psr_utils::MiddleOutScheme snail_scheme(nsegments, ref_seg, tseg_ffa);
+    psr_utils::MiddleOutScheme const snail_scheme(nsegments, ref_seg, tseg_ffa);
     const auto coord_init = snail_scheme.get_coord(0);
     std::vector<double> weights(n_freqs, 1.0);
     std::vector<double> branching_pattern(nsegments - 1);
@@ -1825,8 +1832,8 @@ generate_bp_poly_chebyshev(std::span<const std::vector<double>> param_arr,
             dparam_cur_batch[(i * n_params) + n_params - 1] *
             (utils::kCval / f0_batch[i]);
     }
-    core::taylor_to_cheby_errors_batch(
-        dparam_cur_batch, coord_init.second, n_freqs, n_params);
+    core::taylor_to_cheby_errors_batch(dparam_cur_batch, coord_init.second,
+                                       n_freqs, n_params);
 
     std::vector<double> dparam_new_batch(n_freqs * n_params, 0.0);
     std::vector<double> shift_bins_batch(n_freqs * n_params, 0.0);
@@ -1839,8 +1846,7 @@ generate_bp_poly_chebyshev(std::span<const std::vector<double>> param_arr,
         const auto coord_cur  = snail_scheme.get_current_coord(prune_level);
         // Transform the parameters to coord_cur domain
         core::shift_cheb_errors_batch(dparam_cur_batch, coord_cur.second,
-                                            coord_prev.second, n_freqs,
-                                            n_params);
+                                      coord_prev.second, n_freqs, n_params);
 
         // Calculate optimal parameter steps and shift bins
         psr_utils::poly_cheb_step_vec(n_params, nbins, eta, f0_batch,
@@ -1859,7 +1865,7 @@ generate_bp_poly_chebyshev(std::span<const std::vector<double>> param_arr,
                     continue;
                 }
                 const auto ratio =
-                    (dparam_cur_batch[idx]) / (dparam_new_batch[idx]);
+                    dparam_cur_batch[idx] / dparam_new_batch[idx];
                 const SizeType num_points = std::max(
                     1UL,
                     static_cast<SizeType>(std::ceil(ratio - utils::kFloatEps)));
@@ -1881,11 +1887,11 @@ generate_bp_poly_chebyshev(std::span<const std::vector<double>> param_arr,
 
         // Transform dparams to the next segment
         core::shift_cheb_errors_batch(dparam_cur_next, coord_next.second,
-                                            coord_cur.second, n_freqs,
-                                            n_params);
+                                      coord_cur.second, n_freqs, n_params);
         std::ranges::copy(dparam_cur_next, dparam_cur_batch.begin());
     }
     return branching_pattern;
 }
 
 } // namespace loki::core
+// NOLINTEND(misc-include-cleaner)

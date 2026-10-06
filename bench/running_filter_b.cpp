@@ -4,6 +4,7 @@
 #include <benchmark/benchmark.h>
 
 #include "loki/common/types.hpp"
+
 #include "lib/detail/math.hpp"
 
 namespace {
@@ -27,8 +28,8 @@ void set_items(benchmark::State& state, SizeType n) {
 
 // Args: n, window, use_heap (0 = sorted array, 1 = double heap).
 void bm_running_median(benchmark::State& state) {
-    const auto n = static_cast<SizeType>(state.range(0));
-    const auto w = static_cast<SizeType>(state.range(1));
+    const auto n        = static_cast<SizeType>(state.range(0));
+    const auto w        = static_cast<SizeType>(state.range(1));
     const auto nthreads = static_cast<int>(state.range(3));
     loki::math::detail::tuning().heap_window =
         state.range(2) != 0 ? 1 : (SizeType{1} << 40U);
@@ -43,10 +44,10 @@ void bm_running_median(benchmark::State& state) {
 
 // Args: n, window.
 void bm_running_mean(benchmark::State& state) {
-    const auto n = static_cast<SizeType>(state.range(0));
-    const auto w = static_cast<SizeType>(state.range(1));
+    const auto n        = static_cast<SizeType>(state.range(0));
+    const auto w        = static_cast<SizeType>(state.range(1));
     const auto nthreads = static_cast<int>(state.range(2));
-    const auto x = make_noise(n);
+    const auto x        = make_noise(n);
     std::vector<float> out(n);
     for (auto _ : state) {
         loki::math::running_filter(x, out, w, FilterMethod::kMean, nthreads);
@@ -57,18 +58,18 @@ void bm_running_mean(benchmark::State& state) {
 
 // Args: n, window, fast (0 = exact, 1 = fast). In-place baseline removal.
 void bm_subtract_median(benchmark::State& state) {
-    const auto n = static_cast<SizeType>(state.range(0));
-    const auto w = static_cast<SizeType>(state.range(1));
-    const bool fast = state.range(2) != 0;
+    const auto n        = static_cast<SizeType>(state.range(0));
+    const auto w        = static_cast<SizeType>(state.range(1));
+    const bool fast     = state.range(2) != 0;
     const auto nthreads = static_cast<int>(state.range(3));
-    const auto src  = make_noise(n);
-    auto x          = src;
+    const auto src      = make_noise(n);
+    auto x              = src;
     for (auto _ : state) {
         state.PauseTiming();
         x = src;
         state.ResumeTiming();
-        loki::math::subtract_running_filter(x, w, FilterMethod::kMedian, fast, 101,
-                                           nthreads);
+        loki::math::subtract_running_filter(x, w, FilterMethod::kMedian, fast,
+                                            101, nthreads);
         benchmark::DoNotOptimize(x.data());
     }
     set_items(state, n);
@@ -76,8 +77,8 @@ void bm_subtract_median(benchmark::State& state) {
 
 // Args: n, scale method (loki::ScaleMethod), use_radix.
 void bm_zscore(benchmark::State& state) {
-    const auto n      = static_cast<SizeType>(state.range(0));
-    const auto scale  = static_cast<loki::ScaleMethod>(state.range(1));
+    const auto n        = static_cast<SizeType>(state.range(0));
+    const auto scale    = static_cast<loki::ScaleMethod>(state.range(1));
     const auto nthreads = static_cast<int>(state.range(3));
     loki::math::detail::tuning().radix_select_size =
         state.range(2) != 0 ? 1 : (SizeType{1} << 40U);
@@ -97,7 +98,10 @@ void bm_zscore(benchmark::State& state) {
 
 BENCHMARK(bm_running_median)
     ->ArgNames({"n", "w", "heap", "threads"})
-    ->ArgsProduct({{1 << 20, 1 << 23}, {5, 11, 21, 51, 101, 501, 1001, 4001, 15625}, {0, 1}, {1, 8}})
+    ->ArgsProduct({{1 << 20, 1 << 23},
+                   {5, 11, 21, 51, 101, 501, 1001, 4001, 15625},
+                   {0, 1},
+                   {1, 8}})
     ->Unit(benchmark::kMillisecond)
     ->UseRealTime();
 BENCHMARK(bm_running_mean)

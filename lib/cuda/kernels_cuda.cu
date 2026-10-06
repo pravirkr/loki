@@ -5,6 +5,7 @@
 #include <thrust/device_vector.h>
 
 #include "loki/common/types.hpp"
+
 #include "lib/cuda/cub_helpers.cuh"
 #include "lib/cuda/cuda_utils.cuh"
 
@@ -167,8 +168,8 @@ __global__ __launch_bounds__(256, 4) void kernel_shift_add_linear_complex(
     }
 
     // Phase factor for head only: exp(-2πi * k * shift / nbins)
-    const auto phase =
-        static_cast<float>(-2.0F * cub_helpers::kPI * k * phase_shift[ileaf] / nbins);
+    const auto phase = static_cast<float>(-2.0F * cub_helpers::kPI * k *
+                                          phase_shift[ileaf] / nbins);
     float cosv, sinv;
     __sincosf(phase, &sinv, &cosv);
 

@@ -14,6 +14,7 @@
 #include "loki/common/types.hpp"
 #include "loki/detection/score.hpp"
 #include "loki/search/configs.hpp"
+
 #include "lib/algorithms/ffa_engine.hpp"
 #include "lib/common/dispatch.hpp"
 #include "lib/detail/error_check.hpp"
@@ -96,7 +97,7 @@ public:
                  std::span<const float> ts_v,
                  const std::filesystem::path& outdir,
                  std::string_view file_prefix,
-                 std::string_view config_toml = {}) override {
+                 std::string_view config_toml) override {
         timing::SimpleTimer timer;
         // Reset accumulated state so repeated execute() calls are independent
         m_ffa_stats = search::FFAStatsCollection();
@@ -133,8 +134,8 @@ public:
         // Drain whatever is still in RAM
         timer.start();
         search::flush_candidates(m_cands, m_region_decode, writer,
-                         m_write_param_sets_batch, m_width_batch, m_nbins_batch,
-                         m_base_cfg.get_nparams());
+                                 m_write_param_sets_batch, m_width_batch,
+                                 m_nbins_batch, m_base_cfg.get_nparams());
         ffa_timer_stats_pipeline["io"] += timer.stop();
         m_ffa_stats.update_stats(ffa_timer_stats_pipeline,
                                  static_cast<float>(accumulated_flops));
@@ -231,10 +232,10 @@ private:
                     if (m_cands.is_full()) {
                         ffa_timer_stats["score"] += timer.stop();
                         timer.start();
-                        search::flush_candidates(m_cands, m_region_decode, writer,
-                                         m_write_param_sets_batch,
-                                         m_width_batch, m_nbins_batch,
-                                         m_base_cfg.get_nparams());
+                        search::flush_candidates(
+                            m_cands, m_region_decode, writer,
+                            m_write_param_sets_batch, m_width_batch,
+                            m_nbins_batch, m_base_cfg.get_nparams());
                         ffa_timer_stats["io"] += timer.stop();
                         timer.start();
                     }
@@ -291,9 +292,9 @@ private:
             if (m_cands.is_full()) {
                 ffa_timer_stats["score"] += timer.stop();
                 timer.start();
-                search::flush_candidates(m_cands, m_region_decode, writer,
-                                 m_write_param_sets_batch, m_width_batch,
-                                 m_nbins_batch, m_base_cfg.get_nparams());
+                search::flush_candidates(
+                    m_cands, m_region_decode, writer, m_write_param_sets_batch,
+                    m_width_batch, m_nbins_batch, m_base_cfg.get_nparams());
                 ffa_timer_stats["io"] += timer.stop();
                 timer.start();
             }
@@ -323,3 +324,4 @@ make_ffa_freq_sweep_cpu(const search::FFASearchConfig& cfg,
 } // namespace detail
 
 } // namespace loki::pipelines
+// NOLINTEND(misc-include-cleaner)

@@ -4,9 +4,11 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <filesystem>
 #include <format>
 #include <memory>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -14,6 +16,7 @@
 #include <psrio/psrio.hpp>
 
 #include "loki/common/types.hpp"
+
 #include "lib/detail/error_check.hpp"
 #include "lib/detail/math.hpp"
 #include "lib/detail/utils.hpp"

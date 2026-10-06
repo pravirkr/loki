@@ -1,3 +1,5 @@
+#include "lib/search/prune_mask.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -9,13 +11,12 @@
 
 #include "loki/algorithms/prune_rfi.hpp"
 #include "loki/common/types.hpp"
+
 #include "lib/detail/psr_utils.hpp"
 #include "lib/detail/utils.hpp"
-#include "lib/search/prune_mask.hpp"
 
 using loki::ParamLimit;
 using loki::SizeType;
-using loki::search::GridMask;
 using loki::algorithms::is_impulsive_segment;
 using loki::algorithms::kBirdieAccelPad;
 using loki::algorithms::make_birdie_window;
@@ -23,6 +24,7 @@ using loki::algorithms::make_harvest_window;
 using loki::algorithms::make_pulsar_window;
 using loki::algorithms::ParamWindow;
 using loki::algorithms::PruneRFIConfig;
+using loki::search::GridMask;
 
 namespace {
 
@@ -135,8 +137,10 @@ TEST_CASE("GridMask: disjoint windows are ignored", "[prune_mask]") {
     mask.add_window(ParamWindow{.f_lo = 300.0, .f_hi = 400.0});
     mask.add_window(ParamWindow{
         .f_lo = 150.0, .f_hi = 151.0, .a_lo = 200.0, .a_hi = 300.0});
-    mask.add_window(ParamWindow{
-        .f_lo = 150.0, .f_hi = 151.0, .a_lo = std::numeric_limits<double>::lowest(), .a_hi = -150.0});
+    mask.add_window(ParamWindow{.f_lo = 150.0,
+                                .f_hi = 151.0,
+                                .a_lo = std::numeric_limits<double>::lowest(),
+                                .a_hi = -150.0});
     REQUIRE(mask.empty());
     REQUIRE(mask.get_n_windows() == 0);
 }

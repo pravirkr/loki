@@ -1,6 +1,6 @@
-#include <catch2/catch_test_macros.hpp>
-
 #include "loki/common/backend.hpp"
+
+#include <catch2/catch_test_macros.hpp>
 
 TEST_CASE("Backend utilities", "[backend]") {
     SECTION("to_string and parse_backend") {

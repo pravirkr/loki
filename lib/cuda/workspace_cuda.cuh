@@ -7,6 +7,10 @@
  */
 
 #include <cstdint>
+#include <format>
+#include <stdexcept>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 #include <cuda/std/span>
@@ -14,14 +18,10 @@
 #include <cuda_runtime.h>
 #include <thrust/device_vector.h>
 
-#include <format>
-#include <stdexcept>
-#include <string_view>
-#include <utility>
-
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
 #include "loki/utils/workspace.hpp"
+
 #include "lib/common/dispatch.hpp"
 #include "lib/cuda/coord_cuda.cuh"
 #include "lib/cuda/types_cuda.cuh"

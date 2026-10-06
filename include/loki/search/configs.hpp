@@ -47,7 +47,7 @@ struct FFATomlConfig {
     // [performance]
     std::optional<SizeType> nsamps;
     std::optional<double> tsamp;
-    int nthreads{0}; // 0 = hardware concurrency
+    int nthreads{0};                // 0 = hardware concurrency
     Backend backend{Backend::kCPU}; // "cpu" | "cuda"
     int device{0};                  // GPU ordinal, used by GPU backends
     double max_process_memory_gb{8.0};
@@ -77,7 +77,7 @@ struct FFATomlConfig {
     static void write_default(const std::filesystem::path& path);
 
     /// @brief Get the documented default TOML configuration text.
-    static std::string default_toml_string();
+    static std::string_view default_toml_string();
 };
 
 /**
@@ -111,8 +111,8 @@ public:
     virtual ~FFASearchConfig();
     FFASearchConfig(FFASearchConfig&&) noexcept;
     FFASearchConfig& operator=(FFASearchConfig&&) noexcept;
-    FFASearchConfig(const FFASearchConfig&);
-    FFASearchConfig& operator=(const FFASearchConfig&);
+    FFASearchConfig(const FFASearchConfig& other);
+    FFASearchConfig& operator=(const FFASearchConfig& other);
 
     // --- Getters ---
     SizeType get_nsamps() const noexcept;
@@ -140,12 +140,12 @@ public:
     double get_tseg_ffa() const noexcept;
     SizeType get_niters_ffa() const noexcept;
     SizeType get_nparams() const noexcept;
-    [[nodiscard]] std::vector<std::string> get_param_names() const noexcept;
+    [[nodiscard]] std::vector<std::string> get_param_names() const;
     double get_f_min() const noexcept;
     double get_f_max() const noexcept;
-    [[nodiscard]] std::vector<SizeType> get_scoring_widths() const noexcept;
+    [[nodiscard]] std::vector<SizeType> get_scoring_widths() const;
     SizeType get_n_scoring_widths() const noexcept;
-    [[nodiscard]] std::vector<float> get_boxcar_kadane_biases() const noexcept;
+    [[nodiscard]] std::vector<float> get_boxcar_kadane_biases() const;
     SizeType get_n_boxcar_kadane_biases() const noexcept;
 
     // --- Setters ---
@@ -156,10 +156,9 @@ public:
     get_dparams_f(double tseg_cur) const noexcept;
     [[nodiscard]] std::vector<double>
     get_dparams(double tseg_cur) const noexcept;
-    [[nodiscard]] std::vector<double>
-    get_dparams_actual(double tseg_cur) const noexcept;
+    [[nodiscard]] std::vector<double> get_dparams_actual(double tseg_cur) const;
     [[nodiscard]] std::vector<SizeType>
-    get_param_grid_count(double tseg_cur) const noexcept;
+    get_param_grid_count(double tseg_cur) const;
 
     [[nodiscard]] FFASearchConfig
     get_updated_config(SizeType nbins,
@@ -182,7 +181,7 @@ public:
                      std::optional<double> tsamp    = std::nullopt);
 
     static void write_default_toml(const std::filesystem::path& path);
-    static std::string default_toml_string();
+    static std::string_view default_toml_string();
 
 protected:
     class Impl;
@@ -236,8 +235,8 @@ public:
     ~EPSearchConfig() override;
     EPSearchConfig(EPSearchConfig&&) noexcept;
     EPSearchConfig& operator=(EPSearchConfig&&) noexcept;
-    EPSearchConfig(const EPSearchConfig&);
-    EPSearchConfig& operator=(const EPSearchConfig&);
+    EPSearchConfig(const EPSearchConfig& other);
+    EPSearchConfig& operator=(const EPSearchConfig& other);
 
     // EP-only Getters
     SizeType get_prune_poly_order() const noexcept;

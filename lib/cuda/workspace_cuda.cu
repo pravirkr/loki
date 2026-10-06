@@ -2,9 +2,10 @@
 
 #include <algorithm>
 #include <memory>
+#include <utility>
+
 #include <cub/cub.cuh>
 #include <cuda_runtime.h>
-#include <utility>
 
 #include "lib/cuda/cub_helpers.cuh"
 #include "lib/cuda/cuda_utils.cuh"
@@ -316,17 +317,17 @@ CUBScratchArena::CUBScratchArena(SizeType batch_size,
         "cub::DeviceSelect::Flagged sizing failed");
 
     // 1d. DeviceReduce::Reduce (masked min/max over float scores)
-    auto dummy_minmax_it =
-        thrust::make_transform_iterator(thrust::make_counting_iterator<int>(0),
-                                        cub_helpers::ScoreToMinMaxFloat{nullptr, nullptr});
+    auto dummy_minmax_it = thrust::make_transform_iterator(
+        thrust::make_counting_iterator<int>(0),
+        cub_helpers::ScoreToMinMaxFloat{nullptr, nullptr});
     const MinMaxFloat minmax_identity{std::numeric_limits<float>::max(),
                                       std::numeric_limits<float>::lowest()};
     SizeType reduce_bytes_minmax = 0;
     cuda_utils::check_cuda_call(
-        cub::DeviceReduce::Reduce(nullptr, reduce_bytes_minmax, dummy_minmax_it,
-                                  static_cast<MinMaxFloat*>(nullptr),
-                                  static_cast<int>(max_n_leaves),
-                                  cub_helpers::MinMaxReduce{}, minmax_identity, stream),
+        cub::DeviceReduce::Reduce(
+            nullptr, reduce_bytes_minmax, dummy_minmax_it,
+            static_cast<MinMaxFloat*>(nullptr), static_cast<int>(max_n_leaves),
+            cub_helpers::MinMaxReduce{}, minmax_identity, stream),
         "cub::DeviceReduce::Reduce sizing failed");
 
     // ---- 2. Allocate a single buffer large enough for all operations -------
@@ -390,8 +391,7 @@ CUBScratchArena& CUBScratchArena::operator=(CUBScratchArena&& other) noexcept {
 }
 
 float CUBScratchArena::get_memory_usage_gib() const noexcept {
-    const auto bytes =
-        cub_temp_bytes + sizeof(uint32_t) + sizeof(MinMaxFloat);
+    const auto bytes = cub_temp_bytes + sizeof(uint32_t) + sizeof(MinMaxFloat);
     return static_cast<float>(bytes) / static_cast<float>(1ULL << 30U);
 }
 
@@ -417,13 +417,15 @@ void CUBScratchArena::compute_min_max_scores(
     cudaStream_t stream) {
     auto counting_it  = thrust::make_counting_iterator<int>(0);
     auto transform_it = thrust::make_transform_iterator(
-        counting_it, cub_helpers::ScoreToMinMaxFloat{scores.data(), mask.data()});
+        counting_it,
+        cub_helpers::ScoreToMinMaxFloat{scores.data(), mask.data()});
     const MinMaxFloat identity{std::numeric_limits<float>::max(),
                                std::numeric_limits<float>::lowest()};
     cuda_utils::check_cuda_call(
         cub::DeviceReduce::Reduce(
             cub_temp_storage, cub_temp_bytes, transform_it, d_minmax_out,
-            static_cast<int>(n_leaves), cub_helpers::MinMaxReduce{}, identity, stream),
+            static_cast<int>(n_leaves), cub_helpers::MinMaxReduce{}, identity,
+            stream),
         "cub::DeviceReduce::Reduce failed");
     cuda_utils::check_cuda_call(cudaMemcpyAsync(h_minmax_out, d_minmax_out,
                                                 sizeof(MinMaxFloat),
@@ -457,9 +459,8 @@ EPWorkspaceCUDA<FoldTypeCUDA>::EPWorkspaceCUDA(SizeType batch_size,
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 float EPWorkspaceCUDA<FoldTypeCUDA>::get_seed_memory_usage_gib()
     const noexcept {
-    const auto bytes =
-        (seed_leaves_d.size() * sizeof(double)) +
-        (seed_scores_d.size() * sizeof(float));
+    const auto bytes = (seed_leaves_d.size() * sizeof(double)) +
+                       (seed_scores_d.size() * sizeof(float));
     return static_cast<float>(bytes) / static_cast<float>(1ULL << 30U);
 }
 
@@ -468,8 +469,7 @@ float EPWorkspaceCUDA<FoldTypeCUDA>::get_segment_coords_memory_usage_gib()
     const noexcept {
     const auto bytes =
         (idx_segments_d.size() * sizeof(uint32_t)) +
-        (coord_segments_d.size() *
-         sizeof(cuda::std::pair<double, double>));
+        (coord_segments_d.size() * sizeof(cuda::std::pair<double, double>));
     return static_cast<float>(bytes) / static_cast<float>(1ULL << 30U);
 }
 
@@ -477,8 +477,7 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA>
 float EPWorkspaceCUDA<FoldTypeCUDA>::get_memory_usage_gib() const noexcept {
     return world_tree.get_memory_usage_gib() + prune.get_memory_usage_gib() +
            branch.get_memory_usage_gib() + scratch.get_memory_usage_gib() +
-           get_seed_memory_usage_gib() +
-           get_segment_coords_memory_usage_gib();
+           get_seed_memory_usage_gib() + get_segment_coords_memory_usage_gib();
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
@@ -616,23 +615,11 @@ template std::unique_ptr<loki::detail::DeviceStorage>
 make_ffa_workspace_gpu<ComplexType>(
     SizeType, SizeType, SizeType, SizeType, int);
 template std::unique_ptr<loki::detail::DeviceStorage>
-make_ep_workspace_gpu<float>(SizeType,
-                             SizeType,
-                             SizeType,
-                             SizeType,
-                             SizeType,
-                             SizeType,
-                             SizeType,
-                             int);
+make_ep_workspace_gpu<float>(
+    SizeType, SizeType, SizeType, SizeType, SizeType, SizeType, SizeType, int);
 template std::unique_ptr<loki::detail::DeviceStorage>
-make_ep_workspace_gpu<ComplexType>(SizeType,
-                                   SizeType,
-                                   SizeType,
-                                   SizeType,
-                                   SizeType,
-                                   SizeType,
-                                   SizeType,
-                                   int);
+make_ep_workspace_gpu<ComplexType>(
+    SizeType, SizeType, SizeType, SizeType, SizeType, SizeType, SizeType, int);
 
 } // namespace detail
 

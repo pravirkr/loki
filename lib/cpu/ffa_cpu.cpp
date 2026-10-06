@@ -280,7 +280,7 @@ public:
                 m_ffa_plan.resolve_coordinates(ws.coords);
             }
 
-            auto fold_complex = std::span<ComplexType>(
+            auto const fold_complex = std::span<ComplexType>(
                 reinterpret_cast<ComplexType*>(fold.data()),
                 buffer_size_fourier);
             // Execute the FFA plan
@@ -373,7 +373,7 @@ private:
     void account_cone_band(float wall_s,
                            const core::ConeBandThreadSeconds& stats) {
         const double thread_sum = stats.brute + stats.merge + stats.score;
-        const double wall       = static_cast<double>(wall_s);
+        const auto wall         = static_cast<double>(wall_s);
         const double prefix     = stats.prefix_wall;
         const double rest       = std::max(0.0, wall - prefix);
         const double scale      = thread_sum > 0.0 ? rest / thread_sum : 0.0;
@@ -449,9 +449,9 @@ private:
             const bool scoring     = hits != nullptr;
             const SizeType n_steps = steps.size();
             std::vector<float> extra;
-            float* internal =
+            auto* internal =
                 static_cast<float*>(get_workspace().fold_internal.data());
-            float* user      = static_cast<float*>(fold_result);
+            auto* user       = static_cast<float*>(fold_result);
             float* secondary = user;
             if (scoring && n_steps >= 3) {
                 extra.resize(m_ffa_plan.get_buffer_size());
@@ -475,11 +475,11 @@ private:
                 }
             }
 
-            progress::ProgressGuard progress_guard(m_show_progress);
+            progress::ProgressGuard const progress_guard(m_show_progress);
             auto bar = progress::make_ffa_bar("Computing FFA", n_merge);
             const auto run_span    = m_the_bf->runs();
             const auto offset_span = m_the_bf->run_offsets();
-            float* current         = nullptr;
+            float const* current   = nullptr;
             SizeType progressed    = 0;
             for (SizeType istep = 0; istep < n_steps; ++istep) {
                 const ConeChoice& step   = steps[istep];
@@ -674,7 +674,11 @@ private:
                 }
                 if (bytes <= budget) {
                     return ConeChoice{
-                        .k = k, .tile = tile, .cone = true, .done = done};
+                        .k    = k,
+                        .tile = tile,
+                        .cone = true,
+                        .done = done,
+                    };
                 }
             }
         }
@@ -736,7 +740,7 @@ private:
                 // Use temp_buffer for time-domain output
                 // temp_buffer is ComplexType*, reinterpret as float* for
                 // time-domain data
-                auto real_temp_view =
+                auto const real_temp_view =
                     std::span<float>(reinterpret_cast<float*>(temp_buffer),
                                      brute_fold_size_time);
                 m_the_bf_float->execute(ts_e, ts_v, real_temp_view);
@@ -915,7 +919,7 @@ private:
             }
         }
 
-        progress::ProgressGuard progress_guard(m_show_progress);
+        progress::ProgressGuard const progress_guard(m_show_progress);
         auto bar = progress::make_ffa_bar("Computing FFA", levels - 1);
 
         if (m_is_freq_only) {
@@ -968,7 +972,7 @@ private:
         const auto ncoords_offset = m_ffa_plan.get_ncoords_offsets()[i_level];
         // Get the coordinates for the current level
         const auto& ws = get_workspace();
-        auto coords_cur_span =
+        auto const coords_cur_span =
             std::span(ws.coords_freq).subspan(ncoords_offset, ncoords_cur);
         if constexpr (std::is_same_v<FoldType, float>) {
             core::ffa_iter_freq(fold_in, fold_out, coords_cur_span.data(),
@@ -992,7 +996,7 @@ private:
         const auto ncoords_offset = m_ffa_plan.get_ncoords_offsets()[i_level];
         // Get the coordinates for the current level
         const auto& ws = get_workspace();
-        auto coords_cur_span =
+        auto const coords_cur_span =
             std::span(ws.coords).subspan(ncoords_offset, ncoords_cur);
 
         if constexpr (std::is_same_v<FoldType, float>) {

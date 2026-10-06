@@ -4,11 +4,20 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <numbers>
+#include <optional>
 #include <random>
+#include <span>
+#include <string>
+#include <utility>
 #include <vector>
 
+#include "loki/common/types.hpp"
 #include "loki/detection/score.hpp"
+#include "loki/io/timeseries.hpp"
+#include "loki/simulation/modulate.hpp"
+
 #include "lib/detail/error_check.hpp"
 #include "lib/detail/math.hpp"
 #include "lib/detail/psr_utils.hpp"
@@ -47,7 +56,7 @@ constexpr SizeType kMinBins = 4;
 [[nodiscard]] std::vector<float> finish_lut(std::vector<double> lut) {
     double previous = lut.front();
     for (double& value : lut) {
-        value = std::max(value, previous);
+        value    = std::max(value, previous);
         previous = value;
     }
     error_check::check(lut.back() > 0.0, "pulse CDF has no mass");
@@ -59,7 +68,6 @@ constexpr SizeType kMinBins = 4;
     out.front() = 0.0F;
     for (SizeType i = 1; i < out.size(); ++i) {
         out[i] = std::min(std::max(out[i], out[i - 1]), 1.0F);
-   
     }
     out.back() = 1.0F;
     return out;
@@ -140,7 +148,7 @@ struct Folded {
         noise_norm[i] =
             static_cast<float>((noise.vals[i] * noise_scale) / denom);
     }
-    const double snr_template = static_cast<double>(max_boxcar_snr(tmpl_norm));
+    const auto snr_template = static_cast<double>(max_boxcar_snr(tmpl_norm));
     error_check::check(std::abs(snr_template) > 0.0,
                        "pulse template has zero folded SNR");
     double current = (snr_target / snr_template) * noise_scale;
@@ -150,8 +158,8 @@ struct Folded {
             combined[i] =
                 noise_norm[i] + (static_cast<float>(current) * tmpl_norm[i]);
         }
-        const double measured = static_cast<double>(max_boxcar_snr(combined));
-        const double diff     = measured - snr_target;
+        const auto measured = static_cast<double>(max_boxcar_snr(combined));
+        const double diff   = measured - snr_target;
         if ((diff * diff) < (tol * tol)) {
             break;
         }
@@ -186,8 +194,8 @@ build_cdf_lut(PulseShapeKind shape, double width, double pos, SizeType ngrid) {
     const double phase0 = positive_mod(pos, 1.0);
     std::vector<double> lut(ngrid + 1, 0.0);
     if (shape == PulseShapeKind::kVonMises) {
-        const double kappa =
-            std::log(10.0) / (2.0 * std::pow(std::sin(kPi * width / 2.0), 2.0));
+        const double kappa = std::numbers::ln10 /
+                             (2.0 * std::pow(std::sin(kPi * width / 2.0), 2.0));
         std::vector<double> pdf(ngrid + 1);
         for (SizeType j = 0; j <= ngrid; ++j) {
             const double phase =
@@ -205,7 +213,7 @@ build_cdf_lut(PulseShapeKind shape, double width, double pos, SizeType ngrid) {
     const int nalias     = shape == PulseShapeKind::kBoxcar ? 1 : 4;
     const double sigma   = width / (2.0 * std::sqrt(2.0 * std::numbers::ln10));
     const double box_loc = phase0 - (width / 2.0);
-    auto cdf_at          = [&](double phase) {
+    const auto cdf_at    = [&](double phase) {
         double sum = 0.0;
         for (int alias = -nalias; alias <= nalias; ++alias) {
             const double x = phase + static_cast<double>(alias);
@@ -277,8 +285,8 @@ public:
          SizeType nsamps_in,
          double snr_in,
          double ducy_in,
-         std::string mod_type_in,
-         ModulatorParams mod_in,
+         const std::string& mod_type_in,
+         const ModulatorParams& mod_in,
          std::optional<double> mod_tref_in,
          std::optional<std::uint64_t> seed_in)
         : period(period_in),
@@ -309,6 +317,9 @@ public:
           normal(other.normal) {}
 
     Impl& operator=(const Impl&) = delete;
+    Impl(Impl&&)                 = delete;
+    Impl& operator=(Impl&&)      = delete;
+    ~Impl()                      = default;
 
     [[nodiscard]] std::vector<double> proper_time() const {
         std::vector<double> time(nsamps);
@@ -329,6 +340,8 @@ public:
     double ducy;
     double mod_tref{0.0};
     struct UnitNormalEngine {
+        // NOLINTNEXTLINE(readability-identifier-naming) -- URBG requires
+        // result_type.
         using result_type = std::uint32_t;
         math::PCG32 rng;
 
@@ -351,19 +364,12 @@ PulseSignalConfig::PulseSignalConfig(double period,
                                      SizeType nsamps,
                                      double snr,
                                      double ducy,
-                                     std::string mod_type,
-                                     ModulatorParams mod,
+                                     const std::string& mod_type,
+                                     const ModulatorParams& mod,
                                      std::optional<double> mod_tref,
                                      std::optional<std::uint64_t> seed)
-    : m_impl(std::make_unique<Impl>(period,
-                                    dt,
-                                    nsamps,
-                                    snr,
-                                    ducy,
-                                    std::move(mod_type),
-                                    std::move(mod),
-                                    mod_tref,
-                                    seed)) {}
+    : m_impl(std::make_unique<Impl>(
+          period, dt, nsamps, snr, ducy, mod_type, mod, mod_tref, seed)) {}
 
 PulseSignalConfig::~PulseSignalConfig() = default;
 
@@ -436,14 +442,14 @@ io::TimeSeries PulseSignalConfig::generate(std::string_view shape,
 
     std::vector<float> ts_e(m_impl->nsamps);
     std::vector<float> ts_v(m_impl->nsamps);
-    const float variance = static_cast<float>(noise_scale * noise_scale);
+    const auto variance = static_cast<float>(noise_scale * noise_scale);
     for (SizeType i = 0; i < m_impl->nsamps; ++i) {
         ts_e[i] =
             static_cast<float>((noise_scale * static_cast<double>(noise[i])) +
                                (signal_scale * static_cast<double>(tmpl[i])));
         ts_v[i] = variance;
     }
-    return io::TimeSeries(std::move(ts_e), std::move(ts_v), m_impl->dt);
+    return {std::move(ts_e), std::move(ts_v), m_impl->dt};
 }
 
 io::TimeSeries PulseSignalConfig::generate_noise() {
@@ -457,7 +463,7 @@ io::TimeSeries PulseSignalConfig::generate_noise() {
     for (float& sample : ts_e) {
         sample = m_impl->unit_normal() * static_cast<float>(stdnoise);
     }
-    return io::TimeSeries(std::move(ts_e), std::move(ts_v), m_impl->dt);
+    return {std::move(ts_e), std::move(ts_v), m_impl->dt};
 }
 
 double PulseSignalConfig::period() const noexcept { return m_impl->period; }

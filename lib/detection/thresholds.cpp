@@ -6,10 +6,12 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "loki/common/backend.hpp"
 #include "loki/common/types.hpp"
+
 #include "lib/common/dispatch.hpp"
 #include "lib/detection/thresholds_engine.hpp"
 
@@ -79,10 +81,22 @@ DynamicThresholdScheme::DynamicThresholdScheme(
     std::optional<uint64_t> seed,
     SizeType batch_size,
     Exec exec)
-    : m_impl(std::make_unique<Impl>(make_thresholds_engine(
-          branching_pattern, ref_ducy, nbins, ntrials, nprobs, prob_min,
-          snr_final, nthresholds, ducy_max, wtsp, beam_width, trials_start,
-          mode, seed, batch_size, exec))) {}
+    : m_impl(std::make_unique<Impl>(make_thresholds_engine(branching_pattern,
+                                                           ref_ducy,
+                                                           nbins,
+                                                           ntrials,
+                                                           nprobs,
+                                                           prob_min,
+                                                           snr_final,
+                                                           nthresholds,
+                                                           ducy_max,
+                                                           wtsp,
+                                                           beam_width,
+                                                           trials_start,
+                                                           mode,
+                                                           seed,
+                                                           batch_size,
+                                                           exec))) {}
 
 DynamicThresholdScheme::~DynamicThresholdScheme() = default;
 DynamicThresholdScheme::DynamicThresholdScheme(

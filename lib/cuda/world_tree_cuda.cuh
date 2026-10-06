@@ -13,6 +13,7 @@
 #include <thrust/device_vector.h>
 
 #include "loki/common/types.hpp"
+
 #include "lib/cuda/types_cuda.cuh"
 
 namespace loki::memory {

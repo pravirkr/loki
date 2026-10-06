@@ -6,7 +6,6 @@
 #include <memory>
 #include <mutex>
 #include <queue>
-
 #include <string>
 #include <string_view>
 #include <thread>
@@ -65,9 +64,8 @@ private:
 
 class SpinnerColumn : public Column {
 public:
-    explicit SpinnerColumn(
-        Style style         = {.value = fmt::fg(detail::kOrange)},
-        bool use_tva_frames = false)
+    explicit SpinnerColumn(Style style = {.value = fmt::fg(detail::kOrange)},
+                           bool use_tva_frames = false)
         : Column(style),
           m_use_tva_frames(use_tva_frames) {}
     std::string render(const ProgressBar& bar) override;
@@ -75,7 +73,8 @@ public:
 private:
     bool m_use_tva_frames;
     static constexpr std::array<std::string_view, 10> kFrames = {
-        "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"};
+        "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏",
+    };
     // TVA elevator symbols (ASCII approximations)
     static constexpr std::array<std::string_view, 6> kTVAFrames = {
         "o", // Null/empty set
@@ -83,7 +82,7 @@ private:
         "=", // Identity/equivalence
         ":", // Observer/monitoring
         "*", // Variant/anomaly
-        "-"  // Timeline/linear
+        "-", // Timeline/linear
     };
 };
 
@@ -108,8 +107,7 @@ private:
 
 class PercentageColumn : public Column {
 public:
-    explicit PercentageColumn(
-        Style style = {.value = fmt::fg(detail::kAmber)})
+    explicit PercentageColumn(Style style = {.value = fmt::fg(detail::kAmber)})
         : Column(style) {}
     std::string render(const ProgressBar& bar) override;
 };

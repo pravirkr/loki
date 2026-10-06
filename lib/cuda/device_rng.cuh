@@ -2,7 +2,8 @@
 
 #include <cstdint>
 
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 700) && !defined(LOKI_FORCE_CURAND_RNG)
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 700) &&                        \
+    !defined(LOKI_FORCE_CURAND_RNG)
 
 #ifndef CURANDDX_SM
 #define CURANDDX_SM 700
@@ -39,7 +40,7 @@ struct DeviceRNGConfig {
 #include <curand_kernel.h>
 
 namespace loki::device_rng {
-    namespace detail {
+namespace detail {
 
 /**
  * @brief Wrapper for stock cuRAND per-thread Philox4_32_10 state (sm_50+).
@@ -100,8 +101,7 @@ struct CurandUniformFloat {
  * @tparam Rounds Number of Philox rounds (ignored)
  * @tparam SM Target SM architecture (ignored)
  */
-template <uint32_t Rounds = 10, uint32_t SM = 700>
-struct DeviceRNGConfig {
+template <uint32_t Rounds = 10, uint32_t SM = 700> struct DeviceRNGConfig {
     using Generator    = detail::CurandPhiloxGenerator;
     using NormalFloat  = detail::CurandNormalFloat;
     using UniformFloat = detail::CurandUniformFloat;
@@ -112,7 +112,8 @@ struct DeviceRNGConfig {
 #endif
 
 namespace loki::device_rng {
-/// Default per-thread RNG: Philox 7 rounds on sm_70+ (cuRANDDx), Philox-10 otherwise.
+/// Default per-thread RNG: Philox 7 rounds on sm_70+ (cuRANDDx), Philox-10
+/// otherwise.
 using DefaultDeviceRNG = DeviceRNGConfig<7>;
 
 } // namespace loki::device_rng

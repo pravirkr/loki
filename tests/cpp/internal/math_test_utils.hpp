@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "loki/common/types.hpp"
+
 #include "lib/detail/math.hpp"
 
 namespace loki::test {

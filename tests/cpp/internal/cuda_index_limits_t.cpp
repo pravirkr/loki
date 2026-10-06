@@ -2,8 +2,8 @@
 
 #include "lib/detail/index_limits.hpp"
 
-using loki::index_limits::ChunkIndexUsage;
 using loki::index_limits::chunk_exceeds_cuda_index_limits;
+using loki::index_limits::ChunkIndexUsage;
 
 TEST_CASE("CUDA chunk index guard trips on oversized buffers",
           "[index_limits]") {

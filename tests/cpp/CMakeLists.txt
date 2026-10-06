@@ -64,10 +64,19 @@ if(LOKI_BUILD_APPLICATIONS AND TARGET loki_app)
     ${LOKI_API_TEST_TARGET} PRIVATE LOKI_APP_PATH="$<TARGET_FILE:loki_app>"
   )
   set(LOKI_FFA_CLI_CONFIG ${CMAKE_CURRENT_BINARY_DIR}/loki_cli_dry_run.toml)
-  file(
-    WRITE ${LOKI_FFA_CLI_CONFIG}
-    "[search]\nf_min = 1.0\nf_max = 10.0\nnbins = 64\n[performance]\nnthreads = 1\nmax_process_memory_gb = 4.0\n"
+  string(
+    JOIN
+    ""
+    LOKI_FFA_CLI_CONFIG_CONTENT
+    "[search]\n"
+    "f_min = 1.0\n"
+    "f_max = 10.0\n"
+    "nbins = 64\n"
+    "[performance]\n"
+    "nthreads = 1\n"
+    "max_process_memory_gb = 4.0\n"
   )
+  file(WRITE ${LOKI_FFA_CLI_CONFIG} "${LOKI_FFA_CLI_CONFIG_CONTENT}")
   add_test(NAME loki_search_ffa_dry_run COMMAND $<TARGET_FILE:loki_app> search ffa --config
                                                 ${LOKI_FFA_CLI_CONFIG} --dry-run
   )

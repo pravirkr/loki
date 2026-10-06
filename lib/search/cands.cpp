@@ -1,20 +1,41 @@
 #include "lib/search/cands.hpp"
 
+// NOLINTBEGIN(misc-include-cleaner) -- HDF5/HighFive direct use; umbrella
+// headers via cands.hpp.
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <filesystem>
 #include <format>
 #include <fstream>
+#include <ios>
+#include <mutex>
 #include <numeric>
+#include <optional>
 #include <regex>
+#include <span>
+#include <stdexcept>
+#include <string>
 #include <tuple>
+#include <utility>
+#include <vector>
 
 #include <hdf5.h>
+#include <highfive/H5DataSet.hpp>
+#include <highfive/H5DataSpace.hpp>
+#include <highfive/H5DataType.hpp>
+#include <highfive/H5File.hpp>
+#include <highfive/H5Group.hpp>
+#include <highfive/H5PropertyList.hpp>
 #include <highfive/highfive.hpp>
 #include <highfive/span.hpp>
 #include <omp.h>
 
+#include "loki/algorithms/prune_rfi.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
+
 #include "lib/detail/error_check.hpp"
 #include "lib/detail/utils.hpp"
 #include "lib/utils/world_tree.hpp"
@@ -50,7 +71,7 @@ double round_dp(double x, int digits) noexcept {
 
 // Returns (ref_seg, task_id) as integers, or (-1, -1) if not matched
 std::tuple<int, int> extract_ref_seg_task_id(const std::string& filename) {
-    std::regex re(R"(tmp_(\d{3})_(\d{2})_.*\.(?:txt|h5))");
+    const std::regex re(R"(tmp_(\d{3})_(\d{2})_.*\.(?:txt|h5))");
     std::smatch match;
     if (std::regex_match(filename, match, re)) {
         return {std::stoi(match[1]), std::stoi(match[2])};
@@ -243,7 +264,7 @@ double PruneStats::surv_frac() const noexcept {
                         static_cast<double>(n_leaves_phy),
                     2);
 }
-std::string PruneStats::get_summary() const noexcept {
+std::string PruneStats::get_summary() const {
     std::string summary = std::format(
         "Prune level: {:3d}, seg_idx: {:3d}, leaves: {:5.2f}, "
         "leaves_phys: {:5.2f}, branch_frac: {:5.2f},"
@@ -255,7 +276,7 @@ std::string PruneStats::get_summary() const noexcept {
         summary += std::format(", masked: {}, vetoed: {}, harvested: {}",
                                n_leaves_masked, n_leaves_vetoed, n_harvested);
     }
-    summary += "\n";
+    summary += '\n';
     return summary;
 }
 
@@ -313,7 +334,7 @@ void PruneStatsCollection::update_stats(const PruneStats& stats) {
 }
 std::optional<PruneStats>
 PruneStatsCollection::get_stats(SizeType level) const {
-    auto it = std::ranges::find_if(
+    const auto it = std::ranges::find_if(
         m_stats_list, [level](const auto& s) { return s.level == level; });
     return it != m_stats_list.end() ? std::optional{*it} : std::nullopt;
 }
@@ -532,8 +553,22 @@ FFAResultWriter::~FFAResultWriter() {
         if (!m_finalized) {
             finalize();
         }
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
     }
+}
+
+HighFive::File& FFAResultWriter::h5_file() {
+    if (!m_file.has_value()) {
+        throw std::runtime_error("FFAResultWriter: HDF5 file is not open");
+    }
+    return *m_file;
+}
+
+const HighFive::File& FFAResultWriter::h5_file() const {
+    if (!m_file.has_value()) {
+        throw std::runtime_error("FFAResultWriter: HDF5 file is not open");
+    }
+    return *m_file;
 }
 
 void FFAResultWriter::ensure_datasets(SizeType n_params) {
@@ -543,28 +578,30 @@ void FFAResultWriter::ensure_datasets(SizeType n_params) {
     m_n_params           = n_params;
     const auto row_props = make_row_chunk_props();
 
-    HighFive::DataSpace snr_space({0}, {HighFive::DataSpace::UNLIMITED});
-    m_file->createDataSet("snr", snr_space, HighFive::create_datatype<float>(),
-                          row_props);
+    const HighFive::DataSpace snr_space({0}, {HighFive::DataSpace::UNLIMITED});
+    h5_file().createDataSet("snr", snr_space,
+                            HighFive::create_datatype<float>(), row_props);
 
-    HighFive::DataSpace param_space({0, n_params},
-                                    {HighFive::DataSpace::UNLIMITED, n_params});
+    const HighFive::DataSpace param_space(
+        {0, n_params}, {HighFive::DataSpace::UNLIMITED, n_params});
     HighFive::DataSetCreateProps param_props;
     param_props.add(HighFive::Chunking({kH5ChunkRows, n_params}));
     param_props.add(HighFive::Shuffle());
     param_props.add(HighFive::Deflate(kH5DeflateLevel));
-    m_file->createDataSet("param_sets", param_space,
-                          HighFive::create_datatype<double>(), param_props);
+    h5_file().createDataSet("param_sets", param_space,
+                            HighFive::create_datatype<double>(), param_props);
 
-    HighFive::DataSpace width_space({0}, {HighFive::DataSpace::UNLIMITED});
-    m_file->createDataSet("width", width_space,
-                          HighFive::create_datatype<std::uint16_t>(),
-                          row_props);
+    const HighFive::DataSpace width_space({0},
+                                          {HighFive::DataSpace::UNLIMITED});
+    h5_file().createDataSet("width", width_space,
+                            HighFive::create_datatype<std::uint16_t>(),
+                            row_props);
 
-    HighFive::DataSpace nbins_space({0}, {HighFive::DataSpace::UNLIMITED});
-    m_file->createDataSet("nbins", nbins_space,
-                          HighFive::create_datatype<std::uint16_t>(),
-                          row_props);
+    const HighFive::DataSpace nbins_space({0},
+                                          {HighFive::DataSpace::UNLIMITED});
+    h5_file().createDataSet("nbins", nbins_space,
+                            HighFive::create_datatype<std::uint16_t>(),
+                            row_props);
 
     m_datasets_initialized = true;
 }
@@ -590,34 +627,34 @@ FFAResultMetadata::FFAResultMetadata(const search::FFASearchConfig& cfg,
       bseg_ffa(cfg.get_bseg_ffa()) {}
 
 void FFAResultWriter::write_metadata(const FFAResultMetadata& metadata) {
-    std::scoped_lock lock(m_hdf5_mutex);
+    const std::scoped_lock lock(m_hdf5_mutex);
     if (m_metadata_written) {
         throw std::runtime_error("FFA metadata already written.");
     }
     ensure_datasets(metadata.param_names.size());
 
-    m_file->createAttribute("ffa_version", "0.1.0-cpp");
-    m_file->createAttribute("complete", static_cast<int>(0));
-    m_file->createAttribute("param_names", metadata.param_names);
-    m_file->createAttribute("config_toml", metadata.config_toml);
-    m_file->createAttribute("tsamp", metadata.tsamp);
-    m_file->createAttribute("nsamps", metadata.nsamps);
-    m_file->createAttribute("tobs", metadata.tobs);
-    m_file->createAttribute("f_min", metadata.f_min);
-    m_file->createAttribute("f_max", metadata.f_max);
-    m_file->createAttribute("snr_min", metadata.snr_min);
-    m_file->createAttribute("ducy_max", metadata.ducy_max);
-    m_file->createAttribute("wtsp", metadata.wtsp);
-    m_file->createAttribute("nbins_min", metadata.nbins_min);
-    m_file->createAttribute("nbins_max", metadata.nbins_max);
-    m_file->createAttribute("octave_scale", metadata.octave_scale);
-    m_file->createAttribute("eta", metadata.eta);
-    m_file->createAttribute("use_fourier", metadata.use_fourier);
+    h5_file().createAttribute("ffa_version", "0.1.0-cpp");
+    h5_file().createAttribute("complete", 0);
+    h5_file().createAttribute("param_names", metadata.param_names);
+    h5_file().createAttribute("config_toml", metadata.config_toml);
+    h5_file().createAttribute("tsamp", metadata.tsamp);
+    h5_file().createAttribute("nsamps", metadata.nsamps);
+    h5_file().createAttribute("tobs", metadata.tobs);
+    h5_file().createAttribute("f_min", metadata.f_min);
+    h5_file().createAttribute("f_max", metadata.f_max);
+    h5_file().createAttribute("snr_min", metadata.snr_min);
+    h5_file().createAttribute("ducy_max", metadata.ducy_max);
+    h5_file().createAttribute("wtsp", metadata.wtsp);
+    h5_file().createAttribute("nbins_min", metadata.nbins_min);
+    h5_file().createAttribute("nbins_max", metadata.nbins_max);
+    h5_file().createAttribute("octave_scale", metadata.octave_scale);
+    h5_file().createAttribute("eta", metadata.eta);
+    h5_file().createAttribute("use_fourier", metadata.use_fourier);
     if (metadata.bseg_brute.has_value()) {
-        m_file->createAttribute("bseg_brute", *metadata.bseg_brute);
+        h5_file().createAttribute("bseg_brute", *metadata.bseg_brute);
     }
     if (metadata.bseg_ffa.has_value()) {
-        m_file->createAttribute("bseg_ffa", *metadata.bseg_ffa);
+        h5_file().createAttribute("bseg_ffa", *metadata.bseg_ffa);
     }
     m_metadata_written = true;
 }
@@ -631,7 +668,7 @@ void FFAResultWriter::write_results(std::span<const double> param_sets,
     if (n_param_sets == 0) {
         return;
     }
-    std::scoped_lock lock(m_hdf5_mutex);
+    const std::scoped_lock lock(m_hdf5_mutex);
     ensure_datasets(n_params);
 
     if (param_sets.size() != n_param_sets * n_params) {
@@ -645,9 +682,9 @@ void FFAResultWriter::write_results(std::span<const double> param_sets,
             "scores/width/nbins length must match n_param_sets");
     }
 
-    auto append_1d = [&](const std::string& name, const void* data,
-                         const HighFive::DataType& dtype) {
-        auto dset           = m_file->getDataSet(name);
+    const auto append_1d = [&](const std::string& name, const void* data,
+                               const HighFive::DataType& dtype) {
+        auto dset           = h5_file().getDataSet(name);
         const auto old_dims = dset.getSpace().getDimensions();
         const auto old_rows = old_dims.empty() ? 0UL : old_dims[0];
         dset.resize({old_rows + n_param_sets});
@@ -660,7 +697,7 @@ void FFAResultWriter::write_results(std::span<const double> param_sets,
     append_1d("nbins", nbins.data(),
               HighFive::create_datatype<std::uint16_t>());
 
-    auto param_dset     = m_file->getDataSet("param_sets");
+    auto param_dset     = h5_file().getDataSet("param_sets");
     const auto old_dims = param_dset.getSpace().getDimensions();
     const auto old_rows = old_dims.empty() ? 0UL : old_dims[0];
     param_dset.resize({old_rows + n_param_sets, n_params});
@@ -672,18 +709,18 @@ void FFAResultWriter::finalize() {
     if (m_finalized) {
         return;
     }
-    std::scoped_lock lock(m_hdf5_mutex);
+    const std::scoped_lock lock(m_hdf5_mutex);
     if (m_mode == Mode::kWrite) {
         if (!m_metadata_written) {
             throw std::runtime_error(
                 "FFAResultWriter::finalize called before write_metadata");
         }
-        if (m_file->hasAttribute("complete")) {
-            m_file->getAttribute("complete").write(static_cast<int>(1));
+        if (h5_file().hasAttribute("complete")) {
+            h5_file().getAttribute("complete").write(1);
         } else {
-            m_file->createAttribute("complete", static_cast<int>(1));
+            h5_file().createAttribute("complete", 1);
         }
-        m_file->flush();
+        h5_file().flush();
         m_file.reset();
         std::filesystem::rename(m_open_path, m_final_path);
     }
@@ -691,9 +728,9 @@ void FFAResultWriter::finalize() {
 }
 
 void FFAResultWriter::write_ffa_stats(const FFAStatsCollection& ffa_stats) {
-    std::lock_guard<std::mutex> lock(m_hdf5_mutex);
-    m_file->createDataSet("timer_stats", ffa_stats.get_packed_data());
-    m_file->createAttribute("flops", ffa_stats.get_flops());
+    const std::scoped_lock lock(m_hdf5_mutex);
+    h5_file().createDataSet("timer_stats", ffa_stats.get_packed_data());
+    h5_file().createAttribute("flops", ffa_stats.get_flops());
 }
 
 // --- PruneResultWriter ---
@@ -707,7 +744,7 @@ void PruneResultWriter::write_metadata(
     SizeType max_sugg,
     std::span<const float> threshold_scheme,
     const algorithms::PruneRFIConfig& rfi_config) {
-    std::scoped_lock lock(m_hdf5_mutex);
+    const std::scoped_lock lock(m_hdf5_mutex);
 
     HighFive::File file = open_file();
     if (file.exist("pruning_version")) {
@@ -757,10 +794,10 @@ void PruneResultWriter::write_run_harvest(
     const HarvestBuffer<FoldType>& harvest,
     SizeType n_params,
     SizeType n_harvested_total) {
-    std::lock_guard<std::mutex> lock(m_hdf5_mutex);
+    const std::scoped_lock lock(m_hdf5_mutex);
 
-    HighFive::File file        = open_file();
-    HighFive::Group runs_group = open_runs_group(file);
+    HighFive::File file              = open_file();
+    const HighFive::Group runs_group = open_runs_group(file);
     if (!runs_group.exist(std::string(run_name))) {
         throw std::runtime_error(
             std::format("write_run_harvest: run {} does not exist; call "
@@ -785,9 +822,11 @@ void PruneResultWriter::write_run_harvest(
     // --- param_sets ---
     HighFive::DataSetCreateProps param_props;
     if (n > 0) {
-        param_props.add(
-            HighFive::Chunking({static_cast<hsize_t>(std::min(1024UL, n)),
-                                n_params + 2, kParamStride}));
+        param_props.add(HighFive::Chunking({
+            static_cast<hsize_t>(std::min(1024UL, n)),
+            n_params + 2,
+            kParamStride,
+        }));
         param_props.add(HighFive::Deflate(9));
     }
     auto param_ds = hg.createDataSet(
@@ -829,7 +868,7 @@ template void PruneResultWriter::write_run_harvest<ComplexType>(
     std::string_view, const HarvestBuffer<ComplexType>&, SizeType, SizeType);
 
 void PruneResultWriter::write_runtime(float runtime) {
-    std::lock_guard<std::mutex> lock(m_hdf5_mutex);
+    const std::scoped_lock lock(m_hdf5_mutex);
     HighFive::File file = open_file();
     file.createAttribute("final_runtime", runtime);
 }
@@ -844,7 +883,7 @@ void PruneResultWriter::write_run_results(
     SizeType n_leaves,
     SizeType n_params,
     const PruneStatsCollection& pstats) {
-    std::lock_guard<std::mutex> lock(m_hdf5_mutex);
+    const std::scoped_lock lock(m_hdf5_mutex);
 
     HighFive::File file        = open_file();
     HighFive::Group runs_group = open_runs_group(file);
@@ -865,7 +904,7 @@ void PruneResultWriter::write_run_results(
         n_params + 2,
         kParamStride,
     };
-    HighFive::DataSpace param_sets_space(param_sets_dims);
+    const HighFive::DataSpace param_sets_space(param_sets_dims);
     HighFive::DataSetCreateProps props;
     if (n_leaves > 0) {
         const auto chunk_n_param_sets =
@@ -878,7 +917,7 @@ void PruneResultWriter::write_run_results(
         props.add(HighFive::Chunking(chunk_dims));
         props.add(HighFive::Deflate(9));
     }
-    auto param_ds =
+    const auto param_ds =
         run_group.createDataSet("param_sets", param_sets_space,
                                 HighFive::create_datatype<double>(), props);
     const auto n1 = leaves_view.first.size() / leaves_stride;
@@ -899,23 +938,24 @@ void PruneResultWriter::write_run_results(
     }
 
     // --- scores dataset ---
-    auto scores_ds =
+    const auto scores_ds =
         run_group.createDataSet("scores", HighFive::DataSpace({n_leaves}),
                                 HighFive::create_datatype<float>());
 
-    auto write_chunk_score = [&](std::span<const float> chunk, size_t offset) {
+    const auto write_chunk_score = [&](std::span<const float> chunk,
+                                       size_t offset) {
         if (!chunk.empty()) {
             scores_ds.select({offset}, {chunk.size()})
                 .write_raw(chunk.data(), HighFive::create_datatype<float>());
         }
     };
 
-    auto scores_ep_ds =
+    const auto scores_ep_ds =
         run_group.createDataSet("scores_ep", HighFive::DataSpace({n_leaves}),
                                 HighFive::create_datatype<float>());
 
-    auto write_chunk_scores_ep = [&](std::span<const float> chunk,
-                                     size_t offset) {
+    const auto write_chunk_scores_ep = [&](std::span<const float> chunk,
+                                           size_t offset) {
         if (!chunk.empty()) {
             scores_ep_ds.select({offset}, {chunk.size()})
                 .write_raw(chunk.data(), HighFive::create_datatype<float>());
@@ -1025,22 +1065,23 @@ void merge_prune_result_files(const std::filesystem::path& results_dir,
     });
 
     // --- Merge HDF5 files in order ---
-    auto open_mode = std::filesystem::exists(result_file)
-                         ? HighFive::File::ReadWrite
-                         : HighFive::File::Create;
+    const auto open_mode = std::filesystem::exists(result_file)
+                               ? HighFive::File::ReadWrite
+                               : HighFive::File::Create;
     HighFive::File main_h5(result_file.string(), open_mode);
-    HighFive::Group main_runs_group = main_h5.exist("runs")
-                                          ? main_h5.getGroup("runs")
-                                          : main_h5.createGroup("runs");
+    const HighFive::Group main_runs_group = main_h5.exist("runs")
+                                                ? main_h5.getGroup("runs")
+                                                : main_h5.createGroup("runs");
     for (const auto& entry : temp_h5_files) {
-        HighFive::File temp_h5(entry.path().string(), HighFive::File::ReadOnly);
+        const HighFive::File temp_h5(entry.path().string(),
+                                     HighFive::File::ReadOnly);
         if (temp_h5.exist("runs")) {
-            HighFive::Group temp_runs_group = temp_h5.getGroup("runs");
+            const HighFive::Group temp_runs_group = temp_h5.getGroup("runs");
             for (const auto& run_name : temp_runs_group.listObjectNames()) {
                 if (main_runs_group.exist(run_name)) {
                     continue;
                 }
-                herr_t status =
+                const herr_t status =
                     H5Ocopy(temp_runs_group.getId(), run_name.c_str(),
                             main_runs_group.getId(), run_name.c_str(),
                             H5P_DEFAULT, H5P_DEFAULT);
@@ -1132,3 +1173,4 @@ HIGHFIVE_REGISTER_TYPE(loki::search::PruneStats,
                        loki::search::create_compound_prune_stats)
 HIGHFIVE_REGISTER_TYPE(loki::search::PruneTimerStatsPacked,
                        loki::search::create_compound_prune_timer_stats)
+// NOLINTEND(misc-include-cleaner)

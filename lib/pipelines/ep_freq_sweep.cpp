@@ -12,6 +12,7 @@
 #include "loki/common/backend.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
+
 #include "lib/common/dispatch.hpp"
 #include "lib/pipelines/ep_freq_sweep_engine.hpp"
 
@@ -59,7 +60,7 @@ EPFreqSweep::EPFreqSweep(
     float min_pd,
     std::string_view poly_basis,
     float ref_ducy,
-    algorithms::PruneRFIConfig rfi_config,
+    const algorithms::PruneRFIConfig& rfi_config,
     const std::optional<std::filesystem::path>& plan_cache_file,
     std::optional<SizeType> n_runs,
     std::optional<std::vector<SizeType>> ref_segs,

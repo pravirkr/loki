@@ -1,6 +1,7 @@
-#include "lib/utils/workspace_impl.hpp"
-
+// NOLINTBEGIN(misc-include-cleaner) -- CPU engine; symbols via private/engine
+// headers.
 #include "lib/detail/error_check.hpp"
+#include "lib/utils/workspace_impl.hpp"
 
 namespace loki::memory {
 
@@ -214,3 +215,4 @@ template struct EPWorkspaceCPU<float>;
 template struct EPWorkspaceCPU<ComplexType>;
 
 } // namespace loki::memory
+// NOLINTEND(misc-include-cleaner)

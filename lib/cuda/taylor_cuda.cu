@@ -1,16 +1,17 @@
 #include "lib/cuda/taylor_cuda.cuh"
 
 #include <cstdint>
+
 #include <cuda/atomic>
 #include <cuda/std/limits>
 #include <cuda/std/span>
 #include <cuda/std/type_traits>
 #include <cuda_runtime.h>
-
 #include <thrust/execution_policy.h>
 #include <thrust/sequence.h>
 
 #include "loki/common/types.hpp"
+
 #include "lib/cuda/cuda_utils.cuh"
 #include "lib/cuda/kernel_utils.cuh"
 #include "lib/detail/utils.hpp"

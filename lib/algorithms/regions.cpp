@@ -2,15 +2,20 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <format>
 #include <numeric>
+#include <stdexcept>
 #include <utility>
+#include <vector>
 
 #include <spdlog/spdlog.h>
 
+#include "loki/common/coord.hpp"
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
+
 #include "lib/detail/error_check.hpp"
 #include "lib/detail/index_limits.hpp"
 #include "lib/detail/utils.hpp"
@@ -313,7 +318,7 @@ private:
             return 0.0;
         }
 
-        auto param_limits = cfg.get_param_limits();
+        const auto param_limits = cfg.get_param_limits();
         // Drift from center to edge
         const auto t_half = cfg.get_tobs() / 2.0;
         if (cfg.get_nparams() == 2) {
@@ -477,7 +482,7 @@ private:
 
             auto cfg = m_base_cfg.get_updated_config(nbins, eta, actual_start,
                                                      actual_end);
-            plans::FFAPlan<FoldType> plan(cfg);
+            const plans::FFAPlan<FoldType> plan(cfg);
 
             const SizeType buf   = plan.get_buffer_size();
             const SizeType coord = plan.get_coord_size();
@@ -530,13 +535,17 @@ private:
             }
             if (m_use_gpu) {
                 const auto& cfg = e.cfg;
-                plans::FFAPlan<FoldType> plan(cfg);
+                const plans::FFAPlan<FoldType> plan(cfg);
                 const SizeType seg0    = plan.get_segment_lens().front();
                 const SizeType nfreqs0 = plan.get_param_counts().front().back();
                 const index_limits::ChunkIndexUsage usage{
-                    e.buffer_size,   e.ncoords,
-                    cfg.get_nbins(), cfg.get_n_scoring_widths(),
-                    nfreqs0,         seg0};
+                    .buffer_size      = e.buffer_size,
+                    .ncoords          = e.ncoords,
+                    .nbins            = cfg.get_nbins(),
+                    .n_scoring_widths = cfg.get_n_scoring_widths(),
+                    .nfreqs           = nfreqs0,
+                    .segment_len      = seg0,
+                };
                 if (index_limits::chunk_exceeds_cuda_index_limits(usage)) {
                     return false;
                 }
@@ -572,7 +581,7 @@ private:
         };
 
         // Find the largest fitting chunk ending at `current_f_end`.
-        auto find_largest_fitting_chunk =
+        const auto find_largest_fitting_chunk =
             [&](double current_f_end) -> std::pair<double, ChunkEval> {
             const double remaining_width = current_f_end - f_start;
 
@@ -610,7 +619,7 @@ private:
         // Sliver merge: if the bisection produced a tiny low-frequency
         // remainder, attempt to absorb it into the current chunk.
         constexpr double kSliverWidthFactor = 4.0; // sliver up to 4x tolerance
-        auto try_absorb_sliver =
+        const auto try_absorb_sliver =
             [&](double current_f_end, double nominal_start,
                 ChunkEval bisect_eval) -> std::pair<double, ChunkEval> {
             const double remainder_width = nominal_start - f_start;
@@ -702,7 +711,7 @@ private:
             total_actual_width += s.actual_width;
         }
 
-        auto percentile = [](std::vector<double>& v, double p) {
+        const auto percentile = [](std::vector<double>& v, double p) {
             // Linear-interpolation percentile on a sorted copy. p in [0, 100].
             if (v.empty()) {
                 return 0.0;

@@ -63,11 +63,10 @@ TEST_CASE("CPU FFA sweep is invariant to OpenMP thread count",
             /*snr_min=*/3.0, /*max_passing_candidates=*/1U << 20U);
         FFAFreqSweep sweep(cfg, false);
         const auto outdir = std::filesystem::temp_directory_path();
-        const auto prefix =
-            std::format("loki_det_{}", nthreads);
+        const auto prefix = std::format("loki_det_{}", nthreads);
         sweep.execute(ts_e, ts_v, outdir, prefix);
-        const auto path = outdir / (prefix + "_ffa_results.h5");
-        const auto snr  = read_snr(path);
+        const auto path   = outdir / (prefix + "_ffa_results.h5");
+        const auto snr    = read_snr(path);
         const auto params = read_param_sets_flat(path);
         std::filesystem::remove(path);
         return std::pair{snr, params};

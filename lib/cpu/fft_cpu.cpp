@@ -1,5 +1,3 @@
-#include "lib/utils/fft_impl.hpp"
-
 #include <algorithm>
 #include <bit>
 #include <cassert>
@@ -17,7 +15,9 @@
 #include <spdlog/spdlog.h>
 
 #include "loki/common/types.hpp"
+
 #include "lib/detail/error_check.hpp"
+#include "lib/utils/fft_impl.hpp"
 
 namespace loki::math {
 
@@ -35,7 +35,7 @@ void destroy_fftw_plan(fftwf_plan plan) noexcept {
     if (plan == nullptr) {
         return;
     }
-    std::scoped_lock lock(fftw_planner_mutex());
+    std::scoped_lock const lock(fftw_planner_mutex());
     fftwf_destroy_plan(plan);
 }
 
@@ -181,7 +181,7 @@ FFTWPlan make_rfft_plan(SizeType n_real, SizeType n_complex, SizeType howmany) {
     const int howmany_i   = howmany_to_fftw(howmany);
     fftwf_plan raw        = nullptr;
     {
-        std::scoped_lock lock(fftw_planner_mutex());
+        std::scoped_lock const lock(fftw_planner_mutex());
         raw = fftwf_plan_many_dft_r2c(
             1,                       // rank
             &n_real_i,               // transform size
@@ -207,7 +207,7 @@ make_irfft_plan(SizeType n_real, SizeType n_complex, SizeType howmany) {
     const int howmany_i   = howmany_to_fftw(howmany);
     fftwf_plan raw        = nullptr;
     {
-        std::scoped_lock lock(fftw_planner_mutex());
+        std::scoped_lock const lock(fftw_planner_mutex());
         raw = fftwf_plan_many_dft_c2r(
             1,                       // rank
             &n_real_i,               // transform size
@@ -237,7 +237,8 @@ void build_rfft_ladder(std::vector<HowmanyPlan>& out,
     for (SizeType howmany = from_howmany; howmany <= to_howmany;) {
         out.push_back(HowmanyPlan{
             .n_howmany = howmany,
-            .fft_plan  = make_rfft_plan(n_real, n_complex, howmany)});
+            .fft_plan  = make_rfft_plan(n_real, n_complex, howmany),
+        });
         if (howmany > to_howmany / 2) {
             break;
         }
@@ -256,7 +257,8 @@ void build_irfft_ladder(std::vector<HowmanyPlan>& out,
     for (SizeType howmany = from_howmany; howmany <= to_howmany;) {
         out.push_back(HowmanyPlan{
             .n_howmany = howmany,
-            .fft_plan  = make_irfft_plan(n_real, n_complex, howmany)});
+            .fft_plan  = make_irfft_plan(n_real, n_complex, howmany),
+        });
         if (howmany > to_howmany / 2) {
             break;
         }
@@ -270,7 +272,7 @@ fftwf_plan get_or_create_exact_irfft_plan(PreparedPlans& prepared,
                                           SizeType n_complex,
                                           SizeType howmany) {
     {
-        std::scoped_lock lock(exact_mutex);
+        std::scoped_lock const lock(exact_mutex);
         const auto it = prepared.irfft_exact.find(howmany);
         if (it != prepared.irfft_exact.end()) {
             return it->second.get();
@@ -279,7 +281,7 @@ fftwf_plan get_or_create_exact_irfft_plan(PreparedPlans& prepared,
     FFTWPlan plan     = make_irfft_plan(n_real, n_complex, howmany);
     fftwf_plan result = nullptr;
     {
-        std::scoped_lock lock(exact_mutex);
+        std::scoped_lock const lock(exact_mutex);
         const auto [it, inserted] =
             prepared.irfft_exact.try_emplace(howmany, std::move(plan));
         result = it->second.get();
@@ -629,7 +631,7 @@ void FFTWManager::rfft_batch(std::span<float> real_input,
     auto* out_ptr = reinterpret_cast<fftwf_complex*>(complex_output.data());
 
     if (has_prepared(n_real)) {
-        PreparedPlans& prepared = m_impl->plans.at(n_real);
+        PreparedPlans const& prepared = m_impl->plans.at(n_real);
         if (prepared.exact_howmany_cache) {
             throw error_check::DetailedException(std::format(
                 "FFTWManager::rfft_batch: n_real={} uses exact-howmany cache; "
@@ -653,7 +655,8 @@ void FFTWManager::rfft_batch(std::span<float> real_input,
     for (const SizeType howmany : howmany_sizes) {
         local_plans.push_back(HowmanyPlan{
             .n_howmany = howmany,
-            .fft_plan  = make_rfft_plan(n_real, n_complex, howmany)});
+            .fft_plan  = make_rfft_plan(n_real, n_complex, howmany),
+        });
     }
     execute_rfft_ephemeral(slices, n_workers, in_ptr, out_ptr, n_real,
                            n_complex, local_plans);
@@ -719,7 +722,8 @@ void FFTWManager::irfft_batch(std::span<ComplexType> complex_input,
     for (const SizeType howmany : howmany_sizes) {
         local_plans.push_back(HowmanyPlan{
             .n_howmany = howmany,
-            .fft_plan  = make_irfft_plan(n_real, n_complex, howmany)});
+            .fft_plan  = make_irfft_plan(n_real, n_complex, howmany),
+        });
     }
     execute_irfft_ephemeral(slices, n_workers, in_ptr, out_ptr, n_real,
                             n_complex, local_plans, norm);
@@ -757,15 +761,15 @@ public:
     Impl& operator=(Impl&&)      = delete;
 
     void circular_convolve(std::span<float> n1,
-                             std::span<float> n2,
-                             std::span<float> out) {
+                           std::span<float> n2,
+                           std::span<float> out) {
         fftwf_execute_dft_r2c(m_plan_forward.get(), n1.data(), m_n1_fft);
         fftwf_execute_dft_r2c(m_plan_forward.get(), n2.data(), m_n2_fft);
         for (SizeType i = 0; i < m_n1x * m_n2x * m_fft_size; ++i) {
             const SizeType idx_n1 =
                 ((i / (m_n2x * m_fft_size)) * m_fft_size) + (i % m_fft_size);
-            const SizeType idx_n2 = ((i / m_fft_size) % m_n2x * m_fft_size) +
-                                    (i % m_fft_size);
+            const SizeType idx_n2 =
+                ((i / m_fft_size) % m_n2x * m_fft_size) + (i % m_fft_size);
             m_n1n2_fft[i][0] = (m_n1_fft[idx_n1][0] * m_n2_fft[idx_n2][0]) -
                                (m_n1_fft[idx_n1][1] * m_n2_fft[idx_n2][1]);
             m_n1n2_fft[i][1] = (m_n1_fft[idx_n1][0] * m_n2_fft[idx_n2][1]) +
@@ -778,12 +782,10 @@ private:
     static FFTWPlan make_2d_r2c_plan(SizeType n1x, SizeType ny) {
         fftwf_plan raw = nullptr;
         {
-            std::scoped_lock lock(fftw_planner_mutex());
+            std::scoped_lock const lock(fftw_planner_mutex());
             raw = fftwf_plan_dft_r2c_2d(static_cast<int>(n1x),
-                                          static_cast<int>(ny),
-                                          nullptr,
-                                          nullptr,
-                                          FFTW_ESTIMATE);
+                                        static_cast<int>(ny), nullptr, nullptr,
+                                        FFTW_ESTIMATE);
         }
         return FFTWPlan{raw};
     }
@@ -791,11 +793,9 @@ private:
     static FFTWPlan make_2d_c2r_plan(SizeType n1x, SizeType ny) {
         fftwf_plan raw = nullptr;
         {
-            std::scoped_lock lock(fftw_planner_mutex());
+            std::scoped_lock const lock(fftw_planner_mutex());
             raw = fftwf_plan_dft_c2r_2d(static_cast<int>(n1x),
-                                        static_cast<int>(ny),
-                                        nullptr,
-                                        nullptr,
+                                        static_cast<int>(ny), nullptr, nullptr,
                                         FFTW_ESTIMATE);
         }
         return FFTWPlan{raw};
@@ -845,3 +845,4 @@ void irfft_batch(std::span<ComplexType> complex_input,
 }
 
 } // namespace loki::math
+// NOLINTEND(misc-include-cleaner)

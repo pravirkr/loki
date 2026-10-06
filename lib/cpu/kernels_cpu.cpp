@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstring>
 #include <numbers>
+#include <utility>
 #include <vector>
 
 #include <omp.h>
@@ -17,6 +18,7 @@
 
 #include "loki/common/coord.hpp"
 #include "loki/common/types.hpp"
+
 #include "lib/cpu/brute_fold_intrinsics.hpp"
 
 namespace loki::core {
@@ -311,8 +313,8 @@ void shift_add_complex_recurrence_binary(
     ComplexType* __restrict__ out_e             = out;
     ComplexType* __restrict__ out_v             = out + nbins_f;
 
-    auto compute_fused_op = [&](SizeType k, const BatchType& phase_tail,
-                                const BatchType& phase_head) {
+    auto const compute_fused_op = [&](SizeType k, const BatchType& phase_tail,
+                                      const BatchType& phase_head) {
         const auto tail_e_data = xsimd::load_unaligned(&data_tail_e[k]);
         const auto head_e_data = xsimd::load_unaligned(&data_head_e[k]);
         xsimd::fma(head_e_data, phase_head, tail_e_data * phase_tail)
@@ -425,7 +427,7 @@ void shift_add_complex_recurrence_linear(
     // Initial phase for k=0 is exp(i*0) = 1 + 0i
     ComplexType current_block_start_phase = {1.0F, 0.0F};
 
-    auto compute_and_store = [&](SizeType k, const BatchType& phase) {
+    auto const compute_and_store = [&](SizeType k, const BatchType& phase) {
         const auto tail_e_data = xsimd::load_unaligned(&data_tail_e[k]);
         const auto head_e_data = xsimd::load_unaligned(&data_head_e[k]);
         (tail_e_data + head_e_data * phase).store_unaligned(&out_e[k]);
@@ -508,7 +510,7 @@ void shift_add_complex_recurrence_linear_inplace(
     // Initial phase for k=0 is exp(i*0) = 1 + 0i
     ComplexType current_block_start_phase = {1.0F, 0.0F};
 
-    auto accumulate_inplace = [&](SizeType k, const BatchType& phase) {
+    auto const accumulate_inplace = [&](SizeType k, const BatchType& phase) {
         const auto out_e_data  = xsimd::load_unaligned(&out_e[k]);
         const auto head_e_data = xsimd::load_unaligned(&data_head_e[k]);
         (out_e_data + head_e_data * phase).store_unaligned(&out_e[k]);
@@ -560,8 +562,7 @@ void precompute_base_phasors_scalar(float* __restrict__ delta_r,
                                     double tsamp,
                                     double t_ref,
                                     int nthreads) {
-    nthreads = std::clamp(nthreads, 1, omp_get_max_threads());
-
+    nthreads = std::max(nthreads, 1);
 #pragma omp parallel for num_threads(nthreads) default(none)                   \
     shared(delta_r, delta_i, freqs, nfreqs, segment_len, tsamp, t_ref)
     for (SizeType ifreq = 0; ifreq < nfreqs; ++ifreq) {
@@ -625,9 +626,9 @@ void brute_fold_segment_complex_xsimd(
         fold_v_base[0] = ComplexType(sum_v, 0.0F);
 
         // --- Helper lambda for the core computation ---
-        auto compute_dft_op = [&](SizeType k, BatchType& acc_e_r,
-                                  BatchType& acc_e_i, BatchType& acc_v_r,
-                                  BatchType& acc_v_i) {
+        auto const compute_dft_op = [&](SizeType k, BatchType& acc_e_r,
+                                        BatchType& acc_e_i, BatchType& acc_v_r,
+                                        BatchType& acc_v_i) {
             const auto samples_e = BatchType::load_unaligned(&ts_e_seg[k]);
             const auto samples_v = BatchType::load_unaligned(&ts_v_seg[k]);
             const auto phasor_r =
@@ -745,7 +746,7 @@ void ffa_iter_segment_freq(const float* __restrict__ fold_in,
                            SizeType nsegments,
                            SizeType nbins,
                            int nthreads) noexcept {
-    nthreads = std::clamp(nthreads, 1, omp_get_max_threads());
+    nthreads = std::max(nthreads, 1);
     // Process one segment at a time to keep data in cache
     const SizeType fold_stride     = 2 * nbins;
     const SizeType seg_prev_stride = ncoords_prev * fold_stride;
@@ -773,7 +774,7 @@ void ffa_iter_standard_freq(const float* __restrict__ fold_in,
                             SizeType nsegments,
                             SizeType nbins,
                             int nthreads) noexcept {
-    nthreads = std::clamp(nthreads, 1, omp_get_max_threads());
+    nthreads                       = std::max(nthreads, 1);
     constexpr SizeType kBlockSize  = 32;
     const SizeType fold_stride     = 2 * nbins;
     const SizeType seg_prev_stride = ncoords_prev * fold_stride;
@@ -822,7 +823,7 @@ void ffa_iter_segment(const float* __restrict__ fold_in,
                       SizeType nsegments,
                       SizeType nbins,
                       int nthreads) noexcept {
-    nthreads = std::clamp(nthreads, 1, omp_get_max_threads());
+    nthreads = std::max(nthreads, 1);
     // Process one segment at a time to keep data in cache
     constexpr SizeType kBlockSize  = 32;
     const SizeType fold_stride     = 2 * nbins;
@@ -880,7 +881,7 @@ void ffa_iter_standard(const float* __restrict__ fold_in,
                        SizeType nsegments,
                        SizeType nbins,
                        int nthreads) noexcept {
-    nthreads = std::clamp(nthreads, 1, omp_get_max_threads());
+    nthreads                       = std::max(nthreads, 1);
     constexpr SizeType kBlockSize  = 32;
     const SizeType fold_stride     = 2 * nbins;
     const SizeType seg_prev_stride = ncoords_prev * fold_stride;
@@ -936,7 +937,7 @@ void ffa_complex_iter_segment(const ComplexType* __restrict__ fold_in,
                               SizeType nbins_f,
                               SizeType nbins,
                               int nthreads) noexcept {
-    nthreads = std::clamp(nthreads, 1, omp_get_max_threads());
+    nthreads = std::max(nthreads, 1);
     // Process one segment at a time to keep data in cache
     constexpr SizeType kBlockSize  = 32;
     const SizeType fold_stride     = 2 * nbins_f;
@@ -950,7 +951,7 @@ void ffa_complex_iter_segment(const ComplexType* __restrict__ fold_in,
         // Process coordinates in blocks within each segment
         for (SizeType icoord_block = 0; icoord_block < ncoords_cur;
              icoord_block += kBlockSize) {
-            SizeType block_end =
+            SizeType const block_end =
                 std::min(icoord_block + kBlockSize, ncoords_cur);
             for (SizeType icoord = icoord_block; icoord < block_end; ++icoord) {
                 const auto* __restrict__ coord_cur = &coords[icoord];
@@ -984,7 +985,7 @@ void ffa_complex_iter_standard(const ComplexType* __restrict__ fold_in,
                                SizeType nbins_f,
                                SizeType nbins,
                                int nthreads) noexcept {
-    nthreads = std::clamp(nthreads, 1, omp_get_max_threads());
+    nthreads                       = std::max(nthreads, 1);
     constexpr SizeType kBlockSize  = 32;
     const SizeType fold_stride     = 2 * nbins_f;
     const SizeType seg_prev_stride = ncoords_prev * fold_stride;
@@ -995,7 +996,8 @@ void ffa_complex_iter_standard(const ComplexType* __restrict__ fold_in,
                nbins_f, nbins, fold_stride, seg_prev_stride, seg_out_stride)
     for (SizeType icoord_block = 0; icoord_block < ncoords_cur;
          icoord_block += kBlockSize) {
-        SizeType block_end = std::min(icoord_block + kBlockSize, ncoords_cur);
+        SizeType const block_end =
+            std::min(icoord_block + kBlockSize, ncoords_cur);
         for (SizeType iseg = 0; iseg < nsegments; ++iseg) {
             for (SizeType icoord = icoord_block; icoord < block_end; ++icoord) {
                 const auto* __restrict__ coord_cur = &coords[icoord];
@@ -1030,7 +1032,7 @@ void ffa_complex_iter_segment_freq(
     SizeType nbins_f,
     SizeType nbins,
     int nthreads) noexcept {
-    nthreads = std::clamp(nthreads, 1, omp_get_max_threads());
+    nthreads = std::max(nthreads, 1);
     // Process one segment at a time to keep data in cache
     constexpr SizeType kBlockSize  = 32;
     const SizeType fold_stride     = 2 * nbins_f;
@@ -1044,7 +1046,7 @@ void ffa_complex_iter_segment_freq(
         // Process coordinates in blocks within each segment
         for (SizeType icoord_block = 0; icoord_block < ncoords_cur;
              icoord_block += kBlockSize) {
-            SizeType block_end =
+            SizeType const block_end =
                 std::min(icoord_block + kBlockSize, ncoords_cur);
             for (SizeType icoord = icoord_block; icoord < block_end; ++icoord) {
                 const auto* __restrict__ coord_cur = &coords[icoord];
@@ -1079,7 +1081,7 @@ void ffa_complex_iter_standard_freq(
     SizeType nbins_f,
     SizeType nbins,
     int nthreads) noexcept {
-    nthreads = std::clamp(nthreads, 1, omp_get_max_threads());
+    nthreads                       = std::max(nthreads, 1);
     constexpr SizeType kBlockSize  = 32;
     const SizeType fold_stride     = 2 * nbins_f;
     const SizeType seg_prev_stride = ncoords_prev * fold_stride;
@@ -1090,7 +1092,8 @@ void ffa_complex_iter_standard_freq(
                nbins_f, nbins, fold_stride, seg_prev_stride, seg_out_stride)
     for (SizeType icoord_block = 0; icoord_block < ncoords_cur;
          icoord_block += kBlockSize) {
-        SizeType block_end = std::min(icoord_block + kBlockSize, ncoords_cur);
+        SizeType const block_end =
+            std::min(icoord_block + kBlockSize, ncoords_cur);
         for (SizeType iseg = 0; iseg < nsegments; ++iseg) {
             for (SizeType icoord = icoord_block; icoord < block_end; ++icoord) {
                 const auto* __restrict__ coord_cur = &coords[icoord];
@@ -1122,7 +1125,7 @@ void fill_segment_prefix(const float* __restrict__ src,
     dst[0]     = 0.0;
     for (SizeType i = 0; i < n; ++i) {
         acc += static_cast<double>(src[i]);
-        dst[static_cast<SizeType>(i) + 1] = acc;
+        dst[i + 1] = acc;
     }
 }
 
@@ -1320,7 +1323,7 @@ void tile_input_ranges(const coord::FFACoordFreq* const* coords_levels,
                        SizeType coord_begin,
                        SizeType coord_end,
                        CoordRange* ranges) noexcept {
-    ranges[k_levels] = {coord_begin, coord_end};
+    ranges[k_levels] = {.lo = coord_begin, .hi = coord_end};
     for (SizeType level = k_levels; level >= 1; --level) {
         const auto* coords   = coords_levels[level];
         const SizeType lo    = ranges[level].lo;
@@ -1342,7 +1345,7 @@ void brute_fold_ts(const float* __restrict__ ts_e,
                    SizeType segment_len,
                    SizeType nbins,
                    int nthreads) noexcept {
-    nthreads = std::clamp(nthreads, 1, omp_get_max_threads());
+    nthreads = std::max(nthreads, 1);
 #pragma omp parallel num_threads(nthreads) default(none)                       \
     shared(ts_e, ts_v, fold, runs, run_offsets, nsegments, nfreqs,             \
                segment_len, nbins)
@@ -1376,7 +1379,7 @@ void brute_fold_ffa_fused_freq(const float* __restrict__ ts_e,
                                SizeType nbins,
                                SizeType nlevels,
                                int nthreads) noexcept {
-    nthreads = std::clamp(nthreads, 1, omp_get_max_threads());
+    nthreads                     = std::max(nthreads, 1);
     const SizeType tile_segments = SizeType{1} << nlevels;
     const SizeType ntiles        = nsegments >> nlevels;
     const SizeType fold_stride   = 2 * nbins;
@@ -1449,7 +1452,7 @@ void brute_fold_ts_complex_xsimd(const float* __restrict__ ts_e,
                                  double tsamp,
                                  double t_ref,
                                  int nthreads) noexcept {
-    nthreads           = std::clamp(nthreads, 1, omp_get_max_threads());
+    nthreads           = std::max(nthreads, 1);
     const auto nbins_f = (nbins / 2) + 1;
 
     AlignedFloatVec delta_phasors_r(nfreqs * segment_len);
@@ -1497,7 +1500,7 @@ void brute_fold_ts_complex(const float* __restrict__ ts_e,
                            double tsamp,
                            double t_ref,
                            int nthreads) noexcept {
-    nthreads = std::clamp(nthreads, 1, omp_get_max_threads());
+    nthreads = std::max(nthreads, 1);
 #if defined(__AVX512F__) || (defined(__AVX2__) && defined(__FMA__)) ||         \
     defined(__aarch64__) || defined(__ARM_NEON)
 
@@ -1631,7 +1634,7 @@ void shift_add_linear_batch(const float* __restrict__ folds_tree,
                             const SizeType* __restrict__ indices_ffa,
                             const float* __restrict__ phase_shift,
                             float* __restrict__ folds_out,
-                            float* __restrict__ temp_buffer,
+                            float const* __restrict__ temp_buffer,
                             SizeType nbins,
                             SizeType n_leaves,
                             SizeType physical_start_idx,
@@ -1693,7 +1696,7 @@ void shift_add_ascend_linear_batch(const float* __restrict__ folds_ffa,
                                    const SizeType* __restrict__ indices_ffa,
                                    const float* __restrict__ phase_shift,
                                    float* __restrict__ folds_tree,
-                                   float* __restrict__ temp_buffer,
+                                   float const* __restrict__ temp_buffer,
                                    SizeType nbins,
                                    SizeType n_coords_init,
                                    SizeType n_leaves,
@@ -1779,8 +1782,9 @@ void cone_execute_tile(float* scratch_a,
                        [[maybe_unused]] const double* p4_e = nullptr,
                        [[maybe_unused]] const double* p4_v = nullptr) {
     const SizeType fold_stride = 2 * nbins;
-    CoordRange ranges[17];
-    tile_input_ranges(coords_levels, k_levels, coord_begin, coord_end, ranges);
+    std::array<CoordRange, 17> ranges{};
+    tile_input_ranges(coords_levels, k_levels, coord_begin, coord_end,
+                      ranges.data());
 
     float* cur            = scratch_a;
     float* next           = scratch_b;
@@ -1827,10 +1831,11 @@ void cone_execute_tile(float* scratch_a,
         }
     }
 
-    auto merge_start = time_it ? ConeClock::now() : ConeClock::time_point{};
+    auto const merge_start =
+        time_it ? ConeClock::now() : ConeClock::time_point{};
     for (SizeType level = 1; level <= k_levels; ++level) {
         const SizeType nseg_in    = SizeType{1} << (k_levels - (level - 1));
-        const SizeType nseg_out   = nseg_in >> 1;
+        const SizeType nseg_out   = nseg_in / 2;
         const SizeType width_prev = ranges[level - 1].hi - ranges[level - 1].lo;
         const SizeType width_cur  = ranges[level].hi - ranges[level].lo;
         const SizeType seg_prev   = width_prev * fold_stride;
@@ -1936,23 +1941,23 @@ void ffa_cone_band_freq(const float* level_in,
     if ((nsegments_in % nseg_group) != 0) {
         return;
     }
-    nthreads                   = std::clamp(nthreads, 1, omp_get_max_threads());
-    const SizeType nseg_out    = nsegments_in >> k_levels;
-    const SizeType ncoords_top = ncoords[k_levels];
+    nthreads                      = std::max(nthreads, 1);
+    const SizeType nseg_out       = nsegments_in >> k_levels;
+    const SizeType ncoords_top    = ncoords[k_levels];
     const SizeType scratch_floats = cone_band_working_floats(
         coords_levels, ncoords, k_levels, tile_coords, nbins);
     if (scratch_floats == 0 || ncoords_top == 0 || nseg_out == 0) {
         return;
     }
     const bool bottom            = level_in == nullptr;
-    const bool parallel_groups   = nseg_out >= static_cast<SizeType>(nthreads);
+    const bool parallel_groups   = std::cmp_greater_equal(nseg_out, nthreads);
     const bool time_it           = thread_seconds != nullptr;
     const SizeType prefix_stride = segment_len + 1;
 
     std::vector<double> shared_prefix_e;
     std::vector<double> shared_prefix_v;
-    std::vector<double> shared_p4_e;
-    std::vector<double> shared_p4_v;
+    std::vector<double> const shared_p4_e;
+    std::vector<double> const shared_p4_v;
     if (bottom && !parallel_groups) {
         const auto prefix_start = ConeClock::now();
         shared_prefix_e.resize(nsegments_in * prefix_stride);
@@ -2158,3 +2163,4 @@ void ffa_cone_band_freq(const float* level_in,
 }
 
 } // namespace loki::core
+// NOLINTEND(misc-include-cleaner)

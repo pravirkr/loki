@@ -5,6 +5,10 @@
 #include <stdexcept>
 #include <string_view>
 
+#include "loki/common/backend.hpp"
+#include "loki/common/plans.hpp"
+#include "loki/common/types.hpp"
+
 #include "lib/common/dispatch.hpp"
 #include "lib/utils/workspace_impl.hpp"
 

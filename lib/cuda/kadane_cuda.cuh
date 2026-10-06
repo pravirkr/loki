@@ -1,10 +1,12 @@
 #pragma once
 
 #include <cstdint>
+
 #include <cuda/std/span>
 #include <cuda_runtime.h>
 
 #include "loki/common/types.hpp"
+
 #include "lib/cuda/workspace_cuda.cuh"
 
 namespace loki::detection {

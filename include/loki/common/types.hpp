@@ -33,8 +33,8 @@ concept TriviallyCopyable = std::is_trivially_copyable_v<T>;
 
 // NOLINTBEGIN(cppcoreguidelines-macro-usage)
 // Helper macro for stringification
-#define STRINGIFY(x) STRINGIFY_(x)
-#define STRINGIFY_(x) #x
+#define STRINGIFY(x) STRINGIFY_IMPL(x)
+#define STRINGIFY_IMPL(x) #x
 
 inline constexpr SizeType kUnrollFactor = 8;
 

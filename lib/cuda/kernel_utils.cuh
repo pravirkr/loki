@@ -1,9 +1,9 @@
 #pragma once
 
 #include <cstdint>
+
 #include <cuda/std/cmath>
 #include <cuda/std/utility>
-
 #include <cuda_runtime.h>
 
 #include "lib/detail/utils.hpp"

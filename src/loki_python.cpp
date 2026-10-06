@@ -1,5 +1,3 @@
-#include "bindings/bind.hpp"
-
 #include <string>
 #include <vector>
 
@@ -8,6 +6,8 @@
 #include <pybind11/stl.h>
 
 #include "loki/common/backend.hpp"
+
+#include "bindings/bind.hpp"
 
 namespace loki {
 

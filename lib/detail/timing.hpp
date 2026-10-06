@@ -1,10 +1,23 @@
 #pragma once
 
 #include <chrono>
-#include <spdlog/spdlog.h>
 #include <string_view>
+#include <utility>
+
+#include <spdlog/spdlog.h>
 
 namespace loki::timing {
+
+namespace detail {
+
+template <typename Fn> void swallow_exceptions(Fn&& fn) noexcept {
+    try {
+        std::forward<Fn>(fn)();
+    } catch (...) { // NOLINT(bugprone-empty-catch)
+    }
+}
+
+} // namespace detail
 
 // ScopeTimer class to measure and log the time taken by a block of code
 class ScopeTimer {
@@ -18,15 +31,18 @@ public:
     }
 
     // Destructor ends the timer and logs elapsed time
-    ~ScopeTimer() {
+    ~ScopeTimer() noexcept {
         if (!s_enabled) {
             return;
         }
 
-        auto end     = std::chrono::steady_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-            end - m_start);
-        spdlog::info("{} took {} ms", m_label, elapsed.count());
+        detail::swallow_exceptions([&] {
+            const auto end = std::chrono::steady_clock::now();
+            const auto elapsed =
+                std::chrono::duration_cast<std::chrono::milliseconds>(end -
+                                                                      m_start);
+            spdlog::info("{} took {} ms", m_label, elapsed.count());
+        });
     }
 
     ScopeTimer(const ScopeTimer&)            = delete;
@@ -87,9 +103,9 @@ public:
             spdlog::set_level(spdlog::level::err);
         }
     }
-    ~ScopedLogLevel() {
+    ~ScopedLogLevel() noexcept {
         if (m_quiet) {
-            spdlog::set_level(m_old_level);
+            detail::swallow_exceptions([&] { spdlog::set_level(m_old_level); });
         }
     }
 

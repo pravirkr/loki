@@ -3,13 +3,23 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <format>
+#include <functional>
+#include <map>
+#include <memory>
 #include <numeric>
+#include <ranges>
 #include <span>
+#include <stdexcept>
+#include <string>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
+#include "loki/common/coord.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
+
 #include "lib/core/chebyshev.hpp"
 #include "lib/core/circular.hpp"
 #include "lib/core/taylor.hpp"
@@ -45,9 +55,7 @@ struct FFAPlanBase::Impl {
     Impl(const Impl& other)                = default;
     Impl& operator=(const Impl& other)     = default;
 
-    const search::FFASearchConfig& get_config() const noexcept {
-        return m_cfg;
-    }
+    const search::FFASearchConfig& get_config() const noexcept { return m_cfg; }
 
     SizeType get_coord_size() const noexcept {
         return std::accumulate(ncoords.begin(), ncoords.end(), SizeType{0},
@@ -79,7 +87,8 @@ struct FFAPlanBase::Impl {
         for (SizeType i_level = 1; i_level < n_levels; ++i_level) {
             const auto ncoords_cur    = ncoords[i_level];
             const auto ncoords_offset = ncoords_offsets[i_level];
-            auto coords_span = coords.subspan(ncoords_offset, ncoords_cur);
+            const auto coords_span =
+                coords.subspan(ncoords_offset, ncoords_cur);
 
             // Tail coordinates
             core::ffa_taylor_resolve_poly_batch(
@@ -126,12 +135,13 @@ struct FFAPlanBase::Impl {
         for (SizeType i_level = 1; i_level < n_levels; ++i_level) {
             const auto ncoords_cur    = ncoords[i_level];
             const auto ncoords_offset = ncoords_offsets[i_level];
-            auto coords_freq_span =
+            const auto coords_freq_span =
                 coords_freq.subspan(ncoords_offset, ncoords_cur);
             core::ffa_taylor_resolve_freq_batch(
                 param_counts[i_level][0], param_counts[i_level - 1][0],
                 m_cfg.get_param_limits()[0], coords_freq_span, i_level,
-                m_cfg.get_tseg_brute(), m_cfg.get_nbins(), m_cfg.get_nthreads());
+                m_cfg.get_tseg_brute(), m_cfg.get_nbins(),
+                m_cfg.get_nthreads());
         }
     }
 
@@ -154,7 +164,7 @@ struct FFAPlanBase::Impl {
     }
 
     std::vector<std::vector<double>>
-    compute_param_grid(SizeType ffa_level) const noexcept {
+    compute_param_grid(SizeType ffa_level) const {
         std::vector<std::vector<double>> param_grid(n_params);
         for (SizeType iparam = 0; iparam < n_params; ++iparam) {
             param_grid[iparam] =
@@ -166,7 +176,7 @@ struct FFAPlanBase::Impl {
     }
 
     std::vector<std::vector<std::vector<double>>>
-    compute_param_grid_full() const noexcept {
+    compute_param_grid_full() const {
         std::vector<std::vector<std::vector<double>>> param_grid(n_levels);
         for (SizeType i_level = 0; i_level < n_levels; ++i_level) {
             param_grid[i_level].resize(n_params);
@@ -417,11 +427,11 @@ FFAPlanBase::resolve_coordinates_freq() {
     return m_impl->resolve_coordinates_freq();
 }
 std::vector<std::vector<double>>
-FFAPlanBase::compute_param_grid(SizeType ffa_level) const noexcept {
+FFAPlanBase::compute_param_grid(SizeType ffa_level) const {
     return m_impl->compute_param_grid(ffa_level);
 }
 std::vector<std::vector<std::vector<double>>>
-FFAPlanBase::compute_param_grid_full() const noexcept {
+FFAPlanBase::compute_param_grid_full() const {
     return m_impl->compute_param_grid_full();
 }
 std::map<std::string, std::vector<double>>
@@ -493,7 +503,7 @@ float FFAPlan<FoldType>::get_gflops(bool return_in_time) const noexcept {
 }
 
 template <SupportedFoldType FoldType>
-void FFAPlan<FoldType>::configure_fold_shapes() noexcept {
+void FFAPlan<FoldType>::configure_fold_shapes() {
     const auto n_levels = get_n_levels();
     const auto n_params = get_n_params();
     const auto& cfg     = get_config();

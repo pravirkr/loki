@@ -14,6 +14,7 @@
 #include "loki/common/types.hpp"
 #include "loki/detection/score.hpp"
 #include "loki/search/configs.hpp"
+
 #include "lib/cuda/cuda_utils.cuh"
 #include "lib/cuda/ffa_cuda.cuh"
 #include "lib/cuda/fft_cuda.cuh"
@@ -161,8 +162,8 @@ public:
         // Drain whatever is still in RAM
         timer.start();
         search::flush_candidates(m_cands, m_region_decode, writer,
-                         m_write_param_sets_batch, m_width_batch, m_nbins_batch,
-                         m_base_cfg.get_nparams());
+                                 m_write_param_sets_batch, m_width_batch,
+                                 m_nbins_batch, m_base_cfg.get_nparams());
         ffa_timer_stats_pipeline["io"] += timer.stop();
         m_ffa_stats->update_stats(ffa_timer_stats_pipeline,
                                   static_cast<float>(accumulated_flops));
@@ -239,7 +240,7 @@ private:
 
         // Create region planner with GPU memory limit
         return algorithms::FFARegionPlanner<HostFoldT>(cfg_with_gpu_mem,
-                                                    /*use_gpu=*/true);
+                                                       /*use_gpu=*/true);
     }
 
     void execute_ffa_region(const search::FFASearchConfig& cfg,
@@ -250,8 +251,8 @@ private:
         timing::SimpleTimer timer;
         // Create FFA with shared workspace
         timer.start();
-        auto the_ffa = algorithms::FFACudaCore<FoldTypeCUDA>(m_ffa_workspace, m_fft_manager,
-                                                 cfg, m_device_id);
+        auto the_ffa = algorithms::FFACudaCore<FoldTypeCUDA>(
+            m_ffa_workspace, m_fft_manager, cfg, m_device_id);
         const plans::FFAPlan<HostFoldT>& ffa_plan = the_ffa.get_plan();
         const auto buffer_size_time = ffa_plan.get_buffer_size_time();
         const auto fold_size_time   = ffa_plan.get_fold_size_time();
@@ -329,9 +330,9 @@ private:
         SizeType copied = 0;
         while (copied < n_passing) {
             if (m_cands.is_full()) {
-                search::flush_candidates(m_cands, m_region_decode, writer,
-                                 m_write_param_sets_batch, m_width_batch,
-                                 m_nbins_batch, m_base_cfg.get_nparams());
+                search::flush_candidates(
+                    m_cands, m_region_decode, writer, m_write_param_sets_batch,
+                    m_width_batch, m_nbins_batch, m_base_cfg.get_nparams());
             }
             const SizeType chunk =
                 std::min(m_cands.get_space(), n_passing - copied);

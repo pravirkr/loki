@@ -1,15 +1,29 @@
 #include "lib/detail/progress.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstddef>
+#include <cstdio>
 #include <iostream>
+#include <memory>
+#include <mutex>
+#include <ratio>
 #include <sstream>
+#include <string>
+#include <string_view>
 #include <utility>
+#include <vector>
 
 #include <fmt/color.h>
 #include <fmt/format.h>
+#include <spdlog/common.h>
+#include <spdlog/details/log_msg.h>
 #include <spdlog/details/os.h>
+#include <spdlog/logger.h>
 #include <spdlog/spdlog.h>
+
+#include "loki/common/types.hpp"
 
 namespace loki::progress {
 
@@ -33,10 +47,10 @@ std::string repeat_unicode(const std::string_view s, SizeType n) {
 
 template <typename Rep, typename Period>
 std::string format_duration(std::chrono::duration<Rep, Period> dur) {
-    auto ns        = std::chrono::duration_cast<std::chrono::nanoseconds>(dur);
-    auto secs      = std::chrono::floor<std::chrono::seconds>(ns);
-    const auto hms = std::chrono::hh_mm_ss{secs};
-    auto days      = std::chrono::duration_cast<
+    const auto ns   = std::chrono::duration_cast<std::chrono::nanoseconds>(dur);
+    const auto secs = std::chrono::floor<std::chrono::seconds>(ns);
+    const auto hms  = std::chrono::hh_mm_ss{secs};
+    const auto days = std::chrono::duration_cast<
         std::chrono::duration<int, std::ratio<86400>>>(secs);
 
     std::string result;
@@ -70,7 +84,7 @@ std::string SpinnerColumn::render(const ProgressBar& bar) {
     }
 
     constexpr double kIntervalMs = 150.0;
-    auto frame_no =
+    const auto frame_no =
         (static_cast<double>(bar.get_elapsed().count()) / 1e6) / kIntervalMs;
     if (m_use_tva_frames) {
         return fmt::format(
@@ -95,7 +109,7 @@ std::string BarColumn::render_pulse(const ProgressBar& bar) const {
     for (int i = 0; i < m_width; ++i) {
         pulse_bar[i] = kBarChar[0];
     }
-    std::string p1 = detail::repeat_unicode(kBarChar, m_width);
+    const std::string p1 = detail::repeat_unicode(kBarChar, m_width);
 
     std::string result;
     result += fmt::format("{}", fmt::styled(p1.substr(0, pulse_position),
@@ -145,7 +159,7 @@ std::string TimeStatsColumn::render(const ProgressBar& bar) {
     if (max_progress == 0) {
         return fmt::format("{}", fmt::styled("[??:??s]", m_style.value));
     }
-    auto eta_str = [&]() -> std::string {
+    const auto eta_str = [&]() -> std::string {
         if (progress == 0) {
             return "--:--s";
         }
@@ -197,6 +211,7 @@ ProgressBar::ProgressBar(std::string_view prefix,
     add_column(std::make_unique<TimeStatsColumn>());
 }
 
+// NOLINTNEXTLINE(bugprone-exception-escape) -- destructor may format strings.
 ProgressBar::~ProgressBar() {
     if (!m_is_managed) {
         mark_as_completed();
@@ -218,7 +233,7 @@ ProgressBar& ProgressBar::add_leaves_column() {
 }
 void ProgressBar::set_progress(SizeType new_progress) {
     {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        const std::scoped_lock lock(m_mutex);
         if (!m_start_time_saved) {
             m_start_time       = std::chrono::steady_clock::now();
             m_start_time_saved = true;
@@ -267,7 +282,7 @@ std::string ProgressBar::to_string() const {
 }
 
 void ProgressBar::print_progress() {
-    std::lock_guard<std::mutex> lock(m_mutex);
+    const std::scoped_lock lock(m_mutex);
     if (!is_completed()) {
         m_elapsed = std::chrono::steady_clock::now() - m_start_time;
     }
@@ -312,7 +327,7 @@ void ProgressTrackerSink<Mutex>::set_color_mode(spdlog::color_mode mode) {
 template <class Mutex>
 void ProgressTrackerSink<Mutex>::set_tracker(
     MultiprocessProgressTracker* tracker) {
-    std::lock_guard<Mutex> lock(this->mutex_);
+    const std::scoped_lock lock(this->mutex_);
     m_tracker = tracker;
 }
 template <class Mutex>
@@ -356,11 +371,13 @@ MultiprocessProgressTracker::MultiprocessProgressTracker(
     m_previous_logger = spdlog::default_logger();
     m_sink            = std::make_shared<ProgressTrackerSink<std::mutex>>(
         this, spdlog::color_mode::always);
-    auto logger = std::make_shared<spdlog::logger>("multi_progress", m_sink);
+    const auto logger =
+        std::make_shared<spdlog::logger>("multi_progress", m_sink);
     spdlog::set_default_logger(logger);
     spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] %v");
 }
 
+// NOLINTNEXTLINE(bugprone-exception-escape) -- destructor may format strings.
 MultiprocessProgressTracker::~MultiprocessProgressTracker() {
     stop();
     if (m_sink) {
@@ -373,7 +390,7 @@ MultiprocessProgressTracker::~MultiprocessProgressTracker() {
 }
 
 void MultiprocessProgressTracker::start() {
-    std::lock_guard<std::mutex> lock(m_control_mutex);
+    const std::scoped_lock lock(m_control_mutex);
     if (!m_running.load() && !m_permanently_stopped.load()) {
         detail::show_console_cursor(false);
         m_running.store(true);
@@ -407,12 +424,12 @@ void MultiprocessProgressTracker::stop() {
 int MultiprocessProgressTracker::add_task(std::string_view description,
                                           SizeType total,
                                           bool transient) {
-    std::lock_guard<std::mutex> lock(m_tasks_mutex);
-    int task_id = m_next_task_id++;
-    auto bar    = make_pruning_bar(description, total, transient,
-                                   /*managed=*/true);
-    auto& state = m_tasks[task_id];
-    state.bar   = std::move(bar);
+    const std::scoped_lock lock(m_tasks_mutex);
+    const int task_id = m_next_task_id++;
+    auto bar          = make_pruning_bar(description, total, transient,
+                                         /*managed=*/true);
+    auto& state       = m_tasks[task_id];
+    state.bar         = std::move(bar);
     return task_id;
 }
 
@@ -422,13 +439,13 @@ void MultiprocessProgressTracker::update_task(int task_id,
                                               double leaves,
                                               bool force_complete) {
     {
-        std::lock_guard<std::mutex> lock(m_tasks_mutex);
-        auto it = m_tasks.find(task_id);
+        const std::scoped_lock lock(m_tasks_mutex);
+        const auto it = m_tasks.find(task_id);
         if (it != m_tasks.end()) {
             if (!it->second.active.load()) {
                 it->second.active.store(true);
             }
-            if (completed != static_cast<SizeType>(-1)) {
+            if (std::cmp_not_equal(completed, static_cast<SizeType>(-1))) {
                 it->second.bar->set_progress(completed);
             }
             if (score >= 0) {
@@ -440,10 +457,9 @@ void MultiprocessProgressTracker::update_task(int task_id,
             if (force_complete) {
                 it->second.bar->mark_as_completed();
             }
-            if (it->second.bar->is_completed()) {
-                if (it->second.bar->is_transient()) {
-                    it->second.visible.store(false);
-                }
+            if (it->second.bar->is_completed() &&
+                it->second.bar->is_transient()) {
+                it->second.visible.store(false);
             }
         }
     }
@@ -451,13 +467,13 @@ void MultiprocessProgressTracker::update_task(int task_id,
 }
 
 void MultiprocessProgressTracker::queue_log(std::string msg) {
-    std::lock_guard<std::mutex> lock(m_log_mutex);
+    const std::scoped_lock lock(m_log_mutex);
     m_log_queue.push(std::move(msg));
     m_cv.notify_one();
 }
 
 void MultiprocessProgressTracker::final_cleanup() {
-    std::lock_guard<std::mutex> lock(m_output_mutex);
+    const std::scoped_lock lock(m_output_mutex);
     clear_progress_lines();
     std::cout << std::flush;
 }
@@ -485,7 +501,7 @@ void MultiprocessProgressTracker::render_loop() {
 void MultiprocessProgressTracker::render_frame(bool is_final_render) {
     std::vector<std::string> logs_to_print;
     {
-        std::lock_guard<std::mutex> log_lock(m_log_mutex);
+        const std::scoped_lock log_lock(m_log_mutex);
         while (!m_log_queue.empty()) {
             logs_to_print.push_back(std::move(m_log_queue.front()));
             m_log_queue.pop();
@@ -494,7 +510,7 @@ void MultiprocessProgressTracker::render_frame(bool is_final_render) {
 
     std::vector<std::string> lines_to_render;
     {
-        std::lock_guard<std::mutex> task_lock(m_tasks_mutex);
+        const std::scoped_lock task_lock(m_tasks_mutex);
         std::vector<int> active_and_visible_task_ids;
         for (auto const& [id, task] : m_tasks) {
             if ((task.visible.load() || is_final_render) &&
@@ -503,12 +519,12 @@ void MultiprocessProgressTracker::render_frame(bool is_final_render) {
             }
         }
         std::ranges::sort(active_and_visible_task_ids);
-        for (int id : active_and_visible_task_ids) {
+        for (const int id : active_and_visible_task_ids) {
             lines_to_render.push_back(m_tasks.at(id).bar->to_string());
         }
     }
 
-    std::lock_guard<std::mutex> output_lock(m_output_mutex);
+    const std::scoped_lock output_lock(m_output_mutex);
 
     // --- Critical Rendering Section ---
     // 1. Clear only the old progress bar lines
@@ -557,6 +573,7 @@ ProgressTracker::ProgressTracker(std::string_view description,
     }
 }
 
+// NOLINTNEXTLINE(bugprone-exception-escape) -- destructor may format strings.
 ProgressTracker::~ProgressTracker() {
     // RAII cleanup: ensure the bar is marked as finished when the scope ends
     mark_as_completed();

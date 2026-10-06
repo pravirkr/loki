@@ -21,26 +21,33 @@ namespace loki::detection::detail {
 // make_*_cpu is defined in lib/cpu/, make_*_gpu in lib/cuda/ (GPU builds only).
 
 class ThresholdsEngine {
+protected:
+    ThresholdsEngine() = default;
+
 public:
     virtual ~ThresholdsEngine() = default;
 
     virtual std::vector<SizeType>
-    get_current_thresholds_idx(SizeType istage) const          = 0;
-    virtual std::vector<float> get_branching_pattern() const   = 0;
-    virtual std::vector<float> get_profile() const             = 0;
-    virtual std::vector<float> get_thresholds() const          = 0;
-    virtual std::vector<float> get_probs() const               = 0;
-    virtual SizeType get_nstages() const                       = 0;
-    virtual SizeType get_nthresholds() const                   = 0;
-    virtual SizeType get_nprobs() const                        = 0;
-    virtual std::vector<SizeType> get_box_score_widths() const = 0;
-    virtual std::vector<State> get_states() const              = 0;
-    virtual void run(SizeType thres_neigh)                     = 0;
-    virtual std::vector<State>
-    evaluate(std::span<const float> thresholds,
-             SizeType ntrials,
-             std::optional<uint64_t> seed = std::nullopt) const             = 0;
-    virtual std::string save(const std::string& outdir = "./") const        = 0;
+    get_current_thresholds_idx(SizeType istage) const                       = 0;
+    virtual std::vector<float> get_branching_pattern() const                = 0;
+    virtual std::vector<float> get_profile() const                          = 0;
+    virtual std::vector<float> get_thresholds() const                       = 0;
+    virtual std::vector<float> get_probs() const                            = 0;
+    virtual SizeType get_nstages() const                                    = 0;
+    virtual SizeType get_nthresholds() const                                = 0;
+    virtual SizeType get_nprobs() const                                     = 0;
+    virtual std::vector<SizeType> get_box_score_widths() const              = 0;
+    virtual std::vector<State> get_states() const                           = 0;
+    virtual void run(SizeType thres_neigh)                                  = 0;
+    virtual std::vector<State> evaluate(std::span<const float> thresholds,
+                                        SizeType ntrials,
+                                        std::optional<uint64_t> seed) const = 0;
+    virtual std::string save(const std::string& outdir) const               = 0;
+
+    ThresholdsEngine(const ThresholdsEngine&)            = delete;
+    ThresholdsEngine& operator=(const ThresholdsEngine&) = delete;
+    ThresholdsEngine(ThresholdsEngine&&)                 = delete;
+    ThresholdsEngine& operator=(ThresholdsEngine&&)      = delete;
     virtual std::vector<float> get_best_path_thresholds(float min_pd) const = 0;
 };
 

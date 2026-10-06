@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "loki/common/backend.hpp"
+#include "loki/common/coord.hpp"
 #include "loki/common/types.hpp"
 
 #include "lib/algorithms/fold_engine.hpp"

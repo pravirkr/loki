@@ -17,6 +17,7 @@
 
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
+
 #include "lib/cuda/workspace_cuda.cuh"
 
 namespace loki::algorithms {

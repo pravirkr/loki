@@ -1,3 +1,5 @@
+#include "loki/io/timeseries.hpp"
+
 #include <cmath>
 #include <filesystem>
 #include <limits>
@@ -6,8 +8,6 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
-
-#include "loki/io/timeseries.hpp"
 
 using Catch::Matchers::WithinAbs;
 
@@ -39,11 +39,11 @@ private:
 
 TEST_CASE("timeseries rejects non-finite or non-positive variance", "[io]") {
     const std::vector<float> intensity{1.0F, 2.0F};
+    REQUIRE_THROWS_AS((loki::io::TimeSeries(intensity, {1.0F, 0.0F}, 0.1)),
+                      std::invalid_argument);
     REQUIRE_THROWS_AS(
-        (loki::io::TimeSeries(intensity, {1.0F, 0.0F}, 0.1)),
-        std::invalid_argument);
-    REQUIRE_THROWS_AS(
-        (loki::io::TimeSeries(intensity, {1.0F, std::numeric_limits<float>::quiet_NaN()}, 0.1)),
+        (loki::io::TimeSeries(
+            intensity, {1.0F, std::numeric_limits<float>::quiet_NaN()}, 0.1)),
         std::invalid_argument);
 }
 

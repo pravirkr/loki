@@ -160,9 +160,8 @@ if(LOKI_CUDA STREQUAL "ON" OR LOKI_CUDA STREQUAL "AUTO")
   if(CMAKE_CUDA_COMPILER)
     enable_language(CUDA)
   elseif(LOKI_CUDA STREQUAL "ON")
-    message(
-      FATAL_ERROR
-        "LOKI_CUDA=ON but no CUDA compiler (nvcc) was found. Install CUDA >= 12.6 or use LOKI_CUDA=AUTO/OFF."
+    message(FATAL_ERROR "LOKI_CUDA=ON but no CUDA compiler (nvcc) was found. "
+                        "Install CUDA >= 12.6 or use LOKI_CUDA=AUTO/OFF."
     )
   else()
     message(STATUS "CUDA compiler not found. Building CPU-only (LOKI_CUDA=AUTO).")

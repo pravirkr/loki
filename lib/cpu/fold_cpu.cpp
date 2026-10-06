@@ -6,6 +6,7 @@
 #include <omp.h>
 
 #include "loki/common/types.hpp"
+
 #include "lib/algorithms/fold_engine.hpp"
 #include "lib/common/dispatch.hpp"
 #include "lib/core/kernels.hpp"
@@ -80,15 +81,15 @@ public:
         }
         if constexpr (std::is_same_v<FoldType, float>) {
             core::brute_fold_ts(ts_e.data(), ts_v.data(), fold.data(),
-                                   m_runs.data(), m_run_offsets.data(),
-                                   m_nsegments, m_nfreqs, m_segment_len,
-                                   m_nbins, m_nthreads);
+                                m_runs.data(), m_run_offsets.data(),
+                                m_nsegments, m_nfreqs, m_segment_len, m_nbins,
+                                m_nthreads);
 
         } else {
-            core::brute_fold_ts_complex(
-                ts_e.data(), ts_v.data(), fold.data(), m_freq_arr.data(),
-                m_nfreqs, m_nsegments, m_segment_len, m_nbins, m_tsamp, m_t_ref,
-                m_nthreads);
+            core::brute_fold_ts_complex(ts_e.data(), ts_v.data(), fold.data(),
+                                        m_freq_arr.data(), m_nfreqs,
+                                        m_nsegments, m_segment_len, m_nbins,
+                                        m_tsamp, m_t_ref, m_nthreads);
         }
     }
 
@@ -188,7 +189,9 @@ private:
             "BruteFold segment length does not fit in a phase-run index");
         m_run_offsets.assign(m_nfreqs + 1, 0);
         std::vector<SizeType> counts(m_nfreqs, 0);
-#pragma omp parallel for schedule(static) num_threads(m_nthreads)
+#pragma omp parallel for schedule(static)                                      \
+    num_threads(m_nthreads) default(none)                                      \
+    shared(m_segment_len, m_tsamp, m_t_ref, m_freq_arr, m_nbins, counts)
         for (SizeType ifreq = 0; ifreq < m_nfreqs; ++ifreq) {
             uint32_t prev_bin = std::numeric_limits<uint32_t>::max();
             SizeType nruns    = 0;
@@ -208,7 +211,10 @@ private:
             m_run_offsets[ifreq + 1] = m_run_offsets[ifreq] + counts[ifreq];
         }
         m_runs.resize(m_run_offsets.back());
-#pragma omp parallel for schedule(static) num_threads(m_nthreads)
+#pragma omp parallel for schedule(static)                                      \
+    num_threads(m_nthreads) default(none)                                      \
+    shared(m_segment_len, m_tsamp, m_t_ref, m_freq_arr, m_nbins, m_runs,       \
+               m_run_offsets, counts)
         for (SizeType ifreq = 0; ifreq < m_nfreqs; ++ifreq) {
             coord::PhaseRun* out = m_runs.data() + m_run_offsets[ifreq];
             uint32_t prev_bin    = std::numeric_limits<uint32_t>::max();
@@ -221,14 +227,14 @@ private:
                     proper_time, m_freq_arr[ifreq], m_nbins, 0.0);
                 if (iphase != prev_bin) {
                     if (prev_bin != std::numeric_limits<uint32_t>::max()) {
-                        out[written++] = {run_end, prev_bin};
+                        out[written++] = {.end = run_end, .bin = prev_bin};
                     }
                     prev_bin = iphase;
                 }
                 run_end = static_cast<uint32_t>(isamp + 1);
             }
             if (m_segment_len > 0) {
-                out[written++] = {run_end, prev_bin};
+                out[written++] = {.end = run_end, .bin = prev_bin};
             }
             // Contiguous cover of the segment: the runs abut and end at B.
             error_check::check_equal(
@@ -267,3 +273,4 @@ detail::make_brute_fold_cpu<ComplexType>(
     std::span<const double>, SizeType, SizeType, SizeType, double, double, int);
 
 } // namespace loki::algorithms
+// NOLINTEND(misc-include-cleaner)

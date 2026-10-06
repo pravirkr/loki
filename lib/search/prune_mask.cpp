@@ -2,11 +2,14 @@
 
 #include <algorithm>
 #include <bit>
-#include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <optional>
 #include <span>
 #include <utility>
+
+#include "loki/algorithms/prune_rfi.hpp"
+#include "loki/common/types.hpp"
 
 #include "lib/detail/error_check.hpp"
 #include "lib/detail/psr_utils.hpp"
@@ -95,7 +98,8 @@ void GridMask::add_window_single(double f_lo,
     ++m_n_windows;
 }
 
-void GridMask::add_window(const algorithms::ParamWindow& window, SizeType n_harmonics) {
+void GridMask::add_window(const algorithms::ParamWindow& window,
+                          SizeType n_harmonics) {
     error_check::check(!utils::is_nan(window.f_lo) &&
                            !utils::is_nan(window.f_hi),
                        "GridMask::add_window: frequency bounds must not be "
@@ -164,7 +168,7 @@ SizeType GridMask::filter_resolved(std::span<double> leaves,
     if (empty()) {
         return n_leaves;
     }
-    const auto n_cells = get_n_cells();
+    const auto n_cells                   = get_n_cells();
     double* __restrict__ leaves_ptr      = leaves.data();
     SizeType* __restrict__ origins_ptr   = origins.data();
     SizeType* __restrict__ param_idx_ptr = param_idx.data();

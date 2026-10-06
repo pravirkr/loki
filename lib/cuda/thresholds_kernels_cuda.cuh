@@ -25,6 +25,7 @@
 
 #include "loki/common/types.hpp"
 #include "loki/detection/thresholds.hpp"
+
 #include "lib/cuda/device_rng.cuh"
 
 namespace loki::detection::detail {
@@ -58,10 +59,10 @@ __device__ __forceinline__ typename RNG::Generator open_rng(uint64_t seed,
 // Unique subsequence for evaluate(). purpose, stage, parent, branch and
 // trial each occupy a disjoint bit field, so streams do not overlap.
 __device__ __forceinline__ uint64_t eval_subseq(uint32_t purpose,
-                                                  uint32_t stage,
-                                                  uint32_t parent,
-                                                  uint32_t branch,
-                                                  uint32_t trial) {
+                                                uint32_t stage,
+                                                uint32_t parent,
+                                                uint32_t branch,
+                                                uint32_t trial) {
     return (static_cast<uint64_t>(purpose & 7U) << 61U) |
            (static_cast<uint64_t>(parent & 0xFFFFFFU) << 37U) |
            (static_cast<uint64_t>(stage & 0xFFFFU) << 21U) |
@@ -98,8 +99,8 @@ max_boxcar_snr_from_prefix(const float* __restrict__ prefix,
     for (uint32_t iw = 0; iw < nwidths; ++iw) {
         const BoxWidth box = widths[iw];
         const uint32_t w   = box.w;
-        float max_diff = cuda::std::numeric_limits<float>::lowest();
-        max_diff       = fmaxf(max_diff, prefix[w - 1]);
+        float max_diff     = cuda::std::numeric_limits<float>::lowest();
+        max_diff           = fmaxf(max_diff, prefix[w - 1]);
 
         const uint32_t loop_limit = nbins - w;
         for (uint32_t j = 1; j <= loop_limit; ++j) {
@@ -219,11 +220,12 @@ template <uint32_t NB, uint32_t WMAX> struct RegScorer {
     }
 
     template <bool kStore, bool kFixedStreams = false>
-    __device__ __forceinline__ static float run(const float* __restrict__ in_row,
-                                                float* __restrict__ out_row,
-                                                float branch_scale,
-                                                uint64_t noise_base,
-                                                const TrialSimParams& p) {
+    __device__ __forceinline__ static float
+    run(const float* __restrict__ in_row,
+        float* __restrict__ out_row,
+        float branch_scale,
+        uint64_t noise_base,
+        const TrialSimParams& p) {
         auto rng_noise = open_rng<kFixedStreams>(p.seed, noise_base);
         typename RNG::NormalFloat dist_noise(0.0F, __fsqrt_rn(p.var_add));
         const auto* in4   = reinterpret_cast<const float4*>(in_row);
@@ -274,7 +276,7 @@ template <uint32_t NB, uint32_t WMAX> struct RegScorer {
             const float snr = __fmul_rn(__fsub_rn(__fmul_rn(box.hb, max_diff),
                                                   __fmul_rn(box.b, total_sum)),
                                         inv_stdnoise);
-            max_snr = fmaxf(max_snr, snr);
+            max_snr         = fmaxf(max_snr, snr);
         }
         return max_snr;
     }
@@ -287,11 +289,12 @@ template <uint32_t MAX_BINS> struct GenericScorer {
         return p.nbins_padded / 4;
     }
     template <bool kStore, bool kFixedStreams = false>
-    __device__ __forceinline__ static float run(const float* __restrict__ in_row,
-                                                float* __restrict__ out_row,
-                                                float branch_scale,
-                                                uint64_t noise_base,
-                                                const TrialSimParams& p) {
+    __device__ __forceinline__ static float
+    run(const float* __restrict__ in_row,
+        float* __restrict__ out_row,
+        float branch_scale,
+        uint64_t noise_base,
+        const TrialSimParams& p) {
         auto rng_noise = open_rng<kFixedStreams>(p.seed, noise_base);
         typename RNG::NormalFloat dist_noise(0.0F, __fsqrt_rn(p.var_add));
         const auto* in4   = reinterpret_cast<const float4*>(in_row);
@@ -406,7 +409,8 @@ __device__ __forceinline__ bool parent_is_valid(const State* prev_states,
                                                 uint32_t nprobs,
                                                 uint32_t kprob) {
     return !prev_states[(jthres * nprobs) + kprob].is_empty &&
-           ntrials_par[2 * par_cell] != 0 && ntrials_par[(2 * par_cell) + 1] != 0;
+           ntrials_par[2 * par_cell] != 0 &&
+           ntrials_par[(2 * par_cell) + 1] != 0;
 }
 
 // Memory bound. The explicit minBlocks=1 measured ~6% faster than the bare
@@ -426,8 +430,8 @@ __global__ __launch_bounds__(256, 1) void simulate_score_parents_kernel(
     TrialSimParams p,
     uint32_t ntrials,
     uint32_t nprobs) {
-    const uint64_t tid = (static_cast<uint64_t>(blockIdx.x) * blockDim.x) +
-                         threadIdx.x;
+    const uint64_t tid =
+        (static_cast<uint64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     const uint64_t trials_per_item = 2ULL * ntrials;
     const uint64_t iparent         = tid / trials_per_item;
     if (iparent >= *n_parents) {
@@ -439,8 +443,8 @@ __global__ __launch_bounds__(256, 1) void simulate_score_parents_kernel(
 
     uint64_t select_base = 0;
     uint64_t noise_base  = 0;
-    trial_rng_bases(rng_state[kRngStageBase] + tid, p.nbins_padded,
-                    select_base, noise_base);
+    trial_rng_bases(rng_state[kRngStageBase] + tid, p.nbins_padded, select_base,
+                    noise_base);
 
     const ParentCandidate par = parents[iparent];
     const uint32_t cell       = (par.jslot_prev * nprobs) + par.kprob;
@@ -448,13 +452,13 @@ __global__ __launch_bounds__(256, 1) void simulate_score_parents_kernel(
         trial_id, ntrials_par[(2 * cell) + branch], p.seed, select_base);
     const uint64_t cell_branch = (2ULL * cell) + branch;
     const uint64_t src_row     = (((2ULL * src_par[cell]) + branch) * ntrials) +
-                             idx_par[(cell_branch * ntrials) + src_trial];
-    const uint64_t out_row = (cell_branch * ntrials) + trial_id;
+                                 idx_par[(cell_branch * ntrials) + src_trial];
+    const uint64_t out_row     = (cell_branch * ntrials) + trial_id;
 
     scores_cur[out_row] = Scorer::template run<true>(
         sim_prev + (src_row * p.nbins_padded),
-        sim_cur + (out_row * p.nbins_padded),
-        (branch == 1) ? p.bias_snr : 0.0F, noise_base, p);
+        sim_cur + (out_row * p.nbins_padded), (branch == 1) ? p.bias_snr : 0.0F,
+        noise_base, p);
 }
 
 // Reads and clears the winning key of output cell (islot, iprob).
@@ -497,15 +501,16 @@ __global__ void evaluate_stage_kernel(const float* __restrict__ in_folds,
     const uint32_t nsurv    = n_in[branch];
     uint32_t src            = trial_id;
     if (trial_id >= nsurv) {
-        const float u = eval_uniform(
-            p.seed, eval_subseq(3U, stage, 0U, branch, trial_id));
+        const float u =
+            eval_uniform(p.seed, eval_subseq(3U, stage, 0U, branch, trial_id));
         src = min(static_cast<uint32_t>(u * static_cast<float>(nsurv)),
                   nsurv - 1U);
     }
     const uint64_t noise_subseq = eval_subseq(2U, stage, 0U, branch, trial_id);
     const uint64_t src_row = (static_cast<uint64_t>(branch) * ntrials) + src;
-    const uint64_t out_row = (static_cast<uint64_t>(branch) * ntrials) + trial_id;
-    scores[out_row]        = Scorer::template run<true, true>(
+    const uint64_t out_row =
+        (static_cast<uint64_t>(branch) * ntrials) + trial_id;
+    scores[out_row] = Scorer::template run<true, true>(
         in_folds + (src_row * p.nbins_padded),
         out_folds + (out_row * p.nbins_padded),
         (branch == 1) ? p.bias_snr : 0.0F, noise_subseq, p);
@@ -530,8 +535,8 @@ __global__ __launch_bounds__(256, 2) void simulate_count_items_kernel(
     TrialSimParams p,
     uint32_t ntrials,
     uint32_t nprobs) {
-    const uint64_t tid = (static_cast<uint64_t>(blockIdx.x) * blockDim.x) +
-                         threadIdx.x;
+    const uint64_t tid =
+        (static_cast<uint64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     const uint64_t trials_per_item = 2ULL * ntrials;
     const uint64_t slot            = tid / trials_per_item;
     uint32_t segment               = kInvalidIndex;
@@ -540,13 +545,14 @@ __global__ __launch_bounds__(256, 2) void simulate_count_items_kernel(
         const uint32_t item    = order[slot];
         const uint32_t rng_idx = item_rng_idx[item];
         if (rng_idx != kInvalidIndex) {
-            const auto local_idx    = static_cast<uint32_t>(tid % trials_per_item);
-            const uint32_t branch   = local_idx / ntrials;
-            const uint32_t trial_id = local_idx % ntrials;
+            const auto local_idx = static_cast<uint32_t>(tid % trials_per_item);
+            const uint32_t branch        = local_idx / ntrials;
+            const uint32_t trial_id      = local_idx % ntrials;
             const ThresholdPairItem pair = pairs[item / nprobs];
-            const uint32_t par_cell = (pair.jslot_prev * nprobs) + (item % nprobs);
-            uint64_t select_base    = 0;
-            uint64_t noise_base     = 0;
+            const uint32_t par_cell =
+                (pair.jslot_prev * nprobs) + (item % nprobs);
+            uint64_t select_base = 0;
+            uint64_t noise_base  = 0;
             trial_rng_bases(rng_state[kRngStageBase] +
                                 (rng_idx * trials_per_item) + local_idx,
                             p.nbins_padded, select_base, noise_base);
@@ -566,8 +572,8 @@ __global__ __launch_bounds__(256, 2) void simulate_count_items_kernel(
     const unsigned peers = __match_any_sync(0xFFFFFFFFU, segment);
     const unsigned votes = __ballot_sync(0xFFFFFFFFU, survived) & peers;
     const auto lane      = threadIdx.x % 32;
-    if (segment != kInvalidIndex && lane == static_cast<uint32_t>(__ffs(peers) - 1) &&
-        votes != 0) {
+    if (segment != kInvalidIndex &&
+        lane == static_cast<uint32_t>(__ffs(peers) - 1) && votes != 0) {
         atomicAdd(&counts[segment], static_cast<uint32_t>(__popc(votes)));
     }
 }
@@ -596,9 +602,9 @@ __global__ __launch_bounds__(kBlock) void commit_items_kernel(
     TrialSimParams p,
     uint32_t ntrials,
     uint32_t nprobs) {
-    const uint32_t out_cell = blockIdx.x; // islot * nprobs + iprob
-    const uint32_t ithres   = beam_cur[out_cell / nprobs];
-    const uint32_t key_idx  = (ithres * nprobs) + (out_cell % nprobs);
+    const uint32_t out_cell      = blockIdx.x; // islot * nprobs + iprob
+    const uint32_t ithres        = beam_cur[out_cell / nprobs];
+    const uint32_t key_idx       = (ithres * nprobs) + (out_cell % nprobs);
     const unsigned long long key = take_cell_key(cell_keys, key_idx);
     if (key == kEmptyKey) {
         if (threadIdx.x == 0) {
@@ -609,9 +615,9 @@ __global__ __launch_bounds__(kBlock) void commit_items_kernel(
     }
     const auto item              = static_cast<uint32_t>(key & 0xFFFFFFFFULL);
     const ThresholdPairItem pair = pairs[item / nprobs];
-    const uint32_t par_cell = (pair.jslot_prev * nprobs) + (item % nprobs);
-    const float threshold   = thresholds[ithres];
-    const uint2 cnt         = counts[item];
+    const uint32_t par_cell      = (pair.jslot_prev * nprobs) + (item % nprobs);
+    const float threshold        = thresholds[ithres];
+    const uint2 cnt              = counts[item];
     if (threadIdx.x == 0) {
         states_cur[key_idx]              = cand_states[item];
         ntrials_next[2 * out_cell]       = cnt.x;
@@ -644,8 +650,8 @@ __global__ __launch_bounds__(kBlock) void commit_items_kernel(
                     ((((2ULL * par_cell) + branch) * ntrials) + src_trial) *
                         p.nbins_padded;
                 flag = Scorer::template run<true>(
-                           in_row, reinterpret_cast<float*>(fold),
-                           branch_scale, noise_base, p) > threshold
+                           in_row, reinterpret_cast<float*>(fold), branch_scale,
+                           noise_base, p) > threshold
                            ? 1U
                            : 0U;
             }
@@ -654,9 +660,9 @@ __global__ __launch_bounds__(kBlock) void commit_items_kernel(
             BlockScan(temp_storage).ExclusiveSum(flag, pos, total);
             if (flag != 0) {
                 auto* dst4 = reinterpret_cast<float4*>(
-                    folds_next + ((((2ULL * out_cell) + branch) * ntrials) +
-                                  running + pos) *
-                                     p.nbins_padded);
+                    folds_next +
+                    ((((2ULL * out_cell) + branch) * ntrials) + running + pos) *
+                        p.nbins_padded);
 #pragma unroll
                 for (uint32_t j = 0; j < Scorer::kMaxVec; ++j) {
                     if (j < vec_count) {
@@ -828,12 +834,10 @@ void ScorerLaunch<Scorer>::commit_items(dim3 grid,
                                         TrialSimParams p,
                                         uint32_t ntrials,
                                         uint32_t nprobs) {
-    commit_items_kernel<Scorer, kCommitItemsBlock>
-        <<<grid, block, 0, stream>>>(beam_cur, pairs, item_rng_idx, rng_state,
-                                     counts, cand_states, states_cur,
-                                     cell_keys, folds_par, ntrials_par,
-                                     thresholds, folds_next, ntrials_next,
-                                     error_flag, p, ntrials, nprobs);
+    commit_items_kernel<Scorer, kCommitItemsBlock><<<grid, block, 0, stream>>>(
+        beam_cur, pairs, item_rng_idx, rng_state, counts, cand_states,
+        states_cur, cell_keys, folds_par, ntrials_par, thresholds, folds_next,
+        ntrials_next, error_flag, p, ntrials, nprobs);
 }
 
 // Every scorer type dispatch_scorer can select. Instantiated in

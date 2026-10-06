@@ -1,14 +1,13 @@
 #pragma once
 
-#include "loki/common/backend.hpp" // IWYU pragma: export
-#include "loki/common/coord.hpp"   // IWYU pragma: export
-#include "loki/common/types.hpp"   // IWYU pragma: export
-
 #include "loki/algorithms/ep_regions.hpp"    // IWYU pragma: export
 #include "loki/algorithms/ffa.hpp"           // IWYU pragma: export
 #include "loki/algorithms/fold.hpp"          // IWYU pragma: export
 #include "loki/algorithms/prune.hpp"         // IWYU pragma: export
 #include "loki/algorithms/regions.hpp"       // IWYU pragma: export
+#include "loki/common/backend.hpp"           // IWYU pragma: export
+#include "loki/common/coord.hpp"             // IWYU pragma: export
+#include "loki/common/types.hpp"             // IWYU pragma: export
 #include "loki/detection/score.hpp"          // IWYU pragma: export
 #include "loki/detection/thresholds.hpp"     // IWYU pragma: export
 #include "loki/io/timeseries.hpp"            // IWYU pragma: export

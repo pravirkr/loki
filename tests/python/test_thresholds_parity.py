@@ -45,7 +45,9 @@ KW = {
 }
 
 
-def _stage0_survival_by_threshold(states: np.ndarray, nstages: int) -> dict[int, tuple[float, float]]:
+def _stage0_survival_by_threshold(
+    states: np.ndarray, nstages: int
+) -> dict[int, tuple[float, float]]:
     grid = states.reshape(nstages, NTHR, NPROBS)[0]
     out: dict[int, tuple[float, float]] = {}
     for ithr, iprob in np.argwhere(~grid["is_empty"]):
@@ -72,9 +74,7 @@ def test_cpu_cuda_stage0_survival_parity(mode: str) -> None:
         cpu_by_seed.append(_stage0_survival_by_threshold(cpu.get_states(), len(BP)))
         cuda_by_seed.append(_stage0_survival_by_threshold(gpu.get_states(), len(BP)))
 
-    common = sorted(
-        set.intersection(*[set(d) for d in cpu_by_seed + cuda_by_seed])
-    )
+    common = sorted(set.intersection(*[set(d) for d in cpu_by_seed + cuda_by_seed]))
     assert common, "no common nonempty stage-0 cells between CPU and CUDA"
 
     for ithr in common:

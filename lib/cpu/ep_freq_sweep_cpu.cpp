@@ -15,6 +15,7 @@
 #include "loki/algorithms/ep_regions.hpp"
 #include "loki/algorithms/prune.hpp"
 #include "loki/common/types.hpp"
+
 #include "lib/algorithms/prune_engine.hpp"
 #include "lib/common/dispatch.hpp"
 #include "lib/detail/timing.hpp"
@@ -78,20 +79,21 @@ merge_ep_sweep_results(const std::filesystem::path& tmp_dir,
                                   chunk_prefix, chunk.nsegments);
 
         if (std::filesystem::exists(chunk_result_file)) {
-            HighFive::File chunk_h5(chunk_result_file.string(),
-                                    HighFive::File::ReadOnly);
+            HighFive::File const chunk_h5(chunk_result_file.string(),
+                                          HighFive::File::ReadOnly);
             if (chunk_h5.exist("runs")) {
-                HighFive::Group chunk_runs = chunk_h5.getGroup("runs");
-                HighFive::Group dst_runs   = chunk_group.createGroup("runs");
+                HighFive::Group const chunk_runs = chunk_h5.getGroup("runs");
+                HighFive::Group const dst_runs =
+                    chunk_group.createGroup("runs");
                 for (const auto& run_name : chunk_runs.listObjectNames()) {
-                    auto run_grp = chunk_runs.getGroup(run_name);
+                    auto const run_grp = chunk_runs.getGroup(run_name);
                     if (run_grp.hasAttribute("total_pruning_gflops")) {
                         double run_gflops{};
                         run_grp.getAttribute("total_pruning_gflops")
                             .read(run_gflops);
                         accumulated_flops += run_gflops;
                     }
-                    herr_t status = H5Ocopy(
+                    herr_t const status = H5Ocopy(
                         chunk_runs.getId(), run_name.c_str(), dst_runs.getId(),
                         run_name.c_str(), H5P_DEFAULT, H5P_DEFAULT);
                     if (status < 0) {
@@ -120,7 +122,7 @@ public:
         algorithms::PruneRFIConfig rfi_config,
         const std::optional<std::filesystem::path>& plan_cache_file,
         std::optional<SizeType> n_runs,
-        std::optional<std::vector<SizeType>> ref_segs)
+        const std::optional<std::vector<SizeType>>& ref_segs)
         : m_base_cfg(std::move(cfg)),
           m_show_progress(show_progress),
           m_min_pd(min_pd),
@@ -128,7 +130,7 @@ public:
           m_ref_ducy(ref_ducy),
           m_rfi_config(std::move(rfi_config)),
           m_n_runs(n_runs),
-          m_ref_segs(std::move(ref_segs)),
+          m_ref_segs(ref_segs),
           m_region_planner(
               m_base_cfg, min_pd, poly_basis, ref_ducy, plan_cache_file) {
         const auto& stats = m_region_planner.get_stats();
@@ -323,7 +325,7 @@ std::unique_ptr<EPFreqSweepEngine> make_ep_freq_sweep_cpu(
     const algorithms::PruneRFIConfig& rfi_config,
     const std::optional<std::filesystem::path>& plan_cache_file,
     std::optional<SizeType> n_runs,
-    std::optional<std::vector<SizeType>> ref_segs) {
+    const std::optional<std::vector<SizeType>>& ref_segs) {
     if (cfg.get_use_fourier()) {
         return std::make_unique<EPFreqSweepCpuEngine<ComplexType>>(
             cfg, show_progress, min_pd, poly_basis, ref_ducy, rfi_config,

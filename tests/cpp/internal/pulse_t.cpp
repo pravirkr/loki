@@ -1,3 +1,5 @@
+#include "loki/simulation/pulse.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <vector>
@@ -6,7 +8,7 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include "loki/detection/score.hpp"
-#include "loki/simulation/pulse.hpp"
+
 #include "lib/detail/psr_utils.hpp"
 #include "lib/simulation/pulse_detail.hpp"
 
@@ -62,7 +64,7 @@ void check_lut(detail::PulseShapeKind shape, double ducy, double phi0) {
 }
 
 float folded_snr(const loki::io::TimeSeries& series, double period) {
-    const auto nbins = static_cast<loki::SizeType>(period / series.get_dt());
+    const auto nbins  = static_cast<loki::SizeType>(period / series.get_dt());
     const double freq = 1.0 / period;
     std::vector<float> vals(nbins, 0.0F);
     std::vector<float> vars(nbins, 0.0F);

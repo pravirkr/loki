@@ -1,7 +1,3 @@
-#include <catch2/catch_approx.hpp>
-#include <catch2/catch_test_macros.hpp>
-#include <highfive/highfive.hpp>
-
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -13,6 +9,10 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+#include <catch2/catch_approx.hpp>
+#include <catch2/catch_test_macros.hpp>
+#include <highfive/highfive.hpp>
 
 #include "loki/algorithms/ffa.hpp"
 #include "loki/algorithms/prune.hpp"

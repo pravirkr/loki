@@ -25,8 +25,8 @@ public:
                       SizeType nsamps                   = (SizeType{1} << 21U),
                       double snr                        = 100.0,
                       double ducy                       = 0.1,
-                      std::string mod_type              = "derivative",
-                      ModulatorParams mod               = {},
+                      const std::string& mod_type       = "derivative",
+                      const ModulatorParams& mod        = {},
                       std::optional<double> mod_tref    = std::nullopt,
                       std::optional<std::uint64_t> seed = std::nullopt);
 

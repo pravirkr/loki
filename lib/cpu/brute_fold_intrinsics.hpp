@@ -634,10 +634,10 @@ inline void fold_one_segment(const float* __restrict__ ts_e_seg,
             float final_v_i0 = vreduce_add(acc_v_i0);
 
             for (; k < segment_len; ++k) {
-                const float br = base_r[k];
-                const float bi = base_i[k];
-                float cur_r    = from_base ? br : current_r[k];
-                float cur_i    = from_base ? bi : current_i[k];
+                const float br    = base_r[k];
+                const float bi    = base_i[k];
+                float const cur_r = from_base ? br : current_r[k];
+                float const cur_i = from_base ? bi : current_i[k];
 
                 final_e_r0 += ts_e_seg[k] * cur_r;
                 final_e_i0 += ts_e_seg[k] * cur_i;

@@ -17,6 +17,7 @@
 #include "loki/algorithms/prune_rfi.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
+
 #include "lib/utils/world_tree.hpp"
 
 namespace loki::search {
@@ -95,7 +96,7 @@ struct PruneStats {
     [[nodiscard]] double branch_frac() const noexcept;
     [[nodiscard]] double phys_frac() const noexcept;
     [[nodiscard]] double surv_frac() const noexcept;
-    [[nodiscard]] std::string get_summary() const noexcept;
+    [[nodiscard]] std::string get_summary() const;
 };
 
 struct PruneTimerStatsPacked {
@@ -328,6 +329,8 @@ private:
     SizeType m_n_params{0};
 
     std::optional<HighFive::File> m_file;
+    [[nodiscard]] HighFive::File& h5_file();
+    [[nodiscard]] const HighFive::File& h5_file() const;
     HighFive::File open_file() const;
     void ensure_datasets(SizeType n_params);
 };

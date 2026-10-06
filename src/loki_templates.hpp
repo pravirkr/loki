@@ -1,7 +1,5 @@
 #pragma once
 
-#include "pybind_utils.hpp"
-
 #include <format>
 #include <limits>
 
@@ -12,13 +10,15 @@
 
 #include "loki/loki.hpp"
 
+#include "pybind_utils.hpp"
+
 namespace loki {
 using algorithms::EPMultiPass;
+using algorithms::EPRegionPlanner;
 using algorithms::FFA;
+using algorithms::FFARegionPlanner;
 using plans::FFAPlan;
 using plans::FFAPlanBase;
-using algorithms::EPRegionPlanner;
-using algorithms::FFARegionPlanner;
 using search::FFASearchConfig;
 using search::PulsarSearchConfig;
 

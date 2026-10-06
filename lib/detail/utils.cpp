@@ -1,10 +1,14 @@
 #include "lib/detail/utils.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <format>
+#include <iterator>
+#include <limits>
 #include <optional>
 #include <span>
 #include <stdexcept>
+#include <vector>
 
 #include <omp.h>
 
@@ -39,7 +43,7 @@ void circular_prefix_sum(const float* __restrict__ x,
     }
     // Initial prefix sum over the base cycle (as nbins < nsum)
     const SizeType first_pass = std::min(nbins, nsum);
-    out[0] = x[0];
+    out[0]                    = x[0];
     for (SizeType i = 1; i < first_pass; ++i) {
         out[i] = out[i - 1] + x[i];
     }
@@ -125,8 +129,8 @@ SizeType find_nearest_sorted_idx_scan(std::span<const double> arr_sorted,
     if (idx == n) {
         idx = n - 1; // past the end
     } else if (idx > 0) {
-        double diff_prev = std::abs(val - arr_sorted[idx - 1]);
-        double diff_curr = std::abs(arr_sorted[idx] - val);
+        const double diff_prev = std::abs(val - arr_sorted[idx - 1]);
+        const double diff_curr = std::abs(arr_sorted[idx] - val);
         if (diff_prev <= (diff_curr * (1.0 + rtol)) + atol) {
             --idx; // predecessor is closer (or tie)
         }
@@ -166,7 +170,7 @@ std::vector<SizeType> find_neighbouring_indices(
 }
 
 SizeType find_nearest_index(std::span<const float> range,
-                             float value) noexcept {
+                            float value) noexcept {
     SizeType best_idx = 0;
     float best_dist   = std::fabs(range[0] - value);
     for (SizeType i = 1; i < range.size(); ++i) {
@@ -185,6 +189,7 @@ IndexType find_lower_bin_index(std::span<const float> range,
     return std::distance(range.begin(), it) - 1;
 }
 
+// NOLINTNEXTLINE(bugprone-exception-escape) -- noexcept; OOM is not recovered.
 std::vector<double> linspace(double start,
                              double stop,
                              SizeType num_samples,
@@ -267,7 +272,8 @@ determine_ref_segs_pareto(SizeType nsegments,
         result.reserve(n_runs_val);
         // Single rational form
         for (SizeType i = 0; i < n_runs_val; ++i) {
-            SizeType val = round_div(((denom - i) * lo) + (i * hi), denom);
+            const SizeType val =
+                round_div(((denom - i) * lo) + (i * hi), denom);
             result.push_back(val);
         }
         return result;

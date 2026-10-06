@@ -10,6 +10,7 @@
 #include <spdlog/spdlog.h>
 
 #include "loki/common/types.hpp"
+
 #include "lib/detail/error_check.hpp"
 
 namespace loki::memory {
@@ -86,8 +87,8 @@ float WorldTree<FoldType>::get_score_max() const noexcept {
     if (m_size == 0) {
         return 0.0F;
     }
-    auto regions  = get_active_regions(std::span<const float>(m_scores));
-    float max_val = *std::ranges::max_element(regions.first);
+    auto const regions = get_active_regions(std::span<const float>(m_scores));
+    float max_val      = *std::ranges::max_element(regions.first);
     if (!regions.second.empty()) {
         max_val = std::max(max_val, *std::ranges::max_element(regions.second));
     }
@@ -99,8 +100,8 @@ float WorldTree<FoldType>::get_score_min() const noexcept {
     if (m_size == 0) {
         return 0.0F;
     }
-    auto regions  = get_active_regions(std::span<const float>(m_scores));
-    float min_val = *std::ranges::min_element(regions.first);
+    auto const regions = get_active_regions(std::span<const float>(m_scores));
+    float min_val      = *std::ranges::min_element(regions.first);
     if (!regions.second.empty()) {
         min_val = std::min(min_val, *std::ranges::min_element(regions.second));
     }
@@ -299,40 +300,44 @@ WorldTree<FoldType>::get_best() const {
         return {{}, {}, 0.0F};
     }
 
-    auto regions = get_active_regions(std::span<const float>(m_scores));
+    auto const regions = get_active_regions(std::span<const float>(m_scores));
     // Find max iterator in first region
-    auto it1              = std::ranges::max_element(regions.first);
+    auto const it1        = std::ranges::max_element(regions.first);
     float max_score       = *it1;
     SizeType best_offset  = std::distance(regions.first.begin(), it1);
     SizeType absolute_idx = get_current_start_idx() + best_offset;
 
     // Check second region if it exists
     if (!regions.second.empty()) {
-        auto it2 = std::ranges::max_element(regions.second);
+        auto const it2 = std::ranges::max_element(regions.second);
         if (*it2 > max_score) {
             max_score    = *it2;
             best_offset  = std::distance(regions.second.begin(), it2);
             absolute_idx = best_offset; // Second region starts at 0
         }
     }
-    return {std::span{m_leaves.data() + (absolute_idx * m_leaves_stride),
-                      m_leaves_stride},
-            std::span{m_folds.data() + (absolute_idx * m_folds_stride),
-                      m_folds_stride},
-            max_score};
+    return {
+        std::span{m_leaves.data() + (absolute_idx * m_leaves_stride),
+                  m_leaves_stride},
+        std::span{
+            m_folds.data() + (absolute_idx * m_folds_stride),
+            m_folds_stride,
+        },
+        max_score,
+    };
 }
 
 template <SupportedFoldType FoldType> bool WorldTree<FoldType>::drop_best() {
     if (m_size == 0) {
         return false;
     }
-    auto regions    = get_active_regions(std::span<const float>(m_scores));
-    auto it1        = std::ranges::max_element(regions.first);
-    float max_score = *it1;
-    SizeType best_logical =
+    auto const regions = get_active_regions(std::span<const float>(m_scores));
+    auto const it1     = std::ranges::max_element(regions.first);
+    float const max_score = *it1;
+    auto best_logical =
         static_cast<SizeType>(std::distance(regions.first.begin(), it1));
     if (!regions.second.empty()) {
-        auto it2 = std::ranges::max_element(regions.second);
+        auto const it2 = std::ranges::max_element(regions.second);
         if (*it2 > max_score) {
             best_logical = regions.first.size() +
                            static_cast<SizeType>(
@@ -456,7 +461,7 @@ float WorldTree<FoldType>::add_batch_scattered(
     prune_on_overload(effective_threshold);
 
     // Add Qualifying Batch Items
-    auto pending_indices =
+    auto const pending_indices =
         std::span(m_scratch_pending_indices.data(), slots_to_write);
     SizeType pending_count = 0;
     for (SizeType i = 0; i < slots_to_write; ++i) {
@@ -541,8 +546,10 @@ WorldTree<FoldType>::get_active_regions(std::span<T> arr,
     }
     const auto first_count  = m_capacity - start;
     const auto second_count = m_size - first_count;
-    return {{arr.data() + start_offset, first_count * stride},
-            {arr.data(), second_count * stride}};
+    return {
+        {arr.data() + start_offset, first_count * stride},
+        {arr.data(), second_count * stride},
+    };
 }
 
 template <SupportedFoldType FoldType>
@@ -663,7 +670,7 @@ float WorldTree<FoldType>::get_prune_threshold(
     // smallest score we keep (i.e. the threshold).
     const auto begin = m_scratch_scores.begin();
     const auto end   = begin + total_candidates;
-    auto kth         = begin + total_capacity - 1;
+    auto const kth   = begin + total_capacity - 1;
     std::nth_element(begin, kth, end, std::greater<float>());
     // To break ties, we use the next representable value greater than
     // the topk score.
@@ -671,7 +678,7 @@ float WorldTree<FoldType>::get_prune_threshold(
         std::nextafter(*kth, std::numeric_limits<float>::max());
 
     // Median score for severity (restricted range)
-    auto mid = begin + total_candidates / 2;
+    auto const mid = begin + total_candidates / 2;
     if (mid <= kth) {
         std::nth_element(begin, mid, kth + 1);
     } else {
@@ -812,7 +819,7 @@ void WorldTree<FoldType>::compute_uniqueness_mask_in_scratch() noexcept {
             static_cast<int64_t>(std::nearbyint((val1 + val2) * 1e9));
         const auto score = m_scores[buffer_idx];
 
-        auto it = best_by_key.find(key);
+        auto const it = best_by_key.find(key);
         if (it == best_by_key.end()) {
             best_by_key.emplace(key, BestIndices{score, i});
         } else if (score > it->second.score) {
@@ -861,3 +868,4 @@ template void WorldTree<float>::copy_from_circular<float>(
 template void WorldTree<ComplexType>::copy_from_circular<float>(
     const float*, SizeType, SizeType, SizeType, float*) const noexcept;
 } // namespace loki::memory
+// NOLINTEND(misc-include-cleaner)

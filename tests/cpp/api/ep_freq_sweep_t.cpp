@@ -1,3 +1,5 @@
+#include "loki/pipelines/ep_freq_sweep.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
@@ -16,13 +18,12 @@
 
 #include "loki/algorithms/ep_regions.hpp"
 #include "loki/common/types.hpp"
-#include "loki/pipelines/ep_freq_sweep.hpp"
 #include "loki/search/configs.hpp"
 
 using loki::ParamLimit;
 using loki::SizeType;
-using loki::pipelines::EPFreqSweep;
 using loki::algorithms::EPRegionPlanner;
+using loki::pipelines::EPFreqSweep;
 using loki::search::PulsarSearchConfig;
 
 namespace {

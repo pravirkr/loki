@@ -191,7 +191,7 @@ public:
     using Container  = std::vector<T>;
     using ParamsSpan = std::span<const Container>;
     using Iterator   = CartesianProductIterator<T, MaxDims>;
-    using Sentinel   = typename Iterator::SentinelT;
+    using Sentinel   = Iterator::SentinelT;
 
     constexpr explicit CartesianProductView(ParamsSpan params) noexcept
         : m_params(params) {}

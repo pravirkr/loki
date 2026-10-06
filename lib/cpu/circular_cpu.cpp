@@ -1,3 +1,5 @@
+// NOLINTBEGIN(misc-include-cleaner) -- CPU engine; symbols via private/engine
+// headers.
 #include "lib/core/circular.hpp"
 
 #include <algorithm>
@@ -12,6 +14,7 @@
 #include <spdlog/spdlog.h>
 
 #include "loki/common/types.hpp"
+
 #include "lib/core/transforms.hpp"
 #include "lib/detail/error_check.hpp"
 #include "lib/detail/psr_utils.hpp"
@@ -165,7 +168,7 @@ SizeType circ_taylor_branch_batch(std::span<const double> leaves_tree,
     const SizeType workspace_size      = leaves_branch.size();
     const SizeType single_batch_params = n_leaves * kParams;
     // Get spans from workspace
-    std::span<double> dparam_new =
+    std::span<double> const dparam_new =
         leaves_branch.subspan(0, single_batch_params);
     error_check::check_less_equal(single_batch_params, workspace_size,
                                   "workspace size mismatch");
@@ -341,7 +344,7 @@ SizeType circ_taylor_branch_batch(std::span<const double> leaves_tree,
     // the hole region, replace its d5 value in-place with the first crackle
     // child and append the remaining (n_d5 - 1) crackle children at the tail.
     const SizeType base_out = out_leaves; // snapshot — do not modify in loop
-    auto slice_span         = std::span<double>(scratch_params, branch_max);
+    auto const slice_span   = std::span<double>(scratch_params, branch_max);
     for (SizeType i = 0; i < base_out; ++i) {
         const SizeType lo         = i * kLeavesStride;
         double* __restrict__ leaf = leaves_branch_ptr + lo;
@@ -518,7 +521,7 @@ void circ_taylor_resolve_batch(std::span<const double> leaves_tree,
                              propagator_significance);
 
     // Process circular indices
-    for (SizeType i : idx_circular_snap) {
+    for (SizeType const i : idx_circular_snap) {
         const auto lo      = i * kLeavesStride;
         const auto s_t_cur = leaves_tree[lo + 2];
         const auto j_t_cur = leaves_tree[lo + 4];
@@ -566,7 +569,7 @@ void circ_taylor_resolve_batch(std::span<const double> leaves_tree,
     }
 
     // Process circular crackle indices
-    for (SizeType i : idx_circular_crackle) {
+    for (SizeType const i : idx_circular_crackle) {
         const auto lo      = i * kLeavesStride;
         const auto c_t_cur = leaves_tree[lo + 0];
         const auto j_t_cur = leaves_tree[lo + 4];
@@ -614,7 +617,7 @@ void circ_taylor_resolve_batch(std::span<const double> leaves_tree,
     }
 
     // Process taylor indices
-    for (SizeType i : idx_taylor) {
+    for (SizeType const i : idx_taylor) {
         const auto lo      = i * kLeavesStride;
         const auto c_t_cur = leaves_tree[lo + 0];
         const auto s_t_cur = leaves_tree[lo + 2];
@@ -683,8 +686,10 @@ void circ_taylor_ascend_resolve_batch(
                              propagator_significance);
 
     for (SizeType i = 0; i < n_segments; ++i) {
-        auto param_indices_seg = param_indices.subspan(i * n_leaves, n_leaves);
-        auto phase_shift_seg   = phase_shift.subspan(i * n_leaves, n_leaves);
+        auto const param_indices_seg =
+            param_indices.subspan(i * n_leaves, n_leaves);
+        auto const phase_shift_seg =
+            phase_shift.subspan(i * n_leaves, n_leaves);
 
         const auto [t0_cur, scale_cur] = coord_cur;
         const auto [t0_seg, scale_seg] = coord_segments[i];
@@ -698,7 +703,7 @@ void circ_taylor_ascend_resolve_batch(
         const double onehundred_twenty_dt5 = (dt2 * dt2 * dt) / 120.0;
 
         // Process circular indices
-        for (SizeType i : idx_circular_snap) {
+        for (SizeType const i : idx_circular_snap) {
             const SizeType lo  = i * kLeavesStride;
             const double s_cur = leaves_tree[lo + 2];
             const double j_cur = leaves_tree[lo + 4];
@@ -740,7 +745,7 @@ void circ_taylor_ascend_resolve_batch(
         }
 
         // Process circular crackle indices
-        for (SizeType i : idx_circular_crackle) {
+        for (SizeType const i : idx_circular_crackle) {
             const SizeType lo  = i * kLeavesStride;
             const double c_cur = leaves_tree[lo + 0];
             const double j_cur = leaves_tree[lo + 4];
@@ -782,7 +787,7 @@ void circ_taylor_ascend_resolve_batch(
         }
 
         // Process taylor indices
-        for (SizeType i : idx_taylor) {
+        for (SizeType const i : idx_taylor) {
             const SizeType lo  = i * kLeavesStride;
             const double c_cur = leaves_tree[lo + 0];
             const double s_cur = leaves_tree[lo + 2];
@@ -850,7 +855,7 @@ void circ_taylor_transform_batch(std::span<double> leaves_tree,
                                        kParams, propagator_significance);
 
     // Process circular indices
-    for (SizeType i : idx_circular_snap) {
+    for (SizeType const i : idx_circular_snap) {
         const SizeType lo = i * kLeavesStride;
         const double d4_i = leaves_tree[lo + 2];
         const double d3_i = leaves_tree[lo + 4];
@@ -888,7 +893,7 @@ void circ_taylor_transform_batch(std::span<double> leaves_tree,
     }
 
     // Process circular crackle indices
-    for (SizeType i : idx_circular_crackle) {
+    for (SizeType const i : idx_circular_crackle) {
         const SizeType lo = i * kLeavesStride;
         const double d5_i = leaves_tree[lo + 0];
         const double d3_i = leaves_tree[lo + 4];
@@ -925,7 +930,7 @@ void circ_taylor_transform_batch(std::span<double> leaves_tree,
     }
 
     // Process normal indices
-    for (SizeType i : idx_taylor) {
+    for (SizeType const i : idx_taylor) {
         const SizeType lo     = i * kLeavesStride;
         const double d5_val_i = leaves_tree[lo + 0];
         const double d4_val_i = leaves_tree[lo + 2];
@@ -1016,7 +1021,7 @@ generate_bp_circ_taylor(std::span<const std::vector<double>> param_arr,
     const auto n_freqs   = f0_batch.size();  // Number of frequency bins
 
     // Snail Scheme
-    psr_utils::MiddleOutScheme scheme(nsegments, ref_seg, tseg_ffa);
+    psr_utils::MiddleOutScheme const scheme(nsegments, ref_seg, tseg_ffa);
     std::vector<double> weights(n_freqs, 1.0);
     std::vector<double> branching_pattern(nsegments - 1);
 
@@ -1067,7 +1072,7 @@ generate_bp_circ_taylor(std::span<const std::vector<double>> param_arr,
                     continue;
                 }
                 const auto ratio =
-                    (dparam_cur_batch[idx]) / (dparam_new_batch[idx]);
+                    dparam_cur_batch[idx] / dparam_new_batch[idx];
                 const SizeType num_points = std::max(
                     1UL,
                     static_cast<SizeType>(std::ceil(ratio - utils::kFloatEps)));
@@ -1122,3 +1127,4 @@ generate_bp_circ_taylor(std::span<const std::vector<double>> param_arr,
 }
 
 } // namespace loki::core
+// NOLINTEND(misc-include-cleaner)

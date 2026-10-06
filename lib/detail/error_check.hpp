@@ -34,7 +34,7 @@ inline void check_with_comparator(
     std::string_view msg            = "",
     const std::source_location& loc = std::source_location::current()) {
     if (!cmp(a, b)) {
-        std::string composed =
+        const std::string composed =
             msg.empty() ? std::format("Check failed: {} {} {}", a, op_str, b)
                         : std::format("{} ({} {} {})", msg, a, op_str, b);
         throw DetailedException(composed, loc);
@@ -132,7 +132,7 @@ inline void check_power_of_2(
     std::string_view msg            = "",
     const std::source_location& loc = std::source_location::current()) {
     if ((value & (value - 1)) != 0) {
-        std::string composed =
+        const std::string composed =
             msg.empty()
                 ? std::format("Check failed: {} is not a power of 2", value)
                 : std::format("{} must be power of 2 (got {})", msg, value);
@@ -160,7 +160,7 @@ check_range(Index index,
             const std::source_location& loc = std::source_location::current()) {
     if (index < 0 || static_cast<std::make_unsigned_t<Index>>(index) >=
                          static_cast<std::make_unsigned_t<Size>>(size)) {
-        std::string composed =
+        const std::string composed =
             msg.empty()
                 ? std::format("Index {} out of range [0, {})", index, size)
                 : std::format("{} (index {} >= size {})", msg, index, size);

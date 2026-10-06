@@ -1,3 +1,5 @@
+#include "lib/search/ffa_sweep_candidates.hpp"
+
 #include <algorithm>
 #include <cstdint>
 #include <filesystem>
@@ -11,17 +13,17 @@
 #include "loki/common/types.hpp"
 #include "loki/pipelines/ffa_freq_sweep.hpp"
 #include "loki/search/configs.hpp"
+
 #include "lib/search/cands.hpp"
-#include "lib/search/ffa_sweep_candidates.hpp"
 
 using loki::ParamLimit;
 using loki::SizeType;
-using loki::search::CandidateBuffer;
 using loki::pipelines::FFAFreqSweep;
-using loki::search::flush_candidates;
-using loki::search::RegionDecode;
+using loki::search::CandidateBuffer;
 using loki::search::FFAResultMetadata;
+using loki::search::flush_candidates;
 using loki::search::PulsarSearchConfig;
+using loki::search::RegionDecode;
 
 namespace {
 

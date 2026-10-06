@@ -1,3 +1,5 @@
+// NOLINTBEGIN(misc-include-cleaner) -- CPU engine; symbols via private/engine
+// headers.
 #include "lib/core/taylor.hpp"
 
 #include <algorithm>
@@ -10,6 +12,7 @@
 #include <vector>
 
 #include "loki/common/types.hpp"
+
 #include "lib/core/cartesian.hpp"
 #include "lib/core/transforms.hpp"
 #include "lib/detail/error_check.hpp"
@@ -54,7 +57,7 @@ SizeType poly_taylor_branch_accel_batch(std::span<const double> leaves_tree,
     const SizeType single_batch_params = n_leaves * kParams;
 
     // Get spans from workspace
-    std::span<double> dparam_new =
+    std::span<double> const dparam_new =
         leaves_branch.subspan(0, single_batch_params);
     error_check::check_less_equal(single_batch_params, workspace_size,
                                   "workspace size mismatch");
@@ -194,7 +197,7 @@ SizeType poly_taylor_branch_jerk_batch(std::span<const double> leaves_tree,
     const SizeType single_batch_params = n_leaves * kParams;
 
     // Get spans from workspace
-    std::span<double> dparam_new =
+    std::span<double> const dparam_new =
         leaves_branch.subspan(0, single_batch_params);
     error_check::check_less_equal(single_batch_params, workspace_size,
                                   "workspace size mismatch");
@@ -350,7 +353,7 @@ SizeType poly_taylor_branch_snap_batch(std::span<const double> leaves_tree,
     const SizeType single_batch_params = n_leaves * kParams;
 
     // Get spans from workspace
-    std::span<double> dparam_new =
+    std::span<double> const dparam_new =
         leaves_branch.subspan(0, single_batch_params);
     error_check::check_less_equal(single_batch_params, workspace_size,
                                   "workspace size mismatch");
@@ -956,7 +959,7 @@ void poly_taylor_transform_jerk_batch(std::span<double> leaves_tree,
     // Pre-compute constants to avoid repeated calculations
     const auto dt        = t0_next - t0_cur;
     const auto dt2       = dt * dt;
-    const auto half_dt2  = 0.5 * (dt2);
+    const auto half_dt2  = 0.5 * dt2;
     const auto sixth_dt3 = dt2 * dt / 6.0;
     for (SizeType i = 0; i < n_leaves; ++i) {
         const auto lo       = indices_tree[i] * kLeavesStride;
@@ -1025,7 +1028,7 @@ void poly_taylor_transform_snap_batch(std::span<double> leaves_tree,
     // Pre-compute constants to avoid repeated calculations
     const auto dt                = t0_next - t0_cur;
     const auto dt2               = dt * dt;
-    const auto half_dt2          = 0.5 * (dt2);
+    const auto half_dt2          = 0.5 * dt2;
     const auto sixth_dt3         = dt2 * dt / 6.0;
     const auto twenty_fourth_dt4 = dt2 * dt2 / 24.0;
 
@@ -1281,15 +1284,15 @@ poly_taylor_branch_batch_generic(std::span<const double> leaves_batch,
     const SizeType single_batch_params = n_leaves * n_params;
 
     // Get spans from workspace + other vector allocations
-    std::span<double> dparam_cur_batch =
+    std::span<double> const dparam_cur_batch =
         leaves_branch_batch.subspan(0, single_batch_params);
-    std::span<double> dparam_new_batch =
+    std::span<double> const dparam_new_batch =
         leaves_branch_batch.subspan(single_batch_params, single_batch_params);
-    std::span<double> shift_bins_batch = leaves_branch_batch.subspan(
+    std::span<double> const shift_bins_batch = leaves_branch_batch.subspan(
         single_batch_params * 2, single_batch_params);
-    std::span<double> f0_batch =
+    std::span<double> const f0_batch =
         leaves_branch_batch.subspan(single_batch_params * 3, n_leaves);
-    std::span<double> pad_branched_params = leaves_branch_batch.subspan(
+    std::span<double> const pad_branched_params = leaves_branch_batch.subspan(
         (single_batch_params * 3) + n_leaves, n_leaves * n_params * branch_max);
     const auto workspace_acquired_size = (single_batch_params * 3) + n_leaves +
                                          (n_leaves * n_params * branch_max);
@@ -1326,7 +1329,7 @@ poly_taylor_branch_batch_generic(std::span<const double> leaves_batch,
                 (i * n_params * branch_max) + (j * branch_max);
 
             if (shift_bins_batch[flat_idx] >= (eta - utils::kFloatEps)) {
-                std::span<double> slice_span =
+                std::span<double> const slice_span =
                     pad_branched_params.subspan(pad_offset, branch_max);
                 auto [dparam_act, count] = psr_utils::branch_param_padded(
                     slice_span, param_cur_val, dparam_cur_val,
@@ -1345,8 +1348,8 @@ poly_taylor_branch_batch_generic(std::span<const double> leaves_batch,
 
     // Use the existing robust Cartesian product function
     const auto [leaves_branch_taylor_batch, batch_origins] =
-        cartesian_prod_padded(pad_branched_params, branched_counts,
-                                     n_leaves, n_params, branch_max);
+        cartesian_prod_padded(pad_branched_params, branched_counts, n_leaves,
+                              n_params, branch_max);
     const SizeType total_leaves = batch_origins.size();
 
     // Fill dparams and other parameters using the same logic as original
@@ -1393,7 +1396,7 @@ SizeType poly_taylor_branch_batch(std::span<const double> leaves_tree,
                                   SizeType n_params,
                                   memory::BranchingWorkspace& branch_ws) {
 
-    auto dispatch = [&]<SizeType N>() {
+    auto const dispatch = [&]<SizeType N> {
         return poly_taylor_branch_batch_impl<N>(
             leaves_tree, leaves_branch, leaves_origins, coord_cur, nbins, eta,
             branch_max, n_leaves, branch_ws);
@@ -1425,7 +1428,7 @@ void poly_taylor_resolve_batch(std::span<const double> leaves_branch,
                                SizeType nbins,
                                SizeType n_leaves,
                                SizeType n_params) {
-    auto dispatch = [&]<SizeType N>() {
+    auto const dispatch = [&]<SizeType N> {
         return poly_taylor_resolve_batch_impl<N>(
             leaves_branch, param_indices, phase_shift, param_limits, coord_add,
             coord_cur, coord_init, n_accel_init, n_freq_init, nbins, n_leaves);
@@ -1467,11 +1470,11 @@ void poly_taylor_ascend_resolve_batch(
     error_check::check_equal(coord_segments.size(), n_segments,
                              "coord_segments size mismatch");
 
-    auto dispatch = [&]<SizeType N>() {
+    auto const dispatch = [&]<SizeType N> {
         for (SizeType iseg = 0; iseg < n_segments; ++iseg) {
-            auto param_indices_seg =
+            auto const param_indices_seg =
                 param_indices.subspan(iseg * n_leaves, n_leaves);
-            auto phase_shift_seg =
+            auto const phase_shift_seg =
                 phase_shift.subspan(iseg * n_leaves, n_leaves);
             poly_taylor_ascend_resolve_batch_impl<N>(
                 leaves_branch, param_indices_seg, phase_shift_seg, param_limits,
@@ -1501,11 +1504,11 @@ void poly_taylor_transform_batch(std::span<double> leaves_tree,
                                  SizeType n_leaves,
                                  SizeType n_params,
                                  bool use_conservative_tile) {
-    auto dispatch = [&]<SizeType N, bool C>() {
+    auto dispatch = [&]<SizeType N, bool C> {
         return poly_taylor_transform_batch_impl<N, C>(
             leaves_tree, indices_tree, coord_next, coord_cur, n_leaves);
     };
-    auto launch = [&](bool conservative) {
+    auto const launch = [&](bool conservative) {
         switch (n_params) {
         case 2:
             conservative ? dispatch.template operator()<2, true>()
@@ -1586,7 +1589,7 @@ generate_bp_poly_taylor_approx(std::span<const SizeType> param_grid_count_init,
     std::vector<double> branch_leaves(branch_max * leaves_stride);
     std::vector<double> leaf_data(leaves_stride);
 
-    psr_utils::MiddleOutScheme snail_scheme(nsegments, ref_seg, tseg_ffa);
+    psr_utils::MiddleOutScheme const snail_scheme(nsegments, ref_seg, tseg_ffa);
     const auto coord_init = snail_scheme.get_coord(0);
     SizeType n_leaves     = 1;
     for (const auto count : param_grid_count_init) {
@@ -1606,8 +1609,8 @@ generate_bp_poly_taylor_approx(std::span<const SizeType> param_grid_count_init,
     error_check::check_less(isuggest, n_leaves,
                             "isuggest must be less than n_leaves");
     // Copy isuggest-th leaf to leaf_data
-    auto leaf = std::span(seed_leaves)
-                    .subspan((leaves_stride * isuggest), leaves_stride);
+    auto const leaf = std::span(seed_leaves)
+                          .subspan((leaves_stride * isuggest), leaves_stride);
     std::ranges::copy(leaf, leaf_data.begin());
     for (SizeType prune_level = 1; prune_level < nsegments; ++prune_level) {
         const auto coord_next    = snail_scheme.get_coord(prune_level);
@@ -1616,7 +1619,7 @@ generate_bp_poly_taylor_approx(std::span<const SizeType> param_grid_count_init,
             leaf_data, coord_cur, branch_leaves, nbins, eta, branch_max, 1,
             n_params);
         const auto n_leaves_branch = batch_origins.size();
-        auto leaves_span =
+        auto const leaves_span =
             std::span(branch_leaves).first(n_leaves_branch * leaves_stride);
         std::vector<SizeType> indices_branch(n_leaves_branch);
         std::iota(indices_branch.begin(), indices_branch.end(), 0U);
@@ -1626,7 +1629,8 @@ generate_bp_poly_taylor_approx(std::span<const SizeType> param_grid_count_init,
                                     coord_cur, n_leaves_branch, n_params,
                                     use_conservative_tile);
         // Copy first leaf to leaf_data
-        auto first_leaf_span = std::span(branch_leaves).first(leaves_stride);
+        auto const first_leaf_span =
+            std::span(branch_leaves).first(leaves_stride);
         std::ranges::copy(first_leaf_span, leaf_data.begin());
     }
     // Check if any branches is truncated due to branch_max
@@ -1655,7 +1659,7 @@ generate_bp_poly_taylor(std::span<const std::vector<double>> param_arr,
     const auto n_freqs   = f0_batch.size();  // Number of frequency bins
 
     // Snail Scheme
-    psr_utils::MiddleOutScheme snail_scheme(nsegments, ref_seg, tseg_ffa);
+    psr_utils::MiddleOutScheme const snail_scheme(nsegments, ref_seg, tseg_ffa);
     std::vector<double> weights(n_freqs, 1.0);
     std::vector<double> branching_pattern(nsegments - 1);
 
@@ -1701,7 +1705,7 @@ generate_bp_poly_taylor(std::span<const std::vector<double>> param_arr,
                     continue;
                 }
                 const auto ratio =
-                    (dparam_cur_batch[idx]) / (dparam_new_batch[idx]);
+                    dparam_cur_batch[idx] / dparam_new_batch[idx];
                 const SizeType num_points = std::max(
                     1UL,
                     static_cast<SizeType>(std::ceil(ratio - utils::kFloatEps)));
@@ -1743,3 +1747,4 @@ generate_bp_poly_taylor(std::span<const std::vector<double>> param_arr,
 }
 
 } // namespace loki::core
+// NOLINTEND(misc-include-cleaner)

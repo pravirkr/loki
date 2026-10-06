@@ -13,11 +13,10 @@
 #include <utility>
 #include <vector>
 
-#include <spdlog/spdlog.h>
-
 #include <cuda/std/span>
 #include <cuda_runtime.h>
 #include <cufft.h>
+#include <spdlog/spdlog.h>
 
 #include "lib/cuda/cuda_utils.cuh"
 #include "lib/cuda/workspace_cuda.cuh"
@@ -134,7 +133,7 @@ bool estimate_work_size(int n_real,
     std::array<int, 1> inembed = {in_dist};
     std::array<int, 1> onembed = {out_dist};
     work_size                  = 0;
-    const cufftResult status = cufftEstimateMany(
+    const cufftResult status   = cufftEstimateMany(
         1, n_arr.data(), inembed.data(), 1, in_dist, onembed.data(), 1,
         out_dist, fft_type, batch_size, &work_size);
     return status == CUFFT_SUCCESS;

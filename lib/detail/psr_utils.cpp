@@ -3,9 +3,15 @@
 #include <algorithm>
 #include <cmath>
 #include <format>
+#include <span>
+#include <stdexcept>
+#include <tuple>
+#include <utility>
+#include <vector>
 
 #include "loki/common/types.hpp"
 #include "loki/utils/psr_utils.hpp"
+
 #include "lib/core/transforms.hpp"
 #include "lib/detail/error_check.hpp"
 #include "lib/detail/math.hpp"
@@ -106,7 +112,7 @@ std::vector<double> poly_taylor_shift_d(std::span<const double> dparam_old,
     std::vector<double> shift(n_params);
     for (SizeType i = 0; i < n_params; ++i) {
         const auto orth_factor = std::pow(2.0, i);
-        auto factor =
+        const auto factor =
             std::pow(dt, i + 1) * static_cast<double>(nbins) /
             (math::factorial(static_cast<double>(i + 1)) * orth_factor);
         shift[n_params - 1 - i] = std::abs(dparam_old[i] - dparam_new[i]) *

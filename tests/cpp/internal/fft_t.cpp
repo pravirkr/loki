@@ -9,6 +9,7 @@
 #include <catch2/matchers/catch_matchers_range_equals.hpp>
 
 #include "loki/common/types.hpp"
+
 #include "lib/detail/error_check.hpp"
 #include "lib/utils/fft_impl.hpp"
 
@@ -56,10 +57,11 @@ auto complex_near(float margin) {
 
 #ifdef LOKI_ENABLE_CUDA
 auto cuda_complex_near(float margin) {
-    return [margin](const ComplexTypeCUDA& actual, const ComplexType& expected) {
-        return WithinAbs(expected.real(), margin).match(actual.real()) &&
-               WithinAbs(expected.imag(), margin).match(actual.imag());
-    };
+    return
+        [margin](const ComplexTypeCUDA& actual, const ComplexType& expected) {
+            return WithinAbs(expected.real(), margin).match(actual.real()) &&
+                   WithinAbs(expected.imag(), margin).match(actual.imag());
+        };
 }
 
 auto cuda_complex_eq(const ComplexTypeCUDA& lhs, const ComplexTypeCUDA& rhs) {

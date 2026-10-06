@@ -9,7 +9,9 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include "loki/common/types.hpp"
+
 #include "lib/detail/math.hpp"
+
 #include "math_test_utils.hpp"
 
 using Catch::Matchers::WithinAbs;
@@ -348,7 +350,8 @@ TEST_CASE("estimators reject empty input", "[math][zscore]") {
 TEST_CASE("estimators give the same result for any thread count",
           "[math][zscore]") {
     const auto x = loki::test::make_series(Pattern::kRandom, 300001, 23);
-    for (const auto scale : {ScaleMethod::kStd, ScaleMethod::kIqr, ScaleMethod::kMad}) {
+    for (const auto scale :
+         {ScaleMethod::kStd, ScaleMethod::kIqr, ScaleMethod::kMad}) {
         const auto one = estimate_scale(x, scale, 1);
         for (const int nthreads : {0, 3, 16}) {
             INFO("nthreads " << nthreads);

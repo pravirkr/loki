@@ -2,13 +2,15 @@
 
 #include <algorithm>
 #include <cmath>
-#include <omp.h>
 #include <span>
 #include <tuple>
 #include <vector>
 
+#include <omp.h>
+
 #include "loki/common/coord.hpp"
 #include "loki/common/types.hpp"
+
 #include "lib/core/transforms.hpp"
 #include "lib/detail/error_check.hpp"
 #include "lib/detail/psr_utils.hpp"
@@ -256,7 +258,7 @@ void ffa_taylor_resolve_freq_batch(SizeType n_freqs_cur,
                                    double tseg_brute,
                                    SizeType nbins,
                                    int nthreads) {
-    nthreads = std::clamp(nthreads, 1, omp_get_max_threads());
+    nthreads = std::max(nthreads, 1);
     error_check::check_equal(coords.size(), n_freqs_cur,
                              "coords size mismatch");
 
@@ -264,7 +266,8 @@ void ffa_taylor_resolve_freq_batch(SizeType n_freqs_cur,
         std::ldexp(tseg_brute, static_cast<int>(ffa_level - 1));
 
     // Calculate relative phases and flattened parameter indices
-#pragma omp parallel for schedule(static) num_threads(nthreads)
+#pragma omp parallel for schedule(static) num_threads(nthreads) default(none)  \
+    shared(coords, n_freqs_cur, lim_freq, n_freqs_prev, delta_t, nbins)
     for (SizeType i = 0; i < n_freqs_cur; ++i) {
         const double f_cur =
             psr_utils::get_param_val_at_idx(lim_freq, n_freqs_cur, i);
@@ -287,12 +290,12 @@ void ffa_taylor_resolve_poly_batch(
     SizeType n_params,
     int nthreads) {
     (void)nthreads;
-    auto dispatch = [&]<SizeType N, int L>() {
+    auto dispatch = [&]<SizeType N, int L> {
         return ffa_taylor_resolve_poly_batch_impl<N, L>(
             param_grid_count_cur, param_grid_count_prev, param_limits, coords,
             ffa_level, tseg_brute, nbins);
     };
-    auto launch = [&](bool latter) {
+    auto const launch = [&](bool latter) {
         switch (n_params) {
         case 2:
             latter ? dispatch.template operator()<2, 0>()
@@ -318,3 +321,4 @@ void ffa_taylor_resolve_poly_batch(
 }
 
 } // namespace loki::core
+// NOLINTEND(misc-include-cleaner)

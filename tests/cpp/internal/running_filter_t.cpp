@@ -10,6 +10,7 @@
 #include <omp.h>
 
 #include "lib/detail/math.hpp"
+
 #include "math_test_utils.hpp"
 
 using loki::SizeType;
@@ -171,11 +172,10 @@ double max_abs(const std::vector<float>& x) {
     return m;
 }
 
-std::vector<float>
-run(const std::vector<float>& x,
-    SizeType w,
-    FilterMethod method,
-    int nthreads = 1) {
+std::vector<float> run(const std::vector<float>& x,
+                       SizeType w,
+                       FilterMethod method,
+                       int nthreads = 1) {
     std::vector<float> out(x.size(), -999.0F);
     running_filter(x, out, w, method, nthreads);
     return out;
@@ -300,7 +300,8 @@ TEST_CASE("subtract_running_filter equals x - running_filter",
                         expect[i] = x[i] - base[i];
                     }
                     auto y = x;
-                    subtract_running_filter(y, w, method, false, 101, kManyThreads);
+                    subtract_running_filter(y, w, method, false, 101,
+                                            kManyThreads);
                     INFO("n " << n << " w " << w << " heap " << heap);
                     REQUIRE(y == expect);
                 }
@@ -441,9 +442,10 @@ TEST_CASE("subtract_running_filter fast path equals x - running_filter_fast",
     }
 }
 
-TEST_CASE("thread counts below 1 are treated as 1 and large counts are honoured",
-          "[math][filter]") {
-    const auto x = loki::test::make_series(Pattern::kRandom, 100000, 17);
+TEST_CASE(
+    "thread counts below 1 are treated as 1 and large counts are honoured",
+    "[math][filter]") {
+    const auto x   = loki::test::make_series(Pattern::kRandom, 100000, 17);
     const auto ref = run(x, 51, FilterMethod::kMedian, 1);
     for (const int nthreads : {-3, 0, 64}) {
         INFO("nthreads " << nthreads);

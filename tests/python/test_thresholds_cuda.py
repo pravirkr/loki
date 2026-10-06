@@ -78,7 +78,9 @@ def test_states_layout_matches_cpu(mode: str) -> None:
         BRANCHING, mode=mode, seed=3, **SCHEME_KW
     )
     assert states.dtype == cpu.get_states().dtype
-    assert states.shape == (len(BRANCHING) * len(scheme.thresholds) * len(scheme.probs),)
+    assert states.shape == (
+        len(BRANCHING) * len(scheme.thresholds) * len(scheme.probs),
+    )
     np.testing.assert_array_equal(scheme.thresholds, cpu.thresholds)
     np.testing.assert_array_equal(scheme.probs, cpu.probs)
     assert len(scheme.get_best_path_thresholds()) == len(BRANCHING)

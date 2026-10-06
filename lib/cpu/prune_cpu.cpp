@@ -18,6 +18,7 @@
 #include "loki/algorithms/ffa.hpp"
 #include "loki/algorithms/prune_rfi.hpp"
 #include "loki/common/types.hpp"
+
 #include "lib/algorithms/ffa_engine.hpp"
 #include "lib/algorithms/prune_engine.hpp"
 #include "lib/common/dispatch.hpp"
@@ -118,9 +119,9 @@ public:
             memory_irfft_scratch_gb);
 
         // Setup log and result files
-        std::filesystem::path actual_log_file =
+        std::filesystem::path const actual_log_file =
             log_file.value_or(outdir / std::format("tmp_{}_log.txt", run_name));
-        std::filesystem::path actual_result_file = result_file.value_or(
+        std::filesystem::path const actual_result_file = result_file.value_or(
             outdir / std::format("tmp_{}_results.h5", run_name));
         std::ofstream log(actual_log_file, std::ios::app);
         log << std::format("Pruning log for ref segment: {}\n", ref_seg);
@@ -327,22 +328,22 @@ private:
         const auto batch_cap =
             std::max(SizeType{1}, std::min(m_batch_size, n_survivors));
 
-        memory::CircularView<double> leaves_cv =
+        memory::CircularView<double> const leaves_cv =
             world_tree.get_leaves_circular_view();
-        memory::CircularView<FoldType> folds_cv =
+        memory::CircularView<FoldType> const folds_cv =
             world_tree.get_folds_circular_view();
-        memory::CircularView<float> scores_cv =
+        memory::CircularView<float> const scores_cv =
             world_tree.get_scores_circular_view();
-        memory::CircularView<float> scores_ep_cv =
+        memory::CircularView<float> const scores_ep_cv =
             world_tree.get_scores_ep_circular_view();
 
         const auto leaves_stride = world_tree.get_leaves_stride();
         const auto folds_stride  = world_tree.get_folds_stride();
 
-        auto process_region = [&](std::span<const double> leaves_region,
-                                  std::span<FoldType> folds_region,
-                                  std::span<float> scores_region,
-                                  std::span<float> scores_ep_region) {
+        auto const process_region = [&](std::span<const double> leaves_region,
+                                        std::span<FoldType> folds_region,
+                                        std::span<float> scores_region,
+                                        std::span<float> scores_ep_region) {
             if (leaves_region.empty()) {
                 return;
             }
@@ -388,11 +389,11 @@ private:
         auto& world_tree    = ws.world_tree;
         const auto n_leaves = world_tree.get_size();
 
-        memory::CircularView<double> leaves_view =
+        memory::CircularView<double> const leaves_view =
             world_tree.get_leaves_circular_view();
-        memory::CircularView<float> scores_view =
+        memory::CircularView<float> const scores_view =
             world_tree.get_scores_circular_view();
-        memory::CircularView<float> scores_ep_view =
+        memory::CircularView<float> const scores_ep_view =
             world_tree.get_scores_ep_circular_view();
 
         if (n_leaves > 0) {
@@ -436,23 +437,23 @@ private:
         const auto conservative_tile =
             static_cast<double>(m_cfg.get_use_conservative_tile());
 
-        auto score_flops = [&](double n_leaves) {
+        auto const score_flops = [&](double n_leaves) {
             return n_leaves *
                    ((3.0 * nbins) +
                     (n_widths * ((2.0 * nbins) + (nbins / 4) + 11.0)));
         };
-        auto score_flops_kadane = [&](double n_leaves) {
+        auto const score_flops_kadane = [&](double n_leaves) {
             return n_leaves * (((3.0 * nbins) + 1.0) +
                                (n_biases * ((4.0 * nbins) + 11.0)));
         };
-        auto irfft_flops = [&](double n_leaves) {
+        auto const irfft_flops = [&](double n_leaves) {
             if constexpr (std::is_same_v<FoldType, ComplexType>) {
                 return (2.0 * n_leaves) * nbins * std::log2(nbins);
             } else {
                 return 0.0;
             }
         };
-        auto shift_add_flops = [&](double n_leaves) {
+        auto const shift_add_flops = [&](double n_leaves) {
             if constexpr (std::is_same_v<FoldType, ComplexType>) {
                 return n_leaves * 2.0 * nbins_f * 8.0;
             } else {
@@ -460,18 +461,18 @@ private:
             }
         };
 
-        auto branch_flops = [&](double n_branches, double n_leaves) {
+        auto const branch_flops = [&](double n_branches, double n_leaves) {
             // Dominant Taylor branch arithmetic: per-parameter step/shift work
             // over input branches plus child-center generation over outputs.
             return (n_branches * n_params * 10.0) + (n_leaves * n_params * 2.0);
         };
-        auto resolve_flops = [&](double n_leaves) {
+        auto const resolve_flops = [&](double n_leaves) {
             // Polynomial propagation to acceleration/frequency plus phase and
             // nearest-grid arithmetic. The order-dependent part scales with
             // the number of Taylor parameters.
             return n_leaves * ((6.0 * n_params) + 16.0);
         };
-        auto transform_flops = [&](double n_leaves) {
+        auto const transform_flops = [&](double n_leaves) {
             // Value propagation is triangular in the Taylor order; conservative
             // tiles also propagate uncertainty with squared terms and sqrt.
             const auto value_flops = n_params * (n_params + 1.0);
@@ -479,7 +480,7 @@ private:
                 conservative_tile * n_params * ((2.0 * n_params) + 1.0);
             return n_leaves * (value_flops + error_flops);
         };
-        auto report_flops = [&](double n_leaves) {
+        auto const report_flops = [&](double n_leaves) {
             // Gauge transform and error propagation for all non-frequency
             // parameters, plus final frequency/error conversion.
             return n_leaves * (((n_params - 1.0) * 12.0) + 4.0);
@@ -738,7 +739,7 @@ private:
             SizeType n_leaves_passing = m_prune_funcs->score_and_filter(
                 prune_ws.branched_folds, prune_ws.branched_scores,
                 prune_ws.branched_indices, current_threshold, n_leaves_active);
-            auto branched_scores_span =
+            auto const branched_scores_span =
                 std::span<const float>(prune_ws.branched_scores)
                     .first(n_leaves_active);
             const auto [min_it, max_it] =
@@ -828,13 +829,13 @@ private:
         const bool harvest_on = is_harvest_enabled(harvest_threshold);
         const auto n_cells    = m_mask.get_n_cells();
 
-        auto first = indices.begin();
-        auto last  = first + static_cast<std::ptrdiff_t>(n_passing);
+        auto const first = indices.begin();
+        auto const last  = first + static_cast<std::ptrdiff_t>(n_passing);
         std::stable_sort(first, last, [&](SizeType lhs, SizeType rhs) {
             return scores[lhs] > scores[rhs];
         });
 
-        auto cell_masked = [&](SizeType local_idx) {
+        auto const cell_masked = [&](SizeType local_idx) {
             if (!harvest_on) {
                 return false;
             }
@@ -972,13 +973,13 @@ public:
         m_workspace_storage.reserve(m_nthreads);
         const auto ncoords_ffa = m_ffa_plan.get_ncoords().back();
         if constexpr (std::is_same_v<FoldType, ComplexType>) {
-            for (SizeType i = 0; i < static_cast<SizeType>(m_nthreads); ++i) {
+            for (SizeType i = 0; std::cmp_less(i, m_nthreads); ++i) {
                 m_workspace_storage.emplace_back(
                     m_batch_size, m_branch_max, m_max_sugg, ncoords_ffa,
                     m_cfg.get_nparams(), m_cfg.get_nbins_f(), nsegments);
             }
         } else {
-            for (SizeType i = 0; i < static_cast<SizeType>(m_nthreads); ++i) {
+            for (SizeType i = 0; std::cmp_less(i, m_nthreads); ++i) {
                 m_workspace_storage.emplace_back(
                     m_batch_size, m_branch_max, m_max_sugg, ncoords_ffa,
                     m_cfg.get_nparams(), m_cfg.get_nbins(), nsegments);
@@ -1140,7 +1141,7 @@ public:
             *m_ffa_workspace_ptr, *m_fft_ptr, m_cfg, m_show_progress);
         const auto buffer_size = m_ffa_plan.get_buffer_size();
         const auto fold_size   = m_ffa_plan.get_fold_size();
-        auto fold_span         = m_ffa_fold_span.first(buffer_size);
+        auto const fold_span   = m_ffa_fold_span.first(buffer_size);
         ffa->execute(ts_e, ts_v, fold_span);
         const auto ffa_fold =
             std::span<const FoldType>(fold_span).first(fold_size);
@@ -1248,8 +1249,9 @@ private:
             "EPMultiPass: pruning requires at least 2 parameters");
         const auto& counts = m_ffa_plan.get_param_counts().back();
         const auto limits  = m_cfg.get_param_limits();
-        m_mask_base = search::GridMask(limits[n_params - 2], counts[n_params - 2],
-                               limits[n_params - 1], counts[n_params - 1]);
+        m_mask_base =
+            search::GridMask(limits[n_params - 2], counts[n_params - 2],
+                             limits[n_params - 1], counts[n_params - 1]);
         m_mask_base.add_windows(m_rfi_config.pulsar_mask,
                                 m_rfi_config.n_harmonics);
         if (m_rfi_config.is_active()) {

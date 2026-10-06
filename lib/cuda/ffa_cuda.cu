@@ -3,11 +3,16 @@
 #include <memory>
 #include <optional>
 
+#include <cuda_runtime.h>
 #include <fmt/ranges.h>
 #include <spdlog/spdlog.h>
-
-#include <cuda_runtime.h>
 #include <thrust/device_vector.h>
+
+#include "loki/algorithms/fold.hpp"
+#include "loki/common/coord.hpp"
+#include "loki/common/plans.hpp"
+#include "loki/common/types.hpp"
+#include "loki/detection/score.hpp"
 
 #include "lib/algorithms/ffa_engine.hpp"
 #include "lib/cuda/cuda_utils.cuh"
@@ -20,11 +25,6 @@
 #include "lib/detail/error_check.hpp"
 #include "lib/detail/timing.hpp"
 #include "lib/detection/score_engine.hpp"
-#include "loki/algorithms/fold.hpp"
-#include "loki/common/coord.hpp"
-#include "loki/common/plans.hpp"
-#include "loki/common/types.hpp"
-#include "loki/detection/score.hpp"
 
 namespace loki::algorithms {
 
@@ -529,12 +529,12 @@ private:
 
         if constexpr (std::is_same_v<FoldTypeCUDA, float>) {
             core::ffa_iter_freq_cuda(fold_in, fold_out, coords, ncoords_cur,
-                                        ncoords_prev, nsegments, nbins, stream);
+                                     ncoords_prev, nsegments, nbins, stream);
 
         } else {
-            core::ffa_complex_iter_freq_cuda(
-                fold_in, fold_out, coords, ncoords_cur, ncoords_prev, nsegments,
-                nbins_f, nbins, stream);
+            core::ffa_complex_iter_freq_cuda(fold_in, fold_out, coords,
+                                             ncoords_cur, ncoords_prev,
+                                             nsegments, nbins_f, nbins, stream);
         }
     }
 
@@ -554,12 +554,12 @@ private:
 
         if constexpr (std::is_same_v<FoldTypeCUDA, float>) {
             core::ffa_iter_cuda(fold_in, fold_out, coords, ncoords_cur,
-                                   ncoords_prev, nsegments, nbins, stream);
+                                ncoords_prev, nsegments, nbins, stream);
 
         } else {
-            core::ffa_complex_iter_cuda(fold_in, fold_out, coords,
-                                           ncoords_cur, ncoords_prev, nsegments,
-                                           nbins_f, nbins, stream);
+            core::ffa_complex_iter_cuda(fold_in, fold_out, coords, ncoords_cur,
+                                        ncoords_prev, nsegments, nbins_f, nbins,
+                                        stream);
         }
     }
 

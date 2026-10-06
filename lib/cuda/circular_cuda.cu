@@ -1,6 +1,7 @@
 #include "lib/cuda/circular_cuda.cuh"
 
 #include <cstdint>
+
 #include <cuda/atomic>
 #include <cuda/std/limits>
 #include <cuda/std/span>
@@ -10,6 +11,7 @@
 #include <thrust/sequence.h>
 
 #include "loki/common/types.hpp"
+
 #include "lib/cuda/cub_helpers.cuh"
 #include "lib/cuda/cuda_utils.cuh"
 #include "lib/cuda/kernel_utils.cuh"
@@ -503,8 +505,8 @@ __global__ void kernel_circ_taylor_ascend_resolve_batch(
 
     double a_new, v_new, d_new;
     const uint32_t mask_circular =
-        get_circ_taylor_mask_device(c_cur, s_cur, ds_cur, j_cur, dj_cur,
-                                    a_cur, da_cur, propagator_significance);
+        get_circ_taylor_mask_device(c_cur, s_cur, ds_cur, j_cur, dj_cur, a_cur,
+                                    da_cur, propagator_significance);
     if (mask_circular == 0) {
         a_new = a_cur + (j_cur * dt) + (s_cur * half_dt2) + (c_cur * sixth_dt3);
         v_new = v_cur + (a_cur * dt) + (j_cur * half_dt2) +
@@ -826,8 +828,8 @@ circ_taylor_validate_batch_cuda(cuda::std::span<const double> leaves_branch,
         "kernel_validate_branches_circular launch failed");
 
     // Count number of passing profiles
-    auto transform_it = thrust::make_transform_iterator(validation_mask.data(),
-                                                        cub_helpers::Uint8ToUint32{});
+    auto transform_it = thrust::make_transform_iterator(
+        validation_mask.data(), cub_helpers::Uint8ToUint32{});
 
     cuda_utils::check_cuda_call(
         cub::DeviceReduce::Sum(scratch_ws.cub_temp_storage,

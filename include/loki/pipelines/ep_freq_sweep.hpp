@@ -29,11 +29,11 @@ public:
     /// Only the CPU backend is implemented.
     explicit EPFreqSweep(
         const search::PulsarSearchConfig& cfg,
-        bool show_progress          = true,
-        float min_pd                = 0.1F,
-        std::string_view poly_basis = "taylor",
-        float ref_ducy              = 0.1F,
-        algorithms::PruneRFIConfig rfi_config   = {},
+        bool show_progress                           = true,
+        float min_pd                                 = 0.1F,
+        std::string_view poly_basis                  = "taylor",
+        float ref_ducy                               = 0.1F,
+        const algorithms::PruneRFIConfig& rfi_config = {},
         const std::optional<std::filesystem::path>& plan_cache_file =
             std::nullopt,
         std::optional<SizeType> n_runs                = std::nullopt,

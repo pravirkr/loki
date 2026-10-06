@@ -4,6 +4,10 @@
 #include <cmath>
 #include <format>
 #include <limits>
+#include <span>
+#include <vector>
+
+#include "loki/common/types.hpp"
 
 #include "lib/detail/error_check.hpp"
 #include "lib/detail/utils.hpp"
@@ -101,7 +105,11 @@ ParamWindow make_birdie_window(double f, double f_pad, double a_pad) {
     error_check::check(utils::is_finite(a_pad),
                        "make_birdie_window: a_pad must be finite");
     return ParamWindow{
-        .f_lo = f - f_pad, .f_hi = f + f_pad, .a_lo = -a_pad, .a_hi = a_pad,};
+        .f_lo = f - f_pad,
+        .f_hi = f + f_pad,
+        .a_lo = -a_pad,
+        .a_hi = a_pad,
+    };
 }
 
 ParamWindow make_harvest_window(double f,
@@ -129,10 +137,12 @@ ParamWindow make_harvest_window(double f,
     const auto sweep = f * std::abs(a) * reach * utils::kInvCval;
     const auto f_pad = (ntiles * df) + sweep;
     const auto a_pad = ntiles * da;
-    return ParamWindow{.f_lo = f - f_pad,
-                       .f_hi = f + f_pad,
-                       .a_lo = a - a_pad,
-                       .a_hi = a + a_pad,};
+    return ParamWindow{
+        .f_lo = f - f_pad,
+        .f_hi = f + f_pad,
+        .a_lo = a - a_pad,
+        .a_hi = a + a_pad,
+    };
 }
 
 std::vector<float>

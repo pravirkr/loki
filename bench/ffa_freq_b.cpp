@@ -200,7 +200,7 @@ void run_freq_search(benchmark::State& state,
             break;
         }
     }
-    const auto timers = parse_sweep_timers(log_path);
+    const auto timers               = parse_sweep_timers(log_path);
     state.counters["brutefold_s"]   = timers.brutefold_s;
     state.counters["brute_table_s"] = timers.brute_table_s;
     state.counters["merge_s"]       = timers.merge_s;

@@ -3,10 +3,14 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <span>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
+#include "loki/common/types.hpp"
 #include "loki/detection/thresholds.hpp"
+
 #include "lib/detail/error_check.hpp"
 #include "lib/detail/math.hpp"
 #include "lib/detail/utils.hpp"
@@ -45,7 +49,7 @@ std::vector<float> compute_probs_linear(SizeType nprobs, float prob_min) {
     error_check::check_less(prob_min, 1.0F, "Probability must be < 1");
     error_check::check_greater(prob_min, 0.0F, "Probability must be > 0");
     std::vector<float> probs(nprobs);
-    float step = (1.0F - prob_min) / static_cast<float>(nprobs - 1);
+    const float step = (1.0F - prob_min) / static_cast<float>(nprobs - 1);
 
     for (SizeType i = 0; i < nprobs; ++i) {
         probs[i] = prob_min + (step * static_cast<float>(i));

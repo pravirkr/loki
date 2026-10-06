@@ -3,16 +3,23 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <cstdint>
+#include <format>
+#include <limits>
+#include <memory>
 #include <numbers>
 #include <numeric>
 #include <span>
 #include <stdexcept>
+#include <vector>
 
+#include "loki/common/backend.hpp"
 #include "loki/common/types.hpp"
+
 #include "lib/common/dispatch.hpp"
+#include "lib/cpu/boxcar_kernels.hpp"
 #include "lib/detail/error_check.hpp"
 #include "lib/detail/utils.hpp"
-#include "lib/cpu/boxcar_kernels.hpp"
 #include "lib/detection/score_engine.hpp"
 #include "lib/utils/fft_impl.hpp"
 
@@ -46,8 +53,8 @@ void generate_boxcar_templates(std::span<float> templates,
                              "generate_boxcar_templates: templates size does "
                              "not match");
     for (SizeType iw = 0; iw < ntemplates; ++iw) {
-        const auto width   = widths[iw];
-        auto template_span = templates.subspan(iw * nbins, nbins);
+        const auto width         = widths[iw];
+        const auto template_span = templates.subspan(iw * nbins, nbins);
         // Fill the first 'width' bins with 1.0, rest remain 0.0
         std::fill_n(template_span.begin(), std::min(width, nbins), 1.0F);
         normalise_l2(template_span);
@@ -62,8 +69,8 @@ void generate_gaussian_templates(std::span<float> templates,
                              "generate_gaussian_templates: templates size does "
                              "not match");
     for (SizeType iw = 0; iw < ntemplates; ++iw) {
-        const SizeType width = widths[iw];
-        auto template_span   = templates.subspan(iw * nbins, nbins);
+        const SizeType width     = widths[iw];
+        const auto template_span = templates.subspan(iw * nbins, nbins);
         const auto sigma =
             static_cast<float>(width) /
             (2.0F * std::sqrt(2.0F * std::numbers::ln2_v<float>));
@@ -186,8 +193,8 @@ public:
         // Find the maximum value for each profile and template and then scale
         for (SizeType i = 0; i < m_nprofiles; ++i) {
             for (SizeType j = 0; j < m_ntemplates; ++j) {
-                const auto idx   = (i * m_ntemplates) + j;
-                auto snr_subspan = std::span(m_snr_arr).subspan(
+                const auto idx         = (i * m_ntemplates) + j;
+                const auto snr_subspan = std::span(m_snr_arr).subspan(
                     idx * m_nbins_pow2, m_nbins_pow2);
                 out[idx] = *std::ranges::max_element(snr_subspan) /
                            static_cast<float>(m_nbins_pow2);
@@ -232,7 +239,7 @@ MatchedFilter::~MatchedFilter()                              = default;
 MatchedFilter::MatchedFilter(MatchedFilter&& other) noexcept = default;
 MatchedFilter&
 MatchedFilter::operator=(MatchedFilter&& other) noexcept = default;
-std::vector<float> MatchedFilter::get_templates() const noexcept {
+std::vector<float> MatchedFilter::get_templates() const {
     return m_impl->get_templates();
 }
 SizeType MatchedFilter::get_ntemplates() const noexcept {
@@ -294,8 +301,8 @@ void snr_boxcar_1d(std::span<const float> arr,
                              "snr_boxcar_1d: out size does not match");
     std::vector<float> psum(nbins + wmax);
     utils::circular_prefix_sum(arr.data(), psum.data(), nbins, nbins + wmax);
-    const float sum              = psum[nbins - 1]; // sum of the input array
-    float* __restrict__ psum_ptr = psum.data();
+    const float sum = psum[nbins - 1]; // sum of the input array
+    const float* __restrict__ psum_ptr = psum.data();
 
     for (SizeType iw = 0; iw < ntemplates; ++iw) {
         // Height and baseline of a boxcar filter with width w bins

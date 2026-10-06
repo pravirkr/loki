@@ -19,6 +19,7 @@ Checks: >
   google-*,
   hicpp-*,
   llvm-*,
+  -llvm-header-guard,
   -llvm-prefer-static-over-anonymous-namespace,
   -llvm-use-ranges,
   misc-*,
@@ -29,17 +30,20 @@ Checks: >
   -modernize-use-trailing-return-type,
   -modernize-use-nodiscard,
   openmp-*,
+  -openmp-exception-escape,
   performance-*,
   portability-*,
+  -portability-avoid-pragma-once,
   readability-*,
   -readability-identifier-length,
   -readability-isolate-declaration,
   -readability-magic-numbers,
   -readability-suspicious-call-argument,
+  -readability-use-concise-preprocessor-directives,
 
 HeaderFileExtensions: ["h", "hh", "hpp", "hxx", "cuh"]
 WarningsAsErrors: ""
-HeaderFilterRegex: ".*"
+HeaderFilterRegex: "(include|lib|src|tests|bench|applications)/"
 FormatStyle: "file"
 CheckOptions:
   readability-identifier-naming.ClassCase: "CamelCase"
@@ -71,4 +75,3 @@ CheckOptions:
   readability-function-cognitive-complexity.IgnoreMacros: "true"
   readability-function-cognitive-complexity.Threshold: "150"
   readability-trailing-comma.SingleLineCommaPolicy: Ignore
-

@@ -1,6 +1,4 @@
 #include "loki/algorithms/prune.hpp"
-#include "lib/cuda/ffa_cuda.cuh"
-#include "lib/cuda/prune_cuda.cuh"
 
 #include <algorithm>
 #include <filesystem>
@@ -11,18 +9,20 @@
 #include <stdexcept>
 #include <utility>
 
-#include <fmt/ranges.h>
-#include <spdlog/spdlog.h>
-
 #include <cuda/std/span>
 #include <cuda_runtime.h>
+#include <fmt/ranges.h>
+#include <spdlog/spdlog.h>
 #include <thrust/device_vector.h>
 
 #include "loki/algorithms/ffa.hpp"
 #include "loki/common/types.hpp"
+
 #include "lib/algorithms/prune_engine.hpp"
 #include "lib/cuda/cuda_utils.cuh"
 #include "lib/cuda/dynamic_cuda.cuh"
+#include "lib/cuda/ffa_cuda.cuh"
+#include "lib/cuda/prune_cuda.cuh"
 #include "lib/cuda/world_tree_cuda.cuh"
 #include "lib/detail/psr_utils.hpp"
 #include "lib/detail/timing.hpp"
@@ -39,8 +39,9 @@ struct ExecutionStream {
 
     explicit ExecutionStream(int device_id) {
         cuda_utils::CudaSetDeviceGuard guard(device_id);
-        cuda_utils::check_cuda_call(cudaStreamCreate(&stream),
-                                    "EPMultiPassCudaCore: cudaStreamCreate failed");
+        cuda_utils::check_cuda_call(
+            cudaStreamCreate(&stream),
+            "EPMultiPassCudaCore: cudaStreamCreate failed");
         owns = true;
     }
 
@@ -48,9 +49,9 @@ struct ExecutionStream {
         : stream(external_stream),
           owns(false) {
         if (stream == nullptr) {
-            throw std::invalid_argument(
-                "EPMultiPassCudaCore: execution_stream must be non-null when using "
-                "an external EPWorkspaceCUDA");
+            throw std::invalid_argument("EPMultiPassCudaCore: execution_stream "
+                                        "must be non-null when using "
+                                        "an external EPWorkspaceCUDA");
         }
     }
 
@@ -58,7 +59,8 @@ struct ExecutionStream {
         if (owns && stream != nullptr) {
             cuda_utils::check_cuda_call(
                 cudaStreamSynchronize(stream),
-                "EPMultiPassCudaCore: cudaStreamSynchronize before destroy failed");
+                "EPMultiPassCudaCore: cudaStreamSynchronize before destroy "
+                "failed");
             cuda_utils::check_cuda_call(
                 cudaStreamDestroy(stream),
                 "EPMultiPassCudaCore: cudaStreamDestroy failed");
@@ -885,10 +887,10 @@ public:
         std::error_code ec;
         std::filesystem::create_directories(outdir, ec);
         if (!std::filesystem::exists(outdir)) {
-            throw std::runtime_error(
-                std::format("EPMultiPassCudaCore::execute: Failed to create output "
-                            "directory '{}': {}",
-                            outdir.string(), ec.message()));
+            throw std::runtime_error(std::format(
+                "EPMultiPassCudaCore::execute: Failed to create output "
+                "directory '{}': {}",
+                outdir.string(), ec.message()));
         }
 
         // Determine ref_segs to process
@@ -1015,10 +1017,11 @@ EPMultiPassCudaCore<FoldTypeCUDA>& EPMultiPassCudaCore<FoldTypeCUDA>::operator=(
     EPMultiPassCudaCore<FoldTypeCUDA>&& other) noexcept = default;
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
-void EPMultiPassCudaCore<FoldTypeCUDA>::execute(std::span<const float> ts_e,
-                                            std::span<const float> ts_v,
-                                            const std::filesystem::path& outdir,
-                                            std::string_view file_prefix) {
+void EPMultiPassCudaCore<FoldTypeCUDA>::execute(
+    std::span<const float> ts_e,
+    std::span<const float> ts_v,
+    const std::filesystem::path& outdir,
+    std::string_view file_prefix) {
     m_impl->execute(ts_e, ts_v, outdir, file_prefix);
 }
 
@@ -1094,14 +1097,14 @@ namespace detail {
 template <SupportedFoldType FoldType>
 std::unique_ptr<EPMultiPassEngine<FoldType>>
 make_ep_gpu(search::PulsarSearchConfig cfg,
-             std::span<const float> threshold_scheme,
-             std::optional<SizeType> n_runs,
-             std::optional<std::vector<SizeType>> ref_segs,
-             std::span<const SizeType> ascend_levels,
-             SizeType max_sugg,
-             SizeType batch_size,
-             std::string_view poly_basis,
-             int device_id) {
+            std::span<const float> threshold_scheme,
+            std::optional<SizeType> n_runs,
+            std::optional<std::vector<SizeType>> ref_segs,
+            std::span<const SizeType> ascend_levels,
+            SizeType max_sugg,
+            SizeType batch_size,
+            std::string_view poly_basis,
+            int device_id) {
     return std::make_unique<EPMultiPassCudaEngine<FoldType>>(
         std::move(cfg), threshold_scheme, n_runs, std::move(ref_segs),
         ascend_levels, max_sugg, batch_size, poly_basis, device_id);
@@ -1127,49 +1130,49 @@ make_ep_gpu(memory::EPWorkspace<FoldType>& workspace,
 
 template std::unique_ptr<EPMultiPassEngine<float>>
 make_ep_gpu<float>(memory::EPWorkspace<float>&,
-                 search::PulsarSearchConfig,
-                 std::span<const float>,
-                 std::optional<SizeType>,
-                 std::optional<std::vector<SizeType>>,
-                 std::span<const SizeType>,
-                 SizeType,
-                 SizeType,
-                 std::string_view,
-                 int);
+                   search::PulsarSearchConfig,
+                   std::span<const float>,
+                   std::optional<SizeType>,
+                   std::optional<std::vector<SizeType>>,
+                   std::span<const SizeType>,
+                   SizeType,
+                   SizeType,
+                   std::string_view,
+                   int);
 
 template std::unique_ptr<EPMultiPassEngine<ComplexType>>
 make_ep_gpu<ComplexType>(memory::EPWorkspace<ComplexType>&,
-                 search::PulsarSearchConfig,
-                 std::span<const float>,
-                 std::optional<SizeType>,
-                 std::optional<std::vector<SizeType>>,
-                 std::span<const SizeType>,
-                 SizeType,
-                 SizeType,
-                 std::string_view,
-                 int);
+                         search::PulsarSearchConfig,
+                         std::span<const float>,
+                         std::optional<SizeType>,
+                         std::optional<std::vector<SizeType>>,
+                         std::span<const SizeType>,
+                         SizeType,
+                         SizeType,
+                         std::string_view,
+                         int);
 
 template std::unique_ptr<EPMultiPassEngine<float>>
 make_ep_gpu<float>(search::PulsarSearchConfig,
-                    std::span<const float>,
-                    std::optional<SizeType>,
-                    std::optional<std::vector<SizeType>>,
-                    std::span<const SizeType>,
-                    SizeType,
-                    SizeType,
-                    std::string_view,
-                    int);
+                   std::span<const float>,
+                   std::optional<SizeType>,
+                   std::optional<std::vector<SizeType>>,
+                   std::span<const SizeType>,
+                   SizeType,
+                   SizeType,
+                   std::string_view,
+                   int);
 
 template std::unique_ptr<EPMultiPassEngine<ComplexType>>
 make_ep_gpu<ComplexType>(search::PulsarSearchConfig,
-                          std::span<const float>,
-                          std::optional<SizeType>,
-                          std::optional<std::vector<SizeType>>,
-                          std::span<const SizeType>,
-                          SizeType,
-                          SizeType,
-                          std::string_view,
-                          int);
+                         std::span<const float>,
+                         std::optional<SizeType>,
+                         std::optional<std::vector<SizeType>>,
+                         std::span<const SizeType>,
+                         SizeType,
+                         SizeType,
+                         std::string_view,
+                         int);
 
 } // namespace detail
 

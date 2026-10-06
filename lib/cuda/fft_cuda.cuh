@@ -5,18 +5,18 @@
  * @brief cuFFT plan cache and batched device transforms. Internal.
  */
 
+#include <format>
 #include <memory>
 #include <span>
+#include <stdexcept>
+#include <string_view>
 
 #include <cuda/std/span>
 #include <cuda_runtime.h>
 
-#include <format>
-#include <stdexcept>
-#include <string_view>
-
 #include "loki/common/types.hpp"
 #include "loki/utils/fft.hpp"
+
 #include "lib/cuda/types_cuda.cuh"
 #include "lib/utils/fft_impl.hpp"
 

@@ -1,8 +1,15 @@
 #include "loki/simulation/modulate.hpp"
 
 #include <cmath>
+#include <memory>
 #include <numbers>
+#include <optional>
+#include <span>
+#include <string>
 #include <utility>
+#include <vector>
+
+#include "loki/common/types.hpp"
 
 #include "lib/detail/error_check.hpp"
 #include "lib/detail/utils.hpp"
@@ -27,15 +34,15 @@ void check_time_span(std::span<const double> time,
 }
 
 [[nodiscard]] double int_pow(double base, int exponent) {
-    double result = 1.0;
-    double factor = base;
-    int remaining = exponent;
-    while (remaining > 0) {
-        if ((remaining & 1) != 0) {
+    double result  = 1.0;
+    double factor  = base;
+    auto remaining = static_cast<unsigned>(exponent);
+    while (remaining > 0U) {
+        if ((remaining & 1U) != 0U) {
             result *= factor;
         }
         factor *= factor;
-        remaining >>= 1;
+        remaining >>= 1U;
     }
     return result;
 }
@@ -151,21 +158,23 @@ CircularModulator::CircularModulator(double p_orb,
                                      double m_p,
                                      double sin_i)
     : m_p_orb(p_orb),
-      m_psi(psi),
-      m_x_orb(0.0) {
+      m_psi(psi) {
     error_check::check(p_orb > 0.0, "orbital period must be positive");
     if (x_orb.has_value()) {
         m_x_orb = *x_orb;
         return;
     }
-    error_check::check(m_c.has_value(),
+    const std::optional<double> companion_opt = m_c;
+    error_check::check(companion_opt.has_value(),
                        "circular modulation needs x_orb or companion mass");
-    const double total = m_p + *m_c;
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) -- checked above.
+    const double companion_mass = *companion_opt;
+    const double total          = m_p + companion_mass;
     error_check::check(total != 0.0,
                        "pulsar plus companion mass must be non-zero");
     const double semi_major =
         0.005 * std::pow(total * p_orb * p_orb, 1.0 / 3.0);
-    m_x_orb = semi_major * (*m_c / total) * sin_i;
+    m_x_orb = semi_major * (companion_mass / total) * sin_i;
 }
 
 void CircularModulator::generate(std::span<const double> time,

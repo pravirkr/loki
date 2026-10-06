@@ -20,21 +20,21 @@ TEST_CASE("FFAResultWriter creates datasets and completes atomically",
 
     FFAResultWriter writer(path, FFAResultWriter::Mode::kWrite);
     FFAResultMetadata meta;
-    meta.param_names = {"freq"};
-    meta.config_toml = "# test";
-    meta.tsamp       = 1.0e-4;
-    meta.nsamps      = 1024;
-    meta.tobs        = 0.1024;
-    meta.f_min       = 1.0;
-    meta.f_max       = 100.0;
-    meta.snr_min     = 5.0;
-    meta.ducy_max    = 0.2;
-    meta.wtsp        = 1.5;
-    meta.nbins_min   = 64;
-    meta.nbins_max   = 64;
+    meta.param_names  = {"freq"};
+    meta.config_toml  = "# test";
+    meta.tsamp        = 1.0e-4;
+    meta.nsamps       = 1024;
+    meta.tobs         = 0.1024;
+    meta.f_min        = 1.0;
+    meta.f_max        = 100.0;
+    meta.snr_min      = 5.0;
+    meta.ducy_max     = 0.2;
+    meta.wtsp         = 1.5;
+    meta.nbins_min    = 64;
+    meta.nbins_max    = 64;
     meta.octave_scale = 2.0;
-    meta.eta         = 1.0;
-    meta.use_fourier = true;
+    meta.eta          = 1.0;
+    meta.use_fourier  = true;
     writer.write_metadata(meta);
     writer.finalize();
 

@@ -47,7 +47,7 @@ template <typename T> constexpr T factorial(const T n) {
 }
 
 template <typename T> T norm_isf(T p) {
-    boost::math::normal_distribution<T> norm_dist;
+    const boost::math::normal_distribution<T> norm_dist;
     return boost::math::quantile(boost::math::complement(norm_dist, p));
 }
 
@@ -167,8 +167,8 @@ constexpr bool is_power_of_two(SizeType n) noexcept {
 // @param k_max Maximum polynomial order.
 // @param coeff_order  0=ascending, 1=descending
 // @return 2D matrix of shape (k_max + 1, k_max + 1).
-std::vector<double>
-compute_connection_matrix_s(SizeType k_max, SizeType coeff_order = 1U) noexcept;
+std::vector<double> compute_connection_matrix_s(SizeType k_max,
+                                                SizeType coeff_order = 1U);
 
 using StatTables = StatLookupTables<float>;
 

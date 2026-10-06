@@ -3,8 +3,14 @@
 #include <algorithm>
 #include <cmath>
 #include <numbers>
+#include <span>
+#include <stdexcept>
+#include <tuple>
+#include <utility>
+#include <vector>
 
 #include "loki/common/types.hpp"
+
 #include "lib/detail/error_check.hpp"
 #include "lib/detail/math.hpp"
 #include "lib/detail/utils.hpp"
@@ -219,10 +225,10 @@ void taylor_to_cheby_errors_batch(std::span<double> taylor_error_batch,
             const double d3_err = taylor_error_batch[(i * n_params) + 1];
             const double d2_err = taylor_error_batch[(i * n_params) + 2];
             const double d1_err = taylor_error_batch[(i * n_params) + 3];
-            const double e4_2  = d4_err * w4_2;
-            const double e2_2  = d2_err * w2_2;
-            const double e3_1  = d3_err * w3_1;
-            const double e1_ts = d1_err * ts;
+            const double e4_2   = d4_err * w4_2;
+            const double e2_2   = d2_err * w2_2;
+            const double e3_1   = d3_err * w3_1;
+            const double e1_ts  = d1_err * ts;
             taylor_error_batch[(i * n_params) + 0] = d4_err * w4_4;
             taylor_error_batch[(i * n_params) + 1] = d3_err * w3_3;
             taylor_error_batch[(i * n_params) + 2] =
@@ -240,10 +246,10 @@ void taylor_to_chebyshev_limits_full(std::span<const double> taylor_limits,
                                      SizeType n_params,
                                      double ts,
                                      std::span<double> out) {
-    auto tl = [&](SizeType i, SizeType j, SizeType k) -> double {
+    const auto tl = [&](SizeType i, SizeType j, SizeType k) -> double {
         return taylor_limits[(((i * n_params) + j) * 2) + k];
     };
-    auto ol = [&](SizeType i, SizeType j, SizeType k) -> double& {
+    const auto ol = [&](SizeType i, SizeType j, SizeType k) -> double& {
         return out[(((i * n_params) + j) * 2) + k];
     };
 

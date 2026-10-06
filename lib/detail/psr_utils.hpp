@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "loki/common/types.hpp"
+
 #include "lib/detail/error_check.hpp"
 #include "lib/detail/utils.hpp"
 
@@ -40,7 +41,7 @@ inline float get_phase_idx(double proper_time,
     // Calculate the total phase in cycles (can be negative or > 1)
     const double total_phase = (proper_time - delay) * freq;
     // Normalize phase to [0, 1) interval
-    double norm_phase = total_phase - std::floor(total_phase);
+    const double norm_phase = total_phase - std::floor(total_phase);
     // Scale the normalized phase to [0, nbins) and convert to float
     double iphase = norm_phase * static_cast<double>(nbins);
     if (iphase >= static_cast<double>(nbins)) {
@@ -194,7 +195,7 @@ inline void branch_one_param_padded(SizeType p,
     const SizeType pad_offset = (flat_base + p) * branch_max;
 
     if (shift_bins_ptr[flat_base + p] >= (eta - utils::kFloatEps)) {
-        auto slice =
+        const auto slice =
             std::span<double>(scratch_params_ptr + pad_offset, branch_max);
         auto [dparam_act, count] = branch_param_padded(
             slice, cur, sig_cur, dparam_new_ptr[flat_base + p], branch_max);
@@ -315,7 +316,7 @@ inline SizeType get_nearest_idx_analytical(double val,
     if (idx < 0) {
         return 0;
     }
-    if (idx >= static_cast<int>(count)) {
+    if (std::cmp_greater_equal(idx, count)) {
         return count - 1;
     }
     return static_cast<SizeType>(idx);
@@ -341,8 +342,8 @@ public:
         // np.argsort(np.abs(np.arange(nseg) - ref_idx), kind="stable")
         std::iota(m_data.begin(), m_data.end(), 0);
         std::ranges::sort(m_data, [ref = m_ref_idx](SizeType a, SizeType b) {
-            auto da = (a < ref) ? (ref - a) : (a - ref);
-            auto db = (b < ref) ? (ref - b) : (b - ref);
+            const auto da = (a < ref) ? (ref - a) : (a - ref);
+            const auto db = (b < ref) ? (ref - b) : (b - ref);
             if (da != db) {
                 return da < db;
             }
@@ -390,7 +391,7 @@ public:
             throw std::out_of_range(
                 std::format("level must be in [0, {}].", m_nsegments - 1));
         }
-        auto scheme_till_now =
+        const auto scheme_till_now =
             std::views::take(m_data, static_cast<IndexType>(level + 1));
         const auto [min_it, max_it] =
             std::ranges::minmax_element(scheme_till_now);
@@ -474,7 +475,7 @@ public:
                 "prune_level must be in [0, {}].", m_nsegments - 1));
         }
 
-        auto scheme_till_now =
+        const auto scheme_till_now =
             std::views::take(m_data, static_cast<IndexType>(prune_level));
         const auto [min_it, max_it] =
             std::ranges::minmax_element(scheme_till_now);

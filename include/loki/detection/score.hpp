@@ -24,7 +24,7 @@ public:
     MatchedFilter(const MatchedFilter&)            = delete;
     MatchedFilter& operator=(const MatchedFilter&) = delete;
 
-    std::vector<float> get_templates() const noexcept;
+    std::vector<float> get_templates() const;
     SizeType get_ntemplates() const noexcept;
     SizeType get_nbins() const noexcept;
     void compute(std::span<const float> arr, std::span<float> out);

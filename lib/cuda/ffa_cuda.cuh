@@ -20,6 +20,7 @@
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
+
 #include "lib/cuda/fft_cuda.cuh"
 #include "lib/cuda/workspace_cuda.cuh"
 

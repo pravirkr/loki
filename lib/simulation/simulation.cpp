@@ -4,7 +4,10 @@
 #include <cmath>
 #include <numbers>
 #include <numeric>
+#include <span>
 #include <vector>
+
+#include "loki/common/types.hpp"
 
 #include "lib/detail/error_check.hpp"
 
@@ -17,7 +20,7 @@ void generate_folded_profile(std::span<float> profile,
         profile.size(), nbins,
         "generate_folded_profile: profile size must be >= nbins");
     // Get subspan for the actual work area
-    auto output = profile.subspan(0, nbins);
+    const auto output = profile.subspan(0, nbins);
     // Generate phase values from 0 to 1 (exclusive)
     std::vector<float> phase(nbins);
     std::iota(phase.begin(), phase.end(), 0);
@@ -26,17 +29,18 @@ void generate_folded_profile(std::span<float> profile,
                            [step](float i) { return i * step; });
 
     // Calculate sigma
-    float sigma = ducy / (2.0F * std::sqrt(2.0F * std::numbers::ln10_v<float>));
+    const float sigma =
+        ducy / (2.0F * std::sqrt(2.0F * std::numbers::ln10_v<float>));
 
     // Calculate profile using wrapped phases
     std::ranges::transform(phase, output.begin(), [sigma, center](float p) {
-        float wrapped_phase = std::fmod(p - center + 0.5F, 1.0F) - 0.5F;
+        const float wrapped_phase = std::fmod(p - center + 0.5F, 1.0F) - 0.5F;
         return std::exp(-(wrapped_phase * wrapped_phase) /
                         (2.0F * sigma * sigma));
     });
 
     // Normalize by max value
-    float max_val = std::ranges::max(output);
+    const float max_val = std::ranges::max(output);
     std::ranges::transform(output, output.begin(),
                            [max_val](float val) { return val / max_val; });
 

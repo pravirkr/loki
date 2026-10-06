@@ -2,20 +2,28 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <filesystem>
 #include <format>
 #include <numeric>
+#include <optional>
+#include <stdexcept>
+#include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
 
-#include <highfive/highfive.hpp>
+#include <highfive/H5File.hpp>
 #include <spdlog/spdlog.h>
 
 #include "loki/algorithms/regions.hpp"
+#include "loki/common/backend.hpp"
+#include "loki/common/coord.hpp"
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
 #include "loki/detection/thresholds.hpp"
 #include "loki/search/configs.hpp"
+
 #include "lib/detail/utils.hpp"
 
 namespace loki::algorithms {
@@ -85,13 +93,15 @@ double calculate_ep_chunk_memory_gb(SizeType nparams,
                                 (ncoords_ffa * sizeof(SizeType));
 
     // 5. IRFFT scratch per thread (if complex):
-    SizeType irfft_bytes = 0;
-    if constexpr (kIsComplex) {
-        const SizeType max_nfft =
-            std::max(2 * batch_size * branch_max, 2 * ncoords_ffa);
-        irfft_bytes = (max_nfft * nbins_f * sizeof(ComplexType)) +
-                      (max_nfft * nbins * sizeof(float));
-    }
+    const SizeType irfft_bytes = [&]() -> SizeType {
+        if constexpr (kIsComplex) {
+            const SizeType max_nfft =
+                std::max(2 * batch_size * branch_max, 2 * ncoords_ffa);
+            return (max_nfft * nbins_f * sizeof(ComplexType)) +
+                   (max_nfft * nbins * sizeof(float));
+        }
+        return SizeType{0};
+    }();
 
     const SizeType per_thread_bytes = world_tree_bytes + prune_ws_bytes +
                                       branch_ws_bytes + seed_bytes +
@@ -291,14 +301,15 @@ public:
                 std::format("EPRegionPlanner: cache file '{}' does not exist",
                             filepath.string()));
         }
-        HighFive::File file(filepath.string(), HighFive::File::ReadOnly);
+        const HighFive::File file(filepath.string(), HighFive::File::ReadOnly);
         if (!file.hasAttribute("ep_plan_cache_version")) {
             throw std::invalid_argument(std::format(
                 "EPRegionPlanner: file '{}' is not a valid EP plan cache",
                 filepath.string()));
         }
 
-        auto check_attr_double = [&](const std::string& name, double val) {
+        const auto check_attr_double = [&](const std::string& name,
+                                           double val) {
             double file_val{};
             file.getAttribute(name).read(file_val);
             if (std::abs(val - file_val) >
@@ -310,7 +321,8 @@ public:
             }
         };
 
-        auto check_attr_size = [&](const std::string& name, SizeType val) {
+        const auto check_attr_size = [&](const std::string& name,
+                                         SizeType val) {
             SizeType file_val{};
             file.getAttribute(name).read(file_val);
             if (val != file_val) {
@@ -405,9 +417,9 @@ public:
         SizeType max_coord_size_all  = 0;
         SizeType max_fold_size_all   = 0;
 
-        auto chunks_grp = file.getGroup("chunks");
+        const auto chunks_grp = file.getGroup("chunks");
         for (SizeType i = 0; i < nchunks; ++i) {
-            auto chunk_grp =
+            const auto chunk_grp =
                 chunks_grp.getGroup(std::format("chunk_{:04d}", i));
             double nominal_f_start{};
             double nominal_f_end{};
@@ -440,7 +452,7 @@ public:
 
             auto chunk_cfg = m_base_cfg.get_updated_config(
                 nbins, eta, actual_f_start, actual_f_end);
-            plans::FFAPlan<FoldType> plan(chunk_cfg);
+            const plans::FFAPlan<FoldType> plan(chunk_cfg);
             SizeType ncoords = plan.get_ncoords().back();
             if (chunk_grp.hasAttribute("ncoords")) {
                 chunk_grp.getAttribute("ncoords").read(ncoords);
@@ -601,9 +613,9 @@ private:
         // once for the coarse band
         const double region_actual_start = f_start * (1.0 - max_drift);
         const double region_actual_end   = f_end * (1.0 + max_drift);
-        auto rep_cfg                     = m_base_cfg.get_updated_config(
+        const auto rep_cfg               = m_base_cfg.get_updated_config(
             nbins, eta, region_actual_start, region_actual_end);
-        plans::FFAPlan<FoldType> rep_plan(rep_cfg);
+        const plans::FFAPlan<FoldType> rep_plan(rep_cfg);
         const auto bp_double = rep_plan.get_branching_pattern(m_poly_basis);
         const std::vector<float> bp_float(bp_double.begin(), bp_double.end());
         const auto branch_max_raw = *std::ranges::max_element(bp_double);
@@ -646,9 +658,9 @@ private:
             }
         }
 
-        auto states = detection::evaluate_scheme(threshold_scheme, bp_float,
-                                                 m_ref_ducy, nbins, kNTrials,
-                                                 snr_final, ducy_max, wtsp);
+        const auto states = detection::evaluate_scheme(
+            threshold_scheme, bp_float, m_ref_ducy, nbins, kNTrials, snr_final,
+            ducy_max, wtsp);
         float peak_complexity = 1.0F;
         for (const auto& s : states) {
             if (!s.is_empty) {
@@ -665,7 +677,7 @@ private:
             const double act_end   = nominal_end * (1.0 + max_drift);
             auto chunk_cfg =
                 m_base_cfg.get_updated_config(nbins, eta, act_start, act_end);
-            plans::FFAPlan<FoldType> plan(chunk_cfg);
+            const plans::FFAPlan<FoldType> plan(chunk_cfg);
             const SizeType ncoords = plan.get_ncoords().back();
             const SizeType max_sugg =
                 std::max(SizeType{1024},
@@ -733,7 +745,7 @@ private:
             return {current_f_end - lo_width, std::move(best)};
         };
 
-        auto find_largest_fitting =
+        const auto find_largest_fitting =
             [&](double current_f_end) -> std::pair<double, EvaluatedChunk> {
             const double remaining = current_f_end - f_start;
             auto full_eval         = evaluate_chunk(f_start, current_f_end);
@@ -760,7 +772,7 @@ private:
 
         // Sliver absorption
         constexpr double kSliverFactor = 4.0;
-        auto try_absorb_sliver =
+        const auto try_absorb_sliver =
             [&](double current_f_end, double nominal_start,
                 EvaluatedChunk eval) -> std::pair<double, EvaluatedChunk> {
             const double remainder = nominal_start - f_start;

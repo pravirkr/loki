@@ -18,6 +18,9 @@ namespace loki::algorithms::detail {
 // make_*_cpu is defined in lib/cpu/, make_*_gpu in lib/cuda/ (GPU builds only).
 
 template <SupportedFoldType FoldType> class BruteFoldEngine {
+protected:
+    BruteFoldEngine() = default;
+
 public:
     virtual ~BruteFoldEngine()                     = default;
     virtual SizeType get_fold_size() const         = 0;
@@ -40,6 +43,11 @@ public:
     }
     virtual std::span<const coord::PhaseRun> runs() const { return {}; }
     virtual std::span<const SizeType> run_offsets() const { return {}; }
+
+    BruteFoldEngine(const BruteFoldEngine&)            = delete;
+    BruteFoldEngine& operator=(const BruteFoldEngine&) = delete;
+    BruteFoldEngine(BruteFoldEngine&&)                 = delete;
+    BruteFoldEngine& operator=(BruteFoldEngine&&)      = delete;
 };
 
 template <SupportedFoldType FoldType>

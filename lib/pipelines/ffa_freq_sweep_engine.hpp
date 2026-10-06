@@ -17,6 +17,9 @@ namespace loki::pipelines::detail {
 // make_*_cpu is defined in lib/cpu/, make_*_gpu in lib/cuda/ (GPU builds only).
 
 class FFAFreqSweepEngine {
+protected:
+    FFAFreqSweepEngine() = default;
+
 public:
     virtual ~FFAFreqSweepEngine() = default;
 
@@ -25,6 +28,11 @@ public:
                          const std::filesystem::path& outdir,
                          std::string_view file_prefix,
                          std::string_view config_toml) = 0;
+
+    FFAFreqSweepEngine(const FFAFreqSweepEngine&)            = delete;
+    FFAFreqSweepEngine& operator=(const FFAFreqSweepEngine&) = delete;
+    FFAFreqSweepEngine(FFAFreqSweepEngine&&)                 = delete;
+    FFAFreqSweepEngine& operator=(FFAFreqSweepEngine&&)      = delete;
 };
 
 std::unique_ptr<FFAFreqSweepEngine>

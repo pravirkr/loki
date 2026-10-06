@@ -85,9 +85,7 @@ def run_config(
     kw = dict(kw)
     if batch_size is not None:
         kw["batch_size"] = batch_size
-    dyn = libloki.thresholds.DynamicThresholdScheme(
-        bp, seed=seed, backend="cuda", **kw
-    )
+    dyn = libloki.thresholds.DynamicThresholdScheme(bp, seed=seed, backend="cuda", **kw)
     t0 = time.perf_counter()
     dyn.run(thres_neigh=neigh)
     dt = time.perf_counter() - t0

@@ -1,7 +1,10 @@
 #include "lib/detection/kadane.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstddef>
+#include <limits>
 #include <span>
 #include <stdexcept>
 
@@ -9,6 +12,7 @@
 #include <xsimd/xsimd.hpp>
 
 #include "loki/common/types.hpp"
+
 #include "lib/cpu/simd_utils.hpp"
 #include "lib/detail/error_check.hpp"
 
@@ -70,8 +74,8 @@ SizeType score_and_filter_max_kadane_with_cache_impl(
 
 #pragma omp simd reduction(+ : sum)
             for (SizeType j = 0; j < nbins; ++j) {
-                float val = ts_e_ptr[j] / std::sqrt(ts_v_ptr[j]);
-                dst[j]    = val;
+                float const val = ts_e_ptr[j] / std::sqrt(ts_v_ptr[j]);
+                dst[j]          = val;
                 sum += val;
             }
             total_sums_ptr[lane] = sum;
@@ -82,8 +86,9 @@ SizeType score_and_filter_max_kadane_with_cache_impl(
         simd_utils::transpose<BatchType>(temp_fn_ptr, transposed_fn_ptr, nbins);
 
         // Step 2: init Kadane state for all biases
-        UNROLL_VECTORIZE // Cannot use UNROLL_VECTORIZE_N(NBiases) for gcc < 14.0
-        for (SizeType k = 0; k < NBiases; ++k) {
+        UNROLL_VECTORIZE // Cannot use UNROLL_VECTORIZE_N(NBiases) for gcc
+                         // < 14.0
+            for (SizeType k = 0; k < NBiases; ++k) {
             max_sum[k] = batch_neg_inf;
             cur_max[k] = batch_zero;
             w_cur[k]   = batch_zero;
@@ -102,24 +107,24 @@ SizeType score_and_filter_max_kadane_with_cache_impl(
 
             UNROLL_VECTORIZE
             for (SizeType k = 0; k < NBiases; ++k) {
-                BatchType val = val_base - BatchType(biases[k]);
+                BatchType const val = val_base - BatchType(biases[k]);
 
                 cur_max[k] += val;
                 w_cur[k] += 1.0F;
-                auto upd_max = (cur_max[k] > max_sum[k]);
-                max_sum[k]   = xsimd::select(upd_max, cur_max[k], max_sum[k]);
-                best_w[k]    = xsimd::select(upd_max, w_cur[k], best_w[k]);
-                auto rst_max = (cur_max[k] < BatchType(0.0F));
+                auto const upd_max = (cur_max[k] > max_sum[k]);
+                max_sum[k] = xsimd::select(upd_max, cur_max[k], max_sum[k]);
+                best_w[k]  = xsimd::select(upd_max, w_cur[k], best_w[k]);
+                auto const rst_max = (cur_max[k] < BatchType(0.0F));
                 cur_max[k] =
                     xsimd::select(rst_max, BatchType(0.0F), cur_max[k]);
                 w_cur[k] = xsimd::select(rst_max, BatchType(0.0F), w_cur[k]);
 
                 cur_min[k] += val;
                 wc_min[k] += 1.0F;
-                auto upd_min = (cur_min[k] < min_sum[k]);
-                min_sum[k]   = xsimd::select(upd_min, cur_min[k], min_sum[k]);
-                best_wm[k]   = xsimd::select(upd_min, wc_min[k], best_wm[k]);
-                auto rst_min = (cur_min[k] > BatchType(0.0F));
+                auto const upd_min = (cur_min[k] < min_sum[k]);
+                min_sum[k] = xsimd::select(upd_min, cur_min[k], min_sum[k]);
+                best_wm[k] = xsimd::select(upd_min, wc_min[k], best_wm[k]);
+                auto const rst_min = (cur_min[k] > BatchType(0.0F));
                 cur_min[k] =
                     xsimd::select(rst_min, BatchType(0.0F), cur_min[k]);
                 wc_min[k] = xsimd::select(rst_min, BatchType(0.0F), wc_min[k]);
@@ -145,7 +150,7 @@ SizeType score_and_filter_max_kadane_with_cache_impl(
             const BatchType denom = best_width * (batch_nbins_f - best_width);
             BatchType snr = unbiased_sum * xsimd::sqrt(batch_nbins_f / denom);
 
-            auto valid =
+            auto const valid =
                 (best_width > batch_zero) & (best_width < batch_nbins_f);
             snr     = xsimd::select(valid, snr, batch_neg_inf);
             max_snr = xsimd::max(max_snr, snr);
@@ -263,13 +268,13 @@ score_and_filter_max_kadane_with_cache(std::span<const float> folds,
                                      "folds should be at least nprofiles * "
                                      "2 * nbins");
     SizeType nprofiles_passing = 0;
-    auto dispatch              = [&]<int B, SizeType N>() {
+    auto dispatch              = [&]<int B, SizeType N> {
         nprofiles_passing = score_and_filter_max_kadane_with_cache_impl<B, N>(
             folds.data(), nprofiles, nbins, scores.data(),
             indices_filtered.data(), threshold, cache);
     };
 
-    auto dispatch_bins = [&]<int B>() {
+    auto const dispatch_bins = [&]<int B> {
         if (nbins <= 32) {
             dispatch.template operator()<B, 32>();
         } else if (nbins <= 64) {

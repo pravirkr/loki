@@ -1,5 +1,4 @@
 #include "lib/cuda/kadane_cuda.cuh"
-#include "lib/detection/kadane.hpp"
 
 #include <cuda/atomic>
 #include <cuda/std/atomic>
@@ -7,16 +6,17 @@
 #include <cuda/std/span>
 #include <cuda/std/type_traits>
 #include <cuda_runtime.h>
+#include <spdlog/spdlog.h>
 #include <thrust/copy.h>
 #include <thrust/device_vector.h>
 
-#include <spdlog/spdlog.h>
-
 #include "loki/common/types.hpp"
+
 #include "lib/cuda/cub_helpers.cuh"
 #include "lib/cuda/cuda_utils.cuh"
 #include "lib/cuda/workspace_cuda.cuh"
 #include "lib/detail/error_check.hpp"
+#include "lib/detection/kadane.hpp"
 
 namespace loki::detection {
 
@@ -633,8 +633,8 @@ SizeType score_and_filter_max_cuda_kadane_d(
 
     // Count number of passing profiles
 
-    auto transform_it =
-        thrust::make_transform_iterator(filtered_mask.data(), cub_helpers::Uint8ToUint32{});
+    auto transform_it = thrust::make_transform_iterator(
+        filtered_mask.data(), cub_helpers::Uint8ToUint32{});
     cuda_utils::check_cuda_call(
         cub::DeviceReduce::Sum(scratch_ws.cub_temp_storage,
                                scratch_ws.cub_temp_bytes, transform_it,

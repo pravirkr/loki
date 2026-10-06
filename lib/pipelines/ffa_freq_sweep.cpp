@@ -8,6 +8,7 @@
 
 #include "loki/common/backend.hpp"
 #include "loki/search/configs.hpp"
+
 #include "lib/common/dispatch.hpp"
 #include "lib/pipelines/ffa_freq_sweep_engine.hpp"
 

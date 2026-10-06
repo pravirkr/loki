@@ -1,18 +1,17 @@
-#include "lib/cuda/taylor_cuda.cuh"
-
 #include <cuda/atomic>
 #include <cuda/std/limits>
 #include <cuda/std/span>
 #include <cuda/std/type_traits>
 #include <cuda_runtime.h>
-
 #include <thrust/execution_policy.h>
 #include <thrust/sequence.h>
 
 #include "loki/common/coord.hpp"
 #include "loki/common/types.hpp"
+
 #include "lib/cuda/cuda_utils.cuh"
 #include "lib/cuda/kernel_utils.cuh"
+#include "lib/cuda/taylor_cuda.cuh"
 #include "lib/detail/utils.hpp"
 
 namespace loki::core {
@@ -157,7 +156,8 @@ __device__ __forceinline__ void ffa_taylor_resolve_jerk_batch_device(
     const uint32_t idx_j = utils::get_nearest_idx_analytical_device(
         j_cur, param_limits[po + 0].min, param_limits[po + 0].max, n_jerk_prev);
     const uint32_t idx_a = utils::get_nearest_idx_analytical_device(
-        a_new, param_limits[po + 1].min, param_limits[po + 1].max, n_accel_prev);
+        a_new, param_limits[po + 1].min, param_limits[po + 1].max,
+        n_accel_prev);
     const uint32_t idx_f = utils::get_nearest_idx_analytical_device(
         f_new, param_limits[po + 2].min, param_limits[po + 2].max, n_freq_prev);
 

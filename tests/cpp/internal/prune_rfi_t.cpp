@@ -1,3 +1,5 @@
+#include "loki/algorithms/prune_rfi.hpp"
+
 #include <filesystem>
 #include <format>
 #include <optional>
@@ -10,11 +12,11 @@
 #include <highfive/highfive.hpp>
 
 #include "loki/algorithms/prune.hpp"
-#include "loki/algorithms/prune_rfi.hpp"
 #include "loki/common/backend.hpp"
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
+
 #include "lib/search/cands.hpp"
 #include "lib/utils/world_tree.hpp"
 
@@ -24,10 +26,10 @@ using loki::SizeType;
 using loki::algorithms::EPMultiPassTime;
 using loki::algorithms::ParamWindow;
 using loki::algorithms::PruneRFIConfig;
+using loki::memory::CircularView;
 using loki::search::HarvestBuffer;
 using loki::search::PruneResultWriter;
 using loki::search::PruneStatsCollection;
-using loki::memory::CircularView;
 using loki::search::PulsarSearchConfig;
 
 namespace {
@@ -287,8 +289,8 @@ TEST_CASE("EPMultiPassTime with make_default_harvest_scheme runs cleanly",
     rfi.harvest_scheme = loki::algorithms::make_default_harvest_scheme(
         thresholds, /*min_level=*/10, /*offset=*/10.0F, /*min_snr=*/15.0F);
 
-    const auto outdir =
-        std::filesystem::temp_directory_path() / "loki_ep_rfi_cpp_default_harvest";
+    const auto outdir = std::filesystem::temp_directory_path() /
+                        "loki_ep_rfi_cpp_default_harvest";
     std::filesystem::create_directories(outdir);
 
     EPMultiPassTime ep(cfg, thresholds, /*n_runs=*/std::nullopt, ref_segs,
@@ -315,8 +317,8 @@ TEST_CASE("EPMultiPass backend dispatch", "[prune][backend]") {
         std::filesystem::create_directories(outdir);
         EPMultiPassTime ep(cfg, thresholds, /*n_runs=*/std::nullopt, ref_segs,
                            /*ascend_levels=*/{}, /*max_sugg=*/1U << 14U,
-                           /*batch_size=*/256, "taylor", /*show_progress=*/false,
-                           {}, Exec::cpu(1));
+                           /*batch_size=*/256, "taylor",
+                           /*show_progress=*/false, {}, Exec::cpu(1));
         REQUIRE_NOTHROW(ep.execute(ts_e, ts_v, outdir, "cpu_dispatch"));
         std::filesystem::remove_all(outdir);
     }
@@ -333,4 +335,3 @@ TEST_CASE("EPMultiPass backend dispatch", "[prune][backend]") {
         }
     }
 }
-

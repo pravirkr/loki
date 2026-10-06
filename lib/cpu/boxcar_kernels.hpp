@@ -14,6 +14,7 @@
 #include <omp.h>
 
 #include "loki/common/types.hpp"
+
 #include "lib/detail/utils.hpp"
 
 namespace loki::detection::detail {
@@ -96,8 +97,8 @@ void snr_boxcar_impl(const float* __restrict__ folds,
                 utils::circular_prefix_sum(fold_ptr, psum.data(), nbins,
                                            nbins + wmax);
             }
-            const float sum              = psum[nbins - 1];
-            float* __restrict__ psum_ptr = psum.data();
+            const float sum                    = psum[nbins - 1];
+            const float* __restrict__ psum_ptr = psum.data();
 
             // Compute SNR for each width, find maximum
             float max_snr = std::numeric_limits<float>::lowest();

@@ -4,6 +4,7 @@
 #include <array>
 #include <bit>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <functional>
@@ -16,9 +17,11 @@
 #include <utility>
 #include <vector>
 
+#include <boost/math/special_functions/binomial.hpp>
 #include <omp.h>
 
 #include "loki/common/types.hpp"
+
 #include "lib/detail/utils.hpp"
 
 namespace loki::math {
@@ -48,7 +51,7 @@ std::vector<float> generate_cheb_table(SizeType order_max, SizeType n_derivs) {
     std::vector<float> tab(total_size, 0.0F);
 
     // Helper lambda for 3D indexing: tab(i, j, k)
-    auto idx3d = [=](SizeType i, SizeType j, SizeType k) -> SizeType {
+    const auto idx3d = [=](SizeType i, SizeType j, SizeType k) -> SizeType {
         return (i * dim2 * dim3) + (j * dim3) + k;
     };
 
@@ -162,7 +165,7 @@ generalized_cheb_pols(SizeType poly_order, float t0, float scale) {
 }
 
 std::vector<double> compute_connection_matrix_s(SizeType k_max,
-                                                SizeType coeff_order) noexcept {
+                                                SizeType coeff_order) {
 
     const SizeType n_params = k_max + 1;
     std::vector<double> mat(n_params * n_params, 0.0);
@@ -212,7 +215,7 @@ constexpr SizeType kMinChunkWindows = 8;
     if (m < 0) {
         m += period;
     }
-    return m < static_cast<std::int64_t>(n)
+    return std::cmp_less(m, static_cast<std::int64_t>(n))
                ? static_cast<SizeType>(m)
                : static_cast<SizeType>(period - 1 - m);
 }
@@ -463,16 +466,18 @@ void filter_chunks(const float* x,
                    SizeType w,
                    bool subtract,
                    int nthreads,
-                   MakeWindow&& make_window) {
+                   MakeWindow make_window) {
     const SizeType left      = w / 2;
     const SizeType right     = w - 1 - left;
     const SizeType min_chunk = std::max(kMinChunk, kMinChunkWindows * w);
     // Never more threads than requested, and no thread without a worthwhile
     // chunk of work.
-    const int team = static_cast<int>(
+    int team = static_cast<int>(
         std::clamp(n / min_chunk, SizeType{1},
                    static_cast<SizeType>(std::max(nthreads, 1))));
-#pragma omp parallel num_threads(team)
+    team = std::max(team, 1);
+#pragma omp parallel num_threads(team) default(none)                           \
+    shared(x, n, w, left, right, dst, subtract, make_window)
     {
         const auto nt       = static_cast<SizeType>(omp_get_num_threads());
         const auto tid      = static_cast<SizeType>(omp_get_thread_num());
@@ -483,7 +488,7 @@ void filter_chunks(const float* x,
 
         std::vector<float> ring(w);
         std::vector<float> tail(right);
-        auto window = std::forward<MakeWindow>(make_window)();
+        auto window = make_window();
         if (b < e) {
             gather_reflected(x, n,
                              static_cast<std::int64_t>(b) -
@@ -569,8 +574,8 @@ plan_fast(SizeType n, SizeType window, SizeType min_points) {
                                                  int nthreads) {
     std::vector<float> coarse(nds);
     const double inv_ds = 1.0 / static_cast<double>(ds);
-#pragma omp parallel for num_threads(nthreads)                                 \
-    schedule(static) if (nds * ds >= kParallelThreshold)
+#pragma omp parallel for num_threads(nthreads) schedule(static) default(none)  \
+    shared(x, ds, nds, inv_ds, coarse) if (nds * ds >= kParallelThreshold)
     for (SizeType b = 0; b < nds; ++b) {
         const float* blk = x + (b * ds);
         double acc       = 0.0;
@@ -605,16 +610,17 @@ void interpolate_baseline(const float* x,
     const SizeType tail_start = (ds * (nds - 1)) + half;
     const float inv           = 1.0F / static_cast<float>(2 * ds);
     const float c0            = (ds % 2 == 0) ? 1.0F : 0.0F;
+    nthreads                  = std::max(nthreads, 1);
 
-    auto emit = [&](SizeType i, float bl) {
+    const auto emit = [&](SizeType i, float bl) {
         dst[i] = subtract ? x[i] - bl : bl;
     };
     for (SizeType i = 0; i < std::min(half, n); ++i) {
         emit(i, lo[0]);
     }
-    nthreads = std::max(nthreads, 1);
-#pragma omp parallel for num_threads(nthreads)                                 \
-    schedule(static) if (n >= kParallelThreshold)
+#pragma omp parallel for num_threads(nthreads) schedule(static) default(none)  \
+    shared(x, dst, n, ds, nds, half, inv, c0, lo,                              \
+               subtract) if (n >= kParallelThreshold)
     for (SizeType blk = 0; blk < nds - 1; ++blk) {
         const float a     = lo[blk];
         const float d     = lo[blk + 1] - a;
@@ -729,7 +735,8 @@ void check_nonempty(std::span<const float> x, const char* what) {
     const float* p   = x.data();
     double acc       = 0.0;
     nthreads         = std::max(nthreads, 1);
-#pragma omp parallel for simd num_threads(nthreads) schedule(static)           \
+#pragma omp parallel for simd num_threads(nthreads)                            \
+    schedule(static) default(none) shared(n, p)                                \
     reduction(+ : acc) if (n >= kParallelThreshold)
     for (SizeType i = 0; i < n; ++i) {
         acc += static_cast<double>(p[i]);
@@ -746,7 +753,8 @@ void check_nonempty(std::span<const float> x, const char* what) {
     const float* p   = x.data();
     const double mu  = mean_of(x, nthreads);
     double acc       = 0.0;
-#pragma omp parallel for simd num_threads(nthreads) schedule(static)           \
+#pragma omp parallel for simd num_threads(std::max(nthreads, 1))               \
+    schedule(static) default(none) shared(n, p, mu)                            \
     reduction(+ : acc) if (n >= kParallelThreshold)
     for (SizeType i = 0; i < n; ++i) {
         const double d = static_cast<double>(p[i]) - mu;
@@ -778,8 +786,7 @@ radix_select_key(SizeType n, SizeType k, int nthreads, KeyFn key_of) {
     constexpr std::array<unsigned, 3> kWidth{11U, 11U, 10U};
     constexpr SizeType kBins = 1U << 11U;
     nthreads                 = std::max(nthreads, 1);
-
-    std::uint32_t prefix = 0;
+    std::uint32_t prefix     = 0;
     for (SizeType pass = 0; pass < 3; ++pass) {
         const unsigned shift      = kShift[pass];
         const unsigned width      = kWidth[pass];
@@ -789,7 +796,8 @@ radix_select_key(SizeType n, SizeType k, int nthreads, KeyFn key_of) {
 
         std::array<SizeType, kBins> hist{};
         SizeType* h = hist.data();
-#pragma omp parallel for num_threads(nthreads) schedule(static)                \
+#pragma omp parallel for num_threads(nthreads) schedule(static) default(none)  \
+    shared(n, shift, width, mask, prev_shift, filter, prefix, key_of, h)       \
     reduction(+ : h[ : kBins]) if (n >= kParallelThreshold)
         for (SizeType i = 0; i < n; ++i) {
             const std::uint32_t key = key_of(i);
@@ -836,7 +844,7 @@ public:
     /// k-th smallest value (0-based).
     [[nodiscard]] float kth(SizeType k) {
         if (!m_radix) {
-            auto nth = m_scratch.begin() + static_cast<std::ptrdiff_t>(k);
+            const auto nth = m_scratch.begin() + static_cast<std::ptrdiff_t>(k);
             std::nth_element(m_scratch.begin(), nth, m_scratch.end());
             return *nth;
         }
@@ -858,7 +866,7 @@ public:
         const auto lo     = static_cast<SizeType>(std::floor(pos));
         const SizeType hi = std::min(lo + 1, n - 1);
         const double frac = pos - static_cast<double>(lo);
-        const double a    = static_cast<double>(kth(lo));
+        const auto a      = static_cast<double>(kth(lo));
         if (frac <= 0.0) {
             return a;
         }
@@ -867,7 +875,7 @@ public:
 
 private:
     [[nodiscard]] float value_at(SizeType i) const {
-        const double v = static_cast<double>(m_x[i]);
+        const auto v = static_cast<double>(m_x[i]);
         return m_center.has_value()
                    ? static_cast<float>(std::abs(v - *m_center))
                    : m_x[i];
@@ -887,9 +895,9 @@ private:
 /// Median of a scratch array, reordering it.
 [[nodiscard]] double median_inplace(std::vector<float>& v) {
     const SizeType m = v.size();
-    auto mid         = v.begin() + static_cast<std::ptrdiff_t>(m / 2);
+    const auto mid   = v.begin() + static_cast<std::ptrdiff_t>(m / 2);
     std::nth_element(v.begin(), mid, v.end());
-    const double upper = static_cast<double>(*mid);
+    const auto upper = static_cast<double>(*mid);
     if (m % 2 == 1) {
         return upper;
     }
@@ -910,7 +918,8 @@ mad_about(std::span<const float> x, double med, int nthreads) {
     const SizeType n = x.size();
     const float* p   = x.data();
     double acc       = 0.0;
-#pragma omp parallel for simd num_threads(nthreads) schedule(static)           \
+#pragma omp parallel for simd num_threads(std::max(nthreads, 1))               \
+    schedule(static) default(none) shared(n, p, med)                           \
     reduction(+ : acc) if (n >= kParallelThreshold)
     for (SizeType i = 0; i < n; ++i) {
         acc += std::abs(static_cast<double>(p[i]) - med);
@@ -923,8 +932,8 @@ mad_about(std::span<const float> x, double med, int nthreads) {
     std::vector<float> dev;
     dev.reserve(x.size());
     double acc = 0.0;
-    for (float s : x) {
-        const double v = static_cast<double>(s);
+    for (const float s : x) {
+        const auto v = static_cast<double>(s);
         if (left ? v <= med : v >= med) {
             const double d = std::abs(v - med);
             acc += d;
@@ -945,7 +954,9 @@ mad_about(std::span<const float> x, double med, int nthreads) {
                                        ScaleMethod method,
                                        std::optional<double> median,
                                        int nthreads) {
-    const auto symmetric = [](double s) { return ScaleEstimate{s, s}; };
+    const auto symmetric = [](double s) {
+        return ScaleEstimate{.left = s, .right = s};
+    };
     switch (method) {
     case ScaleMethod::kNone:
         return symmetric(1.0);
@@ -996,13 +1007,13 @@ estimate_scale(std::span<const float> x, ScaleMethod method, int nthreads) {
 ZScoreResult
 zscore(std::span<float> x, LocMethod loc, ScaleMethod scale, int nthreads) {
     check_nonempty(x, "z-scores");
-    nthreads               = std::max(nthreads, 1);
-    const double loc_value = estimate_loc(x, loc, nthreads);
+    const int team         = std::max(nthreads, 1);
+    const double loc_value = estimate_loc(x, loc, team);
     const auto scale_value =
         scale_impl(x, scale,
                    loc == LocMethod::kMedian ? std::optional<double>(loc_value)
                                              : std::nullopt,
-                   nthreads);
+                   team);
 
     const auto inverse = [](double s) {
         return (s > 0.0 && utils::is_finite(s)) ? static_cast<float>(1.0 / s)
@@ -1013,8 +1024,8 @@ zscore(std::span<float> x, LocMethod loc, ScaleMethod scale, int nthreads) {
     const float inv_hi = inverse(scale_value.right);
     float* p           = x.data();
     const SizeType n   = x.size();
-#pragma omp parallel for simd num_threads(nthreads)                            \
-    schedule(static) if (n >= kParallelThreshold)
+#pragma omp parallel for simd num_threads(team) schedule(static) default(none) \
+    shared(n, p, loc_f, inv_lo, inv_hi) if (n >= kParallelThreshold)
     for (SizeType i = 0; i < n; ++i) {
         const float d = p[i] - loc_f;
         p[i]          = d * (d < 0.0F ? inv_lo : inv_hi);

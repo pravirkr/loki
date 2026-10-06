@@ -1,5 +1,3 @@
-#include "bindings/bind.hpp"
-
 #include <cstddef>
 #include <span>
 #include <string>
@@ -13,21 +11,22 @@
 #include <pybind11/stl/filesystem.h>
 
 #include "loki/loki.hpp"
+
+#include "bindings/bind.hpp"
 #include "loki_templates.hpp"
 #include "pybind_utils.hpp"
 
 namespace loki {
-using pipelines::EPFreqSweep;
-using pipelines::FFAFreqSweep;
-using detection::MatchedFilter;
-using plans::FFAPlanBase;
 using algorithms::EPChunkConfig;
 using algorithms::EPChunkStats;
 using algorithms::EPRegionStats;
 using algorithms::FFARegionStats;
+using detection::MatchedFilter;
+using pipelines::EPFreqSweep;
+using pipelines::FFAFreqSweep;
+using plans::FFAPlanBase;
 using search::FFASearchConfig;
 using search::PulsarSearchConfig;
-
 
 namespace py = pybind11;
 
@@ -63,7 +62,7 @@ void bind_thresholds(py::module_& m) {
              py::arg("ducy_max") = 0.3F, py::arg("wtsp") = 1.0F,
              py::arg("beam_width") = 0.7F, py::arg("trials_start") = 1,
              py::arg("mode") = "legacy", py::arg("nthreads") = 1,
-             py::arg("seed") = py::none(), py::kw_only(),
+             py::arg("seed")    = py::none(), py::kw_only(),
              py::arg("backend") = "cpu", py::arg("device") = 0,
              py::arg("batch_size") = 256)
         .def("run", &DynamicThresholdScheme::run, py::arg("thres_neigh") = 10,

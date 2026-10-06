@@ -3,15 +3,15 @@
 #include <memory>
 #include <type_traits>
 
-#include <spdlog/spdlog.h>
-
 #include <cuda_runtime.h>
+#include <spdlog/spdlog.h>
 #include <thrust/device_vector.h>
 #include <thrust/execution_policy.h>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/transform.h>
 
 #include "loki/common/types.hpp"
+
 #include "lib/algorithms/fold_engine.hpp"
 #include "lib/cuda/cuda_utils.cuh"
 #include "lib/cuda/kernel_utils.cuh"

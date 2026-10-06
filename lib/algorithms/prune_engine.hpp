@@ -16,6 +16,7 @@
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
 #include "loki/utils/workspace.hpp"
+
 #include "lib/utils/fft_impl.hpp"
 #include "lib/utils/workspace_impl.hpp"
 
@@ -24,6 +25,9 @@ namespace loki::algorithms::detail {
 // make_*_cpu is defined in lib/cpu/, make_*_gpu in lib/cuda/ (GPU builds only).
 
 template <SupportedFoldType FoldType> class EPMultiPassEngine {
+protected:
+    EPMultiPassEngine() = default;
+
 public:
     virtual ~EPMultiPassEngine() = default;
 
@@ -31,6 +35,11 @@ public:
                          std::span<const float> ts_v,
                          const std::filesystem::path& outdir,
                          std::string_view file_prefix) = 0;
+
+    EPMultiPassEngine(const EPMultiPassEngine&)            = delete;
+    EPMultiPassEngine& operator=(const EPMultiPassEngine&) = delete;
+    EPMultiPassEngine(EPMultiPassEngine&&)                 = delete;
+    EPMultiPassEngine& operator=(EPMultiPassEngine&&)      = delete;
 };
 
 template <SupportedFoldType FoldType>

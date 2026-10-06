@@ -1,5 +1,3 @@
-#include "bindings/bind.hpp"
-
 #include <cstddef>
 #include <span>
 #include <string>
@@ -13,21 +11,22 @@
 #include <pybind11/stl/filesystem.h>
 
 #include "loki/loki.hpp"
+
+#include "bindings/bind.hpp"
 #include "loki_templates.hpp"
 #include "pybind_utils.hpp"
 
 namespace loki {
-using pipelines::EPFreqSweep;
-using pipelines::FFAFreqSweep;
-using detection::MatchedFilter;
-using plans::FFAPlanBase;
 using algorithms::EPChunkConfig;
 using algorithms::EPChunkStats;
 using algorithms::EPRegionStats;
 using algorithms::FFARegionStats;
+using detection::MatchedFilter;
+using pipelines::EPFreqSweep;
+using pipelines::FFAFreqSweep;
+using plans::FFAPlanBase;
 using search::FFASearchConfig;
 using search::PulsarSearchConfig;
-
 
 namespace py = pybind11;
 
@@ -96,8 +95,7 @@ void bind_scores(py::module_& m) {
     m_scores.def(
         "snr_boxcar_2d",
         [](const PyArrayT<float>& arr, const PyArrayT<SizeType>& widths,
-           float stdnoise, int nthreads, std::string_view backend,
-           int device) {
+           float stdnoise, int nthreads, std::string_view backend, int device) {
             if (arr.ndim() != 2 || widths.ndim() != 1) {
                 throw std::runtime_error("Input array must be 2-dimensional, "
                                          "widths must be 1-dimensional");
@@ -121,8 +119,7 @@ void bind_scores(py::module_& m) {
     m_scores.def(
         "snr_boxcar_2d_max",
         [](const PyArrayT<float>& arr, const PyArrayT<SizeType>& widths,
-           float stdnoise, int nthreads, std::string_view backend,
-           int device) {
+           float stdnoise, int nthreads, std::string_view backend, int device) {
             if (arr.ndim() != 2 || widths.ndim() != 1) {
                 throw std::runtime_error("Input array must be 2-dimensional, "
                                          "widths must be 1-dimensional");
@@ -181,10 +178,10 @@ void bind_scores(py::module_& m) {
             const auto nbins     = arr.shape(2);
 
             auto out = PyArrayT<float>(nprofiles);
-            detection::snr_boxcar_3d_max(
-                to_span<const float>(arr), to_span<const SizeType>(widths),
-                to_span<float>(out), nprofiles, nbins,
-                make_exec(backend, device, nthreads));
+            detection::snr_boxcar_3d_max(to_span<const float>(arr),
+                                         to_span<const SizeType>(widths),
+                                         to_span<float>(out), nprofiles, nbins,
+                                         make_exec(backend, device, nthreads));
             return out;
         },
         py::arg("arr"), py::arg("widths"), py::arg("nthreads") = 1,

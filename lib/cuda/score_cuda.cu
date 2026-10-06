@@ -7,12 +7,12 @@
 #include <cuda/std/span>
 #include <cuda/std/type_traits>
 #include <cuda_runtime.h>
+#include <spdlog/spdlog.h>
 #include <thrust/copy.h>
 #include <thrust/device_vector.h>
 
-#include <spdlog/spdlog.h>
-
 #include "loki/common/types.hpp"
+
 #include "lib/cuda/cub_helpers.cuh"
 #include "lib/cuda/cuda_utils.cuh"
 #include "lib/cuda/score_cuda.cuh"
@@ -33,7 +33,7 @@ enum class OutputMode : uint8_t {
     kMax          = 0, // Max SNR for each profile
     kMaxAndFilter = 1, // Max SNR for each profile passing the threshold and the
                        // index in unfiltered scores
-    kPerWidth          = 2, // SNR for each width for each profile
+    kPerWidth     = 2, // SNR for each width for each profile
     kPerWidthAndFilter = 3, // SNR for each width for each profile passing the
                             // threshold and the index in unfiltered scores
 };
@@ -94,7 +94,7 @@ __global__ void kernel_snr_boxcar_warp(const float* __restrict__ folds,
     extern __shared__ float s_psum[]; // NOLINT
     float* s_psum_warp = s_psum + (warp_id * nbins);
 
-    const int fold_stride = (Is3D ? 2 : 1) * nbins;
+    const int fold_stride           = (Is3D ? 2 : 1) * nbins;
     const float* __restrict__ e_ptr = folds + (profile_idx * fold_stride);
     const float* __restrict__ v_ptr = e_ptr + nbins; // only used in Is3D path
 
@@ -213,7 +213,7 @@ __launch_bounds__(256, 4) // Hint: Max 256 threads, min 4 blocks/SM
     float psum[MaxBins + 1];
     psum[0] = 0.0F;
 
-    const int fold_stride = (Is3D ? 2 : 1) * nbins;
+    const int fold_stride           = (Is3D ? 2 : 1) * nbins;
     const float* __restrict__ e_ptr = folds + (profile_idx * fold_stride);
     const float* __restrict__ v_ptr = e_ptr + nbins; // only used in Is3D path
 
@@ -328,7 +328,7 @@ kernel_snr_boxcar_filter_warp(const float* __restrict__ folds,
     extern __shared__ float s_psum[]; // NOLINT
     float* s_psum_warp = s_psum + (warp_id * nbins);
 
-    const int fold_stride = 2 * nbins;
+    const int fold_stride           = 2 * nbins;
     const float* __restrict__ e_ptr = folds + (profile_idx * fold_stride);
     const float* __restrict__ v_ptr = e_ptr + nbins;
 
@@ -338,7 +338,8 @@ kernel_snr_boxcar_filter_warp(const float* __restrict__ folds,
     for (int chunk = 0; chunk < num_chunks; ++chunk) {
         const int idx = (chunk * kWarpSize) + lane_id;
         // Zero-pad out-of-range lanes
-        float val = (idx < nbins) ? fold_norm_bin(e_ptr[idx], v_ptr[idx]) : 0.0F;
+        float val =
+            (idx < nbins) ? fold_norm_bin(e_ptr[idx], v_ptr[idx]) : 0.0F;
         // Warp-local inclusive scan
         val = warp_inclusive_scan(val);
         val += running_sum;
@@ -380,8 +381,7 @@ kernel_snr_boxcar_filter_warp(const float* __restrict__ folds,
     // Final reduction to get max SNR across all widths for this warp
     if (lane_id == 0) {
         scores[profile_idx]        = max_snr;
-        filtered_mask[profile_idx] =
-            (max_snr >= threshold);
+        filtered_mask[profile_idx] = (max_snr >= threshold);
     }
 }
 
@@ -412,7 +412,7 @@ __launch_bounds__(256, 4) // Hint: Max 256 threads, min 4 blocks/SM
     float psum[MaxBins + 1];
     psum[0] = 0.0F;
 
-    const int fold_stride = 2 * nbins;
+    const int fold_stride           = 2 * nbins;
     const float* __restrict__ e_ptr = folds + (profile_idx * fold_stride);
     const float* __restrict__ v_ptr = e_ptr + nbins;
 
@@ -456,8 +456,7 @@ __launch_bounds__(256, 4) // Hint: Max 256 threads, min 4 blocks/SM
     }
     scores[profile_idx] = max_snr;
     // Set validation mask for filtered profiles
-    filtered_mask[profile_idx] =
-        (max_snr >= threshold);
+    filtered_mask[profile_idx] = (max_snr >= threshold);
 }
 
 // Unified launch function template
@@ -598,43 +597,43 @@ void snr_boxcar_3d_max_cuda_d(cuda::std::span<const float> folds,
 namespace detail {
 
 void snr_boxcar_2d_max_gpu(std::span<const float> folds,
-                            std::span<const SizeType> widths,
-                            std::span<float> scores,
-                            SizeType nprofiles,
-                            SizeType nbins,
-                            float stdnoise,
-                            int device_id) {
+                           std::span<const SizeType> widths,
+                           std::span<float> scores,
+                           SizeType nprofiles,
+                           SizeType nbins,
+                           float stdnoise,
+                           int device_id) {
     snr_boxcar_cuda_impl<false, OutputMode::kMax>(
         folds, widths, scores, nprofiles, nbins, stdnoise, device_id);
 }
 
 void snr_boxcar_3d_gpu(std::span<const float> folds,
-                        std::span<const SizeType> widths,
-                        std::span<float> scores,
-                        SizeType nprofiles,
-                        SizeType nbins,
-                        int device_id) {
+                       std::span<const SizeType> widths,
+                       std::span<float> scores,
+                       SizeType nprofiles,
+                       SizeType nbins,
+                       int device_id) {
     snr_boxcar_cuda_impl<true, OutputMode::kPerWidth>(
         folds, widths, scores, nprofiles, nbins, 1.0F, device_id);
 }
 
 void snr_boxcar_3d_max_gpu(std::span<const float> folds,
-                            std::span<const SizeType> widths,
-                            std::span<float> scores,
-                            SizeType nprofiles,
-                            SizeType nbins,
-                            int device_id) {
+                           std::span<const SizeType> widths,
+                           std::span<float> scores,
+                           SizeType nprofiles,
+                           SizeType nbins,
+                           int device_id) {
     snr_boxcar_cuda_impl<true, OutputMode::kMax>(
         folds, widths, scores, nprofiles, nbins, 1.0F, device_id);
 }
 
 void snr_boxcar_2d_max_gpu(DeviceSpan<const float> folds,
-                                DeviceSpan<const uint32_t> widths,
-                                DeviceSpan<float> scores,
-                                SizeType nprofiles,
-                                SizeType nbins,
-                                float stdnoise,
-                                Stream stream) {
+                           DeviceSpan<const uint32_t> widths,
+                           DeviceSpan<float> scores,
+                           SizeType nprofiles,
+                           SizeType nbins,
+                           float stdnoise,
+                           Stream stream) {
     cuda::std::span<const float> folds_span(folds.data(), folds.size());
     cuda::std::span<const uint32_t> widths_span(widths.data(), widths.size());
     cuda::std::span<float> scores_span(scores.data(), scores.size());
@@ -644,24 +643,24 @@ void snr_boxcar_2d_max_gpu(DeviceSpan<const float> folds,
 }
 
 void snr_boxcar_3d_gpu(DeviceSpan<const float> folds,
-                            DeviceSpan<const uint32_t> widths,
-                            DeviceSpan<float> scores,
-                            SizeType nprofiles,
-                            SizeType nbins,
-                            Stream stream) {
+                       DeviceSpan<const uint32_t> widths,
+                       DeviceSpan<float> scores,
+                       SizeType nprofiles,
+                       SizeType nbins,
+                       Stream stream) {
     cuda::std::span<const float> folds_span(folds.data(), folds.size());
     cuda::std::span<const uint32_t> widths_span(widths.data(), widths.size());
     cuda::std::span<float> scores_span(scores.data(), scores.size());
-    snr_boxcar_3d_cuda_d(folds_span, widths_span, scores_span, nprofiles,
-                         nbins, static_cast<cudaStream_t>(stream.native));
+    snr_boxcar_3d_cuda_d(folds_span, widths_span, scores_span, nprofiles, nbins,
+                         static_cast<cudaStream_t>(stream.native));
 }
 
 void snr_boxcar_3d_max_gpu(DeviceSpan<const float> folds,
-                                DeviceSpan<const uint32_t> widths,
-                                DeviceSpan<float> scores,
-                                SizeType nprofiles,
-                                SizeType nbins,
-                                Stream stream) {
+                           DeviceSpan<const uint32_t> widths,
+                           DeviceSpan<float> scores,
+                           SizeType nprofiles,
+                           SizeType nbins,
+                           Stream stream) {
     cuda::std::span<const float> folds_span(folds.data(), folds.size());
     cuda::std::span<const uint32_t> widths_span(widths.data(), widths.size());
     cuda::std::span<float> scores_span(scores.data(), scores.size());
@@ -670,7 +669,6 @@ void snr_boxcar_3d_max_gpu(DeviceSpan<const float> folds,
 }
 
 } // namespace detail
-
 
 SizeType score_and_filter_cuda_d(cuda::std::span<const float> folds,
                                  cuda::std::span<const uint32_t> widths,
@@ -808,8 +806,8 @@ score_and_filter_max_cuda_d(cuda::std::span<const float> folds,
     }
     // Count number of passing profiles
 
-    auto transform_it =
-        thrust::make_transform_iterator(filtered_mask.data(), cub_helpers::Uint8ToUint32{});
+    auto transform_it = thrust::make_transform_iterator(
+        filtered_mask.data(), cub_helpers::Uint8ToUint32{});
     cuda_utils::check_cuda_call(
         cub::DeviceReduce::Sum(scratch_ws.cub_temp_storage,
                                scratch_ws.cub_temp_bytes, transform_it,

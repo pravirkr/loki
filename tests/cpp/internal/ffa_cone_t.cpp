@@ -12,6 +12,7 @@
 #include "loki/common/types.hpp"
 #include "loki/detection/score.hpp"
 #include "loki/search/configs.hpp"
+
 #include "lib/detail/psr_utils.hpp"
 
 using loki::ParamLimit;

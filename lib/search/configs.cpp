@@ -4,23 +4,30 @@
 #include <array>
 #include <bit>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <iterator>
+#include <memory>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <omp.h>
 #include <spdlog/spdlog.h>
-#include <toml++/toml.hpp>
+#include <toml++/toml.hpp> // NOLINT(misc-include-cleaner) -- toml::table, parse, parse_error
 
 #include "loki/common/backend.hpp"
 #include "loki/common/types.hpp"
 #include "loki/detection/score.hpp"
+
 #include "lib/detail/error_check.hpp"
 #include "lib/detail/psr_utils.hpp"
 #include "lib/detail/utils.hpp"
@@ -50,6 +57,8 @@ namespace {
     return {};
 }
 
+// NOLINTBEGIN(misc-include-cleaner) -- toml::table, toml::parse,
+// toml::parse_error via toml.hpp
 void collect_unknown_keys(const toml::table& table,
                           std::span<const std::string_view> allowed,
                           std::string_view table_path,
@@ -58,17 +67,19 @@ void collect_unknown_keys(const toml::table& table,
         if (!is_allowed_key(key.str(), allowed)) {
             const auto path = std::format("{}.{}", table_path, key.str());
             const auto hint = removed_key_hint(path);
-            errors.push_back(hint.empty()
-                                 ? std::format("{}: unknown key", path)
-                                 : std::format("{}: {}", path, hint));
+            errors.push_back(hint.empty() ? std::format("{}: unknown key", path)
+                                          : std::format("{}: {}", path, hint));
         }
     }
 }
 
 void validate_ffa_toml_document(const toml::table& root) {
     static constexpr std::array kTopLevel{
-        std::string_view{"input"}, std::string_view{"search"},
-        std::string_view{"performance"}, std::string_view{"output"}};
+        std::string_view{"input"},
+        std::string_view{"search"},
+        std::string_view{"performance"},
+        std::string_view{"output"},
+    };
     static constexpr std::array kInputKeys{
         std::string_view{"timeseries"},
         std::string_view{"preprocess"},
@@ -77,7 +88,8 @@ void validate_ffa_toml_document(const toml::table& root) {
         std::string_view{"fast_median_min_points"},
         std::string_view{"nsamps"},
         std::string_view{"tsamp"},
-        std::string_view{"dt"}};
+        std::string_view{"dt"},
+    };
     static constexpr std::array kSearchKeys{
         std::string_view{"f_min"},
         std::string_view{"f_max"},
@@ -91,7 +103,8 @@ void validate_ffa_toml_document(const toml::table& root) {
         std::string_view{"wtsp"},
         std::string_view{"snr_min"},
         std::string_view{"use_fourier"},
-        std::string_view{"use_boxcar_kadane"}};
+        std::string_view{"use_boxcar_kadane"},
+    };
     static constexpr std::array kPerformanceKeys{
         std::string_view{"nthreads"},
         std::string_view{"backend"},
@@ -102,9 +115,12 @@ void validate_ffa_toml_document(const toml::table& root) {
         std::string_view{"nbins_min_lossy_bf"},
         std::string_view{"bseg_brute"},
         std::string_view{"bseg_ffa"},
-        std::string_view{"max_passing_candidates"}};
-    static constexpr std::array kOutputKeys{std::string_view{"outdir"},
-                                            std::string_view{"prefix"}};
+        std::string_view{"max_passing_candidates"},
+    };
+    static constexpr std::array kOutputKeys{
+        std::string_view{"outdir"},
+        std::string_view{"prefix"},
+    };
 
     std::vector<std::string> errors;
     for (const auto& [key, _] : root) {
@@ -154,7 +170,7 @@ void validate_ffa_toml_document(const toml::table& root) {
 // FFATomlConfig Implementation
 // ==============================================================================
 
-std::string FFATomlConfig::default_toml_string() {
+std::string_view FFATomlConfig::default_toml_string() {
     return R"(# ==============================================================================
 # Loki FFA Pulsar Search Configuration
 # ==============================================================================
@@ -400,6 +416,7 @@ FFATomlConfig FFATomlConfig::from_string(std::string_view toml_content) {
             err.source().begin.column, err.description()));
     }
 }
+// NOLINTEND(misc-include-cleaner)
 
 FFATomlConfig FFATomlConfig::load(const std::filesystem::path& path) {
     if (!std::filesystem::exists(path)) {
@@ -513,14 +530,26 @@ struct BsegCostWeights {
 // against gather-adds. These weights remain for the direct-DFT comparison
 // and for bench/fit_cost_model.py; the time-domain selector does not use
 // them to pick B inside the cap.
-constexpr BsegCostWeights kBsegWeightsTime{1.0, 0.25, 4.0};
+constexpr BsegCostWeights kBsegWeightsTime{
+    .brute_op = 1.0,
+    .table    = 0.25,
+    .merge_op = 4.0,
+};
 // Fourier FFA with lossy init (time-domain brute fold + RFFT): complex merge
 // is ~5x a brute gather-add per Fourier bin.
-constexpr BsegCostWeights kBsegWeightsFourierLossy{1.0, 28.0, 5.2};
+constexpr BsegCostWeights kBsegWeightsFourierLossy{
+    .brute_op = 1.0,
+    .table    = 28.0,
+    .merge_op = 5.2,
+};
 // Fourier FFA with the direct-DFT brute fold (nbins <= nbins_min_lossy_bf):
 // the SIMD DFT is ~0.27 gather-adds per (sample, freq, bin), a complex merge
 // ~4.9 per Fourier bin.
-constexpr BsegCostWeights kBsegWeightsFourierDirect{0.27, 0.0, 4.9};
+constexpr BsegCostWeights kBsegWeightsFourierDirect{
+    .brute_op = 0.27,
+    .table    = 0.0,
+    .merge_op = 4.9,
+};
 
 } // namespace
 
@@ -843,10 +872,15 @@ private:
 
         const bool direct_dft =
             m_use_fourier && m_nbins <= m_nbins_min_lossy_bf;
-        const BsegCostWeights& w =
-            !m_use_fourier ? kBsegWeightsTime
-                           : (direct_dft ? kBsegWeightsFourierDirect
-                                         : kBsegWeightsFourierLossy);
+        const BsegCostWeights& w = [&]() -> const BsegCostWeights& {
+            if (!m_use_fourier) {
+                return kBsegWeightsTime;
+            }
+            if (direct_dft) {
+                return kBsegWeightsFourierDirect;
+            }
+            return kBsegWeightsFourierLossy;
+        }();
         const auto width =
             static_cast<double>(m_use_fourier ? m_nbins_f : m_nbins);
         const auto nsamps = static_cast<double>(m_nsamps);
@@ -968,7 +1002,8 @@ private:
         const auto levels     = static_cast<int>(std::floor(std::log2(cycles)));
         const int init_levels = (m_nparams == 1) ? 1 : 2;
         const int shift       = std::max(1, levels - init_levels);
-        const SizeType bseg   = static_cast<SizeType>(m_nsamps >> shift);
+        const auto bseg =
+            static_cast<SizeType>(m_nsamps >> static_cast<unsigned>(shift));
         return std::clamp(bseg, SizeType{2}, m_nsamps / 2);
     }
 
@@ -1096,7 +1131,7 @@ SizeType FFASearchConfig::get_niters_ffa() const noexcept {
 SizeType FFASearchConfig::get_nparams() const noexcept {
     return m_impl->get_nparams();
 }
-std::vector<std::string> FFASearchConfig::get_param_names() const noexcept {
+std::vector<std::string> FFASearchConfig::get_param_names() const {
     return m_impl->get_param_names();
 }
 double FFASearchConfig::get_f_min() const noexcept {
@@ -1105,13 +1140,13 @@ double FFASearchConfig::get_f_min() const noexcept {
 double FFASearchConfig::get_f_max() const noexcept {
     return m_impl->get_f_max();
 }
-std::vector<SizeType> FFASearchConfig::get_scoring_widths() const noexcept {
+std::vector<SizeType> FFASearchConfig::get_scoring_widths() const {
     return m_impl->get_scoring_widths();
 }
 SizeType FFASearchConfig::get_n_scoring_widths() const noexcept {
     return m_impl->get_n_scoring_widths();
 }
-std::vector<float> FFASearchConfig::get_boxcar_kadane_biases() const noexcept {
+std::vector<float> FFASearchConfig::get_boxcar_kadane_biases() const {
     return m_impl->get_boxcar_kadane_biases();
 }
 SizeType FFASearchConfig::get_n_boxcar_kadane_biases() const noexcept {
@@ -1128,12 +1163,11 @@ std::vector<double>
 FFASearchConfig::get_dparams(double tseg_cur) const noexcept {
     return m_impl->get_dparams(tseg_cur);
 }
-std::vector<double>
-FFASearchConfig::get_dparams_actual(double tseg_cur) const noexcept {
+std::vector<double> FFASearchConfig::get_dparams_actual(double tseg_cur) const {
     return m_impl->get_dparams_actual(tseg_cur);
 }
 std::vector<SizeType>
-FFASearchConfig::get_param_grid_count(double tseg_cur) const noexcept {
+FFASearchConfig::get_param_grid_count(double tseg_cur) const {
     return m_impl->get_param_grid_count(tseg_cur);
 }
 FFASearchConfig FFASearchConfig::get_updated_config(
@@ -1168,7 +1202,7 @@ void FFASearchConfig::write_default_toml(const std::filesystem::path& path) {
     FFATomlConfig::write_default(path);
 }
 
-std::string FFASearchConfig::default_toml_string() {
+std::string_view FFASearchConfig::default_toml_string() {
     return FFATomlConfig::default_toml_string();
 }
 
@@ -1202,8 +1236,8 @@ public:
     bool m_use_conservative_tile;
 
     double get_x_mass_const() const noexcept {
-        constexpr double safety = 1.1;
-        return utils::kGMsunOneThird * safety * m_m_c_max /
+        constexpr double kSafety = 1.1;
+        return utils::kGMsunOneThird * kSafety * m_m_c_max /
                std::pow(m_m_p_min + m_m_c_max, 2.0 / 3.0);
     }
 };

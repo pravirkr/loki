@@ -28,14 +28,13 @@ struct ChunkIndexUsage {
     SizeType segment_len{};
 };
 
-[[nodiscard]] inline bool chunk_exceeds_cuda_index_limits(
-    const ChunkIndexUsage& u) noexcept {
+[[nodiscard]] inline bool
+chunk_exceeds_cuda_index_limits(const ChunkIndexUsage& u) noexcept {
     if (u.buffer_size > kMaxUint32FoldElements) {
         return true;
     }
-    const auto fold_stride =
-        static_cast<std::uint64_t>(u.ncoords) * static_cast<std::uint64_t>(u.nbins) *
-        2ULL;
+    const auto fold_stride = static_cast<std::uint64_t>(u.ncoords) *
+                             static_cast<std::uint64_t>(u.nbins) * 2ULL;
     if (fold_stride > kMaxIntFoldStrideElements) {
         return true;
     }
@@ -49,13 +48,13 @@ struct ChunkIndexUsage {
     return phase_elems > kMaxUint32FoldElements;
 }
 
-[[nodiscard]] inline std::string chunk_index_limit_message(
-    const ChunkIndexUsage& u) {
-    return std::string(
-        "CUDA index limits exceeded for chunk "
-        "(buffer_size=") +
-           std::to_string(u.buffer_size) + ", ncoords=" +
-           std::to_string(u.ncoords) + ", nbins=" + std::to_string(u.nbins) +
+[[nodiscard]] inline std::string
+chunk_index_limit_message(const ChunkIndexUsage& u) {
+    return std::string("CUDA index limits exceeded for chunk "
+                       "(buffer_size=") +
+           std::to_string(u.buffer_size) +
+           ", ncoords=" + std::to_string(u.ncoords) +
+           ", nbins=" + std::to_string(u.nbins) +
            ", n_widths=" + std::to_string(u.n_scoring_widths) +
            ", nfreqs=" + std::to_string(u.nfreqs) +
            ", segment_len=" + std::to_string(u.segment_len) +

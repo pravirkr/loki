@@ -27,6 +27,9 @@ namespace loki::algorithms::detail {
 // make_*_cpu is defined in lib/cpu/, make_*_gpu in lib/cuda/ (GPU builds only).
 
 template <SupportedFoldType FoldType> class FFAEngine {
+protected:
+    FFAEngine() = default;
+
 public:
     virtual ~FFAEngine() = default;
 
@@ -72,6 +75,11 @@ public:
         throw std::logic_error(
             "execute_return_to_time not implemented on this engine");
     }
+
+    FFAEngine(const FFAEngine&)            = delete;
+    FFAEngine& operator=(const FFAEngine&) = delete;
+    FFAEngine(FFAEngine&&)                 = delete;
+    FFAEngine& operator=(FFAEngine&&)      = delete;
 };
 
 template <SupportedFoldType FoldType>

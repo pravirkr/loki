@@ -7,6 +7,7 @@
 #include "loki/common/types.hpp"
 #include "loki/detection/score.hpp"
 #include "loki/search/configs.hpp"
+
 #include "lib/detection/kadane.hpp"
 #include "lib/utils/fft_impl.hpp"
 #include "lib/utils/workspace_impl.hpp"

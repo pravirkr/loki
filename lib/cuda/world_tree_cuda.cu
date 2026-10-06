@@ -2,10 +2,9 @@
 
 #include <algorithm>
 
-#include <spdlog/spdlog.h>
-
 #include <cuda/std/limits>
 #include <cuda/std/span>
+#include <spdlog/spdlog.h>
 #include <thrust/copy.h>
 #include <thrust/count.h>
 #include <thrust/device_ptr.h>
@@ -19,6 +18,7 @@
 #include <thrust/transform.h>
 
 #include "loki/common/types.hpp"
+
 #include "lib/cuda/cub_helpers.cuh"
 #include "lib/cuda/cuda_utils.cuh"
 #include "lib/detail/error_check.hpp"
@@ -386,15 +386,17 @@ float WorldTreeCUDA<FoldTypeCUDA>::get_score_max(
     }
     auto regions =
         get_active_regions(cuda_utils::as_span(m_scores), SizeType{1});
-    float max_val = thrust::reduce(
-        thrust::cuda::par.on(stream), regions.first.data(),
-        regions.first.data() + regions.first.size(),
-        cuda::std::numeric_limits<float>::lowest(), cub_helpers::ThrustMaxOp<float>());
+    float max_val =
+        thrust::reduce(thrust::cuda::par.on(stream), regions.first.data(),
+                       regions.first.data() + regions.first.size(),
+                       cuda::std::numeric_limits<float>::lowest(),
+                       cub_helpers::ThrustMaxOp<float>());
     if (!regions.second.empty()) {
-        const float max_val2 = thrust::reduce(
-            thrust::cuda::par.on(stream), regions.second.data(),
-            regions.second.data() + regions.second.size(),
-            cuda::std::numeric_limits<float>::lowest(), cub_helpers::ThrustMaxOp<float>());
+        const float max_val2 =
+            thrust::reduce(thrust::cuda::par.on(stream), regions.second.data(),
+                           regions.second.data() + regions.second.size(),
+                           cuda::std::numeric_limits<float>::lowest(),
+                           cub_helpers::ThrustMaxOp<float>());
         max_val = cuda::std::max(max_val, max_val2);
     }
     return max_val;
@@ -408,15 +410,17 @@ float WorldTreeCUDA<FoldTypeCUDA>::get_score_min(
     }
     auto regions =
         get_active_regions(cuda_utils::as_span(m_scores), SizeType{1});
-    float min_val = thrust::reduce(
-        thrust::cuda::par.on(stream), regions.first.data(),
-        regions.first.data() + regions.first.size(),
-        cuda::std::numeric_limits<float>::max(), cub_helpers::ThrustMinOp<float>());
+    float min_val =
+        thrust::reduce(thrust::cuda::par.on(stream), regions.first.data(),
+                       regions.first.data() + regions.first.size(),
+                       cuda::std::numeric_limits<float>::max(),
+                       cub_helpers::ThrustMinOp<float>());
     if (!regions.second.empty()) {
-        const float min_val2 = thrust::reduce(
-            thrust::cuda::par.on(stream), regions.second.data(),
-            regions.second.data() + regions.second.size(),
-            cuda::std::numeric_limits<float>::max(), cub_helpers::ThrustMinOp<float>());
+        const float min_val2 =
+            thrust::reduce(thrust::cuda::par.on(stream), regions.second.data(),
+                           regions.second.data() + regions.second.size(),
+                           cuda::std::numeric_limits<float>::max(),
+                           cub_helpers::ThrustMinOp<float>());
         min_val = cuda::std::min(min_val, min_val2);
     }
     return min_val;

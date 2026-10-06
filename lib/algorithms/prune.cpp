@@ -13,6 +13,7 @@
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
 #include "loki/utils/workspace.hpp"
+
 #include "lib/algorithms/prune_engine.hpp"
 #include "lib/common/dispatch.hpp"
 #include "lib/utils/workspace_impl.hpp"
@@ -75,7 +76,7 @@ make_ep_engine(std::span<memory::EPWorkspace<FoldType>> workspaces,
                PruneRFIConfig rfi_config,
                Exec exec) {
     loki::detail::warn_ignored_nthreads(exec, "EPMultiPass");
-    for (auto& ws : workspaces) {
+    for (const auto& ws : workspaces) {
         loki::detail::check_same_exec(ws.exec(), exec,
                                       "EPMultiPass (workspaces)");
     }

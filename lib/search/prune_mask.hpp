@@ -38,11 +38,11 @@ public:
              ParamLimit lim_freq,
              SizeType n_freq);
 
-    ~GridMask()                                = default;
-    GridMask(const GridMask&)                  = default;
-    GridMask& operator=(const GridMask&)       = default;
-    GridMask(GridMask&&) noexcept              = default;
-    GridMask& operator=(GridMask&&) noexcept   = default;
+    ~GridMask()                              = default;
+    GridMask(const GridMask&)                = default;
+    GridMask& operator=(const GridMask&)     = default;
+    GridMask(GridMask&&) noexcept            = default;
+    GridMask& operator=(GridMask&&) noexcept = default;
 
     [[nodiscard]] SizeType get_n_accel() const noexcept { return m_n_accel; }
     [[nodiscard]] SizeType get_n_freq() const noexcept { return m_n_freq; }
@@ -73,7 +73,8 @@ public:
      * frequency range is also scaled by `k` and `1/k`; the acceleration range
      * is kept (kinematic units are harmonic-invariant).
      */
-    void add_window(const algorithms::ParamWindow& window, SizeType n_harmonics = 0);
+    void add_window(const algorithms::ParamWindow& window,
+                    SizeType n_harmonics = 0);
 
     /// @brief Rasterise a set of windows.
     void add_windows(std::span<const algorithms::ParamWindow> windows,

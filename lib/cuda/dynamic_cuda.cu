@@ -3,10 +3,10 @@
 #include <cuda/std/limits>
 #include <cuda/std/span>
 #include <cuda/std/type_traits>
-
 #include <thrust/copy.h>
 
 #include "loki/common/types.hpp"
+
 #include "lib/cuda/chebyshev_cuda.cuh"
 #include "lib/cuda/circular_cuda.cuh"
 #include "lib/cuda/cuda_utils.cuh"
@@ -119,14 +119,14 @@ void BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::irfft_for_scoring(
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA, typename Derived>
-float BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::get_irfft_scratch_memory_gib()
+float BasePruneDPFunctsCUDA<FoldTypeCUDA,
+                            Derived>::get_irfft_scratch_memory_gib()
     const noexcept {
     if constexpr (std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>) {
         const auto bytes =
             (m_scratch_folds_c_d.size() * sizeof(ComplexTypeCUDA)) +
             (m_scratch_folds_r_d.size() * sizeof(float));
-        return static_cast<float>(bytes) /
-               static_cast<float>(1ULL << 30U);
+        return static_cast<float>(bytes) / static_cast<float>(1ULL << 30U);
     }
     return 0.0F;
 }

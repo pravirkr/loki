@@ -1,13 +1,14 @@
+// NOLINTBEGIN(misc-include-cleaner) -- CPU engine; symbols via private/engine
+// headers.
 #include <span>
 
 #include "loki/common/types.hpp"
-#include "lib/detail/error_check.hpp"
+
 #include "lib/cpu/boxcar_kernels.hpp"
+#include "lib/detail/error_check.hpp"
 #include "lib/detection/score_engine.hpp"
 
-namespace loki::detection {
-
-namespace detail {
+namespace loki::detection::detail {
 
 void snr_boxcar_2d_cpu(std::span<const float> folds,
                        std::span<const SizeType> widths,
@@ -75,6 +76,5 @@ void snr_boxcar_3d_max_cpu(std::span<const float> folds,
                                 nwidths, scores.data(), 1.0F, nthreads);
 }
 
-} // namespace detail
-
-} // namespace loki::detection
+} // namespace loki::detection::detail
+// NOLINTEND(misc-include-cleaner)

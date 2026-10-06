@@ -11,6 +11,7 @@
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
+
 #include "lib/detail/error_check.hpp"
 #include "lib/detail/psr_utils.hpp"
 #include "lib/search/cands.hpp"
@@ -242,11 +243,11 @@ inline void flush_candidates(CandidateBuffer& buf,
             nbins_scratch[k] = static_cast<std::uint16_t>(dec.nbins);
         }
 
-        writer.write_results(
-            param_sets_scratch.first(batch_count * n_params),
-            scores.subspan(batch_start, batch_count),
-            width_scratch.first(batch_count), nbins_scratch.first(batch_count),
-            batch_count, n_params);
+        writer.write_results(param_sets_scratch.first(batch_count * n_params),
+                             scores.subspan(batch_start, batch_count),
+                             width_scratch.first(batch_count),
+                             nbins_scratch.first(batch_count), batch_count,
+                             n_params);
         batch_start += batch_count;
     }
     buf.clear();
