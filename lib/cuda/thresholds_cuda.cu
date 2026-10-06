@@ -1133,22 +1133,22 @@ HighFive::CompoundType create_compound_state() {
 // CUDA-specific implementation
 class ThresholdsCudaCore {
 public:
-    Impl(std::span<const float> branching_pattern,
-         float ref_ducy,
-         SizeType nbins,
-         SizeType ntrials,
-         SizeType nprobs,
-         float prob_min,
-         float snr_final,
-         SizeType nthresholds,
-         float ducy_max,
-         float wtsp,
-         float beam_width,
-         SizeType trials_start,
-         std::string_view mode,
-         SizeType batch_size,
-         int device_id,
-         std::optional<uint64_t> seed)
+    ThresholdsCudaCore(std::span<const float> branching_pattern,
+                       float ref_ducy,
+                       SizeType nbins,
+                       SizeType ntrials,
+                       SizeType nprobs,
+                       float prob_min,
+                       float snr_final,
+                       SizeType nthresholds,
+                       float ducy_max,
+                       float wtsp,
+                       float beam_width,
+                       SizeType trials_start,
+                       std::string_view mode,
+                       SizeType batch_size,
+                       int device_id,
+                       std::optional<uint64_t> seed)
         : m_branching_pattern(branching_pattern.begin(),
                               branching_pattern.end()),
           m_ref_ducy(ref_ducy),
@@ -1249,11 +1249,11 @@ public:
                      mode_to_string(m_mode), max_beam, m_nprobs,
                      utils::to_gib(bytes));
     }
-    ~Impl()                          = default;
-    Impl(const Impl&)                = delete;
-    Impl& operator=(const Impl&)     = delete;
-    Impl(Impl&&)                     = delete;
-    Impl& operator=(Impl&&)          = delete;
+    ~ThresholdsCudaCore()                                    = default;
+    ThresholdsCudaCore(const ThresholdsCudaCore&)            = delete;
+    ThresholdsCudaCore& operator=(const ThresholdsCudaCore&) = delete;
+    ThresholdsCudaCore(ThresholdsCudaCore&&)                 = delete;
+    ThresholdsCudaCore& operator=(ThresholdsCudaCore&&)      = delete;
 
     void run(SizeType thres_neigh) {
         if (thres_neigh == 0) {
@@ -1295,6 +1295,34 @@ public:
     std::vector<State> get_states() const { return m_states; }
     std::vector<float> get_thresholds() const { return m_thresholds; }
     std::vector<float> get_probs() const { return m_probs; }
+
+    std::vector<SizeType> get_current_thresholds_idx(SizeType istage) const {
+        const auto guess       = m_guess_path[istage];
+        const auto half_extent = m_beam_width;
+        const auto lower_bound = std::max(0.0F, guess - half_extent);
+        const auto upper_bound =
+            std::min(m_thresholds.back(), guess + half_extent);
+
+        std::vector<SizeType> result;
+        for (SizeType i = 0; i < m_thresholds.size(); ++i) {
+            if (m_thresholds[i] >= lower_bound &&
+                m_thresholds[i] <= upper_bound) {
+                result.push_back(i);
+            }
+        }
+        return result;
+    }
+
+    std::vector<float> get_branching_pattern() const {
+        return m_branching_pattern;
+    }
+    std::vector<float> get_profile() const { return m_profile; }
+    SizeType get_nstages() const { return m_nstages; }
+    SizeType get_nthresholds() const { return m_nthresholds; }
+    SizeType get_nprobs() const { return m_nprobs; }
+    std::vector<SizeType> get_box_score_widths() const {
+        return m_box_score_widths;
+    }
 
     // Static per-stage layout shared by both pipelines. Stage s reads the
     // beam of stage s-1 (stage 0 reads a virtual one-threshold beam holding
@@ -1992,43 +2020,6 @@ private:
             }
         }
     }
-
-    std::vector<SizeType> get_current_thresholds_idx(SizeType istage) const {
-        const auto guess       = m_guess_path[istage];
-        const auto half_extent = m_beam_width;
-        const auto lower_bound = std::max(0.0F, guess - half_extent);
-        const auto upper_bound =
-            std::min(m_thresholds.back(), guess + half_extent);
-
-        std::vector<SizeType> result;
-        for (SizeType i = 0; i < m_thresholds.size(); ++i) {
-            if (m_thresholds[i] >= lower_bound &&
-                m_thresholds[i] <= upper_bound) {
-                result.push_back(i);
-            }
-        }
-        return result;
-    }
-
-    std::vector<float> get_branching_pattern() const {
-        return m_branching_pattern;
-    }
-    std::vector<float> get_profile() const {
-        return m_profile;
-    }
-    SizeType get_nstages() const {
-        return m_nstages;
-    }
-    SizeType get_nthresholds() const {
-        return m_nthresholds;
-    }
-    SizeType get_nprobs() const {
-        return m_nprobs;
-    }
-    std::vector<SizeType> get_box_score_widths() const {
-        return m_box_score_widths;
-    }
-
 };
 
 class ThresholdsCudaEngine final : public detail::ThresholdsEngine {

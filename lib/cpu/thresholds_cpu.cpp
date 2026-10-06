@@ -365,10 +365,11 @@ public:
     }
 
 private:
-    static void deallocate_from_pool(const float* data_ptr,
-                                     Pool& pool,
-                                     SizeType slot_size_floats,
-                                     SizeType slots_per_pool) noexcept {
+    static void
+    deallocate_from_pool(const float* data_ptr,
+                         Pool& pool,
+                         SizeType slot_size_floats,
+                         [[maybe_unused]] SizeType slots_per_pool) noexcept {
         const auto float_offset = std::distance(
             static_cast<const float*>(pool.data.data()), data_ptr);
         const auto slot_idx =

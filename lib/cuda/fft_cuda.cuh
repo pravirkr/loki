@@ -186,7 +186,7 @@ namespace detail {
 
 /// cuFFT plan cache behind @p fft. Throws if @p fft is not a GPU manager.
 inline CUFFTManager& cuda_fft(FFTManager& fft, std::string_view what) {
-    auto& impl = fft.impl();
+    auto& impl = loki::detail::HandleAccess::impl(fft);
     if (!impl.device) {
         throw std::invalid_argument(
             std::format("{}: expected a GPU FFTManager", what));

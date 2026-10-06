@@ -1,5 +1,3 @@
-#ifdef LOKI_ENABLE_CUDA
-
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -11,6 +9,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 
+#include "loki/common/backend.hpp"
 #include "loki/detection/thresholds.hpp"
 
 namespace loki {
@@ -85,6 +84,9 @@ mean_over_seeds(const std::vector<std::map<SizeType, SurvivalPair>>& by_seed,
 
 TEST_CASE("DynamicThresholdScheme CPU and CUDA agree on stage-0 survival",
           "[thresholds][cuda][parity]") {
+    if (!is_available(Backend::kCUDA)) {
+        SKIP("needs a CUDA build");
+    }
     const auto* mode = GENERATE("legacy", "improved");
     CAPTURE(mode);
 
@@ -126,5 +128,3 @@ TEST_CASE("DynamicThresholdScheme CPU and CUDA agree on stage-0 survival",
 }
 
 } // namespace loki
-
-#endif // LOKI_ENABLE_CUDA

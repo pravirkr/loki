@@ -11,10 +11,11 @@
 
 #include "loki/algorithms/prune.hpp"
 #include "loki/algorithms/prune_rfi.hpp"
-#include "search/cands.hpp"
+#include "loki/common/backend.hpp"
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
+#include "search/cands.hpp"
 #include "utils/world_tree.hpp"
 
 using loki::Exec;
@@ -321,14 +322,15 @@ TEST_CASE("EPMultiPass backend dispatch", "[prune][backend]") {
     }
 
     SECTION("Exec::cuda availability check") {
-#ifndef LOKI_ENABLE_CUDA
-        REQUIRE_THROWS_AS(
-            EPMultiPassTime(cfg, thresholds, /*n_runs=*/std::nullopt, ref_segs,
-                            /*ascend_levels=*/{}, /*max_sugg=*/1U << 14U,
-                            /*batch_size=*/256, "taylor", /*show_progress=*/false,
-                            {}, Exec::cuda(0)),
-            std::invalid_argument);
-#endif
+        if (!loki::is_available(loki::Backend::kCUDA)) {
+            REQUIRE_THROWS_AS(
+                EPMultiPassTime(cfg, thresholds, /*n_runs=*/std::nullopt,
+                                ref_segs, /*ascend_levels=*/{},
+                                /*max_sugg=*/1U << 14U, /*batch_size=*/256,
+                                "taylor", /*show_progress=*/false, {},
+                                Exec::cuda(0)),
+                std::invalid_argument);
+        }
     }
 }
 

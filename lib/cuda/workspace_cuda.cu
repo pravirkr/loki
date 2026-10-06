@@ -599,7 +599,8 @@ make_ep_workspace_gpu(SizeType batch_size,
                       SizeType nsegments,
                       int device_id) {
     cuda_utils::CudaSetDeviceGuard device_guard(device_id);
-    // Default stream: EPMultiPass on a shared workspace runs on it too.
+    // Allocated on the default stream; EPMultiPass on this workspace runs
+    // on its own stream, which the default stream orders before.
     return std::make_unique<EPWorkspaceCudaStorage<CudaFoldType<FoldType>>>(
         batch_size, branch_max, max_sugg, ncoords_ffa, nparams, nbins,
         nsegments, /*stream=*/nullptr);

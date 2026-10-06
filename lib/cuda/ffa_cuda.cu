@@ -1,6 +1,7 @@
 #include "loki/algorithms/ffa.hpp"
 
 #include <memory>
+#include <optional>
 
 #include <fmt/ranges.h>
 #include <spdlog/spdlog.h>
@@ -41,8 +42,8 @@ public:
           m_is_freq_only(m_cfg.get_nparams() == 1),
           m_workspace_storage(m_ffa_plan),
           m_workspace_ptr(&m_workspace_storage),
-          m_fft_storage(device_id),
-          m_fft_ptr(&m_fft_storage) {
+          m_fft_storage(std::in_place, device_id),
+          m_fft_ptr(&*m_fft_storage) {
         cuda_utils::CudaSetDeviceGuard device_guard(m_device_id);
         // Validate workspace
         const auto& ws = get_workspace();
@@ -61,8 +62,8 @@ public:
           m_is_freq_only(m_cfg.get_nparams() == 1),
           m_workspace_storage(),
           m_workspace_ptr(&workspace),
-          m_fft_storage(device_id),
-          m_fft_ptr(&m_fft_storage) {
+          m_fft_storage(std::in_place, device_id),
+          m_fft_ptr(&*m_fft_storage) {
         cuda_utils::CudaSetDeviceGuard device_guard(m_device_id);
         // Validate workspace
         const auto& ws = get_workspace();
@@ -82,7 +83,6 @@ public:
           m_is_freq_only(m_cfg.get_nparams() == 1),
           m_workspace_storage(),
           m_workspace_ptr(&workspace),
-          m_fft_storage(device_id),
           m_fft_ptr(&fft_manager) {
         cuda_utils::CudaSetDeviceGuard device_guard(m_device_id);
         // Validate workspace
@@ -339,7 +339,8 @@ private:
     // The observer pointer that always points to the active workspace.
     memory::FFAWorkspaceCUDA<FoldTypeCUDA>* m_workspace_ptr{nullptr};
 
-    math::CUFFTManager m_fft_storage;
+    // Empty when the caller supplies the FFT manager.
+    std::optional<math::CUFFTManager> m_fft_storage;
     math::CUFFTManager* m_fft_ptr{nullptr};
 
     [[nodiscard]] memory::FFAWorkspaceCUDA<FoldTypeCUDA>&

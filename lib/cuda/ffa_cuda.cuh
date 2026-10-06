@@ -76,6 +76,9 @@ public:
         requires(std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>);
 
 private:
+    // The facade engine embeds Impl directly (no extra indirection).
+    template <SupportedFoldType> friend class FFACudaEngine;
+
     class Impl;
     std::unique_ptr<Impl> m_impl;
 };

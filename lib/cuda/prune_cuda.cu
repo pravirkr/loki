@@ -7,6 +7,7 @@
 #include <format>
 #include <fstream>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 
@@ -1030,8 +1031,9 @@ class EPMultiPassCudaEngine : public detail::EPMultiPassEngine<FoldType> {
     using FoldTypeCUDA = CudaFoldType<FoldType>;
 
 public:
-    /// Runs on the caller's device workspace, on the default stream (the
-    /// stream the public EPWorkspace handle was built on).
+    /// Runs on the caller's device workspace, on a stream owned by this
+    /// engine (as the owning constructor does). The workspace handle was
+    /// allocated on the legacy default stream, which orders before it.
     EPMultiPassCudaEngine(memory::EPWorkspaceCUDA<FoldTypeCUDA>& workspace,
                           search::PulsarSearchConfig cfg,
                           std::span<const float> threshold_scheme,
@@ -1042,8 +1044,9 @@ public:
                           SizeType batch_size,
                           std::string_view poly_basis,
                           int device_id)
-        : m_impl(workspace,
-                 /*execution_stream=*/nullptr,
+        : m_stream(std::in_place, device_id),
+          m_impl(workspace,
+                 m_stream->get(),
                  std::move(cfg),
                  threshold_scheme,
                  n_runs,
@@ -1081,6 +1084,8 @@ public:
     }
 
 private:
+    // Set only on a shared workspace. Declared first so it outlives m_impl.
+    std::optional<ExecutionStream> m_stream;
     typename EPMultiPassCudaCore<FoldTypeCUDA>::Impl m_impl;
 };
 

@@ -156,7 +156,7 @@ namespace detail {
 template <SupportedFoldType FoldType>
 FFAWorkspaceCPU<FoldType>& cpu_workspace(FFAWorkspace<FoldType>& ws,
                                          std::string_view what) {
-    auto& impl = ws.impl();
+    auto& impl = loki::detail::HandleAccess::impl(ws);
     if (!impl.cpu) {
         throw std::invalid_argument(
             std::format("{}: expected a CPU FFAWorkspace", what));
@@ -167,7 +167,7 @@ FFAWorkspaceCPU<FoldType>& cpu_workspace(FFAWorkspace<FoldType>& ws,
 template <SupportedFoldType FoldType>
 EPWorkspaceCPU<FoldType>& cpu_workspace(EPWorkspace<FoldType>& ws,
                                         std::string_view what) {
-    auto& impl = ws.impl();
+    auto& impl = loki::detail::HandleAccess::impl(ws);
     if (!impl.cpu) {
         throw std::invalid_argument(
             std::format("{}: expected a CPU EPWorkspace", what));

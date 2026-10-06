@@ -83,7 +83,7 @@ SizeType FFTManager::n_cached_plans() const {
 namespace detail {
 
 FFTWManager& cpu_fft(FFTManager& fft, std::string_view what) {
-    auto& impl = fft.impl();
+    auto& impl = loki::detail::HandleAccess::impl(fft);
     if (!impl.cpu) {
         throw std::invalid_argument(
             std::format("{}: expected a CPU FFTManager", what));

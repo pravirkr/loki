@@ -76,9 +76,11 @@ TEST_CASE("FFA backend dispatch CPU", "[ffa][backend]") {
     }
 
     SECTION("Exec::cuda availability check") {
-#ifndef LOKI_ENABLE_CUDA
-        REQUIRE_THROWS_AS(FFATime(cfg, false, Exec::cuda(0)),
-                          std::invalid_argument);
-#endif
+        if (loki::is_available(Backend::kCUDA)) {
+            REQUIRE_NOTHROW(FFATime(cfg, false, Exec::cuda(0)));
+        } else {
+            REQUIRE_THROWS_AS(FFATime(cfg, false, Exec::cuda(0)),
+                              std::invalid_argument);
+        }
     }
 }

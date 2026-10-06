@@ -17,6 +17,11 @@
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
 
+namespace loki::detail {
+/// Library-internal accessor to a handle's backend storage.
+struct HandleAccess;
+} // namespace loki::detail
+
 namespace loki::memory {
 
 /**
@@ -49,11 +54,13 @@ public:
     [[nodiscard]] Exec exec() const;
     [[nodiscard]] bool empty() const noexcept { return m_impl == nullptr; }
 
+private:
+    friend struct loki::detail::HandleAccess;
+
     /// Backend storage. Defined inside the library only.
     class Impl;
     [[nodiscard]] Impl& impl();
 
-private:
     std::unique_ptr<Impl> m_impl;
 };
 
@@ -87,11 +94,13 @@ public:
     /// Total allocation of this workspace, in GiB.
     [[nodiscard]] float get_memory_usage_gib() const;
 
+private:
+    friend struct loki::detail::HandleAccess;
+
     /// Backend storage. Defined inside the library only.
     class Impl;
     [[nodiscard]] Impl& impl();
 
-private:
     std::unique_ptr<Impl> m_impl;
 };
 

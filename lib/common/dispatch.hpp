@@ -53,6 +53,14 @@ void check_same_exec(const Exec& resource,
 /// that will be ignored.
 void warn_ignored_nthreads(const Exec& exec, std::string_view algorithm);
 
+/// Grants library code access to the backend storage of the public
+/// handles (FFTManager, FFAWorkspace, EPWorkspace), whose impl() is private.
+struct HandleAccess {
+    template <typename Handle> static auto& impl(Handle& handle) {
+        return handle.impl();
+    }
+};
+
 /**
  * @brief GPU-owned state behind a public handle (workspace, FFT manager).
  *

@@ -44,6 +44,11 @@ target_link_libraries(
                               HighFive::HighFive
                               $<BUILD_INTERFACE:tomlplusplus>
 )
+# fft_t.cpp compiles as CUDA: give it the library's nvcc options. Linked after
+# LOKI_COMPILE_OPTIONS so -Wno-pedantic overrides -Wpedantic for nvcc output.
+if(CMAKE_CUDA_COMPILER AND TARGET ${PROJECT_NAME}_cuda_options)
+  target_link_libraries(${LOKI_TEST_TARGET} PRIVATE ${PROJECT_NAME}_cuda_options)
+endif()
 
 catch_discover_tests(${LOKI_TEST_TARGET})
 

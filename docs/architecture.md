@@ -69,6 +69,12 @@ Domains are `algorithms`, `common`, `detection`, `io`, `pipelines`, `search`,
   `memory::FFAWorkspace<T>`, `memory::EPWorkspace<T>` and `math::FFTManager`.
   An algorithm that receives one checks that it was built for the same
   backend and device.
+- A handle's storage is private: `class Impl; Impl& impl();` sit under
+  `private:`, with `friend struct loki::detail::HandleAccess;`. Library code
+  reaches the concrete buffers only through the accessors built on
+  `HandleAccess` (`memory::detail::cpu_workspace`, `cuda_workspace`,
+  `math::detail::cpu_fft`, `cuda_fft`). A new handle follows the same
+  pattern.
 
 ### 2. Signatures
 
@@ -140,6 +146,16 @@ Domains are `algorithms`, `common`, `detection`, `io`, `pipelines`, `search`,
   that is never installed. It adds `lib/` to the include path, along with the
   backend macros and the CUDA headers, for white-box tests. Do not add `lib/`
   to an include path by hand.
+- GPU tests are gated at run time, so a CPU-only build reports them as
+  skipped instead of compiling them away:
+  `if (!loki::is_available(Backend::kCUDA)) { SKIP("..."); }`. Use
+  `#ifdef LOKI_ENABLE_CUDA` only when a test needs internal CUDA types
+  (today only `fft_t.cpp`).
+- GPU results are compared to the CPU or to an owning instance bit for bit
+  where the kernel is deterministic. The time-domain brute fold accumulates
+  with float `atomicAdd`, so its outputs and anything derived from them
+  (time-domain FFA folds, scores, `level_stats.score_max`) vary from run to
+  run at the float32 rounding level. Compare those with a tolerance.
 
 ## Recipes
 

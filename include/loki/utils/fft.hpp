@@ -11,6 +11,11 @@
 #include "loki/common/backend.hpp"
 #include "loki/common/types.hpp"
 
+namespace loki::detail {
+/// Library-internal accessor to a handle's backend storage.
+struct HandleAccess;
+} // namespace loki::detail
+
 namespace loki::math {
 
 /**
@@ -53,11 +58,13 @@ public:
     [[nodiscard]] Exec exec() const;
     [[nodiscard]] bool empty() const noexcept { return m_impl == nullptr; }
 
+private:
+    friend struct loki::detail::HandleAccess;
+
     /// Backend storage. Defined inside the library only.
     class Impl;
     [[nodiscard]] Impl& impl();
 
-private:
     std::unique_ptr<Impl> m_impl;
 };
 

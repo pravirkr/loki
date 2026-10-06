@@ -282,7 +282,7 @@ namespace detail {
 template <SupportedFoldType FoldType>
 FFAWorkspaceCUDA<CudaFoldType<FoldType>>&
 cuda_workspace(FFAWorkspace<FoldType>& ws, std::string_view what) {
-    auto& impl = ws.impl();
+    auto& impl = loki::detail::HandleAccess::impl(ws);
     if (!impl.device) {
         throw std::invalid_argument(
             std::format("{}: expected a GPU FFAWorkspace", what));
@@ -296,7 +296,7 @@ cuda_workspace(FFAWorkspace<FoldType>& ws, std::string_view what) {
 template <SupportedFoldType FoldType>
 EPWorkspaceCUDA<CudaFoldType<FoldType>>&
 cuda_workspace(EPWorkspace<FoldType>& ws, std::string_view what) {
-    auto& impl = ws.impl();
+    auto& impl = loki::detail::HandleAccess::impl(ws);
     if (!impl.device) {
         throw std::invalid_argument(
             std::format("{}: expected a GPU EPWorkspace", what));

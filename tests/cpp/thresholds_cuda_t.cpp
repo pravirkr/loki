@@ -1,5 +1,3 @@
-#ifdef LOKI_ENABLE_CUDA
-
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -11,6 +9,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 
+#include "loki/common/backend.hpp"
 #include "loki/detection/thresholds.hpp"
 
 namespace loki {
@@ -75,6 +74,9 @@ SizeType count_nonempty(const std::vector<State>& states) {
 
 TEST_CASE("CUDA DynamicThresholdScheme is bit-reproducible for a fixed seed",
           "[thresholds][cuda]") {
+    if (!is_available(Backend::kCUDA)) {
+        SKIP("needs a CUDA build");
+    }
     const auto* mode = GENERATE("legacy", "improved");
     CAPTURE(mode);
     auto scheme_a = make_scheme(mode, 1234);
@@ -99,6 +101,9 @@ TEST_CASE("CUDA DynamicThresholdScheme is bit-reproducible for a fixed seed",
 
 TEST_CASE("CUDA DynamicThresholdScheme states are self-consistent",
           "[thresholds][cuda]") {
+    if (!is_available(Backend::kCUDA)) {
+        SKIP("needs a CUDA build");
+    }
     const auto* mode    = GENERATE("legacy", "improved");
     const SizeType nbin = GENERATE(SizeType{32}, SizeType{50}, SizeType{64});
     CAPTURE(mode, nbin);
@@ -171,6 +176,9 @@ TEST_CASE("CUDA DynamicThresholdScheme states are self-consistent",
 
 TEST_CASE("CUDA DynamicThresholdScheme batch_size only shifts RNG streams",
           "[thresholds][cuda]") {
+    if (!is_available(Backend::kCUDA)) {
+        SKIP("needs a CUDA build");
+    }
     // batch_size is kept in the RNG offset bookkeeping for compatibility, so
     // results change with it, but each setting stays reproducible and valid.
     const auto* mode = GENERATE("legacy", "improved");
@@ -187,6 +195,9 @@ TEST_CASE("CUDA DynamicThresholdScheme batch_size only shifts RNG streams",
 
 TEST_CASE("CUDA DynamicThresholdScheme rejects invalid input",
           "[thresholds][cuda]") {
+    if (!is_available(Backend::kCUDA)) {
+        SKIP("needs a CUDA build");
+    }
     const auto make = [](std::span<const float> branching, SizeType nbins,
                          float prob_min, float ducy_max, float beam_width,
                          SizeType batch_size) {
@@ -231,6 +242,9 @@ TEST_CASE("CUDA DynamicThresholdScheme rejects invalid input",
 
 TEST_CASE("CUDA DynamicThresholdScheme evaluate rescores a path",
           "[thresholds][cuda]") {
+    if (!is_available(Backend::kCUDA)) {
+        SKIP("needs a CUDA build");
+    }
     auto scheme = make_scheme("improved", 7);
     scheme.run(kThresNeigh);
     const auto before = scheme.get_states();
@@ -251,5 +265,3 @@ TEST_CASE("CUDA DynamicThresholdScheme evaluate rescores a path",
 }
 
 } // namespace loki
-
-#endif // LOKI_ENABLE_CUDA

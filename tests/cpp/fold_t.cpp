@@ -1,6 +1,7 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <random>
 #include <vector>
@@ -79,11 +80,9 @@ TEST_CASE("BruteFold CPU executes time and complex domain folding",
     }
 }
 
-#ifdef LOKI_ENABLE_CUDA
-TEST_CASE("BruteFold CUDA parity with CPU and backward compatibility",
-          "[fold][cuda]") {
+TEST_CASE("BruteFold CUDA parity with CPU", "[fold][cuda]") {
     if (!loki::is_available(Backend::kCUDA)) {
-        return;
+        SKIP("needs a CUDA build");
     }
 
     constexpr SizeType kNsamps      = 1024;
@@ -114,15 +113,6 @@ TEST_CASE("BruteFold CUDA parity with CPU and backward compatibility",
         for (SizeType i = 0; i < fold_cpu.size(); ++i) {
             REQUIRE(fold_cuda[i] == Approx(fold_cpu[i]).margin(1e-4F));
         }
-
-        // Backward compatibility class BruteFoldFloatCUDA
-        loki::algorithms::BruteFoldFloatCUDA bf_compat(
-            freqs, kSegmentLen, kNbins, kNsamps, kTsamp, 0.0, 0);
-        std::vector<float> fold_compat(bf_compat.get_fold_size(), 0.0F);
-        bf_compat.execute(ts_e, ts_v, fold_compat);
-        for (SizeType i = 0; i < fold_cpu.size(); ++i) {
-            REQUIRE(fold_compat[i] == Approx(fold_cpu[i]).margin(1e-4F));
-        }
     }
 
     SECTION("Fourier domain parity") {
@@ -140,12 +130,18 @@ TEST_CASE("BruteFold CUDA parity with CPU and backward compatibility",
         bf_cuda.execute(ts_e, ts_v, fold_cuda);
 
         REQUIRE(fold_cpu.size() == fold_cuda.size());
+        // CUDA sums the DFT terms directly, so float32 rounding scales with
+        // the largest harmonic rather than with each element.
+        float peak = 0.0F;
+        for (const auto& x : fold_cpu) {
+            peak = std::max(peak, std::abs(x));
+        }
+        const float tol = 1e-4F * peak;
         for (SizeType i = 0; i < fold_cpu.size(); ++i) {
             REQUIRE(fold_cuda[i].real() ==
-                    Approx(fold_cpu[i].real()).margin(1e-3F));
+                    Approx(fold_cpu[i].real()).margin(tol));
             REQUIRE(fold_cuda[i].imag() ==
-                    Approx(fold_cpu[i].imag()).margin(1e-3F));
+                    Approx(fold_cpu[i].imag()).margin(tol));
         }
     }
 }
-#endif

@@ -8,11 +8,10 @@
 #include <span>
 #include <stdexcept>
 
-#include <omp.h>
-
 #include "common/dispatch.hpp"
 #include "detail/exceptions.hpp"
 #include "detail/utils.hpp"
+#include "detection/boxcar_kernels.hpp"
 #include "detection/score_engine.hpp"
 #include "loki/common/types.hpp"
 #include "utils/fft_impl.hpp"
@@ -36,40 +35,6 @@ void normalise_l2(std::span<float> arr) {
         const float scale = 1.0F / norm;
         std::ranges::transform(arr, arr.begin(),
                                [scale](float val) { return val * scale; });
-    }
-}
-
-/// Branchless e/sqrt(v) folded into the circular prefix sum. The first
-/// `nbins` entries match `circular_prefix_sum` of the normalised profile, so
-/// `diff_max` sees the same values as the two-pass form.
-void ev_circular_prefix(const float* __restrict__ ts_e,
-                        const float* __restrict__ ts_v,
-                        float* __restrict__ psum,
-                        SizeType nbins,
-                        SizeType nsum) noexcept {
-    float run = 0.0F;
-    for (SizeType j = 0; j < nbins; ++j) {
-        const float variance = ts_v[j];
-        const float sample =
-            (variance > 0.0F) ? (ts_e[j] / std::sqrt(variance)) : 0.0F;
-        run += sample;
-        psum[j] = run;
-    }
-    if (nsum <= nbins) {
-        return;
-    }
-    const float last_sum          = psum[nbins - 1];
-    const SizeType first_wrap_end = std::min(nsum, 2 * nbins);
-    for (SizeType i = nbins; i < first_wrap_end; ++i) {
-        psum[i] = psum[i - nbins] + last_sum;
-    }
-    if (nsum > 2 * nbins) {
-        for (SizeType i = 2 * nbins; i < nsum; ++i) {
-            const auto wrap_count   = i / nbins;
-            const auto pos_in_cycle = i % nbins;
-            psum[i] = psum[pos_in_cycle] +
-                      (static_cast<float>(wrap_count) * last_sum);
-        }
     }
 }
 
@@ -128,74 +93,6 @@ void generate_gaussian_templates(std::span<float> templates,
     }
 }
 
-template <bool Is3D, bool FindMax>
-void snr_boxcar_impl(const float* __restrict__ folds,
-                     SizeType nprofiles,
-                     SizeType nbins,
-                     const SizeType* __restrict__ widths,
-                     SizeType nwidths,
-                     float* __restrict__ scores,
-                     float stdnoise = 1.0F, // stdnoise is only used for 2D
-                     int nthreads   = 1) {
-    nthreads            = std::clamp(nthreads, 1, omp_get_max_threads());
-    const SizeType wmax = *std::ranges::max_element(widths, widths + nwidths);
-
-    // Precompute template parameters (h, b) for all widths
-    std::vector<float> h_vals(nwidths);
-    std::vector<float> b_vals(nwidths);
-    for (SizeType iw = 0; iw < nwidths; ++iw) {
-        const auto w = widths[iw];
-        h_vals[iw]   = std::sqrt(static_cast<float>(nbins - w) /
-                                 static_cast<float>(nbins * w));
-        b_vals[iw] =
-            static_cast<float>(w) * h_vals[iw] / static_cast<float>(nbins - w);
-    }
-    const float inv_stdnoise = Is3D ? 1.0F : (1.0F / stdnoise);
-
-#pragma omp parallel num_threads(nthreads) default(none)                       \
-    shared(folds, widths, scores, nbins, nprofiles, nwidths, wmax, h_vals,     \
-               b_vals, inv_stdnoise)
-    {
-        // Thread-local buffers
-        std::vector<float> psum(nbins + wmax, 0.0F);
-
-#pragma omp for
-        for (SizeType i = 0; i < nprofiles; ++i) {
-            if constexpr (Is3D) {
-                const SizeType base_idx            = i * 2 * nbins;
-                const float* __restrict__ ts_e_ptr = folds + base_idx;
-                const float* __restrict__ ts_v_ptr = folds + base_idx + nbins;
-                ev_circular_prefix(ts_e_ptr, ts_v_ptr, psum.data(), nbins,
-                                   nbins + wmax);
-            } else {
-                const float* fold_ptr = folds + (i * nbins);
-                utils::circular_prefix_sum(fold_ptr, psum.data(), nbins,
-                                           nbins + wmax);
-            }
-            const float sum              = psum[nbins - 1];
-            float* __restrict__ psum_ptr = psum.data();
-
-            // Compute SNR for each width, find maximum
-            float max_snr = std::numeric_limits<float>::lowest();
-            for (SizeType iw = 0; iw < nwidths; ++iw) {
-                const auto dmax =
-                    utils::diff_max(psum_ptr + widths[iw], psum_ptr, nbins);
-                const float snr_base =
-                    ((h_vals[iw] + b_vals[iw]) * dmax) - (b_vals[iw] * sum);
-                const float snr = snr_base * inv_stdnoise;
-                if constexpr (FindMax) {
-                    max_snr = std::max(max_snr, snr);
-                } else {
-                    scores[(i * nwidths) + iw] = snr;
-                }
-            }
-            if constexpr (FindMax) {
-                scores[i] = max_snr;
-            }
-        }
-    }
-}
-
 SizeType
 snr_boxcar_3d_max_with_cache_impl(const float* __restrict__ arr,
                                   SizeType nprofiles,
@@ -218,7 +115,8 @@ snr_boxcar_3d_max_with_cache_impl(const float* __restrict__ arr,
         const SizeType base_idx            = i * 2 * nbins;
         const float* __restrict__ ts_e_ptr = arr + base_idx;
         const float* __restrict__ ts_v_ptr = arr + base_idx + nbins;
-        ev_circular_prefix(ts_e_ptr, ts_v_ptr, psum, nbins, nbins + wmax);
+        detail::ev_circular_prefix(ts_e_ptr, ts_v_ptr, psum, nbins,
+                                   nbins + wmax);
         const float sum = psum[nbins - 1];
 
         // Compute SNR for each width, find maximum
@@ -442,76 +340,6 @@ bool snr_boxcar_threshold_with_cache(std::span<const float> arr,
     return false;
 }
 
-namespace detail {
-
-void snr_boxcar_2d_cpu(std::span<const float> folds,
-                       std::span<const SizeType> widths,
-                       std::span<float> scores,
-                       SizeType nprofiles,
-                       SizeType nbins,
-                       float stdnoise,
-                       int nthreads) {
-    const auto nwidths = widths.size();
-    error_check::check_equal(folds.size(), (nprofiles * nbins),
-                             "snr_boxcar_2d: folds size does not match");
-    error_check::check_equal(
-        scores.size(), nprofiles * nwidths,
-        "snr_boxcar_2d: scores size does not match nprofiles * nwidths");
-    snr_boxcar_impl<false, false>(folds.data(), nprofiles, nbins, widths.data(),
-                                  nwidths, scores.data(), stdnoise, nthreads);
-}
-
-void snr_boxcar_2d_max_cpu(std::span<const float> folds,
-                           std::span<const SizeType> widths,
-                           std::span<float> scores,
-                           SizeType nprofiles,
-                           SizeType nbins,
-                           float stdnoise,
-                           int nthreads) {
-    const auto nwidths = widths.size();
-    error_check::check_equal(folds.size(), (nprofiles * nbins),
-                             "snr_boxcar_2d_max: arr size does not match");
-    error_check::check_equal(
-        scores.size(), nprofiles,
-        "snr_boxcar_2d_max: scores size does not match nprofiles");
-    snr_boxcar_impl<false, true>(folds.data(), nprofiles, nbins, widths.data(),
-                                 nwidths, scores.data(), stdnoise, nthreads);
-}
-
-void snr_boxcar_3d_cpu(std::span<const float> folds,
-                       std::span<const SizeType> widths,
-                       std::span<float> scores,
-                       SizeType nprofiles,
-                       SizeType nbins,
-                       int nthreads) {
-    const auto nwidths = widths.size();
-    error_check::check_equal(folds.size(), (nprofiles * 2 * nbins),
-                             "snr_boxcar_3d: folds size does not match");
-    error_check::check_equal(
-        scores.size(), nprofiles * nwidths,
-        "snr_boxcar_3d: scores size does not match nprofiles * nwidths");
-    snr_boxcar_impl<true, false>(folds.data(), nprofiles, nbins, widths.data(),
-                                 nwidths, scores.data(), 1.0F, nthreads);
-}
-
-void snr_boxcar_3d_max_cpu(std::span<const float> folds,
-                           std::span<const SizeType> widths,
-                           std::span<float> scores,
-                           SizeType nprofiles,
-                           SizeType nbins,
-                           int nthreads) {
-    const auto nwidths = widths.size();
-    error_check::check_equal(folds.size(), (nprofiles * 2 * nbins),
-                             "snr_boxcar_3d_max: folds size does not match");
-    error_check::check_equal(
-        scores.size(), nprofiles,
-        "snr_boxcar_3d_max: scores size do not match nprofiles");
-    snr_boxcar_impl<true, true>(folds.data(), nprofiles, nbins, widths.data(),
-                                nwidths, scores.data(), 1.0F, nthreads);
-}
-
-} // namespace detail
-
 void snr_boxcar_2d(std::span<const float> folds,
                    std::span<const SizeType> widths,
                    std::span<float> scores,
@@ -643,8 +471,8 @@ void append_snr_boxcar_3d_hits(const float* folds,
     }
     for (SizeType local = 0; local < nprofiles; ++local) {
         const float* profile = folds + (local * 2 * nbins);
-        ev_circular_prefix(profile, profile + nbins, psum.data(), nbins,
-                           nbins + wmax);
+        detail::ev_circular_prefix(profile, profile + nbins, psum.data(), nbins,
+                                   nbins + wmax);
         const float sum              = psum[nbins - 1];
         const SizeType profile_index = profile_base + local;
         for (SizeType iw = 0; iw < nwidths; ++iw) {
