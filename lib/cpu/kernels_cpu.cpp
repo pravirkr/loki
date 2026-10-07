@@ -4,6 +4,8 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <numbers>
 #include <utility>
@@ -562,7 +564,7 @@ void precompute_base_phasors_scalar(float* __restrict__ delta_r,
                                     double tsamp,
                                     double t_ref,
                                     int nthreads) {
-    nthreads = std::max(nthreads, 1);
+    nthreads = std::clamp(nthreads, 1, omp_get_max_threads());
 #pragma omp parallel for num_threads(nthreads) default(none)                   \
     shared(delta_r, delta_i, freqs, nfreqs, segment_len, tsamp, t_ref)
     for (SizeType ifreq = 0; ifreq < nfreqs; ++ifreq) {
@@ -746,7 +748,7 @@ void ffa_iter_segment_freq(const float* __restrict__ fold_in,
                            SizeType nsegments,
                            SizeType nbins,
                            int nthreads) noexcept {
-    nthreads = std::max(nthreads, 1);
+    nthreads = std::clamp(nthreads, 1, omp_get_max_threads());
     // Process one segment at a time to keep data in cache
     const SizeType fold_stride     = 2 * nbins;
     const SizeType seg_prev_stride = ncoords_prev * fold_stride;
@@ -774,7 +776,7 @@ void ffa_iter_standard_freq(const float* __restrict__ fold_in,
                             SizeType nsegments,
                             SizeType nbins,
                             int nthreads) noexcept {
-    nthreads                       = std::max(nthreads, 1);
+    nthreads = std::clamp(nthreads, 1, omp_get_max_threads());
     constexpr SizeType kBlockSize  = 32;
     const SizeType fold_stride     = 2 * nbins;
     const SizeType seg_prev_stride = ncoords_prev * fold_stride;
@@ -823,7 +825,7 @@ void ffa_iter_segment(const float* __restrict__ fold_in,
                       SizeType nsegments,
                       SizeType nbins,
                       int nthreads) noexcept {
-    nthreads = std::max(nthreads, 1);
+    nthreads = std::clamp(nthreads, 1, omp_get_max_threads());
     // Process one segment at a time to keep data in cache
     constexpr SizeType kBlockSize  = 32;
     const SizeType fold_stride     = 2 * nbins;
@@ -881,7 +883,7 @@ void ffa_iter_standard(const float* __restrict__ fold_in,
                        SizeType nsegments,
                        SizeType nbins,
                        int nthreads) noexcept {
-    nthreads                       = std::max(nthreads, 1);
+    nthreads = std::clamp(nthreads, 1, omp_get_max_threads());
     constexpr SizeType kBlockSize  = 32;
     const SizeType fold_stride     = 2 * nbins;
     const SizeType seg_prev_stride = ncoords_prev * fold_stride;
@@ -937,7 +939,7 @@ void ffa_complex_iter_segment(const ComplexType* __restrict__ fold_in,
                               SizeType nbins_f,
                               SizeType nbins,
                               int nthreads) noexcept {
-    nthreads = std::max(nthreads, 1);
+    nthreads = std::clamp(nthreads, 1, omp_get_max_threads());
     // Process one segment at a time to keep data in cache
     constexpr SizeType kBlockSize  = 32;
     const SizeType fold_stride     = 2 * nbins_f;
@@ -985,7 +987,7 @@ void ffa_complex_iter_standard(const ComplexType* __restrict__ fold_in,
                                SizeType nbins_f,
                                SizeType nbins,
                                int nthreads) noexcept {
-    nthreads                       = std::max(nthreads, 1);
+    nthreads = std::clamp(nthreads, 1, omp_get_max_threads());
     constexpr SizeType kBlockSize  = 32;
     const SizeType fold_stride     = 2 * nbins_f;
     const SizeType seg_prev_stride = ncoords_prev * fold_stride;
@@ -1032,7 +1034,7 @@ void ffa_complex_iter_segment_freq(
     SizeType nbins_f,
     SizeType nbins,
     int nthreads) noexcept {
-    nthreads = std::max(nthreads, 1);
+    nthreads = std::clamp(nthreads, 1, omp_get_max_threads());
     // Process one segment at a time to keep data in cache
     constexpr SizeType kBlockSize  = 32;
     const SizeType fold_stride     = 2 * nbins_f;
@@ -1081,7 +1083,7 @@ void ffa_complex_iter_standard_freq(
     SizeType nbins_f,
     SizeType nbins,
     int nthreads) noexcept {
-    nthreads                       = std::max(nthreads, 1);
+    nthreads = std::clamp(nthreads, 1, omp_get_max_threads());
     constexpr SizeType kBlockSize  = 32;
     const SizeType fold_stride     = 2 * nbins_f;
     const SizeType seg_prev_stride = ncoords_prev * fold_stride;
@@ -1345,7 +1347,7 @@ void brute_fold_ts(const float* __restrict__ ts_e,
                    SizeType segment_len,
                    SizeType nbins,
                    int nthreads) noexcept {
-    nthreads = std::max(nthreads, 1);
+    nthreads = std::clamp(nthreads, 1, omp_get_max_threads());
 #pragma omp parallel num_threads(nthreads) default(none)                       \
     shared(ts_e, ts_v, fold, runs, run_offsets, nsegments, nfreqs,             \
                segment_len, nbins)
@@ -1379,7 +1381,7 @@ void brute_fold_ffa_fused_freq(const float* __restrict__ ts_e,
                                SizeType nbins,
                                SizeType nlevels,
                                int nthreads) noexcept {
-    nthreads                     = std::max(nthreads, 1);
+    nthreads = std::clamp(nthreads, 1, omp_get_max_threads());
     const SizeType tile_segments = SizeType{1} << nlevels;
     const SizeType ntiles        = nsegments >> nlevels;
     const SizeType fold_stride   = 2 * nbins;
@@ -1441,6 +1443,7 @@ void brute_fold_ffa_fused_freq(const float* __restrict__ ts_e,
     }
 }
 
+// NOLINTNEXTLINE(bugprone-exception-escape): allocation failure terminates (noexcept kernel)
 void brute_fold_ts_complex_xsimd(const float* __restrict__ ts_e,
                                  const float* __restrict__ ts_v,
                                  ComplexType* __restrict__ fold,
@@ -1452,7 +1455,7 @@ void brute_fold_ts_complex_xsimd(const float* __restrict__ ts_e,
                                  double tsamp,
                                  double t_ref,
                                  int nthreads) noexcept {
-    nthreads           = std::max(nthreads, 1);
+    nthreads           = std::clamp(nthreads, 1, omp_get_max_threads());
     const auto nbins_f = (nbins / 2) + 1;
 
     AlignedFloatVec delta_phasors_r(nfreqs * segment_len);
@@ -1489,6 +1492,7 @@ void brute_fold_ts_complex_xsimd(const float* __restrict__ ts_e,
     }
 }
 
+// NOLINTNEXTLINE(bugprone-exception-escape): allocation failure terminates (noexcept kernel)
 void brute_fold_ts_complex(const float* __restrict__ ts_e,
                            const float* __restrict__ ts_v,
                            ComplexType* __restrict__ fold,
@@ -1500,7 +1504,7 @@ void brute_fold_ts_complex(const float* __restrict__ ts_e,
                            double tsamp,
                            double t_ref,
                            int nthreads) noexcept {
-    nthreads = std::max(nthreads, 1);
+    nthreads = std::clamp(nthreads, 1, omp_get_max_threads());
 #if defined(__AVX512F__) || (defined(__AVX2__) && defined(__FMA__)) ||         \
     defined(__aarch64__) || defined(__ARM_NEON)
 
@@ -1941,9 +1945,9 @@ void ffa_cone_band_freq(const float* level_in,
     if ((nsegments_in % nseg_group) != 0) {
         return;
     }
-    nthreads                      = std::max(nthreads, 1);
-    const SizeType nseg_out       = nsegments_in >> k_levels;
-    const SizeType ncoords_top    = ncoords[k_levels];
+    nthreads                   = std::clamp(nthreads, 1, omp_get_max_threads());
+    const SizeType nseg_out    = nsegments_in >> k_levels;
+    const SizeType ncoords_top = ncoords[k_levels];
     const SizeType scratch_floats = cone_band_working_floats(
         coords_levels, ncoords, k_levels, tile_coords, nbins);
     if (scratch_floats == 0 || ncoords_top == 0 || nseg_out == 0) {
@@ -1956,8 +1960,10 @@ void ffa_cone_band_freq(const float* level_in,
 
     std::vector<double> shared_prefix_e;
     std::vector<double> shared_prefix_v;
-    std::vector<double> const shared_p4_e;
-    std::vector<double> const shared_p4_v;
+    // NOLINTBEGIN(misc-const-correctness): resized and written under AVX2
+    std::vector<double> shared_p4_e;
+    std::vector<double> shared_p4_v;
+    // NOLINTEND(misc-const-correctness)
     if (bottom && !parallel_groups) {
         const auto prefix_start = ConeClock::now();
         shared_prefix_e.resize(nsegments_in * prefix_stride);
@@ -2163,4 +2169,3 @@ void ffa_cone_band_freq(const float* level_in,
 }
 
 } // namespace loki::core
-// NOLINTEND(misc-include-cleaner)

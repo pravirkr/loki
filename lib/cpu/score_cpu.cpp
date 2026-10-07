@@ -1,5 +1,3 @@
-// NOLINTBEGIN(misc-include-cleaner) -- CPU engine; symbols via private/engine
-// headers.
 #include <span>
 
 #include "loki/common/types.hpp"
@@ -77,4 +75,3 @@ void snr_boxcar_3d_max_cpu(std::span<const float> folds,
 }
 
 } // namespace loki::detection::detail
-// NOLINTEND(misc-include-cleaner)

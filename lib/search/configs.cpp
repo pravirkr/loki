@@ -57,8 +57,6 @@ namespace {
     return {};
 }
 
-// NOLINTBEGIN(misc-include-cleaner) -- toml::table, toml::parse,
-// toml::parse_error via toml.hpp
 void collect_unknown_keys(const toml::table& table,
                           std::span<const std::string_view> allowed,
                           std::string_view table_path,
@@ -416,7 +414,6 @@ FFATomlConfig FFATomlConfig::from_string(std::string_view toml_content) {
             err.source().begin.column, err.description()));
     }
 }
-// NOLINTEND(misc-include-cleaner)
 
 FFATomlConfig FFATomlConfig::load(const std::filesystem::path& path) {
     if (!std::filesystem::exists(path)) {

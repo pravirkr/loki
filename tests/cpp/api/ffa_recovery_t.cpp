@@ -4,13 +4,16 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 #include <highfive/highfive.hpp>
 
+#include "loki/common/types.hpp"
 #include "loki/io/timeseries.hpp"
 #include "loki/simulation/modulate.hpp"
 #include "loki/simulation/pulse.hpp"
@@ -42,8 +45,7 @@ to_unit_variance(loki::io::TimeSeries series) {
         sample /= noise_std;
     }
     std::vector<float> ts_v(ts_e.size(), 1.0F);
-    return loki::io::TimeSeries(std::move(ts_e), std::move(ts_v),
-                                series.get_dt());
+    return {std::move(ts_e), std::move(ts_v), series.get_dt()};
 }
 
 [[nodiscard]] loki::io::TimeSeries make_injected_series(double accel_mps2) {
@@ -167,7 +169,7 @@ void write_ffa_toml(const std::filesystem::path& path,
     if (snrs.empty()) {
         return 0.0F;
     }
-    return *std::max_element(snrs.begin(), snrs.end());
+    return *std::ranges::max_element(snrs);
 }
 
 void run_cli_search(const std::filesystem::path& toml_path) {
@@ -176,8 +178,9 @@ void run_cli_search(const std::filesystem::path& toml_path) {
         SKIP("loki_app was not built (LOKI_APP_PATH undefined)");
     }
     const std::string cmd =
-        std::format("\"{}\" search ffa --config \"{}\" --no-preprocess",
+        std::format(R"("{}" search ffa --config "{}" --no-preprocess)",
                     app_path, toml_path.string());
+    // NOLINTNEXTLINE(bugprone-command-processor): runs the built CLI on purpose
     const int rc = std::system(cmd.c_str());
     REQUIRE(rc == 0);
 }

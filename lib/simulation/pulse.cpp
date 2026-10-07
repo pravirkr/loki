@@ -342,6 +342,7 @@ public:
     struct UnitNormalEngine {
         // NOLINTNEXTLINE(readability-identifier-naming) -- URBG requires
         // result_type.
+        // NOLINTNEXTLINE(readability-identifier-naming): UniformRandomBitGenerator requires result_type
         using result_type = std::uint32_t;
         math::PCG32 rng;
 

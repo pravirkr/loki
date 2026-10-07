@@ -1,6 +1,5 @@
 #include <cstddef>
 #include <span>
-#include <string>
 #include <vector>
 
 #include <pybind11/functional.h>
@@ -13,25 +12,15 @@
 #include "loki/loki.hpp"
 
 #include "bindings/bind.hpp"
-#include "loki_templates.hpp"
 #include "pybind_utils.hpp"
 
 namespace loki {
-using algorithms::EPChunkConfig;
-using algorithms::EPChunkStats;
-using algorithms::EPRegionStats;
-using algorithms::FFARegionStats;
-using detection::MatchedFilter;
-using pipelines::EPFreqSweep;
-using pipelines::FFAFreqSweep;
-using plans::FFAPlanBase;
-using search::FFASearchConfig;
 using search::PulsarSearchConfig;
 
 namespace py = pybind11;
 
 void bind_io(py::module_& m) {
-    auto m_io = m.def_submodule("io", "Timeseries I/O");
+    const auto m_io = m.def_submodule("io", "Timeseries I/O");
     py::enum_<LocMethod>(m_io, "LocMethod")
         .value("Mean", LocMethod::kMean)
         .value("Median", LocMethod::kMedian)
@@ -52,11 +41,13 @@ void bind_io(py::module_& m) {
         .def_readwrite("fast_median_min_points",
                        &io::ReadOptions::fast_median_min_points)
         .def_readwrite("nthreads", &io::ReadOptions::nthreads);
-    auto timeseries_view = [](py::object self, std::span<float> data) {
+    const auto timeseries_view = [](const py::object& self,
+                                    std::span<float> data) {
         return py::array_t<float>(
             py::array::ShapeContainer{static_cast<py::ssize_t>(data.size())},
             py::array::StridesContainer{
-                static_cast<py::ssize_t>(sizeof(float))},
+                static_cast<py::ssize_t>(sizeof(float)),
+            },
             data.data(), self);
     };
     py::class_<io::TimeSeries>(m_io, "TimeSeries")
@@ -76,15 +67,16 @@ void bind_io(py::module_& m) {
         .def_property_readonly("dt", &io::TimeSeries::get_dt)
         .def_property_readonly("tobs", &io::TimeSeries::get_tobs)
         .def_property_readonly("ts_e",
-                               [timeseries_view](py::object self) {
+                               [timeseries_view](const py::object& self) {
                                    return timeseries_view(
                                        self,
                                        self.cast<io::TimeSeries&>().get_ts_e());
                                })
-        .def_property_readonly("ts_v", [timeseries_view](py::object self) {
-            return timeseries_view(self,
-                                   self.cast<io::TimeSeries&>().get_ts_v());
-        });
+        .def_property_readonly(
+            "ts_v", [timeseries_view](const py::object& self) {
+                return timeseries_view(self,
+                                       self.cast<io::TimeSeries&>().get_ts_v());
+            });
 }
 
 } // namespace loki

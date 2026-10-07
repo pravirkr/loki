@@ -2,9 +2,12 @@
 #include <bit>
 #include <cassert>
 #include <format>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <span>
+#include <stdexcept>
 #include <string_view>
 #include <unordered_map>
 #include <utility>
@@ -278,6 +281,7 @@ fftwf_plan get_or_create_exact_irfft_plan(PreparedPlans& prepared,
             return it->second.get();
         }
     }
+    // NOLINTNEXTLINE(misc-const-correctness): moved into the plan cache
     FFTWPlan plan     = make_irfft_plan(n_real, n_complex, howmany);
     fftwf_plan result = nullptr;
     {
@@ -845,4 +849,3 @@ void irfft_batch(std::span<ComplexType> complex_input,
 }
 
 } // namespace loki::math
-// NOLINTEND(misc-include-cleaner)

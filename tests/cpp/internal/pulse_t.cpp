@@ -2,12 +2,15 @@
 
 #include <algorithm>
 #include <cmath>
+#include <optional>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include "loki/common/types.hpp"
 #include "loki/detection/score.hpp"
+#include "loki/io/timeseries.hpp"
 
 #include "lib/detail/psr_utils.hpp"
 #include "lib/simulation/pulse_detail.hpp"
@@ -104,7 +107,7 @@ TEST_CASE("pulse template integrates to one and wraps", "[simulation]") {
     constexpr double kDt            = 0.001;
     constexpr loki::SizeType kSamps = 1000;
     for (const char* shape : {"boxcar", "gaussian", "von_mises"}) {
-        for (double phi0 : {0.5, 0.02}) {
+        for (const double phi0 : {0.5, 0.02}) {
             const auto kind = detail::parse_pulse_shape(shape);
             const auto lut  = detail::build_cdf_lut(kind, 0.1, phi0, 4096);
             std::vector<double> time(kSamps);
@@ -114,7 +117,7 @@ TEST_CASE("pulse template integrates to one and wraps", "[simulation]") {
             const auto signal =
                 detail::generate_pulse_template(time, kDt, kPeriod, lut);
             double sum = 0.0;
-            for (float sample : signal) {
+            for (const float sample : signal) {
                 REQUIRE(sample >= 0.0F);
                 sum += static_cast<double>(sample);
             }

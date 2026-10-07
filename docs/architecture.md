@@ -332,3 +332,33 @@ The script checks that:
 - every public header compiles on its own.
 
 A new rule should come with a new check in the script.
+
+## Portability
+
+CI builds with the oldest compilers `CMakeLists.txt` accepts (GCC 13,
+Clang 18). Code that newer compilers accept can still fail there:
+
+- No `default(none)` on an OpenMP region that calls `error_check::*` (or
+  anything else with a `std::source_location` default argument) directly.
+  GCC < 14 then asks for hidden `source_location` statics in the data
+  clauses. clang-tidy's `openmp-use-default-none` is off for this reason.
+- A variable must not appear in both `shared(...)` and `reduction(...)`.
+- A lambda must not capture a structured binding (Clang 18 with OpenMP
+  rejects it). Bind a named variable first.
+- Code under `#if defined(__AVX2__)` / `__AVX512F__` is not compiled on
+  arm64. Do not add `const` to a variable that such a branch writes, and do
+  not trust a local arm64 build for those branches.
+
+## Static analysis
+
+`.clang-tidy` (root) and `tests/.clang-tidy` (inherits it, relaxes a few
+test-only checks) define the checks; each file lists why a check is off.
+
+```bash
+run-clang-tidy -p build-dev '/(lib|src|tests|applications)/'
+```
+
+- A suppression names its check and gives a reason, on its own line:
+  `// NOLINTNEXTLINE(<check>): <reason>`. A trailing `// NOLINT` is only for
+  lines clang-format never wraps (`#include`). `.clang-format` never reflows
+  NOLINT comments (`CommentPragmas`).

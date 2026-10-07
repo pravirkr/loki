@@ -1,10 +1,15 @@
-#include "loki/pipelines/ep_freq_sweep.hpp"
+#include "loki/pipelines/ep_freq_sweep.hpp" // NOLINT(misc-include-cleaner): facade header first
 
+#include <cstddef>
 #include <filesystem>
 #include <format>
 #include <memory>
+#include <optional>
+#include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -13,11 +18,11 @@
 #include <spdlog/spdlog.h>
 
 #include "loki/algorithms/ep_regions.hpp"
-#include "loki/algorithms/prune.hpp"
+#include "loki/algorithms/prune_rfi.hpp"
 #include "loki/common/types.hpp"
+#include "loki/search/configs.hpp"
 
 #include "lib/algorithms/prune_engine.hpp"
-#include "lib/common/dispatch.hpp"
 #include "lib/detail/timing.hpp"
 #include "lib/pipelines/ep_freq_sweep_engine.hpp"
 #include "lib/utils/fft_impl.hpp"

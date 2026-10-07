@@ -1,6 +1,8 @@
 #include <cstddef>
 #include <span>
+#include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <pybind11/functional.h>
@@ -13,19 +15,10 @@
 #include "loki/loki.hpp"
 
 #include "bindings/bind.hpp"
-#include "loki_templates.hpp"
 #include "pybind_utils.hpp"
 
 namespace loki {
-using algorithms::EPChunkConfig;
-using algorithms::EPChunkStats;
-using algorithms::EPRegionStats;
-using algorithms::FFARegionStats;
 using detection::MatchedFilter;
-using pipelines::EPFreqSweep;
-using pipelines::FFAFreqSweep;
-using plans::FFAPlanBase;
-using search::FFASearchConfig;
 using search::PulsarSearchConfig;
 
 namespace py = pybind11;
@@ -56,7 +49,7 @@ void bind_scores(py::module_& m) {
                 throw std::runtime_error(
                     "Input and output arrays must be 1-dimensional");
             }
-            if (arr.size() != static_cast<ssize_t>(self.get_nbins())) {
+            if (arr.size() != static_cast<py::ssize_t>(self.get_nbins())) {
                 throw std::runtime_error("Input array size must match nbins");
             }
             const auto nprofiles  = arr.shape(0);
@@ -64,7 +57,7 @@ void bind_scores(py::module_& m) {
 
             auto snr = py::array_t<float, py::array::c_style>(
                 py::array::ShapeContainer(
-                    {nprofiles, static_cast<ssize_t>(ntemplates)}));
+                    {nprofiles, static_cast<py::ssize_t>(ntemplates)}));
             self.compute(std::span<const float>(arr.data(), arr.size()),
                          std::span<float>(snr.mutable_data(), snr.size()));
             return snr;
@@ -72,7 +65,7 @@ void bind_scores(py::module_& m) {
     m_scores.def(
         "generate_box_width_trials",
         [](SizeType nbins, double ducy_max, double wtsp) {
-            auto trials =
+            const auto trials =
                 detection::generate_box_width_trials(nbins, ducy_max, wtsp);
             return as_pyarray_ref(trials);
         },

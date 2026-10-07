@@ -1,12 +1,13 @@
-// NOLINTBEGIN(misc-include-cleaner) -- CPU engine; symbols via private/engine
-// headers.
 #include "lib/core/chebyshev.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <numeric>
 #include <span>
+#include <stdexcept>
 #include <utility>
+#include <vector>
 
 #include "loki/common/types.hpp"
 
@@ -1894,4 +1895,3 @@ generate_bp_poly_chebyshev(std::span<const std::vector<double>> param_arr,
 }
 
 } // namespace loki::core
-// NOLINTEND(misc-include-cleaner)

@@ -138,6 +138,7 @@ protected:
     detection::BoxcarKadaneCache m_boxcar_kadane_cache;
 
     // Constructor for all derived classes
+    // NOLINTNEXTLINE(bugprone-crtp-constructor-accessibility): multi-level CRTP
     BasePruneDPFuncts(std::span<const SizeType> param_grid_count_init,
                       std::span<const double> dparams_init,
                       SizeType nseg_ffa,
@@ -193,6 +194,7 @@ public:
 
 // Intermediate base for Taylor-based methods (common seed implementation)
 template <SupportedFoldType FoldType, typename Derived>
+// NOLINTNEXTLINE(bugprone-crtp-constructor-accessibility): multi-level CRTP
 class BaseTaylorPruneDPFuncts : public BasePruneDPFuncts<FoldType, Derived> {
 protected:
     using Base = BasePruneDPFuncts<FoldType, Derived>;
@@ -211,6 +213,7 @@ public:
 
 // Intermediate base for Chebyshev-based methods (common seed implementation)
 template <SupportedFoldType FoldType, typename Derived>
+// NOLINTNEXTLINE(bugprone-crtp-constructor-accessibility): multi-level CRTP
 class BaseChebyshevPruneDPFuncts : public BasePruneDPFuncts<FoldType, Derived> {
 protected:
     using Base = BasePruneDPFuncts<FoldType, Derived>;

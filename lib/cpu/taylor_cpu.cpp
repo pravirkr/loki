@@ -1,5 +1,3 @@
-// NOLINTBEGIN(misc-include-cleaner) -- CPU engine; symbols via private/engine
-// headers.
 #include "lib/core/taylor.hpp"
 
 #include <algorithm>
@@ -7,6 +5,7 @@
 #include <cstring>
 #include <numeric>
 #include <span>
+#include <stdexcept>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -1747,4 +1746,3 @@ generate_bp_poly_taylor(std::span<const std::vector<double>> param_arr,
 }
 
 } // namespace loki::core
-// NOLINTEND(misc-include-cleaner)

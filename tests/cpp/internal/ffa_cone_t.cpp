@@ -1,14 +1,18 @@
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <optional>
 #include <random>
+#include <span>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 
 #include "loki/algorithms/ffa.hpp"
 #include "loki/algorithms/fold.hpp"
+#include "loki/common/backend.hpp"
 #include "loki/common/types.hpp"
 #include "loki/detection/score.hpp"
 #include "loki/search/configs.hpp"
@@ -45,12 +49,20 @@ namespace {
                                           double f_min,
                                           double f_max) {
     const std::vector<ParamLimit> limits = {{.min = f_min, .max = f_max}};
-    return PulsarSearchConfig(nsamps, tsamp, nbins, /*eta=*/0.5, limits,
-                              /*ducy_max=*/0.2, /*wtsp=*/1.5,
-                              /*use_fourier=*/false, nthreads,
-                              /*max_process_memory_gb=*/4.0,
-                              /*octave_scale=*/2.0, /*nbins_max=*/1024,
-                              /*nbins_min_lossy_bf=*/32, bseg);
+    return {nsamps,
+            tsamp,
+            nbins,
+            /*eta=*/0.5,
+            limits,
+            /*ducy_max=*/0.2,
+            /*wtsp=*/1.5,
+            /*use_fourier=*/false,
+            nthreads,
+            /*max_process_memory_gb=*/4.0,
+            /*octave_scale=*/2.0,
+            /*nbins_max=*/1024,
+            /*nbins_min_lossy_bf=*/32,
+            bseg};
 }
 
 } // namespace
@@ -96,16 +108,17 @@ TEST_CASE("Ragged cone tiles stay bit-exact", "[ffa][cone]") {
     std::mt19937 rng(11);
     std::normal_distribution<float> dist(0.0F, 1.0F);
     std::vector<float> ts_e(kNsamps);
-    std::vector<float> ts_v(kNsamps, 1.0F);
+    const std::vector<float> ts_v(kNsamps, 1.0F);
     for (float& sample : ts_e) {
         sample = dist(rng);
     }
     const auto cfg       = make_cfg(kNsamps, kTsamp, /*nbins=*/32, /*bseg=*/128,
                                     /*nthreads=*/2, 4.0, 12.0);
     const auto reference = run_ffa(cfg, ts_e, ts_v, SizeType{0});
+    // NOLINTNEXTLINE(misc-include-cleaner): POSIX setenv
     REQUIRE(setenv("LOKI_CONE_TILE", "3", 1) == 0);
     const auto ragged = run_ffa(cfg, ts_e, ts_v, std::nullopt);
-    unsetenv("LOKI_CONE_TILE");
+    unsetenv("LOKI_CONE_TILE"); // NOLINT(misc-include-cleaner): POSIX
     REQUIRE(ragged.size() == reference.size());
     CHECK(std::memcmp(ragged.data(), reference.data(),
                       reference.size() * sizeof(float)) == 0);

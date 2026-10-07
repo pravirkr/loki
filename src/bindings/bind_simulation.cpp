@@ -1,6 +1,10 @@
 #include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <optional>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <pybind11/functional.h>
@@ -13,19 +17,9 @@
 #include "loki/loki.hpp"
 
 #include "bindings/bind.hpp"
-#include "loki_templates.hpp"
 #include "pybind_utils.hpp"
 
 namespace loki {
-using algorithms::EPChunkConfig;
-using algorithms::EPChunkStats;
-using algorithms::EPRegionStats;
-using algorithms::FFARegionStats;
-using detection::MatchedFilter;
-using pipelines::EPFreqSweep;
-using pipelines::FFAFreqSweep;
-using plans::FFAPlanBase;
-using search::FFASearchConfig;
 using search::PulsarSearchConfig;
 
 namespace py = pybind11;

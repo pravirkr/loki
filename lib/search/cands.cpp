@@ -1,7 +1,5 @@
 #include "lib/search/cands.hpp"
 
-// NOLINTBEGIN(misc-include-cleaner) -- HDF5/HighFive direct use; umbrella
-// headers via cands.hpp.
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -1173,4 +1171,3 @@ HIGHFIVE_REGISTER_TYPE(loki::search::PruneStats,
                        loki::search::create_compound_prune_stats)
 HIGHFIVE_REGISTER_TYPE(loki::search::PruneTimerStatsPacked,
                        loki::search::create_compound_prune_timer_stats)
-// NOLINTEND(misc-include-cleaner)

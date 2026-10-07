@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cmath>
 #include <numeric>
+#include <span>
 #include <stdexcept>
 #include <vector>
 
@@ -8,6 +9,8 @@
 #include <catch2/generators/catch_generators.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <omp.h>
+
+#include "loki/common/types.hpp"
 
 #include "lib/detail/math.hpp"
 
@@ -25,9 +28,10 @@ namespace {
 
 // Values below were produced by the Python reference (np.pad "symmetric" +
 // bottleneck.move_median / move_mean, window edges cut as in running_filter).
-const std::vector<float> kGoldenInput = {3.0F, 1.0F, 4.0F, 1.0F, 5.0F,
-                                         9.0F, 2.0F, 6.0F, 5.0F, 3.0F,
-                                         5.0F, 8.0F, 9.0F, 7.0F, 9.0F};
+const std::vector<float> kGoldenInput = {
+    3.0F, 1.0F, 4.0F, 1.0F, 5.0F, 9.0F, 2.0F, 6.0F,
+    5.0F, 3.0F, 5.0F, 8.0F, 9.0F, 7.0F, 9.0F,
+};
 
 struct GoldenCase {
     loki::SizeType window;
@@ -35,66 +39,329 @@ struct GoldenCase {
 };
 
 const std::vector<GoldenCase> kGoldenMedian = {
-    {1,
-     {3.0F, 1.0F, 4.0F, 1.0F, 5.0F, 9.0F, 2.0F, 6.0F, 5.0F, 3.0F, 5.0F, 8.0F,
-      9.0F, 7.0F, 9.0F}},
-    {2,
-     {3.0F, 2.0F, 2.5F, 2.5F, 3.0F, 7.0F, 5.5F, 4.0F, 5.5F, 4.0F, 4.0F, 6.5F,
-      8.5F, 8.0F, 8.0F}},
-    {3,
-     {3.0F, 3.0F, 1.0F, 4.0F, 5.0F, 5.0F, 6.0F, 5.0F, 5.0F, 5.0F, 5.0F, 8.0F,
-      8.0F, 9.0F, 9.0F}},
-    {4,
-     {2.0F, 3.0F, 2.0F, 2.5F, 4.5F, 3.5F, 5.5F, 5.5F, 4.0F, 5.0F, 5.0F, 6.5F,
-      7.5F, 8.5F, 9.0F}},
-    {5,
-     {3.0F, 3.0F, 3.0F, 4.0F, 4.0F, 5.0F, 5.0F, 5.0F, 5.0F, 5.0F, 5.0F, 7.0F,
-      8.0F, 9.0F, 9.0F}},
-    {6,
-     {3.0F, 2.0F, 3.0F, 3.5F, 3.0F, 4.5F, 5.0F, 5.0F, 5.0F, 5.0F, 5.5F, 6.0F,
-      7.5F, 8.5F, 8.5F}},
-    {7,
-     {3.0F, 3.0F, 3.0F, 3.0F, 4.0F, 5.0F, 5.0F, 5.0F, 5.0F, 5.0F, 6.0F, 7.0F,
-      8.0F, 8.0F, 9.0F}},
-    {20,
-     {3.5F, 4.0F, 4.0F, 4.0F, 4.5F, 4.5F, 4.5F, 5.0F, 5.0F, 5.5F, 5.5F, 5.5F,
-      5.5F, 6.0F, 6.0F}},
+    {
+        1,
+        {
+            3.0F,
+            1.0F,
+            4.0F,
+            1.0F,
+            5.0F,
+            9.0F,
+            2.0F,
+            6.0F,
+            5.0F,
+            3.0F,
+            5.0F,
+            8.0F,
+            9.0F,
+            7.0F,
+            9.0F,
+        },
+    },
+    {
+        2,
+        {
+            3.0F,
+            2.0F,
+            2.5F,
+            2.5F,
+            3.0F,
+            7.0F,
+            5.5F,
+            4.0F,
+            5.5F,
+            4.0F,
+            4.0F,
+            6.5F,
+            8.5F,
+            8.0F,
+            8.0F,
+        },
+    },
+    {
+        3,
+        {
+            3.0F,
+            3.0F,
+            1.0F,
+            4.0F,
+            5.0F,
+            5.0F,
+            6.0F,
+            5.0F,
+            5.0F,
+            5.0F,
+            5.0F,
+            8.0F,
+            8.0F,
+            9.0F,
+            9.0F,
+        },
+    },
+    {
+        4,
+        {
+            2.0F,
+            3.0F,
+            2.0F,
+            2.5F,
+            4.5F,
+            3.5F,
+            5.5F,
+            5.5F,
+            4.0F,
+            5.0F,
+            5.0F,
+            6.5F,
+            7.5F,
+            8.5F,
+            9.0F,
+        },
+    },
+    {
+        5,
+        {
+            3.0F,
+            3.0F,
+            3.0F,
+            4.0F,
+            4.0F,
+            5.0F,
+            5.0F,
+            5.0F,
+            5.0F,
+            5.0F,
+            5.0F,
+            7.0F,
+            8.0F,
+            9.0F,
+            9.0F,
+        },
+    },
+    {
+        6,
+        {
+            3.0F,
+            2.0F,
+            3.0F,
+            3.5F,
+            3.0F,
+            4.5F,
+            5.0F,
+            5.0F,
+            5.0F,
+            5.0F,
+            5.5F,
+            6.0F,
+            7.5F,
+            8.5F,
+            8.5F,
+        },
+    },
+    {
+        7,
+        {
+            3.0F,
+            3.0F,
+            3.0F,
+            3.0F,
+            4.0F,
+            5.0F,
+            5.0F,
+            5.0F,
+            5.0F,
+            5.0F,
+            6.0F,
+            7.0F,
+            8.0F,
+            8.0F,
+            9.0F,
+        },
+    },
+    {
+        20,
+        {
+            3.5F,
+            4.0F,
+            4.0F,
+            4.0F,
+            4.5F,
+            4.5F,
+            4.5F,
+            5.0F,
+            5.0F,
+            5.5F,
+            5.5F,
+            5.5F,
+            5.5F,
+            6.0F,
+            6.0F,
+        },
+    },
 };
 
 const std::vector<GoldenCase> kGoldenMean = {
-    {1,
-     {3.0F, 1.0F, 4.0F, 1.0F, 5.0F, 9.0F, 2.0F, 6.0F, 5.0F, 3.0F, 5.0F, 8.0F,
-      9.0F, 7.0F, 9.0F}},
-    {2,
-     {3.0F, 2.0F, 2.5F, 2.5F, 3.0F, 7.0F, 5.5F, 4.0F, 5.5F, 4.0F, 4.0F, 6.5F,
-      8.5F, 8.0F, 8.0F}},
-    {3,
-     {2.3333333333333335F, 2.6666666666666665F, 2.0F, 3.333333333333333F, 5.0F,
-      5.333333333333333F, 5.666666666666666F, 4.333333333333333F,
-      4.666666666666666F, 4.333333333333333F, 5.333333333333333F,
-      7.333333333333333F, 8.0F, 8.333333333333332F, 8.333333333333332F}},
-    {4,
-     {2.0F, 2.75F, 2.25F, 2.75F, 4.75F, 4.25F, 5.5F, 5.5F, 4.0F, 4.75F, 5.25F,
-      6.25F, 7.25F, 8.25F, 8.5F}},
-    {5,
-     {2.4F, 2.4000000000000004F, 2.8000000000000003F, 4.0F, 4.2F,
-      4.6000000000000005F, 5.4F, 5.0F, 4.2F, 5.4F, 6.0F, 6.4F,
-      7.6000000000000005F, 8.4F, 8.200000000000001F}},
-    {6,
-     {2.6666666666666665F, 2.1666666666666665F, 2.833333333333333F,
-      3.833333333333333F, 3.6666666666666665F, 4.5F, 4.666666666666666F, 5.0F,
-      5.0F, 4.833333333333333F, 6.0F, 6.166666666666666F, 6.833333333333333F,
-      7.833333333333333F, 8.166666666666666F}},
-    {7,
-     {2.4285714285714284F, 2.571428571428571F, 3.714285714285714F,
-      3.571428571428571F, 4.0F, 4.571428571428571F, 4.428571428571428F, 5.0F,
-      5.428571428571428F, 5.428571428571428F, 6.142857142857142F,
-      6.571428571428571F, 7.142857142857142F, 7.7142857142857135F,
-      8.285714285714285F}},
-    {20,
-     {3.9F, 4.0F, 4.15F, 4.3F, 4.55F, 4.55F, 4.75F, 5.050000000000001F,
-      5.300000000000001F, 5.65F, 5.75F, 5.75F, 5.95F, 6.050000000000001F,
-      6.1000000000000005F}},
+    {
+        1,
+        {
+            3.0F,
+            1.0F,
+            4.0F,
+            1.0F,
+            5.0F,
+            9.0F,
+            2.0F,
+            6.0F,
+            5.0F,
+            3.0F,
+            5.0F,
+            8.0F,
+            9.0F,
+            7.0F,
+            9.0F,
+        },
+    },
+    {
+        2,
+        {
+            3.0F,
+            2.0F,
+            2.5F,
+            2.5F,
+            3.0F,
+            7.0F,
+            5.5F,
+            4.0F,
+            5.5F,
+            4.0F,
+            4.0F,
+            6.5F,
+            8.5F,
+            8.0F,
+            8.0F,
+        },
+    },
+    {
+        3,
+        {
+            2.3333333333333335F,
+            2.6666666666666665F,
+            2.0F,
+            3.333333333333333F,
+            5.0F,
+            5.333333333333333F,
+            5.666666666666666F,
+            4.333333333333333F,
+            4.666666666666666F,
+            4.333333333333333F,
+            5.333333333333333F,
+            7.333333333333333F,
+            8.0F,
+            8.333333333333332F,
+            8.333333333333332F,
+        },
+    },
+    {
+        4,
+        {
+            2.0F,
+            2.75F,
+            2.25F,
+            2.75F,
+            4.75F,
+            4.25F,
+            5.5F,
+            5.5F,
+            4.0F,
+            4.75F,
+            5.25F,
+            6.25F,
+            7.25F,
+            8.25F,
+            8.5F,
+        },
+    },
+    {
+        5,
+        {
+            2.4F,
+            2.4000000000000004F,
+            2.8000000000000003F,
+            4.0F,
+            4.2F,
+            4.6000000000000005F,
+            5.4F,
+            5.0F,
+            4.2F,
+            5.4F,
+            6.0F,
+            6.4F,
+            7.6000000000000005F,
+            8.4F,
+            8.200000000000001F,
+        },
+    },
+    {
+        6,
+        {
+            2.6666666666666665F,
+            2.1666666666666665F,
+            2.833333333333333F,
+            3.833333333333333F,
+            3.6666666666666665F,
+            4.5F,
+            4.666666666666666F,
+            5.0F,
+            5.0F,
+            4.833333333333333F,
+            6.0F,
+            6.166666666666666F,
+            6.833333333333333F,
+            7.833333333333333F,
+            8.166666666666666F,
+        },
+    },
+    {
+        7,
+        {
+            2.4285714285714284F,
+            2.571428571428571F,
+            3.714285714285714F,
+            3.571428571428571F,
+            4.0F,
+            4.571428571428571F,
+            4.428571428571428F,
+            5.0F,
+            5.428571428571428F,
+            5.428571428571428F,
+            6.142857142857142F,
+            6.571428571428571F,
+            7.142857142857142F,
+            7.7142857142857135F,
+            8.285714285714285F,
+        },
+    },
+    {
+        20,
+        {
+            3.9F,
+            4.0F,
+            4.15F,
+            4.3F,
+            4.55F,
+            4.55F,
+            4.75F,
+            5.050000000000001F,
+            5.300000000000001F,
+            5.65F,
+            5.75F,
+            5.75F,
+            5.95F,
+            6.050000000000001F,
+            6.1000000000000005F,
+        },
+    },
 };
 
 constexpr int kManyThreads = 8;
@@ -125,7 +392,7 @@ naive_filter(const std::vector<float>& x, SizeType w, FilterMethod method) {
         }
         if (method == FilterMethod::kMean) {
             double acc = 0.0;
-            for (float v : win) {
+            for (const float v : win) {
                 acc += static_cast<double>(v);
             }
             out[i] = static_cast<float>(acc / static_cast<double>(w));
@@ -166,7 +433,7 @@ SizeType first_mean_mismatch(const std::vector<float>& a,
 
 double max_abs(const std::vector<float>& x) {
     double m = 0.0;
-    for (float v : x) {
+    for (const float v : x) {
         m = std::max(m, std::abs(static_cast<double>(v)));
     }
     return m;
@@ -182,13 +449,15 @@ std::vector<float> run(const std::vector<float>& x,
 }
 
 std::vector<SizeType> window_list(SizeType n) {
-    std::vector<SizeType> ws{1,  2,   3,    4, 5,     10,
-                             11, 101, 1001, n, n + 1, (2 * n) + 3};
+    std::vector<SizeType> ws{
+        1, 2, 3, 4, 5, 10, 11, 101, 1001, n, n + 1, (2 * n) + 3,
+    };
     if (n > 1) {
         ws.push_back(n - 1);
     }
     std::ranges::sort(ws);
-    ws.erase(std::unique(ws.begin(), ws.end()), ws.end());
+    const auto dup = std::ranges::unique(ws);
+    ws.erase(dup.begin(), dup.end());
     return ws;
 }
 
@@ -285,8 +554,13 @@ TEST_CASE("running_filter is independent of the thread count",
 TEST_CASE("subtract_running_filter equals x - running_filter",
           "[math][filter]") {
     for (const SizeType n : {SizeType{37}, SizeType{100000}}) {
-        for (const SizeType w : {SizeType{1}, SizeType{4}, SizeType{11},
-                                 SizeType{300}, SizeType{4001}}) {
+        for (const SizeType w : {
+                 SizeType{1},
+                 SizeType{4},
+                 SizeType{11},
+                 SizeType{300},
+                 SizeType{4001},
+             }) {
             for (const auto method :
                  {FilterMethod::kMedian, FilterMethod::kMean}) {
                 for (const bool heap : {false, true}) {
@@ -392,6 +666,7 @@ TEST_CASE("running_filter_fast follows the exact filter on smooth data",
     std::vector<float> x(n);
     loki::math::PCG32 rng(5);
     for (SizeType i = 0; i < n; ++i) {
+        // NOLINTNEXTLINE(modernize-use-std-numbers): keep the reference literal
         x[i] = std::sin(2.0F * 3.14159265F * static_cast<float>(i) / 20000.0F) +
                (0.1F * ((2.0F * loki::test::uniform01(rng)) - 1.0F));
     }

@@ -1,6 +1,13 @@
-#include "loki/pipelines/ffa_freq_sweep.hpp"
+#include "loki/pipelines/ffa_freq_sweep.hpp" // NOLINT(misc-include-cleaner): facade header first
 
+#include <cstdint>
+#include <filesystem>
+#include <format>
 #include <memory>
+#include <span>
+#include <stdexcept>
+#include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -8,7 +15,6 @@
 #include <omp.h>
 #include <spdlog/spdlog.h>
 
-#include "loki/algorithms/ffa.hpp"
 #include "loki/algorithms/regions.hpp"
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
@@ -16,7 +22,6 @@
 #include "loki/search/configs.hpp"
 
 #include "lib/algorithms/ffa_engine.hpp"
-#include "lib/common/dispatch.hpp"
 #include "lib/detail/error_check.hpp"
 #include "lib/detail/timing.hpp"
 #include "lib/detection/score_engine.hpp"
@@ -324,4 +329,3 @@ make_ffa_freq_sweep_cpu(const search::FFASearchConfig& cfg,
 } // namespace detail
 
 } // namespace loki::pipelines
-// NOLINTEND(misc-include-cleaner)

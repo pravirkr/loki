@@ -102,7 +102,7 @@ public:
 
     // Exact normal inverse survival function using Boost
     static T exact_norm_isf(T minus_logsf) {
-        boost::math::normal_distribution<T> norm_dist;
+        const boost::math::normal_distribution<T> norm_dist;
         return boost::math::quantile(
             boost::math::complement(norm_dist, std::exp(-minus_logsf)));
     }
@@ -113,7 +113,7 @@ public:
             throw std::out_of_range(
                 "Degrees of freedom must be greater than 0");
         }
-        boost::math::chi_squared_distribution<T> chi_sq_dist(
+        const boost::math::chi_squared_distribution<T> chi_sq_dist(
             static_cast<T>(df));
         return -std::log(boost::math::cdf(
             boost::math::complement(chi_sq_dist, chi_sq_score)));

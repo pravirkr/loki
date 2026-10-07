@@ -1,21 +1,28 @@
 #include "loki/detection/thresholds.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cmath>
 #include <cstdint>
 #include <exception>
 #include <filesystem>
 #include <format>
+#include <functional>
+#include <iterator>
 #include <memory>
 #include <mutex>
+#include <numeric>
+#include <optional>
 #include <random>
 #include <span>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
+#include <hdf5.h>
 #include <highfive/highfive.hpp>
 #include <omp.h>
 #include <spdlog/spdlog.h>
@@ -24,7 +31,6 @@
 #include "loki/detection/score.hpp"
 #include "loki/simulation/simulation.hpp"
 
-#include "lib/common/dispatch.hpp"
 #include "lib/detail/error_check.hpp"
 #include "lib/detail/math.hpp"
 #include "lib/detail/progress.hpp"
@@ -494,7 +500,7 @@ struct ThreadLocalBuffers {
 std::unique_ptr<FoldVectorHandle>
 simulate_folds(const FoldVectorHandle& folds_in,
                std::span<const float> profile,
-               math::ThreadLocalNormalRNG const& rng,
+               const math::ThreadLocalNormalRNG& rng,
                DualPoolFoldManager& manager,
                ThreadLocalBuffers& buffers,
                float bias_snr                              = 0.0F,
@@ -551,7 +557,7 @@ simulate_folds(const FoldVectorHandle& folds_in,
 std::pair<std::unique_ptr<FoldVectorHandle>, float>
 simulate_score_prune_fused(const FoldVectorHandle& folds_in,
                            std::span<const float> profile,
-                           math::ThreadLocalNormalRNG const& rng,
+                           const math::ThreadLocalNormalRNG& rng,
                            DualPoolFoldManager& manager,
                            ThreadLocalBuffers& buffers,
                            BoxcarWidthsCache& box_cache,
@@ -741,7 +747,7 @@ transition_state(const State& state_cur,
 FoldsType
 simulate_and_score(const FoldsType& folds_cur,
                    std::span<const float> profile,
-                   math::ThreadLocalNormalRNG& rng,
+                   const math::ThreadLocalNormalRNG& rng,
                    DualPoolFoldManager& manager,
                    ThreadLocalBuffers& buffers,
                    std::span<const SizeType> box_score_widths,
@@ -800,7 +806,7 @@ gen_next_using_thresh(const State& state_cur,
                       float nbranches,
                       float bias_snr,
                       std::span<const float> profile,
-                      math::ThreadLocalNormalRNG& rng,
+                      const math::ThreadLocalNormalRNG& rng,
                       DualPoolFoldManager& manager,
                       ThreadLocalBuffers& buffers,
                       BoxcarWidthsCache& box_cache,
@@ -827,7 +833,7 @@ gen_next_using_surv_prob(const State& state_cur,
                          float bias_snr,
                          std::span<const float> profile,
                          std::span<const SizeType> box_score_widths,
-                         math::ThreadLocalNormalRNG& rng,
+                         const math::ThreadLocalNormalRNG& rng,
                          DualPoolFoldManager& manager,
                          ThreadLocalBuffers& buffers,
                          BoxcarWidthsCache& box_cache,
@@ -909,8 +915,6 @@ HighFive::CompoundType create_compound_state() {
     };
 }
 
-} // namespace
-
 // CPU-specific implementation
 class ThresholdsCpuEngine final : public detail::ThresholdsEngine {
 public:
@@ -984,7 +988,7 @@ public:
             }
         }
     }
-    ~ThresholdsCpuEngine()                                         = default;
+    ~ThresholdsCpuEngine() override                                = default;
     ThresholdsCpuEngine(const ThresholdsCpuEngine&)                = delete;
     ThresholdsCpuEngine& operator=(const ThresholdsCpuEngine&)     = delete;
     ThresholdsCpuEngine(ThresholdsCpuEngine&&) noexcept            = delete;
@@ -1384,12 +1388,7 @@ private:
         // Local stats for this segment
         search::TimerStats segment_stats(m_nthreads);
 
-#pragma omp parallel num_threads(m_nthreads) default(none)                     \
-    shared(m_states, m_folds_current, m_folds_next, m_thresholds,              \
-               m_branching_pattern, m_bias_snr, m_profile, m_rng, m_manager,   \
-               m_box_score_widths, m_probs, m_ntrials, istage, thres_neigh,    \
-               beam_idx_cur, beam_idx_prev, stage_offset_prev,                 \
-               stage_offset_cur, segment_stats)
+#pragma omp parallel num_threads(m_nthreads)
         {
             // Not thread_local: it would keep an earlier scheme's sizes
             auto buffers_ptr =
@@ -1466,11 +1465,7 @@ private:
         const auto n_beam            = beam_idx_prev.size();
         const auto n_work            = n_beam * m_nprobs;
 
-#pragma omp parallel num_threads(m_nthreads) default(none)                     \
-    shared(m_states, m_folds_current, m_profile, m_rng, m_manager,             \
-               m_box_score_widths, m_bias_snr, m_ntrials, m_nprobs,            \
-               beam_idx_prev, stage_offset_prev, segment_stats, sim_folds,     \
-               n_work)
+#pragma omp parallel num_threads(m_nthreads)
         {
             // Not thread_local: it would keep an earlier scheme's sizes
             auto buffers_ptr =
@@ -1513,10 +1508,7 @@ private:
         const auto sim_folds =
             pre_simulate_stage_folds(beam_idx_prev, istage, segment_stats);
 
-#pragma omp parallel num_threads(m_nthreads) default(none)                     \
-    shared(m_states, m_folds_next, m_thresholds, m_branching_pattern, m_probs, \
-               istage, thres_neigh, beam_idx_cur, beam_idx_prev,               \
-               stage_offset_prev, stage_offset_cur, segment_stats, sim_folds)
+#pragma omp parallel num_threads(m_nthreads)
         {
             auto& thread_timers = segment_stats.get_thread_local();
 #pragma omp for schedule(dynamic)
@@ -1572,6 +1564,8 @@ private:
         m_timer_stats.merge(segment_stats);
     }
 }; // End ThresholdsCpuEngine definition
+
+} // namespace
 
 namespace detail {
 std::unique_ptr<ThresholdsEngine>
@@ -1629,7 +1623,7 @@ std::vector<State> evaluate_scheme(std::span<const float> thresholds,
     std::vector<FoldsType> folds_current(1);
     std::vector<FoldsType> folds_next(1);
 
-    math::ThreadLocalNormalRNG rng(std::random_device{}());
+    const math::ThreadLocalNormalRNG rng(std::random_device{}());
     // Create initial fold vectors
     auto folds_h0_init = manager->allocate(ntrials);
     auto folds_h1_init = manager->allocate(ntrials);
@@ -1714,7 +1708,7 @@ std::vector<State> determine_scheme(std::span<const float> survive_probs,
     std::vector<FoldsType> folds_current(1);
     std::vector<FoldsType> folds_next(1);
 
-    math::ThreadLocalNormalRNG rng(std::random_device{}());
+    const math::ThreadLocalNormalRNG rng(std::random_device{}());
     // Create initial fold vectors
     auto folds_h0_init = manager->allocate(ntrials);
     auto folds_h1_init = manager->allocate(ntrials);
@@ -1771,4 +1765,3 @@ std::vector<State> determine_scheme(std::span<const float> survive_probs,
 
 HIGHFIVE_REGISTER_TYPE(loki::detection::State,
                        loki::detection::create_compound_state)
-// NOLINTEND(misc-include-cleaner)

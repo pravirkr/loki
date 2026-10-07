@@ -1,5 +1,7 @@
 #include "loki/common/backend.hpp"
 
+#include <stdexcept>
+
 #include <catch2/catch_test_macros.hpp>
 
 TEST_CASE("Backend utilities", "[backend]") {
@@ -34,15 +36,15 @@ TEST_CASE("Backend utilities", "[backend]") {
 
     SECTION("DeviceSpan operations") {
         int dummy = 42;
-        loki::Device dev{.backend = loki::Backend::kCPU, .id = 0};
-        loki::DeviceSpan<int> span(&dummy, 1, dev);
+        const loki::Device dev{.backend = loki::Backend::kCPU, .id = 0};
+        const loki::DeviceSpan<int> span(&dummy, 1, dev);
 
         REQUIRE_FALSE(span.empty());
         REQUIRE(span.size() == 1);
         REQUIRE(span.size_bytes() == sizeof(int));
         REQUIRE(span.data() == &dummy);
 
-        loki::DeviceSpan<const int> const_span = span;
+        const loki::DeviceSpan<const int> const_span = span;
         REQUIRE(const_span.data() == &dummy);
         REQUIRE(const_span.size() == 1);
     }

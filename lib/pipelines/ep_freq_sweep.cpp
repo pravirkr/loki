@@ -29,13 +29,13 @@ std::unique_ptr<detail::EPFreqSweepEngine> make_ep_freq_sweep_engine(
     const algorithms::PruneRFIConfig& rfi_config,
     const std::optional<std::filesystem::path>& plan_cache_file,
     std::optional<SizeType> n_runs,
-    std::optional<std::vector<SizeType>> ref_segs,
+    const std::optional<std::vector<SizeType>>& ref_segs,
     Exec exec) {
     loki::detail::warn_ignored_nthreads(exec, "EPFreqSweep");
     if (exec.backend == Backend::kCPU) {
         return detail::make_ep_freq_sweep_cpu(
             cfg, show_progress, min_pd, poly_basis, ref_ducy, rfi_config,
-            plan_cache_file, n_runs, std::move(ref_segs));
+            plan_cache_file, n_runs, ref_segs);
     }
 #ifdef LOKI_ENABLE_GPU
     if (exec.backend == loki::detail::kGPUBackend) {
@@ -63,19 +63,19 @@ EPFreqSweep::EPFreqSweep(
     const algorithms::PruneRFIConfig& rfi_config,
     const std::optional<std::filesystem::path>& plan_cache_file,
     std::optional<SizeType> n_runs,
+    // NOLINTNEXTLINE(performance-unnecessary-value-param): public signature
     std::optional<std::vector<SizeType>> ref_segs,
     Exec exec)
-    : m_impl(
-          std::make_unique<Impl>(make_ep_freq_sweep_engine(cfg,
-                                                           show_progress,
-                                                           min_pd,
-                                                           poly_basis,
-                                                           ref_ducy,
-                                                           rfi_config,
-                                                           plan_cache_file,
-                                                           n_runs,
-                                                           std::move(ref_segs),
-                                                           exec))) {}
+    : m_impl(std::make_unique<Impl>(make_ep_freq_sweep_engine(cfg,
+                                                              show_progress,
+                                                              min_pd,
+                                                              poly_basis,
+                                                              ref_ducy,
+                                                              rfi_config,
+                                                              plan_cache_file,
+                                                              n_runs,
+                                                              ref_segs,
+                                                              exec))) {}
 
 EPFreqSweep::~EPFreqSweep()                                       = default;
 EPFreqSweep::EPFreqSweep(EPFreqSweep&& other) noexcept            = default;

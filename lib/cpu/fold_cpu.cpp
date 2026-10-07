@@ -1,10 +1,17 @@
-#include "loki/algorithms/fold.hpp"
+#include "loki/algorithms/fold.hpp" // NOLINT(misc-include-cleaner): facade header first
 
 #include <algorithm>
+#include <cstdint>
 #include <limits>
+#include <memory>
+#include <span>
+#include <stdexcept>
+#include <vector>
 
 #include <omp.h>
 
+#include "loki/common/backend.hpp"
+#include "loki/common/coord.hpp"
 #include "loki/common/types.hpp"
 
 #include "lib/algorithms/fold_engine.hpp"
@@ -14,6 +21,8 @@
 #include "lib/detail/psr_utils.hpp"
 
 namespace loki::algorithms {
+
+namespace {
 
 template <SupportedFoldType FoldType>
 class BruteFoldCpuEngine : public detail::BruteFoldEngine<FoldType> {
@@ -189,9 +198,7 @@ private:
             "BruteFold segment length does not fit in a phase-run index");
         m_run_offsets.assign(m_nfreqs + 1, 0);
         std::vector<SizeType> counts(m_nfreqs, 0);
-#pragma omp parallel for schedule(static)                                      \
-    num_threads(m_nthreads) default(none)                                      \
-    shared(m_segment_len, m_tsamp, m_t_ref, m_freq_arr, m_nbins, counts)
+#pragma omp parallel for schedule(static) num_threads(m_nthreads)
         for (SizeType ifreq = 0; ifreq < m_nfreqs; ++ifreq) {
             uint32_t prev_bin = std::numeric_limits<uint32_t>::max();
             SizeType nruns    = 0;
@@ -211,10 +218,7 @@ private:
             m_run_offsets[ifreq + 1] = m_run_offsets[ifreq] + counts[ifreq];
         }
         m_runs.resize(m_run_offsets.back());
-#pragma omp parallel for schedule(static)                                      \
-    num_threads(m_nthreads) default(none)                                      \
-    shared(m_segment_len, m_tsamp, m_t_ref, m_freq_arr, m_nbins, m_runs,       \
-               m_run_offsets, counts)
+#pragma omp parallel for schedule(static) num_threads(m_nthreads)
         for (SizeType ifreq = 0; ifreq < m_nfreqs; ++ifreq) {
             coord::PhaseRun* out = m_runs.data() + m_run_offsets[ifreq];
             uint32_t prev_bin    = std::numeric_limits<uint32_t>::max();
@@ -248,6 +252,8 @@ private:
 
 }; // End BruteFoldCpuEngine definition
 
+} // namespace
+
 namespace detail {
 
 template <SupportedFoldType FoldType>
@@ -273,4 +279,3 @@ detail::make_brute_fold_cpu<ComplexType>(
     std::span<const double>, SizeType, SizeType, SizeType, double, double, int);
 
 } // namespace loki::algorithms
-// NOLINTEND(misc-include-cleaner)

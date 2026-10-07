@@ -3,13 +3,17 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <span>
+#include <stdexcept>
+#include <string_view>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 
 #include "loki/common/backend.hpp"
+#include "loki/common/types.hpp"
 #include "loki/detection/thresholds.hpp"
 
 namespace loki {
@@ -24,7 +28,8 @@ const std::vector<float> kBranching = {
     3.0F, 2.80514208F, 3.20839363F, 1.0F,        1.0F,
     3.0F, 1.0F,        1.0F,        2.25575101F, 1.99490102F,
     3.0F, 1.0F,        3.0F,        1.0F,        3.0F,
-    1.0F, 1.0F,        2.80514208F, 1.06946454F};
+    1.0F, 1.0F,        2.80514208F, 1.06946454F,
+};
 
 constexpr SizeType kNtrials     = 256;
 constexpr SizeType kNprobs      = 12;
@@ -38,9 +43,9 @@ make_scheme(std::string_view mode,
             SizeType batch_size              = 256,
             float beam_width                 = 1.5F,
             std::span<const float> branching = kBranching) {
-    return DynamicThresholdScheme(
-        branching, 0.1F, nbins, kNtrials, kNprobs, 0.05F, 8.0F, kNthresholds,
-        0.3F, 1.2F, beam_width, 1, mode, seed, batch_size, Exec::cuda());
+    return {branching, 0.1F,         nbins,      kNtrials,    kNprobs,    0.05F,
+            8.0F,      kNthresholds, 0.3F,       1.2F,        beam_width, 1,
+            mode,      seed,         batch_size, Exec::cuda()};
 }
 
 // Field-wise bitwise equality (ignores the struct's padding bytes).
@@ -118,7 +123,7 @@ TEST_CASE("CUDA DynamicThresholdScheme states are self-consistent",
     REQUIRE(states.size() == nst * nthr * nprobs);
 
     const auto at = [&](SizeType s, SizeType t, SizeType p) -> const State& {
-        return states[(s * nthr + t) * nprobs + p];
+        return states[(((s * nthr) + t) * nprobs) + p];
     };
     for (SizeType s = 0; s < nst; ++s) {
         SizeType nonempty = 0;
@@ -144,7 +149,9 @@ TEST_CASE("CUDA DynamicThresholdScheme states are self-consistent",
                     const float scaled = succ * static_cast<float>(kNtrials);
                     REQUIRE(scaled == std::round(scaled));
                 }
-                REQUIRE(std::isfinite(st.complexity_cumul));
+                // Finite and set (std::isfinite is UB under -ffast-math).
+                REQUIRE(st.complexity_cumul <
+                        std::numeric_limits<float>::max());
                 REQUIRE(st.cost == st.complexity_cumul / st.success_h1_cumul);
                 // The back-pointer names a non-empty parent whose cumulative
                 // detection probability chains into this state.
@@ -209,7 +216,10 @@ TEST_CASE("CUDA DynamicThresholdScheme rejects invalid input",
     const std::vector<float> one_stage = {2.0F};
     const std::vector<float> negative  = {2.0F, -1.0F, 2.0F};
     const std::vector<float> nan_value = {
-        2.0F, std::numeric_limits<float>::quiet_NaN(), 2.0F};
+        2.0F,
+        std::numeric_limits<float>::quiet_NaN(),
+        2.0F,
+    };
     const std::span<const float> ok(kBranching);
 
     REQUIRE_THROWS_AS(

@@ -1,8 +1,12 @@
 #include "lib/search/ffa_sweep_candidates.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
+#include <iterator>
+#include <optional>
 #include <random>
 #include <span>
 #include <vector>
@@ -102,7 +106,8 @@ WrittenResults run_sweep(SizeType capacity,
                 flush_candidates(buf, table, writer, scratch, width_scratch,
                                  nbins_scratch, kNParams);
             }
-            buf.push(static_cast<float>(s) + (100.0F * region),
+            buf.push(static_cast<float>(s) +
+                         (100.0F * static_cast<float>(region)),
                      static_cast<uint32_t>(s), static_cast<uint32_t>(region));
         }
     }
@@ -139,7 +144,8 @@ WrittenResults run_sweep_bulk(SizeType capacity,
         std::vector<float> scores(n_passing);
         std::vector<uint32_t> indices(n_passing);
         for (SizeType s = 0; s < n_passing; ++s) {
-            scores[s]  = static_cast<float>(s) + (100.0F * region);
+            scores[s] =
+                static_cast<float>(s) + (100.0F * static_cast<float>(region));
             indices[s] = static_cast<uint32_t>(s);
         }
 
@@ -276,8 +282,8 @@ TEST_CASE("A real multi-chunk sweep is unaffected by accumulator capacity",
         }
     }
 
-    auto run = [&](SizeType max_passing_candidates,
-                   const std::string& prefix) -> WrittenResults {
+    const auto run = [&](SizeType max_passing_candidates,
+                         const std::string& prefix) -> WrittenResults {
         const PulsarSearchConfig cfg(
             kNsamps, kTsamp, /*nbins=*/64, /*eta=*/1.0, limits,
             /*ducy_max=*/0.2, /*wtsp=*/1.5, /*use_fourier=*/true,

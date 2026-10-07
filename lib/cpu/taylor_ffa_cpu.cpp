@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <span>
+#include <stdexcept>
 #include <tuple>
 #include <vector>
 
@@ -258,7 +260,7 @@ void ffa_taylor_resolve_freq_batch(SizeType n_freqs_cur,
                                    double tseg_brute,
                                    SizeType nbins,
                                    int nthreads) {
-    nthreads = std::max(nthreads, 1);
+    nthreads = std::clamp(nthreads, 1, omp_get_max_threads());
     error_check::check_equal(coords.size(), n_freqs_cur,
                              "coords size mismatch");
 
@@ -266,8 +268,7 @@ void ffa_taylor_resolve_freq_batch(SizeType n_freqs_cur,
         std::ldexp(tseg_brute, static_cast<int>(ffa_level - 1));
 
     // Calculate relative phases and flattened parameter indices
-#pragma omp parallel for schedule(static) num_threads(nthreads) default(none)  \
-    shared(coords, n_freqs_cur, lim_freq, n_freqs_prev, delta_t, nbins)
+#pragma omp parallel for schedule(static) num_threads(nthreads)
     for (SizeType i = 0; i < n_freqs_cur; ++i) {
         const double f_cur =
             psr_utils::get_param_val_at_idx(lim_freq, n_freqs_cur, i);
@@ -321,4 +322,3 @@ void ffa_taylor_resolve_poly_batch(
 }
 
 } // namespace loki::core
-// NOLINTEND(misc-include-cleaner)

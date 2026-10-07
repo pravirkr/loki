@@ -2,7 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
-#include <random>
+#include <numbers>
 #include <vector>
 
 #include <catch2/catch_approx.hpp>
@@ -30,7 +30,8 @@ TEST_CASE("BruteFold CPU executes time and complex domain folding",
     std::vector<float> ts_e(kNsamps);
     std::vector<float> ts_v(kNsamps, 1.0F);
     for (SizeType i = 0; i < kNsamps; ++i) {
-        ts_e[i] = std::sin(2.0 * M_PI * 5.0 * static_cast<double>(i) * kTsamp);
+        ts_e[i] = static_cast<float>(std::sin(2.0 * std::numbers::pi * 5.0 *
+                                              static_cast<double>(i) * kTsamp));
     }
 
     SECTION("Time domain float") {
@@ -44,7 +45,7 @@ TEST_CASE("BruteFold CPU executes time and complex domain folding",
         bf.execute(ts_e, ts_v, fold);
 
         bool has_nonzero = false;
-        for (float v : fold) {
+        for (const float v : fold) {
             if (std::abs(v) > 1e-4F) {
                 has_nonzero = true;
                 break;
@@ -95,7 +96,8 @@ TEST_CASE("BruteFold CUDA parity with CPU", "[fold][cuda]") {
     std::vector<float> ts_e(kNsamps);
     std::vector<float> ts_v(kNsamps, 1.0F);
     for (SizeType i = 0; i < kNsamps; ++i) {
-        ts_e[i] = std::sin(2.0 * M_PI * 5.0 * static_cast<double>(i) * kTsamp);
+        ts_e[i] = static_cast<float>(std::sin(2.0 * std::numbers::pi * 5.0 *
+                                              static_cast<double>(i) * kTsamp));
     }
 
     SECTION("Time domain parity") {

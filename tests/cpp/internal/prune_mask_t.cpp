@@ -44,6 +44,7 @@ bool cell_in_windows(SizeType ia,
     // resolve() snaps a value v to get_nearest_idx_analytical(v); a cell is
     // covered iff some v in the window snaps to it. Check the cell's value
     // range against the window using the same snapping on the bounds.
+    // NOLINTNEXTLINE(readability-use-anyofallof): the loop reads clearer
     for (const auto& w : windows) {
         if (w.f_hi < kLimFreq.min || w.f_lo > kLimFreq.max ||
             w.a_hi < kLimAccel.min || w.a_lo > kLimAccel.max) {
@@ -118,7 +119,11 @@ TEST_CASE("GridMask: 2D window and clipping", "[prune_mask]") {
     auto mask = make_mask();
     // Partially outside the grid in both dimensions
     const ParamWindow w{
-        .f_lo = 195.0, .f_hi = 250.0, .a_lo = 80.0, .a_hi = 500.0};
+        .f_lo = 195.0,
+        .f_hi = 250.0,
+        .a_lo = 80.0,
+        .a_hi = 500.0,
+    };
     mask.add_window(w);
     const std::vector<ParamWindow> windows{w};
     REQUIRE(mask.count() == brute_count(windows));
@@ -136,11 +141,17 @@ TEST_CASE("GridMask: disjoint windows are ignored", "[prune_mask]") {
     mask.add_window(ParamWindow{.f_lo = 10.0, .f_hi = 50.0});
     mask.add_window(ParamWindow{.f_lo = 300.0, .f_hi = 400.0});
     mask.add_window(ParamWindow{
-        .f_lo = 150.0, .f_hi = 151.0, .a_lo = 200.0, .a_hi = 300.0});
-    mask.add_window(ParamWindow{.f_lo = 150.0,
-                                .f_hi = 151.0,
-                                .a_lo = std::numeric_limits<double>::lowest(),
-                                .a_hi = -150.0});
+        .f_lo = 150.0,
+        .f_hi = 151.0,
+        .a_lo = 200.0,
+        .a_hi = 300.0,
+    });
+    mask.add_window(ParamWindow{
+        .f_lo = 150.0,
+        .f_hi = 151.0,
+        .a_lo = std::numeric_limits<double>::lowest(),
+        .a_hi = -150.0,
+    });
     REQUIRE(mask.empty());
     REQUIRE(mask.get_n_windows() == 0);
 }
@@ -178,7 +189,11 @@ TEST_CASE("GridMask: count is idempotent for overlapping windows",
 TEST_CASE("GridMask: harmonics expand the window", "[prune_mask]") {
     auto mask = make_mask();
     const ParamWindow w{
-        .f_lo = 60.0, .f_hi = 61.0, .a_lo = -10.0, .a_hi = 10.0};
+        .f_lo = 60.0,
+        .f_hi = 61.0,
+        .a_lo = -10.0,
+        .a_hi = 10.0,
+    };
     // Fundamental is below the grid; 2nd (120-122) and 3rd (180-183) harmonics
     // are inside, subharmonics (30, 20) are outside.
     mask.add_window(w, 3);

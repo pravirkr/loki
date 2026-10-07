@@ -382,7 +382,7 @@ TEST_CASE("EP-style copy before irfft preserves source spectrum",
 
     FFTWManager manager;
     manager.prepare_exact_plans(std::span<const SizeType>(&n_real, 1));
-    std::copy(spectrum.begin(), spectrum.end(), spectrum_scratch.begin());
+    std::ranges::copy(spectrum, spectrum_scratch.begin());
     manager.irfft_batch(spectrum_scratch, recovered, batch_size, n_real, 1);
 
     REQUIRE_THAT(spectrum, RangeEquals(spectrum_before));

@@ -1,6 +1,7 @@
 #include <cstddef>
-#include <span>
-#include <string>
+#include <memory>
+#include <optional>
+#include <stdexcept>
 #include <vector>
 
 #include <pybind11/functional.h>
@@ -17,21 +18,13 @@
 #include "pybind_utils.hpp"
 
 namespace loki {
-using algorithms::EPChunkConfig;
-using algorithms::EPChunkStats;
-using algorithms::EPRegionStats;
-using algorithms::FFARegionStats;
-using detection::MatchedFilter;
-using pipelines::EPFreqSweep;
-using pipelines::FFAFreqSweep;
-using plans::FFAPlanBase;
 using search::FFASearchConfig;
 using search::PulsarSearchConfig;
 
 namespace py = pybind11;
 
 void bind_configs(py::module_& m) {
-    auto m_configs = m.def_submodule("configs", "Configs submodule");
+    const auto m_configs = m.def_submodule("configs", "Configs submodule");
     PYBIND11_NUMPY_DTYPE(ParamLimit, min, max);
 
     py::class_<FFASearchConfig>(m_configs, "FFASearchConfig")
@@ -56,8 +49,10 @@ void bind_configs(py::module_& m) {
 
                  std::vector<ParamLimit> limits(n_params);
                  for (SizeType i = 0; i < n_params; ++i) {
-                     limits[i] = {.min = *param_limits.data(i, 0),
-                                  .max = *param_limits.data(i, 1)};
+                     limits[i] = {
+                         .min = *param_limits.data(i, 0),
+                         .max = *param_limits.data(i, 1),
+                     };
                  }
                  return std::make_unique<FFASearchConfig>(
                      nsamps, tsamp, nbins, eta, limits, ducy_max, wtsp,
@@ -147,8 +142,10 @@ void bind_configs(py::module_& m) {
 
                      std::vector<ParamLimit> limits(n_params);
                      for (SizeType i = 0; i < n_params; ++i) {
-                         limits[i] = {.min = *param_limits.data(i, 0),
-                                      .max = *param_limits.data(i, 1)};
+                         limits[i] = {
+                             .min = *param_limits.data(i, 0),
+                             .max = *param_limits.data(i, 1),
+                         };
                      }
                      return std::make_unique<PulsarSearchConfig>(
                          nsamps, tsamp, nbins, eta, limits, ducy_max, wtsp,

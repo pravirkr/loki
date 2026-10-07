@@ -2,10 +2,14 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <functional>
 #include <limits>
 #include <numeric>
 #include <span>
+#include <tuple>
 #include <unordered_map>
+#include <utility>
 
 #include <spdlog/spdlog.h>
 
@@ -216,6 +220,7 @@ SizeType WorldTree<FoldType>::get_physical_start_idx() const {
 // Mutation operations
 
 template <SupportedFoldType FoldType>
+// NOLINTNEXTLINE(bugprone-exception-escape): a broken invariant terminates
 void WorldTree<FoldType>::set_size(SizeType size) noexcept {
     m_size     = size;
     m_head     = 0;
@@ -639,6 +644,7 @@ SizeType WorldTree<FoldType>::calculate_space_left() const {
 }
 
 template <SupportedFoldType FoldType>
+// NOLINTNEXTLINE(bugprone-exception-escape): a broken invariant terminates
 float WorldTree<FoldType>::get_prune_threshold(
     std::span<const float> scores_batch,
     std::span<const SizeType> indices_batch,
@@ -801,6 +807,7 @@ void WorldTree<FoldType>::keep(std::span<const uint8_t> keep_mask) {
 // Memory-efficient uniqueness detection
 // Tie-break: keep first occurrence when scores are equal.
 template <SupportedFoldType FoldType>
+// NOLINTNEXTLINE(bugprone-exception-escape): a broken invariant terminates
 void WorldTree<FoldType>::compute_uniqueness_mask_in_scratch() noexcept {
     if (m_size == 0) {
         return;
@@ -868,4 +875,3 @@ template void WorldTree<float>::copy_from_circular<float>(
 template void WorldTree<ComplexType>::copy_from_circular<float>(
     const float*, SizeType, SizeType, SizeType, float*) const noexcept;
 } // namespace loki::memory
-// NOLINTEND(misc-include-cleaner)

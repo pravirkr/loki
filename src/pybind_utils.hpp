@@ -27,11 +27,11 @@ using PyArrayT = py::array_t<T, py::array::c_style | py::array::forcecast>;
 // source: https://github.com/pybind/pybind11/issues/1042#issuecomment-642215028
 template <typename Sequence>
 inline py::array_t<typename Sequence::value_type> as_pyarray(Sequence&& seq) {
-    auto size = seq.size();
-    auto data = seq.data();
+    const auto size = seq.size();
+    auto data       = seq.data();
     std::unique_ptr<Sequence> seq_ptr =
         std::make_unique<Sequence>(std::forward<Sequence>(seq));
-    auto capsule = py::capsule(seq_ptr.get(), [](void* p) {
+    const auto capsule = py::capsule(seq_ptr.get(), [](void* p) {
         std::unique_ptr<Sequence>(reinterpret_cast<Sequence*>(p)); // NOLINT
     });
     seq_ptr.release();
@@ -42,7 +42,7 @@ inline py::array_t<typename Sequence::value_type> as_pyarray(Sequence&& seq) {
 template <typename Sequence>
 inline py::array_t<typename Sequence::value_type>
 as_pyarray_ref(const Sequence& seq) {
-    auto size        = seq.size();
+    const auto size  = seq.size();
     const auto* data = seq.data();
     return py::array_t<typename Sequence::value_type>(size, data);
 }
@@ -51,14 +51,14 @@ template <typename T>
 inline std::span<const T> to_span(const PyArrayT<T>& arr) {
     static_assert(!std::is_pointer_v<T>, "T must not be a pointer type");
     static_assert(!std::is_reference_v<T>, "T must not be a reference type");
-    py::buffer_info buffer = arr.request();
+    const py::buffer_info buffer = arr.request();
     return std::span<const T>(static_cast<const T*>(buffer.ptr), buffer.size);
 }
 
 template <typename T> inline std::span<T> to_span(PyArrayT<T>& arr) {
     static_assert(!std::is_pointer_v<T>, "T must not be a pointer type");
     static_assert(!std::is_reference_v<T>, "T must not be a reference type");
-    py::buffer_info buffer = arr.request();
+    const py::buffer_info buffer = arr.request();
     return std::span<T>(static_cast<T*>(buffer.ptr), buffer.size);
 }
 

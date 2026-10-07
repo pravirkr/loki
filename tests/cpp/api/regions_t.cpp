@@ -133,7 +133,7 @@ TEST_CASE("FFARegionPlanner fails fast with an actionable diagnostic when "
 
     bool threw = false;
     try {
-        FFARegionPlanner<ComplexType> planner(cfg);
+        const FFARegionPlanner<ComplexType> planner(cfg);
     } catch (const std::runtime_error& err) {
         threw                 = true;
         const std::string msg = err.what();
@@ -192,7 +192,7 @@ TEST_CASE("FFARegionPlanner frequency-only search has no drift expansion",
     const PulsarSearchConfig cfg(kNsamps, kTsamp, /*nbins=*/16, /*eta=*/1.0,
                                  param_limits, 0.2, 1.5, true, 1, 8.0);
 
-    FFARegionPlanner<ComplexType> planner(cfg);
+    const FFARegionPlanner<ComplexType> planner(cfg);
     REQUIRE(planner.get_nregions() >= 1);
     for (const auto& chunk_cfg : planner.get_cfgs()) {
         const auto freq = chunk_cfg.get_param_limits().back();
@@ -218,7 +218,7 @@ TEST_CASE("FFARegionPlanner splits a band when the full range exceeds memory",
     const auto bands =
         generate_ffa_regions(1.0 / 80.0, 1.0 / 40.0, kTsamp, 32, 0.25, 2.0);
     REQUIRE(bands.size() == 1);
-    FFARegionPlanner<ComplexType> planner(cfg);
+    const FFARegionPlanner<ComplexType> planner(cfg);
     REQUIRE(planner.get_nregions() > 1);
     const double k_input_gb =
         (static_cast<double>(kNsamps) * 2.0 * sizeof(float)) /

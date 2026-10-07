@@ -1,6 +1,5 @@
-#include <bit>
-#include <cstdint>
 #include <cstring>
+#include <optional>
 #include <random>
 #include <vector>
 
@@ -54,8 +53,13 @@ TEST_CASE("Fused brute fold + FFA levels is bit-exact with the plain path",
                 /*max_process_memory_gb=*/4.0, /*octave_scale=*/2.0,
                 /*nbins_max=*/1024, /*nbins_min_lossy_bf=*/32, bseg_brute);
             const auto reference = run_ffa(cfg, ts_e, ts_v, SizeType{0});
-            for (const SizeType k : {SizeType{1}, SizeType{2}, SizeType{3},
-                                     SizeType{4}, SizeType{5}}) {
+            for (const SizeType k : {
+                     SizeType{1},
+                     SizeType{2},
+                     SizeType{3},
+                     SizeType{4},
+                     SizeType{5},
+                 }) {
                 const auto fused = run_ffa(cfg, ts_e, ts_v, k);
                 REQUIRE(fused.size() == reference.size());
                 const bool equal =

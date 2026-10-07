@@ -1,13 +1,18 @@
 #include "loki/io/timeseries.hpp"
 
 #include <cmath>
+#include <cstddef>
 #include <filesystem>
 #include <limits>
 #include <random>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
+
+#include "loki/common/types.hpp"
 
 using Catch::Matchers::WithinAbs;
 
@@ -28,6 +33,8 @@ public:
 
     TempDir(const TempDir&)            = delete;
     TempDir& operator=(const TempDir&) = delete;
+    TempDir(TempDir&&)                 = delete;
+    TempDir& operator=(TempDir&&)      = delete;
 
     [[nodiscard]] const std::filesystem::path& path() const { return m_path; }
 
@@ -62,9 +69,9 @@ TEST_CASE("timeseries stores intensity, variance, and sample interval",
 
 TEST_CASE("timeseries leaves the payload unchanged when preprocessing is off",
           "[io]") {
-    TempDir dir;
+    const TempDir dir;
     std::vector<float> samples{1.5F, -2.0F, 3.25F, 0.0F};
-    std::vector<float> variance(samples.size(), 4.0F);
+    const std::vector<float> variance(samples.size(), 4.0F);
     const loki::io::TimeSeries series(samples, variance, 6.4e-5);
     const auto path = dir.path() / "raw.tim";
     series.write(path);
@@ -81,7 +88,7 @@ TEST_CASE("timeseries leaves the payload unchanged when preprocessing is off",
 }
 
 TEST_CASE("timeseries preprocessing removes a constant offset", "[io]") {
-    TempDir dir;
+    const TempDir dir;
     const std::vector<float> samples(64, 7.0F);
     const std::vector<float> variance(samples.size(), 1.0F);
     const loki::io::TimeSeries series(samples, variance, 0.05);
@@ -102,7 +109,7 @@ TEST_CASE("timeseries preprocessing removes a constant offset", "[io]") {
 }
 
 TEST_CASE("timeseries z-score scales a varying series", "[io]") {
-    TempDir dir;
+    const TempDir dir;
     std::vector<float> samples(32);
     for (std::size_t i = 0; i < samples.size(); ++i) {
         samples[i] = static_cast<float>(i);
@@ -121,11 +128,11 @@ TEST_CASE("timeseries z-score scales a varying series", "[io]") {
 
     double mean  = 0.0;
     double accum = 0.0;
-    for (float sample : loaded.get_ts_e()) {
+    for (const float sample : loaded.get_ts_e()) {
         mean += static_cast<double>(sample);
     }
     mean /= static_cast<double>(loaded.get_nsamps());
-    for (float sample : loaded.get_ts_e()) {
+    for (const float sample : loaded.get_ts_e()) {
         const double delta = static_cast<double>(sample) - mean;
         accum += delta * delta;
     }

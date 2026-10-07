@@ -2,10 +2,18 @@
 
 #include <bit>
 #include <cstdint>
+#include <limits>
+#include <optional>
+#include <span>
+#include <stdexcept>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
+
+#include "loki/common/backend.hpp"
+#include "loki/common/types.hpp"
 
 using Catch::Matchers::WithinRel;
 
@@ -23,7 +31,7 @@ TEST_CASE("DynamicThresholdScheme getters", "[thresholds]") {
     constexpr SizeType kNtrials                = 64;
     constexpr SizeType kNprobs                 = 4;
     constexpr SizeType kNthresholds            = 20;
-    detection::DynamicThresholdScheme dyn_scheme(
+    const detection::DynamicThresholdScheme dyn_scheme(
         branching_pattern, 0.5F, kNbins, kNtrials, kNprobs, 0.1F, 6.0F,
         kNthresholds, 0.3F, 1.0F, 0.7F, 0, "legacy", /*seed=*/std::nullopt,
         /*batch_size=*/256, loki::Exec::cpu(1));
@@ -114,7 +122,8 @@ TEST_CASE("evaluate_scheme and determine_scheme start from the initial state",
         const std::vector<float> thresholds = {
             std::numeric_limits<float>::lowest(),
             std::numeric_limits<float>::max(),
-            std::numeric_limits<float>::lowest()};
+            std::numeric_limits<float>::lowest(),
+        };
         const auto states = detection::evaluate_scheme(
             thresholds, branching_pattern, kRefDucy, kNbins, kNtrials);
         REQUIRE_FALSE(states[1].is_empty);
@@ -140,14 +149,14 @@ bool same_state_bits(const detection::State& a, const detection::State& b) {
 TEST_CASE("DynamicThresholdScheme evaluate does not depend on thread count",
           "[thresholds]") {
     const std::vector<float> branching(8, 2.0F);
-    auto make = [&](int nthreads) {
+    const auto make = [&](int nthreads) {
         return detection::DynamicThresholdScheme(
             branching, 0.1F, 32, 64, 6, 0.05F, 8.0F, 24, 0.3F, 1.0F, 1.2F, 1,
             "improved", /*seed=*/17, /*batch_size=*/256,
             loki::Exec::cpu(nthreads));
     };
-    auto one   = make(1);
-    auto eight = make(8);
+    auto one         = make(1);
+    const auto eight = make(8);
     one.run(4);
     const auto path = one.get_best_path_thresholds();
     REQUIRE(path.size() == branching.size());

@@ -54,8 +54,10 @@ enum class Pattern : std::uint8_t {
 inline constexpr std::array<Pattern, 9> kAllPatterns = {
     Pattern::kRandom,       Pattern::kSorted,     Pattern::kReversed,
     Pattern::kConstant,     Pattern::kDuplicates, Pattern::kSignedZeros,
-    Pattern::kDynamicRange, Pattern::kSteps,      Pattern::kImpulses};
+    Pattern::kDynamicRange, Pattern::kSteps,      Pattern::kImpulses,
+};
 
+// NOLINTNEXTLINE(modernize-use-string-view): callers concatenate the result
 inline std::string pattern_name(Pattern p) {
     switch (p) {
     case Pattern::kRandom:
@@ -104,6 +106,7 @@ inline std::vector<float> make_series(Pattern p, SizeType n, uint64_t seed) {
             break;
         case Pattern::kSignedZeros: {
             const auto k = static_cast<int>(u * 4.0F);
+            // NOLINTNEXTLINE(readability-avoid-nested-conditional-operator)
             x[i] = k == 0 ? 0.0F : (k == 1 ? -0.0F : (k == 2 ? 1.0F : -1.0F));
             break;
         }

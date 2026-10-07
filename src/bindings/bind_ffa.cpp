@@ -1,7 +1,9 @@
 #include <cstddef>
-#include <span>
+#include <memory>
 #include <string>
-#include <vector>
+#include <string_view>
+#include <tuple>
+#include <utility>
 
 #include <pybind11/functional.h>
 #include <pybind11/iostream.h>
@@ -17,14 +19,7 @@
 #include "pybind_utils.hpp"
 
 namespace loki {
-using algorithms::EPChunkConfig;
-using algorithms::EPChunkStats;
-using algorithms::EPRegionStats;
-using algorithms::FFARegionStats;
-using detection::MatchedFilter;
-using pipelines::EPFreqSweep;
 using pipelines::FFAFreqSweep;
-using plans::FFAPlanBase;
 using search::FFASearchConfig;
 using search::PulsarSearchConfig;
 

@@ -1,6 +1,5 @@
 #include "lib/utils/world_tree.hpp"
 
-#include <complex>
 #include <numeric>
 #include <span>
 #include <vector>

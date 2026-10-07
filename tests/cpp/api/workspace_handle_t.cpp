@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstring>
 #include <filesystem>
 #include <format>
@@ -8,6 +9,7 @@
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <catch2/catch_approx.hpp>
@@ -151,14 +153,16 @@ EPWorkspace<FoldType> make_ep_workspace(const PulsarSearchConfig& cfg,
     const SizeType nbins = std::is_same_v<FoldType, ComplexType>
                                ? cfg.get_nbins_f()
                                : cfg.get_nbins();
-    return {kEPBatchSize,
-            branch_max,
-            kEPMaxSugg,
-            plan.get_ncoords().back(),
-            cfg.get_nparams(),
-            nbins,
-            plan.get_nsegments().back(),
-            exec};
+    return {
+        kEPBatchSize,
+        branch_max,
+        kEPMaxSugg,
+        plan.get_ncoords().back(),
+        cfg.get_nparams(),
+        nbins,
+        plan.get_nsegments().back(),
+        exec,
+    };
 }
 
 struct EPInputs {
@@ -171,7 +175,10 @@ EPInputs make_ep_inputs(const PulsarSearchConfig& cfg) {
     const auto nsegments =
         loki::plans::FFAPlan<float>(cfg).get_nsegments().back();
     return {
-        std::vector<float>(nsegments - 1, 1.5F), {nsegments / 2}, nsegments};
+        std::vector<float>(nsegments - 1, 1.5F),
+        {nsegments / 2},
+        nsegments,
+    };
 }
 
 struct Dataset {
@@ -189,10 +196,10 @@ std::map<std::string, Dataset>
 read_ep_datasets(const std::filesystem::path& path) {
     std::map<std::string, Dataset> out;
     const HighFive::File file(path.string(), HighFive::File::ReadOnly);
-    auto walk = [&](auto&& self, const HighFive::Group& group,
-                    const std::string& prefix) -> void {
+    const auto walk = [&](auto&& self, const HighFive::Group& group,
+                          const std::string& prefix) -> void {
         for (const auto& name : group.listObjectNames()) {
-            const auto full = prefix + "/" + name;
+            const auto full = std::format("{}/{}", prefix, name);
             if (group.getObjectType(name) == HighFive::ObjectType::Group) {
                 self(self, group.getGroup(name), full);
                 continue;
@@ -263,6 +270,7 @@ void check_ep_shared_matches_owned(bool use_fourier, Exec exec) {
     const auto owned_path = run_ep(owned, cfg, in, tag + "_owned");
 
     std::vector<EPWorkspace<FoldType>> workspaces;
+    workspaces.reserve(static_cast<std::size_t>(nthreads));
     for (int i = 0; i < nthreads; ++i) {
         workspaces.push_back(make_ep_workspace<FoldType>(cfg, exec));
     }

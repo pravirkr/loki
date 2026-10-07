@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <numeric>
+#include <stdexcept>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -77,7 +78,7 @@ TEST_CASE("PCG32", "[math]") {
 
 TEST_CASE("ThreadLocalNormalRNG", "[math]") {
     SECTION("Produces finite samples with fixed seed") {
-        loki::math::ThreadLocalNormalRNG rng(12345U);
+        const loki::math::ThreadLocalNormalRNG rng(12345U);
         std::vector<float> samples(128);
         rng.generate(samples, 2.0F, 0.5F);
         REQUIRE(std::ranges::all_of(
@@ -89,7 +90,7 @@ TEST_CASE("ThreadLocalNormalRNG", "[math]") {
     }
 
     SECTION("uniform_index stays within bounds") {
-        loki::math::ThreadLocalNormalRNG rng(99U);
+        const loki::math::ThreadLocalNormalRNG rng(99U);
         for (int i = 0; i < 100; ++i) {
             const auto idx = rng.uniform_index(7);
             REQUIRE(idx <= 7);

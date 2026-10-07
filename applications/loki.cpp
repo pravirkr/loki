@@ -1,11 +1,14 @@
 #include <algorithm>
 #include <bit>
+#include <cstddef>
 #include <cstdint>
 #include <exception>
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <iterator>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -16,10 +19,12 @@
 #include <spdlog/spdlog.h>
 #include <toml++/toml.hpp>
 
+#include "loki/common/backend.hpp"
 #include "loki/common/types.hpp"
 #include "loki/io/timeseries.hpp"
 #include "loki/pipelines/ffa_freq_sweep.hpp"
 #include "loki/search/configs.hpp"
+#include "loki/simulation/modulate.hpp"
 #include "loki/simulation/pulse.hpp"
 
 namespace {
@@ -51,9 +56,9 @@ std::filesystem::path resolve_output(std::filesystem::path path,
     return path;
 }
 
-std::optional<std::string> find_config_arg(int argc, char** argv) {
+std::optional<std::string> find_config_arg(int argc, char* const* argv) {
     for (int i = 1; i < argc; ++i) {
-        std::string_view arg = argv[i];
+        const std::string_view arg = argv[i];
         if ((arg == "-c" || arg == "--config") && i + 1 < argc) {
             return std::string(argv[i + 1]);
         }
@@ -64,7 +69,7 @@ std::optional<std::string> find_config_arg(int argc, char** argv) {
     return std::nullopt;
 }
 
-bool has_subcommand(int argc, char** argv, std::string_view name) {
+bool has_subcommand(int argc, char* const* argv, std::string_view name) {
     for (int i = 1; i < argc; ++i) {
         if (std::string_view(argv[i]) == name) {
             return true;
@@ -88,7 +93,7 @@ struct SimulateTomlConfig {
     loki::simulation::ModulatorParams mod;
     std::optional<double> mod_tref;
 
-    static std::string default_toml_string() {
+    static std::string_view default_toml_string() {
         return R"(# Loki Pulse Simulation Configuration
 
 [signal]
@@ -142,7 +147,7 @@ format = "tim"                 # "tim" or "dat"
         if (auto* sig = tbl["signal"].as_table()) {
             cfg.period = sig->get("period")->value_or(cfg.period);
             cfg.dt     = sig->get("dt")->value_or(cfg.dt);
-            if (auto* n = sig->get("nsamps")) {
+            if (auto const* n = sig->get("nsamps")) {
                 if (auto val = n->value<int64_t>()) {
                     cfg.nsamps = static_cast<loki::SizeType>(*val);
                 }
@@ -151,7 +156,7 @@ format = "tim"                 # "tim" or "dat"
             cfg.ducy  = sig->get("ducy")->value_or(cfg.ducy);
             cfg.shape = sig->get("shape")->value_or(cfg.shape);
             cfg.phi0  = sig->get("phi0")->value_or(cfg.phi0);
-            if (auto* s = sig->get("seed")) {
+            if (auto const* s = sig->get("seed")) {
                 if (auto val = s->value<int64_t>()) {
                     cfg.seed = static_cast<std::uint64_t>(*val);
                 }
@@ -160,7 +165,7 @@ format = "tim"                 # "tim" or "dat"
 
         if (auto* mod_tbl = tbl["modulation"].as_table()) {
             cfg.mod_type = mod_tbl->get("type")->value_or(cfg.mod_type);
-            if (auto* tr = mod_tbl->get("mod_tref")) {
+            if (auto const* tr = mod_tbl->get("mod_tref")) {
                 cfg.mod_tref = tr->value<double>();
             }
             cfg.mod.shift = mod_tbl->get("shift")->value_or(cfg.mod.shift);
@@ -168,7 +173,8 @@ format = "tim"                 # "tim" or "dat"
             cfg.mod.acc   = mod_tbl->get("acc")->value_or(cfg.mod.acc);
             cfg.mod.jerk  = mod_tbl->get("jerk")->value_or(cfg.mod.jerk);
             cfg.mod.snap  = mod_tbl->get("snap")->value_or(cfg.mod.snap);
-            if (auto* coeffs_arr = mod_tbl->get_as<toml::array>("coeffs")) {
+            if (auto const* coeffs_arr =
+                    mod_tbl->get_as<toml::array>("coeffs")) {
                 cfg.mod.coeffs.clear();
                 for (const auto& elem : *coeffs_arr) {
                     if (auto val = elem.value<double>()) {
@@ -178,10 +184,10 @@ format = "tim"                 # "tim" or "dat"
             }
             cfg.mod.p_orb = mod_tbl->get("p_orb")->value_or(cfg.mod.p_orb);
             cfg.mod.psi   = mod_tbl->get("psi")->value_or(cfg.mod.psi);
-            if (auto* xo = mod_tbl->get("x_orb")) {
+            if (auto const* xo = mod_tbl->get("x_orb")) {
                 cfg.mod.x_orb = xo->value<double>();
             }
-            if (auto* mc = mod_tbl->get("m_c")) {
+            if (auto const* mc = mod_tbl->get("m_c")) {
                 cfg.mod.m_c = mc->value<double>();
             }
             cfg.mod.m_p   = mod_tbl->get("m_p")->value_or(cfg.mod.m_p);
@@ -213,13 +219,13 @@ int run_simulate(double period,
                  const std::optional<double>& mod_tref) {
     loki::simulation::PulseSignalConfig config(period, dt, nsamps, snr, ducy,
                                                mod_type, mod, mod_tref, seed);
-    auto series = config.generate(shape, phi0);
+    const auto series = config.generate(shape, phi0);
     series.write(output);
     SPDLOG_INFO("Wrote {} samples to {}", series.get_nsamps(), output.string());
     return 0;
 }
 
-enum class NsampsPolicy { kFail, kTruncate };
+enum class NsampsPolicy : std::uint8_t { kFail, kTruncate };
 
 std::string read_text_file(const std::filesystem::path& path) {
     std::ifstream in(path);
@@ -227,8 +233,8 @@ std::string read_text_file(const std::filesystem::path& path) {
         throw std::runtime_error("Could not open config file: " +
                                  path.string());
     }
-    return std::string(std::istreambuf_iterator<char>(in),
-                       std::istreambuf_iterator<char>());
+    return {std::istreambuf_iterator<char>(in),
+            std::istreambuf_iterator<char>()};
 }
 
 int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
@@ -244,7 +250,10 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
     // The CPU thread count travels in the search config; Exec only picks the
     // backend and device. Construction rejects a backend this build lacks.
     const loki::Exec exec{
-        .backend = toml_cfg.backend, .nthreads = 1, .device = toml_cfg.device};
+        .backend  = toml_cfg.backend,
+        .nthreads = 1,
+        .device   = toml_cfg.device,
+    };
     if (!loki::is_available(exec.backend)) {
         throw std::runtime_error(std::format(
             "backend '{}' was requested but this build does not contain it",
@@ -254,8 +263,8 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
     const auto preview_cfg = toml_cfg.to_search_config(
         toml_cfg.nsamps.value_or(1U << 21U), toml_cfg.tsamp.value_or(6.4e-5));
     if (dry_run) {
-        loki::pipelines::FFAFreqSweep dry(preview_cfg, /*show_progress=*/false,
-                                          exec);
+        const loki::pipelines::FFAFreqSweep dry(preview_cfg,
+                                                /*show_progress=*/false, exec);
         SPDLOG_INFO("Dry run complete: planner constructed successfully.");
         return 0;
     }
@@ -304,7 +313,7 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
         }
     }
 
-    auto ffa_cfg = toml_cfg.to_search_config(actual_nsamps, ts.get_dt());
+    const auto ffa_cfg = toml_cfg.to_search_config(actual_nsamps, ts.get_dt());
 
     const std::filesystem::path outdir_path = toml_cfg.outdir;
     std::filesystem::create_directories(outdir_path);
@@ -330,11 +339,12 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
 
     if (std::filesystem::exists(result_file)) {
         try {
-            HighFive::File h5(result_file.string(), HighFive::File::ReadOnly);
+            const HighFive::File h5(result_file.string(),
+                                    HighFive::File::ReadOnly);
             if (h5.exist("snr")) {
-                auto snr_dset      = h5.getDataSet("snr");
-                const auto dims    = snr_dset.getDimensions();
-                const auto n_cands = dims.empty() ? 0UL : dims[0];
+                const auto snr_dset = h5.getDataSet("snr");
+                const auto dims     = snr_dset.getDimensions();
+                const auto n_cands  = dims.empty() ? 0UL : dims[0];
                 if (n_cands > 0) {
                     float top_snr           = 0.0F;
                     size_t top_idx          = 0;
@@ -344,8 +354,7 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
                         const size_t count = std::min(kChunk, n_cands - offset);
                         std::vector<float> snrs(count);
                         snr_dset.select({offset}, {count}).read(snrs);
-                        const auto max_it =
-                            std::max_element(snrs.begin(), snrs.end());
+                        const auto max_it = std::ranges::max_element(snrs);
                         if (max_it != snrs.end() && *max_it >= top_snr) {
                             top_snr = *max_it;
                             top_idx = offset +
@@ -362,8 +371,8 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
                         top_snr, top_idx);
 
                     if (h5.exist("param_sets")) {
-                        auto p_dset = h5.getDataSet("param_sets");
-                        auto p_dims = p_dset.getDimensions();
+                        const auto p_dset = h5.getDataSet("param_sets");
+                        auto p_dims       = p_dset.getDimensions();
                         if (p_dims.size() == 2 && p_dims[0] == n_cands &&
                             p_dims[1] > 0) {
                             std::vector<double> top_params(p_dims[1]);
@@ -412,6 +421,7 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
 
 } // namespace
 
+// NOLINTNEXTLINE(bugprone-exception-escape,misc-const-correctness): setup errors abort; main signature is fixed
 int main(int argc, char** argv) {
     CLI::App app{"Loki - Fast Pulsar Search Pipeline"};
     app.require_subcommand(1);
@@ -435,7 +445,7 @@ int main(int argc, char** argv) {
     std::string gen_sim_config_path;
     simulate->add_option("-c,--config", sim_config_path,
                          "Load simulation configuration from TOML file");
-    auto* opt_gen_sim =
+    auto const* opt_gen_sim =
         simulate
             ->add_option("-g,--generate-config", gen_sim_config_path,
                          "Generate default TOML simulation configuration file "
@@ -523,7 +533,7 @@ int main(int argc, char** argv) {
     std::string gen_ffa_config_path;
     ffa->add_option("-c,--config", ffa_config_path,
                     "Path to TOML configuration file");
-    auto* opt_gen_ffa =
+    auto const* opt_gen_ffa =
         ffa->add_option("-g,--generate-config", gen_ffa_config_path,
                         "Generate default TOML configuration file [optional "
                         "output path]")
@@ -659,11 +669,12 @@ int main(int argc, char** argv) {
             }
 
             std::string config_toml;
-            const auto config_path =
-                !ffa_config_path.empty()
-                    ? std::filesystem::path(ffa_config_path)
-                    : (cfg_arg.has_value() ? std::filesystem::path(*cfg_arg)
-                                           : std::filesystem::path{});
+            std::filesystem::path config_path;
+            if (!ffa_config_path.empty()) {
+                config_path = ffa_config_path;
+            } else if (cfg_arg.has_value()) {
+                config_path = *cfg_arg;
+            }
             if (!config_path.empty() && std::filesystem::exists(config_path)) {
                 config_toml = read_text_file(config_path);
             }

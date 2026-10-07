@@ -8,6 +8,9 @@ AlignConsecutiveAssignments:
   Enabled: true
 BinPackParameters: false
 DerivePointerAlignment: false
+# Never reflow clang-tidy suppressions: a wrapped NOLINTNEXTLINE silently
+# stops applying to the intended line.
+CommentPragmas: '^ (IWYU pragma:|NOLINT)'
 # Include order (docs/architecture.md, rule 5). Each group is its own block,
 # separated by a blank line and sorted alphabetically, which is also what
 # clang-tidy's llvm-include-order expects:

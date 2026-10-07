@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <map>
 #include <span>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -10,6 +11,7 @@
 #include <catch2/generators/catch_generators.hpp>
 
 #include "loki/common/backend.hpp"
+#include "loki/common/types.hpp"
 #include "loki/detection/thresholds.hpp"
 
 namespace loki {
@@ -26,18 +28,20 @@ constexpr int kCpuThreads       = 8;
 constexpr float kSurvivalTol    = 0.10F;
 
 const std::vector<float> kBranching = {
-    4.0F, 9.0F, 1.0F, 2.25575101F, 3.98980204F, 3.0F, 2.80514208F, 3.20839363F};
+    4.0F, 9.0F, 1.0F, 2.25575101F, 3.98980204F, 3.0F, 2.80514208F, 3.20839363F,
+};
 
 DynamicThresholdScheme make_cpu(std::string_view mode, uint64_t seed) {
-    return DynamicThresholdScheme(kBranching, 0.1F, 64, kNtrials, kNprobs,
-                                  0.05F, 8.0F, kNthresholds, 0.3F, 1.2F, 1.5F,
-                                  1, mode, seed, 256, Exec::cpu(kCpuThreads));
+    return {kBranching, 0.1F,  64,   kNtrials,
+            kNprobs,    0.05F, 8.0F, kNthresholds,
+            0.3F,       1.2F,  1.5F, 1,
+            mode,       seed,  256,  Exec::cpu(kCpuThreads)};
 }
 
 DynamicThresholdScheme make_cuda(std::string_view mode, uint64_t seed) {
-    return DynamicThresholdScheme(kBranching, 0.1F, 64, kNtrials, kNprobs,
-                                  0.05F, 8.0F, kNthresholds, 0.3F, 1.2F, 1.5F,
-                                  1, mode, seed, 256, Exec::cuda());
+    return {kBranching, 0.1F,         64,   kNtrials,    kNprobs, 0.05F,
+            8.0F,       kNthresholds, 0.3F, 1.2F,        1.5F,    1,
+            mode,       seed,         256,  Exec::cuda()};
 }
 
 using SurvivalPair = std::pair<float, float>;
@@ -106,12 +110,13 @@ TEST_CASE("DynamicThresholdScheme CPU and CUDA agree on stage-0 survival",
     }
 
     std::vector<SizeType> common;
-    for (const auto& [ithr, _] : cpu_maps.front()) {
-        const bool on_cuda =
-            std::all_of(cuda_maps.begin(), cuda_maps.end(),
-                        [ithr](const std::map<SizeType, SurvivalPair>& m) {
-                            return m.contains(ithr);
-                        });
+    for (const auto& entry : cpu_maps.front()) {
+        // Clang 18 with OpenMP cannot capture a structured binding.
+        const SizeType ithr = entry.first;
+        const bool on_cuda  = std::ranges::all_of(
+            cuda_maps, [ithr](const std::map<SizeType, SurvivalPair>& m) {
+                return m.contains(ithr);
+            });
         if (on_cuda) {
             common.push_back(ithr);
         }

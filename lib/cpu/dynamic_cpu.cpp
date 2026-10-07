@@ -1,10 +1,14 @@
-// NOLINTBEGIN(misc-include-cleaner) -- CPU engine; symbols via private/engine
-// headers.
 #include "lib/core/dynamic.hpp"
 
 #include <algorithm>
+#include <format>
+#include <memory>
 #include <span>
+#include <stdexcept>
+#include <string_view>
+#include <tuple>
 #include <utility>
+#include <vector>
 
 #include <spdlog/spdlog.h>
 
@@ -17,6 +21,8 @@
 #include "lib/core/kernels.hpp"
 #include "lib/core/taylor.hpp"
 #include "lib/detail/error_check.hpp"
+#include "lib/detection/kadane.hpp"
+#include "lib/utils/workspace_impl.hpp"
 
 namespace loki::core {
 
@@ -784,4 +790,3 @@ create_prune_dp_functs<ComplexType>(std::string_view,
                                     SizeType);
 
 } // namespace loki::core
-// NOLINTEND(misc-include-cleaner)

@@ -1,10 +1,14 @@
 #include "loki/algorithms/prune_rfi.hpp"
 
+#include <cstddef>
 #include <filesystem>
 #include <format>
+#include <limits>
 #include <optional>
 #include <random>
+#include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -41,13 +45,24 @@ PulsarSearchConfig make_small_cfg() {
         ParamLimit{.min = -10.0, .max = 10.0},
         ParamLimit{.min = 140.0, .max = 145.0},
     };
-    return PulsarSearchConfig(
-        kNsamps, kTsamp, /*nbins=*/32, /*eta=*/1.0, limits, /*ducy_max=*/0.3,
-        /*wtsp=*/1.5, /*use_fourier=*/false, /*nthreads=*/1,
-        /*max_process_memory_gb=*/8.0, /*octave_scale=*/2.0,
-        /*nbins_max=*/1024, /*nbins_min_lossy_bf=*/64,
-        /*bseg_brute=*/1024, /*bseg_ffa=*/kNsamps / 16, /*snr_min=*/5.0,
-        /*max_passing_candidates=*/1U << 22U, /*prune_poly_order=*/2);
+    return {kNsamps,
+            kTsamp,
+            /*nbins=*/32,
+            /*eta=*/1.0,
+            limits,
+            /*ducy_max=*/0.3,
+            /*wtsp=*/1.5,
+            /*use_fourier=*/false,
+            /*nthreads=*/1,
+            /*max_process_memory_gb=*/8.0,
+            /*octave_scale=*/2.0,
+            /*nbins_max=*/1024,
+            /*nbins_min_lossy_bf=*/64,
+            /*bseg_brute=*/1024,
+            /*bseg_ffa=*/kNsamps / 16,
+            /*snr_min=*/5.0,
+            /*max_passing_candidates=*/1U << 22U,
+            /*prune_poly_order=*/2};
 }
 
 std::pair<std::vector<float>, std::vector<float>>
@@ -123,8 +138,8 @@ TEST_CASE("PruneResultWriter writes harvest groups", "[prune_rfi]") {
         writer.write_metadata({"accel", "freq"}, 16, 1024, thresholds, {});
     }
 
-    CircularView<double> empty_leaves{{}, {}};
-    CircularView<float> empty_scores{{}, {}};
+    const CircularView<double> empty_leaves{{}, {}};
+    const CircularView<float> empty_scores{{}, {}};
     const std::vector<SizeType> snail{0, 1, 2};
     PruneStatsCollection stats;
 
@@ -132,7 +147,7 @@ TEST_CASE("PruneResultWriter writes harvest groups", "[prune_rfi]") {
     appender.write_run_results("000_00", snail, empty_leaves, empty_scores,
                                empty_scores, 0.0, 0, 2, stats);
 
-    HarvestBuffer<float> empty_harvest(8, 16, true);
+    const HarvestBuffer<float> empty_harvest(8, 16, true);
     appender.write_run_harvest("000_00", empty_harvest, 2, 0);
 
     appender.write_run_results("001_00", snail, empty_leaves, empty_scores,
@@ -144,13 +159,15 @@ TEST_CASE("PruneResultWriter writes harvest groups", "[prune_rfi]") {
     appender.write_run_harvest("001_00", harvest, 2, 7);
 
     const HighFive::File file(path.string(), HighFive::File::ReadOnly);
-    auto empty_g = file.getGroup("runs").getGroup("000_00").getGroup("harvest");
+    const auto empty_g =
+        file.getGroup("runs").getGroup("000_00").getGroup("harvest");
     SizeType n_total_empty = 0;
     empty_g.getAttribute("n_harvested_total").read(n_total_empty);
     REQUIRE(n_total_empty == 0);
     REQUIRE(empty_g.getDataSet("scores").getSpace().getDimensions()[0] == 0);
 
-    auto hg = file.getGroup("runs").getGroup("001_00").getGroup("harvest");
+    const auto hg =
+        file.getGroup("runs").getGroup("001_00").getGroup("harvest");
     SizeType n_total = 0;
     hg.getAttribute("n_harvested_total").read(n_total);
     REQUIRE(n_total == 7);
@@ -209,9 +226,9 @@ TEST_CASE("EPMultiPassTime full-grid mask empties the tree", "[prune_rfi]") {
     const auto path = result_path(outdir, "cpp_mask", nsegments);
     REQUIRE(std::filesystem::exists(path));
     const HighFive::File file(path.string(), HighFive::File::ReadOnly);
-    auto runs = file.getGroup("runs");
+    const auto runs = file.getGroup("runs");
     REQUIRE_FALSE(runs.listObjectNames().empty());
-    auto run        = runs.getGroup(runs.listObjectNames().front());
+    const auto run  = runs.getGroup(runs.listObjectNames().front());
     const auto dims = run.getDataSet("param_sets").getSpace().getDimensions();
     REQUIRE(dims[0] == 0);
 }
@@ -241,12 +258,12 @@ TEST_CASE("EPMultiPassTime early harvest writes a harvest group",
     const auto path = result_path(outdir, "cpp_harvest", nsegments);
     REQUIRE(std::filesystem::exists(path));
     const HighFive::File file(path.string(), HighFive::File::ReadOnly);
-    auto runs = file.getGroup("runs");
+    const auto runs = file.getGroup("runs");
     REQUIRE_FALSE(runs.listObjectNames().empty());
-    auto run = runs.getGroup(runs.listObjectNames().front());
+    const auto run = runs.getGroup(runs.listObjectNames().front());
     REQUIRE(run.exist("harvest"));
-    auto harvest     = run.getGroup("harvest");
-    SizeType n_total = 0;
+    const auto harvest = run.getGroup("harvest");
+    SizeType n_total   = 0;
     harvest.getAttribute("n_harvested_total").read(n_total);
     REQUIRE(n_total > 0);
     REQUIRE(harvest.exist("scores"));
@@ -256,8 +273,10 @@ TEST_CASE("EPMultiPassTime early harvest writes a harvest group",
 TEST_CASE(
     "make_default_harvest_scheme disables early stages and offsets threshold",
     "[prune_rfi]") {
-    const std::vector<float> thresh{1.0F, 2.0F, 3.0F, 4.0F,  5.0F,  6.0F,
-                                    7.0F, 8.0F, 9.0F, 10.0F, 11.0F, 12.0F};
+    const std::vector<float> thresh{
+        1.0F, 2.0F, 3.0F, 4.0F,  5.0F,  6.0F,
+        7.0F, 8.0F, 9.0F, 10.0F, 11.0F, 12.0F,
+    };
     const auto harvest =
         loki::algorithms::make_default_harvest_scheme(thresh, /*min_level=*/5,
                                                       /*offset=*/10.0F,

@@ -101,6 +101,7 @@ void snr_boxcar_impl(const float* __restrict__ folds,
             const float* __restrict__ psum_ptr = psum.data();
 
             // Compute SNR for each width, find maximum
+            // NOLINTNEXTLINE(misc-const-correctness): written when FindMax
             float max_snr = std::numeric_limits<float>::lowest();
             for (SizeType iw = 0; iw < nwidths; ++iw) {
                 const auto dmax =

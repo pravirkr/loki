@@ -1,27 +1,35 @@
-#include "loki/algorithms/prune.hpp"
+#include "loki/algorithms/prune.hpp" // NOLINT(misc-include-cleaner): facade header first
 
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <exception>
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <future>
+#include <ios>
+#include <memory>
+#include <optional>
 #include <span>
+#include <stdexcept>
+#include <string_view>
+#include <system_error>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 #include <BS_thread_pool.hpp>
 #include <fmt/format.h>
 #include <fmt/ranges.h>
 #include <spdlog/spdlog.h>
 
-#include "loki/algorithms/ffa.hpp"
 #include "loki/algorithms/prune_rfi.hpp"
 #include "loki/common/types.hpp"
+#include "loki/search/configs.hpp"
 
 #include "lib/algorithms/ffa_engine.hpp"
 #include "lib/algorithms/prune_engine.hpp"
-#include "lib/common/dispatch.hpp"
 #include "lib/core/dynamic.hpp"
 #include "lib/detail/error_check.hpp"
 #include "lib/detail/progress.hpp"
@@ -30,7 +38,9 @@
 #include "lib/detail/utils.hpp"
 #include "lib/search/cands.hpp"
 #include "lib/search/prune_mask.hpp"
+#include "lib/utils/fft_impl.hpp"
 #include "lib/utils/workspace_impl.hpp"
+#include "lib/utils/world_tree.hpp"
 
 namespace loki::algorithms {
 
@@ -932,8 +942,6 @@ private:
     }
 }; // End Prune::Impl definition
 
-} // End anonymous namespace
-
 // EPMultiPassCpuEngine implementation
 template <SupportedFoldType FoldType>
 class EPMultiPassCpuEngine : public detail::EPMultiPassEngine<FoldType> {
@@ -1315,6 +1323,7 @@ private:
             }
             task_ids.push_back(id);
 
+            // NOLINTNEXTLINE(bugprone-exception-escape): BS::thread_pool stores it in the future
             auto future = pool.submit_task([this, ref_seg, outdir,
                                             tracker_ptr = tracker.get(), id,
                                             &ffa_fold]() mutable {
@@ -1372,6 +1381,8 @@ private:
         }
     }
 }; // End EPMultiPassCpuEngine definition
+
+} // namespace
 
 namespace detail {
 

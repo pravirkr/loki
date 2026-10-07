@@ -91,6 +91,9 @@ set(LOKI_FORCE_CURAND_RNG
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+# Loki uses no C++20 modules. Skip the dependency scan: it slows every build
+# and adds @modmap arguments that clang-tidy cannot read.
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # Default to Release when no build type is specified (packaging-friendly).

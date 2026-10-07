@@ -1,11 +1,13 @@
-#include "loki/algorithms/ffa.hpp"
+#include "loki/algorithms/ffa.hpp" // NOLINT(misc-include-cleaner): facade header first
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <cstdlib>
 #include <memory>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string_view>
 #include <type_traits>
 #include <utility>
@@ -16,6 +18,9 @@
 #include <spdlog/spdlog.h>
 
 #include "loki/algorithms/fold.hpp"
+#include "loki/common/backend.hpp"
+#include "loki/common/coord.hpp"
+#include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
 #include "loki/detection/score.hpp"
 #include "loki/search/configs.hpp"
@@ -52,8 +57,6 @@ void cone_score_tile(const float* profiles,
                                          nbins, state->widths, state->threshold,
                                          state->psum[tid], state->hits[tid]);
 }
-
-} // namespace
 
 // FFACpuEngine implementation
 template <SupportedFoldType FoldType>
@@ -333,11 +336,13 @@ private:
     /// Benchmark hook: LOKI_FUSE_LEVELS=<n> forces the fusion depth (0
     /// disables).
     void apply_fuse_levels_env() {
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): serial setup, no setenv
         const char* env = std::getenv("LOKI_FUSE_LEVELS");
         if (env == nullptr || env[0] == '\0') {
             return;
         }
-        char* end             = nullptr;
+        char* end = nullptr;
+        // NOLINTNEXTLINE(google-runtime-int): std::strtoul return type
         const unsigned long v = std::strtoul(env, &end, 10);
         if (end == env || *end != '\0') {
             spdlog::warn("Ignoring invalid LOKI_FUSE_LEVELS='{}'", env);
@@ -349,6 +354,7 @@ private:
 
     /// Benchmark hook: LOKI_FFA_LEVEL_TIMING=1 logs per-level Gfloat/s.
     void apply_level_timing_env() {
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): serial setup, no setenv
         const char* env = std::getenv("LOKI_FFA_LEVEL_TIMING");
         m_level_timing  = env != nullptr && env[0] != '\0' && env[0] != '0';
         if (m_level_timing) {
@@ -585,10 +591,13 @@ private:
     }
 
     [[nodiscard]] static SizeType cone_scratch_budget_bytes() {
-        const char* env  = std::getenv("LOKI_CONE_SCRATCH_KB");
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): serial setup, no setenv
+        const char* env = std::getenv("LOKI_CONE_SCRATCH_KB");
+        // NOLINTNEXTLINE(google-runtime-int): std::strtoul return type
         unsigned long kb = 2048;
         if (env != nullptr && env[0] != '\0') {
-            char* end             = nullptr;
+            char* end = nullptr;
+            // NOLINTNEXTLINE(google-runtime-int): std::strtoul return type
             const unsigned long v = std::strtoul(env, &end, 10);
             if (end != env && *end == '\0' && v > 0) {
                 kb = v;
@@ -598,11 +607,13 @@ private:
     }
 
     [[nodiscard]] static SizeType cone_tile_override() {
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): serial setup, no setenv
         const char* env = std::getenv("LOKI_CONE_TILE");
         if (env == nullptr || env[0] == '\0') {
             return 0;
         }
-        char* end             = nullptr;
+        char* end = nullptr;
+        // NOLINTNEXTLINE(google-runtime-int): std::strtoul return type
         const unsigned long v = std::strtoul(env, &end, 10);
         if (end == env || *end != '\0' || v == 0) {
             return 0;
@@ -1011,6 +1022,8 @@ private:
         }
     }
 }; // End FFACpuEngine definition
+
+} // namespace
 
 namespace detail {
 

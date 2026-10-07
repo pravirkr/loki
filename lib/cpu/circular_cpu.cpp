@@ -1,8 +1,8 @@
-// NOLINTBEGIN(misc-include-cleaner) -- CPU engine; symbols via private/engine
-// headers.
 #include "lib/core/circular.hpp"
 
 #include <algorithm>
+#include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <numbers>
 #include <span>
@@ -1127,4 +1127,3 @@ generate_bp_circ_taylor(std::span<const std::vector<double>> param_arr,
 }
 
 } // namespace loki::core
-// NOLINTEND(misc-include-cleaner)

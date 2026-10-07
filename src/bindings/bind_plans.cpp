@@ -1,7 +1,6 @@
 #include <cstddef>
-#include <span>
 #include <string>
-#include <vector>
+#include <string_view>
 
 #include <pybind11/functional.h>
 #include <pybind11/iostream.h>
@@ -10,6 +9,7 @@
 #include <pybind11/stl.h>
 #include <pybind11/stl/filesystem.h>
 
+#include "loki/common/plans.hpp"
 #include "loki/loki.hpp"
 
 #include "bindings/bind.hpp"
@@ -17,13 +17,7 @@
 #include "pybind_utils.hpp"
 
 namespace loki {
-using algorithms::EPChunkConfig;
-using algorithms::EPChunkStats;
-using algorithms::EPRegionStats;
 using algorithms::FFARegionStats;
-using detection::MatchedFilter;
-using pipelines::EPFreqSweep;
-using pipelines::FFAFreqSweep;
 using plans::FFAPlanBase;
 using search::FFASearchConfig;
 using search::PulsarSearchConfig;
@@ -106,7 +100,8 @@ void bind_plans(py::module_& m) {
                                })
         .def_property_readonly("params_dict",
                                [](const FFAPlanBase& self) {
-                                   auto params_map = self.get_params_dict();
+                                   const auto params_map =
+                                       self.get_params_dict();
                                    py::dict result;
                                    for (const auto& [key, value] : params_map) {
                                        result[py::str(key)] =

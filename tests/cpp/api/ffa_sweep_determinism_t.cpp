@@ -1,12 +1,14 @@
-#include <cmath>
 #include <filesystem>
 #include <format>
+#include <optional>
 #include <random>
+#include <utility>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 #include <highfive/highfive.hpp>
 
+#include "loki/common/types.hpp"
 #include "loki/pipelines/ffa_freq_sweep.hpp"
 #include "loki/search/configs.hpp"
 

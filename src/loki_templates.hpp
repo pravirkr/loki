@@ -244,20 +244,22 @@ template <SupportedFoldType FoldType>
 void bind_ep_multi_pass(py::module& m, const std::string& name) {
     auto cls =
         py::class_<EPMultiPass<FoldType>>(m, name.c_str())
-            .def(py::init([](const PulsarSearchConfig& cfg,
-                             const std::vector<float>& threshold_scheme,
-                             std::optional<SizeType> n_runs,
-                             std::optional<std::vector<SizeType>> ref_segs,
-                             const std::vector<SizeType>& ascend_levels,
-                             SizeType max_sugg, SizeType batch_size,
-                             std::string_view poly_basis, bool show_progress,
-                             algorithms::PruneRFIConfig rfi_config,
-                             std::string_view backend, int device) {
-                     return std::make_unique<EPMultiPass<FoldType>>(
-                         cfg, threshold_scheme, n_runs, ref_segs, ascend_levels,
-                         max_sugg, batch_size, poly_basis, show_progress,
-                         rfi_config, make_exec(backend, device));
-                 }),
+            .def(py::init(
+                     [](const PulsarSearchConfig& cfg,
+                        const std::vector<float>& threshold_scheme,
+                        std::optional<SizeType> n_runs,
+                        const std::optional<std::vector<SizeType>>& ref_segs,
+                        const std::vector<SizeType>& ascend_levels,
+                        SizeType max_sugg, SizeType batch_size,
+                        std::string_view poly_basis, bool show_progress,
+                        const algorithms::PruneRFIConfig& rfi_config,
+                        std::string_view backend, int device) {
+                         return std::make_unique<EPMultiPass<FoldType>>(
+                             cfg, threshold_scheme, n_runs, ref_segs,
+                             ascend_levels, max_sugg, batch_size, poly_basis,
+                             show_progress, rfi_config,
+                             make_exec(backend, device));
+                     }),
                  py::arg("cfg"), py::arg("threshold_scheme"),
                  py::arg("n_runs")        = std::nullopt,
                  py::arg("ref_segs")      = std::nullopt,

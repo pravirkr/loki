@@ -1,16 +1,20 @@
-#include <cmath>
 #include <filesystem>
+#include <optional>
 #include <random>
+#include <stdexcept>
+#include <string>
 #include <string_view>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
 
 using Catch::Matchers::WithinAbs;
-using Catch::Matchers::WithinRel;
 
 namespace {
 
@@ -29,6 +33,8 @@ public:
 
     TempDir(const TempDir&)            = delete;
     TempDir& operator=(const TempDir&) = delete;
+    TempDir(TempDir&&)                 = delete;
+    TempDir& operator=(TempDir&&)      = delete;
 
     [[nodiscard]] const std::filesystem::path& path() const { return m_path; }
 
@@ -41,7 +47,7 @@ private:
 TEST_CASE("FFASearchConfig standard construction and getters",
           "[config][ffa]") {
     const std::vector<loki::ParamLimit> limits = {{1.0, 10.0}};
-    loki::search::FFASearchConfig cfg(
+    const loki::search::FFASearchConfig cfg(
         /*nsamps=*/1048576,
         /*tsamp=*/0.0001,
         /*nbins=*/64,
@@ -88,9 +94,9 @@ TEST_CASE("FFASearchConfig standard construction and getters",
 TEST_CASE("FFASearchConfig copy, move and get_updated_config",
           "[config][ffa]") {
     const std::vector<loki::ParamLimit> limits = {{2.0, 20.0}};
-    loki::search::FFASearchConfig orig(262144, 0.0002, 64, 1.0, limits, 0.15,
-                                       1.4, false, 2, 2.0, 2.0, 512, 32, 16, 32,
-                                       5.0, 500000, true);
+    const loki::search::FFASearchConfig orig(262144, 0.0002, 64, 1.0, limits,
+                                             0.15, 1.4, false, 2, 2.0, 2.0, 512,
+                                             32, 16, 32, 5.0, 500000, true);
 
     // Copy construction
     loki::search::FFASearchConfig copied = orig;
@@ -100,13 +106,13 @@ TEST_CASE("FFASearchConfig copy, move and get_updated_config",
     REQUIRE(copied.get_use_fourier() == false);
 
     // Move construction
-    loki::search::FFASearchConfig moved = std::move(copied);
+    const loki::search::FFASearchConfig moved = std::move(copied);
     REQUIRE(moved.get_nsamps() == 262144);
     REQUIRE(moved.get_nbins() == 64);
 
     // get_updated_config
     const std::vector<loki::ParamLimit> new_limits = {{10.0, 50.0}};
-    auto updated = orig.get_updated_config(128, 0.5, new_limits);
+    const auto updated = orig.get_updated_config(128, 0.5, new_limits);
     REQUIRE(updated.get_nbins() == 128);
     REQUIRE_THAT(updated.get_eta(), WithinAbs(0.5, 1e-9));
     REQUIRE_THAT(updated.get_param_limits()[0].min, WithinAbs(10.0, 1e-9));
@@ -115,7 +121,7 @@ TEST_CASE("FFASearchConfig copy, move and get_updated_config",
     REQUIRE_THAT(updated.get_tsamp(), WithinAbs(orig.get_tsamp(), 1e-12));
 
     // get_updated_config with f_min, f_max
-    auto updated2 = orig.get_updated_config(32, 1.5, 5.0, 15.0);
+    const auto updated2 = orig.get_updated_config(32, 1.5, 5.0, 15.0);
     REQUIRE(updated2.get_nbins() == 32);
     REQUIRE_THAT(updated2.get_eta(), WithinAbs(1.5, 1e-9));
     REQUIRE_THAT(updated2.get_param_limits()[0].min, WithinAbs(5.0, 1e-9));
@@ -177,7 +183,7 @@ TEST_CASE("FFASearchConfig validation throws on invalid arguments",
 
 TEST_CASE("EPSearchConfig inherits and adds EP parameters", "[config][ep]") {
     const std::vector<loki::ParamLimit> limits = {{0.5, 5.0}};
-    loki::search::EPSearchConfig ep_cfg(
+    const loki::search::EPSearchConfig ep_cfg(
         /*nsamps=*/524288,
         /*tsamp=*/0.0001,
         /*nbins=*/64,
@@ -247,7 +253,7 @@ TEST_CASE("FFATomlConfig default generation and parsing", "[config][toml]") {
     REQUIRE(cfg.prefix == "loki");
 
     // Convert to FFASearchConfig with supplied nsamps and tsamp
-    auto search_cfg = cfg.to_search_config(1048576, 0.0001);
+    const auto search_cfg = cfg.to_search_config(1048576, 0.0001);
     REQUIRE(search_cfg.get_nsamps() == 1048576);
     REQUIRE_THAT(search_cfg.get_tsamp(), WithinAbs(0.0001, 1e-12));
     REQUIRE(search_cfg.get_nbins() == 64);
@@ -257,7 +263,7 @@ TEST_CASE("FFATomlConfig default generation and parsing", "[config][toml]") {
 
 TEST_CASE("FFATomlConfig file roundtrip in temporary directory",
           "[config][toml]") {
-    TempDir tmp;
+    const TempDir tmp;
     const auto config_path = tmp.path() / "test_ffa_config.toml";
 
     // Write default TOML to file
@@ -270,7 +276,7 @@ TEST_CASE("FFATomlConfig file roundtrip in temporary directory",
     REQUIRE(loaded.nbins == 64);
 
     // Direct FFASearchConfig::from_toml
-    auto search_cfg =
+    const auto search_cfg =
         loki::search::FFASearchConfig::from_toml(config_path, 2097152, 0.00005);
     REQUIRE(search_cfg.get_nsamps() == 2097152);
     REQUIRE_THAT(search_cfg.get_tsamp(), WithinAbs(0.00005, 1e-12));
@@ -301,7 +307,7 @@ nthreads = 2
     REQUIRE_THAT(*cfg_2d.acc_min, WithinAbs(-1.5, 1e-9));
     REQUIRE_THAT(*cfg_2d.acc_max, WithinAbs(1.5, 1e-9));
 
-    auto sc_2d = cfg_2d.to_search_config(131072, 0.001);
+    const auto sc_2d = cfg_2d.to_search_config(131072, 0.001);
     REQUIRE(sc_2d.get_nparams() == 2);
     REQUIRE_THAT(sc_2d.get_param_limits()[0].min, WithinAbs(-1.5, 1e-9));
     REQUIRE_THAT(sc_2d.get_param_limits()[0].max, WithinAbs(1.5, 1e-9));
@@ -318,8 +324,8 @@ acc_max = 2.0
 jerk_min = -0.05
 jerk_max = 0.05
 )";
-    auto cfg_3d = loki::search::FFATomlConfig::from_string(toml_3d);
-    auto sc_3d  = cfg_3d.to_search_config(131072, 0.001);
+    const auto cfg_3d = loki::search::FFATomlConfig::from_string(toml_3d);
+    const auto sc_3d  = cfg_3d.to_search_config(131072, 0.001);
     REQUIRE(sc_3d.get_nparams() == 3);
     REQUIRE_THAT(sc_3d.get_param_limits()[0].min, WithinAbs(-0.05, 1e-9));
     REQUIRE_THAT(sc_3d.get_param_limits()[0].max, WithinAbs(0.05, 1e-9));

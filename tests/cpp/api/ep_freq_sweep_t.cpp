@@ -7,7 +7,9 @@
 #include <optional>
 #include <random>
 #include <set>
+#include <stdexcept>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -39,12 +41,24 @@ PulsarSearchConfig make_test_cfg(double max_memory_gb = 4.0,
     };
     const int nthreads =
         std::clamp(static_cast<int>(std::thread::hardware_concurrency()), 1, 8);
-    return PulsarSearchConfig(
-        kNsamps, kTsamp, /*nbins=*/32, /*eta=*/1.0, limits, /*ducy_max=*/0.3,
-        /*wtsp=*/1.5, /*use_fourier=*/false, nthreads, max_memory_gb,
-        /*octave_scale=*/2.0, /*nbins_max=*/1024, /*nbins_min_lossy_bf=*/64,
-        /*bseg_brute=*/1024, /*bseg_ffa=*/kNsamps / 8, /*snr_min=*/5.0,
-        /*max_passing_candidates=*/1U << 22U, /*prune_poly_order=*/2);
+    return {kNsamps,
+            kTsamp,
+            /*nbins=*/32,
+            /*eta=*/1.0,
+            limits,
+            /*ducy_max=*/0.3,
+            /*wtsp=*/1.5,
+            /*use_fourier=*/false,
+            nthreads,
+            max_memory_gb,
+            /*octave_scale=*/2.0,
+            /*nbins_max=*/1024,
+            /*nbins_min_lossy_bf=*/64,
+            /*bseg_brute=*/1024,
+            /*bseg_ffa=*/kNsamps / 8,
+            /*snr_min=*/5.0,
+            /*max_passing_candidates=*/1U << 22U,
+            /*prune_poly_order=*/2};
 }
 
 std::pair<std::vector<float>, std::vector<float>>
@@ -64,8 +78,8 @@ make_noise_series(SizeType nsamps, unsigned seed = 42) {
 TEST_CASE("EPRegionPlanner plans valid memory-bounded chunks",
           "[ep_freq_sweep]") {
     const auto cfg = make_test_cfg(4.0, 140.0, 145.0);
-    EPRegionPlanner<float> planner(cfg, /*min_pd=*/0.1F, "taylor",
-                                   /*ref_ducy=*/0.1F);
+    const EPRegionPlanner<float> planner(cfg, /*min_pd=*/0.1F, "taylor",
+                                         /*ref_ducy=*/0.1F);
 
     REQUIRE(planner.get_nchunks() > 0);
     const auto& chunks = planner.get_chunk_cfgs();
@@ -92,8 +106,8 @@ TEST_CASE("EPRegionPlanner plans a band spanning two FFA regions",
           "[ep_freq_sweep]") {
     // 70-145 Hz spans two period octaves: 32 bins above 72.5 Hz, 64 below
     const auto cfg = make_test_cfg(4.0, 70.0, 145.0);
-    EPRegionPlanner<float> planner(cfg, /*min_pd=*/0.1F, "taylor",
-                                   /*ref_ducy=*/0.1F);
+    const EPRegionPlanner<float> planner(cfg, /*min_pd=*/0.1F, "taylor",
+                                         /*ref_ducy=*/0.1F);
 
     std::set<SizeType> region_nbins;
     for (const auto& chunk : planner.get_chunk_cfgs()) {
@@ -106,8 +120,8 @@ TEST_CASE("EPRegionPlanner plans a band spanning two FFA regions",
 TEST_CASE("EPRegionPlanner stats report the maxima over its chunks",
           "[ep_freq_sweep]") {
     const auto cfg = make_test_cfg(4.0, 70.0, 145.0);
-    EPRegionPlanner<float> planner(cfg, /*min_pd=*/0.1F, "taylor",
-                                   /*ref_ducy=*/0.1F);
+    const EPRegionPlanner<float> planner(cfg, /*min_pd=*/0.1F, "taylor",
+                                         /*ref_ducy=*/0.1F);
     const auto& stats = planner.get_stats();
     REQUIRE(stats.get_chunk_stats().size() == planner.get_nchunks());
 
@@ -132,11 +146,11 @@ TEST_CASE("EPRegionPlanner HDF5 cache round-trip and validation",
     std::filesystem::remove(cache_file, ec);
 
     const auto cfg = make_test_cfg(4.0, 140.0, 145.0);
-    EPRegionPlanner<float> planner(cfg, /*min_pd=*/0.1F, "taylor",
-                                   /*ref_ducy=*/0.1F, cache_file);
+    const EPRegionPlanner<float> planner(cfg, /*min_pd=*/0.1F, "taylor",
+                                         /*ref_ducy=*/0.1F, cache_file);
 
     REQUIRE(std::filesystem::exists(cache_file));
-    const auto orig_chunks = planner.get_chunk_cfgs();
+    const auto& orig_chunks = planner.get_chunk_cfgs();
 
     // Reload from cache into a new planner
     EPRegionPlanner<float> reloaded(cfg, /*min_pd=*/0.1F, "taylor",
@@ -164,14 +178,14 @@ TEST_CASE("EPRegionPlanner HDF5 cache round-trip and validation",
     }
 
     // Direct cache mismatch tests by modifying copy of cache file
-    auto make_modified_cache = [&](const std::string& filename,
-                                   const std::string& attr,
-                                   auto val) -> std::filesystem::path {
+    const auto make_modified_cache =
+        [&](const std::string& filename, const std::string& attr,
+            const auto& val) -> std::filesystem::path {
         const auto mod_path = outdir / filename;
         std::filesystem::copy_file(
             cache_file, mod_path,
             std::filesystem::copy_options::overwrite_existing);
-        HighFive::File f(mod_path.string(), HighFive::File::ReadWrite);
+        const HighFive::File f(mod_path.string(), HighFive::File::ReadWrite);
         f.getAttribute(attr).write(val);
         return mod_path;
     };
@@ -219,7 +233,7 @@ TEST_CASE("EPFreqSweep executes sweep and writes unified results file",
           "[ep_freq_sweep]") {
     const auto outdir =
         std::filesystem::temp_directory_path() / "loki_ep_sweep_test";
-    const auto file_prefix = "test_sweep";
+    const auto* const file_prefix = "test_sweep";
     std::error_code ec;
     std::filesystem::remove_all(outdir, ec);
 
@@ -245,7 +259,7 @@ TEST_CASE("EPFreqSweep executes sweep and writes unified results file",
     REQUIRE(std::filesystem::exists(result_file));
 
     // Inspect unified HDF5 file
-    HighFive::File h5(result_file.string(), HighFive::File::ReadOnly);
+    const HighFive::File h5(result_file.string(), HighFive::File::ReadOnly);
     REQUIRE(h5.hasAttribute("ep_sweep_version"));
     REQUIRE(h5.hasAttribute("nchunks"));
     REQUIRE(h5.hasAttribute("total_runtime"));
@@ -256,13 +270,13 @@ TEST_CASE("EPFreqSweep executes sweep and writes unified results file",
     REQUIRE(nchunks >= 1);
 
     REQUIRE(h5.exist("chunks"));
-    auto chunks_grp = h5.getGroup("chunks");
+    const auto chunks_grp = h5.getGroup("chunks");
 
     std::set<SizeType> region_nbins;
     for (SizeType i = 0; i < nchunks; ++i) {
         const auto chunk_name = std::format("chunk_{:04d}", i);
         REQUIRE(chunks_grp.exist(chunk_name));
-        auto chunk_grp = chunks_grp.getGroup(chunk_name);
+        const auto chunk_grp = chunks_grp.getGroup(chunk_name);
 
         CHECK(chunk_grp.hasAttribute("nominal_f_start"));
         CHECK(chunk_grp.hasAttribute("nominal_f_end"));

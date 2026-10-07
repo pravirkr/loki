@@ -1,6 +1,8 @@
 #include "loki/simulation/modulate.hpp"
 
 #include <cmath>
+#include <cstddef>
+#include <optional>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -18,7 +20,7 @@ TEST_CASE("derivative delay matches the Taylor polynomial", "[simulation]") {
     terms.acc   = 0.25;
     terms.jerk  = -0.05;
     terms.snap  = 0.01;
-    loki::simulation::DerivativeModulator modulator(terms);
+    const loki::simulation::DerivativeModulator modulator(terms);
     const std::vector<double> time{0.0, 1.25, 4.0, 10.0};
     const double t_ref = 2.0;
     std::vector<double> proper(time.size());
@@ -42,13 +44,14 @@ TEST_CASE("circular mass law and derivative round-trip", "[simulation]") {
     const double semi =
         0.005 * std::pow((kMp + kMc) * kPorb * kPorb, 1.0 / 3.0);
     const double expected = semi * (kMc / (kMp + kMc));
-    loki::simulation::CircularModulator from_mass(kPorb, kPsi, std::nullopt,
-                                                  kMc, kMp, 1.0);
+    const loki::simulation::CircularModulator from_mass(
+        kPorb, kPsi, std::nullopt, kMc, kMp, 1.0);
     REQUIRE_THAT(from_mass.x_orb(), WithinRel(expected, 1e-12));
 
-    loki::simulation::CircularModulator orbit(5000.0, kPsi, 1.5, std::nullopt);
+    const loki::simulation::CircularModulator orbit(5000.0, kPsi, 1.5,
+                                                    std::nullopt);
     const auto deriv = orbit.to_derivatives();
-    loki::simulation::DerivativeModulator taylor(
+    const loki::simulation::DerivativeModulator taylor(
         {deriv.shift, deriv.vel, deriv.acc, deriv.jerk, deriv.snap});
     const auto recovered = taylor.to_circular();
     REQUIRE_THAT(recovered.p_orb, WithinRel(orbit.p_orb(), 1e-8));
@@ -58,7 +61,8 @@ TEST_CASE("circular mass law and derivative round-trip", "[simulation]") {
 
 TEST_CASE("circular_t0 divides by c and kepler is rejected", "[simulation]") {
     constexpr double kAmplitude = loki::utils::kCval;
-    loki::simulation::CircularT0Modulator modulator(kAmplitude, 100.0, 0.0);
+    const loki::simulation::CircularT0Modulator modulator(kAmplitude, 100.0,
+                                                          0.0);
     const std::vector<double> time{25.0};
     std::vector<double> proper(1);
     modulator.generate(time, 0.0, proper);
@@ -66,7 +70,7 @@ TEST_CASE("circular_t0 divides by c and kepler is rejected", "[simulation]") {
     const double delay = std::sin(omega * 25.0);
     REQUIRE_THAT(proper[0], WithinAbs(25.0 - delay, 1e-8));
 
-    loki::simulation::ModulatorParams params;
+    const loki::simulation::ModulatorParams params;
     REQUIRE_THROWS(loki::simulation::make_modulator("keplerian", params));
     REQUIRE_THROWS(loki::simulation::make_modulator("kepler", params));
 }

@@ -1,6 +1,9 @@
 #include <cstddef>
-#include <span>
+#include <filesystem>
+#include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <pybind11/functional.h>
@@ -10,6 +13,7 @@
 #include <pybind11/stl.h>
 #include <pybind11/stl/filesystem.h>
 
+#include "loki/algorithms/prune_rfi.hpp"
 #include "loki/loki.hpp"
 
 #include "bindings/bind.hpp"
@@ -20,12 +24,7 @@ namespace loki {
 using algorithms::EPChunkConfig;
 using algorithms::EPChunkStats;
 using algorithms::EPRegionStats;
-using algorithms::FFARegionStats;
-using detection::MatchedFilter;
 using pipelines::EPFreqSweep;
-using pipelines::FFAFreqSweep;
-using plans::FFAPlanBase;
-using search::FFASearchConfig;
 using search::PulsarSearchConfig;
 
 namespace py = pybind11;
@@ -96,10 +95,10 @@ void bind_prune(py::module_& m) {
         .def(py::init(
                  [](const PulsarSearchConfig& cfg, bool show_progress,
                     float min_pd, std::string_view poly_basis, float ref_ducy,
-                    algorithms::PruneRFIConfig rfi_config,
+                    const algorithms::PruneRFIConfig& rfi_config,
                     const std::optional<std::filesystem::path>& plan_cache_file,
                     std::optional<SizeType> n_runs,
-                    std::optional<std::vector<SizeType>> ref_segs,
+                    const std::optional<std::vector<SizeType>>& ref_segs,
                     std::string_view backend, int device) {
                      return std::make_unique<EPFreqSweep>(
                          cfg, show_progress, min_pd, poly_basis, ref_ducy,
