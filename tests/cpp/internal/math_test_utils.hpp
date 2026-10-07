@@ -106,7 +106,6 @@ inline std::vector<float> make_series(Pattern p, SizeType n, uint64_t seed) {
             break;
         case Pattern::kSignedZeros: {
             const auto k = static_cast<int>(u * 4.0F);
-            // NOLINTNEXTLINE(readability-avoid-nested-conditional-operator)
             x[i] = k == 0 ? 0.0F : (k == 1 ? -0.0F : (k == 2 ? 1.0F : -1.0F));
             break;
         }

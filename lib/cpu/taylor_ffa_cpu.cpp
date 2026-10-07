@@ -260,7 +260,7 @@ void ffa_taylor_resolve_freq_batch(SizeType n_freqs_cur,
                                    double tseg_brute,
                                    SizeType nbins,
                                    int nthreads) {
-    nthreads = std::clamp(nthreads, 1, omp_get_max_threads());
+    nthreads = std::max(nthreads, 1);
     error_check::check_equal(coords.size(), n_freqs_cur,
                              "coords size mismatch");
 

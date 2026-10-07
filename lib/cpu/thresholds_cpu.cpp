@@ -955,7 +955,7 @@ public:
         m_nthresholds = m_thresholds.size();
         m_box_score_widths =
             detection::generate_box_width_trials(m_nbins, m_ducy_max, m_wtsp);
-        m_nthreads    = std::clamp(m_nthreads, 1, omp_get_max_threads());
+        m_nthreads    = std::max(m_nthreads, 1);
         m_timer_stats = search::TimerStats(m_nthreads);
 
         m_bias_snr   = snr_final / static_cast<float>(std::sqrt(m_nstages + 1));

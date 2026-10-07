@@ -1,5 +1,3 @@
-#include "loki/algorithms/prune.hpp" // NOLINT(misc-include-cleaner): facade header first
-
 #include <algorithm>
 #include <cmath>
 #include <cstddef>

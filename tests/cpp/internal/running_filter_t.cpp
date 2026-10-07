@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cmath>
+#include <numbers>
 #include <numeric>
 #include <span>
 #include <stdexcept>
@@ -666,8 +667,8 @@ TEST_CASE("running_filter_fast follows the exact filter on smooth data",
     std::vector<float> x(n);
     loki::math::PCG32 rng(5);
     for (SizeType i = 0; i < n; ++i) {
-        // NOLINTNEXTLINE(modernize-use-std-numbers): keep the reference literal
-        x[i] = std::sin(2.0F * 3.14159265F * static_cast<float>(i) / 20000.0F) +
+        x[i] = std::sin(2.0F * std::numbers::pi_v<float> *
+                        static_cast<float>(i) / 20000.0F) +
                (0.1F * ((2.0F * loki::test::uniform01(rng)) - 1.0F));
     }
     std::vector<float> fast(n);

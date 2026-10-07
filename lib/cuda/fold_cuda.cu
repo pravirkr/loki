@@ -1,7 +1,7 @@
-#include "loki/algorithms/fold.hpp"
-
 #include <memory>
+#include <span>
 #include <type_traits>
+#include <vector>
 
 #include <cuda_runtime.h>
 #include <spdlog/spdlog.h>
@@ -10,6 +10,8 @@
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/transform.h>
 
+#include "loki/common/backend.hpp"
+#include "loki/common/coord.hpp"
 #include "loki/common/types.hpp"
 
 #include "lib/algorithms/fold_engine.hpp"

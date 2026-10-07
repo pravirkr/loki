@@ -21,3 +21,4 @@ Checks: >
   -modernize-use-designated-initializers,
   -readability-trailing-comma,
   -readability-function-cognitive-complexity,
+  -readability-avoid-nested-conditional-operator,

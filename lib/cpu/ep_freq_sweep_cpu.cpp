@@ -1,5 +1,3 @@
-#include "loki/pipelines/ep_freq_sweep.hpp" // NOLINT(misc-include-cleaner): facade header first
-
 #include <cstddef>
 #include <filesystem>
 #include <format>

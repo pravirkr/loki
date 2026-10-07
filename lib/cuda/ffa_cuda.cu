@@ -1,7 +1,9 @@
-#include "loki/algorithms/ffa.hpp"
+#include "lib/cuda/ffa_cuda.cuh"
 
 #include <memory>
 #include <optional>
+#include <span>
+#include <vector>
 
 #include <cuda_runtime.h>
 #include <fmt/ranges.h>
@@ -9,14 +11,17 @@
 #include <thrust/device_vector.h>
 
 #include "loki/algorithms/fold.hpp"
+#include "loki/common/backend.hpp"
 #include "loki/common/coord.hpp"
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
 #include "loki/detection/score.hpp"
+#include "loki/search/configs.hpp"
+#include "loki/utils/fft.hpp"
+#include "loki/utils/workspace.hpp"
 
 #include "lib/algorithms/ffa_engine.hpp"
 #include "lib/cuda/cuda_utils.cuh"
-#include "lib/cuda/ffa_cuda.cuh"
 #include "lib/cuda/fft_cuda.cuh"
 #include "lib/cuda/kernels_cuda.cuh"
 #include "lib/cuda/taylor_cuda.cuh"

@@ -1,5 +1,3 @@
-#include "loki/algorithms/ffa.hpp" // NOLINT(misc-include-cleaner): facade header first
-
 #include <algorithm>
 #include <array>
 #include <cstdint>

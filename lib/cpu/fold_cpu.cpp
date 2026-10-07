@@ -1,5 +1,3 @@
-#include "loki/algorithms/fold.hpp" // NOLINT(misc-include-cleaner): facade header first
-
 #include <algorithm>
 #include <cstdint>
 #include <limits>
@@ -46,7 +44,7 @@ public:
         error_check::check_equal(m_nsamps % m_segment_len, 0,
                                  "BruteFold::Impl: Number of samples is not a "
                                  "multiple of segment length");
-        m_nthreads  = std::clamp(m_nthreads, 1, omp_get_max_threads());
+        m_nthreads  = std::max(m_nthreads, 1);
         m_nfreqs    = m_freq_arr.size();
         m_nsegments = m_nsamps / m_segment_len;
         m_nbins_f   = (nbins / 2) + 1;

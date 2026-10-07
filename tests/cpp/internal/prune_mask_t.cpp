@@ -44,7 +44,6 @@ bool cell_in_windows(SizeType ia,
     // resolve() snaps a value v to get_nearest_idx_analytical(v); a cell is
     // covered iff some v in the window snaps to it. Check the cell's value
     // range against the window using the same snapping on the bounds.
-    // NOLINTNEXTLINE(readability-use-anyofallof): the loop reads clearer
     for (const auto& w : windows) {
         if (w.f_hi < kLimFreq.min || w.f_lo > kLimFreq.max ||
             w.a_hi < kLimAccel.min || w.a_lo > kLimAccel.max) {

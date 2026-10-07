@@ -59,6 +59,7 @@ Checks: >
   -readability-isolate-declaration,
   -readability-magic-numbers,
   -readability-suspicious-call-argument,
+  -readability-use-anyofallof,
   -readability-use-concise-preprocessor-directives,
 
 HeaderFileExtensions: ["h", "hh", "hpp", "hxx", "cuh"]

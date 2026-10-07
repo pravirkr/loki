@@ -625,7 +625,7 @@ void FFTWManager::rfft_batch(std::span<float> real_input,
                              "FFTWManager::rfft_batch: complex_output size "
                              "does not match batch size");
 
-    nthreads = std::clamp(nthreads, 1, omp_get_max_threads());
+    nthreads = std::max(nthreads, 1);
     const auto n_workers =
         std::min(static_cast<SizeType>(nthreads), batch_size);
     const auto slices = build_batch_slices(batch_size, n_workers);
@@ -690,7 +690,7 @@ void FFTWManager::irfft_batch(std::span<ComplexType> complex_input,
                              "FFTWManager::irfft_batch: complex_input size "
                              "does not match batch size");
 
-    nthreads = std::clamp(nthreads, 1, omp_get_max_threads());
+    nthreads = std::max(nthreads, 1);
     const auto n_workers =
         std::min(static_cast<SizeType>(nthreads), batch_size);
     const auto slices = build_batch_slices(batch_size, n_workers);

@@ -172,6 +172,14 @@ Domains are `algorithms`, `common`, `detection`, `io`, `pipelines`, `search`,
   5. private Loki headers (`"lib/..."`);
   6. other same-directory headers.
 
+  "Own header" means the header that declares what the file defines. An
+  engine file (`lib/cpu/ffa_cpu.cpp`, `lib/cuda/ffa_cuda.cu`) implements
+  `make_*_cpu` / `make_*_gpu` from `lib/<area>/<algo>_engine.hpp`, not the
+  public facade, so it has no own header in group 1. It includes the facade
+  header only if it uses a facade type (as `thresholds_cuda.cu` uses
+  `State`). Public headers are already compiled standalone by
+  `check_architecture.sh`, so nothing is lost.
+
   Because each group is a separate block, clang-tidy's
   `llvm-include-order` (which sorts within a block) agrees with
   clang-format. Do not reorder includes by hand; run clang-format.
@@ -309,8 +317,14 @@ The facades do not change: they already dispatch on `kGPUBackend` through
 - On the GPU, the time-domain brute fold accumulates with float `atomicAdd`
   and is not bit-reproducible run to run (rule 6). Every other path is
   deterministic for a fixed seed.
-- Whether `-ffast-math` should be narrowed to the kernel translation units is
-  a numerics decision for a later cycle. It is not a layout question.
+- Thread counts. The caller's `nthreads` is never capped from above:
+  library code clamps only from below, `nthreads = std::max(nthreads, 1)`,
+  before using it in `num_threads(...)`. `omp_get_max_threads()` would let
+  `OMP_NUM_THREADS` or an enclosing region override an explicit request,
+  and the thread count is part of the reproducibility key. Only the
+  configuration and CLI entry points (`configs.cpp` FFA sweep setup,
+  `applications/loki.cpp`) use `omp_get_max_threads()`, to resolve
+  `nthreads <= 0` to "all threads".
 
 ## Checks
 
@@ -342,7 +356,6 @@ Clang 18). Code that newer compilers accept can still fail there:
   anything else with a `std::source_location` default argument) directly.
   GCC < 14 then asks for hidden `source_location` statics in the data
   clauses. clang-tidy's `openmp-use-default-none` is off for this reason.
-- A variable must not appear in both `shared(...)` and `reduction(...)`.
 - A lambda must not capture a structured binding (Clang 18 with OpenMP
   rejects it). Bind a named variable first.
 - Code under `#if defined(__AVX2__)` / `__AVX512F__` is not compiled on
@@ -359,6 +372,5 @@ run-clang-tidy -p build-dev '/(lib|src|tests|applications)/'
 ```
 
 - A suppression names its check and gives a reason, on its own line:
-  `// NOLINTNEXTLINE(<check>): <reason>`. A trailing `// NOLINT` is only for
-  lines clang-format never wraps (`#include`). `.clang-format` never reflows
+  `// NOLINTNEXTLINE(<check>): <reason>`. `.clang-format` never reflows
   NOLINT comments (`CommentPragmas`).

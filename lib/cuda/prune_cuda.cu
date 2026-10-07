@@ -1,4 +1,4 @@
-#include "loki/algorithms/prune.hpp"
+#include "lib/cuda/prune_cuda.cuh"
 
 #include <algorithm>
 #include <filesystem>
@@ -6,8 +6,11 @@
 #include <fstream>
 #include <memory>
 #include <optional>
+#include <span>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
+#include <vector>
 
 #include <cuda/std/span>
 #include <cuda_runtime.h>
@@ -16,13 +19,16 @@
 #include <thrust/device_vector.h>
 
 #include "loki/algorithms/ffa.hpp"
+#include "loki/algorithms/prune_rfi.hpp"
+#include "loki/common/backend.hpp"
 #include "loki/common/types.hpp"
+#include "loki/search/configs.hpp"
+#include "loki/utils/workspace.hpp"
 
 #include "lib/algorithms/prune_engine.hpp"
 #include "lib/cuda/cuda_utils.cuh"
 #include "lib/cuda/dynamic_cuda.cuh"
 #include "lib/cuda/ffa_cuda.cuh"
-#include "lib/cuda/prune_cuda.cuh"
 #include "lib/cuda/world_tree_cuda.cuh"
 #include "lib/detail/psr_utils.hpp"
 #include "lib/detail/timing.hpp"

@@ -62,7 +62,7 @@ void snr_boxcar_impl(const float* __restrict__ folds,
                      float* __restrict__ scores,
                      float stdnoise = 1.0F, // stdnoise is only used for 2D
                      int nthreads   = 1) {
-    nthreads            = std::clamp(nthreads, 1, omp_get_max_threads());
+    nthreads            = std::max(nthreads, 1);
     const SizeType wmax = *std::ranges::max_element(widths, widths + nwidths);
 
     // Precompute template parameters (h, b) for all widths

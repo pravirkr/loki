@@ -1,4 +1,10 @@
-#include "loki/detection/score.hpp"
+#include "lib/cuda/score_cuda.cuh"
+
+#include <cstdint>
+#include <memory>
+#include <span>
+#include <string_view>
+#include <vector>
 
 #include <cub/cub.cuh>
 #include <cuda/atomic>
@@ -11,11 +17,11 @@
 #include <thrust/copy.h>
 #include <thrust/device_vector.h>
 
+#include "loki/common/backend.hpp"
 #include "loki/common/types.hpp"
 
 #include "lib/cuda/cub_helpers.cuh"
 #include "lib/cuda/cuda_utils.cuh"
-#include "lib/cuda/score_cuda.cuh"
 #include "lib/cuda/workspace_cuda.cuh"
 #include "lib/detail/error_check.hpp"
 #include "lib/detail/index_limits.hpp"

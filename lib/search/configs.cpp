@@ -470,6 +470,8 @@ FFATomlConfig::to_search_config(std::optional<SizeType> override_nsamps,
             "(multi-width boxcar decoding is required)");
     }
 
+    // Entry point: 0 (or less) means "all threads". Below this layer the
+    // count is only clamped from below (docs/architecture.md, Numerics).
     const int effective_nthreads =
         nthreads <= 0 ? omp_get_max_threads() : nthreads;
 
@@ -599,7 +601,7 @@ public:
         m_bseg_brute = bseg_brute.value_or(get_bseg_brute_default());
         m_bseg_ffa   = bseg_ffa.value_or(get_bseg_ffa_default());
 
-        m_nthreads = std::clamp(m_nthreads, 1, omp_get_max_threads());
+        m_nthreads = std::max(m_nthreads, 1);
         validate();
         m_tseg_brute = static_cast<double>(m_bseg_brute) * m_tsamp;
         m_tseg_ffa   = static_cast<double>(m_bseg_ffa) * m_tsamp;
