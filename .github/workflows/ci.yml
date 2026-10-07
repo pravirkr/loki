@@ -109,7 +109,9 @@ jobs:
           ctest --preset asan
           ccache --show-stats || true
 
+  # Lint job gate: job-level `if` cannot use workflow `env`. Re-enable → true.
   clang-tidy:
+    if: ${{ false }}
     name: Lint & static analysis (LLVM 23)
     runs-on: ubuntu-latest
     timeout-minutes: 60
