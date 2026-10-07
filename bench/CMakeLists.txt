@@ -1,10 +1,16 @@
-# Google Benchmark (CPM).
-CPMAddPackage(
-  NAME benchmark
-  VERSION 1.9.2
-  GITHUB_REPOSITORY google/benchmark
-  OPTIONS "BENCHMARK_ENABLE_WERROR OFF" "BENCHMARK_FORCE_WERROR OFF" "BENCHMARK_ENABLE_TESTING OFF"
-)
+# Google Benchmark: prefer system libbenchmark-dev when available; pin via CPM otherwise.
+find_package(benchmark CONFIG QUIET)
+if(TARGET benchmark::benchmark_main)
+  message(STATUS "Using system Google Benchmark")
+else()
+  CPMAddPackage(
+    NAME benchmark
+    VERSION 1.9.2
+    GITHUB_REPOSITORY google/benchmark
+    OPTIONS "BENCHMARK_ENABLE_WERROR OFF" "BENCHMARK_FORCE_WERROR OFF"
+            "BENCHMARK_ENABLE_TESTING OFF"
+  )
+endif()
 if(NOT TARGET benchmark::benchmark_main)
   message(
     FATAL_ERROR
@@ -30,20 +36,16 @@ endif()
 add_executable(${LOKI_BENCH_TARGET} ${LOKI_BENCH_SOURCES})
 target_link_libraries(
   ${LOKI_BENCH_TARGET} PRIVATE ${PROJECT_NAME}::${LOKI_LIBRARY_NAME} ${PROJECT_NAME}::internal
-                               ${LOKI_COMPILE_OPTIONS}
-                               benchmark::benchmark_main
+                               ${LOKI_COMPILE_OPTIONS} benchmark::benchmark_main
 )
 
 if(NOT TARGET loki_app)
   message(
-    FATAL_ERROR
-      "loki_app is required for LOKI_BUILD_BENCHMARKS=ON. Enable LOKI_BUILD_APPLICATIONS."
+    FATAL_ERROR "loki_app is required for LOKI_BUILD_BENCHMARKS=ON. Enable LOKI_BUILD_APPLICATIONS."
   )
 endif()
 add_dependencies(${LOKI_BENCH_TARGET} loki_app)
-target_compile_definitions(
-  ${LOKI_BENCH_TARGET} PRIVATE LOKI_APP_PATH="$<TARGET_FILE:loki_app>"
-)
+target_compile_definitions(${LOKI_BENCH_TARGET} PRIVATE LOKI_APP_PATH="$<TARGET_FILE:loki_app>")
 # Keep this after LOKI_COMPILE_OPTIONS so -Wpedantic does not re-enable the warning.
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_library(loki_bench_no_c2y INTERFACE)
