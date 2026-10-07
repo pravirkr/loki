@@ -16,6 +16,10 @@ concurrency:
 
 env:
   CPM_SOURCE_CACHE: ${{ github.workspace }}/.cache/cpm
+  CCACHE_DIR: ${{ github.workspace }}/.cache/ccache
+  CCACHE_MAXSIZE: 1G
+  CCACHE_COMPRESS: true
+  CCACHE_COMPRESSLEVEL: 6
 
 jobs:
   cpp:
@@ -25,8 +29,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Minimum compilers CMakeLists.txt accepts (GCC 13.2, Clang 18).
-        compiler: [g++-13, clang++-18]
+        include:
+          - compiler: g++-13
+            apt_profile: cpp-gcc13
+            ccache_prefix: ci-gcc13
+          - compiler: clang++-18
+            apt_profile: cpp-clang18
+            ccache_prefix: ci-clang18
 
     steps:
       - uses: actions/checkout@v7
@@ -34,8 +43,11 @@ jobs:
       - name: Install system dependencies
         uses: ./.github/actions/install-loki-deps
         with:
-          gcc-13: true
-          clang-18: true
+          profile: ${{ matrix.apt_profile }}
+
+      - uses: ./.github/actions/cache-ccache
+        with:
+          prefix: ${{ matrix.ccache_prefix }}
 
       - name: Cache CPM dependencies
         uses: actions/cache@v6
@@ -47,10 +59,13 @@ jobs:
 
       - name: Configure, build, and test (CMake preset ci)
         run: |
+          ccache --zero-stats || true
+          ccache --show-stats || true
           cmake --version
           cmake --preset ci -D CMAKE_CXX_COMPILER="${{ matrix.compiler }}"
           cmake --build --preset ci --parallel "$(nproc)"
           ctest --preset ci
+          ccache --show-stats || true
 
       # Installed package must work for downstream find_package(loki) users.
       - name: Install and build a downstream consumer
@@ -72,7 +87,11 @@ jobs:
       - name: Install system dependencies
         uses: ./.github/actions/install-loki-deps
         with:
-          gcc-14: true
+          profile: asan-gcc14
+
+      - uses: ./.github/actions/cache-ccache
+        with:
+          prefix: asan-gcc14
 
       - name: Cache CPM dependencies
         uses: actions/cache@v6
@@ -84,9 +103,11 @@ jobs:
 
       - name: Configure, build, and test (CMake preset asan)
         run: |
+          ccache --zero-stats || true
           cmake --preset asan -D CMAKE_CXX_COMPILER=g++-14
           cmake --build --preset asan --parallel "$(nproc)"
           ctest --preset asan
+          ccache --show-stats || true
 
   clang-tidy:
     name: Lint & static analysis (LLVM 23)
@@ -101,11 +122,18 @@ jobs:
       - name: Install system dependencies
         uses: ./.github/actions/install-loki-deps
         with:
-          python-dev: true
+          profile: lint-base
           llvm-version: "23"
 
+      - uses: ./.github/actions/cache-ccache
+        with:
+          prefix: ci-tidy-clang23
+
+      # PyPI pre-commit CLI (not pre-commit-hooks rev in .pre-commit-config.yaml).
       - name: Install pre-commit
-        run: python3 -m pip install --disable-pip-version-check pre-commit==6.0.0
+        run: |
+          python3 -m pip install --disable-pip-version-check --break-system-packages \
+            pre-commit==4.6.2
 
       - name: Cache pre-commit environments
         uses: actions/cache@v6
@@ -126,14 +154,13 @@ jobs:
       - name: Warm pre-commit hook environments
         run: pre-commit install-hooks
 
-      - name: Configure and build (CMake preset ci-tidy)
+      - name: Configure (CMake preset ci-tidy)
         run: |
           cmake --preset ci-tidy \
             -D CMAKE_CXX_COMPILER="clang++-${LLVM_VERSION}"
-          cmake --build --preset ci-tidy --parallel "$(nproc)"
 
-      - name: Run static analysis (aggregate report)
-        run: scripts/ci_static_analysis.sh
+      - name: Build and static analysis (parallel prebuild + aggregate report)
+        run: scripts/ci_lint_job.sh
 
   python:
     name: Python (3.12)
@@ -145,8 +172,11 @@ jobs:
       - name: Install system dependencies
         uses: ./.github/actions/install-loki-deps
         with:
-          build-essential: true
-          git: true
+          profile: python
+
+      - uses: ./.github/actions/cache-ccache
+        with:
+          prefix: python-scikit
 
       - name: Install uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
@@ -162,6 +192,7 @@ jobs:
           restore-keys: |
             cpm-${{ runner.os }}-
 
+      # Wall time is mostly uv sync (pyloki git dep), extension compile, and tests.
       - name: Install package and test dependencies
         run: uv sync --extra tests
         env:
