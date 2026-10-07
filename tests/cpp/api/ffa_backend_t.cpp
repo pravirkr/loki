@@ -1,3 +1,4 @@
+#include <ios>
 #include <random>
 #include <stdexcept>
 #include <vector>
@@ -8,6 +9,7 @@
 #include "loki/algorithms/ffa.hpp"
 #include "loki/common/backend.hpp"
 #include "loki/common/types.hpp"
+#include "loki/detection/score.hpp"
 #include "loki/search/configs.hpp"
 
 using Catch::Approx;
@@ -17,6 +19,7 @@ using loki::Exec;
 using loki::ParamLimit;
 using loki::SizeType;
 using loki::algorithms::compute_ffa;
+using loki::algorithms::compute_ffa_scores;
 using loki::algorithms::FFA;
 using loki::algorithms::FFAFourier;
 using loki::algorithms::FFATime;
@@ -82,5 +85,89 @@ TEST_CASE("FFA backend dispatch CPU", "[ffa][backend]") {
             REQUIRE_THROWS_AS(FFATime(cfg, false, Exec::cuda(0)),
                               std::invalid_argument);
         }
+    }
+}
+
+TEST_CASE("compute_ffa_scores CPU vs CUDA parity", "[ffa][backend][cuda]") {
+    if (!loki::is_available(Backend::kCUDA)) {
+        SKIP("needs a CUDA build");
+    }
+    constexpr SizeType kNsamps = 1U << 14U;
+    constexpr double kTsamp    = 1.0e-3;
+    std::mt19937 rng(42);
+    std::normal_distribution<float> dist(0.0F, 1.0F);
+    std::vector<float> ts_e(kNsamps);
+    std::vector<float> ts_v(kNsamps, 1.0F);
+    for (SizeType i = 0; i < kNsamps; ++i) {
+        ts_e[i] = dist(rng);
+    }
+
+    const std::vector<ParamLimit> limits = {{.min = 5.0, .max = 10.0}};
+
+    for (const bool use_fourier : {false, true}) {
+        DYNAMIC_SECTION("use_fourier = " << std::boolalpha << use_fourier) {
+            const PulsarSearchConfig cfg(
+                kNsamps, kTsamp, /*nbins=*/32, /*eta=*/0.5, limits,
+                /*ducy_max=*/0.2, /*wtsp=*/1.5, use_fourier, /*nthreads=*/1,
+                /*max_process_memory_gb=*/4.0, /*octave_scale=*/2.0,
+                /*nbins_max=*/1024, /*nbins_min_lossy_bf=*/32,
+                /*bseg_brute=*/128);
+
+            auto [cpu_scores, cpu_plan] =
+                compute_ffa_scores(ts_e, ts_v, cfg, /*quiet=*/true,
+                                   /*show_progress=*/false, Exec::cpu(1));
+            auto [cuda_scores, cuda_plan] =
+                compute_ffa_scores(ts_e, ts_v, cfg, /*quiet=*/true,
+                                   /*show_progress=*/false, Exec::cuda(0));
+
+            REQUIRE(cpu_scores.size() == cuda_scores.size());
+            REQUIRE(!cpu_scores.empty());
+            for (SizeType i = 0; i < cpu_scores.size(); ++i) {
+                REQUIRE(cuda_scores[i] ==
+                        Approx(cpu_scores[i]).margin(1.0e-2F));
+            }
+        }
+    }
+}
+
+TEST_CASE("snr_boxcar_2d and snr_boxcar_2d_max CPU vs CUDA parity",
+          "[score][backend][cuda]") {
+    if (!loki::is_available(Backend::kCUDA)) {
+        SKIP("needs a CUDA build");
+    }
+    constexpr SizeType kNprofiles = 64;
+    constexpr SizeType kNbins     = 128;
+    std::vector<float> folds(kNprofiles * kNbins);
+    std::mt19937 rng(1234);
+    std::normal_distribution<float> dist(0.0F, 1.0F);
+    for (auto& val : folds) {
+        val = dist(rng);
+    }
+    const std::vector<SizeType> widths = {1, 2, 4, 8, 16};
+
+    // 2D per-width
+    std::vector<float> scores_cpu(kNprofiles * widths.size());
+    std::vector<float> scores_cuda(kNprofiles * widths.size());
+    loki::detection::snr_boxcar_2d(folds, widths, scores_cpu, kNprofiles,
+                                   kNbins, 1.0F, Exec::cpu(1));
+    loki::detection::snr_boxcar_2d(folds, widths, scores_cuda, kNprofiles,
+                                   kNbins, 1.0F, Exec::cuda(0));
+
+    REQUIRE(scores_cpu.size() == scores_cuda.size());
+    for (SizeType i = 0; i < scores_cpu.size(); ++i) {
+        REQUIRE(scores_cuda[i] == Approx(scores_cpu[i]).margin(1.0e-4F));
+    }
+
+    // 2D max
+    std::vector<float> max_cpu(kNprofiles);
+    std::vector<float> max_cuda(kNprofiles);
+    loki::detection::snr_boxcar_2d_max(folds, widths, max_cpu, kNprofiles,
+                                       kNbins, 1.0F, Exec::cpu(1));
+    loki::detection::snr_boxcar_2d_max(folds, widths, max_cuda, kNprofiles,
+                                       kNbins, 1.0F, Exec::cuda(0));
+
+    REQUIRE(max_cpu.size() == max_cuda.size());
+    for (SizeType i = 0; i < max_cpu.size(); ++i) {
+        REQUIRE(max_cuda[i] == Approx(max_cpu[i]).margin(1.0e-4F));
     }
 }

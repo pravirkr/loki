@@ -43,8 +43,8 @@ void irfft_folds_for_scoring(math::CUFFTManager& fft_manager,
 
 } // namespace
 
-template <SupportedFoldTypeCUDA FoldTypeCUDA, typename Derived>
-BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::BasePruneDPFunctsCUDA(
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+BasePruneDPFunctsCUDA<FoldTypeCUDA>::BasePruneDPFunctsCUDA(
     std::span<const SizeType> param_grid_count_init,
     std::span<const double> dparams_init,
     SizeType nseg_ffa,
@@ -106,8 +106,8 @@ BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::BasePruneDPFunctsCUDA(
     }
 }
 
-template <SupportedFoldTypeCUDA FoldTypeCUDA, typename Derived>
-void BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::irfft_for_scoring(
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+void BasePruneDPFunctsCUDA<FoldTypeCUDA>::irfft_for_scoring(
     cuda::std::span<const ComplexTypeCUDA> src,
     SizeType nfft,
     cuda::std::span<float> dst,
@@ -118,9 +118,8 @@ void BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::irfft_for_scoring(
                             m_cfg.get_nbins(), m_cfg.get_nbins_f(), stream);
 }
 
-template <SupportedFoldTypeCUDA FoldTypeCUDA, typename Derived>
-float BasePruneDPFunctsCUDA<FoldTypeCUDA,
-                            Derived>::get_irfft_scratch_memory_gib()
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+float BasePruneDPFunctsCUDA<FoldTypeCUDA>::get_irfft_scratch_memory_gib()
     const noexcept {
     if constexpr (std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>) {
         const auto bytes =
@@ -131,9 +130,9 @@ float BasePruneDPFunctsCUDA<FoldTypeCUDA,
     return 0.0F;
 }
 
-template <SupportedFoldTypeCUDA FoldTypeCUDA, typename Derived>
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
 cuda::std::span<const FoldTypeCUDA>
-BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::load_segment(
+BasePruneDPFunctsCUDA<FoldTypeCUDA>::load_segment(
     cuda::std::span<const FoldTypeCUDA> ffa_fold, SizeType seg_idx) const {
     const auto nbins   = m_cfg.get_nbins();
     const auto nbins_f = m_cfg.get_nbins_f();
@@ -146,8 +145,8 @@ BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::load_segment(
     }
 }
 
-template <SupportedFoldTypeCUDA FoldTypeCUDA, typename Derived>
-SizeType BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::validate(
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+SizeType BasePruneDPFunctsCUDA<FoldTypeCUDA>::validate(
     cuda::std::span<double> /*leaves_branch*/,
     cuda::std::span<uint32_t> /*leaves_origins*/,
     cuda::std::span<uint8_t> /*validation_mask*/,
@@ -158,8 +157,8 @@ SizeType BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::validate(
     return n_leaves;
 }
 
-template <SupportedFoldTypeCUDA FoldTypeCUDA, typename Derived>
-void BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::shift_add(
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+void BasePruneDPFunctsCUDA<FoldTypeCUDA>::shift_add(
     cuda::std::span<const FoldTypeCUDA> folds_tree,
     cuda::std::span<const uint32_t> indices_tree,
     cuda::std::span<const uint8_t> validation_mask,
@@ -186,8 +185,8 @@ void BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::shift_add(
     }
 }
 
-template <SupportedFoldTypeCUDA FoldTypeCUDA, typename Derived>
-SizeType BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::score_and_filter(
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+SizeType BasePruneDPFunctsCUDA<FoldTypeCUDA>::score_and_filter(
     cuda::std::span<const FoldTypeCUDA> folds_tree,
     cuda::std::span<float> scores_tree,
     cuda::std::span<const uint8_t> validation_mask,
@@ -231,8 +230,8 @@ SizeType BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>::score_and_filter(
 }
 
 // Intermediate implementation for Taylor basis
-template <SupportedFoldTypeCUDA FoldTypeCUDA, typename Derived>
-void BaseTaylorPruneDPFunctsCUDA<FoldTypeCUDA, Derived>::seed(
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+void BaseTaylorPruneDPFunctsCUDA<FoldTypeCUDA>::seed(
     cuda::std::span<const FoldTypeCUDA> fold_segment,
     cuda::std::span<double> seed_leaves,
     cuda::std::span<float> seed_scores,
@@ -271,8 +270,8 @@ void BaseTaylorPruneDPFunctsCUDA<FoldTypeCUDA, Derived>::seed(
 }
 
 // Intermediate implementation for Taylor basis
-template <SupportedFoldTypeCUDA FoldTypeCUDA, typename Derived>
-void BaseChebyshevPruneDPFunctsCUDA<FoldTypeCUDA, Derived>::seed(
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+void BaseChebyshevPruneDPFunctsCUDA<FoldTypeCUDA>::seed(
     cuda::std::span<const FoldTypeCUDA> fold_segment,
     cuda::std::span<double> seed_leaves,
     cuda::std::span<float> seed_scores,
@@ -829,33 +828,15 @@ create_prune_dp_functs_cuda(std::string_view poly_basis,
 
 // Explicit template instantiations
 // Base classes need explicit instantiation for linker
-template class BasePruneDPFunctsCUDA<float, PrunePolyTaylorDPFunctsCUDA<float>>;
-template class BasePruneDPFunctsCUDA<
-    ComplexTypeCUDA,
-    PrunePolyTaylorDPFunctsCUDA<ComplexTypeCUDA>>;
-template class BasePruneDPFunctsCUDA<float, PruneCircTaylorDPFunctsCUDA<float>>;
-template class BasePruneDPFunctsCUDA<
-    ComplexTypeCUDA,
-    PruneCircTaylorDPFunctsCUDA<ComplexTypeCUDA>>;
-template class BaseTaylorPruneDPFunctsCUDA<float,
-                                           PrunePolyTaylorDPFunctsCUDA<float>>;
-template class BaseTaylorPruneDPFunctsCUDA<
-    ComplexTypeCUDA,
-    PrunePolyTaylorDPFunctsCUDA<ComplexTypeCUDA>>;
-template class BaseTaylorPruneDPFunctsCUDA<float,
-                                           PruneCircTaylorDPFunctsCUDA<float>>;
-template class BaseTaylorPruneDPFunctsCUDA<
-    ComplexTypeCUDA,
-    PruneCircTaylorDPFunctsCUDA<ComplexTypeCUDA>>;
+template class BasePruneDPFunctsCUDA<float>;
+template class BasePruneDPFunctsCUDA<ComplexTypeCUDA>;
+template class BaseTaylorPruneDPFunctsCUDA<float>;
+template class BaseTaylorPruneDPFunctsCUDA<ComplexTypeCUDA>;
 
-template class BaseChebyshevPruneDPFunctsCUDA<
-    float,
-    PrunePolyChebyshevDPFunctsCUDA<float>>;
-template class BaseChebyshevPruneDPFunctsCUDA<
-    ComplexTypeCUDA,
-    PrunePolyChebyshevDPFunctsCUDA<ComplexTypeCUDA>>;
+template class BaseChebyshevPruneDPFunctsCUDA<float>;
+template class BaseChebyshevPruneDPFunctsCUDA<ComplexTypeCUDA>;
 
-// Derived classes
+// Leaf classes
 template class PrunePolyTaylorDPFunctsCUDA<float>;
 template class PrunePolyTaylorDPFunctsCUDA<ComplexTypeCUDA>;
 template class PruneCircTaylorDPFunctsCUDA<float>;

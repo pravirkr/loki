@@ -123,8 +123,8 @@ public:
     }
 };
 
-// CRTP Base class - shared functionality for all derived classes
-template <SupportedFoldTypeCUDA FoldTypeCUDA, typename Derived>
+// Base class - shared functionality for all derived classes
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
 class BasePruneDPFunctsCUDA : public PruneDPFunctsCUDA<FoldTypeCUDA> {
 protected:
     // Common members for all derived classes
@@ -203,11 +203,10 @@ public:
 };
 
 // Intermediate base for Taylor-based methods (common seed implementation)
-template <SupportedFoldTypeCUDA FoldTypeCUDA, typename Derived>
-class BaseTaylorPruneDPFunctsCUDA
-    : public BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived> {
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+class BaseTaylorPruneDPFunctsCUDA : public BasePruneDPFunctsCUDA<FoldTypeCUDA> {
 protected:
-    using Base = BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>;
+    using Base = BasePruneDPFunctsCUDA<FoldTypeCUDA>;
 
     // Inherit constructor
     using Base::BasePruneDPFunctsCUDA;
@@ -222,11 +221,11 @@ public:
 };
 
 // Intermediate base for Chebyshev-based methods (common seed implementation)
-template <SupportedFoldTypeCUDA FoldTypeCUDA, typename Derived>
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
 class BaseChebyshevPruneDPFunctsCUDA
-    : public BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived> {
+    : public BasePruneDPFunctsCUDA<FoldTypeCUDA> {
 protected:
-    using Base = BasePruneDPFunctsCUDA<FoldTypeCUDA, Derived>;
+    using Base = BasePruneDPFunctsCUDA<FoldTypeCUDA>;
 
     // Inherit constructor
     using Base::BasePruneDPFunctsCUDA;
@@ -242,13 +241,9 @@ public:
 // Specialized implementation for Polynomial searches in Taylor Basis
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 class PrunePolyTaylorDPFunctsCUDA final
-    : public BaseTaylorPruneDPFunctsCUDA<
-          FoldTypeCUDA,
-          PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>> {
+    : public BaseTaylorPruneDPFunctsCUDA<FoldTypeCUDA> {
 private:
-    using Base =
-        BaseTaylorPruneDPFunctsCUDA<FoldTypeCUDA,
-                                    PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>>;
+    using Base = BaseTaylorPruneDPFunctsCUDA<FoldTypeCUDA>;
 
 public:
     PrunePolyTaylorDPFunctsCUDA(std::span<const SizeType> param_grid_count_init,
@@ -311,13 +306,9 @@ public:
 // Specialized implementation for Polynomial searches in Chebyshev Basis
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 class PrunePolyChebyshevDPFunctsCUDA final
-    : public BaseChebyshevPruneDPFunctsCUDA<
-          FoldTypeCUDA,
-          PrunePolyChebyshevDPFunctsCUDA<FoldTypeCUDA>> {
+    : public BaseChebyshevPruneDPFunctsCUDA<FoldTypeCUDA> {
 private:
-    using Base = BaseChebyshevPruneDPFunctsCUDA<
-        FoldTypeCUDA,
-        PrunePolyChebyshevDPFunctsCUDA<FoldTypeCUDA>>;
+    using Base = BaseChebyshevPruneDPFunctsCUDA<FoldTypeCUDA>;
 
 public:
     PrunePolyChebyshevDPFunctsCUDA(
@@ -382,13 +373,9 @@ public:
 // Use only when nparams == 5
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 class PruneCircTaylorDPFunctsCUDA final
-    : public BaseTaylorPruneDPFunctsCUDA<
-          FoldTypeCUDA,
-          PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>> {
+    : public BaseTaylorPruneDPFunctsCUDA<FoldTypeCUDA> {
 private:
-    using Base =
-        BaseTaylorPruneDPFunctsCUDA<FoldTypeCUDA,
-                                    PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>>;
+    using Base = BaseTaylorPruneDPFunctsCUDA<FoldTypeCUDA>;
 
 public:
     PruneCircTaylorDPFunctsCUDA(std::span<const SizeType> param_grid_count_init,

@@ -198,12 +198,12 @@ class TestFFASensitivity:
                 nsamps=cfg.nsamps,
                 tsamp=cfg.dt,
                 nbins=cfg.fold_bins,
-                tol_bins=self.tol_bins_arr[itol],
-                param_limits=self.param_limits,
+                eta=float(self.tol_bins_arr[itol]),
+                param_limits=np.asarray(self.param_limits, dtype=np.float64),
                 ducy_max=self.ducy_max,
                 wtsp=self.wtsp,
                 bseg_brute=cfg.nsamps // 16384,
-                use_fft_shifts=False,
+                use_fourier=False,
                 nthreads=8,
             )
             losses_real[:, itol] = test_sensitivity_ffa(
@@ -216,12 +216,12 @@ class TestFFASensitivity:
                 nsamps=cfg.nsamps,
                 tsamp=cfg.dt,
                 nbins=cfg.fold_bins,
-                tol_bins=self.tol_bins_arr[itol],
-                param_limits=self.param_limits,
+                eta=float(self.tol_bins_arr[itol]),
+                param_limits=np.asarray(self.param_limits, dtype=np.float64),
                 ducy_max=self.ducy_max,
                 wtsp=self.wtsp,
                 bseg_brute=cfg.nsamps // 16384,
-                use_fft_shifts=True,
+                use_fourier=True,
                 nthreads=8,
             )
             losses_complex[:, itol] = test_sensitivity_ffa(

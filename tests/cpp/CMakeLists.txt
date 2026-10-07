@@ -1,18 +1,28 @@
-# Catch2 test framework (CPM).
-CPMFindPackage(
-  NAME Catch2
-  VERSION 3.16.0
-  GITHUB_REPOSITORY catchorg/Catch2
-  OPTIONS "CATCH_INSTALL_DOCS OFF" "CATCH_INSTALL_EXTRAS OFF"
-)
-if(NOT Catch2_FOUND AND NOT TARGET Catch2::Catch2WithMain)
+# Catch2: prefer system >= 3.16 (Ubuntu 24.04 catch2 is 3.4.0 and breaks CTest on SKIP()).
+# Pin 3.16.0 via CPM when no suitable system package exists.
+find_package(Catch2 3.16 CONFIG QUIET)
+if(Catch2_FOUND)
+  message(STATUS "Using system Catch2 ${Catch2_VERSION}")
+else()
+  CPMFindPackage(
+    NAME Catch2
+    VERSION 3.16.0
+    GITHUB_REPOSITORY catchorg/Catch2
+    OPTIONS "CATCH_INSTALL_DOCS OFF" "CATCH_INSTALL_EXTRAS OFF"
+  )
+endif()
+if(NOT TARGET Catch2::Catch2WithMain)
   message(
     FATAL_ERROR "Catch2 is required for LOKI_BUILD_TESTING=ON but was not found or downloaded."
   )
 endif()
 
-list(APPEND CMAKE_MODULE_PATH ${Catch2_DIR})
-list(APPEND CMAKE_MODULE_PATH ${Catch2_SOURCE_DIR}/extras)
+if(Catch2_DIR)
+  list(APPEND CMAKE_MODULE_PATH ${Catch2_DIR})
+endif()
+if(Catch2_SOURCE_DIR)
+  list(APPEND CMAKE_MODULE_PATH ${Catch2_SOURCE_DIR}/extras)
+endif()
 
 include(CTest)
 include(Catch)

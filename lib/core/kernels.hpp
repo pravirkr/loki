@@ -58,7 +58,7 @@ void brute_fold_ts(const float* __restrict__ ts_e,
                    SizeType nfreqs,
                    SizeType segment_len,
                    SizeType nbins,
-                   int nthreads) noexcept;
+                   int nthreads);
 
 /**
  * @brief Fused time-domain brute fold + first `nlevels` frequency-only FFA
@@ -91,7 +91,7 @@ void brute_fold_ffa_fused_freq(const float* __restrict__ ts_e,
                                SizeType segment_len,
                                SizeType nbins,
                                SizeType nlevels,
-                               int nthreads) noexcept;
+                               int nthreads);
 
 /**
  * @brief Working-set size, in floats, of one frequency tile of a cone band.
@@ -173,7 +173,7 @@ void brute_fold_ts_complex_xsimd(const float* __restrict__ ts_e,
                                  SizeType nbins,
                                  double tsamp,
                                  double t_ref,
-                                 int nthreads) noexcept;
+                                 int nthreads);
 
 void brute_fold_ts_complex(const float* __restrict__ ts_e,
                            const float* __restrict__ ts_v,
@@ -185,7 +185,7 @@ void brute_fold_ts_complex(const float* __restrict__ ts_e,
                            SizeType nbins,
                            double tsamp,
                            double t_ref,
-                           int nthreads) noexcept;
+                           int nthreads);
 
 void ffa_iter(const float* __restrict__ fold_in,
               float* __restrict__ fold_out,
@@ -194,7 +194,7 @@ void ffa_iter(const float* __restrict__ fold_in,
               SizeType ncoords_prev,
               SizeType nsegments,
               SizeType nbins,
-              int nthreads) noexcept;
+              int nthreads);
 
 void ffa_iter_freq(const float* __restrict__ fold_in,
                    float* __restrict__ fold_out,
@@ -203,7 +203,7 @@ void ffa_iter_freq(const float* __restrict__ fold_in,
                    SizeType ncoords_prev,
                    SizeType nsegments,
                    SizeType nbins,
-                   int nthreads) noexcept;
+                   int nthreads);
 
 void ffa_complex_iter(const ComplexType* __restrict__ fold_in,
                       ComplexType* __restrict__ fold_out,
@@ -213,7 +213,7 @@ void ffa_complex_iter(const ComplexType* __restrict__ fold_in,
                       SizeType nsegments,
                       SizeType nbins_f,
                       SizeType nbins,
-                      int nthreads) noexcept;
+                      int nthreads);
 
 void ffa_complex_iter_freq(const ComplexType* __restrict__ fold_in,
                            ComplexType* __restrict__ fold_out,
@@ -223,7 +223,7 @@ void ffa_complex_iter_freq(const ComplexType* __restrict__ fold_in,
                            SizeType nsegments,
                            SizeType nbins_f,
                            SizeType nbins,
-                           int nthreads) noexcept;
+                           int nthreads);
 
 /**
  * @brief Shift ffa folds and add it to the tree folds for each batch.

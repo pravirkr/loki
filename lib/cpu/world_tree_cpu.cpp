@@ -220,13 +220,12 @@ SizeType WorldTree<FoldType>::get_physical_start_idx() const {
 // Mutation operations
 
 template <SupportedFoldType FoldType>
-// NOLINTNEXTLINE(bugprone-exception-escape): a broken invariant terminates
-void WorldTree<FoldType>::set_size(SizeType size) noexcept {
+void WorldTree<FoldType>::set_size(SizeType size) {
+    error_check::check_less_equal(size, m_capacity,
+                                  "WorldTree: Invalid size in set_size()");
     m_size     = size;
     m_head     = 0;
     m_size_old = 0;
-    error_check::check_less_equal(m_size, m_capacity,
-                                  "WorldTree: Invalid size after set_size()");
 }
 
 template <SupportedFoldType FoldType>
@@ -644,12 +643,11 @@ SizeType WorldTree<FoldType>::calculate_space_left() const {
 }
 
 template <SupportedFoldType FoldType>
-// NOLINTNEXTLINE(bugprone-exception-escape): a broken invariant terminates
 float WorldTree<FoldType>::get_prune_threshold(
     std::span<const float> scores_batch,
     std::span<const SizeType> indices_batch,
     SizeType slots_to_write,
-    float current_threshold) noexcept {
+    float current_threshold) {
     if (slots_to_write == 0) {
         return current_threshold;
     }
@@ -807,8 +805,7 @@ void WorldTree<FoldType>::keep(std::span<const uint8_t> keep_mask) {
 // Memory-efficient uniqueness detection
 // Tie-break: keep first occurrence when scores are equal.
 template <SupportedFoldType FoldType>
-// NOLINTNEXTLINE(bugprone-exception-escape): a broken invariant terminates
-void WorldTree<FoldType>::compute_uniqueness_mask_in_scratch() noexcept {
+void WorldTree<FoldType>::compute_uniqueness_mask_in_scratch() {
     if (m_size == 0) {
         return;
     }

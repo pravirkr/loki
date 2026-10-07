@@ -475,7 +475,8 @@ void filter_chunks(const float* x,
     const int team = static_cast<int>(
         std::clamp(n / min_chunk, SizeType{1},
                    static_cast<SizeType>(std::max(nthreads, 1))));
-#pragma omp parallel num_threads(team)
+#pragma omp parallel num_threads(team) default(none)                           \
+    shared(x, dst, make_window) firstprivate(n, w, left, right, subtract)
     {
         const auto nt       = static_cast<SizeType>(omp_get_num_threads());
         const auto tid      = static_cast<SizeType>(omp_get_thread_num());
@@ -572,8 +573,10 @@ plan_fast(SizeType n, SizeType window, SizeType min_points) {
                                                  int nthreads) {
     std::vector<float> coarse(nds);
     const double inv_ds = 1.0 / static_cast<double>(ds);
-#pragma omp parallel for num_threads(nthreads)                                 \
-    schedule(static) if (nds * ds >= kParallelThreshold)
+    nthreads            = std::max(nthreads, 1);
+#pragma omp parallel for num_threads(nthreads) schedule(static) default(none)  \
+    shared(coarse)                                                             \
+    firstprivate(x, ds, nds, inv_ds) if (nds * ds >= kParallelThreshold)
     for (SizeType b = 0; b < nds; ++b) {
         const float* blk = x + (b * ds);
         double acc       = 0.0;
@@ -616,8 +619,9 @@ void interpolate_baseline(const float* x,
     for (SizeType i = 0; i < std::min(half, n); ++i) {
         emit(i, lo[0]);
     }
-#pragma omp parallel for num_threads(nthreads)                                 \
-    schedule(static) if (n >= kParallelThreshold)
+#pragma omp parallel for num_threads(nthreads) schedule(static) default(none)  \
+    firstprivate(x, dst, ds, nds, half, inv, c0, lo,                           \
+                     subtract) if (n >= kParallelThreshold)
     for (SizeType blk = 0; blk < nds - 1; ++blk) {
         const float a     = lo[blk];
         const float d     = lo[blk + 1] - a;
@@ -732,7 +736,8 @@ void check_nonempty(std::span<const float> x, const char* what) {
     const float* p   = x.data();
     double acc       = 0.0;
     nthreads         = std::max(nthreads, 1);
-#pragma omp parallel for simd num_threads(nthreads) schedule(static)           \
+#pragma omp parallel for simd num_threads(nthreads)                            \
+    schedule(static) default(none) firstprivate(n, p)                          \
     reduction(+ : acc) if (n >= kParallelThreshold)
     for (SizeType i = 0; i < n; ++i) {
         acc += static_cast<double>(p[i]);
@@ -749,7 +754,9 @@ void check_nonempty(std::span<const float> x, const char* what) {
     const float* p   = x.data();
     const double mu  = mean_of(x, nthreads);
     double acc       = 0.0;
-#pragma omp parallel for simd num_threads(nthreads) schedule(static)           \
+    nthreads         = std::max(nthreads, 1);
+#pragma omp parallel for simd num_threads(nthreads)                            \
+    schedule(static) default(none) firstprivate(n, p, mu)                      \
     reduction(+ : acc) if (n >= kParallelThreshold)
     for (SizeType i = 0; i < n; ++i) {
         const double d = static_cast<double>(p[i]) - mu;
@@ -791,7 +798,8 @@ radix_select_key(SizeType n, SizeType k, int nthreads, KeyFn key_of) {
 
         std::array<SizeType, kBins> hist{};
         SizeType* h = hist.data();
-#pragma omp parallel for num_threads(nthreads) schedule(static)                \
+#pragma omp parallel for num_threads(nthreads) schedule(static) default(none)  \
+    shared(key_of) firstprivate(n, shift, mask, prev_shift, filter, prefix)    \
     reduction(+ : h[ : kBins]) if (n >= kParallelThreshold)
         for (SizeType i = 0; i < n; ++i) {
             const std::uint32_t key = key_of(i);
@@ -912,7 +920,9 @@ mad_about(std::span<const float> x, double med, int nthreads) {
     const SizeType n = x.size();
     const float* p   = x.data();
     double acc       = 0.0;
-#pragma omp parallel for simd num_threads(nthreads) schedule(static)           \
+    nthreads         = std::max(nthreads, 1);
+#pragma omp parallel for simd num_threads(nthreads)                            \
+    schedule(static) default(none) firstprivate(n, p, med)                     \
     reduction(+ : acc) if (n >= kParallelThreshold)
     for (SizeType i = 0; i < n; ++i) {
         acc += std::abs(static_cast<double>(p[i]) - med);
@@ -1018,7 +1028,8 @@ zscore(std::span<float> x, LocMethod loc, ScaleMethod scale, int nthreads) {
     float* p           = x.data();
     const SizeType n   = x.size();
 #pragma omp parallel for simd num_threads(nthreads)                            \
-    schedule(static) if (n >= kParallelThreshold)
+    schedule(static) default(none)                                             \
+    firstprivate(n, p, loc_f, inv_lo, inv_hi) if (n >= kParallelThreshold)
     for (SizeType i = 0; i < n; ++i) {
         const float d = p[i] - loc_f;
         p[i]          = d * (d < 0.0F ? inv_lo : inv_hi);

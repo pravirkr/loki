@@ -268,7 +268,9 @@ void ffa_taylor_resolve_freq_batch(SizeType n_freqs_cur,
         std::ldexp(tseg_brute, static_cast<int>(ffa_level - 1));
 
     // Calculate relative phases and flattened parameter indices
-#pragma omp parallel for schedule(static) num_threads(nthreads)
+#pragma omp parallel for schedule(static) num_threads(nthreads) default(none)  \
+    shared(coords, lim_freq)                                                   \
+    firstprivate(n_freqs_cur, n_freqs_prev, delta_t, nbins)
     for (SizeType i = 0; i < n_freqs_cur; ++i) {
         const double f_cur =
             psr_utils::get_param_val_at_idx(lim_freq, n_freqs_cur, i);

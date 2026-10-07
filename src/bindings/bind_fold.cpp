@@ -1,4 +1,3 @@
-#include <cstddef>
 #include <string_view>
 
 #include <pybind11/functional.h>

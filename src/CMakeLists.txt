@@ -4,6 +4,19 @@ find_package(
   COMPONENTS Interpreter Development
   REQUIRED
 )
+
+# pybind11: prefer system / scikit-build env; pin 3.0.0 via CPM for plain CMake builds.
+find_package(pybind11 3 CONFIG QUIET)
+if(pybind11_FOUND)
+  message(STATUS "Using system pybind11 ${pybind11_VERSION}")
+else()
+  CPMAddPackage(
+    NAME pybind11
+    VERSION 3.0.0
+    GITHUB_REPOSITORY pybind/pybind11
+    OPTIONS "PYBIND11_INSTALL OFF"
+  )
+endif()
 find_package(pybind11 CONFIG REQUIRED)
 
 # Python extension module (libloki).

@@ -136,7 +136,7 @@ public:
 
     // Circular buffer control
     /// @brief Set size externally (for initialization)
-    void set_size(SizeType size) noexcept;
+    void set_size(SizeType size);
     /// @brief Reset buffer to empty state
     void reset() noexcept;
     /// @brief Prepare for in-place update, freezes current data as read region,
@@ -252,7 +252,7 @@ private:
     /**
      * @brief Calculate available space in buffer
      */
-    SizeType calculate_space_left() const noexcept;
+    SizeType calculate_space_left() const;
 
     /**
      * @brief Get prune threshold in current region
@@ -264,7 +264,7 @@ private:
                               cuda::std::span<const uint32_t> indices_batch,
                               SizeType slots_to_write,
                               float current_threshold,
-                              cudaStream_t stream) noexcept;
+                              cudaStream_t stream);
 
     /**
      * @brief Prune write region by threshold with in-place update.

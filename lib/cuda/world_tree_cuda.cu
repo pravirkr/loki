@@ -536,12 +536,12 @@ SizeType WorldTreeCUDA<FoldTypeCUDA>::get_physical_start_idx() const {
 // Mutation operations
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
-void WorldTreeCUDA<FoldTypeCUDA>::set_size(SizeType size) noexcept {
+void WorldTreeCUDA<FoldTypeCUDA>::set_size(SizeType size) {
+    error_check::check_less_equal(size, m_capacity,
+                                  "WorldTreeCUDA: Invalid size in set_size");
     m_size     = size;
     m_head     = 0;
     m_size_old = 0;
-    error_check::check_less_equal(m_size, m_capacity,
-                                  "WorldTreeCUDA: Invalid size after set_size");
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
@@ -809,7 +809,7 @@ constexpr SizeType WorldTreeCUDA<FoldTypeCUDA>::get_circular_index(
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
-SizeType WorldTreeCUDA<FoldTypeCUDA>::calculate_space_left() const noexcept {
+SizeType WorldTreeCUDA<FoldTypeCUDA>::calculate_space_left() const {
     const auto remaining_old = static_cast<IndexType>(m_size_old) -
                                static_cast<IndexType>(m_read_consumed);
     error_check::check_greater_equal(
@@ -828,7 +828,7 @@ float WorldTreeCUDA<FoldTypeCUDA>::get_prune_threshold(
     cuda::std::span<const uint32_t> indices_batch,
     SizeType slots_to_write,
     float current_threshold,
-    cudaStream_t stream) noexcept {
+    cudaStream_t stream) {
     if (slots_to_write == 0) {
         return current_threshold;
     }

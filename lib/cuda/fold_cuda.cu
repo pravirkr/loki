@@ -1,3 +1,4 @@
+#include <cstdint>
 #include <memory>
 #include <span>
 #include <type_traits>
@@ -11,7 +12,6 @@
 #include <thrust/transform.h>
 
 #include "loki/common/backend.hpp"
-#include "loki/common/coord.hpp"
 #include "loki/common/types.hpp"
 
 #include "lib/algorithms/fold_engine.hpp"

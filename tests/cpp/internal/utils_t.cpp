@@ -1,6 +1,5 @@
 #include "lib/detail/utils.hpp"
 
-#include <cstddef>
 #include <limits>
 #include <optional>
 #include <stdexcept>

@@ -30,6 +30,9 @@ class FFTManager {
 public:
     /// Empty handle. Assign a manager before passing it on.
     FFTManager() noexcept;
+    /// Manager for `exec`'s backend and device. `exec` has no default on
+    /// purpose: `FFTManager()` is the empty handle, not a CPU manager. Write
+    /// `FFTManager(Exec::cpu())` for one.
     explicit FFTManager(Exec exec);
 
     ~FFTManager();

@@ -1348,7 +1348,16 @@ private:
                 const std::string error_msg = std::format(
                     "Error in ref_seg {}: {}", ref_segs[i], e.what());
                 errors.emplace_back(ref_segs[i], error_msg);
+            } catch (...) {
+                // Keep draining: every future must be collected.
+                errors.emplace_back(ref_segs[i],
+                                    std::format("Error in ref_seg {}: unknown "
+                                                "exception",
+                                                ref_segs[i]));
             }
+        }
+        if (tracker) {
+            tracker->stop();
         }
 
         if (errors.empty()) {
@@ -1373,9 +1382,6 @@ private:
                 std::format("Multi-threaded execution failed: {} out of {} "
                             "tasks failed",
                             errors.size(), ref_segs.size()));
-        }
-        if (tracker) {
-            tracker->stop();
         }
     }
 }; // End EPMultiPassCpuEngine definition

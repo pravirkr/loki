@@ -72,6 +72,14 @@ void snr_boxcar_2d(std::span<const float> folds,
                    float stdnoise = 1.0F,
                    Exec exec      = {});
 
+void snr_boxcar_2d(DeviceSpan<const float> folds,
+                   DeviceSpan<const uint32_t> widths,
+                   DeviceSpan<float> scores,
+                   SizeType nprofiles,
+                   SizeType nbins,
+                   float stdnoise = 1.0F,
+                   Stream stream  = {});
+
 // Compute the Boxcar S/N of a batch of single pulse profiles with common
 // variance Useful for thresholding code
 void snr_boxcar_2d_max(std::span<const float> folds,

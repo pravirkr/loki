@@ -248,17 +248,18 @@ public:
     bool get_use_conservative_tile() const noexcept override;
     double get_x_mass_const() const noexcept;
 
-    // NOLINTNEXTLINE(bugprone-derived-method-shadowing-base-method)
+    /// Same as FFASearchConfig::get_updated_config, but keeps the EP fields.
+    /// A distinct name, so it never hides the base overloads: through an
+    /// FFASearchConfig the FFA version runs and returns the FFA type.
     [[nodiscard]] EPSearchConfig
-    get_updated_config(SizeType nbins,
-                       double eta,
-                       std::span<const ParamLimit> param_limits) const;
+    get_updated_ep_config(SizeType nbins,
+                          double eta,
+                          std::span<const ParamLimit> param_limits) const;
 
-    // NOLINTNEXTLINE(bugprone-derived-method-shadowing-base-method)
-    [[nodiscard]] EPSearchConfig get_updated_config(SizeType nbins,
-                                                    double eta,
-                                                    double f_min,
-                                                    double f_max) const;
+    [[nodiscard]] EPSearchConfig get_updated_ep_config(SizeType nbins,
+                                                       double eta,
+                                                       double f_min,
+                                                       double f_max) const;
 
 private:
     class EPImpl;

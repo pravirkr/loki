@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <format>
 #include <numeric>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -620,22 +621,22 @@ private:
         // remainder, attempt to absorb it into the current chunk.
         constexpr double kSliverWidthFactor = 4.0; // sliver up to 4x tolerance
         const auto try_absorb_sliver =
-            [&](double current_f_end, double nominal_start,
-                ChunkEval bisect_eval) -> std::pair<double, ChunkEval> {
+            [&](double current_f_end,
+                double nominal_start) -> std::optional<ChunkEval> {
             const double remainder_width = nominal_start - f_start;
             const double sliver_threshold =
                 kSliverWidthFactor * boundary_tolerance;
 
             if (remainder_width <= 0.0 || remainder_width > sliver_threshold) {
-                return {nominal_start, std::move(bisect_eval)};
+                return std::nullopt;
             }
 
             // Evaluate the merged chunk. If it fits, prefer it.
             auto merged_eval = evaluate_chunk(f_start, current_f_end);
             if (fits(merged_eval)) {
-                return {f_start, std::move(merged_eval)};
+                return merged_eval;
             }
-            return {nominal_start, std::move(bisect_eval)};
+            return std::nullopt;
         };
 
         // Main covering loop
@@ -643,8 +644,11 @@ private:
         while (current_f_end > f_start) {
             auto [nominal_start, eval] =
                 find_largest_fitting_chunk(current_f_end);
-            std::tie(nominal_start, eval) = try_absorb_sliver(
-                current_f_end, nominal_start, std::move(eval));
+            if (auto absorbed =
+                    try_absorb_sliver(current_f_end, nominal_start)) {
+                nominal_start = f_start;
+                eval          = std::move(*absorbed);
+            }
             // Defensive: bisection is guaranteed to make progress because the
             // minimum-width probe fits. If this triggers, there's a logic bug.
             if (nominal_start >= current_f_end) {

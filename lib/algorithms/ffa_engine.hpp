@@ -9,6 +9,7 @@
 #include <optional>
 #include <span>
 #include <stdexcept>
+#include <tuple>
 #include <vector>
 
 #include "loki/common/backend.hpp"
@@ -105,5 +106,13 @@ make_ffa_gpu(memory::FFAWorkspace<FoldType>& workspace,
              math::FFTManager& fft_manager,
              const search::FFASearchConfig& cfg,
              int device_id);
+
+/// compute_ffa_scores on the GPU: the time series is copied in once, folded
+/// and scored on @p device_id, and only the scores are copied back.
+std::tuple<std::vector<float>, plans::FFAPlan<float>>
+compute_ffa_scores_gpu(std::span<const float> ts_e,
+                       std::span<const float> ts_v,
+                       const search::FFASearchConfig& cfg,
+                       int device_id);
 
 } // namespace loki::algorithms::detail

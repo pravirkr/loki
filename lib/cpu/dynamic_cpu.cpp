@@ -27,8 +27,8 @@
 namespace loki::core {
 
 // CRTP Base class implementation
-template <SupportedFoldType FoldType, typename Derived>
-BasePruneDPFuncts<FoldType, Derived>::BasePruneDPFuncts(
+template <SupportedFoldType FoldType>
+BasePruneDPFuncts<FoldType>::BasePruneDPFuncts(
     std::span<const SizeType> param_grid_count_init,
     std::span<const double> dparams_init,
     SizeType nseg_ffa,
@@ -68,8 +68,8 @@ BasePruneDPFuncts<FoldType, Derived>::BasePruneDPFuncts(
     }
 }
 
-template <SupportedFoldType FoldType, typename Derived>
-void BasePruneDPFuncts<FoldType, Derived>::irfft_for_scoring(
+template <SupportedFoldType FoldType>
+void BasePruneDPFuncts<FoldType>::irfft_for_scoring(
     std::span<const ComplexType> src, SizeType nfft, std::span<float> dst)
     requires(std::is_same_v<FoldType, ComplexType>)
 {
@@ -81,8 +81,8 @@ void BasePruneDPFuncts<FoldType, Derived>::irfft_for_scoring(
     m_fft_manager.irfft_batch(scratch, dst.first(nfft * nbins), nfft, nbins, 1);
 }
 
-template <SupportedFoldType FoldType, typename Derived>
-float BasePruneDPFuncts<FoldType, Derived>::get_irfft_scratch_memory_gib()
+template <SupportedFoldType FoldType>
+float BasePruneDPFuncts<FoldType>::get_irfft_scratch_memory_gib()
     const noexcept {
     if constexpr (std::is_same_v<FoldType, ComplexType>) {
         const auto bytes = (m_scratch_folds_c.size() * sizeof(ComplexType)) +
@@ -92,9 +92,10 @@ float BasePruneDPFuncts<FoldType, Derived>::get_irfft_scratch_memory_gib()
     return 0.0F;
 }
 
-template <SupportedFoldType FoldType, typename Derived>
-std::span<const FoldType> BasePruneDPFuncts<FoldType, Derived>::load_segment(
-    std::span<const FoldType> ffa_fold, SizeType seg_idx) const {
+template <SupportedFoldType FoldType>
+std::span<const FoldType>
+BasePruneDPFuncts<FoldType>::load_segment(std::span<const FoldType> ffa_fold,
+                                          SizeType seg_idx) const {
     const auto nbins   = m_cfg.get_nbins();
     const auto nbins_f = m_cfg.get_nbins_f();
     if constexpr (std::is_same_v<FoldType, ComplexType>) {
@@ -106,26 +107,26 @@ std::span<const FoldType> BasePruneDPFuncts<FoldType, Derived>::load_segment(
     }
 }
 
-template <SupportedFoldType FoldType, typename Derived>
-SizeType BasePruneDPFuncts<FoldType, Derived>::validate(
-    std::span<double> /*leaves_branch*/,
-    std::span<SizeType> /*leaves_origins*/,
-    std::pair<double, double> /*coord_cur*/,
-    SizeType n_leaves) const {
+template <SupportedFoldType FoldType>
+SizeType
+BasePruneDPFuncts<FoldType>::validate(std::span<double> /*leaves_branch*/,
+                                      std::span<SizeType> /*leaves_origins*/,
+                                      std::pair<double, double> /*coord_cur*/,
+                                      SizeType n_leaves) const {
     return n_leaves;
 }
 
-template <SupportedFoldType FoldType, typename Derived>
+template <SupportedFoldType FoldType>
 std::tuple<std::vector<double>, std::vector<double>, double>
-BasePruneDPFuncts<FoldType, Derived>::get_validation_params(
+BasePruneDPFuncts<FoldType>::get_validation_params(
     std::pair<double, double> /*coord_add*/) const {
     // Return empty validation parameters for Taylor variant
     std::vector<double> const empty_arr(0);
     return std::make_tuple(empty_arr, empty_arr, 0.0);
 }
 
-template <SupportedFoldType FoldType, typename Derived>
-void BasePruneDPFuncts<FoldType, Derived>::shift_add(
+template <SupportedFoldType FoldType>
+void BasePruneDPFuncts<FoldType>::shift_add(
     std::span<const FoldType> folds_tree,
     std::span<const SizeType> indices_tree,
     std::span<const FoldType> folds_ffa,
@@ -151,8 +152,8 @@ void BasePruneDPFuncts<FoldType, Derived>::shift_add(
     }
 }
 
-template <SupportedFoldType FoldType, typename Derived>
-SizeType BasePruneDPFuncts<FoldType, Derived>::score_and_filter(
+template <SupportedFoldType FoldType>
+SizeType BasePruneDPFuncts<FoldType>::score_and_filter(
     std::span<const FoldType> folds_tree,
     std::span<float> scores_tree,
     std::span<SizeType> indices_tree,
@@ -187,8 +188,8 @@ SizeType BasePruneDPFuncts<FoldType, Derived>::score_and_filter(
     }
 }
 
-template <SupportedFoldType FoldType, typename Derived>
-std::vector<double> BasePruneDPFuncts<FoldType, Derived>::get_transform_matrix(
+template <SupportedFoldType FoldType>
+std::vector<double> BasePruneDPFuncts<FoldType>::get_transform_matrix(
     std::pair<double, double> /*coord_cur*/,
     std::pair<double, double> /*coord_prev*/) const {
     // Return identity matrix for Taylor variant
@@ -201,16 +202,16 @@ std::vector<double> BasePruneDPFuncts<FoldType, Derived>::get_transform_matrix(
     return identity;
 }
 
-template <SupportedFoldType FoldType, typename Derived>
-void BasePruneDPFuncts<FoldType, Derived>::pack(
-    std::span<const FoldType> data, std::span<FoldType> out) const noexcept {
+template <SupportedFoldType FoldType>
+void BasePruneDPFuncts<FoldType>::pack(std::span<const FoldType> data,
+                                       std::span<FoldType> out) const noexcept {
     // Placeholder for future implementation
     std::copy(data.begin(), data.end(), out.begin());
 }
 
 // Intermediate implementation for Taylor basis
-template <SupportedFoldType FoldType, typename Derived>
-void BaseTaylorPruneDPFuncts<FoldType, Derived>::seed(
+template <SupportedFoldType FoldType>
+void BaseTaylorPruneDPFuncts<FoldType>::seed(
     std::span<const FoldType> fold_segment,
     std::span<double> seed_leaves,
     std::span<float> seed_scores,
@@ -248,8 +249,8 @@ void BaseTaylorPruneDPFuncts<FoldType, Derived>::seed(
 }
 
 // Intermediate implementation for Chebyshev basis
-template <SupportedFoldType FoldType, typename Derived>
-void BaseChebyshevPruneDPFuncts<FoldType, Derived>::seed(
+template <SupportedFoldType FoldType>
+void BaseChebyshevPruneDPFuncts<FoldType>::seed(
     std::span<const FoldType> fold_segment,
     std::span<double> seed_leaves,
     std::span<float> seed_scores,
@@ -742,26 +743,15 @@ create_prune_dp_functs(std::string_view poly_basis,
 
 // Explicit template instantiations
 // Base classes need explicit instantiation for linker
-template class BasePruneDPFuncts<float, PrunePolyTaylorDPFuncts<float>>;
-template class BasePruneDPFuncts<ComplexType,
-                                 PrunePolyTaylorDPFuncts<ComplexType>>;
-template class BasePruneDPFuncts<float, PruneCircTaylorDPFuncts<float>>;
-template class BasePruneDPFuncts<ComplexType,
-                                 PruneCircTaylorDPFuncts<ComplexType>>;
+template class BasePruneDPFuncts<float>;
+template class BasePruneDPFuncts<ComplexType>;
 
-template class BaseTaylorPruneDPFuncts<float, PrunePolyTaylorDPFuncts<float>>;
-template class BaseTaylorPruneDPFuncts<ComplexType,
-                                       PrunePolyTaylorDPFuncts<ComplexType>>;
-template class BaseTaylorPruneDPFuncts<float, PruneCircTaylorDPFuncts<float>>;
-template class BaseTaylorPruneDPFuncts<ComplexType,
-                                       PruneCircTaylorDPFuncts<ComplexType>>;
+template class BaseTaylorPruneDPFuncts<float>;
+template class BaseTaylorPruneDPFuncts<ComplexType>;
 
-template class BaseChebyshevPruneDPFuncts<float,
-                                          PrunePolyChebyshevDPFuncts<float>>;
-template class BaseChebyshevPruneDPFuncts<
-    ComplexType,
-    PrunePolyChebyshevDPFuncts<ComplexType>>;
-// Derived classes
+template class BaseChebyshevPruneDPFuncts<float>;
+template class BaseChebyshevPruneDPFuncts<ComplexType>;
+// Leaf classes
 template class PrunePolyTaylorDPFuncts<float>;
 template class PrunePolyTaylorDPFuncts<ComplexType>;
 template class PruneCircTaylorDPFuncts<float>;

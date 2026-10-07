@@ -1,0 +1,19 @@
+name: Cache ccache
+description: Restore and save the ccache directory for CI builds
+
+inputs:
+  prefix:
+    description: Cache key prefix (compiler/preset profile, e.g. ci-gcc13)
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Restore ccache
+      uses: actions/cache@v6
+      with:
+        path: ${{ github.workspace }}/.cache/ccache
+        key: ccache-${{ inputs.prefix }}-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/LokiDependencies.cmake', 'cmake/CPM.cmake') }}-${{ github.sha }}
+        restore-keys: |
+          ccache-${{ inputs.prefix }}-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/LokiDependencies.cmake', 'cmake/CPM.cmake') }}-
+          ccache-${{ inputs.prefix }}-${{ runner.os }}-
