@@ -595,6 +595,11 @@ poly_chebyshev_branch_accel_batch(std::span<double> leaves_tree,
 
     // Fill leaves_origins
     SizeType out_leaves = 0;
+    // Write at most `capacity` leaves; past it, keep counting only, so
+    // the caller sees the total this batch needs and can retry it in
+    // smaller pieces. Nothing is written past the workspace.
+    const SizeType capacity = std::min(leaves_branch.size() / kLeavesStride,
+                                       leaves_origins.size());
     for (SizeType i = 0; i < n_leaves; ++i) {
         const SizeType lo            = i * kLeavesStride;
         const SizeType fb            = i * kParams;
@@ -605,16 +610,18 @@ poly_chebyshev_branch_accel_batch(std::span<double> leaves_tree,
 
         for (SizeType a = 0; a < n_d2_branches; ++a) {
             for (SizeType b = 0; b < n_d1_branches; ++b) {
-                const SizeType bo         = out_leaves * kLeavesStride;
-                leaves_branch_ptr[bo + 0] = scratch_params[d2_offset + a];
-                leaves_branch_ptr[bo + 1] = scratch_dparams[fb + 0];
-                leaves_branch_ptr[bo + 2] = scratch_params[d1_offset + b];
-                leaves_branch_ptr[bo + 3] = scratch_dparams[fb + 1];
-                // Fill d0 and f0 directly from leaves_tree
-                std::memcpy(leaves_branch_ptr + bo + 4,
-                            leaves_tree_ptr + lo + 4, 4 * sizeof(double));
+                if (out_leaves < capacity) {
+                    const SizeType bo         = out_leaves * kLeavesStride;
+                    leaves_branch_ptr[bo + 0] = scratch_params[d2_offset + a];
+                    leaves_branch_ptr[bo + 1] = scratch_dparams[fb + 0];
+                    leaves_branch_ptr[bo + 2] = scratch_params[d1_offset + b];
+                    leaves_branch_ptr[bo + 3] = scratch_dparams[fb + 1];
+                    // Fill d0 and f0 directly from leaves_tree
+                    std::memcpy(leaves_branch_ptr + bo + 4,
+                                leaves_tree_ptr + lo + 4, 4 * sizeof(double));
 
-                leaves_origins_ptr[out_leaves] = i;
+                    leaves_origins_ptr[out_leaves] = i;
+                }
                 ++out_leaves;
             }
         }
@@ -750,6 +757,11 @@ poly_chebyshev_branch_jerk_batch(std::span<double> leaves_tree,
 
     // Fill leaves_origins
     SizeType out_leaves = 0;
+    // Write at most `capacity` leaves; past it, keep counting only, so
+    // the caller sees the total this batch needs and can retry it in
+    // smaller pieces. Nothing is written past the workspace.
+    const SizeType capacity = std::min(leaves_branch.size() / kLeavesStride,
+                                       leaves_origins.size());
     for (SizeType i = 0; i < n_leaves; ++i) {
         const SizeType lo            = i * kLeavesStride;
         const SizeType fb            = i * kParams;
@@ -763,18 +775,20 @@ poly_chebyshev_branch_jerk_batch(std::span<double> leaves_tree,
         for (SizeType a = 0; a < n_d3_branches; ++a) {
             for (SizeType b = 0; b < n_d2_branches; ++b) {
                 for (SizeType c = 0; c < n_d1_branches; ++c) {
-                    const SizeType bo         = out_leaves * kLeavesStride;
-                    leaves_branch_ptr[bo + 0] = scratch_params[d3_offset + a];
-                    leaves_branch_ptr[bo + 1] = scratch_dparams[fb + 0];
-                    leaves_branch_ptr[bo + 2] = scratch_params[d2_offset + b];
-                    leaves_branch_ptr[bo + 3] = scratch_dparams[fb + 1];
-                    leaves_branch_ptr[bo + 4] = scratch_params[d1_offset + c];
-                    leaves_branch_ptr[bo + 5] = scratch_dparams[fb + 2];
-                    // Fill d0 and f0 directly from leaves_tree
-                    std::memcpy(leaves_branch_ptr + bo + 6,
-                                leaves_tree_ptr + lo + 6, 4 * sizeof(double));
+                    if (out_leaves < capacity) {
+                        const SizeType bo         = out_leaves * kLeavesStride;
+                        leaves_branch_ptr[bo + 0] = scratch_params[d3_offset + a];
+                        leaves_branch_ptr[bo + 1] = scratch_dparams[fb + 0];
+                        leaves_branch_ptr[bo + 2] = scratch_params[d2_offset + b];
+                        leaves_branch_ptr[bo + 3] = scratch_dparams[fb + 1];
+                        leaves_branch_ptr[bo + 4] = scratch_params[d1_offset + c];
+                        leaves_branch_ptr[bo + 5] = scratch_dparams[fb + 2];
+                        // Fill d0 and f0 directly from leaves_tree
+                        std::memcpy(leaves_branch_ptr + bo + 6,
+                                    leaves_tree_ptr + lo + 6, 4 * sizeof(double));
 
-                    leaves_origins_ptr[out_leaves] = i;
+                        leaves_origins_ptr[out_leaves] = i;
+                    }
                     ++out_leaves;
                 }
             }
@@ -920,6 +934,11 @@ poly_chebyshev_branch_snap_batch(std::span<double> leaves_tree,
 
     // Fill leaves_origins
     SizeType out_leaves = 0;
+    // Write at most `capacity` leaves; past it, keep counting only, so
+    // the caller sees the total this batch needs and can retry it in
+    // smaller pieces. Nothing is written past the workspace.
+    const SizeType capacity = std::min(leaves_branch.size() / kLeavesStride,
+                                       leaves_origins.size());
     for (SizeType i = 0; i < n_leaves; ++i) {
         const SizeType lo            = i * kLeavesStride;
         const SizeType fb            = i * kParams;
@@ -936,25 +955,27 @@ poly_chebyshev_branch_snap_batch(std::span<double> leaves_tree,
             for (SizeType b = 0; b < n_d3_branches; ++b) {
                 for (SizeType c = 0; c < n_d2_branches; ++c) {
                     for (SizeType d = 0; d < n_d1_branches; ++d) {
-                        const SizeType bo = out_leaves * kLeavesStride;
-                        leaves_branch_ptr[bo + 0] =
-                            scratch_params[d4_offset + a];
-                        leaves_branch_ptr[bo + 1] = scratch_dparams[fb + 0];
-                        leaves_branch_ptr[bo + 2] =
-                            scratch_params[d3_offset + b];
-                        leaves_branch_ptr[bo + 3] = scratch_dparams[fb + 1];
-                        leaves_branch_ptr[bo + 4] =
-                            scratch_params[d2_offset + c];
-                        leaves_branch_ptr[bo + 5] = scratch_dparams[fb + 2];
-                        leaves_branch_ptr[bo + 6] =
-                            scratch_params[d1_offset + d];
-                        leaves_branch_ptr[bo + 7] = scratch_dparams[fb + 3];
-                        // Fill d0 and f0 directly from leaves_tree
-                        std::memcpy(leaves_branch_ptr + bo + 8,
-                                    leaves_tree_ptr + lo + 8,
-                                    4 * sizeof(double));
+                        if (out_leaves < capacity) {
+                            const SizeType bo = out_leaves * kLeavesStride;
+                            leaves_branch_ptr[bo + 0] =
+                                scratch_params[d4_offset + a];
+                            leaves_branch_ptr[bo + 1] = scratch_dparams[fb + 0];
+                            leaves_branch_ptr[bo + 2] =
+                                scratch_params[d3_offset + b];
+                            leaves_branch_ptr[bo + 3] = scratch_dparams[fb + 1];
+                            leaves_branch_ptr[bo + 4] =
+                                scratch_params[d2_offset + c];
+                            leaves_branch_ptr[bo + 5] = scratch_dparams[fb + 2];
+                            leaves_branch_ptr[bo + 6] =
+                                scratch_params[d1_offset + d];
+                            leaves_branch_ptr[bo + 7] = scratch_dparams[fb + 3];
+                            // Fill d0 and f0 directly from leaves_tree
+                            std::memcpy(leaves_branch_ptr + bo + 8,
+                                        leaves_tree_ptr + lo + 8,
+                                        4 * sizeof(double));
 
-                        leaves_origins_ptr[out_leaves] = i;
+                            leaves_origins_ptr[out_leaves] = i;
+                        }
                         ++out_leaves;
                     }
                 }

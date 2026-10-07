@@ -276,6 +276,11 @@ SizeType circ_taylor_branch_batch(std::span<const double> leaves_tree,
     // Loop 3: Branching d4-d1, write every (d4×d3×d2×d1) combo as a complete
     // output leaf. Ignore n_d5
     SizeType out_leaves = 0;
+    // Write at most `capacity` leaves; past it, keep counting only, so
+    // the caller sees the total this batch needs and can retry it in
+    // smaller pieces. Nothing is written past the workspace.
+    const SizeType capacity = std::min(leaves_branch.size() / kLeavesStride,
+                                       leaves_origins.size());
     for (SizeType i = 0; i < n_leaves; ++i) {
         const SizeType lo = i * kLeavesStride;
         const SizeType fb = i * kParams;
@@ -299,24 +304,26 @@ SizeType circ_taylor_branch_batch(std::span<const double> leaves_tree,
             for (SizeType c = 0; c < n_d3; ++c) {
                 for (SizeType d = 0; d < n_d2; ++d) {
                     for (SizeType e = 0; e < n_d1; ++e) {
-                        const SizeType bo = out_leaves * kLeavesStride;
-                        double* __restrict__ out_ptr = leaves_branch_ptr + bo;
+                        if (out_leaves < capacity) {
+                            const SizeType bo = out_leaves * kLeavesStride;
+                            double* __restrict__ out_ptr = leaves_branch_ptr + bo;
 
-                        out_ptr[0] = scratch_params[d5_off];
-                        out_ptr[1] = d5_sig;
-                        out_ptr[2] = scratch_params[d4_off + b];
-                        out_ptr[3] = d4_sig;
-                        out_ptr[4] = scratch_params[d3_off + c];
-                        out_ptr[5] = d3_sig;
-                        out_ptr[6] = scratch_params[d2_off + d];
-                        out_ptr[7] = d2_sig;
-                        out_ptr[8] = scratch_params[d1_off + e];
-                        out_ptr[9] = d1_sig;
-                        // Copy d0 and f0
-                        std::memcpy(out_ptr + 10, leaves_tree_ptr + lo + 10,
-                                    4 * sizeof(double));
+                            out_ptr[0] = scratch_params[d5_off];
+                            out_ptr[1] = d5_sig;
+                            out_ptr[2] = scratch_params[d4_off + b];
+                            out_ptr[3] = d4_sig;
+                            out_ptr[4] = scratch_params[d3_off + c];
+                            out_ptr[5] = d3_sig;
+                            out_ptr[6] = scratch_params[d2_off + d];
+                            out_ptr[7] = d2_sig;
+                            out_ptr[8] = scratch_params[d1_off + e];
+                            out_ptr[9] = d1_sig;
+                            // Copy d0 and f0
+                            std::memcpy(out_ptr + 10, leaves_tree_ptr + lo + 10,
+                                        4 * sizeof(double));
 
-                        leaves_origins_ptr[out_leaves] = i;
+                            leaves_origins_ptr[out_leaves] = i;
+                        }
                         ++out_leaves;
                     }
                 }
@@ -334,10 +341,13 @@ SizeType circ_taylor_branch_batch(std::span<const double> leaves_tree,
             }
         }
         if (!any_crackle) {
-            error_check::check_less_equal(out_leaves, n_leaves * branch_max,
-                                          "out_leaves size mismatch");
-            return out_leaves;
+            return out_leaves; // > capacity: the caller retries smaller
         }
+    }
+    // Loop 4 reads the leaves Loop 3 wrote; if Loop 3 overflowed, they were
+    // not all written. Report the shortfall instead.
+    if (out_leaves > capacity) {
+        return out_leaves;
     }
 
     // Loop 4: Hole expansion. For each existing output leaf that falls in
@@ -373,20 +383,20 @@ SizeType circ_taylor_branch_batch(std::span<const double> leaves_tree,
         // computed in Loop 3. Append remaining crackle branches at the tail
         leaf[0] = slice_span[0];
         for (SizeType a = 1; a < n_d5; ++a) [[unlikely]] {
-            const SizeType bo        = out_leaves * kLeavesStride;
-            double* __restrict__ out = leaves_branch_ptr + bo;
+            if (out_leaves < capacity) {
+                const SizeType bo        = out_leaves * kLeavesStride;
+                double* __restrict__ out = leaves_branch_ptr + bo;
 
-            // Full copy of this leaf, then patch d5
-            std::memcpy(out, leaf, kLeavesStride * sizeof(double));
-            out[0] = slice_span[a];
+                // Full copy of this leaf, then patch d5
+                std::memcpy(out, leaf, kLeavesStride * sizeof(double));
+                out[0] = slice_span[a];
 
-            leaves_origins_ptr[out_leaves] = origin;
+                leaves_origins_ptr[out_leaves] = origin;
+            }
             ++out_leaves;
         }
     }
 
-    error_check::check_less_equal(out_leaves, n_leaves * branch_max,
-                                  "out_leaves size mismatch");
 
     return out_leaves;
 }
