@@ -163,11 +163,12 @@ public:
     SizeType get_nprobs() const;
     std::vector<SizeType> get_box_score_widths() const;
     std::vector<State> get_states() const;
-    /// Search. Deterministic per (seed, mode, toolchain). On the CPU every
-    /// simulated work item (stage, parent cell, target threshold, H0/H1)
-    /// draws from its own stream, so results do not depend on the thread
-    /// count, on scheduling or on earlier runs in the process. CPU and CUDA
-    /// use different generators and agree only statistically.
+    /// Search. Deterministic per (seed, mode, toolchain), and on the GPU also
+    /// per `batch_size`. On the CPU every simulated work item (stage, parent
+    /// cell, target threshold, H0/H1) draws from its own stream, so results
+    /// do not depend on the thread count, on scheduling or on earlier runs in
+    /// the process. CPU and CUDA use different generators and agree only
+    /// statistically.
     /// In-run cost and success_h1_cumul are optimistic Monte Carlo estimates.
     void run(SizeType thres_neigh = 10);
     /// Reporting only. Fresh Monte Carlo of one threshold per stage. Does not

@@ -16,9 +16,10 @@ find_package(mathdx QUIET COMPONENTS curanddx CONFIG)
 
 # Download components via CPM if not found
 if(NOT curanddx_FOUND)
-  set(MATHDX_REDIST_URL
-      "https://developer.nvidia.com/downloads/compute/cuRANDDx/redist/cuRANDDx/cuda12/"
-      "nvidia-mathdx-${MATHDX_VERSION}-cuda12.tar.gz"
+  string(
+    CONCAT MATHDX_REDIST_URL
+    "https://developer.nvidia.com/downloads/compute/cuRANDDx/redist/cuRANDDx/cuda12/"
+    "nvidia-mathdx-${MATHDX_VERSION}-cuda12.tar.gz"
   )
   CPMAddPackage(
     NAME mathdx

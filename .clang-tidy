@@ -60,10 +60,10 @@ Checks: >
 
 HeaderFileExtensions: ["h", "hh", "hpp", "hxx", "cuh"]
 WarningsAsErrors: ""
-HeaderFilterRegex: "(include|lib|src|tests|bench|applications)/"
+HeaderFilterRegex: "(^|/)(include/loki/|lib/|src/|tests/|bench/|applications/)"
 # Third-party code (CPM cache, FetchContent _deps, system prefixes) matches
 # the filter above through its own include/ and src/ folders.
-ExcludeHeaderFilterRegex: "(/_deps/|/\\.cache/|^/opt/|^/usr/)"
+ExcludeHeaderFilterRegex: "(/_deps/|/\\.cache/|^/opt/|^/usr/|miniforge|miniconda|/envs/|/site-packages/)"
 FormatStyle: "file"
 CheckOptions:
   readability-identifier-naming.ClassCase: "CamelCase"

@@ -1,11 +1,10 @@
 #include "lib/cuda/score_cuda.cuh"
 
 #include <cstdint>
-#include <memory>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string_view>
-#include <vector>
 
 #include <cub/cub.cuh>
 #include <cuda/atomic>
@@ -570,6 +569,17 @@ void snr_boxcar_cuda_impl(std::span<const float> folds,
 
 } // namespace
 
+void snr_boxcar_2d_cuda_d(cuda::std::span<const float> folds,
+                          cuda::std::span<const uint32_t> widths,
+                          cuda::std::span<float> scores,
+                          SizeType nprofiles,
+                          SizeType nbins,
+                          float stdnoise,
+                          cudaStream_t stream) {
+    snr_boxcar_cuda_impl_device<false, OutputMode::kPerWidth>(
+        folds, widths, scores, nprofiles, nbins, stdnoise, stream);
+}
+
 void snr_boxcar_2d_max_cuda_d(cuda::std::span<const float> folds,
                               cuda::std::span<const uint32_t> widths,
                               cuda::std::span<float> scores,
@@ -603,6 +613,17 @@ void snr_boxcar_3d_max_cuda_d(cuda::std::span<const float> folds,
 
 namespace detail {
 
+void snr_boxcar_2d_gpu(std::span<const float> folds,
+                       std::span<const SizeType> widths,
+                       std::span<float> scores,
+                       SizeType nprofiles,
+                       SizeType nbins,
+                       float stdnoise,
+                       int device_id) {
+    snr_boxcar_cuda_impl<false, OutputMode::kPerWidth>(
+        folds, widths, scores, nprofiles, nbins, stdnoise, device_id);
+}
+
 void snr_boxcar_2d_max_gpu(std::span<const float> folds,
                            std::span<const SizeType> widths,
                            std::span<float> scores,
@@ -632,6 +653,25 @@ void snr_boxcar_3d_max_gpu(std::span<const float> folds,
                            int device_id) {
     snr_boxcar_cuda_impl<true, OutputMode::kMax>(
         folds, widths, scores, nprofiles, nbins, 1.0F, device_id);
+}
+
+void snr_boxcar_2d_gpu(DeviceSpan<const float> folds,
+                       DeviceSpan<const uint32_t> widths,
+                       DeviceSpan<float> scores,
+                       SizeType nprofiles,
+                       SizeType nbins,
+                       float stdnoise,
+                       Stream stream,
+                       int device_id) {
+    std::optional<cuda_utils::CudaSetDeviceGuard> device_guard;
+    if (device_id >= 0) {
+        device_guard.emplace(device_id);
+    }
+    cuda::std::span<const float> folds_span(folds.data(), folds.size());
+    cuda::std::span<const uint32_t> widths_span(widths.data(), widths.size());
+    cuda::std::span<float> scores_span(scores.data(), scores.size());
+    snr_boxcar_2d_cuda_d(folds_span, widths_span, scores_span, nprofiles, nbins,
+                         stdnoise, static_cast<cudaStream_t>(stream.native));
 }
 
 void snr_boxcar_2d_max_gpu(DeviceSpan<const float> folds,

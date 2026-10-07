@@ -21,6 +21,7 @@
 #include "loki/common/coord.hpp"
 #include "loki/common/types.hpp"
 
+// NOLINTNEXTLINE(misc-include-cleaner): ISA-dependent kernels
 #include "lib/cpu/brute_fold_intrinsics.hpp"
 
 namespace loki::core {

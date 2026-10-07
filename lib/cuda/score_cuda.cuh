@@ -11,6 +11,14 @@
 
 namespace loki::detection {
 
+void snr_boxcar_2d_cuda_d(cuda::std::span<const float> folds,
+                          cuda::std::span<const uint32_t> widths,
+                          cuda::std::span<float> scores,
+                          SizeType nprofiles,
+                          SizeType nbins,
+                          float stdnoise      = 1.0F,
+                          cudaStream_t stream = nullptr);
+
 void snr_boxcar_2d_max_cuda_d(cuda::std::span<const float> folds,
                               cuda::std::span<const uint32_t> widths,
                               cuda::std::span<float> scores,

@@ -4,7 +4,9 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 #include <cuda_runtime.h>
@@ -15,10 +17,8 @@
 
 #include "loki/algorithms/fold.hpp"
 #include "loki/common/backend.hpp"
-#include "loki/common/coord.hpp"
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
-#include "loki/detection/score.hpp"
 #include "loki/search/configs.hpp"
 #include "loki/utils/fft.hpp"
 #include "loki/utils/workspace.hpp"

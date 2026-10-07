@@ -1,4 +1,3 @@
-#include <cstddef>
 #include <tuple>
 
 #include <pybind11/functional.h>

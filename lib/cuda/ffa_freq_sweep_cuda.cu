@@ -1,21 +1,22 @@
 #include <algorithm>
 #include <cstdint>
 #include <filesystem>
+#include <format>
 #include <memory>
 #include <span>
+#include <stdexcept>
+#include <string>
 #include <string_view>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include <spdlog/spdlog.h>
 #include <thrust/device_vector.h>
 
-#include "loki/algorithms/ffa.hpp"
 #include "loki/algorithms/regions.hpp"
-#include "loki/common/backend.hpp"
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
-#include "loki/detection/score.hpp"
 #include "loki/search/configs.hpp"
 
 #include "lib/cuda/cuda_utils.cuh"

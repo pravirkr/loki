@@ -776,26 +776,29 @@ private:
         // Sliver absorption
         constexpr double kSliverFactor = 4.0;
         const auto try_absorb_sliver =
-            [&](double current_f_end, double nominal_start,
-                EvaluatedChunk eval) -> std::pair<double, EvaluatedChunk> {
+            [&](double current_f_end,
+                double nominal_start) -> std::optional<EvaluatedChunk> {
             const double remainder = nominal_start - f_start;
             if (remainder <= 0.0 ||
                 remainder > (kSliverFactor * boundary_tolerance)) {
-                return {nominal_start, std::move(eval)};
+                return std::nullopt;
             }
             auto merged = evaluate_chunk(f_start, current_f_end);
             if (fits(merged)) {
-                return {f_start, std::move(merged)};
+                return merged;
             }
-            return {nominal_start, std::move(eval)};
+            return std::nullopt;
         };
 
         // Main subdivision loop
         double current_f_end = f_end;
         while (current_f_end > f_start) {
-            auto [nominal_start, eval]    = find_largest_fitting(current_f_end);
-            std::tie(nominal_start, eval) = try_absorb_sliver(
-                current_f_end, nominal_start, std::move(eval));
+            auto [nominal_start, eval] = find_largest_fitting(current_f_end);
+            if (auto absorbed =
+                    try_absorb_sliver(current_f_end, nominal_start)) {
+                nominal_start = f_start;
+                eval          = std::move(*absorbed);
+            }
 
             if (nominal_start >= current_f_end) {
                 throw std::runtime_error(std::format(

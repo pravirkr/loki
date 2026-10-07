@@ -361,10 +361,34 @@ void snr_boxcar_2d(std::span<const float> folds,
     }
 #ifdef LOKI_ENABLE_GPU
     if (exec.backend == loki::detail::kGPUBackend) {
-        loki::detail::throw_unimplemented("snr_boxcar_2d", exec.backend);
+        detail::snr_boxcar_2d_gpu(folds, widths, scores, nprofiles, nbins,
+                                  stdnoise, exec.device);
+        return;
     }
 #endif
     loki::detail::throw_unavailable("snr_boxcar_2d", exec.backend);
+}
+
+void snr_boxcar_2d(DeviceSpan<const float> folds,
+                   DeviceSpan<const uint32_t> widths,
+                   DeviceSpan<float> scores,
+                   SizeType nprofiles,
+                   SizeType nbins,
+                   float stdnoise,
+                   Stream stream) {
+    const Device device = loki::detail::common_device(
+        {folds.device, widths.device, scores.device}, "snr_boxcar_2d");
+#ifdef LOKI_ENABLE_GPU
+    detail::snr_boxcar_2d_gpu(folds, widths, scores, nprofiles, nbins, stdnoise,
+                              stream, device.id);
+#else
+    (void)nprofiles;
+    (void)nbins;
+    (void)stdnoise;
+    (void)stream;
+    (void)device;
+    loki::detail::throw_unavailable("snr_boxcar_2d", Backend::kCUDA);
+#endif
 }
 
 void snr_boxcar_2d_max(std::span<const float> folds,

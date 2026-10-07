@@ -119,11 +119,12 @@ Domains are `algorithms`, `common`, `detection`, `io`, `pipelines`, `search`,
   `lib/common/dispatch.hpp`.
 - Every `DeviceSpan` overload of a facade calls `check_device` on its views.
 - Free functions that dispatch (e.g. `snr_boxcar_*` in
-  `lib/detection/score.cpp`) have no engine object. Each one follows the same
-  three branches inline: CPU, then the GPU branch under `#ifdef
-  LOKI_ENABLE_GPU`, then `throw_unavailable`. Their `DeviceSpan` overloads
-  first call `common_device(...)` so that all views agree on one device. In a
-  build without a GPU backend they throw `throw_unavailable(..., kCUDA)`.
+  `lib/detection/score.cpp`, `compute_ffa_scores`) have no engine object.
+  Each one follows the same three branches inline: CPU, then the GPU branch
+  under `#ifdef LOKI_ENABLE_GPU`, then `throw_unavailable`. Their `DeviceSpan`
+  overloads first call `common_device(...)` so that all views agree on one
+  device, and run on that device. In a build without a GPU backend they throw
+  `throw_unavailable(..., kCUDA)`.
 - A public free function that is CPU-only by design (no `Exec`, e.g.
   `MatchedFilter`, `append_snr_boxcar_3d_hits`) may be defined in its facade
   `.cpp`. Kernels it shares with a CPU engine go in a `lib/cpu/` header (e.g.
@@ -319,7 +320,11 @@ The facades do not change: they already dispatch on `kGPUBackend` through
   keep generator state in `thread_local` or in per-thread slots. A fixed seed
   then gives the same result for any thread count and any run order
   (`DynamicThresholdScheme::run` and `evaluate` on the CPU are bit-identical
-  across thread counts).
+  across thread counts). On the GPU, `device_rng.cuh` provides stateless,
+  counter-based Philox streams keyed on the seed and the work-item index:
+  cuRANDDx on `sm_70`+, stock cuRAND Philox below that or with
+  `LOKI_FORCE_CURAND_RNG`. The CUDA `DynamicThresholdScheme` numbers its work
+  items per batch, so its results are reproducible per (seed, `batch_size`).
 - On the GPU, the time-domain brute fold accumulates with float `atomicAdd`
   and is not bit-reproducible run to run (rule 6). Every other path is
   deterministic for a fixed seed.
