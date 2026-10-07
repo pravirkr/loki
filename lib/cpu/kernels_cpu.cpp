@@ -747,7 +747,7 @@ void ffa_iter_segment_freq(const float* __restrict__ fold_in,
                            SizeType ncoords_prev,
                            SizeType nsegments,
                            SizeType nbins,
-                           int nthreads) noexcept {
+                           int nthreads) {
     nthreads = std::max(nthreads, 1);
     // Process one segment at a time to keep data in cache
     const SizeType fold_stride     = 2 * nbins;
@@ -775,7 +775,7 @@ void ffa_iter_standard_freq(const float* __restrict__ fold_in,
                             SizeType ncoords_prev,
                             SizeType nsegments,
                             SizeType nbins,
-                            int nthreads) noexcept {
+                            int nthreads) {
     nthreads                       = std::max(nthreads, 1);
     constexpr SizeType kBlockSize  = 32;
     const SizeType fold_stride     = 2 * nbins;
@@ -824,7 +824,7 @@ void ffa_iter_segment(const float* __restrict__ fold_in,
                       SizeType ncoords_prev,
                       SizeType nsegments,
                       SizeType nbins,
-                      int nthreads) noexcept {
+                      int nthreads) {
     nthreads = std::max(nthreads, 1);
     // Process one segment at a time to keep data in cache
     constexpr SizeType kBlockSize  = 32;
@@ -882,7 +882,7 @@ void ffa_iter_standard(const float* __restrict__ fold_in,
                        SizeType ncoords_prev,
                        SizeType nsegments,
                        SizeType nbins,
-                       int nthreads) noexcept {
+                       int nthreads) {
     nthreads                       = std::max(nthreads, 1);
     constexpr SizeType kBlockSize  = 32;
     const SizeType fold_stride     = 2 * nbins;
@@ -938,7 +938,7 @@ void ffa_complex_iter_segment(const ComplexType* __restrict__ fold_in,
                               SizeType nsegments,
                               SizeType nbins_f,
                               SizeType nbins,
-                              int nthreads) noexcept {
+                              int nthreads) {
     nthreads = std::max(nthreads, 1);
     // Process one segment at a time to keep data in cache
     constexpr SizeType kBlockSize  = 32;
@@ -986,7 +986,7 @@ void ffa_complex_iter_standard(const ComplexType* __restrict__ fold_in,
                                SizeType nsegments,
                                SizeType nbins_f,
                                SizeType nbins,
-                               int nthreads) noexcept {
+                               int nthreads) {
     nthreads                       = std::max(nthreads, 1);
     constexpr SizeType kBlockSize  = 32;
     const SizeType fold_stride     = 2 * nbins_f;
@@ -1033,7 +1033,7 @@ void ffa_complex_iter_segment_freq(
     SizeType nsegments,
     SizeType nbins_f,
     SizeType nbins,
-    int nthreads) noexcept {
+    int nthreads) {
     nthreads = std::max(nthreads, 1);
     // Process one segment at a time to keep data in cache
     constexpr SizeType kBlockSize  = 32;
@@ -1082,7 +1082,7 @@ void ffa_complex_iter_standard_freq(
     SizeType nsegments,
     SizeType nbins_f,
     SizeType nbins,
-    int nthreads) noexcept {
+    int nthreads) {
     nthreads                       = std::max(nthreads, 1);
     constexpr SizeType kBlockSize  = 32;
     const SizeType fold_stride     = 2 * nbins_f;
@@ -1346,7 +1346,7 @@ void brute_fold_ts(const float* __restrict__ ts_e,
                    SizeType nfreqs,
                    SizeType segment_len,
                    SizeType nbins,
-                   int nthreads) noexcept {
+                   int nthreads) {
     nthreads = std::max(nthreads, 1);
 #pragma omp parallel num_threads(nthreads) default(none)                       \
     shared(ts_e, ts_v, fold, runs, run_offsets, nsegments, nfreqs,             \
@@ -1380,7 +1380,7 @@ void brute_fold_ffa_fused_freq(const float* __restrict__ ts_e,
                                SizeType segment_len,
                                SizeType nbins,
                                SizeType nlevels,
-                               int nthreads) noexcept {
+                               int nthreads) {
     nthreads                     = std::max(nthreads, 1);
     const SizeType tile_segments = SizeType{1} << nlevels;
     const SizeType ntiles        = nsegments >> nlevels;
@@ -1443,7 +1443,6 @@ void brute_fold_ffa_fused_freq(const float* __restrict__ ts_e,
     }
 }
 
-// NOLINTNEXTLINE(bugprone-exception-escape): allocation failure terminates (noexcept kernel)
 void brute_fold_ts_complex_xsimd(const float* __restrict__ ts_e,
                                  const float* __restrict__ ts_v,
                                  ComplexType* __restrict__ fold,
@@ -1454,7 +1453,7 @@ void brute_fold_ts_complex_xsimd(const float* __restrict__ ts_e,
                                  SizeType nbins,
                                  double tsamp,
                                  double t_ref,
-                                 int nthreads) noexcept {
+                                 int nthreads) {
     nthreads           = std::max(nthreads, 1);
     const auto nbins_f = (nbins / 2) + 1;
 
@@ -1492,7 +1491,6 @@ void brute_fold_ts_complex_xsimd(const float* __restrict__ ts_e,
     }
 }
 
-// NOLINTNEXTLINE(bugprone-exception-escape): allocation failure terminates (noexcept kernel)
 void brute_fold_ts_complex(const float* __restrict__ ts_e,
                            const float* __restrict__ ts_v,
                            ComplexType* __restrict__ fold,
@@ -1503,7 +1501,7 @@ void brute_fold_ts_complex(const float* __restrict__ ts_e,
                            SizeType nbins,
                            double tsamp,
                            double t_ref,
-                           int nthreads) noexcept {
+                           int nthreads) {
     nthreads = std::max(nthreads, 1);
 #if defined(__AVX512F__) || (defined(__AVX2__) && defined(__FMA__)) ||         \
     defined(__aarch64__) || defined(__ARM_NEON)
@@ -1555,7 +1553,7 @@ void ffa_iter(const float* __restrict__ fold_in,
               SizeType ncoords_prev,
               SizeType nsegments,
               SizeType nbins,
-              int nthreads) noexcept {
+              int nthreads) {
     // Heuristic: prefer segment-major when segments dominate work
     const bool segment_major =
         (nsegments >= 128) && (nsegments > ncoords_cur / 64);
@@ -1575,7 +1573,7 @@ void ffa_iter_freq(const float* __restrict__ fold_in,
                    SizeType ncoords_prev,
                    SizeType nsegments,
                    SizeType nbins,
-                   int nthreads) noexcept {
+                   int nthreads) {
     const bool segment_major =
         (nsegments >= 128) && (nsegments > ncoords_cur / 64);
     if (segment_major) {
@@ -1595,7 +1593,7 @@ void ffa_complex_iter(const ComplexType* __restrict__ fold_in,
                       SizeType nsegments,
                       SizeType nbins_f,
                       SizeType nbins,
-                      int nthreads) noexcept {
+                      int nthreads) {
 
     const bool segment_major =
         (nsegments >= 128) && (nsegments > ncoords_cur / 64);
@@ -1618,7 +1616,7 @@ void ffa_complex_iter_freq(const ComplexType* __restrict__ fold_in,
                            SizeType nsegments,
                            SizeType nbins_f,
                            SizeType nbins,
-                           int nthreads) noexcept {
+                           int nthreads) {
     const bool segment_major =
         (nsegments >= 128) && (nsegments > ncoords_cur / 64);
     if (segment_major) {

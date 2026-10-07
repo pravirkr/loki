@@ -224,6 +224,25 @@ TEST_CASE("EPSearchConfig inherits and adds EP parameters", "[config][ep]") {
     REQUIRE(ep_cfg.get_use_conservative_tile() == true);
     REQUIRE(ep_cfg.get_x_mass_const() > 0.0);
 
+    // get_updated_ep_config keeps the EP fields
+    const std::vector<loki::ParamLimit> new_limits = {{1.0, 4.0}};
+    const auto updated = ep_cfg.get_updated_ep_config(128, 0.5, new_limits);
+    REQUIRE(updated.get_nbins() == 128);
+    REQUIRE_THAT(updated.get_eta(), WithinAbs(0.5, 1e-9));
+    REQUIRE_THAT(updated.get_param_limits()[0].min, WithinAbs(1.0, 1e-9));
+    REQUIRE_THAT(updated.get_param_limits()[0].max, WithinAbs(4.0, 1e-9));
+    REQUIRE(updated.get_prune_poly_order() == 2);
+    REQUIRE_THAT(updated.get_p_orb_min(), WithinAbs(7200.0, 1e-9));
+    REQUIRE_THAT(updated.get_validation_significance(), WithinAbs(4.0, 1e-9));
+    REQUIRE(updated.get_use_conservative_tile() == true);
+
+    const auto updated2 = ep_cfg.get_updated_ep_config(32, 1.5, 2.0, 3.0);
+    REQUIRE(updated2.get_nbins() == 32);
+    REQUIRE_THAT(updated2.get_param_limits()[0].min, WithinAbs(2.0, 1e-9));
+    REQUIRE_THAT(updated2.get_param_limits()[0].max, WithinAbs(3.0, 1e-9));
+    REQUIRE(updated2.get_prune_poly_order() == 2);
+    REQUIRE(updated2.get_use_conservative_tile() == true);
+
     // PulsarSearchConfig alias compatibility
     static_assert(std::is_same_v<loki::search::PulsarSearchConfig,
                                  loki::search::EPSearchConfig>);

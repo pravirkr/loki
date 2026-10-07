@@ -1,15 +1,12 @@
 ---
 # clang-tidy configuration (see docs/architecture.md, Tooling).
 #
-# Run: run-clang-tidy -p build-dev '/(lib|src|tests|applications|bench)/'
+# Run: run-clang-tidy -p build-dev "$PWD/(lib|src|tests|applications)/"
 # tests/.clang-tidy inherits this file and relaxes a few test-only checks.
 #
 # Notable disabled checks and why:
 #   clang-analyzer-deadcode.DeadStores  the analyzer does not see uses in
 #                                       OpenMP clauses (num_threads(n))
-#   openmp-use-default-none             GCC < 14 rejects default(none)
-#                                       around std::source_location
-#                                       (error_check), so it is not portable
 #   openmp-exception-escape             exceptions in regions are accepted
 #   llvm-header-guard, portability-avoid-pragma-once  we use #pragma once
 #   magic numbers, pointer arithmetic, reinterpret_cast, unchecked access
@@ -50,7 +47,6 @@ Checks: >
   -modernize-use-nodiscard,
   openmp-*,
   -openmp-exception-escape,
-  -openmp-use-default-none,
   performance-*,
   portability-*,
   -portability-avoid-pragma-once,

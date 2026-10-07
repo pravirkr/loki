@@ -1353,11 +1353,11 @@ double EPSearchConfig::get_x_mass_const() const noexcept {
     return m_ep_impl->get_x_mass_const();
 }
 
-EPSearchConfig EPSearchConfig::get_updated_config(
+EPSearchConfig EPSearchConfig::get_updated_ep_config(
     SizeType nbins,
     double eta,
     std::span<const ParamLimit> param_limits) const {
-    auto ffa = FFASearchConfig::get_updated_config(nbins, eta, param_limits);
+    auto ffa = get_updated_config(nbins, eta, param_limits);
     return EPSearchConfig(std::move(ffa), m_ep_impl->m_prune_poly_order,
                           m_ep_impl->m_p_orb_min, m_ep_impl->m_m_c_max,
                           m_ep_impl->m_m_p_min,
@@ -1366,11 +1366,11 @@ EPSearchConfig EPSearchConfig::get_updated_config(
                           m_ep_impl->m_use_conservative_tile);
 }
 
-EPSearchConfig EPSearchConfig::get_updated_config(SizeType nbins,
-                                                  double eta,
-                                                  double f_min,
-                                                  double f_max) const {
-    auto ffa = FFASearchConfig::get_updated_config(nbins, eta, f_min, f_max);
+EPSearchConfig EPSearchConfig::get_updated_ep_config(SizeType nbins,
+                                                     double eta,
+                                                     double f_min,
+                                                     double f_max) const {
+    auto ffa = get_updated_config(nbins, eta, f_min, f_max);
     return EPSearchConfig(std::move(ffa), m_ep_impl->m_prune_poly_order,
                           m_ep_impl->m_p_orb_min, m_ep_impl->m_m_c_max,
                           m_ep_impl->m_m_p_min,

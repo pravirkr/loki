@@ -396,16 +396,17 @@ void snr_boxcar_2d_max(DeviceSpan<const float> folds,
                        SizeType nbins,
                        float stdnoise,
                        Stream stream) {
-    loki::detail::common_device({folds.device, widths.device, scores.device},
-                                "snr_boxcar_2d_max");
+    const Device device = loki::detail::common_device(
+        {folds.device, widths.device, scores.device}, "snr_boxcar_2d_max");
 #ifdef LOKI_ENABLE_GPU
     detail::snr_boxcar_2d_max_gpu(folds, widths, scores, nprofiles, nbins,
-                                  stdnoise, stream);
+                                  stdnoise, stream, device.id);
 #else
     (void)nprofiles;
     (void)nbins;
     (void)stdnoise;
     (void)stream;
+    (void)device;
     loki::detail::throw_unavailable("snr_boxcar_2d_max", Backend::kCUDA);
 #endif
 }
@@ -437,14 +438,16 @@ void snr_boxcar_3d(DeviceSpan<const float> folds,
                    SizeType nprofiles,
                    SizeType nbins,
                    Stream stream) {
-    loki::detail::common_device({folds.device, widths.device, scores.device},
-                                "snr_boxcar_3d");
+    const Device device = loki::detail::common_device(
+        {folds.device, widths.device, scores.device}, "snr_boxcar_3d");
 #ifdef LOKI_ENABLE_GPU
-    detail::snr_boxcar_3d_gpu(folds, widths, scores, nprofiles, nbins, stream);
+    detail::snr_boxcar_3d_gpu(folds, widths, scores, nprofiles, nbins, stream,
+                              device.id);
 #else
     (void)nprofiles;
     (void)nbins;
     (void)stream;
+    (void)device;
     loki::detail::throw_unavailable("snr_boxcar_3d", Backend::kCUDA);
 #endif
 }
@@ -523,15 +526,16 @@ void snr_boxcar_3d_max(DeviceSpan<const float> folds,
                        SizeType nprofiles,
                        SizeType nbins,
                        Stream stream) {
-    loki::detail::common_device({folds.device, widths.device, scores.device},
-                                "snr_boxcar_3d_max");
+    const Device device = loki::detail::common_device(
+        {folds.device, widths.device, scores.device}, "snr_boxcar_3d_max");
 #ifdef LOKI_ENABLE_GPU
     detail::snr_boxcar_3d_max_gpu(folds, widths, scores, nprofiles, nbins,
-                                  stream);
+                                  stream, device.id);
 #else
     (void)nprofiles;
     (void)nbins;
     (void)stream;
+    (void)device;
     loki::detail::throw_unavailable("snr_boxcar_3d_max", Backend::kCUDA);
 #endif
 }

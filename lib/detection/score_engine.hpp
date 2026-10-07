@@ -69,26 +69,31 @@ void snr_boxcar_3d_max_gpu(std::span<const float> folds,
                            SizeType nbins,
                            int device_id);
 
+// Device-memory overloads run on `device_id`, the device all views agree on
+// (`common_device`), or on the current device when `device_id < 0`.
 void snr_boxcar_2d_max_gpu(DeviceSpan<const float> folds,
                            DeviceSpan<const uint32_t> widths,
                            DeviceSpan<float> scores,
                            SizeType nprofiles,
                            SizeType nbins,
                            float stdnoise,
-                           Stream stream);
+                           Stream stream,
+                           int device_id);
 
 void snr_boxcar_3d_gpu(DeviceSpan<const float> folds,
                        DeviceSpan<const uint32_t> widths,
                        DeviceSpan<float> scores,
                        SizeType nprofiles,
                        SizeType nbins,
-                       Stream stream);
+                       Stream stream,
+                       int device_id);
 
 void snr_boxcar_3d_max_gpu(DeviceSpan<const float> folds,
                            DeviceSpan<const uint32_t> widths,
                            DeviceSpan<float> scores,
                            SizeType nprofiles,
                            SizeType nbins,
-                           Stream stream);
+                           Stream stream,
+                           int device_id);
 
 } // namespace loki::detection::detail

@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -639,7 +640,12 @@ void snr_boxcar_2d_max_gpu(DeviceSpan<const float> folds,
                            SizeType nprofiles,
                            SizeType nbins,
                            float stdnoise,
-                           Stream stream) {
+                           Stream stream,
+                           int device_id) {
+    std::optional<cuda_utils::CudaSetDeviceGuard> device_guard;
+    if (device_id >= 0) {
+        device_guard.emplace(device_id);
+    }
     cuda::std::span<const float> folds_span(folds.data(), folds.size());
     cuda::std::span<const uint32_t> widths_span(widths.data(), widths.size());
     cuda::std::span<float> scores_span(scores.data(), scores.size());
@@ -653,7 +659,12 @@ void snr_boxcar_3d_gpu(DeviceSpan<const float> folds,
                        DeviceSpan<float> scores,
                        SizeType nprofiles,
                        SizeType nbins,
-                       Stream stream) {
+                       Stream stream,
+                       int device_id) {
+    std::optional<cuda_utils::CudaSetDeviceGuard> device_guard;
+    if (device_id >= 0) {
+        device_guard.emplace(device_id);
+    }
     cuda::std::span<const float> folds_span(folds.data(), folds.size());
     cuda::std::span<const uint32_t> widths_span(widths.data(), widths.size());
     cuda::std::span<float> scores_span(scores.data(), scores.size());
@@ -666,7 +677,12 @@ void snr_boxcar_3d_max_gpu(DeviceSpan<const float> folds,
                            DeviceSpan<float> scores,
                            SizeType nprofiles,
                            SizeType nbins,
-                           Stream stream) {
+                           Stream stream,
+                           int device_id) {
+    std::optional<cuda_utils::CudaSetDeviceGuard> device_guard;
+    if (device_id >= 0) {
+        device_guard.emplace(device_id);
+    }
     cuda::std::span<const float> folds_span(folds.data(), folds.size());
     cuda::std::span<const uint32_t> widths_span(widths.data(), widths.size());
     cuda::std::span<float> scores_span(scores.data(), scores.size());

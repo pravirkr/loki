@@ -108,11 +108,4 @@ compute_ffa_fourier_return_to_time_cuda(std::span<const float> ts_e,
                                         int device_id,
                                         bool quiet = false);
 
-std::tuple<std::vector<float>, plans::FFAPlan<float>>
-compute_ffa_scores_cuda(std::span<const float> ts_e,
-                        std::span<const float> ts_v,
-                        const search::FFASearchConfig& cfg,
-                        int device_id,
-                        bool quiet = false);
-
 } // namespace loki::algorithms

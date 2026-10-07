@@ -5,16 +5,17 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
-  # Portable CI builds; cache CPM downloads across jobs.
   CPM_SOURCE_CACHE: ${{ github.workspace }}/.cache/cpm
-  LOKI_CUDA: OFF
-  LOKI_ENABLE_NATIVE_ARCH: OFF
 
 jobs:
   cpp:
@@ -24,31 +25,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The minimum compilers CMakeLists.txt accepts (GCC 13.2, Clang 18);
-        # the sanitizer job covers a newer GCC.
+        # Minimum compilers CMakeLists.txt accepts (GCC 13.2, Clang 18).
         compiler: [g++-13, clang++-18]
 
     steps:
       - uses: actions/checkout@v7
 
-      - name: Check CPU Info (Linux)
-        run: |
-          lscpu
-          cat /proc/cpuinfo | grep flags | head -n 1
-          cat /proc/cpuinfo | grep "cpu MHz" | head -n 1
-
       - name: Install system dependencies
-        run: |
-          sudo apt update
-          sudo apt install -y --no-install-recommends \
-            cmake \
-            ninja-build \
-            libhdf5-dev \
-            libfftw3-dev \
-            libomp-dev \
-            gcc-13 \
-            g++-13 \
-            clang-18
+        uses: ./.github/actions/install-loki-deps
+        with:
+          gcc-13: true
+          clang-18: true
 
       - name: Cache CPM dependencies
         uses: actions/cache@v6
@@ -58,31 +45,17 @@ jobs:
           restore-keys: |
             cpm-${{ runner.os }}-
 
-      - name: Configure CMake
+      - name: Configure, build, and test (CMake preset ci)
         run: |
           cmake --version
-          cmake -S . -B build -G Ninja \
-          -DCMAKE_CXX_COMPILER="${{ matrix.compiler }}" \
-          -DCMAKE_BUILD_TYPE=Release \
-          -DLOKI_BUILD_PYTHON=OFF \
-          -DLOKI_BUILD_TESTING=ON \
-          -DLOKI_BUILD_DOCS=OFF \
-          -DLOKI_BUILD_BENCHMARKS=OFF \
-          -DLOKI_CUDA=OFF \
-          -DLOKI_ENABLE_NATIVE_ARCH=OFF \
-          -DLOKI_USE_SYSTEM_DEPS=OFF
+          cmake --preset ci -D CMAKE_CXX_COMPILER="${{ matrix.compiler }}"
+          cmake --build --preset ci --parallel "$(nproc)"
+          ctest --preset ci
 
-      - name: Build
-        run: cmake --build build --parallel "$(nproc)"
-
-      - name: Run C++ tests
-        run: ctest --test-dir build --output-on-failure
-
-      # The installed package must work for a downstream find_package(loki)
-      # user, with public headers only (tests/consumer).
+      # Installed package must work for downstream find_package(loki) users.
       - name: Install and build a downstream consumer
         run: |
-          cmake --install build --prefix "$RUNNER_TEMP/loki"
+          cmake --install build-ci --prefix "$RUNNER_TEMP/loki"
           cmake -S tests/consumer -B build-consumer -G Ninja \
             -DCMAKE_CXX_COMPILER="${{ matrix.compiler }}" \
             -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/loki"
@@ -95,56 +68,91 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
-      - name: Install dependencies
-        run: |
-          sudo apt update
-          sudo apt install -y --no-install-recommends cmake ninja-build libhdf5-dev \
-            libfftw3-dev libomp-dev gcc-14 g++-14
-      - name: Configure with sanitizers
-        run: |
-          cmake -S . -B build-asan -G Ninja \
-            -DCMAKE_CXX_COMPILER=g++-14 \
-            -DCMAKE_BUILD_TYPE=Debug \
-            -DLOKI_BUILD_PYTHON=OFF \
-            -DLOKI_BUILD_TESTING=ON \
-            -DLOKI_BUILD_APPLICATIONS=ON \
-            -DLOKI_CUDA=OFF \
-            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
-            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
-      - name: Build and test
-        run: |
-          cmake --build build-asan --parallel "$(nproc)"
-          ctest --test-dir build-asan --output-on-failure
 
-  python:
-    name: Python (${{ matrix.python-version }})
+      - name: Install system dependencies
+        uses: ./.github/actions/install-loki-deps
+        with:
+          gcc-14: true
+
+      - name: Cache CPM dependencies
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.CPM_SOURCE_CACHE }}
+          key: cpm-${{ runner.os }}-${{ hashFiles('cmake/LokiDependencies.cmake', 'cmake/CPM.cmake') }}
+          restore-keys: |
+            cpm-${{ runner.os }}-
+
+      - name: Configure, build, and test (CMake preset asan)
+        run: |
+          cmake --preset asan -D CMAKE_CXX_COMPILER=g++-14
+          cmake --build --preset asan --parallel "$(nproc)"
+          ctest --preset asan
+
+  clang-tidy:
+    name: Lint & static analysis (LLVM 23)
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.12"]
-
+    env:
+      LLVM_VERSION: "23"
+      BUILD_DIR: build-ci-tidy
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install system build dependencies
+      - name: Install system dependencies
+        uses: ./.github/actions/install-loki-deps
+        with:
+          python-dev: true
+          llvm-version: "23"
+
+      - name: Install pre-commit
+        run: python3 -m pip install --disable-pip-version-check pre-commit==6.0.0
+
+      - name: Cache pre-commit environments
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
+          restore-keys: |
+            pre-commit-${{ runner.os }}-
+
+      - name: Cache CPM dependencies
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.CPM_SOURCE_CACHE }}
+          key: cpm-${{ runner.os }}-${{ hashFiles('cmake/LokiDependencies.cmake', 'cmake/CPM.cmake') }}
+          restore-keys: |
+            cpm-${{ runner.os }}-
+
+      - name: Warm pre-commit hook environments
+        run: pre-commit install-hooks
+
+      - name: Configure and build (CMake preset ci-tidy)
         run: |
-          sudo apt update
-          sudo apt install -y --no-install-recommends \
-            build-essential \
-            cmake \
-            ninja-build \
-            libhdf5-dev \
-            libfftw3-dev \
-            libomp-dev \
-            git
+          cmake --preset ci-tidy \
+            -D CMAKE_CXX_COMPILER="clang++-${LLVM_VERSION}"
+          cmake --build --preset ci-tidy --parallel "$(nproc)"
+
+      - name: Run static analysis (aggregate report)
+        run: scripts/ci_static_analysis.sh
+
+  python:
+    name: Python (3.12)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install system dependencies
+        uses: ./.github/actions/install-loki-deps
+        with:
+          build-essential: true
+          git: true
 
       - name: Install uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           enable-cache: true
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.12"
 
       - name: Cache CPM dependencies
         uses: actions/cache@v6
@@ -157,10 +165,10 @@ jobs:
       - name: Install package and test dependencies
         run: uv sync --extra tests
         env:
-          # scikit-build-core honours CMAKE_ARGS when compiling the extension.
           CMAKE_ARGS: >-
             -DLOKI_CUDA=OFF
             -DLOKI_BUILD_TESTING=OFF
+            -DLOKI_ENABLE_NATIVE_ARCH=OFF
 
-      - name: Run Python tests (CPU)
-        run: uv run pytest tests/python/test_cpu_match.py tests/python/test_ffa_recovery.py
+      - name: Run Python tests
+        run: uv run pytest tests/python

@@ -112,8 +112,8 @@ public:
     }
 };
 
-// CRTP Base class - shared functionality for all derived classes
-template <SupportedFoldType FoldType, typename Derived>
+// Base class - shared functionality for all derived classes
+template <SupportedFoldType FoldType>
 class BasePruneDPFuncts : public PruneDPFuncts<FoldType> {
 protected:
     // Common members for all derived classes
@@ -138,7 +138,6 @@ protected:
     detection::BoxcarKadaneCache m_boxcar_kadane_cache;
 
     // Constructor for all derived classes
-    // NOLINTNEXTLINE(bugprone-crtp-constructor-accessibility): multi-level CRTP
     BasePruneDPFuncts(std::span<const SizeType> param_grid_count_init,
                       std::span<const double> dparams_init,
                       SizeType nseg_ffa,
@@ -193,11 +192,10 @@ public:
 };
 
 // Intermediate base for Taylor-based methods (common seed implementation)
-template <SupportedFoldType FoldType, typename Derived>
-// NOLINTNEXTLINE(bugprone-crtp-constructor-accessibility): multi-level CRTP
-class BaseTaylorPruneDPFuncts : public BasePruneDPFuncts<FoldType, Derived> {
+template <SupportedFoldType FoldType>
+class BaseTaylorPruneDPFuncts : public BasePruneDPFuncts<FoldType> {
 protected:
-    using Base = BasePruneDPFuncts<FoldType, Derived>;
+    using Base = BasePruneDPFuncts<FoldType>;
 
     // Inherit constructor
     using Base::BasePruneDPFuncts;
@@ -212,11 +210,10 @@ public:
 };
 
 // Intermediate base for Chebyshev-based methods (common seed implementation)
-template <SupportedFoldType FoldType, typename Derived>
-// NOLINTNEXTLINE(bugprone-crtp-constructor-accessibility): multi-level CRTP
-class BaseChebyshevPruneDPFuncts : public BasePruneDPFuncts<FoldType, Derived> {
+template <SupportedFoldType FoldType>
+class BaseChebyshevPruneDPFuncts : public BasePruneDPFuncts<FoldType> {
 protected:
-    using Base = BasePruneDPFuncts<FoldType, Derived>;
+    using Base = BasePruneDPFuncts<FoldType>;
 
     // Inherit constructor
     using Base::BasePruneDPFuncts;
@@ -231,12 +228,9 @@ public:
 
 // Specialized implementation for Polynomial searches in Taylor Basis
 template <SupportedFoldType FoldType>
-class PrunePolyTaylorDPFuncts final
-    : public BaseTaylorPruneDPFuncts<FoldType,
-                                     PrunePolyTaylorDPFuncts<FoldType>> {
+class PrunePolyTaylorDPFuncts final : public BaseTaylorPruneDPFuncts<FoldType> {
 private:
-    using Base =
-        BaseTaylorPruneDPFuncts<FoldType, PrunePolyTaylorDPFuncts<FoldType>>;
+    using Base = BaseTaylorPruneDPFuncts<FoldType>;
 
 public:
     PrunePolyTaylorDPFuncts(std::span<const SizeType> param_grid_count_init,
@@ -289,12 +283,9 @@ public:
 // Specialized implementation for Polynomial searches in Chebyshev Basis
 template <SupportedFoldType FoldType>
 class PrunePolyChebyshevDPFuncts final
-    : public BaseChebyshevPruneDPFuncts<FoldType,
-                                        PrunePolyChebyshevDPFuncts<FoldType>> {
+    : public BaseChebyshevPruneDPFuncts<FoldType> {
 private:
-    using Base =
-        BaseChebyshevPruneDPFuncts<FoldType,
-                                   PrunePolyChebyshevDPFuncts<FoldType>>;
+    using Base = BaseChebyshevPruneDPFuncts<FoldType>;
 
 public:
     PrunePolyChebyshevDPFuncts(std::span<const SizeType> param_grid_count_init,
@@ -347,12 +338,9 @@ public:
 // Specialized implementation for Circular orbit search in Taylor basis
 // Use only when nparams == 5
 template <SupportedFoldType FoldType>
-class PruneCircTaylorDPFuncts final
-    : public BaseTaylorPruneDPFuncts<FoldType,
-                                     PruneCircTaylorDPFuncts<FoldType>> {
+class PruneCircTaylorDPFuncts final : public BaseTaylorPruneDPFuncts<FoldType> {
 private:
-    using Base =
-        BaseTaylorPruneDPFuncts<FoldType, PruneCircTaylorDPFuncts<FoldType>>;
+    using Base = BaseTaylorPruneDPFuncts<FoldType>;
 
 public:
     PruneCircTaylorDPFuncts(std::span<const SizeType> param_grid_count_init,

@@ -188,64 +188,52 @@ private:
     std::vector<coord::PhaseRun> m_runs;
     std::vector<SizeType> m_run_offsets;
 
-    /// Build the run table and check it reproduces the per-sample phase map.
+    /// Build the run table: per frequency, the (exclusive end, bin) runs of
+    /// consecutive samples in one phase bin. The runs of a frequency cover
+    /// its segment by construction.
     void compute_phase_time_domain() {
         error_check::check_less_equal(
             m_segment_len,
             static_cast<SizeType>(std::numeric_limits<uint32_t>::max()),
             "BruteFold segment length does not fit in a phase-run index");
+        std::vector<std::vector<coord::PhaseRun>> runs_per_freq(m_nfreqs);
+        // NOLINTNEXTLINE(openmp-use-default-none): clauses cannot name members
+#pragma omp parallel for schedule(static) num_threads(m_nthreads)
+        for (SizeType ifreq = 0; ifreq < m_nfreqs; ++ifreq) {
+            runs_per_freq[ifreq] = phase_runs(m_freq_arr[ifreq]);
+        }
         m_run_offsets.assign(m_nfreqs + 1, 0);
-        std::vector<SizeType> counts(m_nfreqs, 0);
-#pragma omp parallel for schedule(static) num_threads(m_nthreads)
         for (SizeType ifreq = 0; ifreq < m_nfreqs; ++ifreq) {
-            uint32_t prev_bin = std::numeric_limits<uint32_t>::max();
-            SizeType nruns    = 0;
-            for (SizeType isamp = 0; isamp < m_segment_len; ++isamp) {
-                const auto proper_time =
-                    (static_cast<double>(isamp) * m_tsamp) - m_t_ref;
-                const uint32_t iphase = psr_utils::get_phase_idx_uint(
-                    proper_time, m_freq_arr[ifreq], m_nbins, 0.0);
-                if (iphase != prev_bin) {
-                    ++nruns;
-                    prev_bin = iphase;
-                }
-            }
-            counts[ifreq] = nruns;
+            m_run_offsets[ifreq + 1] =
+                m_run_offsets[ifreq] + runs_per_freq[ifreq].size();
         }
-        for (SizeType ifreq = 0; ifreq < m_nfreqs; ++ifreq) {
-            m_run_offsets[ifreq + 1] = m_run_offsets[ifreq] + counts[ifreq];
+        m_runs.clear();
+        m_runs.reserve(m_run_offsets.back());
+        for (const auto& runs : runs_per_freq) {
+            m_runs.insert(m_runs.end(), runs.begin(), runs.end());
         }
-        m_runs.resize(m_run_offsets.back());
-#pragma omp parallel for schedule(static) num_threads(m_nthreads)
-        for (SizeType ifreq = 0; ifreq < m_nfreqs; ++ifreq) {
-            coord::PhaseRun* out = m_runs.data() + m_run_offsets[ifreq];
-            uint32_t prev_bin    = std::numeric_limits<uint32_t>::max();
-            uint32_t run_end     = 0;
-            SizeType written     = 0;
-            for (SizeType isamp = 0; isamp < m_segment_len; ++isamp) {
-                const auto proper_time =
-                    (static_cast<double>(isamp) * m_tsamp) - m_t_ref;
-                const uint32_t iphase = psr_utils::get_phase_idx_uint(
-                    proper_time, m_freq_arr[ifreq], m_nbins, 0.0);
-                if (iphase != prev_bin) {
-                    if (prev_bin != std::numeric_limits<uint32_t>::max()) {
-                        out[written++] = {.end = run_end, .bin = prev_bin};
-                    }
-                    prev_bin = iphase;
-                }
-                run_end = static_cast<uint32_t>(isamp + 1);
+    }
+
+    /// Phase runs of one frequency over a segment.
+    [[nodiscard]] std::vector<coord::PhaseRun> phase_runs(double freq) const {
+        std::vector<coord::PhaseRun> runs;
+        uint32_t prev_bin = 0;
+        for (SizeType isamp = 0; isamp < m_segment_len; ++isamp) {
+            const auto proper_time =
+                (static_cast<double>(isamp) * m_tsamp) - m_t_ref;
+            const uint32_t iphase =
+                psr_utils::get_phase_idx_uint(proper_time, freq, m_nbins, 0.0);
+            if (isamp > 0 && iphase != prev_bin) {
+                runs.push_back(
+                    {.end = static_cast<uint32_t>(isamp), .bin = prev_bin});
             }
-            if (m_segment_len > 0) {
-                out[written++] = {.end = run_end, .bin = prev_bin};
-            }
-            // Contiguous cover of the segment: the runs abut and end at B.
-            error_check::check_equal(
-                written, counts[ifreq],
-                "BruteFold phase runs do not match the counted run total");
-            error_check::check_equal(
-                static_cast<SizeType>(run_end), m_segment_len,
-                "BruteFold phase runs do not cover the segment");
+            prev_bin = iphase;
         }
+        if (m_segment_len > 0) {
+            runs.push_back(
+                {.end = static_cast<uint32_t>(m_segment_len), .bin = prev_bin});
+        }
+        return runs;
     }
 
 }; // End BruteFoldCpuEngine definition

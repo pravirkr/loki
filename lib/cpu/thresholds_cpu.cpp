@@ -497,10 +497,34 @@ struct ThreadLocalBuffers {
           scores(max_ntrials) {}
 };
 
+// make_keyed_pcg32 purposes. 0-3 belong to evaluate(); run() uses its own, so a
+// shared seed never gives the two correlated draws.
+constexpr uint32_t kPurposeRunInit = 4; // initial H0/H1 folds
+constexpr uint32_t kPurposeRunStep = 5; // one simulated stage transition
+constexpr uint32_t kNoTarget       = 0xFFFFFFFFU;
+
+/**
+ * Names one simulation work item of run(): (stage, parent cell, target
+ * threshold). Each item draws from its own H0 and H1 streams, so the result
+ * depends only on the seed and the item, never on the thread count, the
+ * schedule or earlier runs.
+ */
+struct StreamKey {
+    uint64_t seed;
+    uint32_t stage;
+    uint32_t parent;
+    uint32_t target;
+
+    [[nodiscard]] math::PCG32 stream(uint32_t branch) const {
+        return math::make_keyed_pcg32(seed, kPurposeRunStep, stage, parent,
+                                      branch, target);
+    }
+};
+
 std::unique_ptr<FoldVectorHandle>
 simulate_folds(const FoldVectorHandle& folds_in,
                std::span<const float> profile,
-               const math::ThreadLocalNormalRNG& rng,
+               math::PCG32& rng,
                DualPoolFoldManager& manager,
                ThreadLocalBuffers& buffers,
                float bias_snr                              = 0.0F,
@@ -529,7 +553,7 @@ simulate_folds(const FoldVectorHandle& folds_in,
         timer.start();
     }
     auto const noise = std::span(buffers.noise).first(ntrials * nbins);
-    rng.generate(noise, 0.0F, std::sqrt(var_add));
+    math::NormalSampler::generate(rng, noise, 0.0F, std::sqrt(var_add));
     if (thread_timers != nullptr) {
         (*thread_timers)["random"] += timer.stop();
         timer.start();
@@ -538,7 +562,9 @@ simulate_folds(const FoldVectorHandle& folds_in,
 
     for (SizeType i = 0; i < ntrials; ++i) {
         const SizeType source_trial_idx =
-            (i < ntrials_in) ? i : rng.uniform_index(ntrials_in - 1);
+            (i < ntrials_in)
+                ? i
+                : math::NormalSampler::uniform_index(rng, ntrials_in - 1);
         const auto in_offset  = source_trial_idx * nbins;
         const auto out_offset = i * nbins;
         for (SizeType j = 0; j < nbins; ++j) {
@@ -557,7 +583,7 @@ simulate_folds(const FoldVectorHandle& folds_in,
 std::pair<std::unique_ptr<FoldVectorHandle>, float>
 simulate_score_prune_fused(const FoldVectorHandle& folds_in,
                            std::span<const float> profile,
-                           const math::ThreadLocalNormalRNG& rng,
+                           math::PCG32& rng,
                            DualPoolFoldManager& manager,
                            ThreadLocalBuffers& buffers,
                            BoxcarWidthsCache& box_cache,
@@ -588,7 +614,7 @@ simulate_score_prune_fused(const FoldVectorHandle& folds_in,
     // Generate noise
     timer.start();
     auto const noise = std::span(buffers.noise).first(ntrials * nbins);
-    rng.generate(noise, 0.0F, std::sqrt(var_add));
+    math::NormalSampler::generate(rng, noise, 0.0F, std::sqrt(var_add));
     thread_timers["random"] += timer.stop();
 
     // Fill output data
@@ -600,7 +626,9 @@ simulate_score_prune_fused(const FoldVectorHandle& folds_in,
     float* __restrict__ out_ptr = output_data.data();
     for (SizeType i = 0; i < ntrials; ++i) {
         const SizeType source_trial_idx =
-            (i < ntrials_in) ? i : rng.uniform_index(ntrials_in - 1);
+            (i < ntrials_in)
+                ? i
+                : math::NormalSampler::uniform_index(rng, ntrials_in - 1);
         const auto in_offset    = source_trial_idx * nbins;
         const auto trial_offset = i * nbins;
         const auto out_offset   = ntrials_success * nbins;
@@ -747,7 +775,7 @@ transition_state(const State& state_cur,
 FoldsType
 simulate_and_score(const FoldsType& folds_cur,
                    std::span<const float> profile,
-                   const math::ThreadLocalNormalRNG& rng,
+                   const StreamKey& key,
                    DualPoolFoldManager& manager,
                    ThreadLocalBuffers& buffers,
                    std::span<const SizeType> box_score_widths,
@@ -755,10 +783,12 @@ simulate_and_score(const FoldsType& folds_cur,
                    float var_add,
                    SizeType ntrials,
                    search::TimerStats::TimerMap* thread_timers = nullptr) {
+    auto rng_h0 = key.stream(0);
+    auto rng_h1 = key.stream(1);
     timing::SimpleTimer timer;
 
     auto folds_h0 =
-        simulate_folds(*folds_cur.folds_h0, profile, rng, manager, buffers,
+        simulate_folds(*folds_cur.folds_h0, profile, rng_h0, manager, buffers,
                        0.0F, var_add, ntrials, thread_timers);
     if (thread_timers != nullptr) {
         timer.start();
@@ -777,7 +807,7 @@ simulate_and_score(const FoldsType& folds_cur,
     }
 
     auto folds_h1 =
-        simulate_folds(*folds_cur.folds_h1, profile, rng, manager, buffers,
+        simulate_folds(*folds_cur.folds_h1, profile, rng_h1, manager, buffers,
                        bias_snr, var_add, ntrials, thread_timers);
     if (thread_timers != nullptr) {
         timer.start();
@@ -806,18 +836,20 @@ gen_next_using_thresh(const State& state_cur,
                       float nbranches,
                       float bias_snr,
                       std::span<const float> profile,
-                      const math::ThreadLocalNormalRNG& rng,
+                      const StreamKey& key,
                       DualPoolFoldManager& manager,
                       ThreadLocalBuffers& buffers,
                       BoxcarWidthsCache& box_cache,
                       search::TimerStats::TimerMap& thread_timers,
                       float var_add    = 1.0F,
                       SizeType ntrials = 1024) {
+    auto rng_h0                        = key.stream(0);
+    auto rng_h1                        = key.stream(1);
     auto [folds_h0_pruned, success_h0] = simulate_score_prune_fused(
-        *folds_cur.folds_h0, profile, rng, manager, buffers, box_cache,
+        *folds_cur.folds_h0, profile, rng_h0, manager, buffers, box_cache,
         threshold, thread_timers, 0.0F, var_add, ntrials);
     auto [folds_h1_pruned, success_h1] = simulate_score_prune_fused(
-        *folds_cur.folds_h1, profile, rng, manager, buffers, box_cache,
+        *folds_cur.folds_h1, profile, rng_h1, manager, buffers, box_cache,
         threshold, thread_timers, bias_snr, var_add, ntrials);
     const auto state_next =
         state_cur.gen_next(threshold, success_h0, success_h1, nbranches);
@@ -833,15 +865,17 @@ gen_next_using_surv_prob(const State& state_cur,
                          float bias_snr,
                          std::span<const float> profile,
                          std::span<const SizeType> box_score_widths,
-                         const math::ThreadLocalNormalRNG& rng,
+                         const StreamKey& key,
                          DualPoolFoldManager& manager,
                          ThreadLocalBuffers& buffers,
                          BoxcarWidthsCache& box_cache,
                          search::TimerStats::TimerMap& thread_timers,
                          float var_add    = 1.0F,
                          SizeType ntrials = 1024) {
+    auto rng_h0 = key.stream(0);
+    auto rng_h1 = key.stream(1);
     auto folds_h0_sim =
-        simulate_folds(*folds_cur.folds_h0, profile, rng, manager, buffers,
+        simulate_folds(*folds_cur.folds_h0, profile, rng_h0, manager, buffers,
                        0.0F, var_add, ntrials);
     auto const scores_h0 =
         std::span(buffers.scores).first(folds_h0_sim->ntrials());
@@ -857,33 +891,13 @@ gen_next_using_surv_prob(const State& state_cur,
                             static_cast<float>(folds_h0_sim_ntrials);
 
     auto [folds_h1_pruned, success_h1] = simulate_score_prune_fused(
-        *folds_cur.folds_h1, profile, rng, manager, buffers, box_cache,
+        *folds_cur.folds_h1, profile, rng_h1, manager, buffers, box_cache,
         threshold_h0, thread_timers, bias_snr, var_add, ntrials);
 
     const auto state_next =
         state_cur.gen_next(threshold_h0, success_h0, success_h1, nbranches);
     return {state_next,
             FoldsType{std::move(folds_h0_sim), std::move(folds_h1_pruned)}};
-}
-
-uint64_t mix64(uint64_t x) noexcept {
-    x += 0x9e3779b97f4a7c15ULL;
-    x = (x ^ (x >> 30U)) * 0xbf58476d1ce4e5b9ULL;
-    x = (x ^ (x >> 27U)) * 0x94d049bb133111ebULL;
-    return x ^ (x >> 31U);
-}
-
-math::PCG32 make_pcg(uint64_t seed,
-                     uint32_t purpose,
-                     uint32_t stage,
-                     uint32_t parent,
-                     uint32_t branch,
-                     uint32_t trial) {
-    uint64_t mixed = mix64(seed ^ (static_cast<uint64_t>(purpose) << 48U));
-    mixed          = mix64(mixed ^ (static_cast<uint64_t>(stage) << 32U));
-    mixed          = mix64(mixed ^ parent);
-    mixed = mix64(mixed ^ ((static_cast<uint64_t>(branch) << 40U) ^ trial));
-    return math::PCG32(mixed, mix64(mixed ^ 0xda3e39cb94b95bdbULL));
 }
 
 float unit_interval(math::PCG32& rng) noexcept {
@@ -894,8 +908,7 @@ void fill_standard_normals(math::PCG32& rng,
                            float* dst,
                            SizeType n,
                            float stddev) {
-    math::ThreadLocalNormalRNG::generate_with(rng, std::span<float>(dst, n),
-                                              0.0F, stddev);
+    math::NormalSampler::generate(rng, std::span<float>(dst, n), 0.0F, stddev);
 }
 
 // Create a compound type for State
@@ -963,7 +976,6 @@ public:
             m_nstages, snr_final, m_branching_pattern, m_trials_start);
 
         m_seed = seed.value_or(std::random_device{}());
-        m_rng  = std::make_unique<math::ThreadLocalNormalRNG>(m_seed);
 
         m_states.resize(m_nstages * m_nthresholds * m_nprobs, State{});
         {
@@ -1123,7 +1135,8 @@ public:
 
         for (uint32_t branch = 0; branch < 2; ++branch) {
             for (uint32_t trial = 0; trial < ntrials_u; ++trial) {
-                auto rng = make_pcg(eval_seed, 0U, 0U, 0U, branch, trial);
+                auto rng = math::make_keyed_pcg32(eval_seed, 0U, 0U, 0U, branch,
+                                                  trial);
                 float* dst =
                     folds.data() + (((branch * ntrials) + trial) * nbins);
                 fill_standard_normals(rng, dst, nbins, 1.0F);
@@ -1141,9 +1154,9 @@ public:
         for (SizeType istage = 0; istage < m_nstages; ++istage) {
             for (uint32_t branch = 0; branch < 2; ++branch) {
                 for (uint32_t trial = 0; trial < ntrials_u; ++trial) {
-                    auto rng =
-                        make_pcg(eval_seed, 2U, static_cast<uint32_t>(istage),
-                                 0U, branch, trial);
+                    auto rng = math::make_keyed_pcg32(
+                        eval_seed, 2U, static_cast<uint32_t>(istage), 0U,
+                        branch, trial);
                     fill_standard_normals(
                         rng,
                         noise.data() + (((branch * ntrials) + trial) * nbins),
@@ -1156,9 +1169,9 @@ public:
                 for (uint32_t trial = 0; trial < ntrials_u; ++trial) {
                     uint32_t src = trial;
                     if (trial >= nsurv) {
-                        auto boot = make_pcg(eval_seed, 3U,
-                                             static_cast<uint32_t>(istage), 0U,
-                                             branch, trial);
+                        auto boot = math::make_keyed_pcg32(
+                            eval_seed, 3U, static_cast<uint32_t>(istage), 0U,
+                            branch, trial);
                         const float draw = unit_interval(boot);
                         src = std::min(static_cast<uint32_t>(
                                            draw * static_cast<float>(nsurv)),
@@ -1263,7 +1276,6 @@ private:
     std::vector<State> m_states;
 
     search::TimerStats m_timer_stats;
-    std::unique_ptr<math::ThreadLocalNormalRNG> m_rng;
     std::unique_ptr<DualPoolFoldManager> m_manager;
     FoldGrid m_folds_current;
     FoldGrid m_folds_next;
@@ -1308,18 +1320,33 @@ private:
 
     FoldsType create_initial_fold_state(ThreadLocalBuffers& buffers) {
         const float var_init = 1.0F;
-        auto folds_h0_init   = m_manager->allocate(m_ntrials);
-        auto folds_h1_init   = m_manager->allocate(m_ntrials);
+        auto rng_h0 =
+            math::make_keyed_pcg32(m_seed, kPurposeRunInit, 0U, 0U, 0U, 0U);
+        auto rng_h1 =
+            math::make_keyed_pcg32(m_seed, kPurposeRunInit, 0U, 0U, 1U, 0U);
+        auto folds_h0_init = m_manager->allocate(m_ntrials);
+        auto folds_h1_init = m_manager->allocate(m_ntrials);
         std::ranges::fill(folds_h0_init->data(), 0.0F);
         std::ranges::fill(folds_h1_init->data(), 0.0F);
 
         auto folds_h0_sim =
-            simulate_folds(*folds_h0_init, m_profile, *m_rng, *m_manager,
+            simulate_folds(*folds_h0_init, m_profile, rng_h0, *m_manager,
                            buffers, 0.0F, var_init, m_ntrials);
         auto folds_h1_sim =
-            simulate_folds(*folds_h1_init, m_profile, *m_rng, *m_manager,
+            simulate_folds(*folds_h1_init, m_profile, rng_h1, *m_manager,
                            buffers, m_bias_snr, var_init, m_ntrials);
         return FoldsType{std::move(folds_h0_sim), std::move(folds_h1_sim)};
+    }
+
+    /// Stream key of one simulated work item of this run.
+    [[nodiscard]] StreamKey
+    step_key(SizeType istage, SizeType parent, SizeType target) const {
+        return {
+            .seed   = m_seed,
+            .stage  = static_cast<uint32_t>(istage),
+            .parent = static_cast<uint32_t>(parent),
+            .target = static_cast<uint32_t>(target),
+        };
     }
 
     void init_states_legacy() {
@@ -1336,9 +1363,9 @@ private:
         for (SizeType const ithres : thresholds_idx) {
             auto [cur_state, cur_fold_state] = gen_next_using_thresh(
                 initial_state, fold_state, m_thresholds[ithres],
-                m_branching_pattern[0], m_bias_snr, m_profile, *m_rng,
-                *m_manager, *buffers_ptr, *boxcar_widths_cache_ptr,
-                thread_timers, 1.0F, m_ntrials);
+                m_branching_pattern[0], m_bias_snr, m_profile,
+                step_key(0, 0, ithres), *m_manager, *buffers_ptr,
+                *boxcar_widths_cache_ptr, thread_timers, 1.0F, m_ntrials);
 
             const auto iprob = utils::find_lower_bin_index(
                 m_probs, cur_state.success_h1_cumul);
@@ -1358,8 +1385,8 @@ private:
         const auto fold_state     = create_initial_fold_state(*buffers_ptr);
         State const initial_state = State::initial();
         const auto fold_sim_state = simulate_and_score(
-            fold_state, m_profile, *m_rng, *m_manager, *buffers_ptr,
-            m_box_score_widths, m_bias_snr, 1.0F, m_ntrials);
+            fold_state, m_profile, step_key(0, 0, kNoTarget), *m_manager,
+            *buffers_ptr, m_box_score_widths, m_bias_snr, 1.0F, m_ntrials);
 
         const auto thresholds_idx = get_current_thresholds_idx(0);
         for (SizeType const ithres : thresholds_idx) {
@@ -1388,6 +1415,7 @@ private:
         // Local stats for this segment
         search::TimerStats segment_stats(m_nthreads);
 
+        // NOLINTNEXTLINE(openmp-use-default-none): clauses cannot name members
 #pragma omp parallel num_threads(m_nthreads)
         {
             // Not thread_local: it would keep an earlier scheme's sizes
@@ -1425,7 +1453,9 @@ private:
                                 prev_state, prev_fold_state,
                                 m_thresholds[ithres],
                                 m_branching_pattern[istage], m_bias_snr,
-                                m_profile, *m_rng, *m_manager, *buffers_ptr,
+                                m_profile,
+                                step_key(istage, prev_fold_idx, ithres),
+                                *m_manager, *buffers_ptr,
                                 *boxcar_widths_cache_ptr, thread_timers, 1.0F,
                                 m_ntrials);
 
@@ -1465,6 +1495,7 @@ private:
         const auto n_beam            = beam_idx_prev.size();
         const auto n_work            = n_beam * m_nprobs;
 
+        // NOLINTNEXTLINE(openmp-use-default-none): clauses cannot name members
 #pragma omp parallel num_threads(m_nthreads)
         {
             // Not thread_local: it would keep an earlier scheme's sizes
@@ -1489,7 +1520,8 @@ private:
                 }
 
                 sim_folds[fold_idx] = simulate_and_score(
-                    prev_fold_state, m_profile, *m_rng, *m_manager,
+                    prev_fold_state, m_profile,
+                    step_key(istage, fold_idx, kNoTarget), *m_manager,
                     *buffers_ptr, m_box_score_widths, m_bias_snr, 1.0F,
                     m_ntrials, &thread_timers);
             }
@@ -1508,6 +1540,7 @@ private:
         const auto sim_folds =
             pre_simulate_stage_folds(beam_idx_prev, istage, segment_stats);
 
+        // NOLINTNEXTLINE(openmp-use-default-none): clauses cannot name members
 #pragma omp parallel num_threads(m_nthreads)
         {
             auto& thread_timers = segment_stats.get_thread_local();
@@ -1623,7 +1656,10 @@ std::vector<State> evaluate_scheme(std::span<const float> thresholds,
     std::vector<FoldsType> folds_current(1);
     std::vector<FoldsType> folds_next(1);
 
-    const math::ThreadLocalNormalRNG rng(std::random_device{}());
+    // Unseeded API: a fresh seed per call, keyed streams per stage.
+    const uint64_t seed = std::random_device{}();
+    auto rng_h0 = math::make_keyed_pcg32(seed, kPurposeRunInit, 0U, 0U, 0U, 0U);
+    auto rng_h1 = math::make_keyed_pcg32(seed, kPurposeRunInit, 0U, 0U, 1U, 0U);
     // Create initial fold vectors
     auto folds_h0_init = manager->allocate(ntrials);
     auto folds_h1_init = manager->allocate(ntrials);
@@ -1633,10 +1669,11 @@ std::vector<State> evaluate_scheme(std::span<const float> thresholds,
     auto boxcar_widths_cache_ptr =
         std::make_unique<detection::BoxcarWidthsCache>(box_score_widths, nbins);
     // Simulate the initial folds (pruning level = 0)
-    auto folds_h0_sim = simulate_folds(*folds_h0_init, profile, rng, *manager,
-                                       *buffers_ptr, 0.0F, var_init, ntrials);
+    auto folds_h0_sim =
+        simulate_folds(*folds_h0_init, profile, rng_h0, *manager, *buffers_ptr,
+                       0.0F, var_init, ntrials);
     auto folds_h1_sim =
-        simulate_folds(*folds_h1_init, profile, rng, *manager, *buffers_ptr,
+        simulate_folds(*folds_h1_init, profile, rng_h1, *manager, *buffers_ptr,
                        bias_snr, var_init, ntrials);
     FoldsType const initial_fold_state{std::move(folds_h0_sim),
                                        std::move(folds_h1_sim)};
@@ -1655,9 +1692,15 @@ std::vector<State> evaluate_scheme(std::span<const float> thresholds,
         }
         auto [cur_state, cur_fold_state] = gen_next_using_thresh(
             prev_state, prev_fold_state, thresholds[istage],
-            branching_pattern[istage], bias_snr, profile, rng, *manager,
-            *buffers_ptr, *boxcar_widths_cache_ptr, thread_timers, 1.0F,
-            ntrials);
+            branching_pattern[istage], bias_snr, profile,
+            StreamKey{
+                .seed   = seed,
+                .stage  = static_cast<uint32_t>(istage),
+                .parent = 0,
+                .target = kNoTarget,
+            },
+            *manager, *buffers_ptr, *boxcar_widths_cache_ptr, thread_timers,
+            1.0F, ntrials);
         states[istage] = cur_state;
         if (istage == 0) {
             folds_current[0] = std::move(cur_fold_state);
@@ -1708,7 +1751,10 @@ std::vector<State> determine_scheme(std::span<const float> survive_probs,
     std::vector<FoldsType> folds_current(1);
     std::vector<FoldsType> folds_next(1);
 
-    const math::ThreadLocalNormalRNG rng(std::random_device{}());
+    // Unseeded API: a fresh seed per call, keyed streams per stage.
+    const uint64_t seed = std::random_device{}();
+    auto rng_h0 = math::make_keyed_pcg32(seed, kPurposeRunInit, 0U, 0U, 0U, 0U);
+    auto rng_h1 = math::make_keyed_pcg32(seed, kPurposeRunInit, 0U, 0U, 1U, 0U);
     // Create initial fold vectors
     auto folds_h0_init = manager->allocate(ntrials);
     auto folds_h1_init = manager->allocate(ntrials);
@@ -1718,10 +1764,11 @@ std::vector<State> determine_scheme(std::span<const float> survive_probs,
     auto boxcar_widths_cache_ptr =
         std::make_unique<detection::BoxcarWidthsCache>(box_score_widths, nbins);
     // Simulate the initial folds (pruning level = 0)
-    auto folds_h0_sim = simulate_folds(*folds_h0_init, profile, rng, *manager,
-                                       *buffers_ptr, 0.0F, var_init, ntrials);
+    auto folds_h0_sim =
+        simulate_folds(*folds_h0_init, profile, rng_h0, *manager, *buffers_ptr,
+                       0.0F, var_init, ntrials);
     auto folds_h1_sim =
-        simulate_folds(*folds_h1_init, profile, rng, *manager, *buffers_ptr,
+        simulate_folds(*folds_h1_init, profile, rng_h1, *manager, *buffers_ptr,
                        bias_snr, var_init, ntrials);
     FoldsType const initial_fold_state{std::move(folds_h0_sim),
                                        std::move(folds_h1_sim)};
@@ -1740,7 +1787,13 @@ std::vector<State> determine_scheme(std::span<const float> survive_probs,
         }
         auto [cur_state, cur_fold_state] = gen_next_using_surv_prob(
             prev_state, prev_fold_state, survive_probs[istage],
-            branching_pattern[istage], bias_snr, profile, box_score_widths, rng,
+            branching_pattern[istage], bias_snr, profile, box_score_widths,
+            StreamKey{
+                .seed   = seed,
+                .stage  = static_cast<uint32_t>(istage),
+                .parent = 0,
+                .target = kNoTarget,
+            },
             *manager, *buffers_ptr, *boxcar_widths_cache_ptr, thread_timers,
             1.0F, ntrials);
         states[istage] = cur_state;

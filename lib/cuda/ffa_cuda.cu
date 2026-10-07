@@ -1,13 +1,16 @@
 #include "lib/cuda/ffa_cuda.cuh"
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <span>
+#include <tuple>
 #include <vector>
 
 #include <cuda_runtime.h>
 #include <fmt/ranges.h>
 #include <spdlog/spdlog.h>
+#include <thrust/copy.h>
 #include <thrust/device_vector.h>
 
 #include "loki/algorithms/fold.hpp"
@@ -24,12 +27,12 @@
 #include "lib/cuda/cuda_utils.cuh"
 #include "lib/cuda/fft_cuda.cuh"
 #include "lib/cuda/kernels_cuda.cuh"
+#include "lib/cuda/score_cuda.cuh"
 #include "lib/cuda/taylor_cuda.cuh"
 #include "lib/cuda/taylor_ffa_cuda.cuh"
 #include "lib/cuda/workspace_cuda.cuh"
 #include "lib/detail/error_check.hpp"
 #include "lib/detail/timing.hpp"
-#include "lib/detection/score_engine.hpp"
 
 namespace loki::algorithms {
 
@@ -722,30 +725,6 @@ compute_ffa_fourier_return_to_time_cuda(std::span<const float> ts_e,
     return {std::move(fold), std::move(ffa_plan_time)};
 }
 
-std::tuple<std::vector<float>, plans::FFAPlan<float>>
-compute_ffa_scores_cuda(std::span<const float> ts_e,
-                        std::span<const float> ts_v,
-                        const search::FFASearchConfig& cfg,
-                        int device_id,
-                        bool quiet) {
-    timing::ScopedLogLevel scoped_log_level(quiet);
-    auto [fold, ffa_plan] =
-        cfg.get_use_fourier()
-            ? compute_ffa_fourier_return_to_time_cuda(ts_e, ts_v, cfg,
-                                                      device_id, quiet)
-            : compute_ffa_cuda<float>(ts_e, ts_v, cfg, device_id, quiet);
-    const auto nsegments = ffa_plan.get_nsegments().back();
-    const auto ncoords   = ffa_plan.get_ncoords().back();
-    error_check::check_equal(
-        nsegments, 1U, "compute_ffa_scores: nsegments must be 1 for scores");
-    const auto& score_widths = cfg.get_scoring_widths();
-    const auto nscores       = ncoords * score_widths.size();
-    std::vector<float> scores(nscores);
-    detection::detail::snr_boxcar_3d_gpu(fold, score_widths, scores, ncoords,
-                                         cfg.get_nbins(), device_id);
-    return {std::move(scores), std::move(ffa_plan)};
-}
-
 // Explicit instantiation
 template class FFACudaCore<float>;
 template class FFACudaCore<ComplexTypeCUDA>;
@@ -865,6 +844,61 @@ make_ffa_gpu(memory::FFAWorkspace<FoldType>& workspace,
     return std::make_unique<FFACudaEngine<FoldType>>(
         memory::detail::cuda_workspace(workspace, "FFA"),
         math::detail::cuda_fft(fft_manager, "FFA"), cfg, device_id);
+}
+
+std::tuple<std::vector<float>, plans::FFAPlan<float>>
+compute_ffa_scores_gpu(std::span<const float> ts_e,
+                       std::span<const float> ts_v,
+                       const search::FFASearchConfig& cfg,
+                       int device_id) {
+    cuda_utils::CudaSetDeviceGuard device_guard(device_id);
+    error_check::check_equal(ts_e.size(), cfg.get_nsamps(),
+                             "compute_ffa_scores: ts_e must have size nsamps");
+    error_check::check_equal(ts_v.size(), ts_e.size(),
+                             "compute_ffa_scores: ts_v must have size nsamps");
+    // Scores use the time-domain plan in both modes.
+    plans::FFAPlan<float> ffa_plan(cfg);
+    const auto nsegments = ffa_plan.get_nsegments().back();
+    const auto ncoords   = ffa_plan.get_ncoords().back();
+    error_check::check_equal(
+        nsegments, 1U, "compute_ffa_scores: nsegments must be 1 for scores");
+
+    cudaStream_t stream = nullptr;
+    // The only host -> device copies: the time series and the widths.
+    const thrust::device_vector<float> ts_e_d(ts_e.begin(), ts_e.end());
+    const thrust::device_vector<float> ts_v_d(ts_v.begin(), ts_v.end());
+    const auto score_widths = cfg.get_scoring_widths();
+    const std::vector<uint32_t> widths_u32(score_widths.begin(),
+                                           score_widths.end());
+    const thrust::device_vector<uint32_t> widths_d(widths_u32.begin(),
+                                                   widths_u32.end());
+
+    thrust::device_vector<float> fold_d;
+    SizeType fold_size = 0;
+    if (cfg.get_use_fourier()) {
+        FFACudaCore<ComplexTypeCUDA> ffa(cfg, device_id);
+        const auto& plan = ffa.get_plan();
+        fold_d.resize(2 * plan.get_buffer_size());
+        fold_size = plan.get_fold_size_time();
+        ffa.execute(cuda_utils::as_span(ts_e_d), cuda_utils::as_span(ts_v_d),
+                    cuda_utils::as_span(fold_d), stream);
+    } else {
+        FFACudaCore<float> ffa(cfg, device_id);
+        const auto& plan = ffa.get_plan();
+        fold_d.resize(plan.get_buffer_size());
+        fold_size = plan.get_fold_size();
+        ffa.execute(cuda_utils::as_span(ts_e_d), cuda_utils::as_span(ts_v_d),
+                    cuda_utils::as_span(fold_d), stream);
+    }
+
+    thrust::device_vector<float> scores_d(ncoords * widths_u32.size());
+    detection::snr_boxcar_3d_cuda_d(
+        cuda_utils::as_span(fold_d, fold_size), cuda_utils::as_span(widths_d),
+        cuda_utils::as_span(scores_d), ncoords, cfg.get_nbins(), stream);
+    // The only device -> host copy: the scores.
+    std::vector<float> scores(scores_d.size());
+    thrust::copy(scores_d.begin(), scores_d.end(), scores.begin());
+    return {std::move(scores), std::move(ffa_plan)};
 }
 
 template std::unique_ptr<FFAEngine<float>>

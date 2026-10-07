@@ -163,7 +163,7 @@ public:
     [[nodiscard]] SizeType get_physical_start_idx() const;
 
     /// @brief Set size externally (for initialization)
-    void set_size(SizeType size) noexcept;
+    void set_size(SizeType size);
     /// @brief Reset buffer to empty state
     void reset() noexcept;
     /// @brief Prepare for in-place update, freezes current data as read region,
@@ -358,7 +358,7 @@ private:
     float get_prune_threshold(std::span<const float> scores_batch,
                               std::span<const SizeType> indices_batch,
                               SizeType slots_to_write,
-                              float current_threshold) noexcept;
+                              float current_threshold);
 
     /**
      * @brief Prune write region by threshold with in-place update.
@@ -378,7 +378,7 @@ private:
 
     // Memory-efficient uniqueness detection
     // Tie-break: keep first occurrence when scores are equal.
-    void compute_uniqueness_mask_in_scratch() noexcept;
+    void compute_uniqueness_mask_in_scratch();
 
     void validate_circular_buffer_state();
 }; // End WorldTree definition

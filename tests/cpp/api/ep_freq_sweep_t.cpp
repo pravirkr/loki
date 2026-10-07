@@ -102,6 +102,25 @@ TEST_CASE("EPRegionPlanner plans valid memory-bounded chunks",
     }
 }
 
+TEST_CASE("EPRegionPlanner plans are reproducible", "[ep_freq_sweep]") {
+    // The planner seeds its threshold scheme, so one configuration always
+    // gives the same chunking, thresholds and max_sugg.
+    const auto cfg = make_test_cfg(4.0, 140.0, 145.0);
+    const EPRegionPlanner<float> a(cfg, /*min_pd=*/0.1F, "taylor",
+                                   /*ref_ducy=*/0.1F);
+    const EPRegionPlanner<float> b(cfg, /*min_pd=*/0.1F, "taylor",
+                                   /*ref_ducy=*/0.1F);
+    REQUIRE(a.get_nchunks() == b.get_nchunks());
+    const auto& ca = a.get_chunk_cfgs();
+    const auto& cb = b.get_chunk_cfgs();
+    for (SizeType i = 0; i < ca.size(); ++i) {
+        CHECK(ca[i].threshold_scheme == cb[i].threshold_scheme);
+        CHECK(ca[i].max_sugg == cb[i].max_sugg);
+        CHECK(ca[i].nominal_f_start == cb[i].nominal_f_start);
+        CHECK(ca[i].nominal_f_end == cb[i].nominal_f_end);
+    }
+}
+
 TEST_CASE("EPRegionPlanner plans a band spanning two FFA regions",
           "[ep_freq_sweep]") {
     // 70-145 Hz spans two period octaves: 32 bins above 72.5 Hz, 64 below

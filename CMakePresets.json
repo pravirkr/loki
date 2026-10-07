@@ -50,6 +50,7 @@
         "CMAKE_BUILD_TYPE": "Debug",
         "LOKI_CUDA": "OFF",
         "LOKI_BUILD_PYTHON": "OFF",
+        "LOKI_ENABLE_NATIVE_ARCH": "OFF",
         "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer",
         "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address,undefined"
       }
@@ -74,6 +75,15 @@
         "LOKI_CUDA_ARCHITECTURES": "80",
         "LOKI_BUILD_BENCHMARKS": "ON"
       }
+    },
+    {
+      "name": "ci-tidy",
+      "displayName": "CI static analysis (Debug, compile DB, Python)",
+      "inherits": "dev",
+      "cacheVariables": {
+        "LOKI_CUDA": "OFF",
+        "LOKI_ENABLE_NATIVE_ARCH": "OFF"
+      }
     }
   ],
   "buildPresets": [
@@ -82,7 +92,8 @@
     { "name": "cuda", "configurePreset": "cuda" },
     { "name": "asan", "configurePreset": "asan" },
     { "name": "ci", "configurePreset": "ci" },
-    { "name": "ci-cuda", "configurePreset": "ci-cuda" }
+    { "name": "ci-cuda", "configurePreset": "ci-cuda" },
+    { "name": "ci-tidy", "configurePreset": "ci-tidy" }
   ],
   "testPresets": [
     {

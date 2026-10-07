@@ -21,7 +21,6 @@
 #include "lib/common/dispatch.hpp"
 #include "lib/detail/error_check.hpp"
 #include "lib/detail/timing.hpp"
-#include "lib/detection/score_engine.hpp"
 #include "lib/utils/fft_impl.hpp"
 #include "lib/utils/workspace_impl.hpp"
 
@@ -291,21 +290,36 @@ compute_ffa_scores(std::span<const float> ts_e,
                    bool show_progress,
                    Exec exec) {
     const timing::ScopedLogLevel scoped_log_level(quiet);
-    auto [fold, ffa_plan] =
-        cfg.get_use_fourier()
-            ? compute_ffa_fourier_return_to_time(ts_e, ts_v, cfg, quiet,
-                                                 show_progress, exec)
-            : compute_ffa<float>(ts_e, ts_v, cfg, quiet, show_progress, exec);
-    const auto nsegments = ffa_plan.get_nsegments().back();
-    const auto ncoords   = ffa_plan.get_ncoords().back();
-    error_check::check_equal(
-        nsegments, 1U, "compute_ffa_scores: nsegments must be 1 for scores");
-    const auto& score_widths = cfg.get_scoring_widths();
-    const auto nscores       = ncoords * score_widths.size();
-    std::vector<float> scores(nscores);
-    detection::detail::snr_boxcar_3d_cpu(fold, score_widths, scores, ncoords,
-                                         cfg.get_nbins(), cfg.get_nthreads());
-    return {std::move(scores), std::move(ffa_plan)};
+    if (exec.backend == Backend::kCPU) {
+        auto [fold, ffa_plan] =
+            cfg.get_use_fourier()
+                ? compute_ffa_fourier_return_to_time(ts_e, ts_v, cfg, quiet,
+                                                     show_progress, exec)
+                : compute_ffa<float>(ts_e, ts_v, cfg, quiet, show_progress,
+                                     exec);
+        const auto nsegments = ffa_plan.get_nsegments().back();
+        const auto ncoords   = ffa_plan.get_ncoords().back();
+        error_check::check_equal(
+            nsegments, 1U,
+            "compute_ffa_scores: nsegments must be 1 for scores");
+        const auto& score_widths = cfg.get_scoring_widths();
+        std::vector<float> scores(ncoords * score_widths.size());
+        // The CPU thread count comes from the config, as for the fold.
+        detection::snr_boxcar_3d(fold, score_widths, scores, ncoords,
+                                 cfg.get_nbins(),
+                                 Exec::cpu(cfg.get_nthreads()));
+        return {std::move(scores), std::move(ffa_plan)};
+    }
+#ifdef LOKI_ENABLE_GPU
+    if (exec.backend == loki::detail::kGPUBackend) {
+        // Fold and score stay on the device: only the time series goes in
+        // and only the scores come back.
+        loki::detail::warn_ignored_nthreads(exec, "compute_ffa_scores");
+        return detail::compute_ffa_scores_gpu(ts_e, ts_v, cfg, exec.device);
+    }
+#endif
+    (void)show_progress;
+    loki::detail::throw_unavailable("compute_ffa_scores", exec.backend);
 }
 
 // Explicit instantiation

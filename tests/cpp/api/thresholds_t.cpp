@@ -49,14 +49,15 @@ TEST_CASE("DynamicThresholdScheme getters", "[thresholds]") {
 
 TEST_CASE("DynamicThresholdScheme runs back to back with different nbins",
           "[thresholds]") {
-    // Per-thread scratch must follow each run's nbins, not the first run's
+    // Per-thread scratch must follow each run's nbins, not the first run's.
+    // Fixed seed: whether a full path survives must not vary between runs.
     const std::vector<float> branching_pattern(7, 3.0F);
     const auto* mode = GENERATE("legacy", "improved");
     for (const SizeType nbins : {32U, 64U, 32U}) {
         CAPTURE(mode, nbins);
         detection::DynamicThresholdScheme dyn_scheme(
             branching_pattern, 0.1F, nbins, 1024, 10, 0.05F, 8.0F, 100, 0.3F,
-            1.0F, 0.7F, 1, mode, /*seed=*/std::nullopt, /*batch_size=*/256,
+            1.0F, 0.7F, 1, mode, /*seed=*/42, /*batch_size=*/256,
             loki::Exec::cpu(4));
         dyn_scheme.run();
         REQUIRE(dyn_scheme.get_best_path_thresholds().size() ==
@@ -168,6 +169,40 @@ TEST_CASE("DynamicThresholdScheme evaluate does not depend on thread count",
     }
     REQUIRE_FALSE(eval_a.front().is_empty);
     REQUIRE_FALSE(eval_a.back().is_empty);
+}
+
+TEST_CASE("DynamicThresholdScheme run is reproducible for a fixed seed",
+          "[thresholds]") {
+    const std::vector<float> branching = {4.0F, 9.0F, 1.0F, 2.5F, 4.0F, 3.0F};
+    const auto* mode                   = GENERATE("legacy", "improved");
+    CAPTURE(mode);
+    const auto run_states = [&](uint64_t seed, int nthreads) {
+        detection::DynamicThresholdScheme dyn(
+            branching, 0.1F, 32, 128, 6, 0.05F, 8.0F, 24, 0.3F, 1.0F, 1.2F, 1,
+            mode, seed, /*batch_size=*/256, loki::Exec::cpu(nthreads));
+        dyn.run(4);
+        return dyn.get_states();
+    };
+    const auto same = [](const std::vector<detection::State>& a,
+                         const std::vector<detection::State>& b) {
+        if (a.size() != b.size()) {
+            return false;
+        }
+        for (SizeType i = 0; i < a.size(); ++i) {
+            if (!same_state_bits(a[i], b[i])) {
+                return false;
+            }
+        }
+        return true;
+    };
+    const auto ref = run_states(11, 1);
+    // Same seed again in the same process (the threads are reused).
+    REQUIRE(same(ref, run_states(11, 1)));
+    // Any thread count: every work item draws from its own stream.
+    REQUIRE(same(ref, run_states(11, 4)));
+    REQUIRE(same(ref, run_states(11, 8)));
+    // A different seed gives different draws.
+    REQUIRE_FALSE(same(ref, run_states(12, 4)));
 }
 
 } // namespace loki

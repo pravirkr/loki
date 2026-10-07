@@ -450,7 +450,7 @@ public:
             chunk_grp.getDataSet("threshold_scheme").read(threshold_scheme);
             chunk_grp.getDataSet("branching_pattern").read(branching_pattern);
 
-            auto chunk_cfg = m_base_cfg.get_updated_config(
+            auto chunk_cfg = m_base_cfg.get_updated_ep_config(
                 nbins, eta, actual_f_start, actual_f_end);
             const plans::FFAPlan<FoldType> plan(chunk_cfg);
             SizeType ncoords = plan.get_ncoords().back();
@@ -613,7 +613,7 @@ private:
         // once for the coarse band
         const double region_actual_start = f_start * (1.0 - max_drift);
         const double region_actual_end   = f_end * (1.0 + max_drift);
-        const auto rep_cfg               = m_base_cfg.get_updated_config(
+        const auto rep_cfg               = m_base_cfg.get_updated_ep_config(
             nbins, eta, region_actual_start, region_actual_end);
         const plans::FFAPlan<FoldType> rep_plan(rep_cfg);
         const auto bp_double = rep_plan.get_branching_pattern(m_poly_basis);
@@ -633,11 +633,14 @@ private:
         constexpr float kProbMin        = 0.05F;
         constexpr float kBeamWidth      = 0.7F;
         constexpr SizeType kTrialsStart = 1;
+        // Fixed seed: the scheme sets max_sugg and the chunking, so plans of
+        // one configuration must not change from run to run.
+        constexpr uint64_t kPlannerSeed = 0x10C1;
 
         detection::DynamicThresholdScheme dyn(
             bp_float, m_ref_ducy, nbins, kNTrials, kNProbs, kProbMin, snr_final,
             kNThresholds, ducy_max, wtsp, kBeamWidth, kTrialsStart, "legacy",
-            /*seed=*/std::nullopt, /*batch_size=*/256,
+            /*seed=*/kPlannerSeed, /*batch_size=*/256,
             Exec::cpu(m_base_cfg.get_nthreads()));
         dyn.run();
 
@@ -675,8 +678,8 @@ private:
                                   double nominal_end) -> EvaluatedChunk {
             const double act_start = nominal_start * (1.0 - max_drift);
             const double act_end   = nominal_end * (1.0 + max_drift);
-            auto chunk_cfg =
-                m_base_cfg.get_updated_config(nbins, eta, act_start, act_end);
+            auto chunk_cfg         = m_base_cfg.get_updated_ep_config(
+                nbins, eta, act_start, act_end);
             const plans::FFAPlan<FoldType> plan(chunk_cfg);
             const SizeType ncoords = plan.get_ncoords().back();
             const SizeType max_sugg =

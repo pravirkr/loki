@@ -7,7 +7,6 @@
 #include <cstdint>
 #include <limits>
 #include <mutex>
-#include <random>
 #include <span>
 #include <stdexcept>
 #include <type_traits>
@@ -17,7 +16,6 @@
 #include <boost/math/distributions/normal.hpp>
 #include <boost/math/special_functions/binomial.hpp>
 #include <boost/math/special_functions/factorials.hpp>
-#include <omp.h>
 
 #include "loki/common/types.hpp"
 
@@ -217,67 +215,63 @@ private:
     StateType m_inc{};
 };
 
+/// SplitMix64 finaliser: a strong 64-bit mix for deriving seeds.
+[[nodiscard]] constexpr uint64_t splitmix64(uint64_t x) noexcept {
+    x += 0x9e3779b97f4a7c15ULL;
+    x = (x ^ (x >> 30U)) * 0xbf58476d1ce4e5b9ULL;
+    x = (x ^ (x >> 27U)) * 0x94d049bb133111ebULL;
+    return x ^ (x >> 31U);
+}
+
 /**
- * @brief High-performance thread-safe normal distribution generator.
+ * @brief Independent PCG32 stream for one keyed work item.
  *
- * Generates normally distributed random numbers using PCG32 PRNG combined with
- * inverse CDF lookup table and linear interpolation. Each thread maintains
- * independent state, ensuring thread-safety without locks during generation.
- *
- * Performance: 3-10× faster than std::normal_distribution across architectures
- * Quality: Passes Kolmogorov-Smirnov and Anderson-Darling normality tests
- * Accuracy: ~1e-5 relative error for standard normal distribution
- *
+ * Hashes the seed and the key fields (a purpose tag plus up to four item
+ * coordinates) into both the PCG state and the stream selector, so distinct
+ * keys give statistically independent streams, and the same key always
+ * gives the same stream. Use it instead of per-thread generators: the draws
+ * then depend only on (seed, key), never on threads or scheduling.
+ * `branch` must be < 2^24; the other fields may use all 32 bits.
  */
-class ThreadLocalNormalRNG {
+[[nodiscard]] inline PCG32 make_keyed_pcg32(uint64_t seed,
+                                            uint32_t purpose,
+                                            uint32_t stage,
+                                            uint32_t parent,
+                                            uint32_t branch,
+                                            uint32_t trial) {
+    uint64_t mixed = splitmix64(seed ^ (static_cast<uint64_t>(purpose) << 48U));
+    mixed          = splitmix64(mixed ^ (static_cast<uint64_t>(stage) << 32U));
+    mixed          = splitmix64(mixed ^ parent);
+    mixed =
+        splitmix64(mixed ^ ((static_cast<uint64_t>(branch) << 40U) ^ trial));
+    return PCG32(mixed, splitmix64(mixed ^ 0xda3e39cb94b95bdbULL));
+}
+
+/**
+ * @brief Normal and bounded-uniform samples drawn from a caller-owned PCG32.
+ *
+ * Stateless: the caller owns the stream, so results depend only on how the
+ * stream was seeded, never on which thread runs the code or on earlier
+ * calls. Give every independent piece of work its own stream (e.g. keyed on
+ * seed, stage and work item) to stay reproducible under any scheduling.
+ *
+ * Normals use an inverse-CDF lookup table (2^17 + 1 quantiles of N(0, 1))
+ * with linear interpolation: ~1e-5 relative error, several times faster than
+ * std::normal_distribution.
+ */
+class NormalSampler {
 public:
-    /**
-     * @brief Constructs the generator with a base seed.
-     *
-     * Each thread will derive its own unique seed from this base seed.
-     * The lookup table is initialized on first use (thread-safe).
-     *
-     * @param base_seed Base seed for seeding per-thread RNGs. Default uses
-     * std::random_device for non-deterministic seed.
-     */
-    explicit ThreadLocalNormalRNG(uint64_t base_seed = std::random_device{}())
-        : m_base_seed(base_seed) {
-        std::call_once(s_lut_init_flag, &ThreadLocalNormalRNG::init_lut);
-    }
-
-    ~ThreadLocalNormalRNG()                                      = default;
-    ThreadLocalNormalRNG(const ThreadLocalNormalRNG&)            = delete;
-    ThreadLocalNormalRNG& operator=(const ThreadLocalNormalRNG&) = delete;
-    ThreadLocalNormalRNG(ThreadLocalNormalRNG&&)                 = delete;
-    ThreadLocalNormalRNG& operator=(ThreadLocalNormalRNG&&)      = delete;
-
-    /**
-     * @brief Generates normally distributed random numbers.
-     *
-     * Fills the output span with samples from N(mean, stddev^2).
-     * Thread-safe: can be called simultaneously from multiple threads.
-     *
-     * @param out Output span to fill with generated samples
-     * @param mean Mean of the normal distribution
-     * @param stddev Standard deviation
-     */
-    void
-    generate(std::span<float> out, float mean, float stddev) const noexcept {
-        generate_impl(out.data(), out.size(), mean, stddev);
-    }
-
-    /// Fills `out` from `rng` using the shared normal lookup table.
-    /// Does not touch the thread-local generator, so each caller can own a
-    /// stream. Same interpolation as `generate`.
-    static void generate_with(PCG32& rng,
-                              std::span<float> out,
-                              float mean,
-                              float stddev) noexcept {
-        std::call_once(s_lut_init_flag, &ThreadLocalNormalRNG::init_lut);
+    /// Fills `out` with samples of N(mean, stddev^2) drawn from `rng`.
+    static void generate(PCG32& rng,
+                         std::span<float> out,
+                         float mean,
+                         float stddev) noexcept {
+        std::call_once(s_lut_init_flag, &NormalSampler::init_lut);
         const auto max_idx = static_cast<float>(s_lut.size() - 2);
         const float* __restrict__ lut_ptr = s_lut.data();
         float* __restrict__ out_ptr       = out.data();
         for (SizeType i = 0; i < out.size(); ++i) {
+            // Uniform in [0, max_idx], split into index and fraction
             const float u_scaled =
                 static_cast<float>(rng()) * kInvU32 * max_idx;
             const auto idx   = static_cast<SizeType>(u_scaled);
@@ -288,16 +282,13 @@ public:
         }
     }
 
-    // Generate a random index in [0, max_value]
-    [[nodiscard]] SizeType uniform_index(SizeType max_value) const noexcept {
-        auto& rng = get_thread_rng(m_base_seed);
-
-        // Lemire's fast bounded random
+    /// Uniform index in [0, max_value] (Lemire's bounded method).
+    [[nodiscard]] static SizeType uniform_index(PCG32& rng,
+                                                SizeType max_value) noexcept {
         const uint64_t range = static_cast<uint64_t>(max_value) + 1ULL;
-
-        uint64_t x = rng();
-        uint64_t m = x * range;
-        auto l     = static_cast<uint32_t>(m);
+        uint64_t x           = rng();
+        uint64_t m           = x * range;
+        auto l               = static_cast<uint32_t>(m);
         if (l < range) {
             const uint64_t t = (1ULL << 32U) % range;
             while (l < t) {
@@ -310,28 +301,16 @@ public:
     }
 
 private:
-    // Static shared lookup table (initialized once, read-only thereafter)
+    // Shared lookup table (initialised once, read-only thereafter)
     static inline std::vector<float> s_lut;
     static inline std::once_flag s_lut_init_flag;
 
-    // Constants
     static constexpr float kInvU32 =
         1.0F / static_cast<float>(std::numeric_limits<uint32_t>::max());
     // 2^17 + 1 for high resolution for the lookup table
     static constexpr SizeType kTableSize = 1U << 17U;
-    static constexpr uint64_t kSeedMix1  = 0x9e3779b97f4a7c15ULL;
-    static constexpr uint64_t kSeedMix2  = 0xda3e39cb94b95bdbULL;
-    static constexpr uint64_t kSplitMix1 = 0xbf58476d1ce4e5b9ULL;
-    static constexpr uint64_t kSplitMix2 = 0x94d049bb133111ebULL;
 
-    uint64_t m_base_seed;
-
-    /**
-     * @brief Initializes the lookup table with quantiles of N(0,1).
-     *
-     * Called exactly once via std::call_once. Precomputes quantiles
-     * for uniform probability values in [0, 1] with linear spacing.
-     */
+    /// Quantiles of N(0, 1) at linearly spaced probabilities in [0, 1].
     static void init_lut() {
         s_lut.resize(kTableSize + 1);
         const boost::math::normal_distribution<double> n01;
@@ -339,76 +318,6 @@ private:
             double p = static_cast<double>(i) / static_cast<double>(kTableSize);
             p        = std::clamp(p, 1e-9, 1.0 - 1e-9);
             s_lut[i] = static_cast<float>(boost::math::quantile(n01, p));
-        }
-    }
-
-    /**
-     * @brief SplitMix64 hash function for seed mixing.
-     *
-     * High-quality 64-bit hash used to derive per-thread seeds from base seed.
-     *
-     * @param x Input value to hash
-     * @return Hashed 64-bit value
-     */
-    [[nodiscard]] static uint64_t splitmix64(uint64_t x) noexcept {
-        x += kSeedMix1;
-        x = (x ^ (x >> 30U)) * kSplitMix1;
-        x = (x ^ (x >> 27U)) * kSplitMix2;
-        return x ^ (x >> 31U);
-    }
-
-    /**
-     * @brief Returns thread-local PCG32 generator, initializing if needed.
-     *
-     * Each thread gets its own PCG32 instance with a unique seed derived
-     * from base_seed and thread ID. Initialization happens lazily on first
-     * call.
-     *
-     * @param base_seed Base seed for deriving thread-specific seed
-     * @return Reference to thread-local PCG32 generator
-     */
-    [[nodiscard]] static PCG32& get_thread_rng(uint64_t base_seed) noexcept {
-        thread_local PCG32 rng;
-        thread_local bool initialized = false;
-
-        if (!initialized) {
-            // Derive unique seed for this thread
-            const auto tid = static_cast<uint64_t>(omp_get_thread_num());
-            const uint64_t thread_seed =
-                splitmix64(base_seed ^ (tid * kSeedMix1));
-            const uint64_t stream = splitmix64(thread_seed ^ kSeedMix2);
-
-            rng         = PCG32(thread_seed, stream);
-            initialized = true;
-        }
-        return rng;
-    }
-
-    // Core generation implementation using LUT + linear interpolation.
-    void generate_impl(float* __restrict__ out_ptr,
-                       SizeType out_size,
-                       float mean,
-                       float stddev) const noexcept {
-        // Get thread-local RNG
-        auto& rng = get_thread_rng(m_base_seed);
-
-        // Maximum valid index for interpolation (we need idx+1 to exist)
-        const auto max_idx = static_cast<float>(s_lut.size() - 2);
-        const float* __restrict__ lut_ptr = s_lut.data();
-
-        for (SizeType i = 0; i < out_size; ++i) {
-            // Get uniform random in [0, max_idx]
-            const float u_scaled =
-                static_cast<float>(rng()) * kInvU32 * max_idx;
-            // Split into integer index and fractional part
-            const auto idx   = static_cast<SizeType>(u_scaled);
-            const float frac = u_scaled - static_cast<float>(idx);
-            // Linear interpolation: z = lut[idx] + frac * (lut[idx+1] -
-            // lut[idx])
-            const float z =
-                std::fma(frac, lut_ptr[idx + 1] - lut_ptr[idx], lut_ptr[idx]);
-            // Transform to N(mean, stddev^2): x = mean + stddev * z
-            out_ptr[i] = std::fma(z, stddev, mean);
         }
     }
 };
