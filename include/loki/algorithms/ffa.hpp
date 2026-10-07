@@ -5,18 +5,13 @@
 #include <span>
 #include <vector>
 
+#include "loki/common/backend.hpp"
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
 #include "loki/detection/score.hpp"
 #include "loki/search/configs.hpp"
 #include "loki/utils/fft.hpp"
 #include "loki/utils/workspace.hpp"
-
-#ifdef LOKI_ENABLE_CUDA
-#include <cuda/std/span>
-#include <cuda_runtime.h>
-#include <thrust/device_vector.h>
-#endif // LOKI_ENABLE_CUDA
 
 namespace loki::algorithms {
 
@@ -28,14 +23,37 @@ namespace loki::algorithms {
  */
 template <SupportedFoldType FoldType> class FFA {
 public:
-    // Chunked FFA constructor (owns workspace and an empty FFTWManager)
-    explicit FFA(const search::FFASearchConfig& cfg, bool show_progress = true);
+    /**
+     * @brief Owns its workspace and FFT plans.
+     *
+     * The CPU thread count comes from @p cfg; @p exec selects the backend
+     * and device.
+     */
+    explicit FFA(const search::FFASearchConfig& cfg,
+                 bool show_progress = true,
+                 Exec exec          = {});
 
-    // Pipeline-based FFA constructor uses external workspace and FFTWManager
+    explicit FFA(const search::FFASearchConfig& cfg, Exec exec)
+        : FFA(cfg, /*show_progress=*/false, exec) {}
+
+    /**
+     * @brief Runs on caller-owned buffers and FFT plans, so several FFA
+     * instances (e.g. one per frequency chunk) can share one allocation.
+     *
+     * @p workspace and @p fft_manager must be built for the same backend and
+     * device as @p exec, and @p workspace must be large enough for @p cfg.
+     */
     explicit FFA(memory::FFAWorkspace<FoldType>& workspace,
-                 math::FFTWManager& fft_manager,
+                 math::FFTManager& fft_manager,
                  const search::FFASearchConfig& cfg,
-                 bool show_progress = true);
+                 bool show_progress = true,
+                 Exec exec          = {});
+
+    explicit FFA(memory::FFAWorkspace<FoldType>& workspace,
+                 math::FFTManager& fft_manager,
+                 const search::FFASearchConfig& cfg,
+                 Exec exec)
+        : FFA(workspace, fft_manager, cfg, /*show_progress=*/false, exec) {}
 
     // --- Rule of five: PIMPL ---
     ~FFA();
@@ -84,10 +102,21 @@ public:
                  std::span<const float> ts_v,
                  std::span<FoldType> fold);
 
+    void execute(DeviceSpan<const float> ts_e,
+                 DeviceSpan<const float> ts_v,
+                 DeviceSpan<FoldType> fold,
+                 Stream stream = {});
+
     // This overload is ONLY enabled when FoldType is ComplexType
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
                  std::span<float> fold)
+        requires(std::is_same_v<FoldType, ComplexType>);
+
+    void execute(DeviceSpan<const float> ts_e,
+                 DeviceSpan<const float> ts_v,
+                 DeviceSpan<float> fold,
+                 Stream stream = {})
         requires(std::is_same_v<FoldType, ComplexType>);
 
 private:
@@ -106,7 +135,8 @@ compute_ffa(std::span<const float> ts_e,
             std::span<const float> ts_v,
             const search::FFASearchConfig& cfg,
             bool quiet         = false,
-            bool show_progress = false);
+            bool show_progress = false,
+            Exec exec          = {});
 
 // Convenience function to fold time series using P-FFA in the Fourier domain
 // and return the result in the time domain (floats)
@@ -115,117 +145,15 @@ compute_ffa_fourier_return_to_time(std::span<const float> ts_e,
                                    std::span<const float> ts_v,
                                    const search::FFASearchConfig& cfg,
                                    bool quiet         = false,
-                                   bool show_progress = false);
+                                   bool show_progress = false,
+                                   Exec exec          = {});
 
 std::tuple<std::vector<float>, plans::FFAPlan<float>>
 compute_ffa_scores(std::span<const float> ts_e,
                    std::span<const float> ts_v,
                    const search::FFASearchConfig& cfg,
                    bool quiet         = false,
-                   bool show_progress = false);
-
-#ifdef LOKI_ENABLE_CUDA
-
-/**
- * @brief FFA algorithm for Pulsar Search on CUDA
- *
- * @tparam FoldTypeCUDA Device fold type (float or ComplexTypeCUDA)
- */
-template <SupportedFoldTypeCUDA FoldTypeCUDA> class FFACUDA {
-public:
-    using HostFoldT   = HostFoldType<FoldTypeCUDA>;
-    using DeviceFoldT = DeviceFoldType<FoldTypeCUDA>;
-
-    // Constructor with owned workspace and empty CUFFTManager
-    explicit FFACUDA(const search::FFASearchConfig& cfg, int device_id = 0);
-
-    // Constructor with external workspace (owns an empty CUFFTManager)
-    explicit FFACUDA(memory::FFAWorkspaceCUDA<FoldTypeCUDA>& workspace,
-                     const search::FFASearchConfig& cfg,
-                     int device_id = 0);
-
-    // Pipeline constructor: external workspace and CUFFTManager
-    explicit FFACUDA(memory::FFAWorkspaceCUDA<FoldTypeCUDA>& workspace,
-                     math::CUFFTManager& fft_manager,
-                     const search::FFASearchConfig& cfg,
-                     int device_id = 0);
-
-    ~FFACUDA();
-    FFACUDA(FFACUDA&&) noexcept;
-    FFACUDA& operator=(FFACUDA&&) noexcept;
-    FFACUDA(const FFACUDA&)            = delete;
-    FFACUDA& operator=(const FFACUDA&) = delete;
-
-    const plans::FFAPlan<HostFoldT>& get_plan() const noexcept;
-    // Transfer ownership of the plan
-    [[nodiscard]] plans::FFAPlan<HostFoldT> extract_plan() && noexcept;
-    float get_brute_fold_timing() const noexcept;
-
-    void execute(std::span<const float> ts_e,
-                 std::span<const float> ts_v,
-                 std::span<HostFoldT> fold);
-
-    void execute(std::span<const float> ts_e,
-                 std::span<const float> ts_v,
-                 cuda::std::span<DeviceFoldT> fold_d);
-
-    void execute(cuda::std::span<const float> ts_e,
-                 cuda::std::span<const float> ts_v,
-                 cuda::std::span<DeviceFoldT> fold,
-                 cudaStream_t stream);
-
-    // This overload is ONLY enabled when FoldTypeCUDA is ComplexTypeCUDA
-    void execute(std::span<const float> ts_e,
-                 std::span<const float> ts_v,
-                 std::span<float> fold)
-        requires(std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>);
-
-    // This overload is ONLY enabled when FoldTypeCUDA is ComplexTypeCUDA
-    void execute(cuda::std::span<const float> ts_e,
-                 cuda::std::span<const float> ts_v,
-                 cuda::std::span<float> fold,
-                 cudaStream_t stream = nullptr)
-        requires(std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>);
-
-private:
-    class Impl;
-    std::unique_ptr<Impl> m_impl;
-};
-
-// Convenience function to fold time series using P-FFA (both time and Fourier
-// domains)
-template <SupportedFoldTypeCUDA FoldTypeCUDA>
-std::tuple<std::vector<HostFoldType<FoldTypeCUDA>>,
-           plans::FFAPlan<HostFoldType<FoldTypeCUDA>>>
-compute_ffa_cuda(std::span<const float> ts_e,
-                 std::span<const float> ts_v,
-                 const search::FFASearchConfig& cfg,
-                 int device_id,
-                 bool quiet = false);
-
-template <SupportedFoldTypeCUDA FoldTypeCUDA>
-std::tuple<thrust::device_vector<FoldTypeCUDA>,
-           plans::FFAPlan<HostFoldType<FoldTypeCUDA>>>
-compute_ffa_cuda_device(std::span<const float> ts_e,
-                        std::span<const float> ts_v,
-                        const search::FFASearchConfig& cfg,
-                        int device_id);
-
-// Convenience function to fold time series using P-FFA in the Fourier domain
-// and return the result in the time domain (floats)
-std::tuple<std::vector<float>, plans::FFAPlan<float>>
-compute_ffa_fourier_return_to_time_cuda(std::span<const float> ts_e,
-                                        std::span<const float> ts_v,
-                                        const search::FFASearchConfig& cfg,
-                                        int device_id,
-                                        bool quiet = false);
-
-std::tuple<std::vector<float>, plans::FFAPlan<float>>
-compute_ffa_scores_cuda(std::span<const float> ts_e,
-                        std::span<const float> ts_v,
-                        const search::FFASearchConfig& cfg,
-                        int device_id,
-                        bool quiet = false);
-#endif // LOKI_ENABLE_CUDA
+                   bool show_progress = false,
+                   Exec exec          = {});
 
 } // namespace loki::algorithms

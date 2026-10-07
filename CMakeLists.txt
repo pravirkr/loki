@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.18)
+cmake_minimum_required(VERSION 3.25...3.31)
 
 project(
   loki
@@ -8,6 +8,16 @@ project(
 )
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# Compiler cache: speeds up rebuilds (CUDA translation units especially).
+option(LOKI_USE_CCACHE "Use ccache as the compiler launcher when it is found" ON)
+if(LOKI_USE_CCACHE AND NOT CMAKE_CXX_COMPILER_LAUNCHER)
+  find_program(LOKI_CCACHE_PROGRAM ccache)
+  if(LOKI_CCACHE_PROGRAM)
+    set(CMAKE_CXX_COMPILER_LAUNCHER ${LOKI_CCACHE_PROGRAM})
+    set(CMAKE_CUDA_COMPILER_LAUNCHER ${LOKI_CCACHE_PROGRAM})
+  endif()
+endif()
 
 # Compiler version requirements
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
@@ -49,10 +59,8 @@ option(BUILD_SHARED_LIBS "Build shared libraries" OFF)
 # Python extensions are installed as a single module file; embed loki statically
 # instead of shipping a separate libloki.so plus loader search-path tweaks.
 if(LOKI_BUILD_PYTHON AND BUILD_SHARED_LIBS)
-  message(
-    FATAL_ERROR
-      "LOKI_BUILD_PYTHON=ON requires BUILD_SHARED_LIBS=OFF. "
-      "Python wheels should statically link loki into libloki.cpython-*.so."
+  message(FATAL_ERROR "LOKI_BUILD_PYTHON=ON requires BUILD_SHARED_LIBS=OFF. "
+                      "Python wheels should statically link loki into libloki.cpython-*.so."
   )
 endif()
 
@@ -83,6 +91,9 @@ set(LOKI_FORCE_CURAND_RNG
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+# Loki uses no C++20 modules. Skip the dependency scan: it slows every build
+# and adds @modmap arguments that clang-tidy cannot read.
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # Default to Release when no build type is specified (packaging-friendly).
@@ -152,9 +163,8 @@ if(LOKI_CUDA STREQUAL "ON" OR LOKI_CUDA STREQUAL "AUTO")
   if(CMAKE_CUDA_COMPILER)
     enable_language(CUDA)
   elseif(LOKI_CUDA STREQUAL "ON")
-    message(
-      FATAL_ERROR
-        "LOKI_CUDA=ON but no CUDA compiler (nvcc) was found. Install CUDA >= 12.6 or use LOKI_CUDA=AUTO/OFF."
+    message(FATAL_ERROR "LOKI_CUDA=ON but no CUDA compiler (nvcc) was found. "
+                        "Install CUDA >= 12.6 or use LOKI_CUDA=AUTO/OFF."
     )
   else()
     message(STATUS "CUDA compiler not found. Building CPU-only (LOKI_CUDA=AUTO).")
@@ -315,10 +325,14 @@ write_basic_package_version_file(
   COMPATIBILITY SameMajorVersion
 )
 
+# FindFFTW.cmake ships with the package: lokiConfig.cmake calls
+# find_dependency(FFTW) for static builds and adds its own directory to
+# CMAKE_MODULE_PATH.
 install(
   FILES ${CMAKE_CURRENT_BINARY_DIR}/lokiConfig.cmake
         ${CMAKE_CURRENT_BINARY_DIR}/lokiConfigVersion.cmake
-        ${CMAKE_CURRENT_BINARY_DIR}/lokiCUDAConfig.cmake DESTINATION ${LOKI_CMAKE_PACKAGE_DIR}
+        ${CMAKE_CURRENT_BINARY_DIR}/lokiCUDAConfig.cmake ${PROJECT_SOURCE_DIR}/cmake/FindFFTW.cmake
+  DESTINATION ${LOKI_CMAKE_PACKAGE_DIR}
 )
 
 include(FeatureSummary)
@@ -326,7 +340,8 @@ feature_summary(WHAT ALL)
 
 if(CMAKE_CUDA_COMPILER)
   message(
-    STATUS "loki build mode: CPU + CUDA (LOKI_CUDA=${LOKI_CUDA}, LOKI_ENABLE_CUDA macro defined)"
+    STATUS
+      "loki build mode: CPU + CUDA (LOKI_CUDA=${LOKI_CUDA}; backends chosen at run time via Exec)"
   )
 else()
   message(STATUS "loki build mode: CPU-only (LOKI_CUDA=${LOKI_CUDA})")

@@ -2,15 +2,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from loki.libloki.ffa import compute_ffa_scores
 from pyloki.periodogram import Periodogram
 
-from loki.libloki.ffa import compute_ffa_scores
-
 if TYPE_CHECKING:
-    from pyloki.io.timeseries import TimeSeries
-
     from loki.libloki.configs import PulsarSearchConfig
     from loki.libloki.ffa import FFAPlan
+    from pyloki.io.timeseries import TimeSeries
 
 
 def ffa_search(

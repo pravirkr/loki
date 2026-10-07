@@ -110,8 +110,8 @@ struct PruneRFIConfig {
  * @param a Source acceleration (m/s^2).
  * @param tobs Observation length (s).
  * @param f_pad Extra half-width in frequency (Hz).
- * @param a_pad Half-width in acceleration (m/s^2). Default (std::numeric_limits<double>::max())
- * masks all accelerations.
+ * @param a_pad Half-width in acceleration (m/s^2). Default
+ * (std::numeric_limits<double>::max()) masks all accelerations.
  */
 [[nodiscard]] ParamWindow
 make_pulsar_window(double f,
@@ -158,11 +158,13 @@ make_birdie_window(double f, double f_pad, double a_pad = kBirdieAccelPad);
  * pruning threshold scheme.
  *
  * @details Stages below `min_level` are disabled (set to `kHarvestDisabled`)
- * to avoid truncating marginal signals and prevent broad early-stage tile masking.
- * Subsequent stages are set to `std::max(min_snr, threshold_scheme[s] + offset)`.
+ * to avoid truncating marginal signals and prevent broad early-stage tile
+ * masking. Subsequent stages are set to `std::max(min_snr, threshold_scheme[s]
+ * + offset)`.
  *
  * @param threshold_scheme Pruning threshold scheme (size nsegments - 1).
- * @param min_level First stage (1-indexed) where harvest is permitted (default 10).
+ * @param min_level First stage (1-indexed) where harvest is permitted (default
+ * 10).
  * @param offset Additive offset above the threshold scheme (default 10.0F).
  * @param min_snr Minimum absolute SNR required for harvesting (default 15.0F).
  */

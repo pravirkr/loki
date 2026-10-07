@@ -101,11 +101,11 @@ public:
 
     /// @brief Compute the parameter grid for a given FFA level.
     [[nodiscard]] std::vector<std::vector<double>>
-    compute_param_grid(SizeType ffa_level) const noexcept;
+    compute_param_grid(SizeType ffa_level) const;
 
     /// @brief Compute the parameter grid for the entire plan.
     [[nodiscard]] std::vector<std::vector<std::vector<double>>>
-    compute_param_grid_full() const noexcept;
+    compute_param_grid_full() const;
 
     /// @brief Get a dictionary of parameters for the last level of the plan.
     [[nodiscard]] std::map<std::string, std::vector<double>>
@@ -195,7 +195,7 @@ private:
     SizeType m_flops_required{0U};
     SizeType m_flops_required_return_in_time{0U};
 
-    void configure_fold_shapes() noexcept;
+    void configure_fold_shapes();
     void compute_flops() noexcept;
     void validate() const;
 };

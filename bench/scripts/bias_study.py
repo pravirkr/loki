@@ -17,7 +17,7 @@ import numpy as np
 from _branching import BRANCHING_PROD, PROD_KW
 from matplotlib import pyplot as plt
 
-from loki import libculoki, libloki
+from loki import libloki
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -53,7 +53,7 @@ def chosen_cell(states: np.ndarray, nthr: int, nprobs: int) -> dict | None:
 
 
 def rescore(
-    scheme: libculoki.thresholds.DynamicThresholdSchemeCUDA,
+    scheme: libloki.thresholds.DynamicThresholdScheme,
     path: np.ndarray,
     seed: int,
 ) -> tuple[float, float, float]:
@@ -69,7 +69,7 @@ def rescore(
 
 
 def median_run(
-    factory: Callable[[], libculoki.thresholds.DynamicThresholdSchemeCUDA],
+    factory: Callable[[], libloki.thresholds.DynamicThresholdScheme],
     repeat: int = 3,
 ) -> float:
     factory()
@@ -83,8 +83,8 @@ def median_run(
 
 
 def one_search(
-    factory: Callable[[int], libculoki.thresholds.DynamicThresholdSchemeCUDA],
-    scorer: libculoki.thresholds.DynamicThresholdSchemeCUDA,
+    factory: Callable[[int], libloki.thresholds.DynamicThresholdScheme],
+    scorer: libloki.thresholds.DynamicThresholdScheme,
     seed: int,
     nthr: int,
     nprobs: int,
@@ -233,12 +233,13 @@ def main(
     print("=== CUDA improved run() timing (median of 3) ===")
     for ntrials in SEARCH_TRIALS:
         seconds = median_run(
-            lambda ntrials=ntrials: libculoki.thresholds.DynamicThresholdSchemeCUDA(
+            lambda ntrials=ntrials: libloki.thresholds.DynamicThresholdScheme(
                 BP,
                 mode="improved",
                 seed=1,
                 batch_size=256,
                 ntrials=ntrials,
+                backend="cuda",
                 **KW,
             ),
         )
@@ -246,25 +247,27 @@ def main(
 
     def cuda_factory(
         ntrials: int,
-    ) -> Callable[[int], libculoki.thresholds.DynamicThresholdSchemeCUDA]:
-        def make(seed: int) -> libculoki.thresholds.DynamicThresholdSchemeCUDA:
-            return libculoki.thresholds.DynamicThresholdSchemeCUDA(
+    ) -> Callable[[int], libloki.thresholds.DynamicThresholdScheme]:
+        def make(seed: int) -> libloki.thresholds.DynamicThresholdScheme:
+            return libloki.thresholds.DynamicThresholdScheme(
                 BP,
                 mode="improved",
                 seed=seed,
                 batch_size=256,
                 ntrials=ntrials,
+                backend="cuda",
                 **KW,
             )
 
         return make
 
-    scorer = libculoki.thresholds.DynamicThresholdSchemeCUDA(
+    scorer = libloki.thresholds.DynamicThresholdScheme(
         BP,
         mode="improved",
         seed=1,
         batch_size=256,
         ntrials=1024,
+        backend="cuda",
         **KW,
     )
     cuda_rows: dict[int, list[dict]] = {}

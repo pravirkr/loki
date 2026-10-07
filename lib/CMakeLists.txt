@@ -1,16 +1,20 @@
-# Collect CPU sources (*.cpp) via GLOB; CUDA *.cu files added when nvcc is available.
-file(GLOB LOKI_LIBRARY_CXX_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
+# Layout (see docs/architecture.md):
+#   lib/<domain>/*.cpp   facades and backend-neutral code, mirroring include/loki/<domain>/
+#   lib/cpu/*_cpu.cpp    CPU engines and kernels
+#   lib/cuda/*_cuda.cu   GPU engines and kernels, compiled only when a GPU backend is enabled
+# Every *.cpp under lib/ is host code; *.cu files are only picked up from lib/cuda/.
+file(GLOB_RECURSE LOKI_LIBRARY_CXX_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
 if(LOKI_LIBRARY_CXX_SOURCES STREQUAL "")
   message(FATAL_ERROR "No C++ sources (*.cpp) found in ${CMAKE_CURRENT_SOURCE_DIR}.")
 endif()
 set(LOKI_LIBRARY_ALL_SOURCES ${LOKI_LIBRARY_CXX_SOURCES})
 
 if(CMAKE_CUDA_COMPILER)
-  file(GLOB LOKI_LIBRARY_CUDA_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*.cu)
+  file(GLOB LOKI_LIBRARY_CUDA_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/cuda/*.cu)
   if(LOKI_LIBRARY_CUDA_SOURCES STREQUAL "")
     message(
       FATAL_ERROR
-        "LOKI_CUDA enabled but no CUDA sources (*.cu) found in ${CMAKE_CURRENT_SOURCE_DIR}."
+        "LOKI_CUDA enabled but no CUDA sources (*.cu) found in ${CMAKE_CURRENT_SOURCE_DIR}/cuda."
     )
   endif()
   list(APPEND LOKI_LIBRARY_ALL_SOURCES ${LOKI_LIBRARY_CUDA_SOURCES})
@@ -22,10 +26,19 @@ add_library(${PROJECT_NAME}::${LOKI_LIBRARY_NAME} ALIAS ${LOKI_LIBRARY_NAME})
 
 target_compile_features(${LOKI_LIBRARY_NAME} PUBLIC cxx_std_20)
 
-# C++ code uses #ifdef LOKI_ENABLE_CUDA for optional GPU API (preprocessor macro, not a CMake option).
+# The backend macros are PRIVATE: they only select which engines the facades
+# can build. Installed headers are identical in every build; callers ask
+# loki::available_backends() at run time. LOKI_ENABLE_GPU marks "a GPU backend
+# is compiled in"; LOKI_ENABLE_CUDA names which one.
+set(LOKI_BACKEND_DEFINITIONS "")
 if(CMAKE_CUDA_COMPILER)
-  target_compile_definitions(${LOKI_LIBRARY_NAME} PUBLIC LOKI_ENABLE_CUDA)
+  list(APPEND LOKI_BACKEND_DEFINITIONS LOKI_ENABLE_CUDA LOKI_ENABLE_GPU)
 endif()
+set(LOKI_BACKEND_DEFINITIONS
+    ${LOKI_BACKEND_DEFINITIONS}
+    PARENT_SCOPE
+)
+target_compile_definitions(${LOKI_LIBRARY_NAME} PRIVATE ${LOKI_BACKEND_DEFINITIONS})
 
 # Dependencies
 include(${PROJECT_SOURCE_DIR}/cmake/LokiDependencies.cmake)
@@ -45,20 +58,22 @@ if(LOKI_ENABLE_COVERAGE)
   endif()
 endif()
 
-# Set include directories
+# Include roots: public headers as "loki/...", private headers relative to the
+# repository root as "lib/..." (see docs/architecture.md, rule 5).
 target_include_directories(
   ${LOKI_LIBRARY_NAME}
   PUBLIC $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include/>
          $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
-  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+  PRIVATE ${PROJECT_SOURCE_DIR}
 )
 
-# Add CUDA include directories when available
+# CUDA headers are used by lib/cuda/ only; public headers never include them.
 if(CMAKE_CUDA_COMPILER)
+  set(LOKI_CUDA_INCLUDE_DIRS ${CUDAToolkit_INCLUDE_DIRS})
   if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL "13.0")
-    target_include_directories(${LOKI_LIBRARY_NAME} PUBLIC "${CUDAToolkit_INCLUDE_DIRS}/cccl")
+    list(PREPEND LOKI_CUDA_INCLUDE_DIRS "${CUDAToolkit_INCLUDE_DIRS}/cccl")
   endif()
-  target_include_directories(${LOKI_LIBRARY_NAME} PUBLIC ${CUDAToolkit_INCLUDE_DIRS})
+  target_include_directories(${LOKI_LIBRARY_NAME} PRIVATE ${LOKI_CUDA_INCLUDE_DIRS})
 endif()
 
 # Header-only internal deps: BUILD_INTERFACE only (never exported to consumers).
@@ -87,9 +102,27 @@ endif()
 
 if(CMAKE_CUDA_COMPILER)
   target_link_libraries(
-    ${LOKI_LIBRARY_NAME}
-    PRIVATE ${LOKI_CUDA_OPTIONS} CUDA::cuda_driver CUDA::curand
-            $<$<BOOL:${LOKI_NEEDS_CURANDDX}>:mathdx::curanddx>
-    PUBLIC CUDA::cudart CUDA::cufft
+    ${LOKI_LIBRARY_NAME} PRIVATE ${LOKI_CUDA_OPTIONS} CUDA::cuda_driver CUDA::curand
+                                 $<$<BOOL:${LOKI_NEEDS_CURANDDX}>:mathdx::curanddx>
+  )
+  # Runtime libraries: PRIVATE for shared loki, link-only PUBLIC for static loki.
+  if(BUILD_SHARED_LIBS)
+    target_link_libraries(${LOKI_LIBRARY_NAME} PRIVATE CUDA::cudart CUDA::cufft)
+  else()
+    target_link_libraries(
+      ${LOKI_LIBRARY_NAME} PUBLIC $<LINK_ONLY:CUDA::cudart> $<LINK_ONLY:CUDA::cufft>
+    )
+  endif()
+endif()
+
+# White-box access for in-tree tests and benchmarks: private headers (lib/),
+# the backend macros, and the CUDA headers. Never installed or exported.
+add_library(${LOKI_LIBRARY_NAME}_internal INTERFACE)
+add_library(${PROJECT_NAME}::internal ALIAS ${LOKI_LIBRARY_NAME}_internal)
+target_include_directories(${LOKI_LIBRARY_NAME}_internal INTERFACE ${PROJECT_SOURCE_DIR})
+target_compile_definitions(${LOKI_LIBRARY_NAME}_internal INTERFACE ${LOKI_BACKEND_DEFINITIONS})
+if(CMAKE_CUDA_COMPILER)
+  target_include_directories(
+    ${LOKI_LIBRARY_NAME}_internal SYSTEM INTERFACE ${LOKI_CUDA_INCLUDE_DIRS}
   )
 endif()

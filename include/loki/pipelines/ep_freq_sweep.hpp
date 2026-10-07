@@ -8,18 +8,14 @@
 #include <vector>
 
 #include "loki/algorithms/prune_rfi.hpp"
+#include "loki/common/backend.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
 
-#ifdef LOKI_ENABLE_CUDA
-#include <cuda/std/span>
-#include <cuda_runtime.h>
-#endif // LOKI_ENABLE_CUDA
-
-namespace loki::algorithms {
+namespace loki::pipelines {
 
 /**
- * @brief Frequency sweep pipeline for Extreme Pruning (EP) search on CPU.
+ * @brief Frequency sweep pipeline for Extreme Pruning (EP) search.
  *
  * Divides the requested frequency range into optimal chunks using
  * EPRegionPlanner (which runs DynamicThresholdScheme simulation once per coarse
@@ -29,17 +25,20 @@ namespace loki::algorithms {
  */
 class EPFreqSweep {
 public:
+    /// The CPU thread count comes from @p cfg; @p exec selects the backend.
+    /// Only the CPU backend is implemented.
     explicit EPFreqSweep(
         const search::PulsarSearchConfig& cfg,
-        bool show_progress          = true,
-        float min_pd                = 0.1F,
-        std::string_view poly_basis = "taylor",
-        float ref_ducy              = 0.1F,
-        PruneRFIConfig rfi_config   = {},
+        bool show_progress                           = true,
+        float min_pd                                 = 0.1F,
+        std::string_view poly_basis                  = "taylor",
+        float ref_ducy                               = 0.1F,
+        const algorithms::PruneRFIConfig& rfi_config = {},
         const std::optional<std::filesystem::path>& plan_cache_file =
             std::nullopt,
         std::optional<SizeType> n_runs                = std::nullopt,
-        std::optional<std::vector<SizeType>> ref_segs = std::nullopt);
+        std::optional<std::vector<SizeType>> ref_segs = std::nullopt,
+        Exec exec                                     = {});
 
     ~EPFreqSweep();
     EPFreqSweep(EPFreqSweep&&) noexcept;
@@ -52,37 +51,9 @@ public:
                  const std::filesystem::path& outdir = "./",
                  std::string_view file_prefix        = "test");
 
-    // Opaque handle to the implementation
-    class BaseImpl;
-
 private:
-    std::unique_ptr<BaseImpl> m_impl;
+    class Impl;
+    std::unique_ptr<Impl> m_impl;
 };
 
-#ifdef LOKI_ENABLE_CUDA
-
-class EPFreqSweepCUDA {
-public:
-    explicit EPFreqSweepCUDA(const search::PulsarSearchConfig& cfg,
-                             int device_id = 0);
-    ~EPFreqSweepCUDA();
-    EPFreqSweepCUDA(EPFreqSweepCUDA&&) noexcept;
-    EPFreqSweepCUDA& operator=(EPFreqSweepCUDA&&) noexcept;
-    EPFreqSweepCUDA(const EPFreqSweepCUDA&)            = delete;
-    EPFreqSweepCUDA& operator=(const EPFreqSweepCUDA&) = delete;
-
-    void execute(std::span<const float> ts_e,
-                 std::span<const float> ts_v,
-                 const std::filesystem::path& outdir = "./",
-                 std::string_view file_prefix        = "test");
-
-    // Opaque handle to the implementation
-    class BaseImpl;
-
-private:
-    std::unique_ptr<BaseImpl> m_impl;
-};
-
-#endif // LOKI_ENABLE_CUDA
-
-} // namespace loki::algorithms
+} // namespace loki::pipelines

@@ -1,9 +1,28 @@
 ---
+# clang-tidy configuration (see docs/architecture.md, Tooling).
+#
+# Run: run-clang-tidy -p build-dev '/(lib|src|tests|applications|bench)/'
+# tests/.clang-tidy inherits this file and relaxes a few test-only checks.
+#
+# Notable disabled checks and why:
+#   clang-analyzer-deadcode.DeadStores  the analyzer does not see uses in
+#                                       OpenMP clauses (num_threads(n))
+#   openmp-use-default-none             GCC < 14 rejects default(none)
+#                                       around std::source_location
+#                                       (error_check), so it is not portable
+#   openmp-exception-escape             exceptions in regions are accepted
+#   llvm-header-guard, portability-avoid-pragma-once  we use #pragma once
+#   magic numbers, pointer arithmetic, reinterpret_cast, unchecked access
+#                                       HPC kernels index raw buffers
+#
+# NOLINT rule: always name the check and give a reason, e.g.
+#   // NOLINT(google-runtime-int): matches std::strtoul
 Checks: >
   bugprone-*,
   -bugprone-easily-swappable-parameters,
   -bugprone-incorrect-roundings,
   clang-analyzer-*,
+  -clang-analyzer-deadcode.DeadStores,
   clang-diagnostic-*,
   concurrency-*,
   cppcoreguidelines*,
@@ -19,6 +38,7 @@ Checks: >
   google-*,
   hicpp-*,
   llvm-*,
+  -llvm-header-guard,
   -llvm-prefer-static-over-anonymous-namespace,
   -llvm-use-ranges,
   misc-*,
@@ -29,17 +49,25 @@ Checks: >
   -modernize-use-trailing-return-type,
   -modernize-use-nodiscard,
   openmp-*,
+  -openmp-exception-escape,
+  -openmp-use-default-none,
   performance-*,
   portability-*,
+  -portability-avoid-pragma-once,
   readability-*,
   -readability-identifier-length,
   -readability-isolate-declaration,
   -readability-magic-numbers,
   -readability-suspicious-call-argument,
+  -readability-use-anyofallof,
+  -readability-use-concise-preprocessor-directives,
 
 HeaderFileExtensions: ["h", "hh", "hpp", "hxx", "cuh"]
 WarningsAsErrors: ""
-HeaderFilterRegex: ".*"
+HeaderFilterRegex: "(include|lib|src|tests|bench|applications)/"
+# Third-party code (CPM cache, FetchContent _deps, system prefixes) matches
+# the filter above through its own include/ and src/ folders.
+ExcludeHeaderFilterRegex: "(/_deps/|/\\.cache/|^/opt/|^/usr/)"
 FormatStyle: "file"
 CheckOptions:
   readability-identifier-naming.ClassCase: "CamelCase"
@@ -70,3 +98,8 @@ CheckOptions:
   readability-identifier-naming.TemplateParameterCase: "CamelCase"
   readability-function-cognitive-complexity.IgnoreMacros: "true"
   readability-function-cognitive-complexity.Threshold: "150"
+  readability-trailing-comma.SingleLineCommaPolicy: Ignore
+  # Umbrella and third-party headers: their symbols come through public
+  # entry points, and pybind11/stl.h, numpy.h, functional.h etc. register
+  # type casters, so an "unused" one must never be removed.
+  misc-include-cleaner.IgnoreHeaders: "pybind11/.*;highfive/.*;catch2/.*;xsimd/.*;fmt/.*;spdlog/.*;omp\\.h;cuda.*;cufft.*;thrust/.*;cub/.*;boost/.*;toml\\+\\+/.*;CLI/.*;BS_thread_pool.*;psrio/.*;fftw3\\.h;hdf5\\.h;H5.*\\.h"

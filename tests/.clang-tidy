@@ -1,0 +1,24 @@
+---
+# Tests inherit the root .clang-tidy. These checks fight Catch2 and test
+# idioms, so they are off here only:
+#   bugprone-random-generator-seed           fixed seeds are intended
+#   clang-analyzer-optin.core.EnumCastOutOfRange  Catch2 flag enums
+#   bugprone-throwing-static-initialization  file-scope test tables
+#   bugprone-unchecked-optional-access       REQUIRE(opt) precedes the access
+#   concurrency-mt-unsafe                    setenv/system in serial tests
+#   google-runtime-int                       std::llround and friends
+#   modernize-use-designated-initializers,
+#   readability-trailing-comma               table-style test data
+#   readability-function-cognitive-complexity  Catch2 macros inflate it
+InheritParentConfig: true
+Checks: >
+  -bugprone-random-generator-seed,
+  -bugprone-throwing-static-initialization,
+  -bugprone-unchecked-optional-access,
+  -clang-analyzer-optin.core.EnumCastOutOfRange,
+  -concurrency-mt-unsafe,
+  -google-runtime-int,
+  -modernize-use-designated-initializers,
+  -readability-trailing-comma,
+  -readability-function-cognitive-complexity,
+  -readability-avoid-nested-conditional-operator,

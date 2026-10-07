@@ -7,13 +7,6 @@
 #include <string_view>
 #include <type_traits>
 
-#ifdef LOKI_ENABLE_CUDA
-#include <cuda/std/complex>
-#include <cuda/std/span>
-#include <thrust/complex.h>
-#include <thrust/device_vector.h>
-#endif // LOKI_ENABLE_CUDA
-
 namespace loki {
 
 using SizeType    = std::size_t;
@@ -38,36 +31,10 @@ concept SupportedFoldType =
 template <typename T>
 concept TriviallyCopyable = std::is_trivially_copyable_v<T>;
 
-#ifdef LOKI_ENABLE_CUDA
-using ComplexTypeCUDA = cuda::std::complex<float>;
-
-template <typename T>
-concept SupportedFoldTypeCUDA =
-    std::is_same_v<T, float> || std::is_same_v<T, ComplexTypeCUDA>;
-
-template <SupportedFoldTypeCUDA T> struct FoldTypeTraits;
-template <> struct FoldTypeTraits<float> {
-    using HostType   = float;
-    using DeviceType = float;
-};
-
-template <> struct FoldTypeTraits<ComplexTypeCUDA> {
-    using HostType   = ComplexType;
-    using DeviceType = ComplexTypeCUDA;
-};
-
-template <SupportedFoldTypeCUDA T>
-using HostFoldType = typename FoldTypeTraits<T>::HostType;
-
-template <SupportedFoldTypeCUDA T>
-using DeviceFoldType = typename FoldTypeTraits<T>::DeviceType;
-
-#endif // LOKI_ENABLE_CUDA
-
 // NOLINTBEGIN(cppcoreguidelines-macro-usage)
 // Helper macro for stringification
-#define STRINGIFY(x) STRINGIFY_(x)
-#define STRINGIFY_(x) #x
+#define STRINGIFY(x) STRINGIFY_IMPL(x)
+#define STRINGIFY_IMPL(x) #x
 
 inline constexpr SizeType kUnrollFactor = 8;
 
@@ -88,7 +55,9 @@ inline constexpr SizeType kUnrollFactor = 8;
 // NOLINTEND(cppcoreguidelines-macro-usage)
 // UNROLL_VECTORIZE_N is not supported for gcc < 14.0
 
-#if defined(LOKI_ENABLE_CUDA) && defined(__CUDACC__)
+// Keyed on the compiler, not on the backend: the header is identical in every
+// build, and nvcc-compiled translation units get host/device qualifiers.
+#if defined(__CUDACC__)
 #define LOKI_HD __host__ __device__
 #define LOKI_D __device__
 #define LOKI_H __host__

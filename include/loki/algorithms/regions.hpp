@@ -7,7 +7,7 @@
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
 
-namespace loki::regions {
+namespace loki::algorithms {
 
 inline constexpr SizeType kFFAFreqSweepWriteBatchSize = 1U << 16U;
 
@@ -175,4 +175,4 @@ private:
     std::unique_ptr<Impl> m_impl;
 };
 
-} // namespace loki::regions
+} // namespace loki::algorithms

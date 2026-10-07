@@ -107,7 +107,9 @@ def summarize(res: dict) -> None:
         f"brute={tot_b:.2f}s (table {tot_t:.2f}s)  merge={tot_f:.2f}s  "
         f"brute share={100 * tot_b / max(tot_b + tot_f, 1e-9):.1f}%"
     )
-    print("  f_range(Hz)            nbins    B   levels  nfreqs0    brute    table    merge  share")
+    print(
+        "  f_range(Hz)            nbins    B   levels  nfreqs0    brute    table    merge  share"
+    )
     for c in res["chunks"]:
         fr = c["f_range"] or (0, 0)
         share = 100 * c["brute"] / max(c["brute"] + c["ffa"], 1e-9)

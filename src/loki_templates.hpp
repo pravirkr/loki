@@ -1,7 +1,5 @@
 #pragma once
 
-#include "pybind_utils.hpp"
-
 #include <format>
 #include <limits>
 
@@ -12,13 +10,15 @@
 
 #include "loki/loki.hpp"
 
+#include "pybind_utils.hpp"
+
 namespace loki {
 using algorithms::EPMultiPass;
+using algorithms::EPRegionPlanner;
 using algorithms::FFA;
+using algorithms::FFARegionPlanner;
 using plans::FFAPlan;
 using plans::FFAPlanBase;
-using regions::EPRegionPlanner;
-using regions::FFARegionPlanner;
 using search::FFASearchConfig;
 using search::PulsarSearchConfig;
 
@@ -50,10 +50,16 @@ void bind_ffa_plan(py::module& m, const std::string& name) {
 // Template function to bind FFA<T>
 template <SupportedFoldType FoldType>
 void bind_ffa_class(py::module& m, const std::string& name) {
-    auto cls = py::class_<FFA<FoldType>>(m, name.c_str())
-                   .def(py::init<PulsarSearchConfig, bool>(), py::arg("cfg"),
-                        py::arg("show_progress") = true)
-                   .def_property_readonly("plan", &FFA<FoldType>::get_plan);
+    auto cls =
+        py::class_<FFA<FoldType>>(m, name.c_str())
+            .def(py::init([](const PulsarSearchConfig& cfg, bool show_progress,
+                             std::string_view backend, int device) {
+                     return std::make_unique<FFA<FoldType>>(
+                         cfg, show_progress, make_exec(backend, device));
+                 }),
+                 py::arg("cfg"), py::arg("show_progress") = true, py::kw_only(),
+                 py::arg("backend") = "cpu", py::arg("device") = 0)
+            .def_property_readonly("plan", &FFA<FoldType>::get_plan);
 
     // Standard execute
     cls.def(
@@ -238,11 +244,22 @@ template <SupportedFoldType FoldType>
 void bind_ep_multi_pass(py::module& m, const std::string& name) {
     auto cls =
         py::class_<EPMultiPass<FoldType>>(m, name.c_str())
-            .def(py::init<const PulsarSearchConfig&, const std::vector<float>&,
-                          std::optional<SizeType>,
-                          std::optional<std::vector<SizeType>>,
-                          const std::vector<SizeType>&, SizeType, SizeType,
-                          std::string_view, bool, algorithms::PruneRFIConfig>(),
+            .def(py::init(
+                     [](const PulsarSearchConfig& cfg,
+                        const std::vector<float>& threshold_scheme,
+                        std::optional<SizeType> n_runs,
+                        const std::optional<std::vector<SizeType>>& ref_segs,
+                        const std::vector<SizeType>& ascend_levels,
+                        SizeType max_sugg, SizeType batch_size,
+                        std::string_view poly_basis, bool show_progress,
+                        const algorithms::PruneRFIConfig& rfi_config,
+                        std::string_view backend, int device) {
+                         return std::make_unique<EPMultiPass<FoldType>>(
+                             cfg, threshold_scheme, n_runs, ref_segs,
+                             ascend_levels, max_sugg, batch_size, poly_basis,
+                             show_progress, rfi_config,
+                             make_exec(backend, device));
+                     }),
                  py::arg("cfg"), py::arg("threshold_scheme"),
                  py::arg("n_runs")        = std::nullopt,
                  py::arg("ref_segs")      = std::nullopt,
@@ -250,7 +267,9 @@ void bind_ep_multi_pass(py::module& m, const std::string& name) {
                  py::arg("max_sugg") = 1U << 18U, py::arg("batch_size") = 1024U,
                  py::arg("poly_basis")    = "taylor",
                  py::arg("show_progress") = true,
-                 py::arg("rfi_config")    = algorithms::PruneRFIConfig());
+                 py::arg("rfi_config")    = algorithms::PruneRFIConfig(),
+                 py::kw_only(), py::arg("backend") = "cpu",
+                 py::arg("device") = 0);
 
     // Standard execute
     cls.def(

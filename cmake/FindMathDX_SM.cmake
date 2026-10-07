@@ -3,11 +3,10 @@
 # Select cuRANDDx SM template value (>= 700) from resolved CUDA architectures.
 #--------------------------------------------------
 
-# Prevent multiple inclusion
-if(MathDX_SM_FIND_INCLUDED)
+if(MATHDX_SM_FIND_INCLUDED)
   return()
 endif()
-set(MathDX_SM_FIND_INCLUDED TRUE)
+set(MATHDX_SM_FIND_INCLUDED TRUE)
 
 include(${CMAKE_CURRENT_LIST_DIR}/LokiCUDAArch.cmake)
 
@@ -31,25 +30,25 @@ else()
        AND NOT LOKI_CUDA_ARCHITECTURES STREQUAL "native"
        AND NOT LOKI_CUDA_ARCHITECTURES MATCHES "^(all-major|all)$"
     )
-      string(REPLACE ";" "," _raw "${LOKI_CUDA_ARCHITECTURES}")
-      string(REGEX MATCH "[0-9]+" _first "${_raw}")
-      if(_first)
-        if(_first LESS 70)
+      string(REPLACE ";" "," raw_archs "${LOKI_CUDA_ARCHITECTURES}")
+      string(REGEX MATCH "[0-9]+" first_arch "${raw_archs}")
+      if(first_arch)
+        if(first_arch LESS 70)
           set(MATHDX_SM 700)
         else()
-          math(EXPR MATHDX_SM "${_first} * 10")
+          math(EXPR MATHDX_SM "${first_arch} * 10")
         endif()
       endif()
     endif()
 
     # 4. Query local GPU via nvidia-smi.
     if(NOT MATHDX_SM)
-      _loki_query_native_gpu_arch(_native_arch)
-      if(_native_arch)
-        if(_native_arch LESS 70)
+      _loki_query_native_gpu_arch(native_arch)
+      if(native_arch)
+        if(native_arch LESS 70)
           set(MATHDX_SM 700)
         else()
-          math(EXPR MATHDX_SM "${_native_arch} * 10")
+          math(EXPR MATHDX_SM "${native_arch} * 10")
         endif()
       endif()
     endif()
@@ -65,9 +64,8 @@ else()
       )
     else()
       set(MATHDX_SM "800")
-      message(
-        WARNING
-          "MathDX: GPU architecture not detected (LOKI_CUDA=AUTO). Defaulting MATHDX_SM=${MATHDX_SM}."
+      message(WARNING "MathDX: GPU architecture not detected (LOKI_CUDA=AUTO). "
+                      "Defaulting MATHDX_SM=${MATHDX_SM}."
       )
     endif()
   endif()

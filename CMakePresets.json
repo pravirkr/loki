@@ -1,0 +1,100 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-${presetName}",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "LOKI_BUILD_TESTING": "ON",
+        "LOKI_BUILD_APPLICATIONS": "ON"
+      }
+    },
+    {
+      "name": "dev",
+      "displayName": "Development (Debug, CPU, tests + Python)",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "LOKI_CUDA": "OFF",
+        "LOKI_BUILD_PYTHON": "ON"
+      }
+    },
+    {
+      "name": "release",
+      "displayName": "Release (CPU + CUDA if found, tests + Python)",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "LOKI_CUDA": "AUTO",
+        "LOKI_BUILD_PYTHON": "ON"
+      }
+    },
+    {
+      "name": "cuda",
+      "displayName": "Release with CUDA required",
+      "inherits": "release",
+      "cacheVariables": {
+        "LOKI_CUDA": "ON",
+        "LOKI_BUILD_BENCHMARKS": "ON"
+      }
+    },
+    {
+      "name": "asan",
+      "displayName": "Debug with AddressSanitizer + UBSan (CPU)",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "LOKI_CUDA": "OFF",
+        "LOKI_BUILD_PYTHON": "OFF",
+        "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer",
+        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address,undefined"
+      }
+    },
+    {
+      "name": "ci",
+      "displayName": "CI (portable Release, CPU, warnings as errors)",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "LOKI_CUDA": "OFF",
+        "LOKI_BUILD_PYTHON": "OFF",
+        "LOKI_ENABLE_NATIVE_ARCH": "OFF"
+      }
+    },
+    {
+      "name": "ci-cuda",
+      "displayName": "CI CUDA compile check (no GPU needed)",
+      "inherits": "ci",
+      "cacheVariables": {
+        "LOKI_CUDA": "AUTO",
+        "LOKI_CUDA_ARCHITECTURES": "80",
+        "LOKI_BUILD_BENCHMARKS": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "dev", "configurePreset": "dev" },
+    { "name": "release", "configurePreset": "release" },
+    { "name": "cuda", "configurePreset": "cuda" },
+    { "name": "asan", "configurePreset": "asan" },
+    { "name": "ci", "configurePreset": "ci" },
+    { "name": "ci-cuda", "configurePreset": "ci-cuda" }
+  ],
+  "testPresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error" }
+    },
+    { "name": "dev", "inherits": "base", "configurePreset": "dev" },
+    { "name": "release", "inherits": "base", "configurePreset": "release" },
+    { "name": "cuda", "inherits": "base", "configurePreset": "cuda" },
+    { "name": "asan", "inherits": "base", "configurePreset": "asan" },
+    { "name": "ci", "inherits": "base", "configurePreset": "ci" }
+  ]
+}

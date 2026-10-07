@@ -11,7 +11,7 @@ from rich.progress import track
 from loki.libloki.configs import PulsarSearchConfig
 from loki.libloki.scores import generate_box_width_trials, snr_boxcar_1d
 from loki.search import ffa_search
-from pyloki.utils import np_utils, psr_utils
+from pyloki.utils import psr_utils
 from pyloki.utils.misc import CONSOLE, get_logger
 
 if TYPE_CHECKING:

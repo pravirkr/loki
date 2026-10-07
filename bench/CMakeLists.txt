@@ -28,11 +28,9 @@ if(LOKI_BENCH_SOURCES STREQUAL "")
 endif()
 
 add_executable(${LOKI_BENCH_TARGET} ${LOKI_BENCH_SOURCES})
-target_include_directories(
-  ${LOKI_BENCH_TARGET} PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/lib
-)
 target_link_libraries(
-  ${LOKI_BENCH_TARGET} PRIVATE ${PROJECT_NAME}::${LOKI_LIBRARY_NAME} ${LOKI_COMPILE_OPTIONS}
+  ${LOKI_BENCH_TARGET} PRIVATE ${PROJECT_NAME}::${LOKI_LIBRARY_NAME} ${PROJECT_NAME}::internal
+                               ${LOKI_COMPILE_OPTIONS}
                                benchmark::benchmark_main
 )
 

@@ -60,7 +60,11 @@ def main() -> None:
             nbins = c["nbins"]
             nbins_f = nbins // 2 + 1
             direct = args.fourier and nbins <= args.nbins_min_lossy_bf
-            mode = "fourier_direct" if direct else ("fourier_lossy" if args.fourier else "time")
+            mode = (
+                "fourier_direct"
+                if direct
+                else ("fourier_lossy" if args.fourier else "time")
+            )
             exec_s = c["brute"] - c["table"]
             f0, B = c["nfreqs0"], c["bseg"]
             f_range = c.get("f_range") or (0.0, 0.0)
@@ -82,7 +86,9 @@ def main() -> None:
             per_chunk[nbins].append((B, c["brute"] + c["ffa"]))
 
     ref = statistics.median(brute_rate["fourier_lossy" if args.fourier else "time"])
-    print(f"reference brute gather-add: {ref * 1e9:.4f} ns/op ({1e-9 / ref:.1f} Gops/s)")
+    print(
+        f"reference brute gather-add: {ref * 1e9:.4f} ns/op ({1e-9 / ref:.1f} Gops/s)"
+    )
     if table_rate:
         t = statistics.median(table_rate)
         print(f"table build: {t * 1e9:.3f} ns/entry -> W_table = {t / ref:.1f}")

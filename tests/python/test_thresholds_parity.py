@@ -10,11 +10,14 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from loki import libculoki, libloki
+from loki import libloki
 
 pytestmark = [
     pytest.mark.slow,
-    pytest.mark.skipif(libculoki is None, reason="CUDA backend not built"),
+    pytest.mark.skipif(
+        "cuda" not in libloki.available_backends(),
+        reason="CUDA backend not built",
+    ),
 ]
 
 BP = np.array(
@@ -42,7 +45,9 @@ KW = {
 }
 
 
-def _stage0_survival_by_threshold(states: np.ndarray, nstages: int) -> dict[int, tuple[float, float]]:
+def _stage0_survival_by_threshold(
+    states: np.ndarray, nstages: int
+) -> dict[int, tuple[float, float]]:
     grid = states.reshape(nstages, NTHR, NPROBS)[0]
     out: dict[int, tuple[float, float]] = {}
     for ithr, iprob in np.argwhere(~grid["is_empty"]):
@@ -61,17 +66,15 @@ def test_cpu_cuda_stage0_survival_parity(mode: str) -> None:
         cpu = libloki.thresholds.DynamicThresholdScheme(
             BP, mode=mode, seed=seed, nthreads=8, **KW
         )
-        gpu = libculoki.thresholds.DynamicThresholdSchemeCUDA(
-            BP, mode=mode, seed=seed, **KW
+        gpu = libloki.thresholds.DynamicThresholdScheme(
+            BP, mode=mode, seed=seed, backend="cuda", **KW
         )
         cpu.run(thres_neigh=THRES_NEIGH)
         gpu.run(thres_neigh=THRES_NEIGH)
         cpu_by_seed.append(_stage0_survival_by_threshold(cpu.get_states(), len(BP)))
         cuda_by_seed.append(_stage0_survival_by_threshold(gpu.get_states(), len(BP)))
 
-    common = sorted(
-        set.intersection(*[set(d) for d in cpu_by_seed + cuda_by_seed])
-    )
+    common = sorted(set.intersection(*[set(d) for d in cpu_by_seed + cuda_by_seed]))
     assert common, "no common nonempty stage-0 cells between CPU and CUDA"
 
     for ithr in common:

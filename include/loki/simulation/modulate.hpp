@@ -162,7 +162,7 @@ public:
 private:
     double m_p_orb;
     double m_psi;
-    double m_x_orb;
+    double m_x_orb{0.0};
 };
 
 /**

@@ -24,7 +24,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        compiler: [g++-14, clang++-18]
+        # The minimum compilers CMakeLists.txt accepts (GCC 13.2, Clang 18);
+        # the sanitizer job covers a newer GCC.
+        compiler: [g++-13, clang++-18]
 
     steps:
       - uses: actions/checkout@v7
@@ -44,8 +46,8 @@ jobs:
             libhdf5-dev \
             libfftw3-dev \
             libomp-dev \
-            gcc-14 \
-            g++-14 \
+            gcc-13 \
+            g++-13 \
             clang-18
 
       - name: Cache CPM dependencies
@@ -58,6 +60,7 @@ jobs:
 
       - name: Configure CMake
         run: |
+          cmake --version
           cmake -S . -B build -G Ninja \
           -DCMAKE_CXX_COMPILER="${{ matrix.compiler }}" \
           -DCMAKE_BUILD_TYPE=Release \
@@ -74,6 +77,17 @@ jobs:
 
       - name: Run C++ tests
         run: ctest --test-dir build --output-on-failure
+
+      # The installed package must work for a downstream find_package(loki)
+      # user, with public headers only (tests/consumer).
+      - name: Install and build a downstream consumer
+        run: |
+          cmake --install build --prefix "$RUNNER_TEMP/loki"
+          cmake -S tests/consumer -B build-consumer -G Ninja \
+            -DCMAKE_CXX_COMPILER="${{ matrix.compiler }}" \
+            -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/loki"
+          cmake --build build-consumer
+          ./build-consumer/loki_consumer
 
   cpp-sanitizer:
     name: C++ ASan/UBSan (g++-14)

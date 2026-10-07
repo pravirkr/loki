@@ -8,15 +8,10 @@
 #include <vector>
 
 #include "loki/algorithms/prune_rfi.hpp"
+#include "loki/common/backend.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
-#include "loki/utils/fft.hpp"
 #include "loki/utils/workspace.hpp"
-
-#ifdef LOKI_ENABLE_CUDA
-#include <cuda/std/span>
-#include <cuda_runtime.h>
-#endif // LOKI_ENABLE_CUDA
 
 namespace loki::algorithms {
 
@@ -28,7 +23,13 @@ namespace loki::algorithms {
  */
 template <SupportedFoldType FoldType> class EPMultiPass {
 public:
-    // Chunked EP constructor (owns workspace)
+    /**
+     * @brief Owns its workspaces (one per CPU thread).
+     *
+     * The CPU thread count comes from @p cfg; @p exec selects the backend
+     * and device. The GPU backend does not support @p rfi_config yet and
+     * throws if it is active.
+     */
     EPMultiPass(search::PulsarSearchConfig cfg,
                 std::span<const float> threshold_scheme,
                 std::optional<SizeType> n_runs                = std::nullopt,
@@ -38,9 +39,17 @@ public:
                 SizeType batch_size                           = 1024U,
                 std::string_view poly_basis                   = "taylor",
                 bool show_progress                            = true,
-                PruneRFIConfig rfi_config                     = {});
+                PruneRFIConfig rfi_config                     = {},
+                Exec exec                                     = {});
 
-    // Pipeline-based EP constructor uses external workspace
+    /**
+     * @brief Runs on caller-owned workspaces, so several runs (e.g. one per
+     * frequency chunk) can share one allocation.
+     *
+     * Every workspace must be built for the same backend and device as
+     * @p exec and sized for @p cfg. The CPU backend needs at least one
+     * workspace per thread; the GPU backend takes exactly one.
+     */
     EPMultiPass(std::span<memory::EPWorkspace<FoldType>> workspaces,
                 search::PulsarSearchConfig cfg,
                 std::span<const float> threshold_scheme,
@@ -51,24 +60,8 @@ public:
                 SizeType batch_size                           = 1024U,
                 std::string_view poly_basis                   = "taylor",
                 bool show_progress                            = true,
-                PruneRFIConfig rfi_config                     = {});
-
-    // Fully external pipeline constructor: external EP workspaces, external FFA
-    // workspace & fold buffer
-    EPMultiPass(std::span<memory::EPWorkspace<FoldType>> workspaces,
-                memory::FFAWorkspace<FoldType>& ffa_workspace,
-                math::FFTWManager& fft_manager,
-                std::span<FoldType> ffa_fold,
-                search::PulsarSearchConfig cfg,
-                std::span<const float> threshold_scheme,
-                std::optional<SizeType> n_runs                = std::nullopt,
-                std::optional<std::vector<SizeType>> ref_segs = std::nullopt,
-                std::span<const SizeType> ascend_levels       = {},
-                SizeType max_sugg                             = 1U << 18U,
-                SizeType batch_size                           = 1024U,
-                std::string_view poly_basis                   = "taylor",
-                bool show_progress                            = true,
-                PruneRFIConfig rfi_config                     = {});
+                PruneRFIConfig rfi_config                     = {},
+                Exec exec                                     = {});
 
     // --- Rule of five: PIMPL ---
     ~EPMultiPass();
@@ -89,58 +82,5 @@ private:
 
 using EPMultiPassTime    = EPMultiPass<float>;
 using EPMultiPassFourier = EPMultiPass<ComplexType>;
-
-#ifdef LOKI_ENABLE_CUDA
-
-template <SupportedFoldTypeCUDA FoldTypeCUDA> class EPMultiPassCUDA {
-public:
-    // Chunked EP constructor (owns workspace)
-    EPMultiPassCUDA(
-        search::PulsarSearchConfig cfg,
-        std::span<const float> threshold_scheme,
-        std::optional<SizeType> n_runs                = std::nullopt,
-        std::optional<std::vector<SizeType>> ref_segs = std::nullopt,
-        std::span<const SizeType> ascend_levels       = {},
-        SizeType max_sugg                             = 1U << 20U,
-        SizeType batch_size                           = 4096U,
-        std::string_view poly_basis                   = "taylor",
-        int device_id                                 = 0);
-
-    // Pipeline-based EP: upstream owns workspace; must pass the same
-    // cudaStream_t used to construct EPWorkspaceCUDA (so CUBScratchArena
-    // alloc/free and kernels match).
-    EPMultiPassCUDA(
-        memory::EPWorkspaceCUDA<FoldTypeCUDA>& workspace,
-        cudaStream_t execution_stream,
-        search::PulsarSearchConfig cfg,
-        std::span<const float> threshold_scheme,
-        std::optional<SizeType> n_runs                = std::nullopt,
-        std::optional<std::vector<SizeType>> ref_segs = std::nullopt,
-        std::span<const SizeType> ascend_levels       = {},
-        SizeType max_sugg                             = 1U << 20U,
-        SizeType batch_size                           = 4096U,
-        std::string_view poly_basis                   = "taylor",
-        int device_id                                 = 0);
-
-    ~EPMultiPassCUDA();
-    EPMultiPassCUDA(EPMultiPassCUDA&&) noexcept;
-    EPMultiPassCUDA& operator=(EPMultiPassCUDA&&) noexcept;
-    EPMultiPassCUDA(const EPMultiPassCUDA&)            = delete;
-    EPMultiPassCUDA& operator=(const EPMultiPassCUDA&) = delete;
-
-    void execute(std::span<const float> ts_e,
-                 std::span<const float> ts_v,
-                 const std::filesystem::path& outdir = "./",
-                 std::string_view file_prefix        = "test");
-
-private:
-    class Impl;
-    std::unique_ptr<Impl> m_impl;
-};
-
-using EPMultiPassTimeCUDA    = EPMultiPassCUDA<float>;
-using EPMultiPassFourierCUDA = EPMultiPassCUDA<ComplexTypeCUDA>;
-
-#endif // LOKI_ENABLE_CUDA
 
 } // namespace loki::algorithms
