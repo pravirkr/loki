@@ -279,8 +279,8 @@ SizeType circ_taylor_branch_batch(std::span<const double> leaves_tree,
     // Write at most `capacity` leaves; past it, keep counting only, so
     // the caller sees the total this batch needs and can retry it in
     // smaller pieces. Nothing is written past the workspace.
-    const SizeType capacity = std::min(leaves_branch.size() / kLeavesStride,
-                                       leaves_origins.size());
+    const SizeType capacity =
+        std::min(leaves_branch.size() / kLeavesStride, leaves_origins.size());
     for (SizeType i = 0; i < n_leaves; ++i) {
         const SizeType lo = i * kLeavesStride;
         const SizeType fb = i * kParams;
@@ -306,7 +306,8 @@ SizeType circ_taylor_branch_batch(std::span<const double> leaves_tree,
                     for (SizeType e = 0; e < n_d1; ++e) {
                         if (out_leaves < capacity) {
                             const SizeType bo = out_leaves * kLeavesStride;
-                            double* __restrict__ out_ptr = leaves_branch_ptr + bo;
+                            double* __restrict__ out_ptr =
+                                leaves_branch_ptr + bo;
 
                             out_ptr[0] = scratch_params[d5_off];
                             out_ptr[1] = d5_sig;
@@ -396,7 +397,6 @@ SizeType circ_taylor_branch_batch(std::span<const double> leaves_tree,
             ++out_leaves;
         }
     }
-
 
     return out_leaves;
 }

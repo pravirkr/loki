@@ -1,8 +1,8 @@
-#include <catch2/catch_test_macros.hpp>
-
 #include <algorithm>
 #include <span>
 #include <vector>
+
+#include <catch2/catch_test_macros.hpp>
 
 #include "lib/core/taylor.hpp"
 #include "lib/utils/workspace_impl.hpp"
@@ -63,9 +63,9 @@ BranchRun branch_with_canaries(std::span<const double> leaves,
     const bool leaves_ok =
         std::all_of(branch_buf.begin() + static_cast<long>(capacity * kStride),
                     branch_buf.end(), [](double v) { return v == kCanaryVal; });
-    const bool origins_ok =
-        std::all_of(origins_buf.begin() + static_cast<long>(capacity),
-                    origins_buf.end(), [](SizeType v) { return v == kCanaryIx; });
+    const bool origins_ok = std::all_of(
+        origins_buf.begin() + static_cast<long>(capacity), origins_buf.end(),
+        [](SizeType v) { return v == kCanaryIx; });
     return {returned, leaves_ok && origins_ok};
 }
 
