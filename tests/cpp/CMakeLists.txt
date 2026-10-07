@@ -1,5 +1,6 @@
-# Catch2: prefer system package (apt/brew) when available; pin 3.16.0 via CPM otherwise.
-find_package(Catch2 3 CONFIG QUIET)
+# Catch2: prefer system >= 3.16 (Ubuntu 24.04 catch2 is 3.4.0 and breaks CTest on SKIP()).
+# Pin 3.16.0 via CPM when no suitable system package exists.
+find_package(Catch2 3.16 CONFIG QUIET)
 if(Catch2_FOUND)
   message(STATUS "Using system Catch2 ${Catch2_VERSION}")
 else()

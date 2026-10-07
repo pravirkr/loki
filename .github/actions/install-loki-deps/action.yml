@@ -9,7 +9,7 @@ inputs:
   apt-cache-version:
     description: Bump when the apt package set for a profile changes
     required: false
-    default: "3"
+    default: "4"
   llvm-version:
     description: If non-empty, install Clang/LLVM tools from apt.llvm.org
     required: false
@@ -18,25 +18,27 @@ inputs:
 runs:
   using: composite
   steps:
+    # Catch2 is not installed here: noble's catch2 (3.4.0) makes CTest fail on runtime SKIP().
+    # Tests use CPM Catch2 3.16 via tests/cpp/CMakeLists.txt.
     - name: Cache and install apt packages (cpp-gcc13)
       if: inputs.profile == 'cpp-gcc13'
       uses: awalsh128/cache-apt-pkgs-action@v1
       with:
-        packages: cmake ninja-build libhdf5-dev libfftw3-dev libomp-dev ccache catch2 gcc-13 g++-13
+        packages: cmake ninja-build libhdf5-dev libfftw3-dev libomp-dev ccache gcc-13 g++-13
         version: cpp-gcc13-${{ inputs.apt-cache-version }}
 
     - name: Cache and install apt packages (cpp-clang18)
       if: inputs.profile == 'cpp-clang18'
       uses: awalsh128/cache-apt-pkgs-action@v1
       with:
-        packages: cmake ninja-build libhdf5-dev libfftw3-dev libomp-dev ccache catch2 clang-18
+        packages: cmake ninja-build libhdf5-dev libfftw3-dev libomp-dev ccache clang-18
         version: cpp-clang18-${{ inputs.apt-cache-version }}
 
     - name: Cache and install apt packages (asan-gcc14)
       if: inputs.profile == 'asan-gcc14'
       uses: awalsh128/cache-apt-pkgs-action@v1
       with:
-        packages: cmake ninja-build libhdf5-dev libfftw3-dev libomp-dev ccache catch2 gcc-14 g++-14
+        packages: cmake ninja-build libhdf5-dev libfftw3-dev libomp-dev ccache gcc-14 g++-14
         version: asan-gcc14-${{ inputs.apt-cache-version }}
 
     - name: Cache and install apt packages (python)
@@ -50,7 +52,7 @@ runs:
       if: inputs.profile == 'lint-base'
       uses: awalsh128/cache-apt-pkgs-action@v1
       with:
-        packages: cmake ninja-build libhdf5-dev libfftw3-dev libomp-dev ccache catch2 pybind11-dev python3-dev python3-pip wget lsb-release gnupg software-properties-common
+        packages: cmake ninja-build libhdf5-dev libfftw3-dev libomp-dev ccache pybind11-dev python3-dev python3-pip wget lsb-release gnupg software-properties-common
         version: lint-base-${{ inputs.apt-cache-version }}
 
     - name: Install LLVM from apt.llvm.org
