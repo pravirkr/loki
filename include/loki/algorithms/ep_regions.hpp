@@ -6,6 +6,7 @@
 #include <string_view>
 #include <vector>
 
+#include "loki/algorithms/prune_rfi.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
 
@@ -26,7 +27,8 @@ struct EPChunkConfig {
     double actual_f_start{0.0};
     double actual_f_end{0.0};
     double peak_complexity{1.0};
-    /// Memory of this chunk alone (its own workspaces and FFA buffers).
+    /// Memory of this chunk alone: its own per-worker buffers and FFA
+    /// buffers plus the inputs. Not the sweep peak (see EPRegionStats).
     double chunk_memory_gb{0.0};
     SizeType nsegments{0};
     SizeType ncoords{0};
@@ -52,6 +54,7 @@ struct EPChunkStats {
     SizeType max_sugg{0};
     SizeType branch_max{0};
     double peak_complexity{0.0};
+    /// Memory of this chunk alone (EPChunkConfig::chunk_memory_gb).
     double memory_gb{0.0};
     double overlap_fraction{0.0};
 };
@@ -97,8 +100,9 @@ public:
     [[nodiscard]] SizeType get_max_branch_max() const noexcept {
         return m_max_branch_max;
     }
-    /// Peak memory of the sweep: the largest per-thread workspace set of any
-    /// run of equal-nbins chunks plus the shared FFA buffers.
+    /// Peak memory of the sweep: the largest per-worker buffer set of any
+    /// run of equal-nbins chunks plus the shared FFA buffers and the inputs.
+    /// Excludes the unmodelled reserve (see docs/memory.md).
     [[nodiscard]] float get_max_memory_gb() const noexcept {
         return m_max_memory_gb;
     }
@@ -140,15 +144,24 @@ private:
  * The threshold scheme and max_sugg are designed per coarse band; branch_max
  * is derived per chunk from the chunk's own plan.
  *
- * Memory model (mirrors EPFreqSweep): per-thread workspaces are sized from the
- * maxima of each contiguous run of chunks with the same nbins, while the FFA
- * workspace and fold buffer are shared by the whole sweep. If the shared size
- * grows after an earlier run was planned, the plan is recomputed once with
- * the shared size fixed, so every run fits next to the final shared buffers.
+ * Memory model (mirrors EPFreqSweep, see docs/memory.md): per-worker buffers
+ * (EP workspace, irfft scratch and, when harvesting is enabled, the harvest
+ * store) are sized from the maxima of each contiguous run of chunks with the
+ * same nbins, while the FFA workspace, the fold buffer and the input series
+ * are held for the whole sweep. The peak must stay within
+ * max_process_memory_gb minus a fixed reserve for unmodelled memory. If the
+ * shared size grows after an earlier run was planned, the plan is recomputed
+ * with the shared size fixed (searching a smaller fixed size if needed), so
+ * every run fits next to the final shared buffers.
  *
  * Supports saving and loading planned chunk configurations to/from HDF5 cache
  * files with strict validation of all search parameters.
  *
+ * @param rfi_config RFI configuration of the sweep: when harvesting is
+ * enabled, each worker's harvest store is budgeted at max_harvests records.
+ * @param n_workers Workers pruning at the same time (EPFreqSweep uses
+ * min(nthreads, number of runs)); clamped to [1, nthreads]. Defaults to
+ * nthreads.
  * @tparam FoldType float for time domain, ComplexType for Fourier domain.
  */
 template <SupportedFoldType FoldType> class EPRegionPlanner {
@@ -158,7 +171,9 @@ public:
                              std::string_view poly_basis = "taylor",
                              float ref_ducy              = 0.1F,
                              const std::optional<std::filesystem::path>&
-                                 plan_cache_file = std::nullopt);
+                                 plan_cache_file               = std::nullopt,
+                             const PruneRFIConfig& rfi_config  = {},
+                             std::optional<SizeType> n_workers = std::nullopt);
 
     ~EPRegionPlanner();
     EPRegionPlanner(EPRegionPlanner&&) noexcept;

@@ -17,10 +17,13 @@
 
 #include "loki/algorithms/ep_regions.hpp"
 #include "loki/algorithms/prune_rfi.hpp"
+#include "loki/common/coord.hpp"
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
 
+#include "lib/algorithms/ep_memory.hpp"
+#include "lib/algorithms/planner_memory.hpp"
 #include "lib/algorithms/prune_engine.hpp"
 #include "lib/detail/timing.hpp"
 #include "lib/pipelines/ep_freq_sweep_engine.hpp"
@@ -135,8 +138,21 @@ public:
           m_rfi_config(std::move(rfi_config)),
           m_n_runs(n_runs),
           m_ref_segs(ref_segs),
-          m_region_planner(
-              m_base_cfg, min_pd, poly_basis, ref_ducy, plan_cache_file) {
+          m_n_workers(algorithms::detail::compute_ep_n_workers(
+              m_base_cfg.get_nthreads(), m_n_runs, m_ref_segs)),
+          m_memory{
+              .nparams   = m_base_cfg.get_nparams(),
+              .nsamps    = m_base_cfg.get_nsamps(),
+              .n_workers = static_cast<int>(m_n_workers),
+              .harvest = algorithms::detail::EPHarvestBound::from(m_rfi_config),
+          },
+          m_region_planner(m_base_cfg,
+                           min_pd,
+                           poly_basis,
+                           ref_ducy,
+                           plan_cache_file,
+                           m_rfi_config,
+                           m_n_workers) {
         const auto& stats = m_region_planner.get_stats();
         spdlog::info(
             "EPFreqSweep initialized: {} chunks planned, max memory: {:.2f} GB "
@@ -150,6 +166,8 @@ public:
             stats.get_max_buffer_size(), stats.get_max_coord_size(),
             m_base_cfg.get_nparams());
         m_ffa_fold.resize(stats.get_max_buffer_size(), FoldType{});
+        check_shared_allocation(stats.get_max_buffer_size(),
+                                stats.get_max_coord_size());
 
         if constexpr (std::is_same_v<FoldType, ComplexType>) {
             const auto& chunk_cfgs = m_region_planner.get_chunk_cfgs();
@@ -201,34 +219,13 @@ public:
         const SizeType nchunks = chunk_cfgs.size();
         spdlog::info("EPFreqSweep: starting sweep over {} chunks", nchunks);
 
-        constexpr SizeType kBatchSize = 1024U;
-        const auto nthreads           = m_base_cfg.get_nthreads();
+        constexpr SizeType kBatchSize = algorithms::detail::kEPBatchSize;
+        const auto& stats             = m_region_planner.get_stats();
 
-        SizeType chunk_idx = 0;
-        while (chunk_idx < nchunks) {
-            // Find contiguous run of chunks sharing the same nbins
-            const auto cur_nbins = chunk_cfgs[chunk_idx].cfg.get_nbins();
-            SizeType range_end   = chunk_idx + 1;
-            while (range_end < nchunks &&
-                   chunk_cfgs[range_end].cfg.get_nbins() == cur_nbins) {
-                ++range_end;
-            }
-
-            // Find max requirements across all chunks in this nbins band
-            SizeType group_max_sugg    = 0;
-            SizeType group_max_branch  = 0;
-            SizeType group_max_ncoords = 0;
-            SizeType group_max_nseg    = 0;
-            for (SizeType i = chunk_idx; i < range_end; ++i) {
-                group_max_sugg =
-                    std::max(group_max_sugg, chunk_cfgs[i].max_sugg);
-                group_max_branch =
-                    std::max(group_max_branch, chunk_cfgs[i].branch_max);
-                group_max_ncoords =
-                    std::max(group_max_ncoords, chunk_cfgs[i].ncoords);
-                group_max_nseg =
-                    std::max(group_max_nseg, chunk_cfgs[i].nsegments);
-            }
+        for (const auto& group : algorithms::detail::ep_chunk_groups(
+                 std::span<const algorithms::EPChunkConfig>(chunk_cfgs))) {
+            const SizeType chunk_idx = group.begin;
+            const SizeType range_end = group.end;
 
             // Guard against plans (e.g. stale caches) whose branch_max is
             // smaller than what the chunk's own plan needs.
@@ -236,39 +233,46 @@ public:
                 const plans::FFAPlan<FoldType> plan(chunk_cfgs[i].cfg);
                 const auto needed = algorithms::detail::compute_branch_max(
                     plan.get_branching_pattern(m_poly_basis));
-                if (needed > group_max_branch) {
+                if (needed > group.branch_max) {
                     throw std::runtime_error(std::format(
                         "EPFreqSweep: chunk {} needs branch_max={} but the "
                         "plan provides {}. Re-plan (stale plan cache?).",
-                        i, needed, group_max_branch));
+                        i, needed, group.branch_max));
                 }
             }
+
+            const auto model_thread_bytes =
+                algorithms::detail::ep_group_thread_bytes<FoldType>(m_memory,
+                                                                    group);
+            check_group_budget(group, model_thread_bytes,
+                               stats.get_max_buffer_size(),
+                               stats.get_max_coord_size());
 
             const SizeType effective_nbins =
                 std::is_same_v<FoldType, ComplexType>
                     ? chunk_cfgs[chunk_idx].cfg.get_nbins_f()
-                    : cur_nbins;
+                    : group.nbins;
 
-            // Allocate workspaces once for this band (one per thread)
+            // Allocate workspaces once for this band (one per worker)
             std::vector<memory::EPWorkspaceCPU<FoldType>> workspaces;
-            workspaces.reserve(static_cast<size_t>(nthreads));
-            for (int t = 0; t < nthreads; ++t) {
-                workspaces.emplace_back(kBatchSize, group_max_branch,
-                                        group_max_sugg, group_max_ncoords,
-                                        m_base_cfg.get_nparams(),
-                                        effective_nbins, group_max_nseg);
+            workspaces.reserve(m_n_workers);
+            for (SizeType t = 0; t < m_n_workers; ++t) {
+                workspaces.emplace_back(
+                    kBatchSize, group.branch_max, group.max_sugg, group.ncoords,
+                    m_base_cfg.get_nparams(), effective_nbins, group.nsegments);
             }
             std::vector<memory::EPWorkspaceCPU<FoldType>*> workspace_ptrs;
             workspace_ptrs.reserve(workspaces.size());
             for (auto& ws : workspaces) {
                 workspace_ptrs.push_back(&ws);
             }
+            check_workspace_allocation(group, workspaces.front());
 
             spdlog::info(
                 "EPFreqSweep: allocated {} workspaces for chunks {}..{} "
                 "(nbins={}, max_sugg={}, {:.2f} GB per workspace)",
-                nthreads, chunk_idx, range_end - 1, effective_nbins,
-                group_max_sugg, workspaces.front().get_memory_usage_gib());
+                m_n_workers, chunk_idx, range_end - 1, effective_nbins,
+                group.max_sugg, workspaces.front().get_memory_usage_gib());
 
             // Process all chunks in this nbins band reusing workspaces
             for (SizeType i = chunk_idx; i < range_end; ++i) {
@@ -295,8 +299,6 @@ public:
 
                 chunk_ep->execute(ts_e, ts_v, tmp_dir, chunk_prefix);
             }
-
-            chunk_idx = range_end;
         }
 
         const auto total_runtime = sweep_timer.stop();
@@ -324,11 +326,76 @@ private:
     algorithms::PruneRFIConfig m_rfi_config;
     std::optional<SizeType> m_n_runs;
     std::optional<std::vector<SizeType>> m_ref_segs;
+    // Workers pruning at the same time: min(nthreads, runs).
+    SizeType m_n_workers;
+    algorithms::detail::EPMemoryContext m_memory;
     algorithms::EPRegionPlanner<FoldType> m_region_planner;
 
     memory::FFAWorkspaceCPU<FoldType> m_ffa_workspace;
     math::FFTWManager m_fft_manager;
     std::vector<FoldType> m_ffa_fold;
+
+    // Runtime checks of the plan against the memory model (docs/memory.md).
+    // They only fire on a bug or a model drift: the planner guarantees the
+    // budget and the model mirrors the allocations exactly.
+
+    /// Before allocating a group: the model total must fit the budget.
+    void check_group_budget(const algorithms::detail::EPChunkGroup& group,
+                            SizeType thread_bytes,
+                            SizeType buffer_size,
+                            SizeType coord_size) const {
+        const double total_gb = algorithms::detail::ep_total_gb(
+            m_memory.n_workers, thread_bytes,
+            algorithms::detail::ep_fixed_bytes<FoldType>(m_memory, buffer_size,
+                                                         coord_size));
+        const double limit_gb = algorithms::detail::effective_memory_limit_gb(
+            m_base_cfg.get_max_process_memory_gb());
+        if (total_gb > limit_gb) {
+            throw std::runtime_error(std::format(
+                "EPFreqSweep: chunks {}..{} need {:.2f} GB ({} workers), more "
+                "than the limit {:.2f} GB. Re-plan (stale plan cache?).",
+                group.begin, group.end - 1, total_gb, m_memory.n_workers,
+                limit_gb));
+        }
+    }
+
+    /// After allocating a group: a workspace must not exceed the model.
+    void check_workspace_allocation(
+        const algorithms::detail::EPChunkGroup& group,
+        const memory::EPWorkspaceCPU<FoldType>& ws) const {
+        const auto model = static_cast<double>(
+            algorithms::detail::ep_workspace_bytes<FoldType>(
+                m_memory.nparams, group.nbins, group.nsegments, group.ncoords,
+                group.max_sugg, group.branch_max, m_memory.batch_size));
+        // get_memory_usage_gib() is a float: allow its rounding.
+        constexpr double kRelTol = 1.0e-5;
+        const double actual = static_cast<double>(ws.get_memory_usage_gib()) *
+                              algorithms::detail::kBytesPerGiB;
+        if (actual > model * (1.0 + kRelTol)) {
+            throw std::logic_error(std::format(
+                "EPFreqSweep: workspace for chunks {}..{} uses {:.0f} bytes, "
+                "more than the memory model's {:.0f} (model drift)",
+                group.begin, group.end - 1, actual, model));
+        }
+    }
+
+    /// After allocating the shared FFA buffers: they must match the model.
+    void check_shared_allocation(SizeType buffer_size,
+                                 SizeType coord_size) const {
+        const SizeType actual =
+            (m_ffa_workspace.fold_internal.size() * sizeof(FoldType)) +
+            (m_ffa_workspace.coords.size() * sizeof(coord::FFACoord)) +
+            (m_ffa_workspace.coords_freq.size() * sizeof(coord::FFACoordFreq)) +
+            (m_ffa_fold.size() * sizeof(FoldType));
+        const SizeType model = algorithms::detail::ep_shared_bytes<FoldType>(
+            m_memory.nparams, buffer_size, coord_size);
+        if (actual > model) {
+            throw std::logic_error(std::format(
+                "EPFreqSweep: shared FFA buffers use {} bytes, more than the "
+                "memory model's {} (model drift)",
+                actual, model));
+        }
+    }
 };
 
 } // namespace

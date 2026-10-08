@@ -99,10 +99,14 @@ template <SupportedFoldType FoldType>
 void bind_ep_region_planner(py::module& m, const std::string& name) {
     py::class_<EPRegionPlanner<FoldType>>(m, name.c_str())
         .def(py::init<const PulsarSearchConfig&, float, std::string_view, float,
-                      const std::optional<std::filesystem::path>&>(),
+                      const std::optional<std::filesystem::path>&,
+                      const algorithms::PruneRFIConfig&,
+                      std::optional<SizeType>>(),
              py::arg("cfg"), py::arg("min_pd") = 0.1F,
              py::arg("poly_basis") = "taylor", py::arg("ref_ducy") = 0.1F,
-             py::arg("plan_cache_file") = std::nullopt)
+             py::arg("plan_cache_file") = std::nullopt,
+             py::arg("rfi_config")      = algorithms::PruneRFIConfig(),
+             py::arg("n_workers")       = std::nullopt)
         .def_property_readonly("chunk_cfgs",
                                &EPRegionPlanner<FoldType>::get_chunk_cfgs)
         .def_property_readonly("nchunks",

@@ -337,6 +337,11 @@ The facades do not change: they already dispatch on `kGPUBackend` through
   `applications/loki.cpp`) use `omp_get_max_threads()`, to resolve
   `nthreads <= 0` to "all threads".
 
+## Memory planning
+
+The FFA and EP sweeps plan their chunks against `max_process_memory_gb` with
+exact memory models and one shared reserve; see [memory.md](memory.md).
+
 ## Checks
 
 All rule checks are scripted:

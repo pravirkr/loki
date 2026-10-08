@@ -19,6 +19,7 @@
 #include <highfive/highfive.hpp>
 
 #include "loki/algorithms/ep_regions.hpp"
+#include "loki/algorithms/prune_rfi.hpp"
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
@@ -291,6 +292,53 @@ TEST_CASE("EPRegionPlanner HDF5 cache round-trip and validation",
     // 5. Non-existent file
     CHECK_THROWS_AS(reloaded.load_cache(outdir / "does_not_exist_xyz.h5"),
                     std::runtime_error);
+
+    // 6. Memory model inputs: model version, workers, harvest store
+    {
+        const auto bad = make_modified_cache("cache_bad_model.h5",
+                                             "ep_memory_model_version", 1U);
+        CHECK_THROWS_AS(reloaded.load_cache(bad), std::invalid_argument);
+        std::filesystem::remove(bad, ec);
+    }
+    {
+        const auto bad = make_modified_cache(
+            "cache_bad_workers.h5", "n_workers", cfg.get_nthreads() + 1);
+        CHECK_THROWS_AS(reloaded.load_cache(bad), std::invalid_argument);
+        std::filesystem::remove(bad, ec);
+    }
+    {
+        loki::algorithms::PruneRFIConfig harvest_rfi;
+        harvest_rfi.harvest_scheme = {5.0F};
+        CHECK_THROWS_AS(EPRegionPlanner<float>(cfg, 0.1F, "taylor", 0.1F,
+                                               cache_file, harvest_rfi),
+                        std::invalid_argument);
+        // A disabled harvest is normalised: its cap does not matter.
+        loki::algorithms::PruneRFIConfig no_harvest_rfi;
+        no_harvest_rfi.max_harvests = 7;
+        CHECK_NOTHROW(EPRegionPlanner<float>(cfg, 0.1F, "taylor", 0.1F,
+                                             cache_file, no_harvest_rfi));
+    }
+    if (cfg.get_nthreads() > 1) {
+        CHECK_THROWS_AS(EPRegionPlanner<float>(cfg, 0.1F, "taylor", 0.1F,
+                                               cache_file, {}, SizeType{1}),
+                        std::invalid_argument);
+    }
+
+    // 7. A plan that no longer fits the limit is rejected on load
+    {
+        const auto bad = outdir / "cache_bad_peak.h5";
+        std::filesystem::copy_file(
+            cache_file, bad, std::filesystem::copy_options::overwrite_existing);
+        {
+            const HighFive::File f(bad.string(), HighFive::File::ReadWrite);
+            f.getGroup("chunks")
+                .getGroup("chunk_0000")
+                .getAttribute("max_sugg")
+                .write(SizeType{1} << 30U);
+        }
+        CHECK_THROWS_AS(reloaded.load_cache(bad), std::runtime_error);
+        std::filesystem::remove(bad, ec);
+    }
 
     std::filesystem::remove(cache_file, ec);
 }

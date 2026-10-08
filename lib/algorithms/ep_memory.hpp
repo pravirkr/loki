@@ -2,34 +2,74 @@
 
 /**
  * @file ep_memory.hpp
- * @brief Host memory model of EPFreqSweep, shared by EPRegionPlanner and the
- * tests that check it against the real allocations. Internal.
+ * @brief Host memory model of EPFreqSweep, shared by EPRegionPlanner, the
+ * sweep's runtime checks and the tests that compare it with the real
+ * allocations. Internal. See docs/memory.md.
  *
- * EPFreqSweep allocates two kinds of buffers:
- *  - per-thread EP workspaces (world tree, prune/branch scratch, FFA seeds and,
- *    for Fourier folds, irfft scratch). They are sized once per contiguous run
- *    of chunks with the same nbins, from the maxima of that run, and freed
- *    before the next run;
+ * EPFreqSweep holds three kinds of memory:
+ *  - per-worker buffers: the EP workspace (world tree, prune/branch scratch,
+ *    FFA seeds), the irfft scratch for Fourier folds and, when harvesting is
+ *    enabled, the harvest store. They are sized once per contiguous run of
+ *    chunks with the same nbins, from the maxima of that run, and freed before
+ *    the next run;
  *  - the FFA workspace (internal fold buffer and coordinates) and the output
- *    fold buffer. They are shared by every chunk and sized from the global
- *    maxima.
+ *    fold buffer, shared by every chunk and sized from the global maxima;
+ *  - the input time series (ts_e, ts_v), resident for the whole sweep whoever
+ *    owns them.
  *
- * The peak is therefore, for the worst run: nthreads * per-thread bytes of the
- * run + shared bytes of the whole sweep.
+ * The peak is therefore, for the worst run:
+ *   n_workers * per-worker bytes of the run + shared bytes + input bytes.
  */
 
 #include <algorithm>
 #include <cstdint>
 #include <span>
 #include <type_traits>
+#include <vector>
 
 #include "loki/algorithms/ep_regions.hpp"
+#include "loki/algorithms/prune_rfi.hpp"
 #include "loki/common/coord.hpp"
 #include "loki/common/types.hpp"
 
 namespace loki::algorithms::detail {
 
 constexpr double kBytesPerGiB = static_cast<double>(1ULL << 30U);
+
+/// Batch size EPFreqSweep runs the pruning with.
+constexpr SizeType kEPBatchSize = 1024U;
+
+/// Version of this model. Bump it with every change to the formulas: plan
+/// caches store it and are rejected when it differs.
+constexpr std::uint32_t kEPMemoryModelVersion = 2U;
+
+/// Worst-case size of the per-run harvest store (see PruneRFIConfig).
+/// Normalised: all fields are zero/false when harvesting is disabled.
+struct EPHarvestBound {
+    bool enabled{false};
+    SizeType max_harvests{0};
+    bool store_folds{false};
+
+    [[nodiscard]] static EPHarvestBound
+    from(const PruneRFIConfig& rfi) noexcept {
+        if (!rfi.has_harvest()) {
+            return {};
+        }
+        return {.enabled      = true,
+                .max_harvests = rfi.max_harvests,
+                .store_folds  = rfi.harvest_store_folds};
+    }
+};
+
+/// Sweep-wide inputs of the model.
+struct EPMemoryContext {
+    SizeType nparams{0};
+    SizeType nsamps{0};
+    /// Workers pruning at the same time, each with its own buffers.
+    int n_workers{1};
+    SizeType batch_size{kEPBatchSize};
+    EPHarvestBound harvest;
+};
 
 /// Size of one element of the folds stored for @p FoldType.
 template <SupportedFoldType FoldType> constexpr SizeType fold_bytes() noexcept {
@@ -102,19 +142,42 @@ SizeType ep_irfft_scratch_bytes(SizeType nbins,
     }
 }
 
-/// Bytes each thread needs for one chunk group.
+/// Bytes of one run's harvest store once it reserved max_harvests records
+/// (HarvestBuffer, as PruneImpl fills it). Zero when harvesting is off.
 template <SupportedFoldType FoldType>
-SizeType ep_thread_bytes(SizeType nparams,
+SizeType ep_harvest_bytes(SizeType nparams,
+                          SizeType nbins,
+                          const EPHarvestBound& harvest) noexcept {
+    if (!harvest.enabled || harvest.max_harvests == 0) {
+        return 0;
+    }
+    constexpr bool kIsComplex       = std::is_same_v<FoldType, ComplexType>;
+    constexpr SizeType kParamStride = 2U;
+    const SizeType nbins_arg        = kIsComplex ? (nbins / 2) + 1 : nbins;
+    const SizeType leaves_stride    = (nparams + 2) * kParamStride;
+    const SizeType fold_record =
+        harvest.store_folds ? 2 * nbins_arg * fold_bytes<FoldType>() : 0;
+    // leaf, fold, score, level, seg_idx, t_ref
+    const SizeType record_bytes = (leaves_stride * sizeof(double)) +
+                                  fold_record + sizeof(float) +
+                                  (2 * sizeof(SizeType)) + sizeof(double);
+    return harvest.max_harvests * record_bytes;
+}
+
+/// Bytes each worker needs for one chunk group.
+template <SupportedFoldType FoldType>
+SizeType ep_thread_bytes(const EPMemoryContext& ctx,
                          SizeType nbins,
                          SizeType nsegments,
                          SizeType ncoords_ffa,
                          SizeType max_sugg,
-                         SizeType branch_max,
-                         SizeType batch_size) {
-    return ep_workspace_bytes<FoldType>(nparams, nbins, nsegments, ncoords_ffa,
-                                        max_sugg, branch_max, batch_size) +
+                         SizeType branch_max) {
+    return ep_workspace_bytes<FoldType>(ctx.nparams, nbins, nsegments,
+                                        ncoords_ffa, max_sugg, branch_max,
+                                        ctx.batch_size) +
            ep_irfft_scratch_bytes<FoldType>(nbins, ncoords_ffa, branch_max,
-                                            batch_size);
+                                            ctx.batch_size) +
+           ep_harvest_bytes<FoldType>(ctx.nparams, nbins, ctx.harvest);
 }
 
 /// Bytes shared by all chunks: the FFA workspace (internal fold buffer and
@@ -128,53 +191,89 @@ ep_shared_bytes(SizeType nparams, SizeType buffer_size, SizeType coord_size) {
            (coord_size * coord_unit_bytes);
 }
 
-[[nodiscard]] inline double ep_total_gb(int nthreads,
+/// Bytes of the input time series (ts_e and ts_v, float32).
+constexpr SizeType ep_input_bytes(SizeType nsamps) noexcept {
+    return 2 * nsamps * sizeof(float);
+}
+
+/// Bytes resident for the whole sweep: shared FFA buffers plus the inputs.
+template <SupportedFoldType FoldType>
+SizeType ep_fixed_bytes(const EPMemoryContext& ctx,
+                        SizeType buffer_size,
+                        SizeType coord_size) {
+    return ep_shared_bytes<FoldType>(ctx.nparams, buffer_size, coord_size) +
+           ep_input_bytes(ctx.nsamps);
+}
+
+[[nodiscard]] inline double ep_total_gb(int n_workers,
                                         SizeType thread_bytes,
-                                        SizeType shared_bytes) noexcept {
+                                        SizeType fixed_bytes) noexcept {
     const auto total =
-        (static_cast<double>(nthreads) * static_cast<double>(thread_bytes)) +
-        static_cast<double>(shared_bytes);
+        (static_cast<double>(n_workers) * static_cast<double>(thread_bytes)) +
+        static_cast<double>(fixed_bytes);
     return total / kBytesPerGiB;
+}
+
+/// A contiguous run of chunks with the same nbins and its maxima: one
+/// allocation of the per-worker buffers in EPFreqSweep.
+struct EPChunkGroup {
+    SizeType begin{0}; ///< First chunk index.
+    SizeType end{0};   ///< One past the last chunk index.
+    SizeType nbins{0};
+    SizeType max_sugg{0};
+    SizeType branch_max{0};
+    SizeType ncoords{0};
+    SizeType nsegments{0};
+};
+
+/// Groups @p chunks into contiguous runs of equal nbins, as EPFreqSweep does.
+inline std::vector<EPChunkGroup>
+ep_chunk_groups(std::span<const EPChunkConfig> chunks) {
+    std::vector<EPChunkGroup> groups;
+    for (SizeType i = 0; i < chunks.size();) {
+        EPChunkGroup g{.begin = i, .nbins = chunks[i].cfg.get_nbins()};
+        for (; i < chunks.size() && chunks[i].cfg.get_nbins() == g.nbins; ++i) {
+            g.max_sugg   = std::max(g.max_sugg, chunks[i].max_sugg);
+            g.branch_max = std::max(g.branch_max, chunks[i].branch_max);
+            g.ncoords    = std::max(g.ncoords, chunks[i].ncoords);
+            g.nsegments  = std::max(g.nsegments, chunks[i].nsegments);
+        }
+        g.end = i;
+        groups.push_back(g);
+    }
+    return groups;
+}
+
+/// Per-worker bytes of one chunk group.
+template <SupportedFoldType FoldType>
+SizeType ep_group_thread_bytes(const EPMemoryContext& ctx,
+                               const EPChunkGroup& g) {
+    return ep_thread_bytes<FoldType>(ctx, g.nbins, g.nsegments, g.ncoords,
+                                     g.max_sugg, g.branch_max);
 }
 
 /**
  * @brief Peak memory of a sweep over @p chunks, in GiB.
  *
- * Groups the chunks into contiguous runs of equal nbins, exactly as
- * EPFreqSweep does, and returns the largest group plus the shared FFA buffers.
+ * The largest chunk group's per-worker buffers plus the shared FFA buffers
+ * (global maxima) and the inputs.
  */
 template <SupportedFoldType FoldType>
 double ep_sweep_peak_gb(std::span<const EPChunkConfig> chunks,
-                        int nthreads,
-                        SizeType nparams,
-                        SizeType batch_size) {
+                        const EPMemoryContext& ctx) {
     SizeType buffer_size = 0;
     SizeType coord_size  = 0;
     for (const auto& c : chunks) {
         buffer_size = std::max(buffer_size, c.buffer_size);
         coord_size  = std::max(coord_size, c.coord_size);
     }
-    const auto shared =
-        ep_shared_bytes<FoldType>(nparams, buffer_size, coord_size);
     SizeType peak_thread = 0;
-    for (SizeType i = 0; i < chunks.size();) {
-        const SizeType nbins = chunks[i].cfg.get_nbins();
-        SizeType max_sugg    = 0;
-        SizeType branch_max  = 0;
-        SizeType ncoords     = 0;
-        SizeType nsegments   = 0;
-        for (; i < chunks.size() && chunks[i].cfg.get_nbins() == nbins; ++i) {
-            max_sugg   = std::max(max_sugg, chunks[i].max_sugg);
-            branch_max = std::max(branch_max, chunks[i].branch_max);
-            ncoords    = std::max(ncoords, chunks[i].ncoords);
-            nsegments  = std::max(nsegments, chunks[i].nsegments);
-        }
-        peak_thread = std::max(
-            peak_thread,
-            ep_thread_bytes<FoldType>(nparams, nbins, nsegments, ncoords,
-                                      max_sugg, branch_max, batch_size));
+    for (const auto& g : ep_chunk_groups(chunks)) {
+        peak_thread =
+            std::max(peak_thread, ep_group_thread_bytes<FoldType>(ctx, g));
     }
-    return ep_total_gb(nthreads, peak_thread, shared);
+    return ep_total_gb(ctx.n_workers, peak_thread,
+                       ep_fixed_bytes<FoldType>(ctx, buffer_size, coord_size));
 }
 
 } // namespace loki::algorithms::detail

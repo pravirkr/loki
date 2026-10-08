@@ -192,8 +192,10 @@ private:
  * @details Each record holds the leaf parameters (already converted to
  * physical units at the leaf's reference time), the score, the pruning level
  * and segment index at which it was harvested, the reference time, and
- * optionally the folded profile. Storage grows with the number of harvests,
- * so memory scales with actual detections rather than the configured cap.
+ * optionally the folded profile. Storage grows with the number of harvests
+ * unless reserve() is called: the EP pruning reserves the configured cap on
+ * the first harvest of a run, so its footprint is bounded and known to the
+ * planner (see ep_harvest_bytes).
  */
 template <SupportedFoldType FoldType> class HarvestBuffer {
 public:
@@ -213,6 +215,12 @@ public:
     [[nodiscard]] bool stores_folds() const noexcept { return m_store_folds; }
 
     void clear() noexcept;
+
+    /// Reserves storage for @p n records (no reallocation up to @p n).
+    void reserve(SizeType n);
+
+    /// Bytes currently allocated by the record storage (capacity-based).
+    [[nodiscard]] SizeType get_memory_bytes() const noexcept;
 
     /**
      * @brief Append one record.

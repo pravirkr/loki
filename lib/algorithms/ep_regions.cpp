@@ -26,16 +26,18 @@
 
 #include "lib/algorithms/ep_chunking.hpp"
 #include "lib/algorithms/ep_memory.hpp"
+#include "lib/algorithms/planner_memory.hpp"
 #include "lib/detail/utils.hpp"
 
 namespace loki::algorithms {
 
 namespace {
 
-constexpr double kSafetyMarginGB  = 0.5; // 500 MB headroom
 constexpr float kSafetyMultiplier = 1.25F;
 // 1.2.0: per-chunk branch_max, per-group memory model.
-constexpr std::string_view kCacheVersion = "1.2.0";
+// 1.3.0: inputs, harvest store and worker count in the memory model; stores
+// the model version, batch size, n_workers and harvest bound.
+constexpr std::string_view kCacheVersion = "1.3.0";
 
 double calculate_max_drift(const search::PulsarSearchConfig& cfg) {
     if (cfg.get_nparams() <= 1) {
@@ -74,6 +76,15 @@ double calculate_max_drift(const search::PulsarSearchConfig& cfg) {
         "Unsupported number of parameters for drift calculation");
 }
 
+int resolve_n_workers(int nthreads, std::optional<SizeType> n_workers) {
+    const int max_workers = std::max(1, nthreads);
+    if (!n_workers) {
+        return max_workers;
+    }
+    return static_cast<int>(std::clamp<SizeType>(
+        *n_workers, 1, static_cast<SizeType>(max_workers)));
+}
+
 } // namespace
 
 template <SupportedFoldType FoldType> class EPRegionPlanner<FoldType>::Impl {
@@ -82,11 +93,20 @@ public:
          float min_pd,
          std::string_view poly_basis,
          float ref_ducy,
-         const std::optional<std::filesystem::path>& plan_cache_file)
+         const std::optional<std::filesystem::path>& plan_cache_file,
+         const PruneRFIConfig& rfi_config,
+         std::optional<SizeType> n_workers)
         : m_base_cfg(std::move(cfg)),
           m_min_pd(min_pd),
           m_poly_basis(poly_basis),
-          m_ref_ducy(ref_ducy) {
+          m_ref_ducy(ref_ducy),
+          m_memory{
+              .nparams = m_base_cfg.get_nparams(),
+              .nsamps  = m_base_cfg.get_nsamps(),
+              .n_workers =
+                  resolve_n_workers(m_base_cfg.get_nthreads(), n_workers),
+              .harvest = detail::EPHarvestBound::from(rfi_config),
+          } {
         if (plan_cache_file && std::filesystem::exists(*plan_cache_file)) {
             load_cache(*plan_cache_file);
         } else {
@@ -142,6 +162,16 @@ public:
         file.createAttribute("poly_basis", std::string(m_poly_basis));
         file.createAttribute("ref_ducy", m_ref_ducy);
         file.createAttribute("nthreads", m_base_cfg.get_nthreads());
+        file.createAttribute("ep_memory_model_version",
+                             detail::kEPMemoryModelVersion);
+        file.createAttribute("batch_size", m_memory.batch_size);
+        file.createAttribute("n_workers", m_memory.n_workers);
+        file.createAttribute("harvest_enabled",
+                             static_cast<uint8_t>(m_memory.harvest.enabled));
+        file.createAttribute("max_harvests", m_memory.harvest.max_harvests);
+        file.createAttribute(
+            "harvest_store_folds",
+            static_cast<uint8_t>(m_memory.harvest.store_folds));
         file.createAttribute("nchunks", m_chunk_cfgs.size());
 
         std::vector<double> limits_min;
@@ -271,6 +301,27 @@ public:
                 "found {}",
                 m_base_cfg.get_nthreads(), file_nthreads));
         }
+
+        const auto check_attr_u64 = [&](const std::string& name,
+                                        std::uint64_t val) {
+            std::uint64_t file_val{};
+            file.getAttribute(name).read(file_val);
+            if (val != file_val) {
+                throw std::invalid_argument(std::format(
+                    "EPRegionPlanner: cache mismatch for '{}': expected {}, "
+                    "found {}",
+                    name, val, file_val));
+            }
+        };
+        check_attr_u64("ep_memory_model_version",
+                       detail::kEPMemoryModelVersion);
+        check_attr_u64("batch_size", m_memory.batch_size);
+        check_attr_u64("n_workers",
+                       static_cast<std::uint64_t>(m_memory.n_workers));
+        check_attr_u64("harvest_enabled", m_memory.harvest.enabled ? 1U : 0U);
+        check_attr_u64("max_harvests", m_memory.harvest.max_harvests);
+        check_attr_u64("harvest_store_folds",
+                       m_memory.harvest.store_folds ? 1U : 0U);
 
         std::string file_poly_basis;
         file.getAttribute("poly_basis").read(file_poly_basis);
@@ -407,16 +458,22 @@ public:
             max_fold_size_all   = std::max(max_fold_size_all, fold_size);
         }
 
-        const auto peak_memory_gb =
+        const double peak_memory_gb =
             m_chunk_cfgs.empty()
-                ? 0.0F
-                : static_cast<float>(detail::ep_sweep_peak_gb<FoldType>(
-                      m_chunk_cfgs, m_base_cfg.get_nthreads(),
-                      m_base_cfg.get_nparams(), detail::kEPBatchSize));
-        m_stats = EPRegionStats(max_sugg_all, max_ncoords_all,
-                                max_branch_max_all, peak_memory_gb,
-                                max_buffer_size_all, max_coord_size_all,
-                                max_fold_size_all, std::move(chunk_stats));
+                ? 0.0
+                : detail::ep_sweep_peak_gb<FoldType>(m_chunk_cfgs, m_memory);
+        const double limit_gb = detail::effective_memory_limit_gb(
+            m_base_cfg.get_max_process_memory_gb());
+        if (peak_memory_gb > limit_gb) {
+            throw std::runtime_error(std::format(
+                "EPRegionPlanner: plan cache '{}' needs {:.2f} GB, more than "
+                "the limit {:.2f} GB; delete it and re-plan",
+                filepath.string(), peak_memory_gb, limit_gb));
+        }
+        m_stats = EPRegionStats(
+            max_sugg_all, max_ncoords_all, max_branch_max_all,
+            static_cast<float>(peak_memory_gb), max_buffer_size_all,
+            max_coord_size_all, max_fold_size_all, std::move(chunk_stats));
         spdlog::info("EPRegionPlanner: loaded {} chunks from plan cache '{}'",
                      m_chunk_cfgs.size(), filepath.string());
     }
@@ -426,6 +483,7 @@ private:
     float m_min_pd;
     std::string m_poly_basis;
     float m_ref_ducy;
+    detail::EPMemoryContext m_memory;
 
     std::vector<EPChunkConfig> m_chunk_cfgs;
     EPRegionStats m_stats;
@@ -453,13 +511,14 @@ private:
                 max_drift));
         }
 
-        const auto max_memory_gb   = m_base_cfg.get_max_process_memory_gb();
-        const auto effective_limit = max_memory_gb - kSafetyMarginGB;
+        const auto max_memory_gb = m_base_cfg.get_max_process_memory_gb();
+        const auto effective_limit =
+            detail::effective_memory_limit_gb(max_memory_gb);
         if (effective_limit <= 0.0) {
             throw std::runtime_error(std::format(
                 "EPRegionPlanner: max_process_memory_gb ({:.2f} GB) must "
                 "exceed safety margin ({:.2f} GB)",
-                max_memory_gb, kSafetyMarginGB));
+                max_memory_gb, detail::kUnmodelledReserveGB));
         }
 
         // The threshold schemes are expensive: design every region once and
@@ -475,8 +534,9 @@ private:
                                             max_drift));
         }
 
-        auto plan = detail::plan_chunks<FoldType>(
-            m_base_cfg, m_poly_basis, designs, max_drift, effective_limit);
+        auto plan =
+            detail::plan_chunks<FoldType>(m_base_cfg, m_poly_basis, designs,
+                                          max_drift, effective_limit, m_memory);
         if (plan.replanned) {
             spdlog::info("EPRegionPlanner: replanned with fixed shared FFA "
                          "buffers (buffer_size={}, coord_size={})",
@@ -497,9 +557,9 @@ private:
 
         spdlog::info(
             "EPRegionPlanner complete: {} chunks planned, max_sugg={}, "
-            "max_mem={:.2f} GB (limit: {:.2f} GB)",
+            "max_mem={:.2f} GB (limit: {:.2f} GB, n_workers={})",
             m_chunk_cfgs.size(), m_stats.get_max_sugg(),
-            m_stats.get_max_memory_gb(), max_memory_gb);
+            m_stats.get_max_memory_gb(), max_memory_gb, m_memory.n_workers);
     }
 
     /// Computes the branching pattern and simulates the DynamicThresholdScheme
@@ -588,9 +648,16 @@ EPRegionPlanner<FoldType>::EPRegionPlanner(
     float min_pd,
     std::string_view poly_basis,
     float ref_ducy,
-    const std::optional<std::filesystem::path>& plan_cache_file)
-    : m_impl(std::make_unique<Impl>(
-          cfg, min_pd, poly_basis, ref_ducy, plan_cache_file)) {}
+    const std::optional<std::filesystem::path>& plan_cache_file,
+    const PruneRFIConfig& rfi_config,
+    std::optional<SizeType> n_workers)
+    : m_impl(std::make_unique<Impl>(cfg,
+                                    min_pd,
+                                    poly_basis,
+                                    ref_ducy,
+                                    plan_cache_file,
+                                    rfi_config,
+                                    n_workers)) {}
 
 template <SupportedFoldType FoldType>
 EPRegionPlanner<FoldType>::~EPRegionPlanner() = default;

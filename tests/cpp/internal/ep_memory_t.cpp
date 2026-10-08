@@ -8,13 +8,17 @@
 
 #include "loki/common/types.hpp"
 
+#include "lib/search/cands.hpp"
 #include "lib/utils/workspace_impl.hpp"
 
 using Catch::Matchers::WithinRel;
 using loki::ComplexType;
 using loki::SizeType;
+using loki::algorithms::detail::ep_harvest_bytes;
+using loki::algorithms::detail::ep_input_bytes;
 using loki::algorithms::detail::ep_shared_bytes;
 using loki::algorithms::detail::ep_workspace_bytes;
+using loki::algorithms::detail::EPHarvestBound;
 using loki::algorithms::detail::kBytesPerGiB;
 using loki::memory::EPWorkspaceCPU;
 using loki::memory::FFAWorkspaceCPU;
@@ -69,4 +73,35 @@ TEMPLATE_TEST_CASE("EP memory model matches the shared FFA buffers",
         CHECK(ep_shared_bytes<TestType>(nparams, kBufferSize, kCoordSize) ==
               actual);
     }
+}
+
+TEST_CASE("EP memory model counts both input series", "[ep_memory]") {
+    constexpr SizeType kNSamps = 1000;
+    CHECK(ep_input_bytes(kNSamps) == 2 * kNSamps * sizeof(float));
+}
+
+TEMPLATE_TEST_CASE("EP memory model matches the reserved harvest store",
+                   "[ep_memory]",
+                   float,
+                   ComplexType) {
+    constexpr bool kIsComplex      = std::is_same_v<TestType, ComplexType>;
+    constexpr SizeType kNBins      = 16;
+    constexpr SizeType kMaxHarvest = 37;
+    const SizeType nbins_ws        = kIsComplex ? (kNBins / 2) + 1 : kNBins;
+
+    for (const SizeType nparams : {SizeType{2}, SizeType{4}}) {
+        for (const bool store_folds : {true, false}) {
+            CAPTURE(nparams, store_folds);
+            // Strides of the world tree PruneImpl builds the store from.
+            loki::search::HarvestBuffer<TestType> harvest(
+                (nparams + 2) * 2, 2 * nbins_ws, store_folds);
+            harvest.reserve(kMaxHarvest);
+            const EPHarvestBound bound{.enabled      = true,
+                                       .max_harvests = kMaxHarvest,
+                                       .store_folds  = store_folds};
+            CHECK(ep_harvest_bytes<TestType>(nparams, kNBins, bound) ==
+                  harvest.get_memory_bytes());
+        }
+    }
+    CHECK(ep_harvest_bytes<TestType>(2, kNBins, EPHarvestBound{}) == 0);
 }

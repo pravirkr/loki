@@ -48,6 +48,31 @@ compute_branch_max(std::span<const double> branching_pattern) {
                     kMinBranchMax);
 }
 
+/**
+ * @brief Workers that prune at the same time in an EPMultiPass execution.
+ *
+ * Each pruning run (reference segment) is one task, so at most
+ * min(nthreads, number of runs) workers are busy and need a workspace. Shared
+ * by EPMultiPass (workspaces, thread pool), EPFreqSweep and the planner's
+ * memory model. The run count is n_runs if set, else the number of ref_segs;
+ * with neither (rejected later by determine_ref_segs) it is nthreads.
+ *
+ * @return A value in [1, max(nthreads, 1)].
+ */
+[[nodiscard]] inline SizeType
+compute_ep_n_workers(int nthreads,
+                     std::optional<SizeType> n_runs,
+                     const std::optional<std::vector<SizeType>>& ref_segs) {
+    const auto max_workers = static_cast<SizeType>(std::max(nthreads, 1));
+    SizeType nruns         = max_workers;
+    if (n_runs) {
+        nruns = *n_runs;
+    } else if (ref_segs) {
+        nruns = ref_segs->size();
+    }
+    return std::clamp<SizeType>(nruns, 1, max_workers);
+}
+
 template <SupportedFoldType FoldType> class EPMultiPassEngine {
 protected:
     EPMultiPassEngine() = default;

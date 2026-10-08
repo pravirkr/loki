@@ -47,7 +47,10 @@ void bind_prune(py::module_& m) {
         .def_readonly("actual_f_start", &EPChunkConfig::actual_f_start)
         .def_readonly("actual_f_end", &EPChunkConfig::actual_f_end)
         .def_readonly("peak_complexity", &EPChunkConfig::peak_complexity)
-        .def_readonly("chunk_memory_gb", &EPChunkConfig::chunk_memory_gb)
+        .def_readonly("chunk_memory_gb", &EPChunkConfig::chunk_memory_gb,
+                      "Memory (GB) of this chunk run alone. The sweep peak, "
+                      "with the shared FFA buffers grown across chunks, is "
+                      "EPRegionStats.max_memory_gb.")
         .def_readonly("nsegments", &EPChunkConfig::nsegments)
         .def_readonly("ncoords", &EPChunkConfig::ncoords)
         .def_readonly("buffer_size", &EPChunkConfig::buffer_size)
@@ -68,7 +71,9 @@ void bind_prune(py::module_& m) {
         .def_readonly("max_sugg", &EPChunkStats::max_sugg)
         .def_readonly("branch_max", &EPChunkStats::branch_max)
         .def_readonly("peak_complexity", &EPChunkStats::peak_complexity)
-        .def_readonly("memory_gb", &EPChunkStats::memory_gb)
+        .def_readonly("memory_gb", &EPChunkStats::memory_gb,
+                      "Memory (GB) of this chunk run alone: its workers, its "
+                      "own shared FFA buffers and the input series.")
         .def_readonly("overlap_fraction", &EPChunkStats::overlap_fraction);
 
     py::class_<EPRegionStats>(m_prune, "EPRegionStats")
@@ -77,7 +82,11 @@ void bind_prune(py::module_& m) {
         .def_property_readonly("max_branch_max",
                                &EPRegionStats::get_max_branch_max)
         .def_property_readonly("max_memory_gb",
-                               &EPRegionStats::get_max_memory_gb)
+                               &EPRegionStats::get_max_memory_gb,
+                               "Peak memory (GB) of the whole sweep, with the "
+                               "shared FFA buffers grown to their largest "
+                               "size. This is the value checked against the "
+                               "memory limit.")
         .def_property_readonly("max_buffer_size",
                                &EPRegionStats::get_max_buffer_size)
         .def_property_readonly("max_coord_size",

@@ -928,6 +928,11 @@ private:
         ++m_n_harvested_total;
 
         if (m_harvest.size() < m_rfi->max_harvests) {
+            if (m_harvest.empty()) {
+                // One allocation of the cap: bounded, and what the EP
+                // planner budgets per worker (ep_harvest_bytes).
+                m_harvest.reserve(m_rfi->max_harvests);
+            }
             m_harvest.push(m_leaf_scratch, fold, score, m_prune_level,
                            seg_idx_cur, t_ref);
             if (m_harvest.size() <= kMaxHarvestLogLines) {
@@ -966,7 +971,9 @@ public:
           m_show_progress(show_progress),
           m_rfi_config(std::move(rfi_config)),
           m_ffa_plan(m_cfg),
-          m_nthreads(m_cfg.get_nthreads()) {
+          m_nthreads(m_cfg.get_nthreads()),
+          m_n_workers(
+              detail::compute_ep_n_workers(m_nthreads, m_n_runs, m_ref_segs)) {
         // Create branching pattern and branch max
         m_branching_pattern = m_ffa_plan.get_branching_pattern(m_poly_basis);
         m_branch_max        = detail::compute_branch_max(m_branching_pattern);
@@ -974,16 +981,16 @@ public:
         // Allocate workspaces
         const auto nsegments = m_ffa_plan.get_nsegments().back();
         setup_rfi_control(nsegments);
-        m_workspace_storage.reserve(m_nthreads);
+        m_workspace_storage.reserve(m_n_workers);
         const auto ncoords_ffa = m_ffa_plan.get_ncoords().back();
         if constexpr (std::is_same_v<FoldType, ComplexType>) {
-            for (SizeType i = 0; std::cmp_less(i, m_nthreads); ++i) {
+            for (SizeType i = 0; i < m_n_workers; ++i) {
                 m_workspace_storage.emplace_back(
                     m_batch_size, m_branch_max, m_max_sugg, ncoords_ffa,
                     m_cfg.get_nparams(), m_cfg.get_nbins_f(), nsegments);
             }
         } else {
-            for (SizeType i = 0; std::cmp_less(i, m_nthreads); ++i) {
+            for (SizeType i = 0; i < m_n_workers; ++i) {
                 m_workspace_storage.emplace_back(
                     m_batch_size, m_branch_max, m_max_sugg, ncoords_ffa,
                     m_cfg.get_nparams(), m_cfg.get_nbins(), nsegments);
@@ -991,9 +998,9 @@ public:
         }
         // Validate storage
         error_check::check_greater_equal(
-            m_workspace_storage.size(), static_cast<SizeType>(m_nthreads),
-            "EPMultiPass: Allocated workspaces size is less than requested "
-            "nthreads.");
+            m_workspace_storage.size(), m_n_workers,
+            "EPMultiPass: Allocated workspaces size is less than the number "
+            "of workers.");
         // Point at our internal storage
         // INVARIANT: m_workspace_storage must not be modified after
         // m_workspaces is set. Both move and copy of Impl are deleted to
@@ -1036,7 +1043,9 @@ public:
           m_show_progress(show_progress),
           m_rfi_config(std::move(rfi_config)),
           m_ffa_plan(m_cfg),
-          m_nthreads(m_cfg.get_nthreads()) {
+          m_nthreads(m_cfg.get_nthreads()),
+          m_n_workers(
+              detail::compute_ep_n_workers(m_nthreads, m_n_runs, m_ref_segs)) {
         // Create branching pattern and branch max
         m_branching_pattern = m_ffa_plan.get_branching_pattern(m_poly_basis);
         m_branch_max        = detail::compute_branch_max(m_branching_pattern);
@@ -1045,9 +1054,9 @@ public:
         const auto nsegments   = m_ffa_plan.get_nsegments().back();
         setup_rfi_control(nsegments);
         error_check::check_greater_equal(
-            m_workspaces.size(), static_cast<SizeType>(m_nthreads),
-            "EPMultiPass: Provided external workspaces is less than requested "
-            "nthreads.");
+            m_workspaces.size(), m_n_workers,
+            "EPMultiPass: Provided external workspaces is less than the "
+            "number of workers (min(nthreads, runs)).");
         const SizeType nbins = std::is_same_v<FoldType, ComplexType>
                                    ? m_cfg.get_nbins_f()
                                    : m_cfg.get_nbins();
@@ -1096,7 +1105,9 @@ public:
           m_show_progress(show_progress),
           m_rfi_config(std::move(rfi_config)),
           m_ffa_plan(m_cfg),
-          m_nthreads(m_cfg.get_nthreads()) {
+          m_nthreads(m_cfg.get_nthreads()),
+          m_n_workers(
+              detail::compute_ep_n_workers(m_nthreads, m_n_runs, m_ref_segs)) {
         // Create branching pattern and branch max
         m_branching_pattern = m_ffa_plan.get_branching_pattern(m_poly_basis);
         m_branch_max        = detail::compute_branch_max(m_branching_pattern);
@@ -1105,9 +1116,9 @@ public:
         const auto nsegments   = m_ffa_plan.get_nsegments().back();
         setup_rfi_control(nsegments);
         error_check::check_greater_equal(
-            m_workspaces.size(), static_cast<SizeType>(m_nthreads),
-            "EPMultiPass: Provided external workspaces is less than requested "
-            "nthreads.");
+            m_workspaces.size(), m_n_workers,
+            "EPMultiPass: Provided external workspaces is less than the "
+            "number of workers (min(nthreads, runs)).");
         const SizeType nbins = std::is_same_v<FoldType, ComplexType>
                                    ? m_cfg.get_nbins_f()
                                    : m_cfg.get_nbins();
@@ -1137,12 +1148,16 @@ public:
         timer.start();
         spdlog::info("EPMultiPass: Initializing with FFA");
 
-        const auto ffa = detail::make_ffa_cpu<FoldType>(
-            *m_ffa_workspace_ptr, *m_fft_ptr, m_cfg, m_show_progress);
         const auto buffer_size = m_ffa_plan.get_buffer_size();
         const auto fold_size   = m_ffa_plan.get_fold_size();
         auto const fold_span   = m_ffa_fold_span.first(buffer_size);
-        ffa->execute(ts_e, ts_v, fold_span);
+        {
+            // The FFA engine is not needed once the fold is computed: free
+            // it before pruning, which holds the peak memory.
+            const auto ffa = detail::make_ffa_cpu<FoldType>(
+                *m_ffa_workspace_ptr, *m_fft_ptr, m_cfg, m_show_progress);
+            ffa->execute(ts_e, ts_v, fold_span);
+        }
         const auto ffa_fold =
             std::span<const FoldType>(fold_span).first(fold_size);
 
@@ -1169,8 +1184,9 @@ public:
         // Determine ref_segs to process
         auto ref_segs_to_process =
             utils::determine_ref_segs(nsegments, m_n_runs, m_ref_segs);
-        spdlog::info("Starting Pruning for {} runs, with {} threads",
-                     ref_segs_to_process.size(), m_nthreads);
+        spdlog::info("Starting Pruning for {} runs, with {} threads ({} "
+                     "workers)",
+                     ref_segs_to_process.size(), m_nthreads, m_n_workers);
 
         // Initialize log file
         std::ofstream log(log_file);
@@ -1228,6 +1244,8 @@ private:
 
     plans::FFAPlan<FoldType> m_ffa_plan;
     int m_nthreads;
+    // Workers pruning at the same time: min(nthreads, runs).
+    SizeType m_n_workers;
     std::vector<double> m_branching_pattern;
     SizeType m_branch_max{0};
     // Static pulsar mask on the FFA base grid, shared read-only by all runs
@@ -1294,7 +1312,7 @@ private:
             tracker->start();
         }
         // Create thread pool
-        BS::thread_pool pool(m_nthreads);
+        BS::thread_pool pool(m_n_workers);
 
         // Submit tasks for each ref_seg
         std::vector<std::future<void>> futures;

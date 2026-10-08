@@ -477,6 +477,28 @@ void HarvestBuffer<FoldType>::clear() noexcept {
 }
 
 template <SupportedFoldType FoldType>
+void HarvestBuffer<FoldType>::reserve(SizeType n) {
+    m_leaves.reserve(n * m_leaves_stride);
+    if (m_store_folds) {
+        m_folds.reserve(n * m_folds_stride);
+    }
+    m_scores.reserve(n);
+    m_levels.reserve(n);
+    m_seg_idx.reserve(n);
+    m_t_ref.reserve(n);
+}
+
+template <SupportedFoldType FoldType>
+SizeType HarvestBuffer<FoldType>::get_memory_bytes() const noexcept {
+    return (m_leaves.capacity() * sizeof(double)) +
+           (m_folds.capacity() * sizeof(FoldType)) +
+           (m_scores.capacity() * sizeof(float)) +
+           (m_levels.capacity() * sizeof(SizeType)) +
+           (m_seg_idx.capacity() * sizeof(SizeType)) +
+           (m_t_ref.capacity() * sizeof(double));
+}
+
+template <SupportedFoldType FoldType>
 void HarvestBuffer<FoldType>::push(std::span<const double> leaf,
                                    std::span<const FoldType> fold,
                                    float score,
