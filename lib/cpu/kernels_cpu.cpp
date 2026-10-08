@@ -1695,7 +1695,7 @@ void shift_add_linear_complex_batch(const ComplexType* __restrict__ folds_tree,
 // Second dimension is n_leaves, but batched, so call to this function
 // should be in the same loop as the one that computes the phase shifts
 void shift_add_ascend_linear_batch(const float* __restrict__ folds_ffa,
-                                   const SizeType* __restrict__ indices_segment,
+                                   const uint32_t* __restrict__ indices_segment,
                                    const SizeType* __restrict__ indices_ffa,
                                    const float* __restrict__ phase_shift,
                                    float* __restrict__ folds_tree,
@@ -1711,7 +1711,7 @@ void shift_add_ascend_linear_batch(const float* __restrict__ folds_ffa,
         // Fill it with zero to avoid accumulation of garbage values
         std::fill(data_tree, data_tree + total_size, 0.0F);
         for (SizeType iseg = 0; iseg < n_segments; ++iseg) {
-            const auto segment_idx     = indices_segment[iseg];
+            const SizeType segment_idx = indices_segment[iseg];
             const auto phase_shift_seg = phase_shift[(iseg * n_leaves) + ileaf];
             const auto ffa_idx_seg     = indices_ffa[(iseg * n_leaves) + ileaf];
             const float* __restrict__ data_ffa =
@@ -1725,7 +1725,7 @@ void shift_add_ascend_linear_batch(const float* __restrict__ folds_ffa,
 
 void shift_add_ascend_linear_complex_batch(
     const ComplexType* __restrict__ folds_ffa,
-    const SizeType* __restrict__ indices_segment,
+    const uint32_t* __restrict__ indices_segment,
     const SizeType* __restrict__ indices_ffa,
     const float* __restrict__ phase_shift,
     ComplexType* __restrict__ folds_tree,
@@ -1740,7 +1740,7 @@ void shift_add_ascend_linear_complex_batch(
         // Fill it with zero to avoid accumulation of garbage values
         std::fill(data_tree, data_tree + total_size, ComplexType{0.0F, 0.0F});
         for (SizeType iseg = 0; iseg < n_segments; ++iseg) {
-            const auto segment_idx     = indices_segment[iseg];
+            const SizeType segment_idx = indices_segment[iseg];
             const auto phase_shift_seg = phase_shift[(iseg * n_leaves) + ileaf];
             const auto ffa_idx_seg     = indices_ffa[(iseg * n_leaves) + ileaf];
             const ComplexType* __restrict__ data_ffa =

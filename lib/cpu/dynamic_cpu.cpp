@@ -1,6 +1,7 @@
 #include "lib/core/dynamic.hpp"
 
 #include <algorithm>
+#include <cstdint>
 #include <format>
 #include <memory>
 #include <span>
@@ -361,7 +362,7 @@ void PrunePolyTaylorDPFuncts<FoldType>::ascend(
     std::span<FoldType> folds_tree,
     std::span<float> scores_tree,
     std::span<float> scores_ep_tree,
-    std::span<const SizeType> idx_segments,
+    std::span<const uint32_t> idx_segments,
     std::span<const std::pair<double, double>> coord_segments,
     std::pair<double, double> coord_cur,
     std::span<SizeType> scratch_param_indices,
@@ -499,7 +500,7 @@ void PrunePolyChebyshevDPFuncts<FoldType>::ascend(
     std::span<FoldType> folds_tree,
     std::span<float> scores_tree,
     std::span<float> scores_ep_tree,
-    std::span<const SizeType> idx_segments,
+    std::span<const uint32_t> idx_segments,
     std::span<const std::pair<double, double>> coord_segments,
     std::pair<double, double> coord_cur,
     std::span<SizeType> scratch_param_indices,
@@ -648,7 +649,7 @@ void PruneCircTaylorDPFuncts<FoldType>::ascend(
     std::span<FoldType> folds_tree,
     std::span<float> scores_tree,
     std::span<float> scores_ep_tree,
-    std::span<const SizeType> idx_segments,
+    std::span<const uint32_t> idx_segments,
     std::span<const std::pair<double, double>> coord_segments,
     std::pair<double, double> coord_cur,
     std::span<SizeType> scratch_param_indices,

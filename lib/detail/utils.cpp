@@ -216,12 +216,43 @@ std::vector<double> linspace(double start,
     return result;
 }
 
+namespace {
+
+void validate_ref_segs(SizeType nsegments,
+                       const std::optional<SizeType>& n_runs,
+                       const std::optional<std::vector<SizeType>>& ref_segs) {
+    if (n_runs.has_value() && ref_segs.has_value()) {
+        throw std::invalid_argument("pass either n_runs or ref_segs, not both");
+    }
+    if (!ref_segs.has_value()) {
+        return;
+    }
+    if (ref_segs->empty()) {
+        throw std::invalid_argument("ref_segs must be non-empty");
+    }
+    std::vector<SizeType> seen;
+    seen.reserve(ref_segs->size());
+    for (const SizeType seg : *ref_segs) {
+        if (seg >= nsegments) {
+            throw std::invalid_argument(std::format(
+                "ref_segs entry {} is outside [0, {})", seg, nsegments));
+        }
+        if (std::ranges::find(seen, seg) != seen.end()) {
+            throw std::invalid_argument(
+                std::format("ref_segs entry {} is duplicated", seg));
+        }
+        seen.push_back(seg);
+    }
+}
+
+} // namespace
+
 std::vector<SizeType>
 determine_ref_segs(SizeType nsegments,
                    std::optional<SizeType> n_runs,
                    std::optional<std::vector<SizeType>> ref_segs) {
+    validate_ref_segs(nsegments, n_runs, ref_segs);
     if (n_runs.has_value()) {
-        // n_runs takes precedence over ref_segs
         const auto n_runs_val = n_runs.value();
         if (n_runs_val < 1 || n_runs_val > nsegments) {
             throw std::runtime_error(
@@ -250,8 +281,8 @@ std::vector<SizeType>
 determine_ref_segs_pareto(SizeType nsegments,
                           std::optional<SizeType> n_runs,
                           std::optional<std::vector<SizeType>> ref_segs) {
+    validate_ref_segs(nsegments, n_runs, ref_segs);
     if (n_runs.has_value()) {
-        // n_runs takes precedence over ref_segs
         const auto n_runs_val = n_runs.value();
         if (n_runs_val < 1 || n_runs_val > nsegments) {
             throw std::runtime_error(

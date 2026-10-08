@@ -1,6 +1,8 @@
 #include "lib/cuda/prune_cuda.cuh"
 
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -14,6 +16,7 @@
 #include <vector>
 
 #include <cuda/std/span>
+#include <cuda/std/utility>
 #include <cuda_runtime.h>
 #include <fmt/ranges.h>
 #include <spdlog/spdlog.h>
@@ -295,17 +298,34 @@ private:
         }
         auto& prune_ws       = ws.prune;
         const auto coord_mid = m_snail_scheme.get_coord(m_prune_level);
-        const auto [idx_segments, coord_segments] =
+        const auto segment_coords_so_far =
             m_snail_scheme.get_segment_coords_so_far(m_prune_level);
+        const auto& idx_segments   = segment_coords_so_far.first;
+        const auto& coord_segments = segment_coords_so_far.second;
         const auto batch_cap =
             std::max(SizeType{1}, std::min(m_batch_size, n_survivors));
         const auto n_segments_so_far = idx_segments.size();
 
-        // Copy the segment coordinates to the device
-        thrust::copy(thrust::cuda::par.on(stream), idx_segments.begin(),
-                     idx_segments.end(), ws.idx_segments_d.begin());
-        thrust::copy(thrust::cuda::par.on(stream), coord_segments.begin(),
-                     coord_segments.end(), ws.coord_segments_d.begin());
+        if (n_segments_so_far > 0) {
+            cuda_utils::check_cuda_call(
+                cudaMemcpyAsync(
+                    thrust::raw_pointer_cast(ws.idx_segments_d.data()),
+                    idx_segments.data(), n_segments_so_far * sizeof(uint32_t),
+                    cudaMemcpyHostToDevice, stream),
+                "cudaMemcpyAsync idx_segments failed");
+            cuda_utils::check_cuda_call(
+                cudaMemcpyAsync(
+                    thrust::raw_pointer_cast(ws.coord_segments_d.data()),
+                    coord_segments.data(),
+                    n_segments_so_far * sizeof(SegmentCoordHost),
+                    cudaMemcpyHostToDevice, stream),
+                "cudaMemcpyAsync coord_segments failed");
+            // Both sources are pageable and die with this call. Wait until
+            // the copies have read them.
+            cuda_utils::check_cuda_call(
+                cudaStreamSynchronize(stream),
+                "cudaStreamSynchronize segment upload failed");
+        }
 
         memory::CircularViewCUDA<double> leaves_cv =
             world_tree.get_leaves_circular_view();

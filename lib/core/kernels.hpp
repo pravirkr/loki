@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 #include "loki/common/coord.hpp"
 #include "loki/common/types.hpp"
 
@@ -279,7 +281,7 @@ void shift_add_linear_complex_batch(const ComplexType* __restrict__ folds_tree,
                                     SizeType capacity) noexcept;
 
 void shift_add_ascend_linear_batch(const float* __restrict__ folds_ffa,
-                                   const SizeType* __restrict__ indices_segment,
+                                   const uint32_t* __restrict__ indices_segment,
                                    const SizeType* __restrict__ indices_ffa,
                                    const float* __restrict__ phase_shift,
                                    float* __restrict__ folds_tree,
@@ -291,7 +293,7 @@ void shift_add_ascend_linear_batch(const float* __restrict__ folds_ffa,
 
 void shift_add_ascend_linear_complex_batch(
     const ComplexType* __restrict__ folds_ffa,
-    const SizeType* __restrict__ indices_segment,
+    const uint32_t* __restrict__ indices_segment,
     const SizeType* __restrict__ indices_ffa,
     const float* __restrict__ phase_shift,
     ComplexType* __restrict__ folds_tree,

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <span>
 #include <tuple>
 #include <vector>
@@ -95,7 +96,7 @@ public:
            std::span<FoldType> folds_tree,
            std::span<float> scores_tree,
            std::span<float> scores_ep_tree,
-           std::span<const SizeType> idx_segments,
+           std::span<const uint32_t> idx_segments,
            std::span<const std::pair<double, double>> coord_segments,
            std::pair<double, double> coord_cur,
            std::span<SizeType> scratch_param_indices,
@@ -268,7 +269,7 @@ public:
                 std::span<FoldType> folds_tree,
                 std::span<float> scores_tree,
                 std::span<float> scores_ep_tree,
-                std::span<const SizeType> idx_segments,
+                std::span<const uint32_t> idx_segments,
                 std::span<const std::pair<double, double>> coord_segments,
                 std::pair<double, double> coord_cur,
                 std::span<SizeType> scratch_param_indices,
@@ -323,7 +324,7 @@ public:
                 std::span<FoldType> folds_tree,
                 std::span<float> scores_tree,
                 std::span<float> scores_ep_tree,
-                std::span<const SizeType> idx_segments,
+                std::span<const uint32_t> idx_segments,
                 std::span<const std::pair<double, double>> coord_segments,
                 std::pair<double, double> coord_cur,
                 std::span<SizeType> scratch_param_indices,
@@ -383,7 +384,7 @@ public:
                 std::span<FoldType> folds_tree,
                 std::span<float> scores_tree,
                 std::span<float> scores_ep_tree,
-                std::span<const SizeType> idx_segments,
+                std::span<const uint32_t> idx_segments,
                 std::span<const std::pair<double, double>> coord_segments,
                 std::pair<double, double> coord_cur,
                 std::span<SizeType> scratch_param_indices,

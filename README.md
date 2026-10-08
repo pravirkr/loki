@@ -205,6 +205,95 @@ ctest --test-dir build
 
 ---
 
+## Containers
+
+[`docker/Dockerfile`](docker/Dockerfile) builds a Loki-only image: the Python
+module (the C++ library is linked into it), the `loki` command, and the
+runtime libraries those need (FFTW, HDF5, NumPy, pyloki). It does not include
+dedispersion, filterbank tools, or injection codes. A Nextflow process, or a
+larger pipeline image, can use this container instead of compiling Loki on
+the cluster.
+
+The image installs Loki with `uv`, the same installer as the Python
+instructions above. It does not use the `release` CMake preset. That preset
+is for a machine you are building on: tests stay on, and both `-march=native`
+and the CUDA architecture list stay at their defaults (`native`). An image
+has to run on other nodes, so the Dockerfile turns native tuning off, sets
+an explicit CPU baseline and GPU list, and leaves the tests out.
+
+The image is portable: the default CPU baseline is `x86-64-v3`, and the CUDA
+image lists GPU architectures explicitly (`80;86;90` by default). Both are
+build arguments. There is no conda package. On a machine where you can
+compile, use mamba only for the compilers and libraries (FFTW, HDF5), then
+`uv pip install`. On a cluster, build the image once (or a `.sif` from it)
+instead of adding a third packaging channel. There is no required container
+registry: clone this repo and `docker build` on a machine with Docker and
+network access (the build fetches pyloki and CPM dependencies).
+
+```bash
+docker build -f docker/Dockerfile --target cpu  -t loki:cpu  .
+docker build -f docker/Dockerfile --target cuda -t loki:cuda .
+```
+
+```bash
+# narrower CPU baseline, or a different set of GPUs
+docker build -f docker/Dockerfile --target cuda -t loki:cuda \
+  --build-arg LOKI_MARCH=x86-64 \
+  --build-arg LOKI_CUDA_ARCHITECTURES="80;90" .
+```
+
+Build the CUDA target with `LOKI_CUDA=AUTO`. `LOKI_CUDA=ON` stops at configure
+time unless `nvidia-smi` can see a GPU, and an image build normally has none.
+The Dockerfile checks that the finished module actually contains the CUDA
+backend.
+
+On Docker, smoke-test the module after build:
+
+```bash
+docker run --rm loki:cpu python -c "import loki; print(loki.libloki.available_backends())"
+docker run --rm --gpus all loki:cuda python -c "import loki; print(loki.libloki.available_backends())"
+```
+
+On a cluster that runs Apptainer (Singularity), convert the **local** Docker
+tag to a `.sif` (no registry).
+
+```bash
+# after docker build ... -t loki:cuda .
+apptainer build loki.sif docker-daemon://loki:cuda
+apptainer exec --nv loki.sif python -c "import loki; print(loki.libloki.available_backends())"
+```
+
+Copy the `.sif` to shared storage if compute nodes cannot build images. There
+is no separate Singularity definition file.
+
+**Nextflow (typical HPC, Singularity executor):** point `container` at the
+`.sif` path. Use `containerOptions '--nv'` on GPU processes.
+
+```groovy
+process LOKI_SEARCH {
+    container "${projectDir}/containers/loki.sif"
+    containerOptions '--nv'
+
+    script:
+    """
+    python -c "import loki; print(loki.libloki.available_backends())"
+    """
+}
+```
+
+**Nextflow (Docker executor):** use the local tag, e.g. `container 'loki:cuda'`,
+and configure GPUs in your site `nextflow.config`.
+
+A pipeline that already has its own image can copy Loki in instead of
+rebuilding it:
+
+```dockerfile
+COPY --from=loki:cuda /opt/venv /opt/loki-venv
+ENV PATH=/opt/loki-venv/bin:$PATH
+```
+
+---
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
