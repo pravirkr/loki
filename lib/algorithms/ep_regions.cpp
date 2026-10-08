@@ -5,7 +5,6 @@
 #include <cstdint>
 #include <filesystem>
 #include <format>
-#include <numeric>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -25,107 +24,18 @@
 #include "loki/detection/thresholds.hpp"
 #include "loki/search/configs.hpp"
 
-#include "lib/algorithms/prune_engine.hpp"
+#include "lib/algorithms/ep_chunking.hpp"
+#include "lib/algorithms/ep_memory.hpp"
 #include "lib/detail/utils.hpp"
 
 namespace loki::algorithms {
 
 namespace {
 
-constexpr SizeType kBatchSize          = 1024U;
-constexpr double kSafetyMarginGB       = 0.5; // 500 MB headroom
-constexpr float kSafetyMultiplier      = 1.25F;
-constexpr double kBisectionToleranceHz = 1.0e-2;
-constexpr double kMinChunkWidthHz      = 1.0e-2;
-constexpr double kRelativeTolerance    = 1.0e-4;
-constexpr SizeType kMaxBisectionSteps  = 50;
-// 1.1.0: chunk branch_max is derived from the chunk's own plan.
-constexpr std::string_view kCacheVersion = "1.1.0";
-
-template <SupportedFoldType FoldType>
-double calculate_ep_chunk_memory_gb(SizeType nparams,
-                                    SizeType nbins,
-                                    SizeType nsegments,
-                                    SizeType ncoords_ffa,
-                                    SizeType max_sugg,
-                                    SizeType branch_max,
-                                    SizeType batch_size,
-                                    int nthreads,
-                                    SizeType ffa_fold_size,
-                                    SizeType ffa_buffer_size,
-                                    SizeType ffa_coord_size) {
-    constexpr bool kIsComplex = std::is_same_v<FoldType, ComplexType>;
-    const SizeType nbins_f    = (nbins / 2) + 1;
-    const SizeType nbins_arg  = kIsComplex ? nbins_f : nbins;
-    const SizeType fold_bytes =
-        kIsComplex ? sizeof(ComplexType) : sizeof(float);
-    constexpr SizeType kParamStride = 2U;
-    const SizeType leaves_stride    = (nparams + 2) * kParamStride;
-
-    // 1. WorldTree per thread:
-    const SizeType max_batch_size = batch_size * branch_max;
-    const SizeType world_tree_bytes =
-        (max_sugg * leaves_stride * sizeof(double)) +
-        (max_sugg * 2 * nbins_arg * fold_bytes) +
-        (max_sugg * 2 * sizeof(float)) +
-        ((max_sugg + max_batch_size) * sizeof(float)) +
-        (max_batch_size * sizeof(SizeType)) + (max_sugg * sizeof(uint8_t));
-
-    // 2. PruneWorkspace per thread:
-    const SizeType max_branched_leaves = batch_size * branch_max;
-    const SizeType max_branched_param_idx =
-        std::max(max_branched_leaves, nsegments * batch_size);
-    const SizeType prune_ws_bytes =
-        (max_branched_leaves * leaves_stride * sizeof(double)) +
-        (max_branched_leaves * 2 * nbins_arg * fold_bytes) +
-        (max_branched_leaves * sizeof(float)) +
-        (max_branched_leaves * sizeof(SizeType)) +
-        (max_branched_param_idx * sizeof(SizeType)) +
-        (max_branched_param_idx * sizeof(float)) +
-        (max_branched_leaves * sizeof(float));
-
-    // 3. BranchingWorkspace per thread:
-    const SizeType branch_ws_bytes =
-        (batch_size * nparams * branch_max * sizeof(double)) +
-        (batch_size * nparams * sizeof(double)) +
-        (batch_size * nparams * sizeof(SizeType)) +
-        (batch_size * nparams * sizeof(double));
-
-    // 4. Seed memory per thread (in EPWorkspaceCPU):
-    const SizeType seed_bytes = (ncoords_ffa * leaves_stride * sizeof(double)) +
-                                (ncoords_ffa * sizeof(float)) +
-                                (ncoords_ffa * sizeof(SizeType));
-
-    // 5. IRFFT scratch per thread (if complex):
-    const SizeType irfft_bytes = [&]() -> SizeType {
-        if constexpr (kIsComplex) {
-            const SizeType max_nfft =
-                std::max(2 * batch_size * branch_max, 2 * ncoords_ffa);
-            return (max_nfft * nbins_f * sizeof(ComplexType)) +
-                   (max_nfft * nbins * sizeof(float));
-        }
-        return SizeType{0};
-    }();
-
-    const SizeType per_thread_bytes = world_tree_bytes + prune_ws_bytes +
-                                      branch_ws_bytes + seed_bytes +
-                                      irfft_bytes;
-    const SizeType all_threads_bytes =
-        static_cast<SizeType>(nthreads) * per_thread_bytes;
-
-    // 6. FFA fold output buffer (shared):
-    const SizeType ffa_fold_bytes = ffa_fold_size * fold_bytes;
-
-    // 7. FFA internal buffer during compute_ffa:
-    const SizeType coord_unit_bytes =
-        (nparams == 1) ? sizeof(coord::FFACoordFreq) : sizeof(coord::FFACoord);
-    const SizeType ffa_ws_bytes = (2 * ffa_buffer_size * fold_bytes) +
-                                  (ffa_coord_size * coord_unit_bytes);
-
-    const SizeType total_bytes =
-        all_threads_bytes + ffa_fold_bytes + ffa_ws_bytes;
-    return static_cast<double>(total_bytes) / static_cast<double>(1ULL << 30U);
-}
+constexpr double kSafetyMarginGB  = 0.5; // 500 MB headroom
+constexpr float kSafetyMultiplier = 1.25F;
+// 1.2.0: per-chunk branch_max, per-group memory model.
+constexpr std::string_view kCacheVersion = "1.2.0";
 
 double calculate_max_drift(const search::PulsarSearchConfig& cfg) {
     if (cfg.get_nparams() <= 1) {
@@ -163,35 +73,6 @@ double calculate_max_drift(const search::PulsarSearchConfig& cfg) {
     throw std::runtime_error(
         "Unsupported number of parameters for drift calculation");
 }
-
-struct EvaluatedChunk {
-    search::PulsarSearchConfig cfg;
-    SizeType ncoords{0};
-    SizeType max_sugg{0};
-    SizeType branch_max{0};
-    SizeType fold_size{0};
-    SizeType buffer_size{0};
-    SizeType coord_size{0};
-    double memory_gb{0.0};
-};
-
-struct RunningMaxima {
-    SizeType max_sugg{0};
-    SizeType branch_max{0};
-    SizeType ncoords{0};
-    SizeType fold_size{0};
-    SizeType buffer_size{0};
-    SizeType coord_size{0};
-
-    void absorb(const EvaluatedChunk& c) noexcept {
-        max_sugg    = std::max(max_sugg, c.max_sugg);
-        branch_max  = std::max(branch_max, c.branch_max);
-        ncoords     = std::max(ncoords, c.ncoords);
-        fold_size   = std::max(fold_size, c.fold_size);
-        buffer_size = std::max(buffer_size, c.buffer_size);
-        coord_size  = std::max(coord_size, c.coord_size);
-    }
-};
 
 } // namespace
 
@@ -428,7 +309,6 @@ public:
         SizeType max_sugg_all        = 0;
         SizeType max_ncoords_all     = 0;
         SizeType max_branch_max_all  = 0;
-        float max_memory_gb_all      = 0.0F;
         SizeType max_buffer_size_all = 0;
         SizeType max_coord_size_all  = 0;
         SizeType max_fold_size_all   = 0;
@@ -522,15 +402,19 @@ public:
             max_sugg_all        = std::max(max_sugg_all, max_sugg);
             max_ncoords_all     = std::max(max_ncoords_all, ncoords);
             max_branch_max_all  = std::max(max_branch_max_all, branch_max);
-            max_memory_gb_all   = std::max(max_memory_gb_all,
-                                           static_cast<float>(chunk_memory_gb));
             max_buffer_size_all = std::max(max_buffer_size_all, buffer_size);
             max_coord_size_all  = std::max(max_coord_size_all, coord_size);
             max_fold_size_all   = std::max(max_fold_size_all, fold_size);
         }
 
+        const auto peak_memory_gb =
+            m_chunk_cfgs.empty()
+                ? 0.0F
+                : static_cast<float>(detail::ep_sweep_peak_gb<FoldType>(
+                      m_chunk_cfgs, m_base_cfg.get_nthreads(),
+                      m_base_cfg.get_nparams(), detail::kEPBatchSize));
         m_stats = EPRegionStats(max_sugg_all, max_ncoords_all,
-                                max_branch_max_all, max_memory_gb_all,
+                                max_branch_max_all, peak_memory_gb,
                                 max_buffer_size_all, max_coord_size_all,
                                 max_fold_size_all, std::move(chunk_stats));
         spdlog::info("EPRegionPlanner: loaded {} chunks from plan cache '{}'",
@@ -578,33 +462,38 @@ private:
                 max_memory_gb, kSafetyMarginGB));
         }
 
-        RunningMaxima maxima;
-        std::vector<EPChunkStats> chunk_stats;
-
+        // The threshold schemes are expensive: design every region once and
+        // reuse the designs if a second planning pass is needed.
+        std::vector<detail::RegionDesign> designs;
+        designs.reserve(ffa_regions.size());
         for (const auto& region : ffa_regions) {
-            subdivide_region(region.f_start, region.f_end, region.nbins,
-                             region.eta, max_drift, effective_limit, maxima,
-                             chunk_stats);
+            if (region.f_end <= region.f_start) {
+                continue;
+            }
+            designs.push_back(design_region(region.f_start, region.f_end,
+                                            region.nbins, region.eta,
+                                            max_drift));
         }
 
-        // Before chunk_stats is moved from: argument order is unspecified
+        auto plan = detail::plan_chunks<FoldType>(
+            m_base_cfg, m_poly_basis, designs, max_drift, effective_limit);
+        if (plan.replanned) {
+            spdlog::info("EPRegionPlanner: replanned with fixed shared FFA "
+                         "buffers (buffer_size={}, coord_size={})",
+                         plan.buffer_size, plan.coord_size);
+        }
+
+        m_chunk_cfgs = std::move(plan.chunk_cfgs);
         const auto max_branch_max_all =
-            chunk_stats.empty()
+            plan.chunk_stats.empty()
                 ? SizeType{0}
-                : std::ranges::max_element(chunk_stats, {},
+                : std::ranges::max_element(plan.chunk_stats, {},
                                            &EPChunkStats::branch_max)
                       ->branch_max;
-        const auto max_memory_gb_all =
-            chunk_stats.empty()
-                ? 0.0F
-                : static_cast<float>(
-                      std::ranges::max_element(chunk_stats, {},
-                                               &EPChunkStats::memory_gb)
-                          ->memory_gb);
-        m_stats = EPRegionStats(maxima.max_sugg, maxima.ncoords,
-                                max_branch_max_all, max_memory_gb_all,
-                                maxima.buffer_size, maxima.coord_size,
-                                maxima.fold_size, std::move(chunk_stats));
+        m_stats = EPRegionStats(
+            plan.max_sugg, plan.max_ncoords, max_branch_max_all,
+            static_cast<float>(plan.peak_memory_gb), plan.buffer_size,
+            plan.coord_size, plan.fold_size, std::move(plan.chunk_stats));
 
         spdlog::info(
             "EPRegionPlanner complete: {} chunks planned, max_sugg={}, "
@@ -613,20 +502,13 @@ private:
             m_stats.get_max_memory_gb(), max_memory_gb);
     }
 
-    void subdivide_region(double f_start,
-                          double f_end,
-                          SizeType nbins,
-                          double eta,
-                          double max_drift,
-                          double effective_limit_gb,
-                          RunningMaxima& maxima,
-                          std::vector<EPChunkStats>& chunk_stats) {
-        if (f_end <= f_start) {
-            return;
-        }
-
-        // 1. Compute branching pattern and simulate DynamicThresholdScheme
-        // once for the coarse band
+    /// Computes the branching pattern and simulates the DynamicThresholdScheme
+    /// once for a coarse band.
+    detail::RegionDesign design_region(double f_start,
+                                       double f_end,
+                                       SizeType nbins,
+                                       double eta,
+                                       double max_drift) const {
         const double region_actual_start = f_start * (1.0 - max_drift);
         const double region_actual_end   = f_end * (1.0 + max_drift);
         const auto rep_cfg               = m_base_cfg.get_updated_ep_config(
@@ -678,202 +560,23 @@ private:
             threshold_scheme, bp_float, m_ref_ducy, nbins, kNTrials, snr_final,
             ducy_max, wtsp);
         float peak_complexity = 1.0F;
-        for (const auto& s : states) {
-            if (!s.is_empty) {
-                peak_complexity = std::max(peak_complexity, s.complexity);
+        for (const auto& st : states) {
+            if (!st.is_empty) {
+                peak_complexity = std::max(peak_complexity, st.complexity);
             }
         }
-        const float safe_complexity =
-            std::max(1.0F, peak_complexity) * kSafetyMultiplier;
-
-        // 2. Analytic evaluator for candidate chunk
-        auto evaluate_chunk = [&](double nominal_start,
-                                  double nominal_end) -> EvaluatedChunk {
-            const double act_start = nominal_start * (1.0 - max_drift);
-            const double act_end   = nominal_end * (1.0 + max_drift);
-            auto chunk_cfg         = m_base_cfg.get_updated_ep_config(
-                nbins, eta, act_start, act_end);
-            const plans::FFAPlan<FoldType> plan(chunk_cfg);
-            const SizeType ncoords = plan.get_ncoords().back();
-            // The pattern depends on the chunk's own band (not monotone in
-            // width), so branch_max must come from the chunk's plan, exactly
-            // as EPMultiPass computes it.
-            const SizeType branch_max = algorithms::detail::compute_branch_max(
-                plan.get_branching_pattern(m_poly_basis));
-            const SizeType max_sugg =
-                std::max(SizeType{1024},
-                         static_cast<SizeType>(
-                             std::ceil(static_cast<double>(ncoords) *
-                                       static_cast<double>(safe_complexity))));
-
-            const double mem_gb = calculate_ep_chunk_memory_gb<FoldType>(
-                m_base_cfg.get_nparams(), nbins, nsegments, ncoords, max_sugg,
-                branch_max, kBatchSize, m_base_cfg.get_nthreads(),
-                plan.get_fold_size(), plan.get_buffer_size(),
-                plan.get_coord_size());
-
-            return EvaluatedChunk{
-                .cfg         = std::move(chunk_cfg),
-                .ncoords     = ncoords,
-                .max_sugg    = max_sugg,
-                .branch_max  = branch_max,
-                .fold_size   = plan.get_fold_size(),
-                .buffer_size = plan.get_buffer_size(),
-                .coord_size  = plan.get_coord_size(),
-                .memory_gb   = mem_gb,
-            };
+        return detail::RegionDesign{
+            .f_start          = f_start,
+            .f_end            = f_end,
+            .nbins            = nbins,
+            .eta              = eta,
+            .threshold_scheme = std::move(threshold_scheme),
+            .bp_float         = bp_float,
+            .peak_complexity  = peak_complexity,
+            .safe_complexity =
+                std::max(1.0F, peak_complexity) * kSafetyMultiplier,
+            .nsegments = nsegments,
         };
-
-        auto fits = [&](const EvaluatedChunk& c) {
-            // Must fit both in isolation and when absorbed into running maxima
-            if (c.memory_gb > effective_limit_gb) {
-                return false;
-            }
-            RunningMaxima test_max = maxima;
-            test_max.absorb(c);
-            const double sweep_mem_gb = calculate_ep_chunk_memory_gb<FoldType>(
-                m_base_cfg.get_nparams(), nbins, nsegments, test_max.ncoords,
-                test_max.max_sugg, test_max.branch_max, kBatchSize,
-                m_base_cfg.get_nthreads(), test_max.fold_size,
-                test_max.buffer_size, test_max.coord_size);
-            return sweep_mem_gb <= effective_limit_gb;
-        };
-
-        const double region_span = f_end - f_start;
-        const double boundary_tolerance =
-            std::max(kBisectionToleranceHz, kRelativeTolerance * region_span);
-
-        auto bisect_chunk =
-            [&](double current_f_end, double min_width, EvaluatedChunk min_eval,
-                double max_width) -> std::pair<double, EvaluatedChunk> {
-            double lo_width     = min_width;
-            double hi_width     = max_width;
-            EvaluatedChunk best = std::move(min_eval);
-
-            for (SizeType step = 0; step < kMaxBisectionSteps &&
-                                    (hi_width - lo_width) > boundary_tolerance;
-                 ++step) {
-                const double mid_width   = std::midpoint(lo_width, hi_width);
-                const double probe_start = current_f_end - mid_width;
-                auto probe = evaluate_chunk(probe_start, current_f_end);
-
-                if (fits(probe)) {
-                    lo_width = mid_width;
-                    best     = std::move(probe);
-                } else {
-                    hi_width = mid_width;
-                }
-            }
-            return {current_f_end - lo_width, std::move(best)};
-        };
-
-        const auto find_largest_fitting =
-            [&](double current_f_end) -> std::pair<double, EvaluatedChunk> {
-            const double remaining = current_f_end - f_start;
-            auto full_eval         = evaluate_chunk(f_start, current_f_end);
-            if (fits(full_eval)) {
-                return {f_start, std::move(full_eval)};
-            }
-
-            const double min_width = std::min(remaining, kMinChunkWidthHz);
-            const double min_start = current_f_end - min_width;
-            auto min_eval          = evaluate_chunk(min_start, current_f_end);
-            if (!fits(min_eval)) {
-                throw std::runtime_error(std::format(
-                    "EPRegionPlanner: Cannot fit minimum viable chunk at "
-                    "[{:08.3f}, {:08.3f}] Hz.\n"
-                    "  Required memory: {:.2f} GB, Available: {:.2f} GB\n"
-                    "  Suggestion: Increase max_process_memory_gb.",
-                    min_start, current_f_end, min_eval.memory_gb,
-                    effective_limit_gb));
-            }
-
-            return bisect_chunk(current_f_end, min_width, std::move(min_eval),
-                                remaining);
-        };
-
-        // Sliver absorption
-        constexpr double kSliverFactor = 4.0;
-        const auto try_absorb_sliver =
-            [&](double current_f_end,
-                double nominal_start) -> std::optional<EvaluatedChunk> {
-            const double remainder = nominal_start - f_start;
-            if (remainder <= 0.0 ||
-                remainder > (kSliverFactor * boundary_tolerance)) {
-                return std::nullopt;
-            }
-            auto merged = evaluate_chunk(f_start, current_f_end);
-            if (fits(merged)) {
-                return merged;
-            }
-            return std::nullopt;
-        };
-
-        // Main subdivision loop
-        double current_f_end = f_end;
-        while (current_f_end > f_start) {
-            auto [nominal_start, eval] = find_largest_fitting(current_f_end);
-            if (auto absorbed =
-                    try_absorb_sliver(current_f_end, nominal_start)) {
-                nominal_start = f_start;
-                eval          = std::move(*absorbed);
-            }
-
-            if (nominal_start >= current_f_end) {
-                throw std::runtime_error(std::format(
-                    "EPRegionPlanner: no progress in [{:08.3f}, {:08.3f}] Hz.",
-                    f_start, current_f_end));
-            }
-
-            const double nominal_end   = current_f_end;
-            const double nominal_width = nominal_end - nominal_start;
-            const double actual_start  = nominal_start * (1.0 - max_drift);
-            const double actual_end    = nominal_end * (1.0 + max_drift);
-            const double actual_width  = actual_end - actual_start;
-            const double overlap_fraction =
-                (actual_width - nominal_width) / actual_width;
-
-            const auto chunk_id = m_chunk_cfgs.size();
-            m_chunk_cfgs.push_back(EPChunkConfig{
-                .cfg               = eval.cfg,
-                .threshold_scheme  = threshold_scheme,
-                .branching_pattern = bp_float,
-                .max_sugg          = eval.max_sugg,
-                .branch_max        = eval.branch_max,
-                .nominal_f_start   = nominal_start,
-                .nominal_f_end     = nominal_end,
-                .actual_f_start    = actual_start,
-                .actual_f_end      = actual_end,
-                .peak_complexity   = peak_complexity,
-                .chunk_memory_gb   = eval.memory_gb,
-                .nsegments         = nsegments,
-                .ncoords           = eval.ncoords,
-                .buffer_size       = eval.buffer_size,
-                .coord_size        = eval.coord_size,
-                .fold_size         = eval.fold_size,
-            });
-
-            chunk_stats.push_back(EPChunkStats{
-                .chunk_id         = chunk_id,
-                .nominal_f_start  = nominal_start,
-                .nominal_f_end    = nominal_end,
-                .actual_f_start   = actual_start,
-                .actual_f_end     = actual_end,
-                .nominal_width    = nominal_width,
-                .actual_width     = actual_width,
-                .nbins            = nbins,
-                .eta              = eta,
-                .ncoords          = eval.ncoords,
-                .max_sugg         = eval.max_sugg,
-                .branch_max       = eval.branch_max,
-                .peak_complexity  = peak_complexity,
-                .memory_gb        = eval.memory_gb,
-                .overlap_fraction = overlap_fraction,
-            });
-
-            maxima.absorb(eval);
-            current_f_end = nominal_start;
-        }
     }
 };
 

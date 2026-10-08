@@ -154,7 +154,10 @@ TEST_CASE("EPRegionPlanner stats report the maxima over its chunks",
     REQUIRE(branch_max > 0);
     REQUIRE(memory_gb > 0.0);
     CHECK(stats.get_max_branch_max() == branch_max);
-    CHECK(stats.get_max_memory_gb() == static_cast<float>(memory_gb));
+    // The sweep peak (per-thread workspaces of the largest nbins run plus the
+    // shared FFA buffers) is at least any single chunk and within the limit.
+    CHECK(stats.get_max_memory_gb() >= static_cast<float>(memory_gb));
+    CHECK(stats.get_max_memory_gb() <= cfg.get_max_process_memory_gb());
 }
 
 TEST_CASE("EPRegionPlanner chunk branch_max covers the chunk's own plan",
@@ -218,6 +221,8 @@ TEST_CASE("EPRegionPlanner HDF5 cache round-trip and validation",
                                     /*ref_ducy=*/0.1F, cache_file);
 
     REQUIRE(reloaded.get_nchunks() == planner.get_nchunks());
+    CHECK(reloaded.get_stats().get_max_memory_gb() ==
+          planner.get_stats().get_max_memory_gb());
     const auto& loaded_chunks = reloaded.get_chunk_cfgs();
 
     for (SizeType i = 0; i < orig_chunks.size(); ++i) {

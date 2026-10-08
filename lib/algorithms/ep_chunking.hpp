@@ -1,0 +1,72 @@
+#pragma once
+
+/**
+ * @file ep_chunking.hpp
+ * @brief Memory-bounded subdivision of coarse FFA regions into EP chunks.
+ * Internal: used by EPRegionPlanner, and by white-box tests that feed it
+ * synthetic region designs.
+ */
+
+#include <span>
+#include <string_view>
+#include <vector>
+
+#include "loki/algorithms/ep_regions.hpp"
+#include "loki/common/types.hpp"
+#include "loki/search/configs.hpp"
+
+namespace loki::algorithms::detail {
+
+/// Batch size EPFreqSweep runs the pruning with.
+constexpr SizeType kEPBatchSize = 1024U;
+
+/// Everything the chunking needs to know about one coarse FFA region. Built
+/// once per region (the threshold scheme is expensive).
+struct RegionDesign {
+    double f_start{0.0};
+    double f_end{0.0};
+    SizeType nbins{0};
+    double eta{0.0};
+    std::vector<float> threshold_scheme;
+    std::vector<float> bp_float;
+    float peak_complexity{1.0F};
+    /// max_sugg of a chunk is ceil(ncoords * safe_complexity), at least 1024.
+    float safe_complexity{1.0F};
+    SizeType nsegments{0};
+};
+
+/// Chunks of a sweep with the maxima EPRegionStats reports.
+struct ChunkPlan {
+    std::vector<EPChunkConfig> chunk_cfgs;
+    std::vector<EPChunkStats> chunk_stats;
+    SizeType max_sugg{0};
+    SizeType max_ncoords{0};
+    SizeType buffer_size{0};
+    SizeType coord_size{0};
+    SizeType fold_size{0};
+    /// Peak sweep memory (see ep_memory.hpp), in GiB.
+    double peak_memory_gb{0.0};
+    /// True if a second pass with a fixed shared FFA size was needed.
+    bool replanned{false};
+};
+
+/**
+ * @brief Subdivides @p designs (in order) into chunks that fit
+ * @p effective_limit_gb.
+ *
+ * Per-thread memory is accounted per contiguous run of equal nbins and the
+ * FFA buffers once for the whole sweep, as EPFreqSweep allocates them. The
+ * shared FFA size is only known once all chunks are planned: if it grew after
+ * an earlier run was planned and that run no longer fits, the plan is redone
+ * once with the shared size fixed to the first pass's maximum.
+ *
+ * @throws std::runtime_error if even a minimum-width chunk does not fit.
+ */
+template <SupportedFoldType FoldType>
+ChunkPlan plan_chunks(const search::PulsarSearchConfig& base_cfg,
+                      std::string_view poly_basis,
+                      std::span<const RegionDesign> designs,
+                      double max_drift,
+                      double effective_limit_gb);
+
+} // namespace loki::algorithms::detail

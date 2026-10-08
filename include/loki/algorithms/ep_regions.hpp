@@ -26,6 +26,7 @@ struct EPChunkConfig {
     double actual_f_start{0.0};
     double actual_f_end{0.0};
     double peak_complexity{1.0};
+    /// Memory of this chunk alone (its own workspaces and FFA buffers).
     double chunk_memory_gb{0.0};
     SizeType nsegments{0};
     SizeType ncoords{0};
@@ -96,6 +97,8 @@ public:
     [[nodiscard]] SizeType get_max_branch_max() const noexcept {
         return m_max_branch_max;
     }
+    /// Peak memory of the sweep: the largest per-thread workspace set of any
+    /// run of equal-nbins chunks plus the shared FFA buffers.
     [[nodiscard]] float get_max_memory_gb() const noexcept {
         return m_max_memory_gb;
     }
@@ -136,6 +139,12 @@ private:
  * widths analytically to respect max_process_memory_gb.
  * The threshold scheme and max_sugg are designed per coarse band; branch_max
  * is derived per chunk from the chunk's own plan.
+ *
+ * Memory model (mirrors EPFreqSweep): per-thread workspaces are sized from the
+ * maxima of each contiguous run of chunks with the same nbins, while the FFA
+ * workspace and fold buffer are shared by the whole sweep. If the shared size
+ * grows after an earlier run was planned, the plan is recomputed once with
+ * the shared size fixed, so every run fits next to the final shared buffers.
  *
  * Supports saving and loading planned chunk configurations to/from HDF5 cache
  * files with strict validation of all search parameters.
