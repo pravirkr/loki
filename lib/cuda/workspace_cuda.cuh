@@ -60,6 +60,10 @@ public:
     FFAWorkspaceCUDA& operator=(FFAWorkspaceCUDA&&) noexcept = default;
 
     void validate(const plans::FFAPlan<HostFoldT>& ffa_plan) const;
+    /// Bytes of the large buffers: the internal fold and the coordinates.
+    [[nodiscard]] SizeType get_buffers_bytes() const noexcept;
+    /// Bytes of every buffer, including the small per-level arrays.
+    [[nodiscard]] SizeType get_memory_usage_bytes() const noexcept;
     void resolve_coordinates_freq(const plans::FFAPlan<HostFoldT>& ffa_plan,
                                   cudaStream_t stream);
     void resolve_coordinates(const plans::FFAPlan<HostFoldT>& ffa_plan,
@@ -104,6 +108,7 @@ struct BranchingWorkspaceCUDA {
     operator=(BranchingWorkspaceCUDA&&) noexcept = default;
 
     [[nodiscard]] BranchingWorkspaceCUDAView get_view() noexcept;
+    [[nodiscard]] SizeType get_memory_usage_bytes() const noexcept;
     [[nodiscard]] float get_memory_usage_gib() const noexcept;
     void
     validate(SizeType batch_size, SizeType branch_max, SizeType nparams) const;
@@ -146,6 +151,7 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA> struct PruneWorkspaceCUDA {
     PruneWorkspaceCUDA(PruneWorkspaceCUDA&&) noexcept            = default;
     PruneWorkspaceCUDA& operator=(PruneWorkspaceCUDA&&) noexcept = default;
 
+    [[nodiscard]] SizeType get_memory_usage_bytes() const noexcept;
     [[nodiscard]] float get_memory_usage_gib() const noexcept;
     void validate(SizeType batch_size,
                   SizeType branch_max,
@@ -164,6 +170,11 @@ struct CUBScratchArena {
     CUBScratchArena(SizeType batch_size,
                     SizeType branch_max,
                     cudaStream_t stream = nullptr);
+    /// Bytes of CUB temporary storage an arena for @p max_n_leaves leaves
+    /// allocates (the largest need of the four operations). Sizing only:
+    /// allocates nothing. The EP memory model queries it.
+    [[nodiscard]] static SizeType temp_bytes_for(SizeType max_n_leaves,
+                                                 cudaStream_t stream = nullptr);
     /// Synchronously frees all device allocations (stream-independent).
     ~CUBScratchArena();
     // Non-copyable: device memory ownership is non-shared
@@ -174,6 +185,7 @@ struct CUBScratchArena {
     CUBScratchArena& operator=(CUBScratchArena&&) noexcept;
 
     /// Returns the size of the CUB temp-storage allocation in gibibytes.
+    [[nodiscard]] SizeType get_memory_usage_bytes() const noexcept;
     [[nodiscard]] float get_memory_usage_gib() const noexcept;
 
     void convert_mask_to_indices(cuda::std::span<const uint8_t> validation_mask,
@@ -216,6 +228,7 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA> struct EPWorkspaceCUDA {
     EPWorkspaceCUDA(EPWorkspaceCUDA&&) noexcept;
     EPWorkspaceCUDA& operator=(EPWorkspaceCUDA&&) noexcept;
 
+    [[nodiscard]] SizeType get_memory_usage_bytes() const noexcept;
     [[nodiscard]] float get_memory_usage_gib() const noexcept;
 
     [[nodiscard]] float get_seed_memory_usage_gib() const noexcept;

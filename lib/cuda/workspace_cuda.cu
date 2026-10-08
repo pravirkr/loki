@@ -83,6 +83,25 @@ void FFAWorkspaceCUDA<FoldTypeCUDA>::validate(
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
+SizeType FFAWorkspaceCUDA<FoldTypeCUDA>::get_buffers_bytes() const noexcept {
+    return (fold_internal_d.size() * sizeof(DeviceFoldT)) +
+           (coords_d.i_tail.size() * sizeof(uint32_t)) +
+           (coords_d.shift_tail.size() * sizeof(float)) +
+           (coords_d.i_head.size() * sizeof(uint32_t)) +
+           (coords_d.shift_head.size() * sizeof(float)) +
+           (coords_freq_d.idx.size() * sizeof(uint32_t)) +
+           (coords_freq_d.shift.size() * sizeof(float));
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+SizeType
+FFAWorkspaceCUDA<FoldTypeCUDA>::get_memory_usage_bytes() const noexcept {
+    return get_buffers_bytes() + (m_param_counts_d.size() * sizeof(uint32_t)) +
+           (m_ncoords_offsets_d.size() * sizeof(uint32_t)) +
+           (m_param_limits_d.size() * sizeof(ParamLimit));
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
 void FFAWorkspaceCUDA<FoldTypeCUDA>::resolve_coordinates_freq(
     const plans::FFAPlan<HostFoldT>& ffa_plan, cudaStream_t stream) {
     copy_plan_to_device(ffa_plan, stream);
@@ -180,14 +199,17 @@ BranchingWorkspaceCUDAView BranchingWorkspaceCUDA::get_view() noexcept {
     };
 }
 
-float BranchingWorkspaceCUDA::get_memory_usage_gib() const noexcept {
-    const auto total_memory = (scratch_params.size() * sizeof(double)) +
-                              (scratch_dparams.size() * sizeof(double)) +
-                              (scratch_counts.size() * sizeof(uint32_t)) +
-                              (leaf_branch_count.size() * sizeof(uint32_t)) +
-                              (leaf_output_offset.size() * sizeof(uint32_t));
+SizeType BranchingWorkspaceCUDA::get_memory_usage_bytes() const noexcept {
+    return (scratch_params.size() * sizeof(double)) +
+           (scratch_dparams.size() * sizeof(double)) +
+           (scratch_counts.size() * sizeof(uint32_t)) +
+           (leaf_branch_count.size() * sizeof(uint32_t)) +
+           (leaf_output_offset.size() * sizeof(uint32_t));
+}
 
-    return static_cast<float>(total_memory) / static_cast<float>(1ULL << 30U);
+float BranchingWorkspaceCUDA::get_memory_usage_gib() const noexcept {
+    return static_cast<float>(get_memory_usage_bytes()) /
+           static_cast<float>(1ULL << 30U);
 }
 
 void BranchingWorkspaceCUDA::validate(SizeType batch_size,
@@ -237,16 +259,22 @@ PruneWorkspaceCUDA<FoldTypeCUDA>::PruneWorkspaceCUDA(SizeType batch_size,
       filtered_mask_d(max_branched_leaves) {}
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
+SizeType
+PruneWorkspaceCUDA<FoldTypeCUDA>::get_memory_usage_bytes() const noexcept {
+    return (branched_leaves_d.size() * sizeof(double)) +
+           (branched_folds_d.size() * sizeof(FoldTypeCUDA)) +
+           (branched_scores_d.size() * sizeof(float)) +
+           (branched_indices_d.size() * sizeof(uint32_t)) +
+           (branched_param_idx_d.size() * sizeof(uint32_t)) +
+           (branched_phase_shift_d.size() * sizeof(float)) +
+           (validation_mask_d.size() * sizeof(uint8_t)) +
+           (filtered_mask_d.size() * sizeof(uint8_t));
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
 float PruneWorkspaceCUDA<FoldTypeCUDA>::get_memory_usage_gib() const noexcept {
-    const auto total_memory = (branched_leaves_d.size() * sizeof(double)) +
-                              (branched_folds_d.size() * sizeof(FoldTypeCUDA)) +
-                              (branched_scores_d.size() * sizeof(float)) +
-                              (branched_indices_d.size() * sizeof(uint32_t)) +
-                              (branched_param_idx_d.size() * sizeof(uint32_t)) +
-                              (branched_phase_shift_d.size() * sizeof(float)) +
-                              (validation_mask_d.size() * sizeof(uint8_t)) +
-                              (filtered_mask_d.size() * sizeof(uint8_t));
-    return static_cast<float>(total_memory) / static_cast<float>(1ULL << 30U);
+    return static_cast<float>(get_memory_usage_bytes()) /
+           static_cast<float>(1ULL << 30U);
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
@@ -282,11 +310,8 @@ void PruneWorkspaceCUDA<FoldTypeCUDA>::validate(SizeType batch_size,
 }
 
 // --- CUBScratchArena implementation ---
-CUBScratchArena::CUBScratchArena(SizeType batch_size,
-                                 SizeType branch_max,
-                                 cudaStream_t stream)
-    : max_n_leaves(batch_size * branch_max) {
-
+SizeType CUBScratchArena::temp_bytes_for(SizeType max_n_leaves,
+                                         cudaStream_t stream) {
     // 1a. DeviceReduce::Sum (uint8 mask → uint32 count via cast iterator)
     auto dummy_cast_it = thrust::make_transform_iterator(
         static_cast<const uint8_t*>(nullptr), cub_helpers::Uint8ToUint32{});
@@ -330,9 +355,16 @@ CUBScratchArena::CUBScratchArena(SizeType batch_size,
             cub_helpers::MinMaxReduce{}, minmax_identity, stream),
         "cub::DeviceReduce::Reduce sizing failed");
 
-    // ---- 2. Allocate a single buffer large enough for all operations -------
-    cub_temp_bytes = std::max(
+    return std::max(
         {reduce_bytes, scan_bytes, flagged_bytes, reduce_bytes_minmax});
+}
+
+CUBScratchArena::CUBScratchArena(SizeType batch_size,
+                                 SizeType branch_max,
+                                 cudaStream_t stream)
+    : max_n_leaves(batch_size * branch_max) {
+    // One buffer large enough for every operation.
+    cub_temp_bytes = temp_bytes_for(max_n_leaves, stream);
     cuda_utils::check_cuda_call(
         cudaMallocAsync(&cub_temp_storage, cub_temp_bytes, stream),
         "cudaMallocAsync cub_temp_storage failed");
@@ -390,9 +422,13 @@ CUBScratchArena& CUBScratchArena::operator=(CUBScratchArena&& other) noexcept {
     return *this;
 }
 
+SizeType CUBScratchArena::get_memory_usage_bytes() const noexcept {
+    return cub_temp_bytes + sizeof(uint32_t) + sizeof(MinMaxFloat);
+}
+
 float CUBScratchArena::get_memory_usage_gib() const noexcept {
-    const auto bytes = cub_temp_bytes + sizeof(uint32_t) + sizeof(MinMaxFloat);
-    return static_cast<float>(bytes) / static_cast<float>(1ULL << 30U);
+    return static_cast<float>(get_memory_usage_bytes()) /
+           static_cast<float>(1ULL << 30U);
 }
 
 void CUBScratchArena::convert_mask_to_indices(
@@ -474,10 +510,21 @@ float EPWorkspaceCUDA<FoldTypeCUDA>::get_segment_coords_memory_usage_gib()
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
+SizeType
+EPWorkspaceCUDA<FoldTypeCUDA>::get_memory_usage_bytes() const noexcept {
+    return world_tree.get_memory_usage_bytes() +
+           prune.get_memory_usage_bytes() + branch.get_memory_usage_bytes() +
+           scratch.get_memory_usage_bytes() +
+           (seed_leaves_d.size() * sizeof(double)) +
+           (seed_scores_d.size() * sizeof(float)) +
+           (idx_segments_d.size() * sizeof(uint32_t)) +
+           (coord_segments_d.size() * sizeof(cuda::std::pair<double, double>));
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
 float EPWorkspaceCUDA<FoldTypeCUDA>::get_memory_usage_gib() const noexcept {
-    return world_tree.get_memory_usage_gib() + prune.get_memory_usage_gib() +
-           branch.get_memory_usage_gib() + scratch.get_memory_usage_gib() +
-           get_seed_memory_usage_gib() + get_segment_coords_memory_usage_gib();
+    return static_cast<float>(get_memory_usage_bytes()) /
+           static_cast<float>(1ULL << 30U);
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>

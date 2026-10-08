@@ -55,7 +55,11 @@ void bind_prune(py::module_& m) {
         .def_readonly("ncoords", &EPChunkConfig::ncoords)
         .def_readonly("buffer_size", &EPChunkConfig::buffer_size)
         .def_readonly("coord_size", &EPChunkConfig::coord_size)
-        .def_readonly("fold_size", &EPChunkConfig::fold_size);
+        .def_readonly("fold_size", &EPChunkConfig::fold_size)
+        .def_readonly("ffa_transient_bytes",
+                      &EPChunkConfig::ffa_transient_bytes,
+                      "Transient FFA scratch of this chunk (bytes). Counted "
+                      "in the sweep peak on CUDA; zero on the CPU.");
 
     py::class_<EPChunkStats>(m_prune, "EPChunkStats")
         .def_readonly("chunk_id", &EPChunkStats::chunk_id)
@@ -87,6 +91,11 @@ void bind_prune(py::module_& m) {
                                "shared FFA buffers grown to their largest "
                                "size. This is the value checked against the "
                                "memory limit.")
+        .def_property_readonly(
+            "memory_limit_gb", &EPRegionStats::get_memory_limit_gb,
+            "Limit the plan was fitted to, before the unmodelled reserve. "
+            "On CUDA this is the smaller of max_process_memory_gb and the "
+            "free device memory less a fixed reserve.")
         .def_property_readonly("max_buffer_size",
                                &EPRegionStats::get_max_buffer_size)
         .def_property_readonly("max_coord_size",

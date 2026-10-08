@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -19,9 +20,11 @@
 using loki::ParamLimit;
 using loki::SizeType;
 using loki::algorithms::generate_ffa_regions;
+using loki::algorithms::detail::ep_cuda_effective_max_sugg;
 using loki::algorithms::detail::ep_sweep_peak_gb;
 using loki::algorithms::detail::EPHarvestBound;
 using loki::algorithms::detail::EPMemoryContext;
+using loki::algorithms::detail::EPMemoryKind;
 using loki::algorithms::detail::plan_chunks;
 using loki::algorithms::detail::RegionDesign;
 using loki::search::PulsarSearchConfig;
@@ -98,6 +101,22 @@ EPMemoryContext make_ctx(const PulsarSearchConfig& cfg,
             .nsamps    = cfg.get_nsamps(),
             .n_workers = n_workers > 0 ? n_workers : cfg.get_nthreads(),
             .harvest   = harvest};
+}
+
+/// A stand-in for the CUB sizing query, so the CUDA policy runs without a
+/// device: a fixed fraction of the leaves.
+SizeType fake_cub_scratch_bytes(SizeType max_n_leaves, int /*device*/) {
+    return 16 * max_n_leaves;
+}
+
+/// The CUDA policy: one worker, as on the device.
+EPMemoryContext make_cuda_ctx(const PulsarSearchConfig& cfg) {
+    return {.nparams           = cfg.get_nparams(),
+            .nsamps            = cfg.get_nsamps(),
+            .n_workers         = 1,
+            .harvest           = {},
+            .kind              = EPMemoryKind::kCuda,
+            .cub_scratch_bytes = &fake_cub_scratch_bytes};
 }
 
 /// One synthetic design over [f_start, f_end] with a chosen complexity.
@@ -295,4 +314,102 @@ TEST_CASE("EP chunking searches a smaller shared size when the replan is "
     CHECK(plan.shared_cap_scale < 1.0);
     CHECK(count_nbins(plan, designs[1].nbins) >= 2);
     check_plan_fits(plan, ctx, kLimitGb);
+}
+
+TEST_CASE("EP chunking CUDA policy fits the limit and counts the transient",
+          "[ep_chunking]") {
+    constexpr double kLimitGb = 2.0;
+    const auto cfg            = make_cfg(70.0, 145.0, /*nthreads=*/4);
+    const auto designs        = make_designs(cfg, /*first_max_sugg=*/2.0e6);
+    const auto ctx            = make_cuda_ctx(cfg);
+    const auto plan =
+        plan_chunks<float>(cfg, "taylor", designs, 0.0, kLimitGb, ctx);
+
+    check_plan_fits(plan, ctx, kLimitGb);
+    REQUIRE(!plan.chunk_cfgs.empty());
+    for (const auto& chunk : plan.chunk_cfgs) {
+        CHECK(chunk.ffa_transient_bytes > 0);
+        // The device world tree needs a capacity above its largest batch.
+        CHECK(chunk.max_sugg >= (ctx.batch_size * chunk.branch_max) + 1);
+    }
+}
+
+TEST_CASE("EP chunking CUDA policy replans when the shared size grows late",
+          "[ep_chunking]") {
+    // Same designs as the CPU replan test, with one worker. The late shared
+    // size no longer fits, so the heavy region is planned again next to it.
+    constexpr double kLimitGb = 0.5;
+    const auto cfg            = make_cfg(30.0, 150.0, /*nthreads=*/4);
+    const auto designs        = make_late_shared_designs(cfg);
+    const auto ctx            = make_cuda_ctx(cfg);
+    const auto plan =
+        plan_chunks<float>(cfg, "taylor", designs, 0.0, kLimitGb, ctx);
+    CHECK(plan.replanned);
+    CHECK(plan.shared_cap_scale == 1.0);
+    check_plan_fits(plan, ctx, kLimitGb);
+}
+
+TEST_CASE("EP chunking CUDA policy requires the CUB sizer", "[ep_chunking]") {
+    const auto cfg        = make_cfg(140.0, 145.0, /*nthreads=*/1);
+    const auto designs    = make_designs(cfg, /*first_max_sugg=*/1.0e3);
+    auto ctx              = make_cuda_ctx(cfg);
+    ctx.cub_scratch_bytes = nullptr;
+    CHECK_THROWS_AS(plan_chunks<float>(cfg, "taylor", designs, 0.0, 8.0, ctx),
+                    std::logic_error);
+}
+
+TEST_CASE("EP chunking with the CUDA policy charges one worker, whatever "
+          "nthreads is",
+          "[ep_chunking]") {
+    constexpr double kLimitGb = 0.2;
+    const auto designs_cfg    = make_cfg(70.0, 145.0, /*nthreads=*/1);
+    const auto designs        = make_designs(designs_cfg, 2.0e6);
+
+    // The thread count of the config must not change a CUDA plan.
+    const auto cfg_few  = make_cfg(70.0, 145.0, /*nthreads=*/1);
+    const auto cfg_many = make_cfg(70.0, 145.0, /*nthreads=*/16);
+    const auto few      = plan_chunks<float>(cfg_few, "taylor", designs, 0.0,
+                                             kLimitGb, make_cuda_ctx(cfg_few));
+    const auto many     = plan_chunks<float>(cfg_many, "taylor", designs, 0.0,
+                                             kLimitGb, make_cuda_ctx(cfg_many));
+    REQUIRE(few.chunk_cfgs.size() == many.chunk_cfgs.size());
+    CHECK(few.peak_memory_gb == many.peak_memory_gb);
+    // The same chunks would need more under 16 CPU workers.
+    CHECK(ep_sweep_peak_gb<float>(few.chunk_cfgs, make_ctx(cfg_many)) >
+          few.peak_memory_gb);
+
+    check_plan_fits(few, make_cuda_ctx(cfg_few), kLimitGb);
+}
+
+TEST_CASE("EP chunking with the CUDA policy floors max_sugg above a batch",
+          "[ep_chunking]") {
+    const auto cfg     = make_cfg(70.0, 145.0, /*nthreads=*/1);
+    const auto designs = make_designs(cfg, /*first_max_sugg=*/1.0);
+    const auto ctx     = make_cuda_ctx(cfg);
+    const auto plan = plan_chunks<float>(cfg, "taylor", designs, 0.0, 8.0, ctx);
+    REQUIRE(!plan.chunk_cfgs.empty());
+    for (const auto& c : plan.chunk_cfgs) {
+        CHECK(c.max_sugg >=
+              ep_cuda_effective_max_sugg(ctx.batch_size, c.branch_max, 0));
+    }
+}
+
+TEST_CASE("EP chunking with the CUDA policy charges the FFA transient scratch",
+          "[ep_chunking]") {
+    const auto cfg     = make_cfg(100.0, 110.0, /*nthreads=*/1);
+    const auto designs = make_designs(cfg, 1.0e4);
+    const auto ctx     = make_cuda_ctx(cfg);
+    const auto plan = plan_chunks<float>(cfg, "taylor", designs, 0.0, 8.0, ctx);
+    REQUIRE(!plan.chunk_cfgs.empty());
+    for (const auto& c : plan.chunk_cfgs) {
+        CHECK(c.ffa_transient_bytes > 0);
+    }
+    // The CPU policy has none.
+    const auto cpu_ctx = make_ctx(cfg);
+    const auto cpu =
+        plan_chunks<float>(cfg, "taylor", designs, 0.0, 8.0, cpu_ctx);
+    for (const auto& c : cpu.chunk_cfgs) {
+        CHECK(c.ffa_transient_bytes == 0);
+    }
+    CHECK(plan.peak_memory_gb == ep_sweep_peak_gb<float>(plan.chunk_cfgs, ctx));
 }

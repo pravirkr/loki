@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "loki/algorithms/prune_rfi.hpp"
+#include "loki/common/backend.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
 
@@ -35,6 +36,10 @@ struct EPChunkConfig {
     SizeType buffer_size{0};
     SizeType coord_size{0};
     SizeType fold_size{0};
+    /// Transient scratch of this chunk's FFA, live while the EP workspace is
+    /// (bytes; CUDA backend only, zero on the CPU). Shared across chunks as
+    /// the maximum.
+    SizeType ffa_transient_bytes{0};
 };
 
 /**
@@ -106,6 +111,15 @@ public:
     [[nodiscard]] float get_max_memory_gb() const noexcept {
         return m_max_memory_gb;
     }
+    /// Memory the plan was fitted to, before the unmodelled reserve: the
+    /// config's max_process_memory_gb on the CPU, and on CUDA the smaller of
+    /// that and the free device memory less a fixed device reserve.
+    [[nodiscard]] double get_memory_limit_gb() const noexcept {
+        return m_memory_limit_gb;
+    }
+    void set_memory_limit_gb(double limit_gb) noexcept {
+        m_memory_limit_gb = limit_gb;
+    }
     [[nodiscard]] SizeType get_max_buffer_size() const noexcept {
         return m_max_buffer_size;
     }
@@ -128,6 +142,7 @@ private:
     SizeType m_max_ncoords{0};
     SizeType m_max_branch_max{0};
     float m_max_memory_gb{0.0F};
+    double m_memory_limit_gb{0.0};
     SizeType m_max_buffer_size{0};
     SizeType m_max_coord_size{0};
     SizeType m_max_fold_size{0};
@@ -161,7 +176,13 @@ private:
  * enabled, each worker's harvest store is budgeted at max_harvests records.
  * @param n_workers Workers pruning at the same time (EPFreqSweep uses
  * min(nthreads, number of runs)); clamped to [1, nthreads]. Defaults to
- * nthreads.
+ * nthreads. Ignored on CUDA, where one worker prunes the runs in turn.
+ * @param exec Backend of the sweep the plan is for. On CUDA the threshold
+ * schemes are designed with the CUDA DynamicThresholdScheme and memory means
+ * device memory only: max_process_memory_gb is capped by the free device
+ * memory less a fixed reserve, and host memory is never checked. An active
+ * @p rfi_config is rejected (not implemented on CUDA). A plan cache is
+ * specific to the backend that wrote it.
  * @tparam FoldType float for time domain, ComplexType for Fourier domain.
  */
 template <SupportedFoldType FoldType> class EPRegionPlanner {
@@ -173,7 +194,8 @@ public:
                              const std::optional<std::filesystem::path>&
                                  plan_cache_file               = std::nullopt,
                              const PruneRFIConfig& rfi_config  = {},
-                             std::optional<SizeType> n_workers = std::nullopt);
+                             std::optional<SizeType> n_workers = std::nullopt,
+                             Exec exec                         = {});
 
     ~EPRegionPlanner();
     EPRegionPlanner(EPRegionPlanner&&) noexcept;

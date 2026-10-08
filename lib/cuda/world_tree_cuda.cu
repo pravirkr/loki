@@ -427,17 +427,21 @@ float WorldTreeCUDA<FoldTypeCUDA>::get_score_min(
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
-float WorldTreeCUDA<FoldTypeCUDA>::get_memory_usage_gib() const noexcept {
-    const auto base_bytes = (m_leaves.size() * sizeof(double)) +
-                            (m_folds.size() * sizeof(FoldTypeCUDA)) +
-                            (m_scores.size() * sizeof(float)) +
-                            (m_scores_ep.size() * sizeof(float)) +
-                            (m_scratch_scores.size() * sizeof(float)) +
-                            (m_scratch_indices_1.size() * sizeof(uint32_t)) +
-                            (m_scratch_indices_2.size() * sizeof(uint32_t)) +
-                            (m_scratch_mask.size() * sizeof(uint8_t));
+SizeType WorldTreeCUDA<FoldTypeCUDA>::get_memory_usage_bytes() const noexcept {
+    return (m_leaves.size() * sizeof(double)) +
+           (m_folds.size() * sizeof(FoldTypeCUDA)) +
+           (m_scores.size() * sizeof(float)) +
+           (m_scores_ep.size() * sizeof(float)) +
+           (m_scratch_scores.size() * sizeof(float)) +
+           (m_scratch_indices_1.size() * sizeof(uint32_t)) +
+           (m_scratch_indices_2.size() * sizeof(uint32_t)) +
+           (m_scratch_mask.size() * sizeof(uint8_t));
+}
 
-    return static_cast<float>(base_bytes) / static_cast<float>(1ULL << 30U);
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+float WorldTreeCUDA<FoldTypeCUDA>::get_memory_usage_gib() const noexcept {
+    return static_cast<float>(get_memory_usage_bytes()) /
+           static_cast<float>(1ULL << 30U);
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>

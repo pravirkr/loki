@@ -11,8 +11,6 @@
 #include <utility>
 #include <vector>
 
-#include <hdf5.h>
-#include <highfive/highfive.hpp>
 #include <spdlog/spdlog.h>
 
 #include "loki/algorithms/ep_regions.hpp"
@@ -27,95 +25,13 @@
 #include "lib/algorithms/prune_engine.hpp"
 #include "lib/detail/timing.hpp"
 #include "lib/pipelines/ep_freq_sweep_engine.hpp"
+#include "lib/pipelines/ep_sweep_common.hpp"
 #include "lib/utils/fft_impl.hpp"
 #include "lib/utils/workspace_impl.hpp"
 
 namespace loki::pipelines {
 
 namespace {
-
-double
-merge_ep_sweep_results(const std::filesystem::path& tmp_dir,
-                       const std::filesystem::path& result_file,
-                       const std::vector<algorithms::EPChunkConfig>& chunk_cfgs,
-                       const search::PulsarSearchConfig& base_cfg,
-                       float min_pd,
-                       std::string_view poly_basis,
-                       float ref_ducy,
-                       float total_runtime) {
-    HighFive::File main_h5(result_file.string(), HighFive::File::Overwrite);
-    main_h5.createAttribute("ep_sweep_version", std::string("1.0.0-cpp"));
-    main_h5.createAttribute("param_names", base_cfg.get_param_names());
-    main_h5.createAttribute("nchunks", chunk_cfgs.size());
-    main_h5.createAttribute("f_min", base_cfg.get_f_min());
-    main_h5.createAttribute("f_max", base_cfg.get_f_max());
-    main_h5.createAttribute("tobs", base_cfg.get_tobs());
-    main_h5.createAttribute("tsamp", base_cfg.get_tsamp());
-    main_h5.createAttribute("min_pd", min_pd);
-    main_h5.createAttribute("poly_basis", std::string(poly_basis));
-    main_h5.createAttribute("ref_ducy", ref_ducy);
-    main_h5.createAttribute("total_runtime", total_runtime);
-
-    auto main_chunks_group   = main_h5.createGroup("chunks");
-    double accumulated_flops = 0.0;
-    const SizeType nchunks   = chunk_cfgs.size();
-
-    for (SizeType i = 0; i < nchunks; ++i) {
-        const auto& chunk              = chunk_cfgs[i];
-        const std::string chunk_prefix = std::format("chunk_{:04d}", i);
-        auto chunk_group = main_chunks_group.createGroup(chunk_prefix);
-
-        chunk_group.createAttribute("chunk_id", i);
-        chunk_group.createAttribute("nominal_f_start", chunk.nominal_f_start);
-        chunk_group.createAttribute("nominal_f_end", chunk.nominal_f_end);
-        chunk_group.createAttribute("actual_f_start", chunk.actual_f_start);
-        chunk_group.createAttribute("actual_f_end", chunk.actual_f_end);
-        chunk_group.createAttribute("nbins", chunk.cfg.get_nbins());
-        chunk_group.createAttribute("eta", chunk.cfg.get_eta());
-        chunk_group.createAttribute("max_sugg", chunk.max_sugg);
-        chunk_group.createAttribute("branch_max", chunk.branch_max);
-        chunk_group.createAttribute("peak_complexity", chunk.peak_complexity);
-        chunk_group.createAttribute("chunk_memory_gb", chunk.chunk_memory_gb);
-        chunk_group.createAttribute("nsegments", chunk.nsegments);
-
-        chunk_group.createDataSet("threshold_scheme", chunk.threshold_scheme);
-        chunk_group.createDataSet("branching_pattern", chunk.branching_pattern);
-
-        const auto chunk_result_file =
-            tmp_dir / std::format("{}_pruning_nstages_{}_results.h5",
-                                  chunk_prefix, chunk.nsegments);
-
-        if (std::filesystem::exists(chunk_result_file)) {
-            HighFive::File const chunk_h5(chunk_result_file.string(),
-                                          HighFive::File::ReadOnly);
-            if (chunk_h5.exist("runs")) {
-                HighFive::Group const chunk_runs = chunk_h5.getGroup("runs");
-                HighFive::Group const dst_runs =
-                    chunk_group.createGroup("runs");
-                for (const auto& run_name : chunk_runs.listObjectNames()) {
-                    auto const run_grp = chunk_runs.getGroup(run_name);
-                    if (run_grp.hasAttribute("total_pruning_gflops")) {
-                        double run_gflops{};
-                        run_grp.getAttribute("total_pruning_gflops")
-                            .read(run_gflops);
-                        accumulated_flops += run_gflops;
-                    }
-                    herr_t const status = H5Ocopy(
-                        chunk_runs.getId(), run_name.c_str(), dst_runs.getId(),
-                        run_name.c_str(), H5P_DEFAULT, H5P_DEFAULT);
-                    if (status < 0) {
-                        throw std::runtime_error(std::format(
-                            "EPFreqSweep: failed to copy run '{}' for chunk {}",
-                            run_name, i));
-                    }
-                }
-            }
-        }
-    }
-
-    main_h5.createAttribute("total_pruning_gflops", accumulated_flops);
-    return accumulated_flops;
-}
 
 template <SupportedFoldType FoldType>
 class EPFreqSweepCpuEngine final : public detail::EPFreqSweepEngine {
@@ -304,7 +220,7 @@ public:
         const auto total_runtime = sweep_timer.stop();
 
         // Batch merge all chunk HDF5 files into unified result file
-        const double accumulated_flops = merge_ep_sweep_results(
+        const double accumulated_flops = detail::merge_ep_sweep_results(
             tmp_dir, result_file, chunk_cfgs, m_base_cfg, m_min_pd,
             m_poly_basis, m_ref_ducy, total_runtime);
 
@@ -348,15 +264,11 @@ private:
             m_memory.n_workers, thread_bytes,
             algorithms::detail::ep_fixed_bytes<FoldType>(m_memory, buffer_size,
                                                          coord_size));
-        const double limit_gb = algorithms::detail::effective_memory_limit_gb(
-            m_base_cfg.get_max_process_memory_gb());
-        if (total_gb > limit_gb) {
-            throw std::runtime_error(std::format(
-                "EPFreqSweep: chunks {}..{} need {:.2f} GB ({} workers), more "
-                "than the limit {:.2f} GB. Re-plan (stale plan cache?).",
-                group.begin, group.end - 1, total_gb, m_memory.n_workers,
-                limit_gb));
-        }
+        detail::check_ep_group_budget(
+            group, total_gb,
+            algorithms::detail::effective_memory_limit_gb(
+                m_base_cfg.get_max_process_memory_gb()),
+            m_memory.n_workers);
     }
 
     /// After allocating a group: a workspace must not exceed the model.
@@ -367,16 +279,9 @@ private:
             algorithms::detail::ep_workspace_bytes<FoldType>(
                 m_memory.nparams, group.nbins, group.nsegments, group.ncoords,
                 group.max_sugg, group.branch_max, m_memory.batch_size));
-        // get_memory_usage_gib() is a float: allow its rounding.
-        constexpr double kRelTol = 1.0e-5;
         const double actual = static_cast<double>(ws.get_memory_usage_gib()) *
                               algorithms::detail::kBytesPerGiB;
-        if (actual > model * (1.0 + kRelTol)) {
-            throw std::logic_error(std::format(
-                "EPFreqSweep: workspace for chunks {}..{} uses {:.0f} bytes, "
-                "more than the memory model's {:.0f} (model drift)",
-                group.begin, group.end - 1, actual, model));
-        }
+        detail::check_ep_workspace_vs_model(group, actual, model);
     }
 
     /// After allocating the shared FFA buffers: they must match the model.
@@ -389,12 +294,7 @@ private:
             (m_ffa_fold.size() * sizeof(FoldType));
         const SizeType model = algorithms::detail::ep_shared_bytes<FoldType>(
             m_memory.nparams, buffer_size, coord_size);
-        if (actual > model) {
-            throw std::logic_error(std::format(
-                "EPFreqSweep: shared FFA buffers use {} bytes, more than the "
-                "memory model's {} (model drift)",
-                actual, model));
-        }
+        detail::check_ep_shared_vs_model(actual, model);
     }
 };
 

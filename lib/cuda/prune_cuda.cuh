@@ -18,9 +18,35 @@
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
 
+#include "lib/cuda/fft_cuda.cuh"
 #include "lib/cuda/workspace_cuda.cuh"
 
 namespace loki::algorithms {
+
+/**
+ * @brief What a sweep shares between its chunks (EPFreqSweep on CUDA).
+ *
+ * The sweep owns every buffer; the chunk's EPMultiPassCudaCore only uses
+ * them. All pointers and spans must outlive the core.
+ */
+template <SupportedFoldTypeCUDA FoldTypeCUDA> struct EPCudaSharedPipeline {
+    /// EP workspace of the chunk group, sized from the group's maxima.
+    memory::EPWorkspaceCUDA<FoldTypeCUDA>* ep_workspace{nullptr};
+    memory::FFAWorkspaceCUDA<FoldTypeCUDA>* ffa_workspace{nullptr};
+    math::CUFFTManager* fft_manager{nullptr};
+    /// Output fold buffer (at least the chunk's FFA buffer size).
+    cuda::std::span<DeviceFoldType<FoldTypeCUDA>> fold_d;
+    /// Input time series on the device (nsamps each).
+    cuda::std::span<const float> ts_e_d;
+    cuda::std::span<const float> ts_v_d;
+    /// Non-null stream the FFA and the pruning run on.
+    cudaStream_t stream{nullptr};
+    /// The shape @p ep_workspace was built with.
+    SizeType ws_max_sugg{0};
+    SizeType ws_branch_max{0};
+    SizeType ws_ncoords{0};
+    SizeType ws_nsegments{0};
+};
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA> class EPMultiPassCudaCore {
 public:
@@ -52,6 +78,21 @@ public:
         std::string_view poly_basis                   = "taylor",
         int device_id                                 = 0);
 
+    /// Shared-pipeline form: runs on the sweep's buffers (see
+    /// EPCudaSharedPipeline). @p max_sugg is this chunk's, for the result file;
+    /// the workspace capacity is @p pipeline.ws_max_sugg. Use execute_device().
+    EPMultiPassCudaCore(
+        const EPCudaSharedPipeline<FoldTypeCUDA>& pipeline,
+        search::PulsarSearchConfig cfg,
+        std::span<const float> threshold_scheme,
+        std::optional<SizeType> n_runs                = std::nullopt,
+        std::optional<std::vector<SizeType>> ref_segs = std::nullopt,
+        std::span<const SizeType> ascend_levels       = {},
+        SizeType max_sugg                             = 1U << 20U,
+        SizeType batch_size                           = 4096U,
+        std::string_view poly_basis                   = "taylor",
+        int device_id                                 = 0);
+
     ~EPMultiPassCudaCore();
     EPMultiPassCudaCore(EPMultiPassCudaCore&&) noexcept;
     EPMultiPassCudaCore& operator=(EPMultiPassCudaCore&&) noexcept;
@@ -62,6 +103,11 @@ public:
                  std::span<const float> ts_v,
                  const std::filesystem::path& outdir = "./",
                  std::string_view file_prefix        = "test");
+
+    /// Runs the FFA of the chunk on the shared device inputs and prunes it.
+    /// Only for the shared-pipeline constructor.
+    void execute_device(const std::filesystem::path& outdir,
+                        std::string_view file_prefix);
 
 private:
     // The facade engine embeds Impl directly (no extra indirection).

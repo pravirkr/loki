@@ -57,12 +57,13 @@ target_link_libraries(
                                        $<BUILD_INTERFACE:tomlplusplus>
 )
 
-# internal/fft_t.cpp uses Thrust device vectors, so nvcc must compile it, with
-# the library's nvcc options (linked after LOKI_COMPILE_OPTIONS so
+# internal/fft_t.cpp and ep_memory_cuda_t.cpp use Thrust device vectors, so
+# nvcc must compile them, with the library's nvcc options (linked after LOKI_COMPILE_OPTIONS so
 # -Wno-pedantic overrides -Wpedantic for nvcc output).
 if(CMAKE_CUDA_COMPILER)
   set_source_files_properties(
-    ${CMAKE_CURRENT_SOURCE_DIR}/internal/fft_t.cpp PROPERTIES LANGUAGE CUDA
+    ${CMAKE_CURRENT_SOURCE_DIR}/internal/fft_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/internal/ep_memory_cuda_t.cpp PROPERTIES LANGUAGE CUDA
   )
   if(TARGET ${PROJECT_NAME}_cuda_options)
     target_link_libraries(${LOKI_INTERNAL_TEST_TARGET} PRIVATE ${PROJECT_NAME}_cuda_options)

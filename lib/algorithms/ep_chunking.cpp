@@ -39,6 +39,8 @@ struct EvaluatedChunk {
     SizeType fold_size{0};
     SizeType buffer_size{0};
     SizeType coord_size{0};
+    /// Transient scratch of the chunk's FFA (CUDA policy only).
+    SizeType ffa_transient_bytes{0};
     double memory_gb{0.0}; ///< The chunk alone, with its own FFA buffers.
 };
 
@@ -48,24 +50,31 @@ struct SharedFFA {
     SizeType fold_size{0};
     SizeType buffer_size{0};
     SizeType coord_size{0};
+    /// Largest transient FFA scratch of any chunk. Live while a group's
+    /// workspace is, so it is sized and capped like a shared buffer.
+    SizeType ffa_transient_bytes{0};
 
     void absorb(const EvaluatedChunk& c) noexcept {
         fold_size   = std::max(fold_size, c.fold_size);
         buffer_size = std::max(buffer_size, c.buffer_size);
         coord_size  = std::max(coord_size, c.coord_size);
+        ffa_transient_bytes =
+            std::max(ffa_transient_bytes, c.ffa_transient_bytes);
     }
     [[nodiscard]] bool contains(const EvaluatedChunk& c) const noexcept {
         return c.fold_size <= fold_size && c.buffer_size <= buffer_size &&
-               c.coord_size <= coord_size;
+               c.coord_size <= coord_size &&
+               c.ffa_transient_bytes <= ffa_transient_bytes;
     }
     [[nodiscard]] SharedFFA scaled(double s) const noexcept {
         const auto scale = [s](SizeType v) {
             return static_cast<SizeType>(
                 std::floor(static_cast<double>(v) * s));
         };
-        return {.fold_size   = scale(fold_size),
-                .buffer_size = scale(buffer_size),
-                .coord_size  = scale(coord_size)};
+        return {.fold_size           = scale(fold_size),
+                .buffer_size         = scale(buffer_size),
+                .coord_size          = scale(coord_size),
+                .ffa_transient_bytes = scale(ffa_transient_bytes)};
     }
 };
 
@@ -239,7 +248,8 @@ private:
             m_memory.n_workers,
             ep_thread_bytes<FoldType>(m_memory, nbins, c.nsegments, c.ncoords,
                                       c.max_sugg, c.branch_max),
-            ep_fixed_bytes<FoldType>(m_memory, c.buffer_size, c.coord_size));
+            ep_fixed_bytes<FoldType>(m_memory, c.buffer_size, c.coord_size,
+                                     c.ffa_transient_bytes));
     }
 
     const EvaluatedChunk& evaluate_chunk(SizeType design_idx,
@@ -268,11 +278,18 @@ private:
             .fold_size   = plan.get_fold_size(),
             .buffer_size = plan.get_buffer_size(),
             .coord_size  = plan.get_coord_size(),
+            .ffa_transient_bytes =
+                ep_ffa_transient_bytes<FoldType>(m_memory, plan),
         };
         c.max_sugg = std::max(
             SizeType{1024}, static_cast<SizeType>(std::ceil(
                                 static_cast<double>(c.ncoords) *
                                 static_cast<double>(design.safe_complexity))));
+        if (m_memory.kind == EPMemoryKind::kCuda) {
+            // The device world tree needs a capacity above its largest batch.
+            c.max_sugg = ep_cuda_effective_max_sugg(m_memory.batch_size,
+                                                    c.branch_max, c.max_sugg);
+        }
         c.memory_gb = chunk_alone_gb(nbins, c);
         return m_memo.emplace(key, std::move(c)).first->second;
     }
@@ -308,7 +325,8 @@ private:
                                           group.ncoords, group.max_sugg,
                                           group.branch_max),
                 ep_fixed_bytes<FoldType>(m_memory, shared.buffer_size,
-                                         shared.coord_size));
+                                         shared.coord_size,
+                                         shared.ffa_transient_bytes));
             // With a fixed shared size the chunk must not enlarge it.
             const bool within_cap =
                 !state.shared_cap || state.shared_cap->contains(c);
@@ -425,22 +443,23 @@ private:
             auto& plan          = state.plan;
             const auto chunk_id = plan.chunk_cfgs.size();
             plan.chunk_cfgs.push_back(EPChunkConfig{
-                .cfg               = eval.cfg,
-                .threshold_scheme  = design.threshold_scheme,
-                .branching_pattern = design.bp_float,
-                .max_sugg          = eval.max_sugg,
-                .branch_max        = eval.branch_max,
-                .nominal_f_start   = nominal_start,
-                .nominal_f_end     = nominal_end,
-                .actual_f_start    = actual_start,
-                .actual_f_end      = actual_end,
-                .peak_complexity   = design.peak_complexity,
-                .chunk_memory_gb   = eval.memory_gb,
-                .nsegments         = design.nsegments,
-                .ncoords           = eval.ncoords,
-                .buffer_size       = eval.buffer_size,
-                .coord_size        = eval.coord_size,
-                .fold_size         = eval.fold_size,
+                .cfg                 = eval.cfg,
+                .threshold_scheme    = design.threshold_scheme,
+                .branching_pattern   = design.bp_float,
+                .max_sugg            = eval.max_sugg,
+                .branch_max          = eval.branch_max,
+                .nominal_f_start     = nominal_start,
+                .nominal_f_end       = nominal_end,
+                .actual_f_start      = actual_start,
+                .actual_f_end        = actual_end,
+                .peak_complexity     = design.peak_complexity,
+                .chunk_memory_gb     = eval.memory_gb,
+                .nsegments           = design.nsegments,
+                .ncoords             = eval.ncoords,
+                .buffer_size         = eval.buffer_size,
+                .coord_size          = eval.coord_size,
+                .fold_size           = eval.fold_size,
+                .ffa_transient_bytes = eval.ffa_transient_bytes,
             });
             plan.chunk_stats.push_back(EPChunkStats{
                 .chunk_id         = chunk_id,

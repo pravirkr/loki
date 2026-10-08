@@ -19,6 +19,14 @@ namespace loki::algorithms::detail {
  */
 inline constexpr double kUnmodelledReserveGB = 0.5;
 
+/**
+ * @brief Free device memory (GiB) the GPU planners leave alone: the CUDA
+ * runtime and context, kernel images, cuFFT work areas and what other
+ * processes allocate meanwhile. Applied by every GPU sweep to the device's
+ * free memory before it takes the smaller of that and max_process_memory_gb.
+ */
+inline constexpr double kDeviceReserveGB = 1.0;
+
 /// Memory available to the modelled buffers under @p max_process_memory_gb.
 [[nodiscard]] constexpr double
 effective_memory_limit_gb(double max_process_memory_gb) noexcept {

@@ -39,7 +39,13 @@ std::unique_ptr<detail::EPFreqSweepEngine> make_ep_freq_sweep_engine(
     }
 #ifdef LOKI_ENABLE_GPU
     if (exec.backend == loki::detail::kGPUBackend) {
-        loki::detail::throw_unimplemented("EPFreqSweep", exec.backend);
+        if (rfi_config.is_active()) {
+            loki::detail::throw_unimplemented("EPFreqSweep (rfi_config)",
+                                              exec.backend);
+        }
+        return detail::make_ep_freq_sweep_gpu(cfg, min_pd, poly_basis, ref_ducy,
+                                              plan_cache_file, n_runs, ref_segs,
+                                              exec.device);
     }
 #endif
     loki::detail::throw_unavailable("EPFreqSweep", exec.backend);

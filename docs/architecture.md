@@ -341,6 +341,10 @@ The facades do not change: they already dispatch on `kGPUBackend` through
 
 The FFA and EP sweeps plan their chunks against `max_process_memory_gb` with
 exact memory models and one shared reserve; see [memory.md](memory.md).
+`EPFreqSweep` has a CPU engine and a CUDA engine. On CUDA,
+`max_process_memory_gb` is a device-memory limit: the plan uses the smaller of
+it and the free device memory less `kDeviceReserveGB`, the runs of a chunk are
+pruned one at a time, and an active `rfi_config` is rejected.
 
 ## Checks
 
