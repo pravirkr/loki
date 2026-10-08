@@ -8,6 +8,7 @@
 #include <numeric>
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <system_error>
 #include <utility>
@@ -24,6 +25,7 @@
 #include "loki/detection/thresholds.hpp"
 #include "loki/search/configs.hpp"
 
+#include "lib/algorithms/prune_engine.hpp"
 #include "lib/detail/utils.hpp"
 
 namespace loki::algorithms {
@@ -37,6 +39,8 @@ constexpr double kBisectionToleranceHz = 1.0e-2;
 constexpr double kMinChunkWidthHz      = 1.0e-2;
 constexpr double kRelativeTolerance    = 1.0e-4;
 constexpr SizeType kMaxBisectionSteps  = 50;
+// 1.1.0: chunk branch_max is derived from the chunk's own plan.
+constexpr std::string_view kCacheVersion = "1.1.0";
 
 template <SupportedFoldType FoldType>
 double calculate_ep_chunk_memory_gb(SizeType nparams,
@@ -164,6 +168,7 @@ struct EvaluatedChunk {
     search::PulsarSearchConfig cfg;
     SizeType ncoords{0};
     SizeType max_sugg{0};
+    SizeType branch_max{0};
     SizeType fold_size{0};
     SizeType buffer_size{0};
     SizeType coord_size{0};
@@ -172,6 +177,7 @@ struct EvaluatedChunk {
 
 struct RunningMaxima {
     SizeType max_sugg{0};
+    SizeType branch_max{0};
     SizeType ncoords{0};
     SizeType fold_size{0};
     SizeType buffer_size{0};
@@ -179,6 +185,7 @@ struct RunningMaxima {
 
     void absorb(const EvaluatedChunk& c) noexcept {
         max_sugg    = std::max(max_sugg, c.max_sugg);
+        branch_max  = std::max(branch_max, c.branch_max);
         ncoords     = std::max(ncoords, c.ncoords);
         fold_size   = std::max(fold_size, c.fold_size);
         buffer_size = std::max(buffer_size, c.buffer_size);
@@ -228,7 +235,8 @@ public:
         HighFive::File file(filepath.string(), HighFive::File::Overwrite);
 
         // Header attributes for configuration validation
-        file.createAttribute("ep_plan_cache_version", std::string("1.0.0"));
+        file.createAttribute("ep_plan_cache_version",
+                             std::string(kCacheVersion));
         file.createAttribute("nsamps", m_base_cfg.get_nsamps());
         file.createAttribute("tsamp", m_base_cfg.get_tsamp());
         file.createAttribute("f_min", m_base_cfg.get_f_min());
@@ -306,6 +314,14 @@ public:
             throw std::invalid_argument(std::format(
                 "EPRegionPlanner: file '{}' is not a valid EP plan cache",
                 filepath.string()));
+        }
+        std::string file_version;
+        file.getAttribute("ep_plan_cache_version").read(file_version);
+        if (file_version != kCacheVersion) {
+            throw std::invalid_argument(std::format(
+                "EPRegionPlanner: cache file '{}' has version {}, expected {} "
+                "(stale plans carry an invalid branch_max; re-plan)",
+                filepath.string(), file_version, kCacheVersion));
         }
 
         const auto check_attr_double = [&](const std::string& name,
@@ -618,9 +634,6 @@ private:
         const plans::FFAPlan<FoldType> rep_plan(rep_cfg);
         const auto bp_double = rep_plan.get_branching_pattern(m_poly_basis);
         const std::vector<float> bp_float(bp_double.begin(), bp_double.end());
-        const auto branch_max_raw = *std::ranges::max_element(bp_double);
-        const SizeType branch_max = std::max(
-            static_cast<SizeType>(std::ceil(branch_max_raw * 2.0)), 32UL);
         const SizeType nsegments = rep_plan.get_nsegments().back();
 
         const auto snr_final = static_cast<float>(m_base_cfg.get_snr_min());
@@ -682,6 +695,11 @@ private:
                 nbins, eta, act_start, act_end);
             const plans::FFAPlan<FoldType> plan(chunk_cfg);
             const SizeType ncoords = plan.get_ncoords().back();
+            // The pattern depends on the chunk's own band (not monotone in
+            // width), so branch_max must come from the chunk's plan, exactly
+            // as EPMultiPass computes it.
+            const SizeType branch_max = algorithms::detail::compute_branch_max(
+                plan.get_branching_pattern(m_poly_basis));
             const SizeType max_sugg =
                 std::max(SizeType{1024},
                          static_cast<SizeType>(
@@ -698,6 +716,7 @@ private:
                 .cfg         = std::move(chunk_cfg),
                 .ncoords     = ncoords,
                 .max_sugg    = max_sugg,
+                .branch_max  = branch_max,
                 .fold_size   = plan.get_fold_size(),
                 .buffer_size = plan.get_buffer_size(),
                 .coord_size  = plan.get_coord_size(),
@@ -714,7 +733,7 @@ private:
             test_max.absorb(c);
             const double sweep_mem_gb = calculate_ep_chunk_memory_gb<FoldType>(
                 m_base_cfg.get_nparams(), nbins, nsegments, test_max.ncoords,
-                test_max.max_sugg, branch_max, kBatchSize,
+                test_max.max_sugg, test_max.branch_max, kBatchSize,
                 m_base_cfg.get_nthreads(), test_max.fold_size,
                 test_max.buffer_size, test_max.coord_size);
             return sweep_mem_gb <= effective_limit_gb;
@@ -820,7 +839,7 @@ private:
                 .threshold_scheme  = threshold_scheme,
                 .branching_pattern = bp_float,
                 .max_sugg          = eval.max_sugg,
-                .branch_max        = branch_max,
+                .branch_max        = eval.branch_max,
                 .nominal_f_start   = nominal_start,
                 .nominal_f_end     = nominal_end,
                 .actual_f_start    = actual_start,
@@ -846,7 +865,7 @@ private:
                 .eta              = eta,
                 .ncoords          = eval.ncoords,
                 .max_sugg         = eval.max_sugg,
-                .branch_max       = branch_max,
+                .branch_max       = eval.branch_max,
                 .peak_complexity  = peak_complexity,
                 .memory_gb        = eval.memory_gb,
                 .overlap_fraction = overlap_fraction,

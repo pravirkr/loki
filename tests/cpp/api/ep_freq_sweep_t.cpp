@@ -19,6 +19,7 @@
 #include <highfive/highfive.hpp>
 
 #include "loki/algorithms/ep_regions.hpp"
+#include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
 
@@ -156,6 +157,47 @@ TEST_CASE("EPRegionPlanner stats report the maxima over its chunks",
     CHECK(stats.get_max_memory_gb() == static_cast<float>(memory_gb));
 }
 
+TEST_CASE("EPRegionPlanner chunk branch_max covers the chunk's own plan",
+          "[ep_freq_sweep]") {
+    const auto cfg = make_test_cfg(4.0, 70.0, 145.0);
+    const EPRegionPlanner<float> planner(cfg, /*min_pd=*/0.1F, "taylor",
+                                         /*ref_ducy=*/0.1F);
+    const auto& chunks = planner.get_chunk_cfgs();
+    const auto& stats  = planner.get_stats().get_chunk_stats();
+    REQUIRE(stats.size() == chunks.size());
+    for (SizeType i = 0; i < chunks.size(); ++i) {
+        const loki::plans::FFAPlan<float> plan(chunks[i].cfg);
+        const auto bp     = plan.get_branching_pattern("taylor");
+        const auto needed = std::max(static_cast<SizeType>(std::ceil(
+                                         2.0 * *std::ranges::max_element(bp))),
+                                     SizeType{32});
+        CHECK(chunks[i].branch_max >= needed);
+        CHECK(stats[i].branch_max == chunks[i].branch_max);
+    }
+}
+
+TEST_CASE("EPRegionPlanner rejects a stale plan cache version",
+          "[ep_freq_sweep]") {
+    const auto cache_file =
+        std::filesystem::temp_directory_path() / "loki_test_ep_plan_stale.h5";
+    std::error_code ec;
+    std::filesystem::remove(cache_file, ec);
+
+    const auto cfg = make_test_cfg(4.0, 140.0, 145.0);
+    {
+        const EPRegionPlanner<float> planner(cfg, 0.1F, "taylor", 0.1F,
+                                             cache_file);
+    }
+    {
+        HighFive::File file(cache_file.string(), HighFive::File::ReadWrite);
+        file.getAttribute("ep_plan_cache_version").write(std::string("1.0.0"));
+    }
+    CHECK_THROWS_AS(
+        EPRegionPlanner<float>(cfg, 0.1F, "taylor", 0.1F, cache_file),
+        std::invalid_argument);
+    std::filesystem::remove(cache_file, ec);
+}
+
 TEST_CASE("EPRegionPlanner HDF5 cache round-trip and validation",
           "[ep_freq_sweep]") {
     const auto outdir     = std::filesystem::temp_directory_path();
@@ -269,7 +311,7 @@ TEST_CASE("EPFreqSweep executes sweep and writes unified results file",
     EPFreqSweep sweep(cfg, /*show_progress=*/false, /*min_pd=*/0.1F, "taylor",
                       /*ref_ducy=*/0.1F, /*rfi_config=*/{},
                       /*plan_cache_file=*/std::nullopt,
-                      /*n_runs=*/1U, test_ref_segs);
+                      /*n_runs=*/std::nullopt, test_ref_segs);
 
     sweep.execute(ts_e, ts_v, outdir, file_prefix);
 

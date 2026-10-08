@@ -19,6 +19,7 @@ struct EPChunkConfig {
     std::vector<float> threshold_scheme;
     std::vector<float> branching_pattern;
     SizeType max_sugg{1U << 18U};
+    /// Branching capacity of this chunk's own plan (not the region's).
     SizeType branch_max{32U};
     double nominal_f_start{0.0};
     double nominal_f_end{0.0};
@@ -133,6 +134,8 @@ private:
  * Uses generate_ffa_regions() for coarse bands (nbins, eta), runs
  * DynamicThresholdScheme simulation once per coarse band, and bisects chunk
  * widths analytically to respect max_process_memory_gb.
+ * The threshold scheme and max_sugg are designed per coarse band; branch_max
+ * is derived per chunk from the chunk's own plan.
  *
  * Supports saving and loading planned chunk configurations to/from HDF5 cache
  * files with strict validation of all search parameters.

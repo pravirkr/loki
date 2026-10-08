@@ -810,10 +810,7 @@ public:
           m_execution_stream(device_id),
           m_ffa_plan(m_cfg),
           m_branching_pattern(m_ffa_plan.get_branching_pattern(m_poly_basis)),
-          m_branch_max(
-              std::max(static_cast<SizeType>(std::ceil(
-                           *std::ranges::max_element(m_branching_pattern) * 2)),
-                       32UL)),
+          m_branch_max(detail::compute_branch_max(m_branching_pattern)),
           m_workspace_storage(m_batch_size,
                               m_branch_max,
                               m_max_sugg,
@@ -861,10 +858,8 @@ public:
           m_workspace_storage(),
           m_workspace_ptr(&workspace) {
         // Create branching pattern and branch max
-        m_branching_pattern   = m_ffa_plan.get_branching_pattern(m_poly_basis);
-        const auto branch_max = *std::ranges::max_element(m_branching_pattern);
-        m_branch_max =
-            std::max(static_cast<SizeType>(std::ceil(branch_max * 2)), 32UL);
+        m_branching_pattern = m_ffa_plan.get_branching_pattern(m_poly_basis);
+        m_branch_max        = detail::compute_branch_max(m_branching_pattern);
 
         // Validate workspaces
         const auto& ws         = get_workspace();

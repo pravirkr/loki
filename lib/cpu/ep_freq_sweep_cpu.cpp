@@ -17,6 +17,7 @@
 
 #include "loki/algorithms/ep_regions.hpp"
 #include "loki/algorithms/prune_rfi.hpp"
+#include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
 
@@ -227,6 +228,20 @@ public:
                     std::max(group_max_ncoords, chunk_cfgs[i].ncoords);
                 group_max_nseg =
                     std::max(group_max_nseg, chunk_cfgs[i].nsegments);
+            }
+
+            // Guard against plans (e.g. stale caches) whose branch_max is
+            // smaller than what the chunk's own plan needs.
+            for (SizeType i = chunk_idx; i < range_end; ++i) {
+                const plans::FFAPlan<FoldType> plan(chunk_cfgs[i].cfg);
+                const auto needed = algorithms::detail::compute_branch_max(
+                    plan.get_branching_pattern(m_poly_basis));
+                if (needed > group_max_branch) {
+                    throw std::runtime_error(std::format(
+                        "EPFreqSweep: chunk {} needs branch_max={} but the "
+                        "plan provides {}. Re-plan (stale plan cache?).",
+                        i, needed, group_max_branch));
+                }
             }
 
             const SizeType effective_nbins =

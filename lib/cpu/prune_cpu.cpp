@@ -968,10 +968,8 @@ public:
           m_ffa_plan(m_cfg),
           m_nthreads(m_cfg.get_nthreads()) {
         // Create branching pattern and branch max
-        m_branching_pattern   = m_ffa_plan.get_branching_pattern(m_poly_basis);
-        const auto branch_max = *std::ranges::max_element(m_branching_pattern);
-        m_branch_max =
-            std::max(static_cast<SizeType>(std::ceil(branch_max * 2)), 32UL);
+        m_branching_pattern = m_ffa_plan.get_branching_pattern(m_poly_basis);
+        m_branch_max        = detail::compute_branch_max(m_branching_pattern);
 
         // Allocate workspaces
         const auto nsegments = m_ffa_plan.get_nsegments().back();
@@ -1040,10 +1038,8 @@ public:
           m_ffa_plan(m_cfg),
           m_nthreads(m_cfg.get_nthreads()) {
         // Create branching pattern and branch max
-        m_branching_pattern   = m_ffa_plan.get_branching_pattern(m_poly_basis);
-        const auto branch_max = *std::ranges::max_element(m_branching_pattern);
-        m_branch_max =
-            std::max(static_cast<SizeType>(std::ceil(branch_max * 2)), 32UL);
+        m_branching_pattern = m_ffa_plan.get_branching_pattern(m_poly_basis);
+        m_branch_max        = detail::compute_branch_max(m_branching_pattern);
         // Validate workspaces
         const auto ncoords_ffa = m_ffa_plan.get_ncoords().back();
         const auto nsegments   = m_ffa_plan.get_nsegments().back();
@@ -1102,10 +1098,8 @@ public:
           m_ffa_plan(m_cfg),
           m_nthreads(m_cfg.get_nthreads()) {
         // Create branching pattern and branch max
-        m_branching_pattern   = m_ffa_plan.get_branching_pattern(m_poly_basis);
-        const auto branch_max = *std::ranges::max_element(m_branching_pattern);
-        m_branch_max =
-            std::max(static_cast<SizeType>(std::ceil(branch_max * 2)), 32UL);
+        m_branching_pattern = m_ffa_plan.get_branching_pattern(m_poly_basis);
+        m_branch_max        = detail::compute_branch_max(m_branching_pattern);
         // Validate workspaces
         const auto ncoords_ffa = m_ffa_plan.get_ncoords().back();
         const auto nsegments   = m_ffa_plan.get_nsegments().back();
