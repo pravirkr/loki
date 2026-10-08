@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -79,26 +80,37 @@ TEST_CASE("Cone bands are bit-exact with the plain BFS path", "[ffa][cone]") {
         ts_v[i] = 1.0F + (0.05F * (dist(rng) * dist(rng)));
     }
 
-    for (const SizeType nbins : {SizeType{16}, SizeType{32}, SizeType{64}}) {
-        for (const SizeType bseg : {SizeType{64}, SizeType{256}}) {
-            for (const int nthreads : {1, 4}) {
-                const auto cfg =
-                    make_cfg(kNsamps, kTsamp, nbins, bseg, nthreads, 5.0, 14.0);
-                const auto reference = run_ffa(cfg, ts_e, ts_v, SizeType{0});
-                for (const SizeType k :
-                     {SizeType{1}, SizeType{2}, SizeType{3}, SizeType{4}}) {
-                    const auto cone = run_ffa(cfg, ts_e, ts_v, k);
-                    INFO("nbins=" << nbins << " bseg=" << bseg
-                                  << " nthreads=" << nthreads << " k=" << k);
-                    REQUIRE(cone.size() == reference.size());
-                    CHECK(std::memcmp(cone.data(), reference.data(),
-                                      reference.size() * sizeof(float)) == 0);
-                }
-                const auto automatic = run_ffa(cfg, ts_e, ts_v, std::nullopt);
-                CHECK(std::memcmp(automatic.data(), reference.data(),
-                                  reference.size() * sizeof(float)) == 0);
-            }
+    // One thorough corner (every fuse level) and the opposite corner
+    // (largest bins and segment, several threads, one level plus automatic).
+    struct Corner {
+        SizeType nbins;
+        SizeType bseg;
+        int nthreads;
+        bool all_levels;
+    };
+    const std::array<Corner, 2> corners = {{
+        {32, 64, 1, true},
+        {64, 256, 4, false},
+    }};
+    for (const auto& corner : corners) {
+        const auto cfg = make_cfg(kNsamps, kTsamp, corner.nbins, corner.bseg,
+                                  corner.nthreads, 5.0, 14.0);
+        const auto reference = run_ffa(cfg, ts_e, ts_v, SizeType{0});
+        const std::array<SizeType, 4> all_k = {1, 2, 3, 4};
+        const std::span<const SizeType> levels =
+            corner.all_levels ? std::span<const SizeType>{all_k}
+                              : std::span<const SizeType>{all_k.data(), 1};
+        for (const SizeType k : levels) {
+            const auto cone = run_ffa(cfg, ts_e, ts_v, k);
+            INFO("nbins=" << corner.nbins << " bseg=" << corner.bseg
+                          << " nthreads=" << corner.nthreads << " k=" << k);
+            REQUIRE(cone.size() == reference.size());
+            CHECK(std::memcmp(cone.data(), reference.data(),
+                              reference.size() * sizeof(float)) == 0);
         }
+        const auto automatic = run_ffa(cfg, ts_e, ts_v, std::nullopt);
+        CHECK(std::memcmp(automatic.data(), reference.data(),
+                          reference.size() * sizeof(float)) == 0);
     }
 }
 

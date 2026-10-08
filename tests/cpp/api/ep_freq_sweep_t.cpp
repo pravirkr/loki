@@ -15,7 +15,6 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
-#include <catch2/generators/catch_generators.hpp>
 #include <highfive/highfive.hpp>
 
 #include "loki/algorithms/ep_regions.hpp"
@@ -75,14 +74,8 @@ make_noise_series(SizeType nsamps, unsigned seed = 42) {
     return {std::move(ts_e), std::move(ts_v)};
 }
 
-} // namespace
-
-TEST_CASE("EPRegionPlanner plans valid memory-bounded chunks",
-          "[ep_freq_sweep]") {
-    const auto cfg = make_test_cfg(4.0, 140.0, 145.0);
-    const EPRegionPlanner<float> planner(cfg, /*min_pd=*/0.1F, "taylor",
-                                         /*ref_ducy=*/0.1F);
-
+void check_memory_bounded_chunks(const PulsarSearchConfig& cfg,
+                                 const EPRegionPlanner<float>& planner) {
     REQUIRE(planner.get_nchunks() > 0);
     const auto& chunks = planner.get_chunk_cfgs();
     const auto& stats  = planner.get_stats();
@@ -104,14 +97,18 @@ TEST_CASE("EPRegionPlanner plans valid memory-bounded chunks",
     }
 }
 
+} // namespace
+
 TEST_CASE("EPRegionPlanner plans are reproducible", "[ep_freq_sweep]") {
     // The planner seeds its threshold scheme, so one configuration always
-    // gives the same chunking, thresholds and max_sugg.
+    // gives the same chunking, thresholds and max_sugg. One planner is also
+    // checked against the memory bound so this does not need its own plan.
     const auto cfg = make_test_cfg(4.0, 140.0, 145.0);
     const EPRegionPlanner<float> a(cfg, /*min_pd=*/0.1F, "taylor",
                                    /*ref_ducy=*/0.1F);
     const EPRegionPlanner<float> b(cfg, /*min_pd=*/0.1F, "taylor",
                                    /*ref_ducy=*/0.1F);
+    check_memory_bounded_chunks(cfg, a);
     REQUIRE(a.get_nchunks() == b.get_nchunks());
     const auto& ca = a.get_chunk_cfgs();
     const auto& cb = b.get_chunk_cfgs();
@@ -123,29 +120,24 @@ TEST_CASE("EPRegionPlanner plans are reproducible", "[ep_freq_sweep]") {
     }
 }
 
-TEST_CASE("EPRegionPlanner plans a band spanning two FFA regions",
+TEST_CASE("EPRegionPlanner wide band covers two regions and reports maxima",
           "[ep_freq_sweep]") {
-    // 70-145 Hz spans two period octaves: 32 bins above 72.5 Hz, 64 below
+    // 70-145 Hz spans two period octaves: 32 bins above 72.5 Hz, 64 below.
+    // One planner serves the region, stats, and branch_max checks.
     const auto cfg = make_test_cfg(4.0, 70.0, 145.0);
     const EPRegionPlanner<float> planner(cfg, /*min_pd=*/0.1F, "taylor",
                                          /*ref_ducy=*/0.1F);
+    const auto& chunks = planner.get_chunk_cfgs();
+    const auto& stats  = planner.get_stats();
 
     std::set<SizeType> region_nbins;
-    for (const auto& chunk : planner.get_chunk_cfgs()) {
+    for (const auto& chunk : chunks) {
         region_nbins.insert(chunk.cfg.get_nbins());
         CHECK(!chunk.threshold_scheme.empty());
     }
     CHECK(region_nbins == std::set<SizeType>{32U, 64U});
-}
 
-TEST_CASE("EPRegionPlanner stats report the maxima over its chunks",
-          "[ep_freq_sweep]") {
-    const auto cfg = make_test_cfg(4.0, 70.0, 145.0);
-    const EPRegionPlanner<float> planner(cfg, /*min_pd=*/0.1F, "taylor",
-                                         /*ref_ducy=*/0.1F);
-    const auto& stats = planner.get_stats();
     REQUIRE(stats.get_chunk_stats().size() == planner.get_nchunks());
-
     SizeType branch_max = 0;
     double memory_gb    = 0.0;
     for (const auto& chunk : stats.get_chunk_stats()) {
@@ -159,16 +151,9 @@ TEST_CASE("EPRegionPlanner stats report the maxima over its chunks",
     // shared FFA buffers) is at least any single chunk and within the limit.
     CHECK(stats.get_max_memory_gb() >= static_cast<float>(memory_gb));
     CHECK(stats.get_max_memory_gb() <= cfg.get_max_process_memory_gb());
-}
 
-TEST_CASE("EPRegionPlanner chunk branch_max covers the chunk's own plan",
-          "[ep_freq_sweep]") {
-    const auto cfg = make_test_cfg(4.0, 70.0, 145.0);
-    const EPRegionPlanner<float> planner(cfg, /*min_pd=*/0.1F, "taylor",
-                                         /*ref_ducy=*/0.1F);
-    const auto& chunks = planner.get_chunk_cfgs();
-    const auto& stats  = planner.get_stats().get_chunk_stats();
-    REQUIRE(stats.size() == chunks.size());
+    const auto& chunk_stats = stats.get_chunk_stats();
+    REQUIRE(chunk_stats.size() == chunks.size());
     for (SizeType i = 0; i < chunks.size(); ++i) {
         const loki::plans::FFAPlan<float> plan(chunks[i].cfg);
         const auto bp     = plan.get_branching_pattern("taylor");
@@ -176,7 +161,7 @@ TEST_CASE("EPRegionPlanner chunk branch_max covers the chunk's own plan",
                                          2.0 * *std::ranges::max_element(bp))),
                                      SizeType{32});
         CHECK(chunks[i].branch_max >= needed);
-        CHECK(stats[i].branch_max == chunks[i].branch_max);
+        CHECK(chunk_stats[i].branch_max == chunks[i].branch_max);
     }
 }
 
@@ -351,11 +336,10 @@ TEST_CASE("EPFreqSweep executes sweep and writes unified results file",
     std::error_code ec;
     std::filesystem::remove_all(outdir, ec);
 
-    // 140-142 Hz is one FFA region, 70-145 Hz is two (32 and 64 bins)
-    const auto [f_min, f_max, nregions] = GENERATE(
-        table<double, double, SizeType>({{140.0, 142.0, 1}, {70.0, 145.0, 2}}));
-    CAPTURE(f_min, f_max);
-    const auto cfg          = make_test_cfg(4.0, f_min, f_max);
+    // One FFA region. The two-region split is checked on the planner above.
+    constexpr double kFMin  = 140.0;
+    constexpr double kFMax  = 142.0;
+    const auto cfg          = make_test_cfg(4.0, kFMin, kFMax);
     const auto [ts_e, ts_v] = make_noise_series(cfg.get_nsamps());
 
     // Run only 1 reference segment for fast test execution
@@ -403,7 +387,7 @@ TEST_CASE("EPFreqSweep executes sweep and writes unified results file",
         chunk_grp.getAttribute("nbins").read(nbins);
         region_nbins.insert(nbins);
     }
-    CHECK(region_nbins.size() == nregions);
+    CHECK(region_nbins.size() == 1);
 
     // Verify temporary per-chunk directory was cleaned up
     const auto tmp_dir = outdir / std::format(".tmp_{}_ep_chunks", file_prefix);
