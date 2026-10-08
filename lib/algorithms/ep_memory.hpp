@@ -47,8 +47,21 @@ namespace loki::algorithms::detail {
 
 constexpr double kBytesPerGiB = static_cast<double>(1ULL << 30U);
 
-/// Batch size EPFreqSweep runs the pruning with.
+/// Batch size the CPU pruning runs with.
 constexpr SizeType kEPBatchSize = 1024U;
+
+/// Batch size the GPU pruning runs with. A batch is one kernel round trip and
+/// one host synchronisation of the world tree, so it must be large: at 1024
+/// the per-batch overhead dominates a 2^25-sample run, which then takes a
+/// minute per reference segment instead of seconds.
+constexpr SizeType kEPBatchSizeCuda = SizeType{1} << 16U;
+
+/// Largest world-tree capacity (candidates) a chunk is planned with. The
+/// world tree trims to the top-k when it is full (lib/utils/world_tree.hpp), so
+/// the capacity bounds the memory and only a run that overflows changes. The
+/// unbounded value, ncoords times the peak complexity of the threshold scheme,
+/// reaches ~1e9 candidates for long series.
+constexpr SizeType kEPMaxWorldTreeCapacity = SizeType{1} << 22U;
 
 /// Version of this model. Bump it with every change to the formulas: plan
 /// caches store it and are rejected when it differs.

@@ -206,4 +206,31 @@ TEST_CASE("CUDA EP memory model: irfft scratch is minimal for float folds",
                          (nfft * kNbins * sizeof(float)));
 }
 
+TEST_CASE("CUDA prune functors take an external FFT manager without planning",
+          "[ep_memory][cuda]") {
+    if (!loki::is_available(Backend::kCUDA)) {
+        SKIP("needs a CUDA build");
+    }
+    const std::vector<SizeType> grid{20U, 25U};
+    const std::vector<double> dparams{0.1, 0.1};
+
+    // The sweep prepares the plans once. The functor must reuse them and
+    // build none of its own.
+    loki::math::CUFFTManager shared(/*device_id=*/0);
+    const std::vector<SizeType> n_reals{kNbins};
+    shared.prepare_exact_plans(n_reals);
+    const auto functs = create_prune_dp_functs_cuda<ComplexTypeCUDA>(
+        "taylor", grid, dparams, kNsegments, /*tseg_ffa=*/1.0, make_cfg(2),
+        kBatch, kBranchMax, /*device_id=*/0, &shared);
+    REQUIRE(functs != nullptr);
+    CHECK(shared.has_prepared(kNbins));
+    CHECK(shared.n_cached_plans() == 0);
+
+    // A manager that does not prepare this nbins is refused.
+    loki::math::CUFFTManager unprepared(/*device_id=*/0);
+    CHECK_THROWS(create_prune_dp_functs_cuda<ComplexTypeCUDA>(
+        "taylor", grid, dparams, kNsegments, /*tseg_ffa=*/1.0, make_cfg(2),
+        kBatch, kBranchMax, /*device_id=*/0, &unprepared));
+}
+
 #endif // LOKI_ENABLE_CUDA

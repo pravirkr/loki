@@ -30,7 +30,9 @@ namespace loki::pipelines {
  * DynamicThresholdScheme, and max_process_memory_gb means device memory only:
  * the plan is fitted to the smaller of it and the free device memory less a
  * fixed reserve (as for FFAFreqSweep), and host memory is never checked.
- * Plan caches are specific to the backend that wrote them. An active
+ * A plan cache written on either backend is accepted on the other: the peak is
+ * rechecked with the current backend, and a plan that does not fit is
+ * rejected. An active
  * rfi_config (pulsar mask, harvesting, impulsive veto) is not implemented on
  * CUDA and is rejected with std::invalid_argument.
  */

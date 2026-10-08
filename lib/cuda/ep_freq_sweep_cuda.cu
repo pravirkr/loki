@@ -100,12 +100,13 @@ public:
           m_ref_segs(ref_segs),
           m_device_id(device_id),
           m_memory{
-              .nparams   = m_base_cfg.get_nparams(),
-              .nsamps    = m_base_cfg.get_nsamps(),
-              .n_workers = 1,
-              .harvest   = {},
-              .kind      = algorithms::detail::EPMemoryKind::kCuda,
-              .device    = device_id,
+              .nparams    = m_base_cfg.get_nparams(),
+              .nsamps     = m_base_cfg.get_nsamps(),
+              .n_workers  = 1,
+              .batch_size = algorithms::detail::kEPBatchSizeCuda,
+              .harvest    = {},
+              .kind       = algorithms::detail::EPMemoryKind::kCuda,
+              .device     = device_id,
               .cub_scratch_bytes =
                   &algorithms::detail::ep_cuda_cub_scratch_bytes,
           },
@@ -118,6 +119,7 @@ public:
                            std::nullopt,
                            Exec::cuda(device_id)),
           m_fft_manager(device_id),
+          m_prune_fft(device_id),
           m_stream(device_id) {
         cuda_utils::CudaSetDeviceGuard device_guard(m_device_id);
         const auto& stats      = m_region_planner.get_stats();
@@ -153,6 +155,9 @@ public:
                 n_reals.push_back(chunk.cfg.get_nbins());
             }
             m_fft_manager.prepare_plans(n_reals);
+            // The pruning functors of every chunk share these exact-batch
+            // plans, instead of building their own per chunk.
+            m_prune_fft.prepare_exact_plans(n_reals);
         }
 
         // What the sweep still has to allocate on top of the shared buffers.
@@ -239,7 +244,7 @@ public:
         spdlog::info("EPFreqSweep (CUDA {}): starting sweep over {} chunks",
                      m_device_id, nchunks);
 
-        constexpr SizeType kBatchSize = algorithms::detail::kEPBatchSize;
+        constexpr SizeType kBatchSize = algorithms::detail::kEPBatchSizeCuda;
         const auto& stats             = m_region_planner.get_stats();
         const double limit_gb = algorithms::detail::effective_memory_limit_gb(
             stats.get_memory_limit_gb());
@@ -295,11 +300,12 @@ public:
                 capacity, workspace.get_memory_usage_gib());
 
             algorithms::EPCudaSharedPipeline<FoldTypeCUDA> pipeline{
-                .ep_workspace  = &workspace,
-                .ffa_workspace = &m_ffa_workspace,
-                .fft_manager   = &m_fft_manager,
-                .fold_d        = cuda_utils::as_span(m_fold_d),
-                .ts_e_d        = cuda::std::span<const float>(
+                .ep_workspace      = &workspace,
+                .ffa_workspace     = &m_ffa_workspace,
+                .fft_manager       = &m_fft_manager,
+                .prune_fft_manager = &m_prune_fft,
+                .fold_d            = cuda_utils::as_span(m_fold_d),
+                .ts_e_d            = cuda::std::span<const float>(
                     thrust::raw_pointer_cast(m_ts_e_d.data()), m_ts_e_d.size()),
                 .ts_v_d = cuda::std::span<const float>(
                     thrust::raw_pointer_cast(m_ts_v_d.data()), m_ts_v_d.size()),
@@ -361,6 +367,8 @@ private:
 
     memory::FFAWorkspaceCUDA<FoldTypeCUDA> m_ffa_workspace;
     math::CUFFTManager m_fft_manager;
+    // The FFT plans of the pruning functors, prepared for every chunk's nbins.
+    math::CUFFTManager m_prune_fft;
     // Declared before the device buffers so that it outlives them.
     OwnedStream m_stream;
     thrust::device_vector<DeviceFoldT> m_fold_d;

@@ -52,13 +52,15 @@ BasePruneDPFunctsCUDA<FoldTypeCUDA>::BasePruneDPFunctsCUDA(
     search::PulsarSearchConfig cfg,
     SizeType batch_size,
     SizeType branch_max,
-    int device_id)
+    int device_id,
+    math::CUFFTManager* external_fft)
     : m_nseg_ffa(nseg_ffa),
       m_tseg_ffa(tseg_ffa),
       m_cfg(std::move(cfg)),
       m_batch_size(batch_size),
       m_branch_max(branch_max),
-      m_fft_manager(device_id) {
+      m_fft_manager(device_id),
+      m_external_fft(external_fft) {
     m_boxcar_widths_d        = m_cfg.get_scoring_widths();
     m_boxcar_kadane_biases_d = m_cfg.get_boxcar_kadane_biases();
     const auto param_limits  = m_cfg.get_param_limits();
@@ -94,7 +96,15 @@ BasePruneDPFunctsCUDA<FoldTypeCUDA>::BasePruneDPFunctsCUDA(
 
     if constexpr (std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>) {
         const auto nbins = m_cfg.get_nbins();
-        m_fft_manager.prepare_exact_plans(std::span<const SizeType>(&nbins, 1));
+        if (m_external_fft != nullptr) {
+            // The owner prepared the plans for every nbins of its sweep.
+            error_check::check(m_external_fft->has_prepared(nbins),
+                               "BasePruneDPFunctsCUDA: the external FFT "
+                               "manager does not prepare this nbins");
+        } else {
+            m_fft_manager.prepare_exact_plans(
+                std::span<const SizeType>(&nbins, 1));
+        }
         const auto max_nfft =
             std::max(2 * m_batch_size * m_branch_max, 2 * m_n_coords_init);
         const auto nbins_f = m_cfg.get_nbins_f();
@@ -114,7 +124,7 @@ void BasePruneDPFunctsCUDA<FoldTypeCUDA>::irfft_for_scoring(
     cudaStream_t stream)
     requires(std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>)
 {
-    irfft_folds_for_scoring(m_fft_manager, m_scratch_folds_c_d, src, nfft, dst,
+    irfft_folds_for_scoring(get_fft(), m_scratch_folds_c_d, src, nfft, dst,
                             m_cfg.get_nbins(), m_cfg.get_nbins_f(), stream);
 }
 
@@ -253,7 +263,7 @@ void BaseTaylorPruneDPFunctsCUDA<FoldTypeCUDA>::seed(
                                  "fold_segment size mismatch");
         auto folds_t_span =
             cuda_utils::as_span(this->m_scratch_folds_r_d).first(nfft * nbins);
-        irfft_folds_for_scoring(this->m_fft_manager, this->m_scratch_folds_c_d,
+        irfft_folds_for_scoring(this->get_fft(), this->m_scratch_folds_c_d,
                                 fold_segment, nfft, folds_t_span, nbins,
                                 nbins_f, stream);
         detection::snr_boxcar_3d_max_cuda_d(
@@ -298,7 +308,7 @@ void BaseChebyshevPruneDPFunctsCUDA<FoldTypeCUDA>::seed(
                                  "fold_segment size mismatch");
         auto folds_t_span =
             cuda_utils::as_span(this->m_scratch_folds_r_d).first(nfft * nbins);
-        irfft_folds_for_scoring(this->m_fft_manager, this->m_scratch_folds_c_d,
+        irfft_folds_for_scoring(this->get_fft(), this->m_scratch_folds_c_d,
                                 fold_segment, nfft, folds_t_span, nbins,
                                 nbins_f, stream);
         detection::snr_boxcar_3d_max_cuda_d(
@@ -324,7 +334,8 @@ PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>::PrunePolyTaylorDPFunctsCUDA(
     search::PulsarSearchConfig cfg,
     SizeType batch_size,
     SizeType branch_max,
-    int device_id)
+    int device_id,
+    math::CUFFTManager* external_fft)
     : Base(param_grid_count_init,
            dparams_init,
            nseg_ffa,
@@ -332,7 +343,8 @@ PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>::PrunePolyTaylorDPFunctsCUDA(
            std::move(cfg),
            batch_size,
            branch_max,
-           device_id) {}
+           device_id,
+           external_fft) {}
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 SizeType PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>::branch(
@@ -433,7 +445,7 @@ void PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>::ascend(
         const auto nfft = 2 * n_leaves;
         auto folds_t_span =
             cuda_utils::as_span(this->m_scratch_folds_r_d).first(nfft * nbins);
-        irfft_folds_for_scoring(this->m_fft_manager, this->m_scratch_folds_c_d,
+        irfft_folds_for_scoring(this->get_fft(), this->m_scratch_folds_c_d,
                                 folds_tree, nfft, folds_t_span, nbins, nbins_f,
                                 stream);
         detection::snr_boxcar_3d_max_cuda_d(
@@ -476,7 +488,8 @@ PrunePolyChebyshevDPFunctsCUDA<FoldTypeCUDA>::PrunePolyChebyshevDPFunctsCUDA(
     search::PulsarSearchConfig cfg,
     SizeType batch_size,
     SizeType branch_max,
-    int device_id)
+    int device_id,
+    math::CUFFTManager* external_fft)
     : Base(param_grid_count_init,
            dparams_init,
            nseg_ffa,
@@ -484,7 +497,8 @@ PrunePolyChebyshevDPFunctsCUDA<FoldTypeCUDA>::PrunePolyChebyshevDPFunctsCUDA(
            std::move(cfg),
            batch_size,
            branch_max,
-           device_id) {}
+           device_id,
+           external_fft) {}
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 SizeType PrunePolyChebyshevDPFunctsCUDA<FoldTypeCUDA>::branch(
@@ -589,7 +603,7 @@ void PrunePolyChebyshevDPFunctsCUDA<FoldTypeCUDA>::ascend(
         const auto nfft = 2 * n_leaves;
         auto folds_t_span =
             cuda_utils::as_span(this->m_scratch_folds_r_d).first(nfft * nbins);
-        irfft_folds_for_scoring(this->m_fft_manager, this->m_scratch_folds_c_d,
+        irfft_folds_for_scoring(this->get_fft(), this->m_scratch_folds_c_d,
                                 folds_tree, nfft, folds_t_span, nbins, nbins_f,
                                 stream);
         detection::snr_boxcar_3d_max_cuda_d(
@@ -636,7 +650,8 @@ PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>::PruneCircTaylorDPFunctsCUDA(
     search::PulsarSearchConfig cfg,
     SizeType batch_size,
     SizeType branch_max,
-    int device_id)
+    int device_id,
+    math::CUFFTManager* external_fft)
     : Base(param_grid_count_init,
            dparams_init,
            nseg_ffa,
@@ -644,7 +659,8 @@ PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>::PruneCircTaylorDPFunctsCUDA(
            std::move(cfg),
            batch_size,
            branch_max,
-           device_id) {}
+           device_id,
+           external_fft) {}
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 SizeType PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>::branch(
@@ -761,7 +777,7 @@ void PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>::ascend(
         const auto nfft = 2 * n_leaves;
         auto folds_t_span =
             cuda_utils::as_span(this->m_scratch_folds_r_d).first(nfft * nbins);
-        irfft_folds_for_scoring(this->m_fft_manager, this->m_scratch_folds_c_d,
+        irfft_folds_for_scoring(this->get_fft(), this->m_scratch_folds_c_d,
                                 folds_tree, nfft, folds_t_span, nbins, nbins_f,
                                 stream);
         detection::snr_boxcar_3d_max_cuda_d(
@@ -804,22 +820,23 @@ create_prune_dp_functs_cuda(std::string_view poly_basis,
                             search::PulsarSearchConfig cfg,
                             SizeType batch_size,
                             SizeType branch_max,
-                            int device_id) {
+                            int device_id,
+                            math::CUFFTManager* external_fft) {
     const auto n_params = cfg.get_nparams();
     if (poly_basis == "taylor" && n_params <= 4) {
         return std::make_unique<PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>>(
             param_grid_count_init, dparams_init, nseg_ffa, tseg_ffa,
-            std::move(cfg), batch_size, branch_max, device_id);
+            std::move(cfg), batch_size, branch_max, device_id, external_fft);
     }
     if (poly_basis == "taylor" && n_params == 5) {
         return std::make_unique<PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>>(
             param_grid_count_init, dparams_init, nseg_ffa, tseg_ffa,
-            std::move(cfg), batch_size, branch_max, device_id);
+            std::move(cfg), batch_size, branch_max, device_id, external_fft);
     }
     if (poly_basis == "chebyshev" && n_params <= 4) {
         return std::make_unique<PrunePolyChebyshevDPFunctsCUDA<FoldTypeCUDA>>(
             param_grid_count_init, dparams_init, nseg_ffa, tseg_ffa,
-            std::move(cfg), batch_size, branch_max, device_id);
+            std::move(cfg), batch_size, branch_max, device_id, external_fft);
     }
     throw std::runtime_error(std::format(
         "Unknown poly_basis: '{}'. Valid options: 'taylor', 'chebyshev'",
@@ -854,7 +871,8 @@ create_prune_dp_functs_cuda<float>(std::string_view,
                                    search::PulsarSearchConfig,
                                    SizeType,
                                    SizeType,
-                                   int);
+                                   int,
+                                   math::CUFFTManager*);
 template std::unique_ptr<PruneDPFunctsCUDA<ComplexTypeCUDA>>
 create_prune_dp_functs_cuda<ComplexTypeCUDA>(std::string_view,
                                              std::span<const SizeType>,
@@ -864,6 +882,7 @@ create_prune_dp_functs_cuda<ComplexTypeCUDA>(std::string_view,
                                              search::PulsarSearchConfig,
                                              SizeType,
                                              SizeType,
-                                             int);
+                                             int,
+                                             math::CUFFTManager*);
 
 } // namespace loki::core

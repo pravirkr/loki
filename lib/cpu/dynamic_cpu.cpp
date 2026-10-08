@@ -36,7 +36,8 @@ BasePruneDPFuncts<FoldType>::BasePruneDPFuncts(
     double tseg_ffa,
     search::PulsarSearchConfig cfg,
     SizeType batch_size,
-    SizeType branch_max)
+    SizeType branch_max,
+    math::FFTWManager* external_fft)
     : m_param_grid_count_init(param_grid_count_init.begin(),
                               param_grid_count_init.end()),
       m_dparams_init(dparams_init.begin(), dparams_init.end()),
@@ -45,6 +46,7 @@ BasePruneDPFuncts<FoldType>::BasePruneDPFuncts(
       m_cfg(std::move(cfg)),
       m_batch_size(batch_size),
       m_branch_max(branch_max),
+      m_external_fft(external_fft),
       m_boxcar_widths_cache(m_cfg.get_scoring_widths(), m_cfg.get_nbins()),
       m_boxcar_kadane_cache(m_cfg.get_boxcar_kadane_biases(),
                             m_cfg.get_nbins()) {
@@ -55,7 +57,15 @@ BasePruneDPFuncts<FoldType>::BasePruneDPFuncts(
     const auto nbins = m_cfg.get_nbins();
     m_n_coords_init  = n_coords_init;
     if constexpr (std::is_same_v<FoldType, ComplexType>) {
-        m_fft_manager.prepare_exact_plans(std::span<const SizeType>(&nbins, 1));
+        if (m_external_fft != nullptr) {
+            // The owner prepared the plans for every nbins of its sweep.
+            error_check::check(m_external_fft->has_prepared(nbins),
+                               "BasePruneDPFuncts: the external FFT manager "
+                               "does not prepare this nbins");
+        } else {
+            m_fft_manager.prepare_exact_plans(
+                std::span<const SizeType>(&nbins, 1));
+        }
         m_scratch_shifts.resize(1); // Not needed for complex
         const auto max_nfft =
             std::max(2 * m_batch_size * m_branch_max, 2 * m_n_coords_init);
@@ -79,7 +89,7 @@ void BasePruneDPFuncts<FoldType>::irfft_for_scoring(
     const auto n_complex = nfft * nbins_f;
     auto const scratch   = std::span(m_scratch_folds_c).first(n_complex);
     std::copy(src.begin(), src.begin() + n_complex, scratch.begin());
-    m_fft_manager.irfft_batch(scratch, dst.first(nfft * nbins), nfft, nbins, 1);
+    get_fft().irfft_batch(scratch, dst.first(nfft * nbins), nfft, nbins, 1);
 }
 
 template <SupportedFoldType FoldType>
@@ -300,14 +310,16 @@ PrunePolyTaylorDPFuncts<FoldType>::PrunePolyTaylorDPFuncts(
     double tseg_ffa,
     search::PulsarSearchConfig cfg,
     SizeType batch_size,
-    SizeType branch_max)
+    SizeType branch_max,
+    math::FFTWManager* external_fft)
     : Base(param_grid_count_init,
            dparams,
            nseg_ffa,
            tseg_ffa,
            std::move(cfg),
            batch_size,
-           branch_max) {}
+           branch_max,
+           external_fft) {}
 
 template <SupportedFoldType FoldType>
 SizeType PrunePolyTaylorDPFuncts<FoldType>::branch(
@@ -434,14 +446,16 @@ PrunePolyChebyshevDPFuncts<FoldType>::PrunePolyChebyshevDPFuncts(
     double tseg_ffa,
     search::PulsarSearchConfig cfg,
     SizeType batch_size,
-    SizeType branch_max)
+    SizeType branch_max,
+    math::FFTWManager* external_fft)
     : Base(param_grid_count_init,
            dparams,
            nseg_ffa,
            tseg_ffa,
            std::move(cfg),
            batch_size,
-           branch_max) {}
+           branch_max,
+           external_fft) {}
 
 template <SupportedFoldType FoldType>
 SizeType PrunePolyChebyshevDPFuncts<FoldType>::branch(
@@ -574,14 +588,16 @@ PruneCircTaylorDPFuncts<FoldType>::PruneCircTaylorDPFuncts(
     double tseg_ffa,
     search::PulsarSearchConfig cfg,
     SizeType batch_size,
-    SizeType branch_max)
+    SizeType branch_max,
+    math::FFTWManager* external_fft)
     : Base(param_grid_count_init,
            dparams_init,
            nseg_ffa,
            tseg_ffa,
            std::move(cfg),
            batch_size,
-           branch_max) {}
+           branch_max,
+           external_fft) {}
 
 template <SupportedFoldType FoldType>
 SizeType PruneCircTaylorDPFuncts<FoldType>::branch(
@@ -720,22 +736,23 @@ create_prune_dp_functs(std::string_view poly_basis,
                        double tseg_ffa,
                        search::PulsarSearchConfig cfg,
                        SizeType batch_size,
-                       SizeType branch_max) {
+                       SizeType branch_max,
+                       math::FFTWManager* external_fft) {
     const auto n_params = cfg.get_nparams();
     if (poly_basis == "taylor" && n_params <= 4) {
         return std::make_unique<PrunePolyTaylorDPFuncts<FoldType>>(
             param_grid_count_init, dparams_init, nseg_ffa, tseg_ffa,
-            std::move(cfg), batch_size, branch_max);
+            std::move(cfg), batch_size, branch_max, external_fft);
     }
     if (poly_basis == "taylor" && n_params == 5) {
         return std::make_unique<PruneCircTaylorDPFuncts<FoldType>>(
             param_grid_count_init, dparams_init, nseg_ffa, tseg_ffa,
-            std::move(cfg), batch_size, branch_max);
+            std::move(cfg), batch_size, branch_max, external_fft);
     }
     if (poly_basis == "chebyshev" && n_params <= 4) {
         return std::make_unique<PrunePolyChebyshevDPFuncts<FoldType>>(
             param_grid_count_init, dparams_init, nseg_ffa, tseg_ffa,
-            std::move(cfg), batch_size, branch_max);
+            std::move(cfg), batch_size, branch_max, external_fft);
     }
     throw std::runtime_error(std::format(
         "Unknown poly_basis: '{}'. Valid options: 'taylor', 'chebyshev'",
@@ -769,7 +786,8 @@ create_prune_dp_functs<float>(std::string_view,
                               double,
                               search::PulsarSearchConfig,
                               SizeType,
-                              SizeType);
+                              SizeType,
+                              math::FFTWManager*);
 template std::unique_ptr<PruneDPFuncts<ComplexType>>
 create_prune_dp_functs<ComplexType>(std::string_view,
                                     std::span<const SizeType>,
@@ -778,6 +796,7 @@ create_prune_dp_functs<ComplexType>(std::string_view,
                                     double,
                                     search::PulsarSearchConfig,
                                     SizeType,
-                                    SizeType);
+                                    SizeType,
+                                    math::FFTWManager*);
 
 } // namespace loki::core

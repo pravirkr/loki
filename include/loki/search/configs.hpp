@@ -266,6 +266,51 @@ private:
     std::unique_ptr<EPImpl> m_ep_impl;
 };
 
+/**
+ * @brief Plain struct representation of an EP TOML configuration file.
+ *
+ * Accepts every FFA table and key with the same meaning, plus the [ep] table
+ * and output.plan_cache. It inherits the FFA fields, so one file can drive
+ * the FFA and the EP searches. Unknown and removed keys are rejected.
+ */
+struct EPTomlConfig : FFATomlConfig {
+    // [ep]
+    std::string poly_basis{"taylor"}; ///< "taylor" or "chebyshev"
+    float min_pd{0.1F};               ///< Detection probability, in (0, 1]
+    float ref_ducy{0.1F};             ///< Reference duty cycle, in (0, 1]
+    SizeType prune_poly_order{3};     ///< Polynomial order of the pruning
+    std::optional<SizeType> n_runs;   ///< Runs to prune; empty = all
+    std::optional<std::vector<SizeType>> ref_segs; ///< Explicit runs
+    double p_orb_min{1e-5};
+    double m_c_max{10.0};
+    double m_p_min{1.4};
+    double propagator_significance{2.0};
+    double validation_significance{5.0};
+    bool use_conservative_tile{false};
+
+    // [output]
+    /// Plan cache file. Used by `search ep --plan-only` and by a search that
+    /// names it.
+    std::optional<std::filesystem::path> plan_cache;
+
+    /// @brief Convert parsed TOML parameters into an EPSearchConfig.
+    [[nodiscard]] EPSearchConfig to_ep_search_config(
+        std::optional<SizeType> override_nsamps = std::nullopt,
+        std::optional<double> override_tsamp    = std::nullopt) const;
+
+    /// @brief Load from a TOML file.
+    static EPTomlConfig load(const std::filesystem::path& path);
+
+    /// @brief Parse from a TOML string.
+    static EPTomlConfig from_string(std::string_view toml_content);
+
+    /// @brief Write a documented default TOML configuration to disk.
+    static void write_default(const std::filesystem::path& path);
+
+    /// @brief Get the documented default TOML configuration text.
+    static std::string_view default_toml_string();
+};
+
 /// Backward-compatibility alias: PulsarSearchConfig is identical to
 /// EPSearchConfig
 using PulsarSearchConfig = EPSearchConfig;

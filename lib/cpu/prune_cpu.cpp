@@ -59,7 +59,8 @@ public:
               SizeType branch_max,
               std::string_view poly_basis,
               const PruneRFIConfig& rfi_config,
-              const search::GridMask& mask_base)
+              const search::GridMask& mask_base,
+              math::FFTWManager* fft_manager = nullptr)
         : m_workspace_ptr(&workspace),
           m_cfg(std::move(cfg)),
           m_ffa_plan(m_cfg),
@@ -78,7 +79,7 @@ public:
             m_ffa_plan.get_dparams_actual().back(),
             m_ffa_plan.get_nsegments().back(),
             m_ffa_plan.get_tsegments().back(), m_cfg, m_batch_size,
-            m_branch_max);
+            m_branch_max, fft_manager);
         const auto n_params = m_cfg.get_nparams();
         error_check::check_equal(
             m_mask_base->get_n_accel(),
@@ -1080,6 +1081,7 @@ public:
         memory::FFAWorkspaceCPU<FoldType>& external_ffa_workspace,
         math::FFTWManager& external_fft_manager,
         std::span<FoldType> external_ffa_fold,
+        std::span<math::FFTWManager* const> external_prune_fft,
         search::PulsarSearchConfig cfg,
         std::span<const float> threshold_scheme,
         std::optional<SizeType> n_runs,
@@ -1127,6 +1129,17 @@ public:
                          m_cfg.get_nparams(), nbins, nsegments);
         }
 
+        // One FFT manager per worker for the pruning functors (complex folds
+        // only). Each worker has its own, because exact-batch plans are created
+        // lazily and are not shared between threads.
+        if constexpr (std::is_same_v<FoldType, ComplexType>) {
+            error_check::check_greater_equal(
+                external_prune_fft.size(), m_n_workers,
+                "EPMultiPass: Provided external prune FFT managers are fewer "
+                "than the number of workers (min(nthreads, runs)).");
+            m_prune_fft.assign(external_prune_fft.begin(),
+                               external_prune_fft.end());
+        }
         // Validate external FFA resources
         m_ffa_workspace_ptr->validate(m_ffa_plan);
         error_check::check_greater_equal(
@@ -1228,6 +1241,9 @@ private:
     memory::FFAWorkspaceCPU<FoldType>* m_ffa_workspace_ptr{nullptr};
     math::FFTWManager m_fft_storage;
     math::FFTWManager* m_fft_ptr{nullptr};
+    // Per-worker FFT managers of the pruning functors, owned by the caller.
+    // Empty when the functors own their own (the standalone pipelines).
+    std::vector<math::FFTWManager*> m_prune_fft;
     std::vector<FoldType> m_ffa_fold_storage;
     std::span<FoldType> m_ffa_fold_span;
 
@@ -1250,6 +1266,14 @@ private:
     SizeType m_branch_max{0};
     // Static pulsar mask on the FFA base grid, shared read-only by all runs
     search::GridMask m_mask_base;
+
+    /// The FFT manager of worker @p thread_idx, or null when the functors own
+    /// theirs.
+    [[nodiscard]] math::FFTWManager*
+    get_prune_fft(SizeType thread_idx) const noexcept {
+        return thread_idx < m_prune_fft.size() ? m_prune_fft[thread_idx]
+                                               : nullptr;
+    }
 
     // Safely get the workspace for a specific thread index
     [[nodiscard]] memory::EPWorkspaceCPU<FoldType>&
@@ -1289,10 +1313,11 @@ private:
                                  const std::filesystem::path& outdir,
                                  const std::filesystem::path& log_file,
                                  const std::filesystem::path& result_file) {
-        auto& ws   = get_thread_workspace(0);
-        auto prune = PruneImpl<FoldType>(
-            ws, m_cfg, m_threshold_scheme, m_max_sugg, m_batch_size,
-            m_branch_max, m_poly_basis, m_rfi_config, m_mask_base);
+        auto& ws = get_thread_workspace(0);
+        auto prune =
+            PruneImpl<FoldType>(ws, m_cfg, m_threshold_scheme, m_max_sugg,
+                                m_batch_size, m_branch_max, m_poly_basis,
+                                m_rfi_config, m_mask_base, get_prune_fft(0));
         for (const auto ref_seg : ref_segs) {
             prune.execute(ffa_fold, ref_seg, m_ascend_levels, outdir, log_file,
                           result_file,
@@ -1341,7 +1366,8 @@ private:
                 auto& ws              = get_thread_workspace(thread_idx);
                 auto prune            = PruneImpl<FoldType>(
                     ws, m_cfg, m_threshold_scheme, m_max_sugg, m_batch_size,
-                    m_branch_max, m_poly_basis, m_rfi_config, m_mask_base);
+                    m_branch_max, m_poly_basis, m_rfi_config, m_mask_base,
+                    get_prune_fft(thread_idx));
 
                 prune.execute(
                     ffa_fold, ref_seg, m_ascend_levels, outdir,
@@ -1445,6 +1471,7 @@ make_ep_cpu(std::span<memory::EPWorkspaceCPU<FoldType>* const> workspaces,
             memory::FFAWorkspaceCPU<FoldType>& ffa_workspace,
             math::FFTWManager& fft_manager,
             std::span<FoldType> ffa_fold,
+            std::span<math::FFTWManager* const> prune_fft,
             search::PulsarSearchConfig cfg,
             std::span<const float> threshold_scheme,
             std::optional<SizeType> n_runs,
@@ -1456,9 +1483,10 @@ make_ep_cpu(std::span<memory::EPWorkspaceCPU<FoldType>* const> workspaces,
             bool show_progress,
             PruneRFIConfig rfi_config) {
     return std::make_unique<EPMultiPassCpuEngine<FoldType>>(
-        workspaces, ffa_workspace, fft_manager, ffa_fold, std::move(cfg),
-        threshold_scheme, n_runs, std::move(ref_segs), ascend_levels, max_sugg,
-        batch_size, poly_basis, show_progress, std::move(rfi_config));
+        workspaces, ffa_workspace, fft_manager, ffa_fold, prune_fft,
+        std::move(cfg), threshold_scheme, n_runs, std::move(ref_segs),
+        ascend_levels, max_sugg, batch_size, poly_basis, show_progress,
+        std::move(rfi_config));
 }
 
 template std::unique_ptr<EPMultiPassEngine<float>>
@@ -1503,6 +1531,7 @@ make_ep_cpu<float>(std::span<memory::EPWorkspaceCPU<float>* const>,
                    memory::FFAWorkspaceCPU<float>&,
                    math::FFTWManager&,
                    std::span<float>,
+                   std::span<math::FFTWManager* const>,
                    search::PulsarSearchConfig,
                    std::span<const float>,
                    std::optional<SizeType>,
@@ -1532,6 +1561,7 @@ make_ep_cpu<ComplexType>(std::span<memory::EPWorkspaceCPU<ComplexType>* const>,
                          memory::FFAWorkspaceCPU<ComplexType>&,
                          math::FFTWManager&,
                          std::span<ComplexType>,
+                         std::span<math::FFTWManager* const>,
                          search::PulsarSearchConfig,
                          std::span<const float>,
                          std::optional<SizeType>,

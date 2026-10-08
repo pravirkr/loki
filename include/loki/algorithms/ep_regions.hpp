@@ -150,6 +150,18 @@ private:
 };
 
 /**
+ * @brief Workers an EPFreqSweep prunes with: min(nthreads, runs), where runs
+ * is n_runs, the number of ref_segs, or nthreads when neither is given.
+ *
+ * Pass the same value as the n_workers of EPRegionPlanner when a plan is made
+ * outside the sweep (plan-only), so that the plan cache matches the sweep.
+ */
+[[nodiscard]] SizeType
+ep_sweep_n_workers(int nthreads,
+                   std::optional<SizeType> n_runs,
+                   const std::optional<std::vector<SizeType>>& ref_segs);
+
+/**
  * @brief A planner for EP (Extreme Pruning) regions across a frequency sweep.
  *
  * Subdivides a frequency search range into optimal memory-bounded chunks.
@@ -181,8 +193,9 @@ private:
  * schemes are designed with the CUDA DynamicThresholdScheme and memory means
  * device memory only: max_process_memory_gb is capped by the free device
  * memory less a fixed reserve, and host memory is never checked. An active
- * @p rfi_config is rejected (not implemented on CUDA). A plan cache is
- * specific to the backend that wrote it.
+ * @p rfi_config is rejected (not implemented on CUDA). A plan cache written on
+ * one backend is accepted on the other: its threshold scheme is statistically
+ * equivalent, and load_cache rechecks its peak with the current backend.
  * @tparam FoldType float for time domain, ComplexType for Fourier domain.
  */
 template <SupportedFoldType FoldType> class EPRegionPlanner {

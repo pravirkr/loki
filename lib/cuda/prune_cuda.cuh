@@ -34,6 +34,9 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA> struct EPCudaSharedPipeline {
     memory::EPWorkspaceCUDA<FoldTypeCUDA>* ep_workspace{nullptr};
     memory::FFAWorkspaceCUDA<FoldTypeCUDA>* ffa_workspace{nullptr};
     math::CUFFTManager* fft_manager{nullptr};
+    /// FFT manager of the pruning functors, prepared by the sweep for every
+    /// chunk's nbins. Null when the functors own theirs.
+    math::CUFFTManager* prune_fft_manager{nullptr};
     /// Output fold buffer (at least the chunk's FFA buffer size).
     cuda::std::span<DeviceFoldType<FoldTypeCUDA>> fold_d;
     /// Input time series on the device (nsamps each).

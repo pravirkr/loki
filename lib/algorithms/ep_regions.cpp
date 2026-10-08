@@ -28,6 +28,7 @@
 #include "lib/algorithms/ep_memory.hpp"
 #include "lib/algorithms/ep_memory_cuda.hpp"
 #include "lib/algorithms/planner_memory.hpp"
+#include "lib/algorithms/prune_engine.hpp"
 #include "lib/common/dispatch.hpp"
 #include "lib/detail/utils.hpp"
 
@@ -42,7 +43,11 @@ constexpr float kSafetyMultiplier = 1.25F;
 // 1.4.0: the backend of the sweep (the model and the threshold simulation
 // differ between CPU and CUDA), the memory-model kind, the batch size of
 // the simulation, and the device architecture (informational).
-constexpr std::string_view kCacheVersion = "1.4.0";
+// 1.5.0: a plan is accepted on either backend. The backend, the memory-model
+// kind and the CUDA worker count are informational; the peak is recomputed.
+// 1.6.0: chunks are planned with the world-tree capacity capped at
+// kEPMaxWorldTreeCapacity, so a 1.5.0 plan (uncapped) is replanned.
+constexpr std::string_view kCacheVersion = "1.6.0";
 
 /// Batch size of the threshold-scheme simulation. CUDA results are
 /// reproducible per (seed, batch_size), so it is part of the cache key.
@@ -118,6 +123,7 @@ make_memory_context(const search::PulsarSearchConfig& cfg,
                                               exec.backend);
         }
         ctx.n_workers         = 1;
+        ctx.batch_size        = detail::kEPBatchSizeCuda;
         ctx.harvest           = {};
         ctx.kind              = detail::EPMemoryKind::kCuda;
         ctx.device            = exec.device;
@@ -157,6 +163,13 @@ double resolve_memory_limit_gb(const search::PulsarSearchConfig& cfg,
 }
 
 } // namespace
+
+SizeType
+ep_sweep_n_workers(int nthreads,
+                   std::optional<SizeType> n_runs,
+                   const std::optional<std::vector<SizeType>>& ref_segs) {
+    return detail::compute_ep_n_workers(nthreads, n_runs, ref_segs);
+}
 
 template <SupportedFoldType FoldType> class EPRegionPlanner<FoldType>::Impl {
 public:
@@ -320,25 +333,21 @@ public:
                 filepath.string(), file_version, kCacheVersion));
         }
 
+        // A plan from the other backend is accepted. Its threshold scheme is
+        // statistically equivalent, and the peak is recomputed below with this
+        // backend's memory policy, so a plan that does not fit is still
+        // rejected.
         std::string file_backend;
         file.getAttribute("ep_backend").read(file_backend);
-        if (file_backend != to_string(m_exec.backend)) {
-            throw std::invalid_argument(std::format(
-                "EPRegionPlanner: cache file '{}' was planned for the {} "
-                "backend, not {} (the memory model and the threshold "
-                "simulation differ between backends; re-plan)",
-                filepath.string(), file_backend, to_string(m_exec.backend)));
-        }
-
-        std::string file_kind;
-        file.getAttribute("ep_memory_model_kind").read(file_kind);
-        const char* const expected_kind =
-            m_memory.kind == detail::EPMemoryKind::kCuda ? "cuda" : "cpu";
-        if (file_kind != expected_kind) {
-            throw std::invalid_argument(std::format(
-                "EPRegionPlanner: cache file '{}' uses the {} memory model, "
-                "not {} (re-plan)",
-                filepath.string(), file_kind, expected_kind));
+        // The worker and thread counts are part of a plan from this backend
+        // only. A plan from the other backend (a CUDA plan has one worker) is
+        // accepted with any counts, because its peak is rechecked below.
+        const bool same_backend = file_backend == to_string(m_exec.backend);
+        if (!same_backend) {
+            spdlog::info("EPRegionPlanner: plan cache '{}' was planned for the "
+                         "{} backend and is used on {}; its peak is rechecked",
+                         filepath.string(), file_backend,
+                         to_string(m_exec.backend));
         }
 
         const auto check_attr_double = [&](const std::string& name,
@@ -401,9 +410,10 @@ public:
         check_attr_double("ref_ducy", m_ref_ducy);
         int file_nthreads{};
         file.getAttribute("nthreads").read(file_nthreads);
-        // The CPU thread count is part of the CPU plan (the workers and the
-        // threshold simulation); it plays no role on the GPU.
-        if (m_exec.backend == Backend::kCPU &&
+        // The CPU thread count is part of a CPU plan (the workers and the
+        // threshold simulation). It plays no role on the GPU, and a plan from
+        // the other backend is accepted whatever its count.
+        if (same_backend && m_exec.backend == Backend::kCPU &&
             file_nthreads != m_base_cfg.get_nthreads()) {
             throw std::invalid_argument(std::format(
                 "EPRegionPlanner: cache mismatch for 'nthreads': expected {}, "
@@ -424,10 +434,16 @@ public:
         };
         check_attr_u64("ep_memory_model_version",
                        detail::kEPMemoryModelVersion);
-        check_attr_u64("batch_size", m_memory.batch_size);
+        // The batch sets the memory of a plan from this backend. A plan from
+        // the other backend is rechecked with this backend's batch (see above).
+        if (same_backend) {
+            check_attr_u64("batch_size", m_memory.batch_size);
+        }
         check_attr_u64("dts_batch_size", kDtsBatchSize);
-        check_attr_u64("n_workers",
-                       static_cast<std::uint64_t>(m_memory.n_workers));
+        if (same_backend) {
+            check_attr_u64("n_workers",
+                           static_cast<std::uint64_t>(m_memory.n_workers));
+        }
         check_attr_u64("harvest_enabled", m_memory.harvest.enabled ? 1U : 0U);
         check_attr_u64("max_harvests", m_memory.harvest.max_harvests);
         check_attr_u64("harvest_store_folds",

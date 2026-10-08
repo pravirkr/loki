@@ -95,7 +95,8 @@ public:
                   SizeType branch_max,
                   std::string_view poly_basis,
                   int device_id,
-                  cudaStream_t stream)
+                  cudaStream_t stream,
+                  math::CUFFTManager* prune_fft = nullptr)
         : m_workspace_ptr(&workspace),
           m_cfg(std::move(cfg)),
           m_ffa_plan(m_cfg),
@@ -115,7 +116,7 @@ public:
             m_ffa_plan.get_dparams_actual().back(),
             m_ffa_plan.get_nsegments().back(),
             m_ffa_plan.get_tsegments().back(), m_cfg, m_batch_size,
-            m_branch_max, m_device_id);
+            m_branch_max, m_device_id, prune_fft);
     }
 
     ~PruneCUDAImpl()                               = default;
@@ -1063,10 +1064,15 @@ private:
             result_file, search::PruneResultWriter::Mode::kWrite);
         writer.write_metadata(m_cfg.get_param_names(), nsegments, m_max_sugg,
                               m_threshold_scheme);
-        auto& ws   = get_workspace();
+        auto& ws = get_workspace();
+        // A chunk of the sweep prunes with the sweep's FFT manager, so its
+        // plans are built once for the sweep. A standalone run owns its own.
+        math::CUFFTManager* const prune_fft =
+            m_pipeline.has_value() ? m_pipeline->prune_fft_manager : nullptr;
         auto prune = PruneCUDAImpl<FoldTypeCUDA>(
             ws, m_cfg, m_threshold_scheme, m_max_sugg, m_batch_size,
-            m_branch_max, m_poly_basis, m_device_id, m_execution_stream.get());
+            m_branch_max, m_poly_basis, m_device_id, m_execution_stream.get(),
+            prune_fft);
         for (const auto ref_seg : ref_segs_to_process) {
             prune.execute(ffa_fold, ref_seg, m_ascend_levels, outdir, log_file,
                           result_file,

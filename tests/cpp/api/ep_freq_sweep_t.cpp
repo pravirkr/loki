@@ -295,10 +295,12 @@ TEST_CASE("EPRegionPlanner HDF5 cache round-trip and validation",
         std::filesystem::remove(bad, ec);
     }
     {
-        const auto bad = make_modified_cache(
-            "cache_bad_kind.h5", "ep_memory_model_kind", std::string("cuda"));
-        CHECK_THROWS_AS(reloaded.load_cache(bad), std::invalid_argument);
-        std::filesystem::remove(bad, ec);
+        // The memory-model kind is informational: a plan from the other
+        // backend loads, and its peak is rechecked with this backend's policy.
+        const auto other = make_modified_cache(
+            "cache_other_kind.h5", "ep_memory_model_kind", std::string("cuda"));
+        CHECK_NOTHROW(reloaded.load_cache(other));
+        std::filesystem::remove(other, ec);
     }
     {
         const auto bad = make_modified_cache(
@@ -476,7 +478,7 @@ TEST_CASE("EPFreqSweep CUDA executes a sweep and writes the unified file",
     CHECK(!std::filesystem::exists(outdir /
                                    std::format(".tmp_{}_ep_chunks", prefix)));
 
-    SECTION("the plan cache loads on CUDA and is rejected on the CPU") {
+    SECTION("the plan cache loads on CUDA and on the CPU") {
         REQUIRE(std::filesystem::exists(cache_file));
         // Same backend: the plan is reused, so the sweep runs without a
         // threshold simulation.
@@ -486,9 +488,10 @@ TEST_CASE("EPFreqSweep CUDA executes a sweep and writes the unified file",
         CHECK(
             std::filesystem::exists(outdir / "cuda_sweep_again_ep_results.h5"));
 
-        CHECK_THROWS_AS(EPFreqSweep(cfg, false, 0.1F, "taylor", 0.1F, {},
-                                    cache_file, std::nullopt, ref_segs),
-                        std::invalid_argument);
+        // The other backend: the CUDA plan has one worker, which this CPU
+        // sweep also uses, and its peak is rechecked on the CPU.
+        CHECK_NOTHROW(EPFreqSweep(cfg, false, 0.1F, "taylor", 0.1F, {},
+                                  cache_file, std::nullopt, ref_segs));
     }
 
     std::filesystem::remove_all(outdir, ec);
@@ -596,20 +599,14 @@ TEST_CASE("EPFreqSweep CUDA matches the CPU sweep on the same plan",
     }
     const std::vector<SizeType> ref_segs{4U};
 
-    // The CPU plan, with one worker, is relabelled as a CUDA plan so both
-    // backends prune with the same thresholds and chunk widths.
+    // The CPU plan, with one worker, is loaded as it is by the GPU sweep: a
+    // plan from the other backend, rechecked with the GPU policy. Both
+    // backends then prune the same chunks and thresholds.
     const auto cache_file = outdir / "plan.h5";
     {
         EPFreqSweep cpu(cfg, false, 0.1F, "taylor", 0.1F, {}, cache_file,
                         std::nullopt, ref_segs);
         cpu.execute(ts_e, ts_v, outdir, "cpu");
-    }
-    {
-        const HighFive::File f(cache_file.string(), HighFive::File::ReadWrite);
-        // The chunks and thresholds stay the CPU plan's. Only the labels the
-        // loader checks are changed, so both backends prune the same plan.
-        f.getAttribute("ep_backend").write(std::string("cuda"));
-        f.getAttribute("ep_memory_model_kind").write(std::string("cuda"));
     }
     {
         EPFreqSweep gpu(cfg, false, 0.1F, "taylor", 0.1F, {}, cache_file,
@@ -675,5 +672,32 @@ TEST_CASE("EPFreqSweep CUDA sweeps with Fourier folds",
                       std::nullopt, std::vector<SizeType>{4U}, Exec::cuda(0));
     CHECK_NOTHROW(sweep.execute(ts_e, ts_v, outdir, "fourier"));
     CHECK(std::filesystem::exists(outdir / "fourier_ep_results.h5"));
+    std::filesystem::remove_all(outdir, ec);
+}
+
+TEST_CASE("EPRegionPlanner accepts a plan cache written on the other backend",
+          "[ep_freq_sweep]") {
+    const auto outdir =
+        std::filesystem::temp_directory_path() / "loki_ep_cross_backend";
+    std::error_code ec;
+    std::filesystem::remove_all(outdir, ec);
+    std::filesystem::create_directories(outdir);
+    const auto cache_file = outdir / "plan_cpu.h5";
+
+    const auto cfg = make_test_cfg(4.0, 140.0, 145.0);
+    const EPRegionPlanner<float> planner(cfg, 0.1F, "taylor", 0.1F, cache_file);
+    {
+        // Relabel the plan as a CUDA plan. The chunks stay as planned, and the
+        // loader rechecks the peak with the CPU policy.
+        const HighFive::File f(cache_file.string(), HighFive::File::ReadWrite);
+        f.getAttribute("ep_backend").write(std::string("cuda"));
+        f.getAttribute("ep_memory_model_kind").write(std::string("cuda"));
+    }
+    const EPRegionPlanner<float> reloaded(cfg, 0.1F, "taylor", 0.1F,
+                                          cache_file);
+    REQUIRE(reloaded.get_nchunks() == planner.get_nchunks());
+    CHECK(reloaded.get_stats().get_max_memory_gb() ==
+          planner.get_stats().get_max_memory_gb());
+
     std::filesystem::remove_all(outdir, ec);
 }

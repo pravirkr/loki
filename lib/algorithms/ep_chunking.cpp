@@ -281,10 +281,13 @@ private:
             .ffa_transient_bytes =
                 ep_ffa_transient_bytes<FoldType>(m_memory, plan),
         };
-        c.max_sugg = std::max(
-            SizeType{1024}, static_cast<SizeType>(std::ceil(
-                                static_cast<double>(c.ncoords) *
-                                static_cast<double>(design.safe_complexity))));
+        // Expected survivors, capped: see kEPMaxWorldTreeCapacity.
+        c.max_sugg = std::min(
+            kEPMaxWorldTreeCapacity,
+            std::max(SizeType{1024},
+                     static_cast<SizeType>(std::ceil(
+                         static_cast<double>(c.ncoords) *
+                         static_cast<double>(design.safe_complexity)))));
         if (m_memory.kind == EPMemoryKind::kCuda) {
             // The device world tree needs a capacity above its largest batch.
             c.max_sugg = ep_cuda_effective_max_sugg(m_memory.batch_size,

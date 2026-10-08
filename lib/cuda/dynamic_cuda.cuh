@@ -134,6 +134,9 @@ protected:
     SizeType m_batch_size;
     SizeType m_branch_max;
     math::CUFFTManager m_fft_manager;
+    // FFT manager owned by the caller (the EP sweep), or null to use
+    // m_fft_manager. It outlives the functor, so its plans are shared.
+    math::CUFFTManager* m_external_fft{nullptr};
 
     SizeType m_n_coords_init{};
     thrust::device_vector<SizeType> m_param_grid_count_init_d;
@@ -155,7 +158,13 @@ protected:
                           search::PulsarSearchConfig cfg,
                           SizeType batch_size,
                           SizeType branch_max,
-                          int device_id = 0);
+                          int device_id                    = 0,
+                          math::CUFFTManager* external_fft = nullptr);
+
+    /** The FFT manager of the IRFFT: the external one if given. */
+    [[nodiscard]] math::CUFFTManager& get_fft() noexcept {
+        return m_external_fft != nullptr ? *m_external_fft : m_fft_manager;
+    }
 
     /** Copy complex folds to scratch, IRFFT to @p dst (ComplexType EP only). */
     void irfft_for_scoring(cuda::std::span<const ComplexTypeCUDA> src,
@@ -253,7 +262,8 @@ public:
                                 search::PulsarSearchConfig cfg,
                                 SizeType batch_size,
                                 SizeType branch_max,
-                                int device_id = 0);
+                                int device_id                    = 0,
+                                math::CUFFTManager* external_fft = nullptr);
 
     SizeType branch(cuda::std::span<double> leaves_tree,
                     cuda::std::span<double> leaves_branch,
@@ -319,7 +329,8 @@ public:
         search::PulsarSearchConfig cfg,
         SizeType batch_size,
         SizeType branch_max,
-        int device_id = 0);
+        int device_id                    = 0,
+        math::CUFFTManager* external_fft = nullptr);
 
     SizeType branch(cuda::std::span<double> leaves_tree,
                     cuda::std::span<double> leaves_branch,
@@ -385,7 +396,8 @@ public:
                                 search::PulsarSearchConfig cfg,
                                 SizeType batch_size,
                                 SizeType branch_max,
-                                int device_id = 0);
+                                int device_id                    = 0,
+                                math::CUFFTManager* external_fft = nullptr);
 
     SizeType branch(cuda::std::span<double> leaves_tree,
                     cuda::std::span<double> leaves_branch,
@@ -454,7 +466,8 @@ create_prune_dp_functs_cuda(std::string_view poly_basis,
                             search::PulsarSearchConfig cfg,
                             SizeType batch_size,
                             SizeType branch_max,
-                            int device_id = 0);
+                            int device_id                    = 0,
+                            math::CUFFTManager* external_fft = nullptr);
 
 // Type aliases for convenience
 using PrunePolyTaylorDPFunctsCUDAFloat = PrunePolyTaylorDPFunctsCUDA<float>;

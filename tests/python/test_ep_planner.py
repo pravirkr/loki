@@ -63,7 +63,8 @@ def test_ep_region_planner_cuda_fits_the_device_budget(tmp_path: Path) -> None:
         assert chunk.ffa_transient_bytes > 0
         assert len(chunk.threshold_scheme) > 0
 
-    # The plan cache is specific to the backend that wrote it.
+    # A plan written on CUDA loads on the CUDA backend and on the CPU: the peak
+    # is rechecked with the policy of the backend that loads it.
     cache = tmp_path / "plan_cuda.h5"
     planner.save_cache(str(cache))
     reloaded = libloki.prune.EPRegionPlannerTime(
@@ -72,8 +73,8 @@ def test_ep_region_planner_cuda_fits_the_device_budget(tmp_path: Path) -> None:
         backend="cuda",
     )
     assert reloaded.nchunks == planner.nchunks
-    with pytest.raises(ValueError, match="backend"):
-        libloki.prune.EPRegionPlannerTime(cfg, plan_cache_file=str(cache))
+    on_cpu = libloki.prune.EPRegionPlannerTime(cfg, plan_cache_file=str(cache))
+    assert on_cpu.nchunks == planner.nchunks
 
 
 def test_ep_region_planner_rejects_unknown_backend() -> None:
