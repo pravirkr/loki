@@ -650,7 +650,7 @@ private:
         SizeType total_processed = 0;
         // The workspace holds batch_size * branch_max leaves, but a leaf's
         // children are the product of its per-parameter branch counts, which
-        // can exceed branch_max on real data. A batch that does not fit is
+        // can exceed branch_max. A batch that does not fit is
         // retried in halves (branch() writes nothing past the workspace and
         // returns the total it needed); the size recovers after a success.
         SizeType batch_cap = batch_size;
