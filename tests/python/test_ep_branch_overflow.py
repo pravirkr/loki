@@ -1,16 +1,16 @@
 """EP on a synthetic series whose branching overflows the per-batch workspace.
 
 One short, bright impulse in white noise, at the anchor segment, makes nearly
-every leaf survive the first stages. Some of them branch past the planned
-pattern (the product of their per-parameter branch counts exceeds
-batch_size * branch_max). Before the fix, the branch write loops ran past the
-workspace: the run aborted with "Branch factor exceeded workspace size"
-followed by heap corruption (SIGABRT), or segfaulted. Now an oversize batch is
-retried in smaller pieces and the run completes.
+every leaf survive the first stages. Some batches then need more children
+than the workspace holds (batch_size * branch_max): branch counts are integer
+and step up across the band, and the product over parameters is not capped.
+Before the fix, the branch write loops ran past the workspace and the run
+aborted with heap corruption (SIGABRT, e.g. "free(): invalid size") or
+segfaulted. Now an oversize batch is retried in smaller pieces and the run
+completes.
 
-The configuration is one 687 s span at 163.84 us, 60-70 Hz, 64 bins, order 3,
-64 segments, with the parameter limits of a circular-orbit prior of
-p_orb_min = 687 s, m_c <= 1, m_p >= 1.1 (pyloki ParamLimits.from_circular).
+Configuration: 2^22 samples at 100 us (419 s), 64 segments, 64 bins, order 3,
+over a rectangular (jerk, accel, freq) box.
 """
 
 from __future__ import annotations
@@ -27,22 +27,21 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 NSAMPS = 2**22
-TSAMP = 2 * 8.192e-05
+TSAMP = 1.0e-4
 NSEG = 64
 ANCHOR = 59
-# from_circular((60, 70), 687.19476736, m_c_max=1.0, m_p_min=1.1, poly_order=3)
 PARAM_LIMITS = [
-    [-54.373973588540686, 54.373973588540686],  # jerk (m/s^3)
-    [-5946.90563843783, 5946.90563843783],  # accel (m/s^2)
-    [59.869826803184516, 70.15186872961807],  # freq (Hz)
+    [-146.0, 146.0],  # jerk (m/s^3)
+    [-9743.0, 9743.0],  # accel (m/s^2)
+    [98.09, 114.94],  # freq (Hz)
 ]
 
 
 def _series() -> np.ndarray:
-    rng = np.random.default_rng(20261007)
+    rng = np.random.default_rng(1)
     ts = rng.standard_normal(NSAMPS)
     start = int((ANCHOR + 0.5) * NSAMPS / NSEG)
-    width = int(0.005 / TSAMP)  # 5 ms
+    width = 30  # 3 ms
     ts[start : start + width] += 200.0 / np.sqrt(width)  # matched S/N 200
     return ts.astype(np.float32)
 
@@ -61,9 +60,6 @@ def _config() -> libloki.configs.PulsarSearchConfig:
         bseg_brute=NSAMPS // NSEG // 16,
         bseg_ffa=NSAMPS // NSEG,
         prune_poly_order=3,
-        p_orb_min=687.19476736,
-        m_c_max=1.0,
-        m_p_min=1.1,
     )
 
 
@@ -72,8 +68,7 @@ def _config() -> libloki.configs.PulsarSearchConfig:
     [
         # Before the fix: SIGABRT (heap corruption after the size check).
         ([3.0] * (NSEG - 1), 1024),
-        # Before the fix: segfault. A small batch cannot average a few
-        # heavily branching leaves against the rest.
+        # Before the fix: SIGABRT as well, through a smaller batch.
         (np.linspace(2.9, 4.5, NSEG - 1).tolist(), 64),
     ],
 )
