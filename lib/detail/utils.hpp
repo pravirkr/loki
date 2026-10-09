@@ -2,8 +2,10 @@
 
 #include <bit>
 #include <cstdint>
+#include <cstring>
 #include <optional>
 #include <span>
+#include <type_traits>
 #include <vector>
 
 #include "loki/common/types.hpp"
@@ -17,19 +19,33 @@ inline constexpr double kGMsunOneThird = 5.10078726793173e6;
 // To match the Python output for bitwise consistency
 inline constexpr double kFloatEps = 1e-6; // half-up rounding
 
+namespace detail {
+/// Hides @p bits from the optimiser. Under -ffast-math the compiler may
+/// assume floats are finite and fold a bit test on a bit_cast float to a
+/// constant; a volatile round trip keeps the test.
+template <typename U> [[nodiscard]] constexpr U opaque_bits(U bits) noexcept {
+    if (std::is_constant_evaluated()) {
+        return bits;
+    }
+    volatile U v = bits;
+    return v;
+}
+} // namespace detail
+
 /**
  * @brief IEEE-754 finite check that remains valid with -ffast-math.
  *
- * std::isfinite relies on floating-point exception semantics that
- * -ffast-math disables; inspect exponent bits directly instead.
+ * std::isfinite is folded to true under -ffinite-math-only, and so is a
+ * plain exponent-bit test on the float; test the hidden bits instead. Meant
+ * for scalar validation; use all_finite() for arrays.
  */
 [[nodiscard]] constexpr bool is_finite(float x) noexcept {
-    const auto bits = std::bit_cast<uint32_t>(x);
+    const auto bits = detail::opaque_bits(std::bit_cast<uint32_t>(x));
     return (bits & 0x7F800000U) != 0x7F800000U;
 }
 
 [[nodiscard]] constexpr bool is_finite(double x) noexcept {
-    const auto bits = std::bit_cast<uint64_t>(x);
+    const auto bits = detail::opaque_bits(std::bit_cast<uint64_t>(x));
     return (bits & 0x7FF0000000000000ULL) != 0x7FF0000000000000ULL;
 }
 
@@ -37,12 +53,29 @@ inline constexpr double kFloatEps = 1e-6; // half-up rounding
  * @brief IEEE-754 NaN check that remains valid with -ffast-math.
  */
 [[nodiscard]] constexpr bool is_nan(float x) noexcept {
-    return (std::bit_cast<uint32_t>(x) & 0x7FFFFFFFU) > 0x7F800000U;
+    return (detail::opaque_bits(std::bit_cast<uint32_t>(x)) & 0x7FFFFFFFU) >
+           0x7F800000U;
 }
 
 [[nodiscard]] constexpr bool is_nan(double x) noexcept {
-    return (std::bit_cast<uint64_t>(x) & 0x7FFFFFFFFFFFFFFFULL) >
-           0x7FF0000000000000ULL;
+    return (detail::opaque_bits(std::bit_cast<uint64_t>(x)) &
+            0x7FFFFFFFFFFFFFFFULL) > 0x7FF0000000000000ULL;
+}
+
+/**
+ * @brief True if every element of @p x is finite; valid with -ffast-math.
+ *
+ * Reads the elements as integers, so no float value exists for the
+ * optimiser to assume finite. Branch-free and vectorisable.
+ */
+[[nodiscard]] inline bool all_finite(std::span<const float> x) noexcept {
+    uint32_t bad = 0;
+    for (const float& v : x) {
+        uint32_t bits = 0;
+        std::memcpy(&bits, &v, sizeof(bits));
+        bad |= static_cast<uint32_t>((bits & 0x7F800000U) == 0x7F800000U);
+    }
+    return bad == 0;
 }
 
 constexpr float to_gib(SizeType bytes) noexcept {

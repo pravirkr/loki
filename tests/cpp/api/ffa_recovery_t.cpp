@@ -70,7 +70,8 @@ void write_ffa_toml(const std::filesystem::path& path,
         throw std::runtime_error("failed to write FFA recovery TOML");
     }
     out << "[input]\n";
-    out << "timeseries = \"" << timeseries.string() << "\"\n";
+    out << "timeseries = \"" << timeseries.string() << "\"\n\n";
+    out << "[preprocessing]\n";
     out << "preprocess = false\n\n";
     out << "[search]\n";
     out << "f_min = " << f_min << "\n";

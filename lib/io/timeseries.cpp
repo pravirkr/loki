@@ -15,10 +15,11 @@
 
 #include <psrio/psrio.hpp>
 
+#include "loki/common/backend.hpp"
 #include "loki/common/types.hpp"
+#include "loki/io/preprocess.hpp"
 
 #include "lib/detail/error_check.hpp"
-#include "lib/detail/math.hpp"
 #include "lib/detail/utils.hpp"
 
 namespace loki::io {
@@ -26,15 +27,26 @@ namespace {
 
 void validate_ingress_arrays(std::span<const float> ts_e,
                              std::span<const float> ts_v) {
+    // Bulk finiteness first; the per-sample scan names the bad index.
+    const bool finite = utils::all_finite(ts_e) && utils::all_finite(ts_v);
+    bool any_weight   = false;
     for (SizeType i = 0; i < ts_e.size(); ++i) {
-        if (!utils::is_finite(ts_e[i])) {
+        if (!finite && !utils::is_finite(ts_e[i])) {
             throw std::invalid_argument(
                 std::format("ts_e[{}] is not finite", i));
         }
-        if (!utils::is_finite(ts_v[i]) || ts_v[i] <= 0.0F) {
+        if ((!finite && !utils::is_finite(ts_v[i])) || ts_v[i] < 0.0F) {
             throw std::invalid_argument(std::format(
-                "ts_v[{}] must be finite and positive (got {})", i, ts_v[i]));
+                "ts_v[{}] must be finite and >= 0 (got {})", i, ts_v[i]));
         }
+        if (ts_v[i] == 0.0F && ts_e[i] != 0.0F) {
+            throw std::invalid_argument(std::format(
+                "ts_e[{}] must be 0 where ts_v is 0 (got {})", i, ts_e[i]));
+        }
+        any_weight = any_weight || ts_v[i] > 0.0F;
+    }
+    if (!any_weight) {
+        throw std::invalid_argument("ts_v is zero on every sample");
     }
 }
 
@@ -80,40 +92,6 @@ template <typename F> auto call_psrio(F&& fn) -> decltype(fn()) {
     }
     }
     throw error_check::DetailedException("unhandled timeseries path");
-}
-
-/// Window length in samples for a filter window given in seconds.
-[[nodiscard]] SizeType
-window_in_samples(double window_sec, double tsamp, SizeType n) {
-    const double bins = window_sec / tsamp;
-    if (bins >= static_cast<double>(n)) {
-        return n;
-    }
-    return bins >= 1.0 ? static_cast<SizeType>(std::llround(bins)) : 1;
-}
-
-/// Remove the running-median baseline and z-score, both in place.
-void preprocess_samples(std::span<float> samples,
-                        double tsamp,
-                        const ReadOptions& options) {
-    if (options.filter_window < 0.0) {
-        throw error_check::DetailedException(
-            "filter window must be non-negative");
-    }
-    if (samples.empty()) {
-        return;
-    }
-    if (options.filter_window > 0.0) {
-        const SizeType window =
-            window_in_samples(options.filter_window, tsamp, samples.size());
-        if (window > 1) {
-            math::subtract_running_filter(
-                samples, window, math::FilterMethod::kMedian,
-                options.fast_median, options.fast_median_min_points,
-                options.nthreads);
-        }
-    }
-    math::zscore(samples, options.loc, options.scale, options.nthreads);
 }
 
 } // namespace
@@ -185,16 +163,30 @@ TimeSeries TimeSeries::read(const std::filesystem::path& path,
     const psrio::TimeSeries raw = load_file(path);
     psrio::Header header        = raw.header();
     std::vector<float> samples(raw.data().begin(), raw.data().end());
-    if (options.preprocess) {
-        preprocess_samples(samples, header.tsamp, options);
-    }
     std::vector<float> variance(samples.size(), 1.0F);
+    if (options.preprocess) {
+        io::preprocess(samples, header.tsamp, samples, variance,
+                       options.preprocessing,
+                       Exec::cpu(std::max(options.nthreads, 1)));
+    }
     TimeSeries series(std::move(samples), std::move(variance), header.tsamp);
     const double tsamp             = header.tsamp;
     series.m_impl->header          = std::move(header);
     series.m_impl->header.tsamp    = tsamp;
     series.m_impl->header.nsamples = series.get_nsamps();
     return series;
+}
+
+PreprocessReport TimeSeries::preprocess(const PreprocessOptions& options,
+                                        Exec exec) {
+    // Fresh outputs keep the series valid if preprocessing throws.
+    std::vector<float> ts_e(m_impl->ts_e.size());
+    std::vector<float> ts_v(m_impl->ts_v.size());
+    auto report = io::preprocess(m_impl->ts_e, m_impl->header.tsamp, ts_e, ts_v,
+                                 options, exec);
+    m_impl->ts_e = std::move(ts_e);
+    m_impl->ts_v = std::move(ts_v);
+    return report;
 }
 
 void TimeSeries::write(const std::filesystem::path& path) const {

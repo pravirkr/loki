@@ -12,6 +12,7 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include "loki/common/types.hpp"
+#include "loki/io/preprocess.hpp"
 #include "loki/search/configs.hpp"
 
 using Catch::Matchers::WithinAbs;
@@ -253,6 +254,7 @@ TEST_CASE("FFATomlConfig default generation and parsing", "[config][toml]") {
         loki::search::FFATomlConfig::default_toml_string();
     REQUIRE_FALSE(default_toml.empty());
     REQUIRE(default_toml.find("[input]") != std::string_view::npos);
+    REQUIRE(default_toml.find("[preprocessing]") != std::string_view::npos);
     REQUIRE(default_toml.find("[search]") != std::string_view::npos);
     REQUIRE(default_toml.find("[performance]") != std::string_view::npos);
     REQUIRE(default_toml.find("[output]") != std::string_view::npos);
@@ -261,8 +263,18 @@ TEST_CASE("FFATomlConfig default generation and parsing", "[config][toml]") {
     auto cfg = loki::search::FFATomlConfig::from_string(default_toml);
     REQUIRE(cfg.timeseries_path == "input.tim");
     REQUIRE(cfg.preprocess == true);
-    REQUIRE(cfg.fast_median == true);
-    REQUIRE(cfg.fast_median_min_points == 101);
+    REQUIRE(cfg.preprocessing.method == loki::io::PreprocessMethod::kRobust);
+    REQUIRE(cfg.preprocessing.fast_median == true);
+    REQUIRE(cfg.preprocessing.fast_median_min_points == 101);
+    REQUIRE_THAT(cfg.min_window_periods, WithinAbs(10.0, 0.0));
+    // The documented defaults are the struct defaults.
+    const loki::io::PreprocessOptions defaults;
+    REQUIRE(cfg.preprocessing.block_scales == defaults.block_scales);
+    REQUIRE(cfg.preprocessing.window_blocks == defaults.window_blocks);
+    REQUIRE(cfg.preprocessing.n_iter == defaults.n_iter);
+    REQUIRE(cfg.preprocessing.clip_sigma == defaults.clip_sigma);
+    REQUIRE(cfg.preprocessing.zap_periodic == defaults.zap_periodic);
+    REQUIRE(cfg.preprocessing.birdies.empty());
     REQUIRE_THAT(cfg.f_min, WithinAbs(0.5, 1e-9));
     REQUIRE_THAT(cfg.f_max, WithinAbs(100.0, 1e-9));
     REQUIRE(cfg.nbins == 64);

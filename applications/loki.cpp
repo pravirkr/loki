@@ -24,6 +24,7 @@
 #include "loki/algorithms/ep_regions.hpp"
 #include "loki/common/backend.hpp"
 #include "loki/common/types.hpp"
+#include "loki/io/preprocess.hpp"
 #include "loki/io/timeseries.hpp"
 #include "loki/pipelines/ep_freq_sweep.hpp"
 #include "loki/pipelines/ffa_freq_sweep.hpp"
@@ -269,8 +270,15 @@ loki::Exec search_exec(const loki::search::FFATomlConfig& cfg) {
     return exec;
 }
 
-/// Reads the timeseries of a search from the [input] settings (or -i).
-loki::io::TimeSeries
+/// A search timeseries and the summary of its preprocessing.
+struct SearchTimeSeries {
+    loki::io::TimeSeries ts;
+    std::optional<loki::io::PreprocessReport> report;
+};
+
+/// Reads the raw timeseries of a search from [input] (or -i) and builds the
+/// folding inputs as [preprocessing] asks.
+SearchTimeSeries
 load_search_timeseries(const loki::search::FFATomlConfig& cfg) {
     if (cfg.timeseries_path.empty()) {
         throw std::invalid_argument(
@@ -283,21 +291,55 @@ load_search_timeseries(const loki::search::FFATomlConfig& cfg) {
             "Input timeseries does not exist: {}", ts_path.string()));
     }
 
-    loki::io::ReadOptions read_opts;
-    read_opts.preprocess             = cfg.preprocess;
-    read_opts.filter_window          = cfg.filter_window;
-    read_opts.fast_median            = cfg.fast_median;
-    read_opts.fast_median_min_points = cfg.fast_median_min_points;
     // Config value 0 means "use all hardware threads".
-    read_opts.nthreads =
+    const int nthreads =
         cfg.nthreads <= 0 ? omp_get_max_threads() : cfg.nthreads;
+    loki::io::ReadOptions read_opts;
+    read_opts.preprocess = false;
+    read_opts.nthreads   = nthreads;
     SPDLOG_INFO("Loading timeseries from: {}", ts_path.string());
-    // FFA assumes finite ts_e and positive ts_v (enforced in TimeSeries).
-    auto ts = loki::io::TimeSeries::read(ts_path, read_opts);
+    SearchTimeSeries out{.ts = loki::io::TimeSeries::read(ts_path, read_opts),
+                         .report = std::nullopt};
+    auto& ts = out.ts;
     SPDLOG_INFO(
         "Loaded timeseries: nsamps = {}, dt = {:.6e} s, tobs = {:.2f} s",
         ts.get_nsamps(), ts.get_dt(), ts.get_tobs());
-    return ts;
+    if (!cfg.preprocess) {
+        return out;
+    }
+    const auto options = cfg.to_preprocess_options();
+    const bool robust  = options.method == loki::io::PreprocessMethod::kRobust;
+    const auto rep     = ts.preprocess(options, loki::Exec::cpu(nthreads));
+    const double dt    = ts.get_dt();
+    if (robust) {
+        SPDLOG_INFO(
+            "Preprocessing (robust): baseline window = {:.3f} s, variance "
+            "window = {:.3f} s, block = {} samples, masked = {:.3f}%, "
+            "clipped = {}, zapped bins = {}, longest masked run = {:.3f} s",
+            static_cast<double>(rep.baseline_window) * dt,
+            static_cast<double>(rep.variance_window) * dt, rep.block_size,
+            100.0 * static_cast<double>(rep.n_masked) /
+                static_cast<double>(rep.nsamps),
+            rep.n_clipped, rep.n_zapped,
+            static_cast<double>(rep.longest_masked_run) * dt);
+    } else {
+        SPDLOG_INFO("Preprocessing (zscore): baseline window = {:.3f} s",
+                    static_cast<double>(rep.baseline_window) * dt);
+    }
+    out.report = rep;
+    return out;
+}
+
+/// Masked runs as long as a brute-fold segment can leave a fold bin with no
+/// weight in the per-segment scores of a pruning search.
+void warn_long_masked_run(const std::optional<loki::io::PreprocessReport>& rep,
+                          loki::SizeType bseg_brute) {
+    if (rep && 2 * rep->longest_masked_run >= bseg_brute) {
+        SPDLOG_WARN("Preprocessing masked a contiguous run of {} samples, "
+                    "comparable to the brute-fold segment ({} samples); "
+                    "scores of that segment are unreliable",
+                    rep->longest_masked_run, bseg_brute);
+    }
 }
 
 /// The sample count a search runs on, as --nsamps-policy asks for.
@@ -335,11 +377,13 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
         return 0;
     }
 
-    auto ts = load_search_timeseries(toml_cfg);
+    auto loaded = load_search_timeseries(toml_cfg);
+    auto& ts    = loaded.ts;
     const loki::SizeType actual_nsamps =
         power_of_two_nsamps(ts.get_nsamps(), nsamps_policy);
 
     const auto ffa_cfg = toml_cfg.to_search_config(actual_nsamps, ts.get_dt());
+    warn_long_masked_run(loaded.report, ffa_cfg.get_bseg_brute());
 
     const std::filesystem::path outdir_path = toml_cfg.outdir;
     std::filesystem::create_directories(outdir_path);
@@ -654,11 +698,13 @@ int run_search_ep(const loki::search::EPTomlConfig& toml_cfg,
         return 0;
     }
 
-    auto ts = load_search_timeseries(toml_cfg);
+    auto loaded = load_search_timeseries(toml_cfg);
+    auto& ts    = loaded.ts;
     const loki::SizeType actual_nsamps =
         power_of_two_nsamps(ts.get_nsamps(), nsamps_policy);
     const auto ep_cfg =
         toml_cfg.to_ep_search_config(actual_nsamps, ts.get_dt());
+    warn_long_masked_run(loaded.report, ep_cfg.get_bseg_brute());
 
     const std::filesystem::path outdir_path = toml_cfg.outdir;
     std::filesystem::create_directories(outdir_path);
@@ -817,6 +863,7 @@ int main(int argc, char** argv) {
                         "output path]")
             ->expected(0, 1);
 
+    std::string preproc_method;
     auto* grp_io = ffa->add_option_group("Input/Output Options");
     grp_io->add_option("-i,--input", ffa_cfg.timeseries_path,
                        "Input timeseries (.tim or .dat)");
@@ -824,18 +871,23 @@ int main(int argc, char** argv) {
                        "Output directory for candidate files");
     grp_io->add_option("-p,--prefix", ffa_cfg.prefix,
                        "Prefix for output candidate files");
-    grp_io->add_flag(
-        "--preprocess,!--no-preprocess", ffa_cfg.preprocess,
-        "Enable/disable timeseries baseline detrending and normalisation");
-    grp_io->add_option(
-        "--filter-window", ffa_cfg.filter_window,
-        "Running median filter window in seconds for baseline detrending");
-    grp_io->add_flag("--fast-median,!--no-fast-median", ffa_cfg.fast_median,
-                     "Approximate long running-median windows by block "
-                     "averaging (default: on)");
+    grp_io->add_flag("--preprocess,!--no-preprocess", ffa_cfg.preprocess,
+                     "Enable/disable preprocessing of the raw timeseries");
+    grp_io
+        ->add_option("--preproc-method", preproc_method,
+                     "Preprocessing method: robust (default) or zscore "
+                     "(legacy detrend + z-score)")
+        ->transform(CLI::IsMember({"robust", "zscore"}, CLI::ignore_case));
+    grp_io->add_option("--filter-window", ffa_cfg.preprocessing.filter_window,
+                       "Baseline (running median) window in seconds");
+    grp_io->add_flag("--fast-median,!--no-fast-median",
+                     ffa_cfg.preprocessing.fast_median,
+                     "zscore: approximate long running-median windows by "
+                     "block averaging (default: on)");
     grp_io->add_option("--fast-median-min-points",
-                       ffa_cfg.fast_median_min_points,
-                       "Width of the short series used by --fast-median");
+                       ffa_cfg.preprocessing.fast_median_min_points,
+                       "zscore: width of the short series used by "
+                       "--fast-median");
 
     auto* grp_range = ffa->add_option_group("Search Parameter Range");
     grp_range->add_option("--fmin", ffa_cfg.f_min,
@@ -921,6 +973,7 @@ int main(int argc, char** argv) {
     std::string ep_backend_name;
     std::vector<SizeType> ep_ref_segs;
 
+    std::string ep_preproc_method;
     auto* ep_grp_io = ep->add_option_group("Input/Output Options");
     ep_grp_io->add_option("-i,--input", ep_cfg.timeseries_path,
                           "Input timeseries (.tim or .dat)");
@@ -928,18 +981,23 @@ int main(int argc, char** argv) {
                           "Output directory for the results file");
     ep_grp_io->add_option("-p,--prefix", ep_cfg.prefix,
                           "Prefix for the results file");
-    ep_grp_io->add_flag(
-        "--preprocess,!--no-preprocess", ep_cfg.preprocess,
-        "Enable/disable timeseries baseline detrending and normalisation");
-    ep_grp_io->add_option(
-        "--filter-window", ep_cfg.filter_window,
-        "Running median filter window in seconds for baseline detrending");
-    ep_grp_io->add_flag("--fast-median,!--no-fast-median", ep_cfg.fast_median,
-                        "Approximate long running-median windows by block "
-                        "averaging (default: on)");
+    ep_grp_io->add_flag("--preprocess,!--no-preprocess", ep_cfg.preprocess,
+                        "Enable/disable preprocessing of the raw timeseries");
+    ep_grp_io
+        ->add_option("--preproc-method", ep_preproc_method,
+                     "Preprocessing method: robust (default) or zscore "
+                     "(legacy detrend + z-score)")
+        ->transform(CLI::IsMember({"robust", "zscore"}, CLI::ignore_case));
+    ep_grp_io->add_option("--filter-window", ep_cfg.preprocessing.filter_window,
+                          "Baseline (running median) window in seconds");
+    ep_grp_io->add_flag("--fast-median,!--no-fast-median",
+                        ep_cfg.preprocessing.fast_median,
+                        "zscore: approximate long running-median windows by "
+                        "block averaging (default: on)");
     ep_grp_io->add_option("--fast-median-min-points",
-                          ep_cfg.fast_median_min_points,
-                          "Width of the short series used by --fast-median");
+                          ep_cfg.preprocessing.fast_median_min_points,
+                          "zscore: width of the short series used by "
+                          "--fast-median");
     ep_grp_io->add_option("--nsamps", ep_cfg.nsamps,
                           "Sample count, for --plan-only (a search reads it "
                           "from the timeseries)");
@@ -1057,6 +1115,16 @@ int main(int argc, char** argv) {
     }
     if (!ep_backend_name.empty()) {
         ep_cfg.backend = loki::parse_backend(ep_backend_name);
+    }
+    const auto parse_method = [](const std::string& name) {
+        return name == "zscore" ? loki::io::PreprocessMethod::kZScore
+                                : loki::io::PreprocessMethod::kRobust;
+    };
+    if (!preproc_method.empty()) {
+        ffa_cfg.preprocessing.method = parse_method(preproc_method);
+    }
+    if (!ep_preproc_method.empty()) {
+        ep_cfg.preprocessing.method = parse_method(ep_preproc_method);
     }
     if (!ep_plan_cache_path.empty()) {
         ep_cfg.plan_cache = std::filesystem::path(ep_plan_cache_path);

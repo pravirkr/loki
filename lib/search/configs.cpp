@@ -55,6 +55,10 @@ namespace {
         return "the [cuda] table was removed; use [performance] backend = "
                "\"cuda\" and device = <id>";
     }
+    if (path == "input.preprocess" || path == "input.filter_window" ||
+        path == "input.fast_median" || path == "input.fast_median_min_points") {
+        return "moved to the [preprocessing] table";
+    }
     if (path == "performance.use_cuda") {
         return "use performance.backend = \"cuda\"";
     }
@@ -84,15 +88,14 @@ void validate_toml_document(const toml::table& root,
                             bool allow_ep,
                             std::string_view label) {
     static constexpr std::array kTopLevel{
-        std::string_view{"input"},
-        std::string_view{"search"},
-        std::string_view{"performance"},
+        std::string_view{"input"},  std::string_view{"preprocessing"},
+        std::string_view{"search"}, std::string_view{"performance"},
         std::string_view{"output"},
     };
     static constexpr std::array kTopLevelEP{
-        std::string_view{"input"},  std::string_view{"search"},
-        std::string_view{"ep"},     std::string_view{"performance"},
-        std::string_view{"output"},
+        std::string_view{"input"},       std::string_view{"preprocessing"},
+        std::string_view{"search"},      std::string_view{"ep"},
+        std::string_view{"performance"}, std::string_view{"output"},
     };
     static constexpr std::array kEPKeys{
         std::string_view{"poly_basis"},
@@ -110,13 +113,29 @@ void validate_toml_document(const toml::table& root,
     };
     static constexpr std::array kInputKeys{
         std::string_view{"timeseries"},
-        std::string_view{"preprocess"},
-        std::string_view{"filter_window"},
-        std::string_view{"fast_median"},
-        std::string_view{"fast_median_min_points"},
         std::string_view{"nsamps"},
         std::string_view{"tsamp"},
         std::string_view{"dt"},
+    };
+    static constexpr std::array kPreprocessingKeys{
+        std::string_view{"preprocess"},
+        std::string_view{"method"},
+        std::string_view{"gain_model"},
+        std::string_view{"filter_window"},
+        std::string_view{"min_window_periods"},
+        std::string_view{"variance_window"},
+        std::string_view{"window_blocks"},
+        std::string_view{"fast_median"},
+        std::string_view{"fast_median_min_points"},
+        std::string_view{"n_iter"},
+        std::string_view{"block_scales"},
+        std::string_view{"block_sigma"},
+        std::string_view{"min_good_fraction"},
+        std::string_view{"clip_sigma"},
+        std::string_view{"zap_periodic"},
+        std::string_view{"zap_sigma"},
+        std::string_view{"zap_whiten_bins"},
+        std::string_view{"birdies"},
     };
     static constexpr std::array kSearchKeys{
         std::string_view{"f_min"},
@@ -174,6 +193,9 @@ void validate_toml_document(const toml::table& root,
     if (const auto* input = root["input"].as_table()) {
         collect_unknown_keys(*input, kInputKeys, "input", errors);
     }
+    if (const auto* pre = root["preprocessing"].as_table()) {
+        collect_unknown_keys(*pre, kPreprocessingKeys, "preprocessing", errors);
+    }
     if (const auto* search = root["search"].as_table()) {
         collect_unknown_keys(*search, kSearchKeys, "search", errors);
     }
@@ -208,6 +230,168 @@ void validate_toml_document(const toml::table& root,
     return value;
 }
 
+[[nodiscard]] std::optional<double> read_number(const toml::table& table,
+                                                std::string_view key,
+                                                std::string_view path) {
+    const auto node = table[key];
+    if (!node) {
+        return std::nullopt;
+    }
+    if (const auto val = node.value<double>()) {
+        return *val;
+    }
+    if (const auto ival = node.value<int64_t>()) {
+        return static_cast<double>(*ival);
+    }
+    throw std::invalid_argument(std::format("{} must be a number", path));
+}
+
+void require_positive(double value, std::string_view path) {
+    if (!utils::is_finite(value) || value <= 0.0) {
+        throw std::invalid_argument(
+            std::format("{} must be a positive number (got {})", path, value));
+    }
+}
+
+[[nodiscard]] std::optional<bool> read_bool(const toml::table& table,
+                                            std::string_view key,
+                                            std::string_view path) {
+    const auto node = table[key];
+    if (!node) {
+        return std::nullopt;
+    }
+    if (!node.is_boolean()) {
+        throw std::invalid_argument(std::format("{} must be a boolean", path));
+    }
+    return *node.value<bool>();
+}
+
+[[nodiscard]] std::optional<SizeType> read_count(const toml::table& table,
+                                                 std::string_view key,
+                                                 std::string_view path) {
+    const auto node = table[key];
+    if (!node) {
+        return std::nullopt;
+    }
+    if (!node.is_integer()) {
+        throw std::invalid_argument(std::format("{} must be an integer", path));
+    }
+    return static_cast<SizeType>(
+        require_non_negative_int64(*node.value<int64_t>(), path));
+}
+
+[[nodiscard]] double array_number(const toml::node& node,
+                                  std::string_view path) {
+    if (const auto val = node.value<double>()) {
+        return *val;
+    }
+    throw std::invalid_argument(std::format("{} must hold numbers", path));
+}
+
+/// Reads [preprocessing] into @p cfg and validates it.
+void read_preprocessing_table(const toml::table& pre, FFATomlConfig& cfg) {
+    auto& o = cfg.preprocessing;
+    if (const auto v =
+            read_bool(pre, "preprocess", "preprocessing.preprocess")) {
+        cfg.preprocess = *v;
+    }
+    if (const auto node = pre["method"]) {
+        const auto v = node.value<std::string>();
+        if (v == "robust") {
+            o.method = io::PreprocessMethod::kRobust;
+        } else if (v == "zscore") {
+            o.method = io::PreprocessMethod::kZScore;
+        } else {
+            throw std::invalid_argument(
+                "preprocessing.method must be \"robust\" or \"zscore\"");
+        }
+    }
+    if (const auto node = pre["gain_model"]) {
+        const auto v = node.value<std::string>();
+        if (v == "additive") {
+            o.gain_model = io::GainModel::kAdditive;
+        } else if (v == "multiplicative") {
+            o.gain_model = io::GainModel::kMultiplicative;
+        } else {
+            throw std::invalid_argument("preprocessing.gain_model must be "
+                                        "\"additive\" or \"multiplicative\"");
+        }
+    }
+    const auto number = [&](std::string_view key, double& out) {
+        const auto path = std::format("preprocessing.{}", key);
+        if (const auto v = read_number(pre, key, path)) {
+            out = *v;
+        }
+    };
+    const auto count = [&](std::string_view key, SizeType& out) {
+        const auto path = std::format("preprocessing.{}", key);
+        if (const auto v = read_count(pre, key, path)) {
+            out = *v;
+        }
+    };
+    const auto flag = [&](std::string_view key, bool& out) {
+        const auto path = std::format("preprocessing.{}", key);
+        if (const auto v = read_bool(pre, key, path)) {
+            out = *v;
+        }
+    };
+    number("filter_window", o.filter_window);
+    number("min_window_periods", cfg.min_window_periods);
+    number("variance_window", o.variance_window);
+    count("window_blocks", o.window_blocks);
+    flag("fast_median", o.fast_median);
+    count("fast_median_min_points", o.fast_median_min_points);
+    count("n_iter", o.n_iter);
+    number("block_sigma", o.block_sigma);
+    number("min_good_fraction", o.min_good_fraction);
+    number("clip_sigma", o.clip_sigma);
+    flag("zap_periodic", o.zap_periodic);
+    number("zap_sigma", o.zap_sigma);
+    count("zap_whiten_bins", o.zap_whiten_bins);
+    if (const auto node = pre["block_scales"]) {
+        const auto* arr = node.as_array();
+        if (arr == nullptr) {
+            throw std::invalid_argument(
+                "preprocessing.block_scales must be an array of seconds");
+        }
+        o.block_scales.clear();
+        for (const auto& el : *arr) {
+            o.block_scales.push_back(
+                array_number(el, "preprocessing.block_scales"));
+        }
+    }
+    if (const auto node = pre["birdies"]) {
+        const auto* arr = node.as_array();
+        if (arr == nullptr) {
+            throw std::invalid_argument("preprocessing.birdies must be an "
+                                        "array of [freq_hz, width_hz]");
+        }
+        o.birdies.clear();
+        for (const auto& el : *arr) {
+            const auto* pair = el.as_array();
+            if (pair == nullptr || pair->size() != 2) {
+                throw std::invalid_argument("preprocessing.birdies entries "
+                                            "must be [freq_hz, width_hz]");
+            }
+            o.birdies.push_back(io::Birdie{
+                .freq  = array_number((*pair)[0], "preprocessing.birdies"),
+                .width = array_number((*pair)[1], "preprocessing.birdies"),
+            });
+        }
+    }
+    if (!utils::is_finite(cfg.min_window_periods) ||
+        cfg.min_window_periods < 0.0) {
+        throw std::invalid_argument(
+            "preprocessing.min_window_periods must be >= 0");
+    }
+    try {
+        o.validate();
+    } catch (const std::invalid_argument& err) {
+        throw std::invalid_argument(
+            std::format("Invalid [preprocessing] table: {}", err.what()));
+    }
+}
+
 } // namespace
 
 // ==============================================================================
@@ -223,16 +407,54 @@ std::string_view FFATomlConfig::default_toml_string() {
 # Path to input timeseries (.tim or .dat format)
 timeseries = "input.tim"
 
-# Preprocess timeseries: subtract running median baseline and z-score normalize
+[preprocessing]
+# Build the folding inputs from the raw timeseries (see docs/preprocessing.md)
 preprocess = true
 
-# Running median filter window in seconds (used if preprocess = true)
-filter_window = 1.0
+# "robust": local baseline and variance, RFI masking, inverse-variance weights.
+# "zscore": legacy running-median detrend + global z-score (unit weights).
+method = "robust"
 
-# Approximate long running-median windows by block averaging. Set false for
-# the exact sliding median. fast_median_min_points is the short-series width.
+# Robust: noise gain model, "additive" (g = 1) or "multiplicative" (g = baseline)
+gain_model = "additive"
+
+# Running-median baseline window in seconds. The effective window is at least
+# min_window_periods / f_min, so slow pulsars are not subtracted (0 disables).
+filter_window = 1.0
+min_window_periods = 10.0
+
+# Robust: local variance window in seconds (0 = the effective baseline window)
+variance_window = 0.0
+
+# Robust: statistics blocks per baseline window
+window_blocks = 101
+
+# Zscore: approximate long running-median windows by block averaging. Set false
+# for the exact sliding median. fast_median_min_points is the short-series width.
 fast_median = true
 fast_median_min_points = 101
+
+# Robust: rounds of (statistics -> bad-block flags)
+n_iter = 2
+
+# Robust: bad-block time scales in seconds ([] disables block masking), the
+# robust z-score threshold for a block mean or variance, and the minimum valid
+# fraction of a block
+block_scales = [0.016, 0.065, 0.26, 1.05]
+block_sigma = 6.0
+min_good_fraction = 0.3
+
+# Robust: zero samples beyond this many local sigmas (0 disables)
+clip_sigma = 6.0
+
+# Robust: zap periodic RFI in the whitened power spectrum. Off by default:
+# a bright pulsar's harmonics can exceed the threshold.
+zap_periodic = false
+zap_sigma = 8.0
+zap_whiten_bins = 1001
+
+# Robust: known RFI lines, always zapped, as [[freq_hz, width_hz], ...]
+birdies = []
 
 [search]
 # Search frequency range in Hz (Period P = 1 / f)
@@ -327,24 +549,6 @@ FFATomlConfig read_ffa_tables(const toml::table& tbl) {
         if (auto val = (*input)["timeseries"].value<std::string>()) {
             cfg.timeseries_path = *val;
         }
-        if (auto val = (*input)["preprocess"].value<bool>()) {
-            cfg.preprocess = *val;
-        }
-        if (auto val = (*input)["filter_window"].value<double>()) {
-            cfg.filter_window = *val;
-        }
-        if (auto val = (*input)["fast_median"].value<bool>()) {
-            cfg.fast_median = *val;
-        }
-        if (auto val = (*input)["fast_median_min_points"].value<int64_t>()) {
-            const auto points = require_non_negative_int64(
-                *val, "input.fast_median_min_points");
-            if (points < 1) {
-                throw std::invalid_argument(
-                    "input.fast_median_min_points must be >= 1");
-            }
-            cfg.fast_median_min_points = static_cast<SizeType>(points);
-        }
         if (auto val = (*input)["nsamps"].value<int64_t>()) {
             cfg.nsamps = static_cast<SizeType>(
                 require_non_negative_int64(*val, "input.nsamps"));
@@ -354,6 +558,10 @@ FFATomlConfig read_ffa_tables(const toml::table& tbl) {
         } else if (const auto val_dt = (*input)["dt"].value<double>()) {
             cfg.tsamp = val_dt;
         }
+    }
+
+    if (const auto* pre = tbl["preprocessing"].as_table()) {
+        read_preprocessing_table(*pre, cfg);
     }
 
     // [search] table
@@ -483,6 +691,21 @@ FFATomlConfig FFATomlConfig::load(const std::filesystem::path& path) {
     const std::string content((std::istreambuf_iterator<char>(file)),
                               std::istreambuf_iterator<char>());
     return from_string(content);
+}
+
+io::PreprocessOptions FFATomlConfig::to_preprocess_options() const {
+    io::PreprocessOptions o = preprocessing;
+    // filter_window = 0 already means one baseline for the whole series.
+    if (min_window_periods > 0.0 && f_min > 0.0 && o.filter_window > 0.0) {
+        const double floor = min_window_periods / f_min;
+        if (floor > o.filter_window) {
+            spdlog::info("Preprocessing: baseline window raised from {:.3g} s "
+                         "to {:.3g} s ({} periods of f_min = {} Hz)",
+                         o.filter_window, floor, min_window_periods, f_min);
+            o.filter_window = floor;
+        }
+    }
+    return o;
 }
 
 FFASearchConfig
@@ -1442,29 +1665,6 @@ namespace {
 
 /// A number that may be written as an integer. Absent keys give nullopt; a key
 /// of another type is an error, not a silent default.
-[[nodiscard]] std::optional<double> read_number(const toml::table& table,
-                                                std::string_view key,
-                                                std::string_view path) {
-    const auto node = table[key];
-    if (!node) {
-        return std::nullopt;
-    }
-    if (const auto val = node.value<double>()) {
-        return *val;
-    }
-    if (const auto ival = node.value<int64_t>()) {
-        return static_cast<double>(*ival);
-    }
-    throw std::invalid_argument(std::format("{} must be a number", path));
-}
-
-void require_positive(double value, std::string_view path) {
-    if (!utils::is_finite(value) || value <= 0.0) {
-        throw std::invalid_argument(
-            std::format("{} must be a positive number (got {})", path, value));
-    }
-}
-
 /// Reads the [ep] table and output.plan_cache of a validated document.
 void read_ep_tables(const toml::table& tbl, EPTomlConfig& cfg) {
     if (const auto* ep = tbl["ep"].as_table()) {
@@ -1573,8 +1773,9 @@ std::string_view EPTomlConfig::default_toml_string() {
     return R"(# ==============================================================================
 # Loki EP Pulsar Search Configuration (Extreme Pruning)
 # ==============================================================================
-# Every [input], [search], [performance] and [output] key of the FFA file has
-# the same meaning here. This file adds the [ep] table and output.plan_cache.
+# Every [input], [preprocessing], [search], [performance] and [output] key of
+# the FFA file has the same meaning here. This file adds the [ep] table and
+# output.plan_cache.
 
 [input]
 # Path to input timeseries (.tim or .dat format), read by `search ep`
@@ -1585,16 +1786,54 @@ timeseries = "input.tim"
 nsamps = 2097152
 tsamp = 0.0000640
 
-# Preprocess timeseries: subtract running median baseline and z-score normalize
+[preprocessing]
+# Build the folding inputs from the raw timeseries (see docs/preprocessing.md)
 preprocess = true
 
-# Running median filter window in seconds (used if preprocess = true)
-filter_window = 1.0
+# "robust": local baseline and variance, RFI masking, inverse-variance weights.
+# "zscore": legacy running-median detrend + global z-score (unit weights).
+method = "robust"
 
-# Approximate long running-median windows by block averaging. Set false for
-# the exact sliding median. fast_median_min_points is the short-series width.
+# Robust: noise gain model, "additive" (g = 1) or "multiplicative" (g = baseline)
+gain_model = "additive"
+
+# Running-median baseline window in seconds. The effective window is at least
+# min_window_periods / f_min, so slow pulsars are not subtracted (0 disables).
+filter_window = 1.0
+min_window_periods = 10.0
+
+# Robust: local variance window in seconds (0 = the effective baseline window)
+variance_window = 0.0
+
+# Robust: statistics blocks per baseline window
+window_blocks = 101
+
+# Zscore: approximate long running-median windows by block averaging. Set false
+# for the exact sliding median. fast_median_min_points is the short-series width.
 fast_median = true
 fast_median_min_points = 101
+
+# Robust: rounds of (statistics -> bad-block flags)
+n_iter = 2
+
+# Robust: bad-block time scales in seconds ([] disables block masking), the
+# robust z-score threshold for a block mean or variance, and the minimum valid
+# fraction of a block
+block_scales = [0.016, 0.065, 0.26, 1.05]
+block_sigma = 6.0
+min_good_fraction = 0.3
+
+# Robust: zero samples beyond this many local sigmas (0 disables)
+clip_sigma = 6.0
+
+# Robust: zap periodic RFI in the whitened power spectrum. Off by default:
+# a bright pulsar's harmonics can exceed the threshold.
+zap_periodic = false
+zap_sigma = 8.0
+zap_whiten_bins = 1001
+
+# Robust: known RFI lines, always zapped, as [[freq_hz, width_hz], ...]
+birdies = []
 
 [search]
 # Search frequency range in Hz (Period P = 1 / f)

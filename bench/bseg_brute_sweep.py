@@ -46,7 +46,8 @@ def write_config(path: Path, args: argparse.Namespace, bseg: str, outdir: Path) 
         perf.append(f"bseg_brute = {int(bseg)}")
     text = (
         "[input]\n"
-        f'timeseries = "{args.timeseries}"\n'
+        f'timeseries = "{args.timeseries}"\n\n'
+        "[preprocessing]\n"
         "preprocess = false\n\n"
         "[search]\n"
         f"f_min = {args.f_min}\n"

@@ -10,6 +10,7 @@
 
 #include "loki/common/backend.hpp"
 #include "loki/common/types.hpp"
+#include "loki/io/preprocess.hpp"
 
 namespace loki::search {
 
@@ -21,12 +22,15 @@ class FFASearchConfig;
 struct FFATomlConfig {
     // [input]
     std::string timeseries_path;
+
+    // [preprocessing] (see docs/preprocessing.md)
     bool preprocess{true};
-    double filter_window{1.0};
-    /// Block-averaged running median for long windows. False keeps the exact
-    /// filter. See loki::math::subtract_running_filter.
-    bool fast_median{true};
-    SizeType fast_median_min_points{101};
+    /// Every option of loki::io::preprocess(). `preprocessing.filter_window`
+    /// is the requested baseline window; see to_preprocess_options().
+    io::PreprocessOptions preprocessing;
+    /// The effective baseline window is at least this many periods of f_min,
+    /// so a slow pulsar is not subtracted with the baseline. 0 disables.
+    double min_window_periods{10.0};
 
     // [search]
     double f_min{0.5};
@@ -61,6 +65,10 @@ struct FFATomlConfig {
     // [output]
     std::string outdir{"./"};
     std::string prefix{"loki"};
+
+    /// @brief Preprocessing options with the effective baseline window
+    /// `max(filter_window, min_window_periods / f_min)`.
+    [[nodiscard]] io::PreprocessOptions to_preprocess_options() const;
 
     /// @brief Convert parsed TOML parameters into an FFASearchConfig.
     [[nodiscard]] FFASearchConfig
