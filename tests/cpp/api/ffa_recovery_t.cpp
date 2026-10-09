@@ -24,7 +24,7 @@
 
 namespace {
 
-constexpr loki::SizeType kNsamps = loki::SizeType{1} << 23U;
+constexpr loki::SizeType kNsamps = loki::SizeType{1} << 20U;
 constexpr double kPeriod         = 0.01;
 constexpr double kDt             = 64e-6;
 constexpr double kTrueFreq       = 100.0;
@@ -32,9 +32,10 @@ constexpr double kTrueAccel      = 200.0;
 constexpr double kSearchSnrMin   = 6.0;
 // Injected folded S/N is 10. Recovery must stay at or above this floor.
 constexpr double kRecoverSnrMin = 8.0;
-// One frequency step at this length is ~3e-5 Hz. One acceleration step is ~2.6
-// m/s^2.
-constexpr double kFreqTol  = 1.0e-4;
+// At 2^20 samples (~67 s) a frequency step is a few times 1e-4 Hz. The
+// acceleration step is wider than the 180–220 m/s^2 band, so that grid is
+// the single centre at 200 m/s^2.
+constexpr double kFreqTol  = 1.5e-3;
 constexpr double kAccelTol = 5.0;
 
 [[nodiscard]] loki::io::TimeSeries

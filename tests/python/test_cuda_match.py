@@ -216,8 +216,10 @@ def test_ffa_jerk_cuda(
         (-1, 1),
         default_params["nsamps"] * default_params["tsamp"],
     )
+    # eta 2 covers the same paths as eta 1 with an 8x smaller grid; at eta 1
+    # comparing the 0.7G-element folds dominated the suite's runtime.
     cfg = libloki.configs.PulsarSearchConfig(
-        eta=1,
+        eta=2,
         param_limits=param_limits.limits,
         use_fourier=use_fourier,
         nthreads=8,

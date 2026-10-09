@@ -1,6 +1,9 @@
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
+#include <cstring>
 #include <numbers>
+#include <random>
 #include <span>
 #include <vector>
 
@@ -532,6 +535,54 @@ TEST_CASE("CUFFTManager C2R keeps complex input", "[fft][CUFFTManager]") {
     }
     // Out-of-place C2R writes the real buffer and leaves the spectrum alone.
     REQUIRE_FALSE(overwritten);
+}
+
+// The EP scorer runs C2R on a batch padded up to a multiple of 1024 rows
+// (irfft_folds_for_scoring) and reads only the first rows. That relies on
+// each row's output not depending on the batch size.
+TEST_CASE("CUFFTManager C2R rows do not depend on the batch size",
+          "[fft][CUFFTManager]") {
+    if (!cuda_device_available()) {
+        SKIP("No CUDA device");
+    }
+    loki::cuda_utils::CudaSetDeviceGuard device_guard(0);
+    constexpr SizeType kRows   = 777;
+    constexpr SizeType kPadded = 1024;
+    CUFFTManager gpu(0);
+    std::mt19937 rng(3);
+    std::normal_distribution<float> dist(0.0F, 1.0F);
+    for (const SizeType n_real :
+         {SizeType{32}, SizeType{64}, SizeType{100}, SizeType{128}}) {
+        for (const bool normalize : {true, false}) {
+            CAPTURE(n_real, normalize);
+            const SizeType n_complex = (n_real / 2) + 1;
+            std::vector<ComplexTypeCUDA> spec(kPadded * n_complex);
+            for (auto& c : spec) {
+                c = ComplexTypeCUDA(dist(rng), dist(rng));
+            }
+            thrust::device_vector<ComplexTypeCUDA> d_exact(
+                spec.begin(), spec.begin() + (kRows * n_complex));
+            thrust::device_vector<ComplexTypeCUDA> d_padded(spec.begin(),
+                                                            spec.end());
+            thrust::device_vector<float> d_out_exact(kRows * n_real);
+            thrust::device_vector<float> d_out_padded(kPadded * n_real);
+            gpu.irfft_batch(loki::cuda_utils::as_span(d_exact),
+                            loki::cuda_utils::as_span(d_out_exact), kRows,
+                            n_real, nullptr, normalize);
+            gpu.irfft_batch(loki::cuda_utils::as_span(d_padded),
+                            loki::cuda_utils::as_span(d_out_padded), kPadded,
+                            n_real, nullptr, normalize);
+            std::vector<float> exact(kRows * n_real);
+            std::vector<float> padded(kRows * n_real);
+            thrust::copy(d_out_exact.begin(), d_out_exact.end(), exact.begin());
+            thrust::copy(d_out_padded.begin(),
+                         d_out_padded.begin() +
+                             static_cast<std::ptrdiff_t>(kRows * n_real),
+                         padded.begin());
+            REQUIRE(std::memcmp(exact.data(), padded.data(),
+                                exact.size() * sizeof(float)) == 0);
+        }
+    }
 }
 
 TEST_CASE("CUFFTManager empty batch is a no-op", "[fft][CUFFTManager]") {

@@ -1130,21 +1130,24 @@ poly_taylor_branch_impl_cuda(cuda::std::span<const double> leaves_tree,
             branch_ws.leaf_branch_count, branch_ws.leaf_output_offset, n_leaves,
             stream),
         "cub::DeviceScan::ExclusiveSum failed");
-    uint32_t last_offset, last_count;
+    uint32_t* const last_offset =
+        scratch_ws.h_scalars + memory::CUBScratchArena::kBranchLastOffset;
+    uint32_t* const last_count =
+        scratch_ws.h_scalars + memory::CUBScratchArena::kBranchLastCount;
     cuda_utils::check_cuda_call(
-        cudaMemcpyAsync(&last_offset,
+        cudaMemcpyAsync(last_offset,
                         branch_ws.leaf_output_offset + (n_leaves - 1),
                         sizeof(uint32_t), cudaMemcpyDeviceToHost, stream),
         "cudaMemcpyAsync failed");
     cuda_utils::check_cuda_call(
-        cudaMemcpyAsync(&last_count,
+        cudaMemcpyAsync(last_count,
                         branch_ws.leaf_branch_count + (n_leaves - 1),
                         sizeof(uint32_t), cudaMemcpyDeviceToHost, stream),
         "cudaMemcpyAsync failed");
     // Unavoidable sync
     cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
                                 "cudaStreamSynchronize branch kernel failed");
-    const SizeType n_leaves_branched = last_offset + last_count;
+    const SizeType n_leaves_branched = *last_offset + *last_count;
     if (n_leaves_branched == 0) {
         return n_leaves_branched;
     }
@@ -1162,9 +1165,9 @@ poly_taylor_branch_impl_cuda(cuda::std::span<const double> leaves_tree,
                             n_leaves * kLeavesStride * sizeof(double),
                             cudaMemcpyDeviceToDevice, stream),
             "cudaMemcpyAsync failed");
-        thrust::sequence(thrust::cuda::par.on(stream), leaves_origins.data(),
-                         leaves_origins.data() + n_leaves,
-                         static_cast<uint32_t>(0));
+        thrust::sequence(
+            thrust::cuda::par_nosync.on(stream), leaves_origins.data(),
+            leaves_origins.data() + n_leaves, static_cast<uint32_t>(0));
 
         return n_leaves_branched;
     }

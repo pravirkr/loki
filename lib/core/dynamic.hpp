@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <span>
 #include <tuple>
 #include <vector>
@@ -95,7 +96,7 @@ public:
            std::span<FoldType> folds_tree,
            std::span<float> scores_tree,
            std::span<float> scores_ep_tree,
-           std::span<const SizeType> idx_segments,
+           std::span<const uint32_t> idx_segments,
            std::span<const std::pair<double, double>> coord_segments,
            std::pair<double, double> coord_cur,
            std::span<SizeType> scratch_param_indices,
@@ -133,18 +134,28 @@ protected:
     std::vector<ComplexType> m_scratch_folds_c;
     std::vector<float> m_scratch_folds_r;
     math::FFTWManager m_fft_manager;
+    // FFT manager owned by the caller (the EP sweep), or null to use
+    // m_fft_manager. It outlives the functor, so its plans are shared.
+    math::FFTWManager* m_external_fft{nullptr};
     // Cache for snr_boxcar_batch
     detection::BoxcarWidthsCache m_boxcar_widths_cache;
     detection::BoxcarKadaneCache m_boxcar_kadane_cache;
 
-    // Constructor for all derived classes
+    // Constructor for all derived classes. With @p external_fft, the plans for
+    // this nbins must already be prepared there, and the functor builds none.
     BasePruneDPFuncts(std::span<const SizeType> param_grid_count_init,
                       std::span<const double> dparams_init,
                       SizeType nseg_ffa,
                       double tseg_ffa,
                       search::PulsarSearchConfig cfg,
                       SizeType batch_size,
-                      SizeType branch_max);
+                      SizeType branch_max,
+                      math::FFTWManager* external_fft = nullptr);
+
+    /** The FFT manager of the IRFFT: the external one if given. */
+    [[nodiscard]] math::FFTWManager& get_fft() noexcept {
+        return m_external_fft != nullptr ? *m_external_fft : m_fft_manager;
+    }
 
     /** Copy complex folds to scratch, IRFFT to @p dst (ComplexType EP only). */
     void irfft_for_scoring(std::span<const ComplexType> src,
@@ -239,7 +250,8 @@ public:
                             double tseg_ffa,
                             search::PulsarSearchConfig cfg,
                             SizeType batch_size,
-                            SizeType branch_max);
+                            SizeType branch_max,
+                            math::FFTWManager* external_fft = nullptr);
 
     SizeType branch(std::span<double> leaves_tree,
                     std::span<double> leaves_branch,
@@ -268,7 +280,7 @@ public:
                 std::span<FoldType> folds_tree,
                 std::span<float> scores_tree,
                 std::span<float> scores_ep_tree,
-                std::span<const SizeType> idx_segments,
+                std::span<const uint32_t> idx_segments,
                 std::span<const std::pair<double, double>> coord_segments,
                 std::pair<double, double> coord_cur,
                 std::span<SizeType> scratch_param_indices,
@@ -294,7 +306,8 @@ public:
                                double tseg_ffa,
                                search::PulsarSearchConfig cfg,
                                SizeType batch_size,
-                               SizeType branch_max);
+                               SizeType branch_max,
+                               math::FFTWManager* external_fft = nullptr);
 
     SizeType branch(std::span<double> leaves_tree,
                     std::span<double> leaves_branch,
@@ -323,7 +336,7 @@ public:
                 std::span<FoldType> folds_tree,
                 std::span<float> scores_tree,
                 std::span<float> scores_ep_tree,
-                std::span<const SizeType> idx_segments,
+                std::span<const uint32_t> idx_segments,
                 std::span<const std::pair<double, double>> coord_segments,
                 std::pair<double, double> coord_cur,
                 std::span<SizeType> scratch_param_indices,
@@ -349,7 +362,8 @@ public:
                             double tseg_ffa,
                             search::PulsarSearchConfig cfg,
                             SizeType batch_size,
-                            SizeType branch_max);
+                            SizeType branch_max,
+                            math::FFTWManager* external_fft = nullptr);
 
     SizeType branch(std::span<double> leaves_tree,
                     std::span<double> leaves_branch,
@@ -383,7 +397,7 @@ public:
                 std::span<FoldType> folds_tree,
                 std::span<float> scores_tree,
                 std::span<float> scores_ep_tree,
-                std::span<const SizeType> idx_segments,
+                std::span<const uint32_t> idx_segments,
                 std::span<const std::pair<double, double>> coord_segments,
                 std::pair<double, double> coord_cur,
                 std::span<SizeType> scratch_param_indices,
@@ -405,7 +419,8 @@ create_prune_dp_functs(std::string_view poly_basis,
                        double tseg_ffa,
                        search::PulsarSearchConfig cfg,
                        SizeType batch_size,
-                       SizeType branch_max);
+                       SizeType branch_max,
+                       math::FFTWManager* external_fft = nullptr);
 
 // Type aliases for convenience
 using PrunePolyTaylorDPFunctsFloat   = PrunePolyTaylorDPFuncts<float>;

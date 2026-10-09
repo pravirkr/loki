@@ -44,6 +44,13 @@ namespace {
 
 /// Keys removed from the schema, with what replaces them.
 [[nodiscard]] std::string_view removed_key_hint(std::string_view path) {
+    if (path == "rfi" || path.starts_with("rfi.") ||
+        path.find("harvest") != std::string_view::npos ||
+        path.find("pulsar_mask") != std::string_view::npos ||
+        path.find("impulsive") != std::string_view::npos) {
+        return "RFI options (pulsar mask, harvesting, impulsive veto) are not "
+               "available in the EP search yet";
+    }
     if (path == "cuda" || path.starts_with("cuda.")) {
         return "the [cuda] table was removed; use [performance] backend = "
                "\"cuda\" and device = <id>";
@@ -71,12 +78,35 @@ void collect_unknown_keys(const toml::table& table,
     }
 }
 
-void validate_ffa_toml_document(const toml::table& root) {
+/// Validates a search document. With @p allow_ep the EP keys are accepted on
+/// top of the FFA ones; otherwise an [ep] table is an unknown key.
+void validate_toml_document(const toml::table& root,
+                            bool allow_ep,
+                            std::string_view label) {
     static constexpr std::array kTopLevel{
         std::string_view{"input"},
         std::string_view{"search"},
         std::string_view{"performance"},
         std::string_view{"output"},
+    };
+    static constexpr std::array kTopLevelEP{
+        std::string_view{"input"},  std::string_view{"search"},
+        std::string_view{"ep"},     std::string_view{"performance"},
+        std::string_view{"output"},
+    };
+    static constexpr std::array kEPKeys{
+        std::string_view{"poly_basis"},
+        std::string_view{"min_pd"},
+        std::string_view{"ref_ducy"},
+        std::string_view{"prune_poly_order"},
+        std::string_view{"n_runs"},
+        std::string_view{"ref_segs"},
+        std::string_view{"p_orb_min"},
+        std::string_view{"m_c_max"},
+        std::string_view{"m_p_min"},
+        std::string_view{"propagator_significance"},
+        std::string_view{"validation_significance"},
+        std::string_view{"use_conservative_tile"},
     };
     static constexpr std::array kInputKeys{
         std::string_view{"timeseries"},
@@ -119,10 +149,21 @@ void validate_ffa_toml_document(const toml::table& root) {
         std::string_view{"outdir"},
         std::string_view{"prefix"},
     };
+    static constexpr std::array kOutputKeysEP{
+        std::string_view{"outdir"},
+        std::string_view{"prefix"},
+        std::string_view{"plan_cache"},
+    };
+    const std::span<const std::string_view> top_level =
+        allow_ep ? std::span<const std::string_view>(kTopLevelEP)
+                 : std::span<const std::string_view>(kTopLevel);
+    const std::span<const std::string_view> output_keys =
+        allow_ep ? std::span<const std::string_view>(kOutputKeysEP)
+                 : std::span<const std::string_view>(kOutputKeys);
 
     std::vector<std::string> errors;
     for (const auto& [key, _] : root) {
-        if (!is_allowed_key(key.str(), kTopLevel)) {
+        if (!is_allowed_key(key.str(), top_level)) {
             const auto hint = removed_key_hint(key.str());
             errors.push_back(
                 hint.empty()
@@ -140,7 +181,12 @@ void validate_ffa_toml_document(const toml::table& root) {
         collect_unknown_keys(*perf, kPerformanceKeys, "performance", errors);
     }
     if (const auto* output = root["output"].as_table()) {
-        collect_unknown_keys(*output, kOutputKeys, "output", errors);
+        collect_unknown_keys(*output, output_keys, "output", errors);
+    }
+    if (allow_ep) {
+        if (const auto* ep = root["ep"].as_table()) {
+            collect_unknown_keys(*ep, kEPKeys, "ep", errors);
+        }
     }
     if (!errors.empty()) {
         std::string message = errors.front();
@@ -149,7 +195,7 @@ void validate_ffa_toml_document(const toml::table& root) {
             message += errors[i];
         }
         throw std::invalid_argument(
-            std::format("Invalid FFA TOML config: {}", message));
+            std::format("Invalid {} TOML config: {}", label, message));
     }
 }
 
@@ -269,145 +315,154 @@ void FFATomlConfig::write_default(const std::filesystem::path& path) {
     file << default_toml_string();
 }
 
+namespace {
+
+/// Reads the FFA tables ([input], [search], [performance], [output]) of a
+/// document that has already been validated.
+FFATomlConfig read_ffa_tables(const toml::table& tbl) {
+    FFATomlConfig cfg;
+
+    // [input] table
+    if (const auto* input = tbl["input"].as_table()) {
+        if (auto val = (*input)["timeseries"].value<std::string>()) {
+            cfg.timeseries_path = *val;
+        }
+        if (auto val = (*input)["preprocess"].value<bool>()) {
+            cfg.preprocess = *val;
+        }
+        if (auto val = (*input)["filter_window"].value<double>()) {
+            cfg.filter_window = *val;
+        }
+        if (auto val = (*input)["fast_median"].value<bool>()) {
+            cfg.fast_median = *val;
+        }
+        if (auto val = (*input)["fast_median_min_points"].value<int64_t>()) {
+            const auto points = require_non_negative_int64(
+                *val, "input.fast_median_min_points");
+            if (points < 1) {
+                throw std::invalid_argument(
+                    "input.fast_median_min_points must be >= 1");
+            }
+            cfg.fast_median_min_points = static_cast<SizeType>(points);
+        }
+        if (auto val = (*input)["nsamps"].value<int64_t>()) {
+            cfg.nsamps = static_cast<SizeType>(
+                require_non_negative_int64(*val, "input.nsamps"));
+        }
+        if (const auto val = (*input)["tsamp"].value<double>()) {
+            cfg.tsamp = val;
+        } else if (const auto val_dt = (*input)["dt"].value<double>()) {
+            cfg.tsamp = val_dt;
+        }
+    }
+
+    // [search] table
+    if (const auto* search = tbl["search"].as_table()) {
+        if (auto val = (*search)["f_min"].value<double>()) {
+            cfg.f_min = *val;
+        }
+        if (auto val = (*search)["f_max"].value<double>()) {
+            cfg.f_max = *val;
+        }
+        if (const auto val = (*search)["acc_min"].value<double>()) {
+            cfg.acc_min = val;
+        }
+        if (const auto val = (*search)["acc_max"].value<double>()) {
+            cfg.acc_max = val;
+        }
+        if (const auto val = (*search)["jerk_min"].value<double>()) {
+            cfg.jerk_min = val;
+        }
+        if (const auto val = (*search)["jerk_max"].value<double>()) {
+            cfg.jerk_max = val;
+        }
+        if (auto val = (*search)["nbins"].value<int64_t>()) {
+            cfg.nbins = static_cast<SizeType>(
+                require_non_negative_int64(*val, "search.nbins"));
+        }
+        if (auto val = (*search)["eta"].value<double>()) {
+            cfg.eta = *val;
+        }
+        if (auto val = (*search)["ducy_max"].value<double>()) {
+            cfg.ducy_max = *val;
+        }
+        if (auto val = (*search)["wtsp"].value<double>()) {
+            cfg.wtsp = *val;
+        }
+        if (auto val = (*search)["snr_min"].value<double>()) {
+            cfg.snr_min = *val;
+        }
+        if (auto val = (*search)["use_fourier"].value<bool>()) {
+            cfg.use_fourier = *val;
+        }
+        if (auto val = (*search)["use_boxcar_kadane"].value<bool>()) {
+            cfg.use_boxcar_kadane = *val;
+        }
+    }
+
+    // [performance] table
+    if (const auto* perf = tbl["performance"].as_table()) {
+        if (auto val = (*perf)["nthreads"].value<int64_t>()) {
+            cfg.nthreads = static_cast<int>(
+                require_non_negative_int64(*val, "performance.nthreads"));
+        }
+        if (auto val = (*perf)["max_process_memory_gb"].value<double>()) {
+            cfg.max_process_memory_gb = *val;
+        }
+        if (auto val = (*perf)["octave_scale"].value<double>()) {
+            cfg.octave_scale = *val;
+        }
+        if (auto val = (*perf)["nbins_max"].value<int64_t>()) {
+            cfg.nbins_max = static_cast<SizeType>(
+                require_non_negative_int64(*val, "performance.nbins_max"));
+        }
+        if (auto val = (*perf)["nbins_min_lossy_bf"].value<int64_t>()) {
+            cfg.nbins_min_lossy_bf =
+                static_cast<SizeType>(require_non_negative_int64(
+                    *val, "performance.nbins_min_lossy_bf"));
+        }
+        if (auto val = (*perf)["bseg_brute"].value<int64_t>()) {
+            cfg.bseg_brute = static_cast<SizeType>(
+                require_non_negative_int64(*val, "performance.bseg_brute"));
+        }
+        if (auto val = (*perf)["bseg_ffa"].value<int64_t>()) {
+            cfg.bseg_ffa = static_cast<SizeType>(
+                require_non_negative_int64(*val, "performance.bseg_ffa"));
+        }
+        if (auto val = (*perf)["max_passing_candidates"].value<int64_t>()) {
+            cfg.max_passing_candidates =
+                static_cast<SizeType>(require_non_negative_int64(
+                    *val, "performance.max_passing_candidates"));
+        }
+        if (auto val = (*perf)["backend"].value<std::string>()) {
+            cfg.backend = parse_backend(*val);
+        }
+        if (auto val = (*perf)["device"].value<int64_t>()) {
+            cfg.device = static_cast<int>(
+                require_non_negative_int64(*val, "performance.device"));
+        }
+    }
+
+    // [output] table
+    if (const auto* output = tbl["output"].as_table()) {
+        if (auto val = (*output)["outdir"].value<std::string>()) {
+            cfg.outdir = *val;
+        }
+        if (auto val = (*output)["prefix"].value<std::string>()) {
+            cfg.prefix = *val;
+        }
+    }
+
+    return cfg;
+}
+
+} // namespace
+
 FFATomlConfig FFATomlConfig::from_string(std::string_view toml_content) {
     try {
         const toml::table tbl = toml::parse(toml_content);
-        validate_ffa_toml_document(tbl);
-        FFATomlConfig cfg;
-
-        // [input] table
-        if (const auto* input = tbl["input"].as_table()) {
-            if (auto val = (*input)["timeseries"].value<std::string>()) {
-                cfg.timeseries_path = *val;
-            }
-            if (auto val = (*input)["preprocess"].value<bool>()) {
-                cfg.preprocess = *val;
-            }
-            if (auto val = (*input)["filter_window"].value<double>()) {
-                cfg.filter_window = *val;
-            }
-            if (auto val = (*input)["fast_median"].value<bool>()) {
-                cfg.fast_median = *val;
-            }
-            if (auto val =
-                    (*input)["fast_median_min_points"].value<int64_t>()) {
-                const auto points = require_non_negative_int64(
-                    *val, "input.fast_median_min_points");
-                if (points < 1) {
-                    throw std::invalid_argument(
-                        "input.fast_median_min_points must be >= 1");
-                }
-                cfg.fast_median_min_points = static_cast<SizeType>(points);
-            }
-            if (auto val = (*input)["nsamps"].value<int64_t>()) {
-                cfg.nsamps = static_cast<SizeType>(
-                    require_non_negative_int64(*val, "input.nsamps"));
-            }
-            if (const auto val = (*input)["tsamp"].value<double>()) {
-                cfg.tsamp = val;
-            } else if (const auto val_dt = (*input)["dt"].value<double>()) {
-                cfg.tsamp = val_dt;
-            }
-        }
-
-        // [search] table
-        if (const auto* search = tbl["search"].as_table()) {
-            if (auto val = (*search)["f_min"].value<double>()) {
-                cfg.f_min = *val;
-            }
-            if (auto val = (*search)["f_max"].value<double>()) {
-                cfg.f_max = *val;
-            }
-            if (const auto val = (*search)["acc_min"].value<double>()) {
-                cfg.acc_min = val;
-            }
-            if (const auto val = (*search)["acc_max"].value<double>()) {
-                cfg.acc_max = val;
-            }
-            if (const auto val = (*search)["jerk_min"].value<double>()) {
-                cfg.jerk_min = val;
-            }
-            if (const auto val = (*search)["jerk_max"].value<double>()) {
-                cfg.jerk_max = val;
-            }
-            if (auto val = (*search)["nbins"].value<int64_t>()) {
-                cfg.nbins = static_cast<SizeType>(
-                    require_non_negative_int64(*val, "search.nbins"));
-            }
-            if (auto val = (*search)["eta"].value<double>()) {
-                cfg.eta = *val;
-            }
-            if (auto val = (*search)["ducy_max"].value<double>()) {
-                cfg.ducy_max = *val;
-            }
-            if (auto val = (*search)["wtsp"].value<double>()) {
-                cfg.wtsp = *val;
-            }
-            if (auto val = (*search)["snr_min"].value<double>()) {
-                cfg.snr_min = *val;
-            }
-            if (auto val = (*search)["use_fourier"].value<bool>()) {
-                cfg.use_fourier = *val;
-            }
-            if (auto val = (*search)["use_boxcar_kadane"].value<bool>()) {
-                cfg.use_boxcar_kadane = *val;
-            }
-        }
-
-        // [performance] table
-        if (const auto* perf = tbl["performance"].as_table()) {
-            if (auto val = (*perf)["nthreads"].value<int64_t>()) {
-                cfg.nthreads = static_cast<int>(
-                    require_non_negative_int64(*val, "performance.nthreads"));
-            }
-            if (auto val = (*perf)["max_process_memory_gb"].value<double>()) {
-                cfg.max_process_memory_gb = *val;
-            }
-            if (auto val = (*perf)["octave_scale"].value<double>()) {
-                cfg.octave_scale = *val;
-            }
-            if (auto val = (*perf)["nbins_max"].value<int64_t>()) {
-                cfg.nbins_max = static_cast<SizeType>(
-                    require_non_negative_int64(*val, "performance.nbins_max"));
-            }
-            if (auto val = (*perf)["nbins_min_lossy_bf"].value<int64_t>()) {
-                cfg.nbins_min_lossy_bf =
-                    static_cast<SizeType>(require_non_negative_int64(
-                        *val, "performance.nbins_min_lossy_bf"));
-            }
-            if (auto val = (*perf)["bseg_brute"].value<int64_t>()) {
-                cfg.bseg_brute = static_cast<SizeType>(
-                    require_non_negative_int64(*val, "performance.bseg_brute"));
-            }
-            if (auto val = (*perf)["bseg_ffa"].value<int64_t>()) {
-                cfg.bseg_ffa = static_cast<SizeType>(
-                    require_non_negative_int64(*val, "performance.bseg_ffa"));
-            }
-            if (auto val = (*perf)["max_passing_candidates"].value<int64_t>()) {
-                cfg.max_passing_candidates =
-                    static_cast<SizeType>(require_non_negative_int64(
-                        *val, "performance.max_passing_candidates"));
-            }
-            if (auto val = (*perf)["backend"].value<std::string>()) {
-                cfg.backend = parse_backend(*val);
-            }
-            if (auto val = (*perf)["device"].value<int64_t>()) {
-                cfg.device = static_cast<int>(
-                    require_non_negative_int64(*val, "performance.device"));
-            }
-        }
-
-        // [output] table
-        if (const auto* output = tbl["output"].as_table()) {
-            if (auto val = (*output)["outdir"].value<std::string>()) {
-                cfg.outdir = *val;
-            }
-            if (auto val = (*output)["prefix"].value<std::string>()) {
-                cfg.prefix = *val;
-            }
-        }
-
-        return cfg;
+        validate_toml_document(tbl, /*allow_ep=*/false, "FFA");
+        return read_ffa_tables(tbl);
     } catch (const toml::parse_error& err) {
         throw std::runtime_error(std::format(
             "TOML parse error at line {}, col {}: {}", err.source().begin.line,
@@ -1377,6 +1432,348 @@ EPSearchConfig EPSearchConfig::get_updated_ep_config(SizeType nbins,
                           m_ep_impl->m_propagator_significance,
                           m_ep_impl->m_validation_significance,
                           m_ep_impl->m_use_conservative_tile);
+}
+
+// ==============================================================================
+// EPTomlConfig Implementation
+// ==============================================================================
+
+namespace {
+
+/// A number that may be written as an integer. Absent keys give nullopt; a key
+/// of another type is an error, not a silent default.
+[[nodiscard]] std::optional<double> read_number(const toml::table& table,
+                                                std::string_view key,
+                                                std::string_view path) {
+    const auto node = table[key];
+    if (!node) {
+        return std::nullopt;
+    }
+    if (const auto val = node.value<double>()) {
+        return *val;
+    }
+    if (const auto ival = node.value<int64_t>()) {
+        return static_cast<double>(*ival);
+    }
+    throw std::invalid_argument(std::format("{} must be a number", path));
+}
+
+void require_positive(double value, std::string_view path) {
+    if (!utils::is_finite(value) || value <= 0.0) {
+        throw std::invalid_argument(
+            std::format("{} must be a positive number (got {})", path, value));
+    }
+}
+
+/// Reads the [ep] table and output.plan_cache of a validated document.
+void read_ep_tables(const toml::table& tbl, EPTomlConfig& cfg) {
+    if (const auto* ep = tbl["ep"].as_table()) {
+        if (auto val = (*ep)["poly_basis"].value<std::string>()) {
+            cfg.poly_basis = *val;
+        }
+        if (const auto val = read_number(*ep, "min_pd", "ep.min_pd")) {
+            cfg.min_pd = static_cast<float>(*val);
+        }
+        if (const auto val = read_number(*ep, "ref_ducy", "ep.ref_ducy")) {
+            cfg.ref_ducy = static_cast<float>(*val);
+        }
+        if (auto val = (*ep)["prune_poly_order"].value<int64_t>()) {
+            cfg.prune_poly_order = static_cast<SizeType>(
+                require_non_negative_int64(*val, "ep.prune_poly_order"));
+        }
+        if (auto val = (*ep)["n_runs"].value<int64_t>()) {
+            cfg.n_runs = static_cast<SizeType>(
+                require_non_negative_int64(*val, "ep.n_runs"));
+        }
+        if (const auto* segs = (*ep)["ref_segs"].as_array()) {
+            std::vector<SizeType> ref_segs;
+            ref_segs.reserve(segs->size());
+            for (const auto& elem : *segs) {
+                const auto seg = elem.value<int64_t>();
+                if (!seg) {
+                    throw std::invalid_argument(
+                        "ep.ref_segs must be an array of integers");
+                }
+                ref_segs.push_back(static_cast<SizeType>(
+                    require_non_negative_int64(*seg, "ep.ref_segs")));
+            }
+            cfg.ref_segs = std::move(ref_segs);
+        }
+        if (const auto val = read_number(*ep, "p_orb_min", "ep.p_orb_min")) {
+            cfg.p_orb_min = *val;
+        }
+        if (const auto val = read_number(*ep, "m_c_max", "ep.m_c_max")) {
+            cfg.m_c_max = *val;
+        }
+        if (const auto val = read_number(*ep, "m_p_min", "ep.m_p_min")) {
+            cfg.m_p_min = *val;
+        }
+        if (const auto val = read_number(*ep, "propagator_significance",
+                                         "ep.propagator_significance")) {
+            cfg.propagator_significance = *val;
+        }
+        if (const auto val = read_number(*ep, "validation_significance",
+                                         "ep.validation_significance")) {
+            cfg.validation_significance = *val;
+        }
+        if (auto val = (*ep)["use_conservative_tile"].value<bool>()) {
+            cfg.use_conservative_tile = *val;
+        }
+    }
+    if (const auto* output = tbl["output"].as_table()) {
+        if (auto val = (*output)["plan_cache"].value<std::string>()) {
+            cfg.plan_cache = std::filesystem::path(*val);
+        }
+    }
+}
+
+/// Range checks that the types cannot express. Used on parse and before a
+/// config is turned into a search config.
+void validate_ep_config(const EPTomlConfig& cfg) {
+    if (cfg.poly_basis != "taylor" && cfg.poly_basis != "chebyshev") {
+        throw std::invalid_argument(std::format(
+            "ep.poly_basis must be 'taylor' or 'chebyshev' (got '{}')",
+            cfg.poly_basis));
+    }
+    for (const auto& [name, value] : {std::pair{"ep.min_pd", cfg.min_pd},
+                                      std::pair{"ep.ref_ducy", cfg.ref_ducy}}) {
+        if (!utils::is_finite(value) || value <= 0.0F || value > 1.0F) {
+            throw std::invalid_argument(
+                std::format("{} must be in (0, 1] (got {})", name, value));
+        }
+    }
+    if (cfg.prune_poly_order < 1) {
+        throw std::invalid_argument(std::format(
+            "ep.prune_poly_order must be >= 1 (got {})", cfg.prune_poly_order));
+    }
+    if (cfg.n_runs.has_value() && *cfg.n_runs < 1) {
+        throw std::invalid_argument("ep.n_runs must be >= 1");
+    }
+    if (cfg.ref_segs.has_value()) {
+        if (cfg.ref_segs->empty()) {
+            throw std::invalid_argument(
+                "ep.ref_segs must not be empty (omit it to prune every run)");
+        }
+        auto segs = *cfg.ref_segs;
+        std::ranges::sort(segs);
+        if (std::ranges::adjacent_find(segs) != segs.end()) {
+            throw std::invalid_argument("ep.ref_segs must not repeat a run");
+        }
+    }
+    require_positive(cfg.p_orb_min, "ep.p_orb_min");
+    require_positive(cfg.m_c_max, "ep.m_c_max");
+    require_positive(cfg.m_p_min, "ep.m_p_min");
+    require_positive(cfg.propagator_significance, "ep.propagator_significance");
+    require_positive(cfg.validation_significance, "ep.validation_significance");
+}
+
+} // namespace
+
+std::string_view EPTomlConfig::default_toml_string() {
+    return R"(# ==============================================================================
+# Loki EP Pulsar Search Configuration (Extreme Pruning)
+# ==============================================================================
+# Every [input], [search], [performance] and [output] key of the FFA file has
+# the same meaning here. This file adds the [ep] table and output.plan_cache.
+
+[input]
+# Path to input timeseries (.tim or .dat format), read by `search ep`
+timeseries = "input.tim"
+
+# Sample count and sample interval. `search ep --plan-only` reads no data, so
+# these are required there. A search takes them from the timeseries.
+nsamps = 2097152
+tsamp = 0.0000640
+
+# Preprocess timeseries: subtract running median baseline and z-score normalize
+preprocess = true
+
+# Running median filter window in seconds (used if preprocess = true)
+filter_window = 1.0
+
+# Approximate long running-median windows by block averaging. Set false for
+# the exact sliding median. fast_median_min_points is the short-series width.
+fast_median = true
+fast_median_min_points = 101
+
+[search]
+# Search frequency range in Hz (Period P = 1 / f)
+f_min = 0.5
+f_max = 100.0
+
+# Optional line-of-sight acceleration limits in m/s^2 (omit or set equal to 0 for freq-only)
+acc_min = 0.0
+acc_max = 0.0
+
+# Optional line-of-sight jerk limits in m/s^3 (omit or set equal to 0 for no jerk search)
+jerk_min = 0.0
+jerk_max = 0.0
+
+# Number of profile bins at shortest search period (must be >= 2 and power of 2)
+nbins = 64
+
+# Tolerance in bins across observation duration (typically 1.0)
+eta = 1.0
+
+# Maximum pulse duty cycle (FWTM in phase) for boxcar template width trials
+ducy_max = 0.2
+
+# Boxcar width trial geometric scale factor (typically 1.2 - 1.5)
+wtsp = 1.5
+
+# Minimum signal-to-noise ratio detection threshold for candidate extraction
+snr_min = 5.0
+
+# Folding domain: true for Fourier-domain FFA (recommended), false for Time-domain FFA
+use_fourier = true
+
+# Peak detection must be the multi-width boxcar; Kadane is not supported
+use_boxcar_kadane = false
+
+[ep]
+# Polynomial basis of the pruning: "taylor" or "chebyshev"
+poly_basis = "taylor"
+
+# Minimum detection probability of the threshold scheme, in (0, 1]
+min_pd = 0.1
+
+# Reference duty cycle of the pruning, in (0, 1]
+ref_ducy = 0.1
+
+# Polynomial order of the pruning (>= 1)
+prune_poly_order = 3
+
+# Number of runs (reference segments) to prune. Set either n_runs or ref_segs,
+# not both: the pruning needs the runs it prunes.
+n_runs = 16
+
+# Explicit reference segments, instead of n_runs (exclusive with n_runs)
+# ref_segs = [0, 1]
+
+# Orbit and mass priors of the search
+p_orb_min = 0.00001
+m_c_max = 10.0
+m_p_min = 1.4
+
+# Significance levels of the propagator and the validation
+propagator_significance = 2.0
+validation_significance = 5.0
+
+# Use the conservative tile of the Fourier search
+use_conservative_tile = false
+
+[performance]
+# Number of CPU OpenMP threads (0 = all hardware threads)
+nthreads = 4
+
+# Maximum memory cap in GB: process RSS on CPU, device memory on CUDA
+max_process_memory_gb = 8.0
+
+# Octave scaling factor between successive search bands (2.0 = octave doubling)
+octave_scale = 2.0
+
+# Maximum number of fold bins for long-period bands
+nbins_max = 1024
+
+# Minimum number of bins for lossy brute force initial stage
+nbins_min_lossy_bf = 64
+
+# Maximum candidate buffer capacity held in memory before streaming to disk
+max_passing_candidates = 4194304
+
+# Execution backend: "cpu", or "cuda" (requires a CUDA-enabled Loki build)
+backend = "cpu"
+
+# GPU device ordinal, used when backend = "cuda"
+device = 0
+
+# FFA segment length in samples: a power of 2 below nsamps, since the pruning
+# needs at least one FFA level. Use nsamps / 128 for a long series.
+bseg_ffa = 16384
+
+[output]
+# Directory where the results file is saved
+outdir = "./"
+
+# Output filename prefix (results saved as <outdir>/<prefix>_ep_results.h5)
+prefix = "loki"
+
+# Plan cache (HDF5). `search ep --plan-only` writes <outdir>/<prefix>_ep_plan.h5
+# when this is omitted. A search reuses a cache that is named here.
+# plan_cache = "./loki_ep_plan.h5"
+)";
+}
+
+void EPTomlConfig::write_default(const std::filesystem::path& path) {
+    if (path.has_parent_path()) {
+        std::filesystem::create_directories(path.parent_path());
+    }
+    std::ofstream file(path);
+    if (!file.is_open()) {
+        throw std::runtime_error(
+            std::format("Could not open file for writing default config: '{}'",
+                        path.string()));
+    }
+    file << default_toml_string();
+}
+
+EPTomlConfig EPTomlConfig::from_string(std::string_view toml_content) {
+    try {
+        const toml::table tbl = toml::parse(toml_content);
+        validate_toml_document(tbl, /*allow_ep=*/true, "EP");
+        EPTomlConfig cfg;
+        static_cast<FFATomlConfig&>(cfg) = read_ffa_tables(tbl);
+        read_ep_tables(tbl, cfg);
+        validate_ep_config(cfg);
+        return cfg;
+    } catch (const toml::parse_error& err) {
+        throw std::runtime_error(std::format(
+            "TOML parse error at line {}, col {}: {}", err.source().begin.line,
+            err.source().begin.column, err.description()));
+    }
+}
+
+EPTomlConfig EPTomlConfig::load(const std::filesystem::path& path) {
+    if (!std::filesystem::exists(path)) {
+        throw std::runtime_error(
+            std::format("Configuration file not found: '{}'", path.string()));
+    }
+    std::ifstream file(path);
+    if (!file.is_open()) {
+        throw std::runtime_error(std::format(
+            "Could not open configuration file: '{}'", path.string()));
+    }
+    const std::string content((std::istreambuf_iterator<char>(file)),
+                              std::istreambuf_iterator<char>());
+    return from_string(content);
+}
+
+EPSearchConfig
+EPTomlConfig::to_ep_search_config(std::optional<SizeType> override_nsamps,
+                                  std::optional<double> override_tsamp) const {
+    validate_ep_config(*this);
+    // Checked here, not on parse: the command line may still set the runs.
+    if (n_runs.has_value() && ref_segs.has_value()) {
+        throw std::invalid_argument(
+            "ep.n_runs and ep.ref_segs are exclusive: set one of them");
+    }
+    if (!n_runs.has_value() && !ref_segs.has_value()) {
+        throw std::invalid_argument(
+            "ep.n_runs or ep.ref_segs must be set: the pruning needs the runs "
+            "it prunes");
+    }
+    auto ffa = to_search_config(override_nsamps, override_tsamp);
+    // The pruning needs at least one FFA level above the brute-force segment,
+    // so the FFA segment must be shorter than the series.
+    if (ffa.get_bseg_ffa() >= ffa.get_nsamps()) {
+        throw std::invalid_argument(std::format(
+            "performance.bseg_ffa ({}) must be below nsamps ({}): the EP "
+            "pruning needs at least one FFA level",
+            ffa.get_bseg_ffa(), ffa.get_nsamps()));
+    }
+    return EPSearchConfig(std::move(ffa), prune_poly_order, p_orb_min, m_c_max,
+                          m_p_min, propagator_significance,
+                          validation_significance, use_conservative_tile);
 }
 
 } // namespace loki::search

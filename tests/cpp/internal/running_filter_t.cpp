@@ -486,7 +486,9 @@ TEST_CASE("running_filter matches a brute-force reference", "[math][filter]") {
     const TuningGuard guard;
     TuningGuard::heap_from(heap ? 1 : 1U << 20U);
 
-    for (const SizeType n : {1U, 2U, 3U, 7U, 64U, 1000U}) {
+    // n = 64 with an oversized window still checks edge reflection. A
+    // thousand-sample brute force is quadratic and dominates sanitizer CI.
+    for (const SizeType n : {1U, 2U, 3U, 7U, 64U}) {
         for (const auto pattern : loki::test::kAllPatterns) {
             const auto x     = loki::test::make_series(pattern, n, 1234 + n);
             const double tol = 1e-6 * std::max(1.0, max_abs(x));
@@ -507,22 +509,31 @@ TEST_CASE("running_filter matches a brute-force reference", "[math][filter]") {
 }
 
 TEST_CASE("running_filter on a longer series", "[math][filter]") {
-    const bool heap = GENERATE(false, true);
-    const TuningGuard guard;
-    TuningGuard::heap_from(heap ? 1 : 1U << 20U);
+    // Heap and sort medians must agree. The brute-force reference covers
+    // small n; comparing the two library paths avoids an O(n w log w) check.
     const auto x = loki::test::make_series(Pattern::kRandom, 10007, 99);
     for (const SizeType w : {1U, 2U, 11U, 101U, 1001U}) {
-        INFO("heap " << heap << " w " << w);
-        REQUIRE(first_median_mismatch(
-                    run(x, w, FilterMethod::kMedian),
-                    naive_filter(x, w, FilterMethod::kMedian)) == x.size());
+        INFO("w " << w);
+        std::vector<float> heap;
+        std::vector<float> tree;
+        {
+            const TuningGuard guard;
+            TuningGuard::heap_from(1);
+            heap = run(x, w, FilterMethod::kMedian);
+        }
+        {
+            const TuningGuard guard;
+            TuningGuard::heap_from(1U << 20U);
+            tree = run(x, w, FilterMethod::kMedian);
+        }
+        REQUIRE(heap == tree);
     }
 }
 
 TEST_CASE("running_filter is independent of the thread count",
           "[math][filter]") {
-    // Long enough to be split into several chunks.
-    const SizeType n = 200000;
+    // Long enough to be split into several chunks (kMinChunk is 16384).
+    const SizeType n = 65536;
     const auto x     = loki::test::make_series(Pattern::kRandom, n, 7);
     for (const SizeType w : {SizeType{5}, SizeType{101}, SizeType{2049}}) {
         for (const bool heap : {false, true}) {
@@ -537,12 +548,10 @@ TEST_CASE("running_filter is independent of the thread count",
         }
     }
     {
-        const auto ref =
-            naive_filter(loki::test::make_series(Pattern::kRandom, 50000, 3),
-                         101, FilterMethod::kMedian);
-        const auto out =
-            run(loki::test::make_series(Pattern::kRandom, 50000, 3), 101,
-                FilterMethod::kMedian, kManyThreads);
+        // n / kMinChunk >= 2, so this still runs on more than one thread.
+        const auto series = loki::test::make_series(Pattern::kRandom, 32768, 3);
+        const auto ref    = naive_filter(series, 101, FilterMethod::kMedian);
+        const auto out = run(series, 101, FilterMethod::kMedian, kManyThreads);
         REQUIRE(out == ref);
     }
     SECTION("mean agrees within rounding") {

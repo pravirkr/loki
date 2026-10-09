@@ -50,18 +50,28 @@ TEST_CASE("DynamicThresholdScheme getters", "[thresholds]") {
 TEST_CASE("DynamicThresholdScheme runs back to back with different nbins",
           "[thresholds]") {
     // Per-thread scratch must follow each run's nbins, not the first run's.
-    // Fixed seed: whether a full path survives must not vary between runs.
-    const std::vector<float> branching_pattern(7, 3.0F);
+    // Fixed seed: the same nbins must produce the same surviving path.
+    // Fewer stages than a search tree. snr_final is lowered with them so the
+    // beam stays low enough for a full path to survive.
+    const std::vector<float> branching_pattern(3, 3.0F);
     const auto* mode = GENERATE("legacy", "improved");
+    std::vector<float> first_path;
     for (const SizeType nbins : {32U, 64U, 32U}) {
         CAPTURE(mode, nbins);
         detection::DynamicThresholdScheme dyn_scheme(
-            branching_pattern, 0.1F, nbins, 1024, 10, 0.05F, 8.0F, 100, 0.3F,
-            1.0F, 0.7F, 1, mode, /*seed=*/42, /*batch_size=*/256,
-            loki::Exec::cpu(4));
+            branching_pattern, 0.1F, nbins, /*ntrials=*/128, /*nprobs=*/6,
+            0.05F, /*snr_final=*/4.0F, /*nthresholds=*/40, 0.3F, 1.0F, 0.7F, 1,
+            mode, /*seed=*/42, /*batch_size=*/64, loki::Exec::cpu(2));
         dyn_scheme.run();
-        REQUIRE(dyn_scheme.get_best_path_thresholds().size() ==
-                branching_pattern.size());
+        const auto path = dyn_scheme.get_best_path_thresholds();
+        REQUIRE(path.size() == branching_pattern.size());
+        if (nbins == 32U) {
+            if (first_path.empty()) {
+                first_path = path;
+            } else {
+                REQUIRE(path == first_path);
+            }
+        }
     }
 }
 

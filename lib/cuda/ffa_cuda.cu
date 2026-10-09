@@ -1,5 +1,6 @@
 #include "lib/cuda/ffa_cuda.cuh"
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -118,6 +119,7 @@ public:
                    std::span<const float> ts_v,
                    std::span<HostFoldT> fold) {
         // timing::ScopeTimer timer("FFACudaCore::execute_h");
+        cuda_utils::CudaSetDeviceGuard device_guard(m_device_id);
         error_check::check_equal(
             ts_e.size(), m_cfg.get_nsamps(),
             "FFACudaCore::execute_h: ts_e must have size nsamps");
@@ -168,6 +170,7 @@ public:
                    std::span<const float> ts_v,
                    cuda::std::span<DeviceFoldT> fold_d) {
         // timing::ScopeTimer timer("FFACudaCore::execute_h");
+        cuda_utils::CudaSetDeviceGuard device_guard(m_device_id);
         error_check::check_equal(
             ts_e.size(), m_cfg.get_nsamps(),
             "FFACudaCore::execute_h: ts_e must have size nsamps");
@@ -209,6 +212,7 @@ public:
                    cuda::std::span<DeviceFoldT> fold_d,
                    cudaStream_t stream) {
         // timing::ScopeTimer timer("FFACudaCore::execute_d");
+        cuda_utils::CudaSetDeviceGuard device_guard(m_device_id);
         error_check::check_equal(
             ts_e_d.size(), m_cfg.get_nsamps(),
             "FFACudaCore::execute_d: ts_e must have size nsamps");
@@ -237,6 +241,7 @@ public:
         requires(std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>)
     {
         // timing::ScopeTimer timer("FFACudaCore::execute_h");
+        cuda_utils::CudaSetDeviceGuard device_guard(m_device_id);
         error_check::check_equal(
             ts_e.size(), m_cfg.get_nsamps(),
             "FFACudaCore::execute_h: ts_e must have size nsamps");
@@ -289,6 +294,7 @@ public:
         requires(std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>)
     {
         // timing::ScopeTimer timer("FFACudaCore::execute_d");
+        cuda_utils::CudaSetDeviceGuard device_guard(m_device_id);
         const auto fold_size_time      = m_ffa_plan.get_fold_size_time();
         const auto fold_size_fourier   = m_ffa_plan.get_fold_size();
         const auto buffer_size_fourier = m_ffa_plan.get_buffer_size();
@@ -456,6 +462,86 @@ private:
         m_brutefold_time += timer.stop();
     }
 
+    // Fused-merge groups for the frequency-only float path, planned once
+    // from the first resolved coordinates (the plan is fixed, so they never
+    // change). Empty until then, and for every other path.
+    std::vector<int> m_fuse_groups;
+
+    // The groups the merge loop launches: one per fused group, one per
+    // unfused level. Each launch writes the other ping-pong buffer.
+    const std::vector<int>& get_fuse_groups(cudaStream_t stream) {
+        if (!m_fuse_groups.empty()) {
+            return m_fuse_groups;
+        }
+        const auto levels = m_ffa_plan.get_n_levels();
+        if constexpr (std::is_same_v<FoldTypeCUDA, float>) {
+            if (m_is_freq_only) {
+                const auto level_bad =
+                    get_workspace().check_fuse_levels_freq(m_ffa_plan, stream);
+                const auto nbins = m_cfg.get_nbins();
+                std::array<bool, 6> k_fits_smem{};
+                for (int k = 3; k <= 5; ++k) {
+                    k_fits_smem[static_cast<size_t>(k)] =
+                        core::ffa_freq_fuse_fits_smem(k, nbins);
+                }
+                m_fuse_groups = core::plan_ffa_freq_fuse_groups(
+                    m_ffa_plan.get_ncoords(), m_ffa_plan.get_nsegments(),
+                    level_bad, k_fits_smem);
+                return m_fuse_groups;
+            }
+        }
+        m_fuse_groups.assign(levels - 1, 1);
+        return m_fuse_groups;
+    }
+
+    void execute_freq_fused(DeviceFoldT* current_in_ptr,
+                            DeviceFoldT* current_out_ptr,
+                            coord::FFACoordFreqDPtrs coords_base,
+                            std::span<const int> groups,
+                            cudaStream_t stream)
+        requires(std::is_same_v<FoldTypeCUDA, float>)
+    {
+        const auto ncoords   = m_ffa_plan.get_ncoords();
+        const auto nsegments = m_ffa_plan.get_nsegments();
+        const auto offsets   = m_ffa_plan.get_ncoords_offsets();
+        const auto nbins     = static_cast<uint32_t>(m_cfg.get_nbins());
+
+        SizeType next_level = 1;
+        for (SizeType i_group = 0; i_group < groups.size(); ++i_group) {
+            const int k = groups[i_group];
+            if (k == 1) {
+                execute_iter_freq(current_in_ptr, current_out_ptr, coords_base,
+                                  next_level, stream);
+            } else {
+                std::array<const uint32_t*, 5> idxs{};
+                std::array<const float*, 5> shifts{};
+                std::array<uint32_t, 5> counts{};
+                for (int step = 0; step < k; ++step) {
+                    const SizeType lvl =
+                        next_level + static_cast<SizeType>(step);
+                    const auto coords = coords_base.offset(offsets[lvl]);
+                    idxs[static_cast<size_t>(step)]   = coords.idx;
+                    shifts[static_cast<size_t>(step)] = coords.shift;
+                    counts[static_cast<size_t>(step)] =
+                        static_cast<uint32_t>(ncoords[lvl]);
+                }
+                const SizeType out_level =
+                    next_level + static_cast<SizeType>(k) - 1;
+                core::ffa_iter_freq_fused_cuda(
+                    current_in_ptr, current_out_ptr, idxs.data(), shifts.data(),
+                    counts.data(),
+                    static_cast<uint32_t>(ncoords[next_level - 1]),
+                    static_cast<uint32_t>(ncoords[out_level]),
+                    static_cast<uint32_t>(nsegments[next_level - 1]), nbins, k,
+                    stream);
+            }
+            if (i_group + 1 < groups.size()) {
+                std::swap(current_in_ptr, current_out_ptr);
+            }
+            next_level += static_cast<SizeType>(k);
+        }
+    }
+
     void execute_unified_device(cuda::std::span<const float> ts_e_d,
                                 cuda::std::span<const float> ts_v_d,
                                 cuda::std::span<DeviceFoldT> fold_d,
@@ -476,8 +562,10 @@ private:
         DeviceFoldT* current_in_ptr  = nullptr;
         DeviceFoldT* current_out_ptr = nullptr;
 
+        // One write per launch: fused groups count once.
+        const auto& groups = get_fuse_groups(stream);
         // Number of internal ping-pong iterations (excluding the final write)
-        const SizeType internal_iters = levels - 2;
+        const SizeType internal_iters = groups.size() - 1;
         // Determine starting configuration to ensure final result lands in the
         // correct side of the ping-pong table
         const bool odd_swaps        = (internal_iters % 2) == 1;
@@ -501,11 +589,16 @@ private:
         // FFA iterations
         if (m_is_freq_only) {
             auto coords_base = ws.coords_freq_d.get_raw_ptrs();
-            for (SizeType i_level = 1; i_level < levels; ++i_level) {
-                execute_iter_freq(current_in_ptr, current_out_ptr, coords_base,
-                                  i_level, stream);
-                if (i_level < levels - 1) {
-                    std::swap(current_in_ptr, current_out_ptr);
+            if constexpr (std::is_same_v<FoldTypeCUDA, float>) {
+                execute_freq_fused(current_in_ptr, current_out_ptr, coords_base,
+                                   groups, stream);
+            } else {
+                for (SizeType i_level = 1; i_level < levels; ++i_level) {
+                    execute_iter_freq(current_in_ptr, current_out_ptr,
+                                      coords_base, i_level, stream);
+                    if (i_level < levels - 1) {
+                        std::swap(current_in_ptr, current_out_ptr);
+                    }
                 }
             }
         } else {
@@ -873,7 +966,8 @@ compute_ffa_scores_gpu(std::span<const float> ts_e,
     const thrust::device_vector<uint32_t> widths_d(widths_u32.begin(),
                                                    widths_u32.end());
 
-    thrust::device_vector<float> fold_d;
+    // The FFA writes the first fold_size elements, the only ones scored.
+    cuda_utils::DeviceVectorNoInit<float> fold_d;
     SizeType fold_size = 0;
     if (cfg.get_use_fourier()) {
         FFACudaCore<ComplexTypeCUDA> ffa(cfg, device_id);

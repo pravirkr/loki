@@ -51,6 +51,11 @@ SizeType score_and_filter_cuda_d(cuda::std::span<const float> folds,
                                  cudaStream_t stream,
                                  memory::DeviceCounter& counter);
 
+/**
+ * Max boxcar S/N per profile, thresholded into @p filtered_mask; returns the
+ * number passing. Every e and v value is multiplied by @p fold_scale as it is
+ * loaded (the deferred 1/nbins of an unnormalized IRFFT).
+ */
 SizeType
 score_and_filter_max_cuda_d(cuda::std::span<const float> folds,
                             cuda::std::span<const uint32_t> widths,
@@ -61,6 +66,7 @@ score_and_filter_max_cuda_d(cuda::std::span<const float> folds,
                             SizeType nprofiles,
                             SizeType nbins,
                             memory::CUBScratchArena& scratch_ws,
-                            cudaStream_t stream);
+                            cudaStream_t stream,
+                            float fold_scale = 1.0F);
 
 } // namespace loki::detection

@@ -17,6 +17,7 @@
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
 
+#include "lib/algorithms/planner_memory.hpp"
 #include "lib/detail/error_check.hpp"
 #include "lib/detail/index_limits.hpp"
 #include "lib/detail/utils.hpp"
@@ -416,10 +417,9 @@ private:
         // For GPU, this is the device memory limit. For CPU, this is the
         // process memory limit.
         const auto max_memory_gb = m_base_cfg.get_max_process_memory_gb();
-        // Reserve some headroom for OS, Python interpreter, and rounding
-        // errors
-        constexpr double kSafetyMarginGB = 0.5; // 500 MB safety margin
-        double effective_limit_gb        = max_memory_gb - kSafetyMarginGB;
+        // Reserve headroom for what the memory model does not cover.
+        double effective_limit_gb =
+            detail::effective_memory_limit_gb(max_memory_gb);
         if (!m_use_gpu) {
             const double input_gb =
                 static_cast<double>(m_base_cfg.get_nsamps()) * 2.0 *
@@ -431,7 +431,7 @@ private:
             throw std::runtime_error(std::format(
                 "FFARegionPlanner: max_process_memory_gb ({:.2f} GB) must "
                 "exceed the safety margin ({:.2f} GB).",
-                max_memory_gb, kSafetyMarginGB));
+                max_memory_gb, detail::kUnmodelledReserveGB));
         }
 
         constexpr double kRelativeTolerance = 1.0e-4;

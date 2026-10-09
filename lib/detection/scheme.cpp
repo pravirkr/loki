@@ -8,6 +8,8 @@
 #include <string>
 #include <vector>
 
+#include <spdlog/spdlog.h>
+
 #include "loki/common/types.hpp"
 #include "loki/detection/thresholds.hpp"
 
@@ -135,6 +137,45 @@ std::vector<float> get_best_path_thresholds(std::span<const State> states,
     }
 
     if (best == nullptr) {
+        SizeType last_live   = 0;
+        float best_pd        = 0.0F;
+        bool any_live        = false;
+        const SizeType cells = nthresholds * nprobs;
+        for (SizeType stage = 0; stage < nstages; ++stage) {
+            const SizeType base = stage * cells;
+            float stage_best    = 0.0F;
+            bool stage_live     = false;
+            for (SizeType i = 0; i < cells; ++i) {
+                const State& s = states[base + i];
+                if (s.is_empty) {
+                    continue;
+                }
+                stage_live = true;
+                stage_best = std::max(stage_best, s.success_h1_cumul);
+            }
+            if (stage_live) {
+                any_live  = true;
+                last_live = stage;
+                best_pd   = stage_best;
+            }
+        }
+        if (!any_live) {
+            spdlog::warn(
+                "get_best_path_thresholds: no path for min_pd={:.4g}; every "
+                "stage is empty (extinction at stage 0)",
+                min_pd);
+        } else if (last_live + 1 < nstages) {
+            spdlog::warn(
+                "get_best_path_thresholds: no path for min_pd={:.4g}; "
+                "extinction at stage {} (last surviving stage {} had best "
+                "cumulative Pd {:.4g})",
+                min_pd, last_live + 1, last_live, best_pd);
+        } else {
+            spdlog::warn(
+                "get_best_path_thresholds: no path for min_pd={:.4g}; best "
+                "cumulative Pd on the final stage is {:.4g}",
+                min_pd, best_pd);
+        }
         return {};
     }
 

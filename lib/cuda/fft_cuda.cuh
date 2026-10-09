@@ -99,7 +99,8 @@ public:
 
     /**
      * @brief Batched complex-to-real FFT. Overwrites @p complex_input.
-     * Applies the 1/n_real normalization that cuFFT omits on C2R.
+     * Applies the 1/n_real normalization that cuFFT omits on C2R, unless
+     * @p normalize is false; the caller then owes the 1/n_real factor.
      *
      * @p stream orders this transform against other GPU work on the same
      * stream. Do not use it to overlap two FFTs on this manager: all plans
@@ -109,7 +110,8 @@ public:
                      cuda::std::span<float> real_output,
                      SizeType batch_size,
                      SizeType n_real,
-                     cudaStream_t stream = nullptr);
+                     cudaStream_t stream = nullptr,
+                     bool normalize      = true);
 
     [[nodiscard]] bool has_prepared(SizeType n_real) const noexcept;
     [[nodiscard]] SizeType n_cached_plans() const noexcept;

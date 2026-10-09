@@ -1,5 +1,10 @@
 #include "lib/cuda/kernels_cuda.cuh"
 
+#include <cstdint>
+#include <span>
+#include <stdexcept>
+#include <vector>
+
 #include <cuda/std/span>
 #include <cuda_runtime.h>
 #include <thrust/device_vector.h>
@@ -8,10 +13,41 @@
 
 #include "lib/cuda/cub_helpers.cuh"
 #include "lib/cuda/cuda_utils.cuh"
+#include "lib/detail/error_check.hpp"
 
 namespace loki::core {
 
 namespace {
+
+// x / nbins in double. A double divide is slow on GPUs with little FP64
+// throughput; for a power-of-two nbins, multiplying by the exact reciprocal
+// gives the same result.
+__device__ __forceinline__ double div_by_nbins(double x, uint32_t nbins) {
+    if ((nbins & (nbins - 1U)) == 0U) {
+        const int log2_nbins = __ffs(static_cast<int>(nbins)) - 1;
+        return x * __longlong_as_double(
+                       static_cast<long long>(1023 - log2_nbins) << 52);
+    }
+    return x / static_cast<double>(nbins);
+}
+
+// Fourier phase -2*pi*k*shift/nbins, formed in double, rounded to float.
+__device__ __forceinline__ float
+fourier_phase(uint32_t k, float shift, uint32_t nbins) {
+    return static_cast<float>(
+        div_by_nbins(-2.0F * cub_helpers::kPI * k * shift, nbins));
+}
+
+// Profile offset (segment, coord) * stride. The factors fit in 32 bits, but
+// the product does not once a level is larger than 4 GiB (frequency-only
+// FFA at nsamps 2^25). A 64-bit product matches the 32-bit one when the
+// 32-bit one does not wrap.
+__device__ __forceinline__ size_t profile_offset(uint32_t segment,
+                                                 uint32_t ncoords,
+                                                 uint32_t icoord,
+                                                 uint32_t stride) {
+    return (static_cast<size_t>(segment) * ncoords + icoord) * stride;
+}
 
 // indices_tree are logical indices, convert to physical indices
 __global__ __launch_bounds__(256, 4) void kernel_shift_add_linear(
@@ -168,8 +204,7 @@ __global__ __launch_bounds__(256, 4) void kernel_shift_add_linear_complex(
     }
 
     // Phase factor for head only: exp(-2πi * k * shift / nbins)
-    const auto phase = static_cast<float>(-2.0F * cub_helpers::kPI * k *
-                                          phase_shift[ileaf] / nbins);
+    const auto phase = fourier_phase(k, phase_shift[ileaf], nbins);
     float cosv, sinv;
     __sincosf(phase, &sinv, &cosv);
 
@@ -246,9 +281,7 @@ __launch_bounds__(256, 4) void kernel_shift_add_ascend_linear_complex(
         // Phase factor: same formula as old kernel, but phase_shift is now
         // the fractional bin shift (not an index), matching CPU semantics
         // exp(-2πi * k * phase_shift / nbins)
-        const float phase = -2.0F * cub_helpers::kPI * static_cast<float>(k) *
-                            phase_shift[leaf_seg_idx] /
-                            static_cast<float>(nbins);
+        const float phase = fourier_phase(k, phase_shift[leaf_seg_idx], nbins);
         float cosv, sinv;
         __sincosf(phase, &sinv, &cosv);
 
@@ -319,12 +352,12 @@ __global__ void kernel_ffa_iter(const float* __restrict__ fold_in,
 
     // Calculate offsets
     const uint32_t total_size = 2 * nbins;
-    const uint32_t tail_offset =
-        ((iseg * 2) * ncoords_prev * total_size) + (coord_tail * total_size);
-    const uint32_t head_offset = ((iseg * 2 + 1) * ncoords_prev * total_size) +
-                                 (coord_head * total_size);
-    const uint32_t out_offset =
-        (iseg * ncoords_cur * total_size) + (icoord * total_size);
+    const size_t tail_offset =
+        profile_offset(iseg * 2, ncoords_prev, coord_tail, total_size);
+    const size_t head_offset =
+        profile_offset(iseg * 2 + 1, ncoords_prev, coord_head, total_size);
+    const size_t out_offset =
+        profile_offset(iseg, ncoords_cur, icoord, total_size);
 
     // Process both e and v components (vectorized access)
     fold_out[out_offset + ibin] =
@@ -368,12 +401,12 @@ __global__ void kernel_ffa_freq_iter(const float* __restrict__ fold_in,
 
     // Calculate offsets
     const uint32_t total_size = 2 * nbins;
-    const uint32_t tail_offset =
-        ((iseg * 2) * ncoords_prev * total_size) + (coord_idx * total_size);
-    const uint32_t head_offset =
-        ((iseg * 2 + 1) * ncoords_prev * total_size) + (coord_idx * total_size);
-    const uint32_t out_offset =
-        (iseg * ncoords_cur * total_size) + (icoord * total_size);
+    const size_t tail_offset =
+        profile_offset(iseg * 2, ncoords_prev, coord_idx, total_size);
+    const size_t head_offset =
+        profile_offset(iseg * 2 + 1, ncoords_prev, coord_idx, total_size);
+    const size_t out_offset =
+        profile_offset(iseg, ncoords_cur, icoord, total_size);
 
     // Process both e and v components (vectorized access)
     fold_out[out_offset + ibin] =
@@ -540,27 +573,25 @@ kernel_ffa_complex_iter(const ComplexTypeCUDA* __restrict__ fold_in,
     const float shift_head    = coords.shift_head[icoord];
 
     // Precompute phase factors: exp(-2πi * k * shift / nbins)
-    const auto phase_factor_tail =
-        static_cast<float>(-2.0F * cub_helpers::kPI * k * shift_tail / nbins);
-    const auto phase_factor_head =
-        static_cast<float>(-2.0F * cub_helpers::kPI * k * shift_head / nbins);
+    const auto phase_factor_tail = fourier_phase(k, shift_tail, nbins);
+    const auto phase_factor_head = fourier_phase(k, shift_head, nbins);
     // Fast sincos computation
     float cos_tail, sin_tail, cos_head, sin_head;
     __sincosf(phase_factor_tail, &sin_tail, &cos_tail);
     __sincosf(phase_factor_head, &sin_head, &cos_head);
 
     // Calculate memory offsets for e and v components
-    const uint32_t tail_offset_e =
-        ((iseg * 2) * ncoords_prev * 2 * nbins_f) + (coord_tail * 2 * nbins_f);
-    const uint32_t tail_offset_v = tail_offset_e + nbins_f;
-    const uint32_t head_offset_e =
-        ((iseg * 2 + 1) * ncoords_prev * 2 * nbins_f) +
-        (coord_head * 2 * nbins_f);
-    const uint32_t head_offset_v = head_offset_e + nbins_f;
+    const uint32_t stride = 2 * nbins_f;
+    const size_t tail_offset_e =
+        profile_offset(iseg * 2, ncoords_prev, coord_tail, stride);
+    const size_t tail_offset_v = tail_offset_e + nbins_f;
+    const size_t head_offset_e =
+        profile_offset(iseg * 2 + 1, ncoords_prev, coord_head, stride);
+    const size_t head_offset_v = head_offset_e + nbins_f;
 
-    const uint32_t out_offset_e =
-        (iseg * ncoords_cur * 2 * nbins_f) + (icoord * 2 * nbins_f);
-    const uint32_t out_offset_v = out_offset_e + nbins_f;
+    const size_t out_offset_e =
+        profile_offset(iseg, ncoords_cur, icoord, stride);
+    const size_t out_offset_v = out_offset_e + nbins_f;
 
     // Load complex values for both e and v components
     const ComplexTypeCUDA* __restrict__ tail_e = fold_in + tail_offset_e + k;
@@ -621,18 +652,17 @@ kernel_ffa_complex_freq_iter(const ComplexTypeCUDA* __restrict__ fold_in,
     const float shift        = coords.shift[icoord];
 
     // Phase factor for head only: exp(-2πi * k * shift / nbins)
-    const auto phase_factor =
-        static_cast<float>(-2.0F * cub_helpers::kPI * k * shift / nbins);
+    const auto phase_factor = fourier_phase(k, shift, nbins);
     float cos_val, sin_val;
     __sincosf(phase_factor, &sin_val, &cos_val);
 
     // Calculate memory offsets
-    const uint32_t tail_offset =
-        ((iseg * 2) * ncoords_prev * 2 * nbins_f) + (coord_idx * 2 * nbins_f);
-    const uint32_t head_offset = ((iseg * 2 + 1) * ncoords_prev * 2 * nbins_f) +
-                                 (coord_idx * 2 * nbins_f);
-    const uint32_t out_offset =
-        (iseg * ncoords_cur * 2 * nbins_f) + (icoord * 2 * nbins_f);
+    const uint32_t stride = 2 * nbins_f;
+    const size_t tail_offset =
+        profile_offset(iseg * 2, ncoords_prev, coord_idx, stride);
+    const size_t head_offset =
+        profile_offset(iseg * 2 + 1, ncoords_prev, coord_idx, stride);
+    const size_t out_offset = profile_offset(iseg, ncoords_cur, icoord, stride);
 
     // Load values - tail is unshifted, head gets phase shift
     const ComplexTypeCUDA* __restrict__ tail_e = fold_in + tail_offset + k;
@@ -682,11 +712,12 @@ __global__ void kernel_fold_time_1d(const float* __restrict__ ts_e,
 
     // Process all frequencies for this (segment, sample) pair
     for (uint32_t ifreq = 0; ifreq < nfreqs; ++ifreq) {
-        const uint32_t phase_idx = (ifreq * segment_len) + isamp;
+        const size_t phase_idx =
+            (static_cast<size_t>(ifreq) * segment_len) + isamp;
         const uint32_t phase_bin = phase_map[phase_idx];
-        const uint32_t ts_idx    = (iseg * segment_len) + isamp;
-        const uint32_t fold_base_idx =
-            (iseg * nfreqs * 2 * nbins) + (ifreq * 2 * nbins);
+        const size_t ts_idx = (static_cast<size_t>(iseg) * segment_len) + isamp;
+        const size_t fold_base_idx =
+            (static_cast<size_t>(iseg) * nfreqs + ifreq) * (2U * nbins);
 
         // Atomic add (but much less contention now!)
         atomicAdd(&fold[fold_base_idx + phase_bin], ts_e[ts_idx]);
@@ -704,25 +735,29 @@ __global__ void kernel_fold_time_2d(const float* __restrict__ ts_e,
                                     uint32_t segment_len,
                                     uint32_t nbins) {
     const uint32_t isamp = (blockIdx.x * blockDim.x) + threadIdx.x;
-    const uint32_t ifreq = blockIdx.y;
-
-    if (isamp >= segment_len || ifreq >= nfreqs) {
+    if (isamp >= segment_len) {
         return;
     }
-    const uint32_t phase_idx   = (ifreq * segment_len) + isamp;
-    const uint32_t phase_bin   = phase_map[phase_idx];
-    const uint32_t freq_offset = ifreq * 2 * nbins;
-    for (uint32_t iseg = 0; iseg < nsegments; ++iseg) {
-        const uint32_t ts_idx = (iseg * segment_len) + isamp;
-        const uint32_t fold_base_idx =
-            (iseg * nfreqs * 2 * nbins) + freq_offset;
+    // gridDim.y is capped at 65535, so frequencies stride over it.
+    for (uint32_t ifreq = blockIdx.y; ifreq < nfreqs; ifreq += gridDim.y) {
+        const size_t phase_idx =
+            (static_cast<size_t>(ifreq) * segment_len) + isamp;
+        const uint32_t phase_bin = phase_map[phase_idx];
+        for (uint32_t iseg = 0; iseg < nsegments; ++iseg) {
+            const size_t ts_idx =
+                (static_cast<size_t>(iseg) * segment_len) + isamp;
+            const size_t fold_base_idx =
+                (static_cast<size_t>(iseg) * nfreqs + ifreq) * (2U * nbins);
 
-        atomicAdd(&fold[fold_base_idx + phase_bin], ts_e[ts_idx]);
-        atomicAdd(&fold[fold_base_idx + nbins + phase_bin], ts_v[ts_idx]);
+            atomicAdd(&fold[fold_base_idx + phase_bin], ts_e[ts_idx]);
+            atomicAdd(&fold[fold_base_idx + nbins + phase_bin], ts_v[ts_idx]);
+        }
     }
 }
 
-// Alternative: Use shared memory for even better performance
+// One block per (segment, frequency). Block size stays 256, so each sample
+// is atomic-added by the same thread as the old serial-over-segments loop.
+// Segments do not share bins.
 __global__ void kernel_fold_time_shmem(const float* __restrict__ ts_e,
                                        const float* __restrict__ ts_v,
                                        const uint32_t* __restrict__ phase_map,
@@ -731,45 +766,40 @@ __global__ void kernel_fold_time_shmem(const float* __restrict__ ts_e,
                                        uint32_t nsegments,
                                        uint32_t segment_len,
                                        uint32_t nbins) {
-    // One block per frequency, each block processes all samples for that
-    // frequency
     extern __shared__ float shared_bins[];
     float* shared_e = shared_bins;
     float* shared_v = shared_bins + nbins;
 
     const uint32_t tid               = threadIdx.x;
     const uint32_t ifreq             = blockIdx.y;
+    const uint32_t iseg              = blockIdx.x;
     const uint32_t threads_per_block = blockDim.x;
+    if (ifreq >= nfreqs || iseg >= nsegments) {
+        return;
+    }
 
-    for (uint32_t iseg = 0; iseg < nsegments; ++iseg) {
-        // Initialize shared memory for this segment
-        for (uint32_t bin = tid; bin < nbins; bin += threads_per_block) {
-            shared_e[bin] = 0.0F;
-            shared_v[bin] = 0.0F;
-        }
-        __syncthreads();
+    for (uint32_t bin = tid; bin < nbins; bin += threads_per_block) {
+        shared_e[bin] = 0.0F;
+        shared_v[bin] = 0.0F;
+    }
+    __syncthreads();
 
-        // Process samples for this frequency and segment
-        for (uint32_t isamp = tid; isamp < segment_len;
-             isamp += threads_per_block) {
-            const uint32_t phase_idx = (ifreq * segment_len) + isamp;
-            const uint32_t phase_bin = phase_map[phase_idx];
-            const uint32_t ts_idx    = (iseg * segment_len) + isamp;
+    for (uint32_t isamp = tid; isamp < segment_len;
+         isamp += threads_per_block) {
+        const size_t phase_idx =
+            (static_cast<size_t>(ifreq) * segment_len) + isamp;
+        const uint32_t phase_bin = phase_map[phase_idx];
+        const size_t ts_idx = (static_cast<size_t>(iseg) * segment_len) + isamp;
+        atomicAdd(&shared_e[phase_bin], ts_e[ts_idx]);
+        atomicAdd(&shared_v[phase_bin], ts_v[ts_idx]);
+    }
+    __syncthreads();
 
-            // Accumulate in shared memory
-            atomicAdd(&shared_e[phase_bin], ts_e[ts_idx]);
-            atomicAdd(&shared_v[phase_bin], ts_v[ts_idx]);
-        }
-        __syncthreads();
-
-        // Write shared memory results to global memory for this segment
-        const uint32_t fold_base_idx =
-            (iseg * nfreqs * 2 * nbins) + (ifreq * 2 * nbins);
-        for (uint32_t bin = tid; bin < nbins; bin += threads_per_block) {
-            fold[fold_base_idx + bin]         = shared_e[bin];
-            fold[fold_base_idx + nbins + bin] = shared_v[bin];
-        }
-        __syncthreads();
+    const size_t fold_base_idx =
+        (static_cast<size_t>(iseg) * nfreqs + ifreq) * (2U * nbins);
+    for (uint32_t bin = tid; bin < nbins; bin += threads_per_block) {
+        fold[fold_base_idx + bin]         = shared_e[bin];
+        fold[fold_base_idx + nbins + bin] = shared_v[bin];
     }
 }
 
@@ -801,15 +831,15 @@ kernel_fold_complex_one_harmonic_per_thread(const float* __restrict__ ts_e,
     float* sh_v = sh + segment_len;
 
     // Cooperative load - all threads participate
-    const uint32_t start_idx = iseg * segment_len;
+    const size_t start_idx = static_cast<size_t>(iseg) * segment_len;
     for (uint32_t i = tid; i < segment_len; i += block_dim) {
         sh_e[i] = ts_e[start_idx + i];
         sh_v[i] = ts_v[start_idx + i];
     }
     __syncthreads();
 
-    const auto base_offset =
-        (iseg * nfreqs * 2 * nbins_f) + (ifreq * 2 * nbins_f);
+    const size_t base_offset =
+        (static_cast<size_t>(iseg) * nfreqs + ifreq) * (2U * nbins_f);
 
     // Thread 0 handles DC via reduction
     if (tid == 0) {
@@ -874,7 +904,7 @@ __global__ void kernel_fold_complex_unified(const float* __restrict__ ts_e,
 
     const float* ts_e_seg;
     const float* ts_v_seg;
-    const uint32_t start_idx = iseg * segment_len;
+    const size_t start_idx = static_cast<size_t>(iseg) * segment_len;
     if constexpr (UseShared) {
         extern __shared__ float sh[];
         float* sh_e = sh;
@@ -893,8 +923,8 @@ __global__ void kernel_fold_complex_unified(const float* __restrict__ ts_e,
         ts_v_seg = ts_v + start_idx;
     }
 
-    const auto base_offset =
-        (iseg * nfreqs * 2 * nbins_f) + (ifreq * 2 * nbins_f);
+    const size_t base_offset =
+        (static_cast<size_t>(iseg) * nfreqs + ifreq) * (2U * nbins_f);
 
     // DC Component: parallel reduction from global memory
     float sum_e = 0.0F, sum_v = 0.0F;
@@ -965,6 +995,227 @@ __global__ void kernel_fold_complex_unified(const float* __restrict__ ts_e,
     }
 }
 
+struct FreqLvl {
+    const uint32_t* idx;
+    const float* shift;
+    uint32_t ncoords;
+};
+
+template <int K> struct FreqLvls {
+    FreqLvl level[K];
+};
+
+__device__ uint32_t lower_bound_u32(const uint32_t* data,
+                                    uint32_t n,
+                                    uint32_t key) {
+    uint32_t lo = 0;
+    uint32_t hi = n;
+    while (lo < hi) {
+        const uint32_t mid = lo + ((hi - lo) >> 1U);
+        if (data[mid] < key) {
+            lo = mid + 1U;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo;
+}
+
+// One block: one level-0 coordinate across 2^K segments. The host picks K
+// only for levels where every parent has at most 2 children and the parent
+// indices are sorted (ffa_freq_fuse_check_levels_cuda), so the descendants
+// of one ancestor stay within 2^K profiles. A coordinate with no children is
+// legal: its block writes nothing.
+template <int K>
+__global__ void kernel_ffa_freq_fuse(const float* __restrict__ fold_in,
+                                     float* __restrict__ fold_out,
+                                     FreqLvls<K> levels,
+                                     uint32_t ncoords_in,
+                                     uint32_t ncoords_out,
+                                     uint32_t nbins,
+                                     bool vec4) {
+    constexpr int kCap      = 1 << K;
+    constexpr int kThreads  = 256;
+    const uint32_t stride   = 2U * nbins;
+    const uint32_t tid      = threadIdx.x;
+    const size_t block_id   = blockIdx.x;
+    const uint32_t ancestor = static_cast<uint32_t>(block_id % ncoords_in);
+    const uint32_t tile     = static_cast<uint32_t>(block_id / ncoords_in);
+    const uint32_t seg0     = tile << K;
+    // 128-wide profiles: 8 profiles in flight, each thread one float4, when
+    // the host found both buffers 16-byte aligned. Other cases stay scalar.
+    // Same values, wider loads.
+    const bool use_vec4 = vec4 && stride == 128U;
+
+    extern __shared__ __align__(16) float fuse_smem[];
+    float* bufs[2] = {fuse_smem, fuse_smem + (kCap * stride)};
+
+    float* cur = bufs[0];
+    if (use_vec4) {
+        const float4* in4            = reinterpret_cast<const float4*>(fold_in);
+        float4* cur4                 = reinterpret_cast<float4*>(cur);
+        const uint32_t prof_in_batch = tid >> 5U;
+        const uint32_t vec           = tid & 31U;
+#pragma unroll
+        for (int base = 0; base < kCap; base += 8) {
+            const uint32_t prof = static_cast<uint32_t>(base) + prof_in_batch;
+            const size_t src =
+                profile_offset(seg0 + prof, ncoords_in, ancestor, 128U);
+            cur4[(static_cast<size_t>(prof) << 5U) + vec] =
+                in4[(src >> 2U) + vec];
+        }
+    } else {
+        for (int prof = 0; prof < kCap; ++prof) {
+            const size_t src =
+                profile_offset(seg0 + static_cast<uint32_t>(prof), ncoords_in,
+                               ancestor, stride);
+            for (uint32_t elem = tid; elem < stride; elem += kThreads) {
+                cur[static_cast<size_t>(prof) * stride + elem] =
+                    fold_in[src + elem];
+            }
+        }
+    }
+    __syncthreads();
+
+    __shared__ uint32_t s_lo;
+    __shared__ uint32_t s_nout;
+    __shared__ uint32_t s_shift[kCap];
+    __shared__ uint32_t s_local[kCap];
+
+    uint32_t parent_lo = ancestor;
+    uint32_t nparents  = 1;
+    uint32_t nseg      = static_cast<uint32_t>(kCap);
+    int cur_buf        = 0;
+
+    for (int step = 0; step < K; ++step) {
+        if (tid == 0) {
+            const FreqLvl lvl = levels.level[step];
+            const uint32_t lo =
+                lower_bound_u32(lvl.idx, lvl.ncoords, parent_lo);
+            const uint32_t hi =
+                lower_bound_u32(lvl.idx, lvl.ncoords, parent_lo + nparents);
+            s_lo   = lo;
+            s_nout = hi - lo;
+        }
+        __syncthreads();
+
+        const uint32_t lo   = s_lo;
+        const uint32_t nout = s_nout;
+        for (uint32_t child = tid; child < nout; child += kThreads) {
+            const float phase = levels.level[step].shift[lo + child];
+            uint32_t shift    = __float2uint_rz(phase + 0.5F);
+            if (shift == nbins) {
+                shift = 0;
+            }
+            s_shift[child] = shift;
+            s_local[child] = levels.level[step].idx[lo + child] - parent_lo;
+        }
+        __syncthreads();
+
+        const uint32_t nseg_out = nseg >> 1U;
+        float* nxt              = bufs[1 - cur_buf];
+        const float* src        = bufs[cur_buf];
+        for (uint32_t seg = 0; seg < nseg_out; ++seg) {
+            for (uint32_t child = 0; child < nout; ++child) {
+                const uint32_t local = s_local[child];
+                const uint32_t shift = s_shift[child];
+                const size_t tail_at =
+                    (static_cast<size_t>(seg * 2U) * nparents + local) * stride;
+                const size_t head_at =
+                    (static_cast<size_t>(seg * 2U + 1U) * nparents + local) *
+                    stride;
+                const size_t dst_at =
+                    (static_cast<size_t>(seg) * nout + child) * stride;
+                for (uint32_t elem = tid; elem < stride; elem += kThreads) {
+                    const uint32_t bin = (elem < nbins) ? elem : elem - nbins;
+                    const uint32_t rot =
+                        (bin < shift) ? (bin + nbins - shift) : (bin - shift);
+                    const uint32_t head_elem =
+                        (elem < nbins) ? rot : rot + nbins;
+                    nxt[dst_at + elem] =
+                        src[tail_at + elem] + src[head_at + head_elem];
+                }
+            }
+        }
+        __syncthreads();
+
+        parent_lo = lo;
+        nparents  = nout;
+        nseg      = nseg_out;
+        cur_buf ^= 1;
+    }
+
+    const float* src = bufs[cur_buf];
+    if (use_vec4) {
+        const float4* src4 = reinterpret_cast<const float4*>(src);
+        float4* out4       = reinterpret_cast<float4*>(fold_out);
+        const uint32_t vec = tid & 31U;
+        for (uint32_t child = tid >> 5U; child < nparents; child += 8U) {
+            const size_t dst =
+                profile_offset(tile, ncoords_out, parent_lo + child, 128U);
+            out4[(dst >> 2U) + vec] =
+                src4[(static_cast<size_t>(child) << 5U) + vec];
+        }
+    } else {
+        for (uint32_t child = 0; child < nparents; ++child) {
+            const size_t dst =
+                profile_offset(tile, ncoords_out, parent_lo + child, stride);
+            const float* from = src + (static_cast<size_t>(child) * stride);
+            for (uint32_t elem = tid; elem < stride; elem += kThreads) {
+                fold_out[dst + elem] = from[elem];
+            }
+        }
+    }
+}
+
+// Counts, per level, the coordinates that break the fusion contract: parent
+// indices not sorted, a parent with more than 2 children, or a parent index
+// outside the previous level. One thread per coordinate of levels >= 1.
+__global__ void kernel_ffa_freq_fuse_check(const uint32_t* __restrict__ idx,
+                                           const uint32_t* __restrict__ offsets,
+                                           const uint32_t* __restrict__ ncoords,
+                                           uint32_t n_levels,
+                                           uint32_t* __restrict__ bad) {
+    const size_t total = offsets[n_levels - 1] + ncoords[n_levels - 1];
+    const size_t first = offsets[1];
+    const size_t gid =
+        first + (static_cast<size_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
+    if (gid >= total) {
+        return;
+    }
+    uint32_t level = 1;
+    while (level + 1 < n_levels && gid >= offsets[level + 1]) {
+        ++level;
+    }
+    const size_t local   = gid - offsets[level];
+    const uint32_t value = idx[gid];
+    bool ok              = value < ncoords[level - 1];
+    if (local >= 1) {
+        ok = ok && idx[gid - 1] <= value;
+    }
+    if (local >= 2) {
+        ok = ok && idx[gid - 2] != value;
+    }
+    if (!ok) {
+        atomicAdd(&bad[level], 1U);
+    }
+}
+
+} // namespace
+
+namespace {
+
+// Kernels that decode a 32-bit thread index (tid / nbins, tid % nbins, ...)
+// need every launched thread index to fit in 32 bits, or the index wraps
+// and part of the output is silently left unwritten.
+void check_u32_threads(SizeType blocks,
+                       SizeType threads_per_block,
+                       std::string_view kernel) {
+    error_check::check_less_equal(
+        blocks * threads_per_block, SizeType{1} << 32U,
+        std::format("{}: work exceeds the 32-bit thread index", kernel));
+}
+
 } // namespace
 
 void brute_fold_ts_cuda(const float* __restrict__ ts_e,
@@ -976,22 +1227,35 @@ void brute_fold_ts_cuda(const float* __restrict__ ts_e,
                         SizeType segment_len,
                         SizeType nbins,
                         cudaStream_t stream) {
+    // The atomic kernels accumulate into the fold, so they need it zeroed.
+    // The shared-memory kernel writes every element.
+    const auto zero_fold = [&] {
+        cuda_utils::check_cuda_call(
+            cudaMemsetAsync(fold, 0,
+                            nsegments * nfreqs * 2 * nbins * sizeof(float),
+                            stream),
+            "brute_fold_ts_cuda: memset fold failed");
+    };
     // Use 1D block configuration for small nfreqs
     if (nfreqs <= 64) {
         const auto total_work               = nsegments * segment_len;
         constexpr SizeType kThreadsPerBlock = 512;
         const auto blocks_per_grid =
             (total_work + kThreadsPerBlock - 1) / kThreadsPerBlock;
+        check_u32_threads(blocks_per_grid, kThreadsPerBlock,
+                          "kernel_fold_time_1d");
         const dim3 block_dim(kThreadsPerBlock);
         const dim3 grid_dim(blocks_per_grid);
         cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
+        zero_fold();
         kernel_fold_time_1d<<<grid_dim, block_dim, 0, stream>>>(
             ts_e, ts_v, phase_map, fold, nfreqs, nsegments, segment_len, nbins);
     } else if (nbins <= 512 && nfreqs <= 65535) {
         // Use shared memory for small bin counts
         constexpr SizeType kThreadsPerBlock = 256;
         const dim3 block_dim(kThreadsPerBlock);
-        const dim3 grid_dim(1, nfreqs);
+        const dim3 grid_dim(static_cast<unsigned>(nsegments),
+                            static_cast<unsigned>(nfreqs));
         const auto shmem_size = 2 * nbins * sizeof(float);
         cuda_utils::check_kernel_launch_params(grid_dim, block_dim, shmem_size);
         kernel_fold_time_shmem<<<grid_dim, block_dim, shmem_size, stream>>>(
@@ -1001,9 +1265,11 @@ void brute_fold_ts_cuda(const float* __restrict__ ts_e,
         constexpr SizeType kThreadsPerBlock = 256;
         const auto blocks_per_grid_x =
             (segment_len + kThreadsPerBlock - 1) / kThreadsPerBlock;
+        constexpr SizeType kMaxGridY = 65535;
         const dim3 block_dim(kThreadsPerBlock);
-        const dim3 grid_dim(blocks_per_grid_x, nfreqs, 1);
+        const dim3 grid_dim(blocks_per_grid_x, std::min(nfreqs, kMaxGridY), 1);
         cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
+        zero_fold();
         kernel_fold_time_2d<<<grid_dim, block_dim, 0, stream>>>(
             ts_e, ts_v, phase_map, fold, nfreqs, nsegments, segment_len, nbins);
     }
@@ -1073,14 +1339,13 @@ void ffa_iter_cuda(const float* __restrict__ fold_in,
     const auto threads_per_block = (total_work < 65536) ? 256 : 512;
     const auto blocks_per_grid =
         (total_work + threads_per_block - 1) / threads_per_block;
+    check_u32_threads(blocks_per_grid, threads_per_block, "kernel_ffa_iter");
     const dim3 block_dim(threads_per_block);
     const dim3 grid_dim(blocks_per_grid);
     cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
     kernel_ffa_iter<<<grid_dim, block_dim, 0, stream>>>(
         fold_in, fold_out, coords, ncoords_cur, ncoords_prev, nsegments, nbins);
     cuda_utils::check_last_cuda_error("FFA iter kernel launch failed");
-    cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
-                                "cudaStreamSynchronize failed");
 }
 
 void ffa_iter_freq_cuda(const float* __restrict__ fold_in,
@@ -1095,14 +1360,216 @@ void ffa_iter_freq_cuda(const float* __restrict__ fold_in,
     const auto threads_per_block = (total_work < 65536) ? 256 : 512;
     const auto blocks_per_grid =
         (total_work + threads_per_block - 1) / threads_per_block;
+    check_u32_threads(blocks_per_grid, threads_per_block,
+                      "kernel_ffa_freq_iter");
     const dim3 block_dim(threads_per_block);
     const dim3 grid_dim(blocks_per_grid);
     cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
     kernel_ffa_freq_iter<<<grid_dim, block_dim, 0, stream>>>(
         fold_in, fold_out, coords, ncoords_cur, ncoords_prev, nsegments, nbins);
     cuda_utils::check_last_cuda_error("FFA freq iter kernel launch failed");
+}
+
+template <int K> SizeType ffa_freq_fuse_static_smem() {
+    // Static __shared__ arrays count against the same per-block limit as
+    // the dynamic tile. Queried once per K (the size is per kernel, not per
+    // device).
+    static const SizeType bytes = [] {
+        cudaFuncAttributes attr{};
+        cuda_utils::check_cuda_call(
+            cudaFuncGetAttributes(&attr, kernel_ffa_freq_fuse<K>),
+            "cudaFuncGetAttributes kernel_ffa_freq_fuse failed");
+        return static_cast<SizeType>(attr.sharedSizeBytes);
+    }();
+    return bytes;
+}
+
+SizeType ffa_freq_fuse_dynamic_smem(int k, SizeType nbins) {
+    return 2ULL * (SizeType{1} << k) * 2ULL * nbins * sizeof(float);
+}
+
+template <int K>
+void launch_ffa_freq_fuse(const float* fold_in,
+                          float* fold_out,
+                          const uint32_t* const* level_idx,
+                          const float* const* level_shift,
+                          const uint32_t* level_ncoords,
+                          uint32_t ncoords_in,
+                          uint32_t ncoords_out,
+                          uint32_t nsegments_in,
+                          uint32_t nbins,
+                          cudaStream_t stream) {
+    FreqLvls<K> levels{};
+    for (int step = 0; step < K; ++step) {
+        levels.level[step] = FreqLvl{.idx     = level_idx[step],
+                                     .shift   = level_shift[step],
+                                     .ncoords = level_ncoords[step]};
+    }
+    const uint32_t ntiles = nsegments_in >> K;
+    const size_t nblocks  = static_cast<size_t>(ntiles) * ncoords_in;
+    const size_t smem     = ffa_freq_fuse_dynamic_smem(K, nbins);
+    const bool vec4 = (reinterpret_cast<std::uintptr_t>(fold_in) % 16U == 0) &&
+                      (reinterpret_cast<std::uintptr_t>(fold_out) % 16U == 0);
+    cuda_utils::check_kernel_launch_params(
+        dim3(static_cast<unsigned>(nblocks)), dim3(256),
+        smem + ffa_freq_fuse_static_smem<K>());
+    kernel_ffa_freq_fuse<K>
+        <<<static_cast<unsigned>(nblocks), 256, smem, stream>>>(
+            fold_in, fold_out, levels, ncoords_in, ncoords_out, nbins, vec4);
+    cuda_utils::check_last_cuda_error(
+        "FFA fused freq iter kernel launch failed");
+}
+
+bool ffa_freq_fuse_fits_smem(int k, SizeType nbins) {
+    SizeType static_bytes = 0;
+    if (k == 5) {
+        static_bytes = ffa_freq_fuse_static_smem<5>();
+    } else if (k == 4) {
+        static_bytes = ffa_freq_fuse_static_smem<4>();
+    } else if (k == 3) {
+        static_bytes = ffa_freq_fuse_static_smem<3>();
+    } else {
+        return false;
+    }
+    return ffa_freq_fuse_dynamic_smem(k, nbins) + static_bytes <=
+           cuda_utils::get_max_shared_memory();
+}
+
+void ffa_iter_freq_fused_cuda(const float* __restrict__ fold_in,
+                              float* __restrict__ fold_out,
+                              const uint32_t* const* level_idx,
+                              const float* const* level_shift,
+                              const uint32_t* level_ncoords,
+                              uint32_t ncoords_in,
+                              uint32_t ncoords_out,
+                              uint32_t nsegments_in,
+                              uint32_t nbins,
+                              int k,
+                              cudaStream_t stream) {
+    if (k == 5) {
+        launch_ffa_freq_fuse<5>(fold_in, fold_out, level_idx, level_shift,
+                                level_ncoords, ncoords_in, ncoords_out,
+                                nsegments_in, nbins, stream);
+    } else if (k == 4) {
+        launch_ffa_freq_fuse<4>(fold_in, fold_out, level_idx, level_shift,
+                                level_ncoords, ncoords_in, ncoords_out,
+                                nsegments_in, nbins, stream);
+    } else if (k == 3) {
+        launch_ffa_freq_fuse<3>(fold_in, fold_out, level_idx, level_shift,
+                                level_ncoords, ncoords_in, ncoords_out,
+                                nsegments_in, nbins, stream);
+    } else {
+        throw std::invalid_argument(
+            "ffa_iter_freq_fused_cuda: k must be 3, 4, or 5");
+    }
+}
+
+std::vector<uint32_t>
+ffa_freq_fuse_check_levels_cuda(const uint32_t* idx,
+                                std::span<const uint32_t> ncoords_offsets,
+                                std::span<const SizeType> ncoords,
+                                uint32_t* bad_d,
+                                cudaStream_t stream) {
+    const auto n_levels = ncoords.size();
+    error_check::check_equal(ncoords_offsets.size(), n_levels,
+                             "ffa_freq_fuse_check_levels_cuda: offsets and "
+                             "ncoords must have the same length");
+    std::vector<uint32_t> bad(n_levels, 0U);
+    if (n_levels < 2) {
+        return bad;
+    }
+    // bad_d holds n_levels counters, then offsets and ncoords (u32 each).
+    std::vector<uint32_t> meta(2 * n_levels);
+    for (SizeType i = 0; i < n_levels; ++i) {
+        meta[i] = ncoords_offsets[i];
+        error_check::check_less_equal(
+            ncoords[i], SizeType{UINT32_MAX},
+            "ffa_freq_fuse_check_levels_cuda: ncoords exceeds 32 bits");
+        meta[n_levels + i] = static_cast<uint32_t>(ncoords[i]);
+    }
+    uint32_t* offsets_d = bad_d + n_levels;
+    uint32_t* ncoords_d = offsets_d + n_levels;
+    cuda_utils::check_cuda_call(
+        cudaMemsetAsync(bad_d, 0, n_levels * sizeof(uint32_t), stream),
+        "ffa_freq_fuse_check_levels_cuda: memset failed");
+    cuda_utils::check_cuda_call(cudaMemcpyAsync(offsets_d, meta.data(),
+                                                meta.size() * sizeof(uint32_t),
+                                                cudaMemcpyHostToDevice, stream),
+                                "ffa_freq_fuse_check_levels_cuda: H2D failed");
+    const SizeType total =
+        ncoords_offsets[n_levels - 1] + ncoords[n_levels - 1];
+    const SizeType work = total - ncoords_offsets[1];
+    if (work > 0) {
+        constexpr SizeType kThreads = 256;
+        const dim3 grid((work + kThreads - 1) / kThreads);
+        cuda_utils::check_kernel_launch_params(grid, dim3(kThreads));
+        kernel_ffa_freq_fuse_check<<<grid, kThreads, 0, stream>>>(
+            idx, offsets_d, ncoords_d, static_cast<uint32_t>(n_levels), bad_d);
+        cuda_utils::check_last_cuda_error(
+            "kernel_ffa_freq_fuse_check launch failed");
+    }
+    cuda_utils::check_cuda_call(cudaMemcpyAsync(bad.data(), bad_d,
+                                                n_levels * sizeof(uint32_t),
+                                                cudaMemcpyDeviceToHost, stream),
+                                "ffa_freq_fuse_check_levels_cuda: D2H failed");
+    // `meta` and `bad` are host stack data used by the async copies.
     cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
-                                "cudaStreamSynchronize failed");
+                                "ffa_freq_fuse_check_levels_cuda: sync failed");
+    return bad;
+}
+
+std::vector<int> plan_ffa_freq_fuse_groups(std::span<const SizeType> ncoords,
+                                           std::span<const SizeType> nsegments,
+                                           std::span<const uint32_t> level_bad,
+                                           std::span<const bool> k_fits_smem) {
+    const SizeType levels = ncoords.size();
+    error_check::check(nsegments.size() == levels && level_bad.size() == levels,
+                       "plan_ffa_freq_fuse_groups: per-level inputs must "
+                       "have the same length");
+    const auto fits = [&](int k, SizeType level) -> bool {
+        const auto ku = static_cast<SizeType>(k);
+        if (k < 3 || static_cast<SizeType>(k) >= k_fits_smem.size() ||
+            !k_fits_smem[ku] || ku > levels - level) {
+            return false;
+        }
+        const SizeType nseg   = nsegments[level - 1];
+        const SizeType ncoord = ncoords[level - 1];
+        if ((nseg % (SizeType{1} << ku)) != 0) {
+            return false;
+        }
+        for (SizeType step = 0; step < ku; ++step) {
+            if (level_bad[level + step] != 0) {
+                return false;
+            }
+        }
+        const SizeType nblocks = (nseg >> ku) * ncoord;
+        return nblocks != 0 && nblocks <= 0x7fffffffULL &&
+               ncoord <= 0xffffffffULL &&
+               ncoords[level + ku - 1] <= 0xffffffffULL;
+    };
+
+    std::vector<int> groups;
+    SizeType level = 1;
+    // A prefix of k = 4 groups, then k = 5, then k = 3, then single levels.
+    bool k4_prefix = true;
+    while (level < levels) {
+        int k = 0;
+        if (k4_prefix && fits(4, level)) {
+            k = 4;
+        } else {
+            k4_prefix = false;
+            if (fits(5, level)) {
+                k = 5;
+            } else if (fits(3, level)) {
+                k = 3;
+            } else {
+                k = 1;
+            }
+        }
+        groups.push_back(k);
+        level += static_cast<SizeType>(k);
+    }
+    return groups;
 }
 
 /*
@@ -1198,6 +1665,8 @@ void ffa_complex_iter_cuda(const ComplexTypeCUDA* __restrict__ fold_in,
     const auto threads_per_block = (total_work < 65536) ? 256 : 512;
     const auto blocks_per_grid =
         (total_work + threads_per_block - 1) / threads_per_block;
+    check_u32_threads(blocks_per_grid, threads_per_block,
+                      "kernel_ffa_complex_iter");
     const dim3 block_dim(threads_per_block);
     const dim3 grid_dim(blocks_per_grid);
     cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
@@ -1205,8 +1674,6 @@ void ffa_complex_iter_cuda(const ComplexTypeCUDA* __restrict__ fold_in,
         fold_in, fold_out, coords, ncoords_cur, ncoords_prev, nsegments,
         nbins_f, nbins);
     cuda_utils::check_last_cuda_error("FFA complex iter kernel launch failed");
-    cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
-                                "cudaStreamSynchronize failed");
 }
 
 void ffa_complex_iter_freq_cuda(const ComplexTypeCUDA* __restrict__ fold_in,
@@ -1222,6 +1689,8 @@ void ffa_complex_iter_freq_cuda(const ComplexTypeCUDA* __restrict__ fold_in,
     const auto threads_per_block = (total_work < 65536) ? 256 : 512;
     const auto blocks_per_grid =
         (total_work + threads_per_block - 1) / threads_per_block;
+    check_u32_threads(blocks_per_grid, threads_per_block,
+                      "kernel_ffa_complex_freq_iter");
     const dim3 block_dim(threads_per_block);
     const dim3 grid_dim(blocks_per_grid);
     cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
@@ -1230,8 +1699,6 @@ void ffa_complex_iter_freq_cuda(const ComplexTypeCUDA* __restrict__ fold_in,
         nbins_f, nbins);
     cuda_utils::check_last_cuda_error(
         "FFA complex freq iter kernel launch failed");
-    cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
-                                "cudaStreamSynchronize failed");
 }
 
 void shift_add_linear_batch_cuda(const float* __restrict__ folds_tree,
@@ -1251,6 +1718,8 @@ void shift_add_linear_batch_cuda(const float* __restrict__ folds_tree,
     const SizeType total_work = n_leaves * nbins;
     const SizeType blocks_per_grid =
         (total_work + kThreadsPerBlock - 1) / kThreadsPerBlock;
+    check_u32_threads(blocks_per_grid, kThreadsPerBlock,
+                      "kernel_shift_add_linear");
     const dim3 block_dim(kThreadsPerBlock);
     const dim3 grid_dim(blocks_per_grid);
     cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
@@ -1280,6 +1749,8 @@ void shift_add_linear_complex_batch_cuda(
     const SizeType total_work = n_leaves * nbins_f;
     const SizeType blocks_per_grid =
         (total_work + kThreadsPerBlock - 1) / kThreadsPerBlock;
+    check_u32_threads(blocks_per_grid, kThreadsPerBlock,
+                      "kernel_shift_add_linear_complex");
     const dim3 block_dim(kThreadsPerBlock);
     const dim3 grid_dim(blocks_per_grid);
     cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
@@ -1308,6 +1779,8 @@ void shift_add_ascend_linear_batch_cuda(
     const SizeType total_work = n_leaves * nbins;
     const SizeType blocks_per_grid =
         (total_work + kThreadsPerBlock - 1) / kThreadsPerBlock;
+    check_u32_threads(blocks_per_grid, kThreadsPerBlock,
+                      "kernel_shift_add_ascend_linear");
     const dim3 block_dim(kThreadsPerBlock);
     const dim3 grid_dim(blocks_per_grid);
     cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
@@ -1336,6 +1809,8 @@ void shift_add_ascend_linear_complex_batch_cuda(
     const SizeType total_work = n_leaves * nbins_f;
     const SizeType blocks_per_grid =
         (total_work + kThreadsPerBlock - 1) / kThreadsPerBlock;
+    check_u32_threads(blocks_per_grid, kThreadsPerBlock,
+                      "kernel_shift_add_ascend_linear_complex");
     const dim3 block_dim(kThreadsPerBlock);
     const dim3 grid_dim(blocks_per_grid);
     cuda_utils::check_kernel_launch_params(grid_dim, block_dim);

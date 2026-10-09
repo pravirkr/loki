@@ -1,0 +1,21 @@
+# Build context is the repository root (docker/Dockerfile).
+.git
+.github
+build
+build-*
+.pixi
+.venv
+**/.venv
+**/__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.cache
+dist
+notebooks
+papers
+.claude
+.cursor
+*.md.bak

@@ -422,20 +422,21 @@ public:
     /**
      * @brief Gets the segment indices and coordinates for all segments up to
      * the given level.
+     *
      * @param level The hierarchical level.
-     * @return A pair containing the segment indices and coordinates.
+     * @return Segment indices and coordinates.
      */
-    [[nodiscard]] std::pair<std::vector<SizeType>,
+    [[nodiscard]] std::pair<std::vector<uint32_t>,
                             std::vector<std::pair<double, double>>>
     get_segment_coords_so_far(SizeType level) const {
         if (level >= m_nsegments) {
             throw std::out_of_range(
                 std::format("level must be in [0, {}].", m_nsegments - 1));
         }
-        std::vector<SizeType> idx_segments(level + 1);
+        std::vector<uint32_t> idx_segments(level + 1);
         std::vector<std::pair<double, double>> coord_segments(level + 1);
         for (SizeType i = 0; i <= level; ++i) {
-            idx_segments[i]   = get_segment_idx(i);
+            idx_segments[i]   = static_cast<uint32_t>(get_segment_idx(i));
             coord_segments[i] = get_segment_coord(i);
         }
         return {idx_segments, coord_segments};

@@ -1,6 +1,8 @@
 #include "lib/cuda/prune_cuda.cuh"
 
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -14,6 +16,7 @@
 #include <vector>
 
 #include <cuda/std/span>
+#include <cuda/std/utility>
 #include <cuda_runtime.h>
 #include <fmt/ranges.h>
 #include <spdlog/spdlog.h>
@@ -92,7 +95,8 @@ public:
                   SizeType branch_max,
                   std::string_view poly_basis,
                   int device_id,
-                  cudaStream_t stream)
+                  cudaStream_t stream,
+                  math::CUFFTManager* prune_fft = nullptr)
         : m_workspace_ptr(&workspace),
           m_cfg(std::move(cfg)),
           m_ffa_plan(m_cfg),
@@ -112,7 +116,7 @@ public:
             m_ffa_plan.get_dparams_actual().back(),
             m_ffa_plan.get_nsegments().back(),
             m_ffa_plan.get_tsegments().back(), m_cfg, m_batch_size,
-            m_branch_max, m_device_id);
+            m_branch_max, m_device_id, prune_fft);
     }
 
     ~PruneCUDAImpl()                               = default;
@@ -295,17 +299,34 @@ private:
         }
         auto& prune_ws       = ws.prune;
         const auto coord_mid = m_snail_scheme.get_coord(m_prune_level);
-        const auto [idx_segments, coord_segments] =
+        const auto segment_coords_so_far =
             m_snail_scheme.get_segment_coords_so_far(m_prune_level);
+        const auto& idx_segments   = segment_coords_so_far.first;
+        const auto& coord_segments = segment_coords_so_far.second;
         const auto batch_cap =
             std::max(SizeType{1}, std::min(m_batch_size, n_survivors));
         const auto n_segments_so_far = idx_segments.size();
 
-        // Copy the segment coordinates to the device
-        thrust::copy(thrust::cuda::par.on(stream), idx_segments.begin(),
-                     idx_segments.end(), ws.idx_segments_d.begin());
-        thrust::copy(thrust::cuda::par.on(stream), coord_segments.begin(),
-                     coord_segments.end(), ws.coord_segments_d.begin());
+        if (n_segments_so_far > 0) {
+            cuda_utils::check_cuda_call(
+                cudaMemcpyAsync(
+                    thrust::raw_pointer_cast(ws.idx_segments_d.data()),
+                    idx_segments.data(), n_segments_so_far * sizeof(uint32_t),
+                    cudaMemcpyHostToDevice, stream),
+                "cudaMemcpyAsync idx_segments failed");
+            cuda_utils::check_cuda_call(
+                cudaMemcpyAsync(
+                    thrust::raw_pointer_cast(ws.coord_segments_d.data()),
+                    coord_segments.data(),
+                    n_segments_so_far * sizeof(std::pair<double, double>),
+                    cudaMemcpyHostToDevice, stream),
+                "cudaMemcpyAsync coord_segments failed");
+            // Both sources are pageable and die with this call. Wait until
+            // the copies have read them.
+            cuda_utils::check_cuda_call(
+                cudaStreamSynchronize(stream),
+                "cudaStreamSynchronize segment upload failed");
+        }
 
         memory::CircularViewCUDA<double> leaves_cv =
             world_tree.get_leaves_circular_view();
@@ -637,6 +658,12 @@ private:
         const auto batch_size =
             std::max(1UL, std::min(m_batch_size, n_branches));
 
+        bool minmax_pending     = false;
+        auto accumulate_min_max = [&stats](const MinMaxFloat& minmax) {
+            stats.score_min = std::min(stats.score_min, minmax.min);
+            stats.score_max = std::max(stats.score_max, minmax.max);
+        };
+
         // Process branches in batches
         // Process branches in potentially split batches to handle wraps
         SizeType total_processed = 0;
@@ -716,14 +743,17 @@ private:
                 cuda_utils::as_span(prune_ws.filtered_mask_d),
                 current_threshold, n_leaves_batch, scratch_ws, stream);
 
-            // Compute min and max scores
-            MinMaxFloat minmax_scores;
-            scratch_ws.compute_min_max_scores(
+            // Compute min and max scores. The host reads them one batch
+            // later, so the reduction and its copy never block this batch
+            // (score_and_filter above still syncs for the pass count).
+            if (minmax_pending) {
+                accumulate_min_max(scratch_ws.wait_min_max());
+            }
+            scratch_ws.compute_min_max_scores_async(
                 cuda_utils::as_span(prune_ws.branched_scores_d),
-                cuda_utils::as_span(prune_ws.validation_mask_d), &minmax_scores,
-                n_leaves_batch, stream);
-            stats.score_min = std::min(stats.score_min, minmax_scores.min);
-            stats.score_max = std::max(stats.score_max, minmax_scores.max);
+                cuda_utils::as_span(prune_ws.validation_mask_d), n_leaves_batch,
+                stream);
+            minmax_pending = true;
 
             if (n_leaves_passing == 0) {
                 world_tree.consume_read(current_batch_size);
@@ -756,6 +786,9 @@ private:
             // Notify the buffer that a batch of the old suggestions has been
             // consumed
             world_tree.consume_read(current_batch_size);
+        }
+        if (minmax_pending) {
+            accumulate_min_max(scratch_ws.wait_min_max());
         }
     }
 
@@ -790,10 +823,7 @@ public:
           m_execution_stream(device_id),
           m_ffa_plan(m_cfg),
           m_branching_pattern(m_ffa_plan.get_branching_pattern(m_poly_basis)),
-          m_branch_max(
-              std::max(static_cast<SizeType>(std::ceil(
-                           *std::ranges::max_element(m_branching_pattern) * 2)),
-                       32UL)),
+          m_branch_max(detail::compute_branch_max(m_branching_pattern)),
           m_workspace_storage(m_batch_size,
                               m_branch_max,
                               m_max_sugg,
@@ -841,10 +871,8 @@ public:
           m_workspace_storage(),
           m_workspace_ptr(&workspace) {
         // Create branching pattern and branch max
-        m_branching_pattern   = m_ffa_plan.get_branching_pattern(m_poly_basis);
-        const auto branch_max = *std::ranges::max_element(m_branching_pattern);
-        m_branch_max =
-            std::max(static_cast<SizeType>(std::ceil(branch_max * 2)), 32UL);
+        m_branching_pattern = m_ffa_plan.get_branching_pattern(m_poly_basis);
+        m_branch_max        = detail::compute_branch_max(m_branching_pattern);
 
         // Validate workspaces
         const auto& ws         = get_workspace();
@@ -855,6 +883,68 @@ public:
                                      : m_cfg.get_nbins();
         ws.validate(m_batch_size, m_branch_max, m_max_sugg, ncoords_ffa,
                     m_cfg.get_nparams(), nbins, nsegments);
+    }
+
+    /// Shared-pipeline constructor: the sweep owns the workspaces, the device
+    /// inputs and the fold buffer, and sized the EP workspace for a chunk
+    /// group (@p pipeline's shape), of which this chunk is a member.
+    Impl(const EPCudaSharedPipeline<FoldTypeCUDA>& pipeline,
+         search::PulsarSearchConfig cfg,
+         std::span<const float> threshold_scheme,
+         std::optional<SizeType> n_runs,
+         std::optional<std::vector<SizeType>> ref_segs,
+         std::span<const SizeType> ascend_levels,
+         SizeType max_sugg,
+         SizeType batch_size,
+         std::string_view poly_basis,
+         int device_id)
+        : m_cfg(std::move(cfg)),
+          m_threshold_scheme(threshold_scheme.begin(), threshold_scheme.end()),
+          m_n_runs(n_runs),
+          m_ref_segs(std::move(ref_segs)),
+          m_ascend_levels(ascend_levels.begin(), ascend_levels.end()),
+          m_max_sugg(max_sugg),
+          m_batch_size(batch_size),
+          m_poly_basis(poly_basis),
+          m_device_id(device_id),
+          m_execution_stream(pipeline.stream),
+          m_ffa_plan(m_cfg),
+          m_workspace_storage(),
+          m_workspace_ptr(pipeline.ep_workspace),
+          m_pipeline(pipeline) {
+        if (pipeline.ep_workspace == nullptr ||
+            pipeline.ffa_workspace == nullptr ||
+            pipeline.fft_manager == nullptr) {
+            throw std::invalid_argument(
+                "EPMultiPassCudaCore: the shared pipeline needs its "
+                "workspaces and FFT manager");
+        }
+        m_branching_pattern = m_ffa_plan.get_branching_pattern(m_poly_basis);
+        const auto branch_max_needed =
+            detail::compute_branch_max(m_branching_pattern);
+        const auto ncoords_ffa = m_ffa_plan.get_ncoords().back();
+        const auto nsegments   = m_ffa_plan.get_nsegments().back();
+        // The group's workspace and the prune functors use the group's
+        // branch_max: a stale plan whose groups are too small must not run.
+        if (branch_max_needed > pipeline.ws_branch_max ||
+            ncoords_ffa > pipeline.ws_ncoords ||
+            nsegments > pipeline.ws_nsegments) {
+            throw std::runtime_error(std::format(
+                "EPMultiPassCudaCore: the chunk needs branch_max={}, "
+                "ncoords={}, nsegments={} but the workspace was sized for "
+                "{}, {}, {}. Re-plan (stale plan cache?).",
+                branch_max_needed, ncoords_ffa, nsegments,
+                pipeline.ws_branch_max, pipeline.ws_ncoords,
+                pipeline.ws_nsegments));
+        }
+        m_branch_max         = pipeline.ws_branch_max;
+        const SizeType nbins = std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>
+                                   ? m_cfg.get_nbins_f()
+                                   : m_cfg.get_nbins();
+        get_workspace().validate(m_batch_size, m_branch_max,
+                                 pipeline.ws_max_sugg, pipeline.ws_ncoords,
+                                 m_cfg.get_nparams(), nbins,
+                                 pipeline.ws_nsegments);
     }
 
     ~Impl()                      = default;
@@ -875,11 +965,83 @@ public:
                    plans::FFAPlan<HostFoldT>>
             result = compute_ffa_cuda_device<FoldTypeCUDA>(ts_e, ts_v, m_cfg,
                                                            m_device_id);
+        // Take the fold out of the tuple: copying it would double the device
+        // memory of the fold.
         const thrust::device_vector<FoldTypeCUDA> ffa_fold_d =
-            std::get<0>(result);
-        plans::FFAPlan<HostFoldT> ffa_plan = std::move(std::get<1>(result));
+            std::move(std::get<0>(result));
+        run_pruning(cuda_utils::as_span(ffa_fold_d), outdir, file_prefix,
+                    timer);
+    }
+
+    /// Shared-pipeline execution: the FFA runs into the sweep's fold buffer
+    /// from the sweep's device inputs, then the runs are pruned in turn.
+    void execute_device(const std::filesystem::path& outdir,
+                        std::string_view file_prefix) {
+        timing::SimpleTimer timer;
+        timer.start();
+        spdlog::info("EPMultiPassCudaCore: Initializing with FFA");
+        const auto& pl = *m_pipeline;
+        cuda_utils::CudaSetDeviceGuard device_guard(m_device_id);
+        {
+            // Scoped: the brute-fold tables of the FFA are freed before the
+            // pruning, as the memory model assumes.
+            FFACudaCore<FoldTypeCUDA> ffa(*pl.ffa_workspace, *pl.fft_manager,
+                                          m_cfg, m_device_id);
+            const auto& plan = ffa.get_plan();
+            error_check::check_greater_equal(
+                pl.fold_d.size(), plan.get_buffer_size(),
+                "EPMultiPassCudaCore: the shared fold buffer is smaller than "
+                "the chunk's FFA buffer");
+            ffa.execute(pl.ts_e_d, pl.ts_v_d,
+                        pl.fold_d.first(plan.get_buffer_size()), pl.stream);
+            cuda_utils::check_cuda_call(
+                cudaStreamSynchronize(pl.stream),
+                "EPMultiPassCudaCore: FFA synchronization failed");
+        }
+        run_pruning(cuda::std::span<const FoldTypeCUDA>(
+                        pl.fold_d.data(), m_ffa_plan.get_fold_size()),
+                    outdir, file_prefix, timer);
+    }
+
+private:
+    search::PulsarSearchConfig m_cfg;
+    std::vector<float> m_threshold_scheme;
+    std::optional<SizeType> m_n_runs;
+    std::optional<std::vector<SizeType>> m_ref_segs;
+    std::vector<SizeType> m_ascend_levels;
+    SizeType m_max_sugg;
+    SizeType m_batch_size;
+    std::string m_poly_basis;
+    int m_device_id;
+
+    plans::FFAPlan<HostFoldT> m_ffa_plan;
+    std::vector<double> m_branching_pattern;
+    SizeType m_branch_max{0};
+
+    // EP workspace ownership
+    ExecutionStream m_execution_stream;
+    memory::EPWorkspaceCUDA<FoldTypeCUDA> m_workspace_storage;
+    // The observer pointer that always points to the active workspace.
+    memory::EPWorkspaceCUDA<FoldTypeCUDA>* m_workspace_ptr{nullptr};
+    // Set only on the shared-pipeline constructor.
+    std::optional<EPCudaSharedPipeline<FoldTypeCUDA>> m_pipeline;
+
+    [[nodiscard]] memory::EPWorkspaceCUDA<FoldTypeCUDA>&
+    get_workspace() noexcept {
+        return *m_workspace_ptr;
+    }
+    [[nodiscard]] const memory::EPWorkspaceCUDA<FoldTypeCUDA>&
+    get_workspace() const noexcept {
+        return *m_workspace_ptr;
+    }
+
+    /// Prunes the selected runs of @p ffa_fold and writes the result file.
+    void run_pruning(cuda::std::span<const FoldTypeCUDA> ffa_fold,
+                     const std::filesystem::path& outdir,
+                     std::string_view file_prefix,
+                     timing::SimpleTimer& timer) {
         // Setup output files and directory
-        const auto nsegments = ffa_plan.get_nsegments().back();
+        const auto nsegments = m_ffa_plan.get_nsegments().back();
         const std::string filebase =
             std::format("{}_pruning_nstages_{}", file_prefix, nsegments);
         const auto log_file =
@@ -914,13 +1076,18 @@ public:
             result_file, search::PruneResultWriter::Mode::kWrite);
         writer.write_metadata(m_cfg.get_param_names(), nsegments, m_max_sugg,
                               m_threshold_scheme);
-        auto& ws   = get_workspace();
+        auto& ws = get_workspace();
+        // A chunk of the sweep prunes with the sweep's FFT manager, so its
+        // plans are built once for the sweep. A standalone run owns its own.
+        math::CUFFTManager* const prune_fft =
+            m_pipeline.has_value() ? m_pipeline->prune_fft_manager : nullptr;
         auto prune = PruneCUDAImpl<FoldTypeCUDA>(
             ws, m_cfg, m_threshold_scheme, m_max_sugg, m_batch_size,
-            m_branch_max, m_poly_basis, m_device_id, m_execution_stream.get());
+            m_branch_max, m_poly_basis, m_device_id, m_execution_stream.get(),
+            prune_fft);
         for (const auto ref_seg : ref_segs_to_process) {
-            prune.execute(cuda_utils::as_span(ffa_fold_d), ref_seg,
-                          m_ascend_levels, outdir, log_file, result_file,
+            prune.execute(ffa_fold, ref_seg, m_ascend_levels, outdir, log_file,
+                          result_file,
                           /*task_id=*/0);
         }
         const auto ep_time = timer.stop();
@@ -931,36 +1098,6 @@ public:
         spdlog::info("Pruning complete. Results saved to {}",
                      result_file.string());
         spdlog::info("Pruning time: {:.2f} seconds", ep_time);
-    }
-
-private:
-    search::PulsarSearchConfig m_cfg;
-    std::vector<float> m_threshold_scheme;
-    std::optional<SizeType> m_n_runs;
-    std::optional<std::vector<SizeType>> m_ref_segs;
-    std::vector<SizeType> m_ascend_levels;
-    SizeType m_max_sugg;
-    SizeType m_batch_size;
-    std::string m_poly_basis;
-    int m_device_id;
-
-    plans::FFAPlan<HostFoldT> m_ffa_plan;
-    std::vector<double> m_branching_pattern;
-    SizeType m_branch_max{0};
-
-    // EP workspace ownership
-    ExecutionStream m_execution_stream;
-    memory::EPWorkspaceCUDA<FoldTypeCUDA> m_workspace_storage;
-    // The observer pointer that always points to the active workspace.
-    memory::EPWorkspaceCUDA<FoldTypeCUDA>* m_workspace_ptr{nullptr};
-
-    [[nodiscard]] memory::EPWorkspaceCUDA<FoldTypeCUDA>&
-    get_workspace() noexcept {
-        return *m_workspace_ptr;
-    }
-    [[nodiscard]] const memory::EPWorkspaceCUDA<FoldTypeCUDA>&
-    get_workspace() const noexcept {
-        return *m_workspace_ptr;
     }
 
 }; // End EPMultiPassCudaCore::Impl implementation
@@ -1013,6 +1150,29 @@ EPMultiPassCudaCore<FoldTypeCUDA>::EPMultiPassCudaCore(
                                     device_id)) {}
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
+EPMultiPassCudaCore<FoldTypeCUDA>::EPMultiPassCudaCore(
+    const EPCudaSharedPipeline<FoldTypeCUDA>& pipeline,
+    search::PulsarSearchConfig cfg,
+    std::span<const float> threshold_scheme,
+    std::optional<SizeType> n_runs,
+    std::optional<std::vector<SizeType>> ref_segs,
+    std::span<const SizeType> ascend_levels,
+    SizeType max_sugg,
+    SizeType batch_size,
+    std::string_view poly_basis,
+    int device_id)
+    : m_impl(std::make_unique<Impl>(pipeline,
+                                    std::move(cfg),
+                                    threshold_scheme,
+                                    n_runs,
+                                    std::move(ref_segs),
+                                    ascend_levels,
+                                    max_sugg,
+                                    batch_size,
+                                    poly_basis,
+                                    device_id)) {}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
 EPMultiPassCudaCore<FoldTypeCUDA>::~EPMultiPassCudaCore() = default;
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 EPMultiPassCudaCore<FoldTypeCUDA>::EPMultiPassCudaCore(
@@ -1028,6 +1188,12 @@ void EPMultiPassCudaCore<FoldTypeCUDA>::execute(
     const std::filesystem::path& outdir,
     std::string_view file_prefix) {
     m_impl->execute(ts_e, ts_v, outdir, file_prefix);
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+void EPMultiPassCudaCore<FoldTypeCUDA>::execute_device(
+    const std::filesystem::path& outdir, std::string_view file_prefix) {
+    m_impl->execute_device(outdir, file_prefix);
 }
 
 // Explicit instantiation

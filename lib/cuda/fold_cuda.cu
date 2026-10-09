@@ -30,9 +30,11 @@ struct ComputePhase {
     double tsamp, t_ref;
     uint32_t segment_len, nbins;
 
-    __device__ uint32_t operator()(uint32_t idx) const {
-        const uint32_t ifreq     = idx / segment_len;
-        const uint32_t isamp     = idx - (ifreq * segment_len);
+    // 64-bit index: nfreqs * segment_len can exceed 32 bits.
+    __device__ uint32_t operator()(SizeType idx) const {
+        const auto ifreq = static_cast<uint32_t>(idx / segment_len);
+        const auto isamp = static_cast<uint32_t>(
+            idx - (static_cast<SizeType>(ifreq) * segment_len));
         const double proper_time = (static_cast<double>(isamp) * tsamp) - t_ref;
         const float phase        = utils::get_phase_idx_device(
             proper_time, freq_arr[ifreq], nbins, 0.0);
@@ -100,6 +102,7 @@ public:
                  std::span<const float> ts_v,
                  std::span<FoldType> fold) override {
         check_inputs(ts_e.size(), ts_v.size(), fold.size());
+        cuda_utils::CudaSetDeviceGuard device_guard(m_device_id);
 
         // Resize buffers only if needed
         if (m_ts_e_d.size() < ts_e.size()) {
@@ -144,6 +147,7 @@ public:
                  DeviceSpan<FoldType> fold,
                  Stream stream) override {
         check_inputs(ts_e.size(), ts_v.size(), fold.size());
+        cuda_utils::CudaSetDeviceGuard device_guard(m_device_id);
         auto custream = static_cast<cudaStream_t>(stream.native);
         cuda::std::span<const float> ts_e_span(ts_e.data(), ts_e.size());
         cuda::std::span<const float> ts_v_span(ts_v.data(), ts_v.size());
@@ -191,9 +195,9 @@ private:
     }
 
     void compute_phase() {
-        auto first = thrust::counting_iterator<uint32_t>(0);
+        auto first = thrust::counting_iterator<SizeType>(0);
         auto last =
-            thrust::counting_iterator<uint32_t>(m_nfreqs * m_segment_len);
+            thrust::counting_iterator<SizeType>(m_nfreqs * m_segment_len);
         ComputePhase functor{
             .freq_arr    = thrust::raw_pointer_cast(m_freq_arr_d.data()),
             .tsamp       = m_tsamp,
@@ -211,11 +215,7 @@ private:
                    cuda::std::span<const float> ts_v,
                    cuda::std::span<DeviceFoldType> fold,
                    cudaStream_t stream) {
-        // Ensure output fold is zeroed
-        cuda_utils::check_cuda_call(
-            cudaMemsetAsync(fold.data(), 0,
-                            fold.size() * sizeof(DeviceFoldType), stream),
-            "cudaMemsetAsync fold failed");
+        // The kernels zero the fold themselves where they accumulate.
         if constexpr (std::is_same_v<FoldType, float>) {
             core::brute_fold_ts_cuda(
                 ts_e.data(), ts_v.data(), fold.data(),
