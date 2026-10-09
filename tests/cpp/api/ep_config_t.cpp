@@ -8,6 +8,7 @@
 
 #include "loki/common/backend.hpp"
 #include "loki/common/types.hpp"
+#include "loki/io/preprocess.hpp"
 #include "loki/search/configs.hpp"
 
 namespace {
@@ -58,6 +59,18 @@ TEST_CASE("EPTomlConfig rejects unknown and removed keys", "[config][ep]") {
         std::invalid_argument);
     REQUIRE_THROWS_AS(loki::search::EPTomlConfig::from_string(
                           make_doc("", "", "", "[cuda]\nenable = true\n")),
+                      std::invalid_argument);
+}
+
+TEST_CASE("EPTomlConfig reads the [preprocessing] table", "[config][ep]") {
+    const auto cfg = loki::search::EPTomlConfig::from_string(
+        make_doc("", "nthreads = 2\nbseg_ffa = 8192\n", "",
+                 "[preprocessing]\nmethod = \"zscore\"\nclip_sigma = 4.0\n"));
+    REQUIRE(cfg.preprocessing.method == loki::io::PreprocessMethod::kZScore);
+    REQUIRE(cfg.preprocessing.clip_sigma == 4.0);
+    REQUIRE_THROWS_AS(loki::search::EPTomlConfig::from_string(
+                          make_doc("", "nthreads = 2\nbseg_ffa = 8192\n", "",
+                                   "[preprocessing]\nblock_sigma = -1.0\n")),
                       std::invalid_argument);
 }
 
