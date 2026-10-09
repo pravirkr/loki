@@ -145,14 +145,11 @@ template <typename FoldType>
 EPWorkspace<FoldType> make_ep_workspace(const PulsarSearchConfig& cfg,
                                         Exec exec) {
     const loki::plans::FFAPlan<FoldType> plan(cfg);
-    const auto pattern = plan.get_branching_pattern("taylor");
-    const auto branch_max =
-        std::max(static_cast<SizeType>(
-                     std::ceil(*std::ranges::max_element(pattern) * 2)),
-                 SizeType{32});
-    const SizeType nbins = std::is_same_v<FoldType, ComplexType>
-                               ? cfg.get_nbins_f()
-                               : cfg.get_nbins();
+    const auto forecast   = plan.forecast_branching("taylor");
+    const auto branch_max = std::max(forecast.max_children, SizeType{32});
+    const SizeType nbins  = std::is_same_v<FoldType, ComplexType>
+                                ? cfg.get_nbins_f()
+                                : cfg.get_nbins();
     return {
         kEPBatchSize,
         branch_max,

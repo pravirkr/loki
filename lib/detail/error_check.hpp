@@ -1,6 +1,7 @@
 #pragma once
 
 #include <concepts>
+#include <cstddef>
 #include <format>
 #include <source_location>
 #include <stdexcept>
@@ -165,6 +166,22 @@ check_range(Index index,
                 ? std::format("Index {} out of range [0, {})", index, size)
                 : std::format("{} (index {} >= size {})", msg, index, size);
         throw DetailedException(composed, loc);
+    }
+}
+
+// Refuse to write `product` more children once `written` slots are filled.
+// One check per parent, before the Cartesian write.
+inline void check_branch_product_fits(
+    std::size_t written,
+    std::size_t product,
+    std::size_t capacity,
+    const std::source_location& loc = std::source_location::current()) {
+    if (product > capacity || written > capacity - product) {
+        throw DetailedException(
+            std::format("A leaf's {} children do not fit in the branch "
+                        "workspace ({} of {} slots already filled)",
+                        product, written, capacity),
+            loc);
     }
 }
 

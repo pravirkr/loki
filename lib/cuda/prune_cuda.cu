@@ -822,8 +822,9 @@ public:
           m_device_id(device_id),
           m_execution_stream(device_id),
           m_ffa_plan(m_cfg),
-          m_branching_pattern(m_ffa_plan.get_branching_pattern(m_poly_basis)),
-          m_branch_max(detail::compute_branch_max(m_branching_pattern)),
+          m_branching_pattern(m_ffa_plan.forecast_branching(m_poly_basis).mean),
+          m_branch_max(detail::compute_branch_max(
+              m_ffa_plan.forecast_branching(m_poly_basis).max_children)),
           m_workspace_storage(m_batch_size,
                               m_branch_max,
                               m_max_sugg,
@@ -871,8 +872,9 @@ public:
           m_workspace_storage(),
           m_workspace_ptr(&workspace) {
         // Create branching pattern and branch max
-        m_branching_pattern = m_ffa_plan.get_branching_pattern(m_poly_basis);
-        m_branch_max        = detail::compute_branch_max(m_branching_pattern);
+        const auto forecast = m_ffa_plan.forecast_branching(m_poly_basis);
+        m_branching_pattern = forecast.mean;
+        m_branch_max        = detail::compute_branch_max(forecast.max_children);
 
         // Validate workspaces
         const auto& ws         = get_workspace();
@@ -919,9 +921,10 @@ public:
                 "EPMultiPassCudaCore: the shared pipeline needs its "
                 "workspaces and FFT manager");
         }
-        m_branching_pattern = m_ffa_plan.get_branching_pattern(m_poly_basis);
+        const auto forecast = m_ffa_plan.forecast_branching(m_poly_basis);
+        m_branching_pattern = forecast.mean;
         const auto branch_max_needed =
-            detail::compute_branch_max(m_branching_pattern);
+            detail::compute_branch_max(forecast.max_children);
         const auto ncoords_ffa = m_ffa_plan.get_ncoords().back();
         const auto nsegments   = m_ffa_plan.get_nsegments().back();
         // The group's workspace and the prune functors use the group's

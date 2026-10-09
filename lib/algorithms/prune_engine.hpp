@@ -6,7 +6,6 @@
  */
 
 #include <algorithm>
-#include <cmath>
 #include <filesystem>
 #include <memory>
 #include <optional>
@@ -27,25 +26,20 @@ namespace loki::algorithms::detail {
 // make_*_cpu is defined in lib/cpu/, make_*_gpu in lib/cuda/ (GPU builds only).
 
 /**
- * @brief Workspace branching capacity needed for a branching pattern.
+ * @brief Workspace slots per parent leaf.
  *
  * Single source of truth shared by EPRegionPlanner and every EPMultiPass
  * engine: the planner must size workspaces with exactly the value the engine
- * validates against. The pattern must come from the plan of the exact band
- * being searched; it is not monotone in band width.
+ * validates against. `max_children` is the worst per-frequency child count
+ * from the plan of the exact band being searched; it is not monotone in band
+ * width. The floor of 32 covers plans whose worst leaf is smaller than that.
  *
- * @param branching_pattern Per-stage branching factors (non-empty).
- * @return max(ceil(2 * max(pattern)), 32).
+ * @param max_children Worst leaf from BranchingForecast::max_children.
+ * @return max(max_children, 32).
  */
-[[nodiscard]] inline SizeType
-compute_branch_max(std::span<const double> branching_pattern) {
+[[nodiscard]] inline SizeType compute_branch_max(SizeType max_children) {
     constexpr SizeType kMinBranchMax = 32U;
-    if (branching_pattern.empty()) {
-        return kMinBranchMax;
-    }
-    const double peak = *std::ranges::max_element(branching_pattern);
-    return std::max(static_cast<SizeType>(std::ceil(peak * 2.0)),
-                    kMinBranchMax);
+    return std::max(max_children, kMinBranchMax);
 }
 
 /**

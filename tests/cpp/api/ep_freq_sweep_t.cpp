@@ -165,10 +165,8 @@ TEST_CASE("EPRegionPlanner wide band covers two regions and reports maxima",
     REQUIRE(chunk_stats.size() == chunks.size());
     for (SizeType i = 0; i < chunks.size(); ++i) {
         const loki::plans::FFAPlan<float> plan(chunks[i].cfg);
-        const auto bp     = plan.get_branching_pattern("taylor");
-        const auto needed = std::max(static_cast<SizeType>(std::ceil(
-                                         2.0 * *std::ranges::max_element(bp))),
-                                     SizeType{32});
+        const auto forecast = plan.forecast_branching("taylor");
+        const auto needed   = std::max(forecast.max_children, SizeType{32});
         CHECK(chunks[i].branch_max >= needed);
         CHECK(chunk_stats[i].branch_max == chunks[i].branch_max);
     }

@@ -13,6 +13,18 @@
 namespace loki::plans {
 
 /**
+ * @brief Per-stage branching forecast for one search band.
+ *
+ * `mean` is the weighted-mean number of children per parent. Thresholds and
+ * the trials scheme consume it. `max_children` is the largest per-frequency
+ * child count over every stage, which sizes the branch workspace.
+ */
+struct BranchingForecast {
+    std::vector<double> mean;
+    SizeType max_children{};
+};
+
+/**
  * @brief Base class for an FFA search plan.
  * @details
  * This class holds all type-invariant (non-template) data and logic
@@ -129,11 +141,23 @@ public:
      * @param poly_basis The polynomial basis for the branching pattern (e.g.
      * "taylor").
      * @param ref_seg The reference segment for the branching pattern.
-     * @return A vector of branching pattern values.
+     * @return A vector of branching pattern values (the weighted mean).
      */
     std::vector<double>
     get_branching_pattern(std::string_view poly_basis = "taylor",
                           SizeType ref_seg            = 0) const;
+
+    /**
+     * @brief Mean branching pattern and the worst leaf's child count.
+     *
+     * One simulation produces both. The mean is what get_branching_pattern
+     * returns. max_children is the workspace bound: every frequency's integer
+     * child count, and for circular orbits the product including crackle
+     * before the snap-occupancy factor.
+     */
+    [[nodiscard]] BranchingForecast
+    forecast_branching(std::string_view poly_basis = "taylor",
+                       SizeType ref_seg            = 0) const;
 
 private:
     struct Impl;

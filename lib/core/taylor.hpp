@@ -3,6 +3,7 @@
 #include <span>
 #include <vector>
 
+#include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
 
 #include "lib/utils/workspace_impl.hpp"
@@ -92,7 +93,8 @@ generate_bp_poly_taylor_approx(std::span<const SizeType> param_grid_count_init,
                                SizeType branch_max        = 256);
 
 // Generate an exact branching pattern for the pruning Taylor search.
-std::vector<double>
+// mean is the weighted average; max_children is the worst frequency.
+plans::BranchingForecast
 generate_bp_poly_taylor(std::span<const std::vector<double>> param_arr,
                         std::span<const double> dparams,
                         double tseg_ffa,

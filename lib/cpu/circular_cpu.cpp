@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <numbers>
 #include <span>
 #include <tuple>
@@ -276,6 +277,8 @@ SizeType circ_taylor_branch_batch(std::span<const double> leaves_tree,
     // Loop 3: Branching d4-d1, write every (d4×d3×d2×d1) combo as a complete
     // output leaf. Ignore n_d5
     SizeType out_leaves = 0;
+    const SizeType capacity =
+        std::min(leaves_branch.size() / kLeavesStride, leaves_origins.size());
     for (SizeType i = 0; i < n_leaves; ++i) {
         const SizeType lo = i * kLeavesStride;
         const SizeType fb = i * kParams;
@@ -294,6 +297,8 @@ SizeType circ_taylor_branch_batch(std::span<const double> leaves_tree,
         const SizeType d3_off = (fb + 2) * branch_max;
         const SizeType d2_off = (fb + 3) * branch_max;
         const SizeType d1_off = (fb + 4) * branch_max;
+        error_check::check_branch_product_fits(
+            out_leaves, n_d4 * n_d3 * n_d2 * n_d1, capacity);
 
         for (SizeType b = 0; b < n_d4; ++b) {
             for (SizeType c = 0; c < n_d3; ++c) {
@@ -334,12 +339,9 @@ SizeType circ_taylor_branch_batch(std::span<const double> leaves_tree,
             }
         }
         if (!any_crackle) {
-            error_check::check_less_equal(out_leaves, n_leaves * branch_max,
-                                          "out_leaves size mismatch");
             return out_leaves;
         }
     }
-
     // Loop 4: Hole expansion. For each existing output leaf that falls in
     // the hole region, replace its d5 value in-place with the first crackle
     // child and append the remaining (n_d5 - 1) crackle children at the tail.
@@ -372,6 +374,7 @@ SizeType circ_taylor_branch_batch(std::span<const double> leaves_tree,
         // Overwrite slot i with first crackle branch, dparam already
         // computed in Loop 3. Append remaining crackle branches at the tail
         leaf[0] = slice_span[0];
+        error_check::check_branch_product_fits(out_leaves, n_d5 - 1, capacity);
         for (SizeType a = 1; a < n_d5; ++a) [[unlikely]] {
             const SizeType bo        = out_leaves * kLeavesStride;
             double* __restrict__ out = leaves_branch_ptr + bo;
@@ -384,9 +387,6 @@ SizeType circ_taylor_branch_batch(std::span<const double> leaves_tree,
             ++out_leaves;
         }
     }
-
-    error_check::check_less_equal(out_leaves, n_leaves * branch_max,
-                                  "out_leaves size mismatch");
 
     return out_leaves;
 }
@@ -1002,7 +1002,7 @@ void circ_taylor_transform_batch(std::span<double> leaves_tree,
     }
 }
 
-std::vector<double>
+plans::BranchingForecast
 generate_bp_circ_taylor(std::span<const std::vector<double>> param_arr,
                         std::span<const double> dparams,
                         double tseg_ffa,
@@ -1024,6 +1024,7 @@ generate_bp_circ_taylor(std::span<const std::vector<double>> param_arr,
     psr_utils::MiddleOutScheme const scheme(nsegments, ref_seg, tseg_ffa);
     std::vector<double> weights(n_freqs, 1.0);
     std::vector<double> branching_pattern(nsegments - 1);
+    SizeType max_children = 0;
 
     // Initialize dparam_cur_batch - each frequency gets the same dparams
     std::vector<double> dparam_cur_batch(n_freqs * n_params);
@@ -1084,6 +1085,30 @@ generate_bp_circ_taylor(std::span<const std::vector<double>> param_arr,
                 }
             }
         }
+        // Worst leaf before the 0.5 snap-occupancy factor. Hole expansion can
+        // copy every child once per crackle branch, so the bound multiplies
+        // the d4..d1 product by the crackle count. Crackle's cell width is
+        // left on the mean path's trajectory.
+        for (SizeType i = 0; i < n_freqs; ++i) {
+            const SizeType idx0    = i * n_params;
+            const double sig_cur   = dparam_cur_batch[idx0];
+            const double sig_new   = dparam_new_batch[idx0];
+            SizeType crackle_count = 1;
+            if (shift_bins_batch[idx0] >= (eta - utils::kFloatEps) &&
+                sig_cur > 0.0 && sig_new > 0.0) {
+                const double ratio = sig_cur / sig_new;
+                crackle_count      = std::max(
+                    SizeType{1},
+                    static_cast<SizeType>(std::ceil(ratio - utils::kFloatEps)));
+            }
+            const auto product =
+                static_cast<SizeType>(std::llround(n_branches[i]));
+            const auto bound =
+                product > std::numeric_limits<SizeType>::max() / crackle_count
+                    ? std::numeric_limits<SizeType>::max()
+                    : product * crackle_count;
+            max_children = std::max(max_children, bound);
+        }
         // Determine validation fraction
         for (SizeType i = 0; i < n_freqs; ++i) {
             const auto snap_active = n_branches_snap[i] > 1.0;
@@ -1123,7 +1148,7 @@ generate_bp_circ_taylor(std::span<const std::vector<double>> param_arr,
         }
     }
 
-    return branching_pattern;
+    return {.mean = std::move(branching_pattern), .max_children = max_children};
 }
 
 } // namespace loki::core

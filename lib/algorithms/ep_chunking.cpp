@@ -269,11 +269,11 @@ private:
         // The branching pattern depends on the chunk's own band (not
         // monotone in width), so branch_max must come from the chunk's
         // plan, exactly as EPMultiPass computes it.
+        const auto forecast = plan.forecast_branching(m_poly_basis);
         EvaluatedChunk c{
-            .cfg     = std::move(chunk_cfg),
-            .ncoords = plan.get_ncoords().back(),
-            .branch_max =
-                compute_branch_max(plan.get_branching_pattern(m_poly_basis)),
+            .cfg         = std::move(chunk_cfg),
+            .ncoords     = plan.get_ncoords().back(),
+            .branch_max  = compute_branch_max(forecast.max_children),
             .nsegments   = design.nsegments,
             .fold_size   = plan.get_fold_size(),
             .buffer_size = plan.get_buffer_size(),

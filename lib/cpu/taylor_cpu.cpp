@@ -133,6 +133,8 @@ SizeType poly_taylor_branch_accel_batch(std::span<const double> leaves_tree,
 
     // Fill leaves_origins
     SizeType out_leaves = 0;
+    const SizeType capacity =
+        std::min(leaves_branch.size() / kLeavesStride, leaves_origins.size());
     for (SizeType i = 0; i < n_leaves; ++i) {
         const SizeType lo            = i * kLeavesStride;
         const SizeType fb            = i * kParams;
@@ -140,6 +142,8 @@ SizeType poly_taylor_branch_accel_batch(std::span<const double> leaves_tree,
         const SizeType n_d1_branches = scratch_counts[fb + 1];
         const SizeType d2_offset     = (fb + 0) * branch_max;
         const SizeType d1_offset     = (fb + 1) * branch_max;
+        error_check::check_branch_product_fits(
+            out_leaves, n_d2_branches * n_d1_branches, capacity);
 
         for (SizeType a = 0; a < n_d2_branches; ++a) {
             for (SizeType b = 0; b < n_d1_branches; ++b) {
@@ -281,6 +285,8 @@ SizeType poly_taylor_branch_jerk_batch(std::span<const double> leaves_tree,
 
     // Fill leaves_origins
     SizeType out_leaves = 0;
+    const SizeType capacity =
+        std::min(leaves_branch.size() / kLeavesStride, leaves_origins.size());
     for (SizeType i = 0; i < n_leaves; ++i) {
         const SizeType lo            = i * kLeavesStride;
         const SizeType fb            = i * kParams;
@@ -290,6 +296,9 @@ SizeType poly_taylor_branch_jerk_batch(std::span<const double> leaves_tree,
         const SizeType d3_offset     = (fb + 0) * branch_max;
         const SizeType d2_offset     = (fb + 1) * branch_max;
         const SizeType d1_offset     = (fb + 2) * branch_max;
+        error_check::check_branch_product_fits(
+            out_leaves, n_d3_branches * n_d2_branches * n_d1_branches,
+            capacity);
 
         for (SizeType a = 0; a < n_d3_branches; ++a) {
             for (SizeType b = 0; b < n_d2_branches; ++b) {
@@ -446,6 +455,8 @@ SizeType poly_taylor_branch_snap_batch(std::span<const double> leaves_tree,
 
     // Fill leaves_origins
     SizeType out_leaves = 0;
+    const SizeType capacity =
+        std::min(leaves_branch.size() / kLeavesStride, leaves_origins.size());
     for (SizeType i = 0; i < n_leaves; ++i) {
         const SizeType lo            = i * kLeavesStride;
         const SizeType fb            = i * kParams;
@@ -457,6 +468,10 @@ SizeType poly_taylor_branch_snap_batch(std::span<const double> leaves_tree,
         const SizeType d3_offset     = (fb + 1) * branch_max;
         const SizeType d2_offset     = (fb + 2) * branch_max;
         const SizeType d1_offset     = (fb + 3) * branch_max;
+        error_check::check_branch_product_fits(
+            out_leaves,
+            n_d4_branches * n_d3_branches * n_d2_branches * n_d1_branches,
+            capacity);
 
         for (SizeType a = 0; a < n_d4_branches; ++a) {
             for (SizeType b = 0; b < n_d3_branches; ++b) {
@@ -1642,7 +1657,7 @@ generate_bp_poly_taylor_approx(std::span<const SizeType> param_grid_count_init,
     return branching_pattern;
 }
 
-std::vector<double>
+plans::BranchingForecast
 generate_bp_poly_taylor(std::span<const std::vector<double>> param_arr,
                         std::span<const double> dparams,
                         double tseg_ffa,
@@ -1661,6 +1676,7 @@ generate_bp_poly_taylor(std::span<const std::vector<double>> param_arr,
     psr_utils::MiddleOutScheme const snail_scheme(nsegments, ref_seg, tseg_ffa);
     std::vector<double> weights(n_freqs, 1.0);
     std::vector<double> branching_pattern(nsegments - 1);
+    SizeType max_children = 0;
 
     // Initialize dparam_cur_batch - each frequency gets the same dparams
     std::vector<double> dparam_cur_batch(n_freqs * n_params);
@@ -1714,6 +1730,13 @@ generate_bp_poly_taylor(std::span<const std::vector<double>> param_arr,
             }
         }
 
+        // Worst leaf at this stage, before the frequencies are averaged.
+        if (!n_branches.empty()) {
+            const auto stage_max = static_cast<SizeType>(
+                std::llround(*std::ranges::max_element(n_branches)));
+            max_children = std::max(max_children, stage_max);
+        }
+
         // Compute average branching factor and update weights
         double children = 0.0;
         double parents  = 0.0;
@@ -1742,7 +1765,7 @@ generate_bp_poly_taylor(std::span<const std::vector<double>> param_arr,
             }
         }
     }
-    return branching_pattern;
+    return {.mean = std::move(branching_pattern), .max_children = max_children};
 }
 
 } // namespace loki::core
