@@ -2,6 +2,7 @@
 
 #include <span>
 
+#include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
 
 #include "lib/utils/workspace_impl.hpp"
@@ -78,7 +79,8 @@ std::vector<double> generate_bp_poly_chebyshev_approx(
     SizeType branch_max = 256);
 
 // Generate an exact branching pattern for the pruning Chebyshev search.
-std::vector<double>
+// mean is the weighted average; max_children is the worst frequency.
+plans::BranchingForecast
 generate_bp_poly_chebyshev(std::span<const std::vector<double>> param_arr,
                            std::span<const double> dparams,
                            double tseg_ffa,

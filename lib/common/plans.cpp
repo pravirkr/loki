@@ -232,6 +232,11 @@ struct FFAPlanBase::Impl {
 
     std::vector<double> get_branching_pattern(std::string_view poly_basis,
                                               SizeType ref_seg) const {
+        return forecast_branching(poly_basis, ref_seg).mean;
+    }
+
+    BranchingForecast forecast_branching(std::string_view poly_basis,
+                                         SizeType ref_seg) const {
         const auto param_arr = compute_param_grid(n_levels - 1);
         if (poly_basis == "taylor") {
             if (n_params <= 4) {
@@ -446,6 +451,10 @@ std::vector<double>
 FFAPlanBase::get_branching_pattern(std::string_view poly_basis,
                                    SizeType ref_seg) const {
     return m_impl->get_branching_pattern(poly_basis, ref_seg);
+}
+BranchingForecast FFAPlanBase::forecast_branching(std::string_view poly_basis,
+                                                  SizeType ref_seg) const {
+    return m_impl->forecast_branching(poly_basis, ref_seg);
 }
 
 // --- Implementation for FFAPlan ---

@@ -1,13 +1,11 @@
-"""EP on a synthetic series whose branching overflows the per-batch workspace.
+"""EP on a synthetic series whose worst leaf exceeds twice the mean branch count.
 
 One short, bright impulse in white noise, at the anchor segment, makes nearly
-every leaf survive the first stages. Some batches then need more children
-than the workspace holds (batch_size * branch_max): branch counts are integer
-and step up across the band, and the product over parameters is not capped.
-Before the fix, the branch write loops ran past the workspace and the run
-aborted with heap corruption (SIGABRT, e.g. "free(): invalid size") or
-segfaulted. Now an oversize batch is retried in smaller pieces and the run
-completes.
+every leaf survive the first stages. Branch counts are integers that step up
+across the band, so the worst frequency's child count is larger than twice
+the weighted mean the thresholds use. The workspace is sized from that worst
+count. Before that, the write ran past the buffer and the process aborted
+with heap corruption (SIGABRT, e.g. "free(): invalid size").
 
 Configuration: 2^22 samples at 100 us (419 s), 64 segments, 64 bins, order 3,
 over a rectangular (jerk, accel, freq) box.
@@ -66,9 +64,9 @@ def _config() -> libloki.configs.PulsarSearchConfig:
 @pytest.mark.parametrize(
     ("thresholds", "batch_size"),
     [
-        # Before the fix: SIGABRT (heap corruption after the size check).
+        # Constant threshold, batch of 1024.
         ([3.0] * (NSEG - 1), 1024),
-        # Before the fix: SIGABRT as well, through a smaller batch.
+        # Rising threshold, batch of 64.
         (np.linspace(2.9, 4.5, NSEG - 1).tolist(), 64),
     ],
 )

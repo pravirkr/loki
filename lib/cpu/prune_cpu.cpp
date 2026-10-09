@@ -649,15 +649,9 @@ private:
         // Process branches in batches
         // Process branches in potentially split batches to handle wraps
         SizeType total_processed = 0;
-        // The workspace holds batch_size * branch_max leaves, but a leaf's
-        // children are the product of its per-parameter branch counts, which
-        // can exceed branch_max. A batch that does not fit is
-        // retried in halves (branch() writes nothing past the workspace and
-        // returns the total it needed); the size recovers after a success.
-        SizeType batch_cap = batch_size;
         while (total_processed < n_branches) {
             const SizeType remaining       = n_branches - total_processed;
-            const SizeType this_batch_size = std::min(batch_cap, remaining);
+            const SizeType this_batch_size = std::min(batch_size, remaining);
             // Get contiguous span; it may be smaller if wrap occurs
             // Read from the beginning of unconsumed data
             auto [leaves_tree_span, current_batch_size] =
@@ -668,6 +662,7 @@ private:
                                 "this_batch_size={}, remaining={}",
                                 total_processed, this_batch_size, remaining));
             }
+            total_processed += current_batch_size;
 
             // Branch
             timer.start();
@@ -676,28 +671,15 @@ private:
                 prune_ws.branched_indices, coord_cur, coord_prev,
                 current_batch_size, branch_ws);
             stats.batch_timers["branch"] += timer.stop();
-            if (n_leaves_batch > prune_ws.max_branched_leaves) {
-                if (current_batch_size == 1) {
-                    throw std::runtime_error(std::format(
-                        "A single leaf branches into {} leaves, more than the "
-                        "workspace holds ({} = batch_size x branch_max); "
-                        "raise batch_size",
-                        n_leaves_batch, prune_ws.max_branched_leaves));
-                }
-                batch_cap = std::max(SizeType{1}, current_batch_size / 2);
-                spdlog::debug("Branching {} leaves needs {} slots > {}; "
-                              "retrying in batches of {}",
-                              current_batch_size, n_leaves_batch,
-                              prune_ws.max_branched_leaves, batch_cap);
-                continue; // nothing consumed; retry the same leaves smaller
-            }
-            batch_cap = std::min(batch_size, batch_cap * 2);
-            total_processed += current_batch_size;
             stats.n_leaves += n_leaves_batch;
             if (n_leaves_batch == 0) {
                 world_tree.consume_read(current_batch_size);
                 continue;
             }
+            error_check::check_less_equal(
+                n_leaves_batch, prune_ws.max_branched_leaves,
+                "Branch factor exceeded workspace size:n_leaves_batch <= "
+                "max_branched_leaves");
 
             // Validation
             timer.start();
@@ -994,8 +976,9 @@ public:
           m_n_workers(
               detail::compute_ep_n_workers(m_nthreads, m_n_runs, m_ref_segs)) {
         // Create branching pattern and branch max
-        m_branching_pattern = m_ffa_plan.get_branching_pattern(m_poly_basis);
-        m_branch_max        = detail::compute_branch_max(m_branching_pattern);
+        const auto forecast = m_ffa_plan.forecast_branching(m_poly_basis);
+        m_branching_pattern = forecast.mean;
+        m_branch_max        = detail::compute_branch_max(forecast.max_children);
 
         // Allocate workspaces
         const auto nsegments = m_ffa_plan.get_nsegments().back();
@@ -1066,8 +1049,9 @@ public:
           m_n_workers(
               detail::compute_ep_n_workers(m_nthreads, m_n_runs, m_ref_segs)) {
         // Create branching pattern and branch max
-        m_branching_pattern = m_ffa_plan.get_branching_pattern(m_poly_basis);
-        m_branch_max        = detail::compute_branch_max(m_branching_pattern);
+        const auto forecast = m_ffa_plan.forecast_branching(m_poly_basis);
+        m_branching_pattern = forecast.mean;
+        m_branch_max        = detail::compute_branch_max(forecast.max_children);
         // Validate workspaces
         const auto ncoords_ffa = m_ffa_plan.get_ncoords().back();
         const auto nsegments   = m_ffa_plan.get_nsegments().back();
@@ -1129,8 +1113,9 @@ public:
           m_n_workers(
               detail::compute_ep_n_workers(m_nthreads, m_n_runs, m_ref_segs)) {
         // Create branching pattern and branch max
-        m_branching_pattern = m_ffa_plan.get_branching_pattern(m_poly_basis);
-        m_branch_max        = detail::compute_branch_max(m_branching_pattern);
+        const auto forecast = m_ffa_plan.forecast_branching(m_poly_basis);
+        m_branching_pattern = forecast.mean;
+        m_branch_max        = detail::compute_branch_max(forecast.max_children);
         // Validate workspaces
         const auto ncoords_ffa = m_ffa_plan.get_ncoords().back();
         const auto nsegments   = m_ffa_plan.get_nsegments().back();

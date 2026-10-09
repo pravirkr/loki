@@ -159,7 +159,7 @@ public:
             for (SizeType i = chunk_idx; i < range_end; ++i) {
                 const plans::FFAPlan<FoldType> plan(chunk_cfgs[i].cfg);
                 const auto needed = algorithms::detail::compute_branch_max(
-                    plan.get_branching_pattern(m_poly_basis));
+                    plan.forecast_branching(m_poly_basis).max_children);
                 if (needed > group.branch_max) {
                     throw std::runtime_error(std::format(
                         "EPFreqSweep: chunk {} needs branch_max={} but the "

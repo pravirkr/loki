@@ -133,9 +133,6 @@ SizeType poly_taylor_branch_accel_batch(std::span<const double> leaves_tree,
 
     // Fill leaves_origins
     SizeType out_leaves = 0;
-    // Write at most `capacity` leaves; past it, keep counting only, so
-    // the caller sees the total this batch needs and can retry it in
-    // smaller pieces. Nothing is written past the workspace.
     const SizeType capacity =
         std::min(leaves_branch.size() / kLeavesStride, leaves_origins.size());
     for (SizeType i = 0; i < n_leaves; ++i) {
@@ -145,21 +142,21 @@ SizeType poly_taylor_branch_accel_batch(std::span<const double> leaves_tree,
         const SizeType n_d1_branches = scratch_counts[fb + 1];
         const SizeType d2_offset     = (fb + 0) * branch_max;
         const SizeType d1_offset     = (fb + 1) * branch_max;
+        error_check::check_branch_product_fits(
+            out_leaves, n_d2_branches * n_d1_branches, capacity);
 
         for (SizeType a = 0; a < n_d2_branches; ++a) {
             for (SizeType b = 0; b < n_d1_branches; ++b) {
-                if (out_leaves < capacity) {
-                    const SizeType bo         = out_leaves * kLeavesStride;
-                    leaves_branch_ptr[bo + 0] = scratch_params[d2_offset + a];
-                    leaves_branch_ptr[bo + 1] = scratch_dparams[fb + 0];
-                    leaves_branch_ptr[bo + 2] = scratch_params[d1_offset + b];
-                    leaves_branch_ptr[bo + 3] = scratch_dparams[fb + 1];
-                    // Fill d0 and f0 directly from leaves_tree
-                    std::memcpy(leaves_branch_ptr + bo + 4,
-                                leaves_tree_ptr + lo + 4, 4 * sizeof(double));
+                const SizeType bo         = out_leaves * kLeavesStride;
+                leaves_branch_ptr[bo + 0] = scratch_params[d2_offset + a];
+                leaves_branch_ptr[bo + 1] = scratch_dparams[fb + 0];
+                leaves_branch_ptr[bo + 2] = scratch_params[d1_offset + b];
+                leaves_branch_ptr[bo + 3] = scratch_dparams[fb + 1];
+                // Fill d0 and f0 directly from leaves_tree
+                std::memcpy(leaves_branch_ptr + bo + 4,
+                            leaves_tree_ptr + lo + 4, 4 * sizeof(double));
 
-                    leaves_origins_ptr[out_leaves] = i;
-                }
+                leaves_origins_ptr[out_leaves] = i;
                 ++out_leaves;
             }
         }
@@ -288,9 +285,6 @@ SizeType poly_taylor_branch_jerk_batch(std::span<const double> leaves_tree,
 
     // Fill leaves_origins
     SizeType out_leaves = 0;
-    // Write at most `capacity` leaves; past it, keep counting only, so
-    // the caller sees the total this batch needs and can retry it in
-    // smaller pieces. Nothing is written past the workspace.
     const SizeType capacity =
         std::min(leaves_branch.size() / kLeavesStride, leaves_origins.size());
     for (SizeType i = 0; i < n_leaves; ++i) {
@@ -302,28 +296,25 @@ SizeType poly_taylor_branch_jerk_batch(std::span<const double> leaves_tree,
         const SizeType d3_offset     = (fb + 0) * branch_max;
         const SizeType d2_offset     = (fb + 1) * branch_max;
         const SizeType d1_offset     = (fb + 2) * branch_max;
+        error_check::check_branch_product_fits(
+            out_leaves, n_d3_branches * n_d2_branches * n_d1_branches,
+            capacity);
 
         for (SizeType a = 0; a < n_d3_branches; ++a) {
             for (SizeType b = 0; b < n_d2_branches; ++b) {
                 for (SizeType c = 0; c < n_d1_branches; ++c) {
-                    if (out_leaves < capacity) {
-                        const SizeType bo = out_leaves * kLeavesStride;
-                        leaves_branch_ptr[bo + 0] =
-                            scratch_params[d3_offset + a];
-                        leaves_branch_ptr[bo + 1] = scratch_dparams[fb + 0];
-                        leaves_branch_ptr[bo + 2] =
-                            scratch_params[d2_offset + b];
-                        leaves_branch_ptr[bo + 3] = scratch_dparams[fb + 1];
-                        leaves_branch_ptr[bo + 4] =
-                            scratch_params[d1_offset + c];
-                        leaves_branch_ptr[bo + 5] = scratch_dparams[fb + 2];
-                        // Fill d0 and f0 directly from leaves_tree
-                        std::memcpy(leaves_branch_ptr + bo + 6,
-                                    leaves_tree_ptr + lo + 6,
-                                    4 * sizeof(double));
+                    const SizeType bo         = out_leaves * kLeavesStride;
+                    leaves_branch_ptr[bo + 0] = scratch_params[d3_offset + a];
+                    leaves_branch_ptr[bo + 1] = scratch_dparams[fb + 0];
+                    leaves_branch_ptr[bo + 2] = scratch_params[d2_offset + b];
+                    leaves_branch_ptr[bo + 3] = scratch_dparams[fb + 1];
+                    leaves_branch_ptr[bo + 4] = scratch_params[d1_offset + c];
+                    leaves_branch_ptr[bo + 5] = scratch_dparams[fb + 2];
+                    // Fill d0 and f0 directly from leaves_tree
+                    std::memcpy(leaves_branch_ptr + bo + 6,
+                                leaves_tree_ptr + lo + 6, 4 * sizeof(double));
 
-                        leaves_origins_ptr[out_leaves] = i;
-                    }
+                    leaves_origins_ptr[out_leaves] = i;
                     ++out_leaves;
                 }
             }
@@ -464,9 +455,6 @@ SizeType poly_taylor_branch_snap_batch(std::span<const double> leaves_tree,
 
     // Fill leaves_origins
     SizeType out_leaves = 0;
-    // Write at most `capacity` leaves; past it, keep counting only, so
-    // the caller sees the total this batch needs and can retry it in
-    // smaller pieces. Nothing is written past the workspace.
     const SizeType capacity =
         std::min(leaves_branch.size() / kLeavesStride, leaves_origins.size());
     for (SizeType i = 0; i < n_leaves; ++i) {
@@ -480,32 +468,34 @@ SizeType poly_taylor_branch_snap_batch(std::span<const double> leaves_tree,
         const SizeType d3_offset     = (fb + 1) * branch_max;
         const SizeType d2_offset     = (fb + 2) * branch_max;
         const SizeType d1_offset     = (fb + 3) * branch_max;
+        error_check::check_branch_product_fits(
+            out_leaves,
+            n_d4_branches * n_d3_branches * n_d2_branches * n_d1_branches,
+            capacity);
 
         for (SizeType a = 0; a < n_d4_branches; ++a) {
             for (SizeType b = 0; b < n_d3_branches; ++b) {
                 for (SizeType c = 0; c < n_d2_branches; ++c) {
                     for (SizeType d = 0; d < n_d1_branches; ++d) {
-                        if (out_leaves < capacity) {
-                            const SizeType bo = out_leaves * kLeavesStride;
-                            leaves_branch_ptr[bo + 0] =
-                                scratch_params[d4_offset + a];
-                            leaves_branch_ptr[bo + 1] = scratch_dparams[fb + 0];
-                            leaves_branch_ptr[bo + 2] =
-                                scratch_params[d3_offset + b];
-                            leaves_branch_ptr[bo + 3] = scratch_dparams[fb + 1];
-                            leaves_branch_ptr[bo + 4] =
-                                scratch_params[d2_offset + c];
-                            leaves_branch_ptr[bo + 5] = scratch_dparams[fb + 2];
-                            leaves_branch_ptr[bo + 6] =
-                                scratch_params[d1_offset + d];
-                            leaves_branch_ptr[bo + 7] = scratch_dparams[fb + 3];
-                            // Fill d0 and f0 directly from leaves_tree
-                            std::memcpy(leaves_branch_ptr + bo + 8,
-                                        leaves_tree_ptr + lo + 8,
-                                        4 * sizeof(double));
+                        const SizeType bo = out_leaves * kLeavesStride;
+                        leaves_branch_ptr[bo + 0] =
+                            scratch_params[d4_offset + a];
+                        leaves_branch_ptr[bo + 1] = scratch_dparams[fb + 0];
+                        leaves_branch_ptr[bo + 2] =
+                            scratch_params[d3_offset + b];
+                        leaves_branch_ptr[bo + 3] = scratch_dparams[fb + 1];
+                        leaves_branch_ptr[bo + 4] =
+                            scratch_params[d2_offset + c];
+                        leaves_branch_ptr[bo + 5] = scratch_dparams[fb + 2];
+                        leaves_branch_ptr[bo + 6] =
+                            scratch_params[d1_offset + d];
+                        leaves_branch_ptr[bo + 7] = scratch_dparams[fb + 3];
+                        // Fill d0 and f0 directly from leaves_tree
+                        std::memcpy(leaves_branch_ptr + bo + 8,
+                                    leaves_tree_ptr + lo + 8,
+                                    4 * sizeof(double));
 
-                            leaves_origins_ptr[out_leaves] = i;
-                        }
+                        leaves_origins_ptr[out_leaves] = i;
                         ++out_leaves;
                     }
                 }
@@ -1667,7 +1657,7 @@ generate_bp_poly_taylor_approx(std::span<const SizeType> param_grid_count_init,
     return branching_pattern;
 }
 
-std::vector<double>
+plans::BranchingForecast
 generate_bp_poly_taylor(std::span<const std::vector<double>> param_arr,
                         std::span<const double> dparams,
                         double tseg_ffa,
@@ -1686,6 +1676,7 @@ generate_bp_poly_taylor(std::span<const std::vector<double>> param_arr,
     psr_utils::MiddleOutScheme const snail_scheme(nsegments, ref_seg, tseg_ffa);
     std::vector<double> weights(n_freqs, 1.0);
     std::vector<double> branching_pattern(nsegments - 1);
+    SizeType max_children = 0;
 
     // Initialize dparam_cur_batch - each frequency gets the same dparams
     std::vector<double> dparam_cur_batch(n_freqs * n_params);
@@ -1739,6 +1730,13 @@ generate_bp_poly_taylor(std::span<const std::vector<double>> param_arr,
             }
         }
 
+        // Worst leaf at this stage, before the frequencies are averaged.
+        if (!n_branches.empty()) {
+            const auto stage_max = static_cast<SizeType>(
+                std::llround(*std::ranges::max_element(n_branches)));
+            max_children = std::max(max_children, stage_max);
+        }
+
         // Compute average branching factor and update weights
         double children = 0.0;
         double parents  = 0.0;
@@ -1767,7 +1765,7 @@ generate_bp_poly_taylor(std::span<const std::vector<double>> param_arr,
             }
         }
     }
-    return branching_pattern;
+    return {.mean = std::move(branching_pattern), .max_children = max_children};
 }
 
 } // namespace loki::core

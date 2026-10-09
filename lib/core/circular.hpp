@@ -4,6 +4,7 @@
 #include <tuple>
 #include <vector>
 
+#include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
 
 #include "lib/utils/workspace_impl.hpp"
@@ -96,7 +97,10 @@ void circ_taylor_transform_batch(std::span<double> leaves_tree,
                                  bool use_conservative_tile,
                                  double propagator_significance);
 
-std::vector<double>
+// mean is the weighted average (including the snap-occupancy factor).
+// max_children is the worst frequency's full product, including crackle
+// and taken before that occupancy factor.
+plans::BranchingForecast
 generate_bp_circ_taylor(std::span<const std::vector<double>> param_arr,
                         std::span<const double> dparams,
                         double tseg_ffa,
