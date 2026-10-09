@@ -24,6 +24,7 @@
 
 #include "lib/common/dispatch.hpp"
 #include "lib/cuda/coord_cuda.cuh"
+#include "lib/cuda/cuda_utils.cuh"
 #include "lib/cuda/types_cuda.cuh"
 #include "lib/cuda/world_tree_cuda.cuh"
 #include "lib/utils/workspace_impl.hpp"
@@ -41,7 +42,8 @@ public:
     using HostFoldT   = HostFoldType<FoldTypeCUDA>;
     using DeviceFoldT = DeviceFoldType<FoldTypeCUDA>;
 
-    thrust::device_vector<DeviceFoldT> fold_internal_d;
+    // Every FFA level writes its whole output, so it needs no fill.
+    cuda_utils::DeviceVectorNoInit<DeviceFoldT> fold_internal_d;
     coord::FFACoordD coords_d;
     coord::FFACoordFreqD coords_freq_d;
 
@@ -60,16 +62,33 @@ public:
     FFAWorkspaceCUDA& operator=(FFAWorkspaceCUDA&&) noexcept = default;
 
     void validate(const plans::FFAPlan<HostFoldT>& ffa_plan) const;
+    /// Bytes of the large buffers: the internal fold and the coordinates.
+    [[nodiscard]] SizeType get_buffers_bytes() const noexcept;
+    /// Bytes of every buffer, including the small per-level arrays.
+    [[nodiscard]] SizeType get_memory_usage_bytes() const noexcept;
     void resolve_coordinates_freq(const plans::FFAPlan<HostFoldT>& ffa_plan,
                                   cudaStream_t stream);
     void resolve_coordinates(const plans::FFAPlan<HostFoldT>& ffa_plan,
                              cudaStream_t stream);
+    /// Per level, the number of resolved frequency coordinates that break
+    /// the fused-merge contract (see ffa_freq_fuse_check_levels_cuda). Call
+    /// after resolve_coordinates_freq(). Synchronizes @p stream.
+    [[nodiscard]] std::vector<uint32_t>
+    check_fuse_levels_freq(const plans::FFAPlan<HostFoldT>& ffa_plan,
+                           cudaStream_t stream);
 
 private:
     // Buffers for device resolve
     thrust::device_vector<uint32_t> m_param_counts_d;
     thrust::device_vector<uint32_t> m_ncoords_offsets_d;
     thrust::device_vector<ParamLimit> m_param_limits_d;
+    // Scratch for check_fuse_levels_freq (3 * n_levels, frequency-only).
+    thrust::device_vector<uint32_t> m_fuse_check_d;
+    // Host sources of the async resolve copies; members so they outlive
+    // the copies without a stream sync.
+    std::vector<uint32_t> m_param_counts_h;
+    std::vector<uint32_t> m_ncoords_offsets_h;
+    std::vector<ParamLimit> m_param_limits_h;
 
     void copy_plan_to_device(const plans::FFAPlan<HostFoldT>& ffa_plan,
                              cudaStream_t stream);
@@ -104,6 +123,7 @@ struct BranchingWorkspaceCUDA {
     operator=(BranchingWorkspaceCUDA&&) noexcept = default;
 
     [[nodiscard]] BranchingWorkspaceCUDAView get_view() noexcept;
+    [[nodiscard]] SizeType get_memory_usage_bytes() const noexcept;
     [[nodiscard]] float get_memory_usage_gib() const noexcept;
     void
     validate(SizeType batch_size, SizeType branch_max, SizeType nparams) const;
@@ -146,6 +166,7 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA> struct PruneWorkspaceCUDA {
     PruneWorkspaceCUDA(PruneWorkspaceCUDA&&) noexcept            = default;
     PruneWorkspaceCUDA& operator=(PruneWorkspaceCUDA&&) noexcept = default;
 
+    [[nodiscard]] SizeType get_memory_usage_bytes() const noexcept;
     [[nodiscard]] float get_memory_usage_gib() const noexcept;
     void validate(SizeType batch_size,
                   SizeType branch_max,
@@ -154,16 +175,33 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA> struct PruneWorkspaceCUDA {
 }; // End PruneWorkspaceCUDA definition
 
 struct CUBScratchArena {
+    /// Pinned host slots for the scalars the host reads back each batch.
+    enum HostSlot : std::uint8_t {
+        kBranchLastOffset = 0,
+        kBranchLastCount  = 1,
+        kReduceOut        = 2,
+        kNumHostSlots     = 4,
+    };
+
     void* cub_temp_storage    = nullptr;
     SizeType cub_temp_bytes   = 0;
     uint32_t* d_reduce_out    = nullptr;
     MinMaxFloat* d_minmax_out = nullptr;
     SizeType max_n_leaves     = 0;
+    // Pinned host memory (not device memory, so not in the memory model).
+    uint32_t* h_scalars      = nullptr;
+    MinMaxFloat* h_minmax    = nullptr;
+    cudaEvent_t minmax_ready = nullptr;
 
     CUBScratchArena() = default;
     CUBScratchArena(SizeType batch_size,
                     SizeType branch_max,
                     cudaStream_t stream = nullptr);
+    /// Bytes of CUB temporary storage an arena for @p max_n_leaves leaves
+    /// allocates (the largest need of the four operations). Sizing only:
+    /// allocates nothing. The EP memory model queries it.
+    [[nodiscard]] static SizeType temp_bytes_for(SizeType max_n_leaves,
+                                                 cudaStream_t stream = nullptr);
     /// Synchronously frees all device allocations (stream-independent).
     ~CUBScratchArena();
     // Non-copyable: device memory ownership is non-shared
@@ -174,6 +212,7 @@ struct CUBScratchArena {
     CUBScratchArena& operator=(CUBScratchArena&&) noexcept;
 
     /// Returns the size of the CUB temp-storage allocation in gibibytes.
+    [[nodiscard]] SizeType get_memory_usage_bytes() const noexcept;
     [[nodiscard]] float get_memory_usage_gib() const noexcept;
 
     void convert_mask_to_indices(cuda::std::span<const uint8_t> validation_mask,
@@ -181,11 +220,17 @@ struct CUBScratchArena {
                                  SizeType n_leaves,
                                  cudaStream_t stream);
 
-    void compute_min_max_scores(cuda::std::span<const float> scores,
-                                cuda::std::span<const uint8_t> mask,
-                                MinMaxFloat* h_minmax_out,
-                                SizeType n_leaves,
-                                cudaStream_t stream);
+    /// Enqueues the masked min/max of @p scores and its copy to the host,
+    /// without waiting. Read it with wait_min_max() before the next call.
+    void compute_min_max_scores_async(cuda::std::span<const float> scores,
+                                      cuda::std::span<const uint8_t> mask,
+                                      SizeType n_leaves,
+                                      cudaStream_t stream);
+    /// Waits for the last compute_min_max_scores_async() and returns it.
+    [[nodiscard]] MinMaxFloat wait_min_max() const;
+
+private:
+    void release() noexcept;
 };
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA> struct EPWorkspaceCUDA {
@@ -216,6 +261,7 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA> struct EPWorkspaceCUDA {
     EPWorkspaceCUDA(EPWorkspaceCUDA&&) noexcept;
     EPWorkspaceCUDA& operator=(EPWorkspaceCUDA&&) noexcept;
 
+    [[nodiscard]] SizeType get_memory_usage_bytes() const noexcept;
     [[nodiscard]] float get_memory_usage_gib() const noexcept;
 
     [[nodiscard]] float get_seed_memory_usage_gib() const noexcept;

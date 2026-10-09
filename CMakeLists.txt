@@ -50,6 +50,11 @@ option(LOKI_BUILD_APPLICATIONS "Build command-line applications" ON)
 option(LOKI_ENABLE_COVERAGE "Enable coverage reporting" OFF)
 option(LOKI_ENABLE_IPO "Enable interprocedural optimization (LTO) on Release builds" OFF)
 option(LOKI_ENABLE_NATIVE_ARCH "Use -march=native in Release builds" ON)
+# Debug stays unoptimized. The asan preset sets -O1 so sanitizers are usable in CI.
+set(LOKI_DEBUG_OPTIMIZATION
+    "-O0"
+    CACHE STRING "Optimization flag for Debug builds (-O0, or -O1 for sanitizers)"
+)
 option(LOKI_USE_SYSTEM_DEPS "Prefer compatible system packages over pinned bundled dependencies"
        OFF
 )
@@ -133,7 +138,8 @@ add_library(${LOKI_COMPILE_OPTIONS} INTERFACE)
 target_compile_options(${LOKI_COMPILE_OPTIONS} INTERFACE -Wall -Wextra -Wpedantic)
 target_compile_options(
   ${LOKI_COMPILE_OPTIONS}
-  INTERFACE $<$<CONFIG:Debug>:-O0;-g> $<$<CONFIG:Release>:-O3;-DNDEBUG;-ffast-math>
+  INTERFACE "$<$<CONFIG:Debug>:${LOKI_DEBUG_OPTIMIZATION};-g>"
+            $<$<CONFIG:Release>:-O3;-DNDEBUG;-ffast-math>
             $<$<AND:$<CONFIG:Release>,$<BOOL:${LOKI_ENABLE_NATIVE_ARCH}>>:-march=native>
             $<$<CONFIG:RelWithDebInfo>:-O2;-DNDEBUG;-g> $<$<CONFIG:MinSizeRel>:-Os;-DNDEBUG>
 )

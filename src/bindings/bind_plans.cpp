@@ -163,7 +163,11 @@ void bind_plans(py::module_& m) {
         .def_property_readonly("device_extra_memory_usage",
                                &FFARegionStats::get_device_extra_memory_usage)
         .def_property_readonly("freq_sweep_memory_usage",
-                               &FFARegionStats::get_freq_sweep_memory_usage);
+                               &FFARegionStats::get_freq_sweep_memory_usage)
+        .def_property_readonly("cpu_memory_usage",
+                               &FFARegionStats::get_cpu_memory_usage)
+        .def_property_readonly("device_memory_usage",
+                               &FFARegionStats::get_device_memory_usage);
 
     bind_ffa_plan<float>(m_plans, "FFAPlanTime");
     bind_ffa_plan<ComplexType>(m_plans, "FFAPlanFourier");

@@ -5,6 +5,8 @@
  * @brief Backend engine interface for EPMultiPass. Internal.
  */
 
+#include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <memory>
 #include <optional>
@@ -23,6 +25,53 @@
 namespace loki::algorithms::detail {
 
 // make_*_cpu is defined in lib/cpu/, make_*_gpu in lib/cuda/ (GPU builds only).
+
+/**
+ * @brief Workspace branching capacity needed for a branching pattern.
+ *
+ * Single source of truth shared by EPRegionPlanner and every EPMultiPass
+ * engine: the planner must size workspaces with exactly the value the engine
+ * validates against. The pattern must come from the plan of the exact band
+ * being searched; it is not monotone in band width.
+ *
+ * @param branching_pattern Per-stage branching factors (non-empty).
+ * @return max(ceil(2 * max(pattern)), 32).
+ */
+[[nodiscard]] inline SizeType
+compute_branch_max(std::span<const double> branching_pattern) {
+    constexpr SizeType kMinBranchMax = 32U;
+    if (branching_pattern.empty()) {
+        return kMinBranchMax;
+    }
+    const double peak = *std::ranges::max_element(branching_pattern);
+    return std::max(static_cast<SizeType>(std::ceil(peak * 2.0)),
+                    kMinBranchMax);
+}
+
+/**
+ * @brief Workers that prune at the same time in an EPMultiPass execution.
+ *
+ * Each pruning run (reference segment) is one task, so at most
+ * min(nthreads, number of runs) workers are busy and need a workspace. Shared
+ * by EPMultiPass (workspaces, thread pool), EPFreqSweep and the planner's
+ * memory model. The run count is n_runs if set, else the number of ref_segs;
+ * with neither (rejected later by determine_ref_segs) it is nthreads.
+ *
+ * @return A value in [1, max(nthreads, 1)].
+ */
+[[nodiscard]] inline SizeType
+compute_ep_n_workers(int nthreads,
+                     std::optional<SizeType> n_runs,
+                     const std::optional<std::vector<SizeType>>& ref_segs) {
+    const auto max_workers = static_cast<SizeType>(std::max(nthreads, 1));
+    SizeType nruns         = max_workers;
+    if (n_runs) {
+        nruns = *n_runs;
+    } else if (ref_segs) {
+        nruns = ref_segs->size();
+    }
+    return std::clamp<SizeType>(nruns, 1, max_workers);
+}
 
 template <SupportedFoldType FoldType> class EPMultiPassEngine {
 protected:
@@ -75,6 +124,7 @@ make_ep_cpu(std::span<memory::EPWorkspaceCPU<FoldType>* const> workspaces,
             memory::FFAWorkspaceCPU<FoldType>& ffa_workspace,
             math::FFTWManager& fft_manager,
             std::span<FoldType> ffa_fold,
+            std::span<math::FFTWManager* const> prune_fft,
             search::PulsarSearchConfig cfg,
             std::span<const float> threshold_scheme,
             std::optional<SizeType> n_runs,

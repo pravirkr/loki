@@ -2,13 +2,16 @@
 
 #include <algorithm>
 #include <memory>
+#include <span>
 #include <utility>
+#include <vector>
 
 #include <cub/cub.cuh>
 #include <cuda_runtime.h>
 
 #include "lib/cuda/cub_helpers.cuh"
 #include "lib/cuda/cuda_utils.cuh"
+#include "lib/cuda/kernels_cuda.cuh"
 #include "lib/cuda/taylor_ffa_cuda.cuh"
 #include "lib/detail/error_check.hpp"
 
@@ -23,13 +26,14 @@ FFAWorkspaceCUDA<FoldTypeCUDA>::FFAWorkspaceCUDA(
     const auto buffer_size  = ffa_plan.get_buffer_size();
     const auto coord_size   = ffa_plan.get_coord_size();
     const bool is_freq_only = n_params == 1;
-    fold_internal_d.resize(buffer_size, DeviceFoldT{});
+    fold_internal_d.resize(buffer_size);
     m_param_counts_d.resize(n_levels * n_params);
     m_ncoords_offsets_d.resize(n_levels + 1);
     m_param_limits_d.resize(n_params);
 
     if (is_freq_only) {
         coords_freq_d.resize(coord_size);
+        m_fuse_check_d.resize(3 * n_levels);
     } else {
         coords_d.resize(coord_size);
     }
@@ -41,13 +45,14 @@ FFAWorkspaceCUDA<FoldTypeCUDA>::FFAWorkspaceCUDA(SizeType buffer_size,
                                                  SizeType n_levels,
                                                  SizeType n_params) {
     const bool is_freq_only = n_params == 1;
-    fold_internal_d.resize(buffer_size, DeviceFoldT{});
+    fold_internal_d.resize(buffer_size);
     m_param_counts_d.resize(n_levels * n_params);
     m_ncoords_offsets_d.resize(n_levels + 1);
     m_param_limits_d.resize(n_params);
 
     if (is_freq_only) {
         coords_freq_d.resize(coord_size);
+        m_fuse_check_d.resize(3 * n_levels);
     } else {
         coords_d.resize(coord_size);
     }
@@ -80,6 +85,26 @@ void FFAWorkspaceCUDA<FoldTypeCUDA>::validate(
                                          "FFAWorkspaceCUDA: coordinates "
                                          "not allocated for enough levels");
     }
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+SizeType FFAWorkspaceCUDA<FoldTypeCUDA>::get_buffers_bytes() const noexcept {
+    return (fold_internal_d.size() * sizeof(DeviceFoldT)) +
+           (coords_d.i_tail.size() * sizeof(uint32_t)) +
+           (coords_d.shift_tail.size() * sizeof(float)) +
+           (coords_d.i_head.size() * sizeof(uint32_t)) +
+           (coords_d.shift_head.size() * sizeof(float)) +
+           (coords_freq_d.idx.size() * sizeof(uint32_t)) +
+           (coords_freq_d.shift.size() * sizeof(float));
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+SizeType
+FFAWorkspaceCUDA<FoldTypeCUDA>::get_memory_usage_bytes() const noexcept {
+    return get_buffers_bytes() + (m_param_counts_d.size() * sizeof(uint32_t)) +
+           (m_ncoords_offsets_d.size() * sizeof(uint32_t)) +
+           (m_fuse_check_d.size() * sizeof(uint32_t)) +
+           (m_param_limits_d.size() * sizeof(ParamLimit));
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
@@ -132,31 +157,45 @@ void FFAWorkspaceCUDA<FoldTypeCUDA>::copy_plan_to_device(
     const auto param_counts    = ffa_plan.get_param_counts_flat();
     const auto ncoords_offsets = ffa_plan.get_ncoords_offsets();
     const auto param_limits    = ffa_plan.get_config().get_param_limits();
+    m_param_counts_h.assign(param_counts.begin(), param_counts.end());
+    m_ncoords_offsets_h.assign(ncoords_offsets.begin(), ncoords_offsets.end());
+    m_param_limits_h.assign(param_limits.begin(), param_limits.end());
 
-    // Copy resolve ingredients to device
+    // Pageable sources: each copy returns once its source is staged, and
+    // the members outlive this call, so no stream sync is needed.
     cuda_utils::check_cuda_call(
         cudaMemcpyAsync(thrust::raw_pointer_cast(m_param_counts_d.data()),
-                        param_counts.data(),
-                        param_counts.size() * sizeof(uint32_t),
+                        m_param_counts_h.data(),
+                        m_param_counts_h.size() * sizeof(uint32_t),
                         cudaMemcpyHostToDevice, stream),
         "cudaMemcpyAsync param counts failed");
     cuda_utils::check_cuda_call(
         cudaMemcpyAsync(thrust::raw_pointer_cast(m_ncoords_offsets_d.data()),
-                        ncoords_offsets.data(),
-                        ncoords_offsets.size() * sizeof(uint32_t),
+                        m_ncoords_offsets_h.data(),
+                        m_ncoords_offsets_h.size() * sizeof(uint32_t),
                         cudaMemcpyHostToDevice, stream),
         "cudaMemcpyAsync ncoords offsets failed");
     cuda_utils::check_cuda_call(
         cudaMemcpyAsync(thrust::raw_pointer_cast(m_param_limits_d.data()),
-                        param_limits.data(),
-                        param_limits.size() * sizeof(ParamLimit),
+                        m_param_limits_h.data(),
+                        m_param_limits_h.size() * sizeof(ParamLimit),
                         cudaMemcpyHostToDevice, stream),
         "cudaMemcpyAsync param limits failed");
+}
 
-    // MANDATORY sync because param_counts and other host memory goes out of
-    // scope on the next line!
-    cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
-                                "cudaStreamSynchronize failed");
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+std::vector<uint32_t> FFAWorkspaceCUDA<FoldTypeCUDA>::check_fuse_levels_freq(
+    const plans::FFAPlan<HostFoldT>& ffa_plan, cudaStream_t stream) {
+    const auto n_levels = ffa_plan.get_n_levels();
+    error_check::check_greater_equal(
+        m_fuse_check_d.size(), 3 * n_levels,
+        "FFAWorkspaceCUDA: fuse check scratch too small");
+    const auto offsets = ffa_plan.get_ncoords_offsets();
+    return core::ffa_freq_fuse_check_levels_cuda(
+        thrust::raw_pointer_cast(coords_freq_d.idx.data()),
+        std::span<const uint32_t>(offsets.data(), n_levels),
+        ffa_plan.get_ncoords(), thrust::raw_pointer_cast(m_fuse_check_d.data()),
+        stream);
 }
 
 // --- BranchingWorkspaceCUDA implementation ---
@@ -180,14 +219,17 @@ BranchingWorkspaceCUDAView BranchingWorkspaceCUDA::get_view() noexcept {
     };
 }
 
-float BranchingWorkspaceCUDA::get_memory_usage_gib() const noexcept {
-    const auto total_memory = (scratch_params.size() * sizeof(double)) +
-                              (scratch_dparams.size() * sizeof(double)) +
-                              (scratch_counts.size() * sizeof(uint32_t)) +
-                              (leaf_branch_count.size() * sizeof(uint32_t)) +
-                              (leaf_output_offset.size() * sizeof(uint32_t));
+SizeType BranchingWorkspaceCUDA::get_memory_usage_bytes() const noexcept {
+    return (scratch_params.size() * sizeof(double)) +
+           (scratch_dparams.size() * sizeof(double)) +
+           (scratch_counts.size() * sizeof(uint32_t)) +
+           (leaf_branch_count.size() * sizeof(uint32_t)) +
+           (leaf_output_offset.size() * sizeof(uint32_t));
+}
 
-    return static_cast<float>(total_memory) / static_cast<float>(1ULL << 30U);
+float BranchingWorkspaceCUDA::get_memory_usage_gib() const noexcept {
+    return static_cast<float>(get_memory_usage_bytes()) /
+           static_cast<float>(1ULL << 30U);
 }
 
 void BranchingWorkspaceCUDA::validate(SizeType batch_size,
@@ -237,16 +279,22 @@ PruneWorkspaceCUDA<FoldTypeCUDA>::PruneWorkspaceCUDA(SizeType batch_size,
       filtered_mask_d(max_branched_leaves) {}
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
+SizeType
+PruneWorkspaceCUDA<FoldTypeCUDA>::get_memory_usage_bytes() const noexcept {
+    return (branched_leaves_d.size() * sizeof(double)) +
+           (branched_folds_d.size() * sizeof(FoldTypeCUDA)) +
+           (branched_scores_d.size() * sizeof(float)) +
+           (branched_indices_d.size() * sizeof(uint32_t)) +
+           (branched_param_idx_d.size() * sizeof(uint32_t)) +
+           (branched_phase_shift_d.size() * sizeof(float)) +
+           (validation_mask_d.size() * sizeof(uint8_t)) +
+           (filtered_mask_d.size() * sizeof(uint8_t));
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
 float PruneWorkspaceCUDA<FoldTypeCUDA>::get_memory_usage_gib() const noexcept {
-    const auto total_memory = (branched_leaves_d.size() * sizeof(double)) +
-                              (branched_folds_d.size() * sizeof(FoldTypeCUDA)) +
-                              (branched_scores_d.size() * sizeof(float)) +
-                              (branched_indices_d.size() * sizeof(uint32_t)) +
-                              (branched_param_idx_d.size() * sizeof(uint32_t)) +
-                              (branched_phase_shift_d.size() * sizeof(float)) +
-                              (validation_mask_d.size() * sizeof(uint8_t)) +
-                              (filtered_mask_d.size() * sizeof(uint8_t));
-    return static_cast<float>(total_memory) / static_cast<float>(1ULL << 30U);
+    return static_cast<float>(get_memory_usage_bytes()) /
+           static_cast<float>(1ULL << 30U);
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
@@ -282,11 +330,8 @@ void PruneWorkspaceCUDA<FoldTypeCUDA>::validate(SizeType batch_size,
 }
 
 // --- CUBScratchArena implementation ---
-CUBScratchArena::CUBScratchArena(SizeType batch_size,
-                                 SizeType branch_max,
-                                 cudaStream_t stream)
-    : max_n_leaves(batch_size * branch_max) {
-
+SizeType CUBScratchArena::temp_bytes_for(SizeType max_n_leaves,
+                                         cudaStream_t stream) {
     // 1a. DeviceReduce::Sum (uint8 mask → uint32 count via cast iterator)
     auto dummy_cast_it = thrust::make_transform_iterator(
         static_cast<const uint8_t*>(nullptr), cub_helpers::Uint8ToUint32{});
@@ -330,22 +375,44 @@ CUBScratchArena::CUBScratchArena(SizeType batch_size,
             cub_helpers::MinMaxReduce{}, minmax_identity, stream),
         "cub::DeviceReduce::Reduce sizing failed");
 
-    // ---- 2. Allocate a single buffer large enough for all operations -------
-    cub_temp_bytes = std::max(
+    return std::max(
         {reduce_bytes, scan_bytes, flagged_bytes, reduce_bytes_minmax});
-    cuda_utils::check_cuda_call(
-        cudaMallocAsync(&cub_temp_storage, cub_temp_bytes, stream),
-        "cudaMallocAsync cub_temp_storage failed");
-    // ---- 3. Allocate device-side output scalars ----------------------------
-    cuda_utils::check_cuda_call(
-        cudaMallocAsync(&d_reduce_out, sizeof(uint32_t), stream),
-        "cudaMallocAsync d_reduce_out failed");
-    cuda_utils::check_cuda_call(
-        cudaMallocAsync(&d_minmax_out, sizeof(MinMaxFloat), stream),
-        "cudaMallocAsync d_minmax_out failed");
 }
 
-CUBScratchArena::~CUBScratchArena() {
+CUBScratchArena::CUBScratchArena(SizeType batch_size,
+                                 SizeType branch_max,
+                                 cudaStream_t stream)
+    : max_n_leaves(batch_size * branch_max) {
+    // A throwing constructor runs no destructor: free what was allocated.
+    try {
+        // One buffer large enough for every operation.
+        cub_temp_bytes = temp_bytes_for(max_n_leaves, stream);
+        cuda_utils::check_cuda_call(
+            cudaMallocAsync(&cub_temp_storage, cub_temp_bytes, stream),
+            "cudaMallocAsync cub_temp_storage failed");
+        // ---- 3. Allocate device-side output scalars ------------------------
+        cuda_utils::check_cuda_call(
+            cudaMallocAsync(&d_reduce_out, sizeof(uint32_t), stream),
+            "cudaMallocAsync d_reduce_out failed");
+        cuda_utils::check_cuda_call(
+            cudaMallocAsync(&d_minmax_out, sizeof(MinMaxFloat), stream),
+            "cudaMallocAsync d_minmax_out failed");
+        cuda_utils::check_cuda_call(
+            cudaMallocHost(&h_scalars, kNumHostSlots * sizeof(uint32_t)),
+            "cudaMallocHost h_scalars failed");
+        cuda_utils::check_cuda_call(
+            cudaMallocHost(&h_minmax, sizeof(MinMaxFloat)),
+            "cudaMallocHost h_minmax failed");
+        cuda_utils::check_cuda_call(
+            cudaEventCreateWithFlags(&minmax_ready, cudaEventDisableTiming),
+            "cudaEventCreate minmax_ready failed");
+    } catch (...) {
+        release();
+        throw;
+    }
+}
+
+void CUBScratchArena::release() noexcept {
     // Use synchronous cudaFree (not cudaFreeAsync) so that destruction is
     // safe regardless of whether the original construction stream is still
     // alive. Callers must ensure no in-flight GPU work uses these pointers
@@ -359,40 +426,52 @@ CUBScratchArena::~CUBScratchArena() {
     if (d_minmax_out != nullptr) {
         cudaFree(d_minmax_out);
     }
+    if (h_scalars != nullptr) {
+        cudaFreeHost(h_scalars);
+    }
+    if (h_minmax != nullptr) {
+        cudaFreeHost(h_minmax);
+    }
+    if (minmax_ready != nullptr) {
+        cudaEventDestroy(minmax_ready);
+    }
 }
+
+CUBScratchArena::~CUBScratchArena() { release(); }
 
 CUBScratchArena::CUBScratchArena(CUBScratchArena&& other) noexcept
     : cub_temp_storage(std::exchange(other.cub_temp_storage, nullptr)),
       cub_temp_bytes(std::exchange(other.cub_temp_bytes, 0)),
       d_reduce_out(std::exchange(other.d_reduce_out, nullptr)),
       d_minmax_out(std::exchange(other.d_minmax_out, nullptr)),
-      max_n_leaves(std::exchange(other.max_n_leaves, 0)) {}
+      max_n_leaves(std::exchange(other.max_n_leaves, 0)),
+      h_scalars(std::exchange(other.h_scalars, nullptr)),
+      h_minmax(std::exchange(other.h_minmax, nullptr)),
+      minmax_ready(std::exchange(other.minmax_ready, nullptr)) {}
 
 CUBScratchArena& CUBScratchArena::operator=(CUBScratchArena&& other) noexcept {
     if (this != &other) {
         // Free current resources before stealing from other
-        if (cub_temp_storage != nullptr) {
-            cudaFree(cub_temp_storage);
-        }
-        if (d_reduce_out != nullptr) {
-            cudaFree(d_reduce_out);
-        }
-        if (d_minmax_out != nullptr) {
-            cudaFree(d_minmax_out);
-        }
-
+        release();
         cub_temp_storage = std::exchange(other.cub_temp_storage, nullptr);
         cub_temp_bytes   = std::exchange(other.cub_temp_bytes, 0);
         d_reduce_out     = std::exchange(other.d_reduce_out, nullptr);
         d_minmax_out     = std::exchange(other.d_minmax_out, nullptr);
         max_n_leaves     = std::exchange(other.max_n_leaves, 0);
+        h_scalars        = std::exchange(other.h_scalars, nullptr);
+        h_minmax         = std::exchange(other.h_minmax, nullptr);
+        minmax_ready     = std::exchange(other.minmax_ready, nullptr);
     }
     return *this;
 }
 
+SizeType CUBScratchArena::get_memory_usage_bytes() const noexcept {
+    return cub_temp_bytes + sizeof(uint32_t) + sizeof(MinMaxFloat);
+}
+
 float CUBScratchArena::get_memory_usage_gib() const noexcept {
-    const auto bytes = cub_temp_bytes + sizeof(uint32_t) + sizeof(MinMaxFloat);
-    return static_cast<float>(bytes) / static_cast<float>(1ULL << 30U);
+    return static_cast<float>(get_memory_usage_bytes()) /
+           static_cast<float>(1ULL << 30U);
 }
 
 void CUBScratchArena::convert_mask_to_indices(
@@ -409,10 +488,9 @@ void CUBScratchArena::convert_mask_to_indices(
         "cub::DeviceSelect::Flagged failed");
 }
 
-void CUBScratchArena::compute_min_max_scores(
+void CUBScratchArena::compute_min_max_scores_async(
     cuda::std::span<const float> scores,
     cuda::std::span<const uint8_t> mask,
-    MinMaxFloat* h_minmax_out,
     SizeType n_leaves,
     cudaStream_t stream) {
     auto counting_it  = thrust::make_counting_iterator<int>(0);
@@ -427,13 +505,18 @@ void CUBScratchArena::compute_min_max_scores(
             static_cast<int>(n_leaves), cub_helpers::MinMaxReduce{}, identity,
             stream),
         "cub::DeviceReduce::Reduce failed");
-    cuda_utils::check_cuda_call(cudaMemcpyAsync(h_minmax_out, d_minmax_out,
+    cuda_utils::check_cuda_call(cudaMemcpyAsync(h_minmax, d_minmax_out,
                                                 sizeof(MinMaxFloat),
                                                 cudaMemcpyDeviceToHost, stream),
                                 "cudaMemcpyAsync minmax out failed");
-    // Synchronise so that *h_minmax_out is valid on the host on return.
-    cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
-                                "cudaStreamSynchronize failed");
+    cuda_utils::check_cuda_call(cudaEventRecord(minmax_ready, stream),
+                                "cudaEventRecord minmax_ready failed");
+}
+
+MinMaxFloat CUBScratchArena::wait_min_max() const {
+    cuda_utils::check_cuda_call(cudaEventSynchronize(minmax_ready),
+                                "cudaEventSynchronize minmax_ready failed");
+    return *h_minmax;
 }
 
 // --- EPWorkspaceCUDA implementation ---
@@ -474,10 +557,21 @@ float EPWorkspaceCUDA<FoldTypeCUDA>::get_segment_coords_memory_usage_gib()
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
+SizeType
+EPWorkspaceCUDA<FoldTypeCUDA>::get_memory_usage_bytes() const noexcept {
+    return world_tree.get_memory_usage_bytes() +
+           prune.get_memory_usage_bytes() + branch.get_memory_usage_bytes() +
+           scratch.get_memory_usage_bytes() +
+           (seed_leaves_d.size() * sizeof(double)) +
+           (seed_scores_d.size() * sizeof(float)) +
+           (idx_segments_d.size() * sizeof(uint32_t)) +
+           (coord_segments_d.size() * sizeof(cuda::std::pair<double, double>));
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
 float EPWorkspaceCUDA<FoldTypeCUDA>::get_memory_usage_gib() const noexcept {
-    return world_tree.get_memory_usage_gib() + prune.get_memory_usage_gib() +
-           branch.get_memory_usage_gib() + scratch.get_memory_usage_gib() +
-           get_seed_memory_usage_gib() + get_segment_coords_memory_usage_gib();
+    return static_cast<float>(get_memory_usage_bytes()) /
+           static_cast<float>(1ULL << 30U);
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>

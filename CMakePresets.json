@@ -44,14 +44,15 @@
     },
     {
       "name": "asan",
-      "displayName": "Debug with AddressSanitizer + UBSan (CPU)",
+      "displayName": "ASan/UBSan at -O1, asserts on (CPU)",
       "inherits": "base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "LOKI_CUDA": "OFF",
         "LOKI_BUILD_PYTHON": "OFF",
         "LOKI_ENABLE_NATIVE_ARCH": "OFF",
-        "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer",
+        "LOKI_DEBUG_OPTIMIZATION": "-O1",
+        "CMAKE_CXX_FLAGS": "-O1 -fsanitize=address,undefined -fno-omit-frame-pointer",
         "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address,undefined"
       }
     },

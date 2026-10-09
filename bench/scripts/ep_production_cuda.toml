@@ -1,0 +1,53 @@
+# Production-scale EP search on CUDA: the CLI twin of ep_production_cuda.py.
+#
+# Simulate the pulse first (same parameters and seed as the script):
+#   loki simulate --period 0.007 --dt 0.000064 --nsamps 33554432 --snr 12 \
+#       --ducy 0.1 --acc 500 --jerk 2 --seed 42 -o ep_production_pulse.tim
+# Then run from the repository root:
+#   loki search ep -c bench/scripts/ep_production_cuda.toml
+#
+# The script and this file share the plan cache, so a plan made by either one
+# is reused by the other.
+
+[input]
+timeseries = "ep_production_pulse.tim"
+nsamps = 33554432
+tsamp = 0.000064
+
+[search]
+# Band in Hz around the injected 142.857 Hz (period 0.007 s)
+f_min = 140.0
+f_max = 145.0
+# Acceleration and jerk ranges in m/s^2 and m/s^3, around the injected 500 and 2
+acc_min = -1000.0
+acc_max = 1000.0
+jerk_min = -4.0
+jerk_max = 4.0
+nbins = 64
+eta = 1.0
+ducy_max = 0.3
+wtsp = 1.2
+snr_min = 5.0
+use_fourier = true
+
+[ep]
+poly_basis = "taylor"
+min_pd = 0.1
+ref_ducy = 0.1
+prune_poly_order = 3
+n_runs = 16
+
+[performance]
+nthreads = 1
+backend = "cuda"
+device = 0
+# Device memory cap in GB. The plan is fitted to the smaller of this and the
+# free device memory less 1 GB.
+max_process_memory_gb = 15.0
+bseg_brute = 4096
+bseg_ffa = 262144
+
+[output]
+outdir = "pruning_results/ep_production_cuda"
+prefix = "ep_production"
+plan_cache = "pruning_results/ep_production_cuda/ep_production_ep_plan.h5"

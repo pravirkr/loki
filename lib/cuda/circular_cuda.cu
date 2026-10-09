@@ -70,7 +70,7 @@ kernel_analyze_and_branch_circular(const double* __restrict__ leaves_tree,
                                    double eta,
                                    uint32_t branch_max,
                                    memory::BranchingWorkspaceCUDAView branch_ws,
-                                   memory::CUBScratchArena& scratch_ws) {
+                                   uint32_t* d_reduce_out) {
     constexpr SizeType kParams       = 5;
     constexpr SizeType kParamStride  = 2;
     constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
@@ -154,7 +154,7 @@ kernel_analyze_and_branch_circular(const double* __restrict__ leaves_tree,
 
     branch_ws.leaf_branch_count[ileaf] = c1 * c2 * c3 * c4;
     if (shift_d5 >= (eta - utils::kFloatEps)) {
-        atomicOr(scratch_ws.d_reduce_out, 1U);
+        atomicOr(d_reduce_out, 1U);
     }
 }
 
@@ -699,7 +699,8 @@ circ_taylor_branch_batch_cuda(cuda::std::span<const double> leaves_tree,
 
     kernel_analyze_and_branch_circular<<<grid_dim, block_dim, 0, stream>>>(
         leaves_tree.data(), n_leaves, coord_cur.second,
-        static_cast<double>(nbins), eta, branch_max, branch_ws, scratch_ws);
+        static_cast<double>(nbins), eta, branch_max, branch_ws,
+        scratch_ws.d_reduce_out);
     cuda_utils::check_last_cuda_error("Kernel 1 launch failed");
 
     // compute output size and offsets (leaf_output_offset)
@@ -709,39 +710,44 @@ circ_taylor_branch_batch_cuda(cuda::std::span<const double> leaves_tree,
             branch_ws.leaf_branch_count, branch_ws.leaf_output_offset, n_leaves,
             stream),
         "cub::DeviceScan::ExclusiveSum failed");
-    uint32_t last_offset, last_count, has_crackle;
+    uint32_t* const last_offset =
+        scratch_ws.h_scalars + memory::CUBScratchArena::kBranchLastOffset;
+    uint32_t* const last_count =
+        scratch_ws.h_scalars + memory::CUBScratchArena::kBranchLastCount;
+    uint32_t* const has_crackle =
+        scratch_ws.h_scalars + memory::CUBScratchArena::kReduceOut;
     cuda_utils::check_cuda_call(
-        cudaMemcpyAsync(&last_offset,
+        cudaMemcpyAsync(last_offset,
                         branch_ws.leaf_output_offset + (n_leaves - 1),
                         sizeof(uint32_t), cudaMemcpyDeviceToHost, stream),
         "cudaMemcpyAsync failed");
     cuda_utils::check_cuda_call(
-        cudaMemcpyAsync(&last_count,
+        cudaMemcpyAsync(last_count,
                         branch_ws.leaf_branch_count + (n_leaves - 1),
                         sizeof(uint32_t), cudaMemcpyDeviceToHost, stream),
         "cudaMemcpyAsync failed");
     cuda_utils::check_cuda_call(
-        cudaMemcpyAsync(&has_crackle, scratch_ws.d_reduce_out, sizeof(uint32_t),
+        cudaMemcpyAsync(has_crackle, scratch_ws.d_reduce_out, sizeof(uint32_t),
                         cudaMemcpyDeviceToHost, stream),
         "cudaMemcpyAsync failed");
     // Unavoidable sync
     cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
                                 "cudaStreamSynchronize branch kernel failed");
-    const SizeType n_leaves_branched = last_offset + last_count;
+    const SizeType n_leaves_branched = *last_offset + *last_count;
     if (n_leaves_branched == 0) {
         return n_leaves_branched;
     }
 
-    if (n_leaves_branched == n_leaves && has_crackle == 0) {
+    if (n_leaves_branched == n_leaves && *has_crackle == 0) {
         // FAST PATH: no branching
         cuda_utils::check_cuda_call(
             cudaMemcpyAsync(leaves_branch.data(), leaves_tree.data(),
                             n_leaves * kLeavesStride * sizeof(double),
                             cudaMemcpyDeviceToDevice, stream),
             "cudaMemcpyAsync failed");
-        thrust::sequence(thrust::cuda::par.on(stream), leaves_origins.data(),
-                         leaves_origins.data() + n_leaves,
-                         static_cast<uint32_t>(0));
+        thrust::sequence(
+            thrust::cuda::par_nosync.on(stream), leaves_origins.data(),
+            leaves_origins.data() + n_leaves, static_cast<uint32_t>(0));
         // Set validation mask for produced outputs
         cuda_utils::check_cuda_call(
             cudaMemsetAsync(validation_mask.data(), 1,
@@ -788,15 +794,17 @@ circ_taylor_branch_batch_cuda(cuda::std::span<const double> leaves_tree,
     cuda_utils::check_last_cuda_error("Kernel 3 launch failed");
 
     // Sync + read back final count
-    uint32_t final_count;
+    uint32_t* const final_count_h =
+        scratch_ws.h_scalars + memory::CUBScratchArena::kReduceOut;
     cuda_utils::check_cuda_call(
-        cudaMemcpyAsync(&final_count, scratch_ws.d_reduce_out, sizeof(uint32_t),
-                        cudaMemcpyDeviceToHost, stream),
+        cudaMemcpyAsync(final_count_h, scratch_ws.d_reduce_out,
+                        sizeof(uint32_t), cudaMemcpyDeviceToHost, stream),
         "cudaMemcpyAsync failed");
 
     // Unavoidable sync
     cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
                                 "cudaStreamSynchronize kernel 3 failed");
+    const uint32_t final_count = *final_count_h;
 
     // Set validation mask for produced outputs
     cuda_utils::check_cuda_call(cudaMemsetAsync(validation_mask.data(), 1,
@@ -838,16 +846,17 @@ circ_taylor_validate_batch_cuda(cuda::std::span<const double> leaves_branch,
         "cub::DeviceReduce::Sum failed");
 
     // Copy result back
-    uint32_t n_leaves_passing = 0;
+    uint32_t* const n_leaves_passing =
+        scratch_ws.h_scalars + memory::CUBScratchArena::kReduceOut;
     cuda_utils::check_cuda_call(
-        cudaMemcpyAsync(&n_leaves_passing, scratch_ws.d_reduce_out,
+        cudaMemcpyAsync(n_leaves_passing, scratch_ws.d_reduce_out,
                         sizeof(uint32_t), cudaMemcpyDeviceToHost, stream),
         "cudaMemcpyAsync failed");
 
-    // You already sync elsewhere usually, but if needed:
+    // The host needs the count to size the next step.
     cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
                                 "stream sync failed");
-    return n_leaves_passing;
+    return *n_leaves_passing;
 }
 
 void circ_taylor_resolve_batch_cuda(

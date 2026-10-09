@@ -427,17 +427,21 @@ float WorldTreeCUDA<FoldTypeCUDA>::get_score_min(
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
-float WorldTreeCUDA<FoldTypeCUDA>::get_memory_usage_gib() const noexcept {
-    const auto base_bytes = (m_leaves.size() * sizeof(double)) +
-                            (m_folds.size() * sizeof(FoldTypeCUDA)) +
-                            (m_scores.size() * sizeof(float)) +
-                            (m_scores_ep.size() * sizeof(float)) +
-                            (m_scratch_scores.size() * sizeof(float)) +
-                            (m_scratch_indices_1.size() * sizeof(uint32_t)) +
-                            (m_scratch_indices_2.size() * sizeof(uint32_t)) +
-                            (m_scratch_mask.size() * sizeof(uint8_t));
+SizeType WorldTreeCUDA<FoldTypeCUDA>::get_memory_usage_bytes() const noexcept {
+    return (m_leaves.size() * sizeof(double)) +
+           (m_folds.size() * sizeof(FoldTypeCUDA)) +
+           (m_scores.size() * sizeof(float)) +
+           (m_scores_ep.size() * sizeof(float)) +
+           (m_scratch_scores.size() * sizeof(float)) +
+           (m_scratch_indices_1.size() * sizeof(uint32_t)) +
+           (m_scratch_indices_2.size() * sizeof(uint32_t)) +
+           (m_scratch_mask.size() * sizeof(uint8_t));
+}
 
-    return static_cast<float>(base_bytes) / static_cast<float>(1ULL << 30U);
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+float WorldTreeCUDA<FoldTypeCUDA>::get_memory_usage_gib() const noexcept {
+    return static_cast<float>(get_memory_usage_bytes()) /
+           static_cast<float>(1ULL << 30U);
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
@@ -657,9 +661,6 @@ float WorldTreeCUDA<FoldTypeCUDA>::add_batch_scattered(
                                       m_leaves_ptr, m_folds_ptr, m_scores_ptr,
                                       m_write_head, m_capacity, slots_to_write,
                                       m_leaves_stride, m_folds_stride, stream);
-        cuda_utils::check_cuda_call(
-            cudaStreamSynchronize(stream),
-            "cudaStreamSynchronize scatter_to_circular_copy_cuda failed");
         m_write_head =
             get_circular_index(slots_to_write, m_write_head, m_capacity);
         m_size += slots_to_write;
@@ -707,9 +708,6 @@ float WorldTreeCUDA<FoldTypeCUDA>::add_batch_scattered(
         m_scratch_pending_indices, m_leaves_ptr, m_folds_ptr, m_scores_ptr,
         m_write_head, m_capacity, n_to_add, m_leaves_stride, m_folds_stride,
         stream);
-    cuda_utils::check_cuda_call(
-        cudaStreamSynchronize(stream),
-        "cudaStreamSynchronize scatter_to_circular_copy_cuda failed");
     m_write_head = get_circular_index(n_to_add, m_write_head, m_capacity);
     m_size += n_to_add;
     return effective_threshold;

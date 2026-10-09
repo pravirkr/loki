@@ -19,6 +19,7 @@
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
 
+#include "lib/algorithms/planner_memory.hpp"
 #include "lib/cuda/cuda_utils.cuh"
 #include "lib/cuda/ffa_cuda.cuh"
 #include "lib/cuda/fft_cuda.cuh"
@@ -219,8 +220,9 @@ private:
             cuda_utils::get_cuda_memory_usage();
 
         // Reserve memory for overhead
-        constexpr double kReservedGB = 1.0; // For CUDA runtime, kernels, etc.
-        const double usable_gpu_gb   = free_mem_gb - kReservedGB;
+        // For the CUDA runtime, kernels, etc.
+        const double usable_gpu_gb =
+            free_mem_gb - algorithms::detail::kDeviceReserveGB;
 
         spdlog::info("GPU Memory: {:.2f} GB total, {:.2f} GB free, {:.2f} GB "
                      "usable for chunking",

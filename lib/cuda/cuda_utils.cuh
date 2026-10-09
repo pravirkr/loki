@@ -449,8 +449,11 @@ public:
     }
 
     ~CudaSetDeviceGuard() {
-        if (m_device_changed && m_prev_device >= 0) {
-            cudaSetDevice(m_prev_device);
+        // Keep the thread-local device in step with the restore, or a later
+        // guard for this device would skip its cudaSetDevice.
+        if (m_device_changed && m_prev_device >= 0 &&
+            cudaSetDevice(m_prev_device) == cudaSuccess) {
+            detail::tls_current_device = m_prev_device;
         }
     }
 
@@ -498,41 +501,57 @@ inline void check_kernel_launch_params(
                                                         shmem_size, loc);
 }
 
-// Span helpers for Thrust device vectors
+/// Device allocator that leaves elements uninitialised: resize() runs no
+/// fill. For buffers that are always written before they are read.
+template <typename T> struct NoInitAllocator : thrust::device_allocator<T> {
+    NoInitAllocator() = default;
+    template <typename U>
+    NoInitAllocator(const NoInitAllocator<U>& /*other*/) noexcept {} // NOLINT
+    template <typename U> struct rebind {
+        using other = NoInitAllocator<U>;
+    };
+    __host__ __device__ void construct(T* /*p*/) noexcept {}
+};
+
 template <typename T>
+using DeviceVectorNoInit = thrust::device_vector<T, NoInitAllocator<T>>;
+
+// Span helpers for Thrust device vectors
+template <typename T, typename Alloc>
 [[nodiscard]] inline cuda::std::span<T>
-as_span(thrust::device_vector<T>& v) noexcept {
+as_span(thrust::device_vector<T, Alloc>& v) noexcept {
     return {thrust::raw_pointer_cast(v.data()),
             static_cast<cuda::std::span<T>::size_type>(v.size())};
 }
 
-template <typename T>
+template <typename T, typename Alloc>
 [[nodiscard]] inline cuda::std::span<const T>
-as_span(const thrust::device_vector<T>& v) noexcept {
+as_span(const thrust::device_vector<T, Alloc>& v) noexcept {
     return {thrust::raw_pointer_cast(v.data()),
             static_cast<cuda::std::span<const T>::size_type>(v.size())};
 }
 
 // Overload for smaller given size
-template <typename T>
-[[nodiscard]] inline cuda::std::span<T> as_span(thrust::device_vector<T>& v,
-                                                SizeType size) noexcept {
+template <typename T, typename Alloc>
+[[nodiscard]] inline cuda::std::span<T>
+as_span(thrust::device_vector<T, Alloc>& v, SizeType size) noexcept {
     return {thrust::raw_pointer_cast(v.data()),
             static_cast<cuda::std::span<T>::size_type>(size)};
 }
 
-template <typename T>
+template <typename T, typename Alloc>
 [[nodiscard]] inline cuda::std::span<const T>
-as_span(const thrust::device_vector<T>& v, SizeType size) noexcept {
+as_span(const thrust::device_vector<T, Alloc>& v, SizeType size) noexcept {
     return {thrust::raw_pointer_cast(v.data()),
             static_cast<cuda::std::span<const T>::size_type>(size)};
 }
 
 // Lifetime safety: forbid temporaries
-template <typename T>
-cuda::std::span<T> as_span(thrust::device_vector<T>&&) = delete;
+template <typename T, typename Alloc>
+cuda::std::span<T> as_span(thrust::device_vector<T, Alloc>&&) = delete;
 
-template <typename T>
-cuda::std::span<const T> as_span(const thrust::device_vector<T>&&) = delete;
+template <typename T, typename Alloc>
+cuda::std::span<const T>
+as_span(const thrust::device_vector<T, Alloc>&&) = delete;
 
 } // namespace loki::cuda_utils

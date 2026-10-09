@@ -18,7 +18,8 @@
 
 namespace loki::pipelines::detail {
 
-// make_ep_freq_sweep_cpu is defined in lib/cpu/. There is no GPU engine yet.
+// make_ep_freq_sweep_cpu is defined in lib/cpu/, make_ep_freq_sweep_gpu in
+// lib/cuda/ (GPU builds only).
 
 class EPFreqSweepEngine {
 protected:
@@ -48,5 +49,18 @@ std::unique_ptr<EPFreqSweepEngine> make_ep_freq_sweep_cpu(
     const std::optional<std::filesystem::path>& plan_cache_file,
     std::optional<SizeType> n_runs,
     const std::optional<std::vector<SizeType>>& ref_segs);
+
+/// GPU engine. Pulsar masking, harvesting and the impulsive veto
+/// (PruneRFIConfig) are not implemented on the GPU: the facade rejects an
+/// active config, so none is passed here.
+std::unique_ptr<EPFreqSweepEngine> make_ep_freq_sweep_gpu(
+    const search::PulsarSearchConfig& cfg,
+    float min_pd,
+    std::string_view poly_basis,
+    float ref_ducy,
+    const std::optional<std::filesystem::path>& plan_cache_file,
+    std::optional<SizeType> n_runs,
+    const std::optional<std::vector<SizeType>>& ref_segs,
+    int device_id);
 
 } // namespace loki::pipelines::detail

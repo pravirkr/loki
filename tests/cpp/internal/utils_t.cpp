@@ -270,6 +270,28 @@ TEST_CASE("determine_ref_segs", "[utils]") {
             loki::utils::determine_ref_segs(5, std::nullopt, std::nullopt),
             std::runtime_error);
     }
+
+    SECTION("Both n_runs and ref_segs throws") {
+        const std::vector<loki::SizeType> custom = {1, 3};
+        REQUIRE_THROWS_AS(loki::utils::determine_ref_segs(10, 2, custom),
+                          std::invalid_argument);
+        REQUIRE_THROWS_AS(loki::utils::determine_ref_segs_pareto(10, 2, custom),
+                          std::invalid_argument);
+    }
+
+    SECTION("Out-of-range or duplicate ref_segs throws") {
+        REQUIRE_THROWS_AS(
+            loki::utils::determine_ref_segs(10, std::nullopt,
+                                            std::vector<loki::SizeType>{10}),
+            std::invalid_argument);
+        REQUIRE_THROWS_AS(
+            loki::utils::determine_ref_segs(10, std::nullopt,
+                                            std::vector<loki::SizeType>{1, 1}),
+            std::invalid_argument);
+        REQUIRE_THROWS_AS(loki::utils::determine_ref_segs(
+                              10, std::nullopt, std::vector<loki::SizeType>{}),
+                          std::invalid_argument);
+    }
 }
 
 TEST_CASE("determine_ref_segs_pareto", "[utils]") {

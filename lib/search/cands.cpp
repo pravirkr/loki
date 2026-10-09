@@ -477,6 +477,28 @@ void HarvestBuffer<FoldType>::clear() noexcept {
 }
 
 template <SupportedFoldType FoldType>
+void HarvestBuffer<FoldType>::reserve(SizeType n) {
+    m_leaves.reserve(n * m_leaves_stride);
+    if (m_store_folds) {
+        m_folds.reserve(n * m_folds_stride);
+    }
+    m_scores.reserve(n);
+    m_levels.reserve(n);
+    m_seg_idx.reserve(n);
+    m_t_ref.reserve(n);
+}
+
+template <SupportedFoldType FoldType>
+SizeType HarvestBuffer<FoldType>::get_memory_bytes() const noexcept {
+    return (m_leaves.capacity() * sizeof(double)) +
+           (m_folds.capacity() * sizeof(FoldType)) +
+           (m_scores.capacity() * sizeof(float)) +
+           (m_levels.capacity() * sizeof(SizeType)) +
+           (m_seg_idx.capacity() * sizeof(SizeType)) +
+           (m_t_ref.capacity() * sizeof(double));
+}
+
+template <SupportedFoldType FoldType>
 void HarvestBuffer<FoldType>::push(std::span<const double> leaf,
                                    std::span<const FoldType> fold,
                                    float score,
@@ -903,27 +925,14 @@ void PruneResultWriter::write_run_results(
         kParamStride,
     };
     const HighFive::DataSpace param_sets_space(param_sets_dims);
-    HighFive::DataSetCreateProps props;
-    if (n_leaves > 0) {
-        const auto chunk_n_param_sets =
-            static_cast<hsize_t>(std::min(1024UL, n_leaves));
-        const std::vector<hsize_t> chunk_dims = {
-            chunk_n_param_sets,
-            n_params + 2,
-            kParamStride,
-        };
-        props.add(HighFive::Chunking(chunk_dims));
-        props.add(HighFive::Deflate(9));
-    }
-    const auto param_ds =
-        run_group.createDataSet("param_sets", param_sets_space,
-                                HighFive::create_datatype<double>(), props);
+    // Uncompressed: deflate halves these float64 rows at best and cost
+    // seconds of CPU per run, while the raw write takes a fraction of that.
+    const auto param_ds = run_group.createDataSet(
+        "param_sets", param_sets_space, HighFive::create_datatype<double>());
     const auto n1 = leaves_view.first.size() / leaves_stride;
     const auto n2 = leaves_view.second.size() / leaves_stride;
     error_check::check_equal(n1 + n2, n_leaves,
                              "write_run_results: circular view size mismatch");
-
-    // Proper 3D hyperslab writes:
     if (n1 > 0) {
         param_ds.select({0UL, 0UL, 0UL}, {n1, n_params + 2, kParamStride})
             .write_raw(leaves_view.first.data(),

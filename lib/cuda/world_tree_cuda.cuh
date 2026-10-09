@@ -81,6 +81,7 @@ public:
     [[nodiscard]] float get_score_min(cudaStream_t stream) const noexcept;
     /// @brief Estimate GPU memory usage in GiB, includes both base storage and
     /// estimated peak temporary allocations.
+    [[nodiscard]] SizeType get_memory_usage_bytes() const noexcept;
     [[nodiscard]] float get_memory_usage_gib() const noexcept;
 
     /**
