@@ -344,7 +344,8 @@ public:
                        float* __restrict__ real_ptr,
                        SizeType batch_size,
                        SizeType n_real,
-                       cudaStream_t stream) {
+                       cudaStream_t stream,
+                       bool normalize) {
         const SizeType n_complex = (n_real / 2) + 1;
         const SizeType max_batch = max_batch_for(n_real);
         const int n_real_i       = to_cufft_int(n_real, "n_real");
@@ -368,6 +369,9 @@ public:
             offset += chunk_batch;
         }
 
+        if (!normalize) {
+            return;
+        }
         // Launch a single normalization pass over the entire batch
         const SizeType total_elements = batch_size * n_real;
         error_check::check_less_equal(
@@ -550,7 +554,8 @@ void CUFFTManager::irfft_batch(cuda::std::span<ComplexTypeCUDA> complex_input,
                                cuda::std::span<float> real_output,
                                SizeType batch_size,
                                SizeType n_real,
-                               cudaStream_t stream) {
+                               cudaStream_t stream,
+                               bool normalize) {
     cuda_utils::CudaSetDeviceGuard device_guard(m_impl->m_device_id);
     error_check::check_greater(n_real, SizeType{0},
                                "CUFFTManager::irfft_batch: n_real must be "
@@ -573,7 +578,8 @@ void CUFFTManager::irfft_batch(cuda::std::span<ComplexTypeCUDA> complex_input,
 
     auto* complex_ptr = reinterpret_cast<cufftComplex*>(complex_input.data());
     auto* real_ptr    = real_output.data();
-    m_impl->execute_irfft(complex_ptr, real_ptr, batch_size, n_real, stream);
+    m_impl->execute_irfft(complex_ptr, real_ptr, batch_size, n_real, stream,
+                          normalize);
 }
 
 bool CUFFTManager::has_prepared(SizeType n_real) const noexcept {

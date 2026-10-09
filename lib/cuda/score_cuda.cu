@@ -35,6 +35,15 @@ __device__ __forceinline__ float fold_norm_bin(float e, float v) {
     return (v > 0.0F) ? (e * rsqrtf(v)) : 0.0F;
 }
 
+// profile_idx * stride exceeds signed 32-bit once the fold is larger than
+// 2 GiB (frequency-only FFA at nsamps 2^25). The 64-bit product matches the
+// 32-bit one when the 32-bit one does not overflow.
+__device__ __forceinline__ const float*
+fold_profile(const float* folds, int profile_idx, int fold_stride) {
+    return folds + (static_cast<size_t>(profile_idx) *
+                    static_cast<size_t>(fold_stride));
+}
+
 enum class OutputMode : uint8_t {
     kMax          = 0, // Max SNR for each profile
     kMaxAndFilter = 1, // Max SNR for each profile passing the threshold and the
@@ -100,8 +109,9 @@ __global__ void kernel_snr_boxcar_warp(const float* __restrict__ folds,
     extern __shared__ float s_psum[]; // NOLINT
     float* s_psum_warp = s_psum + (warp_id * nbins);
 
-    const int fold_stride           = (Is3D ? 2 : 1) * nbins;
-    const float* __restrict__ e_ptr = folds + (profile_idx * fold_stride);
+    const int fold_stride = (Is3D ? 2 : 1) * nbins;
+    const float* __restrict__ e_ptr =
+        fold_profile(folds, profile_idx, fold_stride);
     const float* __restrict__ v_ptr = e_ptr + nbins; // only used in Is3D path
 
     // stdnoise is only used for 2D
@@ -219,8 +229,9 @@ __launch_bounds__(256, 4) // Hint: Max 256 threads, min 4 blocks/SM
     float psum[MaxBins + 1];
     psum[0] = 0.0F;
 
-    const int fold_stride           = (Is3D ? 2 : 1) * nbins;
-    const float* __restrict__ e_ptr = folds + (profile_idx * fold_stride);
+    const int fold_stride = (Is3D ? 2 : 1) * nbins;
+    const float* __restrict__ e_ptr =
+        fold_profile(folds, profile_idx, fold_stride);
     const float* __restrict__ v_ptr = e_ptr + nbins; // only used in Is3D path
 
     const float inv_stdnoise = Is3D ? 1.0F : (1.0F / stdnoise);
@@ -313,7 +324,8 @@ kernel_snr_boxcar_filter_warp(const float* __restrict__ folds,
                               float* __restrict__ scores,
                               const uint8_t* __restrict__ validation_mask,
                               uint8_t* __restrict__ filtered_mask,
-                              float threshold) {
+                              float threshold,
+                              float fold_scale) {
     // Kernel Configuration & Indexing
     constexpr int kWarpSize         = 32;
     constexpr int kProfilesPerBlock = BlockThreads / kWarpSize;
@@ -334,8 +346,9 @@ kernel_snr_boxcar_filter_warp(const float* __restrict__ folds,
     extern __shared__ float s_psum[]; // NOLINT
     float* s_psum_warp = s_psum + (warp_id * nbins);
 
-    const int fold_stride           = 2 * nbins;
-    const float* __restrict__ e_ptr = folds + (profile_idx * fold_stride);
+    const int fold_stride = 2 * nbins;
+    const float* __restrict__ e_ptr =
+        fold_profile(folds, profile_idx, fold_stride);
     const float* __restrict__ v_ptr = e_ptr + nbins;
 
     // Perform warp-level complicated inclusive prefix sum
@@ -344,8 +357,9 @@ kernel_snr_boxcar_filter_warp(const float* __restrict__ folds,
     for (int chunk = 0; chunk < num_chunks; ++chunk) {
         const int idx = (chunk * kWarpSize) + lane_id;
         // Zero-pad out-of-range lanes
-        float val =
-            (idx < nbins) ? fold_norm_bin(e_ptr[idx], v_ptr[idx]) : 0.0F;
+        float val = (idx < nbins) ? fold_norm_bin(e_ptr[idx] * fold_scale,
+                                                  v_ptr[idx] * fold_scale)
+                                  : 0.0F;
         // Warp-local inclusive scan
         val = warp_inclusive_scan(val);
         val += running_sum;
@@ -402,7 +416,8 @@ __launch_bounds__(256, 4) // Hint: Max 256 threads, min 4 blocks/SM
         float* __restrict__ scores,
         const uint8_t* __restrict__ validation_mask,
         uint8_t* __restrict__ filtered_mask,
-        float threshold) {
+        float threshold,
+        float fold_scale) {
     const int profile_idx = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (profile_idx >= nprofiles) {
         return;
@@ -418,14 +433,15 @@ __launch_bounds__(256, 4) // Hint: Max 256 threads, min 4 blocks/SM
     float psum[MaxBins + 1];
     psum[0] = 0.0F;
 
-    const int fold_stride           = 2 * nbins;
-    const float* __restrict__ e_ptr = folds + (profile_idx * fold_stride);
+    const int fold_stride = 2 * nbins;
+    const float* __restrict__ e_ptr =
+        fold_profile(folds, profile_idx, fold_stride);
     const float* __restrict__ v_ptr = e_ptr + nbins;
 
     float running = 0.0F;
 #pragma unroll 8
     for (int i = 0; i < nbins; ++i) {
-        running += fold_norm_bin(e_ptr[i], v_ptr[i]);
+        running += fold_norm_bin(e_ptr[i] * fold_scale, v_ptr[i] * fold_scale);
         psum[i + 1] = running;
     }
     const float total_sum = running;
@@ -813,7 +829,8 @@ score_and_filter_max_cuda_d(cuda::std::span<const float> folds,
                             SizeType nprofiles,
                             SizeType nbins,
                             memory::CUBScratchArena& scratch_ws,
-                            cudaStream_t stream) {
+                            cudaStream_t stream,
+                            float fold_scale) {
     // Dispatch mechanism: Use thread-based when nbins<=64 and nprofiles>=2^16
     constexpr SizeType kWarpSize                = 32;
     constexpr SizeType kThreadsPerBlock         = 256;
@@ -842,10 +859,11 @@ score_and_filter_max_cuda_d(cuda::std::span<const float> folds,
                 throw std::runtime_error(
                     "thread regime: nbins exceeds limit of 64");
         };
-        dispatch_thread_kernel(
-            folds.data(), static_cast<int>(nprofiles), static_cast<int>(nbins),
-            widths.data(), static_cast<int>(widths.size()), scores.data(),
-            validation_mask.data(), filtered_mask.data(), threshold);
+        dispatch_thread_kernel(folds.data(), static_cast<int>(nprofiles),
+                               static_cast<int>(nbins), widths.data(),
+                               static_cast<int>(widths.size()), scores.data(),
+                               validation_mask.data(), filtered_mask.data(),
+                               threshold, fold_scale);
         cuda_utils::check_last_cuda_error(
             "kernel_snr_boxcar_filter_thread launch failed");
 
@@ -862,7 +880,8 @@ score_and_filter_max_cuda_d(cuda::std::span<const float> folds,
                 folds.data(), static_cast<int>(nprofiles),
                 static_cast<int>(nbins), widths.data(),
                 static_cast<int>(widths.size()), scores.data(),
-                validation_mask.data(), filtered_mask.data(), threshold);
+                validation_mask.data(), filtered_mask.data(), threshold,
+                fold_scale);
         cuda_utils::check_last_cuda_error(
             "kernel_snr_boxcar_filter_warp launch failed");
     }
@@ -877,9 +896,10 @@ score_and_filter_max_cuda_d(cuda::std::span<const float> folds,
         "cub::DeviceReduce::Sum failed");
 
     // Copy result back
-    uint32_t nprofiles_passing = 0;
+    uint32_t* const nprofiles_passing =
+        scratch_ws.h_scalars + memory::CUBScratchArena::kReduceOut;
     cuda_utils::check_cuda_call(
-        cudaMemcpyAsync(&nprofiles_passing, scratch_ws.d_reduce_out,
+        cudaMemcpyAsync(nprofiles_passing, scratch_ws.d_reduce_out,
                         sizeof(uint32_t), cudaMemcpyDeviceToHost, stream),
         "cudaMemcpyAsync failed");
 
@@ -887,7 +907,7 @@ score_and_filter_max_cuda_d(cuda::std::span<const float> folds,
     cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
                                 "stream sync failed");
 
-    return nprofiles_passing;
+    return *nprofiles_passing;
 }
 
 } // namespace loki::detection

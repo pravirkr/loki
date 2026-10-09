@@ -5,6 +5,7 @@
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
 #include "loki/algorithms/ffa.hpp"
 #include "loki/common/backend.hpp"
@@ -127,6 +128,45 @@ TEST_CASE("compute_ffa_scores CPU vs CUDA parity", "[ffa][backend][cuda]") {
                         Approx(cpu_scores[i]).margin(1.0e-2F));
             }
         }
+    }
+}
+
+// nbins where the fused GPU merges change k or fall back to unfused because
+// of the shared-memory tile (dynamic plus static), and the float4 path (64).
+TEST_CASE("compute_ffa_scores CPU vs CUDA parity at fused-tile edges",
+          "[ffa][backend][cuda]") {
+    if (!loki::is_available(Backend::kCUDA)) {
+        SKIP("needs a CUDA build");
+    }
+    const auto nbins = GENERATE(SizeType{50}, SizeType{64}, SizeType{96},
+                                SizeType{192}, SizeType{384});
+    CAPTURE(nbins);
+    constexpr SizeType kNsamps = 1U << 14U;
+    constexpr double kTsamp    = 1.0e-3;
+    std::mt19937 rng(7);
+    std::normal_distribution<float> dist(0.0F, 1.0F);
+    std::vector<float> ts_e(kNsamps);
+    const std::vector<float> ts_v(kNsamps, 1.0F);
+    for (auto& v : ts_e) {
+        v = dist(rng);
+    }
+    const std::vector<ParamLimit> limits = {{.min = 5.0, .max = 6.0}};
+    const PulsarSearchConfig cfg(
+        kNsamps, kTsamp, nbins, /*eta=*/0.5, limits, /*ducy_max=*/0.2,
+        /*wtsp=*/1.5, /*use_fourier=*/false, /*nthreads=*/1,
+        /*max_process_memory_gb=*/4.0, /*octave_scale=*/2.0,
+        /*nbins_max=*/1024, /*nbins_min_lossy_bf=*/32, /*bseg_brute=*/32);
+
+    auto [cpu_scores, cpu_plan] =
+        compute_ffa_scores(ts_e, ts_v, cfg, /*quiet=*/true,
+                           /*show_progress=*/false, Exec::cpu(1));
+    auto [cuda_scores, cuda_plan] =
+        compute_ffa_scores(ts_e, ts_v, cfg, /*quiet=*/true,
+                           /*show_progress=*/false, Exec::cuda(0));
+    REQUIRE(cpu_scores.size() == cuda_scores.size());
+    REQUIRE(!cpu_scores.empty());
+    for (SizeType i = 0; i < cpu_scores.size(); ++i) {
+        REQUIRE(cuda_scores[i] == Approx(cpu_scores[i]).margin(1.0e-2F));
     }
 }
 

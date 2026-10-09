@@ -658,6 +658,12 @@ private:
         const auto batch_size =
             std::max(1UL, std::min(m_batch_size, n_branches));
 
+        bool minmax_pending     = false;
+        auto accumulate_min_max = [&stats](const MinMaxFloat& minmax) {
+            stats.score_min = std::min(stats.score_min, minmax.min);
+            stats.score_max = std::max(stats.score_max, minmax.max);
+        };
+
         // Process branches in batches
         // Process branches in potentially split batches to handle wraps
         SizeType total_processed = 0;
@@ -737,14 +743,17 @@ private:
                 cuda_utils::as_span(prune_ws.filtered_mask_d),
                 current_threshold, n_leaves_batch, scratch_ws, stream);
 
-            // Compute min and max scores
-            MinMaxFloat minmax_scores;
-            scratch_ws.compute_min_max_scores(
+            // Compute min and max scores. The host reads them one batch
+            // later, so the reduction and its copy never block this batch
+            // (score_and_filter above still syncs for the pass count).
+            if (minmax_pending) {
+                accumulate_min_max(scratch_ws.wait_min_max());
+            }
+            scratch_ws.compute_min_max_scores_async(
                 cuda_utils::as_span(prune_ws.branched_scores_d),
-                cuda_utils::as_span(prune_ws.validation_mask_d), &minmax_scores,
-                n_leaves_batch, stream);
-            stats.score_min = std::min(stats.score_min, minmax_scores.min);
-            stats.score_max = std::max(stats.score_max, minmax_scores.max);
+                cuda_utils::as_span(prune_ws.validation_mask_d), n_leaves_batch,
+                stream);
+            minmax_pending = true;
 
             if (n_leaves_passing == 0) {
                 world_tree.consume_read(current_batch_size);
@@ -777,6 +786,9 @@ private:
             // Notify the buffer that a batch of the old suggestions has been
             // consumed
             world_tree.consume_read(current_batch_size);
+        }
+        if (minmax_pending) {
+            accumulate_min_max(scratch_ws.wait_min_max());
         }
     }
 

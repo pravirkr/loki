@@ -642,9 +642,10 @@ SizeType score_and_filter_max_cuda_kadane_d(
         "cub::DeviceReduce::Sum failed");
 
     // Copy result back
-    uint32_t nprofiles_passing = 0;
+    uint32_t* const nprofiles_passing =
+        scratch_ws.h_scalars + memory::CUBScratchArena::kReduceOut;
     cuda_utils::check_cuda_call(
-        cudaMemcpyAsync(&nprofiles_passing, scratch_ws.d_reduce_out,
+        cudaMemcpyAsync(nprofiles_passing, scratch_ws.d_reduce_out,
                         sizeof(uint32_t), cudaMemcpyDeviceToHost, stream),
         "cudaMemcpyAsync failed");
 
@@ -652,6 +653,6 @@ SizeType score_and_filter_max_cuda_kadane_d(
     cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
                                 "stream sync failed");
 
-    return nprofiles_passing;
+    return *nprofiles_passing;
 }
 } // namespace loki::detection

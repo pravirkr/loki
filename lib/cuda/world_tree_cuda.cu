@@ -661,9 +661,6 @@ float WorldTreeCUDA<FoldTypeCUDA>::add_batch_scattered(
                                       m_leaves_ptr, m_folds_ptr, m_scores_ptr,
                                       m_write_head, m_capacity, slots_to_write,
                                       m_leaves_stride, m_folds_stride, stream);
-        cuda_utils::check_cuda_call(
-            cudaStreamSynchronize(stream),
-            "cudaStreamSynchronize scatter_to_circular_copy_cuda failed");
         m_write_head =
             get_circular_index(slots_to_write, m_write_head, m_capacity);
         m_size += slots_to_write;
@@ -711,9 +708,6 @@ float WorldTreeCUDA<FoldTypeCUDA>::add_batch_scattered(
         m_scratch_pending_indices, m_leaves_ptr, m_folds_ptr, m_scores_ptr,
         m_write_head, m_capacity, n_to_add, m_leaves_stride, m_folds_stride,
         stream);
-    cuda_utils::check_cuda_call(
-        cudaStreamSynchronize(stream),
-        "cudaStreamSynchronize scatter_to_circular_copy_cuda failed");
     m_write_head = get_circular_index(n_to_add, m_write_head, m_capacity);
     m_size += n_to_add;
     return effective_threshold;

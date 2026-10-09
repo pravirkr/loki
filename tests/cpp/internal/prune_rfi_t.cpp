@@ -6,6 +6,7 @@
 #include <limits>
 #include <optional>
 #include <random>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -180,6 +181,49 @@ TEST_CASE("PruneResultWriter writes harvest groups", "[prune_rfi]") {
     REQUIRE(fold_dims[0] == 1);
     REQUIRE(fold_dims[1] == 2);
     REQUIRE(fold_dims[2] == 8);
+}
+
+TEST_CASE("PruneResultWriter writes param_sets from a wrapped circular view",
+          "[prune_rfi]") {
+    const auto path =
+        std::filesystem::temp_directory_path() / "loki_param_sets_test.h5";
+    std::filesystem::remove(path);
+    const std::vector<float> thresholds(15, 1.5F);
+    {
+        PruneResultWriter writer(path, PruneResultWriter::Mode::kWrite);
+        writer.write_metadata({"accel", "freq"}, 16, 1024, thresholds, {});
+    }
+    // n_params = 2: rows of (n_params + 2) x 2 doubles. The circular view
+    // wraps after 3 rows.
+    constexpr SizeType kRowElems = 8;
+    constexpr SizeType kN1       = 3;
+    constexpr SizeType kN2       = 2;
+    std::vector<double> rows((kN1 + kN2) * kRowElems);
+    for (SizeType i = 0; i < rows.size(); ++i) {
+        rows[i] = 0.25 * static_cast<double>(i);
+    }
+    std::vector<float> scores = {1.0F, 2.0F, 3.0F, 4.0F, 5.0F};
+    const CircularView<double> leaves{
+        std::span<double>(rows).first(kN1 * kRowElems),
+        std::span<double>(rows).subspan(kN1 * kRowElems)};
+    const CircularView<float> score_view{std::span<float>(scores).first(kN1),
+                                         std::span<float>(scores).subspan(kN1)};
+    const std::vector<SizeType> snail{0, 1, 2};
+    PruneStatsCollection stats;
+    {
+        PruneResultWriter appender(path, PruneResultWriter::Mode::kAppend);
+        appender.write_run_results("000_00", snail, leaves, score_view,
+                                   score_view, 0.0, kN1 + kN2, 2, stats);
+    }
+    const HighFive::File file(path.string(), HighFive::File::ReadOnly);
+    const auto ds =
+        file.getGroup("runs").getGroup("000_00").getDataSet("param_sets");
+    REQUIRE(ds.getSpace().getDimensions() ==
+            std::vector<std::size_t>{kN1 + kN2, 4, 2});
+    std::vector<double> read_back(rows.size());
+    ds.read_raw(read_back.data());
+    REQUIRE(read_back == rows);
+    std::filesystem::remove(path);
 }
 
 TEST_CASE("EPMultiPassTime executes with default RFI config", "[prune_rfi]") {

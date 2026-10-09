@@ -21,24 +21,41 @@ namespace loki::core {
 
 namespace {
 
-/** Copy complex folds to scratch and IRFFT (cuFFT C2R overwrites input). */
+// Each distinct batch size costs cuFFT a new plan (about a millisecond of
+// host time), so the transform is rounded up to a multiple of this many
+// rows when the scratch has room. The extra rows are never scored.
+constexpr SizeType kIrfftBatchGranule = 1024;
+
+/**
+ * Copy complex folds to scratch and IRFFT (cuFFT C2R overwrites input).
+ * The first nfft * nbins floats of @p scratch_r receive the profiles,
+ * without the 1/nbins factor when @p normalize is false.
+ */
 void irfft_folds_for_scoring(math::CUFFTManager& fft_manager,
                              thrust::device_vector<ComplexTypeCUDA>& scratch_c,
+                             thrust::device_vector<float>& scratch_r,
                              cuda::std::span<const ComplexTypeCUDA> src,
                              SizeType nfft,
-                             cuda::std::span<float> dst,
                              SizeType nbins,
                              SizeType nbins_f,
-                             cudaStream_t stream) {
+                             cudaStream_t stream,
+                             bool normalize = true) {
     const auto n_complex = nfft * nbins_f;
-    auto scratch         = cuda_utils::as_span(scratch_c).first(n_complex);
     cuda_utils::check_cuda_call(
-        cudaMemcpyAsync(scratch.data(), src.data(),
+        cudaMemcpyAsync(thrust::raw_pointer_cast(scratch_c.data()), src.data(),
                         n_complex * sizeof(ComplexTypeCUDA),
                         cudaMemcpyDeviceToDevice, stream),
         "irfft_for_scoring: d2d copy failed");
-    fft_manager.irfft_batch(scratch, dst.first(nfft * nbins), nfft, nbins,
-                            stream);
+    const auto nfft_padded =
+        ((nfft + kIrfftBatchGranule - 1) / kIrfftBatchGranule) *
+        kIrfftBatchGranule;
+    const bool fits     = nfft_padded * nbins_f <= scratch_c.size() &&
+                          nfft_padded * nbins <= scratch_r.size();
+    const auto nfft_run = fits ? nfft_padded : nfft;
+    fft_manager.irfft_batch(
+        cuda_utils::as_span(scratch_c).first(nfft_run * nbins_f),
+        cuda_utils::as_span(scratch_r).first(nfft_run * nbins), nfft_run, nbins,
+        stream, normalize);
 }
 
 } // namespace
@@ -69,7 +86,14 @@ BasePruneDPFunctsCUDA<FoldTypeCUDA>::BasePruneDPFunctsCUDA(
     for (const auto count : param_grid_count_init) {
         n_coords_init *= count;
     }
-    m_n_coords_init = n_coords_init;
+    m_n_coords_init     = n_coords_init;
+    const auto n_counts = param_grid_count_init.size();
+    // The pruning kernels index the last two (accel, freq) grid counts.
+    error_check::check_greater_equal(
+        n_counts, 2,
+        "BasePruneDPFunctsCUDA: need at least the accel and freq grids");
+    m_n_accel_init = param_grid_count_init[n_counts - 2];
+    m_n_freq_init  = param_grid_count_init[n_counts - 1];
     m_param_grid_count_init_d.resize(param_grid_count_init.size());
     m_dparams_init_d.resize(dparams_init.size());
     m_param_limits_d.resize(param_limits.size());
@@ -120,12 +144,13 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA>
 void BasePruneDPFunctsCUDA<FoldTypeCUDA>::irfft_for_scoring(
     cuda::std::span<const ComplexTypeCUDA> src,
     SizeType nfft,
-    cuda::std::span<float> dst,
-    cudaStream_t stream)
+    cudaStream_t stream,
+    bool normalize)
     requires(std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>)
 {
-    irfft_folds_for_scoring(get_fft(), m_scratch_folds_c_d, src, nfft, dst,
-                            m_cfg.get_nbins(), m_cfg.get_nbins_f(), stream);
+    irfft_folds_for_scoring(get_fft(), m_scratch_folds_c_d, m_scratch_folds_r_d,
+                            src, nfft, m_cfg.get_nbins(), m_cfg.get_nbins_f(),
+                            stream, normalize);
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
@@ -213,18 +238,22 @@ SizeType BasePruneDPFunctsCUDA<FoldTypeCUDA>::score_and_filter(
         auto folds_span = folds_tree.first(nfft * nbins_f);
         auto folds_t_span =
             cuda_utils::as_span(m_scratch_folds_r_d).first(nfft * nbins);
-        irfft_for_scoring(folds_span, nfft, folds_t_span, stream);
         if (m_cfg.get_use_boxcar_kadane()) {
+            irfft_for_scoring(folds_span, nfft, stream);
             return detection::score_and_filter_max_cuda_kadane_d(
                 folds_t_span,
                 cuda_utils::as_span(this->m_boxcar_kadane_biases_d),
                 scores_tree, validation_mask, filtered_mask, threshold,
                 n_leaves, nbins, scratch_ws, stream);
         }
+        // The scorer applies the IRFFT's 1/nbins as it loads each bin (the
+        // same multiply), which saves a pass over the profiles.
+        irfft_for_scoring(folds_span, nfft, stream, /*normalize=*/false);
+        const float irfft_norm = 1.0F / static_cast<float>(nbins);
         return detection::score_and_filter_max_cuda_d(
             folds_t_span, cuda_utils::as_span(this->m_boxcar_widths_d),
             scores_tree, validation_mask, filtered_mask, threshold, n_leaves,
-            nbins, scratch_ws, stream);
+            nbins, scratch_ws, stream, irfft_norm);
     } else {
         if (m_cfg.get_use_boxcar_kadane()) {
             return detection::score_and_filter_max_cuda_kadane_d(
@@ -264,8 +293,8 @@ void BaseTaylorPruneDPFunctsCUDA<FoldTypeCUDA>::seed(
         auto folds_t_span =
             cuda_utils::as_span(this->m_scratch_folds_r_d).first(nfft * nbins);
         irfft_folds_for_scoring(this->get_fft(), this->m_scratch_folds_c_d,
-                                fold_segment, nfft, folds_t_span, nbins,
-                                nbins_f, stream);
+                                this->m_scratch_folds_r_d, fold_segment, nfft,
+                                nbins, nbins_f, stream);
         detection::snr_boxcar_3d_max_cuda_d(
             folds_t_span, cuda_utils::as_span(this->m_boxcar_widths_d),
             seed_scores, this->m_n_coords_init, nbins, stream);
@@ -309,8 +338,8 @@ void BaseChebyshevPruneDPFunctsCUDA<FoldTypeCUDA>::seed(
         auto folds_t_span =
             cuda_utils::as_span(this->m_scratch_folds_r_d).first(nfft * nbins);
         irfft_folds_for_scoring(this->get_fft(), this->m_scratch_folds_c_d,
-                                fold_segment, nfft, folds_t_span, nbins,
-                                nbins_f, stream);
+                                this->m_scratch_folds_r_d, fold_segment, nfft,
+                                nbins, nbins_f, stream);
         detection::snr_boxcar_3d_max_cuda_d(
             folds_t_span, cuda_utils::as_span(this->m_boxcar_widths_d),
             seed_scores, this->m_n_coords_init, nbins, stream);
@@ -376,8 +405,8 @@ void PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>::resolve(
     SizeType n_leaves,
     cudaStream_t stream) const {
     const auto n_params     = this->m_cfg.get_nparams();
-    const auto n_accel_init = this->m_param_grid_count_init_d[n_params - 2];
-    const auto n_freq_init  = this->m_param_grid_count_init_d[n_params - 1];
+    const auto n_accel_init = this->m_n_accel_init;
+    const auto n_freq_init  = this->m_n_freq_init;
     poly_taylor_resolve_batch_cuda(
         leaves_branch, validation_mask, param_indices, phase_shift,
         cuda_utils::as_span(this->m_param_limits_d), coord_add, coord_cur,
@@ -414,8 +443,8 @@ void PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>::ascend(
     SizeType n_leaves,
     cudaStream_t stream) {
     const auto n_params      = this->m_cfg.get_nparams();
-    const auto n_accel_init  = this->m_param_grid_count_init_d[n_params - 2];
-    const auto n_freq_init   = this->m_param_grid_count_init_d[n_params - 1];
+    const auto n_accel_init  = this->m_n_accel_init;
+    const auto n_freq_init   = this->m_n_freq_init;
     const auto nbins         = this->m_cfg.get_nbins();
     const auto nbins_f       = this->m_cfg.get_nbins_f();
     const auto n_segments    = idx_segments.size();
@@ -446,8 +475,8 @@ void PrunePolyTaylorDPFunctsCUDA<FoldTypeCUDA>::ascend(
         auto folds_t_span =
             cuda_utils::as_span(this->m_scratch_folds_r_d).first(nfft * nbins);
         irfft_folds_for_scoring(this->get_fft(), this->m_scratch_folds_c_d,
-                                folds_tree, nfft, folds_t_span, nbins, nbins_f,
-                                stream);
+                                this->m_scratch_folds_r_d, folds_tree, nfft,
+                                nbins, nbins_f, stream);
         detection::snr_boxcar_3d_max_cuda_d(
             folds_t_span, cuda_utils::as_span(this->m_boxcar_widths_d),
             scores_tree, n_leaves, nbins, stream);
@@ -531,8 +560,8 @@ void PrunePolyChebyshevDPFunctsCUDA<FoldTypeCUDA>::resolve(
     SizeType n_leaves,
     cudaStream_t stream) const {
     const auto n_params     = this->m_cfg.get_nparams();
-    const auto n_accel_init = this->m_param_grid_count_init_d[n_params - 2];
-    const auto n_freq_init  = this->m_param_grid_count_init_d[n_params - 1];
+    const auto n_accel_init = this->m_n_accel_init;
+    const auto n_freq_init  = this->m_n_freq_init;
     poly_chebyshev_resolve_batch_cuda(
         leaves_branch, validation_mask, param_indices, phase_shift,
         cuda_utils::as_span(this->m_param_limits_d), coord_add, coord_cur,
@@ -572,8 +601,8 @@ void PrunePolyChebyshevDPFunctsCUDA<FoldTypeCUDA>::ascend(
     SizeType n_leaves,
     cudaStream_t stream) {
     const auto n_params      = this->m_cfg.get_nparams();
-    const auto n_accel_init  = this->m_param_grid_count_init_d[n_params - 2];
-    const auto n_freq_init   = this->m_param_grid_count_init_d[n_params - 1];
+    const auto n_accel_init  = this->m_n_accel_init;
+    const auto n_freq_init   = this->m_n_freq_init;
     const auto nbins         = this->m_cfg.get_nbins();
     const auto nbins_f       = this->m_cfg.get_nbins_f();
     const auto n_segments    = idx_segments.size();
@@ -604,8 +633,8 @@ void PrunePolyChebyshevDPFunctsCUDA<FoldTypeCUDA>::ascend(
         auto folds_t_span =
             cuda_utils::as_span(this->m_scratch_folds_r_d).first(nfft * nbins);
         irfft_folds_for_scoring(this->get_fft(), this->m_scratch_folds_c_d,
-                                folds_tree, nfft, folds_t_span, nbins, nbins_f,
-                                stream);
+                                this->m_scratch_folds_r_d, folds_tree, nfft,
+                                nbins, nbins_f, stream);
         detection::snr_boxcar_3d_max_cuda_d(
             folds_t_span, cuda_utils::as_span(this->m_boxcar_widths_d),
             scores_tree, n_leaves, nbins, stream);
@@ -708,8 +737,8 @@ void PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>::resolve(
     SizeType n_leaves,
     cudaStream_t stream) const {
     const auto n_params     = this->m_cfg.get_nparams();
-    const auto n_accel_init = this->m_param_grid_count_init_d[n_params - 2];
-    const auto n_freq_init  = this->m_param_grid_count_init_d[n_params - 1];
+    const auto n_accel_init = this->m_n_accel_init;
+    const auto n_freq_init  = this->m_n_freq_init;
     circ_taylor_resolve_batch_cuda(
         leaves_branch, validation_mask, param_indices, phase_shift,
         cuda_utils::as_span(this->m_param_limits_d), coord_add, coord_cur,
@@ -746,8 +775,8 @@ void PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>::ascend(
     SizeType n_leaves,
     cudaStream_t stream) {
     const auto n_params      = this->m_cfg.get_nparams();
-    const auto n_accel_init  = this->m_param_grid_count_init_d[n_params - 2];
-    const auto n_freq_init   = this->m_param_grid_count_init_d[n_params - 1];
+    const auto n_accel_init  = this->m_n_accel_init;
+    const auto n_freq_init   = this->m_n_freq_init;
     const auto nbins         = this->m_cfg.get_nbins();
     const auto nbins_f       = this->m_cfg.get_nbins_f();
     const auto n_segments    = idx_segments.size();
@@ -778,8 +807,8 @@ void PruneCircTaylorDPFunctsCUDA<FoldTypeCUDA>::ascend(
         auto folds_t_span =
             cuda_utils::as_span(this->m_scratch_folds_r_d).first(nfft * nbins);
         irfft_folds_for_scoring(this->get_fft(), this->m_scratch_folds_c_d,
-                                folds_tree, nfft, folds_t_span, nbins, nbins_f,
-                                stream);
+                                this->m_scratch_folds_r_d, folds_tree, nfft,
+                                nbins, nbins_f, stream);
         detection::snr_boxcar_3d_max_cuda_d(
             folds_t_span, cuda_utils::as_span(this->m_boxcar_widths_d),
             scores_tree, n_leaves, nbins, stream);
