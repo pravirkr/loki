@@ -49,7 +49,14 @@ foreach(kind api internal)
     ${_target} PRIVATE ${PROJECT_NAME}::${LOKI_LIBRARY_NAME} ${LOKI_COMPILE_OPTIONS}
                        Catch2::Catch2WithMain OpenMP::OpenMP_CXX HighFive::HighFive
   )
-  catch_discover_tests(${_target})
+  if(kind STREQUAL "internal")
+    # The device-memory model tests measure free device memory, so they run
+    # alone (other GPU tests would allocate meanwhile).
+    catch_discover_tests(${_target} TEST_SPEC "~[ep_memory]")
+    catch_discover_tests(${_target} TEST_SPEC "[ep_memory]" PROPERTIES RUN_SERIAL TRUE)
+  else()
+    catch_discover_tests(${_target})
+  endif()
 endforeach()
 
 target_link_libraries(
@@ -64,6 +71,7 @@ if(CMAKE_CUDA_COMPILER)
   set_source_files_properties(
     ${CMAKE_CURRENT_SOURCE_DIR}/internal/fft_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/internal/ep_memory_cuda_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/internal/ep_score_cuda_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/internal/ffa_fused_cuda_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/internal/ffa_final_score_cuda_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/internal/ffa_resolve_cuda_t.cpp

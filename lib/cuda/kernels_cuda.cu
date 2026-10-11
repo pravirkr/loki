@@ -13,30 +13,15 @@
 
 #include "lib/cuda/cub_helpers.cuh"
 #include "lib/cuda/cuda_utils.cuh"
+#include "lib/cuda/ep_fourier_device.cuh"
 #include "lib/detail/error_check.hpp"
 
 namespace loki::core {
 
 namespace {
 
-// x / nbins in double. A double divide is slow on GPUs with little FP64
-// throughput; for a power-of-two nbins, multiplying by the exact reciprocal
-// gives the same result.
-__device__ __forceinline__ double div_by_nbins(double x, uint32_t nbins) {
-    if ((nbins & (nbins - 1U)) == 0U) {
-        const int log2_nbins = __ffs(static_cast<int>(nbins)) - 1;
-        return x * __longlong_as_double(
-                       static_cast<long long>(1023 - log2_nbins) << 52);
-    }
-    return x / static_cast<double>(nbins);
-}
-
-// Fourier phase -2*pi*k*shift/nbins, formed in double, rounded to float.
-__device__ __forceinline__ float
-fourier_phase(uint32_t k, float shift, uint32_t nbins) {
-    return static_cast<float>(
-        div_by_nbins(-2.0F * cub_helpers::kPI * k * shift, nbins));
-}
+using detail::div_by_nbins;
+using detail::fourier_phase;
 
 // Profile offset (segment, coord) * stride. The factors fit in 32 bits, but
 // the product does not once a level is larger than 4 GiB (frequency-only
@@ -203,11 +188,6 @@ __global__ __launch_bounds__(256, 4) void kernel_shift_add_linear_complex(
         return;
     }
 
-    // Phase factor for head only: exp(-2πi * k * shift / nbins)
-    const auto phase = fourier_phase(k, phase_shift[ileaf], nbins);
-    float cosv, sinv;
-    __sincosf(phase, &sinv, &cosv);
-
     // Calculate offsets (in circular tree)
     uint32_t tree_idx = indices_tree[ileaf] + physical_start_idx;
     if (tree_idx >= capacity) {
@@ -219,23 +199,12 @@ __global__ __launch_bounds__(256, 4) void kernel_shift_add_linear_complex(
     const SizeType ffa_base  = static_cast<SizeType>(ffa_idx) * stride;
     const SizeType out_base  = static_cast<SizeType>(ileaf) * stride;
 
-    const ComplexTypeCUDA* __restrict__ tree_e = folds_tree + tree_base + k;
-    const ComplexTypeCUDA* __restrict__ tree_v = tree_e + nbins_f;
-    const ComplexTypeCUDA* __restrict__ ffa_e  = folds_ffa + ffa_base + k;
-    const ComplexTypeCUDA* __restrict__ ffa_v  = ffa_e + nbins_f;
-
-    // OPTIMIZED complex multiplication using fmaf
-    // ffa_shifted_e = ffa_e * exp(-2πi * k * shift / nbins)
-    const float re_ffa_e = fmaf(ffa_e->real(), cosv, -ffa_e->imag() * sinv);
-    const float im_ffa_e = fmaf(ffa_e->real(), sinv, ffa_e->imag() * cosv);
-    const float re_ffa_v = fmaf(ffa_v->real(), cosv, -ffa_v->imag() * sinv);
-    const float im_ffa_v = fmaf(ffa_v->real(), sinv, ffa_v->imag() * cosv);
-
-    // Add tree (unshifted) + ffa (shifted)
-    folds_out[out_base + k] =
-        ComplexTypeCUDA(tree_e->real() + re_ffa_e, tree_e->imag() + im_ffa_e);
-    folds_out[out_base + k + nbins_f] =
-        ComplexTypeCUDA(tree_v->real() + re_ffa_v, tree_v->imag() + im_ffa_v);
+    // Tree (unshifted) + FFA rotated by exp(-2 pi i k shift / nbins)
+    detail::ep_shift_add_harmonic(
+        folds_tree[tree_base + k], folds_tree[tree_base + k + nbins_f],
+        folds_ffa[ffa_base + k], folds_ffa[ffa_base + k + nbins_f], k,
+        phase_shift[ileaf], nbins, folds_out[out_base + k],
+        folds_out[out_base + k + nbins_f]);
 }
 
 __global__

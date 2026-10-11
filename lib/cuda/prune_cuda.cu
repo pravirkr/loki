@@ -658,10 +658,24 @@ private:
         const auto batch_size =
             std::max(1UL, std::min(m_batch_size, n_branches));
 
-        bool minmax_pending     = false;
+        bool minmax_pending = false;
+        MinMaxFloat batch_minmax{};
         auto accumulate_min_max = [&stats](const MinMaxFloat& minmax) {
             stats.score_min = std::min(stats.score_min, minmax.min);
             stats.score_max = std::max(stats.score_max, minmax.max);
+        };
+        // A direct-mode batch is collected once the next batch's branch is
+        // enqueued (its count sync then also covers the fused kernel).
+        bool direct_pending = false;
+        auto collect_direct = [&]() {
+            if (!direct_pending) {
+                return;
+            }
+            const auto n_passing =
+                m_prune_funcs->collect_shift_add_score(batch_minmax);
+            accumulate_min_max(batch_minmax);
+            world_tree.commit_direct_write(n_passing);
+            direct_pending = false;
         };
 
         // Process branches in batches
@@ -691,6 +705,7 @@ private:
                 cuda_utils::as_span(prune_ws.validation_mask_d), coord_cur,
                 coord_prev, current_batch_size, branch_ws_view, scratch_ws,
                 stream);
+            collect_direct();
             stats.n_leaves += n_leaves_batch;
             if (n_leaves_batch == 0) {
                 world_tree.consume_read(current_batch_size);
@@ -713,7 +728,49 @@ private:
                 continue;
             }
 
-            // Resolve kernel
+            // Direct path: when even an all-passing batch fits the free
+            // slots (add_batch_scattered's fast path), the fused kernel
+            // writes the survivors into the tree itself, in the order of
+            // the compaction below. Every valid leaf is resolved and
+            // transformed first (the survivors' values are the same).
+            const bool direct = m_prune_funcs->supports_direct_write() &&
+                                n_leaves_batch <= world_tree.get_space_left();
+            if (direct) {
+                m_prune_funcs->resolve_transform(
+                    cuda_utils::as_span(prune_ws.branched_leaves_d),
+                    cuda_utils::as_span(prune_ws.validation_mask_d),
+                    cuda_utils::as_span(prune_ws.branched_param_idx_d),
+                    cuda_utils::as_span(prune_ws.branched_phase_shift_d),
+                    coord_add, coord_cur, coord_init, coord_next,
+                    n_leaves_batch, stream);
+                const auto dw = world_tree.get_direct_write();
+                const core::EPDirectWriteCUDA<FoldTypeCUDA> target{
+                    .leaves_batch =
+                        cuda_utils::as_span(prune_ws.branched_leaves_d),
+                    .leaves_stride = world_tree.get_leaves_stride(),
+                    .leaves        = dw.leaves,
+                    .folds         = dw.folds,
+                    .scores        = dw.scores,
+                    .write_head    = dw.write_head,
+                };
+                m_prune_funcs->shift_add_score(
+                    world_tree.get_folds_span(),
+                    cuda_utils::as_span(prune_ws.branched_indices_d),
+                    cuda_utils::as_span(prune_ws.validation_mask_d),
+                    ffa_fold_segment,
+                    cuda_utils::as_span(prune_ws.branched_param_idx_d),
+                    cuda_utils::as_span(prune_ws.branched_phase_shift_d),
+                    cuda_utils::as_span(prune_ws.branched_folds_d),
+                    cuda_utils::as_span(prune_ws.branched_scores_d),
+                    cuda_utils::as_span(prune_ws.filtered_mask_d),
+                    current_threshold, n_leaves_batch,
+                    world_tree.get_physical_start_idx(),
+                    world_tree.get_capacity(), scratch_ws, stream, &target);
+                direct_pending = true;
+                world_tree.consume_read(current_batch_size);
+                continue;
+            }
+
             m_prune_funcs->resolve(
                 cuda_utils::as_span(prune_ws.branched_leaves_d),
                 cuda_utils::as_span(prune_ws.validation_mask_d),
@@ -721,39 +778,40 @@ private:
                 cuda_utils::as_span(prune_ws.branched_phase_shift_d), coord_add,
                 coord_cur, coord_init, n_leaves_batch, stream);
 
-            // Shift and add kernel
-            // branched_indices_d are logical indices, convert to physical
-            // indices in shift_add kernel
-            m_prune_funcs->shift_add(
+            // Shift-add and score (one fused kernel for Fourier folds).
+            // branched_indices_d are logical indices, converted to physical
+            // indices in the kernel.
+            const bool fused = m_prune_funcs->supports_direct_write();
+            const auto n_leaves_passing = m_prune_funcs->shift_add_score(
                 world_tree.get_folds_span(),
                 cuda_utils::as_span(prune_ws.branched_indices_d),
                 cuda_utils::as_span(prune_ws.validation_mask_d),
                 ffa_fold_segment,
                 cuda_utils::as_span(prune_ws.branched_param_idx_d),
                 cuda_utils::as_span(prune_ws.branched_phase_shift_d),
-                cuda_utils::as_span(prune_ws.branched_folds_d), n_leaves_batch,
-                world_tree.get_physical_start_idx(), world_tree.get_capacity(),
-                stream);
-
-            // Score and prune kernel
-            const auto n_leaves_passing = m_prune_funcs->score_and_filter(
                 cuda_utils::as_span(prune_ws.branched_folds_d),
                 cuda_utils::as_span(prune_ws.branched_scores_d),
-                cuda_utils::as_span(prune_ws.validation_mask_d),
                 cuda_utils::as_span(prune_ws.filtered_mask_d),
-                current_threshold, n_leaves_batch, scratch_ws, stream);
+                current_threshold, n_leaves_batch,
+                world_tree.get_physical_start_idx(), world_tree.get_capacity(),
+                scratch_ws, stream, nullptr, fused ? &batch_minmax : nullptr);
 
-            // Compute min and max scores. The host reads them one batch
-            // later, so the reduction and its copy never block this batch
-            // (score_and_filter above still syncs for the pass count).
-            if (minmax_pending) {
-                accumulate_min_max(scratch_ws.wait_min_max());
+            // Compute min and max scores (the fused kernel gives them). The
+            // host reads them one batch later, so the reduction and its
+            // copy never block this batch (score_and_filter above still
+            // syncs for the pass count).
+            if (fused) {
+                accumulate_min_max(batch_minmax);
+            } else {
+                if (minmax_pending) {
+                    accumulate_min_max(scratch_ws.wait_min_max());
+                }
+                scratch_ws.compute_min_max_scores_async(
+                    cuda_utils::as_span(prune_ws.branched_scores_d),
+                    cuda_utils::as_span(prune_ws.validation_mask_d),
+                    n_leaves_batch, stream);
+                minmax_pending = true;
             }
-            scratch_ws.compute_min_max_scores_async(
-                cuda_utils::as_span(prune_ws.branched_scores_d),
-                cuda_utils::as_span(prune_ws.validation_mask_d), n_leaves_batch,
-                stream);
-            minmax_pending = true;
 
             if (n_leaves_passing == 0) {
                 world_tree.consume_read(current_batch_size);
@@ -787,6 +845,7 @@ private:
             // consumed
             world_tree.consume_read(current_batch_size);
         }
+        collect_direct();
         if (minmax_pending) {
             accumulate_min_max(scratch_ws.wait_min_max());
         }

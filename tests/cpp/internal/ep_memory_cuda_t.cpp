@@ -63,7 +63,7 @@ EPMemoryContext make_ctx(SizeType nparams) {
     return ctx;
 }
 
-PulsarSearchConfig make_cfg(SizeType nparams) {
+PulsarSearchConfig make_cfg(SizeType nparams, bool kadane = false) {
     std::vector<ParamLimit> limits(nparams,
                                    ParamLimit{.min = -1.0, .max = 1.0});
     limits.back() = ParamLimit{.min = 140.0, .max = 145.0};
@@ -84,7 +84,14 @@ PulsarSearchConfig make_cfg(SizeType nparams) {
             /*bseg_ffa=*/(1U << 16U) / 8,
             /*snr_min=*/5.0,
             /*max_passing_candidates=*/1U << 20U,
-            /*prune_poly_order=*/2};
+            /*prune_poly_order=*/2,
+            /*p_orb_min=*/1e-5,
+            /*m_c_max=*/10.0,
+            /*m_p_min=*/1.4,
+            /*propagator_significance=*/2.0,
+            /*validation_significance=*/5.0,
+            /*use_conservative_tile=*/false,
+            /*use_boxcar_kadane=*/kadane};
 }
 
 } // namespace
@@ -172,38 +179,54 @@ TEST_CASE("CUDA EP memory model matches the prune irfft scratch",
     const std::vector<double> dparams{0.1, 0.1};
     REQUIRE(grid[0] * grid[1] == kNcoords);
 
-    const auto fourier = create_prune_dp_functs_cuda<ComplexTypeCUDA>(
-        "taylor", grid, dparams, kNsegments, /*tseg_ffa=*/1.0, make_cfg(2),
-        kBatch, kBranchMax, /*device_id=*/0);
-    const auto fourier_bytes = static_cast<SizeType>(std::llround(
-        static_cast<double>(fourier->get_irfft_scratch_memory_gib()) *
-        static_cast<double>(1ULL << 30U)));
-    CHECK(fourier_bytes == ep_cuda_irfft_scratch_bytes<ComplexType>(
-                               ctx, kNbins, kNcoords, kBranchMax));
-
-    // Float folds keep a one-element stand-in. The getter reports that as
-    // unused; the model counts the two elements that are allocated.
-    const auto time_domain = create_prune_dp_functs_cuda<float>(
-        "taylor", grid, dparams, kNsegments, /*tseg_ffa=*/1.0, make_cfg(2),
-        kBatch, kBranchMax, /*device_id=*/0);
-    CHECK(time_domain->get_irfft_scratch_memory_gib() == 0.0F);
-    CHECK(
-        ep_cuda_irfft_scratch_bytes<float>(ctx, kNbins, kNcoords, kBranchMax) ==
-        sizeof(ComplexType) + sizeof(float));
+    const auto bytes_of = [](const auto& functs) {
+        return static_cast<SizeType>(std::llround(
+            static_cast<double>(functs->get_irfft_scratch_memory_gib()) *
+            static_cast<double>(1ULL << 30U)));
+    };
+    // Boxcar (fused) and Kadane (irfft scratch), Fourier and float folds.
+    for (const bool kadane : {false, true}) {
+        auto ctx_k              = ctx;
+        ctx_k.use_boxcar_kadane = kadane;
+        const auto fourier      = create_prune_dp_functs_cuda<ComplexTypeCUDA>(
+            "taylor", grid, dparams, kNsegments, /*tseg_ffa=*/1.0,
+            make_cfg(2, kadane), kBatch, kBranchMax, /*device_id=*/0);
+        CHECK(bytes_of(fourier) == ep_cuda_irfft_scratch_bytes<ComplexType>(
+                                       ctx_k, kNbins, kNcoords, kBranchMax));
+        const auto time_domain = create_prune_dp_functs_cuda<float>(
+            "taylor", grid, dparams, kNsegments, /*tseg_ffa=*/1.0,
+            make_cfg(2, kadane), kBatch, kBranchMax, /*device_id=*/0);
+        CHECK(bytes_of(time_domain) ==
+              ep_cuda_irfft_scratch_bytes<float>(ctx_k, kNbins, kNcoords,
+                                                 kBranchMax));
+    }
 }
 
-TEST_CASE("CUDA EP memory model: irfft scratch is minimal for float folds",
+TEST_CASE("CUDA EP memory model: irfft scratch only for unfused scoring",
           "[ep_memory][cuda]") {
-    const auto ctx = make_ctx(2);
-    CHECK(
-        ep_cuda_irfft_scratch_bytes<float>(ctx, kNbins, kNcoords, kBranchMax) ==
-        sizeof(ComplexType) + sizeof(float));
-    const auto fourier = ep_cuda_irfft_scratch_bytes<ComplexType>(
-        ctx, kNbins, kNcoords, kBranchMax);
+    auto ctx = make_ctx(2);
+    // Every case holds the fused scorer's statistics and tile states
+    // (8-byte words); a one-element stand-in replaces an unused scratch.
+    const SizeType tiles    = (2 + (kBatch * kBranchMax) + 1) * 8;
+    const SizeType stand_in = sizeof(ComplexType) + sizeof(float);
+    CHECK(ep_cuda_irfft_scratch_bytes<float>(ctx, kNbins, kNcoords,
+                                             kBranchMax) == stand_in + tiles);
+    CHECK(ep_cuda_irfft_scratch_bytes<ComplexType>(
+              ctx, kNbins, kNcoords, kBranchMax) == stand_in + tiles);
+    // Fourier nbins above the on-chip limit, or the Kadane scorer:
     // max(2 * batch * branch_max, 2 * ncoords) transforms of nbins.
-    const SizeType nfft = std::max(2 * kBatch * kBranchMax, 2 * kNcoords);
-    CHECK(fourier == (nfft * ((kNbins / 2) + 1) * sizeof(ComplexType)) +
-                         (nfft * kNbins * sizeof(float)));
+    const auto full = [&](SizeType nbins) {
+        const SizeType nfft = std::max(2 * kBatch * kBranchMax, 2 * kNcoords);
+        return (nfft * ((nbins / 2) + 1) * sizeof(ComplexType)) +
+               (nfft * nbins * sizeof(float)) + tiles;
+    };
+    CHECK(ep_cuda_irfft_scratch_bytes<ComplexType>(ctx, 2048, kNcoords,
+                                                   kBranchMax) == full(2048));
+    ctx.use_boxcar_kadane = true;
+    CHECK(ep_cuda_irfft_scratch_bytes<ComplexType>(ctx, kNbins, kNcoords,
+                                                   kBranchMax) == full(kNbins));
+    CHECK(ep_cuda_irfft_scratch_bytes<float>(ctx, kNbins, kNcoords,
+                                             kBranchMax) == stand_in + tiles);
 }
 
 TEST_CASE("CUDA prune functors take an external FFT manager without planning",
@@ -219,9 +242,11 @@ TEST_CASE("CUDA prune functors take an external FFT manager without planning",
     loki::math::CUFFTManager shared(/*device_id=*/0);
     const std::vector<SizeType> n_reals{kNbins};
     shared.prepare_exact_plans(n_reals);
+    // Kadane: the batches still go through the irfft.
     const auto functs = create_prune_dp_functs_cuda<ComplexTypeCUDA>(
-        "taylor", grid, dparams, kNsegments, /*tseg_ffa=*/1.0, make_cfg(2),
-        kBatch, kBranchMax, /*device_id=*/0, &shared);
+        "taylor", grid, dparams, kNsegments, /*tseg_ffa=*/1.0,
+        make_cfg(2, /*kadane=*/true), kBatch, kBranchMax, /*device_id=*/0,
+        &shared);
     REQUIRE(functs != nullptr);
     CHECK(shared.has_prepared(kNbins));
     CHECK(shared.n_cached_plans() == 0);
@@ -229,6 +254,11 @@ TEST_CASE("CUDA prune functors take an external FFT manager without planning",
     // A manager that does not prepare this nbins is refused.
     loki::math::CUFFTManager unprepared(/*device_id=*/0);
     CHECK_THROWS(create_prune_dp_functs_cuda<ComplexTypeCUDA>(
+        "taylor", grid, dparams, kNsegments, /*tseg_ffa=*/1.0,
+        make_cfg(2, /*kadane=*/true), kBatch, kBranchMax, /*device_id=*/0,
+        &unprepared));
+    // The fused scoring needs no plans at all.
+    CHECK_NOTHROW(create_prune_dp_functs_cuda<ComplexTypeCUDA>(
         "taylor", grid, dparams, kNsegments, /*tseg_ffa=*/1.0, make_cfg(2),
         kBatch, kBranchMax, /*device_id=*/0, &unprepared));
 }

@@ -154,15 +154,24 @@ struct WidthConsts {
     float b[kMaxWidths];
 };
 
+// Width constants of any count, in caller-provided (shared) memory: the
+// same members as WidthConsts.
+struct WidthConstsView {
+    int* w;
+    float* h;
+    float* b;
+};
+
 // Per-width boxcar constants, the same expressions as the scorers.
-__device__ __forceinline__ void
-load_width_consts(const FFAFinalScoreArgs& args,
-                  int nb,
-                  WidthConsts& s_wc,
-                  uint32_t tid      = threadIdx.x,
-                  uint32_t nthreads = blockDim.x) {
-    for (uint32_t iw = tid; iw < args.nwidths; iw += nthreads) {
-        const int w = static_cast<int>(args.widths[iw]);
+template <class WC>
+__device__ __forceinline__ void load_width_consts(const uint32_t* widths,
+                                                  uint32_t nwidths,
+                                                  int nb,
+                                                  WC& s_wc,
+                                                  uint32_t tid,
+                                                  uint32_t nthreads) {
+    for (uint32_t iw = tid; iw < nwidths; iw += nthreads) {
+        const int w = static_cast<int>(widths[iw]);
         const float h =
             sqrtf(static_cast<float>(nb - w) / static_cast<float>(nb * w));
         const float b = static_cast<float>(w) * h / static_cast<float>(nb - w);
@@ -172,6 +181,24 @@ load_width_consts(const FFAFinalScoreArgs& args,
     }
 }
 
+__device__ __forceinline__ void
+load_width_consts(const FFAFinalScoreArgs& args,
+                  int nb,
+                  WidthConsts& s_wc,
+                  uint32_t tid      = threadIdx.x,
+                  uint32_t nthreads = blockDim.x) {
+    load_width_consts(args.widths, args.nwidths, nb, s_wc, tid, nthreads);
+}
+
+// Sink of the FFA scorers: every passing (profile, width) pair.
+struct EmitSink {
+    const FFAFinalScoreArgs& args;
+    uint32_t index_base;
+    __device__ __forceinline__ void operator()(uint32_t iw, float snr) const {
+        emit(args, index_base + iw, snr);
+    }
+};
+
 // Boxcar S/N of one profile for every width, one warp per profile. row[i]
 // is the inclusive prefix sum of the normalized bins. Each lane loads a
 // window start once and updates the maximum of every width; the maximum is
@@ -179,23 +206,25 @@ load_width_consts(const FFAFinalScoreArgs& args,
 // the thread kernel, (total - lo) + hi; the warp kernel uses
 // (total + hi) - lo. Chunks of 32 window starts where no window wraps (warp
 // uniform) skip the wrap logic.
-template <bool kSerialFormula, uint32_t NW>
-__device__ __forceinline__ void
-score_profile_warp(const float* row,
-                   float total_sum,
-                   int nb,
-                   const WidthConsts& s_wc,
-                   uint32_t index_base,
-                   const FFAFinalScoreArgs& args,
-                   int lane_id) {
-    const uint32_t nwidths = args.nwidths;
+// sink(iw, snr) receives the S/N of each width on lane 0.
+// Scores widths [iw0, iw0 + NW) of the nwidths.
+template <bool kSerialFormula, uint32_t NW, class WC, class Sink>
+__device__ __forceinline__ void score_profile_warp(const float* row,
+                                                   float total_sum,
+                                                   int nb,
+                                                   const WC& s_wc,
+                                                   uint32_t nwidths,
+                                                   Sink&& sink,
+                                                   int lane_id,
+                                                   uint32_t iw0 = 0) {
+    nwidths -= iw0;
     float mx[NW];
     int wv[NW];
     int wmax = 1;
 #pragma unroll
     for (uint32_t iw = 0; iw < NW; ++iw) {
         mx[iw] = cuda::std::numeric_limits<float>::lowest();
-        wv[iw] = (iw < nwidths) ? s_wc.w[iw] : 1;
+        wv[iw] = (iw < nwidths) ? s_wc.w[iw0 + iw] : 1;
         wmax   = max(wmax, wv[iw]);
     }
     for (int base = 0; base < nb; base += static_cast<int>(kWarpSize)) {
@@ -237,10 +266,10 @@ score_profile_warp(const float* row,
         if (iw < nwidths) {
             const float max_diff = warp_reduce_max(mx[iw]);
             if (lane_id == 0) {
-                const float h   = s_wc.h[iw];
-                const float b   = s_wc.b[iw];
+                const float h   = s_wc.h[iw0 + iw];
+                const float b   = s_wc.b[iw0 + iw];
                 const float snr = ((h + b) * max_diff) - (b * total_sum);
-                emit(args, index_base + iw, snr);
+                sink(iw0 + iw, snr);
             }
         }
     }
@@ -251,27 +280,33 @@ score_profile_warp(const float* row,
 // summed serially in the thread kernel's order (its psum[k] is row[k - 1],
 // with psum[0] = 0). Window starts run outermost so each row[j - 1] is read
 // once for every width; the window maximum is order-independent.
-template <uint32_t NW>
-__device__ __forceinline__ void
-score_row_serial(float* row,
-                 int nb,
-                 const WidthConsts& s_wc,
-                 uint32_t index_base,
-                 const FFAFinalScoreArgs& args) {
+// The inclusive prefix sums of row, in place; returns the total.
+__device__ __forceinline__ float prefix_row_serial(float* row, int nb) {
     float running = 0.0F;
 #pragma unroll 8
     for (int i = 0; i < nb; ++i) {
         running += row[i];
         row[i] = running;
     }
-    const float total_sum  = running;
-    const uint32_t nwidths = args.nwidths;
+    return running;
+}
+
+// Scores widths [iw0, iw0 + NW) of a row of prefix sums.
+template <uint32_t NW, class WC, class Sink>
+__device__ __forceinline__ void score_prefixed_row_serial(const float* row,
+                                                          float total_sum,
+                                                          int nb,
+                                                          const WC& s_wc,
+                                                          uint32_t nwidths,
+                                                          Sink&& sink,
+                                                          uint32_t iw0 = 0) {
+    nwidths -= iw0;
     float mx[NW];
     int wv[NW];
     int wmax = 1;
 #pragma unroll
     for (uint32_t iw = 0; iw < NW; ++iw) {
-        wv[iw] = (iw < nwidths) ? s_wc.w[iw] : 1;
+        wv[iw] = (iw < nwidths) ? s_wc.w[iw0 + iw] : 1;
         wmax   = max(wmax, wv[iw]);
         // j = 0: psum[w] - psum[0]
         mx[iw] = row[wv[iw] - 1];
@@ -305,25 +340,48 @@ score_row_serial(float* row,
 #pragma unroll
     for (uint32_t iw = 0; iw < NW; ++iw) {
         if (iw < nwidths) {
-            const float h   = s_wc.h[iw];
-            const float b   = s_wc.b[iw];
+            const float h   = s_wc.h[iw0 + iw];
+            const float b   = s_wc.b[iw0 + iw];
             const float snr = ((h + b) * mx[iw]) - (b * total_sum);
-            emit(args, index_base + iw, snr);
+            sink(iw0 + iw, snr);
         }
     }
 }
 
+// Prefix sums, then every width in groups of NW (sink order is irrelevant:
+// the callers take maxima or emit per width).
+template <uint32_t NW, class WC, class Sink>
+__device__ __forceinline__ void score_row_serial_sink(
+    float* row, int nb, const WC& s_wc, uint32_t nwidths, Sink&& sink) {
+    const float total_sum = prefix_row_serial(row, nb);
+    for (uint32_t iw0 = 0; iw0 < nwidths; iw0 += NW) {
+        score_prefixed_row_serial<NW>(row, total_sum, nb, s_wc, nwidths, sink,
+                                      iw0);
+    }
+}
+
+template <uint32_t NW>
+__device__ __forceinline__ void
+score_row_serial(float* row,
+                 int nb,
+                 const WidthConsts& s_wc,
+                 uint32_t index_base,
+                 const FFAFinalScoreArgs& args) {
+    score_row_serial_sink<NW>(row, nb, s_wc, args.nwidths,
+                              EmitSink{args, index_base});
+}
+
 // Warp-per-profile score (kernel_snr_boxcar_warp): a warp scan of the
 // normalized bins in chunks of 32, written over the e row.
-template <uint32_t NW>
-__device__ __forceinline__ void score_ev_warp(float* e_ptr,
-                                              const float* v_ptr,
-                                              float fold_scale,
-                                              int nb,
-                                              const WidthConsts& s_wc,
-                                              uint32_t index_base,
-                                              const FFAFinalScoreArgs& args,
-                                              int lane_id) {
+template <uint32_t NW, class WC, class Sink>
+__device__ __forceinline__ void score_ev_warp_sink(float* e_ptr,
+                                                   const float* v_ptr,
+                                                   float fold_scale,
+                                                   int nb,
+                                                   const WC& s_wc,
+                                                   uint32_t nwidths,
+                                                   Sink&& sink,
+                                                   int lane_id) {
     float* s_psum_warp = e_ptr;
     float running_sum  = 0.0F;
     const int num_chunks =
@@ -342,8 +400,23 @@ __device__ __forceinline__ void score_ev_warp(float* e_ptr,
             __shfl_sync(0xFFFFFFFF, val, static_cast<int>(kWarpSize) - 1);
     }
     __syncwarp();
-    score_profile_warp</*kSerialFormula=*/false, NW>(
-        s_psum_warp, running_sum, nb, s_wc, index_base, args, lane_id);
+    for (uint32_t iw0 = 0; iw0 < nwidths; iw0 += NW) {
+        score_profile_warp</*kSerialFormula=*/false, NW>(
+            s_psum_warp, running_sum, nb, s_wc, nwidths, sink, lane_id, iw0);
+    }
+}
+
+template <uint32_t NW>
+__device__ __forceinline__ void score_ev_warp(float* e_ptr,
+                                              const float* v_ptr,
+                                              float fold_scale,
+                                              int nb,
+                                              const WidthConsts& s_wc,
+                                              uint32_t index_base,
+                                              const FFAFinalScoreArgs& args,
+                                              int lane_id) {
+    score_ev_warp_sink<NW>(e_ptr, v_ptr, fold_scale, nb, s_wc, args.nwidths,
+                           EmitSink{args, index_base}, lane_id);
 }
 
 // --- Fourier-domain merges (frequency sweep path) ---------------------------

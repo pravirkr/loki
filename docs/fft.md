@@ -131,6 +131,81 @@ uses the forward FFT: `IDFT(x) = conj(FFT(conj(x)))`.
   `cuda_utils::set_kernel_dynamic_smem` fails with a clear message if a
   future configuration does not fit the device.
 
+## Fused pruning step (CUDA EP)
+
+The EP prunes in batches of branched leaves. One kernel per batch replaces
+the shift-add kernel, (for Fourier folds) the copy that cuFFT C2R
+overwrites and the C2R itself, and the scorer:
+`kernel_ep_shift_add_score_c2c` (`ep_score_fourier_cuda.cu`) for complex
+folds, `kernel_ep_shift_add_score_time` (`ep_score_time_cuda.cu`) for
+time-domain folds. Their block bookkeeping is shared
+(`ep_score_device.cuh`). Per leaf they:
+
+1. add the parent fold (world tree) and the FFA segment fold shifted by the
+   leaf's phase. Fourier folds are rotated harmonic by harmonic
+   (`ep_shift_add_harmonic`, `ep_fourier_device.cuh`, which
+   `kernel_shift_add_linear_complex` also uses). Time-domain folds use the
+   whole-bin shift of `kernel_shift_add_linear`. Either way the merged
+   folds are bit-identical to the unfused path;
+2. (Fourier) invert `X_e + i X_v` on chip, direct or Bluestein, as the FFA
+   kernel does;
+3. score the profile with the same scorers and the same regime rule as
+   `score_and_filter_max_cuda_d` (the maximum over the widths), and
+   compare it with the threshold. Any number of widths is supported: the
+   width constants live in dynamic shared memory, and the widths are scored
+   in register groups of 32 after one prefix sum (the maximum is
+   order-free);
+4. count the passing leaves and the min/max score of the valid ones
+   (block atomics; the min/max use an order-preserving key, so they are
+   exact).
+
+The Fourier kernel keeps the FFA kernel's block shape, rounds and row
+budget, and loads the next round's harmonics into registers before the
+current round's transform. The time-domain kernel has 128 threads; it
+forms the e and v rows of 32 leaves (thread scorer) or of up to 16 leaves
+in 12 KiB (warp scorer) in shared memory.
+
+**Direct writes.** When even an all-passing batch fits the tree's free
+slots (`add_batch_scattered`'s fast path), the kernel also writes the
+survivors into the tree. Every valid leaf is resolved and transformed
+first (one kernel), and the survivors are ranked in leaf order (a decoupled
+look-back over ticketed tiles), the order of the `DeviceSelect::Flagged`
+compaction it replaces. Each survivor's leaf, merged fold (merged again
+from the L2-resident rows) and score go to slot `write_head + rank`. Other
+batches use the staged path (the folds in `branched_folds_d`, then
+`add_batch_scattered`, which may raise the threshold and trim the tree).
+
+**Pipelining.** A direct-mode batch only enqueues work. Its count and min/max
+are collected after the next batch's branch is enqueued, so the stream sync
+the branch needs for its count also covers the fused kernel.
+
+**Seeds and ascend (Fourier).** The seed scores and the ascend scores (the
+final S/N in the result file) come from the same kernel in rows mode
+(`ep_score_rows_fourier_cuda`): each row is inverted and scored as it is,
+with no FFA term, mask or statistics.
+
+**When it applies** (`ep_cuda_fused_batch`, `ep_cuda_fused_rows`,
+`ep_memory.hpp`, shared by the functors and the memory model):
+
+- batches: the boxcar scorer, with Fourier nbins up to 1024 and time-domain
+  nbins up to 5119;
+- seeds and ascend: Fourier nbins up to 1024.
+
+Only then do the prune functors skip the irfft scratch and the cuFFT plans
+(`ep_cuda_needs_irfft_scratch`). The Kadane scorer still uses the unfused
+chain for its batches.
+
+**Numerics.** The merged folds, the tree contents and the survivor order are
+as before. Time-domain scores are bit-identical. For Fourier folds only the
+inverse FFT differs from cuFFT: the S/N moves by about 1e-6, so a leaf whose
+score is within that of the threshold can flip. On the 2^25 jerk benchmark
+the final survivors and the top candidates are unchanged, the final S/N
+moves by at most 4e-6, and the per-level survivor counts move by under
+1e-5. C2R ignores the imaginary part of the Nyquist harmonic, which a
+fractional shift makes nonzero. The on-chip transform always drops it, as
+`numpy.fft.irfft` does. cuFFT's result then depends on the algorithm it
+picks, which changes with the batch size.
+
 ## PortableFFT
 
 `PortableFFT<M, E, F>` is a forward, natural-order, power-of-two complex FFT
@@ -210,6 +285,17 @@ The algorithm is a Stockham FFT with register radix-E passes.
   - power-of-two and other `nbins`;
   - depth 1 and 2, freq-only and accel, both scorer regimes;
   - a sweep over every `nbins` from 2 to 1024.
+- `tests/cpp/internal/ep_score_cuda_t.cpp`: the fused EP step against the
+  unfused chain (shift-add, cuFFT C2R, `score_and_filter_max_cuda_d`):
+  - Fourier: every `nbins` from 2 to 1024; both scorer regimes; more than
+    32 widths;
+  - time domain: bit for bit;
+  - row scoring (seeds, ascend) against cuFFT + `snr_boxcar_3d_max_cuda_d`.
+
+  It checks the merged folds bit for bit, the S/N within 1e-5, the masks,
+  counts and min/max, and, in direct mode, the survivors' slots, leaves,
+  folds and scores. Its spectra keep DC and Nyquist real, where cuFFT C2R
+  is well defined.
 - Validate a change end to end with an injection study at 2^25, not only
   2^23. Chunk widths change the search grid (`docs/memory.md`).
 

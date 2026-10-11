@@ -635,6 +635,24 @@ void WorldTreeCUDA<FoldTypeCUDA>::add_initial(
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
+typename WorldTreeCUDA<FoldTypeCUDA>::DirectWrite
+WorldTreeCUDA<FoldTypeCUDA>::get_direct_write() noexcept {
+    return {.leaves     = thrust::raw_pointer_cast(m_leaves.data()),
+            .folds      = thrust::raw_pointer_cast(m_folds.data()),
+            .scores     = thrust::raw_pointer_cast(m_scores.data()),
+            .write_head = m_write_head};
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+void WorldTreeCUDA<FoldTypeCUDA>::commit_direct_write(SizeType n) {
+    error_check::check_less_equal(
+        n, calculate_space_left(),
+        "WorldTreeCUDA: direct write larger than the free space");
+    m_write_head = get_circular_index(n, m_write_head, m_capacity);
+    m_size += n;
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
 float WorldTreeCUDA<FoldTypeCUDA>::add_batch_scattered(
     cuda::std::span<const double> leaves_batch,
     cuda::std::span<const FoldTypeCUDA> folds_batch,

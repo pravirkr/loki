@@ -410,7 +410,7 @@ Clang 18). Code that newer compilers accept can still fail there:
 test-only checks) define the checks; each file lists why a check is off.
 
 ```bash
-run-clang-tidy -p build-dev "$PWD/(lib|src|tests|applications)/"
+run-clang-tidy -p build-debug "$PWD/(lib|src|tests|applications)/"
 ```
 
 - A suppression names its check and gives a reason, on its own line:

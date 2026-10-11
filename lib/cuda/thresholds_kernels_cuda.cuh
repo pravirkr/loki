@@ -79,6 +79,23 @@ struct BoxWidth {
 };
 
 // 1 / sqrt(variance), correctly rounded (same bits in every kernel).
+// Lanes of the warp holding the same @p value (__match_any_sync, sm_70+;
+// the same mask from 32 shuffles on older GPUs). Whole warp only.
+__device__ __forceinline__ unsigned warp_match_any(uint32_t value) {
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 700
+    return __match_any_sync(0xFFFFFFFFU, value);
+#else
+    unsigned peers = 0;
+#pragma unroll
+    for (int src = 0; src < 32; ++src) {
+        if (__shfl_sync(0xFFFFFFFFU, value, src) == value) {
+            peers |= 1U << static_cast<unsigned>(src);
+        }
+    }
+    return peers;
+#endif
+}
+
 __device__ __forceinline__ float inv_stdnoise_of(float var_in, float var_add) {
     return __frsqrt_rn(__fadd_rn(var_in, var_add));
 }
@@ -569,7 +586,7 @@ __global__ __launch_bounds__(256, 2) void simulate_count_items_kernel(
         }
     }
     // Warp-aggregated count per (item, branch) segment.
-    const unsigned peers = __match_any_sync(0xFFFFFFFFU, segment);
+    const unsigned peers = warp_match_any(segment);
     const unsigned votes = __ballot_sync(0xFFFFFFFFU, survived) & peers;
     const auto lane      = threadIdx.x % 32;
     if (segment != kInvalidIndex &&
