@@ -74,7 +74,8 @@ kernel_analyze_and_branch_accel(const double* __restrict__ leaves_tree,
                                 double nbins,
                                 double eta,
                                 uint32_t branch_max,
-                                memory::BranchingWorkspaceCUDAView branch_ws) {
+                                memory::BranchingWorkspaceCUDAView branch_ws,
+                                uint32_t* __restrict__ branch_flags) {
     constexpr SizeType kParams       = 2;
     constexpr SizeType kParamStride  = 2;
     constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
@@ -118,6 +119,8 @@ kernel_analyze_and_branch_accel(const double* __restrict__ leaves_tree,
     const uint32_t c0 = branch_ws.scratch_counts[fb + 0];
     const uint32_t c1 = branch_ws.scratch_counts[fb + 1];
 
+    utils::flag_branch_overflow_device(branch_ws.scratch_counts, fb, kParams,
+                                       branch_max, branch_flags);
     branch_ws.leaf_branch_count[ileaf] = c0 * c1;
 }
 
@@ -134,7 +137,8 @@ kernel_analyze_and_branch_jerk(const double* __restrict__ leaves_tree,
                                double nbins,
                                double eta,
                                uint32_t branch_max,
-                               memory::BranchingWorkspaceCUDAView branch_ws) {
+                               memory::BranchingWorkspaceCUDAView branch_ws,
+                               uint32_t* __restrict__ branch_flags) {
     constexpr SizeType kParams       = 3;
     constexpr SizeType kParamStride  = 2;
     constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
@@ -177,6 +181,9 @@ kernel_analyze_and_branch_jerk(const double* __restrict__ leaves_tree,
             branch_ws.scratch_dparams, branch_ws.scratch_counts, fb,
             branch_max);
         count = branch_ws.scratch_counts[fb + p];
+        if (count > branch_max) {
+            atomicOr(branch_flags, utils::kBranchFlagOverflow);
+        }
     }
     // The lanes of a leaf are consecutive within a warp.
     constexpr unsigned int kFullMask = 0xFFFFFFFF;
@@ -194,7 +201,8 @@ kernel_analyze_and_branch_snap(const double* __restrict__ leaves_tree,
                                double nbins,
                                double eta,
                                uint32_t branch_max,
-                               memory::BranchingWorkspaceCUDAView branch_ws) {
+                               memory::BranchingWorkspaceCUDAView branch_ws,
+                               uint32_t* __restrict__ branch_flags) {
     constexpr SizeType kParams       = 4;
     constexpr SizeType kParamStride  = 2;
     constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
@@ -262,6 +270,8 @@ kernel_analyze_and_branch_snap(const double* __restrict__ leaves_tree,
     const uint32_t c2 = branch_ws.scratch_counts[fb + 2];
     const uint32_t c3 = branch_ws.scratch_counts[fb + 3];
 
+    utils::flag_branch_overflow_device(branch_ws.scratch_counts, fb, kParams,
+                                       branch_max, branch_flags);
     branch_ws.leaf_branch_count[ileaf] = c0 * c1 * c2 * c3;
 }
 
@@ -1169,10 +1179,15 @@ poly_taylor_branch_impl_cuda(cuda::std::span<const double> leaves_tree,
     const dim3 grid_dim(blocks_per_grid);
     cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
 
+    // Per-batch flag word (kBranchFlagOverflow), read back with the counts.
+    cuda_utils::check_cuda_call(
+        cudaMemsetAsync(scratch_ws.d_reduce_out, 0, sizeof(uint32_t), stream),
+        "cudaMemsetAsync failed");
     if constexpr (NPARAMS == 2) {
         kernel_analyze_and_branch_accel<<<grid_dim, block_dim, 0, stream>>>(
             leaves_tree.data(), n_leaves, coord_cur.second,
-            static_cast<double>(nbins), eta, branch_max, branch_ws);
+            static_cast<double>(nbins), eta, branch_max, branch_ws,
+            scratch_ws.d_reduce_out);
     } else if constexpr (NPARAMS == 3) {
         const dim3 grid_lanes(
             ((n_leaves * kJerkBranchLanes) + kThreadsPerBlock - 1) /
@@ -1180,11 +1195,13 @@ poly_taylor_branch_impl_cuda(cuda::std::span<const double> leaves_tree,
         cuda_utils::check_kernel_launch_params(grid_lanes, block_dim);
         kernel_analyze_and_branch_jerk<<<grid_lanes, block_dim, 0, stream>>>(
             leaves_tree.data(), n_leaves, coord_cur.second,
-            static_cast<double>(nbins), eta, branch_max, branch_ws);
+            static_cast<double>(nbins), eta, branch_max, branch_ws,
+            scratch_ws.d_reduce_out);
     } else {
         kernel_analyze_and_branch_snap<<<grid_dim, block_dim, 0, stream>>>(
             leaves_tree.data(), n_leaves, coord_cur.second,
-            static_cast<double>(nbins), eta, branch_max, branch_ws);
+            static_cast<double>(nbins), eta, branch_max, branch_ws,
+            scratch_ws.d_reduce_out);
     }
     cuda_utils::check_last_cuda_error("Kernel 1 launch failed");
 
@@ -1199,6 +1216,8 @@ poly_taylor_branch_impl_cuda(cuda::std::span<const double> leaves_tree,
         scratch_ws.h_scalars + memory::CUBScratchArena::kBranchLastOffset;
     uint32_t* const last_count =
         scratch_ws.h_scalars + memory::CUBScratchArena::kBranchLastCount;
+    uint32_t* const branch_flags =
+        scratch_ws.h_scalars + memory::CUBScratchArena::kReduceOut;
     cuda_utils::check_cuda_call(
         cudaMemcpyAsync(last_offset,
                         branch_ws.leaf_output_offset + (n_leaves - 1),
@@ -1209,10 +1228,20 @@ poly_taylor_branch_impl_cuda(cuda::std::span<const double> leaves_tree,
                         branch_ws.leaf_branch_count + (n_leaves - 1),
                         sizeof(uint32_t), cudaMemcpyDeviceToHost, stream),
         "cudaMemcpyAsync failed");
+    cuda_utils::check_cuda_call(
+        cudaMemcpyAsync(branch_flags, scratch_ws.d_reduce_out, sizeof(uint32_t),
+                        cudaMemcpyDeviceToHost, stream),
+        "cudaMemcpyAsync failed");
     // Unavoidable sync
     cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
                                 "cudaStreamSynchronize branch kernel failed");
     const SizeType n_leaves_branched = *last_offset + *last_count;
+    // Nothing below writes a child past the workspace: reject the batch here.
+    utils::check_branch_fits(
+        *branch_flags, n_leaves_branched,
+        utils::branch_capacity(leaves_branch, leaves_origins, validation_mask,
+                               kLeavesStride),
+        branch_max);
     if (n_leaves_branched == 0) {
         return n_leaves_branched;
     }
