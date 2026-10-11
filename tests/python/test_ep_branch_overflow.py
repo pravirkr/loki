@@ -62,6 +62,19 @@ def _config() -> libloki.configs.PulsarSearchConfig:
 
 
 @pytest.mark.parametrize(
+    "backend",
+    [
+        "cpu",
+        pytest.param(
+            "cuda",
+            marks=pytest.mark.skipif(
+                "cuda" not in libloki.available_backends(),
+                reason="CUDA backend not built",
+            ),
+        ),
+    ],
+)
+@pytest.mark.parametrize(
     ("thresholds", "batch_size"),
     [
         # Constant threshold, batch of 1024.
@@ -74,6 +87,7 @@ def test_ep_survives_branching_past_the_workspace(
     tmp_path: Path,
     thresholds: list[float],
     batch_size: int,
+    backend: str,
 ) -> None:
     ts_e = _series()
     ep = libloki.prune.EPMultiPassFourier(
@@ -83,6 +97,7 @@ def test_ep_survives_branching_past_the_workspace(
         max_sugg=2**18,
         batch_size=batch_size,
         show_progress=False,
+        backend=backend,
     )
     ep.execute(ts_e, np.ones_like(ts_e), str(tmp_path), "overflow")
     result = tmp_path / f"overflow_pruning_nstages_{NSEG}_results.h5"
