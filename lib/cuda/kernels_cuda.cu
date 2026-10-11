@@ -1059,10 +1059,12 @@ __global__ void kernel_ffa_freq_fuse(const float* __restrict__ fold_in,
 #pragma unroll
         for (int base = 0; base < kCap; base += 8) {
             const uint32_t prof = static_cast<uint32_t>(base) + prof_in_batch;
-            const size_t src =
-                profile_offset(seg0 + prof, ncoords_in, ancestor, 128U);
-            cur4[(static_cast<size_t>(prof) << 5U) + vec] =
-                in4[(src >> 2U) + vec];
+            if (prof < static_cast<uint32_t>(kCap)) {
+                const size_t src =
+                    profile_offset(seg0 + prof, ncoords_in, ancestor, 128U);
+                cur4[(static_cast<size_t>(prof) << 5U) + vec] =
+                    in4[(src >> 2U) + vec];
+            }
         }
     } else {
         for (int prof = 0; prof < kCap; ++prof) {
@@ -1410,9 +1412,19 @@ void launch_ffa_freq_fuse(const float* fold_in,
     const size_t smem     = ffa_freq_fuse_dynamic_smem(K, nbins);
     const bool vec4 = (reinterpret_cast<std::uintptr_t>(fold_in) % 16U == 0) &&
                       (reinterpret_cast<std::uintptr_t>(fold_out) % 16U == 0);
-    cuda_utils::check_kernel_launch_params(
-        dim3(static_cast<unsigned>(nblocks)), dim3(256),
-        smem + ffa_freq_fuse_static_smem<K>());
+    const SizeType total_smem = smem + ffa_freq_fuse_static_smem<K>();
+    error_check::check_less_equal(
+        total_smem, cuda_utils::get_max_shared_memory_optin(),
+        "launch_ffa_freq_fuse: tile exceeds the shared memory per block");
+    if (total_smem > cuda_utils::get_max_shared_memory()) {
+        cuda_utils::check_cuda_call(
+            cudaFuncSetAttribute(kernel_ffa_freq_fuse<K>,
+                                 cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                 static_cast<int>(smem)),
+            "cudaFuncSetAttribute kernel_ffa_freq_fuse failed");
+    }
+    cuda_utils::check_kernel_launch_params(dim3(static_cast<unsigned>(nblocks)),
+                                           dim3(256));
     kernel_ffa_freq_fuse<K>
         <<<static_cast<unsigned>(nblocks), 256, smem, stream>>>(
             fold_in, fold_out, levels, ncoords_in, ncoords_out, nbins, vec4);
@@ -1428,11 +1440,15 @@ bool ffa_freq_fuse_fits_smem(int k, SizeType nbins) {
         static_bytes = ffa_freq_fuse_static_smem<4>();
     } else if (k == 3) {
         static_bytes = ffa_freq_fuse_static_smem<3>();
+    } else if (k == 2) {
+        static_bytes = ffa_freq_fuse_static_smem<2>();
     } else {
         return false;
     }
+    // Large tiles opt in to the device's per-block maximum (the launcher
+    // raises the kernel's dynamic shared-memory limit).
     return ffa_freq_fuse_dynamic_smem(k, nbins) + static_bytes <=
-           cuda_utils::get_max_shared_memory();
+           cuda_utils::get_max_shared_memory_optin();
 }
 
 void ffa_iter_freq_fused_cuda(const float* __restrict__ fold_in,
@@ -1458,9 +1474,13 @@ void ffa_iter_freq_fused_cuda(const float* __restrict__ fold_in,
         launch_ffa_freq_fuse<3>(fold_in, fold_out, level_idx, level_shift,
                                 level_ncoords, ncoords_in, ncoords_out,
                                 nsegments_in, nbins, stream);
+    } else if (k == 2) {
+        launch_ffa_freq_fuse<2>(fold_in, fold_out, level_idx, level_shift,
+                                level_ncoords, ncoords_in, ncoords_out,
+                                nsegments_in, nbins, stream);
     } else {
         throw std::invalid_argument(
-            "ffa_iter_freq_fused_cuda: k must be 3, 4, or 5");
+            "ffa_iter_freq_fused_cuda: k must be 2, 3, 4, or 5");
     }
 }
 
@@ -1528,7 +1548,7 @@ std::vector<int> plan_ffa_freq_fuse_groups(std::span<const SizeType> ncoords,
                        "have the same length");
     const auto fits = [&](int k, SizeType level) -> bool {
         const auto ku = static_cast<SizeType>(k);
-        if (k < 3 || static_cast<SizeType>(k) >= k_fits_smem.size() ||
+        if (k < 2 || static_cast<SizeType>(k) >= k_fits_smem.size() ||
             !k_fits_smem[ku] || ku > levels - level) {
             return false;
         }
@@ -1562,6 +1582,8 @@ std::vector<int> plan_ffa_freq_fuse_groups(std::span<const SizeType> ncoords,
                 k = 5;
             } else if (fits(3, level)) {
                 k = 3;
+            } else if (fits(2, level)) {
+                k = 2;
             } else {
                 k = 1;
             }

@@ -13,6 +13,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include <CLI/CLI.hpp>
@@ -335,7 +336,21 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
         return 0;
     }
 
+    // Create the GPU context while the timeseries loads; the sweep's first
+    // device call would otherwise pay for it. A failure surfaces there.
+    std::thread device_init;
+    if (exec.backend != loki::Backend::kCPU) {
+        device_init = std::thread([exec] {
+            try {
+                loki::initialize_device(exec);
+            } catch (...) { // NOLINT(bugprone-empty-catch): reported later
+            }
+        });
+    }
     auto ts = load_search_timeseries(toml_cfg);
+    if (device_init.joinable()) {
+        device_init.join();
+    }
     const loki::SizeType actual_nsamps =
         power_of_two_nsamps(ts.get_nsamps(), nsamps_policy);
 

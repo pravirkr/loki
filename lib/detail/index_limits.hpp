@@ -26,6 +26,9 @@ struct ChunkIndexUsage {
     SizeType n_scoring_widths{};
     SizeType nfreqs{};
     SizeType segment_len{};
+    // The GPU sweep scores the final level on chip and never indexes the
+    // stored final fold, so the signed fold-stride limit does not apply.
+    bool fused_score{false};
 };
 
 [[nodiscard]] inline bool
@@ -35,7 +38,7 @@ chunk_exceeds_cuda_index_limits(const ChunkIndexUsage& u) noexcept {
     }
     const auto fold_stride = static_cast<std::uint64_t>(u.ncoords) *
                              static_cast<std::uint64_t>(u.nbins) * 2ULL;
-    if (fold_stride > kMaxIntFoldStrideElements) {
+    if (!u.fused_score && fold_stride > kMaxIntFoldStrideElements) {
         return true;
     }
     const auto n_scores =

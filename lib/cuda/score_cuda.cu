@@ -7,7 +7,6 @@
 #include <string_view>
 
 #include <cub/cub.cuh>
-#include <cuda/atomic>
 #include <cuda/std/atomic>
 #include <cuda/std/climits>
 #include <cuda/std/span>
@@ -91,8 +90,9 @@ __global__ void kernel_snr_boxcar_warp(const float* __restrict__ folds,
                                        float* __restrict__ scores,
                                        uint32_t* __restrict__ indices_filtered,
                                        uint32_t* nprofiles_passing,
-                                       float threshold = 0.0F,
-                                       float stdnoise  = 1.0F) {
+                                       float threshold  = 0.0F,
+                                       float stdnoise   = 1.0F,
+                                       float fold_scale = 1.0F) {
     // Kernel Configuration & Indexing
     constexpr int kWarpSize         = 32;
     constexpr int kProfilesPerBlock = BlockThreads / kWarpSize;
@@ -125,7 +125,9 @@ __global__ void kernel_snr_boxcar_warp(const float* __restrict__ folds,
         // Zero-pad out-of-range lanes
         float val;
         if constexpr (Is3D) {
-            val = (idx < nbins) ? fold_norm_bin(e_ptr[idx], v_ptr[idx]) : 0.0F;
+            val = (idx < nbins) ? fold_norm_bin(e_ptr[idx] * fold_scale,
+                                                v_ptr[idx] * fold_scale)
+                                : 0.0F;
         } else {
             val = (idx < nbins) ? e_ptr[idx] : 0.0F;
         }
@@ -171,10 +173,7 @@ __global__ void kernel_snr_boxcar_warp(const float* __restrict__ folds,
             } else {
                 if constexpr (Mode == OutputMode::kPerWidthAndFilter) {
                     if (snr >= threshold) {
-                        cuda::atomic_ref<uint32_t, cuda::thread_scope_device>
-                            counter(*nprofiles_passing);
-                        const uint32_t idx = counter.fetch_add(
-                            1, cuda::std::memory_order_relaxed);
+                        const uint32_t idx = atomicAdd(nprofiles_passing, 1U);
                         indices_filtered[idx] = (profile_idx * nwidths) + iw;
                         scores[idx]           = snr;
                     }
@@ -191,10 +190,7 @@ __global__ void kernel_snr_boxcar_warp(const float* __restrict__ folds,
         if (lane_id == 0) {
             if constexpr (Mode == OutputMode::kMaxAndFilter) {
                 if (max_snr >= threshold) {
-                    cuda::atomic_ref<uint32_t, cuda::thread_scope_device>
-                        counter(*nprofiles_passing);
-                    const uint32_t idx =
-                        counter.fetch_add(1, cuda::std::memory_order_relaxed);
+                    const uint32_t idx    = atomicAdd(nprofiles_passing, 1U);
                     indices_filtered[idx] = profile_idx;
                     scores[idx]           = max_snr;
                 }
@@ -216,8 +212,9 @@ __launch_bounds__(256, 4) // Hint: Max 256 threads, min 4 blocks/SM
                                   float* __restrict__ scores,
                                   uint32_t* __restrict__ indices_filtered,
                                   uint32_t* nprofiles_passing,
-                                  float threshold = 0.0F,
-                                  float stdnoise  = 1.0F) {
+                                  float threshold  = 0.0F,
+                                  float stdnoise   = 1.0F,
+                                  float fold_scale = 1.0F) {
     const int profile_idx = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (profile_idx >= nprofiles) {
         return;
@@ -240,7 +237,8 @@ __launch_bounds__(256, 4) // Hint: Max 256 threads, min 4 blocks/SM
 #pragma unroll 8
     for (int i = 0; i < nbins; ++i) {
         if constexpr (Is3D) {
-            running += fold_norm_bin(e_ptr[i], v_ptr[i]);
+            running +=
+                fold_norm_bin(e_ptr[i] * fold_scale, v_ptr[i] * fold_scale);
         } else {
             running += e_ptr[i];
         }
@@ -283,10 +281,7 @@ __launch_bounds__(256, 4) // Hint: Max 256 threads, min 4 blocks/SM
         } else {
             if constexpr (Mode == OutputMode::kPerWidthAndFilter) {
                 if (snr >= threshold) {
-                    cuda::atomic_ref<uint32_t, cuda::thread_scope_device>
-                        counter(*nprofiles_passing);
-                    const uint32_t idx =
-                        counter.fetch_add(1, cuda::std::memory_order_relaxed);
+                    const uint32_t idx = atomicAdd(nprofiles_passing, 1U);
                     indices_filtered[idx] =
                         static_cast<uint32_t>((profile_idx * nwidths) + iw);
                     scores[idx] = snr;
@@ -300,10 +295,7 @@ __launch_bounds__(256, 4) // Hint: Max 256 threads, min 4 blocks/SM
                   Mode == OutputMode::kMaxAndFilter) {
         if constexpr (Mode == OutputMode::kMaxAndFilter) {
             if (max_snr >= threshold) {
-                cuda::atomic_ref<uint32_t, cuda::thread_scope_device> counter(
-                    *nprofiles_passing);
-                const uint32_t idx =
-                    counter.fetch_add(1, cuda::std::memory_order_relaxed);
+                const uint32_t idx    = atomicAdd(nprofiles_passing, 1U);
                 indices_filtered[idx] = profile_idx;
                 scores[idx]           = max_snr;
             }
@@ -756,7 +748,8 @@ SizeType score_and_filter_cuda_d(cuda::std::span<const float> folds,
                                  SizeType nprofiles,
                                  SizeType nbins,
                                  cudaStream_t stream,
-                                 memory::DeviceCounter& counter) {
+                                 memory::DeviceCounter& counter,
+                                 float fold_scale) {
     index_limits::validate_chunk_cuda_index_limits(
         {folds.size(), nprofiles, nbins, widths.size(), 1, 1});
     counter.reset(stream);
@@ -791,10 +784,11 @@ SizeType score_and_filter_cuda_d(cuda::std::span<const float> folds,
                 throw std::runtime_error(
                     "thread regime: nbins exceeds limit of 64");
         };
-        dispatch_thread_kernel(
-            folds.data(), static_cast<int>(nprofiles), static_cast<int>(nbins),
-            widths.data(), static_cast<int>(widths.size()), scores.data(),
-            indices_filtered.data(), counter.d_ptr, threshold, 1.0F);
+        dispatch_thread_kernel(folds.data(), static_cast<int>(nprofiles),
+                               static_cast<int>(nbins), widths.data(),
+                               static_cast<int>(widths.size()), scores.data(),
+                               indices_filtered.data(), counter.d_ptr,
+                               threshold, 1.0F, fold_scale);
         cuda_utils::check_last_cuda_error(
             "kernel_snr_boxcar_thread launch failed");
 
@@ -812,7 +806,8 @@ SizeType score_and_filter_cuda_d(cuda::std::span<const float> folds,
                 folds.data(), static_cast<int>(nprofiles),
                 static_cast<int>(nbins), widths.data(),
                 static_cast<int>(widths.size()), scores.data(),
-                indices_filtered.data(), counter.d_ptr, threshold, 1.0F);
+                indices_filtered.data(), counter.d_ptr, threshold, 1.0F,
+                fold_scale);
         cuda_utils::check_last_cuda_error(
             "kernel_snr_boxcar_warp launch failed");
     }

@@ -247,7 +247,7 @@ acc_max = 0.0
 jerk_min = 0.0
 jerk_max = 0.0
 
-# Number of profile bins at shortest search period (must be >= 2 and power of 2)
+# Number of profile bins at shortest search period (must be >= 2)
 nbins = 64
 
 # Tolerance in bins across observation duration (typically 1.0)
@@ -1609,7 +1609,7 @@ acc_max = 0.0
 jerk_min = 0.0
 jerk_max = 0.0
 
-# Number of profile bins at shortest search period (must be >= 2 and power of 2)
+# Number of profile bins at shortest search period (must be >= 2)
 nbins = 64
 
 # Tolerance in bins across observation duration (typically 1.0)

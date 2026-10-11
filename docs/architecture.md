@@ -328,6 +328,16 @@ The facades do not change: they already dispatch on `kGPUBackend` through
 - On the GPU, the time-domain brute fold accumulates with float `atomicAdd`
   and is not bit-reproducible run to run (rule 6). Every other path is
   deterministic for a fixed seed.
+- The CUDA `FFAFreqSweep` merges the last FFA level(s) on chip with the
+  boxcar scorer. In the time domain this is bit-identical to storing the
+  levels and calling `score_and_filter_cuda_d`
+  (`tests/cpp/internal/ffa_final_score_cuda_t.cpp`). In the Fourier domain the
+  sweep forms phase rotations in FP32 (`fourier_phasor`: an exact `fmaf` split
+  of k * shift, reduced to a fraction of a cycle, then `sincospif`) and inverts
+  on chip with the portable block FFT (Bluestein's algorithm for a `nbins`
+  that is not a power of two; `docs/fft.md`),
+  so its scores differ from `FFA::execute` plus cuFFT at float level (and are
+  closer to the CPU reference). `FFA::execute` and EP keep the FP64 phase.
 - Thread counts. The caller's `nthreads` is never capped from above:
   library code clamps only from below, `nthreads = std::max(nthreads, 1)`,
   before using it in `num_threads(...)`. `omp_get_max_threads()` would let

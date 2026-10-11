@@ -480,13 +480,16 @@ TEST_CASE("CUFFTManager leftover chunk and plan reuse", "[fft][CUFFTManager]") {
         max_batch, n_real);
     REQUIRE(gpu.n_cached_plans() == 2);
 
+    // A prepared n_real plans at most max_batch and a granule (here equal):
+    // the leftover rows are staged through a granule plan, not a new
+    // exact-size plan.
     gpu.rfft_batch(loki::cuda_utils::as_span(d_real),
                    loki::cuda_utils::as_span(d_spec), batch_size, n_real);
-    REQUIRE(gpu.n_cached_plans() == 3);
+    REQUIRE(gpu.n_cached_plans() == 2);
 
     gpu.irfft_batch(loki::cuda_utils::as_span(d_spec),
                     loki::cuda_utils::as_span(d_recovered), batch_size, n_real);
-    REQUIRE(gpu.n_cached_plans() == 4);
+    REQUIRE(gpu.n_cached_plans() == 2);
 
     std::vector<float> gpu_recovered(batch_size * n_real);
     thrust::copy(d_recovered.begin(), d_recovered.end(), gpu_recovered.begin());
@@ -494,7 +497,7 @@ TEST_CASE("CUFFTManager leftover chunk and plan reuse", "[fft][CUFFTManager]") {
 
     gpu.irfft_batch(loki::cuda_utils::as_span(d_spec),
                     loki::cuda_utils::as_span(d_recovered), batch_size, n_real);
-    REQUIRE(gpu.n_cached_plans() == 4);
+    REQUIRE(gpu.n_cached_plans() == 2);
 }
 
 TEST_CASE("CUFFTManager C2R keeps complex input", "[fft][CUFFTManager]") {

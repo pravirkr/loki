@@ -28,6 +28,9 @@ inline constexpr Backend kGPUBackend = Backend::kCUDA;
                                          Backend backend);
 
 /// @throws std::invalid_argument: @p backend is not compiled into this build.
+/// Create the primary context of GPU @p device (GPU builds only).
+void initialize_device_gpu(int device);
+
 [[noreturn]] void throw_unavailable(std::string_view algorithm,
                                     Backend backend);
 

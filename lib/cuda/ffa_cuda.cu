@@ -25,6 +25,7 @@
 #include "loki/utils/workspace.hpp"
 
 #include "lib/algorithms/ffa_engine.hpp"
+#include "lib/algorithms/planner_memory.hpp"
 #include "lib/cuda/cuda_utils.cuh"
 #include "lib/cuda/fft_cuda.cuh"
 #include "lib/cuda/kernels_cuda.cuh"
@@ -85,20 +86,29 @@ public:
     explicit Impl(memory::FFAWorkspaceCUDA<FoldTypeCUDA>& workspace,
                   math::CUFFTManager& fft_manager,
                   search::FFASearchConfig cfg,
-                  int device_id)
+                  int device_id,
+                  bool sweep_buffers = false)
         : m_cfg(std::move(cfg)),
           m_ffa_plan(m_cfg),
           m_device_id(device_id),
           m_is_freq_only(m_cfg.get_nparams() == 1),
           m_workspace_storage(),
           m_workspace_ptr(&workspace),
-          m_fft_ptr(&fft_manager) {
+          m_fft_ptr(&fft_manager),
+          m_sweep_buffers(sweep_buffers) {
         cuda_utils::CudaSetDeviceGuard device_guard(m_device_id);
         // Validate workspace
         const auto& ws = get_workspace();
-        ws.validate(m_ffa_plan);
-        // Initialize BruteFold
-        initialize_brute_fold();
+        ws.validate(m_ffa_plan, required_buffer_size(),
+                    m_sweep_buffers
+                        ? algorithms::detail::gpu_sweep_coord_size(m_ffa_plan)
+                        : m_ffa_plan.get_coord_size());
+        // The sweep folds with workspace tables (no per-chunk allocation).
+        if (m_sweep_buffers) {
+            m_bf_freqs = m_ffa_plan.compute_param_grid(0).back();
+        } else {
+            initialize_brute_fold();
+        }
         log_info();
     }
 
@@ -290,7 +300,8 @@ public:
     void execute_d(cuda::std::span<const float> ts_e_d,
                    cuda::std::span<const float> ts_v_d,
                    cuda::std::span<float> fold_d,
-                   cudaStream_t stream)
+                   cudaStream_t stream,
+                   bool normalize = true)
         requires(std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>)
     {
         // timing::ScopeTimer timer("FFACudaCore::execute_d");
@@ -327,7 +338,156 @@ public:
         const auto nfft = fold_size_time / m_cfg.get_nbins();
         get_fft().irfft_batch(
             cuda_utils::as_span(ws.fold_internal_d).first(fold_size_fourier),
-            fold_d.first(fold_size_time), nfft, m_cfg.get_nbins(), stream);
+            fold_d.first(fold_size_time), nfft, m_cfg.get_nbins(), stream,
+            normalize);
+    }
+
+    void execute_score_d(cuda::std::span<const float> ts_e_d,
+                         cuda::std::span<const float> ts_v_d,
+                         cuda::std::span<DeviceFoldT> work_d,
+                         const core::FFAFinalScoreArgs& args,
+                         cudaStream_t stream) {
+        cuda_utils::CudaSetDeviceGuard device_guard(m_device_id);
+        error_check::check_equal(
+            ts_e_d.size(), m_cfg.get_nsamps(),
+            "FFACudaCore::execute_score_d: ts_e must have size nsamps");
+        error_check::check_equal(
+            ts_v_d.size(), ts_e_d.size(),
+            "FFACudaCore::execute_score_d: ts_v must have size nsamps");
+        error_check::check(
+            algorithms::detail::gpu_fused_score_applies(m_ffa_plan),
+            "FFACudaCore::execute_score_d: the fused final-level scorer does "
+            "not apply to this plan");
+        error_check::check_greater_equal(
+            work_d.size(), required_buffer_size(),
+            "FFACudaCore::execute_score_d: work buffer too small");
+        const auto levels = m_ffa_plan.get_n_levels();
+        error_check::check_greater_equal(
+            levels, SizeType{2},
+            "FFACudaCore::execute_score_d: needs at least one merge level");
+        error_check::check_equal(
+            m_ffa_plan.get_nsegments().back(), SizeType{1},
+            "FFACudaCore::execute_score_d: final level must have one segment");
+
+        auto& ws = get_workspace();
+        // Accel: the final level is resolved on the fly by the fused scorer.
+        m_final_computed = m_ffa_plan.get_n_params() == 2;
+        if (m_is_freq_only) {
+            ws.resolve_coordinates_freq(m_ffa_plan, stream);
+        } else {
+            ws.resolve_coordinates(m_ffa_plan, stream,
+                                   /*skip_final_accel=*/m_final_computed);
+        }
+        DeviceFoldT* in_ptr =
+            thrust::raw_pointer_cast(ws.fold_internal_d.data());
+        DeviceFoldT* out_ptr = work_d.data();
+        initialize_device(ts_e_d, ts_v_d, in_ptr, out_ptr, stream);
+
+        // The last `depth` levels are merged on chip with the scorer. Run
+        // levels 1 .. levels - 1 - depth; afterwards in_ptr holds level
+        // levels - 1 - depth (the source of the fused kernel).
+        const int depth = algorithms::detail::gpu_fused_score_depth(m_ffa_plan);
+        const SizeType last = levels - static_cast<SizeType>(depth);
+        if (m_is_freq_only) {
+            auto coords_base   = ws.coords_freq_d.get_raw_ptrs();
+            const auto& groups = get_fuse_groups_up_to(last, stream);
+            if (!groups.empty()) {
+                execute_freq_fused(in_ptr, out_ptr, coords_base, groups,
+                                   stream);
+                // Each group writes the other buffer: an odd count ends in
+                // out_ptr, an even count back in in_ptr.
+                if (groups.size() % 2 == 1) {
+                    std::swap(in_ptr, out_ptr);
+                }
+            }
+        } else {
+            auto coords_base = ws.coords_d.get_raw_ptrs();
+            for (SizeType i_level = 1; i_level < last; ++i_level) {
+                if constexpr (std::is_same_v<FoldTypeCUDA, float>) {
+                    execute_iter(in_ptr, out_ptr, coords_base, i_level, stream);
+                } else {
+                    execute_iter_sweep(in_ptr, out_ptr, i_level, stream);
+                }
+                std::swap(in_ptr, out_ptr);
+            }
+        }
+
+        m_score_parent = in_ptr;
+        m_score_depth  = depth;
+        score_final(args, stream);
+    }
+
+    void score_final(const core::FFAFinalScoreArgs& args_in,
+                     cudaStream_t stream) {
+        cuda_utils::CudaSetDeviceGuard device_guard(m_device_id);
+        // Accel searches: visit 16 accel rows of the final grid together
+        // (two levels up, one source row feeds 16 accel x 4 freq final
+        // coordinates), so shared ancestors stay in L2.
+        core::FFAFinalScoreArgs args = args_in;
+        if (m_ffa_plan.get_n_params() == 2) {
+            const auto& counts = m_ffa_plan.get_param_counts().back();
+            args.grid_rows     = static_cast<uint32_t>(counts[0]);
+            args.grid_cols     = static_cast<uint32_t>(counts[1]);
+            args.tile_rows     = kFinalTileRows;
+        }
+        error_check::check(m_score_parent != nullptr,
+                           "FFACudaCore::score_final: execute_score first");
+        auto& ws = get_workspace();
+        if constexpr (std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>) {
+            if (core::ffa_fourier_needs_bluestein(m_cfg.get_nbins())) {
+                args.bluestein = ws.bluestein_table(m_cfg.get_nbins());
+            }
+        }
+        const DeviceFoldT* in_ptr = m_score_parent;
+        const SizeType last       = m_ffa_plan.get_n_levels() - 1;
+        const auto ncoords        = m_ffa_plan.get_ncoords();
+        const auto offsets        = m_ffa_plan.get_ncoords_offsets();
+        const auto depth          = static_cast<SizeType>(m_score_depth);
+        const auto ncoords_cur    = ncoords[last];
+        const auto ncoords_prev   = ncoords[last - 1];
+        const auto ncoords_src    = ncoords[last - depth];
+        const auto nbins          = m_cfg.get_nbins();
+        if constexpr (std::is_same_v<FoldTypeCUDA, float>) {
+            if (m_is_freq_only) {
+                const auto base = ws.coords_freq_d.get_raw_ptrs();
+                core::ffa_freq_final_score_cuda(
+                    in_ptr, base.offset(offsets[last]),
+                    base.offset(offsets[last - 1]), ncoords_cur, ncoords_prev,
+                    ncoords_src, m_score_depth, nbins, args, stream);
+            } else if (m_final_computed) {
+                const auto base = ws.coords_d.get_raw_ptrs();
+                core::ffa_final_score_cuda(
+                    in_ptr, ws.accel_resolve_level(m_ffa_plan, last),
+                    base.offset(offsets[last - 1]), ncoords_cur, ncoords_prev,
+                    ncoords_src, m_score_depth, nbins, args, stream);
+            } else {
+                const auto base = ws.coords_d.get_raw_ptrs();
+                core::ffa_final_score_cuda(
+                    in_ptr, base.offset(offsets[last]),
+                    base.offset(offsets[last - 1]), ncoords_cur, ncoords_prev,
+                    ncoords_src, m_score_depth, nbins, args, stream);
+            }
+        } else {
+            if (m_is_freq_only) {
+                const auto base = ws.coords_freq_d.get_raw_ptrs();
+                core::ffa_freq_final_score_fourier_cuda(
+                    in_ptr, base.offset(offsets[last]),
+                    base.offset(offsets[last - 1]), ncoords_cur, ncoords_prev,
+                    ncoords_src, m_score_depth, nbins, args, stream);
+            } else if (m_final_computed) {
+                const auto base = ws.coords_d.get_raw_ptrs();
+                core::ffa_final_score_fourier_cuda(
+                    in_ptr, ws.accel_resolve_level(m_ffa_plan, last),
+                    base.offset(offsets[last - 1]), ncoords_cur, ncoords_prev,
+                    ncoords_src, m_score_depth, nbins, args, stream);
+            } else {
+                const auto base = ws.coords_d.get_raw_ptrs();
+                core::ffa_final_score_fourier_cuda(
+                    in_ptr, base.offset(offsets[last]),
+                    base.offset(offsets[last - 1]), ncoords_cur, ncoords_prev,
+                    ncoords_src, m_score_depth, nbins, args, stream);
+            }
+        }
     }
 
 private:
@@ -335,6 +495,21 @@ private:
     plans::FFAPlan<HostFoldT> m_ffa_plan;
     int m_device_id;
     bool m_is_freq_only;
+    // The workspace holds only the levels execute_score stores.
+    bool m_sweep_buffers{false};
+    static constexpr uint32_t kFinalTileRows = 16;
+    // Source level of the fused final kernel and its depth, left by the
+    // last execute_score.
+    const DeviceFoldT* m_score_parent{nullptr};
+    int m_score_depth{1};
+    // Accel: the final level's coordinates were not stored.
+    bool m_final_computed{false};
+
+    [[nodiscard]] SizeType required_buffer_size() const {
+        return m_sweep_buffers
+                   ? algorithms::detail::gpu_sweep_buffer_size(m_ffa_plan)
+                   : m_ffa_plan.get_buffer_size();
+    }
 
     // Brute fold for the initial time-domain folding
     std::unique_ptr<BruteFold<HostFoldT>> m_the_bf;
@@ -406,11 +581,85 @@ private:
             Exec::cuda(m_device_id));
     }
 
+    // Level-0 frequencies of the sweep's brute fold (host source of the
+    // async upload, so it lives as long as this core).
+    std::vector<double> m_bf_freqs;
+
+    // Brute fold of the sweep path: tables in the workspace, everything on
+    // `stream`. The time-domain fold is one block per segment.
+    void sweep_brute_fold(cuda::std::span<const float> ts_e_d,
+                          cuda::std::span<const float> ts_v_d,
+                          DeviceFoldT* init_buffer_d,
+                          DeviceFoldT* temp_buffer_d,
+                          cudaStream_t stream) {
+        auto& ws               = get_workspace();
+        const SizeType nfreqs  = m_bf_freqs.size();
+        const SizeType seg_len = m_ffa_plan.get_segment_lens()[0];
+        const SizeType nsegs   = m_cfg.get_nsamps() / seg_len;
+        const SizeType nbins   = m_cfg.get_nbins();
+        const double t_ref =
+            m_is_freq_only ? 0.0 : m_ffa_plan.get_tsegments()[0] / 2.0;
+        if (ws.bf_freqs_d.size() < nfreqs) {
+            ws.bf_freqs_d.resize(nfreqs);
+        }
+        const void* staged =
+            ws.stage(m_bf_freqs.data(), nfreqs * sizeof(double));
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(thrust::raw_pointer_cast(ws.bf_freqs_d.data()),
+                            staged != nullptr ? staged : m_bf_freqs.data(),
+                            nfreqs * sizeof(double), cudaMemcpyHostToDevice,
+                            stream),
+            "sweep_brute_fold: freqs upload failed");
+        const double* freqs_d = thrust::raw_pointer_cast(ws.bf_freqs_d.data());
+        bool time_fold        = std::is_same_v<FoldTypeCUDA, float>;
+        if constexpr (std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>) {
+            time_fold = nbins > m_cfg.get_nbins_min_lossy_bf();
+            if (!time_fold) {
+                core::brute_fold_ts_complex_cuda(
+                    ts_e_d.data(), ts_v_d.data(), init_buffer_d, freqs_d,
+                    nfreqs, nsegs, seg_len, m_cfg.get_nbins_f(),
+                    m_cfg.get_tsamp(), t_ref, stream);
+                return;
+            }
+        }
+        if (ws.bf_phase_map_d.size() < nfreqs * seg_len) {
+            ws.bf_phase_map_d.resize(nfreqs * seg_len);
+        }
+        uint32_t* phase_map =
+            thrust::raw_pointer_cast(ws.bf_phase_map_d.data());
+        core::brute_fold_phase_map_cuda(freqs_d, nfreqs, seg_len, nbins,
+                                        m_cfg.get_tsamp(), t_ref, phase_map,
+                                        stream);
+        if constexpr (std::is_same_v<FoldTypeCUDA, float>) {
+            core::brute_fold_segment_cuda(ts_e_d.data(), ts_v_d.data(),
+                                          phase_map, init_buffer_d, nsegs,
+                                          nfreqs, seg_len, nbins, stream);
+        } else {
+            // Lossy: time-domain fold into the other buffer, then R2C.
+            auto* real_temp = reinterpret_cast<float*>(temp_buffer_d);
+            const SizeType fold_size_time = nsegs * nfreqs * 2 * nbins;
+            core::brute_fold_segment_cuda(ts_e_d.data(), ts_v_d.data(),
+                                          phase_map, real_temp, nsegs, nfreqs,
+                                          seg_len, nbins, stream);
+            const auto nfft = fold_size_time / nbins;
+            get_fft().rfft_batch(
+                cuda::std::span<float>(real_temp, fold_size_time),
+                cuda::std::span<ComplexTypeCUDA>(init_buffer_d,
+                                                 nfft * ((nbins / 2) + 1)),
+                nfft, nbins, stream);
+        }
+    }
+
     void initialize_device(cuda::std::span<const float> ts_e_d,
                            cuda::std::span<const float> ts_v_d,
                            DeviceFoldT* init_buffer_d,
                            DeviceFoldT* temp_buffer_d,
                            cudaStream_t stream) {
+        if (m_sweep_buffers) {
+            sweep_brute_fold(ts_e_d, ts_v_d, init_buffer_d, temp_buffer_d,
+                             stream);
+            return;
+        }
         timing::SimpleTimer timer;
         timer.start();
         if constexpr (std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>) {
@@ -444,8 +693,6 @@ private:
                     cuda::std::span<ComplexTypeCUDA>(init_buffer_d,
                                                      brute_fold_size_fourier),
                     nfft, m_cfg.get_nbins(), stream);
-                cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
-                                            "lossy brute fold sync failed");
                 m_brutefold_time += timer.stop();
                 return;
             }
@@ -457,8 +704,6 @@ private:
             DeviceSpan<HostFoldT>(reinterpret_cast<HostFoldT*>(init_buffer_d),
                                   m_the_bf->get_fold_size()),
             Stream(stream));
-        cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
-                                    "brute fold synchronization failed");
         m_brutefold_time += timer.stop();
     }
 
@@ -494,13 +739,50 @@ private:
         return m_fuse_groups;
     }
 
+    // Fused-merge groups for levels 1 .. n_keep - 1 (the sweep merges the
+    // levels above on chip with the scorer). Same planning as
+    // get_fuse_groups.
+    std::vector<int> m_fuse_groups_up_to;
+    SizeType m_fuse_groups_up_to_n{0};
+
+    const std::vector<int>& get_fuse_groups_up_to(SizeType n_keep,
+                                                  cudaStream_t stream) {
+        if (m_fuse_groups_up_to_n == n_keep) {
+            return m_fuse_groups_up_to;
+        }
+        m_fuse_groups_up_to_n = n_keep;
+        m_fuse_groups_up_to.clear();
+        if (n_keep < 2) {
+            return m_fuse_groups_up_to;
+        }
+        const auto level_bad =
+            get_workspace().check_fuse_levels_freq(m_ffa_plan, stream);
+        const auto nbins = m_cfg.get_nbins();
+        std::array<bool, 6> k_fits_smem{};
+        for (int k = 2; k <= 5; ++k) {
+            if constexpr (std::is_same_v<FoldTypeCUDA, float>) {
+                k_fits_smem[static_cast<size_t>(k)] =
+                    core::ffa_freq_fuse_fits_smem(k, nbins);
+            } else {
+                k_fits_smem[static_cast<size_t>(k)] =
+                    core::ffa_complex_freq_fuse_fits_smem(k,
+                                                          m_cfg.get_nbins_f());
+            }
+        }
+        const std::span<const SizeType> ncoords(m_ffa_plan.get_ncoords());
+        const std::span<const SizeType> nsegments(m_ffa_plan.get_nsegments());
+        const std::span<const uint32_t> bad(level_bad);
+        m_fuse_groups_up_to = core::plan_ffa_freq_fuse_groups(
+            ncoords.first(n_keep), nsegments.first(n_keep), bad.first(n_keep),
+            k_fits_smem);
+        return m_fuse_groups_up_to;
+    }
+
     void execute_freq_fused(DeviceFoldT* current_in_ptr,
                             DeviceFoldT* current_out_ptr,
                             coord::FFACoordFreqDPtrs coords_base,
                             std::span<const int> groups,
-                            cudaStream_t stream)
-        requires(std::is_same_v<FoldTypeCUDA, float>)
-    {
+                            cudaStream_t stream) {
         const auto ncoords   = m_ffa_plan.get_ncoords();
         const auto nsegments = m_ffa_plan.get_nsegments();
         const auto offsets   = m_ffa_plan.get_ncoords_offsets();
@@ -510,8 +792,13 @@ private:
         for (SizeType i_group = 0; i_group < groups.size(); ++i_group) {
             const int k = groups[i_group];
             if (k == 1) {
-                execute_iter_freq(current_in_ptr, current_out_ptr, coords_base,
-                                  next_level, stream);
+                if constexpr (std::is_same_v<FoldTypeCUDA, float>) {
+                    execute_iter_freq(current_in_ptr, current_out_ptr,
+                                      coords_base, next_level, stream);
+                } else {
+                    execute_iter_sweep(current_in_ptr, current_out_ptr,
+                                       next_level, stream);
+                }
             } else {
                 std::array<const uint32_t*, 5> idxs{};
                 std::array<const float*, 5> shifts{};
@@ -527,13 +814,24 @@ private:
                 }
                 const SizeType out_level =
                     next_level + static_cast<SizeType>(k) - 1;
-                core::ffa_iter_freq_fused_cuda(
-                    current_in_ptr, current_out_ptr, idxs.data(), shifts.data(),
-                    counts.data(),
-                    static_cast<uint32_t>(ncoords[next_level - 1]),
-                    static_cast<uint32_t>(ncoords[out_level]),
-                    static_cast<uint32_t>(nsegments[next_level - 1]), nbins, k,
-                    stream);
+                if constexpr (std::is_same_v<FoldTypeCUDA, float>) {
+                    core::ffa_iter_freq_fused_cuda(
+                        current_in_ptr, current_out_ptr, idxs.data(),
+                        shifts.data(), counts.data(),
+                        static_cast<uint32_t>(ncoords[next_level - 1]),
+                        static_cast<uint32_t>(ncoords[out_level]),
+                        static_cast<uint32_t>(nsegments[next_level - 1]), nbins,
+                        k, stream);
+                } else {
+                    core::ffa_complex_freq_fused_sweep_cuda(
+                        current_in_ptr, current_out_ptr, idxs.data(),
+                        shifts.data(), counts.data(),
+                        static_cast<uint32_t>(ncoords[next_level - 1]),
+                        static_cast<uint32_t>(ncoords[out_level]),
+                        static_cast<uint32_t>(nsegments[next_level - 1]),
+                        static_cast<uint32_t>(m_cfg.get_nbins_f()), nbins, k,
+                        stream);
+                }
             }
             if (i_group + 1 < groups.size()) {
                 std::swap(current_in_ptr, current_out_ptr);
@@ -552,6 +850,10 @@ private:
             levels, 2,
             "FFACudaCore::execute_unified_device: levels must be greater "
             "than or equal to 2");
+        error_check::check(
+            required_buffer_size() >= m_ffa_plan.get_buffer_size(),
+            "FFACudaCore::execute: the workspace only holds the levels "
+            "execute_score stores");
 
         auto& ws = get_workspace();
         // Use fold_internal from workspace and output fold for ping-pong
@@ -610,6 +912,33 @@ private:
                     std::swap(current_in_ptr, current_out_ptr);
                 }
             }
+        }
+    }
+
+    // Complex merge level of the sweep path (FP32 phasors, reused across
+    // segments).
+    void execute_iter_sweep(const DeviceFoldT* __restrict__ fold_in,
+                            DeviceFoldT* __restrict__ fold_out,
+                            SizeType i_level,
+                            cudaStream_t stream)
+        requires(std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>)
+    {
+        auto& ws                = get_workspace();
+        const auto nbins        = m_cfg.get_nbins();
+        const auto nbins_f      = m_cfg.get_nbins_f();
+        const auto nsegments    = m_ffa_plan.get_fold_shapes_time()[i_level][0];
+        const auto ncoords_cur  = m_ffa_plan.get_ncoords()[i_level];
+        const auto ncoords_prev = m_ffa_plan.get_ncoords()[i_level - 1];
+        const auto offset       = m_ffa_plan.get_ncoords_offsets()[i_level];
+        if (m_is_freq_only) {
+            core::ffa_complex_iter_freq_sweep_cuda(
+                fold_in, fold_out,
+                ws.coords_freq_d.get_raw_ptrs().offset(offset), ncoords_cur,
+                ncoords_prev, nsegments, nbins_f, nbins, stream);
+        } else {
+            core::ffa_complex_iter_sweep_cuda(
+                fold_in, fold_out, ws.coords_d.get_raw_ptrs().offset(offset),
+                ncoords_cur, ncoords_prev, nsegments, nbins_f, nbins, stream);
         }
     }
 
@@ -684,8 +1013,10 @@ FFACudaCore<FoldTypeCUDA>::FFACudaCore(
     memory::FFAWorkspaceCUDA<FoldTypeCUDA>& workspace,
     math::CUFFTManager& fft_manager,
     const search::FFASearchConfig& cfg,
-    int device_id)
-    : m_impl(std::make_unique<Impl>(workspace, fft_manager, cfg, device_id)) {}
+    int device_id,
+    bool sweep_buffers)
+    : m_impl(std::make_unique<Impl>(
+          workspace, fft_manager, cfg, device_id, sweep_buffers)) {}
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 FFACudaCore<FoldTypeCUDA>::~FFACudaCore() = default;
@@ -739,6 +1070,22 @@ void FFACudaCore<FoldTypeCUDA>::execute(
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
+void FFACudaCore<FoldTypeCUDA>::execute_score(
+    cuda::std::span<const float> ts_e,
+    cuda::std::span<const float> ts_v,
+    cuda::std::span<typename FFACudaCore<FoldTypeCUDA>::DeviceFoldT> work,
+    const core::FFAFinalScoreArgs& args,
+    cudaStream_t stream) {
+    m_impl->execute_score_d(ts_e, ts_v, work, args, stream);
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+void FFACudaCore<FoldTypeCUDA>::rescore_final(
+    const core::FFAFinalScoreArgs& args, cudaStream_t stream) {
+    m_impl->score_final(args, stream);
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
 void FFACudaCore<FoldTypeCUDA>::execute(std::span<const float> ts_e,
                                         std::span<const float> ts_v,
                                         std::span<float> fold)
@@ -751,10 +1098,11 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA>
 void FFACudaCore<FoldTypeCUDA>::execute(cuda::std::span<const float> ts_e,
                                         cuda::std::span<const float> ts_v,
                                         cuda::std::span<float> fold,
-                                        cudaStream_t stream)
+                                        cudaStream_t stream,
+                                        bool normalize)
     requires(std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>)
 {
-    m_impl->execute_d(ts_e, ts_v, fold, stream);
+    m_impl->execute_d(ts_e, ts_v, fold, stream, normalize);
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>

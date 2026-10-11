@@ -27,7 +27,7 @@ peak = n_workers * thread_bytes(group) + shared_bytes + input_bytes
 ```
 
 | Term | Contents | Lifetime |
-|---|---|---|
+| --- | --- | --- |
 | `thread_bytes` | `ep_workspace_bytes` (world tree, prune and branch scratch, FFA seeds) + `ep_irfft_scratch_bytes` (Fourier folds only) + `ep_harvest_bytes` | one group |
 | `shared_bytes` | FFA workspace fold buffer and coordinates + output fold buffer, sized from the global maxima of `buffer_size` and `coord_size` | whole sweep |
 | `input_bytes` | `ts_e` and `ts_v`, `2 * nsamps * sizeof(float)` | whole sweep |
@@ -74,7 +74,7 @@ get_memory_limit_gb()` (`memory_limit_gb` in Python) is the limit the plan was
 fitted to.
 
 | Term | Contents | Lifetime |
-|---|---|---|
+| --- | --- | --- |
 | group workspace | `ep_cuda_ep_workspace_bytes` (`WorldTreeCUDA`, `PruneWorkspaceCUDA`, `BranchingWorkspaceCUDA`, `CUBScratchArena`, seeds, segment coordinates) + `ep_cuda_irfft_scratch_bytes` (the Fourier scratch; a two-element stand-in for float folds) | one group |
 | shared | `ep_cuda_shared_bytes`: FFA workspace fold buffer and coordinates, device output fold buffer | whole sweep |
 | inputs | the device copy of `ts_e` and `ts_v`, `2 * nsamps * sizeof(float)` | whole sweep |
@@ -122,6 +122,43 @@ Differences from the CPU policy:
 At the start of `execute`, before the group workspace is allocated, the engine
 checks that the device still has room for that workspace and the transient FFA
 scratch (the shared buffers are already allocated).
+
+### FFA frequency sweep on CUDA
+
+`FFAFreqSweep` on CUDA never stores the final fold. The last two levels
+(one when the plan has only two) are merged on chip and scored in the same
+kernel (`lib/cuda/ffa_score_cuda.cu`; Fourier folds add an on-chip inverse
+FFT, `ffa_score_fourier_impl.cuh`: a direct transform for a power-of-two
+`nbins` from 32, Bluestein's algorithm through power-of-two transforms for
+any other `nbins` up to 1024, both on the portable block FFT
+`ffa_portable_fft.cuh`; see `docs/fft.md`). Accel searches also resolve the final level's
+coordinates on the fly instead of storing them. The planner models what that
+path allocates (`planner_memory.hpp`):
+
+| Term | Contents |
+| --- | --- |
+| fold buffers | two ping-pong buffers of `gpu_sweep_buffer_size(plan)`: the largest level the sweep stores, i.e. every level but the last `gpu_fused_score_depth` ones |
+| coordinates | `gpu_sweep_coord_size(plan)`: every level's resolved coordinates, minus the final level for accel searches |
+| score scratch | two slots (the GPU fills one while the host copies the other) of `min(ncoords * n_widths, kGpuScoreScratchCap)` scores and indices; `kGpuScoreScratchCap = 2^24` |
+| brute fold | the phase-bin map, `nfreqs * segment_len` `uint32_t` |
+| inputs | `ts_e`, `ts_v` |
+
+A chunk the fused path cannot take (more than `kGpuFusedMaxWidths = 32` widths,
+a single level, or a Fourier `nbins` above 1024) is planned and run unfused,
+with full buffers and an uncapped scratch. The Bluestein tables (one per
+non-power-of-two `nbins`, at most 3072 complex values each) are uploaded once
+per sweep and covered by the reserve. A fused chunk whose passing (profile, width) pairs exceed the scratch
+slot drops the excess, counts it, and is scored again after the sweep in
+profile ranges that fit. The signed fold-stride index limit no longer applies
+to fused chunks (the final fold is never indexed). The small per-chunk tables
+(frequencies, accel resolve tables, pinned staging) grow on demand and are
+covered by the reserves.
+
+The chunks run as a two-slot pipeline: chunk i's kernels are queued while the
+host copies chunk i - 1's candidates and appends them to the result file. Every
+per-chunk upload goes through pinned staging, and no per-chunk device
+allocation or legacy-stream operation is left on the fused path, so the queue
+never drains between chunks.
 
 ## Reserve
 
@@ -171,69 +208,3 @@ evaluations (each builds an `FFAPlan`) are memoised across passes.
 `EPChunkConfig::chunk_memory_gb` and `EPChunkStats::memory_gb` are the memory of
 one chunk run alone. `EPRegionStats::get_max_memory_gb()` is the sweep peak
 above, the value compared with the limit.
-
-## World-tree capacity
-
-A chunk's world tree (`max_sugg`, the candidates it holds) is planned as
-`ncoords * 1.25 * peak_complexity`, where `peak_complexity` is the expected
-number of surviving leaves per coordinate at the peak stage of the threshold
-scheme. That product is the candidate count if nothing is trimmed, and it is
-not bounded: at 2^25 samples it reaches about 1e9 candidates, and a chunk
-then needs terabytes, so the band cannot be planned on a device.
-
-The planner therefore caps it at `kEPMaxWorldTreeCapacity` (2^22 candidates,
-`lib/algorithms/ep_memory.hpp`). The world tree already trims to the top-k
-when it is full (`lib/utils/world_tree.hpp`), so the cap bounds the memory,
-and a run changes only where it overflows. The cap is applied on both backends
-and to the CUDA batch floor, `batch_size * branch_max + 1`, which still wins
-when it is larger. Plans made before the cap are replanned (cache 1.6.0).
-
-Scale of the unbounded value, from the planner, one chunk per band
-(`peak_complexity` grows with the segment length, so the sample count
-matters most):
-
-| samples | band (Hz) | acc, jerk | chunk memory without the cap |
-|---|---|---|---|
-| 2^21 | 140-145 | +-1000, +-4 | 0.11 GB (1 chunk) |
-| 2^23 | 140-145 | +-1000, +-4 | 10.7 GB (1 chunk) |
-| 2^24 | 140-145 | +-1000, +-4 | 39.5 GB (3 chunks) |
-| 2^25 | 144.99-145 | +-600, +-2.5 | infeasible (962 GB minimum chunk) |
-
-The capped plan of 2^25 samples over 140-145 Hz with +-1000 and +-4 is one
-chunk at 3.87 GB on a 40 GB limit, with the 1024 batch of the CPU. With the
-GPU batch of 2^16 the same chunk is planned at 7.18 GB.
-
-Production-scale run (`bench/scripts/ep_production_cuda.py`, the same search
-as `ep_production_cuda.toml`, L40S): 2^25 samples, 140-145 Hz, 16 runs, one
-chunk. The device high-water mark was 7.27 GB against a model of 7.18 GB
-(residual +0.10 GB). The run took 269 s, about 15 s per run, and recovered the
-injected pulse: jerk 2.0001 (2), acceleration 500.02 (500), frequency
-142.8571 Hz (142.8571). The run is not optimised; per-run cost is the pruning
-loop, which the next cycle will look at.
-
-## Runtime checks
-
-`EPFreqSweep` checks the plan as it runs:
-
-- after allocating the shared FFA buffers, their size must equal the model;
-- before each group, the model's total must fit the effective limit (a
-  `std::runtime_error` otherwise, e.g. for a hand-edited plan);
-- after allocating a group's workspaces, their size must not exceed the model
-  (a `std::logic_error`: the model has drifted from the allocations).
-
-## Plan cache
-
-The plan cache (`plan_cache_file`) is version 1.6.0. It stores the model inputs
-next to the chunks: `ep_memory_model_version` (`kEPMemoryModelVersion`,
-currently 3), `batch_size`, `n_workers`, `harvest_enabled`, `max_harvests` and
-`harvest_store_folds`, and also `ep_backend` (`cpu` or `cuda`),
-`ep_memory_model_kind` and `dts_batch_size` (the batch size of the threshold
-simulation). `device_arch` (`sm_89`, or `host` for a CPU plan) is recorded and
-not checked. A cache written on the other backend is accepted: the threshold
-scheme is statistically equivalent, not identical. Loading rejects a cache
-whose inputs differ. The worker count and the thread count are compared only
-for a cache from the same backend, because a CUDA plan has one worker and fits
-any CPU worker count. Whatever the backend, loading recomputes the peak with
-the current policy against the current limit, so a plan that does not fit is
-rejected. Bump `kEPMemoryModelVersion` with every change to the formulas, and the
-cache version in `ep_regions.cpp` with every change to the file layout.

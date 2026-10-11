@@ -6,8 +6,12 @@
  * pruning. Internal.
  */
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <format>
+#include <map>
+#include <memory>
 #include <stdexcept>
 #include <string_view>
 #include <utility>
@@ -25,6 +29,7 @@
 #include "lib/common/dispatch.hpp"
 #include "lib/cuda/coord_cuda.cuh"
 #include "lib/cuda/cuda_utils.cuh"
+#include "lib/cuda/taylor_ffa_cuda.cuh"
 #include "lib/cuda/types_cuda.cuh"
 #include "lib/cuda/world_tree_cuda.cuh"
 #include "lib/utils/workspace_impl.hpp"
@@ -46,6 +51,23 @@ public:
     cuda_utils::DeviceVectorNoInit<DeviceFoldT> fold_internal_d;
     coord::FFACoordD coords_d;
     coord::FFACoordFreqD coords_freq_d;
+    // Brute-fold tables of the frequency sweep (grown on demand): the
+    // level-0 frequencies and the time-domain phase-bin map.
+    cuda_utils::DeviceVectorNoInit<double> bf_freqs_d;
+    cuda_utils::DeviceVectorNoInit<uint32_t> bf_phase_map_d;
+
+    /**
+     * @brief Pinned staging for the small per-chunk uploads of a pipelined
+     * sweep. Copies from pageable memory can wait for earlier work on the
+     * stream; from pinned memory they are truly asynchronous. The sweep
+     * alternates two slots and selects one per chunk; a slot is reused only
+     * after its previous chunk finished, so pending copies never see their
+     * source overwritten. With no slot selected, uploads stay pageable.
+     */
+    void select_staging_slot(int slot);
+    /// Copy @p bytes into the selected slot and return the pinned copy
+    /// (nullptr when no slot is selected).
+    [[nodiscard]] const void* stage(const void* src, SizeType bytes);
 
     FFAWorkspaceCUDA() = default;
     explicit FFAWorkspaceCUDA(const plans::FFAPlan<HostFoldT>& ffa_plan);
@@ -54,22 +76,37 @@ public:
                      SizeType n_levels,
                      SizeType n_params);
 
-    ~FFAWorkspaceCUDA() = default;
-
     FFAWorkspaceCUDA(const FFAWorkspaceCUDA&)                = delete;
     FFAWorkspaceCUDA& operator=(const FFAWorkspaceCUDA&)     = delete;
     FFAWorkspaceCUDA(FFAWorkspaceCUDA&&) noexcept            = default;
     FFAWorkspaceCUDA& operator=(FFAWorkspaceCUDA&&) noexcept = default;
 
     void validate(const plans::FFAPlan<HostFoldT>& ffa_plan) const;
+    // Same, with the ping-pong buffer size and the coordinate count the
+    // caller actually needs.
+    void validate(const plans::FFAPlan<HostFoldT>& ffa_plan,
+                  SizeType buffer_size,
+                  SizeType coord_size = SIZE_MAX) const;
     /// Bytes of the large buffers: the internal fold and the coordinates.
     [[nodiscard]] SizeType get_buffers_bytes() const noexcept;
     /// Bytes of every buffer, including the small per-level arrays.
     [[nodiscard]] SizeType get_memory_usage_bytes() const noexcept;
     void resolve_coordinates_freq(const plans::FFAPlan<HostFoldT>& ffa_plan,
                                   cudaStream_t stream);
+    /// @p skip_final_accel: accel plans leave the final level unresolved
+    /// (the fused sweep resolves it on the fly; see accel_resolve_level).
     void resolve_coordinates(const plans::FFAPlan<HostFoldT>& ffa_plan,
-                             cudaStream_t stream);
+                             cudaStream_t stream,
+                             bool skip_final_accel = false);
+    /// Device view of one level's accel resolve tables, valid after
+    /// resolve_coordinates of the same plan.
+    [[nodiscard]] core::FFAAccelResolveLevel
+    accel_resolve_level(const plans::FFAPlan<HostFoldT>& ffa_plan,
+                        SizeType level) const;
+    /// Device Bluestein table of the fused Fourier scorer for @p nbins
+    /// (core::ffa_fourier_bluestein_table), built and uploaded on first use
+    /// and kept for the workspace's lifetime (a sweep has few nbins).
+    [[nodiscard]] const ComplexTypeCUDA* bluestein_table(SizeType nbins);
     /// Per level, the number of resolved frequency coordinates that break
     /// the fused-merge contract (see ffa_freq_fuse_check_levels_cuda). Call
     /// after resolve_coordinates_freq(). Synchronizes @p stream.
@@ -89,9 +126,39 @@ private:
     std::vector<uint32_t> m_param_counts_h;
     std::vector<uint32_t> m_ncoords_offsets_h;
     std::vector<ParamLimit> m_param_limits_h;
+    // Accel resolve tables (grown on demand; small) and their offsets.
+    thrust::device_vector<core::FFAAccelResolveRow> m_accel_rows_d;
+    thrust::device_vector<double> m_accel_cols_d;
+    thrust::device_vector<uint32_t> m_accel_offsets_d;
+    std::vector<uint32_t> m_accel_offsets_h;
+    std::map<SizeType, cuda_utils::DeviceVectorNoInit<ComplexTypeCUDA>>
+        m_bluestein_d;
+
+    struct PinnedFree {
+        void operator()(std::byte* ptr) const noexcept {
+            if (ptr != nullptr) {
+                cudaFreeHost(ptr);
+            }
+        }
+    };
+    struct PinnedStaging {
+        std::unique_ptr<std::byte, PinnedFree> ptr;
+        SizeType capacity{0};
+        SizeType used{0};
+    };
+    std::array<PinnedStaging, 2> m_staging{};
+    int m_staging_slot{-1};
+    // Upload @p bytes from @p src: through the selected pinned slot, or
+    // directly (pageable) when none is selected.
+    void
+    upload(void* dst_d, const void* src, SizeType bytes, cudaStream_t stream);
 
     void copy_plan_to_device(const plans::FFAPlan<HostFoldT>& ffa_plan,
                              cudaStream_t stream);
+    // Accel (n_params = 2) resolve through per-level row / column tables.
+    void resolve_coordinates_accel(const plans::FFAPlan<HostFoldT>& ffa_plan,
+                                   cudaStream_t stream,
+                                   bool skip_final);
 };
 
 struct BranchingWorkspaceCUDAView {

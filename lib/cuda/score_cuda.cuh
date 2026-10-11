@@ -49,7 +49,8 @@ SizeType score_and_filter_cuda_d(cuda::std::span<const float> folds,
                                  SizeType nprofiles,
                                  SizeType nbins,
                                  cudaStream_t stream,
-                                 memory::DeviceCounter& counter);
+                                 memory::DeviceCounter& counter,
+                                 float fold_scale = 1.0F);
 
 /**
  * Max boxcar S/N per profile, thresholded into @p filtered_mask; returns the

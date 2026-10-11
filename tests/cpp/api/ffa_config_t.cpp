@@ -146,12 +146,10 @@ TEST_CASE("FFASearchConfig validation throws on invalid arguments",
                           5.0, 1000, false),
                       std::runtime_error);
 
-    // Non-power of 2 nbins
-    REQUIRE_THROWS_AS(loki::search::FFASearchConfig(
-                          1000, 0.0001, 63, 1.0, valid_limits, 0.2, 1.5, true,
-                          1, 8.0, 2.0, 1024, 64, std::nullopt, std::nullopt,
-                          5.0, 1000, false),
-                      std::runtime_error);
+    // nbins need not be a power of two
+    REQUIRE_NOTHROW(loki::search::FFASearchConfig(
+        1024, 0.0001, 63, 1.0, valid_limits, 0.2, 1.5, true, 1, 8.0, 2.0, 1024,
+        64, std::nullopt, std::nullopt, 5.0, 1000, false));
 
     // Invalid ducy_max
     REQUIRE_THROWS_AS(loki::search::FFASearchConfig(

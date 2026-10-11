@@ -1,3 +1,5 @@
+#include <algorithm>
+
 #include <cuda/atomic>
 #include <cuda/std/limits>
 #include <cuda/std/span>
@@ -10,6 +12,7 @@
 #include "loki/common/types.hpp"
 
 #include "lib/cuda/cuda_utils.cuh"
+#include "lib/cuda/ffa_resolve_device.cuh"
 #include "lib/cuda/kernel_utils.cuh"
 #include "lib/cuda/taylor_cuda.cuh"
 #include "lib/detail/utils.hpp"
@@ -236,7 +239,147 @@ __global__ void kernel_ffa_resolve_taylor_poly_batch(
     }
 }
 
+// Row (level, accel) and column (level, freq) tables of the accel resolve.
+// Each value is the same expression ffa_taylor_resolve_accel_batch_device
+// evaluates, so it rounds the same way.
+__global__ void
+kernel_ffa_resolve_accel_tables(const uint32_t* __restrict__ param_arr_count,
+                                const ParamLimit* __restrict__ param_limits,
+                                const uint32_t* __restrict__ row_off,
+                                const uint32_t* __restrict__ col_off,
+                                uint32_t n_levels,
+                                uint32_t total_rows,
+                                uint32_t total_cols,
+                                double tseg_brute,
+                                FFAAccelResolveRow* __restrict__ rows,
+                                double* __restrict__ cols) {
+    constexpr uint32_t kParams = 2;
+    const uint32_t tid         = (blockIdx.x * blockDim.x) + threadIdx.x;
+    if (tid < total_rows) {
+        const uint32_t i_level = utils::find_ffa_level(row_off, tid, n_levels);
+        const uint32_t accel_idx   = tid - row_off[i_level];
+        const uint32_t n_accel_cur = param_arr_count[(i_level * kParams) + 0];
+        const uint32_t n_accel_prev =
+            param_arr_count[((i_level - 1) * kParams) + 0];
+        const uint32_t n_freq_prev =
+            param_arr_count[((i_level - 1) * kParams) + 1];
+        const double a_cur = utils::get_param_val_at_idx_device(
+            param_limits[0].min, param_limits[0].max, n_accel_cur, accel_idx);
+        const double tsegment =
+            ldexp(tseg_brute, static_cast<int>(i_level - 1));
+        FFAAccelResolveRow row{};
+#pragma unroll
+        for (int latter = 0; latter < 2; ++latter) {
+            const double delta_t =
+                (static_cast<double>(latter) - 0.5) * tsegment;
+            const double delta_t_sq = delta_t * delta_t;
+            const double v_new      = (a_cur * delta_t);
+            const double d_new      = (a_cur * 0.5 * delta_t_sq);
+            const double delay_rel  = d_new * utils::kInvCval;
+            row.w[latter]           = 1.0 - v_new * utils::kInvCval;
+            row.u[latter]           = delta_t - delay_rel;
+        }
+        const uint32_t idx_a = utils::get_nearest_idx_analytical_device(
+            a_cur, param_limits[0].min, param_limits[0].max, n_accel_prev);
+        row.idx_a_base = idx_a * n_freq_prev;
+        rows[tid]      = row;
+        return;
+    }
+    const uint32_t cid = tid - total_rows;
+    if (cid >= total_cols) {
+        return;
+    }
+    const uint32_t i_level    = utils::find_ffa_level(col_off, cid, n_levels);
+    const uint32_t freq_idx   = cid - col_off[i_level];
+    const uint32_t n_freq_cur = param_arr_count[(i_level * kParams) + 1];
+    cols[cid]                 = utils::get_param_val_at_idx_device(
+        param_limits[1].min, param_limits[1].max, n_freq_cur, freq_idx);
+}
+
+// Tail and head of every accel coordinate from the tables. The frequency
+// shift f * (1 - v / c), the nearest-index division and the phase are per
+// coordinate, as in ffa_taylor_resolve_accel_batch_device.
+__global__ void
+kernel_ffa_resolve_accel_fast(const uint32_t* __restrict__ param_arr_count,
+                              const uint32_t* __restrict__ ncoords_offsets,
+                              const ParamLimit* __restrict__ param_limits,
+                              const uint32_t* __restrict__ row_off,
+                              const uint32_t* __restrict__ col_off,
+                              const FFAAccelResolveRow* __restrict__ rows,
+                              const double* __restrict__ cols,
+                              coord::FFACoordDPtrs coords_ptrs,
+                              uint32_t n_levels,
+                              uint32_t ncoords_total,
+                              uint32_t nbins) {
+    constexpr uint32_t kParams = 2;
+    const uint32_t tid         = (blockIdx.x * blockDim.x) + threadIdx.x;
+    if (tid >= ncoords_total) {
+        return;
+    }
+    const uint32_t i_level =
+        utils::find_ffa_level(ncoords_offsets, tid, n_levels);
+    if (i_level == 0) {
+        return;
+    }
+    const FFAAccelResolveLevel lvl{
+        .rows        = rows + row_off[i_level],
+        .cols        = cols + col_off[i_level],
+        .n_accel_cur = param_arr_count[(i_level * kParams) + 0],
+        .n_freq_cur  = param_arr_count[(i_level * kParams) + 1],
+        .n_freq_prev = param_arr_count[((i_level - 1) * kParams) + 1],
+        .nbins       = nbins,
+        .f_min       = param_limits[1].min,
+        .f_max       = param_limits[1].max};
+    const detail::AccelCoord c =
+        detail::resolve_accel_coord(lvl, tid - ncoords_offsets[i_level]);
+    coords_ptrs.i_tail[tid]     = c.i_tail;
+    coords_ptrs.shift_tail[tid] = c.shift_tail;
+    coords_ptrs.i_head[tid]     = c.i_head;
+    coords_ptrs.shift_head[tid] = c.shift_head;
+}
+
 } // namespace
+
+void ffa_taylor_resolve_accel_tables_cuda(
+    cuda::std::span<const uint32_t> param_arr_count,
+    cuda::std::span<const uint32_t> ncoords_offsets,
+    cuda::std::span<const ParamLimit> param_limits,
+    cuda::std::span<const uint32_t> row_col_offsets,
+    FFAAccelResolveRow* rows,
+    double* cols,
+    coord::FFACoordDPtrs coords_ptrs,
+    SizeType n_levels,
+    SizeType ncoords_total,
+    SizeType total_rows,
+    SizeType total_cols,
+    double tseg_brute,
+    SizeType nbins,
+    cudaStream_t stream,
+    SizeType ncoords_resolve) {
+    constexpr int kBlockSize = 256;
+    const uint32_t* row_off  = row_col_offsets.data();
+    ncoords_total            = std::min(ncoords_total, ncoords_resolve);
+    const uint32_t* col_off  = row_off + n_levels + 1;
+    const SizeType n_tab     = total_rows + total_cols;
+    if (n_tab > 0) {
+        const dim3 grid((n_tab + kBlockSize - 1) / kBlockSize);
+        cuda_utils::check_kernel_launch_params(grid, dim3(kBlockSize));
+        kernel_ffa_resolve_accel_tables<<<grid, kBlockSize, 0, stream>>>(
+            param_arr_count.data(), param_limits.data(), row_off, col_off,
+            static_cast<uint32_t>(n_levels), static_cast<uint32_t>(total_rows),
+            static_cast<uint32_t>(total_cols), tseg_brute, rows, cols);
+        cuda_utils::check_last_cuda_error(
+            "FFA accel resolve tables kernel launch failed");
+    }
+    const dim3 grid((ncoords_total + kBlockSize - 1) / kBlockSize);
+    cuda_utils::check_kernel_launch_params(grid, dim3(kBlockSize));
+    kernel_ffa_resolve_accel_fast<<<grid, kBlockSize, 0, stream>>>(
+        param_arr_count.data(), ncoords_offsets.data(), param_limits.data(),
+        row_off, col_off, rows, cols, coords_ptrs,
+        static_cast<uint32_t>(n_levels), static_cast<uint32_t>(ncoords_total),
+        static_cast<uint32_t>(nbins));
+    cuda_utils::check_last_cuda_error("FFA accel resolve kernel launch failed");
+}
 
 void ffa_taylor_resolve_freq_batch_cuda(
     cuda::std::span<const uint32_t> param_arr_count,
