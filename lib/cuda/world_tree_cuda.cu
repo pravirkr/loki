@@ -608,8 +608,9 @@ void WorldTreeCUDA<FoldTypeCUDA>::add_initial(
     error_check::check_less_equal(
         slots_to_write, m_capacity,
         "WorldTreeCUDA: Suggestions too large to add.");
-    error_check::check_equal(slots_to_write, scores_batch.size(),
-                             "slots_to_write must match batch_scores size");
+    error_check::check_greater_equal(
+        scores_batch.size(), slots_to_write,
+        "add_initial: scores_batch smaller than slots_to_write");
 
     reset(); // Start fresh
     cuda_utils::check_cuda_call(
