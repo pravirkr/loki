@@ -389,7 +389,8 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
             }
         });
     }
-    auto ts = load_search_timeseries(toml_cfg);
+    auto loaded = load_search_timeseries(toml_cfg);
+    auto& ts    = loaded.ts;
     if (device_init.joinable()) {
         device_init.join();
     }
@@ -1188,6 +1189,7 @@ int main(int argc, char** argv) {
     }
     if (ep_no_plan_cache) {
         ep_cfg.use_plan_cache = false;
+    }
     const auto parse_method = [](const std::string& name) {
         return name == "zscore" ? loki::io::PreprocessMethod::kZScore
                                 : loki::io::PreprocessMethod::kRobust;
