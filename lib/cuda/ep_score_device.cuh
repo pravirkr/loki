@@ -14,6 +14,7 @@
 
 #include "lib/cuda/ep_score_cuda.cuh"
 #include "lib/cuda/ffa_score_device.cuh"
+#include "lib/cuda/kadane_device.cuh"
 
 namespace loki::core::detail {
 
@@ -71,6 +72,13 @@ __device__ inline uint32_t tile_exclusive_prefix(unsigned long long* state,
     }
     return exclusive;
 }
+
+/// Boxcar widths scored per register group by the fused EP kernels (more
+/// widths are scored in further groups, the maximum being order-free). 8 was
+/// the fastest of 4, 8, 16 and 32 at every nbins: wider groups cost registers
+/// and slow the whole kernel (32 widths took up to 2x the time of groups
+/// of 8).
+inline constexpr uint32_t kEPWidthGroup = 8;
 
 /// Shared-memory state of a block of at most kMaxPB leaves.
 template <uint32_t kMaxPB> struct EPBlock {
@@ -148,6 +156,49 @@ __device__ __forceinline__ void ep_block_record(EPBlock<kMaxPB>& b,
     const uint32_t key = ep_score_key(__float_as_uint(best));
     atomicMax(&b.key_max, key);
     atomicMax(&b.key_min_inv, ~key);
+}
+
+/**
+ * The Kadane scorer (score_and_filter_max_cuda_kadane_d's) over the block's
+ * normalized rows (pitch @p pitch, @p n bins): each warp takes groups of
+ * 32 / nbiases leaves, one lane per bias. Valid leaves are recorded, invalid
+ * ones masked out. Called by every thread, after a barrier.
+ */
+template <uint32_t kMaxPB, class FoldT>
+__device__ __forceinline__ void
+ep_score_kadane_rows(EPBlock<kMaxPB>& b,
+                     const EPScoreArgs<FoldT>& a,
+                     const float* rows,
+                     uint32_t pitch,
+                     uint32_t n,
+                     uint32_t p0,
+                     uint32_t nprof,
+                     uint32_t tid,
+                     uint32_t nthreads,
+                     uint32_t& npass) {
+    namespace kd       = loki::detection::detail;
+    const auto nbiases = static_cast<int>(a.nbiases);
+    const auto lanes =
+        kd::kadane_lanes(static_cast<int>(tid % kWarpSize), nbiases);
+    const float bias = lanes.in_group ? a.kadane_biases[lanes.bias] : 0.0F;
+    const auto per_warp =
+        static_cast<uint32_t>(kd::kadane_profiles_per_warp(nbiases));
+    const uint32_t nwarps = nthreads / kWarpSize;
+    for (uint32_t first = (tid / kWarpSize) * per_warp; first < nprof;
+         first += nwarps * per_warp) {
+        const uint32_t p = first + static_cast<uint32_t>(lanes.profile);
+        const bool in    = lanes.in_group && p < nprof;
+        const bool valid = in && b.valid[p] != 0;
+        if (in && !valid && lanes.bias == 0) {
+            a.filtered_mask[p0 + p] = 0;
+        }
+        const float best =
+            kd::kadane_group_max_snr(rows + ((in ? p : 0U) * pitch), valid,
+                                     static_cast<int>(n), bias, nbiases, lanes);
+        if (valid && lanes.bias == 0) {
+            ep_block_record(b, a, p, p0, best, npass);
+        }
+    }
 }
 
 /**

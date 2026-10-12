@@ -45,6 +45,10 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA> struct EPScoreArgs {
     uint32_t* stats{nullptr};
     const uint32_t* widths{nullptr};
     uint32_t nwidths{0};
+    // Kadane scorer (instead of the boxcar widths): the nbiases (2 or 3)
+    // biases on the device. Not in rows mode. widths and nwidths are unused.
+    const float* kadane_biases{nullptr};
+    uint32_t nbiases{0};
     float threshold{0.0F};
     uint32_t n_leaves{0};
     uint32_t physical_start_idx{0};
@@ -90,17 +94,20 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA>
                                                 SizeType nwidths) noexcept;
 
 /// Words of EPScoreArgs::tile_state for a launch of @p n_leaves leaves
-/// (zero them before each direct-mode launch); at most n_leaves + 1.
+/// (zero them before each direct-mode launch); at most n_leaves + 1. @p kadane:
+/// the launch scores with EPScoreArgs::kadane_biases.
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 [[nodiscard]] SizeType ep_shift_add_score_tile_words(SizeType nbins,
-                                                     SizeType n_leaves);
+                                                     SizeType n_leaves,
+                                                     bool kadane = false);
 
 /**
- * @brief Shift-add, (Fourier: on-chip inverse real FFT,) and boxcar score of
- * the branched leaves of one pruning batch. Equivalent to the shift-add
- * kernel, (an unnormalized C2R,) and score_and_filter_max_cuda_d; bit for bit
- * in the time domain, up to the rounding of the inverse FFT in the Fourier
- * domain. Does not synchronize.
+ * @brief Shift-add, (Fourier: on-chip inverse real FFT,) and boxcar or Kadane
+ * score of the branched leaves of one pruning batch. Equivalent to the
+ * shift-add kernel, (a normalized C2R,) and score_and_filter_max_cuda_d or
+ * score_and_filter_max_cuda_kadane_d (with EPScoreArgs::kadane_biases); bit
+ * for bit in the time domain, up to the rounding of the inverse FFT in the
+ * Fourier domain. Does not synchronize.
  */
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 void ep_shift_add_score_cuda(const EPScoreArgs<FoldTypeCUDA>& args,

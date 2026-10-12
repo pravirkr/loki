@@ -25,7 +25,6 @@ using detail::cmul;
 using detail::EPBlock;
 using detail::fold_norm_bin;
 using detail::hermitian_at;
-using detail::kMaxWidths;
 using detail::kWarpSize;
 using detail::RowLayout;
 using detail::WidthConstsView;
@@ -77,9 +76,15 @@ load_leaf_harmonics(LeafHarmonics (&h)[kMaxIter],
  * leaf's harmonics (ep_shift_add_harmonic, also stored to folds_out) into
  * shared half spectra, run the inverse DFT on chip (direct or Bluestein, as
  * kernel_final_score_c2c) and write the real profile rows. Then the rows are
- * scored with the thread or warp scorer of score_and_filter_max_cuda_d.
+ * scored with the thread or warp scorer of score_and_filter_max_cuda_d, or
+ * (kKadane) with the Kadane scorer, on one normalized row per leaf.
  */
-template <class FFT, uint32_t M, bool kChirp, bool kSerial, uint32_t NW>
+template <class FFT,
+          uint32_t M,
+          bool kChirp,
+          bool kSerial,
+          bool kKadane,
+          uint32_t NW>
 __global__
 __launch_bounds__(FFT::max_threads_per_block) void kernel_ep_shift_add_score_c2c(
     EPFourierScoreArgs a) {
@@ -87,7 +92,7 @@ __launch_bounds__(FFT::max_threads_per_block) void kernel_ep_shift_add_score_c2c
     constexpr uint32_t kNFMax   = (kNMax / 2) + 1;
     constexpr uint32_t F        = FFT::ffts_per_block;
     constexpr uint32_t kEpt     = FFT::elements_per_thread;
-    using Layout                = RowLayout<kNMax, kSerial, F>;
+    using Layout                = RowLayout<kNMax, kSerial, F, kKadane>;
     using complex_type          = typename FFT::value_type;
     constexpr uint32_t kPB      = Layout::kProfiles;
     constexpr uint32_t kMaxIter = (kNFMax + FFT::stride - 1) / FFT::stride;
@@ -96,14 +101,15 @@ __launch_bounds__(FFT::max_threads_per_block) void kernel_ep_shift_add_score_c2c
                   "the scorers need whole warps");
     static_assert(!kSerial || kPB <= FFT::max_threads_per_block,
                   "the serial scorer needs a thread per profile");
+    static_assert(!(kSerial && kKadane), "one scorer");
 
     extern __shared__ __align__(16) unsigned char smem_raw[]; // NOLINT
     __shared__ EPBlock<kPB> b;
     auto* fft_smem = reinterpret_cast<complex_type*>(smem_raw);
     auto* s_half   = reinterpret_cast<ComplexTypeCUDA*>(
         smem_raw + align_up(FFT::shared_memory_size, 16U));
-    auto* rows           = reinterpret_cast<float*>(s_half + (F * 2 * kNFMax));
-    WidthConstsView s_wc = width_consts_at(
+    auto* rows = reinterpret_cast<float*>(s_half + (F * 2 * kNFMax));
+    [[maybe_unused]] WidthConstsView s_wc = width_consts_at(
         reinterpret_cast<unsigned char*>(rows) + Layout::kRowBytes, a.nwidths);
 
     const uint32_t n        = kChirp ? a.nbins : M;
@@ -117,8 +123,10 @@ __launch_bounds__(FFT::max_threads_per_block) void kernel_ep_shift_add_score_c2c
     uint32_t p0;
     uint32_t nprof;
     detail::ep_block_begin(b, a, kPB, tid, nthreads, p0, nprof);
-    detail::load_width_consts(a.widths, a.nwidths, static_cast<int>(n), s_wc,
-                              tid, nthreads);
+    if constexpr (!kKadane) {
+        detail::load_width_consts(a.widths, a.nwidths, static_cast<int>(n),
+                                  s_wc, tid, nthreads);
+    }
     __syncthreads();
 
     const ComplexTypeCUDA* __restrict__ chirp = a.bluestein;
@@ -217,6 +225,11 @@ __launch_bounds__(FFT::max_threads_per_block) void kernel_ep_shift_add_score_c2c
                     if constexpr (kSerial) {
                         rows[(q * pitch) + j] =
                             fold_norm_bin(z.real() * s, z.imag() * s);
+                    } else if constexpr (kKadane) {
+                        // As kernel_kadane_*: e * rsqrt(v) of the normalized
+                        // profile, with no guard.
+                        rows[(q * pitch) + j] =
+                            (z.real() * s) * rsqrtf(z.imag() * s);
                     } else {
                         rows[(((q * 2) + 0) * pitch) + j] = z.real();
                         rows[(((q * 2) + 1) * pitch) + j] = z.imag();
@@ -231,7 +244,10 @@ __launch_bounds__(FFT::max_threads_per_block) void kernel_ep_shift_add_score_c2c
     __syncthreads();
 
     uint32_t npass = 0;
-    if constexpr (kSerial) {
+    if constexpr (kKadane) {
+        detail::ep_score_kadane_rows(b, a, rows, pitch, n, p0, nprof, tid,
+                                     nthreads, npass);
+    } else if constexpr (kSerial) {
         if (tid < nprof) {
             if (b.valid[tid] != 0) {
                 float best = cuda::std::numeric_limits<float>::lowest();
@@ -303,17 +319,23 @@ __launch_bounds__(FFT::max_threads_per_block) void kernel_ep_shift_add_score_c2c
     }
 }
 
-template <class FFT, uint32_t M, bool kChirp, bool kSerial, uint32_t NW>
+template <class FFT,
+          uint32_t M,
+          bool kChirp,
+          bool kSerial,
+          bool kKadane,
+          uint32_t NW>
 void launch_cfg(const EPFourierScoreArgs& args, cudaStream_t stream) {
     constexpr uint32_t F      = FFT::ffts_per_block;
     constexpr uint32_t kNMax  = kChirp ? M / 2 : M;
     constexpr uint32_t kNFMax = (kNMax / 2) + 1;
-    using Layout              = RowLayout<kNMax, kSerial, F>;
+    using Layout              = RowLayout<kNMax, kSerial, F, kKadane>;
     const auto kernel =
-        kernel_ep_shift_add_score_c2c<FFT, M, kChirp, kSerial, NW>;
+        kernel_ep_shift_add_score_c2c<FFT, M, kChirp, kSerial, kKadane, NW>;
     const SizeType smem = align_up(FFT::shared_memory_size, 16U) +
                           (F * 2 * kNFMax * sizeof(ComplexTypeCUDA)) +
-                          Layout::kRowBytes + width_consts_bytes(args.nwidths);
+                          Layout::kRowBytes +
+                          (kKadane ? 0U : width_consts_bytes(args.nwidths));
     cuda_utils::set_kernel_dynamic_smem(kernel, smem);
     const dim3 grid((args.n_leaves + Layout::kProfiles - 1) /
                     Layout::kProfiles);
@@ -326,25 +348,29 @@ template <class FFT, uint32_t M, bool kChirp>
 void launch_m(const EPFourierScoreArgs& args,
               cudaStream_t stream,
               SizeType* profiles_per_block) {
+    constexpr uint32_t kNMax = kChirp ? M / 2 : M;
+    if (args.kadane_biases != nullptr) {
+        if (profiles_per_block != nullptr) {
+            *profiles_per_block =
+                RowLayout<kNMax, false, FFT::ffts_per_block, true>::kProfiles;
+            return;
+        }
+        // The widths are not used: one instantiation.
+        launch_cfg<FFT, M, kChirp, false, true, detail::kEPWidthGroup>(args,
+                                                                       stream);
+        return;
+    }
     const auto launch = [&]<bool kSerial>() {
         if (profiles_per_block != nullptr) {
-            constexpr uint32_t kNMax = kChirp ? M / 2 : M;
             *profiles_per_block =
                 RowLayout<kNMax, kSerial, FFT::ffts_per_block>::kProfiles;
             return;
         }
-        // More than kMaxWidths widths are scored in groups of kMaxWidths.
-        if (args.nwidths <= 8) {
-            launch_cfg<FFT, M, kChirp, kSerial, 8>(args, stream);
-        } else if (args.nwidths <= 16) {
-            launch_cfg<FFT, M, kChirp, kSerial, 16>(args, stream);
-        } else {
-            launch_cfg<FFT, M, kChirp, kSerial, kMaxWidths>(args, stream);
-        }
+        launch_cfg<FFT, M, kChirp, kSerial, false, detail::kEPWidthGroup>(
+            args, stream);
     };
     // Same regime choice as score_and_filter_max_cuda_d.
     constexpr SizeType kThreadRegimeMinProfiles = 1U << 16U;
-    constexpr uint32_t kNMax                    = kChirp ? M / 2 : M;
     if constexpr (kNMax <= 64) {
         if (args.nbins <= 64 && args.n_leaves >= kThreadRegimeMinProfiles) {
             launch.template operator()<true>();
@@ -370,10 +396,14 @@ void dispatch(const EPFourierScoreArgs& args,
               cudaStream_t stream,
               SizeType* profiles_per_block) {
     const SizeType nbins = args.nbins;
-    error_check::check(
-        ep_shift_add_score_supported<ComplexTypeCUDA>(nbins, args.nwidths),
-        "ep_shift_add_score_fourier_cuda: unsupported nbins or "
-        "number of widths");
+    const bool kadane    = args.kadane_biases != nullptr;
+    error_check::check(ep_shift_add_score_supported<ComplexTypeCUDA>(
+                           nbins, kadane ? 1 : args.nwidths),
+                       "ep_shift_add_score_fourier_cuda: unsupported nbins or "
+                       "number of widths");
+    error_check::check(!kadane || args.nbiases == 2 || args.nbiases == 3,
+                       "ep_shift_add_score_fourier_cuda: Kadane takes 2 or 3 "
+                       "biases");
     const bool direct = !ffa_fourier_needs_bluestein(nbins);
     if (!direct && profiles_per_block == nullptr) {
         error_check::check(args.bluestein != nullptr,
@@ -413,12 +443,16 @@ void dispatch(const EPFourierScoreArgs& args,
 
 template <>
 SizeType ep_shift_add_score_tile_words<ComplexTypeCUDA>(SizeType nbins,
-                                                        SizeType n_leaves) {
+                                                        SizeType n_leaves,
+                                                        bool kadane) {
+    static constexpr float kQueryBias = 0.0F;
     EPFourierScoreArgs query{};
-    query.nbins        = static_cast<uint32_t>(nbins);
-    query.n_leaves     = static_cast<uint32_t>(n_leaves);
-    query.nwidths      = 1;
-    SizeType per_block = 1;
+    query.nbins         = static_cast<uint32_t>(nbins);
+    query.n_leaves      = static_cast<uint32_t>(n_leaves);
+    query.nwidths       = 1;
+    query.kadane_biases = kadane ? &kQueryBias : nullptr;
+    query.nbiases       = kadane ? 3 : 0;
+    SizeType per_block  = 1;
     dispatch(query, nullptr, &per_block);
     return ((n_leaves + per_block - 1) / per_block) + 1;
 }

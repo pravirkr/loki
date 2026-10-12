@@ -75,7 +75,7 @@ fitted to.
 
 | Term | Contents | Lifetime |
 | --- | --- | --- |
-| group workspace | `ep_cuda_ep_workspace_bytes` (`WorldTreeCUDA`, `PruneWorkspaceCUDA`, `BranchingWorkspaceCUDA`, `CUBScratchArena`, seeds, segment coordinates) + `ep_cuda_irfft_scratch_bytes` (the fused pruning kernel's statistics and tile states, one 8-byte word per branched leaf at most; the Fourier irfft scratch only when the pruning is not fused, `ep_cuda_needs_irfft_scratch`: the Kadane scorer or nbins above 1024, else a two-element stand-in) | one group |
+| group workspace | `ep_cuda_ep_workspace_bytes` (`WorldTreeCUDA`, `PruneWorkspaceCUDA`, `BranchingWorkspaceCUDA`, `CUBScratchArena`, seeds, segment coordinates) + `ep_cuda_irfft_scratch_bytes` (the fused pruning kernel's statistics and tile states, one 8-byte word per branched leaf at most; the Fourier irfft scratch only when the pruning is not fused, `ep_cuda_needs_irfft_scratch`: Fourier nbins above 1024, else a two-element stand-in) | one group |
 | shared | `ep_cuda_shared_bytes`: FFA workspace fold buffer and coordinates, device output fold buffer | whole sweep |
 | inputs | the device copy of `ts_e` and `ts_v`, `2 * nsamps * sizeof(float)` | whole sweep |
 | FFA transient | scratch the FFA of one chunk allocates while it runs, `ep_ffa_transient_bytes`; the largest of any chunk counts | whole sweep |

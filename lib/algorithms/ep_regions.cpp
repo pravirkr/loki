@@ -108,11 +108,10 @@ make_memory_context(const search::PulsarSearchConfig& cfg,
                     std::optional<SizeType> n_workers,
                     const Exec& exec) {
     detail::EPMemoryContext ctx{
-        .nparams           = cfg.get_nparams(),
-        .use_boxcar_kadane = cfg.get_use_boxcar_kadane(),
-        .nsamps            = cfg.get_nsamps(),
-        .n_workers         = resolve_n_workers(cfg.get_nthreads(), n_workers),
-        .harvest           = detail::EPHarvestBound::from(rfi_config),
+        .nparams   = cfg.get_nparams(),
+        .nsamps    = cfg.get_nsamps(),
+        .n_workers = resolve_n_workers(cfg.get_nthreads(), n_workers),
+        .harvest   = detail::EPHarvestBound::from(rfi_config),
     };
     if (exec.backend == Backend::kCPU) {
         return ctx;

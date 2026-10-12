@@ -66,7 +66,8 @@ constexpr SizeType kEPMaxWorldTreeCapacity = SizeType{1} << 22U;
 /// Version of this model. Bump it with every change to the formulas: plan
 /// caches store it and are rejected when it differs.
 ///  3: CUDA policy (EPMemoryKind), transient FFA scratch of the CUDA model.
-constexpr std::uint32_t kEPMemoryModelVersion = 3U;
+///  4: the Kadane scorer is fused too, so it no longer keeps the irfft scratch.
+constexpr std::uint32_t kEPMemoryModelVersion = 4U;
 
 /// Worst-case size of the per-run harvest store (see PruneRFIConfig).
 /// Normalised: all fields are zero/false when harvesting is disabled.
@@ -99,8 +100,6 @@ using CubScratchBytesFn = SizeType (*)(SizeType max_n_leaves, int device);
 /// Sweep-wide inputs of the model.
 struct EPMemoryContext {
     SizeType nparams{0};
-    /// The Kadane scorer (no fused pruning step; CUDA policy).
-    bool use_boxcar_kadane{false};
     SizeType nsamps{0};
     /// Workers pruning at the same time, each with its own buffers. Always 1
     /// for the CUDA policy.
@@ -225,14 +224,13 @@ inline constexpr SizeType kEPCudaFusedMaxNbinsFourier = 1024;
 inline constexpr SizeType kEPCudaFusedMaxNbinsTime    = 5119;
 
 /// Whether the CUDA prune functors score a batch with the fused kernel (the
-/// boxcar scorer, nbins within the on-chip limit).
+/// boxcar or the Kadane scorer, nbins within the on-chip limit).
 template <SupportedFoldType FoldType>
-constexpr bool ep_cuda_fused_batch(SizeType nbins,
-                                   bool use_boxcar_kadane) noexcept {
+constexpr bool ep_cuda_fused_batch(SizeType nbins) noexcept {
     const SizeType max_nbins = std::is_same_v<FoldType, ComplexType>
                                    ? kEPCudaFusedMaxNbinsFourier
                                    : kEPCudaFusedMaxNbinsTime;
-    return !use_boxcar_kadane && nbins >= 2 && nbins <= max_nbins;
+    return nbins >= 2 && nbins <= max_nbins;
 }
 
 /// Whether the CUDA prune functors score the seeds and the ascend (Fourier
@@ -244,11 +242,9 @@ constexpr bool ep_cuda_fused_rows(SizeType nbins) noexcept {
 /// Whether the CUDA prune functors need the irfft scratch: Fourier folds
 /// with a batch or row scoring that is not fused.
 template <SupportedFoldType FoldType>
-constexpr bool ep_cuda_needs_irfft_scratch(SizeType nbins,
-                                           bool use_boxcar_kadane) noexcept {
+constexpr bool ep_cuda_needs_irfft_scratch(SizeType nbins) noexcept {
     return std::is_same_v<FoldType, ComplexType> &&
-           !(ep_cuda_fused_batch<FoldType>(nbins, use_boxcar_kadane) &&
-             ep_cuda_fused_rows(nbins));
+           !(ep_cuda_fused_batch<FoldType>(nbins) && ep_cuda_fused_rows(nbins));
 }
 
 /// Bytes of the irfft scratch of the prune functors (PruneDPFunctsCUDA),
@@ -262,7 +258,7 @@ SizeType ep_cuda_irfft_scratch_bytes(const EPMemoryContext& ctx,
                                      SizeType ncoords_ffa,
                                      SizeType branch_max) {
     const SizeType tile_words = 2 + (ctx.batch_size * branch_max) + 1;
-    if (ep_cuda_needs_irfft_scratch<FoldType>(nbins, ctx.use_boxcar_kadane)) {
+    if (ep_cuda_needs_irfft_scratch<FoldType>(nbins)) {
         const SizeType max_nfft =
             std::max(2 * ctx.batch_size * branch_max, 2 * ncoords_ffa);
         return (max_nfft * ((nbins / 2) + 1) * sizeof(ComplexType)) +

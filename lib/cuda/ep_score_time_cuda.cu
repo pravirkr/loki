@@ -17,7 +17,6 @@ namespace {
 
 using detail::EPBlock;
 using detail::fold_norm_bin;
-using detail::kMaxWidths;
 using detail::kWarpSize;
 using detail::WidthConstsView;
 
@@ -40,9 +39,15 @@ bool serial_regime(SizeType nbins, SizeType n_leaves) {
     return nbins <= 64 && n_leaves >= (SizeType{1} << 16U);
 }
 
-uint32_t profiles_per_block(SizeType nbins, bool serial) {
+// Kadane: one normalized row per leaf, at most kMaxBlockProfiles leaves.
+uint32_t profiles_per_block(SizeType nbins, bool serial, bool kadane) {
     if (serial) {
         return kSerialProfiles;
+    }
+    if (kadane) {
+        const SizeType fit = kMaxRowBytes / ((nbins | 1U) * sizeof(float));
+        return static_cast<uint32_t>(
+            std::clamp<SizeType>(fit, 1, kMaxBlockProfiles));
     }
     const SizeType fit = kMaxRowBytes / (2 * ((nbins | 1U)) * sizeof(float));
     return static_cast<uint32_t>(
@@ -60,19 +65,21 @@ __device__ __forceinline__ uint32_t whole_shift(float phase_shift,
  * One pruning batch, fused, time domain: each block takes kpb leaves. The
  * threads form each leaf's e and v (tree + FFA rotated by the whole-bin
  * shift, kernel_shift_add_linear's arithmetic) into shared-memory rows, and
- * score them with the thread or warp scorer of score_and_filter_max_cuda_d.
+ * score them with the thread or warp scorer of score_and_filter_max_cuda_d,
+ * or (kKadane) with the Kadane scorer on one normalized row per leaf.
  */
-template <bool kSerial, uint32_t NW>
+template <bool kSerial, bool kKadane, uint32_t NW>
 __global__ __launch_bounds__(kThreads) void kernel_ep_shift_add_score_time(
     EPTimeScoreArgs a, uint32_t kpb) {
     extern __shared__ __align__(16) unsigned char smem_raw[]; // NOLINT
     __shared__ EPBlock<kMaxBlockProfiles> b;
     auto* rows = reinterpret_cast<float*>(smem_raw);
     // Width constants (any count) after the rows.
-    const uint32_t row_floats = kpb * (kSerial ? 1U : 2U) * (a.nbins | 1U);
-    auto* wc_w                = reinterpret_cast<int*>(rows + row_floats);
-    auto* wc_h                = reinterpret_cast<float*>(wc_w + a.nwidths);
-    WidthConstsView s_wc{wc_w, wc_h, wc_h + a.nwidths};
+    const uint32_t row_floats =
+        kpb * ((kSerial || kKadane) ? 1U : 2U) * (a.nbins | 1U);
+    auto* wc_w = reinterpret_cast<int*>(rows + row_floats);
+    auto* wc_h = reinterpret_cast<float*>(wc_w + a.nwidths);
+    [[maybe_unused]] WidthConstsView s_wc{wc_w, wc_h, wc_h + a.nwidths};
 
     const uint32_t n        = a.nbins;
     const uint32_t stride   = 2 * n;
@@ -83,8 +90,10 @@ __global__ __launch_bounds__(kThreads) void kernel_ep_shift_add_score_time(
     uint32_t p0;
     uint32_t nprof;
     detail::ep_block_begin(b, a, kpb, tid, nthreads, p0, nprof);
-    detail::load_width_consts(a.widths, a.nwidths, static_cast<int>(n), s_wc,
-                              tid, nthreads);
+    if constexpr (!kKadane) {
+        detail::load_width_consts(a.widths, a.nwidths, static_cast<int>(n),
+                                  s_wc, tid, nthreads);
+    }
     __syncthreads();
 
     // e_j = tree_e[j] + ffa_e[(j - shift) mod n], and v likewise.
@@ -109,6 +118,9 @@ __global__ __launch_bounds__(kThreads) void kernel_ep_shift_add_score_time(
         merge(q, j, e, v);
         if constexpr (kSerial) {
             rows[(q * pitch) + j] = fold_norm_bin(e, v);
+        } else if constexpr (kKadane) {
+            // As kernel_kadane_*: e * rsqrt(v), with no guard.
+            rows[(q * pitch) + j] = e * rsqrtf(v);
         } else {
             rows[(((q * 2) + 0) * pitch) + j] = e;
             rows[(((q * 2) + 1) * pitch) + j] = v;
@@ -123,7 +135,10 @@ __global__ __launch_bounds__(kThreads) void kernel_ep_shift_add_score_time(
     __syncthreads();
 
     uint32_t npass = 0;
-    if constexpr (kSerial) {
+    if constexpr (kKadane) {
+        detail::ep_score_kadane_rows(b, a, rows, pitch, n, p0, nprof, tid,
+                                     nthreads, npass);
+    } else if constexpr (kSerial) {
         if (tid < nprof) {
             if (b.valid[tid] != 0) {
                 float best = cuda::std::numeric_limits<float>::lowest();
@@ -184,13 +199,14 @@ __global__ __launch_bounds__(kThreads) void kernel_ep_shift_add_score_time(
     }
 }
 
-template <bool kSerial, uint32_t NW>
+template <bool kSerial, bool kKadane, uint32_t NW>
 void launch_cfg(const EPTimeScoreArgs& args, cudaStream_t stream) {
-    const uint32_t kpb  = profiles_per_block(args.nbins, kSerial);
-    const SizeType smem = (static_cast<SizeType>(kpb) * (kSerial ? 1 : 2) *
-                           (args.nbins | 1U) * sizeof(float)) +
-                          (static_cast<SizeType>(args.nwidths) * 3 * 4);
-    const auto kernel   = kernel_ep_shift_add_score_time<kSerial, NW>;
+    const uint32_t kpb = profiles_per_block(args.nbins, kSerial, kKadane);
+    const SizeType smem =
+        (static_cast<SizeType>(kpb) * ((kSerial || kKadane) ? 1 : 2) *
+         (args.nbins | 1U) * sizeof(float)) +
+        (kKadane ? 0 : static_cast<SizeType>(args.nwidths) * 3 * 4);
+    const auto kernel = kernel_ep_shift_add_score_time<kSerial, kKadane, NW>;
     cuda_utils::set_kernel_dynamic_smem(kernel, smem);
     const dim3 grid((args.n_leaves + kpb - 1) / kpb);
     kernel<<<grid, kThreads, smem, stream>>>(args, kpb);
@@ -200,13 +216,7 @@ void launch_cfg(const EPTimeScoreArgs& args, cudaStream_t stream) {
 
 template <bool kSerial>
 void launch_regime(const EPTimeScoreArgs& args, cudaStream_t stream) {
-    if (args.nwidths <= 8) {
-        launch_cfg<kSerial, 8>(args, stream);
-    } else if (args.nwidths <= 16) {
-        launch_cfg<kSerial, 16>(args, stream);
-    } else {
-        launch_cfg<kSerial, kMaxWidths>(args, stream);
-    }
+    launch_cfg<kSerial, false, detail::kEPWidthGroup>(args, stream);
 }
 
 } // namespace
@@ -221,9 +231,12 @@ bool ep_shift_add_score_supported<float>(SizeType nbins,
 
 template <>
 SizeType ep_shift_add_score_tile_words<float>(SizeType nbins,
-                                              SizeType n_leaves) {
+                                              SizeType n_leaves,
+                                              bool kadane) {
     const SizeType kpb =
-        profiles_per_block(nbins, serial_regime(nbins, n_leaves));
+        kadane
+            ? profiles_per_block(nbins, false, true)
+            : profiles_per_block(nbins, serial_regime(nbins, n_leaves), false);
     return ((n_leaves + kpb - 1) / kpb) + 1;
 }
 
@@ -233,9 +246,18 @@ void ep_shift_add_score_cuda<float>(const EPTimeScoreArgs& args,
     if (args.n_leaves == 0) {
         return;
     }
+    const bool kadane = args.kadane_biases != nullptr;
     error_check::check(
-        ep_shift_add_score_supported<float>(args.nbins, args.nwidths),
+        ep_shift_add_score_supported<float>(args.nbins,
+                                            kadane ? 1 : args.nwidths),
         "ep_shift_add_score_cuda: unsupported nbins or number of widths");
+    if (kadane) {
+        error_check::check(args.nbiases == 2 || args.nbiases == 3,
+                           "ep_shift_add_score_cuda: Kadane takes 2 or 3 "
+                           "biases");
+        launch_cfg<false, true, detail::kEPWidthGroup>(args, stream);
+        return;
+    }
     if (serial_regime(args.nbins, args.n_leaves)) {
         launch_regime<true>(args, stream);
     } else {

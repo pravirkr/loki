@@ -63,13 +63,14 @@ EPMemoryContext make_ctx(SizeType nparams) {
     return ctx;
 }
 
-PulsarSearchConfig make_cfg(SizeType nparams, bool kadane = false) {
+PulsarSearchConfig
+make_cfg(SizeType nparams, bool kadane = false, SizeType nbins = kNbins) {
     std::vector<ParamLimit> limits(nparams,
                                    ParamLimit{.min = -1.0, .max = 1.0});
     limits.back() = ParamLimit{.min = 140.0, .max = 145.0};
     return {1U << 16U,
             64e-6,
-            kNbins,
+            nbins,
             /*eta=*/1.0,
             limits,
             /*ducy_max=*/0.3,
@@ -78,7 +79,7 @@ PulsarSearchConfig make_cfg(SizeType nparams, bool kadane = false) {
             /*nthreads=*/1,
             /*max_process_memory_gb=*/4.0,
             /*octave_scale=*/2.0,
-            /*nbins_max=*/1024,
+            /*nbins_max=*/std::max<SizeType>(1024, nbins),
             /*nbins_min_lossy_bf=*/64,
             /*bseg_brute=*/1024,
             /*bseg_ffa=*/(1U << 16U) / 8,
@@ -184,21 +185,25 @@ TEST_CASE("CUDA EP memory model matches the prune irfft scratch",
             static_cast<double>(functs->get_irfft_scratch_memory_gib()) *
             static_cast<double>(1ULL << 30U)));
     };
-    // Boxcar (fused) and Kadane (irfft scratch), Fourier and float folds.
+    // Boxcar and Kadane (both fused), Fourier and float folds; and Fourier
+    // folds above the on-chip limit, which keep the irfft scratch.
     for (const bool kadane : {false, true}) {
-        auto ctx_k              = ctx;
-        ctx_k.use_boxcar_kadane = kadane;
-        const auto fourier      = create_prune_dp_functs_cuda<ComplexTypeCUDA>(
-            "taylor", grid, dparams, kNsegments, /*tseg_ffa=*/1.0,
-            make_cfg(2, kadane), kBatch, kBranchMax, /*device_id=*/0);
-        CHECK(bytes_of(fourier) == ep_cuda_irfft_scratch_bytes<ComplexType>(
-                                       ctx_k, kNbins, kNcoords, kBranchMax));
-        const auto time_domain = create_prune_dp_functs_cuda<float>(
-            "taylor", grid, dparams, kNsegments, /*tseg_ffa=*/1.0,
-            make_cfg(2, kadane), kBatch, kBranchMax, /*device_id=*/0);
-        CHECK(bytes_of(time_domain) ==
-              ep_cuda_irfft_scratch_bytes<float>(ctx_k, kNbins, kNcoords,
-                                                 kBranchMax));
+        for (const SizeType nbins : {kNbins, SizeType{2048}}) {
+            CAPTURE(kadane, nbins);
+            const auto fourier = create_prune_dp_functs_cuda<ComplexTypeCUDA>(
+                "taylor", grid, dparams, kNsegments, /*tseg_ffa=*/1.0,
+                make_cfg(2, kadane, nbins), kBatch, kBranchMax,
+                /*device_id=*/0);
+            CHECK(bytes_of(fourier) == ep_cuda_irfft_scratch_bytes<ComplexType>(
+                                           ctx, nbins, kNcoords, kBranchMax));
+            const auto time_domain = create_prune_dp_functs_cuda<float>(
+                "taylor", grid, dparams, kNsegments, /*tseg_ffa=*/1.0,
+                make_cfg(2, kadane, nbins), kBatch, kBranchMax,
+                /*device_id=*/0);
+            CHECK(bytes_of(time_domain) ==
+                  ep_cuda_irfft_scratch_bytes<float>(ctx, nbins, kNcoords,
+                                                     kBranchMax));
+        }
     }
 }
 
@@ -213,8 +218,8 @@ TEST_CASE("CUDA EP memory model: irfft scratch only for unfused scoring",
                                              kBranchMax) == stand_in + tiles);
     CHECK(ep_cuda_irfft_scratch_bytes<ComplexType>(
               ctx, kNbins, kNcoords, kBranchMax) == stand_in + tiles);
-    // Fourier nbins above the on-chip limit, or the Kadane scorer:
-    // max(2 * batch * branch_max, 2 * ncoords) transforms of nbins.
+    // Fourier nbins above the on-chip limit (the boxcar and the Kadane scorer
+    // alike): max(2 * batch * branch_max, 2 * ncoords) transforms of nbins.
     const auto full = [&](SizeType nbins) {
         const SizeType nfft = std::max(2 * kBatch * kBranchMax, 2 * kNcoords);
         return (nfft * ((nbins / 2) + 1) * sizeof(ComplexType)) +
@@ -222,11 +227,6 @@ TEST_CASE("CUDA EP memory model: irfft scratch only for unfused scoring",
     };
     CHECK(ep_cuda_irfft_scratch_bytes<ComplexType>(ctx, 2048, kNcoords,
                                                    kBranchMax) == full(2048));
-    ctx.use_boxcar_kadane = true;
-    CHECK(ep_cuda_irfft_scratch_bytes<ComplexType>(ctx, kNbins, kNcoords,
-                                                   kBranchMax) == full(kNbins));
-    CHECK(ep_cuda_irfft_scratch_bytes<float>(ctx, kNbins, kNcoords,
-                                             kBranchMax) == stand_in + tiles);
 }
 
 TEST_CASE("CUDA prune functors take an external FFT manager without planning",
@@ -239,28 +239,33 @@ TEST_CASE("CUDA prune functors take an external FFT manager without planning",
 
     // The sweep prepares the plans once. The functor must reuse them and
     // build none of its own.
+    // Fourier nbins above the on-chip limit: the batches still go through
+    // the irfft.
+    constexpr SizeType kBigNbins = 2048;
     loki::math::CUFFTManager shared(/*device_id=*/0);
-    const std::vector<SizeType> n_reals{kNbins};
+    const std::vector<SizeType> n_reals{kBigNbins};
     shared.prepare_exact_plans(n_reals);
-    // Kadane: the batches still go through the irfft.
     const auto functs = create_prune_dp_functs_cuda<ComplexTypeCUDA>(
         "taylor", grid, dparams, kNsegments, /*tseg_ffa=*/1.0,
-        make_cfg(2, /*kadane=*/true), kBatch, kBranchMax, /*device_id=*/0,
-        &shared);
+        make_cfg(2, /*kadane=*/true, kBigNbins), kBatch, kBranchMax,
+        /*device_id=*/0, &shared);
     REQUIRE(functs != nullptr);
-    CHECK(shared.has_prepared(kNbins));
+    CHECK(shared.has_prepared(kBigNbins));
     CHECK(shared.n_cached_plans() == 0);
 
     // A manager that does not prepare this nbins is refused.
     loki::math::CUFFTManager unprepared(/*device_id=*/0);
     CHECK_THROWS(create_prune_dp_functs_cuda<ComplexTypeCUDA>(
         "taylor", grid, dparams, kNsegments, /*tseg_ffa=*/1.0,
-        make_cfg(2, /*kadane=*/true), kBatch, kBranchMax, /*device_id=*/0,
-        &unprepared));
-    // The fused scoring needs no plans at all.
-    CHECK_NOTHROW(create_prune_dp_functs_cuda<ComplexTypeCUDA>(
-        "taylor", grid, dparams, kNsegments, /*tseg_ffa=*/1.0, make_cfg(2),
-        kBatch, kBranchMax, /*device_id=*/0, &unprepared));
+        make_cfg(2, /*kadane=*/true, kBigNbins), kBatch, kBranchMax,
+        /*device_id=*/0, &unprepared));
+    // The fused scoring (boxcar or Kadane) needs no plans at all.
+    for (const bool kadane : {false, true}) {
+        CHECK_NOTHROW(create_prune_dp_functs_cuda<ComplexTypeCUDA>(
+            "taylor", grid, dparams, kNsegments, /*tseg_ffa=*/1.0,
+            make_cfg(2, kadane), kBatch, kBranchMax, /*device_id=*/0,
+            &unprepared));
+    }
 }
 
 #endif // LOKI_ENABLE_CUDA

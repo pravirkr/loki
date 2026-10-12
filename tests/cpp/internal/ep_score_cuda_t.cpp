@@ -22,6 +22,7 @@
 #include "lib/cuda/cuda_utils.cuh"
 #include "lib/cuda/ffa_score_cuda.cuh"
 #include "lib/cuda/fft_cuda.cuh"
+#include "lib/cuda/kadane_cuda.cuh"
 #include "lib/cuda/kernels_cuda.cuh"
 #include "lib/cuda/score_cuda.cuh"
 #include "lib/cuda/workspace_cuda.cuh"
@@ -155,8 +156,15 @@ template <typename FoldT> struct Reference {
     std::vector<float> scores;
 };
 
-template <typename FoldT> Reference<FoldT> reference(const Batch<FoldT>& b) {
+// Biases of the Kadane scorer: the first nbiases of these.
+constexpr float kKadaneBiases[3] = {1.42F, 0.76F, 0.41F};
+
+// nbiases 0: the boxcar scorer; 2 or 3: the Kadane scorer.
+template <typename FoldT>
+Reference<FoldT> reference(const Batch<FoldT>& b, SizeType nbiases = 0) {
     using loki::cuda_utils::as_span;
+    const thrust::device_vector<float> kadane_biases(kKadaneBiases,
+                                                     kKadaneBiases + nbiases);
     thrust::device_vector<FoldT> folds(b.n_leaves * b.stride);
     thrust::device_vector<float> scores(b.n_leaves);
     thrust::device_vector<uint8_t> filt(b.n_leaves);
@@ -175,9 +183,17 @@ template <typename FoldT> Reference<FoldT> reference(const Batch<FoldT>& b) {
         thrust::device_vector<float> real(b.n_leaves * 2 * b.nbins);
         loki::math::irfft_batch_cuda(as_span(work), as_span(real),
                                      b.n_leaves * 2, b.nbins, nullptr, 0);
-        (void)loki::detection::score_and_filter_max_cuda_d(
-            as_span(real), as_span(b.widths), as_span(scores), as_span(b.valid),
-            as_span(filt), 0.0F, b.n_leaves, b.nbins, scratch, nullptr, 1.0F);
+        if (nbiases != 0) {
+            (void)loki::detection::score_and_filter_max_cuda_kadane_d(
+                as_span(real), as_span(kadane_biases), as_span(scores),
+                as_span(b.valid), as_span(filt), 0.0F, b.n_leaves, b.nbins,
+                scratch, nullptr);
+        } else {
+            (void)loki::detection::score_and_filter_max_cuda_d(
+                as_span(real), as_span(b.widths), as_span(scores),
+                as_span(b.valid), as_span(filt), 0.0F, b.n_leaves, b.nbins,
+                scratch, nullptr, 1.0F);
+        }
     } else {
         loki::core::shift_add_linear_batch_cuda(
             thrust::raw_pointer_cast(b.tree.data()),
@@ -188,10 +204,17 @@ template <typename FoldT> Reference<FoldT> reference(const Batch<FoldT>& b) {
             thrust::raw_pointer_cast(b.shift.data()),
             thrust::raw_pointer_cast(folds.data()), b.nbins, b.n_leaves,
             b.physical_start, b.capacity, nullptr);
-        (void)loki::detection::score_and_filter_max_cuda_d(
-            as_span(folds), as_span(b.widths), as_span(scores),
-            as_span(b.valid), as_span(filt), 0.0F, b.n_leaves, b.nbins, scratch,
-            nullptr);
+        if (nbiases != 0) {
+            (void)loki::detection::score_and_filter_max_cuda_kadane_d(
+                as_span(folds), as_span(kadane_biases), as_span(scores),
+                as_span(b.valid), as_span(filt), 0.0F, b.n_leaves, b.nbins,
+                scratch, nullptr);
+        } else {
+            (void)loki::detection::score_and_filter_max_cuda_d(
+                as_span(folds), as_span(b.widths), as_span(scores),
+                as_span(b.valid), as_span(filt), 0.0F, b.n_leaves, b.nbins,
+                scratch, nullptr);
+        }
     }
     return {to_host(folds), to_host(scores)};
 }
@@ -211,6 +234,7 @@ template <typename FoldT>
 Fused<FoldT> run_fused(const Batch<FoldT>& b,
                        float threshold,
                        bool direct,
+                       SizeType nbiases,
                        std::vector<double>* tree_leaves_out = nullptr,
                        std::vector<float>* tree_scores_out  = nullptr,
                        SizeType write_head                  = 0,
@@ -219,7 +243,9 @@ Fused<FoldT> run_fused(const Batch<FoldT>& b,
     thrust::device_vector<float> scores(b.n_leaves);
     thrust::device_vector<uint8_t> mask(b.n_leaves);
     const SizeType words = 3 + loki::core::ep_shift_add_score_tile_words<FoldT>(
-                                   b.nbins, b.n_leaves);
+                                   b.nbins, b.n_leaves, nbiases != 0);
+    const thrust::device_vector<float> kadane_biases(kKadaneBiases,
+                                                     kKadaneBiases + nbiases);
     thrust::device_vector<unsigned long long> state(words, 0ULL);
     thrust::device_vector<ComplexTypeCUDA> bluestein;
     if (Batch<FoldT>::kComplex &&
@@ -254,6 +280,10 @@ Fused<FoldT> run_fused(const Batch<FoldT>& b,
                                   ? nullptr
                                   : thrust::raw_pointer_cast(bluestein.data()),
     };
+    if (nbiases != 0) {
+        args.kadane_biases = thrust::raw_pointer_cast(kadane_biases.data());
+        args.nbiases       = static_cast<uint32_t>(nbiases);
+    }
     if (direct) {
         // The write region wraps at the tree's capacity, as the reads do.
         REQUIRE(dst_capacity == b.capacity);
@@ -293,12 +323,14 @@ template <typename FoldT>
 void check_batch(SizeType nbins,
                  SizeType n_leaves,
                  std::uint32_t seed,
-                 SizeType nwidths = 12) {
+                 SizeType nwidths = 12,
+                 SizeType nbiases = 0) {
     constexpr bool kComplex = Batch<FoldT>::kComplex;
     const Batch<FoldT> b(nbins, n_leaves, seed, nwidths);
     INFO("complex " << kComplex << " nbins " << nbins << " n_leaves "
-                    << n_leaves << " nwidths " << b.widths.size());
-    const auto ref   = reference(b);
+                    << n_leaves << " nwidths " << b.widths.size() << " nbiases "
+                    << nbiases);
+    const auto ref   = reference(b, nbiases);
     const auto valid = to_host(b.valid);
 
     // Threshold at the median of the valid reference scores.
@@ -311,8 +343,19 @@ void check_batch(SizeType nbins,
     std::ranges::nth_element(vs, vs.begin() + static_cast<long>(vs.size() / 2));
     const float threshold = vs[vs.size() / 2];
 
-    const auto staged = run_fused(b, threshold, false);
+    // The Kadane scorer's best width can change on a near-tie, so a few
+    // leaves may differ by more than the rounding. Its sequential scan sums
+    // in another order than the segment-parallel kernel (nbins > 256).
+    SizeType allowed_flips = 0;
+    float tol              = kComplex ? 1.0e-5F : 0.0F;
+    if (nbiases != 0) {
+        allowed_flips = (n_leaves / 50) + 1;
+        tol           = (kComplex || nbins > 256) ? 5.0e-4F : 0.0F;
+    }
+
+    const auto staged = run_fused(b, threshold, false, nbiases);
     float max_diff    = 0.0F;
+    SizeType flips    = 0;
     uint32_t npass    = 0;
     float mn          = std::numeric_limits<float>::max();
     float mx          = std::numeric_limits<float>::lowest();
@@ -327,23 +370,22 @@ void check_batch(SizeType nbins,
                                      ref.folds[(i * b.stride) + k]);
         }
         const float d = std::abs(staged.scores[i] - ref.scores[i]);
-        max_diff      = std::max(max_diff, d);
-        if (std::abs(ref.scores[i] - threshold) > 1.0e-4F) {
-            CHECK((staged.mask[i] != 0) == (ref.scores[i] >= threshold));
+        if (d > tol) {
+            ++flips;
+        } else {
+            max_diff = std::max(max_diff, d);
+            if (std::abs(ref.scores[i] - threshold) > 1.0e-4F) {
+                CHECK((staged.mask[i] != 0) == (ref.scores[i] >= threshold));
+            }
         }
         CHECK((staged.mask[i] != 0) == (staged.scores[i] >= threshold));
         npass += staged.mask[i];
         mn = std::min(mn, staged.scores[i]);
         mx = std::max(mx, staged.scores[i]);
     }
-    INFO("max |dS/N| " << max_diff);
+    INFO("max |dS/N| " << max_diff << ", leaves beyond it " << flips);
     CHECK(folds_exact);
-    if constexpr (kComplex) {
-        CHECK(max_diff < 1.0e-5F);
-    } else {
-        // No transform: the same arithmetic as the unfused chain.
-        CHECK(max_diff == 0.0F);
-    }
+    CHECK(flips <= allowed_flips);
     CHECK(staged.count == npass);
     CHECK(staged.min == mn);
     CHECK(staged.max == mx);
@@ -354,8 +396,8 @@ void check_batch(SizeType nbins,
     const SizeType write_head   = dst_capacity - 3;
     std::vector<double> dst_leaves;
     std::vector<float> dst_scores;
-    const auto dir = run_fused(b, threshold, true, &dst_leaves, &dst_scores,
-                               write_head, dst_capacity);
+    const auto dir = run_fused(b, threshold, true, nbiases, &dst_leaves,
+                               &dst_scores, write_head, dst_capacity);
     CHECK(dir.count == staged.count);
     CHECK(dir.mask == staged.mask);
     CHECK(std::memcmp(dir.scores.data(), staged.scores.data(),
@@ -472,5 +514,40 @@ TEST_CASE("Fused EP time-domain shift-add + score matches bit for bit",
     check_batch<float>(256, 300, 10, 45);
     check_batch<float>(64, 70001, 11, 40);
     check_batch<float>(1400, 60, 12, 70);
+}
+
+TEST_CASE("Fused EP Kadane (Fourier) matches the unfused chain",
+          "[ep][cuda][score][kadane]") {
+    if (!loki::is_available(Backend::kCUDA)) {
+        SKIP("CUDA backend not available");
+    }
+    const loki::cuda_utils::CudaSetDeviceGuard device_guard(0);
+    for (SizeType nbins = 2; nbins <= 1024; ++nbins) {
+        check_batch<ComplexTypeCUDA>(nbins, 53,
+                                     static_cast<std::uint32_t>(nbins), 12, 3);
+    }
+    for (SizeType nbins = 2; nbins <= 1024; nbins += 7) {
+        check_batch<ComplexTypeCUDA>(nbins, 53,
+                                     static_cast<std::uint32_t>(nbins), 12, 2);
+    }
+    // Many tiles, with the direct write.
+    check_batch<ComplexTypeCUDA>(64, 70001, 7, 12, 3);
+    check_batch<ComplexTypeCUDA>(50, 70001, 8, 12, 2);
+    check_batch<ComplexTypeCUDA>(256, 3000, 9, 12, 3);
+}
+
+TEST_CASE("Fused EP Kadane (time domain) matches the unfused chain",
+          "[ep][cuda][score][kadane]") {
+    if (!loki::is_available(Backend::kCUDA)) {
+        SKIP("CUDA backend not available");
+    }
+    const loki::cuda_utils::CudaSetDeviceGuard device_guard(0);
+    for (SizeType nbins = 2; nbins <= 1100; nbins += (nbins < 130 ? 1 : 37)) {
+        check_batch<float>(nbins, 53, static_cast<std::uint32_t>(nbins), 12, 3);
+        check_batch<float>(nbins, 53, static_cast<std::uint32_t>(nbins), 12, 2);
+    }
+    check_batch<float>(64, 70001, 7, 12, 3);
+    check_batch<float>(200, 20000, 8, 12, 2);
+    check_batch<float>(1400, 60, 12, 12, 3);
 }
 #endif // LOKI_ENABLE_CUDA

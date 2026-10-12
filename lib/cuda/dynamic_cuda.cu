@@ -126,11 +126,10 @@ BasePruneDPFunctsCUDA<FoldTypeCUDA>::BasePruneDPFunctsCUDA(
 
     // The fused steps and the irfft scratch, as the memory model decides
     // them (ep_memory.hpp).
-    const auto nbins  = m_cfg.get_nbins();
-    const bool kadane = m_cfg.get_use_boxcar_kadane();
+    const auto nbins = m_cfg.get_nbins();
     m_use_fused_score =
         algorithms::detail::ep_cuda_fused_batch<HostFoldType<FoldTypeCUDA>>(
-            nbins, kadane);
+            nbins);
     if constexpr (std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>) {
         m_use_fused_rows = algorithms::detail::ep_cuda_fused_rows(nbins);
         if ((m_use_fused_score || m_use_fused_rows) &&
@@ -140,7 +139,7 @@ BasePruneDPFunctsCUDA<FoldTypeCUDA>::BasePruneDPFunctsCUDA(
         }
     }
     if (algorithms::detail::ep_cuda_needs_irfft_scratch<
-            HostFoldType<FoldTypeCUDA>>(nbins, kadane)) {
+            HostFoldType<FoldTypeCUDA>>(nbins)) {
         if (m_external_fft != nullptr) {
             // The owner prepared the plans for every nbins of its sweep.
             error_check::check(m_external_fft->has_prepared(nbins),
@@ -355,7 +354,7 @@ SizeType BasePruneDPFunctsCUDA<FoldTypeCUDA>::shift_add_score(
             SizeType words = kStatsWords;
             if (direct != nullptr) {
                 words += ep_shift_add_score_tile_words<FoldTypeCUDA>(
-                    m_cfg.get_nbins(), n_leaves);
+                    m_cfg.get_nbins(), n_leaves, m_cfg.get_use_boxcar_kadane());
                 error_check::check_less_equal(
                     words, m_tile_state_d.size(),
                     "shift_add_score: batch larger than the tile states");
@@ -386,6 +385,12 @@ SizeType BasePruneDPFunctsCUDA<FoldTypeCUDA>::shift_add_score(
                                                    : thrust::raw_pointer_cast(
                                                          m_bluestein_d.data()),
             };
+            if (m_cfg.get_use_boxcar_kadane()) {
+                args.kadane_biases =
+                    thrust::raw_pointer_cast(m_boxcar_kadane_biases_d.data());
+                args.nbiases =
+                    static_cast<uint32_t>(m_boxcar_kadane_biases_d.size());
+            }
             if (direct != nullptr) {
                 args.leaves_batch = direct->leaves_batch.data();
                 args.leaves_stride =

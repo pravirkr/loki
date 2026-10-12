@@ -33,16 +33,20 @@ constexpr uint32_t align_up(uint32_t x, uint32_t a) {
 // kPairs profiles are transformed per round, so kProfiles is a multiple.
 // The rows are kept small (kMaxRowBytes) so that several blocks share an
 // SM: the transforms are latency bound.
-template <uint32_t N, bool kSerial, uint32_t kPairs> struct RowLayout {
+// Serial and Kadane (kKadane, the EP's Kadane scorer) keep one normalized row
+// per profile.
+template <uint32_t N, bool kSerial, uint32_t kPairs, bool kKadane = false>
+struct RowLayout {
     // Serial: one normalized row per profile. Warp: e and v rows. An odd
     // pitch keeps the rows written by one warp on distinct banks.
     static constexpr uint32_t kPitch          = N + 1;
-    static constexpr uint32_t kRowsPerProfile = kSerial ? 1 : 2;
+    static constexpr uint32_t kRowsPerProfile = (kSerial || kKadane) ? 1 : 2;
     static constexpr uint32_t kMaxRowBytes    = 12U * 1024U;
     static constexpr uint32_t kFit =
         kMaxRowBytes / (kRowsPerProfile * (N + 1) * 4U);
+    static constexpr uint32_t kMaxWant = kKadane ? 32U : 16U;
     static constexpr uint32_t kWant =
-        kSerial ? 32U : (kFit < 1U ? 1U : (kFit > 16U ? 16U : kFit));
+        kSerial ? 32U : (kFit < 1U ? 1U : (kFit > kMaxWant ? kMaxWant : kFit));
     static constexpr uint32_t kProfiles =
         kWant < kPairs ? kPairs : (kWant / kPairs) * kPairs;
     static constexpr uint32_t kRowBytes =

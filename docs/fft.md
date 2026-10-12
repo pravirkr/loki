@@ -154,7 +154,9 @@ time-domain folds. Their block bookkeeping is shared
    compare it with the threshold. Any number of widths is supported: the
    width constants live in dynamic shared memory, and the widths are scored
    in register groups of 32 after one prefix sum (the maximum is
-   order-free);
+   order-free; `kEPWidthGroup` = 8 registers per group, which was the fastest
+   of 4, 8, 16 and 32 at every nbins). With `use_boxcar_kadane` the Kadane scorer
+   (`kadane_device.cuh`) replaces the boxcar: see below;
 4. count the passing leaves and the min/max score of the valid ones
    (block atomics; the min/max use an order-preserving key, so they are
    exact).
@@ -164,6 +166,30 @@ budget, and loads the next round's harmonics into registers before the
 current round's transform. The time-domain kernel has 128 threads; it
 forms the e and v rows of 32 leaves (thread scorer) or of up to 16 leaves
 in 12 KiB (warp scorer) in shared memory.
+
+**Kadane scorer.** `ep_score_kadane_rows` (`ep_score_device.cuh`) runs
+`kadane_group_max_snr` (`kadane_device.cuh`), the scan of
+`score_and_filter_max_cuda_kadane_d`, on the block's rows:
+
+- both fused kernels keep one normalized row per leaf, `e * rsqrt(v)` as the
+  Kadane kernels compute it (Fourier: `(z.re / n) * rsqrt(z.im / n)` after
+  the on-chip inverse, the normalized C2R's arithmetic), so a block holds up
+  to 32 leaves in 12 KiB (`RowLayout`'s Kadane layout);
+- a warp scores `32 / nbiases` leaves at once, one lane per bias, each lane
+  running one sequential scan (maximum and minimum subarray, for the wrapped
+  candidate) and the biases combined by shuffles. `nbiases` is 2 or 3 and is
+  read from the device pointer `EPScoreArgs::kadane_biases`, so a future
+  table of biases per nbins is just another pointer;
+- the standalone kernels use the same device functions
+  (`kernel_kadane_warp_multiprofile`, and `kernel_kadane_segment_parallel`
+  for nbins above 256), and their outputs are unchanged bit for bit.
+
+The scan is not the cost of the fused kernel: skipping it entirely saves 16%
+of the kernel at nbins 64 and nothing measurable from nbins 256. The
+standalone kernels are at the DRAM bandwidth of the GPU for nbins from about
+100 (the 134 MB of 2^17 profiles of 128 bins takes 212 us), so the gain of
+the fused path is the removed round trip through the irfft scratch (2.4x on
+the 2^25 jerk benchmark).
 
 **Direct writes.** When even an all-passing batch fits the tree's free
 slots (`add_batch_scattered`'s fast path), the kernel also writes the
@@ -187,16 +213,19 @@ with no FFA term, mask or statistics.
 **When it applies** (`ep_cuda_fused_batch`, `ep_cuda_fused_rows`,
 `ep_memory.hpp`, shared by the functors and the memory model):
 
-- batches: the boxcar scorer, with Fourier nbins up to 1024 and time-domain
-  nbins up to 5119;
-- seeds and ascend: Fourier nbins up to 1024.
+- batches: the boxcar or the Kadane scorer, with Fourier nbins up to 1024
+  and time-domain nbins up to 5119;
+- seeds and ascend: Fourier nbins up to 1024 (always the boxcar).
 
 Only then do the prune functors skip the irfft scratch and the cuFFT plans
-(`ep_cuda_needs_irfft_scratch`). The Kadane scorer still uses the unfused
-chain for its batches.
+(`ep_cuda_needs_irfft_scratch`): they keep them only for Fourier nbins above
+1024.
 
 **Numerics.** The merged folds, the tree contents and the survivor order are
-as before. Time-domain scores are bit-identical. For Fourier folds only the
+as before. Time-domain boxcar scores are bit-identical, and so are the
+Kadane scores up to nbins 256. Above that, the unfused Kadane kernel merges
+10 segments of each profile, which sums in another order than the fused
+sequential scan: the S/N differs by up to 1e-4. For Fourier folds only the
 inverse FFT differs from cuFFT: the S/N moves by about 1e-6, so a leaf whose
 score is within that of the threshold can flip. On the 2^25 jerk benchmark
 the final survivors and the top candidates are unchanged, the final S/N
