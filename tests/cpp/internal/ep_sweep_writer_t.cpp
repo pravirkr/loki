@@ -78,7 +78,9 @@ TEST_CASE("EP sweep writer preserves the merged run layout", "[ep_writer]") {
                                 HighFive::File::ReadOnly);
     const HighFive::File merged((dir / "merged.h5").string(),
                                 HighFive::File::ReadOnly);
-    CHECK(direct.listAttributeNames() == merged.listAttributeNames());
+    // Root-group attributes: HDF5 1.10 cannot list them on a file handle.
+    CHECK(direct.getGroup("/").listAttributeNames() ==
+          merged.getGroup("/").listAttributeNames());
     for (loki::SizeType i = 0; i < 16; ++i) {
         const auto path = std::format("chunks/chunk_0000/runs/run_{:03d}", i);
         CHECK(direct.getGroup(path).listObjectNames() ==
