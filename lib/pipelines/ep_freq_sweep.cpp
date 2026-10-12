@@ -15,6 +15,7 @@
 
 #include "lib/common/dispatch.hpp"
 #include "lib/pipelines/ep_freq_sweep_engine.hpp"
+#include "lib/search/ep_support.hpp"
 
 namespace loki::pipelines {
 
@@ -31,6 +32,7 @@ std::unique_ptr<detail::EPFreqSweepEngine> make_ep_freq_sweep_engine(
     std::optional<SizeType> n_runs,
     const std::optional<std::vector<SizeType>>& ref_segs,
     Exec exec) {
+    search::detail::check_ep_supported(cfg, "EPFreqSweep");
     loki::detail::warn_ignored_nthreads(exec, "EPFreqSweep");
     if (exec.backend == Backend::kCPU) {
         return detail::make_ep_freq_sweep_cpu(

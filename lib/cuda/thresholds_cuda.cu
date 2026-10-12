@@ -566,8 +566,10 @@ public:
         m_box_by_len_d = by_len;
 
         // Fold pools: one cell per (beam slot, prob bin), H0 + H1 rows each.
-        const SizeType cells     = max_beam * m_nprobs;
-        const SizeType pool_rows = cells * 2 * m_ntrials;
+        // Only run() needs them, so they are allocated there: evaluate() and
+        // a scheme that is never run hold no pools.
+        m_max_beam           = max_beam;
+        const SizeType cells = max_beam * m_nprobs;
         if (cells * 2 > std::numeric_limits<uint32_t>::max() ||
             m_ntrials > std::numeric_limits<uint32_t>::max() / 2 ||
             m_nthresholds * m_nprobs > std::numeric_limits<uint32_t>::max()) {
@@ -575,36 +577,7 @@ public:
                 "ThresholdsCuda: problem size exceeds 32-bit "
                 "cell indexing");
         }
-        for (auto& v : m_folds_d) {
-            v.resize(pool_rows * m_nbins_padded);
-        }
-        for (auto& v : m_ntrials_d) {
-            v.resize(cells * 2);
-        }
-        const bool parent_map = m_mode != DynamicThresholdMode::kLegacy;
-        if (parent_map) {
-            for (auto& v : m_src_d) {
-                v.resize(cells);
-            }
-            for (auto& v : m_idx_d) {
-                v.resize(pool_rows);
-            }
-            m_scores_d.resize(pool_rows);
-        }
-        const auto grid_size = m_nstages * m_nthresholds * m_nprobs;
-        m_states.resize(grid_size, State{});
-        m_states_d.resize(grid_size);
-        m_cell_keys_d.resize(m_nthresholds * m_nprobs);
-
-        const SizeType bytes =
-            (2 * pool_rows * m_nbins_padded * sizeof(float)) +
-            (parent_map ? pool_rows * (2 * sizeof(uint32_t) + sizeof(float))
-                        : 0) +
-            (grid_size * sizeof(State));
-        spdlog::info("ThresholdsCuda ({} mode): {} max beam "
-                     "thresholds x {} prob bins, {:.2f} GiB of device memory",
-                     mode_to_string(m_mode), max_beam, m_nprobs,
-                     utils::to_gib(bytes));
+        m_states.resize(m_nstages * m_nthresholds * m_nprobs, State{});
     }
     ~ThresholdsCudaCore()                                    = default;
     ThresholdsCudaCore(const ThresholdsCudaCore&)            = delete;
@@ -620,6 +593,7 @@ public:
         spdlog::info("Running dynamic threshold scheme on CUDA ({} mode)",
                      mode_to_string(m_mode));
         cuda_utils::CudaSetDeviceGuard device_guard(m_device_id);
+        allocate_pools();
         const CudaStream stream;
         constexpr float kVarInit = 1.0F;
         constexpr float kVarAdd  = 1.0F;
@@ -647,6 +621,16 @@ public:
                                     "cudaStreamSynchronize failed");
         m_thres_neigh = thres_neigh;
         warn_empty_stages();
+    }
+
+    /// Device bytes of the pools and state grid that run() allocates.
+    SizeType run_memory_bytes() const {
+        const SizeType pool_rows = m_max_beam * m_nprobs * 2 * m_ntrials;
+        const bool parent_map    = m_mode != DynamicThresholdMode::kLegacy;
+        return (2 * pool_rows * m_nbins_padded * sizeof(float)) +
+               (parent_map ? pool_rows * (2 * sizeof(uint32_t) + sizeof(float))
+                           : 0) +
+               (m_states.size() * sizeof(State));
     }
 
     std::vector<State> get_states() const { return m_states; }
@@ -1302,6 +1286,37 @@ private:
     std::array<thrust::device_vector<uint32_t>, 2> m_src_d;
     std::array<thrust::device_vector<uint32_t>, 2> m_idx_d;
     thrust::device_vector<float> m_scores_d;
+    SizeType m_max_beam{};
+
+    // Allocated on the first run() and kept for later runs.
+    void allocate_pools() {
+        if (!m_states_d.empty()) {
+            return;
+        }
+        const SizeType cells     = m_max_beam * m_nprobs;
+        const SizeType pool_rows = cells * 2 * m_ntrials;
+        for (auto& v : m_folds_d) {
+            v.resize(pool_rows * m_nbins_padded);
+        }
+        for (auto& v : m_ntrials_d) {
+            v.resize(cells * 2);
+        }
+        if (m_mode != DynamicThresholdMode::kLegacy) {
+            for (auto& v : m_src_d) {
+                v.resize(cells);
+            }
+            for (auto& v : m_idx_d) {
+                v.resize(pool_rows);
+            }
+            m_scores_d.resize(pool_rows);
+        }
+        m_cell_keys_d.resize(m_nthresholds * m_nprobs);
+        m_states_d.resize(m_states.size());
+        spdlog::info("ThresholdsCuda ({} mode): {} max beam "
+                     "thresholds x {} prob bins, {:.2f} GiB of device memory",
+                     mode_to_string(m_mode), m_max_beam, m_nprobs,
+                     utils::to_gib(run_memory_bytes()));
+    }
 
     // Bit-level check: host code is built with -ffast-math, under which
     // std::isfinite (and NaN comparisons) may be folded away.
@@ -1432,6 +1447,9 @@ public:
     }
     std::vector<State> get_states() const override {
         return m_impl.get_states();
+    }
+    SizeType run_memory_bytes() const override {
+        return m_impl.run_memory_bytes();
     }
     void run(SizeType thres_neigh) override { m_impl.run(thres_neigh); }
     std::vector<State>

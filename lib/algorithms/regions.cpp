@@ -248,12 +248,13 @@ float FFARegionStats::get_extra_memory_usage() const noexcept {
            static_cast<float>(1ULL << 30U);
 }
 float FFARegionStats::get_device_extra_memory_usage() const noexcept {
-    // ts_e_d + ts_v_d + per-chunk scores_d and passing_indices_d scratch
-    // (widths_d is negligible). The candidate accumulator lives on the host.
-    return static_cast<float>(
-               (((2 * m_n_samps) + get_max_scores_scratch_size()) *
-                sizeof(float)) +
-               (get_max_scores_scratch_size() * sizeof(uint32_t))) /
+    // ts_e_d + ts_v_d + two slots of per-chunk scores and passing indices
+    // (the GPU fills one while the host copies the other; widths_d is
+    // negligible). The candidate accumulator lives on the host.
+    constexpr SizeType kSlots = 2;
+    return static_cast<float>((2 * m_n_samps * sizeof(float)) +
+                              (kSlots * get_max_scores_scratch_size() *
+                               (sizeof(float) + sizeof(uint32_t)))) /
            static_cast<float>(1ULL << 30U);
 }
 float FFARegionStats::get_brutefold_memory_usage() const noexcept {
@@ -485,13 +486,23 @@ private:
                                                      actual_end);
             const plans::FFAPlan<FoldType> plan(cfg);
 
-            const SizeType buf   = plan.get_buffer_size();
-            const SizeType coord = plan.get_coord_size();
+            // The GPU sweep merges and scores the last level on chip, so its
+            // ping-pong buffers hold every level but the last, and its score
+            // scratch is a bounded slot list (detail::kGpuScoreScratchCap).
+            const SizeType buf = m_use_gpu ? detail::gpu_sweep_buffer_size(plan)
+                                           : plan.get_buffer_size();
+            const SizeType coord = m_use_gpu
+                                       ? detail::gpu_sweep_coord_size(plan)
+                                       : plan.get_coord_size();
             const SizeType nc    = plan.get_ncoords().back();
             const SizeType lv    = plan.get_n_levels();
             // Width count follows nbins, which is fixed within a region but
             // differs between regions, so it must come from the chunk config.
-            const SizeType scratch = nc * cfg.get_n_scoring_widths();
+            const SizeType n_scores = nc * cfg.get_n_scoring_widths();
+            const SizeType scratch =
+                (m_use_gpu && detail::gpu_fused_score_applies(plan))
+                    ? std::min(n_scores, detail::kGpuScoreScratchCap)
+                    : n_scores;
             const SizeType seg0    = plan.get_segment_lens().front();
             const SizeType nfreqs0 = plan.get_param_counts().front().back();
             const SizeType bf_bytes =
@@ -546,6 +557,7 @@ private:
                     .n_scoring_widths = cfg.get_n_scoring_widths(),
                     .nfreqs           = nfreqs0,
                     .segment_len      = seg0,
+                    .fused_score      = detail::gpu_fused_score_applies(plan),
                 };
                 if (index_limits::chunk_exceeds_cuda_index_limits(usage)) {
                     return false;

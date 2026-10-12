@@ -84,7 +84,6 @@ std::vector<RegionDesign> make_designs(const PulsarSearchConfig& cfg,
             .eta              = r.eta,
             .threshold_scheme = {1.0F},
             .bp_float         = {1.0F},
-            .peak_complexity  = 1.0F,
             .safe_complexity =
                 designs.empty() ? static_cast<float>(first_max_sugg / ncoords)
                                 : 1.0F,
@@ -134,7 +133,6 @@ RegionDesign make_design(const PulsarSearchConfig& cfg,
         .eta              = 1.0,
         .threshold_scheme = {1.0F},
         .bp_float         = {1.0F},
-        .peak_complexity  = 1.0F,
         .safe_complexity  = safe_complexity,
         .nsegments        = plan.get_nsegments().back(),
     };
@@ -144,7 +142,7 @@ RegionDesign make_design(const PulsarSearchConfig& cfg,
 /// 128) whose wide band sets a large shared FFA size only at the end.
 std::vector<RegionDesign>
 make_late_shared_designs(const PulsarSearchConfig& cfg) {
-    return {make_design(cfg, 100.0, 110.0, 32, 1.0e5F),
+    return {make_design(cfg, 100.0, 110.0, 32, 3.0e4F),
             make_design(cfg, 40.0, 120.0, 128, 1.0e-3F)};
 }
 
@@ -239,7 +237,7 @@ TEST_CASE("EP chunking charges the input series", "[ep_chunking]") {
 
 TEST_CASE("EP chunking charges only the workers that run", "[ep_chunking]") {
     // n_runs < nthreads: fewer workspaces are allocated, so chunks widen.
-    constexpr double kLimitGb = 0.2;
+    constexpr double kLimitGb = 0.3;
     const auto cfg            = make_cfg(70.0, 145.0, /*nthreads=*/4);
     const auto designs        = make_designs(cfg, /*first_max_sugg=*/2.0e6);
     const auto ctx_all        = make_ctx(cfg);
@@ -285,10 +283,12 @@ TEST_CASE("EP chunking replans when the shared FFA size grows late",
           "[ep_chunking]") {
     // Pass 1 fills the limit with the heavy run next to a small shared size;
     // the light run then enlarges it, so the heavy run must be replanned.
-    constexpr double kLimitGb = 0.16;
+    constexpr double kLimitGb = 0.12;
     const auto cfg            = make_cfg(30.0, 150.0, /*nthreads=*/2);
     const auto designs        = make_late_shared_designs(cfg);
-    const auto ctx            = make_ctx(cfg);
+    auto ctx                  = make_ctx(cfg);
+    ctx.batch_size =
+        128; // Keep scratch below the synthetic shared-buffer budgets.
 
     const auto plan =
         plan_chunks<float>(cfg, "taylor", designs, 0.0, kLimitGb, ctx);
@@ -303,10 +303,12 @@ TEST_CASE("EP chunking searches a smaller shared size when the replan is "
     // The heavy run's minimum-width chunk does not fit next to the light
     // run's full shared size: the light run must be split further so the
     // shared size shrinks.
-    constexpr double kLimitGb = 0.12;
+    constexpr double kLimitGb = 0.08;
     const auto cfg            = make_cfg(30.0, 150.0, /*nthreads=*/2);
     const auto designs        = make_late_shared_designs(cfg);
-    const auto ctx            = make_ctx(cfg);
+    auto ctx                  = make_ctx(cfg);
+    ctx.batch_size =
+        128; // Keep scratch below the synthetic shared-buffer budgets.
 
     const auto plan =
         plan_chunks<float>(cfg, "taylor", designs, 0.0, kLimitGb, ctx);
@@ -338,7 +340,7 @@ TEST_CASE("EP chunking CUDA policy replans when the shared size grows late",
           "[ep_chunking]") {
     // Same designs as the CPU replan test, with one worker. The late shared
     // size no longer fits, so the heavy region is planned again next to it.
-    constexpr double kLimitGb = 0.5;
+    constexpr double kLimitGb = 0.12;
     const auto cfg            = make_cfg(30.0, 150.0, /*nthreads=*/4);
     const auto designs        = make_late_shared_designs(cfg);
     const auto ctx            = make_cuda_ctx(cfg);
@@ -412,4 +414,69 @@ TEST_CASE("EP chunking with the CUDA policy charges the FFA transient scratch",
         CHECK(c.ffa_transient_bytes == 0);
     }
     CHECK(plan.peak_memory_gb == ep_sweep_peak_gb<float>(plan.chunk_cfgs, ctx));
+}
+
+TEST_CASE("EP capacity rounds live ring population and a branched batch",
+          "[ep_chunking]") {
+    using loki::algorithms::detail::ep_tree_capacity;
+    CHECK(ep_tree_capacity(4096, 64, 16, EPMemoryKind::kCuda) == 8192);
+    CHECK(ep_tree_capacity(1U << 22U, 64, 16, EPMemoryKind::kCuda) ==
+          (1U << 23U));
+    CHECK_THROWS_AS(ep_tree_capacity(1U << 30U, 64, 16, EPMemoryKind::kCuda),
+                    std::overflow_error);
+}
+
+TEST_CASE("EP chunking preserves forecast capacity above four million",
+          "[ep_chunking]") {
+    const auto cfg     = make_cfg(140.0, 145.0, 1);
+    const auto designs = make_designs(cfg, 5.0e6);
+    const auto ctx     = make_ctx(cfg);
+    const auto plan = plan_chunks<float>(cfg, "taylor", designs, 0.0, 8.0, ctx);
+    REQUIRE(plan.chunk_cfgs.size() == 1);
+    const auto& chunk = plan.chunk_cfgs.front();
+    CHECK(chunk.predicted_peak >= 5'000'000);
+    CHECK(chunk.predicted_live >= chunk.predicted_peak + chunk.ncoords);
+    CHECK(chunk.max_sugg > (1U << 22U));
+    CHECK(std::has_single_bit(chunk.max_sugg));
+    check_plan_fits(plan, ctx, 8.0);
+}
+
+TEST_CASE("EP forecasts account for adjacent populations and selected runs",
+          "[ep_chunking]") {
+    const auto cfg       = make_cfg(140.0, 145.0, 1);
+    auto design          = make_design(cfg, 140.0, 145.0, 32, 1.0F);
+    design.ref_segs      = std::vector<SizeType>{0, 7};
+    SizeType evaluations = 0;
+    design.evaluate      = [&evaluations](std::span<const float> bp) {
+        ++evaluations;
+        REQUIRE(bp.size() == 7);
+        return std::vector<double>{3.0, 4.0, 2.0, 1.0, 0.0, 0.0, 0.0};
+    };
+    const auto plan = plan_chunks<float>(cfg, "taylor", std::span(&design, 1),
+                                         0.0, 8.0, make_ctx(cfg));
+    REQUIRE(plan.chunk_cfgs.size() == 1);
+    const auto& chunk = plan.chunk_cfgs.front();
+    CHECK(evaluations == 2);
+    CHECK(chunk.predicted_peak == 4 * chunk.ncoords);
+    CHECK(chunk.predicted_live == 7 * chunk.ncoords);
+    CHECK(chunk.max_sugg >
+          chunk.predicted_live + chunk.batch_size * chunk.branch_max);
+}
+
+TEST_CASE("CUDA EP lowers the batch only when a minimum chunk cannot fit",
+          "[ep_chunking]") {
+    const auto cfg     = make_cfg(140.0, 145.0, 1);
+    const auto designs = make_designs(cfg, 1000.0);
+    auto ctx           = make_cuda_ctx(cfg);
+    ctx.batch_size     = 1U << 16U;
+    const auto ample =
+        plan_chunks<float>(cfg, "taylor", designs, 0.0, 8.0, ctx);
+    REQUIRE(!ample.chunk_cfgs.empty());
+    CHECK(ample.chunk_cfgs.front().batch_size == ctx.batch_size);
+    const auto tight =
+        plan_chunks<float>(cfg, "taylor", designs, 0.0, 0.06, ctx);
+    REQUIRE(!tight.chunk_cfgs.empty());
+    CHECK(tight.chunk_cfgs.front().batch_size < ctx.batch_size);
+    CHECK(std::has_single_bit(tight.chunk_cfgs.front().batch_size));
+    check_plan_fits(tight, ctx, 0.06);
 }

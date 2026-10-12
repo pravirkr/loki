@@ -31,7 +31,9 @@
  */
 
 #include <algorithm>
+#include <bit>
 #include <cstdint>
+#include <limits>
 #include <span>
 #include <stdexcept>
 #include <type_traits>
@@ -39,6 +41,7 @@
 
 #include "loki/algorithms/ep_regions.hpp"
 #include "loki/algorithms/prune_rfi.hpp"
+#include "loki/algorithms/regions.hpp"
 #include "loki/common/coord.hpp"
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
@@ -56,17 +59,14 @@ constexpr SizeType kEPBatchSize = 1024U;
 /// minute per reference segment instead of seconds.
 constexpr SizeType kEPBatchSizeCuda = SizeType{1} << 16U;
 
-/// Largest world-tree capacity (candidates) a chunk is planned with. The
-/// world tree trims to the top-k when it is full (lib/utils/world_tree.hpp), so
-/// the capacity bounds the memory and only a run that overflows changes. The
-/// unbounded value, ncoords times the peak complexity of the threshold scheme,
-/// reaches ~1e9 candidates for long series.
-constexpr SizeType kEPMaxWorldTreeCapacity = SizeType{1} << 22U;
-
 /// Version of this model. Bump it with every change to the formulas: plan
 /// caches store it and are rejected when it differs.
 ///  3: CUDA policy (EPMemoryKind), transient FFA scratch of the CUDA model.
-constexpr std::uint32_t kEPMemoryModelVersion = 3U;
+///  4: the Kadane scorer is fused too, so it no longer keeps the irfft scratch.
+///  5: shared FFA/tree arena, branch lookahead and score-only overflow.
+///  6: bounded canonical shift-add scratch for fused overflow recomputation.
+///  7: remove branch lookahead after the SNR-10 timing regression.
+constexpr std::uint32_t kEPMemoryModelVersion = 8U;
 
 /// Worst-case size of the per-run harvest store (see PruneRFIConfig).
 /// Normalised: all fields are zero/false when harvesting is disabled.
@@ -110,7 +110,28 @@ struct EPMemoryContext {
     int device{0};
     /// CUDA policy: sizes the CUB temporary storage. Required for kCuda.
     CubScratchBytesFn cub_scratch_bytes{nullptr};
+    /// Sweep-only: FFA internal folds and tree folds share one allocation.
+    bool share_ffa_fold{false};
+    SizeType shared_fold_bytes{0};
 };
+
+/// More FFT sizes retain more vendor plan/context storage outside the model.
+inline double ep_memory_reserve_gb(const search::PulsarSearchConfig& cfg,
+                                   EPMemoryKind kind) {
+    if (kind == EPMemoryKind::kCuda) {
+        const auto regions = generate_ffa_regions(
+            1.0 / cfg.get_f_max(), 1.0 / cfg.get_f_min(), cfg.get_tsamp(),
+            cfg.get_nbins(), cfg.get_eta(), cfg.get_octave_scale(),
+            cfg.get_nbins_max());
+        if (!regions.empty() &&
+            std::ranges::any_of(regions, [&](const auto& region) {
+                return region.nbins != regions.front().nbins;
+            })) {
+            return 1.5;
+        }
+    }
+    return 0.5;
+}
 
 /// Size of one element of the folds stored for @p FoldType.
 template <SupportedFoldType FoldType> constexpr SizeType fold_bytes() noexcept {
@@ -217,21 +238,44 @@ constexpr SizeType ep_cuda_effective_max_sugg(SizeType batch_size,
     return std::max(max_sugg, (batch_size * branch_max) + 1);
 }
 
-/// Bytes of the irfft scratch of the prune functors (PruneDPFunctsCUDA). With
-/// float folds one complex and one real element stand in for it.
-template <SupportedFoldType FoldType>
-SizeType ep_cuda_irfft_scratch_bytes(const EPMemoryContext& ctx,
-                                     SizeType nbins,
-                                     SizeType ncoords_ffa,
-                                     SizeType branch_max) {
-    if constexpr (std::is_same_v<FoldType, ComplexType>) {
-        const SizeType max_nfft =
-            std::max(2 * ctx.batch_size * branch_max, 2 * ncoords_ffa);
-        return (max_nfft * ((nbins / 2) + 1) * sizeof(ComplexType)) +
-               (max_nfft * nbins * sizeof(float));
-    } else {
-        return sizeof(ComplexType) + sizeof(float);
+/// Round up without overflowing SizeType or CUDA's 32-bit tree indices.
+/// Largest world-tree capacity the backend can index.
+inline constexpr SizeType ep_tree_index_limit(EPMemoryKind kind) noexcept {
+    return kind == EPMemoryKind::kCuda
+               ? (SizeType{1} << 30U)
+               : (SizeType{1} << (std::numeric_limits<SizeType>::digits - 2));
+}
+
+inline SizeType ep_tree_capacity(SizeType live,
+                                 SizeType batch,
+                                 SizeType branch_max,
+                                 EPMemoryKind kind) {
+    const SizeType max_capacity = ep_tree_index_limit(kind);
+    if (branch_max == 0 || batch > max_capacity / branch_max ||
+        live >= max_capacity - batch * branch_max) {
+        throw std::overflow_error(
+            "EPRegionPlanner: forecast tree exceeds index capacity");
     }
+    return std::bit_ceil(
+        std::max(SizeType{1024}, live + batch * branch_max + 1));
+}
+
+/// Largest nbins of the fused CUDA pruning kernels (ep_score_cuda.cuh):
+/// the Fourier on-chip transforms, and time-domain rows that fit on chip.
+inline constexpr SizeType kEPCudaFusedMaxNbinsFourier = 1024;
+inline constexpr SizeType kEPCudaFusedMaxNbinsTime    = 1024;
+
+/// Whether the CUDA prune functors score the seeds and the ascend (Fourier
+/// folds; always the boxcar) on chip.
+constexpr bool ep_cuda_fused_rows(SizeType nbins) noexcept {
+    return nbins >= 2 && nbins <= kEPCudaFusedMaxNbinsFourier;
+}
+
+/// Fused scorer statistics and ordered-compaction tile states, the only
+/// per-functor scratch: CUDA EP scores and transforms on chip.
+inline SizeType ep_cuda_scorer_scratch_bytes(const EPMemoryContext& ctx,
+                                             SizeType branch_max) {
+    return (2 + ctx.batch_size * branch_max + 1) * sizeof(std::uint64_t);
 }
 
 /// Bytes of one EPWorkspaceCUDA, sized as EPFreqSweep builds it for one chunk
@@ -272,9 +316,9 @@ SizeType ep_cuda_ep_workspace_bytes(const EPMemoryContext& ctx,
         std::max(max_batch_size, nsegments * batch);
     const SizeType prune_bytes =
         (max_batch_size * leaves_stride * sizeof(double)) +
-        (max_batch_size * 2 * nbins_arg * fold_bytes<FoldType>()) +
+        (batch * 2 * nbins_arg * fold_bytes<FoldType>()) +
         (max_batch_size * sizeof(float)) +
-        (max_batch_size * sizeof(std::uint32_t)) +
+        (max_batch_size * 2 * sizeof(std::uint32_t)) +
         (max_branched_param_idx * sizeof(std::uint32_t)) +
         (max_branched_param_idx * sizeof(float)) +
         (max_batch_size * 2 * sizeof(uint8_t));
@@ -310,10 +354,18 @@ SizeType ep_cuda_workspace_bytes(const EPMemoryContext& ctx,
                                  SizeType ncoords_ffa,
                                  SizeType max_sugg,
                                  SizeType branch_max) {
+    const auto capacity =
+        ep_cuda_effective_max_sugg(ctx.batch_size, branch_max, max_sugg);
+    const auto tree_fold_bytes =
+        capacity * 2 *
+        (std::is_same_v<FoldType, ComplexType> ? nbins / 2 + 1 : nbins) *
+        fold_bytes<FoldType>();
+    const auto overlap = ctx.share_ffa_fold
+                             ? std::min(ctx.shared_fold_bytes, tree_fold_bytes)
+                             : 0;
     return ep_cuda_ep_workspace_bytes<FoldType>(
-               ctx, nbins, nsegments, ncoords_ffa, max_sugg, branch_max) +
-           ep_cuda_irfft_scratch_bytes<FoldType>(ctx, nbins, ncoords_ffa,
-                                                 branch_max);
+               ctx, nbins, nsegments, ncoords_ffa, max_sugg, branch_max) -
+           overlap + ep_cuda_scorer_scratch_bytes(ctx, branch_max);
 }
 
 /// Bytes of the FFA workspace (internal fold buffer and device coordinates)
@@ -423,6 +475,7 @@ struct EPChunkGroup {
     SizeType begin{0}; ///< First chunk index.
     SizeType end{0};   ///< One past the last chunk index.
     SizeType nbins{0};
+    SizeType batch_size{0};
     SizeType max_sugg{0};
     SizeType branch_max{0};
     SizeType ncoords{0};
@@ -434,8 +487,12 @@ inline std::vector<EPChunkGroup>
 ep_chunk_groups(std::span<const EPChunkConfig> chunks) {
     std::vector<EPChunkGroup> groups;
     for (SizeType i = 0; i < chunks.size();) {
-        EPChunkGroup g{.begin = i, .nbins = chunks[i].cfg.get_nbins()};
-        for (; i < chunks.size() && chunks[i].cfg.get_nbins() == g.nbins; ++i) {
+        EPChunkGroup g{.begin      = i,
+                       .nbins      = chunks[i].cfg.get_nbins(),
+                       .batch_size = chunks[i].batch_size};
+        for (; i < chunks.size() && chunks[i].cfg.get_nbins() == g.nbins &&
+               chunks[i].batch_size == g.batch_size;
+             ++i) {
             g.max_sugg   = std::max(g.max_sugg, chunks[i].max_sugg);
             g.branch_max = std::max(g.branch_max, chunks[i].branch_max);
             g.ncoords    = std::max(g.ncoords, chunks[i].ncoords);
@@ -451,7 +508,11 @@ ep_chunk_groups(std::span<const EPChunkConfig> chunks) {
 template <SupportedFoldType FoldType>
 SizeType ep_group_thread_bytes(const EPMemoryContext& ctx,
                                const EPChunkGroup& g) {
-    return ep_thread_bytes<FoldType>(ctx, g.nbins, g.nsegments, g.ncoords,
+    auto memory = ctx;
+    if (g.batch_size != 0) {
+        memory.batch_size = g.batch_size;
+    }
+    return ep_thread_bytes<FoldType>(memory, g.nbins, g.nsegments, g.ncoords,
                                      g.max_sugg, g.branch_max);
 }
 
@@ -472,10 +533,12 @@ double ep_sweep_peak_gb(std::span<const EPChunkConfig> chunks,
         coord_size  = std::max(coord_size, c.coord_size);
         transient   = std::max(transient, c.ffa_transient_bytes);
     }
-    SizeType peak_thread = 0;
+    auto memory              = ctx;
+    memory.shared_fold_bytes = buffer_size * fold_bytes<FoldType>();
+    SizeType peak_thread     = 0;
     for (const auto& g : ep_chunk_groups(chunks)) {
         peak_thread =
-            std::max(peak_thread, ep_group_thread_bytes<FoldType>(ctx, g));
+            std::max(peak_thread, ep_group_thread_bytes<FoldType>(memory, g));
     }
     return ep_total_gb(
         ctx.n_workers, peak_thread,

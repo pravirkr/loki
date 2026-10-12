@@ -140,6 +140,8 @@ TEST_CASE("EPTomlConfig takes the runs from the file or the command line",
                                 "f_min = 140.0\n"
                                 "f_max = 142.0\n"
                                 "nbins = 32\n"
+                                "acc_min = -10.0\n"
+                                "acc_max = 10.0\n"
                                 "[performance]\n"
                                 "bseg_ffa = 8192\n";
     const auto cfg = loki::search::EPTomlConfig::from_string(no_runs);
@@ -214,10 +216,11 @@ TEST_CASE("EPTomlConfig reads the backend, device and plan cache",
                       std::invalid_argument);
 }
 
-TEST_CASE("The default EP document is valid", "[config][ep]") {
+TEST_CASE("The default EP template requires a physical acceleration range",
+          "[config][ep]") {
     const auto cfg = loki::search::EPTomlConfig::from_string(
         std::string(loki::search::EPTomlConfig::default_toml_string()));
-    REQUIRE_NOTHROW(cfg.to_ep_search_config());
+    REQUIRE_THROWS_AS(cfg.to_ep_search_config(), std::invalid_argument);
     REQUIRE(cfg.n_runs.value() == 16);
 }
 
@@ -227,7 +230,72 @@ TEST_CASE("EPTomlConfig::write_default writes a document that loads",
         std::filesystem::temp_directory_path() / "loki_ep_config_t.toml";
     loki::search::EPTomlConfig::write_default(path);
     const auto cfg = loki::search::EPTomlConfig::load(path);
-    REQUIRE_NOTHROW(cfg.to_ep_search_config());
+    REQUIRE_THROWS_AS(cfg.to_ep_search_config(), std::invalid_argument);
     std::error_code ec;
     std::filesystem::remove(path, ec);
+}
+
+TEST_CASE("EP threshold simulation has an independent target SNR",
+          "[config][ep]") {
+    const auto defaults = loki::search::EPTomlConfig::from_string(make_doc())
+                              .to_ep_search_config();
+    REQUIRE(defaults.get_target_snr() == 8.5);
+    REQUIRE(defaults.get_snr_min() == 6.0);
+    const auto custom =
+        loki::search::EPTomlConfig::from_string(
+            make_doc("target_snr = 12\n", "nthreads = 2\nbseg_ffa = 8192\n",
+                     "snr_min = 6.0\n"))
+            .to_ep_search_config();
+    REQUIRE(custom.get_target_snr() == 12.0);
+    REQUIRE(custom.get_snr_min() == 6.0);
+    const auto updated = custom.get_updated_ep_config(64, 1.0, 140.0, 141.0);
+    REQUIRE(updated.get_target_snr() == 12.0);
+    REQUIRE(updated.get_snr_min() == 6.0);
+    const auto copied = custom;
+    REQUIRE(copied.get_target_snr() == 12.0);
+    for (const auto value : {"0.0", "-1.0", "nan", "inf"}) {
+        REQUIRE_THROWS_AS(loki::search::EPTomlConfig::from_string(make_doc(
+                              std::string("target_snr = ") + value + "\n")),
+                          std::invalid_argument);
+    }
+}
+
+TEST_CASE("EP target SNR defaults follow the search parameter count",
+          "[config][ep]") {
+    const std::vector<double> expected{8.5, 8.5, 9.2, 9.8, 10.0};
+    for (loki::SizeType nparams = 1; nparams <= expected.size(); ++nparams) {
+        std::vector<loki::ParamLimit> limits(nparams, {.min = 0.0, .max = 0.0});
+        limits.back() = {.min = 140.0, .max = 142.0};
+        const loki::search::FFASearchConfig ffa(65536, 64e-6, 32, 1.0, limits);
+        // Keep the default pruning-order metadata: dispatch uses nparams.
+        const loki::search::EPSearchConfig cfg(ffa);
+        REQUIRE(cfg.get_target_snr() == expected[nparams - 1]);
+        REQUIRE(
+            cfg.get_updated_ep_config(64, 1.0, 140.0, 141.0).get_target_snr() ==
+            expected[nparams - 1]);
+        const loki::search::EPSearchConfig override(ffa, 3, 1e-5, 10.0, 1.4,
+                                                    2.0, 5.0, false, 11.0);
+        REQUIRE(override.get_target_snr() == 11.0);
+        const std::vector<loki::ParamLimit> freq_limits{
+            {.min = 140.0, .max = 142.0}};
+        REQUIRE(
+            cfg.get_updated_ep_config(32, 1.0, freq_limits).get_target_snr() ==
+            8.5);
+        REQUIRE(override.get_updated_ep_config(32, 1.0, freq_limits)
+                    .get_target_snr() == 11.0);
+    }
+    REQUIRE_THROWS_AS(
+        loki::search::EPTomlConfig::from_string(make_doc("snr_final = 10\n")),
+        std::invalid_argument);
+    const auto toml = loki::search::EPTomlConfig::from_string(make_doc());
+    REQUIRE_FALSE(toml.target_snr.has_value());
+}
+
+TEST_CASE("EP config rejects bin limits above 1024", "[config][ep]") {
+    REQUIRE_THROWS_AS(loki::search::EPTomlConfig::from_string(
+                          make_doc("", "nbins_max = 1025\n")),
+                      std::invalid_argument);
+    const auto cfg = loki::search::EPTomlConfig::from_string(
+        make_doc("", "nbins_max = 1024\nbseg_ffa = 8192\n"));
+    REQUIRE_NOTHROW(cfg.to_ep_search_config());
 }

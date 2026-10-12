@@ -44,7 +44,9 @@ struct FFATomlConfig {
     double eta{1.0};
     double ducy_max{0.2};
     double wtsp{1.5};
-    double snr_min{5.0};
+    /// Minimum candidate SNR written to final FFA/EP HDF5; EP filtering is
+    /// reserved for future use.
+    double snr_min{6.0};
     bool use_fourier{true};
     bool use_boxcar_kadane{false};
 
@@ -112,7 +114,7 @@ public:
                     SizeType nbins_min_lossy_bf        = 64,
                     std::optional<SizeType> bseg_brute = std::nullopt,
                     std::optional<SizeType> bseg_ffa   = std::nullopt,
-                    double snr_min                     = 5.0,
+                    double snr_min                     = 6.0,
                     SizeType max_passing_candidates    = 1U << 22U, // 4M
                     bool use_boxcar_kadane             = false);
 
@@ -140,6 +142,8 @@ public:
     SizeType get_nbins_min_lossy_bf() const noexcept;
     SizeType get_bseg_brute() const noexcept;
     SizeType get_bseg_ffa() const noexcept;
+    /// Minimum candidate SNR written to final FFA/EP HDF5 (default 6).
+    /// Currently applied by FFA; EP output filtering is reserved for later.
     double get_snr_min() const noexcept;
     SizeType get_max_passing_candidates() const noexcept;
     bool get_use_boxcar_kadane() const noexcept;
@@ -200,7 +204,9 @@ protected:
  * @brief Configuration for Extreme Pruning (EP) searches.
  *
  * Superset of FFASearchConfig, adding EP-specific pruning, orbit, and threshold
- * configuration.
+ * configuration. It also configures FFA searches, so it accepts any FFA
+ * search space; the EP entry points reject frequency-only searches and
+ * nbins_max > 1024 before they allocate storage.
  */
 class EPSearchConfig : public FFASearchConfig {
 public:
@@ -220,7 +226,7 @@ public:
                    SizeType nbins_min_lossy_bf        = 64,
                    std::optional<SizeType> bseg_brute = std::nullopt,
                    std::optional<SizeType> bseg_ffa   = std::nullopt,
-                   double snr_min                     = 5.0,
+                   double snr_min                     = 6.0,
                    SizeType max_passing_candidates    = 1U << 22U, // 4M
                    SizeType prune_poly_order          = 3,
                    double p_orb_min                   = 1e-5,
@@ -229,16 +235,18 @@ public:
                    double propagator_significance     = 2.0,
                    double validation_significance     = 5.0,
                    bool use_conservative_tile         = false,
-                   bool use_boxcar_kadane             = false);
+                   bool use_boxcar_kadane             = false,
+                   std::optional<double> target_snr   = std::nullopt);
 
     explicit EPSearchConfig(FFASearchConfig ffa_cfg,
-                            SizeType prune_poly_order      = 3,
-                            double p_orb_min               = 1e-5,
-                            double m_c_max                 = 10.0,
-                            double m_p_min                 = 1.4,
-                            double propagator_significance = 2.0,
-                            double validation_significance = 5.0,
-                            bool use_conservative_tile     = false);
+                            SizeType prune_poly_order        = 3,
+                            double p_orb_min                 = 1e-5,
+                            double m_c_max                   = 10.0,
+                            double m_p_min                   = 1.4,
+                            double propagator_significance   = 2.0,
+                            double validation_significance   = 5.0,
+                            bool use_conservative_tile       = false,
+                            std::optional<double> target_snr = std::nullopt);
 
     ~EPSearchConfig() override;
     EPSearchConfig(EPSearchConfig&&) noexcept;
@@ -247,6 +255,10 @@ public:
     EPSearchConfig& operator=(const EPSearchConfig& other);
 
     // EP-only Getters
+    /// Entropic information limit for EP multipass/pipeline threshold design.
+    /// An omitted target uses parameter count: 1/2 -> 8.5, 3 -> 9.2,
+    /// 4 -> 9.8, 5 (circular) -> 10.0. Independent of snr_min.
+    double get_target_snr() const noexcept;
     SizeType get_prune_poly_order() const noexcept;
     double get_p_orb_min() const noexcept;
     double get_m_c_max() const noexcept;
@@ -283,11 +295,14 @@ private:
  */
 struct EPTomlConfig : FFATomlConfig {
     // [ep]
+    /// Entropic information limit for EP only; empty selects the search
+    /// default.
+    std::optional<double> target_snr;
     std::string poly_basis{"taylor"}; ///< "taylor" or "chebyshev"
-    float min_pd{0.1F};               ///< Detection probability, in (0, 1]
-    float ref_ducy{0.1F};             ///< Reference duty cycle, in (0, 1]
-    SizeType prune_poly_order{3};     ///< Polynomial order of the pruning
-    std::optional<SizeType> n_runs;   ///< Runs to prune; empty = all
+    float min_pd{0.1F};   ///< Requested Pd cutoff, in (0, 1]; shortfalls warn
+    float ref_ducy{0.1F}; ///< Reference duty cycle, in (0, 1]
+    SizeType prune_poly_order{3};   ///< Polynomial order of the pruning
+    std::optional<SizeType> n_runs; ///< Runs to prune; empty = all
     std::optional<std::vector<SizeType>> ref_segs; ///< Explicit runs
     double p_orb_min{1e-5};
     double m_c_max{10.0};
@@ -300,6 +315,8 @@ struct EPTomlConfig : FFATomlConfig {
     /// Plan cache file. Used by `search ep --plan-only` and by a search that
     /// names it.
     std::optional<std::filesystem::path> plan_cache;
+    /// CLI searches cache plans by default; false disables automatic caching.
+    bool use_plan_cache{true};
 
     /// @brief Convert parsed TOML parameters into an EPSearchConfig.
     [[nodiscard]] EPSearchConfig to_ep_search_config(

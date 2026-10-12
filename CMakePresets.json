@@ -15,7 +15,17 @@
     },
     {
       "name": "dev",
-      "displayName": "Development (Debug, CPU, tests + Python)",
+      "displayName": "Development (Release, CUDA if found, tests + Python)",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "LOKI_CUDA": "AUTO",
+        "LOKI_BUILD_PYTHON": "ON"
+      }
+    },
+    {
+      "name": "debug",
+      "displayName": "Debug (CPU, tests + Python; debugging and clang-tidy only, too slow for test runs)",
       "inherits": "base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
@@ -80,7 +90,7 @@
     {
       "name": "ci-tidy",
       "displayName": "CI static analysis (Debug, compile DB, Python)",
-      "inherits": "dev",
+      "inherits": "debug",
       "cacheVariables": {
         "LOKI_CUDA": "OFF",
         "LOKI_ENABLE_NATIVE_ARCH": "OFF"
@@ -89,6 +99,7 @@
   ],
   "buildPresets": [
     { "name": "dev", "configurePreset": "dev" },
+    { "name": "debug", "configurePreset": "debug" },
     { "name": "release", "configurePreset": "release" },
     { "name": "cuda", "configurePreset": "cuda" },
     { "name": "asan", "configurePreset": "asan" },

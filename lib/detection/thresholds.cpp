@@ -17,9 +17,10 @@
 
 namespace loki::detection {
 
-namespace {
+namespace detail {
 
-std::unique_ptr<detail::ThresholdsEngine>
+// Shared with the EP planner (thresholds_engine.hpp).
+std::unique_ptr<ThresholdsEngine>
 make_thresholds_engine(std::span<const float> branching_pattern,
                        float ref_ducy,
                        SizeType nbins,
@@ -54,7 +55,7 @@ make_thresholds_engine(std::span<const float> branching_pattern,
     loki::detail::throw_unavailable("DynamicThresholdScheme", exec.backend);
 }
 
-} // namespace
+} // namespace detail
 
 class DynamicThresholdScheme::Impl {
 public:
@@ -81,22 +82,23 @@ DynamicThresholdScheme::DynamicThresholdScheme(
     std::optional<uint64_t> seed,
     SizeType batch_size,
     Exec exec)
-    : m_impl(std::make_unique<Impl>(make_thresholds_engine(branching_pattern,
-                                                           ref_ducy,
-                                                           nbins,
-                                                           ntrials,
-                                                           nprobs,
-                                                           prob_min,
-                                                           snr_final,
-                                                           nthresholds,
-                                                           ducy_max,
-                                                           wtsp,
-                                                           beam_width,
-                                                           trials_start,
-                                                           mode,
-                                                           seed,
-                                                           batch_size,
-                                                           exec))) {}
+    : m_impl(std::make_unique<Impl>(
+          detail::make_thresholds_engine(branching_pattern,
+                                         ref_ducy,
+                                         nbins,
+                                         ntrials,
+                                         nprobs,
+                                         prob_min,
+                                         snr_final,
+                                         nthresholds,
+                                         ducy_max,
+                                         wtsp,
+                                         beam_width,
+                                         trials_start,
+                                         mode,
+                                         seed,
+                                         batch_size,
+                                         exec))) {}
 
 DynamicThresholdScheme::~DynamicThresholdScheme() = default;
 DynamicThresholdScheme::DynamicThresholdScheme(

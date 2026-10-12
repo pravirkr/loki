@@ -44,13 +44,24 @@ public:
     WorldTreeCUDA(SizeType capacity,
                   SizeType nparams,
                   SizeType nbins,
-                  SizeType max_batch_size);
+                  SizeType max_batch_size,
+                  cuda::std::span<FoldTypeCUDA> shared_folds = {});
 
     ~WorldTreeCUDA()                                   = default;
     WorldTreeCUDA(const WorldTreeCUDA&)                = delete;
     WorldTreeCUDA& operator=(const WorldTreeCUDA&)     = delete;
     WorldTreeCUDA(WorldTreeCUDA&&) noexcept            = default;
     WorldTreeCUDA& operator=(WorldTreeCUDA&&) noexcept = default;
+
+    /// Prepare the legacy overflow cutoff before recomputing pending folds.
+    float prepare_scored_batch(cuda::std::span<const float> scores,
+                               cuda::std::span<const uint32_t> indices,
+                               SizeType count,
+                               float threshold,
+                               cudaStream_t stream);
+
+    SizeType overload_count() const noexcept { return m_overload_count; }
+    SizeType peak_live() const noexcept { return m_peak_live; }
 
     // Getters
     [[nodiscard]] cuda::std::span<const double>
@@ -149,6 +160,25 @@ public:
     /// @brief Advance read consumed counter
     void consume_read(SizeType n);
 
+    /// @brief Free slots of the write region: a batch with at most this many
+    /// survivors takes add_batch_scattered's fast path.
+    [[nodiscard]] SizeType get_space_left() const {
+        return calculate_space_left();
+    }
+    /// @brief Destination of a batch written straight into the write region
+    /// (survivor r at physical slot (write_head + r) % capacity), for a
+    /// batch of at most get_space_left() survivors.
+    struct DirectWrite {
+        double* leaves{nullptr};
+        FoldTypeCUDA* folds{nullptr};
+        float* scores{nullptr};
+        SizeType write_head{0};
+    };
+    [[nodiscard]] DirectWrite get_direct_write() noexcept;
+    /// @brief Account for @p n survivors written through get_direct_write()
+    /// (n <= get_space_left()); same state as add_batch_scattered's fast path.
+    void commit_direct_write(SizeType n);
+
     // Add an initial set of candidate leaves to the Tree (reset buffer first)
     void add_initial(cuda::std::span<const double> leaves_batch,
                      cuda::std::span<const FoldTypeCUDA> folds_batch,
@@ -185,6 +215,8 @@ private:
 
     // Configuration
     SizeType m_capacity{};
+    SizeType m_overload_count{0};
+    mutable SizeType m_peak_live{0};
     SizeType m_nparams{};
     SizeType m_nbins{};
     SizeType m_max_batch_size{};
@@ -193,7 +225,8 @@ private:
 
     // Device storage
     thrust::device_vector<double> m_leaves;
-    thrust::device_vector<FoldTypeCUDA> m_folds;
+    thrust::device_vector<FoldTypeCUDA> m_owned_folds;
+    cuda::std::span<FoldTypeCUDA> m_folds;
     thrust::device_vector<float> m_scores;
     thrust::device_vector<float> m_scores_ep;
 

@@ -80,6 +80,26 @@ void poly_taylor_transform_batch_cuda(
     bool use_conservative_tile,
     cudaStream_t stream);
 
+/// poly_taylor_resolve_batch_cuda, then poly_taylor_transform_batch_cuda to
+/// @p coord_next, in one kernel (for every valid leaf).
+void poly_taylor_resolve_transform_batch_cuda(
+    cuda::std::span<double> leaves_branch,
+    cuda::std::span<const uint8_t> validation_mask,
+    cuda::std::span<uint32_t> param_indices,
+    cuda::std::span<float> phase_shift,
+    cuda::std::span<const ParamLimit> param_limits,
+    std::pair<double, double> coord_add,
+    std::pair<double, double> coord_cur,
+    std::pair<double, double> coord_init,
+    std::pair<double, double> coord_next,
+    SizeType n_accel_init,
+    SizeType n_freq_init,
+    SizeType nbins,
+    SizeType n_leaves,
+    SizeType n_params,
+    bool use_conservative_tile,
+    cudaStream_t stream);
+
 void poly_taylor_report_batch_cuda(cuda::std::span<double> leaves_tree,
                                    std::pair<double, double> coord_report,
                                    SizeType n_leaves,

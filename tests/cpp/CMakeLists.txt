@@ -49,7 +49,14 @@ foreach(kind api internal)
     ${_target} PRIVATE ${PROJECT_NAME}::${LOKI_LIBRARY_NAME} ${LOKI_COMPILE_OPTIONS}
                        Catch2::Catch2WithMain OpenMP::OpenMP_CXX HighFive::HighFive
   )
-  catch_discover_tests(${_target})
+  if(kind STREQUAL "internal")
+    # The device-memory model tests measure free device memory, so they run
+    # alone (other GPU tests would allocate meanwhile).
+    catch_discover_tests(${_target} TEST_SPEC "~[ep_memory]")
+    catch_discover_tests(${_target} TEST_SPEC "[ep_memory]" PROPERTIES RUN_SERIAL TRUE)
+  else()
+    catch_discover_tests(${_target})
+  endif()
 endforeach()
 
 target_link_libraries(
@@ -64,7 +71,11 @@ if(CMAKE_CUDA_COMPILER)
   set_source_files_properties(
     ${CMAKE_CURRENT_SOURCE_DIR}/internal/fft_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/internal/ep_memory_cuda_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/internal/ep_score_cuda_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/internal/ffa_fused_cuda_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/internal/ffa_final_score_cuda_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/internal/kadane_cuda_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/internal/ffa_resolve_cuda_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/internal/cub_scratch_cuda_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/internal/world_tree_cuda_t.cpp PROPERTIES LANGUAGE CUDA
   )
@@ -102,7 +113,8 @@ if(LOKI_BUILD_APPLICATIONS AND TARGET loki_app)
 
   # EP search: config generation, a plan-only run that writes the plan cache, a
   # dry run that loads that cache, and two rejections (a missing file and an
-  # RFI table, which the EP search does not accept).
+  # RFI table, which the EP search does not accept). Eight segments give this
+  # seeded fixture an eligible path at min_pd=0.1; four relied on fallback.
   set(LOKI_EP_CLI_DIR ${CMAKE_CURRENT_BINARY_DIR}/loki_cli_ep)
   file(MAKE_DIRECTORY ${LOKI_EP_CLI_DIR})
   string(
@@ -120,11 +132,12 @@ if(LOKI_BUILD_APPLICATIONS AND TARGET loki_app)
     "nbins = 32\n"
     "[ep]\n"
     "n_runs = 1\n"
+    "min_pd = 0.1\n"
     "prune_poly_order = 2\n"
     "[performance]\n"
     "nthreads = 1\n"
     "max_process_memory_gb = 4.0\n"
-    "bseg_ffa = 8192\n"
+    "bseg_ffa = 4096\n"
     "[output]\n"
     "outdir = \"${LOKI_EP_CLI_DIR}/out\"\n"
     "prefix = \"cli\"\n"

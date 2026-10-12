@@ -23,6 +23,11 @@ struct EPChunkConfig {
     SizeType max_sugg{1U << 18U};
     /// Branching capacity of this chunk's own plan (not the region's).
     SizeType branch_max{32U};
+    /// Parent batch planned for this chunk; zero uses the backend default.
+    SizeType batch_size{0};
+    /// Forecast survivors and simultaneous old/new ring occupancy.
+    SizeType predicted_peak{0};
+    SizeType predicted_live{0};
     double nominal_f_start{0.0};
     double nominal_f_end{0.0};
     double actual_f_start{0.0};
@@ -58,6 +63,9 @@ struct EPChunkStats {
     SizeType ncoords{0};
     SizeType max_sugg{0};
     SizeType branch_max{0};
+    SizeType batch_size{0};
+    SizeType predicted_peak{0};
+    SizeType predicted_live{0};
     double peak_complexity{0.0};
     /// Memory of this chunk alone (EPChunkConfig::chunk_memory_gb).
     double memory_gb{0.0};
@@ -167,9 +175,9 @@ ep_sweep_n_workers(int nthreads,
  * Subdivides a frequency search range into optimal memory-bounded chunks.
  * Uses generate_ffa_regions() for coarse bands (nbins, eta), runs
  * DynamicThresholdScheme simulation once per coarse band, and bisects chunk
- * widths analytically to respect max_process_memory_gb.
- * The threshold scheme and max_sugg are designed per coarse band; branch_max
- * is derived per chunk from the chunk's own plan.
+ * widths to respect max_process_memory_gb. Thresholds are selected per coarse
+ * band; population forecasts, ring capacity, branch_max and batch are planned
+ * per chunk. There is no fixed beam cap.
  *
  * Memory model (mirrors EPFreqSweep, see docs/memory.md): per-worker buffers
  * (EP workspace, irfft scratch and, when harvesting is enabled, the harvest
@@ -184,6 +192,11 @@ ep_sweep_n_workers(int nthreads,
  * Supports saving and loading planned chunk configurations to/from HDF5 cache
  * files with strict validation of all search parameters.
  *
+ * Frequency-only EP is unsupported. EP bin counts cannot exceed 1024.
+ * @param min_pd Requested simulation cutoff. If no path qualifies, accept the
+ * best available simulated path with a warning; independent evaluation below
+ * the cutoff also warns. The configuration is never changed. No complete
+ * simulated terminal path remains an error.
  * @param rfi_config RFI configuration of the sweep: when harvesting is
  * enabled, each worker's harvest store is budgeted at max_harvests records.
  * @param n_workers Workers pruning at the same time (EPFreqSweep uses
@@ -209,6 +222,18 @@ public:
                              const PruneRFIConfig& rfi_config  = {},
                              std::optional<SizeType> n_workers = std::nullopt,
                              Exec exec                         = {});
+
+    /// Run-aware planning. Existing calls plan conservatively for every run.
+    EPRegionPlanner(const search::PulsarSearchConfig& cfg,
+                    float min_pd,
+                    std::string_view poly_basis,
+                    float ref_ducy,
+                    const std::optional<std::filesystem::path>& plan_cache_file,
+                    const PruneRFIConfig& rfi_config,
+                    std::optional<SizeType> n_workers,
+                    std::optional<SizeType> n_runs,
+                    const std::optional<std::vector<SizeType>>& ref_segs,
+                    Exec exec = {});
 
     ~EPRegionPlanner();
     EPRegionPlanner(EPRegionPlanner&&) noexcept;

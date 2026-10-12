@@ -16,6 +16,7 @@
 
 #include "lib/algorithms/prune_engine.hpp"
 #include "lib/common/dispatch.hpp"
+#include "lib/search/ep_support.hpp"
 #include "lib/utils/workspace_impl.hpp"
 
 namespace loki::algorithms {
@@ -43,6 +44,7 @@ make_ep_engine(search::PulsarSearchConfig cfg,
                bool show_progress,
                PruneRFIConfig rfi_config,
                Exec exec) {
+    search::detail::check_ep_supported(cfg, "EPMultiPass");
     loki::detail::warn_ignored_nthreads(exec, "EPMultiPass");
     if (exec.backend == Backend::kCPU) {
         return detail::make_ep_cpu<FoldType>(
@@ -75,6 +77,7 @@ make_ep_engine(std::span<memory::EPWorkspace<FoldType>> workspaces,
                bool show_progress,
                PruneRFIConfig rfi_config,
                Exec exec) {
+    search::detail::check_ep_supported(cfg, "EPMultiPass");
     loki::detail::warn_ignored_nthreads(exec, "EPMultiPass");
     for (const auto& ws : workspaces) {
         loki::detail::check_same_exec(ws.exec(), exec,

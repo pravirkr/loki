@@ -83,6 +83,19 @@ struct ExecutionStream {
     [[nodiscard]] cudaStream_t get() const noexcept { return stream; }
 };
 
+__global__ void kernel_cached_score_mask(const float* scores,
+                                         const uint8_t* valid,
+                                         uint8_t* flags,
+                                         float threshold,
+                                         SizeType n) {
+    const SizeType i =
+        static_cast<SizeType>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < n) {
+        flags[i] =
+            static_cast<uint8_t>(valid[i] != 0 && scores[i] >= threshold);
+    }
+}
+
 template <SupportedFoldTypeCUDA FoldTypeCUDA> class PruneCUDAImpl {
 public:
     using HostFoldT   = HostFoldType<FoldTypeCUDA>;
@@ -96,7 +109,8 @@ public:
                   std::string_view poly_basis,
                   int device_id,
                   cudaStream_t stream,
-                  math::CUFFTManager* prune_fft = nullptr)
+                  std::function<void(pipelines::detail::EPResultPayload)>
+                      result_sink = {})
         : m_workspace_ptr(&workspace),
           m_cfg(std::move(cfg)),
           m_ffa_plan(m_cfg),
@@ -107,7 +121,8 @@ public:
           m_poly_basis(poly_basis),
           m_total_levels(m_threshold_scheme.size()),
           m_device_id(device_id),
-          m_stream(stream) {
+          m_stream(stream),
+          m_result_sink(std::move(result_sink)) {
         cuda_utils::CudaSetDeviceGuard device_guard(m_device_id);
         error_check::check_less_equal(m_cfg.get_nparams(), 5,
                                       "Pruning not supported for nparams > 5.");
@@ -116,7 +131,7 @@ public:
             m_ffa_plan.get_dparams_actual().back(),
             m_ffa_plan.get_nsegments().back(),
             m_ffa_plan.get_tsegments().back(), m_cfg, m_batch_size,
-            m_branch_max, m_device_id, prune_fft);
+            m_branch_max, m_device_id);
     }
 
     ~PruneCUDAImpl()                               = default;
@@ -127,7 +142,7 @@ public:
 
     [[nodiscard]] float get_memory_usage_gib() const noexcept {
         return get_workspace().get_memory_usage_gib() +
-               m_prune_funcs->get_irfft_scratch_memory_gib();
+               m_prune_funcs->get_scorer_scratch_memory_gib();
     }
 
     void execute(cuda::std::span<const FoldTypeCUDA> ffa_fold,
@@ -145,14 +160,14 @@ public:
         const auto& ws                 = get_workspace();
         const auto memory_tree_gb      = ws.world_tree.get_memory_usage_gib();
         const auto memory_workspace_gb = ws.prune.get_memory_usage_gib();
-        const auto memory_irfft_scratch_gb =
-            m_prune_funcs->get_irfft_scratch_memory_gib();
+        const auto memory_scorer_scratch_gb =
+            m_prune_funcs->get_scorer_scratch_memory_gib();
         const auto memory_total_gb = get_memory_usage_gib();
         spdlog::info(
             "Pruning run {:03d}: Memory Usage: {:.2f} GB total "
-            "({:.2f} GB tree + {:.2f} GB workspace + {:.3f} GB irfft scratch)",
+            "({:.2f} GB tree + {:.2f} GB workspace + {:.3f} GB scorer scratch)",
             ref_seg, memory_total_gb, memory_tree_gb, memory_workspace_gb,
-            memory_irfft_scratch_gb);
+            memory_scorer_scratch_gb);
 
         // Setup log and result files
         std::filesystem::path actual_log_file =
@@ -206,7 +221,10 @@ public:
                            ref_seg);
         log.close();
 
-        spdlog::info("Pruning run {:03d}: complete", ref_seg);
+        spdlog::info(
+            "Pruning run {:03d}: complete (peak live {}, overload trims {})",
+            ref_seg, get_workspace().world_tree.peak_live(),
+            get_workspace().world_tree.overload_count());
         spdlog::info("Pruning run {:03d}: stats: {}", ref_seg,
                      m_pstats.get_stats_summary_cuda(timer.stop()));
     }
@@ -224,7 +242,8 @@ private:
     std::string_view m_poly_basis;
     SizeType m_total_levels;
     int m_device_id;
-    cudaStream_t m_stream{nullptr};
+    cudaStream_t m_stream;
+    std::function<void(pipelines::detail::EPResultPayload)> m_result_sink;
 
     bool m_prune_complete{false};
     SizeType m_prune_level{};
@@ -262,13 +281,18 @@ private:
             m_prune_funcs->load_segment(ffa_fold, m_snail_scheme.get_ref_idx());
         const auto coord_init = m_snail_scheme.get_coord(m_prune_level);
         const auto n_leaves   = m_ffa_plan.get_ncoords().back();
-        m_prune_funcs->seed(fold_segment, cuda_utils::as_span(ws.seed_leaves_d),
-                            cuda_utils::as_span(ws.seed_scores_d), coord_init,
+        // A sweep workspace is sized for the largest chunk in its group.
+        // Seed only this chunk's active coordinates, not the whole allocation.
+        const auto seed_leaves =
+            cuda_utils::as_span(ws.seed_leaves_d)
+                .first(n_leaves * world_tree.get_leaves_stride());
+        const auto seed_scores =
+            cuda_utils::as_span(ws.seed_scores_d).first(n_leaves);
+        m_prune_funcs->seed(fold_segment, seed_leaves, seed_scores, coord_init,
                             stream);
         // Initialize the WorldTree with the generated data
-        world_tree.add_initial(
-            cuda_utils::as_span(ws.seed_leaves_d), fold_segment,
-            cuda_utils::as_span(ws.seed_scores_d), n_leaves, stream);
+        world_tree.add_initial(seed_leaves, fold_segment, seed_scores, n_leaves,
+                               stream);
 
         // Initialize the prune stats
         m_pstats = search::PruneStatsCollection();
@@ -463,6 +487,19 @@ private:
             cudaStreamSynchronize(m_stream),
             "cudaStreamSynchronize write results failed");
 
+        if (m_result_sink) {
+            m_result_sink(pipelines::detail::EPResultPayload{
+                .run_name     = std::string(run_name),
+                .snail_scheme = m_snail_scheme.get_data(),
+                .leaves       = std::move(leaves_report_h),
+                .scores       = std::move(scores_report_h),
+                .scores_ep    = std::move(scores_ep_report_h),
+                .gflops       = compute_total_prune_gflops(),
+                .nparams      = m_cfg.get_nparams(),
+                .stats        = m_pstats,
+            });
+            return;
+        }
         // Both host vectors are now contiguous — wrap as single-span views
         memory::CircularView<double> leaves_report_view{
             std::span<double>(leaves_report_h), std::span<double>{}};
@@ -635,11 +672,10 @@ private:
                                    search::PruneIterationStats& stats,
                                    cudaStream_t stream) {
 
-        auto& ws            = get_workspace();
-        auto& world_tree    = ws.world_tree;
-        auto& prune_ws      = ws.prune;
-        auto& scratch_ws    = ws.scratch;
-        auto branch_ws_view = ws.branch.get_view();
+        auto& ws         = get_workspace();
+        auto& world_tree = ws.world_tree;
+        auto& prune_ws   = ws.prune;
+        auto& scratch_ws = ws.scratch;
 
         // Get coordinates
         const auto coord_init = m_snail_scheme.get_coord(0);
@@ -658,14 +694,28 @@ private:
         const auto batch_size =
             std::max(1UL, std::min(m_batch_size, n_branches));
 
-        bool minmax_pending     = false;
+        MinMaxFloat batch_minmax{};
         auto accumulate_min_max = [&stats](const MinMaxFloat& minmax) {
             stats.score_min = std::min(stats.score_min, minmax.min);
             stats.score_max = std::max(stats.score_max, minmax.max);
         };
+        // A direct-mode batch is collected once the next batch's branch is
+        // enqueued (its count sync then also covers the fused kernel).
+        bool direct_pending = false;
+        auto collect_direct = [&]() {
+            if (!direct_pending) {
+                return;
+            }
+            const auto n_passing =
+                m_prune_funcs->collect_shift_add_score(batch_minmax);
+            accumulate_min_max(batch_minmax);
+            world_tree.commit_direct_write(n_passing);
+            direct_pending = false;
+        };
 
         // Process branches in batches
         // Process branches in potentially split batches to handle wraps
+        auto branch_ws_view      = ws.branch.get_view();
         SizeType total_processed = 0;
         while (total_processed < n_branches) {
             const SizeType remaining       = n_branches - total_processed;
@@ -691,6 +741,7 @@ private:
                 cuda_utils::as_span(prune_ws.validation_mask_d), coord_cur,
                 coord_prev, current_batch_size, branch_ws_view, scratch_ws,
                 stream);
+            collect_direct();
             stats.n_leaves += n_leaves_batch;
             if (n_leaves_batch == 0) {
                 world_tree.consume_read(current_batch_size);
@@ -713,7 +764,48 @@ private:
                 continue;
             }
 
-            // Resolve kernel
+            // Direct path: when even an all-passing batch fits the free
+            // slots (add_batch_scattered's fast path), the fused kernel
+            // writes the survivors into the tree itself, in the order of
+            // the compaction below. Every valid leaf is resolved and
+            // transformed first (the survivors' values are the same).
+            const bool direct = n_leaves_batch <= world_tree.get_space_left();
+            if (direct) {
+                m_prune_funcs->resolve_transform(
+                    cuda_utils::as_span(prune_ws.branched_leaves_d),
+                    cuda_utils::as_span(prune_ws.validation_mask_d),
+                    cuda_utils::as_span(prune_ws.branched_param_idx_d),
+                    cuda_utils::as_span(prune_ws.branched_phase_shift_d),
+                    coord_add, coord_cur, coord_init, coord_next,
+                    n_leaves_batch, stream);
+                const auto dw = world_tree.get_direct_write();
+                const core::EPDirectWriteCUDA<FoldTypeCUDA> target{
+                    .leaves_batch =
+                        cuda_utils::as_span(prune_ws.branched_leaves_d),
+                    .leaves_stride = world_tree.get_leaves_stride(),
+                    .leaves        = dw.leaves,
+                    .folds         = dw.folds,
+                    .scores        = dw.scores,
+                    .write_head    = dw.write_head,
+                };
+                m_prune_funcs->shift_add_score(
+                    world_tree.get_folds_span(),
+                    cuda_utils::as_span(prune_ws.branched_indices_d),
+                    cuda_utils::as_span(prune_ws.validation_mask_d),
+                    ffa_fold_segment,
+                    cuda_utils::as_span(prune_ws.branched_param_idx_d),
+                    cuda_utils::as_span(prune_ws.branched_phase_shift_d),
+                    cuda_utils::as_span(prune_ws.branched_folds_d),
+                    cuda_utils::as_span(prune_ws.branched_scores_d),
+                    cuda_utils::as_span(prune_ws.filtered_mask_d),
+                    current_threshold, n_leaves_batch,
+                    world_tree.get_physical_start_idx(),
+                    world_tree.get_capacity(), scratch_ws, stream, &target);
+                direct_pending = true;
+                world_tree.consume_read(current_batch_size);
+                continue;
+            }
+
             m_prune_funcs->resolve(
                 cuda_utils::as_span(prune_ws.branched_leaves_d),
                 cuda_utils::as_span(prune_ws.validation_mask_d),
@@ -721,39 +813,24 @@ private:
                 cuda_utils::as_span(prune_ws.branched_phase_shift_d), coord_add,
                 coord_cur, coord_init, n_leaves_batch, stream);
 
-            // Shift and add kernel
-            // branched_indices_d are logical indices, convert to physical
-            // indices in shift_add kernel
-            m_prune_funcs->shift_add(
+            // Shift-add and score (one fused kernel for Fourier folds).
+            // branched_indices_d are logical indices, converted to physical
+            // indices in the kernel.
+            const auto n_leaves_passing = m_prune_funcs->shift_add_score(
                 world_tree.get_folds_span(),
                 cuda_utils::as_span(prune_ws.branched_indices_d),
                 cuda_utils::as_span(prune_ws.validation_mask_d),
                 ffa_fold_segment,
                 cuda_utils::as_span(prune_ws.branched_param_idx_d),
                 cuda_utils::as_span(prune_ws.branched_phase_shift_d),
-                cuda_utils::as_span(prune_ws.branched_folds_d), n_leaves_batch,
-                world_tree.get_physical_start_idx(), world_tree.get_capacity(),
-                stream);
-
-            // Score and prune kernel
-            const auto n_leaves_passing = m_prune_funcs->score_and_filter(
-                cuda_utils::as_span(prune_ws.branched_folds_d),
+                cuda::std::span<FoldTypeCUDA>{},
                 cuda_utils::as_span(prune_ws.branched_scores_d),
-                cuda_utils::as_span(prune_ws.validation_mask_d),
                 cuda_utils::as_span(prune_ws.filtered_mask_d),
-                current_threshold, n_leaves_batch, scratch_ws, stream);
+                current_threshold, n_leaves_batch,
+                world_tree.get_physical_start_idx(), world_tree.get_capacity(),
+                scratch_ws, stream, nullptr, &batch_minmax);
 
-            // Compute min and max scores. The host reads them one batch
-            // later, so the reduction and its copy never block this batch
-            // (score_and_filter above still syncs for the pass count).
-            if (minmax_pending) {
-                accumulate_min_max(scratch_ws.wait_min_max());
-            }
-            scratch_ws.compute_min_max_scores_async(
-                cuda_utils::as_span(prune_ws.branched_scores_d),
-                cuda_utils::as_span(prune_ws.validation_mask_d), n_leaves_batch,
-                stream);
-            minmax_pending = true;
+            accumulate_min_max(batch_minmax);
 
             if (n_leaves_passing == 0) {
                 world_tree.consume_read(current_batch_size);
@@ -769,27 +846,83 @@ private:
                 cuda_utils::as_span(prune_ws.filtered_mask_d), coord_next,
                 coord_cur, n_leaves_batch, stream);
 
-            // Convert validation mask to indices
-            scratch_ws.convert_mask_to_indices(
-                cuda_utils::as_span(prune_ws.filtered_mask_d),
-                cuda_utils::as_span(prune_ws.branched_indices_d),
-                n_leaves_batch, stream);
-
-            // Add batch to output suggestions
-            current_threshold = world_tree.add_batch_scattered(
-                cuda_utils::as_span(prune_ws.branched_leaves_d),
-                cuda_utils::as_span(prune_ws.branched_folds_d),
-                cuda_utils::as_span(prune_ws.branched_scores_d),
-                cuda_utils::as_span(prune_ws.branched_indices_d),
-                current_threshold, n_leaves_passing, stream);
-
-            // Notify the buffer that a batch of the old suggestions has been
-            // consumed
-            world_tree.consume_read(current_batch_size);
+            {
+                scratch_ws.convert_mask_to_indices(
+                    cuda_utils::as_span(prune_ws.filtered_mask_d),
+                    cuda_utils::as_span(prune_ws.passing_indices_d),
+                    n_leaves_batch, stream);
+                current_threshold = world_tree.prepare_scored_batch(
+                    cuda_utils::as_span(prune_ws.branched_scores_d),
+                    cuda_utils::as_span(prune_ws.passing_indices_d),
+                    n_leaves_passing, current_threshold, stream);
+                // Keep parents readable until every accepted child's fold
+                // has been recomputed with the existing shift-add arithmetic.
+                const auto stride = world_tree.get_leaves_stride();
+                for (SizeType off = 0; off < n_leaves_batch;
+                     off += m_batch_size) {
+                    const auto count =
+                        std::min(m_batch_size, n_leaves_batch - off);
+                    const auto flags =
+                        cuda_utils::as_span(prune_ws.filtered_mask_d)
+                            .subspan(off, count);
+                    const auto scores =
+                        cuda_utils::as_span(prune_ws.branched_scores_d)
+                            .subspan(off, count);
+                    const auto valid =
+                        cuda_utils::as_span(prune_ws.validation_mask_d)
+                            .subspan(off, count);
+                    const auto grid =
+                        static_cast<unsigned>((count + 255) / 256);
+                    kernel_cached_score_mask<<<grid, 256, 0, stream>>>(
+                        scores.data(), valid.data(), flags.data(),
+                        current_threshold, count);
+                    cuda_utils::check_last_cuda_error(
+                        "EP cached score mask failed");
+                    scratch_ws.convert_mask_to_indices(
+                        flags, cuda_utils::as_span(prune_ws.passing_indices_d),
+                        count, stream);
+                    uint32_t selected = 0;
+                    cuda_utils::check_cuda_call(
+                        cudaMemcpyAsync(&selected, scratch_ws.d_reduce_out,
+                                        sizeof(selected),
+                                        cudaMemcpyDeviceToHost, stream),
+                        "EP recomputation count copy failed");
+                    cuda_utils::check_cuda_call(
+                        cudaStreamSynchronize(stream),
+                        "EP recomputation count wait failed");
+                    const auto passing = std::min<SizeType>(
+                        selected, world_tree.get_space_left());
+                    if (passing != 0) {
+                        m_prune_funcs->shift_add(
+                            world_tree.get_folds_span(),
+                            cuda_utils::as_span(prune_ws.branched_indices_d)
+                                .subspan(off, count),
+                            flags, ffa_fold_segment,
+                            cuda_utils::as_span(prune_ws.branched_param_idx_d)
+                                .subspan(off, count),
+                            cuda_utils::as_span(prune_ws.branched_phase_shift_d)
+                                .subspan(off, count),
+                            cuda_utils::as_span(prune_ws.branched_folds_d),
+                            count, world_tree.get_physical_start_idx(),
+                            world_tree.get_capacity(), stream);
+                        current_threshold = world_tree.add_batch_scattered(
+                            cuda_utils::as_span(prune_ws.branched_leaves_d)
+                                .subspan(off * stride, count * stride),
+                            cuda_utils::as_span(prune_ws.branched_folds_d),
+                            scores,
+                            cuda_utils::as_span(prune_ws.passing_indices_d),
+                            current_threshold, passing, stream);
+                    }
+                    if (passing < selected ||
+                        world_tree.get_space_left() == 0) {
+                        break;
+                    }
+                }
+                world_tree.consume_read(current_batch_size);
+                continue;
+            }
         }
-        if (minmax_pending) {
-            accumulate_min_max(scratch_ws.wait_min_max());
-        }
+        collect_direct();
     }
 
 }; // End PruneCUDAImpl implementation
@@ -1075,19 +1208,21 @@ private:
         log.close();
 
         // Write metadata to result file
-        auto writer = search::PruneResultWriter(
-            result_file, search::PruneResultWriter::Mode::kWrite);
-        writer.write_metadata(m_cfg.get_param_names(), nsegments, m_max_sugg,
-                              m_threshold_scheme);
-        auto& ws = get_workspace();
-        // A chunk of the sweep prunes with the sweep's FFT manager, so its
-        // plans are built once for the sweep. A standalone run owns its own.
-        math::CUFFTManager* const prune_fft =
-            m_pipeline.has_value() ? m_pipeline->prune_fft_manager : nullptr;
+        const auto sink =
+            m_pipeline
+                ? m_pipeline->result_sink
+                : std::function<void(pipelines::detail::EPResultPayload)>{};
+        if (!sink) {
+            auto writer = search::PruneResultWriter(
+                result_file, search::PruneResultWriter::Mode::kWrite);
+            writer.write_metadata(m_cfg.get_param_names(), nsegments,
+                                  m_max_sugg, m_threshold_scheme);
+        }
+        auto& ws   = get_workspace();
         auto prune = PruneCUDAImpl<FoldTypeCUDA>(
             ws, m_cfg, m_threshold_scheme, m_max_sugg, m_batch_size,
             m_branch_max, m_poly_basis, m_device_id, m_execution_stream.get(),
-            prune_fft);
+            sink);
         for (const auto ref_seg : ref_segs_to_process) {
             prune.execute(ffa_fold, ref_seg, m_ascend_levels, outdir, log_file,
                           result_file,
@@ -1095,9 +1230,11 @@ private:
         }
         const auto ep_time = timer.stop();
         // Write final runtime to result file
-        auto writer_final = search::PruneResultWriter(
-            result_file, search::PruneResultWriter::Mode::kAppend);
-        writer_final.write_runtime(ep_time);
+        if (!sink) {
+            auto writer_final = search::PruneResultWriter(
+                result_file, search::PruneResultWriter::Mode::kAppend);
+            writer_final.write_runtime(ep_time);
+        }
         spdlog::info("Pruning complete. Results saved to {}",
                      result_file.string());
         spdlog::info("Pruning time: {:.2f} seconds", ep_time);

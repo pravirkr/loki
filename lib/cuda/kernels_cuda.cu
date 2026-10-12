@@ -13,30 +13,15 @@
 
 #include "lib/cuda/cub_helpers.cuh"
 #include "lib/cuda/cuda_utils.cuh"
+#include "lib/cuda/ep_fourier_device.cuh"
 #include "lib/detail/error_check.hpp"
 
 namespace loki::core {
 
 namespace {
 
-// x / nbins in double. A double divide is slow on GPUs with little FP64
-// throughput; for a power-of-two nbins, multiplying by the exact reciprocal
-// gives the same result.
-__device__ __forceinline__ double div_by_nbins(double x, uint32_t nbins) {
-    if ((nbins & (nbins - 1U)) == 0U) {
-        const int log2_nbins = __ffs(static_cast<int>(nbins)) - 1;
-        return x * __longlong_as_double(
-                       static_cast<long long>(1023 - log2_nbins) << 52);
-    }
-    return x / static_cast<double>(nbins);
-}
-
-// Fourier phase -2*pi*k*shift/nbins, formed in double, rounded to float.
-__device__ __forceinline__ float
-fourier_phase(uint32_t k, float shift, uint32_t nbins) {
-    return static_cast<float>(
-        div_by_nbins(-2.0F * cub_helpers::kPI * k * shift, nbins));
-}
+using detail::div_by_nbins;
+using detail::fourier_phase;
 
 // Profile offset (segment, coord) * stride. The factors fit in 32 bits, but
 // the product does not once a level is larger than 4 GiB (frequency-only
@@ -203,11 +188,6 @@ __global__ __launch_bounds__(256, 4) void kernel_shift_add_linear_complex(
         return;
     }
 
-    // Phase factor for head only: exp(-2πi * k * shift / nbins)
-    const auto phase = fourier_phase(k, phase_shift[ileaf], nbins);
-    float cosv, sinv;
-    __sincosf(phase, &sinv, &cosv);
-
     // Calculate offsets (in circular tree)
     uint32_t tree_idx = indices_tree[ileaf] + physical_start_idx;
     if (tree_idx >= capacity) {
@@ -219,23 +199,12 @@ __global__ __launch_bounds__(256, 4) void kernel_shift_add_linear_complex(
     const SizeType ffa_base  = static_cast<SizeType>(ffa_idx) * stride;
     const SizeType out_base  = static_cast<SizeType>(ileaf) * stride;
 
-    const ComplexTypeCUDA* __restrict__ tree_e = folds_tree + tree_base + k;
-    const ComplexTypeCUDA* __restrict__ tree_v = tree_e + nbins_f;
-    const ComplexTypeCUDA* __restrict__ ffa_e  = folds_ffa + ffa_base + k;
-    const ComplexTypeCUDA* __restrict__ ffa_v  = ffa_e + nbins_f;
-
-    // OPTIMIZED complex multiplication using fmaf
-    // ffa_shifted_e = ffa_e * exp(-2πi * k * shift / nbins)
-    const float re_ffa_e = fmaf(ffa_e->real(), cosv, -ffa_e->imag() * sinv);
-    const float im_ffa_e = fmaf(ffa_e->real(), sinv, ffa_e->imag() * cosv);
-    const float re_ffa_v = fmaf(ffa_v->real(), cosv, -ffa_v->imag() * sinv);
-    const float im_ffa_v = fmaf(ffa_v->real(), sinv, ffa_v->imag() * cosv);
-
-    // Add tree (unshifted) + ffa (shifted)
-    folds_out[out_base + k] =
-        ComplexTypeCUDA(tree_e->real() + re_ffa_e, tree_e->imag() + im_ffa_e);
-    folds_out[out_base + k + nbins_f] =
-        ComplexTypeCUDA(tree_v->real() + re_ffa_v, tree_v->imag() + im_ffa_v);
+    // Tree (unshifted) + FFA rotated by exp(-2 pi i k shift / nbins)
+    detail::ep_shift_add_harmonic(
+        folds_tree[tree_base + k], folds_tree[tree_base + k + nbins_f],
+        folds_ffa[ffa_base + k], folds_ffa[ffa_base + k + nbins_f], k,
+        phase_shift[ileaf], nbins, folds_out[out_base + k],
+        folds_out[out_base + k + nbins_f]);
 }
 
 __global__
@@ -1059,10 +1028,12 @@ __global__ void kernel_ffa_freq_fuse(const float* __restrict__ fold_in,
 #pragma unroll
         for (int base = 0; base < kCap; base += 8) {
             const uint32_t prof = static_cast<uint32_t>(base) + prof_in_batch;
-            const size_t src =
-                profile_offset(seg0 + prof, ncoords_in, ancestor, 128U);
-            cur4[(static_cast<size_t>(prof) << 5U) + vec] =
-                in4[(src >> 2U) + vec];
+            if (prof < static_cast<uint32_t>(kCap)) {
+                const size_t src =
+                    profile_offset(seg0 + prof, ncoords_in, ancestor, 128U);
+                cur4[(static_cast<size_t>(prof) << 5U) + vec] =
+                    in4[(src >> 2U) + vec];
+            }
         }
     } else {
         for (int prof = 0; prof < kCap; ++prof) {
@@ -1410,9 +1381,19 @@ void launch_ffa_freq_fuse(const float* fold_in,
     const size_t smem     = ffa_freq_fuse_dynamic_smem(K, nbins);
     const bool vec4 = (reinterpret_cast<std::uintptr_t>(fold_in) % 16U == 0) &&
                       (reinterpret_cast<std::uintptr_t>(fold_out) % 16U == 0);
-    cuda_utils::check_kernel_launch_params(
-        dim3(static_cast<unsigned>(nblocks)), dim3(256),
-        smem + ffa_freq_fuse_static_smem<K>());
+    const SizeType total_smem = smem + ffa_freq_fuse_static_smem<K>();
+    error_check::check_less_equal(
+        total_smem, cuda_utils::get_max_shared_memory_optin(),
+        "launch_ffa_freq_fuse: tile exceeds the shared memory per block");
+    if (total_smem > cuda_utils::get_max_shared_memory()) {
+        cuda_utils::check_cuda_call(
+            cudaFuncSetAttribute(kernel_ffa_freq_fuse<K>,
+                                 cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                 static_cast<int>(smem)),
+            "cudaFuncSetAttribute kernel_ffa_freq_fuse failed");
+    }
+    cuda_utils::check_kernel_launch_params(dim3(static_cast<unsigned>(nblocks)),
+                                           dim3(256));
     kernel_ffa_freq_fuse<K>
         <<<static_cast<unsigned>(nblocks), 256, smem, stream>>>(
             fold_in, fold_out, levels, ncoords_in, ncoords_out, nbins, vec4);
@@ -1428,11 +1409,15 @@ bool ffa_freq_fuse_fits_smem(int k, SizeType nbins) {
         static_bytes = ffa_freq_fuse_static_smem<4>();
     } else if (k == 3) {
         static_bytes = ffa_freq_fuse_static_smem<3>();
+    } else if (k == 2) {
+        static_bytes = ffa_freq_fuse_static_smem<2>();
     } else {
         return false;
     }
+    // Large tiles opt in to the device's per-block maximum (the launcher
+    // raises the kernel's dynamic shared-memory limit).
     return ffa_freq_fuse_dynamic_smem(k, nbins) + static_bytes <=
-           cuda_utils::get_max_shared_memory();
+           cuda_utils::get_max_shared_memory_optin();
 }
 
 void ffa_iter_freq_fused_cuda(const float* __restrict__ fold_in,
@@ -1458,9 +1443,13 @@ void ffa_iter_freq_fused_cuda(const float* __restrict__ fold_in,
         launch_ffa_freq_fuse<3>(fold_in, fold_out, level_idx, level_shift,
                                 level_ncoords, ncoords_in, ncoords_out,
                                 nsegments_in, nbins, stream);
+    } else if (k == 2) {
+        launch_ffa_freq_fuse<2>(fold_in, fold_out, level_idx, level_shift,
+                                level_ncoords, ncoords_in, ncoords_out,
+                                nsegments_in, nbins, stream);
     } else {
         throw std::invalid_argument(
-            "ffa_iter_freq_fused_cuda: k must be 3, 4, or 5");
+            "ffa_iter_freq_fused_cuda: k must be 2, 3, 4, or 5");
     }
 }
 
@@ -1528,7 +1517,7 @@ std::vector<int> plan_ffa_freq_fuse_groups(std::span<const SizeType> ncoords,
                        "have the same length");
     const auto fits = [&](int k, SizeType level) -> bool {
         const auto ku = static_cast<SizeType>(k);
-        if (k < 3 || static_cast<SizeType>(k) >= k_fits_smem.size() ||
+        if (k < 2 || static_cast<SizeType>(k) >= k_fits_smem.size() ||
             !k_fits_smem[ku] || ku > levels - level) {
             return false;
         }
@@ -1562,6 +1551,8 @@ std::vector<int> plan_ffa_freq_fuse_groups(std::span<const SizeType> ncoords,
                 k = 5;
             } else if (fits(3, level)) {
                 k = 3;
+            } else if (fits(2, level)) {
+                k = 2;
             } else {
                 k = 1;
             }

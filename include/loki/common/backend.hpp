@@ -55,6 +55,15 @@ struct Exec {
 };
 
 /**
+ * @brief Create the runtime context of @p exec's device now (CUDA: the
+ * device's primary context), so the first algorithm on it does not pay for
+ * it. A no-op for Backend::kCPU. Safe to call from a helper thread while the
+ * caller reads its input.
+ * @throws std::invalid_argument if this build lacks the backend.
+ */
+void initialize_device(Exec exec = {});
+
+/**
  * @brief Non-owning handle to a backend queue: `cudaStream_t` for CUDA.
  * Null means the backend's default stream. The caller keeps it alive.
  * Converts implicitly from the native handle, so a `cudaStream_t` can

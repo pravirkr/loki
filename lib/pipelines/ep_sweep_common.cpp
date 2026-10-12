@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <hdf5.h>
@@ -19,15 +20,15 @@
 
 namespace loki::pipelines::detail {
 
-double
-merge_ep_sweep_results(const std::filesystem::path& tmp_dir,
-                       const std::filesystem::path& result_file,
-                       const std::vector<algorithms::EPChunkConfig>& chunk_cfgs,
-                       const search::PulsarSearchConfig& base_cfg,
-                       float min_pd,
-                       std::string_view poly_basis,
-                       float ref_ducy,
-                       float total_runtime) {
+namespace {
+void initialize_ep_results(
+    const std::filesystem::path& result_file,
+    const std::vector<algorithms::EPChunkConfig>& chunk_cfgs,
+    const search::PulsarSearchConfig& base_cfg,
+    float min_pd,
+    std::string_view poly_basis,
+    float ref_ducy,
+    float total_runtime) {
     HighFive::File main_h5(result_file.string(), HighFive::File::Overwrite);
     main_h5.createAttribute("ep_sweep_version", std::string("1.0.0-cpp"));
     main_h5.createAttribute("param_names", base_cfg.get_param_names());
@@ -41,9 +42,8 @@ merge_ep_sweep_results(const std::filesystem::path& tmp_dir,
     main_h5.createAttribute("ref_ducy", ref_ducy);
     main_h5.createAttribute("total_runtime", total_runtime);
 
-    auto main_chunks_group   = main_h5.createGroup("chunks");
-    double accumulated_flops = 0.0;
-    const SizeType nchunks   = chunk_cfgs.size();
+    auto main_chunks_group = main_h5.createGroup("chunks");
+    const SizeType nchunks = chunk_cfgs.size();
 
     for (SizeType i = 0; i < nchunks; ++i) {
         const auto& chunk              = chunk_cfgs[i];
@@ -65,7 +65,28 @@ merge_ep_sweep_results(const std::filesystem::path& tmp_dir,
 
         chunk_group.createDataSet("threshold_scheme", chunk.threshold_scheme);
         chunk_group.createDataSet("branching_pattern", chunk.branching_pattern);
+    }
+    main_h5.createAttribute("total_pruning_gflops", 0.0);
+}
+} // namespace
 
+double
+merge_ep_sweep_results(const std::filesystem::path& tmp_dir,
+                       const std::filesystem::path& result_file,
+                       const std::vector<algorithms::EPChunkConfig>& chunk_cfgs,
+                       const search::PulsarSearchConfig& base_cfg,
+                       float min_pd,
+                       std::string_view poly_basis,
+                       float ref_ducy,
+                       float total_runtime) {
+    initialize_ep_results(result_file, chunk_cfgs, base_cfg, min_pd, poly_basis,
+                          ref_ducy, total_runtime);
+    HighFive::File main_h5(result_file.string(), HighFive::File::ReadWrite);
+    double accumulated_flops = 0.0;
+    for (SizeType i = 0; i < chunk_cfgs.size(); ++i) {
+        const auto& chunk              = chunk_cfgs[i];
+        const std::string chunk_prefix = std::format("chunk_{:04d}", i);
+        auto chunk_group = main_h5.getGroup("chunks/" + chunk_prefix);
         const auto chunk_result_file =
             tmp_dir / std::format("{}_pruning_nstages_{}_results.h5",
                                   chunk_prefix, chunk.nsegments);
@@ -98,8 +119,109 @@ merge_ep_sweep_results(const std::filesystem::path& tmp_dir,
         }
     }
 
-    main_h5.createAttribute("total_pruning_gflops", accumulated_flops);
+    main_h5.getAttribute("total_pruning_gflops").write(accumulated_flops);
     return accumulated_flops;
+}
+
+EPSweepWriter::EPSweepWriter(
+    const std::filesystem::path& result_file,
+    const std::vector<algorithms::EPChunkConfig>& chunks,
+    const search::PulsarSearchConfig& cfg,
+    float min_pd,
+    std::string_view poly_basis,
+    float ref_ducy)
+    : m_file(result_file),
+      m_partial_file(std::filesystem::path(result_file) += ".partial"),
+      m_nchunks(chunks.size()) {
+    initialize_ep_results(m_partial_file, chunks, cfg, min_pd, poly_basis,
+                          ref_ducy, 0.0F);
+    m_thread = std::thread([this] { run(); });
+}
+
+EPSweepWriter::~EPSweepWriter() {
+    {
+        const std::lock_guard lock(m_mutex);
+        m_stopping = true;
+    }
+    m_ready.notify_all();
+    if (m_thread.joinable()) {
+        m_thread.join();
+    }
+}
+
+void EPSweepWriter::submit(EPResultPayload payload) {
+    std::unique_lock lock(m_mutex);
+    m_ready.wait(lock, [this] { return !m_pending || m_error || m_stopping; });
+    if (m_error) {
+        std::rethrow_exception(m_error);
+    }
+    if (m_stopping) {
+        throw std::logic_error("EP writer already finished");
+    }
+    m_pending = std::move(payload);
+    m_ready.notify_all();
+}
+
+void EPSweepWriter::run() {
+    try {
+        while (true) {
+            EPResultPayload payload;
+            {
+                std::unique_lock lock(m_mutex);
+                m_ready.wait(lock, [this] { return m_pending || m_stopping; });
+                if (!m_pending) {
+                    return;
+                }
+                payload = std::move(*m_pending);
+                m_pending.reset();
+            }
+            m_ready.notify_all();
+            if (payload.chunk_id >= m_nchunks) {
+                throw std::invalid_argument("EP writer: invalid chunk id");
+            }
+            search::PruneResultWriter writer(
+                m_partial_file, search::PruneResultWriter::Mode::kAppend,
+                std::format("chunks/chunk_{:04d}", payload.chunk_id));
+            writer.write_run_results(payload.run_name, payload.snail_scheme,
+                                     {std::span<double>(payload.leaves), {}},
+                                     {std::span<float>(payload.scores), {}},
+                                     {std::span<float>(payload.scores_ep), {}},
+                                     payload.gflops, payload.scores.size(),
+                                     payload.nparams, payload.stats);
+            m_gflops += payload.gflops;
+        }
+    } catch (...) {
+        {
+            const std::lock_guard lock(m_mutex);
+            m_error = std::current_exception();
+        }
+        m_ready.notify_all();
+    }
+}
+
+double EPSweepWriter::finish(float runtime) {
+    if (m_finished) {
+        throw std::logic_error("EP writer already finished");
+    }
+    m_finished = true;
+    {
+        const std::lock_guard lock(m_mutex);
+        m_stopping = true;
+    }
+    m_ready.notify_all();
+    if (m_thread.joinable()) {
+        m_thread.join();
+    }
+    if (m_error) {
+        std::rethrow_exception(m_error);
+    }
+    {
+        HighFive::File file(m_partial_file.string(), HighFive::File::ReadWrite);
+        file.getAttribute("total_runtime").write(runtime);
+        file.getAttribute("total_pruning_gflops").write(m_gflops);
+    }
+    std::filesystem::rename(m_partial_file, m_file);
+    return m_gflops;
 }
 
 void check_ep_group_budget(const algorithms::detail::EPChunkGroup& group,

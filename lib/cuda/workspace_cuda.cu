@@ -9,8 +9,10 @@
 #include <cub/cub.cuh>
 #include <cuda_runtime.h>
 
+#include "lib/algorithms/ep_memory.hpp"
 #include "lib/cuda/cub_helpers.cuh"
 #include "lib/cuda/cuda_utils.cuh"
+#include "lib/cuda/ffa_score_cuda.cuh"
 #include "lib/cuda/kernels_cuda.cuh"
 #include "lib/cuda/taylor_ffa_cuda.cuh"
 #include "lib/detail/error_check.hpp"
@@ -43,9 +45,12 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA>
 FFAWorkspaceCUDA<FoldTypeCUDA>::FFAWorkspaceCUDA(SizeType buffer_size,
                                                  SizeType coord_size,
                                                  SizeType n_levels,
-                                                 SizeType n_params) {
+                                                 SizeType n_params,
+                                                 bool allocate_internal) {
     const bool is_freq_only = n_params == 1;
-    fold_internal_d.resize(buffer_size);
+    if (allocate_internal) {
+        fold_internal_d.resize(buffer_size);
+    }
     m_param_counts_d.resize(n_levels * n_params);
     m_ncoords_offsets_d.resize(n_levels + 1);
     m_param_limits_d.resize(n_params);
@@ -61,14 +66,22 @@ FFAWorkspaceCUDA<FoldTypeCUDA>::FFAWorkspaceCUDA(SizeType buffer_size,
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 void FFAWorkspaceCUDA<FoldTypeCUDA>::validate(
     const plans::FFAPlan<HostFoldT>& ffa_plan) const {
-    const auto n_levels     = ffa_plan.get_n_levels();
-    const auto n_params     = ffa_plan.get_n_params();
-    const auto buffer_size  = ffa_plan.get_buffer_size();
-    const auto coord_size   = ffa_plan.get_coord_size();
+    validate(ffa_plan, ffa_plan.get_buffer_size());
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+void FFAWorkspaceCUDA<FoldTypeCUDA>::validate(
+    const plans::FFAPlan<HostFoldT>& ffa_plan,
+    SizeType buffer_size,
+    SizeType coord_size_required) const {
+    const auto n_levels = ffa_plan.get_n_levels();
+    const auto n_params = ffa_plan.get_n_params();
+    const auto coord_size =
+        std::min(ffa_plan.get_coord_size(), coord_size_required);
     const bool is_freq_only = n_params == 1;
 
     error_check::check_greater_equal(
-        fold_internal_d.size(), buffer_size,
+        internal_folds().size(), buffer_size,
         "FFAWorkspaceCUDA: fold_internal buffer too small");
     error_check::check_greater_equal(
         m_param_counts_d.size(), n_levels * n_params,
@@ -89,7 +102,7 @@ void FFAWorkspaceCUDA<FoldTypeCUDA>::validate(
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 SizeType FFAWorkspaceCUDA<FoldTypeCUDA>::get_buffers_bytes() const noexcept {
-    return (fold_internal_d.size() * sizeof(DeviceFoldT)) +
+    return (internal_folds().size() * sizeof(DeviceFoldT)) +
            (coords_d.i_tail.size() * sizeof(uint32_t)) +
            (coords_d.shift_tail.size() * sizeof(float)) +
            (coords_d.i_head.size() * sizeof(uint32_t)) +
@@ -126,7 +139,9 @@ void FFAWorkspaceCUDA<FoldTypeCUDA>::resolve_coordinates_freq(
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 void FFAWorkspaceCUDA<FoldTypeCUDA>::resolve_coordinates(
-    const plans::FFAPlan<HostFoldT>& ffa_plan, cudaStream_t stream) {
+    const plans::FFAPlan<HostFoldT>& ffa_plan,
+    cudaStream_t stream,
+    bool skip_final_accel) {
     copy_plan_to_device(ffa_plan, stream);
 
     const auto n_levels      = ffa_plan.get_n_levels();
@@ -135,6 +150,10 @@ void FFAWorkspaceCUDA<FoldTypeCUDA>::resolve_coordinates(
     const auto tseg_brute    = ffa_plan.get_config().get_tseg_brute();
     const auto nbins         = ffa_plan.get_config().get_nbins();
     auto coord_ptrs          = coords_d.get_raw_ptrs();
+    if (n_params == 2) {
+        resolve_coordinates_accel(ffa_plan, stream, skip_final_accel);
+        return;
+    }
     // Tail coordinates
     core::ffa_taylor_resolve_poly_batch_cuda(
         cuda_utils::as_span(m_param_counts_d),
@@ -151,6 +170,152 @@ void FFAWorkspaceCUDA<FoldTypeCUDA>::resolve_coordinates(
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
+void FFAWorkspaceCUDA<FoldTypeCUDA>::resolve_coordinates_accel(
+    const plans::FFAPlan<HostFoldT>& ffa_plan,
+    cudaStream_t stream,
+    bool skip_final) {
+    // Per-level row (accel) and column (freq) offsets; level 0 has none.
+    const auto& counts  = ffa_plan.get_param_counts();
+    const auto n_levels = ffa_plan.get_n_levels();
+    m_accel_offsets_h.assign(2 * (n_levels + 1), 0U);
+    SizeType rows = 0;
+    SizeType cols = 0;
+    for (SizeType l = 0; l < n_levels; ++l) {
+        m_accel_offsets_h[l]                = static_cast<uint32_t>(rows);
+        m_accel_offsets_h[n_levels + 1 + l] = static_cast<uint32_t>(cols);
+        if (l > 0) {
+            rows += counts[l][0];
+            cols += counts[l][1];
+        }
+    }
+    m_accel_offsets_h[n_levels]           = static_cast<uint32_t>(rows);
+    m_accel_offsets_h[(2 * n_levels) + 1] = static_cast<uint32_t>(cols);
+    if (m_accel_rows_d.size() < rows) {
+        m_accel_rows_d.resize(rows);
+    }
+    if (m_accel_cols_d.size() < cols) {
+        m_accel_cols_d.resize(cols);
+    }
+    if (m_accel_offsets_d.size() < m_accel_offsets_h.size()) {
+        m_accel_offsets_d.resize(m_accel_offsets_h.size());
+    }
+    upload(thrust::raw_pointer_cast(m_accel_offsets_d.data()),
+           m_accel_offsets_h.data(),
+           m_accel_offsets_h.size() * sizeof(uint32_t), stream);
+    core::ffa_taylor_resolve_accel_tables_cuda(
+        cuda_utils::as_span(m_param_counts_d),
+        cuda_utils::as_span(m_ncoords_offsets_d),
+        cuda_utils::as_span(m_param_limits_d),
+        cuda::std::span<const uint32_t>(
+            thrust::raw_pointer_cast(m_accel_offsets_d.data()),
+            m_accel_offsets_h.size()),
+        thrust::raw_pointer_cast(m_accel_rows_d.data()),
+        thrust::raw_pointer_cast(m_accel_cols_d.data()),
+        coords_d.get_raw_ptrs(), n_levels, ffa_plan.get_coord_size(), rows,
+        cols, ffa_plan.get_config().get_tseg_brute(),
+        ffa_plan.get_config().get_nbins(), stream,
+        skip_final ? ffa_plan.get_ncoords_offsets()[n_levels - 1]
+                   : ffa_plan.get_coord_size());
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+const ComplexTypeCUDA*
+FFAWorkspaceCUDA<FoldTypeCUDA>::bluestein_table(SizeType nbins) {
+    auto it = m_bluestein_d.find(nbins);
+    if (it == m_bluestein_d.end()) {
+        const auto table = core::ffa_fourier_bluestein_table(nbins);
+        it               = m_bluestein_d.emplace(nbins, table.size()).first;
+        cuda_utils::check_cuda_call(
+            cudaMemcpy(thrust::raw_pointer_cast(it->second.data()),
+                       table.data(), table.size() * sizeof(ComplexTypeCUDA),
+                       cudaMemcpyHostToDevice),
+            "FFAWorkspaceCUDA::bluestein_table: upload failed");
+    }
+    return thrust::raw_pointer_cast(it->second.data());
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+core::FFAAccelResolveLevel FFAWorkspaceCUDA<FoldTypeCUDA>::accel_resolve_level(
+    const plans::FFAPlan<HostFoldT>& ffa_plan, SizeType level) const {
+    const auto n_levels = ffa_plan.get_n_levels();
+    error_check::check(ffa_plan.get_n_params() == 2 && level >= 1 &&
+                           level < n_levels &&
+                           m_accel_offsets_h.size() == 2 * (n_levels + 1),
+                       "FFAWorkspaceCUDA::accel_resolve_level: resolve the "
+                       "accel plan first");
+    const auto& counts = ffa_plan.get_param_counts();
+    const auto& freq   = ffa_plan.get_config().get_param_limits()[1];
+    return {
+        .rows        = thrust::raw_pointer_cast(m_accel_rows_d.data()) +
+                       m_accel_offsets_h[level],
+        .cols        = thrust::raw_pointer_cast(m_accel_cols_d.data()) +
+                       m_accel_offsets_h[n_levels + 1 + level],
+        .n_accel_cur = static_cast<uint32_t>(counts[level][0]),
+        .n_freq_cur  = static_cast<uint32_t>(counts[level][1]),
+        .n_freq_prev = static_cast<uint32_t>(counts[level - 1][1]),
+        .nbins       = static_cast<uint32_t>(ffa_plan.get_config().get_nbins()),
+        .f_min       = freq.min,
+        .f_max       = freq.max,
+    };
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+void FFAWorkspaceCUDA<FoldTypeCUDA>::select_staging_slot(int slot) {
+    error_check::check(slot >= -1 && slot < 2,
+                       "FFAWorkspaceCUDA: staging slot must be -1, 0 or 1");
+    m_staging_slot = slot;
+    if (slot >= 0) {
+        m_staging[static_cast<SizeType>(slot)].used = 0;
+    }
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+const void* FFAWorkspaceCUDA<FoldTypeCUDA>::stage(const void* src,
+                                                  SizeType bytes) {
+    if (m_staging_slot < 0) {
+        return nullptr;
+    }
+    constexpr SizeType kAlign = 16;
+    auto& st              = m_staging[static_cast<SizeType>(m_staging_slot)];
+    const SizeType offset = ((st.used + kAlign - 1) / kAlign) * kAlign;
+    if (offset + bytes > st.capacity) {
+        // Grow (rare): the slot's previous chunk has finished, so nothing
+        // pending reads this buffer.
+        if (st.used != 0) {
+            // Earlier stagings of this chunk live in the buffer: fall back
+            // to a pageable copy for this one.
+            return nullptr;
+        }
+        const SizeType capacity =
+            std::max<SizeType>(2 * (offset + bytes), SizeType{1} << 16U);
+        void* ptr = nullptr;
+        cuda_utils::check_cuda_call(cudaMallocHost(&ptr, capacity),
+                                    "FFAWorkspaceCUDA: cudaMallocHost failed");
+        st.ptr.reset(static_cast<std::byte*>(ptr));
+        st.capacity = capacity;
+    }
+    std::byte* dst = st.ptr.get() + offset;
+    std::memcpy(dst, src, bytes);
+    st.used = offset + bytes;
+    return dst;
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+void FFAWorkspaceCUDA<FoldTypeCUDA>::upload(void* dst_d,
+                                            const void* src,
+                                            SizeType bytes,
+                                            cudaStream_t stream) {
+    if (bytes == 0) {
+        return;
+    }
+    const void* staged = stage(src, bytes);
+    cuda_utils::check_cuda_call(
+        cudaMemcpyAsync(dst_d, staged != nullptr ? staged : src, bytes,
+                        cudaMemcpyHostToDevice, stream),
+        "FFAWorkspaceCUDA: cudaMemcpyAsync upload failed");
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
 void FFAWorkspaceCUDA<FoldTypeCUDA>::copy_plan_to_device(
     const plans::FFAPlan<HostFoldT>& ffa_plan, cudaStream_t stream) {
 
@@ -161,26 +326,17 @@ void FFAWorkspaceCUDA<FoldTypeCUDA>::copy_plan_to_device(
     m_ncoords_offsets_h.assign(ncoords_offsets.begin(), ncoords_offsets.end());
     m_param_limits_h.assign(param_limits.begin(), param_limits.end());
 
-    // Pageable sources: each copy returns once its source is staged, and
-    // the members outlive this call, so no stream sync is needed.
-    cuda_utils::check_cuda_call(
-        cudaMemcpyAsync(thrust::raw_pointer_cast(m_param_counts_d.data()),
-                        m_param_counts_h.data(),
-                        m_param_counts_h.size() * sizeof(uint32_t),
-                        cudaMemcpyHostToDevice, stream),
-        "cudaMemcpyAsync param counts failed");
-    cuda_utils::check_cuda_call(
-        cudaMemcpyAsync(thrust::raw_pointer_cast(m_ncoords_offsets_d.data()),
-                        m_ncoords_offsets_h.data(),
-                        m_ncoords_offsets_h.size() * sizeof(uint32_t),
-                        cudaMemcpyHostToDevice, stream),
-        "cudaMemcpyAsync ncoords offsets failed");
-    cuda_utils::check_cuda_call(
-        cudaMemcpyAsync(thrust::raw_pointer_cast(m_param_limits_d.data()),
-                        m_param_limits_h.data(),
-                        m_param_limits_h.size() * sizeof(ParamLimit),
-                        cudaMemcpyHostToDevice, stream),
-        "cudaMemcpyAsync param limits failed");
+    // Pageable sources (members, so they outlive the copies) unless a
+    // pinned staging slot is selected.
+    upload(thrust::raw_pointer_cast(m_param_counts_d.data()),
+           m_param_counts_h.data(), m_param_counts_h.size() * sizeof(uint32_t),
+           stream);
+    upload(thrust::raw_pointer_cast(m_ncoords_offsets_d.data()),
+           m_ncoords_offsets_h.data(),
+           m_ncoords_offsets_h.size() * sizeof(uint32_t), stream);
+    upload(thrust::raw_pointer_cast(m_param_limits_d.data()),
+           m_param_limits_h.data(),
+           m_param_limits_h.size() * sizeof(ParamLimit), stream);
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
@@ -270,9 +426,10 @@ PruneWorkspaceCUDA<FoldTypeCUDA>::PruneWorkspaceCUDA(SizeType batch_size,
       leaves_stride((nparams + 2) * kLeavesParamStride),
       folds_stride(2 * nbins),
       branched_leaves_d(max_branched_leaves * leaves_stride),
-      branched_folds_d(max_branched_leaves * folds_stride),
+      branched_folds_d(batch_size * folds_stride),
       branched_scores_d(max_branched_leaves),
       branched_indices_d(max_branched_leaves),
+      passing_indices_d(max_branched_leaves),
       branched_param_idx_d(max_branched_param_idx),
       branched_phase_shift_d(max_branched_param_idx),
       validation_mask_d(max_branched_leaves),
@@ -285,6 +442,7 @@ PruneWorkspaceCUDA<FoldTypeCUDA>::get_memory_usage_bytes() const noexcept {
            (branched_folds_d.size() * sizeof(FoldTypeCUDA)) +
            (branched_scores_d.size() * sizeof(float)) +
            (branched_indices_d.size() * sizeof(uint32_t)) +
+           (passing_indices_d.size() * sizeof(uint32_t)) +
            (branched_param_idx_d.size() * sizeof(uint32_t)) +
            (branched_phase_shift_d.size() * sizeof(float)) +
            (validation_mask_d.size() * sizeof(uint8_t)) +
@@ -307,7 +465,7 @@ void PruneWorkspaceCUDA<FoldTypeCUDA>::validate(SizeType batch_size,
         branched_leaves_d.size(), batch_size * branch_max * leaves_stride,
         "PruneWorkspaceCUDA: branched_leaves_d size is too small");
     error_check::check_equal(
-        branched_folds_d.size(), batch_size * branch_max * folds_stride,
+        branched_folds_d.size(), batch_size * folds_stride,
         "PruneWorkspaceCUDA: branched_folds_d size is too small");
     error_check::check_equal(
         branched_scores_d.size(), batch_size * branch_max,
@@ -521,15 +679,18 @@ MinMaxFloat CUBScratchArena::wait_min_max() const {
 
 // --- EPWorkspaceCUDA implementation ---
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
-EPWorkspaceCUDA<FoldTypeCUDA>::EPWorkspaceCUDA(SizeType batch_size,
-                                               SizeType branch_max,
-                                               SizeType max_sugg,
-                                               SizeType ncoords_ffa,
-                                               SizeType nparams,
-                                               SizeType nbins,
-                                               SizeType nsegments,
-                                               cudaStream_t stream)
-    : world_tree(max_sugg, nparams, nbins, batch_size * branch_max),
+EPWorkspaceCUDA<FoldTypeCUDA>::EPWorkspaceCUDA(
+    SizeType batch_size,
+    SizeType branch_max,
+    SizeType max_sugg,
+    SizeType ncoords_ffa,
+    SizeType nparams,
+    SizeType nbins,
+    SizeType nsegments,
+    cudaStream_t stream,
+    cuda::std::span<FoldTypeCUDA> shared_folds)
+    : world_tree(
+          max_sugg, nparams, nbins, batch_size * branch_max, shared_folds),
       prune(batch_size, branch_max, nparams, nbins, nsegments),
       branch(batch_size, branch_max, nparams),
       scratch(batch_size, branch_max, stream) {

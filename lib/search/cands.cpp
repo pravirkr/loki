@@ -754,9 +754,12 @@ void FFAResultWriter::write_ffa_stats(const FFAStatsCollection& ffa_stats) {
 }
 
 // --- PruneResultWriter ---
-PruneResultWriter::PruneResultWriter(std::filesystem::path filename, Mode mode)
+PruneResultWriter::PruneResultWriter(std::filesystem::path filename,
+                                     Mode mode,
+                                     std::string group_path)
     : m_filepath(std::move(filename)),
-      m_mode(mode) {}
+      m_mode(mode),
+      m_group_path(std::move(group_path)) {}
 
 void PruneResultWriter::write_metadata(
     const std::vector<std::string>& param_names,
@@ -1004,9 +1007,10 @@ HighFive::File PruneResultWriter::open_file() const {
     return file;
 }
 
-HighFive::Group PruneResultWriter::open_runs_group(HighFive::File& file) {
-    return file.exist("runs") ? file.getGroup("runs")
-                              : file.createGroup("runs");
+HighFive::Group PruneResultWriter::open_runs_group(HighFive::File& file) const {
+    const auto path =
+        m_group_path.empty() ? std::string("runs") : m_group_path + "/runs";
+    return file.exist(path) ? file.getGroup(path) : file.createGroup(path);
 }
 
 void merge_prune_result_files(const std::filesystem::path& results_dir,

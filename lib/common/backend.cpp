@@ -47,6 +47,19 @@ bool is_available(Backend backend) {
     return std::ranges::find(avail, backend) != avail.end();
 }
 
+void initialize_device(Exec exec) {
+    if (exec.backend == Backend::kCPU) {
+        return;
+    }
+#ifdef LOKI_ENABLE_GPU
+    if (exec.backend == detail::kGPUBackend) {
+        detail::initialize_device_gpu(exec.device);
+        return;
+    }
+#endif
+    detail::throw_unavailable("initialize_device", exec.backend);
+}
+
 } // namespace loki
 
 namespace loki::detail {

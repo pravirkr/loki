@@ -15,6 +15,32 @@ and how `EPRegionPlanner` uses it. The model has two policies, for the CPU and
 the CUDA sweep (see [CUDA backend](#cuda-backend)); everything below is the CPU
 policy unless it says otherwise.
 
+`snr_min` is the minimum candidate SNR intended for the final HDF5 output of
+both FFA and EP searches, default 6.0. It is defined in `FFASearchConfig` and
+inherited by `EPSearchConfig` (TOML `[search].snr_min`, CLI `--snr-min`, Python
+`snr_min`). FFA applies it to candidate extraction; EP retains the setting for
+future output filtering and does not apply it yet.
+
+`EPSearchConfig::target_snr` is an entropic information limit used only for EP
+multipass and pipeline threshold design, independent of `snr_min` (TOML
+`[ep].target_snr`, CLI `--target-snr`, Python `target_snr`). An explicit positive finite number overrides the default.
+
+EP rejects frequency-only searches (use FFA) and `nbins_max > 1024` at
+every entry point (`EPRegionPlanner`, `EPMultiPass`, `EPFreqSweep`, the EP
+TOML), before any storage is allocated. `PulsarSearchConfig` itself accepts
+both, because it also configures FFA searches.
+
+Chunking is automatic. The sweep first forms regions for the required bin
+counts, then subdivides each region in frequency until every chunk and its
+shared workspace group fit the effective memory budget. It evaluates the
+region's thresholds for each chunk's actual branching pattern and selected
+reference segments, multiplies the per-seed forecast by the FFA seed count,
+and derives `max_sugg` from adjacent-stage overlap plus a worst branched
+batch, rounded up to a power of two. It first narrows chunks; only when the
+minimum chunk cannot fit does it reduce the parent batch. If even that cannot
+fit, planning fails with a required-memory diagnostic. The forecast is an
+estimate of survivor populations, with legacy trimming retained for overflow.
+
 ## What the model counts
 
 The sweep processes chunks in order. Contiguous chunks with the same `nbins`
@@ -27,7 +53,7 @@ peak = n_workers * thread_bytes(group) + shared_bytes + input_bytes
 ```
 
 | Term | Contents | Lifetime |
-|---|---|---|
+| --- | --- | --- |
 | `thread_bytes` | `ep_workspace_bytes` (world tree, prune and branch scratch, FFA seeds) + `ep_irfft_scratch_bytes` (Fourier folds only) + `ep_harvest_bytes` | one group |
 | `shared_bytes` | FFA workspace fold buffer and coordinates + output fold buffer, sized from the global maxima of `buffer_size` and `coord_size` | whole sweep |
 | `input_bytes` | `ts_e` and `ts_v`, `2 * nsamps * sizeof(float)` | whole sweep |
@@ -60,12 +86,18 @@ another on one stream, so the model has one worker whatever `nthreads` is
 (`EPMemoryContext::kind == EPMemoryKind::kCuda`, `n_workers == 1`).
 
 **Which memory.** On CUDA, `max_process_memory_gb` means device memory only.
-Host memory is never checked (it is small: the inputs and the HDF5 buffers).
+Host memory is never checked. Result snapshots are bounded to one active write
+and one waiting payload, in addition to the producer snapshot and inputs.
+The model fits execution buffers. Threshold selection/evaluation currently
+allocates separate CUDA simulation workspaces without a user-budget check;
+cuFFT work areas, tail buffers, and temporary growth peaks are covered by fixed
+reserves. Budget fitting therefore does not yet bound every planning/transient
+allocation.
 As for `FFAFreqSweep`, the plan is fitted to
 
 ```text
 limit = min(max_process_memory_gb, free device memory - kDeviceReserveGB)   (1 GB)
-effective limit = limit - kUnmodelledReserveGB                              (0.5 GB)
+effective limit = limit - reserve       (0.5 GB; 1.5 GB for multiple nbins)
 ```
 
 `kDeviceReserveGB` (`planner_memory.hpp`) covers the CUDA context, kernel
@@ -74,9 +106,9 @@ get_memory_limit_gb()` (`memory_limit_gb` in Python) is the limit the plan was
 fitted to.
 
 | Term | Contents | Lifetime |
-|---|---|---|
-| group workspace | `ep_cuda_ep_workspace_bytes` (`WorldTreeCUDA`, `PruneWorkspaceCUDA`, `BranchingWorkspaceCUDA`, `CUBScratchArena`, seeds, segment coordinates) + `ep_cuda_irfft_scratch_bytes` (the Fourier scratch; a two-element stand-in for float folds) | one group |
-| shared | `ep_cuda_shared_bytes`: FFA workspace fold buffer and coordinates, device output fold buffer | whole sweep |
+| --- | --- | --- |
+| group workspace | `ep_cuda_ep_workspace_bytes` (`WorldTreeCUDA`, `PruneWorkspaceCUDA`, `BranchingWorkspaceCUDA`, `CUBScratchArena`, seeds, segment coordinates) + `ep_cuda_irfft_scratch_bytes` (the fused pruning kernel's statistics and tile states, one 8-byte word per branched leaf at most; no IRFFT fold scratch) | one group |
+| shared | `ep_cuda_shared_bytes`: logical FFA internal fold size, coordinates, and seed-output fold buffer; internal/tree overlap is subtracted once from the group total | coordinates/output: whole sweep; shared fold arena: one group |
 | inputs | the device copy of `ts_e` and `ts_v`, `2 * nsamps * sizeof(float)` | whole sweep |
 | FFA transient | scratch the FFA of one chunk allocates while it runs, `ep_ffa_transient_bytes`; the largest of any chunk counts | whole sweep |
 
@@ -96,32 +128,78 @@ Differences from the CPU policy:
 - A workspace group is allocated once and its shape must equal every chunk's
   (`validate` uses `check_equal`), so the engine builds the workspace from the
   group maxima and checks each chunk fits within it.
-- The threshold scheme is the CUDA `DynamicThresholdScheme`. It is
-  reproducible for a given seed and batch size, and differs statistically from
-  the CPU scheme, so plans are not interchangeable between backends.
+- The threshold scheme is the CUDA `DynamicThresholdScheme`. It differs
+  statistically from the CPU scheme. A cache can be reused on the other
+  backend after adapting its batch and rechecking capacity and memory.
 - cuFFT work areas and the few small FFA arrays (counts, offsets, limits) are
   not in the exact model. `kDeviceReserveGB` (1 GB) is what the GPU planners
   leave for the CUDA context, kernel images and those work areas, and the
-  0.5 GB unmodelled reserve is a second margin.
-- The batch is 2^16 candidates on the GPU (`kEPBatchSizeCuda`) and 1024 on the
+  unmodelled reserve is a second margin: 0.5 GB for one `nbins`, or
+  1.5 GB when the sweep retains plans for multiple sizes.
+- The preferred batch is 2^16 parents on the GPU (`kEPBatchSizeCuda`) and 1024 on the
   CPU (`kEPBatchSize`). A batch is one kernel round trip and one world-tree
   synchronisation, so the GPU needs a large one: at 1024, one run of 2^25
   samples took about 63 s, at 2^16 about 15 s. The batch is part of the memory
-  model (the world tree and the prune scratch scale with `batch * branch_max`)
+  model (the world tree and the prune scratch scale with `batch * branch_max`).
+  If a minimum-width CUDA chunk cannot fit, planning retries with successively
+  halved batches, down to one parent. It never reduces forecast capacity
+  to force a fit. The chosen batch is stored per chunk
   and of the cache, which records it. On the GPU, a run that overflows the
   world tree trims at batch boundaries, so results can depend on the batch.
-- The FFT plans of the pruning are owned by the sweep, one exact-batch
-  `CUFFTManager` for every chunk's `nbins`, not built by each chunk's functors.
-  The FFA keeps its own manager, which needs ladder plans. The cuFFT work area
-  (up to 256 MB) now lasts for the sweep, outside the model; the 1 GB device
-  reserve covers it. The CPU sweep keeps one exact `FFTWManager` per worker, for
-  the same reason: plans are created lazily and are not shared across threads.
+- CUDA pruning uses on-chip transforms and owns no cuFFT plans or work area.
+  The FFA keeps its ladder-plan manager; its cuFFT work area remains outside
+  the exact model and is covered by the existing reserves. The CPU sweep keeps
+  one exact `FFTWManager` per pruning worker: plans are created lazily and are
+  not shared across threads.
 - `PruneRFIConfig` (pulsar mask, harvesting, impulsive veto) is not implemented
   on CUDA: an active one is rejected with `std::invalid_argument`.
+
+The FFA internal fold and EP tree folds use the same allocation in a sweep:
+the arena is `max(FFA internal bytes, tree fold bytes)`, rather than their sum.
+The FFA output folds remain separate throughout pruning. Allocation checks
+count the views logically; the sweep peak subtracts the shared overlap once.
+Standalone workspaces continue to own their buffers.
 
 At the start of `execute`, before the group workspace is allocated, the engine
 checks that the device still has room for that workspace and the transient FFA
 scratch (the shared buffers are already allocated).
+
+### FFA frequency sweep on CUDA
+
+`FFAFreqSweep` on CUDA never stores the final fold. The last two levels
+(one when the plan has only two) are merged on chip and scored in the same
+kernel (`lib/cuda/ffa_score_cuda.cu`; Fourier folds add an on-chip inverse
+FFT, `ffa_score_fourier_impl.cuh`: a direct transform for a power-of-two
+`nbins` from 32, Bluestein's algorithm through power-of-two transforms for
+any other `nbins` up to 1024, both on the portable block FFT
+`ffa_portable_fft.cuh`; see `docs/fft.md`). Accel searches also resolve the final level's
+coordinates on the fly instead of storing them. The planner models what that
+path allocates (`planner_memory.hpp`):
+
+| Term | Contents |
+| --- | --- |
+| fold buffers | two ping-pong buffers of `gpu_sweep_buffer_size(plan)`: the largest level the sweep stores, i.e. every level but the last `gpu_fused_score_depth` ones |
+| coordinates | `gpu_sweep_coord_size(plan)`: every level's resolved coordinates, minus the final level for accel searches |
+| score scratch | two slots (the GPU fills one while the host copies the other) of `min(ncoords * n_widths, kGpuScoreScratchCap)` scores and indices; `kGpuScoreScratchCap = 2^24` |
+| brute fold | the phase-bin map, `nfreqs * segment_len` `uint32_t` |
+| inputs | `ts_e`, `ts_v` |
+
+A chunk the fused path cannot take (more than `kGpuFusedMaxWidths = 32` widths,
+a single level, or a Fourier `nbins` above 1024) is planned and run unfused,
+with full buffers and an uncapped scratch. The Bluestein tables (one per
+non-power-of-two `nbins`, at most 3072 complex values each) are uploaded once
+per sweep and covered by the reserve. A fused chunk whose passing (profile, width) pairs exceed the scratch
+slot drops the excess, counts it, and is scored again after the sweep in
+profile ranges that fit. The signed fold-stride index limit no longer applies
+to fused chunks (the final fold is never indexed). The small per-chunk tables
+(frequencies, accel resolve tables, pinned staging) grow on demand and are
+covered by the reserves.
+
+The chunks run as a two-slot pipeline: chunk i's kernels are queued while the
+host copies chunk i - 1's candidates and appends them to the result file. Every
+per-chunk upload goes through pinned staging, and no per-chunk device
+allocation or legacy-stream operation is left on the fused path, so the queue
+never drains between chunks.
 
 ## Reserve
 
@@ -149,6 +227,23 @@ checked.
 
 ## Planning
 
+Thresholds are selected once per coarse region. Their population forecast is
+then evaluated for each chunk's actual branching pattern and selected reference
+segments, with a fixed evaluation seed distinct from threshold selection.
+Identical forecasts are cached across probes and replans. The estimate comes
+from Monte Carlo trials and is not a deterministic bound on real data.
+
+For each run, `L[0] = n_seeds`, and subsequent populations are
+`ceil(n_seeds * state.complexity)`. The largest adjacent sum bounds forecast
+parent/survivor overlap in the ring. Add `batch_size * branch_max + 1`, round
+up to a power of two, and pass that capacity into the complete memory model.
+`max_passing_candidates` is an FFA output-buffer setting and does not control EP.
+
+The minimum nominal frequency chunk width is currently 0.01 Hz (or the
+remaining band if smaller), plus drift padding. A minimum-chunk failure refers
+to this permitted width; it does not establish that every finer grid-aligned
+chunk would be infeasible.
+
 `EPRegionPlanner` splits each FFA region into chunks, growing each chunk until
 the sweep would exceed the effective limit with it (bisection on the width).
 Because the shared FFA buffers are sized from the global maxima, a chunk placed
@@ -172,68 +267,10 @@ evaluations (each builds an `FFAPlan`) are memoised across passes.
 one chunk run alone. `EPRegionStats::get_max_memory_gb()` is the sweep peak
 above, the value compared with the limit.
 
-## World-tree capacity
-
-A chunk's world tree (`max_sugg`, the candidates it holds) is planned as
-`ncoords * 1.25 * peak_complexity`, where `peak_complexity` is the expected
-number of surviving leaves per coordinate at the peak stage of the threshold
-scheme. That product is the candidate count if nothing is trimmed, and it is
-not bounded: at 2^25 samples it reaches about 1e9 candidates, and a chunk
-then needs terabytes, so the band cannot be planned on a device.
-
-The planner therefore caps it at `kEPMaxWorldTreeCapacity` (2^22 candidates,
-`lib/algorithms/ep_memory.hpp`). The world tree already trims to the top-k
-when it is full (`lib/utils/world_tree.hpp`), so the cap bounds the memory,
-and a run changes only where it overflows. The cap is applied on both backends
-and to the CUDA batch floor, `batch_size * branch_max + 1`, which still wins
-when it is larger. Plans made before the cap are replanned (cache 1.6.0).
-
-Scale of the unbounded value, from the planner, one chunk per band
-(`peak_complexity` grows with the segment length, so the sample count
-matters most):
-
-| samples | band (Hz) | acc, jerk | chunk memory without the cap |
-|---|---|---|---|
-| 2^21 | 140-145 | +-1000, +-4 | 0.11 GB (1 chunk) |
-| 2^23 | 140-145 | +-1000, +-4 | 10.7 GB (1 chunk) |
-| 2^24 | 140-145 | +-1000, +-4 | 39.5 GB (3 chunks) |
-| 2^25 | 144.99-145 | +-600, +-2.5 | infeasible (962 GB minimum chunk) |
-
-The capped plan of 2^25 samples over 140-145 Hz with +-1000 and +-4 is one
-chunk at 3.87 GB on a 40 GB limit, with the 1024 batch of the CPU. With the
-GPU batch of 2^16 the same chunk is planned at 7.18 GB.
-
-Production-scale run (`bench/scripts/ep_production_cuda.py`, the same search
-as `ep_production_cuda.toml`, L40S): 2^25 samples, 140-145 Hz, 16 runs, one
-chunk. The device high-water mark was 7.27 GB against a model of 7.18 GB
-(residual +0.10 GB). The run took 269 s, about 15 s per run, and recovered the
-injected pulse: jerk 2.0001 (2), acceleration 500.02 (500), frequency
-142.8571 Hz (142.8571). The run is not optimised; per-run cost is the pruning
-loop, which the next cycle will look at.
-
-## Runtime checks
-
-`EPFreqSweep` checks the plan as it runs:
-
-- after allocating the shared FFA buffers, their size must equal the model;
-- before each group, the model's total must fit the effective limit (a
-  `std::runtime_error` otherwise, e.g. for a hand-edited plan);
-- after allocating a group's workspaces, their size must not exceed the model
-  (a `std::logic_error`: the model has drifted from the allocations).
-
-## Plan cache
-
-The plan cache (`plan_cache_file`) is version 1.6.0. It stores the model inputs
-next to the chunks: `ep_memory_model_version` (`kEPMemoryModelVersion`,
-currently 3), `batch_size`, `n_workers`, `harvest_enabled`, `max_harvests` and
-`harvest_store_folds`, and also `ep_backend` (`cpu` or `cuda`),
-`ep_memory_model_kind` and `dts_batch_size` (the batch size of the threshold
-simulation). `device_arch` (`sm_89`, or `host` for a CPU plan) is recorded and
-not checked. A cache written on the other backend is accepted: the threshold
-scheme is statistically equivalent, not identical. Loading rejects a cache
-whose inputs differ. The worker count and the thread count are compared only
-for a cache from the same backend, because a CUDA plan has one worker and fits
-any CPU worker count. Whatever the backend, loading recomputes the peak with
-the current policy against the current limit, so a plan that does not fit is
-rejected. Bump `kEPMemoryModelVersion` with every change to the formulas, and the
-cache version in `ep_regions.cpp` with every change to the file layout.
+The CUDA sweep writes owned host snapshots directly into the final HDF5
+chunk/run layout using one writer thread. Successful completion waits for all
+writes and propagates errors; interrupted files are not resumable. The CLI
+caches plans in `<outdir>/<prefix>_ep_plan.h5` by default. Set
+`output.use_plan_cache = false` or pass `--no-plan-cache` to disable automatic
+caching. Explicit cache paths retain strict validation; obsolete implicit
+caches are regenerated.

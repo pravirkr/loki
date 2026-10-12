@@ -31,6 +31,7 @@
 #include "lib/detail/error_check.hpp"
 #include "lib/detail/psr_utils.hpp"
 #include "lib/detail/utils.hpp"
+#include "lib/search/ep_support.hpp"
 
 namespace loki::search {
 
@@ -99,6 +100,7 @@ void validate_toml_document(const toml::table& root,
     };
     static constexpr std::array kEPKeys{
         std::string_view{"poly_basis"},
+        std::string_view{"target_snr"},
         std::string_view{"min_pd"},
         std::string_view{"ref_ducy"},
         std::string_view{"prune_poly_order"},
@@ -172,6 +174,7 @@ void validate_toml_document(const toml::table& root,
         std::string_view{"outdir"},
         std::string_view{"prefix"},
         std::string_view{"plan_cache"},
+        std::string_view{"use_plan_cache"},
     };
     const std::span<const std::string_view> top_level =
         allow_ep ? std::span<const std::string_view>(kTopLevelEP)
@@ -469,7 +472,7 @@ acc_max = 0.0
 jerk_min = 0.0
 jerk_max = 0.0
 
-# Number of profile bins at shortest search period (must be >= 2 and power of 2)
+# Number of profile bins at shortest search period (must be >= 2)
 nbins = 64
 
 # Tolerance in bins across observation duration (typically 1.0)
@@ -481,8 +484,8 @@ ducy_max = 0.2
 # Boxcar width trial geometric scale factor (typically 1.2 - 1.5)
 wtsp = 1.5
 
-# Minimum signal-to-noise ratio detection threshold for candidate extraction
-snr_min = 5.0
+# Minimum candidate SNR written to final HDF5 (EP filtering reserved for later)
+snr_min = 6.0
 
 # Folding domain: true for Fourier-domain FFA (recommended), false for Time-domain FFA
 use_fourier = true
@@ -1495,14 +1498,26 @@ public:
            double m_p_min,
            double propagator_significance,
            double validation_significance,
-           bool use_conservative_tile)
+           bool use_conservative_tile,
+           SizeType nparams,
+           std::optional<double> target_snr)
         : m_prune_poly_order(prune_poly_order),
           m_p_orb_min(p_orb_min),
           m_m_c_max(m_c_max),
           m_m_p_min(m_p_min),
           m_propagator_significance(propagator_significance),
           m_validation_significance(validation_significance),
-          m_use_conservative_tile(use_conservative_tile) {}
+          m_use_conservative_tile(use_conservative_tile),
+          m_target_snr_override(target_snr),
+          m_target_snr(target_snr.value_or(nparams <= 2   ? 8.5
+                                           : nparams == 3 ? 9.2
+                                           : nparams == 4 ? 9.8
+                                                          : 10.0)) {
+        if (!utils::is_finite(m_target_snr) || m_target_snr <= 0.0) {
+            throw std::invalid_argument(
+                "target_snr must be finite and positive");
+        }
+    }
 
     SizeType m_prune_poly_order;
     double m_p_orb_min;
@@ -1511,6 +1526,8 @@ public:
     double m_propagator_significance;
     double m_validation_significance;
     bool m_use_conservative_tile;
+    std::optional<double> m_target_snr_override;
+    double m_target_snr;
 
     double get_x_mass_const() const noexcept {
         constexpr double kSafety = 1.1;
@@ -1547,7 +1564,8 @@ EPSearchConfig::EPSearchConfig(SizeType nsamps,
                                double propagator_significance,
                                double validation_significance,
                                bool use_conservative_tile,
-                               bool use_boxcar_kadane)
+                               bool use_boxcar_kadane,
+                               std::optional<double> target_snr)
     : FFASearchConfig(nsamps,
                       tsamp,
                       nbins,
@@ -1572,7 +1590,9 @@ EPSearchConfig::EPSearchConfig(SizeType nsamps,
                                          m_p_min,
                                          propagator_significance,
                                          validation_significance,
-                                         use_conservative_tile)) {}
+                                         use_conservative_tile,
+                                         get_nparams(),
+                                         target_snr)) {}
 
 EPSearchConfig::EPSearchConfig(FFASearchConfig ffa_cfg,
                                SizeType prune_poly_order,
@@ -1581,7 +1601,8 @@ EPSearchConfig::EPSearchConfig(FFASearchConfig ffa_cfg,
                                double m_p_min,
                                double propagator_significance,
                                double validation_significance,
-                               bool use_conservative_tile)
+                               bool use_conservative_tile,
+                               std::optional<double> target_snr)
     : FFASearchConfig(std::move(ffa_cfg)),
       m_ep_impl(std::make_unique<EPImpl>(prune_poly_order,
                                          p_orb_min,
@@ -1589,7 +1610,9 @@ EPSearchConfig::EPSearchConfig(FFASearchConfig ffa_cfg,
                                          m_p_min,
                                          propagator_significance,
                                          validation_significance,
-                                         use_conservative_tile)) {}
+                                         use_conservative_tile,
+                                         get_nparams(),
+                                         target_snr)) {}
 
 EPSearchConfig::~EPSearchConfig()                                    = default;
 EPSearchConfig::EPSearchConfig(EPSearchConfig&&) noexcept            = default;
@@ -1608,6 +1631,9 @@ EPSearchConfig& EPSearchConfig::operator=(const EPSearchConfig& other) {
 
 SizeType EPSearchConfig::get_prune_poly_order() const noexcept {
     return m_ep_impl->m_prune_poly_order;
+}
+double EPSearchConfig::get_target_snr() const noexcept {
+    return m_ep_impl->m_target_snr;
 }
 double EPSearchConfig::get_p_orb_min() const noexcept {
     return m_ep_impl->m_p_orb_min;
@@ -1636,12 +1662,12 @@ EPSearchConfig EPSearchConfig::get_updated_ep_config(
     double eta,
     std::span<const ParamLimit> param_limits) const {
     auto ffa = get_updated_config(nbins, eta, param_limits);
-    return EPSearchConfig(std::move(ffa), m_ep_impl->m_prune_poly_order,
-                          m_ep_impl->m_p_orb_min, m_ep_impl->m_m_c_max,
-                          m_ep_impl->m_m_p_min,
-                          m_ep_impl->m_propagator_significance,
-                          m_ep_impl->m_validation_significance,
-                          m_ep_impl->m_use_conservative_tile);
+    return EPSearchConfig(
+        std::move(ffa), m_ep_impl->m_prune_poly_order, m_ep_impl->m_p_orb_min,
+        m_ep_impl->m_m_c_max, m_ep_impl->m_m_p_min,
+        m_ep_impl->m_propagator_significance,
+        m_ep_impl->m_validation_significance,
+        m_ep_impl->m_use_conservative_tile, m_ep_impl->m_target_snr_override);
 }
 
 EPSearchConfig EPSearchConfig::get_updated_ep_config(SizeType nbins,
@@ -1649,12 +1675,12 @@ EPSearchConfig EPSearchConfig::get_updated_ep_config(SizeType nbins,
                                                      double f_min,
                                                      double f_max) const {
     auto ffa = get_updated_config(nbins, eta, f_min, f_max);
-    return EPSearchConfig(std::move(ffa), m_ep_impl->m_prune_poly_order,
-                          m_ep_impl->m_p_orb_min, m_ep_impl->m_m_c_max,
-                          m_ep_impl->m_m_p_min,
-                          m_ep_impl->m_propagator_significance,
-                          m_ep_impl->m_validation_significance,
-                          m_ep_impl->m_use_conservative_tile);
+    return EPSearchConfig(
+        std::move(ffa), m_ep_impl->m_prune_poly_order, m_ep_impl->m_p_orb_min,
+        m_ep_impl->m_m_c_max, m_ep_impl->m_m_p_min,
+        m_ep_impl->m_propagator_significance,
+        m_ep_impl->m_validation_significance,
+        m_ep_impl->m_use_conservative_tile, m_ep_impl->m_target_snr_override);
 }
 
 // ==============================================================================
@@ -1668,6 +1694,9 @@ namespace {
 /// Reads the [ep] table and output.plan_cache of a validated document.
 void read_ep_tables(const toml::table& tbl, EPTomlConfig& cfg) {
     if (const auto* ep = tbl["ep"].as_table()) {
+        if (const auto val = read_number(*ep, "target_snr", "ep.target_snr")) {
+            cfg.target_snr = *val;
+        }
         if (auto val = (*ep)["poly_basis"].value<std::string>()) {
             cfg.poly_basis = *val;
         }
@@ -1721,6 +1750,9 @@ void read_ep_tables(const toml::table& tbl, EPTomlConfig& cfg) {
         }
     }
     if (const auto* output = tbl["output"].as_table()) {
+        if (auto val = (*output)["use_plan_cache"].value<bool>()) {
+            cfg.use_plan_cache = *val;
+        }
         if (auto val = (*output)["plan_cache"].value<std::string>()) {
             cfg.plan_cache = std::filesystem::path(*val);
         }
@@ -1730,6 +1762,16 @@ void read_ep_tables(const toml::table& tbl, EPTomlConfig& cfg) {
 /// Range checks that the types cannot express. Used on parse and before a
 /// config is turned into a search config.
 void validate_ep_config(const EPTomlConfig& cfg) {
+    if (cfg.nbins_max > detail::kEPMaxNbins ||
+        cfg.nbins > detail::kEPMaxNbins) {
+        throw std::invalid_argument(std::format(
+            "EP nbins and nbins_max must be <= {}", detail::kEPMaxNbins));
+    }
+    if (cfg.target_snr &&
+        (!utils::is_finite(*cfg.target_snr) || *cfg.target_snr <= 0.0)) {
+        throw std::invalid_argument(
+            "ep.target_snr must be finite and positive");
+    }
     if (cfg.poly_basis != "taylor" && cfg.poly_basis != "chebyshev") {
         throw std::invalid_argument(std::format(
             "ep.poly_basis must be 'taylor' or 'chebyshev' (got '{}')",
@@ -1840,7 +1882,9 @@ birdies = []
 f_min = 0.5
 f_max = 100.0
 
-# Optional line-of-sight acceleration limits in m/s^2 (omit or set equal to 0 for freq-only)
+# Line-of-sight acceleration limits in m/s^2: set a physical search range.
+# Frequency-only EP is unsupported; use the FFA pipeline for that search.
+# Edit these zero placeholders before executing this template.
 acc_min = 0.0
 acc_max = 0.0
 
@@ -1848,7 +1892,7 @@ acc_max = 0.0
 jerk_min = 0.0
 jerk_max = 0.0
 
-# Number of profile bins at shortest search period (must be >= 2 and power of 2)
+# Number of profile bins at shortest search period (must be >= 2)
 nbins = 64
 
 # Tolerance in bins across observation duration (typically 1.0)
@@ -1860,8 +1904,8 @@ ducy_max = 0.2
 # Boxcar width trial geometric scale factor (typically 1.2 - 1.5)
 wtsp = 1.5
 
-# Minimum signal-to-noise ratio detection threshold for candidate extraction
-snr_min = 5.0
+# Minimum candidate SNR written to final HDF5 (EP filtering reserved for later)
+snr_min = 6.0
 
 # Folding domain: true for Fourier-domain FFA (recommended), false for Time-domain FFA
 use_fourier = true
@@ -1870,10 +1914,16 @@ use_fourier = true
 use_boxcar_kadane = false
 
 [ep]
+# Entropic information limit for EP multipass/pipeline threshold design only.
+# Omit to use the search default (from the parameter count):
+# frequency/accel 8.5, jerk 9.2, snap 9.8, circular 10.0. Independent of search.snr_min.
+# target_snr = 9.2
+
 # Polynomial basis of the pruning: "taylor" or "chebyshev"
 poly_basis = "taylor"
 
-# Minimum detection probability of the threshold scheme, in (0, 1]
+# Requested detection probability cutoff, in (0, 1].
+# Shortfalls during selection or evaluation warn and are accepted temporarily.
 min_pd = 0.1
 
 # Reference duty cycle of the pruning, in (0, 1]
@@ -1911,7 +1961,7 @@ max_process_memory_gb = 8.0
 # Octave scaling factor between successive search bands (2.0 = octave doubling)
 octave_scale = 2.0
 
-# Maximum number of fold bins for long-period bands
+# Maximum number of EP fold bins for long-period bands (cannot exceed 1024)
 nbins_max = 1024
 
 # Minimum number of bins for lossy brute force initial stage
@@ -1938,7 +1988,9 @@ outdir = "./"
 prefix = "loki"
 
 # Plan cache (HDF5). `search ep --plan-only` writes <outdir>/<prefix>_ep_plan.h5
-# when this is omitted. A search reuses a cache that is named here.
+# when this is omitted. Searches also cache here by default.
+# Disable automatic plan caching (explicit plan_cache paths still apply).
+use_plan_cache = true
 # plan_cache = "./loki_ep_plan.h5"
 )";
 }
@@ -2002,6 +2054,10 @@ EPTomlConfig::to_ep_search_config(std::optional<SizeType> override_nsamps,
             "it prunes");
     }
     auto ffa = to_search_config(override_nsamps, override_tsamp);
+    if (ffa.get_nparams() < 2) {
+        throw std::invalid_argument(
+            "frequency-only EP is unsupported; use FFA");
+    }
     // The pruning needs at least one FFA level above the brute-force segment,
     // so the FFA segment must be shorter than the series.
     if (ffa.get_bseg_ffa() >= ffa.get_nsamps()) {
@@ -2012,7 +2068,8 @@ EPTomlConfig::to_ep_search_config(std::optional<SizeType> override_nsamps,
     }
     return EPSearchConfig(std::move(ffa), prune_poly_order, p_orb_min, m_c_max,
                           m_p_min, propagator_significance,
-                          validation_significance, use_conservative_tile);
+                          validation_significance, use_conservative_tile,
+                          target_snr);
 }
 
 } // namespace loki::search

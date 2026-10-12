@@ -14,6 +14,7 @@
 
 #include "lib/cuda/cub_helpers.cuh"
 #include "lib/cuda/cuda_utils.cuh"
+#include "lib/cuda/kadane_device.cuh"
 #include "lib/cuda/workspace_cuda.cuh"
 #include "lib/detail/error_check.hpp"
 #include "lib/detection/kadane.hpp"
@@ -22,18 +23,27 @@ namespace loki::detection {
 
 namespace {
 
+using detail::kadane_group_max_snr;
+using detail::kadane_lanes;
+using detail::kadane_profiles_per_warp;
+using detail::kadane_snr;
+using detail::KadaneLanes;
+
 template <int BlockThreads, int MaxBins, int ProfilesPerWarp>
 __global__ void
 kernel_kadane_warp_multiprofile(const float* __restrict__ folds,
                                 int nprofiles,
                                 int nbins,
                                 const float* __restrict__ biases,
+                                int nbiases,
                                 float* __restrict__ scores,
                                 const uint8_t* __restrict__ validation_mask,
                                 uint8_t* __restrict__ filtered_mask,
                                 float threshold) {
     constexpr int kWarpSize      = 32;
     constexpr int kWarpsPerBlock = BlockThreads / kWarpSize;
+    static_assert(ProfilesPerWarp <= kadane_profiles_per_warp(2),
+                  "a warp scores at most 16 profiles");
 
     const int warp_id = static_cast<int>(threadIdx.x) / kWarpSize;
     const int lane_id = static_cast<int>(threadIdx.x) % kWarpSize;
@@ -45,15 +55,15 @@ kernel_kadane_warp_multiprofile(const float* __restrict__ folds,
         return;
     }
 
-    // Early validation: one lane per profile (b_idx == 0) clears filtered_mask
-    if ((lane_id % 3) == 0) {
-        const int p_sub = lane_id / 3;
-        if (p_sub < ProfilesPerWarp) {
-            const int g_profile = profile_start_idx + p_sub;
-            if (g_profile < nprofiles && validation_mask[g_profile] == 0) {
-                filtered_mask[g_profile] = 0;
-            }
-        }
+    // One lane per bias; a group of nbiases lanes scores one profile.
+    KadaneLanes lanes   = kadane_lanes(lane_id, nbiases);
+    lanes.in_group      = lanes.in_group && lanes.profile < ProfilesPerWarp;
+    const int g_profile = profile_start_idx + lanes.profile;
+    const bool in_range = lanes.in_group && g_profile < nprofiles;
+
+    // Early validation: one lane per profile clears filtered_mask
+    if (in_range && lanes.bias == 0 && validation_mask[g_profile] == 0) {
+        filtered_mask[g_profile] = 0;
     }
     __syncwarp();
 
@@ -65,9 +75,9 @@ kernel_kadane_warp_multiprofile(const float* __restrict__ folds,
     // 1. Cooperative, conflict-free loading and on-the-fly normalization of
     // profiles
     for (int p_sub = 0; p_sub < ProfilesPerWarp; ++p_sub) {
-        const int g_profile = profile_start_idx + p_sub;
-        if (g_profile < nprofiles && validation_mask[g_profile] != 0) {
-            const float* e_ptr    = folds + g_profile * 2 * nbins;
+        const int g = profile_start_idx + p_sub;
+        if (g < nprofiles && validation_mask[g] != 0) {
+            const float* e_ptr    = folds + g * 2 * nbins;
             const float* v_ptr    = e_ptr + nbins;
             float* s_fold_profile = s_fold_warp + p_sub * nbins_padded;
             for (int bin_idx = lane_id; bin_idx < nbins; bin_idx += kWarpSize) {
@@ -79,129 +89,15 @@ kernel_kadane_warp_multiprofile(const float* __restrict__ folds,
 
     __syncwarp();
 
-    // 2. Cooperative mean calculation: threads of the warp sum sections of each
-    // profile
-    float partial_sum            = 0.0F;
-    constexpr int active_threads = ProfilesPerWarp * 3;
-    const int p_sub              = lane_id / 3;
-    const int b_idx              = lane_id % 3;
-    const int base_lane          = p_sub * 3;
-
-    if (lane_id < active_threads) {
-        const int g_profile = profile_start_idx + p_sub;
-        if (g_profile < nprofiles && validation_mask[g_profile] != 0) {
-            const float* s_fold_profile = s_fold_warp + p_sub * nbins_padded;
-            const int chunk             = (nbins + 2) / 3; // split into parts
-            const int start             = b_idx * chunk;
-            const int end               = min(nbins, start + chunk);
-            for (int j = start; j < end; ++j) {
-                partial_sum += s_fold_profile[j];
-            }
-        }
-    }
-
-    // Shuffle within each 3-lane group to get total sum per profile
-    float total_sum                 = partial_sum;
-    constexpr uint32_t kShuffleMask = 0xFFFFFFFF; // all 32 lanes participate
-
-    int next1 = b_idx + 1;
-    if (next1 >= 3)
-        next1 = 0;
-    int next2 = b_idx + 2;
-    if (next2 >= 3)
-        next2 -= 3;
-
-    total_sum += __shfl_sync(kShuffleMask, partial_sum, base_lane + next1);
-    total_sum += __shfl_sync(kShuffleMask, partial_sum, base_lane + next2);
-
-    const float mean_val = total_sum / static_cast<float>(nbins);
-
-    // 3. Parallel Bias Kadane scans
-    if (lane_id < active_threads) {
-        const int g_profile = profile_start_idx + p_sub;
-        if (g_profile < nprofiles && validation_mask[g_profile] != 0) {
-            const float bias            = biases[b_idx];
-            const float* s_fold_profile = s_fold_warp + p_sub * nbins_padded;
-
-            float max_sum = cuda::std::numeric_limits<float>::lowest();
-            float cur_max = 0.0F;
-            float w_cur   = 0.0F;
-            float best_w  = 1.0F;
-
-            float min_sum = cuda::std::numeric_limits<float>::max();
-            float cur_min = 0.0F;
-            float wc_min  = 0.0F;
-            float best_wm = 1.0F;
-
-            const float shift = mean_val + bias;
-            for (int j = 0; j < nbins; ++j) {
-                const float val = s_fold_profile[j] - shift;
-
-                // Track Max Contiguous Subarray
-                cur_max += val;
-                w_cur += 1.0F;
-
-                const bool update_max = (cur_max > max_sum);
-                max_sum               = update_max ? cur_max : max_sum;
-                best_w                = update_max ? w_cur : best_w;
-
-                const bool reset_max = (cur_max < 0.0F);
-                cur_max              = reset_max ? 0.0F : cur_max;
-                w_cur                = reset_max ? 0.0F : w_cur;
-
-                // Track Min Contiguous Subarray (for wrapped candidate)
-                cur_min += val;
-                wc_min += 1.0F;
-
-                const bool update_min = (cur_min < min_sum);
-                min_sum               = update_min ? cur_min : min_sum;
-                best_wm               = update_min ? wc_min : best_wm;
-
-                const bool reset_min = (cur_min > 0.0F);
-                cur_min              = reset_min ? 0.0F : cur_min;
-                wc_min               = reset_min ? 0.0F : wc_min;
-            }
-
-            // Candidate 1: Standard Non-wrapped
-            float best_biased_sum = max_sum;
-            int best_width        = static_cast<int>(best_w);
-
-            // Candidate 2: Wrapped maximum
-            const int excluded_width = static_cast<int>(best_wm);
-            const int wrapped_width  = nbins - excluded_width;
-
-            const float wrapped_sum =
-                (-static_cast<float>(nbins) * bias) - min_sum;
-            const bool use_wrapped =
-                (wrapped_width > 0) && (wrapped_sum > best_biased_sum);
-            best_biased_sum = use_wrapped ? wrapped_sum : best_biased_sum;
-            best_width      = use_wrapped ? wrapped_width : best_width;
-
-            float snr = cuda::std::numeric_limits<float>::lowest();
-            if (best_width > 0 && best_width < nbins) {
-                const float unbiased_sum =
-                    best_biased_sum + (static_cast<float>(best_width) * bias);
-
-                const float scale = sqrtf(
-                    static_cast<float>(nbins) /
-                    static_cast<float>(best_width * (nbins - best_width)));
-
-                snr = unbiased_sum * scale;
-            }
-
-            // Shuffle-based max reduction across the 3 biases for this profile
-            float max_snr = snr;
-            const float other_snr1 =
-                __shfl_sync(kShuffleMask, snr, base_lane + next1);
-            const float other_snr2 =
-                __shfl_sync(kShuffleMask, snr, base_lane + next2);
-            max_snr = fmaxf(max_snr, fmaxf(other_snr1, other_snr2));
-
-            if (b_idx == 0) {
-                scores[g_profile]        = max_snr;
-                filtered_mask[g_profile] = (max_snr >= threshold) ? 1 : 0;
-            }
-        }
+    const bool active = in_range && validation_mask[g_profile] != 0;
+    const float bias  = lanes.in_group ? __ldg(&biases[lanes.bias]) : 0.0F;
+    const float* s_fold_profile =
+        s_fold_warp + (lanes.in_group ? lanes.profile : 0) * nbins_padded;
+    const float max_snr = kadane_group_max_snr(s_fold_profile, active, nbins,
+                                               bias, nbiases, lanes);
+    if (active && lanes.bias == 0) {
+        scores[g_profile]        = max_snr;
+        filtered_mask[g_profile] = (max_snr >= threshold) ? 1 : 0;
     }
 }
 
@@ -211,6 +107,7 @@ kernel_kadane_segment_parallel(const float* __restrict__ folds,
                                int nprofiles,
                                int nbins,
                                const float* __restrict__ biases,
+                               int nbiases,
                                float* __restrict__ scores,
                                const uint8_t* __restrict__ validation_mask,
                                uint8_t* __restrict__ filtered_mask,
@@ -218,8 +115,8 @@ kernel_kadane_segment_parallel(const float* __restrict__ folds,
     constexpr int kWarpSize      = 32;
     constexpr int kWarpsPerBlock = BlockThreads / kWarpSize;
     constexpr int kSegments      = 10;
-    constexpr int kBiases        = 3;
-    constexpr int kActiveThreads = kSegments * kBiases; // 30
+    // 10 segments x 2 or 3 biases: 20 or 30 active lanes
+    const int active_threads = kSegments * nbiases;
 
     const int warp_id = static_cast<int>(threadIdx.x) / kWarpSize;
     const int lane_id = static_cast<int>(threadIdx.x) % kWarpSize;
@@ -259,18 +156,19 @@ kernel_kadane_segment_parallel(const float* __restrict__ folds,
     const float mean_val = total_profile_sum / static_cast<float>(nbins);
 
     // ─── Phase 3: Segment-parallel Kadane (30 active lanes) ─────────────
-    // Lane mapping: seg_idx = lane_id / 3 (0-9), b_idx = lane_id % 3 (0-2)
-    const int seg_idx   = lane_id / kBiases;
-    const int b_idx     = lane_id % kBiases;
+    // Lane mapping: seg_idx = lane_id / nbiases (0-9), b_idx = lane_id %
+    // nbiases
+    const int seg_idx   = lane_id / nbiases;
+    const int b_idx     = lane_id % nbiases;
     const int seg_chunk = (nbins + kSegments - 1) / kSegments;
     const int seg_start = seg_idx * seg_chunk;
     const int seg_end   = min(nbins, seg_start + seg_chunk);
-    const int seg_len   = (lane_id < kActiveThreads && seg_start < nbins)
+    const int seg_len   = (lane_id < active_threads && seg_start < nbins)
                               ? (seg_end - seg_start)
                               : 0;
 
     const float bias =
-        (lane_id < kActiveThreads) ? __ldg(&biases[b_idx]) : 0.0F;
+        (lane_id < active_threads) ? __ldg(&biases[b_idx]) : 0.0F;
     const float shift = mean_val + bias;
 
     // Segment metadata — initialized as merge identity (empty segment)
@@ -376,14 +274,14 @@ kernel_kadane_segment_parallel(const float* __restrict__ folds,
 
     // ─── Phase 4: Merge tree — 4 rounds to combine 10 segments ──────────
     // Round r: left segments at seg_idx % (2<<r) == 0 merge with partner
-    //          at seg_idx + (1<<r), using warp lane stride 3*(1<<r).
+    //          at seg_idx + (1<<r), using warp lane stride nbiases*(1<<r).
 
     // Not using kActiveMask as it will be UB as per PTX ISA documentation
     constexpr uint32_t kShuffleMask = 0xFFFFFFFF; // all 32 lanes participate
 #pragma unroll
     for (int round = 0; round < 4; ++round) {
-        const int seg_stride   = (1 << round);   // 1, 2, 4, 8
-        const int lane_stride  = 3 * seg_stride; // 3, 6, 12, 24
+        const int seg_stride   = (1 << round);         // 1, 2, 4, 8
+        const int lane_stride  = nbiases * seg_stride; // 3, 6, 12, 24 for 3
         const int partner_lane = lane_id + lane_stride;
 
         // All lanes shuffle partner's 14 segment values
@@ -416,7 +314,7 @@ kernel_kadane_segment_parallel(const float* __restrict__ folds,
             __shfl_sync(kShuffleMask, s_min_sub_w, partner_lane);
 
         // Only "left" lanes that have a valid right partner perform the merge
-        const bool is_left = (lane_id < kActiveThreads) &&
+        const bool is_left = (lane_id < active_threads) &&
                              ((seg_idx % (2 * seg_stride)) == 0) &&
                              ((seg_idx + seg_stride) < kSegments);
 
@@ -489,41 +387,20 @@ kernel_kadane_segment_parallel(const float* __restrict__ folds,
     }
 
     // ─── Phase 5: Compute SNR from merged result ────────────────────────
-    // After 4 merge rounds, seg_idx==0 lanes (0, 1, 2) hold the final
-    // merged result for biases 0, 1, 2 respectively.
-    if (lane_id < kBiases) {
-        // s_max_sub = max non-wrapping subarray (Kadane result)
-        float best_biased_sum = s_max_sub;
-        int best_width        = static_cast<int>(s_max_sub_w);
+    // After 4 merge rounds, seg_idx==0 lanes (0 .. nbiases-1) hold the final
+    // merged result for each bias. s_max_sub is the max non-wrapping subarray
+    // (Kadane result); s_min_sub the min one, for the wrapped candidate.
+    if (lane_id < nbiases) {
+        const float snr = kadane_snr(s_max_sub, s_max_sub_w, s_min_sub,
+                                     s_min_sub_w, nbins, bias);
 
-        // Wrapped candidate: complement of the min subarray
-        const int excluded_width = static_cast<int>(s_min_sub_w);
-        const int wrapped_width  = nbins - excluded_width;
-
-        const float wrapped_sum =
-            (-static_cast<float>(nbins) * bias) - s_min_sub;
-        const bool use_wrapped =
-            (wrapped_width > 0) && (wrapped_sum > best_biased_sum);
-        best_biased_sum = use_wrapped ? wrapped_sum : best_biased_sum;
-        best_width      = use_wrapped ? wrapped_width : best_width;
-
-        float snr = cuda::std::numeric_limits<float>::lowest();
-        if (best_width > 0 && best_width < nbins) {
-            const float unbiased_sum =
-                best_biased_sum + (static_cast<float>(best_width) * bias);
-
-            const float scale =
-                sqrtf(static_cast<float>(nbins) /
-                      static_cast<float>(best_width * (nbins - best_width)));
-
-            snr = unbiased_sum * scale;
+        // Max across the biases
+        const uint32_t bias_mask = (1U << nbiases) - 1U; // lanes 0..nbiases-1
+        const float snr1         = __shfl_sync(bias_mask, snr, 1);
+        float max_snr            = fmaxf(snr, snr1);
+        if (nbiases == 3) {
+            max_snr = fmaxf(max_snr, __shfl_sync(bias_mask, snr, 2));
         }
-
-        // Max across 3 biases
-        constexpr uint32_t kBiasMask = 0x7; // lanes 0-2
-        const float snr1             = __shfl_sync(kBiasMask, snr, 1);
-        const float snr2             = __shfl_sync(kBiasMask, snr, 2);
-        const float max_snr          = fmaxf(snr, fmaxf(snr1, snr2));
 
         if (lane_id == 0) {
             scores[profile_idx]        = max_snr;
@@ -555,15 +432,53 @@ void launch_kernel_kadane_warp_multiprofile(
     const SizeType blocks_per_grid =
         (total_warps + kWarpsPerBlock - 1) / kWarpsPerBlock;
     const dim3 grid_dim(blocks_per_grid);
-    cuda_utils::check_kernel_launch_params(grid_dim, block_dim, shmem_size);
+    cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
+    constexpr auto kernel =
+        kernel_kadane_warp_multiprofile<kThreadsPerBlock, MaxBins,
+                                        ProfilesPerWarp>;
+    // The rows bound the occupancy: take the largest shared-memory carveout
+    // (and check the opt-in limit, which is above the 48 KiB default).
+    cuda_utils::set_kernel_dynamic_smem(kernel, shmem_size);
 
-    kernel_kadane_warp_multiprofile<kThreadsPerBlock, MaxBins, ProfilesPerWarp>
-        <<<grid_dim, block_dim, shmem_size, stream>>>(
-            folds.data(), static_cast<int>(nprofiles), static_cast<int>(nbins),
-            biases.data(), scores.data(), validation_mask.data(),
-            filtered_mask.data(), threshold);
+    kernel<<<grid_dim, block_dim, shmem_size, stream>>>(
+        folds.data(), static_cast<int>(nprofiles), static_cast<int>(nbins),
+        biases.data(), static_cast<int>(biases.size()), scores.data(),
+        validation_mask.data(), filtered_mask.data(), threshold);
     cuda_utils::check_last_cuda_error(
         "kernel_kadane_warp_multiprofile launch failed");
+}
+
+template <SizeType kThreadsPerBlock>
+void launch_kernel_kadane_segment_parallel(
+    cuda::std::span<const float> folds,
+    cuda::std::span<const float> biases,
+    cuda::std::span<float> scores,
+    cuda::std::span<const uint8_t> validation_mask,
+    cuda::std::span<uint8_t> filtered_mask,
+    float threshold,
+    SizeType nprofiles,
+    SizeType nbins,
+    cudaStream_t stream) {
+    constexpr SizeType kWarpSize      = 32;
+    constexpr SizeType kWarpsPerBlock = kThreadsPerBlock / kWarpSize;
+    // 1 profile per warp, nbins floats in shmem
+    const SizeType shmem_size = kWarpsPerBlock * nbins * sizeof(float);
+    const dim3 block_dim(kThreadsPerBlock);
+    const SizeType blocks_per_grid =
+        (nprofiles + kWarpsPerBlock - 1) / kWarpsPerBlock;
+    const dim3 grid_dim(blocks_per_grid);
+    cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
+    constexpr auto kernel = kernel_kadane_segment_parallel<kThreadsPerBlock>;
+    // Rows of more than 48 KiB need the opt-in; it also takes the largest
+    // shared-memory carveout, which bounds the occupancy.
+    cuda_utils::set_kernel_dynamic_smem(kernel, shmem_size);
+
+    kernel<<<grid_dim, block_dim, shmem_size, stream>>>(
+        folds.data(), static_cast<int>(nprofiles), static_cast<int>(nbins),
+        biases.data(), static_cast<int>(biases.size()), scores.data(),
+        validation_mask.data(), filtered_mask.data(), threshold);
+    cuda_utils::check_last_cuda_error(
+        "kernel_kadane_segment_parallel launch failed");
 }
 
 } // namespace
@@ -583,9 +498,9 @@ SizeType score_and_filter_max_cuda_kadane_d(
     constexpr SizeType kWarpRegimeMaxBins = 256;
     const bool use_warp_regime            = (nbins <= kWarpRegimeMaxBins);
 
-    if (biases.size() != 3) {
-        throw std::runtime_error(
-            "score_and_filter_max_cuda_kadane_d: biases must be of size 3");
+    if (biases.size() != 2 && biases.size() != 3) {
+        throw std::runtime_error("score_and_filter_max_cuda_kadane_d: biases "
+                                 "must be of size 2 or 3");
     }
 
     if (use_warp_regime) {
@@ -611,24 +526,20 @@ SizeType score_and_filter_max_cuda_kadane_d(
                 "exceeds compiled limit of 256");
         }
     } else {
-        constexpr SizeType kWarpSize        = 32;
-        constexpr SizeType kThreadsPerBlock = 256;
-        constexpr SizeType kWarpsPerBlock   = kThreadsPerBlock / kWarpSize;
-        // 1 profile per warp, nbins floats in shmem
-        const SizeType shmem_size = kWarpsPerBlock * nbins * sizeof(float);
-        const dim3 block_dim(kThreadsPerBlock);
-        const SizeType blocks_per_grid =
-            (nprofiles + kWarpsPerBlock - 1) / kWarpsPerBlock;
-        const dim3 grid_dim(blocks_per_grid);
-        cuda_utils::check_kernel_launch_params(grid_dim, block_dim, shmem_size);
-
-        kernel_kadane_segment_parallel<kThreadsPerBlock>
-            <<<grid_dim, block_dim, shmem_size, stream>>>(
-                folds.data(), static_cast<int>(nprofiles),
-                static_cast<int>(nbins), biases.data(), scores.data(),
-                validation_mask.data(), filtered_mask.data(), threshold);
-        cuda_utils::check_last_cuda_error(
-            "kernel_kadane_segment_parallel launch failed");
+        // One profile per warp, nbins floats of shared memory each: 8 warps
+        // per block, fewer for rows that do not fit.
+        constexpr SizeType kBigBlock   = 256;
+        constexpr SizeType kSmallBlock = 64;
+        const SizeType max_smem = cuda_utils::get_max_shared_memory_optin();
+        if (kBigBlock / 32 * nbins * sizeof(float) <= max_smem) {
+            launch_kernel_kadane_segment_parallel<kBigBlock>(
+                folds, biases, scores, validation_mask, filtered_mask,
+                threshold, nprofiles, nbins, stream);
+        } else {
+            launch_kernel_kadane_segment_parallel<kSmallBlock>(
+                folds, biases, scores, validation_mask, filtered_mask,
+                threshold, nprofiles, nbins, stream);
+        }
     }
 
     // Count number of passing profiles

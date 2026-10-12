@@ -13,6 +13,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include <CLI/CLI.hpp>
@@ -377,8 +378,22 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
         return 0;
     }
 
+    // Create the GPU context while the timeseries loads; the sweep's first
+    // device call would otherwise pay for it. A failure surfaces there.
+    std::thread device_init;
+    if (exec.backend != loki::Backend::kCPU) {
+        device_init = std::thread([exec] {
+            try {
+                loki::initialize_device(exec);
+            } catch (...) { // NOLINT(bugprone-empty-catch): reported later
+            }
+        });
+    }
     auto loaded = load_search_timeseries(toml_cfg);
     auto& ts    = loaded.ts;
+    if (device_init.joinable()) {
+        device_init.join();
+    }
     const loki::SizeType actual_nsamps =
         power_of_two_nsamps(ts.get_nsamps(), nsamps_policy);
 
@@ -531,6 +546,9 @@ void print_ep_plan(const loki::algorithms::EPRegionPlanner<FoldType>& planner,
             chunk.nominal_f_end, chunk.actual_f_start, chunk.actual_f_end,
             chunk.ncoords, chunk.max_sugg, chunk.branch_max, chunk.nsegments,
             chunk.chunk_memory_gb);
+        std::cout << std::format(
+            "       predicted peak {}, live ring {}, batch {}\n",
+            chunk.predicted_peak, chunk.predicted_live, chunk.batch_size);
     }
 
     std::cout << "Groups of equal nbins, each with its own workspaces:\n";
@@ -584,12 +602,14 @@ int run_plan_ep(const loki::search::EPTomlConfig& toml_cfg) {
     if (cfg.get_use_fourier()) {
         const loki::algorithms::EPRegionPlanner<loki::ComplexType> planner(
             cfg, toml_cfg.min_pd, toml_cfg.poly_basis, toml_cfg.ref_ducy,
-            cache_path, {}, n_workers, exec);
+            cache_path, {}, n_workers, toml_cfg.n_runs, toml_cfg.ref_segs,
+            exec);
         print_ep_plan(planner, workers, cache_path);
     } else {
         const loki::algorithms::EPRegionPlanner<float> planner(
             cfg, toml_cfg.min_pd, toml_cfg.poly_basis, toml_cfg.ref_ducy,
-            cache_path, {}, n_workers, exec);
+            cache_path, {}, n_workers, toml_cfg.n_runs, toml_cfg.ref_segs,
+            exec);
         print_ep_plan(planner, workers, cache_path);
     }
     return 0;
@@ -681,6 +701,47 @@ void print_ep_summary(const std::filesystem::path& result_file) {
     }
 }
 
+template <loki::SupportedFoldType FoldType>
+std::optional<std::filesystem::path>
+prepare_ep_plan_cache(const loki::search::EPTomlConfig& toml_cfg,
+                      const loki::search::PulsarSearchConfig& cfg,
+                      loki::Exec exec) {
+    if (toml_cfg.plan_cache || !toml_cfg.use_plan_cache) {
+        return toml_cfg.plan_cache;
+    }
+    const auto path    = std::filesystem::path(toml_cfg.outdir) /
+                         std::format("{}_ep_plan.h5", toml_cfg.prefix);
+    const auto workers = loki::algorithms::ep_sweep_n_workers(
+        cfg.get_nthreads(), toml_cfg.n_runs, toml_cfg.ref_segs);
+    // An implicit cache that no longer matches the configuration is replanned;
+    // planning errors themselves propagate.
+    if (std::filesystem::exists(path)) {
+        try {
+            const loki::algorithms::EPRegionPlanner<FoldType> cached(
+                cfg, toml_cfg.min_pd, toml_cfg.poly_basis, toml_cfg.ref_ducy,
+                path, {}, workers, toml_cfg.n_runs, toml_cfg.ref_segs, exec);
+            return path;
+        } catch (const std::exception& error) {
+            SPDLOG_WARN("Automatic EP plan cache '{}' is stale, replanning: {}",
+                        path.string(), error.what());
+        }
+    }
+    const loki::algorithms::EPRegionPlanner<FoldType> fresh(
+        cfg, toml_cfg.min_pd, toml_cfg.poly_basis, toml_cfg.ref_ducy,
+        std::nullopt, {}, workers, toml_cfg.n_runs, toml_cfg.ref_segs, exec);
+    fresh.save_cache(path);
+    return path;
+}
+
+std::optional<std::filesystem::path>
+prepare_ep_plan_cache(const loki::search::EPTomlConfig& toml_cfg,
+                      const loki::search::PulsarSearchConfig& cfg,
+                      loki::Exec exec) {
+    return cfg.get_use_fourier()
+               ? prepare_ep_plan_cache<loki::ComplexType>(toml_cfg, cfg, exec)
+               : prepare_ep_plan_cache<float>(toml_cfg, cfg, exec);
+}
+
 /// `search ep`: runs the EP sweep over the timeseries and prints a summary.
 int run_search_ep(const loki::search::EPTomlConfig& toml_cfg,
                   bool dry_run,
@@ -692,8 +753,9 @@ int run_search_ep(const loki::search::EPTomlConfig& toml_cfg,
     if (dry_run) {
         const loki::pipelines::EPFreqSweep dry(
             preview_cfg, /*show_progress=*/false, toml_cfg.min_pd,
-            toml_cfg.poly_basis, toml_cfg.ref_ducy, {}, toml_cfg.plan_cache,
-            toml_cfg.n_runs, toml_cfg.ref_segs, exec);
+            toml_cfg.poly_basis, toml_cfg.ref_ducy, {},
+            prepare_ep_plan_cache(toml_cfg, preview_cfg, exec), toml_cfg.n_runs,
+            toml_cfg.ref_segs, exec);
         SPDLOG_INFO("Dry run complete: planner constructed successfully.");
         return 0;
     }
@@ -720,8 +782,8 @@ int run_search_ep(const loki::search::EPTomlConfig& toml_cfg,
 
     loki::pipelines::EPFreqSweep sweep(
         ep_cfg, /*show_progress=*/true, toml_cfg.min_pd, toml_cfg.poly_basis,
-        toml_cfg.ref_ducy, {}, toml_cfg.plan_cache, toml_cfg.n_runs,
-        toml_cfg.ref_segs, exec);
+        toml_cfg.ref_ducy, {}, prepare_ep_plan_cache(toml_cfg, ep_cfg, exec),
+        toml_cfg.n_runs, toml_cfg.ref_segs, exec);
     sweep.execute(ts.get_ts_e().first(actual_nsamps),
                   ts.get_ts_v().first(actual_nsamps), outdir_path,
                   toml_cfg.prefix);
@@ -908,8 +970,9 @@ int main(int argc, char** argv) {
                            "Phase bin count (default: 64)");
     grp_search->add_option("--eta", ffa_cfg.eta,
                            "Tolerance parameter (default: 1.0)");
-    grp_search->add_option("--snr-min", ffa_cfg.snr_min,
-                           "Candidate SNR detection threshold (default: 5.0)");
+    grp_search->add_option(
+        "--snr-min", ffa_cfg.snr_min,
+        "Minimum candidate SNR for final HDF5 (default: 6.0)");
     grp_search->add_option("--ducy-max", ffa_cfg.ducy_max,
                            "Maximum duty cycle to evaluate (default: 0.2)");
     grp_search->add_option("--wtsp", ffa_cfg.wtsp,
@@ -968,6 +1031,7 @@ int main(int argc, char** argv) {
 
     bool ep_dry_run                  = false;
     bool ep_plan_only                = false;
+    bool ep_no_plan_cache            = false;
     std::string ep_nsamps_policy_str = "fail";
     std::string ep_plan_cache_path;
     std::string ep_backend_name;
@@ -1003,6 +1067,8 @@ int main(int argc, char** argv) {
                           "from the timeseries)");
     ep_grp_io->add_option("--tsamp", ep_cfg.tsamp,
                           "Sample interval in seconds, for --plan-only");
+    ep_grp_io->add_flag("--no-plan-cache", ep_no_plan_cache,
+                        "Disable automatic EP plan caching");
     ep_grp_io->add_option("--plan-cache", ep_plan_cache_path,
                           "Plan cache file (HDF5) to write or reuse");
 
@@ -1028,7 +1094,8 @@ int main(int argc, char** argv) {
                               "Tolerance parameter (default: 1.0)");
     ep_grp_search->add_option(
         "--snr-min", ep_cfg.snr_min,
-        "Candidate SNR detection threshold (default: 5.0)");
+        "Minimum candidate SNR for final HDF5 (default: 6.0; EP filtering "
+        "reserved for future use)");
     ep_grp_search->add_option("--ducy-max", ep_cfg.ducy_max,
                               "Maximum duty cycle to evaluate (default: 0.2)");
     ep_grp_search->add_option("--wtsp", ep_cfg.wtsp,
@@ -1038,14 +1105,18 @@ int main(int argc, char** argv) {
         "Use Fourier-domain folding (default) or time-domain folding");
 
     auto* ep_grp_pruning = ep->add_option_group("EP Pruning Parameters");
+    ep_grp_pruning->add_option(
+        "--target-snr", ep_cfg.target_snr,
+        "EP entropic information limit (default by search: frequency/accel "
+        "8.5, jerk 9.2, snap 9.8, circular 10.0)");
     ep_grp_pruning
         ->add_option("--poly-basis", ep_cfg.poly_basis,
                      "Polynomial basis: taylor (default) or chebyshev")
         ->check(CLI::IsMember({"taylor", "chebyshev"}));
     ep_grp_pruning->add_option(
         "--min-pd", ep_cfg.min_pd,
-        "Minimum detection probability of the threshold scheme, in (0, 1] "
-        "(default: 0.1)");
+        "Requested detection probability cutoff, in (0, 1] "
+        "(default: 0.1; shortfalls warn and accept the best available scheme)");
     ep_grp_pruning->add_option(
         "--ref-ducy", ep_cfg.ref_ducy,
         "Reference duty cycle of the pruning, in (0, 1] (default: 0.1)");
@@ -1115,6 +1186,9 @@ int main(int argc, char** argv) {
     }
     if (!ep_backend_name.empty()) {
         ep_cfg.backend = loki::parse_backend(ep_backend_name);
+    }
+    if (ep_no_plan_cache) {
+        ep_cfg.use_plan_cache = false;
     }
     const auto parse_method = [](const std::string& name) {
         return name == "zscore" ? loki::io::PreprocessMethod::kZScore

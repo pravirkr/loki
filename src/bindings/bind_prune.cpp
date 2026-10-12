@@ -42,6 +42,9 @@ void bind_prune(py::module_& m) {
         .def_readonly("branching_pattern", &EPChunkConfig::branching_pattern)
         .def_readonly("max_sugg", &EPChunkConfig::max_sugg)
         .def_readonly("branch_max", &EPChunkConfig::branch_max)
+        .def_readonly("batch_size", &EPChunkConfig::batch_size)
+        .def_readonly("predicted_peak", &EPChunkConfig::predicted_peak)
+        .def_readonly("predicted_live", &EPChunkConfig::predicted_live)
         .def_readonly("nominal_f_start", &EPChunkConfig::nominal_f_start)
         .def_readonly("nominal_f_end", &EPChunkConfig::nominal_f_end)
         .def_readonly("actual_f_start", &EPChunkConfig::actual_f_start)
@@ -74,6 +77,9 @@ void bind_prune(py::module_& m) {
         .def_readonly("ncoords", &EPChunkStats::ncoords)
         .def_readonly("max_sugg", &EPChunkStats::max_sugg)
         .def_readonly("branch_max", &EPChunkStats::branch_max)
+        .def_readonly("batch_size", &EPChunkStats::batch_size)
+        .def_readonly("predicted_peak", &EPChunkStats::predicted_peak)
+        .def_readonly("predicted_live", &EPChunkStats::predicted_live)
         .def_readonly("peak_complexity", &EPChunkStats::peak_complexity)
         .def_readonly("memory_gb", &EPChunkStats::memory_gb,
                       "Memory (GB) of this chunk run alone: its workers, its "

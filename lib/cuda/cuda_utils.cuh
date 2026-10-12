@@ -315,6 +315,12 @@ public:
         return m_props.sharedMemPerBlock;
     }
 
+    /// Per-block shared memory a kernel can opt in to
+    /// (cudaFuncAttributeMaxDynamicSharedMemorySize).
+    [[nodiscard]] SizeType get_max_shared_memory_optin() const noexcept {
+        return m_props.sharedMemPerBlockOptin;
+    }
+
     [[nodiscard]] int get_max_threads_per_block() const noexcept {
         return m_props.maxThreadsPerBlock;
     }
@@ -481,6 +487,37 @@ private:
 
 [[nodiscard]] inline SizeType get_max_shared_memory() {
     return CudaDeviceContext::get().get_max_shared_memory();
+}
+
+[[nodiscard]] inline SizeType get_max_shared_memory_optin() {
+    return CudaDeviceContext::get().get_max_shared_memory_optin();
+}
+
+/// Prefer the largest shared-memory carveout for @p kernel. The carveout is
+/// a hint; a device that cannot honour it (before sm_70) keeps its default.
+template <class Kernel> void prefer_max_shared_carveout(Kernel kernel) {
+    if (cudaFuncSetAttribute(kernel,
+                             cudaFuncAttributePreferredSharedMemoryCarveout,
+                             cudaSharedmemCarveoutMaxShared) != cudaSuccess) {
+        (void)cudaGetLastError(); // not sticky; drop it
+    }
+}
+
+/// Allow @p kernel @p bytes of dynamic shared memory (above 48 KiB needs the
+/// opt-in, sm_70+) and prefer the largest carveout.
+template <class Kernel>
+void set_kernel_dynamic_smem(Kernel kernel, SizeType bytes) {
+    if (bytes > get_max_shared_memory_optin()) {
+        throw std::invalid_argument(std::format(
+            "set_kernel_dynamic_smem: {} bytes of shared memory, the device "
+            "allows {}",
+            bytes, get_max_shared_memory_optin()));
+    }
+    check_cuda_call(cudaFuncSetAttribute(
+                        kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                        static_cast<int>(bytes)),
+                    "cudaFuncSetAttribute max dynamic smem failed");
+    prefer_max_shared_carveout(kernel);
 }
 
 [[nodiscard]] inline std::pair<double, double> get_cuda_memory_usage() {

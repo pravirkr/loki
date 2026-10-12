@@ -113,5 +113,13 @@ TEMPLATE_TEST_CASE("WorldTreeCUDA::add_initial takes the leading seeds of a "
     REQUIRE_THROWS(tree.add_initial(
         loki::cuda_utils::as_span(leaves_d), loki::cuda_utils::as_span(folds_d),
         loki::cuda_utils::as_span(scores_d, kNUsed - 1), kNUsed, stream));
+    REQUIRE_THROWS(tree.add_initial(
+        loki::cuda_utils::as_span(leaves_d),
+        loki::cuda_utils::as_span(folds_d, (kNUsed - 1) * folds_stride),
+        loki::cuda_utils::as_span(scores_d), kNUsed, stream));
+    REQUIRE_THROWS(tree.add_initial(
+        loki::cuda_utils::as_span(leaves_d, (kNUsed - 1) * leaves_stride),
+        loki::cuda_utils::as_span(folds_d), loki::cuda_utils::as_span(scores_d),
+        kNUsed, stream));
 }
 #endif // LOKI_ENABLE_CUDA

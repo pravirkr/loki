@@ -121,6 +121,12 @@ kernel_analyze_and_branch_accel(const double* __restrict__ leaves_tree,
     branch_ws.leaf_branch_count[ileaf] = c0 * c1;
 }
 
+// One lane per (leaf, parameter), four lanes per leaf (lane 3 idle): the
+// three FP64 branch decisions of a leaf are independent, so spreading them
+// over lanes hides their latency. Each lane evaluates the same expressions
+// as a whole-leaf thread would, so the output is unchanged.
+constexpr uint32_t kJerkBranchLanes = 4;
+
 __global__ void
 kernel_analyze_and_branch_jerk(const double* __restrict__ leaves_tree,
                                uint32_t n_leaves,
@@ -133,58 +139,52 @@ kernel_analyze_and_branch_jerk(const double* __restrict__ leaves_tree,
     constexpr SizeType kParamStride  = 2;
     constexpr SizeType kLeavesStride = (kParams + 2) * kParamStride;
 
-    const uint32_t ileaf = (blockIdx.x * blockDim.x) + threadIdx.x;
-    if (ileaf >= n_leaves) {
-        return;
+    const uint32_t gtid  = (blockIdx.x * blockDim.x) + threadIdx.x;
+    const uint32_t ileaf = gtid / kJerkBranchLanes;
+    const uint32_t p     = gtid % kJerkBranchLanes;
+    const bool active    = ileaf < n_leaves && p < kParams;
+
+    uint32_t count = 1;
+    if (active) {
+        const uint32_t lo = ileaf * kLeavesStride;
+        const uint32_t fb = ileaf * kParams;
+
+        const double dt2     = dt * dt;
+        const double dt3     = dt2 * dt;
+        const double inv_dt  = 1.0 / dt;
+        const double inv_dt2 = inv_dt * inv_dt;
+        const double inv_dt3 = inv_dt2 * inv_dt;
+        const double dphi    = eta / nbins;
+
+        const double cur     = leaves_tree[lo + (2 * p)];
+        const double sig_cur = leaves_tree[lo + (2 * p) + 1];
+        const double f0      = leaves_tree[lo + 8];
+        const double dfactor = utils::kCval / f0;
+        double sig_new;
+        double shift;
+        if (p == 0) {
+            sig_new = dphi * dfactor * 24.0 * inv_dt3;
+            shift   = fabs(sig_cur - sig_new) * dt3 * nbins / (24.0 * dfactor);
+        } else if (p == 1) {
+            sig_new = dphi * dfactor * 4.0 * inv_dt2;
+            shift   = fabs(sig_cur - sig_new) * dt2 * nbins / (4.0 * dfactor);
+        } else {
+            sig_new = dphi * dfactor * 1.0 * inv_dt;
+            shift   = fabs(sig_cur - sig_new) * dt * nbins / (1.0 * dfactor);
+        }
+        utils::branch_one_param_padded_device(
+            p, cur, sig_cur, sig_new, eta, shift, branch_ws.scratch_params,
+            branch_ws.scratch_dparams, branch_ws.scratch_counts, fb,
+            branch_max);
+        count = branch_ws.scratch_counts[fb + p];
     }
-
-    const uint32_t lo = ileaf * kLeavesStride;
-    const uint32_t fb = ileaf * kParams;
-
-    const double dt2     = dt * dt;
-    const double dt3     = dt2 * dt;
-    const double inv_dt  = 1.0 / dt;
-    const double inv_dt2 = inv_dt * inv_dt;
-    const double inv_dt3 = inv_dt2 * inv_dt;
-    const double dphi    = eta / nbins;
-
-    const double d3_cur     = leaves_tree[lo + 0];
-    const double d3_sig_cur = leaves_tree[lo + 1];
-    const double d2_cur     = leaves_tree[lo + 2];
-    const double d2_sig_cur = leaves_tree[lo + 3];
-    const double d1_cur     = leaves_tree[lo + 4];
-    const double d1_sig_cur = leaves_tree[lo + 5];
-    const double f0         = leaves_tree[lo + 8];
-
-    const double dfactor    = utils::kCval / f0;
-    const double d3_sig_new = dphi * dfactor * 24.0 * inv_dt3;
-    const double d2_sig_new = dphi * dfactor * 4.0 * inv_dt2;
-    const double d1_sig_new = dphi * dfactor * 1.0 * inv_dt;
-    const double shift_d3 =
-        fabs(d3_sig_cur - d3_sig_new) * dt3 * nbins / (24.0 * dfactor);
-    const double shift_d2 =
-        fabs(d2_sig_cur - d2_sig_new) * dt2 * nbins / (4.0 * dfactor);
-    const double shift_d1 =
-        fabs(d1_sig_cur - d1_sig_new) * dt * nbins / (1.0 * dfactor);
-
-    utils::branch_one_param_padded_device(
-        0, d3_cur, d3_sig_cur, d3_sig_new, eta, shift_d3,
-        branch_ws.scratch_params, branch_ws.scratch_dparams,
-        branch_ws.scratch_counts, fb, branch_max);
-    utils::branch_one_param_padded_device(
-        1, d2_cur, d2_sig_cur, d2_sig_new, eta, shift_d2,
-        branch_ws.scratch_params, branch_ws.scratch_dparams,
-        branch_ws.scratch_counts, fb, branch_max);
-    utils::branch_one_param_padded_device(
-        2, d1_cur, d1_sig_cur, d1_sig_new, eta, shift_d1,
-        branch_ws.scratch_params, branch_ws.scratch_dparams,
-        branch_ws.scratch_counts, fb, branch_max);
-
-    const uint32_t c0 = branch_ws.scratch_counts[fb + 0];
-    const uint32_t c1 = branch_ws.scratch_counts[fb + 1];
-    const uint32_t c2 = branch_ws.scratch_counts[fb + 2];
-
-    branch_ws.leaf_branch_count[ileaf] = c0 * c1 * c2;
+    // The lanes of a leaf are consecutive within a warp.
+    constexpr unsigned int kFullMask = 0xFFFFFFFF;
+    const uint32_t c1                = __shfl_down_sync(kFullMask, count, 1);
+    const uint32_t c2                = __shfl_down_sync(kFullMask, count, 2);
+    if (active && p == 0) {
+        branch_ws.leaf_branch_count[ileaf] = count * c1 * c2;
+    }
 }
 
 __global__ void
@@ -1049,6 +1049,67 @@ kernel_poly_taylor_transform_batch(double* __restrict__ leaves_tree,
     }
 }
 
+// Resolve, then transform, each leaf (one thread per leaf, as the two
+// kernels). The transform only rewrites the leaf after its resolve read it.
+template <int NPARAMS, bool UseConservativeTile>
+__global__ void kernel_poly_taylor_resolve_transform_batch(
+    double* __restrict__ leaves,
+    const uint8_t* __restrict__ validation_mask,
+    uint32_t* __restrict__ param_indices,
+    float* __restrict__ phase_shift,
+    const ParamLimit* __restrict__ param_limits,
+    cuda::std::pair<double, double> coord_add,
+    cuda::std::pair<double, double> coord_cur,
+    cuda::std::pair<double, double> coord_init,
+    cuda::std::pair<double, double> coord_next,
+    SizeType n_accel_init,
+    SizeType n_freq_init,
+    SizeType nbins,
+    uint32_t n_leaves) {
+    if constexpr (NPARAMS == 2) {
+        resolve_taylor_accel(leaves, validation_mask, param_indices,
+                             phase_shift, param_limits, coord_add, coord_cur,
+                             coord_init, n_accel_init, n_freq_init, nbins,
+                             n_leaves);
+        transform_taylor_accel<UseConservativeTile>(
+            leaves, validation_mask, n_leaves, coord_next, coord_cur);
+    } else if constexpr (NPARAMS == 3) {
+        resolve_taylor_jerk(leaves, validation_mask, param_indices, phase_shift,
+                            param_limits, coord_add, coord_cur, coord_init,
+                            n_accel_init, n_freq_init, nbins, n_leaves);
+        transform_taylor_jerk<UseConservativeTile>(
+            leaves, validation_mask, n_leaves, coord_next, coord_cur);
+    } else if constexpr (NPARAMS == 4) {
+        resolve_taylor_snap(leaves, validation_mask, param_indices, phase_shift,
+                            param_limits, coord_add, coord_cur, coord_init,
+                            n_accel_init, n_freq_init, nbins, n_leaves);
+        transform_taylor_snap<UseConservativeTile>(
+            leaves, validation_mask, n_leaves, coord_next, coord_cur);
+    } else {
+        static_assert(NPARAMS <= 4, "Unsupported Taylor order");
+    }
+}
+
+// Branching fast path (every leaf has one child): copy the leaves, the
+// identity origins and an all-valid mask in one pass.
+__global__ void kernel_copy_unbranched(const double* __restrict__ leaves_tree,
+                                       double* __restrict__ leaves_branch,
+                                       uint32_t* __restrict__ leaves_origins,
+                                       uint8_t* __restrict__ validation_mask,
+                                       uint32_t n_leaves,
+                                       uint32_t leaves_stride) {
+    const uint32_t tid    = (blockIdx.x * blockDim.x) + threadIdx.x;
+    const size_t n_values = static_cast<size_t>(n_leaves) * leaves_stride;
+    for (size_t i = tid; i < n_values;
+         i += static_cast<size_t>(gridDim.x) * blockDim.x) {
+        leaves_branch[i] = leaves_tree[i];
+    }
+    if (tid < n_leaves) {
+        leaves_origins[tid]  = tid;
+        validation_mask[tid] = 1;
+    }
+}
+
 __global__ void kernel_poly_taylor_report_batch(
     double* __restrict__ leaves_tree, uint32_t n_leaves, uint32_t n_params) {
     const uint32_t tid = (blockIdx.x * blockDim.x) + threadIdx.x;
@@ -1113,7 +1174,11 @@ poly_taylor_branch_impl_cuda(cuda::std::span<const double> leaves_tree,
             leaves_tree.data(), n_leaves, coord_cur.second,
             static_cast<double>(nbins), eta, branch_max, branch_ws);
     } else if constexpr (NPARAMS == 3) {
-        kernel_analyze_and_branch_jerk<<<grid_dim, block_dim, 0, stream>>>(
+        const dim3 grid_lanes(
+            ((n_leaves * kJerkBranchLanes) + kThreadsPerBlock - 1) /
+            kThreadsPerBlock);
+        cuda_utils::check_kernel_launch_params(grid_lanes, block_dim);
+        kernel_analyze_and_branch_jerk<<<grid_lanes, block_dim, 0, stream>>>(
             leaves_tree.data(), n_leaves, coord_cur.second,
             static_cast<double>(nbins), eta, branch_max, branch_ws);
     } else {
@@ -1152,25 +1217,26 @@ poly_taylor_branch_impl_cuda(cuda::std::span<const double> leaves_tree,
         return n_leaves_branched;
     }
 
+    if (n_leaves_branched == n_leaves) {
+        // FAST PATH: no branching. Copy, identity origins, all valid.
+        const dim3 grid_copy(
+            (std::max<SizeType>(n_leaves * kLeavesStride / 4, n_leaves) +
+             kThreadsPerBlock - 1) /
+            kThreadsPerBlock);
+        cuda_utils::check_kernel_launch_params(grid_copy, block_dim);
+        kernel_copy_unbranched<<<grid_copy, block_dim, 0, stream>>>(
+            leaves_tree.data(), leaves_branch.data(), leaves_origins.data(),
+            validation_mask.data(), static_cast<uint32_t>(n_leaves),
+            static_cast<uint32_t>(kLeavesStride));
+        cuda_utils::check_last_cuda_error("kernel_copy_unbranched failed");
+        return n_leaves_branched;
+    }
+
     // Set validation mask for produced outputs
     cuda_utils::check_cuda_call(
         cudaMemsetAsync(validation_mask.data(), 1,
                         n_leaves_branched * sizeof(uint8_t), stream),
         "cudaMemsetAsync failed");
-
-    if (n_leaves_branched == n_leaves) {
-        // FAST PATH: no branching
-        cuda_utils::check_cuda_call(
-            cudaMemcpyAsync(leaves_branch.data(), leaves_tree.data(),
-                            n_leaves * kLeavesStride * sizeof(double),
-                            cudaMemcpyDeviceToDevice, stream),
-            "cudaMemcpyAsync failed");
-        thrust::sequence(
-            thrust::cuda::par_nosync.on(stream), leaves_origins.data(),
-            leaves_origins.data() + n_leaves, static_cast<uint32_t>(0));
-
-        return n_leaves_branched;
-    }
 
     // ---- Kernel 2: materialize ----
     const auto blocks_per_grid_out =
@@ -1404,6 +1470,55 @@ void poly_taylor_transform_batch_cuda(
     launch(use_conservative_tile);
     cuda_utils::check_last_cuda_error("Taylor transform kernel launch failed");
     // No need to sync, the next kernel will do it
+}
+
+void poly_taylor_resolve_transform_batch_cuda(
+    cuda::std::span<double> leaves_branch,
+    cuda::std::span<const uint8_t> validation_mask,
+    cuda::std::span<uint32_t> param_indices,
+    cuda::std::span<float> phase_shift,
+    cuda::std::span<const ParamLimit> param_limits,
+    std::pair<double, double> coord_add,
+    std::pair<double, double> coord_cur,
+    std::pair<double, double> coord_init,
+    std::pair<double, double> coord_next,
+    SizeType n_accel_init,
+    SizeType n_freq_init,
+    SizeType nbins,
+    SizeType n_leaves,
+    SizeType n_params,
+    bool use_conservative_tile,
+    cudaStream_t stream) {
+    constexpr SizeType kThreadsPerBlock = 256;
+    const dim3 block_dim(kThreadsPerBlock);
+    const dim3 grid_dim((n_leaves + kThreadsPerBlock - 1) / kThreadsPerBlock);
+    cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
+    auto dispatch = [&]<int N, bool C>() {
+        kernel_poly_taylor_resolve_transform_batch<N, C>
+            <<<grid_dim, block_dim, 0, stream>>>(
+                leaves_branch.data(), validation_mask.data(),
+                param_indices.data(), phase_shift.data(), param_limits.data(),
+                coord_add, coord_cur, coord_init, coord_next, n_accel_init,
+                n_freq_init, nbins, static_cast<uint32_t>(n_leaves));
+    };
+    switch (n_params) {
+    case 2:
+        use_conservative_tile ? dispatch.template operator()<2, true>()
+                              : dispatch.template operator()<2, false>();
+        break;
+    case 3:
+        use_conservative_tile ? dispatch.template operator()<3, true>()
+                              : dispatch.template operator()<3, false>();
+        break;
+    case 4:
+        use_conservative_tile ? dispatch.template operator()<4, true>()
+                              : dispatch.template operator()<4, false>();
+        break;
+    default:
+        throw std::invalid_argument("Unsupported n_params");
+    }
+    cuda_utils::check_last_cuda_error(
+        "Taylor resolve + transform kernel launch failed");
 }
 
 void poly_taylor_report_batch_cuda(cuda::std::span<double> leaves_tree,

@@ -329,6 +329,7 @@ public:
 private:
     std::filesystem::path m_final_path;
     Mode m_mode;
+    std::string m_group_path;
     std::filesystem::path m_open_path;
     inline static std::mutex m_hdf5_mutex;
     bool m_datasets_initialized{false};
@@ -348,7 +349,8 @@ public:
     enum class Mode : std::uint8_t { kWrite, kAppend };
 
     explicit PruneResultWriter(std::filesystem::path filename,
-                               Mode mode = Mode::kWrite);
+                               Mode mode              = Mode::kWrite,
+                               std::string group_path = "");
     ~PruneResultWriter()                                   = default;
     PruneResultWriter(const PruneResultWriter&)            = delete;
     PruneResultWriter& operator=(const PruneResultWriter&) = delete;
@@ -392,10 +394,11 @@ public:
 private:
     std::filesystem::path m_filepath;
     Mode m_mode;
+    std::string m_group_path;
     inline static std::mutex m_hdf5_mutex;
 
     HighFive::File open_file() const;
-    static HighFive::Group open_runs_group(HighFive::File& file);
+    HighFive::Group open_runs_group(HighFive::File& file) const;
 };
 
 /**

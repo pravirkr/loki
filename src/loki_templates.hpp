@@ -103,18 +103,23 @@ void bind_ep_region_planner(py::module& m, const std::string& name) {
                     std::string_view poly_basis, float ref_ducy,
                     const std::optional<std::filesystem::path>& plan_cache_file,
                     const algorithms::PruneRFIConfig& rfi_config,
-                    std::optional<SizeType> n_workers, std::string_view backend,
-                    int device) {
+                    std::optional<SizeType> n_workers,
+                    std::optional<SizeType> n_runs,
+                    const std::optional<std::vector<SizeType>>& ref_segs,
+                    std::string_view backend, int device) {
                      return std::make_unique<EPRegionPlanner<FoldType>>(
                          cfg, min_pd, poly_basis, ref_ducy, plan_cache_file,
-                         rfi_config, n_workers, make_exec(backend, device));
+                         rfi_config, n_workers, n_runs, ref_segs,
+                         make_exec(backend, device));
                  }),
              py::arg("cfg"), py::arg("min_pd") = 0.1F,
              py::arg("poly_basis") = "taylor", py::arg("ref_ducy") = 0.1F,
              py::arg("plan_cache_file") = std::nullopt,
              py::arg("rfi_config")      = algorithms::PruneRFIConfig(),
              py::arg("n_workers")       = std::nullopt, py::kw_only(),
-             py::arg("backend") = "cpu", py::arg("device") = 0)
+             py::arg("n_runs")          = std::nullopt,
+             py::arg("ref_segs") = std::nullopt, py::arg("backend") = "cpu",
+             py::arg("device") = 0)
         .def_property_readonly("chunk_cfgs",
                                &EPRegionPlanner<FoldType>::get_chunk_cfgs)
         .def_property_readonly("nchunks",

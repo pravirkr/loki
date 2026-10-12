@@ -207,6 +207,98 @@ public:
     std::unordered_map<CUFFTPlanKey, CUFFTPlan, CUFFTPlanKeyHash> m_plans;
     std::unique_ptr<std::byte, DeviceDeleter> m_work_area;
     SizeType m_work_area_bytes{0};
+    // Staging rows for the sub-granule tail of a max-batch (prepared) n_real.
+    std::unique_ptr<std::byte, DeviceDeleter> m_tail_in;
+    std::unique_ptr<std::byte, DeviceDeleter> m_tail_out;
+    SizeType m_tail_in_bytes{0};
+    SizeType m_tail_out_bytes{0};
+
+    static void grow_buffer(std::unique_ptr<std::byte, DeviceDeleter>& buf,
+                            SizeType& cur_bytes,
+                            SizeType bytes) {
+        if (bytes <= cur_bytes) {
+            return;
+        }
+        // The old buffer may still be read by queued transforms.
+        cuda_utils::check_cuda_call(
+            cudaDeviceSynchronize(),
+            "CUFFTManager: cudaDeviceSynchronize failed before growing tail");
+        void* ptr = nullptr;
+        cuda_utils::check_cuda_call(cudaMalloc(&ptr, bytes),
+                                    "CUFFTManager: cudaMalloc tail failed");
+        buf.reset(static_cast<std::byte*>(ptr));
+        cur_bytes = bytes;
+    }
+
+    /**
+     * @brief Run a batched transform with a bounded set of plans.
+     *
+     * Exact-batch n_real values (EP) plan every distinct chunk size. Prepared
+     * n_real values use only two plans per direction: max_batch and a
+     * granule of kTailGranule rows. Rows past the last full granule are
+     * staged through a granule-sized scratch, so a different batch size per
+     * call (one per FFA region) never builds a new plan. Each row is an
+     * independent transform, so the decomposition does not change the math.
+     */
+    template <typename InT, typename OutT, typename ExecFn>
+    void execute_chunked(InT* in_ptr,
+                         OutT* out_ptr,
+                         SizeType batch_size,
+                         SizeType n_real,
+                         SizeType in_dist,
+                         SizeType out_dist,
+                         cufftType type,
+                         cudaStream_t stream,
+                         ExecFn&& exec_fn) {
+        constexpr SizeType kTailGranule = 1024;
+        const SizeType max_batch        = max_batch_for(n_real);
+        const int n_real_i              = to_cufft_int(n_real, "n_real");
+        const bool granular             = m_prepared.contains(n_real);
+        const SizeType granule          = std::min(kTailGranule, max_batch);
+        SizeType offset                 = 0;
+        while (offset < batch_size) {
+            const SizeType remaining = batch_size - offset;
+            SizeType chunk_batch     = std::min(max_batch, remaining);
+            if (granular && remaining < max_batch) {
+                chunk_batch = granule;
+                if (remaining < granule) {
+                    // Stage the tail through a full-granule transform.
+                    const SizeType in_bytes = granule * in_dist * sizeof(InT);
+                    const SizeType out_bytes =
+                        granule * out_dist * sizeof(OutT);
+                    grow_buffer(m_tail_in, m_tail_in_bytes, in_bytes);
+                    grow_buffer(m_tail_out, m_tail_out_bytes, out_bytes);
+                    auto* tin  = reinterpret_cast<InT*>(m_tail_in.get());
+                    auto* tout = reinterpret_cast<OutT*>(m_tail_out.get());
+                    cuda_utils::check_cuda_call(
+                        cudaMemcpyAsync(tin, in_ptr + (offset * in_dist),
+                                        remaining * in_dist * sizeof(InT),
+                                        cudaMemcpyDeviceToDevice, stream),
+                        "CUFFTManager: tail stage-in failed");
+                    CUFFTPlan& plan = get_or_create_plan(
+                        n_real_i, static_cast<int>(granule), type);
+                    cuda_utils::check_cufft_call(
+                        cufftSetStream(plan.get(), stream),
+                        "CUFFTManager: cufftSetStream failed");
+                    exec_fn(plan.get(), tin, tout);
+                    cuda_utils::check_cuda_call(
+                        cudaMemcpyAsync(out_ptr + (offset * out_dist), tout,
+                                        remaining * out_dist * sizeof(OutT),
+                                        cudaMemcpyDeviceToDevice, stream),
+                        "CUFFTManager: tail stage-out failed");
+                    offset += remaining;
+                    continue;
+                }
+            }
+            const int chunk_i = to_cufft_int(chunk_batch, "chunk_batch");
+            CUFFTPlan& plan   = get_or_create_plan(n_real_i, chunk_i, type);
+            cuda_utils::check_cufft_call(cufftSetStream(plan.get(), stream),
+                                         "CUFFTManager: cufftSetStream failed");
+            exec_fn(plan.get(), in_ptr + (offset * in_dist),
+                    out_ptr + (offset * out_dist));
+            offset += chunk_batch;
+        }
+    }
 
     [[nodiscard]] SizeType work_area_budget_bytes() const {
         const auto [free_mem_gb, total_mem_gb] =
@@ -321,23 +413,13 @@ public:
                       SizeType n_real,
                       cudaStream_t stream) {
         const SizeType n_complex = (n_real / 2) + 1;
-        const SizeType max_batch = max_batch_for(n_real);
-        const int n_real_i       = to_cufft_int(n_real, "n_real");
-        SizeType offset          = 0;
-        while (offset < batch_size) {
-            const SizeType remaining   = batch_size - offset;
-            const SizeType chunk_batch = std::min(max_batch, remaining);
-            const int chunk_i = to_cufft_int(chunk_batch, "chunk_batch");
-            CUFFTPlan& plan = get_or_create_plan(n_real_i, chunk_i, CUFFT_R2C);
-            cuda_utils::check_cufft_call(cufftSetStream(plan.get(), stream),
-                                         "CUFFTManager: cufftSetStream failed");
-            float* chunk_real           = real_ptr + (offset * n_real);
-            cufftComplex* chunk_complex = complex_ptr + (offset * n_complex);
-            cuda_utils::check_cufft_call(
-                cufftExecR2C(plan.get(), chunk_real, chunk_complex),
-                "CUFFTManager: cufftExecR2C failed");
-            offset += chunk_batch;
-        }
+        execute_chunked(real_ptr, complex_ptr, batch_size, n_real, n_real,
+                        n_complex, CUFFT_R2C, stream,
+                        [](cufftHandle plan, float* in, cufftComplex* out) {
+                            cuda_utils::check_cufft_call(
+                                cufftExecR2C(plan, in, out),
+                                "CUFFTManager: cufftExecR2C failed");
+                        });
     }
 
     void execute_irfft(cufftComplex* __restrict__ complex_ptr,
@@ -347,27 +429,14 @@ public:
                        cudaStream_t stream,
                        bool normalize) {
         const SizeType n_complex = (n_real / 2) + 1;
-        const SizeType max_batch = max_batch_for(n_real);
-        const int n_real_i       = to_cufft_int(n_real, "n_real");
         const float norm         = 1.0F / static_cast<float>(n_real);
-        SizeType offset          = 0;
-
-        while (offset < batch_size) {
-            const SizeType remaining   = batch_size - offset;
-            const SizeType chunk_batch = std::min(max_batch, remaining);
-            const int chunk_i = to_cufft_int(chunk_batch, "chunk_batch");
-
-            CUFFTPlan& plan = get_or_create_plan(n_real_i, chunk_i, CUFFT_C2R);
-            cuda_utils::check_cufft_call(cufftSetStream(plan.get(), stream),
-                                         "CUFFTManager: cufftSetStream failed");
-
-            cufftComplex* chunk_complex = complex_ptr + (offset * n_complex);
-            float* chunk_real           = real_ptr + (offset * n_real);
-            cuda_utils::check_cufft_call(
-                cufftExecC2R(plan.get(), chunk_complex, chunk_real),
-                "CUFFTManager: cufftExecC2R failed");
-            offset += chunk_batch;
-        }
+        execute_chunked(complex_ptr, real_ptr, batch_size, n_real, n_complex,
+                        n_real, CUFFT_C2R, stream,
+                        [](cufftHandle plan, cufftComplex* in, float* out) {
+                            cuda_utils::check_cufft_call(
+                                cufftExecC2R(plan, in, out),
+                                "CUFFTManager: cufftExecC2R failed");
+                        });
 
         if (!normalize) {
             return;
