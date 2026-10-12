@@ -76,7 +76,8 @@ if(CMAKE_CUDA_COMPILER)
     ${CMAKE_CURRENT_SOURCE_DIR}/internal/ffa_final_score_cuda_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/internal/kadane_cuda_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/internal/ffa_resolve_cuda_t.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/internal/cub_scratch_cuda_t.cpp PROPERTIES LANGUAGE CUDA
+    ${CMAKE_CURRENT_SOURCE_DIR}/internal/cub_scratch_cuda_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/internal/world_tree_cuda_t.cpp PROPERTIES LANGUAGE CUDA
   )
   if(TARGET ${PROJECT_NAME}_cuda_options)
     target_link_libraries(${LOKI_INTERNAL_TEST_TARGET} PRIVATE ${PROJECT_NAME}_cuda_options)

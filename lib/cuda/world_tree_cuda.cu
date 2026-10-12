@@ -618,8 +618,17 @@ void WorldTreeCUDA<FoldTypeCUDA>::add_initial(
     error_check::check_less_equal(
         slots_to_write, m_capacity,
         "WorldTreeCUDA: Suggestions too large to add.");
-    error_check::check_equal(slots_to_write, scores_batch.size(),
-                             "slots_to_write must match batch_scores size");
+    // A sweep's seed buffers are sized for the largest chunk of its group:
+    // copy the leading slots_to_write seeds, as the CPU WorldTree does.
+    error_check::check_greater_equal(
+        scores_batch.size(), slots_to_write,
+        "add_initial: scores_batch smaller than slots_to_write");
+    error_check::check_greater_equal(
+        leaves_batch.size(), slots_to_write * m_leaves_stride,
+        "add_initial: leaves_batch smaller than slots_to_write");
+    error_check::check_greater_equal(
+        folds_batch.size(), slots_to_write * m_folds_stride,
+        "add_initial: folds_batch smaller than slots_to_write");
 
     reset(); // Start fresh
     cuda_utils::check_cuda_call(
