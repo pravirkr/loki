@@ -44,14 +44,27 @@ private:
 
 } // namespace
 
-TEST_CASE("timeseries rejects non-finite or non-positive variance", "[io]") {
+TEST_CASE("timeseries rejects invalid weights", "[io]") {
     const std::vector<float> intensity{1.0F, 2.0F};
-    REQUIRE_THROWS_AS((loki::io::TimeSeries(intensity, {1.0F, 0.0F}, 0.1)),
+    // Negative or non-finite weights.
+    REQUIRE_THROWS_AS((loki::io::TimeSeries(intensity, {1.0F, -1.0F}, 0.1)),
                       std::invalid_argument);
     REQUIRE_THROWS_AS(
         (loki::io::TimeSeries(
             intensity, {1.0F, std::numeric_limits<float>::quiet_NaN()}, 0.1)),
         std::invalid_argument);
+    // Zero weight needs zero signal.
+    REQUIRE_THROWS_AS((loki::io::TimeSeries(intensity, {1.0F, 0.0F}, 0.1)),
+                      std::invalid_argument);
+    // At least one sample must carry weight.
+    REQUIRE_THROWS_AS((loki::io::TimeSeries({0.0F, 0.0F}, {0.0F, 0.0F}, 0.1)),
+                      std::invalid_argument);
+}
+
+TEST_CASE("timeseries accepts masked samples", "[io]") {
+    const loki::io::TimeSeries series({1.0F, 0.0F, 2.0F}, {1.0F, 0.0F, 0.5F},
+                                      0.1);
+    REQUIRE(series.get_ts_v()[1] == 0.0F);
 }
 
 TEST_CASE("timeseries stores intensity, variance, and sample interval",
@@ -96,10 +109,11 @@ TEST_CASE("timeseries preprocessing removes a constant offset", "[io]") {
     series.write(path);
 
     loki::io::ReadOptions options;
-    options.preprocess    = true;
-    options.filter_window = 1.0;
-    const auto loaded     = loki::io::TimeSeries::read(path, options);
-    double mean           = 0.0;
+    options.preprocess                  = true;
+    options.preprocessing.method        = loki::io::PreprocessMethod::kZScore;
+    options.preprocessing.filter_window = 1.0;
+    const auto loaded = loki::io::TimeSeries::read(path, options);
+    double mean       = 0.0;
     for (loki::SizeType i = 0; i < loaded.get_nsamps(); ++i) {
         mean += static_cast<double>(loaded.get_ts_e()[i]);
         REQUIRE(loaded.get_ts_v()[i] == 1.0F);
@@ -120,11 +134,12 @@ TEST_CASE("timeseries z-score scales a varying series", "[io]") {
     series.write(path);
 
     loki::io::ReadOptions options;
-    options.preprocess    = true;
-    options.filter_window = 100.0;
-    options.loc           = loki::LocMethod::kMean;
-    options.scale         = loki::ScaleMethod::kStd;
-    const auto loaded     = loki::io::TimeSeries::read(path, options);
+    options.preprocess                  = true;
+    options.preprocessing.method        = loki::io::PreprocessMethod::kZScore;
+    options.preprocessing.filter_window = 100.0;
+    options.preprocessing.loc           = loki::LocMethod::kMean;
+    options.preprocessing.scale         = loki::ScaleMethod::kStd;
+    const auto loaded = loki::io::TimeSeries::read(path, options);
 
     double mean  = 0.0;
     double accum = 0.0;

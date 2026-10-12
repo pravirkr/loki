@@ -10,6 +10,7 @@
 #include "loki/common/types.hpp"             // IWYU pragma: export
 #include "loki/detection/score.hpp"          // IWYU pragma: export
 #include "loki/detection/thresholds.hpp"     // IWYU pragma: export
+#include "loki/io/preprocess.hpp"            // IWYU pragma: export
 #include "loki/io/timeseries.hpp"            // IWYU pragma: export
 #include "loki/pipelines/ep_freq_sweep.hpp"  // IWYU pragma: export
 #include "loki/pipelines/ffa_freq_sweep.hpp" // IWYU pragma: export

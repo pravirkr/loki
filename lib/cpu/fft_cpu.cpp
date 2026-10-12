@@ -178,6 +178,12 @@ std::vector<BatchSlice> build_batch_slices(SizeType batch_size,
     return slices;
 }
 
+// FFTW treats in == out as an in-place plan, and new-array execution must
+// keep in-place-ness. Plans are executed out of place, so plan with distinct,
+// SIMD-aligned dummies (never touched under FFTW_ESTIMATE).
+alignas(64) float g_plan_dummy_real[16];
+alignas(64) fftwf_complex g_plan_dummy_complex[16];
+
 FFTWPlan make_rfft_plan(SizeType n_real, SizeType n_complex, SizeType howmany) {
     const int n_real_i    = static_cast<int>(n_real);
     const int n_complex_i = static_cast<int>(n_complex);
@@ -189,9 +195,9 @@ FFTWPlan make_rfft_plan(SizeType n_real, SizeType n_complex, SizeType howmany) {
             1,                       // rank
             &n_real_i,               // transform size
             howmany_i,               // number of transforms
-            nullptr,                 // input (dummy for planning)
+            g_plan_dummy_real,       // input (dummy for planning)
             nullptr, 1, n_real_i,    // input layout: stride=1, dist=n_real
-            nullptr,                 // output (dummy for planning)
+            g_plan_dummy_complex,    // output (dummy for planning)
             nullptr, 1, n_complex_i, // output layout: stride=1, dist=n_complex
             FFTW_ESTIMATE);
     }
@@ -215,9 +221,9 @@ make_irfft_plan(SizeType n_real, SizeType n_complex, SizeType howmany) {
             1,                       // rank
             &n_real_i,               // transform size
             howmany_i,               // number of transforms
-            nullptr,                 // input (dummy for planning)
+            g_plan_dummy_complex,    // input (dummy for planning)
             nullptr, 1, n_complex_i, // input layout: stride=1, dist=n_complex
-            nullptr,                 // output (dummy for planning)
+            g_plan_dummy_real,       // output (dummy for planning)
             nullptr, 1, n_real_i,    // output layout: stride=1, dist=n_real
             FFTW_ESTIMATE);
     }

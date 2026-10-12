@@ -106,6 +106,8 @@ void write_search_config(const std::filesystem::path& path,
     // rejects. 488 Hz is the closest round cutoff that still satisfies it.
     output << std::format("[input]\n"
                           "timeseries = \"{}\"\n"
+                          "\n"
+                          "[preprocessing]\n"
                           "preprocess = false\n"
                           "\n"
                           "[search]\n"
