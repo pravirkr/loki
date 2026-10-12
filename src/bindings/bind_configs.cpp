@@ -66,7 +66,7 @@ void bind_configs(py::module_& m) {
              py::arg("octave_scale") = 2.0, py::arg("nbins_max") = 1024,
              py::arg("nbins_min_lossy_bf") = 64,
              py::arg("bseg_brute")         = std::nullopt,
-             py::arg("bseg_ffa") = std::nullopt, py::arg("snr_min") = 5.0,
+             py::arg("bseg_ffa") = std::nullopt, py::arg("snr_min") = 6.0,
              py::arg("max_passing_candidates") = 1U << 22U, // 4M
              py::arg("use_boxcar_kadane")      = false)
         .def_property_readonly("nsamps", &FFASearchConfig::get_nsamps)
@@ -80,6 +80,10 @@ void bind_configs(py::module_& m) {
                                    return as_pyarray_ref(
                                        self.get_param_limits());
                                })
+        .def_property_readonly(
+            "snr_min", &FFASearchConfig::get_snr_min,
+            "Minimum candidate SNR for final FFA/EP HDF5 (default 6); "
+            "EP output filtering is reserved for future use.")
         .def_property_readonly("ducy_max", &FFASearchConfig::get_ducy_max)
         .def_property_readonly("wtsp", &FFASearchConfig::get_wtsp)
         .def_property_readonly("bseg_brute", &FFASearchConfig::get_bseg_brute)
@@ -128,7 +132,7 @@ void bind_configs(py::module_& m) {
                     double p_orb_min, double m_c_max, double m_p_min,
                     double propagator_significance,
                     double validation_significance, bool use_conservative_tile,
-                    bool use_boxcar_kadane) {
+                    bool use_boxcar_kadane, std::optional<double> target_snr) {
                      if (param_limits.ndim() != 2 ||
                          param_limits.shape(1) != 2) {
                          throw std::invalid_argument(
@@ -153,7 +157,7 @@ void bind_configs(py::module_& m) {
                          bseg_brute, bseg_ffa, snr_min, max_passing_candidates,
                          prune_poly_order, p_orb_min, m_c_max, m_p_min,
                          propagator_significance, validation_significance,
-                         use_conservative_tile, use_boxcar_kadane);
+                         use_conservative_tile, use_boxcar_kadane, target_snr);
                  }),
              py::arg("nsamps"), py::arg("tsamp"), py::arg("nbins"),
              py::arg("eta"), py::arg("param_limits"), py::arg("ducy_max") = 0.2,
@@ -162,14 +166,19 @@ void bind_configs(py::module_& m) {
              py::arg("octave_scale") = 2.0, py::arg("nbins_max") = 1024,
              py::arg("nbins_min_lossy_bf") = 64,
              py::arg("bseg_brute")         = std::nullopt,
-             py::arg("bseg_ffa") = std::nullopt, py::arg("snr_min") = 5.0,
+             py::arg("bseg_ffa") = std::nullopt, py::arg("snr_min") = 6.0,
              py::arg("max_passing_candidates") = 1U << 22U, // 4M
              py::arg("prune_poly_order") = 3, py::arg("p_orb_min") = 1e-5,
              py::arg("m_c_max") = 10.0, py::arg("m_p_min") = 1.4,
              py::arg("propagator_significance") = 2.0,
              py::arg("validation_significance") = 5.0,
              py::arg("use_conservative_tile")   = false,
-             py::arg("use_boxcar_kadane")       = false)
+             py::arg("use_boxcar_kadane")       = false, py::kw_only(),
+             py::arg("target_snr")              = std::nullopt)
+        .def_property_readonly(
+            "target_snr", &PulsarSearchConfig::get_target_snr,
+            "EP entropic information limit; None selects the parameter-count "
+            "default: frequency/accel 8.5, jerk 9.2, snap 9.8, circular 10.")
         .def_property_readonly("prune_poly_order",
                                &PulsarSearchConfig::get_prune_poly_order)
         .def_property_readonly("p_orb_min", &PulsarSearchConfig::get_p_orb_min)

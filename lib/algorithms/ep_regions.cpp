@@ -1,10 +1,12 @@
 #include "loki/algorithms/ep_regions.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <format>
+#include <map>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -31,12 +33,13 @@
 #include "lib/algorithms/prune_engine.hpp"
 #include "lib/common/dispatch.hpp"
 #include "lib/detail/utils.hpp"
+#include "lib/detection/thresholds_engine.hpp"
+#include "lib/search/ep_support.hpp"
 
 namespace loki::algorithms {
 
 namespace {
 
-constexpr float kSafetyMultiplier = 1.25F;
 // 1.2.0: per-chunk branch_max, per-group memory model.
 // 1.3.0: inputs, harvest store and worker count in the memory model; stores
 // the model version, batch size, n_workers and harvest bound.
@@ -47,11 +50,27 @@ constexpr float kSafetyMultiplier = 1.25F;
 // kind and the CUDA worker count are informational; the peak is recomputed.
 // 1.6.0: chunks are planned with the world-tree capacity capped at
 // kEPMaxWorldTreeCapacity, so a 1.5.0 plan (uncapped) is replanned.
-constexpr std::string_view kCacheVersion = "1.6.0";
+// 1.7.0: uncapped adjacent-stage population forecast, run selection and batch.
+// 1.8.0: independent EP snr_final in the threshold scheme and cache key.
+// 1.9.0: rename EP target to target_snr and select search-specific defaults.
+// 1.11.0: warning-only Pd policy and bounded 1024-bin CUDA storage.
+// 1.12.0: the FFA segmentation (bseg_brute, bseg_ffa, nbins_min_lossy_bf).
+constexpr std::string_view kCacheVersion = "1.12.0";
 
-/// Batch size of the threshold-scheme simulation. CUDA results are
-/// reproducible per (seed, batch_size), so it is part of the cache key.
-constexpr SizeType kDtsBatchSize = 256;
+/// Threshold-scheme simulation of the planner. The seeds are fixed: the
+/// scheme sets the chunking, so plans of one configuration must not change
+/// from run to run. CUDA results are reproducible per (seed, batch_size), so
+/// the batch size and the evaluation seed are part of the cache key.
+constexpr SizeType kDtsNTrials        = 1024;
+constexpr SizeType kDtsNProbs         = 10;
+constexpr float kDtsProbMin           = 0.05F;
+constexpr SizeType kDtsNThresholds    = 100;
+constexpr float kDtsBeamWidth         = 0.7F;
+constexpr SizeType kDtsTrialsStart    = 1;
+constexpr SizeType kDtsThresNeigh     = 10;
+constexpr uint64_t kDtsSeed           = 0x10C1;
+constexpr uint64_t kDtsEvaluationSeed = 0x10C2;
+constexpr SizeType kDtsBatchSize      = 256;
 
 double calculate_max_drift(const search::PulsarSearchConfig& cfg) {
     if (cfg.get_nparams() <= 1) {
@@ -107,6 +126,7 @@ make_memory_context(const search::PulsarSearchConfig& cfg,
                     const PruneRFIConfig& rfi_config,
                     std::optional<SizeType> n_workers,
                     const Exec& exec) {
+    search::detail::check_ep_supported(cfg, "EPRegionPlanner");
     detail::EPMemoryContext ctx{
         .nparams   = cfg.get_nparams(),
         .nsamps    = cfg.get_nsamps(),
@@ -128,6 +148,7 @@ make_memory_context(const search::PulsarSearchConfig& cfg,
         ctx.kind              = detail::EPMemoryKind::kCuda;
         ctx.device            = exec.device;
         ctx.cub_scratch_bytes = &detail::ep_cuda_cub_scratch_bytes;
+        ctx.share_ffa_fold    = true;
         return ctx;
     }
 #endif
@@ -180,15 +201,31 @@ public:
          const std::optional<std::filesystem::path>& plan_cache_file,
          const PruneRFIConfig& rfi_config,
          std::optional<SizeType> n_workers,
+         std::optional<SizeType> n_runs,
+         const std::optional<std::vector<SizeType>>& ref_segs,
          const Exec& exec)
         : m_base_cfg(std::move(cfg)),
           m_min_pd(min_pd),
           m_poly_basis(poly_basis),
           m_ref_ducy(ref_ducy),
           m_exec(exec),
+          m_n_runs(n_runs),
+          m_ref_segs(ref_segs),
           m_memory(
               make_memory_context(m_base_cfg, rfi_config, n_workers, exec)),
           m_memory_limit_gb(resolve_memory_limit_gb(m_base_cfg, exec)) {
+        if (!utils::is_finite(m_min_pd) || m_min_pd <= 0.0F ||
+            m_min_pd > 1.0F) {
+            throw std::invalid_argument(
+                "EPRegionPlanner: min_pd must be in (0, 1]");
+        }
+        // Every coarse region uses the same FFA segmentation for this cfg.
+        const plans::FFAPlan<FoldType> initial_plan(m_base_cfg);
+        if (!m_n_runs && !m_ref_segs) {
+            m_n_runs = initial_plan.get_nsegments().back();
+        }
+        (void)utils::determine_ref_segs(initial_plan.get_nsegments().back(),
+                                        m_n_runs, m_ref_segs);
         if (plan_cache_file && std::filesystem::exists(*plan_cache_file)) {
             load_cache(*plan_cache_file);
         } else {
@@ -236,6 +273,11 @@ public:
 #endif
         file.createAttribute("device_arch", device_arch);
         file.createAttribute("dts_batch_size", kDtsBatchSize);
+        file.createAttribute("evaluation_seed", kDtsEvaluationSeed);
+        const plans::FFAPlan<FoldType> run_plan(m_base_cfg);
+        file.createDataSet("ref_segs", utils::determine_ref_segs(
+                                           run_plan.get_nsegments().back(),
+                                           m_n_runs, m_ref_segs));
         file.createAttribute("nsamps", m_base_cfg.get_nsamps());
         file.createAttribute("tsamp", m_base_cfg.get_tsamp());
         file.createAttribute("f_min", m_base_cfg.get_f_min());
@@ -251,6 +293,10 @@ public:
                              m_base_cfg.get_max_process_memory_gb());
         file.createAttribute("octave_scale", m_base_cfg.get_octave_scale());
         file.createAttribute("nbins_max", m_base_cfg.get_nbins_max());
+        file.createAttribute("nbins_min_lossy_bf",
+                             m_base_cfg.get_nbins_min_lossy_bf());
+        file.createAttribute("bseg_brute", m_base_cfg.get_bseg_brute());
+        file.createAttribute("bseg_ffa", m_base_cfg.get_bseg_ffa());
         file.createAttribute("prune_poly_order",
                              m_base_cfg.get_prune_poly_order());
         file.createAttribute(
@@ -259,6 +305,7 @@ public:
         file.createAttribute("min_pd", m_min_pd);
         file.createAttribute("poly_basis", std::string(m_poly_basis));
         file.createAttribute("ref_ducy", m_ref_ducy);
+        file.createAttribute("target_snr", m_base_cfg.get_target_snr());
         file.createAttribute("nthreads", m_base_cfg.get_nthreads());
         file.createAttribute("ep_memory_model_version",
                              detail::kEPMemoryModelVersion);
@@ -296,6 +343,9 @@ public:
             chunk_grp.createAttribute("eta", chunk.cfg.get_eta());
             chunk_grp.createAttribute("max_sugg", chunk.max_sugg);
             chunk_grp.createAttribute("branch_max", chunk.branch_max);
+            chunk_grp.createAttribute("batch_size", chunk.batch_size);
+            chunk_grp.createAttribute("predicted_peak", chunk.predicted_peak);
+            chunk_grp.createAttribute("predicted_live", chunk.predicted_live);
             chunk_grp.createAttribute("peak_complexity", chunk.peak_complexity);
             chunk_grp.createAttribute("chunk_memory_gb", chunk.chunk_memory_gb);
             chunk_grp.createAttribute("nsegments", chunk.nsegments);
@@ -388,6 +438,11 @@ public:
                           m_base_cfg.get_max_process_memory_gb());
         check_attr_double("octave_scale", m_base_cfg.get_octave_scale());
         check_attr_size("nbins_max", m_base_cfg.get_nbins_max());
+        // The FFA segmentation sets every chunk's coordinates and buffers.
+        check_attr_size("nbins_min_lossy_bf",
+                        m_base_cfg.get_nbins_min_lossy_bf());
+        check_attr_size("bseg_brute", m_base_cfg.get_bseg_brute());
+        check_attr_size("bseg_ffa", m_base_cfg.get_bseg_ffa());
         check_attr_size("prune_poly_order", m_base_cfg.get_prune_poly_order());
 
         uint8_t file_use_fourier{};
@@ -408,6 +463,7 @@ public:
 
         check_attr_double("min_pd", m_min_pd);
         check_attr_double("ref_ducy", m_ref_ducy);
+        check_attr_double("target_snr", m_base_cfg.get_target_snr());
         int file_nthreads{};
         file.getAttribute("nthreads").read(file_nthreads);
         // The CPU thread count is part of a CPU plan (the workers and the
@@ -440,6 +496,18 @@ public:
             check_attr_u64("batch_size", m_memory.batch_size);
         }
         check_attr_u64("dts_batch_size", kDtsBatchSize);
+        check_attr_u64("evaluation_seed", kDtsEvaluationSeed);
+        std::vector<SizeType> cached_runs;
+        file.getDataSet("ref_segs").read(cached_runs);
+        const plans::FFAPlan<FoldType> run_plan(m_base_cfg);
+        const auto requested_runs = utils::determine_ref_segs(
+            run_plan.get_nsegments().back(), m_n_runs, m_ref_segs);
+        for (const auto ref_seg : requested_runs) {
+            if (std::ranges::find(cached_runs, ref_seg) == cached_runs.end()) {
+                throw std::invalid_argument(
+                    "EPRegionPlanner: cache mismatch for ref_segs");
+            }
+        }
         if (same_backend) {
             check_attr_u64("n_workers",
                            static_cast<std::uint64_t>(m_memory.n_workers));
@@ -502,6 +570,9 @@ public:
             double eta{};
             SizeType max_sugg{};
             SizeType branch_max{};
+            SizeType batch_size{};
+            SizeType predicted_peak{};
+            SizeType predicted_live{};
             double peak_complexity{};
             double chunk_memory_gb{};
             SizeType nsegments{};
@@ -514,6 +585,26 @@ public:
             chunk_grp.getAttribute("eta").read(eta);
             chunk_grp.getAttribute("max_sugg").read(max_sugg);
             chunk_grp.getAttribute("branch_max").read(branch_max);
+            chunk_grp.getAttribute("batch_size").read(batch_size);
+            chunk_grp.getAttribute("predicted_peak").read(predicted_peak);
+            chunk_grp.getAttribute("predicted_live").read(predicted_live);
+            if (!same_backend) {
+                batch_size = m_memory.batch_size;
+            }
+            if (batch_size == 0 || batch_size > m_memory.batch_size ||
+                !std::has_single_bit(batch_size)) {
+                throw std::invalid_argument(
+                    "EPRegionPlanner: invalid cached batch size");
+            }
+            const auto required = detail::ep_tree_capacity(
+                predicted_live, batch_size, branch_max, m_memory.kind);
+            if (same_backend && max_sugg < required) {
+                throw std::invalid_argument(
+                    "EPRegionPlanner: cached capacity below forecast");
+            }
+            // A backend change also changes the batch allowance. Preserve
+            // the forecast, rather than the other backend's capacity floor.
+            max_sugg = same_backend ? std::max(max_sugg, required) : required;
             chunk_grp.getAttribute("peak_complexity").read(peak_complexity);
             chunk_grp.getAttribute("chunk_memory_gb").read(chunk_memory_gb);
             chunk_grp.getAttribute("nsegments").read(nsegments);
@@ -542,6 +633,9 @@ public:
                 .branching_pattern   = std::move(branching_pattern),
                 .max_sugg            = max_sugg,
                 .branch_max          = branch_max,
+                .batch_size          = batch_size,
+                .predicted_peak      = predicted_peak,
+                .predicted_live      = predicted_live,
                 .nominal_f_start     = nominal_f_start,
                 .nominal_f_end       = nominal_f_end,
                 .actual_f_start      = actual_f_start,
@@ -574,6 +668,9 @@ public:
                 .ncoords          = ncoords,
                 .max_sugg         = max_sugg,
                 .branch_max       = branch_max,
+                .batch_size       = batch_size,
+                .predicted_peak   = predicted_peak,
+                .predicted_live   = predicted_live,
                 .peak_complexity  = peak_complexity,
                 .memory_gb        = chunk_memory_gb,
                 .overlap_fraction = overlap_fraction,
@@ -592,7 +689,8 @@ public:
                 ? 0.0
                 : detail::ep_sweep_peak_gb<FoldType>(m_chunk_cfgs, m_memory);
         const double limit_gb =
-            detail::effective_memory_limit_gb(m_memory_limit_gb);
+            m_memory_limit_gb -
+            detail::ep_memory_reserve_gb(m_base_cfg, m_memory.kind);
         if (peak_memory_gb > limit_gb) {
             throw std::runtime_error(std::format(
                 "EPRegionPlanner: plan cache '{}' needs {:.2f} GB, more than "
@@ -614,6 +712,8 @@ private:
     std::string m_poly_basis;
     float m_ref_ducy;
     Exec m_exec;
+    std::optional<SizeType> m_n_runs;
+    std::optional<std::vector<SizeType>> m_ref_segs;
     detail::EPMemoryContext m_memory;
     /// Memory the plan is fitted to (see resolve_memory_limit_gb).
     double m_memory_limit_gb;
@@ -645,17 +745,18 @@ private:
         }
 
         const auto max_memory_gb = m_memory_limit_gb;
-        const auto effective_limit =
-            detail::effective_memory_limit_gb(max_memory_gb);
+        const auto reserve_gb =
+            detail::ep_memory_reserve_gb(m_base_cfg, m_memory.kind);
+        const auto effective_limit = max_memory_gb - reserve_gb;
         if (effective_limit <= 0.0) {
             throw std::runtime_error(std::format(
                 "EPRegionPlanner: the memory limit ({:.2f} GB) must "
                 "exceed the safety margin ({:.2f} GB)",
-                max_memory_gb, detail::kUnmodelledReserveGB));
+                max_memory_gb, reserve_gb));
         }
 
-        // The threshold schemes are expensive: design every region once and
-        // reuse the designs if a second planning pass is needed.
+        // Each region's engine holds its simulation pools only while its
+        // path is selected, so none is left when the EP search allocates.
         std::vector<detail::RegionDesign> designs;
         designs.reserve(ffa_regions.size());
         for (const auto& region : ffa_regions) {
@@ -663,8 +764,8 @@ private:
                 continue;
             }
             designs.push_back(design_region(region.f_start, region.f_end,
-                                            region.nbins, region.eta,
-                                            max_drift));
+                                            region.nbins, region.eta, max_drift,
+                                            effective_limit));
         }
 
         auto plan =
@@ -696,13 +797,65 @@ private:
             m_stats.get_max_memory_gb(), max_memory_gb, m_memory.n_workers);
     }
 
-    /// Computes the branching pattern and simulates the DynamicThresholdScheme
-    /// once for a coarse band.
+    std::unique_ptr<detection::detail::ThresholdsEngine>
+    make_threshold_engine(std::span<const float> branching_pattern,
+                          SizeType nbins,
+                          uint64_t seed) const {
+        return detection::detail::make_thresholds_engine(
+            branching_pattern, m_ref_ducy, nbins, kDtsNTrials, kDtsNProbs,
+            kDtsProbMin, static_cast<float>(m_base_cfg.get_target_snr()),
+            kDtsNThresholds, static_cast<float>(m_base_cfg.get_ducy_max()),
+            static_cast<float>(m_base_cfg.get_wtsp()), kDtsBeamWidth,
+            kDtsTrialsStart, "legacy", seed, kDtsBatchSize,
+            m_exec.backend == Backend::kCPU
+                ? Exec::cpu(m_base_cfg.get_nthreads())
+                : m_exec);
+    }
+
+    /// Path of minimum cost meeting min_pd. If none does, the best available
+    /// simulated path is accepted with a warning; min_pd is not changed.
+    std::vector<float>
+    select_thresholds(const detection::detail::ThresholdsEngine& dyn,
+                      double f_start,
+                      double f_end,
+                      SizeType nbins) const {
+        auto thresholds = dyn.get_best_path_thresholds(m_min_pd);
+        if (!thresholds.empty()) {
+            return thresholds;
+        }
+        thresholds = dyn.get_best_path_thresholds(0.0F);
+        if (thresholds.empty()) {
+            throw std::runtime_error(std::format(
+                "EPRegionPlanner: simulation has no surviving terminal path "
+                "in f=[{:.6g}, {:.6g}] Hz (nbins={}, target_snr={:.6g})",
+                f_start, f_end, nbins, m_base_cfg.get_target_snr()));
+        }
+        const auto states = dyn.get_states();
+        const auto terminal =
+            std::span(states).last(dyn.get_nthresholds() * dyn.get_nprobs());
+        float best_pd = 0.0F;
+        for (const auto& state : terminal) {
+            if (!state.is_empty) {
+                best_pd = std::max(best_pd, state.success_h1_cumul);
+            }
+        }
+        spdlog::warn("EPRegionPlanner: no path meets min_pd={:.6g} in "
+                     "f=[{:.6g}, {:.6g}] Hz; best terminal Pd={:.6g}. "
+                     "Accepting the best available simulated path; "
+                     "configured min_pd is unchanged.",
+                     m_min_pd, f_start, f_end, best_pd);
+        return thresholds;
+    }
+
+    /// Computes the branching pattern and selects the threshold scheme of a
+    /// coarse band. The returned design forecasts the population of any
+    /// chunk's branching pattern with an independent, seeded evaluation.
     detail::RegionDesign design_region(double f_start,
                                        double f_end,
                                        SizeType nbins,
                                        double eta,
-                                       double max_drift) const {
+                                       double max_drift,
+                                       double memory_limit_gb) const {
         const double region_actual_start = f_start * (1.0 - max_drift);
         const double region_actual_end   = f_end * (1.0 + max_drift);
         const auto rep_cfg               = m_base_cfg.get_updated_ep_config(
@@ -712,55 +865,52 @@ private:
         const std::vector<float> bp_float(bp_double.begin(), bp_double.end());
         const SizeType nsegments = rep_plan.get_nsegments().back();
 
-        const auto snr_final = static_cast<float>(m_base_cfg.get_snr_min());
-        const auto ducy_max  = static_cast<float>(m_base_cfg.get_ducy_max());
-        const auto wtsp      = static_cast<float>(m_base_cfg.get_wtsp());
-
-        constexpr SizeType kNTrials     = 1024;
-        constexpr SizeType kNThresholds = 100;
-        constexpr SizeType kNProbs      = 10;
-        constexpr float kProbMin        = 0.05F;
-        constexpr float kBeamWidth      = 0.7F;
-        constexpr SizeType kTrialsStart = 1;
-        // Fixed seed: the scheme sets max_sugg and the chunking, so plans of
-        // one configuration must not change from run to run.
-        constexpr uint64_t kPlannerSeed = 0x10C1;
-
-        detection::DynamicThresholdScheme dyn(
-            bp_float, m_ref_ducy, nbins, kNTrials, kNProbs, kProbMin, snr_final,
-            kNThresholds, ducy_max, wtsp, kBeamWidth, kTrialsStart, "legacy",
-            /*seed=*/kPlannerSeed, /*batch_size=*/kDtsBatchSize,
-            m_exec.backend == Backend::kCPU
-                ? Exec::cpu(m_base_cfg.get_nthreads())
-                : m_exec);
-        dyn.run();
-
-        auto threshold_scheme = dyn.get_best_path_thresholds(m_min_pd);
-        if (threshold_scheme.empty()) {
-            spdlog::warn(
-                "EPRegionPlanner: no path for min_pd={:.2f} in f=[{:.2f}, "
-                "{:.2f}], retrying with min_pd=0.01",
-                m_min_pd, f_start, f_end);
-            threshold_scheme = dyn.get_best_path_thresholds(0.01F);
-        }
-        if (threshold_scheme.empty()) {
-            threshold_scheme.resize(nsegments - 1);
-            for (SizeType s = 0; s < nsegments - 1; ++s) {
-                threshold_scheme[s] =
-                    std::max(1.5F, snr_final * static_cast<float>(s + 1) /
-                                       static_cast<float>(nsegments));
+        std::vector<float> threshold_scheme;
+        {
+            const auto dyn = make_threshold_engine(bp_float, nbins, kDtsSeed);
+            const double sim_gb = static_cast<double>(dyn->run_memory_bytes()) /
+                                  detail::kBytesPerGiB;
+            if (sim_gb > memory_limit_gb) {
+                throw std::runtime_error(std::format(
+                    "EPRegionPlanner: the threshold simulation for nbins={} "
+                    "needs {:.2f} GB, more than the {:.2f} GB limit",
+                    nbins, sim_gb, memory_limit_gb));
             }
+            dyn->run(kDtsThresNeigh);
+            threshold_scheme = select_thresholds(*dyn, f_start, f_end, nbins);
         }
 
-        const auto states = detection::evaluate_scheme(
-            threshold_scheme, bp_float, m_ref_ducy, nbins, kNTrials, snr_final,
-            ducy_max, wtsp);
-        float peak_complexity = 1.0F;
-        for (const auto& st : states) {
-            if (!st.is_empty) {
-                peak_complexity = std::max(peak_complexity, st.complexity);
+        // Evaluations allocate no simulation pools on the GPU. A chunk
+        // branching pattern is evaluated once and reused by later probes.
+        auto evaluate = [this, nbins, thresholds = threshold_scheme,
+                         cache =
+                             std::make_shared<std::map<std::vector<float>,
+                                                       std::vector<double>>>()](
+                            std::span<const float> bp) {
+            std::vector<float> key(bp.begin(), bp.end());
+            if (const auto it = cache->find(key); it != cache->end()) {
+                return it->second;
             }
-        }
+            const auto states =
+                make_threshold_engine(bp, nbins, kDtsSeed)
+                    ->evaluate(thresholds, kDtsNTrials, kDtsEvaluationSeed);
+            const float evaluated_pd = states.empty() || states.back().is_empty
+                                           ? 0.0F
+                                           : states.back().success_h1_cumul;
+            if (evaluated_pd < m_min_pd) {
+                spdlog::warn("EPRegionPlanner: evaluated Pd={:.6g} below "
+                             "configured min_pd={:.6g} (nbins={}); accepting "
+                             "the selected scheme.",
+                             evaluated_pd, m_min_pd, nbins);
+            }
+            std::vector<double> complexity;
+            complexity.reserve(states.size());
+            for (const auto& state : states) {
+                complexity.push_back(state.is_empty ? 0.0 : state.complexity);
+            }
+            cache->emplace(std::move(key), complexity);
+            return complexity;
+        };
         return detail::RegionDesign{
             .f_start          = f_start,
             .f_end            = f_end,
@@ -768,10 +918,10 @@ private:
             .eta              = eta,
             .threshold_scheme = std::move(threshold_scheme),
             .bp_float         = bp_float,
-            .peak_complexity  = peak_complexity,
-            .safe_complexity =
-                std::max(1.0F, peak_complexity) * kSafetyMultiplier,
-            .nsegments = nsegments,
+            .nsegments        = nsegments,
+            .n_runs           = m_n_runs,
+            .ref_segs         = m_ref_segs,
+            .evaluate         = std::move(evaluate),
         };
     }
 };
@@ -795,6 +945,31 @@ EPRegionPlanner<FoldType>::EPRegionPlanner(
                                     plan_cache_file,
                                     rfi_config,
                                     n_workers,
+                                    std::nullopt,
+                                    std::nullopt,
+                                    exec)) {}
+
+template <SupportedFoldType FoldType>
+EPRegionPlanner<FoldType>::EPRegionPlanner(
+    const search::PulsarSearchConfig& cfg,
+    float min_pd,
+    std::string_view poly_basis,
+    float ref_ducy,
+    const std::optional<std::filesystem::path>& plan_cache_file,
+    const PruneRFIConfig& rfi_config,
+    std::optional<SizeType> n_workers,
+    std::optional<SizeType> n_runs,
+    const std::optional<std::vector<SizeType>>& ref_segs,
+    Exec exec)
+    : m_impl(std::make_unique<Impl>(cfg,
+                                    min_pd,
+                                    poly_basis,
+                                    ref_ducy,
+                                    plan_cache_file,
+                                    rfi_config,
+                                    n_workers,
+                                    n_runs,
+                                    ref_segs,
                                     exec)) {}
 
 template <SupportedFoldType FoldType>

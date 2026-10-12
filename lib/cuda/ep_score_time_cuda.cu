@@ -125,7 +125,7 @@ __global__ __launch_bounds__(kThreads) void kernel_ep_shift_add_score_time(
             rows[(((q * 2) + 0) * pitch) + j] = e;
             rows[(((q * 2) + 1) * pitch) + j] = v;
         }
-        if (!direct) {
+        if (!direct && a.folds_out != nullptr) {
             float* __restrict__ out =
                 a.folds_out + (static_cast<size_t>(p0 + q) * stride);
             out[j]     = e;

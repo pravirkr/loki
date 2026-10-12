@@ -49,6 +49,17 @@ public:
 
     // Every FFA level writes its whole output, so it needs no fill.
     cuda_utils::DeviceVectorNoInit<DeviceFoldT> fold_internal_d;
+    cuda::std::span<DeviceFoldT> shared_fold_internal;
+    cuda::std::span<DeviceFoldT> internal_folds() noexcept {
+        return shared_fold_internal.empty()
+                   ? cuda_utils::as_span(fold_internal_d)
+                   : shared_fold_internal;
+    }
+    cuda::std::span<const DeviceFoldT> internal_folds() const noexcept {
+        return shared_fold_internal.empty()
+                   ? cuda_utils::as_span(fold_internal_d)
+                   : shared_fold_internal;
+    }
     coord::FFACoordD coords_d;
     coord::FFACoordFreqD coords_freq_d;
     // Brute-fold tables of the frequency sweep (grown on demand): the
@@ -74,7 +85,8 @@ public:
     FFAWorkspaceCUDA(SizeType buffer_size,
                      SizeType coord_size,
                      SizeType n_levels,
-                     SizeType n_params);
+                     SizeType n_params,
+                     bool allocate_internal = true);
 
     FFAWorkspaceCUDA(const FFAWorkspaceCUDA&)                = delete;
     FFAWorkspaceCUDA& operator=(const FFAWorkspaceCUDA&)     = delete;
@@ -213,6 +225,7 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA> struct PruneWorkspaceCUDA {
     thrust::device_vector<float> branched_scores_d;
     // Scratch space for indices
     thrust::device_vector<uint32_t> branched_indices_d;
+    thrust::device_vector<uint32_t> passing_indices_d;
     // Scratch space for resolving parameters
     thrust::device_vector<uint32_t> branched_param_idx_d;
     thrust::device_vector<float> branched_phase_shift_d;
@@ -320,7 +333,8 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA> struct EPWorkspaceCUDA {
                     SizeType nparams,
                     SizeType nbins,
                     SizeType nsegments,
-                    cudaStream_t stream = nullptr);
+                    cudaStream_t stream                        = nullptr,
+                    cuda::std::span<FoldTypeCUDA> shared_folds = {});
 
     ~EPWorkspaceCUDA();
     EPWorkspaceCUDA(const EPWorkspaceCUDA&)            = delete;

@@ -13,6 +13,7 @@
 #include <string_view>
 #include <vector>
 
+#include "loki/common/backend.hpp"
 #include "loki/common/types.hpp"
 #include "loki/detection/thresholds.hpp"
 
@@ -28,16 +29,20 @@ public:
     virtual ~ThresholdsEngine() = default;
 
     virtual std::vector<SizeType>
-    get_current_thresholds_idx(SizeType istage) const                       = 0;
-    virtual std::vector<float> get_branching_pattern() const                = 0;
-    virtual std::vector<float> get_profile() const                          = 0;
-    virtual std::vector<float> get_thresholds() const                       = 0;
-    virtual std::vector<float> get_probs() const                            = 0;
-    virtual SizeType get_nstages() const                                    = 0;
-    virtual SizeType get_nthresholds() const                                = 0;
-    virtual SizeType get_nprobs() const                                     = 0;
-    virtual std::vector<SizeType> get_box_score_widths() const              = 0;
-    virtual std::vector<State> get_states() const                           = 0;
+    get_current_thresholds_idx(SizeType istage) const          = 0;
+    virtual std::vector<float> get_branching_pattern() const   = 0;
+    virtual std::vector<float> get_profile() const             = 0;
+    virtual std::vector<float> get_thresholds() const          = 0;
+    virtual std::vector<float> get_probs() const               = 0;
+    virtual SizeType get_nstages() const                       = 0;
+    virtual SizeType get_nthresholds() const                   = 0;
+    virtual SizeType get_nprobs() const                        = 0;
+    virtual std::vector<SizeType> get_box_score_widths() const = 0;
+    virtual std::vector<State> get_states() const              = 0;
+    /// Memory that run() allocates on top of the constructed engine: the
+    /// device pools of a GPU engine. CPU engines own theirs from
+    /// construction and report 0.
+    virtual SizeType run_memory_bytes() const { return 0; }
     virtual void run(SizeType thres_neigh)                                  = 0;
     virtual std::vector<State> evaluate(std::span<const float> thresholds,
                                         SizeType ntrials,
@@ -85,5 +90,25 @@ make_thresholds_gpu(std::span<const float> branching_pattern,
                     SizeType batch_size,
                     int device_id,
                     std::optional<uint64_t> seed);
+
+// The facade's backend dispatch, for internal callers that need the engine
+// itself (the EP planner checks run_memory_bytes() against its budget).
+std::unique_ptr<ThresholdsEngine>
+make_thresholds_engine(std::span<const float> branching_pattern,
+                       float ref_ducy,
+                       SizeType nbins,
+                       SizeType ntrials,
+                       SizeType nprobs,
+                       float prob_min,
+                       float snr_final,
+                       SizeType nthresholds,
+                       float ducy_max,
+                       float wtsp,
+                       float beam_width,
+                       SizeType trials_start,
+                       std::string_view mode,
+                       std::optional<uint64_t> seed,
+                       SizeType batch_size,
+                       Exec exec);
 
 } // namespace loki::detection::detail

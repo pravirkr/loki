@@ -326,10 +326,12 @@ void fused_move_pairs_cuda(const uint32_t* __restrict__ holes,
  * @tparam FoldTypeCUDA Either float or ComplexTypeCUDA
  */
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
-WorldTreeCUDA<FoldTypeCUDA>::WorldTreeCUDA(SizeType capacity,
-                                           SizeType nparams,
-                                           SizeType nbins,
-                                           SizeType max_batch_size)
+WorldTreeCUDA<FoldTypeCUDA>::WorldTreeCUDA(
+    SizeType capacity,
+    SizeType nparams,
+    SizeType nbins,
+    SizeType max_batch_size,
+    cuda::std::span<FoldTypeCUDA> shared_folds)
     : m_capacity(capacity),
       m_nparams(nparams),
       m_nbins(nbins),
@@ -337,13 +339,18 @@ WorldTreeCUDA<FoldTypeCUDA>::WorldTreeCUDA(SizeType capacity,
       m_leaves_stride((nparams + 2) * kParamStride),
       m_folds_stride(2 * nbins),
       m_leaves(m_capacity * m_leaves_stride, 0.0),
-      m_folds(m_capacity * m_folds_stride, FoldTypeCUDA{}),
+      m_owned_folds(shared_folds.empty() ? m_capacity * m_folds_stride : 0,
+                    FoldTypeCUDA{}),
+      m_folds(shared_folds.empty() ? cuda_utils::as_span(m_owned_folds)
+                                   : shared_folds),
       m_scores(m_capacity, 0.0F),
       m_scores_ep(m_capacity, 0.0F),
       m_scratch_scores((m_capacity + max_batch_size), 0.0F),
       m_scratch_indices_1(m_capacity, 0),
       m_scratch_indices_2(m_capacity, 0),
       m_scratch_mask(m_capacity, 0) {
+    error_check::check_equal(m_folds.size(), m_capacity * m_folds_stride,
+                             "WorldTreeCUDA: shared fold size mismatch");
     // Validate inputs
     error_check::check_greater(m_capacity, SizeType{0},
                                "WorldTreeCUDA: capacity must be > 0");
@@ -370,7 +377,7 @@ WorldTreeCUDA<FoldTypeCUDA>::get_leaves_span() const noexcept {
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 cuda::std::span<const FoldTypeCUDA>
 WorldTreeCUDA<FoldTypeCUDA>::get_folds_span() const noexcept {
-    return cuda_utils::as_span(m_folds);
+    return m_folds;
 }
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 cuda::std::span<const float>
@@ -499,12 +506,13 @@ WorldTreeCUDA<FoldTypeCUDA>::get_leaves_circular_view() const noexcept {
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 CircularViewCUDA<FoldTypeCUDA>
 WorldTreeCUDA<FoldTypeCUDA>::get_folds_circular_view() noexcept {
-    return get_active_regions(cuda_utils::as_span(m_folds), m_folds_stride);
+    return get_active_regions(m_folds, m_folds_stride);
 }
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 CircularViewCUDA<const FoldTypeCUDA>
 WorldTreeCUDA<FoldTypeCUDA>::get_folds_circular_view() const noexcept {
-    return get_active_regions(cuda_utils::as_span(m_folds), m_folds_stride);
+    return get_active_regions(cuda::std::span<const FoldTypeCUDA>(m_folds),
+                              m_folds_stride);
 }
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 CircularViewCUDA<float>
@@ -550,13 +558,15 @@ void WorldTreeCUDA<FoldTypeCUDA>::set_size(SizeType size) {
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 void WorldTreeCUDA<FoldTypeCUDA>::reset() noexcept {
-    m_size          = 0;
-    m_head          = 0;
-    m_size_old      = 0;
-    m_is_updating   = false;
-    m_read_consumed = 0;
-    m_write_head    = 0;
-    m_write_start   = 0;
+    m_overload_count = 0;
+    m_peak_live      = 0;
+    m_size           = 0;
+    m_head           = 0;
+    m_size_old       = 0;
+    m_is_updating    = false;
+    m_read_consumed  = 0;
+    m_write_head     = 0;
+    m_write_start    = 0;
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
@@ -732,6 +742,21 @@ float WorldTreeCUDA<FoldTypeCUDA>::add_batch_scattered(
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
+float WorldTreeCUDA<FoldTypeCUDA>::prepare_scored_batch(
+    cuda::std::span<const float> scores,
+    cuda::std::span<const uint32_t> indices,
+    SizeType count,
+    float threshold,
+    cudaStream_t stream) {
+    if (count > calculate_space_left()) {
+        threshold =
+            get_prune_threshold(scores, indices, count, threshold, stream);
+        prune_on_overload(threshold, stream);
+    }
+    return threshold;
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
 void WorldTreeCUDA<FoldTypeCUDA>::validate(SizeType capacity,
                                            SizeType nparams,
                                            SizeType nbins,
@@ -831,6 +856,8 @@ SizeType WorldTreeCUDA<FoldTypeCUDA>::calculate_space_left() const {
     error_check::check_greater_equal(
         remaining_old, 0, "calculate_space_left: Invalid buffer state");
 
+    m_peak_live =
+        std::max(m_peak_live, static_cast<SizeType>(remaining_old) + m_size);
     const auto space_left = static_cast<IndexType>(m_capacity) -
                             (remaining_old + static_cast<IndexType>(m_size));
     error_check::check_greater_equal(
@@ -892,6 +919,7 @@ float WorldTreeCUDA<FoldTypeCUDA>::get_prune_threshold(
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 void WorldTreeCUDA<FoldTypeCUDA>::prune_on_overload(float threshold,
                                                     cudaStream_t stream) {
+    ++m_overload_count;
     error_check::check(
         m_is_updating,
         "WorldTreeCUDA: prune_on_overload only allowed during updates");

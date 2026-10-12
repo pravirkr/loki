@@ -9,6 +9,7 @@
 #include <cub/cub.cuh>
 #include <cuda_runtime.h>
 
+#include "lib/algorithms/ep_memory.hpp"
 #include "lib/cuda/cub_helpers.cuh"
 #include "lib/cuda/cuda_utils.cuh"
 #include "lib/cuda/ffa_score_cuda.cuh"
@@ -44,9 +45,12 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA>
 FFAWorkspaceCUDA<FoldTypeCUDA>::FFAWorkspaceCUDA(SizeType buffer_size,
                                                  SizeType coord_size,
                                                  SizeType n_levels,
-                                                 SizeType n_params) {
+                                                 SizeType n_params,
+                                                 bool allocate_internal) {
     const bool is_freq_only = n_params == 1;
-    fold_internal_d.resize(buffer_size);
+    if (allocate_internal) {
+        fold_internal_d.resize(buffer_size);
+    }
     m_param_counts_d.resize(n_levels * n_params);
     m_ncoords_offsets_d.resize(n_levels + 1);
     m_param_limits_d.resize(n_params);
@@ -77,7 +81,7 @@ void FFAWorkspaceCUDA<FoldTypeCUDA>::validate(
     const bool is_freq_only = n_params == 1;
 
     error_check::check_greater_equal(
-        fold_internal_d.size(), buffer_size,
+        internal_folds().size(), buffer_size,
         "FFAWorkspaceCUDA: fold_internal buffer too small");
     error_check::check_greater_equal(
         m_param_counts_d.size(), n_levels * n_params,
@@ -98,7 +102,7 @@ void FFAWorkspaceCUDA<FoldTypeCUDA>::validate(
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 SizeType FFAWorkspaceCUDA<FoldTypeCUDA>::get_buffers_bytes() const noexcept {
-    return (fold_internal_d.size() * sizeof(DeviceFoldT)) +
+    return (internal_folds().size() * sizeof(DeviceFoldT)) +
            (coords_d.i_tail.size() * sizeof(uint32_t)) +
            (coords_d.shift_tail.size() * sizeof(float)) +
            (coords_d.i_head.size() * sizeof(uint32_t)) +
@@ -422,9 +426,10 @@ PruneWorkspaceCUDA<FoldTypeCUDA>::PruneWorkspaceCUDA(SizeType batch_size,
       leaves_stride((nparams + 2) * kLeavesParamStride),
       folds_stride(2 * nbins),
       branched_leaves_d(max_branched_leaves * leaves_stride),
-      branched_folds_d(max_branched_leaves * folds_stride),
+      branched_folds_d(batch_size * folds_stride),
       branched_scores_d(max_branched_leaves),
       branched_indices_d(max_branched_leaves),
+      passing_indices_d(max_branched_leaves),
       branched_param_idx_d(max_branched_param_idx),
       branched_phase_shift_d(max_branched_param_idx),
       validation_mask_d(max_branched_leaves),
@@ -437,6 +442,7 @@ PruneWorkspaceCUDA<FoldTypeCUDA>::get_memory_usage_bytes() const noexcept {
            (branched_folds_d.size() * sizeof(FoldTypeCUDA)) +
            (branched_scores_d.size() * sizeof(float)) +
            (branched_indices_d.size() * sizeof(uint32_t)) +
+           (passing_indices_d.size() * sizeof(uint32_t)) +
            (branched_param_idx_d.size() * sizeof(uint32_t)) +
            (branched_phase_shift_d.size() * sizeof(float)) +
            (validation_mask_d.size() * sizeof(uint8_t)) +
@@ -459,7 +465,7 @@ void PruneWorkspaceCUDA<FoldTypeCUDA>::validate(SizeType batch_size,
         branched_leaves_d.size(), batch_size * branch_max * leaves_stride,
         "PruneWorkspaceCUDA: branched_leaves_d size is too small");
     error_check::check_equal(
-        branched_folds_d.size(), batch_size * branch_max * folds_stride,
+        branched_folds_d.size(), batch_size * folds_stride,
         "PruneWorkspaceCUDA: branched_folds_d size is too small");
     error_check::check_equal(
         branched_scores_d.size(), batch_size * branch_max,
@@ -673,15 +679,18 @@ MinMaxFloat CUBScratchArena::wait_min_max() const {
 
 // --- EPWorkspaceCUDA implementation ---
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
-EPWorkspaceCUDA<FoldTypeCUDA>::EPWorkspaceCUDA(SizeType batch_size,
-                                               SizeType branch_max,
-                                               SizeType max_sugg,
-                                               SizeType ncoords_ffa,
-                                               SizeType nparams,
-                                               SizeType nbins,
-                                               SizeType nsegments,
-                                               cudaStream_t stream)
-    : world_tree(max_sugg, nparams, nbins, batch_size * branch_max),
+EPWorkspaceCUDA<FoldTypeCUDA>::EPWorkspaceCUDA(
+    SizeType batch_size,
+    SizeType branch_max,
+    SizeType max_sugg,
+    SizeType ncoords_ffa,
+    SizeType nparams,
+    SizeType nbins,
+    SizeType nsegments,
+    cudaStream_t stream,
+    cuda::std::span<FoldTypeCUDA> shared_folds)
+    : world_tree(
+          max_sugg, nparams, nbins, batch_size * branch_max, shared_folds),
       prune(batch_size, branch_max, nparams, nbins, nsegments),
       branch(batch_size, branch_max, nparams),
       scratch(batch_size, branch_max, stream) {

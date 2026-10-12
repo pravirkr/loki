@@ -160,7 +160,9 @@ __launch_bounds__(FFT::max_threads_per_block) void kernel_ep_shift_add_score_c2c
         }
         if (active) {
             ComplexTypeCUDA* __restrict__ out =
-                a.folds_out + (static_cast<size_t>(p0 + q) * stride);
+                a.folds_out == nullptr
+                    ? nullptr
+                    : a.folds_out + (static_cast<size_t>(p0 + q) * stride);
             const float shift = b.shift[q];
 #pragma unroll
             for (uint32_t i = 0; i < kMaxIter; ++i) {
@@ -175,7 +177,7 @@ __launch_bounds__(FFT::max_threads_per_block) void kernel_ep_shift_add_score_c2c
                     }
                     half_e[k] = me;
                     half_v[k] = mv;
-                    if (!direct && !rows_mode) {
+                    if (!direct && !rows_mode && out != nullptr) {
                         out[k]      = me;
                         out[nf + k] = mv;
                     }

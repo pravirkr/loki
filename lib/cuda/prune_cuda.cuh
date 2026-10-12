@@ -20,6 +20,7 @@
 
 #include "lib/cuda/fft_cuda.cuh"
 #include "lib/cuda/workspace_cuda.cuh"
+#include "lib/pipelines/ep_sweep_common.hpp"
 
 namespace loki::algorithms {
 
@@ -34,9 +35,6 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA> struct EPCudaSharedPipeline {
     memory::EPWorkspaceCUDA<FoldTypeCUDA>* ep_workspace{nullptr};
     memory::FFAWorkspaceCUDA<FoldTypeCUDA>* ffa_workspace{nullptr};
     math::CUFFTManager* fft_manager{nullptr};
-    /// FFT manager of the pruning functors, prepared by the sweep for every
-    /// chunk's nbins. Null when the functors own theirs.
-    math::CUFFTManager* prune_fft_manager{nullptr};
     /// Output fold buffer (at least the chunk's FFA buffer size).
     cuda::std::span<DeviceFoldType<FoldTypeCUDA>> fold_d;
     /// Input time series on the device (nsamps each).
@@ -49,6 +47,7 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA> struct EPCudaSharedPipeline {
     SizeType ws_branch_max{0};
     SizeType ws_ncoords{0};
     SizeType ws_nsegments{0};
+    std::function<void(pipelines::detail::EPResultPayload)> result_sink;
 };
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA> class EPMultiPassCudaCore {

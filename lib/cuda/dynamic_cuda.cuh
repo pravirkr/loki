@@ -95,16 +95,6 @@ public:
                            SizeType capacity,
                            cudaStream_t stream) const noexcept = 0;
 
-    virtual SizeType
-    score_and_filter(cuda::std::span<const FoldTypeCUDA> folds_tree,
-                     cuda::std::span<float> scores_tree,
-                     cuda::std::span<const uint8_t> validation_mask,
-                     cuda::std::span<uint8_t> filtered_mask,
-                     float threshold,
-                     SizeType n_leaves,
-                     memory::CUBScratchArena& scratch_ws,
-                     cudaStream_t stream) noexcept = 0;
-
     /// resolve, then transform every valid leaf to @p coord_next (the
     /// direct-write path transforms before scoring).
     virtual void
@@ -124,20 +114,13 @@ public:
                   n_leaves, stream);
     }
 
-    /// Whether shift_add_score can write the survivors into the tree
-    /// (its @p direct argument).
-    [[nodiscard]] virtual bool supports_direct_write() const noexcept {
-        return false;
-    }
-
-    /// shift_add then score_and_filter of one batch (fused into one kernel
-    /// where supported); returns the number of passing leaves. The fused
-    /// kernel also gives the min/max score of the valid leaves (@p minmax;
-    /// the identity {max, lowest} when there are none). With @p direct
-    /// (needs supports_direct_write()), the passing leaves go into the tree
-    /// instead of folds_out, and the call only enqueues the work and
-    /// returns 0: collect_shift_add_score() gives its results later, so the
-    /// host can enqueue the next batch meanwhile.
+    /// Fused shift-add and scoring of one batch; returns the number of passing
+    /// leaves. The fused kernel also gives the min/max score of the valid
+    /// leaves (@p minmax; the identity {max, lowest} when there are none). With
+    /// @p direct the passing leaves go into the tree instead of folds_out, and
+    /// the call only enqueues the work and returns 0: collect_shift_add_score()
+    /// gives its results later, so the host can enqueue the next batch
+    /// meanwhile.
     virtual SizeType
     shift_add_score(cuda::std::span<const FoldTypeCUDA> folds_tree,
                     cuda::std::span<const uint32_t> indices_tree,
@@ -187,9 +170,8 @@ public:
                         SizeType n_leaves,
                         cudaStream_t stream) const = 0;
 
-    /** IRFFT scoring scratch (complex + real; a one-element stand-in when
-     * the scoring is fused) and the fused kernel's tile states. */
-    [[nodiscard]] virtual float get_irfft_scratch_memory_gib() const noexcept {
+    /** Fused scorer statistics and tile states. */
+    [[nodiscard]] virtual float get_scorer_scratch_memory_gib() const noexcept {
         return 0.0F;
     }
 };
@@ -204,11 +186,6 @@ protected:
     search::PulsarSearchConfig m_cfg;
     SizeType m_batch_size;
     SizeType m_branch_max;
-    math::CUFFTManager m_fft_manager;
-    // FFT manager owned by the caller (the EP sweep), or null to use
-    // m_fft_manager. It outlives the functor, so its plans are shared.
-    math::CUFFTManager* m_external_fft{nullptr};
-
     SizeType m_n_coords_init{};
     // Host copies of the last two grid counts: reading the device vector
     // element by element blocks on the stream.
@@ -220,21 +197,12 @@ protected:
     thrust::device_vector<uint32_t> m_boxcar_widths_d;
     thrust::device_vector<float> m_boxcar_kadane_biases_d;
 
-    // IRFFT scratch: complex copy (C2R overwrites input) + real output for
-    // scoring
-    thrust::device_vector<ComplexTypeCUDA> m_scratch_folds_c_d;
-    thrust::device_vector<float> m_scratch_folds_r_d;
-    // Fused shift-add + on-chip IRFFT + score (ComplexType EP, boxcar
-    // scorer), and its Bluestein table when nbins needs one.
-    bool m_use_fused_score{false};
-    // The seeds and the ascend score on chip too (any scorer setting: they
-    // always use the boxcar). With both fused, no irfft scratch is needed.
-    bool m_use_fused_rows{false};
+    // On-chip scoring, including Bluestein for non-power-of-two widths.
     thrust::device_vector<ComplexTypeCUDA> m_bluestein_d;
     // The fused kernel's batch statistics (kStatsWords words), then the
     // tile states of its ordered compaction (direct writes; at most one per
     // leaf), zeroed by one memset; and the pinned host copy of the
-    // statistics. Counted with the irfft scratch.
+    // statistics. Counted as the scorer scratch.
     static constexpr SizeType kStatsWords = 2;
     thrust::device_vector<unsigned long long> m_tile_state_d;
     std::unique_ptr<uint32_t, void (*)(uint32_t*)> m_stats_h{nullptr, nullptr};
@@ -253,27 +221,12 @@ protected:
                           search::PulsarSearchConfig cfg,
                           SizeType batch_size,
                           SizeType branch_max,
-                          int device_id                    = 0,
-                          math::CUFFTManager* external_fft = nullptr);
-
-    /** The FFT manager of the IRFFT: the external one if given. */
-    [[nodiscard]] math::CUFFTManager& get_fft() noexcept {
-        return m_external_fft != nullptr ? *m_external_fft : m_fft_manager;
-    }
-
-    /** Copy complex folds to scratch and IRFFT them into the first
-     * nfft * nbins floats of m_scratch_folds_r_d (ComplexType EP only).
-     * With @p normalize false the 1/nbins factor is left to the caller. */
-    void irfft_for_scoring(cuda::std::span<const ComplexTypeCUDA> src,
-                           SizeType nfft,
-                           cudaStream_t stream,
-                           bool normalize = true)
-        requires(std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>);
+                          int device_id = 0);
 
 public:
     // Common implementations shared by all variants
     /** Max boxcar S/N of @p n_rows complex folds (the seeds and the
-     * ascend): on chip when m_use_fused_rows, else IRFFT + scorer. */
+     * ascend): with the on-chip transform and scorer. */
     void score_complex_rows(cuda::std::span<const ComplexTypeCUDA> folds,
                             SizeType n_rows,
                             cuda::std::span<float> scores,
@@ -304,15 +257,6 @@ public:
                    SizeType capacity,
                    cudaStream_t stream) const noexcept override;
 
-    SizeType score_and_filter(cuda::std::span<const FoldTypeCUDA> folds_tree,
-                              cuda::std::span<float> scores_tree,
-                              cuda::std::span<const uint8_t> validation_mask,
-                              cuda::std::span<uint8_t> filtered_mask,
-                              float threshold,
-                              SizeType n_leaves,
-                              memory::CUBScratchArena& scratch_ws,
-                              cudaStream_t stream) noexcept override;
-
     SizeType
     shift_add_score(cuda::std::span<const FoldTypeCUDA> folds_tree,
                     cuda::std::span<const uint32_t> indices_tree,
@@ -332,13 +276,9 @@ public:
                     const EPDirectWriteCUDA<FoldTypeCUDA>* direct = nullptr,
                     MinMaxFloat* minmax = nullptr) override;
 
-    [[nodiscard]] bool supports_direct_write() const noexcept override {
-        return m_use_fused_score;
-    }
-
     SizeType collect_shift_add_score(MinMaxFloat& minmax) override;
 
-    [[nodiscard]] float get_irfft_scratch_memory_gib() const noexcept override;
+    [[nodiscard]] float get_scorer_scratch_memory_gib() const noexcept override;
 };
 
 // Intermediate base for Taylor-based methods (common seed implementation)
@@ -392,8 +332,7 @@ public:
                                 search::PulsarSearchConfig cfg,
                                 SizeType batch_size,
                                 SizeType branch_max,
-                                int device_id                    = 0,
-                                math::CUFFTManager* external_fft = nullptr);
+                                int device_id = 0);
 
     SizeType branch(cuda::std::span<double> leaves_tree,
                     cuda::std::span<double> leaves_branch,
@@ -470,8 +409,7 @@ public:
         search::PulsarSearchConfig cfg,
         SizeType batch_size,
         SizeType branch_max,
-        int device_id                    = 0,
-        math::CUFFTManager* external_fft = nullptr);
+        int device_id = 0);
 
     SizeType branch(cuda::std::span<double> leaves_tree,
                     cuda::std::span<double> leaves_branch,
@@ -537,8 +475,7 @@ public:
                                 search::PulsarSearchConfig cfg,
                                 SizeType batch_size,
                                 SizeType branch_max,
-                                int device_id                    = 0,
-                                math::CUFFTManager* external_fft = nullptr);
+                                int device_id = 0);
 
     SizeType branch(cuda::std::span<double> leaves_tree,
                     cuda::std::span<double> leaves_branch,
@@ -607,8 +544,7 @@ create_prune_dp_functs_cuda(std::string_view poly_basis,
                             search::PulsarSearchConfig cfg,
                             SizeType batch_size,
                             SizeType branch_max,
-                            int device_id                    = 0,
-                            math::CUFFTManager* external_fft = nullptr);
+                            int device_id = 0);
 
 // Type aliases for convenience
 using PrunePolyTaylorDPFunctsCUDAFloat = PrunePolyTaylorDPFunctsCUDA<float>;

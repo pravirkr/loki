@@ -336,10 +336,9 @@ public:
                                /*output_in_internal_buffer=*/true);
         // IRFFT
         const auto nfft = fold_size_time / m_cfg.get_nbins();
-        get_fft().irfft_batch(
-            cuda_utils::as_span(ws.fold_internal_d).first(fold_size_fourier),
-            fold_d.first(fold_size_time), nfft, m_cfg.get_nbins(), stream,
-            normalize);
+        get_fft().irfft_batch(ws.internal_folds().first(fold_size_fourier),
+                              fold_d.first(fold_size_time), nfft,
+                              m_cfg.get_nbins(), stream, normalize);
     }
 
     void execute_score_d(cuda::std::span<const float> ts_e_d,
@@ -378,8 +377,7 @@ public:
             ws.resolve_coordinates(m_ffa_plan, stream,
                                    /*skip_final_accel=*/m_final_computed);
         }
-        DeviceFoldT* in_ptr =
-            thrust::raw_pointer_cast(ws.fold_internal_d.data());
+        DeviceFoldT* in_ptr  = ws.internal_folds().data();
         DeviceFoldT* out_ptr = work_d.data();
         initialize_device(ts_e_d, ts_v_d, in_ptr, out_ptr, stream);
 
@@ -857,8 +855,7 @@ private:
 
         auto& ws = get_workspace();
         // Use fold_internal from workspace and output fold for ping-pong
-        DeviceFoldT* fold_internal_ptr =
-            thrust::raw_pointer_cast(ws.fold_internal_d.data());
+        DeviceFoldT* fold_internal_ptr = ws.internal_folds().data();
         DeviceFoldT* fold_result_ptr = thrust::raw_pointer_cast(fold_d.data());
 
         DeviceFoldT* current_in_ptr  = nullptr;

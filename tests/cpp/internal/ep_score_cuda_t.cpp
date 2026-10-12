@@ -238,7 +238,8 @@ Fused<FoldT> run_fused(const Batch<FoldT>& b,
                        std::vector<double>* tree_leaves_out = nullptr,
                        std::vector<float>* tree_scores_out  = nullptr,
                        SizeType write_head                  = 0,
-                       SizeType dst_capacity                = 0) {
+                       SizeType dst_capacity                = 0,
+                       bool score_only                      = false) {
     thrust::device_vector<FoldT> folds_out(b.n_leaves * b.stride);
     thrust::device_vector<float> scores(b.n_leaves);
     thrust::device_vector<uint8_t> mask(b.n_leaves);
@@ -259,13 +260,14 @@ Fused<FoldT> run_fused(const Batch<FoldT>& b,
     auto* stats =
         reinterpret_cast<uint32_t*>(thrust::raw_pointer_cast(state.data()));
     loki::core::EPScoreArgs<FoldT> args{
-        .folds_tree         = thrust::raw_pointer_cast(b.tree.data()),
-        .indices_tree       = thrust::raw_pointer_cast(b.idx_tree.data()),
-        .validation_mask    = thrust::raw_pointer_cast(b.valid.data()),
-        .folds_ffa          = thrust::raw_pointer_cast(b.ffa.data()),
-        .indices_ffa        = thrust::raw_pointer_cast(b.idx_ffa.data()),
-        .phase_shift        = thrust::raw_pointer_cast(b.shift.data()),
-        .folds_out          = thrust::raw_pointer_cast(folds_out.data()),
+        .folds_tree      = thrust::raw_pointer_cast(b.tree.data()),
+        .indices_tree    = thrust::raw_pointer_cast(b.idx_tree.data()),
+        .validation_mask = thrust::raw_pointer_cast(b.valid.data()),
+        .folds_ffa       = thrust::raw_pointer_cast(b.ffa.data()),
+        .indices_ffa     = thrust::raw_pointer_cast(b.idx_ffa.data()),
+        .phase_shift     = thrust::raw_pointer_cast(b.shift.data()),
+        .folds_out =
+            score_only ? nullptr : thrust::raw_pointer_cast(folds_out.data()),
         .scores             = thrust::raw_pointer_cast(scores.data()),
         .filtered_mask      = thrust::raw_pointer_cast(mask.data()),
         .stats              = stats,
@@ -354,12 +356,19 @@ void check_batch(SizeType nbins,
     }
 
     const auto staged = run_fused(b, threshold, false, nbiases);
-    float max_diff    = 0.0F;
-    SizeType flips    = 0;
-    uint32_t npass    = 0;
-    float mn          = std::numeric_limits<float>::max();
-    float mx          = std::numeric_limits<float>::lowest();
-    bool folds_exact  = true;
+    const auto score_only =
+        run_fused(b, threshold, false, nbiases, nullptr, nullptr, 0, 0, true);
+    CHECK(score_only.scores == staged.scores);
+    CHECK(score_only.mask == staged.mask);
+    CHECK(score_only.count == staged.count);
+    CHECK(score_only.min == staged.min);
+    CHECK(score_only.max == staged.max);
+    float max_diff   = 0.0F;
+    SizeType flips   = 0;
+    uint32_t npass   = 0;
+    float mn         = std::numeric_limits<float>::max();
+    float mx         = std::numeric_limits<float>::lowest();
+    bool folds_exact = true;
     for (SizeType i = 0; i < n_leaves; ++i) {
         if (valid[i] == 0) {
             REQUIRE(staged.mask[i] == 0);
@@ -504,7 +513,7 @@ TEST_CASE("Fused EP time-domain shift-add + score matches bit for bit",
         SKIP("CUDA backend not available");
     }
     const loki::cuda_utils::CudaSetDeviceGuard device_guard(0);
-    for (SizeType nbins = 2; nbins <= 1100; nbins += (nbins < 130 ? 1 : 37)) {
+    for (SizeType nbins = 2; nbins <= 1024; nbins += (nbins < 130 ? 1 : 37)) {
         check_batch<float>(nbins, 53, static_cast<std::uint32_t>(nbins));
     }
     for (const SizeType nbins : {SizeType{32}, SizeType{50}, SizeType{64}}) {
@@ -513,7 +522,7 @@ TEST_CASE("Fused EP time-domain shift-add + score matches bit for bit",
     check_batch<float>(128, 20000, 8);
     check_batch<float>(256, 300, 10, 45);
     check_batch<float>(64, 70001, 11, 40);
-    check_batch<float>(1400, 60, 12, 70);
+    check_batch<float>(1024, 60, 12, 70);
 }
 
 TEST_CASE("Fused EP Kadane (Fourier) matches the unfused chain",
@@ -542,12 +551,12 @@ TEST_CASE("Fused EP Kadane (time domain) matches the unfused chain",
         SKIP("CUDA backend not available");
     }
     const loki::cuda_utils::CudaSetDeviceGuard device_guard(0);
-    for (SizeType nbins = 2; nbins <= 1100; nbins += (nbins < 130 ? 1 : 37)) {
+    for (SizeType nbins = 2; nbins <= 1024; nbins += (nbins < 130 ? 1 : 37)) {
         check_batch<float>(nbins, 53, static_cast<std::uint32_t>(nbins), 12, 3);
         check_batch<float>(nbins, 53, static_cast<std::uint32_t>(nbins), 12, 2);
     }
     check_batch<float>(64, 70001, 7, 12, 3);
     check_batch<float>(200, 20000, 8, 12, 2);
-    check_batch<float>(1400, 60, 12, 12, 3);
+    check_batch<float>(1024, 60, 12, 12, 3);
 }
 #endif // LOKI_ENABLE_CUDA

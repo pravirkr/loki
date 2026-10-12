@@ -112,7 +112,8 @@ if(LOKI_BUILD_APPLICATIONS AND TARGET loki_app)
 
   # EP search: config generation, a plan-only run that writes the plan cache, a
   # dry run that loads that cache, and two rejections (a missing file and an
-  # RFI table, which the EP search does not accept).
+  # RFI table, which the EP search does not accept). Eight segments give this
+  # seeded fixture an eligible path at min_pd=0.1; four relied on fallback.
   set(LOKI_EP_CLI_DIR ${CMAKE_CURRENT_BINARY_DIR}/loki_cli_ep)
   file(MAKE_DIRECTORY ${LOKI_EP_CLI_DIR})
   string(
@@ -130,11 +131,12 @@ if(LOKI_BUILD_APPLICATIONS AND TARGET loki_app)
     "nbins = 32\n"
     "[ep]\n"
     "n_runs = 1\n"
+    "min_pd = 0.1\n"
     "prune_poly_order = 2\n"
     "[performance]\n"
     "nthreads = 1\n"
     "max_process_memory_gb = 4.0\n"
-    "bseg_ffa = 8192\n"
+    "bseg_ffa = 4096\n"
     "[output]\n"
     "outdir = \"${LOKI_EP_CLI_DIR}/out\"\n"
     "prefix = \"cli\"\n"

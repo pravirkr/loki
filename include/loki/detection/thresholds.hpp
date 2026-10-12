@@ -32,11 +32,16 @@ namespace loki::detection {
 //      estimates are optimistic (winner's curse). They are not a measurement
 //      of detection performance on data.
 //
-// Reporting only (papers, validation, offline tables). evaluate() does not
-// change the path and is not part of the on-the-fly pipeline:
+// Independent evaluation (reporting and EP population forecasts). evaluate()
+// never changes the selected path or applies min_pd as a second filter:
 //   1. The same run() and path as above.
 //   2. ev = evaluate(path, ntrials_eval, seed_eval) with seed_eval != seed.
-//   3. Quote ev.back().cost and ev.back().success_h1_cumul.
+//   3. Report ev.back().cost and ev.back().success_h1_cumul; a lower evaluated
+//      Pd does not invalidate the selection. EP planners use evaluated
+//      complexity on actual chunk branching patterns to estimate memory.
+// EP planners temporarily accept the best available simulated path with a
+// warning when no path meets min_pd; the low-level selector still returns empty
+// in that case. The configured cutoff is never modified.
 // Raising ntrials inside run() is what changes the path. evaluate() does not.
 enum class DynamicThresholdMode : uint8_t { kLegacy, kImproved };
 
@@ -171,8 +176,9 @@ public:
     /// statistically.
     /// In-run cost and success_h1_cumul are optimistic Monte Carlo estimates.
     void run(SizeType thres_neigh = 10);
-    /// Reporting only. Fresh Monte Carlo of one threshold per stage. Does not
-    /// modify run() and is not called before a live search. `ntrials` may
+    /// Fresh Monte Carlo of one fixed threshold per stage, for reporting or
+    /// EP population forecasts. Never modifies selection or re-filters Pd.
+    /// `ntrials` may
     /// differ from the search. Unset `seed` draws a random one; pass a seed
     /// different from the search seed. Deterministic per (seed, thresholds,
     /// ntrials). Each trial has its own stream.
@@ -181,6 +187,9 @@ public:
              SizeType ntrials,
              std::optional<uint64_t> seed = std::nullopt) const;
     std::string save(const std::string& outdir = "./") const;
+    /// Select minimum-cost terminal states whose in-run cumulative Pd >=
+    /// min_pd. Returns an empty path when none qualify; never relaxes min_pd.
+    /// Independent evaluate() estimates may differ and do not change this path.
     std::vector<float> get_best_path_thresholds(float min_pd = 0.1F) const;
 
 private:

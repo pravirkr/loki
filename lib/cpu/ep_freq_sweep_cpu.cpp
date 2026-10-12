@@ -68,7 +68,9 @@ public:
                            ref_ducy,
                            plan_cache_file,
                            m_rfi_config,
-                           m_n_workers) {
+                           m_n_workers,
+                           m_n_runs,
+                           m_ref_segs) {
         const auto& stats = m_region_planner.get_stats();
         spdlog::info(
             "EPFreqSweep initialized: {} chunks planned, max memory: {:.2f} GB "

@@ -17,6 +17,7 @@
 
 #include "lib/algorithms/ep_memory.hpp"
 #include "lib/algorithms/prune_engine.hpp"
+#include "lib/detail/utils.hpp"
 
 namespace loki::algorithms::detail {
 
@@ -35,12 +36,18 @@ struct EvaluatedChunk {
     SizeType ncoords{0};
     SizeType max_sugg{0};
     SizeType branch_max{0};
+    SizeType batch_size{0};
     SizeType nsegments{0};
     SizeType fold_size{0};
     SizeType buffer_size{0};
     SizeType coord_size{0};
     /// Transient scratch of the chunk's FFA (CUDA policy only).
     SizeType ffa_transient_bytes{0};
+    SizeType predicted_peak{0};
+    SizeType predicted_live{0};
+    double peak_complexity{1.0};
+    std::vector<float> branching_pattern;
+    bool indexable{true};
     double memory_gb{0.0}; ///< The chunk alone, with its own FFA buffers.
 };
 
@@ -85,6 +92,7 @@ struct GroupMaxima {
     SizeType nbins{0};
     SizeType max_sugg{0};
     SizeType branch_max{0};
+    SizeType batch_size{0};
     SizeType ncoords{0};
     SizeType nsegments{0};
 
@@ -93,6 +101,7 @@ struct GroupMaxima {
         branch_max = std::max(branch_max, c.branch_max);
         ncoords    = std::max(ncoords, c.ncoords);
         nsegments  = std::max(nsegments, c.nsegments);
+        batch_size = c.batch_size;
     }
 };
 
@@ -136,6 +145,16 @@ public:
 
     ChunkPlan run(std::span<const RegionDesign> designs) {
         auto state = run_pass(designs, std::nullopt);
+        while (state.failure && !state.failure->outside_cap &&
+               m_memory.kind == EPMemoryKind::kCuda &&
+               m_memory.batch_size > 1) {
+            m_memory.batch_size /= 2;
+            spdlog::warn("EPRegionPlanner: minimum chunk does not fit; "
+                         "retrying with CUDA batch={}",
+                         m_memory.batch_size);
+            m_memo.clear();
+            state = run_pass(designs, std::nullopt);
+        }
         if (state.failure) {
             throw std::runtime_error(state.failure->message);
         }
@@ -246,10 +265,19 @@ private:
                                         const EvaluatedChunk& c) const {
         return ep_total_gb(
             m_memory.n_workers,
-            ep_thread_bytes<FoldType>(m_memory, nbins, c.nsegments, c.ncoords,
-                                      c.max_sugg, c.branch_max),
+            ep_thread_bytes<FoldType>(chunk_memory(c.batch_size, c.buffer_size),
+                                      nbins, c.nsegments, c.ncoords, c.max_sugg,
+                                      c.branch_max),
             ep_fixed_bytes<FoldType>(m_memory, c.buffer_size, c.coord_size,
                                      c.ffa_transient_bytes));
+    }
+
+    EPMemoryContext chunk_memory(SizeType batch,
+                                 SizeType buffer_size = 0) const {
+        auto ctx              = m_memory;
+        ctx.batch_size        = batch;
+        ctx.shared_fold_bytes = buffer_size * fold_bytes<FoldType>();
+        return ctx;
     }
 
     const EvaluatedChunk& evaluate_chunk(SizeType design_idx,
@@ -269,11 +297,12 @@ private:
         // The branching pattern depends on the chunk's own band (not
         // monotone in width), so branch_max must come from the chunk's
         // plan, exactly as EPMultiPass computes it.
-        const auto forecast = plan.forecast_branching(m_poly_basis);
         EvaluatedChunk c{
-            .cfg         = std::move(chunk_cfg),
-            .ncoords     = plan.get_ncoords().back(),
-            .branch_max  = compute_branch_max(forecast.max_children),
+            .cfg        = std::move(chunk_cfg),
+            .ncoords    = plan.get_ncoords().back(),
+            .branch_max = compute_branch_max(
+                plan.forecast_branching(m_poly_basis).max_children),
+            .batch_size  = m_memory.batch_size,
             .nsegments   = design.nsegments,
             .fold_size   = plan.get_fold_size(),
             .buffer_size = plan.get_buffer_size(),
@@ -281,17 +310,57 @@ private:
             .ffa_transient_bytes =
                 ep_ffa_transient_bytes<FoldType>(m_memory, plan),
         };
-        // Expected survivors, capped: see kEPMaxWorldTreeCapacity.
-        c.max_sugg = std::min(
-            kEPMaxWorldTreeCapacity,
-            std::max(SizeType{1024},
-                     static_cast<SizeType>(std::ceil(
-                         static_cast<double>(c.ncoords) *
-                         static_cast<double>(design.safe_complexity)))));
-        if (m_memory.kind == EPMemoryKind::kCuda) {
-            // The device world tree needs a capacity above its largest batch.
-            c.max_sugg = ep_cuda_effective_max_sugg(m_memory.batch_size,
-                                                    c.branch_max, c.max_sugg);
+        const auto runs = utils::determine_ref_segs(
+            design.nsegments,
+            (!design.n_runs && !design.ref_segs)
+                ? std::optional<SizeType>(design.nsegments)
+                : design.n_runs,
+            design.ref_segs);
+        double peak = static_cast<double>(c.ncoords);
+        double live = peak;
+        for (const auto ref_seg : runs) {
+            const auto forecast =
+                plan.forecast_branching(m_poly_basis, ref_seg);
+            c.branch_max = std::max(c.branch_max,
+                                    compute_branch_max(forecast.max_children));
+            const std::vector<float> bp(forecast.mean.begin(),
+                                        forecast.mean.end());
+            if (c.branching_pattern.empty()) {
+                c.branching_pattern = bp;
+            }
+            const auto complexities =
+                design.evaluate ? design.evaluate(bp)
+                                : std::vector<double>{static_cast<double>(
+                                      design.safe_complexity)};
+            double previous = static_cast<double>(c.ncoords);
+            for (const double complexity : complexities) {
+                if (!utils::is_finite(complexity) || complexity < 0.0) {
+                    throw std::logic_error(
+                        "EPRegionPlanner: invalid complexity forecast");
+                }
+                const double population =
+                    std::ceil(static_cast<double>(c.ncoords) * complexity);
+                peak              = std::max(peak, population);
+                live              = std::max(live, previous + population);
+                c.peak_complexity = std::max(c.peak_complexity, complexity);
+                previous          = population;
+            }
+        }
+        // An oversized probe must fail fitting, rather than aborting the
+        // width search before it can try a narrower chunk.
+        const auto bound = ep_tree_index_limit(m_memory.kind);
+        c.indexable      = live < static_cast<double>(bound);
+        c.predicted_peak =
+            static_cast<SizeType>(std::min(peak, static_cast<double>(bound)));
+        c.predicted_live =
+            static_cast<SizeType>(std::min(live, static_cast<double>(bound)));
+        try {
+            c.max_sugg = ep_tree_capacity(c.predicted_live, c.batch_size,
+                                          c.branch_max, m_memory.kind);
+        } catch (const std::overflow_error&) {
+            // No tree is counted, so the memory below is a lower bound.
+            c.indexable = false;
+            c.max_sugg  = 0;
         }
         c.memory_gb = chunk_alone_gb(nbins, c);
         return m_memo.emplace(key, std::move(c)).first->second;
@@ -315,7 +384,8 @@ private:
         // the inputs.
         auto fits = [&](const EvaluatedChunk& c) -> FitResult {
             GroupMaxima group =
-                (state.group.active && state.group.nbins == nbins)
+                (state.group.active && state.group.nbins == nbins &&
+                 state.group.batch_size == c.batch_size)
                     ? state.group
                     : GroupMaxima{};
             group.absorb(c);
@@ -324,9 +394,10 @@ private:
             shared.absorb(c);
             const double sweep_gb = ep_total_gb(
                 m_memory.n_workers,
-                ep_thread_bytes<FoldType>(m_memory, nbins, group.nsegments,
-                                          group.ncoords, group.max_sugg,
-                                          group.branch_max),
+                ep_thread_bytes<FoldType>(
+                    chunk_memory(group.batch_size, shared.buffer_size), nbins,
+                    group.nsegments, group.ncoords, group.max_sugg,
+                    group.branch_max),
                 ep_fixed_bytes<FoldType>(m_memory, shared.buffer_size,
                                          shared.coord_size,
                                          shared.ffa_transient_bytes));
@@ -334,7 +405,7 @@ private:
             const bool within_cap =
                 !state.shared_cap || state.shared_cap->contains(c);
             return {
-                .ok          = within_cap && sweep_gb <= m_limit_gb,
+                .ok = c.indexable && within_cap && sweep_gb <= m_limit_gb,
                 .required_gb = sweep_gb,
                 .outside_cap = !within_cap,
             };
@@ -364,6 +435,20 @@ private:
                     hi_width = mid_width;
                 }
             }
+            // Branching changes discretely with the band. Probe beyond the
+            // first failing bracket before accepting a locally maximal width.
+            const double anchor = lo_width;
+            for (SizeType probe_idx = 1; probe_idx <= 8; ++probe_idx) {
+                const double width =
+                    anchor +
+                    (max_width - anchor) * static_cast<double>(probe_idx) / 8.0;
+                const auto& probe =
+                    evaluate(current_f_end - width, current_f_end);
+                if (fits(probe).ok && width > lo_width) {
+                    lo_width = width;
+                    best     = probe;
+                }
+            }
             return {current_f_end - lo_width, std::move(best)};
         };
 
@@ -379,21 +464,43 @@ private:
             const double min_start = current_f_end - min_width;
             const auto& min_eval   = evaluate(min_start, current_f_end);
             if (const auto min_fit = fits(min_eval); !min_fit.ok) {
+                // A wider band can have a cheaper discrete branching pattern.
+                // Do not conclude infeasibility from the minimum probe alone.
+                std::optional<std::pair<double, EvaluatedChunk>> wider;
+                for (SizeType step = 1; step <= 8; ++step) {
+                    const double width =
+                        min_width + (remaining - min_width) *
+                                        static_cast<double>(step) / 8.0;
+                    const auto& probe =
+                        evaluate(current_f_end - width, current_f_end);
+                    if (fits(probe).ok) {
+                        wider = {width, probe};
+                    }
+                }
+                if (wider) {
+                    return bisect_chunk(current_f_end, wider->first,
+                                        std::move(wider->second), remaining);
+                }
                 state.failure = PassFailure{
                     .message = std::format(
                         "EPRegionPlanner: Cannot fit minimum viable chunk at "
                         "[{:08.3f}, {:08.3f}] Hz (nbins={}).\n"
-                        "  Required memory: {:.2f} GB (per-thread workspaces "
+                        "  Required memory: {}{:.2f} GB (per-thread workspaces "
                         "for this nbins run plus the shared FFA buffers and "
                         "the input series), Available: {:.2f} GB\n{}"
-                        "  Suggestion: Increase max_process_memory_gb.",
-                        min_start, current_f_end, nbins, min_fit.required_gb,
-                        m_limit_gb,
+                        "{}",
+                        min_start, current_f_end, nbins,
+                        min_eval.indexable ? "" : "at least ",
+                        min_fit.required_gb, m_limit_gb,
                         state.shared_cap
                             ? "  The shared FFA buffers are fixed to the "
                               "largest size found while planning all "
                               "regions.\n"
-                            : ""),
+                            : "",
+                        min_eval.indexable
+                            ? "  Suggestion: Increase max_process_memory_gb."
+                            : "  Forecast exceeds the tree index range; "
+                              "the memory estimate is a lower bound."),
                     .outside_cap = min_fit.outside_cap,
                 };
                 return std::nullopt;
@@ -448,14 +555,17 @@ private:
             plan.chunk_cfgs.push_back(EPChunkConfig{
                 .cfg                 = eval.cfg,
                 .threshold_scheme    = design.threshold_scheme,
-                .branching_pattern   = design.bp_float,
+                .branching_pattern   = eval.branching_pattern,
                 .max_sugg            = eval.max_sugg,
                 .branch_max          = eval.branch_max,
+                .batch_size          = eval.batch_size,
+                .predicted_peak      = eval.predicted_peak,
+                .predicted_live      = eval.predicted_live,
                 .nominal_f_start     = nominal_start,
                 .nominal_f_end       = nominal_end,
                 .actual_f_start      = actual_start,
                 .actual_f_end        = actual_end,
-                .peak_complexity     = design.peak_complexity,
+                .peak_complexity     = eval.peak_complexity,
                 .chunk_memory_gb     = eval.memory_gb,
                 .nsegments           = design.nsegments,
                 .ncoords             = eval.ncoords,
@@ -477,13 +587,17 @@ private:
                 .ncoords          = eval.ncoords,
                 .max_sugg         = eval.max_sugg,
                 .branch_max       = eval.branch_max,
-                .peak_complexity  = design.peak_complexity,
+                .batch_size       = eval.batch_size,
+                .predicted_peak   = eval.predicted_peak,
+                .predicted_live   = eval.predicted_live,
+                .peak_complexity  = eval.peak_complexity,
                 .memory_gb        = eval.memory_gb,
                 .overlap_fraction = overlap_fraction,
             });
 
             // A new run starts when nbins changes (same rule as the sweep).
-            if (!state.group.active || state.group.nbins != nbins) {
+            if (!state.group.active || state.group.nbins != nbins ||
+                state.group.batch_size != eval.batch_size) {
                 state.group        = GroupMaxima{};
                 state.group.active = true;
                 state.group.nbins  = nbins;
