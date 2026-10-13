@@ -113,7 +113,8 @@ void ffa_freq_final_score_cuda(const float* __restrict__ fold_in,
 [[nodiscard]] bool ffa_fourier_needs_bluestein(SizeType nbins) noexcept;
 
 /**
- * @brief Bluestein table of the fused Fourier scorer for @p nbins = N.
+ * @brief Bluestein table of the fused Fourier scorer and of the batched GPU
+ * FFTs (fft_cuda.cuh) for @p nbins = N in [2, math::kGpuFFTMaxN].
  *
  * The inverse DFT of length N runs on chip as a circular convolution of
  * power-of-two length M = max(32, bit_ceil(2N - 1)). Layout: the chirp

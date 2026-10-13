@@ -34,6 +34,7 @@
 #include "lib/cuda/prune_cuda.cuh"
 #include "lib/cuda/types_cuda.cuh"
 #include "lib/cuda/workspace_cuda.cuh"
+#include "lib/detail/nvtx.hpp"
 #include "lib/detail/timing.hpp"
 #include "lib/pipelines/ep_freq_sweep_engine.hpp"
 #include "lib/pipelines/ep_sweep_common.hpp"
@@ -342,6 +343,7 @@ public:
             };
 
             for (SizeType i = group.begin; i < group.end; ++i) {
+                const nvtx::Range chunk_range("ep sweep: chunk");
                 const auto& chunk = chunk_cfgs[i];
                 spdlog::info("EPFreqSweep: processing chunk {}/{} - nominal "
                              "f=[{:08.3f}, {:08.3f}] Hz, actual f=[{:08.3f}, "
@@ -398,7 +400,7 @@ private:
     algorithms::EPRegionPlanner<FoldType> m_region_planner;
 
     memory::FFAWorkspaceCUDA<FoldTypeCUDA> m_ffa_workspace;
-    math::CUFFTManager m_fft_manager;
+    math::GpuFFTManager m_fft_manager;
     // Declared before the device buffers so that it outlives them.
     OwnedStream m_stream;
     thrust::device_vector<DeviceFoldT> m_fold_d;

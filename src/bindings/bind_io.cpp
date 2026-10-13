@@ -136,10 +136,13 @@ void bind_io(py::module_& m) {
         .def("write", &io::TimeSeries::write, py::arg("path"))
         .def(
             "preprocess",
-            [](io::TimeSeries& self, const PO& options, int nthreads) {
-                return self.preprocess(options, Exec::cpu(nthreads));
+            [](io::TimeSeries& self, const PO& options, int nthreads,
+               std::string_view backend, int device) {
+                return self.preprocess(options,
+                                       make_exec(backend, device, nthreads));
             },
-            py::arg("options") = PO{}, py::arg("nthreads") = 1)
+            py::arg("options") = PO{}, py::arg("nthreads") = 1, py::kw_only(),
+            py::arg("backend") = "cpu", py::arg("device") = 0)
         .def_property_readonly("nsamps", &io::TimeSeries::get_nsamps)
         .def_property_readonly("dt", &io::TimeSeries::get_dt)
         .def_property_readonly("tobs", &io::TimeSeries::get_tobs)

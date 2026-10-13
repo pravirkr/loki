@@ -142,10 +142,21 @@ TEST_CASE("FFASearchConfig validation throws on invalid arguments",
 
     // Negative tsamp
     REQUIRE_THROWS_AS(loki::search::FFASearchConfig(
-                          1000, -0.0001, 64, 1.0, valid_limits, 0.2, 1.5, true,
+                          1024, -0.0001, 64, 1.0, valid_limits, 0.2, 1.5, true,
                           1, 8.0, 2.0, 1024, 64, std::nullopt, std::nullopt,
                           5.0, 1000, false),
                       std::runtime_error);
+
+    // Each negative case uses a valid nsamps (a power of two), so it fails
+    // on its own rule.
+    // nbins below 2
+    for (const loki::SizeType nbins : {loki::SizeType{0}, loki::SizeType{1}}) {
+        REQUIRE_THROWS_AS(loki::search::FFASearchConfig(
+                              1024, 0.0001, nbins, 1.0, valid_limits, 0.2, 1.5,
+                              true, 1, 8.0, 2.0, 1024, 64, std::nullopt,
+                              std::nullopt, 5.0, 1000, false),
+                          std::runtime_error);
+    }
 
     // nbins need not be a power of two
     REQUIRE_NOTHROW(loki::search::FFASearchConfig(
@@ -154,19 +165,19 @@ TEST_CASE("FFASearchConfig validation throws on invalid arguments",
 
     // Invalid ducy_max
     REQUIRE_THROWS_AS(loki::search::FFASearchConfig(
-                          1000, 0.0001, 64, 1.0, valid_limits, 0.0, 1.5, true,
+                          1024, 0.0001, 64, 1.0, valid_limits, 0.0, 1.5, true,
                           1, 8.0, 2.0, 1024, 64, std::nullopt, std::nullopt,
                           5.0, 1000, false),
                       std::runtime_error);
     REQUIRE_THROWS_AS(loki::search::FFASearchConfig(
-                          1000, 0.0001, 64, 1.0, valid_limits, 1.5, 1.5, true,
+                          1024, 0.0001, 64, 1.0, valid_limits, 1.5, 1.5, true,
                           1, 8.0, 2.0, 1024, 64, std::nullopt, std::nullopt,
                           5.0, 1000, false),
                       std::runtime_error);
 
     // Empty param_limits
     REQUIRE_THROWS_AS(
-        loki::search::FFASearchConfig(1000, 0.0001, 64, 1.0, {}, 0.2, 1.5, true,
+        loki::search::FFASearchConfig(1024, 0.0001, 64, 1.0, {}, 0.2, 1.5, true,
                                       1, 8.0, 2.0, 1024, 64, std::nullopt,
                                       std::nullopt, 5.0, 1000, false),
         std::runtime_error);
@@ -174,7 +185,7 @@ TEST_CASE("FFASearchConfig validation throws on invalid arguments",
     // Inverted frequency limits
     const std::vector<loki::ParamLimit> inv_limits = {{10.0, 1.0}};
     REQUIRE_THROWS_AS(loki::search::FFASearchConfig(
-                          1000, 0.0001, 64, 1.0, inv_limits, 0.2, 1.5, true, 1,
+                          1024, 0.0001, 64, 1.0, inv_limits, 0.2, 1.5, true, 1,
                           8.0, 2.0, 1024, 64, std::nullopt, std::nullopt, 5.0,
                           1000, false),
                       std::runtime_error);

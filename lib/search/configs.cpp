@@ -874,6 +874,8 @@ public:
         if (m_param_limits.empty()) {
             throw std::runtime_error("coord_limits must be non-empty");
         }
+        // Before the defaults below, which depend on nbins.
+        error_check::check_greater_equal(m_nbins, 2, "nbins must be >= 2");
         m_nbins_f = (m_nbins / 2) + 1;
         m_nparams = m_param_limits.size();
         m_param_names.assign(kParamNames.end() - m_nparams, kParamNames.end());

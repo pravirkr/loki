@@ -8,6 +8,7 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <catch2/matchers/catch_matchers_range_equals.hpp>
 
@@ -394,7 +395,7 @@ TEST_CASE("EP-style copy before irfft preserves source spectrum",
 
 #ifdef LOKI_ENABLE_CUDA
 
-using loki::math::CUFFTManager;
+using loki::math::GpuFFTManager;
 using loki::math::irfft_batch_cuda;
 using loki::math::rfft_batch_cuda;
 
@@ -405,407 +406,154 @@ bool cuda_device_available() {
     return cudaGetDeviceCount(&count) == cudaSuccess && count > 0;
 }
 
+std::vector<float> random_rows(SizeType batch_size, SizeType n, unsigned seed) {
+    std::mt19937 rng(seed);
+    std::normal_distribution<float> nd(0.0F, 1.0F);
+    std::vector<float> x(batch_size * n);
+    for (auto& v : x) {
+        v = nd(rng);
+    }
+    return x;
+}
+
+template <typename T>
+std::vector<T> to_host(const thrust::device_vector<T>& d) {
+    std::vector<T> h(d.size());
+    thrust::copy(d.begin(), d.end(), h.begin());
+    return h;
+}
+
 } // namespace
 
-TEST_CASE("CUFFTManager round-trip matches FFTWManager",
-          "[fft][CUFFTManager]") {
+TEST_CASE("GpuFFTManager matches FFTW for direct and Bluestein lengths",
+          "[fft][GpuFFTManager]") {
     if (!cuda_device_available()) {
         SKIP("No CUDA device");
     }
     loki::cuda_utils::CudaSetDeviceGuard device_guard(0);
+    const SizeType n = GENERATE(2, 3, 5, 7, 16, 31, 32, 50, 64, 100, 127, 128,
+                                333, 512, 1000, 1024, 1500, 2047, 2048);
+    constexpr SizeType kBatch = 37;
+    const SizeType nf         = (n / 2) + 1;
+    const auto real_in = random_rows(kBatch, n, static_cast<unsigned>(n));
 
-    constexpr SizeType n_real     = 64;
-    constexpr SizeType batch_size = 32;
-    auto real_in                  = make_sine_batch(batch_size, n_real);
-    const SizeType n_complex      = (n_real / 2) + 1;
-
-    std::vector<ComplexType> cpu_spec(batch_size * n_complex);
-    std::vector<float> cpu_recovered(batch_size * n_real);
+    std::vector<ComplexType> cpu_spec(kBatch * nf);
+    std::vector<float> cpu_real(kBatch * n);
     FFTWManager cpu;
-    cpu.prepare_plans(std::span<const SizeType>(&n_real, 1));
-    cpu.rfft_batch(real_in, cpu_spec, batch_size, n_real, 1);
-    cpu.irfft_batch(cpu_spec, cpu_recovered, batch_size, n_real, 1);
+    auto real_copy = real_in;
+    cpu.rfft_batch(real_copy, cpu_spec, kBatch, n, 1);
+    auto spec_copy = cpu_spec;
+    cpu.irfft_batch(spec_copy, cpu_real, kBatch, n, 1);
 
+    GpuFFTManager gpu(0);
+    gpu.prepare_plans(std::span<const SizeType>(&n, 1));
+    REQUIRE(gpu.has_prepared(n));
+    REQUIRE(gpu.n_cached_plans() == 1);
     thrust::device_vector<float> d_real(real_in.begin(), real_in.end());
-    thrust::device_vector<ComplexTypeCUDA> d_spec(batch_size * n_complex);
-    thrust::device_vector<float> d_recovered(batch_size * n_real);
-
-    CUFFTManager gpu(0);
-    gpu.prepare_plans(std::span<const SizeType>(&n_real, 1));
+    thrust::device_vector<ComplexTypeCUDA> d_spec(kBatch * nf);
+    thrust::device_vector<float> d_back(kBatch * n);
     gpu.rfft_batch(loki::cuda_utils::as_span(d_real),
-                   loki::cuda_utils::as_span(d_spec), batch_size, n_real);
-    gpu.irfft_batch(loki::cuda_utils::as_span(d_spec),
-                    loki::cuda_utils::as_span(d_recovered), batch_size, n_real);
-
-    std::vector<ComplexTypeCUDA> gpu_spec(batch_size * n_complex);
-    std::vector<float> gpu_recovered(batch_size * n_real);
-    thrust::copy(d_spec.begin(), d_spec.end(), gpu_spec.begin());
-    thrust::copy(d_recovered.begin(), d_recovered.end(), gpu_recovered.begin());
-
-    REQUIRE_THAT(gpu_spec, RangeEquals(cpu_spec, cuda_complex_near(kFftTol)));
-    require_round_trip(real_in, gpu_recovered);
-    require_round_trip(cpu_recovered, gpu_recovered);
-}
-
-TEST_CASE("CUFFTManager leftover chunk and plan reuse", "[fft][CUFFTManager]") {
-    if (!cuda_device_available()) {
-        SKIP("No CUDA device");
+                   loki::cuda_utils::as_span(d_spec), kBatch, n);
+    // C2R of FFTW's spectrum, so both directions are checked on their own.
+    std::vector<ComplexTypeCUDA> cpu_spec_c(cpu_spec.size());
+    for (SizeType i = 0; i < cpu_spec.size(); ++i) {
+        cpu_spec_c[i] = {cpu_spec[i].real(), cpu_spec[i].imag()};
     }
-    loki::cuda_utils::CudaSetDeviceGuard device_guard(0);
+    thrust::device_vector<ComplexTypeCUDA> d_cpu_spec(cpu_spec_c.begin(),
+                                                      cpu_spec_c.end());
+    gpu.irfft_batch(loki::cuda_utils::as_span(d_cpu_spec),
+                    loki::cuda_utils::as_span(d_back), kBatch, n);
+    cudaDeviceSynchronize();
 
-    constexpr SizeType n_real     = 64;
-    constexpr SizeType max_batch  = 8;
-    constexpr SizeType batch_size = max_batch + 2;
-    auto real_in                  = make_sine_batch(batch_size, n_real);
-    const SizeType n_complex      = (n_real / 2) + 1;
-
-    thrust::device_vector<float> d_real(real_in.begin(), real_in.end());
-    thrust::device_vector<ComplexTypeCUDA> d_spec(batch_size * n_complex);
-    thrust::device_vector<float> d_recovered(batch_size * n_real);
-
-    CUFFTManager gpu(0);
-    gpu.prepare_plans(std::span<const SizeType>(&n_real, 1), max_batch);
-    REQUIRE(gpu.has_prepared(n_real));
-    REQUIRE(gpu.n_cached_plans() == 2);
-
-    gpu.rfft_batch(
-        loki::cuda_utils::as_span(d_real).first(max_batch * n_real),
-        loki::cuda_utils::as_span(d_spec).first(max_batch * n_complex),
-        max_batch, n_real);
-    REQUIRE(gpu.n_cached_plans() == 2);
-
-    gpu.rfft_batch(
-        loki::cuda_utils::as_span(d_real).first(max_batch * n_real),
-        loki::cuda_utils::as_span(d_spec).first(max_batch * n_complex),
-        max_batch, n_real);
-    REQUIRE(gpu.n_cached_plans() == 2);
-
-    // A prepared n_real plans at most max_batch and a granule (here equal):
-    // the leftover rows are staged through a granule plan, not a new
-    // exact-size plan.
-    gpu.rfft_batch(loki::cuda_utils::as_span(d_real),
-                   loki::cuda_utils::as_span(d_spec), batch_size, n_real);
-    REQUIRE(gpu.n_cached_plans() == 2);
-
-    gpu.irfft_batch(loki::cuda_utils::as_span(d_spec),
-                    loki::cuda_utils::as_span(d_recovered), batch_size, n_real);
-    REQUIRE(gpu.n_cached_plans() == 2);
-
-    std::vector<float> gpu_recovered(batch_size * n_real);
-    thrust::copy(d_recovered.begin(), d_recovered.end(), gpu_recovered.begin());
-    require_round_trip(real_in, gpu_recovered);
-
-    gpu.irfft_batch(loki::cuda_utils::as_span(d_spec),
-                    loki::cuda_utils::as_span(d_recovered), batch_size, n_real);
-    REQUIRE(gpu.n_cached_plans() == 2);
-}
-
-TEST_CASE("CUFFTManager C2R keeps complex input", "[fft][CUFFTManager]") {
-    if (!cuda_device_available()) {
-        SKIP("No CUDA device");
+    // Float-level agreement: errors scale like sqrt(n) of the unit-variance
+    // input in the spectrum and like 1 / sqrt(n) in the normalized C2R.
+    const auto spec = to_host(d_spec);
+    const float tol_spec =
+        2e-6F * static_cast<float>(n) * std::sqrt(static_cast<float>(n));
+    for (SizeType i = 0; i < spec.size(); ++i) {
+        REQUIRE_THAT(spec[i].real(), WithinAbs(cpu_spec[i].real(), tol_spec));
+        REQUIRE_THAT(spec[i].imag(), WithinAbs(cpu_spec[i].imag(), tol_spec));
     }
-    loki::cuda_utils::CudaSetDeviceGuard device_guard(0);
-
-    constexpr SizeType n_real     = 64;
-    constexpr SizeType batch_size = 16;
-    auto real_in                  = make_sine_batch(batch_size, n_real);
-    const SizeType n_complex      = (n_real / 2) + 1;
-
-    thrust::device_vector<float> d_real(real_in.begin(), real_in.end());
-    thrust::device_vector<ComplexTypeCUDA> d_spec(batch_size * n_complex);
-    thrust::device_vector<float> d_recovered(batch_size * n_real);
-
-    CUFFTManager gpu(0);
-    gpu.rfft_batch(loki::cuda_utils::as_span(d_real),
-                   loki::cuda_utils::as_span(d_spec), batch_size, n_real);
-
-    std::vector<ComplexTypeCUDA> spec_before(batch_size * n_complex);
-    thrust::copy(d_spec.begin(), d_spec.end(), spec_before.begin());
-
-    gpu.irfft_batch(loki::cuda_utils::as_span(d_spec),
-                    loki::cuda_utils::as_span(d_recovered), batch_size, n_real);
-
-    std::vector<ComplexTypeCUDA> spec_after(batch_size * n_complex);
-    thrust::copy(d_spec.begin(), d_spec.end(), spec_after.begin());
-
-    bool overwritten = false;
-    for (SizeType i = 0; i < spec_before.size(); ++i) {
-        if (spec_before[i].real() != spec_after[i].real() ||
-            spec_before[i].imag() != spec_after[i].imag()) {
-            overwritten = true;
-            break;
+    for (SizeType b = 0; b < kBatch; ++b) {
+        REQUIRE(spec[b * nf].imag() == 0.0F);
+        if (n % 2 == 0) {
+            REQUIRE(spec[(b * nf) + (n / 2)].imag() == 0.0F);
         }
     }
-    // Out-of-place C2R writes the real buffer and leaves the spectrum alone.
-    REQUIRE_FALSE(overwritten);
+    const auto back = to_host(d_back);
+    require_reals_near(back, cpu_real,
+                       2e-5F * std::sqrt(static_cast<float>(n)));
+    require_reals_near(cpu_real, real_in, 1e-4F);
+    // The input of the C2R is left unchanged.
+    REQUIRE(to_host(d_cpu_spec) == cpu_spec_c);
 }
 
-// The EP scorer runs C2R on a batch padded up to a multiple of 1024 rows
-// (irfft_folds_for_scoring) and reads only the first rows. That relies on
-// each row's output not depending on the batch size.
-TEST_CASE("CUFFTManager C2R rows do not depend on the batch size",
-          "[fft][CUFFTManager]") {
+TEST_CASE("GpuFFTManager rows do not depend on the batch",
+          "[fft][GpuFFTManager]") {
     if (!cuda_device_available()) {
         SKIP("No CUDA device");
     }
     loki::cuda_utils::CudaSetDeviceGuard device_guard(0);
-    constexpr SizeType kRows   = 777;
-    constexpr SizeType kPadded = 1024;
-    CUFFTManager gpu(0);
-    std::mt19937 rng(3);
-    std::normal_distribution<float> dist(0.0F, 1.0F);
-    for (const SizeType n_real :
-         {SizeType{32}, SizeType{64}, SizeType{100}, SizeType{128}}) {
-        for (const bool normalize : {true, false}) {
-            CAPTURE(n_real, normalize);
-            const SizeType n_complex = (n_real / 2) + 1;
-            std::vector<ComplexTypeCUDA> spec(kPadded * n_complex);
-            for (auto& c : spec) {
-                c = ComplexTypeCUDA(dist(rng), dist(rng));
-            }
-            thrust::device_vector<ComplexTypeCUDA> d_exact(
-                spec.begin(), spec.begin() + (kRows * n_complex));
-            thrust::device_vector<ComplexTypeCUDA> d_padded(spec.begin(),
-                                                            spec.end());
-            thrust::device_vector<float> d_out_exact(kRows * n_real);
-            thrust::device_vector<float> d_out_padded(kPadded * n_real);
-            gpu.irfft_batch(loki::cuda_utils::as_span(d_exact),
-                            loki::cuda_utils::as_span(d_out_exact), kRows,
-                            n_real, nullptr, normalize);
-            gpu.irfft_batch(loki::cuda_utils::as_span(d_padded),
-                            loki::cuda_utils::as_span(d_out_padded), kPadded,
-                            n_real, nullptr, normalize);
-            std::vector<float> exact(kRows * n_real);
-            std::vector<float> padded(kRows * n_real);
-            thrust::copy(d_out_exact.begin(), d_out_exact.end(), exact.begin());
-            thrust::copy(d_out_padded.begin(),
-                         d_out_padded.begin() +
-                             static_cast<std::ptrdiff_t>(kRows * n_real),
-                         padded.begin());
-            REQUIRE(std::memcmp(exact.data(), padded.data(),
-                                exact.size() * sizeof(float)) == 0);
-        }
-    }
-}
-
-TEST_CASE("CUFFTManager empty batch is a no-op", "[fft][CUFFTManager]") {
-    if (!cuda_device_available()) {
-        SKIP("No CUDA device");
-    }
-    loki::cuda_utils::CudaSetDeviceGuard device_guard(0);
-
-    constexpr SizeType n_real = 64;
-    thrust::device_vector<float> empty_real;
-    thrust::device_vector<ComplexTypeCUDA> empty_spec;
-    CUFFTManager gpu(0);
-    gpu.rfft_batch(loki::cuda_utils::as_span(empty_real),
-                   loki::cuda_utils::as_span(empty_spec), 0, n_real);
-    gpu.irfft_batch(loki::cuda_utils::as_span(empty_spec),
-                    loki::cuda_utils::as_span(empty_real), 0, n_real);
-    REQUIRE(gpu.n_cached_plans() == 0);
-}
-
-TEST_CASE("CUFFTManager prepare_plans reject shrink", "[fft][CUFFTManager]") {
-    if (!cuda_device_available()) {
-        SKIP("No CUDA device");
-    }
-    loki::cuda_utils::CudaSetDeviceGuard device_guard(0);
-
-    constexpr SizeType n_real = 64;
-    CUFFTManager gpu(0);
-    gpu.prepare_plans(std::span<const SizeType>(&n_real, 1), 256);
-    const SizeType plans_after_first = gpu.n_cached_plans();
-    gpu.prepare_plans(std::span<const SizeType>(&n_real, 1), 256);
-    REQUIRE(gpu.n_cached_plans() == plans_after_first);
-    REQUIRE_THROWS_AS(
-        gpu.prepare_plans(std::span<const SizeType>(&n_real, 1), 128),
-        loki::error_check::DetailedException);
-}
-
-TEST_CASE("CUFFTManager exact-batch lazy cache reuses plans",
-          "[fft][CUFFTManager]") {
-    if (!cuda_device_available()) {
-        SKIP("No CUDA device");
-    }
-    loki::cuda_utils::CudaSetDeviceGuard device_guard(0);
-
-    constexpr SizeType n_real     = 64;
-    constexpr SizeType batch_size = 200;
-    const SizeType n_complex      = (n_real / 2) + 1;
-    auto real_in                  = make_sine_batch(batch_size, n_real);
-
+    const SizeType n          = GENERATE(64, 100);
+    constexpr SizeType kBatch = 33;
+    const SizeType nf         = (n / 2) + 1;
+    const auto real_in        = random_rows(kBatch, n, 7);
     thrust::device_vector<float> d_real(real_in.begin(), real_in.end());
-    thrust::device_vector<ComplexTypeCUDA> d_spec(batch_size * n_complex);
-    thrust::device_vector<float> d_recovered_a(batch_size * n_real);
-    thrust::device_vector<float> d_recovered_b(batch_size * n_real);
+    thrust::device_vector<ComplexTypeCUDA> d_all(kBatch * nf);
+    thrust::device_vector<ComplexTypeCUDA> d_one(nf);
+    GpuFFTManager gpu(0);
+    gpu.rfft_batch(loki::cuda_utils::as_span(d_real),
+                   loki::cuda_utils::as_span(d_all), kBatch, n);
+    // Row 17 alone.
+    gpu.rfft_batch(loki::cuda_utils::as_span(d_real).subspan(17 * n, n),
+                   loki::cuda_utils::as_span(d_one), 1, n);
+    thrust::device_vector<float> d_r_all(kBatch * n);
+    thrust::device_vector<float> d_r_one(n);
+    gpu.irfft_batch(loki::cuda_utils::as_span(d_all),
+                    loki::cuda_utils::as_span(d_r_all), kBatch, n);
+    gpu.irfft_batch(loki::cuda_utils::as_span(d_one),
+                    loki::cuda_utils::as_span(d_r_one), 1, n);
+    const auto all   = to_host(d_all);
+    const auto one   = to_host(d_one);
+    const auto r_all = to_host(d_r_all);
+    const auto r_one = to_host(d_r_one);
+    for (SizeType k = 0; k < nf; ++k) {
+        REQUIRE(cuda_complex_eq(all[(17 * nf) + k], one[k]));
+    }
+    for (SizeType j = 0; j < n; ++j) {
+        REQUIRE(r_all[(17 * n) + j] == r_one[j]);
+    }
+}
 
-    CUFFTManager spectral(0);
-    spectral.rfft_batch(loki::cuda_utils::as_span(d_real),
-                        loki::cuda_utils::as_span(d_spec), batch_size, n_real);
-
-    CUFFTManager gpu(0);
-    gpu.prepare_exact_plans(std::span<const SizeType>(&n_real, 1));
-    REQUIRE(gpu.has_prepared(n_real));
+TEST_CASE("GpuFFTManager limits", "[fft][GpuFFTManager]") {
+    if (!cuda_device_available()) {
+        SKIP("No CUDA device");
+    }
+    loki::cuda_utils::CudaSetDeviceGuard device_guard(0);
+    GpuFFTManager gpu(0);
+    const std::vector<SizeType> bad{1, loki::math::kGpuFFTMaxN + 1};
+    for (const SizeType n : bad) {
+        REQUIRE_THROWS(gpu.prepare_plans(std::span<const SizeType>(&n, 1)));
+    }
+    // An empty batch does nothing.
+    thrust::device_vector<float> d_real(64);
+    thrust::device_vector<ComplexTypeCUDA> d_spec(33);
+    gpu.rfft_batch(loki::cuda_utils::as_span(d_real),
+                   loki::cuda_utils::as_span(d_spec), 0, 64);
+    // Undersized buffers are rejected.
+    REQUIRE_THROWS(gpu.rfft_batch(loki::cuda_utils::as_span(d_real),
+                                  loki::cuda_utils::as_span(d_spec), 2, 64));
     REQUIRE(gpu.n_cached_plans() == 0);
-
-    gpu.irfft_batch(loki::cuda_utils::as_span(d_spec),
-                    loki::cuda_utils::as_span(d_recovered_a), batch_size,
-                    n_real);
-    REQUIRE(gpu.n_cached_plans() == 1);
-
-    spectral.rfft_batch(loki::cuda_utils::as_span(d_real),
-                        loki::cuda_utils::as_span(d_spec), batch_size, n_real);
-    gpu.irfft_batch(loki::cuda_utils::as_span(d_spec),
-                    loki::cuda_utils::as_span(d_recovered_b), batch_size,
-                    n_real);
-    REQUIRE(gpu.n_cached_plans() == 1);
-
-    std::vector<float> recovered_a(batch_size * n_real);
-    std::vector<float> recovered_b(batch_size * n_real);
-    thrust::copy(d_recovered_a.begin(), d_recovered_a.end(),
-                 recovered_a.begin());
-    thrust::copy(d_recovered_b.begin(), d_recovered_b.end(),
-                 recovered_b.begin());
-    require_reals_near(recovered_b, recovered_a, kFftRepeatTol);
-}
-
-TEST_CASE("CUFFTManager exact-batch caches two chunk sizes",
-          "[fft][CUFFTManager]") {
-    if (!cuda_device_available()) {
-        SKIP("No CUDA device");
-    }
-    loki::cuda_utils::CudaSetDeviceGuard device_guard(0);
-
-    constexpr SizeType n_real     = 32;
-    constexpr SizeType max_batch  = 8;
-    constexpr SizeType batch_size = max_batch + 1;
-    const SizeType n_complex      = (n_real / 2) + 1;
-    auto real_in                  = make_sine_batch(batch_size, n_real);
-
-    thrust::device_vector<float> d_real(real_in.begin(), real_in.end());
-    thrust::device_vector<ComplexTypeCUDA> d_spec(batch_size * n_complex);
-    thrust::device_vector<ComplexTypeCUDA> d_spec_scratch(batch_size *
-                                                          n_complex);
-    thrust::device_vector<float> d_recovered(batch_size * n_real);
-
-    CUFFTManager spectral(0);
-    spectral.rfft_batch(loki::cuda_utils::as_span(d_real),
-                        loki::cuda_utils::as_span(d_spec), batch_size, n_real);
-    std::vector<ComplexTypeCUDA> spec_before(batch_size * n_complex);
-    thrust::copy(d_spec.begin(), d_spec.end(), spec_before.begin());
-
-    CUFFTManager gpu(0);
-    gpu.prepare_exact_plans(std::span<const SizeType>(&n_real, 1), max_batch);
-    thrust::copy(d_spec.begin(), d_spec.end(), d_spec_scratch.begin());
-    gpu.irfft_batch(loki::cuda_utils::as_span(d_spec_scratch),
-                    loki::cuda_utils::as_span(d_recovered), batch_size, n_real);
-    REQUIRE(gpu.n_cached_plans() == 2);
-
-    std::vector<ComplexTypeCUDA> spec_after(batch_size * n_complex);
-    thrust::copy(d_spec.begin(), d_spec.end(), spec_after.begin());
-    REQUIRE_THAT(spec_after, RangeEquals(spec_before, cuda_complex_eq));
-
-    std::vector<float> gpu_recovered(batch_size * n_real);
-    thrust::copy(d_recovered.begin(), d_recovered.end(), gpu_recovered.begin());
-    require_round_trip(real_in, gpu_recovered);
-
-    spectral.rfft_batch(loki::cuda_utils::as_span(d_real),
-                        loki::cuda_utils::as_span(d_spec), batch_size, n_real);
-    thrust::copy(d_spec.begin(), d_spec.end(), d_spec_scratch.begin());
-    gpu.irfft_batch(loki::cuda_utils::as_span(d_spec_scratch),
-                    loki::cuda_utils::as_span(d_recovered), batch_size, n_real);
-    REQUIRE(gpu.n_cached_plans() == 2);
-
-    REQUIRE_THROWS_AS(gpu.rfft_batch(loki::cuda_utils::as_span(d_real),
-                                     loki::cuda_utils::as_span(d_spec),
-                                     batch_size, n_real),
-                      loki::error_check::DetailedException);
-}
-
-TEST_CASE("CUFFTManager exact vs max-batch mode conflict",
-          "[fft][CUFFTManager]") {
-    if (!cuda_device_available()) {
-        SKIP("No CUDA device");
-    }
-    loki::cuda_utils::CudaSetDeviceGuard device_guard(0);
-
-    constexpr SizeType n_real = 64;
-
-    SECTION("exact then prepare_plans") {
-        CUFFTManager gpu(0);
-        gpu.prepare_exact_plans(std::span<const SizeType>(&n_real, 1));
-        REQUIRE_THROWS_AS(
-            gpu.prepare_plans(std::span<const SizeType>(&n_real, 1)),
-            loki::error_check::DetailedException);
-    }
-    SECTION("prepare_plans then exact") {
-        CUFFTManager gpu(0);
-        gpu.prepare_plans(std::span<const SizeType>(&n_real, 1));
-        REQUIRE_THROWS_AS(
-            gpu.prepare_exact_plans(std::span<const SizeType>(&n_real, 1)),
-            loki::error_check::DetailedException);
-    }
-    SECTION("exact reject shrink") {
-        CUFFTManager gpu(0);
-        gpu.prepare_exact_plans(std::span<const SizeType>(&n_real, 1), 256);
-        gpu.prepare_exact_plans(std::span<const SizeType>(&n_real, 1), 256);
-        REQUIRE_THROWS_AS(
-            gpu.prepare_exact_plans(std::span<const SizeType>(&n_real, 1), 128),
-            loki::error_check::DetailedException);
-    }
-}
-
-TEST_CASE("CUFFTManager exact-batch two sizes round-trip",
-          "[fft][CUFFTManager]") {
-    if (!cuda_device_available()) {
-        SKIP("No CUDA device");
-    }
-    loki::cuda_utils::CudaSetDeviceGuard device_guard(0);
-
-    constexpr SizeType n_real  = 64;
-    constexpr SizeType batch_a = 16;
-    constexpr SizeType batch_b = 24;
-    const SizeType n_complex   = (n_real / 2) + 1;
-    auto real_in_a             = make_sine_batch(batch_a, n_real);
-    auto real_in_b             = make_sine_batch(batch_b, n_real);
-
-    thrust::device_vector<float> d_real_a(real_in_a.begin(), real_in_a.end());
-    thrust::device_vector<float> d_real_b(real_in_b.begin(), real_in_b.end());
-    thrust::device_vector<ComplexTypeCUDA> d_spec_a(batch_a * n_complex);
-    thrust::device_vector<ComplexTypeCUDA> d_spec_b(batch_b * n_complex);
-    thrust::device_vector<float> d_out_a(batch_a * n_real);
-    thrust::device_vector<float> d_out_b(batch_b * n_real);
-
-    CUFFTManager spectral(0);
-    spectral.rfft_batch(loki::cuda_utils::as_span(d_real_a),
-                        loki::cuda_utils::as_span(d_spec_a), batch_a, n_real);
-    spectral.rfft_batch(loki::cuda_utils::as_span(d_real_b),
-                        loki::cuda_utils::as_span(d_spec_b), batch_b, n_real);
-
-    CUFFTManager gpu(0);
-    gpu.prepare_exact_plans(std::span<const SizeType>(&n_real, 1));
-    gpu.irfft_batch(loki::cuda_utils::as_span(d_spec_a),
-                    loki::cuda_utils::as_span(d_out_a), batch_a, n_real);
-    gpu.irfft_batch(loki::cuda_utils::as_span(d_spec_b),
-                    loki::cuda_utils::as_span(d_out_b), batch_b, n_real);
-    REQUIRE(gpu.n_cached_plans() == 2);
-
-    std::vector<float> out_a(batch_a * n_real);
-    std::vector<float> out_b(batch_b * n_real);
-    thrust::copy(d_out_a.begin(), d_out_a.end(), out_a.begin());
-    thrust::copy(d_out_b.begin(), d_out_b.end(), out_b.begin());
-    require_round_trip(real_in_a, out_a);
-    require_round_trip(real_in_b, out_b);
 }
 
 TEST_CASE("rfft_batch_cuda / irfft_batch_cuda convenience wrappers",
-          "[fft][CUFFTManager]") {
+          "[fft][GpuFFTManager]") {
     if (!cuda_device_available()) {
         SKIP("No CUDA device");
     }
     loki::cuda_utils::CudaSetDeviceGuard device_guard(0);
 
-    constexpr SizeType n_real     = 64;
+    constexpr SizeType n_real     = 50;
     constexpr SizeType batch_size = 16;
     const SizeType n_complex      = (n_real / 2) + 1;
     auto real_in                  = make_sine_batch(batch_size, n_real);

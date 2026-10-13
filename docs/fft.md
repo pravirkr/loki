@@ -14,9 +14,8 @@ FFT of the CUDA FFA sweep works. Read it before changing
 - Inverse transforms are unnormalized C2R. The `1 / nbins` is applied later:
   the scorers take it as `fold_scale`.
 - C2R treats the input as Hermitian, so the imaginary parts of the DC
-  harmonic and (for even `nbins`) the Nyquist harmonic are ignored. cuFFT and
-  FFTW both behave this way. The on-chip transforms below zero those parts
-  explicitly.
+  harmonic and (for even `nbins`) the Nyquist harmonic are ignored, as FFTW
+  does. The GPU transforms below zero those parts explicitly.
 - `nbins` is any integer `>= 2`. Nothing in loki requires a power of two. The
   FFT code must keep it that way.
 
@@ -25,22 +24,37 @@ FFT of the CUDA FFA sweep works. Read it before changing
 | Where | Library | Notes |
 | --- | --- | --- |
 | CPU (`lib/cpu/fft_cpu.cpp`) | FFTW (`FFTWManager`) | Plans cached per size. |
-| GPU, batched (`lib/cuda/fft_cuda.cu`) | cuFFT (`CUFFTManager`) | Lossy brute fold (rFFT), unfused FFA levels, EP. |
+| GPU, batched (`lib/cuda/fft_cuda.cu`) | `PortableFFT` (`GpuFFTManager`) | Lossy brute fold (R2C), unfused FFA chunks and `FFA::execute` (C2R). |
 | GPU, fused FFA Fourier scorer | `PortableFFT` (`ffa_portable_fft.cuh`) | On chip, inside the final-level kernel. |
 
-### cuFFT plan cache
+loki uses no vendor FFT library on the GPU (cuFFT was removed in 2026-10).
 
-A cuFFT plan is tied to its batch size, and every FFA chunk has a different
-batch size. Building a plan for each chunk cost seconds on large sweeps.
-`CUFFTManager` therefore has two modes.
+### Batched GPU transforms
 
-- **Prepared sizes** (`prepare_plans`, used by the FFA sweep). Each size gets
-  two plans per direction: one for `max_batch` rows and one for a granule of
-  1024 rows. `execute_chunked` runs a call as full `max_batch` blocks, then
-  full granules. The rows that remain are copied into a granule-sized scratch
-  buffer and transformed there. Rows are independent transforms, so this
-  split does not change the result.
-- **Exact sizes** (EP). One plan per distinct batch size, as before.
+`GpuFFTManager` transforms each row with one block-level `PortableFFT`, so
+a row's output does not depend on the batch size or on the other rows, and
+inputs are left unchanged. There are no plans. The only state is a
+Bluestein table per length that needs one, built by `prepare_plans` (the
+sweeps call it for their chunk sizes) or on first use. `math::FFTManager`
+on a GPU `Exec` wraps one.
+
+- **Even lengths** (`n >= 4`) use real packing: the row is the complex
+  sequence `z[m] = x[2m] + i x[2m+1]` of length `h = n / 2`, transformed at
+  length `h`, with a twiddle pass `X[k] = E[k] + w^k O[k]` (R2C) or its
+  inverse before the transform (C2R). Odd lengths are transformed as complex
+  rows of length `n`.
+- The complex length is transformed directly when it is a power of two
+  `>= 32`, and with Bluestein's algorithm otherwise (the table of
+  `ffa_fourier_bluestein_table`).
+- **Lengths:** 2 to `kGpuFFTMaxN = 2048`. Bluestein then needs `M <= 4096`
+  points, 32 KiB of shared memory per block, which every supported
+  architecture has. Fourier-domain GPU searches with a larger `nbins` are
+  rejected when they are built (`check_gpu_fourier_nbins`).
+- **Speed** (L40S, sweep R2C of the lossy brute fold): power-of-two lengths
+  52.4 ms against cuFFT's 52.8 ms (W2L), and 50-800 bins 31.6 ms against
+  32.1 ms (W2Ln). The transforms are memory-bound.
+- **Accuracy:** float level against FFTW for every length tested, 2 to 2048
+  (`tests/cpp/internal/fft_t.cpp`).
 
 ## Fused Fourier final level (CUDA FFA sweep)
 
@@ -98,10 +112,11 @@ uses the forward FFT: `IDFT(x) = conj(FFT(conj(x)))`.
   - The chirp phase is computed from `j^2 mod 2N` in integers, so it is exact
     for large `j`.
   - Bluestein does roughly 2.5-5x the arithmetic of a direct transform of a
-    similar size. It is still far faster than the unfused cuFFT route, which
+    similar size. It is still far faster than the unfused route, which
     writes the whole complex fold to global memory and reads it back.
-- **`nbins > 1024`:** the chunk is planned unfused and goes through cuFFT
-  (`gpu_fused_score_applies` in `planner_memory.hpp`).
+- **`nbins > 1024`** (up to 2048): the chunk is planned unfused and goes
+  through the batched C2R of `GpuFFTManager` (`gpu_fused_score_applies` in
+  `planner_memory.hpp`).
 
 ### Kernel shape and occupancy
 
@@ -134,8 +149,8 @@ uses the forward FFT: `IDFT(x) = conj(FFT(conj(x)))`.
 ## Fused pruning step (CUDA EP)
 
 The EP prunes in batches of branched leaves. One kernel per batch replaces
-the shift-add kernel, (for Fourier folds) the copy that cuFFT C2R
-overwrites and the C2R itself, and the scorer:
+the shift-add kernel, (for Fourier folds) the copy that the old cuFFT C2R
+overwrote and the C2R itself, and the scorer:
 `kernel_ep_shift_add_score_c2c` (`ep_score_fourier_cuda.cu`) for complex
 folds, `kernel_ep_shift_add_score_time` (`ep_score_time_cuda.cu`) for
 time-domain folds. Their block bookkeeping is shared
@@ -217,9 +232,9 @@ with no FFA term, mask or statistics.
   and time-domain nbins up to 5119;
 - seeds and ascend: Fourier nbins up to 1024 (always the boxcar).
 
-Only then do the prune functors skip the irfft scratch and the cuFFT plans
-(`ep_cuda_needs_irfft_scratch`): they keep them only for Fourier nbins above
-1024.
+Only then do the prune functors skip the irfft scratch
+(`ep_cuda_needs_irfft_scratch`). EP rejects Fourier nbins above 1024
+(`ep_support.hpp`), so the CUDA pruning never needs it.
 
 **Numerics.** The merged folds, the tree contents and the survivor order are
 as before. Time-domain boxcar scores are bit-identical, and so are the
@@ -309,21 +324,23 @@ The algorithm is a Stockham FFT with register radix-E passes.
 ## Tests and benchmarks
 
 - `tests/cpp/internal/ffa_final_score_cuda_t.cpp`:
-  - the fused Fourier scorer against the unfused merge kernels, cuFFT C2R and
-    `score_and_filter_cuda_d`, at a tolerance of 1e-5;
+  - the fused Fourier scorer against the unfused merge kernels, the batched
+    C2R (`irfft_batch_cuda`) and `score_and_filter_cuda_d`, at a tolerance
+    of 1e-5;
   - power-of-two and other `nbins`;
   - depth 1 and 2, freq-only and accel, both scorer regimes;
   - a sweep over every `nbins` from 2 to 1024.
 - `tests/cpp/internal/ep_score_cuda_t.cpp`: the fused EP step against the
-  unfused chain (shift-add, cuFFT C2R, `score_and_filter_max_cuda_d`):
+  unfused chain (shift-add, batched C2R, `score_and_filter_max_cuda_d`):
   - Fourier: every `nbins` from 2 to 1024; both scorer regimes; more than
     32 widths;
   - time domain: bit for bit;
-  - row scoring (seeds, ascend) against cuFFT + `snr_boxcar_3d_max_cuda_d`.
+  - row scoring (seeds, ascend) against the batched C2R +
+    `snr_boxcar_3d_max_cuda_d`.
 
   It checks the merged folds bit for bit, the S/N within 1e-5, the masks,
   counts and min/max, and, in direct mode, the survivors' slots, leaves,
-  folds and scores. Its spectra keep DC and Nyquist real, where cuFFT C2R
+  folds and scores. Its spectra keep DC and Nyquist real, where every C2R
   is well defined.
 - Validate a change end to end with an injection study at 2^25, not only
   2^23. Chunk widths change the search grid (`docs/memory.md`).

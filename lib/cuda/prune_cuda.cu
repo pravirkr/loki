@@ -32,6 +32,7 @@
 #include "lib/cuda/ffa_cuda.cuh"
 #include "lib/cuda/world_tree_cuda.cuh"
 #include "lib/detail/error_check.hpp"
+#include "lib/detail/nvtx.hpp"
 #include "lib/detail/psr_utils.hpp"
 #include "lib/detail/timing.hpp"
 #include "lib/detail/utils.hpp"
@@ -1119,8 +1120,10 @@ public:
         const auto& pl = *m_pipeline;
         cuda_utils::CudaSetDeviceGuard device_guard(m_device_id);
         {
-            // Scoped: the brute-fold tables of the FFA are freed before the
-            // pruning, as the memory model assumes.
+            // Scoped: the FFA core's host state ends before the pruning (its
+            // brute-fold tables live in the shared workspace; the memory
+            // model counts them).
+            const nvtx::Range range("ep: ffa");
             FFACudaCore<FoldTypeCUDA> ffa(*pl.ffa_workspace, *pl.fft_manager,
                                           m_cfg, m_device_id);
             const auto& plan = ffa.get_plan();
@@ -1176,6 +1179,7 @@ private:
                      const std::filesystem::path& outdir,
                      std::string_view file_prefix,
                      timing::SimpleTimer& timer) {
+        const nvtx::Range range("ep: pruning");
         // Setup output files and directory
         const auto nsegments = m_ffa_plan.get_nsegments().back();
         const std::string filebase =

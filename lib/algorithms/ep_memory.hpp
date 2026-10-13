@@ -46,6 +46,8 @@
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
 
+#include "lib/algorithms/planner_memory.hpp"
+
 namespace loki::algorithms::detail {
 
 constexpr double kBytesPerGiB = static_cast<double>(1ULL << 30U);
@@ -66,7 +68,8 @@ constexpr SizeType kEPBatchSizeCuda = SizeType{1} << 16U;
 ///  5: shared FFA/tree arena, branch lookahead and score-only overflow.
 ///  6: bounded canonical shift-add scratch for fused overflow recomputation.
 ///  7: remove branch lookahead after the SNR-10 timing regression.
-constexpr std::uint32_t kEPMemoryModelVersion = 8U;
+///  9: no cuFFT: the CUDA reserve is 0.5 GiB for any number of FFT sizes.
+constexpr std::uint32_t kEPMemoryModelVersion = 9U;
 
 /// Worst-case size of the per-run harvest store (see PruneRFIConfig).
 /// Normalised: all fields are zero/false when harvesting is disabled.
@@ -115,22 +118,12 @@ struct EPMemoryContext {
     SizeType shared_fold_bytes{0};
 };
 
-/// More FFT sizes retain more vendor plan/context storage outside the model.
-inline double ep_memory_reserve_gb(const search::PulsarSearchConfig& cfg,
-                                   EPMemoryKind kind) {
-    if (kind == EPMemoryKind::kCuda) {
-        const auto regions = generate_ffa_regions(
-            1.0 / cfg.get_f_max(), 1.0 / cfg.get_f_min(), cfg.get_tsamp(),
-            cfg.get_nbins(), cfg.get_eta(), cfg.get_octave_scale(),
-            cfg.get_nbins_max());
-        if (!regions.empty() &&
-            std::ranges::any_of(regions, [&](const auto& region) {
-                return region.nbins != regions.front().nbins;
-            })) {
-            return 1.5;
-        }
-    }
-    return 0.5;
+/// Reserve for what the EP memory model does not count (kUnmodelledReserveGB
+/// in planner_memory.hpp). The GPU transforms keep no vendor plans, so the
+/// reserve no longer grows with the number of FFT sizes.
+inline double ep_memory_reserve_gb(const search::PulsarSearchConfig& /*cfg*/,
+                                   EPMemoryKind /*kind*/) {
+    return kUnmodelledReserveGB;
 }
 
 /// Size of one element of the folds stored for @p FoldType.

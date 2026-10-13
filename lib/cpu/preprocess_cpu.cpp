@@ -27,18 +27,6 @@ namespace {
 
 constexpr SizeType kParallelThreshold = 1U << 14U;
 
-/// Median of v[0, n) (mean of the two middle values for even n). Reorders v.
-template <typename T> double median_inplace(T* v, SizeType n) noexcept {
-    const SizeType h = n / 2;
-    std::nth_element(v, v + h, v + n);
-    const auto hi = static_cast<double>(v[h]);
-    if (n % 2 == 1) {
-        return hi;
-    }
-    const auto lo = static_cast<double>(*std::max_element(v, v + h));
-    return 0.5 * (lo + hi);
-}
-
 /// Exact median of v[0, n), same value as median_inplace but about 2x faster
 /// on blocks: a sorted sample brackets the middle, a branchless pass copies
 /// the bracket into @p tmp (capacity n) and only that is selected. Falls back
@@ -82,75 +70,7 @@ double median_bracketed(float* v, SizeType n, float* tmp) noexcept {
     return 0.5 * (lower + upper);
 }
 
-/// Median of a small vector (copied).
-double median_of(std::vector<double> v) {
-    return v.empty() ? 0.0 : median_inplace(v.data(), v.size());
-}
-
-/// Gaussian-consistent robust spread: 1.4826 * MAD about @p med.
-double robust_spread(const std::vector<double>& v, double med) {
-    std::vector<double> dev(v.size());
-    std::ranges::transform(v, dev.begin(),
-                           [med](double a) { return std::abs(a - med); });
-    return kMadScale * median_of(std::move(dev));
-}
-
-SizeType min_valid(double min_good, SizeType len) {
-    const auto need =
-        static_cast<SizeType>(std::ceil(min_good * static_cast<double>(len)));
-    return std::max<SizeType>({need, 3, 1});
-}
-
-/// Block-level baseline and variance for the current mask.
-struct BlockStats {
-    std::vector<float> mu;
-    std::vector<float> var;
-    std::vector<float> good;
-    double median_var{0.0};
-};
-
-BlockStats compute_stats(std::span<const float> x,
-                         std::span<const std::uint8_t> mask,
-                         const BlockGrid& grid,
-                         SizeType k_mu,
-                         SizeType k_var,
-                         double min_good,
-                         int nthreads) {
-    const SizeType nb = grid.nblocks;
-    BlockStats st;
-    st.good.resize(nb);
-    std::vector<float> med(nb);
-    std::vector<std::uint8_t> usable(nb);
-    block_medians(x, mask, grid, min_good, med, usable, st.good, nthreads);
-    st.mu = masked_running_median(med, usable, k_mu, nthreads);
-    // Median then mean: the mean removes the staircase a running median
-    // leaves on a trend with superposed wander.
-    st.mu = reflected_running_mean(st.mu, blocks_per_window(k_mu, 2));
-
-    std::vector<float> var(nb);
-    block_variances(x, mask, grid, st.mu, min_good, var, usable, nthreads);
-    std::vector<double> used;
-    used.reserve(nb);
-    for (SizeType b = 0; b < nb; ++b) {
-        if (usable[b] != 0U) {
-            used.push_back(var[b]);
-        }
-    }
-    if (used.empty()) {
-        throw std::invalid_argument(
-            "preprocess: no block has a usable variance (constant or fully "
-            "masked series)");
-    }
-    st.median_var        = median_of(std::move(used));
-    st.var               = masked_running_mean(var, usable, k_var);
-    const auto floor_var = static_cast<float>(kRelVarFloor * st.median_var);
-    for (auto& v : st.var) {
-        v = std::max(v, floor_var);
-    }
-    return st;
-}
-
-void check_finite(std::span<const float> x, int nthreads) {
+void check_finite_cpu(std::span<const float> x, int nthreads) {
     const SizeType n     = x.size();
     const SizeType chunk = std::max<SizeType>(kParallelThreshold, 1);
     const SizeType nc    = (n + chunk - 1) / chunk;
@@ -191,149 +111,85 @@ PreprocessReport preprocess_zscore(std::span<float> x,
     return rep;
 }
 
-PreprocessReport preprocess_robust(std::span<float> x,
-                                   double tsamp,
-                                   std::span<float> ts_v,
-                                   const PreprocessOptions& o,
-                                   int nthreads) {
-    const SizeType n = x.size();
-    if (n < kMinRobustSamples) {
-        throw std::invalid_argument(
-            "preprocess: the robust method needs at least 16 samples");
-    }
-    check_finite(x, nthreads);
-
-    // Geometry. A zero baseline window means one baseline for the series.
-    const SizeType w_mu  = o.filter_window > 0.0
-                               ? window_in_samples(o.filter_window, tsamp, n)
-                               : n;
-    const SizeType w_var = o.variance_window > 0.0
-                               ? window_in_samples(o.variance_window, tsamp, n)
-                               : w_mu;
-    const SizeType block =
-        std::clamp(w_mu / o.window_blocks, std::min(kMinStatBlock, n), n);
-    const BlockGrid grid(n, block);
-    const SizeType k_mu  = blocks_per_window(w_mu, block);
-    const SizeType k_var = blocks_per_window(w_var, block);
-
-    std::vector<SizeType> scales;
-    for (const double s : o.block_scales) {
-        const auto len = static_cast<SizeType>(std::llround(s / tsamp));
-        if (len >= kMinFlagBlock &&
-            n / std::max<SizeType>(len, 1) >= kMinFlagBlocks) {
-            scales.push_back(len);
-        }
-    }
-    std::ranges::sort(scales);
-    const auto dup = std::ranges::unique(scales);
-    scales.erase(dup.begin(), dup.end());
-
-    // ts_v doubles as the whitened-residual scratch until the output pass.
-    std::span<float> z = ts_v;
-    std::vector<std::uint8_t> mask(n, 1U);
-    const double clamp = o.clip_sigma;
-
-    BlockStats st = compute_stats(x, mask, grid, k_mu, k_var,
-                                  o.min_good_fraction, nthreads);
-    if (!scales.empty()) {
-        for (SizeType it = 0; it < o.n_iter; ++it) {
-            whiten(x, grid, st.mu, st.var, z, nthreads);
-            flag_bad_blocks(z, scales, o.block_sigma, o.min_good_fraction,
-                            clamp, mask, nthreads);
-            st = compute_stats(x, mask, grid, k_mu, k_var, o.min_good_fraction,
-                               nthreads);
-        }
-    }
-
-    PreprocessReport rep;
-    rep.method          = PreprocessMethod::kRobust;
-    rep.nsamps          = n;
-    rep.baseline_window = w_mu;
-    rep.variance_window = w_var;
-    rep.block_size      = block;
-
-    if (o.zap_periodic || !o.birdies.empty()) {
-        whiten(x, grid, st.mu, st.var, z, nthreads);
-        // Masked samples and outliers stay out of the spectrum; outliers are
-        // marked 2 (still valid) so they keep their raw value below.
-        const float clip = clamp > 0.0 ? static_cast<float>(clamp) : 0.0F;
-        std::uint8_t* m  = mask.data();
-        float* zp        = z.data();
+/// Zap step of the robust method (PreprocessOptions::zap_periodic, birdies)
+/// on @p x with the sample mask @p mask; @p z is scratch.
+SizeType zap_cpu(const BlockGrid& grid,
+                 std::span<const float> mu,
+                 std::span<const float> var,
+                 double tsamp,
+                 const PreprocessOptions& o,
+                 std::span<float> x,
+                 std::span<float> z,
+                 std::span<std::uint8_t> mask,
+                 int nthreads) {
+    const SizeType n     = x.size();
+    const SizeType block = grid.block;
+    const double clamp   = o.clip_sigma;
+    whiten(x, grid, mu, var, z, nthreads);
+    // Masked samples and outliers stay out of the spectrum; outliers are
+    // marked 2 (still valid) so they keep their raw value below.
+    const float clip = clamp > 0.0 ? static_cast<float>(clamp) : 0.0F;
+    std::uint8_t* m  = mask.data();
+    float* zp        = z.data();
 #pragma omp parallel for num_threads(nthreads) schedule(static) default(none)  \
     firstprivate(n, m, zp, clip) if (n >= kParallelThreshold)
-        for (SizeType i = 0; i < n; ++i) {
-            const bool outlier = clip > 0.0F && std::abs(zp[i]) > clip;
-            m[i]  = (m[i] != 0U && outlier) ? std::uint8_t{2} : m[i];
-            zp[i] = m[i] == 1U ? zp[i] : 0.0F;
-        }
-        rep.n_zapped = zap_spectrum(z, tsamp, o.zap_periodic, o.zap_sigma,
-                                    o.zap_whiten_bins, o.birdies, nthreads);
-        const std::span<const float> mu  = st.mu;
-        const std::span<const float> var = st.var;
-        float* xp                        = x.data();
-        const bool update                = rep.n_zapped > 0;
+    for (SizeType i = 0; i < n; ++i) {
+        const bool outlier = clip > 0.0F && std::abs(zp[i]) > clip;
+        m[i]               = (m[i] != 0U && outlier) ? std::uint8_t{2} : m[i];
+        zp[i]              = m[i] == 1U ? zp[i] : 0.0F;
+    }
+    const SizeType n_zapped =
+        zap_spectrum(z, tsamp, o.zap_periodic, o.zap_sigma, o.zap_whiten_bins,
+                     o.birdies, nthreads);
+    float* xp         = x.data();
+    const bool update = n_zapped > 0;
 #pragma omp parallel num_threads(nthreads) default(none) shared(grid)          \
     firstprivate(mu, var, xp, zp, m, block,                                    \
                      update) if (n >= kParallelThreshold)
-        {
-            std::vector<float> mub(block);
-            std::vector<float> varb(block);
+    {
+        std::vector<float> mub(block);
+        std::vector<float> varb(block);
 #pragma omp for schedule(static)
-            for (SizeType b = 0; b < grid.nblocks; ++b) {
-                const SizeType i0  = grid.begin(b);
-                const SizeType len = grid.end(b) - i0;
-                if (update) {
-                    interpolate_block(grid, mu, b, mub.data());
-                    interpolate_block(grid, var, b, varb.data());
+        for (SizeType b = 0; b < grid.nblocks; ++b) {
+            const SizeType i0  = grid.begin(b);
+            const SizeType len = grid.end(b) - i0;
+            if (update) {
+                interpolate_block(grid, mu, b, mub.data());
+                interpolate_block(grid, var, b, varb.data());
+            }
+            for (SizeType j = 0; j < len; ++j) {
+                const SizeType i = i0 + j;
+                if (update && m[i] == 1U) {
+                    xp[i] = mub[j] + (zp[i] * std::sqrt(varb[j]));
                 }
-                for (SizeType j = 0; j < len; ++j) {
-                    const SizeType i = i0 + j;
-                    if (update && m[i] == 1U) {
-                        xp[i] = mub[j] + (zp[i] * std::sqrt(varb[j]));
-                    }
-                    m[i] = m[i] == 0U ? std::uint8_t{0} : std::uint8_t{1};
-                }
+                m[i] = m[i] == 0U ? std::uint8_t{0} : std::uint8_t{1};
             }
         }
-        if (update) {
-            st = compute_stats(x, mask, grid, k_mu, k_var, o.min_good_fraction,
-                               nthreads);
-        }
     }
+    return n_zapped;
+}
 
-    // Normalisation and gain.
-    const bool mult = o.gain_model == GainModel::kMultiplicative;
-    if (mult && *std::ranges::min_element(st.mu) <= 0.0F) {
-        throw std::invalid_argument(
-            "preprocess: the multiplicative gain model needs a positive "
-            "baseline (is the data already mean-subtracted?)");
-    }
-    std::vector<double> info;
-    info.reserve(grid.nblocks);
-    for (SizeType b = 0; b < grid.nblocks; ++b) {
-        if (st.good[b] > 0.0F) {
-            const double g = mult ? st.mu[b] : 1.0;
-            info.push_back(g * g / st.var[b]);
-        }
-    }
-    if (info.empty()) {
-        throw std::invalid_argument("preprocess: every sample is masked");
-    }
-    const double c = 1.0 / std::sqrt(median_of(std::move(info)));
-
-    // Output pass: x -> ts_e (same buffer), ts_v.
-    std::vector<SizeType> n_clip(grid.nblocks, 0);
-    std::vector<SizeType> n_mask(grid.nblocks, 0);
+/// Output pass of the robust method: x -> ts_e (same buffer), ts_v.
+void output_cpu(const BlockGrid& grid,
+                std::span<const float> mu,
+                std::span<const float> var,
+                float cf,
+                float clip2,
+                bool mult,
+                std::span<float> x,
+                std::span<float> ts_v,
+                std::span<const std::uint8_t> mask,
+                std::span<SizeType> n_clip,
+                std::span<SizeType> n_mask,
+                int nthreads) {
     {
-        const std::span<const float> mu  = st.mu;
-        const std::span<const float> var = st.var;
-        float* xp                        = x.data();
-        float* vp                        = ts_v.data();
-        const std::uint8_t* m            = mask.data();
-        const auto cf                    = static_cast<float>(c);
-        const auto clip2 = static_cast<float>(o.clip_sigma * o.clip_sigma);
-        SizeType* ncp    = n_clip.data();
-        SizeType* nmp    = n_mask.data();
+        float* xp             = x.data();
+        float* vp             = ts_v.data();
+        const std::uint8_t* m = mask.data();
+        SizeType* ncp         = n_clip.data();
+        SizeType* nmp         = n_mask.data();
+        const SizeType n      = x.size();
+        const SizeType block  = grid.block;
 #pragma omp parallel num_threads(nthreads) default(none) shared(grid)          \
     firstprivate(mu, var, xp, vp, m, cf, clip2, ncp, nmp, mult,                \
                      block) if (n >= kParallelThreshold)
@@ -367,45 +223,153 @@ PreprocessReport preprocess_robust(std::span<float> x,
             }
         }
     }
-    for (SizeType b = 0; b < grid.nblocks; ++b) {
-        rep.n_clipped += n_clip[b];
-        rep.n_masked += n_mask[b];
+}
+
+/// Count, sum and sum of squares of the valid `z` of every block of @p g.
+void flag_sums_cpu(std::span<const float> z,
+                   std::span<const std::uint8_t> mask,
+                   const BlockGrid& g,
+                   float cl,
+                   std::span<SizeType> cnt_out,
+                   std::span<double> s1_out,
+                   std::span<double> s2_out,
+                   int nthreads) {
+    const SizeType n       = z.size();
+    const SizeType nb      = g.nblocks;
+    const std::uint8_t* mk = mask.data();
+    SizeType* pc           = cnt_out.data();
+    double* p1             = s1_out.data();
+    double* p2             = s2_out.data();
+#pragma omp parallel for num_threads(nthreads) schedule(static) default(none)  \
+    shared(g)                                                                  \
+    firstprivate(z, mk, pc, p1, p2, cl, nb) if (n >= kParallelThreshold)
+    for (SizeType b = 0; b < nb; ++b) {
+        const SizeType i0  = g.begin(b);
+        const SizeType len = g.end(b) - i0;
+        SizeType cnt       = 0;
+        double s1          = 0.0;
+        double s2          = 0.0;
+        for (SizeType i = i0; i < i0 + len; ++i) {
+            const float v = z[i];
+            const bool ok = mk[i] != 0U && (cl == 0.0F || std::abs(v) <= cl);
+            cnt += ok ? 1 : 0;
+            s1 += ok ? static_cast<double>(v) : 0.0;
+            s2 += ok ? static_cast<double>(v) * v : 0.0;
+        }
+        pc[b] = cnt;
+        p1[b] = s1;
+        p2[b] = s2;
     }
-    if (rep.n_masked + rep.n_clipped == n) {
-        throw std::invalid_argument("preprocess: every sample is masked");
+}
+
+void mask_blocks_cpu(const BlockGrid& g,
+                     std::span<const std::uint8_t> bad,
+                     std::span<std::uint8_t> mask) {
+    for (SizeType b = 0; b < g.nblocks; ++b) {
+        if (bad[b] != 0U) {
+            std::fill(mask.begin() + static_cast<std::ptrdiff_t>(g.begin(b)),
+                      mask.begin() + static_cast<std::ptrdiff_t>(g.end(b)), 0U);
+        }
     }
-    rep.longest_masked_run = longest_zero_run(ts_v);
-    rep.global_scale       = std::sqrt(st.median_var);
-    rep.norm               = c;
-    rep.block_mu           = std::move(st.mu);
-    rep.block_sigma.resize(grid.nblocks);
-    std::ranges::transform(st.var, rep.block_sigma.begin(),
-                           [](float v) { return std::sqrt(v); });
-    rep.block_good_fraction = std::move(st.good);
-    return rep;
+}
+
+/// The per-sample passes of the robust method on the CPU, in place on ts_e
+/// (x) and ts_v (z).
+class CpuRobustStages final : public RobustStages {
+public:
+    CpuRobustStages(std::span<float> x, std::span<float> z, int nthreads)
+        : m_x(x),
+          m_z(z),
+          m_mask(x.size(), 1U),
+          m_nthreads(nthreads) {}
+
+    void check_finite() override { check_finite_cpu(m_x, m_nthreads); }
+
+    void reset_mask() override { std::ranges::fill(m_mask, 1U); }
+
+    void block_medians(const BlockGrid& grid,
+                       double min_good,
+                       std::span<float> med,
+                       std::span<std::uint8_t> usable,
+                       std::span<float> good) override {
+        detail::block_medians(m_x, m_mask, grid, min_good, med, usable, good,
+                              m_nthreads);
+    }
+
+    std::vector<float> running_median(std::span<const float> v,
+                                      std::span<const std::uint8_t> usable,
+                                      SizeType k) override {
+        return masked_running_median(v, usable, k, m_nthreads);
+    }
+
+    void block_variances(const BlockGrid& grid,
+                         std::span<const float> mu,
+                         double min_good,
+                         std::span<float> var,
+                         std::span<std::uint8_t> usable) override {
+        detail::block_variances(m_x, m_mask, grid, mu, min_good, var, usable,
+                                m_nthreads);
+    }
+
+    void whiten(const BlockGrid& grid,
+                std::span<const float> mu,
+                std::span<const float> var) override {
+        detail::whiten(m_x, grid, mu, var, m_z, m_nthreads);
+    }
+
+    void flag_sums(const BlockGrid& g,
+                   float clip,
+                   std::span<SizeType> cnt,
+                   std::span<double> s1,
+                   std::span<double> s2) override {
+        flag_sums_cpu(m_z, m_mask, g, clip, cnt, s1, s2, m_nthreads);
+    }
+
+    void mask_blocks(const BlockGrid& g,
+                     std::span<const std::uint8_t> bad) override {
+        mask_blocks_cpu(g, bad, m_mask);
+    }
+
+    SizeType zap(const BlockGrid& grid,
+                 std::span<const float> mu,
+                 std::span<const float> var,
+                 double tsamp,
+                 const PreprocessOptions& o) override {
+        return zap_cpu(grid, mu, var, tsamp, o, m_x, m_z, m_mask, m_nthreads);
+    }
+
+    void output(const BlockGrid& grid,
+                std::span<const float> mu,
+                std::span<const float> var,
+                float cf,
+                float clip2,
+                bool mult,
+                std::span<SizeType> n_clip,
+                std::span<SizeType> n_mask) override {
+        output_cpu(grid, mu, var, cf, clip2, mult, m_x, m_z, m_mask, n_clip,
+                   n_mask, m_nthreads);
+    }
+
+    std::span<const float> ts_v() override { return m_z; }
+
+private:
+    std::span<float> m_x;
+    std::span<float> m_z;
+    std::vector<std::uint8_t> m_mask;
+    int m_nthreads;
+};
+
+PreprocessReport preprocess_robust(std::span<float> x,
+                                   double tsamp,
+                                   std::span<float> ts_v,
+                                   const PreprocessOptions& o,
+                                   int nthreads) {
+    // ts_v doubles as the whitened-residual scratch until the output pass.
+    CpuRobustStages stages(x, ts_v, nthreads);
+    return run_robust(stages, tsamp, o);
 }
 
 } // namespace
-
-BlockGrid::BlockGrid(SizeType n_samples, SizeType block_size)
-    : n(n_samples),
-      block(std::max<SizeType>(block_size, 1)),
-      nblocks((n_samples + block - 1) / block) {}
-
-SizeType window_in_samples(double window_sec, double tsamp, SizeType n) {
-    const double bins = window_sec / tsamp;
-    if (bins >= static_cast<double>(n)) {
-        return n;
-    }
-    return bins >= 1.0 ? static_cast<SizeType>(std::llround(bins)) : 1;
-}
-
-SizeType blocks_per_window(SizeType window, SizeType block) {
-    auto k = static_cast<SizeType>(
-        std::llround(static_cast<double>(window) / static_cast<double>(block)));
-    k = std::max<SizeType>(k, 1);
-    return k % 2 == 0 ? k + 1 : k;
-}
 
 void interpolate_block(const BlockGrid& grid,
                        std::span<const float> values,
@@ -535,34 +499,6 @@ void block_variances(std::span<const float> x,
     }
 }
 
-void fill_holes(std::span<float> v, std::span<const std::uint8_t> have) {
-    const SizeType n = v.size();
-    SizeType prev    = n; // last index with a value, n = none yet
-    for (SizeType i = 0; i < n; ++i) {
-        if (have[i] == 0U) {
-            continue;
-        }
-        if (prev == n) {
-            std::fill(v.begin(), v.begin() + static_cast<std::ptrdiff_t>(i),
-                      v[i]);
-        } else if (i > prev + 1) {
-            const double a    = v[prev];
-            const double d    = static_cast<double>(v[i]) - a;
-            const auto span_d = static_cast<double>(i - prev);
-            for (SizeType j = prev + 1; j < i; ++j) {
-                v[j] = static_cast<float>(
-                    a + (d * static_cast<double>(j - prev) / span_d));
-            }
-        }
-        prev = i;
-    }
-    if (prev == n) {
-        throw std::invalid_argument("preprocess: no usable block statistics");
-    }
-    std::fill(v.begin() + static_cast<std::ptrdiff_t>(prev) + 1, v.end(),
-              v[prev]);
-}
-
 std::vector<float> masked_running_median(std::span<const float> v,
                                          std::span<const std::uint8_t> usable,
                                          SizeType k,
@@ -623,67 +559,6 @@ std::vector<float> masked_running_median(std::span<const float> v,
     return out;
 }
 
-std::vector<float> masked_running_mean(std::span<const float> v,
-                                       std::span<const std::uint8_t> usable,
-                                       SizeType k) {
-    const SizeType n    = v.size();
-    const SizeType half = k / 2;
-    std::vector<double> sum(n + 1, 0.0);
-    std::vector<SizeType> cnt(n + 1, 0);
-    for (SizeType i = 0; i < n; ++i) {
-        const bool ok = usable[i] != 0U;
-        sum[i + 1]    = sum[i] + (ok ? static_cast<double>(v[i]) : 0.0);
-        cnt[i + 1]    = cnt[i] + (ok ? 1 : 0);
-    }
-    std::vector<float> out(n, 0.0F);
-    std::vector<std::uint8_t> have(n, 0U);
-    for (SizeType i = 0; i < n; ++i) {
-        const SizeType lo = i >= half ? i - half : 0;
-        const SizeType hi = std::min(n, i + half + 1);
-        const SizeType c  = cnt[hi] - cnt[lo];
-        if (c > 0) {
-            have[i] = 1U;
-            out[i]  = static_cast<float>((sum[hi] - sum[lo]) /
-                                         static_cast<double>(c));
-        }
-    }
-    fill_holes(out, have);
-    return out;
-}
-
-std::vector<float> reflected_running_mean(std::span<const float> v,
-                                          SizeType k) {
-    const auto n    = static_cast<std::ptrdiff_t>(v.size());
-    const auto half = static_cast<std::ptrdiff_t>(k / 2);
-    if (half == 0 || n < 2) {
-        return {v.begin(), v.end()};
-    }
-    // Extended series with point reflection about both ends.
-    const auto at = [&](std::ptrdiff_t j) -> double {
-        if (j < 0) {
-            const std::ptrdiff_t m = std::min(-j, n - 1);
-            return (2.0 * v[0]) - v[m];
-        }
-        if (j >= n) {
-            const std::ptrdiff_t m =
-                std::max((2 * (n - 1)) - j, std::ptrdiff_t{0});
-            return (2.0 * v[n - 1]) - v[m];
-        }
-        return v[j];
-    };
-    std::vector<double> prefix(static_cast<SizeType>(n + (2 * half)) + 1, 0.0);
-    for (std::ptrdiff_t j = -half; j < n + half; ++j) {
-        prefix[j + half + 1] = prefix[j + half] + at(j);
-    }
-    std::vector<float> out(v.size());
-    const auto kd = static_cast<double>((2 * half) + 1);
-    for (std::ptrdiff_t i = 0; i < n; ++i) {
-        out[i] =
-            static_cast<float>((prefix[i + (2 * half) + 1] - prefix[i]) / kd);
-    }
-    return out;
-}
-
 void whiten(std::span<const float> x,
             const BlockGrid& grid,
             std::span<const float> mu,
@@ -724,72 +599,13 @@ void flag_bad_blocks(std::span<const float> z,
     for (const SizeType s : scales) {
         const BlockGrid g(n, s);
         const SizeType nb = g.nblocks;
-        std::vector<double> stat_m(nb, 0.0);
-        std::vector<double> stat_v(nb, 0.0);
+        std::vector<SizeType> cnt(nb, 0);
+        std::vector<double> s1(nb, 0.0);
+        std::vector<double> s2(nb, 0.0);
         std::vector<std::uint8_t> bad(nb, 0U);
-        double* pm             = stat_m.data();
-        double* pv             = stat_v.data();
-        std::uint8_t* pb       = bad.data();
-        const std::uint8_t* mk = mask.data();
-#pragma omp parallel for num_threads(nthreads) schedule(static) default(none)  \
-    shared(g) firstprivate(z, mk, pm, pv, pb, cl, min_good,                    \
-                               nb) if (n >= kParallelThreshold)
-        for (SizeType b = 0; b < nb; ++b) {
-            const SizeType i0  = g.begin(b);
-            const SizeType len = g.end(b) - i0;
-            SizeType cnt       = 0;
-            double s1          = 0.0;
-            double s2          = 0.0;
-            for (SizeType i = i0; i < i0 + len; ++i) {
-                const float v = z[i];
-                const bool ok =
-                    mk[i] != 0U && (cl == 0.0F || std::abs(v) <= cl);
-                cnt += ok ? 1 : 0;
-                s1 += ok ? static_cast<double>(v) : 0.0;
-                s2 += ok ? static_cast<double>(v) * v : 0.0;
-            }
-            if (cnt == 0 || static_cast<double>(cnt) <
-                                min_good * static_cast<double>(len)) {
-                pb[b] = 1U;
-                continue;
-            }
-            const auto c = static_cast<double>(cnt);
-            pm[b]        = (s1 / c) * std::sqrt(c);
-            // Wilson-Hilferty: cbrt(chi2_c / c) is close to normal, so the
-            // variance statistic is not skewed by short blocks or red noise.
-            const double wh = 2.0 / (9.0 * c);
-            pv[b] =
-                (std::cbrt(std::max(s2 / c, 0.0)) - (1.0 - wh)) / std::sqrt(wh);
-        }
-        std::vector<double> vm;
-        std::vector<double> vv;
-        vm.reserve(nb);
-        vv.reserve(nb);
-        for (SizeType b = 0; b < nb; ++b) {
-            if (bad[b] == 0U) {
-                vm.push_back(stat_m[b]);
-                vv.push_back(stat_v[b]);
-            }
-        }
-        if (!vm.empty()) {
-            const double cm = median_of(vm);
-            const double cv = median_of(vv);
-            const double sm = std::max(robust_spread(vm, cm), 1.0);
-            const double sv = std::max(robust_spread(vv, cv), 1.0);
-            for (SizeType b = 0; b < nb; ++b) {
-                if (bad[b] == 0U && (std::abs(stat_m[b] - cm) > nsigma * sm ||
-                                     std::abs(stat_v[b] - cv) > nsigma * sv)) {
-                    bad[b] = 1U;
-                }
-            }
-        }
-        for (SizeType b = 0; b < nb; ++b) {
-            if (bad[b] != 0U) {
-                std::fill(
-                    mask.begin() + static_cast<std::ptrdiff_t>(g.begin(b)),
-                    mask.begin() + static_cast<std::ptrdiff_t>(g.end(b)), 0U);
-            }
-        }
+        flag_sums_cpu(z, mask, g, cl, cnt, s1, s2, nthreads);
+        flag_decisions(g, cnt, s1, s2, nsigma, min_good, bad);
+        mask_blocks_cpu(g, bad, mask);
     }
 }
 
@@ -904,16 +720,6 @@ SizeType zap_spectrum(std::span<float> z,
         math::irfft_batch(spec, z, 1, n, nthreads);
     }
     return nzap;
-}
-
-SizeType longest_zero_run(std::span<const float> v) noexcept {
-    SizeType best = 0;
-    SizeType run  = 0;
-    for (const float a : v) {
-        run  = a == 0.0F ? run + 1 : 0;
-        best = std::max(best, run);
-    }
-    return best;
 }
 
 PreprocessReport preprocess_cpu(std::span<const float> raw,

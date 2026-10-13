@@ -21,6 +21,7 @@
 
 #include "lib/algorithms/ffa_engine.hpp"
 #include "lib/detail/error_check.hpp"
+#include "lib/detail/nvtx.hpp"
 #include "lib/detail/timing.hpp"
 #include "lib/detection/score_engine.hpp"
 #include "lib/pipelines/ffa_freq_sweep_engine.hpp"
@@ -125,6 +126,7 @@ public:
             spdlog::info("Processing chunk f0 (Hz): [{:08.3f}, {:08.3f}]",
                          freq_limits.min, freq_limits.max);
             search::FFATimerStats ffa_timer_stats;
+            const nvtx::Range chunk_range("ffa sweep: chunk");
             execute_ffa_region(ts_e, ts_v, cfg_cur, i, writer, ffa_timer_stats);
             accumulated_flops += m_region_decode[i].gflops;
             // Log per-chunk timing summary

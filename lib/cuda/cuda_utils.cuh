@@ -11,7 +11,6 @@
 
 #include <cuda/std/span>
 #include <cuda_runtime.h>
-#include <cufft.h>
 #include <curand.h>
 #include <thrust/device_vector.h>
 
@@ -22,68 +21,6 @@ namespace loki::cuda_utils {
 namespace detail {
 
 // Error code to string conversion
-constexpr std::string_view cufft_error_string(cufftResult error) noexcept {
-    switch (error) {
-    case CUFFT_SUCCESS:
-        return "CUFFT_SUCCESS: The cuFFT operation was successful.";
-    case CUFFT_INVALID_PLAN:
-        return "CUFFT_INVALID_PLAN: cuFFT was passed an invalid plan handle.";
-    case CUFFT_ALLOC_FAILED:
-        return "CUFFT_ALLOC_FAILED: cuFFT failed to allocate GPU or CPU "
-               "memory.";
-    case CUFFT_INVALID_TYPE:
-        return "CUFFT_INVALID_TYPE: The cuFFT type provided is unsupported.";
-    case CUFFT_INVALID_VALUE:
-        return "CUFFT_INVALID_VALUE: User specified an invalid pointer or "
-               "parameter";
-    case CUFFT_INTERNAL_ERROR:
-        return "CUFFT_INTERNAL_ERROR: Driver or internal cuFFT library error";
-    case CUFFT_EXEC_FAILED:
-        return "CUFFT_EXEC_FAILED: Failed to execute an FFT on the GPU";
-    case CUFFT_SETUP_FAILED:
-        return "CUFFT_SETUP_FAILED: The cuFFT library failed to initialize";
-    case CUFFT_INVALID_SIZE:
-        return "CUFFT_INVALID_SIZE: User specified an invalid transform size";
-    case CUFFT_UNALIGNED_DATA:
-        return "CUFFT_UNALIGNED_DATA: Not currently in use";
-#if CUFFT_VERSION < 12000
-    case CUFFT_INCOMPLETE_PARAMETER_LIST:
-        return "CUFFT_INCOMPLETE_PARAMETER_LIST: Missing parameters in call";
-#endif
-    case CUFFT_INVALID_DEVICE:
-        return "CUFFT_INVALID_DEVICE: Execution of a plan was on different GPU "
-               "than plan creation";
-#if CUFFT_VERSION < 12000
-    case CUFFT_PARSE_ERROR:
-        return "CUFFT_PARSE_ERROR: Internal plan database error";
-#endif
-    case CUFFT_NO_WORKSPACE:
-        return "CUFFT_NO_WORKSPACE: No workspace has been provided prior to "
-               "plan execution";
-    case CUFFT_NOT_IMPLEMENTED:
-        return "CUFFT_NOT_IMPLEMENTED: Function does not implement "
-               "functionality for parameters given.";
-    case CUFFT_NOT_SUPPORTED:
-        return "CUFFT_NOT_SUPPORTED: Operation is not supported for parameters "
-               "given.";
-#if CUFFT_VERSION >= 12000
-    case CUFFT_MISSING_DEPENDENCY:
-        return "CUFFT_MISSING_DEPENDENCY: cuFFT is unable to find a dependency";
-    case CUFFT_NVRTC_FAILURE:
-        return "CUFFT_NVRTC_FAILURE: An NVRTC failure was encountered during a "
-               "cuFFT operation";
-    case CUFFT_NVJITLINK_FAILURE:
-        return "CUFFT_NVJITLINK_FAILURE: An nvJitLink failure was encountered "
-               "during a cuFFT operation";
-    case CUFFT_NVSHMEM_FAILURE:
-        return "CUFFT_NVSHMEM_FAILURE: An NVSHMEM failure was encountered "
-               "during a cuFFT operation";
-#endif
-    default:
-        return "Unknown cuFFT error";
-    }
-}
-
 constexpr std::string_view curand_error_string(curandStatus_t error) noexcept {
     switch (error) {
     case CURAND_STATUS_SUCCESS:
@@ -129,7 +66,7 @@ constexpr std::string_view curand_error_string(curandStatus_t error) noexcept {
 class CudaException : public std::runtime_error {
 public:
     // Error type identification
-    enum class ErrorType : uint8_t { kCuda, kCufft, kCurand };
+    enum class ErrorType : uint8_t { kCuda, kCurand };
 
     // Constructor for cudaError_t
     explicit CudaException(
@@ -139,19 +76,6 @@ public:
         : std::runtime_error(format_error(code, user_msg, loc)),
           m_error_code(code),
           m_error_type(ErrorType::kCuda),
-          m_file(loc.file_name()),
-          m_line(loc.line()),
-          m_func(loc.function_name()),
-          m_user_msg(user_msg) {}
-
-    // Constructor for cufftResult
-    explicit CudaException(
-        cufftResult code,
-        std::string_view user_msg       = "",
-        const std::source_location& loc = std::source_location::current())
-        : std::runtime_error(format_error(code, user_msg, loc)),
-          m_error_code(code),
-          m_error_type(ErrorType::kCufft),
           m_file(loc.file_name()),
           m_line(loc.line()),
           m_func(loc.function_name()),
@@ -187,8 +111,6 @@ public:
                 using T = std::decay_t<decltype(error)>;
                 if constexpr (std::is_same_v<T, cudaError_t>) {
                     return cudaGetErrorString(error);
-                } else if constexpr (std::is_same_v<T, cufftResult>) {
-                    return std::string(cufft_error_string(error));
                 } else if constexpr (std::is_same_v<T, curandStatus_t>) {
                     return std::string(curand_error_string(error));
                 }
@@ -197,7 +119,7 @@ public:
     }
 
 private:
-    std::variant<cudaError_t, cufftResult, curandStatus_t> m_error_code;
+    std::variant<cudaError_t, curandStatus_t> m_error_code;
     ErrorType m_error_type;
     const char* m_file;
     uint32_t m_line;
@@ -215,9 +137,6 @@ private:
         if constexpr (std::is_same_v<ErrorCode, cudaError_t>) {
             library_name = "CUDA";
             error_desc   = cudaGetErrorString(code);
-        } else if constexpr (std::is_same_v<ErrorCode, cufftResult>) {
-            library_name = "cuFFT";
-            error_desc   = cufft_error_string(code);
         } else if constexpr (std::is_same_v<ErrorCode, curandStatus_t>) {
             library_name = "cuRAND";
             error_desc   = curand_error_string(code);
@@ -246,15 +165,6 @@ check_cuda_call(cudaError_t result,
                 std::string_view msg     = "",
                 std::source_location loc = std::source_location::current()) {
     if (result != cudaSuccess) {
-        throw detail::CudaException(result, msg, loc);
-    }
-}
-
-inline void
-check_cufft_call(cufftResult result,
-                 std::string_view msg     = "",
-                 std::source_location loc = std::source_location::current()) {
-    if (result != CUFFT_SUCCESS) {
         throw detail::CudaException(result, msg, loc);
     }
 }

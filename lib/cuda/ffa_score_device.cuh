@@ -54,6 +54,59 @@ __device__ __forceinline__ float warp_reduce_max(float val) {
     return val;
 }
 
+/// Maxima of P values per lane over the 32 lanes of a warp, P a power of
+/// two <= 32, in P - 1 + log2(32 / P) shuffles (P separate reductions take
+/// 5 P). Each step a lane keeps half of its values and takes the partner's
+/// maxima of the same half; max is exact in any order, so every result
+/// equals warp_reduce_max of that value. On return, vals[0] of lane L is
+/// the maximum of value warp_max_owner(L, P).
+template <uint32_t P>
+__device__ __forceinline__ void warp_reduce_max_multi(float (&vals)[P],
+                                                      int lane_id) {
+    static_assert(P >= 1 && P <= 32 && (P & (P - 1)) == 0,
+                  "P must be a power of two <= 32");
+    constexpr unsigned int kFullMask = 0xFFFFFFFF;
+    // log2(P) split steps; compile-time bounds keep vals in registers.
+    constexpr int kSplits = P >= 32   ? 5
+                            : P >= 16 ? 4
+                            : P >= 8  ? 3
+                            : P >= 4  ? 2
+                            : P >= 2  ? 1
+                                      : 0;
+#pragma unroll
+    for (int step = 0; step < kSplits; ++step) {
+        const uint32_t half = P >> (step + 1);
+        const int offset    = 16 >> step;
+        const bool upper    = (lane_id & offset) != 0;
+#pragma unroll
+        for (uint32_t i = 0; i < P / 2; ++i) {
+            if (i < half) {
+                const float send = upper ? vals[i] : vals[i + half];
+                const float keep = upper ? vals[i + half] : vals[i];
+                vals[i] = fmaxf(keep, __shfl_xor_sync(kFullMask, send, offset));
+            }
+        }
+    }
+#pragma unroll
+    for (int offset = 16 >> kSplits; offset > 0; offset >>= 1) {
+        vals[0] = fmaxf(vals[0], __shfl_xor_sync(kFullMask, vals[0], offset));
+    }
+}
+
+/// Index of the value whose maximum warp_reduce_max_multi<P> leaves in
+/// lane @p lane_id: the lane bits of the split steps, high bit first.
+template <uint32_t P>
+__device__ __forceinline__ uint32_t warp_max_owner(int lane_id) {
+    // log2(32 / P)
+    constexpr uint32_t kSplitShift = P >= 32   ? 0
+                                     : P >= 16 ? 1
+                                     : P >= 8  ? 2
+                                     : P >= 4  ? 3
+                                     : P >= 2  ? 4
+                                               : 5;
+    return static_cast<uint32_t>(lane_id) >> kSplitShift;
+}
+
 __device__ __forceinline__ size_t profile_offset(uint32_t segment,
                                                  uint32_t ncoords,
                                                  uint32_t icoord,
@@ -206,9 +259,14 @@ struct EmitSink {
 // the thread kernel, (total - lo) + hi; the warp kernel uses
 // (total + hi) - lo. Chunks of 32 window starts where no window wraps (warp
 // uniform) skip the wrap logic.
-// sink(iw, snr) receives the S/N of each width on lane 0.
+// sink(iw, snr) receives the S/N of each width on lane 0, or (kLaneSink) on
+// one lane per width, after a single multi-value reduction of the maxima.
 // Scores widths [iw0, iw0 + NW) of the nwidths.
-template <bool kSerialFormula, uint32_t NW, class WC, class Sink>
+template <bool kSerialFormula,
+          uint32_t NW,
+          class WC,
+          class Sink,
+          bool kLaneSink = false>
 __device__ __forceinline__ void score_profile_warp(const float* row,
                                                    float total_sum,
                                                    int nb,
@@ -261,15 +319,36 @@ __device__ __forceinline__ void score_profile_warp(const float* row,
             }
         }
     }
+    if constexpr (kLaneSink) {
+        // Slots past nwidths hold lowest() and are not emitted.
+        constexpr uint32_t P = NW <= 8 ? 8 : (NW <= 16 ? 16 : 32);
+        static_assert(NW <= 32, "at most 32 widths per group");
+        float vals[P];
 #pragma unroll
-    for (uint32_t iw = 0; iw < NW; ++iw) {
-        if (iw < nwidths) {
-            const float max_diff = warp_reduce_max(mx[iw]);
-            if (lane_id == 0) {
-                const float h   = s_wc.h[iw0 + iw];
-                const float b   = s_wc.b[iw0 + iw];
-                const float snr = ((h + b) * max_diff) - (b * total_sum);
-                sink(iw0 + iw, snr);
+        for (uint32_t iw = 0; iw < P; ++iw) {
+            vals[iw] =
+                iw < NW ? mx[iw] : cuda::std::numeric_limits<float>::lowest();
+        }
+        warp_reduce_max_multi<P>(vals, lane_id);
+        const uint32_t iw = warp_max_owner<P>(lane_id);
+        const bool owner  = (lane_id & static_cast<int>((32 / P) - 1)) == 0;
+        if (owner && iw < nwidths && iw < NW) {
+            const float h   = s_wc.h[iw0 + iw];
+            const float b   = s_wc.b[iw0 + iw];
+            const float snr = ((h + b) * vals[0]) - (b * total_sum);
+            sink(iw0 + iw, snr);
+        }
+    } else {
+#pragma unroll
+        for (uint32_t iw = 0; iw < NW; ++iw) {
+            if (iw < nwidths) {
+                const float max_diff = warp_reduce_max(mx[iw]);
+                if (lane_id == 0) {
+                    const float h   = s_wc.h[iw0 + iw];
+                    const float b   = s_wc.b[iw0 + iw];
+                    const float snr = ((h + b) * max_diff) - (b * total_sum);
+                    sink(iw0 + iw, snr);
+                }
             }
         }
     }
@@ -373,7 +452,7 @@ score_row_serial(float* row,
 
 // Warp-per-profile score (kernel_snr_boxcar_warp): a warp scan of the
 // normalized bins in chunks of 32, written over the e row.
-template <uint32_t NW, class WC, class Sink>
+template <uint32_t NW, class WC, class Sink, bool kLaneSink = false>
 __device__ __forceinline__ void score_ev_warp_sink(float* e_ptr,
                                                    const float* v_ptr,
                                                    float fold_scale,
@@ -401,7 +480,7 @@ __device__ __forceinline__ void score_ev_warp_sink(float* e_ptr,
     }
     __syncwarp();
     for (uint32_t iw0 = 0; iw0 < nwidths; iw0 += NW) {
-        score_profile_warp</*kSerialFormula=*/false, NW>(
+        score_profile_warp</*kSerialFormula=*/false, NW, WC, Sink&, kLaneSink>(
             s_psum_warp, running_sum, nb, s_wc, nwidths, sink, lane_id, iw0);
     }
 }
@@ -415,8 +494,10 @@ __device__ __forceinline__ void score_ev_warp(float* e_ptr,
                                               uint32_t index_base,
                                               const FFAFinalScoreArgs& args,
                                               int lane_id) {
-    score_ev_warp_sink<NW>(e_ptr, v_ptr, fold_scale, nb, s_wc, args.nwidths,
-                           EmitSink{args, index_base}, lane_id);
+    // EmitSink claims an output slot from any lane.
+    score_ev_warp_sink<NW, WidthConsts, EmitSink, /*kLaneSink=*/true>(
+        e_ptr, v_ptr, fold_scale, nb, s_wc, args.nwidths,
+        EmitSink{args, index_base}, lane_id);
 }
 
 // --- Fourier-domain merges (frequency sweep path) ---------------------------

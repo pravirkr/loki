@@ -114,7 +114,8 @@ public:
         }
 
         // Copy input data to device
-        cudaStream_t stream = nullptr;
+        // The per-thread default stream: no implicit sync with other streams.
+        cudaStream_t stream = cudaStreamPerThread;
         cuda_utils::check_cuda_call(
             cudaMemcpyAsync(thrust::raw_pointer_cast(m_ts_e_d.data()),
                             ts_e.data(), ts_e.size() * sizeof(float),

@@ -42,7 +42,7 @@ public:
     /// execute_score) only hold the levels execute_score stores, sized by
     /// detail::gpu_sweep_buffer_size; execute() is then unavailable.
     explicit FFACudaCore(memory::FFAWorkspaceCUDA<FoldTypeCUDA>& workspace,
-                         math::CUFFTManager& fft_manager,
+                         math::GpuFFTManager& fft_manager,
                          const search::FFASearchConfig& cfg,
                          int device_id      = 0,
                          bool sweep_buffers = false);

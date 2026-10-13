@@ -34,7 +34,7 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA> struct EPCudaSharedPipeline {
     /// EP workspace of the chunk group, sized from the group's maxima.
     memory::EPWorkspaceCUDA<FoldTypeCUDA>* ep_workspace{nullptr};
     memory::FFAWorkspaceCUDA<FoldTypeCUDA>* ffa_workspace{nullptr};
-    math::CUFFTManager* fft_manager{nullptr};
+    math::GpuFFTManager* fft_manager{nullptr};
     /// Output fold buffer (at least the chunk's FFA buffer size).
     cuda::std::span<DeviceFoldType<FoldTypeCUDA>> fold_d;
     /// Input time series on the device (nsamps each).

@@ -2,6 +2,7 @@
 #include <bit>
 #include <cmath>
 #include <complex>
+#include <format>
 #include <numbers>
 #include <stdexcept>
 #include <utility>
@@ -10,6 +11,7 @@
 #include "lib/cuda/coord_cuda.cuh"
 #include "lib/cuda/ffa_score_cuda.cuh"
 #include "lib/cuda/ffa_score_fourier_impl.cuh"
+#include "lib/cuda/fft_cuda.cuh"
 #include "lib/cuda/types_cuda.cuh"
 
 namespace loki::core {
@@ -51,9 +53,12 @@ bool ffa_fourier_needs_bluestein(SizeType nbins) noexcept {
 }
 
 std::vector<ComplexTypeCUDA> ffa_fourier_bluestein_table(SizeType nbins) {
-    if (nbins < 2 || nbins > 1024) {
+    // The fused scorers take nbins up to 1024, the batched GPU FFTs up to
+    // math::kGpuFFTMaxN (M up to 4096).
+    if (nbins < 2 || nbins > math::kGpuFFTMaxN) {
         throw std::invalid_argument(
-            "ffa_fourier_bluestein_table: nbins must be in [2, 1024]");
+            std::format("ffa_fourier_bluestein_table: nbins must be in [2, {}]",
+                        math::kGpuFFTMaxN));
     }
     const SizeType n = nbins;
     const SizeType m = std::max<SizeType>(32, std::bit_ceil((2 * n) - 1));
