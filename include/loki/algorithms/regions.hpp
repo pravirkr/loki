@@ -135,11 +135,19 @@ private:
  * @brief A planner for FFA regions (Time or Fourier domain).
  * @details
  * This class plans the FFA regions for a given search configuration. Each
- * frequency searchregion produced by generate_ffa_regions() is
- * subdivided into memory-bounded chunks by bisecting the region's frequency
- * width; nbins/eta and every other search parameter (e.g. acceleration,
- * jerk) are held fixed within a region and are never altered by this
- * subdivision.
+ * frequency search region produced by generate_ffa_regions() is subdivided
+ * into chunks; nbins/eta and every other search parameter (e.g.
+ * acceleration, jerk) are held fixed within a region and are never altered
+ * by this subdivision. No chunk, and no workspace sized for all of them,
+ * exceeds max_process_memory_gb.
+ *
+ * On the CPU (`use_gpu = false`) the chunks are the cheapest partition of
+ * each region under a run-time model: an accel (jerk) grid is designed at
+ * its chunk's highest frequency, so wide chunks oversample their low end and
+ * narrower ones can be faster even when memory allows wide ones. Once memory
+ * stops binding, the plan no longer depends on the limit. Frequency-only
+ * searches take the fewest chunks that fit. On the GPU each chunk is the
+ * widest that fits (bisection on the width).
  *
  * The planner also accounts for Doppler/drift expansion of each chunk's
  * frequency window when nparams > 1 (derived from the acceleration/jerk

@@ -211,5 +211,9 @@ TEST_CASE("Fourier execute_scored matches a scan of the stored fold",
         // Both paths invert with the lane FFT, whose per-profile result does
         // not depend on the batch or the thread count.
         CHECK(n_exact == hits.size());
+        if (!accel && !fuse.has_value()) {
+            // Frequency-only: scored by Fourier cone bands.
+            CHECK(scored.get_last_fuse_levels() > 0);
+        }
     }
 }

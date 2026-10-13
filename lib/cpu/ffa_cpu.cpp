@@ -367,6 +367,13 @@ public:
             scratch = std::span<FoldType>(owned);
         }
         scratch = scratch.first(buffer_size);
+        if constexpr (std::is_same_v<FoldType, ComplexType>) {
+            if (m_is_freq_only &&
+                run_cone_bands_fourier(ts_e, ts_v, scratch, threshold, widths,
+                                       hits)) {
+                return;
+            }
+        }
         if (fused) {
             run_final_scored(ts_e, ts_v, scratch, threshold, widths, hits);
             return;
@@ -415,13 +422,22 @@ public:
                           std::vector<detection::SnrHit>& hits) {
         const SizeType levels = m_cfg.get_niters_ffa() + 1;
         const SizeType final  = levels - 1;
+        // Accel: levels L-1 and L both merged in scratch (two_levels).
+        const bool two_levels =
+            detail::cpu_scored_fused_levels(m_ffa_plan) == 2;
         const FoldType* src =
-            execute_unified(ts_e, ts_v, scratch, false, /*end_level=*/final);
+            execute_unified(ts_e, ts_v, scratch, false,
+                            /*end_level=*/two_levels ? final - 1 : final);
         const auto nbins        = m_cfg.get_nbins();
         const auto ncoords_cur  = m_ffa_plan.get_ncoords()[final];
         const auto ncoords_prev = m_ffa_plan.get_ncoords()[final - 1];
         const auto offset       = m_ffa_plan.get_ncoords_offsets()[final];
         const auto& ws          = get_workspace();
+        // Final coordinates are rows of frequencies (one per accel or jerk
+        // trial); the kernels tile rows that share parent rows together.
+        const auto row_len = m_ffa_plan.get_param_counts()[final].back();
+        const auto row_len_prev =
+            m_ffa_plan.get_param_counts()[final - 1].back();
         ConeScoreCtx score_ctx(widths, threshold, m_nthreads,
                                /*timed=*/true);
         timing::SimpleTimer timer;
@@ -430,9 +446,21 @@ public:
             // About 64 KiB of profiles per tile: L2-resident while scored.
             const SizeType tile =
                 std::max<SizeType>(16, (SizeType{16} * 1024) / (2 * nbins));
-            core::ffa_final_scored(src, ws.coords.data() + offset, ncoords_cur,
-                                   ncoords_prev, nbins, tile, &cone_score_tile,
-                                   &score_ctx, m_nthreads);
+            if (two_levels) {
+                core::ffa_final2_scored(
+                    src,
+                    ws.coords.data() +
+                        m_ffa_plan.get_ncoords_offsets()[final - 1],
+                    ws.coords.data() + offset, ncoords_cur,
+                    m_ffa_plan.get_ncoords()[final - 2], nbins, row_len,
+                    row_len_prev, tile, &cone_score_tile, &score_ctx,
+                    m_nthreads);
+            } else {
+                core::ffa_final_scored(
+                    src, ws.coords.data() + offset, ncoords_cur, ncoords_prev,
+                    nbins, row_len, row_len_prev, tile, &cone_score_tile,
+                    &score_ctx, m_nthreads);
+            }
         } else {
             // A multiple of the merge step block and of the lane FFT width;
             // about 128 KiB of real profiles.
@@ -445,11 +473,20 @@ public:
                     src, ws.coords_freq.data() + offset, ncoords_cur,
                     ncoords_prev, m_cfg.get_nbins_f(), nbins, tile,
                     &fourier_score_tile, &ctx, m_nthreads);
+            } else if (two_levels) {
+                core::ffa_complex_final2_tiles(
+                    src,
+                    ws.coords.data() +
+                        m_ffa_plan.get_ncoords_offsets()[final - 1],
+                    ws.coords.data() + offset, ncoords_cur, ncoords_prev,
+                    m_ffa_plan.get_ncoords()[final - 2], m_cfg.get_nbins_f(),
+                    nbins, row_len, row_len_prev, tile, &fourier_score_tile,
+                    &ctx, m_nthreads);
             } else {
                 core::ffa_complex_final_tiles(
                     src, ws.coords.data() + offset, ncoords_cur, ncoords_prev,
-                    m_cfg.get_nbins_f(), nbins, tile, &fourier_score_tile, &ctx,
-                    m_nthreads);
+                    m_cfg.get_nbins_f(), nbins, row_len, row_len_prev, tile,
+                    &fourier_score_tile, &ctx, m_nthreads);
             }
         }
         const auto wall = static_cast<double>(timer.stop());
@@ -458,6 +495,10 @@ public:
                              static_cast<double>(nbins),
                          wall);
         score_ctx.collect(hits);
+        if (!m_is_freq_only) {
+            // Accel tiles are visited row group by row group.
+            std::ranges::sort(hits, {}, &detection::SnrHit::score_index);
+        }
         m_last_score_time =
             static_cast<float>(std::min(wall, score_ctx.max_seconds()));
     }
@@ -883,6 +924,159 @@ private:
                         .cone = true,
                         .done = done,
                     };
+                }
+            }
+        }
+        return plain;
+    }
+
+    /**
+     * @brief Fourier frequency-only scored execution by cone bands (temporal
+     * tiling): the brute fold is stored, then groups of levels are merged
+     * tile by tile in cache and the top band is scored in place. Same merges
+     * and phase steps as the level-by-level path (bit-identical). Returns
+     * false (nothing done) when no band fits the scratch budget or the top
+     * band would not reach the final level.
+     */
+    [[nodiscard]] bool
+    run_cone_bands_fourier(std::span<const float> ts_e,
+                           std::span<const float> ts_v,
+                           std::span<FoldType> scratch,
+                           float threshold,
+                           std::span<const SizeType> widths,
+                           std::vector<detection::SnrHit>& hits) {
+        if constexpr (!std::is_same_v<FoldType, ComplexType>) {
+            return false;
+        } else {
+            if (!m_is_freq_only) {
+                return false;
+            }
+            if (m_fuse_levels_override.has_value() &&
+                *m_fuse_levels_override == 0) {
+                return false;
+            }
+            const SizeType levels  = m_cfg.get_niters_ffa() + 1;
+            const SizeType n_merge = levels - 1;
+            if (n_merge < 1) {
+                return false;
+            }
+            const auto ncoords         = m_ffa_plan.get_ncoords();
+            const auto offsets         = m_ffa_plan.get_ncoords_offsets();
+            const auto& shapes         = m_ffa_plan.get_fold_shapes_time();
+            const SizeType nbins       = m_cfg.get_nbins();
+            const SizeType nbins_f     = m_cfg.get_nbins_f();
+            const SizeType budget      = cone_scratch_budget_bytes();
+            const SizeType tile_forced = cone_tile_override();
+            auto& ws                   = get_workspace();
+
+            std::vector<ConeChoice> steps;
+            SizeType done = 0;
+            while (done < n_merge) {
+                const ConeChoice step = choose_cone_step_complex(
+                    done, n_merge - done, ncoords, offsets, shapes, nbins_f,
+                    budget, tile_forced, ws.coords_freq.data());
+                steps.push_back(step);
+                done += step.k;
+            }
+            // The top band scores the final level in cache.
+            if (!steps.back().cone ||
+                std::ranges::none_of(steps, &ConeChoice::cone)) {
+                return false;
+            }
+            m_last_fuse_levels = steps.front().cone ? steps.front().k : 0;
+
+            ConeScoreCtx score_ctx(widths, threshold, m_nthreads,
+                                   /*timed=*/true);
+            FourierScoreCtx ctx(&score_ctx, nbins, nbins_f, m_nthreads);
+            ComplexType* buf_a = ws.fold_internal.data();
+            ComplexType* buf_b = scratch.data();
+            initialize(ts_e, ts_v, buf_a, buf_b);
+            const ComplexType* current = buf_a;
+            for (SizeType istep = 0; istep < steps.size(); ++istep) {
+                const ConeChoice& step = steps[istep];
+                const bool last        = istep + 1 == steps.size();
+                ComplexType* dest =
+                    last ? nullptr : (current == buf_a ? buf_b : buf_a);
+                timing::SimpleTimer step_timer;
+                step_timer.start();
+                if (step.cone) {
+                    std::array<const coord::FFACoordFreq*, 17> coords{};
+                    std::array<SizeType, 17> counts{};
+                    counts[0] = ncoords[step.done];
+                    for (SizeType j = 1; j <= step.k; ++j) {
+                        counts[j] = ncoords[step.done + j];
+                        coords[j] =
+                            ws.coords_freq.data() + offsets[step.done + j];
+                    }
+                    core::ffa_complex_cone_band_freq(
+                        current, dest, coords.data(), counts.data(),
+                        shapes[step.done][0], nbins_f, nbins, step.k, step.tile,
+                        last ? &fourier_score_tile : nullptr,
+                        last ? &ctx : nullptr, m_nthreads);
+                } else {
+                    execute_iter_freq(current, dest, step.done + 1);
+                }
+                if (m_level_timing) {
+                    double floats = 0.0;
+                    for (SizeType j = 1; j <= step.k; ++j) {
+                        const SizeType level = step.done + j;
+                        floats += static_cast<double>(shapes[level][0]) *
+                                  static_cast<double>(ncoords[level]) * 2.0 *
+                                  static_cast<double>(nbins);
+                    }
+                    log_level_timing(step.cone ? "cone" : "merge", step.done,
+                                     floats,
+                                     static_cast<double>(step_timer.stop()));
+                }
+                if (dest != nullptr) {
+                    current = dest;
+                }
+            }
+            score_ctx.collect(hits);
+            m_last_score_time = static_cast<float>(score_ctx.max_seconds());
+            return true;
+        }
+    }
+
+    /// choose_cone_step for complex folds: the band starts from a stored
+    /// level, so only the two scratch buffers count.
+    [[nodiscard]] ConeChoice
+    choose_cone_step_complex(SizeType done,
+                             SizeType remain,
+                             std::span<const SizeType> ncoords,
+                             std::span<const uint32_t> offsets,
+                             const std::vector<std::vector<SizeType>>& shapes,
+                             SizeType nbins_f,
+                             SizeType budget,
+                             SizeType tile_forced,
+                             const coord::FFACoordFreq* coords_base) const {
+        ConeChoice plain{.k = 1, .tile = 0, .cone = false, .done = done};
+        SizeType k_cap      = std::min(remain, SizeType{16});
+        const SizeType nseg = shapes[done][0];
+        while (k_cap > 0 && (SizeType{1} << k_cap) > nseg) {
+            --k_cap;
+        }
+        if (m_fuse_levels_override.has_value() && *m_fuse_levels_override > 0) {
+            k_cap = std::min(k_cap, *m_fuse_levels_override);
+        }
+        constexpr std::array<SizeType, 5> kTiles{512, 256, 128, 64, 32};
+        const SizeType ntiles = tile_forced == 0 ? kTiles.size() : 1;
+        for (SizeType k = k_cap; k >= 1; --k) {
+            std::array<const coord::FFACoordFreq*, 17> coords{};
+            std::array<SizeType, 17> counts{};
+            counts[0] = ncoords[done];
+            for (SizeType j = 1; j <= k; ++j) {
+                counts[j] = ncoords[done + j];
+                coords[j] = coords_base + offsets[done + j];
+            }
+            for (SizeType itile = 0; itile < ntiles; ++itile) {
+                const SizeType tile =
+                    tile_forced == 0 ? kTiles[itile] : tile_forced;
+                const SizeType elems = core::cone_band_working_floats(
+                    coords.data(), counts.data(), k, tile, nbins_f);
+                if (elems != 0 && 2 * elems * sizeof(ComplexType) <= budget) {
+                    return ConeChoice{
+                        .k = k, .tile = tile, .cone = true, .done = done};
                 }
             }
         }

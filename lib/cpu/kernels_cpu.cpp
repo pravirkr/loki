@@ -7,7 +7,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <numbers>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -1614,11 +1616,69 @@ void brute_fold_ts_complex(const float* __restrict__ ts_e,
 #endif
 }
 
+namespace {
+// A tile of final coordinates: `nrows` rows of the coordinate grid (all
+// parameters but frequency) times `ncols` frequencies from `col_begin`.
+struct FinalTile {
+    SizeType row_begin;
+    SizeType nrows;
+    SizeType col_begin;
+    SizeType ncols;
+};
+
+// Tiles of the final level ordered for parent reuse. Neighbouring accel
+// (jerk) rows read the same parent rows of the level before (its grid is
+// coarser), and a parent row of a wide chunk is far larger than L2. Rows with
+// the same parent rows form a group, and a group's tiles walk the frequency
+// axis, so a tile's parents stay in cache across its rows.
+template <typename Coord>
+std::vector<FinalTile> plan_final_tiles(const Coord* coords,
+                                        SizeType ncoords_cur,
+                                        SizeType row_len,
+                                        SizeType row_len_prev,
+                                        SizeType tile_cols) {
+    std::vector<FinalTile> tiles;
+    if (row_len == 0 || row_len_prev == 0 || ncoords_cur % row_len != 0) {
+        row_len      = ncoords_cur;
+        row_len_prev = 0;
+    }
+    const SizeType nrows   = ncoords_cur / row_len;
+    const auto parent_rows = [&](SizeType row) {
+        if constexpr (std::is_same_v<Coord, coord::FFACoord>) {
+            const auto& c = coords[row * row_len];
+            return std::pair<SizeType, SizeType>{c.i_tail / row_len_prev,
+                                                 c.i_head / row_len_prev};
+        } else {
+            return std::pair<SizeType, SizeType>{row, row};
+        }
+    };
+    for (SizeType row = 0; row < nrows;) {
+        SizeType end = row + 1;
+        if (row_len_prev != 0) {
+            const auto key = parent_rows(row);
+            while (end < nrows && parent_rows(end) == key) {
+                ++end;
+            }
+        }
+        for (SizeType col = 0; col < row_len; col += tile_cols) {
+            tiles.push_back({.row_begin = row,
+                             .nrows     = end - row,
+                             .col_begin = col,
+                             .ncols     = std::min(tile_cols, row_len - col)});
+        }
+        row = end;
+    }
+    return tiles;
+}
+} // namespace
+
 void ffa_final_scored(const float* __restrict__ fold_in,
                       const coord::FFACoord* __restrict__ coords,
                       SizeType ncoords_cur,
                       SizeType ncoords_prev,
                       SizeType nbins,
+                      SizeType row_len,
+                      SizeType row_len_prev,
                       SizeType tile_coords,
                       ConeScoreFn score_fn,
                       void* score_ctx,
@@ -1628,29 +1688,37 @@ void ffa_final_scored(const float* __restrict__ fold_in,
     const SizeType fold_stride         = 2 * nbins;
     const float* __restrict__ seg_tail = fold_in;
     const float* __restrict__ seg_head = fold_in + (ncoords_prev * fold_stride);
-    const SizeType ntiles = (ncoords_cur + tile_coords - 1) / tile_coords;
+    const std::vector<FinalTile> tiles = plan_final_tiles(
+        coords, ncoords_cur, row_len, row_len_prev, tile_coords);
+    const SizeType ntiles = tiles.size();
+    if (row_len == 0 || ncoords_cur % row_len != 0) {
+        row_len = ncoords_cur;
+    }
 
 #pragma omp parallel num_threads(nthreads) default(none)                       \
-    shared(seg_tail, seg_head, coords, ncoords_cur, nbins, tile_coords,        \
-               score_fn, score_ctx, fold_stride, ntiles)
+    shared(seg_tail, seg_head, coords, nbins, tile_coords, score_fn,           \
+               score_ctx, fold_stride, ntiles, tiles, row_len)
     {
         utils::UninitVector<float> scratch(tile_coords * fold_stride);
 #pragma omp for schedule(static)
         for (SizeType itile = 0; itile < ntiles; ++itile) {
-            const SizeType begin = itile * tile_coords;
-            const SizeType count = std::min(tile_coords, ncoords_cur - begin);
-            for (SizeType i = 0; i < count; ++i) {
-                const auto& coord = coords[begin + i];
-                shift_add_binary_direct(
-                    seg_tail +
-                        (static_cast<SizeType>(coord.i_tail) * fold_stride),
-                    coord.shift_tail,
-                    seg_head +
-                        (static_cast<SizeType>(coord.i_head) * fold_stride),
-                    coord.shift_head, scratch.data() + (i * fold_stride),
-                    nbins);
+            const FinalTile& tile = tiles[itile];
+            for (SizeType row = tile.row_begin;
+                 row < tile.row_begin + tile.nrows; ++row) {
+                const SizeType begin = (row * row_len) + tile.col_begin;
+                for (SizeType i = 0; i < tile.ncols; ++i) {
+                    const auto& coord = coords[begin + i];
+                    shift_add_binary_direct(
+                        seg_tail +
+                            (static_cast<SizeType>(coord.i_tail) * fold_stride),
+                        coord.shift_tail,
+                        seg_head +
+                            (static_cast<SizeType>(coord.i_head) * fold_stride),
+                        coord.shift_head, scratch.data() + (i * fold_stride),
+                        nbins);
+                }
+                score_fn(scratch.data(), begin, tile.ncols, nbins, score_ctx);
             }
-            score_fn(scratch.data(), begin, count, nbins, score_ctx);
         }
     }
 }
@@ -1660,31 +1728,41 @@ template <typename Coord, typename MergeOne>
 void complex_final_tiles(const Coord* __restrict__ coords,
                          SizeType ncoords_cur,
                          SizeType nbins_f,
+                         SizeType row_len,
+                         SizeType row_len_prev,
                          SizeType tile_coords,
                          ComplexTileFn tile_fn,
                          void* tile_ctx,
                          int nthreads,
                          MergeOne merge_one) {
-    nthreads                   = std::max(nthreads, 1);
-    const SizeType fold_stride = 2 * nbins_f;
-    const SizeType ntiles      = (ncoords_cur + tile_coords - 1) / tile_coords;
+    nthreads                           = std::max(nthreads, 1);
+    const SizeType fold_stride         = 2 * nbins_f;
+    const std::vector<FinalTile> tiles = plan_final_tiles(
+        coords, ncoords_cur, row_len, row_len_prev, tile_coords);
+    const SizeType ntiles = tiles.size();
+    if (row_len == 0 || ncoords_cur % row_len != 0) {
+        row_len = ncoords_cur;
+    }
 
 #pragma omp parallel num_threads(nthreads) default(none)                       \
-    shared(coords, ncoords_cur, nbins_f, tile_coords, tile_fn, tile_ctx,       \
-               fold_stride, ntiles, merge_one)
+    shared(coords, nbins_f, tile_coords, tile_fn, tile_ctx, fold_stride,       \
+               ntiles, tiles, row_len, merge_one)
     {
         utils::UninitVector<ComplexType> scratch(tile_coords * fold_stride);
 #pragma omp for schedule(static)
         for (SizeType itile = 0; itile < ntiles; ++itile) {
-            const SizeType begin = itile * tile_coords;
-            const SizeType count = std::min(tile_coords, ncoords_cur - begin);
-            for (SizeType b0 = 0; b0 < count; b0 += kMergeStepBlock) {
-                const SizeType nblock =
-                    std::min(SizeType{kMergeStepBlock}, count - b0);
-                merge_one(coords + begin + b0, nblock,
-                          scratch.data() + (b0 * fold_stride));
+            const FinalTile& tile = tiles[itile];
+            for (SizeType row = tile.row_begin;
+                 row < tile.row_begin + tile.nrows; ++row) {
+                const SizeType begin = (row * row_len) + tile.col_begin;
+                for (SizeType b0 = 0; b0 < tile.ncols; b0 += kMergeStepBlock) {
+                    const SizeType nblock =
+                        std::min(SizeType{kMergeStepBlock}, tile.ncols - b0);
+                    merge_one(coords + begin + b0, nblock,
+                              scratch.data() + (b0 * fold_stride));
+                }
+                tile_fn(scratch.data(), begin, tile.ncols, tile_ctx);
             }
-            tile_fn(scratch.data(), begin, count, tile_ctx);
         }
     }
 }
@@ -1696,6 +1774,8 @@ void ffa_complex_final_tiles(const ComplexType* __restrict__ fold_in,
                              SizeType ncoords_prev,
                              SizeType nbins_f,
                              SizeType nbins,
+                             SizeType row_len,
+                             SizeType row_len_prev,
                              SizeType tile_coords,
                              ComplexTileFn tile_fn,
                              void* tile_ctx,
@@ -1704,7 +1784,8 @@ void ffa_complex_final_tiles(const ComplexType* __restrict__ fold_in,
     const ComplexType* seg_tail = fold_in;
     const ComplexType* seg_head = fold_in + (ncoords_prev * fold_stride);
     complex_final_tiles(
-        coords, ncoords_cur, nbins_f, tile_coords, tile_fn, tile_ctx, nthreads,
+        coords, ncoords_cur, nbins_f, row_len, row_len_prev, tile_coords,
+        tile_fn, tile_ctx, nthreads,
         [=](const coord::FFACoord* block, SizeType nblock, ComplexType* out) {
             std::array<ComplexType, kMergeStepBlock> steps_tail;
             std::array<ComplexType, kMergeStepBlock> steps_head;
@@ -1726,6 +1807,320 @@ void ffa_complex_final_tiles(const ComplexType* __restrict__ fold_in,
         });
 }
 
+namespace {
+// Parent rows of a set of final coordinates: [lo, hi) of i_tail and i_head.
+struct ParentSpan {
+    SizeType tail_lo;
+    SizeType tail_hi;
+    SizeType head_lo;
+    SizeType head_hi;
+};
+
+ParentSpan parent_span(const coord::FFACoord* coords,
+                       SizeType row_len,
+                       SizeType row_begin,
+                       SizeType nrows,
+                       SizeType col_begin,
+                       SizeType ncols) {
+    ParentSpan span{.tail_lo = std::numeric_limits<SizeType>::max(),
+                    .tail_hi = 0,
+                    .head_lo = std::numeric_limits<SizeType>::max(),
+                    .head_hi = 0};
+    for (SizeType row = row_begin; row < row_begin + nrows; ++row) {
+        const coord::FFACoord* c = coords + (row * row_len) + col_begin;
+        for (SizeType i = 0; i < ncols; ++i) {
+            span.tail_lo = std::min<SizeType>(span.tail_lo, c[i].i_tail);
+            span.tail_hi = std::max<SizeType>(span.tail_hi, c[i].i_tail + 1);
+            span.head_lo = std::min<SizeType>(span.head_lo, c[i].i_head);
+            span.head_hi = std::max<SizeType>(span.head_hi, c[i].i_head + 1);
+        }
+    }
+    return span;
+}
+
+// Visit the sub-tiles of `tile` whose parents fit `cap` rows per segment:
+// the whole tile, else row by row, else halves of a row's columns.
+template <typename Visit>
+void for_each_parent_fit(const coord::FFACoord* coords,
+                         SizeType row_len,
+                         const FinalTile& tile,
+                         SizeType cap,
+                         SizeType align,
+                         Visit visit) {
+    const auto fits = [&](const ParentSpan& sp) {
+        const auto rows = [align](SizeType lo, SizeType hi) {
+            return (((hi + align - 1) / align) * align) -
+                   ((lo / align) * align);
+        };
+        return rows(sp.tail_lo, sp.tail_hi) <= cap &&
+               rows(sp.head_lo, sp.head_hi) <= cap;
+    };
+    const ParentSpan whole =
+        parent_span(coords, row_len, tile.row_begin, tile.nrows, tile.col_begin,
+                    tile.ncols);
+    if (fits(whole)) {
+        visit(tile, whole);
+        return;
+    }
+    for (SizeType row = tile.row_begin; row < tile.row_begin + tile.nrows;
+         ++row) {
+        // Split the row's columns until each part fits (one column always
+        // does: it reads one parent per segment).
+        std::vector<FinalTile> parts = {{.row_begin = row,
+                                         .nrows     = 1,
+                                         .col_begin = tile.col_begin,
+                                         .ncols     = tile.ncols}};
+        while (!parts.empty()) {
+            const FinalTile part = parts.back();
+            parts.pop_back();
+            const ParentSpan sp = parent_span(coords, row_len, part.row_begin,
+                                              1, part.col_begin, part.ncols);
+            if (fits(sp) || part.ncols == 1) {
+                visit(part, sp);
+                continue;
+            }
+            const SizeType half = ((part.ncols / 2) / align) * align;
+            const SizeType left = half == 0 ? part.ncols / 2 : half;
+            // Right half first: the stack visits the left half first.
+            parts.push_back({.row_begin = row,
+                             .nrows     = 1,
+                             .col_begin = part.col_begin + left,
+                             .ncols     = part.ncols - left});
+            parts.push_back({.row_begin = row,
+                             .nrows     = 1,
+                             .col_begin = part.col_begin,
+                             .ncols     = left});
+        }
+    }
+}
+} // namespace
+
+void ffa_final2_scored(const float* __restrict__ fold_in,
+                       const coord::FFACoord* __restrict__ coords_prev,
+                       const coord::FFACoord* __restrict__ coords,
+                       SizeType ncoords_cur,
+                       SizeType ncoords_prev2,
+                       SizeType nbins,
+                       SizeType row_len,
+                       SizeType row_len_prev,
+                       SizeType tile_coords,
+                       ConeScoreFn score_fn,
+                       void* score_ctx,
+                       int nthreads) {
+    nthreads                   = std::max(nthreads, 1);
+    tile_coords                = std::max<SizeType>(tile_coords, 1);
+    const SizeType fold_stride = 2 * nbins;
+    // A level-(L-1) parent in scratch: each channel stored twice ([e, e, v,
+    // v]), so a rotation of it is one contiguous run.
+    const SizeType par_stride          = 4 * nbins;
+    const SizeType seg2                = ncoords_prev2 * fold_stride;
+    const std::vector<FinalTile> tiles = plan_final_tiles(
+        coords, ncoords_cur, row_len, row_len_prev, tile_coords);
+    const SizeType ntiles = tiles.size();
+    if (row_len == 0 || ncoords_cur % row_len != 0) {
+        row_len = ncoords_cur;
+    }
+    // Parents per segment held in scratch; a tile of a row group reads about
+    // half its columns plus the head drift.
+    const SizeType cap = tile_coords + 64;
+
+#pragma omp parallel num_threads(nthreads) default(none) shared(               \
+        fold_in, coords_prev, coords, nbins, tile_coords, score_fn, score_ctx, \
+            fold_stride, par_stride, seg2, ntiles, tiles, row_len, cap)
+    {
+        utils::UninitVector<float> scratch(tile_coords * fold_stride);
+        utils::UninitVector<float> par_tail(cap * par_stride);
+        utils::UninitVector<float> par_head(cap * par_stride);
+        // Level L-1 segment `seg` (0 tail, 1 head) rows [lo, hi) from level
+        // L-2 (segments 2 seg, 2 seg + 1), the arithmetic of ffa_iter.
+        const auto fill = [&](SizeType seg, SizeType lo, SizeType hi,
+                              float* par) {
+            const float* l2_tail = fold_in + ((2 * seg) * seg2);
+            const float* l2_head = fold_in + ((2 * seg + 1) * seg2);
+            for (SizeType idx = lo; idx < hi; ++idx) {
+                const auto& c     = coords_prev[idx];
+                const SizeType st = phase_shift_bins(c.shift_tail, nbins);
+                const SizeType sh = phase_shift_bins(c.shift_head, nbins);
+                const float* t    = l2_tail + (c.i_tail * fold_stride);
+                const float* h    = l2_head + (c.i_head * fold_stride);
+                float* out        = par + ((idx - lo) * par_stride);
+                shift_add_binary_channel(t, st, h, sh, out, nbins);
+                shift_add_binary_channel(t + nbins, st, h + nbins, sh,
+                                         out + (2 * nbins), nbins);
+                std::memcpy(out + nbins, out, nbins * sizeof(float));
+                std::memcpy(out + (3 * nbins), out + (2 * nbins),
+                            nbins * sizeof(float));
+            }
+        };
+#pragma omp for schedule(static)
+        for (SizeType itile = 0; itile < ntiles; ++itile) {
+            for_each_parent_fit(
+                coords, row_len, tiles[itile], cap, 1,
+                [&](const FinalTile& tile, const ParentSpan& sp) {
+                    fill(0, sp.tail_lo, sp.tail_hi, par_tail.data());
+                    fill(1, sp.head_lo, sp.head_hi, par_head.data());
+                    for (SizeType row = tile.row_begin;
+                         row < tile.row_begin + tile.nrows; ++row) {
+                        const SizeType begin = (row * row_len) + tile.col_begin;
+                        for (SizeType i = 0; i < tile.ncols; ++i) {
+                            const auto& c = coords[begin + i];
+                            const SizeType st =
+                                phase_shift_bins(c.shift_tail, nbins);
+                            const SizeType sh =
+                                phase_shift_bins(c.shift_head, nbins);
+                            const float* __restrict__ t =
+                                par_tail.data() +
+                                ((c.i_tail - sp.tail_lo) * par_stride) +
+                                (nbins - st);
+                            const float* __restrict__ h =
+                                par_head.data() +
+                                ((c.i_head - sp.head_lo) * par_stride) +
+                                (nbins - sh);
+                            float* __restrict__ out =
+                                scratch.data() + (i * fold_stride);
+#pragma omp simd
+                            for (SizeType j = 0; j < nbins; ++j) {
+                                out[j] = t[j] + h[j];
+                            }
+#pragma omp simd
+                            for (SizeType j = 0; j < nbins; ++j) {
+                                out[nbins + j] =
+                                    t[(2 * nbins) + j] + h[(2 * nbins) + j];
+                            }
+                        }
+                        score_fn(scratch.data(), begin, tile.ncols, nbins,
+                                 score_ctx);
+                    }
+                });
+        }
+    }
+}
+
+void ffa_complex_final2_tiles(const ComplexType* __restrict__ fold_in,
+                              const coord::FFACoord* __restrict__ coords_prev,
+                              const coord::FFACoord* __restrict__ coords,
+                              SizeType ncoords_cur,
+                              SizeType ncoords_prev,
+                              SizeType ncoords_prev2,
+                              SizeType nbins_f,
+                              SizeType nbins,
+                              SizeType row_len,
+                              SizeType row_len_prev,
+                              SizeType tile_coords,
+                              ComplexTileFn tile_fn,
+                              void* tile_ctx,
+                              int nthreads) {
+    nthreads                           = std::max(nthreads, 1);
+    const SizeType fold_stride         = 2 * nbins_f;
+    const SizeType seg2                = ncoords_prev2 * fold_stride;
+    const std::vector<FinalTile> tiles = plan_final_tiles(
+        coords, ncoords_cur, row_len, row_len_prev, tile_coords);
+    const SizeType ntiles = tiles.size();
+    if (row_len == 0 || ncoords_cur % row_len != 0) {
+        row_len = ncoords_cur;
+    }
+    // Level-(L-1) rows are merged in the phase-step blocks of the stored
+    // level (multiples of kMergeStepBlock), so the steps are identical.
+    const SizeType cap = tile_coords + (2 * kMergeStepBlock) + 64;
+
+#pragma omp parallel num_threads(nthreads) default(none)                       \
+    shared(fold_in, coords_prev, coords, ncoords_prev, nbins_f, nbins,         \
+               tile_coords, tile_fn, tile_ctx, fold_stride, seg2, ntiles,      \
+               tiles, row_len, cap)
+    {
+        utils::UninitVector<ComplexType> scratch(tile_coords * fold_stride);
+        utils::UninitVector<ComplexType> par_tail(cap * fold_stride);
+        utils::UninitVector<ComplexType> par_head(cap * fold_stride);
+        std::array<ComplexType, kMergeStepBlock> steps_tail;
+        std::array<ComplexType, kMergeStepBlock> steps_head;
+        // Level L-1 segment `seg` rows [lo, hi) (lo a multiple of
+        // kMergeStepBlock).
+        const auto fill = [&](SizeType seg, SizeType lo, SizeType hi,
+                              ComplexType* par) {
+            const ComplexType* l2_tail = fold_in + ((2 * seg) * seg2);
+            const ComplexType* l2_head = fold_in + ((2 * seg + 1) * seg2);
+            for (SizeType b0 = lo; b0 < hi; b0 += kMergeStepBlock) {
+                const SizeType nblock =
+                    std::min<SizeType>(kMergeStepBlock, ncoords_prev - b0);
+                const coord::FFACoord* block = coords_prev + b0;
+                fill_merge_phase_steps(
+                    [block](SizeType i) { return block[i].shift_tail; }, nblock,
+                    nbins, steps_tail.data());
+                fill_merge_phase_steps(
+                    [block](SizeType i) { return block[i].shift_head; }, nblock,
+                    nbins, steps_head.data());
+                for (SizeType i = 0; i < nblock; ++i) {
+                    shift_add_complex_recurrence_binary_steps(
+                        l2_tail + (static_cast<SizeType>(block[i].i_tail) *
+                                   fold_stride),
+                        steps_tail[i],
+                        l2_head + (static_cast<SizeType>(block[i].i_head) *
+                                   fold_stride),
+                        steps_head[i], par + ((b0 + i - lo) * fold_stride),
+                        nbins_f);
+                }
+            }
+        };
+#pragma omp for schedule(static)
+        for (SizeType itile = 0; itile < ntiles; ++itile) {
+            for_each_parent_fit(
+                coords, row_len, tiles[itile], cap, kMergeStepBlock,
+                [&](const FinalTile& tile, const ParentSpan& sp) {
+                    const SizeType tail_lo =
+                        (sp.tail_lo / kMergeStepBlock) * kMergeStepBlock;
+                    const SizeType head_lo =
+                        (sp.head_lo / kMergeStepBlock) * kMergeStepBlock;
+                    fill(0, tail_lo,
+                         std::min(((sp.tail_hi + kMergeStepBlock - 1) /
+                                   kMergeStepBlock) *
+                                      kMergeStepBlock,
+                                  ncoords_prev),
+                         par_tail.data());
+                    fill(1, head_lo,
+                         std::min(((sp.head_hi + kMergeStepBlock - 1) /
+                                   kMergeStepBlock) *
+                                      kMergeStepBlock,
+                                  ncoords_prev),
+                         par_head.data());
+                    for (SizeType row = tile.row_begin;
+                         row < tile.row_begin + tile.nrows; ++row) {
+                        const SizeType begin = (row * row_len) + tile.col_begin;
+                        for (SizeType b0 = 0; b0 < tile.ncols;
+                             b0 += kMergeStepBlock) {
+                            const SizeType nblock = std::min(
+                                SizeType{kMergeStepBlock}, tile.ncols - b0);
+                            const coord::FFACoord* block = coords + begin + b0;
+                            fill_merge_phase_steps(
+                                [block](SizeType i) {
+                                    return block[i].shift_tail;
+                                },
+                                nblock, nbins, steps_tail.data());
+                            fill_merge_phase_steps(
+                                [block](SizeType i) {
+                                    return block[i].shift_head;
+                                },
+                                nblock, nbins, steps_head.data());
+                            for (SizeType i = 0; i < nblock; ++i) {
+                                shift_add_complex_recurrence_binary_steps(
+                                    par_tail.data() +
+                                        ((block[i].i_tail - tail_lo) *
+                                         fold_stride),
+                                    steps_tail[i],
+                                    par_head.data() +
+                                        ((block[i].i_head - head_lo) *
+                                         fold_stride),
+                                    steps_head[i],
+                                    scratch.data() + ((b0 + i) * fold_stride),
+                                    nbins_f);
+                            }
+                        }
+                        tile_fn(scratch.data(), begin, tile.ncols, tile_ctx);
+                    }
+                });
+        }
+    }
+}
+
 void ffa_complex_final_tiles_freq(
     const ComplexType* __restrict__ fold_in,
     const coord::FFACoordFreq* __restrict__ coords,
@@ -1741,7 +2136,8 @@ void ffa_complex_final_tiles_freq(
     const ComplexType* seg_tail = fold_in;
     const ComplexType* seg_head = fold_in + (ncoords_prev * fold_stride);
     complex_final_tiles(
-        coords, ncoords_cur, nbins_f, tile_coords, tile_fn, tile_ctx, nthreads,
+        coords, ncoords_cur, nbins_f, /*row_len=*/ncoords_cur,
+        /*row_len_prev=*/0, tile_coords, tile_fn, tile_ctx, nthreads,
         [=](const coord::FFACoordFreq* block, SizeType nblock,
             ComplexType* out) {
             std::array<ComplexType, kMergeStepBlock> steps;
@@ -2373,6 +2769,145 @@ void ffa_cone_band_freq(const float* level_in,
                 thread_seconds->brute += brute_local;
                 thread_seconds->merge += merge_local;
                 thread_seconds->score += score_local;
+            }
+        }
+    }
+}
+
+void ffa_complex_cone_band_freq(const ComplexType* level_in,
+                                ComplexType* level_out,
+                                const coord::FFACoordFreq* const* coords_levels,
+                                const SizeType* ncoords,
+                                SizeType nsegments_in,
+                                SizeType nbins_f,
+                                SizeType nbins,
+                                SizeType k_levels,
+                                SizeType tile_coords,
+                                ComplexTileFn tile_fn,
+                                void* tile_ctx,
+                                int nthreads) {
+    if (level_in == nullptr || k_levels == 0 || k_levels > 16 ||
+        tile_coords == 0 || nsegments_in == 0 || ncoords == nullptr) {
+        return;
+    }
+    const SizeType nseg_group = SizeType{1} << k_levels;
+    if ((nsegments_in % nseg_group) != 0) {
+        return;
+    }
+    nthreads                     = std::max(nthreads, 1);
+    const SizeType nseg_out      = nsegments_in >> k_levels;
+    const SizeType ncoords_top   = ncoords[k_levels];
+    const SizeType fold_stride   = 2 * nbins_f;
+    const SizeType scratch_elems = cone_band_working_floats(
+        coords_levels, ncoords, k_levels, tile_coords, nbins_f);
+    if (scratch_elems == 0 || ncoords_top == 0 || nseg_out == 0) {
+        return;
+    }
+    // One phase-step table per level of the band, in the step blocks of the
+    // stored merge (ffa_complex_iter_freq), reused by every segment and tile.
+    std::array<std::vector<ComplexType>, 17> steps;
+    for (SizeType level = 1; level <= k_levels; ++level) {
+        steps[level].resize(ncoords[level]);
+    }
+#pragma omp parallel num_threads(nthreads) default(none)                       \
+    shared(steps, coords_levels, ncoords, k_levels, nbins)
+    for (SizeType level = 1; level <= k_levels; ++level) {
+        const SizeType n = ncoords[level];
+#pragma omp for schedule(static)
+        for (SizeType b0 = 0; b0 < n; b0 += kMergeStepBlock) {
+            const coord::FFACoordFreq* block = coords_levels[level] + b0;
+            fill_merge_phase_steps(
+                [block](SizeType i) { return block[i].shift; },
+                std::min(n - b0, SizeType{kMergeStepBlock}), nbins,
+                steps[level].data() + b0);
+        }
+    }
+    const bool parallel_groups = std::cmp_greater_equal(nseg_out, nthreads);
+
+#pragma omp parallel num_threads(nthreads) default(none) shared(               \
+        level_in, level_out, coords_levels, ncoords, nbins_f, k_levels,        \
+            tile_coords, tile_fn, tile_ctx, nseg_group, nseg_out, ncoords_top, \
+            fold_stride, scratch_elems, steps, parallel_groups)
+    {
+        utils::UninitVector<ComplexType> scratch_a(scratch_elems);
+        utils::UninitVector<ComplexType> scratch_b(scratch_elems);
+        // The 2^k input segments of `group`, merged k levels for the top
+        // coordinates [coord0, coord1) in scratch.
+        const auto run_tile = [&](SizeType group, SizeType coord0,
+                                  SizeType coord1) {
+            std::array<CoordRange, 17> ranges{};
+            tile_input_ranges(coords_levels, k_levels, coord0, coord1,
+                              ranges.data());
+            ComplexType* cur      = scratch_a.data();
+            ComplexType* next     = scratch_b.data();
+            const SizeType width0 = ranges[0].hi - ranges[0].lo;
+            const SizeType in_seg = ncoords[0] * fold_stride;
+            for (SizeType iseg = 0; iseg < nseg_group; ++iseg) {
+                const SizeType global_seg = (group * nseg_group) + iseg;
+                std::memcpy(
+                    static_cast<void*>(cur + (iseg * width0 * fold_stride)),
+                    level_in + (global_seg * in_seg) +
+                        (ranges[0].lo * fold_stride),
+                    width0 * fold_stride * sizeof(ComplexType));
+            }
+            for (SizeType level = 1; level <= k_levels; ++level) {
+                const SizeType nseg_lvl = SizeType{1} << (k_levels - level);
+                const SizeType width_prv =
+                    ranges[level - 1].hi - ranges[level - 1].lo;
+                const SizeType width_cur = ranges[level].hi - ranges[level].lo;
+                const SizeType seg_prev  = width_prv * fold_stride;
+                const SizeType seg_cur   = width_cur * fold_stride;
+                const auto* coords       = coords_levels[level];
+                const SizeType base      = ranges[level].lo;
+                const SizeType prev_base = ranges[level - 1].lo;
+                for (SizeType iseg = 0; iseg < nseg_lvl; ++iseg) {
+                    const ComplexType* tail = cur + ((iseg * 2) * seg_prev);
+                    const ComplexType* head =
+                        cur + (((iseg * 2) + 1) * seg_prev);
+                    ComplexType* out = next + (iseg * seg_cur);
+                    for (SizeType local = 0; local < width_cur; ++local) {
+                        const SizeType global = base + local;
+                        const SizeType prev =
+                            static_cast<SizeType>(coords[global].idx) -
+                            prev_base;
+                        shift_add_complex_recurrence_linear_steps(
+                            tail + (prev * fold_stride),
+                            head + (prev * fold_stride), steps[level][global],
+                            out + (local * fold_stride), nbins_f);
+                    }
+                }
+                std::swap(cur, next);
+            }
+            const SizeType width_k = ranges[k_levels].hi - ranges[k_levels].lo;
+            if (level_out != nullptr) {
+                std::memcpy(
+                    static_cast<void*>(level_out +
+                                       (group * ncoords_top * fold_stride) +
+                                       (ranges[k_levels].lo * fold_stride)),
+                    cur, width_k * fold_stride * sizeof(ComplexType));
+            }
+            if (tile_fn != nullptr) {
+                tile_fn(cur, ranges[k_levels].lo, width_k, tile_ctx);
+            }
+        };
+
+        if (parallel_groups) {
+#pragma omp for schedule(static)
+            for (SizeType group = 0; group < nseg_out; ++group) {
+                for (SizeType coord0 = 0; coord0 < ncoords_top;
+                     coord0 += tile_coords) {
+                    run_tile(group, coord0,
+                             std::min(coord0 + tile_coords, ncoords_top));
+                }
+            }
+        } else {
+#pragma omp for schedule(static)
+            for (SizeType coord0 = 0; coord0 < ncoords_top;
+                 coord0 += tile_coords) {
+                for (SizeType group = 0; group < nseg_out; ++group) {
+                    run_tile(group, coord0,
+                             std::min(coord0 + tile_coords, ncoords_top));
+                }
             }
         }
     }

@@ -200,6 +200,47 @@ per-chunk upload goes through pinned staging, and no per-chunk device
 allocation or legacy-stream operation is left on the fused path, so the queue
 never drains between chunks.
 
+### FFA frequency sweep on the CPU
+
+The CPU `FFAFreqSweep` stores neither the final level nor, for accel (jerk)
+searches, the level before it: `FFA::execute_scored` merges both tile by tile
+in per-thread scratch and scores them there (`cpu_scored_fused_levels`,
+`planner_memory.hpp`). Frequency-only searches run cone bands (temporal
+tiling, time and Fourier folds) and score the top band in cache, but keep the
+full buffer for the bands below.
+
+| Term | Contents |
+| --- | --- |
+| fold buffers | two ping-pong buffers of `cpu_scored_buffer_size(plan)`: the largest stored level (every level but the last two for accel searches; the full buffer for frequency-only searches) |
+| coordinates | every level's resolved coordinates |
+| brute fold | phase-run table (time) or phasor table (Fourier), see `estimate_brutefold_table_bytes` |
+| extra | write staging and the `max_passing_candidates` accumulator (12 B per candidate) |
+| inputs | `ts_e`, `ts_v` |
+
+The workspace is allocated once, sized by the maximum of each term over all
+chunks. Chunks are chosen by cost, with the memory limit as a hard cap
+(`regions.cpp`, `planner_cost.hpp`):
+
+- **Cost.** A chunk's modelled run time sums, over its own plan's levels,
+  `nsegments * ncoords * 2 * nbins` times a per-stage weight (brute fold,
+  stored merges, the fused level L-1, the fused final level), plus a fixed
+  cost per chunk. The weights come from one-core level timing
+  (`LOKI_FFA_LEVEL_TIMING`). An accel grid is designed at its chunk's highest
+  frequency, so a wide chunk pays for trials its low end does not need.
+- **Partition.** Each region is split on a geometric frequency grid (64 steps,
+  refined when the limit admits no chunk one step wide) by dynamic
+  programming: the cheapest set of chunks that each fit the limit. A
+  frequency-only search minimises the chunk count instead: its grid does not
+  depend on the width, and splitting would only move the grid origin.
+- **Cap.** If the workspace (the per-term maxima, possibly set by different
+  chunks) exceeds the limit, the per-chunk limit is lowered by the excess and
+  the regions are partitioned again. The plan does not depend on the order in
+  which chunks are accepted, more memory never costs more, and once memory
+  stops binding the plan no longer depends on the limit.
+
+The GPU planner keeps the widest chunk that fits (bisection on the width),
+because a GPU chunk has real fixed costs.
+
 ## Reserve
 
 The reserve covers what cannot be counted deterministically: heap

@@ -87,10 +87,11 @@ public:
      * @brief Fold and emit thresholded boxcar hits without storing the final
      * fold.
      *
-     * Time-domain, frequency-only searches score each top-level frequency
-     * tile while it is still in the cone-band scratch. Accel and
-     * Fourier-domain searches merge the final level tile by tile into
-     * scratch (Fourier tiles are inverse-transformed there) and score it.
+     * Frequency-only searches score each top-level frequency tile while it
+     * is still in the cone-band scratch (Fourier tiles are inverse-transformed
+     * there). Accel searches merge the last two levels tile by tile into
+     * scratch (the final level only when the plan has two levels) and score
+     * them; neither level is stored.
      * `hits` are appended in score-index order (`profile * nwidths + width`)
      * and match `snr_boxcar_3d` of the stored fold followed by a threshold
      * scan (Fourier: up to the FFT's batch-size dependence when threaded).
