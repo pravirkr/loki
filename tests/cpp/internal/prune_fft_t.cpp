@@ -15,7 +15,7 @@ namespace {
 using loki::ComplexType;
 using loki::ParamLimit;
 using loki::SizeType;
-using loki::math::FFTWManager;
+using loki::math::CpuFFT;
 using loki::search::PulsarSearchConfig;
 
 PulsarSearchConfig make_cfg(bool use_fourier) {
@@ -46,7 +46,7 @@ PulsarSearchConfig make_cfg(bool use_fourier) {
 
 template <typename FoldType>
 std::unique_ptr<loki::core::PruneDPFuncts<FoldType>>
-make_functs(const PulsarSearchConfig& cfg, FFTWManager* fft) {
+make_functs(const PulsarSearchConfig& cfg, CpuFFT* fft) {
     const loki::plans::FFAPlan<FoldType> plan(cfg);
     return loki::core::create_prune_dp_functs<FoldType>(
         "taylor", plan.get_param_counts().back(),
@@ -60,7 +60,7 @@ make_functs(const PulsarSearchConfig& cfg, FFTWManager* fft) {
 TEST_CASE("Prune functors reuse the FFT plans of an external manager",
           "[ep_freq_sweep][fft]") {
     const auto cfg = make_cfg(/*use_fourier=*/true);
-    FFTWManager shared;
+    CpuFFT shared;
     const std::vector<SizeType> n_reals{cfg.get_nbins()};
     shared.prepare_exact_plans(n_reals);
 
@@ -75,7 +75,7 @@ TEST_CASE("Prune functors reuse the FFT plans of an external manager",
 TEST_CASE("Prune functors refuse an external manager without their plans",
           "[ep_freq_sweep][fft]") {
     const auto cfg = make_cfg(/*use_fourier=*/true);
-    FFTWManager unprepared;
+    CpuFFT unprepared;
     CHECK_THROWS(make_functs<ComplexType>(cfg, &unprepared));
 }
 

@@ -261,11 +261,11 @@ private:
     algorithms::EPRegionPlanner<FoldType> m_region_planner;
 
     memory::FFAWorkspaceCPU<FoldType> m_ffa_workspace;
-    math::FFTWManager m_fft_manager;
+    math::CpuFFT m_fft_manager;
     // Pruning FFT managers, one per worker (complex folds only), and the
     // pointers the chunk engines take. Built once in the constructor.
-    std::vector<math::FFTWManager> m_prune_fft;
-    std::vector<math::FFTWManager*> m_prune_fft_ptrs;
+    std::vector<math::CpuFFT> m_prune_fft;
+    std::vector<math::CpuFFT*> m_prune_fft_ptrs;
     std::vector<FoldType> m_ffa_fold;
 
     // Runtime checks of the plan against the memory model (docs/memory.md).

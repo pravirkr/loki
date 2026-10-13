@@ -21,7 +21,7 @@ namespace loki::algorithms::detail {
  *
  * The models count every large buffer exactly. What remains is hard to account
  * deterministically: heap fragmentation and allocator arenas, thread stacks,
- * small per-task objects (FFA plans, FFTW plans, logging buffers) and the
+ * small per-task objects (FFA plans, FFT tables, logging buffers) and the
  * interpreter or application around the library. A fixed amount, rather than
  * a fraction of the limit, keeps large limits usable and small limits
  * feasible. See docs/memory.md.
@@ -125,6 +125,33 @@ gpu_sweep_coord_size(const plans::FFAPlan<FoldType>& plan) {
         return plan.get_coord_size() - plan.get_ncoords().back();
     }
     return plan.get_coord_size();
+}
+
+/**
+ * @brief Fold buffer size (elements) a CPU FFA needs for scored execution
+ * (`execute_scored`, used by the CPU sweep).
+ *
+ * Accel searches merge the final level tile by tile into scratch and score
+ * it there, so the ping-pong buffers hold every level but the last (accel
+ * trees widen, so the last level is the largest). Frequency-only trees are
+ * flat and the cone path may store the top level, so they keep the full
+ * buffer.
+ */
+template <SupportedFoldType FoldType>
+[[nodiscard]] SizeType
+cpu_scored_buffer_size(const plans::FFAPlan<FoldType>& plan) {
+    const auto& shapes = plan.get_fold_shapes();
+    if (plan.get_n_params() < 2 || shapes.size() < 2 ||
+        plan.get_nsegments().back() != 1) {
+        return plan.get_buffer_size();
+    }
+    SizeType size = 0;
+    for (SizeType i = 0; i + 1 < shapes.size(); ++i) {
+        size =
+            std::max(size, std::accumulate(shapes[i].begin(), shapes[i].end(),
+                                           SizeType{1}, std::multiplies<>()));
+    }
+    return size;
 }
 
 } // namespace loki::algorithms::detail

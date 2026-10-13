@@ -133,10 +133,10 @@ protected:
     // scoring
     std::vector<ComplexType> m_scratch_folds_c;
     std::vector<float> m_scratch_folds_r;
-    math::FFTWManager m_fft_manager;
+    math::CpuFFT m_fft_manager;
     // FFT manager owned by the caller (the EP sweep), or null to use
     // m_fft_manager. It outlives the functor, so its plans are shared.
-    math::FFTWManager* m_external_fft{nullptr};
+    math::CpuFFT* m_external_fft{nullptr};
     // Cache for snr_boxcar_batch
     detection::BoxcarWidthsCache m_boxcar_widths_cache;
     detection::BoxcarKadaneCache m_boxcar_kadane_cache;
@@ -150,10 +150,10 @@ protected:
                       search::PulsarSearchConfig cfg,
                       SizeType batch_size,
                       SizeType branch_max,
-                      math::FFTWManager* external_fft = nullptr);
+                      math::CpuFFT* external_fft = nullptr);
 
     /** The FFT manager of the IRFFT: the external one if given. */
-    [[nodiscard]] math::FFTWManager& get_fft() noexcept {
+    [[nodiscard]] math::CpuFFT& get_fft() noexcept {
         return m_external_fft != nullptr ? *m_external_fft : m_fft_manager;
     }
 
@@ -251,7 +251,7 @@ public:
                             search::PulsarSearchConfig cfg,
                             SizeType batch_size,
                             SizeType branch_max,
-                            math::FFTWManager* external_fft = nullptr);
+                            math::CpuFFT* external_fft = nullptr);
 
     SizeType branch(std::span<double> leaves_tree,
                     std::span<double> leaves_branch,
@@ -307,7 +307,7 @@ public:
                                search::PulsarSearchConfig cfg,
                                SizeType batch_size,
                                SizeType branch_max,
-                               math::FFTWManager* external_fft = nullptr);
+                               math::CpuFFT* external_fft = nullptr);
 
     SizeType branch(std::span<double> leaves_tree,
                     std::span<double> leaves_branch,
@@ -363,7 +363,7 @@ public:
                             search::PulsarSearchConfig cfg,
                             SizeType batch_size,
                             SizeType branch_max,
-                            math::FFTWManager* external_fft = nullptr);
+                            math::CpuFFT* external_fft = nullptr);
 
     SizeType branch(std::span<double> leaves_tree,
                     std::span<double> leaves_branch,
@@ -420,7 +420,7 @@ create_prune_dp_functs(std::string_view poly_basis,
                        search::PulsarSearchConfig cfg,
                        SizeType batch_size,
                        SizeType branch_max,
-                       math::FFTWManager* external_fft = nullptr);
+                       math::CpuFFT* external_fft = nullptr);
 
 // Type aliases for convenience
 using PrunePolyTaylorDPFunctsFloat   = PrunePolyTaylorDPFuncts<float>;

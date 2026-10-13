@@ -37,7 +37,7 @@ BasePruneDPFuncts<FoldType>::BasePruneDPFuncts(
     search::PulsarSearchConfig cfg,
     SizeType batch_size,
     SizeType branch_max,
-    math::FFTWManager* external_fft)
+    math::CpuFFT* external_fft)
     : m_param_grid_count_init(param_grid_count_init.begin(),
                               param_grid_count_init.end()),
       m_dparams_init(dparams_init.begin(), dparams_init.end()),
@@ -311,7 +311,7 @@ PrunePolyTaylorDPFuncts<FoldType>::PrunePolyTaylorDPFuncts(
     search::PulsarSearchConfig cfg,
     SizeType batch_size,
     SizeType branch_max,
-    math::FFTWManager* external_fft)
+    math::CpuFFT* external_fft)
     : Base(param_grid_count_init,
            dparams,
            nseg_ffa,
@@ -447,7 +447,7 @@ PrunePolyChebyshevDPFuncts<FoldType>::PrunePolyChebyshevDPFuncts(
     search::PulsarSearchConfig cfg,
     SizeType batch_size,
     SizeType branch_max,
-    math::FFTWManager* external_fft)
+    math::CpuFFT* external_fft)
     : Base(param_grid_count_init,
            dparams,
            nseg_ffa,
@@ -589,7 +589,7 @@ PruneCircTaylorDPFuncts<FoldType>::PruneCircTaylorDPFuncts(
     search::PulsarSearchConfig cfg,
     SizeType batch_size,
     SizeType branch_max,
-    math::FFTWManager* external_fft)
+    math::CpuFFT* external_fft)
     : Base(param_grid_count_init,
            dparams_init,
            nseg_ffa,
@@ -737,7 +737,7 @@ create_prune_dp_functs(std::string_view poly_basis,
                        search::PulsarSearchConfig cfg,
                        SizeType batch_size,
                        SizeType branch_max,
-                       math::FFTWManager* external_fft) {
+                       math::CpuFFT* external_fft) {
     const auto n_params = cfg.get_nparams();
     if (poly_basis == "taylor" && n_params <= 4) {
         return std::make_unique<PrunePolyTaylorDPFuncts<FoldType>>(
@@ -787,7 +787,7 @@ create_prune_dp_functs<float>(std::string_view,
                               search::PulsarSearchConfig,
                               SizeType,
                               SizeType,
-                              math::FFTWManager*);
+                              math::CpuFFT*);
 template std::unique_ptr<PruneDPFuncts<ComplexType>>
 create_prune_dp_functs<ComplexType>(std::string_view,
                                     std::span<const SizeType>,
@@ -797,6 +797,6 @@ create_prune_dp_functs<ComplexType>(std::string_view,
                                     search::PulsarSearchConfig,
                                     SizeType,
                                     SizeType,
-                                    math::FFTWManager*);
+                                    math::CpuFFT*);
 
 } // namespace loki::core

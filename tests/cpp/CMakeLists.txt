@@ -61,7 +61,7 @@ endforeach()
 
 target_link_libraries(
   ${LOKI_INTERNAL_TEST_TARGET} PRIVATE ${PROJECT_NAME}::internal Boost::math
-                                       $<BUILD_INTERFACE:tomlplusplus>
+                                       $<BUILD_INTERFACE:tomlplusplus> pocketfft
 )
 
 # These internal tests use Thrust device vectors, so nvcc must compile them, with the

@@ -24,7 +24,6 @@ These are **never** downloaded by loki and must be discoverable by CMake on your
 | Library | Minimum Version | conda-forge install |
 | --------- | ----------------- | --------------------- |
 | HDF5 | - | `mamba install hdf5` |
-| FFTW (float + OpenMP) | - | `mamba install fftw` |
 | OpenMP | - | `mamba install libomp` *(macOS)* / `libgomp` *(Linux)* |
 | CMake | 3.25 | `mamba install cmake>=3.25` |
 | Ninja | - | `mamba install ninja` |
@@ -58,7 +57,7 @@ Best for using loki from Python in a conda environment. Builds one extension, `l
 ```bash
 mamba create -n loki_env python=3.12
 mamba activate loki_env
-mamba install -c conda-forge cmake>=3.25 ninja hdf5 fftw libomp  # macOS
+mamba install -c conda-forge cmake>=3.25 ninja hdf5 libomp  # macOS
 # Linux: also install gcc>=13.2 gxx>=13.2
 
 export CPM_SOURCE_CACHE="$HOME/.cache/CPM"   # optional; avoids re-downloading CPM deps
@@ -210,7 +209,7 @@ ctest --test-dir build
 
 [`docker/Dockerfile`](docker/Dockerfile) builds a Loki-only image: the Python
 module (the C++ library is linked into it), the `loki` command, and the
-runtime libraries those need (FFTW, HDF5, NumPy, pyloki). It does not include
+runtime libraries those need (HDF5, NumPy, pyloki). It does not include
 dedispersion, filterbank tools, or injection codes. A Nextflow process, or a
 larger pipeline image, can use this container instead of compiling Loki on
 the cluster.
@@ -225,7 +224,7 @@ an explicit CPU baseline and GPU list, and leaves the tests out.
 The image is portable: the default CPU baseline is `x86-64-v3`, and the CUDA
 image lists GPU architectures explicitly (`80;86;90` by default). Both are
 build arguments. There is no conda package. On a machine where you can
-compile, use mamba only for the compilers and libraries (FFTW, HDF5), then
+compile, use mamba only for the compilers and libraries (HDF5), then
 `uv pip install`. On a cluster, build the image once (or a `.sif` from it)
 instead of adding a third packaging channel. There is no required container
 registry: clone this repo and `docker build` on a machine with Docker and

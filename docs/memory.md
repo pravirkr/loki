@@ -148,8 +148,8 @@ Differences from the CPU policy:
   world tree trims at batch boundaries, so results can depend on the batch.
 - CUDA pruning uses on-chip transforms. The FFA stage's GPU transforms keep
   no plans or work area, only the small Bluestein tables. The CPU sweep keeps
-  one exact `FFTWManager` per pruning worker: plans are created lazily and are
-  not shared across threads.
+  one `CpuFFT` per pruning worker; the host FFT tables themselves are small,
+  immutable and shared by all threads.
 - `PruneRFIConfig` (pulsar mask, harvesting, impulsive veto) is not implemented
   on CUDA: an active one is rejected with `std::invalid_argument`.
 
@@ -204,7 +204,7 @@ never drains between chunks.
 
 The reserve covers what cannot be counted deterministically: heap
 fragmentation and allocator arenas, thread stacks, small per-task objects (FFA
-and FFTW plans, logging), and the interpreter or application around the
+plans, FFT tables, logging), and the interpreter or application around the
 library. It is a fixed amount rather than a fraction of the limit, so large
 limits stay usable and small limits stay feasible.
 

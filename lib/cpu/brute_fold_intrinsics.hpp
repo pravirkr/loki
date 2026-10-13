@@ -216,8 +216,8 @@ inline void fold_one_segment(const float* __restrict__ ts_e_seg,
                 {
                     const Vec e   = loadu(&ts_e_seg[k]);
                     const Vec v   = loadu(&ts_v_seg[k]);
-                    const Vec br  = loada(&base_r[k]);
-                    const Vec bi  = loada(&base_i[k]);
+                    const Vec br  = loadu(&base_r[k]);
+                    const Vec bi  = loadu(&base_i[k]);
                     const Vec cr0 = from_base ? br : loada(&current_r[k]);
                     const Vec ci0 = from_base ? bi : loada(&current_i[k]);
 
@@ -261,8 +261,8 @@ inline void fold_one_segment(const float* __restrict__ ts_e_seg,
                     const SizeType k1 = k + kBatchSize;
                     const Vec e       = loadu(&ts_e_seg[k1]);
                     const Vec v       = loadu(&ts_v_seg[k1]);
-                    const Vec br      = loada(&base_r[k1]);
-                    const Vec bi      = loada(&base_i[k1]);
+                    const Vec br      = loadu(&base_r[k1]);
+                    const Vec bi      = loadu(&base_i[k1]);
                     const Vec cr0     = from_base ? br : loada(&current_r[k1]);
                     const Vec ci0     = from_base ? bi : loada(&current_i[k1]);
 
@@ -304,8 +304,8 @@ inline void fold_one_segment(const float* __restrict__ ts_e_seg,
             if (k + kBatchSize <= segment_len) {
                 const Vec e   = loadu(&ts_e_seg[k]);
                 const Vec v   = loadu(&ts_v_seg[k]);
-                const Vec br  = loada(&base_r[k]);
-                const Vec bi  = loada(&base_i[k]);
+                const Vec br  = loadu(&base_r[k]);
+                const Vec bi  = loadu(&base_i[k]);
                 const Vec cr0 = from_base ? br : loada(&current_r[k]);
                 const Vec ci0 = from_base ? bi : loada(&current_i[k]);
 
@@ -436,8 +436,8 @@ inline void fold_one_segment(const float* __restrict__ ts_e_seg,
                 {
                     const Vec e   = loadu(&ts_e_seg[k]);
                     const Vec v   = loadu(&ts_v_seg[k]);
-                    const Vec br  = loada(&base_r[k]);
-                    const Vec bi  = loada(&base_i[k]);
+                    const Vec br  = loadu(&base_r[k]);
+                    const Vec bi  = loadu(&base_i[k]);
                     const Vec cr0 = from_base ? br : loada(&current_r[k]);
                     const Vec ci0 = from_base ? bi : loada(&current_i[k]);
 
@@ -465,8 +465,8 @@ inline void fold_one_segment(const float* __restrict__ ts_e_seg,
                     const SizeType k1 = k + kBatchSize;
                     const Vec e       = loadu(&ts_e_seg[k1]);
                     const Vec v       = loadu(&ts_v_seg[k1]);
-                    const Vec br      = loada(&base_r[k1]);
-                    const Vec bi      = loada(&base_i[k1]);
+                    const Vec br      = loadu(&base_r[k1]);
+                    const Vec bi      = loadu(&base_i[k1]);
                     const Vec cr0     = from_base ? br : loada(&current_r[k1]);
                     const Vec ci0     = from_base ? bi : loada(&current_i[k1]);
 
@@ -492,8 +492,8 @@ inline void fold_one_segment(const float* __restrict__ ts_e_seg,
             if (k + kBatchSize <= segment_len) {
                 const Vec e   = loadu(&ts_e_seg[k]);
                 const Vec v   = loadu(&ts_v_seg[k]);
-                const Vec br  = loada(&base_r[k]);
-                const Vec bi  = loada(&base_i[k]);
+                const Vec br  = loadu(&base_r[k]);
+                const Vec bi  = loadu(&base_i[k]);
                 const Vec cr0 = from_base ? br : loada(&current_r[k]);
                 const Vec ci0 = from_base ? bi : loada(&current_i[k]);
 
@@ -571,8 +571,8 @@ inline void fold_one_segment(const float* __restrict__ ts_e_seg,
                 {
                     const Vec e   = loadu(&ts_e_seg[k]);
                     const Vec v   = loadu(&ts_v_seg[k]);
-                    const Vec br  = loada(&base_r[k]);
-                    const Vec bi  = loada(&base_i[k]);
+                    const Vec br  = loadu(&base_r[k]);
+                    const Vec bi  = loadu(&base_i[k]);
                     const Vec cr0 = from_base ? br : loada(&current_r[k]);
                     const Vec ci0 = from_base ? bi : loada(&current_i[k]);
 
@@ -592,8 +592,8 @@ inline void fold_one_segment(const float* __restrict__ ts_e_seg,
                     const SizeType k1 = k + kBatchSize;
                     const Vec e       = loadu(&ts_e_seg[k1]);
                     const Vec v       = loadu(&ts_v_seg[k1]);
-                    const Vec br      = loada(&base_r[k1]);
-                    const Vec bi      = loada(&base_i[k1]);
+                    const Vec br      = loadu(&base_r[k1]);
+                    const Vec bi      = loadu(&base_i[k1]);
                     const Vec cr0     = from_base ? br : loada(&current_r[k1]);
                     const Vec ci0     = from_base ? bi : loada(&current_i[k1]);
 
@@ -611,8 +611,8 @@ inline void fold_one_segment(const float* __restrict__ ts_e_seg,
             if (k + kBatchSize <= segment_len) {
                 const Vec e   = loadu(&ts_e_seg[k]);
                 const Vec v   = loadu(&ts_v_seg[k]);
-                const Vec br  = loada(&base_r[k]);
-                const Vec bi  = loada(&base_i[k]);
+                const Vec br  = loadu(&base_r[k]);
+                const Vec bi  = loadu(&base_i[k]);
                 const Vec cr0 = from_base ? br : loada(&current_r[k]);
                 const Vec ci0 = from_base ? bi : loada(&current_i[k]);
 

@@ -89,15 +89,14 @@ target_link_libraries(
           $<BUILD_INTERFACE:fmt::fmt-header-only>
           $<BUILD_INTERFACE:spdlog::spdlog_header_only>
           $<BUILD_INTERFACE:psrio::psrio>
+          $<BUILD_INTERFACE:pocketfft>
 )
 
 # System/runtime deps: PRIVATE for shared loki, PUBLIC for static loki.
 if(BUILD_SHARED_LIBS)
-  target_link_libraries(${LOKI_LIBRARY_NAME} PRIVATE OpenMP::OpenMP_CXX HDF5::HDF5 FFTW::Float)
+  target_link_libraries(${LOKI_LIBRARY_NAME} PRIVATE OpenMP::OpenMP_CXX HDF5::HDF5)
 else()
-  target_link_libraries(
-    ${LOKI_LIBRARY_NAME} PUBLIC OpenMP::OpenMP_CXX HDF5::HDF5 $<LINK_ONLY:FFTW::Float>
-  )
+  target_link_libraries(${LOKI_LIBRARY_NAME} PUBLIC OpenMP::OpenMP_CXX HDF5::HDF5)
 endif()
 
 if(CMAKE_CUDA_COMPILER)

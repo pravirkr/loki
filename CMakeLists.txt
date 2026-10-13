@@ -284,11 +284,6 @@ if(CMAKE_CUDA_COMPILER)
   set(LOKI_BUILT_WITH_CUDA ON)
 endif()
 
-set(LOKI_BUILT_AS_SHARED OFF)
-if(BUILD_SHARED_LIBS)
-  set(LOKI_BUILT_AS_SHARED ON)
-endif()
-
 install(
   TARGETS ${LOKI_LIBRARY_NAME}
   EXPORT lokiTargets
@@ -332,13 +327,10 @@ write_basic_package_version_file(
   COMPATIBILITY SameMajorVersion
 )
 
-# FindFFTW.cmake ships with the package: lokiConfig.cmake calls
-# find_dependency(FFTW) for static builds and adds its own directory to
-# CMAKE_MODULE_PATH.
 install(
   FILES ${CMAKE_CURRENT_BINARY_DIR}/lokiConfig.cmake
         ${CMAKE_CURRENT_BINARY_DIR}/lokiConfigVersion.cmake
-        ${CMAKE_CURRENT_BINARY_DIR}/lokiCUDAConfig.cmake ${PROJECT_SOURCE_DIR}/cmake/FindFFTW.cmake
+        ${CMAKE_CURRENT_BINARY_DIR}/lokiCUDAConfig.cmake
   DESTINATION ${LOKI_CMAKE_PACKAGE_DIR}
 )
 

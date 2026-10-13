@@ -20,7 +20,6 @@
 #include "loki/utils/fft.hpp"
 #include "loki/utils/workspace.hpp"
 
-#include "lib/utils/fft_impl.hpp"
 #include "lib/utils/workspace_impl.hpp"
 
 namespace loki::algorithms::detail {
@@ -51,6 +50,16 @@ public:
                                 std::span<const SizeType> /*widths*/,
                                 std::vector<detection::SnrHit>& /*hits*/) {
         throw std::logic_error("execute_scored not implemented on this engine");
+    }
+    /// As above, with a caller-owned fold buffer (at least buffer_size) for
+    /// paths that need one, so repeated calls do not allocate it.
+    virtual void execute_scored(std::span<const float> ts_e,
+                                std::span<const float> ts_v,
+                                float threshold,
+                                std::span<const SizeType> widths,
+                                std::vector<detection::SnrHit>& hits,
+                                std::span<FoldType> /*scratch*/) {
+        execute_scored(ts_e, ts_v, threshold, widths, hits);
     }
 
     virtual void execute(std::span<const float> ts_e,
@@ -90,7 +99,6 @@ make_ffa_cpu(const search::FFASearchConfig& cfg, bool show_progress);
 template <SupportedFoldType FoldType>
 std::unique_ptr<FFAEngine<FoldType>>
 make_ffa_cpu(memory::FFAWorkspaceCPU<FoldType>& workspace,
-             math::FFTWManager& fft_manager,
              const search::FFASearchConfig& cfg,
              bool show_progress);
 

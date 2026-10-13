@@ -60,7 +60,7 @@ public:
               std::string_view poly_basis,
               const PruneRFIConfig& rfi_config,
               const search::GridMask& mask_base,
-              math::FFTWManager* fft_manager = nullptr)
+              math::CpuFFT* fft_manager = nullptr)
         : m_workspace_ptr(&workspace),
           m_cfg(std::move(cfg)),
           m_ffa_plan(m_cfg),
@@ -1081,9 +1081,9 @@ public:
     EPMultiPassCpuEngine(
         std::span<memory::EPWorkspaceCPU<FoldType>* const> external_workspaces,
         memory::FFAWorkspaceCPU<FoldType>& external_ffa_workspace,
-        math::FFTWManager& external_fft_manager,
+        math::CpuFFT& external_fft_manager,
         std::span<FoldType> external_ffa_fold,
-        std::span<math::FFTWManager* const> external_prune_fft,
+        std::span<math::CpuFFT* const> external_prune_fft,
         search::PulsarSearchConfig cfg,
         std::span<const float> threshold_scheme,
         std::optional<SizeType> n_runs,
@@ -1171,7 +1171,7 @@ public:
             // The FFA engine is not needed once the fold is computed: free
             // it before pruning, which holds the peak memory.
             const auto ffa = detail::make_ffa_cpu<FoldType>(
-                *m_ffa_workspace_ptr, *m_fft_ptr, m_cfg, m_show_progress);
+                *m_ffa_workspace_ptr, m_cfg, m_show_progress);
             ffa->execute(ts_e, ts_v, fold_span);
         }
         const auto ffa_fold =
@@ -1242,11 +1242,11 @@ private:
     // FFA resources (either owned or non-owning external references)
     memory::FFAWorkspaceCPU<FoldType> m_ffa_workspace_storage;
     memory::FFAWorkspaceCPU<FoldType>* m_ffa_workspace_ptr{nullptr};
-    math::FFTWManager m_fft_storage;
-    math::FFTWManager* m_fft_ptr{nullptr};
+    math::CpuFFT m_fft_storage;
+    math::CpuFFT* m_fft_ptr{nullptr};
     // Per-worker FFT managers of the pruning functors, owned by the caller.
     // Empty when the functors own their own (the standalone pipelines).
-    std::vector<math::FFTWManager*> m_prune_fft;
+    std::vector<math::CpuFFT*> m_prune_fft;
     std::vector<FoldType> m_ffa_fold_storage;
     std::span<FoldType> m_ffa_fold_span;
 
@@ -1272,7 +1272,7 @@ private:
 
     /// The FFT manager of worker @p thread_idx, or null when the functors own
     /// theirs.
-    [[nodiscard]] math::FFTWManager*
+    [[nodiscard]] math::CpuFFT*
     get_prune_fft(SizeType thread_idx) const noexcept {
         return thread_idx < m_prune_fft.size() ? m_prune_fft[thread_idx]
                                                : nullptr;
@@ -1472,9 +1472,9 @@ template <SupportedFoldType FoldType>
 std::unique_ptr<EPMultiPassEngine<FoldType>>
 make_ep_cpu(std::span<memory::EPWorkspaceCPU<FoldType>* const> workspaces,
             memory::FFAWorkspaceCPU<FoldType>& ffa_workspace,
-            math::FFTWManager& fft_manager,
+            math::CpuFFT& fft_manager,
             std::span<FoldType> ffa_fold,
-            std::span<math::FFTWManager* const> prune_fft,
+            std::span<math::CpuFFT* const> prune_fft,
             search::PulsarSearchConfig cfg,
             std::span<const float> threshold_scheme,
             std::optional<SizeType> n_runs,
@@ -1532,9 +1532,9 @@ make_ep_cpu<float>(std::span<memory::EPWorkspaceCPU<float>* const>,
 template std::unique_ptr<EPMultiPassEngine<float>>
 make_ep_cpu<float>(std::span<memory::EPWorkspaceCPU<float>* const>,
                    memory::FFAWorkspaceCPU<float>&,
-                   math::FFTWManager&,
+                   math::CpuFFT&,
                    std::span<float>,
-                   std::span<math::FFTWManager* const>,
+                   std::span<math::CpuFFT* const>,
                    search::PulsarSearchConfig,
                    std::span<const float>,
                    std::optional<SizeType>,
@@ -1562,9 +1562,9 @@ make_ep_cpu<ComplexType>(std::span<memory::EPWorkspaceCPU<ComplexType>* const>,
 template std::unique_ptr<EPMultiPassEngine<ComplexType>>
 make_ep_cpu<ComplexType>(std::span<memory::EPWorkspaceCPU<ComplexType>* const>,
                          memory::FFAWorkspaceCPU<ComplexType>&,
-                         math::FFTWManager&,
+                         math::CpuFFT&,
                          std::span<ComplexType>,
-                         std::span<math::FFTWManager* const>,
+                         std::span<math::CpuFFT* const>,
                          search::PulsarSearchConfig,
                          std::span<const float>,
                          std::optional<SizeType>,

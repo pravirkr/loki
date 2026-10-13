@@ -19,13 +19,12 @@ struct HandleAccess;
 namespace loki::math {
 
 /**
- * @brief Owns batched real-FFT plans (FFTW on CPU; on CUDA, the tables of the
- * portable block FFT).
+ * @brief Owns the tables of the batched real FFTs (on CPU, loki's host FFT;
+ * on CUDA, the portable block FFT).
  *
- * Opaque handle. Fourier-domain searches create and destroy plans on every
- * call unless a manager with prepared plans is passed in. Build one manager
- * per backend and device, prepare the transform lengths it will see, and
- * share it between instances to amortise planning.
+ * Opaque handle. Build one manager per backend and device, prepare the
+ * transform lengths it will see, and share it between instances to amortise
+ * building the tables.
  */
 class FFTManager {
 public:
@@ -43,14 +42,13 @@ public:
     FFTManager& operator=(const FFTManager&) = delete;
 
     /**
-     * @brief Pre-build plans for each real length in @p n_reals, for every
-     * power-of-two batch size up to the backend maximum. Repeated calls with
-     * the same lengths are no-ops.
+     * @brief Pre-build the transform tables for each real length in
+     * @p n_reals. Repeated calls with the same lengths are no-ops.
      */
     void prepare_plans(std::span<const SizeType> n_reals);
 
     /**
-     * @brief Register @p n_reals for lazily cached exact-batch inverse plans
+     * @brief Register @p n_reals; their tables are built on first use
      * (suited to fixed lengths with varying batch sizes, as in EP pruning).
      */
     void prepare_exact_plans(std::span<const SizeType> n_reals);

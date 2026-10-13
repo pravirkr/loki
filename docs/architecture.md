@@ -255,6 +255,7 @@ Private code:
   `loki::cub_helpers`, `cuda/device_rng.cuh` uses `loki::device_rng`,
   `cpu/simd_utils.hpp` uses `loki::simd_utils`,
   `cpu/brute_fold_intrinsics.hpp` uses `loki::brute_fold_intrinsics`,
+  `cpu/lane_fft.hpp` uses `loki::lane_fft`,
   `detail/progress.hpp` uses `loki::progress`. The
   device companion of a host header uses the host header's namespace:
   `cuda/kernel_utils.cuh` uses `loki::utils`, `cuda/types_cuda.cuh` uses

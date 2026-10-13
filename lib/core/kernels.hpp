@@ -164,6 +164,64 @@ void ffa_cone_band_freq(const float* level_in,
                         ConeBandThreadSeconds* thread_seconds,
                         int nthreads);
 
+/**
+ * @brief Final FFA level (time domain, accel) merged straight into a scored
+ * tile: the final fold is never stored.
+ *
+ * `fold_in` is the level before the final one (layout `[2, ncoords_prev, 2,
+ * nbins]`). Each tile of `tile_coords` final coordinates is merged into
+ * per-thread scratch with the same arithmetic as `ffa_iter` and passed to
+ * `score_fn`. Tiles are split over threads in contiguous, static blocks, so
+ * per-thread outputs concatenated in thread order are in coordinate order.
+ */
+void ffa_final_scored(const float* __restrict__ fold_in,
+                      const coord::FFACoord* __restrict__ coords,
+                      SizeType ncoords_cur,
+                      SizeType ncoords_prev,
+                      SizeType nbins,
+                      SizeType tile_coords,
+                      ConeScoreFn score_fn,
+                      void* score_ctx,
+                      int nthreads);
+
+/// Called on each tile of final Fourier-domain profiles (layout `[count, 2,
+/// nbins_f]`) in per-thread scratch; must be thread-safe.
+using ComplexTileFn = void (*)(ComplexType* tile,
+                               SizeType coord_begin,
+                               SizeType count,
+                               void* ctx);
+
+/**
+ * @brief Final FFA level (Fourier domain) merged tile by tile into scratch.
+ *
+ * `fold_in` is the level before the final one (`[2, ncoords_prev, 2,
+ * nbins_f]`). Same merge arithmetic and phase steps as `ffa_complex_iter` /
+ * `ffa_complex_iter_freq`; `tile_coords` must be a multiple of 32. Tiles are
+ * split over threads in contiguous, static blocks.
+ */
+void ffa_complex_final_tiles(const ComplexType* __restrict__ fold_in,
+                             const coord::FFACoord* __restrict__ coords,
+                             SizeType ncoords_cur,
+                             SizeType ncoords_prev,
+                             SizeType nbins_f,
+                             SizeType nbins,
+                             SizeType tile_coords,
+                             ComplexTileFn tile_fn,
+                             void* tile_ctx,
+                             int nthreads);
+
+void ffa_complex_final_tiles_freq(
+    const ComplexType* __restrict__ fold_in,
+    const coord::FFACoordFreq* __restrict__ coords,
+    SizeType ncoords_cur,
+    SizeType ncoords_prev,
+    SizeType nbins_f,
+    SizeType nbins,
+    SizeType tile_coords,
+    ComplexTileFn tile_fn,
+    void* tile_ctx,
+    int nthreads);
+
 // Fallback implementation
 void brute_fold_ts_complex_xsimd(const float* __restrict__ ts_e,
                                  const float* __restrict__ ts_v,

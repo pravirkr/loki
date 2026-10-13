@@ -38,7 +38,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         cmake \
         git \
-        libfftw3-dev \
         libgomp1 \
         libhdf5-dev \
         ninja-build \
@@ -78,8 +77,6 @@ ENV DEBIAN_FRONTEND=noninteractive \
     HOME=/tmp
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libfftw3-double3 \
-        libfftw3-single3 \
         libgomp1 \
         libhdf5-310 \
         libhdf5-hl-310 \
@@ -115,7 +112,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         cmake \
         git \
-        libfftw3-dev \
         libgomp1 \
         libhdf5-dev \
         ninja-build \
@@ -157,8 +153,6 @@ ENV DEBIAN_FRONTEND=noninteractive \
     HOME=/tmp
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libfftw3-double3 \
-        libfftw3-single3 \
         libgomp1 \
         libhdf5-310 \
         libhdf5-hl-310 \

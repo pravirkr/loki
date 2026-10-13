@@ -1,11 +1,14 @@
 #pragma once
 
 #include <bit>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <new>
 #include <optional>
 #include <span>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "loki/common/types.hpp"
@@ -81,6 +84,54 @@ template <typename U> [[nodiscard]] constexpr U opaque_bits(U bits) noexcept {
 constexpr float to_gib(SizeType bytes) noexcept {
     return static_cast<float>(bytes) / 1024.0F / 1024.0F / 1024.0F;
 }
+
+/**
+ * @brief Allocator for large scratch buffers: 64-byte aligned, and elements
+ * of trivially copyable types are left uninitialised.
+ *
+ * `std::vector<T>::resize` value-initialises (zero-fills) every element; for
+ * multi-GB fold buffers that every kernel overwrites before reading, that is
+ * a wasted pass over memory plus a page fault per page. The 64-byte alignment
+ * suits SIMD loads from the buffer start.
+ */
+template <typename T, std::size_t Align = 64> struct UninitAlignedAllocator {
+    using value_type = T;
+    template <typename U> struct rebind {
+        using other = UninitAlignedAllocator<U, Align>;
+    };
+
+    UninitAlignedAllocator() noexcept = default;
+    template <typename U>
+    // NOLINTNEXTLINE(google-explicit-constructor): allocator rebind
+    UninitAlignedAllocator(const UninitAlignedAllocator<U, Align>&) noexcept {}
+
+    [[nodiscard]] T* allocate(std::size_t n) {
+        return static_cast<T*>(
+            ::operator new(n * sizeof(T), std::align_val_t{Align}));
+    }
+    void deallocate(T* p, std::size_t /*n*/) noexcept {
+        ::operator delete(p, std::align_val_t{Align});
+    }
+    template <typename U> void construct(U* p) {
+        if constexpr (!(std::is_trivially_copyable_v<U> &&
+                        std::is_trivially_destructible_v<U>)) {
+            ::new (static_cast<void*>(p)) U;
+        }
+    }
+    template <typename U, typename... Args>
+    void construct(U* p, Args&&... args) {
+        ::new (static_cast<void*>(p)) U(std::forward<Args>(args)...);
+    }
+    template <typename U>
+    bool operator==(const UninitAlignedAllocator<U, Align>&) const noexcept {
+        return true;
+    }
+};
+
+/// A vector whose `resize(n)` leaves trivially copyable elements
+/// uninitialised (64-byte aligned storage).
+template <typename T>
+using UninitVector = std::vector<T, UninitAlignedAllocator<T>>;
 
 /**
  * @brief Computes max_i(x[i] - y[i]) for two non-overlapping float arrays.

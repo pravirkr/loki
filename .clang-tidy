@@ -98,4 +98,4 @@ CheckOptions:
   # Umbrella and third-party headers: their symbols come through public
   # entry points, and pybind11/stl.h, numpy.h, functional.h etc. register
   # type casters, so an "unused" one must never be removed.
-  misc-include-cleaner.IgnoreHeaders: "pybind11/.*;highfive/.*;catch2/.*;xsimd/.*;fmt/.*;spdlog/.*;omp\\.h;cuda.*;cufft.*;thrust/.*;cub/.*;boost/.*;toml\\+\\+/.*;CLI/.*;BS_thread_pool.*;psrio/.*;fftw3\\.h;hdf5\\.h;H5.*\\.h"
+  misc-include-cleaner.IgnoreHeaders: "pybind11/.*;highfive/.*;catch2/.*;xsimd/.*;fmt/.*;spdlog/.*;omp\\.h;cuda.*;cufft.*;thrust/.*;cub/.*;boost/.*;toml\\+\\+/.*;CLI/.*;BS_thread_pool.*;psrio/.*;pocketfft_hdronly\\.h;hdf5\\.h;H5.*\\.h"

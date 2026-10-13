@@ -486,11 +486,13 @@ private:
                                                      actual_end);
             const plans::FFAPlan<FoldType> plan(cfg);
 
-            // The GPU sweep merges and scores the last level on chip, so its
-            // ping-pong buffers hold every level but the last, and its score
-            // scratch is a bounded slot list (detail::kGpuScoreScratchCap).
-            const SizeType buf = m_use_gpu ? detail::gpu_sweep_buffer_size(plan)
-                                           : plan.get_buffer_size();
+            // Both sweeps merge and score the last level without storing it:
+            // the GPU on chip (its score scratch is a bounded slot list,
+            // detail::kGpuScoreScratchCap), the CPU tile by tile in per-thread
+            // scratch (no score array at all).
+            const SizeType buf   = m_use_gpu
+                                       ? detail::gpu_sweep_buffer_size(plan)
+                                       : detail::cpu_scored_buffer_size(plan);
             const SizeType coord = m_use_gpu
                                        ? detail::gpu_sweep_coord_size(plan)
                                        : plan.get_coord_size();
@@ -499,10 +501,12 @@ private:
             // Width count follows nbins, which is fixed within a region but
             // differs between regions, so it must come from the chunk config.
             const SizeType n_scores = nc * cfg.get_n_scoring_widths();
-            const SizeType scratch =
-                (m_use_gpu && detail::gpu_fused_score_applies(plan))
-                    ? std::min(n_scores, detail::kGpuScoreScratchCap)
-                    : n_scores;
+            SizeType scratch        = n_scores;
+            if (!m_use_gpu) {
+                scratch = 0;
+            } else if (detail::gpu_fused_score_applies(plan)) {
+                scratch = std::min(n_scores, detail::kGpuScoreScratchCap);
+            }
             const SizeType seg0    = plan.get_segment_lens().front();
             const SizeType nfreqs0 = plan.get_param_counts().front().back();
             const SizeType bf_bytes =
@@ -562,6 +566,11 @@ private:
                 if (index_limits::chunk_exceeds_cuda_index_limits(usage)) {
                     return false;
                 }
+            } else if (static_cast<std::uint64_t>(e.ncoords) *
+                           e.cfg.get_n_scoring_widths() >
+                       index_limits::kMaxUint32FoldElements) {
+                // CPU hits carry a 32-bit score index (coord * nwidths + iw).
+                return false;
             }
             return true;
         };
