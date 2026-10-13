@@ -296,7 +296,7 @@ No CMake edit is needed: the globs pick up the new files.
    `LANGUAGE HIP` and define `LOKI_ENABLE_HIP` and `LOKI_ENABLE_GPU`.
 3. Point `kGPUBackend` in `lib/common/dispatch.hpp` at `Backend::kHIP` under
    `LOKI_ENABLE_HIP`.
-4. Add `lib/cuda/gpu_compat.cuh`, which maps the CUDA, cuFFT, Thrust and CUB
+4. Add `lib/cuda/gpu_compat.cuh`, which maps the CUDA, Thrust and CUB
    names onto their HIP equivalents.
 
 The facades do not change: they already dispatch on `kGPUBackend` through
@@ -335,9 +335,13 @@ The facades do not change: they already dispatch on `kGPUBackend` through
   sweep forms phase rotations in FP32 (`fourier_phasor`: an exact `fmaf` split
   of k * shift, reduced to a fraction of a cycle, then `sincospif`) and inverts
   on chip with the portable block FFT (Bluestein's algorithm for a `nbins`
-  that is not a power of two; `docs/fft.md`),
-  so its scores differ from `FFA::execute` plus cuFFT at float level (and are
-  closer to the CPU reference). `FFA::execute` and EP keep the FP64 phase.
+  that is not a power of two; `docs/fft.md`).
+  `FFA::execute`, `compute_ffa*` and the FFA stage of EP use the same merge
+  and brute-fold kernels as the sweep, so on the GPU every Fourier fold uses
+  these FP32 phasors. The Fourier brute fold seeds its phasors from the
+  double phase reduced to a cycle, re-seeded every 64 samples. The GPU FFTs
+  are portable block transforms (no cuFFT). Fourier results are at float
+  level relative to the CPU reference.
 - Thread counts. The caller's `nthreads` is never capped from above:
   library code clamps only from below, `nthreads = std::max(nthreads, 1)`,
   before using it in `num_threads(...)`. `omp_get_max_threads()` would let

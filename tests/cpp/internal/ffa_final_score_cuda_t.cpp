@@ -365,7 +365,9 @@ TEST_CASE("Fused final FFA level and score match the unfused path bit for bit",
     }
     SECTION("warp regime (larger nbins, or few profiles)") {
         const SizeType nbins = GENERATE(50, 64, 128, 256, 1024);
-        const auto widths    = geometric_widths(nbins, 14);
+        // Every width bucket of the warp scorer's multi-value reduction.
+        const SizeType nwidth = GENERATE(6, 14, 20, 30);
+        const auto widths     = geometric_widths(nbins, nwidth);
         check_final_score(nbins, 500, 1201, widths, 1.0F, freq_only, 3);
         check_final_score(nbins, 500, 1201, widths,
                           1.0F / static_cast<float>(nbins), freq_only, 4);

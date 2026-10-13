@@ -267,7 +267,7 @@ TEMPLATE_TEST_CASE("CUDA EP shared group seeds only each chunk's coordinates",
         kBatch, branch_max, capacity, ncoords, larger.get_nparams(), width,
         nsegments, stream,
         loki::cuda_utils::as_span(arena).first(capacity * 2 * width));
-    loki::math::CUFFTManager fft(0);
+    loki::math::GpuFFTManager fft(0);
     thrust::device_vector<DeviceFoldT> folds(plan.get_buffer_size());
     std::vector<float> noise(larger.get_nsamps());
     std::mt19937 rng(17);

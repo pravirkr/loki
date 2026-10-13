@@ -8,6 +8,7 @@
 #include "loki/common/backend.hpp"
 
 #include "lib/common/dispatch.hpp"
+#include "lib/detail/nvtx.hpp"
 #include "lib/detail/utils.hpp"
 #include "lib/io/preprocess_engine.hpp"
 
@@ -65,6 +66,7 @@ PreprocessReport preprocess(std::span<const float> raw,
         throw std::invalid_argument("preprocess: tsamp must be positive");
     }
     options.validate();
+    const nvtx::Range range("preprocess");
     const auto* rb       = raw.data();
     const auto* re       = rb + raw.size();
     const auto* eb       = ts_e.data();
@@ -85,7 +87,15 @@ PreprocessReport preprocess(std::span<const float> raw,
     }
 #ifdef LOKI_ENABLE_GPU
     if (exec.backend == loki::detail::kGPUBackend) {
-        loki::detail::throw_unimplemented("preprocess", exec.backend);
+        // The GPU runs the robust passes; the z-score method and the
+        // spectral zap have no GPU kernels and run on the CPU.
+        if (options.method != PreprocessMethod::kRobust ||
+            options.zap_periodic || !options.birdies.empty()) {
+            return detail::preprocess_cpu(raw, tsamp, ts_e, ts_v, options,
+                                          exec.nthreads);
+        }
+        return detail::preprocess_gpu(raw, tsamp, ts_e, ts_v, options,
+                                      exec.device);
     }
 #endif
     loki::detail::throw_unavailable("preprocess", exec.backend);

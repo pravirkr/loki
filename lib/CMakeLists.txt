@@ -107,12 +107,21 @@ if(CMAKE_CUDA_COMPILER)
   )
   # Runtime libraries: PRIVATE for shared loki, link-only PUBLIC for static loki.
   if(BUILD_SHARED_LIBS)
-    target_link_libraries(${LOKI_LIBRARY_NAME} PRIVATE CUDA::cudart CUDA::cufft)
+    target_link_libraries(${LOKI_LIBRARY_NAME} PRIVATE CUDA::cudart)
   else()
     target_link_libraries(
-      ${LOKI_LIBRARY_NAME} PUBLIC $<LINK_ONLY:CUDA::cudart> $<LINK_ONLY:CUDA::cufft>
+      ${LOKI_LIBRARY_NAME} PUBLIC $<LINK_ONLY:CUDA::cudart>
     )
   endif()
+endif()
+
+# Profiling ranges (lib/detail/nvtx.hpp): header-only NVTX from the CUDA
+# toolkit, usable in CPU-only builds too.
+if(LOKI_ENABLE_NVTX)
+  find_package(CUDAToolkit REQUIRED)
+  target_link_libraries(${LOKI_LIBRARY_NAME} PRIVATE CUDA::nvtx3)
+  target_compile_definitions(${LOKI_LIBRARY_NAME} PRIVATE LOKI_NVTX)
+  message(STATUS "NVTX ranges: ON")
 endif()
 
 # White-box access for in-tree tests and benchmarks: private headers (lib/),

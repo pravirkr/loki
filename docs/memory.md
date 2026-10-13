@@ -90,14 +90,13 @@ Host memory is never checked. Result snapshots are bounded to one active write
 and one waiting payload, in addition to the producer snapshot and inputs.
 The model fits execution buffers. Threshold selection/evaluation currently
 allocates separate CUDA simulation workspaces without a user-budget check;
-cuFFT work areas, tail buffers, and temporary growth peaks are covered by fixed
-reserves. Budget fitting therefore does not yet bound every planning/transient
+tail buffers and temporary growth peaks are covered by fixed reserves. Budget fitting therefore does not yet bound every planning/transient
 allocation.
 As for `FFAFreqSweep`, the plan is fitted to
 
 ```text
 limit = min(max_process_memory_gb, free device memory - kDeviceReserveGB)   (1 GB)
-effective limit = limit - reserve       (0.5 GB; 1.5 GB for multiple nbins)
+effective limit = limit - reserve       (0.5 GB)
 ```
 
 `kDeviceReserveGB` (`planner_memory.hpp`) covers the CUDA context, kernel
@@ -131,11 +130,12 @@ Differences from the CPU policy:
 - The threshold scheme is the CUDA `DynamicThresholdScheme`. It differs
   statistically from the CPU scheme. A cache can be reused on the other
   backend after adapting its batch and rechecking capacity and memory.
-- cuFFT work areas and the few small FFA arrays (counts, offsets, limits) are
-  not in the exact model. `kDeviceReserveGB` (1 GB) is what the GPU planners
-  leave for the CUDA context, kernel images and those work areas, and the
-  unmodelled reserve is a second margin: 0.5 GB for one `nbins`, or
-  1.5 GB when the sweep retains plans for multiple sizes.
+- The Bluestein tables (under 64 KiB per size), CUB temporaries and the few
+  small FFA arrays (counts, offsets, limits) are not in the exact model.
+  `kDeviceReserveGB` (1 GB) is what the GPU planners leave for the CUDA
+  context, kernel images and those arrays, and the unmodelled reserve
+  (0.5 GB) is a second margin. Before cuFFT was removed (memory model 9) it
+  was 1.5 GB when the sweep retained plans for several sizes.
 - The preferred batch is 2^16 parents on the GPU (`kEPBatchSizeCuda`) and 1024 on the
   CPU (`kEPBatchSize`). A batch is one kernel round trip and one world-tree
   synchronisation, so the GPU needs a large one: at 1024, one run of 2^25
@@ -146,9 +146,8 @@ Differences from the CPU policy:
   to force a fit. The chosen batch is stored per chunk
   and of the cache, which records it. On the GPU, a run that overflows the
   world tree trims at batch boundaries, so results can depend on the batch.
-- CUDA pruning uses on-chip transforms and owns no cuFFT plans or work area.
-  The FFA keeps its ladder-plan manager; its cuFFT work area remains outside
-  the exact model and is covered by the existing reserves. The CPU sweep keeps
+- CUDA pruning uses on-chip transforms. The FFA stage's GPU transforms keep
+  no plans or work area, only the small Bluestein tables. The CPU sweep keeps
   one exact `FFTWManager` per pruning worker: plans are created lazily and are
   not shared across threads.
 - `PruneRFIConfig` (pulsar mask, harvesting, impulsive veto) is not implemented

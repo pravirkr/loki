@@ -195,21 +195,47 @@ __launch_bounds__(FFT::max_threads_per_block) void kernel_final_score_c2c(
     const uint32_t stride                     = 2 * nf;
     ComplexTypeCUDA* half_e                   = s_half + (fft_id * 2 * kNFMax);
     ComplexTypeCUDA* half_v                   = half_e + kNFMax;
+    // The step phasors (k = FFT::stride) are the same for every thread of
+    // a transform: lane j of its lane group computes the one of shift j and
+    // shares it (kGroup lanes, a power of two, within one warp).
+    constexpr uint32_t kGroup =
+        FFT::stride < kWarpSize ? FFT::stride : kWarpSize;
+    constexpr bool kShareSteps = kGroup >= static_cast<uint32_t>(Rows::kShifts);
     for (uint32_t r = 0; r < kPB; r += F) {
         const uint32_t q  = r + fft_id;
         const bool active = q < nprof;
+        Phasor st[Rows::kShifts];
+        if constexpr (kShareSteps) {
+            // Every lane takes part; an idle transform reads an unset row
+            // and discards the result.
+            const uint32_t lane_j = threadIdx.x % kGroup;
+            Phasor mine{1.0F, 0.0F};
+            if (lane_j < static_cast<uint32_t>(Rows::kShifts) &&
+                (kTailShift || (lane_j % 2) == 1)) {
+                mine =
+                    fourier_phasor(FFT::stride, s_src[q].shift[lane_j], inv_n);
+            }
+#pragma unroll
+            for (int j = 0; j < Rows::kShifts; ++j) {
+                st[j].c = __shfl_sync(0xFFFFFFFFU, mine.c, j,
+                                      static_cast<int>(kGroup));
+                st[j].s = __shfl_sync(0xFFFFFFFFU, mine.s, j,
+                                      static_cast<int>(kGroup));
+            }
+        }
         // Merge this profile's harmonics k = threadIdx.x + i * stride
         // into the half spectra (phasor recurrences as in the C2R
         // kernel).
         if (active) {
             const Rows& rs = s_src[q];
             Phasor ph[Rows::kShifts];
-            Phasor st[Rows::kShifts];
 #pragma unroll
             for (int j = 0; j < Rows::kShifts; ++j) {
                 if (kTailShift || (j % 2) == 1) {
                     ph[j] = fourier_phasor(threadIdx.x, rs.shift[j], inv_n);
-                    st[j] = fourier_phasor(FFT::stride, rs.shift[j], inv_n);
+                    if constexpr (!kShareSteps) {
+                        st[j] = fourier_phasor(FFT::stride, rs.shift[j], inv_n);
+                    }
                 } else {
                     ph[j] = Phasor{1.0F, 0.0F};
                     st[j] = Phasor{1.0F, 0.0F};

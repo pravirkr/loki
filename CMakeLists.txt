@@ -50,6 +50,7 @@ option(LOKI_BUILD_APPLICATIONS "Build command-line applications" ON)
 option(LOKI_ENABLE_COVERAGE "Enable coverage reporting" OFF)
 option(LOKI_ENABLE_IPO "Enable interprocedural optimization (LTO) on Release builds" OFF)
 option(LOKI_ENABLE_NATIVE_ARCH "Use -march=native in Release builds" ON)
+option(LOKI_ENABLE_NVTX "NVTX ranges for nsys profiling (needs the CUDA toolkit headers)" OFF)
 # Debug stays unoptimized. The asan preset sets -O1 so sanitizers are usable in CI.
 set(LOKI_DEBUG_OPTIMIZATION
     "-O0"

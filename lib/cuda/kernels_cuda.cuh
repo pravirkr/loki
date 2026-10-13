@@ -99,26 +99,6 @@ plan_ffa_freq_fuse_groups(std::span<const SizeType> ncoords,
                           std::span<const uint32_t> level_bad,
                           std::span<const bool> k_fits_smem);
 
-void ffa_complex_iter_cuda(const ComplexTypeCUDA* __restrict__ fold_in,
-                           ComplexTypeCUDA* __restrict__ fold_out,
-                           coord::FFACoordDPtrs coords,
-                           SizeType ncoords_cur,
-                           SizeType ncoords_prev,
-                           SizeType nsegments,
-                           SizeType nbins_f,
-                           SizeType nbins,
-                           cudaStream_t stream);
-
-void ffa_complex_iter_freq_cuda(const ComplexTypeCUDA* __restrict__ fold_in,
-                                ComplexTypeCUDA* __restrict__ fold_out,
-                                coord::FFACoordFreqDPtrs coords,
-                                SizeType ncoords_cur,
-                                SizeType ncoords_prev,
-                                SizeType nsegments,
-                                SizeType nbins_f,
-                                SizeType nbins,
-                                cudaStream_t stream);
-
 void shift_add_linear_batch_cuda(const float* __restrict__ folds_tree,
                                  const uint32_t* __restrict__ indices_tree,
                                  const uint8_t* __restrict__ validation_mask,

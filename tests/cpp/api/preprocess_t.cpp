@@ -466,12 +466,120 @@ TEST_CASE("preprocess: edge cases", "[io][preprocess]") {
         opt.block_scales = {-1.0};
         REQUIRE_THROWS_AS(run(raw, opt), std::invalid_argument);
     }
-    SECTION("GPU backend is not implemented") {
-        const auto raw = white(1000, 20);
-        std::vector<float> e(raw.size());
-        std::vector<float> v(raw.size());
-        REQUIRE_THROWS(
-            loki::io::preprocess(raw, kTsamp, e, v, {}, loki::Exec::cuda(0)));
+}
+
+namespace {
+
+Out run_cuda(const std::vector<float>& raw, const PreprocessOptions& o = {}) {
+    Out out{std::vector<float>(raw.size()), std::vector<float>(raw.size()), {}};
+    out.rep =
+        loki::io::preprocess(raw, kTsamp, out.e, out.v, o, loki::Exec::cuda(0));
+    return out;
+}
+
+/// The CUDA engine against the CPU. On the reference build they are
+/// bit-identical; the tolerance only allows for host compilers that lower
+/// the CPU's divisions differently under -ffast-math. The sample mask and
+/// the counts must agree exactly.
+void require_same(const Out& cpu, const Out& gpu) {
+    REQUIRE(cpu.rep.n_masked == gpu.rep.n_masked);
+    REQUIRE(cpu.rep.n_clipped == gpu.rep.n_clipped);
+    REQUIRE(cpu.rep.n_zapped == gpu.rep.n_zapped);
+    REQUIRE(cpu.rep.longest_masked_run == gpu.rep.longest_masked_run);
+    REQUIRE(cpu.rep.block_size == gpu.rep.block_size);
+    REQUIRE(cpu.rep.block_mu.size() == gpu.rep.block_mu.size());
+    REQUIRE_THAT(gpu.rep.norm, WithinRel(cpu.rep.norm, 1e-6));
+    REQUIRE_THAT(gpu.rep.global_scale, WithinRel(cpu.rep.global_scale, 1e-6));
+    for (SizeType b = 0; b < cpu.rep.block_mu.size(); ++b) {
+        REQUIRE(cpu.rep.block_mu[b] == gpu.rep.block_mu[b]);
+        REQUIRE(cpu.rep.block_sigma[b] == gpu.rep.block_sigma[b]);
+    }
+    SizeType ndiff = 0;
+    for (SizeType i = 0; i < cpu.e.size(); ++i) {
+        REQUIRE((cpu.v[i] == 0.0F) == (gpu.v[i] == 0.0F));
+        const bool same = cpu.e[i] == gpu.e[i] && cpu.v[i] == gpu.v[i];
+        if (!same) {
+            ++ndiff;
+            REQUIRE_THAT(gpu.e[i], WithinRel(cpu.e[i], 1e-5F));
+            REQUIRE_THAT(gpu.v[i], WithinRel(cpu.v[i], 1e-5F));
+        }
+    }
+    UNSCOPED_INFO("samples differing from the CPU: " << ndiff);
+}
+
+} // namespace
+
+TEST_CASE("preprocess: CUDA matches the CPU", "[io][preprocess][cuda]") {
+    if (!loki::is_available(loki::Backend::kCUDA)) {
+        SKIP("CUDA backend not available");
+    }
+    SECTION("RFI bursts and spikes") {
+        const SizeType n = (1U << 20U) + 777;
+        auto raw         = white(n, 30);
+        for (SizeType i = 200'000; i < 200'500; ++i) {
+            raw[i] += 3.0F;
+        }
+        for (SizeType i = 600'000; i < 600'300; ++i) {
+            raw[i] *= 5.0F;
+        }
+        for (SizeType k = 0; k < 100; ++k) {
+            raw[(k * 9973) + 1500] += 50.0F;
+        }
+        const auto gpu = run_cuda(raw);
+        REQUIRE(gpu.rep.n_masked > 0);
+        REQUIRE(gpu.rep.n_clipped >= 100);
+        require_same(run(raw, {}, 1), gpu);
+    }
+    SECTION("quantised data with a dropout, variance window") {
+        auto raw = white(1U << 19U, 31, 4.0);
+        for (auto& v : raw) {
+            v = std::clamp(std::round(v + 64.0F), 0.0F, 255.0F);
+        }
+        std::fill(raw.begin() + 100'000, raw.begin() + 140'000, 0.0F);
+        PreprocessOptions opt;
+        opt.variance_window = 0.3;
+        require_same(run(raw, opt, 1), run_cuda(raw, opt));
+    }
+    SECTION("multiplicative gain, one iteration, no clip") {
+        auto raw = white(300'001, 32);
+        for (SizeType i = 0; i < raw.size(); ++i) {
+            raw[i] = 100.0F + (10.0F * std::sin(static_cast<float>(i) / 5e4F)) +
+                     (10.0F * raw[i]);
+        }
+        PreprocessOptions opt;
+        opt.gain_model = GainModel::kMultiplicative;
+        opt.n_iter     = 1;
+        opt.clip_sigma = 0.0;
+        require_same(run(raw, opt, 1), run_cuda(raw, opt));
+    }
+    SECTION("blocks longer than the on-chip rows") {
+        PreprocessOptions opt;
+        opt.filter_window = 600.0; // block 5940 samples
+        const auto raw    = white(1U << 20U, 33);
+        require_same(run(raw, opt, 1), run_cuda(raw, opt));
+    }
+    SECTION("short series") {
+        const auto raw = white(20, 34);
+        require_same(run(raw, {}, 1), run_cuda(raw));
+    }
+    SECTION("z-score and zap options run on the CPU") {
+        const auto raw = white(50'000, 35);
+        PreprocessOptions z;
+        z.method = PreprocessMethod::kZScore;
+        REQUIRE(run(raw, z, 1).e == run_cuda(raw, z).e);
+        PreprocessOptions zap;
+        zap.zap_periodic = true;
+        REQUIRE(run(raw, zap, 1).e == run_cuda(raw, zap).e);
+    }
+    SECTION("invalid input") {
+        auto bad = white(10'000, 36);
+        // Write the NaN bits directly: -ffast-math may fold a NaN constant.
+        const std::uint32_t nan_bits = 0x7FC00000U;
+        std::memcpy(&bad[17], &nan_bits, sizeof(nan_bits));
+        REQUIRE_THROWS_AS(run_cuda(bad), std::invalid_argument);
+        // Constant data has no usable variance.
+        REQUIRE_THROWS_AS(run_cuda(std::vector<float>(10'000, 3.0F)),
+                          std::invalid_argument);
     }
 }
 

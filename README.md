@@ -153,6 +153,7 @@ Project-specific options use the **`LOKI_`** prefix. Standard CMake options keep
 | **`LOKI_BUILD_DOCS`** | `OFF` | Build documentation |
 | **`LOKI_ENABLE_COVERAGE`** | `OFF` | Compile with `--coverage` |
 | **`LOKI_ENABLE_IPO`** | `OFF` | Link-time optimization (Release) |
+| **`LOKI_ENABLE_NVTX`** | `OFF` | NVTX ranges for `nsys` profiling (sweeps, chunks, FFA stages, preprocessing, EP). Needs the CUDA toolkit headers, also for CPU-only builds. |
 | **`BUILD_SHARED_LIBS`** | `OFF` | `ON` = shared `libloki`; `OFF` = static `libloki.a`. Must be `OFF` when `LOKI_BUILD_PYTHON=ON`. |
 
 ### CPU vs GPU vs CPU+GPU

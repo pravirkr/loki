@@ -19,7 +19,8 @@ struct HandleAccess;
 namespace loki::math {
 
 /**
- * @brief Owns batched real-FFT plans (FFTW on CPU, cuFFT on CUDA).
+ * @brief Owns batched real-FFT plans (FFTW on CPU; on CUDA, the tables of the
+ * portable block FFT).
  *
  * Opaque handle. Fourier-domain searches create and destroy plans on every
  * call unless a manager with prepared plans is passed in. Build one manager

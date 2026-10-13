@@ -29,6 +29,7 @@
 #include "lib/cuda/score_cuda.cuh"
 #include "lib/cuda/workspace_cuda.cuh"
 #include "lib/detail/error_check.hpp"
+#include "lib/detail/nvtx.hpp"
 #include "lib/detail/timing.hpp"
 #include "lib/pipelines/ffa_freq_sweep_engine.hpp"
 #include "lib/search/cands.hpp"
@@ -61,6 +62,8 @@ public:
             std::vector<SizeType> n_reals;
             n_reals.reserve(cfgs.size());
             for (const auto& cfg : cfgs) {
+                math::check_gpu_fourier_nbins(cfg.get_nbins(),
+                                              "FFAFreqSweep (CUDA)");
                 n_reals.push_back(cfg.get_nbins());
             }
             m_fft_manager.prepare_plans(n_reals);
@@ -155,6 +158,7 @@ public:
                  const std::filesystem::path& outdir,
                  std::string_view file_prefix,
                  std::string_view config_toml) override {
+        const nvtx::Range range("ffa sweep (cuda)");
         timing::SimpleTimer timer;
         search::FFATimerStats ffa_timer_stats_pipeline;
         timer.start();
@@ -204,6 +208,7 @@ public:
             spdlog::debug("Processing chunk f0 (Hz): [{:08.3f}, {:08.3f}]",
                           freq_limits.min, freq_limits.max);
             accumulated_flops += m_region_decode[i].gflops;
+            const nvtx::Range chunk_range("ffa sweep: chunk");
             timer.start();
             auto core = std::make_unique<algorithms::FFACudaCore<FoldTypeCUDA>>(
                 m_ffa_workspace, m_fft_manager, cfg_cur, m_device_id,
@@ -270,7 +275,7 @@ private:
     search::CandidateBuffer m_cands;
 
     memory::FFAWorkspaceCUDA<FoldTypeCUDA> m_ffa_workspace;
-    math::CUFFTManager m_fft_manager;
+    math::GpuFFTManager m_fft_manager;
     SizeType m_total_passing_scores{};
     // Host staging for one chunk's compacted device output.
     std::vector<float> m_scores_staging;
@@ -414,6 +419,7 @@ private:
     void finish_in_flight(InFlight& f,
                           search::FFAResultWriter& writer,
                           std::vector<SizeType>& redo) {
+        const nvtx::Range range("ffa sweep: collect candidates");
         auto& slot = m_slots[static_cast<size_t>(f.slot)];
         cuda_utils::check_cuda_call(
             cudaEventSynchronize(slot.done),

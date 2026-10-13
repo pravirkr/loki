@@ -35,6 +35,25 @@ table.
 All passes are `O(N)` and run in parallel over fixed blocks. The output does
 not depend on the thread count.
 
+### Backends
+
+`preprocess` takes an `Exec`. The CLI preprocesses on the search's backend,
+so a CUDA search does not spend its single host core on it.
+
+- **CPU** (`lib/cpu/preprocess_cpu.cpp`): OpenMP over blocks.
+- **CUDA** (`lib/cuda/preprocess_cuda.cu`): the per-sample passes run on the
+  device:
+  - block medians and variances (radix selection);
+  - the running median over block values;
+  - whitening, the bad-block sums and the output pass.
+
+  The block-level steps (running means, flag decisions, normalisation) run
+  on the host for both backends (`lib/io/preprocess_robust.cpp`).
+  Selections are exact, and the interpolation uses the same IEEE double
+  operations, so on the reference build the output is bit-identical to the
+  CPU's.The z-score method and the spectral zap (`zap_periodic`, `birdies`) have no
+  GPU kernels. On a GPU `Exec` they run on the CPU with `Exec::nthreads`.
+
 1. **Geometry.**
    - The baseline window `W` is in seconds; see "Baseline window" below.
    - Statistics blocks have `B = W / window_blocks` samples (at least 32).

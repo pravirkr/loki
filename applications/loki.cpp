@@ -278,9 +278,9 @@ struct SearchTimeSeries {
 };
 
 /// Reads the raw timeseries of a search from [input] (or -i) and builds the
-/// folding inputs as [preprocessing] asks.
-SearchTimeSeries
-load_search_timeseries(const loki::search::FFATomlConfig& cfg) {
+/// folding inputs as [preprocessing] asks, on the search's backend.
+SearchTimeSeries load_search_timeseries(const loki::search::FFATomlConfig& cfg,
+                                        loki::Exec exec) {
     if (cfg.timeseries_path.empty()) {
         throw std::invalid_argument(
             "Input timeseries path must be specified via -i/--input or "
@@ -310,8 +310,11 @@ load_search_timeseries(const loki::search::FFATomlConfig& cfg) {
     }
     const auto options = cfg.to_preprocess_options();
     const bool robust  = options.method == loki::io::PreprocessMethod::kRobust;
-    const auto rep     = ts.preprocess(options, loki::Exec::cpu(nthreads));
-    const double dt    = ts.get_dt();
+    // GPU searches preprocess on their device; the CPU thread count serves
+    // the options the GPU runs on the host (z-score, spectral zap).
+    exec.nthreads   = nthreads;
+    const auto rep  = ts.preprocess(options, exec);
+    const double dt = ts.get_dt();
     if (robust) {
         SPDLOG_INFO(
             "Preprocessing (robust): baseline window = {:.3f} s, variance "
@@ -389,7 +392,7 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
             }
         });
     }
-    auto loaded = load_search_timeseries(toml_cfg);
+    auto loaded = load_search_timeseries(toml_cfg, exec);
     auto& ts    = loaded.ts;
     if (device_init.joinable()) {
         device_init.join();
@@ -760,7 +763,7 @@ int run_search_ep(const loki::search::EPTomlConfig& toml_cfg,
         return 0;
     }
 
-    auto loaded = load_search_timeseries(toml_cfg);
+    auto loaded = load_search_timeseries(toml_cfg, exec);
     auto& ts    = loaded.ts;
     const loki::SizeType actual_nsamps =
         power_of_two_nsamps(ts.get_nsamps(), nsamps_policy);

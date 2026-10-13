@@ -98,7 +98,7 @@ template <SupportedFoldType FoldType>
 std::unique_ptr<FFAEngine<FoldType>>
 make_ffa_gpu(const search::FFASearchConfig& cfg, int device_id);
 
-/// Shares the caller's GPU workspace and cuFFT plan cache (both handles must
+/// Shares the caller's GPU workspace and FFT manager (both handles must
 /// be GPU handles on @p device_id; the facade checks).
 template <SupportedFoldType FoldType>
 std::unique_ptr<FFAEngine<FoldType>>

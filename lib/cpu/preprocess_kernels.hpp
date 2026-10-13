@@ -6,7 +6,9 @@
  * Internal; exposed for white-box tests.
  *
  * Every stage works on a fixed decomposition into blocks and reduces in a
- * fixed order, so results do not depend on the number of threads.
+ * fixed order, so results do not depend on the number of threads. The
+ * block geometry and the block-level steps shared with the GPU backend are
+ * in lib/io/preprocess_robust.hpp.
  */
 
 #include <cstdint>
@@ -16,44 +18,9 @@
 #include "loki/common/types.hpp"
 #include "loki/io/preprocess.hpp"
 
+#include "lib/io/preprocess_robust.hpp"
+
 namespace loki::io::detail {
-
-/// Smallest statistics block; robust block estimates need a few samples.
-inline constexpr SizeType kMinStatBlock = 32;
-/// Shortest series the robust method accepts.
-inline constexpr SizeType kMinRobustSamples = 16;
-/// Smallest bad-block scale in samples and the fewest blocks per scale.
-inline constexpr SizeType kMinFlagBlock  = 8;
-inline constexpr SizeType kMinFlagBlocks = 8;
-/// Variance floor relative to the median block variance.
-inline constexpr double kRelVarFloor = 1e-6;
-
-/// Contiguous blocks of `block` samples; the last one may be shorter.
-struct BlockGrid {
-    SizeType n{0};
-    SizeType block{1};
-    SizeType nblocks{0};
-
-    BlockGrid(SizeType n_samples, SizeType block_size);
-
-    [[nodiscard]] SizeType begin(SizeType b) const noexcept {
-        return b * block;
-    }
-    [[nodiscard]] SizeType end(SizeType b) const noexcept {
-        return b + 1 == nblocks ? n : (b + 1) * block;
-    }
-    [[nodiscard]] double center(SizeType b) const noexcept {
-        return static_cast<double>(begin(b)) +
-               (0.5 * static_cast<double>(end(b) - begin(b) - 1));
-    }
-};
-
-/// Window length in samples for @p window_sec, clamped to [1, n].
-[[nodiscard]] SizeType
-window_in_samples(double window_sec, double tsamp, SizeType n);
-
-/// Nearest odd count of blocks covering @p window samples (>= 1).
-[[nodiscard]] SizeType blocks_per_window(SizeType window, SizeType block);
 
 /**
  * @brief Linear interpolation of block values to the samples of block @p b.
@@ -113,17 +80,7 @@ masked_running_median(std::span<const float> v,
                       std::span<const std::uint8_t> usable,
                       SizeType k,
                       int nthreads);
-[[nodiscard]] std::vector<float> masked_running_mean(
-    std::span<const float> v, std::span<const std::uint8_t> usable, SizeType k);
-
-/// Centred running mean over @p k entries (odd), extending the series by
-/// point reflection about its ends so that linear trends are unbiased.
-[[nodiscard]] std::vector<float>
-reflected_running_mean(std::span<const float> v, SizeType k);
-
-/// Fills entries with `have == 0` by linear interpolation in place.
-/// @throws std::invalid_argument if no entry has a value.
-void fill_holes(std::span<float> v, std::span<const std::uint8_t> have);
+// masked_running_mean() is in lib/io/preprocess_robust.hpp.
 
 /// `z = (x - mu) / sigma` with block-level mu and variance interpolated.
 void whiten(std::span<const float> x,
@@ -176,8 +133,5 @@ SizeType zap_spectrum(std::span<float> z,
                       SizeType whiten_bins,
                       std::span<const Birdie> birdies,
                       int nthreads);
-
-/// Longest run of zeros in @p v.
-[[nodiscard]] SizeType longest_zero_run(std::span<const float> v) noexcept;
 
 } // namespace loki::io::detail

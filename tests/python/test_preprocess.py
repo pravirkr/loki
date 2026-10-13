@@ -84,3 +84,23 @@ def test_options_and_birdies() -> None:
         opts.validate()
     with pytest.raises(ValueError):
         io.preprocess(_noise(1024), TSAMP, opts)
+
+
+@pytest.mark.skipif(
+    "cuda" not in libloki.available_backends(), reason="CUDA backend not built"
+)
+def test_cuda_matches_cpu() -> None:
+    raw = _noise((1 << 17) + 333, seed=5)
+    raw[40000:40400] += 4.0
+    raw[90000:90200] *= 6.0
+    cpu = io.preprocess(raw, TSAMP)
+    gpu = io.preprocess(raw, TSAMP, backend="cuda")
+    np.testing.assert_array_equal(cpu[1] == 0.0, gpu[1] == 0.0)
+    np.testing.assert_allclose(gpu[0], cpu[0], rtol=1e-5, atol=1e-6)
+    np.testing.assert_allclose(gpu[1], cpu[1], rtol=1e-5, atol=1e-6)
+    assert gpu[2].n_masked == cpu[2].n_masked > 0
+    np.testing.assert_array_equal(gpu[2].block_mu, cpu[2].block_mu)
+
+    series = io.TimeSeries(raw, np.ones_like(raw), TSAMP)
+    series.preprocess(io.PreprocessOptions(), backend="cuda")
+    np.testing.assert_array_equal(series.ts_e, gpu[0])
