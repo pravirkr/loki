@@ -26,7 +26,6 @@
 #include "lib/detail/timing.hpp"
 #include "lib/pipelines/ep_freq_sweep_engine.hpp"
 #include "lib/pipelines/ep_sweep_common.hpp"
-#include "lib/utils/fft_impl.hpp"
 #include "lib/utils/workspace_impl.hpp"
 
 namespace loki::pipelines {
@@ -86,27 +85,6 @@ public:
         m_ffa_fold.resize(stats.get_max_buffer_size(), FoldType{});
         check_shared_allocation(stats.get_max_buffer_size(),
                                 stats.get_max_coord_size());
-
-        if constexpr (std::is_same_v<FoldType, ComplexType>) {
-            const auto& chunk_cfgs = m_region_planner.get_chunk_cfgs();
-            std::vector<SizeType> n_reals;
-            n_reals.reserve(chunk_cfgs.size());
-            for (const auto& chunk : chunk_cfgs) {
-                n_reals.push_back(chunk.cfg.get_nbins());
-            }
-            m_fft_manager.prepare_plans(n_reals);
-
-            // The pruning functors of every chunk share these plans: one exact
-            // manager per worker, prepared once for all chunk nbins, instead of
-            // one per run. Each worker keeps its own, since plans are created
-            // lazily.
-            m_prune_fft.resize(m_n_workers);
-            m_prune_fft_ptrs.reserve(m_n_workers);
-            for (auto& fft : m_prune_fft) {
-                fft.prepare_exact_plans(n_reals);
-                m_prune_fft_ptrs.push_back(&fft);
-            }
-        }
 
         spdlog::info(
             "EPFreqSweep allocated shared FFA workspace: buffer_size={}, "
@@ -219,9 +197,9 @@ public:
                 // Internal pipeline: build the CPU engine directly on the
                 // shared workspaces, FFA buffers and plan cache.
                 const auto chunk_ep = algorithms::detail::make_ep_cpu<FoldType>(
-                    std::span(workspace_ptrs), m_ffa_workspace, m_fft_manager,
-                    std::span(m_ffa_fold), std::span(m_prune_fft_ptrs),
-                    chunk.cfg, chunk.threshold_scheme, m_n_runs, m_ref_segs,
+                    std::span(workspace_ptrs), m_ffa_workspace,
+                    std::span(m_ffa_fold), chunk.cfg, chunk.threshold_scheme,
+                    m_n_runs, m_ref_segs,
                     /*ascend_levels=*/{}, chunk.max_sugg, kBatchSize,
                     m_poly_basis, m_show_progress && (nchunks == 1),
                     m_rfi_config);
@@ -261,11 +239,6 @@ private:
     algorithms::EPRegionPlanner<FoldType> m_region_planner;
 
     memory::FFAWorkspaceCPU<FoldType> m_ffa_workspace;
-    math::CpuFFT m_fft_manager;
-    // Pruning FFT managers, one per worker (complex folds only), and the
-    // pointers the chunk engines take. Built once in the constructor.
-    std::vector<math::CpuFFT> m_prune_fft;
-    std::vector<math::CpuFFT*> m_prune_fft_ptrs;
     std::vector<FoldType> m_ffa_fold;
 
     // Runtime checks of the plan against the memory model (docs/memory.md).

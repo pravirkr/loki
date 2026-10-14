@@ -196,6 +196,19 @@ public:
         }
     }
 
+    /// Max over widths of score(): out[p] for every profile in
+    /// [0, nprofiles). Bit-identical to the scalar max scorer
+    /// (`snr_boxcar_3d_max*`), whose per-width S/N score() reproduces.
+    void score_max(const float* __restrict__ folds,
+                   SizeType nprofiles,
+                   float* __restrict__ out) {
+        for (SizeType p0 = 0; p0 < nprofiles; p0 += kGroup) {
+            const SizeType nvalid = std::min(kGroup, nprofiles - p0);
+            score_group(folds + (p0 * 2 * m_nbins), nvalid);
+            group_max(out + p0, nvalid);
+        }
+    }
+
     /// Lane stride of score_lanes() input.
     static constexpr SizeType kLaneStride = 16;
 
@@ -232,6 +245,28 @@ public:
 #endif
     }
 
+    /// Max over widths of score_lanes(): out[lane] for lane < nvalid.
+    void score_lanes_max(const float* __restrict__ e,
+                         const float* __restrict__ v,
+                         SizeType nvalid,
+                         float* __restrict__ out) {
+#if defined(__AVX2__) && defined(__FMA__)
+        scan_lanes(e, v);
+        finish_group();
+        group_max(out, nvalid);
+#else
+        const SizeType nbins = m_nbins;
+        for (SizeType lane = 0; lane < nvalid; ++lane) {
+            for (SizeType j = 0; j < nbins; ++j) {
+                m_row[j]         = e[(j * kLaneStride) + lane];
+                m_row[nbins + j] = v[(j * kLaneStride) + lane];
+            }
+            score_group(m_row.data(), 1);
+            group_max(out + lane, 1);
+        }
+#endif
+    }
+
 private:
 #if defined(__AVX2__) && defined(__FMA__)
     static constexpr SizeType kGroup = 16; // two 8-lane chains in flight
@@ -243,13 +278,27 @@ private:
     SizeType m_wmax;
     std::vector<float> m_hb; // h + b per width
     std::vector<float> m_b;
-    std::vector<float> m_psum;  // [nbins + wmax][kGroup]
-    std::vector<float> m_snr;   // [width][kGroup]
-    std::vector<float> m_max;   // [width][kGroup] running maxima
-    std::vector<float> m_dummy; // e = 0, v = 1: pads the last group
+    // 64-byte aligned, so a [kGroup] row is one cache line (no split loads).
+    utils::UninitVector<float> m_psum; // [nbins + wmax][kGroup]
+    utils::UninitVector<float> m_snr;  // [width][kGroup]
+    utils::UninitVector<float> m_max;  // [width][kGroup] running maxima
+    std::vector<float> m_dummy;        // e = 0, v = 1: pads the last group
 #if !(defined(__AVX2__) && defined(__FMA__))
     std::vector<float> m_row = std::vector<float>(2 * m_nbins);
 #endif
+
+    /// Max over widths of the scored group in m_snr (exact in any order).
+    void group_max(float* __restrict__ out, SizeType nvalid) const noexcept {
+        std::array<float, kGroup> mx{};
+        mx.fill(std::numeric_limits<float>::lowest());
+        for (SizeType iw = 0; iw < m_widths.size(); ++iw) {
+            const float* snr = m_snr.data() + (iw * kGroup);
+            for (SizeType lane = 0; lane < kGroup; ++lane) {
+                mx[lane] = std::max(mx[lane], snr[lane]);
+            }
+        }
+        std::copy_n(mx.begin(), nvalid, out);
+    }
 
 #if defined(__AVX2__) && defined(__FMA__)
     /// Transpose an 8 x 8 block: rows[r][c0 + c] -> dst[c * stride + r].
@@ -399,43 +448,77 @@ private:
             }
         }
         // Per width: max over start bins of psum[j + w] - psum[j] (exact in any
-        // order), then snr = fma(h + b, dmax, -(b * sum)). Start bins are
-        // tiled so a tile's rows stay in L1 across every width.
-        constexpr SizeType kTile = 128;
-        const SizeType nw        = m_widths.size();
-        float* __restrict__ mx   = m_max.data();
-        std::fill_n(mx, nw * kGroup, std::numeric_limits<float>::lowest());
-        for (SizeType j0 = 0; j0 < nbins; j0 += kTile) {
-            const SizeType j1 = std::min(nbins, j0 + kTile);
-            for (SizeType iw = 0; iw < nw; ++iw) {
-                const float* hi = ps + (m_widths[iw] * kGroup);
-                float* m_iw     = mx + (iw * kGroup);
+        // order), then snr = fma(h + b, dmax, -(b * sum)). Start bins outer and
+        // a block of widths inner, one accumulator per width: the max chains
+        // run in parallel instead of one latency-bound chain per width. The
+        // difference is psum[j + w] + (-psum[j]) with an exact sign flip,
+        // which rounds as the subtraction does.
+        const SizeType nw      = m_widths.size();
+        float* __restrict__ mx = m_max.data();
 #if defined(__AVX512F__)
-                __m512 m = _mm512_loadu_ps(m_iw);
-                for (SizeType j = j0; j < j1; ++j) {
-                    m = _mm512_max_ps(
-                        m, _mm512_sub_ps(_mm512_loadu_ps(hi + (j * kGroup)),
-                                         _mm512_loadu_ps(ps + (j * kGroup))));
+        constexpr SizeType kBlock = 8;
+        const __m512i sign        = _mm512_set1_epi32(INT32_MIN);
+        for (SizeType k0 = 0; k0 < nw; k0 += kBlock) {
+            const SizeType kk = std::min(kBlock, nw - k0);
+            std::array<SizeType, kBlock> off{};
+            // NOLINTNEXTLINE(modernize-avoid-c-arrays): std::array drops __m512's alignment attribute
+            __m512 acc[kBlock];
+            for (SizeType k = 0; k < kBlock; ++k) {
+                // Lanes past kk repeat the last width; they are not stored.
+                off[k] = m_widths[k0 + std::min(k, kk - 1)] * kGroup;
+                acc[k] = _mm512_set1_ps(std::numeric_limits<float>::lowest());
+            }
+            for (SizeType j = 0; j < nbins; ++j) {
+                const float* row = ps + (j * kGroup);
+                const __m512 nlo = _mm512_castsi512_ps(_mm512_xor_si512(
+                    _mm512_castps_si512(_mm512_loadu_ps(row)), sign));
+#pragma GCC unroll 8
+                for (SizeType k = 0; k < kBlock; ++k) {
+                    acc[k] = _mm512_max_ps(
+                        acc[k],
+                        _mm512_add_ps(nlo, _mm512_loadu_ps(row + off[k])));
                 }
-                _mm512_storeu_ps(m_iw, m);
-#else
-                __m256 m0 = _mm256_loadu_ps(m_iw);
-                __m256 m1 = _mm256_loadu_ps(m_iw + 8);
-                for (SizeType j = j0; j < j1; ++j) {
-                    const float* lo = ps + (j * kGroup);
-                    m0              = _mm256_max_ps(
-                        m0, _mm256_sub_ps(_mm256_loadu_ps(hi + (j * kGroup)),
-                                          _mm256_loadu_ps(lo)));
-                    m1 = _mm256_max_ps(
-                        m1,
-                        _mm256_sub_ps(_mm256_loadu_ps(hi + (j * kGroup) + 8),
-                                      _mm256_loadu_ps(lo + 8)));
-                }
-                _mm256_storeu_ps(m_iw, m0);
-                _mm256_storeu_ps(m_iw + 8, m1);
-#endif
+            }
+            for (SizeType k = 0; k < kk; ++k) {
+                _mm512_storeu_ps(mx + ((k0 + k) * kGroup), acc[k]);
             }
         }
+#else
+        constexpr SizeType kBlock = 6; // two halves: 12 accumulators
+        const __m256 sign = _mm256_castsi256_ps(_mm256_set1_epi32(INT32_MIN));
+        for (SizeType k0 = 0; k0 < nw; k0 += kBlock) {
+            const SizeType kk = std::min(kBlock, nw - k0);
+            std::array<SizeType, kBlock> off{};
+            // NOLINTBEGIN(modernize-avoid-c-arrays): std::array drops the vector alignment attribute
+            __m256 acc0[kBlock];
+            __m256 acc1[kBlock];
+            // NOLINTEND(modernize-avoid-c-arrays)
+            for (SizeType k = 0; k < kBlock; ++k) {
+                off[k]  = m_widths[k0 + std::min(k, kk - 1)] * kGroup;
+                acc0[k] = _mm256_set1_ps(std::numeric_limits<float>::lowest());
+                acc1[k] = acc0[k];
+            }
+            for (SizeType j = 0; j < nbins; ++j) {
+                const float* row  = ps + (j * kGroup);
+                const __m256 nlo0 = _mm256_xor_ps(_mm256_loadu_ps(row), sign);
+                const __m256 nlo1 =
+                    _mm256_xor_ps(_mm256_loadu_ps(row + 8), sign);
+#pragma GCC unroll 6
+                for (SizeType k = 0; k < kBlock; ++k) {
+                    acc0[k] = _mm256_max_ps(
+                        acc0[k],
+                        _mm256_add_ps(nlo0, _mm256_loadu_ps(row + off[k])));
+                    acc1[k] = _mm256_max_ps(
+                        acc1[k],
+                        _mm256_add_ps(nlo1, _mm256_loadu_ps(row + off[k] + 8)));
+                }
+            }
+            for (SizeType k = 0; k < kk; ++k) {
+                _mm256_storeu_ps(mx + ((k0 + k) * kGroup), acc0[k]);
+                _mm256_storeu_ps(mx + ((k0 + k) * kGroup) + 8, acc1[k]);
+            }
+        }
+#endif
         for (SizeType iw = 0; iw < nw; ++iw) {
             const __m256 hb = _mm256_set1_ps(m_hb[iw]);
             const __m256 b  = _mm256_set1_ps(m_b[iw]);

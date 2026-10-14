@@ -1132,18 +1132,24 @@ public:
         std::vector<float> noise(2 * ntrials * nbins, 0.0F);
         std::vector<float> scores(2 * ntrials, 0.0F);
         std::array<uint32_t, 2> n_in = {ntrials_u, ntrials_u};
+        // Every draw comes from a stream keyed on (purpose, stage, branch,
+        // trial), and the survivor compaction below stays serial, so the
+        // states are identical for any thread count.
+        const int nthreads = m_nthreads;
+        const auto n_items = static_cast<std::int64_t>(2 * ntrials);
 
-        for (uint32_t branch = 0; branch < 2; ++branch) {
-            for (uint32_t trial = 0; trial < ntrials_u; ++trial) {
-                auto rng = math::make_keyed_pcg32(eval_seed, 0U, 0U, 0U, branch,
-                                                  trial);
-                float* dst =
-                    folds.data() + (((branch * ntrials) + trial) * nbins);
-                fill_standard_normals(rng, dst, nbins, 1.0F);
-                if (branch == 1) {
-                    for (SizeType j = 0; j < nbins; ++j) {
-                        dst[j] += m_profile[j] * m_bias_snr;
-                    }
+        // NOLINTNEXTLINE(openmp-use-default-none): clauses cannot name members
+#pragma omp parallel for num_threads(nthreads)
+        for (std::int64_t item = 0; item < n_items; ++item) {
+            const auto branch = static_cast<uint32_t>(item / ntrials_u);
+            const auto trial  = static_cast<uint32_t>(item % ntrials_u);
+            auto rng =
+                math::make_keyed_pcg32(eval_seed, 0U, 0U, 0U, branch, trial);
+            float* dst = folds.data() + (static_cast<SizeType>(item) * nbins);
+            fill_standard_normals(rng, dst, nbins, 1.0F);
+            if (branch == 1) {
+                for (SizeType j = 0; j < nbins; ++j) {
+                    dst[j] += m_profile[j] * m_bias_snr;
                 }
             }
         }
@@ -1152,40 +1158,36 @@ public:
         State prev   = State::initial();
         float var_in = 1.0F;
         for (SizeType istage = 0; istage < m_nstages; ++istage) {
-            for (uint32_t branch = 0; branch < 2; ++branch) {
-                for (uint32_t trial = 0; trial < ntrials_u; ++trial) {
-                    auto rng = math::make_keyed_pcg32(
-                        eval_seed, 2U, static_cast<uint32_t>(istage), 0U,
-                        branch, trial);
-                    fill_standard_normals(
-                        rng,
-                        noise.data() + (((branch * ntrials) + trial) * nbins),
-                        nbins, 1.0F);
-                }
-            }
-            for (uint32_t branch = 0; branch < 2; ++branch) {
+            const auto stage = static_cast<uint32_t>(istage);
+            // NOLINTNEXTLINE(openmp-use-default-none): clauses cannot name members
+#pragma omp parallel for num_threads(nthreads)
+            for (std::int64_t item = 0; item < n_items; ++item) {
+                const auto branch = static_cast<uint32_t>(item / ntrials_u);
+                const auto trial  = static_cast<uint32_t>(item % ntrials_u);
+                auto rng = math::make_keyed_pcg32(eval_seed, 2U, stage, 0U,
+                                                  branch, trial);
+                fill_standard_normals(
+                    rng, noise.data() + (static_cast<SizeType>(item) * nbins),
+                    nbins, 1.0F);
                 const uint32_t nsurv = n_in[branch];
                 const float scale    = (branch == 1) ? m_bias_snr : 0.0F;
-                for (uint32_t trial = 0; trial < ntrials_u; ++trial) {
-                    uint32_t src = trial;
-                    if (trial >= nsurv) {
-                        auto boot = math::make_keyed_pcg32(
-                            eval_seed, 3U, static_cast<uint32_t>(istage), 0U,
-                            branch, trial);
-                        const float draw = unit_interval(boot);
-                        src = std::min(static_cast<uint32_t>(
-                                           draw * static_cast<float>(nsurv)),
-                                       nsurv - 1U);
-                    }
-                    const float* in =
-                        folds.data() + (((branch * ntrials) + src) * nbins);
-                    const float* nz =
-                        noise.data() + (((branch * ntrials) + trial) * nbins);
-                    float* out = generated.data() +
-                                 (((branch * ntrials) + trial) * nbins);
-                    for (SizeType j = 0; j < nbins; ++j) {
-                        out[j] = in[j] + nz[j] + (scale * m_profile[j]);
-                    }
+                uint32_t src         = trial;
+                if (trial >= nsurv) {
+                    auto boot = math::make_keyed_pcg32(eval_seed, 3U, stage, 0U,
+                                                       branch, trial);
+                    const float draw = unit_interval(boot);
+                    src              = std::min(
+                        static_cast<uint32_t>(draw * static_cast<float>(nsurv)),
+                        nsurv - 1U);
+                }
+                const float* in =
+                    folds.data() + (((branch * ntrials) + src) * nbins);
+                const float* nz =
+                    noise.data() + (static_cast<SizeType>(item) * nbins);
+                float* out =
+                    generated.data() + (static_cast<SizeType>(item) * nbins);
+                for (SizeType j = 0; j < nbins; ++j) {
+                    out[j] = in[j] + nz[j] + (scale * m_profile[j]);
                 }
             }
             const float stdnoise = std::sqrt(var_in + 1.0F);
@@ -1197,7 +1199,7 @@ public:
                     m_box_score_widths,
                     std::span<float>(scores.data() + (branch * ntrials),
                                      ntrials),
-                    ntrials, nbins, stdnoise, 1);
+                    ntrials, nbins, stdnoise, nthreads);
             }
             std::array<uint32_t, 2> counts = {0, 0};
             for (uint32_t branch = 0; branch < 2; ++branch) {

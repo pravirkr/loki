@@ -919,8 +919,6 @@ private:
             .threshold_scheme = std::move(threshold_scheme),
             .bp_float         = bp_float,
             .nsegments        = nsegments,
-            .n_runs           = m_n_runs,
-            .ref_segs         = m_ref_segs,
             .evaluate         = std::move(evaluate),
         };
     }

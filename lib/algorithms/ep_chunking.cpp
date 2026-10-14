@@ -296,12 +296,17 @@ private:
         const plans::FFAPlan<FoldType> plan(chunk_cfg);
         // The branching pattern depends on the chunk's own band (not
         // monotone in width), so branch_max must come from the chunk's
-        // plan, exactly as EPMultiPass computes it.
+        // plan, exactly as EPMultiPass computes it. It does not depend on
+        // the reference segment (the snail scheme enters only through the
+        // span and the step to the next epoch, the same for every start;
+        // tests/cpp/api/ep_branching_t.cpp), so one forecast serves every
+        // run: it costs a parameter-grid pass per call, which repeating
+        // per run made the planning cost grow with n_runs.
+        const auto forecast = plan.forecast_branching(m_poly_basis);
         EvaluatedChunk c{
-            .cfg        = std::move(chunk_cfg),
-            .ncoords    = plan.get_ncoords().back(),
-            .branch_max = compute_branch_max(
-                plan.forecast_branching(m_poly_basis).max_children),
+            .cfg         = std::move(chunk_cfg),
+            .ncoords     = plan.get_ncoords().back(),
+            .branch_max  = compute_branch_max(forecast.max_children),
             .batch_size  = m_memory.batch_size,
             .nsegments   = design.nsegments,
             .fold_size   = plan.get_fold_size(),
@@ -309,27 +314,14 @@ private:
             .coord_size  = plan.get_coord_size(),
             .ffa_transient_bytes =
                 ep_ffa_transient_bytes<FoldType>(m_memory, plan),
+            .branching_pattern =
+                std::vector<float>(forecast.mean.begin(), forecast.mean.end()),
         };
-        const auto runs = utils::determine_ref_segs(
-            design.nsegments,
-            (!design.n_runs && !design.ref_segs)
-                ? std::optional<SizeType>(design.nsegments)
-                : design.n_runs,
-            design.ref_segs);
         double peak = static_cast<double>(c.ncoords);
         double live = peak;
-        for (const auto ref_seg : runs) {
-            const auto forecast =
-                plan.forecast_branching(m_poly_basis, ref_seg);
-            c.branch_max = std::max(c.branch_max,
-                                    compute_branch_max(forecast.max_children));
-            const std::vector<float> bp(forecast.mean.begin(),
-                                        forecast.mean.end());
-            if (c.branching_pattern.empty()) {
-                c.branching_pattern = bp;
-            }
+        {
             const auto complexities =
-                design.evaluate ? design.evaluate(bp)
+                design.evaluate ? design.evaluate(c.branching_pattern)
                                 : std::vector<double>{static_cast<double>(
                                       design.safe_complexity)};
             double previous = static_cast<double>(c.ncoords);

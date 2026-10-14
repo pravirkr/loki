@@ -25,7 +25,7 @@ or `lib/cuda/ffa_score_fourier_*`.
 
 | Where | Library | Notes |
 | --- | --- | --- |
-| CPU, batched rows up to 1024 points | lane FFT (`lib/cpu/lane_fft.hpp`) | FFA lossy brute fold (R2C), `FFA::execute` and the fused final level (C2R), EP pruning (C2R), `CpuFFT` for these lengths. |
+| CPU, batched rows up to 1024 points | lane FFT (`lib/cpu/lane_fft.hpp`) | FFA lossy brute fold (R2C), `FFA::execute` and the fused final level (C2R), EP pruning (C2R, fused with the scorer), `CpuFFT` for these lengths. |
 | CPU, longer rows (`lib/cpu/fft_cpu.cpp`) | pocketfft | Preprocessing's whole-series transforms; `CpuFFT` for lengths above 1024. |
 | GPU, batched (`lib/cuda/fft_cuda.cu`) | `PortableFFT` (`GpuFFTManager`) | Lossy brute fold (R2C), unfused FFA chunks and `FFA::execute` (C2R). |
 | GPU, fused FFA Fourier scorer | `PortableFFT` (`ffa_portable_fft.cuh`) | On chip, inside the final-level kernel. |
@@ -68,6 +68,18 @@ a vertical SIMD operation with no shuffles.
   stored path (`FFA::execute`) uses the same transform, so the fused scores
   equal a scan of the stored fold bit for bit
   (`tests/cpp/api/ffa_fused_t.cpp`).
+- **Fused EP pruning step (CPU).** The CPU prune functors
+  (`BasePruneDPFuncts::shift_add_score`, `lib/cpu/dynamic_cpu.cpp`) work in
+  tiles of 16 leaves: shift-add into an L1 tile, `EVTransform::inverse`, the
+  maximum over widths straight from the lane layout
+  (`BoxcarScorer3D::score_lanes_max`), and only passing folds are copied out,
+  into the free world-tree slots when the whole batch fits. Seeds and ascend
+  score the same way, so EP keeps no batch-sized real-fold scratch and needs
+  no `CpuFFT`. Every profile is transformed and scored in its own lane, so
+  the fused step equals the unfused chain (`shift_add`, then
+  `score_and_filter`) bit for bit for any cut into tiles
+  (`tests/cpp/internal/prune_fft_t.cpp`). Against the earlier paired-row
+  C2R, scores move at float level (relative 1e-6).
 - **Accuracy:** within `2e-7` (relative to the row's largest value) of a
   double DFT for every `n` from 2 to 1024, both directions
   (`tests/cpp/internal/lane_fft_t.cpp`).

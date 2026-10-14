@@ -375,7 +375,6 @@ void ffa_complex_iter_freq(const ComplexType* __restrict__ fold_in,
  * @param indices_ffa  Indices to access the ffa folds (size: n_leaves)
  * @param phase_shift  Phase shifts to apply to the ffa folds (size: n_leaves)
  * @param folds_out  The output array (size: n_leaves * 2 * nbins)
- * @param temp_buffer  Pre-allocated buffer of size 2 * nbins
  * @param nbins  The number of bins in the input/output arrays (time-domain)
  * @param n_leaves  The number of valid leaves in the tree
  */
@@ -385,7 +384,6 @@ void shift_add_linear_batch(const float* __restrict__ folds_tree,
                             const SizeType* __restrict__ indices_ffa,
                             const float* __restrict__ phase_shift,
                             float* __restrict__ folds_out,
-                            float const* __restrict__ temp_buffer,
                             SizeType nbins,
                             SizeType n_leaves,
                             SizeType physical_start_idx,
@@ -424,7 +422,6 @@ void shift_add_ascend_linear_batch(const float* __restrict__ folds_ffa,
                                    const SizeType* __restrict__ indices_ffa,
                                    const float* __restrict__ phase_shift,
                                    float* __restrict__ folds_tree,
-                                   float const* __restrict__ temp_buffer,
                                    SizeType nbins,
                                    SizeType n_coords_init,
                                    SizeType n_leaves,

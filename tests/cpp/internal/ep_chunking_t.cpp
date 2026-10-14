@@ -441,11 +441,10 @@ TEST_CASE("EP chunking preserves forecast capacity above four million",
     check_plan_fits(plan, ctx, 8.0);
 }
 
-TEST_CASE("EP forecasts account for adjacent populations and selected runs",
+TEST_CASE("EP forecasts account for adjacent populations, once per chunk",
           "[ep_chunking]") {
     const auto cfg       = make_cfg(140.0, 145.0, 1);
     auto design          = make_design(cfg, 140.0, 145.0, 32, 1.0F);
-    design.ref_segs      = std::vector<SizeType>{0, 7};
     SizeType evaluations = 0;
     design.evaluate      = [&evaluations](std::span<const float> bp) {
         ++evaluations;
@@ -456,7 +455,9 @@ TEST_CASE("EP forecasts account for adjacent populations and selected runs",
                                          0.0, 8.0, make_ctx(cfg));
     REQUIRE(plan.chunk_cfgs.size() == 1);
     const auto& chunk = plan.chunk_cfgs.front();
-    CHECK(evaluations == 2);
+    // The branching forecast does not depend on the run, so a chunk is
+    // evaluated once whatever the number of runs.
+    CHECK(evaluations == 1);
     CHECK(chunk.predicted_peak == 4 * chunk.ncoords);
     CHECK(chunk.predicted_live == 7 * chunk.ncoords);
     CHECK(chunk.max_sugg >

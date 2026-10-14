@@ -322,6 +322,38 @@ void fill_merge_phase_steps(ShiftOf shift_of,
     }
 }
 
+/// Leaves per phase-step block of the EP shift-adds (one fused scoring tile).
+constexpr SizeType kEPStepBlock = 16;
+
+/**
+ * @brief merge_phase_step of shifts[i] for i in [0, m), m <= kEPStepBlock.
+ *
+ * The trigonometry always runs over the full block (unused lanes padded with
+ * zero shifts), so it vectorises and each step is independent of m and of
+ * the leaf's position in the block: the fused and unfused EP paths, which
+ * cut the leaves differently, produce identical steps.
+ */
+void ep_phase_steps(const float* __restrict__ shifts,
+                    SizeType m,
+                    SizeType nbins,
+                    ComplexType* __restrict__ steps) noexcept {
+    std::array<double, kEPStepBlock> angle{};
+    std::array<float, kEPStepBlock> re{};
+    std::array<float, kEPStepBlock> im{};
+    for (SizeType i = 0; i < m; ++i) {
+        angle[i] =
+            -2.0 * std::numbers::pi * shifts[i] / static_cast<float>(nbins);
+    }
+#pragma omp simd
+    for (SizeType i = 0; i < kEPStepBlock; ++i) {
+        re[i] = static_cast<float>(std::cos(angle[i]));
+        im[i] = static_cast<float>(std::sin(angle[i]));
+    }
+    for (SizeType i = 0; i < m; ++i) {
+        steps[i] = ComplexType{re[i], im[i]};
+    }
+}
+
 /**
  * @brief Optimized version of shift_add_complex using a recurrence relation for
  * the phase. Idea here is to replace the two expensive sin/cos calls with one
@@ -519,26 +551,13 @@ void shift_add_complex_recurrence_linear_steps(
     }
 }
 
-void shift_add_complex_recurrence_linear(
-    const ComplexType* __restrict__ data_tail,
+/// shift_add_complex_recurrence_linear_steps accumulating into `out`:
+/// out += head * d^k.
+void shift_add_complex_recurrence_linear_inplace_steps(
     const ComplexType* __restrict__ data_head,
-    float phase_shift,
+    ComplexType delta_phase,
     ComplexType* __restrict__ out,
-    SizeType nbins_f,
-    SizeType nbins) noexcept {
-    shift_add_complex_recurrence_linear_steps(
-        data_tail, data_head, merge_phase_step(phase_shift, nbins), out,
-        nbins_f);
-}
-
-void shift_add_complex_recurrence_linear_inplace(
-    const ComplexType* __restrict__ data_head,
-    float phase_shift,
-    ComplexType* __restrict__ out,
-    SizeType nbins_f,
-    SizeType nbins) noexcept {
-    // On the fly phase computation is faster than precomputed phase steps on
-    // Intel CPUs.
+    SizeType nbins_f) noexcept {
     using BatchType                  = xsimd::batch<ComplexType>;
     static constexpr auto kBatchSize = BatchType::size;
 
@@ -546,15 +565,6 @@ void shift_add_complex_recurrence_linear_inplace(
     const ComplexType* __restrict__ data_head_v = data_head + nbins_f;
     ComplexType* __restrict__ out_e             = out;
     ComplexType* __restrict__ out_v             = out + nbins_f;
-
-    // Calculate the constant phase step per iteration
-    const auto phase_step_angle =
-        -2.0 * std::numbers::pi * phase_shift / static_cast<float>(nbins);
-
-    // This is the complex number we will multiply by in each iteration
-    const ComplexType delta_phase = {
-        static_cast<float>(std::cos(phase_step_angle)),
-        static_cast<float>(std::sin(phase_step_angle))};
 
     // Phase steps within a SIMD block: [d^0, d^1, d^2, d^3]
     std::array<ComplexType, kBatchSize> delta_vec_std;
@@ -2244,12 +2254,10 @@ void shift_add_linear_batch(const float* __restrict__ folds_tree,
                             const SizeType* __restrict__ indices_ffa,
                             const float* __restrict__ phase_shift,
                             float* __restrict__ folds_out,
-                            float const* __restrict__ temp_buffer,
                             SizeType nbins,
                             SizeType n_leaves,
                             SizeType physical_start_idx,
                             SizeType capacity) noexcept {
-    (void)temp_buffer;
     const auto total_size = 2 * nbins;
     for (SizeType ileaf = 0; ileaf < n_leaves; ++ileaf) {
         const uint32_t tree_idx_logical =
@@ -2280,20 +2288,26 @@ void shift_add_linear_complex_batch(const ComplexType* __restrict__ folds_tree,
                                     SizeType physical_start_idx,
                                     SizeType capacity) noexcept {
     const auto total_size = 2 * nbins_f;
-    for (SizeType ileaf = 0; ileaf < n_leaves; ++ileaf) {
-        const uint32_t tree_idx_logical =
-            indices_tree[ileaf] + physical_start_idx;
-        const uint32_t tree_idx_physical = tree_idx_logical < capacity
-                                               ? tree_idx_logical
-                                               : tree_idx_logical - capacity;
-        // Get restrict pointers for current batch item
-        const ComplexType* __restrict__ data_tree =
-            folds_tree + (tree_idx_physical * total_size);
-        const ComplexType* __restrict__ data_ffa =
-            folds_ffa + (indices_ffa[ileaf] * total_size);
-        ComplexType* __restrict__ data_out = folds_out + (ileaf * total_size);
-        shift_add_complex_recurrence_linear(
-            data_tree, data_ffa, phase_shift[ileaf], data_out, nbins_f, nbins);
+    std::array<ComplexType, kEPStepBlock> steps{};
+    for (SizeType l0 = 0; l0 < n_leaves; l0 += kEPStepBlock) {
+        const SizeType m = std::min(kEPStepBlock, n_leaves - l0);
+        ep_phase_steps(phase_shift + l0, m, nbins, steps.data());
+        for (SizeType i = 0; i < m; ++i) {
+            const SizeType ileaf = l0 + i;
+            const uint32_t tree_idx_logical =
+                indices_tree[ileaf] + physical_start_idx;
+            const uint32_t tree_idx_physical =
+                tree_idx_logical < capacity ? tree_idx_logical
+                                            : tree_idx_logical - capacity;
+            const ComplexType* __restrict__ data_tree =
+                folds_tree + (tree_idx_physical * total_size);
+            const ComplexType* __restrict__ data_ffa =
+                folds_ffa + (indices_ffa[ileaf] * total_size);
+            ComplexType* __restrict__ data_out =
+                folds_out + (ileaf * total_size);
+            shift_add_complex_recurrence_linear_steps(
+                data_tree, data_ffa, steps[i], data_out, nbins_f);
+        }
     }
 }
 
@@ -2306,12 +2320,10 @@ void shift_add_ascend_linear_batch(const float* __restrict__ folds_ffa,
                                    const SizeType* __restrict__ indices_ffa,
                                    const float* __restrict__ phase_shift,
                                    float* __restrict__ folds_tree,
-                                   float const* __restrict__ temp_buffer,
                                    SizeType nbins,
                                    SizeType n_coords_init,
                                    SizeType n_leaves,
                                    SizeType n_segments) noexcept {
-    (void)temp_buffer;
     const auto total_size = 2 * nbins;
     for (SizeType ileaf = 0; ileaf < n_leaves; ++ileaf) {
         float* __restrict__ data_tree = folds_tree + (ileaf * total_size);
@@ -2342,19 +2354,27 @@ void shift_add_ascend_linear_complex_batch(
     SizeType n_leaves,
     SizeType n_segments) noexcept {
     const auto total_size = 2 * nbins_f;
-    for (SizeType ileaf = 0; ileaf < n_leaves; ++ileaf) {
-        ComplexType* __restrict__ data_tree = folds_tree + (ileaf * total_size);
-        // Fill it with zero to avoid accumulation of garbage values
-        std::fill(data_tree, data_tree + total_size, ComplexType{0.0F, 0.0F});
+    std::array<ComplexType, kEPStepBlock> steps{};
+    // Blocks of leaves, segments in order within a block: each leaf still
+    // accumulates its segments in segment order.
+    for (SizeType l0 = 0; l0 < n_leaves; l0 += kEPStepBlock) {
+        const SizeType m = std::min(kEPStepBlock, n_leaves - l0);
+        // Fill with zero to avoid accumulation of garbage values
+        std::fill(folds_tree + (l0 * total_size),
+                  folds_tree + ((l0 + m) * total_size),
+                  ComplexType{0.0F, 0.0F});
         for (SizeType iseg = 0; iseg < n_segments; ++iseg) {
             const SizeType segment_idx = indices_segment[iseg];
-            const auto phase_shift_seg = phase_shift[(iseg * n_leaves) + ileaf];
-            const auto ffa_idx_seg     = indices_ffa[(iseg * n_leaves) + ileaf];
-            const ComplexType* __restrict__ data_ffa =
-                folds_ffa + (segment_idx * n_coords_init * total_size) +
-                (ffa_idx_seg * total_size);
-            shift_add_complex_recurrence_linear_inplace(
-                data_ffa, phase_shift_seg, data_tree, nbins_f, nbins);
+            const SizeType row         = (iseg * n_leaves) + l0;
+            ep_phase_steps(phase_shift + row, m, nbins, steps.data());
+            for (SizeType i = 0; i < m; ++i) {
+                const ComplexType* __restrict__ data_ffa =
+                    folds_ffa + (segment_idx * n_coords_init * total_size) +
+                    (indices_ffa[row + i] * total_size);
+                shift_add_complex_recurrence_linear_inplace_steps(
+                    data_ffa, steps[i], folds_tree + ((l0 + i) * total_size),
+                    nbins_f);
+            }
         }
     }
 }

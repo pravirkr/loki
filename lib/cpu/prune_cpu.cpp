@@ -36,7 +36,6 @@
 #include "lib/detail/utils.hpp"
 #include "lib/search/cands.hpp"
 #include "lib/search/prune_mask.hpp"
-#include "lib/utils/fft_impl.hpp"
 #include "lib/utils/workspace_impl.hpp"
 #include "lib/utils/world_tree.hpp"
 
@@ -59,8 +58,7 @@ public:
               SizeType branch_max,
               std::string_view poly_basis,
               const PruneRFIConfig& rfi_config,
-              const search::GridMask& mask_base,
-              math::CpuFFT* fft_manager = nullptr)
+              const search::GridMask& mask_base)
         : m_workspace_ptr(&workspace),
           m_cfg(std::move(cfg)),
           m_ffa_plan(m_cfg),
@@ -79,7 +77,7 @@ public:
             m_ffa_plan.get_dparams_actual().back(),
             m_ffa_plan.get_nsegments().back(),
             m_ffa_plan.get_tsegments().back(), m_cfg, m_batch_size,
-            m_branch_max, fft_manager);
+            m_branch_max);
         const auto n_params = m_cfg.get_nparams();
         error_check::check_equal(
             m_mask_base->get_n_accel(),
@@ -99,8 +97,7 @@ public:
     PruneImpl& operator=(PruneImpl&&)      = delete;
 
     [[nodiscard]] float get_memory_usage_gib() const noexcept {
-        return get_workspace().get_memory_usage_gib() +
-               m_prune_funcs->get_irfft_scratch_memory_gib();
+        return get_workspace().get_memory_usage_gib();
     }
 
     void execute(std::span<const FoldType> ffa_fold,
@@ -118,14 +115,11 @@ public:
         const auto& ws                 = get_workspace();
         const auto memory_tree_gb      = ws.world_tree.get_memory_usage_gib();
         const auto memory_workspace_gb = ws.prune.get_memory_usage_gib();
-        const auto memory_irfft_scratch_gb =
-            m_prune_funcs->get_irfft_scratch_memory_gib();
-        const auto memory_total_gb = get_memory_usage_gib();
-        spdlog::info(
-            "Pruning run {:03d}: Memory Usage: {:.2f} GB total "
-            "({:.2f} GB tree + {:.2f} GB workspace + {:.3f} GB irfft scratch)",
-            ref_seg, memory_total_gb, memory_tree_gb, memory_workspace_gb,
-            memory_irfft_scratch_gb);
+        const auto memory_total_gb     = get_memory_usage_gib();
+        spdlog::info("Pruning run {:03d}: Memory Usage: {:.2f} GB total "
+                     "({:.2f} GB tree + {:.2f} GB workspace)",
+                     ref_seg, memory_total_gb, memory_tree_gb,
+                     memory_workspace_gb);
 
         // Setup log and result files
         std::filesystem::path const actual_log_file =
@@ -560,9 +554,17 @@ private:
         const auto seg_idx_cur = m_snail_scheme.get_segment_idx(m_prune_level);
         const auto threshold   = m_threshold_scheme[m_prune_level - 1];
         // Capture the number of branches *before* finalizing the update
-        const auto n_branches = world_tree.get_size_old();
+        const auto n_branches  = world_tree.get_size_old();
+        const auto n_overloads = world_tree.get_n_overloads();
 
         execute_iteration_batched(ffa_fold, seg_idx_cur, threshold, stats);
+        if (world_tree.get_n_overloads() > n_overloads) {
+            spdlog::warn("Pruning level {:3d}: the world tree overflowed in {} "
+                         "batch(es); survivors were trimmed and the output "
+                         "depends on the batch size",
+                         m_prune_level,
+                         world_tree.get_n_overloads() - n_overloads);
+        }
 
         // Finalize: make new region active, defragment for contiguous access.
         world_tree.finalize_in_place_update();
@@ -734,20 +736,32 @@ private:
                 stats.batch_timers["rfi"] += timer.stop();
             }
 
-            // Load, shift, add (Map branched_itree to physical indices)
+            // Load, shift, add (tree origins to physical indices), score and
+            // filter, tile by tile; only passing folds are stored. When every
+            // leaf of the batch would fit in the tree and no post-score pass
+            // can drop a passing leaf, the passing folds go straight into the
+            // free tree slots in append order (what add_batch_scattered's
+            // fast path would store), and only leaves and scores are copied
+            // afterwards.
+            const bool direct_folds =
+                !post_score_active &&
+                world_tree.get_space_left() >= n_leaves_active;
+            const core::PassingFolds<FoldType> passing_folds =
+                direct_folds
+                    ? core::PassingFolds<
+                          FoldType>{.data =
+                                        world_tree.get_folds_writable().data(),
+                                    .ring_start = world_tree.get_write_head(),
+                                    .ring_capacity = capacity}
+                    : core::PassingFolds<FoldType>{
+                          .data = prune_ws.branched_folds.data()};
             timer.start();
-            m_prune_funcs->shift_add(
+            SizeType n_leaves_passing = m_prune_funcs->shift_add_score(
                 world_tree.get_folds(), prune_ws.branched_indices,
                 ffa_fold_segment, prune_ws.branched_param_idx,
-                prune_ws.branched_phase_shift, prune_ws.branched_folds,
-                n_leaves_active, physical_start_idx, capacity);
-            stats.batch_timers["shift_add"] += timer.stop();
-
-            // Score and filter
-            timer.start();
-            SizeType n_leaves_passing = m_prune_funcs->score_and_filter(
-                prune_ws.branched_folds, prune_ws.branched_scores,
-                prune_ws.branched_indices, current_threshold, n_leaves_active);
+                prune_ws.branched_phase_shift, passing_folds,
+                prune_ws.branched_scores, current_threshold, n_leaves_active,
+                physical_start_idx, capacity);
             auto const branched_scores_span =
                 std::span<const float>(prune_ws.branched_scores)
                     .first(n_leaves_active);
@@ -783,10 +797,16 @@ private:
 
             // Add batch to output suggestions
             timer.start();
-            current_threshold = world_tree.add_batch_scattered(
-                prune_ws.branched_leaves, prune_ws.branched_folds,
-                prune_ws.branched_scores, prune_ws.branched_indices,
-                current_threshold, n_leaves_passing);
+            if (direct_folds) {
+                world_tree.add_batch_scattered_prefolded(
+                    prune_ws.branched_leaves, prune_ws.branched_scores,
+                    prune_ws.branched_indices, n_leaves_passing);
+            } else {
+                current_threshold = world_tree.add_batch_scattered(
+                    prune_ws.branched_leaves, prune_ws.branched_folds,
+                    prune_ws.branched_scores, prune_ws.branched_indices,
+                    current_threshold, n_leaves_passing);
+            }
             stats.batch_timers["batch_add"] += timer.stop();
             // Notify the buffer that a batch of the old suggestions has been
             // consumed
@@ -1015,7 +1035,6 @@ public:
         // Allocate internal FFA resources
         m_ffa_workspace_storage = memory::FFAWorkspaceCPU<FoldType>(m_ffa_plan);
         m_ffa_workspace_ptr     = &m_ffa_workspace_storage;
-        m_fft_ptr               = &m_fft_storage;
         m_ffa_fold_storage.resize(m_ffa_plan.get_buffer_size(), FoldType{});
         m_ffa_fold_span = std::span(m_ffa_fold_storage);
     }
@@ -1071,7 +1090,6 @@ public:
         // Allocate internal FFA resources
         m_ffa_workspace_storage = memory::FFAWorkspaceCPU<FoldType>(m_ffa_plan);
         m_ffa_workspace_ptr     = &m_ffa_workspace_storage;
-        m_fft_ptr               = &m_fft_storage;
         m_ffa_fold_storage.resize(m_ffa_plan.get_buffer_size(), FoldType{});
         m_ffa_fold_span = std::span(m_ffa_fold_storage);
     }
@@ -1081,9 +1099,7 @@ public:
     EPMultiPassCpuEngine(
         std::span<memory::EPWorkspaceCPU<FoldType>* const> external_workspaces,
         memory::FFAWorkspaceCPU<FoldType>& external_ffa_workspace,
-        math::CpuFFT& external_fft_manager,
         std::span<FoldType> external_ffa_fold,
-        std::span<math::CpuFFT* const> external_prune_fft,
         search::PulsarSearchConfig cfg,
         std::span<const float> threshold_scheme,
         std::optional<SizeType> n_runs,
@@ -1096,7 +1112,6 @@ public:
         PruneRFIConfig rfi_config)
         : m_workspaces(external_workspaces.begin(), external_workspaces.end()),
           m_ffa_workspace_ptr(&external_ffa_workspace),
-          m_fft_ptr(&external_fft_manager),
           m_ffa_fold_span(external_ffa_fold),
           m_cfg(std::move(cfg)),
           m_threshold_scheme(threshold_scheme.begin(), threshold_scheme.end()),
@@ -1132,17 +1147,6 @@ public:
                          m_cfg.get_nparams(), nbins, nsegments);
         }
 
-        // One FFT manager per worker for the pruning functors (complex folds
-        // only). Each worker has its own, because exact-batch plans are created
-        // lazily and are not shared between threads.
-        if constexpr (std::is_same_v<FoldType, ComplexType>) {
-            error_check::check_greater_equal(
-                external_prune_fft.size(), m_n_workers,
-                "EPMultiPass: Provided external prune FFT managers are fewer "
-                "than the number of workers (min(nthreads, runs)).");
-            m_prune_fft.assign(external_prune_fft.begin(),
-                               external_prune_fft.end());
-        }
         // Validate external FFA resources
         m_ffa_workspace_ptr->validate(m_ffa_plan);
         error_check::check_greater_equal(
@@ -1242,11 +1246,6 @@ private:
     // FFA resources (either owned or non-owning external references)
     memory::FFAWorkspaceCPU<FoldType> m_ffa_workspace_storage;
     memory::FFAWorkspaceCPU<FoldType>* m_ffa_workspace_ptr{nullptr};
-    math::CpuFFT m_fft_storage;
-    math::CpuFFT* m_fft_ptr{nullptr};
-    // Per-worker FFT managers of the pruning functors, owned by the caller.
-    // Empty when the functors own their own (the standalone pipelines).
-    std::vector<math::CpuFFT*> m_prune_fft;
     std::vector<FoldType> m_ffa_fold_storage;
     std::span<FoldType> m_ffa_fold_span;
 
@@ -1269,14 +1268,6 @@ private:
     SizeType m_branch_max{0};
     // Static pulsar mask on the FFA base grid, shared read-only by all runs
     search::GridMask m_mask_base;
-
-    /// The FFT manager of worker @p thread_idx, or null when the functors own
-    /// theirs.
-    [[nodiscard]] math::CpuFFT*
-    get_prune_fft(SizeType thread_idx) const noexcept {
-        return thread_idx < m_prune_fft.size() ? m_prune_fft[thread_idx]
-                                               : nullptr;
-    }
 
     // Safely get the workspace for a specific thread index
     [[nodiscard]] memory::EPWorkspaceCPU<FoldType>&
@@ -1316,11 +1307,10 @@ private:
                                  const std::filesystem::path& outdir,
                                  const std::filesystem::path& log_file,
                                  const std::filesystem::path& result_file) {
-        auto& ws = get_thread_workspace(0);
-        auto prune =
-            PruneImpl<FoldType>(ws, m_cfg, m_threshold_scheme, m_max_sugg,
-                                m_batch_size, m_branch_max, m_poly_basis,
-                                m_rfi_config, m_mask_base, get_prune_fft(0));
+        auto& ws   = get_thread_workspace(0);
+        auto prune = PruneImpl<FoldType>(
+            ws, m_cfg, m_threshold_scheme, m_max_sugg, m_batch_size,
+            m_branch_max, m_poly_basis, m_rfi_config, m_mask_base);
         for (const auto ref_seg : ref_segs) {
             prune.execute(ffa_fold, ref_seg, m_ascend_levels, outdir, log_file,
                           result_file,
@@ -1369,8 +1359,7 @@ private:
                 auto& ws              = get_thread_workspace(thread_idx);
                 auto prune            = PruneImpl<FoldType>(
                     ws, m_cfg, m_threshold_scheme, m_max_sugg, m_batch_size,
-                    m_branch_max, m_poly_basis, m_rfi_config, m_mask_base,
-                    get_prune_fft(thread_idx));
+                    m_branch_max, m_poly_basis, m_rfi_config, m_mask_base);
 
                 prune.execute(
                     ffa_fold, ref_seg, m_ascend_levels, outdir,
@@ -1472,9 +1461,7 @@ template <SupportedFoldType FoldType>
 std::unique_ptr<EPMultiPassEngine<FoldType>>
 make_ep_cpu(std::span<memory::EPWorkspaceCPU<FoldType>* const> workspaces,
             memory::FFAWorkspaceCPU<FoldType>& ffa_workspace,
-            math::CpuFFT& fft_manager,
             std::span<FoldType> ffa_fold,
-            std::span<math::CpuFFT* const> prune_fft,
             search::PulsarSearchConfig cfg,
             std::span<const float> threshold_scheme,
             std::optional<SizeType> n_runs,
@@ -1486,10 +1473,9 @@ make_ep_cpu(std::span<memory::EPWorkspaceCPU<FoldType>* const> workspaces,
             bool show_progress,
             PruneRFIConfig rfi_config) {
     return std::make_unique<EPMultiPassCpuEngine<FoldType>>(
-        workspaces, ffa_workspace, fft_manager, ffa_fold, prune_fft,
-        std::move(cfg), threshold_scheme, n_runs, std::move(ref_segs),
-        ascend_levels, max_sugg, batch_size, poly_basis, show_progress,
-        std::move(rfi_config));
+        workspaces, ffa_workspace, ffa_fold, std::move(cfg), threshold_scheme,
+        n_runs, std::move(ref_segs), ascend_levels, max_sugg, batch_size,
+        poly_basis, show_progress, std::move(rfi_config));
 }
 
 template std::unique_ptr<EPMultiPassEngine<float>>
@@ -1532,9 +1518,7 @@ make_ep_cpu<float>(std::span<memory::EPWorkspaceCPU<float>* const>,
 template std::unique_ptr<EPMultiPassEngine<float>>
 make_ep_cpu<float>(std::span<memory::EPWorkspaceCPU<float>* const>,
                    memory::FFAWorkspaceCPU<float>&,
-                   math::CpuFFT&,
                    std::span<float>,
-                   std::span<math::CpuFFT* const>,
                    search::PulsarSearchConfig,
                    std::span<const float>,
                    std::optional<SizeType>,
@@ -1562,9 +1546,7 @@ make_ep_cpu<ComplexType>(std::span<memory::EPWorkspaceCPU<ComplexType>* const>,
 template std::unique_ptr<EPMultiPassEngine<ComplexType>>
 make_ep_cpu<ComplexType>(std::span<memory::EPWorkspaceCPU<ComplexType>* const>,
                          memory::FFAWorkspaceCPU<ComplexType>&,
-                         math::CpuFFT&,
                          std::span<ComplexType>,
-                         std::span<math::CpuFFT* const>,
                          search::PulsarSearchConfig,
                          std::span<const float>,
                          std::optional<SizeType>,

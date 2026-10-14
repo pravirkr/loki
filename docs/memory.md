@@ -54,7 +54,7 @@ peak = n_workers * thread_bytes(group) + shared_bytes + input_bytes
 
 | Term | Contents | Lifetime |
 | --- | --- | --- |
-| `thread_bytes` | `ep_workspace_bytes` (world tree, prune and branch scratch, FFA seeds) + `ep_irfft_scratch_bytes` (Fourier folds only) + `ep_harvest_bytes` | one group |
+| `thread_bytes` | `ep_workspace_bytes` (world tree, prune and branch scratch, FFA seeds) + `ep_harvest_bytes`. The pruning functors score in tiles of 16 leaves and hold no batch-sized scoring scratch | one group |
 | `shared_bytes` | FFA workspace fold buffer and coordinates + output fold buffer, sized from the global maxima of `buffer_size` and `coord_size` | whole sweep |
 | `input_bytes` | `ts_e` and `ts_v`, `2 * nsamps * sizeof(float)` | whole sweep |
 

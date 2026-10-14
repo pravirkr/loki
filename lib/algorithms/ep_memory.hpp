@@ -8,10 +8,11 @@
  *
  * EPFreqSweep holds three kinds of memory:
  *  - per-worker buffers: the EP workspace (world tree, prune/branch scratch,
- *    FFA seeds), the irfft scratch for Fourier folds and, when harvesting is
- *    enabled, the harvest store. They are sized once per contiguous run of
- *    chunks with the same nbins, from the maxima of that run, and freed before
- *    the next run;
+ *    FFA seeds) and, when harvesting is enabled, the harvest store. The
+ *    pruning functors score tile by tile (16 leaves) and keep no batch-sized
+ *    scoring scratch; their few kilobytes are left to the reserve. They are
+ * sized once per contiguous run of chunks with the same nbins, from the maxima
+ * of that run, and freed before the next run;
  *  - the FFA workspace (internal fold buffer and coordinates) and the output
  *    fold buffer, shared by every chunk and sized from the global maxima;
  *  - the input time series (ts_e, ts_v), resident for the whole sweep whoever
@@ -69,7 +70,8 @@ constexpr SizeType kEPBatchSizeCuda = SizeType{1} << 16U;
 ///  6: bounded canonical shift-add scratch for fused overflow recomputation.
 ///  7: remove branch lookahead after the SNR-10 timing regression.
 ///  9: no cuFFT: the CUDA reserve is 0.5 GiB for any number of FFT sizes.
-constexpr std::uint32_t kEPMemoryModelVersion = 9U;
+/// 10: CPU pruning scores in fused tiles: no irfft scratch per worker.
+constexpr std::uint32_t kEPMemoryModelVersion = 10U;
 
 /// Worst-case size of the per-run harvest store (see PruneRFIConfig).
 /// Normalised: all fields are zero/false when harvesting is disabled.
@@ -179,22 +181,6 @@ SizeType ep_workspace_bytes(SizeType nparams,
                                 (ncoords_ffa * sizeof(SizeType));
 
     return world_tree_bytes + prune_bytes + branch_bytes + seed_bytes;
-}
-
-/// Bytes of the irfft scratch each pruning thread owns (Fourier folds only).
-template <SupportedFoldType FoldType>
-SizeType ep_irfft_scratch_bytes(SizeType nbins,
-                                SizeType ncoords_ffa,
-                                SizeType branch_max,
-                                SizeType batch_size) {
-    if constexpr (std::is_same_v<FoldType, ComplexType>) {
-        const SizeType max_nfft =
-            std::max(2 * batch_size * branch_max, 2 * ncoords_ffa);
-        return (max_nfft * ((nbins / 2) + 1) * sizeof(ComplexType)) +
-               (max_nfft * nbins * sizeof(float));
-    } else {
-        return 0;
-    }
 }
 
 /// Bytes of one run's harvest store once it reserved max_harvests records
@@ -415,8 +401,6 @@ SizeType ep_thread_bytes(const EPMemoryContext& ctx,
     return ep_workspace_bytes<FoldType>(ctx.nparams, nbins, nsegments,
                                         ncoords_ffa, max_sugg, branch_max,
                                         ctx.batch_size) +
-           ep_irfft_scratch_bytes<FoldType>(nbins, ncoords_ffa, branch_max,
-                                            ctx.batch_size) +
            ep_harvest_bytes<FoldType>(ctx.nparams, nbins, ctx.harvest);
 }
 

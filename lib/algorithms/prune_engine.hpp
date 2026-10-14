@@ -18,7 +18,6 @@
 #include "loki/search/configs.hpp"
 #include "loki/utils/workspace.hpp"
 
-#include "lib/utils/fft_impl.hpp"
 #include "lib/utils/workspace_impl.hpp"
 
 namespace loki::algorithms::detail {
@@ -116,9 +115,7 @@ template <SupportedFoldType FoldType>
 std::unique_ptr<EPMultiPassEngine<FoldType>>
 make_ep_cpu(std::span<memory::EPWorkspaceCPU<FoldType>* const> workspaces,
             memory::FFAWorkspaceCPU<FoldType>& ffa_workspace,
-            math::CpuFFT& fft_manager,
             std::span<FoldType> ffa_fold,
-            std::span<math::CpuFFT* const> prune_fft,
             search::PulsarSearchConfig cfg,
             std::span<const float> threshold_scheme,
             std::optional<SizeType> n_runs,
