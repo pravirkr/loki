@@ -27,8 +27,9 @@ inline void transpose_xsimd(const float* __restrict__ src,
             rows[r] = BatchType::load_unaligned(&src[(r * nbins) + jb]);
         }
 
-        // In-place transpose
-        xsimd::transpose(rows.data(), rows.data());
+        // In-place transpose (end must be begin + batch size; see
+        // lane_fft_cpu.cpp).
+        xsimd::transpose(rows.data(), rows.data() + kBatchSize);
 
         // Store transposed result
         for (SizeType r = 0; r < kBatchSize; ++r) {
