@@ -28,6 +28,12 @@ struct ReadOptions {
     int nthreads{1};
 };
 
+/// @brief Sample count and sample interval of a timeseries file.
+struct TimeSeriesInfo {
+    SizeType nsamps{};
+    double dt{};
+};
+
 /**
  * @brief In-memory timeseries with intensity and per-sample variance.
  *
@@ -49,6 +55,10 @@ public:
 
     static TimeSeries read(const std::filesystem::path& path,
                            const ReadOptions& options = {});
+
+    /// Reads only the header of @p path (.tim, or .dat with its .inf): the
+    /// samples are not loaded.
+    static TimeSeriesInfo read_info(const std::filesystem::path& path);
 
     void write(const std::filesystem::path& path) const;
 

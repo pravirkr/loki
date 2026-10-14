@@ -54,13 +54,20 @@ a vertical SIMD operation with no shuffles.
   `E = (Z[k] + conj Z[n-k]) / 2`, `V = (Z[k] - conj Z[n-k]) / 2i`. For a
   generic batch, rows pair up as `(2p, 2p + 1)` and an odd last row is paired
   with zeros, so a row's rounding depends on its partner row (float level).
-- Any `n >= 2`: a mixed-radix Stockham FFT with radices 4, 2, 3, 5, 7, 11 and
-  13 (the odd ones share one generic kernel that pairs `x[j]` with
-  `x[R - j]`), and Bluestein's algorithm for lengths with a larger prime
-  factor, on a convolution of the smallest `2^a 3^b 5^c >= 2n - 1` points.
-  Twiddles, chirps and the Bluestein kernel are computed in double.
-- Rows are moved in and out of the lane layout with 8 x 8 AVX transposes
-  (xsimd elsewhere).
+- Any `n >= 2`: a mixed-radix Stockham FFT, and Bluestein's algorithm for
+  lengths with a prime factor above 13, on a convolution of the smallest
+  `2^a 3^b 5^c >= 2n - 1` points. The power-of-two part of the length takes
+  the fewest stages of radix at most 8 (radix-8 and radix-4 butterflies are
+  radix-2 splits down to the radix-4 kernel; radix 16 spills registers),
+  then the odd radices 3, 5, 7, 11 and 13 (one generic kernel that pairs
+  `x[j]` with `x[R - j]`). Twiddles, chirps and the Bluestein kernel are
+  computed in double.
+- Every point is one 64-byte line per buffer, so a sub-transform of the
+  first stage (every radix-th line) is closed under the later stages: for
+  power-of-two lengths 256 to 1024 they run sub-transform by sub-transform,
+  in L1 (`depth_first`). Same arithmetic as stage by stage.
+- Rows are moved into the lane layout with 16 x 16 AVX-512 transposes (8 x 8
+  AVX2 ones for the rest and elsewhere; xsimd off x86).
 - **Fused with the scorer.** In the CPU FFA's fused Fourier final level
   (`run_final_scored`, `lib/cpu/ffa_cpu.cpp`), each tile of 16 final profiles
   is inverted and scored straight from the lane layout
@@ -78,7 +85,7 @@ a vertical SIMD operation with no shuffles.
   no `CpuFFT`. Every profile is transformed and scored in its own lane, so
   the fused step equals the unfused chain (`shift_add`, then
   `score_and_filter`) bit for bit for any cut into tiles
-  (`tests/cpp/internal/prune_fft_t.cpp`). Against the earlier paired-row
+  (`tests/cpp/internal/ep_score_cpu_t.cpp`). Against the earlier paired-row
   C2R, scores move at float level (relative 1e-6).
 - **Accuracy:** within `2e-7` (relative to the row's largest value) of a
   double DFT for every `n` from 2 to 1024, both directions
@@ -86,8 +93,11 @@ a vertical SIMD operation with no shuffles.
 - **Speed** (Xeon Gold 6348H, one thread): the fused inverse plus scoring is
   1.7x to 3.8x faster than FFTW C2R (estimate-mode plans, as loki used) plus
   the row scorer for power-of-two and smooth `nbins` (n = 64: 89 against
-  285 ns per profile), and 2.5x to 13x for Bluestein lengths. The CPU FFA sweep went from 53.0 to 29.8 s on W4
-  (`tmp_files/optimizations.md`, section 0c).
+  285 ns per profile), and 2.5x to 13x for Bluestein lengths. The CPU FFA
+  sweep went from 53.0 to 29.8 s on W4. The radix-8 stages, depth-first
+  order and 16 x 16 transposes then cut the inverse (ns per profile) at
+  n = 64 / 128 / 256 / 512 / 1024 from 38 / 103 / 290 / 670 / 1450 to
+  33 / 95 / 237 / 512 / 1257.
 
 pocketfft does the long transforms. Preprocessing's whole-series R2C and C2R
 cost about as much as FFTW's estimate-mode plan plus execution did, or less

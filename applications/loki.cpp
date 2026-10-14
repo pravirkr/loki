@@ -23,6 +23,7 @@
 #include <toml++/toml.hpp>
 
 #include "loki/algorithms/ep_regions.hpp"
+#include "loki/algorithms/regions.hpp"
 #include "loki/common/backend.hpp"
 #include "loki/common/types.hpp"
 #include "loki/io/preprocess.hpp"
@@ -365,6 +366,69 @@ loki::SizeType power_of_two_nsamps(loki::SizeType actual_nsamps,
     return pow2_nsamps;
 }
 
+struct SearchDims {
+    loki::SizeType nsamps;
+    double tsamp;
+};
+
+/// The sample count and interval a dry run plans with: those of the input
+/// header when the config names an input (only the header is read), else
+/// [input] nsamps / tsamp, else 2^21 samples of 64 us.
+SearchDims dry_run_dims(const loki::search::FFATomlConfig& cfg,
+                        NsampsPolicy nsamps_policy) {
+    if (!cfg.timeseries_path.empty()) {
+        const std::filesystem::path ts_path = cfg.timeseries_path;
+        if (!std::filesystem::exists(ts_path)) {
+            throw std::runtime_error(std::format(
+                "Input timeseries does not exist: {}", ts_path.string()));
+        }
+        const auto info = loki::io::TimeSeries::read_info(ts_path);
+        SPDLOG_INFO("Input header: nsamps = {}, dt = {:.6e} s, tobs = {:.2f} s",
+                    info.nsamps, info.dt,
+                    static_cast<double>(info.nsamps) * info.dt);
+        return {.nsamps = power_of_two_nsamps(info.nsamps, nsamps_policy),
+                .tsamp  = info.dt};
+    }
+    const SearchDims dims{.nsamps = cfg.nsamps.value_or(1U << 21U),
+                          .tsamp  = cfg.tsamp.value_or(6.4e-5)};
+    if (!cfg.nsamps.has_value() || !cfg.tsamp.has_value()) {
+        SPDLOG_WARN("No input timeseries: planning with nsamps = {}, tsamp = "
+                    "{:.6e} s (set -i/--input, or [input] nsamps and tsamp)",
+                    dims.nsamps, dims.tsamp);
+    }
+    return dims;
+}
+
+/// Plans the FFA chunks of @p cfg (no sweep buffers) and prints them.
+template <loki::SupportedFoldType FoldType>
+void print_ffa_plan(const loki::search::FFASearchConfig& cfg, loki::Exec exec) {
+    const bool use_gpu = exec.backend != loki::Backend::kCPU;
+    const loki::algorithms::FFARegionPlanner<FoldType> planner(cfg, use_gpu);
+    const auto& cfgs   = planner.get_cfgs();
+    const auto& chunks = planner.get_chunk_stats();
+    std::cout << std::format(
+        "FFA plan: {} chunks, nsamps {}, tobs {:.2f} s, sweep memory {:.3f} "
+        "GB against a limit of {:.3f} GB\n",
+        cfgs.size(), cfg.get_nsamps(), cfg.get_tobs(),
+        planner.get_stats().get_freq_sweep_memory_usage(),
+        cfg.get_max_process_memory_gb());
+    if (use_gpu) {
+        std::cout << "The GPU sweep also caps the limit by the free device "
+                     "memory, which a dry run does not query.\n";
+    }
+    std::cout << std::format("{:>6} {:>6} {:>23} {:>23} {:>9}\n", "chunk",
+                             "nbins", "nominal f [Hz]", "actual f [Hz]",
+                             "mem [GB]");
+    for (SizeType i = 0; i < std::min(cfgs.size(), chunks.size()); ++i) {
+        const auto& chunk = chunks[i];
+        std::cout << std::format(
+            "{:>6} {:>6} {:>10.3f} - {:<10.3f} {:>10.3f} - {:<10.3f} "
+            "{:>9.3f}\n",
+            i, cfgs[i].get_nbins(), chunk.nominal_f_start, chunk.nominal_f_end,
+            chunk.actual_f_start, chunk.actual_f_end, chunk.total_memory_gb);
+    }
+}
+
 int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
                    std::string_view config_toml,
                    bool dry_run,
@@ -372,11 +436,15 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
     check_frequency_range(toml_cfg);
     const loki::Exec exec = search_exec(toml_cfg);
 
-    const auto preview_cfg = toml_cfg.to_search_config(
-        toml_cfg.nsamps.value_or(1U << 21U), toml_cfg.tsamp.value_or(6.4e-5));
     if (dry_run) {
-        const loki::pipelines::FFAFreqSweep dry(preview_cfg,
-                                                /*show_progress=*/false, exec);
+        const auto dims = dry_run_dims(toml_cfg, nsamps_policy);
+        const auto preview_cfg =
+            toml_cfg.to_search_config(dims.nsamps, dims.tsamp);
+        if (preview_cfg.get_use_fourier()) {
+            print_ffa_plan<loki::ComplexType>(preview_cfg, exec);
+        } else {
+            print_ffa_plan<float>(preview_cfg, exec);
+        }
         SPDLOG_INFO("Dry run complete: planner constructed successfully.");
         return 0;
     }
@@ -516,7 +584,7 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
 template <typename FoldType>
 void print_ep_plan(const loki::algorithms::EPRegionPlanner<FoldType>& planner,
                    SizeType workers,
-                   const std::filesystem::path& cache_path) {
+                   const std::optional<std::filesystem::path>& cache_path) {
     const auto& chunks = planner.get_chunk_cfgs();
     const auto& stats  = planner.get_stats();
     if (chunks.empty()) {
@@ -571,7 +639,35 @@ void print_ep_plan(const loki::algorithms::EPRegionPlanner<FoldType>& planner,
             begin, end - 1, nbins, max_sugg, branch_max, workers);
         begin = end;
     }
-    std::cout << std::format("Plan cache: {}\n", cache_path.string());
+    std::cout << std::format("Plan cache: {}\n",
+                             cache_path ? cache_path->string() : "none");
+}
+
+/// Plans the EP chunks of @p cfg (or loads them from @p cache_path, writing
+/// the cache when it does not exist) and prints them. No sweep is built.
+void plan_and_print_ep(const loki::search::EPTomlConfig& toml_cfg,
+                       const loki::search::PulsarSearchConfig& cfg,
+                       const std::optional<std::filesystem::path>& cache_path,
+                       loki::Exec exec) {
+    // The same worker count the sweep uses, so the cache matches it. The GPU
+    // sweep prunes its runs on one worker.
+    const SizeType n_workers = loki::algorithms::ep_sweep_n_workers(
+        cfg.get_nthreads(), toml_cfg.n_runs, toml_cfg.ref_segs);
+    const SizeType workers =
+        exec.backend == loki::Backend::kCPU ? n_workers : SizeType{1};
+    if (cfg.get_use_fourier()) {
+        const loki::algorithms::EPRegionPlanner<loki::ComplexType> planner(
+            cfg, toml_cfg.min_pd, toml_cfg.poly_basis, toml_cfg.ref_ducy,
+            cache_path, {}, n_workers, toml_cfg.n_runs, toml_cfg.ref_segs,
+            exec);
+        print_ep_plan(planner, workers, cache_path);
+    } else {
+        const loki::algorithms::EPRegionPlanner<float> planner(
+            cfg, toml_cfg.min_pd, toml_cfg.poly_basis, toml_cfg.ref_ducy,
+            cache_path, {}, n_workers, toml_cfg.n_runs, toml_cfg.ref_segs,
+            exec);
+        print_ep_plan(planner, workers, cache_path);
+    }
 }
 
 /// `search ep --plan-only`: plans the chunks, writes the plan cache and prints
@@ -590,31 +686,12 @@ int run_plan_ep(const loki::search::EPTomlConfig& toml_cfg) {
     const auto cache_path = toml_cfg.plan_cache.value_or(
         std::filesystem::path(toml_cfg.outdir) /
         std::format("{}_ep_plan.h5", toml_cfg.prefix));
-    // The same worker count the sweep uses, so the cache matches it. The GPU
-    // sweep prunes its runs on one worker.
-    const SizeType n_workers = loki::algorithms::ep_sweep_n_workers(
-        cfg.get_nthreads(), toml_cfg.n_runs, toml_cfg.ref_segs);
-    const SizeType workers =
-        exec.backend == loki::Backend::kCPU ? n_workers : SizeType{1};
 
     SPDLOG_INFO("Planning EP search (no data read): f=[{:.3f}, {:.3f}] Hz, "
                 "nsamps={}, nbins={}, backend={}",
                 cfg.get_f_min(), cfg.get_f_max(), cfg.get_nsamps(),
                 cfg.get_nbins(), loki::to_string(exec.backend));
-
-    if (cfg.get_use_fourier()) {
-        const loki::algorithms::EPRegionPlanner<loki::ComplexType> planner(
-            cfg, toml_cfg.min_pd, toml_cfg.poly_basis, toml_cfg.ref_ducy,
-            cache_path, {}, n_workers, toml_cfg.n_runs, toml_cfg.ref_segs,
-            exec);
-        print_ep_plan(planner, workers, cache_path);
-    } else {
-        const loki::algorithms::EPRegionPlanner<float> planner(
-            cfg, toml_cfg.min_pd, toml_cfg.poly_basis, toml_cfg.ref_ducy,
-            cache_path, {}, n_workers, toml_cfg.n_runs, toml_cfg.ref_segs,
-            exec);
-        print_ep_plan(planner, workers, cache_path);
-    }
+    plan_and_print_ep(toml_cfg, cfg, cache_path, exec);
     return 0;
 }
 
@@ -750,15 +827,16 @@ int run_search_ep(const loki::search::EPTomlConfig& toml_cfg,
                   bool dry_run,
                   NsampsPolicy nsamps_policy) {
     check_frequency_range(toml_cfg);
-    const loki::Exec exec  = search_exec(toml_cfg);
-    const auto preview_cfg = toml_cfg.to_ep_search_config(
-        toml_cfg.nsamps.value_or(1U << 21U), toml_cfg.tsamp.value_or(6.4e-5));
+    const loki::Exec exec = search_exec(toml_cfg);
     if (dry_run) {
-        const loki::pipelines::EPFreqSweep dry(
-            preview_cfg, /*show_progress=*/false, toml_cfg.min_pd,
-            toml_cfg.poly_basis, toml_cfg.ref_ducy, {},
-            prepare_ep_plan_cache(toml_cfg, preview_cfg, exec), toml_cfg.n_runs,
-            toml_cfg.ref_segs, exec);
+        const auto dims = dry_run_dims(toml_cfg, nsamps_policy);
+        const auto preview_cfg =
+            toml_cfg.to_ep_search_config(dims.nsamps, dims.tsamp);
+        // The plan cache is prepared as the search would prepare it, so a
+        // search after the dry run reuses it.
+        plan_and_print_ep(toml_cfg, preview_cfg,
+                          prepare_ep_plan_cache(toml_cfg, preview_cfg, exec),
+                          exec);
         SPDLOG_INFO("Dry run complete: planner constructed successfully.");
         return 0;
     }

@@ -812,6 +812,24 @@ private:
                 : m_exec);
     }
 
+    /// An engine for evaluate() only. The CPU engine then allocates no
+    /// simulation pools (the GPU engine never does before run()).
+    std::unique_ptr<detection::detail::ThresholdsEngine>
+    make_evaluation_engine(std::span<const float> branching_pattern,
+                           SizeType nbins,
+                           uint64_t seed) const {
+        if (m_exec.backend != Backend::kCPU) {
+            return make_threshold_engine(branching_pattern, nbins, seed);
+        }
+        return detection::detail::make_thresholds_cpu(
+            branching_pattern, m_ref_ducy, nbins, kDtsNTrials, kDtsNProbs,
+            kDtsProbMin, static_cast<float>(m_base_cfg.get_target_snr()),
+            kDtsNThresholds, static_cast<float>(m_base_cfg.get_ducy_max()),
+            static_cast<float>(m_base_cfg.get_wtsp()), kDtsBeamWidth,
+            kDtsTrialsStart, "legacy", m_base_cfg.get_nthreads(), seed,
+            /*simulate=*/false);
+    }
+
     /// Path of minimum cost meeting min_pd. If none does, the best available
     /// simulated path is accepted with a warning; min_pd is not changed.
     std::vector<float>
@@ -892,7 +910,7 @@ private:
                 return it->second;
             }
             const auto states =
-                make_threshold_engine(bp, nbins, kDtsSeed)
+                make_evaluation_engine(bp, nbins, kDtsSeed)
                     ->evaluate(thresholds, kDtsNTrials, kDtsEvaluationSeed);
             const float evaluated_pd = states.empty() || states.back().is_empty
                                            ? 0.0F

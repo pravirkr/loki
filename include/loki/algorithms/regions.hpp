@@ -113,9 +113,6 @@ public:
     /// @brief Get the memory usage of the FFA freq sweep for this region (in
     /// GB).
     float get_freq_sweep_memory_usage() const noexcept;
-    /// @brief Get the chunk stats for the planner.
-    [[nodiscard]] std::vector<coord::FFAChunkStats>
-    get_chunk_stats() const noexcept;
 
 private:
     SizeType m_max_buffer_size;
@@ -177,6 +174,10 @@ public:
     SizeType get_nregions() const noexcept;
     /// @brief Get the stats for the planner.
     [[nodiscard]] const FFARegionStats& get_stats() const noexcept;
+    /// @brief Frequency range and memory of each chunk, in the order of
+    /// get_cfgs().
+    [[nodiscard]] const std::vector<coord::FFAChunkStats>&
+    get_chunk_stats() const noexcept;
 
 private:
     class Impl;

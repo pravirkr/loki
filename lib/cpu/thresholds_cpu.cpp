@@ -945,7 +945,8 @@ public:
                         SizeType trials_start,
                         std::string_view mode,
                         int nthreads,
-                        std::optional<uint64_t> seed)
+                        std::optional<uint64_t> seed,
+                        bool simulate)
         : m_branching_pattern(branching_pattern.begin(),
                               branching_pattern.end()),
           m_ref_ducy(ref_ducy),
@@ -955,7 +956,8 @@ public:
           m_beam_width(beam_width),
           m_trials_start(trials_start),
           m_mode(dynamic_threshold_mode_from_string(mode)),
-          m_nthreads(nthreads) {
+          m_nthreads(nthreads),
+          m_simulate(simulate) {
         if (m_branching_pattern.empty()) {
             throw std::invalid_argument("Branching pattern is empty");
         }
@@ -978,7 +980,8 @@ public:
         m_seed = seed.value_or(std::random_device{}());
 
         m_states.resize(m_nstages * m_nthresholds * m_nprobs, State{});
-        {
+        // An evaluation-only engine needs neither the pools nor stage 0.
+        if (m_simulate) {
             const auto [fold_slots_per_pool, score_slots_per_pool] =
                 compute_max_allocations_needed();
             m_manager = std::make_unique<DualPoolFoldManager>(
@@ -1019,9 +1022,13 @@ public:
     std::vector<SizeType> get_box_score_widths() const override {
         return m_box_score_widths;
     }
-    std::vector<State> get_states() const override { return m_states; }
+    std::vector<State> get_states() const override {
+        check_simulate("get_states");
+        return m_states;
+    }
 
     std::vector<float> get_best_path_thresholds(float min_pd) const override {
+        check_simulate("get_best_path_thresholds");
         return detail::get_best_path_thresholds(
             std::span<const State>(m_states.data(), m_states.size()),
             m_thresholds, m_probs, m_nstages, m_nthresholds, m_nprobs, min_pd);
@@ -1029,6 +1036,7 @@ public:
 
     // Methods
     void run(SizeType thres_neigh) override {
+        check_simulate("run");
         const auto mode_label = mode_to_string(m_mode);
         spdlog::info("Running dynamic threshold scheme ({} mode)", mode_label);
 
@@ -1067,6 +1075,7 @@ public:
 
     // Save
     std::string save(const std::string& outdir) const override {
+        check_simulate("save");
         const std::filesystem::path filebase = std::format(
             "dynscheme_{}_nstages_{:03d}_nthresh_{:03d}_nprobs_{:03d}_"
             "ntrials_{:04d}_snr_{:04.1f}_ducy_{:04.2f}_beam_{:03.1f}.h5",
@@ -1278,9 +1287,19 @@ private:
     std::vector<State> m_states;
 
     search::TimerStats m_timer_stats;
+    bool m_simulate;
     std::unique_ptr<DualPoolFoldManager> m_manager;
     FoldGrid m_folds_current;
     FoldGrid m_folds_next;
+
+    void check_simulate(std::string_view what) const {
+        if (!m_simulate) {
+            throw std::logic_error(
+                std::format("DynamicThresholdScheme::{}: engine was built for "
+                            "evaluate only",
+                            what));
+        }
+    }
 
     std::pair<SizeType, SizeType> compute_max_allocations_needed() {
         SizeType max_active_per_stage = 0;
@@ -1618,11 +1637,12 @@ make_thresholds_cpu(std::span<const float> branching_pattern,
                     SizeType trials_start,
                     std::string_view mode,
                     int nthreads,
-                    std::optional<uint64_t> seed) {
+                    std::optional<uint64_t> seed,
+                    bool simulate) {
     return std::make_unique<ThresholdsCpuEngine>(
         branching_pattern, ref_ducy, nbins, ntrials, nprobs, prob_min,
         snr_final, nthresholds, ducy_max, wtsp, beam_width, trials_start, mode,
-        nthreads, seed);
+        nthreads, seed, simulate);
 }
 } // namespace detail
 

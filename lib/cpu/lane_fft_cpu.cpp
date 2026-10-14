@@ -108,14 +108,72 @@ inline void transpose8(const std::array<const float*, kBlock>& src,
 #endif
 static_assert(kLanes % kBlock == 0, "kLanes must be a multiple of the block");
 
+#if defined(__AVX512F__)
+/// dst[c][0..16) = src[0..16)[c] for a 16 x 16 block of floats.
+[[gnu::always_inline]] inline void
+transpose16(const std::array<const float*, kLanes>& src,
+            float* __restrict__ dst) noexcept {
+    // NOLINTBEGIN(modernize-avoid-c-arrays): std::array drops the vector alignment attribute
+    __m512 r[16];
+    __m512 t[16];
+    // NOLINTEND(modernize-avoid-c-arrays)
+    for (SizeType i = 0; i < 16; ++i) {
+        r[i] = _mm512_loadu_ps(src[i]);
+    }
+    // 32-bit interleave within 128-bit lanes, then 64-bit.
+    for (SizeType i = 0; i < 16; i += 2) {
+        t[i]     = _mm512_unpacklo_ps(r[i], r[i + 1]);
+        t[i + 1] = _mm512_unpackhi_ps(r[i], r[i + 1]);
+    }
+    for (SizeType i = 0; i < 16; i += 4) {
+        r[i] = _mm512_castpd_ps(_mm512_unpacklo_pd(_mm512_castps_pd(t[i]),
+                                                   _mm512_castps_pd(t[i + 2])));
+        r[i + 1] = _mm512_castpd_ps(_mm512_unpackhi_pd(
+            _mm512_castps_pd(t[i]), _mm512_castps_pd(t[i + 2])));
+        r[i + 2] = _mm512_castpd_ps(_mm512_unpacklo_pd(
+            _mm512_castps_pd(t[i + 1]), _mm512_castps_pd(t[i + 3])));
+        r[i + 3] = _mm512_castpd_ps(_mm512_unpackhi_pd(
+            _mm512_castps_pd(t[i + 1]), _mm512_castps_pd(t[i + 3])));
+    }
+    // r[4 g + j] holds column (4 l + j) of rows 4 g .. 4 g + 3 in 128-bit
+    // lane l. Gather the four row groups of each column: 128-bit shuffles.
+    for (SizeType j = 0; j < 4; ++j) {
+        const __m512 a = _mm512_shuffle_f32x4(r[j], r[4 + j], 0x44);
+        const __m512 b = _mm512_shuffle_f32x4(r[j], r[4 + j], 0xEE);
+        const __m512 c = _mm512_shuffle_f32x4(r[8 + j], r[12 + j], 0x44);
+        const __m512 d = _mm512_shuffle_f32x4(r[8 + j], r[12 + j], 0xEE);
+        // a = [g0 l0, g0 l1, g1 l0, g1 l1], c likewise for g2, g3.
+        _mm512_storeu_ps(dst + ((0 + j) * kLanes),
+                         _mm512_shuffle_f32x4(a, c, 0x88));
+        _mm512_storeu_ps(dst + ((4 + j) * kLanes),
+                         _mm512_shuffle_f32x4(a, c, 0xDD));
+        _mm512_storeu_ps(dst + ((8 + j) * kLanes),
+                         _mm512_shuffle_f32x4(b, d, 0x88));
+        _mm512_storeu_ps(dst + ((12 + j) * kLanes),
+                         _mm512_shuffle_f32x4(b, d, 0xDD));
+    }
+}
+#endif
+
 /// dst[c][lane] = rows[lane][c] for c < ncols; dst has a kLanes stride.
 void rows_to_lanes(const std::array<const float*, kLanes>& rows,
                    SizeType ncols,
                    float* __restrict__ dst) noexcept {
+    SizeType c0 = 0;
+#if defined(__AVX512F__)
+    static_assert(kLanes == 16, "transpose16 is a 16 x 16 block");
+    std::array<const float*, kLanes> src16{};
+    for (; c0 + kLanes <= ncols; c0 += kLanes) {
+        for (SizeType r = 0; r < kLanes; ++r) {
+            src16[r] = rows[r] + c0;
+        }
+        transpose16(src16, dst + (c0 * kLanes));
+    }
+#endif
     const SizeType nfull = ncols - (ncols % kBlock);
     std::array<const float*, kBlock> src{};
     std::array<float*, kBlock> out{};
-    for (SizeType c0 = 0; c0 < nfull; c0 += kBlock) {
+    for (; c0 < nfull; c0 += kBlock) {
         for (SizeType h = 0; h < kLanes; h += kBlock) {
             for (SizeType r = 0; r < kBlock; ++r) {
                 src[r] = rows[h + r] + c0;
@@ -160,17 +218,36 @@ void lanes_to_rows(const float* __restrict__ src,
 
 namespace {
 
-/// Radices of the direct transform, in stage order.
-constexpr std::array<SizeType, 7> kRadices{4, 2, 3, 5, 7, 11, 13};
+/// Odd radices of the direct transform, in stage order (after the powers
+/// of two).
+constexpr std::array<SizeType, 5> kOddRadices{3, 5, 7, 11, 13};
+/// Largest power-of-two radix.
+constexpr SizeType kMaxPow2Radix = 8;
 
-/// Whether n factors over kRadices.
+/// Whether n factors over 2 and kOddRadices.
 bool is_direct(SizeType n) noexcept {
-    for (const SizeType r : kRadices) {
+    n >>= std::countr_zero(n);
+    for (const SizeType r : kOddRadices) {
         while (n % r == 0) {
             n /= r;
         }
     }
     return n == 1;
+}
+
+/// Radices of 2^a in stage order: the fewest stages (passes over the
+/// buffers) with radices up to kMaxPow2Radix, as even as possible, larger
+/// radices first.
+std::vector<SizeType> pow2_radices(SizeType a) {
+    constexpr auto kMaxLog = std::countr_zero(kMaxPow2Radix);
+    const SizeType nstages = (a + kMaxLog - 1) / kMaxLog;
+    std::vector<SizeType> radices;
+    for (SizeType s = 0; s < nstages; ++s) {
+        const SizeType bits = (a + (nstages - s) - 1) / (nstages - s);
+        radices.push_back(SizeType{1} << bits);
+        a -= bits;
+    }
+    return radices;
 }
 
 /// Smallest 2^a 3^b 5^c >= n.
@@ -208,6 +285,68 @@ template <bool Inverse>
     return Inverse ? CBatch{-v.im, v.re} : CBatch{v.im, -v.re};
 }
 
+/// cos / sin (2 pi j / R), j < R / 2.
+template <SizeType R> struct RootTable {
+    std::array<float, R / 2> cos{};
+    std::array<float, R / 2> sin{};
+    RootTable() noexcept {
+        for (SizeType j = 0; j < R / 2; ++j) {
+            const auto [c, sn] = unit_root(j, R);
+            cos[j]             = static_cast<float>(c);
+            sin[j]             = static_cast<float>(sn);
+        }
+    }
+};
+
+/// v * e^(+-2 pi i j / R) (+: Inverse), j < R / 2.
+template <bool Inverse, SizeType R>
+[[gnu::always_inline]] inline CBatch root_mul(CBatch v, SizeType j) noexcept {
+    if (j == 0) {
+        return v;
+    }
+    if (4 * j == R) {
+        return rot<Inverse>(v);
+    }
+    static const RootTable<R> table;
+    const Batch c(table.cos[j]);
+    const Batch sn(Inverse ? table.sin[j] : -table.sin[j]);
+    return {xsimd::fms(v.re, c, v.im * sn), xsimd::fma(v.re, sn, v.im * c)};
+}
+
+/// The R-point DFT (R a power of two) of x, by radix-2 decimation in
+/// frequency down to the radix-4 butterfly.
+template <bool Inverse, SizeType R>
+[[gnu::always_inline]] inline std::array<CBatch, R>
+dft_pow2(const std::array<CBatch, R>& x) noexcept {
+    if constexpr (R == 2) {
+        return {cadd(x[0], x[1]), csub(x[0], x[1])};
+    } else if constexpr (R == 4) {
+        const CBatch apc = cadd(x[0], x[2]);
+        const CBatch amc = csub(x[0], x[2]);
+        const CBatch bpd = cadd(x[1], x[3]);
+        const CBatch jbd = rot<Inverse>(csub(x[1], x[3]));
+        return {cadd(apc, bpd), cadd(amc, jbd), csub(apc, bpd), csub(amc, jbd)};
+    } else {
+        constexpr SizeType kHalf = R / 2;
+        std::array<CBatch, kHalf> a;
+        std::array<CBatch, kHalf> b;
+#pragma GCC unroll 16
+        for (SizeType j = 0; j < kHalf; ++j) {
+            a[j] = cadd(x[j], x[j + kHalf]);
+            b[j] = root_mul<Inverse, R>(csub(x[j], x[j + kHalf]), j);
+        }
+        const auto ya = dft_pow2<Inverse, kHalf>(a);
+        const auto yb = dft_pow2<Inverse, kHalf>(b);
+        std::array<CBatch, R> y;
+#pragma GCC unroll 16
+        for (SizeType m = 0; m < kHalf; ++m) {
+            y[2 * m]       = ya[m];
+            y[(2 * m) + 1] = yb[m];
+        }
+        return y;
+    }
+}
+
 /// cos / sin (2 pi j k / R), j, k = 1 .. (R - 1) / 2, at [(j - 1) H + k - 1].
 template <SizeType R> struct OddRadixTable {
     static constexpr SizeType kH = (R - 1) / 2;
@@ -235,6 +374,8 @@ void radix_stage(const float* __restrict__ ar,
                  float* __restrict__ bi,
                  SizeType len,
                  SizeType stride,
+                 SizeType q0,
+                 SizeType qstep,
                  const float* __restrict__ tw) noexcept {
     constexpr SizeType kH = (R - 1) / 2;
     static const OddRadixTable<R> table;
@@ -243,7 +384,7 @@ void radix_stage(const float* __restrict__ ar,
     const SizeType n1 = len / R;
     for (SizeType p = 0; p < n1; ++p) {
         const float* wp = tw + (2 * (R - 1) * p);
-        for (SizeType q = 0; q < stride; ++q) {
+        for (SizeType q = q0; q < stride; q += qstep) {
             const SizeType in  = (q + (stride * p)) * kLanes;
             const SizeType ins = stride * n1 * kLanes;
             const SizeType out = (q + (stride * R * p)) * kLanes;
@@ -254,18 +395,8 @@ void radix_stage(const float* __restrict__ ar,
                     x[j] = load(ar, ai, in + (j * ins) + h);
                 }
                 std::array<CBatch, R> y;
-                if constexpr (R == 2) {
-                    y[0] = cadd(x[0], x[1]);
-                    y[1] = csub(x[0], x[1]);
-                } else if constexpr (R == 4) {
-                    const CBatch apc = cadd(x[0], x[2]);
-                    const CBatch amc = csub(x[0], x[2]);
-                    const CBatch bpd = cadd(x[1], x[3]);
-                    const CBatch jbd = rot<Inverse>(csub(x[1], x[3]));
-                    y[0]             = cadd(apc, bpd);
-                    y[1]             = cadd(amc, jbd);
-                    y[2]             = csub(apc, bpd);
-                    y[3]             = csub(amc, jbd);
+                if constexpr (std::has_single_bit(R)) {
+                    y = dft_pow2<Inverse, R>(x);
                 } else {
                     // Pair x[j] with x[R - j]: y[k], y[R - k] = P +- (+-i) Q.
                     std::array<CBatch, kH> sum;
@@ -310,11 +441,15 @@ void run_radix(const float* ar,
                float* bi,
                SizeType len,
                SizeType stride,
+               SizeType q0,
+               SizeType qstep,
                const float* tw) noexcept {
     if (len == R) {
-        radix_stage<Inverse, R, false>(ar, ai, br, bi, len, stride, tw);
+        radix_stage<Inverse, R, false>(ar, ai, br, bi, len, stride, q0, qstep,
+                                       tw);
     } else {
-        radix_stage<Inverse, R, true>(ar, ai, br, bi, len, stride, tw);
+        radix_stage<Inverse, R, true>(ar, ai, br, bi, len, stride, q0, qstep,
+                                      tw);
     }
 }
 
@@ -339,6 +474,8 @@ struct EVTransform::Plan {
     SizeType n;
     SizeType fft_size; // n, or the Bluestein convolution length
     std::vector<Stage> stages;
+    // Run the stages after the first one sub-transform by sub-transform.
+    bool depth_first{false};
     // Per stage, per butterfly p: w^(p k), k = 1 .. radix - 1, (re, im) of
     // the inverse transform (w = e^(2 pi i / len)); the forward one uses
     // their conjugates.
@@ -359,27 +496,40 @@ struct EVTransform::Plan {
             plan_stages();
             plan_bluestein();
         }
+        // Each point is one cache line per buffer, so a sub-transform of
+        // the first stage (every radix-th line) stays in L1 through the
+        // other stages up to 1024 points; it pays from 256 points (below
+        // that the whole transform fits L1). Not for odd factors: slower.
+        depth_first = stages.size() > 1 && std::has_single_bit(fft_size) &&
+                      fft_size >= 256 && fft_size <= 1024;
     }
 
     void plan_stages() {
+        std::vector<SizeType> radices =
+            pow2_radices(std::countr_zero(fft_size));
+        SizeType odd = fft_size >> std::countr_zero(fft_size);
+        for (const SizeType radix : kOddRadices) {
+            while (odd % radix == 0) {
+                radices.push_back(radix);
+                odd /= radix;
+            }
+        }
         SizeType len    = fft_size;
         SizeType stride = 1;
-        for (const SizeType radix : kRadices) {
-            while (len % radix == 0 && len > 1) {
-                stages.push_back({.radix    = radix,
-                                  .len      = len,
-                                  .stride   = stride,
-                                  .twiddles = twiddles.size()});
-                for (SizeType p = 0; p < len / radix; ++p) {
-                    for (SizeType k = 1; k < radix; ++k) {
-                        const auto [c, sn] = unit_root(p * k, len);
-                        twiddles.push_back(static_cast<float>(c));
-                        twiddles.push_back(static_cast<float>(sn));
-                    }
+        for (const SizeType radix : radices) {
+            stages.push_back({.radix    = radix,
+                              .len      = len,
+                              .stride   = stride,
+                              .twiddles = twiddles.size()});
+            for (SizeType p = 0; p < len / radix; ++p) {
+                for (SizeType k = 1; k < radix; ++k) {
+                    const auto [c, sn] = unit_root(p * k, len);
+                    twiddles.push_back(static_cast<float>(c));
+                    twiddles.push_back(static_cast<float>(sn));
                 }
-                len /= radix;
-                stride *= radix;
             }
+            len /= radix;
+            stride *= radix;
         }
     }
 
@@ -490,33 +640,70 @@ std::pair<float*, float*> EVTransform::run_stages(float* re,
     float* ai       = im;
     float* br       = in_z ? m_y_re : m_z_re;
     float* bi       = in_z ? m_y_im : m_z_im;
-    for (const Plan::Stage& st : m_plan->stages) {
+    const auto run  = [&](const Plan::Stage& st, SizeType q0, SizeType qstep) {
         const float* tw = m_plan->twiddles.data() + st.twiddles;
         switch (st.radix) {
         case 2:
-            run_radix<Inverse, 2>(ar, ai, br, bi, st.len, st.stride, tw);
+            run_radix<Inverse, 2>(ar, ai, br, bi, st.len, st.stride, q0, qstep,
+                                  tw);
             break;
         case 3:
-            run_radix<Inverse, 3>(ar, ai, br, bi, st.len, st.stride, tw);
+            run_radix<Inverse, 3>(ar, ai, br, bi, st.len, st.stride, q0, qstep,
+                                  tw);
             break;
         case 4:
-            run_radix<Inverse, 4>(ar, ai, br, bi, st.len, st.stride, tw);
+            run_radix<Inverse, 4>(ar, ai, br, bi, st.len, st.stride, q0, qstep,
+                                  tw);
             break;
         case 5:
-            run_radix<Inverse, 5>(ar, ai, br, bi, st.len, st.stride, tw);
+            run_radix<Inverse, 5>(ar, ai, br, bi, st.len, st.stride, q0, qstep,
+                                  tw);
+            break;
+        case 8:
+            run_radix<Inverse, 8>(ar, ai, br, bi, st.len, st.stride, q0, qstep,
+                                  tw);
+            break;
+        case 16:
+            run_radix<Inverse, 16>(ar, ai, br, bi, st.len, st.stride, q0, qstep,
+                                   tw);
             break;
         case 7:
-            run_radix<Inverse, 7>(ar, ai, br, bi, st.len, st.stride, tw);
+            run_radix<Inverse, 7>(ar, ai, br, bi, st.len, st.stride, q0, qstep,
+                                  tw);
             break;
         case 11:
-            run_radix<Inverse, 11>(ar, ai, br, bi, st.len, st.stride, tw);
+            run_radix<Inverse, 11>(ar, ai, br, bi, st.len, st.stride, q0, qstep,
+                                   tw);
             break;
         default:
-            run_radix<Inverse, 13>(ar, ai, br, bi, st.len, st.stride, tw);
+            run_radix<Inverse, 13>(ar, ai, br, bi, st.len, st.stride, q0, qstep,
+                                   tw);
             break;
         }
         std::swap(ar, br);
         std::swap(ai, bi);
+    };
+    const auto& stages = m_plan->stages;
+    if (!m_plan->depth_first) {
+        for (const Plan::Stage& st : stages) {
+            run(st, 0, 1);
+        }
+        return {ar, ai};
+    }
+    // The first stage over all points; then each of its radix sub-transforms
+    // (points q + radix m) through the remaining stages while it is in L1.
+    run(stages.front(), 0, 1);
+    float* const sr    = ar;
+    float* const si    = ai;
+    const SizeType sub = stages.front().radix;
+    for (SizeType q = 0; q < sub; ++q) {
+        ar = sr;
+        ai = si;
+        br = sr == m_z_re ? m_y_re : m_z_re;
+        bi = sr == m_z_re ? m_y_im : m_z_im;
+        for (SizeType s = 1; s < stages.size(); ++s) {
+            run(stages[s], q, sub);
+        }
     }
     return {ar, ai};
 }

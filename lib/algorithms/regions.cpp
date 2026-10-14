@@ -36,13 +36,20 @@ SizeType estimate_brutefold_table_bytes(bool use_fourier,
         return 0;
     }
     if (use_fourier) {
-        // delta_phasors_r/i allocated during Fourier brute-fold init.
-        return 2ULL * sizeof(float) * nfreqs * segment_len;
+        // Direct Fourier fold (brute_fold_ts_complex): per frequency a table
+        // of min(segment_len, 64) rows of nbins/2 + 1 (re, im) pairs padded
+        // to 16 floats, and for longer segments the sub-block phasors.
+        constexpr SizeType kSub   = 64;
+        const SizeType nbins_f    = (nbins / 2) + 1;
+        const SizeType row_floats = ((2 * nbins_f) + 15) / 16 * 16;
+        const SizeType sub        = std::min(segment_len, kSub);
+        const SizeType nsub       = (segment_len + sub - 1) / sub;
+        const SizeType g_floats   = nsub > 1 ? nsub * 2 * nbins_f : 0;
+        return sizeof(float) * nfreqs * ((sub * row_floats) + g_floats);
     }
     // Upper bound on the phase-run table: one (end, bin) pair per sample,
     // plus the per-frequency offsets. A period-capped segment stores far
     // fewer runs (about nbins per frequency).
-    (void)nbins;
     return (sizeof(std::uint32_t) * 2ULL * nfreqs * segment_len) +
            (sizeof(SizeType) * (nfreqs + 1ULL));
 }
@@ -1007,6 +1014,11 @@ SizeType FFARegionPlanner<FoldType>::get_nregions() const noexcept {
 template <SupportedFoldType FoldType>
 const FFARegionStats& FFARegionPlanner<FoldType>::get_stats() const noexcept {
     return m_impl->get_stats();
+}
+template <SupportedFoldType FoldType>
+const std::vector<coord::FFAChunkStats>&
+FFARegionPlanner<FoldType>::get_chunk_stats() const noexcept {
+    return m_impl->get_chunk_stats();
 }
 
 template class FFARegionPlanner<float>;

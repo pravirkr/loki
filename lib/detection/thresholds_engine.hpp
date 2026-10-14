@@ -56,6 +56,8 @@ public:
     virtual std::vector<float> get_best_path_thresholds(float min_pd) const = 0;
 };
 
+/// @p simulate = false builds an engine for evaluate() only: no simulation
+/// pools and no stage-0 states; run(), save() and the state getters throw.
 std::unique_ptr<ThresholdsEngine>
 make_thresholds_cpu(std::span<const float> branching_pattern,
                     float ref_ducy,
@@ -71,7 +73,8 @@ make_thresholds_cpu(std::span<const float> branching_pattern,
                     SizeType trials_start,
                     std::string_view mode,
                     int nthreads,
-                    std::optional<uint64_t> seed);
+                    std::optional<uint64_t> seed,
+                    bool simulate = true);
 
 std::unique_ptr<ThresholdsEngine>
 make_thresholds_gpu(std::span<const float> branching_pattern,

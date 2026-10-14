@@ -94,6 +94,20 @@ template <typename F> auto call_psrio(F&& fn) -> decltype(fn()) {
     throw error_check::DetailedException("unhandled timeseries path");
 }
 
+[[nodiscard]] psrio::TimeSeriesReader
+open_reader(const std::filesystem::path& path) {
+    switch (kind_from_path(path)) {
+    case FileKind::kTim:
+        return call_psrio([&] { return psrio::TimeSeriesReader(path); });
+    case FileKind::kDat: {
+        auto inf = path;
+        inf.replace_extension(".inf");
+        return call_psrio([&] { return psrio::TimeSeriesReader(path, inf); });
+    }
+    }
+    throw error_check::DetailedException("unhandled timeseries path");
+}
+
 } // namespace
 
 class TimeSeries::Impl {
@@ -175,6 +189,11 @@ TimeSeries TimeSeries::read(const std::filesystem::path& path,
     series.m_impl->header.tsamp    = tsamp;
     series.m_impl->header.nsamples = series.get_nsamps();
     return series;
+}
+
+TimeSeriesInfo TimeSeries::read_info(const std::filesystem::path& path) {
+    const psrio::TimeSeriesReader reader = open_reader(path);
+    return {.nsamps = reader.nsamples(), .dt = reader.dt()};
 }
 
 PreprocessReport TimeSeries::preprocess(const PreprocessOptions& options,

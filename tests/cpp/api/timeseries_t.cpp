@@ -157,3 +157,18 @@ TEST_CASE("timeseries z-score scales a varying series", "[io]") {
     REQUIRE_THAT(stddev, WithinAbs(1.0, 1e-3));
     REQUIRE(loaded.get_ts_v()[0] == 1.0F);
 }
+
+TEST_CASE("timeseries read_info returns the header without the samples",
+          "[io]") {
+    const TempDir dir;
+    const std::vector<float> samples(1000, 0.5F);
+    const std::vector<float> variance(samples.size(), 1.0F);
+    const loki::io::TimeSeries series(samples, variance, 1.28e-4);
+    const auto path = dir.path() / "info.tim";
+    series.write(path);
+
+    const auto info = loki::io::TimeSeries::read_info(path);
+    REQUIRE(info.nsamps == samples.size());
+    REQUIRE_THAT(info.dt, WithinAbs(1.28e-4, 0.0));
+    REQUIRE_THROWS(loki::io::TimeSeries::read_info(dir.path() / "none.tim"));
+}
