@@ -13,13 +13,16 @@
 
 #include <spdlog/spdlog.h>
 
+#include "loki/common/backend.hpp"
 #include "loki/common/coord.hpp"
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
 
+#include "lib/algorithms/ep_memory_cuda.hpp"
 #include "lib/algorithms/planner_cost.hpp"
 #include "lib/algorithms/planner_memory.hpp"
+#include "lib/common/dispatch.hpp"
 #include "lib/detail/error_check.hpp"
 #include "lib/detail/index_limits.hpp"
 #include "lib/detail/utils.hpp"
@@ -107,6 +110,38 @@ PlanMaxima to_maxima(const ChunkEval& eval) noexcept {
         .scores_scratch  = eval.scores_scratch,
         .brutefold_bytes = eval.brutefold_bytes,
     };
+}
+
+/// The configuration the sweep of @p exec is planned with. A GPU sweep
+/// allocates on the device, so its limit is also capped by the free device
+/// memory less detail::kDeviceReserveGB (host memory is not checked).
+search::FFASearchConfig cfg_for_exec(const search::FFASearchConfig& cfg,
+                                     const Exec& exec) {
+    if (exec.backend == Backend::kCPU) {
+        return cfg;
+    }
+#ifdef LOKI_ENABLE_GPU
+    if (exec.backend == loki::detail::kGPUBackend) {
+        const double free_gb   = detail::ep_cuda_free_memory_gb(exec.device);
+        const double usable_gb = free_gb - detail::kDeviceReserveGB;
+        if (usable_gb < 1.0) {
+            throw std::runtime_error(
+                std::format("Insufficient GPU memory: {:.2f} GB available, "
+                            "need at least 1 GB",
+                            usable_gb));
+        }
+        const double user_limit = cfg.get_max_process_memory_gb();
+        const double limit_gb   = std::min(user_limit, usable_gb);
+        spdlog::info("FFARegionPlanner: GPU {} has {:.2f} GB free, {:.2f} GB "
+                     "usable; chunking budget {:.2f} GB (user limit {:.2f} "
+                     "GB)",
+                     exec.device, free_gb, usable_gb, limit_gb, user_limit);
+        auto capped = cfg;
+        capped.set_max_process_memory_gb(limit_gb);
+        return capped;
+    }
+#endif
+    loki::detail::throw_unavailable("FFARegionPlanner", exec.backend);
 }
 } // namespace
 
@@ -994,6 +1029,11 @@ template <SupportedFoldType FoldType>
 FFARegionPlanner<FoldType>::FFARegionPlanner(const search::FFASearchConfig& cfg,
                                              bool use_gpu)
     : m_impl(std::make_unique<Impl>(cfg, use_gpu)) {}
+template <SupportedFoldType FoldType>
+FFARegionPlanner<FoldType>::FFARegionPlanner(const search::FFASearchConfig& cfg,
+                                             Exec exec)
+    : m_impl(std::make_unique<Impl>(cfg_for_exec(cfg, exec),
+                                    exec.backend != Backend::kCPU)) {}
 template <SupportedFoldType FoldType>
 FFARegionPlanner<FoldType>::~FFARegionPlanner() = default;
 template <SupportedFoldType FoldType>

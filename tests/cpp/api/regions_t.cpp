@@ -8,11 +8,14 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
+#include "loki/common/backend.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
 
 using Catch::Matchers::ContainsSubstring;
+using loki::Backend;
 using loki::ComplexType;
+using loki::Exec;
 using loki::ParamLimit;
 using loki::SizeType;
 using loki::algorithms::FFARegionPlanner;
@@ -246,5 +249,66 @@ TEST_CASE("generate_ffa_regions splits a capped bin count into octave bands",
     }
     for (SizeType i = 0; i + 1 < regions.size(); ++i) {
         CHECK(std::abs(regions[i].f_start - regions[i + 1].f_end) < kTol);
+    }
+}
+
+// --- FFARegionPlanner(cfg, Exec): the plan the sweep of that backend runs ---
+
+namespace {
+
+PulsarSearchConfig make_exec_planner_cfg(double max_memory_gb) {
+    const std::vector<ParamLimit> param_limits = {
+        {.min = -10.0, .max = 10.0},
+        {.min = 1.0, .max = 20.0},
+    };
+    return {1U << 14U, 1e-3, /*nbins=*/32, /*eta=*/1.0, param_limits,
+            0.2,       1.5,  true,         1,           max_memory_gb};
+}
+
+template <typename A, typename B> bool same_chunks(const A& a, const B& b) {
+    const auto& ca = a.get_chunk_stats();
+    const auto& cb = b.get_chunk_stats();
+    if (ca.size() != cb.size() || a.get_cfgs().size() != b.get_cfgs().size()) {
+        return false;
+    }
+    for (SizeType i = 0; i < ca.size(); ++i) {
+        if (ca[i].nominal_f_start != cb[i].nominal_f_start ||
+            ca[i].nominal_f_end != cb[i].nominal_f_end) {
+            return false;
+        }
+    }
+    return true;
+}
+
+} // namespace
+
+TEST_CASE("FFARegionPlanner with Exec plans as the backend's sweep",
+          "[regions]") {
+    const auto cfg = make_exec_planner_cfg(2.0);
+    SECTION("CPU: same plan as use_gpu = false") {
+        const FFARegionPlanner<ComplexType> by_exec(cfg, Exec::cpu());
+        const FFARegionPlanner<ComplexType> by_flag(cfg, false);
+        CHECK(same_chunks(by_exec, by_flag));
+    }
+    SECTION("CUDA: same plan as use_gpu = true below the free memory") {
+        if (!loki::is_available(Backend::kCUDA)) {
+            SKIP("needs a CUDA build");
+        }
+        const FFARegionPlanner<ComplexType> by_exec(cfg, Exec::cuda(0));
+        const FFARegionPlanner<ComplexType> by_flag(cfg, true);
+        CHECK(same_chunks(by_exec, by_flag));
+        CHECK(by_exec.get_cfgs().front().get_max_process_memory_gb() == 2.0);
+    }
+    SECTION("CUDA: a limit above the device memory is capped") {
+        if (!loki::is_available(Backend::kCUDA)) {
+            SKIP("needs a CUDA build");
+        }
+        constexpr double kHuge = 1.0e6;
+        const FFARegionPlanner<ComplexType> planner(
+            make_exec_planner_cfg(kHuge), Exec::cuda(0));
+        const double limit =
+            planner.get_cfgs().front().get_max_process_memory_gb();
+        CHECK(limit < kHuge);
+        CHECK(planner.get_stats().get_freq_sweep_memory_usage() <= limit);
     }
 }

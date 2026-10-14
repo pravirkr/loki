@@ -88,11 +88,11 @@ another on one stream, so the model has one worker whatever `nthreads` is
 **Which memory.** On CUDA, `max_process_memory_gb` means device memory only.
 Host memory is never checked. Result snapshots are bounded to one active write
 and one waiting payload, in addition to the producer snapshot and inputs.
-The model fits execution buffers. Threshold selection/evaluation currently
-allocates separate CUDA simulation workspaces without a user-budget check;
-tail buffers and temporary growth peaks are covered by fixed reserves. Budget fitting therefore does not yet bound every planning/transient
-allocation.
-As for `FFAFreqSweep`, the plan is fitted to
+The model fits execution buffers. Threshold selection and evaluation
+allocate separate CUDA simulation workspaces that are not checked against
+the limit, and tail buffers and temporary peaks are covered by fixed
+reserves, so the budget does not yet bound every planning or transient
+allocation. As for `FFAFreqSweep`, the plan is fitted to
 
 ```text
 limit = min(max_process_memory_gb, free device memory - kDeviceReserveGB)   (1 GB)
@@ -134,8 +134,7 @@ Differences from the CPU policy:
   small FFA arrays (counts, offsets, limits) are not in the exact model.
   `kDeviceReserveGB` (1 GB) is what the GPU planners leave for the CUDA
   context, kernel images and those arrays, and the unmodelled reserve
-  (0.5 GB) is a second margin. Before cuFFT was removed (memory model 9) it
-  was 1.5 GB when the sweep retained plans for several sizes.
+  (0.5 GB) is a second margin.
 - The preferred batch is 2^16 parents on the GPU (`kEPBatchSizeCuda`) and 1024 on the
   CPU (`kEPBatchSize`). A batch is one kernel round trip and one world-tree
   synchronisation, so the GPU needs a large one: at 1024, one run of 2^25
@@ -146,10 +145,10 @@ Differences from the CPU policy:
   to force a fit. The chosen batch is stored per chunk
   and of the cache, which records it. On the GPU, a run that overflows the
   world tree trims at batch boundaries, so results can depend on the batch.
-- CUDA pruning uses on-chip transforms. The FFA stage's GPU transforms keep
-  no plans or work area, only the small Bluestein tables. The CPU sweep keeps
-  one `CpuFFT` per pruning worker; the host FFT tables themselves are small,
-  immutable and shared by all threads.
+- Neither backend keeps FFT plans or scratch for pruning: CUDA inverts on
+  chip, the CPU with the lane FFT inside its scoring tiles. The FFA stage's
+  GPU transforms keep only the small Bluestein tables; the host FFT tables
+  are small, immutable and shared by all threads.
 - `PruneRFIConfig` (pulsar mask, harvesting, impulsive veto) is not implemented
   on CUDA: an active one is rejected with `std::invalid_argument`.
 
@@ -171,9 +170,11 @@ kernel (`lib/cuda/ffa_score_cuda.cu`; Fourier folds add an on-chip inverse
 FFT, `ffa_score_fourier_impl.cuh`: a direct transform for a power-of-two
 `nbins` from 32, Bluestein's algorithm through power-of-two transforms for
 any other `nbins` up to 1024, both on the portable block FFT
-`ffa_portable_fft.cuh`; see `docs/fft.md`). Accel searches also resolve the final level's
-coordinates on the fly instead of storing them. The planner models what that
-path allocates (`planner_memory.hpp`):
+`ffa_portable_fft.cuh`; see `docs/fft.md`). Accel searches also resolve the
+final level's coordinates on the fly instead of storing them. The plan is
+fitted to `min(max_process_memory_gb, free device memory - kDeviceReserveGB)`
+(`FFARegionPlanner(cfg, Exec)`, which `loki search ffa --dry-run` also uses),
+and the planner models what the fused path allocates (`planner_memory.hpp`):
 
 | Term | Contents |
 | --- | --- |

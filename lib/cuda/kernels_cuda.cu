@@ -20,9 +20,6 @@ namespace loki::core {
 
 namespace {
 
-using detail::div_by_nbins;
-using detail::fourier_phase;
-
 // Profile offset (segment, coord) * stride. The factors fit in 32 bits, but
 // the product does not once a level is larger than 4 GiB (frequency-only
 // FFA at nsamps 2^25). A 64-bit product matches the 32-bit one when the
@@ -247,12 +244,11 @@ __launch_bounds__(256, 4) void kernel_shift_add_ascend_linear_complex(
         const uint32_t ffa_idx_seg  = indices_ffa[leaf_seg_idx];
         const uint32_t segment_idx  = indices_segment[iseg];
 
-        // Phase factor: same formula as old kernel, but phase_shift is now
-        // the fractional bin shift (not an index), matching CPU semantics
-        // exp(-2πi * k * phase_shift / nbins)
-        const float phase = fourier_phase(k, phase_shift[leaf_seg_idx], nbins);
-        float cosv, sinv;
-        __sincosf(phase, &sinv, &cosv);
+        // exp(-2πi * k * phase_shift / nbins); phase_shift is the fractional
+        // bin shift (not an index), matching CPU semantics
+        float cosv;
+        float sinv;
+        detail::ep_phasor(k, phase_shift[leaf_seg_idx], nbins, cosv, sinv);
 
         // folds_ffa layout: segment_idx * n_coords_init * stride + ffa_idx_seg
         // * stride

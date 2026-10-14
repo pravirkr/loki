@@ -402,8 +402,9 @@ SearchDims dry_run_dims(const loki::search::FFATomlConfig& cfg,
 /// Plans the FFA chunks of @p cfg (no sweep buffers) and prints them.
 template <loki::SupportedFoldType FoldType>
 void print_ffa_plan(const loki::search::FFASearchConfig& cfg, loki::Exec exec) {
-    const bool use_gpu = exec.backend != loki::Backend::kCPU;
-    const loki::algorithms::FFARegionPlanner<FoldType> planner(cfg, use_gpu);
+    // On a GPU, the planner caps the limit by the device's free memory, as
+    // the sweep does, so the plan printed is the one the sweep would run.
+    const loki::algorithms::FFARegionPlanner<FoldType> planner(cfg, exec);
     const auto& cfgs   = planner.get_cfgs();
     const auto& chunks = planner.get_chunk_stats();
     std::cout << std::format(
@@ -411,11 +412,9 @@ void print_ffa_plan(const loki::search::FFASearchConfig& cfg, loki::Exec exec) {
         "GB against a limit of {:.3f} GB\n",
         cfgs.size(), cfg.get_nsamps(), cfg.get_tobs(),
         planner.get_stats().get_freq_sweep_memory_usage(),
-        cfg.get_max_process_memory_gb());
-    if (use_gpu) {
-        std::cout << "The GPU sweep also caps the limit by the free device "
-                     "memory, which a dry run does not query.\n";
-    }
+        planner.get_cfgs().empty()
+            ? cfg.get_max_process_memory_gb()
+            : planner.get_cfgs().front().get_max_process_memory_gb());
     std::cout << std::format("{:>6} {:>6} {:>23} {:>23} {:>9}\n", "chunk",
                              "nbins", "nominal f [Hz]", "actual f [Hz]",
                              "mem [GB]");

@@ -3,6 +3,7 @@
 #include <memory>
 #include <vector>
 
+#include "loki/common/backend.hpp"
 #include "loki/common/coord.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
@@ -158,6 +159,15 @@ public:
      */
     explicit FFARegionPlanner(const search::FFASearchConfig& cfg,
                               bool use_gpu = false);
+    /**
+     * @brief The plan the FFAFreqSweep of @p exec runs. Backend::kCPU plans
+     * as `use_gpu = false`. A GPU backend plans as `use_gpu = true` against
+     * the smaller of max_process_memory_gb and the free memory of
+     * `exec.device` less a fixed reserve, as the GPU sweep does.
+     * @throws std::runtime_error if the device has less than 1 GB usable.
+     * @throws std::invalid_argument if this build lacks the backend.
+     */
+    FFARegionPlanner(const search::FFASearchConfig& cfg, Exec exec);
 
     // --- Rule of five: PIMPL ---
     ~FFARegionPlanner();

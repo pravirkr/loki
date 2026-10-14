@@ -30,6 +30,7 @@ kernel_ffa_complex_iter_sweep(const ComplexTypeCUDA* __restrict__ fold_in,
                               uint32_t nsegments,
                               uint32_t segs_per_thread,
                               uint32_t nbins_f,
+                              float nbins,
                               float inv_nbins) {
     const size_t tid =
         (static_cast<size_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
@@ -47,10 +48,10 @@ kernel_ffa_complex_iter_sweep(const ComplexTypeCUDA* __restrict__ fold_in,
         min(static_cast<size_t>(nsegments), seg_begin + segs_per_thread));
 
     const TailHeadF th = parents.get(icoord);
-    const Phasor ph    = fourier_phasor(k, th.shift_head, inv_nbins);
+    const Phasor ph    = fourier_phasor(k, th.shift_head, nbins, inv_nbins);
     Phasor pt{1.0F, 0.0F};
     if constexpr (Parents::kTailShift) {
-        pt = fourier_phasor(k, th.shift_tail, inv_nbins);
+        pt = fourier_phasor(k, th.shift_tail, nbins, inv_nbins);
     }
     const uint32_t stride = 2 * nbins_f;
     for (auto iseg = static_cast<uint32_t>(seg_begin); iseg < seg_end; ++iseg) {
@@ -99,7 +100,7 @@ void launch_complex_iter_sweep(const ComplexTypeCUDA* fold_in,
         fold_in, fold_out, parents, static_cast<uint32_t>(ncoords_cur),
         static_cast<uint32_t>(ncoords_prev), static_cast<uint32_t>(nsegments),
         static_cast<uint32_t>(segs_per_thread), static_cast<uint32_t>(nbins_f),
-        1.0F / static_cast<float>(nbins));
+        static_cast<float>(nbins), 1.0F / static_cast<float>(nbins));
     cuda_utils::check_last_cuda_error(
         "kernel_ffa_complex_iter_sweep launch failed");
 }
@@ -209,6 +210,7 @@ kernel_ffa_complex_freq_fuse(const ComplexTypeCUDA* __restrict__ fold_in,
                              uint32_t ncoords_in,
                              uint32_t ncoords_out,
                              uint32_t nbins_f,
+                             float nbins,
                              float inv_nbins) {
     constexpr int kCap      = 1 << K;
     const uint32_t stride   = 2U * nbins_f;
@@ -266,7 +268,8 @@ kernel_ffa_complex_freq_fuse(const ComplexTypeCUDA* __restrict__ fold_in,
             const uint32_t child = item / nbins_f;
             const uint32_t k     = item - (child * nbins_f);
             const uint32_t local = s_local[child];
-            const Phasor ph      = fourier_phasor(k, s_shift[child], inv_nbins);
+            const Phasor ph =
+                fourier_phasor(k, s_shift[child], nbins, inv_nbins);
             const Phasor one{1.0F, 0.0F};
             for (uint32_t seg = 0; seg < nseg_out; ++seg) {
                 const ComplexTypeCUDA* tail =
@@ -348,7 +351,7 @@ void launch_complex_freq_fuse(const ComplexTypeCUDA* fold_in,
     kernel_ffa_complex_freq_fuse<K>
         <<<static_cast<unsigned>(nblocks), kThreads, smem, stream>>>(
             fold_in, fold_out, levels, ncoords_in, ncoords_out, nbins_f,
-            1.0F / static_cast<float>(nbins));
+            static_cast<float>(nbins), 1.0F / static_cast<float>(nbins));
     cuda_utils::check_last_cuda_error(
         "kernel_ffa_complex_freq_fuse launch failed");
 }

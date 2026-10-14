@@ -17,6 +17,7 @@
 #include <thrust/device_vector.h>
 
 #include "loki/algorithms/regions.hpp"
+#include "loki/common/backend.hpp"
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
@@ -310,43 +311,13 @@ private:
 
     memory::DeviceCounter m_passing_counter;
 
-    // Helper function to create region planner with GPU memory considerations
+    // The plan of FFARegionPlanner(Exec::cuda): the memory limit capped by
+    // the device's free memory less the reserve (shared with the dry run).
     static algorithms::FFARegionPlanner<HostFoldT>
     create_region_planner(const search::FFASearchConfig& base_cfg,
                           int device_id) {
-        cuda_utils::CudaSetDeviceGuard device_guard(device_id);
-        // Query CUDA memory usage
-        const auto [free_mem_gb, total_mem_gb] =
-            cuda_utils::get_cuda_memory_usage();
-
-        // Reserve memory for overhead
-        // For the CUDA runtime, kernels, etc.
-        const double usable_gpu_gb =
-            free_mem_gb - algorithms::detail::kDeviceReserveGB;
-
-        spdlog::info("GPU Memory: {:.2f} GB total, {:.2f} GB free, {:.2f} GB "
-                     "usable for chunking",
-                     total_mem_gb, free_mem_gb, usable_gpu_gb);
-
-        if (usable_gpu_gb < 1.0) {
-            throw std::runtime_error(
-                std::format("Insufficient GPU memory: {:.2f} GB available, "
-                            "need at least 1 GB",
-                            usable_gpu_gb));
-        }
-
-        const double user_limit   = base_cfg.get_max_process_memory_gb();
-        const double gpu_limit_gb = std::min(user_limit, usable_gpu_gb);
-        spdlog::info("Using {:.2f} GB GPU chunking budget (user limit {:.2f} "
-                     "GB, usable GPU {:.2f} GB)",
-                     gpu_limit_gb, user_limit, usable_gpu_gb);
-
-        auto cfg_with_gpu_mem = base_cfg;
-        cfg_with_gpu_mem.set_max_process_memory_gb(gpu_limit_gb);
-
-        // Create region planner with GPU memory limit
-        return algorithms::FFARegionPlanner<HostFoldT>(cfg_with_gpu_mem,
-                                                       /*use_gpu=*/true);
+        return algorithms::FFARegionPlanner<HostFoldT>(base_cfg,
+                                                       Exec::cuda(device_id));
     }
 
     // A fused chunk whose GPU work is queued: its core, and the scratch slot
