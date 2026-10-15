@@ -75,8 +75,10 @@ SizeType score_and_filter_max_kadane_with_cache_impl(
 
 #pragma omp simd reduction(+ : sum)
             for (SizeType j = 0; j < nbins; ++j) {
-                float const val = ts_e_ptr[j] / std::sqrt(ts_v_ptr[j]);
-                dst[j]          = val;
+                float const v = ts_v_ptr[j];
+                float const val =
+                    (v > 0.0F) ? (ts_e_ptr[j] / std::sqrt(v)) : 0.0F;
+                dst[j] = val;
                 sum += val;
             }
             for (SizeType j = nbins; j < nbins_simd; ++j) {
@@ -180,8 +182,10 @@ SizeType score_and_filter_max_kadane_with_cache_impl(
         const float* __restrict__ ts_v_ptr = ts_e_ptr + nbins;
         float total_sum                    = 0.0F;
         for (SizeType j = 0; j < nbins; ++j) {
-            fold_norm[j] = ts_e_ptr[j] * (1.0F / std::sqrt(ts_v_ptr[j]));
-            total_sum += fold_norm[j];
+            float const v   = ts_v_ptr[j];
+            float const val = (v > 0.0F) ? (ts_e_ptr[j] / std::sqrt(v)) : 0.0F;
+            fold_norm[j]    = val;
+            total_sum += val;
         }
         const float mean_val = total_sum / static_cast<float>(nbins);
         float max_snr        = std::numeric_limits<float>::lowest();
