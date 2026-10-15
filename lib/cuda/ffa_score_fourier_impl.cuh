@@ -177,7 +177,8 @@ __launch_bounds__(FFT::max_threads_per_block) void kernel_final_score_c2c(
     const uint32_t n        = kChirp ? nbins : M;
     const uint32_t nf       = (n / 2) + 1;
     const uint32_t pitch    = n | 1U;
-    const float inv_n       = 1.0F / static_cast<float>(n);
+    const auto n_f          = static_cast<float>(n);
+    const float inv_n       = 1.0F / n_f;
     const uint32_t tid      = (threadIdx.y * blockDim.x) + threadIdx.x;
     const uint32_t nthreads = blockDim.x * blockDim.y;
     const uint32_t p0       = args.profile_begin + (blockIdx.x * kPB);
@@ -212,8 +213,8 @@ __launch_bounds__(FFT::max_threads_per_block) void kernel_final_score_c2c(
             Phasor mine{1.0F, 0.0F};
             if (lane_j < static_cast<uint32_t>(Rows::kShifts) &&
                 (kTailShift || (lane_j % 2) == 1)) {
-                mine =
-                    fourier_phasor(FFT::stride, s_src[q].shift[lane_j], inv_n);
+                mine = fourier_phasor(FFT::stride, s_src[q].shift[lane_j], n_f,
+                                      inv_n);
             }
 #pragma unroll
             for (int j = 0; j < Rows::kShifts; ++j) {
@@ -232,9 +233,11 @@ __launch_bounds__(FFT::max_threads_per_block) void kernel_final_score_c2c(
 #pragma unroll
             for (int j = 0; j < Rows::kShifts; ++j) {
                 if (kTailShift || (j % 2) == 1) {
-                    ph[j] = fourier_phasor(threadIdx.x, rs.shift[j], inv_n);
+                    ph[j] =
+                        fourier_phasor(threadIdx.x, rs.shift[j], n_f, inv_n);
                     if constexpr (!kShareSteps) {
-                        st[j] = fourier_phasor(FFT::stride, rs.shift[j], inv_n);
+                        st[j] = fourier_phasor(FFT::stride, rs.shift[j], n_f,
+                                               inv_n);
                     }
                 } else {
                     ph[j] = Phasor{1.0F, 0.0F};

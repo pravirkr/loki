@@ -23,11 +23,11 @@
 #include "lib/detail/error_check.hpp"
 #include "lib/detail/nvtx.hpp"
 #include "lib/detail/timing.hpp"
+#include "lib/detail/utils.hpp"
 #include "lib/detection/score_engine.hpp"
 #include "lib/pipelines/ffa_freq_sweep_engine.hpp"
 #include "lib/search/cands.hpp"
 #include "lib/search/ffa_sweep_candidates.hpp"
-#include "lib/utils/fft_impl.hpp"
 #include "lib/utils/workspace_impl.hpp"
 
 namespace loki::pipelines {
@@ -50,28 +50,16 @@ public:
         m_ffa_workspace = memory::FFAWorkspaceCPU<FoldType>(
             planner_stats.get_max_buffer_size(),
             planner_stats.get_max_coord_size(), m_base_cfg.get_nparams());
-        if constexpr (std::is_same_v<FoldType, ComplexType>) {
-            const auto& cfgs = m_region_planner.get_cfgs();
-            std::vector<SizeType> n_reals;
-            n_reals.reserve(cfgs.size());
-            for (const auto& cfg : cfgs) {
-                n_reals.push_back(cfg.get_nbins());
-            }
-            m_fft_manager.prepare_plans(n_reals);
-        }
         m_write_param_sets_batch.resize(
             planner_stats.get_write_param_sets_size());
         m_width_batch.resize(algorithms::kFFAFreqSweepWriteBatchSize);
         m_nbins_batch.resize(algorithms::kFFAFreqSweepWriteBatchSize);
-        // Frequency-only time-domain chunks score inside the top cone band,
-        // so the final fold and the dense score array are not allocated.
-        const bool score_in_band =
-            !m_base_cfg.get_use_fourier() && m_base_cfg.get_nparams() == 1;
-        if (!score_in_band) {
-            m_scores_chunk.resize(planner_stats.get_max_scores_scratch_size());
+        // Chunks score in scratch (see execute_ffa_region), so there is no
+        // dense score array. The second ping-pong buffer of the merges is
+        // not needed by frequency-only time-domain cone bands.
+        if (m_base_cfg.get_use_fourier() || m_base_cfg.get_nparams() > 1) {
             m_fold_time.resize(planner_stats.get_max_buffer_size_time());
         }
-        validate_scratch_sizes();
 
         if (m_base_cfg.get_use_boxcar_kadane()) {
             throw std::invalid_argument(
@@ -161,32 +149,14 @@ private:
     bool m_show_progress;
 
     memory::FFAWorkspaceCPU<FoldType> m_ffa_workspace;
-    math::FFTWManager m_fft_manager;
     SizeType m_total_passing_scores{};
-    // Per-chunk raw score scratch; overwritten by every chunk.
-    std::vector<float> m_scores_chunk;
     std::vector<double> m_write_param_sets_batch;
     std::vector<std::uint16_t> m_width_batch;
     std::vector<std::uint16_t> m_nbins_batch;
 
     search::FFAStatsCollection m_ffa_stats;
     // Persistent input/output buffers
-    std::vector<float> m_fold_time;
-
-    /// @brief Assert the planner-derived scratch sizes cover every chunk.
-    void validate_scratch_sizes() const {
-        if (m_scores_chunk.empty()) {
-            return;
-        }
-        for (SizeType i = 0; i < m_region_decode.size(); ++i) {
-            error_check::check_less_equal(
-                m_region_decode[i].get_n_scores(), m_scores_chunk.size(),
-                std::format("FFAFreqSweep: chunk {} needs {} score slots but "
-                            "the planner only sized the scratch for {}",
-                            i, m_region_decode[i].get_n_scores(),
-                            m_scores_chunk.size()));
-        }
-    }
+    utils::UninitVector<float> m_fold_time;
 
     void execute_ffa_region(std::span<const float> ts_e,
                             std::span<const float> ts_v,
@@ -198,9 +168,9 @@ private:
         // Create FFA with shared workspace
         timer.start();
         // Internal pipeline: build the CPU engine directly on the shared
-        // workspace and plan cache (no facade, no dispatch).
+        // workspace (no facade, no dispatch).
         const auto ffa_engine = algorithms::detail::make_ffa_cpu<FoldType>(
-            m_ffa_workspace, m_fft_manager, cfg, m_show_progress);
+            m_ffa_workspace, cfg, m_show_progress);
         auto& the_ffa                            = *ffa_engine;
         const plans::FFAPlan<FoldType>& ffa_plan = the_ffa.get_plan();
         const auto& dec                          = m_region_decode[region_id];
@@ -211,89 +181,35 @@ private:
         error_check::check_equal(ffa_plan.get_ncoords().back(), dec.ncoords,
                                  "FFAFreqSweep::execute_ffa_region: decode "
                                  "table is out of sync with the FFA plan");
-        if constexpr (std::is_same_v<FoldType, float>) {
-            if (cfg.get_nparams() == 1) {
-                std::vector<detection::SnrHit> hits;
-                the_ffa.execute_scored(ts_e, ts_v, snr_min, dec.widths, hits);
-                const auto brutefold_time = the_ffa.get_brute_fold_timing();
-                const auto score_in_band  = the_ffa.get_last_score_timing();
-                const auto wall           = timer.stop();
-                const auto ffa_time =
-                    std::max(0.0F, wall - brutefold_time - score_in_band);
-                ffa_timer_stats["brutefold"] += brutefold_time;
-                ffa_timer_stats["ffa"] += ffa_time;
-                spdlog::info(
-                    "FFA Chunk detail: nbins={} bseg_brute={} levels={} "
-                    "fuse_levels={} nfreqs0={} ncoords_top={} "
-                    "brutefold_s={:.4f} brute_table_s={:.4f} ffa_s={:.4f}",
-                    cfg.get_nbins(), cfg.get_bseg_brute(),
-                    ffa_plan.get_n_levels(), the_ffa.get_last_fuse_levels(),
-                    ffa_plan.get_ncoords().front(),
-                    ffa_plan.get_ncoords().back(), brutefold_time,
-                    the_ffa.get_brute_fold_init_timing(), ffa_time);
-                timer.start();
-                SizeType n_passing = 0;
-                for (const auto& hit : hits) {
-                    if (m_cands.is_full()) {
-                        ffa_timer_stats["score"] += timer.stop();
-                        timer.start();
-                        search::flush_candidates(
-                            m_cands, m_region_decode, writer,
-                            m_write_param_sets_batch, m_width_batch,
-                            m_nbins_batch, m_base_cfg.get_nparams());
-                        ffa_timer_stats["io"] += timer.stop();
-                        timer.start();
-                    }
-                    m_cands.push(hit.snr, hit.score_index,
-                                 static_cast<uint32_t>(region_id));
-                    ++n_passing;
-                }
-                m_total_passing_scores += n_passing;
-                ffa_timer_stats["score"] += timer.stop() + score_in_band;
-                return;
-            }
-        }
-        const auto buffer_size_time = ffa_plan.get_buffer_size_time();
-        const auto fold_size_time   = ffa_plan.get_fold_size_time();
-        const auto fold_time = std::span(m_fold_time).first(buffer_size_time);
-        if constexpr (std::is_same_v<FoldType, ComplexType>) {
-            the_ffa.execute_return_to_time(ts_e, ts_v, fold_time);
-        } else {
-            the_ffa.execute(ts_e, ts_v, fold_time);
-        }
+        // Every chunk scores in scratch: the final level is merged, (for
+        // Fourier) inverted and scored tile by tile, so neither the final fold
+        // nor a dense score array is stored. m_fold_time is the second
+        // ping-pong buffer of the merges (unused by frequency-only time-domain
+        // cone bands).
+        std::vector<detection::SnrHit> hits;
+        the_ffa.execute_scored(
+            ts_e, ts_v, snr_min, dec.widths, hits,
+            std::span<FoldType>(reinterpret_cast<FoldType*>(m_fold_time.data()),
+                                (m_fold_time.size() * sizeof(float)) /
+                                    sizeof(FoldType)));
         const auto brutefold_time = the_ffa.get_brute_fold_timing();
+        const auto score_in_band  = the_ffa.get_last_score_timing();
+        const auto wall           = timer.stop();
+        const auto ffa_time =
+            std::max(0.0F, wall - brutefold_time - score_in_band);
         ffa_timer_stats["brutefold"] += brutefold_time;
-        const auto ffa_time = timer.stop() - brutefold_time;
         ffa_timer_stats["ffa"] += ffa_time;
-        // Machine-parsable per-chunk breakdown (used by the bseg_brute sweep
-        // benchmark). brutefold_s includes brute_table_s.
-        spdlog::info(
-            "FFA Chunk detail: nbins={} bseg_brute={} levels={} fuse_levels={} "
-            "nfreqs0={} ncoords_top={} brutefold_s={:.4f} brute_table_s={:.4f} "
-            "ffa_s={:.4f}",
-            cfg.get_nbins(), cfg.get_bseg_brute(), ffa_plan.get_n_levels(),
-            the_ffa.get_last_fuse_levels(), ffa_plan.get_ncoords().front(),
-            ffa_plan.get_ncoords().back(), brutefold_time,
-            the_ffa.get_brute_fold_init_timing(), ffa_time);
-
-        // Compute scores
+        spdlog::info("FFA Chunk detail: nbins={} bseg_brute={} levels={} "
+                     "fuse_levels={} nfreqs0={} ncoords_top={} "
+                     "brutefold_s={:.4f} brute_table_s={:.4f} ffa_s={:.4f}",
+                     cfg.get_nbins(), cfg.get_bseg_brute(),
+                     ffa_plan.get_n_levels(), the_ffa.get_last_fuse_levels(),
+                     ffa_plan.get_ncoords().front(),
+                     ffa_plan.get_ncoords().back(), brutefold_time,
+                     the_ffa.get_brute_fold_init_timing(), ffa_time);
         timer.start();
-        const auto n_scores = dec.get_n_scores();
-        // Scratch is sized by the planner for the largest chunk; the
-        // accumulator is separate, so this span never depends on how many
-        // candidates have already survived.
-        const auto scores_span = std::span(m_scores_chunk).first(n_scores);
-        // One score per (coordinate, boxcar width). The index is
-        // coord * n_widths + width, which search::flush_candidates decodes.
-        detection::detail::snr_boxcar_3d_cpu(
-            std::span(m_fold_time).first(fold_size_time), dec.widths,
-            scores_span, dec.ncoords, dec.nbins, cfg.get_nthreads());
-
         SizeType n_passing = 0;
-        for (SizeType score_idx = 0; score_idx < n_scores; ++score_idx) {
-            if (scores_span[score_idx] < snr_min) {
-                continue;
-            }
+        for (const auto& hit : hits) {
             if (m_cands.is_full()) {
                 ffa_timer_stats["score"] += timer.stop();
                 timer.start();
@@ -303,14 +219,12 @@ private:
                 ffa_timer_stats["io"] += timer.stop();
                 timer.start();
             }
-            m_cands.push(scores_span[score_idx],
-                         static_cast<uint32_t>(score_idx),
+            m_cands.push(hit.snr, hit.score_index,
                          static_cast<uint32_t>(region_id));
             ++n_passing;
         }
         m_total_passing_scores += n_passing;
-
-        ffa_timer_stats["score"] += timer.stop();
+        ffa_timer_stats["score"] += timer.stop() + score_in_band;
     }
 
 }; // End FFAFreqSweepCpuEngine definition

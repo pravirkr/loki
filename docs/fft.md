@@ -1,33 +1,109 @@
 # FFTs in loki
 
 This page covers where loki transforms profiles between the time and Fourier
-domains, which library does each transform, and how the fused on-chip inverse
-FFT of the CUDA FFA sweep works. Read it before changing
-`lib/cuda/fft_cuda.cu`, `lib/cuda/ffa_portable_fft.cuh` or
-`lib/cuda/ffa_score_fourier_*`.
+domains, which code does each transform, and how the fused inverse FFTs of the
+FFA sweeps work. Read it before changing `lib/cpu/fft_cpu.cpp`,
+`lib/cpu/lane_fft*`, `lib/cuda/fft_cuda.cu`, `lib/cuda/ffa_portable_fft.cuh`
+or `lib/cuda/ffa_score_fourier_*`.
 
 ## Conventions
 
 - A Fourier fold stores `nbins_f = nbins / 2 + 1` harmonics per profile for
   each of `e` (signal) and `v` (variance). A profile's row is `2 * nbins_f`
   complex values: `e` first, then `v`.
-- Inverse transforms are unnormalized C2R. The `1 / nbins` is applied later:
-  the scorers take it as `fold_scale`.
+- On the GPU, inverse transforms are unnormalized C2R and the `1 / nbins` is
+  applied later: the scorers take it as `fold_scale`. The host C2R
+  (`CpuFFT::irfft_batch`, the lane FFT) is normalised.
 - C2R treats the input as Hermitian, so the imaginary parts of the DC
-  harmonic and (for even `nbins`) the Nyquist harmonic are ignored, as FFTW
-  does. The GPU transforms below zero those parts explicitly.
+  harmonic and (for even `nbins`) the Nyquist harmonic are ignored. The GPU
+  transforms zero those parts explicitly; the host ones read only the real
+  parts.
 - `nbins` is any integer `>= 2`. Nothing in loki requires a power of two. The
   FFT code must keep it that way.
+- Fourier shifts rotate harmonic `k` by `exp(-2 pi i k shift / nbins)`. The
+  CPU computes the per-coordinate (per-leaf) step in double and rounds it
+  once (`fill_merge_phase_steps`, `ep_phase_steps`); the GPU uses
+  `fourier_phasor` (`ffa_score_device.cuh`): an exact `fmaf` split of
+  `k * shift`, an exact reduction modulo `nbins`, then `sincospif`, within
+  3.3e-7 for any `nbins` (`tests/cpp/internal/fourier_phasor_cuda_t.cpp`).
+  Every GPU Fourier merge and EP shift-add uses it.
 
 ## Who does which transform
 
 | Where | Library | Notes |
 | --- | --- | --- |
-| CPU (`lib/cpu/fft_cpu.cpp`) | FFTW (`FFTWManager`) | Plans cached per size. |
+| CPU, batched rows up to 1024 points | lane FFT (`lib/cpu/lane_fft.hpp`) | FFA lossy brute fold (R2C), `FFA::execute` and the fused final level (C2R), EP pruning (C2R, fused with the scorer), `CpuFFT` for these lengths. |
+| CPU, longer rows (`lib/cpu/fft_cpu.cpp`) | pocketfft | Preprocessing's whole-series transforms; `CpuFFT` for lengths above 1024. |
 | GPU, batched (`lib/cuda/fft_cuda.cu`) | `PortableFFT` (`GpuFFTManager`) | Lossy brute fold (R2C), unfused FFA chunks and `FFA::execute` (C2R). |
 | GPU, fused FFA Fourier scorer | `PortableFFT` (`ffa_portable_fft.cuh`) | On chip, inside the final-level kernel. |
 
-loki uses no vendor FFT library on the GPU (cuFFT was removed in 2026-10).
+loki uses no vendor FFT library (cuFFT and FFTW were removed in 2026-10).
+pocketfft (C++ branch, header-only, BSD-3-Clause) is pinned in
+`cmake/LokiDependencies.cmake` and included by `lib/cpu/fft_cpu.cpp` only;
+the C++ tests also use it as their reference.
+
+### Host transforms
+
+`math::CpuFFT` (`lib/utils/fft_impl.hpp`) is the host FFT behind
+`math::FFTManager` on a CPU `Exec`. Its transforms never modify their input,
+and its tables are immutable and cached per length for the process, so one
+manager can serve several threads. `prepare_plans` builds the tables ahead of
+use; `prepare_exact_plans` only registers the lengths.
+
+The **lane FFT** (`lane_fft::EVTransform`) transforms 16 profiles at a time,
+one per SIMD lane: the data are laid out `[point][16]`, so every butterfly is
+a vertical SIMD operation with no shuffles.
+
+- A profile's `e` and `v` rows ride in one complex transform, `z = e + iv`.
+  The inverse packs the two half spectra into the full Hermitian spectrum of
+  `z`, scaled by `1 / n`; the result holds `e` in its real part and `v` in its
+  imaginary part. The forward transform unpacks
+  `E = (Z[k] + conj Z[n-k]) / 2`, `V = (Z[k] - conj Z[n-k]) / 2i`. For a
+  generic batch, rows pair up as `(2p, 2p + 1)` and an odd last row is paired
+  with zeros, so a row's rounding depends on its partner row (float level).
+- Any `n >= 2`: a mixed-radix Stockham FFT, and Bluestein's algorithm for
+  lengths with a prime factor above 13, on a convolution of the smallest
+  `2^a 3^b 5^c >= 2n - 1` points. The power-of-two part of the length takes
+  the fewest stages of radix at most 8 (radix-8 and radix-4 butterflies are
+  radix-2 splits down to the radix-4 kernel; radix 16 spills registers),
+  then the odd radices 3, 5, 7, 11 and 13 (one generic kernel that pairs
+  `x[j]` with `x[R - j]`). Twiddles, chirps and the Bluestein kernel are
+  computed in double.
+- Every point is one 64-byte line per buffer, so a sub-transform of the
+  first stage (every radix-th line) is closed under the later stages: for
+  power-of-two lengths 256 to 1024 they run sub-transform by sub-transform,
+  in L1 (`depth_first`). Same arithmetic as stage by stage.
+- Rows are moved into the lane layout with 16 x 16 AVX-512 transposes (8 x 8
+  AVX2 ones for the rest and elsewhere; xsimd off x86).
+- **Fused with the scorer.** In the CPU FFA's fused Fourier final level
+  (`run_final_scored`, `lib/cpu/ffa_cpu.cpp`), each tile of 16 final profiles
+  is inverted and scored straight from the lane layout
+  (`BoxcarScorer3D::score_lanes`): no transposes back, no stored fold. The
+  stored path (`FFA::execute`) uses the same transform, so the fused scores
+  equal a scan of the stored fold bit for bit
+  (`tests/cpp/api/ffa_fused_t.cpp`).
+- **Fused EP pruning step (CPU).** The CPU prune functors
+  (`BasePruneDPFuncts::shift_add_score`, `lib/cpu/dynamic_cpu.cpp`) work in
+  tiles of 16 leaves: shift-add into an L1 tile, `EVTransform::inverse`, the
+  maximum over widths straight from the lane layout
+  (`BoxcarScorer3D::score_lanes_max`), and only passing folds are copied out,
+  into the free world-tree slots when the whole batch fits. Seeds and ascend
+  score the same way, so EP keeps no batch-sized real-fold scratch and needs
+  no `CpuFFT`. Every profile is transformed and scored in its own lane, so
+  the fused step equals the unfused chain (`shift_add`, then
+  `score_and_filter`) bit for bit for any cut into tiles
+  (`tests/cpp/internal/ep_score_cpu_t.cpp`). Against the earlier paired-row
+  C2R, scores move at float level (relative 1e-6).
+- **Accuracy:** within `2e-7` (relative to the row's largest value) of a
+  double DFT for every `n` from 2 to 1024, both directions
+  (`tests/cpp/internal/lane_fft_t.cpp`).
+- **Speed** (Xeon Gold 6348H, one thread): inverse incl. transposes, ns per
+  profile at n = 64 / 128 / 256 / 512 / 1024: 33 / 95 / 237 / 512 / 1257.
+  Fused with scoring it was 1.7-3.8x faster than the FFTW C2R plus row scorer
+  it replaced (2.5-13x for Bluestein lengths).
+
+pocketfft does the long transforms, as fast as FFTW's estimate-mode plan
+plus execution or faster (2^25 samples: 1.2 s against 1.7 s).
 
 ### Batched GPU transforms
 
@@ -50,11 +126,10 @@ on a GPU `Exec` wraps one.
   points, 32 KiB of shared memory per block, which every supported
   architecture has. Fourier-domain GPU searches with a larger `nbins` are
   rejected when they are built (`check_gpu_fourier_nbins`).
-- **Speed** (L40S, sweep R2C of the lossy brute fold): power-of-two lengths
-  52.4 ms against cuFFT's 52.8 ms (W2L), and 50-800 bins 31.6 ms against
-  32.1 ms (W2Ln). The transforms are memory-bound.
-- **Accuracy:** float level against FFTW for every length tested, 2 to 2048
-  (`tests/cpp/internal/fft_t.cpp`).
+- **Speed:** memory-bound, on par with cuFFT when it was replaced (L40S,
+  W2L sweep R2C: 52.4 against 52.8 ms).
+- **Accuracy:** float level against the host FFT for every length tested,
+  2 to 2048 (`tests/cpp/internal/fft_t.cpp`; against FFTW before 2026-10).
 
 ## Fused Fourier final level (CUDA FFA sweep)
 
@@ -148,18 +223,17 @@ uses the forward FFT: `IDFT(x) = conj(FFT(conj(x)))`.
 
 ## Fused pruning step (CUDA EP)
 
-The EP prunes in batches of branched leaves. One kernel per batch replaces
-the shift-add kernel, (for Fourier folds) the copy that the old cuFFT C2R
-overwrote and the C2R itself, and the scorer:
+The EP prunes in batches of branched leaves. One kernel per batch does the
+shift-add, (for Fourier folds) the inverse FFT, and the scoring:
 `kernel_ep_shift_add_score_c2c` (`ep_score_fourier_cuda.cu`) for complex
 folds, `kernel_ep_shift_add_score_time` (`ep_score_time_cuda.cu`) for
 time-domain folds. Their block bookkeeping is shared
 (`ep_score_device.cuh`). Per leaf they:
 
 1. add the parent fold (world tree) and the FFA segment fold shifted by the
-   leaf's phase. Fourier folds are rotated harmonic by harmonic
-   (`ep_shift_add_harmonic`, `ep_fourier_device.cuh`, which
-   `kernel_shift_add_linear_complex` also uses). Time-domain folds use the
+   leaf's phase. Fourier folds are rotated harmonic by harmonic with
+   `fourier_phasor` (`ep_shift_add_harmonic`, `ep_fourier_device.cuh`, which
+   `kernel_shift_add_linear_complex` and the ascend kernel also use). Time-domain folds use the
    whole-bin shift of `kernel_shift_add_linear`. Either way the merged
    folds are bit-identical to the unfused path;
 2. (Fourier) invert `X_e + i X_v` on chip, direct or Bluestein, as the FFA
@@ -167,11 +241,11 @@ time-domain folds. Their block bookkeeping is shared
 3. score the profile with the same scorers and the same regime rule as
    `score_and_filter_max_cuda_d` (the maximum over the widths), and
    compare it with the threshold. Any number of widths is supported: the
-   width constants live in dynamic shared memory, and the widths are scored
-   in register groups of 32 after one prefix sum (the maximum is
-   order-free; `kEPWidthGroup` = 8 registers per group, which was the fastest
-   of 4, 8, 16 and 32 at every nbins). With `use_boxcar_kadane` the Kadane scorer
-   (`kadane_device.cuh`) replaces the boxcar: see below;
+   width constants live in dynamic shared memory, and after one prefix sum
+   the widths are scored in register groups of `kEPWidthGroup` = 8 (the
+   fastest of 4, 8, 16 and 32 at every nbins; the maximum is order-free).
+   With `use_boxcar_kadane` the Kadane scorer (`kadane_device.cuh`) replaces
+   the boxcar: see below;
 4. count the passing leaves and the min/max score of the valid ones
    (block atomics; the min/max use an order-preserving key, so they are
    exact).
@@ -236,19 +310,15 @@ Only then do the prune functors skip the irfft scratch
 (`ep_cuda_needs_irfft_scratch`). EP rejects Fourier nbins above 1024
 (`ep_support.hpp`), so the CUDA pruning never needs it.
 
-**Numerics.** The merged folds, the tree contents and the survivor order are
-as before. Time-domain boxcar scores are bit-identical, and so are the
-Kadane scores up to nbins 256. Above that, the unfused Kadane kernel merges
-10 segments of each profile, which sums in another order than the fused
-sequential scan: the S/N differs by up to 1e-4. For Fourier folds only the
-inverse FFT differs from cuFFT: the S/N moves by about 1e-6, so a leaf whose
-score is within that of the threshold can flip. On the 2^25 jerk benchmark
-the final survivors and the top candidates are unchanged, the final S/N
-moves by at most 4e-6, and the per-level survivor counts move by under
-1e-5. C2R ignores the imaginary part of the Nyquist harmonic, which a
-fractional shift makes nonzero. The on-chip transform always drops it, as
-`numpy.fft.irfft` does. cuFFT's result then depends on the algorithm it
-picks, which changes with the batch size.
+**Numerics.** The fused and unfused paths merge identical folds, so the tree
+contents and survivor order do not depend on which one ran. Time-domain
+boxcar scores are bit-identical between them, and so are the Kadane scores
+up to nbins 256; above that the unfused Kadane kernel sums 10 segments of
+each profile in another order (S/N within 1e-4). Fourier scores agree to
+about 1e-6 in S/N. A fractional shift makes the Nyquist harmonic's imaginary
+part nonzero; the on-chip C2R always drops it, as `numpy.fft.irfft` does, so
+the result does not depend on the batch size. Against the CPU, matched EP
+Fourier scores agree within about 1e-5 (2^25 jerk benchmark).
 
 ## PortableFFT
 
@@ -279,9 +349,8 @@ The algorithm is a Stockham FFT with register radix-E passes.
   powers `r < R` by recurrence. No tables are needed, and the arithmetic is
   FP32.
 - Accuracy: across every `nbins` from 2 to 1024, the fused scores differ from
-  cuFFT C2R plus `score_and_filter_cuda_d` by at most 3.7e-6 in S/N (median
-  7e-7). End to end, the GPU sweep is within 2e-4 S/N of the CPU (FFTW) sweep
-  at matched chunking, about 4x closer than the old unfused GPU path.
+  a batched C2R plus `score_and_filter_cuda_d` by at most 3.7e-6 in S/N
+  (median 7e-7).
 
 ## Why not cuFFTDx, or cuFFT callbacks
 

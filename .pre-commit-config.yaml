@@ -38,7 +38,7 @@ repos:
       - id: cmake-lint
         additional_dependencies: [pyyaml]
         args: [--config-files=.cmake-format.yaml]
-        exclude: cmake/(CPM|FindFFTW)\.cmake$
+        exclude: cmake/CPM\.cmake$
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.16.8

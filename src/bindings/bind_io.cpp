@@ -121,6 +121,9 @@ void bind_io(py::module_& m) {
             },
             data.data(), self);
     };
+    py::class_<io::TimeSeriesInfo>(m_io, "TimeSeriesInfo")
+        .def_readonly("nsamps", &io::TimeSeriesInfo::nsamps)
+        .def_readonly("dt", &io::TimeSeriesInfo::dt);
     py::class_<io::TimeSeries>(m_io, "TimeSeries")
         .def(py::init([](const PyArrayT<float>& ts_e,
                          const PyArrayT<float>& ts_v, double dt) {
@@ -133,6 +136,7 @@ void bind_io(py::module_& m) {
              py::arg("ts_e"), py::arg("ts_v"), py::arg("dt"))
         .def_static("read", &io::TimeSeries::read, py::arg("path"),
                     py::arg("options") = io::ReadOptions{})
+        .def_static("read_info", &io::TimeSeries::read_info, py::arg("path"))
         .def("write", &io::TimeSeries::write, py::arg("path"))
         .def(
             "preprocess",

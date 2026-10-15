@@ -1,19 +1,27 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <span>
+#include <string_view>
 #include <tuple>
 #include <vector>
 
 #include "loki/common/types.hpp"
-#include "loki/detection/score.hpp"
 #include "loki/search/configs.hpp"
 
-#include "lib/detection/kadane.hpp"
-#include "lib/utils/fft_impl.hpp"
 #include "lib/utils/workspace_impl.hpp"
 
 namespace loki::core {
+
+/// Where shift_add_score writes the folds of passing leaves: leaf i at slot
+/// i (ring_capacity == 0), or the k-th passing leaf at slot
+/// (ring_start + k) mod ring_capacity (straight into free world-tree slots).
+template <SupportedFoldType FoldType> struct PassingFolds {
+    FoldType* data{nullptr};
+    SizeType ring_start{0};
+    SizeType ring_capacity{0};
+};
 
 // Virtual Interface - for runtime polymorphism
 template <SupportedFoldType FoldType> class PruneDPFuncts {
@@ -77,6 +85,25 @@ public:
                                       float threshold,
                                       SizeType n_leaves) = 0;
 
+    /**
+     * shift_add followed by score_and_filter, fused over small tiles of
+     * leaves that stay in cache. Scores, the passing indices and the folds
+     * of passing leaves are identical to the two calls; only passing folds
+     * are written, to @p folds_out. @p indices_tree holds the tree origins
+     * on entry and the passing local indices on return.
+     */
+    virtual SizeType shift_add_score(std::span<const FoldType> folds_tree,
+                                     std::span<SizeType> indices_tree,
+                                     std::span<const FoldType> folds_ffa,
+                                     std::span<const SizeType> indices_ffa,
+                                     std::span<const float> phase_shift,
+                                     PassingFolds<FoldType> folds_out,
+                                     std::span<float> scores_out,
+                                     float threshold,
+                                     SizeType n_leaves,
+                                     SizeType physical_start_idx,
+                                     SizeType capacity) = 0;
+
     virtual void transform(std::span<double> leaves_tree,
                            std::span<SizeType> indices_tree,
                            std::pair<double, double> coord_next,
@@ -106,12 +133,12 @@ public:
     virtual void report(std::span<double> leaves_tree,
                         std::pair<double, double> coord_report,
                         SizeType n_leaves) const = 0;
-
-    /** IRFFT scoring scratch (complex + real), zero for float EP. */
-    [[nodiscard]] virtual float get_irfft_scratch_memory_gib() const noexcept {
-        return 0.0F;
-    }
 };
+
+namespace detail {
+/// Scorer state of the CPU prune functors (lib/cpu/dynamic_cpu.cpp).
+template <SupportedFoldType FoldType> class EPScorer;
+} // namespace detail
 
 // Base class - shared functionality for all derived classes
 template <SupportedFoldType FoldType>
@@ -127,41 +154,23 @@ protected:
     SizeType m_branch_max;
 
     SizeType m_n_coords_init{};
-    // Buffer for shift-add operations
-    std::vector<FoldType> m_scratch_shifts;
-    // IRFFT scratch: complex copy (C2R overwrites input) + real output for
-    // scoring
-    std::vector<ComplexType> m_scratch_folds_c;
-    std::vector<float> m_scratch_folds_r;
-    math::FFTWManager m_fft_manager;
-    // FFT manager owned by the caller (the EP sweep), or null to use
-    // m_fft_manager. It outlives the functor, so its plans are shared.
-    math::FFTWManager* m_external_fft{nullptr};
-    // Cache for snr_boxcar_batch
-    detection::BoxcarWidthsCache m_boxcar_widths_cache;
-    detection::BoxcarKadaneCache m_boxcar_kadane_cache;
+    // Exact SIMD boxcar scorer (and the lane FFT for Fourier folds), with
+    // the scratch of one scoring tile.
+    std::unique_ptr<detail::EPScorer<FoldType>> m_scorer;
 
-    // Constructor for all derived classes. With @p external_fft, the plans for
-    // this nbins must already be prepared there, and the functor builds none.
+    // Constructor for all derived classes.
     BasePruneDPFuncts(std::span<const SizeType> param_grid_count_init,
                       std::span<const double> dparams_init,
                       SizeType nseg_ffa,
                       double tseg_ffa,
                       search::PulsarSearchConfig cfg,
                       SizeType batch_size,
-                      SizeType branch_max,
-                      math::FFTWManager* external_fft = nullptr);
+                      SizeType branch_max);
 
-    /** The FFT manager of the IRFFT: the external one if given. */
-    [[nodiscard]] math::FFTWManager& get_fft() noexcept {
-        return m_external_fft != nullptr ? *m_external_fft : m_fft_manager;
-    }
-
-    /** Copy complex folds to scratch, IRFFT to @p dst (ComplexType EP only). */
-    void irfft_for_scoring(std::span<const ComplexType> src,
-                           SizeType nfft,
-                           std::span<float> dst)
-        requires(std::is_same_v<FoldType, ComplexType>);
+    /** Boxcar max S/N of @p n_leaves folds [n][2][nbins or nbins_f]. */
+    void score_folds(std::span<const FoldType> folds,
+                     std::span<float> scores,
+                     SizeType n_leaves);
 
 public:
     // Common implementations shared by all variants
@@ -192,6 +201,18 @@ public:
                               float threshold,
                               SizeType n_leaves) override;
 
+    SizeType shift_add_score(std::span<const FoldType> folds_tree,
+                             std::span<SizeType> indices_tree,
+                             std::span<const FoldType> folds_ffa,
+                             std::span<const SizeType> indices_ffa,
+                             std::span<const float> phase_shift,
+                             PassingFolds<FoldType> folds_out,
+                             std::span<float> scores_out,
+                             float threshold,
+                             SizeType n_leaves,
+                             SizeType physical_start_idx,
+                             SizeType capacity) override;
+
     std::vector<double>
     get_transform_matrix(std::pair<double, double> coord_cur,
                          std::pair<double, double> coord_prev) const override;
@@ -199,7 +220,11 @@ public:
     void pack(std::span<const FoldType> data,
               std::span<FoldType> out) const noexcept override;
 
-    [[nodiscard]] float get_irfft_scratch_memory_gib() const noexcept override;
+    ~BasePruneDPFuncts() override;
+    BasePruneDPFuncts(const BasePruneDPFuncts&)                = delete;
+    BasePruneDPFuncts& operator=(const BasePruneDPFuncts&)     = delete;
+    BasePruneDPFuncts(BasePruneDPFuncts&&) noexcept            = delete;
+    BasePruneDPFuncts& operator=(BasePruneDPFuncts&&) noexcept = delete;
 };
 
 // Intermediate base for Taylor-based methods (common seed implementation)
@@ -210,7 +235,6 @@ protected:
 
     // Inherit constructor
     using Base::BasePruneDPFuncts;
-    using Base::irfft_for_scoring;
 
 public:
     // Common seed implementation for all Taylor variants
@@ -228,7 +252,6 @@ protected:
 
     // Inherit constructor
     using Base::BasePruneDPFuncts;
-    using Base::irfft_for_scoring;
 
 public:
     void seed(std::span<const FoldType> fold_segment,
@@ -250,8 +273,7 @@ public:
                             double tseg_ffa,
                             search::PulsarSearchConfig cfg,
                             SizeType batch_size,
-                            SizeType branch_max,
-                            math::FFTWManager* external_fft = nullptr);
+                            SizeType branch_max);
 
     SizeType branch(std::span<double> leaves_tree,
                     std::span<double> leaves_branch,
@@ -306,8 +328,7 @@ public:
                                double tseg_ffa,
                                search::PulsarSearchConfig cfg,
                                SizeType batch_size,
-                               SizeType branch_max,
-                               math::FFTWManager* external_fft = nullptr);
+                               SizeType branch_max);
 
     SizeType branch(std::span<double> leaves_tree,
                     std::span<double> leaves_branch,
@@ -362,8 +383,7 @@ public:
                             double tseg_ffa,
                             search::PulsarSearchConfig cfg,
                             SizeType batch_size,
-                            SizeType branch_max,
-                            math::FFTWManager* external_fft = nullptr);
+                            SizeType branch_max);
 
     SizeType branch(std::span<double> leaves_tree,
                     std::span<double> leaves_branch,
@@ -419,8 +439,7 @@ create_prune_dp_functs(std::string_view poly_basis,
                        double tseg_ffa,
                        search::PulsarSearchConfig cfg,
                        SizeType batch_size,
-                       SizeType branch_max,
-                       math::FFTWManager* external_fft = nullptr);
+                       SizeType branch_max);
 
 // Type aliases for convenience
 using PrunePolyTaylorDPFunctsFloat   = PrunePolyTaylorDPFuncts<float>;

@@ -4,10 +4,13 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <complex>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <numbers>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -21,8 +24,7 @@
 #include "loki/common/coord.hpp"
 #include "loki/common/types.hpp"
 
-// NOLINTNEXTLINE(misc-include-cleaner): ISA-dependent kernels
-#include "lib/cpu/brute_fold_intrinsics.hpp"
+#include "lib/detail/utils.hpp"
 
 namespace loki::core {
 
@@ -75,17 +77,61 @@ using AlignedFloatVec = std::vector<float, xsimd::aligned_allocator<float>>;
     }
 }
 
+/// out[j] = tail[j] + head[j] for j in [0, len).
+inline void add_run(const float* __restrict__ tail,
+                    const float* __restrict__ head,
+                    float* __restrict__ out,
+                    SizeType len) noexcept {
+#pragma omp simd
+    for (SizeType j = 0; j < len; ++j) {
+        out[j] = tail[j] + head[j];
+    }
+}
+
 /**
- * @brief Optimized version of shift_add_binary, using a single pre-allocated
- * buffer of size 2 * nbins.
+ * @brief Rotate `tail` right by `shift_tail` and `head` right by
+ * `shift_head`, and add them, for one channel.
+ *
+ * out[j] = tail[(j - shift_tail) mod nbins] + head[(j - shift_head) mod
+ * nbins]. The two shifts split [0, nbins) into at most three runs in which
+ * both sources are contiguous, so each run is one vectorised add with no
+ * temporary buffer.
  */
-void shift_add_binary_with_buffer(const float* __restrict__ data_tail,
-                                  float phase_shift_tail,
-                                  const float* __restrict__ data_head,
-                                  float phase_shift_head,
-                                  float* __restrict__ out,
-                                  float* __restrict__ temp_buffer,
-                                  SizeType nbins) noexcept {
+inline void shift_add_binary_channel(const float* __restrict__ tail,
+                                     SizeType shift_tail,
+                                     const float* __restrict__ head,
+                                     SizeType shift_head,
+                                     float* __restrict__ out,
+                                     SizeType nbins) noexcept {
+    const SizeType lo = std::min(shift_tail, shift_head);
+    const SizeType hi = std::max(shift_tail, shift_head);
+    // [0, lo): both sources wrapped.
+    add_run(tail + (nbins - shift_tail), head + (nbins - shift_head), out, lo);
+    // [lo, hi): the smaller shift is in order, the larger one still wraps.
+    if (shift_tail <= shift_head) {
+        add_run(tail + (lo - shift_tail), head + (lo + nbins - shift_head),
+                out + lo, hi - lo);
+    } else {
+        add_run(tail + (lo + nbins - shift_tail), head + (lo - shift_head),
+                out + lo, hi - lo);
+    }
+    // [hi, nbins): both sources in order.
+    add_run(tail + (hi - shift_tail), head + (hi - shift_head), out + hi,
+            nbins - hi);
+}
+
+/**
+ * @brief Rotate and add two (e, v) profiles: out = rot(tail) + rot(head).
+ *
+ * Same sums as rotating each profile into a buffer and adding (float addition
+ * is commutative), in a single pass.
+ */
+void shift_add_binary_direct(const float* __restrict__ data_tail,
+                             float phase_shift_tail,
+                             const float* __restrict__ data_head,
+                             float phase_shift_head,
+                             float* __restrict__ out,
+                             SizeType nbins) noexcept {
     auto shift_tail = static_cast<SizeType>(phase_shift_tail + 0.5F);
     if (shift_tail == nbins) {
         shift_tail = 0;
@@ -94,32 +140,10 @@ void shift_add_binary_with_buffer(const float* __restrict__ data_tail,
     if (shift_head == nbins) {
         shift_head = 0;
     }
-    const SizeType total_size = 2 * nbins;
-
-    // Circular shift data_tail into out
-    const auto shift_tail_size = nbins - shift_tail;
-    std::memcpy(out + shift_tail, data_tail, sizeof(float) * shift_tail_size);
-    std::memcpy(out, data_tail + shift_tail_size, sizeof(float) * shift_tail);
-    std::memcpy(out + nbins + shift_tail, data_tail + nbins,
-                sizeof(float) * shift_tail_size);
-    std::memcpy(out + nbins, data_tail + nbins + shift_tail_size,
-                sizeof(float) * shift_tail);
-
-    // Circular shift data_head into temp_buffer
-    const auto shift_head_size = nbins - shift_head;
-    std::memcpy(temp_buffer + shift_head, data_head,
-                sizeof(float) * shift_head_size);
-    std::memcpy(temp_buffer, data_head + shift_head_size,
-                sizeof(float) * shift_head);
-    std::memcpy(temp_buffer + nbins + shift_head, data_head + nbins,
-                sizeof(float) * shift_head_size);
-    std::memcpy(temp_buffer + nbins, data_head + nbins + shift_head_size,
-                sizeof(float) * shift_head);
-
-    // Perform the final addition in a single loop
-    for (SizeType j = 0; j < total_size; ++j) {
-        out[j] += temp_buffer[j];
-    }
+    shift_add_binary_channel(data_tail, shift_tail, data_head, shift_head, out,
+                             nbins);
+    shift_add_binary_channel(data_tail + nbins, shift_tail, data_head + nbins,
+                             shift_head, out + nbins, nbins);
 }
 
 /**
@@ -248,6 +272,181 @@ shift_add_complex_binary(const ComplexType* __restrict__ data_tail,
     }
 }
 
+using MergeBatch = xsimd::batch<ComplexType>;
+/// Harmonics per SIMD block of the complex merges.
+constexpr SizeType kMergeWidth = MergeBatch::size;
+
+/**
+ * @brief Phase table of one complex merge, for the phase step
+ * d = exp(-2 pi i shift / nbins) between harmonics.
+ *
+ * The merges build the phase of harmonic k as (d^W)^b d^j, k = W b + j, W the
+ * SIMD width: the in-block phases d^0 .. d^(W-1) (split re / im, one SIMD
+ * load each) and the block step d^W are computed in double from d and rounded
+ * to float once; the blocks then advance by one float product each. Built
+ * from a float d by float products, d^W carried about W roundings into every
+ * block: the phase drifted to ~2e-5 at k = 512, ~1e-6 now (B10). The tables
+ * are filled for a block of coordinates before their merges, so this work
+ * stays off the merges' dependency chains.
+ */
+struct alignas(64) PhaseStep {
+    std::array<float, kMergeWidth> re;
+    std::array<float, kMergeWidth> im;
+    ComplexType block; // d^W
+    ComplexType step;  // d, for the scalar remainder
+};
+
+/// Sets `out` for the phase step d = (d_re, d_im).
+[[gnu::always_inline]] inline void
+set_phase_step(PhaseStep& out, double d_re, double d_im) noexcept {
+    static_assert(std::has_single_bit(kMergeWidth),
+                  "kMergeWidth must be a power of two");
+    // (re, im) *= (b_re, b_im), explicit FMA order.
+    const auto cmul = [](double& re, double& im, double b_re, double b_im) {
+        const double r = std::fma(re, b_re, -(im * b_im));
+        im             = std::fma(re, b_im, im * b_re);
+        re             = r;
+    };
+    out.step = ComplexType(static_cast<float>(d_re), static_cast<float>(d_im));
+#if defined(__AVX512F__)
+    static_assert(kMergeWidth == 16, "AVX-512 merges use 16 complex lanes");
+    // d^(2^i) for i < 5.
+    std::array<double, 5> p_re{d_re};
+    std::array<double, 5> p_im{d_im};
+    for (SizeType i = 1; i < 5; ++i) {
+        p_re[i] = p_re[i - 1];
+        p_im[i] = p_im[i - 1];
+        cmul(p_re[i], p_im[i], p_re[i - 1], p_im[i - 1]);
+    }
+    const auto vmul = [](__m512d& re, __m512d& im, __m512d b_re, __m512d b_im) {
+        const __m512d r = _mm512_fmsub_pd(re, b_re, _mm512_mul_pd(im, b_im));
+        im              = _mm512_fmadd_pd(re, b_im, _mm512_mul_pd(im, b_re));
+        re              = r;
+    };
+    // Lane j < 8: the product of d^(2^i) over the set bits i of j.
+    const __m512d one  = _mm512_set1_pd(1.0);
+    const __m512d zero = _mm512_setzero_pd();
+    __m512d re = _mm512_mask_blend_pd(0xAA, one, _mm512_set1_pd(p_re[0]));
+    __m512d im = _mm512_mask_blend_pd(0xAA, zero, _mm512_set1_pd(p_im[0]));
+    vmul(re, im, _mm512_mask_blend_pd(0xCC, one, _mm512_set1_pd(p_re[1])),
+         _mm512_mask_blend_pd(0xCC, zero, _mm512_set1_pd(p_im[1])));
+    vmul(re, im, _mm512_mask_blend_pd(0xF0, one, _mm512_set1_pd(p_re[2])),
+         _mm512_mask_blend_pd(0xF0, zero, _mm512_set1_pd(p_im[2])));
+    // Lanes 8 .. 15: times d^8.
+    __m512d hre = re;
+    __m512d him = im;
+    vmul(hre, him, _mm512_set1_pd(p_re[3]), _mm512_set1_pd(p_im[3]));
+    _mm512_store_ps(out.re.data(), _mm512_insertf32x8(_mm512_castps256_ps512(
+                                                          _mm512_cvtpd_ps(re)),
+                                                      _mm512_cvtpd_ps(hre), 1));
+    _mm512_store_ps(out.im.data(), _mm512_insertf32x8(_mm512_castps256_ps512(
+                                                          _mm512_cvtpd_ps(im)),
+                                                      _mm512_cvtpd_ps(him), 1));
+    out.block =
+        ComplexType(static_cast<float>(p_re[4]), static_cast<float>(p_im[4]));
+#else
+    // d^(i + h) = d^i d^h for h = 1, 2, 4, ...: a chain of log2(W) products.
+    std::array<double, kMergeWidth> re{};
+    std::array<double, kMergeWidth> im{};
+    re[0]       = 1.0;
+    double h_re = d_re;
+    double h_im = d_im;
+    for (SizeType h = 1; h < kMergeWidth; h *= 2) {
+        for (SizeType i = 0; i < h; ++i) {
+            re[i + h] = re[i];
+            im[i + h] = im[i];
+            cmul(re[i + h], im[i + h], h_re, h_im);
+        }
+        const double sq_re = h_re;
+        const double sq_im = h_im;
+        cmul(h_re, h_im, sq_re, sq_im);
+    }
+    for (SizeType i = 0; i < kMergeWidth; ++i) {
+        out.re[i] = static_cast<float>(re[i]);
+        out.im[i] = static_cast<float>(im[i]);
+    }
+    out.block = ComplexType(static_cast<float>(h_re), static_cast<float>(h_im));
+#endif
+}
+
+/// The in-block phases of a phase table, as a SIMD batch.
+[[gnu::always_inline]] inline MergeBatch
+in_block_phases(const PhaseStep& p) noexcept {
+    return {xsimd::batch<float>::load_aligned(p.re.data()),
+            xsimd::batch<float>::load_aligned(p.im.data())};
+}
+
+/**
+ * @brief Phase steps exp(-2 pi i shift_of(i) / nbins), i in [0, n).
+ *
+ * Scalar double cos/sin per merge call dominated the complex merges (about
+ * 500 ns of a 590 ns merge at nbins 64). A separate loop over a block of
+ * shifts vectorises the trigonometry, and the steps are reused across
+ * segments.
+ */
+// Coordinates per phase-step block in the complex merges. The fused final
+// level uses the same blocks, so the vectorised trigonometry sees the same
+// inputs in the same lanes.
+constexpr SizeType kMergeStepBlock = 32;
+
+template <typename ShiftOf>
+void fill_merge_phase_steps(ShiftOf shift_of,
+                            SizeType n,
+                            SizeType nbins,
+                            PhaseStep* __restrict__ steps) noexcept {
+    constexpr SizeType kChunk = 64;
+    std::array<double, kChunk> angle{};
+    std::array<double, kChunk> re{};
+    std::array<double, kChunk> im{};
+    for (SizeType i0 = 0; i0 < n; i0 += kChunk) {
+        const SizeType m = std::min(kChunk, n - i0);
+        for (SizeType i = 0; i < m; ++i) {
+            angle[i] = -2.0 * std::numbers::pi * shift_of(i0 + i) /
+                       static_cast<float>(nbins);
+        }
+#pragma omp simd
+        for (SizeType i = 0; i < m; ++i) {
+            re[i] = std::cos(angle[i]);
+            im[i] = std::sin(angle[i]);
+        }
+        for (SizeType i = 0; i < m; ++i) {
+            set_phase_step(steps[i0 + i], re[i], im[i]);
+        }
+    }
+}
+
+/// Leaves per phase-step block of the EP shift-adds (one fused scoring tile).
+constexpr SizeType kEPStepBlock = 16;
+
+/**
+ * @brief Phase steps of shifts[i] for i in [0, m), m <= kEPStepBlock.
+ *
+ * The trigonometry always runs over the full block (unused lanes padded with
+ * zero shifts), so it vectorises and each step is independent of m and of
+ * the leaf's position in the block: the fused and unfused EP paths, which
+ * cut the leaves differently, produce identical steps.
+ */
+void ep_phase_steps(const float* __restrict__ shifts,
+                    SizeType m,
+                    SizeType nbins,
+                    PhaseStep* __restrict__ steps) noexcept {
+    std::array<double, kEPStepBlock> angle{};
+    std::array<double, kEPStepBlock> re{};
+    std::array<double, kEPStepBlock> im{};
+    for (SizeType i = 0; i < m; ++i) {
+        angle[i] =
+            -2.0 * std::numbers::pi * shifts[i] / static_cast<float>(nbins);
+    }
+#pragma omp simd
+    for (SizeType i = 0; i < kEPStepBlock; ++i) {
+        re[i] = std::cos(angle[i]);
+        im[i] = std::sin(angle[i]);
+    }
+    for (SizeType i = 0; i < m; ++i) {
+        set_phase_step(steps[i], re[i], im[i]);
+    }
+}
+
 /**
  * @brief Optimized version of shift_add_complex using a recurrence relation for
  * the phase. Idea here is to replace the two expensive sin/cos calls with one
@@ -258,52 +457,24 @@ shift_add_complex_binary(const ComplexType* __restrict__ data_tail,
  * @note This is the only version that vectorizes efficiently across
  * architectures. The other versions are not vectorized.
  */
-void shift_add_complex_recurrence_binary(
+void shift_add_complex_recurrence_binary_steps(
     const ComplexType* __restrict__ data_tail,
-    float phase_shift_tail,
+    const PhaseStep& delta_tail,
     const ComplexType* __restrict__ data_head,
-    float phase_shift_head,
+    const PhaseStep& delta_head,
     ComplexType* __restrict__ out,
-    SizeType nbins_f,
-    SizeType nbins) noexcept {
+    SizeType nbins_f) noexcept {
     using BatchType                  = xsimd::batch<ComplexType>;
     static constexpr auto kBatchSize = BatchType::size;
 
-    // Calculate the constant phase step per iteration
-    const auto phase_step_tail_angle =
-        -2.0 * std::numbers::pi * phase_shift_tail / static_cast<float>(nbins);
-    const auto phase_step_head_angle =
-        -2.0 * std::numbers::pi * phase_shift_head / static_cast<float>(nbins);
-
-    // This is the complex number we will multiply by in each iteration
-    const ComplexType delta_phase_tail = {
-        static_cast<float>(std::cos(phase_step_tail_angle)),
-        static_cast<float>(std::sin(phase_step_tail_angle))};
-    const ComplexType delta_phase_head = {
-        static_cast<float>(std::cos(phase_step_head_angle)),
-        static_cast<float>(std::sin(phase_step_head_angle))};
-
-    // Phase steps within a SIMD block: [d^0, d^1, d^2, d^3]
-    std::array<ComplexType, kBatchSize> delta_vec_tail_std;
-    std::array<ComplexType, kBatchSize> delta_vec_head_std;
-    delta_vec_tail_std[0] = {1.0F, 0.0F};
-    delta_vec_head_std[0] = {1.0F, 0.0F};
-    for (size_t i = 1; i < kBatchSize; ++i) {
-        delta_vec_tail_std[i] = delta_vec_tail_std[i - 1] * delta_phase_tail;
-        delta_vec_head_std[i] = delta_vec_head_std[i - 1] * delta_phase_head;
-    }
-
-    // Load the phase steps into SIMD registers
-    const auto delta_vec_tail =
-        xsimd::load_unaligned(delta_vec_tail_std.data());
-    const auto delta_vec_head =
-        xsimd::load_unaligned(delta_vec_head_std.data());
-
-    // Phase step between SIMD blocks: d^SIMD_WIDTH
-    const ComplexType delta_block_tail =
-        delta_vec_tail_std.back() * delta_phase_tail;
-    const ComplexType delta_block_head =
-        delta_vec_head_std.back() * delta_phase_head;
+    // Phase steps within a SIMD block, [d^0, ..., d^(W-1)], and between
+    // blocks, d^W.
+    const BatchType delta_vec_tail     = in_block_phases(delta_tail);
+    const BatchType delta_vec_head     = in_block_phases(delta_head);
+    const ComplexType delta_block_tail = delta_tail.block;
+    const ComplexType delta_block_head = delta_head.block;
+    const ComplexType delta_phase_tail = delta_tail.step;
+    const ComplexType delta_phase_head = delta_head.step;
 
     // Initial phase for k=0 is exp(i*0) = 1 + 0i
     ComplexType current_block_start_phase_tail = {1.0F, 0.0F};
@@ -386,15 +557,12 @@ void shift_add_complex_recurrence_binary(
  * @param nbins  The number of original bins in the input/output arrays
  * (time-domain)
  */
-void shift_add_complex_recurrence_linear(
+void shift_add_complex_recurrence_linear_steps(
     const ComplexType* __restrict__ data_tail,
     const ComplexType* __restrict__ data_head,
-    float phase_shift,
+    const PhaseStep& delta,
     ComplexType* __restrict__ out,
-    SizeType nbins_f,
-    SizeType nbins) noexcept {
-    // On the fly phase computation is faster than precomputed phase steps on
-    // Intel CPUs.
+    SizeType nbins_f) noexcept {
     using BatchType                  = xsimd::batch<ComplexType>;
     static constexpr auto kBatchSize = BatchType::size;
 
@@ -405,27 +573,11 @@ void shift_add_complex_recurrence_linear(
     ComplexType* __restrict__ out_e             = out;
     ComplexType* __restrict__ out_v             = out + nbins_f;
 
-    // Calculate the constant phase step per iteration
-    const auto phase_step_angle =
-        -2.0 * std::numbers::pi * phase_shift / static_cast<float>(nbins);
-
-    // This is the complex number we will multiply by in each iteration
-    const ComplexType delta_phase = {
-        static_cast<float>(std::cos(phase_step_angle)),
-        static_cast<float>(std::sin(phase_step_angle))};
-
-    // Phase steps within a SIMD block: [d^0, d^1, d^2, d^3]
-    std::array<ComplexType, kBatchSize> delta_vec_std;
-    delta_vec_std[0] = {1.0F, 0.0F};
-    for (size_t i = 1; i < kBatchSize; ++i) {
-        delta_vec_std[i] = delta_vec_std[i - 1] * delta_phase;
-    }
-
-    // Load the phase steps into SIMD registers
-    const auto delta_vec = xsimd::load_unaligned(delta_vec_std.data());
-
-    // Phase step between SIMD blocks: d^SIMD_WIDTH
-    const ComplexType delta_block = delta_vec_std.back() * delta_phase;
+    // Phase steps within a SIMD block, [d^0, ..., d^(W-1)], and between
+    // blocks, d^W.
+    const BatchType delta_vec     = in_block_phases(delta);
+    const ComplexType delta_block = delta.block;
+    const ComplexType delta_phase = delta.step;
 
     // Initial phase for k=0 is exp(i*0) = 1 + 0i
     ComplexType current_block_start_phase = {1.0F, 0.0F};
@@ -472,14 +624,13 @@ void shift_add_complex_recurrence_linear(
     }
 }
 
-void shift_add_complex_recurrence_linear_inplace(
+/// shift_add_complex_recurrence_linear_steps accumulating into `out`:
+/// out += head * d^k.
+void shift_add_complex_recurrence_linear_inplace_steps(
     const ComplexType* __restrict__ data_head,
-    float phase_shift,
+    const PhaseStep& delta,
     ComplexType* __restrict__ out,
-    SizeType nbins_f,
-    SizeType nbins) noexcept {
-    // On the fly phase computation is faster than precomputed phase steps on
-    // Intel CPUs.
+    SizeType nbins_f) noexcept {
     using BatchType                  = xsimd::batch<ComplexType>;
     static constexpr auto kBatchSize = BatchType::size;
 
@@ -488,27 +639,11 @@ void shift_add_complex_recurrence_linear_inplace(
     ComplexType* __restrict__ out_e             = out;
     ComplexType* __restrict__ out_v             = out + nbins_f;
 
-    // Calculate the constant phase step per iteration
-    const auto phase_step_angle =
-        -2.0 * std::numbers::pi * phase_shift / static_cast<float>(nbins);
-
-    // This is the complex number we will multiply by in each iteration
-    const ComplexType delta_phase = {
-        static_cast<float>(std::cos(phase_step_angle)),
-        static_cast<float>(std::sin(phase_step_angle))};
-
-    // Phase steps within a SIMD block: [d^0, d^1, d^2, d^3]
-    std::array<ComplexType, kBatchSize> delta_vec_std;
-    delta_vec_std[0] = {1.0F, 0.0F};
-    for (size_t i = 1; i < kBatchSize; ++i) {
-        delta_vec_std[i] = delta_vec_std[i - 1] * delta_phase;
-    }
-
-    // Load the phase steps into SIMD registers
-    const auto delta_vec = xsimd::load_unaligned(delta_vec_std.data());
-
-    // Phase step between SIMD blocks: d^SIMD_WIDTH
-    const ComplexType delta_block = delta_vec_std.back() * delta_phase;
+    // Phase steps within a SIMD block, [d^0, ..., d^(W-1)], and between
+    // blocks, d^W.
+    const BatchType delta_vec     = in_block_phases(delta);
+    const ComplexType delta_block = delta.block;
+    const ComplexType delta_phase = delta.step;
 
     // Initial phase for k=0 is exp(i*0) = 1 + 0i
     ComplexType current_block_start_phase = {1.0F, 0.0F};
@@ -551,162 +686,6 @@ void shift_add_complex_recurrence_linear_inplace(
             out_e[k] += data_head_e[k] * current_phase;
             out_v[k] += data_head_v[k] * current_phase;
             current_phase *= delta_phase;
-        }
-    }
-}
-
-// One-shot m=1 phasor table. Double phase, scalar libm; OpenMP over
-// frequencies.
-void precompute_base_phasors_scalar(float* __restrict__ delta_r,
-                                    float* __restrict__ delta_i,
-                                    const double* __restrict__ freqs,
-                                    SizeType nfreqs,
-                                    SizeType segment_len,
-                                    double tsamp,
-                                    double t_ref,
-                                    int nthreads) {
-    nthreads = std::max(nthreads, 1);
-#pragma omp parallel for num_threads(nthreads) default(none)                   \
-    shared(delta_r, delta_i, freqs, nfreqs, segment_len, tsamp, t_ref)
-    for (SizeType ifreq = 0; ifreq < nfreqs; ++ifreq) {
-        const double phase_factor = -2.0 * std::numbers::pi * freqs[ifreq];
-        const auto off            = ifreq * segment_len;
-        for (SizeType i = 0; i < segment_len; ++i) {
-            const double proper_time = (static_cast<double>(i) * tsamp) - t_ref;
-            const double phase       = phase_factor * proper_time;
-            delta_r[off + i]         = static_cast<float>(std::cos(phase));
-            delta_i[off + i]         = static_cast<float>(std::sin(phase));
-        }
-    }
-}
-
-void brute_fold_segment_complex_xsimd(
-    const float* __restrict__ ts_e_seg,
-    const float* __restrict__ ts_v_seg,
-    ComplexType* __restrict__ fold_seg,
-    SizeType nfreqs,
-    SizeType nbins_f,
-    SizeType segment_len,
-    const float* __restrict__ delta_phasors_r,
-    const float* __restrict__ delta_phasors_i,
-    float* __restrict__ current_phasors_r,
-    float* __restrict__ current_phasors_i) noexcept {
-    using BatchType           = xsimd::batch<float>;
-    constexpr auto kBatchSize = BatchType::size;
-    // DC component: sum over the segment
-    BatchType sum_e_vec(0.0F);
-    BatchType sum_v_vec(0.0F);
-    SizeType i = 0;
-    // Main SIMD loop: process 2 * kBatchSize at a time
-    for (; i + (2 * kBatchSize) <= segment_len; i += 2 * kBatchSize) {
-        sum_e_vec += BatchType::load_unaligned(&ts_e_seg[i]);
-        sum_v_vec += BatchType::load_unaligned(&ts_v_seg[i]);
-        sum_e_vec += BatchType::load_unaligned(&ts_e_seg[i + kBatchSize]);
-        sum_v_vec += BatchType::load_unaligned(&ts_v_seg[i + kBatchSize]);
-    }
-    // One more batch if at least kBatchSize left
-    if (i + kBatchSize <= segment_len) {
-        sum_e_vec += BatchType::load_unaligned(&ts_e_seg[i]);
-        sum_v_vec += BatchType::load_unaligned(&ts_v_seg[i]);
-        i += kBatchSize;
-    }
-    float sum_e = xsimd::reduce_add(sum_e_vec);
-    float sum_v = xsimd::reduce_add(sum_v_vec);
-    // Scalar tail
-    for (; i < segment_len; ++i) {
-        sum_e += ts_e_seg[i];
-        sum_v += ts_v_seg[i];
-    }
-
-    for (SizeType ifreq = 0; ifreq < nfreqs; ++ifreq) {
-        const auto freq_offset_out            = ifreq * 2 * nbins_f;
-        const auto phasor_offset              = ifreq * segment_len;
-        ComplexType* __restrict__ fold_e_base = fold_seg + freq_offset_out;
-        ComplexType* __restrict__ fold_v_base = fold_e_base + nbins_f;
-
-        // DC component: Assign pre-computed sums
-        fold_e_base[0] = ComplexType(sum_e, 0.0F);
-        fold_v_base[0] = ComplexType(sum_v, 0.0F);
-
-        // --- Helper lambda for the core computation ---
-        auto const compute_dft_op = [&](SizeType k, BatchType& acc_e_r,
-                                        BatchType& acc_e_i, BatchType& acc_v_r,
-                                        BatchType& acc_v_i) {
-            const auto samples_e = BatchType::load_unaligned(&ts_e_seg[k]);
-            const auto samples_v = BatchType::load_unaligned(&ts_v_seg[k]);
-            const auto phasor_r =
-                BatchType::load_aligned(&current_phasors_r[k]);
-            const auto phasor_i =
-                BatchType::load_aligned(&current_phasors_i[k]);
-
-            acc_e_r = xsimd::fma(samples_e, phasor_r, acc_e_r);
-            acc_e_i = xsimd::fma(samples_e, phasor_i, acc_e_i);
-            acc_v_r = xsimd::fma(samples_v, phasor_r, acc_v_r);
-            acc_v_i = xsimd::fma(samples_v, phasor_i, acc_v_i);
-
-            // update current phasor ← current * base
-            const auto delta_r =
-                BatchType::load_unaligned(&delta_phasors_r[phasor_offset + k]);
-            const auto delta_i =
-                BatchType::load_unaligned(&delta_phasors_i[phasor_offset + k]);
-            const auto new_r =
-                xsimd::fms(phasor_r, delta_r, phasor_i * delta_i);
-            const auto new_i =
-                xsimd::fma(phasor_r, delta_i, phasor_i * delta_r);
-            new_r.store_aligned(&current_phasors_r[k]);
-            new_i.store_aligned(&current_phasors_i[k]);
-        };
-        const float* __restrict__ base_r_start =
-            delta_phasors_r + static_cast<std::ptrdiff_t>(phasor_offset);
-        const float* __restrict__ base_i_start =
-            delta_phasors_i + static_cast<std::ptrdiff_t>(phasor_offset);
-        std::copy(base_r_start,
-                  base_r_start + static_cast<std::ptrdiff_t>(segment_len),
-                  current_phasors_r);
-        std::copy(base_i_start,
-                  base_i_start + static_cast<std::ptrdiff_t>(segment_len),
-                  current_phasors_i);
-
-        // AC components with SIMD
-        for (SizeType m = 1; m < nbins_f; ++m) {
-            BatchType acc_e_r(0.0F);
-            BatchType acc_e_i(0.0F);
-            BatchType acc_v_r(0.0F);
-            BatchType acc_v_i(0.0F);
-
-            SizeType k = 0;
-            for (; k + (2 * kBatchSize) <= segment_len; k += 2 * kBatchSize) {
-                compute_dft_op(k, acc_e_r, acc_e_i, acc_v_r, acc_v_i);
-                compute_dft_op(k + kBatchSize, acc_e_r, acc_e_i, acc_v_r,
-                               acc_v_i);
-            }
-            if (k + kBatchSize <= segment_len) {
-                compute_dft_op(k, acc_e_r, acc_e_i, acc_v_r, acc_v_i);
-                k += kBatchSize;
-            }
-
-            float final_e_r = xsimd::reduce_add(acc_e_r);
-            float final_e_i = xsimd::reduce_add(acc_e_i);
-            float final_v_r = xsimd::reduce_add(acc_v_r);
-            float final_v_i = xsimd::reduce_add(acc_v_i);
-
-            for (; k < segment_len; ++k) {
-                final_e_r += ts_e_seg[k] * current_phasors_r[k];
-                final_e_i += ts_e_seg[k] * current_phasors_i[k];
-                final_v_r += ts_v_seg[k] * current_phasors_r[k];
-                final_v_i += ts_v_seg[k] * current_phasors_i[k];
-
-                // update current phasor ← current * base
-                const float old_r = current_phasors_r[k];
-                const float old_i = current_phasors_i[k];
-                current_phasors_r[k] =
-                    (old_r * base_r_start[k]) - (old_i * base_i_start[k]);
-                current_phasors_i[k] =
-                    (old_r * base_i_start[k]) + (old_i * base_r_start[k]);
-            }
-
-            fold_e_base[m] = ComplexType(final_e_r, final_e_i);
-            fold_v_base[m] = ComplexType(final_v_r, final_v_i);
         }
     }
 }
@@ -837,10 +816,6 @@ void ffa_iter_segment(const float* __restrict__ fold_in,
     shared(fold_in, fold_out, coords, ncoords_cur, ncoords_prev, nsegments,    \
                nbins, fold_stride, seg_prev_stride, seg_out_stride)
     {
-        // Each thread allocates its own buffer once
-        std::vector<float> temp_buffer(2 * nbins);
-        auto* __restrict__ temp_buffer_ptr = temp_buffer.data();
-
 #pragma omp for
         for (SizeType iseg = 0; iseg < nsegments; ++iseg) {
             // Process coordinates in blocks within each segment
@@ -866,10 +841,9 @@ void ffa_iter_segment(const float* __restrict__ fold_in,
                     const auto* __restrict__ fold_head = &fold_in[head_offset];
                     auto* __restrict__ fold_sum        = &fold_out[out_offset];
 
-                    shift_add_binary_with_buffer(
-                        fold_tail, coord_cur->shift_tail, fold_head,
-                        coord_cur->shift_head, fold_sum, temp_buffer_ptr,
-                        nbins);
+                    shift_add_binary_direct(fold_tail, coord_cur->shift_tail,
+                                            fold_head, coord_cur->shift_head,
+                                            fold_sum, nbins);
                 }
             }
         }
@@ -894,9 +868,6 @@ void ffa_iter_standard(const float* __restrict__ fold_in,
     shared(fold_in, fold_out, coords, ncoords_cur, ncoords_prev, nsegments,    \
                nbins, fold_stride, seg_prev_stride, seg_out_stride)
     {
-        std::vector<float> temp_buffer(2 * nbins);
-        auto* __restrict__ temp_buffer_ptr = temp_buffer.data();
-
 #pragma omp for
         for (SizeType icoord_block = 0; icoord_block < ncoords_cur;
              icoord_block += kBlockSize) {
@@ -921,10 +892,9 @@ void ffa_iter_standard(const float* __restrict__ fold_in,
                     const auto* __restrict__ fold_head = &fold_in[head_offset];
                     auto* __restrict__ fold_sum        = &fold_out[out_offset];
 
-                    shift_add_binary_with_buffer(
-                        fold_tail, coord_cur->shift_tail, fold_head,
-                        coord_cur->shift_head, fold_sum, temp_buffer_ptr,
-                        nbins);
+                    shift_add_binary_direct(fold_tail, coord_cur->shift_tail,
+                                            fold_head, coord_cur->shift_head,
+                                            fold_sum, nbins);
                 }
             }
         }
@@ -946,17 +916,32 @@ void ffa_complex_iter_segment(const ComplexType* __restrict__ fold_in,
     const SizeType fold_stride     = 2 * nbins_f;
     const SizeType seg_prev_stride = ncoords_prev * fold_stride;
     const SizeType seg_out_stride  = ncoords_cur * fold_stride;
+    // Few coordinates and many segments: one phase-step table per level.
+    std::vector<PhaseStep> steps(2 * ncoords_cur);
+    PhaseStep* __restrict__ steps_tail = steps.data();
+    PhaseStep* __restrict__ steps_head = steps.data() + ncoords_cur;
 
-#pragma omp parallel for num_threads(nthreads) default(none)                   \
+#pragma omp parallel num_threads(nthreads) default(none)                       \
     shared(fold_in, fold_out, coords, ncoords_cur, ncoords_prev, nsegments,    \
-               nbins_f, nbins, fold_stride, seg_prev_stride, seg_out_stride)
-    for (SizeType iseg = 0; iseg < nsegments; ++iseg) {
-        // Process coordinates in blocks within each segment
+               nbins_f, nbins, fold_stride, seg_prev_stride, seg_out_stride,   \
+               steps_tail, steps_head)
+    {
+#pragma omp for schedule(static)
         for (SizeType icoord_block = 0; icoord_block < ncoords_cur;
              icoord_block += kBlockSize) {
-            SizeType const block_end =
-                std::min(icoord_block + kBlockSize, ncoords_cur);
-            for (SizeType icoord = icoord_block; icoord < block_end; ++icoord) {
+            const SizeType nblock =
+                std::min(icoord_block + kBlockSize, ncoords_cur) - icoord_block;
+            const auto* block = coords + icoord_block;
+            fill_merge_phase_steps(
+                [block](SizeType i) { return block[i].shift_tail; }, nblock,
+                nbins, steps_tail + icoord_block);
+            fill_merge_phase_steps(
+                [block](SizeType i) { return block[i].shift_head; }, nblock,
+                nbins, steps_head + icoord_block);
+        }
+#pragma omp for schedule(static)
+        for (SizeType iseg = 0; iseg < nsegments; ++iseg) {
+            for (SizeType icoord = 0; icoord < ncoords_cur; ++icoord) {
                 const auto* __restrict__ coord_cur = &coords[icoord];
                 const auto tail_offset =
                     ((iseg * 2) * seg_prev_stride) +
@@ -966,14 +951,10 @@ void ffa_complex_iter_segment(const ComplexType* __restrict__ fold_in,
                     (static_cast<SizeType>(coord_cur->i_head) * fold_stride);
                 const auto out_offset =
                     (iseg * seg_out_stride) + (icoord * fold_stride);
-
-                const auto* __restrict__ fold_tail = &fold_in[tail_offset];
-                const auto* __restrict__ fold_head = &fold_in[head_offset];
-                auto* __restrict__ fold_sum        = &fold_out[out_offset];
-
-                shift_add_complex_recurrence_binary(
-                    fold_tail, coord_cur->shift_tail, fold_head,
-                    coord_cur->shift_head, fold_sum, nbins_f, nbins);
+                shift_add_complex_recurrence_binary_steps(
+                    &fold_in[tail_offset], steps_tail[icoord],
+                    &fold_in[head_offset], steps_head[icoord],
+                    &fold_out[out_offset], nbins_f);
             }
         }
     }
@@ -989,7 +970,7 @@ void ffa_complex_iter_standard(const ComplexType* __restrict__ fold_in,
                                SizeType nbins,
                                int nthreads) {
     nthreads                       = std::max(nthreads, 1);
-    constexpr SizeType kBlockSize  = 32;
+    constexpr SizeType kBlockSize  = kMergeStepBlock;
     const SizeType fold_stride     = 2 * nbins_f;
     const SizeType seg_prev_stride = ncoords_prev * fold_stride;
     const SizeType seg_out_stride  = ncoords_cur * fold_stride;
@@ -999,27 +980,33 @@ void ffa_complex_iter_standard(const ComplexType* __restrict__ fold_in,
                nbins_f, nbins, fold_stride, seg_prev_stride, seg_out_stride)
     for (SizeType icoord_block = 0; icoord_block < ncoords_cur;
          icoord_block += kBlockSize) {
-        SizeType const block_end =
-            std::min(icoord_block + kBlockSize, ncoords_cur);
+        const SizeType nblock =
+            std::min(icoord_block + kBlockSize, ncoords_cur) - icoord_block;
+        const auto* block = coords + icoord_block;
+        // Phase steps of this block, reused by every segment.
+        std::array<PhaseStep, kBlockSize> steps_tail;
+        std::array<PhaseStep, kBlockSize> steps_head;
+        fill_merge_phase_steps(
+            [block](SizeType i) { return block[i].shift_tail; }, nblock, nbins,
+            steps_tail.data());
+        fill_merge_phase_steps(
+            [block](SizeType i) { return block[i].shift_head; }, nblock, nbins,
+            steps_head.data());
         for (SizeType iseg = 0; iseg < nsegments; ++iseg) {
-            for (SizeType icoord = icoord_block; icoord < block_end; ++icoord) {
-                const auto* __restrict__ coord_cur = &coords[icoord];
+            for (SizeType ib = 0; ib < nblock; ++ib) {
+                const auto* __restrict__ coord_cur = &block[ib];
                 const auto tail_offset =
                     ((iseg * 2) * seg_prev_stride) +
                     (static_cast<SizeType>(coord_cur->i_tail) * fold_stride);
                 const auto head_offset =
                     (((iseg * 2) + 1) * seg_prev_stride) +
                     (static_cast<SizeType>(coord_cur->i_head) * fold_stride);
-                const auto out_offset =
-                    (iseg * seg_out_stride) + (icoord * fold_stride);
-
-                const auto* __restrict__ fold_tail = &fold_in[tail_offset];
-                const auto* __restrict__ fold_head = &fold_in[head_offset];
-                auto* __restrict__ fold_sum        = &fold_out[out_offset];
-
-                shift_add_complex_recurrence_binary(
-                    fold_tail, coord_cur->shift_tail, fold_head,
-                    coord_cur->shift_head, fold_sum, nbins_f, nbins);
+                const auto out_offset = (iseg * seg_out_stride) +
+                                        ((icoord_block + ib) * fold_stride);
+                shift_add_complex_recurrence_binary_steps(
+                    &fold_in[tail_offset], steps_tail[ib],
+                    &fold_in[head_offset], steps_head[ib],
+                    &fold_out[out_offset], nbins_f);
             }
         }
     }
@@ -1041,34 +1028,38 @@ void ffa_complex_iter_segment_freq(
     const SizeType fold_stride     = 2 * nbins_f;
     const SizeType seg_prev_stride = ncoords_prev * fold_stride;
     const SizeType seg_out_stride  = ncoords_cur * fold_stride;
+    // Few coordinates and many segments: one phase-step table per level.
+    std::vector<PhaseStep> steps_vec(ncoords_cur);
+    PhaseStep* __restrict__ steps = steps_vec.data();
 
-#pragma omp parallel for num_threads(nthreads) default(none)                   \
+#pragma omp parallel num_threads(nthreads) default(none)                       \
     shared(fold_in, fold_out, coords, ncoords_cur, ncoords_prev, nsegments,    \
-               nbins_f, nbins, fold_stride, seg_prev_stride, seg_out_stride)
-    for (SizeType iseg = 0; iseg < nsegments; ++iseg) {
-        // Process coordinates in blocks within each segment
+               nbins_f, nbins, fold_stride, seg_prev_stride, seg_out_stride,   \
+               steps)
+    {
+#pragma omp for schedule(static)
         for (SizeType icoord_block = 0; icoord_block < ncoords_cur;
              icoord_block += kBlockSize) {
-            SizeType const block_end =
-                std::min(icoord_block + kBlockSize, ncoords_cur);
-            for (SizeType icoord = icoord_block; icoord < block_end; ++icoord) {
-                const auto* __restrict__ coord_cur = &coords[icoord];
+            const SizeType nblock =
+                std::min(icoord_block + kBlockSize, ncoords_cur) - icoord_block;
+            const auto* block = coords + icoord_block;
+            fill_merge_phase_steps(
+                [block](SizeType i) { return block[i].shift; }, nblock, nbins,
+                steps + icoord_block);
+        }
+#pragma omp for schedule(static)
+        for (SizeType iseg = 0; iseg < nsegments; ++iseg) {
+            for (SizeType icoord = 0; icoord < ncoords_cur; ++icoord) {
+                const auto idx = static_cast<SizeType>(coords[icoord].idx);
                 const auto tail_offset =
-                    ((iseg * 2) * seg_prev_stride) +
-                    (static_cast<SizeType>(coord_cur->idx) * fold_stride);
+                    ((iseg * 2) * seg_prev_stride) + (idx * fold_stride);
                 const auto head_offset =
-                    (((iseg * 2) + 1) * seg_prev_stride) +
-                    (static_cast<SizeType>(coord_cur->idx) * fold_stride);
+                    (((iseg * 2) + 1) * seg_prev_stride) + (idx * fold_stride);
                 const auto out_offset =
                     (iseg * seg_out_stride) + (icoord * fold_stride);
-
-                const auto* __restrict__ fold_tail = &fold_in[tail_offset];
-                const auto* __restrict__ fold_head = &fold_in[head_offset];
-                auto* __restrict__ fold_sum        = &fold_out[out_offset];
-
-                shift_add_complex_recurrence_linear(fold_tail, fold_head,
-                                                    coord_cur->shift, fold_sum,
-                                                    nbins_f, nbins);
+                shift_add_complex_recurrence_linear_steps(
+                    &fold_in[tail_offset], &fold_in[head_offset], steps[icoord],
+                    &fold_out[out_offset], nbins_f);
             }
         }
     }
@@ -1085,7 +1076,7 @@ void ffa_complex_iter_standard_freq(
     SizeType nbins,
     int nthreads) {
     nthreads                       = std::max(nthreads, 1);
-    constexpr SizeType kBlockSize  = 32;
+    constexpr SizeType kBlockSize  = kMergeStepBlock;
     const SizeType fold_stride     = 2 * nbins_f;
     const SizeType seg_prev_stride = ncoords_prev * fold_stride;
     const SizeType seg_out_stride  = ncoords_cur * fold_stride;
@@ -1095,27 +1086,25 @@ void ffa_complex_iter_standard_freq(
                nbins_f, nbins, fold_stride, seg_prev_stride, seg_out_stride)
     for (SizeType icoord_block = 0; icoord_block < ncoords_cur;
          icoord_block += kBlockSize) {
-        SizeType const block_end =
-            std::min(icoord_block + kBlockSize, ncoords_cur);
+        const SizeType nblock =
+            std::min(icoord_block + kBlockSize, ncoords_cur) - icoord_block;
+        const auto* block = coords + icoord_block;
+        // Phase steps of this block, reused by every segment.
+        std::array<PhaseStep, kBlockSize> steps;
+        fill_merge_phase_steps([block](SizeType i) { return block[i].shift; },
+                               nblock, nbins, steps.data());
         for (SizeType iseg = 0; iseg < nsegments; ++iseg) {
-            for (SizeType icoord = icoord_block; icoord < block_end; ++icoord) {
-                const auto* __restrict__ coord_cur = &coords[icoord];
+            for (SizeType ib = 0; ib < nblock; ++ib) {
+                const auto idx = static_cast<SizeType>(block[ib].idx);
                 const auto tail_offset =
-                    ((iseg * 2) * seg_prev_stride) +
-                    (static_cast<SizeType>(coord_cur->idx) * fold_stride);
+                    ((iseg * 2) * seg_prev_stride) + (idx * fold_stride);
                 const auto head_offset =
-                    (((iseg * 2) + 1) * seg_prev_stride) +
-                    (static_cast<SizeType>(coord_cur->idx) * fold_stride);
-                const auto out_offset =
-                    (iseg * seg_out_stride) + (icoord * fold_stride);
-
-                const auto* __restrict__ fold_tail = &fold_in[tail_offset];
-                const auto* __restrict__ fold_head = &fold_in[head_offset];
-                auto* __restrict__ fold_sum        = &fold_out[out_offset];
-
-                shift_add_complex_recurrence_linear(fold_tail, fold_head,
-                                                    coord_cur->shift, fold_sum,
-                                                    nbins_f, nbins);
+                    (((iseg * 2) + 1) * seg_prev_stride) + (idx * fold_stride);
+                const auto out_offset = (iseg * seg_out_stride) +
+                                        ((icoord_block + ib) * fold_stride);
+                shift_add_complex_recurrence_linear_steps(
+                    &fold_in[tail_offset], &fold_in[head_offset], steps[ib],
+                    &fold_out[out_offset], nbins_f);
             }
         }
     }
@@ -1338,6 +1327,26 @@ void tile_input_ranges(const coord::FFACoordFreq* const* coords_levels,
 
 } // namespace
 
+#if defined(__AVX2__)
+/// Prefix sums of 4 consecutive segments, interleaved: dst[4 i + s] is the
+/// sum of the first i samples of segment s (the same sequential double sums
+/// as fill_segment_prefix).
+void fill_segment_prefix_4seg(const float* __restrict__ src,
+                              SizeType segment_len,
+                              double* __restrict__ dst) noexcept {
+    std::array<double, 4> acc{};
+    for (SizeType s = 0; s < 4; ++s) {
+        dst[s] = 0.0;
+    }
+    for (SizeType i = 0; i < segment_len; ++i) {
+        for (SizeType s = 0; s < 4; ++s) {
+            acc[s] += static_cast<double>(src[(s * segment_len) + i]);
+            dst[((i + 1) * 4) + s] = acc[s];
+        }
+    }
+}
+#endif
+
 void brute_fold_ts(const float* __restrict__ ts_e,
                    const float* __restrict__ ts_v,
                    float* __restrict__ fold,
@@ -1348,15 +1357,40 @@ void brute_fold_ts(const float* __restrict__ ts_e,
                    SizeType segment_len,
                    SizeType nbins,
                    int nthreads) {
-    nthreads = std::max(nthreads, 1);
+    nthreads                  = std::max(nthreads, 1);
+    const SizeType seg_stride = nfreqs * 2 * nbins;
+    // Groups of 4 segments go through the SIMD kernel (bit-exact with the
+    // scalar one); the rest one by one.
+#if defined(__AVX2__)
+    const SizeType ngroups = nsegments / 4;
+#else
+    const SizeType ngroups = 0;
+#endif
 #pragma omp parallel num_threads(nthreads) default(none)                       \
     shared(ts_e, ts_v, fold, runs, run_offsets, nsegments, nfreqs,             \
-               segment_len, nbins)
+               segment_len, nbins, seg_stride, ngroups)
     {
+#if defined(__AVX2__)
+        std::vector<double> p4_e(4 * (segment_len + 1));
+        std::vector<double> p4_v(4 * (segment_len + 1));
+        std::vector<float> fold_buf(4 * 2 * nbins);
+#pragma omp for schedule(static)
+        for (SizeType igroup = 0; igroup < ngroups; ++igroup) {
+            const SizeType iseg = igroup * 4;
+            fill_segment_prefix_4seg(ts_e + (iseg * segment_len), segment_len,
+                                     p4_e.data());
+            fill_segment_prefix_4seg(ts_v + (iseg * segment_len), segment_len,
+                                     p4_v.data());
+            brute_fold_runs_range_4seg(p4_e.data(), p4_v.data(),
+                                       fold + (iseg * seg_stride),
+                                       fold_buf.data(), seg_stride, runs,
+                                       run_offsets, 0, nfreqs, nbins);
+        }
+#endif
         std::vector<double> prefix_e(segment_len + 1);
         std::vector<double> prefix_v(segment_len + 1);
 #pragma omp for schedule(static)
-        for (SizeType iseg = 0; iseg < nsegments; ++iseg) {
+        for (SizeType iseg = ngroups * 4; iseg < nsegments; ++iseg) {
             const auto start_idx              = iseg * segment_len;
             const auto* __restrict__ ts_e_seg = ts_e + start_idx;
             const auto* __restrict__ ts_v_seg = ts_v + start_idx;
@@ -1444,53 +1478,152 @@ void brute_fold_ffa_fused_freq(const float* __restrict__ ts_e,
     }
 }
 
-void brute_fold_ts_complex_xsimd(const float* __restrict__ ts_e,
-                                 const float* __restrict__ ts_v,
-                                 ComplexType* __restrict__ fold,
-                                 const double* __restrict__ freqs,
-                                 SizeType nfreqs,
-                                 SizeType nsegments,
-                                 SizeType segment_len,
-                                 SizeType nbins,
-                                 double tsamp,
-                                 double t_ref,
-                                 int nthreads) {
-    nthreads           = std::max(nthreads, 1);
-    const auto nbins_f = (nbins / 2) + 1;
+namespace {
 
-    AlignedFloatVec delta_phasors_r(nfreqs * segment_len);
-    AlignedFloatVec delta_phasors_i(nfreqs * segment_len);
-    float* __restrict__ delta_phasors_r_ptr = delta_phasors_r.data();
-    float* __restrict__ delta_phasors_i_ptr = delta_phasors_i.data();
-
-    // Never xsimd this; it results in numerical error with fast_math on avx2.
-    precompute_base_phasors_scalar(delta_phasors_r_ptr, delta_phasors_i_ptr,
-                                   freqs, nfreqs, segment_len, tsamp, t_ref,
-                                   nthreads);
-
-#pragma omp parallel num_threads(nthreads) default(none)                       \
-    shared(ts_e, ts_v, fold, nfreqs, nsegments, segment_len, nbins_f,          \
-               delta_phasors_r_ptr, delta_phasors_i_ptr)
-    {
-        AlignedFloatVec current_phasors_r(segment_len);
-        AlignedFloatVec current_phasors_i(segment_len);
-        float* __restrict__ current_phasors_r_ptr = current_phasors_r.data();
-        float* __restrict__ current_phasors_i_ptr = current_phasors_i.data();
-
-#pragma omp for
-        for (SizeType iseg = 0; iseg < nsegments; ++iseg) {
-            const SizeType start_idx           = iseg * segment_len;
-            const float* __restrict__ ts_e_seg = ts_e + start_idx;
-            const float* __restrict__ ts_v_seg = ts_v + start_idx;
-            ComplexType* __restrict__ fold_seg =
-                fold + (iseg * nfreqs * 2 * nbins_f);
-            brute_fold_segment_complex_xsimd(
-                ts_e_seg, ts_v_seg, fold_seg, nfreqs, nbins_f, segment_len,
-                delta_phasors_r_ptr, delta_phasors_i_ptr, current_phasors_r_ptr,
-                current_phasors_i_ptr);
+/// Phasor table of one frequency: row j < nrows holds exp(i m phase_j),
+/// m < nbins_f, as (re, im) pairs padded with zeros to row_len floats;
+/// phase_j = -2 pi f (j tsamp - t_ref). Double, rounded once.
+void fill_brute_phasors(double freq,
+                        SizeType nrows,
+                        SizeType nbins_f,
+                        double tsamp,
+                        double t_ref,
+                        SizeType row_len,
+                        float* __restrict__ table) noexcept {
+    const double phase_factor = -2.0 * std::numbers::pi * freq;
+    for (SizeType j = 0; j < nrows; ++j) {
+        const double phase =
+            phase_factor * ((static_cast<double>(j) * tsamp) - t_ref);
+        float* row = table + (j * row_len);
+        // exp(i m phase) by a double recurrence over m: its error (~m 1e-16)
+        // stays far below the float rounding.
+        const double w_re = std::cos(phase);
+        const double w_im = std::sin(phase);
+        double p_re       = 1.0;
+        double p_im       = 0.0;
+        for (SizeType m = 0; m < nbins_f; ++m) {
+            row[2 * m]       = static_cast<float>(p_re);
+            row[(2 * m) + 1] = static_cast<float>(p_im);
+            const double r   = std::fma(p_re, w_re, -(p_im * w_im));
+            p_im             = std::fma(p_re, w_im, p_im * w_re);
+            p_re             = r;
         }
+        for (SizeType c = 2 * nbins_f; c < row_len; ++c)
+            row[c] = 0.0F;
     }
 }
+
+/// out[s][c0 + c] (+)= sum_j x[s][j] table[j][c0 + c], j < len, c < NV W,
+/// for NS rows; `accumulate` adds to out instead of overwriting it.
+template <SizeType NS, SizeType NV>
+[[gnu::always_inline]] inline void
+brute_gemm_block(const std::array<const float*, NS>& x,
+                 const float* __restrict__ table,
+                 SizeType segment_len,
+                 SizeType row_len,
+                 SizeType c0,
+                 const std::array<float*, NS>& out,
+                 bool accumulate) noexcept {
+    using B               = xsimd::batch<float>;
+    constexpr SizeType kW = B::size;
+    // Two accumulators (even and odd samples): shorter float sums.
+    std::array<std::array<B, NV>, NS> acc0;
+    std::array<std::array<B, NV>, NS> acc1;
+    for (SizeType s = 0; s < NS; ++s) {
+        for (SizeType v = 0; v < NV; ++v) {
+            acc0[s][v] =
+                accumulate ? B::load_aligned(out[s] + c0 + (v * kW)) : B(0.0F);
+            acc1[s][v] = B(0.0F);
+        }
+    }
+    SizeType j = 0;
+    for (; j + 2 <= segment_len; j += 2) {
+        const float* t0 = table + (j * row_len) + c0;
+        const float* t1 = t0 + row_len;
+        std::array<B, NS> x0;
+        std::array<B, NS> x1;
+        for (SizeType s = 0; s < NS; ++s) {
+            x0[s] = B(x[s][j]);
+            x1[s] = B(x[s][j + 1]);
+        }
+        for (SizeType v = 0; v < NV; ++v) {
+            const B a = B::load_aligned(t0 + (v * kW));
+            const B b = B::load_aligned(t1 + (v * kW));
+            for (SizeType s = 0; s < NS; ++s) {
+                acc0[s][v] = xsimd::fma(x0[s], a, acc0[s][v]);
+                acc1[s][v] = xsimd::fma(x1[s], b, acc1[s][v]);
+            }
+        }
+    }
+    for (; j < segment_len; ++j) {
+        const float* t0 = table + (j * row_len) + c0;
+        for (SizeType v = 0; v < NV; ++v) {
+            const B a = B::load_aligned(t0 + (v * kW));
+            for (SizeType s = 0; s < NS; ++s)
+                acc0[s][v] = xsimd::fma(B(x[s][j]), a, acc0[s][v]);
+        }
+    }
+    for (SizeType s = 0; s < NS; ++s)
+        for (SizeType v = 0; v < NV; ++v)
+            (acc0[s][v] + acc1[s][v]).store_aligned(out[s] + c0 + (v * kW));
+}
+
+/// Samples per sub-block of the direct Fourier brute fold (one table).
+constexpr SizeType kBruteSub = 64;
+
+template <SizeType NS>
+void brute_gemm_rows(const std::array<const float*, NS>& x,
+                     const float* table,
+                     SizeType segment_len,
+                     SizeType row_len,
+                     const std::array<float*, NS>& out,
+                     bool accumulate) noexcept {
+    using B               = xsimd::batch<float>;
+    constexpr SizeType kW = B::size;
+#if defined(__AVX512F__)
+    constexpr SizeType kMaxNV = NS >= 4 ? 3 : 5;
+#else
+    constexpr SizeType kMaxNV = NS >= 4 ? 1 : 2;
+#endif
+    SizeType c0 = 0;
+    for (; c0 + (kMaxNV * kW) <= row_len; c0 += kMaxNV * kW)
+        brute_gemm_block<NS, kMaxNV>(x, table, segment_len, row_len, c0, out,
+                                     accumulate);
+    switch ((row_len - c0) / kW) {
+    case 0:
+        break;
+    case 1:
+        brute_gemm_block<NS, 1>(x, table, segment_len, row_len, c0, out,
+                                accumulate);
+        break;
+    case 2:
+        brute_gemm_block<NS, 2>(x, table, segment_len, row_len, c0, out,
+                                accumulate);
+        break;
+    case 3:
+        brute_gemm_block<NS, 3>(x, table, segment_len, row_len, c0, out,
+                                accumulate);
+        break;
+    case 4:
+        brute_gemm_block<NS, 4>(x, table, segment_len, row_len, c0, out,
+                                accumulate);
+        break;
+    case 5:
+        brute_gemm_block<NS, 5>(x, table, segment_len, row_len, c0, out,
+                                accumulate);
+        break;
+    case 6:
+        brute_gemm_block<NS, 6>(x, table, segment_len, row_len, c0, out,
+                                accumulate);
+        break;
+    default:
+        brute_gemm_block<NS, 7>(x, table, segment_len, row_len, c0, out,
+                                accumulate);
+        break;
+    }
+}
+
+} // namespace
 
 void brute_fold_ts_complex(const float* __restrict__ ts_e,
                            const float* __restrict__ ts_v,
@@ -1503,48 +1636,639 @@ void brute_fold_ts_complex(const float* __restrict__ ts_e,
                            double tsamp,
                            double t_ref,
                            int nthreads) {
-    nthreads = std::max(nthreads, 1);
-#if defined(__AVX512F__) || (defined(__AVX2__) && defined(__FMA__)) ||         \
-    defined(__aarch64__) || defined(__ARM_NEON)
-
-    const auto nbins_f = (nbins / 2) + 1;
-
-    AlignedFloatVec delta_phasors_r(nfreqs * segment_len);
-    AlignedFloatVec delta_phasors_i(nfreqs * segment_len);
-    float* __restrict__ delta_phasors_r_ptr = delta_phasors_r.data();
-    float* __restrict__ delta_phasors_i_ptr = delta_phasors_i.data();
-
-    // Never xsimd this; it results in numerical error with fast_math on avx2.
-    precompute_base_phasors_scalar(delta_phasors_r_ptr, delta_phasors_i_ptr,
-                                   freqs, nfreqs, segment_len, tsamp, t_ref,
-                                   nthreads);
-
-#pragma omp parallel num_threads(nthreads) default(none)                       \
-    shared(ts_e, ts_v, fold, nfreqs, nsegments, segment_len, nbins_f,          \
-               delta_phasors_r_ptr, delta_phasors_i_ptr)
-    {
-        AlignedFloatVec current_phasors_r(segment_len);
-        AlignedFloatVec current_phasors_i(segment_len);
-        float* __restrict__ current_phasors_r_ptr = current_phasors_r.data();
-        float* __restrict__ current_phasors_i_ptr = current_phasors_i.data();
-
-#pragma omp for schedule(static)
-        for (SizeType iseg = 0; iseg < nsegments; ++iseg) {
-            const SizeType start_idx           = iseg * segment_len;
-            const float* __restrict__ ts_e_seg = ts_e + start_idx;
-            const float* __restrict__ ts_v_seg = ts_v + start_idx;
-            ComplexType* __restrict__ fold_seg =
-                fold + (iseg * nfreqs * 2 * nbins_f);
-            brute_fold_intrinsics::fold_one_segment(
-                ts_e_seg, ts_v_seg, fold_seg, current_phasors_r_ptr,
-                current_phasors_i_ptr, delta_phasors_r_ptr, delta_phasors_i_ptr,
-                nfreqs, segment_len, nbins_f);
+    // fold[s][m] = sum_j x_s[j] exp(i m phase_j) as GEMMs against phasor
+    // tables shared by every segment (each is folded from its own start).
+    // The phase is linear in j, so j = B q + r splits it: sub-block q of B
+    // samples is a GEMM against one B-row table T[r] = exp(i m phase'_r)
+    // (phase' without t_ref: small, in L1), rotated by G[q] = exp(i m
+    // phase_(B q)) and summed. A segment of at most B samples is one
+    // sub-block with the full phase in T. Pairs of segments (e and v rows)
+    // share the table loads.
+    nthreads                = std::max(nthreads, 1);
+    constexpr SizeType kW   = xsimd::batch<float>::size;
+    const SizeType nbins_f  = (nbins / 2) + 1;
+    const SizeType row_len  = (((2 * nbins_f) + kW - 1) / kW) * kW;
+    const SizeType sub      = std::min(segment_len, kBruteSub);
+    const SizeType nsub     = (segment_len + sub - 1) / sub;
+    const bool split        = nsub > 1;
+    const SizeType t_stride = sub * row_len;
+    const SizeType g_stride = nsub * 2 * nbins_f;
+    AlignedFloatVec t_tables(nfreqs * t_stride);
+    AlignedFloatVec g_tables(split ? nfreqs * g_stride : 0);
+    for (SizeType f = 0; f < nfreqs; ++f) {
+        fill_brute_phasors(freqs[f], sub, nbins_f, tsamp, split ? 0.0 : t_ref,
+                           row_len, t_tables.data() + (f * t_stride));
+        if (split) {
+            fill_brute_phasors(freqs[f], nsub, nbins_f,
+                               tsamp * static_cast<double>(sub), t_ref,
+                               2 * nbins_f, g_tables.data() + (f * g_stride));
         }
     }
-#else
-    brute_fold_ts_complex_xsimd(ts_e, ts_v, fold, freqs, nfreqs, nsegments,
-                                segment_len, nbins, tsamp, t_ref, nthreads);
-#endif
+    const float* t_tab         = t_tables.data();
+    const float* g_tab         = g_tables.data();
+    const SizeType fold_stride = nfreqs * 2 * nbins_f; // per segment
+    const SizeType npairs      = (nsegments + 1) / 2;
+#pragma omp parallel num_threads(nthreads) default(none)                       \
+    shared(ts_e, ts_v, fold, nfreqs, nsegments, segment_len, nbins_f, row_len, \
+               sub, nsub, split, t_tab, g_tab, t_stride, g_stride,             \
+               fold_stride, npairs)
+    {
+        // Sub-block results, and their rotated sums (split only).
+        AlignedFloatVec y_rows(4 * row_len);
+        std::vector<float> acc(split ? 4 * 2 * nbins_f : 0);
+        const std::array<float*, 4> y{y_rows.data(), y_rows.data() + row_len,
+                                      y_rows.data() + (2 * row_len),
+                                      y_rows.data() + (3 * row_len)};
+#pragma omp for schedule(static)
+        for (SizeType ip = 0; ip < npairs; ++ip) {
+            const SizeType s0   = 2 * ip;
+            const SizeType nseg = std::min<SizeType>(2, nsegments - s0);
+            const float* e0     = ts_e + (s0 * segment_len);
+            const float* v0     = ts_v + (s0 * segment_len);
+            for (SizeType f = 0; f < nfreqs; ++f) {
+                const float* table = t_tab + (f * t_stride);
+                std::fill(acc.begin(), acc.end(), 0.0F);
+                for (SizeType q = 0; q < nsub; ++q) {
+                    const SizeType j0  = q * sub;
+                    const SizeType len = std::min(sub, segment_len - j0);
+                    if (nseg == 2) {
+                        brute_gemm_rows<4>({e0 + j0, v0 + j0,
+                                            e0 + segment_len + j0,
+                                            v0 + segment_len + j0},
+                                           table, len, row_len, y, false);
+                    } else {
+                        brute_gemm_rows<2>({e0 + j0, v0 + j0}, table, len,
+                                           row_len, {y[0], y[1]}, false);
+                    }
+                    if (!split) {
+                        break;
+                    }
+                    // acc += G[q] * y, complex, per row.
+                    const float* g = g_tab + (f * g_stride) + (q * 2 * nbins_f);
+                    for (SizeType r = 0; r < 2 * nseg; ++r) {
+                        float* a       = acc.data() + (r * 2 * nbins_f);
+                        const float* v = y[r];
+                        for (SizeType m = 0; m < nbins_f; ++m) {
+                            const float gr = g[2 * m];
+                            const float gi = g[(2 * m) + 1];
+                            const float vr = v[2 * m];
+                            const float vi = v[(2 * m) + 1];
+                            a[2 * m] += (gr * vr) - (gi * vi);
+                            a[(2 * m) + 1] += (gr * vi) + (gi * vr);
+                        }
+                    }
+                }
+                for (SizeType s = 0; s < nseg; ++s) {
+                    auto* dst = reinterpret_cast<float*>(
+                        fold + ((s0 + s) * fold_stride) + (f * 2 * nbins_f));
+                    for (SizeType r = 0; r < 2; ++r) {
+                        const float* src =
+                            split ? acc.data() + (((2 * s) + r) * 2 * nbins_f)
+                                  : y[(2 * s) + r];
+                        std::copy_n(src, 2 * nbins_f, dst + (r * 2 * nbins_f));
+                    }
+                }
+            }
+        }
+    }
+}
+
+namespace {
+// A tile of final coordinates: `nrows` rows of the coordinate grid (all
+// parameters but frequency) times `ncols` frequencies from `col_begin`.
+struct FinalTile {
+    SizeType row_begin;
+    SizeType nrows;
+    SizeType col_begin;
+    SizeType ncols;
+};
+
+// Tiles of the final level ordered for parent reuse. Neighbouring accel
+// (jerk) rows read the same parent rows of the level before (its grid is
+// coarser), and a parent row of a wide chunk is far larger than L2. Rows with
+// the same parent rows form a group, and a group's tiles walk the frequency
+// axis, so a tile's parents stay in cache across its rows.
+template <typename Coord>
+std::vector<FinalTile> plan_final_tiles(const Coord* coords,
+                                        SizeType ncoords_cur,
+                                        SizeType row_len,
+                                        SizeType row_len_prev,
+                                        SizeType tile_cols) {
+    std::vector<FinalTile> tiles;
+    if (row_len == 0 || row_len_prev == 0 || ncoords_cur % row_len != 0) {
+        row_len      = ncoords_cur;
+        row_len_prev = 0;
+    }
+    const SizeType nrows   = ncoords_cur / row_len;
+    const auto parent_rows = [&](SizeType row) {
+        if constexpr (std::is_same_v<Coord, coord::FFACoord>) {
+            const auto& c = coords[row * row_len];
+            return std::pair<SizeType, SizeType>{c.i_tail / row_len_prev,
+                                                 c.i_head / row_len_prev};
+        } else {
+            return std::pair<SizeType, SizeType>{row, row};
+        }
+    };
+    for (SizeType row = 0; row < nrows;) {
+        SizeType end = row + 1;
+        if (row_len_prev != 0) {
+            const auto key = parent_rows(row);
+            while (end < nrows && parent_rows(end) == key) {
+                ++end;
+            }
+        }
+        for (SizeType col = 0; col < row_len; col += tile_cols) {
+            tiles.push_back({.row_begin = row,
+                             .nrows     = end - row,
+                             .col_begin = col,
+                             .ncols     = std::min(tile_cols, row_len - col)});
+        }
+        row = end;
+    }
+    return tiles;
+}
+} // namespace
+
+void ffa_final_scored(const float* __restrict__ fold_in,
+                      const coord::FFACoord* __restrict__ coords,
+                      SizeType ncoords_cur,
+                      SizeType ncoords_prev,
+                      SizeType nbins,
+                      SizeType row_len,
+                      SizeType row_len_prev,
+                      SizeType tile_coords,
+                      ConeScoreFn score_fn,
+                      void* score_ctx,
+                      int nthreads) {
+    nthreads                           = std::max(nthreads, 1);
+    tile_coords                        = std::max<SizeType>(tile_coords, 1);
+    const SizeType fold_stride         = 2 * nbins;
+    const float* __restrict__ seg_tail = fold_in;
+    const float* __restrict__ seg_head = fold_in + (ncoords_prev * fold_stride);
+    const std::vector<FinalTile> tiles = plan_final_tiles(
+        coords, ncoords_cur, row_len, row_len_prev, tile_coords);
+    const SizeType ntiles = tiles.size();
+    if (row_len == 0 || ncoords_cur % row_len != 0) {
+        row_len = ncoords_cur;
+    }
+
+#pragma omp parallel num_threads(nthreads) default(none)                       \
+    shared(seg_tail, seg_head, coords, nbins, tile_coords, score_fn,           \
+               score_ctx, fold_stride, ntiles, tiles, row_len)
+    {
+        utils::UninitVector<float> scratch(tile_coords * fold_stride);
+#pragma omp for schedule(static)
+        for (SizeType itile = 0; itile < ntiles; ++itile) {
+            const FinalTile& tile = tiles[itile];
+            for (SizeType row = tile.row_begin;
+                 row < tile.row_begin + tile.nrows; ++row) {
+                const SizeType begin = (row * row_len) + tile.col_begin;
+                for (SizeType i = 0; i < tile.ncols; ++i) {
+                    const auto& coord = coords[begin + i];
+                    shift_add_binary_direct(
+                        seg_tail +
+                            (static_cast<SizeType>(coord.i_tail) * fold_stride),
+                        coord.shift_tail,
+                        seg_head +
+                            (static_cast<SizeType>(coord.i_head) * fold_stride),
+                        coord.shift_head, scratch.data() + (i * fold_stride),
+                        nbins);
+                }
+                score_fn(scratch.data(), begin, tile.ncols, nbins, score_ctx);
+            }
+        }
+    }
+}
+
+namespace {
+template <typename Coord, typename MergeOne>
+void complex_final_tiles(const Coord* __restrict__ coords,
+                         SizeType ncoords_cur,
+                         SizeType nbins_f,
+                         SizeType row_len,
+                         SizeType row_len_prev,
+                         SizeType tile_coords,
+                         ComplexTileFn tile_fn,
+                         void* tile_ctx,
+                         int nthreads,
+                         MergeOne merge_one) {
+    nthreads                           = std::max(nthreads, 1);
+    const SizeType fold_stride         = 2 * nbins_f;
+    const std::vector<FinalTile> tiles = plan_final_tiles(
+        coords, ncoords_cur, row_len, row_len_prev, tile_coords);
+    const SizeType ntiles = tiles.size();
+    if (row_len == 0 || ncoords_cur % row_len != 0) {
+        row_len = ncoords_cur;
+    }
+
+#pragma omp parallel num_threads(nthreads) default(none)                       \
+    shared(coords, nbins_f, tile_coords, tile_fn, tile_ctx, fold_stride,       \
+               ntiles, tiles, row_len, merge_one)
+    {
+        utils::UninitVector<ComplexType> scratch(tile_coords * fold_stride);
+#pragma omp for schedule(static)
+        for (SizeType itile = 0; itile < ntiles; ++itile) {
+            const FinalTile& tile = tiles[itile];
+            for (SizeType row = tile.row_begin;
+                 row < tile.row_begin + tile.nrows; ++row) {
+                const SizeType begin = (row * row_len) + tile.col_begin;
+                for (SizeType b0 = 0; b0 < tile.ncols; b0 += kMergeStepBlock) {
+                    const SizeType nblock =
+                        std::min(SizeType{kMergeStepBlock}, tile.ncols - b0);
+                    merge_one(coords + begin + b0, nblock,
+                              scratch.data() + (b0 * fold_stride));
+                }
+                tile_fn(scratch.data(), begin, tile.ncols, tile_ctx);
+            }
+        }
+    }
+}
+} // namespace
+
+void ffa_complex_final_tiles(const ComplexType* __restrict__ fold_in,
+                             const coord::FFACoord* __restrict__ coords,
+                             SizeType ncoords_cur,
+                             SizeType ncoords_prev,
+                             SizeType nbins_f,
+                             SizeType nbins,
+                             SizeType row_len,
+                             SizeType row_len_prev,
+                             SizeType tile_coords,
+                             ComplexTileFn tile_fn,
+                             void* tile_ctx,
+                             int nthreads) {
+    const SizeType fold_stride  = 2 * nbins_f;
+    const ComplexType* seg_tail = fold_in;
+    const ComplexType* seg_head = fold_in + (ncoords_prev * fold_stride);
+    complex_final_tiles(
+        coords, ncoords_cur, nbins_f, row_len, row_len_prev, tile_coords,
+        tile_fn, tile_ctx, nthreads,
+        [=](const coord::FFACoord* block, SizeType nblock, ComplexType* out) {
+            std::array<PhaseStep, kMergeStepBlock> steps_tail;
+            std::array<PhaseStep, kMergeStepBlock> steps_head;
+            fill_merge_phase_steps(
+                [block](SizeType i) { return block[i].shift_tail; }, nblock,
+                nbins, steps_tail.data());
+            fill_merge_phase_steps(
+                [block](SizeType i) { return block[i].shift_head; }, nblock,
+                nbins, steps_head.data());
+            for (SizeType i = 0; i < nblock; ++i) {
+                shift_add_complex_recurrence_binary_steps(
+                    seg_tail +
+                        (static_cast<SizeType>(block[i].i_tail) * fold_stride),
+                    steps_tail[i],
+                    seg_head +
+                        (static_cast<SizeType>(block[i].i_head) * fold_stride),
+                    steps_head[i], out + (i * fold_stride), nbins_f);
+            }
+        });
+}
+
+namespace {
+// Parent rows of a set of final coordinates: [lo, hi) of i_tail and i_head.
+struct ParentSpan {
+    SizeType tail_lo;
+    SizeType tail_hi;
+    SizeType head_lo;
+    SizeType head_hi;
+};
+
+ParentSpan parent_span(const coord::FFACoord* coords,
+                       SizeType row_len,
+                       SizeType row_begin,
+                       SizeType nrows,
+                       SizeType col_begin,
+                       SizeType ncols) {
+    ParentSpan span{.tail_lo = std::numeric_limits<SizeType>::max(),
+                    .tail_hi = 0,
+                    .head_lo = std::numeric_limits<SizeType>::max(),
+                    .head_hi = 0};
+    for (SizeType row = row_begin; row < row_begin + nrows; ++row) {
+        const coord::FFACoord* c = coords + (row * row_len) + col_begin;
+        for (SizeType i = 0; i < ncols; ++i) {
+            span.tail_lo = std::min<SizeType>(span.tail_lo, c[i].i_tail);
+            span.tail_hi = std::max<SizeType>(span.tail_hi, c[i].i_tail + 1);
+            span.head_lo = std::min<SizeType>(span.head_lo, c[i].i_head);
+            span.head_hi = std::max<SizeType>(span.head_hi, c[i].i_head + 1);
+        }
+    }
+    return span;
+}
+
+// Visit the sub-tiles of `tile` whose parents fit `cap` rows per segment:
+// the whole tile, else row by row, else halves of a row's columns.
+template <typename Visit>
+void for_each_parent_fit(const coord::FFACoord* coords,
+                         SizeType row_len,
+                         const FinalTile& tile,
+                         SizeType cap,
+                         SizeType align,
+                         Visit visit) {
+    const auto fits = [&](const ParentSpan& sp) {
+        const auto rows = [align](SizeType lo, SizeType hi) {
+            return (((hi + align - 1) / align) * align) -
+                   ((lo / align) * align);
+        };
+        return rows(sp.tail_lo, sp.tail_hi) <= cap &&
+               rows(sp.head_lo, sp.head_hi) <= cap;
+    };
+    const ParentSpan whole =
+        parent_span(coords, row_len, tile.row_begin, tile.nrows, tile.col_begin,
+                    tile.ncols);
+    if (fits(whole)) {
+        visit(tile, whole);
+        return;
+    }
+    for (SizeType row = tile.row_begin; row < tile.row_begin + tile.nrows;
+         ++row) {
+        // Split the row's columns until each part fits (one column always
+        // does: it reads one parent per segment).
+        std::vector<FinalTile> parts = {{.row_begin = row,
+                                         .nrows     = 1,
+                                         .col_begin = tile.col_begin,
+                                         .ncols     = tile.ncols}};
+        while (!parts.empty()) {
+            const FinalTile part = parts.back();
+            parts.pop_back();
+            const ParentSpan sp = parent_span(coords, row_len, part.row_begin,
+                                              1, part.col_begin, part.ncols);
+            if (fits(sp) || part.ncols == 1) {
+                visit(part, sp);
+                continue;
+            }
+            const SizeType half = ((part.ncols / 2) / align) * align;
+            const SizeType left = half == 0 ? part.ncols / 2 : half;
+            // Right half first: the stack visits the left half first.
+            parts.push_back({.row_begin = row,
+                             .nrows     = 1,
+                             .col_begin = part.col_begin + left,
+                             .ncols     = part.ncols - left});
+            parts.push_back({.row_begin = row,
+                             .nrows     = 1,
+                             .col_begin = part.col_begin,
+                             .ncols     = left});
+        }
+    }
+}
+} // namespace
+
+void ffa_final2_scored(const float* __restrict__ fold_in,
+                       const coord::FFACoord* __restrict__ coords_prev,
+                       const coord::FFACoord* __restrict__ coords,
+                       SizeType ncoords_cur,
+                       SizeType ncoords_prev2,
+                       SizeType nbins,
+                       SizeType row_len,
+                       SizeType row_len_prev,
+                       SizeType tile_coords,
+                       ConeScoreFn score_fn,
+                       void* score_ctx,
+                       int nthreads) {
+    nthreads                   = std::max(nthreads, 1);
+    tile_coords                = std::max<SizeType>(tile_coords, 1);
+    const SizeType fold_stride = 2 * nbins;
+    // A level-(L-1) parent in scratch: each channel stored twice ([e, e, v,
+    // v]), so a rotation of it is one contiguous run.
+    const SizeType par_stride          = 4 * nbins;
+    const SizeType seg2                = ncoords_prev2 * fold_stride;
+    const std::vector<FinalTile> tiles = plan_final_tiles(
+        coords, ncoords_cur, row_len, row_len_prev, tile_coords);
+    const SizeType ntiles = tiles.size();
+    if (row_len == 0 || ncoords_cur % row_len != 0) {
+        row_len = ncoords_cur;
+    }
+    // Parents per segment held in scratch; a tile of a row group reads about
+    // half its columns plus the head drift.
+    const SizeType cap = tile_coords + 64;
+
+#pragma omp parallel num_threads(nthreads) default(none) shared(               \
+        fold_in, coords_prev, coords, nbins, tile_coords, score_fn, score_ctx, \
+            fold_stride, par_stride, seg2, ntiles, tiles, row_len, cap)
+    {
+        utils::UninitVector<float> scratch(tile_coords * fold_stride);
+        utils::UninitVector<float> par_tail(cap * par_stride);
+        utils::UninitVector<float> par_head(cap * par_stride);
+        // Level L-1 segment `seg` (0 tail, 1 head) rows [lo, hi) from level
+        // L-2 (segments 2 seg, 2 seg + 1), the arithmetic of ffa_iter.
+        const auto fill = [&](SizeType seg, SizeType lo, SizeType hi,
+                              float* par) {
+            const float* l2_tail = fold_in + ((2 * seg) * seg2);
+            const float* l2_head = fold_in + ((2 * seg + 1) * seg2);
+            for (SizeType idx = lo; idx < hi; ++idx) {
+                const auto& c     = coords_prev[idx];
+                const SizeType st = phase_shift_bins(c.shift_tail, nbins);
+                const SizeType sh = phase_shift_bins(c.shift_head, nbins);
+                const float* t    = l2_tail + (c.i_tail * fold_stride);
+                const float* h    = l2_head + (c.i_head * fold_stride);
+                float* out        = par + ((idx - lo) * par_stride);
+                shift_add_binary_channel(t, st, h, sh, out, nbins);
+                shift_add_binary_channel(t + nbins, st, h + nbins, sh,
+                                         out + (2 * nbins), nbins);
+                std::memcpy(out + nbins, out, nbins * sizeof(float));
+                std::memcpy(out + (3 * nbins), out + (2 * nbins),
+                            nbins * sizeof(float));
+            }
+        };
+#pragma omp for schedule(static)
+        for (SizeType itile = 0; itile < ntiles; ++itile) {
+            for_each_parent_fit(
+                coords, row_len, tiles[itile], cap, 1,
+                [&](const FinalTile& tile, const ParentSpan& sp) {
+                    fill(0, sp.tail_lo, sp.tail_hi, par_tail.data());
+                    fill(1, sp.head_lo, sp.head_hi, par_head.data());
+                    for (SizeType row = tile.row_begin;
+                         row < tile.row_begin + tile.nrows; ++row) {
+                        const SizeType begin = (row * row_len) + tile.col_begin;
+                        for (SizeType i = 0; i < tile.ncols; ++i) {
+                            const auto& c = coords[begin + i];
+                            const SizeType st =
+                                phase_shift_bins(c.shift_tail, nbins);
+                            const SizeType sh =
+                                phase_shift_bins(c.shift_head, nbins);
+                            const float* __restrict__ t =
+                                par_tail.data() +
+                                ((c.i_tail - sp.tail_lo) * par_stride) +
+                                (nbins - st);
+                            const float* __restrict__ h =
+                                par_head.data() +
+                                ((c.i_head - sp.head_lo) * par_stride) +
+                                (nbins - sh);
+                            float* __restrict__ out =
+                                scratch.data() + (i * fold_stride);
+#pragma omp simd
+                            for (SizeType j = 0; j < nbins; ++j) {
+                                out[j] = t[j] + h[j];
+                            }
+#pragma omp simd
+                            for (SizeType j = 0; j < nbins; ++j) {
+                                out[nbins + j] =
+                                    t[(2 * nbins) + j] + h[(2 * nbins) + j];
+                            }
+                        }
+                        score_fn(scratch.data(), begin, tile.ncols, nbins,
+                                 score_ctx);
+                    }
+                });
+        }
+    }
+}
+
+void ffa_complex_final2_tiles(const ComplexType* __restrict__ fold_in,
+                              const coord::FFACoord* __restrict__ coords_prev,
+                              const coord::FFACoord* __restrict__ coords,
+                              SizeType ncoords_cur,
+                              SizeType ncoords_prev,
+                              SizeType ncoords_prev2,
+                              SizeType nbins_f,
+                              SizeType nbins,
+                              SizeType row_len,
+                              SizeType row_len_prev,
+                              SizeType tile_coords,
+                              ComplexTileFn tile_fn,
+                              void* tile_ctx,
+                              int nthreads) {
+    nthreads                           = std::max(nthreads, 1);
+    const SizeType fold_stride         = 2 * nbins_f;
+    const SizeType seg2                = ncoords_prev2 * fold_stride;
+    const std::vector<FinalTile> tiles = plan_final_tiles(
+        coords, ncoords_cur, row_len, row_len_prev, tile_coords);
+    const SizeType ntiles = tiles.size();
+    if (row_len == 0 || ncoords_cur % row_len != 0) {
+        row_len = ncoords_cur;
+    }
+    // Level-(L-1) rows are merged in the phase-step blocks of the stored
+    // level (multiples of kMergeStepBlock), so the steps are identical.
+    const SizeType cap = tile_coords + (2 * kMergeStepBlock) + 64;
+
+#pragma omp parallel num_threads(nthreads) default(none)                       \
+    shared(fold_in, coords_prev, coords, ncoords_prev, nbins_f, nbins,         \
+               tile_coords, tile_fn, tile_ctx, fold_stride, seg2, ntiles,      \
+               tiles, row_len, cap)
+    {
+        utils::UninitVector<ComplexType> scratch(tile_coords * fold_stride);
+        utils::UninitVector<ComplexType> par_tail(cap * fold_stride);
+        utils::UninitVector<ComplexType> par_head(cap * fold_stride);
+        std::array<PhaseStep, kMergeStepBlock> steps_tail;
+        std::array<PhaseStep, kMergeStepBlock> steps_head;
+        // Level L-1 segment `seg` rows [lo, hi) (lo a multiple of
+        // kMergeStepBlock).
+        const auto fill = [&](SizeType seg, SizeType lo, SizeType hi,
+                              ComplexType* par) {
+            const ComplexType* l2_tail = fold_in + ((2 * seg) * seg2);
+            const ComplexType* l2_head = fold_in + ((2 * seg + 1) * seg2);
+            for (SizeType b0 = lo; b0 < hi; b0 += kMergeStepBlock) {
+                const SizeType nblock =
+                    std::min<SizeType>(kMergeStepBlock, ncoords_prev - b0);
+                const coord::FFACoord* block = coords_prev + b0;
+                fill_merge_phase_steps(
+                    [block](SizeType i) { return block[i].shift_tail; }, nblock,
+                    nbins, steps_tail.data());
+                fill_merge_phase_steps(
+                    [block](SizeType i) { return block[i].shift_head; }, nblock,
+                    nbins, steps_head.data());
+                for (SizeType i = 0; i < nblock; ++i) {
+                    shift_add_complex_recurrence_binary_steps(
+                        l2_tail + (static_cast<SizeType>(block[i].i_tail) *
+                                   fold_stride),
+                        steps_tail[i],
+                        l2_head + (static_cast<SizeType>(block[i].i_head) *
+                                   fold_stride),
+                        steps_head[i], par + ((b0 + i - lo) * fold_stride),
+                        nbins_f);
+                }
+            }
+        };
+#pragma omp for schedule(static)
+        for (SizeType itile = 0; itile < ntiles; ++itile) {
+            for_each_parent_fit(
+                coords, row_len, tiles[itile], cap, kMergeStepBlock,
+                [&](const FinalTile& tile, const ParentSpan& sp) {
+                    const SizeType tail_lo =
+                        (sp.tail_lo / kMergeStepBlock) * kMergeStepBlock;
+                    const SizeType head_lo =
+                        (sp.head_lo / kMergeStepBlock) * kMergeStepBlock;
+                    fill(0, tail_lo,
+                         std::min(((sp.tail_hi + kMergeStepBlock - 1) /
+                                   kMergeStepBlock) *
+                                      kMergeStepBlock,
+                                  ncoords_prev),
+                         par_tail.data());
+                    fill(1, head_lo,
+                         std::min(((sp.head_hi + kMergeStepBlock - 1) /
+                                   kMergeStepBlock) *
+                                      kMergeStepBlock,
+                                  ncoords_prev),
+                         par_head.data());
+                    for (SizeType row = tile.row_begin;
+                         row < tile.row_begin + tile.nrows; ++row) {
+                        const SizeType begin = (row * row_len) + tile.col_begin;
+                        for (SizeType b0 = 0; b0 < tile.ncols;
+                             b0 += kMergeStepBlock) {
+                            const SizeType nblock = std::min(
+                                SizeType{kMergeStepBlock}, tile.ncols - b0);
+                            const coord::FFACoord* block = coords + begin + b0;
+                            fill_merge_phase_steps(
+                                [block](SizeType i) {
+                                    return block[i].shift_tail;
+                                },
+                                nblock, nbins, steps_tail.data());
+                            fill_merge_phase_steps(
+                                [block](SizeType i) {
+                                    return block[i].shift_head;
+                                },
+                                nblock, nbins, steps_head.data());
+                            for (SizeType i = 0; i < nblock; ++i) {
+                                shift_add_complex_recurrence_binary_steps(
+                                    par_tail.data() +
+                                        ((block[i].i_tail - tail_lo) *
+                                         fold_stride),
+                                    steps_tail[i],
+                                    par_head.data() +
+                                        ((block[i].i_head - head_lo) *
+                                         fold_stride),
+                                    steps_head[i],
+                                    scratch.data() + ((b0 + i) * fold_stride),
+                                    nbins_f);
+                            }
+                        }
+                        tile_fn(scratch.data(), begin, tile.ncols, tile_ctx);
+                    }
+                });
+        }
+    }
+}
+
+void ffa_complex_final_tiles_freq(
+    const ComplexType* __restrict__ fold_in,
+    const coord::FFACoordFreq* __restrict__ coords,
+    SizeType ncoords_cur,
+    SizeType ncoords_prev,
+    SizeType nbins_f,
+    SizeType nbins,
+    SizeType tile_coords,
+    ComplexTileFn tile_fn,
+    void* tile_ctx,
+    int nthreads) {
+    const SizeType fold_stride  = 2 * nbins_f;
+    const ComplexType* seg_tail = fold_in;
+    const ComplexType* seg_head = fold_in + (ncoords_prev * fold_stride);
+    complex_final_tiles(
+        coords, ncoords_cur, nbins_f, /*row_len=*/ncoords_cur,
+        /*row_len_prev=*/0, tile_coords, tile_fn, tile_ctx, nthreads,
+        [=](const coord::FFACoordFreq* block, SizeType nblock,
+            ComplexType* out) {
+            std::array<PhaseStep, kMergeStepBlock> steps;
+            fill_merge_phase_steps(
+                [block](SizeType i) { return block[i].shift; }, nblock, nbins,
+                steps.data());
+            for (SizeType i = 0; i < nblock; ++i) {
+                const auto row =
+                    static_cast<SizeType>(block[i].idx) * fold_stride;
+                shift_add_complex_recurrence_linear_steps(
+                    seg_tail + row, seg_head + row, steps[i],
+                    out + (i * fold_stride), nbins_f);
+            }
+        });
 }
 
 void ffa_iter(const float* __restrict__ fold_in,
@@ -1637,12 +2361,10 @@ void shift_add_linear_batch(const float* __restrict__ folds_tree,
                             const SizeType* __restrict__ indices_ffa,
                             const float* __restrict__ phase_shift,
                             float* __restrict__ folds_out,
-                            float const* __restrict__ temp_buffer,
                             SizeType nbins,
                             SizeType n_leaves,
                             SizeType physical_start_idx,
                             SizeType capacity) noexcept {
-    (void)temp_buffer;
     const auto total_size = 2 * nbins;
     for (SizeType ileaf = 0; ileaf < n_leaves; ++ileaf) {
         const uint32_t tree_idx_logical =
@@ -1673,20 +2395,26 @@ void shift_add_linear_complex_batch(const ComplexType* __restrict__ folds_tree,
                                     SizeType physical_start_idx,
                                     SizeType capacity) noexcept {
     const auto total_size = 2 * nbins_f;
-    for (SizeType ileaf = 0; ileaf < n_leaves; ++ileaf) {
-        const uint32_t tree_idx_logical =
-            indices_tree[ileaf] + physical_start_idx;
-        const uint32_t tree_idx_physical = tree_idx_logical < capacity
-                                               ? tree_idx_logical
-                                               : tree_idx_logical - capacity;
-        // Get restrict pointers for current batch item
-        const ComplexType* __restrict__ data_tree =
-            folds_tree + (tree_idx_physical * total_size);
-        const ComplexType* __restrict__ data_ffa =
-            folds_ffa + (indices_ffa[ileaf] * total_size);
-        ComplexType* __restrict__ data_out = folds_out + (ileaf * total_size);
-        shift_add_complex_recurrence_linear(
-            data_tree, data_ffa, phase_shift[ileaf], data_out, nbins_f, nbins);
+    std::array<PhaseStep, kEPStepBlock> steps{};
+    for (SizeType l0 = 0; l0 < n_leaves; l0 += kEPStepBlock) {
+        const SizeType m = std::min(kEPStepBlock, n_leaves - l0);
+        ep_phase_steps(phase_shift + l0, m, nbins, steps.data());
+        for (SizeType i = 0; i < m; ++i) {
+            const SizeType ileaf = l0 + i;
+            const uint32_t tree_idx_logical =
+                indices_tree[ileaf] + physical_start_idx;
+            const uint32_t tree_idx_physical =
+                tree_idx_logical < capacity ? tree_idx_logical
+                                            : tree_idx_logical - capacity;
+            const ComplexType* __restrict__ data_tree =
+                folds_tree + (tree_idx_physical * total_size);
+            const ComplexType* __restrict__ data_ffa =
+                folds_ffa + (indices_ffa[ileaf] * total_size);
+            ComplexType* __restrict__ data_out =
+                folds_out + (ileaf * total_size);
+            shift_add_complex_recurrence_linear_steps(
+                data_tree, data_ffa, steps[i], data_out, nbins_f);
+        }
     }
 }
 
@@ -1699,12 +2427,10 @@ void shift_add_ascend_linear_batch(const float* __restrict__ folds_ffa,
                                    const SizeType* __restrict__ indices_ffa,
                                    const float* __restrict__ phase_shift,
                                    float* __restrict__ folds_tree,
-                                   float const* __restrict__ temp_buffer,
                                    SizeType nbins,
                                    SizeType n_coords_init,
                                    SizeType n_leaves,
                                    SizeType n_segments) noexcept {
-    (void)temp_buffer;
     const auto total_size = 2 * nbins;
     for (SizeType ileaf = 0; ileaf < n_leaves; ++ileaf) {
         float* __restrict__ data_tree = folds_tree + (ileaf * total_size);
@@ -1735,19 +2461,27 @@ void shift_add_ascend_linear_complex_batch(
     SizeType n_leaves,
     SizeType n_segments) noexcept {
     const auto total_size = 2 * nbins_f;
-    for (SizeType ileaf = 0; ileaf < n_leaves; ++ileaf) {
-        ComplexType* __restrict__ data_tree = folds_tree + (ileaf * total_size);
-        // Fill it with zero to avoid accumulation of garbage values
-        std::fill(data_tree, data_tree + total_size, ComplexType{0.0F, 0.0F});
+    std::array<PhaseStep, kEPStepBlock> steps{};
+    // Blocks of leaves, segments in order within a block: each leaf still
+    // accumulates its segments in segment order.
+    for (SizeType l0 = 0; l0 < n_leaves; l0 += kEPStepBlock) {
+        const SizeType m = std::min(kEPStepBlock, n_leaves - l0);
+        // Fill with zero to avoid accumulation of garbage values
+        std::fill(folds_tree + (l0 * total_size),
+                  folds_tree + ((l0 + m) * total_size),
+                  ComplexType{0.0F, 0.0F});
         for (SizeType iseg = 0; iseg < n_segments; ++iseg) {
             const SizeType segment_idx = indices_segment[iseg];
-            const auto phase_shift_seg = phase_shift[(iseg * n_leaves) + ileaf];
-            const auto ffa_idx_seg     = indices_ffa[(iseg * n_leaves) + ileaf];
-            const ComplexType* __restrict__ data_ffa =
-                folds_ffa + (segment_idx * n_coords_init * total_size) +
-                (ffa_idx_seg * total_size);
-            shift_add_complex_recurrence_linear_inplace(
-                data_ffa, phase_shift_seg, data_tree, nbins_f, nbins);
+            const SizeType row         = (iseg * n_leaves) + l0;
+            ep_phase_steps(phase_shift + row, m, nbins, steps.data());
+            for (SizeType i = 0; i < m; ++i) {
+                const ComplexType* __restrict__ data_ffa =
+                    folds_ffa + (segment_idx * n_coords_init * total_size) +
+                    (indices_ffa[row + i] * total_size);
+                shift_add_complex_recurrence_linear_inplace_steps(
+                    data_ffa, steps[i], folds_tree + ((l0 + i) * total_size),
+                    nbins_f);
+            }
         }
     }
 }
@@ -2162,6 +2896,145 @@ void ffa_cone_band_freq(const float* level_in,
                 thread_seconds->brute += brute_local;
                 thread_seconds->merge += merge_local;
                 thread_seconds->score += score_local;
+            }
+        }
+    }
+}
+
+void ffa_complex_cone_band_freq(const ComplexType* level_in,
+                                ComplexType* level_out,
+                                const coord::FFACoordFreq* const* coords_levels,
+                                const SizeType* ncoords,
+                                SizeType nsegments_in,
+                                SizeType nbins_f,
+                                SizeType nbins,
+                                SizeType k_levels,
+                                SizeType tile_coords,
+                                ComplexTileFn tile_fn,
+                                void* tile_ctx,
+                                int nthreads) {
+    if (level_in == nullptr || k_levels == 0 || k_levels > 16 ||
+        tile_coords == 0 || nsegments_in == 0 || ncoords == nullptr) {
+        return;
+    }
+    const SizeType nseg_group = SizeType{1} << k_levels;
+    if ((nsegments_in % nseg_group) != 0) {
+        return;
+    }
+    nthreads                     = std::max(nthreads, 1);
+    const SizeType nseg_out      = nsegments_in >> k_levels;
+    const SizeType ncoords_top   = ncoords[k_levels];
+    const SizeType fold_stride   = 2 * nbins_f;
+    const SizeType scratch_elems = cone_band_working_floats(
+        coords_levels, ncoords, k_levels, tile_coords, nbins_f);
+    if (scratch_elems == 0 || ncoords_top == 0 || nseg_out == 0) {
+        return;
+    }
+    // One phase-step table per level of the band, in the step blocks of the
+    // stored merge (ffa_complex_iter_freq), reused by every segment and tile.
+    std::array<std::vector<PhaseStep>, 17> steps;
+    for (SizeType level = 1; level <= k_levels; ++level) {
+        steps[level].resize(ncoords[level]);
+    }
+#pragma omp parallel num_threads(nthreads) default(none)                       \
+    shared(steps, coords_levels, ncoords, k_levels, nbins)
+    for (SizeType level = 1; level <= k_levels; ++level) {
+        const SizeType n = ncoords[level];
+#pragma omp for schedule(static)
+        for (SizeType b0 = 0; b0 < n; b0 += kMergeStepBlock) {
+            const coord::FFACoordFreq* block = coords_levels[level] + b0;
+            fill_merge_phase_steps(
+                [block](SizeType i) { return block[i].shift; },
+                std::min(n - b0, SizeType{kMergeStepBlock}), nbins,
+                steps[level].data() + b0);
+        }
+    }
+    const bool parallel_groups = std::cmp_greater_equal(nseg_out, nthreads);
+
+#pragma omp parallel num_threads(nthreads) default(none) shared(               \
+        level_in, level_out, coords_levels, ncoords, nbins_f, k_levels,        \
+            tile_coords, tile_fn, tile_ctx, nseg_group, nseg_out, ncoords_top, \
+            fold_stride, scratch_elems, steps, parallel_groups)
+    {
+        utils::UninitVector<ComplexType> scratch_a(scratch_elems);
+        utils::UninitVector<ComplexType> scratch_b(scratch_elems);
+        // The 2^k input segments of `group`, merged k levels for the top
+        // coordinates [coord0, coord1) in scratch.
+        const auto run_tile = [&](SizeType group, SizeType coord0,
+                                  SizeType coord1) {
+            std::array<CoordRange, 17> ranges{};
+            tile_input_ranges(coords_levels, k_levels, coord0, coord1,
+                              ranges.data());
+            ComplexType* cur      = scratch_a.data();
+            ComplexType* next     = scratch_b.data();
+            const SizeType width0 = ranges[0].hi - ranges[0].lo;
+            const SizeType in_seg = ncoords[0] * fold_stride;
+            for (SizeType iseg = 0; iseg < nseg_group; ++iseg) {
+                const SizeType global_seg = (group * nseg_group) + iseg;
+                std::memcpy(
+                    static_cast<void*>(cur + (iseg * width0 * fold_stride)),
+                    level_in + (global_seg * in_seg) +
+                        (ranges[0].lo * fold_stride),
+                    width0 * fold_stride * sizeof(ComplexType));
+            }
+            for (SizeType level = 1; level <= k_levels; ++level) {
+                const SizeType nseg_lvl = SizeType{1} << (k_levels - level);
+                const SizeType width_prv =
+                    ranges[level - 1].hi - ranges[level - 1].lo;
+                const SizeType width_cur = ranges[level].hi - ranges[level].lo;
+                const SizeType seg_prev  = width_prv * fold_stride;
+                const SizeType seg_cur   = width_cur * fold_stride;
+                const auto* coords       = coords_levels[level];
+                const SizeType base      = ranges[level].lo;
+                const SizeType prev_base = ranges[level - 1].lo;
+                for (SizeType iseg = 0; iseg < nseg_lvl; ++iseg) {
+                    const ComplexType* tail = cur + ((iseg * 2) * seg_prev);
+                    const ComplexType* head =
+                        cur + (((iseg * 2) + 1) * seg_prev);
+                    ComplexType* out = next + (iseg * seg_cur);
+                    for (SizeType local = 0; local < width_cur; ++local) {
+                        const SizeType global = base + local;
+                        const SizeType prev =
+                            static_cast<SizeType>(coords[global].idx) -
+                            prev_base;
+                        shift_add_complex_recurrence_linear_steps(
+                            tail + (prev * fold_stride),
+                            head + (prev * fold_stride), steps[level][global],
+                            out + (local * fold_stride), nbins_f);
+                    }
+                }
+                std::swap(cur, next);
+            }
+            const SizeType width_k = ranges[k_levels].hi - ranges[k_levels].lo;
+            if (level_out != nullptr) {
+                std::memcpy(
+                    static_cast<void*>(level_out +
+                                       (group * ncoords_top * fold_stride) +
+                                       (ranges[k_levels].lo * fold_stride)),
+                    cur, width_k * fold_stride * sizeof(ComplexType));
+            }
+            if (tile_fn != nullptr) {
+                tile_fn(cur, ranges[k_levels].lo, width_k, tile_ctx);
+            }
+        };
+
+        if (parallel_groups) {
+#pragma omp for schedule(static)
+            for (SizeType group = 0; group < nseg_out; ++group) {
+                for (SizeType coord0 = 0; coord0 < ncoords_top;
+                     coord0 += tile_coords) {
+                    run_tile(group, coord0,
+                             std::min(coord0 + tile_coords, ncoords_top));
+                }
+            }
+        } else {
+#pragma omp for schedule(static)
+            for (SizeType coord0 = 0; coord0 < ncoords_top;
+                 coord0 += tile_coords) {
+                for (SizeType group = 0; group < nseg_out; ++group) {
+                    run_tile(group, coord0,
+                             std::min(coord0 + tile_coords, ncoords_top));
+                }
             }
         }
     }

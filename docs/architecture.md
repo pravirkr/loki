@@ -254,7 +254,7 @@ Private code:
   `cuda/cuda_utils.cuh` uses `loki::cuda_utils`, `cuda/cub_helpers.cuh` uses
   `loki::cub_helpers`, `cuda/device_rng.cuh` uses `loki::device_rng`,
   `cpu/simd_utils.hpp` uses `loki::simd_utils`,
-  `cpu/brute_fold_intrinsics.hpp` uses `loki::brute_fold_intrinsics`,
+  `cpu/lane_fft.hpp` uses `loki::lane_fft`,
   `detail/progress.hpp` uses `loki::progress`. The
   device companion of a host header uses the host header's namespace:
   `cuda/kernel_utils.cuh` uses `loki::utils`, `cuda/types_cuda.cuh` uses
@@ -333,12 +333,14 @@ The facades do not change: they already dispatch on `kGPUBackend` through
   levels and calling `score_and_filter_cuda_d`
   (`tests/cpp/internal/ffa_final_score_cuda_t.cpp`). In the Fourier domain the
   sweep forms phase rotations in FP32 (`fourier_phasor`: an exact `fmaf` split
-  of k * shift, reduced to a fraction of a cycle, then `sincospif`) and inverts
+  of k * shift, reduced by an exact multiple of nbins, then `sincospif`;
+  within 3.3e-7 for any `nbins`, `fourier_phasor_cuda_t.cpp`) and inverts
   on chip with the portable block FFT (Bluestein's algorithm for a `nbins`
   that is not a power of two; `docs/fft.md`).
-  `FFA::execute`, `compute_ffa*` and the FFA stage of EP use the same merge
-  and brute-fold kernels as the sweep, so on the GPU every Fourier fold uses
-  these FP32 phasors. The Fourier brute fold seeds its phasors from the
+  `FFA::execute`, `compute_ffa*`, the FFA stage of EP and the EP Fourier
+  shift-adds (`ep_phasor`) use the same phasor, so on the GPU every Fourier
+  rotation is FP32 with no `__sincosf`. The CPU computes its phase steps in
+  double and rounds them once (`fill_merge_phase_steps`, `ep_phase_steps`). The Fourier brute fold seeds its phasors from the
   double phase reduced to a cycle, re-seeded every 64 samples. The GPU FFTs
   are portable block transforms (no cuFFT). Fourier results are at float
   level relative to the CPU reference.
@@ -355,10 +357,12 @@ The facades do not change: they already dispatch on `kGPUBackend` through
 
 The FFA and EP sweeps plan their chunks against `max_process_memory_gb` with
 exact memory models and one shared reserve; see [memory.md](memory.md).
-`EPFreqSweep` has a CPU engine and a CUDA engine. On CUDA,
+Both sweeps have a CPU engine and a CUDA engine. On CUDA,
 `max_process_memory_gb` is a device-memory limit: the plan uses the smaller of
-it and the free device memory less `kDeviceReserveGB`, the runs of a chunk are
-pruned one at a time, and an active `rfi_config` is rejected.
+it and the free device memory less `kDeviceReserveGB`
+(`FFARegionPlanner(cfg, Exec)` and `EPRegionPlanner` with a GPU `Exec`; the
+CLI's `--dry-run` plans the same way). `EPFreqSweep` on CUDA prunes the runs
+of a chunk one at a time and rejects an active `rfi_config`.
 
 ## Checks
 

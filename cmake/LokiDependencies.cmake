@@ -2,16 +2,14 @@
 # LOKI — Dependency management (CPU + shared CPM deps)
 #
 # Design rules:
-#   1. OpenMP, HDF5, and FFTW are hard system dependencies — never fetched.
-#   2. FFTW is internal (pimpl in lib/fft.cpp). Linked PRIVATE for shared loki;
-#      for static loki it is linked with LINK_ONLY so consumers resolve symbols
-#      without inheriting fftw3.h include paths.
-#   3. OpenMP and HDF5 are internal. For a SHARED loki they are linked PRIVATE;
+#   1. OpenMP and HDF5 are hard system dependencies — never fetched.
+#   2. OpenMP and HDF5 are internal. For a SHARED loki they are linked PRIVATE;
 #      for STATIC loki they are linked PUBLIC so consumers can resolve symbols.
-#   4. fmt and spdlog are CPM-pinned header-only libraries (single translation
+#   3. fmt and spdlog are CPM-pinned header-only libraries (single translation
 #      unit, no version skew with libc++ std::format instantiations).
-#   5. CLI11, xsimd, Boost::math, BS_thread_pool, tomlplusplus, HighFive, and
-#      psrio are header-only internal dependencies -> BUILD_INTERFACE only.
+#   4. CLI11, xsimd, Boost::math, BS_thread_pool, tomlplusplus, HighFive,
+#      psrio and pocketfft are header-only internal dependencies ->
+#      BUILD_INTERFACE only. pocketfft is included by lib/cpu/fft_cpu.cpp only.
 #=============================================================================
 
 # -----------------------------------------------------------------------
@@ -20,7 +18,6 @@
 message(STATUS "Searching for required system dependencies...")
 find_package(OpenMP REQUIRED COMPONENTS CXX)
 find_package(HDF5 REQUIRED) # For HighFive
-find_package(FFTW REQUIRED COMPONENTS FLOAT_LIB)
 
 # -----------------------------------------------------------------------
 # 2. CPM-managed dependencies (pinned versions, bundled by default)
@@ -103,6 +100,31 @@ if(xsimd_ADDED)
   target_include_directories(xsimd INTERFACE "${xsimd_SOURCE_DIR}/include")
 elseif(NOT TARGET xsimd)
   message(FATAL_ERROR "xsimd is required but was not found or downloaded.")
+endif()
+
+# pocketfft (C++ branch, header-only, BSD-3-Clause): the host FFT for long
+# transforms (lib/cpu/fft_cpu.cpp). Upstream is
+# https://gitlab.mpcdf.mpg.de/mtr/pocketfft (branch cpp); the author's GitHub
+# mirror serves the same commit as a plain archive.
+CPMAddPackage(
+  NAME pocketfft
+  VERSION 0.0.0-c90e55b
+  URL https://github.com/mreineck/pocketfft/archive/c90e55b3d529f8efa40ed01a20de22405f45fc65.tar.gz
+  URL_HASH SHA256=2d90016da31a8cc1dd0ac0c89c1f2fb55df8f4ccc3f0386dcfbad09ac6d1c3ba
+  DOWNLOAD_ONLY YES
+  EXCLUDE_FROM_ALL YES
+  SYSTEM YES
+)
+if(pocketfft_ADDED)
+  add_library(pocketfft INTERFACE IMPORTED GLOBAL)
+  target_include_directories(pocketfft SYSTEM INTERFACE "${pocketfft_SOURCE_DIR}")
+  # No pocketfft thread pool (callers parallelise over rows with OpenMP); a
+  # small plan cache for repeated long transforms.
+  target_compile_definitions(
+    pocketfft INTERFACE POCKETFFT_NO_MULTITHREADING POCKETFFT_CACHE_SIZE=16
+  )
+elseif(NOT TARGET pocketfft)
+  message(FATAL_ERROR "pocketfft is required but was not found or downloaded.")
 endif()
 
 CPMAddPackage(

@@ -104,6 +104,12 @@ public:
     }
     [[nodiscard]] SizeType get_size() const noexcept { return m_size; }
     [[nodiscard]] SizeType get_size_old() const noexcept { return m_size_old; }
+    /// @brief Number of batches that overflowed the tree (and triggered the
+    /// median/top-k trim) since construction. A planned run never overflows;
+    /// a non-zero count means the output depends on the batch size.
+    [[nodiscard]] SizeType get_n_overloads() const noexcept {
+        return m_n_overloads;
+    }
     [[nodiscard]] float get_size_lb() const noexcept;
     /// @brief Get maximum score in current region
     [[nodiscard]] float get_score_max() const noexcept;
@@ -243,6 +249,33 @@ public:
                         std::span<const SizeType> indices_batch,
                         float current_threshold,
                         SizeType slots_to_write);
+
+    /// Free slots of the write region during an update: slots
+    /// [write_head, write_head + n) mod capacity hold no live leaf.
+    [[nodiscard]] SizeType get_space_left() const {
+        return calculate_space_left();
+    }
+    [[nodiscard]] SizeType get_write_head() const noexcept {
+        return m_write_head;
+    }
+    /// Fold storage, for a producer that writes folds into free slots.
+    [[nodiscard]] std::span<FoldType> get_folds_writable() noexcept {
+        return m_folds;
+    }
+
+    /**
+     * @brief add_batch_scattered for a batch whose folds are already in the
+     * tree: the producer wrote the fold of the k-th entry of indices_batch
+     * into slot (write_head + k) mod capacity. Copies the leaves and scores
+     * into the same slots. The batch must fit (slots_to_write <=
+     * get_space_left()), so the tree is not trimmed, as in the fast path of
+     * add_batch_scattered.
+     */
+    void add_batch_scattered_prefolded(std::span<const double> leaves_batch,
+                                       std::span<const float> scores_batch,
+                                       std::span<const SizeType> indices_batch,
+                                       SizeType slots_to_write);
+
     // Prune to keep only unique candidates
     void deduplicate();
 
@@ -278,6 +311,7 @@ private:
     SizeType m_write_head{0}; // Index where next element will be written
     SizeType m_write_start{0};
     SizeType m_read_consumed{0};
+    SizeType m_n_overloads{0};
 
     // Scratch buffer for in-place operations
     std::vector<float> m_scratch_scores;

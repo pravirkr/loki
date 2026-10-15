@@ -455,6 +455,7 @@ float WorldTree<FoldType>::add_batch_scattered(
     }
 
     // Slow path: Overflow & Pruning (Median + Top-K Strategy)
+    ++m_n_overloads;
     error_check::check_less_equal(slots_to_write, m_max_batch_size,
                                   "WorldTree: Suggestions too large to add.");
     // Determine the Global Pruning Threshold
@@ -490,6 +491,32 @@ float WorldTree<FoldType>::add_batch_scattered(
                              scores_batch.data(), pending_indices.data(),
                              n_to_add);
     return effective_threshold;
+}
+
+template <SupportedFoldType FoldType>
+void WorldTree<FoldType>::add_batch_scattered_prefolded(
+    std::span<const double> leaves_batch,
+    std::span<const float> scores_batch,
+    std::span<const SizeType> indices_batch,
+    SizeType slots_to_write) {
+    error_check::check(m_is_updating,
+                       "WorldTree: add_batch only allowed during updates");
+    error_check::check_less_equal(
+        slots_to_write, calculate_space_left(),
+        "WorldTree: prefolded batch exceeds the free slots");
+    for (SizeType i = 0; i < slots_to_write; ++i) {
+        const auto src_idx = indices_batch[i];
+        const auto dst_idx = m_write_head;
+        std::copy_n(leaves_batch.begin() + (src_idx * m_leaves_stride),
+                    m_leaves_stride,
+                    m_leaves.begin() + (dst_idx * m_leaves_stride));
+        m_scores[dst_idx] = scores_batch[src_idx];
+        m_write_head++;
+        if (m_write_head == m_capacity) {
+            m_write_head = 0;
+        }
+    }
+    m_size += slots_to_write;
 }
 
 template <SupportedFoldType FoldType> void WorldTree<FoldType>::deduplicate() {

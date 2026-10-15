@@ -3,6 +3,7 @@
 #include <memory>
 #include <vector>
 
+#include "loki/common/backend.hpp"
 #include "loki/common/coord.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
@@ -113,9 +114,6 @@ public:
     /// @brief Get the memory usage of the FFA freq sweep for this region (in
     /// GB).
     float get_freq_sweep_memory_usage() const noexcept;
-    /// @brief Get the chunk stats for the planner.
-    [[nodiscard]] std::vector<coord::FFAChunkStats>
-    get_chunk_stats() const noexcept;
 
 private:
     SizeType m_max_buffer_size;
@@ -135,11 +133,19 @@ private:
  * @brief A planner for FFA regions (Time or Fourier domain).
  * @details
  * This class plans the FFA regions for a given search configuration. Each
- * frequency searchregion produced by generate_ffa_regions() is
- * subdivided into memory-bounded chunks by bisecting the region's frequency
- * width; nbins/eta and every other search parameter (e.g. acceleration,
- * jerk) are held fixed within a region and are never altered by this
- * subdivision.
+ * frequency search region produced by generate_ffa_regions() is subdivided
+ * into chunks; nbins/eta and every other search parameter (e.g.
+ * acceleration, jerk) are held fixed within a region and are never altered
+ * by this subdivision. No chunk, and no workspace sized for all of them,
+ * exceeds max_process_memory_gb.
+ *
+ * On the CPU (`use_gpu = false`) the chunks are the cheapest partition of
+ * each region under a run-time model: an accel (jerk) grid is designed at
+ * its chunk's highest frequency, so wide chunks oversample their low end and
+ * narrower ones can be faster even when memory allows wide ones. Once memory
+ * stops binding, the plan no longer depends on the limit. Frequency-only
+ * searches take the fewest chunks that fit. On the GPU each chunk is the
+ * widest that fits (bisection on the width).
  *
  * The planner also accounts for Doppler/drift expansion of each chunk's
  * frequency window when nparams > 1 (derived from the acceleration/jerk
@@ -153,6 +159,15 @@ public:
      */
     explicit FFARegionPlanner(const search::FFASearchConfig& cfg,
                               bool use_gpu = false);
+    /**
+     * @brief The plan the FFAFreqSweep of @p exec runs. Backend::kCPU plans
+     * as `use_gpu = false`. A GPU backend plans as `use_gpu = true` against
+     * the smaller of max_process_memory_gb and the free memory of
+     * `exec.device` less a fixed reserve, as the GPU sweep does.
+     * @throws std::runtime_error if the device has less than 1 GB usable.
+     * @throws std::invalid_argument if this build lacks the backend.
+     */
+    FFARegionPlanner(const search::FFASearchConfig& cfg, Exec exec);
 
     // --- Rule of five: PIMPL ---
     ~FFARegionPlanner();
@@ -169,6 +184,10 @@ public:
     SizeType get_nregions() const noexcept;
     /// @brief Get the stats for the planner.
     [[nodiscard]] const FFARegionStats& get_stats() const noexcept;
+    /// @brief Frequency range and memory of each chunk, in the order of
+    /// get_cfgs().
+    [[nodiscard]] const std::vector<coord::FFAChunkStats>&
+    get_chunk_stats() const noexcept;
 
 private:
     class Impl;

@@ -33,7 +33,8 @@ SizeType score_and_filter_max_kadane_with_cache_impl(
     constexpr SizeType kSimdAlign = xsimd::default_arch::alignment();
 
     const auto* __restrict__ biases = cache.biases.data();
-    const SizeType vec_end          = nprofiles - (nprofiles % kBatchSize);
+    const SizeType nbins_simd =
+        ((nbins + kBatchSize - 1) / kBatchSize) * kBatchSize;
 
     // Temp buffers for the normalized and transposed data
     alignas(kSimdAlign) std::array<float, kBatchSize * MaxNBINS> temp_fn{};
@@ -58,7 +59,7 @@ SizeType score_and_filter_max_kadane_with_cache_impl(
 
     SizeType nprofiles_passing = 0;
 
-    for (SizeType i = 0; i < vec_end; i += kBatchSize) {
+    for (SizeType i = 0; i + kBatchSize <= nprofiles; i += kBatchSize) {
         const float* __restrict__ chunk_base  = arr + (i * 2 * nbins);
         float* __restrict__ temp_fn_ptr       = temp_fn.data();
         float* __restrict__ transposed_fn_ptr = transposed_fn.data();
@@ -69,21 +70,27 @@ SizeType score_and_filter_max_kadane_with_cache_impl(
             const float* __restrict__ ts_e_ptr =
                 chunk_base + (lane * 2 * nbins);
             const float* __restrict__ ts_v_ptr = ts_e_ptr + nbins;
-            float* __restrict__ dst            = temp_fn_ptr + (lane * nbins);
-            float sum                          = 0.0F;
+            float* __restrict__ dst = temp_fn_ptr + (lane * MaxNBINS);
+            float sum               = 0.0F;
 
 #pragma omp simd reduction(+ : sum)
             for (SizeType j = 0; j < nbins; ++j) {
-                float const val = ts_e_ptr[j] / std::sqrt(ts_v_ptr[j]);
-                dst[j]          = val;
+                float const v = ts_v_ptr[j];
+                float const val =
+                    (v > 0.0F) ? (ts_e_ptr[j] / std::sqrt(v)) : 0.0F;
+                dst[j] = val;
                 sum += val;
+            }
+            for (SizeType j = nbins; j < nbins_simd; ++j) {
+                dst[j] = 0.0F;
             }
             total_sums_ptr[lane] = sum;
         }
 
         const BatchType mean_val =
-            BatchType::load_aligned(total_sums_ptr) / batch_nbins_f;
-        simd_utils::transpose<BatchType>(temp_fn_ptr, transposed_fn_ptr, nbins);
+            BatchType::load_unaligned(total_sums_ptr) / batch_nbins_f;
+        simd_utils::transpose<BatchType>(temp_fn_ptr, transposed_fn_ptr, nbins,
+                                         MaxNBINS);
 
         // Step 2: init Kadane state for all biases
         UNROLL_VECTORIZE // Cannot use UNROLL_VECTORIZE_N(NBiases) for gcc
@@ -102,7 +109,7 @@ SizeType score_and_filter_max_kadane_with_cache_impl(
         // Step 3: single pass over bins, updating ALL biases
         for (SizeType j = 0; j < nbins; ++j) {
             const BatchType val_base =
-                BatchType::load_aligned(&transposed_fn[j * kBatchSize]) -
+                BatchType::load_unaligned(&transposed_fn[j * kBatchSize]) -
                 mean_val;
 
             UNROLL_VECTORIZE
@@ -169,13 +176,16 @@ SizeType score_and_filter_max_kadane_with_cache_impl(
     }
     // Scalar tail
     auto* __restrict__ fold_norm = cache.fold_norm_buffer.data();
+    const SizeType vec_end       = (nprofiles / kBatchSize) * kBatchSize;
     for (SizeType i = vec_end; i < nprofiles; ++i) {
         const float* __restrict__ ts_e_ptr = arr + (i * 2 * nbins);
         const float* __restrict__ ts_v_ptr = ts_e_ptr + nbins;
         float total_sum                    = 0.0F;
         for (SizeType j = 0; j < nbins; ++j) {
-            fold_norm[j] = ts_e_ptr[j] * (1.0F / std::sqrt(ts_v_ptr[j]));
-            total_sum += fold_norm[j];
+            float const v   = ts_v_ptr[j];
+            float const val = (v > 0.0F) ? (ts_e_ptr[j] / std::sqrt(v)) : 0.0F;
+            fold_norm[j]    = val;
+            total_sum += val;
         }
         const float mean_val = total_sum / static_cast<float>(nbins);
         float max_snr        = std::numeric_limits<float>::lowest();

@@ -84,6 +84,64 @@ TEST_CASE("BruteFold CPU executes time and complex domain folding",
     }
 }
 
+TEST_CASE("BruteFold CPU Fourier: any segment length matches a double DFT",
+          "[fold][cpu]") {
+    // The SIMD fold reads one phasor row per frequency at stride segment_len,
+    // so lengths that are not a multiple of the vector width start rows off
+    // the vector alignment.
+    constexpr double kTsamp  = 64e-6;
+    constexpr SizeType kNseg = 3;
+    const SizeType seg_len =
+        GENERATE(SizeType{33}, SizeType{100}, SizeType{256}, SizeType{300});
+    const SizeType nbins   = GENERATE(SizeType{16}, SizeType{33});
+    const SizeType nsamps  = kNseg * seg_len;
+    const SizeType nbins_f = (nbins / 2) + 1;
+    const double t_ref     = 0.5 * static_cast<double>(seg_len) * kTsamp;
+    const std::vector<double> freqs = {0.7, 3.1, 47.0, 99.3, 211.9};
+    std::mt19937 rng(5);
+    std::normal_distribution<float> nd(0.0F, 1.0F);
+    std::vector<float> ts_e(nsamps);
+    std::vector<float> ts_v(nsamps);
+    for (SizeType i = 0; i < nsamps; ++i) {
+        ts_e[i] = nd(rng);
+        ts_v[i] = 1.0F + (0.1F * std::abs(nd(rng)));
+    }
+    BruteFold<ComplexType> bf(freqs, seg_len, nbins, nsamps, kTsamp, t_ref,
+                              Exec::cpu(1));
+    std::vector<ComplexType> fold(bf.get_fold_size());
+    bf.execute(ts_e, ts_v, fold);
+    REQUIRE(fold.size() == kNseg * freqs.size() * 2 * nbins_f);
+    for (SizeType iseg = 0; iseg < kNseg; ++iseg) {
+        for (SizeType ifreq = 0; ifreq < freqs.size(); ++ifreq) {
+            for (SizeType ch = 0; ch < 2; ++ch) {
+                const auto& ts = ch == 0 ? ts_e : ts_v;
+                const auto row = ((iseg * freqs.size() + ifreq) * 2) + ch;
+                double scale   = 0.0;
+                for (SizeType i = 0; i < seg_len; ++i) {
+                    scale += std::abs(ts[(iseg * seg_len) + i]);
+                }
+                for (SizeType k = 0; k < nbins_f; ++k) {
+                    double re = 0.0;
+                    double im = 0.0;
+                    for (SizeType i = 0; i < seg_len; ++i) {
+                        const double t =
+                            (static_cast<double>(i) * kTsamp) - t_ref;
+                        const double ph = -2.0 * std::numbers::pi *
+                                          freqs[ifreq] *
+                                          static_cast<double>(k) * t;
+                        const double x  = ts[(iseg * seg_len) + i];
+                        re += x * std::cos(ph);
+                        im += x * std::sin(ph);
+                    }
+                    const auto got = fold[(row * nbins_f) + k];
+                    REQUIRE(got.real() == Approx(re).margin(1e-5 * scale));
+                    REQUIRE(got.imag() == Approx(im).margin(1e-5 * scale));
+                }
+            }
+        }
+    }
+}
+
 TEST_CASE("BruteFold CUDA parity with CPU", "[fold][cuda]") {
     if (!loki::is_available(Backend::kCUDA)) {
         SKIP("needs a CUDA build");

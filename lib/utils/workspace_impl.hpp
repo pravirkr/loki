@@ -16,6 +16,7 @@
 #include "loki/utils/workspace.hpp"
 
 #include "lib/common/dispatch.hpp"
+#include "lib/detail/utils.hpp"
 #include "lib/utils/world_tree.hpp"
 
 namespace loki::memory {
@@ -29,7 +30,8 @@ namespace loki::memory {
  * @tparam FoldType float or ComplexType.
  */
 template <SupportedFoldType FoldType> struct FFAWorkspaceCPU {
-    std::vector<FoldType> fold_internal;
+    // Every level is written before it is read: no zero-fill.
+    utils::UninitVector<FoldType> fold_internal;
     std::vector<coord::FFACoord> coords;
     std::vector<coord::FFACoordFreq> coords_freq;
 
@@ -46,7 +48,11 @@ template <SupportedFoldType FoldType> struct FFAWorkspaceCPU {
     FFAWorkspaceCPU(FFAWorkspaceCPU&&) noexcept            = default;
     FFAWorkspaceCPU& operator=(FFAWorkspaceCPU&&) noexcept = default;
 
+    /// Coordinates and a full-plan fold buffer (execute()).
     void validate(const plans::FFAPlan<FoldType>& ffa_plan) const;
+    /// fold_internal holds at least `buffer_size` elements.
+    void validate_buffer(SizeType buffer_size) const;
+    void validate_coords(const plans::FFAPlan<FoldType>& ffa_plan) const;
 };
 
 /**

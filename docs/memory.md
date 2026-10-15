@@ -54,7 +54,7 @@ peak = n_workers * thread_bytes(group) + shared_bytes + input_bytes
 
 | Term | Contents | Lifetime |
 | --- | --- | --- |
-| `thread_bytes` | `ep_workspace_bytes` (world tree, prune and branch scratch, FFA seeds) + `ep_irfft_scratch_bytes` (Fourier folds only) + `ep_harvest_bytes` | one group |
+| `thread_bytes` | `ep_workspace_bytes` (world tree, prune and branch scratch, FFA seeds) + `ep_harvest_bytes`. The pruning functors score in tiles of 16 leaves and hold no batch-sized scoring scratch | one group |
 | `shared_bytes` | FFA workspace fold buffer and coordinates + output fold buffer, sized from the global maxima of `buffer_size` and `coord_size` | whole sweep |
 | `input_bytes` | `ts_e` and `ts_v`, `2 * nsamps * sizeof(float)` | whole sweep |
 
@@ -88,11 +88,11 @@ another on one stream, so the model has one worker whatever `nthreads` is
 **Which memory.** On CUDA, `max_process_memory_gb` means device memory only.
 Host memory is never checked. Result snapshots are bounded to one active write
 and one waiting payload, in addition to the producer snapshot and inputs.
-The model fits execution buffers. Threshold selection/evaluation currently
-allocates separate CUDA simulation workspaces without a user-budget check;
-tail buffers and temporary growth peaks are covered by fixed reserves. Budget fitting therefore does not yet bound every planning/transient
-allocation.
-As for `FFAFreqSweep`, the plan is fitted to
+The model fits execution buffers. Threshold selection and evaluation
+allocate separate CUDA simulation workspaces that are not checked against
+the limit, and tail buffers and temporary peaks are covered by fixed
+reserves, so the budget does not yet bound every planning or transient
+allocation. As for `FFAFreqSweep`, the plan is fitted to
 
 ```text
 limit = min(max_process_memory_gb, free device memory - kDeviceReserveGB)   (1 GB)
@@ -134,8 +134,7 @@ Differences from the CPU policy:
   small FFA arrays (counts, offsets, limits) are not in the exact model.
   `kDeviceReserveGB` (1 GB) is what the GPU planners leave for the CUDA
   context, kernel images and those arrays, and the unmodelled reserve
-  (0.5 GB) is a second margin. Before cuFFT was removed (memory model 9) it
-  was 1.5 GB when the sweep retained plans for several sizes.
+  (0.5 GB) is a second margin.
 - The preferred batch is 2^16 parents on the GPU (`kEPBatchSizeCuda`) and 1024 on the
   CPU (`kEPBatchSize`). A batch is one kernel round trip and one world-tree
   synchronisation, so the GPU needs a large one: at 1024, one run of 2^25
@@ -146,10 +145,10 @@ Differences from the CPU policy:
   to force a fit. The chosen batch is stored per chunk
   and of the cache, which records it. On the GPU, a run that overflows the
   world tree trims at batch boundaries, so results can depend on the batch.
-- CUDA pruning uses on-chip transforms. The FFA stage's GPU transforms keep
-  no plans or work area, only the small Bluestein tables. The CPU sweep keeps
-  one exact `FFTWManager` per pruning worker: plans are created lazily and are
-  not shared across threads.
+- Neither backend keeps FFT plans or scratch for pruning: CUDA inverts on
+  chip, the CPU with the lane FFT inside its scoring tiles. The FFA stage's
+  GPU transforms keep only the small Bluestein tables; the host FFT tables
+  are small, immutable and shared by all threads.
 - `PruneRFIConfig` (pulsar mask, harvesting, impulsive veto) is not implemented
   on CUDA: an active one is rejected with `std::invalid_argument`.
 
@@ -171,9 +170,11 @@ kernel (`lib/cuda/ffa_score_cuda.cu`; Fourier folds add an on-chip inverse
 FFT, `ffa_score_fourier_impl.cuh`: a direct transform for a power-of-two
 `nbins` from 32, Bluestein's algorithm through power-of-two transforms for
 any other `nbins` up to 1024, both on the portable block FFT
-`ffa_portable_fft.cuh`; see `docs/fft.md`). Accel searches also resolve the final level's
-coordinates on the fly instead of storing them. The planner models what that
-path allocates (`planner_memory.hpp`):
+`ffa_portable_fft.cuh`; see `docs/fft.md`). Accel searches also resolve the
+final level's coordinates on the fly instead of storing them. The plan is
+fitted to `min(max_process_memory_gb, free device memory - kDeviceReserveGB)`
+(`FFARegionPlanner(cfg, Exec)`, which `loki search ffa --dry-run` also uses),
+and the planner models what the fused path allocates (`planner_memory.hpp`):
 
 | Term | Contents |
 | --- | --- |
@@ -200,11 +201,52 @@ per-chunk upload goes through pinned staging, and no per-chunk device
 allocation or legacy-stream operation is left on the fused path, so the queue
 never drains between chunks.
 
+### FFA frequency sweep on the CPU
+
+The CPU `FFAFreqSweep` stores neither the final level nor, for accel (jerk)
+searches, the level before it: `FFA::execute_scored` merges both tile by tile
+in per-thread scratch and scores them there (`cpu_scored_fused_levels`,
+`planner_memory.hpp`). Frequency-only searches run cone bands (temporal
+tiling, time and Fourier folds) and score the top band in cache, but keep the
+full buffer for the bands below.
+
+| Term | Contents |
+| --- | --- |
+| fold buffers | two ping-pong buffers of `cpu_scored_buffer_size(plan)`: the largest stored level (every level but the last two for accel searches; the full buffer for frequency-only searches) |
+| coordinates | every level's resolved coordinates |
+| brute fold | phase-run table (time) or phasor table (Fourier), see `estimate_brutefold_table_bytes` |
+| extra | write staging and the `max_passing_candidates` accumulator (12 B per candidate) |
+| inputs | `ts_e`, `ts_v` |
+
+The workspace is allocated once, sized by the maximum of each term over all
+chunks. Chunks are chosen by cost, with the memory limit as a hard cap
+(`regions.cpp`, `planner_cost.hpp`):
+
+- **Cost.** A chunk's modelled run time sums, over its own plan's levels,
+  `nsegments * ncoords * 2 * nbins` times a per-stage weight (brute fold,
+  stored merges, the fused level L-1, the fused final level), plus a fixed
+  cost per chunk. The weights come from one-core level timing
+  (`LOKI_FFA_LEVEL_TIMING`). An accel grid is designed at its chunk's highest
+  frequency, so a wide chunk pays for trials its low end does not need.
+- **Partition.** Each region is split on a geometric frequency grid (64 steps,
+  refined when the limit admits no chunk one step wide) by dynamic
+  programming: the cheapest set of chunks that each fit the limit. A
+  frequency-only search minimises the chunk count instead: its grid does not
+  depend on the width, and splitting would only move the grid origin.
+- **Cap.** If the workspace (the per-term maxima, possibly set by different
+  chunks) exceeds the limit, the per-chunk limit is lowered by the excess and
+  the regions are partitioned again. The plan does not depend on the order in
+  which chunks are accepted, more memory never costs more, and once memory
+  stops binding the plan no longer depends on the limit.
+
+The GPU planner keeps the widest chunk that fits (bisection on the width),
+because a GPU chunk has real fixed costs.
+
 ## Reserve
 
 The reserve covers what cannot be counted deterministically: heap
 fragmentation and allocator arenas, thread stacks, small per-task objects (FFA
-and FFTW plans, logging), and the interpreter or application around the
+plans, FFT tables, logging), and the interpreter or application around the
 library. It is a fixed amount rather than a fraction of the limit, so large
 limits stay usable and small limits stay feasible.
 

@@ -19,7 +19,7 @@ FFTManager::FFTManager() noexcept = default;
 FFTManager::FFTManager(Exec exec) : m_impl(std::make_unique<Impl>()) {
     m_impl->exec = exec;
     if (exec.backend == Backend::kCPU) {
-        m_impl->cpu = std::make_unique<FFTWManager>();
+        m_impl->cpu = std::make_unique<CpuFFT>();
         return;
     }
 #ifdef LOKI_ENABLE_GPU
@@ -85,7 +85,7 @@ SizeType FFTManager::n_cached_plans() const {
 
 namespace detail {
 
-FFTWManager& cpu_fft(FFTManager& fft, std::string_view what) {
+CpuFFT& cpu_fft(FFTManager& fft, std::string_view what) {
     auto& impl = loki::detail::HandleAccess::impl(fft);
     if (!impl.cpu) {
         throw std::invalid_argument(

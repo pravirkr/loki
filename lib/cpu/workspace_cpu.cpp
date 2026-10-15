@@ -15,7 +15,7 @@ FFAWorkspaceCPU<FoldType>::FFAWorkspaceCPU(
     const auto buffer_size  = ffa_plan.get_buffer_size();
     const auto coord_size   = ffa_plan.get_coord_size();
     const bool is_freq_only = ffa_plan.get_n_params() == 1;
-    fold_internal.resize(buffer_size, FoldType{});
+    fold_internal.resize(buffer_size);
     if (is_freq_only) {
         coords_freq.resize(coord_size);
     } else {
@@ -28,7 +28,7 @@ FFAWorkspaceCPU<FoldType>::FFAWorkspaceCPU(SizeType buffer_size,
                                            SizeType coord_size,
                                            SizeType n_params) {
     const bool is_freq_only = n_params == 1;
-    fold_internal.resize(buffer_size, FoldType{});
+    fold_internal.resize(buffer_size);
     if (is_freq_only) {
         coords_freq.resize(coord_size);
     } else {
@@ -39,11 +39,21 @@ FFAWorkspaceCPU<FoldType>::FFAWorkspaceCPU(SizeType buffer_size,
 template <SupportedFoldType FoldType>
 void FFAWorkspaceCPU<FoldType>::validate(
     const plans::FFAPlan<FoldType>& ffa_plan) const {
-    const auto buffer_size  = ffa_plan.get_buffer_size();
-    const bool is_freq_only = ffa_plan.get_n_params() == 1;
+    validate_coords(ffa_plan);
+    validate_buffer(ffa_plan.get_buffer_size());
+}
+
+template <SupportedFoldType FoldType>
+void FFAWorkspaceCPU<FoldType>::validate_buffer(SizeType buffer_size) const {
     error_check::check_greater_equal(
         fold_internal.size(), buffer_size,
         "FFAWorkspaceCPU: fold_internal buffer too small");
+}
+
+template <SupportedFoldType FoldType>
+void FFAWorkspaceCPU<FoldType>::validate_coords(
+    const plans::FFAPlan<FoldType>& ffa_plan) const {
+    const bool is_freq_only = ffa_plan.get_n_params() == 1;
     if (is_freq_only) {
         error_check::check_greater_equal(
             coords_freq.size(), ffa_plan.get_coord_size(),

@@ -16,7 +16,8 @@ namespace detail {
 template <typename BatchType>
 inline void transpose_xsimd(const float* __restrict__ src,
                             float* __restrict__ dst,
-                            SizeType nbins) noexcept {
+                            SizeType nbins,
+                            SizeType row_stride) noexcept {
     constexpr SizeType kBatchSize = BatchType::size;
     const SizeType nbins_rounded =
         ((nbins + kBatchSize - 1) / kBatchSize) * kBatchSize;
@@ -24,11 +25,12 @@ inline void transpose_xsimd(const float* __restrict__ src,
     for (SizeType jb = 0; jb < nbins_rounded; jb += kBatchSize) {
         // Load rows from temp_fn
         for (SizeType r = 0; r < kBatchSize; ++r) {
-            rows[r] = BatchType::load_unaligned(&src[(r * nbins) + jb]);
+            rows[r] = BatchType::load_unaligned(&src[(r * row_stride) + jb]);
         }
 
-        // In-place transpose
-        xsimd::transpose(rows.data(), rows.data());
+        // In-place transpose (end must be begin + batch size; see
+        // lane_fft_cpu.cpp).
+        xsimd::transpose(rows.data(), rows.data() + kBatchSize);
 
         // Store transposed result
         for (SizeType r = 0; r < kBatchSize; ++r) {
@@ -40,17 +42,18 @@ inline void transpose_xsimd(const float* __restrict__ src,
 #if defined(__AVX2__)
 inline void transpose_avx2(const float* __restrict__ src,
                            float* __restrict__ dst,
-                           SizeType nbins) noexcept {
+                           SizeType nbins,
+                           SizeType row_stride) noexcept {
     const SizeType nbins_rounded = ((nbins + 7) / 8) * 8;
     for (SizeType jb = 0; jb < nbins_rounded; jb += 8) {
-        __m256 r0 = _mm256_loadu_ps(&src[0 * nbins + jb]);
-        __m256 r1 = _mm256_loadu_ps(&src[1 * nbins + jb]);
-        __m256 r2 = _mm256_loadu_ps(&src[2 * nbins + jb]);
-        __m256 r3 = _mm256_loadu_ps(&src[3 * nbins + jb]);
-        __m256 r4 = _mm256_loadu_ps(&src[4 * nbins + jb]);
-        __m256 r5 = _mm256_loadu_ps(&src[5 * nbins + jb]);
-        __m256 r6 = _mm256_loadu_ps(&src[6 * nbins + jb]);
-        __m256 r7 = _mm256_loadu_ps(&src[7 * nbins + jb]);
+        __m256 r0 = _mm256_loadu_ps(&src[0 * row_stride + jb]);
+        __m256 r1 = _mm256_loadu_ps(&src[1 * row_stride + jb]);
+        __m256 r2 = _mm256_loadu_ps(&src[2 * row_stride + jb]);
+        __m256 r3 = _mm256_loadu_ps(&src[3 * row_stride + jb]);
+        __m256 r4 = _mm256_loadu_ps(&src[4 * row_stride + jb]);
+        __m256 r5 = _mm256_loadu_ps(&src[5 * row_stride + jb]);
+        __m256 r6 = _mm256_loadu_ps(&src[6 * row_stride + jb]);
+        __m256 r7 = _mm256_loadu_ps(&src[7 * row_stride + jb]);
 
         __m256 tmp0 = _mm256_unpacklo_ps(r0, r1);
         __m256 tmp1 = _mm256_unpackhi_ps(r0, r1);
@@ -79,14 +82,14 @@ inline void transpose_avx2(const float* __restrict__ src,
         r6 = _mm256_permute2f128_ps(tmpa, tmpe, 0x31);
         r7 = _mm256_permute2f128_ps(tmpb, tmpf, 0x31);
 
-        _mm256_store_ps(&dst[(jb + 0) * 8], r0);
-        _mm256_store_ps(&dst[(jb + 1) * 8], r1);
-        _mm256_store_ps(&dst[(jb + 2) * 8], r2);
-        _mm256_store_ps(&dst[(jb + 3) * 8], r3);
-        _mm256_store_ps(&dst[(jb + 4) * 8], r4);
-        _mm256_store_ps(&dst[(jb + 5) * 8], r5);
-        _mm256_store_ps(&dst[(jb + 6) * 8], r6);
-        _mm256_store_ps(&dst[(jb + 7) * 8], r7);
+        _mm256_storeu_ps(&dst[(jb + 0) * 8], r0);
+        _mm256_storeu_ps(&dst[(jb + 1) * 8], r1);
+        _mm256_storeu_ps(&dst[(jb + 2) * 8], r2);
+        _mm256_storeu_ps(&dst[(jb + 3) * 8], r3);
+        _mm256_storeu_ps(&dst[(jb + 4) * 8], r4);
+        _mm256_storeu_ps(&dst[(jb + 5) * 8], r5);
+        _mm256_storeu_ps(&dst[(jb + 6) * 8], r6);
+        _mm256_storeu_ps(&dst[(jb + 7) * 8], r7);
     }
 }
 #endif
@@ -94,25 +97,26 @@ inline void transpose_avx2(const float* __restrict__ src,
 #if defined(__AVX512F__)
 inline void transpose_avx512(const float* __restrict__ src,
                              float* __restrict__ dst,
-                             SizeType nbins) noexcept {
+                             SizeType nbins,
+                             SizeType row_stride) noexcept {
     const SizeType nbins_rounded = ((nbins + 15) / 16) * 16;
     for (SizeType jb = 0; jb < nbins_rounded; jb += 16) {
-        __m512 r0 = _mm512_loadu_ps(&src[0 * nbins + jb]);
-        __m512 r1 = _mm512_loadu_ps(&src[1 * nbins + jb]);
-        __m512 r2 = _mm512_loadu_ps(&src[2 * nbins + jb]);
-        __m512 r3 = _mm512_loadu_ps(&src[3 * nbins + jb]);
-        __m512 r4 = _mm512_loadu_ps(&src[4 * nbins + jb]);
-        __m512 r5 = _mm512_loadu_ps(&src[5 * nbins + jb]);
-        __m512 r6 = _mm512_loadu_ps(&src[6 * nbins + jb]);
-        __m512 r7 = _mm512_loadu_ps(&src[7 * nbins + jb]);
-        __m512 r8 = _mm512_loadu_ps(&src[8 * nbins + jb]);
-        __m512 r9 = _mm512_loadu_ps(&src[9 * nbins + jb]);
-        __m512 ra = _mm512_loadu_ps(&src[10 * nbins + jb]);
-        __m512 rb = _mm512_loadu_ps(&src[11 * nbins + jb]);
-        __m512 rc = _mm512_loadu_ps(&src[12 * nbins + jb]);
-        __m512 rd = _mm512_loadu_ps(&src[13 * nbins + jb]);
-        __m512 re = _mm512_loadu_ps(&src[14 * nbins + jb]);
-        __m512 rf = _mm512_loadu_ps(&src[15 * nbins + jb]);
+        __m512 r0 = _mm512_loadu_ps(&src[0 * row_stride + jb]);
+        __m512 r1 = _mm512_loadu_ps(&src[1 * row_stride + jb]);
+        __m512 r2 = _mm512_loadu_ps(&src[2 * row_stride + jb]);
+        __m512 r3 = _mm512_loadu_ps(&src[3 * row_stride + jb]);
+        __m512 r4 = _mm512_loadu_ps(&src[4 * row_stride + jb]);
+        __m512 r5 = _mm512_loadu_ps(&src[5 * row_stride + jb]);
+        __m512 r6 = _mm512_loadu_ps(&src[6 * row_stride + jb]);
+        __m512 r7 = _mm512_loadu_ps(&src[7 * row_stride + jb]);
+        __m512 r8 = _mm512_loadu_ps(&src[8 * row_stride + jb]);
+        __m512 r9 = _mm512_loadu_ps(&src[9 * row_stride + jb]);
+        __m512 ra = _mm512_loadu_ps(&src[10 * row_stride + jb]);
+        __m512 rb = _mm512_loadu_ps(&src[11 * row_stride + jb]);
+        __m512 rc = _mm512_loadu_ps(&src[12 * row_stride + jb]);
+        __m512 rd = _mm512_loadu_ps(&src[13 * row_stride + jb]);
+        __m512 re = _mm512_loadu_ps(&src[14 * row_stride + jb]);
+        __m512 rf = _mm512_loadu_ps(&src[15 * row_stride + jb]);
 
         __m512 tmp0 = _mm512_unpacklo_ps(r0, r1);
         __m512 tmp1 = _mm512_unpackhi_ps(r0, r1);
@@ -182,22 +186,22 @@ inline void transpose_avx512(const float* __restrict__ src,
         re = _mm512_shuffle_f32x4(tmpc, tmpd, _MM_SHUFFLE(3, 1, 3, 1));
         rf = _mm512_shuffle_f32x4(tmpe, tmpf, _MM_SHUFFLE(3, 1, 3, 1));
 
-        _mm512_store_ps(&dst[(jb + 0) * 16], r0);
-        _mm512_store_ps(&dst[(jb + 1) * 16], r1);
-        _mm512_store_ps(&dst[(jb + 2) * 16], r2);
-        _mm512_store_ps(&dst[(jb + 3) * 16], r3);
-        _mm512_store_ps(&dst[(jb + 4) * 16], r4);
-        _mm512_store_ps(&dst[(jb + 5) * 16], r5);
-        _mm512_store_ps(&dst[(jb + 6) * 16], r6);
-        _mm512_store_ps(&dst[(jb + 7) * 16], r7);
-        _mm512_store_ps(&dst[(jb + 8) * 16], r8);
-        _mm512_store_ps(&dst[(jb + 9) * 16], r9);
-        _mm512_store_ps(&dst[(jb + 10) * 16], ra);
-        _mm512_store_ps(&dst[(jb + 11) * 16], rb);
-        _mm512_store_ps(&dst[(jb + 12) * 16], rc);
-        _mm512_store_ps(&dst[(jb + 13) * 16], rd);
-        _mm512_store_ps(&dst[(jb + 14) * 16], re);
-        _mm512_store_ps(&dst[(jb + 15) * 16], rf);
+        _mm512_storeu_ps(&dst[(jb + 0) * 16], r0);
+        _mm512_storeu_ps(&dst[(jb + 1) * 16], r1);
+        _mm512_storeu_ps(&dst[(jb + 2) * 16], r2);
+        _mm512_storeu_ps(&dst[(jb + 3) * 16], r3);
+        _mm512_storeu_ps(&dst[(jb + 4) * 16], r4);
+        _mm512_storeu_ps(&dst[(jb + 5) * 16], r5);
+        _mm512_storeu_ps(&dst[(jb + 6) * 16], r6);
+        _mm512_storeu_ps(&dst[(jb + 7) * 16], r7);
+        _mm512_storeu_ps(&dst[(jb + 8) * 16], r8);
+        _mm512_storeu_ps(&dst[(jb + 9) * 16], r9);
+        _mm512_storeu_ps(&dst[(jb + 10) * 16], ra);
+        _mm512_storeu_ps(&dst[(jb + 11) * 16], rb);
+        _mm512_storeu_ps(&dst[(jb + 12) * 16], rc);
+        _mm512_storeu_ps(&dst[(jb + 13) * 16], rd);
+        _mm512_storeu_ps(&dst[(jb + 14) * 16], re);
+        _mm512_storeu_ps(&dst[(jb + 15) * 16], rf);
     }
 }
 #endif
@@ -205,13 +209,14 @@ inline void transpose_avx512(const float* __restrict__ src,
 #if defined(__ARM_NEON)
 inline void transpose_neon(const float* __restrict__ src,
                            float* __restrict__ dst,
-                           SizeType nbins) noexcept {
+                           SizeType nbins,
+                           SizeType row_stride) noexcept {
     const SizeType nbins_rounded = ((nbins + 3) / 4) * 4;
     for (SizeType jb = 0; jb < nbins_rounded; jb += 4) {
-        float32x4_t r0 = vld1q_f32(&src[(0 * nbins) + jb]);
-        float32x4_t r1 = vld1q_f32(&src[(1 * nbins) + jb]);
-        float32x4_t r2 = vld1q_f32(&src[(2 * nbins) + jb]);
-        float32x4_t r3 = vld1q_f32(&src[(3 * nbins) + jb]);
+        float32x4_t r0 = vld1q_f32(&src[(0 * row_stride) + jb]);
+        float32x4_t r1 = vld1q_f32(&src[(1 * row_stride) + jb]);
+        float32x4_t r2 = vld1q_f32(&src[(2 * row_stride) + jb]);
+        float32x4_t r3 = vld1q_f32(&src[(3 * row_stride) + jb]);
 
         const float32x4x2_t t01 = vtrnq_f32(r0, r1);
         const float32x4x2_t t23 = vtrnq_f32(r2, r3);
@@ -234,30 +239,31 @@ inline void transpose_neon(const float* __restrict__ src,
 template <typename BatchType>
 inline void transpose(const float* __restrict__ src,
                       float* __restrict__ dst,
-                      SizeType nbins) noexcept {
+                      SizeType nbins,
+                      SizeType row_stride) noexcept {
 
 #if defined(__AVX512F__)
     if constexpr (BatchType::size == 16) {
-        detail::transpose_avx512(src, dst, nbins);
+        detail::transpose_avx512(src, dst, nbins, row_stride);
         return;
     }
 #endif
 
 #if defined(__AVX2__)
     if constexpr (BatchType::size == 8) {
-        detail::transpose_avx2(src, dst, nbins);
+        detail::transpose_avx2(src, dst, nbins, row_stride);
         return;
     }
 #endif
 
 #if defined(__ARM_NEON)
     if constexpr (BatchType::size == 4) {
-        detail::transpose_neon(src, dst, nbins);
+        detail::transpose_neon(src, dst, nbins, row_stride);
         return;
     }
 #endif
 
-    detail::transpose_xsimd<BatchType>(src, dst, nbins);
+    detail::transpose_xsimd<BatchType>(src, dst, nbins, row_stride);
 }
 
 } // namespace loki::simd_utils

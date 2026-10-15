@@ -21,7 +21,7 @@ namespace loki::algorithms::detail {
  *
  * The models count every large buffer exactly. What remains is hard to account
  * deterministically: heap fragmentation and allocator arenas, thread stacks,
- * small per-task objects (FFA plans, FFTW plans, logging buffers) and the
+ * small per-task objects (FFA plans, FFT tables, logging buffers) and the
  * interpreter or application around the library. A fixed amount, rather than
  * a fraction of the limit, keeps large limits usable and small limits
  * feasible. See docs/memory.md.
@@ -125,6 +125,52 @@ gpu_sweep_coord_size(const plans::FFAPlan<FoldType>& plan) {
         return plan.get_coord_size() - plan.get_ncoords().back();
     }
     return plan.get_coord_size();
+}
+
+/**
+ * @brief Levels a CPU FFA merges straight into scored tiles (`execute_scored`,
+ * used by the CPU sweep): 2 for accel (jerk) plans of three or more levels, 1
+ * for two, 0 when the top level has more than one segment. Accel trees widen,
+ * so the last two levels are the largest; frequency-only searches use the
+ * cone path or score the final level only (1).
+ */
+template <SupportedFoldType FoldType>
+[[nodiscard]] SizeType
+cpu_scored_fused_levels(const plans::FFAPlan<FoldType>& plan) {
+    const SizeType n_levels = plan.get_fold_shapes().size();
+    if (n_levels < 2 || plan.get_nsegments().back() != 1) {
+        return 0;
+    }
+    if (plan.get_n_params() >= 2 && n_levels >= 3) {
+        return 2;
+    }
+    return 1;
+}
+
+/**
+ * @brief Fold buffer size (elements) a CPU FFA needs for scored execution
+ * (`execute_scored`, used by the CPU sweep).
+ *
+ * Accel searches merge the last two levels tile by tile into scratch and
+ * score them there (cpu_scored_fused_levels), so the ping-pong buffers hold
+ * the other levels only. Frequency-only trees are flat and the cone path may
+ * store the top level, so they keep the full buffer.
+ */
+template <SupportedFoldType FoldType>
+[[nodiscard]] SizeType
+cpu_scored_buffer_size(const plans::FFAPlan<FoldType>& plan) {
+    const auto& shapes = plan.get_fold_shapes();
+    if (plan.get_n_params() < 2 || cpu_scored_fused_levels(plan) == 0) {
+        return plan.get_buffer_size();
+    }
+    const SizeType stored = shapes.size() - cpu_scored_fused_levels(plan);
+    SizeType size         = 0;
+    for (SizeType i = 0; i < stored; ++i) {
+        size =
+            std::max(size, std::accumulate(shapes[i].begin(), shapes[i].end(),
+                                           SizeType{1}, std::multiplies<>()));
+    }
+    return size;
 }
 
 } // namespace loki::algorithms::detail

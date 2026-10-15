@@ -157,7 +157,7 @@ public:
           m_shape(shape),
           m_nbins_pow2(std::bit_ceil(m_nbins)),
           m_ntemplates(widths_arr.size()),
-          m_fft2d(math::FFT2D(m_nprofiles, m_ntemplates, m_nbins_pow2)) {
+          m_convolver(m_nprofiles, m_ntemplates, m_nbins_pow2) {
         // Allocate memory for the templates
         m_templates.resize(m_ntemplates * m_nbins_pow2, 0.0F);
         m_arr_padded.resize(nprofiles * m_nbins_pow2, 0.0F);
@@ -182,22 +182,22 @@ public:
         if (out_size != m_nprofiles * m_ntemplates) {
             throw std::invalid_argument("Output array size does not match");
         }
-        if (arr_size != m_nbins_pow2) {
-            std::ranges::copy(arr, m_arr_padded.begin());
-        } else {
-            m_arr_padded.assign(arr.begin(), arr.end());
+        // Zero-pad each profile to nbins_pow2 bins (the padding tail stays
+        // zero from construction).
+        for (SizeType i = 0; i < m_nprofiles; ++i) {
+            std::ranges::copy(
+                arr.subspan(i * m_nbins, m_nbins),
+                m_arr_padded.begin() +
+                    static_cast<std::ptrdiff_t>(i * m_nbins_pow2));
         }
-        m_fft2d.circular_convolve(std::span<float>(m_arr_padded),
-                                  std::span<float>(m_templates),
-                                  std::span<float>(m_snr_arr));
-        // Find the maximum value for each profile and template and then scale
+        m_convolver.convolve(m_arr_padded, m_templates, m_snr_arr);
+        // Maximum of each profile-template circular convolution.
         for (SizeType i = 0; i < m_nprofiles; ++i) {
             for (SizeType j = 0; j < m_ntemplates; ++j) {
                 const auto idx         = (i * m_ntemplates) + j;
                 const auto snr_subspan = std::span(m_snr_arr).subspan(
                     idx * m_nbins_pow2, m_nbins_pow2);
-                out[idx] = *std::ranges::max_element(snr_subspan) /
-                           static_cast<float>(m_nbins_pow2);
+                out[idx] = *std::ranges::max_element(snr_subspan);
             }
         }
     }
@@ -214,8 +214,7 @@ private:
     std::vector<float> m_arr_padded;
     std::vector<float> m_snr_arr;
 
-    // FFTW plans
-    math::FFT2D m_fft2d;
+    math::CircularConvolver m_convolver;
 
     void initialise_templates() {
         if (m_shape == "gaussian") {
@@ -487,40 +486,13 @@ void append_snr_boxcar_3d_hits(const float* folds,
     if (nprofiles == 0 || widths.empty() || nbins == 0) {
         return;
     }
-    const SizeType nwidths = widths.size();
-    const SizeType wmax    = *std::ranges::max_element(widths);
+    const SizeType wmax = *std::ranges::max_element(widths);
     error_check::check_greater_equal(
         psum.size(), nbins + wmax,
         "append_snr_boxcar_3d_hits: psum is shorter than nbins + max width");
-    std::vector<float> h_vals(nwidths);
-    std::vector<float> b_vals(nwidths);
-    for (SizeType iw = 0; iw < nwidths; ++iw) {
-        const auto w = widths[iw];
-        h_vals[iw]   = std::sqrt(static_cast<float>(nbins - w) /
-                                 static_cast<float>(nbins * w));
-        b_vals[iw] =
-            static_cast<float>(w) * h_vals[iw] / static_cast<float>(nbins - w);
-    }
-    for (SizeType local = 0; local < nprofiles; ++local) {
-        const float* profile = folds + (local * 2 * nbins);
-        detail::ev_circular_prefix(profile, profile + nbins, psum.data(), nbins,
-                                   nbins + wmax);
-        const float sum              = psum[nbins - 1];
-        const SizeType profile_index = profile_base + local;
-        for (SizeType iw = 0; iw < nwidths; ++iw) {
-            const float dmax =
-                utils::diff_max(psum.data() + widths[iw], psum.data(), nbins);
-            const float snr =
-                ((h_vals[iw] + b_vals[iw]) * dmax) - (b_vals[iw] * sum);
-            if (snr >= threshold) {
-                hits.push_back(SnrHit{
-                    .score_index =
-                        static_cast<uint32_t>((profile_index * nwidths) + iw),
-                    .snr = snr,
-                });
-            }
-        }
-    }
+    detail::BoxcarScorer3D scorer(nbins, widths.data(), widths.size());
+    detail::append_boxcar_hits(scorer, folds, profile_base, nprofiles,
+                               threshold, hits);
 }
 
 void snr_boxcar_3d_max(std::span<const float> folds,

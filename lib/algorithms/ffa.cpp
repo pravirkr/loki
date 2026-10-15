@@ -55,9 +55,12 @@ make_ffa_engine(memory::FFAWorkspace<FoldType>& workspace,
     loki::detail::check_same_exec(fft_manager.exec(), exec,
                                   "FFA (fft_manager)");
     if (exec.backend == Backend::kCPU) {
+        // The CPU engine's lane FFT tables are process-wide, so it needs no
+        // manager; still reject an empty or non-CPU handle.
+        static_cast<void>(math::detail::cpu_fft(fft_manager, "FFA"));
         return detail::make_ffa_cpu<FoldType>(
-            memory::detail::cpu_workspace(workspace, "FFA"),
-            math::detail::cpu_fft(fft_manager, "FFA"), cfg, show_progress);
+            memory::detail::cpu_workspace(workspace, "FFA"), cfg,
+            show_progress);
     }
 #ifdef LOKI_ENABLE_GPU
     if (exec.backend == loki::detail::kGPUBackend) {

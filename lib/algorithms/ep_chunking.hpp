@@ -32,8 +32,6 @@ struct RegionDesign {
     /// Synthetic forecast used by internal tests when evaluate is unset.
     float safe_complexity{1.0F};
     SizeType nsegments{0};
-    std::optional<SizeType> n_runs;
-    std::optional<std::vector<SizeType>> ref_segs;
     /// Selected path's per-stage population per initial seed, evaluated
     /// deterministically for a chunk's branching pattern. Excludes level zero.
     std::function<std::vector<double>(std::span<const float>)> evaluate;

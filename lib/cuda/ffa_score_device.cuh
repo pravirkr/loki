@@ -507,20 +507,27 @@ struct Phasor {
     float s;
 };
 
-// exp(-2 pi i k shift / nbins) in FP32. k * shift is split exactly into
-// hi + lo (fmaf), reduced to a fraction of a cycle, then evaluated with
-// sincospif, which is accurate for any argument. For a power-of-two nbins
-// the scaling is exact. This avoids the FP64 phase of fourier_phase
-// (kernels_cuda.cu) and the large-argument error of __sincosf.
+/**
+ * exp(-2 pi i k shift / nbins) in FP32, accurate for any argument and any
+ * nbins (<= 3.3e-7 measured, nbins 50..1024). k * shift is split exactly
+ * into t_hi + t_lo (fmaf); t_hi is reduced by a whole number of cycles,
+ * which is exact (the remainder is a multiple of ulp(t_hi) and at most about
+ * nbins); the remaining fraction of a cycle goes to sincospif, which is
+ * accurate for any argument. Reducing t_hi * inv_nbins instead is exact only
+ * for a power-of-two nbins (2.4e-4 at nbins 1000); for a power of two both
+ * give the same bits, since scaling by inv_nbins then commutes with rounding.
+ * This avoids the FP64 phase of fourier_phase (ep_fourier_device.cuh) and
+ * the large-argument error of __sincosf. @p inv_nbins is 1 / nbins in float.
+ */
 __device__ __forceinline__ Phasor fourier_phasor(uint32_t k,
                                                  float shift,
+                                                 float nbins,
                                                  float inv_nbins) {
     const auto kf    = static_cast<float>(k);
     const float t_hi = kf * shift;
     const float t_lo = fmaf(kf, shift, -t_hi);
-    const float c_hi = t_hi * inv_nbins;
-    const float c_lo = t_lo * inv_nbins;
-    const float frac = (c_hi - rintf(c_hi)) + c_lo;
+    const float r    = fmaf(-nbins, rintf(t_hi * inv_nbins), t_hi);
+    const float frac = (r + t_lo) * inv_nbins;
     Phasor ph;
     sincospif(-2.0F * frac, &ph.s, &ph.c);
     return ph;
