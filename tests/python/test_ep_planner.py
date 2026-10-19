@@ -214,6 +214,12 @@ def test_ep_planner_accepts_best_available_path(tmp_path: Path, backend: str) ->
 
     with h5py.File(cache) as saved:
         assert saved.attrs["min_pd"] == 1.0
+        # The threshold pipeline is part of the plan.
+        assert saved.attrs["dts_algorithm"] == "shared-e22"
+        assert saved.attrs["dts_refine"] == (
+            "shortlist" if backend == "cpu" else "full"
+        )
+        assert saved.attrs["dts_w_terminal"] == 1.0
     # Reloading preserves the user's requested constraint and chosen scheme.
     reloaded = libloki.prune.EPRegionPlannerTime(
         cfg, min_pd=1.0, ref_segs=[0], plan_cache_file=cache, backend=backend
@@ -264,7 +270,11 @@ def test_ep_rejects_bins_above_1024(nbins: int, nbins_max: int) -> None:
 
 
 @pytest.mark.skipif(not _cuda_built(), reason="CUDA backend not built")
-def test_cuda_threshold_simulation_over_budget_is_rejected() -> None:
+@pytest.mark.parametrize("limit_gb", [1.0, 0.6])
+def test_cuda_threshold_design_fits_the_budget(limit_gb: float) -> None:
+    # nbins 1024 would need far more than the limit for its search pools: the
+    # search steps its budget down and runs at 64 bins, and the schedule is
+    # re-fitted at 1024 bins.
     cfg = libloki.configs.PulsarSearchConfig(
         nsamps=1 << 16,
         tsamp=64e-6,
@@ -274,9 +284,9 @@ def test_cuda_threshold_simulation_over_budget_is_rejected() -> None:
         ducy_max=0.3,
         wtsp=1.2,
         nthreads=1,
-        max_process_memory_gb=1.0,
+        max_process_memory_gb=limit_gb,
         bseg_brute=1024,
         bseg_ffa=8192,
     )
-    with pytest.raises(RuntimeError, match="threshold simulation.*needs"):
-        libloki.prune.EPRegionPlannerFourier(cfg, backend="cuda")
+    planner = libloki.prune.EPRegionPlannerFourier(cfg, backend="cuda")
+    assert planner.nchunks > 0

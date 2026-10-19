@@ -148,6 +148,22 @@ transition_key(float complexity_cumul, uint32_t global_work_idx) {
            global_work_idx;
 }
 
+// Orders (score, trial) so that the largest key is the highest score, ties
+// broken by the lowest trial index (as std::max_element). 0 is below every
+// key, so it marks "no trial".
+__device__ __forceinline__ unsigned long long score_trial_key(float score,
+                                                              uint32_t trial) {
+    const uint32_t bits = __float_as_uint(score);
+    const uint32_t ord =
+        (bits & 0x80000000U) != 0U ? ~bits : bits | 0x80000000U;
+    return (static_cast<unsigned long long>(ord) << 32U) |
+           (0xFFFFFFFFU - trial);
+}
+
+__device__ __forceinline__ uint32_t trial_of_key(unsigned long long key) {
+    return 0xFFFFFFFFU - static_cast<uint32_t>(key & 0xFFFFFFFFULL);
+}
+
 struct ParentCandidate {
     uint32_t jslot_prev;
     uint32_t jthres_abs;
@@ -220,6 +236,29 @@ __device__ __forceinline__ uint32_t select_source_trial(uint32_t trial_id,
     typename RNG::UniformFloat dist_select(0.0F, 1.0F);
     const float u = dist_select.generate4(rng_select).x;
     return min(static_cast<uint32_t>(u * ntrials_in), ntrials_in - 1U);
+}
+
+// Source survivor for a failed slot (mode shared): the failed slots of a
+// parent, taken in order, are refilled stratified over its @p nsurv
+// survivors: slot number failed_rank of nfailed draws its quantile
+// (failed_rank + u) / nfailed, u uniform. Stratification keeps the expected
+// offspring of a survivor at ntrials / nsurv with less variance than
+// independent draws.
+__device__ __forceinline__ uint32_t
+select_failed_source_trial(uint32_t failed_rank,
+                           uint32_t nfailed,
+                           uint32_t nsurv,
+                           uint64_t seed,
+                           uint64_t select_base) {
+    auto rng_select = make_rng(seed, select_base);
+    typename RNG::UniformFloat dist_select(0.0F, 1.0F);
+    const float u = dist_select.generate4(rng_select).x;
+    const float quantile =
+        __fdiv_rn(__fadd_rn(static_cast<float>(failed_rank), u),
+                  static_cast<float>(nfailed));
+    return min(
+        static_cast<uint32_t>(__fmul_rn(quantile, static_cast<float>(nsurv))),
+        nsurv - 1U);
 }
 
 // One simulated trial: out = in + N(0, var_add) + branch_scale * profile,
@@ -446,10 +485,12 @@ __global__ __launch_bounds__(256, 1) void simulate_score_parents_kernel(
     float* __restrict__ scores_cur,
     TrialSimParams p,
     uint32_t ntrials,
-    uint32_t nprobs) {
+    uint32_t nprobs,
+    uint32_t nbranches) {
+    // nbranches = 1 simulates H0 only (shared mode: H1 is not per cell)
     const uint64_t tid =
         (static_cast<uint64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
-    const uint64_t trials_per_item = 2ULL * ntrials;
+    const uint64_t trials_per_item = static_cast<uint64_t>(nbranches) * ntrials;
     const uint64_t iparent         = tid / trials_per_item;
     if (iparent >= *n_parents) {
         return;
@@ -460,17 +501,50 @@ __global__ __launch_bounds__(256, 1) void simulate_score_parents_kernel(
 
     uint64_t select_base = 0;
     uint64_t noise_base  = 0;
-    trial_rng_bases(rng_state[kRngStageBase] + tid, p.nbins_padded, select_base,
-                    noise_base);
+    // nbranches = 1 (shared mode): every parent draws the same noise for
+    // trial t at this stage (common random numbers), so the costs that cells
+    // compare share their noise as far as their populations allow.
+    const uint64_t rng_idx = nbranches == 1 ? local_idx : tid;
+    trial_rng_bases(rng_state[kRngStageBase] + rng_idx, p.nbins_padded,
+                    select_base, noise_base);
 
     const ParentCandidate par = parents[iparent];
     const uint32_t cell       = (par.jslot_prev * nprobs) + par.kprob;
-    const uint32_t src_trial  = select_source_trial(
-        trial_id, ntrials_par[(2 * cell) + branch], p.seed, select_base);
-    const uint64_t cell_branch = (2ULL * cell) + branch;
-    const uint64_t src_row     = (((2ULL * src_par[cell]) + branch) * ntrials) +
-                                 idx_par[(cell_branch * ntrials) + src_trial];
-    const uint64_t out_row     = (cell_branch * ntrials) + trial_id;
+    uint32_t src_trial        = 0;
+    if (nbranches == 1) {
+        // Shared mode: a trial that survived keeps its slot; the failed slots
+        // are refilled stratified over the survivors, so a candidate's noise
+        // population differs from its parent's only where it must.
+        const uint32_t count = ntrials_par[2 * cell];
+        const uint32_t* survivors =
+            idx_par + (static_cast<uint64_t>(cell) * ntrials);
+        uint32_t lo = 0;
+        uint32_t hi = count;
+        while (lo < hi) {
+            const uint32_t mid = lo + ((hi - lo) / 2);
+            if (survivors[mid] < trial_id) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        src_trial =
+            (lo < count && survivors[lo] == trial_id)
+                ? lo
+                : select_failed_source_trial(trial_id - lo, ntrials - count,
+                                             count, p.seed, select_base);
+    } else {
+        src_trial = select_source_trial(
+            trial_id, ntrials_par[(2 * cell) + branch], p.seed, select_base);
+    }
+    // Pool rows per cell: nbranches (H0 only in shared mode)
+    const uint64_t cell_branch =
+        (static_cast<uint64_t>(nbranches) * cell) + branch;
+    const uint64_t src_row =
+        (((static_cast<uint64_t>(nbranches) * src_par[cell]) + branch) *
+         ntrials) +
+        idx_par[(cell_branch * ntrials) + src_trial];
+    const uint64_t out_row = (cell_branch * ntrials) + trial_id;
 
     scores_cur[out_row] = Scorer::template run<true>(
         sim_prev + (src_row * p.nbins_padded),
@@ -507,10 +581,16 @@ __global__ void evaluate_stage_kernel(const float* __restrict__ in_folds,
                                       float* __restrict__ scores,
                                       TrialSimParams p,
                                       uint32_t ntrials,
-                                      uint32_t stage) {
-    const uint32_t tid   = (blockIdx.x * blockDim.x) + threadIdx.x;
-    const uint32_t total = 2U * ntrials;
-    if (tid >= total) {
+                                      uint32_t stage,
+                                      uint32_t tid_offset,
+                                      uint32_t trial_offset,
+                                      uint32_t tid_limit) {
+    // tid_offset = ntrials runs the H1 branch only; tid_limit = ntrials the
+    // H0 branch only (2 * ntrials: both). trial_offset numbers the trials of
+    // a chunk globally: their random streams are those of trials
+    // trial_offset + [0, ntrials).
+    const uint32_t tid = (blockIdx.x * blockDim.x) + threadIdx.x + tid_offset;
+    if (tid >= tid_limit) {
         return;
     }
     const uint32_t branch   = tid / ntrials;
@@ -519,11 +599,13 @@ __global__ void evaluate_stage_kernel(const float* __restrict__ in_folds,
     uint32_t src            = trial_id;
     if (trial_id >= nsurv) {
         const float u =
-            eval_uniform(p.seed, eval_subseq(3U, stage, 0U, branch, trial_id));
+            eval_uniform(p.seed, eval_subseq(3U, stage, 0U, branch,
+                                             trial_id + trial_offset));
         src = min(static_cast<uint32_t>(u * static_cast<float>(nsurv)),
                   nsurv - 1U);
     }
-    const uint64_t noise_subseq = eval_subseq(2U, stage, 0U, branch, trial_id);
+    const uint64_t noise_subseq =
+        eval_subseq(2U, stage, 0U, branch, trial_id + trial_offset);
     const uint64_t src_row = (static_cast<uint64_t>(branch) * ntrials) + src;
     const uint64_t out_row =
         (static_cast<uint64_t>(branch) * ntrials) + trial_id;
@@ -549,6 +631,7 @@ __global__ __launch_bounds__(256, 2) void simulate_count_items_kernel(
     const uint32_t* __restrict__ ntrials_par,
     const float* __restrict__ thresholds,
     uint32_t* __restrict__ counts,
+    unsigned long long* __restrict__ best_h0,
     TrialSimParams p,
     uint32_t ntrials,
     uint32_t nprobs) {
@@ -558,6 +641,7 @@ __global__ __launch_bounds__(256, 2) void simulate_count_items_kernel(
     const uint64_t slot            = tid / trials_per_item;
     uint32_t segment               = kInvalidIndex;
     bool survived                  = false;
+    unsigned long long key_h0      = 0; // best H0 trial, for the floor
     if (slot < n_items) {
         const uint32_t item    = order[slot];
         const uint32_t rng_idx = item_rng_idx[item];
@@ -583,15 +667,32 @@ __global__ __launch_bounds__(256, 2) void simulate_count_items_kernel(
                 (branch == 1) ? p.bias_snr : 0.0F, noise_base, p);
             survived = score > thresholds[pair.ithres_abs];
             segment  = (2 * item) + branch;
+            if (branch == 0) {
+                key_h0 = score_trial_key(score, trial_id);
+            }
         }
     }
     // Warp-aggregated count per (item, branch) segment.
     const unsigned peers = warp_match_any(segment);
     const unsigned votes = __ballot_sync(0xFFFFFFFFU, survived) & peers;
     const auto lane      = threadIdx.x % 32;
-    if (segment != kInvalidIndex &&
-        lane == static_cast<uint32_t>(__ffs(peers) - 1) && votes != 0) {
+    const bool leader    = segment != kInvalidIndex &&
+                           lane == static_cast<uint32_t>(__ffs(peers) - 1);
+    if (leader && votes != 0) {
         atomicAdd(&counts[segment], static_cast<uint32_t>(__popc(votes)));
+    }
+    // Best H0 trial of each segment, kept only while none survives: the
+    // floor of a stage that prunes every noise trial.
+    unsigned long long key_max = 0;
+#pragma unroll
+    for (int src = 0; src < 32; ++src) {
+        const unsigned long long other = __shfl_sync(0xFFFFFFFFU, key_h0, src);
+        if (((peers >> static_cast<unsigned>(src)) & 1U) != 0U) {
+            key_max = max(key_max, other);
+        }
+    }
+    if (leader && (segment & 1U) == 0U && votes == 0 && key_max != 0) {
+        atomicMax(&best_h0[segment / 2], key_max);
     }
 }
 
@@ -613,6 +714,7 @@ __global__ __launch_bounds__(kBlock) void commit_items_kernel(
     const float* __restrict__ folds_par,
     const uint32_t* __restrict__ ntrials_par,
     const float* __restrict__ thresholds,
+    const unsigned long long* __restrict__ best_h0,
     float* __restrict__ folds_next,
     uint32_t* __restrict__ ntrials_next,
     uint32_t* __restrict__ error_flag,
@@ -635,9 +737,13 @@ __global__ __launch_bounds__(kBlock) void commit_items_kernel(
     const uint32_t par_cell      = (pair.jslot_prev * nprobs) + (item % nprobs);
     const float threshold        = thresholds[ithres];
     const uint2 cnt              = counts[item];
+    // No H0 survivor: the best H0 trial stands in, counted as one.
+    const bool floor_h0    = cnt.x == 0;
+    const uint32_t best_t  = floor_h0 ? trial_of_key(best_h0[item]) : 0U;
+    const uint32_t want_h0 = floor_h0 ? 1U : cnt.x;
     if (threadIdx.x == 0) {
         states_cur[key_idx]              = cand_states[item];
-        ntrials_next[2 * out_cell]       = cnt.x;
+        ntrials_next[2 * out_cell]       = want_h0;
         ntrials_next[(2 * out_cell) + 1] = cnt.y;
     }
     const uint64_t trials_per_item = 2ULL * ntrials;
@@ -666,11 +772,12 @@ __global__ __launch_bounds__(kBlock) void commit_items_kernel(
                     folds_par +
                     ((((2ULL * par_cell) + branch) * ntrials) + src_trial) *
                         p.nbins_padded;
-                flag = Scorer::template run<true>(
-                           in_row, reinterpret_cast<float*>(fold), branch_scale,
-                           noise_base, p) > threshold
-                           ? 1U
-                           : 0U;
+                const float score = Scorer::template run<true>(
+                    in_row, reinterpret_cast<float*>(fold), branch_scale,
+                    noise_base, p);
+                flag = (branch == 0 && floor_h0)
+                           ? (t == best_t ? 1U : 0U)
+                           : (score > threshold ? 1U : 0U);
             }
             uint32_t pos   = 0;
             uint32_t total = 0;
@@ -690,7 +797,7 @@ __global__ __launch_bounds__(kBlock) void commit_items_kernel(
             running += total;
             __syncthreads(); // temp_storage reuse
         }
-        if (threadIdx.x == 0 && running != (branch == 0 ? cnt.x : cnt.y)) {
+        if (threadIdx.x == 0 && running != (branch == 0 ? want_h0 : cnt.y)) {
             atomicOr(error_flag, 1U);
         }
     }
@@ -720,7 +827,8 @@ template <typename Scorer> struct ScorerLaunch {
                                        float* scores_cur,
                                        TrialSimParams p,
                                        uint32_t ntrials,
-                                       uint32_t nprobs);
+                                       uint32_t nprobs,
+                                       uint32_t nbranches);
 
     static void evaluate_stage(dim3 grid,
                                dim3 block,
@@ -731,7 +839,10 @@ template <typename Scorer> struct ScorerLaunch {
                                float* scores,
                                TrialSimParams p,
                                uint32_t ntrials,
-                               uint32_t stage);
+                               uint32_t stage,
+                               uint32_t tid_offset,
+                               uint32_t trial_offset,
+                               uint32_t tid_limit);
 
     static void simulate_count_items(dim3 grid,
                                      dim3 block,
@@ -745,6 +856,7 @@ template <typename Scorer> struct ScorerLaunch {
                                      const uint32_t* ntrials_par,
                                      const float* thresholds,
                                      uint32_t* counts,
+                                     unsigned long long* best_h0,
                                      TrialSimParams p,
                                      uint32_t ntrials,
                                      uint32_t nprobs);
@@ -763,6 +875,7 @@ template <typename Scorer> struct ScorerLaunch {
                              const float* folds_par,
                              const uint32_t* ntrials_par,
                              const float* thresholds,
+                             const unsigned long long* best_h0,
                              float* folds_next,
                              uint32_t* ntrials_next,
                              uint32_t* error_flag,
@@ -787,10 +900,11 @@ void ScorerLaunch<Scorer>::simulate_score_parents(
     float* scores_cur,
     TrialSimParams p,
     uint32_t ntrials,
-    uint32_t nprobs) {
+    uint32_t nprobs,
+    uint32_t nbranches) {
     simulate_score_parents_kernel<Scorer><<<grid, block, 0, stream>>>(
         parents, n_parents, rng_state, sim_prev, ntrials_par, src_par, idx_par,
-        sim_cur, scores_cur, p, ntrials, nprobs);
+        sim_cur, scores_cur, p, ntrials, nprobs, nbranches);
 }
 
 template <typename Scorer>
@@ -803,9 +917,13 @@ void ScorerLaunch<Scorer>::evaluate_stage(dim3 grid,
                                           float* scores,
                                           TrialSimParams p,
                                           uint32_t ntrials,
-                                          uint32_t stage) {
+                                          uint32_t stage,
+                                          uint32_t tid_offset,
+                                          uint32_t trial_offset,
+                                          uint32_t tid_limit) {
     evaluate_stage_kernel<Scorer><<<grid, block, 0, stream>>>(
-        in_folds, n_in, out_folds, scores, p, ntrials, stage);
+        in_folds, n_in, out_folds, scores, p, ntrials, stage, tid_offset,
+        trial_offset, tid_limit);
 }
 
 template <typename Scorer>
@@ -822,12 +940,13 @@ void ScorerLaunch<Scorer>::simulate_count_items(
     const uint32_t* ntrials_par,
     const float* thresholds,
     uint32_t* counts,
+    unsigned long long* best_h0,
     TrialSimParams p,
     uint32_t ntrials,
     uint32_t nprobs) {
     simulate_count_items_kernel<Scorer><<<grid, block, 0, stream>>>(
         order, n_items, pairs, item_rng_idx, rng_state, folds_par, ntrials_par,
-        thresholds, counts, p, ntrials, nprobs);
+        thresholds, counts, best_h0, p, ntrials, nprobs);
 }
 
 template <typename Scorer>
@@ -845,6 +964,7 @@ void ScorerLaunch<Scorer>::commit_items(dim3 grid,
                                         const float* folds_par,
                                         const uint32_t* ntrials_par,
                                         const float* thresholds,
+                                        const unsigned long long* best_h0,
                                         float* folds_next,
                                         uint32_t* ntrials_next,
                                         uint32_t* error_flag,
@@ -853,8 +973,8 @@ void ScorerLaunch<Scorer>::commit_items(dim3 grid,
                                         uint32_t nprobs) {
     commit_items_kernel<Scorer, kCommitItemsBlock><<<grid, block, 0, stream>>>(
         beam_cur, pairs, item_rng_idx, rng_state, counts, cand_states,
-        states_cur, cell_keys, folds_par, ntrials_par, thresholds, folds_next,
-        ntrials_next, error_flag, p, ntrials, nprobs);
+        states_cur, cell_keys, folds_par, ntrials_par, thresholds, best_h0,
+        folds_next, ntrials_next, error_flag, p, ntrials, nprobs);
 }
 
 // Every scorer type dispatch_scorer can select. Instantiated in

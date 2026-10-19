@@ -32,7 +32,32 @@ both, because it also configures FFA searches.
 
 Chunking is automatic. The sweep first forms regions for the required bin
 counts, then subdivides each region in frequency until every chunk and its
-shared workspace group fit the effective memory budget. It evaluates the
+shared workspace group fit the effective memory budget. The region's
+thresholds come from `DynamicThresholdScheme` in mode `shared` on both
+backends (signal trials common to every path, probability bins anchored at
+`min_pd`, the survivors of the last stage weighted into the cost): the search,
+then `solve()`, which selects, refines and repairs the schedule on fresh
+samples so that its measured Pd is `min_pd` (see
+`include/loki/detection/thresholds.hpp`). The refinement is the full pipeline
+on CUDA and the shortlist on the CPU. Memory and runtime of this step are bounded. Up to 128 bins the search runs at
+the true `nbins` when its pools fit. Above that, or when they do not fit, it
+runs at 64 bins (`kDtsNbinsSim`, raised so that the reference pulse spans at
+least four bins) and `refit_scheme` re-fits the schedule at the true `nbins`:
+a common upward threshold shift, scanned on fresh samples, then tightening,
+repair and an independent report. The reason is that a maximum over more
+boxcar templates has a heavier noise tail (about `nbins` times more
+independent phase positions), so a schedule found at 64 bins is too
+permissive at 256 to 1024 bins (cost per detection 1.1 to 3.3 times a native
+search's; `bench/scripts/schemes/nbins_proxy_study.py`); the shift brings that
+to about 1.0 to 1.05 in the same tests and the refit always reports the Pd at
+the true `nbins`. The refit's sample sizes follow the memory limit (a quarter
+of it, at most 4 GB: 24 B per trial and bin for a signal bank, 12 B for a noise
+evaluation), and the search budget steps down (1024 trials / 40 probability
+bins, 512/40, 512/20, 256/20, 128/16) until its pools fit; only a limit below
+the last step fails, with a message. The design runs once per plan and is kept
+in the plan cache. Its pools are checked against the limit on their
+own, because they are freed before the EP search; the post-processing samples
+(a few `nstages x 2^17` float banks) are small beside them. It evaluates the
 region's thresholds for each chunk's actual branching pattern and selected
 reference segments, multiplies the per-seed forecast by the FFA seed count,
 and derives `max_sugg` from adjacent-stage overlap plus a worst branched
@@ -127,8 +152,9 @@ Differences from the CPU policy:
 - A workspace group is allocated once and its shape must equal every chunk's
   (`validate` uses `check_equal`), so the engine builds the workspace from the
   group maxima and checks each chunk fits within it.
-- The threshold scheme is the CUDA `DynamicThresholdScheme`. It differs
-  statistically from the CPU scheme. A cache can be reused on the other
+- The threshold scheme is `DynamicThresholdScheme` in mode `shared`. The CUDA
+  and CPU engines differ statistically (and the refinement default differs:
+  full on CUDA, shortlist on the CPU). A cache can be reused on the other
   backend after adapting its batch and rechecking capacity and memory.
 - The Bluestein tables (under 64 KiB per size), CUB temporaries and the few
   small FFA arrays (counts, offsets, limits) are not in the exact model.
