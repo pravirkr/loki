@@ -43,7 +43,7 @@ def nbins_sim(nbins: int, ref_ducy: float) -> int:
     return min(nbins, sim)
 
 
-def make(bp, nbins, ref_ducy, ducy_max, wtsp, snr, pd_min, backend, refine, seed):
+def make(bp, nbins, ref_ducy, ducy_max, wtsp, snr, pd_min, backend, mode, seed):
     return lt.DynamicThresholdScheme(
         np.asarray(bp, dtype=np.float32),
         ref_ducy,
@@ -54,19 +54,18 @@ def make(bp, nbins, ref_ducy, ducy_max, wtsp, snr, pd_min, backend, refine, seed
         nthresholds=100,
         ducy_max=ducy_max,
         wtsp=wtsp,
-        mode="shared",
+        mode=mode,
         seed=seed,
         backend=backend,
         nthreads=16,
         guess="window",
         min_pd=pd_min,
         w_terminal=1.0,
-        refine=refine,
     )
 
 
-def solve(bp, nbins, ref_ducy, ducy_max, wtsp, snr, pd_min, backend, refine, seed):
-    s = make(bp, nbins, ref_ducy, ducy_max, wtsp, snr, pd_min, backend, refine, seed)
+def solve(bp, nbins, ref_ducy, ducy_max, wtsp, snr, pd_min, backend, mode, seed):
+    s = make(bp, nbins, ref_ducy, ducy_max, wtsp, snr, pd_min, backend, mode, seed)
     s.run(10)
     return s.solve()
 
@@ -91,7 +90,7 @@ PATTERNS = {
 
 @click.command()
 @click.option("--backend", default="cuda")
-@click.option("--refine", default="shortlist")
+@click.option("--mode", default="robust")
 @click.option("--patterns", default="seg8,seg32,prod")
 @click.option("--ref-ducy", "ref_ducys", default="0.05,0.1,0.2")
 @click.option("--wtsp", "wtsps", default="1.0,1.2")
@@ -99,7 +98,7 @@ PATTERNS = {
 @click.option("--snr", default=8.0)
 @click.option("--seed", default=1)
 @click.option("--out", type=click.Path(path_type=pathlib.Path), default=None)
-def main(backend, refine, patterns, ref_ducys, wtsps, pd_mins, snr, seed, out):
+def main(backend, mode, patterns, ref_ducys, wtsps, pd_mins, snr, seed, out):
     rows = []
     for name in patterns.split(","):
         bp, nbins_list = PATTERNS[name]
@@ -121,7 +120,7 @@ def main(backend, refine, patterns, ref_ducys, wtsps, pd_mins, snr, seed, out):
                                 snr,
                                 pd_min,
                                 backend,
-                                refine,
+                                mode,
                                 seed,
                             )
                             prx = solve(
@@ -133,7 +132,7 @@ def main(backend, refine, patterns, ref_ducys, wtsps, pd_mins, snr, seed, out):
                                 snr,
                                 pd_min,
                                 backend,
-                                refine,
+                                mode,
                                 seed,
                             )
                             pd_n, c_n, l_n = rescore(

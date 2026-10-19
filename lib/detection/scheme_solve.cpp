@@ -53,17 +53,54 @@ double rank_of(const State& last, double pd, double w) {
 
 } // namespace
 
-float relax_schedule(std::vector<float>& thresholds,
-                     std::span<const float> scores,
-                     SizeType n,
-                     double target) {
-    std::vector<float> margins(n, std::numeric_limits<float>::max());
+HostSignalBank::HostSignalBank(std::vector<float> scores, SizeType n)
+    : m_scores(std::move(scores)),
+      m_n(n) {
+    error_check::check(n > 0 && m_scores.size() % n == 0,
+                       "HostSignalBank: scores must be nstages x n");
+}
+
+std::vector<float>
+HostSignalBank::margins(std::span<const float> thresholds) const {
+    error_check::check_equal(thresholds.size() * m_n, m_scores.size(),
+                             "HostSignalBank: one threshold per stage");
+    std::vector<float> margins(m_n, std::numeric_limits<float>::max());
     for (SizeType s = 0; s < thresholds.size(); ++s) {
-        for (SizeType t = 0; t < n; ++t) {
+        for (SizeType t = 0; t < m_n; ++t) {
             margins[t] =
-                std::min(margins[t], scores[(s * n) + t] - thresholds[s]);
+                std::min(margins[t], m_scores[(s * m_n) + t] - thresholds[s]);
         }
     }
+    return margins;
+}
+
+std::vector<float>
+HostSignalBank::survivor_minima(std::span<const float> thresholds) const {
+    const auto margin = margins(thresholds);
+    std::vector<float> minima(thresholds.size(),
+                              std::numeric_limits<float>::max());
+    for (SizeType s = 0; s < thresholds.size(); ++s) {
+        for (SizeType t = 0; t < m_n; ++t) {
+            if (margin[t] > 0.0F) {
+                minima[s] = std::min(minima[s], m_scores[(s * m_n) + t]);
+            }
+        }
+    }
+    return minima;
+}
+
+SizeType count_survivors(const SignalBank& bank,
+                         std::span<const float> thresholds) {
+    const auto margins = bank.margins(thresholds);
+    return static_cast<SizeType>(
+        std::ranges::count_if(margins, [](float m) { return m > 0.0F; }));
+}
+
+float relax_schedule(std::vector<float>& thresholds,
+                     const SignalBank& bank,
+                     double target) {
+    const SizeType n        = bank.size();
+    auto margins            = bank.margins(thresholds);
     const SizeType required = std::min(
         n, static_cast<SizeType>(std::ceil(target * static_cast<double>(n))));
     const auto rank =
@@ -84,33 +121,16 @@ float relax_schedule(std::vector<float>& thresholds,
 }
 
 std::pair<SizeType, SizeType> tighten_schedule(std::vector<float>& thresholds,
-                                               std::span<const float> scores,
-                                               SizeType n) {
-    std::vector<uint8_t> alive(n, 1);
-    for (SizeType s = 0; s < thresholds.size(); ++s) {
-        for (SizeType t = 0; t < n; ++t) {
-            alive[t] &=
-                static_cast<uint8_t>(scores[(s * n) + t] > thresholds[s]);
-        }
-    }
-    std::vector<uint32_t> survivors;
-    survivors.reserve(n);
-    for (SizeType t = 0; t < n; ++t) {
-        if (alive[t] != 0) {
-            survivors.push_back(static_cast<uint32_t>(t));
-        }
-    }
-    const SizeType count = survivors.size();
+                                               const SignalBank& bank) {
+    const SizeType count = count_survivors(bank, thresholds);
     SizeType tightened   = 0;
     if (count == 0) {
         return {tightened, count};
     }
+    const auto minima = bank.survivor_minima(thresholds);
     for (SizeType s = 0; s < thresholds.size(); ++s) {
-        float bound = std::numeric_limits<float>::max();
-        for (const auto t : survivors) {
-            bound = std::min(bound, scores[(s * n) + t]);
-        }
-        bound = std::nextafter(bound, std::numeric_limits<float>::lowest());
+        const float bound =
+            std::nextafter(minima[s], std::numeric_limits<float>::lowest());
         if (bound > thresholds[s]) {
             thresholds[s] = bound;
             ++tightened;
@@ -162,8 +182,7 @@ BlockRefinement refine_blocks(const ThresholdsEngine& engine,
                               Candidate start,
                               double initial_pd,
                               double initial_rank,
-                              std::span<const float> scores,
-                              SizeType n,
+                              const SignalBank& bank,
                               double target,
                               std::span<const SizeType> cuts,
                               double w,
@@ -190,13 +209,13 @@ BlockRefinement refine_blocks(const ThresholdsEngine& engine,
             for (SizeType s = cuts[b]; s < cuts[b + 1]; ++s) {
                 thresholds[s] += direction * delta;
             }
-            relax_schedule(thresholds, scores, n, target);
-            const auto tightened = tighten_schedule(thresholds, scores, n);
+            relax_schedule(thresholds, bank, target);
+            const auto tightened = tighten_schedule(thresholds, bank);
             if (thresholds == out.best.thresholds || tightened.second == 0) {
                 continue;
             }
-            const double pd =
-                static_cast<double>(tightened.second) / static_cast<double>(n);
+            const double pd   = static_cast<double>(tightened.second) /
+                                static_cast<double>(bank.size());
             const double rank = evaluate_rank(thresholds, pd, kNoiseSelect);
             ++out.proposals;
             if (rank > kMoveGain * out.rank || rank >= best_rank) {
@@ -311,16 +330,13 @@ shortlist_candidates(const ThresholdsEngine& engine,
 
 } // namespace
 
-SchemeSolution solve_scheme(ThresholdsEngine& engine,
-                            float min_pd,
-                            double w,
-                            RefineLevel refine) {
+SchemeSolution
+solve_scheme(ThresholdsEngine& engine, float min_pd, double w, bool robust) {
     error_check::check(min_pd > 0.0F && min_pd < 1.0F,
                        "solve: min_pd must be in (0, 1)");
     SchemeSolution out;
     out.min_pd             = min_pd;
     out.w_terminal         = static_cast<float>(w);
-    out.refine             = refine;
     const SizeType nstages = engine.get_nstages();
     const uint64_t seed    = engine.get_seed();
     const auto budget      = engine.solve_budget();
@@ -365,7 +381,7 @@ SchemeSolution solve_scheme(ThresholdsEngine& engine,
             engine.release_search_memory();
             return out;
         }
-        if (refine == RefineLevel::kNone) {
+        if (!robust) {
             candidates.push_back(
                 {selected.thresholds, selected.pd, selected.c});
         } else {
@@ -377,18 +393,18 @@ SchemeSolution solve_scheme(ThresholdsEngine& engine,
 
     // Tighten (and relax if short) every candidate on a fresh signal bank and
     // pick by C / Pd on a fresh noise sample.
-    const auto scores =
-        engine.simulate_h1_scores(n, derive_seed(seed, kBankSelect));
+    const auto bank =
+        engine.make_signal_bank(n, derive_seed(seed, kBankSelect));
     Candidate best;
     const auto evaluate_noise = [&](std::span<const float> thresholds,
                                     uint64_t salt) {
         return engine.evaluate(thresholds, budget.nnoise,
                                derive_seed(seed, salt), /*h0_only=*/true);
     };
-    if (refine == RefineLevel::kNone) {
-        best              = candidates.front();
-        const float shift = relax_schedule(best.thresholds, scores, n, target);
-        const auto tightened = tighten_schedule(best.thresholds, scores, n);
+    if (!robust) {
+        best                 = candidates.front();
+        const float shift    = relax_schedule(best.thresholds, *bank, target);
+        const auto tightened = tighten_schedule(best.thresholds, *bank);
         out.diagnostics.emplace_back("initial_shift",
                                      static_cast<double>(shift));
         out.diagnostics.emplace_back("tightened_stages",
@@ -401,9 +417,9 @@ SchemeSolution solve_scheme(ThresholdsEngine& engine,
         std::vector<std::pair<double, SizeType>> order;
         for (SizeType i = 0; i < candidates.size(); ++i) {
             auto& candidate = candidates[i];
-            relax_schedule(candidate.thresholds, scores, n, target);
+            relax_schedule(candidate.thresholds, *bank, target);
             const auto tightened =
-                tighten_schedule(candidate.thresholds, scores, n);
+                tighten_schedule(candidate.thresholds, *bank);
             const auto check =
                 evaluate_noise(candidate.thresholds, kNoiseSelect);
             const double pd =
@@ -426,7 +442,7 @@ SchemeSolution solve_scheme(ThresholdsEngine& engine,
         SizeType confirmations        = 0;
         SizeType winning_moves        = 0;
         const auto cuts = refinement_blocks(engine.get_branching_pattern());
-        if (refine == RefineLevel::kFull) {
+        {
             std::ranges::sort(order);
             std::vector<std::vector<float>> used_starts;
             for (const auto& entry : order) {
@@ -442,8 +458,8 @@ SchemeSolution solve_scheme(ThresholdsEngine& engine,
                 used_starts.push_back(candidates[idx].thresholds);
                 ++starts;
                 auto refined = refine_blocks(
-                    engine, candidates[idx], bank_pd[idx], entry.first, scores,
-                    n, target, cuts, w, budget.nnoise, seed);
+                    engine, candidates[idx], bank_pd[idx], entry.first, *bank,
+                    target, cuts, w, budget.nnoise, seed);
                 proposals += refined.proposals;
                 confirmations += refined.confirmations;
                 if (refined.rank < best_rank) {
@@ -481,17 +497,15 @@ SchemeSolution solve_scheme(ThresholdsEngine& engine,
     // chosen schedule fell short of the target there.
     float repair_shift = 0.0F;
     {
-        const auto repair_scores =
-            engine.simulate_h1_scores(n, derive_seed(seed, kBankRepair));
-        repair_shift =
-            relax_schedule(best.thresholds, repair_scores, n, target);
+        const auto repair =
+            engine.make_signal_bank(n, derive_seed(seed, kBankRepair));
+        repair_shift = relax_schedule(best.thresholds, *repair, target);
     }
     // Report on a third bank that no choice above has seen.
     {
-        const auto report_scores =
-            engine.simulate_h1_scores(n, derive_seed(seed, kBankReport));
-        const SizeType count =
-            count_survivors(report_scores, best.thresholds, n);
+        const auto report =
+            engine.make_signal_bank(n, derive_seed(seed, kBankReport));
+        const SizeType count = count_survivors(*report, best.thresholds);
         out.pd    = static_cast<double>(count) / static_cast<double>(n);
         out.pd_se = std::sqrt(out.pd * (1.0 - out.pd) / static_cast<double>(n));
         out.pd_trials = n;
@@ -540,8 +554,8 @@ SchemeSolution refit_scheme(const ThresholdsEngine& engine,
 
     // Common upward shift of lowest C / Pd among those reaching the target,
     // on one signal bank and one noise sample.
-    const auto scores =
-        engine.simulate_h1_scores(n, derive_seed(seed, kRefitSelect));
+    const auto bank =
+        engine.make_signal_bank(n, derive_seed(seed, kRefitSelect));
     const auto& base   = searched.thresholds;
     const auto shifted = [&](float shift) {
         std::vector<float> t(base.size());
@@ -558,7 +572,7 @@ SchemeSolution refit_scheme(const ThresholdsEngine& engine,
     const auto probe      = [&](float shift) {
         Point pt{.shift = shift};
         const auto t = shifted(shift);
-        pt.pd        = static_cast<double>(count_survivors(scores, t, n)) /
+        pt.pd        = static_cast<double>(count_survivors(*bank, t)) /
                        static_cast<double>(n);
         if (pt.pd >= target) {
             const auto states = engine.evaluate(t, budget.nnoise,
@@ -590,18 +604,18 @@ SchemeSolution refit_scheme(const ThresholdsEngine& engine,
         }
     }
     auto thresholds      = shifted(best.shift);
-    const auto tightened = tighten_schedule(thresholds, scores, n);
+    const auto tightened = tighten_schedule(thresholds, *bank);
     // Repair on another bank, report on a third.
     float repair_shift = 0.0F;
     {
-        const auto repair_scores =
-            engine.simulate_h1_scores(n, derive_seed(seed, kRefitRepair));
-        repair_shift = relax_schedule(thresholds, repair_scores, n, target);
+        const auto repair =
+            engine.make_signal_bank(n, derive_seed(seed, kRefitRepair));
+        repair_shift = relax_schedule(thresholds, *repair, target);
     }
     {
-        const auto report_scores =
-            engine.simulate_h1_scores(n, derive_seed(seed, kRefitReport));
-        const SizeType count = count_survivors(report_scores, thresholds, n);
+        const auto report =
+            engine.make_signal_bank(n, derive_seed(seed, kRefitReport));
+        const SizeType count = count_survivors(*report, thresholds);
         out.pd    = static_cast<double>(count) / static_cast<double>(n);
         out.pd_se = std::sqrt(out.pd * (1.0 - out.pd) / static_cast<double>(n));
         out.pd_trials = n;

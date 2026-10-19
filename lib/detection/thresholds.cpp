@@ -42,22 +42,22 @@ make_thresholds_engine(std::span<const float> branching_pattern,
                        std::optional<uint64_t> seed,
                        SizeType batch_size,
                        std::string_view guess,
-                       float min_pd,
-                       float w_terminal,
+                       const SharedOptions& shared,
                        Exec exec) {
     if (exec.backend == Backend::kCPU) {
         return detail::make_thresholds_cpu(
             branching_pattern, ref_ducy, nbins, ntrials, nprobs, prob_min,
             snr_final, nthresholds, ducy_max, wtsp, beam_width, trials_start,
-            mode, exec.nthreads, seed, /*simulate=*/true, guess, min_pd,
-            w_terminal);
+            mode, exec.nthreads, seed, /*simulate=*/true, guess, shared.min_pd,
+            shared.w_terminal, shared.beam_sigma, shared.reach_sigma);
     }
 #ifdef LOKI_ENABLE_GPU
     if (exec.backend == loki::detail::kGPUBackend) {
         return detail::make_thresholds_gpu(
             branching_pattern, ref_ducy, nbins, ntrials, nprobs, prob_min,
             snr_final, nthresholds, ducy_max, wtsp, beam_width, trials_start,
-            mode, batch_size, exec.device, seed, guess, min_pd, w_terminal);
+            mode, batch_size, exec.device, seed, guess, shared.min_pd,
+            shared.w_terminal, shared.beam_sigma, shared.reach_sigma);
     }
 #endif
     (void)batch_size;
@@ -96,7 +96,6 @@ void append_solution(const std::string& path, const SchemeSolution& sol) {
     grp.createAttribute("search_c", sol.search_c);
     grp.createAttribute("min_pd", sol.min_pd);
     grp.createAttribute("w_terminal", sol.w_terminal);
-    grp.createAttribute("refine", refine_to_string(sol.refine));
     grp.createAttribute("delivery", delivery_to_string(sol.delivery));
     for (const auto& [name, value] : sol.diagnostics) {
         grp.createAttribute("diag_" + name, value);
@@ -229,8 +228,7 @@ DynamicThresholdScheme::DynamicThresholdScheme(
                                          seed,
                                          batch_size,
                                          guess,
-                                         shared.min_pd,
-                                         shared.w_terminal,
+                                         shared,
                                          exec),
           dynamic_threshold_mode_from_string(mode),
           shared)) {}
@@ -303,13 +301,13 @@ DynamicThresholdScheme::simulate_h1_scores(SizeType ntrials,
     return m_impl->m_engine->simulate_h1_scores(ntrials, seed);
 }
 SchemeSolution DynamicThresholdScheme::solve() {
-    if (m_impl->m_mode != DynamicThresholdMode::kShared) {
+    if (!is_shared_family(m_impl->m_mode)) {
         throw std::invalid_argument(
-            "DynamicThresholdScheme::solve: only mode 'shared'");
+            "DynamicThresholdScheme::solve: only modes 'shared' and 'robust'");
     }
     m_impl->m_solution = detail::solve_scheme(
         *m_impl->m_engine, m_impl->m_shared.min_pd, m_impl->m_shared.w_terminal,
-        m_impl->m_shared.refine);
+        /*robust=*/m_impl->m_mode == DynamicThresholdMode::kRobust);
     return *m_impl->m_solution;
 }
 const SchemeSolution* DynamicThresholdScheme::solution() const {

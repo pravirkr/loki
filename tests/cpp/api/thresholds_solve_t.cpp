@@ -2,6 +2,7 @@
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
+#include <format>
 #include <string_view>
 #include <vector>
 
@@ -12,14 +13,14 @@
 #include "loki/common/types.hpp"
 #include "loki/detection/thresholds.hpp"
 
-// DynamicThresholdScheme::solve() of mode "shared": the schedule to use, with
-// the Pd and cost of exactly those thresholds measured on fresh samples.
+// DynamicThresholdScheme::solve() of modes "shared" and "robust": the schedule
+// to use, with the Pd and cost of exactly those thresholds measured on fresh
+// samples.
 
 namespace loki {
 namespace {
 
 using detection::DynamicThresholdScheme;
-using detection::RefineLevel;
 using detection::SharedOptions;
 
 constexpr float kMinPd = 0.3F;
@@ -29,13 +30,12 @@ bool skip_backend(std::string_view backend) {
 }
 
 DynamicThresholdScheme make(std::string_view backend,
-                            RefineLevel refine,
+                            std::string_view mode,
                             uint64_t seed,
-                            int nthreads          = 2,
-                            std::string_view mode = "shared") {
+                            int nthreads         = 2,
+                            SharedOptions shared = {.min_pd     = kMinPd,
+                                                    .w_terminal = 1.0F}) {
     const std::vector<float> branching(8, 2.0F);
-    const SharedOptions shared{
-        .min_pd = kMinPd, .w_terminal = 1.0F, .refine = refine};
     return {branching,
             /*ref_ducy=*/0.1F,
             /*nbins=*/32,
@@ -73,20 +73,20 @@ bool same_bits(const std::vector<float>& a, const std::vector<float>& b) {
 TEST_CASE("solve: the Pd it reports is that of the returned thresholds",
           "[thresholds][solve]") {
     const auto* backend = GENERATE("cpu", "cuda");
-    const auto refine   = GENERATE(RefineLevel::kNone, RefineLevel::kShortlist,
-                                   RefineLevel::kFull);
-    CAPTURE(backend, detection::refine_to_string(refine));
+    const auto* mode    = GENERATE("shared", "robust");
+    CAPTURE(backend, mode);
     if (skip_backend(backend)) {
         SKIP("needs a CUDA build");
     }
-    auto scheme = make(backend, refine, 7);
+    auto scheme = make(backend, mode, 7);
     REQUIRE(scheme.solution() == nullptr);
     scheme.run(10);
     const auto sol = scheme.solve();
     REQUIRE(scheme.solution() != nullptr);
     REQUIRE(sol.thresholds.size() == scheme.get_nstages());
     REQUIRE(sol.delivery != detection::Delivery::kNoPath);
-    REQUIRE(sol.refine == refine);
+    // Only robust compares a shortlist of candidates
+    REQUIRE(sol.shortlist.empty() == (std::string_view(mode) == "shared"));
     REQUIRE(sol.min_pd == kMinPd);
     REQUIRE(sol.w_terminal == 1.0F);
     REQUIRE(sol.pd_trials == (SizeType{1} << 17U));
@@ -115,12 +115,13 @@ TEST_CASE("solve: the Pd it reports is that of the returned thresholds",
 TEST_CASE("solve is reproducible and does not depend on the thread count",
           "[thresholds][solve]") {
     const auto* backend = GENERATE("cpu", "cuda");
-    CAPTURE(backend);
+    const auto* mode    = GENERATE("shared", "robust");
+    CAPTURE(backend, mode);
     if (skip_backend(backend)) {
         SKIP("needs a CUDA build");
     }
-    auto a = make(backend, RefineLevel::kFull, 11, 1);
-    auto b = make(backend, RefineLevel::kFull, 11, 3);
+    auto a = make(backend, mode, 11, 1);
+    auto b = make(backend, mode, 11, 3);
     a.run(10);
     b.run(10);
     const auto sa = a.solve();
@@ -133,34 +134,42 @@ TEST_CASE("solve is reproducible and does not depend on the thread count",
     REQUIRE(same_bits(a.solve().thresholds, sa.thresholds));
 }
 
-TEST_CASE("solve needs mode shared", "[thresholds][solve]") {
-    auto improved = make("cpu", RefineLevel::kFull, 3, 2, "improved");
+TEST_CASE("solve needs mode shared or robust", "[thresholds][solve]") {
+    auto improved = make("cpu", "improved", 3);
     improved.run(6);
     REQUIRE_THROWS_AS(improved.solve(), std::invalid_argument);
     REQUIRE(improved.solution() == nullptr);
 }
 
-TEST_CASE("Shared mode on the CPU needs the window beam", "[thresholds]") {
-    const std::vector<float> branching(8, 2.0F);
-    REQUIRE_THROWS_AS(DynamicThresholdScheme(branching, 0.1F, 32, 512, 10,
-                                             0.05F, 8.0F, 40, 0.3F, 1.0F, 1.5F,
-                                             1, "shared", 7, 256, Exec::cpu(2)),
-                      std::invalid_argument);
+TEST_CASE("The guided beam needs a positive width and reach", "[thresholds]") {
+    const auto* backend = GENERATE("cpu", "cuda");
+    CAPTURE(backend);
+    if (skip_backend(backend)) {
+        SKIP("needs a CUDA build");
+    }
+    for (const auto& shared :
+         {SharedOptions{.min_pd = kMinPd, .beam_sigma = 0.0F},
+          SharedOptions{.min_pd = kMinPd, .reach_sigma = -1.0F}}) {
+        REQUIRE_THROWS_AS(make(backend, "shared", 7, 2, shared),
+                          std::invalid_argument);
+    }
 }
 
 TEST_CASE("save works in every mode, with the solution after solve()",
           "[thresholds][solve]") {
     const auto dir = std::filesystem::temp_directory_path() / "loki_solve_save";
     std::filesystem::remove_all(dir);
-    for (const std::string_view mode : {"legacy", "improved", "shared"}) {
+    for (const std::string_view mode :
+         {"legacy", "improved", "shared", "robust"}) {
         CAPTURE(mode);
-        auto scheme = make("cpu", RefineLevel::kShortlist, 5, 2, mode);
+        auto scheme = make("cpu", mode, 5);
         scheme.run(6);
         const auto before = scheme.save((dir / mode).string());
         REQUIRE(std::filesystem::exists(before));
-        if (mode == "shared") {
-            const auto sol   = scheme.solve();
-            const auto after = scheme.save((dir / "solved").string());
+        if (mode == "shared" || mode == "robust") {
+            const auto sol = scheme.solve();
+            const auto after =
+                scheme.save((dir / std::format("solved_{}", mode)).string());
             REQUIRE(std::filesystem::exists(after));
             REQUIRE(std::filesystem::file_size(after) >
                     std::filesystem::file_size(before));

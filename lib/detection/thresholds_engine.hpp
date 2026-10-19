@@ -38,6 +38,44 @@ struct SearchPath {
     double c{0.0};  ///< in-run total cost (with the terminal weight)
 };
 
+/** A fresh unpruned signal sample of solve() (simulate_h1_scores), kept
+ * where the engine simulated it: the steps of solve() need only per-trial
+ * margins and per-stage minima, not the stage x trial matrix.
+ */
+class SignalBank {
+public:
+    SignalBank()                             = default;
+    virtual ~SignalBank()                    = default;
+    SignalBank(const SignalBank&)            = delete;
+    SignalBank& operator=(const SignalBank&) = delete;
+    SignalBank(SignalBank&&)                 = delete;
+    SignalBank& operator=(SignalBank&&)      = delete;
+    virtual SizeType size() const            = 0;
+    /// Per trial, min over stages of (score - threshold): the trial
+    /// survives @p thresholds iff its margin is > 0.
+    virtual std::vector<float>
+    margins(std::span<const float> thresholds) const = 0;
+    /// Per stage, the lowest score of the trials that survive
+    /// @p thresholds (the maximum float when none does).
+    virtual std::vector<float>
+    survivor_minima(std::span<const float> thresholds) const = 0;
+};
+
+/// SignalBank of a host score matrix (stage-major nstages x n).
+class HostSignalBank final : public SignalBank {
+public:
+    HostSignalBank(std::vector<float> scores, SizeType n);
+    SizeType size() const override { return m_n; }
+    std::vector<float>
+    margins(std::span<const float> thresholds) const override;
+    std::vector<float>
+    survivor_minima(std::span<const float> thresholds) const override;
+
+private:
+    std::vector<float> m_scores;
+    SizeType m_n;
+};
+
 class ThresholdsEngine {
 protected:
     ThresholdsEngine() = default;
@@ -72,19 +110,19 @@ public:
     virtual std::string save(const std::string& outdir) const = 0;
     /// Seed of the search (the seed of every derived stream of solve()).
     virtual uint64_t get_seed() const = 0;
-    /// Mode "shared": the cost and Pd of the terminal path selected at the
+    /// Mode "robust": the cost and Pd of the terminal path selected at the
     /// end of the first pass (empty thresholds when none met @p min_pd).
     virtual SearchPath first_pass_path(float /*min_pd*/) const {
         throw std::logic_error(
-            "first_pass_path: the engine is not in mode 'shared'");
+            "first_pass_path: the engine is not in mode 'robust'");
     }
-    /// Mode "shared": the signal trials the search counted its Pd on,
-    /// stage-major (nstages x nh1), after run().
+    /// Modes "shared" and "robust": the signal trials the search counted its Pd
+    /// on, stage-major (nstages x nh1), after run().
     virtual std::vector<float> shared_h1_bank() const {
         throw std::logic_error(
             "shared_h1_bank: the engine is not in mode 'shared'");
     }
-    /// Samples of solve(); backends override the defaults.
+    /// Samples of solve() (the defaults of SolveBudget on every backend).
     virtual SolveBudget solve_budget() const { return {}; }
     /// Frees the simulation pools. States and getters stay valid; run() may
     /// be called again and allocates them anew.
@@ -93,6 +131,12 @@ public:
     /// resampled. Returns the H1 scores, stage-major (nstages x ntrials).
     virtual std::vector<float> simulate_h1_scores(SizeType ntrials,
                                                   uint64_t seed) const = 0;
+    /// A signal bank of simulate_h1_scores(n, seed); the default keeps the
+    /// matrix on the host.
+    virtual std::unique_ptr<SignalBank> make_signal_bank(SizeType n,
+                                                         uint64_t seed) const {
+        return std::make_unique<HostSignalBank>(simulate_h1_scores(n, seed), n);
+    }
 
     ThresholdsEngine(const ThresholdsEngine&)            = delete;
     ThresholdsEngine& operator=(const ThresholdsEngine&) = delete;
@@ -122,10 +166,12 @@ make_thresholds_cpu(std::span<const float> branching_pattern,
                     bool simulate          = true,
                     std::string_view guess = "analytic",
                     float min_pd           = 0.1F,
-                    float w_terminal       = 0.0F);
+                    float w_terminal       = 0.0F,
+                    float beam_sigma       = 3.0F,
+                    float reach_sigma      = 1.0F);
 
-/// Mode "shared" on the CPU (lib/cpu/thresholds_shared_cpu.cpp): @p nprobs
-/// bins from @p min_pd to 1. Needs guess "window".
+/// Modes "shared" and "robust" on the CPU (lib/cpu/thresholds_shared_cpu.cpp):
+/// @p nprobs bins from @p min_pd to 1, the guided beam.
 std::unique_ptr<ThresholdsEngine>
 make_thresholds_shared_cpu(std::span<const float> branching_pattern,
                            float ref_ducy,
@@ -141,8 +187,11 @@ make_thresholds_shared_cpu(std::span<const float> branching_pattern,
                            int nthreads,
                            std::optional<uint64_t> seed,
                            std::string_view guess,
+                           std::string_view mode,
                            float min_pd,
-                           float w_terminal);
+                           float w_terminal,
+                           float beam_sigma,
+                           float reach_sigma);
 
 std::unique_ptr<ThresholdsEngine>
 make_thresholds_gpu(std::span<const float> branching_pattern,
@@ -163,7 +212,9 @@ make_thresholds_gpu(std::span<const float> branching_pattern,
                     std::optional<uint64_t> seed,
                     std::string_view guess = "analytic",
                     float min_pd           = 0.1F,
-                    float w_terminal       = 0.0F);
+                    float w_terminal       = 0.0F,
+                    float beam_sigma       = 3.0F,
+                    float reach_sigma      = 1.0F);
 
 // The facade's backend dispatch, for internal callers that need the engine
 // itself (the EP planner checks run_memory_bytes() against its budget).
@@ -184,8 +235,7 @@ make_thresholds_engine(std::span<const float> branching_pattern,
                        std::optional<uint64_t> seed,
                        SizeType batch_size,
                        std::string_view guess,
-                       float min_pd,
-                       float w_terminal,
+                       const SharedOptions& shared,
                        Exec exec);
 
 } // namespace loki::detection::detail

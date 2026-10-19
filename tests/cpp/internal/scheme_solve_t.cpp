@@ -116,12 +116,13 @@ TEST_CASE("relax_schedule lowers only as far as needed and never raises",
     constexpr SizeType kM = 6;
     constexpr SizeType kN = 4096;
     const auto scores     = scores_bank(kM, kN, 1);
+    const detail::HostSignalBank bank(scores, kN);
     // A strict schedule: few survivors
     std::vector<float> thr(kM, 5.5F);
     const SizeType before = survivors(thr, scores, kN);
     const double target   = 0.2;
     REQUIRE(static_cast<double>(before) / kN < target);
-    const float shift = detail::relax_schedule(thr, scores, kN, target);
+    const float shift = detail::relax_schedule(thr, bank, target);
     REQUIRE(shift < 0.0F);
     const SizeType need = static_cast<SizeType>(std::ceil(target * kN));
     // At the float rounding boundary the count can be one trial short
@@ -135,7 +136,7 @@ TEST_CASE("relax_schedule lowers only as far as needed and never raises",
     // Already enough survivors: unchanged
     std::vector<float> loose(kM, 2.0F);
     const auto copy = loose;
-    REQUIRE(detail::relax_schedule(loose, scores, kN, 0.2) == 0.0F);
+    REQUIRE(detail::relax_schedule(loose, bank, 0.2) == 0.0F);
     REQUIRE(loose == copy);
 }
 
@@ -144,9 +145,11 @@ TEST_CASE("tighten_schedule raises thresholds without losing a survivor",
     constexpr SizeType kM = 6;
     constexpr SizeType kN = 4096;
     const auto scores     = scores_bank(kM, kN, 2);
+    const detail::HostSignalBank bank(scores, kN);
     std::vector<float> thr(kM, 3.0F);
-    const SizeType before      = survivors(thr, scores, kN);
-    const auto [raised, count] = detail::tighten_schedule(thr, scores, kN);
+    const SizeType before = survivors(thr, scores, kN);
+    REQUIRE(detail::count_survivors(bank, thr) == before);
+    const auto [raised, count] = detail::tighten_schedule(thr, bank);
     REQUIRE(count == before);
     REQUIRE(raised > 0);
     // Not one survivor lost, and every stage's threshold is as high as it can
@@ -161,7 +164,7 @@ TEST_CASE("tighten_schedule raises thresholds without losing a survivor",
     // No survivor at all: a no-op, not a threshold at the float maximum
     std::vector<float> none(kM, 100.0F);
     const auto untouched = none;
-    const auto result    = detail::tighten_schedule(none, scores, kN);
+    const auto result    = detail::tighten_schedule(none, bank);
     REQUIRE(result.second == 0);
     REQUIRE(none == untouched);
 }
@@ -224,9 +227,10 @@ using loki::detection::detail::make_thresholds_engine;
 
 std::unique_ptr<loki::detection::detail::ThresholdsEngine>
 shared_engine(const std::vector<float>& bp, SizeType nbins, float min_pd) {
-    return make_thresholds_engine(bp, 0.1F, nbins, 1024, 40, 0.05F, 8.0F, 100,
-                                  0.2F, 1.5F, 0.7F, 1, "shared", 5, 256,
-                                  "window", min_pd, 1.0F, loki::Exec::cpu(4));
+    return make_thresholds_engine(
+        bp, 0.1F, nbins, 1024, 40, 0.05F, 8.0F, 100, 0.2F, 1.5F, 0.7F, 1,
+        "shared", 5, 256, "window", {.min_pd = min_pd, .w_terminal = 1.0F},
+        loki::Exec::cpu(4));
 }
 
 double cost_per_detection(const loki::detection::detail::ThresholdsEngine& eng,
@@ -250,8 +254,8 @@ TEST_CASE("refit_scheme re-fits a small-nbins schedule to the true nbins",
     constexpr float kMinPd      = 0.3F;
     auto proxy                  = shared_engine(bp, 64, kMinPd);
     proxy->run(10);
-    const auto searched = detail::solve_scheme(
-        *proxy, kMinPd, 1.0, loki::detection::RefineLevel::kNone);
+    const auto searched =
+        detail::solve_scheme(*proxy, kMinPd, 1.0, /*robust=*/false);
     REQUIRE_FALSE(searched.thresholds.empty());
     proxy.reset();
 
@@ -275,8 +279,8 @@ TEST_CASE("refit_scheme re-fits a small-nbins schedule to the true nbins",
     // nbins)
     auto native = shared_engine(bp, 256, kMinPd);
     native->run(10);
-    const auto sol = detail::solve_scheme(*native, kMinPd, 1.0,
-                                          loki::detection::RefineLevel::kNone);
+    const auto sol =
+        detail::solve_scheme(*native, kMinPd, 1.0, /*robust=*/false);
     const double native_cost = cost_per_detection(*native, sol.thresholds);
     CAPTURE(native_cost);
     REQUIRE(refitted < 1.5 * native_cost);

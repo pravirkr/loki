@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 #include <span>
 #include <string_view>
@@ -17,9 +18,6 @@ std::vector<float>
 compute_thresholds(float snr_start, float snr_final, SizeType nthresholds);
 
 std::vector<float> compute_probs(SizeType nprobs, float prob_min = 0.05F);
-
-std::vector<float> compute_probs_linear(SizeType nprobs,
-                                        float prob_min = 0.05F);
 
 /// Most probability bins below the target of mode "shared": a bounded
 /// fallback, not another fine grid at high targets.
@@ -103,6 +101,95 @@ BeamBounds window_scheme(std::span<const float> h1_scores,
                          float prob_min,
                          float eps = kWindowEps);
 
+/// Constructor inputs of a searching DynamicThresholdScheme engine.
+struct SchemeInputs {
+    std::span<const float> branching_pattern;
+    float ref_ducy;
+    float ducy_max;
+    float wtsp;
+    float beam_width;
+    float prob_min;
+    float snr_final;
+    SizeType nbins;
+    SizeType ntrials;
+    SizeType nprobs;
+    SizeType nthresholds;
+    SizeType batch_size;
+};
+
+/// Checks the inputs every backend's search needs; throws
+/// std::invalid_argument naming @p who.
+void validate_scheme_inputs(const SchemeInputs& in, std::string_view who);
+
+/// Logs the first stage that ended with no state (nothing survived into it).
+void warn_empty_stages(std::span<const State> states,
+                       SizeType nstages,
+                       SizeType nthresholds,
+                       SizeType nprobs,
+                       std::string_view who);
+
+/// Statistics of the unpruned signal scores that set the guided beam.
+struct PilotStats {
+    BeamBounds window;        ///< window_scheme
+    std::vector<float> guess; ///< pilot_guess_scheme
+    std::vector<float> sigma; ///< score_sigma
+};
+
+/** window_scheme, pilot_guess_scheme and score_sigma in one pass over
+ * @p sorted_scores (stage-major nstages x ntrials, every row ascending).
+ * Order statistics equal those of the unsorted functions.
+ */
+PilotStats pilot_stats(std::span<const float> sorted_scores,
+                       SizeType ntrials,
+                       std::span<const float> branching_pattern,
+                       SizeType trials_start,
+                       float prob_min,
+                       float eps = kWindowEps);
+
+/// Standard deviation per stage of the unpruned signal scores (h1_scores,
+/// stage-major nstages x ntrials).
+std::vector<float> score_sigma(std::span<const float> h1_scores,
+                               SizeType ntrials,
+                               SizeType nstages);
+
+/** Beam of half-width @p width sigma_s around @p guess_path, inside the
+ * feasibility @p window. A stage whose guess lies outside its window gets
+ * the window edge nearest to the guess.
+ */
+BeamBounds guided_beam(const BeamBounds& window,
+                       std::span<const float> guess_path,
+                       std::span<const float> sigma,
+                       float width);
+
+/** Largest number of grid thresholds a guided_beam of half-width @p width
+ * can hold at any stage, wherever its guess lies: the pool size that fits
+ * every recentred beam.
+ */
+SizeType guided_beam_capacity(std::span<const float> thresholds,
+                              const BeamBounds& window,
+                              std::span<const float> sigma,
+                              float width);
+
+/** A transition of the guided beam from threshold @p prev (guess
+ * @p guess_prev) to @p cur (guess @p guess_cur) changes the offset from the
+ * guess by at most @p reach standard deviations @p sigma_cur.
+ */
+inline bool within_reach(float cur,
+                         float guess_cur,
+                         float prev,
+                         float guess_prev,
+                         float sigma_cur,
+                         float reach) {
+    const float d = (cur - guess_cur) - (prev - guess_prev);
+    return std::abs(d) <= reach * sigma_cur;
+}
+
+/** Guess learnt from a searched path: g + smoothed (path - g), the offset
+ * averaged over 3 consecutive stages. @p guess_path if @p path is empty.
+ */
+std::vector<float> recentre_guess(std::span<const float> guess_path,
+                                  std::span<const float> path);
+
 /// Indices of @p thresholds inside [lo, hi].
 std::vector<SizeType>
 beam_indices(std::span<const float> thresholds, float lo, float hi);
@@ -140,6 +227,16 @@ std::vector<State> backtrack_states(std::span<const State> states,
  */
 double terminal_rank(const State& s, double w_terminal);
 
+/** Stores terminal_rank (with @p w_terminal) in the `cost` of every non-empty
+ * cell of the last stage, so saved states rank terminal cells as the solver
+ * does. A no-op for @p w_terminal == 0.
+ */
+void store_terminal_cost(std::span<State> states,
+                         SizeType nstages,
+                         SizeType nthresholds,
+                         SizeType nprobs,
+                         double w_terminal);
+
 /** The terminal cell (ithres * nprobs + iprob of the last stage) of lowest
  * terminal_rank among non-empty cells with success_h1_cumul >= @p min_pd, or
  * the maximum SizeType when none qualifies.
@@ -152,13 +249,14 @@ SizeType best_terminal_cell(std::span<const State> states,
                             double w_terminal);
 
 /** Expected future cost per surviving noise leaf, per stage, from a finished
- * run (the "window" beam's second pass ranks cell candidates by cost so far
- * plus h[s] * complexity). Paths: the cheapest terminal cell (terminal_rank)
- * of every probability bin below pd_max_factor * probs[0]. Per stage, h of a
- * path is (C_final - C_s) / n_s; the result is the median over paths, then
- * a moving average over up to 2 * half_window + 1 stages, both in log space
- * and over all stages but the last, which gets @p w_terminal (0: no future
- * and no weight). Empty when no such terminal cell exists.
+ * run (the second pass of modes improved with the "window" beam and robust
+ * ranks cell candidates by cost so far plus h[s] * complexity). Paths: the
+ * cheapest terminal cell (terminal_rank) of every probability bin below
+ * pd_max_factor * probs[0]. Per stage, h of a path is (C_final - C_s) / n_s;
+ * the result is the median over paths, then a moving average over up to 2 *
+ * half_window + 1 stages, both in log space and over all stages but the last,
+ * which gets @p w_terminal (0: no future and no weight). Empty when no such
+ * terminal cell exists.
  */
 std::vector<float> cost_to_go_scheme(std::span<const State> states,
                                      std::span<const float> thresholds,
@@ -202,33 +300,37 @@ SearchPath search_path(std::span<const State> states,
                        SizeType terminal_cell,
                        double w_terminal);
 
+/// Trials of @p bank that survive every stage of @p thresholds.
+SizeType count_survivors(const SignalBank& bank,
+                         std::span<const float> thresholds);
+
 /** Lowers every threshold by one common shift, only if needed, so that at
- * least ceil(target * n) of the n sample trials (stage-major scores) survive
- * every stage. Never raises. Returns the shift (<= 0).
+ * least ceil(target * n) of the n trials of @p bank survive every stage.
+ * Never raises. Returns the shift (<= 0).
  */
 float relax_schedule(std::vector<float>& thresholds,
-                     std::span<const float> scores,
-                     SizeType n,
+                     const SignalBank& bank,
                      double target);
 
-/** Raises each threshold to just below the lowest score of the sample
- * trials that survive the whole schedule, so none of them is lost. A no-op
+/** Raises each threshold to just below the lowest score of the trials of
+ * @p bank that survive the whole schedule, so none of them is lost. A no-op
  * when no trial survives. Returns the number of raised stages and the number
  * of surviving trials.
  */
 std::pair<SizeType, SizeType> tighten_schedule(std::vector<float>& thresholds,
-                                               std::span<const float> scores,
-                                               SizeType n);
+                                               const SignalBank& bank);
 
 /** Cut points (stage indices, first 0, last nstages) of up to four blocks of
  * equal total log-branching. */
 std::vector<SizeType> refinement_blocks(std::span<const float> branching);
 
-/** DynamicThresholdScheme::solve on a mode "shared" engine after run(). */
+/** DynamicThresholdScheme::solve on a mode "shared" or "robust" engine after
+ * run(). @p robust adds the shortlist and the block refinement.
+ */
 SchemeSolution solve_scheme(ThresholdsEngine& engine,
                             float min_pd,
                             double w_terminal,
-                            RefineLevel refine);
+                            bool robust);
 
 /** Re-fits a schedule found at a smaller nbins to the folds of @p engine (an
  * evaluation-only engine at the true nbins; nothing else of it is used).

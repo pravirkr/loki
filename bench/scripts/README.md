@@ -48,11 +48,11 @@ python bench/scripts/ffa/compare_ffa.py $LOKI_BENCH_WORK/runs/{base,new}_W4/W4_f
 
 | Script | Purpose |
 |---|---|
-| `thresholds_check_cuda.py` | One CUDA `DynamicThresholdScheme` run at production size: in-run and re-scored path. |
+| `thresholds_check_cuda.py` | One CUDA `DynamicThresholdScheme` run per mode at production size (`--mode improved,shared,robust`): in-run, solved and re-scored path; `--save` writes the states for plotting. |
 | `golden_schemes.py` | Bit-exact CUDA golden harness (`make`, `check`, `repro`). |
 | `golden_evaluate.py` | Bit-exact CUDA golden of `evaluate()` (normal, H0-floor and H1-extinction schedules, several nbins and trial counts): `make`, `check`. Goldens live in the ignored `bench/scripts/golden/`. |
-| `golden_solve.py` | `solve()` of mode `shared` against the research workspace's solver (`dts_work` tags keep/E18, E20, E22 = refine `none`, `shortlist`, `full`), bit for bit on the same toolchain. Reads `golden/solve_manifest.json`. |
-| `solve_suite.py` | Reduced version of the workspace suite: `solve()` on the production and issue #15 patterns, judged by a direct count of fresh signal trials and an independent noise evaluation (gates: delivered Pd, reported against judged Pd). Any backend and refine level. |
+| `golden_solve.py` | Bit-exact CUDA regression golden of `solve()` in modes `shared` and `robust` on the `solve_suite.py` cases: `record`, `check`. Writes `golden/solve_golden.json` (ignored); valid for the recording toolchain only. |
+| `solve_suite.py` | Reduced version of the workspace suite: `solve()` on the production and issue #15 patterns, judged by a direct count of fresh signal trials and an independent noise evaluation (gates: delivered Pd, reported against judged Pd). Any backend; `--mode shared|robust`. |
 | `nbins_proxy_study.py` | The planner searches thresholds at a small simulation nbins: rescores proxy and native schedules at the true nbins (Pd, cost per detection). |
 | `bias_study.py` | In-run against re-scored cost and Pd of the selected path, over seeds and search trial counts. |
 | `pd_calibration_study.py` | Why the selected path delivers less than `min_pd` (`cells`, `ntrials`, `modes`) and what `calibrate()` delivers (`calib`, with `--guess analytic|pilot`). Results go to `bench/scripts/results/pd_calibration/`. |

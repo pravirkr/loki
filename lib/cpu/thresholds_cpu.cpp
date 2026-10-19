@@ -1034,13 +1034,33 @@ public:
           m_simulate(simulate),
           m_guess(guess) {
         const auto beam_guess = detail::beam_guess_from_string(guess);
-        if (m_mode == DynamicThresholdMode::kShared) {
-            // make_thresholds_cpu builds mode 'shared' with its own engine.
+        if (is_shared_family(m_mode)) {
+            // make_thresholds_cpu builds modes 'shared' and 'robust' with
+            // their own engine.
             throw std::logic_error(
-                "ThresholdsCpuEngine: mode 'shared' has its own engine");
+                "ThresholdsCpuEngine: modes 'shared' and 'robust' have their "
+                "own engine");
         }
         if (m_branching_pattern.empty()) {
             throw std::invalid_argument("Branching pattern is empty");
+        }
+        if (m_simulate) {
+            // The checks of every backend's search (evaluation-only engines
+            // take any grid).
+            detail::validate_scheme_inputs(
+                {.branching_pattern = m_branching_pattern,
+                 .ref_ducy          = ref_ducy,
+                 .ducy_max          = ducy_max,
+                 .wtsp              = wtsp,
+                 .beam_width        = beam_width,
+                 .prob_min          = prob_min,
+                 .snr_final         = snr_final,
+                 .nbins             = nbins,
+                 .ntrials           = ntrials,
+                 .nprobs            = nprobs,
+                 .nthresholds       = nthresholds,
+                 .batch_size        = 1},
+                "ThresholdsCpu");
         }
         m_profile    = simulation::generate_folded_profile(nbins, ref_ducy);
         m_thresholds = detail::compute_thresholds(0.1F, snr_final, nthresholds);
@@ -1163,6 +1183,8 @@ public:
             }
         }
 
+        detail::warn_empty_stages(m_states, m_nstages, m_nthresholds, m_nprobs,
+                                  "ThresholdsCpu");
         const float total_time = total_timer.stop();
         spdlog::info("Dynamic threshold scheme complete: {}",
                      m_timer_stats.summary(total_time));
@@ -1882,14 +1904,15 @@ make_thresholds_cpu(std::span<const float> branching_pattern,
                     bool simulate,
                     std::string_view guess,
                     float min_pd,
-                    float w_terminal) {
-    if (dynamic_threshold_mode_from_string(mode) ==
-        DynamicThresholdMode::kShared) {
+                    float w_terminal,
+                    float beam_sigma,
+                    float reach_sigma) {
+    if (is_shared_family(dynamic_threshold_mode_from_string(mode))) {
         if (simulate) {
             return make_thresholds_shared_cpu(
                 branching_pattern, ref_ducy, nbins, ntrials, nprobs, snr_final,
                 nthresholds, ducy_max, wtsp, beam_width, trials_start, nthreads,
-                seed, guess, min_pd, w_terminal);
+                seed, guess, mode, min_pd, w_terminal, beam_sigma, reach_sigma);
         }
         // Evaluation only: the physics is the same in every mode.
         return std::make_unique<ThresholdsCpuEngine>(
@@ -1919,85 +1942,16 @@ std::vector<State> evaluate_scheme(std::span<const float> thresholds,
     error_check::check_equal(thresholds.size(), branching_pattern.size(),
                              "Number of thresholds must match the number of "
                              "stages");
-
-    const auto nstages = branching_pattern.size();
-    const auto profile = simulation::generate_folded_profile(nbins, ref_ducy);
-    const auto box_score_widths =
-        detection::generate_box_width_trials(nbins, ducy_max, wtsp);
-    const auto bias_snr =
-        snr_final / std::sqrt(static_cast<float>(nstages + 1));
-    const float var_init     = 1.0F;
-    const auto initial_state = State::initial();
-    // Stages after the path stops stay empty
-    std::vector<State> states(nstages);
-
-    const auto slots_per_pool = 10;
-    auto manager =
-        std::make_unique<DualPoolFoldManager>(nbins, ntrials, slots_per_pool);
-    std::vector<FoldsType> folds_current(1);
-    std::vector<FoldsType> folds_next(1);
-
-    // Unseeded API: a fresh seed per call, keyed streams per stage.
-    const uint64_t seed = std::random_device{}();
-    auto rng_h0 = math::make_keyed_pcg32(seed, kPurposeRunInit, 0U, 0U, 0U, 0U);
-    auto rng_h1 = math::make_keyed_pcg32(seed, kPurposeRunInit, 0U, 0U, 1U, 0U);
-    // Create initial fold vectors
-    auto folds_h0_init = manager->allocate(ntrials);
-    auto folds_h1_init = manager->allocate(ntrials);
-    std::ranges::fill(folds_h0_init->data(), 0.0F);
-    std::ranges::fill(folds_h1_init->data(), 0.0F);
-    auto buffers_ptr = std::make_unique<ThreadLocalBuffers>(nbins, 2 * ntrials);
-    auto boxcar_widths_cache_ptr =
-        std::make_unique<detection::BoxcarWidthsCache>(box_score_widths, nbins);
-    // Simulate the initial folds (pruning level = 0)
-    auto folds_h0_sim =
-        simulate_folds(*folds_h0_init, profile, rng_h0, *manager, *buffers_ptr,
-                       0.0F, var_init, ntrials);
-    auto folds_h1_sim =
-        simulate_folds(*folds_h1_init, profile, rng_h1, *manager, *buffers_ptr,
-                       bias_snr, var_init, ntrials);
-    FoldsType const initial_fold_state{std::move(folds_h0_sim),
-                                       std::move(folds_h1_sim)};
-    // Dummy timer object to avoid compiler warning
-    search::TimerStats::TimerMap thread_timers;
-    for (SizeType istage = 0; istage < nstages; ++istage) {
-        const auto prev_state =
-            (istage == 0) ? initial_state : states[istage - 1];
-        const auto& prev_fold_state =
-            (istage == 0) ? initial_fold_state : folds_current[0];
-        if (istage > 0 && prev_fold_state.is_empty()) {
-            spdlog::info(
-                "Path not viable, No trials survived, stopping at stage {}",
-                istage);
-            break;
-        }
-        auto [cur_state, cur_fold_state] = gen_next_using_thresh(
-            prev_state, prev_fold_state, thresholds[istage],
-            branching_pattern[istage], bias_snr, profile,
-            StreamKey{
-                .seed   = seed,
-                .stage  = static_cast<uint32_t>(istage),
-                .parent = 0,
-                .target = kNoTarget,
-            },
-            *manager, *buffers_ptr, *boxcar_widths_cache_ptr, thread_timers,
-            1.0F, ntrials);
-        states[istage] = cur_state;
-        if (istage == 0) {
-            folds_current[0] = std::move(cur_fold_state);
-        } else {
-            folds_next[0] = std::move(cur_fold_state);
-        }
-        if (istage > 0) {
-            // Swap the folds
-            manager->swap_pools();
-            std::swap(folds_current, folds_next);
-            for (auto& fold_opt : folds_next) {
-                fold_opt.invalidate();
-            }
-        }
-    }
-    return states;
+    // The evaluation of DynamicThresholdScheme::evaluate() on an
+    // evaluation-only engine (its grid is unused). Unseeded API: a fresh seed
+    // per call.
+    const auto engine = detail::make_thresholds_cpu(
+        branching_pattern, ref_ducy, nbins, ntrials, /*nprobs=*/2,
+        /*prob_min=*/0.5F, snr_final, /*nthresholds=*/100, ducy_max, wtsp,
+        /*beam_width=*/0.7F, /*trials_start=*/1, "improved", /*nthreads=*/1,
+        std::nullopt, /*simulate=*/false);
+    return engine->evaluate(thresholds, ntrials, std::random_device{}(),
+                            /*h0_only=*/false);
 }
 
 std::vector<State> determine_scheme(std::span<const float> survive_probs,

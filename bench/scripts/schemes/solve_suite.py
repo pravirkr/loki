@@ -1,4 +1,4 @@
-"""Reduced acceptance suite for DynamicThresholdScheme.solve() (mode "shared").
+"""Reduced acceptance suite for DynamicThresholdScheme.solve() (modes "shared", "robust").
 
 A smaller version of the research workspace's quick tier: the production
 pattern and the issue #15 patterns at several S/N, targets and solver seeds.
@@ -11,9 +11,9 @@ Gates per case (the workspace's):
   - every seed's judged Pd >= 0.90 pd_min and the median >= 0.98 pd_min;
   - every seed's reported Pd within 10 % of the judged one.
 The judged cost per detection L = C / Pd is printed per case (geometric mean
-over seeds); compare backends or refine levels with --refine and --backend.
+over seeds); compare backends or modes with --mode and --backend.
 
-    PYTHONPATH=src python solve_suite.py --backend cuda --refine full
+    PYTHONPATH=src python solve_suite.py --backend cuda --mode robust
 """
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ def judge_seed(case: tuple[str, float, float], what: str) -> int:
     return int.from_bytes(hashlib.sha256(key).digest()[:8], "little") >> 1
 
 
-def make(case, seed, backend, refine, nthreads, nbins=64):
+def make(case, seed, backend, mode, nthreads, nbins=64):
     fam, snr, pd_min = case
     bp, kw = FAMILIES[fam]
     return lt.DynamicThresholdScheme(
@@ -73,20 +73,18 @@ def make(case, seed, backend, refine, nthreads, nbins=64):
         nthresholds=100,
         ducy_max=kw["ducy_max"],
         wtsp=kw["wtsp"],
-        mode="shared",
+        mode=mode,
         seed=seed,
         backend=backend,
         nthreads=nthreads,
-        guess="window",
         min_pd=pd_min,
         w_terminal=1.0,
-        refine=refine,
     )
 
 
 def judge(case, thresholds, backend, nthreads):
     """Pd and cost of a schedule on fresh samples (a scheme only to simulate)."""
-    probe = make(case, 1, backend, "none", nthreads)
+    probe = make(case, 1, backend, "shared", nthreads)
     scores = probe.simulate_h1_scores(JUDGE_H1, judge_seed(case, "h1"))
     alive = np.all(scores > np.asarray(thresholds, dtype=np.float32)[:, None], axis=0)
     pd = float(alive.mean())
@@ -99,9 +97,9 @@ def judge(case, thresholds, backend, nthreads):
 @click.command()
 @click.option("--backend", default="cuda")
 @click.option(
-    "--refine",
-    default="full",
-    type=click.Choice(["none", "shortlist", "full"]),
+    "--mode",
+    default="robust",
+    type=click.Choice(["shared", "robust"]),
 )
 @click.option("--seeds", default=8)
 @click.option("--nthreads", default=16)
@@ -111,7 +109,7 @@ def judge(case, thresholds, backend, nthreads):
     help="'all' or comma-separated indices of QUICK",
 )
 @click.option("--out", type=click.Path(path_type=pathlib.Path), default=None)
-def main(backend, refine, seeds, nthreads, cases, out):
+def main(backend, mode, seeds, nthreads, cases, out):
     sel = QUICK if cases == "all" else [QUICK[int(i)] for i in cases.split(",")]
     rows, failures = [], 0
     for case in sel:
@@ -120,7 +118,7 @@ def main(backend, refine, seeds, nthreads, cases, out):
         ok = True
         for seed in range(1, seeds + 1):
             t0 = time.perf_counter()
-            scheme = make(case, seed, backend, refine, nthreads)
+            scheme = make(case, seed, backend, mode, nthreads)
             scheme.run(10)
             sol = scheme.solve()
             times.append(time.perf_counter() - t0)
@@ -142,7 +140,7 @@ def main(backend, refine, seeds, nthreads, cases, out):
             "snr": snr,
             "pd_min": pd_min,
             "backend": backend,
-            "refine": refine,
+            "mode": mode,
             "pass": ok,
             "pd_min_judged": min(pds) if pds else None,
             "pd_median_judged": statistics.median(pds) if pds else None,

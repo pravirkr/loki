@@ -91,21 +91,6 @@ shared_probability_grid(float min_pd, SizeType n_above, SizeType max_below) {
     return probs;
 }
 
-std::vector<float> compute_probs_linear(SizeType nprobs, float prob_min) {
-    error_check::check_greater(nprobs, 1,
-                               "Number of probabilities must be > 1");
-    error_check::check_less(prob_min, 1.0F, "Probability must be < 1");
-    error_check::check_greater(prob_min, 0.0F, "Probability must be > 0");
-    std::vector<float> probs(nprobs);
-    const float step = (1.0F - prob_min) / static_cast<float>(nprobs - 1);
-
-    for (SizeType i = 0; i < nprobs; ++i) {
-        probs[i] = prob_min + (step * static_cast<float>(i));
-    }
-
-    return probs;
-}
-
 std::vector<float> bound_scheme(SizeType nstages, float snr_bound) {
     const auto nsegments = nstages + 1;
     std::vector<float> thresholds(nstages);
@@ -244,6 +229,181 @@ BeamBounds window_scheme(std::span<const float> h1_scores,
         beam.lo[s] = row[r_lo];
     }
     return beam;
+}
+
+std::vector<float> score_sigma(std::span<const float> h1_scores,
+                               SizeType ntrials,
+                               SizeType nstages) {
+    error_check::check_equal(h1_scores.size(), nstages * ntrials,
+                             "h1_scores size does not match nstages x ntrials");
+    error_check::check(ntrials > 1, "score_sigma: ntrials must be > 1");
+    std::vector<float> sigma(nstages);
+    for (SizeType s = 0; s < nstages; ++s) {
+        const auto row = h1_scores.subspan(s * ntrials, ntrials);
+        double sum     = 0.0;
+        double sum2    = 0.0;
+        for (const float x : row) {
+            sum += x;
+            sum2 += static_cast<double>(x) * x;
+        }
+        const auto n    = static_cast<double>(ntrials);
+        const auto mean = sum / n;
+        sigma[s]        = static_cast<float>(
+            std::sqrt(std::max(0.0, (sum2 - (n * mean * mean)) / (n - 1.0))));
+    }
+    return sigma;
+}
+
+void validate_scheme_inputs(const SchemeInputs& in, std::string_view who) {
+    const auto fail = [who](const std::string& msg) {
+        throw std::invalid_argument(std::format("{}: {}", who, msg));
+    };
+    for (const float x : {in.ref_ducy, in.ducy_max, in.wtsp, in.beam_width,
+                          in.prob_min, in.snr_final}) {
+        if (!utils::is_finite(x)) {
+            fail("float parameters must be finite");
+        }
+    }
+    if (in.branching_pattern.size() < 2) {
+        fail("branching pattern needs at least 2 stages");
+    }
+    for (SizeType i = 0; i < in.branching_pattern.size(); ++i) {
+        const float b = in.branching_pattern[i];
+        if (!utils::is_finite(b) || b <= 0.0F) {
+            fail(std::format("branching_pattern[{}] = {} must be finite and "
+                             "positive",
+                             i, b));
+        }
+    }
+    if (in.nbins < 4 || in.nbins > 1024) {
+        fail(std::format("nbins={} must be in [4, 1024]", in.nbins));
+    }
+    if (in.ntrials == 0 || in.nprobs == 0 || in.batch_size == 0) {
+        fail("ntrials, nprobs and batch_size must be positive");
+    }
+    if (in.nthresholds < 2 || !(in.snr_final > 0.1F)) {
+        fail("need nthresholds >= 2 and a finite snr_final > 0.1");
+    }
+    if (!(in.prob_min > 0.0F && in.prob_min < 1.0F)) {
+        fail(std::format("prob_min={} must be in (0, 1)", in.prob_min));
+    }
+    if (!(in.ref_ducy > 0.0F && in.ref_ducy < 1.0F) ||
+        !(in.ducy_max > 0.0F && in.ducy_max < 1.0F)) {
+        fail("ref_ducy and ducy_max must be in (0, 1)");
+    }
+    if (!(in.wtsp > 0.0F) || !(in.beam_width > 0.0F)) {
+        fail("wtsp and beam_width must be positive");
+    }
+}
+
+void warn_empty_stages(std::span<const State> states,
+                       SizeType nstages,
+                       SizeType nthresholds,
+                       SizeType nprobs,
+                       std::string_view who) {
+    const auto stride = nthresholds * nprobs;
+    for (SizeType istage = 0; istage < nstages; ++istage) {
+        const auto stage = states.subspan(istage * stride, stride);
+        if (std::ranges::all_of(stage,
+                                [](const State& st) { return st.is_empty; })) {
+            spdlog::warn("{}: stage {} (and all later stages) has no "
+                         "surviving state",
+                         who, istage);
+            return;
+        }
+    }
+}
+
+PilotStats pilot_stats(std::span<const float> sorted_scores,
+                       SizeType ntrials,
+                       std::span<const float> branching_pattern,
+                       SizeType trials_start,
+                       float prob_min,
+                       float eps) {
+    const auto nstages = branching_pattern.size();
+    error_check::check_equal(sorted_scores.size(), nstages * ntrials,
+                             "sorted_scores size does not match nstages x "
+                             "ntrials");
+    error_check::check(ntrials > 1, "pilot_stats: ntrials must be > 1");
+    // The ranks of window_scheme and pilot_guess_scheme.
+    const auto n = static_cast<double>(ntrials);
+    const auto q_lo =
+        static_cast<double>(eps * prob_min) / static_cast<double>(nstages);
+    const auto q_hi = 1.0 - (0.5 * static_cast<double>(prob_min));
+    const auto rank = [&](double q) {
+        return std::min(static_cast<SizeType>(std::floor(q * n)), ntrials - 1);
+    };
+    const auto r_lo   = rank(q_lo);
+    const auto r_hi   = rank(q_hi);
+    const auto trials = trials_scheme(branching_pattern, trials_start, 1E10F);
+    PilotStats out{.window = {.lo = std::vector<float>(nstages),
+                              .hi = std::vector<float>(nstages)},
+                   .guess  = std::vector<float>(nstages),
+                   .sigma  = score_sigma(sorted_scores, ntrials, nstages)};
+    for (SizeType s = 0; s < nstages; ++s) {
+        const auto row   = sorted_scores.subspan(s * ntrials, ntrials);
+        out.window.lo[s] = row[r_lo];
+        out.window.hi[s] = row[r_hi];
+        out.guess[s]     = std::min(row[ntrials / 2], trials[s]);
+    }
+    return out;
+}
+
+BeamBounds guided_beam(const BeamBounds& window,
+                       std::span<const float> guess_path,
+                       std::span<const float> sigma,
+                       float width) {
+    const auto nstages = guess_path.size();
+    error_check::check(window.lo.size() == nstages &&
+                           window.hi.size() == nstages &&
+                           sigma.size() == nstages,
+                       "guided_beam: size mismatch");
+    BeamBounds beam{.lo = std::vector<float>(nstages),
+                    .hi = std::vector<float>(nstages)};
+    for (SizeType s = 0; s < nstages; ++s) {
+        const float g = std::clamp(guess_path[s], window.lo[s], window.hi[s]);
+        beam.lo[s]    = std::max(window.lo[s], g - (width * sigma[s]));
+        beam.hi[s]    = std::min(window.hi[s], g + (width * sigma[s]));
+    }
+    return beam;
+}
+
+SizeType guided_beam_capacity(std::span<const float> thresholds,
+                              const BeamBounds& window,
+                              std::span<const float> sigma,
+                              float width) {
+    error_check::check(thresholds.size() > 1,
+                       "guided_beam_capacity: needs a threshold grid");
+    const float step  = thresholds[1] - thresholds[0];
+    SizeType capacity = 0;
+    for (SizeType s = 0; s < sigma.size(); ++s) {
+        const auto band =
+            static_cast<SizeType>(std::ceil(2.0F * width * sigma[s] / step)) +
+            2;
+        const auto in_window =
+            beam_indices(thresholds, window.lo[s], window.hi[s]).size();
+        capacity = std::max(capacity, std::min(band, in_window));
+    }
+    return capacity;
+}
+
+std::vector<float> recentre_guess(std::span<const float> guess_path,
+                                  std::span<const float> path) {
+    std::vector<float> guess(guess_path.begin(), guess_path.end());
+    if (path.size() != guess.size()) {
+        return guess;
+    }
+    const auto n = guess.size();
+    for (SizeType s = 0; s < n; ++s) {
+        const SizeType a = s == 0 ? 0 : s - 1;
+        const SizeType b = std::min(s + 1, n - 1);
+        float offset     = 0.0F;
+        for (SizeType k = a; k <= b; ++k) {
+            offset += path[k] - guess_path[k];
+        }
+        guess[s] += offset / static_cast<float>(b - a + 1);
+    }
+    return guess;
 }
 
 std::vector<SizeType>
@@ -408,6 +568,23 @@ double terminal_rank(const State& s, double w_terminal) {
         return static_cast<double>(s.cost);
     }
     return total_cost(s, w_terminal) / static_cast<double>(s.success_h1_cumul);
+}
+
+void store_terminal_cost(std::span<State> states,
+                         SizeType nstages,
+                         SizeType nthresholds,
+                         SizeType nprobs,
+                         double w_terminal) {
+    if (w_terminal == 0.0 || nstages == 0) {
+        return;
+    }
+    const auto last = states.subspan((nstages - 1) * nthresholds * nprobs,
+                                     nthresholds * nprobs);
+    for (auto& state : last) {
+        if (!state.is_empty && state.success_h1_cumul > 0.0F) {
+            state.cost = static_cast<float>(terminal_rank(state, w_terminal));
+        }
+    }
 }
 
 SizeType best_terminal_cell(std::span<const State> states,

@@ -31,39 +31,41 @@ void bind_thresholds(py::module_& m) {
                          threshold, cost, threshold_prev, success_h1_cumul_prev,
                          is_empty);
     py::class_<DynamicThresholdScheme>(m_thresholds, "DynamicThresholdScheme")
-        .def(py::init(
-                 [](const py::array_t<float>& branching_pattern, float ref_ducy,
-                    SizeType nbins, SizeType ntrials, SizeType nprobs,
-                    float prob_min, float snr_final, SizeType nthresholds,
-                    float ducy_max, float wtsp, float beam_width,
-                    SizeType trials_start, std::string_view mode, int nthreads,
-                    std::optional<uint64_t> seed, std::string_view backend,
-                    int device, SizeType batch_size, std::string_view guess,
-                    float min_pd, float w_terminal, std::string_view refine) {
-                     const detection::SharedOptions shared{
-                         .min_pd     = min_pd,
-                         .w_terminal = w_terminal,
-                         .refine = detection::refine_level_from_string(refine)};
-                     return std::make_unique<DynamicThresholdScheme>(
-                         std::span<const float>(branching_pattern.data(),
-                                                branching_pattern.size()),
-                         ref_ducy, nbins, ntrials, nprobs, prob_min, snr_final,
-                         nthresholds, ducy_max, wtsp, beam_width, trials_start,
-                         mode, seed, batch_size, guess, shared,
-                         make_exec(backend, device, nthreads));
-                 }),
+        .def(py::init([](const py::array_t<float>& branching_pattern,
+                         float ref_ducy, SizeType nbins, SizeType ntrials,
+                         SizeType nprobs, float prob_min, float snr_final,
+                         SizeType nthresholds, float ducy_max, float wtsp,
+                         float beam_width, SizeType trials_start,
+                         std::string_view mode, int nthreads,
+                         std::optional<uint64_t> seed, std::string_view backend,
+                         int device, SizeType batch_size,
+                         std::string_view guess, float min_pd, float w_terminal,
+                         float beam_sigma, float reach_sigma) {
+                 const detection::SharedOptions shared{.min_pd     = min_pd,
+                                                       .w_terminal = w_terminal,
+                                                       .beam_sigma = beam_sigma,
+                                                       .reach_sigma =
+                                                           reach_sigma};
+                 return std::make_unique<DynamicThresholdScheme>(
+                     std::span<const float>(branching_pattern.data(),
+                                            branching_pattern.size()),
+                     ref_ducy, nbins, ntrials, nprobs, prob_min, snr_final,
+                     nthresholds, ducy_max, wtsp, beam_width, trials_start,
+                     mode, seed, batch_size, guess, shared,
+                     make_exec(backend, device, nthreads));
+             }),
              py::arg("branching_pattern"), py::arg("ref_ducy"),
              py::arg("nbins") = 64, py::arg("ntrials") = 1024,
              py::arg("nprobs") = 40, py::arg("prob_min") = 0.05F,
              py::arg("snr_final") = 8.0F, py::arg("nthresholds") = 100,
              py::arg("ducy_max") = 0.3F, py::arg("wtsp") = 1.0F,
              py::arg("beam_width") = 0.7F, py::arg("trials_start") = 1,
-             py::arg("mode") = "legacy", py::arg("nthreads") = 1,
+             py::arg("mode") = "shared", py::arg("nthreads") = 1,
              py::arg("seed")    = py::none(), py::kw_only(),
              py::arg("backend") = "cpu", py::arg("device") = 0,
              py::arg("batch_size") = 256, py::arg("guess") = "analytic",
              py::arg("min_pd") = 0.1F, py::arg("w_terminal") = 1.0F,
-             py::arg("refine") = "full")
+             py::arg("beam_sigma") = 3.0F, py::arg("reach_sigma") = 1.0F)
         .def("run", &DynamicThresholdScheme::run, py::arg("thres_neigh") = 10,
              "Operational search. The path from get_best_path_thresholds is "
              "used immediately. In-run cost and success_h1_cumul are "
@@ -100,13 +102,13 @@ void bind_thresholds(py::module_& m) {
                 out["delivery"]   = detection::delivery_to_string(sol.delivery);
                 out["min_pd"]     = sol.min_pd;
                 out["w_terminal"] = sol.w_terminal;
-                out["refine"]     = detection::refine_to_string(sol.refine);
                 return out;
             },
-            "Mode 'shared', after run(): the schedule to use with the Pd and "
-            "cost of exactly those thresholds measured on fresh samples "
-            "(selection, refinement and repair use other samples than the "
-            "report). Frees the search's device memory.")
+            "Modes 'shared' and 'robust', after run(): the schedule to use "
+            "with the Pd and cost of exactly those thresholds measured on "
+            "fresh samples (tightening, selection, refinement and repair use "
+            "other samples than the report). Frees the search's device "
+            "memory.")
         .def_property_readonly("nstages", &DynamicThresholdScheme::get_nstages)
         .def_property_readonly("nthresholds",
                                &DynamicThresholdScheme::get_nthresholds)

@@ -177,7 +177,8 @@ struct ParentCandidate {
 // item = pair * nprobs + kprob, in the order of the original batched walk,
 // so "lowest item index" is the original tie-break order.
 //
-// Improved mode (one simulation per parent cell, shared by its children):
+// Modes improved, shared and robust (one simulation per parent cell, shared
+// by its children; the shared modes count H1 on bitmasks of shared trials):
 //   compact_parents_kernel -> simulate_score_parents_kernel ->
 //   decide_parents_kernel -> commit_parents_kernel.
 //   Parent folds are gathered through the (src cell, survivor index) map

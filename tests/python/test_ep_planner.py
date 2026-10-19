@@ -215,10 +215,8 @@ def test_ep_planner_accepts_best_available_path(tmp_path: Path, backend: str) ->
     with h5py.File(cache) as saved:
         assert saved.attrs["min_pd"] == 1.0
         # The threshold pipeline is part of the plan.
-        assert saved.attrs["dts_algorithm"] == "shared-e22"
-        assert saved.attrs["dts_refine"] == (
-            "shortlist" if backend == "cpu" else "full"
-        )
+        assert saved.attrs["dts_algorithm"] == "shared-guided"
+        assert saved.attrs["dts_mode"] == ("shared" if backend == "cpu" else "robust")
         assert saved.attrs["dts_w_terminal"] == 1.0
     # Reloading preserves the user's requested constraint and chosen scheme.
     reloaded = libloki.prune.EPRegionPlannerTime(

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cfloat>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -25,6 +26,7 @@
 #include <thrust/execution_policy.h>
 #include <thrust/fill.h>
 #include <thrust/iterator/counting_iterator.h>
+#include <thrust/sequence.h>
 #include <thrust/transform.h>
 
 #include "loki/common/types.hpp"
@@ -634,6 +636,149 @@ private:
     cudaStream_t m_stream{nullptr};
 };
 
+// Signal bank of solve(): per trial, min over stages of (score - threshold),
+// the same float arithmetic as detail::HostSignalBank.
+__global__ void bank_margins_kernel(const float* __restrict__ scores,
+                                    const float* __restrict__ thresholds,
+                                    uint32_t nstages,
+                                    uint32_t n,
+                                    float* __restrict__ margins) {
+    const uint32_t t = (blockIdx.x * blockDim.x) + threadIdx.x;
+    if (t >= n) {
+        return;
+    }
+    float m = FLT_MAX;
+    for (uint32_t s = 0; s < nstages; ++s) {
+        m = fminf(m,
+                  scores[(static_cast<SizeType>(s) * n) + t] - thresholds[s]);
+    }
+    margins[t] = m;
+}
+
+struct FloatMin {
+    __device__ float operator()(float a, float b) const { return fminf(a, b); }
+};
+
+// Order-preserving map of floats to ints (an involution), for atomicMin.
+__device__ __forceinline__ int ordered_float_key(int bits) {
+    return bits >= 0 ? bits : bits ^ 0x7FFFFFFF;
+}
+
+// Per stage (blockIdx.y), the lowest score of the trials with margin > 0.
+template <uint32_t kBlock>
+__global__ __launch_bounds__(kBlock) void bank_minima_kernel(
+    const float* __restrict__ scores,
+    const float* __restrict__ margins,
+    uint32_t n,
+    int* __restrict__ minima_keys) {
+    using BlockReduce = cub::BlockReduce<float, kBlock>;
+    __shared__ typename BlockReduce::TempStorage temp;
+    const uint32_t s = blockIdx.y;
+    float m          = FLT_MAX;
+    for (uint32_t t = (blockIdx.x * kBlock) + threadIdx.x; t < n;
+         t += gridDim.x * kBlock) {
+        if (margins[t] > 0.0F) {
+            m = fminf(m, scores[(static_cast<SizeType>(s) * n) + t]);
+        }
+    }
+    const float block_min = BlockReduce(temp).Reduce(m, FloatMin{});
+    if (threadIdx.x == 0) {
+        atomicMin(&minima_keys[s],
+                  ordered_float_key(__float_as_int(block_min)));
+    }
+}
+
+// SignalBank kept on the device: only margins (n floats) and minima
+// (nstages floats) go to the host.
+class DeviceSignalBank final : public detail::SignalBank {
+public:
+    DeviceSignalBank(int device_id, SizeType nstages, SizeType n)
+        : m_device_id(device_id),
+          m_nstages(nstages),
+          m_n(n) {}
+
+    SizeType size() const override { return m_n; }
+
+    std::vector<float>
+    margins(std::span<const float> thresholds) const override {
+        cuda_utils::CudaSetDeviceGuard device_guard(m_device_id);
+        const CudaStream stream;
+        compute_margins(thresholds, stream);
+        std::vector<float> out(m_n);
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(
+                out.data(), thrust::raw_pointer_cast(m_margins_d.data()),
+                m_n * sizeof(float), cudaMemcpyDeviceToHost, stream),
+            "cudaMemcpyAsync failed");
+        cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
+                                    "cudaStreamSynchronize failed");
+        return out;
+    }
+
+    std::vector<float>
+    survivor_minima(std::span<const float> thresholds) const override {
+        constexpr uint32_t kBlock = 256;
+        cuda_utils::CudaSetDeviceGuard device_guard(m_device_id);
+        const CudaStream stream;
+        compute_margins(thresholds, stream);
+        thrust::device_vector<int> keys(
+            m_nstages, std::bit_cast<int>(std::numeric_limits<float>::max()));
+        const auto blocks = static_cast<uint32_t>(
+            std::min<SizeType>((m_n + kBlock - 1) / kBlock, 64));
+        const dim3 grid(blocks, static_cast<uint32_t>(m_nstages));
+        bank_minima_kernel<kBlock><<<grid, kBlock, 0, stream>>>(
+            scores(), thrust::raw_pointer_cast(m_margins_d.data()),
+            static_cast<uint32_t>(m_n), thrust::raw_pointer_cast(keys.data()));
+        cuda_utils::check_last_cuda_error("bank_minima_kernel");
+        std::vector<int> host(m_nstages);
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(host.data(), thrust::raw_pointer_cast(keys.data()),
+                            m_nstages * sizeof(int), cudaMemcpyDeviceToHost,
+                            stream),
+            "cudaMemcpyAsync failed");
+        cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
+                                    "cudaStreamSynchronize failed");
+        std::vector<float> out(m_nstages);
+        std::ranges::transform(host, out.begin(), [](int key) {
+            return std::bit_cast<float>(key >= 0 ? key : key ^ 0x7FFFFFFF);
+        });
+        return out;
+    }
+
+    /// The score matrix of simulate_h1_scores_device (one leading padding
+    /// row: stage s at (s + 1) * n).
+    thrust::device_vector<float>& matrix() { return m_matrix; }
+
+private:
+    const float* scores() const {
+        return thrust::raw_pointer_cast(m_matrix.data()) + m_n;
+    }
+
+    void compute_margins(std::span<const float> thresholds,
+                         cudaStream_t stream) const {
+        if (thresholds.size() != m_nstages) {
+            throw std::invalid_argument(
+                "DeviceSignalBank: one threshold per stage");
+        }
+        constexpr uint32_t kBlock = 256;
+        m_thresholds_d.assign(thresholds.begin(), thresholds.end());
+        m_margins_d.resize(m_n);
+        const auto blocks = static_cast<uint32_t>((m_n + kBlock - 1) / kBlock);
+        bank_margins_kernel<<<blocks, kBlock, 0, stream>>>(
+            scores(), thrust::raw_pointer_cast(m_thresholds_d.data()),
+            static_cast<uint32_t>(m_nstages), static_cast<uint32_t>(m_n),
+            thrust::raw_pointer_cast(m_margins_d.data()));
+        cuda_utils::check_last_cuda_error("bank_margins_kernel");
+    }
+
+    int m_device_id;
+    SizeType m_nstages;
+    SizeType m_n;
+    thrust::device_vector<float> m_matrix;
+    mutable thrust::device_vector<float> m_thresholds_d;
+    mutable thrust::device_vector<float> m_margins_d;
+};
+
 // Create a compound type for State
 HighFive::CompoundType create_compound_state() {
     return {{"success_h0", HighFive::create_datatype<float>()},
@@ -672,7 +817,9 @@ public:
                        std::optional<uint64_t> seed,
                        std::string_view guess,
                        float min_pd,
-                       float w_terminal)
+                       float w_terminal,
+                       float beam_sigma,
+                       float reach_sigma)
         : m_branching_pattern(branching_pattern.begin(),
                               branching_pattern.end()),
           m_ref_ducy(ref_ducy),
@@ -688,7 +835,7 @@ public:
           m_nbins(nbins),
           m_guess(guess) {
         const auto beam_guess = detail::beam_guess_from_string(guess);
-        const bool shared     = m_mode == DynamicThresholdMode::kShared;
+        const bool shared     = is_shared_family(m_mode);
         validate_inputs(nprobs, shared ? 0.5F : prob_min, snr_final,
                         nthresholds);
         if (shared) {
@@ -746,18 +893,41 @@ public:
         }
         m_box_by_len_d = by_len;
 
-        if (beam_guess == detail::BeamGuess::kWindow) {
-            // Data-driven beam: every threshold a feasible path may use, and
-            // all transitions between consecutive beams (see run()).
-            m_beam = detail::window_scheme(
-                simulate_h1_scores(detail::kWindowTrials,
-                                   detail::derive_seed(m_seed, kPilotSalt)),
-                detail::kWindowTrials, m_nstages, m_probs.front());
-            m_guess_path.resize(m_nstages);
-            std::ranges::transform(
-                m_beam.lo, m_beam.hi, m_guess_path.begin(),
-                [](float lo, float hi) { return 0.5F * (lo + hi); });
+        if (beam_guess == detail::BeamGuess::kWindow || shared) {
+            // Data-driven beam from an unpruned signal simulation: the
+            // feasibility window (improved "window": the whole window and
+            // every transition), or in the shared modes the guided beam
+            // around the pilot guess with reach-limited transitions.
+            const auto stats = detail::pilot_stats(
+                simulate_h1_scores_sorted(
+                    detail::kWindowTrials,
+                    detail::derive_seed(m_seed, kPilotSalt)),
+                detail::kWindowTrials, m_branching_pattern, m_trials_start,
+                m_probs.front());
+            m_window          = stats.window;
             m_all_transitions = true;
+            if (shared) {
+                if (!(beam_sigma > 0.0F) || !(reach_sigma > 0.0F)) {
+                    throw std::invalid_argument(
+                        "ThresholdsCuda: beam_sigma and reach_sigma must be "
+                        "positive");
+                }
+                m_guide_width = beam_sigma;
+                m_guide_reach = reach_sigma;
+            }
+            if (m_guide_width > 0.0F) {
+                m_score_sigma = stats.sigma;
+                m_guess_pilot = stats.guess;
+                m_guess_path  = m_guess_pilot;
+                m_beam = detail::guided_beam(m_window, m_guess_path,
+                                             m_score_sigma, m_guide_width);
+            } else {
+                m_beam = m_window;
+                m_guess_path.resize(m_nstages);
+                std::ranges::transform(
+                    m_beam.lo, m_beam.hi, m_guess_path.begin(),
+                    [](float lo, float hi) { return 0.5F * (lo + hi); });
+            }
         } else {
             if (beam_guess == detail::BeamGuess::kPilot) {
                 m_guess_path = detail::pilot_guess_scheme(
@@ -782,6 +952,12 @@ public:
                     istage, m_guess_path[istage], m_beam_width));
             }
             max_beam = std::max(max_beam, beam_size);
+        }
+        if (!m_score_sigma.empty()) {
+            // Any recentred beam (mode robust's second pass) fits the pools.
+            max_beam = std::max(max_beam, detail::guided_beam_capacity(
+                                              m_thresholds, m_window,
+                                              m_score_sigma, m_guide_width));
         }
 
         // Fold pools: one cell per (beam slot, prob bin), H0 + H1 rows each.
@@ -819,21 +995,41 @@ public:
 
         const SizeType neigh = m_all_transitions ? m_nthresholds : thres_neigh;
         // "window" beam: a first pass ranks cell candidates by cost so far;
-        // the second ranks them by cost so far plus the first pass's cost
-        // to go of their noise survivors (detail::cost_to_go_scheme).
+        // the second (modes improved and robust) ranks them by cost so far
+        // plus the first pass's cost to go of their noise survivors
+        // (detail::cost_to_go_scheme), and in mode robust searches around
+        // the guess recentred on the first pass's path.
         m_cost_to_go.clear();
         m_h1_bank_valid = false;
+        m_h1_bank_host.clear();
+        if (!m_score_sigma.empty()) {
+            m_guess_path = m_guess_pilot;
+            m_beam = detail::guided_beam(m_window, m_guess_path, m_score_sigma,
+                                         m_guide_width);
+        }
         run_pass(neigh, kVarInit, kVarAdd, stream);
-        if (m_mode == DynamicThresholdMode::kShared) {
+        if (m_mode == DynamicThresholdMode::kRobust) {
             m_first_states = m_states;
         }
-        if (m_all_transitions && m_mode != DynamicThresholdMode::kLegacy) {
+        // Mode shared stops after one pass.
+        if (m_all_transitions && (m_mode == DynamicThresholdMode::kImproved ||
+                                  m_mode == DynamicThresholdMode::kRobust)) {
             m_cost_to_go = detail::cost_to_go_scheme(
                 m_states, m_thresholds, m_probs, m_nstages, m_nthresholds,
                 m_nprobs, 8.0F, 4, m_w);
             if (!m_cost_to_go.empty()) {
+                if (!m_score_sigma.empty()) {
+                    m_guess_path = detail::recentre_guess(
+                        m_guess_pilot, get_best_path_thresholds(m_min_pd));
+                    m_beam = detail::guided_beam(m_window, m_guess_path,
+                                                 m_score_sigma, m_guide_width);
+                }
                 run_pass(neigh, kVarInit, kVarAdd, stream);
             }
+        }
+        if (is_shared_family(m_mode)) {
+            detail::store_terminal_cost(m_states, m_nstages, m_nthresholds,
+                                        m_nprobs, m_w);
         }
         m_thres_neigh = thres_neigh;
         warn_empty_stages();
@@ -870,8 +1066,7 @@ public:
     /// H0 only in shared mode (its H1 lives in bitmasks). At least the two
     /// rows of the initial virtual parent.
     SizeType pool_rows_count() const {
-        const SizeType rows_per_cell =
-            m_mode == DynamicThresholdMode::kShared ? 1 : 2;
+        const SizeType rows_per_cell = is_shared_family(m_mode) ? 1 : 2;
         return std::max<SizeType>(m_max_beam * m_nprobs * rows_per_cell, 2) *
                m_ntrials;
     }
@@ -883,7 +1078,7 @@ public:
         // Shared mode: the H1 score matrix, its chunked simulation's fold
         // buffers, and the survivor and pass bitmasks.
         const SizeType shared_bytes =
-            m_mode == DynamicThresholdMode::kShared
+            is_shared_family(m_mode)
                 ? ((m_nstages + 1) * m_nh1 * sizeof(float)) +
                       (4 * h1_chunk_trials(m_nh1) * m_nbins_padded *
                        sizeof(float)) +
@@ -938,6 +1133,17 @@ public:
         SizeType max_parents{1};
     };
 
+    /// Guided beam: a transition may change the offset from the guess by at
+    /// most m_guide_reach sigma_s (0: any transition).
+    bool within_reach(SizeType istage, SizeType ithres, SizeType jthres) const {
+        if (m_score_sigma.empty() || m_guide_reach <= 0.0F) {
+            return true;
+        }
+        return detail::within_reach(
+            m_thresholds[ithres], m_guess_path[istage], m_thresholds[jthres],
+            m_guess_path[istage - 1], m_score_sigma[istage], m_guide_reach);
+    }
+
     StagePlans build_stage_plans(SizeType thres_neigh, bool with_order) const {
         StagePlans plans;
         plans.stages.resize(m_nstages);
@@ -975,7 +1181,8 @@ public:
                          utils::find_neighbouring_indices(beam_prev_idx, ithres,
                                                           thres_neigh)) {
                         const int32_t jslot = prev_slot_of_thresh[jthres];
-                        if (jslot < 0) {
+                        if (jslot < 0 ||
+                            !within_reach(istage, ithres, jthres)) {
                             continue;
                         }
                         pairs_flat.push_back(
@@ -1078,8 +1285,7 @@ public:
     /// the first pass's cost to go; in mode shared the last stage always
     /// weighs w (its survivors go on to the next processing step).
     float rank_weight(SizeType istage) const {
-        if (m_mode == DynamicThresholdMode::kShared &&
-            istage + 1 == m_nstages) {
+        if (is_shared_family(m_mode) && istage + 1 == m_nstages) {
             return static_cast<float>(m_w);
         }
         return m_cost_to_go.empty() ? 0.0F : m_cost_to_go[istage];
@@ -1109,7 +1315,7 @@ public:
 
         // Shared mode: one unpruned H1 simulation scores every stage; cells
         // carry bitmasks of the shared trials they keep.
-        const bool shared      = m_mode == DynamicThresholdMode::kShared;
+        const bool shared      = is_shared_family(m_mode);
         const auto nh1         = static_cast<uint32_t>(m_nh1);
         const auto h1_words    = static_cast<uint32_t>(m_h1_words);
         const uint32_t nbranch = shared ? 1U : 2U;
@@ -1433,6 +1639,12 @@ public:
         file.createAttribute("seed", m_seed);
         file.createAttribute("batch_size", m_batch_size);
         file.createAttribute("thres_neigh", m_thres_neigh);
+        if (is_shared_family(m_mode)) {
+            file.createAttribute("min_pd", m_min_pd);
+            file.createAttribute("w_terminal", m_w);
+            file.createAttribute("beam_sigma", m_guide_width);
+            file.createAttribute("reach_sigma", m_guide_reach);
+        }
 
         // Create dataset creation property list and enable compression
         HighFive::DataSetCreateProps props;
@@ -1447,6 +1659,9 @@ public:
         file.createDataSet("guess_path", m_guess_path);
         file.createDataSet("beam_lo", m_beam.lo);
         file.createDataSet("beam_hi", m_beam.hi);
+        if (!m_guess_pilot.empty()) {
+            file.createDataSet("guess_path_pilot", m_guess_pilot);
+        }
         // Define the 3D dataspace for states
         std::vector<SizeType> dims = {m_nstages, m_nthresholds, m_nprobs};
         HighFive::DataSetCreateProps props_states;
@@ -1474,20 +1689,23 @@ public:
     }
 
     detail::SearchPath first_pass_path(float min_pd) const {
-        if (m_mode != DynamicThresholdMode::kShared || m_first_states.empty()) {
+        if (m_first_states.empty()) {
             throw std::logic_error(
                 "ThresholdsCuda::first_pass_path: needs run() in mode "
-                "'shared'");
+                "'robust'");
         }
         return selected_path(m_first_states, min_pd);
     }
 
     /// The shared H1 trials of the last run(), stage-major (nstages x nh1).
     std::vector<float> shared_h1_bank() const {
-        if (m_mode != DynamicThresholdMode::kShared || !m_h1_bank_valid) {
+        if (!m_h1_bank_host.empty()) {
+            return m_h1_bank_host;
+        }
+        if (!is_shared_family(m_mode) || !m_h1_bank_valid) {
             throw std::logic_error(
                 "ThresholdsCuda::shared_h1_bank: needs run() in mode "
-                "'shared'");
+                "'shared' or 'robust'");
         }
         cuda_utils::CudaSetDeviceGuard device_guard(m_device_id);
         std::vector<float> out(m_nstages * m_nh1);
@@ -1503,6 +1721,11 @@ public:
     /// Frees the pools allocate_pools() made; run() allocates them again.
     void release_search_memory() {
         cuda_utils::CudaSetDeviceGuard device_guard(m_device_id);
+        // Mode robust's shortlist replays paths on the search's bank: keep it
+        // on the host, so that solve() can run again.
+        if (m_mode == DynamicThresholdMode::kRobust && m_h1_bank_valid) {
+            m_h1_bank_host = shared_h1_bank();
+        }
         const auto drop = [](auto& v) {
             using V = std::remove_reference_t<decltype(v)>;
             V().swap(v);
@@ -1534,7 +1757,7 @@ public:
     }
 
     std::vector<float> get_best_path_thresholds(float min_pd) const {
-        if (m_mode == DynamicThresholdMode::kShared) {
+        if (is_shared_family(m_mode)) {
             auto path = selected_path(m_states, min_pd);
             if (!path.thresholds.empty()) {
                 return std::move(path.thresholds);
@@ -1715,6 +1938,68 @@ public:
         return h1_scores;
     }
 
+    /// A signal bank of simulate_h1_scores(n, seed), kept on the device.
+    std::unique_ptr<detail::SignalBank> make_signal_bank(SizeType n,
+                                                         uint64_t seed) const {
+        if (n == 0 || n > (1U << 20U)) {
+            throw std::invalid_argument(
+                "ThresholdsCuda::make_signal_bank: n must be in [1, 2^20]");
+        }
+        cuda_utils::CudaSetDeviceGuard device_guard(m_device_id);
+        auto bank =
+            std::make_unique<DeviceSignalBank>(m_device_id, m_nstages, n);
+        const CudaStream stream;
+        std::array<thrust::device_vector<float>, 2> folds;
+        simulate_h1_scores_device(n, seed, stream, bank->matrix(), folds);
+        cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
+                                    "cudaStreamSynchronize failed");
+        return bank;
+    }
+
+    /// simulate_h1_scores with every stage's row sorted ascending (on the
+    /// device).
+    std::vector<float> simulate_h1_scores_sorted(SizeType ntrials,
+                                                 uint64_t seed) const {
+        cuda_utils::CudaSetDeviceGuard device_guard(m_device_id);
+        const CudaStream stream;
+        thrust::device_vector<float> matrix;
+        std::array<thrust::device_vector<float>, 2> folds;
+        simulate_h1_scores_device(ntrials, seed, stream, matrix, folds);
+        const auto items = static_cast<int64_t>(m_nstages * ntrials);
+        thrust::device_vector<float> sorted(m_nstages * ntrials);
+        thrust::device_vector<int64_t> offsets(m_nstages + 1);
+        thrust::sequence(thrust::cuda::par.on(stream), offsets.begin(),
+                         offsets.end(), int64_t{0},
+                         static_cast<int64_t>(ntrials));
+        const float* keys_in =
+            thrust::raw_pointer_cast(matrix.data()) + ntrials;
+        float* keys_out    = thrust::raw_pointer_cast(sorted.data());
+        const int64_t* off = thrust::raw_pointer_cast(offsets.data());
+        const auto nseg    = static_cast<int64_t>(m_nstages);
+        size_t temp_bytes  = 0;
+        cuda_utils::check_cuda_call(
+            cub::DeviceSegmentedRadixSort::SortKeys(
+                nullptr, temp_bytes, keys_in, keys_out, items, nseg, off,
+                off + 1, 0, static_cast<int>(sizeof(float) * 8), stream),
+            "SegmentedRadixSort failed");
+        thrust::device_vector<uint8_t> temp(temp_bytes);
+        cuda_utils::check_cuda_call(
+            cub::DeviceSegmentedRadixSort::SortKeys(
+                thrust::raw_pointer_cast(temp.data()), temp_bytes, keys_in,
+                keys_out, items, nseg, off, off + 1, 0,
+                static_cast<int>(sizeof(float) * 8), stream),
+            "SegmentedRadixSort failed");
+        std::vector<float> h1_scores(m_nstages * ntrials);
+        cuda_utils::check_cuda_call(
+            cudaMemcpyAsync(h1_scores.data(), keys_out,
+                            h1_scores.size() * sizeof(float),
+                            cudaMemcpyDeviceToHost, stream),
+            "cudaMemcpyAsync failed");
+        cuda_utils::check_cuda_call(cudaStreamSynchronize(stream),
+                                    "cudaStreamSynchronize failed");
+        return h1_scores;
+    }
+
     /// Trials per chunk of the H1 simulation: its two fold buffers (both
     /// branches) stay within kH1ChunkBytes.
     SizeType h1_chunk_trials(SizeType ntrials) const {
@@ -1754,6 +2039,9 @@ public:
         constexpr uint32_t kBlock = 256;
         for (SizeType offset = 0; offset < ntrials; offset += chunk) {
             const auto offset_u = static_cast<uint32_t>(offset);
+            // The last chunk may be partial: only its trials write scores.
+            const auto live_u =
+                static_cast<uint32_t>(std::min(chunk, ntrials - offset));
             {
                 const dim3 grid((2 * chunk + kBlock - 1) / kBlock);
                 cuda_utils::check_kernel_launch_params(grid, dim3(kBlock));
@@ -1782,7 +2070,7 @@ public:
                         grid, kBlock, stream, cur_in,
                         thrust::raw_pointer_cast(n_in.data()), cur_out, scores,
                         params, chunk_u, static_cast<uint32_t>(istage), chunk_u,
-                        offset_u, 2U * chunk_u);
+                        offset_u, chunk_u + live_u);
                 });
                 cuda_utils::check_last_cuda_error("evaluate_stage_kernel");
                 std::swap(cur_in, cur_out);
@@ -1829,9 +2117,18 @@ private:
     std::vector<SizeType> m_box_score_widths;
     std::vector<float> m_guess_path;
     detail::BeamBounds m_beam;
-    // "window" beam: every pair of consecutive beam thresholds is a
-    // transition, whatever thres_neigh.
+    // "window" and guided beams: run() ignores thres_neigh (the guided beam
+    // then limits transitions by within_reach()).
     bool m_all_transitions{false};
+    // "window" beam guided by a guess (empty m_score_sigma: the whole
+    // window): feasibility window, pilot guess, signal score std per stage,
+    // beam half-width and transition reach (both in sigma), and whether pass
+    // 2 recentres the guess on pass 1's path.
+    detail::BeamBounds m_window;
+    std::vector<float> m_guess_pilot;
+    std::vector<float> m_score_sigma;
+    float m_guide_width{0.0F};
+    float m_guide_reach{0.0F};
     // "window" beam: cost to go per stage of the second pass (empty: rank
     // cell candidates by complexity_cumul).
     std::vector<float> m_cost_to_go;
@@ -1841,6 +2138,8 @@ private:
     std::vector<State> m_first_states;
     // Shared mode: the H1 matrix of this run() is simulated.
     bool m_h1_bank_valid{false};
+    // Mode robust: host copy of the bank after release_search_memory().
+    std::vector<float> m_h1_bank_host;
 
     // Device constants
     thrust::device_vector<float> m_thresholds_d;
@@ -1900,7 +2199,7 @@ private:
             }
             m_scores_d.resize(pool_rows);
         }
-        if (m_mode == DynamicThresholdMode::kShared) {
+        if (is_shared_family(m_mode)) {
             for (auto& v : m_h1_mask_d) {
                 v.resize(cells * m_h1_words);
             }
@@ -1924,63 +2223,25 @@ private:
                          float prob_min,
                          float snr_final,
                          SizeType nthresholds) const {
-        const auto fail = [](const std::string& msg) {
-            throw std::invalid_argument("ThresholdsCuda: " + msg);
-        };
-        for (const float x : {m_ref_ducy, m_ducy_max, m_wtsp, m_beam_width,
-                              prob_min, snr_final}) {
-            if (!is_finite(x)) {
-                fail("float parameters must be finite");
-            }
-        }
-        if (m_branching_pattern.size() < 2) {
-            fail("branching pattern needs at least 2 stages");
-        }
-        for (SizeType i = 0; i < m_branching_pattern.size(); ++i) {
-            const float b = m_branching_pattern[i];
-            if (!is_finite(b) || b <= 0.0F) {
-                fail(std::format("branching_pattern[{}] = {} must be finite "
-                                 "and positive",
-                                 i, b));
-            }
-        }
-        if (m_nbins < 4 || m_nbins > 1024) {
-            fail(std::format("nbins={} must be in [4, 1024]", m_nbins));
-        }
-        if (m_ntrials == 0 || nprobs == 0 || m_batch_size == 0) {
-            fail("ntrials, nprobs and batch_size must be positive");
-        }
-        if (nthresholds < 2 || !(snr_final > 0.1F)) {
-            fail("need nthresholds >= 2 and a finite snr_final > 0.1");
-        }
-        if (!(prob_min > 0.0F && prob_min < 1.0F)) {
-            fail(std::format("prob_min={} must be in (0, 1)", prob_min));
-        }
-        if (!(m_ref_ducy > 0.0F && m_ref_ducy < 1.0F) ||
-            !(m_ducy_max > 0.0F && m_ducy_max < 1.0F)) {
-            fail("ref_ducy and ducy_max must be in (0, 1)");
-        }
-        if (!(m_wtsp > 0.0F) || !(m_beam_width > 0.0F)) {
-            fail("wtsp and beam_width must be positive");
-        }
+        detail::validate_scheme_inputs(
+            {.branching_pattern = m_branching_pattern,
+             .ref_ducy          = m_ref_ducy,
+             .ducy_max          = m_ducy_max,
+             .wtsp              = m_wtsp,
+             .beam_width        = m_beam_width,
+             .prob_min          = prob_min,
+             .snr_final         = snr_final,
+             .nbins             = m_nbins,
+             .ntrials           = m_ntrials,
+             .nprobs            = nprobs,
+             .nthresholds       = nthresholds,
+             .batch_size        = m_batch_size},
+            "ThresholdsCuda");
     }
 
-    // Logs stages that ended with no state (nothing survived into them).
     void warn_empty_stages() const {
-        const auto stride = m_nthresholds * m_nprobs;
-        for (SizeType istage = 0; istage < m_nstages; ++istage) {
-            const auto begin =
-                m_states.begin() + static_cast<std::ptrdiff_t>(istage * stride);
-            const bool empty =
-                std::all_of(begin, begin + static_cast<std::ptrdiff_t>(stride),
-                            [](const State& st) { return st.is_empty; });
-            if (empty) {
-                spdlog::warn("ThresholdsCuda: stage {} (and all "
-                             "later stages) has no surviving state",
-                             istage);
-                return;
-            }
-        }
+        detail::warn_empty_stages(m_states, m_nstages, m_nthresholds, m_nprobs,
+                                  "ThresholdsCuda");
     }
 };
 
@@ -2004,7 +2265,9 @@ public:
                          std::optional<uint64_t> seed,
                          std::string_view guess,
                          float min_pd,
-                         float w_terminal)
+                         float w_terminal,
+                         float beam_sigma,
+                         float reach_sigma)
         : m_impl(branching_pattern,
                  ref_ducy,
                  nbins,
@@ -2023,7 +2286,9 @@ public:
                  seed,
                  guess,
                  min_pd,
-                 w_terminal) {}
+                 w_terminal,
+                 beam_sigma,
+                 reach_sigma) {}
 
     std::vector<SizeType>
     get_current_thresholds_idx(SizeType istage) const override {
@@ -2072,6 +2337,10 @@ public:
                                           uint64_t seed) const override {
         return m_impl.simulate_h1_scores(ntrials, seed);
     }
+    std::unique_ptr<detail::SignalBank>
+    make_signal_bank(SizeType n, uint64_t seed) const override {
+        return m_impl.make_signal_bank(n, seed);
+    }
     std::string save(const std::string& outdir) const override {
         return m_impl.save(outdir);
     }
@@ -2104,11 +2373,14 @@ make_thresholds_gpu(std::span<const float> branching_pattern,
                     std::optional<uint64_t> seed,
                     std::string_view guess,
                     float min_pd,
-                    float w_terminal) {
+                    float w_terminal,
+                    float beam_sigma,
+                    float reach_sigma) {
     return std::make_unique<ThresholdsCudaEngine>(
         branching_pattern, ref_ducy, nbins, ntrials, nprobs, prob_min,
         snr_final, nthresholds, ducy_max, wtsp, beam_width, trials_start, mode,
-        batch_size, device_id, seed, guess, min_pd, w_terminal);
+        batch_size, device_id, seed, guess, min_pd, w_terminal, beam_sigma,
+        reach_sigma);
 }
 } // namespace detail
 

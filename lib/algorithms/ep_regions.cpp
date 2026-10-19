@@ -66,7 +66,10 @@ namespace {
 //         independent selection, repair and report of the thresholds, and a
 //         small simulation nbins; the CPU improved mode and calibrate() are
 //         no longer used.
-constexpr std::string_view kCacheVersion = "1.15.0";
+// 1.16.0: guided beam (a guess with a beam and a reach in signal-score
+//         standard deviations); modes "robust" (CUDA) and "shared" (CPU)
+//         instead of refinement levels.
+constexpr std::string_view kCacheVersion = "1.16.0";
 
 /// Threshold-scheme simulation of the planner. The seeds are fixed: the
 /// scheme sets the chunking, so plans of one configuration must not change
@@ -76,7 +79,8 @@ constexpr SizeType kDtsNTrials = 1024;
 // Bins from min_pd to 1: the resolution of the Pd-cost trade-off (see
 // DynamicThresholdScheme's constructor).
 constexpr SizeType kDtsNProbs = 40;
-// Beam of the threshold search: data-driven, so kDtsBeamWidth and
+// Beam of the threshold search: the shared modes always use the guided
+// beam (SharedOptions defaults), so kDtsGuess, kDtsBeamWidth and
 // kDtsThresNeigh are unused.
 constexpr std::string_view kDtsGuess = "window";
 // Grid of the evaluation-only engines, which never search.
@@ -122,7 +126,7 @@ constexpr std::array<std::pair<SizeType, SizeType>, 5> kDtsSearchLadder = {
 // A reference pulse must span at least this many simulated bins.
 constexpr double kDtsMinPulseBins = 4.0;
 // Bumped with any change of the threshold pipeline.
-constexpr std::string_view kDtsAlgorithm = "shared-e22";
+constexpr std::string_view kDtsAlgorithm = "shared-guided";
 constexpr SizeType kDtsBatchSize         = 256;
 
 double calculate_max_drift(const search::PulsarSearchConfig& cfg) {
@@ -329,8 +333,7 @@ public:
         file.createAttribute("evaluation_seed", kDtsEvaluationSeed);
         file.createAttribute("dts_algorithm", std::string(kDtsAlgorithm));
         file.createAttribute("dts_w_terminal", kDtsWTerminal);
-        file.createAttribute("dts_refine",
-                             detection::refine_to_string(dts_refine()));
+        file.createAttribute("dts_mode", std::string(dts_mode()));
         file.createAttribute("dts_nbins_fallback", kDtsNbinsSim);
         file.createAttribute("dts_native_max_bins", kDtsNativeMaxBins);
         file.createAttribute("dts_min_pulse_bins", kDtsMinPulseBins);
@@ -559,9 +562,9 @@ public:
         check_attr_u64("evaluation_seed", kDtsEvaluationSeed);
         {
             // The scheme sets the chunking: the algorithm and everything that
-            // changes its thresholds are part of the plan. The refinement is
-            // a per-backend default, so a plan from the other backend (which
-            // is statistically equivalent) is accepted with another one.
+            // changes its thresholds are part of the plan. The mode is a
+            // per-backend default, so a plan from the other backend is
+            // accepted with another one.
             std::string file_algorithm;
             file.getAttribute("dts_algorithm").read(file_algorithm);
             if (file_algorithm != kDtsAlgorithm) {
@@ -575,14 +578,13 @@ public:
             check_attr_size("dts_nbins_fallback", kDtsNbinsSim);
             check_attr_size("dts_native_max_bins", kDtsNativeMaxBins);
             if (same_backend) {
-                std::string file_refine;
-                file.getAttribute("dts_refine").read(file_refine);
-                if (file_refine != detection::refine_to_string(dts_refine())) {
+                std::string file_mode;
+                file.getAttribute("dts_mode").read(file_mode);
+                if (file_mode != dts_mode()) {
                     throw std::invalid_argument(std::format(
-                        "EPRegionPlanner: cache mismatch for 'dts_refine': "
+                        "EPRegionPlanner: cache mismatch for 'dts_mode': "
                         "expected '{}', found '{}'",
-                        detection::refine_to_string(dts_refine()),
-                        file_refine));
+                        dts_mode(), file_mode));
                 }
             }
         }
@@ -886,14 +888,11 @@ private:
             m_stats.get_max_memory_gb(), max_memory_gb, m_memory.n_workers);
     }
 
-    /// Refinement of the threshold search after its first pass: the CUDA
-    /// default is the full pipeline; the CPU runs the shortlist (the block
-    /// search roughly doubles the CPU planning time for under 1 % on
-    /// realistic patterns).
-    detection::RefineLevel dts_refine() const {
-        return m_exec.backend == Backend::kCPU
-                   ? detection::RefineLevel::kShortlist
-                   : detection::RefineLevel::kFull;
+    /// Mode of the threshold search: "robust" on CUDA; "shared" on the CPU,
+    /// where robust's second pass and refinement cost several times the
+    /// planning time (provisional, not yet measured on the CPU).
+    std::string_view dts_mode() const {
+        return m_exec.backend == Backend::kCPU ? "shared" : "robust";
     }
 
     /// Pd the threshold search aims at. min_pd = 1 cannot be met (the grid is
@@ -925,8 +924,9 @@ private:
             static_cast<float>(m_base_cfg.get_target_snr()), kDtsNThresholds,
             static_cast<float>(m_base_cfg.get_ducy_max()),
             static_cast<float>(m_base_cfg.get_wtsp()), kDtsBeamWidth,
-            kDtsTrialsStart, "shared", seed, kDtsBatchSize, kDtsGuess,
-            scheme_target(), kDtsWTerminal,
+            kDtsTrialsStart, dts_mode(), seed, kDtsBatchSize, kDtsGuess,
+            detection::SharedOptions{.min_pd     = scheme_target(),
+                                     .w_terminal = kDtsWTerminal},
             m_exec.backend == Backend::kCPU
                 ? Exec::cpu(m_base_cfg.get_nthreads())
                 : m_exec);
@@ -1044,8 +1044,8 @@ private:
                          rung.second);
         }
         dyn->run(kDtsThresNeigh);
-        auto sol = detection::detail::solve_scheme(*dyn, scheme_target(),
-                                                   kDtsWTerminal, dts_refine());
+        auto sol = detection::detail::solve_scheme(
+            *dyn, scheme_target(), kDtsWTerminal, dts_mode() == "robust");
         if (sol.thresholds.empty()) {
             throw std::runtime_error(std::format(
                 "EPRegionPlanner: simulation has no surviving terminal path "

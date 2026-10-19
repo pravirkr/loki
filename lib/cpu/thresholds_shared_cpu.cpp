@@ -112,8 +112,11 @@ public:
                               int nthreads,
                               std::optional<uint64_t> seed,
                               std::string_view guess,
+                              DynamicThresholdMode mode,
                               float min_pd,
-                              float w_terminal)
+                              float w_terminal,
+                              float beam_sigma,
+                              float reach_sigma)
         : m_branching_pattern(branching_pattern.begin(),
                               branching_pattern.end()),
           m_ref_ducy(ref_ducy),
@@ -126,12 +129,34 @@ public:
           m_seed(seed.value_or(std::random_device{}())),
           m_min_pd(min_pd),
           m_w(static_cast<double>(w_terminal)),
-          m_guess(guess) {
-        if (detail::beam_guess_from_string(guess) !=
-            detail::BeamGuess::kWindow) {
+          m_guess(guess),
+          m_mode(mode),
+          m_guide_width(beam_sigma),
+          m_guide_reach(reach_sigma) {
+        if (!is_shared_family(mode)) {
             throw std::invalid_argument(
-                "DynamicThresholdScheme: mode 'shared' on the CPU needs "
-                "guess='window'");
+                "ThresholdsSharedCpuEngine: modes 'shared' and 'robust' only");
+        }
+        // The guess applies to legacy and improved only, but must be valid.
+        (void)detail::beam_guess_from_string(guess);
+        // The checks of every backend's search (prob_min is unused here).
+        detail::validate_scheme_inputs({.branching_pattern = branching_pattern,
+                                        .ref_ducy          = ref_ducy,
+                                        .ducy_max          = ducy_max,
+                                        .wtsp              = wtsp,
+                                        .beam_width        = beam_width,
+                                        .prob_min          = 0.5F,
+                                        .snr_final         = snr_final,
+                                        .nbins             = nbins,
+                                        .ntrials           = ntrials,
+                                        .nprobs            = nprobs,
+                                        .nthresholds       = nthresholds,
+                                        .batch_size        = 1},
+                                       "ThresholdsSharedCpu");
+        if (!(beam_sigma > 0.0F) || !(reach_sigma > 0.0F)) {
+            throw std::invalid_argument(
+                "DynamicThresholdScheme: beam_sigma and reach_sigma must be "
+                "positive");
         }
         if (!(min_pd > 0.0F && min_pd < 1.0F)) {
             throw std::invalid_argument(
@@ -146,11 +171,6 @@ public:
         if (!(w_terminal >= 0.0F) || !utils::is_finite(w_terminal)) {
             throw std::invalid_argument(
                 "DynamicThresholdScheme: w_terminal must be finite and >= 0");
-        }
-        if (m_branching_pattern.size() < 2) {
-            throw std::invalid_argument(
-                "DynamicThresholdScheme: branching pattern needs at least 2 "
-                "stages");
         }
         if (ntrials == 0 ||
             ntrials > std::numeric_limits<uint32_t>::max() / 2) {
@@ -180,14 +200,24 @@ public:
         m_nh1      = std::min<SizeType>(kSharedH1PerTrial * m_ntrials,
                                         SizeType{1} << 20U);
         m_h1_words = (m_nh1 + 31) / 32;
-        m_beam     = detail::window_scheme(
-            m_eval->simulate_h1_scores(detail::kWindowTrials,
-                                       detail::derive_seed(m_seed, kPilotSalt)),
-            detail::kWindowTrials, m_nstages, m_probs.front());
-        m_guess_path.resize(m_nstages);
-        std::ranges::transform(
-            m_beam.lo, m_beam.hi, m_guess_path.begin(),
-            [](float lo, float hi) { return 0.5F * (lo + hi); });
+        {
+            auto pilot = m_eval->simulate_h1_scores(
+                detail::kWindowTrials, detail::derive_seed(m_seed, kPilotSalt));
+            for (SizeType s = 0; s < m_nstages; ++s) {
+                const auto row = std::span(pilot).subspan(
+                    s * detail::kWindowTrials, detail::kWindowTrials);
+                std::ranges::sort(row);
+            }
+            auto stats = detail::pilot_stats(pilot, detail::kWindowTrials,
+                                             m_branching_pattern, trials_start,
+                                             m_probs.front());
+            m_window   = std::move(stats.window);
+            m_guess_pilot = std::move(stats.guess);
+            m_score_sigma = std::move(stats.sigma);
+        }
+        m_guess_path = m_guess_pilot;
+        m_beam = detail::guided_beam(m_window, m_guess_path, m_score_sigma,
+                                     m_guide_width);
         for (SizeType s = 0; s < m_nstages; ++s) {
             const auto n = get_current_thresholds_idx(s).size();
             if (n == 0) {
@@ -196,6 +226,10 @@ public:
             }
             m_max_beam = std::max(m_max_beam, n);
         }
+        // Any recentred beam (mode robust's second pass) fits the pools.
+        m_max_beam = std::max(m_max_beam, detail::guided_beam_capacity(
+                                              m_thresholds, m_window,
+                                              m_score_sigma, m_guide_width));
         const SizeType cells = m_max_beam * m_nprobs;
         if (cells * 2 > std::numeric_limits<uint32_t>::max() ||
             m_nthresholds * m_nprobs > std::numeric_limits<uint32_t>::max()) {
@@ -264,7 +298,7 @@ public:
     detail::SearchPath first_pass_path(float min_pd) const override {
         if (m_first_states.empty()) {
             throw std::logic_error(
-                "first_pass_path: run() has not been called");
+                "first_pass_path: needs run() in mode 'robust'");
         }
         return selected_path(m_first_states, min_pd);
     }
@@ -312,9 +346,14 @@ public:
     }
 
     // ---- search ----
-    void run(SizeType /*thres_neigh*/) override {
-        spdlog::info("Running dynamic threshold scheme on the CPU (shared "
-                     "mode)");
+    void run(SizeType thres_neigh) override {
+        // thres_neigh is unused (the guided beam sets the reach); positive as
+        // on every backend.
+        if (thres_neigh == 0) {
+            throw std::invalid_argument("thres_neigh must be positive");
+        }
+        spdlog::info("Running dynamic threshold scheme on the CPU ({} mode)",
+                     mode_to_string(m_mode));
         timing::SimpleTimer total_timer;
         total_timer.start();
         allocate_pools();
@@ -322,24 +361,40 @@ public:
         m_h1_bank = m_eval->simulate_h1_scores(
             m_nh1, detail::derive_seed(m_seed, kSharedSalt));
         m_cost_to_go.clear();
+        m_first_states.clear();
+        m_guess_path = m_guess_pilot;
+        m_beam = detail::guided_beam(m_window, m_guess_path, m_score_sigma,
+                                     m_guide_width);
         run_pass();
-        m_first_states = m_states;
-        m_cost_to_go   = detail::cost_to_go_scheme(
-            m_states, m_thresholds, m_probs, m_nstages, m_nthresholds, m_nprobs,
-            8.0F, 4, m_w);
-        if (!m_cost_to_go.empty()) {
-            run_pass();
+        if (m_mode == DynamicThresholdMode::kRobust) {
+            // Second pass: ranked with the first pass's cost to go, around
+            // the guess recentred on its path.
+            m_first_states = m_states;
+            m_cost_to_go   = detail::cost_to_go_scheme(
+                m_states, m_thresholds, m_probs, m_nstages, m_nthresholds,
+                m_nprobs, 8.0F, 4, m_w);
+            if (!m_cost_to_go.empty()) {
+                m_guess_path = detail::recentre_guess(
+                    m_guess_pilot, get_best_path_thresholds(m_min_pd));
+                m_beam = detail::guided_beam(m_window, m_guess_path,
+                                             m_score_sigma, m_guide_width);
+                run_pass();
+            }
         }
-        spdlog::info("Dynamic threshold scheme (shared) took {:.2f} s",
-                     total_timer.stop());
+        detail::store_terminal_cost(m_states, m_nstages, m_nthresholds,
+                                    m_nprobs, m_w);
+        detail::warn_empty_stages(m_states, m_nstages, m_nthresholds, m_nprobs,
+                                  "ThresholdsSharedCpu");
+        spdlog::info("Dynamic threshold scheme ({}) took {:.2f} s",
+                     mode_to_string(m_mode), total_timer.stop());
     }
 
     std::string save(const std::string& outdir) const override {
         const std::filesystem::path filebase = std::format(
-            "dynscheme_shared_nstages_{:03d}_nthresh_{:03d}_nprobs_{:03d}_"
+            "dynscheme_{}_nstages_{:03d}_nthresh_{:03d}_nprobs_{:03d}_"
             "ntrials_{:04d}_snr_{:04.1f}_ducy_{:04.2f}_beam_{:03.1f}.h5",
-            m_nstages, m_nthresholds, m_nprobs, m_ntrials, m_thresholds.back(),
-            m_ref_ducy, m_beam_width);
+            mode_to_string(m_mode), m_nstages, m_nthresholds, m_nprobs,
+            m_ntrials, m_thresholds.back(), m_ref_ducy, m_beam_width);
         std::filesystem::create_directories(outdir);
         const std::filesystem::path filepath =
             std::filesystem::path(outdir) / filebase;
@@ -350,12 +405,14 @@ public:
         file.createAttribute("ducy_max", m_ducy_max);
         file.createAttribute("wtsp", m_wtsp);
         file.createAttribute("beam_width", m_beam_width);
-        file.createAttribute("mode", std::string("shared"));
+        file.createAttribute("mode", mode_to_string(m_mode));
         file.createAttribute("guess", m_guess);
         file.createAttribute("seed", m_seed);
         file.createAttribute("nthreads", m_nthreads);
         file.createAttribute("min_pd", m_min_pd);
         file.createAttribute("w_terminal", m_w);
+        file.createAttribute("beam_sigma", m_guide_width);
+        file.createAttribute("reach_sigma", m_guide_reach);
         file.createDataSet("branching_pattern", m_branching_pattern);
         file.createDataSet("profile", m_profile);
         file.createDataSet("thresholds", m_thresholds);
@@ -363,6 +420,7 @@ public:
         file.createDataSet("guess_path", m_guess_path);
         file.createDataSet("beam_lo", m_beam.lo);
         file.createDataSet("beam_hi", m_beam.hi);
+        file.createDataSet("guess_path_pilot", m_guess_pilot);
         const std::vector<SizeType> dims = {m_nstages, m_nthresholds, m_nprobs};
         HighFive::DataSetCreateProps props_states;
         props_states.add(
@@ -436,8 +494,9 @@ private:
         std::vector<ThresholdPair> pairs;
     };
 
-    /// Every pair (previous beam threshold, current beam threshold) is a
-    /// transition. Stage 0 reads a virtual one-threshold beam.
+    /// Every pair (previous beam threshold, current beam threshold) within
+    /// reach of the guess is a transition. Stage 0 reads a virtual
+    /// one-threshold beam.
     std::vector<Plan> build_plans() const {
         std::vector<Plan> plans(m_nstages);
         std::vector<SizeType> beam_prev = {0};
@@ -452,6 +511,12 @@ private:
                     continue;
                 }
                 for (SizeType jslot = 0; jslot < beam_prev.size(); ++jslot) {
+                    if (!detail::within_reach(
+                            m_thresholds[plan.beam_cur[islot]], m_guess_path[s],
+                            m_thresholds[beam_prev[jslot]], m_guess_path[s - 1],
+                            m_score_sigma[s], m_guide_reach)) {
+                        continue;
+                    }
                     plan.pairs.push_back(
                         {static_cast<uint32_t>(plan.beam_cur[islot]),
                          static_cast<uint32_t>(islot),
@@ -789,6 +854,9 @@ private:
     float m_min_pd;
     double m_w;
     std::string m_guess;
+    DynamicThresholdMode m_mode;
+    float m_guide_width;
+    float m_guide_reach;
 
     std::unique_ptr<detail::ThresholdsEngine> m_eval;
     std::unique_ptr<detection::BoxcarWidthsCache> m_box_cache;
@@ -798,6 +866,11 @@ private:
     std::vector<SizeType> m_box_score_widths;
     std::vector<float> m_guess_path;
     detail::BeamBounds m_beam;
+    // Guided beam: feasibility window, pilot guess, signal score std per
+    // stage, beam half-width and reach (both in sigma).
+    detail::BeamBounds m_window;
+    std::vector<float> m_guess_pilot;
+    std::vector<float> m_score_sigma;
     SizeType m_nprobs{};
     SizeType m_nstages{};
     SizeType m_nthresholds{};
@@ -840,12 +913,16 @@ make_thresholds_shared_cpu(std::span<const float> branching_pattern,
                            int nthreads,
                            std::optional<uint64_t> seed,
                            std::string_view guess,
+                           std::string_view mode,
                            float min_pd,
-                           float w_terminal) {
+                           float w_terminal,
+                           float beam_sigma,
+                           float reach_sigma) {
     return std::make_unique<ThresholdsSharedCpuEngine>(
         branching_pattern, ref_ducy, nbins, ntrials, nprobs, snr_final,
         nthresholds, ducy_max, wtsp, beam_width, trials_start, nthreads, seed,
-        guess, min_pd, w_terminal);
+        guess, dynamic_threshold_mode_from_string(mode), min_pd, w_terminal,
+        beam_sigma, reach_sigma);
 }
 
 } // namespace detail

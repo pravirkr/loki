@@ -1,4 +1,4 @@
-"""Tests for DynamicThresholdScheme.solve (mode "shared", CPU and CUDA)."""
+"""Tests for DynamicThresholdScheme.solve (modes "shared" and "robust", CPU and CUDA)."""
 
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ KW = {
 }
 
 
-def _scheme(backend: str, seed: int = 7, mode: str = "shared", refine: str = "full"):
+def _scheme(backend: str, seed: int = 7, mode: str = "shared", **opts):
     extra = {"nthreads": 2} if backend == "cpu" else {}
     return libloki.thresholds.DynamicThresholdScheme(
         BRANCHING,
@@ -44,22 +44,23 @@ def _scheme(backend: str, seed: int = 7, mode: str = "shared", refine: str = "fu
         seed=seed,
         backend=backend,
         min_pd=MIN_PD,
-        refine=refine,
+        **opts,
         **extra,
         **KW,
     )
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
-@pytest.mark.parametrize("refine", ["none", "shortlist", "full"])
-def test_solve_reports_the_pd_of_its_thresholds(backend: str, refine: str) -> None:
-    scheme = _scheme(backend, refine=refine)
+@pytest.mark.parametrize("mode", ["shared", "robust"])
+def test_solve_reports_the_pd_of_its_thresholds(backend: str, mode: str) -> None:
+    scheme = _scheme(backend, mode=mode)
     scheme.run(10)
     sol = scheme.solve()
     thresholds = sol["thresholds"]
     assert thresholds.shape == (scheme.nstages,)
     assert sol["delivery"] != "no_path"
-    assert sol["refine"] == refine
+    # only robust compares a shortlist of candidates
+    assert (len(sol["shortlist"]) == 0) == (mode == "shared")
     assert sol["pd"] >= 0.9 * MIN_PD
     assert sol["pd_se"] > 0
     assert sol["pd_trials"] == 1 << 17
@@ -76,32 +77,25 @@ def test_solve_reports_the_pd_of_its_thresholds(backend: str, refine: str) -> No
 
 
 @pytest.mark.parametrize("mode", ["legacy", "improved"])
-def test_solve_needs_mode_shared(mode: str) -> None:
+def test_solve_needs_a_shared_mode(mode: str) -> None:
     scheme = _scheme("cpu", mode=mode)
     scheme.run(6)
     with pytest.raises(ValueError, match="shared"):
         scheme.solve()
 
 
-def test_shared_mode_on_the_cpu_needs_the_window_beam() -> None:
-    kw = {**KW, "guess": "analytic"}
-    with pytest.raises(ValueError, match="window"):
-        libloki.thresholds.DynamicThresholdScheme(
-            BRANCHING,
-            mode="shared",
-            seed=7,
-            backend="cpu",
-            nthreads=2,
-            **kw,
-        )
+@pytest.mark.parametrize("opts", [{"beam_sigma": 0.0}, {"reach_sigma": -1.0}])
+def test_the_guided_beam_needs_a_positive_width_and_reach(opts: dict) -> None:
+    with pytest.raises(ValueError, match="sigma"):
+        _scheme("cpu", **opts)
 
 
-@pytest.mark.parametrize("mode", ["legacy", "improved", "shared"])
+@pytest.mark.parametrize("mode", ["legacy", "improved", "shared", "robust"])
 def test_save_in_every_mode_and_the_solution_after_solve(
     mode: str,
     tmp_path: Path,
 ) -> None:
-    scheme = _scheme("cpu", mode=mode, refine="shortlist")
+    scheme = _scheme("cpu", mode=mode)
     scheme.run(6)
     plain = Path(scheme.save(outdir=str(tmp_path / "plain")))
     with h5py.File(plain) as f:
@@ -112,7 +106,8 @@ def test_save_in_every_mode_and_the_solution_after_solve(
             scheme.nprobs,
         )
         assert "solution" not in f
-    if mode != "shared":
+        assert f.attrs["mode"] == mode
+    if mode not in ("shared", "robust"):
         return
     sol = scheme.solve()
     solved = Path(scheme.save(outdir=str(tmp_path / "solved")))
@@ -125,7 +120,6 @@ def test_save_in_every_mode_and_the_solution_after_solve(
         )
         assert grp.attrs["pd"] == pytest.approx(sol["pd"])
         assert grp.attrs["delivery"] == sol["delivery"]
-        assert grp.attrs["refine"] == "shortlist"
         assert grp["eval_complexity"].shape == (scheme.nstages,)
         # the search itself is still there for plotting the paths
         assert f["states"].shape[0] == scheme.nstages
@@ -141,3 +135,15 @@ def test_shared_states_have_the_pd_grid_anchored_at_min_pd() -> None:
     assert above[0] == pytest.approx(MIN_PD, rel=1e-4)
     assert len(above) == KW["nprobs"]
     assert len(probs) - len(above) <= 16
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("mode", ["shared", "robust"])
+def test_solve_can_run_twice(backend: str, mode: str) -> None:
+    # solve() frees the search's device memory; a second call must still work
+    scheme = _scheme(backend, mode=mode)
+    scheme.run(10)
+    first = scheme.solve()
+    second = scheme.solve()
+    np.testing.assert_array_equal(first["thresholds"], second["thresholds"])
+    assert first["pd"] == second["pd"]
