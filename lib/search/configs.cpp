@@ -805,9 +805,9 @@ struct BsegCostWeights {
     double merge_op;
 };
 
-// Time-domain FFA. The run-length brute fold makes the segment length a
-// period cap (see select_bseg_brute_by_cost) rather than a fitted trade
-// against gather-adds. These weights remain for the direct-DFT comparison
+// Time-domain FFA. The run-length brute fold sets the segment length from a
+// cycles-at-f_max target (see select_bseg_brute_by_cost) rather than a fitted
+// trade against gather-adds. These weights remain for the direct-DFT comparison
 // and for bench/fit_cost_model.py; the time-domain selector does not use
 // them to pick B inside the cap.
 constexpr BsegCostWeights kBsegWeightsTime{
@@ -1186,14 +1186,22 @@ private:
             merge_above[k - 1] = merge_above[k] + merge_elems[k];
         }
 
-        // Time-domain and lossy-Fourier folds use the run-length kernel. Its
-        // cost per frequency is ~nbins * ceil(B / P), so a segment of one to
-        // two periods at f_max costs about one merge level. Take the largest
-        // power of two inside that cap. The 16*nbins guard below is only for
-        // the direct DFT.
+        // Time-domain and lossy-Fourier folds use the run-length kernel. The
+        // brute cost per frequency is ~nbins * ceil(B / P): flat up to one
+        // period at f_max and then growing with the cycles per segment. The
+        // accuracy side is the number of merge levels, each of which rounds
+        // the shifts to whole bins and loses S/N (measured with
+        // bench/scripts/ffa/bseg_brute_sensitivity.py: about 1% per halving
+        // of B below ~8 cycles at nbins 32, with the loss falling as nbins
+        // grows). So B is set from a target number of cycles at f_max, the
+        // fast end of the chunk, which the planner keeps within octave_scale
+        // of f_min. The direct DFT keeps the cost scan below.
         if (!direct_dft) {
-            const double cap_samples = 2.0 / (m_tsamp * m_f_max);
-            std::optional<SizeType> largest_under_cap;
+            const double target_cycles  = bseg_target_cycles();
+            const double target_samples = target_cycles / (m_tsamp * m_f_max);
+            const auto desired_k        = static_cast<SizeType>(std::max(
+                1L, std::lround(std::log2(std::max(target_samples, 2.0)))));
+            std::optional<SizeType> largest_below_target;
             std::optional<SizeType> smallest_valid;
             for (SizeType k = 1; k <= k_brute_max; ++k) {
                 const auto bseg_k = SizeType{1} << k;
@@ -1207,18 +1215,20 @@ private:
                 if (!smallest_valid.has_value()) {
                     smallest_valid = bseg_k;
                 }
-                if (static_cast<double>(bseg_k) <= cap_samples) {
-                    largest_under_cap = bseg_k;
+                if (k <= desired_k) {
+                    largest_below_target = bseg_k;
                 }
             }
-            const auto chosen = largest_under_cap.has_value()
-                                    ? largest_under_cap
+            const auto chosen = largest_below_target.has_value()
+                                    ? largest_below_target
                                     : smallest_valid;
             if (chosen.has_value()) {
                 spdlog::debug(
-                    "bseg_brute period cap: nbins={}, f=[{:.4g}, {:.4g}] Hz "
-                    "-> bseg_brute={} (cap {:.0f} samples, {:.2f} periods)",
-                    m_nbins, m_f_min, m_f_max, *chosen, cap_samples,
+                    "bseg_brute cycle target: nbins={}, nparams={}, "
+                    "f=[{:.4g}, {:.4g}] Hz -> bseg_brute={} (target {:.2f} "
+                    "cycles at f_max, got {:.2f})",
+                    m_nbins, m_nparams, m_f_min, m_f_max, *chosen,
+                    target_cycles,
                     static_cast<double>(*chosen) * m_tsamp * m_f_max);
                 return chosen;
             }
@@ -1272,6 +1282,27 @@ private:
                           m_nbins, m_f_min, m_f_max, *best, best_cost);
         }
         return best;
+    }
+
+    /**
+     * @brief Target cycles per brute segment at f_max for the run-length
+     * (time-domain and lossy-Fourier) fold.
+     *
+     * Fitted from injection sweeps (2^21 samples, eta = 1, chunk ratio 1.5):
+     * the per-level shift rounding costs S/N roughly in proportion to
+     * 1/nbins^2 (pulse width in bins), so wide-profile chunks need fewer
+     * cycles. Acceleration searches have more merge dimensions and need
+     * about twice as many. The chosen B is the power of two nearest to the
+     * target (never above it by more than the rounding).
+     */
+    [[nodiscard]] double bseg_target_cycles() const {
+        double cycles = 1.5;
+        if (m_nbins <= 64) {
+            cycles = 4.0;
+        } else if (m_nbins <= 128) {
+            cycles = 2.0;
+        }
+        return (m_nparams > 1) ? 2.0 * cycles : cycles;
     }
 
     /// Legacy heuristic: roughly two cycles at f_min (four for nparams > 1).
