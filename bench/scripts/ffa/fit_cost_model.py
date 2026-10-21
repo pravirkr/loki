@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Fit the brute-vs-merge cost-model constants from ``bseg_brute_sweep.py`` JSON.
 
-The ``bseg_brute`` selector in ``lib/configs.cpp`` minimises
+Only the direct-DFT Fourier selector in ``lib/search/configs.cpp``
+(``kDirectDftWeights``) still minimises
 
-    cost(B) = W_brute * brute_ops(B) + W_table * F0 * B + W_merge * merge_ops(B)
+    cost(B) = W_brute * brute_ops(B) + W_merge * merge_ops(B)
 
-The time-domain selector no longer minimises this: it takes the largest power
-of two segment with ``B * tsamp * f_max <= 2`` periods, because the run-length
+The time-domain and lossy-Fourier selectors use a cycles-at-f_max target
+instead (see ``bseg_brute_sensitivity.py``), because the run-length
 brute fold costs about one merge level at that depth. Pass ``--tsamp`` to
 score chunks with the run-length op count
 

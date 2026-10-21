@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <bit>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -228,7 +229,18 @@ int run_simulate(double period,
                  const std::optional<double>& mod_tref) {
     loki::simulation::PulseSignalConfig config(period, dt, nsamps, snr, ducy,
                                                mod_type, mod, mod_tref, seed);
-    const auto series = config.generate(shape, phi0);
+    auto series = config.generate(shape, phi0);
+    // Writes a unit-variance file. For --no-preprocess.
+    const auto ts_v = series.get_ts_v();
+    if (ts_v.empty() || !(ts_v.front() > 0.0F)) {
+        throw std::runtime_error("simulated timeseries has no valid variance");
+    }
+    const auto inv_sigma =
+        static_cast<float>(1.0 / std::sqrt(static_cast<double>(ts_v.front())));
+    for (auto& sample : series.get_ts_e()) {
+        sample *= inv_sigma;
+    }
+    std::ranges::fill(series.get_ts_v(), 1.0F);
     series.write(output);
     SPDLOG_INFO("Wrote {} samples to {}", series.get_nsamps(), output.string());
     return 0;
