@@ -1,14 +1,64 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
+#include <format>
+#include <source_location>
 
 #include <cuda/std/cmath>
+#include <cuda/std/span>
 #include <cuda/std/utility>
 #include <cuda_runtime.h>
 
+#include "loki/common/types.hpp"
+
+#include "lib/detail/error_check.hpp"
 #include "lib/detail/utils.hpp"
 
 namespace loki::utils {
+
+/// Bits of the per-batch flag word (CUBScratchArena::d_reduce_out) that the
+/// analyze kernels raise: a parameter whose child count passed branch_max,
+/// and, in the circular basis, a crackle shift that needs hole expansion.
+inline constexpr uint32_t kBranchFlagCrackle  = 1U;
+inline constexpr uint32_t kBranchFlagOverflow = 2U;
+
+/// Slots the branch outputs hold, in leaves: the smallest of the leaves,
+/// origins and validation-mask views.
+[[nodiscard]] inline SizeType
+branch_capacity(cuda::std::span<const double> leaves_branch,
+                cuda::std::span<const uint32_t> leaves_origins,
+                cuda::std::span<const uint8_t> validation_mask,
+                SizeType leaves_stride) noexcept {
+    return std::min({leaves_branch.size() / leaves_stride,
+                     leaves_origins.size(), validation_mask.size()});
+}
+
+/// Reject a branched batch before anything is written to the outputs: a
+/// parameter that branched past branch_max (kBranchFlagOverflow), or a total
+/// that does not fit in the branch workspace. The CPU kernels throw at the
+/// same two points (branch_param_padded, check_branch_product_fits).
+inline void check_branch_fits(
+    uint32_t branch_flags,
+    SizeType n_leaves_branched,
+    SizeType capacity,
+    SizeType branch_max,
+    const std::source_location& loc = std::source_location::current()) {
+    if ((branch_flags & kBranchFlagOverflow) != 0U) {
+        throw error_check::DetailedException(
+            std::format("A parameter branches into more than branch_max={} "
+                        "children",
+                        branch_max),
+            loc);
+    }
+    if (n_leaves_branched > capacity) {
+        throw error_check::DetailedException(
+            std::format("Branching a batch needs {} leaves but the branch "
+                        "workspace holds {}",
+                        n_leaves_branched, capacity),
+            loc);
+    }
+}
 
 __device__ __forceinline__ double get_param_val_at_idx_device(double vmin,
                                                               double vmax,
@@ -231,12 +281,32 @@ branch_param_generate_points_device(double* __restrict__ out_values,
     // Place the center of the first child cell exactly half a sub-span inward
     const double first_center = parent_min + (dparam_new_actual / 2.0);
 
+    // The slot holds out_size values. The count stays the true need, so the
+    // leaf's product reports it and the host rejects the batch
+    // (kBranchFlagOverflow) before any child is materialized.
+    const uint32_t n_write = min(num_points, out_size);
 #pragma unroll 4
-    for (uint32_t i = 0; i < num_points; ++i) {
+    for (uint32_t i = 0; i < n_write; ++i) {
         out_values[i] =
             fma(static_cast<double>(i), dparam_new_actual, first_center);
     }
     return {dparam_new_actual, num_points};
+}
+
+/// Raise kBranchFlagOverflow on @p branch_flags when a parameter of the leaf
+/// at @p flat_base branched into more than @p branch_max children.
+__device__ __forceinline__ void
+flag_branch_overflow_device(const uint32_t* __restrict__ scratch_counts,
+                            uint32_t flat_base,
+                            uint32_t n_params,
+                            uint32_t branch_max,
+                            uint32_t* __restrict__ branch_flags) {
+    for (uint32_t p = 0; p < n_params; ++p) {
+        if (scratch_counts[flat_base + p] > branch_max) {
+            atomicOr(branch_flags, kBranchFlagOverflow);
+            return;
+        }
+    }
 }
 
 __device__ __forceinline__ void
