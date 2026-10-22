@@ -1,0 +1,3 @@
+# Matches CMake preset `dev` → binaryDir build-dev (see CMakePresets.json).
+CompileFlags:
+  CompilationDatabase: build-dev
