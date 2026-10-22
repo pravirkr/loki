@@ -39,6 +39,17 @@ struct FFATomlConfig {
     std::optional<double> acc_max;
     std::optional<double> jerk_min;
     std::optional<double> jerk_max;
+    /// [search.orbit]: the parameter limits from physical circular-orbit
+    /// limits (search::circular_param_limits) instead of acc_* and jerk_*.
+    /// f_min and f_max are then intrinsic spin frequencies.
+    struct OrbitLimits {
+        std::string order;                    ///< "accel" | "jerk" | "snap"
+        std::optional<double> p_orb_min;      ///< seconds
+        std::optional<double> p_orb_min_tobs; ///< in units of T_obs
+        double m_c_max{10.0};
+        double m_p_min{1.2};
+    };
+    std::optional<OrbitLimits> orbit;
 
     SizeType nbins{64};
     double eta{1.0};

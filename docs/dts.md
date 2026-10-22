@@ -44,7 +44,9 @@ cell: an approximate, compressed-state search with no optimality guarantee.
 | `shared` (default) | shared signal trials, guided beam, one pass | `solve()`: tighten, repair, report | production |
 | `robust` | as `shared`, plus a second pass | `solve()`: shortlist, block refinement, repair, report | when ~2.5x the run time buys a lower L |
 
-The EP planner uses `robust` on CUDA and `shared` on the CPU.
+The EP planner uses `shared` on both backends, once per region; every chunk
+of the region runs that schedule (see
+[memory.md](memory.md#planning)).
 
 ## The winner's curse, and what the default mode does about it
 

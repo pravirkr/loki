@@ -10,8 +10,8 @@ ep_production_cuda.toml, so either driver gives the same plan (the cache file
 is shared) and the same candidates:
 
     loki simulate --period 0.007 --dt 0.000064 --nsamps 33554432 --snr 12 \\
-        --ducy 0.1 --acc 500 --jerk 2 --seed 42 -o ep_production_pulse.tim
-    loki search ep -c bench/scripts/ep_production_cuda.toml
+        --ducy 0.1 --acc 300 --jerk 0.15 --seed 42 -o ep_production_pulse.tim
+    loki search ep -c bench/scripts/ep/ep_production_cuda.toml
 
 The script reports the plan, the device high-water mark against the model, the
 run time, and the best candidate against the injected parameters. The device
@@ -42,18 +42,22 @@ import measure_ep_peak_rss as rss  # noqa: E402
 
 GB = 1024**3
 
-# The injected pulse (tmp_files/test_jerk_cuda.py).
+# The injected pulse: a circular orbit of P_orb = 2 pi ACC / JERK = 12566 s
+# (5.9 T_obs) reaches this acceleration and jerk.
 PERIOD = 0.007
 DT = 64e-6
 SNR = 12.0
 DUCY = 0.1
-ACC = 500.0
-JERK = 2.0
+ACC = 300.0
+JERK = 0.15
 SEED = 42
 
-# Search: jerk and acceleration are wide enough to hold the injected values.
-JERK_LIMITS = (-4.0, 4.0)
-ACC_LIMITS = (-1000.0, 1000.0)
+# Search: circular orbits with P_orb >= 5 T_obs (a coherent jerk search),
+# m_c <= 10 and m_p >= 1.2 M_sun, as [search.orbit] in ep_production_cuda.toml
+# (about +/- 499 m/s^2 and +/- 0.29 m/s^3 at 2^25 samples).
+P_ORB_MIN_TOBS = 5.0
+M_C_MAX = 10.0
+M_P_MIN = 1.2
 
 
 def simulate(nsamps: int) -> tuple[np.ndarray, np.ndarray]:
@@ -84,9 +88,14 @@ def make_config(
         tsamp=DT,
         nbins=64,
         eta=1.0,
-        # Order of the parameters: jerk, acceleration, frequency.
-        param_limits=np.array(
-            [JERK_LIMITS, ACC_LIMITS, (f_min, f_max)], dtype=np.float64
+        # Rows: jerk, acceleration, frequency (widened by v/c).
+        param_limits=libloki.configs.circular_param_limits(
+            f_min,
+            f_max,
+            poly_order=3,
+            p_orb_min=P_ORB_MIN_TOBS * (nsamps * DT),
+            m_c_max=M_C_MAX,
+            m_p_min=M_P_MIN,
         ),
         ducy_max=0.3,
         wtsp=1.2,

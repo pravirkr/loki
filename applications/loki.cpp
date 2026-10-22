@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <bit>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -578,6 +579,15 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
 // EP search (`search ep`)
 // =============================================================================
 
+/// A count as a power of two with one decimal ("2^20.0"), as the library logs
+/// it.
+std::string format_pow2(loki::SizeType n) {
+    if (n == 0) {
+        return "0";
+    }
+    return std::format("2^{:.1f}", std::log2(static_cast<double>(n)));
+}
+
 /// Writes the chunk table, the groups of equal nbins and the memory peak of an
 /// EP plan to stdout.
 template <typename FoldType>
@@ -604,21 +614,22 @@ void print_ep_plan(const loki::algorithms::EPRegionPlanner<FoldType>& planner,
         stats.get_memory_limit_gb());
 
     std::cout << std::format(
-        "{:>6} {:>6} {:>23} {:>23} {:>9} {:>9} {:>10} {:>6} {:>9}\n", "chunk",
-        "nbins", "nominal f [Hz]", "actual f [Hz]", "ncoords", "max_sugg",
-        "branch_max", "nseg", "mem [GB]");
+        "{:>6} {:>6} {:>23} {:>23} {:>9} {:>9} {:>10} {:>6} {:>9} {:>7}\n",
+        "chunk", "nbins", "nominal f [Hz]", "actual f [Hz]", "ncoords",
+        "max_sugg", "branch_max", "nseg", "mem [GB]", "Pd");
     for (SizeType i = 0; i < chunks.size(); ++i) {
         const auto& chunk = chunks[i];
         std::cout << std::format(
             "{:>6} {:>6} {:>10.3f} - {:<10.3f} {:>10.3f} - {:<10.3f} {:>9} "
-            "{:>9} {:>10} {:>6} {:>9.3f}\n",
+            "{:>9} {:>10} {:>6} {:>9.3f} {:>7.4f}\n",
             i, chunk.cfg.get_nbins(), chunk.nominal_f_start,
             chunk.nominal_f_end, chunk.actual_f_start, chunk.actual_f_end,
-            chunk.ncoords, chunk.max_sugg, chunk.branch_max, chunk.nsegments,
-            chunk.chunk_memory_gb);
+            chunk.ncoords, format_pow2(chunk.max_sugg), chunk.branch_max,
+            chunk.nsegments, chunk.chunk_memory_gb, chunk.pd);
         std::cout << std::format(
             "       predicted peak {}, live ring {}, batch {}\n",
-            chunk.predicted_peak, chunk.predicted_live, chunk.batch_size);
+            format_pow2(chunk.predicted_peak),
+            format_pow2(chunk.predicted_live), chunk.batch_size);
     }
 
     std::cout << "Groups of equal nbins, each with its own workspaces:\n";
@@ -635,7 +646,7 @@ void print_ep_plan(const loki::algorithms::EPRegionPlanner<FoldType>& planner,
         std::cout << std::format(
             "  chunks {}..{}: nbins {}, max_sugg {}, branch_max {}, {} "
             "worker(s)\n",
-            begin, end - 1, nbins, max_sugg, branch_max, workers);
+            begin, end - 1, nbins, format_pow2(max_sugg), branch_max, workers);
         begin = end;
     }
     std::cout << std::format("Plan cache: {}\n",

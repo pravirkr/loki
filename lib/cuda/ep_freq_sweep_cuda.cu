@@ -36,6 +36,7 @@
 #include "lib/cuda/workspace_cuda.cuh"
 #include "lib/detail/nvtx.hpp"
 #include "lib/detail/timing.hpp"
+#include "lib/detail/utils.hpp"
 #include "lib/pipelines/ep_freq_sweep_engine.hpp"
 #include "lib/pipelines/ep_sweep_common.hpp"
 
@@ -132,7 +133,7 @@ public:
             "device memory (limit {:.2f} GB), max_sugg: {}",
             m_device_id, m_region_planner.get_nchunks(),
             stats.get_max_memory_gb(), stats.get_memory_limit_gb(),
-            stats.get_max_sugg());
+            utils::format_pow2(stats.get_max_sugg()));
 
         // The FFA workspace needs the deepest chunk's level count.
         SizeType max_levels = 0;
@@ -323,7 +324,7 @@ public:
                 "EPFreqSweep (CUDA {}): allocated a workspace for chunks "
                 "{}..{} (nbins={}, max_sugg={}, {:.2f} GB)",
                 m_device_id, group.begin, group.end - 1, effective_nbins,
-                capacity, workspace.get_memory_usage_gib());
+                utils::format_pow2(capacity), workspace.get_memory_usage_gib());
 
             algorithms::EPCudaSharedPipeline<FoldTypeCUDA> pipeline{
                 .ep_workspace  = &workspace,
@@ -351,12 +352,14 @@ public:
                              i + 1, nchunks, chunk.nominal_f_start,
                              chunk.nominal_f_end, chunk.actual_f_start,
                              chunk.actual_f_end, chunk.cfg.get_nbins(),
-                             chunk.max_sugg);
+                             utils::format_pow2(chunk.max_sugg));
 
                 spdlog::info("EP chunk {}: predicted peak {}, live ring {}, "
                              "capacity {}, batch {}",
-                             i, chunk.predicted_peak, chunk.predicted_live,
-                             chunk.max_sugg, chunk.batch_size);
+                             i, utils::format_pow2(chunk.predicted_peak),
+                             utils::format_pow2(chunk.predicted_live),
+                             utils::format_pow2(chunk.max_sugg),
+                             chunk.batch_size);
                 pipeline.result_sink = [&result_writer,
                                         i](detail::EPResultPayload payload) {
                     payload.chunk_id = i;

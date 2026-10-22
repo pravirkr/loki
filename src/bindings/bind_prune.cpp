@@ -50,6 +50,8 @@ void bind_prune(py::module_& m) {
         .def_readonly("actual_f_start", &EPChunkConfig::actual_f_start)
         .def_readonly("actual_f_end", &EPChunkConfig::actual_f_end)
         .def_readonly("peak_complexity", &EPChunkConfig::peak_complexity)
+        .def_readonly("pd", &EPChunkConfig::pd)
+        .def_readonly("pd_se", &EPChunkConfig::pd_se)
         .def_readonly("chunk_memory_gb", &EPChunkConfig::chunk_memory_gb,
                       "Memory (GB) of this chunk run alone. The sweep peak, "
                       "with the shared FFA buffers grown across chunks, is "
@@ -81,6 +83,8 @@ void bind_prune(py::module_& m) {
         .def_readonly("predicted_peak", &EPChunkStats::predicted_peak)
         .def_readonly("predicted_live", &EPChunkStats::predicted_live)
         .def_readonly("peak_complexity", &EPChunkStats::peak_complexity)
+        .def_readonly("pd", &EPChunkStats::pd)
+        .def_readonly("pd_se", &EPChunkStats::pd_se)
         .def_readonly("memory_gb", &EPChunkStats::memory_gb,
                       "Memory (GB) of this chunk run alone: its workers, its "
                       "own shared FFA buffers and the input series.")

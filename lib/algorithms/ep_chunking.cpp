@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <format>
+#include <functional>
 #include <map>
 #include <numeric>
 #include <optional>
@@ -10,6 +11,7 @@
 #include <string>
 #include <tuple>
 #include <utility>
+#include <vector>
 
 #include <spdlog/spdlog.h>
 
@@ -49,6 +51,24 @@ struct EvaluatedChunk {
     std::vector<float> branching_pattern;
     bool indexable{true};
     double memory_gb{0.0}; ///< The chunk alone, with its own FFA buffers.
+    /// The region schedule the chunk runs.
+    std::vector<float> threshold_scheme{};
+    double pd{0.0};
+    double pd_se{0.0};
+};
+
+/// Chunk geometry: everything of a chunk that does not depend on its
+/// thresholds or on the batch.
+struct ChunkGeometry {
+    search::PulsarSearchConfig cfg;
+    SizeType ncoords{0};
+    SizeType branch_max{0};
+    SizeType nsegments{0};
+    SizeType fold_size{0};
+    SizeType buffer_size{0};
+    SizeType coord_size{0};
+    SizeType ffa_transient_bytes{0};
+    std::vector<float> branching_pattern;
 };
 
 /// FFA workspace and fold buffer: shared by every chunk of a sweep, so sized
@@ -152,7 +172,6 @@ public:
             spdlog::warn("EPRegionPlanner: minimum chunk does not fit; "
                          "retrying with CUDA batch={}",
                          m_memory.batch_size);
-            m_memo.clear();
             state = run_pass(designs, std::nullopt);
         }
         if (state.failure) {
@@ -214,9 +233,11 @@ private:
     double m_max_drift;
     double m_limit_gb;
     EPMemoryContext m_memory;
-    // Chunk evaluations are pure functions of (region, nominal band): reuse
-    // them across planning passes (each builds an FFAPlan).
-    std::map<MemoKey, EvaluatedChunk> m_memo;
+    // Geometry and designs are pure functions of (region, nominal band) and
+    // do not depend on the batch: reuse them across planning passes and
+    // batch retries.
+    std::map<MemoKey, ChunkGeometry> m_geometry;
+    std::map<MemoKey, ChunkDesign> m_designs;
 
     ChunkPlan finish_replan(PassState state, double cap_scale) const {
         finalize(state);
@@ -280,19 +301,18 @@ private:
         return ctx;
     }
 
-    const EvaluatedChunk& evaluate_chunk(SizeType design_idx,
-                                         const RegionDesign& design,
-                                         double nominal_start,
-                                         double nominal_end) {
+    const ChunkGeometry& geometry(SizeType design_idx,
+                                  const RegionDesign& design,
+                                  double nominal_start,
+                                  double nominal_end) {
         const MemoKey key{design_idx, nominal_start, nominal_end};
-        if (const auto it = m_memo.find(key); it != m_memo.end()) {
+        if (const auto it = m_geometry.find(key); it != m_geometry.end()) {
             return it->second;
         }
-        const auto nbins       = design.nbins;
         const double act_start = nominal_start * (1.0 - m_max_drift);
         const double act_end   = nominal_end * (1.0 + m_max_drift);
-        auto chunk_cfg = m_base_cfg.get_updated_ep_config(nbins, design.eta,
-                                                          act_start, act_end);
+        auto chunk_cfg         = m_base_cfg.get_updated_ep_config(
+            design.nbins, design.eta, act_start, act_end);
         const plans::FFAPlan<FoldType> plan(chunk_cfg);
         // The branching pattern depends on the chunk's own band (not
         // monotone in width), so branch_max must come from the chunk's
@@ -300,14 +320,12 @@ private:
         // the reference segment (the snail scheme enters only through the
         // span and the step to the next epoch, the same for every start;
         // tests/cpp/api/ep_branching_t.cpp), so one forecast serves every
-        // run: it costs a parameter-grid pass per call, which repeating
-        // per run made the planning cost grow with n_runs.
+        // run.
         const auto forecast = plan.forecast_branching(m_poly_basis);
-        EvaluatedChunk c{
+        ChunkGeometry g{
             .cfg         = std::move(chunk_cfg),
             .ncoords     = plan.get_ncoords().back(),
             .branch_max  = compute_branch_max(forecast.max_children),
-            .batch_size  = m_memory.batch_size,
             .nsegments   = design.nsegments,
             .fold_size   = plan.get_fold_size(),
             .buffer_size = plan.get_buffer_size(),
@@ -317,35 +335,64 @@ private:
             .branching_pattern =
                 std::vector<float>(forecast.mean.begin(), forecast.mean.end()),
         };
-        double peak = static_cast<double>(c.ncoords);
-        double live = peak;
-        {
-            const auto complexities =
-                design.evaluate ? design.evaluate(c.branching_pattern)
-                                : std::vector<double>{static_cast<double>(
-                                      design.safe_complexity)};
-            double previous = static_cast<double>(c.ncoords);
-            for (const double complexity : complexities) {
-                if (!utils::is_finite(complexity) || complexity < 0.0) {
-                    throw std::logic_error(
-                        "EPRegionPlanner: invalid complexity forecast");
-                }
-                const double population =
-                    std::ceil(static_cast<double>(c.ncoords) * complexity);
-                peak              = std::max(peak, population);
-                live              = std::max(live, previous + population);
-                c.peak_complexity = std::max(c.peak_complexity, complexity);
-                previous          = population;
-            }
+        return m_geometry.emplace(key, std::move(g)).first->second;
+    }
+
+    /// The design of a band (the whole region's, in practice); synthetic and
+    /// exact when the region has no designer.
+    const ChunkDesign& chunk_design(SizeType design_idx,
+                                    const RegionDesign& design,
+                                    double nominal_start,
+                                    double nominal_end,
+                                    const ChunkGeometry& g) {
+        const MemoKey key{design_idx, nominal_start, nominal_end};
+        if (const auto it = m_designs.find(key); it != m_designs.end()) {
+            return it->second;
         }
+        ChunkDesign d;
+        if (design.design) {
+            d = design.design(g.branching_pattern, nominal_start, nominal_end);
+            if (d.thresholds.size() != g.branching_pattern.size()) {
+                throw std::logic_error("EPRegionPlanner: a chunk design "
+                                       "needs one threshold per stage");
+            }
+        } else {
+            d = ChunkDesign{
+                .thresholds = std::vector<float>(g.branching_pattern.size()),
+                .forecast   = {.complexity = {static_cast<double>(
+                                   design.safe_complexity)}},
+            };
+        }
+        return m_designs.emplace(key, std::move(d)).first->second;
+    }
+
+    /// Sizes a chunk of geometry @p g for a per-stage complexity forecast
+    /// and its ring margin.
+    EvaluatedChunk sized(const ChunkGeometry& g,
+                         SizeType nbins,
+                         std::span<const double> complexity,
+                         std::span<const double> margin) const {
+        EvaluatedChunk c{
+            .cfg                 = g.cfg,
+            .ncoords             = g.ncoords,
+            .branch_max          = g.branch_max,
+            .batch_size          = m_memory.batch_size,
+            .nsegments           = g.nsegments,
+            .fold_size           = g.fold_size,
+            .buffer_size         = g.buffer_size,
+            .coord_size          = g.coord_size,
+            .ffa_transient_bytes = g.ffa_transient_bytes,
+            .branching_pattern   = g.branching_pattern,
+        };
+        const auto ring   = ep_ring_forecast(c.ncoords, complexity, margin);
+        c.peak_complexity = ring.peak_complexity;
         // An oversized probe must fail fitting, rather than aborting the
         // width search before it can try a narrower chunk.
-        const auto bound = ep_tree_index_limit(m_memory.kind);
-        c.indexable      = live < static_cast<double>(bound);
-        c.predicted_peak =
-            static_cast<SizeType>(std::min(peak, static_cast<double>(bound)));
-        c.predicted_live =
-            static_cast<SizeType>(std::min(live, static_cast<double>(bound)));
+        const auto bound =
+            static_cast<double>(ep_tree_index_limit(m_memory.kind));
+        c.indexable      = ring.live < bound;
+        c.predicted_peak = static_cast<SizeType>(std::min(ring.peak, bound));
+        c.predicted_live = static_cast<SizeType>(std::min(ring.live, bound));
         try {
             c.max_sugg = ep_tree_capacity(c.predicted_live, c.batch_size,
                                           c.branch_max, m_memory.kind);
@@ -355,21 +402,60 @@ private:
             c.max_sugg  = 0;
         }
         c.memory_gb = chunk_alone_gb(nbins, c);
-        return m_memo.emplace(key, std::move(c)).first->second;
+        return c;
+    }
+
+    /// A chunk sized from the region design: the region schedule's noise
+    /// population on the chunk's own branching pattern. A schedule's pass
+    /// rates do not depend on the branching, which only multiplies the leaves
+    /// of each stage (State::gen_next on both backends), so they carry over
+    /// exactly: c'_s = c_s * prod_{j <= s} bp'_j / bp_j, with the design's Pd
+    /// and ring margin. Without a designer the synthetic complexity is used
+    /// as is.
+    EvaluatedChunk scaled(SizeType design_idx,
+                          const RegionDesign& design,
+                          double nominal_start,
+                          double nominal_end) {
+        const auto& g =
+            geometry(design_idx, design, nominal_start, nominal_end);
+        const auto& region =
+            geometry(design_idx, design, design.f_start, design.f_end);
+        const auto& d = chunk_design(design_idx, design, design.f_start,
+                                     design.f_end, region);
+        std::vector<double> complexity = d.forecast.complexity;
+        if (design.design) {
+            const auto& bp_region = region.branching_pattern;
+            const auto& bp_chunk  = g.branching_pattern;
+            if (bp_chunk.size() != bp_region.size() ||
+                complexity.size() > bp_region.size()) {
+                throw std::logic_error("EPRegionPlanner: a chunk's stages "
+                                       "differ from its region's");
+            }
+            double ratio = 1.0;
+            for (SizeType s = 0; s < complexity.size(); ++s) {
+                if (!(bp_region[s] > 0.0F)) {
+                    throw std::logic_error("EPRegionPlanner: the region's "
+                                           "branching must be positive");
+                }
+                ratio *= static_cast<double>(bp_chunk[s]) /
+                         static_cast<double>(bp_region[s]);
+                complexity[s] *= ratio;
+            }
+        }
+        auto c = sized(g, design.nbins, complexity, ep_ring_margin(d.forecast));
+        c.threshold_scheme = d.thresholds;
+        c.pd               = d.pd;
+        c.pd_se            = d.pd_se;
+        return c;
     }
 
     void subdivide_region(SizeType design_idx,
                           const RegionDesign& design,
                           PassState& state) {
+        using EvalFn         = std::function<EvaluatedChunk(double, double)>;
         const double f_start = design.f_start;
         const double f_end   = design.f_end;
         const auto nbins     = design.nbins;
-
-        auto evaluate = [&](double nominal_start,
-                            double nominal_end) -> const EvaluatedChunk& {
-            return evaluate_chunk(design_idx, design, nominal_start,
-                                  nominal_end);
-        };
 
         // Memory of the sweep if chunk `c` is placed next: per-worker
         // buffers of the chunk's nbins run plus the shared FFA buffers and
@@ -406,23 +492,32 @@ private:
         const double region_span = f_end - f_start;
         const double boundary_tolerance =
             std::max(kBisectionToleranceHz, kRelativeTolerance * region_span);
+        // Start of a chunk of @p width ending at @p end: exactly f_start
+        // when the chunk reaches it.
+        const auto start_of = [&](double end, double width) {
+            const double start = end - width;
+            return start - f_start <= kRelativeTolerance * boundary_tolerance
+                       ? f_start
+                       : start;
+        };
 
         auto bisect_chunk =
-            [&](double current_f_end, double min_width, EvaluatedChunk min_eval,
-                double max_width) -> std::pair<double, EvaluatedChunk> {
+            [&](const EvalFn& evaluate, double current_f_end, double min_width,
+                EvaluatedChunk min_eval, double max_width,
+                double tolerance) -> std::pair<double, EvaluatedChunk> {
             double lo_width     = min_width;
             double hi_width     = max_width;
             EvaluatedChunk best = std::move(min_eval);
 
-            for (SizeType step = 0; step < kMaxBisectionSteps &&
-                                    (hi_width - lo_width) > boundary_tolerance;
+            for (SizeType step = 0;
+                 step < kMaxBisectionSteps && (hi_width - lo_width) > tolerance;
                  ++step) {
                 const double mid_width = std::midpoint(lo_width, hi_width);
-                const auto& probe =
-                    evaluate(current_f_end - mid_width, current_f_end);
+                auto probe =
+                    evaluate(start_of(current_f_end, mid_width), current_f_end);
                 if (fits(probe).ok) {
                     lo_width = mid_width;
-                    best     = probe;
+                    best     = std::move(probe);
                 } else {
                     hi_width = mid_width;
                 }
@@ -434,44 +529,54 @@ private:
                 const double width =
                     anchor +
                     (max_width - anchor) * static_cast<double>(probe_idx) / 8.0;
-                const auto& probe =
-                    evaluate(current_f_end - width, current_f_end);
-                if (fits(probe).ok && width > lo_width) {
+                if (width <= lo_width) {
+                    continue;
+                }
+                auto probe =
+                    evaluate(start_of(current_f_end, width), current_f_end);
+                if (fits(probe).ok) {
                     lo_width = width;
-                    best     = probe;
+                    best     = std::move(probe);
                 }
             }
-            return {current_f_end - lo_width, std::move(best)};
+            return {start_of(current_f_end, lo_width), std::move(best)};
         };
 
-        const auto find_largest_fitting = [&](double current_f_end)
+        // The widest chunk ending at current_f_end, at most @p max_width
+        // wide, that fits by @p evaluate. Sets state.failure if none does.
+        const auto find_largest_fitting =
+            [&](const EvalFn& evaluate, double current_f_end, double max_width,
+                double tolerance)
             -> std::optional<std::pair<double, EvaluatedChunk>> {
-            const double remaining = current_f_end - f_start;
-            const auto& full_eval  = evaluate(f_start, current_f_end);
-            if (fits(full_eval).ok) {
-                return std::pair{f_start, full_eval};
+            {
+                auto full =
+                    evaluate(start_of(current_f_end, max_width), current_f_end);
+                if (fits(full).ok) {
+                    return std::pair{start_of(current_f_end, max_width),
+                                     std::move(full)};
+                }
             }
-
-            const double min_width = std::min(remaining, kMinChunkWidthHz);
-            const double min_start = current_f_end - min_width;
-            const auto& min_eval   = evaluate(min_start, current_f_end);
+            const double min_width = std::min(max_width, kMinChunkWidthHz);
+            const double min_start = start_of(current_f_end, min_width);
+            auto min_eval          = evaluate(min_start, current_f_end);
             if (const auto min_fit = fits(min_eval); !min_fit.ok) {
                 // A wider band can have a cheaper discrete branching pattern.
                 // Do not conclude infeasibility from the minimum probe alone.
                 std::optional<std::pair<double, EvaluatedChunk>> wider;
                 for (SizeType step = 1; step <= 8; ++step) {
                     const double width =
-                        min_width + (remaining - min_width) *
+                        min_width + (max_width - min_width) *
                                         static_cast<double>(step) / 8.0;
-                    const auto& probe =
-                        evaluate(current_f_end - width, current_f_end);
+                    auto probe =
+                        evaluate(start_of(current_f_end, width), current_f_end);
                     if (fits(probe).ok) {
-                        wider = {width, probe};
+                        wider = {width, std::move(probe)};
                     }
                 }
                 if (wider) {
-                    return bisect_chunk(current_f_end, wider->first,
-                                        std::move(wider->second), remaining);
+                    return bisect_chunk(evaluate, current_f_end, wider->first,
+                                        std::move(wider->second), max_width,
+                                        tolerance);
                 }
                 state.failure = PassFailure{
                     .message = std::format(
@@ -497,7 +602,12 @@ private:
                 };
                 return std::nullopt;
             }
-            return bisect_chunk(current_f_end, min_width, min_eval, remaining);
+            return bisect_chunk(evaluate, current_f_end, min_width,
+                                std::move(min_eval), max_width, tolerance);
+        };
+
+        const EvalFn size_fn = [&](double start, double end) {
+            return scaled(design_idx, design, start, end);
         };
 
         // Sliver absorption: merge a tiny leftover into the last chunk.
@@ -509,32 +619,15 @@ private:
                 remainder > (kSliverFactor * boundary_tolerance)) {
                 return std::nullopt;
             }
-            const auto& merged = evaluate(f_start, current_f_end);
+            auto merged = size_fn(f_start, current_f_end);
             if (fits(merged).ok) {
                 return merged;
             }
             return std::nullopt;
         };
 
-        double current_f_end = f_end;
-        while (current_f_end > f_start) {
-            auto found = find_largest_fitting(current_f_end);
-            if (!found) {
-                return;
-            }
-            auto [nominal_start, eval] = std::move(*found);
-            if (auto absorbed =
-                    try_absorb_sliver(current_f_end, nominal_start)) {
-                nominal_start = f_start;
-                eval          = std::move(*absorbed);
-            }
-            if (nominal_start >= current_f_end) {
-                throw std::runtime_error(std::format(
-                    "EPRegionPlanner: no progress in [{:08.3f}, {:08.3f}] Hz.",
-                    f_start, current_f_end));
-            }
-
-            const double nominal_end   = current_f_end;
+        const auto place = [&](double nominal_start, double nominal_end,
+                               const EvaluatedChunk& eval) {
             const double nominal_width = nominal_end - nominal_start;
             const double actual_start  = nominal_start * (1.0 - m_max_drift);
             const double actual_end    = nominal_end * (1.0 + m_max_drift);
@@ -546,7 +639,7 @@ private:
             const auto chunk_id = plan.chunk_cfgs.size();
             plan.chunk_cfgs.push_back(EPChunkConfig{
                 .cfg                 = eval.cfg,
-                .threshold_scheme    = design.threshold_scheme,
+                .threshold_scheme    = eval.threshold_scheme,
                 .branching_pattern   = eval.branching_pattern,
                 .max_sugg            = eval.max_sugg,
                 .branch_max          = eval.branch_max,
@@ -558,6 +651,8 @@ private:
                 .actual_f_start      = actual_start,
                 .actual_f_end        = actual_end,
                 .peak_complexity     = eval.peak_complexity,
+                .pd                  = eval.pd,
+                .pd_se               = eval.pd_se,
                 .chunk_memory_gb     = eval.memory_gb,
                 .nsegments           = design.nsegments,
                 .ncoords             = eval.ncoords,
@@ -583,6 +678,8 @@ private:
                 .predicted_peak   = eval.predicted_peak,
                 .predicted_live   = eval.predicted_live,
                 .peak_complexity  = eval.peak_complexity,
+                .pd               = eval.pd,
+                .pd_se            = eval.pd_se,
                 .memory_gb        = eval.memory_gb,
                 .overlap_fraction = overlap_fraction,
             });
@@ -598,7 +695,29 @@ private:
             state.shared.absorb(eval);
             plan.max_sugg    = std::max(plan.max_sugg, eval.max_sugg);
             plan.max_ncoords = std::max(plan.max_ncoords, eval.ncoords);
-            current_f_end    = nominal_start;
+        };
+
+        double current_f_end = f_end;
+        while (current_f_end > f_start) {
+            auto found = find_largest_fitting(size_fn, current_f_end,
+                                              current_f_end - f_start,
+                                              boundary_tolerance);
+            if (!found) {
+                return;
+            }
+            auto [nominal_start, eval] = std::move(*found);
+            if (auto absorbed =
+                    try_absorb_sliver(current_f_end, nominal_start)) {
+                nominal_start = f_start;
+                eval          = std::move(*absorbed);
+            }
+            if (nominal_start >= current_f_end) {
+                throw std::runtime_error(std::format(
+                    "EPRegionPlanner: no progress in [{:08.3f}, {:08.3f}] Hz.",
+                    f_start, current_f_end));
+            }
+            place(nominal_start, current_f_end, eval);
+            current_f_end = nominal_start;
         }
     }
 };

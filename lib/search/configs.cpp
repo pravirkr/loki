@@ -27,6 +27,7 @@
 #include "loki/common/backend.hpp"
 #include "loki/common/types.hpp"
 #include "loki/detection/score.hpp"
+#include "loki/search/orbit.hpp"
 
 #include "lib/detail/error_check.hpp"
 #include "lib/detail/psr_utils.hpp"
@@ -140,19 +141,13 @@ void validate_toml_document(const toml::table& root,
         std::string_view{"birdies"},
     };
     static constexpr std::array kSearchKeys{
-        std::string_view{"f_min"},
-        std::string_view{"f_max"},
-        std::string_view{"acc_min"},
-        std::string_view{"acc_max"},
-        std::string_view{"jerk_min"},
-        std::string_view{"jerk_max"},
-        std::string_view{"nbins"},
-        std::string_view{"eta"},
-        std::string_view{"ducy_max"},
-        std::string_view{"wtsp"},
-        std::string_view{"snr_min"},
-        std::string_view{"use_fourier"},
-        std::string_view{"use_boxcar_kadane"},
+        std::string_view{"f_min"},       std::string_view{"f_max"},
+        std::string_view{"acc_min"},     std::string_view{"acc_max"},
+        std::string_view{"jerk_min"},    std::string_view{"jerk_max"},
+        std::string_view{"orbit"},       std::string_view{"nbins"},
+        std::string_view{"eta"},         std::string_view{"ducy_max"},
+        std::string_view{"wtsp"},        std::string_view{"snr_min"},
+        std::string_view{"use_fourier"}, std::string_view{"use_boxcar_kadane"},
     };
     static constexpr std::array kPerformanceKeys{
         std::string_view{"nthreads"},
@@ -201,6 +196,21 @@ void validate_toml_document(const toml::table& root,
     }
     if (const auto* search = root["search"].as_table()) {
         collect_unknown_keys(*search, kSearchKeys, "search", errors);
+        if (const auto* orbit = (*search)["orbit"].node()) {
+            static constexpr std::array kOrbitKeys{
+                std::string_view{"order"},
+                std::string_view{"p_orb_min"},
+                std::string_view{"p_orb_min_tobs"},
+                std::string_view{"m_c_max"},
+                std::string_view{"m_p_min"},
+            };
+            if (const auto* table = orbit->as_table()) {
+                collect_unknown_keys(*table, kOrbitKeys, "search.orbit",
+                                     errors);
+            } else {
+                errors.emplace_back("search.orbit: must be a table");
+            }
+        }
     }
     if (const auto* perf = root["performance"].as_table()) {
         collect_unknown_keys(*perf, kPerformanceKeys, "performance", errors);
@@ -493,6 +503,18 @@ use_fourier = true
 # Peak detection algorithm: false for standard multi-width boxcar, true for Kadane
 use_boxcar_kadane = false
 
+# Alternative to acc_* and jerk_*: limits of physical circular orbits. The
+# acceleration, jerk (and snap) limits and a Doppler-widened frequency range
+# are derived from them (f_min and f_max are then intrinsic spin
+# frequencies). Exactly one of p_orb_min (seconds) and p_orb_min_tobs (in units
+# of the observation length) is required. Coherent Taylor searches commonly
+# use p_orb_min_tobs = 10 (accel), 5 (jerk) or 3 (snap).
+# [search.orbit]
+# order = "jerk"          # "accel" | "jerk" | "snap"
+# p_orb_min_tobs = 5.0
+# m_c_max = 10.0          # companion mass, M_sun
+# m_p_min = 1.2           # pulsar mass, M_sun
+
 [performance]
 # Number of CPU OpenMP threads (clamped to hardware concurrency)
 nthreads = 4
@@ -586,6 +608,37 @@ FFATomlConfig read_ffa_tables(const toml::table& tbl) {
         }
         if (const auto val = (*search)["jerk_max"].value<double>()) {
             cfg.jerk_max = val;
+        }
+        if (const auto* orbit = (*search)["orbit"].as_table()) {
+            FFATomlConfig::OrbitLimits o;
+            const auto require_double = [&](std::string_view key) {
+                const auto node = (*orbit)[key];
+                if (!node) {
+                    return std::optional<double>{};
+                }
+                const auto val = node.value<double>();
+                if (!val) {
+                    throw std::invalid_argument(
+                        std::format("search.orbit.{} must be a number", key));
+                }
+                return val;
+            };
+            if (const auto order = (*orbit)["order"].value<std::string>()) {
+                o.order = *order;
+            } else {
+                throw std::invalid_argument(
+                    "search.orbit.order must be set: \"accel\", \"jerk\" or "
+                    "\"snap\"");
+            }
+            o.p_orb_min      = require_double("p_orb_min");
+            o.p_orb_min_tobs = require_double("p_orb_min_tobs");
+            if (const auto val = require_double("m_c_max")) {
+                o.m_c_max = *val;
+            }
+            if (const auto val = require_double("m_p_min")) {
+                o.m_p_min = *val;
+            }
+            cfg.orbit = std::move(o);
         }
         if (auto val = (*search)["nbins"].value<int64_t>()) {
             cfg.nbins = static_cast<SizeType>(
@@ -711,6 +764,97 @@ io::PreprocessOptions FFATomlConfig::to_preprocess_options() const {
     return o;
 }
 
+namespace {
+
+/// [search.orbit]: the parameter limits of the circular orbits it allows.
+std::vector<ParamLimit>
+orbit_param_limits(const FFATomlConfig::OrbitLimits& orbit,
+                   double f_min,
+                   double f_max,
+                   double tobs,
+                   bool has_acc,
+                   bool has_jerk) {
+    if (has_acc || has_jerk) {
+        throw std::invalid_argument(
+            "search.orbit sets the parameter limits: remove the non-zero "
+            "search.acc_* and search.jerk_* (or the orbit table)");
+    }
+    SizeType poly_order = 0;
+    if (orbit.order == "accel") {
+        poly_order = 2;
+    } else if (orbit.order == "jerk") {
+        poly_order = 3;
+    } else if (orbit.order == "snap") {
+        poly_order = 4;
+    } else {
+        throw std::invalid_argument(std::format(
+            "search.orbit.order must be \"accel\", \"jerk\" or \"snap\", "
+            "got \"{}\"",
+            orbit.order));
+    }
+    if (orbit.p_orb_min.has_value() == orbit.p_orb_min_tobs.has_value()) {
+        throw std::invalid_argument(
+            "search.orbit needs exactly one of p_orb_min (seconds) and "
+            "p_orb_min_tobs (units of the observation length)");
+    }
+    if (orbit.p_orb_min_tobs.has_value() &&
+        (!utils::is_finite(*orbit.p_orb_min_tobs) ||
+         *orbit.p_orb_min_tobs <= 0.0)) {
+        throw std::invalid_argument(
+            std::format("search.orbit.p_orb_min_tobs must be positive, got {}",
+                        *orbit.p_orb_min_tobs));
+    }
+    const double p_orb_min =
+        orbit.p_orb_min.value_or(orbit.p_orb_min_tobs.value_or(0.0) * tobs);
+    auto limits = circular_param_limits(f_min, f_max, poly_order,
+                                        {.p_orb_min = p_orb_min,
+                                         .m_c_max   = orbit.m_c_max,
+                                         .m_p_min   = orbit.m_p_min});
+    if (p_orb_min < tobs) {
+        spdlog::warn("search.orbit: p_orb_min = {:.4g} s is shorter than the "
+                     "observation ({:.4g} s); a Taylor phase model of order "
+                     "{} is not coherent over a whole orbit",
+                     p_orb_min, tobs, poly_order);
+    }
+    static constexpr std::array kNames{"snap", "jerk", "accel"};
+    std::string derived;
+    for (SizeType i = 0; i + 1 < limits.size(); ++i) {
+        derived += std::format("{} +/- {:.4g}, ",
+                               kNames[kNames.size() - (limits.size() - 1) + i],
+                               limits[i].max);
+    }
+    spdlog::info("search.orbit ({}, P_orb >= {:.4g} s = {:.3g} T_obs, m_c <= "
+                 "{:.3g}, m_p >= {:.3g}): {}f = [{:.6g}, {:.6g}] Hz",
+                 orbit.order, p_orb_min, p_orb_min / tobs, orbit.m_c_max,
+                 orbit.m_p_min, derived, limits.back().min, limits.back().max);
+    return limits;
+}
+
+/// Logs the circular orbit an explicit box with jerk implies, and warns when
+/// it is faster than the observation.
+void report_implied_orbit(std::span<const ParamLimit> limits, double tobs) {
+    const auto implied = implied_circular_orbit(limits);
+    if (!implied) {
+        return;
+    }
+    const double ratio = implied->p_orb / tobs;
+    if (ratio < 1.0) {
+        spdlog::warn(
+            "search: the acc/jerk limits reach circular orbits of "
+            "P_orb = {:.4g} s ({:.2g} T_obs) with a companion of at "
+            "least {:.3g} M_sun (m_p 1.4); a Taylor phase model is not "
+            "coherent over a whole orbit. Consider [search.orbit].",
+            implied->p_orb, ratio, implied->m_c_min);
+    } else {
+        spdlog::info("search: the acc/jerk limits reach circular orbits of "
+                     "P_orb = {:.4g} s ({:.2g} T_obs) with a companion of at "
+                     "least {:.3g} M_sun (m_p 1.4)",
+                     implied->p_orb, ratio, implied->m_c_min);
+    }
+}
+
+} // namespace
+
 FFASearchConfig
 FFATomlConfig::to_search_config(std::optional<SizeType> override_nsamps,
                                 std::optional<double> override_tsamp) const {
@@ -727,17 +871,22 @@ FFATomlConfig::to_search_config(std::optional<SizeType> override_nsamps,
             "Both jerk_min and jerk_max must be specified together.");
     }
 
-    std::vector<ParamLimit> limits;
     const bool has_jerk = jerk_min.has_value() && jerk_max.has_value() &&
                           (*jerk_min != 0.0 || *jerk_max != 0.0);
     const bool has_acc  = acc_min.has_value() && acc_max.has_value() &&
                           (*acc_min != 0.0 || *acc_max != 0.0);
+    const double tobs   = static_cast<double>(final_nsamps) * final_tsamp;
 
-    if (has_jerk) {
+    std::vector<ParamLimit> limits;
+    if (orbit.has_value()) {
+        limits =
+            orbit_param_limits(*orbit, f_min, f_max, tobs, has_acc, has_jerk);
+    } else if (has_jerk) {
         limits.push_back({.min = *jerk_min, .max = *jerk_max});
         limits.push_back(
             {.min = acc_min.value_or(0.0), .max = acc_max.value_or(0.0)});
         limits.push_back({.min = f_min, .max = f_max});
+        report_implied_orbit(limits, tobs);
     } else if (has_acc) {
         limits.push_back({.min = *acc_min, .max = *acc_max});
         limits.push_back({.min = f_min, .max = f_max});
@@ -1952,6 +2101,18 @@ validation_significance = 5.0
 
 # Use the conservative tile of the Fourier search
 use_conservative_tile = false
+
+# Alternative to acc_* and jerk_*: limits of physical circular orbits. The
+# acceleration, jerk (and snap) limits and a Doppler-widened frequency range
+# are derived from them (f_min and f_max are then intrinsic spin
+# frequencies). Exactly one of p_orb_min (seconds) and p_orb_min_tobs (in units
+# of the observation length) is required. Coherent Taylor searches commonly
+# use p_orb_min_tobs = 10 (accel), 5 (jerk) or 3 (snap).
+# [search.orbit]
+# order = "jerk"          # "accel" | "jerk" | "snap"
+# p_orb_min_tobs = 5.0
+# m_c_max = 10.0          # companion mass, M_sun
+# m_p_min = 1.2           # pulsar mass, M_sun
 
 [performance]
 # Number of CPU OpenMP threads (0 = all hardware threads)
