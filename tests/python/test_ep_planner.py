@@ -76,6 +76,9 @@ def test_ep_region_planner_cuda_fits_the_device_budget(tmp_path: Path) -> None:
         backend="cuda",
     )
     assert reloaded.nchunks == planner.nchunks
+    for chunk, cached in zip(planner.chunk_cfgs, reloaded.chunk_cfgs, strict=True):
+        assert cached.pd == chunk.pd
+        assert cached.pd_se == chunk.pd_se
     on_cpu = libloki.prune.EPRegionPlannerTime(cfg, plan_cache_file=str(cache))
     assert on_cpu.nchunks == planner.nchunks
     for cpu_chunk, cuda_chunk in zip(
@@ -123,7 +126,10 @@ def test_ep_planner_seeded_forecast_and_run_aware_cache(tmp_path: Path) -> None:
         assert first.predicted_peak == other.predicted_peak
         assert first.predicted_live == other.predicted_live
         assert first.batch_size == other.batch_size
-        assert first.max_sugg & (first.max_sugg - 1) == 0
+        assert first.pd == other.pd
+        assert first.threshold_scheme == other.threshold_scheme
+        # The ring is sized in multiples of 1024 leaves, not powers of two.
+        assert first.max_sugg % 1024 == 0
         assert first.max_sugg > first.predicted_live
     cache = tmp_path / "run_plan.h5"
     planner.save_cache(str(cache))
@@ -214,6 +220,10 @@ def test_ep_planner_accepts_best_available_path(tmp_path: Path, backend: str) ->
 
     with h5py.File(cache) as saved:
         assert saved.attrs["min_pd"] == 1.0
+        # The threshold pipeline is part of the plan.
+        assert saved.attrs["dts_algorithm"] == "shared-per-region"
+        assert saved.attrs["dts_mode"] == "shared"
+        assert saved.attrs["dts_w_terminal"] == 1.0
     # Reloading preserves the user's requested constraint and chosen scheme.
     reloaded = libloki.prune.EPRegionPlannerTime(
         cfg, min_pd=1.0, ref_segs=[0], plan_cache_file=cache, backend=backend
@@ -264,7 +274,11 @@ def test_ep_rejects_bins_above_1024(nbins: int, nbins_max: int) -> None:
 
 
 @pytest.mark.skipif(not _cuda_built(), reason="CUDA backend not built")
-def test_cuda_threshold_simulation_over_budget_is_rejected() -> None:
+@pytest.mark.parametrize("limit_gb", [1.0, 0.6])
+def test_cuda_threshold_design_fits_the_budget(limit_gb: float) -> None:
+    # nbins 1024 would need far more than the limit for its search pools: the
+    # search steps its budget down and runs at 64 bins, and the schedule is
+    # re-fitted at 1024 bins.
     cfg = libloki.configs.PulsarSearchConfig(
         nsamps=1 << 16,
         tsamp=64e-6,
@@ -274,9 +288,93 @@ def test_cuda_threshold_simulation_over_budget_is_rejected() -> None:
         ducy_max=0.3,
         wtsp=1.2,
         nthreads=1,
-        max_process_memory_gb=1.0,
+        max_process_memory_gb=limit_gb,
         bseg_brute=1024,
         bseg_ffa=8192,
     )
-    with pytest.raises(RuntimeError, match="threshold simulation.*needs"):
-        libloki.prune.EPRegionPlannerFourier(cfg, backend="cuda")
+    planner = libloki.prune.EPRegionPlannerFourier(cfg, backend="cuda")
+    assert planner.nchunks > 0
+
+
+@pytest.mark.parametrize("backend", ["cpu", "cuda"])
+def test_ep_planner_runs_region_designs(backend: str) -> None:
+    """Every chunk runs its region's design, and the plan fits."""
+    if backend == "cuda" and not _cuda_built():
+        pytest.skip("CUDA backend not built")
+    cfg = libloki.configs.PulsarSearchConfig(
+        nsamps=1 << 16,
+        tsamp=64e-6,
+        nbins=32,
+        eta=1.0,
+        param_limits=np.array([[-10.0, 10.0], [100.0, 145.0]], dtype=np.float64),
+        ducy_max=0.3,
+        use_fourier=False,
+        nthreads=1,
+        max_process_memory_gb=1.0,
+        bseg_brute=1024,
+        bseg_ffa=(1 << 16) // 8,
+        prune_poly_order=2,
+    )
+    planner = libloki.prune.EPRegionPlannerTime(
+        cfg, min_pd=0.5, ref_segs=[0], backend=backend
+    )
+    stats = planner.stats
+    assert 0.0 < stats.max_memory_gb <= stats.memory_limit_gb
+    for chunk in planner.chunk_cfgs:
+        assert len(chunk.threshold_scheme) == len(chunk.branching_pattern)
+        assert 0.0 < chunk.pd <= 1.0
+        assert chunk.pd_se >= 0.0
+        assert chunk.max_sugg >= chunk.predicted_live
+        assert chunk.pd >= 0.9 * 0.5 - 4.0 * chunk.pd_se
+    # One design per region (the regions here differ only in nbins).
+    designs = {
+        (chunk.cfg.nbins, tuple(chunk.threshold_scheme)) for chunk in planner.chunk_cfgs
+    }
+    assert len(designs) == len({chunk.cfg.nbins for chunk in planner.chunk_cfgs})
+
+
+def test_ep_plan_cache_made_on_cuda_serves_cpu(tmp_path: Path) -> None:
+    """A CUDA plan is reused on the CPU under the CPU's own memory limit."""
+    if not _cuda_built():
+        pytest.skip("CUDA backend not built")
+
+    def config(nthreads: int, memory_gb: float) -> libloki.configs.PulsarSearchConfig:
+        return libloki.configs.PulsarSearchConfig(
+            nsamps=1 << 16,
+            tsamp=64e-6,
+            nbins=32,
+            eta=1.0,
+            param_limits=np.array([[-10.0, 10.0], [100.0, 145.0]], dtype=np.float64),
+            ducy_max=0.3,
+            use_fourier=False,
+            nthreads=nthreads,
+            max_process_memory_gb=memory_gb,
+            bseg_brute=1024,
+            bseg_ffa=(1 << 16) // 8,
+            prune_poly_order=2,
+        )
+
+    cache = str(tmp_path / "plan.h5")
+    gpu = libloki.prune.EPRegionPlannerTime(
+        config(1, 1.0), min_pd=0.5, ref_segs=[0], plan_cache_file=cache, backend="cuda"
+    )
+    cpu = libloki.prune.EPRegionPlannerTime(
+        config(2, 4.0), min_pd=0.5, ref_segs=[0], plan_cache_file=cache, backend="cpu"
+    )
+    assert cpu.nchunks == gpu.nchunks
+    for a, b in zip(gpu.chunk_cfgs, cpu.chunk_cfgs, strict=True):
+        assert a.nominal_f_start == b.nominal_f_start
+        assert a.nominal_f_end == b.nominal_f_end
+        assert list(a.threshold_scheme) == list(b.threshold_scheme)
+        assert a.pd == b.pd
+        assert b.max_sugg >= b.predicted_live
+    assert 0.0 < cpu.stats.max_memory_gb <= cpu.stats.memory_limit_gb
+    # On the same backend the limit is part of the plan.
+    with pytest.raises(ValueError, match="max_process_memory_gb"):
+        libloki.prune.EPRegionPlannerTime(
+            config(1, 2.0),
+            min_pd=0.5,
+            ref_segs=[0],
+            plan_cache_file=cache,
+            backend="cuda",
+        )

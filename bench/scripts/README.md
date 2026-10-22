@@ -42,7 +42,20 @@ python bench/scripts/ffa/compare_ffa.py $LOKI_BENCH_WORK/runs/{base,new}_W4/W4_f
 | `jerk_test.py` | `simulate` the 2^25-sample jerk pulsar (needs pyloki); `run` a fixed-threshold `EPMultiPass` (3 runs, 140-145 Hz) on a backend, domain and nbins, and print the execute time. |
 | `compare_multipass.py` | Two `EPMultiPass` results run by run: bit-exactness, level counts, Jaccard, matched dS/N, top-10. |
 | `compare_sweep.py` | Two `EPFreqSweep` results: candidate sets and level statistics within a tolerance. |
-| `../ep_production_cuda.py`, `../measure_ep_peak_rss.py`, `../thresholds_check_cuda.py`, `../golden_schemes.py`, `../bias_study.py` (top level) | Planned EP sweeps, the memory model against peak RSS / device memory, and threshold-scheme checks (see each file's docstring). |
+| `ep_production_cuda.py`, `measure_ep_peak_rss.py` | Planned EP sweeps and the memory model against peak RSS / device memory (see each file's docstring). |
+
+## Threshold schemes (`schemes/`)
+
+| Script | Purpose |
+|---|---|
+| `thresholds_check_cuda.py` | One CUDA `DynamicThresholdScheme` run per mode at production size (`--mode improved,shared,robust`): in-run, solved and re-scored path; `--save` writes the states for plotting. |
+| `golden_schemes.py` | Bit-exact CUDA golden harness (`make`, `check`, `repro`). |
+| `golden_evaluate.py` | Bit-exact CUDA golden of `evaluate()` (normal, H0-floor and H1-extinction schedules, several nbins and trial counts): `make`, `check`. Goldens live in the ignored `bench/scripts/golden/`. |
+| `golden_solve.py` | Bit-exact CUDA regression golden of `solve()` in modes `shared` and `robust` on the `solve_suite.py` cases: `record`, `check`. Writes `golden/solve_golden.json` (ignored); valid for the recording toolchain only. |
+| `solve_suite.py` | Reduced version of the workspace suite: `solve()` on the production and issue #15 patterns, judged by a direct count of fresh signal trials and an independent noise evaluation (gates: delivered Pd, reported against judged Pd). Any backend; `--mode shared|robust`. |
+| `nbins_proxy_study.py` | The planner searches thresholds at a small simulation nbins: rescores proxy and native schedules at the true nbins (Pd, cost per detection). |
+| `bias_study.py` | In-run against re-scored cost and Pd of the selected path, over seeds and search trial counts. |
+| `pd_calibration_study.py` | Why the selected path delivers less than `min_pd` (`cells`, `ntrials`, `modes`) and what `calibrate()` delivers (`calib`, with `--guess analytic|pilot`). Results go to `bench/scripts/results/pd_calibration/`. |
 
 ## Profiling (`common/`)
 

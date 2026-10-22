@@ -317,8 +317,8 @@ TEST_CASE("CUDA threshold pools are allocated by run() only",
     if (!loki::is_available(Backend::kCUDA)) {
         SKIP("needs a CUDA build");
     }
-    const std::string mode =
-        GENERATE(std::string{"legacy"}, std::string{"improved"});
+    const std::string mode = GENERATE(
+        std::string{"legacy"}, std::string{"improved"}, std::string{"shared"});
     const std::vector<float> bp{2.0F, 2.0F, 1.5F, 2.0F};
     const std::vector<float> thresholds(bp.size(), 1.5F);
     const auto make = [&] {
@@ -331,7 +331,7 @@ TEST_CASE("CUDA threshold pools are allocated by run() only",
     {
         auto warm_up = make();
         warm_up->run(6);
-        (void)warm_up->evaluate(thresholds, 64, 21);
+        (void)warm_up->evaluate(thresholds, 64, 21, false);
     }
     const auto used_bytes =
         [free_start = loki::cuda_utils::get_cuda_memory_usage().first] {
@@ -369,7 +369,7 @@ TEST_CASE("CUDA threshold pools are allocated by run() only",
     const auto run_bytes = static_cast<double>(engine->run_memory_bytes());
     REQUIRE(run_bytes > 8 * kConstantsBytes);
     // Construction and evaluation hold no simulation pools.
-    const auto evaluated = engine->evaluate(thresholds, 64, 21);
+    const auto evaluated = engine->evaluate(thresholds, 64, 21, false);
     CHECK(evaluated.size() == bp.size());
     CHECK(used_bytes() <= kConstantsBytes);
 
@@ -379,7 +379,7 @@ TEST_CASE("CUDA threshold pools are allocated by run() only",
     // A second run reuses the pools and repeats the first exactly.
     engine->run(6);
     same_states(first, engine->get_states());
-    same_states(evaluated, engine->evaluate(thresholds, 64, 21));
+    same_states(evaluated, engine->evaluate(thresholds, 64, 21, false));
 
     engine.reset();
     CHECK(used_bytes() <= kConstantsBytes);

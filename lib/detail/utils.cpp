@@ -8,6 +8,7 @@
 #include <optional>
 #include <span>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include <omp.h>
@@ -22,6 +23,13 @@ SizeType round_div(SizeType num, SizeType den) {
     return (num + (den / 2)) / den;
 }
 } // namespace
+
+std::string format_pow2(SizeType n) {
+    if (n == 0) {
+        return "0";
+    }
+    return std::format("2^{:.1f}", std::log2(static_cast<double>(n)));
+}
 
 float diff_max(const float* __restrict__ x,
                const float* __restrict__ y,

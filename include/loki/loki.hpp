@@ -15,6 +15,7 @@
 #include "loki/pipelines/ep_freq_sweep.hpp"  // IWYU pragma: export
 #include "loki/pipelines/ffa_freq_sweep.hpp" // IWYU pragma: export
 #include "loki/search/configs.hpp"           // IWYU pragma: export
+#include "loki/search/orbit.hpp"             // IWYU pragma: export
 #include "loki/simulation/modulate.hpp"      // IWYU pragma: export
 #include "loki/simulation/pulse.hpp"         // IWYU pragma: export
 #include "loki/simulation/simulation.hpp"    // IWYU pragma: export

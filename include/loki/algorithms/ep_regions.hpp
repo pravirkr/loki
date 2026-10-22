@@ -18,6 +18,7 @@ namespace loki::algorithms {
  */
 struct EPChunkConfig {
     search::PulsarSearchConfig cfg;
+    /// Thresholds of this chunk: its region's design.
     std::vector<float> threshold_scheme;
     std::vector<float> branching_pattern;
     SizeType max_sugg{1U << 18U};
@@ -33,6 +34,10 @@ struct EPChunkConfig {
     double actual_f_start{0.0};
     double actual_f_end{0.0};
     double peak_complexity{1.0};
+    /// Pd of the threshold scheme at the chunk's nbins, measured on a fresh
+    /// signal sample, and its binomial standard error.
+    double pd{0.0};
+    double pd_se{0.0};
     /// Memory of this chunk alone: its own per-worker buffers and FFA
     /// buffers plus the inputs. Not the sweep peak (see EPRegionStats).
     double chunk_memory_gb{0.0};
@@ -67,6 +72,8 @@ struct EPChunkStats {
     SizeType predicted_peak{0};
     SizeType predicted_live{0};
     double peak_complexity{0.0};
+    double pd{0.0};
+    double pd_se{0.0};
     /// Memory of this chunk alone (EPChunkConfig::chunk_memory_gb).
     double memory_gb{0.0};
     double overlap_fraction{0.0};
@@ -172,12 +179,16 @@ ep_sweep_n_workers(int nthreads,
 /**
  * @brief A planner for EP (Extreme Pruning) regions across a frequency sweep.
  *
- * Subdivides a frequency search range into optimal memory-bounded chunks.
- * Uses generate_ffa_regions() for coarse bands (nbins, eta), runs
- * DynamicThresholdScheme simulation once per coarse band, and bisects chunk
- * widths to respect max_process_memory_gb. Thresholds are selected per coarse
- * band; population forecasts, ring capacity, branch_max and batch are planned
- * per chunk. There is no fixed beam cap.
+ * Subdivides a frequency search range into memory-bounded chunks.
+ * generate_ffa_regions() gives the regions (nbins, eta), which are never
+ * merged. Each region's thresholds are designed once with
+ * DynamicThresholdScheme (mode "shared" on both backends) over its whole
+ * band, and every chunk of the region runs them. The region is split from its
+ * top frequency down. A candidate chunk's noise population is the design's on
+ * the chunk's own branching pattern (exact: a schedule's pass rates do not
+ * depend on the branching); the world tree (max_sugg) is sized from it with
+ * a margin for its Monte Carlo error, and the chunk is accepted only if the
+ * exact memory of the sweep with it fits. The chunk's Pd is the design's.
  *
  * Memory model (mirrors EPFreqSweep, see docs/memory.md): per-worker buffers
  * (EP workspace, irfft scratch and, when harvesting is enabled, the harvest

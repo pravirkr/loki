@@ -170,3 +170,37 @@ SMALL_KW = {
     "beam_width": 1.5,
     "wtsp": 1.2,
 }
+
+# Issue #15 Taylor patterns: FFAPlanTime(cfg).get_branching_pattern("taylor")
+# with FFASearchConfig(nsamps=2**23, tsamp=8.192e-5, nbins=32, eta=1.0,
+# param_limits=[[-10, 10], [133.333, 200]], bseg_ffa=nsamps // nseg).
+# Rounded to 3 decimals; keyed by the number of segments nseg.
+BRANCHING_ISSUE15 = {
+    4: np.array([3.143, 4.818, 2.217], dtype=np.float32),
+    8: np.array([1.0, 3.0, 3.143, 1.0, 1.606, 5.604, 1.0], dtype=np.float32),
+    16: np.array(
+        [1.0, 3.0, 1.0, 1.0, 1.0, 6.075, 1.482, 1.0]
+        + [1.0, 1.0, 1.921, 1.391, 1.123, 1.0, 1.0],
+        dtype=np.float32,
+    ),
+    32: np.array(
+        [1.0, 3.0, 1.0, 1.0, 1.0, 3.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+        + [1.23, 1.646, 1.317, 1.125, 1.0, 1.0, 3.0, 1.0, 1.0, 1.0]
+        + [1.47, 1.307, 1.207, 1.152, 1.118, 1.004, 1.0, 1.0, 1.0, 1.0],
+        dtype=np.float32,
+    ),
+}
+
+# Issue #15 scheme settings (nbins 32); snr_final is varied (6, 8.1, 10).
+ISSUE15_KW = {
+    "ref_ducy": 0.1,
+    "nbins": 32,
+    "ntrials": 1024,
+    "nprobs": 10,
+    "prob_min": 0.05,
+    "snr_final": 8.1,
+    "nthresholds": 100,
+    "ducy_max": 0.2,
+    "beam_width": 0.7,
+    "wtsp": 1.5,
+}

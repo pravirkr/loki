@@ -10,6 +10,7 @@
 #include <format>
 #include <functional>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <numeric>
@@ -488,13 +489,15 @@ struct ThreadLocalBuffers {
     std::vector<float> profile_scaled;
     std::vector<float> noise;
     std::vector<float> scores;
+    std::vector<float> fold_best;
     FoldsType folds_h0;
     FoldsType folds_h1;
 
     ThreadLocalBuffers(SizeType nbins, SizeType max_ntrials)
         : profile_scaled(nbins),
           noise(max_ntrials * nbins),
-          scores(max_ntrials) {}
+          scores(max_ntrials),
+          fold_best(nbins) {}
 };
 
 // make_keyed_pcg32 purposes. 0-3 belong to evaluate(); run() uses its own, so a
@@ -502,6 +505,8 @@ struct ThreadLocalBuffers {
 constexpr uint32_t kPurposeRunInit = 4; // initial H0/H1 folds
 constexpr uint32_t kPurposeRunStep = 5; // one simulated stage transition
 constexpr uint32_t kNoTarget       = 0xFFFFFFFFU;
+// Seed salt of the pilot simulation of the "pilot" beam guess.
+constexpr uint64_t kPilotSalt = 0x9110CA11ULL;
 
 /**
  * Names one simulation work item of run(): (stage, parent cell, target
@@ -589,6 +594,7 @@ simulate_score_prune_fused(const FoldVectorHandle& folds_in,
                            BoxcarWidthsCache& box_cache,
                            float threshold,
                            search::TimerStats::TimerMap& thread_timers,
+                           bool keep_best,
                            float bias_snr   = 0.0F,
                            float var_add    = 1.0F,
                            SizeType ntrials = 1024) {
@@ -622,6 +628,8 @@ simulate_score_prune_fused(const FoldVectorHandle& folds_in,
     const float var_new      = folds_in.variance() + var_add;
     const float stdnoise     = std::sqrt(var_new);
     SizeType ntrials_success = 0;
+    auto fold_best           = std::span(buffers.fold_best).first(nbins);
+    float snr_best           = std::numeric_limits<float>::lowest();
 
     float* __restrict__ out_ptr = output_data.data();
     for (SizeType i = 0; i < ntrials; ++i) {
@@ -640,14 +648,30 @@ simulate_score_prune_fused(const FoldVectorHandle& folds_in,
                                       profile_scaled[j];
         }
         // Compute SNR
-        const bool snr_above_threshold =
-            detection::snr_boxcar_threshold_with_cache(
-                std::span<const float>(out_ptr + out_offset, nbins), nbins,
-                box_cache, threshold, stdnoise);
+        const auto fold = std::span<const float>(out_ptr + out_offset, nbins);
+        bool snr_above_threshold = false;
+        if (keep_best && ntrials_success == 0) {
+            // Until a trial passes, keep a copy of the best that fails
+            const float snr = detection::snr_boxcar_max_with_cache(
+                fold, nbins, box_cache, stdnoise);
+            snr_above_threshold = snr > threshold;
+            if (!snr_above_threshold && snr > snr_best) {
+                snr_best = snr;
+                std::ranges::copy(fold, fold_best.begin());
+            }
+        } else {
+            snr_above_threshold = detection::snr_boxcar_threshold_with_cache(
+                fold, nbins, box_cache, threshold, stdnoise);
+        }
         // Prune if SNR is below threshold
         if (snr_above_threshold) {
             ++ntrials_success;
         }
+    }
+    // None passed: the best stands in, at the resolution of one trial
+    if (keep_best && ntrials_success == 0) {
+        std::ranges::copy(fold_best, out_ptr);
+        ntrials_success = 1;
     }
     thread_timers["add_score"] += timer.stop();
     const float success =
@@ -698,6 +722,47 @@ void prune_folds(FoldVectorHandle& folds_in,
     folds_in.set_ntrials(ntrials_success);
 }
 
+// Next state from survivor counts. Not inlined, so that every caller gets
+// the same arithmetic under -ffast-math (the decide pass of
+// run_segment_improved must match the folds it commits bit for bit).
+[[gnu::noinline]] State next_state(const State& state_cur,
+                                   SizeType n_surv_h0,
+                                   SizeType ntrials_h0,
+                                   SizeType n_surv_h1,
+                                   SizeType ntrials_h1,
+                                   float threshold,
+                                   float nbranches) {
+    const float success_h0 =
+        static_cast<float>(n_surv_h0) / static_cast<float>(ntrials_h0);
+    const float success_h1 =
+        static_cast<float>(n_surv_h1) / static_cast<float>(ntrials_h1);
+    return state_cur.gen_next(threshold, success_h0, success_h1, nbranches);
+}
+
+// The state transition_state() returns, from survivor counts only: no
+// folds are copied.
+State transition_state_only(const State& state_cur,
+                            const FoldsType& folds_cur,
+                            float threshold,
+                            float nbranches) {
+    const auto ntrials_h0 = folds_cur.folds_h0->ntrials();
+    const auto ntrials_h1 = folds_cur.folds_h1->ntrials();
+    const auto scores_h0  = folds_cur.scores_h0->data();
+    const auto scores_h1  = folds_cur.scores_h1->data();
+    SizeType n_surv_h0    = 0;
+    for (SizeType i = 0; i < ntrials_h0; ++i) {
+        n_surv_h0 += scores_h0[i] > threshold ? 1 : 0;
+    }
+    // None passed: the best stands in, at the resolution of one trial
+    n_surv_h0          = std::max<SizeType>(n_surv_h0, 1);
+    SizeType n_surv_h1 = 0;
+    for (SizeType i = 0; i < ntrials_h1; ++i) {
+        n_surv_h1 += scores_h1[i] > threshold ? 1 : 0;
+    }
+    return next_state(state_cur, n_surv_h0, ntrials_h0, n_surv_h1, ntrials_h1,
+                      threshold, nbranches);
+}
+
 std::pair<State, FoldsType>
 transition_state(const State& state_cur,
                  const FoldsType& folds_cur,
@@ -742,6 +807,14 @@ transition_state(const State& state_cur,
             ++n_surv_h0;
         }
     }
+    // None passed: the best stands in, at the resolution of one trial
+    if (n_surv_h0 == 0) {
+        const auto ibest = static_cast<SizeType>(std::distance(
+            scores_h0.begin(), std::ranges::max_element(scores_h0)));
+        std::copy_n(h0_in.begin() + static_cast<IndexType>(ibest * nbins),
+                    nbins, h0_out.begin());
+        n_surv_h0 = 1;
+    }
 
     SizeType n_surv_h1 = 0;
     for (SizeType i = 0; i < ntrials_h1; ++i) {
@@ -762,13 +835,9 @@ transition_state(const State& state_cur,
         (*thread_timers)["io"] += timer.stop();
     }
 
-    const float success_h0 =
-        static_cast<float>(n_surv_h0) / static_cast<float>(ntrials_h0);
-    const float success_h1 =
-        static_cast<float>(n_surv_h1) / static_cast<float>(ntrials_h1);
-
     // Persistent storage only needs pruned folds; scores are stage-local.
-    return {state_cur.gen_next(threshold, success_h0, success_h1, nbranches),
+    return {next_state(state_cur, n_surv_h0, ntrials_h0, n_surv_h1, ntrials_h1,
+                       threshold, nbranches),
             FoldsType{std::move(folds_h0_out), std::move(folds_h1_out)}};
 }
 
@@ -847,10 +916,11 @@ gen_next_using_thresh(const State& state_cur,
     auto rng_h1                        = key.stream(1);
     auto [folds_h0_pruned, success_h0] = simulate_score_prune_fused(
         *folds_cur.folds_h0, profile, rng_h0, manager, buffers, box_cache,
-        threshold, thread_timers, 0.0F, var_add, ntrials);
+        threshold, thread_timers, /*keep_best=*/true, 0.0F, var_add, ntrials);
     auto [folds_h1_pruned, success_h1] = simulate_score_prune_fused(
         *folds_cur.folds_h1, profile, rng_h1, manager, buffers, box_cache,
-        threshold, thread_timers, bias_snr, var_add, ntrials);
+        threshold, thread_timers, /*keep_best=*/false, bias_snr, var_add,
+        ntrials);
     const auto state_next =
         state_cur.gen_next(threshold, success_h0, success_h1, nbranches);
     return {state_next,
@@ -892,7 +962,8 @@ gen_next_using_surv_prob(const State& state_cur,
 
     auto [folds_h1_pruned, success_h1] = simulate_score_prune_fused(
         *folds_cur.folds_h1, profile, rng_h1, manager, buffers, box_cache,
-        threshold_h0, thread_timers, bias_snr, var_add, ntrials);
+        threshold_h0, thread_timers, /*keep_best=*/false, bias_snr, var_add,
+        ntrials);
 
     const auto state_next =
         state_cur.gen_next(threshold_h0, success_h0, success_h1, nbranches);
@@ -946,7 +1017,10 @@ public:
                         std::string_view mode,
                         int nthreads,
                         std::optional<uint64_t> seed,
-                        bool simulate)
+                        bool simulate,
+                        std::string_view guess,
+                        float /*min_pd*/,
+                        float /*w_terminal*/)
         : m_branching_pattern(branching_pattern.begin(),
                               branching_pattern.end()),
           m_ref_ducy(ref_ducy),
@@ -957,9 +1031,36 @@ public:
           m_trials_start(trials_start),
           m_mode(dynamic_threshold_mode_from_string(mode)),
           m_nthreads(nthreads),
-          m_simulate(simulate) {
+          m_simulate(simulate),
+          m_guess(guess) {
+        const auto beam_guess = detail::beam_guess_from_string(guess);
+        if (is_shared_family(m_mode)) {
+            // make_thresholds_cpu builds modes 'shared' and 'robust' with
+            // their own engine.
+            throw std::logic_error(
+                "ThresholdsCpuEngine: modes 'shared' and 'robust' have their "
+                "own engine");
+        }
         if (m_branching_pattern.empty()) {
             throw std::invalid_argument("Branching pattern is empty");
+        }
+        if (m_simulate) {
+            // The checks of every backend's search (evaluation-only engines
+            // take any grid).
+            detail::validate_scheme_inputs(
+                {.branching_pattern = m_branching_pattern,
+                 .ref_ducy          = ref_ducy,
+                 .ducy_max          = ducy_max,
+                 .wtsp              = wtsp,
+                 .beam_width        = beam_width,
+                 .prob_min          = prob_min,
+                 .snr_final         = snr_final,
+                 .nbins             = nbins,
+                 .ntrials           = ntrials,
+                 .nprobs            = nprobs,
+                 .nthresholds       = nthresholds,
+                 .batch_size        = 1},
+                "ThresholdsCpu");
         }
         m_profile    = simulation::generate_folded_profile(nbins, ref_ducy);
         m_thresholds = detail::compute_thresholds(0.1F, snr_final, nthresholds);
@@ -973,11 +1074,34 @@ public:
         m_nthreads    = std::max(m_nthreads, 1);
         m_timer_stats = search::TimerStats(m_nthreads);
 
-        m_bias_snr   = snr_final / static_cast<float>(std::sqrt(m_nstages + 1));
-        m_guess_path = detail::guess_scheme(
-            m_nstages, snr_final, m_branching_pattern, m_trials_start);
-
-        m_seed = seed.value_or(std::random_device{}());
+        m_bias_snr = snr_final / static_cast<float>(std::sqrt(m_nstages + 1));
+        m_seed     = seed.value_or(std::random_device{}());
+        if (beam_guess == detail::BeamGuess::kWindow) {
+            // Data-driven beam: every threshold a feasible path may use, and
+            // all transitions between consecutive beams (see run()).
+            m_beam = detail::window_scheme(
+                simulate_h1_scores(detail::kWindowTrials,
+                                   detail::derive_seed(m_seed, kPilotSalt)),
+                detail::kWindowTrials, m_nstages, m_probs.front());
+            m_guess_path.resize(m_nstages);
+            std::ranges::transform(
+                m_beam.lo, m_beam.hi, m_guess_path.begin(),
+                [](float lo, float hi) { return 0.5F * (lo + hi); });
+            m_all_transitions = true;
+        } else {
+            if (beam_guess == detail::BeamGuess::kPilot) {
+                m_guess_path = detail::pilot_guess_scheme(
+                    simulate_h1_scores(detail::kPilotGuessTrials,
+                                       detail::derive_seed(m_seed, kPilotSalt)),
+                    detail::kPilotGuessTrials, m_branching_pattern,
+                    m_trials_start);
+            } else {
+                m_guess_path = detail::guess_scheme(
+                    m_nstages, snr_final, m_branching_pattern, m_trials_start);
+            }
+            m_beam = detail::centred_beam(m_guess_path, m_beam_width,
+                                          m_thresholds.back());
+        }
 
         m_states.resize(m_nstages * m_nthresholds * m_nprobs, State{});
         // An evaluation-only engine needs neither the pools nor stage 0.
@@ -1044,20 +1168,59 @@ public:
         timing::SimpleTimer total_timer;
         total_timer.start();
 
+        const SizeType neigh = m_all_transitions ? m_nthresholds : thres_neigh;
+        // "window" beam: a first pass ranks cell candidates by cost so far;
+        // the second ranks them by cost so far plus the first pass's cost
+        // to go of their noise survivors (detail::cost_to_go_scheme).
+        m_cost_to_go.clear();
+        run_pass(neigh);
+        if (m_all_transitions && m_mode == DynamicThresholdMode::kImproved) {
+            m_cost_to_go =
+                detail::cost_to_go_scheme(m_states, m_thresholds, m_probs,
+                                          m_nstages, m_nthresholds, m_nprobs);
+            if (!m_cost_to_go.empty()) {
+                run_pass(neigh);
+            }
+        }
+
+        detail::warn_empty_stages(m_states, m_nstages, m_nthresholds, m_nprobs,
+                                  "ThresholdsCpu");
+        const float total_time = total_timer.stop();
+        spdlog::info("Dynamic threshold scheme complete: {}",
+                     m_timer_stats.summary(total_time));
+    }
+
+    // One forward pass into m_states. Every pass after the first starts
+    // from a fresh grid (stage 0 draws the same streams again).
+    void run_pass(SizeType neigh) {
+        if (m_has_run) {
+            for (auto& folds : m_folds_current) {
+                folds.invalidate();
+            }
+            for (auto& folds : m_folds_next) {
+                folds.invalidate();
+            }
+            std::ranges::fill(m_states, State{});
+            if (m_mode == DynamicThresholdMode::kImproved) {
+                init_states_improved();
+            } else {
+                init_states_legacy();
+            }
+        }
+        m_has_run = true;
         progress::ProgressGuard const progress_guard(true);
         auto bar =
             progress::make_standard_bar("Computing scheme", m_nstages - 1);
-
         for (SizeType istage = 1; istage < m_nstages; ++istage) {
             if (m_mode == DynamicThresholdMode::kImproved) {
-                run_segment_improved(istage, thres_neigh);
+                run_segment_improved(istage, neigh);
                 m_manager->swap_pools();
                 std::swap(m_folds_current, m_folds_next);
                 for (auto& fold_opt : m_folds_next) {
                     fold_opt.invalidate();
                 }
             } else {
-                run_segment_legacy(istage, thres_neigh);
+                run_segment_legacy(istage, neigh);
                 m_manager->swap_pools();
                 std::swap(m_folds_current, m_folds_next);
                 for (auto& fold_opt : m_folds_next) {
@@ -1067,10 +1230,6 @@ public:
             bar.set_progress(istage);
         }
         bar.mark_as_completed();
-
-        const float total_time = total_timer.stop();
-        spdlog::info("Dynamic threshold scheme complete: {}",
-                     m_timer_stats.summary(total_time));
     }
 
     // Save
@@ -1093,6 +1252,7 @@ public:
         file.createAttribute("wtsp", m_wtsp);
         file.createAttribute("beam_width", m_beam_width);
         file.createAttribute("mode", mode_to_string(m_mode));
+        file.createAttribute("guess", m_guess);
         file.createAttribute("seed", m_seed);
         file.createAttribute("nthreads", m_nthreads);
 
@@ -1107,6 +1267,8 @@ public:
         file.createDataSet("thresholds", m_thresholds);
         file.createDataSet("probs", m_probs);
         file.createDataSet("guess_path", m_guess_path);
+        file.createDataSet("beam_lo", m_beam.lo);
+        file.createDataSet("beam_hi", m_beam.hi);
         // Define the 3D dataspace for states
         std::vector<SizeType> dims = {m_nstages, m_nthresholds, m_nprobs};
         HighFive::DataSetCreateProps props_states;
@@ -1122,7 +1284,39 @@ public:
 
     std::vector<State> evaluate(std::span<const float> thresholds,
                                 SizeType ntrials,
-                                std::optional<uint64_t> seed) const override {
+                                std::optional<uint64_t> seed,
+                                bool h0_only) const override {
+        return evaluate_impl(thresholds, ntrials,
+                             seed.value_or(std::random_device{}()), nullptr,
+                             h0_only);
+    }
+
+    uint64_t get_seed() const override { return m_seed; }
+
+    std::vector<float> simulate_h1_scores(SizeType ntrials,
+                                          uint64_t seed) const override {
+        const std::vector<float> open(m_nstages,
+                                      std::numeric_limits<float>::lowest());
+        std::vector<float> h1_scores(m_nstages * ntrials, 0.0F);
+        evaluate_impl(open, ntrials, seed, &h1_scores, false);
+        return h1_scores;
+    }
+
+    std::vector<SizeType>
+    get_current_thresholds_idx(SizeType istage) const override {
+        return detail::beam_indices(m_thresholds, m_beam.lo[istage],
+                                    m_beam.hi[istage]);
+    }
+
+private:
+    /// evaluate(); when @p h1_scores is set, also stores every stage's H1
+    /// scores (stage-major) before pruning. @p h0_only skips the H1 branch
+    /// (success_h1 = 1 in the states).
+    std::vector<State> evaluate_impl(std::span<const float> thresholds,
+                                     SizeType ntrials,
+                                     uint64_t eval_seed,
+                                     std::vector<float>* h1_scores,
+                                     bool h0_only) const {
         if (thresholds.size() != m_nstages) {
             throw std::invalid_argument(
                 "DynamicThresholdScheme::evaluate: need one threshold per "
@@ -1133,23 +1327,27 @@ public:
                 "DynamicThresholdScheme::evaluate: ntrials must be in "
                 "[1, 2^20]");
         }
-        const uint64_t eval_seed = seed.value_or(std::random_device{}());
         const auto ntrials_u     = static_cast<uint32_t>(ntrials);
         const SizeType nbins     = m_nbins;
-        std::vector<float> folds(2 * ntrials * nbins, 0.0F);
-        std::vector<float> generated(2 * ntrials * nbins, 0.0F);
-        std::vector<float> noise(2 * ntrials * nbins, 0.0F);
-        std::vector<float> scores(2 * ntrials, 0.0F);
+        const uint32_t branch_hi = h0_only ? 1U : 2U;
+        std::vector<float> folds(branch_hi * ntrials * nbins, 0.0F);
+        std::vector<float> generated(branch_hi * ntrials * nbins, 0.0F);
+        std::vector<float> noise(branch_hi * ntrials * nbins, 0.0F);
+        std::vector<float> scores(branch_hi * ntrials, 0.0F);
         std::array<uint32_t, 2> n_in = {ntrials_u, ntrials_u};
         // Every draw comes from a stream keyed on (purpose, stage, branch,
         // trial), and the survivor compaction below stays serial, so the
         // states are identical for any thread count.
         const int nthreads = m_nthreads;
-        const auto n_items = static_cast<std::int64_t>(2 * ntrials);
+        const auto n_items = static_cast<std::int64_t>(branch_hi * ntrials);
+        // H1 scores only: the H0 branch is not simulated
+        const std::int64_t item_lo =
+            h1_scores != nullptr ? static_cast<std::int64_t>(ntrials) : 0;
+        const uint32_t branch_lo = h1_scores != nullptr ? 1U : 0U;
 
         // NOLINTNEXTLINE(openmp-use-default-none): clauses cannot name members
 #pragma omp parallel for num_threads(nthreads)
-        for (std::int64_t item = 0; item < n_items; ++item) {
+        for (std::int64_t item = item_lo; item < n_items; ++item) {
             const auto branch = static_cast<uint32_t>(item / ntrials_u);
             const auto trial  = static_cast<uint32_t>(item % ntrials_u);
             auto rng =
@@ -1170,7 +1368,7 @@ public:
             const auto stage = static_cast<uint32_t>(istage);
             // NOLINTNEXTLINE(openmp-use-default-none): clauses cannot name members
 #pragma omp parallel for num_threads(nthreads)
-            for (std::int64_t item = 0; item < n_items; ++item) {
+            for (std::int64_t item = item_lo; item < n_items; ++item) {
                 const auto branch = static_cast<uint32_t>(item / ntrials_u);
                 const auto trial  = static_cast<uint32_t>(item % ntrials_u);
                 auto rng = math::make_keyed_pcg32(eval_seed, 2U, stage, 0U,
@@ -1200,7 +1398,7 @@ public:
                 }
             }
             const float stdnoise = std::sqrt(var_in + 1.0F);
-            for (uint32_t branch = 0; branch < 2; ++branch) {
+            for (uint32_t branch = branch_lo; branch < branch_hi; ++branch) {
                 detection::detail::snr_boxcar_2d_max_cpu(
                     std::span<const float>(generated.data() +
                                                (branch * ntrials * nbins),
@@ -1210,8 +1408,22 @@ public:
                                      ntrials),
                     ntrials, nbins, stdnoise, nthreads);
             }
-            std::array<uint32_t, 2> counts = {0, 0};
-            for (uint32_t branch = 0; branch < 2; ++branch) {
+            if (h1_scores != nullptr) {
+                std::copy_n(scores.data() + ntrials, ntrials,
+                            h1_scores->data() + (istage * ntrials));
+            }
+            std::array<uint32_t, 2> counts = {0, h0_only ? ntrials_u : 0U};
+            if (h1_scores != nullptr) {
+                // Nothing is pruned: every trial survives in its own slot, so
+                // the compaction is the identity. Swap instead of copying.
+                folds.swap(generated);
+                counts[1] = ntrials_u;
+                n_in[1]   = ntrials_u;
+            }
+            for (uint32_t branch = branch_lo; branch < branch_hi; ++branch) {
+                if (h1_scores != nullptr) {
+                    break;
+                }
                 const float* branch_scores = scores.data() + (branch * ntrials);
                 uint32_t n                 = 0;
                 for (uint32_t trial = 0; trial < ntrials_u; ++trial) {
@@ -1225,6 +1437,16 @@ public:
                         ++n;
                     }
                 }
+                // No H0 survivor: keep the best noise trial, counted as one
+                if (branch == 0 && n == 0) {
+                    const auto best = static_cast<uint32_t>(
+                        std::max_element(branch_scores,
+                                         branch_scores + ntrials) -
+                        branch_scores);
+                    std::copy_n(generated.data() + (best * nbins), nbins,
+                                folds.data());
+                    n = 1;
+                }
                 counts[branch] = n;
                 n_in[branch]   = n;
             }
@@ -1236,33 +1458,13 @@ public:
             states[istage] = next;
             prev           = next;
             var_in += 1.0F;
-            if (counts[0] == 0 || counts[1] == 0) {
+            if (counts[1] == 0) {
                 break;
             }
         }
         return states;
     }
 
-    std::vector<SizeType>
-    get_current_thresholds_idx(SizeType istage) const override {
-        const auto guess       = m_guess_path[istage];
-        const auto half_extent = m_beam_width;
-        const auto lower_bound = std::max(0.0F, guess - half_extent);
-        const auto upper_bound =
-            std::min(m_thresholds.back(), guess + half_extent);
-
-        std::vector<SizeType> result;
-        for (SizeType i = 0; i < m_thresholds.size(); ++i) {
-            if (m_thresholds[i] >= lower_bound &&
-                m_thresholds[i] <= upper_bound) {
-                result.push_back(i);
-            }
-        }
-
-        return result;
-    }
-
-private:
     std::vector<float> m_branching_pattern;
     float m_ref_ducy;
     SizeType m_ntrials;
@@ -1284,10 +1486,18 @@ private:
     std::vector<SizeType> m_box_score_widths;
     float m_bias_snr;
     std::vector<float> m_guess_path;
+    detail::BeamBounds m_beam;
+    // "window" beam: every pair of consecutive beam thresholds is a
+    // transition, whatever thres_neigh.
+    bool m_all_transitions{false};
+    // "window" beam: cost to go per stage of the second pass.
+    std::vector<float> m_cost_to_go;
+    bool m_has_run{false};
     std::vector<State> m_states;
 
     search::TimerStats m_timer_stats;
     bool m_simulate;
+    std::string m_guess;
     std::unique_ptr<DualPoolFoldManager> m_manager;
     FoldGrid m_folds_current;
     FoldGrid m_folds_next;
@@ -1301,25 +1511,51 @@ private:
         }
     }
 
-    std::pair<SizeType, SizeType> compute_max_allocations_needed() {
+    SizeType max_beam_size() const {
         SizeType max_active_per_stage = 0;
         for (SizeType istage = 0; istage < m_nstages; ++istage) {
-            auto const active_thresholds = get_current_thresholds_idx(istage);
             max_active_per_stage =
-                std::max(max_active_per_stage, active_thresholds.size());
+                std::max(max_active_per_stage,
+                         get_current_thresholds_idx(istage).size());
         }
+        return max_active_per_stage;
+    }
+
+    // (fold slots, score slots) per pool of the DualPoolFoldManager.
+    std::pair<SizeType, SizeType> pool_slots() const {
+        const auto max_active_per_stage = max_beam_size();
         // h0 + h1 per cell
         const auto max_persistent = max_active_per_stage * m_nprobs * 2;
-        const auto max_temporary  = m_nthreads * 2;
+        const auto max_temporary  = static_cast<SizeType>(m_nthreads) * 2;
         SizeType fold_slots       = max_persistent + max_temporary;
         SizeType score_slots      = 0;
+        if (m_mode == DynamicThresholdMode::kImproved) {
+            // Full simulated folds (h0 + h1) per parent state in the beam;
+            // scores only live in those stage-local folds
+            fold_slots += max_active_per_stage * m_nprobs * 2;
+            score_slots = max_active_per_stage * m_nprobs * 2;
+        }
+        return {fold_slots, score_slots};
+    }
+
+    /// Host bytes of the simulation pools a simulating engine allocates
+    /// (also reported by an evaluation-only engine, which allocates none).
+    SizeType run_memory_bytes() const override {
+        const auto [fold_slots, score_slots] = pool_slots();
+        return 2 *
+               ((fold_slots * m_ntrials * m_nbins) +
+                (score_slots * m_ntrials)) *
+               sizeof(float);
+    }
+
+    std::pair<SizeType, SizeType> compute_max_allocations_needed() {
+        const auto max_active_per_stage = max_beam_size();
+        const auto max_persistent       = max_active_per_stage * m_nprobs * 2;
+        const auto max_temporary        = static_cast<SizeType>(m_nthreads) * 2;
+        const auto [fold_slots, score_slots] = pool_slots();
 
         if (m_mode == DynamicThresholdMode::kImproved) {
-            // Full simulated folds (h0 + h1) per parent state in the beam
             const auto max_sim_folds = max_active_per_stage * m_nprobs * 2;
-            fold_slots += max_sim_folds;
-            // Scores only live in stage-local sim_folds (h0 + h1 per parent)
-            score_slots = max_sim_folds;
             spdlog::info("Allocation analysis (improved): {} active thresholds "
                          "max, {} prob bins, {} threads",
                          max_active_per_stage, m_nprobs, m_nthreads);
@@ -1551,11 +1787,22 @@ private:
     }
 
     // Run a segment using pre-simulated folds (improved mode)
+    // Ranking of the candidates for one cell: cost so far, plus the cost
+    // to go of the noise survivors in the second pass of the "window" beam.
+    float rank(const State& state, SizeType istage) const noexcept {
+        if (m_cost_to_go.empty() || m_cost_to_go[istage] <= 0.0F) {
+            return state.complexity_cumul;
+        }
+        return state.complexity_cumul +
+               (m_cost_to_go[istage] * state.complexity);
+    }
+
     void run_segment_improved(SizeType istage, SizeType thres_neigh = 10) {
         const auto beam_idx_cur      = get_current_thresholds_idx(istage);
         const auto beam_idx_prev     = get_current_thresholds_idx(istage - 1);
         const auto stage_offset_prev = (istage - 1) * m_nthresholds * m_nprobs;
         const auto stage_offset_cur  = istage * m_nthresholds * m_nprobs;
+        constexpr SizeType kNoParent = std::numeric_limits<SizeType>::max();
 
         search::TimerStats segment_stats(m_nthreads);
         const auto sim_folds =
@@ -1565,12 +1812,16 @@ private:
 #pragma omp parallel num_threads(m_nthreads)
         {
             auto& thread_timers = segment_stats.get_thread_local();
+            // Winning parent cell of each probability bin of this threshold
+            std::vector<SizeType> winner(m_nprobs);
 #pragma omp for schedule(dynamic)
             for (SizeType i = 0; i < beam_idx_cur.size(); ++i) {
                 const auto ithres = beam_idx_cur[i];
+                std::ranges::fill(winner, kNoParent);
                 const auto neighbour_beam_indices =
                     utils::find_neighbouring_indices(beam_idx_prev, ithres,
                                                      thres_neigh);
+                // Decide: candidate states from survivor counts only
                 for (SizeType const jthresh : neighbour_beam_indices) {
                     for (SizeType kprob = 0; kprob < m_nprobs; ++kprob) {
                         const auto prev_fold_idx = (jthresh * m_nprobs) + kprob;
@@ -1587,10 +1838,9 @@ private:
                             continue;
                         }
 
-                        auto [cur_state, cur_fold_state] = transition_state(
+                        const auto cur_state = transition_state_only(
                             prev_state, prev_sim_fold, m_thresholds[ithres],
-                            m_branching_pattern[istage], *m_manager,
-                            &thread_timers);
+                            m_branching_pattern[istage]);
 
                         const auto iprob = utils::find_lower_bin_index(
                             m_probs, cur_state.success_h1_cumul);
@@ -1602,16 +1852,29 @@ private:
                         const auto cur_idx       = (ithres * m_nprobs) + iprob;
                         const auto cur_state_idx = stage_offset_cur + cur_idx;
 
-                        State& existing_state     = m_states[cur_state_idx];
-                        FoldsType& existing_folds = m_folds_next[cur_idx];
-
+                        State& existing_state = m_states[cur_state_idx];
                         if (existing_state.is_empty ||
-                            cur_state.complexity_cumul <
-                                existing_state.complexity_cumul) {
+                            rank(cur_state, istage) <
+                                rank(existing_state, istage)) {
                             existing_state = cur_state;
-                            existing_folds = std::move(cur_fold_state);
+                            winner[static_cast<SizeType>(iprob)] =
+                                prev_fold_idx;
                         }
                     }
+                }
+                // Commit: the surviving folds of each winner only
+                for (SizeType iprob = 0; iprob < m_nprobs; ++iprob) {
+                    if (winner[iprob] == kNoParent) {
+                        continue;
+                    }
+                    const auto prev_fold_idx         = winner[iprob];
+                    auto [cur_state, cur_fold_state] = transition_state(
+                        m_states[stage_offset_prev + prev_fold_idx],
+                        sim_folds[prev_fold_idx], m_thresholds[ithres],
+                        m_branching_pattern[istage], *m_manager,
+                        &thread_timers);
+                    m_folds_next[(ithres * m_nprobs) + iprob] =
+                        std::move(cur_fold_state);
                 }
             }
         }
@@ -1638,11 +1901,30 @@ make_thresholds_cpu(std::span<const float> branching_pattern,
                     std::string_view mode,
                     int nthreads,
                     std::optional<uint64_t> seed,
-                    bool simulate) {
+                    bool simulate,
+                    std::string_view guess,
+                    float min_pd,
+                    float w_terminal,
+                    float beam_sigma,
+                    float reach_sigma) {
+    if (is_shared_family(dynamic_threshold_mode_from_string(mode))) {
+        if (simulate) {
+            return make_thresholds_shared_cpu(
+                branching_pattern, ref_ducy, nbins, ntrials, nprobs, snr_final,
+                nthresholds, ducy_max, wtsp, beam_width, trials_start, nthreads,
+                seed, guess, mode, min_pd, w_terminal, beam_sigma, reach_sigma);
+        }
+        // Evaluation only: the physics is the same in every mode.
+        return std::make_unique<ThresholdsCpuEngine>(
+            branching_pattern, ref_ducy, nbins, ntrials, nprobs, prob_min,
+            snr_final, nthresholds, ducy_max, wtsp, beam_width, trials_start,
+            "improved", nthreads, seed, /*simulate=*/false, guess, min_pd,
+            w_terminal);
+    }
     return std::make_unique<ThresholdsCpuEngine>(
         branching_pattern, ref_ducy, nbins, ntrials, nprobs, prob_min,
         snr_final, nthresholds, ducy_max, wtsp, beam_width, trials_start, mode,
-        nthreads, seed, simulate);
+        nthreads, seed, simulate, guess, min_pd, w_terminal);
 }
 } // namespace detail
 
@@ -1660,85 +1942,16 @@ std::vector<State> evaluate_scheme(std::span<const float> thresholds,
     error_check::check_equal(thresholds.size(), branching_pattern.size(),
                              "Number of thresholds must match the number of "
                              "stages");
-
-    const auto nstages = branching_pattern.size();
-    const auto profile = simulation::generate_folded_profile(nbins, ref_ducy);
-    const auto box_score_widths =
-        detection::generate_box_width_trials(nbins, ducy_max, wtsp);
-    const auto bias_snr =
-        snr_final / std::sqrt(static_cast<float>(nstages + 1));
-    const float var_init     = 1.0F;
-    const auto initial_state = State::initial();
-    // Stages after the path stops stay empty
-    std::vector<State> states(nstages);
-
-    const auto slots_per_pool = 10;
-    auto manager =
-        std::make_unique<DualPoolFoldManager>(nbins, ntrials, slots_per_pool);
-    std::vector<FoldsType> folds_current(1);
-    std::vector<FoldsType> folds_next(1);
-
-    // Unseeded API: a fresh seed per call, keyed streams per stage.
-    const uint64_t seed = std::random_device{}();
-    auto rng_h0 = math::make_keyed_pcg32(seed, kPurposeRunInit, 0U, 0U, 0U, 0U);
-    auto rng_h1 = math::make_keyed_pcg32(seed, kPurposeRunInit, 0U, 0U, 1U, 0U);
-    // Create initial fold vectors
-    auto folds_h0_init = manager->allocate(ntrials);
-    auto folds_h1_init = manager->allocate(ntrials);
-    std::ranges::fill(folds_h0_init->data(), 0.0F);
-    std::ranges::fill(folds_h1_init->data(), 0.0F);
-    auto buffers_ptr = std::make_unique<ThreadLocalBuffers>(nbins, 2 * ntrials);
-    auto boxcar_widths_cache_ptr =
-        std::make_unique<detection::BoxcarWidthsCache>(box_score_widths, nbins);
-    // Simulate the initial folds (pruning level = 0)
-    auto folds_h0_sim =
-        simulate_folds(*folds_h0_init, profile, rng_h0, *manager, *buffers_ptr,
-                       0.0F, var_init, ntrials);
-    auto folds_h1_sim =
-        simulate_folds(*folds_h1_init, profile, rng_h1, *manager, *buffers_ptr,
-                       bias_snr, var_init, ntrials);
-    FoldsType const initial_fold_state{std::move(folds_h0_sim),
-                                       std::move(folds_h1_sim)};
-    // Dummy timer object to avoid compiler warning
-    search::TimerStats::TimerMap thread_timers;
-    for (SizeType istage = 0; istage < nstages; ++istage) {
-        const auto prev_state =
-            (istage == 0) ? initial_state : states[istage - 1];
-        const auto& prev_fold_state =
-            (istage == 0) ? initial_fold_state : folds_current[0];
-        if (istage > 0 && prev_fold_state.is_empty()) {
-            spdlog::info(
-                "Path not viable, No trials survived, stopping at stage {}",
-                istage);
-            break;
-        }
-        auto [cur_state, cur_fold_state] = gen_next_using_thresh(
-            prev_state, prev_fold_state, thresholds[istage],
-            branching_pattern[istage], bias_snr, profile,
-            StreamKey{
-                .seed   = seed,
-                .stage  = static_cast<uint32_t>(istage),
-                .parent = 0,
-                .target = kNoTarget,
-            },
-            *manager, *buffers_ptr, *boxcar_widths_cache_ptr, thread_timers,
-            1.0F, ntrials);
-        states[istage] = cur_state;
-        if (istage == 0) {
-            folds_current[0] = std::move(cur_fold_state);
-        } else {
-            folds_next[0] = std::move(cur_fold_state);
-        }
-        if (istage > 0) {
-            // Swap the folds
-            manager->swap_pools();
-            std::swap(folds_current, folds_next);
-            for (auto& fold_opt : folds_next) {
-                fold_opt.invalidate();
-            }
-        }
-    }
-    return states;
+    // The evaluation of DynamicThresholdScheme::evaluate() on an
+    // evaluation-only engine (its grid is unused). Unseeded API: a fresh seed
+    // per call.
+    const auto engine = detail::make_thresholds_cpu(
+        branching_pattern, ref_ducy, nbins, ntrials, /*nprobs=*/2,
+        /*prob_min=*/0.5F, snr_final, /*nthresholds=*/100, ducy_max, wtsp,
+        /*beam_width=*/0.7F, /*trials_start=*/1, "improved", /*nthreads=*/1,
+        std::nullopt, /*simulate=*/false);
+    return engine->evaluate(thresholds, ntrials, std::random_device{}(),
+                            /*h0_only=*/false);
 }
 
 std::vector<State> determine_scheme(std::span<const float> survive_probs,
