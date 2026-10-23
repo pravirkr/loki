@@ -213,7 +213,7 @@ full buffer for the bands below.
 | Term | Contents |
 | --- | --- |
 | fold buffers | two ping-pong buffers of `cpu_scored_buffer_size(plan)`: the largest stored level (every level but the last two for accel searches; the full buffer for frequency-only searches) |
-| coordinates | every level's resolved coordinates |
+| coordinates | `cpu_scored_coord_size(plan)`: every level's resolved coordinates, except that accel searches keep one batch of final-level rows (`kCpuFinalCoordBatchBytes`, 32 MiB) in place of the final level, which `run_final_scored` resolves batch by batch |
 | brute fold | phase-run table (time) or phasor table (Fourier), see `estimate_brutefold_table_bytes` |
 | extra | write staging and the `max_passing_candidates` accumulator (12 B per candidate) |
 | inputs | `ts_e`, `ts_v` |

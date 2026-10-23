@@ -10,6 +10,7 @@
 #include <functional>
 #include <numeric>
 
+#include "loki/common/coord.hpp"
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
@@ -171,6 +172,50 @@ cpu_scored_buffer_size(const plans::FFAPlan<FoldType>& plan) {
                                            SizeType{1}, std::multiplies<>()));
     }
     return size;
+}
+
+/**
+ * @brief Bytes of final-level accel coordinates a CPU scored execution
+ * resolves at a time. Accel (n_params = 2) plans resolve the final level on
+ * the fly, a batch of whole rows (accel trials) at a time, instead of
+ * storing it: it is the largest level, and its profiles are never stored
+ * either (cpu_scored_fused_levels).
+ */
+inline constexpr SizeType kCpuFinalCoordBatchBytes = SizeType{32} << 20U;
+
+/// True when a CPU scored execution resolves the final level on the fly.
+template <SupportedFoldType FoldType>
+[[nodiscard]] bool
+cpu_final_coords_on_the_fly(const plans::FFAPlan<FoldType>& plan) {
+    return plan.get_n_params() == 2 && cpu_scored_fused_levels(plan) >= 1;
+}
+
+/// Rows (accel trials) of the final level resolved per batch.
+template <SupportedFoldType FoldType>
+[[nodiscard]] SizeType
+cpu_final_coord_batch_rows(const plans::FFAPlan<FoldType>& plan,
+                           SizeType batch_bytes = kCpuFinalCoordBatchBytes) {
+    const SizeType row_len = plan.get_param_counts().back().back();
+    const SizeType nrows   = plan.get_ncoords().back() / row_len;
+    const SizeType per_batch =
+        std::max<SizeType>(1, batch_bytes / sizeof(coord::FFACoord));
+    return std::clamp<SizeType>(per_batch / row_len, 1, nrows);
+}
+
+/**
+ * @brief Coordinates (elements) a CPU FFA needs for scored execution: every
+ * level, except that accel plans hold one batch of final-level rows in place
+ * of the final level (cpu_final_coords_on_the_fly).
+ */
+template <SupportedFoldType FoldType>
+[[nodiscard]] SizeType
+cpu_scored_coord_size(const plans::FFAPlan<FoldType>& plan) {
+    if (!cpu_final_coords_on_the_fly(plan)) {
+        return plan.get_coord_size();
+    }
+    const SizeType row_len = plan.get_param_counts().back().back();
+    return plan.get_coord_size() - plan.get_ncoords().back() +
+           (cpu_final_coord_batch_rows(plan) * row_len);
 }
 
 } // namespace loki::algorithms::detail

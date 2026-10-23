@@ -552,10 +552,25 @@ private:
         const auto& fold_shapes = m_ffa_plan.get_fold_shapes();
         spdlog::info("P-FFA [{}] -> [{}]", fmt::join(fold_shapes.front(), ", "),
                      fmt::join(fold_shapes.back(), ", "));
-        const auto memory_buffer_gb = m_ffa_plan.get_buffer_memory_usage();
-        const auto memory_coord_gb  = m_ffa_plan.get_coord_memory_usage();
-        spdlog::info("FFACudaCore Memory: {:.2f} GB + {:.2f} GB (coords)",
-                     memory_buffer_gb, memory_coord_gb);
+        // The buffers and coordinates this core validates against (a sweep
+        // core does not store the levels merged and scored on chip).
+        const SizeType coord_size =
+            m_sweep_buffers
+                ? algorithms::detail::gpu_sweep_coord_size(m_ffa_plan)
+                : m_ffa_plan.get_coord_size();
+        const auto memory_buffer_gb =
+            static_cast<float>(2 * required_buffer_size() *
+                               sizeof(FoldTypeCUDA)) /
+            static_cast<float>(1ULL << 30U);
+        const auto memory_coord_gb =
+            m_ffa_plan.get_coord_size() == 0
+                ? 0.0F
+                : m_ffa_plan.get_coord_memory_usage() *
+                      static_cast<float>(coord_size) /
+                      static_cast<float>(m_ffa_plan.get_coord_size());
+        spdlog::info("FFACudaCore Memory{}: {:.2f} GB + {:.2f} GB (coords)",
+                     m_sweep_buffers ? " (sweep)" : "", memory_buffer_gb,
+                     memory_coord_gb);
     }
 
     // Level-0 frequencies of the brute fold (host source of the async

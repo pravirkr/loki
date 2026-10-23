@@ -322,7 +322,8 @@ public:
                        std::span<const std::uint16_t> nbins,
                        SizeType n_param_sets,
                        SizeType n_params);
-    void write_ffa_stats(const FFAStatsCollection& ffa_stats);
+    void write_ffa_stats(const FFAStatsCollection& ffa_stats,
+                         float total_runtime);
     /// Commit the temporary file and atomically rename to the final path.
     void finalize();
 

@@ -113,8 +113,11 @@ def test_ffa_freq_sweep_recovers_injected_pulsar(tmp_path: Path) -> None:
         prefix = f"recovery_{accel_mps2:g}_{'fourier' if use_fourier else 'time'}"
         sweep = libloki.ffa.FFAFreqSweep(cfg, show_progress=False)
         sweep.execute(ts_e, ts_v, str(tmp_path), prefix)
+        result_h5 = tmp_path / f"{prefix}_ffa_results.h5"
+        with h5py.File(result_h5, "r") as handle:
+            assert float(handle.attrs["total_runtime"]) > 0.0
         best = _best_recovered_snr(
-            tmp_path / f"{prefix}_ffa_results.h5",
+            result_h5,
             expect_accel=search_accel,
         )
         assert best >= RECOVER_SNR_MIN, (
