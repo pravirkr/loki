@@ -354,7 +354,14 @@ public:
         }
         const bool fusion_off =
             m_fuse_levels_override.has_value() && *m_fuse_levels_override == 0;
-        const bool fused = m_cfg.get_niters_ffa() >= 1 && !fusion_off;
+        // Time-domain frequency-only plans that the cone bands decline (e.g.
+        // base segments too long for the cone scratch) have no fused final
+        // kernel: run_final_scored reads accel coordinates. Use the stored
+        // fold; the planner already sizes the full buffer for these plans.
+        const bool freq_only_time =
+            std::is_same_v<FoldType, float> && m_is_freq_only;
+        const bool fused =
+            m_cfg.get_niters_ffa() >= 1 && !fusion_off && !freq_only_time;
         // Fused: the final level is never stored (detail::
         // cpu_scored_buffer_size, which the sweep planner also uses).
         const auto buffer_size =
@@ -443,6 +450,9 @@ public:
         timing::SimpleTimer timer;
         timer.start();
         if constexpr (std::is_same_v<FoldType, float>) {
+            error_check::check(!m_is_freq_only,
+                               "FFA::run_final_scored: no fused final level "
+                               "for time-domain frequency-only plans");
             // About 64 KiB of profiles per tile: L2-resident while scored.
             const SizeType tile =
                 std::max<SizeType>(16, (SizeType{16} * 1024) / (2 * nbins));

@@ -160,6 +160,8 @@ public:
                  std::string_view file_prefix,
                  std::string_view config_toml) override {
         const nvtx::Range range("ffa sweep (cuda)");
+        timing::SimpleTimer sweep_timer;
+        sweep_timer.start();
         timing::SimpleTimer timer;
         search::FFATimerStats ffa_timer_stats_pipeline;
         timer.start();
@@ -259,7 +261,7 @@ public:
         ffa_timer_stats_pipeline["io"] += timer.stop();
         m_ffa_stats->update_stats(ffa_timer_stats_pipeline,
                                   static_cast<float>(accumulated_flops));
-        writer.write_ffa_stats(*m_ffa_stats);
+        writer.write_ffa_stats(*m_ffa_stats, sweep_timer.stop());
         writer.finalize();
         spdlog::info("FFA Freq Sweep complete: {} candidates above S/N {:.2f}",
                      m_total_passing_scores, m_base_cfg.get_snr_min());

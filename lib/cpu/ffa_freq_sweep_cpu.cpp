@@ -90,6 +90,8 @@ public:
                  const std::filesystem::path& outdir,
                  std::string_view file_prefix,
                  std::string_view config_toml) override {
+        timing::SimpleTimer sweep_timer;
+        sweep_timer.start();
         timing::SimpleTimer timer;
         // Reset accumulated state so repeated execute() calls are independent
         m_ffa_stats = search::FFAStatsCollection();
@@ -132,7 +134,7 @@ public:
         ffa_timer_stats_pipeline["io"] += timer.stop();
         m_ffa_stats.update_stats(ffa_timer_stats_pipeline,
                                  static_cast<float>(accumulated_flops));
-        writer.write_ffa_stats(m_ffa_stats);
+        writer.write_ffa_stats(m_ffa_stats, sweep_timer.stop());
         writer.finalize();
         spdlog::info("FFA Freq Sweep complete: {} candidates above S/N {:.2f}",
                      m_total_passing_scores, m_base_cfg.get_snr_min());

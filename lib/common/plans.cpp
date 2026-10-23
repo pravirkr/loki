@@ -549,39 +549,50 @@ void FFAPlan<FoldType>::compute_flops() noexcept {
     const auto n_levels = get_n_levels();
     const auto nbins_f  = (nbins / 2) + 1;
 
-    SizeType flops_brutefold{0U}, flops_ffa{0U};
+    // Convention: data arithmetic only, excluding index and phasor
+    // generation. A real FFT of length N costs 2.5 * N * log2(N).
+    const auto rfft_flops = [](double n) { return 2.5 * n * std::log2(n); };
+    const double dnbins   = static_cast<double>(nbins);
+
+    double flops_brutefold{0.0}, flops_ffa{0.0};
     if constexpr (std::is_same_v<FoldType, ComplexType>) {
+        const auto nseg0 = get_nsegments()[0];
         if (nbins > cfg.get_nbins_min_lossy_bf()) {
-            // O(nsamps) - Lossy BruteFold + RFFT
-            flops_brutefold =
-                (nsamps * 2 * nfreqs) + (nfreqs * nbins * std::log2(nbins));
+            // O(nsamps) lossy brute fold, then an RFFT of each (e, v) row
+            flops_brutefold = (2.0 * nsamps * nfreqs) +
+                              (2.0 * nseg0 * nfreqs * rfft_flops(dnbins));
         } else {
-            // Direct DFT
-            flops_brutefold = 8 * nsamps * 2 * nfreqs * nbins_f;
+            // Direct DFT: 4 FLOPs per (sample, harmonic, channel)
+            flops_brutefold = 8.0 * nsamps * nfreqs * nbins_f;
         }
+        // Per complex output and channel: one complex multiply plus add (8)
+        // for frequency-only plans; both halves rotated (two complex
+        // multiplies plus an add, 14) for multi-parameter plans.
+        const double flops_per_merge = (cfg.get_nparams() > 1) ? 14.0 : 8.0;
         for (SizeType i_level = 1; i_level < n_levels; ++i_level) {
             const auto nsegments   = get_nsegments()[i_level];
             const auto ncoords_cur = get_ncoords()[i_level];
-            // 2 profiles (e+v) * nbins_f * 8 FLOPs per complex
-            // shift-add
-            flops_ffa += ncoords_cur * nsegments * 2 * nbins_f * 8;
+            flops_ffa += static_cast<double>(ncoords_cur) * nsegments * 2 *
+                         nbins_f * flops_per_merge;
         }
     } else {
         // O(nsamps)
-        flops_brutefold = (nsamps * 2 * nfreqs);
+        flops_brutefold = 2.0 * nsamps * nfreqs;
         for (SizeType i_level = 1; i_level < n_levels; ++i_level) {
             const auto nsegments   = get_nsegments()[i_level];
             const auto ncoords_cur = get_ncoords()[i_level];
             // 2 profiles (e+v) * nbins * 1 FLOP per add
-            flops_ffa += ncoords_cur * nsegments * 2 * nbins;
+            flops_ffa +=
+                static_cast<double>(ncoords_cur) * nsegments * 2 * nbins;
         }
     }
-    m_flops_required = flops_brutefold + flops_ffa;
+    const double flops_total = flops_brutefold + flops_ffa;
+    m_flops_required         = static_cast<SizeType>(flops_total);
     if constexpr (std::is_same_v<FoldType, ComplexType>) {
-        // IRFFT
-        const auto nfft = get_fold_size_time() / nbins;
-        m_flops_required_return_in_time =
-            m_flops_required + (nfft * nbins * std::log2(nbins));
+        // IRFFT of every row
+        const auto nfft                 = get_fold_size_time() / nbins;
+        m_flops_required_return_in_time = static_cast<SizeType>(
+            flops_total + (static_cast<double>(nfft) * rfft_flops(dnbins)));
     } else {
         m_flops_required_return_in_time = m_flops_required;
     }

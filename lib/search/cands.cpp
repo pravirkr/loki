@@ -747,10 +747,12 @@ void FFAResultWriter::finalize() {
     m_finalized = true;
 }
 
-void FFAResultWriter::write_ffa_stats(const FFAStatsCollection& ffa_stats) {
+void FFAResultWriter::write_ffa_stats(const FFAStatsCollection& ffa_stats,
+                                      float total_runtime) {
     const std::scoped_lock lock(m_hdf5_mutex);
     h5_file().createDataSet("timer_stats", ffa_stats.get_packed_data());
     h5_file().createAttribute("flops", ffa_stats.get_flops());
+    h5_file().createAttribute("total_runtime", total_runtime);
 }
 
 // --- PruneResultWriter ---
