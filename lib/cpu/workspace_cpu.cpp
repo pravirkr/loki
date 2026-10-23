@@ -53,14 +53,20 @@ void FFAWorkspaceCPU<FoldType>::validate_buffer(SizeType buffer_size) const {
 template <SupportedFoldType FoldType>
 void FFAWorkspaceCPU<FoldType>::validate_coords(
     const plans::FFAPlan<FoldType>& ffa_plan) const {
+    validate_coords(ffa_plan, ffa_plan.get_coord_size());
+}
+
+template <SupportedFoldType FoldType>
+void FFAWorkspaceCPU<FoldType>::validate_coords(
+    const plans::FFAPlan<FoldType>& ffa_plan, SizeType coord_size) const {
     const bool is_freq_only = ffa_plan.get_n_params() == 1;
     if (is_freq_only) {
         error_check::check_greater_equal(
-            coords_freq.size(), ffa_plan.get_coord_size(),
+            coords_freq.size(), coord_size,
             "FFAWorkspaceCPU: coordinates not allocated for enough levels");
     } else {
         error_check::check_greater_equal(
-            coords.size(), ffa_plan.get_coord_size(),
+            coords.size(), coord_size,
             "FFAWorkspaceCPU: coordinates not allocated for enough levels");
     }
 }

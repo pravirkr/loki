@@ -121,13 +121,19 @@ public:
                 "cudaEventCreate failed");
         }
 
-        // Log the actual memory usage for the allocated buffers
-        spdlog::info("FfaFreqSweep allocated {:.2f} GB ({:.2f} GB buffers "
-                     "+ {:.2f} GB coords + {:.2f} GB extra)",
-                     planner_stats.get_freq_sweep_memory_usage(),
-                     planner_stats.get_buffer_memory_usage(),
+        // Device memory the planner budgets for the sweep. "Other" is the
+        // brute-fold tables.
+        const float total_gb = planner_stats.get_freq_sweep_memory_usage();
+        const float other_gb = total_gb -
+                               planner_stats.get_buffer_memory_usage() -
+                               planner_stats.get_coord_memory_usage() -
+                               planner_stats.get_device_extra_memory_usage();
+        spdlog::info("FfaFreqSweep device memory {:.2f} GB ({:.2f} GB fold "
+                     "buffers + {:.2f} GB coords + {:.2f} GB extra + {:.2f} "
+                     "GB other)",
+                     total_gb, planner_stats.get_buffer_memory_usage(),
                      planner_stats.get_coord_memory_usage(),
-                     planner_stats.get_device_extra_memory_usage());
+                     planner_stats.get_device_extra_memory_usage(), other_gb);
         spdlog::info("FfaFreqSweep will process {} chunks, keeping up to "
                      "{} candidates in RAM before flushing to disk",
                      m_region_planner.get_nregions(), m_cands.get_capacity());
@@ -261,11 +267,14 @@ public:
         ffa_timer_stats_pipeline["io"] += timer.stop();
         m_ffa_stats->update_stats(ffa_timer_stats_pipeline,
                                   static_cast<float>(accumulated_flops));
-        writer.write_ffa_stats(*m_ffa_stats, sweep_timer.stop());
+        const float total_runtime = sweep_timer.stop();
+        writer.write_ffa_stats(*m_ffa_stats, total_runtime);
         writer.finalize();
         spdlog::info("FFA Freq Sweep complete: {} candidates above S/N {:.2f}",
                      m_total_passing_scores, m_base_cfg.get_snr_min());
-        spdlog::info("FFA Freq Sweep: timer: {}",
+        // The stage timers do not cover every wait (GPU kernels overlap the
+        // host), so the wall-clock is logged next to them.
+        spdlog::info("FFA Freq Sweep: wall {:.1f} s; timer: {}", total_runtime,
                      m_ffa_stats->get_concise_timer_summary());
     }
 

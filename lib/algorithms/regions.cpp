@@ -531,7 +531,7 @@ private:
         const SizeType buf   = m_use_gpu ? detail::gpu_sweep_buffer_size(plan)
                                          : detail::cpu_scored_buffer_size(plan);
         const SizeType coord = m_use_gpu ? detail::gpu_sweep_coord_size(plan)
-                                         : plan.get_coord_size();
+                                         : detail::cpu_scored_coord_size(plan);
         const SizeType nc    = plan.get_ncoords().back();
         const SizeType lv    = plan.get_n_levels();
         // Width count follows nbins, which is fixed within a region but
@@ -1017,7 +1017,7 @@ private:
             spdlog::info("  Modelled run time (1 thread): {:.1f} s",
                          m_modelled_cost_s);
         }
-        spdlog::info("  Freq Sweep allocated: {:.2f} GB (limit: {:.2f} GB)",
+        spdlog::info("  Freq Sweep peak memory: {:.2f} GB (limit: {:.2f} GB)",
                      m_stats.get_freq_sweep_memory_usage(),
                      m_base_cfg.get_max_process_memory_gb());
     }

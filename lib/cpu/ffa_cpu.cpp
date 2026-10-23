@@ -29,6 +29,7 @@
 #include "lib/algorithms/planner_memory.hpp"
 #include "lib/common/dispatch.hpp"
 #include "lib/core/kernels.hpp"
+#include "lib/core/taylor_ffa.hpp"
 #include "lib/cpu/boxcar_kernels.hpp"
 #include "lib/cpu/lane_fft.hpp"
 #include "lib/detail/error_check.hpp"
@@ -97,6 +98,37 @@ void cone_score_tile(const float* profiles,
     if (state->timed) {
         state->seconds[tid] += static_cast<double>(timer.stop());
     }
+}
+
+/// A score callback whose coordinates start at `first` of the level (a batch
+/// of final-level rows resolved on the fly).
+struct OffsetScoreCtx {
+    core::ConeScoreFn fn;
+    void* ctx;
+    SizeType first;
+};
+
+void offset_score_tile(const float* profiles,
+                       SizeType coord_begin,
+                       SizeType nprofiles,
+                       SizeType nbins,
+                       void* ctx) {
+    const auto& state = *static_cast<const OffsetScoreCtx*>(ctx);
+    state.fn(profiles, state.first + coord_begin, nprofiles, nbins, state.ctx);
+}
+
+struct OffsetTileCtx {
+    core::ComplexTileFn fn;
+    void* ctx;
+    SizeType first;
+};
+
+void offset_tile(ComplexType* tile,
+                 SizeType coord_begin,
+                 SizeType count,
+                 void* ctx) {
+    const auto& state = *static_cast<const OffsetTileCtx*>(ctx);
+    state.fn(tile, state.first + coord_begin, count, state.ctx);
 }
 
 /// Inverse-FFT stage of the fused Fourier final level: the lane FFT, whose
@@ -182,7 +214,7 @@ public:
         m_brutefold_init_time = init_timer.stop();
         apply_fuse_levels_env();
         apply_level_timing_env();
-        log_info();
+        log_info(/*scored=*/false);
     }
 
     explicit FFACpuEngine(memory::FFAWorkspaceCPU<FoldType>& workspace,
@@ -198,7 +230,8 @@ public:
         // A shared (sweep) workspace may be sized for scored execution only;
         // each execute path checks the fold buffer it needs.
         const auto& ws = get_workspace();
-        ws.validate_coords(m_ffa_plan);
+        ws.validate_coords(m_ffa_plan,
+                           detail::cpu_scored_coord_size(m_ffa_plan));
         // Initialize BruteFold (table build time is tracked separately)
         timing::SimpleTimer init_timer;
         init_timer.start();
@@ -206,7 +239,7 @@ public:
         m_brutefold_init_time = init_timer.stop();
         apply_fuse_levels_env();
         apply_level_timing_env();
-        log_info();
+        log_info(/*scored=*/true);
     }
 
     ~FFACpuEngine() override                     = default;
@@ -338,20 +371,6 @@ public:
             static_cast<std::uint64_t>(std::numeric_limits<uint32_t>::max()),
             "FFA::execute_scored: ncoords * nwidths exceeds the 32-bit "
             "score index");
-        auto& ws = get_workspace();
-        if (m_is_freq_only) {
-            m_ffa_plan.resolve_coordinates_freq(ws.coords_freq);
-        } else {
-            m_ffa_plan.resolve_coordinates(ws.coords);
-        }
-        hits.clear();
-        m_last_score_time = 0.0F;
-        if constexpr (std::is_same_v<FoldType, float>) {
-            if (m_is_freq_only &&
-                run_cone_bands(ts_e, ts_v, nullptr, &hits, threshold, widths)) {
-                return;
-            }
-        }
         const bool fusion_off =
             m_fuse_levels_override.has_value() && *m_fuse_levels_override == 0;
         // Time-domain frequency-only plans that the cone bands decline (e.g.
@@ -362,6 +381,24 @@ public:
             std::is_same_v<FoldType, float> && m_is_freq_only;
         const bool fused =
             m_cfg.get_niters_ffa() >= 1 && !fusion_off && !freq_only_time;
+        auto& ws = get_workspace();
+        if (m_is_freq_only) {
+            m_ffa_plan.resolve_coordinates_freq(ws.coords_freq);
+        } else if (fused && detail::cpu_final_coords_on_the_fly(m_ffa_plan)) {
+            // run_final_scored resolves the final level batch by batch.
+            resolve_coordinates_but_final(ws.coords);
+        } else {
+            ws.validate_coords(m_ffa_plan);
+            m_ffa_plan.resolve_coordinates(ws.coords);
+        }
+        hits.clear();
+        m_last_score_time = 0.0F;
+        if constexpr (std::is_same_v<FoldType, float>) {
+            if (m_is_freq_only &&
+                run_cone_bands(ts_e, ts_v, nullptr, &hits, threshold, widths)) {
+                return;
+            }
+        }
         // Fused: the final level is never stored (detail::
         // cpu_scored_buffer_size, which the sweep planner also uses).
         const auto buffer_size =
@@ -432,72 +469,45 @@ public:
         // Accel: levels L-1 and L both merged in scratch (two_levels).
         const bool two_levels =
             detail::cpu_scored_fused_levels(m_ffa_plan) == 2;
+        // Levels merged in scratch and never stored (reported per chunk).
+        m_last_fuse_levels = two_levels ? 2 : 1;
         const FoldType* src =
             execute_unified(ts_e, ts_v, scratch, false,
                             /*end_level=*/two_levels ? final - 1 : final);
-        const auto nbins        = m_cfg.get_nbins();
-        const auto ncoords_cur  = m_ffa_plan.get_ncoords()[final];
-        const auto ncoords_prev = m_ffa_plan.get_ncoords()[final - 1];
-        const auto offset       = m_ffa_plan.get_ncoords_offsets()[final];
-        const auto& ws          = get_workspace();
+        const auto nbins       = m_cfg.get_nbins();
+        const auto ncoords_cur = m_ffa_plan.get_ncoords()[final];
+        const auto offset      = m_ffa_plan.get_ncoords_offsets()[final];
+        auto& ws               = get_workspace();
         // Final coordinates are rows of frequencies (one per accel or jerk
         // trial); the kernels tile rows that share parent rows together.
         const auto row_len = m_ffa_plan.get_param_counts()[final].back();
         const auto row_len_prev =
             m_ffa_plan.get_param_counts()[final - 1].back();
+        // Accel plans resolve the final level a batch of rows at a time into
+        // the slot after the stored levels (detail::cpu_scored_coord_size);
+        // other plans read the stored level in one batch.
+        const bool on_the_fly = detail::cpu_final_coords_on_the_fly(m_ffa_plan);
+        const SizeType nrows  = ncoords_cur / row_len;
+        const SizeType batch_rows =
+            on_the_fly ? final_coord_batch_rows() : nrows;
         ConeScoreCtx score_ctx(widths, threshold, m_nthreads,
                                /*timed=*/true);
         timing::SimpleTimer timer;
         timer.start();
-        if constexpr (std::is_same_v<FoldType, float>) {
-            error_check::check(!m_is_freq_only,
-                               "FFA::run_final_scored: no fused final level "
-                               "for time-domain frequency-only plans");
-            // About 64 KiB of profiles per tile: L2-resident while scored.
-            const SizeType tile =
-                std::max<SizeType>(16, (SizeType{16} * 1024) / (2 * nbins));
-            if (two_levels) {
-                core::ffa_final2_scored(
-                    src,
-                    ws.coords.data() +
-                        m_ffa_plan.get_ncoords_offsets()[final - 1],
-                    ws.coords.data() + offset, ncoords_cur,
-                    m_ffa_plan.get_ncoords()[final - 2], nbins, row_len,
-                    row_len_prev, tile, &cone_score_tile, &score_ctx,
-                    m_nthreads);
-            } else {
-                core::ffa_final_scored(
-                    src, ws.coords.data() + offset, ncoords_cur, ncoords_prev,
-                    nbins, row_len, row_len_prev, tile, &cone_score_tile,
-                    &score_ctx, m_nthreads);
+        for (SizeType row0 = 0; row0 < nrows; row0 += batch_rows) {
+            const SizeType row1   = std::min(nrows, row0 + batch_rows);
+            const SizeType nbatch = (row1 - row0) * row_len;
+            const SizeType first  = row0 * row_len;
+            // Frequency-only plans read coords_freq (ws.coords is empty).
+            coord::FFACoord* coords =
+                m_is_freq_only ? nullptr : ws.coords.data() + offset;
+            if (on_the_fly) {
+                resolve_final_rows(std::span(coords, nbatch), row0, row1);
+            } else if (coords != nullptr) {
+                coords += first;
             }
-        } else {
-            // A multiple of the merge step block and of the lane FFT width;
-            // about 128 KiB of real profiles.
-            const SizeType tile = std::clamp<SizeType>(
-                std::bit_floor((SizeType{32} * 1024) / (2 * nbins)), 32, 512);
-            FourierScoreCtx ctx(&score_ctx, nbins, m_cfg.get_nbins_f(),
-                                m_nthreads);
-            if (m_is_freq_only) {
-                core::ffa_complex_final_tiles_freq(
-                    src, ws.coords_freq.data() + offset, ncoords_cur,
-                    ncoords_prev, m_cfg.get_nbins_f(), nbins, tile,
-                    &fourier_score_tile, &ctx, m_nthreads);
-            } else if (two_levels) {
-                core::ffa_complex_final2_tiles(
-                    src,
-                    ws.coords.data() +
-                        m_ffa_plan.get_ncoords_offsets()[final - 1],
-                    ws.coords.data() + offset, ncoords_cur, ncoords_prev,
-                    m_ffa_plan.get_ncoords()[final - 2], m_cfg.get_nbins_f(),
-                    nbins, row_len, row_len_prev, tile, &fourier_score_tile,
-                    &ctx, m_nthreads);
-            } else {
-                core::ffa_complex_final_tiles(
-                    src, ws.coords.data() + offset, ncoords_cur, ncoords_prev,
-                    m_cfg.get_nbins_f(), nbins, row_len, row_len_prev, tile,
-                    &fourier_score_tile, &ctx, m_nthreads);
-            }
+            run_final_batch(src, coords, nbatch, first, two_levels, row_len,
+                            row_len_prev, score_ctx);
         }
         const auto wall = static_cast<double>(timer.stop());
         log_level_timing("final+score", final,
@@ -511,6 +521,138 @@ public:
         }
         m_last_score_time =
             static_cast<float>(std::min(wall, score_ctx.max_seconds()));
+    }
+
+    /// Final-level rows per on-the-fly batch: the planned batch, or fewer
+    /// with LOKI_FINAL_COORD_BATCH_KB (test hook for the batch edges).
+    [[nodiscard]] SizeType final_coord_batch_rows() const {
+        const SizeType planned = detail::cpu_final_coord_batch_rows(m_ffa_plan);
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): serial setup, no setenv
+        const char* env = std::getenv("LOKI_FINAL_COORD_BATCH_KB");
+        if (env == nullptr || env[0] == '\0') {
+            return planned;
+        }
+        char* end = nullptr;
+        // NOLINTNEXTLINE(google-runtime-int): std::strtoul return type
+        const unsigned long kb = std::strtoul(env, &end, 10);
+        if (end == env || *end != '\0' || kb == 0) {
+            spdlog::warn("Ignoring invalid LOKI_FINAL_COORD_BATCH_KB='{}'",
+                         env);
+            return planned;
+        }
+        return std::min(planned,
+                        detail::cpu_final_coord_batch_rows(
+                            m_ffa_plan, static_cast<SizeType>(kb) << 10U));
+    }
+
+    /// Resolve every level's coordinates except the final one (accel plans
+    /// that resolve the final level on the fly).
+    void resolve_coordinates_but_final(std::span<coord::FFACoord> coords) {
+        const SizeType final = m_ffa_plan.get_n_levels() - 1;
+        error_check::check_greater_equal(
+            coords.size(), detail::cpu_scored_coord_size(m_ffa_plan),
+            "FFA::execute_scored: coordinates not allocated for enough "
+            "levels");
+        const auto& counts  = m_ffa_plan.get_param_counts();
+        const auto ncoords  = m_ffa_plan.get_ncoords();
+        const auto offsets  = m_ffa_plan.get_ncoords_offsets();
+        const auto n_params = m_ffa_plan.get_n_params();
+        for (SizeType i_level = 1; i_level < final; ++i_level) {
+            const auto level_coords =
+                coords.subspan(offsets[i_level], ncoords[i_level]);
+            for (SizeType latter = 0; latter < 2; ++latter) {
+                core::ffa_taylor_resolve_poly_batch(
+                    counts[i_level], counts[i_level - 1],
+                    m_cfg.get_param_limits(), level_coords, i_level, latter,
+                    m_cfg.get_tseg_brute(), m_cfg.get_nbins(), n_params,
+                    m_nthreads);
+            }
+        }
+    }
+
+    /// Resolve rows [row0, row1) of the final level into `coords`.
+    void resolve_final_rows(std::span<coord::FFACoord> coords,
+                            SizeType row0,
+                            SizeType row1) const {
+        const SizeType final = m_ffa_plan.get_n_levels() - 1;
+        const auto& counts   = m_ffa_plan.get_param_counts();
+        core::ffa_taylor_resolve_accel_rows(
+            counts[final], counts[final - 1], m_cfg.get_param_limits(), coords,
+            final, m_cfg.get_tseg_brute(), m_cfg.get_nbins(), row0, row1,
+            m_nthreads);
+    }
+
+    /**
+     * @brief Merge (and score) `nbatch` final-level coordinates, starting at
+     * coordinate `first` of the level; `coords` holds exactly those.
+     */
+    void run_final_batch(const FoldType* src,
+                         const coord::FFACoord* coords,
+                         SizeType nbatch,
+                         SizeType first,
+                         bool two_levels,
+                         SizeType row_len,
+                         SizeType row_len_prev,
+                         ConeScoreCtx& score_ctx) {
+        const SizeType final    = m_cfg.get_niters_ffa();
+        const auto nbins        = m_cfg.get_nbins();
+        const auto ncoords_cur  = nbatch;
+        const auto ncoords_prev = m_ffa_plan.get_ncoords()[final - 1];
+        const auto& ws          = get_workspace();
+        if constexpr (std::is_same_v<FoldType, float>) {
+            error_check::check(!m_is_freq_only,
+                               "FFA::run_final_scored: no fused final level "
+                               "for time-domain frequency-only plans");
+            OffsetScoreCtx shifted{
+                .fn = &cone_score_tile, .ctx = &score_ctx, .first = first};
+            // About 64 KiB of profiles per tile: L2-resident while scored.
+            const SizeType tile =
+                std::max<SizeType>(16, (SizeType{16} * 1024) / (2 * nbins));
+            if (two_levels) {
+                core::ffa_final2_scored(
+                    src,
+                    ws.coords.data() +
+                        m_ffa_plan.get_ncoords_offsets()[final - 1],
+                    coords, ncoords_cur, m_ffa_plan.get_ncoords()[final - 2],
+                    nbins, row_len, row_len_prev, tile, &offset_score_tile,
+                    &shifted, m_nthreads);
+            } else {
+                core::ffa_final_scored(src, coords, ncoords_cur, ncoords_prev,
+                                       nbins, row_len, row_len_prev, tile,
+                                       &offset_score_tile, &shifted,
+                                       m_nthreads);
+            }
+        } else {
+            // A multiple of the merge step block and of the lane FFT width;
+            // about 128 KiB of real profiles.
+            const SizeType tile = std::clamp<SizeType>(
+                std::bit_floor((SizeType{32} * 1024) / (2 * nbins)), 32, 512);
+            FourierScoreCtx ctx(&score_ctx, nbins, m_cfg.get_nbins_f(),
+                                m_nthreads);
+            OffsetTileCtx shifted{
+                .fn = &fourier_score_tile, .ctx = &ctx, .first = first};
+            if (m_is_freq_only) {
+                const auto offset = m_ffa_plan.get_ncoords_offsets()[final];
+                core::ffa_complex_final_tiles_freq(
+                    src, ws.coords_freq.data() + offset, ncoords_cur,
+                    ncoords_prev, m_cfg.get_nbins_f(), nbins, tile,
+                    &fourier_score_tile, &ctx, m_nthreads);
+            } else if (two_levels) {
+                core::ffa_complex_final2_tiles(
+                    src,
+                    ws.coords.data() +
+                        m_ffa_plan.get_ncoords_offsets()[final - 1],
+                    coords, ncoords_cur, ncoords_prev,
+                    m_ffa_plan.get_ncoords()[final - 2], m_cfg.get_nbins_f(),
+                    nbins, row_len, row_len_prev, tile, &offset_tile, &shifted,
+                    m_nthreads);
+            } else {
+                core::ffa_complex_final_tiles(
+                    src, coords, ncoords_cur, ncoords_prev, m_cfg.get_nbins_f(),
+                    nbins, row_len, row_len_prev, tile, &offset_tile, &shifted,
+                    m_nthreads);
+            }
+        }
     }
 
     void execute_return_to_time_impl(std::span<const float> ts_e,
@@ -1093,16 +1235,41 @@ private:
         return plain;
     }
 
-    void log_info() {
-        // Log iniital and final fold shapes
+    /**
+     * @brief Log the fold shapes and the memory this engine's path uses.
+     *
+     * A standalone engine (`scored` false) serves execute(): its workspace
+     * and the caller's fold, each the plan's full buffer. A sweep engine on a
+     * shared workspace (`scored` true) runs execute_scored() only, whose
+     * ping-pong buffers exclude the levels merged in scratch and whose
+     * coordinates exclude the final accel level (detail::
+     * cpu_scored_buffer_size and cpu_scored_coord_size, as the sweep
+     * planner sizes them).
+     */
+    void log_info(bool scored) {
         const auto& fold_shapes = m_ffa_plan.get_fold_shapes();
         spdlog::info("P-FFA [{}] -> [{}]", fmt::join(fold_shapes.front(), ", "),
                      fmt::join(fold_shapes.back(), ", "));
-        //  Log memory usage
-        const auto memory_buffer_gb = m_ffa_plan.get_buffer_memory_usage();
-        const auto memory_coord_gb  = m_ffa_plan.get_coord_memory_usage();
-        spdlog::info("FFA Memory Usage: {:.2f} GB + {:.2f} GB (coords)",
-                     memory_buffer_gb, memory_coord_gb);
+        const SizeType buffer_size =
+            scored ? detail::cpu_scored_buffer_size(m_ffa_plan)
+                   : m_ffa_plan.get_buffer_size();
+        const auto memory_buffer_gb =
+            static_cast<float>(2 * buffer_size * sizeof(FoldType)) /
+            static_cast<float>(1ULL << 30U);
+        // Accel scored execution holds one batch of final-level rows in
+        // place of the final level (detail::cpu_scored_coord_size).
+        const SizeType coord_size =
+            scored ? detail::cpu_scored_coord_size(m_ffa_plan)
+                   : m_ffa_plan.get_coord_size();
+        const auto memory_coord_gb =
+            m_ffa_plan.get_coord_size() == 0
+                ? 0.0F
+                : m_ffa_plan.get_coord_memory_usage() *
+                      static_cast<float>(coord_size) /
+                      static_cast<float>(m_ffa_plan.get_coord_size());
+        spdlog::info("FFA Memory Usage{}: {:.2f} GB + {:.2f} GB (coords)",
+                     scored ? " (scored)" : "", memory_buffer_gb,
+                     memory_coord_gb);
     }
 
     void initialize_brute_fold() {

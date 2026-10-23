@@ -53,6 +53,9 @@ template <SupportedFoldType FoldType> struct FFAWorkspaceCPU {
     /// fold_internal holds at least `buffer_size` elements.
     void validate_buffer(SizeType buffer_size) const;
     void validate_coords(const plans::FFAPlan<FoldType>& ffa_plan) const;
+    /// As validate_coords, for a path that needs `coord_size` coordinates.
+    void validate_coords(const plans::FFAPlan<FoldType>& ffa_plan,
+                         SizeType coord_size) const;
 };
 
 /**
