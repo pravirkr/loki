@@ -16,6 +16,8 @@
 
 #include "loki/common/types.hpp"
 
+#include "lib/detail/utils.hpp"
+
 namespace loki::cuda_utils {
 
 namespace detail {
@@ -434,8 +436,8 @@ void set_kernel_dynamic_smem(Kernel kernel, SizeType bytes) {
     SizeType free_mem, total_mem;
     check_cuda_call(cudaMemGetInfo(&free_mem, &total_mem),
                     "Failed to get CUDA memory usage");
-    return {static_cast<double>(free_mem) / (1ULL << 30U),
-            static_cast<double>(total_mem) / (1ULL << 30U)};
+    return {static_cast<double>(free_mem) / utils::kBytesPerGB,
+            static_cast<double>(total_mem) / utils::kBytesPerGB};
 }
 
 // Standalone check function - delegates to context

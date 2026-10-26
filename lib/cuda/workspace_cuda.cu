@@ -16,6 +16,7 @@
 #include "lib/cuda/kernels_cuda.cuh"
 #include "lib/cuda/taylor_ffa_cuda.cuh"
 #include "lib/detail/error_check.hpp"
+#include "lib/detail/utils.hpp"
 
 namespace loki::memory {
 
@@ -385,7 +386,7 @@ SizeType BranchingWorkspaceCUDA::get_memory_usage_bytes() const noexcept {
 
 float BranchingWorkspaceCUDA::get_memory_usage_gib() const noexcept {
     return static_cast<float>(get_memory_usage_bytes()) /
-           static_cast<float>(1ULL << 30U);
+           static_cast<float>(utils::kBytesPerGB);
 }
 
 void BranchingWorkspaceCUDA::validate(SizeType batch_size,
@@ -452,7 +453,7 @@ PruneWorkspaceCUDA<FoldTypeCUDA>::get_memory_usage_bytes() const noexcept {
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 float PruneWorkspaceCUDA<FoldTypeCUDA>::get_memory_usage_gib() const noexcept {
     return static_cast<float>(get_memory_usage_bytes()) /
-           static_cast<float>(1ULL << 30U);
+           static_cast<float>(utils::kBytesPerGB);
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
@@ -629,7 +630,7 @@ SizeType CUBScratchArena::get_memory_usage_bytes() const noexcept {
 
 float CUBScratchArena::get_memory_usage_gib() const noexcept {
     return static_cast<float>(get_memory_usage_bytes()) /
-           static_cast<float>(1ULL << 30U);
+           static_cast<float>(utils::kBytesPerGB);
 }
 
 void CUBScratchArena::convert_mask_to_indices(
@@ -705,7 +706,7 @@ float EPWorkspaceCUDA<FoldTypeCUDA>::get_seed_memory_usage_gib()
     const noexcept {
     const auto bytes = (seed_leaves_d.size() * sizeof(double)) +
                        (seed_scores_d.size() * sizeof(float));
-    return static_cast<float>(bytes) / static_cast<float>(1ULL << 30U);
+    return static_cast<float>(bytes) / static_cast<float>(utils::kBytesPerGB);
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
@@ -714,7 +715,7 @@ float EPWorkspaceCUDA<FoldTypeCUDA>::get_segment_coords_memory_usage_gib()
     const auto bytes =
         (idx_segments_d.size() * sizeof(uint32_t)) +
         (coord_segments_d.size() * sizeof(cuda::std::pair<double, double>));
-    return static_cast<float>(bytes) / static_cast<float>(1ULL << 30U);
+    return static_cast<float>(bytes) / static_cast<float>(utils::kBytesPerGB);
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
@@ -732,7 +733,7 @@ EPWorkspaceCUDA<FoldTypeCUDA>::get_memory_usage_bytes() const noexcept {
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 float EPWorkspaceCUDA<FoldTypeCUDA>::get_memory_usage_gib() const noexcept {
     return static_cast<float>(get_memory_usage_bytes()) /
-           static_cast<float>(1ULL << 30U);
+           static_cast<float>(utils::kBytesPerGB);
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>

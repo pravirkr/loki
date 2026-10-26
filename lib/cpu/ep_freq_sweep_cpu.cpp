@@ -269,8 +269,8 @@ private:
             algorithms::detail::ep_workspace_bytes<FoldType>(
                 m_memory.nparams, group.nbins, group.nsegments, group.ncoords,
                 group.max_sugg, group.branch_max, m_memory.batch_size));
-        const double actual = static_cast<double>(ws.get_memory_usage_gib()) *
-                              algorithms::detail::kBytesPerGiB;
+        const double actual =
+            static_cast<double>(ws.get_memory_usage_gib()) * utils::kBytesPerGB;
         detail::check_ep_workspace_vs_model(group, actual, model);
     }
 

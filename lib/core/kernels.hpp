@@ -1,6 +1,8 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+#include <span>
 
 #include "loki/common/coord.hpp"
 #include "loki/common/types.hpp"
@@ -22,6 +24,13 @@ using ConeScoreFn = void (*)(const float* profiles,
                              SizeType nprofiles,
                              SizeType nbins,
                              void* ctx);
+
+/**
+ * @brief Called after each batch of top coordinates of a cone band, by one
+ * thread while the others wait (e.g. to hand over the batch's hits). Must
+ * not throw.
+ */
+using ConeBatchFn = void (*)(void* ctx);
 
 /**
  * @brief Sum of per-thread seconds inside one cone band.
@@ -143,6 +152,10 @@ cone_band_working_floats(const coord::FFACoordFreq* const* coords_levels,
  * scratch. Pass a null `level_out` to skip materialising the band output
  * (the top band of a scored search).
  *
+ * The top coordinates run in batches of whole tiles, at most
+ * `batch_coords` of them (0: one batch); `batch_fn`, when set, runs after
+ * each batch.
+ *
  * @param thread_seconds  Optional accumulator of per-thread brute, merge and
  *                        score seconds. Not wall-clock time.
  */
@@ -162,6 +175,9 @@ void ffa_cone_band_freq(const float* level_in,
                         ConeScoreFn score_fn,
                         void* score_ctx,
                         ConeBandThreadSeconds* thread_seconds,
+                        SizeType batch_coords,
+                        ConeBatchFn batch_fn,
+                        void* batch_ctx,
                         int nthreads);
 
 /**
@@ -289,6 +305,11 @@ void ffa_complex_final_tiles_freq(
  * segment). Tiles are split over threads in contiguous, static blocks.
  * `cone_band_working_floats(coords_levels, ncoords, k_levels, tile_coords,
  * nbins_f)` complex elements of scratch per buffer, two buffers per thread.
+ *
+ * The phase steps go to `step_table` (64-byte aligned): the top coordinates
+ * run in batches of whole tiles whose steps fit it, and of at most
+ * `batch_coords` coordinates when that is not 0; `batch_fn`, when set, runs
+ * after each batch. A table smaller than `cone_band_tile_step_bytes` throws.
  */
 void ffa_complex_cone_band_freq(const ComplexType* level_in,
                                 ComplexType* level_out,
@@ -301,7 +322,26 @@ void ffa_complex_cone_band_freq(const ComplexType* level_in,
                                 SizeType tile_coords,
                                 ComplexTileFn tile_fn,
                                 void* tile_ctx,
+                                std::span<std::byte> step_table,
+                                SizeType batch_coords,
+                                ConeBatchFn batch_fn,
+                                void* batch_ctx,
                                 int nthreads);
+
+/// Bytes of one phase step of the complex merges (depends on the SIMD
+/// width of the build).
+[[nodiscard]] SizeType phase_step_bytes() noexcept;
+
+/**
+ * @brief Phase-step table bytes a Fourier cone band needs at least: the
+ * steps of one tile of `tile_coords` top coordinates (each level's range
+ * rounded out to step blocks). 0 when the band cannot run.
+ */
+[[nodiscard]] SizeType
+cone_band_tile_step_bytes(const coord::FFACoordFreq* const* coords_levels,
+                          const SizeType* ncoords,
+                          SizeType k_levels,
+                          SizeType tile_coords) noexcept;
 
 void brute_fold_ts_complex(const float* __restrict__ ts_e,
                            const float* __restrict__ ts_v,
@@ -333,6 +373,11 @@ void ffa_iter_freq(const float* __restrict__ fold_in,
                    SizeType nbins,
                    int nthreads);
 
+/**
+ * @brief One complex (Fourier) merge level. `step_table` (64-byte aligned,
+ * at least two step blocks) holds the phase steps of a batch of
+ * coordinates where a level is merged segment by segment.
+ */
 void ffa_complex_iter(const ComplexType* __restrict__ fold_in,
                       ComplexType* __restrict__ fold_out,
                       const coord::FFACoord* __restrict__ coords,
@@ -341,8 +386,10 @@ void ffa_complex_iter(const ComplexType* __restrict__ fold_in,
                       SizeType nsegments,
                       SizeType nbins_f,
                       SizeType nbins,
+                      std::span<std::byte> step_table,
                       int nthreads);
 
+/// Frequency-only counterpart of ffa_complex_iter.
 void ffa_complex_iter_freq(const ComplexType* __restrict__ fold_in,
                            ComplexType* __restrict__ fold_out,
                            const coord::FFACoordFreq* __restrict__ coords,
@@ -351,6 +398,7 @@ void ffa_complex_iter_freq(const ComplexType* __restrict__ fold_in,
                            SizeType nsegments,
                            SizeType nbins_f,
                            SizeType nbins,
+                           std::span<std::byte> step_table,
                            int nthreads);
 
 /**

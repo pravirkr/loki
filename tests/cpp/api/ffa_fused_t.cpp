@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <initializer_list>
 #include <optional>
@@ -124,15 +125,27 @@ TEST_CASE("Accel execute_scored is bit-exact with a scan of the stored fold",
     }
     REQUIRE(!expected.empty());
 
-    // Fused final level (default) and the stored-fold fallback (fusion off).
-    for (const auto fuse :
-         {std::optional<SizeType>{}, std::optional<SizeType>{SizeType{0}}}) {
+    // Fused final level (default), the same with one final-level row per
+    // on-the-fly coordinate batch, and the stored-fold fallback (fusion off).
+    struct Mode {
+        std::optional<SizeType> fuse;
+        bool row_batches;
+    };
+    for (const Mode mode : {Mode{.fuse = std::nullopt, .row_batches = false},
+                            Mode{.fuse = std::nullopt, .row_batches = true},
+                            Mode{.fuse = SizeType{0}, .row_batches = false}}) {
         FFATime scored(cfg, /*show_progress=*/false);
-        scored.set_fuse_levels(fuse);
+        scored.set_fuse_levels(mode.fuse);
         std::vector<SnrHit> hits;
+        if (mode.row_batches) {
+            // NOLINTNEXTLINE(misc-include-cleaner): POSIX setenv
+            REQUIRE(setenv("LOKI_FINAL_COORD_BATCH_KB", "1", 1) == 0);
+        }
         scored.execute_scored(ts_e, ts_v, kThreshold, widths, hits);
+        unsetenv("LOKI_FINAL_COORD_BATCH_KB"); // NOLINT(misc-include-cleaner)
         INFO("nbins=" << nbins << " nthreads=" << nthreads
-                      << " fused=" << !fuse.has_value());
+                      << " fused=" << !mode.fuse.has_value()
+                      << " row_batches=" << mode.row_batches);
         REQUIRE(hits.size() == expected.size());
         bool equal = true;
         for (SizeType i = 0; i < hits.size(); ++i) {
@@ -181,14 +194,28 @@ TEST_CASE("Fourier execute_scored matches a scan of the stored fold",
                   widths, scores, ncoords, nbins, loki::Exec::cpu(1));
     constexpr float kThreshold = 1.0F;
 
-    for (const auto fuse :
-         {std::optional<SizeType>{}, std::optional<SizeType>{SizeType{0}}}) {
+    // As the time-domain test: fused, fused with one final-level row per
+    // on-the-fly coordinate batch (accel), and the stored-fold fallback.
+    struct Mode {
+        std::optional<SizeType> fuse;
+        bool row_batches;
+    };
+    for (const Mode mode : {Mode{.fuse = std::nullopt, .row_batches = false},
+                            Mode{.fuse = std::nullopt, .row_batches = true},
+                            Mode{.fuse = SizeType{0}, .row_batches = false}}) {
+        const auto& fuse = mode.fuse;
         FFAFourier scored(cfg, /*show_progress=*/false);
         scored.set_fuse_levels(fuse);
         std::vector<SnrHit> hits;
+        if (mode.row_batches) {
+            // NOLINTNEXTLINE(misc-include-cleaner): POSIX setenv
+            REQUIRE(setenv("LOKI_FINAL_COORD_BATCH_KB", "1", 1) == 0);
+        }
         scored.execute_scored(ts_e, ts_v, kThreshold, widths, hits);
+        unsetenv("LOKI_FINAL_COORD_BATCH_KB"); // NOLINT(misc-include-cleaner)
         INFO("nbins=" << nbins << " accel=" << accel << " nthreads=" << nthreads
-                      << " fused=" << !fuse.has_value());
+                      << " fused=" << !fuse.has_value()
+                      << " row_batches=" << mode.row_batches);
         // Every hit is a stored-fold score above the threshold, in order.
         SizeType n_expected = 0;
         for (const float score : scores) {

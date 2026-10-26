@@ -70,13 +70,14 @@ build_region_decode_table(std::span<const search::FFASearchConfig> cfgs) {
         dec.nbins         = cfg.get_nbins();
         dec.nsegments     = plan.get_nsegments().back();
 
-        // Scoring cost: 2 passes over (e, v) profiles per width trial.
-        const auto score_flops =
-            static_cast<double>(dec.ncoords * 2) *
-            static_cast<double>(dec.n_widths * 2 * dec.nbins);
-        dec.gflops = static_cast<double>(plan.get_gflops(
-                         /*return_in_time=*/true)) +
-                     (score_flops * 1e-9);
+        // Scoring cost (data arithmetic only): per bin, a prefix sum and a
+        // normalisation, plus one subtract and one max per width.
+        const auto score_flops = static_cast<double>(dec.ncoords) *
+                                 static_cast<double>(dec.nbins) *
+                                 static_cast<double>((2 * dec.n_widths) + 3);
+        dec.gflops             = static_cast<double>(plan.get_gflops(
+                                     /*return_in_time=*/true)) +
+                                 (score_flops * 1e-9);
 
         error_check::check_less_equal(
             dec.get_n_scores(),

@@ -783,51 +783,30 @@ FFATomlConfig::to_search_config(std::optional<SizeType> override_nsamps,
 namespace {
 
 /**
- * @brief Relative cost weights for the bseg_brute selector.
+ * @brief Relative cost weights for the direct-DFT bseg_brute selector.
  *
- * All weights are expressed in units of one time-domain brute-fold
- * gather-add ("brute op"). They were fitted with bench/bseg_brute_sweep.py +
- * bench/fit_cost_model.py (Apple M1 Pro, 8 threads, nsamps = 2^21 / 2^23,
- * 1-488 Hz, nbins 32-1024). The optimum is flat (within ~5% over a factor of
- * two in B), so the weights only need to be roughly right; use an explicit
- * `bseg_brute` to override on unusual hardware or backends.
+ * Only the direct-DFT Fourier brute fold (nbins <= nbins_min_lossy_bf) picks
+ * its segment length by cost: there the brute fold is a (sample, frequency,
+ * Fourier bin) triple loop and dominates the run time. The time-domain and
+ * lossy-Fourier paths use a cycles-at-f_max target instead (see
+ * bseg_target_cycles). Weights are in units of one time-domain brute-fold
+ * gather-add, fitted with bench/scripts/ffa/bseg_brute_sweep.py +
+ * fit_cost_model.py (Apple M1 Pro, 8 threads). The optimum is flat, so they
+ * only need to be roughly right; use an explicit `bseg_brute` to override on
+ * unusual hardware or backends.
  *
- * - brute_op:  cost per brute op. For the direct-DFT Fourier brute fold one
- *              "op" is a (sample, frequency, Fourier bin) triple.
- * - table:     cost per (frequency, sample) lookup-table entry built when the
- *              BruteFold is constructed (measured ~28 brute ops/entry).
- * - merge_op:  cost per merge element-op, i.e. per
- *              2 * ncoords * nsegments * width.
+ * - brute_op: cost per (sample, frequency, Fourier bin) of the SIMD DFT
+ *             (~0.27 gather-adds).
+ * - merge_op: cost per complex merge element-op, i.e. per
+ *             2 * ncoords * nsegments * nbins_f (~4.9 gather-adds).
  */
-struct BsegCostWeights {
+struct DirectDftCostWeights {
     double brute_op;
-    double table;
     double merge_op;
 };
 
-// Time-domain FFA. The run-length brute fold makes the segment length a
-// period cap (see select_bseg_brute_by_cost) rather than a fitted trade
-// against gather-adds. These weights remain for the direct-DFT comparison
-// and for bench/fit_cost_model.py; the time-domain selector does not use
-// them to pick B inside the cap.
-constexpr BsegCostWeights kBsegWeightsTime{
-    .brute_op = 1.0,
-    .table    = 0.25,
-    .merge_op = 4.0,
-};
-// Fourier FFA with lossy init (time-domain brute fold + RFFT): complex merge
-// is ~5x a brute gather-add per Fourier bin.
-constexpr BsegCostWeights kBsegWeightsFourierLossy{
-    .brute_op = 1.0,
-    .table    = 28.0,
-    .merge_op = 5.2,
-};
-// Fourier FFA with the direct-DFT brute fold (nbins <= nbins_min_lossy_bf):
-// the SIMD DFT is ~0.27 gather-adds per (sample, freq, bin), a complex merge
-// ~4.9 per Fourier bin.
-constexpr BsegCostWeights kBsegWeightsFourierDirect{
+constexpr DirectDftCostWeights kDirectDftWeights{
     .brute_op = 0.27,
-    .table    = 0.0,
     .merge_op = 4.9,
 };
 
@@ -1099,14 +1078,15 @@ private:
     /**
      * @brief Default brute-fold segment length (the FFA entry level).
      *
-     * Chosen by a cost model (see select_bseg_brute_by_cost). The previous
+     * Chosen by a cycles-at-f_max target, or by a cost model for the
+     * direct-DFT Fourier brute fold (see select_bseg_brute). The previous
      * "two cycles at f_min" heuristic is kept as a fallback for degenerate
      * configurations (e.g. nsamps that is not a power of two, which validate()
      * rejects anyway, or parameter ranges the grid-count helpers refuse).
      */
     SizeType get_bseg_brute_default() const {
         try {
-            if (const auto bseg = select_bseg_brute_by_cost()) {
+            if (const auto bseg = select_bseg_brute()) {
                 return *bseg;
             }
         } catch (const std::exception& ex) {
@@ -1118,26 +1098,13 @@ private:
     }
 
     /**
-     * @brief Pick the power-of-two brute segment length B minimising
-     * W_brute * brute_ops(B) + W_table * F0 * B + W_merge * merge_ops(B).
+     * @brief Largest k such that B = 2^k is a valid brute segment length, or
+     * std::nullopt when no power-of-two choice exists (nsamps that is not a
+     * power of two, which validate() rejects anyway).
      *
-     * - Brute fold at segment length B costs ~2 * nsamps * F(B) gather-adds,
-     *   where F(B) is the level-0 frequency grid size (proportional to B).
-     * - Every FFA merge level costs ~2 * ncoords * nsegments * width element
-     *   ops (width = nbins, or nbins_f for the Fourier domain). For a
-     *   frequency-only search F * N is constant, so each level costs the same.
-     * - Halving B halves the brute cost and adds one merge level, which pays
-     *   off while B > ~2 * W_merge/W_brute * width. This makes B track the
-     *   number of bins (samples per bin) instead of the number of cycles at
-     *   f_min, so slow-pulsar chunks with a capped nbins no longer pay for a
-     *   huge brute fold and a B^2 index table.
-     *
-     * Level counts come from the real parameter grids, so higher-order
-     * searches and the F>=1 floor are handled, and candidates that violate
-     * the "level 0 has a single higher-order trial" plan constraint are
-     * skipped. Returns std::nullopt if no candidate is valid.
+     * B must stay below nsamps (validate) and below the FFA segment cap.
      */
-    [[nodiscard]] std::optional<SizeType> select_bseg_brute_by_cost() const {
+    [[nodiscard]] std::optional<SizeType> bseg_brute_k_max() const {
         if (m_nsamps < 4 || !std::has_single_bit(m_nsamps)) {
             return std::nullopt;
         }
@@ -1146,35 +1113,122 @@ private:
             bseg_ffa_cap > m_nsamps) {
             return std::nullopt;
         }
-        const auto k_max =
-            static_cast<SizeType>(std::countr_zero(bseg_ffa_cap));
-        // B must stay below nsamps (validate) and below the FFA segment cap.
-        const SizeType k_brute_max = std::min(
-            k_max, static_cast<SizeType>(std::countr_zero(m_nsamps)) - 1);
+        return std::min(static_cast<SizeType>(std::countr_zero(bseg_ffa_cap)),
+                        static_cast<SizeType>(std::countr_zero(m_nsamps)) - 1);
+    }
 
+    /// validate_plan(): level 0 (segments of 2^k samples) may only have a
+    /// frequency grid, i.e. a single trial for every higher-order parameter.
+    [[nodiscard]] bool level0_is_frequency_only(SizeType k) const {
+        const auto c0 = get_param_grid_count(
+            static_cast<double>(SizeType{1} << k) * m_tsamp);
+        return std::all_of(c0.begin(), c0.end() - 1,
+                           [](SizeType count) { return count == 1; });
+    }
+
+    /**
+     * @brief Pick the default brute segment length B (a power of two), or
+     * std::nullopt if no valid choice exists.
+     *
+     * - Direct-DFT Fourier: minimise a cost model (select_bseg_direct_dft).
+     * - Time domain and lossy Fourier: a cycles-at-f_max target
+     *   (select_bseg_by_cycles).
+     */
+    [[nodiscard]] std::optional<SizeType> select_bseg_brute() const {
         const bool direct_dft =
             m_use_fourier && m_nbins <= m_nbins_min_lossy_bf;
-        const BsegCostWeights& w = [&]() -> const BsegCostWeights& {
-            if (!m_use_fourier) {
-                return kBsegWeightsTime;
-            }
-            if (direct_dft) {
-                return kBsegWeightsFourierDirect;
-            }
-            return kBsegWeightsFourierLossy;
-        }();
-        const auto width =
-            static_cast<double>(m_use_fourier ? m_nbins_f : m_nbins);
-        const auto nsamps = static_cast<double>(m_nsamps);
+        return direct_dft ? select_bseg_direct_dft() : select_bseg_by_cycles();
+    }
 
-        // Grid counts per segment length 2^k samples, k = 1..k_max.
-        std::vector<std::vector<SizeType>> counts(k_max + 1);
+    /**
+     * @brief B from a target number of cycles per segment at f_max.
+     *
+     * The run-length brute cost per frequency is ~nbins * ceil(B / P): flat
+     * up to one period at f_max and then growing with the cycles per
+     * segment. The accuracy side is the number of merge levels, each of which
+     * rounds the shifts to whole bins and loses S/N (measured with
+     * bench/scripts/ffa/bseg_brute_sensitivity.py: about 1% per halving of B
+     * below ~8 cycles at nbins 32, with the loss falling as nbins grows). So
+     * B is set from a target number of cycles at f_max, the fast end of the
+     * chunk, which the planner keeps within octave_scale of f_min.
+     *
+     * Takes the largest valid B at or below the power of two nearest to the
+     * target; the smallest valid B if all candidates are above it.
+     */
+    [[nodiscard]] std::optional<SizeType> select_bseg_by_cycles() const {
+        const auto k_max = bseg_brute_k_max();
+        if (!k_max.has_value()) {
+            return std::nullopt;
+        }
+        const double target_cycles  = bseg_target_cycles();
+        const double target_samples = target_cycles / (m_tsamp * m_f_max);
+        const auto desired_k        = static_cast<SizeType>(std::max(
+            1L, std::lround(std::log2(std::max(target_samples, 2.0)))));
+        std::optional<SizeType> largest_below_target;
+        std::optional<SizeType> smallest_valid;
+        for (SizeType k = 1; k <= *k_max; ++k) {
+            if (!level0_is_frequency_only(k)) {
+                continue;
+            }
+            const auto bseg_k = SizeType{1} << k;
+            if (!smallest_valid.has_value()) {
+                smallest_valid = bseg_k;
+            }
+            if (k <= desired_k) {
+                largest_below_target = bseg_k;
+            }
+        }
+        const auto chosen = largest_below_target.has_value()
+                                ? largest_below_target
+                                : smallest_valid;
+        if (chosen.has_value()) {
+            spdlog::debug("bseg_brute cycle target: nbins={}, nparams={}, "
+                          "f=[{:.4g}, {:.4g}] Hz -> bseg_brute={} (target "
+                          "{:.2f} cycles at f_max, got {:.2f})",
+                          m_nbins, m_nparams, m_f_min, m_f_max, *chosen,
+                          target_cycles,
+                          static_cast<double>(*chosen) * m_tsamp * m_f_max);
+        }
+        return chosen;
+    }
+
+    /**
+     * @brief B minimising W_brute * brute_ops(B) + W_merge * merge_ops(B) for
+     * the direct-DFT Fourier brute fold.
+     *
+     * - Brute fold at segment length B costs ~2 * nsamps * F(B) * nbins_f
+     *   (sample, frequency, bin) triples, F(B) being the level-0 frequency
+     *   grid size (proportional to B).
+     * - Every FFA merge level costs ~2 * ncoords * nsegments * nbins_f
+     *   element ops. For a frequency-only search F * N is constant, so each
+     *   level costs the same.
+     * - Halving B halves the brute cost and adds one merge level, which pays
+     *   off while B > ~2 * W_merge/W_brute * nbins_f.
+     *
+     * Level counts come from the real parameter grids, so higher-order
+     * searches and the F>=1 floor are handled, and candidates that violate
+     * the "level 0 has a single higher-order trial" plan constraint are
+     * skipped.
+     */
+    [[nodiscard]] std::optional<SizeType> select_bseg_direct_dft() const {
+        const auto k_max_opt = bseg_brute_k_max();
+        if (!k_max_opt.has_value()) {
+            return std::nullopt;
+        }
+        const SizeType k_max = *k_max_opt;
+        const auto width     = static_cast<double>(m_nbins_f);
+        const auto nsamps    = static_cast<double>(m_nsamps);
+        const auto& w        = kDirectDftWeights;
+
+        // Level-0 frequency counts and merge work per segment length 2^k.
+        std::vector<SizeType> nfreqs0(k_max + 1, 0);
         std::vector<double> merge_elems(k_max + 1, 0.0);
         for (SizeType k = 1; k <= k_max; ++k) {
             const double tseg = static_cast<double>(SizeType{1} << k) * m_tsamp;
-            counts[k]         = get_param_grid_count(tseg);
+            const auto counts = get_param_grid_count(tseg);
+            nfreqs0[k]        = counts.back();
             double ncoords    = 1.0;
-            for (const auto c : counts[k]) {
+            for (const auto c : counts) {
                 ncoords *= static_cast<double>(c);
             }
             const double nsegments = nsamps / static_cast<double>(1ULL << k);
@@ -1186,77 +1240,31 @@ private:
             merge_above[k - 1] = merge_above[k] + merge_elems[k];
         }
 
-        // Time-domain and lossy-Fourier folds use the run-length kernel. Its
-        // cost per frequency is ~nbins * ceil(B / P), so a segment of one to
-        // two periods at f_max costs about one merge level. Take the largest
-        // power of two inside that cap. The 16*nbins guard below is only for
-        // the direct DFT.
-        if (!direct_dft) {
-            const double cap_samples = 2.0 / (m_tsamp * m_f_max);
-            std::optional<SizeType> largest_under_cap;
-            std::optional<SizeType> smallest_valid;
-            for (SizeType k = 1; k <= k_brute_max; ++k) {
-                const auto bseg_k = SizeType{1} << k;
-                const auto& c0    = counts[k];
-                const bool single_higher_order =
-                    std::all_of(c0.begin(), c0.end() - 1,
-                                [](SizeType count) { return count == 1; });
-                if (!single_higher_order) {
-                    continue;
-                }
-                if (!smallest_valid.has_value()) {
-                    smallest_valid = bseg_k;
-                }
-                if (static_cast<double>(bseg_k) <= cap_samples) {
-                    largest_under_cap = bseg_k;
-                }
-            }
-            const auto chosen = largest_under_cap.has_value()
-                                    ? largest_under_cap
-                                    : smallest_valid;
-            if (chosen.has_value()) {
-                spdlog::debug(
-                    "bseg_brute period cap: nbins={}, f=[{:.4g}, {:.4g}] Hz "
-                    "-> bseg_brute={} (cap {:.0f} samples, {:.2f} periods)",
-                    m_nbins, m_f_min, m_f_max, *chosen, cap_samples,
-                    static_cast<double>(*chosen) * m_tsamp * m_f_max);
-                return chosen;
-            }
-        }
-
         // Beyond ~16 bins' worth of samples a larger B can no longer pay for
-        // itself (the measured optimum is 4-8 * nbins). Without this guard a
-        // very narrow chunk, where F(B) floors at 1, would pick an enormous B
-        // and make its brute-fold table (and plan shape) larger than that of
-        // the wider chunks around it, breaking the planner's assumption that
-        // narrowing a chunk never increases its memory. Fall back to the
-        // unrestricted scan only if the guard leaves no valid candidate.
+        // itself. Without this guard a very narrow chunk, where F(B) floors
+        // at 1, would pick an enormous B and make its brute-fold plan shape
+        // larger than that of the wider chunks around it, breaking the
+        // planner's assumption that narrowing a chunk never increases its
+        // memory. Fall back to the unrestricted scan only if the guard
+        // leaves no valid candidate.
         constexpr SizeType kMaxBsegPerBin = 16;
         const SizeType bseg_guard         = kMaxBsegPerBin * m_nbins;
 
         std::optional<SizeType> best;
         double best_cost = 0.0;
         for (const bool guarded : {true, false}) {
-            for (SizeType k = 1; k <= k_brute_max; ++k) {
+            for (SizeType k = 1; k <= k_max; ++k) {
                 const auto bseg_k = SizeType{1} << k;
                 if (guarded && bseg_k > bseg_guard) {
                     break;
                 }
-                const auto& c0 = counts[k];
-                // validate_plan(): level 0 may only have a frequency grid.
-                const bool single_higher_order =
-                    std::all_of(c0.begin(), c0.end() - 1,
-                                [](SizeType count) { return count == 1; });
-                if (!single_higher_order) {
+                if (!level0_is_frequency_only(k)) {
                     continue;
                 }
-                const auto nfreqs0 = static_cast<double>(c0.back());
-                const auto bseg    = static_cast<double>(bseg_k);
                 const double brute_ops =
-                    2.0 * nsamps * nfreqs0 * (direct_dft ? width : 1.0);
-                const double cost = (w.brute_op * brute_ops) +
-                                    (w.table * nfreqs0 * bseg) +
-                                    (w.merge_op * merge_above[k]);
+                    2.0 * nsamps * static_cast<double>(nfreqs0[k]) * width;
+                const double cost =
+                    (w.brute_op * brute_ops) + (w.merge_op * merge_above[k]);
                 if (!best.has_value() || cost <= best_cost) {
                     best      = bseg_k;
                     best_cost = cost;
@@ -1267,11 +1275,33 @@ private:
             }
         }
         if (best.has_value()) {
-            spdlog::debug("bseg_brute cost model: nbins={}, f=[{:.4g}, "
-                          "{:.4g}] Hz -> bseg_brute={} (model cost {:.3e})",
+            spdlog::debug("bseg_brute direct-DFT cost model: nbins={}, "
+                          "f=[{:.4g}, {:.4g}] Hz -> bseg_brute={} (model cost "
+                          "{:.3e})",
                           m_nbins, m_f_min, m_f_max, *best, best_cost);
         }
         return best;
+    }
+
+    /**
+     * @brief Target cycles per brute segment at f_max for the run-length
+     * (time-domain and lossy-Fourier) fold.
+     *
+     * Fitted from injection sweeps (2^21 samples, eta = 1, chunk ratio 1.5):
+     * the per-level shift rounding costs S/N roughly in proportion to
+     * 1/nbins^2 (pulse width in bins), so wide-profile chunks need fewer
+     * cycles. Acceleration searches have more merge dimensions and need
+     * about twice as many. The chosen B is the power of two nearest to the
+     * target (never above it by more than the rounding).
+     */
+    [[nodiscard]] double bseg_target_cycles() const {
+        double cycles = 1.5;
+        if (m_nbins <= 64) {
+            cycles = 4.0;
+        } else if (m_nbins <= 128) {
+            cycles = 2.0;
+        }
+        return (m_nparams > 1) ? 2.0 * cycles : cycles;
     }
 
     /// Legacy heuristic: roughly two cycles at f_min (four for nparams > 1).

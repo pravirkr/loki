@@ -19,7 +19,7 @@ namespace loki::algorithms::detail {
 /// itself, so the model follows the library version; memoised.
 SizeType ep_cuda_cub_scratch_bytes(SizeType max_n_leaves, int device);
 
-/// Free device memory (GiB) of @p device right now.
+/// Free device memory (GB) of @p device right now.
 double ep_cuda_free_memory_gb(int device);
 
 /// Compute capability of @p device, e.g. "sm_89". Informational: plan caches

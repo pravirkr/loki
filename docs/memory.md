@@ -10,7 +10,17 @@ effective limit = max_process_memory_gb - kUnmodelledReserveGB   (0.5 GB)
 ```
 
 `kUnmodelledReserveGB` lives in `lib/algorithms/planner_memory.hpp` and is shared
-by both planners. This page describes the EP model (`lib/algorithms/ep_memory.hpp`)
+by both planners.
+
+**Units.** Every memory limit, getter and log in Loki counts a GB as 2^30
+bytes (`utils::kBytesPerGB`, `lib/detail/utils.hpp`), the convention of
+Slurm's `--mem`, `top` and `htop`, and labels it "GB". `max_process_memory_gb
+= 16` (`--memory-gb 16`) is the same amount as a Slurm allocation of
+`--mem=16G`. That allocation must also hold what the reserve covers, so ask
+Slurm for at least `--memory-gb`; the plan never exceeds `--memory-gb` minus
+the reserve.
+
+This page describes the EP model (`lib/algorithms/ep_memory.hpp`)
 and how `EPRegionPlanner` uses it. The model has two policies, for the CPU and
 the CUDA sweep (see [CUDA backend](#cuda-backend)); everything below is the CPU
 policy unless it says otherwise.
@@ -210,13 +220,76 @@ in per-thread scratch and scores them there (`cpu_scored_fused_levels`,
 tiling, time and Fourier folds) and score the top band in cache, but keep the
 full buffer for the bands below.
 
+The rule is that every allocation whose size grows with the problem (samples,
+trials, bins, coordinates, widths, threads) is either part of a workspace the
+planner sizes or bounded by a term the planner adds; the reserve covers only
+size-independent objects. The planner counts, per chunk, and sizes the sweep
+by the maximum of each term over the chunks:
+
 | Term | Contents |
 | --- | --- |
-| fold buffers | two ping-pong buffers of `cpu_scored_buffer_size(plan)`: the largest stored level (every level but the last two for accel searches; the full buffer for frequency-only searches) |
-| coordinates | every level's resolved coordinates |
-| brute fold | phase-run table (time) or phasor table (Fourier), see `estimate_brutefold_table_bytes` |
+| fold buffers | two ping-pong buffers of `cpu_scored_buffer_size(plan)`: the largest stored level (every level but the last two for accel searches; the full buffer for frequency-only searches). The sweep allocates both once (`FFAWorkspaceCPU::fold_internal` and the sweep's second buffer, passed as `scratch`); pages a chunk never uses are never touched |
+| coordinates | `cpu_scored_coord_size(plan)`: every level's resolved coordinates, except that accel searches keep one batch of final-level rows (`kCpuFinalCoordBatchBytes`, 32 MiB) in place of the final level, which `run_final_scored` resolves batch by batch |
+| brute fold | phase-run table (time domain, and Fourier plans above `nbins_min_lossy_bf`, which fold in time and transform), three times the runs while it is built; or phasor table (Fourier), see `estimate_brutefold_table_bytes` |
+| scratch | `nthreads * cpu_ffa_thread_scratch_bytes(plan)` + `cpu_hit_buffer_bytes(plan)` + the phase-step table (`cpu_phase_step_table_bytes`, the largest chunk's) |
 | extra | write staging and the `max_passing_candidates` accumulator (12 B per candidate) |
 | inputs | `ts_e`, `ts_v` |
+
+`FFARegionStats::get_scratch_memory_usage()` (`scratch_memory_usage` in
+Python) is the scratch term; the sweep logs it on its "peak memory" line.
+
+- **Phase steps.** A complex (Fourier) merge rotates a profile by
+  `exp(-2 pi i shift / nbins)`. The steps depend only on the coordinate, so
+  they are computed once per coordinate (vectorised, in blocks of 32) and
+  reused by every segment and tile. The kernels compute them for one batch of
+  coordinates at a time into one table, `FFAWorkspaceCPU::phase_steps`, at
+  most `kPhaseStepTableBytes` (32 MiB, about 170 k steps), or less when the
+  plan needs less. Cone bands run their top coordinates in batches of whole
+  tiles whose steps fit the table; segment-major merges run batches of whole
+  step blocks. The step blocks are those of a single pass, so the results are
+  bit-identical. Before this table the steps of every level of a band were
+  held at once, which exceeded the plan by up to 7.8 GB.
+- **Per-thread scratch.** `cpu_ffa_thread_scratch_bytes` is an explicit upper
+  bound on what one thread allocates: the largest of the cone bands (the cone
+  budget, `kCpuConeScratchBytes` = 2 MiB or `LOKI_CONE_SCRATCH_KB`; three
+  budgets for time-domain bands, whose segment prefix sums may be shared), the
+  fused or plain brute fold (prefix sums of `bseg_brute` samples), and the
+  fused final level (tile and parent rows), plus the boxcar scorer and the
+  lane FFT. Its terms mirror the allocations in `kernels_cpu.cpp`,
+  `ffa_cpu.cpp`, `boxcar_kernels.hpp` and `lane_fft_cpu.cpp`; change them
+  together.
+- **Hits.** Hits are data dependent: one per passing (profile, width). The
+  engine hands them to the sweep (`detail::HitSink`) after every batch of
+  final-level coordinates, and the sweep pushes them straight into the
+  candidate buffer, which is flushed to disk when full. A batch is
+  `kCpuHitBatchCoords` (2^16) coordinates of whole tiles, or, for accel
+  searches, whole row groups (rows that share parent rows,
+  `cpu_final_row_group_rows`) up to that size. The per-thread hit vectors are
+  freed after each batch, so `cpu_hit_buffer_bytes` = 2 x batch x widths x
+  8 B bounds them even if every profile passes. The hits keep their
+  score-index order.
+
+The CPU sweep path allocates nothing else that grows with the problem. The
+audit of everything reachable from `FFAFreqSweep::execute`:
+
+| Allocation | Where | Class |
+| --- | --- | --- |
+| `fold_internal`, coordinates, `phase_steps` | `FFAWorkspaceCPU` | workspace |
+| second ping-pong buffer (`m_fold_time`) | sweep | workspace |
+| candidate accumulator, write staging | sweep | workspace ("extra") |
+| phase-run / phasor tables, run lists while built | `BruteFold`, `brute_fold_ts_complex` | brute-fold term |
+| cone tiles, prefix sums (per thread or shared) | `ffa_cone_band_freq`, `ffa_complex_cone_band_freq` | per-thread bound |
+| brute-fold prefix sums and rows | `brute_fold_ts`, `brute_fold_ffa_fused_freq`, `brute_fold_ts_complex` | per-thread bound |
+| final tiles and parent rows | `ffa_final_scored`, `ffa_final2_scored`, `complex_final_tiles`, `ffa_complex_final2_tiles` | per-thread bound |
+| `BoxcarScorer3D`, `EVTransform` (scoring, forward / inverse batches) | `ConeScoreCtx`, `FourierScoreCtx`, `lane_fft_cpu.cpp` | per-thread bound |
+| hits | `ConeScoreCtx` per-thread vectors | hit term |
+| tile lists, batch lists, per-chunk plan and decode tables | kernels, `FFAPlan`, `RegionDecode` | small: at most one entry per tile of a batch, or per level |
+| FFT plans and Bluestein tables (one per `nbins`) | `EVTransform::get_plan` | size-independent (reserve) |
+
+Standalone `FFA::execute_scored` (public API) collects every hit in the
+caller's vector and allocates its own second fold buffer; it is not part of a
+memory plan. The benchmark hook `LOKI_FUSE_LEVELS=0` stores the final level
+and allocates an unplanned buffer (it logs a warning).
 
 The workspace is allocated once, sized by the maximum of each term over all
 chunks. Chunks are chosen by cost, with the memory limit as a hard cap
@@ -241,6 +314,11 @@ chunks. Chunks are chosen by cost, with the memory limit as a hard cap
 
 The GPU planner keeps the widest chunk that fits (bisection on the width),
 because a GPU chunk has real fixed costs.
+
+Test hooks shrink the batches to exercise their edges (`ffa_memory_t.cpp`):
+`LOKI_PHASE_TABLE_KB`, `LOKI_HIT_BATCH_COORDS`, `LOKI_FINAL_COORD_BATCH_KB`.
+`tests/cpp/internal/ffa_memory_t.cpp` also checks that the planner's terms
+cover the real workspace and the per-thread bounds of every chunk.
 
 ## Reserve
 

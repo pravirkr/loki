@@ -22,6 +22,7 @@
 #include "lib/cuda/cub_helpers.cuh"
 #include "lib/cuda/cuda_utils.cuh"
 #include "lib/detail/error_check.hpp"
+#include "lib/detail/utils.hpp"
 
 namespace loki::memory {
 namespace {
@@ -448,7 +449,7 @@ SizeType WorldTreeCUDA<FoldTypeCUDA>::get_memory_usage_bytes() const noexcept {
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
 float WorldTreeCUDA<FoldTypeCUDA>::get_memory_usage_gib() const noexcept {
     return static_cast<float>(get_memory_usage_bytes()) /
-           static_cast<float>(1ULL << 30U);
+           static_cast<float>(utils::kBytesPerGB);
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
