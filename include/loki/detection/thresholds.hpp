@@ -274,6 +274,10 @@ public:
     /// @p batch_size is used by the GPU backends only; @p exec.nthreads by
     /// the CPU backend only.
     ///
+    /// @p ref_ducy is the reference pulse's full width at a tenth of maximum
+    /// (FWTM), in turns: a Gaussian of rms width ref_ducy / (2 sqrt(2 ln 10)).
+    /// A pulse of FWHM duty d needs ref_ducy = sqrt(ln 10 / ln 2) d ~ 1.82 d.
+    ///
     /// Probability grid: @p nprobs log-spaced bins of cumulative Pd from
     /// @p prob_min to 1; a cell keeps one path per (threshold, bin). Modes
     /// shared and robust build it from SharedOptions::min_pd instead: nprobs

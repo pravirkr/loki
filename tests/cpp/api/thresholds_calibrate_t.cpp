@@ -205,6 +205,44 @@ TEST_CASE("simulate_h1_scores is evaluate's unpruned signal", "[thresholds]") {
     REQUIRE(states.back().success_h1_cumul == 1.0F);
 }
 
+TEST_CASE("simulate_h1_scores: a partial last chunk leaves the others intact",
+          "[thresholds]") {
+    const auto* backend = GENERATE("cpu", "cuda");
+    CAPTURE(backend);
+    if (skip_backend(backend)) {
+        SKIP("needs a CUDA build");
+    }
+    // At nbins 1024 CUDA simulates 4096 trials per chunk, so 5000 trials end
+    // with a partial chunk of 904. Each trial keeps the random streams of
+    // its index: the first 4096 trials of both calls must be identical at
+    // every stage (the partial chunk once wrote into the next stage's row).
+    const std::vector<float> branching(8, 2.0F);
+    const DynamicThresholdScheme dyn(
+        branching, /*ref_ducy=*/0.1F, /*nbins=*/1024, /*ntrials=*/64,
+        /*nprobs=*/4, /*prob_min=*/0.05F, /*snr_final=*/8.0F,
+        /*nthresholds=*/8, /*ducy_max=*/0.3F, /*wtsp=*/1.0F,
+        /*beam_width=*/1.5F, /*trials_start=*/1, "improved", 5,
+        /*batch_size=*/256, exec_of(backend));
+    constexpr SizeType kFull    = 4096;
+    constexpr SizeType kPartial = 5000;
+    const auto nstages          = dyn.get_nstages();
+    const auto full             = dyn.simulate_h1_scores(kFull, 9);
+    const auto partial          = dyn.simulate_h1_scores(kPartial, 9);
+    REQUIRE(full.size() == nstages * kFull);
+    REQUIRE(partial.size() == nstages * kPartial);
+    for (SizeType s = 0; s < nstages; ++s) {
+        CAPTURE(s);
+        const std::vector<float> head(
+            partial.begin() + static_cast<std::ptrdiff_t>(s * kPartial),
+            partial.begin() +
+                static_cast<std::ptrdiff_t>((s * kPartial) + kFull));
+        const std::vector<float> ref(
+            full.begin() + static_cast<std::ptrdiff_t>(s * kFull),
+            full.begin() + static_cast<std::ptrdiff_t>((s + 1) * kFull));
+        REQUIRE(same_bits(head, ref));
+    }
+}
+
 TEST_CASE("calibrate delivers min_pd on independent trials", "[thresholds]") {
     const auto* backend = GENERATE("cpu", "cuda");
     CAPTURE(backend);

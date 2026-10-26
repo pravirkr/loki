@@ -81,10 +81,11 @@ __global__ void simulate_folds_init_kernel(float* __restrict__ folds_sim,
         return;
     }
 
-    const uint32_t branch   = tid / ntrials; // 0=H0, 1=H1
-    const uint32_t trial_id = tid % ntrials;
-    const uint32_t out_offset =
-        branch * ntrials * nbins_padded + trial_id * nbins_padded;
+    const uint32_t branch = tid / ntrials; // 0=H0, 1=H1
+    // Row tid = branch * ntrials + trial_id; 64-bit, as 2 * ntrials *
+    // nbins_padded can exceed 2^32.
+    const uint64_t out_offset =
+        static_cast<uint64_t>(tid) * static_cast<uint64_t>(nbins_padded);
     const float branch_scale = (branch == 1) ? bias_snr : 0.0F;
 
     const uint64_t global_tid = rng_offset + tid;
@@ -447,8 +448,8 @@ simulate_folds_init_eval_kernel(float* __restrict__ folds_sim,
     }
     const uint32_t branch   = tid / ntrials;
     const uint32_t trial_id = tid % ntrials;
-    const uint32_t out_offset =
-        branch * ntrials * nbins_padded + trial_id * nbins_padded;
+    const uint64_t out_offset =
+        static_cast<uint64_t>(tid) * static_cast<uint64_t>(nbins_padded);
     const float branch_scale = (branch == 1) ? bias_snr : 0.0F;
     const float noise_stddev = __fsqrt_rn(var_add);
     auto rng_noise           = typename RNG::Generator(

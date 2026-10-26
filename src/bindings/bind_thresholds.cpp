@@ -22,6 +22,38 @@ using search::PulsarSearchConfig;
 
 namespace py = pybind11;
 
+namespace {
+
+py::dict solution_to_dict(detection::SchemeSolution sol) {
+    py::dict out;
+    out["thresholds"]        = as_pyarray(std::move(sol.thresholds));
+    out["pd"]                = sol.pd;
+    out["pd_se"]             = sol.pd_se;
+    out["pd_trials"]         = sol.pd_trials;
+    out["c"]                 = sol.c;
+    out["cost"]              = sol.cost;
+    out["eval_states"]       = as_pyarray(std::move(sol.eval_states));
+    out["search_thresholds"] = as_pyarray(std::move(sol.search_thresholds));
+    out["search_pd"]         = sol.search_pd;
+    out["search_c"]          = sol.search_c;
+    py::list shortlist;
+    for (auto& path : sol.shortlist) {
+        shortlist.append(as_pyarray(std::move(path)));
+    }
+    out["shortlist"] = std::move(shortlist);
+    py::dict diag;
+    for (const auto& [name, value] : sol.diagnostics) {
+        diag[py::str(name)] = value;
+    }
+    out["diagnostics"] = std::move(diag);
+    out["delivery"]    = detection::delivery_to_string(sol.delivery);
+    out["min_pd"]      = sol.min_pd;
+    out["w_terminal"]  = sol.w_terminal;
+    return out;
+}
+
+} // namespace
+
 void bind_thresholds(py::module_& m) {
     auto m_thresholds = m.def_submodule("thresholds", "Thresholds submodule");
     using detection::DynamicThresholdScheme;
@@ -65,7 +97,11 @@ void bind_thresholds(py::module_& m) {
              py::arg("backend") = "cpu", py::arg("device") = 0,
              py::arg("batch_size") = 256, py::arg("guess") = "analytic",
              py::arg("min_pd") = 0.1F, py::arg("w_terminal") = 1.0F,
-             py::arg("beam_sigma") = 3.0F, py::arg("reach_sigma") = 1.0F)
+             py::arg("beam_sigma") = 3.0F, py::arg("reach_sigma") = 1.0F,
+             "ref_ducy is the reference pulse's full width at a tenth of "
+             "maximum (FWTM), in turns: a Gaussian of rms width ref_ducy / "
+             "(2 sqrt(2 ln 10)). A pulse of FWHM duty d needs ref_ducy = "
+             "sqrt(ln 10 / ln 2) d ~ 1.82 d.")
         .def("run", &DynamicThresholdScheme::run, py::arg("thres_neigh") = 10,
              "Operational search. The path from get_best_path_thresholds is "
              "used immediately. In-run cost and success_h1_cumul are "
@@ -76,39 +112,23 @@ void bind_thresholds(py::module_& m) {
         .def(
             "solve",
             [](DynamicThresholdScheme& self) {
-                auto sol = self.solve();
-                py::dict out;
-                out["thresholds"]  = as_pyarray(std::move(sol.thresholds));
-                out["pd"]          = sol.pd;
-                out["pd_se"]       = sol.pd_se;
-                out["pd_trials"]   = sol.pd_trials;
-                out["c"]           = sol.c;
-                out["cost"]        = sol.cost;
-                out["eval_states"] = as_pyarray(std::move(sol.eval_states));
-                out["search_thresholds"] =
-                    as_pyarray(std::move(sol.search_thresholds));
-                out["search_pd"] = sol.search_pd;
-                out["search_c"]  = sol.search_c;
-                py::list shortlist;
-                for (auto& path : sol.shortlist) {
-                    shortlist.append(as_pyarray(std::move(path)));
-                }
-                out["shortlist"] = std::move(shortlist);
-                py::dict diag;
-                for (const auto& [name, value] : sol.diagnostics) {
-                    diag[py::str(name)] = value;
-                }
-                out["diagnostics"] = std::move(diag);
-                out["delivery"]   = detection::delivery_to_string(sol.delivery);
-                out["min_pd"]     = sol.min_pd;
-                out["w_terminal"] = sol.w_terminal;
-                return out;
+                return solution_to_dict(self.solve());
             },
             "Modes 'shared' and 'robust', after run(): the schedule to use "
             "with the Pd and cost of exactly those thresholds measured on "
             "fresh samples (tightening, selection, refinement and repair use "
             "other samples than the report). Frees the search's device "
             "memory.")
+        .def(
+            "solution",
+            [](const DynamicThresholdScheme& self) -> py::object {
+                const auto* sol = self.solution();
+                if (sol == nullptr) {
+                    return py::none();
+                }
+                return solution_to_dict(*sol);
+            },
+            "The result of the last solve() (same keys), or None.")
         .def_property_readonly("nstages", &DynamicThresholdScheme::get_nstages)
         .def_property_readonly("nthresholds",
                                &DynamicThresholdScheme::get_nthresholds)

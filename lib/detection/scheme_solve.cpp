@@ -541,7 +541,8 @@ SchemeSolution refit_scheme(const ThresholdsEngine& engine,
     constexpr uint64_t kRefitNoiseR = 0x5A9E0014ULL;
     constexpr float kShiftStep      = 0.2F;
     constexpr float kShiftFine      = 0.1F;
-    constexpr float kShiftMax       = 3.0F;
+    constexpr SizeType kShiftSteps  = 15; // up to 3.0
+    constexpr float kShiftMax       = kShiftStep * kShiftSteps;
     const SizeType n                = budget.nbank;
     const double p                  = static_cast<double>(min_pd);
     const double target             = std::min(
@@ -584,8 +585,9 @@ SchemeSolution refit_scheme(const ThresholdsEngine& engine,
         return pt;
     };
     Point best = probe(0.0F);
-    for (float shift = kShiftStep; shift <= kShiftMax; shift += kShiftStep) {
-        const Point pt = probe(shift);
+    // Integer steps: a float accumulator overshoots 3.0 and skips the last.
+    for (SizeType i = 1; i <= kShiftSteps; ++i) {
+        const Point pt = probe(kShiftStep * static_cast<float>(i));
         if (pt.pd < target) {
             break; // the Pd only falls with the shift
         }

@@ -347,7 +347,11 @@ eps_s = sqrt(sum_{j <= s} (1 - s_j) / (N s_j)),    m_s = 1 + z eps_s,    z = 2.3
 
 and a ring sized with it falls short of the true mean about 1 % of the time
 (`ep_ring_margin`, `kEPRingMarginZ`). With `N = 2^15` and production schedules
-`m_s` is about 1.1 to 1.2. During stage `s` the ring holds the unconsumed
+`m_s` is about 1.1 to 1.2. A stage whose evaluation prunes every noise trial
+is counted at the floor `s_j = 1 / N` (one trial kept): it adds about 1 to
+`eps_s^2`, so `m_s >= 1 + z` from that stage on. That over-allocates, on the
+safe side, and only where the forecast population is already tiny. During
+stage `s` the ring holds the unconsumed
 parents and the survivors written so far, so it is sized from the largest
 adjacent sum, plus one branched batch, rounded up to a multiple of 1024
 leaves (`kEPRingGranularity`; neither ring needs a power of two):

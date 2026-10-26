@@ -249,6 +249,12 @@ public:
             throw std::invalid_argument(
                 "EPRegionPlanner: min_pd must be in (0, 1]");
         }
+        // Checked here: scheme_nbins divides by it before any engine does.
+        if (!utils::is_finite(m_ref_ducy) || m_ref_ducy <= 0.0F ||
+            m_ref_ducy >= 1.0F) {
+            throw std::invalid_argument(
+                "EPRegionPlanner: ref_ducy must be in (0, 1)");
+        }
         // Every coarse region uses the same FFA segmentation for this cfg.
         const plans::FFAPlan<FoldType> initial_plan(m_base_cfg);
         if (!m_n_runs && !m_ref_segs) {
@@ -602,9 +608,13 @@ public:
             throw std::invalid_argument(
                 "EPRegionPlanner: cache mismatch for param_limits size");
         }
+        // Relative: snap limits are ~1e-7, below any absolute tolerance.
+        const auto differs = [](double a, double b) {
+            return std::abs(a - b) > 1e-6 * std::max(std::abs(a), std::abs(b));
+        };
         for (SizeType i = 0; i < cur_limits.size(); ++i) {
-            if (std::abs(cur_limits[i].min - file_lim_min[i]) > 1e-6 ||
-                std::abs(cur_limits[i].max - file_lim_max[i]) > 1e-6) {
+            if (differs(cur_limits[i].min, file_lim_min[i]) ||
+                differs(cur_limits[i].max, file_lim_max[i])) {
                 throw std::invalid_argument(std::format(
                     "EPRegionPlanner: cache mismatch for param_limits[{}]", i));
             }
@@ -782,6 +792,8 @@ public:
         m_stats.set_memory_limit_gb(m_memory_limit_gb);
         spdlog::info("EPRegionPlanner: loaded {} chunks from plan cache '{}'",
                      m_chunk_cfgs.size(), filepath.string());
+        // A cached plan warns about a short Pd as a fresh one does.
+        report_chunks();
     }
 
 private:

@@ -147,3 +147,16 @@ def test_solve_can_run_twice(backend: str, mode: str) -> None:
     second = scheme.solve()
     np.testing.assert_array_equal(first["thresholds"], second["thresholds"])
     assert first["pd"] == second["pd"]
+
+
+def test_solution_returns_the_last_solve() -> None:
+    scheme = _scheme("cpu")
+    assert scheme.solution() is None
+    scheme.run(10)
+    sol = scheme.solve()
+    kept = scheme.solution()
+    assert kept is not None
+    assert kept.keys() == sol.keys()
+    np.testing.assert_array_equal(kept["thresholds"], sol["thresholds"])
+    assert kept["pd"] == sol["pd"]
+    assert kept["delivery"] == sol["delivery"]

@@ -745,6 +745,9 @@ private:
                 counts[item] = {count_h0, count_h1};
                 const float ntrials_h1 =
                     static_cast<float>(m_ntrials_desc[prev][(2 * cell) + 1]);
+                // The state carries the noise survival floored at the
+                // minimum support (a regularised search model, as on CUDA);
+                // counts[] and the survivor maps keep the observation.
                 const State next =
                     prev_states[(pair.jthres * nprobs) + kprob].gen_next(
                         threshold,

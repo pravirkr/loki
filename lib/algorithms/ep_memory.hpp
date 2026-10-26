@@ -254,8 +254,11 @@ struct EPPopulationForecast {
  *
  * Population s is the seed count times a product of measured pass rates, so
  * its relative error is eps_s = sqrt(sum_{j <= s} (1 - s_j) / (N s_j)) (the
- * binomial errors of the factors, in quadrature). A stage that passes nothing
- * ends the path and adds no error. All ones for an exact forecast.
+ * binomial errors of the factors, in quadrature). The evaluation keeps at
+ * least one noise trial per stage, so s_j >= 1 / N; a stage at that floor
+ * adds about 1 to eps_s^2 (a margin of at least 1 + z from there on, which
+ * over-allocates on the safe side). A rate of 0 (a hand-made forecast) is
+ * skipped. All ones for an exact forecast.
  */
 inline std::vector<double>
 ep_ring_margin(const EPPopulationForecast& forecast) {

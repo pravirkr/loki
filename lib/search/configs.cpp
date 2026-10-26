@@ -243,6 +243,59 @@ void validate_toml_document(const toml::table& root,
     return value;
 }
 
+/// True when the float at @p pos of @p text is written `nan` or `inf` (with
+/// an optional sign). toml++ positions are 1-based and count code points.
+[[nodiscard]] bool is_nonfinite_literal(std::string_view text,
+                                        const toml::source_position& pos) {
+    std::size_t i = text.starts_with("\xEF\xBB\xBF") ? 3 : 0; // BOM
+    for (toml::source_index line = 1; line < pos.line; ++line) {
+        i = text.find('\n', i);
+        if (i == std::string_view::npos) {
+            return false;
+        }
+        ++i;
+    }
+    for (toml::source_index col = 1;
+         col < pos.column && i < text.size() && text[i] != '\n'; ++col) {
+        ++i; // one code point: skip its UTF-8 continuation bytes
+        while (i < text.size() &&
+               (static_cast<unsigned char>(text[i]) & 0xC0U) == 0x80U) {
+            ++i;
+        }
+    }
+    if (i < text.size() && (text[i] == '+' || text[i] == '-')) {
+        ++i;
+    }
+    const auto token = text.substr(std::min(i, text.size()));
+    return token.starts_with("nan") || token.starts_with("inf");
+}
+
+/// No config value may be non-finite. TOML allows the float literals `nan`
+/// and `inf`, and toml++ builds them from quiet_NaN() and infinity(); under
+/// -ffast-math (Release) those are poison, so the parsed value is garbage and
+/// no check on it can catch them. They are rejected by their source text.
+void reject_nonfinite_floats(const toml::node& node,
+                             std::string_view text,
+                             const std::string& path) {
+    if (const auto* tbl = node.as_table()) {
+        for (const auto& [key, child] : *tbl) {
+            reject_nonfinite_floats(
+                child, text,
+                path.empty() ? std::string(key.str())
+                             : std::format("{}.{}", path, key.str()));
+        }
+    } else if (const auto* arr = node.as_array()) {
+        for (std::size_t j = 0; j < arr->size(); ++j) {
+            reject_nonfinite_floats((*arr)[j], text,
+                                    std::format("{}[{}]", path, j));
+        }
+    } else if (node.is_floating_point() &&
+               is_nonfinite_literal(text, node.source().begin)) {
+        throw std::invalid_argument(
+            std::format("{} must be finite (got nan or inf)", path));
+    }
+}
+
 [[nodiscard]] std::optional<double> read_number(const toml::table& table,
                                                 std::string_view key,
                                                 std::string_view path) {
@@ -725,6 +778,7 @@ FFATomlConfig read_ffa_tables(const toml::table& tbl) {
 FFATomlConfig FFATomlConfig::from_string(std::string_view toml_content) {
     try {
         const toml::table tbl = toml::parse(toml_content);
+        reject_nonfinite_floats(tbl, toml_content, "");
         validate_toml_document(tbl, /*allow_ep=*/false, "FFA");
         return read_ffa_tables(tbl);
     } catch (const toml::parse_error& err) {
@@ -1928,12 +1982,16 @@ void validate_ep_config(const EPTomlConfig& cfg) {
             "ep.poly_basis must be 'taylor' or 'chebyshev' (got '{}')",
             cfg.poly_basis));
     }
-    for (const auto& [name, value] : {std::pair{"ep.min_pd", cfg.min_pd},
-                                      std::pair{"ep.ref_ducy", cfg.ref_ducy}}) {
-        if (!utils::is_finite(value) || value <= 0.0F || value > 1.0F) {
-            throw std::invalid_argument(
-                std::format("{} must be in (0, 1] (got {})", name, value));
-        }
+    if (!utils::is_finite(cfg.min_pd) || cfg.min_pd <= 0.0F ||
+        cfg.min_pd > 1.0F) {
+        throw std::invalid_argument(
+            std::format("ep.min_pd must be in (0, 1] (got {})", cfg.min_pd));
+    }
+    // The threshold scheme needs a pulse narrower than the period.
+    if (!utils::is_finite(cfg.ref_ducy) || cfg.ref_ducy <= 0.0F ||
+        cfg.ref_ducy >= 1.0F) {
+        throw std::invalid_argument(std::format(
+            "ep.ref_ducy must be in (0, 1) (got {})", cfg.ref_ducy));
     }
     if (cfg.prune_poly_order < 1) {
         throw std::invalid_argument(std::format(
@@ -2174,6 +2232,7 @@ void EPTomlConfig::write_default(const std::filesystem::path& path) {
 EPTomlConfig EPTomlConfig::from_string(std::string_view toml_content) {
     try {
         const toml::table tbl = toml::parse(toml_content);
+        reject_nonfinite_floats(tbl, toml_content, "");
         validate_toml_document(tbl, /*allow_ep=*/true, "EP");
         EPTomlConfig cfg;
         static_cast<FFATomlConfig&>(cfg) = read_ffa_tables(tbl);

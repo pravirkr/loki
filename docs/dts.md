@@ -92,9 +92,12 @@ measuring the chosen schedule on samples that took no part in choosing it
   their offset by at most 0.9 σ per stage; hence the defaults 3 and 1. A reach
   of 0.5 σ costs 9 % on a 4-segment pattern.
 - **Ranking.** A cell keeps the candidate of lowest cost / Pd (cost so far,
-  plus `w_terminal` times the survivors at the last stage); for the ranking
-  only, a noise survivor count below 8 per 1024 trials is treated as 8 (a
-  near-zero count is mostly luck). The Pd grid has `nprobs` bins from `min_pd`
+  plus `w_terminal` times the survivors at the last stage). In the search's
+  states, a noise survivor count below 8 per 1024 trials is treated as 8 (a
+  near-zero count is mostly luck, and a deep search would exploit it): the
+  floored pass rate enters the cost so far, every descendant's cost and the
+  `robust` cost to go. The survivor maps keep the actual trials, and `solve()`
+  measures C on fresh noise, so the reported C is not floored. The Pd grid has `nprobs` bins from `min_pd`
   to 1 (`min_pd` is an edge) and at most 16 below it.
 - **`solve()` on fresh samples** (2^17 signal trials each, 2^15 noise trials):
   1. *tighten* on bank A: lower every threshold by one common shift if fewer
@@ -144,6 +147,11 @@ Carlo noise of the same order as the differences between the modes (about
 `nprobs` is the number of Pd bins from `min_pd` to 1; `ntrials` (1024) is the
 noise population per cell. `prob_min`, `guess`, `beam_width` and
 `thres_neigh` apply to `legacy` and `improved` only.
+
+`ref_ducy` is the reference pulse's full width at a tenth of maximum (FWTM),
+in turns: the simulated pulse is a Gaussian of rms width
+σ = `ref_ducy` / (2 sqrt(2 ln 10)). For a pulse of measured FWHM duty d, set
+`ref_ducy` = sqrt(ln 10 / ln 2) d ≈ 1.82 d.
 
 The bin width is the resolution at which the search trades Pd against cost,
 and it matters most for L. Run time and run() memory grow linearly with
@@ -210,5 +218,10 @@ regression golden of both shared modes (valid for one toolchain);
   2^17-trial count) and holds for the simulated signal model: a pulse of the
   reference shape at the design S/N, folded without loss. Mismatch loss of the
   EP search and multi-leaf detection are outside it.
+- Pd is survival to the final candidate list, not completeness at a
+  false-alarm rate. The last threshold is chosen by cost alone (`w_terminal`
+  weighs the final survivors); nothing bounds the false-alarm probability per
+  final trial. At low S/N a high Pd can need a final list that keeps about
+  10^-5 of the noise, so the next processing step must be cheap enough for it.
 - The reported C is an independent but noisy Monte Carlo estimate; on very
   large irregular trees it can be off by a large factor.
