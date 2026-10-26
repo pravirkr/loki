@@ -448,8 +448,9 @@ void write_candidate_results(const std::filesystem::path& spool,
     // serialization scratch, including exceptionally small test budgets.
     const auto batch = std::max<std::size_t>(
         1, std::min<std::size_t>(
-               65536, static_cast<std::size_t>(options.memory_gb * 1e9 /
-                                               (32 * sizeof(Candidate)))));
+               65536,
+               static_cast<std::size_t>(options.memory_gb * utils::kBytesPerGB /
+                                        (32 * sizeof(Candidate)))));
     ExternalSort sort(scratch.path);
     for (std::size_t start = 0; start < nrows; start += batch) {
         auto records = read_candidates(raw, start,

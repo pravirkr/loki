@@ -250,7 +250,7 @@ std::uint64_t CandidateClusterer::append(const Candidate& c) {
     constexpr std::size_t kBytesPerCluster = 8 * sizeof(CandidateCluster) + 256;
     const double required = static_cast<double>(clusters.size() + 1) *
                             static_cast<double>(kBytesPerCluster);
-    if (required > m_options.memory_gb * 1e9 / 2) {
+    if (required > m_options.memory_gb * utils::kBytesPerGB / 2) {
         throw std::runtime_error("candidate representative index exceeds host "
                                  "memory budget; increase candidate memory_gb");
     }
@@ -289,7 +289,7 @@ std::uint64_t CandidateClusterer::append_transitive(const Candidate& c) {
         constexpr std::size_t kBytesPerNode =
             8 * sizeof(Node) + 8 * sizeof(CandidateCluster) + 512;
         if (static_cast<double>(m_nodes.size() + 1) * kBytesPerNode >
-            m_options.memory_gb * 1e9 / 2) {
+            m_options.memory_gb * utils::kBytesPerGB / 2) {
             throw std::runtime_error(
                 "candidate transitive track index exceeds host "
                 "memory budget; increase candidate memory_gb");
@@ -448,7 +448,7 @@ CandidateClustering cluster_candidates(std::span<const Candidate> candidates,
     // The convenience API's input and index are charged separately from the
     // representative budget reserved inside the processor.
     if (static_cast<double>(candidates.size()) * sizeof(std::size_t) >
-        options.memory_gb * 1e9 / 4) {
+        options.memory_gb * utils::kBytesPerGB / 4) {
         throw std::runtime_error("candidate input index exceeds memory budget");
     }
     std::vector<std::size_t> order(candidates.size());
