@@ -7,6 +7,7 @@
 
 #include "loki/common/backend.hpp"
 #include "loki/common/types.hpp"
+#include "loki/io/observation.hpp"
 #include "loki/io/preprocess.hpp"
 
 namespace loki::io {
@@ -75,6 +76,8 @@ public:
     [[nodiscard]] std::span<const float> get_ts_e() const noexcept;
     [[nodiscard]] std::span<float> get_ts_v() noexcept;
     [[nodiscard]] std::span<const float> get_ts_v() const noexcept;
+
+    [[nodiscard]] const ObservationMetadata& get_observation() const noexcept;
 
     [[nodiscard]] double get_dt() const noexcept;
     [[nodiscard]] SizeType get_nsamps() const noexcept;

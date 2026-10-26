@@ -315,13 +315,15 @@ public:
     FFAResultWriter& operator=(FFAResultWriter&&)      = delete;
 
     void write_metadata(const FFAResultMetadata& metadata);
+    void write_regions(std::span<const FFASearchConfig> configs);
 
     void write_results(std::span<const double> param_sets,
                        std::span<const float> scores,
                        std::span<const std::uint16_t> widths_bins,
                        std::span<const std::uint16_t> nbins,
                        SizeType n_param_sets,
-                       SizeType n_params);
+                       SizeType n_params,
+                       std::span<const std::uint64_t> detection_ids = {});
     void write_ffa_stats(const FFAStatsCollection& ffa_stats,
                          float total_runtime);
     /// Commit the temporary file and atomically rename to the final path.

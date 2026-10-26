@@ -499,3 +499,25 @@ caches plans in `<outdir>/<prefix>_ep_plan.h5` by default. Set
 `output.use_plan_cache = false` or pass `--no-plan-cache` to disable automatic
 caching. Explicit cache paths retain strict validation; obsolete implicit
 caches are regenerated.
+
+## Candidate postprocessing
+
+FFA sweeps reserve `candidates.memory_gb` for host-side candidate processing
+before fitting CPU chunks; set it below `max_process_memory_gb`. CUDA's search
+cap remains a device limit, and this candidate budget applies separately to
+host memory. The raw writer also stages uint64 detection identities (8 bytes
+per write-batch row), included in the host sweep memory estimate.
+
+Postprocessing sorts bounded candidate runs on disk and merges two runs at a
+time. Transitive grouping keeps a union-find node and ordered neighbor indexes
+for each distinct full Taylor track, including nonrepresentatives that may
+bridge components. Exact-track width duplicates share a node; its widest
+recorded duty cycle preserves all possible graph edges. Nodes, both index
+trees, final membership remapping and representative vectors have a conservative
+memory charge including allocation growth. No dense pairwise matrix is built.
+Anchored mode charges its representative vector and frequency index instead.
+The raw membership column is remapped in bounded batches after transitive
+components are complete, so later bridges cannot leave stale cluster IDs. Exhaustion is an
+explicit error, never a silent candidate cap. HDF5/runtime/allocator overhead
+is additional to accounted buffers. Temporary disk use can exceed the final
+HDF5 size even when raw retention is disabled. See [Candidate products](candidates.md).

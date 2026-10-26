@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <format>
+#include <fstream>
 #include <memory>
 #include <span>
 #include <stdexcept>
@@ -115,6 +116,7 @@ public:
     std::vector<float> ts_e;
     std::vector<float> ts_v;
     psrio::Header header;
+    ObservationMetadata observation;
 };
 
 TimeSeries::TimeSeries(std::vector<float> ts_e,
@@ -164,6 +166,10 @@ std::span<const float> TimeSeries::get_ts_v() const noexcept {
     return m_impl->ts_v;
 }
 
+const ObservationMetadata& TimeSeries::get_observation() const noexcept {
+    return m_impl->observation;
+}
+
 double TimeSeries::get_dt() const noexcept { return m_impl->header.tsamp; }
 
 SizeType TimeSeries::get_nsamps() const noexcept { return m_impl->ts_e.size(); }
@@ -188,6 +194,54 @@ TimeSeries TimeSeries::read(const std::filesystem::path& path,
     series.m_impl->header          = std::move(header);
     series.m_impl->header.tsamp    = tsamp;
     series.m_impl->header.nsamples = series.get_nsamps();
+    auto& obs                      = series.m_impl->observation;
+    obs.input_path                 = path.string();
+    obs.source                     = series.m_impl->header.source;
+    obs.original_nsamps            = series.get_nsamps();
+    if (kind_from_path(path) == FileKind::kTim) {
+        const psrio::detail::MappedFile mapped(path);
+        const auto h = psrio::formats::sigproc::FilterbankHeader::parse(
+            mapped.bytes(), path.string());
+        obs.dm        = h.refdm;
+        obs.start_mjd = h.tstart;
+        if (h.barycentric) {
+            obs.barycentric = *h.barycentric != 0;
+        }
+    } else {
+        auto inf = path;
+        inf.replace_extension(".inf");
+        std::ifstream input(inf);
+        std::string line;
+        // psrio's unified Header uses zero for missing optional metadata.
+        // Inspect presence only; numerical parsing stays owned by psrio.
+        while (std::getline(input, line)) {
+            const auto eq = line.rfind('=');
+            if (eq == std::string::npos ||
+                line.find_first_not_of(" \t", eq + 1) == std::string::npos) {
+                continue;
+            }
+            auto key = line.substr(0, eq);
+            std::ranges::transform(key, key.begin(), [](unsigned char c) {
+                return static_cast<char>(std::tolower(c));
+            });
+            key.erase(0, key.find_first_not_of(" \t"));
+            if (key.starts_with("dispersion measure")) {
+                obs.dm = series.m_impl->header.dm;
+            }
+            if (key.starts_with("epoch of observation")) {
+                obs.start_mjd = series.m_impl->header.tstart;
+            }
+            if (key.starts_with("barycentered?")) {
+                obs.barycentric = series.m_impl->header.barycentric != 0;
+            }
+        }
+    }
+    // psrio serializes its absent unified start time as zero on synthetic
+    // data. It is a sentinel, not a usable observational reference MJD.
+    if (obs.start_mjd && *obs.start_mjd == 0) {
+        obs.start_mjd.reset();
+    }
+    obs.validate();
     return series;
 }
 

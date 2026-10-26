@@ -297,3 +297,6 @@ ENV PATH=/opt/loki-venv/bin:$PATH
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+Candidate clustering, the versioned HDF5 schema, and PulsarX folding export are
+documented in [Candidate products](docs/candidates.md).

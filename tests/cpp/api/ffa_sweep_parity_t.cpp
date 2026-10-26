@@ -38,12 +38,15 @@ struct SweepResults {
 
 SweepResults read_results(const std::filesystem::path& path) {
     const HighFive::File file(path.string(), HighFive::File::ReadOnly);
+    // Compare raw scoring trials; representative selection is tested
+    // separately.
+    const auto detections = file.getGroup("detections");
     SweepResults out;
-    file.getDataSet("snr").read(out.snr);
-    file.getDataSet("width").read(out.width);
-    file.getDataSet("nbins").read(out.nbins);
+    detections.getDataSet("snr").read(out.snr);
+    detections.getDataSet("width").read(out.width);
+    detections.getDataSet("nbins").read(out.nbins);
     std::vector<std::vector<double>> rows;
-    file.getDataSet("param_sets").read(rows);
+    detections.getDataSet("param_sets").read(rows);
     for (const auto& row : rows) {
         REQUIRE(row.size() == 1);
         out.f0.push_back(row[0]);

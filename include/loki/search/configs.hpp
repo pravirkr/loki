@@ -10,7 +10,9 @@
 
 #include "loki/common/backend.hpp"
 #include "loki/common/types.hpp"
+#include "loki/io/observation.hpp"
 #include "loki/io/preprocess.hpp"
+#include "loki/search/candidates.hpp"
 
 namespace loki::search {
 
@@ -22,6 +24,8 @@ class FFASearchConfig;
 struct FFATomlConfig {
     // [input]
     std::string timeseries_path;
+    io::ObservationMetadata observation;
+    CandidateOptions candidates;
 
     // [preprocessing] (see docs/preprocessing.md)
     bool preprocess{true};
@@ -57,7 +61,7 @@ struct FFATomlConfig {
     double wtsp{1.5};
     /// Minimum candidate SNR written to final FFA/EP HDF5; EP filtering is
     /// reserved for future use.
-    double snr_min{6.0};
+    double snr_min{7.0};
     bool use_fourier{true};
     bool use_boxcar_kadane{false};
 
@@ -125,7 +129,7 @@ public:
                     SizeType nbins_min_lossy_bf        = 64,
                     std::optional<SizeType> bseg_brute = std::nullopt,
                     std::optional<SizeType> bseg_ffa   = std::nullopt,
-                    double snr_min                     = 6.0,
+                    double snr_min                     = 7.0,
                     SizeType max_passing_candidates    = 1U << 22U, // 4M
                     bool use_boxcar_kadane             = false);
 
@@ -237,7 +241,7 @@ public:
                    SizeType nbins_min_lossy_bf        = 64,
                    std::optional<SizeType> bseg_brute = std::nullopt,
                    std::optional<SizeType> bseg_ffa   = std::nullopt,
-                   double snr_min                     = 6.0,
+                   double snr_min                     = 7.0,
                    SizeType max_passing_candidates    = 1U << 22U, // 4M
                    SizeType prune_poly_order          = 3,
                    double p_orb_min                   = 1e-5,

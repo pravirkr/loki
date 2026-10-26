@@ -92,7 +92,7 @@ void validate_toml_document(const toml::table& root,
     static constexpr std::array kTopLevel{
         std::string_view{"input"},  std::string_view{"preprocessing"},
         std::string_view{"search"}, std::string_view{"performance"},
-        std::string_view{"output"},
+        std::string_view{"output"}, std::string_view{"candidates"},
     };
     static constexpr std::array kTopLevelEP{
         std::string_view{"input"},       std::string_view{"preprocessing"},
@@ -115,10 +115,10 @@ void validate_toml_document(const toml::table& root,
         std::string_view{"use_conservative_tile"},
     };
     static constexpr std::array kInputKeys{
-        std::string_view{"timeseries"},
-        std::string_view{"nsamps"},
-        std::string_view{"tsamp"},
-        std::string_view{"dt"},
+        std::string_view{"timeseries"},  std::string_view{"nsamps"},
+        std::string_view{"tsamp"},       std::string_view{"dt"},
+        std::string_view{"dm"},          std::string_view{"start_mjd"},
+        std::string_view{"barycentric"},
     };
     static constexpr std::array kPreprocessingKeys{
         std::string_view{"preprocess"},
@@ -178,7 +178,28 @@ void validate_toml_document(const toml::table& root,
         allow_ep ? std::span<const std::string_view>(kOutputKeysEP)
                  : std::span<const std::string_view>(kOutputKeys);
 
+    static constexpr std::array kCandidateKeys{
+        std::string_view{"cluster"},
+        std::string_view{"grouping"},
+        std::string_view{"radius"},
+        std::string_view{"phase_radius"},
+        std::string_view{"retain_detections"},
+        std::string_view{"flag_harmonics"},
+        std::string_view{"remove_harmonics"},
+        std::string_view{"harmonic_denominator_max"},
+        std::string_view{"harmonic_phase_distance"},
+        std::string_view{"harmonic_snr_distance"},
+        std::string_view{"max_candidates"},
+        std::string_view{"memory_gb"},
+        std::string_view{"temporary_directory"},
+    };
+
     std::vector<std::string> errors;
+    if (const auto* candidates = root["candidates"].as_table()) {
+        collect_unknown_keys(*candidates, kCandidateKeys, "candidates", errors);
+    } else if (root.contains("candidates")) {
+        errors.emplace_back("candidates must be a table");
+    }
     for (const auto& [key, _] : root) {
         if (!is_allowed_key(key.str(), top_level)) {
             const auto hint = removed_key_hint(key.str());
@@ -548,7 +569,7 @@ ducy_max = 0.2
 wtsp = 1.5
 
 # Minimum candidate SNR written to final HDF5 (EP filtering reserved for later)
-snr_min = 6.0
+snr_min = 7.0
 
 # Folding domain: true for Fourier-domain FFA (recommended), false for Time-domain FFA
 use_fourier = true
@@ -599,6 +620,23 @@ outdir = "./"
 
 # Output filename prefix (results saved as <outdir>/<prefix>_ffa_results.h5)
 prefix = "loki"
+
+[candidates]
+# Phase-track friends-of-friends; radius in narrower pulse widths.
+cluster = true
+grouping = "transitive" # or "anchored" for strongest-representative suppression
+radius = 1.0
+# Minimum separation in phase cycles. Set 0 for pulse-width-only clustering.
+phase_radius = 0.05
+retain_detections = true
+flag_harmonics = false
+remove_harmonics = false
+harmonic_denominator_max = 100
+harmonic_phase_distance = 1.0
+harmonic_snr_distance = 3.0
+max_candidates = 0 # unlimited; applied after harmonic filtering
+memory_gb = 1.0 # additional host budget, reserved within CPU search budget
+# temporary_directory = "/scratch/loki"
 )";
 }
 
@@ -635,6 +673,31 @@ FFATomlConfig read_ffa_tables(const toml::table& tbl) {
             cfg.tsamp = val;
         } else if (const auto val_dt = (*input)["dt"].value<double>()) {
             cfg.tsamp = val_dt;
+        }
+    }
+
+    if (const auto* input = tbl["input"].as_table()) {
+        for (const auto* key : {"dm", "start_mjd"}) {
+            if (input->contains(key)) {
+                const auto value = (*input)[key].value<double>();
+                if (!value) {
+                    throw std::invalid_argument(std::string("input.") + key +
+                                                ": expected number");
+                }
+                if (std::string_view(key) == "dm") {
+                    cfg.observation.dm = *value;
+                } else {
+                    cfg.observation.start_mjd = *value;
+                }
+            }
+        }
+        if (input->contains("barycentric")) {
+            const auto value = (*input)["barycentric"].value_exact<bool>();
+            if (!value) {
+                throw std::invalid_argument(
+                    "input.barycentric: expected boolean");
+            }
+            cfg.observation.barycentric = *value;
         }
     }
 
@@ -759,6 +822,135 @@ FFATomlConfig read_ffa_tables(const toml::table& tbl) {
                 require_non_negative_int64(*val, "performance.device"));
         }
     }
+
+    if (const auto* candidates = tbl["candidates"].as_table()) {
+        auto& options = cfg.candidates;
+        if (candidates->contains("cluster")) {
+            const auto value = (*candidates)["cluster"].value_exact<bool>();
+            if (!value) {
+                throw std::invalid_argument(
+                    "candidates.cluster: invalid value type");
+            }
+            options.cluster = *value;
+        }
+        if (candidates->contains("grouping")) {
+            const auto value = (*candidates)["grouping"].value<std::string>();
+            if (!value) {
+                throw std::invalid_argument(
+                    "candidates.grouping: invalid value type");
+            }
+            options.grouping = *value;
+        }
+        if (candidates->contains("radius")) {
+            const auto value = (*candidates)["radius"].value<double>();
+            if (!value) {
+                throw std::invalid_argument(
+                    "candidates.radius: invalid value type");
+            }
+            options.radius = *value;
+        }
+        if (candidates->contains("phase_radius")) {
+            const auto value = (*candidates)["phase_radius"].value<double>();
+            if (!value) {
+                throw std::invalid_argument(
+                    "candidates.phase_radius: invalid value type");
+            }
+            options.phase_radius = *value;
+        }
+        if (candidates->contains("retain_detections")) {
+            const auto value =
+                (*candidates)["retain_detections"].value_exact<bool>();
+            if (!value) {
+                throw std::invalid_argument(
+                    "candidates.retain_detections: invalid value type");
+            }
+            options.retain_detections = *value;
+        }
+        if (candidates->contains("flag_harmonics")) {
+            const auto value =
+                (*candidates)["flag_harmonics"].value_exact<bool>();
+            if (!value) {
+                throw std::invalid_argument(
+                    "candidates.flag_harmonics: invalid value type");
+            }
+            options.flag_harmonics = *value;
+        }
+        if (candidates->contains("remove_harmonics")) {
+            const auto value =
+                (*candidates)["remove_harmonics"].value_exact<bool>();
+            if (!value) {
+                throw std::invalid_argument(
+                    "candidates.remove_harmonics: invalid value type");
+            }
+            options.remove_harmonics = *value;
+        }
+        if (candidates->contains("harmonic_denominator_max")) {
+            const auto value = (*candidates)["harmonic_denominator_max"]
+                                   .value_exact<int64_t>();
+            if (!value) {
+                throw std::invalid_argument(
+                    "candidates.harmonic_denominator_max: invalid value type");
+            }
+            const auto checked = require_non_negative_int64(
+                *value, "candidates.harmonic_denominator_max");
+            if (checked > 10000) {
+                throw std::invalid_argument(
+                    "harmonic denominator exceeds 10000");
+            }
+            options.harmonic_denominator_max =
+                static_cast<decltype(options.harmonic_denominator_max)>(
+                    checked);
+        }
+        if (candidates->contains("harmonic_phase_distance")) {
+            const auto value =
+                (*candidates)["harmonic_phase_distance"].value<double>();
+            if (!value) {
+                throw std::invalid_argument(
+                    "candidates.harmonic_phase_distance: invalid value type");
+            }
+            options.harmonic_phase_distance = *value;
+        }
+        if (candidates->contains("harmonic_snr_distance")) {
+            const auto value =
+                (*candidates)["harmonic_snr_distance"].value<double>();
+            if (!value) {
+                throw std::invalid_argument(
+                    "candidates.harmonic_snr_distance: invalid value type");
+            }
+            options.harmonic_snr_distance = *value;
+        }
+        if (candidates->contains("max_candidates")) {
+            const auto value =
+                (*candidates)["max_candidates"].value_exact<int64_t>();
+            if (!value) {
+                throw std::invalid_argument(
+                    "candidates.max_candidates: invalid value type");
+            }
+            const auto checked =
+                require_non_negative_int64(*value, "candidates.max_candidates");
+            options.max_candidates =
+                static_cast<decltype(options.max_candidates)>(checked);
+        }
+        if (candidates->contains("memory_gb")) {
+            const auto value = (*candidates)["memory_gb"].value<double>();
+            if (!value) {
+                throw std::invalid_argument(
+                    "candidates.memory_gb: invalid value type");
+            }
+            options.memory_gb = *value;
+        }
+        if (candidates->contains("temporary_directory")) {
+            const auto value =
+                (*candidates)["temporary_directory"].value<std::string>();
+            if (!value) {
+                throw std::invalid_argument(
+                    "candidates.temporary_directory: invalid value type");
+            }
+            options.temporary_directory = *value;
+        }
+    }
+    cfg.candidates.validate();
+    cfg.observation.validate();
 
     // [output] table
     if (const auto* output = tbl["output"].as_table()) {
@@ -2144,7 +2336,7 @@ ducy_max = 0.2
 wtsp = 1.5
 
 # Minimum candidate SNR written to final HDF5 (EP filtering reserved for later)
-snr_min = 6.0
+snr_min = 7.0
 
 # Folding domain: true for Fourier-domain FFA (recommended), false for Time-domain FFA
 use_fourier = true

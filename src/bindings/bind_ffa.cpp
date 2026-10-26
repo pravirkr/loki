@@ -92,22 +92,29 @@ void bind_ffa(py::module_& m) {
 
     py::class_<FFAFreqSweep>(m_ffa, "FFAFreqSweep")
         .def(py::init([](const FFASearchConfig& cfg, bool show_progress,
-                         std::string_view backend, int device) {
+                         std::string_view backend, int device,
+                         const search::CandidateOptions& candidates) {
                  return std::make_unique<FFAFreqSweep>(
-                     cfg, show_progress, make_exec(backend, device));
+                     cfg, candidates, show_progress,
+                     make_exec(backend, device));
              }),
              py::arg("cfg"), py::arg("show_progress") = true, py::kw_only(),
-             py::arg("backend") = "cpu", py::arg("device") = 0)
+             py::arg("backend") = "cpu", py::arg("device") = 0,
+             py::arg("candidates") = search::CandidateOptions{})
         .def(
             "execute",
             [](FFAFreqSweep& self, const PyArrayT<float>& ts_e,
-               const PyArrayT<float>& ts_v, const std::string& outdir,
-               const std::string& file_prefix) {
+               const PyArrayT<float>& ts_v, const std::filesystem::path& outdir,
+               const std::string& file_prefix, const std::string& config_toml,
+               const io::ObservationMetadata& observation) {
                 self.execute(to_span<const float>(ts_e),
-                             to_span<const float>(ts_v), outdir, file_prefix);
+                             to_span<const float>(ts_v), outdir, file_prefix,
+                             config_toml, observation);
             },
             py::arg("ts_e"), py::arg("ts_v"), py::arg("outdir"),
-            py::arg("file_prefix") = "test");
+            py::arg("file_prefix") = "test", py::kw_only(),
+            py::arg("config_toml") = "",
+            py::arg("observation") = io::ObservationMetadata{});
 }
 
 } // namespace loki

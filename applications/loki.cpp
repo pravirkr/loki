@@ -445,12 +445,23 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
                    bool dry_run,
                    NsampsPolicy nsamps_policy) {
     check_frequency_range(toml_cfg);
+    toml_cfg.candidates.validate();
+    toml_cfg.observation.validate();
     const loki::Exec exec = search_exec(toml_cfg);
 
     if (dry_run) {
-        const auto dims = dry_run_dims(toml_cfg, nsamps_policy);
-        const auto preview_cfg =
-            toml_cfg.to_search_config(dims.nsamps, dims.tsamp);
+        const auto dims  = dry_run_dims(toml_cfg, nsamps_policy);
+        auto preview_cfg = toml_cfg.to_search_config(dims.nsamps, dims.tsamp);
+        if (exec.backend == loki::Backend::kCPU) {
+            const auto remaining = preview_cfg.get_max_process_memory_gb() -
+                                   toml_cfg.candidates.memory_gb;
+            if (remaining <= 0) {
+                throw std::invalid_argument(
+                    "candidate host memory budget must be smaller than total "
+                    "CPU search memory budget");
+            }
+            preview_cfg.set_max_process_memory_gb(remaining);
+        }
         if (preview_cfg.get_use_fourier()) {
             print_ffa_plan<loki::ComplexType>(preview_cfg, exec);
         } else {
@@ -494,10 +505,21 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
         SPDLOG_INFO("Using {} backend on device {}",
                     loki::to_string(exec.backend), exec.device);
     }
-    loki::pipelines::FFAFreqSweep sweep(ffa_cfg, /*show_progress=*/true, exec);
+    auto observation = ts.get_observation();
+    if (toml_cfg.observation.dm) {
+        observation.dm = toml_cfg.observation.dm;
+    }
+    if (toml_cfg.observation.start_mjd) {
+        observation.start_mjd = toml_cfg.observation.start_mjd;
+    }
+    if (toml_cfg.observation.barycentric) {
+        observation.barycentric = toml_cfg.observation.barycentric;
+    }
+    loki::pipelines::FFAFreqSweep sweep(ffa_cfg, toml_cfg.candidates,
+                                        /*show_progress=*/true, exec);
     sweep.execute(ts.get_ts_e().first(actual_nsamps),
                   ts.get_ts_v().first(actual_nsamps), outdir_path,
-                  toml_cfg.prefix, config_toml);
+                  toml_cfg.prefix, config_toml, observation);
 
     const auto result_file =
         outdir_path / std::format("{}_ffa_results.h5", toml_cfg.prefix);
@@ -1035,6 +1057,58 @@ int main(int argc, char** argv) {
                        "Output directory for candidate files");
     grp_io->add_option("-p,--prefix", ffa_cfg.prefix,
                        "Prefix for output candidate files");
+    grp_io->add_option("--dm", ffa_cfg.observation.dm,
+                       "Override single-trial dispersion measure (pc cm^-3)");
+    grp_io->add_option("--start-mjd", ffa_cfg.observation.start_mjd,
+                       "Override MJD of the first input sample");
+    grp_io->add_option(
+        "--barycentric", ffa_cfg.observation.barycentric,
+        "Override timing frame: true (barycentric) or false (topocentric)");
+    auto* grp_candidates = ffa->add_option_group("Candidate processing");
+    grp_candidates->add_flag(
+        "--cluster,!--no-cluster", ffa_cfg.candidates.cluster,
+        "Enable/disable phase-track clustering (default: enabled)");
+    grp_candidates
+        ->add_option("--cluster-grouping", ffa_cfg.candidates.grouping,
+                     "Grouping: transitive (default) or anchored")
+        ->check(CLI::IsMember({"transitive", "anchored"}));
+    grp_candidates->add_option(
+        "--cluster-radius", ffa_cfg.candidates.radius,
+        "Clustering radius in narrower pulse widths (default: 1)");
+    grp_candidates->add_option("--cluster-phase-radius",
+                               ffa_cfg.candidates.phase_radius,
+                               "Minimum suppression radius in phase cycles "
+                               "(default: 0.05; 0 disables floor)");
+    grp_candidates->add_flag(
+        "--retain-detections,!--no-retain-detections",
+        ffa_cfg.candidates.retain_detections,
+        "Keep raw detections and membership (default: enabled)");
+    grp_candidates->add_flag("--flag-harmonics",
+                             ffa_cfg.candidates.flag_harmonics,
+                             "Flag harmonic relationships between clusters");
+    grp_candidates->add_flag(
+        "--remove-harmonics", ffa_cfg.candidates.remove_harmonics,
+        "Exclude flagged harmonics; requires --flag-harmonics");
+    grp_candidates->add_option(
+        "--harmonic-denominator-max",
+        ffa_cfg.candidates.harmonic_denominator_max,
+        "Maximum rational harmonic denominator (default: 100)");
+    grp_candidates->add_option("--harmonic-phase-distance",
+                               ffa_cfg.candidates.harmonic_phase_distance,
+                               "Harmonic track tolerance in pulse widths");
+    grp_candidates->add_option("--harmonic-snr-distance",
+                               ffa_cfg.candidates.harmonic_snr_distance,
+                               "Harmonic S/N agreement tolerance");
+    grp_candidates->add_option("--max-candidates",
+                               ffa_cfg.candidates.max_candidates,
+                               "Maximum folding candidates; zero is unlimited");
+    grp_candidates->add_option(
+        "--candidate-memory-gb", ffa_cfg.candidates.memory_gb,
+        "Additional host budget reserved for candidate processing");
+    grp_candidates->add_option("--candidate-tempdir",
+                               ffa_cfg.candidates.temporary_directory,
+                               "Directory for bounded external sorting");
+
     grp_io->add_flag("--preprocess,!--no-preprocess", ffa_cfg.preprocess,
                      "Enable/disable preprocessing of the raw timeseries");
     grp_io
@@ -1074,7 +1148,7 @@ int main(int argc, char** argv) {
                            "Tolerance parameter (default: 1.0)");
     grp_search->add_option(
         "--snr-min", ffa_cfg.snr_min,
-        "Minimum candidate SNR for final HDF5 (default: 6.0)");
+        "Minimum candidate SNR for final HDF5 (default: 7.0)");
     grp_search->add_option("--ducy-max", ffa_cfg.ducy_max,
                            "Maximum duty cycle to evaluate (default: 0.2)");
     grp_search->add_option("--wtsp", ffa_cfg.wtsp,
@@ -1197,7 +1271,7 @@ int main(int argc, char** argv) {
                               "Tolerance parameter (default: 1.0)");
     ep_grp_search->add_option(
         "--snr-min", ep_cfg.snr_min,
-        "Minimum candidate SNR for final HDF5 (default: 6.0; EP filtering "
+        "Minimum candidate SNR for final HDF5 (default: 7.0; EP filtering "
         "reserved for future use)");
     ep_grp_search->add_option("--ducy-max", ep_cfg.ducy_max,
                               "Maximum duty cycle to evaluate (default: 0.2)");

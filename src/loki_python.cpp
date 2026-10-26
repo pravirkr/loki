@@ -32,12 +32,12 @@ PYBIND11_MODULE(libloki, m) {
     bind_scores(m);
     bind_thresholds(m);
     bind_fold(m);
+    bind_io(m);
     bind_configs(m);
     bind_plans(m);
     bind_ffa(m);
     bind_psr_utils(m);
     bind_prune(m);
-    bind_io(m);
     bind_simulation(m);
 }
 

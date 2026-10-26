@@ -25,6 +25,24 @@ namespace py = pybind11;
 void bind_configs(py::module_& m) {
     auto m_configs = m.def_submodule("configs", "Configs submodule");
     PYBIND11_NUMPY_DTYPE(ParamLimit, min, max);
+    using CO = search::CandidateOptions;
+    py::class_<CO>(m_configs, "CandidateOptions")
+        .def(py::init<>())
+        .def_readwrite("cluster", &CO::cluster)
+        .def_readwrite("grouping", &CO::grouping)
+        .def_readwrite("radius", &CO::radius)
+        .def_readwrite("phase_radius", &CO::phase_radius)
+        .def_readwrite("retain_detections", &CO::retain_detections)
+        .def_readwrite("flag_harmonics", &CO::flag_harmonics)
+        .def_readwrite("remove_harmonics", &CO::remove_harmonics)
+        .def_readwrite("harmonic_denominator_max",
+                       &CO::harmonic_denominator_max)
+        .def_readwrite("harmonic_phase_distance", &CO::harmonic_phase_distance)
+        .def_readwrite("harmonic_snr_distance", &CO::harmonic_snr_distance)
+        .def_readwrite("max_candidates", &CO::max_candidates)
+        .def_readwrite("memory_gb", &CO::memory_gb)
+        .def_readwrite("temporary_directory", &CO::temporary_directory)
+        .def("validate", &CO::validate);
 
     py::class_<FFASearchConfig>(m_configs, "FFASearchConfig")
         .def(py::init([](SizeType nsamps, double tsamp, SizeType nbins,
@@ -66,7 +84,7 @@ void bind_configs(py::module_& m) {
              py::arg("octave_scale") = 2.0, py::arg("nbins_max") = 1024,
              py::arg("nbins_min_lossy_bf") = 64,
              py::arg("bseg_brute")         = std::nullopt,
-             py::arg("bseg_ffa") = std::nullopt, py::arg("snr_min") = 6.0,
+             py::arg("bseg_ffa") = std::nullopt, py::arg("snr_min") = 7.0,
              py::arg("max_passing_candidates") = 1U << 22U, // 4M
              py::arg("use_boxcar_kadane")      = false)
         .def_property_readonly("nsamps", &FFASearchConfig::get_nsamps)
@@ -166,7 +184,7 @@ void bind_configs(py::module_& m) {
              py::arg("octave_scale") = 2.0, py::arg("nbins_max") = 1024,
              py::arg("nbins_min_lossy_bf") = 64,
              py::arg("bseg_brute")         = std::nullopt,
-             py::arg("bseg_ffa") = std::nullopt, py::arg("snr_min") = 6.0,
+             py::arg("bseg_ffa") = std::nullopt, py::arg("snr_min") = 7.0,
              py::arg("max_passing_candidates") = 1U << 22U, // 4M
              py::arg("prune_poly_order") = 3, py::arg("p_orb_min") = 1e-5,
              py::arg("m_c_max") = 10.0, py::arg("m_p_min") = 1.4,

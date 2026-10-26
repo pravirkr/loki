@@ -288,7 +288,7 @@ TEST_CASE("FFATomlConfig default generation and parsing", "[config][toml]") {
     REQUIRE_THAT(cfg.f_max, WithinAbs(100.0, 1e-9));
     REQUIRE(cfg.nbins == 64);
     REQUIRE_THAT(cfg.eta, WithinAbs(1.0, 1e-9));
-    REQUIRE_THAT(cfg.snr_min, WithinAbs(6.0, 1e-9));
+    REQUIRE_THAT(cfg.snr_min, WithinAbs(7.0, 1e-9));
     REQUIRE(cfg.use_fourier == true);
     REQUIRE(cfg.prefix == "loki");
 

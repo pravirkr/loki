@@ -263,7 +263,7 @@ TEST_CASE("EP threshold simulation has an independent target SNR",
     const auto defaults = loki::search::EPTomlConfig::from_string(make_doc())
                               .to_ep_search_config();
     REQUIRE(defaults.get_target_snr() == 8.5);
-    REQUIRE(defaults.get_snr_min() == 6.0);
+    REQUIRE(defaults.get_snr_min() == 7.0);
     const auto custom =
         loki::search::EPTomlConfig::from_string(
             make_doc("target_snr = 12\n", "nthreads = 2\nbseg_ffa = 8192\n",

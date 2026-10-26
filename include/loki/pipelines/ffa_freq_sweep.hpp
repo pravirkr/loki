@@ -7,6 +7,8 @@
 
 #include "loki/common/backend.hpp"
 #include "loki/common/types.hpp"
+#include "loki/io/observation.hpp"
+#include "loki/search/candidates.hpp"
 #include "loki/search/configs.hpp"
 
 namespace loki::pipelines {
@@ -24,6 +26,11 @@ public:
                           bool show_progress = true,
                           Exec exec          = {});
 
+    explicit FFAFreqSweep(const search::FFASearchConfig& cfg,
+                          const search::CandidateOptions& candidates,
+                          bool show_progress = true,
+                          Exec exec          = {});
+
     ~FFAFreqSweep();
     FFAFreqSweep(FFAFreqSweep&&) noexcept;
     FFAFreqSweep& operator=(FFAFreqSweep&&) noexcept;
@@ -32,9 +39,10 @@ public:
 
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
-                 const std::filesystem::path& outdir = "./",
-                 std::string_view file_prefix        = "test",
-                 std::string_view config_toml        = {});
+                 const std::filesystem::path& outdir        = "./",
+                 std::string_view file_prefix               = "test",
+                 std::string_view config_toml               = {},
+                 const io::ObservationMetadata& observation = {});
 
 private:
     class Impl;

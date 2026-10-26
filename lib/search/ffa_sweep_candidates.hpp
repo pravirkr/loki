@@ -217,6 +217,7 @@ inline void flush_candidates(CandidateBuffer& buf,
     const auto local_idx  = buf.get_local_indices();
     const auto region_ids = buf.get_region_ids();
 
+    std::vector<std::uint64_t> detection_ids(batch_max);
     SizeType batch_start = 0;
     while (batch_start < buf.get_size()) {
         const SizeType batch_count =
@@ -229,6 +230,8 @@ inline void flush_candidates(CandidateBuffer& buf,
             const SizeType score_idx  = local_idx[global_idx];
             const SizeType coord_idx  = score_idx / dec.n_widths;
             const SizeType width_idx  = score_idx % dec.n_widths;
+            detection_ids[k] = (static_cast<std::uint64_t>(region_id) << 32U) |
+                               static_cast<std::uint64_t>(score_idx);
 
             // Reconstruct parameters from coord_idx using index arithmetic
             SizeType remaining = coord_idx;
@@ -244,11 +247,12 @@ inline void flush_candidates(CandidateBuffer& buf,
             nbins_scratch[k] = static_cast<std::uint16_t>(dec.nbins);
         }
 
-        writer.write_results(param_sets_scratch.first(batch_count * n_params),
-                             scores.subspan(batch_start, batch_count),
-                             width_scratch.first(batch_count),
-                             nbins_scratch.first(batch_count), batch_count,
-                             n_params);
+        writer.write_results(
+            param_sets_scratch.first(batch_count * n_params),
+            scores.subspan(batch_start, batch_count),
+            width_scratch.first(batch_count), nbins_scratch.first(batch_count),
+            batch_count, n_params,
+            std::span<const std::uint64_t>(detection_ids).first(batch_count));
         batch_start += batch_count;
     }
     buf.clear();

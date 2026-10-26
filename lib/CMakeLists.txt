@@ -40,6 +40,10 @@ set(LOKI_BACKEND_DEFINITIONS
 )
 target_compile_definitions(${LOKI_LIBRARY_NAME} PRIVATE ${LOKI_BACKEND_DEFINITIONS})
 
+# Record the actual producer release in the common candidate product.
+set_property(SOURCE io/candidate_results.cpp APPEND PROPERTY COMPILE_DEFINITIONS
+             LOKI_PRODUCER_VERSION="${PROJECT_VERSION}")
+
 # Dependencies
 include(${PROJECT_SOURCE_DIR}/cmake/LokiDependencies.cmake)
 if(CMAKE_CUDA_COMPILER)

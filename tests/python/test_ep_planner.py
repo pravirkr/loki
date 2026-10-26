@@ -146,7 +146,7 @@ def test_ep_sweep_rejects_invalid_runs_at_construction(kwargs: dict) -> None:
 
 def test_ep_target_snr_is_independent_and_invalidates_cache(tmp_path: Path) -> None:
     cfg = _search_config(nthreads=1)
-    assert cfg.snr_min == 6.0
+    assert cfg.snr_min == 7.0
     assert cfg.target_snr == 8.5
     cache = tmp_path / "snr_plan.h5"
     libloki.prune.EPRegionPlannerTime(cfg, ref_segs=[0]).save_cache(str(cache))

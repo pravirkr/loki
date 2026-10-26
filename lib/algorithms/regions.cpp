@@ -319,9 +319,11 @@ float FFARegionStats::get_extra_memory_usage() const noexcept {
     // accumulator (score + local index + region id), plus the write staging.
     constexpr SizeType kBytesPerCandidate =
         sizeof(float) + (2 * sizeof(uint32_t));
-    return static_cast<float>((get_write_param_sets_size() * sizeof(double)) +
-                              (get_max_scores_scratch_size() * sizeof(float)) +
-                              (get_max_candidates() * kBytesPerCandidate)) /
+    return static_cast<float>(
+               (get_write_param_sets_size() * sizeof(double)) +
+               (kFFAFreqSweepWriteBatchSize * sizeof(std::uint64_t)) +
+               (get_max_scores_scratch_size() * sizeof(float)) +
+               (get_max_candidates() * kBytesPerCandidate)) /
            static_cast<float>(utils::kBytesPerGB);
 }
 float FFARegionStats::get_device_extra_memory_usage() const noexcept {

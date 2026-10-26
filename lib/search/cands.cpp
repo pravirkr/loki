@@ -568,14 +568,7 @@ FFAResultWriter::FFAResultWriter(std::filesystem::path filename, Mode mode)
     m_file.emplace(open_file());
 }
 
-FFAResultWriter::~FFAResultWriter() {
-    try {
-        if (!m_finalized) {
-            finalize();
-        }
-    } catch (...) { // NOLINT(bugprone-empty-catch)
-    }
-}
+FFAResultWriter::~FFAResultWriter() = default;
 
 HighFive::File& FFAResultWriter::h5_file() {
     if (!m_file.has_value()) {
@@ -623,6 +616,9 @@ void FFAResultWriter::ensure_datasets(SizeType n_params) {
                             HighFive::create_datatype<std::uint16_t>(),
                             row_props);
 
+    h5_file().createDataSet("detection_id", snr_space,
+                            HighFive::create_datatype<std::uint64_t>(),
+                            row_props);
     m_datasets_initialized = true;
 }
 
@@ -679,12 +675,41 @@ void FFAResultWriter::write_metadata(const FFAResultMetadata& metadata) {
     m_metadata_written = true;
 }
 
-void FFAResultWriter::write_results(std::span<const double> param_sets,
-                                    std::span<const float> scores,
-                                    std::span<const std::uint16_t> widths_bins,
-                                    std::span<const std::uint16_t> nbins,
-                                    SizeType n_param_sets,
-                                    SizeType n_params) {
+void FFAResultWriter::write_regions(std::span<const FFASearchConfig> configs) {
+    const std::scoped_lock lock(m_hdf5_mutex);
+    auto regions = h5_file().createGroup("regions");
+    for (std::size_t i = 0; i < configs.size(); ++i) {
+        const auto& cfg = configs[i];
+        auto region     = regions.createGroup(std::format("region_{:04d}", i));
+        region.createAttribute("source_region", static_cast<std::uint64_t>(i));
+        region.createAttribute("nbins", cfg.get_nbins());
+        region.createAttribute("eta", cfg.get_eta());
+        region.createAttribute("f_min", cfg.get_f_min());
+        region.createAttribute("f_max", cfg.get_f_max());
+        region.createDataSet("scoring_widths", cfg.get_scoring_widths());
+        region.createDataSet("param_counts",
+                             cfg.get_param_grid_count(cfg.get_tobs()));
+        std::vector<double> limits;
+        for (const auto& limit : cfg.get_param_limits()) {
+            limits.push_back(limit.min);
+            limits.push_back(limit.max);
+        }
+        region
+            .createDataSet<double>(
+                "param_limits",
+                HighFive::DataSpace({cfg.get_nparams(), std::size_t{2}}))
+            .write_raw(limits.data());
+    }
+}
+
+void FFAResultWriter::write_results(
+    std::span<const double> param_sets,
+    std::span<const float> scores,
+    std::span<const std::uint16_t> widths_bins,
+    std::span<const std::uint16_t> nbins,
+    SizeType n_param_sets,
+    SizeType n_params,
+    std::span<const std::uint64_t> detection_ids) {
     if (n_param_sets == 0) {
         return;
     }
@@ -711,6 +736,18 @@ void FFAResultWriter::write_results(std::span<const double> param_sets,
         dset.select({old_rows}, {n_param_sets}).write_raw(data, dtype);
     };
 
+    std::vector<std::uint64_t> generated_ids;
+    if (detection_ids.empty()) {
+        const auto first = h5_file().getDataSet("snr").getDimensions()[0];
+        generated_ids.resize(n_param_sets);
+        std::iota(generated_ids.begin(), generated_ids.end(), first);
+        detection_ids = generated_ids;
+    }
+    if (detection_ids.size() != n_param_sets) {
+        throw std::invalid_argument("detection ID length mismatch");
+    }
+    append_1d("detection_id", detection_ids.data(),
+              HighFive::create_datatype<std::uint64_t>());
     append_1d("snr", scores.data(), HighFive::create_datatype<float>());
     append_1d("width", widths_bins.data(),
               HighFive::create_datatype<std::uint16_t>());
