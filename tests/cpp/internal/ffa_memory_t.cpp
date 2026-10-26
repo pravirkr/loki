@@ -125,11 +125,14 @@ bool same_hits(const std::vector<SnrHit>& a, const std::vector<SnrHit>& b) {
 } // namespace
 
 TEST_CASE("Phase-step table batches are bit-exact", "[ffa][memory]") {
-    const auto [ts_e, ts_v] = make_series(5);
-    const SizeType nbins    = GENERATE(SizeType{32}, SizeType{50});
-    const bool accel        = GENERATE(false, true);
-    const int nthreads      = GENERATE(1, 3);
-    const auto cfg = make_cfg(nbins, accel, /*fourier=*/true, nthreads);
+    // Not a structured binding: clang 18 cannot capture one under -fopenmp.
+    const auto series    = make_series(5);
+    const auto& ts_e     = series.first;
+    const auto& ts_v     = series.second;
+    const SizeType nbins = GENERATE(SizeType{32}, SizeType{50});
+    const bool accel     = GENERATE(false, true);
+    const int nthreads   = GENERATE(1, 3);
+    const auto cfg       = make_cfg(nbins, accel, /*fourier=*/true, nthreads);
     CAPTURE(nbins, accel, nthreads);
 
     // execute(): every level merged and stored (segment-major levels use
@@ -159,11 +162,14 @@ TEST_CASE("Phase-step table batches are bit-exact", "[ffa][memory]") {
 
 TEST_CASE("Hit batches are bit-exact and in score-index order",
           "[ffa][memory]") {
-    const auto [ts_e, ts_v] = make_series(9);
-    const bool fourier      = GENERATE(false, true);
-    const bool accel        = GENERATE(false, true);
-    const int nthreads      = GENERATE(1, 3);
-    const auto cfg          = make_cfg(/*nbins=*/32, accel, fourier, nthreads);
+    // Not a structured binding: clang 18 cannot capture one under -fopenmp.
+    const auto series  = make_series(9);
+    const auto& ts_e   = series.first;
+    const auto& ts_v   = series.second;
+    const bool fourier = GENERATE(false, true);
+    const bool accel   = GENERATE(false, true);
+    const int nthreads = GENERATE(1, 3);
+    const auto cfg     = make_cfg(/*nbins=*/32, accel, fourier, nthreads);
     CAPTURE(fourier, accel, nthreads);
     const auto run = [&] {
         return fourier ? scored_hits<ComplexType>(cfg, ts_e, ts_v, 1.0F)
