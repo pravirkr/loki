@@ -41,15 +41,47 @@ TOML), before any storage is allocated. `PulsarSearchConfig` itself accepts
 both, because it also configures FFA searches.
 
 Chunking is automatic. The sweep first forms regions for the required bin
-counts, then subdivides each region in frequency until every chunk and its
-shared workspace group fit the effective memory budget. It evaluates the
-region's thresholds for each chunk's actual branching pattern and selected
-reference segments, multiplies the per-seed forecast by the FFA seed count,
-and derives `max_sugg` from adjacent-stage overlap plus a worst branched
-batch, rounded up to a power of two. It first narrows chunks; only when the
-minimum chunk cannot fit does it reduce the parent batch. If even that cannot
-fit, planning fails with a required-memory diagnostic. The forecast is an
-estimate of survivor populations, with legacy trimming retained for overflow.
+counts (never merged), then subdivides each region in frequency until every
+chunk and its shared workspace group fit the effective memory budget. Each
+region's thresholds are designed once, over its whole band, by
+`DynamicThresholdScheme` in mode `shared` on both backends (signal trials
+common to every path, probability bins anchored at `min_pd`, the survivors of
+the last stage weighted into the cost): the search, then `solve()`, which
+selects, tightens and repairs the schedule on fresh samples so that its
+measured Pd is `min_pd` (see `include/loki/detection/thresholds.hpp`). Every
+chunk of the region runs that schedule. The chunk's `pd` and `pd_se` are the
+design's measurement at the true `nbins`: the branching only multiplies the
+leaves of each stage (`State::gen_next`), so neither a schedule's Pd nor its
+pass rates depend on it. A design below 0.9 `min_pd` is kept with a warning.
+One design per region bounds planning time: a design at 1024 bins costs
+about 20 s on CUDA, mostly the refit's evaluations. Chunks below the top of a
+region run a schedule designed for the region's larger branching, which is
+valid (same Pd) but not the cheapest for them.
+
+Memory and runtime of a design are bounded. Up to 128 bins the search runs at
+the true `nbins` when its pools fit. Above that, or when they do not fit, it
+runs at 64 bins (`kDtsNbinsSim`, raised so that the reference pulse spans at
+least four bins) and `refit_scheme` re-fits the schedule at the true `nbins`:
+a common upward threshold shift, scanned on fresh samples, then tightening,
+repair and an independent report. The reason is that a maximum over more
+boxcar templates has a heavier noise tail (about `nbins` times more
+independent phase positions), so a schedule found at 64 bins is too
+permissive at 256 to 1024 bins (cost per detection 1.1 to 3.3 times a native
+search's; `bench/scripts/schemes/nbins_proxy_study.py`); the shift brings that
+to about 1.0 to 1.05 in the same tests and the refit always reports the Pd at
+the true `nbins`. The refit's sample sizes follow the memory limit (a quarter
+of it, at most 4 GB: 24 B per trial and bin for a signal bank, 12 B for a noise
+evaluation), and the search budget steps down (1024 trials / 40 probability
+bins, 512/40, 512/20, 256/20, 128/16) until its pools fit; only a limit below
+the last step fails, with a message. The search pools are checked against the
+limit on their own, because they are freed before the EP search. The designs
+run once per plan and are kept in the plan cache.
+
+A chunk is sized from its own design's final noise evaluation (2^15 trials
+natively, the refit's noise sample otherwise): see [Planning](#planning). It
+first narrows chunks; only when the minimum chunk cannot fit does it reduce
+the parent batch (CUDA). If even that cannot fit, planning fails with a
+required-memory diagnostic.
 
 ## What the model counts
 
@@ -98,11 +130,9 @@ another on one stream, so the model has one worker whatever `nthreads` is
 **Which memory.** On CUDA, `max_process_memory_gb` means device memory only.
 Host memory is never checked. Result snapshots are bounded to one active write
 and one waiting payload, in addition to the producer snapshot and inputs.
-The model fits execution buffers. Threshold selection and evaluation
-allocate separate CUDA simulation workspaces that are not checked against
-the limit, and tail buffers and temporary peaks are covered by fixed
-reserves, so the budget does not yet bound every planning or transient
-allocation. As for `FFAFreqSweep`, the plan is fitted to
+The model fits execution buffers. The threshold designs run before the sweep
+allocates, and their search pools are checked against the limit on their
+own; tail buffers and temporary peaks are covered by fixed reserves. As for `FFAFreqSweep`, the plan is fitted to
 
 ```text
 limit = min(max_process_memory_gb, free device memory - kDeviceReserveGB)   (1 GB)
@@ -137,9 +167,12 @@ Differences from the CPU policy:
 - A workspace group is allocated once and its shape must equal every chunk's
   (`validate` uses `check_equal`), so the engine builds the workspace from the
   group maxima and checks each chunk fits within it.
-- The threshold scheme is the CUDA `DynamicThresholdScheme`. It differs
-  statistically from the CPU scheme. A cache can be reused on the other
-  backend after adapting its batch and rechecking capacity and memory.
+- The threshold scheme is `DynamicThresholdScheme` in mode `shared` on both
+  backends. The CUDA and CPU engines differ statistically. A cache can be
+  reused on the other backend, like FFT wisdom: its batch is adapted and its
+  capacity and peak are rechecked under that run's own memory limit, worker
+  count and threads (which are part of the key only for a plan from the same
+  backend). Plan once on the GPU, then run on the CPU with the same cache.
 - The Bluestein tables (under 64 KiB per size), CUB temporaries and the few
   small FFA arrays (counts, offsets, limits) are not in the exact model.
   `kDeviceReserveGB` (1 GB) is what the GPU planners leave for the CUDA
@@ -346,25 +379,98 @@ checked.
 
 ## Planning
 
-Thresholds are selected once per coarse region. Their population forecast is
-then evaluated for each chunk's actual branching pattern and selected reference
-segments, with a fixed evaluation seed distinct from threshold selection.
-Identical forecasts are cached across probes and replans. The estimate comes
-from Monte Carlo trials and is not a deterministic bound on real data.
+### Parameter limits
 
-For each run, `L[0] = n_seeds`, and subsequent populations are
-`ceil(n_seeds * state.complexity)`. The largest adjacent sum bounds forecast
-parent/survivor overlap in the ring. Add `batch_size * branch_max + 1`, round
-up to a power of two, and pass that capacity into the complete memory model.
-`max_passing_candidates` is an FFA output-buffer setting and does not control EP.
+The world tree grows with the parameter box, so the box should hold only
+physical orbits. The branching of a stage is a phase drift in bins, so the
+tree depends on `f * nbins` and on the derivative limits; the jerk limit
+dominates over a long observation. Measured at `T_obs` = 2147 s and nbins 512
+(25-29 Hz): a box of accel +/- 1000 and jerk +/- 4 needs 132 GB for a 0.01 Hz
+chunk, while the circular-orbit limits of a coherent jerk search (P_orb >= 5
+`T_obs`, m_c <= 10, m_p >= 1.2: accel +/- 499, jerk +/- 0.29) need 2.4 GB, and
+the whole 4 Hz band plans into 15 GB. Each chunk's FFA band is also padded by
+the drift these limits allow (`calculate_max_drift`).
+
+Give either explicit limits (`search.acc_*`, `search.jerk_*`) or a
+`[search.orbit]` table, whose limits follow from `search::circular_param_limits`
+(pyloki's `from_circular`; `libloki.configs.circular_param_limits` in Python):
+
+```toml
+[search.orbit]
+order = "jerk"          # "accel" | "jerk" | "snap"
+p_orb_min_tobs = 5.0    # or p_orb_min in seconds
+m_c_max = 10.0
+m_p_min = 1.2
+```
+
+`f_min` and `f_max` are then intrinsic spin frequencies, widened by `v/c`.
+Explicit limits with a jerk are reported as the fastest circular orbit they
+reach (`search::implied_circular_orbit`), with a warning when it is shorter
+than the observation. `[ep]` `p_orb_min`, `m_c_max` and `m_p_min` are a
+different setting: the leaf validation of the circular pruning basis.
+
+### Ring capacity
+
+The population of a run is forecast from its region's design: `L_0 = n_seeds`
+(the FFA coordinates, exact) and, after stage `s`,
+`L_s = ceil(n_seeds * c_s * m_s)`, where `c_s` is the noise survivors per seed
+(`State::complexity`) and `m_s` a margin for the Monte Carlo error of the
+forecast (issue #15, section 7). `c_s` is a product of measured pass rates
+`s_j`, each with binomial relative error `sqrt((1 - s_j) / (N s_j))` on `N`
+noise trials per stage, so
+
+```text
+eps_s = sqrt(sum_{j <= s} (1 - s_j) / (N s_j)),    m_s = 1 + z eps_s,    z = 2.33
+```
+
+and a ring sized with it falls short of the true mean about 1 % of the time
+(`ep_ring_margin`, `kEPRingMarginZ`). With `N = 2^15` and production schedules
+`m_s` is about 1.1 to 1.2. A stage whose evaluation prunes every noise trial
+is counted at the floor `s_j = 1 / N` (one trial kept): it adds about 1 to
+`eps_s^2`, so `m_s >= 1 + z` from that stage on. That over-allocates, on the
+safe side, and only where the forecast population is already tiny. During
+stage `s` the ring holds the unconsumed
+parents and the survivors written so far, so it is sized from the largest
+adjacent sum, plus one branched batch, rounded up to a multiple of 1024
+leaves (`kEPRingGranularity`; neither ring needs a power of two):
+
+```text
+live     = max_s (L_{s-1} + L_s)
+max_sugg = round_up(live + batch_size * branch_max + 1, 1024)
+```
+
+The margin covers simulation error only. Data that departs from the noise
+model (RFI, a bright source) can exceed it; the world tree then trims
+survivors at batch boundaries (a warning, and a loss of sensitivity). It
+never allocates more: memory stays within the plan. Logs and the CLI print
+`max_sugg` and the forecast populations as powers of two (`2^21.3`); the
+cache and the Python stats keep the exact counts.
+`max_passing_candidates` is an FFA output-buffer setting and does not control
+EP.
+
+### Width search
 
 The minimum nominal frequency chunk width is currently 0.01 Hz (or the
 remaining band if smaller), plus drift padding. A minimum-chunk failure refers
 to this permitted width; it does not establish that every finer grid-aligned
 chunk would be infeasible.
 
-`EPRegionPlanner` splits each FFA region into chunks, growing each chunk until
-the sweep would exceed the effective limit with it (bisection on the width).
+`EPRegionPlanner` designs each FFA region once over its whole band, then
+splits the region into chunks from its top frequency down, growing each chunk
+until the sweep would exceed the effective limit with it (bisection on the
+width, with probes beyond the bracket since branching changes discretely with
+the band). A probe simulates nothing. Its population is the region design's
+on the probe's own branching pattern `bp'`:
+
+```text
+c'_s = c_s * prod_{j <= s} bp'_j / bp_j
+```
+
+This is exact, not an approximation. A schedule's pass rates `s_j` are
+survivor fractions of the simulated trials, which never see the branching, so
+the region design's evaluation is also the chunk's. The ring margin carries
+over with them. The design is memoised by branching pattern, across replans
+and batch retries.
 Because the shared FFA buffers are sized from the global maxima, a chunk placed
 late can enlarge them after earlier groups were already fitted:
 

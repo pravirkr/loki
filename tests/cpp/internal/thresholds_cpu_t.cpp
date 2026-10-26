@@ -47,8 +47,8 @@ TEST_CASE("Evaluation-only CPU threshold engine evaluates identically",
     REQUIRE(path.size() == branching.size());
 
     const auto eval_only = make_engine(branching, 3, /*simulate=*/false);
-    const auto expected  = full->evaluate(path, 256, 3);
-    const auto actual    = eval_only->evaluate(path, 256, 3);
+    const auto expected  = full->evaluate(path, 256, 3, false);
+    const auto actual    = eval_only->evaluate(path, 256, 3, false);
     REQUIRE(expected.size() == actual.size());
     for (SizeType i = 0; i < expected.size(); ++i) {
         REQUIRE(same_state_bits(expected[i], actual[i]));

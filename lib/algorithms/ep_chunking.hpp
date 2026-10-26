@@ -20,21 +20,32 @@
 
 namespace loki::algorithms::detail {
 
-/// Everything the chunking needs to know about one coarse FFA region. Built
-/// once per region (the threshold scheme is expensive).
+/// Thresholds designed for one region's branching pattern, with the noise
+/// population forecast of their own independent evaluation.
+struct ChunkDesign {
+    std::vector<float> thresholds{};
+    /// Pd at the chunk's nbins on a fresh signal sample, and its standard
+    /// error.
+    double pd{1.0};
+    double pd_se{0.0};
+    EPPopulationForecast forecast{};
+};
+
+/// Everything the chunking needs to know about one coarse FFA region.
 struct RegionDesign {
     double f_start{0.0};
     double f_end{0.0};
     SizeType nbins{0};
     double eta{0.0};
-    std::vector<float> threshold_scheme;
-    std::vector<float> bp_float;
-    /// Synthetic forecast used by internal tests when evaluate is unset.
-    float safe_complexity{1.0F};
     SizeType nsegments{0};
-    /// Selected path's per-stage population per initial seed, evaluated
-    /// deterministically for a chunk's branching pattern. Excludes level zero.
-    std::function<std::vector<double>(std::span<const float>)> evaluate;
+    /// The threshold design of the region's branching pattern over the
+    /// nominal band [f_start, f_end] (the band is for logs). Called once per
+    /// region; every chunk runs it.
+    std::function<ChunkDesign(std::span<const float> bp, double, double)>
+        design{};
+    /// Synthetic exact per-stage complexity used by internal tests when
+    /// design is unset.
+    float safe_complexity{1.0F};
 };
 
 /// Chunks of a sweep with the maxima EPRegionStats reports.
@@ -58,6 +69,13 @@ struct ChunkPlan {
 /**
  * @brief Subdivides @p designs (in order) into chunks that fit
  * @p effective_limit_gb.
+ *
+ * Each region is designed once over its whole band (RegionDesign::design)
+ * and split from its top frequency down; every chunk runs the region
+ * schedule. A chunk's population is that design's on the chunk's own
+ * branching pattern: the schedule's pass rates do not depend on the
+ * branching, so they carry over exactly and no probe simulates anything. The
+ * widest chunk whose sweep fits is found by bisection on the width.
  *
  * Per-worker memory is accounted per contiguous run of equal nbins and the
  * FFA buffers and inputs once for the whole sweep, as EPFreqSweep allocates

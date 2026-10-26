@@ -23,7 +23,7 @@ using search::PulsarSearchConfig;
 namespace py = pybind11;
 
 void bind_configs(py::module_& m) {
-    const auto m_configs = m.def_submodule("configs", "Configs submodule");
+    auto m_configs = m.def_submodule("configs", "Configs submodule");
     PYBIND11_NUMPY_DTYPE(ParamLimit, min, max);
 
     py::class_<FFASearchConfig>(m_configs, "FFASearchConfig")
@@ -192,6 +192,52 @@ void bind_configs(py::module_& m) {
                                &PulsarSearchConfig::get_x_mass_const);
 
     m_configs.attr("EPSearchConfig") = m_configs.attr("PulsarSearchConfig");
+
+    m_configs.def(
+        "circular_param_limits",
+        [](double f_min, double f_max, SizeType poly_order, double p_orb_min,
+           double m_c_max, double m_p_min) {
+            const auto limits =
+                search::circular_param_limits(f_min, f_max, poly_order,
+                                              {.p_orb_min = p_orb_min,
+                                               .m_c_max   = m_c_max,
+                                               .m_p_min   = m_p_min});
+            py::array_t<double> out(
+                {static_cast<py::ssize_t>(limits.size()), py::ssize_t{2}});
+            auto view = out.mutable_unchecked<2>();
+            for (SizeType i = 0; i < limits.size(); ++i) {
+                view(static_cast<py::ssize_t>(i), 0) = limits[i].min;
+                view(static_cast<py::ssize_t>(i), 1) = limits[i].max;
+            }
+            return out;
+        },
+        py::arg("f_min"), py::arg("f_max"), py::kw_only(),
+        py::arg("poly_order"), py::arg("p_orb_min"), py::arg("m_c_max") = 10.0,
+        py::arg("m_p_min") = 1.2,
+        "param_limits (rows [snap], [jerk], accel, freq) covering circular "
+        "orbits with P_orb >= p_orb_min s, m_c <= m_c_max and m_p >= m_p_min; "
+        "the frequency range is widened by v/c (pyloki's from_circular).");
+    m_configs.def(
+        "implied_circular_orbit",
+        [](const PyArrayT<double>& param_limits, double m_p) -> py::object {
+            if (param_limits.ndim() != 2 || param_limits.shape(1) != 2) {
+                throw std::invalid_argument(
+                    "param_limits must be a 2D array with shape (nparams, 2)");
+            }
+            std::vector<ParamLimit> limits;
+            for (py::ssize_t i = 0; i < param_limits.shape(0); ++i) {
+                limits.push_back({.min = *param_limits.data(i, 0),
+                                  .max = *param_limits.data(i, 1)});
+            }
+            const auto implied = search::implied_circular_orbit(limits, m_p);
+            if (!implied) {
+                return py::none();
+            }
+            return py::make_tuple(implied->p_orb, implied->m_c_min);
+        },
+        py::arg("param_limits"), py::arg("m_p") = 1.4,
+        "(p_orb, m_c_min) of the fastest circular orbit an accel/jerk box "
+        "reaches, or None without both limits.");
 
     // Plans submodule
 }

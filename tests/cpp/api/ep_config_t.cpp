@@ -5,6 +5,7 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "loki/common/backend.hpp"
 #include "loki/common/types.hpp"
@@ -119,6 +120,28 @@ TEST_CASE("EPTomlConfig checks the pruning parameters", "[config][ep]") {
     REQUIRE_THROWS_AS(
         loki::search::EPTomlConfig::from_string(make_doc("m_c_max = nan\n")),
         std::invalid_argument);
+}
+
+TEST_CASE("EPTomlConfig rejects nan and inf by their literal", "[config][ep]") {
+    // toml++'s NaN and Inf are garbage under -ffast-math: the reader must
+    // reject the literal itself, with either sign, before any other check.
+    using Catch::Matchers::ContainsSubstring;
+    const auto ep_doc = [](const std::string& ep) {
+        return loki::search::EPTomlConfig::from_string(make_doc(ep));
+    };
+    for (const auto* value : {"nan", "+nan", "-nan", "inf", "+inf", "-inf"}) {
+        CAPTURE(value);
+        REQUIRE_THROWS_WITH(ep_doc(std::string("min_pd = ") + value + "\n"),
+                            ContainsSubstring("ep.min_pd must be finite"));
+    }
+    // Positions count code points: non-ASCII text earlier on the line does
+    // not hide the literal, nor flag a finite value (the unknown key is then
+    // the error).
+    REQUIRE_THROWS_WITH(ep_doc("\"\xC3\xA9\xC3\xA9\" = [1.5, inf]\n"),
+                        ContainsSubstring("[1] must be finite"));
+    REQUIRE_THROWS_WITH(ep_doc("\"\xC3\xA9\xC3\xA9\" = [1.5, 2.5]\n"),
+                        !ContainsSubstring("finite"));
+    REQUIRE_NOTHROW(ep_doc("target_snr = 9.5 # \xC3\xA9 inf nan\n"));
 }
 
 TEST_CASE("EPTomlConfig reads whole numbers as reals", "[config][ep]") {

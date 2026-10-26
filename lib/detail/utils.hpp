@@ -7,6 +7,7 @@
 #include <new>
 #include <optional>
 #include <span>
+#include <string>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -89,6 +90,10 @@ template <typename U> [[nodiscard]] constexpr U opaque_bits(U bits) noexcept {
 constexpr float to_gib(SizeType bytes) noexcept {
     return static_cast<float>(static_cast<double>(bytes) / kBytesPerGB);
 }
+
+/// A count as a power of two for logs, with one decimal: 1048576 is
+/// "2^20.0", 3000000 is "2^21.5". Zero is "0".
+[[nodiscard]] std::string format_pow2(SizeType n);
 
 /**
  * @brief Allocator for large scratch buffers: 64-byte aligned, and elements

@@ -32,7 +32,7 @@
  */
 
 #include <algorithm>
-#include <bit>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <span>
@@ -70,7 +70,9 @@ constexpr SizeType kEPBatchSizeCuda = SizeType{1} << 16U;
 ///  7: remove branch lookahead after the SNR-10 timing regression.
 ///  9: no cuFFT: the CUDA reserve is 0.5 GiB for any number of FFT sizes.
 /// 10: CPU pruning scores in fused tiles: no irfft scratch per worker.
-constexpr std::uint32_t kEPMemoryModelVersion = 10U;
+/// 11: ring capacity from the margin-inflated live forecast, rounded up to a
+///     multiple of kEPRingGranularity (was bit_ceil).
+constexpr std::uint32_t kEPMemoryModelVersion = 11U;
 
 /// Worst-case size of the per-run harvest store (see PruneRFIConfig).
 /// Normalised: all fields are zero/false when harvesting is disabled.
@@ -216,7 +218,6 @@ constexpr SizeType ep_cuda_effective_max_sugg(SizeType batch_size,
     return std::max(max_sugg, (batch_size * branch_max) + 1);
 }
 
-/// Round up without overflowing SizeType or CUDA's 32-bit tree indices.
 /// Largest world-tree capacity the backend can index.
 inline constexpr SizeType ep_tree_index_limit(EPMemoryKind kind) noexcept {
     return kind == EPMemoryKind::kCuda
@@ -224,18 +225,115 @@ inline constexpr SizeType ep_tree_index_limit(EPMemoryKind kind) noexcept {
                : (SizeType{1} << (std::numeric_limits<SizeType>::digits - 2));
 }
 
+/// The world tree is sized in multiples of this many leaves. Neither ring
+/// needs a power of two: both index modulo the capacity.
+inline constexpr SizeType kEPRingGranularity = 1024;
+
+/// Normal quantile of the ring margin: a forecast sized with it falls short
+/// of the true mean population about 1 % of the time (issue #15, section 7).
+inline constexpr double kEPRingMarginZ = 2.33;
+
+/**
+ * @brief Noise population of one schedule on one branching pattern.
+ *
+ * Per stage: the survivors per initial seed (State::complexity) and the
+ * stage's noise pass rate s_j (State::success_h0), measured on @p ntrials
+ * trials per stage. @p ntrials = 0 marks an exact (synthetic) forecast.
+ */
+struct EPPopulationForecast {
+    std::vector<double> complexity{};
+    std::vector<double> pass_rate{};
+    SizeType ntrials{0};
+};
+
+/**
+ * @brief Per-stage factor 1 + z eps_s that covers the Monte Carlo error of a
+ * forecast population.
+ *
+ * Population s is the seed count times a product of measured pass rates, so
+ * its relative error is eps_s = sqrt(sum_{j <= s} (1 - s_j) / (N s_j)) (the
+ * binomial errors of the factors, in quadrature). The evaluation keeps at
+ * least one noise trial per stage, so s_j >= 1 / N; a stage at that floor
+ * adds about 1 to eps_s^2 (a margin of at least 1 + z from there on, which
+ * over-allocates on the safe side). A rate of 0 (a hand-made forecast) is
+ * skipped. All ones for an exact forecast.
+ */
+inline std::vector<double>
+ep_ring_margin(const EPPopulationForecast& forecast) {
+    std::vector<double> margin(forecast.complexity.size(), 1.0);
+    if (forecast.ntrials == 0) {
+        return margin;
+    }
+    const auto n = static_cast<double>(forecast.ntrials);
+    double var   = 0.0;
+    for (SizeType s = 0; s < margin.size(); ++s) {
+        const double pass =
+            s < forecast.pass_rate.size() ? forecast.pass_rate[s] : 1.0;
+        if (pass > 0.0 && pass < 1.0) {
+            var += (1.0 - pass) / (n * pass);
+        }
+        margin[s] = 1.0 + (kEPRingMarginZ * std::sqrt(var));
+    }
+    return margin;
+}
+
+/// Forecast ring populations of a chunk with @p ncoords seeds.
+struct EPRingForecast {
+    /// Largest stage population L_s (with its margin).
+    double peak{0.0};
+    /// Largest occupancy of the ring, L_{s-1} + L_s: a stage's parents are
+    /// consumed batch by batch while its survivors are written.
+    double live{0.0};
+    /// Largest per-seed complexity (without margin), for reports.
+    double peak_complexity{1.0};
+};
+
+/**
+ * @brief Ring populations: L_0 = ncoords (exact) and
+ * L_s = ceil(ncoords * complexity_s * margin_s).
+ *
+ * @p margin is ep_ring_margin() of the forecast that sizes the chunk; the
+ * planner's width probes pass the margin of their reference design.
+ */
+inline EPRingForecast ep_ring_forecast(SizeType ncoords,
+                                       std::span<const double> complexity,
+                                       std::span<const double> margin) {
+    const auto seeds = static_cast<double>(ncoords);
+    EPRingForecast out{.peak = seeds, .live = seeds};
+    double previous = seeds;
+    for (SizeType s = 0; s < complexity.size(); ++s) {
+        const double c = complexity[s];
+        if (!utils::is_finite(c) || c < 0.0) {
+            throw std::logic_error(
+                "EPRegionPlanner: invalid complexity forecast");
+        }
+        const double m          = s < margin.size() ? margin[s] : 1.0;
+        const double population = std::ceil(seeds * c * m);
+        out.peak                = std::max(out.peak, population);
+        out.live                = std::max(out.live, previous + population);
+        out.peak_complexity     = std::max(out.peak_complexity, c);
+        previous                = population;
+    }
+    return out;
+}
+
+/// World-tree capacity for a forecast @p live ring: room for one branched
+/// batch on top, rounded up to kEPRingGranularity leaves.
 inline SizeType ep_tree_capacity(SizeType live,
                                  SizeType batch,
                                  SizeType branch_max,
                                  EPMemoryKind kind) {
     const SizeType max_capacity = ep_tree_index_limit(kind);
     if (branch_max == 0 || batch > max_capacity / branch_max ||
-        live >= max_capacity - batch * branch_max) {
+        batch * branch_max >= max_capacity - kEPRingGranularity ||
+        live >= max_capacity - (batch * branch_max) - kEPRingGranularity) {
         throw std::overflow_error(
             "EPRegionPlanner: forecast tree exceeds index capacity");
     }
-    return std::bit_ceil(
-        std::max(SizeType{1024}, live + batch * branch_max + 1));
+    const SizeType needed = live + (batch * branch_max) + 1;
+    const SizeType units =
+        (needed + kEPRingGranularity - 1) / kEPRingGranularity;
+    return std::max(units, SizeType{1}) * kEPRingGranularity;
 }
 
 /// Largest nbins of the fused CUDA pruning kernels (ep_score_cuda.cuh):

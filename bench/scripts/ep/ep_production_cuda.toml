@@ -2,9 +2,9 @@
 #
 # Simulate the pulse first (same parameters and seed as the script):
 #   loki simulate --period 0.007 --dt 0.000064 --nsamps 33554432 --snr 12 \
-#       --ducy 0.1 --acc 500 --jerk 2 --seed 42 -o ep_production_pulse.tim
+#       --ducy 0.1 --acc 300 --jerk 0.15 --seed 42 -o ep_production_pulse.tim
 # Then run from the repository root:
-#   loki search ep -c bench/scripts/ep_production_cuda.toml
+#   loki search ep -c bench/scripts/ep/ep_production_cuda.toml
 #
 # The script and this file share the plan cache, so a plan made by either one
 # is reused by the other.
@@ -15,20 +15,26 @@ nsamps = 33554432
 tsamp = 0.000064
 
 [search]
-# Band in Hz around the injected 142.857 Hz (period 0.007 s)
+# Band in Hz around the injected 142.857 Hz (period 0.007 s): intrinsic spin
+# frequencies, widened by v/c from [search.orbit]
 f_min = 140.0
 f_max = 145.0
-# Acceleration and jerk ranges in m/s^2 and m/s^3, around the injected 500 and 2
-acc_min = -1000.0
-acc_max = 1000.0
-jerk_min = -4.0
-jerk_max = 4.0
 nbins = 64
 eta = 1.0
 ducy_max = 0.3
 wtsp = 1.2
 snr_min = 5.0
 use_fourier = true
+
+# Acceleration and jerk limits of circular orbits with P_orb >= 5 T_obs (a
+# coherent jerk search), m_c <= 10 and m_p >= 1.2 M_sun: about +/- 499 m/s^2
+# and +/- 0.29 m/s^3 at 2^25 samples. The injected pulse (acc 300, jerk 0.15)
+# is such an orbit (P_orb = 5.9 T_obs).
+[search.orbit]
+order = "jerk"
+p_orb_min_tobs = 5.0
+m_c_max = 10.0
+m_p_min = 1.2
 
 [ep]
 poly_basis = "taylor"

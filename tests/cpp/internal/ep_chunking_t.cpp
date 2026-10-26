@@ -1,7 +1,9 @@
 #include "lib/algorithms/ep_chunking.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -78,16 +80,14 @@ std::vector<RegionDesign> make_designs(const PulsarSearchConfig& cfg,
         const loki::plans::FFAPlan<float> plan(rcfg);
         const auto ncoords = static_cast<double>(plan.get_ncoords().back());
         designs.push_back(RegionDesign{
-            .f_start          = r.f_start,
-            .f_end            = r.f_end,
-            .nbins            = r.nbins,
-            .eta              = r.eta,
-            .threshold_scheme = {1.0F},
-            .bp_float         = {1.0F},
+            .f_start   = r.f_start,
+            .f_end     = r.f_end,
+            .nbins     = r.nbins,
+            .eta       = r.eta,
+            .nsegments = plan.get_nsegments().back(),
             .safe_complexity =
                 designs.empty() ? static_cast<float>(first_max_sugg / ncoords)
                                 : 1.0F,
-            .nsegments = plan.get_nsegments().back(),
         });
     }
     return designs;
@@ -127,14 +127,12 @@ RegionDesign make_design(const PulsarSearchConfig& cfg,
     const auto rcfg = cfg.get_updated_ep_config(nbins, 1.0, f_start, f_end);
     const loki::plans::FFAPlan<float> plan(rcfg);
     return RegionDesign{
-        .f_start          = f_start,
-        .f_end            = f_end,
-        .nbins            = nbins,
-        .eta              = 1.0,
-        .threshold_scheme = {1.0F},
-        .bp_float         = {1.0F},
-        .safe_complexity  = safe_complexity,
-        .nsegments        = plan.get_nsegments().back(),
+        .f_start         = f_start,
+        .f_end           = f_end,
+        .nbins           = nbins,
+        .eta             = 1.0,
+        .nsegments       = plan.get_nsegments().back(),
+        .safe_complexity = safe_complexity,
     };
 }
 
@@ -142,7 +140,7 @@ RegionDesign make_design(const PulsarSearchConfig& cfg,
 /// 128) whose wide band sets a large shared FFA size only at the end.
 std::vector<RegionDesign>
 make_late_shared_designs(const PulsarSearchConfig& cfg) {
-    return {make_design(cfg, 100.0, 110.0, 32, 3.0e4F),
+    return {make_design(cfg, 100.0, 110.0, 32, 6.0e4F),
             make_design(cfg, 40.0, 120.0, 128, 1.0e-3F)};
 }
 
@@ -419,11 +417,61 @@ TEST_CASE("EP chunking with the CUDA policy charges the FFA transient scratch",
 TEST_CASE("EP capacity rounds live ring population and a branched batch",
           "[ep_chunking]") {
     using loki::algorithms::detail::ep_tree_capacity;
-    CHECK(ep_tree_capacity(4096, 64, 16, EPMemoryKind::kCuda) == 8192);
+    using loki::algorithms::detail::kEPRingGranularity;
+    // live + batch * branch_max + 1, up to a multiple of the granularity.
+    CHECK(ep_tree_capacity(4096, 64, 16, EPMemoryKind::kCuda) == 6144);
     CHECK(ep_tree_capacity(1U << 22U, 64, 16, EPMemoryKind::kCuda) ==
-          (1U << 23U));
+          (1U << 22U) + 2048);
+    CHECK(ep_tree_capacity(0, 1, 1, EPMemoryKind::kCpu) == kEPRingGranularity);
+    CHECK(ep_tree_capacity(1023, 1, 1, EPMemoryKind::kCpu) ==
+          2 * kEPRingGranularity);
     CHECK_THROWS_AS(ep_tree_capacity(1U << 30U, 64, 16, EPMemoryKind::kCuda),
                     std::overflow_error);
+}
+
+TEST_CASE("EP ring margin covers the Monte Carlo error of the forecast",
+          "[ep_chunking]") {
+    using loki::algorithms::detail::ep_ring_forecast;
+    using loki::algorithms::detail::ep_ring_margin;
+    using loki::algorithms::detail::EPPopulationForecast;
+    using loki::algorithms::detail::kEPRingMarginZ;
+    // Exact (synthetic) forecasts have no margin.
+    const EPPopulationForecast exact{.complexity = {2.0, 3.0}};
+    CHECK(ep_ring_margin(exact) == std::vector<double>{1.0, 1.0});
+
+    // eps_s = sqrt(sum_{j<=s} (1 - s_j) / (N s_j)); a pass rate of 1 (or 0)
+    // adds nothing.
+    const EPPopulationForecast mc{.complexity = {1.0, 0.5, 0.25, 0.25},
+                                  .pass_rate  = {0.5, 0.5, 1.0, 0.25},
+                                  .ntrials    = 1024};
+    const auto margin = ep_ring_margin(mc);
+    REQUIRE(margin.size() == 4);
+    const double r_half    = 0.5 / (1024.0 * 0.5);
+    const double r_quarter = 0.75 / (1024.0 * 0.25);
+    const auto near        = [](double a, double b) {
+        return std::abs(a - b) < 1e-12;
+    };
+    CHECK(near(margin[0], 1.0 + (kEPRingMarginZ * std::sqrt(r_half))));
+    CHECK(near(margin[1], 1.0 + (kEPRingMarginZ * std::sqrt(2 * r_half))));
+    CHECK(margin[2] == margin[1]);
+    CHECK(near(margin[3],
+               1.0 + (kEPRingMarginZ * std::sqrt((2 * r_half) + r_quarter))));
+
+    // More trials, smaller margin.
+    auto mc_large    = mc;
+    mc_large.ntrials = 1U << 15U;
+    CHECK(ep_ring_margin(mc_large)[3] < margin[3]);
+    CHECK(ep_ring_margin(mc_large)[3] > 1.0);
+
+    // L_0 = ncoords exactly; L_s = ceil(ncoords c_s m_s); live is the largest
+    // adjacent sum.
+    const auto ring = ep_ring_forecast(1000, mc.complexity, margin);
+    const double l1 = std::ceil(1000.0 * 1.0 * margin[0]);
+    const double l2 = std::ceil(1000.0 * 0.5 * margin[1]);
+    CHECK(ring.peak == l1);
+    CHECK(ring.live == 1000.0 + l1);
+    CHECK(ring.live > l1 + l2);
+    CHECK(ring.peak_complexity == 1.0);
 }
 
 TEST_CASE("EP chunking preserves forecast capacity above four million",
@@ -437,7 +485,7 @@ TEST_CASE("EP chunking preserves forecast capacity above four million",
     CHECK(chunk.predicted_peak >= 5'000'000);
     CHECK(chunk.predicted_live >= chunk.predicted_peak + chunk.ncoords);
     CHECK(chunk.max_sugg > (1U << 22U));
-    CHECK(std::has_single_bit(chunk.max_sugg));
+    CHECK(chunk.max_sugg % loki::algorithms::detail::kEPRingGranularity == 0);
     check_plan_fits(plan, ctx, 8.0);
 }
 
@@ -446,17 +494,20 @@ TEST_CASE("EP forecasts account for adjacent populations, once per chunk",
     const auto cfg       = make_cfg(140.0, 145.0, 1);
     auto design          = make_design(cfg, 140.0, 145.0, 32, 1.0F);
     SizeType evaluations = 0;
-    design.evaluate      = [&evaluations](std::span<const float> bp) {
+    design.design = [&evaluations](std::span<const float> bp, double, double) {
         ++evaluations;
         REQUIRE(bp.size() == 7);
-        return std::vector<double>{3.0, 4.0, 2.0, 1.0, 0.0, 0.0, 0.0};
+        return loki::algorithms::detail::ChunkDesign{
+            .thresholds = std::vector<float>(bp.size(), 0.0F),
+            .forecast   = {.complexity = {3.0, 4.0, 2.0, 1.0, 0.0, 0.0, 0.0}},
+        };
     };
     const auto plan = plan_chunks<float>(cfg, "taylor", std::span(&design, 1),
                                          0.0, 8.0, make_ctx(cfg));
     REQUIRE(plan.chunk_cfgs.size() == 1);
     const auto& chunk = plan.chunk_cfgs.front();
     // The branching forecast does not depend on the run, so a chunk is
-    // evaluated once whatever the number of runs.
+    // designed once whatever the number of runs.
     CHECK(evaluations == 1);
     CHECK(chunk.predicted_peak == 4 * chunk.ncoords);
     CHECK(chunk.predicted_live == 7 * chunk.ncoords);
@@ -480,4 +531,82 @@ TEST_CASE("CUDA EP lowers the batch only when a minimum chunk cannot fit",
     CHECK(tight.chunk_cfgs.front().batch_size < ctx.batch_size);
     CHECK(std::has_single_bit(tight.chunk_cfgs.front().batch_size));
     check_plan_fits(tight, ctx, 0.06);
+}
+
+namespace {
+
+/// The per-stage complexity of @p bp: @p scale times its running product,
+/// as a schedule with every pass rate equal gives.
+std::vector<double> scaled_complexity(std::span<const float> bp, double scale) {
+    std::vector<double> c(bp.size());
+    double prod = 1.0;
+    for (SizeType s = 0; s < bp.size(); ++s) {
+        prod *= static_cast<double>(bp[s]);
+        c[s] = scale * prod;
+    }
+    return c;
+}
+
+/// A design whose per-seed complexity is @p scale times the running product
+/// of the branching pattern it is designed for.
+RegionDesign make_scaled_design(const PulsarSearchConfig& cfg,
+                                double f_start,
+                                double f_end,
+                                double scale,
+                                SizeType* ndesigns) {
+    auto design   = make_design(cfg, f_start, f_end, 32, 1.0F);
+    design.design = [=](std::span<const float> bp, double, double) {
+        ++*ndesigns;
+        return loki::algorithms::detail::ChunkDesign{
+            .thresholds = std::vector<float>(bp.size(), 1.0F),
+            .pd         = 0.5,
+            .pd_se      = 0.01,
+            .forecast   = {.complexity = scaled_complexity(bp, scale),
+                           .pass_rate  = std::vector<double>(bp.size(), 0.5),
+                           .ntrials    = 1U << 15U},
+        };
+    };
+    return design;
+}
+
+} // namespace
+
+TEST_CASE("EP chunking designs each region once", "[ep_chunking]") {
+    constexpr double kLimitGb = 0.2;
+    const auto cfg            = make_cfg(140.0, 145.0, /*nthreads=*/2);
+    SizeType ndesigns         = 0;
+    const auto design = make_scaled_design(cfg, 100.0, 145.0, 2.0e3, &ndesigns);
+    const auto ctx    = make_ctx(cfg);
+    const auto plan   = plan_chunks<float>(cfg, "taylor", std::span(&design, 1),
+                                           0.0, kLimitGb, ctx);
+    REQUIRE(plan.chunk_cfgs.size() >= 2);
+    check_plan_fits(plan, ctx, kLimitGb);
+    CHECK(ndesigns == 1);
+    for (const auto& c : plan.chunk_cfgs) {
+        CHECK(c.pd == 0.5);
+        CHECK(c.threshold_scheme.size() == c.branching_pattern.size());
+        CHECK(c.max_sugg % loki::algorithms::detail::kEPRingGranularity == 0);
+    }
+}
+
+TEST_CASE("EP chunking carries the region's pass rates to each chunk",
+          "[ep_chunking]") {
+    // The scaled design's pass rates do not depend on the branching, so a
+    // chunk's population from the region design must be the one a design of
+    // the chunk's own branching pattern gives.
+    constexpr double kScale   = 2.0e3;
+    constexpr double kLimitGb = 0.2;
+    const auto cfg            = make_cfg(140.0, 145.0, /*nthreads=*/2);
+    SizeType ndesigns         = 0;
+    const auto design =
+        make_scaled_design(cfg, 100.0, 145.0, kScale, &ndesigns);
+    const auto ctx  = make_ctx(cfg);
+    const auto plan = plan_chunks<float>(cfg, "taylor", std::span(&design, 1),
+                                         0.0, kLimitGb, ctx);
+    REQUIRE(plan.chunk_cfgs.size() >= 2);
+    for (const auto& c : plan.chunk_cfgs) {
+        const auto own    = scaled_complexity(c.branching_pattern, kScale);
+        const double peak = std::ranges::max(own);
+        CHECK(std::abs(c.peak_complexity - peak) <= 1.0e-6 * peak);
+    }
 }

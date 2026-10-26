@@ -24,6 +24,7 @@
 #include "lib/algorithms/planner_memory.hpp"
 #include "lib/algorithms/prune_engine.hpp"
 #include "lib/detail/timing.hpp"
+#include "lib/detail/utils.hpp"
 #include "lib/pipelines/ep_freq_sweep_engine.hpp"
 #include "lib/pipelines/ep_sweep_common.hpp"
 #include "lib/utils/workspace_impl.hpp"
@@ -75,7 +76,8 @@ public:
             "EPFreqSweep initialized: {} chunks planned, max memory: {:.2f} GB "
             "(process limit: {:.2f} GB), max_sugg: {}",
             m_region_planner.get_nchunks(), stats.get_max_memory_gb(),
-            m_base_cfg.get_max_process_memory_gb(), stats.get_max_sugg());
+            m_base_cfg.get_max_process_memory_gb(),
+            utils::format_pow2(stats.get_max_sugg()));
 
         // Allocate shared FFA workspace and fold buffer once for the entire
         // sweep
@@ -179,7 +181,8 @@ public:
                 "EPFreqSweep: allocated {} workspaces for chunks {}..{} "
                 "(nbins={}, max_sugg={}, {:.2f} GB per workspace)",
                 m_n_workers, chunk_idx, range_end - 1, effective_nbins,
-                group.max_sugg, workspaces.front().get_memory_usage_gib());
+                utils::format_pow2(group.max_sugg),
+                workspaces.front().get_memory_usage_gib());
 
             // Process all chunks in this nbins band reusing workspaces
             for (SizeType i = chunk_idx; i < range_end; ++i) {
@@ -191,7 +194,7 @@ public:
                     "max_sugg={})",
                     i + 1, nchunks, chunk.nominal_f_start, chunk.nominal_f_end,
                     chunk.actual_f_start, chunk.actual_f_end,
-                    chunk.cfg.get_nbins(), chunk.max_sugg);
+                    chunk.cfg.get_nbins(), utils::format_pow2(chunk.max_sugg));
 
                 const std::string chunk_prefix = std::format("chunk_{:04d}", i);
                 // Internal pipeline: build the CPU engine directly on the
