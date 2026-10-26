@@ -229,7 +229,18 @@ int run_simulate(double period,
                  const std::optional<double>& mod_tref) {
     loki::simulation::PulseSignalConfig config(period, dt, nsamps, snr, ducy,
                                                mod_type, mod, mod_tref, seed);
-    const auto series = config.generate(shape, phi0);
+    auto series = config.generate(shape, phi0);
+    // Writes a unit-variance file. For --no-preprocess.
+    const auto ts_v = series.get_ts_v();
+    if (ts_v.empty() || !(ts_v.front() > 0.0F)) {
+        throw std::runtime_error("simulated timeseries has no valid variance");
+    }
+    const auto inv_sigma =
+        static_cast<float>(1.0 / std::sqrt(static_cast<double>(ts_v.front())));
+    for (auto& sample : series.get_ts_e()) {
+        sample *= inv_sigma;
+    }
+    std::ranges::fill(series.get_ts_v(), 1.0F);
     series.write(output);
     SPDLOG_INFO("Wrote {} samples to {}", series.get_nsamps(), output.string());
     return 0;
@@ -1083,7 +1094,8 @@ int main(int argc, char** argv) {
         "OpenMP threads (0 = hardware concurrency, default: 0)");
     grp_perf->add_option(
         "--memory-gb", ffa_cfg.max_process_memory_gb,
-        "Memory cap in GB: total process RSS on CPU, device memory on CUDA");
+        "Memory cap in GB of 2^30 bytes (as Slurm's --mem=16G): total "
+        "process RSS on CPU, device memory on CUDA");
     grp_perf->add_option("--octave-scale", ffa_cfg.octave_scale,
                          "Octave scaling factor (default: 2.0)");
     grp_perf->add_option("--nbins-max", ffa_cfg.nbins_max,
@@ -1242,7 +1254,8 @@ int main(int argc, char** argv) {
         "OpenMP threads (0 = hardware concurrency, default: 0)");
     ep_grp_perf->add_option(
         "--memory-gb", ep_cfg.max_process_memory_gb,
-        "Memory cap in GB: total process RSS on CPU, device memory on CUDA");
+        "Memory cap in GB of 2^30 bytes (as Slurm's --mem=16G): total "
+        "process RSS on CPU, device memory on CUDA");
     ep_grp_perf->add_option("--octave-scale", ep_cfg.octave_scale,
                             "Octave scaling factor (default: 2.0)");
     ep_grp_perf->add_option("--nbins-max", ep_cfg.nbins_max,

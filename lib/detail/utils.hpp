@@ -22,6 +22,10 @@ inline constexpr double kInvCval = 3.3356409519815204e-09; // s/m
 inline constexpr double kGMsunOneThird = 5.10078726793173e6;
 // To match the Python output for bitwise consistency
 inline constexpr double kFloatEps = 1e-6; // half-up rounding
+/// Bytes per "GB" in every memory limit, getter and log: 2^30 (binary, the
+/// convention of Slurm's `--mem`, top and htop), so `max_process_memory_gb
+/// = 16` is the same amount as `--mem=16G`. See docs/memory.md.
+inline constexpr double kBytesPerGB = 1073741824.0;
 
 namespace detail {
 /// Hides @p bits from the optimiser. Under -ffast-math the compiler may
@@ -82,8 +86,9 @@ template <typename U> [[nodiscard]] constexpr U opaque_bits(U bits) noexcept {
     return bad == 0;
 }
 
+/// @p bytes in GB of 2^30 bytes (kBytesPerGB).
 constexpr float to_gib(SizeType bytes) noexcept {
-    return static_cast<float>(bytes) / 1024.0F / 1024.0F / 1024.0F;
+    return static_cast<float>(static_cast<double>(bytes) / kBytesPerGB);
 }
 
 /// A count as a power of two for logs, with one decimal: 1048576 is

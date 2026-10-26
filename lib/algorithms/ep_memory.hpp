@@ -52,8 +52,6 @@
 
 namespace loki::algorithms::detail {
 
-constexpr double kBytesPerGiB = static_cast<double>(1ULL << 30U);
-
 /// Batch size the CPU pruning runs with.
 constexpr SizeType kEPBatchSize = 1024U;
 
@@ -542,7 +540,7 @@ SizeType ep_fixed_bytes(const EPMemoryContext& ctx,
     const auto total =
         (static_cast<double>(n_workers) * static_cast<double>(thread_bytes)) +
         static_cast<double>(fixed_bytes);
-    return total / kBytesPerGiB;
+    return total / utils::kBytesPerGB;
 }
 
 /// A contiguous run of chunks with the same nbins and its maxima: one
@@ -593,7 +591,7 @@ SizeType ep_group_thread_bytes(const EPMemoryContext& ctx,
 }
 
 /**
- * @brief Peak memory of a sweep over @p chunks, in GiB.
+ * @brief Peak memory of a sweep over @p chunks, in GB.
  *
  * The largest chunk group's per-worker buffers plus the shared FFA buffers
  * (global maxima) and the inputs.

@@ -218,3 +218,51 @@ TEST_CASE("execute_scored matches a threshold scan of snr_boxcar_3d",
         CHECK(hits[i].snr == expected[i].snr);
     }
 }
+
+TEST_CASE("execute_scored without cone bands matches a threshold scan",
+          "[ffa][cone][score]") {
+    // Base segments too long for the cone scratch (here forced with a 1 KiB
+    // budget) make the cone path decline; the time-domain frequency-only
+    // plan must then score the stored fold (it used to read accel
+    // coordinates that frequency-only workspaces never allocate).
+    constexpr SizeType kNsamps = 1U << 14U;
+    constexpr double kTsamp    = 1.0e-3;
+    std::mt19937 rng(23);
+    std::normal_distribution<float> dist(0.0F, 1.0F);
+    std::vector<float> ts_e(kNsamps);
+    std::vector<float> ts_v(kNsamps, 1.0F);
+    for (float& sample : ts_e) {
+        sample = dist(rng);
+    }
+    const auto cfg = make_cfg(kNsamps, kTsamp, /*nbins=*/32, /*bseg=*/128,
+                              /*nthreads=*/2, 6.0, 12.0);
+    FFATime plain(cfg, /*show_progress=*/false);
+    plain.set_fuse_levels(SizeType{0});
+    std::vector<float> fold(plain.get_plan().get_buffer_size(), 0.0F);
+    plain.execute(ts_e, ts_v, fold);
+    const auto ncoords = plain.get_plan().get_ncoords().back();
+    const auto nbins   = cfg.get_nbins();
+    const auto widths  = cfg.get_scoring_widths();
+    std::vector<float> scores(ncoords * widths.size());
+    snr_boxcar_3d(std::span<const float>(fold).first(ncoords * 2 * nbins),
+                  widths, scores, ncoords, nbins, loki::Exec::cpu(1));
+    constexpr float kThreshold = 1.5F;
+    std::vector<loki::detection::SnrHit> expected;
+    for (SizeType i = 0; i < scores.size(); ++i) {
+        if (scores[i] >= kThreshold) {
+            expected.push_back({static_cast<uint32_t>(i), scores[i]});
+        }
+    }
+
+    FFATime scored(cfg, /*show_progress=*/false);
+    std::vector<loki::detection::SnrHit> hits;
+    // NOLINTNEXTLINE(misc-include-cleaner): POSIX setenv
+    REQUIRE(setenv("LOKI_CONE_SCRATCH_KB", "1", 1) == 0);
+    scored.execute_scored(ts_e, ts_v, kThreshold, widths, hits);
+    unsetenv("LOKI_CONE_SCRATCH_KB"); // NOLINT(misc-include-cleaner): POSIX
+    REQUIRE(hits.size() == expected.size());
+    for (SizeType i = 0; i < hits.size(); ++i) {
+        CHECK(hits[i].score_index == expected[i].score_index);
+        CHECK(hits[i].snr == expected[i].snr);
+    }
+}

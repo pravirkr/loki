@@ -374,3 +374,57 @@ jerk_max = 0.05
     REQUIRE_THAT(sc_3d.get_param_limits()[2].min, WithinAbs(5.0, 1e-9));
     REQUIRE_THAT(sc_3d.get_param_limits()[2].max, WithinAbs(15.0, 1e-9));
 }
+
+namespace {
+
+// Default bseg_brute for a frequency-only chunk (2^21 samples at 64 us).
+loki::SizeType default_bseg(loki::SizeType nbins,
+                            double f_min,
+                            double f_max,
+                            bool use_fourier) {
+    const std::vector<loki::ParamLimit> limits = {{f_min, f_max}};
+    const loki::search::FFASearchConfig cfg(
+        /*nsamps=*/2097152, /*tsamp=*/64e-6, nbins, /*eta=*/1.0, limits,
+        /*ducy_max=*/0.2, /*wtsp=*/1.5, use_fourier, /*nthreads=*/1,
+        /*max_process_memory_gb=*/4.0, /*octave_scale=*/1.5,
+        /*nbins_max=*/1024, /*nbins_min_lossy_bf=*/64, std::nullopt,
+        std::nullopt, /*snr_min=*/6.0, /*max_passing_candidates=*/1000,
+        /*use_boxcar_kadane=*/false);
+    return cfg.get_bseg_brute();
+}
+
+} // namespace
+
+TEST_CASE("FFASearchConfig default bseg_brute tracks cycles at f_max",
+          "[config][ffa][bseg]") {
+    // Target cycles at f_max: 4 (nbins <= 64), 2 (<= 128), 1.5 (larger);
+    // B is the power of two nearest to target / (tsamp * f_max).
+    SECTION("ms chunk, narrow profile") {
+        REQUIRE(default_bseg(32, 200.0, 300.0, false) == 256);
+        REQUIRE(default_bseg(64, 200.0, 300.0, false) == 256);
+    }
+    SECTION("fewer cycles for wider profiles") {
+        REQUIRE(default_bseg(128, 100.0, 150.0, false) == 256);
+        REQUIRE(default_bseg(512, 20.0, 30.0, false) == 1024);
+    }
+    SECTION("lossy Fourier uses the time-domain target") {
+        REQUIRE(default_bseg(128, 100.0, 150.0, true) ==
+                default_bseg(128, 100.0, 150.0, false));
+    }
+    SECTION("cycles at f_max stay in the target band") {
+        // Cycles at f_max stay within [2.8, 5.7] for the 4-cycle target.
+        for (const double f_max : {50.0, 120.0, 300.0}) {
+            const auto bseg     = default_bseg(32, f_max / 1.5, f_max, false);
+            const double cycles = static_cast<double>(bseg) * 64e-6 * f_max;
+            REQUIRE(cycles >= 2.8);
+            REQUIRE(cycles <= 5.7);
+        }
+    }
+    SECTION("explicit bseg_brute is respected") {
+        const std::vector<loki::ParamLimit> limits = {{200.0, 300.0}};
+        const loki::search::FFASearchConfig cfg(
+            2097152, 64e-6, 32, 1.0, limits, 0.2, 1.5, false, 1, 4.0, 1.5, 1024,
+            64, loki::SizeType{512}, std::nullopt, 6.0, 1000, false);
+        REQUIRE(cfg.get_bseg_brute() == 512);
+    }
+}

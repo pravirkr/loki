@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cstddef>
 #include <cstring>
 #include <random>
 #include <vector>
@@ -10,6 +11,7 @@
 #include "loki/common/types.hpp"
 
 #include "lib/core/kernels.hpp"
+#include "lib/detail/utils.hpp"
 
 using loki::ComplexType;
 using loki::SizeType;
@@ -157,9 +159,10 @@ TEST_CASE("Two fused final Fourier levels are bit-exact with the stored "
         x = ComplexType{dist(rng), dist(rng)};
     }
     std::vector<ComplexType> level1(2 * lv.ncoords_prev() * 2 * nbins_f);
-    loki::core::ffa_complex_iter(level2.data(), level1.data(),
-                                 lv.coords_prev.data(), lv.ncoords_prev(),
-                                 lv.n2, /*nsegments=*/2, nbins_f, nbins, 1);
+    loki::utils::UninitVector<std::byte> step_table(SizeType{1} << 20U);
+    loki::core::ffa_complex_iter(
+        level2.data(), level1.data(), lv.coords_prev.data(), lv.ncoords_prev(),
+        lv.n2, /*nsegments=*/2, nbins_f, nbins, step_table, 1);
 
     const SizeType stride = 2 * nbins_f;
     CollectedComplex expected{

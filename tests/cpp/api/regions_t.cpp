@@ -312,3 +312,21 @@ TEST_CASE("FFARegionPlanner with Exec plans as the backend's sweep",
         CHECK(planner.get_stats().get_freq_sweep_memory_usage() <= limit);
     }
 }
+
+TEST_CASE("FFARegionStats reports memory in GB of 2^30 bytes", "[regions]") {
+    // 2 * 2^27 float elements = 2^30 bytes of fold buffers; 2^28 samples of
+    // ts_e and ts_v = 2^31 bytes; 2^29 scratch bytes.
+    const loki::algorithms::FFARegionStats stats(
+        /*max_buffer_size=*/SizeType{1} << 27U, /*max_coord_size=*/0,
+        /*max_ncoords=*/0, /*max_ffa_levels=*/0, /*max_scores_scratch=*/0,
+        /*n_params=*/1, /*n_samps=*/SizeType{1} << 28U,
+        /*max_passing_candidates=*/0, /*use_fourier=*/false,
+        /*use_gpu=*/false, /*max_brutefold_bytes=*/0,
+        /*max_scratch_bytes=*/SizeType{1} << 29U);
+    CHECK(stats.get_buffer_memory_usage() == 1.0F);
+    CHECK(stats.get_input_memory_usage() == 2.0F);
+    CHECK(stats.get_scratch_memory_usage() == 0.5F);
+    CHECK(std::abs(stats.get_cpu_memory_usage() -
+                   (1.0F + 2.0F + 0.5F + stats.get_extra_memory_usage())) <
+          1.0e-6F);
+}

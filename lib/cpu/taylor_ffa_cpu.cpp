@@ -22,31 +22,25 @@ namespace loki::core {
 
 namespace {
 
+// Accel coordinates of rows [row_begin, row_end) of one level (a row is one
+// accel trial of n_freq_cur coordinates); coords holds those rows only.
 template <int LATTER>
-void ffa_taylor_resolve_accel_batch(
+void ffa_taylor_resolve_accel_rows(
     std::span<const SizeType> param_grid_count_cur,
     std::span<const SizeType> param_grid_count_prev,
     std::span<const ParamLimit> param_limits,
     std::span<coord::FFACoord> coords,
     SizeType ffa_level,
     double tseg_brute,
-    SizeType nbins) {
-    constexpr SizeType kParams = 2;
-    error_check::check_equal(param_grid_count_cur.size(), kParams,
-                             "param_grid_count_cur should have 2 elements");
-    error_check::check_equal(param_grid_count_prev.size(), kParams,
-                             "param_grid_count_prev should have 2 elements");
-    error_check::check_equal(param_limits.size(), kParams,
-                             "param_limits should have 2 elements");
-
+    SizeType nbins,
+    SizeType row_begin,
+    SizeType row_end) {
     const SizeType n_accel_cur  = param_grid_count_cur[0];
     const SizeType n_freq_cur   = param_grid_count_cur[1];
     const SizeType n_accel_prev = param_grid_count_prev[0];
     const SizeType n_freq_prev  = param_grid_count_prev[1];
     const ParamLimit& lim_accel = param_limits[0];
     const ParamLimit& lim_freq  = param_limits[1];
-    const auto ncoords          = n_accel_cur * n_freq_cur;
-    error_check::check_equal(coords.size(), ncoords, "coords size mismatch");
 
     const double tsegment =
         std::ldexp(tseg_brute, static_cast<int>(ffa_level - 1));
@@ -55,7 +49,7 @@ void ffa_taylor_resolve_accel_batch(
     // Pre-compute constants to avoid repeated calculations
     const auto half_delta_t_sq = 0.5 * delta_t * delta_t;
 
-    for (SizeType accel_idx = 0; accel_idx < n_accel_cur; ++accel_idx) {
+    for (SizeType accel_idx = row_begin; accel_idx < row_end; ++accel_idx) {
         // Generate parameters on the fly
         const auto a_cur =
             psr_utils::get_param_val_at_idx(lim_accel, n_accel_cur, accel_idx);
@@ -64,7 +58,7 @@ void ffa_taylor_resolve_accel_batch(
         const auto d_new = a_cur * half_delta_t_sq;
         const auto idx_a = psr_utils::get_nearest_idx_analytical(
             a_new, lim_accel, n_accel_prev);
-        const auto coord_a_offset = accel_idx * n_freq_cur;
+        const auto coord_a_offset = (accel_idx - row_begin) * n_freq_cur;
         const auto idx_a_offset   = idx_a * n_freq_prev;
 
         for (SizeType freq_idx = 0; freq_idx < n_freq_cur; ++freq_idx) {
@@ -89,6 +83,29 @@ void ffa_taylor_resolve_accel_batch(
             }
         }
     }
+}
+
+template <int LATTER>
+void ffa_taylor_resolve_accel_batch(
+    std::span<const SizeType> param_grid_count_cur,
+    std::span<const SizeType> param_grid_count_prev,
+    std::span<const ParamLimit> param_limits,
+    std::span<coord::FFACoord> coords,
+    SizeType ffa_level,
+    double tseg_brute,
+    SizeType nbins) {
+    constexpr SizeType kParams = 2;
+    error_check::check_equal(param_grid_count_cur.size(), kParams,
+                             "param_grid_count_cur should have 2 elements");
+    error_check::check_equal(param_grid_count_prev.size(), kParams,
+                             "param_grid_count_prev should have 2 elements");
+    error_check::check_equal(param_limits.size(), kParams,
+                             "param_limits should have 2 elements");
+    const auto ncoords = param_grid_count_cur[0] * param_grid_count_cur[1];
+    error_check::check_equal(coords.size(), ncoords, "coords size mismatch");
+    ffa_taylor_resolve_accel_rows<LATTER>(
+        param_grid_count_cur, param_grid_count_prev, param_limits, coords,
+        ffa_level, tseg_brute, nbins, 0, param_grid_count_cur[0]);
 }
 
 template <int LATTER>
@@ -321,6 +338,45 @@ void ffa_taylor_resolve_poly_batch(
         }
     };
     launch(latter != 0U);
+}
+
+void ffa_taylor_resolve_accel_rows(
+    std::span<const SizeType> param_grid_count_cur,
+    std::span<const SizeType> param_grid_count_prev,
+    std::span<const ParamLimit> param_limits,
+    std::span<coord::FFACoord> coords,
+    SizeType ffa_level,
+    double tseg_brute,
+    SizeType nbins,
+    SizeType row_begin,
+    SizeType row_end,
+    int nthreads) {
+    error_check::check_equal(param_grid_count_cur.size(), SizeType{2},
+                             "ffa_taylor_resolve_accel_rows: accel plans only");
+    error_check::check_equal(param_grid_count_prev.size(), SizeType{2},
+                             "ffa_taylor_resolve_accel_rows: accel plans only");
+    error_check::check_equal(param_limits.size(), SizeType{2},
+                             "ffa_taylor_resolve_accel_rows: accel plans only");
+    error_check::check(
+        row_begin <= row_end && row_end <= param_grid_count_cur[0],
+        "ffa_taylor_resolve_accel_rows: row range out of bounds");
+    const SizeType n_freq = param_grid_count_cur[1];
+    error_check::check_greater_equal(
+        coords.size(), (row_end - row_begin) * n_freq,
+        "ffa_taylor_resolve_accel_rows: coords too small for the rows");
+    const auto nrows = static_cast<std::int64_t>(row_end - row_begin);
+#pragma omp parallel for num_threads(std::max(nthreads, 1)) schedule(static)
+    for (std::int64_t i = 0; i < nrows; ++i) {
+        const auto row = row_begin + static_cast<SizeType>(i);
+        const auto row_coords =
+            coords.subspan(static_cast<SizeType>(i) * n_freq, n_freq);
+        ffa_taylor_resolve_accel_rows<0>(
+            param_grid_count_cur, param_grid_count_prev, param_limits,
+            row_coords, ffa_level, tseg_brute, nbins, row, row + 1);
+        ffa_taylor_resolve_accel_rows<1>(
+            param_grid_count_cur, param_grid_count_prev, param_limits,
+            row_coords, ffa_level, tseg_brute, nbins, row, row + 1);
+    }
 }
 
 } // namespace loki::core

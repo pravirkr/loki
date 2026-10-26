@@ -22,6 +22,7 @@
 #include "lib/cuda/score_cuda.cuh"
 #include "lib/cuda/taylor_cuda.cuh"
 #include "lib/detail/error_check.hpp"
+#include "lib/detail/utils.hpp"
 #include "lib/search/ep_support.hpp"
 
 namespace loki::core {
@@ -128,7 +129,7 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA>
 float BasePruneDPFunctsCUDA<FoldTypeCUDA>::get_scorer_scratch_memory_gib()
     const noexcept {
     const auto bytes = m_tile_state_d.size() * sizeof(unsigned long long);
-    return static_cast<float>(bytes) / static_cast<float>(1ULL << 30U);
+    return static_cast<float>(bytes) / static_cast<float>(utils::kBytesPerGB);
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>

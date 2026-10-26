@@ -59,7 +59,7 @@ GridMask::GridMask(ParamLimit lim_accel,
 
 float GridMask::get_memory_usage_gib() const noexcept {
     return static_cast<float>(m_bits.size() * sizeof(uint64_t)) /
-           static_cast<float>(1ULL << 30U);
+           static_cast<float>(utils::kBytesPerGB);
 }
 
 void GridMask::set_range(SizeType lo, SizeType hi) noexcept {

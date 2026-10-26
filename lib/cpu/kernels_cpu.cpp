@@ -10,6 +10,7 @@
 #include <cstring>
 #include <limits>
 #include <numbers>
+#include <span>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -24,6 +25,8 @@
 #include "loki/common/coord.hpp"
 #include "loki/common/types.hpp"
 
+#include "lib/algorithms/planner_memory.hpp"
+#include "lib/detail/error_check.hpp"
 #include "lib/detail/utils.hpp"
 
 namespace loki::core {
@@ -296,6 +299,9 @@ struct alignas(64) PhaseStep {
     ComplexType step;  // d, for the scalar remainder
 };
 
+static_assert(sizeof(PhaseStep) <= algorithms::detail::kMaxPhaseStepBytes,
+              "the memory model's phase-step size is too small");
+
 /// Sets `out` for the phase step d = (d_re, d_im).
 [[gnu::always_inline]] inline void
 set_phase_step(PhaseStep& out, double d_re, double d_im) noexcept {
@@ -413,6 +419,20 @@ void fill_merge_phase_steps(ShiftOf shift_of,
             set_phase_step(steps[i0 + i], re[i], im[i]);
         }
     }
+}
+
+/// The caller's phase-step table (FFAWorkspaceCPU::phase_steps) as steps.
+/// Called before a parallel region (it checks).
+[[nodiscard]] std::span<PhaseStep> as_phase_steps(std::span<std::byte> table,
+                                                  SizeType min_steps) {
+    error_check::check(reinterpret_cast<std::uintptr_t>(table.data()) %
+                               alignof(PhaseStep) ==
+                           0,
+                       "phase-step table must be 64-byte aligned");
+    const SizeType n = table.size() / sizeof(PhaseStep);
+    error_check::check_greater_equal(
+        n, min_steps, "phase-step table too small for one step block");
+    return {reinterpret_cast<PhaseStep*>(table.data()), n};
 }
 
 /// Leaves per phase-step block of the EP shift-adds (one fused scoring tile).
@@ -909,6 +929,7 @@ void ffa_complex_iter_segment(const ComplexType* __restrict__ fold_in,
                               SizeType nsegments,
                               SizeType nbins_f,
                               SizeType nbins,
+                              std::span<PhaseStep> table,
                               int nthreads) {
     nthreads = std::max(nthreads, 1);
     // Process one segment at a time to keep data in cache
@@ -916,32 +937,35 @@ void ffa_complex_iter_segment(const ComplexType* __restrict__ fold_in,
     const SizeType fold_stride     = 2 * nbins_f;
     const SizeType seg_prev_stride = ncoords_prev * fold_stride;
     const SizeType seg_out_stride  = ncoords_cur * fold_stride;
-    // Few coordinates and many segments: one phase-step table per level.
-    std::vector<PhaseStep> steps(2 * ncoords_cur);
-    PhaseStep* __restrict__ steps_tail = steps.data();
-    PhaseStep* __restrict__ steps_head = steps.data() + ncoords_cur;
+    // Few coordinates and many segments: the phase steps of a batch of
+    // coordinates (whole step blocks, tail and head halves of the table),
+    // reused by every segment.
+    const SizeType batch = (table.size() / 2 / kBlockSize) * kBlockSize;
+    PhaseStep* __restrict__ steps_tail = table.data();
+    PhaseStep* __restrict__ steps_head = table.data() + batch;
 
 #pragma omp parallel num_threads(nthreads) default(none)                       \
     shared(fold_in, fold_out, coords, ncoords_cur, ncoords_prev, nsegments,    \
                nbins_f, nbins, fold_stride, seg_prev_stride, seg_out_stride,   \
-               steps_tail, steps_head)
-    {
+               steps_tail, steps_head, batch)
+    for (SizeType c0 = 0; c0 < ncoords_cur; c0 += batch) {
+        const SizeType c1 = std::min(c0 + batch, ncoords_cur);
 #pragma omp for schedule(static)
-        for (SizeType icoord_block = 0; icoord_block < ncoords_cur;
+        for (SizeType icoord_block = c0; icoord_block < c1;
              icoord_block += kBlockSize) {
             const SizeType nblock =
-                std::min(icoord_block + kBlockSize, ncoords_cur) - icoord_block;
+                std::min(icoord_block + kBlockSize, c1) - icoord_block;
             const auto* block = coords + icoord_block;
             fill_merge_phase_steps(
                 [block](SizeType i) { return block[i].shift_tail; }, nblock,
-                nbins, steps_tail + icoord_block);
+                nbins, steps_tail + (icoord_block - c0));
             fill_merge_phase_steps(
                 [block](SizeType i) { return block[i].shift_head; }, nblock,
-                nbins, steps_head + icoord_block);
+                nbins, steps_head + (icoord_block - c0));
         }
 #pragma omp for schedule(static)
         for (SizeType iseg = 0; iseg < nsegments; ++iseg) {
-            for (SizeType icoord = 0; icoord < ncoords_cur; ++icoord) {
+            for (SizeType icoord = c0; icoord < c1; ++icoord) {
                 const auto* __restrict__ coord_cur = &coords[icoord];
                 const auto tail_offset =
                     ((iseg * 2) * seg_prev_stride) +
@@ -952,8 +976,8 @@ void ffa_complex_iter_segment(const ComplexType* __restrict__ fold_in,
                 const auto out_offset =
                     (iseg * seg_out_stride) + (icoord * fold_stride);
                 shift_add_complex_recurrence_binary_steps(
-                    &fold_in[tail_offset], steps_tail[icoord],
-                    &fold_in[head_offset], steps_head[icoord],
+                    &fold_in[tail_offset], steps_tail[icoord - c0],
+                    &fold_in[head_offset], steps_head[icoord - c0],
                     &fold_out[out_offset], nbins_f);
             }
         }
@@ -1021,6 +1045,7 @@ void ffa_complex_iter_segment_freq(
     SizeType nsegments,
     SizeType nbins_f,
     SizeType nbins,
+    std::span<PhaseStep> table,
     int nthreads) {
     nthreads = std::max(nthreads, 1);
     // Process one segment at a time to keep data in cache
@@ -1028,28 +1053,30 @@ void ffa_complex_iter_segment_freq(
     const SizeType fold_stride     = 2 * nbins_f;
     const SizeType seg_prev_stride = ncoords_prev * fold_stride;
     const SizeType seg_out_stride  = ncoords_cur * fold_stride;
-    // Few coordinates and many segments: one phase-step table per level.
-    std::vector<PhaseStep> steps_vec(ncoords_cur);
-    PhaseStep* __restrict__ steps = steps_vec.data();
+    // Few coordinates and many segments: the phase steps of a batch of
+    // coordinates (whole step blocks), reused by every segment.
+    const SizeType batch          = (table.size() / kBlockSize) * kBlockSize;
+    PhaseStep* __restrict__ steps = table.data();
 
 #pragma omp parallel num_threads(nthreads) default(none)                       \
     shared(fold_in, fold_out, coords, ncoords_cur, ncoords_prev, nsegments,    \
                nbins_f, nbins, fold_stride, seg_prev_stride, seg_out_stride,   \
-               steps)
-    {
+               steps, batch)
+    for (SizeType c0 = 0; c0 < ncoords_cur; c0 += batch) {
+        const SizeType c1 = std::min(c0 + batch, ncoords_cur);
 #pragma omp for schedule(static)
-        for (SizeType icoord_block = 0; icoord_block < ncoords_cur;
+        for (SizeType icoord_block = c0; icoord_block < c1;
              icoord_block += kBlockSize) {
             const SizeType nblock =
-                std::min(icoord_block + kBlockSize, ncoords_cur) - icoord_block;
+                std::min(icoord_block + kBlockSize, c1) - icoord_block;
             const auto* block = coords + icoord_block;
             fill_merge_phase_steps(
                 [block](SizeType i) { return block[i].shift; }, nblock, nbins,
-                steps + icoord_block);
+                steps + (icoord_block - c0));
         }
 #pragma omp for schedule(static)
         for (SizeType iseg = 0; iseg < nsegments; ++iseg) {
-            for (SizeType icoord = 0; icoord < ncoords_cur; ++icoord) {
+            for (SizeType icoord = c0; icoord < c1; ++icoord) {
                 const auto idx = static_cast<SizeType>(coords[icoord].idx);
                 const auto tail_offset =
                     ((iseg * 2) * seg_prev_stride) + (idx * fold_stride);
@@ -1058,8 +1085,8 @@ void ffa_complex_iter_segment_freq(
                 const auto out_offset =
                     (iseg * seg_out_stride) + (icoord * fold_stride);
                 shift_add_complex_recurrence_linear_steps(
-                    &fold_in[tail_offset], &fold_in[head_offset], steps[icoord],
-                    &fold_out[out_offset], nbins_f);
+                    &fold_in[tail_offset], &fold_in[head_offset],
+                    steps[icoord - c0], &fold_out[out_offset], nbins_f);
             }
         }
     }
@@ -2318,14 +2345,16 @@ void ffa_complex_iter(const ComplexType* __restrict__ fold_in,
                       SizeType nsegments,
                       SizeType nbins_f,
                       SizeType nbins,
+                      std::span<std::byte> step_table,
                       int nthreads) {
 
     const bool segment_major =
         (nsegments >= 128) && (nsegments > ncoords_cur / 64);
     if (segment_major) {
-        ffa_complex_iter_segment(fold_in, fold_out, coords, ncoords_cur,
-                                 ncoords_prev, nsegments, nbins_f, nbins,
-                                 nthreads);
+        ffa_complex_iter_segment(
+            fold_in, fold_out, coords, ncoords_cur, ncoords_prev, nsegments,
+            nbins_f, nbins, as_phase_steps(step_table, 2 * kMergeStepBlock),
+            nthreads);
     } else {
         ffa_complex_iter_standard(fold_in, fold_out, coords, ncoords_cur,
                                   ncoords_prev, nsegments, nbins_f, nbins,
@@ -2341,13 +2370,15 @@ void ffa_complex_iter_freq(const ComplexType* __restrict__ fold_in,
                            SizeType nsegments,
                            SizeType nbins_f,
                            SizeType nbins,
+                           std::span<std::byte> step_table,
                            int nthreads) {
     const bool segment_major =
         (nsegments >= 128) && (nsegments > ncoords_cur / 64);
     if (segment_major) {
-        ffa_complex_iter_segment_freq(fold_in, fold_out, coords, ncoords_cur,
-                                      ncoords_prev, nsegments, nbins_f, nbins,
-                                      nthreads);
+        ffa_complex_iter_segment_freq(
+            fold_in, fold_out, coords, ncoords_cur, ncoords_prev, nsegments,
+            nbins_f, nbins, as_phase_steps(step_table, kMergeStepBlock),
+            nthreads);
     } else {
         ffa_complex_iter_standard_freq(fold_in, fold_out, coords, ncoords_cur,
                                        ncoords_prev, nsegments, nbins_f, nbins,
@@ -2618,32 +2649,148 @@ void cone_execute_tile(float* scratch_a,
 
 } // namespace
 
+namespace {
+
+/// Profiles per band level that one tile of `tile_coords` top coordinates
+/// reads at most (widths[k] is the tile). False when a level is not
+/// monotone in idx (the band must not run).
+[[nodiscard]] bool
+cone_band_widths(const coord::FFACoordFreq* const* coords_levels,
+                 const SizeType* ncoords,
+                 SizeType k_levels,
+                 SizeType tile_coords,
+                 std::array<SizeType, 17>& widths) noexcept {
+    if (k_levels == 0 || k_levels > 16 || tile_coords == 0 ||
+        ncoords == nullptr || coords_levels == nullptr) {
+        return false;
+    }
+    const SizeType top = std::min(tile_coords, ncoords[k_levels]);
+    if (top == 0) {
+        return false;
+    }
+    widths           = {};
+    widths[k_levels] = top;
+    for (SizeType level = k_levels; level >= 1; --level) {
+        const auto* coords = coords_levels[level];
+        const SizeType n   = ncoords[level];
+        if (coords == nullptr || n == 0 || !coords_idx_monotone(coords, n)) {
+            return false;
+        }
+        widths[level - 1] = max_idx_span(coords, n, widths[level]);
+        if (widths[level - 1] == 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
+ * @brief A batch of whole tiles of a cone band, top coordinates [c0, c1):
+ * the block-aligned coordinate range [lo, hi) of every band level whose
+ * phase steps the batch uses, and where each starts in the step table.
+ */
+struct ConeBatch {
+    SizeType c0{0};
+    SizeType c1{0};
+    std::array<SizeType, 17> lo{};
+    std::array<SizeType, 17> hi{};
+    std::array<SizeType, 17> off{};
+    SizeType nsteps{0};
+};
+
+ConeBatch cone_batch_steps(const coord::FFACoordFreq* const* coords_levels,
+                           const SizeType* ncoords,
+                           SizeType k_levels,
+                           SizeType c0,
+                           SizeType c1) noexcept {
+    ConeBatch b{.c0 = c0, .c1 = c1};
+    std::array<CoordRange, 17> ranges{};
+    tile_input_ranges(coords_levels, k_levels, c0, c1, ranges.data());
+    for (SizeType level = 1; level <= k_levels; ++level) {
+        b.lo[level] = (ranges[level].lo / kMergeStepBlock) * kMergeStepBlock;
+        b.hi[level] = std::min(
+            ((ranges[level].hi + kMergeStepBlock - 1) / kMergeStepBlock) *
+                kMergeStepBlock,
+            ncoords[level]);
+        b.off[level] = b.nsteps;
+        b.nsteps += b.hi[level] - b.lo[level];
+    }
+    return b;
+}
+
+/**
+ * @brief Split the top coordinates of a cone band into batches of whole
+ * tiles: at most `max_tiles` tiles each, and (when `table_steps` is not 0)
+ * no more phase steps than the table holds. Batch edges are multiples of
+ * tile_coords, which is a multiple of kMergeStepBlock for complex bands,
+ * so the step blocks are those of the unbatched merge.
+ */
+std::vector<ConeBatch>
+plan_cone_batches(const coord::FFACoordFreq* const* coords_levels,
+                  const SizeType* ncoords,
+                  SizeType k_levels,
+                  SizeType tile_coords,
+                  SizeType max_tiles,
+                  SizeType table_steps) {
+    const SizeType ncoords_top = ncoords[k_levels];
+    std::vector<ConeBatch> batches;
+    for (SizeType c0 = 0; c0 < ncoords_top;) {
+        const SizeType tiles_left =
+            (ncoords_top - c0 + tile_coords - 1) / tile_coords;
+        const auto batch_of = [&](SizeType ntiles) {
+            return cone_batch_steps(
+                coords_levels, ncoords, k_levels, c0,
+                std::min(c0 + (ntiles * tile_coords), ncoords_top));
+        };
+        SizeType ntiles = std::min(tiles_left, max_tiles);
+        if (table_steps != 0 && batch_of(ntiles).nsteps > table_steps) {
+            // The steps grow with the batch: bisect the largest that fits.
+            SizeType fit = 0;
+            SizeType bad = ntiles;
+            while (bad - fit > 1) {
+                const SizeType mid = fit + ((bad - fit) / 2);
+                if (batch_of(mid).nsteps <= table_steps) {
+                    fit = mid;
+                } else {
+                    bad = mid;
+                }
+            }
+            error_check::check_greater(
+                fit, SizeType{0},
+                "ffa_complex_cone_band_freq: the phase steps of one tile do "
+                "not fit the step table");
+            ntiles = fit;
+        }
+        batches.push_back(batch_of(ntiles));
+        c0 = batches.back().c1;
+    }
+    return batches;
+}
+
+/// Tiles per batch: all of them, or at most batch_coords top coordinates
+/// (at least one tile).
+[[nodiscard]] SizeType cone_max_tiles(SizeType ncoords_top,
+                                      SizeType tile_coords,
+                                      SizeType batch_coords) noexcept {
+    const SizeType all = (ncoords_top + tile_coords - 1) / tile_coords;
+    if (batch_coords == 0) {
+        return all;
+    }
+    return std::clamp<SizeType>(batch_coords / tile_coords, 1, all);
+}
+
+} // namespace
+
 SizeType
 cone_band_working_floats(const coord::FFACoordFreq* const* coords_levels,
                          const SizeType* ncoords,
                          SizeType k_levels,
                          SizeType tile_coords,
                          SizeType nbins) noexcept {
-    if (k_levels == 0 || k_levels > 16 || tile_coords == 0 || nbins == 0 ||
-        ncoords == nullptr || coords_levels == nullptr) {
-        return 0;
-    }
-    const SizeType top = std::min(tile_coords, ncoords[k_levels]);
-    if (top == 0) {
-        return 0;
-    }
     std::array<SizeType, 17> widths{};
-    widths[k_levels] = top;
-    for (SizeType level = k_levels; level >= 1; --level) {
-        const auto* coords = coords_levels[level];
-        const SizeType n   = ncoords[level];
-        if (coords == nullptr || n == 0 || !coords_idx_monotone(coords, n)) {
-            return 0;
-        }
-        widths[level - 1] = max_idx_span(coords, n, widths[level]);
-        if (widths[level - 1] == 0) {
-            return 0;
-        }
+    if (nbins == 0 || !cone_band_widths(coords_levels, ncoords, k_levels,
+                                        tile_coords, widths)) {
+        return 0;
     }
     SizeType floats = 0;
     for (SizeType level = 0; level <= k_levels; ++level) {
@@ -2651,6 +2798,27 @@ cone_band_working_floats(const coord::FFACoordFreq* const* coords_levels,
         floats = std::max(floats, nseg * widths[level] * 2 * nbins);
     }
     return floats;
+}
+
+SizeType phase_step_bytes() noexcept { return sizeof(PhaseStep); }
+
+SizeType
+cone_band_tile_step_bytes(const coord::FFACoordFreq* const* coords_levels,
+                          const SizeType* ncoords,
+                          SizeType k_levels,
+                          SizeType tile_coords) noexcept {
+    std::array<SizeType, 17> widths{};
+    if (!cone_band_widths(coords_levels, ncoords, k_levels, tile_coords,
+                          widths)) {
+        return 0;
+    }
+    // A range of w coordinates rounded out to step blocks.
+    SizeType steps = 0;
+    for (SizeType level = 1; level <= k_levels; ++level) {
+        steps +=
+            std::min(widths[level] + (2 * kMergeStepBlock), ncoords[level]);
+    }
+    return steps * sizeof(PhaseStep);
 }
 
 void ffa_cone_band_freq(const float* level_in,
@@ -2669,6 +2837,9 @@ void ffa_cone_band_freq(const float* level_in,
                         ConeScoreFn score_fn,
                         void* score_ctx,
                         ConeBandThreadSeconds* thread_seconds,
+                        SizeType batch_coords,
+                        ConeBatchFn batch_fn,
+                        void* batch_ctx,
                         int nthreads) {
     if (k_levels == 0 || k_levels > 16 || tile_coords == 0 ||
         nsegments_in == 0 || ncoords == nullptr) {
@@ -2690,6 +2861,10 @@ void ffa_cone_band_freq(const float* level_in,
     const bool parallel_groups   = std::cmp_greater_equal(nseg_out, nthreads);
     const bool time_it           = thread_seconds != nullptr;
     const SizeType prefix_stride = segment_len + 1;
+    // Batches of whole tiles; batch_fn runs after each.
+    const SizeType batch_tiles =
+        cone_max_tiles(ncoords_top, tile_coords, batch_coords);
+    const SizeType batch_span = batch_tiles * tile_coords;
 
     std::vector<double> shared_prefix_e;
     std::vector<double> shared_prefix_v;
@@ -2762,12 +2937,13 @@ void ffa_cone_band_freq(const float* level_in,
         }
     }
 
-#pragma omp parallel num_threads(nthreads) default(none) shared(               \
-        level_in, ts_e, ts_v, runs, run_offsets, level_out, coords_levels,     \
-            ncoords, nbins, k_levels, tile_coords, score_fn, score_ctx,        \
-            thread_seconds, nseg_group, nseg_out, ncoords_top, scratch_floats, \
-            bottom, parallel_groups, time_it, prefix_stride, segment_len,      \
-            shared_prefix_e, shared_prefix_v, shared_p4_e, shared_p4_v)
+#pragma omp parallel num_threads(nthreads) default(none)                       \
+    shared(level_in, ts_e, ts_v, runs, run_offsets, level_out, coords_levels,  \
+               ncoords, nbins, k_levels, tile_coords, score_fn, score_ctx,     \
+               thread_seconds, nseg_group, nseg_out, ncoords_top,              \
+               scratch_floats, bottom, parallel_groups, time_it,               \
+               prefix_stride, segment_len, shared_prefix_e, shared_prefix_v,   \
+               shared_p4_e, shared_p4_v, batch_span, batch_fn, batch_ctx)
     {
         double brute_local = 0.0;
         double merge_local = 0.0;
@@ -2787,106 +2963,119 @@ void ffa_cone_band_freq(const float* level_in,
 #endif
         }
 
-        if (parallel_groups) {
+        for (SizeType batch0 = 0; batch0 < ncoords_top; batch0 += batch_span) {
+            const SizeType batch1 = std::min(batch0 + batch_span, ncoords_top);
+            if (parallel_groups) {
 #pragma omp for schedule(static)
-            for (SizeType group = 0; group < nseg_out; ++group) {
-                if (bottom) {
-                    const auto prefix_start =
-                        time_it ? ConeClock::now() : ConeClock::time_point{};
-                    const SizeType seg0 = group * nseg_group;
-                    for (SizeType iseg = 0; iseg < nseg_group; ++iseg) {
-                        const SizeType global_seg = seg0 + iseg;
-                        fill_segment_prefix(ts_e + (global_seg * segment_len),
-                                            prefix_e.data() +
-                                                (iseg * prefix_stride),
-                                            segment_len);
-                        fill_segment_prefix(ts_v + (global_seg * segment_len),
-                                            prefix_v.data() +
-                                                (iseg * prefix_stride),
-                                            segment_len);
-                    }
+                for (SizeType group = 0; group < nseg_out; ++group) {
+                    if (bottom) {
+                        const auto prefix_start = time_it
+                                                      ? ConeClock::now()
+                                                      : ConeClock::time_point{};
+                        const SizeType seg0     = group * nseg_group;
+                        for (SizeType iseg = 0; iseg < nseg_group; ++iseg) {
+                            const SizeType global_seg = seg0 + iseg;
+                            fill_segment_prefix(
+                                ts_e + (global_seg * segment_len),
+                                prefix_e.data() + (iseg * prefix_stride),
+                                segment_len);
+                            fill_segment_prefix(
+                                ts_v + (global_seg * segment_len),
+                                prefix_v.data() + (iseg * prefix_stride),
+                                segment_len);
+                        }
 #if defined(__AVX2__)
-                    const SizeType n_prefix = segment_len + 1;
-                    for (SizeType iseg = 0; iseg + 4 <= nseg_group; iseg += 4) {
-                        const double* pe0 =
-                            prefix_e.data() + (iseg + 0) * prefix_stride;
-                        const double* pe1 =
-                            prefix_e.data() + (iseg + 1) * prefix_stride;
-                        const double* pe2 =
-                            prefix_e.data() + (iseg + 2) * prefix_stride;
-                        const double* pe3 =
-                            prefix_e.data() + (iseg + 3) * prefix_stride;
-                        double* dst_e = p4_e.data() + (iseg * prefix_stride);
+                        const SizeType n_prefix = segment_len + 1;
+                        for (SizeType iseg = 0; iseg + 4 <= nseg_group;
+                             iseg += 4) {
+                            const double* pe0 =
+                                prefix_e.data() + (iseg + 0) * prefix_stride;
+                            const double* pe1 =
+                                prefix_e.data() + (iseg + 1) * prefix_stride;
+                            const double* pe2 =
+                                prefix_e.data() + (iseg + 2) * prefix_stride;
+                            const double* pe3 =
+                                prefix_e.data() + (iseg + 3) * prefix_stride;
+                            double* dst_e =
+                                p4_e.data() + (iseg * prefix_stride);
 
-                        const double* pv0 =
-                            prefix_v.data() + (iseg + 0) * prefix_stride;
-                        const double* pv1 =
-                            prefix_v.data() + (iseg + 1) * prefix_stride;
-                        const double* pv2 =
-                            prefix_v.data() + (iseg + 2) * prefix_stride;
-                        const double* pv3 =
-                            prefix_v.data() + (iseg + 3) * prefix_stride;
-                        double* dst_v = p4_v.data() + (iseg * prefix_stride);
+                            const double* pv0 =
+                                prefix_v.data() + (iseg + 0) * prefix_stride;
+                            const double* pv1 =
+                                prefix_v.data() + (iseg + 1) * prefix_stride;
+                            const double* pv2 =
+                                prefix_v.data() + (iseg + 2) * prefix_stride;
+                            const double* pv3 =
+                                prefix_v.data() + (iseg + 3) * prefix_stride;
+                            double* dst_v =
+                                p4_v.data() + (iseg * prefix_stride);
 
-                        for (SizeType i = 0; i < n_prefix; ++i) {
-                            dst_e[i * 4 + 0] = pe0[i];
-                            dst_e[i * 4 + 1] = pe1[i];
-                            dst_e[i * 4 + 2] = pe2[i];
-                            dst_e[i * 4 + 3] = pe3[i];
+                            for (SizeType i = 0; i < n_prefix; ++i) {
+                                dst_e[i * 4 + 0] = pe0[i];
+                                dst_e[i * 4 + 1] = pe1[i];
+                                dst_e[i * 4 + 2] = pe2[i];
+                                dst_e[i * 4 + 3] = pe3[i];
 
-                            dst_v[i * 4 + 0] = pv0[i];
-                            dst_v[i * 4 + 1] = pv1[i];
-                            dst_v[i * 4 + 2] = pv2[i];
-                            dst_v[i * 4 + 3] = pv3[i];
+                                dst_v[i * 4 + 0] = pv0[i];
+                                dst_v[i * 4 + 1] = pv1[i];
+                                dst_v[i * 4 + 2] = pv2[i];
+                                dst_v[i * 4 + 3] = pv3[i];
+                            }
+                        }
+#endif
+                        if (time_it) {
+                            brute_local += cone_seconds(prefix_start);
                         }
                     }
-#endif
-                    if (time_it) {
-                        brute_local += cone_seconds(prefix_start);
+                    for (SizeType coord0 = batch0; coord0 < batch1;
+                         coord0 += tile_coords) {
+                        const SizeType coord1 =
+                            std::min(coord0 + tile_coords, ncoords_top);
+                        cone_execute_tile(
+                            scratch_a.data(), scratch_b.data(), level_in,
+                            bottom ? prefix_e.data() : nullptr,
+                            bottom ? prefix_v.data() : nullptr, runs,
+                            run_offsets, prefix_stride, level_out,
+                            coords_levels, ncoords, group, coord0, coord1,
+                            nbins, k_levels, score_fn, score_ctx, time_it,
+                            &brute_local, &merge_local, &score_local,
+                            bottom ? p4_e.data() : nullptr,
+                            bottom ? p4_v.data() : nullptr);
                     }
                 }
-                for (SizeType coord0 = 0; coord0 < ncoords_top;
+            } else {
+#pragma omp for schedule(static)
+                for (SizeType coord0 = batch0; coord0 < batch1;
                      coord0 += tile_coords) {
                     const SizeType coord1 =
                         std::min(coord0 + tile_coords, ncoords_top);
-                    cone_execute_tile(
-                        scratch_a.data(), scratch_b.data(), level_in,
-                        bottom ? prefix_e.data() : nullptr,
-                        bottom ? prefix_v.data() : nullptr, runs, run_offsets,
-                        prefix_stride, level_out, coords_levels, ncoords, group,
-                        coord0, coord1, nbins, k_levels, score_fn, score_ctx,
-                        time_it, &brute_local, &merge_local, &score_local,
-                        bottom ? p4_e.data() : nullptr,
-                        bottom ? p4_v.data() : nullptr);
+                    for (SizeType group = 0; group < nseg_out; ++group) {
+                        const double* pe  = nullptr;
+                        const double* pv  = nullptr;
+                        const double* p4e = nullptr;
+                        const double* p4v = nullptr;
+                        if (bottom) {
+                            const SizeType off =
+                                group * nseg_group * prefix_stride;
+                            pe = shared_prefix_e.data() + off;
+                            pv = shared_prefix_v.data() + off;
+#if defined(__AVX2__)
+                            p4e = shared_p4_e.data() + off;
+                            p4v = shared_p4_v.data() + off;
+#endif
+                        }
+                        cone_execute_tile(
+                            scratch_a.data(), scratch_b.data(), level_in, pe,
+                            pv, runs, run_offsets, prefix_stride, level_out,
+                            coords_levels, ncoords, group, coord0, coord1,
+                            nbins, k_levels, score_fn, score_ctx, time_it,
+                            &brute_local, &merge_local, &score_local, p4e, p4v);
+                    }
                 }
             }
-        } else {
-#pragma omp for schedule(static)
-            for (SizeType coord0 = 0; coord0 < ncoords_top;
-                 coord0 += tile_coords) {
-                const SizeType coord1 =
-                    std::min(coord0 + tile_coords, ncoords_top);
-                for (SizeType group = 0; group < nseg_out; ++group) {
-                    const double* pe  = nullptr;
-                    const double* pv  = nullptr;
-                    const double* p4e = nullptr;
-                    const double* p4v = nullptr;
-                    if (bottom) {
-                        const SizeType off = group * nseg_group * prefix_stride;
-                        pe                 = shared_prefix_e.data() + off;
-                        pv                 = shared_prefix_v.data() + off;
-#if defined(__AVX2__)
-                        p4e = shared_p4_e.data() + off;
-                        p4v = shared_p4_v.data() + off;
-#endif
-                    }
-                    cone_execute_tile(
-                        scratch_a.data(), scratch_b.data(), level_in, pe, pv,
-                        runs, run_offsets, prefix_stride, level_out,
-                        coords_levels, ncoords, group, coord0, coord1, nbins,
-                        k_levels, score_fn, score_ctx, time_it, &brute_local,
-                        &merge_local, &score_local, p4e, p4v);
-                }
+            if (batch_fn != nullptr) {
+#pragma omp single
+                batch_fn(batch_ctx);
             }
         }
 
@@ -2912,6 +3101,10 @@ void ffa_complex_cone_band_freq(const ComplexType* level_in,
                                 SizeType tile_coords,
                                 ComplexTileFn tile_fn,
                                 void* tile_ctx,
+                                std::span<std::byte> step_table,
+                                SizeType batch_coords,
+                                ConeBatchFn batch_fn,
+                                void* batch_ctx,
                                 int nthreads) {
     if (level_in == nullptr || k_levels == 0 || k_levels > 16 ||
         tile_coords == 0 || nsegments_in == 0 || ncoords == nullptr) {
@@ -2930,38 +3123,30 @@ void ffa_complex_cone_band_freq(const ComplexType* level_in,
     if (scratch_elems == 0 || ncoords_top == 0 || nseg_out == 0) {
         return;
     }
-    // One phase-step table per level of the band, in the step blocks of the
-    // stored merge (ffa_complex_iter_freq), reused by every segment and tile.
-    std::array<std::vector<PhaseStep>, 17> steps;
-    for (SizeType level = 1; level <= k_levels; ++level) {
-        steps[level].resize(ncoords[level]);
-    }
-#pragma omp parallel num_threads(nthreads) default(none)                       \
-    shared(steps, coords_levels, ncoords, k_levels, nbins)
-    for (SizeType level = 1; level <= k_levels; ++level) {
-        const SizeType n = ncoords[level];
-#pragma omp for schedule(static)
-        for (SizeType b0 = 0; b0 < n; b0 += kMergeStepBlock) {
-            const coord::FFACoordFreq* block = coords_levels[level] + b0;
-            fill_merge_phase_steps(
-                [block](SizeType i) { return block[i].shift; },
-                std::min(n - b0, SizeType{kMergeStepBlock}), nbins,
-                steps[level].data() + b0);
-        }
-    }
+    // The phase steps of each level of the band, in the step blocks of the
+    // stored merge (ffa_complex_iter_freq), reused by every segment group
+    // and tile. They are computed for one batch of top coordinates at a
+    // time, into the caller's fixed table.
+    const std::span<PhaseStep> table =
+        as_phase_steps(step_table, kMergeStepBlock);
+    const std::vector<ConeBatch> batches = plan_cone_batches(
+        coords_levels, ncoords, k_levels, tile_coords,
+        cone_max_tiles(ncoords_top, tile_coords, batch_coords), table.size());
+    PhaseStep* const steps     = table.data();
     const bool parallel_groups = std::cmp_greater_equal(nseg_out, nthreads);
 
-#pragma omp parallel num_threads(nthreads) default(none) shared(               \
-        level_in, level_out, coords_levels, ncoords, nbins_f, k_levels,        \
-            tile_coords, tile_fn, tile_ctx, nseg_group, nseg_out, ncoords_top, \
-            fold_stride, scratch_elems, steps, parallel_groups)
+#pragma omp parallel num_threads(nthreads) default(none)                       \
+    shared(level_in, level_out, coords_levels, ncoords, nbins_f, nbins,        \
+               k_levels, tile_coords, tile_fn, tile_ctx, nseg_group, nseg_out, \
+               ncoords_top, fold_stride, scratch_elems, steps, batches,        \
+               parallel_groups, batch_fn, batch_ctx)
     {
         utils::UninitVector<ComplexType> scratch_a(scratch_elems);
         utils::UninitVector<ComplexType> scratch_b(scratch_elems);
         // The 2^k input segments of `group`, merged k levels for the top
-        // coordinates [coord0, coord1) in scratch.
-        const auto run_tile = [&](SizeType group, SizeType coord0,
-                                  SizeType coord1) {
+        // coordinates [coord0, coord1) of batch `b` in scratch.
+        const auto run_tile = [&](const ConeBatch& b, SizeType group,
+                                  SizeType coord0, SizeType coord1) {
             std::array<CoordRange, 17> ranges{};
             tile_input_ranges(coords_levels, k_levels, coord0, coord1,
                               ranges.data());
@@ -2987,6 +3172,8 @@ void ffa_complex_cone_band_freq(const ComplexType* level_in,
                 const auto* coords       = coords_levels[level];
                 const SizeType base      = ranges[level].lo;
                 const SizeType prev_base = ranges[level - 1].lo;
+                const PhaseStep* level_steps = steps + b.off[level];
+                const SizeType steps_lo      = b.lo[level];
                 for (SizeType iseg = 0; iseg < nseg_lvl; ++iseg) {
                     const ComplexType* tail = cur + ((iseg * 2) * seg_prev);
                     const ComplexType* head =
@@ -2999,7 +3186,8 @@ void ffa_complex_cone_band_freq(const ComplexType* level_in,
                             prev_base;
                         shift_add_complex_recurrence_linear_steps(
                             tail + (prev * fold_stride),
-                            head + (prev * fold_stride), steps[level][global],
+                            head + (prev * fold_stride),
+                            level_steps[global - steps_lo],
                             out + (local * fold_stride), nbins_f);
                     }
                 }
@@ -3018,23 +3206,45 @@ void ffa_complex_cone_band_freq(const ComplexType* level_in,
             }
         };
 
-        if (parallel_groups) {
-#pragma omp for schedule(static)
-            for (SizeType group = 0; group < nseg_out; ++group) {
-                for (SizeType coord0 = 0; coord0 < ncoords_top;
-                     coord0 += tile_coords) {
-                    run_tile(group, coord0,
-                             std::min(coord0 + tile_coords, ncoords_top));
+        for (const ConeBatch& b : batches) {
+            // Steps of every level of the batch (disjoint table ranges).
+            for (SizeType level = 1; level <= k_levels; ++level) {
+                const coord::FFACoordFreq* level_coords = coords_levels[level];
+                const SizeType n                        = ncoords[level];
+                PhaseStep* level_steps                  = steps + b.off[level];
+#pragma omp for schedule(static) nowait
+                for (SizeType b0 = b.lo[level]; b0 < b.hi[level];
+                     b0 += kMergeStepBlock) {
+                    const coord::FFACoordFreq* block = level_coords + b0;
+                    fill_merge_phase_steps(
+                        [block](SizeType i) { return block[i].shift; },
+                        std::min(n - b0, SizeType{kMergeStepBlock}), nbins,
+                        level_steps + (b0 - b.lo[level]));
                 }
             }
-        } else {
+#pragma omp barrier
+            if (parallel_groups) {
 #pragma omp for schedule(static)
-            for (SizeType coord0 = 0; coord0 < ncoords_top;
-                 coord0 += tile_coords) {
                 for (SizeType group = 0; group < nseg_out; ++group) {
-                    run_tile(group, coord0,
-                             std::min(coord0 + tile_coords, ncoords_top));
+                    for (SizeType coord0 = b.c0; coord0 < b.c1;
+                         coord0 += tile_coords) {
+                        run_tile(b, group, coord0,
+                                 std::min(coord0 + tile_coords, b.c1));
+                    }
                 }
+            } else {
+#pragma omp for schedule(static)
+                for (SizeType coord0 = b.c0; coord0 < b.c1;
+                     coord0 += tile_coords) {
+                    for (SizeType group = 0; group < nseg_out; ++group) {
+                        run_tile(b, group, coord0,
+                                 std::min(coord0 + tile_coords, b.c1));
+                    }
+                }
+            }
+            if (batch_fn != nullptr) {
+#pragma omp single
+                batch_fn(batch_ctx);
             }
         }
     }

@@ -356,7 +356,12 @@ The facades do not change: they already dispatch on `kGPUBackend` through
 ## Memory planning
 
 The FFA and EP sweeps plan their chunks against `max_process_memory_gb` with
-exact memory models and one shared reserve; see [memory.md](memory.md).
+exact memory models and one shared reserve; see [memory.md](memory.md). Every
+memory size in Loki is in GB of 2^30 bytes (`utils::kBytesPerGB`, as Slurm's
+`--mem`). An
+allocation that grows with the problem must be in a planned workspace or
+bounded by a term the planner adds; kernels do not allocate tables sized by
+the plan.
 Both sweeps have a CPU engine and a CUDA engine. On CUDA,
 `max_process_memory_gb` is a device-memory limit: the plan uses the smaller of
 it and the free device memory less `kDeviceReserveGB`

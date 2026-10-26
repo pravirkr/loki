@@ -57,7 +57,7 @@ struct ChunkPlan {
     SizeType buffer_size{0};
     SizeType coord_size{0};
     SizeType fold_size{0};
-    /// Peak sweep memory (see ep_memory.hpp), in GiB.
+    /// Peak sweep memory (see ep_memory.hpp), in GB.
     double peak_memory_gb{0.0};
     /// True if a pass with a fixed shared FFA size was needed.
     bool replanned{false};

@@ -2,6 +2,7 @@
 #include <cmath>
 #include <vector>
 
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include "loki/algorithms/regions.hpp"
@@ -11,7 +12,9 @@
 
 #include "lib/algorithms/planner_cost.hpp"
 #include "lib/algorithms/planner_memory.hpp"
+#include "lib/detail/utils.hpp"
 
+using Catch::Approx;
 using loki::ComplexType;
 using loki::ParamLimit;
 using loki::SizeType;
@@ -61,7 +64,7 @@ double modelled_cost(const FFARegionPlanner<FoldType>& planner,
 
 double sweep_budget_gb(double max_memory_gb) {
     const double input_gb = static_cast<double>(kNsamps) * 2.0 * sizeof(float) /
-                            static_cast<double>(1ULL << 30U);
+                            loki::utils::kBytesPerGB;
     return detail::effective_memory_limit_gb(max_memory_gb) - input_gb;
 }
 
@@ -209,5 +212,71 @@ TEST_CASE("FFARegionPlanner CPU: a frequency-only search keeps one chunk per "
             CHECK(planner.get_nregions() == regions.size());
             check_covers_regions(planner, false);
         }
+    }
+}
+
+namespace {
+
+// Closed-form FLOP count of a frequency-only plan: data arithmetic only, a
+// real FFT of length N costs 2.5 N log2 N.
+double expected_gflops(const FFAPlan<ComplexType>& plan,
+                       const FFASearchConfig& cfg,
+                       bool return_in_time) {
+    const auto nbins   = static_cast<double>(cfg.get_nbins());
+    const auto nbins_f = static_cast<double>(cfg.get_nbins_f());
+    const auto nsamps  = static_cast<double>(cfg.get_nsamps());
+    const auto nfreqs  = static_cast<double>(plan.get_ncoords()[0]);
+    const auto rfft    = 2.5 * nbins * std::log2(nbins);
+    double flops{};
+    if (cfg.get_nbins() > cfg.get_nbins_min_lossy_bf()) {
+        flops = (2.0 * nsamps * nfreqs) +
+                (2.0 * static_cast<double>(plan.get_nsegments()[0]) * nfreqs *
+                 rfft);
+    } else {
+        flops = 8.0 * nsamps * nfreqs * nbins_f;
+    }
+    for (SizeType i = 1; i < plan.get_n_levels(); ++i) {
+        flops += static_cast<double>(plan.get_ncoords()[i]) *
+                 static_cast<double>(plan.get_nsegments()[i]) * 2.0 * nbins_f *
+                 8.0;
+    }
+    if (return_in_time) {
+        flops +=
+            static_cast<double>(plan.get_fold_size_time() / cfg.get_nbins()) *
+            rfft;
+    }
+    return flops * 1e-9;
+}
+
+} // namespace
+
+TEST_CASE("FFAPlan: FLOP count matches the closed form (time fold)",
+          "[ffa][plan][flops]") {
+    const std::vector<ParamLimit> limits{{.min = 20.0, .max = 40.0}};
+    const FFASearchConfig cfg(SizeType{1} << 14U, kTsamp, 32, 1.0, limits, 0.2,
+                              1.5, /*use_fourier=*/false);
+    const FFAPlan<float> plan(cfg);
+    double flops = 2.0 * static_cast<double>(cfg.get_nsamps()) *
+                   static_cast<double>(plan.get_ncoords()[0]);
+    for (SizeType i = 1; i < plan.get_n_levels(); ++i) {
+        flops += static_cast<double>(plan.get_ncoords()[i]) *
+                 static_cast<double>(plan.get_nsegments()[i]) * 2.0 * 32.0;
+    }
+    REQUIRE(plan.get_gflops(false) == Approx(flops * 1e-9).epsilon(1e-4));
+}
+
+TEST_CASE("FFAPlan: FLOP count matches the closed form (Fourier fold)",
+          "[ffa][plan][flops]") {
+    const std::vector<ParamLimit> limits{{.min = 20.0, .max = 40.0}};
+    // nbins 32 uses the direct DFT brute fold, nbins 128 the lossy one.
+    for (const SizeType nbins : {SizeType{32}, SizeType{128}}) {
+        const FFASearchConfig cfg(SizeType{1} << 14U, kTsamp, nbins, 1.0,
+                                  limits, 0.2, 1.5, /*use_fourier=*/true);
+        const FFAPlan<ComplexType> plan(cfg);
+        INFO("nbins " << nbins);
+        REQUIRE(plan.get_gflops(false) ==
+                Approx(expected_gflops(plan, cfg, false)).epsilon(1e-4));
+        REQUIRE(plan.get_gflops(true) ==
+                Approx(expected_gflops(plan, cfg, true)).epsilon(1e-4));
     }
 }

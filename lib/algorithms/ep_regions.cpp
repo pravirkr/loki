@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <format>
+#include <limits>
 #include <map>
 #include <optional>
 #include <span>
@@ -42,6 +43,16 @@
 namespace loki::algorithms {
 
 namespace {
+
+/// The sweep peak as a float that is never below it (EPRegionStats keeps a
+/// float; a chunk's double memory must not exceed it by a rounding).
+[[nodiscard]] float peak_gb_float(double gb) noexcept {
+    auto f = static_cast<float>(gb);
+    if (static_cast<double>(f) < gb) {
+        f = std::nextafter(f, std::numeric_limits<float>::max());
+    }
+    return f;
+}
 
 constexpr std::string_view kCacheVersion = "1.18.0";
 
@@ -787,7 +798,7 @@ public:
         }
         m_stats = EPRegionStats(
             max_sugg_all, max_ncoords_all, max_branch_max_all,
-            static_cast<float>(peak_memory_gb), max_buffer_size_all,
+            peak_gb_float(peak_memory_gb), max_buffer_size_all,
             max_coord_size_all, max_fold_size_all, std::move(chunk_stats));
         m_stats.set_memory_limit_gb(m_memory_limit_gb);
         spdlog::info("EPRegionPlanner: loaded {} chunks from plan cache '{}'",
@@ -877,7 +888,7 @@ private:
                       ->branch_max;
         m_stats = EPRegionStats(
             plan.max_sugg, plan.max_ncoords, max_branch_max_all,
-            static_cast<float>(plan.peak_memory_gb), plan.buffer_size,
+            peak_gb_float(plan.peak_memory_gb), plan.buffer_size,
             plan.coord_size, plan.fold_size, std::move(plan.chunk_stats));
         m_stats.set_memory_limit_gb(m_memory_limit_gb);
 
@@ -974,7 +985,7 @@ private:
                                                 double memory_limit_gb) const {
         const double bytes = std::min(kDtsRefitMemoryFraction * memory_limit_gb,
                                       kDtsRefitMemoryMaxGB) *
-                             detail::kBytesPerGiB;
+                             utils::kBytesPerGB;
         const auto floor_pow2 = [](double x, SizeType lo, SizeType hi) {
             const auto v = static_cast<SizeType>(std::max(x, 1.0));
             return std::clamp(std::bit_floor(v), lo, hi);
@@ -1003,7 +1014,7 @@ private:
                                           double memory_limit_gb) const {
         const auto gb = [](const auto& engine) {
             return static_cast<double>(engine->run_memory_bytes()) /
-                   detail::kBytesPerGiB;
+                   utils::kBytesPerGB;
         };
         // The pools of the search are freed before the EP search, so they are
         // checked against the limit on their own. Returns the first rung that

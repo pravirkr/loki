@@ -4,6 +4,7 @@
 #include "loki/common/types.hpp"
 
 #include "lib/detail/error_check.hpp"
+#include "lib/detail/utils.hpp"
 #include "lib/utils/workspace_impl.hpp"
 
 namespace loki::memory {
@@ -51,16 +52,29 @@ void FFAWorkspaceCPU<FoldType>::validate_buffer(SizeType buffer_size) const {
 }
 
 template <SupportedFoldType FoldType>
+void FFAWorkspaceCPU<FoldType>::ensure_phase_steps(SizeType bytes) {
+    if (phase_steps.size() < bytes) {
+        phase_steps.resize(bytes);
+    }
+}
+
+template <SupportedFoldType FoldType>
 void FFAWorkspaceCPU<FoldType>::validate_coords(
     const plans::FFAPlan<FoldType>& ffa_plan) const {
+    validate_coords(ffa_plan, ffa_plan.get_coord_size());
+}
+
+template <SupportedFoldType FoldType>
+void FFAWorkspaceCPU<FoldType>::validate_coords(
+    const plans::FFAPlan<FoldType>& ffa_plan, SizeType coord_size) const {
     const bool is_freq_only = ffa_plan.get_n_params() == 1;
     if (is_freq_only) {
         error_check::check_greater_equal(
-            coords_freq.size(), ffa_plan.get_coord_size(),
+            coords_freq.size(), coord_size,
             "FFAWorkspaceCPU: coordinates not allocated for enough levels");
     } else {
         error_check::check_greater_equal(
-            coords.size(), ffa_plan.get_coord_size(),
+            coords.size(), coord_size,
             "FFAWorkspaceCPU: coordinates not allocated for enough levels");
     }
 }
@@ -79,7 +93,8 @@ BranchingWorkspace::BranchingWorkspace(SizeType batch_size,
                               (scratch_dparams.size() * sizeof(double)) +
                               (scratch_counts.size() * sizeof(SizeType)) +
                               (scratch_shifts.size() * sizeof(double));
-    return static_cast<float>(total_memory) / static_cast<float>(1ULL << 30U);
+    return static_cast<float>(total_memory) /
+           static_cast<float>(utils::kBytesPerGB);
 }
 
 void BranchingWorkspace::validate(SizeType batch_size,
@@ -133,7 +148,8 @@ float PruneWorkspace<FoldType>::get_memory_usage_gib() const noexcept {
                               (branched_param_idx.size() * sizeof(SizeType)) +
                               (branched_phase_shift.size() * sizeof(float)) +
                               (branched_parent_scores.size() * sizeof(float));
-    return static_cast<float>(total_memory) / static_cast<float>(1ULL << 30U);
+    return static_cast<float>(total_memory) /
+           static_cast<float>(utils::kBytesPerGB);
 }
 
 template <SupportedFoldType FoldType>
@@ -187,7 +203,7 @@ float EPWorkspaceCPU<FoldType>::get_seed_memory_usage_gib() const noexcept {
     const auto bytes = (seed_leaves.size() * sizeof(double)) +
                        (seed_scores.size() * sizeof(float)) +
                        (seed_keep_indices.size() * sizeof(SizeType));
-    return static_cast<float>(bytes) / static_cast<float>(1ULL << 30U);
+    return static_cast<float>(bytes) / static_cast<float>(utils::kBytesPerGB);
 }
 
 template <SupportedFoldType FoldType>

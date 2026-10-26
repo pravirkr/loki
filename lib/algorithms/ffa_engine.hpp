@@ -5,6 +5,7 @@
  * @brief Backend engine interface for FFA. Internal.
  */
 
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
@@ -25,6 +26,13 @@
 namespace loki::algorithms::detail {
 
 // make_*_cpu is defined in lib/cpu/, make_*_gpu in lib/cuda/ (GPU builds only).
+
+/**
+ * @brief Receives the hits of a scored FFA execution, in score-index order,
+ * one batch of final-level coordinates at a time
+ * (`cpu_hit_batch_coords`). The span is valid only during the call.
+ */
+using HitSink = std::function<void(std::span<const detection::SnrHit>)>;
 
 template <SupportedFoldType FoldType> class FFAEngine {
 protected:
@@ -51,15 +59,20 @@ public:
                                 std::vector<detection::SnrHit>& /*hits*/) {
         throw std::logic_error("execute_scored not implemented on this engine");
     }
-    /// As above, with a caller-owned fold buffer (at least buffer_size) for
-    /// paths that need one, so repeated calls do not allocate it.
-    virtual void execute_scored(std::span<const float> ts_e,
-                                std::span<const float> ts_v,
-                                float threshold,
-                                std::span<const SizeType> widths,
-                                std::vector<detection::SnrHit>& hits,
+    /**
+     * @brief As above, handing the hits to @p sink batch by batch instead of
+     * collecting them, so they never take more than a batch of memory
+     * (`cpu_hit_buffer_bytes`). @p scratch is the caller's second ping-pong
+     * buffer, at least `cpu_scored_buffer_size` elements; this overload
+     * allocates no fold-sized memory (the CPU sweep).
+     */
+    virtual void execute_scored(std::span<const float> /*ts_e*/,
+                                std::span<const float> /*ts_v*/,
+                                float /*threshold*/,
+                                std::span<const SizeType> /*widths*/,
+                                const HitSink& /*sink*/,
                                 std::span<FoldType> /*scratch*/) {
-        execute_scored(ts_e, ts_v, threshold, widths, hits);
+        throw std::logic_error("execute_scored not implemented on this engine");
     }
 
     virtual void execute(std::span<const float> ts_e,

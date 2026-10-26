@@ -31,14 +31,21 @@ namespace loki::algorithms {
 
 namespace {
 
+/// Brute-fold table bytes of a CPU chunk. Fourier plans above
+/// nbins_min_lossy_bf fold in the time domain and transform (the lossy
+/// path of FFACpuEngine::initialize_brute_fold), so they build the
+/// time-domain table.
 SizeType estimate_brutefold_table_bytes(bool use_fourier,
                                         SizeType nfreqs,
                                         SizeType segment_len,
-                                        SizeType nbins) noexcept {
+                                        SizeType nbins,
+                                        SizeType nbins_min_lossy_bf,
+                                        double tsamp,
+                                        double f_max) noexcept {
     if (nfreqs == 0 || segment_len == 0) {
         return 0;
     }
-    if (use_fourier) {
+    if (use_fourier && nbins <= nbins_min_lossy_bf) {
         // Direct Fourier fold (brute_fold_ts_complex): per frequency a table
         // of min(segment_len, 64) rows of nbins/2 + 1 (re, im) pairs padded
         // to 16 floats, and for longer segments the sub-block phasors.
@@ -50,10 +57,21 @@ SizeType estimate_brutefold_table_bytes(bool use_fourier,
         const SizeType g_floats   = nsub > 1 ? nsub * 2 * nbins_f : 0;
         return sizeof(float) * nfreqs * ((sub * row_floats) + g_floats);
     }
-    // Upper bound on the phase-run table: one (end, bin) pair per sample,
-    // plus the per-frequency offsets. A period-capped segment stores far
-    // fewer runs (about nbins per frequency).
-    return (sizeof(std::uint32_t) * 2ULL * nfreqs * segment_len) +
+    // Phase-run table: one (end, bin) pair per run of samples in one phase
+    // bin. The phase of a segment advances segment_len * tsamp * f_max
+    // turns, so it crosses at most that many times nbins bin edges: a
+    // frequency has that many runs plus a few, and never more than one per
+    // sample. While the table is built, the per-frequency run lists (each at
+    // most twice its runs) and the table are live together: three times the
+    // runs. Plus the per-frequency offsets.
+    constexpr SizeType kBuildCopies = 3;
+    constexpr double kSlack         = 4.0;
+    const double edges  = std::ceil(static_cast<double>(segment_len) * tsamp *
+                                    f_max * static_cast<double>(nbins));
+    const SizeType runs = edges + kSlack >= static_cast<double>(segment_len)
+                              ? segment_len
+                              : static_cast<SizeType>(edges + kSlack);
+    return (kBuildCopies * sizeof(std::uint32_t) * 2ULL * nfreqs * runs) +
            (sizeof(SizeType) * (nfreqs + 1ULL));
 }
 
@@ -72,8 +90,10 @@ struct ChunkEval {
     SizeType ffa_levels;
     SizeType scores_scratch; // ncoords * n_widths for THIS chunk's nbins
     SizeType brutefold_bytes;
-    SizeType segment_len0; // brute-fold segment length
-    SizeType nfreqs0;      // brute-fold frequencies
+    SizeType scratch_bytes; // CPU: per-thread scratch and hits
+    SizeType step_bytes;    // CPU: phase-step table (Fourier)
+    SizeType segment_len0;  // brute-fold segment length
+    SizeType nfreqs0;       // brute-fold frequencies
     bool gpu_fused_score;
     double chunk_only_memory_gb; // For logging/stats.
     double allocated_memory_gb;  // With accumulated maxima
@@ -90,6 +110,8 @@ struct PlanMaxima {
     SizeType ffa_levels{};
     SizeType scores_scratch{};
     SizeType brutefold_bytes{};
+    SizeType scratch_bytes{};
+    SizeType step_bytes{};
 
     void absorb(const PlanMaxima& other) noexcept {
         buffer_size     = std::max(buffer_size, other.buffer_size);
@@ -98,6 +120,8 @@ struct PlanMaxima {
         ffa_levels      = std::max(ffa_levels, other.ffa_levels);
         scores_scratch  = std::max(scores_scratch, other.scores_scratch);
         brutefold_bytes = std::max(brutefold_bytes, other.brutefold_bytes);
+        scratch_bytes   = std::max(scratch_bytes, other.scratch_bytes);
+        step_bytes      = std::max(step_bytes, other.step_bytes);
     }
 };
 
@@ -109,6 +133,8 @@ PlanMaxima to_maxima(const ChunkEval& eval) noexcept {
         .ffa_levels      = eval.ffa_levels,
         .scores_scratch  = eval.scores_scratch,
         .brutefold_bytes = eval.brutefold_bytes,
+        .scratch_bytes   = eval.scratch_bytes,
+        .step_bytes      = eval.step_bytes,
     };
 }
 
@@ -246,7 +272,8 @@ FFARegionStats::FFARegionStats(SizeType max_buffer_size,
                                SizeType max_passing_candidates,
                                bool use_fourier,
                                bool use_gpu,
-                               SizeType max_brutefold_bytes)
+                               SizeType max_brutefold_bytes,
+                               SizeType max_scratch_bytes)
     : m_max_buffer_size(max_buffer_size),
       m_max_coord_size(max_coord_size),
       m_max_ncoords(max_ncoords),
@@ -257,7 +284,8 @@ FFARegionStats::FFARegionStats(SizeType max_buffer_size,
       m_max_passing_candidates(max_passing_candidates),
       m_use_fourier(use_fourier),
       m_use_gpu(use_gpu),
-      m_max_brutefold_bytes(max_brutefold_bytes) {}
+      m_max_brutefold_bytes(max_brutefold_bytes),
+      m_max_scratch_bytes(max_scratch_bytes) {}
 
 SizeType FFARegionStats::get_max_buffer_size_time() const noexcept {
     return m_use_fourier ? 2 * m_max_buffer_size : m_max_buffer_size;
@@ -274,7 +302,7 @@ SizeType FFARegionStats::get_write_param_sets_size() const noexcept {
 float FFARegionStats::get_buffer_memory_usage() const noexcept {
     const auto fold_bytes = m_use_fourier ? sizeof(ComplexType) : sizeof(float);
     return static_cast<float>(2 * m_max_buffer_size * fold_bytes) /
-           static_cast<float>(1ULL << 30U);
+           static_cast<float>(utils::kBytesPerGB);
 }
 float FFARegionStats::get_coord_memory_usage() const noexcept {
     SizeType coord_size;
@@ -283,7 +311,8 @@ float FFARegionStats::get_coord_memory_usage() const noexcept {
     } else {
         coord_size = m_max_coord_size * sizeof(coord::FFACoord);
     }
-    return static_cast<float>(coord_size) / static_cast<float>(1ULL << 30U);
+    return static_cast<float>(coord_size) /
+           static_cast<float>(utils::kBytesPerGB);
 }
 float FFARegionStats::get_extra_memory_usage() const noexcept {
     // Per-chunk raw score scratch, plus the fixed-capacity candidate
@@ -293,7 +322,7 @@ float FFARegionStats::get_extra_memory_usage() const noexcept {
     return static_cast<float>((get_write_param_sets_size() * sizeof(double)) +
                               (get_max_scores_scratch_size() * sizeof(float)) +
                               (get_max_candidates() * kBytesPerCandidate)) /
-           static_cast<float>(1ULL << 30U);
+           static_cast<float>(utils::kBytesPerGB);
 }
 float FFARegionStats::get_device_extra_memory_usage() const noexcept {
     // ts_e_d + ts_v_d + two slots of per-chunk scores and passing indices
@@ -303,22 +332,26 @@ float FFARegionStats::get_device_extra_memory_usage() const noexcept {
     return static_cast<float>((2 * m_n_samps * sizeof(float)) +
                               (kSlots * get_max_scores_scratch_size() *
                                (sizeof(float) + sizeof(uint32_t)))) /
-           static_cast<float>(1ULL << 30U);
+           static_cast<float>(utils::kBytesPerGB);
 }
 float FFARegionStats::get_brutefold_memory_usage() const noexcept {
     return static_cast<float>(m_max_brutefold_bytes) /
-           static_cast<float>(1ULL << 30U);
+           static_cast<float>(utils::kBytesPerGB);
+}
+float FFARegionStats::get_scratch_memory_usage() const noexcept {
+    return static_cast<float>(static_cast<double>(m_max_scratch_bytes) /
+                              utils::kBytesPerGB);
 }
 float FFARegionStats::get_input_memory_usage() const noexcept {
     // Resident input timeseries: ts_e and ts_v (float32).
     constexpr float kBytesPerSample = 2.0F * sizeof(float);
     return static_cast<float>(m_n_samps) * kBytesPerSample /
-           static_cast<float>(1ULL << 30U);
+           static_cast<float>(utils::kBytesPerGB);
 }
 float FFARegionStats::get_cpu_memory_usage() const noexcept {
     return get_buffer_memory_usage() + get_coord_memory_usage() +
            get_extra_memory_usage() + get_brutefold_memory_usage() +
-           get_input_memory_usage();
+           get_scratch_memory_usage() + get_input_memory_usage();
 }
 // Use this for GPU memory usage calculation
 float FFARegionStats::get_device_memory_usage() const noexcept {
@@ -361,7 +394,7 @@ private:
 
     std::vector<search::FFASearchConfig> m_cfgs;
     FFARegionStats m_stats{
-        0, 0, 0, 0, 0, 0, 0, 0, m_base_cfg.get_use_fourier(), m_use_gpu, 0};
+        0, 0, 0, 0, 0, 0, 0, 0, m_base_cfg.get_use_fourier(), m_use_gpu, 0, 0};
     std::vector<coord::FFAChunkStats> m_chunk_stats;
     double m_modelled_cost_s{}; // CPU cost model, summed over chunks
 
@@ -459,10 +492,11 @@ private:
                               m_base_cfg.get_max_passing_candidates(),
                               m_base_cfg.get_use_fourier(),
                               m_use_gpu,
-                              m.brutefold_bytes};
+                              m.brutefold_bytes,
+                              m.scratch_bytes + m.step_bytes};
     }
 
-    // Memory (GiB) the modelled sweep buffers may use.
+    // Memory (GB) the modelled sweep buffers may use.
     double effective_limit_gb() const {
         // For GPU, this is the device memory limit. For CPU, this is the
         // process memory limit.
@@ -473,8 +507,7 @@ private:
         if (!m_use_gpu) {
             const double input_gb =
                 static_cast<double>(m_base_cfg.get_nsamps()) * 2.0 *
-                static_cast<double>(sizeof(float)) /
-                static_cast<double>(1ULL << 30U);
+                static_cast<double>(sizeof(float)) / utils::kBytesPerGB;
             effective_limit_gb -= input_gb;
         }
         if (effective_limit_gb <= 0.0) {
@@ -531,7 +564,7 @@ private:
         const SizeType buf   = m_use_gpu ? detail::gpu_sweep_buffer_size(plan)
                                          : detail::cpu_scored_buffer_size(plan);
         const SizeType coord = m_use_gpu ? detail::gpu_sweep_coord_size(plan)
-                                         : plan.get_coord_size();
+                                         : detail::cpu_scored_coord_size(plan);
         const SizeType nc    = plan.get_ncoords().back();
         const SizeType lv    = plan.get_n_levels();
         // Width count follows nbins, which is fixed within a region but
@@ -546,11 +579,19 @@ private:
         const SizeType seg0    = plan.get_segment_lens().front();
         const SizeType nfreqs0 = plan.get_param_counts().front().back();
         const SizeType bf_bytes =
+            m_use_gpu ? estimate_gpu_brutefold_bytes(nfreqs0, seg0)
+                      : estimate_brutefold_table_bytes(
+                            m_base_cfg.get_use_fourier(), nfreqs0, seg0,
+                            cfg.get_nbins(), cfg.get_nbins_min_lossy_bf(),
+                            cfg.get_tsamp(), cfg.get_param_limits().back().max);
+        // CPU kernels' per-thread scratch and one batch of hits (per chunk),
+        // and the phase-step table (allocated once, at the largest chunk's).
+        const SizeType scratch_bytes =
             m_use_gpu
-                ? estimate_gpu_brutefold_bytes(nfreqs0, seg0)
-                : estimate_brutefold_table_bytes(m_base_cfg.get_use_fourier(),
-                                                 nfreqs0, seg0,
-                                                 cfg.get_nbins());
+                ? 0
+                : detail::cpu_scored_scratch_bytes(plan, cfg.get_nthreads());
+        const SizeType step_bytes =
+            m_use_gpu ? 0 : detail::cpu_phase_step_table_bytes(plan);
 
         const PlanMaxima chunk_only{
             .buffer_size     = buf,
@@ -559,6 +600,8 @@ private:
             .ffa_levels      = lv,
             .scores_scratch  = scratch,
             .brutefold_bytes = bf_bytes,
+            .scratch_bytes   = scratch_bytes,
+            .step_bytes      = step_bytes,
         };
         const double chunk_only_gb =
             stats_for(chunk_only).get_freq_sweep_memory_usage();
@@ -583,6 +626,8 @@ private:
             .ffa_levels           = lv,
             .scores_scratch       = scratch,
             .brutefold_bytes      = bf_bytes,
+            .scratch_bytes        = scratch_bytes,
+            .step_bytes           = step_bytes,
             .segment_len0         = seg0,
             .nfreqs0              = nfreqs0,
             .gpu_fused_score      = detail::gpu_fused_score_applies(plan),
@@ -653,14 +698,17 @@ private:
     // Each chunk alone must fit the limit, but the workspace is sized by the
     // maximum of each buffer over all chunks, which different chunks may set.
     // If that sum overshoots, the per-chunk limit is lowered by the overshoot
-    // and the regions are partitioned again. The result never depends on the
-    // order in which chunks are accepted.
+    // and the regions are partitioned again. A cut too small to move a chunk
+    // edge on the frequency grid leaves the plan unchanged, so each further
+    // cut is at least twice the previous one. The result never depends on
+    // the order in which chunks are accepted.
     PlanMaxima
     partition_regions_by_cost(const std::vector<coord::FFARegion>& regions,
                               double max_drift) {
-        constexpr SizeType kMaxLimitAttempts = 8;
+        constexpr SizeType kMaxLimitAttempts = 16;
         const double limit_gb                = effective_limit_gb();
         double chunk_limit_gb                = limit_gb;
+        double cut_gb                        = 0.0;
         for (SizeType attempt = 0; attempt < kMaxLimitAttempts; ++attempt) {
             m_cfgs.clear();
             m_chunk_stats.clear();
@@ -679,7 +727,8 @@ private:
             spdlog::debug("FFARegionPlanner: workspace {:.3f} GB exceeds "
                           "{:.3f} GB; lowering the per-chunk limit",
                           allocated_gb, limit_gb);
-            chunk_limit_gb -= allocated_gb - limit_gb;
+            cut_gb = std::max(allocated_gb - limit_gb, 2.0 * cut_gb);
+            chunk_limit_gb -= cut_gb;
         }
         throw std::runtime_error(std::format(
             "FFARegionPlanner: could not fit the sweep workspace in {:.2f} GB "
@@ -1017,7 +1066,7 @@ private:
             spdlog::info("  Modelled run time (1 thread): {:.1f} s",
                          m_modelled_cost_s);
         }
-        spdlog::info("  Freq Sweep allocated: {:.2f} GB (limit: {:.2f} GB)",
+        spdlog::info("  Freq Sweep peak memory: {:.2f} GB (limit: {:.2f} GB)",
                      m_stats.get_freq_sweep_memory_usage(),
                      m_base_cfg.get_max_process_memory_gb());
     }

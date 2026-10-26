@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <format>
@@ -20,6 +21,7 @@
 #include "loki/search/configs.hpp"
 
 #include "lib/algorithms/ffa_engine.hpp"
+#include "lib/algorithms/planner_memory.hpp"
 #include "lib/detail/error_check.hpp"
 #include "lib/detail/nvtx.hpp"
 #include "lib/detail/timing.hpp"
@@ -55,11 +57,18 @@ public:
         m_width_batch.resize(algorithms::kFFAFreqSweepWriteBatchSize);
         m_nbins_batch.resize(algorithms::kFFAFreqSweepWriteBatchSize);
         // Chunks score in scratch (see execute_ffa_region), so there is no
-        // dense score array. The second ping-pong buffer of the merges is
-        // not needed by frequency-only time-domain cone bands.
-        if (m_base_cfg.get_use_fourier() || m_base_cfg.get_nparams() > 1) {
-            m_fold_time.resize(planner_stats.get_max_buffer_size_time());
+        // dense score array. The second ping-pong buffer of the merges and
+        // the phase-step table are allocated once here, as the planner
+        // counts them; pages a sweep never uses (e.g. the second buffer of
+        // frequency-only time-domain cone bands) are never touched.
+        m_fold_time.resize(planner_stats.get_max_buffer_size_time());
+        SizeType step_bytes = 0;
+        for (const auto& chunk_cfg : m_region_planner.get_cfgs()) {
+            step_bytes = std::max(
+                step_bytes, algorithms::detail::cpu_phase_step_table_bytes(
+                                plans::FFAPlan<FoldType>(chunk_cfg)));
         }
+        m_ffa_workspace.ensure_phase_steps(step_bytes);
 
         if (m_base_cfg.get_use_boxcar_kadane()) {
             throw std::invalid_argument(
@@ -67,13 +76,23 @@ public:
                 "(multi-width boxcar decoding is required)");
         }
 
-        // Log the actual memory usage for the allocated buffers
-        spdlog::info("FFAFreqSweep allocated {:.2f} GB ({:.2f} GB buffers "
-                     "+ {:.2f} GB coords + {:.2f} GB extra)",
-                     planner_stats.get_freq_sweep_memory_usage(),
-                     planner_stats.get_buffer_memory_usage(),
+        // The planner's peak for the sweep. Fold buffers are the two
+        // ping-pong buffers of the largest chunk. Scratch is the per-thread
+        // kernel scratch, one batch of hits and the phase-step table.
+        // "Other" is the input timeseries and the brute-fold tables.
+        const float total_gb = planner_stats.get_freq_sweep_memory_usage();
+        const float other_gb = total_gb -
+                               planner_stats.get_buffer_memory_usage() -
+                               planner_stats.get_coord_memory_usage() -
+                               planner_stats.get_extra_memory_usage() -
+                               planner_stats.get_scratch_memory_usage();
+        spdlog::info("FFAFreqSweep peak memory {:.2f} GB ({:.2f} GB fold "
+                     "buffers + {:.2f} GB coords + {:.2f} GB extra + {:.2f} "
+                     "GB scratch + {:.2f} GB other)",
+                     total_gb, planner_stats.get_buffer_memory_usage(),
                      planner_stats.get_coord_memory_usage(),
-                     planner_stats.get_extra_memory_usage());
+                     planner_stats.get_extra_memory_usage(),
+                     planner_stats.get_scratch_memory_usage(), other_gb);
         spdlog::info("FFAFreqSweep will process {} chunks, keeping up to {} "
                      "candidates in RAM before flushing to disk",
                      m_region_planner.get_nregions(), m_cands.get_capacity());
@@ -90,6 +109,8 @@ public:
                  const std::filesystem::path& outdir,
                  std::string_view file_prefix,
                  std::string_view config_toml) override {
+        timing::SimpleTimer sweep_timer;
+        sweep_timer.start();
         timing::SimpleTimer timer;
         // Reset accumulated state so repeated execute() calls are independent
         m_ffa_stats = search::FFAStatsCollection();
@@ -132,11 +153,14 @@ public:
         ffa_timer_stats_pipeline["io"] += timer.stop();
         m_ffa_stats.update_stats(ffa_timer_stats_pipeline,
                                  static_cast<float>(accumulated_flops));
-        writer.write_ffa_stats(m_ffa_stats);
+        const float total_runtime = sweep_timer.stop();
+        writer.write_ffa_stats(m_ffa_stats, total_runtime);
         writer.finalize();
         spdlog::info("FFA Freq Sweep complete: {} candidates above S/N {:.2f}",
                      m_total_passing_scores, m_base_cfg.get_snr_min());
-        spdlog::info("FFA Freq Sweep: timer: {}",
+        // The stage timers do not cover every wait (GPU kernels overlap the
+        // host), so the wall-clock is logged next to them.
+        spdlog::info("FFA Freq Sweep: wall {:.1f} s; timer: {}", total_runtime,
                      m_ffa_stats.get_concise_timer_summary());
     }
 
@@ -184,19 +208,42 @@ private:
         // Every chunk scores in scratch: the final level is merged, (for
         // Fourier) inverted and scored tile by tile, so neither the final fold
         // nor a dense score array is stored. m_fold_time is the second
-        // ping-pong buffer of the merges (unused by frequency-only time-domain
-        // cone bands).
-        std::vector<detection::SnrHit> hits;
+        // ping-pong buffer of the merges. The hits come batch by batch and go
+        // straight to the candidate buffer, which is flushed to disk when
+        // full, so at most one batch of hits is held.
+        SizeType n_passing   = 0;
+        float push_s         = 0.0F;
+        float io_s           = 0.0F;
+        const auto push_hits = [&](std::span<const detection::SnrHit> batch) {
+            timing::SimpleTimer push_timer;
+            push_timer.start();
+            for (const auto& hit : batch) {
+                if (m_cands.is_full()) {
+                    push_s += push_timer.stop();
+                    push_timer.start();
+                    search::flush_candidates(m_cands, m_region_decode, writer,
+                                             m_write_param_sets_batch,
+                                             m_width_batch, m_nbins_batch,
+                                             m_base_cfg.get_nparams());
+                    io_s += push_timer.stop();
+                    push_timer.start();
+                }
+                m_cands.push(hit.snr, hit.score_index,
+                             static_cast<uint32_t>(region_id));
+            }
+            n_passing += batch.size();
+            push_s += push_timer.stop();
+        };
         the_ffa.execute_scored(
-            ts_e, ts_v, snr_min, dec.widths, hits,
+            ts_e, ts_v, snr_min, dec.widths, push_hits,
             std::span<FoldType>(reinterpret_cast<FoldType*>(m_fold_time.data()),
                                 (m_fold_time.size() * sizeof(float)) /
                                     sizeof(FoldType)));
         const auto brutefold_time = the_ffa.get_brute_fold_timing();
         const auto score_in_band  = the_ffa.get_last_score_timing();
         const auto wall           = timer.stop();
-        const auto ffa_time =
-            std::max(0.0F, wall - brutefold_time - score_in_band);
+        const auto ffa_time = std::max(0.0F, wall - brutefold_time -
+                                                 score_in_band - push_s - io_s);
         ffa_timer_stats["brutefold"] += brutefold_time;
         ffa_timer_stats["ffa"] += ffa_time;
         spdlog::info("FFA Chunk detail: nbins={} bseg_brute={} levels={} "
@@ -207,24 +254,9 @@ private:
                      ffa_plan.get_ncoords().front(),
                      ffa_plan.get_ncoords().back(), brutefold_time,
                      the_ffa.get_brute_fold_init_timing(), ffa_time);
-        timer.start();
-        SizeType n_passing = 0;
-        for (const auto& hit : hits) {
-            if (m_cands.is_full()) {
-                ffa_timer_stats["score"] += timer.stop();
-                timer.start();
-                search::flush_candidates(
-                    m_cands, m_region_decode, writer, m_write_param_sets_batch,
-                    m_width_batch, m_nbins_batch, m_base_cfg.get_nparams());
-                ffa_timer_stats["io"] += timer.stop();
-                timer.start();
-            }
-            m_cands.push(hit.snr, hit.score_index,
-                         static_cast<uint32_t>(region_id));
-            ++n_passing;
-        }
         m_total_passing_scores += n_passing;
-        ffa_timer_stats["score"] += timer.stop() + score_in_band;
+        ffa_timer_stats["score"] += push_s + score_in_band;
+        ffa_timer_stats["io"] += io_s;
     }
 
 }; // End FFAFreqSweepCpuEngine definition
