@@ -90,7 +90,7 @@ public:
     [[nodiscard]] float get_score_max(cudaStream_t stream) const noexcept;
     /// @brief Get minimum score in current region
     [[nodiscard]] float get_score_min(cudaStream_t stream) const noexcept;
-    /// @brief Estimate GPU memory usage in GiB, includes both base storage and
+    /// @brief Estimate GPU memory usage in GB, includes both base storage and
     /// estimated peak temporary allocations.
     [[nodiscard]] SizeType get_memory_usage_bytes() const noexcept;
     [[nodiscard]] float get_memory_usage_gib() const noexcept;

@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <format>
+#include <limits>
 #include <map>
 #include <optional>
 #include <stdexcept>
@@ -39,6 +40,16 @@
 namespace loki::algorithms {
 
 namespace {
+
+/// The sweep peak as a float that is never below it (EPRegionStats keeps a
+/// float; a chunk's double memory must not exceed it by a rounding).
+[[nodiscard]] float peak_gb_float(double gb) noexcept {
+    auto f = static_cast<float>(gb);
+    if (static_cast<double>(f) < gb) {
+        f = std::nextafter(f, std::numeric_limits<float>::max());
+    }
+    return f;
+}
 
 // 1.2.0: per-chunk branch_max, per-group memory model.
 // 1.3.0: inputs, harvest store and worker count in the memory model; stores
@@ -699,7 +710,7 @@ public:
         }
         m_stats = EPRegionStats(
             max_sugg_all, max_ncoords_all, max_branch_max_all,
-            static_cast<float>(peak_memory_gb), max_buffer_size_all,
+            peak_gb_float(peak_memory_gb), max_buffer_size_all,
             max_coord_size_all, max_fold_size_all, std::move(chunk_stats));
         m_stats.set_memory_limit_gb(m_memory_limit_gb);
         spdlog::info("EPRegionPlanner: loaded {} chunks from plan cache '{}'",
@@ -786,7 +797,7 @@ private:
                       ->branch_max;
         m_stats = EPRegionStats(
             plan.max_sugg, plan.max_ncoords, max_branch_max_all,
-            static_cast<float>(plan.peak_memory_gb), plan.buffer_size,
+            peak_gb_float(plan.peak_memory_gb), plan.buffer_size,
             plan.coord_size, plan.fold_size, std::move(plan.chunk_stats));
         m_stats.set_memory_limit_gb(m_memory_limit_gb);
 
@@ -887,7 +898,7 @@ private:
         {
             const auto dyn = make_threshold_engine(bp_float, nbins, kDtsSeed);
             const double sim_gb = static_cast<double>(dyn->run_memory_bytes()) /
-                                  detail::kBytesPerGiB;
+                                  utils::kBytesPerGB;
             if (sim_gb > memory_limit_gb) {
                 throw std::runtime_error(std::format(
                     "EPRegionPlanner: the threshold simulation for nbins={} "

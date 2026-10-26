@@ -67,7 +67,8 @@ public:
                    SizeType max_passing_candidates,
                    bool use_fourier,
                    bool use_gpu,
-                   SizeType max_brutefold_bytes = 0);
+                   SizeType max_brutefold_bytes = 0,
+                   SizeType max_scratch_bytes   = 0);
 
     ~FFARegionStats()                                    = default;
     FFARegionStats(FFARegionStats&&) noexcept            = default;
@@ -104,6 +105,9 @@ public:
     float get_extra_memory_usage() const noexcept;
     /// @brief Peak BruteFold lookup-table bytes (shared across chunks).
     float get_brutefold_memory_usage() const noexcept;
+    /// @brief CPU kernel scratch (in GB): every thread's scratch, one batch
+    /// of hits and the phase-step table of Fourier merges. 0 on the GPU.
+    float get_scratch_memory_usage() const noexcept;
     /// @brief Resident input timeseries (ts_e + ts_v) in GB.
     float get_input_memory_usage() const noexcept;
     /// @brief Get the device memory usage of the timeseries and per-chunk
@@ -127,6 +131,7 @@ private:
     bool m_use_fourier;
     bool m_use_gpu;
     SizeType m_max_brutefold_bytes{};
+    SizeType m_max_scratch_bytes{};
 };
 
 /**

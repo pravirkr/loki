@@ -26,6 +26,7 @@
 #include "lib/core/taylor_ffa.hpp"
 #include "lib/detail/error_check.hpp"
 #include "lib/detail/psr_utils.hpp"
+#include "lib/detail/utils.hpp"
 
 namespace loki::plans {
 
@@ -68,7 +69,7 @@ struct FFAPlanBase::Impl {
                                     : sizeof(coord::FFACoord);
         const double bytes    = static_cast<double>(get_coord_size()) *
                                 static_cast<double>(elem_bytes);
-        return static_cast<float>(bytes / static_cast<double>(1ULL << 30U));
+        return static_cast<float>(bytes / utils::kBytesPerGB);
     }
 
     void resolve_coordinates(std::span<coord::FFACoord> coords) {
@@ -502,7 +503,8 @@ SizeType FFAPlan<FoldType>::get_buffer_size_time() const noexcept {
 template <SupportedFoldType FoldType>
 float FFAPlan<FoldType>::get_buffer_memory_usage() const noexcept {
     const auto total_memory = 2 * get_buffer_size() * sizeof(FoldType);
-    return static_cast<float>(total_memory) / static_cast<float>(1ULL << 30U);
+    return static_cast<float>(total_memory) /
+           static_cast<float>(utils::kBytesPerGB);
 }
 template <SupportedFoldType FoldType>
 float FFAPlan<FoldType>::get_gflops(bool return_in_time) const noexcept {

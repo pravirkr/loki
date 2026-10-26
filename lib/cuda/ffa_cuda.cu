@@ -36,6 +36,7 @@
 #include "lib/detail/error_check.hpp"
 #include "lib/detail/nvtx.hpp"
 #include "lib/detail/timing.hpp"
+#include "lib/detail/utils.hpp"
 
 namespace loki::algorithms {
 
@@ -561,7 +562,7 @@ private:
         const auto memory_buffer_gb =
             static_cast<float>(2 * required_buffer_size() *
                                sizeof(FoldTypeCUDA)) /
-            static_cast<float>(1ULL << 30U);
+            static_cast<float>(utils::kBytesPerGB);
         const auto memory_coord_gb =
             m_ffa_plan.get_coord_size() == 0
                 ? 0.0F

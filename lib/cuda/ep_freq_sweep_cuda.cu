@@ -181,7 +181,7 @@ public:
             static_cast<double>(peak_group_bytes + peak_transient +
                                 stats.get_max_buffer_size() *
                                     sizeof(DeviceFoldT)) /
-            algorithms::detail::kBytesPerGiB;
+            utils::kBytesPerGB;
 
         spdlog::info("EPFreqSweep (CUDA {}): allocated the shared buffers "
                      "(buffer_size={}, coord_size={}, {} levels)",
@@ -407,7 +407,7 @@ private:
     thrust::device_vector<float> m_ts_e_d;
     thrust::device_vector<float> m_ts_v_d;
     /// Device memory the sweep still takes on top of the shared buffers: the
-    /// largest group's workspace and the transient FFA scratch (GiB).
+    /// largest group's workspace and the transient FFA scratch (GB).
     double m_extra_peak_gb{0.0};
 
     // Runtime checks of the plan against the memory model (docs/memory.md).

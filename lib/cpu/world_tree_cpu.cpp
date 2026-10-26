@@ -16,6 +16,7 @@
 #include "loki/common/types.hpp"
 
 #include "lib/detail/error_check.hpp"
+#include "lib/detail/utils.hpp"
 
 namespace loki::memory {
 
@@ -127,7 +128,8 @@ float WorldTree<FoldType>::get_memory_usage_gib() const noexcept {
     // all unique)
     // const auto extra_temp_bytes =
     //    (m_capacity * (sizeof(int64_t) + sizeof(BestIndices)));
-    return static_cast<float>(base_bytes) / static_cast<float>(1ULL << 30U);
+    return static_cast<float>(base_bytes) /
+           static_cast<float>(utils::kBytesPerGB);
 }
 
 template <SupportedFoldType FoldType>

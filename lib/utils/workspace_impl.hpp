@@ -6,6 +6,7 @@
  * public workspace handles. Internal.
  */
 
+#include <cstddef>
 #include <memory>
 #include <string_view>
 #include <vector>
@@ -34,6 +35,10 @@ template <SupportedFoldType FoldType> struct FFAWorkspaceCPU {
     utils::UninitVector<FoldType> fold_internal;
     std::vector<coord::FFACoord> coords;
     std::vector<coord::FFACoordFreq> coords_freq;
+    /// Phase-step table of the CPU complex merges (64-byte aligned, filled
+    /// batch by batch). Empty for time-domain folds; see
+    /// algorithms::detail::kPhaseStepTableBytes.
+    utils::UninitVector<std::byte> phase_steps;
 
     FFAWorkspaceCPU() = default;
     explicit FFAWorkspaceCPU(const plans::FFAPlan<FoldType>& ffa_plan);
@@ -52,6 +57,9 @@ template <SupportedFoldType FoldType> struct FFAWorkspaceCPU {
     void validate(const plans::FFAPlan<FoldType>& ffa_plan) const;
     /// fold_internal holds at least `buffer_size` elements.
     void validate_buffer(SizeType buffer_size) const;
+    /// Grow phase_steps to `bytes` if it is smaller (allocated once; pages
+    /// are touched only as the table is filled).
+    void ensure_phase_steps(SizeType bytes);
     void validate_coords(const plans::FFAPlan<FoldType>& ffa_plan) const;
     /// As validate_coords, for a path that needs `coord_size` coordinates.
     void validate_coords(const plans::FFAPlan<FoldType>& ffa_plan,

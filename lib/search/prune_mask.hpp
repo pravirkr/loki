@@ -57,7 +57,7 @@ public:
     [[nodiscard]] SizeType get_n_windows() const noexcept {
         return m_n_windows;
     }
-    /// @brief Memory usage of the bitset in GiB.
+    /// @brief Memory usage of the bitset in GB.
     [[nodiscard]] float get_memory_usage_gib() const noexcept;
 
     /// @brief True if the base-grid cell `coord_idx` is masked.

@@ -12,6 +12,7 @@
 
 #include "lib/algorithms/planner_cost.hpp"
 #include "lib/algorithms/planner_memory.hpp"
+#include "lib/detail/utils.hpp"
 
 using Catch::Approx;
 using loki::ComplexType;
@@ -63,7 +64,7 @@ double modelled_cost(const FFARegionPlanner<FoldType>& planner,
 
 double sweep_budget_gb(double max_memory_gb) {
     const double input_gb = static_cast<double>(kNsamps) * 2.0 * sizeof(float) /
-                            static_cast<double>(1ULL << 30U);
+                            loki::utils::kBytesPerGB;
     return detail::effective_memory_limit_gb(max_memory_gb) - input_gb;
 }
 

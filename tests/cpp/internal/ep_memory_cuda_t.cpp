@@ -28,6 +28,7 @@
 #include "lib/cuda/prune_cuda.cuh"
 #include "lib/cuda/types_cuda.cuh"
 #include "lib/cuda/workspace_cuda.cuh"
+#include "lib/detail/utils.hpp"
 #include "lib/detection/thresholds_engine.hpp"
 #include "lib/pipelines/ep_sweep_common.hpp"
 
@@ -145,7 +146,7 @@ TEMPLATE_TEST_CASE("CUDA EP memory model matches EPWorkspaceCUDA",
 
     // The device agrees, up to the allocator's granularity.
     const auto delta = static_cast<SizeType>((free_before - free_after) *
-                                             static_cast<double>(1ULL << 30U));
+                                             loki::utils::kBytesPerGB);
     CHECK(delta + kSlack >= model);
     CHECK(delta <= model + kSlack);
 }
@@ -194,7 +195,7 @@ TEST_CASE("CUDA EP memory model matches the prune irfft scratch",
     const auto bytes_of = [](const auto& functs) {
         return static_cast<SizeType>(std::llround(
             static_cast<double>(functs->get_scorer_scratch_memory_gib()) *
-            static_cast<double>(1ULL << 30U)));
+            loki::utils::kBytesPerGB));
     };
     // Boxcar and Kadane (both fused), Fourier and float folds; and Fourier
     // the maximum supported fold width.
@@ -337,7 +338,7 @@ TEST_CASE("CUDA threshold pools are allocated by run() only",
         [free_start = loki::cuda_utils::get_cuda_memory_usage().first] {
             return (free_start -
                     loki::cuda_utils::get_cuda_memory_usage().first) *
-                   static_cast<double>(1ULL << 30U);
+                   loki::utils::kBytesPerGB;
         };
     constexpr double kConstantsBytes = 2U << 20U;
     const auto same_states           = [](const auto& a, const auto& b) {

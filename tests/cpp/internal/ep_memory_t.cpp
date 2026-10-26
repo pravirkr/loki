@@ -19,9 +19,9 @@ using loki::algorithms::detail::ep_input_bytes;
 using loki::algorithms::detail::ep_shared_bytes;
 using loki::algorithms::detail::ep_workspace_bytes;
 using loki::algorithms::detail::EPHarvestBound;
-using loki::algorithms::detail::kBytesPerGiB;
 using loki::memory::EPWorkspaceCPU;
 using loki::memory::FFAWorkspaceCPU;
+using loki::utils::kBytesPerGB;
 
 // The planner's memory model must equal what EPFreqSweep really allocates:
 // the plans it produces are only as good as these numbers.
@@ -45,7 +45,7 @@ TEMPLATE_TEST_CASE("EP memory model matches the per-thread EPWorkspaceCPU",
                                           kNCoords, nparams, nbins_ws,
                                           kNSegments);
         const auto actual =
-            static_cast<double>(ws.get_memory_usage_gib()) * kBytesPerGiB;
+            static_cast<double>(ws.get_memory_usage_gib()) * kBytesPerGB;
         const auto model = static_cast<double>(
             ep_workspace_bytes<TestType>(nparams, kNBins, kNSegments, kNCoords,
                                          kMaxSugg, kBranchMax, kBatch));

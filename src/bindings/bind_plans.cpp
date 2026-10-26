@@ -160,6 +160,8 @@ void bind_plans(py::module_& m) {
                                &FFARegionStats::get_coord_memory_usage)
         .def_property_readonly("extra_memory_usage",
                                &FFARegionStats::get_extra_memory_usage)
+        .def_property_readonly("scratch_memory_usage",
+                               &FFARegionStats::get_scratch_memory_usage)
         .def_property_readonly("device_extra_memory_usage",
                                &FFARegionStats::get_device_extra_memory_usage)
         .def_property_readonly("freq_sweep_memory_usage",
