@@ -2,11 +2,16 @@
 
 #include <chrono>
 #include <filesystem>
+#include <format>
 #include <memory>
 #include <span>
 #include <stdexcept>
+#include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
+
+#include <spdlog/spdlog.h>
 
 #include "loki/common/backend.hpp"
 #include "loki/search/configs.hpp"
@@ -99,19 +104,56 @@ void FFAFreqSweep::execute(std::span<const float> ts_e,
     if (staging.empty()) {
         throw std::runtime_error("cannot create FFA staging directory");
     }
-    try {
-        m_impl->m_engine->execute(ts_e, ts_v, staging, "spool", config_toml);
-        const auto destination =
-            outdir / (std::string(file_prefix) + "_ffa_results.h5");
-        io::detail::write_candidate_results(staging / "spool_ffa_results.h5",
-                                            destination, observation,
-                                            m_impl->candidates);
-    } catch (...) {
+    const auto discard_staging = [&staging] {
         std::error_code error;
         std::filesystem::remove_all(staging, error);
+    };
+    try {
+        m_impl->m_engine->execute(ts_e, ts_v, staging, "spool", config_toml);
+    } catch (...) {
+        // An incomplete search leaves nothing worth keeping.
+        discard_staging();
         throw;
     }
-    std::error_code error;
-    std::filesystem::remove_all(staging, error);
+    const auto spool = staging / "spool_ffa_results.h5";
+    try {
+        io::detail::write_candidate_results(
+            spool, outdir / (std::string(file_prefix) + "_ffa_results.h5"),
+            observation, m_impl->candidates);
+    } catch (...) {
+        // The search finished: keep its detections so post-processing can be
+        // retried without searching again.
+        const auto kept = outdir / (std::string(file_prefix) + "_ffa_spool.h5");
+        std::error_code error;
+        std::filesystem::rename(spool, kept, error);
+        if (error) {
+            spdlog::error("FFA post-processing failed and the search spool "
+                          "could not be kept ({}); it remains in '{}'",
+                          error.message(), staging.string());
+        } else {
+            discard_staging();
+            spdlog::error(
+                "FFA post-processing failed; the search's detections are kept "
+                "in '{}'. Retry with FFAFreqSweep::publish_candidates (Python: "
+                "libloki.ffa.FFAFreqSweep.publish_candidates).",
+                kept.string());
+        }
+        throw;
+    }
+    discard_staging();
+}
+
+void FFAFreqSweep::publish_candidates(
+    const std::filesystem::path& spool,
+    const std::filesystem::path& output,
+    const search::CandidateOptions& candidates,
+    const io::ObservationMetadata& observation) {
+    candidates.validate();
+    observation.validate();
+    if (!std::filesystem::exists(spool)) {
+        throw std::invalid_argument(
+            std::format("FFA spool '{}' does not exist", spool.string()));
+    }
+    io::detail::write_candidate_results(spool, output, observation, candidates);
 }
 } // namespace loki::pipelines

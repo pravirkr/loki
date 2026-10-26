@@ -270,8 +270,9 @@ def export_pulsarx(
         frame = timing_frame or "topocentric"
         if known_frame is not None and frame != known_frame:
             msg = (
-                "Candidate and folding timing frames differ; "
-                "conversion is not supported"
+                "Candidate and folding timing frames differ: the file is "
+                f"{known_frame}, the export {frame} (frame conversion is not "
+                f"supported); pass timing_frame/--timing-frame {known_frame}"
             )
             raise ValueError(msg)
         output.parent.mkdir(parents=True, exist_ok=True)

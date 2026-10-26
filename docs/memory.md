@@ -520,4 +520,6 @@ The raw membership column is remapped in bounded batches after transitive
 components are complete, so later bridges cannot leave stale cluster IDs. Exhaustion is an
 explicit error, never a silent candidate cap. HDF5/runtime/allocator overhead
 is additional to accounted buffers. Temporary disk use can exceed the final
-HDF5 size even when raw retention is disabled. See [Candidate products](candidates.md).
+HDF5 size even when raw retention is disabled: the sort keeps 184 bytes per
+detection in two runs at its peak, about 37 GB for 10^8 detections (see
+[Candidate products](candidates.md) for the estimate).

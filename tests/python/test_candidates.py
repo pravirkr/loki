@@ -208,7 +208,7 @@ def test_ffa_common_schema_and_repeated_execution(
         )
 
 
-def _tim_header(path: Path, *, metadata: bool) -> None:
+def _tim_header(path: Path, *, metadata: bool, refdm: float = 0) -> None:
     def string(value: str) -> bytes:
         data = value.encode()
         return struct.pack("<i", len(data)) + data
@@ -219,7 +219,7 @@ def _tim_header(path: Path, *, metadata: bool) -> None:
     data += string("tsamp") + struct.pack("<d", 0.001)
     if metadata:
         data += string("tstart") + struct.pack("<d", 60000)
-        data += string("refdm") + struct.pack("<d", 0)
+        data += string("refdm") + struct.pack("<d", refdm)
         data += string("barycentric") + struct.pack("<i", 0)
     data += string("HEADER_END") + np.ones(64, np.float32).tobytes()
     path.write_bytes(data)
@@ -235,6 +235,16 @@ def test_timeseries_metadata_preserves_unknown_and_zero_dm(tmp_path: Path) -> No
         assert ts.observation.dm == (0 if known else None)
         assert ts.observation.start_mjd == (60000 if known else None)
         assert ts.observation.barycentric == (False if known else None)
+
+
+def test_invalid_header_dm_is_unknown_not_fatal(tmp_path: Path) -> None:
+    options = libloki.io.ReadOptions()
+    options.preprocess = False
+    path = tmp_path / "negative_dm.tim"
+    _tim_header(path, metadata=True, refdm=-1.0)
+    ts = libloki.io.TimeSeries.read(path, options)
+    assert ts.observation.dm is None
+    assert ts.observation.start_mjd == 60000
 
 
 def test_presto_observation_metadata(tmp_path: Path) -> None:
@@ -287,3 +297,89 @@ def test_export_retains_unsigned_ids_and_rejects_malformed_columns(
         handle["candidates/f1"][0] = 1
     with pytest.raises(ValueError, match="disagrees with native"):
         export_pulsarx(source, output, pepoch=60000)
+
+
+def test_failed_postprocessing_keeps_the_spool(tmp_path: Path) -> None:
+    rng = np.random.default_rng(45)
+    n = 8192
+    samples = rng.normal(size=n).astype(np.float32)
+    samples[np.arange(n) % 100 < 5] += 2
+    cfg = libloki.configs.FFASearchConfig(
+        n,
+        0.001,
+        32,
+        1,
+        np.array([[9.5, 10.5]]),
+        use_fourier=True,
+        nthreads=1,
+        snr_min=4,
+    )
+    starved = libloki.configs.CandidateOptions()
+    starved.memory_gb = 1e-4  # too small for the grouping index
+    sweep = libloki.ffa.FFAFreqSweep(cfg, show_progress=False, candidates=starved)
+    with pytest.raises(Exception, match="memory"):
+        sweep.execute(samples, np.ones(n, np.float32), tmp_path, "run")
+    spool = tmp_path / "run_ffa_spool.h5"
+    assert spool.exists()
+    assert not (tmp_path / "run_ffa_results.h5").exists()
+    assert not list(tmp_path.glob(".loki-ffa-*"))
+
+    options = libloki.configs.CandidateOptions()
+    options.memory_gb = 0.01
+    libloki.ffa.FFAFreqSweep.publish_candidates(
+        spool, tmp_path / "resumed_ffa_results.h5", candidates=options
+    )
+    direct = libloki.ffa.FFAFreqSweep(cfg, show_progress=False, candidates=options)
+    direct.execute(samples, np.ones(n, np.float32), tmp_path, "direct")
+    with (
+        h5py.File(tmp_path / "resumed_ffa_results.h5") as resumed,
+        h5py.File(tmp_path / "direct_ffa_results.h5") as reference,
+    ):
+        np.testing.assert_array_equal(
+            resumed["candidates/id"][:], reference["candidates/id"][:]
+        )
+        np.testing.assert_array_equal(
+            resumed["detections/cluster_id"][:], reference["detections/cluster_id"][:]
+        )
+    with pytest.raises(ValueError, match="does not exist"):
+        libloki.ffa.FFAFreqSweep.publish_candidates(
+            tmp_path / "missing.h5", tmp_path / "x.h5"
+        )
+
+
+def test_accelerated_ffa_export_matches_native_parameters(tmp_path: Path) -> None:
+    # The C++ product's f1 and the converter's check of it against the native
+    # acceleration must agree, with fdot = -f accel / c, through a real search.
+    rng = np.random.default_rng(7)
+    n = 8192
+    samples = rng.normal(size=n).astype(np.float32)
+    samples[np.arange(n) % 100 < 5] += 2
+    cfg = libloki.configs.FFASearchConfig(
+        n,
+        0.001,
+        32,
+        1,
+        np.array([[-2e6, 2e6], [9.5, 10.5]]),
+        use_fourier=True,
+        nthreads=1,
+        snr_min=4,
+    )
+    options = libloki.configs.CandidateOptions()
+    options.memory_gb = 0.01
+    options.cluster = False
+    observation = libloki.io.ObservationMetadata()
+    observation.dm = 10.0
+    observation.start_mjd = 60000
+    observation.barycentric = False
+    sweep = libloki.ffa.FFAFreqSweep(cfg, show_progress=False, candidates=options)
+    sweep.execute(
+        samples, np.ones(n, np.float32), tmp_path, "acc", observation=observation
+    )
+    output = tmp_path / "acc.cands"
+    export_pulsarx(tmp_path / "acc_ffa_results.h5", output)
+    rows = _rows(output)
+    accel, f0, f1, f2 = rows[:, 2], rows[:, 3], rows[:, 4], rows[:, 5]
+    assert np.any(accel > 0)
+    assert np.any(accel < 0)
+    np.testing.assert_allclose(f1, -f0 * accel / C, rtol=1e-9, atol=1e-15)
+    assert np.all(f2 == 0)

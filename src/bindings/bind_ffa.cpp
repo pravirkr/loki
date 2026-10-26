@@ -114,7 +114,13 @@ void bind_ffa(py::module_& m) {
             py::arg("ts_e"), py::arg("ts_v"), py::arg("outdir"),
             py::arg("file_prefix") = "test", py::kw_only(),
             py::arg("config_toml") = "",
-            py::arg("observation") = io::ObservationMetadata{});
+            py::arg("observation") = io::ObservationMetadata{})
+        .def_static("publish_candidates", &FFAFreqSweep::publish_candidates,
+                    py::arg("spool"), py::arg("output"), py::kw_only(),
+                    py::arg("candidates")  = search::CandidateOptions{},
+                    py::arg("observation") = io::ObservationMetadata{},
+                    "Group and publish the detections of a spool kept by a "
+                    "failed execute(), without searching again.");
 }
 
 } // namespace loki

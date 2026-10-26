@@ -112,7 +112,14 @@ TEST_CASE("Candidate retention selection and failed publication",
         loki::io::detail::write_candidate_results(raw, output, {}, options));
     const HighFive::File preserved(output.string(), HighFive::File::ReadOnly);
     REQUIRE(preserved.getDataSet("candidates/snr").getDimensions()[0] == 2);
-    REQUIRE_FALSE(std::filesystem::exists(output.string() + ".partial"));
+    // The partial file lives in a scratch directory beside the output; a failed
+    // publication removes it.
+    for (const auto& entry :
+         std::filesystem::directory_iterator(files.directory)) {
+        CAPTURE(entry.path().string());
+        REQUIRE_FALSE(
+            entry.path().filename().string().starts_with("loki-candidates-"));
+    }
 }
 
 TEST_CASE("Abandoned raw writers do not publish", "[candidates][hdf5]") {

@@ -34,7 +34,8 @@ memory_gb = 1.0
 ```
 
 CLI equivalents include `--no-cluster`, `--cluster-grouping transitive|anchored`, `--cluster-radius`, `--cluster-phase-radius`,
-`--no-retain-detections`, `--flag-harmonics`, `--remove-harmonics`,
+`--no-retain-detections`, `--flag-harmonics` / `--no-flag-harmonics`,
+`--remove-harmonics` / `--no-remove-harmonics`,
 `--max-candidates`, `--candidate-memory-gb`, `--candidate-tempdir`,
 `--dm`, `--start-mjd` and `--barycentric true|false`.
 Harmonic removal requires harmonic flagging. Zero maximum candidates means
@@ -188,9 +189,31 @@ The final file is atomically renamed into place only after search, clustering,
 selection and serialization succeed. `complete=1` is set explicitly before
 publication. An abandoned raw writer does not finalize in its destructor.
 
+If the search finishes but postprocessing fails (the candidate memory budget,
+a full scratch disk, an HDF5 error), the search's detections are kept as
+`<prefix>_ffa_spool.h5` beside the intended output and the error is
+rethrown. Publish them without searching again, with larger budgets if needed,
+passing the same observation metadata as the search:
+
+```python
+options = libloki.configs.CandidateOptions()
+options.memory_gb = 8.0
+libloki.ffa.FFAFreqSweep.publish_candidates(
+    "out/run_ffa_spool.h5", "out/run_ffa_results.h5",
+    candidates=options, observation=observation,
+)
+```
+
+(C++: `pipelines::FFAFreqSweep::publish_candidates`.) A search that fails
+part-way leaves nothing behind.
+
 External S/N sorting uses bounded batches and two-way merging, including when
-raw retention is disabled. Temporary files may be as large as several copies
-of the raw detections. The graph index (or representative index in anchored mode) has an explicit
+raw retention is disabled. Each sorted record is a full 184-byte `Candidate`,
+and the two-way merge rewrites every record about log2(N / 65536) times for N
+detections. Plan the scratch disk (`temporary_directory`, by default beside
+the output) for a peak of roughly the raw spool + 2 x 184 B x N + the final
+file: about 37 GB for 10^8 detections, with several hundred GB written over
+the run. The graph index (or representative index in anchored mode) has an explicit
 memory limit;
 exhaustion fails without dropping detections or replacing an existing final
 result. The candidate host budget is reserved within the CPU search cap, so it
@@ -242,12 +265,34 @@ are rejected rather than silently truncated.
 
 ## Migration and EP adapter contract
 
+### Behaviour changes for existing FFA users
+
+- **Default `snr_min` is 7, was 6** (C++ `FFASearchConfig`, Python, both TOML
+  templates). It is the FFA detection threshold, so a search relying on the
+  default writes fewer detections. Keep the old behaviour with
+  `[search] snr_min = 6.0`. EP stores `snr_min` but its pruning uses
+  `target_snr`, which is unchanged.
+- **Root datasets now mean the selected candidates.** `snr`, `param_sets`,
+  `width` and `nbins` are hard links to `/candidates`: one row per selected
+  representative, sorted by S/N, not one row per passing trial. Every passing
+  trial is in `/detections` (when `retain_detections`).
+- **Types and names.** `width` and `nbins` are `uint32` (were `uint16`). Root
+  `detection_id` is gone: use `/detections/id` and `/candidates/id`. The search
+  attributes (`ffa_version`, `config_toml`, `tsamp`, `nsamps`, `tobs`, `f_min`,
+  `f_max`, `snr_min`, `ducy_max`, `wtsp`, `eta`, `bseg_*`, ...) moved to the
+  `/search` group; the root keeps `param_names`, `complete` and the schema
+  attributes.
+- **CPU memory.** The candidate budget `candidates.memory_gb` (default 1 GB) is
+  reserved inside `max_process_memory_gb`. A CPU search with
+  `max_process_memory_gb <= memory_gb` now fails at construction; lower
+  `[candidates] memory_gb` or raise the search cap. CUDA is unaffected.
+
+### Reading old files
+
 Existing flat FFA files remain readable through `loki.candidates.CandidateFile`;
-missing observational metadata can be supplied during export. The new root
-`snr`, `param_sets`, `width` and `nbins` names are transitional hard links to
-**selected candidates**. Readers needing all raw detections must now open
-`/detections`. They must check the schema rather than assume the old root names
-still mean all passing trials.
+missing observational metadata can be supplied during export. Readers must
+check `schema_version` rather than assume the root names still mean all
+passing trials.
 
 The shared C++ API is in `loki/search/candidates.hpp`. It accepts normalized
 Taylor trials and provides `cluster_candidates` and `phase_track_distance`.

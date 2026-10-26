@@ -553,7 +553,16 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
                     }
 
                     SPDLOG_INFO("=== Search Summary ===");
-                    SPDLOG_INFO("Total candidates detected : {}", n_cands);
+                    // Root datasets hold the selected candidates; every
+                    // passing trial is in /detections when retained.
+                    if (h5.exist("detections/snr")) {
+                        const auto n_detections =
+                            h5.getDataSet("detections/snr").getDimensions();
+                        SPDLOG_INFO("Detections above snr_min   : {}",
+                                    n_detections.empty() ? 0UL
+                                                         : n_detections[0]);
+                    }
+                    SPDLOG_INFO("Selected candidates        : {}", n_cands);
                     SPDLOG_INFO(
                         "Top candidate SNR          : {:.2f} (candidate "
                         "#{})",
@@ -1083,11 +1092,12 @@ int main(int argc, char** argv) {
         "--retain-detections,!--no-retain-detections",
         ffa_cfg.candidates.retain_detections,
         "Keep raw detections and membership (default: enabled)");
-    grp_candidates->add_flag("--flag-harmonics",
+    grp_candidates->add_flag("--flag-harmonics,!--no-flag-harmonics",
                              ffa_cfg.candidates.flag_harmonics,
                              "Flag harmonic relationships between clusters");
     grp_candidates->add_flag(
-        "--remove-harmonics", ffa_cfg.candidates.remove_harmonics,
+        "--remove-harmonics,!--no-remove-harmonics",
+        ffa_cfg.candidates.remove_harmonics,
         "Exclude flagged harmonics; requires --flag-harmonics");
     grp_candidates->add_option(
         "--harmonic-denominator-max",

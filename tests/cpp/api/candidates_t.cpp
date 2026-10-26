@@ -2,10 +2,10 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <iterator>
-#include <limits>
 #include <random>
 #include <vector>
 
@@ -111,7 +111,8 @@ TEST_CASE("Candidate processing validates input and bounds representatives",
     auto bad  = trial(0, 10, 12);
     bad.width = 0;
     REQUIRE_THROWS(loki::search::cluster_candidates(std::array{bad}, 1));
-    bad = trial(0, 10, std::numeric_limits<float>::quiet_NaN());
+    // A NaN from its bits: quiet_NaN() is not one under -ffast-math.
+    bad = trial(0, 10, std::bit_cast<float>(0x7FC00000U));
     REQUIRE_THROWS(loki::search::cluster_candidates(std::array{bad}, 1));
     options           = {};
     options.memory_gb = 0.0001;
@@ -181,7 +182,8 @@ TEST_CASE("Suppression separates acceleration tracks at identical frequencies",
     loki::search::CandidateOptions options;
     options.phase_radius = -1;
     REQUIRE_THROWS(options.validate());
-    options.phase_radius = std::numeric_limits<double>::quiet_NaN();
+    options.phase_radius =
+        std::bit_cast<double>(0x7FF8000000000000ULL); // NaN, fast-math safe
     REQUIRE_THROWS(options.validate());
 }
 
@@ -305,4 +307,33 @@ TEST_CASE("Final transitive membership removes gaps after component unions",
     REQUIRE(out.membership == std::vector<std::uint64_t>{0, 0, 0, 1});
     REQUIRE(out.clusters.size() == 2);
     REQUIRE(out.clusters[1].representative.id == 3);
+}
+
+TEST_CASE("Higher derivatives can link tracks far apart in frequency",
+          "[candidates]") {
+    // Phase difference 0.99 R/2 * T5(x) on x in [-1, 1] (T5 = 16x^5 - 20x^3 +
+    // 5x): span 0.99 R, yet delta_f = 4.95 R / Tobs, near the Bernstein
+    // bound the neighbour search relies on. A narrower search window would
+    // miss this link.
+    constexpr double kTobs = 1.0;
+    constexpr double kHalf = kTobs / 2;
+    const auto a           = trial(0, 10, 12); // duty 0.1, so R = 0.1
+    const double s         = 0.99 * 0.1 / 2;
+    auto b                 = trial(1, 10 + (5 * s / kHalf), 11);
+    b.derivatives[2]       = -20 * s * 6 / (kHalf * kHalf * kHalf);
+    b.derivatives[4] = 16 * s * 120 / (kHalf * kHalf * kHalf * kHalf * kHalf);
+    for (const auto* grouping : {"transitive", "anchored"}) {
+        CAPTURE(grouping);
+        loki::search::CandidateOptions options;
+        options.grouping = grouping;
+        REQUIRE(
+            loki::search::cluster_candidates(std::vector{a, b}, kTobs, options)
+                .clusters.size() == 1);
+        auto plain           = b;
+        plain.derivatives[2] = 0;
+        plain.derivatives[4] = 0;
+        REQUIRE(loki::search::cluster_candidates(std::vector{a, plain}, kTobs,
+                                                 options)
+                    .clusters.size() == 2);
+    }
 }

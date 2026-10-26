@@ -37,12 +37,27 @@ public:
     FFAFreqSweep(const FFAFreqSweep&)            = delete;
     FFAFreqSweep& operator=(const FFAFreqSweep&) = delete;
 
+    /// Runs the search, then groups and publishes the candidates as
+    /// `<outdir>/<file_prefix>_ffa_results.h5`. If the search completes but
+    /// the post-processing fails (candidate memory budget, disk, HDF5), the
+    /// raw spool is kept as `<outdir>/<file_prefix>_ffa_spool.h5` and the
+    /// error is rethrown; publish_candidates() resumes from it.
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
                  const std::filesystem::path& outdir        = "./",
                  std::string_view file_prefix               = "test",
                  std::string_view config_toml               = {},
                  const io::ObservationMetadata& observation = {});
+
+    /// Groups the detections of a kept @p spool and publishes the product at
+    /// @p output, atomically, without searching again. Pass the same
+    /// @p observation metadata as the original execute(): the spool does not
+    /// store it.
+    static void
+    publish_candidates(const std::filesystem::path& spool,
+                       const std::filesystem::path& output,
+                       const search::CandidateOptions& candidates = {},
+                       const io::ObservationMetadata& observation = {});
 
 private:
     class Impl;

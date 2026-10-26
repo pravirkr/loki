@@ -9,7 +9,10 @@
 #include <numeric>
 #include <span>
 #include <stdexcept>
+#include <tuple>
 #include <vector>
+
+#include <spdlog/spdlog.h>
 
 #include "lib/detail/utils.hpp"
 #include "lib/search/candidate_processing.hpp"
@@ -89,11 +92,24 @@ std::vector<double> roots(Polynomial p) {
     return result;
 }
 
+/// Degree of the phase-difference polynomial: one per frequency derivative.
+constexpr std::size_t kPhaseDegree =
+    std::tuple_size_v<decltype(Candidate::derivatives)>;
+
+/// Frequency reach of a link of phase span @p span over @p tobs. The phase
+/// difference on [-1, 1] has p'(0) = delta_f * Tobs / 2, and Bernstein's
+/// inequality at the midpoint bounds |p'(0)| by degree * span / 2, so every
+/// linkable track lies within |delta_f| <= degree * span / Tobs, even when
+/// higher derivatives cancel the endpoint phase. 1 % slack covers rounding.
+double link_reach(double span, double tobs) {
+    return 1.01 * static_cast<double>(kPhaseDegree) * span / tobs;
+}
+
 double phase_span(const Candidate& a,
                   const Candidate& b,
                   double tobs,
                   double scale_a = 1.0) {
-    Polynomial p(7, 0);
+    Polynomial p(kPhaseDegree + 1, 0);
     double factor = 1;
     for (std::size_t k = 0; k < a.derivatives.size(); ++k) {
         factor *= (tobs / 2) / static_cast<double>(k + 1);
@@ -203,15 +219,12 @@ std::uint64_t CandidateClusterer::append(const Candidate& c) {
     }
     std::uint64_t match = std::numeric_limits<std::uint64_t>::max();
     if (m_options.cluster) {
-        // Markov's polynomial inequality on [-1,1]: a phase polynomial of
-        // degree <= 6 and span R has |df(midpoint)| <= 36 R / Tobs.
         // min(duty_a,duty_b) <= duty_c, including the phase-cycle floor,
         // making this a conservative prefilter for every Taylor order.
-        const double reach = 36 *
-                             std::max(m_options.radius * c.duty_cycle(),
-                                      m_options.phase_radius) /
-                             m_tobs;
-        const auto end     = m_index.upper_bound(c.derivatives[0] + reach);
+        const double reach = link_reach(
+            std::max(m_options.radius * c.duty_cycle(), m_options.phase_radius),
+            m_tobs);
+        const auto end = m_index.upper_bound(c.derivatives[0] + reach);
         for (auto it = m_index.lower_bound(c.derivatives[0] - reach); it != end;
              ++it) {
             if (it->second < match &&
@@ -287,13 +300,11 @@ std::uint64_t CandidateClusterer::append_transitive(const Candidate& c) {
         m_tracks.emplace(c.derivatives, node);
         m_index.emplace(c.derivatives[0], node);
     }
-    // Degree <=6 Markov bound: every matching track is within this frequency
-    // interval, even when acceleration/jerk cancel endpoint phase differences.
-    const double reach = 36 *
-                         std::max(m_options.phase_radius,
-                                  m_options.radius * m_nodes[node].duty) /
-                         m_tobs;
-    const auto end     = m_index.upper_bound(c.derivatives[0] + reach);
+    // Every matching track is within this frequency interval (link_reach).
+    const double reach = link_reach(
+        std::max(m_options.phase_radius, m_options.radius * m_nodes[node].duty),
+        m_tobs);
+    const auto end = m_index.upper_bound(c.derivatives[0] + reach);
     for (auto it = m_index.lower_bound(c.derivatives[0] - reach); it != end;
          ++it) {
         const auto other = it->second;
@@ -351,6 +362,19 @@ void CandidateClusterer::finish() {
         finish_transitive();
     }
     if (m_options.flag_harmonics) {
+        // Every pair of clusters, times every denominator: quadratic.
+        const double pairs = 0.5 * static_cast<double>(clusters.size()) *
+                             static_cast<double>(clusters.size());
+        const double work =
+            pairs * static_cast<double>(m_options.harmonic_denominator_max);
+        if (work > 1e10) {
+            spdlog::warn("Harmonic flagging compares {} clusters pairwise "
+                         "with denominators up to {} (~{:.1e} steps); this "
+                         "may take hours. Lower harmonic_denominator_max or "
+                         "snr_min, or disable flag_harmonics.",
+                         clusters.size(), m_options.harmonic_denominator_max,
+                         work);
+        }
         for (std::size_t h = 0; h < clusters.size(); ++h) {
             auto& child    = clusters[h];
             const auto& hc = child.representative;

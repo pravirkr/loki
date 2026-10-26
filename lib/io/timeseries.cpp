@@ -15,6 +15,7 @@
 #include <vector>
 
 #include <psrio/psrio.hpp>
+#include <spdlog/spdlog.h>
 
 #include "loki/common/backend.hpp"
 #include "loki/common/types.hpp"
@@ -239,6 +240,20 @@ TimeSeries TimeSeries::read(const std::filesystem::path& path,
     // psrio serializes its absent unified start time as zero on synthetic
     // data. It is a sentinel, not a usable observational reference MJD.
     if (obs.start_mjd && *obs.start_mjd == 0) {
+        obs.start_mjd.reset();
+    }
+    // A header value the metadata cannot hold (a negative reference DM, say)
+    // makes that field unknown rather than the file unreadable.
+    if (obs.dm && (!utils::is_finite(*obs.dm) || *obs.dm < 0)) {
+        spdlog::warn("'{}': ignoring header DM {} (not a finite, nonnegative "
+                     "value); the DM is unknown",
+                     path.string(), *obs.dm);
+        obs.dm.reset();
+    }
+    if (obs.start_mjd &&
+        (!utils::is_finite(*obs.start_mjd) || *obs.start_mjd <= 0)) {
+        spdlog::warn("'{}': ignoring header start MJD {}; it is unknown",
+                     path.string(), *obs.start_mjd);
         obs.start_mjd.reset();
     }
     obs.validate();
