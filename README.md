@@ -1,6 +1,11 @@
-# loki
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/_static/logo/loki-logo-dark.svg">
+    <img alt="loki" src="docs/_static/logo/loki-logo.svg" width="360">
+  </picture>
+</p>
 
-Leverage Optimal significance to unveil Keplerian orbIt pulsars
+**loki** searches for short-period binary pulsars with coherent signal detection and pruning.
 
 A high-performance **C++20** pulsar searching library with **Python bindings**. The same core library supports **CPU-only**, **GPU-accelerated**, and **CPU+GPU** builds: CPU paths always compile; CUDA paths are added when the CUDA toolchain is enabled at configure time.
 
