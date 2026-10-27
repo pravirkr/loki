@@ -2,13 +2,16 @@
 #include <bit>
 #include <cmath>
 #include <complex>
+#include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <numbers>
 #include <random>
 #include <span>
 #include <vector>
 
+#include <catch2/catch_template_test_macros.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include "loki/common/plans.hpp"
@@ -19,6 +22,7 @@
 #include "lib/core/dynamic.hpp"
 #include "lib/core/kernels.hpp"
 #include "lib/cpu/boxcar_kernels.hpp"
+#include "lib/cpu/lane_fft.hpp"
 
 // CPU pruning scorers: the exact SIMD max scorer, and the fused
 // shift-add + score tiles of the prune functors.
@@ -206,6 +210,66 @@ void check_fused_matches_unfused(const PulsarSearchConfig& cfg,
 }
 
 } // namespace
+
+TEMPLATE_TEST_CASE("Final EP widths agree with per-width final-fold scoring",
+                   "[ep][score][candidates]",
+                   float,
+                   ComplexType) {
+    constexpr SizeType kN = 45; // two tiles and a partial tile
+    for (const SizeType nbins : {32U, 50U, 100U, 257U}) {
+        constexpr bool kComplex = std::is_same_v<TestType, ComplexType>;
+        const auto cfg          = make_cfg(nbins, kComplex);
+        const auto widths       = cfg.get_scoring_widths();
+        std::vector<float> folds(kN * 2 * nbins, 0.0F);
+        for (SizeType p = 0; p < kN; ++p) {
+            std::fill_n(folds.data() + (p * 2 + 1) * nbins, nbins, 1.0F);
+            if (p != kN - 1) {
+                const auto width = widths[p % widths.size()];
+                for (SizeType j = 0; j < width; ++j) {
+                    folds[p * 2 * nbins + (j + nbins - 2) % nbins] = 5.0F;
+                }
+            }
+        }
+        std::vector<TestType> input;
+        if constexpr (kComplex) {
+            input.resize(kN * 2 * cfg.get_nbins_f());
+            loki::lane_fft::forward_batch(folds.data(), input.data(), kN * 2,
+                                          nbins, 1);
+        } else {
+            input.assign(folds.begin(), folds.end());
+        }
+        const auto before = input;
+        auto functor      = make_functs<TestType>(cfg);
+        std::vector<std::uint32_t> winners(kN);
+        functor->final_widths(input, winners);
+        REQUIRE(input == before);
+        std::vector<float> scores(kN * widths.size());
+        loki::detection::snr_boxcar_3d(folds, widths, scores, kN, nbins);
+        for (SizeType p = 0; p < kN; ++p) {
+            const auto first =
+                scores.begin() + static_cast<std::ptrdiff_t>(p * widths.size());
+            const auto last =
+                first + static_cast<std::ptrdiff_t>(widths.size());
+            const auto best = std::max_element(first, last);
+            float runner_up = std::numeric_limits<float>::lowest();
+            for (auto at = first; at != last; ++at) {
+                if (at != best) {
+                    runner_up = std::max(runner_up, *at);
+                }
+            }
+            // The lane transform rounds differently from the time-domain
+            // reference; unambiguous winning widths must nevertheless agree.
+            if (*best - runner_up > 1e-4F) {
+                CHECK(winners[p] ==
+                      widths[static_cast<SizeType>(best - first)]);
+            }
+        }
+        // All-zero signal: an exact tie only where the transform is exact.
+        if (!kComplex || std::has_single_bit(nbins)) {
+            CHECK(winners.back() == widths.front());
+        }
+    }
+}
 
 TEST_CASE("BoxcarScorer3D max is bit-exact with the scalar max scorer",
           "[ep][score]") {

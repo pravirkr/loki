@@ -31,12 +31,15 @@ void initialize_ep_results(
     float total_runtime) {
     HighFive::File main_h5(result_file.string(), HighFive::File::Overwrite);
     main_h5.createAttribute("ep_sweep_version", std::string("1.0.0-cpp"));
+    main_h5.createAttribute("complete", 0);
     main_h5.createAttribute("param_names", base_cfg.get_param_names());
     main_h5.createAttribute("nchunks", chunk_cfgs.size());
     main_h5.createAttribute("f_min", base_cfg.get_f_min());
     main_h5.createAttribute("f_max", base_cfg.get_f_max());
     main_h5.createAttribute("tobs", base_cfg.get_tobs());
     main_h5.createAttribute("tsamp", base_cfg.get_tsamp());
+    main_h5.createAttribute("nsamps", base_cfg.get_nsamps());
+    main_h5.createAttribute("snr_min", base_cfg.get_snr_min());
     main_h5.createAttribute("min_pd", min_pd);
     main_h5.createAttribute("poly_basis", std::string(poly_basis));
     main_h5.createAttribute("ref_ducy", ref_ducy);
@@ -64,6 +67,8 @@ void initialize_ep_results(
         chunk_group.createAttribute("nsegments", chunk.nsegments);
 
         chunk_group.createDataSet("threshold_scheme", chunk.threshold_scheme);
+        chunk_group.createDataSet("scoring_widths",
+                                  chunk.cfg.get_scoring_widths());
         chunk_group.createDataSet("branching_pattern", chunk.branching_pattern);
     }
     main_h5.createAttribute("total_pruning_gflops", 0.0);
@@ -120,6 +125,7 @@ merge_ep_sweep_results(const std::filesystem::path& tmp_dir,
     }
 
     main_h5.getAttribute("total_pruning_gflops").write(accumulated_flops);
+    main_h5.getAttribute("complete").write(1);
     return accumulated_flops;
 }
 
@@ -187,7 +193,8 @@ void EPSweepWriter::run() {
                                      {std::span<float>(payload.scores), {}},
                                      {std::span<float>(payload.scores_ep), {}},
                                      payload.gflops, payload.scores.size(),
-                                     payload.nparams, payload.stats);
+                                     payload.nparams, payload.stats,
+                                     payload.widths);
             m_gflops += payload.gflops;
         }
     } catch (...) {
@@ -219,6 +226,7 @@ double EPSweepWriter::finish(float runtime) {
         HighFive::File file(m_partial_file.string(), HighFive::File::ReadWrite);
         file.getAttribute("total_runtime").write(runtime);
         file.getAttribute("total_pruning_gflops").write(m_gflops);
+        file.getAttribute("complete").write(1);
     }
     std::filesystem::rename(m_partial_file, m_file);
     return m_gflops;

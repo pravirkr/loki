@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <exception>
 #include <filesystem>
 #include <format>
@@ -391,6 +392,18 @@ private:
         auto& ws            = get_workspace();
         auto& world_tree    = ws.world_tree;
         const auto n_leaves = world_tree.get_size();
+        std::vector<std::uint32_t> widths;
+        if (m_poly_basis == "taylor" && m_cfg.get_nparams() <= 4 &&
+            !m_rfi->is_active()) {
+            widths.resize(n_leaves);
+            const auto folds = world_tree.get_folds_circular_view();
+            const auto nfirst =
+                folds.first.size() / world_tree.get_folds_stride();
+            m_prune_funcs->final_widths(folds.first,
+                                        std::span(widths).first(nfirst));
+            m_prune_funcs->final_widths(folds.second,
+                                        std::span(widths).subspan(nfirst));
+        }
 
         memory::CircularView<double> const leaves_view =
             world_tree.get_leaves_circular_view();
@@ -417,7 +430,7 @@ private:
         result_writer.write_run_results(
             run_name, m_snail_scheme.get_data(), leaves_view, scores_view,
             scores_ep_view, total_pruning_gflops, n_leaves, m_cfg.get_nparams(),
-            m_pstats);
+            m_pstats, widths);
         if (m_rfi->has_harvest()) {
             result_writer.write_run_harvest(
                 run_name, m_harvest, m_cfg.get_nparams(), m_n_harvested_total);

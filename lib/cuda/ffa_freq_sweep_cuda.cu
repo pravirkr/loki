@@ -185,6 +185,7 @@ public:
             result_file, search::FFAResultWriter::Mode::kWrite);
         writer.write_metadata(
             search::FFAResultMetadata(m_base_cfg, config_toml));
+        writer.write_regions(m_region_planner.get_cfgs());
 
         // Copy input data to device
         cudaStream_t stream = m_stream;

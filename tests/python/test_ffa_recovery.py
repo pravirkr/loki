@@ -115,7 +115,7 @@ def test_ffa_freq_sweep_recovers_injected_pulsar(tmp_path: Path) -> None:
         sweep.execute(ts_e, ts_v, str(tmp_path), prefix)
         result_h5 = tmp_path / f"{prefix}_ffa_results.h5"
         with h5py.File(result_h5, "r") as handle:
-            assert float(handle.attrs["total_runtime"]) > 0.0
+            assert float(handle["search"].attrs["total_runtime"]) > 0.0
         best = _best_recovered_snr(
             result_h5,
             expect_accel=search_accel,

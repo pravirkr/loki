@@ -232,9 +232,10 @@ TEST_CASE("FFA CLI recovers injected pulsar in narrow search window",
         REQUIRE(best >= kRecoverSnrMin);
 
         const HighFive::File h5(result_h5.string(), HighFive::File::ReadOnly);
-        REQUIRE(h5.hasAttribute("total_runtime"));
+        const auto search = h5.getGroup("search");
+        REQUIRE(search.hasAttribute("total_runtime"));
         float total_runtime = 0.0F;
-        h5.getAttribute("total_runtime").read(total_runtime);
+        search.getAttribute("total_runtime").read(total_runtime);
         REQUIRE(total_runtime > 0.0F);
     }
 

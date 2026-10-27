@@ -38,6 +38,7 @@ template <SupportedFoldTypeCUDA FoldTypeCUDA> struct EPScoreArgs {
     // invalid leaves).
     FoldTypeCUDA* folds_out{nullptr};
     float* scores{nullptr};
+    uint32_t* winning_widths{nullptr}; ///< Optional final-row width output.
     uint8_t* filtered_mask{nullptr};
     // Batch statistics, zeroed by the caller: [0] the number of passing
     // leaves, [1] the ordered key (ep_score_key) of the largest score of a
@@ -128,6 +129,7 @@ void ep_score_rows_fourier_cuda(const ComplexTypeCUDA* folds,
                                 SizeType nwidths,
                                 float* scores,
                                 const ComplexTypeCUDA* bluestein,
-                                cudaStream_t stream);
+                                cudaStream_t stream,
+                                uint32_t* winning_widths = nullptr);
 
 } // namespace loki::core

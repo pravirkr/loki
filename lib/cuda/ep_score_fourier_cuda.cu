@@ -252,12 +252,19 @@ __launch_bounds__(FFT::max_threads_per_block) void kernel_ep_shift_add_score_c2c
     } else if constexpr (kSerial) {
         if (tid < nprof) {
             if (b.valid[tid] != 0) {
-                float best = cuda::std::numeric_limits<float>::lowest();
+                float best       = cuda::std::numeric_limits<float>::lowest();
+                uint32_t best_iw = 0;
                 detail::score_row_serial_sink<NW>(
                     rows + (tid * pitch), static_cast<int>(n), s_wc, a.nwidths,
-                    [&best](uint32_t /*iw*/, float snr) {
+                    [&best, &best_iw](uint32_t iw, float snr) {
+                        if (snr > best) {
+                            best_iw = iw;
+                        }
                         best = fmaxf(best, snr);
                     });
+                if (a.winning_widths != nullptr) {
+                    a.winning_widths[p0 + tid] = a.widths[best_iw];
+                }
                 detail::ep_block_record(b, a, tid, p0, best, npass);
             } else {
                 a.filtered_mask[p0 + tid] = 0;
@@ -275,15 +282,22 @@ __launch_bounds__(FFT::max_threads_per_block) void kernel_ep_shift_add_score_c2c
                 }
                 continue;
             }
-            float best   = cuda::std::numeric_limits<float>::lowest();
-            float* e_row = rows + ((p * 2) * pitch);
+            float best       = cuda::std::numeric_limits<float>::lowest();
+            uint32_t best_iw = 0;
+            float* e_row     = rows + ((p * 2) * pitch);
             detail::score_ev_warp_sink<NW>(
                 e_row, e_row + pitch, s, static_cast<int>(n), s_wc, a.nwidths,
-                [&best](uint32_t /*iw*/, float snr) {
+                [&best, &best_iw](uint32_t iw, float snr) {
+                    if (snr > best) {
+                        best_iw = iw;
+                    }
                     best = fmaxf(best, snr);
                 },
                 lane_id);
             if (lane_id == 0) {
+                if (a.winning_widths != nullptr) {
+                    a.winning_widths[p0 + p] = a.widths[best_iw];
+                }
                 detail::ep_block_record(b, a, p, p0, best, npass);
             }
         }
@@ -466,21 +480,23 @@ void ep_score_rows_fourier_cuda(const ComplexTypeCUDA* folds,
                                 SizeType nwidths,
                                 float* scores,
                                 const ComplexTypeCUDA* bluestein,
-                                cudaStream_t stream) {
+                                cudaStream_t stream,
+                                uint32_t* winning_widths) {
     if (n_rows == 0) {
         return;
     }
     error_check::check_less_equal(n_rows, SizeType{UINT32_MAX},
                                   "ep_score_rows_fourier_cuda: too many rows");
     EPFourierScoreArgs args{};
-    args.folds_tree = folds;
-    args.scores     = scores;
-    args.widths     = widths;
-    args.nwidths    = static_cast<uint32_t>(nwidths);
-    args.threshold  = cuda::std::numeric_limits<float>::lowest();
-    args.n_leaves   = static_cast<uint32_t>(n_rows);
-    args.nbins      = static_cast<uint32_t>(nbins);
-    args.bluestein  = bluestein;
+    args.folds_tree     = folds;
+    args.scores         = scores;
+    args.winning_widths = winning_widths;
+    args.widths         = widths;
+    args.nwidths        = static_cast<uint32_t>(nwidths);
+    args.threshold      = cuda::std::numeric_limits<float>::lowest();
+    args.n_leaves       = static_cast<uint32_t>(n_rows);
+    args.nbins          = static_cast<uint32_t>(nbins);
+    args.bluestein      = bluestein;
     dispatch(args, stream, nullptr);
 }
 

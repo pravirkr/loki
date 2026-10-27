@@ -39,7 +39,8 @@ void snr_boxcar_3d_max_cuda_d(cuda::std::span<const float> folds,
                               cuda::std::span<float> scores,
                               SizeType nprofiles,
                               SizeType nbins,
-                              cudaStream_t stream = nullptr);
+                              cudaStream_t stream      = nullptr,
+                              uint32_t* winning_widths = nullptr);
 
 SizeType score_and_filter_cuda_d(cuda::std::span<const float> folds,
                                  cuda::std::span<const uint32_t> widths,

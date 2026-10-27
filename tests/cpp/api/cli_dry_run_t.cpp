@@ -53,4 +53,5 @@ TEST_CASE("FFA CLI dry run plans with the input header", "[cli]") {
     INFO(text);
     REQUIRE(text.find("nsamps 1048576, tobs 67.11 s") != std::string::npos);
     REQUIRE(text.find("No input timeseries") == std::string::npos);
+    REQUIRE(text.find("limit of 3.000 GB") != std::string::npos);
 }

@@ -8,6 +8,7 @@
  */
 
 #include <condition_variable>
+#include <cstdint>
 #include <exception>
 #include <filesystem>
 #include <mutex>
@@ -53,6 +54,7 @@ struct EPResultPayload {
     std::vector<double> leaves;
     std::vector<float> scores;
     std::vector<float> scores_ep;
+    std::vector<std::uint32_t> widths;
     double gflops{0.0};
     SizeType nparams{0};
     search::PruneStatsCollection stats;

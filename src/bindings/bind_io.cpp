@@ -22,6 +22,17 @@ namespace py = pybind11;
 
 void bind_io(py::module_& m) {
     auto m_io = m.def_submodule("io", "Timeseries I/O");
+    py::class_<io::ObservationMetadata>(m_io, "ObservationMetadata")
+        .def(py::init<>())
+        .def_readwrite("dm", &io::ObservationMetadata::dm)
+        .def_readwrite("start_mjd", &io::ObservationMetadata::start_mjd)
+        .def_readwrite("barycentric", &io::ObservationMetadata::barycentric)
+        .def_readwrite("source", &io::ObservationMetadata::source)
+        .def_readwrite("input_path", &io::ObservationMetadata::input_path)
+        .def_readwrite("original_nsamps",
+                       &io::ObservationMetadata::original_nsamps)
+        .def("validate", &io::ObservationMetadata::validate);
+
     py::enum_<LocMethod>(m_io, "LocMethod")
         .value("Mean", LocMethod::kMean)
         .value("Median", LocMethod::kMedian)
@@ -147,6 +158,7 @@ void bind_io(py::module_& m) {
             },
             py::arg("options") = PO{}, py::arg("nthreads") = 1, py::kw_only(),
             py::arg("backend") = "cpu", py::arg("device") = 0)
+        .def_property_readonly("observation", &io::TimeSeries::get_observation)
         .def_property_readonly("nsamps", &io::TimeSeries::get_nsamps)
         .def_property_readonly("dt", &io::TimeSeries::get_dt)
         .def_property_readonly("tobs", &io::TimeSeries::get_tobs)

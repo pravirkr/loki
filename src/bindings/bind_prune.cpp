@@ -126,7 +126,14 @@ void bind_prune(py::module_& m) {
                     const std::optional<std::filesystem::path>& plan_cache_file,
                     std::optional<SizeType> n_runs,
                     const std::optional<std::vector<SizeType>>& ref_segs,
-                    std::string_view backend, int device) {
+                    std::string_view backend, int device,
+                    const std::optional<search::CandidateOptions>& candidates) {
+                     if (candidates) {
+                         return std::make_unique<EPFreqSweep>(
+                             cfg, *candidates, show_progress, min_pd,
+                             poly_basis, ref_ducy, rfi_config, plan_cache_file,
+                             n_runs, ref_segs, make_exec(backend, device));
+                     }
                      return std::make_unique<EPFreqSweep>(
                          cfg, show_progress, min_pd, poly_basis, ref_ducy,
                          rfi_config, plan_cache_file, n_runs, ref_segs,
@@ -139,17 +146,26 @@ void bind_prune(py::module_& m) {
              py::arg("plan_cache_file") = std::nullopt,
              py::arg("n_runs")          = std::nullopt,
              py::arg("ref_segs")        = std::nullopt, py::kw_only(),
-             py::arg("backend") = "cpu", py::arg("device") = 0)
+             py::arg("backend") = "cpu", py::arg("device") = 0,
+             py::arg("candidates") = std::nullopt)
         .def(
             "execute",
             [](EPFreqSweep& self, const PyArrayT<float>& ts_e,
                const PyArrayT<float>& ts_v, const std::string& outdir,
-               const std::string& file_prefix) {
+               const std::string& file_prefix,
+               const io::ObservationMetadata& observation) {
                 self.execute(to_span<const float>(ts_e),
-                             to_span<const float>(ts_v), outdir, file_prefix);
+                             to_span<const float>(ts_v), outdir, file_prefix,
+                             observation);
             },
             py::arg("ts_e"), py::arg("ts_v"), py::arg("outdir") = "./",
-            py::arg("file_prefix") = "test");
+            py::arg("file_prefix") = "test", py::kw_only(),
+            py::arg("observation") = io::ObservationMetadata{})
+        .def_static("publish_candidates", &EPFreqSweep::publish_candidates,
+                    py::arg("spool"), py::arg("output"), py::kw_only(),
+                    py::arg("candidates")  = search::CandidateOptions{},
+                    py::arg("observation") = io::ObservationMetadata{},
+                    py::arg("snr_min")     = std::nullopt);
 }
 
 } // namespace loki

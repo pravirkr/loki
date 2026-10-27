@@ -146,7 +146,7 @@ def test_ep_sweep_rejects_invalid_runs_at_construction(kwargs: dict) -> None:
 
 def test_ep_target_snr_is_independent_and_invalidates_cache(tmp_path: Path) -> None:
     cfg = _search_config(nthreads=1)
-    assert cfg.snr_min == 6.0
+    assert cfg.snr_min == 7.0
     assert cfg.target_snr == 8.5
     cache = tmp_path / "snr_plan.h5"
     libloki.prune.EPRegionPlannerTime(cfg, ref_segs=[0]).save_cache(str(cache))
@@ -200,9 +200,9 @@ def test_ep_target_snr_defaults_and_override(nparams: int, expected: float) -> N
     assert (
         libloki.configs.EPSearchConfig(**args, target_snr=None).target_snr == expected
     )
-    overridden = libloki.configs.EPSearchConfig(**args, target_snr=11.0, snr_min=7.0)
+    overridden = libloki.configs.EPSearchConfig(**args, target_snr=11.0, snr_min=6.0)
     assert overridden.target_snr == 11.0
-    assert overridden.snr_min == 7.0
+    assert overridden.snr_min == 6.0
 
 
 @pytest.mark.parametrize("backend", ["cpu", "cuda"])

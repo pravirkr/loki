@@ -170,6 +170,11 @@ public:
                         SizeType n_leaves,
                         cudaStream_t stream) const = 0;
 
+    virtual void final_widths(cuda::std::span<const FoldTypeCUDA> folds,
+                              cuda::std::span<uint32_t> widths,
+                              cuda::std::span<float> scores,
+                              cudaStream_t stream) = 0;
+
     /** Fused scorer statistics and tile states. */
     [[nodiscard]] virtual float get_scorer_scratch_memory_gib() const noexcept {
         return 0.0F;
@@ -225,6 +230,10 @@ protected:
 
 public:
     // Common implementations shared by all variants
+    void final_widths(cuda::std::span<const FoldTypeCUDA> folds,
+                      cuda::std::span<uint32_t> widths,
+                      cuda::std::span<float> scores,
+                      cudaStream_t stream) override;
     /** Max boxcar S/N of @p n_rows complex folds (the seeds and the
      * ascend): with the on-chip transform and scorer. */
     void score_complex_rows(cuda::std::span<const ComplexTypeCUDA> folds,

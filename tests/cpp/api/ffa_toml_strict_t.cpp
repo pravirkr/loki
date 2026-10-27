@@ -203,3 +203,56 @@ TEST_CASE("FFATomlConfig rejects the removed CUDA keys with a hint",
     REQUIRE(message_for("[performance]\ndevice_id = 0\n")
                 .find("performance.device") != std::string::npos);
 }
+
+TEST_CASE("FFA candidate TOML options are strict",
+          "[ffa][config][candidates]") {
+    const auto cfg = loki::search::FFATomlConfig::from_string(
+        "[candidates]\ncluster = false\nradius = 2.0\nretain_detections = "
+        "false\n"
+        "[input]\ndm = 0.0\nstart_mjd = 60000.0\nbarycentric = false\n");
+    REQUIRE_FALSE(cfg.candidates.cluster);
+    REQUIRE_FALSE(cfg.candidates.retain_detections);
+    REQUIRE(cfg.observation.dm.has_value());
+    REQUIRE(*cfg.observation.dm == 0);
+    REQUIRE(cfg.candidates.enabled);
+    REQUIRE_FALSE(loki::search::FFATomlConfig::from_string(
+                      "[candidates]\nenabled = false\n")
+                      .candidates.enabled);
+    REQUIRE_THROWS(loki::search::FFATomlConfig::from_string(
+        "[candidates]\nenabled = 0\n"));
+    REQUIRE_THROWS(loki::search::FFATomlConfig::from_string(
+        "[candidates]\nraduis = 2.0\n"));
+    REQUIRE_THROWS(loki::search::FFATomlConfig::from_string(
+        "[candidates]\ncluster = 1\n"));
+    REQUIRE_THROWS(loki::search::FFATomlConfig::from_string(
+        "[candidates]\nradius = -1.0\n"));
+    REQUIRE_THROWS(loki::search::FFATomlConfig::from_string(
+        "[candidates]\nremove_harmonics = true\n"));
+}
+
+TEST_CASE("FFA production threshold and phase suppression are configurable",
+          "[ffa][config][candidates]") {
+    const auto defaults = loki::search::FFATomlConfig::from_string("");
+    REQUIRE(defaults.snr_min == 7);
+    REQUIRE(defaults.candidates.phase_radius == 0.05);
+    REQUIRE(defaults.candidates.grouping == "transitive");
+    const auto legacy = loki::search::FFATomlConfig::from_string(
+        "[search]\nsnr_min = 6.0\n[candidates]\nphase_radius = 0.0\n");
+    REQUIRE(legacy.snr_min == 6);
+    REQUIRE(legacy.candidates.phase_radius == 0);
+    REQUIRE_THROWS(loki::search::FFATomlConfig::from_string(
+        "[candidates]\nphase_radius = -0.1\n"));
+    REQUIRE_THROWS(loki::search::FFATomlConfig::from_string(
+        "[candidates]\nphase_radius = \"wide\"\n"));
+}
+
+TEST_CASE("Candidate grouping policy is strict and configurable",
+          "[config][candidates]") {
+    const auto cfg = loki::search::FFATomlConfig::from_string(
+        "[candidates]\ngrouping = \"anchored\"\n");
+    REQUIRE(cfg.candidates.grouping == "anchored");
+    REQUIRE_THROWS(loki::search::FFATomlConfig::from_string(
+        "[candidates]\ngrouping = \"invalid\"\n"));
+    REQUIRE_THROWS(loki::search::FFATomlConfig::from_string(
+        "[candidates]\ngrouping = true\n"));
+}

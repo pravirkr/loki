@@ -40,6 +40,10 @@ set(LOKI_BACKEND_DEFINITIONS
 )
 target_compile_definitions(${LOKI_LIBRARY_NAME} PRIVATE ${LOKI_BACKEND_DEFINITIONS})
 
+# Record the actual producer release in the common candidate product.
+set_property(SOURCE io/candidate_results.cpp APPEND PROPERTY COMPILE_DEFINITIONS
+             LOKI_PRODUCER_VERSION="${PROJECT_VERSION}")
+
 # Dependencies
 include(${PROJECT_SOURCE_DIR}/cmake/LokiDependencies.cmake)
 if(CMAKE_CUDA_COMPILER)
@@ -102,8 +106,10 @@ endif()
 if(CMAKE_CUDA_COMPILER)
   target_link_libraries(
     ${LOKI_LIBRARY_NAME} PRIVATE ${LOKI_CUDA_OPTIONS} CUDA::cuda_driver CUDA::curand
-                                 $<$<BOOL:${LOKI_NEEDS_CURANDDX}>:mathdx::curanddx>
   )
+  if(LOKI_NEEDS_CURANDDX)
+    target_link_libraries(${LOKI_LIBRARY_NAME} PRIVATE $<BUILD_INTERFACE:mathdx::curanddx>)
+  endif()
   # Runtime libraries: PRIVATE for shared loki, link-only PUBLIC for static loki.
   if(BUILD_SHARED_LIBS)
     target_link_libraries(${LOKI_LIBRARY_NAME} PRIVATE CUDA::cudart)

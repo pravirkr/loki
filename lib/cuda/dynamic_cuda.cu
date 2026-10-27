@@ -108,6 +108,30 @@ BasePruneDPFunctsCUDA<FoldTypeCUDA>::BasePruneDPFunctsCUDA(
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
+void BasePruneDPFunctsCUDA<FoldTypeCUDA>::final_widths(
+    cuda::std::span<const FoldTypeCUDA> folds,
+    cuda::std::span<uint32_t> widths,
+    cuda::std::span<float> scores,
+    cudaStream_t stream) {
+    const auto n     = widths.size();
+    const auto nbins = m_cfg.get_nbins();
+    if constexpr (std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>) {
+        ep_score_rows_fourier_cuda(
+            folds.data(), n, nbins,
+            thrust::raw_pointer_cast(m_boxcar_widths_d.data()),
+            m_boxcar_widths_d.size(), scores.data(),
+            m_bluestein_d.empty()
+                ? nullptr
+                : thrust::raw_pointer_cast(m_bluestein_d.data()),
+            stream, widths.data());
+    } else {
+        detection::snr_boxcar_3d_max_cuda_d(
+            folds, cuda_utils::as_span(m_boxcar_widths_d), scores, n, nbins,
+            stream, widths.data());
+    }
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
 void BasePruneDPFunctsCUDA<FoldTypeCUDA>::score_complex_rows(
     cuda::std::span<const ComplexTypeCUDA> folds,
     SizeType n_rows,

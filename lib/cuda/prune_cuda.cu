@@ -432,6 +432,39 @@ private:
         const auto n1            = leaves_view.first.size() / leaves_stride;
         const auto n2            = leaves_view.second.size() / leaves_stride;
 
+        std::vector<std::uint32_t> widths_report_h;
+        if (m_poly_basis == "taylor" && m_cfg.get_nparams() <= 4 &&
+            !m_rfi->is_active()) {
+            widths_report_h.resize(n_leaves);
+            const auto folds   = world_tree.get_folds_circular_view();
+            auto& scratch      = ws.prune;
+            SizeType written   = 0;
+            const auto collect = [&](auto region) {
+                const auto stride = world_tree.get_folds_stride();
+                const auto count  = region.size() / stride;
+                for (SizeType p = 0; p < count; p += m_batch_size) {
+                    const auto n = std::min(m_batch_size, count - p);
+                    auto widths =
+                        cuda_utils::as_span(scratch.branched_indices_d)
+                            .first(n);
+                    auto scores =
+                        cuda_utils::as_span(scratch.branched_scores_d).first(n);
+                    m_prune_funcs->final_widths(
+                        region.subspan(p * stride, n * stride), widths, scores,
+                        m_stream);
+                    cuda_utils::check_cuda_call(
+                        cudaMemcpyAsync(widths_report_h.data() + written,
+                                        widths.data(),
+                                        n * sizeof(std::uint32_t),
+                                        cudaMemcpyDeviceToHost, m_stream),
+                        "copy final EP widths failed");
+                    written += n;
+                }
+            };
+            collect(folds.first);
+            collect(folds.second);
+        }
+
         if (n_leaves > 0) {
             // Transform the suggestion params to middle of the data
             m_prune_funcs->report(leaves_view.first, coord_mid, n1, m_stream);
@@ -495,6 +528,7 @@ private:
                 .leaves       = std::move(leaves_report_h),
                 .scores       = std::move(scores_report_h),
                 .scores_ep    = std::move(scores_ep_report_h),
+                .widths       = std::move(widths_report_h),
                 .gflops       = compute_total_prune_gflops(),
                 .nparams      = m_cfg.get_nparams(),
                 .stats        = m_pstats,
@@ -516,7 +550,7 @@ private:
         result_writer.write_run_results(
             run_name, m_snail_scheme.get_data(), leaves_report_view,
             scores_report_view, scores_ep_report_view, total_pruning_gflops,
-            n_leaves, m_cfg.get_nparams(), m_pstats);
+            n_leaves, m_cfg.get_nparams(), m_pstats, widths_report_h);
     }
 
     [[nodiscard]] double compute_total_prune_gflops() const {
