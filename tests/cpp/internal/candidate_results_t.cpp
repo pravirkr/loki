@@ -7,6 +7,7 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 #include <highfive/highfive.hpp>
 
 #include "loki/io/observation.hpp"
@@ -132,10 +133,38 @@ TEST_CASE("Abandoned raw writers do not publish", "[candidates][hdf5]") {
         writer.write_metadata(meta);
     }
     REQUIRE_FALSE(std::filesystem::exists(path));
-    const HighFive::File raw(path.string() + ".tmp", HighFive::File::ReadOnly);
-    int complete = 1;
-    raw.getAttribute("complete").read(complete);
-    REQUIRE(complete == 0);
+    REQUIRE_FALSE(std::filesystem::exists(path.string() + ".tmp"));
+}
+
+TEST_CASE("Incomplete search spools are not published", "[candidates][hdf5]") {
+    Files files;
+    const auto raw = files.directory / "raw.h5";
+    spool(raw, 4);
+    {
+        HighFive::File file(raw.string(), HighFive::File::ReadWrite);
+        file.getAttribute("complete").write(0);
+    }
+    const auto out = files.directory / "out.h5";
+    REQUIRE_THROWS_WITH(
+        loki::io::detail::write_candidate_results(raw, out, {}, {}),
+        "search spool is incomplete");
+    REQUIRE_FALSE(std::filesystem::exists(out));
+}
+
+TEST_CASE("Spools outside the kinematic Taylor convention are rejected",
+          "[candidates][hdf5]") {
+    Files files;
+    const auto raw = files.directory / "raw.h5";
+    spool(raw, 4);
+    {
+        HighFive::File file(raw.string(), HighFive::File::ReadWrite);
+        file.getAttribute("param_names")
+            .write(std::vector<std::string>{"freq", "accel"});
+    }
+    const auto out = files.directory / "out.h5";
+    REQUIRE_THROWS_WITH(
+        loki::io::detail::write_candidate_results(raw, out, {}, {}),
+        "unsupported native parameter convention");
 }
 
 TEST_CASE("Empty common candidate files have valid zero-row tables",

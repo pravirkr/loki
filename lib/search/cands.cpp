@@ -15,6 +15,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -568,7 +569,19 @@ FFAResultWriter::FFAResultWriter(std::filesystem::path filename, Mode mode)
     m_file.emplace(open_file());
 }
 
-FFAResultWriter::~FFAResultWriter() = default;
+// An unfinalized write is never published: drop its partial file instead of
+// leaving "<name>.tmp" beside the results.
+FFAResultWriter::~FFAResultWriter() {
+    if (m_finalized || m_mode != Mode::kWrite) {
+        return;
+    }
+    try {
+        m_file.reset();
+    } catch (...) { // NOLINT(bugprone-empty-catch)
+    }
+    std::error_code error;
+    std::filesystem::remove(m_open_path, error);
+}
 
 HighFive::File& FFAResultWriter::h5_file() {
     if (!m_file.has_value()) {

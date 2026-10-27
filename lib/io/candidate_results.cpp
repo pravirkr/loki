@@ -19,6 +19,7 @@
 #include <hdf5.h>
 #include <highfive/highfive.hpp>
 
+#include "loki/common/types.hpp"
 #include "loki/search/candidates.hpp"
 
 #include "lib/detail/utils.hpp"
@@ -62,8 +63,10 @@ void copy_object(const HighFive::File& source,
     }
 }
 
-template <typename Source, typename Target>
-void copy_attributes(const Source& source,
+// The source is a group, not a file: HDF5 1.10 cannot count the attributes
+// of a file ID (H5Aget_num_attrs), so pass the root group "/" instead.
+template <typename Target>
+void copy_attributes(const HighFive::Group& source,
                      const Target& target,
                      bool skip_selection_counts = false) {
     for (const auto& name : source.listAttributeNames()) {
@@ -169,14 +172,6 @@ struct EPSource {
 
 std::vector<EPSource> ep_sources(const HighFive::File& file,
                                  const search::CandidateOptions& options) {
-    int complete = 0;
-    if (!file.hasAttribute("complete")) {
-        throw std::invalid_argument("EP spool has no completion marker");
-    }
-    file.getAttribute("complete").read(complete);
-    if (complete != 1) {
-        throw std::invalid_argument("EP spool is incomplete");
-    }
     std::string basis;
     file.getAttribute("poly_basis").read(basis);
     if (basis != "taylor") {
@@ -594,18 +589,26 @@ void publish_candidate_results(const std::filesystem::path& spool,
     std::vector<std::string> names;
     raw.getAttribute("param_names").read(names);
     const auto nparams = names.size();
-    if (nparams == 0 || nparams > 6 || (ep && (nparams < 2 || nparams > 4))) {
+    if (nparams == 0 || nparams > kParamNames.size() ||
+        (ep && (nparams < 2 || nparams > 4))) {
         throw std::invalid_argument("unsupported candidate parameter count");
     }
-    if (ep) {
-        constexpr std::array<std::string_view, 4> expected{"snap", "jerk",
-                                                           "accel", "freq"};
-        for (std::size_t i = 0; i < nparams; ++i) {
-            if (names[i] != expected[expected.size() - nparams + i]) {
-                throw std::invalid_argument(
-                    "unsupported EP native parameter convention");
-            }
+    // The derivative conversion below assumes the kinematic Taylor order
+    // [..., jerk, accel, freq]; the Python reader checks the same suffix.
+    for (std::size_t i = 0; i < nparams; ++i) {
+        if (names[i] != kParamNames[kParamNames.size() - nparams + i]) {
+            throw std::invalid_argument(
+                "unsupported native parameter convention");
         }
+    }
+    // Only a finalized search spool is complete; a ".tmp" left by an
+    // interrupted search would publish a truncated candidate list.
+    int complete = 0;
+    if (raw.hasAttribute("complete")) {
+        raw.getAttribute("complete").read(complete);
+    }
+    if (complete != 1) {
+        throw std::invalid_argument("search spool is incomplete");
     }
     double tobs = 0;
     raw.getAttribute("tobs").read(tobs);
@@ -725,7 +728,7 @@ void publish_candidate_results(const std::filesystem::path& spool,
             result.createAttribute("tobs", tobs);
             result.createAttribute("tsamp", tsamp);
             auto search_group = result.createGroup("search");
-            copy_attributes(raw, search_group);
+            copy_attributes(raw.getGroup("/"), search_group);
             if (raw.exist("regions")) {
                 copy_object(raw, "regions", search_group, "regions");
             }
@@ -734,7 +737,7 @@ void publish_candidate_results(const std::filesystem::path& spool,
             }
             if (ep) {
                 copy_object(raw, "chunks", result.getGroup("/"), "chunks");
-                copy_attributes(raw, result, true);
+                copy_attributes(raw.getGroup("/"), result, true);
                 config.createAttribute("snr_min", snr_min);
                 config.createAttribute(
                     "width_policy",
