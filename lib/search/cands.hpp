@@ -392,7 +392,8 @@ public:
                            double total_pruning_gflops,
                            SizeType n_leaves,
                            SizeType n_params,
-                           const PruneStatsCollection& pstats);
+                           const PruneStatsCollection& pstats,
+                           std::span<const std::uint32_t> widths = {});
 
 private:
     std::filesystem::path m_filepath;

@@ -452,7 +452,8 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
     if (dry_run) {
         const auto dims  = dry_run_dims(toml_cfg, nsamps_policy);
         auto preview_cfg = toml_cfg.to_search_config(dims.nsamps, dims.tsamp);
-        if (exec.backend == loki::Backend::kCPU) {
+        if (toml_cfg.candidates.enabled &&
+            exec.backend == loki::Backend::kCPU) {
             const auto remaining = preview_cfg.get_max_process_memory_gb() -
                                    toml_cfg.candidates.memory_gb;
             if (remaining <= 0) {
@@ -554,7 +555,8 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
 
                     SPDLOG_INFO("=== Search Summary ===");
                     // Root datasets hold the selected candidates; every
-                    // passing trial is in /detections when retained.
+                    // passing trial is in /detections when retained. With
+                    // candidate processing disabled they hold every trial.
                     if (h5.exist("detections/snr")) {
                         const auto n_detections =
                             h5.getDataSet("detections/snr").getDimensions();
@@ -562,7 +564,11 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
                                     n_detections.empty() ? 0UL
                                                          : n_detections[0]);
                     }
-                    SPDLOG_INFO("Selected candidates        : {}", n_cands);
+                    if (h5.exist("candidates")) {
+                        SPDLOG_INFO("Selected candidates        : {}", n_cands);
+                    } else {
+                        SPDLOG_INFO("Detections above snr_min   : {}", n_cands);
+                    }
                     SPDLOG_INFO(
                         "Top candidate SNR          : {:.2f} (candidate "
                         "#{})",
@@ -695,12 +701,37 @@ void print_ep_plan(const loki::algorithms::EPRegionPlanner<FoldType>& planner,
                              cache_path ? cache_path->string() : "none");
 }
 
+/// Candidate processing runs after merge, while the shared engine buffers
+/// remain resident. Use exactly the facade's reservation for cache/dry runs.
+loki::search::PulsarSearchConfig
+ep_candidate_planning_config(const loki::search::EPTomlConfig& config,
+                             const loki::search::PulsarSearchConfig& input,
+                             loki::Exec exec) {
+    auto cfg = input;
+    if (config.candidates.enabled && config.poly_basis == "taylor" &&
+        cfg.get_nparams() <= 4) {
+        config.candidates.validate();
+        if (exec.backend == loki::Backend::kCPU) {
+            const auto remaining =
+                cfg.get_max_process_memory_gb() - config.candidates.memory_gb;
+            if (remaining <= 0) {
+                throw std::invalid_argument(
+                    "candidate host memory budget must be smaller than total "
+                    "CPU search memory budget");
+            }
+            cfg.set_max_process_memory_gb(remaining);
+        }
+    }
+    return cfg;
+}
+
 /// Plans the EP chunks of @p cfg (or loads them from @p cache_path, writing
 /// the cache when it does not exist) and prints them. No sweep is built.
 void plan_and_print_ep(const loki::search::EPTomlConfig& toml_cfg,
-                       const loki::search::PulsarSearchConfig& cfg,
+                       const loki::search::PulsarSearchConfig& input_cfg,
                        const std::optional<std::filesystem::path>& cache_path,
                        loki::Exec exec) {
+    const auto cfg = ep_candidate_planning_config(toml_cfg, input_cfg, exec);
     // The same worker count the sweep uses, so the cache matches it. The GPU
     // sweep prunes its runs on one worker.
     const SizeType n_workers = loki::algorithms::ep_sweep_n_workers(
@@ -757,6 +788,16 @@ void print_ep_summary(const std::filesystem::path& result_file) {
     }
     try {
         const HighFive::File h5(result_file.string(), HighFive::File::ReadOnly);
+        if (h5.hasAttribute("n_candidates")) {
+            std::uint64_t detections = 0;
+            std::uint64_t selected   = 0;
+            h5.getAttribute("n_detections").read(detections);
+            h5.getAttribute("n_candidates").read(selected);
+            SPDLOG_INFO("Final EP detections above candidate S/N : {}",
+                        detections);
+            SPDLOG_INFO("Selected EP candidates                  : {}",
+                        selected);
+        }
         std::vector<std::string> param_names;
         if (h5.hasAttribute("param_names")) {
             h5.getAttribute("param_names").read(param_names);
@@ -867,8 +908,9 @@ prepare_ep_plan_cache(const loki::search::EPTomlConfig& toml_cfg,
 
 std::optional<std::filesystem::path>
 prepare_ep_plan_cache(const loki::search::EPTomlConfig& toml_cfg,
-                      const loki::search::PulsarSearchConfig& cfg,
+                      const loki::search::PulsarSearchConfig& input_cfg,
                       loki::Exec exec) {
+    const auto cfg = ep_candidate_planning_config(toml_cfg, input_cfg, exec);
     return cfg.get_use_fourier()
                ? prepare_ep_plan_cache<loki::ComplexType>(toml_cfg, cfg, exec)
                : prepare_ep_plan_cache<float>(toml_cfg, cfg, exec);
@@ -913,13 +955,36 @@ int run_search_ep(const loki::search::EPTomlConfig& toml_cfg,
                     loki::to_string(exec.backend), exec.device);
     }
 
-    loki::pipelines::EPFreqSweep sweep(
-        ep_cfg, /*show_progress=*/true, toml_cfg.min_pd, toml_cfg.poly_basis,
-        toml_cfg.ref_ducy, {}, prepare_ep_plan_cache(toml_cfg, ep_cfg, exec),
-        toml_cfg.n_runs, toml_cfg.ref_segs, exec);
+    const auto cache = prepare_ep_plan_cache(toml_cfg, ep_cfg, exec);
+    const bool common_candidates = toml_cfg.candidates.enabled &&
+                                   toml_cfg.poly_basis == "taylor" &&
+                                   ep_cfg.get_nparams() <= 4;
+    auto sweep                   = common_candidates
+                                       ? loki::pipelines::EPFreqSweep(
+                                             ep_cfg, toml_cfg.candidates, true, toml_cfg.min_pd,
+                                             toml_cfg.poly_basis, toml_cfg.ref_ducy, {}, cache,
+                                             toml_cfg.n_runs, toml_cfg.ref_segs, exec)
+                                       : loki::pipelines::EPFreqSweep(
+                                             ep_cfg, true, toml_cfg.min_pd, toml_cfg.poly_basis,
+                                             toml_cfg.ref_ducy, {}, cache, toml_cfg.n_runs,
+                                             toml_cfg.ref_segs, exec);
+    if (toml_cfg.candidates.enabled && !common_candidates) {
+        SPDLOG_WARN("Common EP candidates currently support polynomial Taylor "
+                    "only; writing run diagnostics");
+    }
+    auto observation = ts.get_observation();
+    if (toml_cfg.observation.dm) {
+        observation.dm = toml_cfg.observation.dm;
+    }
+    if (toml_cfg.observation.start_mjd) {
+        observation.start_mjd = toml_cfg.observation.start_mjd;
+    }
+    if (toml_cfg.observation.barycentric) {
+        observation.barycentric = toml_cfg.observation.barycentric;
+    }
     sweep.execute(ts.get_ts_e().first(actual_nsamps),
                   ts.get_ts_v().first(actual_nsamps), outdir_path,
-                  toml_cfg.prefix);
+                  toml_cfg.prefix, observation);
 
     print_ep_summary(outdir_path /
                      std::format("{}_ep_results.h5", toml_cfg.prefix));
@@ -1074,6 +1139,10 @@ int main(int argc, char** argv) {
         "--barycentric", ffa_cfg.observation.barycentric,
         "Override timing frame: true (barycentric) or false (topocentric)");
     auto* grp_candidates = ffa->add_option_group("Candidate processing");
+    grp_candidates->add_flag(
+        "--candidates,!--no-candidates", ffa_cfg.candidates.enabled,
+        "Enable/disable candidate processing; disabled writes the flat "
+        "detection file of earlier versions (default: enabled)");
     grp_candidates->add_flag(
         "--cluster,!--no-cluster", ffa_cfg.candidates.cluster,
         "Enable/disable phase-track clustering (default: enabled)");
@@ -1273,16 +1342,71 @@ int main(int argc, char** argv) {
     ep_grp_range->add_option("--jerk-max", ep_cfg.jerk_max,
                              "Maximum jerk in m/s^3");
 
+    ep->add_option("--dm", ep_cfg.observation.dm,
+                   "Override single-trial dispersion measure");
+    ep->add_option("--start-mjd", ep_cfg.observation.start_mjd,
+                   "Override MJD of the first sample");
+    ep->add_option("--barycentric", ep_cfg.observation.barycentric,
+                   "Override barycentric/topocentric timing frame");
+    auto* ep_grp_candidates = ep->add_option_group("Candidate processing");
+    ep_grp_candidates->add_flag(
+        "--candidates,!--no-candidates", ep_cfg.candidates.enabled,
+        "Enable/disable candidate processing; disabled writes only the run "
+        "diagnostics of earlier versions (default: enabled)");
+    ep_grp_candidates->add_flag(
+        "--cluster,!--no-cluster", ep_cfg.candidates.cluster,
+        "Enable/disable phase-track clustering (default: enabled)");
+    ep_grp_candidates
+        ->add_option("--cluster-grouping", ep_cfg.candidates.grouping,
+                     "Grouping: transitive (default) or anchored")
+        ->check(CLI::IsMember({"transitive", "anchored"}));
+    ep_grp_candidates->add_option(
+        "--cluster-radius", ep_cfg.candidates.radius,
+        "Clustering radius in narrower pulse widths (default: 1)");
+    ep_grp_candidates->add_option("--cluster-phase-radius",
+                                  ep_cfg.candidates.phase_radius,
+                                  "Minimum suppression radius in phase cycles "
+                                  "(default: 0.05; 0 disables floor)");
+    ep_grp_candidates->add_flag(
+        "--retain-detections,!--no-retain-detections",
+        ep_cfg.candidates.retain_detections,
+        "Keep raw detections and membership (default: enabled)");
+    ep_grp_candidates->add_flag("--flag-harmonics,!--no-flag-harmonics",
+                                ep_cfg.candidates.flag_harmonics,
+                                "Flag harmonic relationships between clusters");
+    ep_grp_candidates->add_flag(
+        "--remove-harmonics,!--no-remove-harmonics",
+        ep_cfg.candidates.remove_harmonics,
+        "Exclude flagged harmonics; requires --flag-harmonics");
+    ep_grp_candidates->add_option(
+        "--harmonic-denominator-max",
+        ep_cfg.candidates.harmonic_denominator_max,
+        "Maximum rational harmonic denominator (default: 100)");
+    ep_grp_candidates->add_option("--harmonic-phase-distance",
+                                  ep_cfg.candidates.harmonic_phase_distance,
+                                  "Harmonic track tolerance in pulse widths");
+    ep_grp_candidates->add_option("--harmonic-snr-distance",
+                                  ep_cfg.candidates.harmonic_snr_distance,
+                                  "Harmonic S/N agreement tolerance");
+    ep_grp_candidates->add_option(
+        "--max-candidates", ep_cfg.candidates.max_candidates,
+        "Maximum folding candidates; zero is unlimited");
+    ep_grp_candidates->add_option(
+        "--candidate-memory-gb", ep_cfg.candidates.memory_gb,
+        "Additional host budget reserved for candidate processing");
+    ep_grp_candidates->add_option("--candidate-tempdir",
+                                  ep_cfg.candidates.temporary_directory,
+                                  "Directory for bounded external sorting");
+
     auto* ep_grp_search =
         ep->add_option_group("Detection & Folding Parameters");
     ep_grp_search->add_option("--nbins", ep_cfg.nbins,
                               "Phase bin count (default: 64)");
     ep_grp_search->add_option("--eta", ep_cfg.eta,
                               "Tolerance parameter (default: 1.0)");
-    ep_grp_search->add_option(
-        "--snr-min", ep_cfg.snr_min,
-        "Minimum candidate SNR for final HDF5 (default: 7.0; EP filtering "
-        "reserved for future use)");
+    ep_grp_search->add_option("--snr-min", ep_cfg.snr_min,
+                              "Minimum final candidate S/N, independent of the "
+                              "pruning target (default: 7.0)");
     ep_grp_search->add_option("--ducy-max", ep_cfg.ducy_max,
                               "Maximum duty cycle to evaluate (default: 0.2)");
     ep_grp_search->add_option("--wtsp", ep_cfg.wtsp,

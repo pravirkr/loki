@@ -12,6 +12,10 @@ namespace loki::search {
 
 /// Host-side postprocessing only; independent of the scoring backend.
 struct CandidateOptions {
+    /// false skips candidate processing: FFA writes the search's flat
+    /// detection file and EP its run diagnostics, as before candidate
+    /// products, and no host memory is reserved.
+    bool enabled{true};
     bool cluster{true};
     std::string grouping{"transitive"}; ///< "transitive" or "anchored".
     double radius{1.0}; ///< Phase-residual span in narrower pulse widths.
@@ -24,7 +28,7 @@ struct CandidateOptions {
     double harmonic_phase_distance{1.0};
     double harmonic_snr_distance{3.0};
     std::uint64_t max_candidates{0}; ///< Zero means unlimited.
-    double memory_gb{1.0};           ///< Additional host memory, decimal GB.
+    double memory_gb{1.0};           ///< Additional host memory, GB (2^30).
     std::filesystem::path temporary_directory;
     void validate() const;
 };

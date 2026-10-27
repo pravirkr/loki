@@ -13,6 +13,13 @@ from loki import libloki
 from loki.candidates import C, CandidateFile, export_pulsarx, main
 
 
+@pytest.fixture(params=["cpu", "cuda"])
+def backend(request: pytest.FixtureRequest) -> str:
+    if request.param not in libloki.available_backends():
+        pytest.skip(f"{request.param} backend not built")
+    return request.param
+
+
 def _legacy(path: Path, *, jerk: float = 3.0, acceleration: float = -20.0) -> None:
     with h5py.File(path, "w") as handle:
         handle.attrs.update(complete=1, ffa_version="0.1.0-cpp")
@@ -98,7 +105,7 @@ def test_higher_derivatives_cannot_be_silently_truncated(tmp_path: Path) -> None
 
 @pytest.mark.parametrize("grouping", ["transitive", "anchored"])
 def test_ffa_common_schema_and_repeated_execution(
-    tmp_path: Path, grouping: str
+    tmp_path: Path, grouping: str, backend: str
 ) -> None:
     rng = np.random.default_rng(45)
     n = 8192
@@ -122,7 +129,9 @@ def test_ffa_common_schema_and_repeated_execution(
     observation.start_mjd = 60000
     observation.barycentric = False
     observation.original_nsamps = n + 100
-    sweep = libloki.ffa.FFAFreqSweep(cfg, show_progress=False, candidates=options)
+    sweep = libloki.ffa.FFAFreqSweep(
+        cfg, show_progress=False, candidates=options, backend=backend
+    )
     for prefix in ("first", "second"):
         sweep.execute(
             samples, np.ones(n, np.float32), tmp_path, prefix, observation=observation
@@ -205,6 +214,68 @@ def test_ffa_common_schema_and_repeated_execution(
     with pytest.raises(ValueError, match="frames differ"):
         export_pulsarx(
             tmp_path / "first_ffa_results.h5", output, timing_frame="barycentric"
+        )
+
+
+def test_disabled_candidates_write_the_flat_detection_file(
+    tmp_path: Path, backend: str
+) -> None:
+    rng = np.random.default_rng(45)
+    n = 8192
+    samples = rng.normal(size=n).astype(np.float32)
+    samples[np.arange(n) % 100 < 5] += 2
+    cfg = libloki.configs.FFASearchConfig(
+        n,
+        0.001,
+        32,
+        1,
+        np.array([[9.5, 10.5]]),
+        use_fourier=True,
+        nthreads=1,
+        snr_min=4,
+    )
+    disabled = libloki.configs.CandidateOptions()
+    disabled.enabled = False
+    sweep = libloki.ffa.FFAFreqSweep(
+        cfg, show_progress=False, candidates=disabled, backend=backend
+    )
+    sweep.execute(samples, np.ones(n, np.float32), tmp_path, "flat")
+    flat = tmp_path / "flat_ffa_results.h5"
+    assert not list(tmp_path.glob(".loki-ffa-*"))
+    with h5py.File(flat) as handle:
+        assert "schema_version" not in handle.attrs
+        for name in ("candidates", "detections", "clusters", "search"):
+            assert name not in handle
+        assert float(handle.attrs["total_runtime"]) > 0.0
+        assert handle["snr"].size == handle["param_sets"].shape[0] > 0
+    with CandidateFile(flat) as candidates:
+        assert candidates.legacy
+
+    # The flat file is the spool that candidate processing starts from.
+    options = libloki.configs.CandidateOptions()
+    options.memory_gb = 0.01
+    libloki.ffa.FFAFreqSweep.publish_candidates(
+        flat, tmp_path / "published_ffa_results.h5", candidates=options
+    )
+    direct = libloki.ffa.FFAFreqSweep(
+        cfg, show_progress=False, candidates=options, backend=backend
+    )
+    direct.execute(samples, np.ones(n, np.float32), tmp_path, "direct")
+    with (
+        h5py.File(tmp_path / "published_ffa_results.h5") as published,
+        h5py.File(tmp_path / "direct_ffa_results.h5") as reference,
+        h5py.File(flat) as handle,
+    ):
+        assert published["detections/snr"].size == handle["snr"].size
+        np.testing.assert_array_equal(
+            published["candidates/id"][:], reference["candidates/id"][:]
+        )
+        np.testing.assert_array_equal(
+            published["candidates/snr"][:], reference["candidates/snr"][:]
+        )
+    with pytest.raises(ValueError, match="enabled"):
+        libloki.ffa.FFAFreqSweep.publish_candidates(
+            flat, tmp_path / "x.h5", candidates=disabled
         )
 
 
@@ -299,7 +370,7 @@ def test_export_retains_unsigned_ids_and_rejects_malformed_columns(
         export_pulsarx(source, output, pepoch=60000)
 
 
-def test_failed_postprocessing_keeps_the_spool(tmp_path: Path) -> None:
+def test_failed_postprocessing_keeps_the_spool(tmp_path: Path, backend: str) -> None:
     rng = np.random.default_rng(45)
     n = 8192
     samples = rng.normal(size=n).astype(np.float32)
@@ -316,7 +387,9 @@ def test_failed_postprocessing_keeps_the_spool(tmp_path: Path) -> None:
     )
     starved = libloki.configs.CandidateOptions()
     starved.memory_gb = 1e-4  # too small for the grouping index
-    sweep = libloki.ffa.FFAFreqSweep(cfg, show_progress=False, candidates=starved)
+    sweep = libloki.ffa.FFAFreqSweep(
+        cfg, show_progress=False, candidates=starved, backend=backend
+    )
     with pytest.raises(Exception, match="memory"):
         sweep.execute(samples, np.ones(n, np.float32), tmp_path, "run")
     spool = tmp_path / "run_ffa_spool.h5"
@@ -329,7 +402,9 @@ def test_failed_postprocessing_keeps_the_spool(tmp_path: Path) -> None:
     libloki.ffa.FFAFreqSweep.publish_candidates(
         spool, tmp_path / "resumed_ffa_results.h5", candidates=options
     )
-    direct = libloki.ffa.FFAFreqSweep(cfg, show_progress=False, candidates=options)
+    direct = libloki.ffa.FFAFreqSweep(
+        cfg, show_progress=False, candidates=options, backend=backend
+    )
     direct.execute(samples, np.ones(n, np.float32), tmp_path, "direct")
     with (
         h5py.File(tmp_path / "resumed_ffa_results.h5") as resumed,
@@ -347,7 +422,10 @@ def test_failed_postprocessing_keeps_the_spool(tmp_path: Path) -> None:
         )
 
 
-def test_accelerated_ffa_export_matches_native_parameters(tmp_path: Path) -> None:
+@pytest.mark.parametrize("use_fourier", [False, True])
+def test_accelerated_ffa_export_matches_native_parameters(
+    tmp_path: Path, backend: str, use_fourier: bool
+) -> None:
     # The C++ product's f1 and the converter's check of it against the native
     # acceleration must agree, with fdot = -f accel / c, through a real search.
     rng = np.random.default_rng(7)
@@ -360,7 +438,7 @@ def test_accelerated_ffa_export_matches_native_parameters(tmp_path: Path) -> Non
         32,
         1,
         np.array([[-2e6, 2e6], [9.5, 10.5]]),
-        use_fourier=True,
+        use_fourier=use_fourier,
         nthreads=1,
         snr_min=4,
     )
@@ -371,7 +449,9 @@ def test_accelerated_ffa_export_matches_native_parameters(tmp_path: Path) -> Non
     observation.dm = 10.0
     observation.start_mjd = 60000
     observation.barycentric = False
-    sweep = libloki.ffa.FFAFreqSweep(cfg, show_progress=False, candidates=options)
+    sweep = libloki.ffa.FFAFreqSweep(
+        cfg, show_progress=False, candidates=options, backend=backend
+    )
     sweep.execute(
         samples, np.ones(n, np.float32), tmp_path, "acc", observation=observation
     )

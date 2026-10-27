@@ -10,6 +10,8 @@
 #include "loki/algorithms/prune_rfi.hpp"
 #include "loki/common/backend.hpp"
 #include "loki/common/types.hpp"
+#include "loki/io/observation.hpp"
+#include "loki/search/candidates.hpp"
 #include "loki/search/configs.hpp"
 
 namespace loki::pipelines {
@@ -40,8 +42,25 @@ class EPFreqSweep {
 public:
     /// The CPU thread count comes from @p cfg; @p exec selects the backend
     /// and the device.
+    /// This overload retains the existing run-oriented diagnostic output.
     explicit EPFreqSweep(
         const search::PulsarSearchConfig& cfg,
+        bool show_progress                           = true,
+        float min_pd                                 = 0.1F,
+        std::string_view poly_basis                  = "taylor",
+        float ref_ducy                               = 0.1F,
+        const algorithms::PruneRFIConfig& rfi_config = {},
+        const std::optional<std::filesystem::path>& plan_cache_file =
+            std::nullopt,
+        std::optional<SizeType> n_runs                = std::nullopt,
+        std::optional<std::vector<SizeType>> ref_segs = std::nullopt,
+        Exec exec                                     = {});
+
+    /// Publish common candidates after all independent runs have finished.
+    /// Currently supports polynomial Taylor with an inactive RFI config.
+    explicit EPFreqSweep(
+        const search::PulsarSearchConfig& cfg,
+        const search::CandidateOptions& candidates,
         bool show_progress                           = true,
         float min_pd                                 = 0.1F,
         std::string_view poly_basis                  = "taylor",
@@ -61,8 +80,18 @@ public:
 
     void execute(std::span<const float> ts_e,
                  std::span<const float> ts_v,
-                 const std::filesystem::path& outdir = "./",
-                 std::string_view file_prefix        = "test");
+                 const std::filesystem::path& outdir        = "./",
+                 std::string_view file_prefix               = "test",
+                 const io::ObservationMetadata& observation = {});
+
+    /// Retry postprocessing of a completed EP spool without searching again.
+    /// With no override, snr_min is read from the saved search configuration.
+    static void
+    publish_candidates(const std::filesystem::path& spool,
+                       const std::filesystem::path& output,
+                       const search::CandidateOptions& candidates = {},
+                       const io::ObservationMetadata& observation = {},
+                       std::optional<double> snr_min = std::nullopt);
 
 private:
     class Impl;

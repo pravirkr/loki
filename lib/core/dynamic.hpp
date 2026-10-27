@@ -133,6 +133,11 @@ public:
     virtual void report(std::span<double> leaves_tree,
                         std::pair<double, double> coord_report,
                         SizeType n_leaves) const = 0;
+
+    /// Winning boxcar width of each final fold; first configured width wins
+    /// ties.
+    virtual void final_widths(std::span<const FoldType> folds,
+                              std::span<std::uint32_t> widths) = 0;
 };
 
 namespace detail {
@@ -174,6 +179,8 @@ protected:
 
 public:
     // Common implementations shared by all variants
+    void final_widths(std::span<const FoldType> folds,
+                      std::span<std::uint32_t> widths) override;
     std::span<const FoldType> load_segment(std::span<const FoldType> ffa_fold,
                                            SizeType seg_idx) const override;
 

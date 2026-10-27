@@ -61,6 +61,23 @@ inline void ev_circular_prefix(const float* __restrict__ ts_e,
     }
 }
 
+/// Boxcar template constants for every width: snr = (h + b) * dmax - b * sum.
+/// Restrict keeps GCC's scalar/SIMD choice independent of the heap distance
+/// between the arrays: the paths can differ by a few ULPs under -ffast-math.
+inline void boxcar_template_consts(SizeType nbins,
+                                   const SizeType* __restrict__ widths,
+                                   SizeType nwidths,
+                                   float* __restrict__ h_vals,
+                                   float* __restrict__ b_vals) noexcept {
+    for (SizeType iw = 0; iw < nwidths; ++iw) {
+        const auto w = widths[iw];
+        h_vals[iw]   = std::sqrt(static_cast<float>(nbins - w) /
+                                 static_cast<float>(nbins * w));
+        b_vals[iw] =
+            static_cast<float>(w) * h_vals[iw] / static_cast<float>(nbins - w);
+    }
+}
+
 template <bool Is3D, bool FindMax>
 void snr_boxcar_impl(const float* __restrict__ folds,
                      SizeType nprofiles,
@@ -76,13 +93,8 @@ void snr_boxcar_impl(const float* __restrict__ folds,
     // Precompute template parameters (h, b) for all widths
     std::vector<float> h_vals(nwidths);
     std::vector<float> b_vals(nwidths);
-    for (SizeType iw = 0; iw < nwidths; ++iw) {
-        const auto w = widths[iw];
-        h_vals[iw]   = std::sqrt(static_cast<float>(nbins - w) /
-                                 static_cast<float>(nbins * w));
-        b_vals[iw] =
-            static_cast<float>(w) * h_vals[iw] / static_cast<float>(nbins - w);
-    }
+    boxcar_template_consts(nbins, widths, nwidths, h_vals.data(),
+                           b_vals.data());
     const float inv_stdnoise = Is3D ? 1.0F : (1.0F / stdnoise);
 
 #pragma omp parallel num_threads(nthreads) default(none)                       \
@@ -127,22 +139,6 @@ void snr_boxcar_impl(const float* __restrict__ folds,
                 scores[i] = max_snr;
             }
         }
-    }
-}
-
-/// Boxcar template constants for every width: snr = (h + b) * dmax - b * sum.
-/// The single definition keeps every 3D scorer on the same constants.
-inline void boxcar_template_consts(SizeType nbins,
-                                   const SizeType* __restrict__ widths,
-                                   SizeType nwidths,
-                                   float* __restrict__ h_vals,
-                                   float* __restrict__ b_vals) noexcept {
-    for (SizeType iw = 0; iw < nwidths; ++iw) {
-        const auto w = widths[iw];
-        h_vals[iw]   = std::sqrt(static_cast<float>(nbins - w) /
-                                 static_cast<float>(nbins * w));
-        b_vals[iw] =
-            static_cast<float>(w) * h_vals[iw] / static_cast<float>(nbins - w);
     }
 }
 

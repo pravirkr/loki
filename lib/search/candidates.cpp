@@ -205,11 +205,18 @@ bool candidate_brighter(const Candidate& a, const Candidate& b) {
 }
 
 CandidateClusterer::CandidateClusterer(double tobs,
-                                       const CandidateOptions& options)
+                                       const CandidateOptions& options,
+                                       std::size_t reserved_bytes)
     : m_tobs(tobs),
-      m_options(options) {
+      m_options(options),
+      m_memory_gb(options.memory_gb -
+                  static_cast<double>(reserved_bytes) / utils::kBytesPerGB) {
     positive(tobs, "candidate tobs must be finite and positive");
     options.validate();
+    if (m_memory_gb <= 0) {
+        throw std::runtime_error(
+            "candidate source index exhausts the host memory budget");
+    }
 }
 
 std::uint64_t CandidateClusterer::append(const Candidate& c) {
@@ -250,7 +257,7 @@ std::uint64_t CandidateClusterer::append(const Candidate& c) {
     constexpr std::size_t kBytesPerCluster = 8 * sizeof(CandidateCluster) + 256;
     const double required = static_cast<double>(clusters.size() + 1) *
                             static_cast<double>(kBytesPerCluster);
-    if (required > m_options.memory_gb * utils::kBytesPerGB / 2) {
+    if (required > m_memory_gb * utils::kBytesPerGB / 2) {
         throw std::runtime_error("candidate representative index exceeds host "
                                  "memory budget; increase candidate memory_gb");
     }
@@ -289,7 +296,7 @@ std::uint64_t CandidateClusterer::append_transitive(const Candidate& c) {
         constexpr std::size_t kBytesPerNode =
             8 * sizeof(Node) + 8 * sizeof(CandidateCluster) + 512;
         if (static_cast<double>(m_nodes.size() + 1) * kBytesPerNode >
-            m_options.memory_gb * utils::kBytesPerGB / 2) {
+            m_memory_gb * utils::kBytesPerGB / 2) {
             throw std::runtime_error(
                 "candidate transitive track index exceeds host "
                 "memory budget; increase candidate memory_gb");

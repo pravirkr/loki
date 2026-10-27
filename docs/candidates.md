@@ -1,8 +1,121 @@
 # Candidate products
 
-An FFA frequency sweep now writes a versioned common candidate file,
-`<prefix>_ffa_results.h5`. Searches operate on **one already dedispersed DM
-trial**. Loki does not perform a DM search or distill candidates across DMs.
+FFA and candidate-enabled Taylor EP sweeps write versioned common candidate
+files, `<prefix>_ffa_results.h5` and `<prefix>_ep_results.h5`. Searches operate
+on **one already dedispersed DM trial**. Loki does not perform a DM search or
+distill candidates across DMs.
+
+## Switching candidate processing off
+
+Candidate processing is on by default. Turn it off to get the output of
+earlier versions:
+
+- TOML: `[candidates] enabled = false`;
+- CLI: `loki search ffa --no-candidates` or `loki search ep --no-candidates`;
+- Python/C++: `CandidateOptions.enabled = False` (`enabled = false`).
+
+With processing off, nothing is grouped, selected or sorted, and no host
+memory is reserved for it: the whole `max_process_memory_gb` goes to the
+search. FFA writes the flat detection file `<prefix>_ffa_results.h5` of
+earlier versions, one root row per passing trial with the search attributes
+at the root. It also carries two additive items, `detection_id` and
+`/regions`. This flat file is also the spool candidate processing starts
+from, so `FFAFreqSweep.publish_candidates` can publish it later. EP writes
+only its run diagnostics, as the constructor without candidates does; Taylor
+runs still save their winning `width`. `publish_candidates` refuses options
+with processing off.
+
+## EP candidates
+
+Taylor EP sweeps can publish the same common candidate tables after every
+independent run has finished and the run files have been merged. CPU runs
+remain independent and may execute concurrently. Postprocessing reads their
+final leaves across all runs/chunks, applies `snr_min`, then uses the same
+phase-track grouping and selection as FFA. Every surviving leaf contributes
+one winning boxcar width. There is no expansion into multiple width trials,
+and no early suppression of a weaker run's leaves before transitive closure.
+
+The result remains `<prefix>_ep_results.h5`. Existing `/chunks/.../runs/...`
+diagnostics and search attributes are preserved alongside `/observation`,
+`/processing`, `/search`, `/detections`, `/clusters` and `/candidates`.
+`retain_detections = false` removes the common raw table; the original run
+diagnostics remain available. Root compatibility arrays refer to selected
+candidates, as for FFA.
+
+The candidate score is the existing run `scores` value: maximum boxcar S/N of
+the final reintegrated fold. `scores_ep` remains the pruning-score diagnostic.
+Candidate options and S/N selection do not change pruning thresholds, survivor
+decisions or RNG streams. Width identity is recovered from the final folds
+using the same backend scorer; the first configured width wins an exact tie.
+Each run now saves this identity in `width`; a chunk saves `scoring_widths`.
+
+This increment supports full-observation polynomial Taylor searches
+(acceleration, jerk and snap) with RFI control disabled. Common-product
+construction rejects active RFI, Chebyshev and circular-model requests. The
+existing diagnostic constructor remains available for other supported searches.
+Harvesting and masking are outside this candidate path.
+
+In Python, pass `candidates=CandidateOptions()` to opt in; `candidates=None`
+retains the existing diagnostic-only API. In C++, use the overload whose
+second argument is `CandidateOptions`. The CLI enables candidate processing
+for supported Taylor searches using the existing `[candidates]` table and
+the same flags as FFA, including `--no-cluster`. Other CLI models retain
+diagnostic output and report that common candidates are unsupported.
+
+For a Taylor search configured in `ep.toml`, with output directory `results`
+and prefix `search`, the CLI search and conversion are:
+
+```bash
+loki search ep -c ep.toml
+loki-candidates results/search_ep_results.h5 results/search.cands
+```
+
+Clustering is enabled by default. The converter exports `/candidates`, the
+selected representatives, unless a different table is requested. See
+[PulsarX conversion](#pulsarx-conversion) for metadata and folding-epoch
+requirements.
+
+```python
+options = libloki.configs.CandidateOptions()
+options.memory_gb = 0.25
+sweep = libloki.prune.EPFreqSweep(
+    cfg, ref_segs=[2, 4], show_progress=False,
+    candidates=options, backend="cuda",
+)
+sweep.execute(ts_e, ts_v, "results", "search", observation=observation)
+```
+
+Completed Taylor runs already report their kinematic parameters at the full
+observation midpoint, independent of the starting reference segment. The
+adapter normalizes these reported terms to frequency derivatives without
+applying a second epoch shift. Native value/scale pairs are retained in the
+run diagnostics; their scales are not labeled as statistical uncertainties.
+The common `has_parameter_errors` flag remains false.
+
+`/search/sources/run_path` and `chunk_id` map each `source_region` to its
+original run. `source_index` is the original final-leaf row, and the uint64
+identity is `(source_region << 32) | source_index`. Source ordinals follow
+sorted run paths, independent of writer completion order. Both indices have
+explicit overflow checks. Every common row retains its original score,
+width, bin count and native parameters.
+
+Publication is atomic. If postprocessing fails after the search completes,
+the previous product is preserved and completed runs are kept in
+`<prefix>_ep_spool.h5`. Retry without searching again:
+
+```python
+libloki.prune.EPFreqSweep.publish_candidates(
+    "results/search_ep_spool.h5", "results/search_ep_results.h5",
+    candidates=options, observation=observation,
+)
+```
+
+The default retry threshold comes from the spool's saved `snr_min`; an explicit
+override affects postprocessing only. Supply the original observation metadata
+again, as with FFA retry publication. Incomplete spools are rejected. The
+common Python reader and PulsarX converter accept supported EP products with
+the same DM/frame/epoch requirements; nonzero derivatives above jerk are
+still rejected by PulsarX export.
 
 ## Search configuration
 
@@ -160,7 +273,8 @@ grids or chunk plans.
 `param_sets` is `(N, len(param_names))` in native Loki parameter order
 `[..., jerk, accel, freq]`. Higher derivatives remain in this array.
 `param_errors` has the same shape, with validity indicated by
-`has_parameter_errors`; FFA currently supplies no parameter uncertainties.
+`has_parameter_errors`; neither FFA nor Taylor EP currently supplies statistical
+parameter uncertainties.
 `f0`, `f1`, `f2` are frequency, frequency derivative and second frequency
 derivative in Hz, Hz/s and Hz/s². Other columns include `snr`, `width`, `nbins`,
 `duty_cycle`, `member_count`, `phase_extent`, `parent_cluster_id`, `harmonic_numerator`,
@@ -227,6 +341,8 @@ Runtime/allocator/HDF5 overhead is additional to the accounted buffers.
 
 ```bash
 loki-candidates trial_ffa_results.h5 trial.cands
+# The same converter accepts a common Taylor EP product:
+loki-candidates trial_ep_results.h5 trial_ep.cands
 # Also available without relying on the installed entry point:
 python -m loki.candidates trial_ffa_results.h5 trial.cands
 ```
@@ -263,15 +379,17 @@ Unknown DM requires `--dm`. Unknown epoch requires `--pepoch` when derivatives
 are nonzero. Nonzero terms above jerk cannot be represented by this format and
 are rejected rather than silently truncated.
 
-## Migration and EP adapter contract
+## Migration and shared candidate contract
 
 ### Behaviour changes for existing FFA users
 
 - **Default `snr_min` is 7, was 6** (C++ `FFASearchConfig`, Python, both TOML
   templates). It is the FFA detection threshold, so a search relying on the
   default writes fewer detections. Keep the old behaviour with
-  `[search] snr_min = 6.0`. EP stores `snr_min` but its pruning uses
-  `target_snr`, which is unchanged.
+  `[search] snr_min = 6.0`. Candidate-enabled Taylor EP applies `snr_min`
+  to final reintegrated scores after all runs finish. Its pruning uses the
+  independent `target_snr`, which is unchanged. Diagnostic-only EP output
+  retains all final leaves without this candidate filter.
 - **Root datasets now mean the selected candidates.** `snr`, `param_sets`,
   `width` and `nbins` are hard links to `/candidates`: one row per selected
   representative, sorted by S/N, not one row per passing trial. Every passing
@@ -285,7 +403,9 @@ are rejected rather than silently truncated.
 - **CPU memory.** The candidate budget `candidates.memory_gb` (default 1 GB) is
   reserved inside `max_process_memory_gb`. A CPU search with
   `max_process_memory_gb <= memory_gb` now fails at construction; lower
-  `[candidates] memory_gb` or raise the search cap. CUDA is unaffected.
+  `[candidates] memory_gb` or raise the search cap. Candidate-enabled Taylor
+  EP uses the same reservation. CUDA keeps its device search cap and a
+  separate host candidate budget.
 
 ### Reading old files
 
@@ -294,12 +414,23 @@ missing observational metadata can be supplied during export. Readers must
 check `schema_version` rather than assume the root names still mean all
 passing trials.
 
+Legacy EP files without saved winning widths are not accepted as common
+candidate products. Width identity is required for duty-aware grouping and
+cannot be inferred from a maximum-over-width score alone. Completed current
+Taylor spools can be published using `EPFreqSweep.publish_candidates`.
+
+### Shared candidate contract
+
 The shared C++ API is in `loki/search/candidates.hpp`. It accepts normalized
 Taylor trials and provides `cluster_candidates` and `phase_track_distance`.
-It runs on host memory without an `Exec` parameter. Future EP adapters must
-provide the normalized track at the common epoch, original score, winning
-boxcar width/bin count, and stable run/leaf identity. EP supplies one trial per
-leaf, while FFA supplies all widths. EP's current maximum-over-width output does
-not preserve the winning width; later integration must explicitly carry or
-recover it. Chebyshev/orbital model normalization and legacy EP file decoding
-remain part of that integration, not this FFA change.
+It runs on host memory without an `Exec` parameter. Both adapters provide
+midpoint-referenced frequency derivatives, original scores and native
+parameters, boxcar width/bin count, and stable source identity. FFA supplies
+every passing width trial; Taylor EP supplies one winning-width trial per
+final leaf across completed runs. Taylor EP recovers that width from final
+folds without overwriting reported scores or changing pruning decisions.
+
+Common EP candidates currently require an inactive RFI configuration and
+polynomial Taylor models through snap. Chebyshev/orbital normalization and
+RFI harvest/masking integration are outside this path. PulsarX export supports
+terms through jerk and rejects nonzero higher derivatives.

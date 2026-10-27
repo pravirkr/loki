@@ -10,7 +10,10 @@ effective limit = max_process_memory_gb - kUnmodelledReserveGB   (0.5 GB)
 ```
 
 `kUnmodelledReserveGB` lives in `lib/algorithms/planner_memory.hpp` and is shared
-by both planners.
+by both planners. Candidate-enabled CPU sweeps first reserve
+`candidates.memory_gb` from the configured process cap, then apply this planner
+limit to the remaining search budget. CUDA uses a separate host candidate
+budget. See [Candidate postprocessing](#candidate-postprocessing).
 
 **Units.** Every memory limit, getter and log in Loki counts a GB as 2^30
 bytes (`utils::kBytesPerGB`, `lib/detail/utils.hpp`), the convention of
@@ -25,11 +28,13 @@ and how `EPRegionPlanner` uses it. The model has two policies, for the CPU and
 the CUDA sweep (see [CUDA backend](#cuda-backend)); everything below is the CPU
 policy unless it says otherwise.
 
-`snr_min` is the minimum candidate SNR intended for the final HDF5 output of
-both FFA and EP searches, default 6.0. It is defined in `FFASearchConfig` and
-inherited by `EPSearchConfig` (TOML `[search].snr_min`, CLI `--snr-min`, Python
-`snr_min`). FFA applies it to candidate extraction; EP retains the setting for
-future output filtering and does not apply it yet.
+`snr_min` is the minimum candidate S/N for the common HDF5 output of
+FFA and candidate-enabled Taylor EP searches, default 7.0. It is defined in
+`FFASearchConfig` and inherited by `EPSearchConfig` (TOML
+`[search].snr_min`, CLI `--snr-min`, Python `snr_min`). FFA applies it to
+candidate extraction. Taylor EP applies it to the final reintegrated scores
+after independent runs finish and merge;
+diagnostic-only EP output retains all final leaves.
 
 `EPSearchConfig::target_snr` is an entropic information limit used only for EP
 multipass and pipeline threshold design, independent of `snr_min` (TOML
@@ -501,6 +506,24 @@ caching. Explicit cache paths retain strict validation; obsolete implicit
 caches are regenerated.
 
 ## Candidate postprocessing
+
+EP candidate publication also reserves `candidates.memory_gb` before CPU
+planning when the candidate-enabled sweep overload is used. CLI dry runs,
+plan-only runs, cache preparation and execution use this same reservation.
+The legacy diagnostic-only API does not reserve a candidate index. Its CPU
+memory model now additionally covers a uint32 winning-width result per final
+leaf, up to `4 * max_sugg` bytes per worker. Memory-model version 12 invalidates
+older caches so this term cannot be omitted.
+
+CUDA recovers final widths in batches using existing device index/score
+scratch, so it requires no additional problem-sized device allocation. The
+owned host result snapshot has one additional uint32 per leaf. At most three
+snapshots can coexist (the current producer, a pending payload and the active
+write), bounding this addition by `3 * 4 * capacity` bytes. As before, CUDA's
+search cap bounds device memory, and native host snapshots are outside it.
+The candidate graph has its separate host budget and starts after the writer
+has drained. EP source/provenance indexing is charged against that budget;
+candidate records are read from each merged run in bounded batches.
 
 FFA sweeps reserve `candidates.memory_gb` for host-side candidate processing
 before fitting CPU chunks; set it below `max_process_memory_gb`. CUDA's search

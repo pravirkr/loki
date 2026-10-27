@@ -28,6 +28,7 @@ void bind_configs(py::module_& m) {
     using CO = search::CandidateOptions;
     py::class_<CO>(m_configs, "CandidateOptions")
         .def(py::init<>())
+        .def_readwrite("enabled", &CO::enabled)
         .def_readwrite("cluster", &CO::cluster)
         .def_readwrite("grouping", &CO::grouping)
         .def_readwrite("radius", &CO::radius)

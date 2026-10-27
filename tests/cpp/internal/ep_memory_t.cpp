@@ -1,6 +1,8 @@
 #include "lib/algorithms/ep_memory.hpp"
 
 #include <cstddef>
+#include <cstdint>
+#include <vector>
 
 #include <catch2/catch_template_test_macros.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -50,6 +52,15 @@ TEMPLATE_TEST_CASE("EP memory model matches the per-thread EPWorkspaceCPU",
             ep_workspace_bytes<TestType>(nparams, kNBins, kNSegments, kNCoords,
                                          kMaxSugg, kBranchMax, kBatch));
         CHECK_THAT(actual, WithinRel(model, 1e-5));
+        const std::vector<std::uint32_t> final_widths(kMaxSugg);
+        const loki::algorithms::detail::EPMemoryContext context{
+            .nparams = nparams, .batch_size = kBatch, .harvest = {}};
+        const auto reporting_model =
+            loki::algorithms::detail::ep_thread_bytes<TestType>(
+                context, kNBins, kNSegments, kNCoords, kMaxSugg, kBranchMax);
+        CHECK_THAT(actual + static_cast<double>(final_widths.capacity() *
+                                                sizeof(std::uint32_t)),
+                   WithinRel(static_cast<double>(reporting_model), 1e-5));
     }
 }
 

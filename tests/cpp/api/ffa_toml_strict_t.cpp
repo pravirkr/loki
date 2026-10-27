@@ -214,6 +214,12 @@ TEST_CASE("FFA candidate TOML options are strict",
     REQUIRE_FALSE(cfg.candidates.retain_detections);
     REQUIRE(cfg.observation.dm.has_value());
     REQUIRE(*cfg.observation.dm == 0);
+    REQUIRE(cfg.candidates.enabled);
+    REQUIRE_FALSE(loki::search::FFATomlConfig::from_string(
+                      "[candidates]\nenabled = false\n")
+                      .candidates.enabled);
+    REQUIRE_THROWS(loki::search::FFATomlConfig::from_string(
+        "[candidates]\nenabled = 0\n"));
     REQUIRE_THROWS(loki::search::FFATomlConfig::from_string(
         "[candidates]\nraduis = 2.0\n"));
     REQUIRE_THROWS(loki::search::FFATomlConfig::from_string(

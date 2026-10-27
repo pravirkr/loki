@@ -90,9 +90,10 @@ __global__ void kernel_snr_boxcar_warp(const float* __restrict__ folds,
                                        float* __restrict__ scores,
                                        uint32_t* __restrict__ indices_filtered,
                                        uint32_t* nprofiles_passing,
-                                       float threshold  = 0.0F,
-                                       float stdnoise   = 1.0F,
-                                       float fold_scale = 1.0F) {
+                                       float threshold          = 0.0F,
+                                       float stdnoise           = 1.0F,
+                                       float fold_scale         = 1.0F,
+                                       uint32_t* winning_widths = nullptr) {
     // Kernel Configuration & Indexing
     constexpr int kWarpSize         = 32;
     constexpr int kProfilesPerBlock = BlockThreads / kWarpSize;
@@ -144,6 +145,7 @@ __global__ void kernel_snr_boxcar_warp(const float* __restrict__ folds,
     // Find max SNR across all widths
     const float total_sum = running_sum;
     float max_snr         = cuda::std::numeric_limits<float>::lowest();
+    uint32_t max_width    = widths[0];
 
     for (int iw = 0; iw < nwidths; ++iw) {
         const int w   = static_cast<int>(widths[iw]);
@@ -169,6 +171,9 @@ __global__ void kernel_snr_boxcar_warp(const float* __restrict__ folds,
             const float snr = snr_base * inv_stdnoise;
             if constexpr (Mode == OutputMode::kMax ||
                           Mode == OutputMode::kMaxAndFilter) {
+                if (snr > max_snr) {
+                    max_width = widths[iw];
+                }
                 max_snr = fmaxf(max_snr, snr);
             } else {
                 if constexpr (Mode == OutputMode::kPerWidthAndFilter) {
@@ -196,6 +201,9 @@ __global__ void kernel_snr_boxcar_warp(const float* __restrict__ folds,
                 }
             } else {
                 scores[profile_idx] = max_snr;
+                if (winning_widths != nullptr) {
+                    winning_widths[profile_idx] = max_width;
+                }
             }
         }
     }
@@ -212,9 +220,10 @@ __launch_bounds__(256, 4) // Hint: Max 256 threads, min 4 blocks/SM
                                   float* __restrict__ scores,
                                   uint32_t* __restrict__ indices_filtered,
                                   uint32_t* nprofiles_passing,
-                                  float threshold  = 0.0F,
-                                  float stdnoise   = 1.0F,
-                                  float fold_scale = 1.0F) {
+                                  float threshold          = 0.0F,
+                                  float stdnoise           = 1.0F,
+                                  float fold_scale         = 1.0F,
+                                  uint32_t* winning_widths = nullptr) {
     const int profile_idx = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (profile_idx >= nprofiles) {
         return;
@@ -246,6 +255,7 @@ __launch_bounds__(256, 4) // Hint: Max 256 threads, min 4 blocks/SM
     }
     const float total_sum = running;
     float max_snr         = cuda::std::numeric_limits<float>::lowest();
+    uint32_t max_width    = widths[0];
 
 // Loop over widths
 #pragma unroll 1
@@ -277,6 +287,9 @@ __launch_bounds__(256, 4) // Hint: Max 256 threads, min 4 blocks/SM
         const float snr      = snr_base * inv_stdnoise;
         if constexpr (Mode == OutputMode::kMax ||
                       Mode == OutputMode::kMaxAndFilter) {
+            if (snr > max_snr) {
+                max_width = widths[iw];
+            }
             max_snr = fmaxf(max_snr, snr);
         } else {
             if constexpr (Mode == OutputMode::kPerWidthAndFilter) {
@@ -301,6 +314,9 @@ __launch_bounds__(256, 4) // Hint: Max 256 threads, min 4 blocks/SM
             }
         } else {
             scores[profile_idx] = max_snr;
+            if (winning_widths != nullptr) {
+                winning_widths[profile_idx] = max_width;
+            }
         }
     }
 }
@@ -481,7 +497,8 @@ void snr_boxcar_cuda_impl_device(cuda::std::span<const float> folds,
                                  SizeType nprofiles,
                                  SizeType nbins,
                                  float stdnoise,
-                                 cudaStream_t stream) {
+                                 cudaStream_t stream,
+                                 uint32_t* winning_widths = nullptr) {
     static_assert(Mode == OutputMode::kMax || Mode == OutputMode::kPerWidth,
                   "Filter Mode not allowed");
     const auto nwidths = widths.size();
@@ -522,10 +539,10 @@ void snr_boxcar_cuda_impl_device(cuda::std::span<const float> folds,
                 throw std::runtime_error(
                     "thread regime: nbins exceeds limit of 64");
         };
-        dispatch_thread_kernel(folds.data(), static_cast<int>(nprofiles),
-                               static_cast<int>(nbins), widths.data(),
-                               static_cast<int>(nwidths), scores.data(),
-                               nullptr, nullptr, 0.0F, stdnoise);
+        dispatch_thread_kernel(
+            folds.data(), static_cast<int>(nprofiles), static_cast<int>(nbins),
+            widths.data(), static_cast<int>(nwidths), scores.data(), nullptr,
+            nullptr, 0.0F, stdnoise, 1.0F, winning_widths);
         cuda_utils::check_last_cuda_error(
             "kernel_snr_boxcar_thread launch failed");
 
@@ -542,7 +559,7 @@ void snr_boxcar_cuda_impl_device(cuda::std::span<const float> folds,
                 folds.data(), static_cast<int>(nprofiles),
                 static_cast<int>(nbins), widths.data(),
                 static_cast<int>(nwidths), scores.data(), nullptr, nullptr,
-                0.0F, stdnoise);
+                0.0F, stdnoise, 1.0F, winning_widths);
         cuda_utils::check_last_cuda_error(
             "kernel_snr_boxcar_warp launch failed");
     }
@@ -614,9 +631,10 @@ void snr_boxcar_3d_max_cuda_d(cuda::std::span<const float> folds,
                               cuda::std::span<float> scores,
                               SizeType nprofiles,
                               SizeType nbins,
-                              cudaStream_t stream) {
+                              cudaStream_t stream,
+                              uint32_t* winning_widths) {
     snr_boxcar_cuda_impl_device<true, OutputMode::kMax>(
-        folds, widths, scores, nprofiles, nbins, 1.0F, stream);
+        folds, widths, scores, nprofiles, nbins, 1.0F, stream, winning_widths);
 }
 
 namespace detail {

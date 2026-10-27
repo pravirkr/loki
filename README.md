@@ -298,5 +298,6 @@ ENV PATH=/opt/loki-venv/bin:$PATH
 
 MIT — see [LICENSE](LICENSE).
 
-Candidate clustering, the versioned HDF5 schema, and PulsarX folding export are
-documented in [Candidate products](docs/candidates.md).
+Candidate clustering for FFA and Taylor EP, the versioned HDF5 schema, and
+PulsarX folding export are documented in [Candidate products](docs/candidates.md).
+The common EP candidate path supports Taylor searches with RFI control disabled.

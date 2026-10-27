@@ -1,6 +1,7 @@
 #include "lib/core/dynamic.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <format>
 #include <limits>
@@ -80,6 +81,27 @@ public:
         }
     }
 
+    /// Winning boxcar width of m <= kEPScoreTile folds; the first configured
+    /// width wins an exact tie.
+    void widths(const FoldType* folds, SizeType m, std::uint32_t* out) {
+        std::array<float, kEPScoreTile> best;
+        best.fill(std::numeric_limits<float>::lowest());
+        std::fill_n(out, m, static_cast<std::uint32_t>(m_widths.front()));
+        const auto emit = [&](SizeType p, SizeType iw, float snr) {
+            if (snr > best[p]) {
+                best[p] = snr;
+                out[p]  = static_cast<std::uint32_t>(m_widths[iw]);
+            }
+        };
+        if constexpr (kComplex) {
+            m_transform->inverse(folds, m);
+            m_boxcar.score_lanes(m_transform->e_lanes(), m_transform->v_lanes(),
+                                 m, emit);
+        } else {
+            m_boxcar.score(folds, m, emit);
+        }
+    }
+
     /// The configured score (boxcar or Kadane) of m <= kEPScoreTile folds.
     void score(const FoldType* folds, SizeType m, float* scores) {
         if (!m_use_kadane) {
@@ -154,6 +176,18 @@ BasePruneDPFuncts<FoldType>::BasePruneDPFuncts(
 
 template <SupportedFoldType FoldType>
 BasePruneDPFuncts<FoldType>::~BasePruneDPFuncts() = default;
+
+template <SupportedFoldType FoldType>
+void BasePruneDPFuncts<FoldType>::final_widths(
+    std::span<const FoldType> folds, std::span<std::uint32_t> widths) {
+    const auto stride = m_scorer->stride();
+    error_check::check_equal(folds.size(), widths.size() * stride,
+                             "final_widths: folds size mismatch");
+    for (SizeType p = 0; p < widths.size(); p += detail::kEPScoreTile) {
+        const auto count = std::min(detail::kEPScoreTile, widths.size() - p);
+        m_scorer->widths(folds.data() + p * stride, count, widths.data() + p);
+    }
+}
 
 template <SupportedFoldType FoldType>
 void BasePruneDPFuncts<FoldType>::score_folds(std::span<const FoldType> folds,

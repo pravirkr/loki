@@ -18,7 +18,9 @@ namespace loki::search::detail {
 /// CandidateOptions::memory_gb.
 class CandidateClusterer {
 public:
-    CandidateClusterer(double tobs, const CandidateOptions& options);
+    CandidateClusterer(double tobs,
+                       const CandidateOptions& options,
+                       std::size_t reserved_bytes = 0);
     std::uint64_t append(const Candidate& candidate);
     void finish();
     [[nodiscard]] std::uint64_t cluster_id(std::uint64_t provisional) const;
@@ -36,6 +38,7 @@ private:
     void finish_transitive();
     double m_tobs;
     CandidateOptions m_options;
+    double m_memory_gb;
     std::multimap<double, std::uint64_t> m_index;
     std::map<std::array<double, 6>, std::uint64_t> m_tracks;
     std::vector<Node> m_nodes;

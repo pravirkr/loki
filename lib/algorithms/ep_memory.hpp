@@ -72,7 +72,8 @@ constexpr SizeType kEPBatchSizeCuda = SizeType{1} << 16U;
 /// 10: CPU pruning scores in fused tiles: no irfft scratch per worker.
 /// 11: ring capacity from the margin-inflated live forecast, rounded up to a
 ///     multiple of kEPRingGranularity (was bit_ceil).
-constexpr std::uint32_t kEPMemoryModelVersion = 11U;
+/// 12: final winning-width reporting, uint32 per surviving CPU leaf.
+constexpr std::uint32_t kEPMemoryModelVersion = 12U;
 
 /// Worst-case size of the per-run harvest store (see PruneRFIConfig).
 /// Normalised: all fields are zero/false when harvesting is disabled.
@@ -498,7 +499,8 @@ SizeType ep_thread_bytes(const EPMemoryContext& ctx,
     return ep_workspace_bytes<FoldType>(ctx.nparams, nbins, nsegments,
                                         ncoords_ffa, max_sugg, branch_max,
                                         ctx.batch_size) +
-           ep_harvest_bytes<FoldType>(ctx.nparams, nbins, ctx.harvest);
+           ep_harvest_bytes<FoldType>(ctx.nparams, nbins, ctx.harvest) +
+           max_sugg * sizeof(std::uint32_t);
 }
 
 /// Bytes shared by all chunks: the FFA workspace (internal fold buffer and

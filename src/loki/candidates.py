@@ -30,7 +30,7 @@ def _text(value: Any) -> str:  # noqa: ANN401
 
 
 class CandidateFile:
-    """Context-managed, bounded-batch reader for common and legacy FFA files."""
+    """Bounded-batch reader for common FFA/EP and legacy flat FFA files."""
 
     def __init__(self, path: str | Path, *, table: str = "candidates") -> None:
         if table not in TABLES:

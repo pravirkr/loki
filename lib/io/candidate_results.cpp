@@ -12,6 +12,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <vector>
 
@@ -58,6 +59,41 @@ void copy_object(const HighFive::File& source,
                 H5P_DEFAULT, H5P_DEFAULT) < 0) {
         throw std::runtime_error("cannot copy candidate metadata object " +
                                  name);
+    }
+}
+
+template <typename Source, typename Target>
+void copy_attributes(const Source& source,
+                     const Target& target,
+                     bool skip_selection_counts = false) {
+    for (const auto& name : source.listAttributeNames()) {
+        if (target.hasAttribute(name) ||
+            (skip_selection_counts &&
+             (name == "n_clusters" || name == "n_candidates"))) {
+            continue;
+        }
+        const auto attr  = source.getAttribute(name);
+        const auto type  = attr.getDataType();
+        const auto space = attr.getSpace();
+        const hid_t dst = H5Acreate2(target.getId(), name.c_str(), type.getId(),
+                                     space.getId(), H5P_DEFAULT, H5P_DEFAULT);
+        if (dst < 0) {
+            throw std::runtime_error("cannot create search attribute");
+        }
+        const auto bytes = type.getSize() * space.getElementCount();
+        std::vector<std::byte> data(bytes);
+        const herr_t rd = H5Aread(attr.getId(), type.getId(), data.data());
+        const herr_t wr =
+            rd < 0 ? -1 : H5Awrite(dst, type.getId(), data.data());
+        if (H5Tdetect_class(type.getId(), H5T_VLEN) > 0 ||
+            H5Tis_variable_str(type.getId()) > 0) {
+            H5Dvlen_reclaim(type.getId(), space.getId(), H5P_DEFAULT,
+                            data.data());
+        }
+        H5Aclose(dst);
+        if (wr < 0) {
+            throw std::runtime_error("cannot copy search attribute");
+        }
     }
 }
 
@@ -122,6 +158,127 @@ std::vector<Candidate> read_candidates(const HighFive::File& file,
                                c.parameters[nparams - 1 - k] * utils::kInvCval;
         }
         c.validate();
+    }
+    return records;
+}
+
+struct EPSource {
+    std::string path;
+    std::uint64_t chunk;
+};
+
+std::vector<EPSource> ep_sources(const HighFive::File& file,
+                                 const search::CandidateOptions& options) {
+    int complete = 0;
+    if (!file.hasAttribute("complete")) {
+        throw std::invalid_argument("EP spool has no completion marker");
+    }
+    file.getAttribute("complete").read(complete);
+    if (complete != 1) {
+        throw std::invalid_argument("EP spool is incomplete");
+    }
+    std::string basis;
+    file.getAttribute("poly_basis").read(basis);
+    if (basis != "taylor") {
+        throw std::invalid_argument(
+            "EP candidates currently require Taylor polynomial runs");
+    }
+    std::vector<EPSource> sources;
+    auto chunks = file.getGroup("chunks").listObjectNames();
+    std::ranges::sort(chunks);
+    std::size_t bytes = 0;
+    for (const auto& chunk_name : chunks) {
+        const auto path  = "chunks/" + chunk_name;
+        const auto chunk = file.getGroup(path);
+        if (!chunk.exist("runs")) {
+            throw std::invalid_argument("EP spool is missing completed runs");
+        }
+        std::uint64_t chunk_id = 0;
+        chunk.getAttribute("chunk_id").read(chunk_id);
+        auto runs = chunk.getGroup("runs").listObjectNames();
+        std::ranges::sort(runs);
+        for (const auto& run : runs) {
+            const auto run_path = path + "/runs/" + run;
+            const auto group    = file.getGroup(run_path);
+            if (group.exist("harvest")) {
+                throw std::invalid_argument(
+                    "EP candidate publication requires RFI disabled");
+            }
+            bytes += 2 * (sizeof(EPSource) + run_path.size() + 1);
+            if (static_cast<double>(bytes) >
+                options.memory_gb * utils::kBytesPerGB / 8) {
+                throw std::runtime_error(
+                    "EP source index exceeds candidate memory budget");
+            }
+            if (sources.size() >= std::numeric_limits<std::uint32_t>::max()) {
+                throw std::overflow_error(
+                    "too many EP runs for detection identities");
+            }
+            sources.push_back({run_path, chunk_id});
+        }
+    }
+    return sources;
+}
+
+std::vector<Candidate> read_ep_candidates(const HighFive::File& file,
+                                          const EPSource& source,
+                                          std::uint32_t run_id,
+                                          std::size_t start,
+                                          std::size_t count,
+                                          std::size_t nparams,
+                                          double snr_min) {
+    const auto run  = file.getGroup(source.path);
+    const auto dims = run.getDataSet("param_sets").getDimensions();
+    if (dims.size() != 3 || dims[1] != nparams + 2 || dims[2] != 2 ||
+        run.getDataSet("width").getDimensions() !=
+            std::vector<std::size_t>{dims[0]} ||
+        run.getDataSet("scores").getDimensions() !=
+            std::vector<std::size_t>{dims[0]}) {
+        throw std::invalid_argument("invalid EP final-leaf table");
+    }
+    std::vector<float> scores(count);
+    std::vector<std::uint32_t> widths(count);
+    std::vector<double> leaves(count * (nparams + 2) * 2);
+    if (count != 0) {
+        run.getDataSet("scores").select({start}, {count}).read(scores);
+        run.getDataSet("width").select({start}, {count}).read(widths);
+        run.getDataSet("param_sets")
+            .select({start, 0, 0}, {count, nparams + 2, 2})
+            .read_raw(leaves.data());
+    }
+    std::uint32_t nbins   = 0;
+    const auto chunk_path = source.path.substr(0, source.path.find("/runs/"));
+    file.getGroup(chunk_path).getAttribute("nbins").read(nbins);
+    std::vector<Candidate> records;
+    records.reserve(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        if (!utils::is_finite(scores[i])) {
+            throw std::invalid_argument("non-finite final EP score");
+        }
+        if (scores[i] < snr_min) {
+            continue;
+        }
+        if (start + i > std::numeric_limits<std::uint32_t>::max()) {
+            throw std::overflow_error(
+                "EP leaf index exceeds detection identity capacity");
+        }
+        Candidate c;
+        c.id = (static_cast<std::uint64_t>(run_id) << 32U) | (start + i);
+        c.source_region = run_id;
+        c.source_index  = static_cast<std::uint32_t>(start + i);
+        c.width         = widths[i];
+        c.nbins         = nbins;
+        c.snr           = scores[i];
+        for (std::size_t k = 0; k < nparams; ++k) {
+            c.parameters[k] = leaves[i * (nparams + 2) * 2 + 2 * k];
+        }
+        c.derivatives[0] = c.parameters[nparams - 1];
+        for (std::size_t k = 1; k < nparams; ++k) {
+            c.derivatives[k] = -c.derivatives[0] *
+                               c.parameters[nparams - 1 - k] * utils::kInvCval;
+        }
+        c.validate();
+        records.push_back(c);
     }
     return records;
 }
@@ -420,12 +577,12 @@ private:
     std::vector<CandidateCluster> m_batch;
     std::vector<std::uint64_t> m_ids;
 };
-} // namespace
-
-void write_candidate_results(const std::filesystem::path& spool,
-                             const std::filesystem::path& output,
-                             const ObservationMetadata& observation,
-                             const search::CandidateOptions& options) {
+void publish_candidate_results(const std::filesystem::path& spool,
+                               const std::filesystem::path& output,
+                               const ObservationMetadata& observation,
+                               const search::CandidateOptions& options,
+                               bool ep,
+                               double snr_min) {
     options.validate();
     observation.validate();
     ScratchDirectory scratch(options.temporary_directory.empty()
@@ -437,13 +594,33 @@ void write_candidate_results(const std::filesystem::path& spool,
     std::vector<std::string> names;
     raw.getAttribute("param_names").read(names);
     const auto nparams = names.size();
-    if (nparams == 0 || nparams > 6) {
+    if (nparams == 0 || nparams > 6 || (ep && (nparams < 2 || nparams > 4))) {
         throw std::invalid_argument("unsupported candidate parameter count");
+    }
+    if (ep) {
+        constexpr std::array<std::string_view, 4> expected{"snap", "jerk",
+                                                           "accel", "freq"};
+        for (std::size_t i = 0; i < nparams; ++i) {
+            if (names[i] != expected[expected.size() - nparams + i]) {
+                throw std::invalid_argument(
+                    "unsupported EP native parameter convention");
+            }
+        }
     }
     double tobs = 0;
     raw.getAttribute("tobs").read(tobs);
-    search::detail::CandidateClusterer processor(tobs, options);
-    const auto nrows = raw.getDataSet("snr").getDimensions()[0];
+    std::size_t nrows = 0;
+    const auto sources =
+        ep ? ep_sources(raw, options) : std::vector<EPSource>{};
+    std::size_t source_bytes = 0;
+    if (ep) {
+        source_bytes = sources.capacity() * sizeof(EPSource);
+        for (const auto& source : sources) {
+            source_bytes += source.path.capacity() + 1;
+        }
+    }
+    search::detail::CandidateClusterer processor(tobs, options,
+                                                 2 * source_bytes);
     // At least 3/4 of half the budget remains for streams, HDF5 caches and
     // serialization scratch, including exceptionally small test budgets.
     const auto batch = std::max<std::size_t>(
@@ -452,10 +629,28 @@ void write_candidate_results(const std::filesystem::path& spool,
                static_cast<std::size_t>(options.memory_gb * utils::kBytesPerGB /
                                         (32 * sizeof(Candidate)))));
     ExternalSort sort(scratch.path);
-    for (std::size_t start = 0; start < nrows; start += batch) {
-        auto records = read_candidates(raw, start,
-                                       std::min(batch, nrows - start), nparams);
-        sort.add(records);
+    if (ep) {
+        for (std::size_t run_id = 0; run_id < sources.size(); ++run_id) {
+            const auto count = raw.getGroup(sources[run_id].path)
+                                   .getDataSet("scores")
+                                   .getDimensions()[0];
+            for (std::size_t start = 0; start < count; start += batch) {
+                auto records = read_ep_candidates(
+                    raw, sources[run_id], static_cast<std::uint32_t>(run_id),
+                    start, std::min(batch, count - start), nparams, snr_min);
+                nrows += records.size();
+                if (!records.empty()) {
+                    sort.add(records);
+                }
+            }
+        }
+    } else {
+        nrows = raw.getDataSet("snr").getDimensions()[0];
+        for (std::size_t start = 0; start < nrows; start += batch) {
+            auto records = read_candidates(
+                raw, start, std::min(batch, nrows - start), nparams);
+            sort.add(records);
+        }
     }
     const auto sorted = sort.finish();
     // The atomic publication file must live beside the destination, even if
@@ -471,7 +666,7 @@ void write_candidate_results(const std::filesystem::path& spool,
             result.createAttribute("producer", std::string("loki"));
             result.createAttribute("producer_version",
                                    std::string(LOKI_PRODUCER_VERSION));
-            result.createAttribute("algorithm", std::string("ffa"));
+            result.createAttribute("algorithm", std::string(ep ? "ep" : "ffa"));
             result.createAttribute("complete", 0);
             result.createAttribute("param_names", names);
             result.createAttribute("parameter_model",
@@ -530,39 +725,38 @@ void write_candidate_results(const std::filesystem::path& spool,
             result.createAttribute("tobs", tobs);
             result.createAttribute("tsamp", tsamp);
             auto search_group = result.createGroup("search");
-            // Copy the small, heterogeneous attributes without exposing HDF5
-            // types in the public candidate API.
-            for (const auto& name : raw.listAttributeNames()) {
-                const auto attr  = raw.getAttribute(name);
-                const auto type  = attr.getDataType();
-                const auto space = attr.getSpace();
-                const hid_t dst =
-                    H5Acreate2(search_group.getId(), name.c_str(), type.getId(),
-                               space.getId(), H5P_DEFAULT, H5P_DEFAULT);
-                if (dst < 0) {
-                    throw std::runtime_error("cannot create search attribute");
-                }
-                const auto bytes = type.getSize() * space.getElementCount();
-                std::vector<std::byte> data(bytes);
-                const herr_t rd =
-                    H5Aread(attr.getId(), type.getId(), data.data());
-                const herr_t wr =
-                    rd < 0 ? -1 : H5Awrite(dst, type.getId(), data.data());
-                if (H5Tdetect_class(type.getId(), H5T_VLEN) > 0 ||
-                    H5Tis_variable_str(type.getId()) > 0) {
-                    H5Dvlen_reclaim(type.getId(), space.getId(), H5P_DEFAULT,
-                                    data.data());
-                }
-                H5Aclose(dst);
-                if (wr < 0) {
-                    throw std::runtime_error("cannot copy search attribute");
-                }
-            }
+            copy_attributes(raw, search_group);
             if (raw.exist("regions")) {
                 copy_object(raw, "regions", search_group, "regions");
             }
             if (raw.exist("timer_stats")) {
                 copy_object(raw, "timer_stats", search_group, "timer_stats");
+            }
+            if (ep) {
+                copy_object(raw, "chunks", result.getGroup("/"), "chunks");
+                copy_attributes(raw, result, true);
+                config.createAttribute("snr_min", snr_min);
+                config.createAttribute(
+                    "width_policy",
+                    std::string(
+                        "one winning configured boxcar width per final leaf"));
+                config.createAttribute(
+                    "score_semantics",
+                    std::string("final reintegrated boxcar S/N; scores_ep "
+                                "remains diagnostic"));
+                auto provenance = search_group.createGroup("sources");
+                std::vector<std::uint64_t> chunk_ids;
+                std::vector<std::string> paths;
+                for (const auto& source : sources) {
+                    chunk_ids.push_back(source.chunk);
+                    paths.push_back(source.path);
+                }
+                provenance.createDataSet("chunk_id", chunk_ids);
+                provenance.createDataSet("run_path", paths);
+                provenance.createAttribute(
+                    "identity_encoding",
+                    std::string("id = (source ordinal << 32) | leaf row; "
+                                "source_region indexes these sources"));
             }
             // Raw rows are written in sorted order, so membership is appended
             // sequentially without an in-memory mapping of every detection.
@@ -659,5 +853,32 @@ void write_candidate_results(const std::filesystem::path& spool,
         std::filesystem::remove(publish, error);
         throw;
     }
+}
+} // namespace
+
+void write_candidate_results(const std::filesystem::path& spool,
+                             const std::filesystem::path& output,
+                             const ObservationMetadata& observation,
+                             const search::CandidateOptions& options) {
+    publish_candidate_results(spool, output, observation, options, false, 0);
+}
+
+void write_ep_candidate_results(const std::filesystem::path& spool,
+                                const std::filesystem::path& output,
+                                const ObservationMetadata& observation,
+                                const search::CandidateOptions& options,
+                                std::optional<double> snr_min) {
+    if (!snr_min) {
+        const HighFive::File raw(spool.string(), HighFive::File::ReadOnly);
+        double saved = 7;
+        raw.getAttribute("snr_min").read(saved);
+        snr_min = saved;
+    }
+    if (!utils::is_finite(*snr_min) || *snr_min < 0) {
+        throw std::invalid_argument(
+            "EP candidate S/N minimum must be finite and non-negative");
+    }
+    publish_candidate_results(spool, output, observation, options, true,
+                              *snr_min);
 }
 } // namespace loki::io::detail

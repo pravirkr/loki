@@ -61,7 +61,7 @@ FFAFreqSweep::FFAFreqSweep(const search::FFASearchConfig& cfg,
     // On CPU both the persistent engine workspace and postprocessing are
     // resident. Reserve postprocessing before fitting the search chunks.
     auto search_cfg = cfg;
-    if (exec.backend == Backend::kCPU) {
+    if (candidates.enabled && exec.backend == Backend::kCPU) {
         const auto remaining =
             cfg.get_max_process_memory_gb() - candidates.memory_gb;
         if (remaining <= 0) {
@@ -87,6 +87,11 @@ void FFAFreqSweep::execute(std::span<const float> ts_e,
                            std::string_view config_toml,
                            const io::ObservationMetadata& observation) {
     observation.validate();
+    if (!m_impl->candidates.enabled) {
+        // The flat detection file of earlier versions, written in place.
+        m_impl->m_engine->execute(ts_e, ts_v, outdir, file_prefix, config_toml);
+        return;
+    }
     std::filesystem::create_directories(outdir);
     std::filesystem::path staging;
     for (unsigned int attempt = 0; attempt < 100; ++attempt) {
@@ -150,6 +155,10 @@ void FFAFreqSweep::publish_candidates(
     const io::ObservationMetadata& observation) {
     candidates.validate();
     observation.validate();
+    if (!candidates.enabled) {
+        throw std::invalid_argument(
+            "publish_candidates needs candidate processing enabled");
+    }
     if (!std::filesystem::exists(spool)) {
         throw std::invalid_argument(
             std::format("FFA spool '{}' does not exist", spool.string()));

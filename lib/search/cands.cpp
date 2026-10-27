@@ -944,7 +944,8 @@ void PruneResultWriter::write_run_results(
     double total_pruning_gflops,
     SizeType n_leaves,
     SizeType n_params,
-    const PruneStatsCollection& pstats) {
+    const PruneStatsCollection& pstats,
+    std::span<const std::uint32_t> widths) {
     const std::scoped_lock lock(m_hdf5_mutex);
 
     HighFive::File file        = open_file();
@@ -1021,6 +1022,11 @@ void PruneResultWriter::write_run_results(
     write_chunk_scores_ep(scores_ep_view.second, offset_s);
 
     run_group.createDataSet("snail_scheme", snail_scheme);
+    if (!widths.empty() || n_leaves == 0) {
+        error_check::check_equal(widths.size(), n_leaves,
+                                 "write_run_results: width count mismatch");
+        run_group.createDataSet("width", widths);
+    }
     if (!level_stats.empty()) {
         run_group.createDataSet("level_stats", level_stats);
     }

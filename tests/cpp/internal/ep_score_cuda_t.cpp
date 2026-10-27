@@ -9,6 +9,7 @@
 #include <limits>
 #include <random>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -483,19 +484,43 @@ TEST_CASE("Fused EP row scoring (seeds, ascend) matches cuFFT + scorer",
             bluestein.assign(table.begin(), table.end());
         }
         thrust::device_vector<float> got(n_rows);
+        thrust::device_vector<uint32_t> winners(n_rows);
         loki::core::ep_score_rows_fourier_cuda(
             thrust::raw_pointer_cast(b.tree.data()), n_rows, nbins,
             thrust::raw_pointer_cast(b.widths.data()), b.widths.size(),
             thrust::raw_pointer_cast(got.data()),
             bluestein.empty() ? nullptr
                               : thrust::raw_pointer_cast(bluestein.data()),
-            nullptr);
+            nullptr, thrust::raw_pointer_cast(winners.data()));
         cudaDeviceSynchronize();
-        const auto r   = to_host(ref);
-        const auto g   = to_host(got);
-        float max_diff = 0.0F;
+        thrust::device_vector<float> per_width(n_rows * b.widths.size());
+        loki::detection::snr_boxcar_3d_cuda_d(as_span(real), as_span(b.widths),
+                                              as_span(per_width), n_rows, nbins,
+                                              nullptr);
+        const auto width_scores   = to_host(per_width);
+        const auto winning_widths = to_host(winners);
+        const auto width_values   = to_host(b.widths);
+        const auto r              = to_host(ref);
+        const auto g              = to_host(got);
+        float max_diff            = 0.0F;
         for (SizeType i = 0; i < n_rows; ++i) {
-            max_diff = std::max(max_diff, std::abs(r[i] - g[i]));
+            max_diff         = std::max(max_diff, std::abs(r[i] - g[i]));
+            const auto begin = width_scores.begin() +
+                               static_cast<long>(i * width_values.size());
+            const auto end   = begin + static_cast<long>(width_values.size());
+            const auto best  = std::max_element(begin, end);
+            float runner_up  = std::numeric_limits<float>::lowest();
+            for (auto at = begin; at != end; ++at) {
+                if (at != best) {
+                    runner_up = std::max(runner_up, *at);
+                }
+            }
+            // The independent inverse FFT rounds differently; unambiguous
+            // winning widths must nevertheless agree.
+            if (*best - runner_up > 1e-4F) {
+                REQUIRE(winning_widths[i] ==
+                        width_values[static_cast<SizeType>(best - begin)]);
+            }
         }
         INFO("max |dS/N| " << max_diff);
         CHECK(max_diff < 1.0e-5F);
@@ -505,6 +530,71 @@ TEST_CASE("Fused EP row scoring (seeds, ascend) matches cuFFT + scorer",
     }
     check_rows(64, 70001, 12); // thread regime
     check_rows(256, 500, 45);
+}
+
+TEST_CASE("Final CUDA EP width ties select the first configured width",
+          "[ep][cuda][score][candidates]") {
+    if (!loki::is_available(Backend::kCUDA)) {
+        SKIP("needs CUDA");
+    }
+    using loki::cuda_utils::as_span;
+    const loki::cuda_utils::CudaSetDeviceGuard guard(0);
+    const std::vector<uint32_t> widths_h{5, 1, 3};
+    const thrust::device_vector<uint32_t> widths = widths_h;
+    constexpr SizeType kBins                     = 32;
+    for (const SizeType n : {SizeType{17}, SizeType{65536}}) {
+        std::vector<float> real_h(n * 2 * kBins, 0);
+        for (SizeType p = 0; p < n; ++p) {
+            std::fill_n(real_h.data() + (p * 2 + 1) * kBins, kBins, 1.0F);
+        }
+        const thrust::device_vector<float> real = real_h;
+        thrust::device_vector<uint32_t> winners(n);
+        thrust::device_vector<float> scores(n);
+        loki::detection::snr_boxcar_3d_max_cuda_d(
+            as_span(real), as_span(widths), as_span(scores), n, kBins, nullptr,
+            thrust::raw_pointer_cast(winners.data()));
+        for (const auto width : to_host(winners)) {
+            REQUIRE(width == 5);
+        }
+        for (const auto score : to_host(scores)) {
+            REQUIRE(score == 0);
+        }
+    }
+    // Power-of-two transforms keep the zero signal exact. Bluestein may
+    // introduce tiny nonzero samples, so that input is not an exact score tie.
+    for (const auto [nbins, kN] :
+         {std::pair<SizeType, SizeType>{32, 17}, {64, 65536}, {128, 17}}) {
+        CAPTURE(nbins, kN);
+        const SizeType nf = nbins / 2 + 1;
+        std::vector<ComplexTypeCUDA> folds_h(kN * 2 * nf,
+                                             ComplexTypeCUDA{0, 0});
+        for (SizeType p = 0; p < kN; ++p) {
+            folds_h[(p * 2 + 1) * nf] =
+                ComplexTypeCUDA{static_cast<float>(nbins), 0};
+        }
+        const thrust::device_vector<ComplexTypeCUDA> folds = folds_h;
+        thrust::device_vector<ComplexTypeCUDA> bluestein;
+        if (loki::core::ffa_fourier_needs_bluestein(nbins)) {
+            const auto table = loki::core::ffa_fourier_bluestein_table(nbins);
+            bluestein.assign(table.begin(), table.end());
+        }
+        thrust::device_vector<uint32_t> winners(kN);
+        thrust::device_vector<float> scores(kN);
+        loki::core::ep_score_rows_fourier_cuda(
+            thrust::raw_pointer_cast(folds.data()), kN, nbins,
+            thrust::raw_pointer_cast(widths.data()), widths.size(),
+            thrust::raw_pointer_cast(scores.data()),
+            bluestein.empty() ? nullptr
+                              : thrust::raw_pointer_cast(bluestein.data()),
+            nullptr, thrust::raw_pointer_cast(winners.data()));
+        cudaDeviceSynchronize();
+        for (const auto width : to_host(winners)) {
+            REQUIRE(width == 5);
+        }
+        for (const auto score : to_host(scores)) {
+            REQUIRE(score == 0);
+        }
+    }
 }
 
 TEST_CASE("Fused EP time-domain shift-add + score matches bit for bit",

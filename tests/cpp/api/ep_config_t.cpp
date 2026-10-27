@@ -63,6 +63,26 @@ TEST_CASE("EPTomlConfig rejects unknown and removed keys", "[config][ep]") {
                       std::invalid_argument);
 }
 
+TEST_CASE("EP candidate controls do not replace the pruning target",
+          "[config][ep][candidates]") {
+    const auto cfg = loki::search::EPTomlConfig::from_string(make_doc(
+        "target_snr = 8.5\n", "nthreads = 2\nbseg_ffa = 8192\n",
+        "snr_min = 12.0\n",
+        "[candidates]\ncluster = false\ngrouping = \"anchored\"\n"
+        "memory_gb = 0.02\nretain_detections = false\nmax_candidates = 3\n"));
+    CHECK_FALSE(cfg.candidates.cluster);
+    CHECK(cfg.candidates.grouping == "anchored");
+    CHECK(cfg.candidates.memory_gb == 0.02);
+    CHECK_FALSE(cfg.candidates.retain_detections);
+    CHECK(cfg.candidates.max_candidates == 3);
+    const auto search = cfg.to_ep_search_config();
+    CHECK(search.get_target_snr() == 8.5);
+    CHECK(search.get_snr_min() == 12.0);
+    CHECK_THROWS_AS(loki::search::EPTomlConfig::from_string(
+                        make_doc("", "", "", "[candidates]\nunknown = true\n")),
+                    std::invalid_argument);
+}
+
 TEST_CASE("EPTomlConfig reads the [preprocessing] table", "[config][ep]") {
     const auto cfg = loki::search::EPTomlConfig::from_string(
         make_doc("", "nthreads = 2\nbseg_ffa = 8192\n", "",

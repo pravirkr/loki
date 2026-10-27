@@ -98,6 +98,7 @@ void validate_toml_document(const toml::table& root,
         std::string_view{"input"},       std::string_view{"preprocessing"},
         std::string_view{"search"},      std::string_view{"ep"},
         std::string_view{"performance"}, std::string_view{"output"},
+        std::string_view{"candidates"},
     };
     static constexpr std::array kEPKeys{
         std::string_view{"poly_basis"},
@@ -179,6 +180,7 @@ void validate_toml_document(const toml::table& root,
                  : std::span<const std::string_view>(kOutputKeys);
 
     static constexpr std::array kCandidateKeys{
+        std::string_view{"enabled"},
         std::string_view{"cluster"},
         std::string_view{"grouping"},
         std::string_view{"radius"},
@@ -622,6 +624,9 @@ outdir = "./"
 prefix = "loki"
 
 [candidates]
+# false writes the flat detection file of earlier versions: no grouping or
+# selection, and no host memory reserved for them.
+enabled = true
 # Phase-track friends-of-friends; radius in narrower pulse widths.
 cluster = true
 grouping = "transitive" # or "anchored" for strongest-representative suppression
@@ -825,6 +830,14 @@ FFATomlConfig read_ffa_tables(const toml::table& tbl) {
 
     if (const auto* candidates = tbl["candidates"].as_table()) {
         auto& options = cfg.candidates;
+        if (candidates->contains("enabled")) {
+            const auto value = (*candidates)["enabled"].value_exact<bool>();
+            if (!value) {
+                throw std::invalid_argument(
+                    "candidates.enabled: invalid value type");
+            }
+            options.enabled = *value;
+        }
         if (candidates->contains("cluster")) {
             const auto value = (*candidates)["cluster"].value_exact<bool>();
             if (!value) {
@@ -2422,6 +2435,23 @@ device = 0
 # FFA segment length in samples: a power of 2 below nsamps, since the pruning
 # needs at least one FFA level. Use nsamps / 128 for a long series.
 bseg_ffa = 16384
+
+[candidates]
+# Postprocess the merged final Taylor runs after all pruning has finished.
+# Other polynomial bases/models currently retain diagnostic-only output.
+# false writes the run diagnostics of earlier versions only.
+enabled = true
+cluster = true
+grouping = "transitive" # or "anchored"
+radius = 1.0
+phase_radius = 0.05
+retain_detections = true
+flag_harmonics = false
+remove_harmonics = false
+max_candidates = 0
+# Separate host candidate budget; reserved before CPU chunk planning.
+memory_gb = 1.0
+# temporary_directory = "/scratch/loki"
 
 [output]
 # Directory where the results file is saved
