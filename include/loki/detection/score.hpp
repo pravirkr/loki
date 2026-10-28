@@ -46,7 +46,8 @@ struct BoxcarWidthsCache {
     BoxcarWidthsCache(std::span<const SizeType> widths, SizeType nbins);
 };
 
-// Generate boxcar width trials for matched filtering
+// Generate boxcar width trials for matched filtering: steps of wtsp from 1,
+// ending at min(floor(ducy_max * fold_bins), fold_bins - 1)
 std::vector<SizeType> generate_box_width_trials(SizeType fold_bins,
                                                 double ducy_max = 0.2,
                                                 double wtsp     = 1.5);
