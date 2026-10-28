@@ -274,17 +274,18 @@ BoxcarWidthsCache::BoxcarWidthsCache(std::span<const SizeType> widths,
 
 std::vector<SizeType>
 generate_box_width_trials(SizeType fold_bins, double ducy_max, double wtsp) {
-    const auto wmax = static_cast<SizeType>(
-        std::max(1.0, ducy_max * static_cast<double>(fold_bins)));
+    // A box as wide as the profile leaves no off-pulse bins: its S/N is 0/0
+    const auto wmax =
+        std::min(static_cast<SizeType>(
+                     std::max(1.0, ducy_max * static_cast<double>(fold_bins))),
+                 fold_bins > 1 ? fold_bins - 1 : SizeType{1});
     std::vector<SizeType> widths = {1};
     while (widths.back() < wmax) {
         const auto next_width = std::max(
             static_cast<SizeType>(widths.back() + 1),
             static_cast<SizeType>(wtsp * static_cast<double>(widths.back())));
-        if (next_width > wmax) {
-            break;
-        }
-        widths.push_back(next_width);
+        // A step past wmax ends the set at wmax itself
+        widths.push_back(std::min(next_width, wmax));
     }
     return widths;
 }

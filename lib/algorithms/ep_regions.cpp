@@ -54,7 +54,7 @@ namespace {
     return f;
 }
 
-constexpr std::string_view kCacheVersion = "1.18.0";
+constexpr std::string_view kCacheVersion = "1.19.0";
 
 /// Threshold-scheme simulation of the planner. The seeds are fixed: the
 /// scheme sets the chunking, so plans of one configuration must not change
