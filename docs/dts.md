@@ -25,6 +25,12 @@ S/N of its fold) and keeps the children above the threshold γ_s. A schedule
 - the detection probability Pd: the probability that a signal of the design
   S/N (`snr_final`) survives every stage.
 
+The scheme always simulates the boxcar score over the configured widths
+(`ducy_max`, `wtsp`). With `use_boxcar_kadane` the search prunes on the Kadane
+score instead, a faster approximation of it; the thresholds are still designed
+for the boxcar, and the scores the search reports are the boxcar's (see
+[candidates](candidates.md)).
+
 The objective is to minimise the cost per detection L = C / Pd subject to
 Pd ≥ `min_pd`. A Pd above `min_pd` is allowed when it lowers L (short patterns
 often have their optimum there).
