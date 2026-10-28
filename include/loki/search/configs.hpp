@@ -161,6 +161,9 @@ public:
     /// Currently applied by FFA; EP output filtering is reserved for later.
     double get_snr_min() const noexcept;
     SizeType get_max_passing_candidates() const noexcept;
+    /// EP prunes on the Kadane score, a faster approximation of the boxcar
+    /// score. The threshold scheme and the reported scores always use the
+    /// boxcar widths. FFA sweeps and the TOML configs reject it.
     bool get_use_boxcar_kadane() const noexcept;
     virtual bool get_use_conservative_tile() const noexcept { return false; }
     double get_tseg_brute() const noexcept;

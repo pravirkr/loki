@@ -576,7 +576,7 @@ snr_min = 7.0
 # Folding domain: true for Fourier-domain FFA (recommended), false for Time-domain FFA
 use_fourier = true
 
-# Peak detection algorithm: false for standard multi-width boxcar, true for Kadane
+# Peak detection must be the multi-width boxcar; Kadane is not supported
 use_boxcar_kadane = false
 
 # Alternative to acc_* and jerk_*: limits of physical circular orbits. The
