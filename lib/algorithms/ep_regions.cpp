@@ -146,6 +146,21 @@ double calculate_max_drift(const search::PulsarSearchConfig& cfg) {
                                (max_snap * t_half * t_half * t_half / 6.0);
         return drift / utils::kCval;
     }
+    if (cfg.get_nparams() == 5) {
+        const auto max_crackle = std::max(std::abs(param_limits[0].min),
+                                          std::abs(param_limits[0].max));
+        const auto max_snap    = std::max(std::abs(param_limits[1].min),
+                                          std::abs(param_limits[1].max));
+        const auto max_jerk    = std::max(std::abs(param_limits[2].min),
+                                          std::abs(param_limits[2].max));
+        const auto max_accel   = std::max(std::abs(param_limits[3].min),
+                                          std::abs(param_limits[3].max));
+        const auto drift =
+            (max_accel * t_half) + (max_jerk * t_half * t_half / 2.0) +
+            (max_snap * t_half * t_half * t_half / 6.0) +
+            (max_crackle * t_half * t_half * t_half * t_half / 24.0);
+        return drift / utils::kCval;
+    }
     throw std::runtime_error(
         "Unsupported number of parameters for drift calculation");
 }

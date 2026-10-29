@@ -47,13 +47,17 @@ def _make_injected() -> tuple[np.ndarray, np.ndarray]:
     return ts_e, ts_v
 
 
-def _search_config() -> libloki.configs.PulsarSearchConfig:
+def _search_config(
+    param_limits: np.ndarray | None = None,
+) -> libloki.configs.PulsarSearchConfig:
+    if param_limits is None:
+        param_limits = np.array([[-10.0, 10.0], [140.0, 145.0]], dtype=np.float64)
     return libloki.configs.PulsarSearchConfig(
         nsamps=NSAMPS,
         tsamp=DT,
         nbins=32,
         eta=1.0,
-        param_limits=np.array([[-10.0, 10.0], [140.0, 145.0]], dtype=np.float64),
+        param_limits=param_limits,
         ducy_max=0.3,
         use_fourier=False,
         nthreads=1,
@@ -64,15 +68,17 @@ def _search_config() -> libloki.configs.PulsarSearchConfig:
     )
 
 
-def _best_score_near_truth(result_h5: Path) -> float:
+def _best_score_near_truth(result_h5: Path, nparams: int = 2) -> float:
     best = 0.0
     with h5py.File(result_h5, "r") as handle:
         for chunk in handle["chunks"].values():
             for run in chunk["runs"].values():
                 scores = np.asarray(run["scores"][:], dtype=np.float64)
-                # Leaves are (nparams + 2) rows of (value, error); row 1 is
-                # the frequency of a two-parameter search.
-                freqs = np.asarray(run["param_sets"][:, 1, 0], dtype=np.float64)
+                # Leaves are (nparams + 2) rows of (value, error); row
+                # nparams - 1 is the frequency.
+                freqs = np.asarray(
+                    run["param_sets"][:, nparams - 1, 0], dtype=np.float64
+                )
                 near = np.abs(freqs - TRUE_FREQ) <= FREQ_TOL
                 if np.any(near):
                     best = max(best, float(scores[near].max()))
@@ -112,4 +118,22 @@ def test_ep_freq_sweep_recovers_injected_pulsar(tmp_path: Path, backend: str) ->
     again.execute(ts_e, ts_v, str(tmp_path), "recovery_cached")
     assert _best_score_near_truth(tmp_path / "recovery_cached_ep_results.h5") >= (
         RECOVER_SNR_MIN
+    )
+
+
+def test_ep_freq_sweep_recovers_with_five_parameters(tmp_path: Path) -> None:
+    """The planner's drift margin covers crackle, so five parameters plan."""
+    ts_e, ts_v = _make_injected()
+    # Crackle, snap, jerk, accel and frequency around the injected pulsar.
+    limits = np.array(
+        [[-0.2, 0.2], [-0.5, 0.5], [-1.0, 1.0], [-10.0, 10.0], [140.0, 145.0]],
+        dtype=np.float64,
+    )
+    sweep = libloki.prune.EPFreqSweep(
+        _search_config(limits), min_pd=0.5, show_progress=False, ref_segs=[4]
+    )
+    sweep.execute(ts_e, ts_v, str(tmp_path), "five")
+    best = _best_score_near_truth(tmp_path / "five_ep_results.h5", nparams=5)
+    assert best >= RECOVER_SNR_MIN, (
+        f"best score near the pulsar {best:.2f} is below {RECOVER_SNR_MIN}"
     )
