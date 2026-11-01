@@ -95,8 +95,7 @@ struct ChunkEval {
     SizeType segment_len0;  // brute-fold segment length
     SizeType nfreqs0;       // brute-fold frequencies
     bool gpu_fused_score;
-    double chunk_only_memory_gb; // For logging/stats.
-    double allocated_memory_gb;  // With accumulated maxima
+    double chunk_only_memory_gb; // Workspace of this chunk alone
     double cost_s;               // CPU cost model (0 on the GPU)
 };
 
@@ -467,16 +466,8 @@ private:
                          max_drift, max_drift * 100.0, m_base_cfg.get_tobs(),
                          m_base_cfg.get_nparams());
         }
-        PlanMaxima maxima;
-        if (m_use_gpu) {
-            for (const auto& region : ffa_regions) {
-                subdivide_region_by_memory(region.f_start, region.f_end,
-                                           region.nbins, region.eta, max_drift,
-                                           maxima);
-            }
-        } else {
-            maxima = partition_regions_by_cost(ffa_regions, max_drift);
-        }
+        const PlanMaxima maxima =
+            partition_regions_by_cost(ffa_regions, max_drift);
         m_stats = stats_for(maxima);
 
         // Log summary statistics
@@ -532,14 +523,13 @@ private:
     }
 
     // The single point of contact with the memory and cost models: plans the
-    // drift-expanded chunk and sizes it. `maxima` holds the workspace sized
-    // so far; allocated_memory_gb is the workspace after adding this chunk.
+    // drift-expanded chunk and sizes it alone. The workspace of all chunks is
+    // checked once a plan is complete (partition_regions_by_cost).
     ChunkEval evaluate_chunk(double nominal_start,
                              double nominal_end,
                              SizeType nbins,
                              double eta,
-                             double max_drift,
-                             const PlanMaxima& maxima) const {
+                             double max_drift) const {
         if (nominal_end <= nominal_start) {
             throw std::runtime_error(
                 std::format("FFARegionPlanner: zero/negative-width chunk "
@@ -608,12 +598,6 @@ private:
         const double chunk_only_gb =
             stats_for(chunk_only).get_freq_sweep_memory_usage();
 
-        // Workspace is sized by max over all chunks.
-        PlanMaxima allocated = maxima;
-        allocated.absorb(chunk_only);
-        const double allocated_gb =
-            stats_for(allocated).get_freq_sweep_memory_usage();
-
         const double cost_s =
             m_use_gpu ? 0.0
                       : detail::estimate_chunk_cost(
@@ -634,7 +618,6 @@ private:
             .nfreqs0              = nfreqs0,
             .gpu_fused_score      = detail::gpu_fused_score_applies(plan),
             .chunk_only_memory_gb = chunk_only_gb,
-            .allocated_memory_gb  = allocated_gb,
             .cost_s               = cost_s,
         };
     }
@@ -695,7 +678,8 @@ private:
         m_cfgs.push_back(std::move(eval.cfg));
     }
 
-    // CPU: chunk every region by the cost model, under the memory limit.
+    // Chunk every region under the memory limit: by the cost model on the
+    // CPU, by widest-first bisection on the GPU.
     //
     // Each chunk alone must fit the limit, but the workspace is sized by the
     // maximum of each buffer over all chunks, which different chunks may set.
@@ -717,9 +701,15 @@ private:
             m_modelled_cost_s = 0.0;
             PlanMaxima maxima;
             for (const auto& region : regions) {
-                partition_region_by_cost(region.f_start, region.f_end,
-                                         region.nbins, region.eta, max_drift,
-                                         chunk_limit_gb, maxima);
+                if (m_use_gpu) {
+                    subdivide_region_by_memory(
+                        region.f_start, region.f_end, region.nbins, region.eta,
+                        max_drift, chunk_limit_gb, maxima);
+                } else {
+                    partition_region_by_cost(region.f_start, region.f_end,
+                                             region.nbins, region.eta,
+                                             max_drift, chunk_limit_gb, maxima);
+                }
             }
             const double allocated_gb =
                 stats_for(maxima).get_freq_sweep_memory_usage();
@@ -769,8 +759,8 @@ private:
         // The narrowest chunk at the top must fit, or no grid will.
         const double min_width = std::min(f_end - f_start, kMinChunkWidthHz);
         {
-            auto min_eval = evaluate_chunk(f_end - min_width, f_end, nbins, eta,
-                                           max_drift, PlanMaxima{});
+            auto min_eval =
+                evaluate_chunk(f_end - min_width, f_end, nbins, eta, max_drift);
             const bool index_bound = exceeds_index_limits(min_eval);
             if (index_bound || min_eval.chunk_only_memory_gb > chunk_limit_gb) {
                 const auto drift_span =
@@ -817,8 +807,8 @@ private:
                     if (best[j] == kUnreachable) {
                         continue;
                     }
-                    auto eval = evaluate_chunk(grid[j], grid[i], nbins, eta,
-                                               max_drift, PlanMaxima{});
+                    auto eval =
+                        evaluate_chunk(grid[j], grid[i], nbins, eta, max_drift);
                     if (eval.chunk_only_memory_gb >
                         kSpanCutoff * chunk_limit_gb) {
                         break;
@@ -855,18 +845,23 @@ private:
         }
     }
 
-    // GPU: bisect the chunk width until the chunk fits; widest chunk first.
+    // GPU: bisect the chunk width until the chunk fits `chunk_limit_gb`;
+    // widest chunk first. Each chunk is tested alone: testing against the
+    // running workspace maxima made the result depend on the chunks accepted
+    // earlier, which could fill the limit with one buffer and leave no room
+    // for a later region that grows another. The caller checks the workspace
+    // and lowers the per-chunk limit on overshoot.
     void subdivide_region_by_memory(double f_start,
                                     double f_end,
                                     SizeType nbins,
                                     double eta,
                                     double max_drift,
+                                    double chunk_limit_gb,
                                     PlanMaxima& maxima) {
         if (f_end <= f_start) {
             return; // Empty or inverted region; nothing to do.
         }
         check_drift_expansion(f_start, max_drift);
-        const double effective_limit_gb = this->effective_limit_gb();
 
         constexpr double kRelativeTolerance = 1.0e-4;
         // Convergence tolerance for the frequency-width *bisection search*
@@ -884,11 +879,10 @@ private:
 
         auto evaluate = [&](double nominal_start, double nominal_end) {
             return evaluate_chunk(nominal_start, nominal_end, nbins, eta,
-                                  max_drift, maxima);
+                                  max_drift);
         };
-        // Workspace is sized by max over all chunks; fit must use that.
         auto fits = [&](const ChunkEval& e) {
-            return e.allocated_memory_gb <= effective_limit_gb &&
+            return e.chunk_only_memory_gb <= chunk_limit_gb &&
                    !exceeds_index_limits(e);
         };
 
@@ -948,7 +942,7 @@ private:
                     "  Suggestion: Increase max_memory_gb or reduce "
                     "parameter search ranges.",
                     f_start, current_f_end, min_chunk_width, drift_span,
-                    min_eval.allocated_memory_gb, effective_limit_gb));
+                    min_eval.chunk_only_memory_gb, chunk_limit_gb));
             }
 
             return find_boundary_bisect(current_f_end, min_chunk_width,
