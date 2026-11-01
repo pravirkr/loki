@@ -34,15 +34,16 @@ struct CircularOrbitLimits {
  * With omega = 2 pi / p_orb_min and K = (G M_sun)^(1/3) m_c_max
  * (m_p_min + m_c_max)^(-2/3), the k-th derivative of the line-of-sight
  * position is at most K omega^(k - 2/3) in magnitude (k = 1 is the velocity
- * v). The limits are, in param_limits order, [+/- snap] (order 4),
- * [+/- jerk] (order >= 3), +/- acceleration, and the frequency range widened
- * by the Doppler factor: [f_min (1 - v/c), f_max (1 + v/c)]. This is pyloki's
+ * v). The limits are, in param_limits order, [+/- crackle] (order 5),
+ * [+/- snap] (order >= 4), [+/- jerk] (order >= 3), +/- acceleration, and
+ * the frequency range widened by the Doppler factor:
+ * [f_min (1 - v/c), f_max (1 + v/c)]. This is pyloki's
  * ParamLimits.from_circular.
  *
  * @param poly_order Highest searched derivative of the frequency's phase
- * model: 2 (acceleration), 3 (jerk) or 4 (snap).
+ * model: 2 (acceleration), 3 (jerk), 4 (snap) or 5 (crackle).
  * @throws std::invalid_argument for a non-positive or non-finite input, an
- * empty frequency range, a poly_order outside [2, 4], or limits whose
+ * empty frequency range, a poly_order outside [2, 5], or limits whose
  * velocity reaches the speed of light.
  */
 [[nodiscard]] std::vector<ParamLimit>

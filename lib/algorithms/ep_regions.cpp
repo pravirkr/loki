@@ -9,6 +9,7 @@
 #include <format>
 #include <limits>
 #include <map>
+#include <numbers>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -145,6 +146,18 @@ double calculate_max_drift(const search::PulsarSearchConfig& cfg) {
                                (max_jerk * t_half * t_half / 2.0) +
                                (max_snap * t_half * t_half * t_half / 6.0);
         return drift / utils::kCval;
+    }
+    if (cfg.get_nparams() == 5) {
+        // Circular search: the box only spans the grid, the orbit limits
+        // bound the signal. v(t) = v_amp sin(omega t + phi) with
+        // v_amp <= x_mass_const omega^(1/3) (the pruner's mass limit), so
+        // |v(t_half) - v(0)| <= 2 v_amp |sin(omega t_half / 2)|, largest at
+        // omega_max = 2 pi / p_orb_min.
+        const auto omega_max = 2.0 * std::numbers::pi / cfg.get_p_orb_min();
+        const auto v_amp     = cfg.get_x_mass_const() * std::cbrt(omega_max);
+        const auto phase =
+            std::min(omega_max * t_half / 2.0, std::numbers::pi / 2.0);
+        return 2.0 * v_amp * std::sin(phase) / utils::kCval;
     }
     throw std::runtime_error(
         "Unsupported number of parameters for drift calculation");
@@ -352,6 +365,10 @@ public:
         file.createAttribute("bseg_ffa", m_base_cfg.get_bseg_ffa());
         file.createAttribute("prune_poly_order",
                              m_base_cfg.get_prune_poly_order());
+        // The circular orbit limits: five parameters plan and prune by them.
+        file.createAttribute("p_orb_min", m_base_cfg.get_p_orb_min());
+        file.createAttribute("m_c_max", m_base_cfg.get_m_c_max());
+        file.createAttribute("m_p_min", m_base_cfg.get_m_p_min());
         file.createAttribute(
             "use_conservative_tile",
             static_cast<uint8_t>(m_base_cfg.get_use_conservative_tile()));
@@ -504,6 +521,13 @@ public:
         check_attr_size("bseg_brute", m_base_cfg.get_bseg_brute());
         check_attr_size("bseg_ffa", m_base_cfg.get_bseg_ffa());
         check_attr_size("prune_poly_order", m_base_cfg.get_prune_poly_order());
+        // Only five parameters use the orbit limits, and a five-parameter
+        // cache always records them.
+        if (m_base_cfg.get_nparams() == 5) {
+            check_attr_double("p_orb_min", m_base_cfg.get_p_orb_min());
+            check_attr_double("m_c_max", m_base_cfg.get_m_c_max());
+            check_attr_double("m_p_min", m_base_cfg.get_m_p_min());
+        }
 
         uint8_t file_use_fourier{};
         file.getAttribute("use_fourier").read(file_use_fourier);
@@ -841,8 +865,12 @@ private:
         const auto max_drift = calculate_max_drift(m_base_cfg);
         if (max_drift < 0.0 || max_drift >= 1.0) {
             throw std::runtime_error(std::format(
-                "EPRegionPlanner: max_drift must be in [0, 1); got {:.6f}.",
-                max_drift));
+                "EPRegionPlanner: max_drift must be in [0, 1); got {:.6f}.{}",
+                max_drift,
+                m_base_cfg.get_nparams() == 5
+                    ? " Five parameters bound it by the circular orbit: "
+                      "raise p_orb_min or lower m_c_max."
+                    : ""));
         }
 
         const auto max_memory_gb = m_memory_limit_gb;

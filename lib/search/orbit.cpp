@@ -49,10 +49,10 @@ circular_param_limits(double f_min,
             "circular orbit limits: f_max ({}) must exceed f_min ({})", f_max,
             f_min));
     }
-    if (poly_order < 2 || poly_order > 4) {
+    if (poly_order < 2 || poly_order > 5) {
         throw std::invalid_argument(std::format(
-            "circular orbit limits: poly_order must be 2 (accel), 3 (jerk) "
-            "or 4 (snap), got {}",
+            "circular orbit limits: poly_order must be 2 (accel), 3 (jerk), "
+            "4 (snap) or 5 (crackle), got {}",
             poly_order));
     }
     const double omega = 2.0 * std::numbers::pi / orbit.p_orb_min;

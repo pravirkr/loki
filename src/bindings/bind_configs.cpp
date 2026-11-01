@@ -233,7 +233,8 @@ void bind_configs(py::module_& m) {
         py::arg("f_min"), py::arg("f_max"), py::kw_only(),
         py::arg("poly_order"), py::arg("p_orb_min"), py::arg("m_c_max") = 10.0,
         py::arg("m_p_min") = 1.2,
-        "param_limits (rows [snap], [jerk], accel, freq) covering circular "
+        "param_limits (rows [crackle], [snap], [jerk], accel, freq) covering "
+        "circular "
         "orbits with P_orb >= p_orb_min s, m_c <= m_c_max and m_p >= m_p_min; "
         "the frequency range is widened by v/c (pyloki's from_circular).");
     m_configs.def(

@@ -10,7 +10,7 @@ from loki import libloki
 TOBS = (1 << 25) * 64e-6
 
 
-@pytest.mark.parametrize("poly_order", [2, 3, 4])
+@pytest.mark.parametrize("poly_order", [2, 3, 4, 5])
 def test_circular_param_limits_matches_pyloki(poly_order: int) -> None:
     pyloki_config = pytest.importorskip("pyloki.config")
     expected = pyloki_config.ParamLimits.from_circular(
@@ -58,7 +58,7 @@ def test_circular_limits_drive_a_search_config() -> None:
     "kwargs",
     [
         {"poly_order": 1, "p_orb_min": 1e4},
-        {"poly_order": 5, "p_orb_min": 1e4},
+        {"poly_order": 6, "p_orb_min": 1e4},
         {"poly_order": 3, "p_orb_min": 0.0},
         {"poly_order": 3, "p_orb_min": 1e4, "m_c_max": -1.0},
         # A microsecond orbit needs a velocity above c.
