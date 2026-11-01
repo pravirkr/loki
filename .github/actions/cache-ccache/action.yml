@@ -1,16 +1,26 @@
-name: Cache ccache
-description: Restore and save the ccache directory for CI builds
+name: Restore ccache
+description: >
+  Restore the ccache directory for CI builds. Jobs save it with
+  actions/cache/save and the `key` output, on pushes to main only: a pull
+  request restores main's cache and never writes its own, so the 10 GB cache
+  store holds one recent entry per profile.
 
 inputs:
   prefix:
     description: Cache key prefix (compiler/preset profile, e.g. ci-gcc13)
     required: true
 
+outputs:
+  key:
+    description: The key to save this run's ccache under
+    value: ${{ steps.restore.outputs.cache-primary-key }}
+
 runs:
   using: composite
   steps:
     - name: Restore ccache
-      uses: actions/cache@v6
+      id: restore
+      uses: actions/cache/restore@v6
       with:
         path: ${{ github.workspace }}/.cache/ccache
         key: ccache-${{ inputs.prefix }}-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/LokiDependencies.cmake', 'cmake/CPM.cmake') }}-${{ github.sha }}

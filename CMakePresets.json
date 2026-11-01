@@ -14,29 +14,10 @@
       }
     },
     {
-      "name": "dev",
-      "displayName": "Development (Release, CUDA if found, tests + Python)",
-      "inherits": "base",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release",
-        "LOKI_CUDA": "AUTO",
-        "LOKI_BUILD_PYTHON": "ON"
-      }
-    },
-    {
-      "name": "debug",
-      "displayName": "Debug (CPU, tests + Python; debugging and clang-tidy only, too slow for test runs)",
-      "inherits": "base",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug",
-        "LOKI_CUDA": "OFF",
-        "LOKI_BUILD_PYTHON": "ON"
-      }
-    },
-    {
       "name": "release",
-      "displayName": "Release (CPU + CUDA if found, tests + Python)",
+      "displayName": "Release (default: CUDA if found, tests + Python, build/)",
       "inherits": "base",
+      "binaryDir": "${sourceDir}/build",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "LOKI_CUDA": "AUTO",
@@ -45,8 +26,9 @@
     },
     {
       "name": "cuda",
-      "displayName": "Release with CUDA required",
+      "displayName": "Release with CUDA required, benchmarks",
       "inherits": "release",
+      "binaryDir": "${sourceDir}/build-cuda",
       "cacheVariables": {
         "LOKI_CUDA": "ON",
         "LOKI_BUILD_BENCHMARKS": "ON"
@@ -74,37 +56,27 @@
         "CMAKE_BUILD_TYPE": "Release",
         "LOKI_CUDA": "OFF",
         "LOKI_BUILD_PYTHON": "OFF",
-        "LOKI_ENABLE_NATIVE_ARCH": "OFF"
-      }
-    },
-    {
-      "name": "ci-cuda",
-      "displayName": "CI CUDA compile check (no GPU needed)",
-      "inherits": "ci",
-      "cacheVariables": {
-        "LOKI_CUDA": "AUTO",
-        "LOKI_CUDA_ARCHITECTURES": "80",
-        "LOKI_BUILD_BENCHMARKS": "ON"
+        "LOKI_ENABLE_NATIVE_ARCH": "OFF",
+        "LOKI_WARNINGS_AS_ERRORS": "ON"
       }
     },
     {
       "name": "ci-tidy",
       "displayName": "CI static analysis (Debug, compile DB, Python)",
-      "inherits": "debug",
+      "inherits": "base",
       "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
         "LOKI_CUDA": "OFF",
+        "LOKI_BUILD_PYTHON": "ON",
         "LOKI_ENABLE_NATIVE_ARCH": "OFF"
       }
     }
   ],
   "buildPresets": [
-    { "name": "dev", "configurePreset": "dev" },
-    { "name": "debug", "configurePreset": "debug" },
     { "name": "release", "configurePreset": "release" },
     { "name": "cuda", "configurePreset": "cuda" },
     { "name": "asan", "configurePreset": "asan" },
     { "name": "ci", "configurePreset": "ci" },
-    { "name": "ci-cuda", "configurePreset": "ci-cuda" },
     { "name": "ci-tidy", "configurePreset": "ci-tidy" }
   ],
   "testPresets": [
@@ -114,10 +86,14 @@
       "output": { "outputOnFailure": true },
       "execution": { "noTestsAction": "error" }
     },
-    { "name": "dev", "inherits": "base", "configurePreset": "dev" },
     { "name": "release", "inherits": "base", "configurePreset": "release" },
     { "name": "cuda", "inherits": "base", "configurePreset": "cuda" },
-    { "name": "asan", "inherits": "base", "configurePreset": "asan" },
+    {
+      "name": "asan",
+      "inherits": "base",
+      "configurePreset": "asan",
+      "filter": { "exclude": { "label": "^slow$" } }
+    },
     { "name": "ci", "inherits": "base", "configurePreset": "ci" }
   ]
 }

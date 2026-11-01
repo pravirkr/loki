@@ -275,7 +275,7 @@ TEST_CASE("BoxcarScorer3D max is bit-exact with the scalar max scorer",
           "[ep][score]") {
     for (const SizeType nbins :
          {7U, 16U, 32U, 50U, 64U, 100U, 128U, 256U, 509U, 1024U}) {
-        for (const auto [ducy, wtsp] : {std::pair{0.3, 1.2}, {0.5, 1.1}}) {
+        for (const auto& [ducy, wtsp] : {std::pair{0.3, 1.2}, {0.5, 1.1}}) {
             const auto widths =
                 loki::detection::generate_box_width_trials(nbins, ducy, wtsp);
             constexpr SizeType kN = 45; // two full groups and a ragged one

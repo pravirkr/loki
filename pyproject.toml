@@ -43,6 +43,7 @@ tests = [
     "pytest-sugar",
     "pytest-benchmark",
     "pytest-mock",
+    "pytest-xdist",
 ]
 dev = ["ruff", "ty"]
 docs = [
@@ -60,7 +61,7 @@ docs = [
 cmake.version = ">=3.25"
 cmake.build-type = "Release"
 install.strip = true            # Strip debug symbols
-build-dir = "build/{wheel_tag}"
+build-dir = "build-wheel/{wheel_tag}"
 
 [tool.scikit-build.cmake.define]
 LOKI_BUILD_PYTHON = "ON"

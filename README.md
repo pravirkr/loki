@@ -157,6 +157,7 @@ Project-specific options use the **`LOKI_`** prefix. Standard CMake options keep
 | **`LOKI_BUILD_DOCS`** | `OFF` | Build documentation |
 | **`LOKI_ENABLE_COVERAGE`** | `OFF` | Compile with `--coverage` |
 | **`LOKI_ENABLE_IPO`** | `OFF` | Link-time optimization (Release) |
+| **`LOKI_WARNINGS_AS_ERRORS`** | `OFF` | `-Werror` on Loki's own C++ sources (the `ci` preset turns it on) |
 | **`LOKI_ENABLE_NVTX`** | `OFF` | NVTX ranges for `nsys` profiling (sweeps, chunks, FFA stages, preprocessing, EP). Needs the CUDA toolkit headers, also for CPU-only builds. |
 | **`BUILD_SHARED_LIBS`** | `OFF` | `ON` = shared `libloki`; `OFF` = static `libloki.a`. Must be `OFF` when `LOKI_BUILD_PYTHON=ON`. |
 
@@ -199,14 +200,18 @@ Add to `~/.bashrc` or `~/.zshrc` to cache downloaded dependencies across rebuild
 
 ## Development builds
 
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug \
-  -DLOKI_BUILD_TESTING=ON \
-  -DLOKI_CUDA=AUTO
+`CMakePresets.json` keeps every build in Release. `release` is the default and
+builds into `build/` (CUDA if found, tests, Python, `-march=native`):
 
-cmake --build build -j
-ctest --test-dir build
+```bash
+cmake --preset release
+cmake --build --preset release
+ctest --preset release -j 8
 ```
+
+`cuda` requires CUDA and adds the benchmarks (`build-cuda/`), `asan` is the
+ASan/UBSan build (`build-asan/`, skips the `[slow]` tests), and `ci` and
+`ci-tidy` are the CI builds. `pip install` builds into `build-wheel/`.
 
 ---
 

@@ -61,7 +61,8 @@ std::vector<DComplex> ref_forward(const float* x, SizeType n) {
 
 } // namespace
 
-TEST_CASE("Lane FFT inverse and forward match a double DFT", "[fft][lane]") {
+TEST_CASE("Lane FFT inverse and forward match a double DFT",
+          "[fft][lane][slow]") {
     // Powers of two, mixed radices, odd sizes and Bluestein sizes (prime
     // factors > 13: 17, 34, 509).
     const SizeType n =
@@ -158,7 +159,7 @@ TEST_CASE("Lane FFT lane output equals its row output", "[fft][lane]") {
 }
 
 TEST_CASE("Lane FFT matches a double DFT for every n up to 1024",
-          "[fft][lane]") {
+          "[fft][lane][slow]") {
     // One profile (two rows) per size; a root table keeps the O(n^2)
     // reference cheap. Covers every radix mix and Bluestein size.
     std::mt19937 rng(17);

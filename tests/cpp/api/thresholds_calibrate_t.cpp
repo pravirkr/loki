@@ -206,7 +206,7 @@ TEST_CASE("simulate_h1_scores is evaluate's unpruned signal", "[thresholds]") {
 }
 
 TEST_CASE("simulate_h1_scores: a partial last chunk leaves the others intact",
-          "[thresholds]") {
+          "[thresholds][slow]") {
     const auto* backend = GENERATE("cpu", "cuda");
     CAPTURE(backend);
     if (skip_backend(backend)) {

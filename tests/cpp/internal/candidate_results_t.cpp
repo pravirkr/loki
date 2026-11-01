@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -16,9 +17,11 @@
 #include "lib/search/cands.hpp"
 
 namespace {
+// A directory of its own per test: ctest runs the cases in parallel.
 struct Files {
     std::filesystem::path directory =
-        std::filesystem::temp_directory_path() / "loki-candidate-results-test";
+        std::filesystem::temp_directory_path() / "loki-candidate-results-test" /
+        std::to_string(std::mt19937_64{std::random_device{}()}());
     Files() { std::filesystem::create_directories(directory); }
     ~Files() { std::filesystem::remove_all(directory); }
 };

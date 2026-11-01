@@ -51,6 +51,7 @@ option(LOKI_ENABLE_COVERAGE "Enable coverage reporting" OFF)
 option(LOKI_ENABLE_IPO "Enable interprocedural optimization (LTO) on Release builds" OFF)
 option(LOKI_ENABLE_NATIVE_ARCH "Use -march=native in Release builds" ON)
 option(LOKI_ENABLE_NVTX "NVTX ranges for nsys profiling (needs the CUDA toolkit headers)" OFF)
+option(LOKI_WARNINGS_AS_ERRORS "Make compiler warnings errors in Loki's own C++ sources" OFF)
 # Debug stays unoptimized. The asan preset sets -O1 so sanitizers are usable in CI.
 set(LOKI_DEBUG_OPTIMIZATION
     "-O0"
@@ -137,6 +138,11 @@ include(GNUInstallDirs)
 set(LOKI_COMPILE_OPTIONS ${PROJECT_NAME}_compile_options)
 add_library(${LOKI_COMPILE_OPTIONS} INTERFACE)
 target_compile_options(${LOKI_COMPILE_OPTIONS} INTERFACE -Wall -Wextra -Wpedantic)
+# Loki's targets only: the fetched dependencies keep their own warning flags.
+target_compile_options(
+  ${LOKI_COMPILE_OPTIONS}
+  INTERFACE $<$<AND:$<BOOL:${LOKI_WARNINGS_AS_ERRORS}>,$<COMPILE_LANGUAGE:CXX>>:-Werror>
+)
 target_compile_options(
   ${LOKI_COMPILE_OPTIONS}
   INTERFACE "$<$<CONFIG:Debug>:${LOKI_DEBUG_OPTIMIZATION};-g>"

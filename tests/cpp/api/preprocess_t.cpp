@@ -1,6 +1,7 @@
 #include "loki/io/preprocess.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <complex>
 #include <cstddef>
@@ -140,11 +141,18 @@ double tone_amplitude(const std::vector<float>& x, double freq) {
     return std::abs(acc) / static_cast<double>(x.size());
 }
 
+/// Finite from the bits: std::isfinite folds to true under -ffast-math. The
+/// volatile keeps the compiler from folding the bit test as well.
+bool is_finite(float x) {
+    const volatile auto bits = std::bit_cast<std::uint32_t>(x);
+    return (bits & 0x7F800000U) != 0x7F800000U;
+}
+
 void require_contract(const Out& o) {
     bool any = false;
     for (SizeType i = 0; i < o.e.size(); ++i) {
-        REQUIRE(std::isfinite(o.e[i]));
-        REQUIRE(std::isfinite(o.v[i]));
+        REQUIRE(is_finite(o.e[i]));
+        REQUIRE(is_finite(o.v[i]));
         REQUIRE(o.v[i] >= 0.0F);
         if (o.v[i] == 0.0F) {
             REQUIRE(o.e[i] == 0.0F);

@@ -124,7 +124,7 @@ bool same_hits(const std::vector<SnrHit>& a, const std::vector<SnrHit>& b) {
 
 } // namespace
 
-TEST_CASE("Phase-step table batches are bit-exact", "[ffa][memory]") {
+TEST_CASE("Phase-step table batches are bit-exact", "[ffa][memory][slow]") {
     // Not a structured binding: clang 18 cannot capture one under -fopenmp.
     const auto series    = make_series(5);
     const auto& ts_e     = series.first;

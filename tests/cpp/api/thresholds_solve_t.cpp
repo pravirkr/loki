@@ -113,7 +113,7 @@ TEST_CASE("solve: the Pd it reports is that of the returned thresholds",
 }
 
 TEST_CASE("solve is reproducible and does not depend on the thread count",
-          "[thresholds][solve]") {
+          "[thresholds][solve][slow]") {
     const auto* backend = GENERATE("cpu", "cuda");
     const auto* mode    = GENERATE("shared", "robust");
     CAPTURE(backend, mode);
@@ -156,7 +156,7 @@ TEST_CASE("The guided beam needs a positive width and reach", "[thresholds]") {
 }
 
 TEST_CASE("save works in every mode, with the solution after solve()",
-          "[thresholds][solve]") {
+          "[thresholds][solve][slow]") {
     const auto dir = std::filesystem::temp_directory_path() / "loki_solve_save";
     std::filesystem::remove_all(dir);
     for (const std::string_view mode :

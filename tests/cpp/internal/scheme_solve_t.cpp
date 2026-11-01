@@ -245,7 +245,7 @@ double cost_per_detection(const loki::detection::detail::ThresholdsEngine& eng,
 } // namespace
 
 TEST_CASE("refit_scheme re-fits a small-nbins schedule to the true nbins",
-          "[thresholds][solve]") {
+          "[thresholds][solve][slow]") {
     // The 8-segment pattern of issue #15. A schedule searched at 64 bins is too
     // permissive at 256: the refit must deliver the target there and cost
     // clearly less than the unshifted schedule.

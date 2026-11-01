@@ -28,10 +28,10 @@ against the old-vs-old jitter, not against zero.
 
 ```bash
 export LOKI_BENCH_WORK=/scratch/loki-bench
-python bench/scripts/ffa/workloads.py data   build-dev/applications/loki
-python bench/scripts/ffa/workloads.py config build-dev/applications/loki --backend cuda
+python bench/scripts/ffa/workloads.py data   build/applications/loki
+python bench/scripts/ffa/workloads.py config build/applications/loki --backend cuda
 python bench/scripts/ffa/workloads.py run    base/loki base W3 W4
-python bench/scripts/ffa/workloads.py run    build-dev/applications/loki new W3 W4
+python bench/scripts/ffa/workloads.py run    build/applications/loki new W3 W4
 python bench/scripts/ffa/compare_ffa.py $LOKI_BENCH_WORK/runs/{base,new}_W4/W4_ffa_results.h5
 ```
 

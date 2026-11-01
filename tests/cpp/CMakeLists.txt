@@ -49,13 +49,17 @@ foreach(kind api internal)
     ${_target} PRIVATE ${PROJECT_NAME}::${LOKI_LIBRARY_NAME} ${LOKI_COMPILE_OPTIONS}
                        Catch2::Catch2WithMain OpenMP::OpenMP_CXX HighFive::HighFive
   )
+  # Catch2 tags become CTest labels: [slow] marks the tests the sanitizer preset
+  # skips (ctest -LE slow).
   if(kind STREQUAL "internal")
     # The device-memory model tests measure free device memory, so they run
     # alone (other GPU tests would allocate meanwhile).
-    catch_discover_tests(${_target} TEST_SPEC "~[ep_memory]")
-    catch_discover_tests(${_target} TEST_SPEC "[ep_memory]" PROPERTIES RUN_SERIAL TRUE)
+    catch_discover_tests(${_target} TEST_SPEC "~[ep_memory]" ADD_TAGS_AS_LABELS)
+    catch_discover_tests(
+      ${_target} TEST_SPEC "[ep_memory]" ADD_TAGS_AS_LABELS PROPERTIES RUN_SERIAL TRUE
+    )
   else()
-    catch_discover_tests(${_target})
+    catch_discover_tests(${_target} ADD_TAGS_AS_LABELS)
   endif()
 endforeach()
 
