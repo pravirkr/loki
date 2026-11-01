@@ -393,8 +393,20 @@ dominates over a long observation. Measured at `T_obs` = 2147 s and nbins 512
 (25-29 Hz): a box of accel +/- 1000 and jerk +/- 4 needs 132 GB for a 0.01 Hz
 chunk, while the circular-orbit limits of a coherent jerk search (P_orb >= 5
 `T_obs`, m_c <= 10, m_p >= 1.2: accel +/- 499, jerk +/- 0.29) need 2.4 GB, and
-the whole 4 Hz band plans into 15 GB. Each chunk's FFA band is also padded by
-the drift these limits allow (`calculate_max_drift`).
+the whole 4 Hz band plans into 15 GB.
+
+Each chunk's FFA band is also padded by how far a frequency set at the centre
+of the data can wander by its edges, `t = T_obs / 2` away
+(`calculate_max_drift`): `f (1 +/- max_drift)`. Up to four parameters the
+search model is a Taylor polynomial, so the bound is the Taylor series of the
+velocity change, `(|a| t + |j| t^2 / 2 + |s| t^3 / 6) / c`, with the box
+limits. Five parameters are a circular search: the box only spans the grid,
+and the orbit limits bound the signal. With `v(t) = v_amp sin(omega t + phi)`,
+`v_amp <= x_mass_const omega^(1/3)` (the mass limit the pruning validates
+against) and `omega <= omega_max = 2 pi / p_orb_min`,
+`max_drift = 2 x_mass_const omega_max^(1/3) sin(min(omega_max t / 2, pi / 2)) / c`.
+The plan cache records `p_orb_min`, `m_c_max` and `m_p_min` and checks them for
+five parameters.
 
 Give either explicit limits (`search.acc_*`, `search.jerk_*`) or a
 `[search.orbit]` table, whose limits follow from `search::circular_param_limits`
@@ -402,7 +414,7 @@ Give either explicit limits (`search.acc_*`, `search.jerk_*`) or a
 
 ```toml
 [search.orbit]
-order = "jerk"          # "accel" | "jerk" | "snap"
+order = "jerk"          # "accel" | "jerk" | "snap" | "crackle"
 p_orb_min_tobs = 5.0    # or p_orb_min in seconds
 m_c_max = 10.0
 m_p_min = 1.2
@@ -411,8 +423,11 @@ m_p_min = 1.2
 `f_min` and `f_max` are then intrinsic spin frequencies, widened by `v/c`.
 Explicit limits with a jerk are reported as the fastest circular orbit they
 reach (`search::implied_circular_orbit`), with a warning when it is shorter
-than the observation. `[ep]` `p_orb_min`, `m_c_max` and `m_p_min` are a
-different setting: the leaf validation of the circular pruning basis.
+than the observation. `order = "crackle"` gives the five parameters of a
+circular EP search. `[ep]` `p_orb_min`, `m_c_max` and `m_p_min` are the orbit
+the circular pruning validates its leaves against, and the five-parameter
+drift above; a `[search.orbit]` table sets them from its own orbit, and setting
+them in `[ep]` as well is an error.
 
 ### Ring capacity
 

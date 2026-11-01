@@ -4,6 +4,7 @@
 #include <cmath>
 #include <filesystem>
 #include <format>
+#include <numbers>
 #include <optional>
 #include <random>
 #include <set>
@@ -341,6 +342,67 @@ TEST_CASE("EPRegionPlanner HDF5 cache round-trip and validation",
     }
 
     std::filesystem::remove(cache_file, ec);
+}
+
+TEST_CASE("EPRegionPlanner pads five-parameter chunks by the orbit drift",
+          "[ep_freq_sweep]") {
+    // A circular search is bounded by its orbit limits, not by the box: the
+    // velocity change over half the observation of an orbit with
+    // P_orb >= p_orb_min, v_amp <= x_mass_const omega^(1/3).
+    constexpr SizeType kNsamps = 1U << 16U;
+    constexpr double kTsamp    = 64e-6;
+    const double tobs          = static_cast<double>(kNsamps) * kTsamp;
+    const std::vector<ParamLimit> limits{
+        ParamLimit{.min = -0.2, .max = 0.2},
+        ParamLimit{.min = -0.5, .max = 0.5},
+        ParamLimit{.min = -1.0, .max = 1.0},
+        ParamLimit{.min = -10.0, .max = 10.0},
+        ParamLimit{.min = 140.0, .max = 145.0},
+    };
+    const auto make_cfg = [&](double p_orb_min) {
+        return PulsarSearchConfig(kNsamps, kTsamp, /*nbins=*/32, /*eta=*/1.0,
+                                  limits, /*ducy_max=*/0.3, /*wtsp=*/1.5,
+                                  /*use_fourier=*/false, /*nthreads=*/1,
+                                  /*max_process_memory_gb=*/4.0,
+                                  /*octave_scale=*/2.0, /*nbins_max=*/1024,
+                                  /*nbins_min_lossy_bf=*/64,
+                                  /*bseg_brute=*/1024,
+                                  /*bseg_ffa=*/kNsamps / 8, /*snr_min=*/5.0,
+                                  /*max_passing_candidates=*/1U << 22U,
+                                  /*prune_poly_order=*/2, p_orb_min,
+                                  /*m_c_max=*/1.0, /*m_p_min=*/1.4);
+    };
+    const auto cfg     = make_cfg(10.0 * tobs);
+    const double omega = 2.0 * std::numbers::pi / cfg.get_p_orb_min();
+    const double v_amp = cfg.get_x_mass_const() * std::cbrt(omega);
+    // omega * tobs / 4 < pi / 2 here, so the sine is not capped.
+    const double drift =
+        2.0 * v_amp * std::sin(omega * tobs / 4.0) / 299792458.0;
+    const auto cache_file = std::filesystem::temp_directory_path() /
+                            "loki_test_ep_plan_five_params.h5";
+    EPRegionPlanner<float> planner(cfg, /*min_pd=*/0.1F, "taylor",
+                                   /*ref_ducy=*/0.1F, cache_file);
+    REQUIRE(planner.get_nchunks() > 0);
+    for (const auto& chunk : planner.get_chunk_cfgs()) {
+        CHECK(1.0 - (chunk.actual_f_start / chunk.nominal_f_start) ==
+              Catch::Approx(drift));
+        CHECK((chunk.actual_f_end / chunk.nominal_f_end) - 1.0 ==
+              Catch::Approx(drift));
+    }
+
+    // The orbit limits are part of a five-parameter plan.
+    {
+        const HighFive::File f(cache_file.string(), HighFive::File::ReadWrite);
+        f.getAttribute("p_orb_min").write(20.0 * tobs);
+    }
+    CHECK_THROWS_AS(planner.load_cache(cache_file), std::invalid_argument);
+    std::error_code ec;
+    std::filesystem::remove(cache_file, ec);
+
+    // The default p_orb_min allows orbits faster than light.
+    CHECK_THROWS_AS(EPRegionPlanner<float>(make_cfg(1e-5), /*min_pd=*/0.1F,
+                                           "taylor", /*ref_ducy=*/0.1F),
+                    std::runtime_error);
 }
 
 TEST_CASE("EPFreqSweep executes sweep and writes unified results file",

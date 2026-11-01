@@ -49,6 +49,7 @@ def _make_injected() -> tuple[np.ndarray, np.ndarray]:
 
 def _search_config(
     param_limits: np.ndarray | None = None,
+    **orbit: float,
 ) -> libloki.configs.PulsarSearchConfig:
     if param_limits is None:
         param_limits = np.array([[-10.0, 10.0], [140.0, 145.0]], dtype=np.float64)
@@ -65,6 +66,7 @@ def _search_config(
         bseg_brute=1024,
         bseg_ffa=NSAMPS // 8,
         prune_poly_order=2,
+        **orbit,
     )
 
 
@@ -122,15 +124,16 @@ def test_ep_freq_sweep_recovers_injected_pulsar(tmp_path: Path, backend: str) ->
 
 
 def test_ep_freq_sweep_recovers_with_five_parameters(tmp_path: Path) -> None:
-    """The planner's drift margin covers crackle, so five parameters plan."""
+    """A circular search plans and prunes by its orbit limits."""
     ts_e, ts_v = _make_injected()
-    # Crackle, snap, jerk, accel and frequency around the injected pulsar.
-    limits = np.array(
-        [[-0.2, 0.2], [-0.5, 0.5], [-1.0, 1.0], [-10.0, 10.0], [140.0, 145.0]],
-        dtype=np.float64,
-    )
+    # Orbits of at least 1000 observations with a companion of at most
+    # 0.05 M_sun: |accel| <= 38 m/s^2 covers the injected pulsar, and the
+    # higher derivatives keep the tree small.
+    orbit = {"p_orb_min": 1000.0 * NSAMPS * DT, "m_c_max": 0.05, "m_p_min": 1.2}
+    limits = libloki.configs.circular_param_limits(140.0, 145.0, poly_order=5, **orbit)
+    cfg = _search_config(limits, **orbit)
     sweep = libloki.prune.EPFreqSweep(
-        _search_config(limits), min_pd=0.5, show_progress=False, ref_segs=[4]
+        cfg, min_pd=0.5, show_progress=False, ref_segs=[4]
     )
     sweep.execute(ts_e, ts_v, str(tmp_path), "five")
     best = _best_score_near_truth(tmp_path / "five_ep_results.h5", nparams=5)

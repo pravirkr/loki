@@ -580,13 +580,13 @@ use_fourier = true
 use_boxcar_kadane = false
 
 # Alternative to acc_* and jerk_*: limits of physical circular orbits. The
-# acceleration, jerk (and snap) limits and a Doppler-widened frequency range
-# are derived from them (f_min and f_max are then intrinsic spin
+# acceleration, jerk (snap, crackle) limits and a Doppler-widened frequency
+# range are derived from them (f_min and f_max are then intrinsic spin
 # frequencies). Exactly one of p_orb_min (seconds) and p_orb_min_tobs (in units
 # of the observation length) is required. Coherent Taylor searches commonly
 # use p_orb_min_tobs = 10 (accel), 5 (jerk) or 3 (snap).
 # [search.orbit]
-# order = "jerk"          # "accel" | "jerk" | "snap"
+# order = "jerk"          # "accel" | "jerk" | "snap" | "crackle" (EP only)
 # p_orb_min_tobs = 5.0
 # m_c_max = 10.0          # companion mass, M_sun
 # m_p_min = 1.2           # pulsar mass, M_sun
@@ -748,8 +748,8 @@ FFATomlConfig read_ffa_tables(const toml::table& tbl) {
                 o.order = *order;
             } else {
                 throw std::invalid_argument(
-                    "search.orbit.order must be set: \"accel\", \"jerk\" or "
-                    "\"snap\"");
+                    "search.orbit.order must be set: \"accel\", \"jerk\", "
+                    "\"snap\" or \"crackle\"");
             }
             o.p_orb_min      = require_double("p_orb_min");
             o.p_orb_min_tobs = require_double("p_orb_min_tobs");
@@ -1045,10 +1045,12 @@ orbit_param_limits(const FFATomlConfig::OrbitLimits& orbit,
         poly_order = 3;
     } else if (orbit.order == "snap") {
         poly_order = 4;
+    } else if (orbit.order == "crackle") {
+        poly_order = 5;
     } else {
         throw std::invalid_argument(std::format(
-            "search.orbit.order must be \"accel\", \"jerk\" or \"snap\", "
-            "got \"{}\"",
+            "search.orbit.order must be \"accel\", \"jerk\", \"snap\" or "
+            "\"crackle\", got \"{}\"",
             orbit.order));
     }
     if (orbit.p_orb_min.has_value() == orbit.p_orb_min_tobs.has_value()) {
@@ -1075,7 +1077,7 @@ orbit_param_limits(const FFATomlConfig::OrbitLimits& orbit,
                      "{} is not coherent over a whole orbit",
                      p_orb_min, tobs, poly_order);
     }
-    static constexpr std::array kNames{"snap", "jerk", "accel"};
+    static constexpr std::array kNames{"crackle", "snap", "jerk", "accel"};
     std::string derived;
     for (SizeType i = 0; i + 1 < limits.size(); ++i) {
         derived += std::format("{} +/- {:.4g}, ",
@@ -2168,6 +2170,15 @@ void read_ep_tables(const toml::table& tbl, EPTomlConfig& cfg) {
             }
             cfg.ref_segs = std::move(ref_segs);
         }
+        // [search.orbit] sets the orbit of the pruning too: one source.
+        if (cfg.orbit.has_value()) {
+            for (const auto key : {"p_orb_min", "m_c_max", "m_p_min"}) {
+                if ((*ep)[key]) {
+                    throw std::invalid_argument(std::format(
+                        "ep.{} is set by [search.orbit]: remove it", key));
+                }
+            }
+        }
         if (const auto val = read_number(*ep, "p_orb_min", "ep.p_orb_min")) {
             cfg.p_orb_min = *val;
         }
@@ -2383,10 +2394,11 @@ n_runs = 16
 # Explicit reference segments, instead of n_runs (exclusive with n_runs)
 # ref_segs = [0, 1]
 
-# Orbit and mass priors of the search
-p_orb_min = 0.00001
-m_c_max = 10.0
-m_p_min = 1.4
+# Orbit and mass priors of the circular (crackle) pruning. A [search.orbit]
+# table sets them instead.
+# p_orb_min = 0.00001
+# m_c_max = 10.0
+# m_p_min = 1.4
 
 # Significance levels of the propagator and the validation
 propagator_significance = 2.0
@@ -2396,13 +2408,13 @@ validation_significance = 5.0
 use_conservative_tile = false
 
 # Alternative to acc_* and jerk_*: limits of physical circular orbits. The
-# acceleration, jerk (and snap) limits and a Doppler-widened frequency range
-# are derived from them (f_min and f_max are then intrinsic spin
+# acceleration, jerk (snap, crackle) limits and a Doppler-widened frequency
+# range are derived from them (f_min and f_max are then intrinsic spin
 # frequencies). Exactly one of p_orb_min (seconds) and p_orb_min_tobs (in units
 # of the observation length) is required. Coherent Taylor searches commonly
 # use p_orb_min_tobs = 10 (accel), 5 (jerk) or 3 (snap).
 # [search.orbit]
-# order = "jerk"          # "accel" | "jerk" | "snap"
+# order = "jerk"          # "accel" | "jerk" | "snap" | "crackle" (EP only)
 # p_orb_min_tobs = 5.0
 # m_c_max = 10.0          # companion mass, M_sun
 # m_p_min = 1.2           # pulsar mass, M_sun
@@ -2540,8 +2552,18 @@ EPTomlConfig::to_ep_search_config(std::optional<SizeType> override_nsamps,
             "pruning needs at least one FFA level",
             ffa.get_bseg_ffa(), ffa.get_nsamps()));
     }
-    return EPSearchConfig(std::move(ffa), prune_poly_order, p_orb_min, m_c_max,
-                          m_p_min, propagator_significance,
+    // The pruning checks its leaves against the orbit of [search.orbit].
+    double orbit_p_min = p_orb_min;
+    double orbit_m_c   = m_c_max;
+    double orbit_m_p   = m_p_min;
+    if (orbit.has_value()) {
+        orbit_p_min = orbit->p_orb_min.value_or(
+            orbit->p_orb_min_tobs.value_or(0.0) * ffa.get_tobs());
+        orbit_m_c = orbit->m_c_max;
+        orbit_m_p = orbit->m_p_min;
+    }
+    return EPSearchConfig(std::move(ffa), prune_poly_order, orbit_p_min,
+                          orbit_m_c, orbit_m_p, propagator_significance,
                           validation_significance, use_conservative_tile,
                           target_snr);
 }

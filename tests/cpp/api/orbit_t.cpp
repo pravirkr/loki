@@ -17,6 +17,7 @@ using loki::ParamLimit;
 using loki::SizeType;
 using loki::search::circular_param_limits;
 using loki::search::CircularOrbitLimits;
+using loki::search::EPTomlConfig;
 using loki::search::FFATomlConfig;
 using loki::search::implied_circular_orbit;
 
@@ -58,6 +59,23 @@ TEST_CASE("circular_param_limits matches pyloki's from_circular",
     }
 }
 
+TEST_CASE("circular_param_limits adds crackle at order five",
+          "[config][orbit]") {
+    // pyloki.config.ParamLimits.from_circular((25, 29), 5 T, 10, 1.2,
+    // poly_order=5): the order-four rows below a crackle row.
+    const CircularOrbitLimits orbit{
+        .p_orb_min = 5.0 * kTobs, .m_c_max = 10.0, .m_p_min = 1.2};
+    const auto snap    = circular_param_limits(25.0, 29.0, 4, orbit);
+    const auto crackle = circular_param_limits(25.0, 29.0, 5, orbit);
+    REQUIRE(crackle.size() == 5);
+    CHECK_THAT(crackle[0].max, WithinRel(9.993214039965e-08, 1e-6));
+    CHECK(crackle[0].min == -crackle[0].max);
+    for (SizeType i = 0; i < snap.size(); ++i) {
+        CHECK(crackle[i + 1].min == snap[i].min);
+        CHECK(crackle[i + 1].max == snap[i].max);
+    }
+}
+
 TEST_CASE("circular_param_limits has one row per searched derivative",
           "[config][orbit]") {
     const CircularOrbitLimits orbit{.p_orb_min = 5.0 * kTobs};
@@ -78,7 +96,7 @@ TEST_CASE("circular_param_limits rejects unphysical inputs",
     const CircularOrbitLimits orbit{.p_orb_min = 1000.0};
     CHECK_THROWS_AS(circular_param_limits(25.0, 29.0, 1, orbit),
                     std::invalid_argument);
-    CHECK_THROWS_AS(circular_param_limits(25.0, 29.0, 5, orbit),
+    CHECK_THROWS_AS(circular_param_limits(25.0, 29.0, 6, orbit),
                     std::invalid_argument);
     CHECK_THROWS_AS(circular_param_limits(29.0, 25.0, 2, orbit),
                     std::invalid_argument);
@@ -148,6 +166,36 @@ TEST_CASE("[search.orbit] sets the parameter limits", "[config][orbit]") {
                                        "acc_min = 0.0\nacc_max = 0.0\n"))
                              .to_search_config();
     CHECK(seconds.get_nparams() == 2);
+
+    // Crackle: the five parameters of a circular EP search.
+    const auto crackle =
+        FFATomlConfig::from_string(
+            orbit_doc("order = \"crackle\"\np_orb_min = 1e3\n"))
+            .to_search_config();
+    CHECK(crackle.get_nparams() == 5);
+}
+
+TEST_CASE("[search.orbit] sets the orbit of the EP pruning",
+          "[config][orbit]") {
+    const auto ep_doc = [](const std::string& ep_extra) {
+        return orbit_doc("order = \"crackle\"\np_orb_min_tobs = 10.0\n"
+                         "m_c_max = 0.5\nm_p_min = 1.3\n") +
+               "[ep]\nn_runs = 2\n" + ep_extra +
+               "[performance]\nbseg_ffa = 8192\n";
+    };
+    const auto cfg =
+        EPTomlConfig::from_string(ep_doc("")).to_ep_search_config();
+    const double tobs = 65536.0 * 0.000064;
+    CHECK(cfg.get_nparams() == 5);
+    CHECK_THAT(cfg.get_p_orb_min(), WithinRel(10.0 * tobs, 1e-12));
+    CHECK(cfg.get_m_c_max() == 0.5);
+    CHECK(cfg.get_m_p_min() == 1.3);
+    // A second orbit in [ep] could disagree with the box.
+    for (const auto* key :
+         {"p_orb_min = 100.0\n", "m_c_max = 1.0\n", "m_p_min = 1.4\n"}) {
+        CHECK_THROWS_AS(EPTomlConfig::from_string(ep_doc(key)),
+                        std::invalid_argument);
+    }
 }
 
 TEST_CASE("[search.orbit] rejects incomplete or conflicting input",
@@ -170,9 +218,8 @@ TEST_CASE("[search.orbit] rejects incomplete or conflicting input",
         std::invalid_argument);
     // Order missing or unknown, a non-numeric value, an unknown key
     CHECK_THROWS(convert(orbit_doc("p_orb_min = 100.0\n")));
-    CHECK_THROWS_AS(
-        convert(orbit_doc("order = \"crackle\"\np_orb_min = 1e3\n")),
-        std::invalid_argument);
+    CHECK_THROWS_AS(convert(orbit_doc("order = \"kepler\"\np_orb_min = 1e3\n")),
+                    std::invalid_argument);
     CHECK_THROWS(
         convert(orbit_doc("order = \"jerk\"\np_orb_min = \"long\"\n")));
     CHECK_THROWS(convert(orbit_doc("order = \"jerk\"\np_orb_min = 100.0\n"
