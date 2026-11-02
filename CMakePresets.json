@@ -15,7 +15,8 @@
     },
     {
       "name": "release",
-      "displayName": "Release (default: CUDA if found, tests + Python, build/)",
+      "displayName": "Release",
+      "description": "Default: CUDA if found, tests, Python, -march=native; build/",
       "inherits": "base",
       "binaryDir": "${sourceDir}/build",
       "cacheVariables": {
@@ -27,7 +28,8 @@
     },
     {
       "name": "cuda",
-      "displayName": "Release with CUDA required, benchmarks",
+      "displayName": "CUDA",
+      "description": "Release with CUDA required, benchmarks; build-cuda/",
       "inherits": "release",
       "binaryDir": "${sourceDir}/build-cuda",
       "cacheVariables": {
@@ -37,7 +39,8 @@
     },
     {
       "name": "asan",
-      "displayName": "ASan/UBSan at -O1, asserts on (CPU)",
+      "displayName": "ASan",
+      "description": "ASan/UBSan at -O1, asserts on, CPU; build-asan/",
       "inherits": "base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
@@ -51,7 +54,8 @@
     },
     {
       "name": "ci",
-      "displayName": "CI (portable Release, CPU, warnings as errors)",
+      "displayName": "CI",
+      "description": "Portable Release, CPU, warnings as errors; build-ci/",
       "inherits": "base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
@@ -63,7 +67,8 @@
     },
     {
       "name": "ci-tidy",
-      "displayName": "CI static analysis (Debug, compile DB, Python)",
+      "displayName": "CI tidy",
+      "description": "Static analysis: Debug, compile DB, Python; build-ci-tidy/",
       "inherits": "base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
