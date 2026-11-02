@@ -96,19 +96,12 @@ function(loki_validate_cuda_architectures)
   loki_resolve_cuda_arch_numbers(arch_numbers)
 
   if(arch_numbers STREQUAL "")
+    # nvcc needs no GPU or driver; only "native" asks this machine's GPU.
     if(LOKI_CUDA_ARCHITECTURES STREQUAL "native")
-      message(WARNING "Could not resolve native GPU compute capability (nvidia-smi unavailable). "
-                      "Architecture policy checks skipped; cuRANDDx may be fetched conservatively."
+      message(FATAL_ERROR "LOKI_CUDA_ARCHITECTURES=native, but nvidia-smi reports no GPU on this "
+                          "machine. Name the target GPUs instead (e.g. 80 or 80;90), or build "
+                          "with LOKI_CUDA=OFF."
       )
-      set(LOKI_NEEDS_CURANDDX
-          TRUE
-          CACHE INTERNAL "Whether MathDX/cuRANDDx is required" FORCE
-      )
-      set(LOKI_MAX_CUDA_ARCH
-          800
-          CACHE INTERNAL "Highest resolved CUDA arch number" FORCE
-      )
-      return()
     endif()
     message(FATAL_ERROR "Could not parse LOKI_CUDA_ARCHITECTURES='${LOKI_CUDA_ARCHITECTURES}'. "
                         "Use native, all-major, or numeric values such as 61 or 61;80."

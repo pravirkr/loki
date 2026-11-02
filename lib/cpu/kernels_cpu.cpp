@@ -1423,7 +1423,7 @@ void brute_fold_ts(const float* __restrict__ ts_e,
             const auto* __restrict__ ts_v_seg = ts_v + start_idx;
             fill_segment_prefix(ts_e_seg, prefix_e.data(), segment_len);
             fill_segment_prefix(ts_v_seg, prefix_v.data(), segment_len);
-            auto* __restrict__ fold_seg = fold + (iseg * nfreqs * 2 * nbins);
+            auto* __restrict__ fold_seg = fold + (iseg * seg_stride);
             brute_fold_runs_range(prefix_e.data(), prefix_v.data(), fold_seg,
                                   runs, run_offsets, 0, nfreqs, nbins);
         }

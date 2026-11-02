@@ -293,7 +293,8 @@ private:
                 mx[lane] = std::max(mx[lane], snr[lane]);
             }
         }
-        std::copy_n(mx.begin(), nvalid, out);
+        // nvalid <= kGroup at every call; the min lets GCC see the bound.
+        std::copy_n(mx.begin(), std::min(nvalid, kGroup), out);
     }
 
 #if defined(__AVX2__) && defined(__FMA__)

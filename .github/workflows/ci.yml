@@ -10,9 +10,11 @@ on:
 permissions:
   contents: read
 
+# A new push cancels a pull request's older run; every commit on main keeps
+# its run, so each one gets a result.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CPM_SOURCE_CACHE: ${{ github.workspace }}/.cache/cpm
@@ -45,7 +47,8 @@ jobs:
         with:
           profile: ${{ matrix.apt_profile }}
 
-      - uses: ./.github/actions/cache-ccache
+      - id: ccache
+        uses: ./.github/actions/cache-ccache
         with:
           prefix: ${{ matrix.ccache_prefix }}
 
@@ -64,7 +67,7 @@ jobs:
           cmake --version
           cmake --preset ci -D CMAKE_CXX_COMPILER="${{ matrix.compiler }}"
           cmake --build --preset ci --parallel "$(nproc)"
-          ctest --preset ci
+          ctest --preset ci --parallel "$(nproc)"
           ccache --show-stats || true
 
       # Installed package must work for downstream find_package(loki) users.
@@ -76,6 +79,13 @@ jobs:
             -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/loki"
           cmake --build build-consumer
           ./build-consumer/loki_consumer
+
+      - name: Save ccache
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ steps.ccache.outputs.key }}
 
   cpp-sanitizer:
     name: C++ ASan/UBSan (g++-14)
@@ -89,7 +99,8 @@ jobs:
         with:
           profile: asan-gcc14
 
-      - uses: ./.github/actions/cache-ccache
+      - id: ccache
+        uses: ./.github/actions/cache-ccache
         with:
           prefix: asan-gcc14
 
@@ -106,8 +117,16 @@ jobs:
           ccache --zero-stats || true
           cmake --preset asan -D CMAKE_CXX_COMPILER=g++-14
           cmake --build --preset asan --parallel "$(nproc)"
-          ctest --preset asan
+          # The asan test preset skips the [slow] tests; Release runs them.
+          ctest --preset asan --parallel "$(nproc)"
           ccache --show-stats || true
+
+      - name: Save ccache
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ steps.ccache.outputs.key }}
 
   # Lint job gate: job-level `if` cannot use workflow `env`. Re-enable → true.
   clang-tidy:
@@ -127,7 +146,8 @@ jobs:
           profile: lint-base
           llvm-version: "23"
 
-      - uses: ./.github/actions/cache-ccache
+      - id: ccache
+        uses: ./.github/actions/cache-ccache
         with:
           prefix: ci-tidy-clang23
 
@@ -164,6 +184,13 @@ jobs:
       - name: Build and static analysis (parallel prebuild + aggregate report)
         run: scripts/ci_lint_job.sh
 
+      - name: Save ccache
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ steps.ccache.outputs.key }}
+
   python:
     name: Python (3.12)
     runs-on: ubuntu-latest
@@ -176,7 +203,8 @@ jobs:
         with:
           profile: python
 
-      - uses: ./.github/actions/cache-ccache
+      - id: ccache
+        uses: ./.github/actions/cache-ccache
         with:
           prefix: python-scikit
 
@@ -204,4 +232,11 @@ jobs:
             -DLOKI_ENABLE_NATIVE_ARCH=OFF
 
       - name: Run Python tests
-        run: uv run pytest tests/python
+        run: uv run pytest -n auto --durations=15 tests/python
+
+      - name: Save ccache
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ steps.ccache.outputs.key }}

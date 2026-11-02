@@ -158,7 +158,7 @@ TEST_CASE("Accel execute_scored is bit-exact with a scan of the stored fold",
 }
 
 TEST_CASE("Fourier execute_scored matches a scan of the stored fold",
-          "[ffa][fused][score]") {
+          "[ffa][fused][score][slow]") {
     constexpr SizeType kNsamps = 1U << 15U;
     constexpr double kTsamp    = 1.0e-3;
     std::mt19937 rng(91);

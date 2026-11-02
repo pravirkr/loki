@@ -99,7 +99,8 @@ TEST_CASE("EP sweep writer propagates asynchronous write failures",
     const auto path =
         std::filesystem::temp_directory_path() / "loki_ep_writer_error.h5";
     const auto cfg = writer_cfg();
-    const std::vector<loki::algorithms::EPChunkConfig> chunks{{.cfg = cfg}};
+    const std::vector<loki::algorithms::EPChunkConfig> chunks{
+        {.cfg = cfg, .threshold_scheme = {}, .branching_pattern = {}}};
     std::filesystem::remove(path);
     loki::pipelines::detail::EPSweepWriter writer(path, chunks, cfg, 0.1F,
                                                   "taylor", 0.1F);

@@ -17,7 +17,7 @@ merge times are read from the ``FFA Chunk detail`` log line.
 
 Usage::
 
-    python bseg_brute_sensitivity.py --app build-dev/applications/loki \\
+    python bseg_brute_sensitivity.py --app build/applications/loki \\
         --workdir /tmp/loki_bseg_sens --nsamps 2097152 --cases 6 \\
         --bsegs legacy cost 128 256 512 1024 2048 4096 8192 --json out.json
 

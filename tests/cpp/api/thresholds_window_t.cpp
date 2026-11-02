@@ -150,7 +150,7 @@ TEST_CASE("Window beam resolves issue #15 on CUDA: every target reached, "
 }
 
 TEST_CASE("Window beam resolves issue #15 on the CPU (calibrated)",
-          "[thresholds][window]") {
+          "[thresholds][window][slow][bigmem]") {
     const int nseg     = GENERATE(4, 8);
     const float min_pd = GENERATE(0.5F, 0.9F);
     CAPTURE(nseg, min_pd);
@@ -167,7 +167,7 @@ TEST_CASE("Window beam resolves issue #15 on the CPU (calibrated)",
 }
 
 TEST_CASE("Window beam: reproducible, and run() can be called again",
-          "[thresholds][window]") {
+          "[thresholds][window][slow][bigmem]") {
     // Shared mode is CUDA-only
     const auto [backend, mode] = GENERATE(
         std::pair<std::string_view, std::string_view>{"cpu", "improved"},
@@ -192,7 +192,7 @@ TEST_CASE("Window beam: reproducible, and run() can be called again",
 }
 
 TEST_CASE("Window beam spans the signal quantiles at every stage",
-          "[thresholds][window]") {
+          "[thresholds][window][bigmem]") {
     const auto* backend = GENERATE("cpu", "cuda");
     CAPTURE(backend);
     if (skip_backend(backend)) {

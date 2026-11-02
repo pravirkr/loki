@@ -33,3 +33,15 @@ target_link_libraries(
   ${LOKI_PYMODULE_NAME} PUBLIC ${PROJECT_NAME}::${LOKI_LIBRARY_NAME} ${LOKI_COMPILE_OPTIONS}
 )
 install(TARGETS ${LOKI_PYMODULE_NAME} DESTINATION ${LOKI_LIBRARY_NAME})
+
+# Development builds: keep src/loki/ importable with PYTHONPATH=src, with no
+# install and no manual copy. Never under pip, which installs the module.
+if(LOKI_PYTHON_INPLACE AND NOT SKBUILD)
+  add_custom_command(
+    TARGET ${LOKI_PYMODULE_NAME}
+    POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:${LOKI_PYMODULE_NAME}>
+            ${CMAKE_CURRENT_SOURCE_DIR}/loki/
+    COMMENT "Copying ${LOKI_PYMODULE_NAME} into src/loki/"
+  )
+endif()
