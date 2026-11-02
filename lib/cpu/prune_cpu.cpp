@@ -572,11 +572,11 @@ private:
 
         execute_iteration_batched(ffa_fold, seg_idx_cur, threshold, stats);
         if (world_tree.get_n_overloads() > n_overloads) {
-            spdlog::warn("Pruning level {:3d}: the world tree overflowed in {} "
-                         "batch(es); survivors were trimmed and the output "
-                         "depends on the batch size",
-                         m_prune_level,
-                         world_tree.get_n_overloads() - n_overloads);
+            spdlog::debug(
+                "Pruning level {:3d}: the world tree overflowed in {} "
+                "batch(es); survivors were trimmed and the output "
+                "depends on the batch size",
+                m_prune_level, world_tree.get_n_overloads() - n_overloads);
         }
 
         // Finalize: make new region active, defragment for contiguous access.

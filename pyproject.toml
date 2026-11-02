@@ -46,6 +46,8 @@ tests = [
     "pytest-xdist",
 ]
 dev = ["ruff", "ty"]
+# Example notebooks in notebooks/ (see notebooks/README.md).
+notebooks = ["jupyterlab", "matplotlib", "scipy"]
 docs = [
     "sphinx",
     "sphinx-book-theme",
