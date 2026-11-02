@@ -9,6 +9,8 @@
 
 A high-performance **C++20** pulsar searching library with **Python bindings**. The same core library supports **CPU-only**, **GPU-accelerated**, and **CPU+GPU** builds: CPU paths always compile; CUDA paths are added when the CUDA toolchain is enabled at configure time.
 
+Worked examples on simulated data are in [`notebooks/`](notebooks/README.md).
+
 ---
 
 ## Requirements

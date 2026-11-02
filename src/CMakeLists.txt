@@ -32,6 +32,8 @@ target_include_directories(${LOKI_PYMODULE_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_
 target_link_libraries(
   ${LOKI_PYMODULE_NAME} PUBLIC ${PROJECT_NAME}::${LOKI_LIBRARY_NAME} ${LOKI_COMPILE_OPTIONS}
 )
+# set_log_level: the module shares loki's header-only spdlog registry.
+target_link_libraries(${LOKI_PYMODULE_NAME} PRIVATE $<BUILD_INTERFACE:spdlog::spdlog_header_only>)
 install(TARGETS ${LOKI_PYMODULE_NAME} DESTINATION ${LOKI_LIBRARY_NAME})
 
 # Development builds: keep src/loki/ importable with PYTHONPATH=src, with no

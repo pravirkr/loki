@@ -277,6 +277,8 @@ target/
 
 # Jupyter Notebook
 .ipynb_checkpoints
+# Files the example notebooks write
+notebooks/_output/
 
 # IPython
 profile_default/

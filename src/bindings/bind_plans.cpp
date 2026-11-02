@@ -28,7 +28,7 @@ void bind_plans(py::module_& m) {
     PYBIND11_NUMPY_DTYPE(coord::FFACoord, i_tail, shift_tail, i_head,
                          shift_head);
     PYBIND11_NUMPY_DTYPE(coord::FFACoordFreq, idx, shift);
-    PYBIND11_NUMPY_DTYPE(coord::FFARegion, f_start, f_end, nbins);
+    PYBIND11_NUMPY_DTYPE(coord::FFARegion, f_start, f_end, nbins, eta);
 
     // Bind FFAPlanBase
     py::class_<FFAPlanBase>(m_plans, "FFAPlanBase")
@@ -175,10 +175,19 @@ void bind_plans(py::module_& m) {
     bind_ffa_plan<ComplexType>(m_plans, "FFAPlanFourier");
     bind_ffa_region_planner<float>(m_plans, "FFARegionPlannerTime");
     bind_ffa_region_planner<ComplexType>(m_plans, "FFARegionPlannerFourier");
-    m_plans.def("generate_ffa_regions", &algorithms::generate_ffa_regions,
-                py::arg("p_min"), py::arg("p_max"), py::arg("tsamp"),
-                py::arg("nbins_min"), py::arg("eta_min"),
-                py::arg("octave_scale") = 2.0, py::arg("nbins_max") = 1024);
+    m_plans.def(
+        "generate_ffa_regions",
+        [](double p_min, double p_max, double tsamp, SizeType nbins_min,
+           double eta_min, double octave_scale, SizeType nbins_max) {
+            return as_pyarray(algorithms::generate_ffa_regions(
+                p_min, p_max, tsamp, nbins_min, eta_min, octave_scale,
+                nbins_max));
+        },
+        py::arg("p_min"), py::arg("p_max"), py::arg("tsamp"),
+        py::arg("nbins_min"), py::arg("eta_min"), py::arg("octave_scale") = 2.0,
+        py::arg("nbins_max") = 1024,
+        "Octave regions of a frequency sweep, as a structured array with "
+        "fields f_start, f_end (Hz), nbins and eta.");
 
     // FFA submodule
 }
