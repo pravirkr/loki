@@ -21,7 +21,8 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "LOKI_CUDA": "AUTO",
-        "LOKI_BUILD_PYTHON": "ON"
+        "LOKI_BUILD_PYTHON": "ON",
+        "LOKI_PYTHON_INPLACE": "ON"
       }
     },
     {

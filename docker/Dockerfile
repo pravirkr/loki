@@ -127,10 +127,10 @@ RUN uv venv /opt/venv --python /usr/bin/python3 \
 WORKDIR /src
 COPY . /src
 
-# LOKI_CUDA=ON refuses to configure unless nvidia-smi sees a GPU, which a
-# normal image build does not have. AUTO compiles CUDA when nvcc is present.
+# Compiling CUDA needs no GPU; the explicit architectures stand in for the
+# default "native", which would ask this machine's GPU.
 RUN uv pip install . \
-        -C cmake.define.LOKI_CUDA=AUTO \
+        -C cmake.define.LOKI_CUDA=ON \
         -C cmake.define.LOKI_ENABLE_NATIVE_ARCH=OFF \
         -C cmake.define.LOKI_CUDA_ARCHITECTURES="${LOKI_CUDA_ARCHITECTURES}" \
         -C cmake.define.CMAKE_CUDA_FLAGS="-Xcompiler=-march=${LOKI_MARCH}" \

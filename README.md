@@ -75,7 +75,7 @@ uv pip install git+https://github.com/pravirkr/loki.git
 | Value | Behaviour |
 | ------- | ----------- |
 | **`AUTO`** *(default)* | Build GPU support if `nvcc` is found; otherwise CPU-only. |
-| **`ON`** | **Require** CUDA toolkit, NVIDIA driver/GPU (`nvidia-smi`), and MathDX. **Hard fail** if any are missing. |
+| **`ON`** | **Require** the CUDA toolkit and MathDX. **Hard fail** if either is missing. |
 | **`OFF`** | CPU-only even if CUDA is installed. |
 
 ```bash
@@ -99,7 +99,8 @@ To disable (e.g. when cross-compiling or building a generic binary):
 uv pip install git+https://github.com/pravirkr/loki.git -C cmake.define.LOKI_ENABLE_NATIVE_ARCH=OFF
 ```
 
-Pre-built wheels (when published via cibuildwheel) use `LOKI_ENABLE_NATIVE_ARCH=OFF` so they run on a wide range of CPUs.
+An image or binary that runs on other machines needs it off; the
+[container](#containers) sets an explicit CPU baseline instead.
 
 ---
 
@@ -152,6 +153,7 @@ Project-specific options use the **`LOKI_`** prefix. Standard CMake options keep
 | **`LOKI_ENABLE_NATIVE_ARCH`** | `ON` | Add `-march=native` in Release builds |
 | **`LOKI_USE_SYSTEM_DEPS`** | `OFF` | Prefer system CPM packages over pinned downloads |
 | **`LOKI_BUILD_PYTHON`** | `ON` | Build Python extension modules |
+| **`LOKI_PYTHON_INPLACE`** | `OFF` | Copy the built module into `src/loki/` for `PYTHONPATH=src` (the `release` preset turns it on; ignored under pip) |
 | **`LOKI_BUILD_TESTING`** | `OFF` | Build C++ Catch2 tests |
 | **`LOKI_BUILD_BENCHMARKS`** | `OFF` | Build Google Benchmark executables |
 | **`LOKI_BUILD_DOCS`** | `OFF` | Build documentation |
@@ -207,7 +209,11 @@ builds into `build/` (CUDA if found, tests, Python, `-march=native`):
 cmake --preset release
 cmake --build --preset release
 ctest --preset release -j 8
+PYTHONPATH=src pytest -n auto tests/python
 ```
+
+The `release` build copies the Python module into `src/loki/`
+(`LOKI_PYTHON_INPLACE`), so `PYTHONPATH=src` imports it without an install.
 
 `cuda` requires CUDA and adds the benchmarks (`build-cuda/`), `asan` is the
 ASan/UBSan build (`build-asan/`, skips the `[slow]` tests), and `ci` and
@@ -252,10 +258,10 @@ docker build -f docker/Dockerfile --target cuda -t loki:cuda \
   --build-arg LOKI_CUDA_ARCHITECTURES="80;90" .
 ```
 
-Build the CUDA target with `LOKI_CUDA=AUTO`. `LOKI_CUDA=ON` stops at configure
-time unless `nvidia-smi` can see a GPU, and an image build normally has none.
-The Dockerfile checks that the finished module actually contains the CUDA
-backend.
+Compiling CUDA needs no GPU or driver, so the image builds with `LOKI_CUDA=ON`
+and an explicit `LOKI_CUDA_ARCHITECTURES`; only the default `native` needs a
+GPU at configure time. The Dockerfile also checks that the finished module
+contains the CUDA backend.
 
 On Docker, smoke-test the module after build:
 

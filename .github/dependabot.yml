@@ -1,0 +1,10 @@
+# Keeps the actions used by the workflows and composite actions up to date.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      github-actions:
+        patterns: ["*"]

@@ -44,6 +44,7 @@ endif()
 # loki configuration options
 option(LOKI_BUILD_DOCS "Build documentation" OFF)
 option(LOKI_BUILD_PYTHON "Build Python bindings" ON)
+option(LOKI_PYTHON_INPLACE "Copy the built Python module into src/loki/ (PYTHONPATH=src)" OFF)
 option(LOKI_BUILD_TESTING "Build C++ tests" OFF)
 option(LOKI_BUILD_BENCHMARKS "Build benchmarks" OFF)
 option(LOKI_BUILD_APPLICATIONS "Build command-line applications" ON)
@@ -184,29 +185,6 @@ if(LOKI_CUDA STREQUAL "ON" OR LOKI_CUDA STREQUAL "AUTO")
   endif()
 elseif(LOKI_CUDA STREQUAL "OFF")
   message(STATUS "CUDA disabled by user (LOKI_CUDA=OFF). Building CPU-only.")
-endif()
-
-# When CUDA is explicitly required, verify a driver/GPU is present (not just nvcc).
-if(CMAKE_CUDA_COMPILER AND LOKI_CUDA STREQUAL "ON")
-  find_program(LOKI_NVIDIA_SMI nvidia-smi)
-  if(NOT LOKI_NVIDIA_SMI)
-    message(
-      FATAL_ERROR
-        "LOKI_CUDA=ON but nvidia-smi was not found. An NVIDIA driver and GPU are required."
-    )
-  endif()
-  execute_process(
-    COMMAND ${LOKI_NVIDIA_SMI} --query-gpu=name --format=csv,noheader
-    OUTPUT_VARIABLE _loki_gpu_names
-    RESULT_VARIABLE _loki_gpu_status
-    OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET
-  )
-  if(NOT _loki_gpu_status EQUAL 0 OR _loki_gpu_names STREQUAL "")
-    message(
-      FATAL_ERROR "LOKI_CUDA=ON but nvidia-smi reports no usable GPU. Check driver installation."
-    )
-  endif()
-  message(STATUS "LOKI_CUDA=ON: detected GPU(s): ${_loki_gpu_names}")
 endif()
 
 if(CMAKE_CUDA_COMPILER)

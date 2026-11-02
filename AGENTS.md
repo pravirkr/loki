@@ -9,11 +9,11 @@ Before finishing a change:
 - `scripts/check_architecture.sh` passes;
 - `pre-commit run --files <changed files>` passes;
 - `cmake --preset release && cmake --build --preset release &&
-  ctest --preset release -j 8` passes; for Python, copy
-  `build/src/libloki*.so` into `src/loki/` and run
-  `PYTHONPATH=src pytest -n auto tests/python`. The `release` preset builds
-  into `build/` (with CUDA when a toolkit is found). Never run the C++ or
-  Python tests on a Debug build (`ci-tidy`): they are far too slow there.
+  ctest --preset release -j 8` passes; for Python, run
+  `PYTHONPATH=src pytest -n auto tests/python` (the build copies the module
+  into `src/loki/`). The `release` preset builds into `build/` (with CUDA
+  when a toolkit is found). Never run the C++ or Python tests on a Debug
+  build (`ci-tidy`): they are far too slow there.
 
 Do not change kernel math, RNG streams or output formats as a side effect of
 a layout or API change. Do not stage or commit unless asked.

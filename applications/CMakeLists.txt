@@ -8,7 +8,11 @@ foreach(source_file IN LISTS LOKI_APPLICATION_SOURCES)
   # binary itself is still named after the source file via OUTPUT_NAME.
   set(TARGET_NAME "${EXECUTABLE_NAME}_app")
   add_executable(${TARGET_NAME} ${source_file})
-  set_target_properties(${TARGET_NAME} PROPERTIES OUTPUT_NAME ${EXECUTABLE_NAME})
+  # The installed binary keeps the directories of the libraries it links
+  # (libomp, HDF5) on its run path, as the build tree does.
+  set_target_properties(
+    ${TARGET_NAME} PROPERTIES OUTPUT_NAME ${EXECUTABLE_NAME} INSTALL_RPATH_USE_LINK_PATH ON
+  )
   target_link_libraries(
     ${TARGET_NAME}
     PRIVATE ${LOKI_LIBRARY_NAME}
@@ -22,7 +26,11 @@ foreach(source_file IN LISTS LOKI_APPLICATION_SOURCES)
   list(APPEND LOKI_APPLICATIONS ${TARGET_NAME})
 endforeach()
 
-install(
-  TARGETS ${LOKI_APPLICATIONS}
-  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-)
+# Under pip, the wheel's scripts directory: the installer puts it on PATH (the
+# environment's bin/). A plain bin/ would land inside site-packages.
+if(SKBUILD)
+  set(LOKI_APPLICATION_DESTINATION ${SKBUILD_SCRIPTS_DIR})
+else()
+  set(LOKI_APPLICATION_DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
+install(TARGETS ${LOKI_APPLICATIONS} RUNTIME DESTINATION ${LOKI_APPLICATION_DESTINATION})
