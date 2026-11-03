@@ -93,30 +93,39 @@ private:
     TimePoint m_start{Clock::now()};
 };
 
-// ScopedLogLevel class to temporarily set the log level
-class ScopedLogLevel {
+namespace detail {
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables): per-thread state
+inline thread_local int t_quiet_depth = 0;
+} // namespace detail
+
+// QuietScope marks the calling thread quiet while it lives (the `quiet`
+// argument of the compute_ffa functions): engine detail lines that check
+// quiet() stay silent. Thread-local, so the log level, the sinks and other
+// threads' logging are untouched, and concurrent calls cannot leave the
+// level changed. Scopes nest.
+class QuietScope {
 public:
-    explicit ScopedLogLevel(bool quiet)
-        : m_old_level(spdlog::get_level()),
-          m_quiet(quiet) {
+    explicit QuietScope(bool quiet) : m_quiet(quiet) {
         if (m_quiet) {
-            spdlog::set_level(spdlog::level::err);
+            ++detail::t_quiet_depth;
         }
     }
-    ~ScopedLogLevel() noexcept {
+    ~QuietScope() noexcept {
         if (m_quiet) {
-            detail::swallow_exceptions([&] { spdlog::set_level(m_old_level); });
+            --detail::t_quiet_depth;
         }
     }
 
-    ScopedLogLevel(const ScopedLogLevel&)            = delete;
-    ScopedLogLevel& operator=(const ScopedLogLevel&) = delete;
-    ScopedLogLevel(ScopedLogLevel&&)                 = delete;
-    ScopedLogLevel& operator=(ScopedLogLevel&&)      = delete;
+    QuietScope(const QuietScope&)            = delete;
+    QuietScope& operator=(const QuietScope&) = delete;
+    QuietScope(QuietScope&&)                 = delete;
+    QuietScope& operator=(QuietScope&&)      = delete;
 
 private:
-    spdlog::level::level_enum m_old_level;
     bool m_quiet;
 };
+
+// Whether a QuietScope is alive on this thread.
+[[nodiscard]] inline bool quiet() noexcept { return detail::t_quiet_depth > 0; }
 
 } // namespace loki::timing

@@ -38,7 +38,10 @@ lib/
   <domain>/*.cpp              facades and backend-neutral code, mirroring include/loki/<domain>/
   <domain>/*_engine.hpp       engine interface + make_*_cpu / make_*_gpu declarations
   <domain>/*.hpp              other private headers of that domain
-  common/                     backend.cpp, dispatch.hpp (dispatch helpers), plans.cpp
+  common/                     backend.cpp, dispatch.hpp (dispatch helpers), plans.cpp,
+                              progress.cpp (process-wide progress mode),
+                              interrupt.cpp (Ctrl-C: InterruptGuard, checkpoints)
+                              terminal.cpp (palette, TTY and NO_COLOR checks)
   core/                       kinematics and kernel interfaces shared by CPU and GPU code
   detail/                     internal utilities: errors, math, timing, progress, psr_utils
   cpu/*_cpu.cpp               CPU engines and kernels (OpenMP, SIMD); CPU-only headers

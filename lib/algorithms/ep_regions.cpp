@@ -933,12 +933,12 @@ private:
     void report_chunks() const {
         for (SizeType i = 0; i < m_chunk_cfgs.size(); ++i) {
             const auto& c = m_chunk_cfgs[i];
-            spdlog::info("EPRegionPlanner: chunk {} f=[{:.6g}, {:.6g}] Hz "
-                         "(nbins={}): Pd {:.4f} +/- {:.4f}, max_sugg={}, "
-                         "peak complexity {:.4g}",
-                         i, c.nominal_f_start, c.nominal_f_end,
-                         c.cfg.get_nbins(), c.pd, c.pd_se,
-                         utils::format_pow2(c.max_sugg), c.peak_complexity);
+            spdlog::debug("EPRegionPlanner: chunk {} f=[{:.6g}, {:.6g}] Hz "
+                          "(nbins={}): Pd {:.4f} +/- {:.4f}, max_sugg={}, "
+                          "peak complexity {:.4g}",
+                          i, c.nominal_f_start, c.nominal_f_end,
+                          c.cfg.get_nbins(), c.pd, c.pd_se,
+                          utils::format_pow2(c.max_sugg), c.peak_complexity);
             if (c.pd < kDtsPdTolerance * m_min_pd) {
                 spdlog::warn(
                     "EPRegionPlanner: the thresholds of chunk {} (f=[{:.6g}, "
@@ -1089,7 +1089,7 @@ private:
                 "{} trials, {} probability bins",
                 f_start, f_end, memory_limit_gb, rung.first, rung.second);
         }
-        dyn->run(kDtsThresNeigh);
+        dyn->run(kDtsThresNeigh, /*show_progress=*/false);
         auto sol        = detection::detail::solve_scheme(*dyn, scheme_target(),
                                                           kDtsWTerminal,
                                                           /*robust=*/false);

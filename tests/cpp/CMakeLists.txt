@@ -114,6 +114,51 @@ if(LOKI_BUILD_APPLICATIONS AND TARGET loki_app)
   )
   set_tests_properties(loki_search_ffa_bad_config PROPERTIES WILL_FAIL TRUE)
 
+  # Global output flags: --version, -q (no info lines on the console), a log
+  # file that keeps the info lines the console hides, and -q with -v rejected.
+  add_test(NAME loki_cli_version COMMAND $<TARGET_FILE:loki_app> --version)
+  set(LOKI_CLI_VERSION_RE "^loki [0-9]+\\.[0-9]+\\.[0-9]+ \\(backends: cpu")
+  set_tests_properties(loki_cli_version PROPERTIES PASS_REGULAR_EXPRESSION ${LOKI_CLI_VERSION_RE})
+  add_test(NAME loki_cli_quiet COMMAND $<TARGET_FILE:loki_app> search ffa --config
+                                       ${LOKI_FFA_CLI_CONFIG} --dry-run -q
+  )
+  set_tests_properties(loki_cli_quiet PROPERTIES FAIL_REGULAR_EXPRESSION "\\[info\\]")
+  set(LOKI_CLI_LOG_FILE ${CMAKE_CURRENT_BINARY_DIR}/loki_cli_log_file.log)
+  add_test(NAME loki_cli_log_file_clean COMMAND ${CMAKE_COMMAND} -E rm -f ${LOKI_CLI_LOG_FILE})
+  set_tests_properties(loki_cli_log_file_clean PROPERTIES FIXTURES_SETUP loki_cli_log_file)
+  add_test(NAME loki_cli_log_file
+           COMMAND $<TARGET_FILE:loki_app> --log-level error --log-file ${LOKI_CLI_LOG_FILE} search
+                   ffa --config ${LOKI_FFA_CLI_CONFIG} --dry-run
+  )
+  set_tests_properties(
+    loki_cli_log_file PROPERTIES FIXTURES_REQUIRED loki_cli_log_file FIXTURES_SETUP
+                                 loki_cli_log_file_written FAIL_REGULAR_EXPRESSION "\\[info\\]"
+  )
+  add_test(NAME loki_cli_log_file_content COMMAND ${CMAKE_COMMAND} -E cat ${LOKI_CLI_LOG_FILE})
+  set_tests_properties(
+    loki_cli_log_file_content PROPERTIES FIXTURES_REQUIRED loki_cli_log_file_written
+                                         PASS_REGULAR_EXPRESSION "\\[info\\] Dry run complete"
+  )
+  # Colour: none when the output is not a terminal (ctest captures it, as a
+  # batch job's log file would); --color always forces it.
+  string(ASCII 27 LOKI_ESC)
+  add_test(NAME loki_cli_plain_when_redirected
+           COMMAND $<TARGET_FILE:loki_app> search ffa --config ${LOKI_FFA_CLI_CONFIG} --dry-run
+  )
+  set_tests_properties(
+    loki_cli_plain_when_redirected PROPERTIES FAIL_REGULAR_EXPRESSION ${LOKI_ESC}
+  )
+  add_test(NAME loki_cli_color_always COMMAND $<TARGET_FILE:loki_app> --color always search ffa
+                                              --config ${LOKI_FFA_CLI_CONFIG} --dry-run
+  )
+  set_tests_properties(
+    loki_cli_color_always PROPERTIES PASS_REGULAR_EXPRESSION "${LOKI_ESC}\\[[0-9;]*mFFA plan:"
+  )
+  add_test(NAME loki_cli_quiet_verbose_conflict COMMAND $<TARGET_FILE:loki_app> -q -v search ffa
+                                                        --config ${LOKI_FFA_CLI_CONFIG} --dry-run
+  )
+  set_tests_properties(loki_cli_quiet_verbose_conflict PROPERTIES WILL_FAIL TRUE)
+
   # EP search: config generation, a plan-only run that writes the plan cache, a
   # dry run that loads that cache, and two rejections (a missing file and an
   # RFI table, which the EP search does not accept). Eight segments give this

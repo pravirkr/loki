@@ -23,6 +23,7 @@ foreach(source_file IN LISTS LOKI_APPLICATION_SOURCES)
             $<BUILD_INTERFACE:tomlplusplus>
             $<BUILD_INTERFACE:HighFive::HighFive>
   )
+  target_compile_definitions(${TARGET_NAME} PRIVATE LOKI_VERSION="${PROJECT_VERSION}")
   list(APPEND LOKI_APPLICATIONS ${TARGET_NAME})
 endforeach()
 

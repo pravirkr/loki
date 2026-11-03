@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any
 
 import numpy as np
 import pytest
+
+from loki import libloki
 
 
 @pytest.fixture
@@ -23,3 +26,13 @@ def default_params() -> dict[str, Any]:
         "nsamps": 2**23,
         "bseg_brute": 1024,
     }
+
+
+@pytest.fixture(autouse=True)
+def _restore_output_settings() -> Iterator[None]:
+    """Each test may change loki's log level and progress mode freely."""
+    level = libloki.get_log_level()
+    mode = libloki.get_progress_mode()
+    yield
+    libloki.set_log_level(level)
+    libloki.set_progress_mode(mode)

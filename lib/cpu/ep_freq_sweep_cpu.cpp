@@ -16,6 +16,7 @@
 #include "loki/algorithms/ep_regions.hpp"
 #include "loki/algorithms/prune_rfi.hpp"
 #include "loki/common/coord.hpp"
+#include "loki/common/interrupt.hpp"
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
@@ -88,7 +89,7 @@ public:
         check_shared_allocation(stats.get_max_buffer_size(),
                                 stats.get_max_coord_size());
 
-        spdlog::info(
+        spdlog::debug(
             "EPFreqSweep allocated shared FFA workspace: buffer_size={}, "
             "coord_size={}",
             stats.get_max_buffer_size(), stats.get_max_coord_size());
@@ -126,7 +127,7 @@ public:
 
         const auto& chunk_cfgs = m_region_planner.get_chunk_cfgs();
         const SizeType nchunks = chunk_cfgs.size();
-        spdlog::info("EPFreqSweep: starting sweep over {} chunks", nchunks);
+        spdlog::debug("EPFreqSweep: starting sweep over {} chunks", nchunks);
 
         constexpr SizeType kBatchSize = algorithms::detail::kEPBatchSize;
         const auto& stats             = m_region_planner.get_stats();
@@ -177,7 +178,7 @@ public:
             }
             check_workspace_allocation(group, workspaces.front());
 
-            spdlog::info(
+            spdlog::debug(
                 "EPFreqSweep: allocated {} workspaces for chunks {}..{} "
                 "(nbins={}, max_sugg={}, {:.2f} GB per workspace)",
                 m_n_workers, chunk_idx, range_end - 1, effective_nbins,
@@ -186,8 +187,9 @@ public:
 
             // Process all chunks in this nbins band reusing workspaces
             for (SizeType i = chunk_idx; i < range_end; ++i) {
+                loki::check_interrupt();
                 const auto& chunk = chunk_cfgs[i];
-                spdlog::info(
+                spdlog::debug(
                     "EPFreqSweep: processing chunk {}/{} - nominal "
                     "f=[{:08.3f}, "
                     "{:08.3f}] Hz, actual f=[{:08.3f}, {:08.3f}] Hz (nbins={}, "

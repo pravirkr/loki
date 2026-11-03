@@ -22,6 +22,7 @@
 #include "loki/algorithms/fold.hpp"
 #include "loki/common/backend.hpp"
 #include "loki/common/coord.hpp"
+#include "loki/common/interrupt.hpp"
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
 #include "loki/detection/score.hpp"
@@ -1133,13 +1134,15 @@ private:
                                          /*timed=*/false);
             }
 
-            progress::ProgressGuard const progress_guard(m_show_progress);
-            auto bar = progress::make_ffa_bar("Computing FFA", n_merge);
+            progress::ProgressTracker bar("Computing FFA", n_merge,
+                                          m_show_progress,
+                                          progress::ProgressBar::Kind::kFFA);
             const auto run_span    = m_the_bf->runs();
             const auto offset_span = m_the_bf->run_offsets();
             float const* current   = nullptr;
             SizeType progressed    = 0;
             for (SizeType istep = 0; istep < n_steps; ++istep) {
+                loki::check_interrupt();
                 const ConeChoice& step   = steps[istep];
                 const bool last          = istep + 1 == n_steps;
                 float* dest              = nullptr;
@@ -1214,15 +1217,15 @@ private:
                 }
                 progressed += step.k;
                 if (m_show_progress) {
-                    bar->set_leaves(m_ffa_plan.get_ncoords_lb()[progressed]);
-                    bar->set_progress(progressed);
+                    bar.set_leaves(m_ffa_plan.get_ncoords_lb()[progressed]);
+                    bar.set_progress(progressed);
                 }
             }
             if (scoring && !steps.back().cone) {
                 score_stored_fold(current, ncoords.back(), nbins, threshold,
                                   widths, *sink);
             }
-            bar->mark_as_completed();
+            bar.mark_as_completed();
             return true;
         }
     }
@@ -1491,9 +1494,13 @@ private:
      * planner sizes them).
      */
     void log_info(bool scored) {
+        if (timing::quiet()) {
+            return;
+        }
         const auto& fold_shapes = m_ffa_plan.get_fold_shapes();
-        spdlog::info("P-FFA [{}] -> [{}]", fmt::join(fold_shapes.front(), ", "),
-                     fmt::join(fold_shapes.back(), ", "));
+        spdlog::debug("P-FFA [{}] -> [{}]",
+                      fmt::join(fold_shapes.front(), ", "),
+                      fmt::join(fold_shapes.back(), ", "));
         const SizeType buffer_size =
             scored ? detail::cpu_scored_buffer_size(m_ffa_plan)
                    : m_ffa_plan.get_buffer_size();
@@ -1511,9 +1518,9 @@ private:
                 : m_ffa_plan.get_coord_memory_usage() *
                       static_cast<float>(coord_size) /
                       static_cast<float>(m_ffa_plan.get_coord_size());
-        spdlog::info("FFA Memory Usage{}: {:.2f} GB + {:.2f} GB (coords)",
-                     scored ? " (scored)" : "", memory_buffer_gb,
-                     memory_coord_gb);
+        spdlog::debug("FFA Memory Usage{}: {:.2f} GB + {:.2f} GB (coords)",
+                      scored ? " (scored)" : "", memory_buffer_gb,
+                      memory_coord_gb);
     }
 
     void initialize_brute_fold() {
@@ -1719,13 +1726,15 @@ private:
             }
         }
 
-        progress::ProgressGuard const progress_guard(m_show_progress);
-        auto bar = progress::make_ffa_bar("Computing FFA", levels - 1);
+        progress::ProgressTracker bar("Computing FFA", levels - 1,
+                                      m_show_progress,
+                                      progress::ProgressBar::Kind::kFFA);
 
         FoldType* last_written = current_in_ptr;
         if (m_is_freq_only) {
             for (SizeType i_level = first_level; i_level < end_level;
                  ++i_level) {
+                loki::check_interrupt();
                 timing::SimpleTimer level_timer;
                 level_timer.start();
                 execute_iter_freq(current_in_ptr, current_out_ptr, i_level);
@@ -1744,13 +1753,14 @@ private:
                     std::swap(current_in_ptr, current_out_ptr);
                 }
                 if (m_show_progress) {
-                    bar->set_leaves(m_ffa_plan.get_ncoords_lb()[i_level]);
-                    bar->set_progress(i_level);
+                    bar.set_leaves(m_ffa_plan.get_ncoords_lb()[i_level]);
+                    bar.set_progress(i_level);
                 }
             }
         } else {
             for (SizeType i_level = first_level; i_level < end_level;
                  ++i_level) {
+                loki::check_interrupt();
                 timing::SimpleTimer level_timer;
                 level_timer.start();
                 execute_iter(current_in_ptr, current_out_ptr, i_level);
@@ -1769,12 +1779,12 @@ private:
                     std::swap(current_in_ptr, current_out_ptr);
                 }
                 if (m_show_progress) {
-                    bar->set_leaves(m_ffa_plan.get_ncoords_lb()[i_level]);
-                    bar->set_progress(i_level);
+                    bar.set_leaves(m_ffa_plan.get_ncoords_lb()[i_level]);
+                    bar.set_progress(i_level);
                 }
             }
         }
-        bar->mark_as_completed();
+        bar.mark_as_completed();
         return last_written;
     }
 

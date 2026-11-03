@@ -441,12 +441,13 @@ private:
             m_base_cfg.get_eta(), m_base_cfg.get_octave_scale(),
             m_base_cfg.get_nbins_max());
         // Print region info
-        spdlog::info("FFARegionPlanner - planned regions:");
+        spdlog::info("FFARegionPlanner: planned {} regions",
+                     ffa_regions.size());
         for (const auto& region : ffa_regions) {
-            spdlog::info("Region: f=[{:08.3f}, {:08.3f}] Hz, nbins={:04d}, "
-                         "eta={:04.1f}",
-                         region.f_start, region.f_end, region.nbins,
-                         region.eta);
+            spdlog::debug("Region: f=[{:08.3f}, {:08.3f}] Hz, nbins={:04d}, "
+                          "eta={:04.1f}",
+                          region.f_start, region.f_end, region.nbins,
+                          region.eta);
         }
 
         // Step 2: For each region, subdivide in frequency if it doesn't fit
@@ -461,10 +462,10 @@ private:
                 max_drift));
         }
         if (max_drift > 0 && m_base_cfg.get_nparams() > 1) {
-            spdlog::info("Drift-aware chunking: max_drift={:.6f} "
-                         "({:.4f}%) for tobs={:.1f}s, n_params={}",
-                         max_drift, max_drift * 100.0, m_base_cfg.get_tobs(),
-                         m_base_cfg.get_nparams());
+            spdlog::debug("Drift-aware chunking: max_drift={:.6f} "
+                          "({:.4f}%) for tobs={:.1f}s, n_params={}",
+                          max_drift, max_drift * 100.0, m_base_cfg.get_tobs(),
+                          m_base_cfg.get_nparams());
         }
         const PlanMaxima maxima =
             partition_regions_by_cost(ffa_regions, max_drift);

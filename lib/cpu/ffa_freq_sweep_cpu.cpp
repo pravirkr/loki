@@ -15,6 +15,7 @@
 #include <spdlog/spdlog.h>
 
 #include "loki/algorithms/regions.hpp"
+#include "loki/common/interrupt.hpp"
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
 #include "loki/detection/score.hpp"
@@ -131,17 +132,18 @@ public:
         double accumulated_flops     = 0.0;
         const auto& ffa_regions_cfgs = m_region_planner.get_cfgs();
         for (SizeType i = 0; i < ffa_regions_cfgs.size(); ++i) {
+            loki::check_interrupt();
             const search::FFASearchConfig& cfg_cur = ffa_regions_cfgs[i];
             const auto& freq_limits = cfg_cur.get_param_limits().back();
-            spdlog::info("Processing chunk f0 (Hz): [{:08.3f}, {:08.3f}]",
-                         freq_limits.min, freq_limits.max);
+            spdlog::debug("Processing chunk f0 (Hz): [{:08.3f}, {:08.3f}]",
+                          freq_limits.min, freq_limits.max);
             search::FFATimerStats ffa_timer_stats;
             const nvtx::Range chunk_range("ffa sweep: chunk");
             execute_ffa_region(ts_e, ts_v, cfg_cur, i, writer, ffa_timer_stats);
             accumulated_flops += m_region_decode[i].gflops;
             // Log per-chunk timing summary
-            spdlog::info("FFA Chunk: timer: {}",
-                         ffa_timer_stats.get_concise_timer_summary());
+            spdlog::debug("FFA Chunk: timer: {}",
+                          ffa_timer_stats.get_concise_timer_summary());
             // Update accumulated stats
             m_ffa_stats.update_stats(ffa_timer_stats);
         }
@@ -247,14 +249,14 @@ private:
                                                  score_in_band - push_s - io_s);
         ffa_timer_stats["brutefold"] += brutefold_time;
         ffa_timer_stats["ffa"] += ffa_time;
-        spdlog::info("FFA Chunk detail: nbins={} bseg_brute={} levels={} "
-                     "fuse_levels={} nfreqs0={} ncoords_top={} "
-                     "brutefold_s={:.4f} brute_table_s={:.4f} ffa_s={:.4f}",
-                     cfg.get_nbins(), cfg.get_bseg_brute(),
-                     ffa_plan.get_n_levels(), the_ffa.get_last_fuse_levels(),
-                     ffa_plan.get_ncoords().front(),
-                     ffa_plan.get_ncoords().back(), brutefold_time,
-                     the_ffa.get_brute_fold_init_timing(), ffa_time);
+        spdlog::debug("FFA Chunk detail: nbins={} bseg_brute={} levels={} "
+                      "fuse_levels={} nfreqs0={} ncoords_top={} "
+                      "brutefold_s={:.4f} brute_table_s={:.4f} ffa_s={:.4f}",
+                      cfg.get_nbins(), cfg.get_bseg_brute(),
+                      ffa_plan.get_n_levels(), the_ffa.get_last_fuse_levels(),
+                      ffa_plan.get_ncoords().front(),
+                      ffa_plan.get_ncoords().back(), brutefold_time,
+                      the_ffa.get_brute_fold_init_timing(), ffa_time);
         m_total_passing_scores += n_passing;
         ffa_timer_stats["score"] += push_s + score_in_band;
         ffa_timer_stats["io"] += io_s;

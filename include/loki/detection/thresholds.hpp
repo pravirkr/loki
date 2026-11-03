@@ -365,7 +365,9 @@ public:
     /// the process. CPU and CUDA use different generators and agree only
     /// statistically.
     /// In-run cost and success_h1_cumul are optimistic Monte Carlo estimates.
-    void run(SizeType thres_neigh = 10);
+    /// @p show_progress draws a progress bar (CPU only; how it is drawn is
+    /// set by loki::set_progress_mode). False writes nothing.
+    void run(SizeType thres_neigh = 10, bool show_progress = true);
     /// Fresh Monte Carlo of one fixed threshold per stage, for reporting or
     /// EP population forecasts. Never modifies selection or re-filters Pd.
     /// `ntrials` may

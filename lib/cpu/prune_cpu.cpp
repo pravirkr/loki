@@ -24,6 +24,7 @@
 #include <spdlog/spdlog.h>
 
 #include "loki/algorithms/prune_rfi.hpp"
+#include "loki/common/interrupt.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
 
@@ -117,10 +118,10 @@ public:
         const auto memory_tree_gb      = ws.world_tree.get_memory_usage_gib();
         const auto memory_workspace_gb = ws.prune.get_memory_usage_gib();
         const auto memory_total_gb     = get_memory_usage_gib();
-        spdlog::info("Pruning run {:03d}: Memory Usage: {:.2f} GB total "
-                     "({:.2f} GB tree + {:.2f} GB workspace)",
-                     ref_seg, memory_total_gb, memory_tree_gb,
-                     memory_workspace_gb);
+        spdlog::debug("Pruning run {:03d}: Memory Usage: {:.2f} GB total "
+                      "({:.2f} GB tree + {:.2f} GB workspace)",
+                      ref_seg, memory_total_gb, memory_tree_gb,
+                      memory_workspace_gb);
 
         // Setup log and result files
         std::filesystem::path const actual_log_file =
@@ -132,22 +133,24 @@ public:
         log.close();
 
         const auto nsegments = m_ffa_plan.get_nsegments().back();
-        std::unique_ptr<progress::ProgressGuard> progress_guard;
+        // A task of the shared display, or a bar of its own.
         std::unique_ptr<progress::ProgressTracker> bar;
-        if (show_progress) {
-            progress_guard = std::make_unique<progress::ProgressGuard>(true);
-            bar            = std::make_unique<progress::ProgressTracker>(
+        if (tracker != nullptr) {
+            bar = std::make_unique<progress::ProgressTracker>(tracker, task_id);
+        } else if (show_progress) {
+            bar = std::make_unique<progress::ProgressTracker>(
                 std::format("Pruning segment {:03d}", ref_seg), nsegments - 1,
-                tracker, task_id);
+                /*show=*/true, progress::ProgressBar::Kind::kPruning);
         }
 
         initialize(ffa_fold, ref_seg, actual_log_file);
 
         for (SizeType iter = 0; iter < nsegments - 1; ++iter) {
+            loki::check_interrupt();
             execute_iteration(ffa_fold, actual_log_file);
             // Check for early termination (no survivors)
             if (m_prune_complete) {
-                spdlog::info(
+                spdlog::debug(
                     "Pruning terminated early at iteration {} - no survivors",
                     iter + 1);
                 break;
@@ -181,11 +184,11 @@ public:
                                  ref_seg);
         final_log << std::format("Time: {}\n\n", m_pstats.get_timer_summary());
         final_log.close();
-        spdlog::info("Pruning run {:03d}: complete", ref_seg);
-        spdlog::info("Pruning run {:03d}: stats: {}", ref_seg,
-                     m_pstats.get_stats_summary());
-        spdlog::info("Pruning run {:03d}: timer: {}", ref_seg,
-                     m_pstats.get_concise_timer_summary());
+        spdlog::debug("Pruning run {:03d}: complete", ref_seg);
+        spdlog::debug("Pruning run {:03d}: stats: {}", ref_seg,
+                      m_pstats.get_stats_summary());
+        spdlog::debug("Pruning run {:03d}: timer: {}", ref_seg,
+                      m_pstats.get_concise_timer_summary());
     }
 
 private:
@@ -264,7 +267,7 @@ private:
             world_tree.get_leaves_stride(), world_tree.get_folds_stride(),
             m_rfi->harvest_store_folds);
         m_n_harvested_total = 0;
-        spdlog::info("Pruning run {:03d}: initialized", ref_seg);
+        spdlog::debug("Pruning run {:03d}: initialized", ref_seg);
 
         // Initialize the world tree with the first segment
         const auto fold_segment =
@@ -285,9 +288,9 @@ private:
             world_tree.add_initial_scattered(ws.seed_leaves, fold_segment,
                                              ws.seed_scores,
                                              ws.seed_keep_indices, n_keep);
-            spdlog::info("Pruning run {:03d}: pulsar mask removed {} of {} "
-                         "seeds ({} grid cells masked)",
-                         ref_seg, n_seeds_masked, n_leaves, m_mask.count());
+            spdlog::debug("Pruning run {:03d}: pulsar mask removed {} of {} "
+                          "seeds ({} grid cells masked)",
+                          ref_seg, n_seeds_masked, n_leaves, m_mask.count());
         }
 
         // Initialize the prune stats
@@ -322,7 +325,7 @@ private:
         if (n_survivors == 0) {
             return;
         }
-        spdlog::info("Ascending survivors at level {}", m_prune_level);
+        spdlog::debug("Ascending survivors at level {}", m_prune_level);
         auto& prune_ws       = ws.prune;
         const auto coord_mid = m_snail_scheme.get_coord(m_prune_level);
         const auto segment_coords_so_far =
@@ -605,17 +608,17 @@ private:
         log.close();
         m_pstats.update_stats(pstats_cur, stats.batch_timers);
         if (stats.n_harvested > 0) {
-            spdlog::info("Pruning level {:3d}: harvested {} candidate(s) "
-                         "(run total {}, recorded {}, mask cells {})",
-                         m_prune_level, stats.n_harvested, m_n_harvested_total,
-                         m_harvest.size(), m_mask.count());
+            spdlog::debug("Pruning level {:3d}: harvested {} candidate(s) "
+                          "(run total {}, recorded {}, mask cells {})",
+                          m_prune_level, stats.n_harvested, m_n_harvested_total,
+                          m_harvest.size(), m_mask.count());
         }
 
         // Check if no survivors
         if (world_tree.get_size() == 0) {
             m_prune_complete = true;
-            spdlog::info("Pruning run complete at level {} - no survivors",
-                         m_prune_level);
+            spdlog::debug("Pruning run complete at level {} - no survivors",
+                          m_prune_level);
             return;
         }
     }
@@ -1179,7 +1182,7 @@ public:
                  std::string_view file_prefix) override {
         timing::SimpleTimer timer;
         timer.start();
-        spdlog::info("EPMultiPass: Initializing with FFA");
+        spdlog::debug("EPMultiPass: Initializing with FFA");
 
         const auto buffer_size = m_ffa_plan.get_buffer_size();
         const auto fold_size   = m_ffa_plan.get_fold_size();
@@ -1217,9 +1220,9 @@ public:
         // Determine ref_segs to process
         auto ref_segs_to_process =
             utils::determine_ref_segs(nsegments, m_n_runs, m_ref_segs);
-        spdlog::info("Starting Pruning for {} runs, with {} threads ({} "
-                     "workers)",
-                     ref_segs_to_process.size(), m_nthreads, m_n_workers);
+        spdlog::debug("Starting Pruning for {} runs, with {} threads ({} "
+                      "workers)",
+                      ref_segs_to_process.size(), m_nthreads, m_n_workers);
 
         // Initialize log file
         std::ofstream log(log_file);
@@ -1245,9 +1248,8 @@ public:
         auto writer_final = search::PruneResultWriter(
             result_file, search::PruneResultWriter::Mode::kAppend);
         writer_final.write_runtime(ep_time);
-        spdlog::info("Pruning complete. Results saved to {}",
-                     result_file.string());
-        spdlog::info("Pruning time: {:.2f} seconds", ep_time);
+        spdlog::info("Pruning complete in {:.2f} s. Results saved to {}",
+                     ep_time, result_file.string());
     }
 
 private:
@@ -1368,6 +1370,8 @@ private:
             auto future = pool.submit_task([this, ref_seg, outdir,
                                             tracker_ptr = tracker.get(), id,
                                             &ffa_fold]() mutable {
+                // Runs still queued at an interrupt stop before starting.
+                loki::check_interrupt();
                 const auto thread_idx = BS::this_thread::get_index().value();
                 auto& ws              = get_thread_workspace(thread_idx);
                 auto prune            = PruneImpl<FoldType>(
@@ -1384,9 +1388,12 @@ private:
         }
         // Wait for all tasks to complete and handle exceptions
         std::vector<std::pair<SizeType, std::string>> errors;
+        bool interrupted = false;
         for (size_t i = 0; i < futures.size(); ++i) {
             try {
                 futures[i].get();
+            } catch (const loki::Interrupted&) {
+                interrupted = true;
             } catch (const std::exception& e) {
                 const std::string error_msg = std::format(
                     "Error in ref_seg {}: {}", ref_segs[i], e.what());
@@ -1402,9 +1409,12 @@ private:
         if (tracker) {
             tracker->stop();
         }
+        if (interrupted) {
+            throw loki::Interrupted();
+        }
 
         if (errors.empty()) {
-            spdlog::info("All tasks completed successfully.");
+            spdlog::debug("All tasks completed successfully.");
         } else {
             spdlog::warn("Completed with {} errors out of {} tasks.",
                          errors.size(), ref_segs.size());

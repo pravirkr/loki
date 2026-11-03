@@ -184,10 +184,10 @@ public:
                                     sizeof(DeviceFoldT)) /
             utils::kBytesPerGB;
 
-        spdlog::info("EPFreqSweep (CUDA {}): allocated the shared buffers "
-                     "(buffer_size={}, coord_size={}, {} levels)",
-                     m_device_id, stats.get_max_buffer_size(),
-                     stats.get_max_coord_size(), max_levels);
+        spdlog::debug("EPFreqSweep (CUDA {}): allocated the shared buffers "
+                      "(buffer_size={}, coord_size={}, {} levels)",
+                      m_device_id, stats.get_max_buffer_size(),
+                      stats.get_max_coord_size(), max_levels);
     }
 
     ~EPFreqSweepCudaEngine() final                                 = default;
@@ -249,8 +249,8 @@ public:
         const SizeType nchunks = chunk_cfgs.size();
         detail::EPSweepWriter result_writer(result_file, chunk_cfgs, m_base_cfg,
                                             m_min_pd, m_poly_basis, m_ref_ducy);
-        spdlog::info("EPFreqSweep (CUDA {}): starting sweep over {} chunks",
-                     m_device_id, nchunks);
+        spdlog::debug("EPFreqSweep (CUDA {}): starting sweep over {} chunks",
+                      m_device_id, nchunks);
 
         const auto& stats = m_region_planner.get_stats();
         const double limit_gb =
@@ -320,7 +320,7 @@ public:
                     algorithms::detail::ep_cuda_ep_workspace_bytes<FoldType>(
                         group_memory, group.nbins, group.nsegments,
                         group.ncoords, group.max_sugg, group.branch_max)));
-            spdlog::info(
+            spdlog::debug(
                 "EPFreqSweep (CUDA {}): allocated a workspace for chunks "
                 "{}..{} (nbins={}, max_sugg={}, {:.2f} GB)",
                 m_device_id, group.begin, group.end - 1, effective_nbins,
@@ -346,20 +346,20 @@ public:
             for (SizeType i = group.begin; i < group.end; ++i) {
                 const nvtx::Range chunk_range("ep sweep: chunk");
                 const auto& chunk = chunk_cfgs[i];
-                spdlog::info("EPFreqSweep: processing chunk {}/{} - nominal "
-                             "f=[{:08.3f}, {:08.3f}] Hz, actual f=[{:08.3f}, "
-                             "{:08.3f}] Hz (nbins={}, max_sugg={})",
-                             i + 1, nchunks, chunk.nominal_f_start,
-                             chunk.nominal_f_end, chunk.actual_f_start,
-                             chunk.actual_f_end, chunk.cfg.get_nbins(),
-                             utils::format_pow2(chunk.max_sugg));
+                spdlog::debug("EPFreqSweep: processing chunk {}/{} - nominal "
+                              "f=[{:08.3f}, {:08.3f}] Hz, actual f=[{:08.3f}, "
+                              "{:08.3f}] Hz (nbins={}, max_sugg={})",
+                              i + 1, nchunks, chunk.nominal_f_start,
+                              chunk.nominal_f_end, chunk.actual_f_start,
+                              chunk.actual_f_end, chunk.cfg.get_nbins(),
+                              utils::format_pow2(chunk.max_sugg));
 
-                spdlog::info("EP chunk {}: predicted peak {}, live ring {}, "
-                             "capacity {}, batch {}",
-                             i, utils::format_pow2(chunk.predicted_peak),
-                             utils::format_pow2(chunk.predicted_live),
-                             utils::format_pow2(chunk.max_sugg),
-                             chunk.batch_size);
+                spdlog::debug("EP chunk {}: predicted peak {}, live ring {}, "
+                              "capacity {}, batch {}",
+                              i, utils::format_pow2(chunk.predicted_peak),
+                              utils::format_pow2(chunk.predicted_live),
+                              utils::format_pow2(chunk.max_sugg),
+                              chunk.batch_size);
                 pipeline.result_sink = [&result_writer,
                                         i](detail::EPResultPayload payload) {
                     payload.chunk_id = i;

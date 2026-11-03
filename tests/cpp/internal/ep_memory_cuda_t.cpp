@@ -331,7 +331,7 @@ TEST_CASE("CUDA threshold pools are allocated by run() only",
     // which the driver keeps. Measure after them.
     {
         auto warm_up = make();
-        warm_up->run(6);
+        warm_up->run(6, /*show_progress=*/false);
         (void)warm_up->evaluate(thresholds, 64, 21, false);
     }
     const auto used_bytes =
@@ -374,11 +374,11 @@ TEST_CASE("CUDA threshold pools are allocated by run() only",
     CHECK(evaluated.size() == bp.size());
     CHECK(used_bytes() <= kConstantsBytes);
 
-    engine->run(6);
+    engine->run(6, /*show_progress=*/false);
     CHECK(used_bytes() >= run_bytes);
     const auto first = engine->get_states();
     // A second run reuses the pools and repeats the first exactly.
-    engine->run(6);
+    engine->run(6, /*show_progress=*/false);
     same_states(first, engine->get_states());
     same_states(evaluated, engine->evaluate(thresholds, 64, 21, false));
 

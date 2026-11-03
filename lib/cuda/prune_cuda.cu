@@ -164,7 +164,7 @@ public:
         const auto memory_scorer_scratch_gb =
             m_prune_funcs->get_scorer_scratch_memory_gib();
         const auto memory_total_gb = get_memory_usage_gib();
-        spdlog::info(
+        spdlog::debug(
             "Pruning run {:03d}: Memory Usage: {:.2f} GB total "
             "({:.2f} GB tree + {:.2f} GB workspace + {:.3f} GB scorer scratch)",
             ref_seg, memory_total_gb, memory_tree_gb, memory_workspace_gb,
@@ -179,7 +179,7 @@ public:
         const auto nsegments = m_ffa_plan.get_nsegments().back();
 
         initialize(ffa_fold, ref_seg, m_stream);
-        spdlog::info("Pruning run {:03d}: initialized", ref_seg);
+        spdlog::debug("Pruning run {:03d}: initialized", ref_seg);
 
         SizeType iterations_completed = 0;
         for (SizeType iter = 0; iter < nsegments - 1; ++iter) {
@@ -199,7 +199,7 @@ public:
 
         // Log early exit ONCE after loop if needed
         if (m_prune_complete && iterations_completed < nsegments - 1) {
-            spdlog::info(
+            spdlog::debug(
                 "Pruning terminated early at iteration {} - no survivors",
                 iterations_completed);
         }
@@ -222,12 +222,12 @@ public:
                            ref_seg);
         log.close();
 
-        spdlog::info(
+        spdlog::debug(
             "Pruning run {:03d}: complete (peak live {}, overload trims {})",
             ref_seg, get_workspace().world_tree.peak_live(),
             get_workspace().world_tree.overload_count());
-        spdlog::info("Pruning run {:03d}: stats: {}", ref_seg,
-                     m_pstats.get_stats_summary_cuda(timer.stop()));
+        spdlog::debug("Pruning run {:03d}: stats: {}", ref_seg,
+                      m_pstats.get_stats_summary_cuda(timer.stop()));
     }
 
 private:
@@ -1130,7 +1130,7 @@ public:
                  std::string_view file_prefix) {
         timing::SimpleTimer timer;
         timer.start();
-        spdlog::info("EPMultiPassCudaCore: Initializing with FFA");
+        spdlog::debug("EPMultiPassCudaCore: Initializing with FFA");
         // Create appropriate FFA fold
         std::tuple<thrust::device_vector<FoldTypeCUDA>,
                    plans::FFAPlan<HostFoldT>>
@@ -1150,7 +1150,7 @@ public:
                         std::string_view file_prefix) {
         timing::SimpleTimer timer;
         timer.start();
-        spdlog::info("EPMultiPassCudaCore: Initializing with FFA");
+        spdlog::debug("EPMultiPassCudaCore: Initializing with FFA");
         const auto& pl = *m_pipeline;
         cuda_utils::CudaSetDeviceGuard device_guard(m_device_id);
         {
@@ -1237,8 +1237,8 @@ private:
         // Determine ref_segs to process
         auto ref_segs_to_process =
             utils::determine_ref_segs(nsegments, m_n_runs, m_ref_segs);
-        spdlog::info("Starting Pruning for {} runs, on CUDA device {}",
-                     ref_segs_to_process.size(), m_device_id);
+        spdlog::debug("Starting Pruning for {} runs, on CUDA device {}",
+                      ref_segs_to_process.size(), m_device_id);
 
         // Initialize log file
         std::ofstream log(log_file);
@@ -1273,9 +1273,8 @@ private:
                 result_file, search::PruneResultWriter::Mode::kAppend);
             writer_final.write_runtime(ep_time);
         }
-        spdlog::info("Pruning complete. Results saved to {}",
-                     result_file.string());
-        spdlog::info("Pruning time: {:.2f} seconds", ep_time);
+        spdlog::info("Pruning complete in {:.2f} s. Results saved to {}",
+                     ep_time, result_file.string());
     }
 
 }; // End EPMultiPassCudaCore::Impl implementation

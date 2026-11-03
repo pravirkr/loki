@@ -986,8 +986,8 @@ public:
             throw std::invalid_argument("thres_neigh must be positive");
         }
         timing::ScopeTimer timer("ThresholdsCuda::run");
-        spdlog::info("Running dynamic threshold scheme on CUDA ({} mode)",
-                     mode_to_string(m_mode));
+        spdlog::debug("Running dynamic threshold scheme on CUDA ({} mode)",
+                      mode_to_string(m_mode));
         cuda_utils::CudaSetDeviceGuard device_guard(m_device_id);
         allocate_pools();
         const CudaStream stream;
@@ -2208,10 +2208,10 @@ private:
         }
         m_cell_keys_d.resize(m_nthresholds * m_nprobs);
         m_states_d.resize(m_states.size());
-        spdlog::info("ThresholdsCuda ({} mode): {} max beam "
-                     "thresholds x {} prob bins, {:.2f} GiB of device memory",
-                     mode_to_string(m_mode), m_max_beam, m_nprobs,
-                     utils::to_gib(run_memory_bytes()));
+        spdlog::debug("ThresholdsCuda ({} mode): {} max beam "
+                      "thresholds x {} prob bins, {:.2f} GiB of device memory",
+                      mode_to_string(m_mode), m_max_beam, m_nprobs,
+                      utils::to_gib(run_memory_bytes()));
     }
 
     // Bit-level check: host code is built with -ffast-math, under which
@@ -2327,7 +2327,10 @@ public:
         return m_impl.shared_h1_bank();
     }
     void release_search_memory() override { m_impl.release_search_memory(); }
-    void run(SizeType thres_neigh) override { m_impl.run(thres_neigh); }
+    // The CUDA search draws no progress bar.
+    void run(SizeType thres_neigh, bool /*show_progress*/) override {
+        m_impl.run(thres_neigh);
+    }
     std::vector<State> evaluate(std::span<const float> thresholds,
                                 SizeType ntrials,
                                 std::optional<uint64_t> seed,

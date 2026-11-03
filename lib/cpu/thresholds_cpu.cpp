@@ -28,6 +28,7 @@
 #include <omp.h>
 #include <spdlog/spdlog.h>
 
+#include "loki/common/interrupt.hpp"
 #include "loki/common/types.hpp"
 #include "loki/detection/score.hpp"
 #include "loki/simulation/simulation.hpp"
@@ -1114,7 +1115,7 @@ public:
             const auto pool_memory_size_gb =
                 static_cast<float>(pool_memory_size) / 1024.0F / 1024.0F /
                 1024.0F;
-            spdlog::info(
+            spdlog::debug(
                 "Pre-allocated 2 fold pools of {} slots and 2 score pools "
                 "of {} slots ({:.2f} GB)",
                 fold_slots_per_pool, score_slots_per_pool, pool_memory_size_gb);
@@ -1159,10 +1160,10 @@ public:
     }
 
     // Methods
-    void run(SizeType thres_neigh) override {
+    void run(SizeType thres_neigh, bool show_progress) override {
         check_simulate("run");
         const auto mode_label = mode_to_string(m_mode);
-        spdlog::info("Running dynamic threshold scheme ({} mode)", mode_label);
+        spdlog::debug("Running dynamic threshold scheme ({} mode)", mode_label);
 
         m_timer_stats.reset();
         timing::SimpleTimer total_timer;
@@ -1173,13 +1174,13 @@ public:
         // the second ranks them by cost so far plus the first pass's cost
         // to go of their noise survivors (detail::cost_to_go_scheme).
         m_cost_to_go.clear();
-        run_pass(neigh);
+        run_pass(neigh, show_progress);
         if (m_all_transitions && m_mode == DynamicThresholdMode::kImproved) {
             m_cost_to_go =
                 detail::cost_to_go_scheme(m_states, m_thresholds, m_probs,
                                           m_nstages, m_nthresholds, m_nprobs);
             if (!m_cost_to_go.empty()) {
-                run_pass(neigh);
+                run_pass(neigh, show_progress);
             }
         }
 
@@ -1192,7 +1193,7 @@ public:
 
     // One forward pass into m_states. Every pass after the first starts
     // from a fresh grid (stage 0 draws the same streams again).
-    void run_pass(SizeType neigh) {
+    void run_pass(SizeType neigh, bool show_progress) {
         if (m_has_run) {
             for (auto& folds : m_folds_current) {
                 folds.invalidate();
@@ -1208,10 +1209,10 @@ public:
             }
         }
         m_has_run = true;
-        progress::ProgressGuard const progress_guard(true);
-        auto bar =
-            progress::make_standard_bar("Computing scheme", m_nstages - 1);
+        progress::ProgressTracker bar("Computing scheme", m_nstages - 1,
+                                      show_progress);
         for (SizeType istage = 1; istage < m_nstages; ++istage) {
+            loki::check_interrupt();
             if (m_mode == DynamicThresholdMode::kImproved) {
                 run_segment_improved(istage, neigh);
                 m_manager->swap_pools();
@@ -1365,6 +1366,7 @@ private:
         State prev   = State::initial();
         float var_in = 1.0F;
         for (SizeType istage = 0; istage < m_nstages; ++istage) {
+            loki::check_interrupt();
             const auto stage = static_cast<uint32_t>(istage);
             // NOLINTNEXTLINE(openmp-use-default-none): clauses cannot name members
 #pragma omp parallel for num_threads(nthreads)
@@ -1556,19 +1558,20 @@ private:
 
         if (m_mode == DynamicThresholdMode::kImproved) {
             const auto max_sim_folds = max_active_per_stage * m_nprobs * 2;
-            spdlog::info("Allocation analysis (improved): {} active thresholds "
-                         "max, {} prob bins, {} threads",
-                         max_active_per_stage, m_nprobs, m_nthreads);
-            spdlog::info("Fold pool: {} persistent + {} sim_folds + {} "
-                         "temporary = {} slots",
-                         max_persistent, max_sim_folds, max_temporary,
-                         fold_slots);
-            spdlog::info("Score pool: {} stage-local slots", score_slots);
+            spdlog::debug(
+                "Allocation analysis (improved): {} active thresholds "
+                "max, {} prob bins, {} threads",
+                max_active_per_stage, m_nprobs, m_nthreads);
+            spdlog::debug("Fold pool: {} persistent + {} sim_folds + {} "
+                          "temporary = {} slots",
+                          max_persistent, max_sim_folds, max_temporary,
+                          fold_slots);
+            spdlog::debug("Score pool: {} stage-local slots", score_slots);
         } else {
-            spdlog::info("Allocation analysis: {} active thresholds max, {} "
-                         "prob bins, {} threads",
-                         max_active_per_stage, m_nprobs, m_nthreads);
-            spdlog::info(
+            spdlog::debug("Allocation analysis: {} active thresholds max, {} "
+                          "prob bins, {} threads",
+                          max_active_per_stage, m_nprobs, m_nthreads);
+            spdlog::debug(
                 "Need {} persistent + {} temporary = {} fold slots per pool",
                 max_persistent, max_temporary, fold_slots);
         }

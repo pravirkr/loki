@@ -252,7 +252,7 @@ compute_ffa(std::span<const float> ts_e,
             bool quiet,
             bool show_progress,
             Exec exec) {
-    const timing::ScopedLogLevel scoped_log_level(quiet);
+    const timing::QuietScope quiet_scope(quiet);
     FFA<FoldType> ffa(cfg, show_progress, exec);
     const plans::FFAPlan<FoldType>& ffa_plan = ffa.get_plan();
     const auto buffer_size                   = ffa_plan.get_buffer_size();
@@ -271,7 +271,7 @@ compute_ffa_fourier_return_to_time(std::span<const float> ts_e,
                                    bool quiet,
                                    bool show_progress,
                                    Exec exec) {
-    const timing::ScopedLogLevel scoped_log_level(quiet);
+    const timing::QuietScope quiet_scope(quiet);
     FFA<ComplexType> ffa(cfg, show_progress, exec);
     const plans::FFAPlan<ComplexType>& ffa_plan = ffa.get_plan();
     const auto buffer_size_time = ffa_plan.get_buffer_size_time();
@@ -292,7 +292,7 @@ compute_ffa_scores(std::span<const float> ts_e,
                    bool quiet,
                    bool show_progress,
                    Exec exec) {
-    const timing::ScopedLogLevel scoped_log_level(quiet);
+    const timing::QuietScope quiet_scope(quiet);
     if (exec.backend == Backend::kCPU) {
         auto [fold, ffa_plan] =
             cfg.get_use_fourier()

@@ -1283,7 +1283,7 @@ public:
             detection::generate_box_width_trials(m_nbins, m_ducy_max, m_wtsp);
         m_boxcar_kadane_biases = {1.42F, 0.76F, 0.41F};
 
-        spdlog::debug(
+        spdlog::trace(
             "FFASearchConfig: nsamps={}, tsamp={}, nbins={}, eta={}, "
             "ducy_max={}, wtsp={}, use_fourier={}, nthreads={}, snr_min={}, "
             "bseg_brute={}, bseg_ffa={}",
@@ -1592,7 +1592,7 @@ private:
                                 ? largest_below_target
                                 : smallest_valid;
         if (chosen.has_value()) {
-            spdlog::debug("bseg_brute cycle target: nbins={}, nparams={}, "
+            spdlog::trace("bseg_brute cycle target: nbins={}, nparams={}, "
                           "f=[{:.4g}, {:.4g}] Hz -> bseg_brute={} (target "
                           "{:.2f} cycles at f_max, got {:.2f})",
                           m_nbins, m_nparams, m_f_min, m_f_max, *chosen,
@@ -1685,7 +1685,7 @@ private:
             }
         }
         if (best.has_value()) {
-            spdlog::debug("bseg_brute direct-DFT cost model: nbins={}, "
+            spdlog::trace("bseg_brute direct-DFT cost model: nbins={}, "
                           "f=[{:.4g}, {:.4g}] Hz -> bseg_brute={} (model cost "
                           "{:.3e})",
                           m_nbins, m_f_min, m_f_max, *best, best_cost);

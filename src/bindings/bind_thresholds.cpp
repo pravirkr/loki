@@ -78,13 +78,17 @@ void bind_thresholds(py::module_& m) {
                                                        .beam_sigma = beam_sigma,
                                                        .reach_sigma =
                                                            reach_sigma};
-                 return std::make_unique<DynamicThresholdScheme>(
-                     std::span<const float>(branching_pattern.data(),
-                                            branching_pattern.size()),
-                     ref_ducy, nbins, ntrials, nprobs, prob_min, snr_final,
-                     nthresholds, ducy_max, wtsp, beam_width, trials_start,
-                     mode, seed, batch_size, guess, shared,
-                     make_exec(backend, device, nthreads));
+                 const std::span<const float> pattern(branching_pattern.data(),
+                                                      branching_pattern.size());
+                 const auto exec = make_exec(backend, device, nthreads);
+                 // The pilot guess simulates an unpruned search.
+                 return long_call([&] {
+                     return std::make_unique<DynamicThresholdScheme>(
+                         pattern, ref_ducy, nbins, ntrials, nprobs, prob_min,
+                         snr_final, nthresholds, ducy_max, wtsp, beam_width,
+                         trials_start, mode, seed, batch_size, guess, shared,
+                         exec);
+                 });
              }),
              py::arg("branching_pattern"), py::arg("ref_ducy"),
              py::arg("nbins") = 64, py::arg("ntrials") = 1024,
@@ -103,16 +107,19 @@ void bind_thresholds(py::module_& m) {
              "(2 sqrt(2 ln 10)). A pulse of FWHM duty d needs ref_ducy = "
              "sqrt(ln 10 / ln 2) d ~ 1.82 d.")
         .def("run", &DynamicThresholdScheme::run, py::arg("thres_neigh") = 10,
+             py::arg("show_progress") = true, py::call_guard<LongCall>(),
              "Operational search. The path from get_best_path_thresholds is "
              "used immediately. In-run cost and success_h1_cumul are "
-             "optimistic Monte Carlo estimates.")
+             "optimistic Monte Carlo estimates. show_progress=False draws no "
+             "progress bar; set_progress_mode() chooses how one is drawn.")
         .def("save", &DynamicThresholdScheme::save, py::arg("outdir") = "./",
              "Writes the search (states, grids, beam) as HDF5, in every mode; "
              "after solve() also a group 'solution'.")
         .def(
             "solve",
             [](DynamicThresholdScheme& self) {
-                return solution_to_dict(self.solve());
+                auto sol = long_call([&] { return self.solve(); });
+                return solution_to_dict(std::move(sol));
             },
             "Modes 'shared' and 'robust', after run(): the schedule to use "
             "with the Pd and cost of exactly those thresholds measured on "
@@ -169,8 +176,9 @@ void bind_thresholds(py::module_& m) {
             [](const DynamicThresholdScheme& self,
                const PyArrayT<float>& thresholds, SizeType ntrials,
                std::optional<uint64_t> seed) {
-                return as_pyarray(self.evaluate(
-                    to_span<const float>(thresholds), ntrials, seed));
+                const auto span = to_span<const float>(thresholds);
+                return as_pyarray(long_call(
+                    [&] { return self.evaluate(span, ntrials, seed); }));
             },
             py::arg("thresholds"), py::arg("ntrials"),
             py::arg("seed") = py::none(),
@@ -191,7 +199,8 @@ void bind_thresholds(py::module_& m) {
                     .delta_max      = delta_max,
                     .allow_raise    = allow_raise,
                 };
-                auto res = self.calibrate(min_pd, opts);
+                auto res =
+                    long_call([&] { return self.calibrate(min_pd, opts); });
                 py::dict out;
                 out["thresholds"]       = as_pyarray(std::move(res.thresholds));
                 out["delta"]            = res.delta;
@@ -220,7 +229,9 @@ void bind_thresholds(py::module_& m) {
                uint64_t seed) {
                 const auto nstages =
                     static_cast<py::ssize_t>(self.get_nstages());
-                return as_pyarray(self.simulate_h1_scores(ntrials, seed))
+                return as_pyarray(long_call([&] {
+                           return self.simulate_h1_scores(ntrials, seed);
+                       }))
                     .reshape({nstages, static_cast<py::ssize_t>(ntrials)});
             },
             py::arg("ntrials"), py::arg("seed"),
@@ -232,10 +243,13 @@ void bind_thresholds(py::module_& m) {
            const PyArrayT<float>& branching_pattern, float ref_ducy,
            SizeType nbins, SizeType ntrials, float snr_final, float ducy_max,
            float wtsp) {
-            return as_pyarray(detection::evaluate_scheme(
-                to_span<const float>(thresholds),
-                to_span<const float>(branching_pattern), ref_ducy, nbins,
-                ntrials, snr_final, ducy_max, wtsp));
+            const auto thresholds_span = to_span<const float>(thresholds);
+            const auto pattern_span = to_span<const float>(branching_pattern);
+            return as_pyarray(long_call([&] {
+                return detection::evaluate_scheme(thresholds_span, pattern_span,
+                                                  ref_ducy, nbins, ntrials,
+                                                  snr_final, ducy_max, wtsp);
+            }));
         },
         py::arg("thresholds"), py::arg("branching_pattern"),
         py::arg("ref_ducy"), py::arg("nbins") = 64, py::arg("ntrials") = 1024,
@@ -247,10 +261,13 @@ void bind_thresholds(py::module_& m) {
            const PyArrayT<float>& branching_pattern, float ref_ducy,
            SizeType nbins, SizeType ntrials, float snr_final, float ducy_max,
            float wtsp) {
-            return as_pyarray(detection::determine_scheme(
-                to_span<const float>(survive_probs),
-                to_span<const float>(branching_pattern), ref_ducy, nbins,
-                ntrials, snr_final, ducy_max, wtsp));
+            const auto probs_span   = to_span<const float>(survive_probs);
+            const auto pattern_span = to_span<const float>(branching_pattern);
+            return as_pyarray(long_call([&] {
+                return detection::determine_scheme(probs_span, pattern_span,
+                                                   ref_ducy, nbins, ntrials,
+                                                   snr_final, ducy_max, wtsp);
+            }));
         },
         py::arg("survive_probs"), py::arg("branching_pattern"),
         py::arg("ref_ducy"), py::arg("nbins") = 64, py::arg("ntrials") = 1024,

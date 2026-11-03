@@ -128,16 +128,20 @@ void bind_prune(py::module_& m) {
                     const std::optional<std::vector<SizeType>>& ref_segs,
                     std::string_view backend, int device,
                     const std::optional<search::CandidateOptions>& candidates) {
-                     if (candidates) {
+                     const auto exec = make_exec(backend, device);
+                     // Planning runs a threshold search per region.
+                     return long_call([&] {
+                         if (candidates) {
+                             return std::make_unique<EPFreqSweep>(
+                                 cfg, *candidates, show_progress, min_pd,
+                                 poly_basis, ref_ducy, rfi_config,
+                                 plan_cache_file, n_runs, ref_segs, exec);
+                         }
                          return std::make_unique<EPFreqSweep>(
-                             cfg, *candidates, show_progress, min_pd,
-                             poly_basis, ref_ducy, rfi_config, plan_cache_file,
-                             n_runs, ref_segs, make_exec(backend, device));
-                     }
-                     return std::make_unique<EPFreqSweep>(
-                         cfg, show_progress, min_pd, poly_basis, ref_ducy,
-                         rfi_config, plan_cache_file, n_runs, ref_segs,
-                         make_exec(backend, device));
+                             cfg, show_progress, min_pd, poly_basis, ref_ducy,
+                             rfi_config, plan_cache_file, n_runs, ref_segs,
+                             exec);
+                     });
                  }),
              py::arg("cfg"), py::arg("show_progress") = true,
              py::arg("min_pd") = 0.1F, py::arg("poly_basis") = "taylor",
@@ -154,9 +158,12 @@ void bind_prune(py::module_& m) {
                const PyArrayT<float>& ts_v, const std::string& outdir,
                const std::string& file_prefix,
                const io::ObservationMetadata& observation) {
-                self.execute(to_span<const float>(ts_e),
-                             to_span<const float>(ts_v), outdir, file_prefix,
-                             observation);
+                const auto ts_e_span = to_span<const float>(ts_e);
+                const auto ts_v_span = to_span<const float>(ts_v);
+                long_call([&] {
+                    self.execute(ts_e_span, ts_v_span, outdir, file_prefix,
+                                 observation);
+                });
             },
             py::arg("ts_e"), py::arg("ts_v"), py::arg("outdir") = "./",
             py::arg("file_prefix") = "test", py::kw_only(),

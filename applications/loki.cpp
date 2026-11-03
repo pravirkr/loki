@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <csignal>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -10,22 +11,28 @@
 #include <iostream>
 #include <iterator>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <CLI/CLI.hpp>
 #include <highfive/highfive.hpp>
 #include <omp.h>
+#include <spdlog/sinks/ansicolor_sink.h>
+#include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/spdlog.h>
 #include <toml++/toml.hpp>
 
 #include "loki/algorithms/ep_regions.hpp"
 #include "loki/algorithms/regions.hpp"
 #include "loki/common/backend.hpp"
+#include "loki/common/interrupt.hpp"
+#include "loki/common/progress.hpp"
 #include "loki/common/types.hpp"
 #include "loki/io/preprocess.hpp"
 #include "loki/io/timeseries.hpp"
@@ -35,9 +42,103 @@
 #include "loki/simulation/modulate.hpp"
 #include "loki/simulation/pulse.hpp"
 
+#include "console.hpp"
+
 namespace {
 
 using loki::SizeType;
+
+#ifndef LOKI_VERSION
+#define LOKI_VERSION "unknown"
+#endif
+
+/// Console, log-file and progress settings shared by every subcommand.
+struct OutputOptions {
+    int verbosity{0}; // -v: debug, -vv: trace
+    bool quiet{false};
+    std::string log_level; // overrides -v and -q
+    std::string progress;  // empty: auto, or -q's "off"
+    std::string log_file;
+    std::string color{"auto"};
+};
+
+std::string version_text() {
+    std::string backends;
+    for (const auto b : loki::available_backends()) {
+        backends += backends.empty() ? "" : ", ";
+        backends += loki::to_string(b);
+    }
+    return std::format("loki {} (backends: {})", LOKI_VERSION, backends);
+}
+
+/// Applies @p opts to the default logger and the progress mode. The console
+/// shows its level; a log file gets at least the info messages, whatever
+/// the console shows (more with -v or a lower --log-level), and is appended
+/// to.
+void configure_output(const OutputOptions& opts,
+                      int argc,
+                      const char* const* argv) {
+    auto choice = loki::cli::ColorChoice::kAuto;
+    if (opts.color == "always") {
+        choice = loki::cli::ColorChoice::kAlways;
+    } else if (opts.color == "never") {
+        choice = loki::cli::ColorChoice::kNever;
+        // NO_COLOR also reaches the progress bars. Set before any thread.
+        // NOLINTNEXTLINE(concurrency-mt-unsafe,misc-include-cleaner)
+        setenv("NO_COLOR", "1", 1);
+    }
+    loki::cli::Console::get().configure(choice, opts.verbosity > 0);
+    auto console = spdlog::level::info;
+    if (!opts.log_level.empty()) {
+        console = spdlog::level::from_str(opts.log_level);
+    } else if (opts.quiet) {
+        console = spdlog::level::warn;
+    } else if (opts.verbosity == 1) {
+        console = spdlog::level::debug;
+    } else if (opts.verbosity >= 2) {
+        console = spdlog::level::trace;
+    }
+    auto sink_colors = spdlog::color_mode::automatic;
+    if (choice == loki::cli::ColorChoice::kAlways) {
+        sink_colors = spdlog::color_mode::always;
+    } else if (choice == loki::cli::ColorChoice::kNever) {
+        sink_colors = spdlog::color_mode::never;
+    }
+    const auto logger = spdlog::default_logger();
+    for (const auto& sink : logger->sinks()) {
+        sink->set_level(console);
+        if (const auto color_sink = std::dynamic_pointer_cast<
+                spdlog::sinks::ansicolor_sink<spdlog::details::console_mutex>>(
+                sink)) {
+            color_sink->set_color_mode(sink_colors);
+        }
+    }
+    logger->set_level(console);
+    if (!opts.log_file.empty()) {
+        const auto file_level = std::min(console, spdlog::level::info);
+        auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(
+            opts.log_file, /*truncate=*/false);
+        file_sink->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] %v");
+        file_sink->set_level(file_level);
+        loki::cli::Console::get().set_log_file(file_sink);
+        logger->sinks().push_back(std::move(file_sink));
+        logger->set_level(std::min(console, file_level));
+        // Every line reaches the file at once, even if the job is killed.
+        logger->flush_on(spdlog::level::trace);
+    }
+    if (!opts.progress.empty()) {
+        loki::set_progress_mode(loki::parse_progress_mode(opts.progress));
+    } else if (opts.quiet) {
+        loki::set_progress_mode(loki::ProgressMode::kOff);
+    }
+    std::string command;
+    for (int i = 0; i < argc; ++i) {
+        command += i == 0 ? "" : " ";
+        command +=
+            argv[i]; // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+    }
+    spdlog::debug("{}: {}", version_text(), command);
+}
 
 std::string lower_copy(std::string text) {
     for (char& ch : text) {
@@ -419,17 +520,21 @@ void print_ffa_plan(const loki::search::FFASearchConfig& cfg, loki::Exec exec) {
     const loki::algorithms::FFARegionPlanner<FoldType> planner(cfg, exec);
     const auto& cfgs   = planner.get_cfgs();
     const auto& chunks = planner.get_chunk_stats();
-    std::cout << std::format(
-        "FFA plan: {} chunks, nsamps {}, tobs {:.2f} s, sweep memory {:.3f} "
-        "GB against a limit of {:.3f} GB\n",
-        cfgs.size(), cfg.get_nsamps(), cfg.get_tobs(),
-        planner.get_stats().get_freq_sweep_memory_usage(),
-        planner.get_cfgs().empty()
-            ? cfg.get_max_process_memory_gb()
-            : planner.get_cfgs().front().get_max_process_memory_gb());
-    std::cout << std::format("{:>6} {:>6} {:>23} {:>23} {:>9}\n", "chunk",
-                             "nbins", "nominal f [Hz]", "actual f [Hz]",
-                             "mem [GB]");
+    const auto& con    = loki::cli::Console::get();
+    std::cout
+        << con.title("FFA plan:")
+        << std::format(
+               " {} chunks, nsamps {}, tobs {:.2f} s, sweep memory {:.3f} "
+               "GB against a limit of {:.3f} GB\n",
+               cfgs.size(), cfg.get_nsamps(), cfg.get_tobs(),
+               planner.get_stats().get_freq_sweep_memory_usage(),
+               planner.get_cfgs().empty()
+                   ? cfg.get_max_process_memory_gb()
+                   : planner.get_cfgs().front().get_max_process_memory_gb());
+    std::cout << con.header(std::format("{:>6} {:>6} {:>23} {:>23} {:>9}",
+                                        "chunk", "nbins", "nominal f [Hz]",
+                                        "actual f [Hz]", "mem [GB]"))
+              << "\n";
     for (SizeType i = 0; i < std::min(cfgs.size(), chunks.size()); ++i) {
         const auto& chunk = chunks[i];
         std::cout << std::format(
@@ -531,89 +636,78 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
         try {
             const HighFive::File h5(result_file.string(),
                                     HighFive::File::ReadOnly);
-            if (h5.exist("snr")) {
-                const auto snr_dset = h5.getDataSet("snr");
-                const auto dims     = snr_dset.getDimensions();
-                const auto n_cands  = dims.empty() ? 0UL : dims[0];
-                if (n_cands > 0) {
-                    float top_snr           = 0.0F;
-                    size_t top_idx          = 0;
-                    constexpr size_t kChunk = 65536;
-                    for (size_t offset = 0; offset < n_cands;
-                         offset += kChunk) {
-                        const size_t count = std::min(kChunk, n_cands - offset);
-                        std::vector<float> snrs(count);
-                        snr_dset.select({offset}, {count}).read(snrs);
-                        const auto max_it = std::ranges::max_element(snrs);
-                        if (max_it != snrs.end() && *max_it >= top_snr) {
-                            top_snr = *max_it;
-                            top_idx = offset +
-                                      static_cast<size_t>(
-                                          std::distance(snrs.begin(), max_it));
-                        }
+            std::vector<std::pair<std::string, std::string>> rows;
+            const auto n_cands = h5.exist("snr") ? [&] {
+                const auto dims = h5.getDataSet("snr").getDimensions();
+                return dims.empty() ? 0UL : dims[0];
+            }()
+                                                 : 0UL;
+            if (n_cands > 0) {
+                const auto snr_dset     = h5.getDataSet("snr");
+                float top_snr           = 0.0F;
+                size_t top_idx          = 0;
+                constexpr size_t kChunk = 65536;
+                for (size_t offset = 0; offset < n_cands; offset += kChunk) {
+                    const size_t count = std::min(kChunk, n_cands - offset);
+                    std::vector<float> snrs(count);
+                    snr_dset.select({offset}, {count}).read(snrs);
+                    const auto max_it = std::ranges::max_element(snrs);
+                    if (max_it != snrs.end() && *max_it >= top_snr) {
+                        top_snr = *max_it;
+                        top_idx = offset + static_cast<size_t>(std::distance(
+                                               snrs.begin(), max_it));
                     }
+                }
 
-                    SPDLOG_INFO("=== Search Summary ===");
-                    // Root datasets hold the selected candidates; every
-                    // passing trial is in /detections when retained. With
-                    // candidate processing disabled they hold every trial.
-                    if (h5.exist("detections/snr")) {
-                        const auto n_detections =
-                            h5.getDataSet("detections/snr").getDimensions();
-                        SPDLOG_INFO("Detections above snr_min   : {}",
-                                    n_detections.empty() ? 0UL
-                                                         : n_detections[0]);
-                    }
-                    if (h5.exist("candidates")) {
-                        SPDLOG_INFO("Selected candidates        : {}", n_cands);
-                    } else {
-                        SPDLOG_INFO("Detections above snr_min   : {}", n_cands);
-                    }
-                    SPDLOG_INFO(
-                        "Top candidate SNR          : {:.2f} (candidate "
-                        "#{})",
-                        top_snr, top_idx);
+                // Root datasets hold the selected candidates; every passing
+                // trial is in /detections when retained. With candidate
+                // processing disabled they hold every trial.
+                if (h5.exist("detections/snr")) {
+                    const auto n_detections =
+                        h5.getDataSet("detections/snr").getDimensions();
+                    rows.emplace_back("Detections above snr_min",
+                                      std::to_string(n_detections.empty()
+                                                         ? 0UL
+                                                         : n_detections[0]));
+                }
+                rows.emplace_back(h5.exist("candidates")
+                                      ? "Selected candidates"
+                                      : "Detections above snr_min",
+                                  std::to_string(n_cands));
+                rows.emplace_back(
+                    "Top candidate SNR",
+                    std::format("{:.2f} (candidate #{})", top_snr, top_idx));
 
-                    if (h5.exist("param_sets")) {
-                        const auto p_dset = h5.getDataSet("param_sets");
-                        auto p_dims       = p_dset.getDimensions();
-                        if (p_dims.size() == 2 && p_dims[0] == n_cands &&
-                            p_dims[1] > 0) {
-                            std::vector<double> top_params(p_dims[1]);
-                            p_dset.select({top_idx, 0}, {1, p_dims[1]})
-                                .read_raw(top_params.data());
-                            if (h5.hasAttribute("param_names")) {
-                                std::vector<std::string> p_names;
-                                h5.getAttribute("param_names").read(p_names);
-                                std::string p_str;
-                                for (size_t pi = 0;
-                                     pi < std::min(top_params.size(),
-                                                   p_names.size());
-                                     ++pi) {
-                                    if (pi > 0) {
-                                        p_str += ", ";
-                                    }
-                                    p_str +=
-                                        std::format("{}={:.6f}", p_names[pi],
-                                                    top_params[pi]);
-                                }
-                                SPDLOG_INFO("Top candidate parameters   : [{}]",
-                                            p_str);
+                if (h5.exist("param_sets")) {
+                    const auto p_dset = h5.getDataSet("param_sets");
+                    auto p_dims       = p_dset.getDimensions();
+                    if (p_dims.size() == 2 && p_dims[0] == n_cands &&
+                        p_dims[1] > 0 && h5.hasAttribute("param_names")) {
+                        std::vector<double> top_params(p_dims[1]);
+                        p_dset.select({top_idx, 0}, {1, p_dims[1]})
+                            .read_raw(top_params.data());
+                        std::vector<std::string> p_names;
+                        h5.getAttribute("param_names").read(p_names);
+                        std::string p_str;
+                        for (size_t pi = 0;
+                             pi < std::min(top_params.size(), p_names.size());
+                             ++pi) {
+                            if (pi > 0) {
+                                p_str += ", ";
                             }
+                            p_str += std::format("{}={:.6f}", p_names[pi],
+                                                 top_params[pi]);
                         }
+                        rows.emplace_back("Top candidate parameters",
+                                          std::format("[{}]", p_str));
                     }
-                } else {
-                    SPDLOG_INFO("=== Search Summary ===");
-                    SPDLOG_INFO("Total candidates detected : 0 above S/N "
-                                "threshold {:.2f}",
-                                toml_cfg.snr_min);
                 }
             } else {
-                SPDLOG_INFO("=== Search Summary ===");
-                SPDLOG_INFO(
-                    "Total candidates detected : 0 above S/N threshold {:.2f}",
-                    toml_cfg.snr_min);
+                rows.emplace_back("Total candidates detected",
+                                  std::format("0 above S/N threshold {:.2f}",
+                                              toml_cfg.snr_min));
             }
+            loki::cli::Console::get().summary("Search Summary", rows);
         } catch (const std::exception& e) {
             SPDLOG_WARN("HDF5 result summary inspection failed: {}", e.what());
         }
@@ -644,8 +738,10 @@ void print_ep_plan(const loki::algorithms::EPRegionPlanner<FoldType>& planner,
                    const std::optional<std::filesystem::path>& cache_path) {
     const auto& chunks = planner.get_chunk_cfgs();
     const auto& stats  = planner.get_stats();
+    const auto& con    = loki::cli::Console::get();
     if (chunks.empty()) {
-        std::cout << "EP plan: no chunks (the frequency range is empty)\n";
+        std::cout << con.title("EP plan:")
+                  << " no chunks (the frequency range is empty)\n";
         return;
     }
 
@@ -655,16 +751,21 @@ void print_ep_plan(const loki::algorithms::EPRegionPlanner<FoldType>& planner,
         nbins_lo = std::min(nbins_lo, chunk.cfg.get_nbins());
         nbins_hi = std::max(nbins_hi, chunk.cfg.get_nbins());
     }
-    std::cout << std::format(
-        "EP plan: {} chunks, nbins {}..{}, peak {:.3f} GB against a limit of "
-        "{:.3f} GB\n",
-        chunks.size(), nbins_lo, nbins_hi, stats.get_max_memory_gb(),
-        stats.get_memory_limit_gb());
+    std::cout
+        << con.title("EP plan:")
+        << std::format(
+               " {} chunks, nbins {}..{}, peak {:.3f} GB against a limit of "
+               "{:.3f} GB\n",
+               chunks.size(), nbins_lo, nbins_hi, stats.get_max_memory_gb(),
+               stats.get_memory_limit_gb());
 
-    std::cout << std::format(
-        "{:>6} {:>6} {:>23} {:>23} {:>9} {:>9} {:>10} {:>6} {:>9} {:>7}\n",
-        "chunk", "nbins", "nominal f [Hz]", "actual f [Hz]", "ncoords",
-        "max_sugg", "branch_max", "nseg", "mem [GB]", "Pd");
+    std::cout << con.header(std::format(
+                     "{:>6} {:>6} {:>23} {:>23} {:>9} {:>9} {:>10} {:>6} "
+                     "{:>9} {:>7}",
+                     "chunk", "nbins", "nominal f [Hz]", "actual f [Hz]",
+                     "ncoords", "max_sugg", "branch_max", "nseg", "mem [GB]",
+                     "Pd"))
+              << "\n";
     for (SizeType i = 0; i < chunks.size(); ++i) {
         const auto& chunk = chunks[i];
         std::cout << std::format(
@@ -674,13 +775,15 @@ void print_ep_plan(const loki::algorithms::EPRegionPlanner<FoldType>& planner,
             chunk.nominal_f_end, chunk.actual_f_start, chunk.actual_f_end,
             chunk.ncoords, format_pow2(chunk.max_sugg), chunk.branch_max,
             chunk.nsegments, chunk.chunk_memory_gb, chunk.pd);
-        std::cout << std::format(
-            "       predicted peak {}, live ring {}, batch {}\n",
-            format_pow2(chunk.predicted_peak),
-            format_pow2(chunk.predicted_live), chunk.batch_size);
+        std::cout << con.muted(std::format(
+                         "       predicted peak {}, live ring {}, batch {}",
+                         format_pow2(chunk.predicted_peak),
+                         format_pow2(chunk.predicted_live), chunk.batch_size))
+                  << "\n";
     }
 
-    std::cout << "Groups of equal nbins, each with its own workspaces:\n";
+    std::cout << con.title("Groups of equal nbins")
+              << ", each with its own workspaces:\n";
     for (SizeType begin = 0; begin < chunks.size();) {
         const auto nbins    = chunks[begin].cfg.get_nbins();
         SizeType end        = begin;
@@ -697,7 +800,8 @@ void print_ep_plan(const loki::algorithms::EPRegionPlanner<FoldType>& planner,
             begin, end - 1, nbins, format_pow2(max_sugg), branch_max, workers);
         begin = end;
     }
-    std::cout << std::format("Plan cache: {}\n",
+    std::cout << con.title("Plan cache:")
+              << std::format(" {}\n",
                              cache_path ? cache_path->string() : "none");
 }
 
@@ -841,9 +945,9 @@ void print_ep_summary(const std::filesystem::path& result_file) {
             }
         }
 
-        SPDLOG_INFO("=== Search Summary ===");
-        SPDLOG_INFO("Runs pruned                   : {} ({} leaves)", n_runs,
-                    n_leaves);
+        std::vector<std::pair<std::string, std::string>> rows;
+        rows.emplace_back("Runs pruned",
+                          std::format("{} ({} leaves)", n_runs, n_leaves));
         if (found) {
             const auto run    = h5.getGroup("chunks")
                                     .getGroup(top_chunk)
@@ -861,13 +965,17 @@ void print_ep_summary(const std::filesystem::path& result_file) {
                 p_str += std::format("{}={:.6f}", param_names[pi],
                                      leaf_values[pi * 2]);
             }
-            SPDLOG_INFO("Top score                      : {:.2f} (chunk {}, "
-                        "run {}, leaf {})",
-                        top_score, top_chunk, top_run, top_leaf);
-            SPDLOG_INFO("Top candidate parameters      : [{}]", p_str);
+            rows.emplace_back("Top score",
+                              std::format("{:.2f} (chunk {}, run {}, leaf {})",
+                                          top_score, top_chunk, top_run,
+                                          top_leaf));
+            rows.emplace_back("Top candidate parameters",
+                              std::format("[{}]", p_str));
         } else {
-            SPDLOG_INFO("No leaves were written by the pruning");
+            rows.emplace_back("Top candidate",
+                              "none: the pruning wrote no leaves");
         }
+        loki::cli::Console::get().summary("Search Summary", rows);
         SPDLOG_INFO("Saved HDF5 results to: {}", result_file.string());
     } catch (const std::exception& e) {
         SPDLOG_WARN("HDF5 result summary inspection failed: {}", e.what());
@@ -995,8 +1103,47 @@ int run_search_ep(const loki::search::EPTomlConfig& toml_cfg,
 
 // NOLINTNEXTLINE(bugprone-exception-escape,misc-const-correctness): setup errors abort; main signature is fixed
 int main(int argc, char** argv) {
+    // Until the flags are parsed: colour only on an interactive terminal.
+    loki::cli::Console::get().configure(loki::cli::ColorChoice::kAuto,
+                                        /*verbose=*/false);
     CLI::App app{"Loki - Fast Pulsar Search Pipeline"};
     app.require_subcommand(1);
+    app.set_version_flag("--version", [] { return version_text(); });
+    app.footer("Exit status: 0 success, 1 failure, 130 stopped by Ctrl-C, "
+               "143 stopped by SIGTERM; other values: invalid command line.");
+
+    // Global output options: accepted before or after the subcommand.
+    OutputOptions output;
+    auto* grp_logging = app.add_option_group("Output & Logging");
+    auto* opt_verbose =
+        grp_logging->add_flag("-v,--verbose", output.verbosity,
+                              "More log detail: -v debug, -vv trace");
+    auto* opt_quiet = grp_logging->add_flag(
+        "-q,--quiet", output.quiet,
+        "Warnings and errors only, and no progress bars (unless --progress "
+        "is given)");
+    opt_quiet->excludes(opt_verbose);
+    grp_logging
+        ->add_option("--log-level", output.log_level,
+                     "Console log level (instead of -v or -q)")
+        ->check(CLI::IsMember(
+            {"trace", "debug", "info", "warning", "error", "critical", "off"}))
+        ->excludes(opt_verbose)
+        ->excludes(opt_quiet);
+    grp_logging
+        ->add_option("--progress", output.progress,
+                     "Progress bars: auto (live on a terminal, plain lines "
+                     "otherwise), rich, plain or off")
+        ->check(CLI::IsMember({"auto", "rich", "plain", "off"}));
+    grp_logging
+        ->add_option("--color", output.color,
+                     "Colour on the terminal: auto (only on an interactive "
+                     "terminal, unless NO_COLOR is set), always or never")
+        ->check(CLI::IsMember({"auto", "always", "never"}));
+    grp_logging->add_option(
+        "--log-file", output.log_file,
+        "Also append the log to this file: info and up whatever the console "
+        "shows, more with -v");
 
     // Pre-inspect configuration argument if passed to populate base config
     // before CLI option registration
@@ -1095,7 +1242,7 @@ int main(int argc, char** argv) {
         try {
             ffa_cfg = loki::search::FFATomlConfig::load(*cfg_arg);
         } catch (const std::exception& ex) {
-            SPDLOG_ERROR("{}", ex.what());
+            loki::cli::Console::get().error(ex.what());
             return 1;
         }
     }
@@ -1105,7 +1252,7 @@ int main(int argc, char** argv) {
         try {
             ep_cfg = loki::search::EPTomlConfig::load(*cfg_arg);
         } catch (const std::exception& ex) {
-            SPDLOG_ERROR("{}", ex.what());
+            loki::cli::Console::get().error(ex.what());
             return 1;
         }
     }
@@ -1492,7 +1639,18 @@ int main(int argc, char** argv) {
                    "When nsamps is not a power of 2: fail (default) or "
                    "truncate");
 
+    simulate->fallthrough();
+    search->fallthrough();
+    ffa->fallthrough();
+    ep->fallthrough();
+
     CLI11_PARSE(app, argc, argv);
+    try {
+        configure_output(output, argc, argv);
+    } catch (const std::exception& ex) { // e.g. an unwritable --log-file
+        SPDLOG_ERROR("{}", ex.what());
+        return 1;
+    }
     if (!backend_name.empty()) {
         ffa_cfg.backend = loki::parse_backend(backend_name);
     }
@@ -1519,6 +1677,9 @@ int main(int argc, char** argv) {
         ep_cfg.ref_segs = ep_ref_segs;
     }
 
+    // Ctrl-C, or SIGTERM (e.g. Slurm's scancel), stops the run at its next
+    // checkpoint and unwinds cleanly; a second Ctrl-C kills it at once.
+    const loki::InterruptGuard interrupt_guard(/*handle_terminate=*/true);
     try {
         if (simulate->parsed()) {
             if (*opt_gen_sim) {
@@ -1612,8 +1773,15 @@ int main(int argc, char** argv) {
             }
             return run_search_ep(ep_cfg, ep_dry_run, policy);
         }
+    } catch (const loki::Interrupted&) {
+        const int sig = loki::interrupt_signal();
+        SPDLOG_WARN("Interrupted{}: stopped before finishing; outputs may be "
+                    "incomplete",
+                    sig == 0 ? "" : std::format(" by signal {}", sig));
+        // The shell's convention for a run ended by a signal.
+        return 128 + (sig == 0 ? SIGINT : sig);
     } catch (const std::exception& ex) {
-        SPDLOG_ERROR("{}", ex.what());
+        loki::cli::Console::get().error(ex.what());
         return 1;
     }
 
