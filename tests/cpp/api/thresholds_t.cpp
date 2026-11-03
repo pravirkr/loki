@@ -157,6 +157,49 @@ bool same_state_bits(const detection::State& a, const detection::State& b) {
 
 } // namespace
 
+TEST_CASE("evaluate_scheme and determine_scheme are deterministic per seed",
+          "[thresholds]") {
+    const std::vector<float> branching_pattern = {2.0F, 3.0F, 4.0F};
+    const std::vector<float> thresholds        = {1.0F, 2.0F, 3.0F};
+    const std::vector<float> survive_probs(branching_pattern.size(), 0.5F);
+    constexpr float kRefDucy    = 0.1F;
+    constexpr SizeType kNbins   = 32;
+    constexpr SizeType kNtrials = 1024;
+    constexpr float kSnr        = 8.0F;
+    constexpr float kDucyMax    = 0.3F;
+    constexpr float kWtsp       = 1.0F;
+
+    const auto same = [](const std::vector<detection::State>& a,
+                         const std::vector<detection::State>& b) {
+        REQUIRE(a.size() == b.size());
+        for (SizeType i = 0; i < a.size(); ++i) {
+            if (!same_state_bits(a[i], b[i])) {
+                return false;
+            }
+        }
+        return true;
+    };
+    const auto evaluate = [&](uint64_t seed) {
+        return detection::evaluate_scheme(thresholds, branching_pattern,
+                                          kRefDucy, kNbins, kNtrials, kSnr,
+                                          kDucyMax, kWtsp, seed);
+    };
+    const auto determine = [&](uint64_t seed) {
+        return detection::determine_scheme(survive_probs, branching_pattern,
+                                           kRefDucy, kNbins, kNtrials, kSnr,
+                                           kDucyMax, kWtsp, seed);
+    };
+
+    SECTION("evaluate_scheme") {
+        REQUIRE(same(evaluate(7), evaluate(7)));
+        REQUIRE_FALSE(same(evaluate(7), evaluate(8)));
+    }
+    SECTION("determine_scheme") {
+        REQUIRE(same(determine(7), determine(7)));
+        REQUIRE_FALSE(same(determine(7), determine(8)));
+    }
+}
+
 TEST_CASE("DynamicThresholdScheme evaluate does not depend on thread count",
           "[thresholds]") {
     const std::vector<float> branching(8, 2.0F);

@@ -34,4 +34,8 @@ enum class TermColor : std::uint32_t {
 /// unset or empty.
 [[nodiscard]] bool color_allowed() noexcept;
 
+/// @brief Whether colour is forced on where it would be off (a pipe, a log
+/// file): CLICOLOR_FORCE set and not "0". NO_COLOR still wins.
+[[nodiscard]] bool color_forced() noexcept;
+
 } // namespace loki

@@ -10,7 +10,6 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
-#include <iterator>
 #include <memory>
 #include <optional>
 #include <span>
@@ -31,18 +30,20 @@
 
 #include "lib/detail/error_check.hpp"
 #include "lib/detail/psr_utils.hpp"
+#include "lib/detail/toml_schema.hpp"
+#include "lib/detail/toml_utils.hpp"
 #include "lib/detail/utils.hpp"
+#include "lib/search/config_keys.hpp"
 #include "lib/search/ep_support.hpp"
 
 namespace loki::search {
 
 namespace {
 
-[[nodiscard]] bool is_allowed_key(std::string_view key,
-                                  std::span<const std::string_view> allowed) {
-    return std::ranges::any_of(
-        allowed, [&](std::string_view candidate) { return key == candidate; });
-}
+using toml_utils::array_number;
+using toml_utils::read_number;
+using toml_utils::read_string;
+using toml_utils::reject_nonfinite_floats;
 
 /// Keys removed from the schema, with what replaces them.
 [[nodiscard]] std::string_view removed_key_hint(std::string_view path) {
@@ -70,414 +71,330 @@ namespace {
     return {};
 }
 
-void collect_unknown_keys(const toml::table& table,
-                          std::span<const std::string_view> allowed,
-                          std::string_view table_path,
-                          std::vector<std::string>& errors) {
-    for (const auto& [key, _] : table) {
-        if (!is_allowed_key(key.str(), allowed)) {
-            const auto path = std::format("{}.{}", table_path, key.str());
-            const auto hint = removed_key_hint(path);
-            errors.push_back(hint.empty() ? std::format("{}: unknown key", path)
-                                          : std::format("{}: {}", path, hint));
-        }
-    }
+/// The order of the tables in a written config, as in the templates.
+constexpr std::array kTableOrder{
+    std::string_view{"input"},       std::string_view{"preprocessing"},
+    std::string_view{"search"},      std::string_view{"ep"},
+    std::string_view{"performance"}, std::string_view{"output"},
+    std::string_view{"candidates"},
+};
+
+using Orbit = FFATomlConfig::OrbitLimits;
+
+const toml_utils::Schema<Orbit>& orbit_schema() {
+    using toml_utils::field;
+    static const toml_utils::Schema<Orbit> schema{
+        toml_utils::required(
+            field<Orbit>("", "order", [](auto& o) -> auto& { return o.order; }),
+            R"("accel", "jerk", "snap" or "crackle")"),
+        field<Orbit>("", "p_orb_min",
+                     [](auto& o) -> auto& { return o.p_orb_min; }),
+        field<Orbit>("", "p_orb_min_tobs",
+                     [](auto& o) -> auto& { return o.p_orb_min_tobs; }),
+        field<Orbit>("", "m_c_max", [](auto& o) -> auto& { return o.m_c_max; }),
+        field<Orbit>("", "m_p_min", [](auto& o) -> auto& { return o.m_p_min; }),
+    };
+    return schema;
 }
 
-/// Validates a search document. With @p allow_ep the EP keys are accepted on
-/// top of the FFA ones; otherwise an [ep] table is an unknown key.
-void validate_toml_document(const toml::table& root,
-                            bool allow_ep,
-                            std::string_view label) {
-    static constexpr std::array kTopLevel{
-        std::string_view{"input"},  std::string_view{"preprocessing"},
-        std::string_view{"search"}, std::string_view{"performance"},
-        std::string_view{"output"}, std::string_view{"candidates"},
+/// The keys of an FFA config, shared by the EP config.
+template <typename Cfg> toml_utils::Schema<Cfg> ffa_fields() {
+    using toml_utils::choice;
+    using toml_utils::custom;
+    using toml_utils::field;
+    constexpr std::array kMethods{
+        std::pair{std::string_view{"robust"}, io::PreprocessMethod::kRobust},
+        std::pair{std::string_view{"zscore"}, io::PreprocessMethod::kZScore},
     };
-    static constexpr std::array kTopLevelEP{
-        std::string_view{"input"},       std::string_view{"preprocessing"},
-        std::string_view{"search"},      std::string_view{"ep"},
-        std::string_view{"performance"}, std::string_view{"output"},
-        std::string_view{"candidates"},
+    constexpr std::array kGainModels{
+        std::pair{std::string_view{"additive"}, io::GainModel::kAdditive},
+        std::pair{std::string_view{"multiplicative"},
+                  io::GainModel::kMultiplicative},
     };
-    static constexpr std::array kEPKeys{
-        std::string_view{"poly_basis"},
-        std::string_view{"target_snr"},
-        std::string_view{"min_pd"},
-        std::string_view{"ref_ducy"},
-        std::string_view{"prune_poly_order"},
-        std::string_view{"n_runs"},
-        std::string_view{"ref_segs"},
-        std::string_view{"p_orb_min"},
-        std::string_view{"m_c_max"},
-        std::string_view{"m_p_min"},
-        std::string_view{"propagator_significance"},
-        std::string_view{"validation_significance"},
-        std::string_view{"use_conservative_tile"},
+    return {
+        // [input]
+        field<Cfg>("input", "timeseries",
+                   [](auto& c) -> auto& { return c.timeseries_path; }),
+        field<Cfg>("input", "nsamps",
+                   [](auto& c) -> auto& { return c.nsamps; }),
+        field<Cfg>("input", "tsamp", [](auto& c) -> auto& { return c.tsamp; }),
+        // Alias of tsamp, read only when tsamp is not set.
+        custom<Cfg>(
+            "input", "dt",
+            [](const toml::table& t, const std::string& path, Cfg& c) {
+                if (!c.tsamp) {
+                    c.tsamp = read_number(t, "dt", path);
+                }
+            },
+            [](const Cfg& /*c*/, toml::table& /*t*/) {}),
+        field<Cfg>("input", "dm",
+                   [](auto& c) -> auto& { return c.observation.dm; }),
+        field<Cfg>("input", "start_mjd",
+                   [](auto& c) -> auto& { return c.observation.start_mjd; }),
+        field<Cfg>("input", "barycentric",
+                   [](auto& c) -> auto& { return c.observation.barycentric; }),
+        // [preprocessing]
+        field<Cfg>("preprocessing", "preprocess",
+                   [](auto& c) -> auto& { return c.preprocess; }),
+        choice<Cfg>(
+            "preprocessing", "method",
+            [](auto& c) -> auto& { return c.preprocessing.method; }, kMethods),
+        choice<Cfg>(
+            "preprocessing", "gain_model",
+            [](auto& c) -> auto& { return c.preprocessing.gain_model; },
+            kGainModels),
+        field<Cfg>(
+            "preprocessing", "filter_window",
+            [](auto& c) -> auto& { return c.preprocessing.filter_window; }),
+        field<Cfg>("preprocessing", "min_window_periods",
+                   [](auto& c) -> auto& { return c.min_window_periods; }),
+        field<Cfg>(
+            "preprocessing", "variance_window",
+            [](auto& c) -> auto& { return c.preprocessing.variance_window; }),
+        field<Cfg>(
+            "preprocessing", "window_blocks",
+            [](auto& c) -> auto& { return c.preprocessing.window_blocks; }),
+        field<Cfg>(
+            "preprocessing", "fast_median",
+            [](auto& c) -> auto& { return c.preprocessing.fast_median; }),
+        field<Cfg>("preprocessing", "fast_median_min_points",
+                   [](auto& c) -> auto& {
+                       return c.preprocessing.fast_median_min_points;
+                   }),
+        field<Cfg>("preprocessing", "n_iter",
+                   [](auto& c) -> auto& { return c.preprocessing.n_iter; }),
+        field<Cfg>(
+            "preprocessing", "block_scales",
+            [](auto& c) -> auto& { return c.preprocessing.block_scales; }),
+        field<Cfg>(
+            "preprocessing", "block_sigma",
+            [](auto& c) -> auto& { return c.preprocessing.block_sigma; }),
+        field<Cfg>(
+            "preprocessing", "min_good_fraction",
+            [](auto& c) -> auto& { return c.preprocessing.min_good_fraction; }),
+        field<Cfg>("preprocessing", "clip_sigma",
+                   [](auto& c) -> auto& { return c.preprocessing.clip_sigma; }),
+        field<Cfg>(
+            "preprocessing", "zap_periodic",
+            [](auto& c) -> auto& { return c.preprocessing.zap_periodic; }),
+        field<Cfg>("preprocessing", "zap_sigma",
+                   [](auto& c) -> auto& { return c.preprocessing.zap_sigma; }),
+        field<Cfg>(
+            "preprocessing", "zap_whiten_bins",
+            [](auto& c) -> auto& { return c.preprocessing.zap_whiten_bins; }),
+        custom<Cfg>(
+            "preprocessing", "birdies",
+            [](const toml::table& t, const std::string& path, Cfg& c) {
+                const auto* arr = t["birdies"].as_array();
+                if (arr == nullptr) {
+                    throw std::invalid_argument(std::format(
+                        "{} must be an array of [freq_hz, width_hz]", path));
+                }
+                auto& birdies = c.preprocessing.birdies;
+                birdies.clear();
+                for (const auto& el : *arr) {
+                    const auto* pair = el.as_array();
+                    if (pair == nullptr || pair->size() != 2) {
+                        throw std::invalid_argument(std::format(
+                            "{} entries must be [freq_hz, width_hz]", path));
+                    }
+                    birdies.push_back(io::Birdie{
+                        .freq  = array_number((*pair)[0], path),
+                        .width = array_number((*pair)[1], path),
+                    });
+                }
+            },
+            [](const Cfg& c, toml::table& t) {
+                toml::array birdies;
+                for (const auto& birdie : c.preprocessing.birdies) {
+                    birdies.push_back(toml::array{birdie.freq, birdie.width});
+                }
+                t.insert("birdies", std::move(birdies));
+            }),
+        // [search]
+        field<Cfg>("search", "f_min", [](auto& c) -> auto& { return c.f_min; }),
+        field<Cfg>("search", "f_max", [](auto& c) -> auto& { return c.f_max; }),
+        field<Cfg>("search", "acc_min",
+                   [](auto& c) -> auto& { return c.acc_min; }),
+        field<Cfg>("search", "acc_max",
+                   [](auto& c) -> auto& { return c.acc_max; }),
+        field<Cfg>("search", "jerk_min",
+                   [](auto& c) -> auto& { return c.jerk_min; }),
+        field<Cfg>("search", "jerk_max",
+                   [](auto& c) -> auto& { return c.jerk_max; }),
+        toml_utils::sub_table<Cfg>(
+            "search", "orbit", [](auto& c) -> auto& { return c.orbit; },
+            orbit_schema()),
+        field<Cfg>("search", "nbins", [](auto& c) -> auto& { return c.nbins; }),
+        field<Cfg>("search", "eta", [](auto& c) -> auto& { return c.eta; }),
+        field<Cfg>("search", "ducy_max",
+                   [](auto& c) -> auto& { return c.ducy_max; }),
+        field<Cfg>("search", "wtsp", [](auto& c) -> auto& { return c.wtsp; }),
+        field<Cfg>("search", "snr_min",
+                   [](auto& c) -> auto& { return c.snr_min; }),
+        field<Cfg>("search", "use_fourier",
+                   [](auto& c) -> auto& { return c.use_fourier; }),
+        field<Cfg>("search", "use_boxcar_kadane",
+                   [](auto& c) -> auto& { return c.use_boxcar_kadane; }),
+        // [performance]
+        field<Cfg>("performance", "nthreads",
+                   [](auto& c) -> auto& { return c.nthreads; }),
+        custom<Cfg>(
+            "performance", "backend",
+            [](const toml::table& t, const std::string& path, Cfg& c) {
+                c.backend = parse_backend(*read_string(t, "backend", path));
+            },
+            [](const Cfg& c, toml::table& t) {
+                t.insert("backend", std::string(to_string(c.backend)));
+            }),
+        field<Cfg>("performance", "device",
+                   [](auto& c) -> auto& { return c.device; }),
+        field<Cfg>("performance", "max_process_memory_gb",
+                   [](auto& c) -> auto& { return c.max_process_memory_gb; }),
+        field<Cfg>("performance", "octave_scale",
+                   [](auto& c) -> auto& { return c.octave_scale; }),
+        field<Cfg>("performance", "nbins_max",
+                   [](auto& c) -> auto& { return c.nbins_max; }),
+        field<Cfg>("performance", "nbins_min_lossy_bf",
+                   [](auto& c) -> auto& { return c.nbins_min_lossy_bf; }),
+        field<Cfg>("performance", "bseg_brute",
+                   [](auto& c) -> auto& { return c.bseg_brute; }),
+        field<Cfg>("performance", "bseg_ffa",
+                   [](auto& c) -> auto& { return c.bseg_ffa; }),
+        field<Cfg>("performance", "max_passing_candidates",
+                   [](auto& c) -> auto& { return c.max_passing_candidates; }),
+        // [output]
+        field<Cfg>("output", "outdir",
+                   [](auto& c) -> auto& { return c.outdir; }),
+        field<Cfg>("output", "prefix",
+                   [](auto& c) -> auto& { return c.prefix; }),
+        // [candidates]
+        field<Cfg>("candidates", "enabled",
+                   [](auto& c) -> auto& { return c.candidates.enabled; }),
+        field<Cfg>("candidates", "cluster",
+                   [](auto& c) -> auto& { return c.candidates.cluster; }),
+        field<Cfg>("candidates", "grouping",
+                   [](auto& c) -> auto& { return c.candidates.grouping; }),
+        field<Cfg>("candidates", "radius",
+                   [](auto& c) -> auto& { return c.candidates.radius; }),
+        field<Cfg>("candidates", "phase_radius",
+                   [](auto& c) -> auto& { return c.candidates.phase_radius; }),
+        field<Cfg>(
+            "candidates", "retain_detections",
+            [](auto& c) -> auto& { return c.candidates.retain_detections; }),
+        field<Cfg>(
+            "candidates", "flag_harmonics",
+            [](auto& c) -> auto& { return c.candidates.flag_harmonics; }),
+        field<Cfg>(
+            "candidates", "remove_harmonics",
+            [](auto& c) -> auto& { return c.candidates.remove_harmonics; }),
+        field<Cfg>("candidates", "harmonic_denominator_max",
+                   [](auto& c) -> auto& {
+                       return c.candidates.harmonic_denominator_max;
+                   }),
+        field<Cfg>("candidates", "harmonic_phase_distance",
+                   [](auto& c) -> auto& {
+                       return c.candidates.harmonic_phase_distance;
+                   }),
+        field<Cfg>("candidates", "harmonic_snr_distance",
+                   [](auto& c) -> auto& {
+                       return c.candidates.harmonic_snr_distance;
+                   }),
+        field<Cfg>(
+            "candidates", "max_candidates",
+            [](auto& c) -> auto& { return c.candidates.max_candidates; }),
+        field<Cfg>("candidates", "memory_gb",
+                   [](auto& c) -> auto& { return c.candidates.memory_gb; }),
+        field<Cfg>(
+            "candidates", "temporary_directory",
+            [](auto& c) -> auto& { return c.candidates.temporary_directory; }),
     };
-    static constexpr std::array kInputKeys{
-        std::string_view{"timeseries"},  std::string_view{"nsamps"},
-        std::string_view{"tsamp"},       std::string_view{"dt"},
-        std::string_view{"dm"},          std::string_view{"start_mjd"},
-        std::string_view{"barycentric"},
-    };
-    static constexpr std::array kPreprocessingKeys{
-        std::string_view{"preprocess"},
-        std::string_view{"method"},
-        std::string_view{"gain_model"},
-        std::string_view{"filter_window"},
-        std::string_view{"min_window_periods"},
-        std::string_view{"variance_window"},
-        std::string_view{"window_blocks"},
-        std::string_view{"fast_median"},
-        std::string_view{"fast_median_min_points"},
-        std::string_view{"n_iter"},
-        std::string_view{"block_scales"},
-        std::string_view{"block_sigma"},
-        std::string_view{"min_good_fraction"},
-        std::string_view{"clip_sigma"},
-        std::string_view{"zap_periodic"},
-        std::string_view{"zap_sigma"},
-        std::string_view{"zap_whiten_bins"},
-        std::string_view{"birdies"},
-    };
-    static constexpr std::array kSearchKeys{
-        std::string_view{"f_min"},       std::string_view{"f_max"},
-        std::string_view{"acc_min"},     std::string_view{"acc_max"},
-        std::string_view{"jerk_min"},    std::string_view{"jerk_max"},
-        std::string_view{"orbit"},       std::string_view{"nbins"},
-        std::string_view{"eta"},         std::string_view{"ducy_max"},
-        std::string_view{"wtsp"},        std::string_view{"snr_min"},
-        std::string_view{"use_fourier"}, std::string_view{"use_boxcar_kadane"},
-    };
-    static constexpr std::array kPerformanceKeys{
-        std::string_view{"nthreads"},
-        std::string_view{"backend"},
-        std::string_view{"device"},
-        std::string_view{"max_process_memory_gb"},
-        std::string_view{"octave_scale"},
-        std::string_view{"nbins_max"},
-        std::string_view{"nbins_min_lossy_bf"},
-        std::string_view{"bseg_brute"},
-        std::string_view{"bseg_ffa"},
-        std::string_view{"max_passing_candidates"},
-    };
-    static constexpr std::array kOutputKeys{
-        std::string_view{"outdir"},
-        std::string_view{"prefix"},
-    };
-    static constexpr std::array kOutputKeysEP{
-        std::string_view{"outdir"},
-        std::string_view{"prefix"},
-        std::string_view{"plan_cache"},
-        std::string_view{"use_plan_cache"},
-    };
-    const std::span<const std::string_view> top_level =
-        allow_ep ? std::span<const std::string_view>(kTopLevelEP)
-                 : std::span<const std::string_view>(kTopLevel);
-    const std::span<const std::string_view> output_keys =
-        allow_ep ? std::span<const std::string_view>(kOutputKeysEP)
-                 : std::span<const std::string_view>(kOutputKeys);
+}
 
-    static constexpr std::array kCandidateKeys{
-        std::string_view{"enabled"},
-        std::string_view{"cluster"},
-        std::string_view{"grouping"},
-        std::string_view{"radius"},
-        std::string_view{"phase_radius"},
-        std::string_view{"retain_detections"},
-        std::string_view{"flag_harmonics"},
-        std::string_view{"remove_harmonics"},
-        std::string_view{"harmonic_denominator_max"},
-        std::string_view{"harmonic_phase_distance"},
-        std::string_view{"harmonic_snr_distance"},
-        std::string_view{"max_candidates"},
-        std::string_view{"memory_gb"},
-        std::string_view{"temporary_directory"},
-    };
+const toml_utils::Schema<FFATomlConfig>& ffa_schema() {
+    static const auto schema = ffa_fields<FFATomlConfig>();
+    return schema;
+}
 
-    std::vector<std::string> errors;
-    if (const auto* candidates = root["candidates"].as_table()) {
-        collect_unknown_keys(*candidates, kCandidateKeys, "candidates", errors);
-    } else if (root.contains("candidates")) {
-        errors.emplace_back("candidates must be a table");
-    }
-    for (const auto& [key, _] : root) {
-        if (!is_allowed_key(key.str(), top_level)) {
-            const auto hint = removed_key_hint(key.str());
-            errors.push_back(
-                hint.empty()
-                    ? std::format("unknown top-level key '{}'", key.str())
-                    : std::format("{}: {}", key.str(), hint));
-        }
-    }
-    if (const auto* input = root["input"].as_table()) {
-        collect_unknown_keys(*input, kInputKeys, "input", errors);
-    }
-    if (const auto* pre = root["preprocessing"].as_table()) {
-        collect_unknown_keys(*pre, kPreprocessingKeys, "preprocessing", errors);
-    }
-    if (const auto* search = root["search"].as_table()) {
-        collect_unknown_keys(*search, kSearchKeys, "search", errors);
-        if (const auto* orbit = (*search)["orbit"].node()) {
-            static constexpr std::array kOrbitKeys{
-                std::string_view{"order"},
-                std::string_view{"p_orb_min"},
-                std::string_view{"p_orb_min_tobs"},
-                std::string_view{"m_c_max"},
-                std::string_view{"m_p_min"},
-            };
-            if (const auto* table = orbit->as_table()) {
-                collect_unknown_keys(*table, kOrbitKeys, "search.orbit",
-                                     errors);
-            } else {
-                errors.emplace_back("search.orbit: must be a table");
+/// The FFA keys and the [ep] table, with the plan cache in [output].
+const toml_utils::Schema<EPTomlConfig>& ep_schema() {
+    using toml_utils::field;
+    using E = EPTomlConfig;
+    // An orbit prior of [ep] is not written when [search.orbit] sets it.
+    const auto orbit_prior = [](toml_utils::Field<E> f) {
+        f.write = [write = std::move(f.write)](const E& c, toml::table& t) {
+            if (!c.orbit) {
+                write(c, t);
             }
-        }
-    }
-    if (const auto* perf = root["performance"].as_table()) {
-        collect_unknown_keys(*perf, kPerformanceKeys, "performance", errors);
-    }
-    if (const auto* output = root["output"].as_table()) {
-        collect_unknown_keys(*output, output_keys, "output", errors);
-    }
-    if (allow_ep) {
-        if (const auto* ep = root["ep"].as_table()) {
-            collect_unknown_keys(*ep, kEPKeys, "ep", errors);
-        }
-    }
-    if (!errors.empty()) {
-        std::string message = errors.front();
-        for (std::size_t i = 1; i < errors.size(); ++i) {
-            message += "; ";
-            message += errors[i];
-        }
-        throw std::invalid_argument(
-            std::format("Invalid {} TOML config: {}", label, message));
-    }
-}
-
-[[nodiscard]] int64_t require_non_negative_int64(int64_t value,
-                                                 std::string_view path) {
-    if (value < 0) {
-        throw std::invalid_argument(
-            std::format("{} must be non-negative (got {})", path, value));
-    }
-    return value;
-}
-
-/// True when the float at @p pos of @p text is written `nan` or `inf` (with
-/// an optional sign). toml++ positions are 1-based and count code points.
-[[nodiscard]] bool is_nonfinite_literal(std::string_view text,
-                                        const toml::source_position& pos) {
-    std::size_t i = text.starts_with("\xEF\xBB\xBF") ? 3 : 0; // BOM
-    for (toml::source_index line = 1; line < pos.line; ++line) {
-        i = text.find('\n', i);
-        if (i == std::string_view::npos) {
-            return false;
-        }
-        ++i;
-    }
-    for (toml::source_index col = 1;
-         col < pos.column && i < text.size() && text[i] != '\n'; ++col) {
-        ++i; // one code point: skip its UTF-8 continuation bytes
-        while (i < text.size() &&
-               (static_cast<unsigned char>(text[i]) & 0xC0U) == 0x80U) {
-            ++i;
-        }
-    }
-    if (i < text.size() && (text[i] == '+' || text[i] == '-')) {
-        ++i;
-    }
-    const auto token = text.substr(std::min(i, text.size()));
-    return token.starts_with("nan") || token.starts_with("inf");
-}
-
-/// No config value may be non-finite. TOML allows the float literals `nan`
-/// and `inf`, and toml++ builds them from quiet_NaN() and infinity(); under
-/// -ffast-math (Release) those are poison, so the parsed value is garbage and
-/// no check on it can catch them. They are rejected by their source text.
-void reject_nonfinite_floats(const toml::node& node,
-                             std::string_view text,
-                             const std::string& path) {
-    if (const auto* tbl = node.as_table()) {
-        for (const auto& [key, child] : *tbl) {
-            reject_nonfinite_floats(
-                child, text,
-                path.empty() ? std::string(key.str())
-                             : std::format("{}.{}", path, key.str()));
-        }
-    } else if (const auto* arr = node.as_array()) {
-        for (std::size_t j = 0; j < arr->size(); ++j) {
-            reject_nonfinite_floats((*arr)[j], text,
-                                    std::format("{}[{}]", path, j));
-        }
-    } else if (node.is_floating_point() &&
-               is_nonfinite_literal(text, node.source().begin)) {
-        throw std::invalid_argument(
-            std::format("{} must be finite (got nan or inf)", path));
-    }
-}
-
-[[nodiscard]] std::optional<double> read_number(const toml::table& table,
-                                                std::string_view key,
-                                                std::string_view path) {
-    const auto node = table[key];
-    if (!node) {
-        return std::nullopt;
-    }
-    if (const auto val = node.value<double>()) {
-        return *val;
-    }
-    if (const auto ival = node.value<int64_t>()) {
-        return static_cast<double>(*ival);
-    }
-    throw std::invalid_argument(std::format("{} must be a number", path));
-}
-
-void require_positive(double value, std::string_view path) {
-    if (!utils::is_finite(value) || value <= 0.0) {
-        throw std::invalid_argument(
-            std::format("{} must be a positive number (got {})", path, value));
-    }
-}
-
-[[nodiscard]] std::optional<bool> read_bool(const toml::table& table,
-                                            std::string_view key,
-                                            std::string_view path) {
-    const auto node = table[key];
-    if (!node) {
-        return std::nullopt;
-    }
-    if (!node.is_boolean()) {
-        throw std::invalid_argument(std::format("{} must be a boolean", path));
-    }
-    return *node.value<bool>();
-}
-
-[[nodiscard]] std::optional<SizeType> read_count(const toml::table& table,
-                                                 std::string_view key,
-                                                 std::string_view path) {
-    const auto node = table[key];
-    if (!node) {
-        return std::nullopt;
-    }
-    if (!node.is_integer()) {
-        throw std::invalid_argument(std::format("{} must be an integer", path));
-    }
-    return static_cast<SizeType>(
-        require_non_negative_int64(*node.value<int64_t>(), path));
-}
-
-[[nodiscard]] double array_number(const toml::node& node,
-                                  std::string_view path) {
-    if (const auto val = node.value<double>()) {
-        return *val;
-    }
-    throw std::invalid_argument(std::format("{} must hold numbers", path));
-}
-
-/// Reads [preprocessing] into @p cfg and validates it.
-void read_preprocessing_table(const toml::table& pre, FFATomlConfig& cfg) {
-    auto& o = cfg.preprocessing;
-    if (const auto v =
-            read_bool(pre, "preprocess", "preprocessing.preprocess")) {
-        cfg.preprocess = *v;
-    }
-    if (const auto node = pre["method"]) {
-        const auto v = node.value<std::string>();
-        if (v == "robust") {
-            o.method = io::PreprocessMethod::kRobust;
-        } else if (v == "zscore") {
-            o.method = io::PreprocessMethod::kZScore;
-        } else {
-            throw std::invalid_argument(
-                "preprocessing.method must be \"robust\" or \"zscore\"");
-        }
-    }
-    if (const auto node = pre["gain_model"]) {
-        const auto v = node.value<std::string>();
-        if (v == "additive") {
-            o.gain_model = io::GainModel::kAdditive;
-        } else if (v == "multiplicative") {
-            o.gain_model = io::GainModel::kMultiplicative;
-        } else {
-            throw std::invalid_argument("preprocessing.gain_model must be "
-                                        "\"additive\" or \"multiplicative\"");
-        }
-    }
-    const auto number = [&](std::string_view key, double& out) {
-        const auto path = std::format("preprocessing.{}", key);
-        if (const auto v = read_number(pre, key, path)) {
-            out = *v;
-        }
+        };
+        return f;
     };
-    const auto count = [&](std::string_view key, SizeType& out) {
-        const auto path = std::format("preprocessing.{}", key);
-        if (const auto v = read_count(pre, key, path)) {
-            out = *v;
-        }
-    };
-    const auto flag = [&](std::string_view key, bool& out) {
-        const auto path = std::format("preprocessing.{}", key);
-        if (const auto v = read_bool(pre, key, path)) {
-            out = *v;
-        }
-    };
-    number("filter_window", o.filter_window);
-    number("min_window_periods", cfg.min_window_periods);
-    number("variance_window", o.variance_window);
-    count("window_blocks", o.window_blocks);
-    flag("fast_median", o.fast_median);
-    count("fast_median_min_points", o.fast_median_min_points);
-    count("n_iter", o.n_iter);
-    number("block_sigma", o.block_sigma);
-    number("min_good_fraction", o.min_good_fraction);
-    number("clip_sigma", o.clip_sigma);
-    flag("zap_periodic", o.zap_periodic);
-    number("zap_sigma", o.zap_sigma);
-    count("zap_whiten_bins", o.zap_whiten_bins);
-    if (const auto node = pre["block_scales"]) {
-        const auto* arr = node.as_array();
-        if (arr == nullptr) {
-            throw std::invalid_argument(
-                "preprocessing.block_scales must be an array of seconds");
-        }
-        o.block_scales.clear();
-        for (const auto& el : *arr) {
-            o.block_scales.push_back(
-                array_number(el, "preprocessing.block_scales"));
-        }
-    }
-    if (const auto node = pre["birdies"]) {
-        const auto* arr = node.as_array();
-        if (arr == nullptr) {
-            throw std::invalid_argument("preprocessing.birdies must be an "
-                                        "array of [freq_hz, width_hz]");
-        }
-        o.birdies.clear();
-        for (const auto& el : *arr) {
-            const auto* pair = el.as_array();
-            if (pair == nullptr || pair->size() != 2) {
-                throw std::invalid_argument("preprocessing.birdies entries "
-                                            "must be [freq_hz, width_hz]");
-            }
-            o.birdies.push_back(io::Birdie{
-                .freq  = array_number((*pair)[0], "preprocessing.birdies"),
-                .width = array_number((*pair)[1], "preprocessing.birdies"),
-            });
-        }
-    }
+    static const auto schema = [&] {
+        auto fields = ffa_fields<E>();
+        const std::array extra{
+            field<E>("ep", "target_snr",
+                     [](auto& c) -> auto& { return c.target_snr; }),
+            field<E>("ep", "poly_basis",
+                     [](auto& c) -> auto& { return c.poly_basis; }),
+            field<E>("ep", "min_pd", [](auto& c) -> auto& { return c.min_pd; }),
+            field<E>("ep", "ref_ducy",
+                     [](auto& c) -> auto& { return c.ref_ducy; }),
+            field<E>("ep", "prune_poly_order",
+                     [](auto& c) -> auto& { return c.prune_poly_order; }),
+            field<E>("ep", "n_runs", [](auto& c) -> auto& { return c.n_runs; }),
+            field<E>("ep", "ref_segs",
+                     [](auto& c) -> auto& { return c.ref_segs; }),
+            orbit_prior(field<E>("ep", "p_orb_min",
+                                 [](auto& c) -> auto& { return c.p_orb_min; })),
+            orbit_prior(field<E>("ep", "m_c_max",
+                                 [](auto& c) -> auto& { return c.m_c_max; })),
+            orbit_prior(field<E>("ep", "m_p_min",
+                                 [](auto& c) -> auto& { return c.m_p_min; })),
+            field<E>(
+                "ep", "propagator_significance",
+                [](auto& c) -> auto& { return c.propagator_significance; }),
+            field<E>(
+                "ep", "validation_significance",
+                [](auto& c) -> auto& { return c.validation_significance; }),
+            field<E>("ep", "use_conservative_tile",
+                     [](auto& c) -> auto& { return c.use_conservative_tile; }),
+            field<E>("output", "plan_cache",
+                     [](auto& c) -> auto& { return c.plan_cache; }),
+            field<E>("output", "use_plan_cache",
+                     [](auto& c) -> auto& { return c.use_plan_cache; }),
+        };
+        fields.insert(fields.end(), extra.begin(), extra.end());
+        return fields;
+    }();
+    return schema;
+}
+
+/// Checks of an FFA config that span several keys or need the whole
+/// [preprocessing] table.
+void check_ffa_fields(const FFATomlConfig& cfg) {
     if (!utils::is_finite(cfg.min_window_periods) ||
         cfg.min_window_periods < 0.0) {
         throw std::invalid_argument(
             "preprocessing.min_window_periods must be >= 0");
     }
     try {
-        o.validate();
+        cfg.preprocessing.validate();
     } catch (const std::invalid_argument& err) {
         throw std::invalid_argument(
             std::format("Invalid [preprocessing] table: {}", err.what()));
+    }
+    if (cfg.candidates.harmonic_denominator_max > 10000) {
+        throw std::invalid_argument(
+            "candidates.harmonic_denominator_max must be at most 10000");
+    }
+    cfg.candidates.validate();
+    cfg.observation.validate();
+}
+
+void require_positive(double value, std::string_view path) {
+    if (!utils::is_finite(value) || value <= 0.0) {
+        throw std::invalid_argument(
+            std::format("{} must be a positive number (got {})", path, value));
     }
 }
 
@@ -495,6 +412,17 @@ std::string_view FFATomlConfig::default_toml_string() {
 [input]
 # Path to input timeseries (.tim or .dat format)
 timeseries = "input.tim"
+
+# Sample count and sample interval, for a config used without data (e.g.
+# FFASearchConfig.from_toml). A search takes them from the timeseries.
+# nsamps = 2097152
+# tsamp = 0.0000640
+
+# Observation metadata stored with the candidates; each overrides the
+# timeseries header (or --dm, --start-mjd, --barycentric on the command line).
+# dm = 0.0              # dispersion measure, pc cm^-3
+# start_mjd = 60000.0   # MJD of the first sample
+# barycentric = false   # true: barycentric, false: topocentric sample times
 
 [preprocessing]
 # Build the folding inputs from the raw timeseries (see docs/preprocessing.md)
@@ -588,6 +516,7 @@ use_boxcar_kadane = false
 # [search.orbit]
 # order = "jerk"          # "accel" | "jerk" | "snap" | "crackle" (EP only)
 # p_orb_min_tobs = 5.0
+# p_orb_min = 100.0      # seconds, instead of p_orb_min_tobs
 # m_c_max = 10.0          # companion mass, M_sun
 # m_p_min = 1.2           # pulsar mass, M_sun
 
@@ -615,6 +544,10 @@ backend = "cpu"
 
 # GPU device ordinal, used when backend = "cuda"
 device = 0
+
+# Segment lengths in samples, powers of 2 (default: chosen by the planner)
+# bseg_brute = 1024     # brute-force fold segment
+# bseg_ffa = 2097152    # FFA segment (default: nsamps)
 
 [output]
 # Directory where candidate HDF5 file will be saved
@@ -660,352 +593,42 @@ void FFATomlConfig::write_default(const std::filesystem::path& path) {
 
 namespace {
 
-/// Reads the FFA tables ([input], [search], [performance], [output]) of a
-/// document that has already been validated.
-FFATomlConfig read_ffa_tables(const toml::table& tbl) {
-    FFATomlConfig cfg;
-
-    // [input] table
-    if (const auto* input = tbl["input"].as_table()) {
-        if (auto val = (*input)["timeseries"].value<std::string>()) {
-            cfg.timeseries_path = *val;
-        }
-        if (auto val = (*input)["nsamps"].value<int64_t>()) {
-            cfg.nsamps = static_cast<SizeType>(
-                require_non_negative_int64(*val, "input.nsamps"));
-        }
-        if (const auto val = (*input)["tsamp"].value<double>()) {
-            cfg.tsamp = val;
-        } else if (const auto val_dt = (*input)["dt"].value<double>()) {
-            cfg.tsamp = val_dt;
-        }
+[[nodiscard]] std::vector<std::string>
+with_orbit_keys(std::vector<std::string> keys) {
+    for (const auto& f : orbit_schema()) {
+        keys.push_back(std::format("search.orbit.{}", f.key));
     }
-
-    if (const auto* input = tbl["input"].as_table()) {
-        for (const auto* key : {"dm", "start_mjd"}) {
-            if (input->contains(key)) {
-                const auto value = (*input)[key].value<double>();
-                if (!value) {
-                    throw std::invalid_argument(std::string("input.") + key +
-                                                ": expected number");
-                }
-                if (std::string_view(key) == "dm") {
-                    cfg.observation.dm = *value;
-                } else {
-                    cfg.observation.start_mjd = *value;
-                }
-            }
-        }
-        if (input->contains("barycentric")) {
-            const auto value = (*input)["barycentric"].value_exact<bool>();
-            if (!value) {
-                throw std::invalid_argument(
-                    "input.barycentric: expected boolean");
-            }
-            cfg.observation.barycentric = *value;
-        }
-    }
-
-    if (const auto* pre = tbl["preprocessing"].as_table()) {
-        read_preprocessing_table(*pre, cfg);
-    }
-
-    // [search] table
-    if (const auto* search = tbl["search"].as_table()) {
-        if (auto val = (*search)["f_min"].value<double>()) {
-            cfg.f_min = *val;
-        }
-        if (auto val = (*search)["f_max"].value<double>()) {
-            cfg.f_max = *val;
-        }
-        if (const auto val = (*search)["acc_min"].value<double>()) {
-            cfg.acc_min = val;
-        }
-        if (const auto val = (*search)["acc_max"].value<double>()) {
-            cfg.acc_max = val;
-        }
-        if (const auto val = (*search)["jerk_min"].value<double>()) {
-            cfg.jerk_min = val;
-        }
-        if (const auto val = (*search)["jerk_max"].value<double>()) {
-            cfg.jerk_max = val;
-        }
-        if (const auto* orbit = (*search)["orbit"].as_table()) {
-            FFATomlConfig::OrbitLimits o;
-            const auto require_double = [&](std::string_view key) {
-                const auto node = (*orbit)[key];
-                if (!node) {
-                    return std::optional<double>{};
-                }
-                const auto val = node.value<double>();
-                if (!val) {
-                    throw std::invalid_argument(
-                        std::format("search.orbit.{} must be a number", key));
-                }
-                return val;
-            };
-            if (const auto order = (*orbit)["order"].value<std::string>()) {
-                o.order = *order;
-            } else {
-                throw std::invalid_argument(
-                    "search.orbit.order must be set: \"accel\", \"jerk\", "
-                    "\"snap\" or \"crackle\"");
-            }
-            o.p_orb_min      = require_double("p_orb_min");
-            o.p_orb_min_tobs = require_double("p_orb_min_tobs");
-            if (const auto val = require_double("m_c_max")) {
-                o.m_c_max = *val;
-            }
-            if (const auto val = require_double("m_p_min")) {
-                o.m_p_min = *val;
-            }
-            cfg.orbit = std::move(o);
-        }
-        if (auto val = (*search)["nbins"].value<int64_t>()) {
-            cfg.nbins = static_cast<SizeType>(
-                require_non_negative_int64(*val, "search.nbins"));
-        }
-        if (auto val = (*search)["eta"].value<double>()) {
-            cfg.eta = *val;
-        }
-        if (auto val = (*search)["ducy_max"].value<double>()) {
-            cfg.ducy_max = *val;
-        }
-        if (auto val = (*search)["wtsp"].value<double>()) {
-            cfg.wtsp = *val;
-        }
-        if (auto val = (*search)["snr_min"].value<double>()) {
-            cfg.snr_min = *val;
-        }
-        if (auto val = (*search)["use_fourier"].value<bool>()) {
-            cfg.use_fourier = *val;
-        }
-        if (auto val = (*search)["use_boxcar_kadane"].value<bool>()) {
-            cfg.use_boxcar_kadane = *val;
-        }
-    }
-
-    // [performance] table
-    if (const auto* perf = tbl["performance"].as_table()) {
-        if (auto val = (*perf)["nthreads"].value<int64_t>()) {
-            cfg.nthreads = static_cast<int>(
-                require_non_negative_int64(*val, "performance.nthreads"));
-        }
-        if (auto val = (*perf)["max_process_memory_gb"].value<double>()) {
-            cfg.max_process_memory_gb = *val;
-        }
-        if (auto val = (*perf)["octave_scale"].value<double>()) {
-            cfg.octave_scale = *val;
-        }
-        if (auto val = (*perf)["nbins_max"].value<int64_t>()) {
-            cfg.nbins_max = static_cast<SizeType>(
-                require_non_negative_int64(*val, "performance.nbins_max"));
-        }
-        if (auto val = (*perf)["nbins_min_lossy_bf"].value<int64_t>()) {
-            cfg.nbins_min_lossy_bf =
-                static_cast<SizeType>(require_non_negative_int64(
-                    *val, "performance.nbins_min_lossy_bf"));
-        }
-        if (auto val = (*perf)["bseg_brute"].value<int64_t>()) {
-            cfg.bseg_brute = static_cast<SizeType>(
-                require_non_negative_int64(*val, "performance.bseg_brute"));
-        }
-        if (auto val = (*perf)["bseg_ffa"].value<int64_t>()) {
-            cfg.bseg_ffa = static_cast<SizeType>(
-                require_non_negative_int64(*val, "performance.bseg_ffa"));
-        }
-        if (auto val = (*perf)["max_passing_candidates"].value<int64_t>()) {
-            cfg.max_passing_candidates =
-                static_cast<SizeType>(require_non_negative_int64(
-                    *val, "performance.max_passing_candidates"));
-        }
-        if (auto val = (*perf)["backend"].value<std::string>()) {
-            cfg.backend = parse_backend(*val);
-        }
-        if (auto val = (*perf)["device"].value<int64_t>()) {
-            cfg.device = static_cast<int>(
-                require_non_negative_int64(*val, "performance.device"));
-        }
-    }
-
-    if (const auto* candidates = tbl["candidates"].as_table()) {
-        auto& options = cfg.candidates;
-        if (candidates->contains("enabled")) {
-            const auto value = (*candidates)["enabled"].value_exact<bool>();
-            if (!value) {
-                throw std::invalid_argument(
-                    "candidates.enabled: invalid value type");
-            }
-            options.enabled = *value;
-        }
-        if (candidates->contains("cluster")) {
-            const auto value = (*candidates)["cluster"].value_exact<bool>();
-            if (!value) {
-                throw std::invalid_argument(
-                    "candidates.cluster: invalid value type");
-            }
-            options.cluster = *value;
-        }
-        if (candidates->contains("grouping")) {
-            const auto value = (*candidates)["grouping"].value<std::string>();
-            if (!value) {
-                throw std::invalid_argument(
-                    "candidates.grouping: invalid value type");
-            }
-            options.grouping = *value;
-        }
-        if (candidates->contains("radius")) {
-            const auto value = (*candidates)["radius"].value<double>();
-            if (!value) {
-                throw std::invalid_argument(
-                    "candidates.radius: invalid value type");
-            }
-            options.radius = *value;
-        }
-        if (candidates->contains("phase_radius")) {
-            const auto value = (*candidates)["phase_radius"].value<double>();
-            if (!value) {
-                throw std::invalid_argument(
-                    "candidates.phase_radius: invalid value type");
-            }
-            options.phase_radius = *value;
-        }
-        if (candidates->contains("retain_detections")) {
-            const auto value =
-                (*candidates)["retain_detections"].value_exact<bool>();
-            if (!value) {
-                throw std::invalid_argument(
-                    "candidates.retain_detections: invalid value type");
-            }
-            options.retain_detections = *value;
-        }
-        if (candidates->contains("flag_harmonics")) {
-            const auto value =
-                (*candidates)["flag_harmonics"].value_exact<bool>();
-            if (!value) {
-                throw std::invalid_argument(
-                    "candidates.flag_harmonics: invalid value type");
-            }
-            options.flag_harmonics = *value;
-        }
-        if (candidates->contains("remove_harmonics")) {
-            const auto value =
-                (*candidates)["remove_harmonics"].value_exact<bool>();
-            if (!value) {
-                throw std::invalid_argument(
-                    "candidates.remove_harmonics: invalid value type");
-            }
-            options.remove_harmonics = *value;
-        }
-        if (candidates->contains("harmonic_denominator_max")) {
-            const auto value = (*candidates)["harmonic_denominator_max"]
-                                   .value_exact<int64_t>();
-            if (!value) {
-                throw std::invalid_argument(
-                    "candidates.harmonic_denominator_max: invalid value type");
-            }
-            const auto checked = require_non_negative_int64(
-                *value, "candidates.harmonic_denominator_max");
-            if (checked > 10000) {
-                throw std::invalid_argument(
-                    "harmonic denominator exceeds 10000");
-            }
-            options.harmonic_denominator_max =
-                static_cast<decltype(options.harmonic_denominator_max)>(
-                    checked);
-        }
-        if (candidates->contains("harmonic_phase_distance")) {
-            const auto value =
-                (*candidates)["harmonic_phase_distance"].value<double>();
-            if (!value) {
-                throw std::invalid_argument(
-                    "candidates.harmonic_phase_distance: invalid value type");
-            }
-            options.harmonic_phase_distance = *value;
-        }
-        if (candidates->contains("harmonic_snr_distance")) {
-            const auto value =
-                (*candidates)["harmonic_snr_distance"].value<double>();
-            if (!value) {
-                throw std::invalid_argument(
-                    "candidates.harmonic_snr_distance: invalid value type");
-            }
-            options.harmonic_snr_distance = *value;
-        }
-        if (candidates->contains("max_candidates")) {
-            const auto value =
-                (*candidates)["max_candidates"].value_exact<int64_t>();
-            if (!value) {
-                throw std::invalid_argument(
-                    "candidates.max_candidates: invalid value type");
-            }
-            const auto checked =
-                require_non_negative_int64(*value, "candidates.max_candidates");
-            options.max_candidates =
-                static_cast<decltype(options.max_candidates)>(checked);
-        }
-        if (candidates->contains("memory_gb")) {
-            const auto value = (*candidates)["memory_gb"].value<double>();
-            if (!value) {
-                throw std::invalid_argument(
-                    "candidates.memory_gb: invalid value type");
-            }
-            options.memory_gb = *value;
-        }
-        if (candidates->contains("temporary_directory")) {
-            const auto value =
-                (*candidates)["temporary_directory"].value<std::string>();
-            if (!value) {
-                throw std::invalid_argument(
-                    "candidates.temporary_directory: invalid value type");
-            }
-            options.temporary_directory = *value;
-        }
-    }
-    cfg.candidates.validate();
-    cfg.observation.validate();
-
-    // [output] table
-    if (const auto* output = tbl["output"].as_table()) {
-        if (auto val = (*output)["outdir"].value<std::string>()) {
-            cfg.outdir = *val;
-        }
-        if (auto val = (*output)["prefix"].value<std::string>()) {
-            cfg.prefix = *val;
-        }
-    }
-
-    return cfg;
+    return keys;
 }
 
 } // namespace
 
+std::vector<std::string> ffa_config_keys() {
+    return with_orbit_keys(toml_utils::schema_keys(ffa_schema()));
+}
+
+std::vector<std::string> ep_config_keys() {
+    return with_orbit_keys(toml_utils::schema_keys(ep_schema()));
+}
+
+std::string FFATomlConfig::to_toml_string() const {
+    return toml_utils::to_toml_text(
+        toml_utils::write_fields(ffa_schema(), *this), kTableOrder);
+}
+
 FFATomlConfig FFATomlConfig::from_string(std::string_view toml_content) {
-    try {
-        const toml::table tbl = toml::parse(toml_content);
-        reject_nonfinite_floats(tbl, toml_content, "");
-        validate_toml_document(tbl, /*allow_ep=*/false, "FFA");
-        return read_ffa_tables(tbl);
-    } catch (const toml::parse_error& err) {
-        throw std::runtime_error(std::format(
-            "TOML parse error at line {}, col {}: {}", err.source().begin.line,
-            err.source().begin.column, err.description()));
-    }
+    const toml::table tbl = toml_utils::parse(toml_content);
+    reject_nonfinite_floats(tbl, toml_content, "");
+    toml_utils::check_document(ffa_schema(), tbl, "Invalid FFA TOML config",
+                               removed_key_hint);
+    FFATomlConfig cfg;
+    toml_utils::read_fields(ffa_schema(), tbl, cfg);
+    check_ffa_fields(cfg);
+    return cfg;
 }
 
 FFATomlConfig FFATomlConfig::load(const std::filesystem::path& path) {
-    if (!std::filesystem::exists(path)) {
-        throw std::runtime_error(
-            std::format("Configuration file not found: '{}'", path.string()));
-    }
-    std::ifstream file(path);
-    if (!file.is_open()) {
-        throw std::runtime_error(std::format(
-            "Could not open configuration file: '{}'", path.string()));
-    }
-    const std::string content((std::istreambuf_iterator<char>(file)),
-                              std::istreambuf_iterator<char>());
-    return from_string(content);
+    return toml_utils::load_file(path, &FFATomlConfig::from_string);
 }
 
 io::PreprocessOptions FFATomlConfig::to_preprocess_options() const {
@@ -2131,85 +1754,6 @@ EPSearchConfig EPSearchConfig::get_updated_ep_config(SizeType nbins,
 
 namespace {
 
-/// A number that may be written as an integer. Absent keys give nullopt; a key
-/// of another type is an error, not a silent default.
-/// Reads the [ep] table and output.plan_cache of a validated document.
-void read_ep_tables(const toml::table& tbl, EPTomlConfig& cfg) {
-    if (const auto* ep = tbl["ep"].as_table()) {
-        if (const auto val = read_number(*ep, "target_snr", "ep.target_snr")) {
-            cfg.target_snr = *val;
-        }
-        if (auto val = (*ep)["poly_basis"].value<std::string>()) {
-            cfg.poly_basis = *val;
-        }
-        if (const auto val = read_number(*ep, "min_pd", "ep.min_pd")) {
-            cfg.min_pd = static_cast<float>(*val);
-        }
-        if (const auto val = read_number(*ep, "ref_ducy", "ep.ref_ducy")) {
-            cfg.ref_ducy = static_cast<float>(*val);
-        }
-        if (auto val = (*ep)["prune_poly_order"].value<int64_t>()) {
-            cfg.prune_poly_order = static_cast<SizeType>(
-                require_non_negative_int64(*val, "ep.prune_poly_order"));
-        }
-        if (auto val = (*ep)["n_runs"].value<int64_t>()) {
-            cfg.n_runs = static_cast<SizeType>(
-                require_non_negative_int64(*val, "ep.n_runs"));
-        }
-        if (const auto* segs = (*ep)["ref_segs"].as_array()) {
-            std::vector<SizeType> ref_segs;
-            ref_segs.reserve(segs->size());
-            for (const auto& elem : *segs) {
-                const auto seg = elem.value<int64_t>();
-                if (!seg) {
-                    throw std::invalid_argument(
-                        "ep.ref_segs must be an array of integers");
-                }
-                ref_segs.push_back(static_cast<SizeType>(
-                    require_non_negative_int64(*seg, "ep.ref_segs")));
-            }
-            cfg.ref_segs = std::move(ref_segs);
-        }
-        // [search.orbit] sets the orbit of the pruning too: one source.
-        if (cfg.orbit.has_value()) {
-            for (const auto key : {"p_orb_min", "m_c_max", "m_p_min"}) {
-                if ((*ep)[key]) {
-                    throw std::invalid_argument(std::format(
-                        "ep.{} is set by [search.orbit]: remove it", key));
-                }
-            }
-        }
-        if (const auto val = read_number(*ep, "p_orb_min", "ep.p_orb_min")) {
-            cfg.p_orb_min = *val;
-        }
-        if (const auto val = read_number(*ep, "m_c_max", "ep.m_c_max")) {
-            cfg.m_c_max = *val;
-        }
-        if (const auto val = read_number(*ep, "m_p_min", "ep.m_p_min")) {
-            cfg.m_p_min = *val;
-        }
-        if (const auto val = read_number(*ep, "propagator_significance",
-                                         "ep.propagator_significance")) {
-            cfg.propagator_significance = *val;
-        }
-        if (const auto val = read_number(*ep, "validation_significance",
-                                         "ep.validation_significance")) {
-            cfg.validation_significance = *val;
-        }
-        if (auto val = (*ep)["use_conservative_tile"].value<bool>()) {
-            cfg.use_conservative_tile = *val;
-        }
-    }
-    if (const auto* output = tbl["output"].as_table()) {
-        if (auto val = (*output)["use_plan_cache"].value<bool>()) {
-            cfg.use_plan_cache = *val;
-        }
-        if (auto val = (*output)["plan_cache"].value<std::string>()) {
-            cfg.plan_cache = std::filesystem::path(*val);
-        }
-    }
-}
-
 /// Range checks that the types cannot express. Used on parse and before a
 /// config is turned into a search config.
 void validate_ep_config(const EPTomlConfig& cfg) {
@@ -2282,6 +1826,12 @@ timeseries = "input.tim"
 # these are required there. A search takes them from the timeseries.
 nsamps = 2097152
 tsamp = 0.0000640
+
+# Observation metadata stored with the candidates; each overrides the
+# timeseries header (or --dm, --start-mjd, --barycentric on the command line).
+# dm = 0.0              # dispersion measure, pc cm^-3
+# start_mjd = 60000.0   # MJD of the first sample
+# barycentric = false   # true: barycentric, false: topocentric sample times
 
 [preprocessing]
 # Build the folding inputs from the raw timeseries (see docs/preprocessing.md)
@@ -2416,6 +1966,7 @@ use_conservative_tile = false
 # [search.orbit]
 # order = "jerk"          # "accel" | "jerk" | "snap" | "crackle" (EP only)
 # p_orb_min_tobs = 5.0
+# p_orb_min = 100.0      # seconds, instead of p_orb_min_tobs
 # m_c_max = 10.0          # companion mass, M_sun
 # m_p_min = 1.2           # pulsar mass, M_sun
 
@@ -2447,6 +1998,8 @@ device = 0
 # FFA segment length in samples: a power of 2 below nsamps, since the pruning
 # needs at least one FFA level. Use nsamps / 128 for a long series.
 bseg_ffa = 16384
+# Brute-force fold segment in samples, a power of 2 (default: the planner's)
+# bseg_brute = 1024
 
 [candidates]
 # Postprocess the merged final Taylor runs after all pruning has finished.
@@ -2460,6 +2013,9 @@ phase_radius = 0.05
 retain_detections = true
 flag_harmonics = false
 remove_harmonics = false
+harmonic_denominator_max = 100
+harmonic_phase_distance = 1.0
+harmonic_snr_distance = 3.0
 max_candidates = 0
 # Separate host candidate budget; reserved before CPU chunk planning.
 memory_gb = 1.0
@@ -2493,36 +2049,36 @@ void EPTomlConfig::write_default(const std::filesystem::path& path) {
     file << default_toml_string();
 }
 
+std::string EPTomlConfig::to_toml_string() const {
+    return toml_utils::to_toml_text(
+        toml_utils::write_fields(ep_schema(), *this), kTableOrder);
+}
+
 EPTomlConfig EPTomlConfig::from_string(std::string_view toml_content) {
-    try {
-        const toml::table tbl = toml::parse(toml_content);
-        reject_nonfinite_floats(tbl, toml_content, "");
-        validate_toml_document(tbl, /*allow_ep=*/true, "EP");
-        EPTomlConfig cfg;
-        static_cast<FFATomlConfig&>(cfg) = read_ffa_tables(tbl);
-        read_ep_tables(tbl, cfg);
-        validate_ep_config(cfg);
-        return cfg;
-    } catch (const toml::parse_error& err) {
-        throw std::runtime_error(std::format(
-            "TOML parse error at line {}, col {}: {}", err.source().begin.line,
-            err.source().begin.column, err.description()));
+    const toml::table tbl = toml_utils::parse(toml_content);
+    reject_nonfinite_floats(tbl, toml_content, "");
+    toml_utils::check_document(ep_schema(), tbl, "Invalid EP TOML config",
+                               removed_key_hint);
+    EPTomlConfig cfg;
+    toml_utils::read_fields(ep_schema(), tbl, cfg);
+    check_ffa_fields(cfg);
+    // [search.orbit] sets the orbit of the pruning too: one source.
+    if (cfg.orbit.has_value()) {
+        if (const auto* ep = tbl["ep"].as_table()) {
+            for (const auto key : {"p_orb_min", "m_c_max", "m_p_min"}) {
+                if (ep->contains(key)) {
+                    throw std::invalid_argument(std::format(
+                        "ep.{} is set by [search.orbit]: remove it", key));
+                }
+            }
+        }
     }
+    validate_ep_config(cfg);
+    return cfg;
 }
 
 EPTomlConfig EPTomlConfig::load(const std::filesystem::path& path) {
-    if (!std::filesystem::exists(path)) {
-        throw std::runtime_error(
-            std::format("Configuration file not found: '{}'", path.string()));
-    }
-    std::ifstream file(path);
-    if (!file.is_open()) {
-        throw std::runtime_error(std::format(
-            "Could not open configuration file: '{}'", path.string()));
-    }
-    const std::string content((std::istreambuf_iterator<char>(file)),
-                              std::istreambuf_iterator<char>());
-    return from_string(content);
+    return toml_utils::load_file(path, &EPTomlConfig::from_string);
 }
 
 EPSearchConfig
@@ -2542,7 +2098,10 @@ EPTomlConfig::to_ep_search_config(std::optional<SizeType> override_nsamps,
     auto ffa = to_search_config(override_nsamps, override_tsamp);
     if (ffa.get_nparams() < 2) {
         throw std::invalid_argument(
-            "frequency-only EP is unsupported; use FFA");
+            "frequency-only EP is unsupported: set a search range in "
+            "search.acc_min/acc_max (or --acc-min/--acc-max), or a "
+            "[search.orbit] table; use 'loki search ffa' for a frequency-only "
+            "search");
     }
     // The pruning needs at least one FFA level above the brute-force segment,
     // so the FFA segment must be shorter than the series.

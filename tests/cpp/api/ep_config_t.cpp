@@ -213,6 +213,12 @@ TEST_CASE("EPTomlConfig validates explicit reference segments",
     REQUIRE_THROWS_AS(loki::search::EPTomlConfig::from_string(
                           make_doc("ref_segs = [0, \"a\"]\n")),
                       std::invalid_argument);
+    REQUIRE_THROWS_AS(
+        loki::search::EPTomlConfig::from_string(make_doc("ref_segs = 1\n")),
+        std::invalid_argument);
+    REQUIRE_THROWS_AS(loki::search::EPTomlConfig::from_string(
+                          make_doc("ref_segs = [0, true]\n")),
+                      std::invalid_argument);
 
     const auto cfg =
         loki::search::EPTomlConfig::from_string("[input]\n"

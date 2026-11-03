@@ -407,22 +407,30 @@ private:
     std::unique_ptr<Impl> m_impl;
 };
 
+/// Monte Carlo of one fixed threshold per stage, as
+/// DynamicThresholdScheme::evaluate(). Unset `seed` draws a random one;
+/// deterministic per (seed, thresholds, ntrials).
 std::vector<State> evaluate_scheme(std::span<const float> thresholds,
                                    std::span<const float> branching_pattern,
                                    float ref_ducy,
-                                   SizeType nbins   = 64,
-                                   SizeType ntrials = 1024,
-                                   float snr_final  = 8.0F,
-                                   float ducy_max   = 0.3F,
-                                   float wtsp       = 1.0F);
+                                   SizeType nbins               = 64,
+                                   SizeType ntrials             = 1024,
+                                   float snr_final              = 8.0F,
+                                   float ducy_max               = 0.3F,
+                                   float wtsp                   = 1.0F,
+                                   std::optional<uint64_t> seed = std::nullopt);
 
-std::vector<State> determine_scheme(std::span<const float> survive_probs,
-                                    std::span<const float> branching_pattern,
-                                    float ref_ducy,
-                                    SizeType nbins   = 64,
-                                    SizeType ntrials = 1024,
-                                    float snr_final  = 8.0F,
-                                    float ducy_max   = 0.3F,
-                                    float wtsp       = 1.0F);
+/// The thresholds that keep a fraction `survive_probs` of the noise at each
+/// stage. Unset `seed` draws a random one; deterministic per (seed, inputs).
+std::vector<State>
+determine_scheme(std::span<const float> survive_probs,
+                 std::span<const float> branching_pattern,
+                 float ref_ducy,
+                 SizeType nbins               = 64,
+                 SizeType ntrials             = 1024,
+                 float snr_final              = 8.0F,
+                 float ducy_max               = 0.3F,
+                 float wtsp                   = 1.0F,
+                 std::optional<uint64_t> seed = std::nullopt);
 
 } // namespace loki::detection

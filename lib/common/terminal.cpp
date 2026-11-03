@@ -28,4 +28,11 @@ bool color_allowed() noexcept {
     return no_color == nullptr || no_color[0] == '\0';
 }
 
+bool color_forced() noexcept {
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): read only
+    const char* force = std::getenv("CLICOLOR_FORCE");
+    return force != nullptr && force[0] != '\0' &&
+           std::string_view(force) != "0";
+}
+
 } // namespace loki

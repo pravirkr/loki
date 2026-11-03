@@ -20,7 +20,6 @@ foreach(source_file IN LISTS LOKI_APPLICATION_SOURCES)
             ${LOKI_COMPILE_OPTIONS}
             $<BUILD_INTERFACE:fmt::fmt-header-only>
             $<BUILD_INTERFACE:spdlog::spdlog_header_only>
-            $<BUILD_INTERFACE:tomlplusplus>
             $<BUILD_INTERFACE:HighFive::HighFive>
   )
   target_compile_definitions(${TARGET_NAME} PRIVATE LOKI_VERSION="${PROJECT_VERSION}")

@@ -43,7 +43,9 @@ lib/
                               interrupt.cpp (Ctrl-C: InterruptGuard, checkpoints)
                               terminal.cpp (palette, TTY and NO_COLOR checks)
   core/                       kinematics and kernel interfaces shared by CPU and GPU code
-  detail/                     internal utilities: errors, math, timing, progress, psr_utils
+  detail/                     internal utilities: errors, math, timing, progress, psr_utils,
+                              toml_utils and toml_schema (the config
+                              schema, reader and writer)
   cpu/*_cpu.cpp               CPU engines and kernels (OpenMP, SIMD); CPU-only headers
   cuda/*_cuda.cu, *.cuh       GPU engines, kernels, device types and helpers
 src/
@@ -355,6 +357,51 @@ The facades do not change: they already dispatch on `kGPUBackend` through
   configuration and CLI entry points (`configs.cpp` FFA sweep setup,
   `applications/loki.cpp`) use `omp_get_max_threads()`, to resolve
   `nthreads <= 0` to "all threads".
+
+## Configuration files
+
+Configuration files are TOML, read with toml++ (header-only, fetched by CPM
+in `cmake/LokiDependencies.cmake`). This is a settled choice; do not add a
+second format. TOML has one specification, so the C++ reader and Python's
+standard `tomllib` read a file the same way, it keeps comments, and it has
+none of YAML's implicit typing (`no`, `1e3`, `1:30`). The configs are flat
+(at most `[search.orbit]` deep), which is what TOML is good at.
+
+- Every config type is a plain `*TomlConfig` struct with `load`,
+  `from_string`, `write_default` and `default_toml_string`:
+  `search::FFATomlConfig`, `search::EPTomlConfig` and
+  `simulation::SimulateTomlConfig`. The CLI's `-g` writes the documented
+  default, and a test loads it back.
+- Each config type has one schema (`lib/detail/toml_schema.hpp`): a row per
+  key naming its table and the member it fills, e.g.
+  `field<Cfg>("search", "f_min", [](auto& c) -> auto& { return c.f_min; })`.
+  The allowed keys, the reader and `to_toml_string()` all come from it, so a
+  new key is one row plus its line in the documented template; a test fails
+  when the template and the schema disagree. The member's type sets the TOML
+  type: a real (a whole number reads as one), a non-negative integer in the
+  member's range, a boolean, a string, an array; `choice` maps strings to an
+  enum, `sub_table` reads `[search.orbit]`, `custom` covers the rest
+  (`birdies`, the `dt` alias). Checks that span several keys stay with the
+  config type. The schema readers:
+  - reject an unknown table or key, naming its path, with "did you mean"
+    for a near miss and a hint for a removed key, and a table written as a
+    value;
+  - reject a value of the wrong type instead of keeping the default. Do not
+    read with toml++'s `value_or`, or skip a key when `value<T>()` comes back
+    empty: toml++ converts (`1` to `true`) or drops a mismatched value
+    without a word;
+  - reject `nan` and `inf` by their source text (`reject_nonfinite_floats`),
+    because under `-ffast-math` no check on the parsed value can catch them;
+  - name the file in every error of `load()`.
+- Readers check keys and types. Value ranges that a command-line flag can
+  override are checked after the overrides are applied.
+- Every config type has `to_toml_string()`, the inverse of `from_string`
+  (unset optional settings are left out). A test round-trips every field.
+- Results files record how they were produced, as root attributes written by
+  `search::write_run_provenance` after the run: `config_effective` (the
+  config after defaults and command-line overrides), `command_line` and
+  `loki_version`. The CLI writes them for FFA and EP searches. The FFA search
+  also keeps the raw config file text in `config_toml`.
 
 ## Memory planning
 

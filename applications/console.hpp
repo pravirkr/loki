@@ -2,12 +2,11 @@
 
 // Terminal presentation of the loki CLI: styled plan tables, the search
 // summary and error messages. Colour only on an interactive terminal (or
-// with --color always); redirected output, as in batch jobs, stays plain
+// with CLICOLOR_FORCE); redirected output, as in batch jobs, stays plain
 // text and keeps the log lines it always had. Nothing here runs in a
 // compute loop: it prints before and after the search.
 
 #include <algorithm>
-#include <cstdint>
 #include <cstdio>
 #include <memory>
 #include <string>
@@ -25,8 +24,6 @@
 
 namespace loki::cli {
 
-enum class ColorChoice : uint8_t { kAuto, kAlways, kNever };
-
 class Console {
 public:
     static Console& get() {
@@ -34,20 +31,11 @@ public:
         return console;
     }
 
-    /// Decides once whether stdout gets colour.
-    void configure(ColorChoice choice, bool verbose) {
+    /// Decides once whether stdout gets colour: on an interactive terminal,
+    /// or wherever CLICOLOR_FORCE asks for it, unless NO_COLOR is set.
+    void configure(bool verbose) {
         m_verbose = verbose;
-        switch (choice) {
-        case ColorChoice::kAlways:
-            m_color = true;
-            break;
-        case ColorChoice::kNever:
-            m_color = false;
-            break;
-        case ColorChoice::kAuto:
-            m_color = stdout_is_terminal() && color_allowed();
-            break;
-        }
+        m_color   = color_allowed() && (color_forced() || stdout_is_terminal());
     }
 
     /// The --log-file sink, which keeps the plain lines a styled terminal
@@ -72,6 +60,22 @@ public:
     [[nodiscard]] std::string strong(std::string_view text) const {
         return style(text, fmt::emphasis::bold);
     }
+    [[nodiscard]] std::string score(std::string_view text) const {
+        return style(text, fg(TermColor::kBrightGreen) | fmt::emphasis::bold);
+    }
+
+    /// A section heading line: a titled rule on a colour terminal,
+    /// "=== heading ===" otherwise.
+    [[nodiscard]] std::string heading(std::string_view text) const {
+        if (!m_color) {
+            return fmt::format("=== {} ===", text);
+        }
+        std::string rule;
+        for (std::size_t i = 0; i < kRuleWidth; ++i) {
+            rule += "─";
+        }
+        return title(fmt::format("── {} ", text)) + muted(rule);
+    }
 
     /// Writes @p text to stdout as is.
     static void print(std::string_view text) {
@@ -95,12 +99,7 @@ public:
             }
             return;
         }
-        std::string rule;
-        for (std::size_t i = 0; i < kRuleWidth; ++i) {
-            rule += "─";
-        }
-        std::string out =
-            "\n" + title(fmt::format("── {} ", heading)) + muted(rule) + "\n";
+        std::string out = "\n" + this->heading(heading) + "\n";
         for (const auto& [key, value] : rows) {
             out += fmt::format("  {} {}\n",
                                muted(fmt::format("{:<{}}", key, width)),

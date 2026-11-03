@@ -223,6 +223,29 @@ ASan/UBSan build (`build-asan/`, skips the `[slow]` tests), and `ci` and
 
 ---
 
+## Command-line output
+
+`loki --help` lists the subcommands; `loki search ffa --help` and the
+others list their options. Output is controlled by three options, accepted
+before or after the subcommand:
+
+- `-v` adds per-chunk and per-run detail, `-vv` everything;
+- `-q` keeps warnings and errors and turns off the progress bars, `-qq`
+  keeps errors only;
+- `--log-file PATH` also appends the log to a file, as plain text, with at
+  least the info lines whatever `-q` hides on the console.
+
+Colour and live progress bars appear only on an interactive terminal; a
+pipe or a batch job's log gets plain lines. `NO_COLOR=1` turns colour off,
+`CLICOLOR_FORCE=1` forces it on, and `LOKI_PROGRESS` (`rich`, `plain` or
+`off`) overrides the progress bars.
+
+Exit status: 0 success, 1 failure, 130 stopped by Ctrl-C, 143 stopped by
+SIGTERM (e.g. Slurm's `scancel`); any other value is an invalid command
+line.
+
+---
+
 ## Containers
 
 [`docker/Dockerfile`](docker/Dockerfile) builds a Loki-only image: the Python

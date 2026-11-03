@@ -98,6 +98,11 @@ struct FFATomlConfig {
     /// @brief Parse from a TOML string.
     static FFATomlConfig from_string(std::string_view toml_content);
 
+    /// @brief The configuration as TOML text, with the keys the reader
+    /// takes: from_string() of it gives back this config. Unset optional
+    /// settings are left out. A run records it as its effective config.
+    [[nodiscard]] std::string to_toml_string() const;
+
     /// @brief Write a documented default TOML configuration to disk.
     static void write_default(const std::filesystem::path& path);
 
@@ -346,6 +351,10 @@ struct EPTomlConfig : FFATomlConfig {
 
     /// @brief Parse from a TOML string.
     static EPTomlConfig from_string(std::string_view toml_content);
+
+    /// @brief The configuration as TOML text, with the [ep] table: see
+    /// FFATomlConfig::to_toml_string().
+    [[nodiscard]] std::string to_toml_string() const;
 
     /// @brief Write a documented default TOML configuration to disk.
     static void write_default(const std::filesystem::path& path);

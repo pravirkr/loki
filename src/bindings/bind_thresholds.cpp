@@ -242,37 +242,37 @@ void bind_thresholds(py::module_& m) {
         [](const PyArrayT<float>& thresholds,
            const PyArrayT<float>& branching_pattern, float ref_ducy,
            SizeType nbins, SizeType ntrials, float snr_final, float ducy_max,
-           float wtsp) {
+           float wtsp, std::optional<uint64_t> seed) {
             const auto thresholds_span = to_span<const float>(thresholds);
             const auto pattern_span = to_span<const float>(branching_pattern);
             return as_pyarray(long_call([&] {
-                return detection::evaluate_scheme(thresholds_span, pattern_span,
-                                                  ref_ducy, nbins, ntrials,
-                                                  snr_final, ducy_max, wtsp);
+                return detection::evaluate_scheme(
+                    thresholds_span, pattern_span, ref_ducy, nbins, ntrials,
+                    snr_final, ducy_max, wtsp, seed);
             }));
         },
         py::arg("thresholds"), py::arg("branching_pattern"),
         py::arg("ref_ducy"), py::arg("nbins") = 64, py::arg("ntrials") = 1024,
         py::arg("snr_final") = 8.0F, py::arg("ducy_max") = 0.3F,
-        py::arg("wtsp") = 1.0F);
+        py::arg("wtsp") = 1.0F, py::arg("seed") = py::none());
     m_thresholds.def(
         "determine_scheme",
         [](const PyArrayT<float>& survive_probs,
            const PyArrayT<float>& branching_pattern, float ref_ducy,
            SizeType nbins, SizeType ntrials, float snr_final, float ducy_max,
-           float wtsp) {
+           float wtsp, std::optional<uint64_t> seed) {
             const auto probs_span   = to_span<const float>(survive_probs);
             const auto pattern_span = to_span<const float>(branching_pattern);
             return as_pyarray(long_call([&] {
-                return detection::determine_scheme(probs_span, pattern_span,
-                                                   ref_ducy, nbins, ntrials,
-                                                   snr_final, ducy_max, wtsp);
+                return detection::determine_scheme(
+                    probs_span, pattern_span, ref_ducy, nbins, ntrials,
+                    snr_final, ducy_max, wtsp, seed);
             }));
         },
         py::arg("survive_probs"), py::arg("branching_pattern"),
         py::arg("ref_ducy"), py::arg("nbins") = 64, py::arg("ntrials") = 1024,
         py::arg("snr_final") = 8.0F, py::arg("ducy_max") = 0.3F,
-        py::arg("wtsp") = 1.0F);
+        py::arg("wtsp") = 1.0F, py::arg("seed") = py::none());
 }
 
 } // namespace loki

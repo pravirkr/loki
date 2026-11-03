@@ -205,7 +205,8 @@ stages it is `complexity_cumul / success_h1_cumul`.
 `DynamicThresholdScheme::evaluate(thresholds, ntrials, seed)` measures a
 schedule on the engine's backend with a given seed (on CUDA with a
 device-wide compaction). The free function `evaluate_scheme(...)` is the same
-evaluation on the CPU with a fresh random seed per call. The EP planner
+evaluation on the CPU; like `determine_scheme(...)`, it takes an optional
+`seed` and draws a fresh random one when it is unset. The EP planner
 evaluates the chunk branching patterns with `evaluate()` on its own backend.
 
 ## Reproducibility

@@ -1938,7 +1938,8 @@ std::vector<State> evaluate_scheme(std::span<const float> thresholds,
                                    SizeType ntrials,
                                    float snr_final,
                                    float ducy_max,
-                                   float wtsp) {
+                                   float wtsp,
+                                   std::optional<uint64_t> seed) {
     error_check::check(!thresholds.empty(), "thresholds cannot be empty");
     error_check::check(!branching_pattern.empty(),
                        "branching_pattern cannot be empty");
@@ -1946,15 +1947,13 @@ std::vector<State> evaluate_scheme(std::span<const float> thresholds,
                              "Number of thresholds must match the number of "
                              "stages");
     // The evaluation of DynamicThresholdScheme::evaluate() on an
-    // evaluation-only engine (its grid is unused). Unseeded API: a fresh seed
-    // per call.
+    // evaluation-only engine (its grid is unused).
     const auto engine = detail::make_thresholds_cpu(
         branching_pattern, ref_ducy, nbins, ntrials, /*nprobs=*/2,
         /*prob_min=*/0.5F, snr_final, /*nthresholds=*/100, ducy_max, wtsp,
         /*beam_width=*/0.7F, /*trials_start=*/1, "improved", /*nthreads=*/1,
         std::nullopt, /*simulate=*/false);
-    return engine->evaluate(thresholds, ntrials, std::random_device{}(),
-                            /*h0_only=*/false);
+    return engine->evaluate(thresholds, ntrials, seed, /*h0_only=*/false);
 }
 
 std::vector<State> determine_scheme(std::span<const float> survive_probs,
@@ -1964,7 +1963,8 @@ std::vector<State> determine_scheme(std::span<const float> survive_probs,
                                     SizeType ntrials,
                                     float snr_final,
                                     float ducy_max,
-                                    float wtsp) {
+                                    float wtsp,
+                                    std::optional<uint64_t> seed) {
     error_check::check(!survive_probs.empty(), "thresholds cannot be empty");
     error_check::check(!branching_pattern.empty(),
                        "branching_pattern cannot be empty");
@@ -1989,10 +1989,12 @@ std::vector<State> determine_scheme(std::span<const float> survive_probs,
     std::vector<FoldsType> folds_current(1);
     std::vector<FoldsType> folds_next(1);
 
-    // Unseeded API: a fresh seed per call, keyed streams per stage.
-    const uint64_t seed = std::random_device{}();
-    auto rng_h0 = math::make_keyed_pcg32(seed, kPurposeRunInit, 0U, 0U, 0U, 0U);
-    auto rng_h1 = math::make_keyed_pcg32(seed, kPurposeRunInit, 0U, 0U, 1U, 0U);
+    // Unset seed: a fresh one per call. Keyed streams per stage.
+    const uint64_t run_seed = seed.value_or(std::random_device{}());
+    auto rng_h0 =
+        math::make_keyed_pcg32(run_seed, kPurposeRunInit, 0U, 0U, 0U, 0U);
+    auto rng_h1 =
+        math::make_keyed_pcg32(run_seed, kPurposeRunInit, 0U, 0U, 1U, 0U);
     // Create initial fold vectors
     auto folds_h0_init = manager->allocate(ntrials);
     auto folds_h1_init = manager->allocate(ntrials);
@@ -2027,7 +2029,7 @@ std::vector<State> determine_scheme(std::span<const float> survive_probs,
             prev_state, prev_fold_state, survive_probs[istage],
             branching_pattern[istage], bias_snr, profile, box_score_widths,
             StreamKey{
-                .seed   = seed,
+                .seed   = run_seed,
                 .stage  = static_cast<uint32_t>(istage),
                 .parent = 0,
                 .target = kNoTarget,
