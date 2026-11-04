@@ -61,20 +61,35 @@ inline void ev_circular_prefix(const float* __restrict__ ts_e,
     }
 }
 
-/// Boxcar template constants for every width: snr = (h + b) * dmax - b * sum.
-/// Restrict keeps GCC's scalar/SIMD choice independent of the heap distance
-/// between the arrays: the paths can differ by a few ULPs under -ffast-math.
+/// Height h and baseline b of a boxcar of width w bins (zero mean, unit
+/// square sum): snr = (h + b) * dmax - b * sum. Scalar and out of line on
+/// purpose: under -ffast-math GCC vectorises float division and square root
+/// with reciprocal estimates and a Newton step, a few ULPs off the exact
+/// result, and whether a loop over widths is vectorised depends on the call
+/// site and the target. Every scorer must see the same constants.
+struct BoxcarTemplate {
+    float h;
+    float b;
+};
+
+[[gnu::noinline]] inline BoxcarTemplate boxcar_template(SizeType nbins,
+                                                        SizeType w) noexcept {
+    const float h = std::sqrt(static_cast<float>(nbins - w) /
+                              static_cast<float>(nbins * w));
+    return {.h = h,
+            .b = static_cast<float>(w) * h / static_cast<float>(nbins - w)};
+}
+
+/// boxcar_template() for every width.
 inline void boxcar_template_consts(SizeType nbins,
                                    const SizeType* __restrict__ widths,
                                    SizeType nwidths,
                                    float* __restrict__ h_vals,
                                    float* __restrict__ b_vals) noexcept {
     for (SizeType iw = 0; iw < nwidths; ++iw) {
-        const auto w = widths[iw];
-        h_vals[iw]   = std::sqrt(static_cast<float>(nbins - w) /
-                                 static_cast<float>(nbins * w));
-        b_vals[iw] =
-            static_cast<float>(w) * h_vals[iw] / static_cast<float>(nbins - w);
+        const auto [h, b] = boxcar_template(nbins, widths[iw]);
+        h_vals[iw]        = h;
+        b_vals[iw]        = b;
     }
 }
 
