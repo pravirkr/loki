@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <format>
 #include <numeric>
 #include <ranges>
 #include <span>
@@ -11,6 +10,8 @@
 #include <tuple>
 #include <utility>
 #include <vector>
+
+#include <fmt/format.h>
 
 #include "loki/common/types.hpp"
 
@@ -370,7 +371,7 @@ public:
     [[nodiscard]] SizeType get_segment_idx(SizeType level) const {
         if (level >= m_nsegments) {
             throw std::out_of_range(
-                std::format("level must be in [0, {}].", m_nsegments - 1));
+                fmt::format("level must be in [0, {}].", m_nsegments - 1));
         }
         return m_data[level];
     }
@@ -389,7 +390,7 @@ public:
     [[nodiscard]] std::pair<double, double> get_coord(SizeType level) const {
         if (level >= m_nsegments) {
             throw std::out_of_range(
-                std::format("level must be in [0, {}].", m_nsegments - 1));
+                fmt::format("level must be in [0, {}].", m_nsegments - 1));
         }
         const auto scheme_till_now =
             std::views::take(m_data, static_cast<IndexType>(level + 1));
@@ -431,7 +432,7 @@ public:
     get_segment_coords_so_far(SizeType level) const {
         if (level >= m_nsegments) {
             throw std::out_of_range(
-                std::format("level must be in [0, {}].", m_nsegments - 1));
+                fmt::format("level must be in [0, {}].", m_nsegments - 1));
         }
         std::vector<uint32_t> idx_segments(level + 1);
         std::vector<std::pair<double, double>> coord_segments(level + 1);
@@ -469,10 +470,10 @@ public:
     get_valid(SizeType prune_level) const {
         if (prune_level == 0) {
             throw std::invalid_argument(
-                std::format("prune_level must be greater than 0."));
+                fmt::format("prune_level must be greater than 0."));
         }
         if (prune_level > m_nsegments) {
-            throw std::out_of_range(std::format(
+            throw std::out_of_range(fmt::format(
                 "prune_level must be in [0, {}].", m_nsegments - 1));
         }
 

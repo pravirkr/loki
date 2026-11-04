@@ -1,7 +1,6 @@
 #include <algorithm>
 #include <cstdint>
 #include <filesystem>
-#include <format>
 #include <memory>
 #include <optional>
 #include <span>
@@ -15,6 +14,7 @@
 
 #include <cuda/std/span>
 #include <cuda_runtime.h>
+#include <fmt/format.h>
 #include <spdlog/spdlog.h>
 #include <thrust/device_vector.h>
 
@@ -184,10 +184,10 @@ public:
                                     sizeof(DeviceFoldT)) /
             utils::kBytesPerGB;
 
-        spdlog::info("EPFreqSweep (CUDA {}): allocated the shared buffers "
-                     "(buffer_size={}, coord_size={}, {} levels)",
-                     m_device_id, stats.get_max_buffer_size(),
-                     stats.get_max_coord_size(), max_levels);
+        spdlog::debug("EPFreqSweep (CUDA {}): allocated the shared buffers "
+                      "(buffer_size={}, coord_size={}, {} levels)",
+                      m_device_id, stats.get_max_buffer_size(),
+                      stats.get_max_coord_size(), max_levels);
     }
 
     ~EPFreqSweepCudaEngine() final                                 = default;
@@ -206,7 +206,7 @@ public:
 
         if (ts_e.size() != m_base_cfg.get_nsamps() ||
             ts_v.size() != m_base_cfg.get_nsamps()) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "EPFreqSweep::execute: ts_e and ts_v must have nsamps={} "
                 "samples, got {} and {}",
                 m_base_cfg.get_nsamps(), ts_e.size(), ts_v.size()));
@@ -216,16 +216,16 @@ public:
         std::error_code ec;
         std::filesystem::create_directories(outdir, ec);
         if (!std::filesystem::exists(outdir)) {
-            throw std::runtime_error(std::format(
+            throw std::runtime_error(fmt::format(
                 "EPFreqSweep::execute: Failed to create output directory '{}': "
                 "{}",
                 outdir.string(), ec.message()));
         }
         const auto result_file =
-            (outdir / std::format("{}_ep_results.h5", file_prefix))
+            (outdir / fmt::format("{}_ep_results.h5", file_prefix))
                 .lexically_normal();
         const auto tmp_dir =
-            (outdir / std::format(".tmp_{}_ep_chunks", file_prefix))
+            (outdir / fmt::format(".tmp_{}_ep_chunks", file_prefix))
                 .lexically_normal();
         std::filesystem::create_directories(tmp_dir, ec);
 
@@ -249,8 +249,8 @@ public:
         const SizeType nchunks = chunk_cfgs.size();
         detail::EPSweepWriter result_writer(result_file, chunk_cfgs, m_base_cfg,
                                             m_min_pd, m_poly_basis, m_ref_ducy);
-        spdlog::info("EPFreqSweep (CUDA {}): starting sweep over {} chunks",
-                     m_device_id, nchunks);
+        spdlog::debug("EPFreqSweep (CUDA {}): starting sweep over {} chunks",
+                      m_device_id, nchunks);
 
         const auto& stats = m_region_planner.get_stats();
         const double limit_gb =
@@ -320,7 +320,7 @@ public:
                     algorithms::detail::ep_cuda_ep_workspace_bytes<FoldType>(
                         group_memory, group.nbins, group.nsegments,
                         group.ncoords, group.max_sugg, group.branch_max)));
-            spdlog::info(
+            spdlog::debug(
                 "EPFreqSweep (CUDA {}): allocated a workspace for chunks "
                 "{}..{} (nbins={}, max_sugg={}, {:.2f} GB)",
                 m_device_id, group.begin, group.end - 1, effective_nbins,
@@ -346,26 +346,26 @@ public:
             for (SizeType i = group.begin; i < group.end; ++i) {
                 const nvtx::Range chunk_range("ep sweep: chunk");
                 const auto& chunk = chunk_cfgs[i];
-                spdlog::info("EPFreqSweep: processing chunk {}/{} - nominal "
-                             "f=[{:08.3f}, {:08.3f}] Hz, actual f=[{:08.3f}, "
-                             "{:08.3f}] Hz (nbins={}, max_sugg={})",
-                             i + 1, nchunks, chunk.nominal_f_start,
-                             chunk.nominal_f_end, chunk.actual_f_start,
-                             chunk.actual_f_end, chunk.cfg.get_nbins(),
-                             utils::format_pow2(chunk.max_sugg));
+                spdlog::debug("EPFreqSweep: processing chunk {}/{} - nominal "
+                              "f=[{:08.3f}, {:08.3f}] Hz, actual f=[{:08.3f}, "
+                              "{:08.3f}] Hz (nbins={}, max_sugg={})",
+                              i + 1, nchunks, chunk.nominal_f_start,
+                              chunk.nominal_f_end, chunk.actual_f_start,
+                              chunk.actual_f_end, chunk.cfg.get_nbins(),
+                              utils::format_pow2(chunk.max_sugg));
 
-                spdlog::info("EP chunk {}: predicted peak {}, live ring {}, "
-                             "capacity {}, batch {}",
-                             i, utils::format_pow2(chunk.predicted_peak),
-                             utils::format_pow2(chunk.predicted_live),
-                             utils::format_pow2(chunk.max_sugg),
-                             chunk.batch_size);
+                spdlog::debug("EP chunk {}: predicted peak {}, live ring {}, "
+                              "capacity {}, batch {}",
+                              i, utils::format_pow2(chunk.predicted_peak),
+                              utils::format_pow2(chunk.predicted_live),
+                              utils::format_pow2(chunk.max_sugg),
+                              chunk.batch_size);
                 pipeline.result_sink = [&result_writer,
                                         i](detail::EPResultPayload payload) {
                     payload.chunk_id = i;
                     result_writer.submit(std::move(payload));
                 };
-                const std::string chunk_prefix = std::format("chunk_{:04d}", i);
+                const std::string chunk_prefix = fmt::format("chunk_{:04d}", i);
                 algorithms::EPMultiPassCudaCore<FoldTypeCUDA> chunk_ep(
                     pipeline, chunk.cfg, chunk.threshold_scheme, m_n_runs,
                     m_ref_segs, /*ascend_levels=*/{}, chunk.max_sugg,
@@ -422,7 +422,7 @@ private:
         const double free_gb =
             algorithms::detail::ep_cuda_free_memory_gb(m_device_id);
         if (free_gb < m_extra_peak_gb) {
-            throw std::runtime_error(std::format(
+            throw std::runtime_error(fmt::format(
                 "EPFreqSweep: device {} has {:.2f} GB free but the sweep "
                 "still needs up to {:.2f} GB (plan peak {:.2f} GB). Free "
                 "device memory or re-plan with a smaller "
@@ -442,7 +442,7 @@ private:
             const auto needed = algorithms::detail::compute_branch_max(
                 plan.forecast_branching(m_poly_basis).max_children);
             if (needed > group.branch_max) {
-                throw std::runtime_error(std::format(
+                throw std::runtime_error(fmt::format(
                     "EPFreqSweep: chunk {} needs branch_max={} but the plan "
                     "provides {}. Re-plan (stale plan cache?).",
                     i, needed, group.branch_max));

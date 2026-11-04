@@ -1,8 +1,8 @@
 #pragma once
 
-#include <format>
 #include <limits>
 
+#include <fmt/format.h>
 #include <pybind11/iostream.h>
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
@@ -66,8 +66,10 @@ void bind_ffa_class(py::module& m, const std::string& name) {
         "execute",
         [](FFA<FoldType>& self, const PyArrayT<float>& ts_e,
            const PyArrayT<float>& ts_v, PyArrayT<FoldType>& fold) {
-            self.execute(to_span<const float>(ts_e), to_span<const float>(ts_v),
-                         to_span<FoldType>(fold));
+            const auto ts_e_span = to_span<const float>(ts_e);
+            const auto ts_v_span = to_span<const float>(ts_v);
+            const auto fold_span = to_span<FoldType>(fold);
+            long_call([&] { self.execute(ts_e_span, ts_v_span, fold_span); });
         },
         py::arg("ts_e"), py::arg("ts_v"), py::arg("fold"));
 
@@ -77,8 +79,11 @@ void bind_ffa_class(py::module& m, const std::string& name) {
             "execute",
             [](FFA<FoldType>& self, const PyArrayT<float>& ts_e,
                const PyArrayT<float>& ts_v, PyArrayT<float>& fold) {
-                self.execute(to_span<const float>(ts_e),
-                             to_span<const float>(ts_v), to_span<float>(fold));
+                const auto ts_e_span = to_span<const float>(ts_e);
+                const auto ts_v_span = to_span<const float>(ts_v);
+                const auto fold_span = to_span<float>(fold);
+                long_call(
+                    [&] { self.execute(ts_e_span, ts_v_span, fold_span); });
             },
             py::arg("ts_e"), py::arg("ts_v"), py::arg("fold"));
     }
@@ -107,10 +112,13 @@ void bind_ep_region_planner(py::module& m, const std::string& name) {
                     std::optional<SizeType> n_runs,
                     const std::optional<std::vector<SizeType>>& ref_segs,
                     std::string_view backend, int device) {
-                     return std::make_unique<EPRegionPlanner<FoldType>>(
-                         cfg, min_pd, poly_basis, ref_ducy, plan_cache_file,
-                         rfi_config, n_workers, n_runs, ref_segs,
-                         make_exec(backend, device));
+                     const auto exec = make_exec(backend, device);
+                     // Planning runs a threshold search per region.
+                     return long_call([&] {
+                         return std::make_unique<EPRegionPlanner<FoldType>>(
+                             cfg, min_pd, poly_basis, ref_ducy, plan_cache_file,
+                             rfi_config, n_workers, n_runs, ref_segs, exec);
+                     });
                  }),
              py::arg("cfg"), py::arg("min_pd") = 0.1F,
              py::arg("poly_basis") = "taylor", py::arg("ref_ducy") = 0.1F,
@@ -172,7 +180,7 @@ inline void bind_prune_rfi(py::module& m) {
         .def_readwrite("a_lo", &ParamWindow::a_lo)
         .def_readwrite("a_hi", &ParamWindow::a_hi)
         .def("__repr__", [](const ParamWindow& w) {
-            return std::format(
+            return fmt::format(
                 "ParamWindow(f_lo={}, f_hi={}, a_lo={}, a_hi={})", w.f_lo,
                 w.f_hi, w.a_lo, w.a_hi);
         });
@@ -294,8 +302,11 @@ void bind_ep_multi_pass(py::module& m, const std::string& name) {
         [](EPMultiPass<FoldType>& self, const PyArrayT<float>& ts_e,
            const PyArrayT<float>& ts_v, std::string_view outdir,
            std::string_view file_prefix) {
-            self.execute(to_span<const float>(ts_e), to_span<const float>(ts_v),
-                         outdir, file_prefix);
+            const auto ts_e_span = to_span<const float>(ts_e);
+            const auto ts_v_span = to_span<const float>(ts_v);
+            long_call([&] {
+                self.execute(ts_e_span, ts_v_span, outdir, file_prefix);
+            });
         },
         py::arg("ts_e"), py::arg("ts_v"), py::arg("outdir"),
         py::arg("file_prefix"));

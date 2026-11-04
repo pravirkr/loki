@@ -4,7 +4,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
-#include <format>
 #include <fstream>
 #include <memory>
 #include <optional>
@@ -18,6 +17,7 @@
 #include <cuda/std/span>
 #include <cuda/std/utility>
 #include <cuda_runtime.h>
+#include <fmt/format.h>
 #include <fmt/ranges.h>
 #include <spdlog/spdlog.h>
 #include <thrust/device_vector.h>
@@ -156,7 +156,7 @@ public:
         timing::SimpleTimer timer;
         timer.start();
         const std::string run_name =
-            std::format("{:03d}_{:02d}", ref_seg, task_id);
+            fmt::format("{:03d}_{:02d}", ref_seg, task_id);
 
         const auto& ws                 = get_workspace();
         const auto memory_tree_gb      = ws.world_tree.get_memory_usage_gib();
@@ -164,7 +164,7 @@ public:
         const auto memory_scorer_scratch_gb =
             m_prune_funcs->get_scorer_scratch_memory_gib();
         const auto memory_total_gb = get_memory_usage_gib();
-        spdlog::info(
+        spdlog::debug(
             "Pruning run {:03d}: Memory Usage: {:.2f} GB total "
             "({:.2f} GB tree + {:.2f} GB workspace + {:.3f} GB scorer scratch)",
             ref_seg, memory_total_gb, memory_tree_gb, memory_workspace_gb,
@@ -172,14 +172,14 @@ public:
 
         // Setup log and result files
         std::filesystem::path actual_log_file =
-            log_file.value_or(outdir / std::format("tmp_{}_log.txt", run_name));
+            log_file.value_or(outdir / fmt::format("tmp_{}_log.txt", run_name));
         std::filesystem::path actual_result_file = result_file.value_or(
-            outdir / std::format("tmp_{}_results.h5", run_name));
+            outdir / fmt::format("tmp_{}_results.h5", run_name));
 
         const auto nsegments = m_ffa_plan.get_nsegments().back();
 
         initialize(ffa_fold, ref_seg, m_stream);
-        spdlog::info("Pruning run {:03d}: initialized", ref_seg);
+        spdlog::debug("Pruning run {:03d}: initialized", ref_seg);
 
         SizeType iterations_completed = 0;
         for (SizeType iter = 0; iter < nsegments - 1; ++iter) {
@@ -199,7 +199,7 @@ public:
 
         // Log early exit ONCE after loop if needed
         if (m_prune_complete && iterations_completed < nsegments - 1) {
-            spdlog::info(
+            spdlog::debug(
                 "Pruning terminated early at iteration {} - no survivors",
                 iterations_completed);
         }
@@ -216,18 +216,18 @@ public:
 
         // Final log entries
         std::ofstream log(actual_log_file, std::ios::app);
-        log << std::format("Pruning log for ref segment: {}\n", ref_seg);
+        log << fmt::format("Pruning log for ref segment: {}\n", ref_seg);
         log << m_pstats.get_all_summaries();
-        log << std::format("Pruning run complete for ref segment {}\n",
+        log << fmt::format("Pruning run complete for ref segment {}\n",
                            ref_seg);
         log.close();
 
-        spdlog::info(
+        spdlog::debug(
             "Pruning run {:03d}: complete (peak live {}, overload trims {})",
             ref_seg, get_workspace().world_tree.peak_live(),
             get_workspace().world_tree.overload_count());
-        spdlog::info("Pruning run {:03d}: stats: {}", ref_seg,
-                     m_pstats.get_stats_summary_cuda(timer.stop()));
+        spdlog::debug("Pruning run {:03d}: stats: {}", ref_seg,
+                      m_pstats.get_stats_summary_cuda(timer.stop()));
     }
 
 private:
@@ -656,7 +656,7 @@ private:
         ++m_prune_level;
         error_check::check_less_equal(
             m_prune_level, m_total_levels,
-            std::format("Pruning complete - exceeded total levels at level "
+            fmt::format("Pruning complete - exceeded total levels at level "
                         "{}",
                         m_prune_level));
         auto& ws         = get_workspace();
@@ -762,7 +762,7 @@ private:
                 world_tree.get_leaves_span(this_batch_size);
             if (current_batch_size == 0) {
                 throw std::runtime_error(
-                    std::format("Loaded batch size is 0: total_processed={}, "
+                    fmt::format("Loaded batch size is 0: total_processed={}, "
                                 "this_batch_size={}, remaining={}",
                                 total_processed, this_batch_size, remaining));
             }
@@ -1100,7 +1100,7 @@ public:
         if (branch_max_needed > pipeline.ws_branch_max ||
             ncoords_ffa > pipeline.ws_ncoords ||
             nsegments > pipeline.ws_nsegments) {
-            throw std::runtime_error(std::format(
+            throw std::runtime_error(fmt::format(
                 "EPMultiPassCudaCore: the chunk needs branch_max={}, "
                 "ncoords={}, nsegments={} but the workspace was sized for "
                 "{}, {}, {}. Re-plan (stale plan cache?).",
@@ -1130,7 +1130,7 @@ public:
                  std::string_view file_prefix) {
         timing::SimpleTimer timer;
         timer.start();
-        spdlog::info("EPMultiPassCudaCore: Initializing with FFA");
+        spdlog::debug("EPMultiPassCudaCore: Initializing with FFA");
         // Create appropriate FFA fold
         std::tuple<thrust::device_vector<FoldTypeCUDA>,
                    plans::FFAPlan<HostFoldT>>
@@ -1150,7 +1150,7 @@ public:
                         std::string_view file_prefix) {
         timing::SimpleTimer timer;
         timer.start();
-        spdlog::info("EPMultiPassCudaCore: Initializing with FFA");
+        spdlog::debug("EPMultiPassCudaCore: Initializing with FFA");
         const auto& pl = *m_pipeline;
         cuda_utils::CudaSetDeviceGuard device_guard(m_device_id);
         {
@@ -1217,18 +1217,18 @@ private:
         // Setup output files and directory
         const auto nsegments = m_ffa_plan.get_nsegments().back();
         const std::string filebase =
-            std::format("{}_pruning_nstages_{}", file_prefix, nsegments);
+            fmt::format("{}_pruning_nstages_{}", file_prefix, nsegments);
         const auto log_file =
-            (outdir / std::format("{}_log.txt", filebase)).lexically_normal();
+            (outdir / fmt::format("{}_log.txt", filebase)).lexically_normal();
         const auto result_file =
-            (outdir / std::format("{}_results.h5", filebase))
+            (outdir / fmt::format("{}_results.h5", filebase))
                 .lexically_normal();
 
         // Create output directory
         std::error_code ec;
         std::filesystem::create_directories(outdir, ec);
         if (!std::filesystem::exists(outdir)) {
-            throw std::runtime_error(std::format(
+            throw std::runtime_error(fmt::format(
                 "EPMultiPassCudaCore::execute: Failed to create output "
                 "directory '{}': {}",
                 outdir.string(), ec.message()));
@@ -1237,8 +1237,8 @@ private:
         // Determine ref_segs to process
         auto ref_segs_to_process =
             utils::determine_ref_segs(nsegments, m_n_runs, m_ref_segs);
-        spdlog::info("Starting Pruning for {} runs, on CUDA device {}",
-                     ref_segs_to_process.size(), m_device_id);
+        spdlog::debug("Starting Pruning for {} runs, on CUDA device {}",
+                      ref_segs_to_process.size(), m_device_id);
 
         // Initialize log file
         std::ofstream log(log_file);
@@ -1273,9 +1273,8 @@ private:
                 result_file, search::PruneResultWriter::Mode::kAppend);
             writer_final.write_runtime(ep_time);
         }
-        spdlog::info("Pruning complete. Results saved to {}",
-                     result_file.string());
-        spdlog::info("Pruning time: {:.2f} seconds", ep_time);
+        spdlog::info("Pruning complete in {:.2f} s. Results saved to {}",
+                     ep_time, result_file.string());
     }
 
 }; // End EPMultiPassCudaCore::Impl implementation

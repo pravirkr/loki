@@ -337,6 +337,28 @@ With both clustering and harmonic flagging disabled, singleton results stream
 directly without allocating a representative index.
 Runtime/allocator/HDF5 overhead is additional to the accounted buffers.
 
+## Inspecting a result file
+
+`loki inspect` summarises a result file without Python: the run metadata
+(input, nsamps, tsamp, tobs, searched ranges, version, the command line
+and the effective configuration, or the raw `config_toml` when a file
+predates provenance) and the top candidates by S/N. It reads the common schema,
+flat FFA files (`--no-candidates`) and raw EP runs.
+
+```bash
+loki inspect trial_ffa_results.h5            # top 10 candidates
+loki inspect trial_ep_results.h5 -n 25       # top 25
+loki inspect trial_ffa_results.h5 --json     # the same summary, for pipelines
+loki inspect trial_ffa_results.h5 --profile  # also the top candidate's profile
+```
+
+`--profile` draws the folded profile only when the file stores one (a
+`folds` dataset of shape `[rows, 2, nbins]` in the table); the search
+products above do not, so it says so. The search writes no backend
+attribute, so the backend shows as "not recorded". C++ tools get the same
+summary from `loki::io::read_candidate_file_summary`
+(`loki/io/candidate_file.hpp`).
+
 ## PulsarX conversion
 
 ```bash

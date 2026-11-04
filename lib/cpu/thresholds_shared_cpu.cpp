@@ -5,7 +5,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
-#include <format>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -17,16 +16,19 @@
 #include <utility>
 #include <vector>
 
+#include <fmt/format.h>
 #include <highfive/highfive.hpp>
 #include <omp.h>
 #include <spdlog/spdlog.h>
 
+#include "loki/common/interrupt.hpp"
 #include "loki/common/types.hpp"
 #include "loki/detection/score.hpp"
 #include "loki/detection/thresholds.hpp"
 #include "loki/simulation/simulation.hpp"
 
 #include "lib/detail/error_check.hpp"
+#include "lib/detail/interrupt.hpp"
 #include "lib/detail/math.hpp"
 #include "lib/detail/progress.hpp"
 #include "lib/detail/timing.hpp"
@@ -160,7 +162,7 @@ public:
         }
         if (!(min_pd > 0.0F && min_pd < 1.0F)) {
             throw std::invalid_argument(
-                std::format("DynamicThresholdScheme: min_pd={} must be in "
+                fmt::format("DynamicThresholdScheme: min_pd={} must be in "
                             "(0, 1)",
                             min_pd));
         }
@@ -194,7 +196,7 @@ public:
             detection::generate_box_width_trials(m_nbins, m_ducy_max, m_wtsp);
         if (*std::ranges::max_element(m_box_score_widths) >= m_nbins) {
             throw std::invalid_argument(
-                std::format("ducy_max={} gives a box width >= nbins={}",
+                fmt::format("ducy_max={} gives a box width >= nbins={}",
                             m_ducy_max, m_nbins));
         }
         m_nh1      = std::min<SizeType>(kSharedH1PerTrial * m_ntrials,
@@ -222,7 +224,7 @@ public:
             const auto n = get_current_thresholds_idx(s).size();
             if (n == 0) {
                 throw std::invalid_argument(
-                    std::format("Threshold beam of stage {} is empty", s));
+                    fmt::format("Threshold beam of stage {} is empty", s));
             }
             m_max_beam = std::max(m_max_beam, n);
         }
@@ -346,14 +348,14 @@ public:
     }
 
     // ---- search ----
-    void run(SizeType thres_neigh) override {
+    void run(SizeType thres_neigh, bool show_progress) override {
         // thres_neigh is unused (the guided beam sets the reach); positive as
         // on every backend.
         if (thres_neigh == 0) {
             throw std::invalid_argument("thres_neigh must be positive");
         }
-        spdlog::info("Running dynamic threshold scheme on the CPU ({} mode)",
-                     mode_to_string(m_mode));
+        spdlog::debug("Running dynamic threshold scheme on the CPU ({} mode)",
+                      mode_to_string(m_mode));
         timing::SimpleTimer total_timer;
         total_timer.start();
         allocate_pools();
@@ -365,7 +367,7 @@ public:
         m_guess_path = m_guess_pilot;
         m_beam = detail::guided_beam(m_window, m_guess_path, m_score_sigma,
                                      m_guide_width);
-        run_pass();
+        run_pass(show_progress);
         if (m_mode == DynamicThresholdMode::kRobust) {
             // Second pass: ranked with the first pass's cost to go, around
             // the guess recentred on its path.
@@ -378,7 +380,7 @@ public:
                     m_guess_pilot, get_best_path_thresholds(m_min_pd));
                 m_beam = detail::guided_beam(m_window, m_guess_path,
                                              m_score_sigma, m_guide_width);
-                run_pass();
+                run_pass(show_progress);
             }
         }
         detail::store_terminal_cost(m_states, m_nstages, m_nthresholds,
@@ -390,7 +392,7 @@ public:
     }
 
     std::string save(const std::string& outdir) const override {
-        const std::filesystem::path filebase = std::format(
+        const std::filesystem::path filebase = fmt::format(
             "dynscheme_{}_nstages_{:03d}_nthresh_{:03d}_nprobs_{:03d}_"
             "ntrials_{:04d}_snr_{:04.1f}_ducy_{:04.2f}_beam_{:03.1f}.h5",
             mode_to_string(m_mode), m_nstages, m_nthresholds, m_nprobs,
@@ -530,7 +532,7 @@ private:
     }
 
     // One forward pass into m_states, from a fresh grid.
-    void run_pass() {
+    void run_pass(bool show_progress) {
         const auto ntrials         = static_cast<uint32_t>(m_ntrials);
         const auto nprobs          = static_cast<uint32_t>(m_nprobs);
         const SizeType grid_stride = m_nthresholds * m_nprobs;
@@ -575,11 +577,11 @@ private:
         std::vector<detection::BoxcarWidthsCache> caches(
             static_cast<SizeType>(m_nthreads), *m_box_cache);
 
-        progress::ProgressGuard const progress_guard(true);
-        auto bar =
-            progress::make_standard_bar("Computing scheme (shared)", m_nstages);
+        progress::ProgressTracker bar("Computing scheme (shared)", m_nstages,
+                                      show_progress);
         float var_in = 1.0F;
         for (SizeType istage = 0; istage < m_nstages; ++istage) {
+            loki::check_interrupt();
             const auto& plan      = plans[istage];
             const uint32_t cur    = static_cast<uint32_t>(istage & 1U);
             const uint32_t prev   = cur ^ 1U;
@@ -657,6 +659,9 @@ private:
             // NOLINTNEXTLINE(openmp-use-default-none): clauses cannot name members
 #pragma omp parallel for num_threads(m_nthreads) schedule(static)
             for (std::int64_t item = 0; item < n_sim; ++item) {
+                if (interrupt::requested()) {
+                    continue; // checked after the region
+                }
                 const auto ip    = static_cast<SizeType>(item) / ntrials;
                 const auto trial = static_cast<uint32_t>(
                     static_cast<SizeType>(item) % ntrials);
@@ -702,6 +707,7 @@ private:
                     caches[static_cast<SizeType>(omp_get_thread_num())],
                     stdnoise);
             }
+            loki::check_interrupt();
 
             // Every transition: counts, candidate state and its rank.
             const SizeType n_items = plan.pairs.size() * nprobs;
@@ -714,6 +720,9 @@ private:
 #pragma omp parallel for num_threads(m_nthreads) schedule(static)
             for (std::int64_t it = 0; it < static_cast<std::int64_t>(n_items);
                  ++it) {
+                if (interrupt::requested()) {
+                    continue; // checked after the region
+                }
                 const auto item          = static_cast<uint32_t>(it);
                 const ThresholdPair pair = plan.pairs[item / nprobs];
                 const uint32_t kprob     = item % nprobs;
@@ -771,6 +780,7 @@ private:
                                  item;
                 }
             }
+            loki::check_interrupt();
             // The lowest key of every output cell wins (ties: lowest item).
             std::vector<unsigned long long> winner(m_nthresholds * nprobs,
                                                    kEmptyKey);

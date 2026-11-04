@@ -7,7 +7,6 @@
 #include <cstdint>
 #include <exception>
 #include <filesystem>
-#include <format>
 #include <functional>
 #include <iterator>
 #include <limits>
@@ -23,11 +22,13 @@
 #include <utility>
 #include <vector>
 
+#include <fmt/format.h>
 #include <hdf5.h>
 #include <highfive/highfive.hpp>
 #include <omp.h>
 #include <spdlog/spdlog.h>
 
+#include "loki/common/interrupt.hpp"
 #include "loki/common/types.hpp"
 #include "loki/detection/score.hpp"
 #include "loki/simulation/simulation.hpp"
@@ -1114,7 +1115,7 @@ public:
             const auto pool_memory_size_gb =
                 static_cast<float>(pool_memory_size) / 1024.0F / 1024.0F /
                 1024.0F;
-            spdlog::info(
+            spdlog::debug(
                 "Pre-allocated 2 fold pools of {} slots and 2 score pools "
                 "of {} slots ({:.2f} GB)",
                 fold_slots_per_pool, score_slots_per_pool, pool_memory_size_gb);
@@ -1159,10 +1160,10 @@ public:
     }
 
     // Methods
-    void run(SizeType thres_neigh) override {
+    void run(SizeType thres_neigh, bool show_progress) override {
         check_simulate("run");
         const auto mode_label = mode_to_string(m_mode);
-        spdlog::info("Running dynamic threshold scheme ({} mode)", mode_label);
+        spdlog::debug("Running dynamic threshold scheme ({} mode)", mode_label);
 
         m_timer_stats.reset();
         timing::SimpleTimer total_timer;
@@ -1173,13 +1174,13 @@ public:
         // the second ranks them by cost so far plus the first pass's cost
         // to go of their noise survivors (detail::cost_to_go_scheme).
         m_cost_to_go.clear();
-        run_pass(neigh);
+        run_pass(neigh, show_progress);
         if (m_all_transitions && m_mode == DynamicThresholdMode::kImproved) {
             m_cost_to_go =
                 detail::cost_to_go_scheme(m_states, m_thresholds, m_probs,
                                           m_nstages, m_nthresholds, m_nprobs);
             if (!m_cost_to_go.empty()) {
-                run_pass(neigh);
+                run_pass(neigh, show_progress);
             }
         }
 
@@ -1192,7 +1193,7 @@ public:
 
     // One forward pass into m_states. Every pass after the first starts
     // from a fresh grid (stage 0 draws the same streams again).
-    void run_pass(SizeType neigh) {
+    void run_pass(SizeType neigh, bool show_progress) {
         if (m_has_run) {
             for (auto& folds : m_folds_current) {
                 folds.invalidate();
@@ -1208,10 +1209,10 @@ public:
             }
         }
         m_has_run = true;
-        progress::ProgressGuard const progress_guard(true);
-        auto bar =
-            progress::make_standard_bar("Computing scheme", m_nstages - 1);
+        progress::ProgressTracker bar("Computing scheme", m_nstages - 1,
+                                      show_progress);
         for (SizeType istage = 1; istage < m_nstages; ++istage) {
+            loki::check_interrupt();
             if (m_mode == DynamicThresholdMode::kImproved) {
                 run_segment_improved(istage, neigh);
                 m_manager->swap_pools();
@@ -1235,7 +1236,7 @@ public:
     // Save
     std::string save(const std::string& outdir) const override {
         check_simulate("save");
-        const std::filesystem::path filebase = std::format(
+        const std::filesystem::path filebase = fmt::format(
             "dynscheme_{}_nstages_{:03d}_nthresh_{:03d}_nprobs_{:03d}_"
             "ntrials_{:04d}_snr_{:04.1f}_ducy_{:04.2f}_beam_{:03.1f}.h5",
             mode_to_string(m_mode), m_nstages, m_nthresholds, m_nprobs,
@@ -1365,6 +1366,7 @@ private:
         State prev   = State::initial();
         float var_in = 1.0F;
         for (SizeType istage = 0; istage < m_nstages; ++istage) {
+            loki::check_interrupt();
             const auto stage = static_cast<uint32_t>(istage);
             // NOLINTNEXTLINE(openmp-use-default-none): clauses cannot name members
 #pragma omp parallel for num_threads(nthreads)
@@ -1505,7 +1507,7 @@ private:
     void check_simulate(std::string_view what) const {
         if (!m_simulate) {
             throw std::logic_error(
-                std::format("DynamicThresholdScheme::{}: engine was built for "
+                fmt::format("DynamicThresholdScheme::{}: engine was built for "
                             "evaluate only",
                             what));
         }
@@ -1556,19 +1558,20 @@ private:
 
         if (m_mode == DynamicThresholdMode::kImproved) {
             const auto max_sim_folds = max_active_per_stage * m_nprobs * 2;
-            spdlog::info("Allocation analysis (improved): {} active thresholds "
-                         "max, {} prob bins, {} threads",
-                         max_active_per_stage, m_nprobs, m_nthreads);
-            spdlog::info("Fold pool: {} persistent + {} sim_folds + {} "
-                         "temporary = {} slots",
-                         max_persistent, max_sim_folds, max_temporary,
-                         fold_slots);
-            spdlog::info("Score pool: {} stage-local slots", score_slots);
+            spdlog::debug(
+                "Allocation analysis (improved): {} active thresholds "
+                "max, {} prob bins, {} threads",
+                max_active_per_stage, m_nprobs, m_nthreads);
+            spdlog::debug("Fold pool: {} persistent + {} sim_folds + {} "
+                          "temporary = {} slots",
+                          max_persistent, max_sim_folds, max_temporary,
+                          fold_slots);
+            spdlog::debug("Score pool: {} stage-local slots", score_slots);
         } else {
-            spdlog::info("Allocation analysis: {} active thresholds max, {} "
-                         "prob bins, {} threads",
-                         max_active_per_stage, m_nprobs, m_nthreads);
-            spdlog::info(
+            spdlog::debug("Allocation analysis: {} active thresholds max, {} "
+                          "prob bins, {} threads",
+                          max_active_per_stage, m_nprobs, m_nthreads);
+            spdlog::debug(
                 "Need {} persistent + {} temporary = {} fold slots per pool",
                 max_persistent, max_temporary, fold_slots);
         }
@@ -1935,7 +1938,8 @@ std::vector<State> evaluate_scheme(std::span<const float> thresholds,
                                    SizeType ntrials,
                                    float snr_final,
                                    float ducy_max,
-                                   float wtsp) {
+                                   float wtsp,
+                                   std::optional<uint64_t> seed) {
     error_check::check(!thresholds.empty(), "thresholds cannot be empty");
     error_check::check(!branching_pattern.empty(),
                        "branching_pattern cannot be empty");
@@ -1943,15 +1947,13 @@ std::vector<State> evaluate_scheme(std::span<const float> thresholds,
                              "Number of thresholds must match the number of "
                              "stages");
     // The evaluation of DynamicThresholdScheme::evaluate() on an
-    // evaluation-only engine (its grid is unused). Unseeded API: a fresh seed
-    // per call.
+    // evaluation-only engine (its grid is unused).
     const auto engine = detail::make_thresholds_cpu(
         branching_pattern, ref_ducy, nbins, ntrials, /*nprobs=*/2,
         /*prob_min=*/0.5F, snr_final, /*nthresholds=*/100, ducy_max, wtsp,
         /*beam_width=*/0.7F, /*trials_start=*/1, "improved", /*nthreads=*/1,
         std::nullopt, /*simulate=*/false);
-    return engine->evaluate(thresholds, ntrials, std::random_device{}(),
-                            /*h0_only=*/false);
+    return engine->evaluate(thresholds, ntrials, seed, /*h0_only=*/false);
 }
 
 std::vector<State> determine_scheme(std::span<const float> survive_probs,
@@ -1961,7 +1963,8 @@ std::vector<State> determine_scheme(std::span<const float> survive_probs,
                                     SizeType ntrials,
                                     float snr_final,
                                     float ducy_max,
-                                    float wtsp) {
+                                    float wtsp,
+                                    std::optional<uint64_t> seed) {
     error_check::check(!survive_probs.empty(), "thresholds cannot be empty");
     error_check::check(!branching_pattern.empty(),
                        "branching_pattern cannot be empty");
@@ -1986,10 +1989,12 @@ std::vector<State> determine_scheme(std::span<const float> survive_probs,
     std::vector<FoldsType> folds_current(1);
     std::vector<FoldsType> folds_next(1);
 
-    // Unseeded API: a fresh seed per call, keyed streams per stage.
-    const uint64_t seed = std::random_device{}();
-    auto rng_h0 = math::make_keyed_pcg32(seed, kPurposeRunInit, 0U, 0U, 0U, 0U);
-    auto rng_h1 = math::make_keyed_pcg32(seed, kPurposeRunInit, 0U, 0U, 1U, 0U);
+    // Unset seed: a fresh one per call. Keyed streams per stage.
+    const uint64_t run_seed = seed.value_or(std::random_device{}());
+    auto rng_h0 =
+        math::make_keyed_pcg32(run_seed, kPurposeRunInit, 0U, 0U, 0U, 0U);
+    auto rng_h1 =
+        math::make_keyed_pcg32(run_seed, kPurposeRunInit, 0U, 0U, 1U, 0U);
     // Create initial fold vectors
     auto folds_h0_init = manager->allocate(ntrials);
     auto folds_h1_init = manager->allocate(ntrials);
@@ -2024,7 +2029,7 @@ std::vector<State> determine_scheme(std::span<const float> survive_probs,
             prev_state, prev_fold_state, survive_probs[istage],
             branching_pattern[istage], bias_snr, profile, box_score_widths,
             StreamKey{
-                .seed   = seed,
+                .seed   = run_seed,
                 .stage  = static_cast<uint32_t>(istage),
                 .parent = 0,
                 .target = kNoTarget,

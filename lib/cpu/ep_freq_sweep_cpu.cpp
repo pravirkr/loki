@@ -1,6 +1,5 @@
 #include <cstddef>
 #include <filesystem>
-#include <format>
 #include <memory>
 #include <optional>
 #include <span>
@@ -11,11 +10,13 @@
 #include <utility>
 #include <vector>
 
+#include <fmt/format.h>
 #include <spdlog/spdlog.h>
 
 #include "loki/algorithms/ep_regions.hpp"
 #include "loki/algorithms/prune_rfi.hpp"
 #include "loki/common/coord.hpp"
+#include "loki/common/interrupt.hpp"
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
@@ -88,7 +89,7 @@ public:
         check_shared_allocation(stats.get_max_buffer_size(),
                                 stats.get_max_coord_size());
 
-        spdlog::info(
+        spdlog::debug(
             "EPFreqSweep allocated shared FFA workspace: buffer_size={}, "
             "coord_size={}",
             stats.get_max_buffer_size(), stats.get_max_coord_size());
@@ -110,23 +111,23 @@ public:
         std::error_code ec;
         std::filesystem::create_directories(outdir, ec);
         if (!std::filesystem::exists(outdir)) {
-            throw std::runtime_error(std::format(
+            throw std::runtime_error(fmt::format(
                 "EPFreqSweep::execute: Failed to create output directory '{}': "
                 "{}",
                 outdir.string(), ec.message()));
         }
 
         const auto result_file =
-            (outdir / std::format("{}_ep_results.h5", file_prefix))
+            (outdir / fmt::format("{}_ep_results.h5", file_prefix))
                 .lexically_normal();
         const auto tmp_dir =
-            (outdir / std::format(".tmp_{}_ep_chunks", file_prefix))
+            (outdir / fmt::format(".tmp_{}_ep_chunks", file_prefix))
                 .lexically_normal();
         std::filesystem::create_directories(tmp_dir, ec);
 
         const auto& chunk_cfgs = m_region_planner.get_chunk_cfgs();
         const SizeType nchunks = chunk_cfgs.size();
-        spdlog::info("EPFreqSweep: starting sweep over {} chunks", nchunks);
+        spdlog::debug("EPFreqSweep: starting sweep over {} chunks", nchunks);
 
         constexpr SizeType kBatchSize = algorithms::detail::kEPBatchSize;
         const auto& stats             = m_region_planner.get_stats();
@@ -143,7 +144,7 @@ public:
                 const auto needed = algorithms::detail::compute_branch_max(
                     plan.forecast_branching(m_poly_basis).max_children);
                 if (needed > group.branch_max) {
-                    throw std::runtime_error(std::format(
+                    throw std::runtime_error(fmt::format(
                         "EPFreqSweep: chunk {} needs branch_max={} but the "
                         "plan provides {}. Re-plan (stale plan cache?).",
                         i, needed, group.branch_max));
@@ -177,7 +178,7 @@ public:
             }
             check_workspace_allocation(group, workspaces.front());
 
-            spdlog::info(
+            spdlog::debug(
                 "EPFreqSweep: allocated {} workspaces for chunks {}..{} "
                 "(nbins={}, max_sugg={}, {:.2f} GB per workspace)",
                 m_n_workers, chunk_idx, range_end - 1, effective_nbins,
@@ -186,8 +187,9 @@ public:
 
             // Process all chunks in this nbins band reusing workspaces
             for (SizeType i = chunk_idx; i < range_end; ++i) {
+                loki::check_interrupt();
                 const auto& chunk = chunk_cfgs[i];
-                spdlog::info(
+                spdlog::debug(
                     "EPFreqSweep: processing chunk {}/{} - nominal "
                     "f=[{:08.3f}, "
                     "{:08.3f}] Hz, actual f=[{:08.3f}, {:08.3f}] Hz (nbins={}, "
@@ -196,7 +198,7 @@ public:
                     chunk.actual_f_start, chunk.actual_f_end,
                     chunk.cfg.get_nbins(), utils::format_pow2(chunk.max_sugg));
 
-                const std::string chunk_prefix = std::format("chunk_{:04d}", i);
+                const std::string chunk_prefix = fmt::format("chunk_{:04d}", i);
                 // Internal pipeline: build the CPU engine directly on the
                 // shared workspaces, FFA buffers and plan cache.
                 const auto chunk_ep = algorithms::detail::make_ep_cpu<FoldType>(

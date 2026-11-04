@@ -1,9 +1,10 @@
 #include "loki/utils/workspace.hpp"
 
-#include <format>
 #include <memory>
 #include <stdexcept>
 #include <string_view>
+
+#include <fmt/format.h>
 
 #include "loki/common/backend.hpp"
 #include "loki/common/plans.hpp"
@@ -20,7 +21,7 @@ template <typename Handle>
 void require_sized(const Handle& ws, std::string_view what) {
     if (ws.empty()) {
         throw std::invalid_argument(
-            std::format("{}: workspace handle is empty", what));
+            fmt::format("{}: workspace handle is empty", what));
     }
 }
 
@@ -163,7 +164,7 @@ FFAWorkspaceCPU<FoldType>& cpu_workspace(FFAWorkspace<FoldType>& ws,
     auto& impl = loki::detail::HandleAccess::impl(ws);
     if (!impl.cpu) {
         throw std::invalid_argument(
-            std::format("{}: expected a CPU FFAWorkspace", what));
+            fmt::format("{}: expected a CPU FFAWorkspace", what));
     }
     return *impl.cpu;
 }
@@ -174,7 +175,7 @@ EPWorkspaceCPU<FoldType>& cpu_workspace(EPWorkspace<FoldType>& ws,
     auto& impl = loki::detail::HandleAccess::impl(ws);
     if (!impl.cpu) {
         throw std::invalid_argument(
-            std::format("{}: expected a CPU EPWorkspace", what));
+            fmt::format("{}: expected a CPU EPWorkspace", what));
     }
     return *impl.cpu;
 }

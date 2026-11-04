@@ -2,13 +2,14 @@
 
 #include <algorithm>
 #include <array>
-#include <format>
 #include <limits>
 #include <optional>
 #include <ranges>
 #include <span>
 #include <stdexcept>
 #include <vector>
+
+#include <fmt/format.h>
 
 #include "loki/common/types.hpp"
 
@@ -102,7 +103,7 @@ public:
           m_done(false) {
         if (m_dims > MaxDims) {
             throw std::invalid_argument(
-                std::format("Too many dimensions for CartesianProductIterator "
+                fmt::format("Too many dimensions for CartesianProductIterator "
                             "(got {}, max {})",
                             m_dims, MaxDims));
         }

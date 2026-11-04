@@ -1,10 +1,11 @@
 #include "loki/utils/fft.hpp"
 
-#include <format>
 #include <memory>
 #include <span>
 #include <stdexcept>
 #include <string_view>
+
+#include <fmt/format.h>
 
 #include "loki/common/backend.hpp"
 #include "loki/common/types.hpp"
@@ -89,7 +90,7 @@ CpuFFT& cpu_fft(FFTManager& fft, std::string_view what) {
     auto& impl = loki::detail::HandleAccess::impl(fft);
     if (!impl.cpu) {
         throw std::invalid_argument(
-            std::format("{}: expected a CPU FFTManager", what));
+            fmt::format("{}: expected a CPU FFTManager", what));
     }
     return *impl.cpu;
 }

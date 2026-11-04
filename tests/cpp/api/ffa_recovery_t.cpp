@@ -2,7 +2,6 @@
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
-#include <format>
 #include <fstream>
 #include <optional>
 #include <stdexcept>
@@ -11,6 +10,7 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <fmt/format.h>
 #include <highfive/highfive.hpp>
 
 #include "loki/common/types.hpp"
@@ -180,7 +180,7 @@ void run_cli_search(const std::filesystem::path& toml_path) {
         SKIP("loki_app was not built (LOKI_APP_PATH undefined)");
     }
     const std::string cmd =
-        std::format(R"("{}" search ffa --config "{}" --no-preprocess)",
+        fmt::format(R"("{}" search ffa --config "{}" --no-preprocess)",
                     app_path, toml_path.string());
     // NOLINTNEXTLINE(bugprone-command-processor): runs the built CLI on purpose
     const int rc = std::system(cmd.c_str());

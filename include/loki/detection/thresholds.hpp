@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstdint>
-#include <format>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -60,7 +59,7 @@ dynamic_threshold_mode_from_string(std::string_view s) {
     if (s == "robust") {
         return DynamicThresholdMode::kRobust;
     }
-    throw std::invalid_argument(std::format("unknown mode: {}", s));
+    throw std::invalid_argument(std::string("unknown mode: ").append(s));
 }
 
 inline std::string mode_to_string(DynamicThresholdMode m) {
@@ -365,7 +364,9 @@ public:
     /// the process. CPU and CUDA use different generators and agree only
     /// statistically.
     /// In-run cost and success_h1_cumul are optimistic Monte Carlo estimates.
-    void run(SizeType thres_neigh = 10);
+    /// @p show_progress draws a progress bar (CPU only; how it is drawn is
+    /// set by loki::set_progress_mode). False writes nothing.
+    void run(SizeType thres_neigh = 10, bool show_progress = true);
     /// Fresh Monte Carlo of one fixed threshold per stage, for reporting or
     /// EP population forecasts. Never modifies selection or re-filters Pd.
     /// `ntrials` may
@@ -405,22 +406,30 @@ private:
     std::unique_ptr<Impl> m_impl;
 };
 
+/// Monte Carlo of one fixed threshold per stage, as
+/// DynamicThresholdScheme::evaluate(). Unset `seed` draws a random one;
+/// deterministic per (seed, thresholds, ntrials).
 std::vector<State> evaluate_scheme(std::span<const float> thresholds,
                                    std::span<const float> branching_pattern,
                                    float ref_ducy,
-                                   SizeType nbins   = 64,
-                                   SizeType ntrials = 1024,
-                                   float snr_final  = 8.0F,
-                                   float ducy_max   = 0.3F,
-                                   float wtsp       = 1.0F);
+                                   SizeType nbins               = 64,
+                                   SizeType ntrials             = 1024,
+                                   float snr_final              = 8.0F,
+                                   float ducy_max               = 0.3F,
+                                   float wtsp                   = 1.0F,
+                                   std::optional<uint64_t> seed = std::nullopt);
 
-std::vector<State> determine_scheme(std::span<const float> survive_probs,
-                                    std::span<const float> branching_pattern,
-                                    float ref_ducy,
-                                    SizeType nbins   = 64,
-                                    SizeType ntrials = 1024,
-                                    float snr_final  = 8.0F,
-                                    float ducy_max   = 0.3F,
-                                    float wtsp       = 1.0F);
+/// The thresholds that keep a fraction `survive_probs` of the noise at each
+/// stage. Unset `seed` draws a random one; deterministic per (seed, inputs).
+std::vector<State>
+determine_scheme(std::span<const float> survive_probs,
+                 std::span<const float> branching_pattern,
+                 float ref_ducy,
+                 SizeType nbins               = 64,
+                 SizeType ntrials             = 1024,
+                 float snr_final              = 8.0F,
+                 float ducy_max               = 0.3F,
+                 float wtsp                   = 1.0F,
+                 std::optional<uint64_t> seed = std::nullopt);
 
 } // namespace loki::detection

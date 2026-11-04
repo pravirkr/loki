@@ -1,7 +1,11 @@
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <cstdint>
+#include <exception>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -15,48 +19,74 @@
 #include <spdlog/sinks/base_sink.h>
 #include <spdlog/spdlog.h>
 
+#include "loki/common/terminal.hpp"
 #include "loki/common/types.hpp"
 
 namespace loki::progress {
 
 namespace detail {
-// Progress-bar palette.
-constexpr auto kOrange      = fmt::color{0xFF8C42};
-constexpr auto kAmber       = fmt::color{0xFFB366};
-constexpr auto kDarkOrange  = fmt::color{0xE6722A};
-constexpr auto kBrightGreen = fmt::color{0x66BB6A};
-constexpr auto kBackground  = fmt::color{0x3A3A3A};
-constexpr auto kRed         = fmt::color{0xF92672};
+// A foreground style in the shared palette (loki/common/terminal.hpp).
+constexpr fmt::text_style fg(TermColor color) {
+    return fmt::fg(fmt::rgb(to_rgb(color)));
+}
 } // namespace detail
+
+// How a shown bar is drawn: loki::get_progress_mode() resolved against the
+// environment (LOKI_PROGRESS) and stdout (see loki/common/progress.hpp).
+enum class Render : uint8_t { kOff, kRich, kPlain };
+
+// kOff when !show; otherwise the resolved process-wide mode.
+Render resolve_render(bool show);
 
 struct Style {
     fmt::text_style value;
 };
 
-// Base class for all progress bar columns
+// Options of one rendered line.
+struct RenderContext {
+    bool live{true};  // rich frame: spinner and bar are drawn
+    bool color{true}; // ANSI styles
+    int bar_width{40};
+};
+
 class ProgressBar;
 
+// One field of a bar line. A column that renders "" is skipped together
+// with its separator.
 class Column {
 public:
-    Column() = default;
-    explicit Column(Style style) : m_style(style) {}
-    virtual ~Column()                                  = default;
-    Column(const Column&)                              = delete;
-    Column& operator=(const Column&)                   = delete;
-    Column(Column&&)                                   = delete;
-    Column& operator=(Column&&)                        = delete;
-    virtual std::string render(const ProgressBar& bar) = 0;
+    explicit Column(Style style = {}, std::string_view separator = " ")
+        : m_style(style),
+          m_separator(separator) {}
+    virtual ~Column()                                          = default;
+    Column(const Column&)                                      = delete;
+    Column& operator=(const Column&)                           = delete;
+    Column(Column&&)                                           = delete;
+    Column& operator=(Column&&)                                = delete;
+    virtual std::string render(const ProgressBar& bar,
+                               const RenderContext& ctx) const = 0;
+    std::string_view separator() const { return m_separator; }
 
 protected:
+    std::string styled(std::string_view text, const RenderContext& ctx) const;
+    static std::string
+    styled(std::string_view text, const Style& style, const RenderContext& ctx);
+
     Style m_style{};
+
+private:
+    std::string m_separator;
 };
 
 class TextColumn : public Column {
 public:
-    explicit TextColumn(std::string_view text, Style style = {})
-        : Column(style),
+    explicit TextColumn(std::string_view text,
+                        Style style                = {},
+                        std::string_view separator = " ")
+        : Column(style, separator),
           m_text(text) {}
-    std::string render(const ProgressBar& /*bar*/) override;
+    std::string render(const ProgressBar& bar,
+                       const RenderContext& ctx) const override;
 
 private:
     std::string m_text;
@@ -64,11 +94,13 @@ private:
 
 class SpinnerColumn : public Column {
 public:
-    explicit SpinnerColumn(Style style = {.value = fmt::fg(detail::kOrange)},
-                           bool use_tva_frames = false)
+    explicit SpinnerColumn(
+        Style style         = {.value = detail::fg(TermColor::kOrange)},
+        bool use_tva_frames = false)
         : Column(style),
           m_use_tva_frames(use_tva_frames) {}
-    std::string render(const ProgressBar& bar) override;
+    std::string render(const ProgressBar& bar,
+                       const RenderContext& ctx) const override;
 
 private:
     bool m_use_tva_frames;
@@ -89,111 +121,126 @@ private:
 class BarColumn : public Column {
 public:
     explicit BarColumn(
-        int width              = 40,
-        Style style            = {.value = fmt::fg(detail::kRed)},
-        Style background_style = {.value = fmt::fg(detail::kBackground)})
+        Style style            = {.value = detail::fg(TermColor::kRed)},
+        Style background_style = {.value = detail::fg(TermColor::kBackground)})
         : Column(style),
-          m_width(width),
           m_background_style(background_style) {}
 
-    std::string render(const ProgressBar& bar) override;
+    std::string render(const ProgressBar& bar,
+                       const RenderContext& ctx) const override;
 
 private:
-    std::string render_pulse(const ProgressBar& bar) const;
-    int m_width;
+    std::string render_pulse(const ProgressBar& bar,
+                             const RenderContext& ctx) const;
     Style m_background_style;
-    static constexpr std::string_view kBarChar = "\u2501";
+    static constexpr std::string_view kBarChar     = "━";
+    static constexpr std::string_view kBarRestChar = "─";
 };
 
 class PercentageColumn : public Column {
 public:
-    explicit PercentageColumn(Style style = {.value = fmt::fg(detail::kAmber)})
+    explicit PercentageColumn(
+        Style style = {.value = detail::fg(TermColor::kAmber)})
         : Column(style) {}
-    std::string render(const ProgressBar& bar) override;
+    std::string render(const ProgressBar& bar,
+                       const RenderContext& ctx) const override;
+};
+
+// "done/total", for the overall line of a multi-task display.
+class CountColumn : public Column {
+public:
+    explicit CountColumn(Style style = {.value = detail::fg(TermColor::kAmber)})
+        : Column(style) {}
+    std::string render(const ProgressBar& bar,
+                       const RenderContext& ctx) const override;
 };
 
 class TimeStatsColumn : public Column {
 public:
     explicit TimeStatsColumn(
-        Style style = {.value = fmt::fg(detail::kDarkOrange)})
-        : Column(style) {}
-    std::string render(const ProgressBar& bar) override;
+        Style style = {.value = detail::fg(TermColor::kDarkOrange)})
+        : Column(style, kSeparator) {}
+    std::string render(const ProgressBar& bar,
+                       const RenderContext& ctx) const override;
+    static constexpr std::string_view kSeparator = " • ";
 };
 
 class ScoreColumn : public Column {
 public:
     explicit ScoreColumn(
         Style style = {.value = fmt::fg(fmt::terminal_color::bright_red)})
-        : Column(style) {}
-    std::string render(const ProgressBar& bar) override;
+        : Column(style, TimeStatsColumn::kSeparator) {}
+    std::string render(const ProgressBar& bar,
+                       const RenderContext& ctx) const override;
 };
 
 class LeavesColumn : public Column {
 public:
     explicit LeavesColumn(
-        Style style = {.value = fmt::fg(detail::kBrightGreen)})
-        : Column(style) {}
-    std::string render(const ProgressBar& bar) override;
+        Style style = {.value = detail::fg(TermColor::kBrightGreen)})
+        : Column(style, TimeStatsColumn::kSeparator) {}
+    std::string render(const ProgressBar& bar,
+                       const RenderContext& ctx) const override;
 };
 
+// State of one bar and its rendering to a line. Thread-safe; writes nothing:
+// MultiprocessProgressTracker owns all output.
 class ProgressBar {
 public:
+    enum class Kind : uint8_t {
+        kStandard, // prefix, spinner, bar, percentage, time
+        kFFA,      // + leaves
+        kPruning,  // + score and leaves
+        kOverall,  // prefix, spinner, bar, done/total, time
+    };
+
     explicit ProgressBar(std::string_view prefix,
                          SizeType max_progress = 100,
-                         int bar_width         = 40,
-                         bool transient        = true,
-                         bool is_managed       = false);
+                         Kind kind             = Kind::kStandard,
+                         bool transient        = true);
 
-    ~ProgressBar();
-
+    ~ProgressBar()                             = default;
     ProgressBar(const ProgressBar&)            = delete;
     ProgressBar& operator=(const ProgressBar&) = delete;
     ProgressBar(ProgressBar&&)                 = delete;
     ProgressBar& operator=(ProgressBar&&)      = delete;
 
-    ProgressBar& add_column(std::unique_ptr<Column> col);
-    ProgressBar& add_score_column();
-    ProgressBar& add_leaves_column();
-
+    // Restart the clock (a task that starts after its bar was made).
+    void restart_clock();
+    // Completes the bar when it reaches max_progress (> 0), except a
+    // kOverall bar: tasks may still be added; it completes explicitly.
     void set_progress(SizeType new_progress);
+    void set_max_progress(SizeType max_progress);
     void set_score(double s);
     void set_leaves(double l);
-    void tick();
-    bool is_completed() const;
-    bool is_transient() const;
     void mark_as_completed();
 
+    bool is_completed() const;
+    bool is_transient() const;
     SizeType get_progress() const;
     SizeType get_max_progress() const;
     double get_score() const;
     double get_leaves() const;
-
+    // Frozen at completion.
     std::chrono::nanoseconds get_elapsed() const;
-    // Public method to render the bar state to a string
-    std::string to_string() const;
-    void print_progress();
+
+    // One line. With max_cols > 0 the bar shrinks (then disappears) so the
+    // visible width fits in max_cols.
+    std::string to_string(const RenderContext& ctx, int max_cols = 0) const;
 
 private:
     std::vector<std::unique_ptr<Column>> m_columns;
-    SizeType m_max_progress;
+    std::atomic<SizeType> m_max_progress;
     std::atomic<SizeType> m_progress{0};
     std::atomic<bool> m_completed{false};
     std::atomic<double> m_score{0.0};
     std::atomic<double> m_leaves{0.0};
-    std::chrono::steady_clock::time_point m_start_time;
-    std::chrono::nanoseconds m_elapsed{};
-    bool m_start_time_saved{false};
+    std::atomic<int64_t> m_start_ns{0};
+    std::atomic<int64_t> m_end_ns{0};
+    Kind m_kind;
     bool m_transient;
-    bool m_is_managed;
-    std::mutex m_mutex;
 
-    static constexpr std::string_view kSeparator = " \u2022 ";
-};
-
-struct ProgressState {
-    std::unique_ptr<ProgressBar> bar;
-    std::atomic<bool> visible{true};
-    std::atomic<bool> active{false};
+    std::string render_columns(const RenderContext& ctx) const;
 };
 
 class MultiprocessProgressTracker; // Forward declaration
@@ -218,10 +265,22 @@ private:
     void set_color_mode(spdlog::color_mode mode);
 };
 
+// The display of one or more bars ("tasks"); the only writer of progress
+// output. The mode is fixed at construction (resolve_render):
+//   kRich:  a live region at the bottom of the terminal, redrawn by a render
+//           thread. Log lines are routed above it; completed transient bars
+//           vanish and the others stay as permanent lines. The cursor is
+//           hidden while it runs.
+//   kPlain: self-contained lines at 25/50/75 % and at completion: of the
+//           task for a standalone bar (ProgressTracker), of the count of
+//           tasks done otherwise.
+//   kOff:   nothing at all.
+// Only one rich display runs at a time; a second one started meanwhile
+// draws nothing.
 class MultiprocessProgressTracker {
 public:
     explicit MultiprocessProgressTracker(
-        std::string overall_description = "Working...");
+        std::string overall_description = "Working...", bool show = true);
 
     ~MultiprocessProgressTracker();
     MultiprocessProgressTracker(const MultiprocessProgressTracker&) = delete;
@@ -232,8 +291,14 @@ public:
     operator=(MultiprocessProgressTracker&&) = delete;
 
     void start();
+    // Idempotent. Leaves the cursor below the permanent lines.
     void stop();
-    int add_task(std::string_view description, SizeType total, bool transient);
+    int add_task(std::string_view description,
+                 SizeType total,
+                 bool transient         = true,
+                 ProgressBar::Kind kind = ProgressBar::Kind::kPruning);
+    // completed == SizeType(-1) leaves the progress unchanged; negative
+    // score / leaves leave them unchanged.
     void update_task(int task_id,
                      SizeType completed,
                      double score        = -1.0,
@@ -242,49 +307,62 @@ public:
     void queue_log(std::string msg);
 
 private:
+    friend class ProgressTracker;
+
+    struct Task {
+        std::unique_ptr<ProgressBar> bar;
+        bool active{false};
+        bool committed{false}; // final line printed (rich) or plain done
+        int next_quarter{1};   // next plain milestone, in quarters
+    };
+
+    std::atomic<Render> m_render;
     std::string m_overall_description;
-    std::map<int, ProgressState> m_tasks;
-    std::atomic<bool> m_running;
+    ProgressBar m_overall;
+    int m_overall_next_quarter{1};
+    std::map<int, Task> m_tasks;
+    std::atomic<bool> m_running{false};
+    std::atomic<bool> m_stopped{false};
+    bool m_owns_live{false};
+    bool m_standalone{false}; // display of one ProgressTracker
+    bool m_color{true};       // rich mode: false when NO_COLOR is set
     std::thread m_render_thread;
     std::mutex m_tasks_mutex;
     std::mutex m_control_mutex;
+    std::mutex m_wait_mutex;
     std::mutex m_log_mutex;
-    std::mutex m_output_mutex;
     std::condition_variable m_cv;
     std::queue<std::string> m_log_queue;
-    std::atomic<bool> m_permanently_stopped;
     int m_next_task_id{};
     int m_last_rendered_lines{};
     std::shared_ptr<ProgressTrackerSink<std::mutex>> m_sink;
     std::shared_ptr<spdlog::logger> m_previous_logger;
+    std::shared_ptr<spdlog::logger> m_logger;
 
-    void final_cleanup();
-    void clear_progress_lines() const noexcept;
     void render_loop();
     void render_frame(bool is_final_render);
+    void install_logger();
+    void restore_logger();
+    // Plain milestones of the task (standalone) or of the overall count;
+    // m_tasks_mutex held.
+    std::vector<std::string> plain_lines(Task& task);
+    void sync_overall_locked();
 };
 
-// This class is used to hide the console cursor during progress bar updates
-// and restore it after the progress bar is done.
-class ProgressGuard {
-public:
-    explicit ProgressGuard(bool show);
-    ~ProgressGuard();
-    ProgressGuard(const ProgressGuard&)            = delete;
-    ProgressGuard& operator=(const ProgressGuard&) = delete;
-    ProgressGuard(ProgressGuard&&)                 = delete;
-    ProgressGuard& operator=(ProgressGuard&&)      = delete;
-
-private:
-    bool m_show;
-};
-
+// Handle of one bar: either a task of a shared display or a standalone bar
+// with a display of its own. Completes the bar when it goes out of scope,
+// unless an exception (e.g. loki::Interrupted) unwinds it: then the bar is
+// dropped without a completion line.
 class ProgressTracker {
 public:
+    // Standalone bar. Draws nothing when !show.
     ProgressTracker(std::string_view description,
                     SizeType max_progress,
-                    MultiprocessProgressTracker* tracker,
-                    int task_id = -1);
+                    bool show,
+                    ProgressBar::Kind kind = ProgressBar::Kind::kStandard,
+                    bool transient         = true);
+    // Task task_id of tracker. A null tracker draws nothing.
+    ProgressTracker(MultiprocessProgressTracker* tracker, int task_id);
 
     ~ProgressTracker();
     ProgressTracker(const ProgressTracker&)            = delete;
@@ -295,27 +373,18 @@ public:
     void set_progress(SizeType value);
     void set_score(double value);
     void set_leaves(double value);
+    // Completes the bar and, for a standalone bar, finishes its display, so
+    // that what follows is printed below it.
     void mark_as_completed();
 
 private:
-    std::unique_ptr<ProgressBar> m_owned_bar;
+    std::unique_ptr<MultiprocessProgressTracker> m_owned;
     MultiprocessProgressTracker* m_tracker = nullptr;
+    int m_uncaught_exceptions{std::uncaught_exceptions()};
     // To batch updates for the tracker
     int m_task_id           = -1;
     double m_current_score  = -1.0;
     double m_current_leaves = -1.0;
 };
-
-// Progress bar factory functions
-ProgressBar make_standard_bar(std::string_view prefix,
-                              SizeType max_progress,
-                              bool transient = true);
-std::unique_ptr<ProgressBar> make_ffa_bar(std::string_view prefix,
-                                          SizeType max_progress,
-                                          bool transient = true);
-std::unique_ptr<ProgressBar> make_pruning_bar(std::string_view prefix,
-                                              SizeType max_progress,
-                                              bool transient = true,
-                                              bool managed   = false);
 
 } // namespace loki::progress

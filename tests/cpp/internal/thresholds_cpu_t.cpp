@@ -42,7 +42,7 @@ TEST_CASE("Evaluation-only CPU threshold engine evaluates identically",
           "[thresholds]") {
     const std::vector<float> branching(8, 2.0F);
     auto full = make_engine(branching, 1, /*simulate=*/true);
-    full->run(4);
+    full->run(4, /*show_progress=*/false);
     const auto path = full->get_best_path_thresholds(0.0F);
     REQUIRE(path.size() == branching.size());
 
@@ -55,7 +55,8 @@ TEST_CASE("Evaluation-only CPU threshold engine evaluates identically",
     }
     REQUIRE_FALSE(actual.back().is_empty);
 
-    REQUIRE_THROWS_AS(eval_only->run(4), std::logic_error);
+    REQUIRE_THROWS_AS(eval_only->run(4, /*show_progress=*/false),
+                      std::logic_error);
     REQUIRE_THROWS_AS(eval_only->get_states(), std::logic_error);
     REQUIRE_THROWS_AS(eval_only->get_best_path_thresholds(0.0F),
                       std::logic_error);

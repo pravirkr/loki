@@ -2,11 +2,12 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <format>
 #include <limits>
 #include <span>
 #include <utility>
 #include <vector>
+
+#include <fmt/format.h>
 
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
@@ -82,7 +83,7 @@ build_region_decode_table(std::span<const search::FFASearchConfig> cfgs) {
         error_check::check_less_equal(
             dec.get_n_scores(),
             static_cast<SizeType>(std::numeric_limits<uint32_t>::max()),
-            std::format("build_region_decode_table: chunk produces {} scores, "
+            fmt::format("build_region_decode_table: chunk produces {} scores, "
                         "which exceeds the uint32 index range used by the "
                         "candidate buffer",
                         dec.get_n_scores()));
@@ -175,7 +176,7 @@ private:
     void check_space(SizeType n) const {
         error_check::check_less_equal(
             n, get_space(),
-            std::format("CandidateBuffer: requested {} slots but only {} of {} "
+            fmt::format("CandidateBuffer: requested {} slots but only {} of {} "
                         "are free",
                         n, get_space(), m_capacity));
     }

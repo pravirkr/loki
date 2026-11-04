@@ -7,6 +7,7 @@
 
 #include <cuda/std/span>
 #include <cuda_runtime.h>
+#include <fmt/format.h>
 #include <thrust/device_vector.h>
 
 #include "loki/common/types.hpp"
@@ -818,7 +819,7 @@ void check_u32_threads(SizeType blocks,
                        std::string_view kernel) {
     error_check::check_less_equal(
         blocks * threads_per_block, SizeType{1} << 32U,
-        std::format("{}: work exceeds the 32-bit thread index", kernel));
+        fmt::format("{}: work exceeds the 32-bit thread index", kernel));
 }
 
 } // namespace

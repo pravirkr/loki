@@ -15,14 +15,14 @@ foreach(source_file IN LISTS LOKI_APPLICATION_SOURCES)
   )
   target_link_libraries(
     ${TARGET_NAME}
-    PRIVATE ${LOKI_LIBRARY_NAME}
+    PRIVATE $<BUILD_INTERFACE:loki_fmt>
+            $<BUILD_INTERFACE:loki_spdlog>
+            ${LOKI_LIBRARY_NAME}
             CLI11::CLI11
             ${LOKI_COMPILE_OPTIONS}
-            $<BUILD_INTERFACE:fmt::fmt-header-only>
-            $<BUILD_INTERFACE:spdlog::spdlog_header_only>
-            $<BUILD_INTERFACE:tomlplusplus>
             $<BUILD_INTERFACE:HighFive::HighFive>
   )
+  target_compile_definitions(${TARGET_NAME} PRIVATE LOKI_VERSION="${PROJECT_VERSION}")
   list(APPEND LOKI_APPLICATIONS ${TARGET_NAME})
 endforeach()
 

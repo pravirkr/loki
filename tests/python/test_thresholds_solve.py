@@ -160,3 +160,17 @@ def test_solution_returns_the_last_solve() -> None:
     np.testing.assert_array_equal(kept["thresholds"], sol["thresholds"])
     assert kept["pd"] == sol["pd"]
     assert kept["delivery"] == sol["delivery"]
+
+
+@pytest.mark.parametrize("name", ["evaluate_scheme", "determine_scheme"])
+def test_free_schemes_are_deterministic_per_seed(name: str) -> None:
+    first = np.linspace(0.5, 2.0, BRANCHING.size, dtype=np.float32)
+    if name == "determine_scheme":
+        first = np.full(BRANCHING.size, 0.5, dtype=np.float32)
+    func = getattr(libloki.thresholds, name)
+
+    def run(seed: int) -> np.ndarray:
+        return func(first, BRANCHING, 0.1, nbins=32, ntrials=512, seed=seed)
+
+    np.testing.assert_array_equal(run(7), run(7))
+    assert not np.array_equal(run(7), run(8))

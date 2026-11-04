@@ -5,7 +5,6 @@
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
-#include <format>
 #include <fstream>
 #include <memory>
 #include <span>
@@ -14,6 +13,7 @@
 #include <utility>
 #include <vector>
 
+#include <fmt/format.h>
 #include <psrio/psrio.hpp>
 #include <spdlog/spdlog.h>
 
@@ -35,14 +35,14 @@ void validate_ingress_arrays(std::span<const float> ts_e,
     for (SizeType i = 0; i < ts_e.size(); ++i) {
         if (!finite && !utils::is_finite(ts_e[i])) {
             throw std::invalid_argument(
-                std::format("ts_e[{}] is not finite", i));
+                fmt::format("ts_e[{}] is not finite", i));
         }
         if ((!finite && !utils::is_finite(ts_v[i])) || ts_v[i] < 0.0F) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "ts_v[{}] must be finite and >= 0 (got {})", i, ts_v[i]));
         }
         if (ts_v[i] == 0.0F && ts_e[i] != 0.0F) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "ts_e[{}] must be 0 where ts_v is 0 (got {})", i, ts_e[i]));
         }
         any_weight = any_weight || ts_v[i] > 0.0F;

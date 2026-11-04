@@ -276,8 +276,8 @@ DynamicThresholdScheme::get_best_path_thresholds(float min_pd) const {
     return m_impl->m_engine->get_best_path_thresholds(min_pd);
 }
 
-void DynamicThresholdScheme::run(SizeType thres_neigh) {
-    m_impl->m_engine->run(thres_neigh);
+void DynamicThresholdScheme::run(SizeType thres_neigh, bool show_progress) {
+    m_impl->m_engine->run(thres_neigh, show_progress);
 }
 std::vector<State>
 DynamicThresholdScheme::evaluate(std::span<const float> thresholds,

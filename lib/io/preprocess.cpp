@@ -1,9 +1,10 @@
 #include "loki/io/preprocess.hpp"
 
-#include <format>
 #include <functional>
 #include <span>
 #include <stdexcept>
+
+#include <fmt/format.h>
 
 #include "loki/common/backend.hpp"
 
@@ -18,7 +19,7 @@ void PreprocessOptions::validate() const {
     const PreprocessOptions& o = *this;
     const auto require         = [](bool ok, const char* what) {
         if (!ok) {
-            throw std::invalid_argument(std::format("preprocess: {}", what));
+            throw std::invalid_argument(fmt::format("preprocess: {}", what));
         }
     };
     require(utils::is_finite(o.filter_window) && o.filter_window >= 0.0,

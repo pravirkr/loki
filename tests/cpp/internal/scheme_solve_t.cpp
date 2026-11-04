@@ -253,7 +253,7 @@ TEST_CASE("refit_scheme re-fits a small-nbins schedule to the true nbins",
                                    1.606F, 5.604F, 1.0F};
     constexpr float kMinPd      = 0.3F;
     auto proxy                  = shared_engine(bp, 64, kMinPd);
-    proxy->run(10);
+    proxy->run(10, /*show_progress=*/false);
     const auto searched =
         detail::solve_scheme(*proxy, kMinPd, 1.0, /*robust=*/false);
     REQUIRE_FALSE(searched.thresholds.empty());
@@ -278,7 +278,7 @@ TEST_CASE("refit_scheme re-fits a small-nbins schedule to the true nbins",
     // Close to a native search at the true nbins (the gate is loose at large
     // nbins)
     auto native = shared_engine(bp, 256, kMinPd);
-    native->run(10);
+    native->run(10, /*show_progress=*/false);
     const auto sol =
         detail::solve_scheme(*native, kMinPd, 1.0, /*robust=*/false);
     const double native_cost = cost_per_detection(*native, sol.thresholds);

@@ -2,12 +2,12 @@
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
-#include <format>
 #include <string_view>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
+#include <fmt/format.h>
 
 #include "loki/common/backend.hpp"
 #include "loki/common/types.hpp"
@@ -169,7 +169,7 @@ TEST_CASE("save works in every mode, with the solution after solve()",
         if (mode == "shared" || mode == "robust") {
             const auto sol = scheme.solve();
             const auto after =
-                scheme.save((dir / std::format("solved_{}", mode)).string());
+                scheme.save((dir / fmt::format("solved_{}", mode)).string());
             REQUIRE(std::filesystem::exists(after));
             REQUIRE(std::filesystem::file_size(after) >
                     std::filesystem::file_size(before));

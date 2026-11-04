@@ -1,0 +1,23 @@
+# Build environment for loki, modern tier (newest tested toolchain).
+# Same usage as environment.yml. CUDA 12.9 needs a driver >= R525 through
+# minor-version compatibility; for CUDA 13.x (driver >= R580) set
+# cuda-version=13.0.
+name: loki-modern
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - cmake>=3.25
+  - ninja
+  - hdf5=1.14 # HDF5 2.x is not yet supported
+  - gcc_linux-64=14
+  - gxx_linux-64=14
+  - cuda-version=12.9
+  - cuda-nvcc
+  - cuda-cudart-dev
+  - libcurand-dev
+  - numpy>=2.0
+  - h5py>=3.11
+  - pip
+  - pytest
+  - pytest-xdist

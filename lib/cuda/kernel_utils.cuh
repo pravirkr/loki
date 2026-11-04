@@ -2,13 +2,13 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <format>
 #include <source_location>
 
 #include <cuda/std/cmath>
 #include <cuda/std/span>
 #include <cuda/std/utility>
 #include <cuda_runtime.h>
+#include <fmt/format.h>
 
 #include "loki/common/types.hpp"
 
@@ -46,14 +46,14 @@ inline void check_branch_fits(
     const std::source_location& loc = std::source_location::current()) {
     if ((branch_flags & kBranchFlagOverflow) != 0U) {
         throw error_check::DetailedException(
-            std::format("A parameter branches into more than branch_max={} "
+            fmt::format("A parameter branches into more than branch_max={} "
                         "children",
                         branch_max),
             loc);
     }
     if (n_leaves_branched > capacity) {
         throw error_check::DetailedException(
-            std::format("Branching a batch needs {} leaves but the branch "
+            fmt::format("Branching a batch needs {} leaves but the branch "
                         "workspace holds {}",
                         n_leaves_branched, capacity),
             loc);

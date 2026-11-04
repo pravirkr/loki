@@ -1,0 +1,43 @@
+# Floor-toolchain loki image for HPC clusters (docker/podman; Apptainer: docker/loki.def).
+# docker/Dockerfile is the Ubuntu 24.04 image; this one targets old drivers.
+#
+#   podman build -f docker/Dockerfile.floor -t loki:floor .
+#   apptainer build loki.sif docker-daemon://loki:floor   # or: podman save + docker-archive:
+#
+# Floor toolchain: Ubuntu 22.04 (system GCC 11, HDF5 1.10), CUDA 12.4, so a
+# 12.x build runs on driver R525 or newer. CPU code is x86-64-v2 (SSE4.2,
+# POPCNT, SSSE3: CPUs from about 2009). A baseline guest such as qemu64 lacks
+# those and will SIGILL. SASS covers Turing through Hopper (sm_75 to sm_90).
+# For AVX2 or AVX-512 nodes, rebuild with --build-arg LOKI_CPU_ARCH=x86-64-v3
+# (or x86-64-v4).
+ARG CUDA_VERSION=12.4.1
+
+FROM docker.io/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS build
+ARG LOKI_CPU_ARCH=x86-64-v2
+ARG LOKI_CUDA_ARCHITECTURES="75;80;86;89;90"
+ARG JOBS=8
+ENV CMAKE_BUILD_PARALLEL_LEVEL=${JOBS}
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        g++ git ca-certificates libhdf5-dev \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=ghcr.io/astral-sh/uv:0.8.17 /uv /usr/local/bin/uv
+ENV UV_PYTHON_INSTALL_DIR=/opt/python UV_LINK_MODE=copy UV_NO_CACHE=1
+RUN uv venv --python 3.12 /opt/loki && uv pip install --python /opt/loki cmake ninja
+COPY . /src/loki
+RUN PATH=/opt/loki/bin:$PATH uv pip install --python /opt/loki /src/loki \
+        -Ccmake.define.LOKI_CUDA=ON \
+        -Ccmake.define.LOKI_ENABLE_NATIVE_ARCH=OFF \
+        "-Ccmake.define.LOKI_CPU_ARCH=${LOKI_CPU_ARCH}" \
+        "-Ccmake.define.LOKI_CUDA_ARCHITECTURES=${LOKI_CUDA_ARCHITECTURES}" \
+        -Cbuild-dir=/tmp/loki-build \
+    && rm -rf /tmp/loki-build
+
+# Runtime: the CUDA runtime is linked statically, so the base image (driver
+# libraries come from the host via --nv / the NVIDIA container toolkit) is enough.
+FROM docker.io/nvidia/cuda:${CUDA_VERSION}-base-ubuntu22.04
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libgomp1 libhdf5-103-1 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /opt /opt
+ENV PATH=/opt/loki/bin:$PATH
+CMD ["loki", "--help"]

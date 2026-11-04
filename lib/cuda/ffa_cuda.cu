@@ -549,10 +549,14 @@ private:
     [[nodiscard]] math::GpuFFTManager& get_fft() noexcept { return *m_fft_ptr; }
 
     void log_info() {
+        if (timing::quiet()) {
+            return;
+        }
         // Log iniital and final fold shapes
         const auto& fold_shapes = m_ffa_plan.get_fold_shapes();
-        spdlog::info("P-FFA [{}] -> [{}]", fmt::join(fold_shapes.front(), ", "),
-                     fmt::join(fold_shapes.back(), ", "));
+        spdlog::debug("P-FFA [{}] -> [{}]",
+                      fmt::join(fold_shapes.front(), ", "),
+                      fmt::join(fold_shapes.back(), ", "));
         // The buffers and coordinates this core validates against (a sweep
         // core does not store the levels merged and scored on chip).
         const SizeType coord_size =
@@ -569,9 +573,9 @@ private:
                 : m_ffa_plan.get_coord_memory_usage() *
                       static_cast<float>(coord_size) /
                       static_cast<float>(m_ffa_plan.get_coord_size());
-        spdlog::info("FFACudaCore Memory{}: {:.2f} GB + {:.2f} GB (coords)",
-                     m_sweep_buffers ? " (sweep)" : "", memory_buffer_gb,
-                     memory_coord_gb);
+        spdlog::debug("FFACudaCore Memory{}: {:.2f} GB + {:.2f} GB (coords)",
+                      m_sweep_buffers ? " (sweep)" : "", memory_buffer_gb,
+                      memory_coord_gb);
     }
 
     // Level-0 frequencies of the brute fold (host source of the async
@@ -1013,7 +1017,7 @@ compute_ffa_cuda(std::span<const float> ts_e,
                  int device_id,
                  bool quiet) {
     using HostFoldT = HostFoldType<FoldTypeCUDA>;
-    timing::ScopedLogLevel scoped_log_level(quiet);
+    const timing::QuietScope quiet_scope(quiet);
     FFACudaCore<FoldTypeCUDA> ffa(cfg, device_id);
     const plans::FFAPlan<HostFoldT>& ffa_plan = ffa.get_plan();
     const auto buffer_size                    = ffa_plan.get_buffer_size();
@@ -1051,7 +1055,7 @@ compute_ffa_fourier_return_to_time_cuda(std::span<const float> ts_e,
                                         const search::FFASearchConfig& cfg,
                                         int device_id,
                                         bool quiet) {
-    timing::ScopedLogLevel scoped_log_level(quiet);
+    const timing::QuietScope quiet_scope(quiet);
     FFACudaCore<ComplexTypeCUDA> ffa(cfg, device_id);
     const plans::FFAPlan<ComplexType>& ffa_plan = ffa.get_plan();
     const auto buffer_size_time = ffa_plan.get_buffer_size_time();

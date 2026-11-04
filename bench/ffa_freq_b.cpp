@@ -1,6 +1,5 @@
 #include <cstdlib>
 #include <filesystem>
-#include <format>
 #include <fstream>
 #include <regex>
 #include <stdexcept>
@@ -8,6 +7,7 @@
 #include <string_view>
 
 #include <benchmark/benchmark.h>
+#include <fmt/format.h>
 
 #ifndef LOKI_APP_PATH
 #define LOKI_APP_PATH ""
@@ -77,14 +77,14 @@ void dump_timeseries_once() {
             "loki_app was not built (LOKI_APP_PATH undefined)");
     }
     const auto log_path       = temp_root().root / "simulate.log";
-    const std::string command = std::format(
+    const std::string command = fmt::format(
         "\"{}\" simulate --period 0.007 --dt 6.4e-5 --nsamps {} --snr 10 "
         "--ducy 0.1 --shape gaussian --phi0 0.5 --seed 1 -o \"{}\" > \"{}\" "
         "2>&1",
         app_path, kNsamps, temp_root().timeseries.string(), log_path.string());
     if (std::system(command.c_str()) != 0) {
         throw std::runtime_error(
-            std::format("loki simulate failed: {}", log_excerpt(log_path)));
+            fmt::format("loki simulate failed: {}", log_excerpt(log_path)));
     }
     dumped = true;
 }
@@ -104,7 +104,7 @@ void write_search_config(const std::filesystem::path& path,
     // The offline script uses f_max = 500 Hz (1 / 0.002). That period is
     // shorter than nbins * tsamp (32 * 6.4e-5 s), which the region planner
     // rejects. 488 Hz is the closest round cutoff that still satisfies it.
-    output << std::format("[input]\n"
+    output << fmt::format("[input]\n"
                           "timeseries = \"{}\"\n"
                           "\n"
                           "[preprocessing]\n"
@@ -135,7 +135,7 @@ void write_search_config(const std::filesystem::path& path,
                           "prefix = \"{}\"\n",
                           timeseries.string(), use_fourier ? "true" : "false",
                           bseg_brute > 0
-                              ? std::format("bseg_brute = {}\n", bseg_brute)
+                              ? fmt::format("bseg_brute = {}\n", bseg_brute)
                               : std::string{},
                           outdir.string(), prefix);
 }
@@ -176,7 +176,7 @@ void run_freq_search(benchmark::State& state,
 
     const std::string tag =
         std::string(use_fourier ? "fourier" : "time") +
-        (bseg_brute > 0 ? std::format("_bseg{}", bseg_brute) : std::string{});
+        (bseg_brute > 0 ? fmt::format("_bseg{}", bseg_brute) : std::string{});
     const auto case_dir    = temp_root().root / tag;
     const auto outdir      = case_dir / "out";
     const auto config_path = case_dir / "config.toml";
@@ -192,12 +192,12 @@ void run_freq_search(benchmark::State& state,
 
     const std::string app_path = LOKI_APP_PATH;
     const std::string command =
-        std::format("\"{}\" search ffa --config \"{}\" > \"{}\" 2>&1", app_path,
+        fmt::format("\"{}\" search ffa --config \"{}\" > \"{}\" 2>&1", app_path,
                     config_path.string(), log_path.string());
     for (auto _ : state) {
         if (std::system(command.c_str()) != 0) {
             state.SkipWithError(
-                std::format("loki search ffa failed: {}", log_excerpt(log_path))
+                fmt::format("loki search ffa failed: {}", log_excerpt(log_path))
                     .c_str());
             break;
         }

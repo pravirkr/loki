@@ -6,11 +6,11 @@
 
 #include <algorithm>
 #include <complex>
-#include <format>
 #include <limits>
 #include <span>
 #include <string_view>
 
+#include <fmt/format.h>
 #include <omp.h>
 #include <pocketfft_hdronly.h>
 
@@ -36,13 +36,13 @@ void check_batch(SizeType input_size,
                  std::string_view what) {
     error_check::check(
         n_in == 0 || batch_size <= std::numeric_limits<SizeType>::max() / n_in,
-        std::format("{}: batch_size * row length overflows SizeType", what));
+        fmt::format("{}: batch_size * row length overflows SizeType", what));
     error_check::check_equal(input_size, batch_size * n_in,
-                             std::format("{}: input size does not match the "
+                             fmt::format("{}: input size does not match the "
                                          "batch size",
                                          what));
     error_check::check_equal(output_size, batch_size * n_out,
-                             std::format("{}: output size does not match the "
+                             fmt::format("{}: output size does not match the "
                                          "batch size",
                                          what));
 }

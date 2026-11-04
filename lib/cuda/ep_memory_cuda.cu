@@ -1,10 +1,11 @@
 #include "lib/algorithms/ep_memory_cuda.hpp"
 
-#include <format>
 #include <map>
 #include <mutex>
 #include <string>
 #include <utility>
+
+#include <fmt/format.h>
 
 #include "loki/common/types.hpp"
 
@@ -39,7 +40,7 @@ std::string ep_cuda_device_arch(int device) {
     cuda_utils::check_cuda_call(
         cudaGetDeviceProperties(&prop, device),
         "EPRegionPlanner: cudaGetDeviceProperties failed");
-    return std::format("sm_{}{}", prop.major, prop.minor);
+    return fmt::format("sm_{}{}", prop.major, prop.minor);
 }
 
 } // namespace loki::algorithms::detail

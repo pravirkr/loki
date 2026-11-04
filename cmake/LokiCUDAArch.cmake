@@ -66,7 +66,12 @@ function(loki_resolve_cuda_arch_numbers out_list_var)
     endif()
   elseif(raw_archs MATCHES "^(all-major|all)$")
     # Fat-binary presets include Volta+ slices; assume cuRANDDx may be used.
-    list(APPEND resolved "70")
+    # The placeholder is the oldest slice the toolkit targets (CUDA 13: sm_75).
+    if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 13.0)
+      list(APPEND resolved "75")
+    else()
+      list(APPEND resolved "70")
+    endif()
   else()
     string(REPLACE ";" "," raw_archs "${raw_archs}")
     string(REPLACE " " "," raw_archs "${raw_archs}")
@@ -121,6 +126,13 @@ function(loki_validate_cuda_architectures)
     if(arch_int LESS LOKI_MIN_CUDA_ARCH)
       message(FATAL_ERROR "LOKI_CUDA_ARCHITECTURES includes sm_${arch_int}, but loki requires "
                           "sm_${LOKI_MIN_CUDA_ARCH} or higher."
+      )
+    endif()
+    # CUDA 13 dropped Maxwell, Pascal and Volta (sm_50 to sm_72).
+    if(arch_int LESS 75 AND CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 13.0)
+      message(FATAL_ERROR "LOKI_CUDA_ARCHITECTURES includes sm_${arch_int}, which CUDA "
+                          "${CMAKE_CUDA_COMPILER_VERSION} cannot target (CUDA 13 supports sm_75+). "
+                          "Build for sm_${arch_int} with a CUDA 12.x toolkit."
       )
     endif()
   endforeach()

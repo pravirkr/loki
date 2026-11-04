@@ -6,6 +6,7 @@
 #include <cuda/std/limits>
 #include <cuda/std/span>
 #include <cuda/std/type_traits>
+#include <fmt/format.h>
 #include <thrust/copy.h>
 
 #include "loki/common/types.hpp"
@@ -897,7 +898,7 @@ create_prune_dp_functs_cuda(std::string_view poly_basis,
             param_grid_count_init, dparams_init, nseg_ffa, tseg_ffa,
             std::move(cfg), batch_size, branch_max, device_id);
     }
-    throw std::runtime_error(std::format(
+    throw std::runtime_error(fmt::format(
         "Unknown poly_basis: '{}'. Valid options: 'taylor', 'chebyshev'",
         poly_basis));
 }

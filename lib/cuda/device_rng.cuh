@@ -5,13 +5,34 @@
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 700) &&                        \
     !defined(LOKI_FORCE_CURAND_RNG)
 
-#ifndef CURANDDX_SM
-#define CURANDDX_SM 700
-#endif
-
 #include <curanddx.hpp>
 
 namespace loki::device_rng {
+
+/**
+ * @brief cuRANDDx SM<> value for the architecture slice being compiled.
+ *
+ * Each slice of a fat binary (e.g. sm_75;sm_80;sm_89) gets its own value:
+ * the newest SM cuRANDDx knows that is not newer than the slice. Defining
+ * LOKI_CURANDDX_SM (the CMake cache variable of that name) pins one value
+ * for every slice.
+ */
+constexpr uint32_t curanddx_sm(uint32_t arch) {
+    constexpr uint32_t kKnown[] = {1210, 1200, 1030, 1000, 900, 890,
+                                   870,  860,  800,  750,  700};
+    for (const uint32_t sm : kKnown) {
+        if (arch >= sm) {
+            return sm;
+        }
+    }
+    return 700;
+}
+
+#ifdef LOKI_CURANDDX_SM
+inline constexpr uint32_t kCuranddxSM = LOKI_CURANDDX_SM;
+#else
+inline constexpr uint32_t kCuranddxSM = curanddx_sm(__CUDA_ARCH__);
+#endif
 
 /**
  * @brief cuRANDDx generator configuration for high-performance per-thread RNG.
@@ -22,7 +43,7 @@ namespace loki::device_rng {
  * @tparam Rounds Number of Philox rounds
  * @tparam SM Target SM architecture for cuRANDDx templates
  */
-template <uint32_t Rounds = 10, uint32_t SM = CURANDDX_SM>
+template <uint32_t Rounds = 10, uint32_t SM = kCuranddxSM>
 struct DeviceRNGConfig {
     using Generator = decltype(curanddx::Generator<curanddx::philox4_32>() +
                                curanddx::PhiloxRounds<Rounds>() +

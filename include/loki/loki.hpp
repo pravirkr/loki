@@ -7,9 +7,13 @@
 #include "loki/algorithms/regions.hpp"       // IWYU pragma: export
 #include "loki/common/backend.hpp"           // IWYU pragma: export
 #include "loki/common/coord.hpp"             // IWYU pragma: export
+#include "loki/common/interrupt.hpp"         // IWYU pragma: export
+#include "loki/common/progress.hpp"          // IWYU pragma: export
+#include "loki/common/terminal.hpp"          // IWYU pragma: export
 #include "loki/common/types.hpp"             // IWYU pragma: export
 #include "loki/detection/score.hpp"          // IWYU pragma: export
 #include "loki/detection/thresholds.hpp"     // IWYU pragma: export
+#include "loki/io/candidate_file.hpp"        // IWYU pragma: export
 #include "loki/io/observation.hpp"           // IWYU pragma: export
 #include "loki/io/preprocess.hpp"            // IWYU pragma: export
 #include "loki/io/timeseries.hpp"            // IWYU pragma: export
@@ -18,6 +22,8 @@
 #include "loki/search/candidates.hpp"        // IWYU pragma: export
 #include "loki/search/configs.hpp"           // IWYU pragma: export
 #include "loki/search/orbit.hpp"             // IWYU pragma: export
+#include "loki/search/provenance.hpp"        // IWYU pragma: export
+#include "loki/simulation/configs.hpp"       // IWYU pragma: export
 #include "loki/simulation/modulate.hpp"      // IWYU pragma: export
 #include "loki/simulation/pulse.hpp"         // IWYU pragma: export
 #include "loki/simulation/simulation.hpp"    // IWYU pragma: export

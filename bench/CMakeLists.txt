@@ -35,8 +35,9 @@ endif()
 
 add_executable(${LOKI_BENCH_TARGET} ${LOKI_BENCH_SOURCES})
 target_link_libraries(
-  ${LOKI_BENCH_TARGET} PRIVATE ${PROJECT_NAME}::${LOKI_LIBRARY_NAME} ${PROJECT_NAME}::internal
-                               ${LOKI_COMPILE_OPTIONS} benchmark::benchmark_main
+  ${LOKI_BENCH_TARGET} PRIVATE loki_fmt loki_spdlog ${PROJECT_NAME}::${LOKI_LIBRARY_NAME}
+                               ${PROJECT_NAME}::internal ${LOKI_COMPILE_OPTIONS}
+                               benchmark::benchmark_main
 )
 
 if(NOT TARGET loki_app)

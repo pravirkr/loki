@@ -34,9 +34,13 @@ void bind_ffa(py::module_& m) {
         [](const PyArrayT<float>& ts_e, const PyArrayT<float>& ts_v,
            const FFASearchConfig& cfg, bool quiet, bool show_progress,
            std::string_view backend, int device) {
-            auto [fold, ffa_plan] = algorithms::compute_ffa<float>(
-                to_span<const float>(ts_e), to_span<const float>(ts_v), cfg,
-                quiet, show_progress, make_exec(backend, device));
+            const auto ts_e_span  = to_span<const float>(ts_e);
+            const auto ts_v_span  = to_span<const float>(ts_v);
+            const auto exec       = make_exec(backend, device);
+            auto [fold, ffa_plan] = long_call([&] {
+                return algorithms::compute_ffa<float>(
+                    ts_e_span, ts_v_span, cfg, quiet, show_progress, exec);
+            });
             return std::make_tuple(as_pyarray(std::move(fold)),
                                    std::move(ffa_plan));
         },
@@ -49,9 +53,13 @@ void bind_ffa(py::module_& m) {
         [](const PyArrayT<float>& ts_e, const PyArrayT<float>& ts_v,
            const FFASearchConfig& cfg, bool quiet, bool show_progress,
            std::string_view backend, int device) {
-            auto [fold, ffa_plan] = algorithms::compute_ffa<ComplexType>(
-                to_span<const float>(ts_e), to_span<const float>(ts_v), cfg,
-                quiet, show_progress, make_exec(backend, device));
+            const auto ts_e_span  = to_span<const float>(ts_e);
+            const auto ts_v_span  = to_span<const float>(ts_v);
+            const auto exec       = make_exec(backend, device);
+            auto [fold, ffa_plan] = long_call([&] {
+                return algorithms::compute_ffa<ComplexType>(
+                    ts_e_span, ts_v_span, cfg, quiet, show_progress, exec);
+            });
             return std::make_tuple(as_pyarray(std::move(fold)),
                                    std::move(ffa_plan));
         },
@@ -64,10 +72,13 @@ void bind_ffa(py::module_& m) {
         [](const PyArrayT<float>& ts_e, const PyArrayT<float>& ts_v,
            const FFASearchConfig& cfg, bool quiet, bool show_progress,
            std::string_view backend, int device) {
-            auto [fold, ffa_plan] =
-                algorithms::compute_ffa_fourier_return_to_time(
-                    to_span<const float>(ts_e), to_span<const float>(ts_v), cfg,
-                    quiet, show_progress, make_exec(backend, device));
+            const auto ts_e_span  = to_span<const float>(ts_e);
+            const auto ts_v_span  = to_span<const float>(ts_v);
+            const auto exec       = make_exec(backend, device);
+            auto [fold, ffa_plan] = long_call([&] {
+                return algorithms::compute_ffa_fourier_return_to_time(
+                    ts_e_span, ts_v_span, cfg, quiet, show_progress, exec);
+            });
             return std::make_tuple(as_pyarray(std::move(fold)),
                                    std::move(ffa_plan));
         },
@@ -80,9 +91,13 @@ void bind_ffa(py::module_& m) {
         [](const PyArrayT<float>& ts_e, const PyArrayT<float>& ts_v,
            const FFASearchConfig& cfg, bool quiet, bool show_progress,
            std::string_view backend, int device) {
-            auto [scores, ffa_plan] = algorithms::compute_ffa_scores(
-                to_span<const float>(ts_e), to_span<const float>(ts_v), cfg,
-                quiet, show_progress, make_exec(backend, device));
+            const auto ts_e_span    = to_span<const float>(ts_e);
+            const auto ts_v_span    = to_span<const float>(ts_v);
+            const auto exec         = make_exec(backend, device);
+            auto [scores, ffa_plan] = long_call([&] {
+                return algorithms::compute_ffa_scores(
+                    ts_e_span, ts_v_span, cfg, quiet, show_progress, exec);
+            });
             return std::make_tuple(as_pyarray(std::move(scores)),
                                    std::move(ffa_plan));
         },
@@ -94,9 +109,11 @@ void bind_ffa(py::module_& m) {
         .def(py::init([](const FFASearchConfig& cfg, bool show_progress,
                          std::string_view backend, int device,
                          const search::CandidateOptions& candidates) {
-                 return std::make_unique<FFAFreqSweep>(
-                     cfg, candidates, show_progress,
-                     make_exec(backend, device));
+                 const auto exec = make_exec(backend, device);
+                 return long_call([&] {
+                     return std::make_unique<FFAFreqSweep>(cfg, candidates,
+                                                           show_progress, exec);
+                 });
              }),
              py::arg("cfg"), py::arg("show_progress") = true, py::kw_only(),
              py::arg("backend") = "cpu", py::arg("device") = 0,
@@ -107,9 +124,12 @@ void bind_ffa(py::module_& m) {
                const PyArrayT<float>& ts_v, const std::filesystem::path& outdir,
                const std::string& file_prefix, const std::string& config_toml,
                const io::ObservationMetadata& observation) {
-                self.execute(to_span<const float>(ts_e),
-                             to_span<const float>(ts_v), outdir, file_prefix,
-                             config_toml, observation);
+                const auto ts_e_span = to_span<const float>(ts_e);
+                const auto ts_v_span = to_span<const float>(ts_v);
+                long_call([&] {
+                    self.execute(ts_e_span, ts_v_span, outdir, file_prefix,
+                                 config_toml, observation);
+                });
             },
             py::arg("ts_e"), py::arg("ts_v"), py::arg("outdir"),
             py::arg("file_prefix") = "test", py::kw_only(),

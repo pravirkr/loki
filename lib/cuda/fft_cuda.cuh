@@ -6,7 +6,6 @@
  * FFT (ffa_portable_fft.cuh): no vendor FFT library. Internal.
  */
 
-#include <format>
 #include <memory>
 #include <span>
 #include <stdexcept>
@@ -14,6 +13,7 @@
 
 #include <cuda/std/span>
 #include <cuda_runtime.h>
+#include <fmt/format.h>
 
 #include "loki/common/types.hpp"
 #include "loki/utils/fft.hpp"
@@ -38,7 +38,7 @@ inline constexpr SizeType kGpuFFTMaxN = 2048;
 /// transform, naming the caller @p what.
 inline void check_gpu_fourier_nbins(SizeType nbins, std::string_view what) {
     if (!gpu_fft_supported(nbins)) {
-        throw std::invalid_argument(std::format(
+        throw std::invalid_argument(fmt::format(
             "{}: Fourier-domain folds on the GPU support nbins in [2, {}] "
             "(got {}); lower nbins_max, use time-domain folds or the CPU "
             "backend",
@@ -150,7 +150,7 @@ inline GpuFFTManager& cuda_fft(FFTManager& fft, std::string_view what) {
     auto& impl = loki::detail::HandleAccess::impl(fft);
     if (!impl.device) {
         throw std::invalid_argument(
-            std::format("{}: expected a GPU FFTManager", what));
+            fmt::format("{}: expected a GPU FFTManager", what));
     }
     return static_cast<GpuFFTPlans&>(*impl.device).manager;
 }

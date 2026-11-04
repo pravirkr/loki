@@ -378,6 +378,7 @@ tmp_files/
 
 # DynamicThresholdScheme script outputs (regenerate locally)
 bench/scripts/golden/
+bench/scripts/schemes/golden/
 bench/scripts/results/
 
 # LSP config files

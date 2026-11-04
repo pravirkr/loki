@@ -2,6 +2,7 @@
 #include "lib/cuda/ep_score_cuda.cuh"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cmath>
 #include <cstdint>
@@ -562,8 +563,10 @@ TEST_CASE("Final CUDA EP width ties select the first configured width",
     }
     // Power-of-two transforms keep the zero signal exact. Bluestein may
     // introduce tiny nonzero samples, so that input is not an exact score tie.
-    for (const auto [nbins, kN] :
-         {std::pair<SizeType, SizeType>{32, 17}, {64, 65536}, {128, 17}}) {
+    // A named list: nvcc < 12.6 cannot deduce a braced range here.
+    constexpr std::array<std::pair<SizeType, SizeType>, 3> kCases{
+        {{32, 17}, {64, 65536}, {128, 17}}};
+    for (const auto& [nbins, kN] : kCases) {
         CAPTURE(nbins, kN);
         const SizeType nf = nbins / 2 + 1;
         std::vector<ComplexTypeCUDA> folds_h(kN * 2 * nf,

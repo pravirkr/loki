@@ -1,12 +1,12 @@
 #include <cstdlib>
 #include <filesystem>
-#include <format>
 #include <fstream>
 #include <iterator>
 #include <string>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <fmt/format.h>
 
 #include "loki/common/types.hpp"
 #include "loki/io/timeseries.hpp"
@@ -42,7 +42,7 @@ TEST_CASE("FFA CLI dry run plans with the input header", "[cli]") {
     }
     const auto log_path = base / "dry_run.log";
     const std::string cmd =
-        std::format(R"("{}" search ffa --config "{}" --dry-run > "{}" 2>&1)",
+        fmt::format(R"("{}" search ffa --config "{}" --dry-run > "{}" 2>&1)",
                     app_path, toml_path.string(), log_path.string());
     // NOLINTNEXTLINE(bugprone-command-processor): runs the built CLI on purpose
     REQUIRE(std::system(cmd.c_str()) == 0);

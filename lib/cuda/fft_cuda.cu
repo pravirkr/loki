@@ -4,7 +4,6 @@
 #include <bit>
 #include <cstddef>
 #include <cstdint>
-#include <format>
 #include <limits>
 #include <memory>
 #include <string_view>
@@ -14,6 +13,7 @@
 
 #include <cuda/std/span>
 #include <cuda_runtime.h>
+#include <fmt/format.h>
 #include <thrust/device_vector.h>
 
 #include "lib/cuda/cuda_utils.cuh"
@@ -344,7 +344,7 @@ template <class F> void dispatch_size(SizeType n, F&& f) {
     }
 #undef LOKI_FFT_M
     throw std::invalid_argument(
-        std::format("GpuFFTManager: unsupported length {}", n));
+        fmt::format("GpuFFTManager: unsupported length {}", n));
 }
 
 void check_extent(SizeType batch_size,
@@ -354,7 +354,7 @@ void check_extent(SizeType batch_size,
                   SizeType in_row,
                   SizeType out_row) {
     error_check::check(gpu_fft_supported(n_real),
-                       std::format("GpuFFTManager: length {} is not in [2, "
+                       fmt::format("GpuFFTManager: length {} is not in [2, "
                                    "{}]",
                                    n_real, kGpuFFTMaxN));
     const bool fits =
@@ -391,7 +391,7 @@ public:
 
     void prepare(SizeType n) {
         error_check::check(gpu_fft_supported(n),
-                           std::format("GpuFFTManager: length {} is not in "
+                           fmt::format("GpuFFTManager: length {} is not in "
                                        "[2, {}]",
                                        n, kGpuFFTMaxN));
         (void)table(complex_length(n));

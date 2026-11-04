@@ -1,9 +1,11 @@
+#include <exception>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "loki/common/backend.hpp"
 #include "loki/io/preprocess.hpp"
@@ -255,4 +257,79 @@ TEST_CASE("Candidate grouping policy is strict and configurable",
         "[candidates]\ngrouping = \"invalid\"\n"));
     REQUIRE_THROWS(loki::search::FFATomlConfig::from_string(
         "[candidates]\ngrouping = true\n"));
+}
+
+TEST_CASE("FFATomlConfig rejects values of the wrong type", "[config][ffa]") {
+    const auto message_for = [](const std::string& toml) -> std::string {
+        try {
+            (void)loki::search::FFATomlConfig::from_string(toml);
+        } catch (const std::exception& ex) {
+            return ex.what();
+        }
+        return {};
+    };
+    // Each of these used to be ignored, or converted, without a word.
+    REQUIRE(message_for("[search]\nf_min = \"100\"\n")
+                .find("search.f_min must be a number") != std::string::npos);
+    REQUIRE(message_for("[search]\nuse_fourier = 1\n")
+                .find("search.use_fourier must be a boolean") !=
+            std::string::npos);
+    REQUIRE(message_for("[search]\nnbins = true\n")
+                .find("search.nbins must be an integer") != std::string::npos);
+    REQUIRE(message_for("[performance]\nbackend = 1\n")
+                .find("performance.backend must be a string") !=
+            std::string::npos);
+    REQUIRE(message_for("[input]\ntsamp = \"6.4e-5\"\n")
+                .find("input.tsamp must be a number") != std::string::npos);
+    REQUIRE(message_for("[preprocessing]\nblock_sigma = true\n")
+                .find("preprocessing.block_sigma must be a number") !=
+            std::string::npos);
+    REQUIRE(message_for("search = 1\n").find("search must be a table") !=
+            std::string::npos);
+    // Whole numbers are still reals.
+    REQUIRE(loki::search::FFATomlConfig::from_string("[search]\nf_min = 2\n")
+                .f_min == 2.0);
+}
+
+namespace {
+
+std::string ffa_message_for(const std::string& toml) {
+    try {
+        (void)loki::search::FFATomlConfig::from_string(toml);
+    } catch (const std::exception& ex) {
+        return ex.what();
+    }
+    return {};
+}
+
+} // namespace
+
+TEST_CASE("FFATomlConfig names the key of every wrong type", "[config][ffa]") {
+    const auto [toml, expected] = GENERATE(table<std::string, std::string>({
+        {"[input]\ndm = true\n", "input.dm must be a number"},
+        {"[input]\nbarycentric = 1\n", "input.barycentric must be a boolean"},
+        {"[preprocessing]\nmethod = 1\n",
+         "preprocessing.method must be a string"},
+        {"[candidates]\nradius = true\n", "candidates.radius must be a number"},
+        {"[candidates]\ngrouping = 1\n",
+         "candidates.grouping must be a string"},
+        {"[candidates]\nmax_candidates = 5.0\n",
+         "candidates.max_candidates must be an integer"},
+        {"[candidates]\nharmonic_denominator_max = 20000\n",
+         "candidates.harmonic_denominator_max must be at most 10000"},
+        {"[search.orbit]\norder = 1\n", "search.orbit.order must be a string"},
+        {"[search.orbit]\norder = \"accel\"\nm_c_max = true\n",
+         "search.orbit.m_c_max must be a number"},
+    }));
+    CAPTURE(toml);
+    CHECK_THAT(ffa_message_for(toml),
+               Catch::Matchers::ContainsSubstring(expected));
+}
+
+TEST_CASE("FFATomlConfig suggests the key a typo meant", "[config][ffa]") {
+    CHECK_THAT(ffa_message_for("[search]\nf_mn = 1.0\n"),
+               Catch::Matchers::ContainsSubstring(
+                   "search.f_mn: unknown key (did you mean 'f_min'?)"));
+    CHECK_THAT(ffa_message_for("[serach]\nf_min = 1.0\n"),
+               Catch::Matchers::ContainsSubstring("(did you mean 'search'?)"));
 }

@@ -99,7 +99,7 @@ public:
     /// engine allocates at construction (an evaluation-only CPU engine
     /// reports what a simulating one would need, without allocating).
     virtual SizeType run_memory_bytes() const { return 0; }
-    virtual void run(SizeType thres_neigh) = 0;
+    virtual void run(SizeType thres_neigh, bool show_progress) = 0;
     /// @p h0_only skips the signal branch: success_h1 is 1 in the states and
     /// the noise states are those of the full evaluation (its branches use
     /// independent streams).
