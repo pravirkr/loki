@@ -4,7 +4,6 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <format>
 #include <functional>
 #include <limits>
 #include <random>
@@ -14,6 +13,7 @@
 #include <string_view>
 #include <vector>
 
+#include <fmt/format.h>
 #include <spdlog/spdlog.h>
 
 #include "loki/common/types.hpp"
@@ -143,7 +143,7 @@ BeamGuess beam_guess_from_string(std::string_view guess) {
         return BeamGuess::kWindow;
     }
     throw std::invalid_argument(
-        std::format("unknown beam guess '{}' (expected 'analytic', 'pilot' "
+        fmt::format("unknown beam guess '{}' (expected 'analytic', 'pilot' "
                     "or 'window')",
                     guess));
 }
@@ -256,7 +256,7 @@ std::vector<float> score_sigma(std::span<const float> h1_scores,
 
 void validate_scheme_inputs(const SchemeInputs& in, std::string_view who) {
     const auto fail = [who](const std::string& msg) {
-        throw std::invalid_argument(std::format("{}: {}", who, msg));
+        throw std::invalid_argument(fmt::format("{}: {}", who, msg));
     };
     for (const float x : {in.ref_ducy, in.ducy_max, in.wtsp, in.beam_width,
                           in.prob_min, in.snr_final}) {
@@ -270,13 +270,13 @@ void validate_scheme_inputs(const SchemeInputs& in, std::string_view who) {
     for (SizeType i = 0; i < in.branching_pattern.size(); ++i) {
         const float b = in.branching_pattern[i];
         if (!utils::is_finite(b) || b <= 0.0F) {
-            fail(std::format("branching_pattern[{}] = {} must be finite and "
+            fail(fmt::format("branching_pattern[{}] = {} must be finite and "
                              "positive",
                              i, b));
         }
     }
     if (in.nbins < 4 || in.nbins > 1024) {
-        fail(std::format("nbins={} must be in [4, 1024]", in.nbins));
+        fail(fmt::format("nbins={} must be in [4, 1024]", in.nbins));
     }
     if (in.ntrials == 0 || in.nprobs == 0 || in.batch_size == 0) {
         fail("ntrials, nprobs and batch_size must be positive");
@@ -285,7 +285,7 @@ void validate_scheme_inputs(const SchemeInputs& in, std::string_view who) {
         fail("need nthresholds >= 2 and a finite snr_final > 0.1");
     }
     if (!(in.prob_min > 0.0F && in.prob_min < 1.0F)) {
-        fail(std::format("prob_min={} must be in (0, 1)", in.prob_min));
+        fail(fmt::format("prob_min={} must be in (0, 1)", in.prob_min));
     }
     if (!(in.ref_ducy > 0.0F && in.ref_ducy < 1.0F) ||
         !(in.ducy_max > 0.0F && in.ducy_max < 1.0F)) {

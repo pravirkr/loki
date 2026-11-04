@@ -4,7 +4,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
-#include <format>
 #include <fstream>
 #include <iterator>
 #include <optional>
@@ -14,6 +13,7 @@
 #include <string_view>
 #include <vector>
 
+#include <fmt/format.h>
 #include <toml++/toml.hpp> // NOLINT(misc-include-cleaner) -- toml::table, parse, parse_error
 
 #include "loki/common/types.hpp"
@@ -95,14 +95,14 @@ std::string did_you_mean(std::string_view key,
         }
     }
     return best.empty() ? std::string{}
-                        : std::format(" (did you mean '{}'?)", best);
+                        : fmt::format(" (did you mean '{}'?)", best);
 }
 
 toml::table parse(std::string_view text) {
     try {
         return toml::parse(text);
     } catch (const toml::parse_error& err) {
-        throw std::runtime_error(std::format(
+        throw std::runtime_error(fmt::format(
             "TOML parse error at line {}, col {}: {}", err.source().begin.line,
             err.source().begin.column, err.description()));
     }
@@ -111,11 +111,11 @@ toml::table parse(std::string_view text) {
 std::string read_file(const std::filesystem::path& path) {
     if (!std::filesystem::exists(path)) {
         throw std::runtime_error(
-            std::format("Configuration file not found: '{}'", path.string()));
+            fmt::format("Configuration file not found: '{}'", path.string()));
     }
     std::ifstream file(path);
     if (!file.is_open()) {
-        throw std::runtime_error(std::format(
+        throw std::runtime_error(fmt::format(
             "Could not open configuration file: '{}'", path.string()));
     }
     return {std::istreambuf_iterator<char>(file),
@@ -135,12 +135,12 @@ void collect_unknown_keys(const toml::table& table,
                           RemovedKeyHint hint) {
     for (const auto& [key, _] : table) {
         if (!is_allowed_key(key.str(), allowed)) {
-            const auto path = std::format("{}.{}", table_path, key.str());
+            const auto path = fmt::format("{}.{}", table_path, key.str());
             const auto text = hint == nullptr ? std::string_view{} : hint(path);
             errors.push_back(text.empty()
-                                 ? std::format("{}: unknown key{}", path,
+                                 ? fmt::format("{}: unknown key{}", path,
                                                did_you_mean(key.str(), allowed))
-                                 : std::format("{}: {}", path, text));
+                                 : fmt::format("{}: {}", path, text));
         }
     }
 }
@@ -155,7 +155,7 @@ void throw_if_errors(const std::vector<std::string>& errors,
         message += "; ";
         message += errors[i];
     }
-    throw std::invalid_argument(std::format("{}: {}", label, message));
+    throw std::invalid_argument(fmt::format("{}: {}", label, message));
 }
 
 void reject_nonfinite_floats(const toml::node& node,
@@ -166,24 +166,24 @@ void reject_nonfinite_floats(const toml::node& node,
             reject_nonfinite_floats(
                 child, text,
                 path.empty() ? std::string(key.str())
-                             : std::format("{}.{}", path, key.str()));
+                             : fmt::format("{}.{}", path, key.str()));
         }
     } else if (const auto* arr = node.as_array()) {
         for (std::size_t j = 0; j < arr->size(); ++j) {
             reject_nonfinite_floats((*arr)[j], text,
-                                    std::format("{}[{}]", path, j));
+                                    fmt::format("{}[{}]", path, j));
         }
     } else if (node.is_floating_point() &&
                is_nonfinite_literal(text, node.source().begin)) {
         throw std::invalid_argument(
-            std::format("{} must be finite (got nan or inf)", path));
+            fmt::format("{} must be finite (got nan or inf)", path));
     }
 }
 
 int64_t require_non_negative_int64(int64_t value, std::string_view path) {
     if (value < 0) {
         throw std::invalid_argument(
-            std::format("{} must be non-negative (got {})", path, value));
+            fmt::format("{} must be non-negative (got {})", path, value));
     }
     return value;
 }
@@ -196,7 +196,7 @@ std::optional<double> read_number(const toml::table& table,
         return std::nullopt;
     }
     if (!node->is_number()) {
-        throw std::invalid_argument(std::format("{} must be a number", path));
+        throw std::invalid_argument(fmt::format("{} must be a number", path));
     }
     return number_value(*node);
 }
@@ -209,7 +209,7 @@ std::optional<bool> read_bool(const toml::table& table,
         return std::nullopt;
     }
     if (!node->is_boolean()) {
-        throw std::invalid_argument(std::format("{} must be a boolean", path));
+        throw std::invalid_argument(fmt::format("{} must be a boolean", path));
     }
     return node->value_exact<bool>();
 }
@@ -222,7 +222,7 @@ std::optional<SizeType> read_count(const toml::table& table,
         return std::nullopt;
     }
     if (!node->is_integer()) {
-        throw std::invalid_argument(std::format("{} must be an integer", path));
+        throw std::invalid_argument(fmt::format("{} must be an integer", path));
     }
     return static_cast<SizeType>(
         require_non_negative_int64(*node->value_exact<int64_t>(), path));
@@ -236,14 +236,14 @@ std::optional<std::string> read_string(const toml::table& table,
         return std::nullopt;
     }
     if (!node->is_string()) {
-        throw std::invalid_argument(std::format("{} must be a string", path));
+        throw std::invalid_argument(fmt::format("{} must be a string", path));
     }
     return node->value_exact<std::string>();
 }
 
 double array_number(const toml::node& node, std::string_view path) {
     if (!node.is_number()) {
-        throw std::invalid_argument(std::format("{} must hold numbers", path));
+        throw std::invalid_argument(fmt::format("{} must hold numbers", path));
     }
     return number_value(node);
 }
@@ -258,7 +258,7 @@ std::optional<std::vector<double>> read_number_array(const toml::table& table,
     const auto* arr = node->as_array();
     if (arr == nullptr) {
         throw std::invalid_argument(
-            std::format("{} must be an array of numbers", path));
+            fmt::format("{} must be an array of numbers", path));
     }
     std::vector<double> values;
     values.reserve(arr->size());
@@ -278,7 +278,7 @@ std::optional<std::vector<SizeType>> read_count_array(const toml::table& table,
     const auto* arr = node->as_array();
     if (arr == nullptr) {
         throw std::invalid_argument(
-            std::format("{} must be an array of integers", path));
+            fmt::format("{} must be an array of integers", path));
     }
     std::vector<SizeType> values;
     values.reserve(arr->size());
@@ -286,7 +286,7 @@ std::optional<std::vector<SizeType>> read_count_array(const toml::table& table,
         const auto val = el.value_exact<int64_t>();
         if (!val) {
             throw std::invalid_argument(
-                std::format("{} must be an array of integers", path));
+                fmt::format("{} must be an array of integers", path));
         }
         values.push_back(
             static_cast<SizeType>(require_non_negative_int64(*val, path)));
@@ -305,7 +305,7 @@ namespace {
             out += '\\';
             out += ch;
         } else if (byte < 0x20U || byte == 0x7FU) {
-            out += std::format("\\u{:04X}", static_cast<unsigned>(byte));
+            out += fmt::format("\\u{:04X}", static_cast<unsigned>(byte));
         } else {
             out += ch;
         }
@@ -329,10 +329,10 @@ namespace {
         return *val ? "true" : "false";
     }
     if (const auto val = node.value_exact<int64_t>()) {
-        return std::format("{}", *val);
+        return fmt::format("{}", *val);
     }
     if (const auto val = node.value_exact<double>()) {
-        auto text = std::format("{}", *val);
+        auto text = fmt::format("{}", *val);
         if (text.find_first_of(".en") == std::string::npos) {
             text += ".0";
         }
@@ -344,15 +344,15 @@ namespace {
 void append_table(std::string& out,
                   std::string_view name,
                   const toml::table& table) {
-    out += std::format("{}[{}]\n", out.empty() ? "" : "\n", name);
+    out += fmt::format("{}[{}]\n", out.empty() ? "" : "\n", name);
     for (const auto& [key, value] : table) {
         if (!value.is_table()) {
-            out += std::format("{} = {}\n", key.str(), toml_value(value));
+            out += fmt::format("{} = {}\n", key.str(), toml_value(value));
         }
     }
     for (const auto& [key, value] : table) {
         if (const auto* sub = value.as_table()) {
-            append_table(out, std::format("{}.{}", name, key.str()), *sub);
+            append_table(out, fmt::format("{}.{}", name, key.str()), *sub);
         }
     }
 }

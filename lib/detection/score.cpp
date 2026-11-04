@@ -4,7 +4,6 @@
 #include <bit>
 #include <cmath>
 #include <cstdint>
-#include <format>
 #include <limits>
 #include <memory>
 #include <numbers>
@@ -12,6 +11,8 @@
 #include <span>
 #include <stdexcept>
 #include <vector>
+
+#include <fmt/format.h>
 
 #include "loki/common/backend.hpp"
 #include "loki/common/types.hpp"
@@ -224,7 +225,7 @@ private:
             generate_boxcar_templates(m_templates, m_widths_arr, m_nbins_pow2);
         } else {
             throw std::invalid_argument(
-                std::format("Invalid template shape: {}", m_shape));
+                fmt::format("Invalid template shape: {}", m_shape));
         }
     }
 }; // End MatchedFilter::Impl definition

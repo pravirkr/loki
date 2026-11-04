@@ -104,19 +104,19 @@ else()
 endif()
 
 if(CMAKE_CUDA_COMPILER)
-  target_link_libraries(
-    ${LOKI_LIBRARY_NAME} PRIVATE ${LOKI_CUDA_OPTIONS} CUDA::cuda_driver CUDA::curand
-  )
+  # cuRAND is used through its device headers only (lib/cuda/device_rng.cuh), so
+  # libcurand is not linked.
+  target_link_libraries(${LOKI_LIBRARY_NAME} PRIVATE ${LOKI_CUDA_OPTIONS} CUDA::cuda_driver)
   if(LOKI_NEEDS_CURANDDX)
     target_link_libraries(${LOKI_LIBRARY_NAME} PRIVATE $<BUILD_INTERFACE:mathdx::curanddx>)
   endif()
-  # Runtime libraries: PRIVATE for shared loki, link-only PUBLIC for static loki.
+  # The CUDA runtime is linked statically, so a build needs no libcudart at run
+  # time (only the driver's libcuda). PRIVATE for shared loki, link-only PUBLIC
+  # for static loki.
   if(BUILD_SHARED_LIBS)
-    target_link_libraries(${LOKI_LIBRARY_NAME} PRIVATE CUDA::cudart)
+    target_link_libraries(${LOKI_LIBRARY_NAME} PRIVATE CUDA::cudart_static)
   else()
-    target_link_libraries(
-      ${LOKI_LIBRARY_NAME} PUBLIC $<LINK_ONLY:CUDA::cudart>
-    )
+    target_link_libraries(${LOKI_LIBRARY_NAME} PUBLIC $<LINK_ONLY:CUDA::cudart_static>)
   endif()
 endif()
 
@@ -135,6 +135,10 @@ add_library(${LOKI_LIBRARY_NAME}_internal INTERFACE)
 add_library(${PROJECT_NAME}::internal ALIAS ${LOKI_LIBRARY_NAME}_internal)
 target_include_directories(${LOKI_LIBRARY_NAME}_internal INTERFACE ${PROJECT_SOURCE_DIR})
 target_compile_definitions(${LOKI_LIBRARY_NAME}_internal INTERFACE ${LOKI_BACKEND_DEFINITIONS})
+# Private headers include fmt and spdlog (lib/detail/progress.hpp, ...).
+target_link_libraries(
+  ${LOKI_LIBRARY_NAME}_internal INTERFACE fmt::fmt-header-only spdlog::spdlog_header_only
+)
 if(CMAKE_CUDA_COMPILER)
   target_include_directories(
     ${LOKI_LIBRARY_NAME}_internal SYSTEM INTERFACE ${LOKI_CUDA_INCLUDE_DIRS}

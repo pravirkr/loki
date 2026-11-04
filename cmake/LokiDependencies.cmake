@@ -28,19 +28,6 @@ else()
   message(STATUS "LOKI_USE_SYSTEM_DEPS=OFF: using pinned CPM dependencies.")
 endif()
 
-# psrio — header-only SIGPROC/PRESTO reader. CPM adds the subdirectory so the
-# psrio::psrio interface target (include path and C++20) is available.
-CPMAddPackage(
-  NAME psrio
-  VERSION 0.2.0
-  URL https://github.com/pravirkr/psrio/archive/refs/tags/v0.2.0.tar.gz
-  OPTIONS "PSRIO_BUILD_TESTS OFF"
-  EXCLUDE_FROM_ALL YES
-  SYSTEM YES
-)
-if(NOT TARGET psrio::psrio)
-  message(FATAL_ERROR "psrio::psrio target not available after CPM setup.")
-endif()
 
 
 # fmt — keep version in sync with spdlog's expected fmt release.
@@ -68,6 +55,21 @@ if(NOT TARGET fmt::fmt-header-only)
 endif()
 if(NOT TARGET spdlog::spdlog_header_only)
   message(FATAL_ERROR "spdlog::spdlog_header_only target not available after CPM setup.")
+endif()
+
+# psrio — header-only SIGPROC/PRESTO reader. After fmt: psrio links fmt::fmt-header-only
+# and reuses this target. CPM adds the subdirectory so the
+# psrio::psrio interface target (include path and C++20) is available.
+CPMAddPackage(
+  NAME psrio
+  VERSION 0.4.0
+  URL https://github.com/pravirkr/psrio/archive/refs/tags/v0.4.0.tar.gz
+  OPTIONS "PSRIO_BUILD_TESTS OFF"
+  EXCLUDE_FROM_ALL YES
+  SYSTEM YES
+)
+if(NOT TARGET psrio::psrio)
+  message(FATAL_ERROR "psrio::psrio target not available after CPM setup.")
 endif()
 
 # -----------------------------------------------------------------------

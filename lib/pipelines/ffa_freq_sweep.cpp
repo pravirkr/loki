@@ -2,7 +2,6 @@
 
 #include <chrono>
 #include <filesystem>
-#include <format>
 #include <memory>
 #include <span>
 #include <stdexcept>
@@ -11,6 +10,7 @@
 #include <system_error>
 #include <utility>
 
+#include <fmt/format.h>
 #include <spdlog/spdlog.h>
 
 #include "loki/common/backend.hpp"
@@ -161,7 +161,7 @@ void FFAFreqSweep::publish_candidates(
     }
     if (!std::filesystem::exists(spool)) {
         throw std::invalid_argument(
-            std::format("FFA spool '{}' does not exist", spool.string()));
+            fmt::format("FFA spool '{}' does not exist", spool.string()));
     }
     io::detail::write_candidate_results(spool, output, observation, candidates);
 }

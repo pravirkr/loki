@@ -720,10 +720,12 @@ float WorldTreeCUDA<FoldTypeCUDA>::add_batch_scattered(
         thrust::raw_pointer_cast(m_scratch_indices_1.data());
     ScoreAboveThresholdFunctor functor{.scores    = scores_batch.data(),
                                        .threshold = effective_threshold};
+    // Raw pointers, not span iterators: the Thrust of CUDA < 12.6 cannot take
+    // cuda::std::span iterators.
     const auto end_it = thrust::copy_if(
-        thrust::cuda::par.on(stream), indices_batch.begin(),
-        indices_batch.begin() + static_cast<IndexType>(slots_to_write),
-        indices_batch.begin(), // stencil = src_idx
+        thrust::cuda::par.on(stream), indices_batch.data(),
+        indices_batch.data() + static_cast<IndexType>(slots_to_write),
+        indices_batch.data(), // stencil = src_idx
         m_scratch_pending_indices, functor);
 
     const SizeType pending_count =
@@ -901,8 +903,8 @@ float WorldTreeCUDA<FoldTypeCUDA>::get_prune_threshold(
         thrust::raw_pointer_cast(m_scores.data()), start_idx, m_size,
         SizeType{1}, thrust::raw_pointer_cast(m_scratch_scores.data()), stream);
     // Append batch scores [m_size ... total]
-    thrust::gather(thrust::cuda::par.on(stream), indices_batch.begin(),
-                   indices_batch.begin() + slots_to_write, scores_batch.begin(),
+    thrust::gather(thrust::cuda::par.on(stream), indices_batch.data(),
+                   indices_batch.data() + slots_to_write, scores_batch.data(),
                    m_scratch_scores.begin() + m_size);
 
     // The item at 'total_capacity-1' (in descending order) is the smallest

@@ -19,3 +19,7 @@ papers
 .claude
 .cursor
 *.md.bak
+tmp_files
+tmp_files2
+src/loki/libloki*.so
+*.sif

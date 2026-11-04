@@ -26,11 +26,11 @@
  */
 
 #include <cstdint>
-#include <format>
 #include <string_view>
 
 #include <cuda/std/span>
 #include <cuda_runtime.h>
+#include <fmt/format.h>
 
 #include "loki/common/types.hpp"
 
@@ -58,7 +58,7 @@ void check_u32_threads(SizeType blocks,
                        std::string_view kernel) {
     error_check::check_less_equal(
         blocks * threads_per_block, SizeType{1} << 32U,
-        std::format("{}: work exceeds the 32-bit thread index", kernel));
+        fmt::format("{}: work exceeds the 32-bit thread index", kernel));
 }
 
 } // namespace
@@ -660,7 +660,7 @@ void ffa_iter_freq_cuda(const float* __restrict__ fold_in,
             grid_z = (ncoords_cur + kMaxGridDim - 1) / kMaxGridDim;
 
             if (grid_z > kMaxGridDim) {
-                throw std::runtime_error(std::format(
+                throw std::runtime_error(fmt::format(
                     "ncoords_cur={} too large: exceeds 3D grid capacity ({})",
                     ncoords_cur, kMaxGridDim * kMaxGridDim));
             }

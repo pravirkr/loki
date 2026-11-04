@@ -2,11 +2,12 @@
 
 #include <concepts>
 #include <cstddef>
-#include <format>
 #include <source_location>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+
+#include <fmt/format.h>
 
 namespace loki::error_check {
 class DetailedException : public std::runtime_error {
@@ -19,7 +20,7 @@ public:
 private:
     static std::string compose_message(std::string_view msg,
                                        const std::source_location& loc) {
-        return std::format("{}:{}:{}: error: {}\n  in function '{}'",
+        return fmt::format("{}:{}:{}: error: {}\n  in function '{}'",
                            loc.file_name(), loc.line(), loc.column(), msg,
                            loc.function_name());
     }
@@ -36,8 +37,8 @@ inline void check_with_comparator(
     const std::source_location& loc = std::source_location::current()) {
     if (!cmp(a, b)) {
         const std::string composed =
-            msg.empty() ? std::format("Check failed: {} {} {}", a, op_str, b)
-                        : std::format("{} ({} {} {})", msg, a, op_str, b);
+            msg.empty() ? fmt::format("Check failed: {} {} {}", a, op_str, b)
+                        : fmt::format("{} ({} {} {})", msg, a, op_str, b);
         throw DetailedException(composed, loc);
     }
 }
@@ -135,8 +136,8 @@ inline void check_power_of_2(
     if ((value & (value - 1)) != 0) {
         const std::string composed =
             msg.empty()
-                ? std::format("Check failed: {} is not a power of 2", value)
-                : std::format("{} must be power of 2 (got {})", msg, value);
+                ? fmt::format("Check failed: {} is not a power of 2", value)
+                : fmt::format("{} must be power of 2 (got {})", msg, value);
         throw DetailedException(composed, loc);
     }
 }
@@ -163,8 +164,8 @@ check_range(Index index,
                          static_cast<std::make_unsigned_t<Size>>(size)) {
         const std::string composed =
             msg.empty()
-                ? std::format("Index {} out of range [0, {})", index, size)
-                : std::format("{} (index {} >= size {})", msg, index, size);
+                ? fmt::format("Index {} out of range [0, {})", index, size)
+                : fmt::format("{} (index {} >= size {})", msg, index, size);
         throw DetailedException(composed, loc);
     }
 }
@@ -178,7 +179,7 @@ inline void check_branch_product_fits(
     const std::source_location& loc = std::source_location::current()) {
     if (product > capacity || written > capacity - product) {
         throw DetailedException(
-            std::format("A leaf's {} children do not fit in the branch "
+            fmt::format("A leaf's {} children do not fit in the branch "
                         "workspace ({} of {} slots already filled)",
                         product, written, capacity),
             loc);

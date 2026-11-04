@@ -1,7 +1,6 @@
 #include <algorithm>
 #include <cstdint>
 #include <filesystem>
-#include <format>
 #include <memory>
 #include <span>
 #include <stdexcept>
@@ -10,6 +9,7 @@
 #include <utility>
 #include <vector>
 
+#include <fmt/format.h>
 #include <fmt/ranges.h>
 #include <omp.h>
 #include <spdlog/spdlog.h>
@@ -119,9 +119,9 @@ public:
         m_total_passing_scores = 0;
 
         // Write metadata to result file
-        const std::string filebase = std::format("{}_ffa", file_prefix);
+        const std::string filebase = fmt::format("{}_ffa", file_prefix);
         const auto result_file =
-            outdir / std::format("{}_results.h5", filebase);
+            outdir / fmt::format("{}_results.h5", filebase);
         auto writer = search::FFAResultWriter(
             result_file, search::FFAResultWriter::Mode::kWrite);
         writer.write_metadata(

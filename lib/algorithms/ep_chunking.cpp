@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <format>
 #include <functional>
 #include <map>
 #include <numeric>
@@ -13,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include <fmt/format.h>
 #include <spdlog/spdlog.h>
 
 #include "loki/common/plans.hpp"
@@ -246,7 +246,7 @@ private:
         // Every run was fitted next to the fixed shared size, which bounds
         // the final one: the peak fits by construction.
         if (state.plan.peak_memory_gb > m_limit_gb) {
-            throw std::logic_error(std::format(
+            throw std::logic_error(fmt::format(
                 "EPRegionPlanner: replanned sweep peak {:.4f} GB exceeds the "
                 "limit {:.4f} GB",
                 state.plan.peak_memory_gb, m_limit_gb));
@@ -579,7 +579,7 @@ private:
                                         tolerance);
                 }
                 state.failure = PassFailure{
-                    .message = std::format(
+                    .message = fmt::format(
                         "EPRegionPlanner: Cannot fit minimum viable chunk at "
                         "[{:08.3f}, {:08.3f}] Hz (nbins={}).\n"
                         "  Required memory: {}{:.2f} GB (per-thread workspaces "
@@ -712,7 +712,7 @@ private:
                 eval          = std::move(*absorbed);
             }
             if (nominal_start >= current_f_end) {
-                throw std::runtime_error(std::format(
+                throw std::runtime_error(fmt::format(
                     "EPRegionPlanner: no progress in [{:08.3f}, {:08.3f}] Hz.",
                     f_start, current_f_end));
             }

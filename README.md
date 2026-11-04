@@ -17,8 +17,8 @@ Worked examples on simulated data are in [`notebooks/`](notebooks/README.md).
 
 ### Compilers
 
-- **GCC >= 13.2** or **Clang >= 18** (C++20 support required)
-- **CUDA >= 12.6** *(optional, for GPU acceleration)*
+- **GCC >= 11** or **Clang >= 17** (C++20 support required)
+- **CUDA >= 12.2** *(optional, for GPU acceleration)*
 - **CMake >= 3.25**
 - **Python >= 3.12** *(for Python bindings)*
 
@@ -30,11 +30,11 @@ These are **never** downloaded by loki and must be discoverable by CMake on your
 
 | Library | Minimum Version | conda-forge install |
 | --------- | ----------------- | --------------------- |
-| HDF5 | - | `mamba install hdf5` |
+| HDF5 | 1.10 (1.14 tested; 2.x not yet supported) | `mamba install "hdf5=1.14"` |
 | OpenMP | - | `mamba install libomp` *(macOS)* / `libgomp` *(Linux)* |
 | CMake | 3.25 | `mamba install cmake>=3.25` |
 | Ninja | - | `mamba install ninja` |
-| GCC | 13.2 | `mamba install gcc>=13.2 gxx>=13.2` *(Linux)* |
+| GCC | 11 | system GCC 11+, or `mamba install gxx_linux-64` *(Linux)* |
 | Python | 3.12 | `mamba install python>=3.12` |
 
 Header-only C++ dependencies (fmt, spdlog, HighFive, CLI11, xsimd, etc.) are fetched automatically via [CPM.cmake](https://github.com/cpm-cmake/CPM.cmake) unless `LOKI_USE_SYSTEM_DEPS=ON`.
@@ -45,13 +45,17 @@ Frozen minimum requirements for CUDA builds:
 
 | Component | Minimum |
 | --------- | ------- |
-| CUDA Toolkit | 12.6 |
-| GCC (when used as nvcc host compiler) | 13.2 |
+| CUDA Toolkit | 12.2 |
+| GCC (when used as nvcc host compiler) | 11 |
+| NVIDIA driver | R525 (CUDA 12.x builds), R580 (CUDA 13.x builds) |
 | CMake | 3.25 |
-| GPU compute capability | **sm_50** (Maxwell) |
+| GPU compute capability | **sm_50** (Maxwell) with CUDA 12.x; sm_75 with CUDA 13 |
 
-- CUDA Toolkit 12.6+, with a host compiler supported by that toolkit.
-- For CUDA 12.6 specifically: GCC 7.3–13.2, or Clang 7–18.
+- CUDA Toolkit 12.2+, with a host compiler that toolkit accepts: nvcc 12.2–12.3 take GCC <= 12
+  (Clang <= 16), nvcc 12.4–12.6 GCC <= 13.2 (Clang <= 17/18), nvcc 12.8+ GCC 14.
+- An older driver runs a newer 12.x build through CUDA minor-version compatibility, as long as
+  the binary holds SASS for the GPU (the default `native` architecture does). Check the driver
+  with `nvidia-smi` on a compute node, not the login node.
 
 ---
 
@@ -65,7 +69,7 @@ Best for using loki from Python in a conda environment. Builds one extension, `l
 mamba create -n loki_env python=3.12
 mamba activate loki_env
 mamba install -c conda-forge cmake>=3.25 ninja hdf5 libomp  # macOS
-# Linux: also install gcc>=13.2 gxx>=13.2
+# Linux: system GCC >= 11 works; otherwise also install gxx_linux-64
 
 export CPM_SOURCE_CACHE="$HOME/.cache/CPM"   # optional; avoids re-downloading CPM deps
 
@@ -153,6 +157,8 @@ Project-specific options use the **`LOKI_`** prefix. Standard CMake options keep
 | **`LOKI_CUDA`** | `AUTO` | CUDA build mode: `AUTO`, `ON`, or `OFF` |
 | **`LOKI_CUDA_ARCHITECTURES`** | `native` | Passed to `CMAKE_CUDA_ARCHITECTURES` (`native`, `61;80`, `all-major`, …). Minimum supported GPU: **sm_50**. |
 | **`LOKI_ENABLE_NATIVE_ARCH`** | `ON` | Add `-march=native` in Release builds |
+| **`LOKI_CPU_ARCH`** | *(empty)* | Fixed `-march` value instead of native (`x86-64-v2`, `x86-64-v3`, …), for binaries that run on other machines. The `portable` preset sets `x86-64-v2` and SASS `75;80;86;89;90`. |
+| **`LOKI_CURANDDX_SM`** | *(empty)* | Pin cuRANDDx's `SM<>` value for every architecture slice; empty: each slice uses its own |
 | **`LOKI_USE_SYSTEM_DEPS`** | `OFF` | Prefer system CPM packages over pinned downloads |
 | **`LOKI_BUILD_PYTHON`** | `ON` | Build Python extension modules |
 | **`LOKI_PYTHON_INPLACE`** | `OFF` | Copy the built module into `src/loki/` for `PYTHONPATH=src` (the `release` preset turns it on; ignored under pip) |
@@ -173,7 +179,8 @@ Project-specific options use the **`LOKI_`** prefix. Standard CMake options keep
 
 ### GPU architecture
 
-- **Minimum GPU:** sm_50 (Maxwell). CMake rejects lower values in `LOKI_CUDA_ARCHITECTURES`.
+- **Minimum GPU:** sm_50 (Maxwell). CMake rejects lower values in `LOKI_CUDA_ARCHITECTURES`,
+  and sm_50–sm_72 with a CUDA 13 toolkit (which supports sm_75+; use CUDA 12.x for older GPUs).
 - **Fat binaries:** pass multiple SMs, e.g. `-DLOKI_CUDA_ARCHITECTURES='61;80'` or `all-major`.
 - **MathDX / cuRANDDx** is downloaded and linked only when any target arch is sm_70+ and `LOKI_FORCE_CURAND_RNG=OFF`.
 
@@ -331,6 +338,28 @@ rebuilding it:
 ```dockerfile
 COPY --from=loki:cuda /opt/venv /opt/loki-venv
 ENV PATH=/opt/loki-venv/bin:$PATH
+```
+
+### HPC clusters (older drivers and compilers)
+
+Loki builds with the system compiler of Debian 12, Ubuntu 22.04 and RHEL 9
+(GCC >= 11) and CUDA 12.2+. Check the driver on a **compute node**
+(`nvidia-smi`): a CUDA 12.x build runs on driver R525 or newer.
+
+- Conda: [`environment.yml`](environment.yml) is the floor toolchain (CUDA 12.4,
+  GCC 12, HDF5 1.14); its header lists the exports and the `pip install`
+  line. [`environment-modern.yml`](environment-modern.yml) is the newest one.
+  Build on the node type that runs loki: `-march=native` from a login node
+  can crash (SIGILL) on older compute nodes. For one install shared by
+  several node types, build with `-Ccmake.define.LOKI_ENABLE_NATIVE_ARCH=OFF
+  -Ccmake.define.LOKI_CPU_ARCH=x86-64-v2`.
+- Containers: [`docker/Dockerfile.floor`](docker/Dockerfile.floor) (docker or
+  podman) and [`docker/loki.def`](docker/loki.def) (Apptainer) build the same
+  floor image: Ubuntu 22.04, CUDA 12.4, x86-64-v2, SASS `75;80;86;89;90`.
+
+```bash
+apptainer build loki.sif docker/loki.def
+apptainer exec --nv loki.sif loki --version
 ```
 
 ---

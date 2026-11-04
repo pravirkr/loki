@@ -32,12 +32,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - compiler: g++-13
-            apt_profile: cpp-gcc13
-            ccache_prefix: ci-gcc13
-          - compiler: clang++-18
-            apt_profile: cpp-clang18
-            ccache_prefix: ci-clang18
+          # The toolchain floor (CMakeLists.txt) and the newest packaged GCC.
+          - compiler: g++-11
+            apt_profile: cpp-gcc11
+            ccache_prefix: ci-gcc11
+          - compiler: clang++-17
+            apt_profile: cpp-clang17
+            ccache_prefix: ci-clang17
+          - compiler: g++-14
+            apt_profile: cpp-gcc14
+            ccache_prefix: ci-gcc14
 
     steps:
       - uses: actions/checkout@v7

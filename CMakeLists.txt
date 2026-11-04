@@ -21,17 +21,17 @@ endif()
 
 # Compiler version requirements
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-  if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 13.2)
+  if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 11.0)
     message(
       FATAL_ERROR
-        "GCC >= 13.2 required for complete C++20 support. Found: ${CMAKE_CXX_COMPILER_VERSION}"
+        "GCC >= 11 required for C++20 support. Found: ${CMAKE_CXX_COMPILER_VERSION}"
     )
   endif()
 elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-  if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 18.0)
+  if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 17.0)
     message(
       FATAL_ERROR
-        "Clang >= 18.0 required for complete C++20 support. Found: ${CMAKE_CXX_COMPILER_VERSION}"
+        "Clang >= 17 required for C++20 support. Found: ${CMAKE_CXX_COMPILER_VERSION}"
     )
   endif()
 else()
@@ -51,6 +51,13 @@ option(LOKI_BUILD_APPLICATIONS "Build command-line applications" ON)
 option(LOKI_ENABLE_COVERAGE "Enable coverage reporting" OFF)
 option(LOKI_ENABLE_IPO "Enable interprocedural optimization (LTO) on Release builds" OFF)
 option(LOKI_ENABLE_NATIVE_ARCH "Use -march=native in Release builds" ON)
+# A fixed CPU target instead of native, for binaries that run on other machines
+# (containers, shared installs, login node vs compute node): x86-64-v2 runs on
+# any x86-64 since ~2009, x86-64-v3 needs AVX2/FMA, x86-64-v4 AVX-512.
+set(LOKI_CPU_ARCH
+    ""
+    CACHE STRING "Release -march value (e.g. x86-64-v2, x86-64-v3); overrides native when set"
+)
 option(LOKI_ENABLE_NVTX "NVTX ranges for nsys profiling (needs the CUDA toolkit headers)" OFF)
 option(LOKI_WARNINGS_AS_ERRORS "Make compiler warnings errors in Loki's own C++ sources" OFF)
 # Debug stays unoptimized. The asan preset sets -O1 so sanitizers are usable in CI.
@@ -137,6 +144,14 @@ include(GNUInstallDirs)
 # Interface target: link any library/executable to this to inherit these flags.
 # Usage: target_link_libraries(my_target PRIVATE ${LOKI_COMPILE_OPTIONS})
 set(LOKI_COMPILE_OPTIONS ${PROJECT_NAME}_compile_options)
+if(LOKI_CPU_ARCH)
+  set(LOKI_MARCH_FLAG "-march=${LOKI_CPU_ARCH}")
+elseif(LOKI_ENABLE_NATIVE_ARCH)
+  set(LOKI_MARCH_FLAG "-march=native")
+else()
+  set(LOKI_MARCH_FLAG "")
+endif()
+message(STATUS "CPU target (Release): ${LOKI_MARCH_FLAG}")
 add_library(${LOKI_COMPILE_OPTIONS} INTERFACE)
 target_compile_options(${LOKI_COMPILE_OPTIONS} INTERFACE -Wall -Wextra -Wpedantic)
 # Loki's targets only: the fetched dependencies keep their own warning flags.
@@ -148,7 +163,7 @@ target_compile_options(
   ${LOKI_COMPILE_OPTIONS}
   INTERFACE "$<$<CONFIG:Debug>:${LOKI_DEBUG_OPTIMIZATION};-g>"
             $<$<CONFIG:Release>:-O3;-DNDEBUG;-ffast-math>
-            $<$<AND:$<CONFIG:Release>,$<BOOL:${LOKI_ENABLE_NATIVE_ARCH}>>:-march=native>
+            $<$<CONFIG:Release>:${LOKI_MARCH_FLAG}>
             $<$<CONFIG:RelWithDebInfo>:-O2;-DNDEBUG;-g> $<$<CONFIG:MinSizeRel>:-Os;-DNDEBUG>
 )
 
@@ -178,7 +193,7 @@ if(LOKI_CUDA STREQUAL "ON" OR LOKI_CUDA STREQUAL "AUTO")
     enable_language(CUDA)
   elseif(LOKI_CUDA STREQUAL "ON")
     message(FATAL_ERROR "LOKI_CUDA=ON but no CUDA compiler (nvcc) was found. "
-                        "Install CUDA >= 12.6 or use LOKI_CUDA=AUTO/OFF."
+                        "Install CUDA >= 12.2 or use LOKI_CUDA=AUTO/OFF."
     )
   else()
     message(STATUS "CUDA compiler not found. Building CPU-only (LOKI_CUDA=AUTO).")
@@ -188,8 +203,9 @@ elseif(LOKI_CUDA STREQUAL "OFF")
 endif()
 
 if(CMAKE_CUDA_COMPILER)
-  if(CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 12.6.0)
-    message(FATAL_ERROR "CUDA >= 12.6 required. Found: ${CMAKE_CUDA_COMPILER_VERSION}")
+  if(CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 12.2.0)
+    # CUDA 12.0/12.1 ship a CCCL without cuda::std::span.
+    message(FATAL_ERROR "CUDA >= 12.2 required. Found: ${CMAKE_CUDA_COMPILER_VERSION}")
   endif()
   message(STATUS "Found CUDA ${CMAKE_CUDA_COMPILER_VERSION}.")
 
@@ -197,6 +213,8 @@ if(CMAKE_CUDA_COMPILER)
   find_package(CUDAToolkit REQUIRED)
 
   set(CMAKE_CUDA_STANDARD ${CMAKE_CXX_STANDARD})
+  # Static CUDA runtime for every CUDA-linked target (see lib/CMakeLists.txt).
+  set(CMAKE_CUDA_RUNTIME_LIBRARY Static)
   set(CMAKE_CUDA_STANDARD_REQUIRED ON)
   set(CMAKE_CUDA_EXTENSIONS OFF)
 

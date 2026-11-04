@@ -2,12 +2,13 @@
 
 #include <algorithm>
 #include <cmath>
-#include <format>
 #include <span>
 #include <stdexcept>
 #include <tuple>
 #include <utility>
 #include <vector>
+
+#include <fmt/format.h>
 
 #include "loki/common/types.hpp"
 #include "loki/utils/psr_utils.hpp"
@@ -205,7 +206,7 @@ std::tuple<std::vector<double>, double>
 branch_param(double param_cur, double dparam_cur, double dparam_new) {
     if (dparam_cur <= 0.0 || dparam_new <= 0.0) {
         throw std::invalid_argument(
-            std::format("Both dparam_cur and dparam_new must be positive (got "
+            fmt::format("Both dparam_cur and dparam_new must be positive (got "
                         "{}, {})",
                         dparam_cur, dparam_new));
     }
@@ -238,7 +239,7 @@ std::pair<double, SizeType> branch_param_padded(std::span<double> out_values,
                                                 SizeType branch_max) {
     if (dparam_cur <= 0.0 || dparam_new <= 0.0) {
         throw std::invalid_argument(
-            std::format("Both dparam_cur and dparam_new must be positive (got "
+            fmt::format("Both dparam_cur and dparam_new must be positive (got "
                         "{}, {})",
                         dparam_cur, dparam_new));
     }
@@ -271,7 +272,7 @@ std::pair<double, SizeType> branch_dparam_crackle(double dparam_cur,
                                                   SizeType branch_max) {
     if (dparam_cur <= 0.0 || dparam_new <= 0.0) {
         throw std::invalid_argument(
-            std::format("Both dparam_cur and dparam_new must be positive (got "
+            fmt::format("Both dparam_cur and dparam_new must be positive (got "
                         "{}, {})",
                         dparam_cur, dparam_new));
     }

@@ -5,7 +5,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
-#include <format>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -17,6 +16,7 @@
 #include <utility>
 #include <vector>
 
+#include <fmt/format.h>
 #include <highfive/highfive.hpp>
 #include <omp.h>
 #include <spdlog/spdlog.h>
@@ -162,7 +162,7 @@ public:
         }
         if (!(min_pd > 0.0F && min_pd < 1.0F)) {
             throw std::invalid_argument(
-                std::format("DynamicThresholdScheme: min_pd={} must be in "
+                fmt::format("DynamicThresholdScheme: min_pd={} must be in "
                             "(0, 1)",
                             min_pd));
         }
@@ -196,7 +196,7 @@ public:
             detection::generate_box_width_trials(m_nbins, m_ducy_max, m_wtsp);
         if (*std::ranges::max_element(m_box_score_widths) >= m_nbins) {
             throw std::invalid_argument(
-                std::format("ducy_max={} gives a box width >= nbins={}",
+                fmt::format("ducy_max={} gives a box width >= nbins={}",
                             m_ducy_max, m_nbins));
         }
         m_nh1      = std::min<SizeType>(kSharedH1PerTrial * m_ntrials,
@@ -224,7 +224,7 @@ public:
             const auto n = get_current_thresholds_idx(s).size();
             if (n == 0) {
                 throw std::invalid_argument(
-                    std::format("Threshold beam of stage {} is empty", s));
+                    fmt::format("Threshold beam of stage {} is empty", s));
             }
             m_max_beam = std::max(m_max_beam, n);
         }
@@ -392,7 +392,7 @@ public:
     }
 
     std::string save(const std::string& outdir) const override {
-        const std::filesystem::path filebase = std::format(
+        const std::filesystem::path filebase = fmt::format(
             "dynscheme_{}_nstages_{:03d}_nthresh_{:03d}_nprobs_{:03d}_"
             "ntrials_{:04d}_snr_{:04.1f}_ducy_{:04.2f}_beam_{:03.1f}.h5",
             mode_to_string(m_mode), m_nstages, m_nthresholds, m_nprobs,

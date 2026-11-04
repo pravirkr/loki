@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <format>
 #include <limits>
 #include <numeric>
 #include <optional>
@@ -11,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include <fmt/format.h>
 #include <spdlog/spdlog.h>
 
 #include "loki/common/backend.hpp"
@@ -151,7 +151,7 @@ search::FFASearchConfig cfg_for_exec(const search::FFASearchConfig& cfg,
         const double usable_gb = free_gb - detail::kDeviceReserveGB;
         if (usable_gb < 1.0) {
             throw std::runtime_error(
-                std::format("Insufficient GPU memory: {:.2f} GB available, "
+                fmt::format("Insufficient GPU memory: {:.2f} GB available, "
                             "need at least 1 GB",
                             usable_gb));
         }
@@ -192,7 +192,7 @@ std::vector<coord::FFARegion> generate_ffa_regions(double p_min,
                                      "nbins_max must be >= nbins_min.");
     error_check::check_greater(
         p_min, 2.0 * tsamp,
-        std::format("p_min ({:.9f} s) must exceed 2*tsamp ({:.9f} s); the "
+        fmt::format("p_min ({:.9f} s) must exceed 2*tsamp ({:.9f} s); the "
                     "requested f_max = {:.6f} Hz meets or exceeds the "
                     "Nyquist frequency ({:.6f} Hz) for tsamp={:.9f} s. "
                     "Lower f_max (raise p_min) or use a finer tsamp.",
@@ -200,7 +200,7 @@ std::vector<coord::FFARegion> generate_ffa_regions(double p_min,
                     tsamp));
     error_check::check_greater_equal(
         p_min, static_cast<double>(nbins_min) * tsamp,
-        std::format("p_min ({:.9f} s) must be >= nbins_min ({}) * tsamp "
+        fmt::format("p_min ({:.9f} s) must be >= nbins_min ({}) * tsamp "
                     "({:.9f} s) = {:.9f} s; "
                     "the requested f_max = {:.6f} Hz allows fewer than "
                     "nbins_min samples per period. "
@@ -229,7 +229,7 @@ std::vector<coord::FFARegion> generate_ffa_regions(double p_min,
                     std::min(p_cur_low * octave_scale, p_max);
                 error_check::check_greater(
                     p_cur_high, p_cur_low,
-                    std::format("Period grid stalled at P={:.17g} s with "
+                    fmt::format("Period grid stalled at P={:.17g} s with "
                                 "octave_scale={:.17g}.",
                                 p_cur_low, octave_scale));
                 regions.push_back({
@@ -245,7 +245,7 @@ std::vector<coord::FFARegion> generate_ffa_regions(double p_min,
         const double p_cur_high = std::min(p_cur_low * octave_scale, p_max);
         error_check::check_greater(
             p_cur_high, p_cur_low,
-            std::format("Period grid stalled at P={:.17g} s with "
+            fmt::format("Period grid stalled at P={:.17g} s with "
                         "octave_scale={:.17g}.",
                         p_cur_low, octave_scale));
         regions.push_back({
@@ -455,7 +455,7 @@ private:
         const auto max_drift = calculate_max_drift(m_base_cfg);
         // Log drift information
         if (max_drift < 0.0 || max_drift >= 1.0) {
-            throw std::runtime_error(std::format(
+            throw std::runtime_error(fmt::format(
                 "FFARegionPlanner: max_drift must be in [0, 1); got {:.6f}. "
                 "This typically indicates a parameter range that is too large "
                 "for the observation duration.",
@@ -505,7 +505,7 @@ private:
             effective_limit_gb -= input_gb;
         }
         if (effective_limit_gb <= 0.0) {
-            throw std::runtime_error(std::format(
+            throw std::runtime_error(fmt::format(
                 "FFARegionPlanner: max_process_memory_gb ({:.2f} GB) must "
                 "exceed the safety margin ({:.2f} GB).",
                 max_memory_gb, detail::kUnmodelledReserveGB));
@@ -515,7 +515,7 @@ private:
 
     static void check_drift_expansion(double f_start, double max_drift) {
         if (f_start * (1.0 - max_drift) <= 0.0) {
-            throw std::runtime_error(std::format(
+            throw std::runtime_error(fmt::format(
                 "FFARegionPlanner: drift expansion would push f_start "
                 "({:.6f} Hz) to a non-positive frequency (drift={:.6f}). "
                 "Reduce parameter ranges or raise f_min.",
@@ -533,14 +533,14 @@ private:
                              double max_drift) const {
         if (nominal_end <= nominal_start) {
             throw std::runtime_error(
-                std::format("FFARegionPlanner: zero/negative-width chunk "
+                fmt::format("FFARegionPlanner: zero/negative-width chunk "
                             "[{:.8f}, {:.8f}] Hz.",
                             nominal_start, nominal_end));
         }
         const double actual_start = nominal_start * (1.0 - max_drift);
         const double actual_end   = nominal_end * (1.0 + max_drift);
         if (actual_start <= 0.0 || actual_end <= actual_start) {
-            throw std::runtime_error(std::format(
+            throw std::runtime_error(fmt::format(
                 "FFARegionPlanner: invalid drift-expanded range "
                 "[{:.8f}, {:.8f}] Hz from nominal [{:.8f}, {:.8f}] Hz.",
                 actual_start, actual_end, nominal_start, nominal_end));
@@ -723,7 +723,7 @@ private:
             cut_gb = std::max(allocated_gb - limit_gb, 2.0 * cut_gb);
             chunk_limit_gb -= cut_gb;
         }
-        throw std::runtime_error(std::format(
+        throw std::runtime_error(fmt::format(
             "FFARegionPlanner: could not fit the sweep workspace in {:.2f} GB "
             "after {} attempts. This is a planner bug.",
             limit_gb, kMaxLimitAttempts));
@@ -767,7 +767,7 @@ private:
                 const auto drift_span =
                     (f_end * (1.0 + max_drift)) -
                     ((f_end - min_width) * (1.0 - max_drift));
-                throw std::runtime_error(std::format(
+                throw std::runtime_error(fmt::format(
                     "FFARegionPlanner: Cannot fit minimum viable chunk at "
                     "the top of [{:08.3f}, {:08.3f}] Hz.\n"
                     "  Nominal range: {:.3f} Hz, drift-expanded span: {:.3f} "
@@ -837,7 +837,7 @@ private:
                 return;
             }
             if (f_end - grid[steps - 1] < kMinChunkWidthHz) {
-                throw std::runtime_error(std::format(
+                throw std::runtime_error(fmt::format(
                     "FFARegionPlanner: no chunking of [{:08.3f}, {:08.3f}] Hz "
                     "(nbins={}) fits {:.2f} GB at {} grid steps. This is a "
                     "planner bug.",
@@ -934,7 +934,7 @@ private:
             if (!fits(min_eval)) {
                 const auto drift_span = (current_f_end * (1.0 + max_drift)) -
                                         (min_probe_start * (1.0 - max_drift));
-                throw std::runtime_error(std::format(
+                throw std::runtime_error(fmt::format(
                     "FFARegionPlanner: Cannot fit minimum viable chunk at "
                     "the top of [{:08.3f}, {:08.3f}] Hz.\n"
                     "  Nominal range: {:.3f} Hz, drift-expanded span: {:.3f} "
@@ -985,7 +985,7 @@ private:
             // Defensive: bisection is guaranteed to make progress because the
             // minimum-width probe fits. If this triggers, there's a logic bug.
             if (nominal_start >= current_f_end) {
-                throw std::runtime_error(std::format(
+                throw std::runtime_error(fmt::format(
                     "FFARegionPlanner: no progress in [{:08.3f}, {:08.3f}] Hz "
                     "with nbins={}. This is a planner bug.",
                     f_start, current_f_end, nbins));

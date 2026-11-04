@@ -1,8 +1,8 @@
 #pragma once
 
-#include <format>
 #include <limits>
 
+#include <fmt/format.h>
 #include <pybind11/iostream.h>
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
@@ -180,7 +180,7 @@ inline void bind_prune_rfi(py::module& m) {
         .def_readwrite("a_lo", &ParamWindow::a_lo)
         .def_readwrite("a_hi", &ParamWindow::a_hi)
         .def("__repr__", [](const ParamWindow& w) {
-            return std::format(
+            return fmt::format(
                 "ParamWindow(f_lo={}, f_hi={}, a_lo={}, a_hi={})", w.f_lo,
                 w.f_hi, w.a_lo, w.a_hi);
         });

@@ -1,5 +1,4 @@
 #include <filesystem>
-#include <format>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -7,6 +6,7 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <fmt/format.h>
 #include <highfive/highfive.hpp>
 
 #include "loki/algorithms/ep_regions.hpp"
@@ -61,7 +61,7 @@ TEST_CASE("EP sweep writer preserves the merged run layout", "[ep_writer]") {
     loki::pipelines::detail::EPSweepWriter writer(dir / "direct.h5", chunks,
                                                   cfg, 0.1F, "taylor", 0.1F);
     for (loki::SizeType i = 0; i < 16; ++i) {
-        auto run = payload(std::format("run_{:03d}", i), i == 0 ? 0 : 100);
+        auto run = payload(fmt::format("run_{:03d}", i), i == 0 ? 0 : 100);
         loki::search::PruneResultWriter append(
             old_file, loki::search::PruneResultWriter::Mode::kAppend);
         append.write_run_results(
@@ -82,7 +82,7 @@ TEST_CASE("EP sweep writer preserves the merged run layout", "[ep_writer]") {
     CHECK(direct.getGroup("/").listAttributeNames() ==
           merged.getGroup("/").listAttributeNames());
     for (loki::SizeType i = 0; i < 16; ++i) {
-        const auto path = std::format("chunks/chunk_0000/runs/run_{:03d}", i);
+        const auto path = fmt::format("chunks/chunk_0000/runs/run_{:03d}", i);
         CHECK(direct.getGroup(path).listObjectNames() ==
               merged.getGroup(path).listObjectNames());
         CHECK(direct.getDataSet(path + "/param_sets").getDimensions() ==

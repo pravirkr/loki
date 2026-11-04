@@ -2,13 +2,14 @@
 
 #include <algorithm>
 #include <cmath>
-#include <format>
 #include <numbers>
 #include <numeric>
 #include <optional>
 #include <span>
 #include <stdexcept>
 #include <vector>
+
+#include <fmt/format.h>
 
 #include "loki/common/types.hpp"
 
@@ -20,7 +21,7 @@ namespace {
 
 void require_positive(double value, const char* name) {
     if (!utils::is_finite(value) || value <= 0.0) {
-        throw std::invalid_argument(std::format(
+        throw std::invalid_argument(fmt::format(
             "circular orbit limits: {} must be positive and finite, got {}",
             name, value));
     }
@@ -45,12 +46,12 @@ circular_param_limits(double f_min,
     require_positive(orbit.m_c_max, "m_c_max");
     require_positive(orbit.m_p_min, "m_p_min");
     if (f_max <= f_min) {
-        throw std::invalid_argument(std::format(
+        throw std::invalid_argument(fmt::format(
             "circular orbit limits: f_max ({}) must exceed f_min ({})", f_max,
             f_min));
     }
     if (poly_order < 2 || poly_order > 5) {
-        throw std::invalid_argument(std::format(
+        throw std::invalid_argument(fmt::format(
             "circular orbit limits: poly_order must be 2 (accel), 3 (jerk), "
             "4 (snap) or 5 (crackle), got {}",
             poly_order));
@@ -63,7 +64,7 @@ circular_param_limits(double f_min,
     };
     const double beta = deriv(1) / utils::kCval;
     if (!(beta < 1.0)) {
-        throw std::invalid_argument(std::format(
+        throw std::invalid_argument(fmt::format(
             "circular orbit limits: p_orb_min = {} s with m_c_max = {} and "
             "m_p_min = {} needs a velocity of {:.3g} c",
             orbit.p_orb_min, orbit.m_c_max, orbit.m_p_min, beta));

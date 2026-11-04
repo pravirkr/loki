@@ -3,7 +3,6 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
-#include <format>
 #include <fstream>
 #include <optional>
 #include <span>
@@ -13,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include <fmt/format.h>
 #include <toml++/toml.hpp> // NOLINT(misc-include-cleaner) -- toml::table
 
 #include "lib/detail/toml_schema.hpp"
@@ -132,7 +132,7 @@ void SimulateTomlConfig::write_default(const std::filesystem::path& path) {
     std::ofstream file(path);
     if (!file.is_open()) {
         throw std::runtime_error(
-            std::format("Could not open file for writing default config: '{}'",
+            fmt::format("Could not open file for writing default config: '{}'",
                         path.string()));
     }
     file << default_toml_string();
@@ -170,7 +170,7 @@ void SimulateTomlConfig::validate() const {
                             std::string_view what) {
         if (!toml_utils::is_allowed_key(value, allowed)) {
             errors.push_back(
-                std::format("{} is '{}'{}", what, value,
+                fmt::format("{} is '{}'{}", what, value,
                             toml_utils::did_you_mean(value, allowed)));
         }
     };

@@ -7,7 +7,6 @@
 #include <cstdint>
 #include <exception>
 #include <filesystem>
-#include <format>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -24,6 +23,7 @@
 #include <vector>
 
 #include <CLI/CLI.hpp>
+#include <fmt/format.h>
 #include <highfive/highfive.hpp>
 #include <omp.h>
 #include <spdlog/sinks/ansicolor_sink.h>
@@ -71,7 +71,7 @@ std::string version_text() {
         backends += backends.empty() ? "" : ", ";
         backends += loki::to_string(b);
     }
-    return std::format("loki {} (backends: {})", LOKI_VERSION, backends);
+    return fmt::format("loki {} (backends: {})", LOKI_VERSION, backends);
 }
 
 /// The command line of this run, set by configure_output().
@@ -253,7 +253,7 @@ std::string read_text_file(const std::filesystem::path& path) {
 void check_frequency_range(const loki::search::FFATomlConfig& cfg) {
     if (cfg.f_min <= 0.0 || cfg.f_max <= cfg.f_min) {
         throw std::invalid_argument(
-            std::format("Invalid frequency range: [{:.3f}, {:.3f}] Hz",
+            fmt::format("Invalid frequency range: [{:.3f}, {:.3f}] Hz",
                         cfg.f_min, cfg.f_max));
     }
 }
@@ -267,7 +267,7 @@ loki::Exec search_exec(const loki::search::FFATomlConfig& cfg) {
         .device   = cfg.device,
     };
     if (!loki::is_available(exec.backend)) {
-        throw std::runtime_error(std::format(
+        throw std::runtime_error(fmt::format(
             "backend '{}' was requested but this build does not contain it",
             loki::to_string(exec.backend)));
     }
@@ -291,7 +291,7 @@ SearchTimeSeries load_search_timeseries(const loki::search::FFATomlConfig& cfg,
     }
     const std::filesystem::path ts_path = cfg.timeseries_path;
     if (!std::filesystem::exists(ts_path)) {
-        throw std::runtime_error(std::format(
+        throw std::runtime_error(fmt::format(
             "Input timeseries does not exist: {}", ts_path.string()));
     }
 
@@ -356,7 +356,7 @@ loki::SizeType power_of_two_nsamps(loki::SizeType actual_nsamps,
         return actual_nsamps;
     }
     if (policy == NsampsPolicy::kFail) {
-        throw std::invalid_argument(std::format(
+        throw std::invalid_argument(fmt::format(
             "Timeseries length {} is not a power of 2; use --nsamps-policy "
             "truncate",
             actual_nsamps));
@@ -381,7 +381,7 @@ SearchDims dry_run_dims(const loki::search::FFATomlConfig& cfg,
     if (!cfg.timeseries_path.empty()) {
         const std::filesystem::path ts_path = cfg.timeseries_path;
         if (!std::filesystem::exists(ts_path)) {
-            throw std::runtime_error(std::format(
+            throw std::runtime_error(fmt::format(
                 "Input timeseries does not exist: {}", ts_path.string()));
         }
         const auto info = loki::io::TimeSeries::read_info(ts_path);
@@ -412,7 +412,7 @@ void print_ffa_plan(const loki::search::FFASearchConfig& cfg, loki::Exec exec) {
     const auto& con    = loki::cli::Console::get();
     std::cout
         << con.title("FFA plan:")
-        << std::format(
+        << fmt::format(
                " {} chunks, nsamps {}, tobs {:.2f} s, sweep memory {:.3f} "
                "GB against a limit of {:.3f} GB\n",
                cfgs.size(), cfg.get_nsamps(), cfg.get_tobs(),
@@ -420,13 +420,13 @@ void print_ffa_plan(const loki::search::FFASearchConfig& cfg, loki::Exec exec) {
                planner.get_cfgs().empty()
                    ? cfg.get_max_process_memory_gb()
                    : planner.get_cfgs().front().get_max_process_memory_gb());
-    std::cout << con.header(std::format("{:>6} {:>6} {:>23} {:>23} {:>9}",
+    std::cout << con.header(fmt::format("{:>6} {:>6} {:>23} {:>23} {:>9}",
                                         "chunk", "nbins", "nominal f [Hz]",
                                         "actual f [Hz]", "mem [GB]"))
               << "\n";
     for (SizeType i = 0; i < std::min(cfgs.size(), chunks.size()); ++i) {
         const auto& chunk = chunks[i];
-        std::cout << std::format(
+        std::cout << fmt::format(
             "{:>6} {:>6} {:>10.3f} - {:<10.3f} {:>10.3f} - {:<10.3f} "
             "{:>9.3f}\n",
             i, cfgs[i].get_nbins(), chunk.nominal_f_start, chunk.nominal_f_end,
@@ -517,7 +517,7 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
                   toml_cfg.prefix, config_toml, observation);
 
     const auto result_file =
-        outdir_path / std::format("{}_ffa_results.h5", toml_cfg.prefix);
+        outdir_path / fmt::format("{}_ffa_results.h5", toml_cfg.prefix);
     record_provenance(result_file, toml_cfg, actual_nsamps, ts.get_dt());
     SPDLOG_INFO("FFA search complete. Inspecting results in {}",
                 result_file.string());
@@ -566,7 +566,7 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
                                   std::to_string(n_cands));
                 rows.emplace_back(
                     "Top candidate SNR",
-                    std::format("{:.2f} (candidate #{})", top_snr, top_idx));
+                    fmt::format("{:.2f} (candidate #{})", top_snr, top_idx));
 
                 if (h5.exist("param_sets")) {
                     const auto p_dset = h5.getDataSet("param_sets");
@@ -585,16 +585,16 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
                             if (pi > 0) {
                                 p_str += ", ";
                             }
-                            p_str += std::format("{}={:.6f}", p_names[pi],
+                            p_str += fmt::format("{}={:.6f}", p_names[pi],
                                                  top_params[pi]);
                         }
                         rows.emplace_back("Top candidate parameters",
-                                          std::format("[{}]", p_str));
+                                          fmt::format("[{}]", p_str));
                     }
                 }
             } else {
                 rows.emplace_back("Total candidates detected",
-                                  std::format("0 above S/N threshold {:.2f}",
+                                  fmt::format("0 above S/N threshold {:.2f}",
                                               toml_cfg.snr_min));
             }
             loki::cli::Console::get().summary("Search Summary", rows);
@@ -617,7 +617,7 @@ std::string format_pow2(loki::SizeType n) {
     if (n == 0) {
         return "0";
     }
-    return std::format("2^{:.1f}", std::log2(static_cast<double>(n)));
+    return fmt::format("2^{:.1f}", std::log2(static_cast<double>(n)));
 }
 
 /// Writes the chunk table, the groups of equal nbins and the memory peak of an
@@ -643,13 +643,13 @@ void print_ep_plan(const loki::algorithms::EPRegionPlanner<FoldType>& planner,
     }
     std::cout
         << con.title("EP plan:")
-        << std::format(
+        << fmt::format(
                " {} chunks, nbins {}..{}, peak {:.3f} GB against a limit of "
                "{:.3f} GB\n",
                chunks.size(), nbins_lo, nbins_hi, stats.get_max_memory_gb(),
                stats.get_memory_limit_gb());
 
-    std::cout << con.header(std::format(
+    std::cout << con.header(fmt::format(
                      "{:>6} {:>6} {:>23} {:>23} {:>9} {:>9} {:>10} {:>6} "
                      "{:>9} {:>7}",
                      "chunk", "nbins", "nominal f [Hz]", "actual f [Hz]",
@@ -658,14 +658,14 @@ void print_ep_plan(const loki::algorithms::EPRegionPlanner<FoldType>& planner,
               << "\n";
     for (SizeType i = 0; i < chunks.size(); ++i) {
         const auto& chunk = chunks[i];
-        std::cout << std::format(
+        std::cout << fmt::format(
             "{:>6} {:>6} {:>10.3f} - {:<10.3f} {:>10.3f} - {:<10.3f} {:>9} "
             "{:>9} {:>10} {:>6} {:>9.3f} {:>7.4f}\n",
             i, chunk.cfg.get_nbins(), chunk.nominal_f_start,
             chunk.nominal_f_end, chunk.actual_f_start, chunk.actual_f_end,
             chunk.ncoords, format_pow2(chunk.max_sugg), chunk.branch_max,
             chunk.nsegments, chunk.chunk_memory_gb, chunk.pd);
-        std::cout << con.muted(std::format(
+        std::cout << con.muted(fmt::format(
                          "       predicted peak {}, live ring {}, batch {}",
                          format_pow2(chunk.predicted_peak),
                          format_pow2(chunk.predicted_live), chunk.batch_size))
@@ -684,14 +684,14 @@ void print_ep_plan(const loki::algorithms::EPRegionPlanner<FoldType>& planner,
             branch_max = std::max(branch_max, chunks[end].branch_max);
             ++end;
         }
-        std::cout << std::format(
+        std::cout << fmt::format(
             "  chunks {}..{}: nbins {}, max_sugg {}, branch_max {}, {} "
             "worker(s)\n",
             begin, end - 1, nbins, format_pow2(max_sugg), branch_max, workers);
         begin = end;
     }
     std::cout << con.title("Plan cache:")
-              << std::format(" {}\n",
+              << fmt::format(" {}\n",
                              cache_path ? cache_path->string() : "none");
 }
 
@@ -762,7 +762,7 @@ int run_plan_ep(const loki::search::EPTomlConfig& toml_cfg) {
         toml_cfg.to_ep_search_config(*toml_cfg.nsamps, *toml_cfg.tsamp);
     const auto cache_path = toml_cfg.plan_cache.value_or(
         std::filesystem::path(toml_cfg.outdir) /
-        std::format("{}_ep_plan.h5", toml_cfg.prefix));
+        fmt::format("{}_ep_plan.h5", toml_cfg.prefix));
 
     SPDLOG_INFO("Planning EP search (no data read): f=[{:.3f}, {:.3f}] Hz, "
                 "nsamps={}, nbins={}, backend={}",
@@ -837,7 +837,7 @@ void print_ep_summary(const std::filesystem::path& result_file) {
 
         std::vector<std::pair<std::string, std::string>> rows;
         rows.emplace_back("Runs pruned",
-                          std::format("{} ({} leaves)", n_runs, n_leaves));
+                          fmt::format("{} ({} leaves)", n_runs, n_leaves));
         if (found) {
             const auto run    = h5.getGroup("chunks")
                                     .getGroup(top_chunk)
@@ -852,15 +852,15 @@ void print_ep_summary(const std::filesystem::path& result_file) {
                 if (pi > 0) {
                     p_str += ", ";
                 }
-                p_str += std::format("{}={:.6f}", param_names[pi],
+                p_str += fmt::format("{}={:.6f}", param_names[pi],
                                      leaf_values[pi * 2]);
             }
             rows.emplace_back("Top score",
-                              std::format("{:.2f} (chunk {}, run {}, leaf {})",
+                              fmt::format("{:.2f} (chunk {}, run {}, leaf {})",
                                           top_score, top_chunk, top_run,
                                           top_leaf));
             rows.emplace_back("Top candidate parameters",
-                              std::format("[{}]", p_str));
+                              fmt::format("[{}]", p_str));
         } else {
             rows.emplace_back("Top candidate",
                               "none: the pruning wrote no leaves");
@@ -881,7 +881,7 @@ prepare_ep_plan_cache(const loki::search::EPTomlConfig& toml_cfg,
         return toml_cfg.plan_cache;
     }
     const auto path    = std::filesystem::path(toml_cfg.outdir) /
-                         std::format("{}_ep_plan.h5", toml_cfg.prefix);
+                         fmt::format("{}_ep_plan.h5", toml_cfg.prefix);
     const auto workers = loki::algorithms::ep_sweep_n_workers(
         cfg.get_nthreads(), toml_cfg.n_runs, toml_cfg.ref_segs);
     // An implicit cache that no longer matches the configuration is replanned;
@@ -985,7 +985,7 @@ int run_search_ep(const loki::search::EPTomlConfig& toml_cfg,
                   toml_cfg.prefix, observation);
 
     const auto result_file =
-        outdir_path / std::format("{}_ep_results.h5", toml_cfg.prefix);
+        outdir_path / fmt::format("{}_ep_results.h5", toml_cfg.prefix);
     record_provenance(result_file, toml_cfg, actual_nsamps, ts.get_dt());
     print_ep_summary(result_file);
     return 0;
@@ -1024,7 +1024,7 @@ std::string_view param_unit(const std::string& name) {
 
 std::string layout_text(const loki::io::CandidateFileSummary& s) {
     if (s.layout == "common") {
-        return std::format("candidate schema {}", s.schema_version);
+        return fmt::format("candidate schema {}", s.schema_version);
     }
     if (s.layout == "legacy_ffa") {
         return "legacy flat FFA results";
@@ -1033,8 +1033,8 @@ std::string layout_text(const loki::io::CandidateFileSummary& s) {
 }
 
 std::string format_param(const std::string& name, double value) {
-    return name == "freq" ? std::format("{:.6f}", value)
-                          : std::format("{:.6g}", value);
+    return name == "freq" ? fmt::format("{:.6f}", value)
+                          : fmt::format("{:.6g}", value);
 }
 
 /// A finite double, checked on its bits (-ffast-math, docs/architecture.md).
@@ -1064,7 +1064,7 @@ std::string json_string(std::string_view text) {
             break;
         default:
             if (static_cast<unsigned char>(ch) < 0x20) {
-                out += std::format("\\u{:04x}", static_cast<int>(ch));
+                out += fmt::format("\\u{:04x}", static_cast<int>(ch));
             } else {
                 out += ch;
             }
@@ -1074,12 +1074,12 @@ std::string json_string(std::string_view text) {
 }
 
 std::string json_number(double value) {
-    return is_finite_bits(value) ? std::format("{}", value) : "null";
+    return is_finite_bits(value) ? fmt::format("{}", value) : "null";
 }
 
 // A float in its shortest form (29.77668, not 29.776679992675781).
 std::string json_number(float value) {
-    return is_finite_bits(static_cast<double>(value)) ? std::format("{}", value)
+    return is_finite_bits(static_cast<double>(value)) ? fmt::format("{}", value)
                                                       : "null";
 }
 
@@ -1099,7 +1099,7 @@ std::string inspect_json(const loki::io::CandidateFileSummary& s,
     std::string out  = "{\n";
     const auto field = [&out](std::string_view key, const std::string& value,
                               bool last = false) {
-        out += std::format("  {}: {}{}\n", json_string(key), value,
+        out += fmt::format("  {}: {}{}\n", json_string(key), value,
                            last ? "" : ",");
     };
     field("file", json_string(s.path.string()));
@@ -1112,7 +1112,7 @@ std::string inspect_json(const loki::io::CandidateFileSummary& s,
     field("backend", json_optional(s.backend));
     field("source", json_string(s.source_name));
     field("input_path", json_string(s.input_path));
-    field("nsamps", std::format("{}", s.nsamps));
+    field("nsamps", fmt::format("{}", s.nsamps));
     field("tsamp", json_number(s.tsamp));
     field("tobs", json_number(s.tobs));
     field("dm", json_optional(s.dm));
@@ -1125,7 +1125,7 @@ std::string inspect_json(const loki::io::CandidateFileSummary& s,
     std::string ranges;
     for (const auto& range : s.ranges) {
         ranges +=
-            std::format("{}\n    {{\"name\": {}, \"min\": {}, \"max\": {}}}",
+            fmt::format("{}\n    {{\"name\": {}, \"min\": {}, \"max\": {}}}",
                         ranges.empty() ? "" : ",", json_string(range.name),
                         json_number(range.min), json_number(range.max));
     }
@@ -1135,19 +1135,19 @@ std::string inspect_json(const loki::io::CandidateFileSummary& s,
     field("config_effective", json_optional(s.config_effective));
     field("config_toml", json_optional(s.config_toml));
     field("table", json_string(s.table));
-    field("n_rows", std::format("{}", s.n_rows));
-    field("n_detections", s.n_detections ? std::format("{}", *s.n_detections)
+    field("n_rows", fmt::format("{}", s.n_rows));
+    field("n_detections", s.n_detections ? fmt::format("{}", *s.n_detections)
                                          : std::string("null"));
     std::string rows;
     for (std::size_t i = 0; i < s.top.size(); ++i) {
         const auto& row = s.top[i];
         std::string params;
         for (std::size_t p = 0; p < row.params.size(); ++p) {
-            params += std::format("{}{}: {}", p == 0 ? "" : ", ",
+            params += fmt::format("{}{}: {}", p == 0 ? "" : ", ",
                                   json_string(s.param_names[p]),
                                   json_number(row.params[p]));
         }
-        rows += std::format(
+        rows += fmt::format(
             "{}\n    {{\"rank\": {}, \"row\": {}, \"snr\": {}, \"params\": "
             "{{{}}}, \"width\": {}, \"nbins\": {}, \"source\": {}}}",
             i == 0 ? "" : ",", i + 1, row.row, json_number(row.snr), params,
@@ -1220,7 +1220,7 @@ std::string inspect_text(const loki::io::CandidateFileSummary& s,
     std::vector<std::pair<std::string, std::string>> meta;
     meta.emplace_back("File", s.path.string());
     const auto layout = layout_text(s);
-    meta.emplace_back("Search", std::format("{} ({}{})", s.algorithm, layout,
+    meta.emplace_back("Search", fmt::format("{} ({}{})", s.algorithm, layout,
                                             s.complete ? "" : ", INCOMPLETE"));
     // The provenance version, else the candidate writer's producer version.
     const auto& loki_version =
@@ -1228,7 +1228,7 @@ std::string inspect_text(const loki::io::CandidateFileSummary& s,
     std::string version =
         loki_version.empty() ? std::string() : "loki " + loki_version;
     if (!s.writer_version.empty()) {
-        version += std::format("{}writer {}{}", version.empty() ? "" : " (",
+        version += fmt::format("{}writer {}{}", version.empty() ? "" : " (",
                                s.writer_version, version.empty() ? "" : ")");
     }
     if (version.empty()) {
@@ -1245,25 +1245,25 @@ std::string inspect_text(const loki::io::CandidateFileSummary& s,
     if (!s.source_name.empty()) {
         meta.emplace_back("Source", s.source_name);
     }
-    meta.emplace_back("nsamps", std::format("{}", s.nsamps));
-    meta.emplace_back("tsamp", std::format("{:.6g} s", s.tsamp));
-    meta.emplace_back("tobs", std::format("{:.6g} s", s.tobs));
+    meta.emplace_back("nsamps", fmt::format("{}", s.nsamps));
+    meta.emplace_back("tsamp", fmt::format("{:.6g} s", s.tsamp));
+    meta.emplace_back("tobs", fmt::format("{:.6g} s", s.tobs));
     if (s.dm) {
-        meta.emplace_back("DM", std::format("{:.4f}", *s.dm));
+        meta.emplace_back("DM", fmt::format("{:.4f}", *s.dm));
     }
     for (const auto& range : s.ranges) {
-        meta.emplace_back(std::format("Range {}", range.name),
-                          std::format("[{}, {}]{}",
+        meta.emplace_back(fmt::format("Range {}", range.name),
+                          fmt::format("[{}, {}]{}",
                                       format_param(range.name, range.min),
                                       format_param(range.name, range.max),
                                       param_unit(range.name)));
     }
     if (s.snr_min) {
-        meta.emplace_back("S/N min", std::format("{:.2f}", *s.snr_min));
+        meta.emplace_back("S/N min", fmt::format("{:.2f}", *s.snr_min));
     }
-    std::string rows_text = std::format("{}", s.n_rows);
+    std::string rows_text = fmt::format("{}", s.n_rows);
     if (s.n_detections) {
-        rows_text += std::format(" (from {} detections)", *s.n_detections);
+        rows_text += fmt::format(" (from {} detections)", *s.n_detections);
     }
     meta.emplace_back(s.layout == "ep_runs" ? "Leaves" : "Candidates",
                       rows_text);
@@ -1274,14 +1274,14 @@ std::string inspect_text(const loki::io::CandidateFileSummary& s,
     }
     std::string out = con.heading("Run metadata") + "\n";
     for (const auto& [key, value] : meta) {
-        out += std::format("  {}  {}\n",
-                           con.muted(std::format("{:<{}}", key, key_width)),
+        out += fmt::format("  {}  {}\n",
+                           con.muted(fmt::format("{:<{}}", key, key_width)),
                            con.strong(value));
     }
 
     // Top candidates: padded as plain text first, so styles keep alignment.
     out += "\n" +
-           con.heading(std::format("Top candidates ({} of {})", s.top.size(),
+           con.heading(fmt::format("Top candidates ({} of {})", s.top.size(),
                                    s.n_rows)) +
            "\n";
     if (s.top.empty()) {
@@ -1295,13 +1295,13 @@ std::string inspect_text(const loki::io::CandidateFileSummary& s,
         std::vector<std::vector<std::string>> cells;
         for (std::size_t i = 0; i < s.top.size(); ++i) {
             const auto& row = s.top[i];
-            std::vector<std::string> line{std::format("{}", i + 1)};
+            std::vector<std::string> line{fmt::format("{}", i + 1)};
             for (std::size_t p = 0; p < row.params.size(); ++p) {
                 line.push_back(format_param(s.param_names[p], row.params[p]));
             }
-            line.push_back(std::format("{:.2f}", row.snr));
-            line.push_back(row.width == 0 ? "-" : std::format("{}", row.width));
-            line.push_back(row.nbins == 0 ? "-" : std::format("{}", row.nbins));
+            line.push_back(fmt::format("{:.2f}", row.snr));
+            line.push_back(row.width == 0 ? "-" : fmt::format("{}", row.width));
+            line.push_back(row.nbins == 0 ? "-" : fmt::format("{}", row.nbins));
             line.push_back(row.source.empty() ? "-" : row.source);
             cells.push_back(std::move(line));
         }
@@ -1317,7 +1317,7 @@ std::string inspect_text(const loki::io::CandidateFileSummary& s,
         const auto pad      = [&](std::size_t c, const std::string& text) {
             // Numbers align right; the source, last, is not padded.
             return c == last_col ? text
-                                 : std::format("{:>{}}", text, widths[c]);
+                                 : fmt::format("{:>{}}", text, widths[c]);
         };
         out += " ";
         for (std::size_t c = 0; c < header.size(); ++c) {
@@ -1352,7 +1352,7 @@ std::string inspect_text(const loki::io::CandidateFileSummary& s,
                 out += "  " + con.accent(line) + "\n";
             }
             out += "  " +
-                   con.muted(std::format("{} bins, phase 0 to 1",
+                   con.muted(fmt::format("{} bins, phase 0 to 1",
                                          s.top_profile->size())) +
                    "\n";
         }
@@ -2070,7 +2070,7 @@ int main(int argc, char** argv) {
         const int sig = loki::interrupt_signal();
         SPDLOG_WARN("Interrupted{}: stopped before finishing; outputs may be "
                     "incomplete",
-                    sig == 0 ? "" : std::format(" by signal {}", sig));
+                    sig == 0 ? "" : fmt::format(" by signal {}", sig));
         // The shell's convention for a run ended by a signal.
         return 128 + (sig == 0 ? SIGINT : sig);
     } catch (const std::exception& ex) {

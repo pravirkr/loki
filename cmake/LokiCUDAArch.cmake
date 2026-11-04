@@ -123,6 +123,13 @@ function(loki_validate_cuda_architectures)
                           "sm_${LOKI_MIN_CUDA_ARCH} or higher."
       )
     endif()
+    # CUDA 13 dropped Maxwell, Pascal and Volta (sm_50 to sm_72).
+    if(arch_int LESS 75 AND CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 13.0)
+      message(FATAL_ERROR "LOKI_CUDA_ARCHITECTURES includes sm_${arch_int}, which CUDA "
+                          "${CMAKE_CUDA_COMPILER_VERSION} cannot target (CUDA 13 supports sm_75+). "
+                          "Build for sm_${arch_int} with a CUDA 12.x toolkit."
+      )
+    endif()
   endforeach()
 
   if(max_arch LESS 70 OR LOKI_FORCE_CURAND_RNG)

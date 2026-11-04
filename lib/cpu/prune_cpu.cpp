@@ -4,7 +4,6 @@
 #include <cstdint>
 #include <exception>
 #include <filesystem>
-#include <format>
 #include <fstream>
 #include <future>
 #include <ios>
@@ -112,7 +111,7 @@ public:
                  int task_id,
                  bool show_progress) {
         const std::string run_name =
-            std::format("{:03d}_{:02d}", ref_seg, task_id);
+            fmt::format("{:03d}_{:02d}", ref_seg, task_id);
 
         const auto& ws                 = get_workspace();
         const auto memory_tree_gb      = ws.world_tree.get_memory_usage_gib();
@@ -125,11 +124,11 @@ public:
 
         // Setup log and result files
         std::filesystem::path const actual_log_file =
-            log_file.value_or(outdir / std::format("tmp_{}_log.txt", run_name));
+            log_file.value_or(outdir / fmt::format("tmp_{}_log.txt", run_name));
         std::filesystem::path const actual_result_file = result_file.value_or(
-            outdir / std::format("tmp_{}_results.h5", run_name));
+            outdir / fmt::format("tmp_{}_results.h5", run_name));
         std::ofstream log(actual_log_file, std::ios::app);
-        log << std::format("Pruning log for ref segment: {}\n", ref_seg);
+        log << fmt::format("Pruning log for ref segment: {}\n", ref_seg);
         log.close();
 
         const auto nsegments = m_ffa_plan.get_nsegments().back();
@@ -139,7 +138,7 @@ public:
             bar = std::make_unique<progress::ProgressTracker>(tracker, task_id);
         } else if (show_progress) {
             bar = std::make_unique<progress::ProgressTracker>(
-                std::format("Pruning segment {:03d}", ref_seg), nsegments - 1,
+                fmt::format("Pruning segment {:03d}", ref_seg), nsegments - 1,
                 /*show=*/true, progress::ProgressBar::Kind::kPruning);
         }
 
@@ -180,9 +179,9 @@ public:
 
         // Final log entries
         std::ofstream final_log(actual_log_file, std::ios::app);
-        final_log << std::format("Pruning run complete for ref segment {}\n",
+        final_log << fmt::format("Pruning run complete for ref segment {}\n",
                                  ref_seg);
-        final_log << std::format("Time: {}\n\n", m_pstats.get_timer_summary());
+        final_log << fmt::format("Time: {}\n\n", m_pstats.get_timer_summary());
         final_log.close();
         spdlog::debug("Pruning run {:03d}: complete", ref_seg);
         spdlog::debug("Pruning run {:03d}: stats: {}", ref_seg,
@@ -676,7 +675,7 @@ private:
                 world_tree.get_leaves_span(this_batch_size);
             if (current_batch_size == 0) {
                 throw std::runtime_error(
-                    std::format("Loaded batch size is 0: total_processed={}, "
+                    fmt::format("Loaded batch size is 0: total_processed={}, "
                                 "this_batch_size={}, remaining={}",
                                 total_processed, this_batch_size, remaining));
             }
@@ -1200,11 +1199,11 @@ public:
         // Setup output files and directory
         const auto nsegments = m_ffa_plan.get_nsegments().back();
         const std::string filebase =
-            std::format("{}_pruning_nstages_{}", file_prefix, nsegments);
+            fmt::format("{}_pruning_nstages_{}", file_prefix, nsegments);
         const auto log_file =
-            (outdir / std::format("{}_log.txt", filebase)).lexically_normal();
+            (outdir / fmt::format("{}_log.txt", filebase)).lexically_normal();
         const auto result_file =
-            (outdir / std::format("{}_results.h5", filebase))
+            (outdir / fmt::format("{}_results.h5", filebase))
                 .lexically_normal();
 
         // Create output directory
@@ -1212,7 +1211,7 @@ public:
         std::filesystem::create_directories(outdir, ec);
         if (!std::filesystem::exists(outdir)) {
             throw std::runtime_error(
-                std::format("EPMultiPass::execute: Failed to create output "
+                fmt::format("EPMultiPass::execute: Failed to create output "
                             "directory '{}': {}",
                             outdir.string(), ec.message()));
         }
@@ -1358,7 +1357,7 @@ private:
         for (const auto ref_seg : ref_segs) {
             if (tracker) {
                 id = tracker->add_task(
-                    std::format("Pruning segment {:03d}", ref_seg),
+                    fmt::format("Pruning segment {:03d}", ref_seg),
                     nsegments - 1,
                     /*transient=*/true);
             } else {
@@ -1395,13 +1394,13 @@ private:
             } catch (const loki::Interrupted&) {
                 interrupted = true;
             } catch (const std::exception& e) {
-                const std::string error_msg = std::format(
+                const std::string error_msg = fmt::format(
                     "Error in ref_seg {}: {}", ref_segs[i], e.what());
                 errors.emplace_back(ref_segs[i], error_msg);
             } catch (...) {
                 // Keep draining: every future must be collected.
                 errors.emplace_back(ref_segs[i],
-                                    std::format("Error in ref_seg {}: unknown "
+                                    fmt::format("Error in ref_seg {}: unknown "
                                                 "exception",
                                                 ref_segs[i]));
             }
@@ -1424,7 +1423,7 @@ private:
         if (!errors.empty()) {
             std::ofstream log(log_file, std::ios::app);
             for (const auto& [ref_seg, error_msg] : errors) {
-                log << std::format("Error processing ref_seg {}: {}\n", ref_seg,
+                log << fmt::format("Error processing ref_seg {}: {}\n", ref_seg,
                                    error_msg);
             }
             log.close();
@@ -1432,7 +1431,7 @@ private:
                           errors.back().second);
 
             throw std::runtime_error(
-                std::format("Multi-threaded execution failed: {} out of {} "
+                fmt::format("Multi-threaded execution failed: {} out of {} "
                             "tasks failed",
                             errors.size(), ref_segs.size()));
         }

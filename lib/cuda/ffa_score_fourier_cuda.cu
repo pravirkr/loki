@@ -2,11 +2,12 @@
 #include <bit>
 #include <cmath>
 #include <complex>
-#include <format>
 #include <numbers>
 #include <stdexcept>
 #include <utility>
 #include <vector>
+
+#include <fmt/format.h>
 
 #include "lib/cuda/coord_cuda.cuh"
 #include "lib/cuda/ffa_score_cuda.cuh"
@@ -57,7 +58,7 @@ std::vector<ComplexTypeCUDA> ffa_fourier_bluestein_table(SizeType nbins) {
     // math::kGpuFFTMaxN (M up to 4096).
     if (nbins < 2 || nbins > math::kGpuFFTMaxN) {
         throw std::invalid_argument(
-            std::format("ffa_fourier_bluestein_table: nbins must be in [2, {}]",
+            fmt::format("ffa_fourier_bluestein_table: nbins must be in [2, {}]",
                         math::kGpuFFTMaxN));
     }
     const SizeType n = nbins;

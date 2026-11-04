@@ -2,13 +2,13 @@
 
 #include <cstddef>
 #include <filesystem>
-#include <format>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
+#include <fmt/format.h>
 #include <hdf5.h>
 #include <highfive/highfive.hpp>
 
@@ -50,7 +50,7 @@ void initialize_ep_results(
 
     for (SizeType i = 0; i < nchunks; ++i) {
         const auto& chunk              = chunk_cfgs[i];
-        const std::string chunk_prefix = std::format("chunk_{:04d}", i);
+        const std::string chunk_prefix = fmt::format("chunk_{:04d}", i);
         auto chunk_group = main_chunks_group.createGroup(chunk_prefix);
 
         chunk_group.createAttribute("chunk_id", i);
@@ -90,10 +90,10 @@ merge_ep_sweep_results(const std::filesystem::path& tmp_dir,
     double accumulated_flops = 0.0;
     for (SizeType i = 0; i < chunk_cfgs.size(); ++i) {
         const auto& chunk              = chunk_cfgs[i];
-        const std::string chunk_prefix = std::format("chunk_{:04d}", i);
+        const std::string chunk_prefix = fmt::format("chunk_{:04d}", i);
         auto chunk_group = main_h5.getGroup("chunks/" + chunk_prefix);
         const auto chunk_result_file =
-            tmp_dir / std::format("{}_pruning_nstages_{}_results.h5",
+            tmp_dir / fmt::format("{}_pruning_nstages_{}_results.h5",
                                   chunk_prefix, chunk.nsegments);
 
         if (std::filesystem::exists(chunk_result_file)) {
@@ -115,7 +115,7 @@ merge_ep_sweep_results(const std::filesystem::path& tmp_dir,
                         chunk_runs.getId(), run_name.c_str(), dst_runs.getId(),
                         run_name.c_str(), H5P_DEFAULT, H5P_DEFAULT);
                     if (status < 0) {
-                        throw std::runtime_error(std::format(
+                        throw std::runtime_error(fmt::format(
                             "EPFreqSweep: failed to copy run '{}' for chunk {}",
                             run_name, i));
                     }
@@ -187,7 +187,7 @@ void EPSweepWriter::run() {
             }
             search::PruneResultWriter writer(
                 m_partial_file, search::PruneResultWriter::Mode::kAppend,
-                std::format("chunks/chunk_{:04d}", payload.chunk_id));
+                fmt::format("chunks/chunk_{:04d}", payload.chunk_id));
             writer.write_run_results(payload.run_name, payload.snail_scheme,
                                      {std::span<double>(payload.leaves), {}},
                                      {std::span<float>(payload.scores), {}},
@@ -237,7 +237,7 @@ void check_ep_group_budget(const algorithms::detail::EPChunkGroup& group,
                            double limit_gb,
                            int n_workers) {
     if (total_gb > limit_gb) {
-        throw std::runtime_error(std::format(
+        throw std::runtime_error(fmt::format(
             "EPFreqSweep: chunks {}..{} need {:.2f} GB ({} workers), more "
             "than the limit {:.2f} GB. Re-plan (stale plan cache?).",
             group.begin, group.end - 1, total_gb, n_workers, limit_gb));
@@ -250,7 +250,7 @@ void check_ep_workspace_vs_model(const algorithms::detail::EPChunkGroup& group,
     // get_memory_usage_gib() is a float: allow its rounding.
     constexpr double kRelTol = 1.0e-5;
     if (actual_bytes > model_bytes * (1.0 + kRelTol)) {
-        throw std::logic_error(std::format(
+        throw std::logic_error(fmt::format(
             "EPFreqSweep: workspace for chunks {}..{} uses {:.0f} bytes, "
             "more than the memory model's {:.0f} (model drift)",
             group.begin, group.end - 1, actual_bytes, model_bytes));
@@ -259,7 +259,7 @@ void check_ep_workspace_vs_model(const algorithms::detail::EPChunkGroup& group,
 
 void check_ep_shared_vs_model(SizeType actual_bytes, SizeType model_bytes) {
     if (actual_bytes > model_bytes) {
-        throw std::logic_error(std::format(
+        throw std::logic_error(fmt::format(
             "EPFreqSweep: shared FFA buffers use {} bytes, more than the "
             "memory model's {} (model drift)",
             actual_bytes, model_bytes));

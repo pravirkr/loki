@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstdint>
-#include <format>
 #include <source_location>
 #include <stdexcept>
 #include <string>
@@ -12,6 +11,7 @@
 #include <cuda/std/span>
 #include <cuda_runtime.h>
 #include <curand.h>
+#include <fmt/format.h>
 #include <thrust/device_vector.h>
 
 #include "loki/common/types.hpp"
@@ -144,14 +144,14 @@ private:
             error_desc   = curand_error_string(code);
         }
 
-        auto base_msg = std::format("{} Error [{}]: {}", library_name,
+        auto base_msg = fmt::format("{} Error [{}]: {}", library_name,
                                     static_cast<int>(code), error_desc);
 
         return user_msg.empty()
-                   ? std::format("{} in {} ({}:{})", base_msg,
+                   ? fmt::format("{} in {} ({}:{})", base_msg,
                                  loc.function_name(), loc.file_name(),
                                  loc.line())
-                   : std::format("{} in {} ({}:{}): {}", base_msg,
+                   : fmt::format("{} in {} ({}:{}): {}", base_msg,
                                  loc.function_name(), loc.file_name(),
                                  loc.line(), user_msg);
     }
@@ -246,7 +246,7 @@ public:
     }
 
     [[nodiscard]] std::string get_device_info() const {
-        return std::format(
+        return fmt::format(
             "Device {}: {} (CC {}.{}), Mem: {} MiB, Shared Mem: {} bytes",
             m_device_id, m_props.name, m_props.major, m_props.minor,
             m_props.totalGlobalMem >> 20U, m_props.sharedMemPerBlock);
@@ -268,7 +268,7 @@ public:
 
         auto check_limit = [&](auto val, auto max, std::string_view dim) {
             if (val > static_cast<unsigned>(max)) {
-                throw std::runtime_error(std::format(
+                throw std::runtime_error(fmt::format(
                     "{} dimension {} exceeds device limit {} at {}:{}", dim,
                     val, max, loc.file_name(), loc.line()));
             }
@@ -328,7 +328,7 @@ inline void set_device(int device_id) {
     if (device_id < 0 || device_id >= device_count) {
         throw detail::CudaException(
             cudaErrorInvalidDevice,
-            std::format("Invalid device_id {} (must be 0..{})", device_id,
+            fmt::format("Invalid device_id {} (must be 0..{})", device_id,
                         device_count - 1));
     }
 
@@ -338,7 +338,7 @@ inline void set_device(int device_id) {
     }
 
     check_cuda_call(cudaSetDevice(device_id),
-                    std::format("cudaSetDevice({}) failed", device_id));
+                    fmt::format("cudaSetDevice({}) failed", device_id));
 
     current = device_id;
     // Force context refresh after device switch
@@ -420,7 +420,7 @@ template <class Kernel> void prefer_max_shared_carveout(Kernel kernel) {
 template <class Kernel>
 void set_kernel_dynamic_smem(Kernel kernel, SizeType bytes) {
     if (bytes > get_max_shared_memory_optin()) {
-        throw std::invalid_argument(std::format(
+        throw std::invalid_argument(fmt::format(
             "set_kernel_dynamic_smem: {} bytes of shared memory, the device "
             "allows {}",
             bytes, get_max_shared_memory_optin()));

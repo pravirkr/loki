@@ -2,7 +2,6 @@
 
 #include <cstddef>
 #include <filesystem>
-#include <format>
 #include <limits>
 #include <optional>
 #include <random>
@@ -14,6 +13,7 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <fmt/format.h>
 #include <highfive/highfive.hpp>
 
 #include "loki/algorithms/prune.hpp"
@@ -82,7 +82,7 @@ std::filesystem::path result_path(const std::filesystem::path& outdir,
                                   std::string_view prefix,
                                   SizeType nsegments) {
     return outdir /
-           std::format("{}_pruning_nstages_{}_results.h5", prefix, nsegments);
+           fmt::format("{}_pruning_nstages_{}_results.h5", prefix, nsegments);
 }
 
 } // namespace

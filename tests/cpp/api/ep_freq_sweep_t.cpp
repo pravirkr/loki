@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
-#include <format>
 #include <numbers>
 #include <optional>
 #include <random>
@@ -17,6 +16,7 @@
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <fmt/format.h>
 #include <highfive/highfive.hpp>
 
 #include "loki/algorithms/ep_regions.hpp"
@@ -430,7 +430,7 @@ TEST_CASE("EPFreqSweep executes sweep and writes unified results file",
     sweep.execute(ts_e, ts_v, outdir, file_prefix);
 
     const auto result_file =
-        outdir / std::format("{}_ep_results.h5", file_prefix);
+        outdir / fmt::format("{}_ep_results.h5", file_prefix);
     REQUIRE(std::filesystem::exists(result_file));
 
     // Inspect unified HDF5 file
@@ -449,7 +449,7 @@ TEST_CASE("EPFreqSweep executes sweep and writes unified results file",
 
     std::set<SizeType> region_nbins;
     for (SizeType i = 0; i < nchunks; ++i) {
-        const auto chunk_name = std::format("chunk_{:04d}", i);
+        const auto chunk_name = fmt::format("chunk_{:04d}", i);
         REQUIRE(chunks_grp.exist(chunk_name));
         const auto chunk_grp = chunks_grp.getGroup(chunk_name);
 
@@ -467,7 +467,7 @@ TEST_CASE("EPFreqSweep executes sweep and writes unified results file",
     CHECK(region_nbins.size() == 1);
 
     // Verify temporary per-chunk directory was cleaned up
-    const auto tmp_dir = outdir / std::format(".tmp_{}_ep_chunks", file_prefix);
+    const auto tmp_dir = outdir / fmt::format(".tmp_{}_ep_chunks", file_prefix);
     CHECK(!std::filesystem::exists(tmp_dir));
 
     std::filesystem::remove_all(outdir, ec);
@@ -517,7 +517,7 @@ TEST_CASE("EPFreqSweep CUDA executes a sweep and writes the unified file",
                       std::nullopt, ref_segs, Exec::cuda(0));
     sweep.execute(ts_e, ts_v, outdir, prefix);
 
-    const auto result_file = outdir / std::format("{}_ep_results.h5", prefix);
+    const auto result_file = outdir / fmt::format("{}_ep_results.h5", prefix);
     REQUIRE(std::filesystem::exists(result_file));
     {
         const HighFive::File h5(result_file.string(), HighFive::File::ReadOnly);
@@ -529,14 +529,14 @@ TEST_CASE("EPFreqSweep CUDA executes a sweep and writes the unified file",
         const auto chunks_grp = h5.getGroup("chunks");
         for (SizeType i = 0; i < nchunks; ++i) {
             const auto grp =
-                chunks_grp.getGroup(std::format("chunk_{:04d}", i));
+                chunks_grp.getGroup(fmt::format("chunk_{:04d}", i));
             CHECK(grp.exist("runs"));
             CHECK(grp.exist("threshold_scheme"));
             CHECK(grp.exist("branching_pattern"));
         }
     }
     CHECK(!std::filesystem::exists(outdir /
-                                   std::format(".tmp_{}_ep_chunks", prefix)));
+                                   fmt::format(".tmp_{}_ep_chunks", prefix)));
 
     SECTION("the plan cache loads on CUDA and on the CPU") {
         REQUIRE(std::filesystem::exists(cache_file));
@@ -625,7 +625,7 @@ TEST_CASE("EPFreqSweep CUDA runs both bin groups within the device budget",
     std::set<SizeType> written;
     const auto chunks_grp = h5.getGroup("chunks");
     for (SizeType i = 0; i < nchunks; ++i) {
-        const auto grp = chunks_grp.getGroup(std::format("chunk_{:04d}", i));
+        const auto grp = chunks_grp.getGroup(fmt::format("chunk_{:04d}", i));
         SizeType nbins{};
         grp.getAttribute("nbins").read(nbins);
         written.insert(nbins);

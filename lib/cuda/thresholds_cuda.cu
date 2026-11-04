@@ -9,7 +9,6 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
-#include <format>
 #include <limits>
 #include <memory>
 #include <numeric>
@@ -20,6 +19,7 @@
 
 #include <cub/cub.cuh>
 #include <cuda_runtime.h>
+#include <fmt/format.h>
 #include <highfive/highfive.hpp>
 #include <spdlog/spdlog.h>
 #include <thrust/device_vector.h>
@@ -844,7 +844,7 @@ public:
             // bins from min_pd to 1 (prob_min is unused). The terminal
             // weight is a property of this mode only.
             if (!(min_pd > 0.0F && min_pd < 1.0F)) {
-                throw std::invalid_argument(std::format(
+                throw std::invalid_argument(fmt::format(
                     "ThresholdsCuda: min_pd={} must be in (0, 1)", min_pd));
             }
             if (nprobs < 2) {
@@ -874,7 +874,7 @@ public:
             detection::generate_box_width_trials(m_nbins, m_ducy_max, m_wtsp);
         if (*std::ranges::max_element(m_box_score_widths) >= m_nbins) {
             throw std::invalid_argument(
-                std::format("ducy_max={} gives a box width >= nbins={}",
+                fmt::format("ducy_max={} gives a box width >= nbins={}",
                             m_ducy_max, m_nbins));
         }
         m_bias_snr = snr_final / static_cast<float>(std::sqrt(m_nstages + 1));
@@ -947,7 +947,7 @@ public:
         for (SizeType istage = 0; istage < m_nstages; ++istage) {
             const auto beam_size = get_current_thresholds_idx(istage).size();
             if (beam_size == 0) {
-                throw std::invalid_argument(std::format(
+                throw std::invalid_argument(fmt::format(
                     "Threshold beam of stage {} is empty (guess {:.3f}, "
                     "beam_width {}); increase beam_width or nthresholds",
                     istage, m_guess_path[istage], m_beam_width));
@@ -1612,14 +1612,14 @@ public:
         const uint32_t error_flag = error_flag_d[0];
         if (error_flag != 0) {
             throw std::runtime_error(
-                std::format("ThresholdsCuda: legacy survivor regeneration "
+                fmt::format("ThresholdsCuda: legacy survivor regeneration "
                             "disagreed with the counting pass (flag {})",
                             error_flag));
         }
     }
 
     std::string save(const std::string& outdir = "./") const {
-        const std::filesystem::path filebase = std::format(
+        const std::filesystem::path filebase = fmt::format(
             "dynscheme_{}_nstages_{:03d}_nthresh_{:03d}_nprobs_{:03d}_"
             "ntrials_{:04d}_snr_{:04.1f}_ducy_{:04.2f}_beam_{:03.1f}.h5",
             mode_to_string(m_mode), m_nstages, m_nthresholds, m_nprobs,

@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <format>
 #include <iterator>
 #include <limits>
 #include <optional>
@@ -11,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include <fmt/format.h>
 #include <omp.h>
 
 #include "loki/common/types.hpp"
@@ -28,7 +28,7 @@ std::string format_pow2(SizeType n) {
     if (n == 0) {
         return "0";
     }
-    return std::format("2^{:.1f}", std::log2(static_cast<double>(n)));
+    return fmt::format("2^{:.1f}", std::log2(static_cast<double>(n)));
 }
 
 float diff_max(const float* __restrict__ x,
@@ -242,12 +242,12 @@ void validate_ref_segs(SizeType nsegments,
     seen.reserve(ref_segs->size());
     for (const SizeType seg : *ref_segs) {
         if (seg >= nsegments) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "ref_segs entry {} is outside [0, {})", seg, nsegments));
         }
         if (std::ranges::find(seen, seg) != seen.end()) {
             throw std::invalid_argument(
-                std::format("ref_segs entry {} is duplicated", seg));
+                fmt::format("ref_segs entry {} is duplicated", seg));
         }
         seen.push_back(seg);
     }
@@ -264,7 +264,7 @@ determine_ref_segs(SizeType nsegments,
         const auto n_runs_val = n_runs.value();
         if (n_runs_val < 1 || n_runs_val > nsegments) {
             throw std::runtime_error(
-                std::format("n_runs must be between 1 and {}, got {}",
+                fmt::format("n_runs must be between 1 and {}, got {}",
                             nsegments, n_runs_val));
         }
         std::vector<SizeType> ref_segs_val(n_runs_val);
@@ -294,7 +294,7 @@ determine_ref_segs_pareto(SizeType nsegments,
         const auto n_runs_val = n_runs.value();
         if (n_runs_val < 1 || n_runs_val > nsegments) {
             throw std::runtime_error(
-                std::format("n_runs must be between 1 and {}, got {}",
+                fmt::format("n_runs must be between 1 and {}, got {}",
                             nsegments, n_runs_val));
         }
         // Special case: single anchor → center

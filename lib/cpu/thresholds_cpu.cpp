@@ -7,7 +7,6 @@
 #include <cstdint>
 #include <exception>
 #include <filesystem>
-#include <format>
 #include <functional>
 #include <iterator>
 #include <limits>
@@ -23,6 +22,7 @@
 #include <utility>
 #include <vector>
 
+#include <fmt/format.h>
 #include <hdf5.h>
 #include <highfive/highfive.hpp>
 #include <omp.h>
@@ -1236,7 +1236,7 @@ public:
     // Save
     std::string save(const std::string& outdir) const override {
         check_simulate("save");
-        const std::filesystem::path filebase = std::format(
+        const std::filesystem::path filebase = fmt::format(
             "dynscheme_{}_nstages_{:03d}_nthresh_{:03d}_nprobs_{:03d}_"
             "ntrials_{:04d}_snr_{:04.1f}_ducy_{:04.2f}_beam_{:03.1f}.h5",
             mode_to_string(m_mode), m_nstages, m_nthresholds, m_nprobs,
@@ -1507,7 +1507,7 @@ private:
     void check_simulate(std::string_view what) const {
         if (!m_simulate) {
             throw std::logic_error(
-                std::format("DynamicThresholdScheme::{}: engine was built for "
+                fmt::format("DynamicThresholdScheme::{}: engine was built for "
                             "evaluate only",
                             what));
         }

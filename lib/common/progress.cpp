@@ -1,10 +1,11 @@
 #include "loki/common/progress.hpp"
 
 #include <atomic>
-#include <format>
 #include <initializer_list>
 #include <stdexcept>
 #include <string_view>
+
+#include <fmt/format.h>
 
 namespace loki {
 
@@ -41,7 +42,7 @@ ProgressMode parse_progress_mode(std::string_view name) {
         }
     }
     throw std::invalid_argument(
-        std::format("Unknown progress mode '{}'. Expected 'auto', 'rich', "
+        fmt::format("Unknown progress mode '{}'. Expected 'auto', 'rich', "
                     "'plain' or 'off'",
                     name));
 }

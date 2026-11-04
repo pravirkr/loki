@@ -3,7 +3,6 @@
 #include <cstddef>
 #include <cstring>
 #include <filesystem>
-#include <format>
 #include <map>
 #include <optional>
 #include <random>
@@ -14,6 +13,7 @@
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <fmt/format.h>
 #include <highfive/highfive.hpp>
 
 #include "loki/algorithms/ffa.hpp"
@@ -196,7 +196,7 @@ read_ep_datasets(const std::filesystem::path& path) {
     const auto walk = [&](auto&& self, const HighFive::Group& group,
                           const std::string& prefix) -> void {
         for (const auto& name : group.listObjectNames()) {
-            const auto full = std::format("{}/{}", prefix, name);
+            const auto full = fmt::format("{}/{}", prefix, name);
             if (group.getObjectType(name) == HighFive::ObjectType::Group) {
                 self(self, group.getGroup(name), full);
                 continue;
@@ -246,7 +246,7 @@ std::filesystem::path run_ep(EPMultiPass<FoldType>& ep,
         std::filesystem::temp_directory_path() / "loki_workspace_handle_ep";
     std::filesystem::create_directories(outdir);
     ep.execute(ts_e, ts_v, outdir, prefix);
-    return outdir / std::format("{}_pruning_nstages_{}_results.h5", prefix,
+    return outdir / fmt::format("{}_pruning_nstages_{}_results.h5", prefix,
                                 in.nsegments);
 }
 
@@ -262,7 +262,7 @@ void check_ep_shared_matches_owned(bool use_fourier, Exec exec) {
                                 {}, kEPMaxSugg, kEPBatchSize, "taylor",
                                 /*show_progress=*/false, {}, exec);
     // ctest runs test cases in parallel processes: keep file names distinct.
-    const auto tag        = std::format("{}_{}", loki::to_string(exec.backend),
+    const auto tag        = fmt::format("{}_{}", loki::to_string(exec.backend),
                                         use_fourier ? "fourier" : "time");
     const auto owned_path = run_ep(owned, cfg, in, tag + "_owned");
 

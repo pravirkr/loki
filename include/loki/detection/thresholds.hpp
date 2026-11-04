@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstdint>
-#include <format>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -60,7 +59,7 @@ dynamic_threshold_mode_from_string(std::string_view s) {
     if (s == "robust") {
         return DynamicThresholdMode::kRobust;
     }
-    throw std::invalid_argument(std::format("unknown mode: {}", s));
+    throw std::invalid_argument(std::string("unknown mode: ").append(s));
 }
 
 inline std::string mode_to_string(DynamicThresholdMode m) {

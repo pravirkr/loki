@@ -2,10 +2,11 @@
 
 #include <algorithm>
 #include <cmath>
-#include <format>
 #include <limits>
 #include <span>
 #include <vector>
+
+#include <fmt/format.h>
 
 #include "loki/common/types.hpp"
 
@@ -45,7 +46,7 @@ void PruneRFIConfig::validate(SizeType nsegments) const {
     if (!harvest_scheme.empty()) {
         error_check::check_equal(
             harvest_scheme.size(), nsegments - 1,
-            std::format("PruneRFIConfig: harvest_scheme must have size "
+            fmt::format("PruneRFIConfig: harvest_scheme must have size "
                         "nsegments - 1 = {} (got {})",
                         nsegments - 1, harvest_scheme.size()));
         for (const auto v : harvest_scheme) {

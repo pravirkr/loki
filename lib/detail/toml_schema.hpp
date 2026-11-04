@@ -19,7 +19,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
-#include <format>
 #include <functional>
 #include <limits>
 #include <optional>
@@ -30,6 +29,7 @@
 #include <utility>
 #include <vector>
 
+#include <fmt/format.h>
 #include <toml++/toml.hpp> // NOLINT(misc-include-cleaner) -- toml::table, node
 
 #include "loki/common/types.hpp"
@@ -90,7 +90,7 @@ template <typename T>
             static_cast<std::uint64_t>(std::numeric_limits<T>::max());
         if (static_cast<std::uint64_t>(*val) > kMax) {
             throw std::invalid_argument(
-                std::format("{} must be at most {}", path, kMax));
+                fmt::format("{} must be at most {}", path, kMax));
         }
         return static_cast<T>(*val);
     } else if constexpr (std::is_same_v<T, std::vector<double>>) {
@@ -110,7 +110,7 @@ void write_as(toml::table& table, std::string_view key, const T& value) {
     } else if constexpr (std::is_same_v<T, float>) {
         // The shortest text of the float (0.1, not 0.10000000149011612):
         // it reads back as the same float.
-        table.insert(key, std::stod(std::format("{}", value)));
+        table.insert(key, std::stod(fmt::format("{}", value)));
     } else if constexpr (std::is_same_v<T, std::filesystem::path>) {
         table.insert(key, value.string());
     } else if constexpr (std::is_integral_v<T>) {
@@ -223,9 +223,9 @@ choice(std::string_view table,
             }
             allowed[i] = names[i].first;
             listed +=
-                std::format("{}\"{}\"", i == 0 ? "" : " or ", names[i].first);
+                fmt::format("{}\"{}\"", i == 0 ? "" : " or ", names[i].first);
         }
-        throw std::invalid_argument(std::format("{} must be {} (got \"{}\"){}",
+        throw std::invalid_argument(fmt::format("{} must be {} (got \"{}\"){}",
                                                 path, listed, *val,
                                                 did_you_mean(*val, allowed)));
     };
@@ -275,7 +275,7 @@ void read_fields(const Schema<Cfg>& schema,
         if (table == nullptr || !table->contains(f.key)) {
             if (f.required) {
                 throw std::invalid_argument(
-                    std::format("{} must be set{}{}", path,
+                    fmt::format("{} must be set{}{}", path,
                                 f.required->empty() ? "" : ": ", *f.required));
             }
             continue;
@@ -347,11 +347,11 @@ void check_document(const Schema<Cfg>& schema,
         if (std::ranges::find(tables, name) == tables.end()) {
             const auto text = hint == nullptr ? std::string_view{} : hint(name);
             errors.push_back(text.empty()
-                                 ? std::format("unknown top-level key '{}'{}",
+                                 ? fmt::format("unknown top-level key '{}'{}",
                                                name, did_you_mean(name, tables))
-                                 : std::format("{}: {}", name, text));
+                                 : fmt::format("{}: {}", name, text));
         } else if (!node.is_table()) {
-            errors.push_back(std::format("{} must be a table", name));
+            errors.push_back(fmt::format("{} must be a table", name));
         }
     }
     for (const auto name : tables) {
@@ -378,7 +378,7 @@ void check_document(const Schema<Cfg>& schema,
             if (const auto* sub = node->as_table()) {
                 f.check_sub_table(*sub, path, errors);
             } else {
-                errors.push_back(std::format("{} must be a table", path));
+                errors.push_back(fmt::format("{} must be a table", path));
             }
         }
     }

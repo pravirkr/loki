@@ -5,7 +5,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
-#include <format>
 #include <fstream>
 #include <ios>
 #include <mutex>
@@ -20,6 +19,7 @@
 #include <utility>
 #include <vector>
 
+#include <fmt/format.h>
 #include <hdf5.h>
 #include <highfive/H5DataSet.hpp>
 #include <highfive/H5DataSpace.hpp>
@@ -182,11 +182,11 @@ std::string FFATimerStats::get_concise_timer_summary() const {
                 breakdown += " | ";
             }
             breakdown +=
-                std::format("{}: {:.0f}%", name, (time / total_time) * 100.0F);
+                fmt::format("{}: {:.0f}%", name, (time / total_time) * 100.0F);
             count++;
         }
     }
-    return std::format("Total: {:.1f}s ({})", total_time, breakdown);
+    return fmt::format("Total: {:.1f}s ({})", total_time, breakdown);
 }
 
 // --- FFAStatsCollection ---
@@ -216,11 +216,11 @@ std::string FFAStatsCollection::get_concise_timer_summary() const {
                 breakdown += " | ";
             }
             breakdown +=
-                std::format("{}: {:.0f}%", name, (time / total_time) * 100.0F);
+                fmt::format("{}: {:.0f}%", name, (time / total_time) * 100.0F);
             count++;
         }
     }
-    return std::format("Total: {:.1f}s ({})", total_time, breakdown);
+    return fmt::format("Total: {:.1f}s ({})", total_time, breakdown);
 }
 
 std::vector<FFATimerStatsPacked> FFAStatsCollection::get_packed_data() const {
@@ -264,7 +264,7 @@ double PruneStats::surv_frac() const noexcept {
                     2);
 }
 std::string PruneStats::get_summary() const {
-    std::string summary = std::format(
+    std::string summary = fmt::format(
         "Prune level: {:3d}, seg_idx: {:3d}, leaves: {:5.2f}, "
         "leaves_phys: {:5.2f}, branch_frac: {:5.2f},"
         "score thresh: {:5.2f}, max: {:5.2f}, min: {:5.2f}, "
@@ -272,7 +272,7 @@ std::string PruneStats::get_summary() const {
         level, seg_idx, lb_leaves(), lb_leaves_phys(), branch_frac(), threshold,
         score_max, score_min, surv_frac());
     if (n_leaves_masked > 0 || n_leaves_vetoed > 0 || n_harvested > 0) {
-        summary += std::format(", masked: {}, vetoed: {}, harvested: {}",
+        summary += fmt::format(", masked: {}, vetoed: {}, harvested: {}",
                                n_leaves_masked, n_leaves_vetoed, n_harvested);
     }
     summary += '\n';
@@ -360,10 +360,10 @@ std::string PruneStatsCollection::get_stats_summary() const {
         n_vetoed += stats.n_leaves_vetoed;
         n_harvested += stats.n_harvested;
     }
-    auto summary = std::format("Score: {:.2f}, Leaves: {:.2f}",
+    auto summary = fmt::format("Score: {:.2f}, Leaves: {:.2f}",
                                last_stats.score_max, last_stats.lb_leaves());
     if (n_masked > 0 || n_vetoed > 0 || n_harvested > 0) {
-        summary += std::format(", masked: {}, vetoed: {}, harvested: {}",
+        summary += fmt::format(", masked: {}, vetoed: {}, harvested: {}",
                                n_masked, n_vetoed, n_harvested);
     }
     return summary;
@@ -373,7 +373,7 @@ std::string PruneStatsCollection::get_stats_summary_cuda(float duration) const {
         return "No stats available. Duration: 0.0s";
     }
     const auto& last_stats = m_stats_list.back();
-    return std::format("Score: {:.2f}, Leaves: {:.2f}, Total: {:.2f}s",
+    return fmt::format("Score: {:.2f}, Leaves: {:.2f}, Total: {:.2f}s",
                        last_stats.score_max, last_stats.lb_leaves(), duration);
 }
 std::string PruneStatsCollection::get_timer_summary() const {
@@ -382,7 +382,7 @@ std::string PruneStatsCollection::get_timer_summary() const {
         return "Timing breakdown: 0.00s\n";
     }
     std::string summary =
-        std::format("Timing breakdown: {:.2f}s\n", total_time);
+        fmt::format("Timing breakdown: {:.2f}s\n", total_time);
     std::vector<std::pair<std::string, float>> sorted_timers(
         m_accumulated_timers.begin(), m_accumulated_timers.end());
     std::ranges::sort(sorted_timers, [](const auto& a, const auto& b) {
@@ -390,7 +390,7 @@ std::string PruneStatsCollection::get_timer_summary() const {
     });
     for (const auto& [name, time] : sorted_timers) {
         const auto percent = (time / total_time) * 100.0F;
-        summary += std::format("  {:10s}: {:6.1f}%\n", name, percent);
+        summary += fmt::format("  {:10s}: {:6.1f}%\n", name, percent);
     }
     return summary;
 }
@@ -415,11 +415,11 @@ std::string PruneStatsCollection::get_concise_timer_summary() const {
                 breakdown += " | ";
             }
             breakdown +=
-                std::format("{}: {:.0f}%", name, (time / total_time) * 100.0F);
+                fmt::format("{}: {:.0f}%", name, (time / total_time) * 100.0F);
             count++;
         }
     }
-    return std::format("Total: {:.1f}s ({})", total_time, breakdown);
+    return fmt::format("Total: {:.1f}s ({})", total_time, breakdown);
 }
 std::pair<std::vector<PruneStats>, std::vector<PruneTimerStatsPacked>>
 PruneStatsCollection::get_packed_data() const {
@@ -693,7 +693,7 @@ void FFAResultWriter::write_regions(std::span<const FFASearchConfig> configs) {
     auto regions = h5_file().createGroup("regions");
     for (std::size_t i = 0; i < configs.size(); ++i) {
         const auto& cfg = configs[i];
-        auto region     = regions.createGroup(std::format("region_{:04d}", i));
+        auto region     = regions.createGroup(fmt::format("region_{:04d}", i));
         region.createAttribute("source_region", static_cast<std::uint64_t>(i));
         region.createAttribute("nbins", cfg.get_nbins());
         region.createAttribute("eta", cfg.get_eta());
@@ -731,7 +731,7 @@ void FFAResultWriter::write_results(
 
     if (param_sets.size() != n_param_sets * n_params) {
         throw std::invalid_argument(
-            std::format("param_sets size does not match ({} != {} * {})",
+            fmt::format("param_sets size does not match ({} != {} * {})",
                         param_sets.size(), n_param_sets, n_params));
     }
     if (scores.size() != n_param_sets || widths_bins.size() != n_param_sets ||
@@ -875,13 +875,13 @@ void PruneResultWriter::write_run_harvest(
     const HighFive::Group runs_group = open_runs_group(file);
     if (!runs_group.exist(std::string(run_name))) {
         throw std::runtime_error(
-            std::format("write_run_harvest: run {} does not exist; call "
+            fmt::format("write_run_harvest: run {} does not exist; call "
                         "write_run_results first.",
                         run_name));
     }
     HighFive::Group run_group = runs_group.getGroup(std::string(run_name));
     if (run_group.exist("harvest")) {
-        throw std::runtime_error(std::format(
+        throw std::runtime_error(fmt::format(
             "write_run_harvest: harvest group already exists for run {}.",
             run_name));
     }
@@ -965,7 +965,7 @@ void PruneResultWriter::write_run_results(
     HighFive::Group runs_group = open_runs_group(file);
     if (runs_group.exist(std::string(run_name))) {
         throw std::runtime_error(
-            std::format("Run name {} already exists.", run_name));
+            fmt::format("Run name {} already exists.", run_name));
     }
     HighFive::Group run_group = runs_group.createGroup(std::string(run_name));
 
@@ -1075,7 +1075,7 @@ void merge_prune_result_files(const std::filesystem::path& results_dir,
                               const std::filesystem::path& log_file,
                               const std::filesystem::path& result_file) {
     if (!std::filesystem::exists(results_dir)) {
-        throw std::runtime_error(std::format(
+        throw std::runtime_error(fmt::format(
             "Results directory does not exist: {}", results_dir.string()));
     }
 
@@ -1102,7 +1102,7 @@ void merge_prune_result_files(const std::filesystem::path& results_dir,
     std::ofstream main_log(log_file, std::ios::app);
     if (!main_log) {
         throw std::runtime_error(
-            std::format("Cannot open log file: {}", log_file.string()));
+            fmt::format("Cannot open log file: {}", log_file.string()));
     }
     for (const auto& entry : temp_log_files) {
         std::ifstream temp_log(entry.path());
@@ -1156,7 +1156,7 @@ void merge_prune_result_files(const std::filesystem::path& results_dir,
                             H5P_DEFAULT, H5P_DEFAULT);
                 if (status < 0) {
                     throw std::runtime_error(
-                        std::format("Failed to copy run '{}' from {}", run_name,
+                        fmt::format("Failed to copy run '{}' from {}", run_name,
                                     entry.path().string()));
                 }
             }
@@ -1226,13 +1226,13 @@ std::string TimerStats::summary(float total_time) const {
             if (!breakdown.empty()) {
                 breakdown += " | ";
             }
-            breakdown += std::format(
+            breakdown += fmt::format(
                 "{}: {:.0f}%", name,
                 (time / (total_time * static_cast<float>(n_threads))) * 100.0F);
             count++;
         }
     }
-    return std::format("Total: {:.1f}s ({})", total_time, breakdown);
+    return fmt::format("Total: {:.1f}s ({})", total_time, breakdown);
 }
 } // namespace loki::search
 

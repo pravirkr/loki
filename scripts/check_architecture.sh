@@ -46,6 +46,13 @@ while IFS= read -r line; do fail "$line"; done < <(
         grep -vE '^lib/(algorithms|detection|pipelines|search|utils|io|simulation|common)/[a-z_]+\.cpp$' |
         xargs grep -nE 'LOKI_ENABLE_(GPU|CUDA|HIP)')
 
+# 3b. fmt::format, never std::format: libstdc++ < 13 has no <format>
+#     (Portability, "Toolchain floor").
+section "no std::format or <format> (use fmt::format)"
+while IFS= read -r line; do fail "$line"; done < <(
+    sources include lib src applications bench tests/cpp |
+        xargs grep -nE 'std::(v?format|format_to|format_string|formatter)\b|#include <format>')
+
 # 4. Public headers open only the namespaces rule 7 allows.
 section "public namespaces follow the directory"
 for h in $(find include/loki -mindepth 2 -name '*.hpp'); do

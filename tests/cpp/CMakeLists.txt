@@ -48,6 +48,7 @@ foreach(kind api internal)
   target_link_libraries(
     ${_target} PRIVATE ${PROJECT_NAME}::${LOKI_LIBRARY_NAME} ${LOKI_COMPILE_OPTIONS}
                        Catch2::Catch2WithMain OpenMP::OpenMP_CXX HighFive::HighFive
+                       fmt::fmt-header-only
   )
   # Catch2 tags become CTest labels: [slow] marks the tests the sanitizer preset
   # skips (ctest -LE slow). Two tags run alone (RUN_SERIAL), whatever ctest -j:
@@ -70,7 +71,7 @@ target_link_libraries(
 # -Wpedantic for nvcc output).
 if(CMAKE_CUDA_COMPILER)
   set_source_files_properties(
-    ${CMAKE_CURRENT_SOURCE_DIR}/internal/fft_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/internal/fft_cuda_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/internal/ep_memory_cuda_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/internal/ep_score_cuda_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/internal/ffa_fused_cuda_t.cpp

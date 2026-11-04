@@ -38,6 +38,19 @@
       }
     },
     {
+      "name": "portable",
+      "displayName": "Portable",
+      "description": "Release for other machines (containers, shared installs): x86-64-v2, SASS 75;80;86;89;90; build-portable/",
+      "inherits": "release",
+      "binaryDir": "${sourceDir}/build-portable",
+      "cacheVariables": {
+        "LOKI_ENABLE_NATIVE_ARCH": "OFF",
+        "LOKI_CPU_ARCH": "x86-64-v2",
+        "LOKI_CUDA_ARCHITECTURES": "75;80;86;89;90",
+        "LOKI_PYTHON_INPLACE": "OFF"
+      }
+    },
+    {
       "name": "asan",
       "displayName": "ASan",
       "description": "ASan/UBSan at -O1, asserts on, CPU; build-asan/",
@@ -81,6 +94,7 @@
   "buildPresets": [
     { "name": "release", "configurePreset": "release" },
     { "name": "cuda", "configurePreset": "cuda" },
+    { "name": "portable", "configurePreset": "portable" },
     { "name": "asan", "configurePreset": "asan" },
     { "name": "ci", "configurePreset": "ci" },
     { "name": "ci-tidy", "configurePreset": "ci-tidy" }
@@ -94,6 +108,7 @@
     },
     { "name": "release", "inherits": "base", "configurePreset": "release" },
     { "name": "cuda", "inherits": "base", "configurePreset": "cuda" },
+    { "name": "portable", "inherits": "base", "configurePreset": "portable" },
     {
       "name": "asan",
       "inherits": "base",

@@ -1,11 +1,11 @@
 #include "loki/search/provenance.hpp"
 
 #include <filesystem>
-#include <format>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 
+#include <fmt/format.h>
 #include <highfive/H5File.hpp>
 #include <highfive/highfive.hpp>
 
@@ -15,7 +15,7 @@ void write_run_provenance(const std::filesystem::path& results_file,
                           const RunProvenance& provenance) {
     if (!std::filesystem::exists(results_file)) {
         throw std::runtime_error(
-            std::format("write_run_provenance: results file not found: '{}'",
+            fmt::format("write_run_provenance: results file not found: '{}'",
                         results_file.string()));
     }
     HighFive::File file(results_file.string(), HighFive::File::ReadWrite);

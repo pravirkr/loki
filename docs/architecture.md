@@ -217,7 +217,7 @@ Domains are `algorithms`, `common`, `detection`, `io`, `pipelines`, `search`,
   skipped instead of compiling them away:
   `if (!loki::is_available(Backend::kCUDA)) { SKIP("..."); }`. Use
   `#ifdef LOKI_ENABLE_CUDA` only when a test needs internal CUDA types
-  (today only `fft_t.cpp`).
+  (the `*_cuda_t.cpp` files, which nvcc compiles).
 - GPU results are compared to the CPU or to an owning instance bit for bit
   where the kernel is deterministic. The time-domain brute fold accumulates
   with float `atomicAdd`, so its outputs and anything derived from them
@@ -442,8 +442,26 @@ A new rule should come with a new check in the script.
 
 ## Portability
 
-CI builds with the oldest compilers `CMakeLists.txt` accepts (GCC 13,
-Clang 18). Code that newer compilers accept can still fail there:
+The toolchain floor is C++20 with GCC 11, Clang 17 and CUDA 12.2
+(`CMakeLists.txt` rejects anything older). It lets loki build with the
+system compiler of Debian 12, Ubuntu 22.04 and RHEL 9. CI builds with the
+oldest host compilers `CMakeLists.txt` accepts (GCC 11, Clang 17). CUDA 12.2
+builds are checked on the cluster machines. Code that newer compilers accept
+can still fail there:
+
+- Format with `fmt::format` (and `<fmt/format.h>`), never `std::format`:
+  libstdc++ < 13 has no `<format>`. `check_architecture.sh` rejects
+  `std::format` and `#include <format>`. A plain `{}` floating-point field
+  follows fmt's notation (`0.0001`, not `1e-04`).
+- Thrust and CUB in CUDA < 12.6 do not take `cuda::std::span` iterators. Pass
+  `span.data()` and `span.data() + n`.
+- In a file nvcc compiles, range-for over a braced list
+  (`for (auto [a, b] : {std::pair{...}, ...})`) fails in nvcc < 12.6. Name
+  the list (a `constexpr std::array`).
+- Keep host-only template code (pocketfft, large `std::` algorithms on
+  `double`) out of the files nvcc compiles. nvcc 12.2 hits an internal
+  compiler error on some of it; a CPU test goes in its own `*_t.cpp`, not in
+  the `*_cuda_t.cpp` file.
 
 - Never call `error_check::*` (or anything else with a `std::source_location`
   default argument) directly inside an OpenMP region. GCC < 14 then asks for

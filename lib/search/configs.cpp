@@ -8,7 +8,6 @@
 #include <cstdint>
 #include <exception>
 #include <filesystem>
-#include <format>
 #include <fstream>
 #include <memory>
 #include <optional>
@@ -19,6 +18,7 @@
 #include <utility>
 #include <vector>
 
+#include <fmt/format.h>
 #include <omp.h>
 #include <spdlog/spdlog.h>
 #include <toml++/toml.hpp> // NOLINT(misc-include-cleaner) -- toml::table, parse, parse_error
@@ -187,7 +187,7 @@ template <typename Cfg> toml_utils::Schema<Cfg> ffa_fields() {
             [](const toml::table& t, const std::string& path, Cfg& c) {
                 const auto* arr = t["birdies"].as_array();
                 if (arr == nullptr) {
-                    throw std::invalid_argument(std::format(
+                    throw std::invalid_argument(fmt::format(
                         "{} must be an array of [freq_hz, width_hz]", path));
                 }
                 auto& birdies = c.preprocessing.birdies;
@@ -195,7 +195,7 @@ template <typename Cfg> toml_utils::Schema<Cfg> ffa_fields() {
                 for (const auto& el : *arr) {
                     const auto* pair = el.as_array();
                     if (pair == nullptr || pair->size() != 2) {
-                        throw std::invalid_argument(std::format(
+                        throw std::invalid_argument(fmt::format(
                             "{} entries must be [freq_hz, width_hz]", path));
                     }
                     birdies.push_back(io::Birdie{
@@ -381,7 +381,7 @@ void check_ffa_fields(const FFATomlConfig& cfg) {
         cfg.preprocessing.validate();
     } catch (const std::invalid_argument& err) {
         throw std::invalid_argument(
-            std::format("Invalid [preprocessing] table: {}", err.what()));
+            fmt::format("Invalid [preprocessing] table: {}", err.what()));
     }
     if (cfg.candidates.harmonic_denominator_max > 10000) {
         throw std::invalid_argument(
@@ -394,7 +394,7 @@ void check_ffa_fields(const FFATomlConfig& cfg) {
 void require_positive(double value, std::string_view path) {
     if (!utils::is_finite(value) || value <= 0.0) {
         throw std::invalid_argument(
-            std::format("{} must be a positive number (got {})", path, value));
+            fmt::format("{} must be a positive number (got {})", path, value));
     }
 }
 
@@ -585,7 +585,7 @@ void FFATomlConfig::write_default(const std::filesystem::path& path) {
     std::ofstream file(path);
     if (!file.is_open()) {
         throw std::runtime_error(
-            std::format("Could not open file for writing default config: '{}'",
+            fmt::format("Could not open file for writing default config: '{}'",
                         path.string()));
     }
     file << default_toml_string();
@@ -596,7 +596,7 @@ namespace {
 [[nodiscard]] std::vector<std::string>
 with_orbit_keys(std::vector<std::string> keys) {
     for (const auto& f : orbit_schema()) {
-        keys.push_back(std::format("search.orbit.{}", f.key));
+        keys.push_back(fmt::format("search.orbit.{}", f.key));
     }
     return keys;
 }
@@ -671,7 +671,7 @@ orbit_param_limits(const FFATomlConfig::OrbitLimits& orbit,
     } else if (orbit.order == "crackle") {
         poly_order = 5;
     } else {
-        throw std::invalid_argument(std::format(
+        throw std::invalid_argument(fmt::format(
             "search.orbit.order must be \"accel\", \"jerk\", \"snap\" or "
             "\"crackle\", got \"{}\"",
             orbit.order));
@@ -685,7 +685,7 @@ orbit_param_limits(const FFATomlConfig::OrbitLimits& orbit,
         (!utils::is_finite(*orbit.p_orb_min_tobs) ||
          *orbit.p_orb_min_tobs <= 0.0)) {
         throw std::invalid_argument(
-            std::format("search.orbit.p_orb_min_tobs must be positive, got {}",
+            fmt::format("search.orbit.p_orb_min_tobs must be positive, got {}",
                         *orbit.p_orb_min_tobs));
     }
     const double p_orb_min =
@@ -703,7 +703,7 @@ orbit_param_limits(const FFATomlConfig::OrbitLimits& orbit,
     static constexpr std::array kNames{"crackle", "snap", "jerk", "accel"};
     std::string derived;
     for (SizeType i = 0; i + 1 < limits.size(); ++i) {
-        derived += std::format("{} +/- {:.4g}, ",
+        derived += fmt::format("{} +/- {:.4g}, ",
                                kNames[kNames.size() - (limits.size() - 1) + i],
                                limits[i].max);
     }
@@ -1102,7 +1102,7 @@ private:
             const auto& param_limit = m_param_limits[iparam];
             error_check::check_greater_equal(
                 param_limit.max, param_limit.min,
-                std::format(
+                fmt::format(
                     "param_limits[{}] must be increasing (got [{}, {}])",
                     iparam, param_limit.min, param_limit.max));
         }
@@ -1759,7 +1759,7 @@ namespace {
 void validate_ep_config(const EPTomlConfig& cfg) {
     if (cfg.nbins_max > detail::kEPMaxNbins ||
         cfg.nbins > detail::kEPMaxNbins) {
-        throw std::invalid_argument(std::format(
+        throw std::invalid_argument(fmt::format(
             "EP nbins and nbins_max must be <= {}", detail::kEPMaxNbins));
     }
     if (cfg.target_snr &&
@@ -1768,23 +1768,23 @@ void validate_ep_config(const EPTomlConfig& cfg) {
             "ep.target_snr must be finite and positive");
     }
     if (cfg.poly_basis != "taylor" && cfg.poly_basis != "chebyshev") {
-        throw std::invalid_argument(std::format(
+        throw std::invalid_argument(fmt::format(
             "ep.poly_basis must be 'taylor' or 'chebyshev' (got '{}')",
             cfg.poly_basis));
     }
     if (!utils::is_finite(cfg.min_pd) || cfg.min_pd <= 0.0F ||
         cfg.min_pd > 1.0F) {
         throw std::invalid_argument(
-            std::format("ep.min_pd must be in (0, 1] (got {})", cfg.min_pd));
+            fmt::format("ep.min_pd must be in (0, 1] (got {})", cfg.min_pd));
     }
     // The threshold scheme needs a pulse narrower than the period.
     if (!utils::is_finite(cfg.ref_ducy) || cfg.ref_ducy <= 0.0F ||
         cfg.ref_ducy >= 1.0F) {
-        throw std::invalid_argument(std::format(
+        throw std::invalid_argument(fmt::format(
             "ep.ref_ducy must be in (0, 1) (got {})", cfg.ref_ducy));
     }
     if (cfg.prune_poly_order < 1) {
-        throw std::invalid_argument(std::format(
+        throw std::invalid_argument(fmt::format(
             "ep.prune_poly_order must be >= 1 (got {})", cfg.prune_poly_order));
     }
     if (cfg.n_runs.has_value() && *cfg.n_runs < 1) {
@@ -2043,7 +2043,7 @@ void EPTomlConfig::write_default(const std::filesystem::path& path) {
     std::ofstream file(path);
     if (!file.is_open()) {
         throw std::runtime_error(
-            std::format("Could not open file for writing default config: '{}'",
+            fmt::format("Could not open file for writing default config: '{}'",
                         path.string()));
     }
     file << default_toml_string();
@@ -2067,7 +2067,7 @@ EPTomlConfig EPTomlConfig::from_string(std::string_view toml_content) {
         if (const auto* ep = tbl["ep"].as_table()) {
             for (const auto key : {"p_orb_min", "m_c_max", "m_p_min"}) {
                 if (ep->contains(key)) {
-                    throw std::invalid_argument(std::format(
+                    throw std::invalid_argument(fmt::format(
                         "ep.{} is set by [search.orbit]: remove it", key));
                 }
             }
@@ -2106,7 +2106,7 @@ EPTomlConfig::to_ep_search_config(std::optional<SizeType> override_nsamps,
     // The pruning needs at least one FFA level above the brute-force segment,
     // so the FFA segment must be shorter than the series.
     if (ffa.get_bseg_ffa() >= ffa.get_nsamps()) {
-        throw std::invalid_argument(std::format(
+        throw std::invalid_argument(fmt::format(
             "performance.bseg_ffa ({}) must be below nsamps ({}): the EP "
             "pruning needs at least one FFA level",
             ffa.get_bseg_ffa(), ffa.get_nsamps()));

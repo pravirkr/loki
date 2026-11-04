@@ -1,0 +1,33 @@
+# Build environment for loki, floor tier (older HPC systems).
+#
+#   mamba env create -f environment.yml && mamba activate loki
+#   export CC=$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-gcc
+#   export CXX=$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-g++
+#   export CUDAHOSTCXX=$CXX HDF5_ROOT=$CONDA_PREFIX
+#   pip install .            # on a GPU node: -Ccmake.define.LOKI_CUDA=ON
+#
+# CUDA 12.4 runs on any NVIDIA driver >= R525 (minor-version compatibility),
+# as long as the build holds SASS for the GPU (the default "native" does).
+# GCC 12 is the newest host compiler nvcc 12.4 pairs well with; a system
+# GCC 11-13.2 works too (drop gxx_linux-64 and point CXX at it).
+# Build on the machine (node type) that runs loki: -march=native.
+# CPU-only: drop the cuda-* packages. Newest toolchain: environment-modern.yml.
+name: loki
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - cmake>=3.25
+  - ninja
+  - hdf5=1.14 # HDF5 2.x is not yet supported
+  - gcc_linux-64=12
+  - gxx_linux-64=12
+  - cuda-version=12.4
+  - cuda-nvcc
+  - cuda-cudart-dev
+  - libcurand-dev
+  - numpy>=2.0
+  - h5py>=3.11
+  - pip
+  - pytest
+  - pytest-xdist

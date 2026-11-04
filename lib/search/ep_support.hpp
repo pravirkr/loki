@@ -5,9 +5,10 @@
  * @brief The searches EP supports. Internal.
  */
 
-#include <format>
 #include <stdexcept>
 #include <string_view>
+
+#include <fmt/format.h>
 
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
@@ -23,12 +24,12 @@ inline constexpr SizeType kEPMaxNbins = 1024;
 inline void check_ep_supported(const PulsarSearchConfig& cfg,
                                std::string_view caller) {
     if (cfg.get_nparams() < 2) {
-        throw std::invalid_argument(std::format(
+        throw std::invalid_argument(fmt::format(
             "{}: frequency-only EP is unsupported; use FFA", caller));
     }
     if (cfg.get_nbins_max() > kEPMaxNbins) {
         throw std::invalid_argument(
-            std::format("{}: EP nbins_max must be <= {} (got {})", caller,
+            fmt::format("{}: EP nbins_max must be <= {} (got {})", caller,
                         kEPMaxNbins, cfg.get_nbins_max()));
     }
 }

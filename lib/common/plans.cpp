@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <format>
 #include <functional>
 #include <map>
 #include <memory>
@@ -15,6 +14,8 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
+
+#include <fmt/format.h>
 
 #include "loki/common/coord.hpp"
 #include "loki/common/types.hpp"
@@ -226,7 +227,7 @@ struct FFAPlanBase::Impl {
                 nsegments[n_levels - 1], m_cfg.get_nbins(), m_cfg.get_eta(),
                 ref_seg, isuggest);
         }
-        throw std::invalid_argument(std::format(
+        throw std::invalid_argument(fmt::format(
             "Invalid poly_basis ({}) for branching pattern generation",
             poly_basis));
     }
@@ -273,7 +274,7 @@ struct FFAPlanBase::Impl {
                     ref_seg);
             }
         }
-        throw std::invalid_argument(std::format(
+        throw std::invalid_argument(fmt::format(
             "Invalid poly_basis ({}) for branching pattern generation",
             poly_basis));
     }

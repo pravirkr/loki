@@ -9,7 +9,6 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <format>
 #include <map>
 #include <memory>
 #include <stdexcept>
@@ -20,6 +19,7 @@
 #include <cuda/std/span>
 #include <cuda/std/utility>
 #include <cuda_runtime.h>
+#include <fmt/format.h>
 #include <thrust/device_vector.h>
 
 #include "loki/common/plans.hpp"
@@ -412,7 +412,7 @@ cuda_workspace(FFAWorkspace<FoldType>& ws, std::string_view what) {
     auto& impl = loki::detail::HandleAccess::impl(ws);
     if (!impl.device) {
         throw std::invalid_argument(
-            std::format("{}: expected a GPU FFAWorkspace", what));
+            fmt::format("{}: expected a GPU FFAWorkspace", what));
     }
     return static_cast<FFAWorkspaceCudaStorage<CudaFoldType<FoldType>>&>(
                *impl.device)
@@ -426,7 +426,7 @@ cuda_workspace(EPWorkspace<FoldType>& ws, std::string_view what) {
     auto& impl = loki::detail::HandleAccess::impl(ws);
     if (!impl.device) {
         throw std::invalid_argument(
-            std::format("{}: expected a GPU EPWorkspace", what));
+            fmt::format("{}: expected a GPU EPWorkspace", what));
     }
     return static_cast<EPWorkspaceCudaStorage<CudaFoldType<FoldType>>&>(
                *impl.device)

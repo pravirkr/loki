@@ -1,6 +1,5 @@
 #include <cstddef>
 #include <filesystem>
-#include <format>
 #include <memory>
 #include <optional>
 #include <span>
@@ -11,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include <fmt/format.h>
 #include <spdlog/spdlog.h>
 
 #include "loki/algorithms/ep_regions.hpp"
@@ -111,17 +111,17 @@ public:
         std::error_code ec;
         std::filesystem::create_directories(outdir, ec);
         if (!std::filesystem::exists(outdir)) {
-            throw std::runtime_error(std::format(
+            throw std::runtime_error(fmt::format(
                 "EPFreqSweep::execute: Failed to create output directory '{}': "
                 "{}",
                 outdir.string(), ec.message()));
         }
 
         const auto result_file =
-            (outdir / std::format("{}_ep_results.h5", file_prefix))
+            (outdir / fmt::format("{}_ep_results.h5", file_prefix))
                 .lexically_normal();
         const auto tmp_dir =
-            (outdir / std::format(".tmp_{}_ep_chunks", file_prefix))
+            (outdir / fmt::format(".tmp_{}_ep_chunks", file_prefix))
                 .lexically_normal();
         std::filesystem::create_directories(tmp_dir, ec);
 
@@ -144,7 +144,7 @@ public:
                 const auto needed = algorithms::detail::compute_branch_max(
                     plan.forecast_branching(m_poly_basis).max_children);
                 if (needed > group.branch_max) {
-                    throw std::runtime_error(std::format(
+                    throw std::runtime_error(fmt::format(
                         "EPFreqSweep: chunk {} needs branch_max={} but the "
                         "plan provides {}. Re-plan (stale plan cache?).",
                         i, needed, group.branch_max));
@@ -198,7 +198,7 @@ public:
                     chunk.actual_f_start, chunk.actual_f_end,
                     chunk.cfg.get_nbins(), utils::format_pow2(chunk.max_sugg));
 
-                const std::string chunk_prefix = std::format("chunk_{:04d}", i);
+                const std::string chunk_prefix = fmt::format("chunk_{:04d}", i);
                 // Internal pipeline: build the CPU engine directly on the
                 // shared workspaces, FFA buffers and plan cache.
                 const auto chunk_ep = algorithms::detail::make_ep_cpu<FoldType>(

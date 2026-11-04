@@ -5,7 +5,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
-#include <format>
 #include <functional>
 #include <iterator>
 #include <optional>
@@ -15,6 +14,7 @@
 #include <utility>
 #include <vector>
 
+#include <fmt/format.h>
 #include <hdf5.h>
 #include <highfive/highfive.hpp>
 
@@ -231,7 +231,7 @@ void read_common(const HighFive::File& file,
     out.layout         = "common";
     out.schema_version = text_attribute(file, "schema_version").value_or("");
     if (!out.schema_version.starts_with("1.") && out.schema_version != "1") {
-        throw std::invalid_argument(std::format(
+        throw std::invalid_argument(fmt::format(
             "unsupported candidate schema version {}", out.schema_version));
     }
     out.algorithm = text_attribute(file, "algorithm").value_or("");
@@ -305,12 +305,12 @@ void read_common(const HighFive::File& file,
                 read_cell<std::uint32_t>(table, "source_region", row);
             if (region < run_paths.size() && region < chunk_ids.size()) {
                 cand.source =
-                    std::format("chunk {} run {}", chunk_ids[region],
+                    fmt::format("chunk {} run {}", chunk_ids[region],
                                 std::filesystem::path(run_paths[region])
                                     .filename()
                                     .string());
             } else if (out.algorithm != "ep") {
-                cand.source = std::format("region {}", region);
+                cand.source = fmt::format("region {}", region);
             }
         }
         out.top.push_back(std::move(cand));
@@ -356,7 +356,7 @@ void read_legacy_ffa(const HighFive::File& file,
         };
         if (file.exist("detection_id")) {
             const auto id = read_cell<std::uint64_t>(root, "detection_id", row);
-            cand.source   = std::format("region {}", id >> 32U);
+            cand.source   = fmt::format("region {}", id >> 32U);
         }
         out.top.push_back(std::move(cand));
     }
@@ -436,7 +436,7 @@ void read_ep_runs(const HighFive::File& file,
         for (std::size_t i = 0; i < nparams; ++i) {
             cand.params.push_back(pairs[2 * i]);
         }
-        cand.source = std::format(
+        cand.source = fmt::format(
             "chunk {} run {}",
             attribute_or<std::uint64_t>(chunk, "chunk_id", 0U), src.run);
         if (run.exist("width")) {
@@ -454,11 +454,11 @@ read_candidate_file_summary(const std::filesystem::path& path,
                             std::size_t top_n) {
     if (!std::filesystem::exists(path)) {
         throw std::invalid_argument(
-            std::format("result file not found: {}", path.string()));
+            fmt::format("result file not found: {}", path.string()));
     }
     if (H5Fis_hdf5(path.string().c_str()) <= 0) {
         throw std::invalid_argument(
-            std::format("not an HDF5 file: {}", path.string()));
+            fmt::format("not an HDF5 file: {}", path.string()));
     }
     CandidateFileSummary out;
     out.path = path;
@@ -487,7 +487,7 @@ read_candidate_file_summary(const std::filesystem::path& path,
         }
     } catch (const HighFive::Exception& e) {
         throw std::runtime_error(
-            std::format("cannot read {}: {}", path.string(), e.what()));
+            fmt::format("cannot read {}: {}", path.string(), e.what()));
     }
     return out;
 }

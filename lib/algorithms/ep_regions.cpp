@@ -6,7 +6,6 @@
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
-#include <format>
 #include <limits>
 #include <map>
 #include <numbers>
@@ -19,6 +18,7 @@
 #include <utility>
 #include <vector>
 
+#include <fmt/format.h>
 #include <highfive/H5File.hpp>
 #include <spdlog/spdlog.h>
 
@@ -226,7 +226,7 @@ double resolve_memory_limit_gb(const search::PulsarSearchConfig& cfg,
                      "usable for the sweep (user limit {:.2f} GB)",
                      exec.device, free_gb, usable_gb, user_limit);
         if (usable_gb < 1.0) {
-            throw std::runtime_error(std::format(
+            throw std::runtime_error(fmt::format(
                 "EPRegionPlanner: insufficient GPU memory: {:.2f} GB free, "
                 "need at least {:.2f} GB",
                 free_gb, 1.0 + detail::kDeviceReserveGB));
@@ -404,7 +404,7 @@ public:
         for (SizeType i = 0; i < m_chunk_cfgs.size(); ++i) {
             const auto& chunk = m_chunk_cfgs[i];
             auto chunk_grp =
-                chunks_grp.createGroup(std::format("chunk_{:04d}", i));
+                chunks_grp.createGroup(fmt::format("chunk_{:04d}", i));
             chunk_grp.createAttribute("nominal_f_start", chunk.nominal_f_start);
             chunk_grp.createAttribute("nominal_f_end", chunk.nominal_f_end);
             chunk_grp.createAttribute("actual_f_start", chunk.actual_f_start);
@@ -437,19 +437,19 @@ public:
     void load_cache(const std::filesystem::path& filepath) {
         if (!std::filesystem::exists(filepath)) {
             throw std::runtime_error(
-                std::format("EPRegionPlanner: cache file '{}' does not exist",
+                fmt::format("EPRegionPlanner: cache file '{}' does not exist",
                             filepath.string()));
         }
         const HighFive::File file(filepath.string(), HighFive::File::ReadOnly);
         if (!file.hasAttribute("ep_plan_cache_version")) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "EPRegionPlanner: file '{}' is not a valid EP plan cache",
                 filepath.string()));
         }
         std::string file_version;
         file.getAttribute("ep_plan_cache_version").read(file_version);
         if (file_version != kCacheVersion) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "EPRegionPlanner: cache file '{}' has version {}, expected {} "
                 "(stale plans carry an invalid branch_max; re-plan)",
                 filepath.string(), file_version, kCacheVersion));
@@ -478,7 +478,7 @@ public:
             file.getAttribute(name).read(file_val);
             if (std::abs(val - file_val) >
                 1e-6 * std::max(1.0, std::abs(val))) {
-                throw std::invalid_argument(std::format(
+                throw std::invalid_argument(fmt::format(
                     "EPRegionPlanner: cache file '{}' mismatch for attribute "
                     "'{}': expected {:.8f}, found {:.8f}",
                     filepath.string(), name, val, file_val));
@@ -490,7 +490,7 @@ public:
             SizeType file_val{};
             file.getAttribute(name).read(file_val);
             if (val != file_val) {
-                throw std::invalid_argument(std::format(
+                throw std::invalid_argument(fmt::format(
                     "EPRegionPlanner: cache file '{}' mismatch for attribute "
                     "'{}': expected {}, found {}",
                     filepath.string(), name, val, file_val));
@@ -533,7 +533,7 @@ public:
         file.getAttribute("use_fourier").read(file_use_fourier);
         if (static_cast<bool>(file_use_fourier) !=
             m_base_cfg.get_use_fourier()) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "EPRegionPlanner: cache mismatch for 'use_fourier'"));
         }
 
@@ -541,7 +541,7 @@ public:
         file.getAttribute("use_conservative_tile").read(file_cons_tile);
         if (static_cast<bool>(file_cons_tile) !=
             m_base_cfg.get_use_conservative_tile()) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "EPRegionPlanner: cache mismatch for 'use_conservative_tile'"));
         }
 
@@ -555,7 +555,7 @@ public:
         // the other backend is accepted whatever its count.
         if (same_backend && m_exec.backend == Backend::kCPU &&
             file_nthreads != m_base_cfg.get_nthreads()) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "EPRegionPlanner: cache mismatch for 'nthreads': expected {}, "
                 "found {}",
                 m_base_cfg.get_nthreads(), file_nthreads));
@@ -566,7 +566,7 @@ public:
             std::uint64_t file_val{};
             file.getAttribute(name).read(file_val);
             if (val != file_val) {
-                throw std::invalid_argument(std::format(
+                throw std::invalid_argument(fmt::format(
                     "EPRegionPlanner: cache mismatch for '{}': expected {}, "
                     "found {}",
                     name, val, file_val));
@@ -586,7 +586,7 @@ public:
             std::string file_algorithm;
             file.getAttribute("dts_algorithm").read(file_algorithm);
             if (file_algorithm != kDtsAlgorithm) {
-                throw std::invalid_argument(std::format(
+                throw std::invalid_argument(fmt::format(
                     "EPRegionPlanner: cache mismatch for 'dts_algorithm': "
                     "expected '{}', found '{}'",
                     kDtsAlgorithm, file_algorithm));
@@ -599,7 +599,7 @@ public:
             std::string file_mode;
             file.getAttribute("dts_mode").read(file_mode);
             if (file_mode != kDtsMode) {
-                throw std::invalid_argument(std::format(
+                throw std::invalid_argument(fmt::format(
                     "EPRegionPlanner: cache mismatch for 'dts_mode': "
                     "expected '{}', found '{}'",
                     kDtsMode, file_mode));
@@ -628,7 +628,7 @@ public:
         std::string file_poly_basis;
         file.getAttribute("poly_basis").read(file_poly_basis);
         if (file_poly_basis != m_poly_basis) {
-            throw std::invalid_argument(std::format(
+            throw std::invalid_argument(fmt::format(
                 "EPRegionPlanner: cache mismatch for 'poly_basis': expected "
                 "'{}', found '{}'",
                 m_poly_basis, file_poly_basis));
@@ -650,7 +650,7 @@ public:
         for (SizeType i = 0; i < cur_limits.size(); ++i) {
             if (differs(cur_limits[i].min, file_lim_min[i]) ||
                 differs(cur_limits[i].max, file_lim_max[i])) {
-                throw std::invalid_argument(std::format(
+                throw std::invalid_argument(fmt::format(
                     "EPRegionPlanner: cache mismatch for param_limits[{}]", i));
             }
         }
@@ -673,7 +673,7 @@ public:
         const auto chunks_grp = file.getGroup("chunks");
         for (SizeType i = 0; i < nchunks; ++i) {
             const auto chunk_grp =
-                chunks_grp.getGroup(std::format("chunk_{:04d}", i));
+                chunks_grp.getGroup(fmt::format("chunk_{:04d}", i));
             double nominal_f_start{};
             double nominal_f_end{};
             double actual_f_start{};
@@ -812,7 +812,7 @@ public:
             m_memory_limit_gb -
             detail::ep_memory_reserve_gb(m_base_cfg, m_memory.kind);
         if (peak_memory_gb > limit_gb) {
-            throw std::runtime_error(std::format(
+            throw std::runtime_error(fmt::format(
                 "EPRegionPlanner: plan cache '{}' ({} plan) needs {:.2f} GB "
                 "with {} worker(s) on {}, more than the limit {:.2f} GB; use "
                 "fewer workers, raise max_process_memory_gb, or delete it and "
@@ -864,7 +864,7 @@ private:
 
         const auto max_drift = calculate_max_drift(m_base_cfg);
         if (max_drift < 0.0 || max_drift >= 1.0) {
-            throw std::runtime_error(std::format(
+            throw std::runtime_error(fmt::format(
                 "EPRegionPlanner: max_drift must be in [0, 1); got {:.6f}.{}",
                 max_drift,
                 m_base_cfg.get_nparams() == 5
@@ -878,7 +878,7 @@ private:
             detail::ep_memory_reserve_gb(m_base_cfg, m_memory.kind);
         const auto effective_limit = max_memory_gb - reserve_gb;
         if (effective_limit <= 0.0) {
-            throw std::runtime_error(std::format(
+            throw std::runtime_error(fmt::format(
                 "EPRegionPlanner: the memory limit ({:.2f} GB) must "
                 "exceed the safety margin ({:.2f} GB)",
                 max_memory_gb, reserve_gb));
@@ -1075,7 +1075,7 @@ private:
             const auto smallest = make_threshold_engine(
                 bp, nbins_search, kDtsSeed, kDtsSearchLadder.back().first,
                 kDtsSearchLadder.back().second);
-            throw std::runtime_error(std::format(
+            throw std::runtime_error(fmt::format(
                 "EPRegionPlanner: the threshold search for nbins={} needs "
                 "{:.2f} GB at its smallest budget ({} trials, {} probability "
                 "bins), more than the {:.2f} GB limit",
@@ -1095,7 +1095,7 @@ private:
                                                           /*robust=*/false);
         SizeType nnoise = dyn->solve_budget().nnoise;
         if (sol.thresholds.empty()) {
-            throw std::runtime_error(std::format(
+            throw std::runtime_error(fmt::format(
                 "EPRegionPlanner: simulation has no surviving terminal path "
                 "in f=[{:.6g}, {:.6g}] Hz (nbins={}, target_snr={:.6g})",
                 f_start, f_end, nbins_search, m_base_cfg.get_target_snr()));
