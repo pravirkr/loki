@@ -43,7 +43,10 @@ From: nvidia/cuda:12.4.1-base-ubuntu22.04
 Stage: final
 
 %files from build
-    /opt /opt
+    # One line per directory: the base image already has /opt (/opt/nvidia),
+    # and "/opt /opt" would copy into it as /opt/opt.
+    /opt/python /opt/python
+    /opt/loki /opt/loki
 
 %post
     apt-get update && apt-get install -y --no-install-recommends libgomp1 libhdf5-103-1
