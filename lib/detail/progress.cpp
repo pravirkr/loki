@@ -111,11 +111,22 @@ std::mutex& output_mutex() {
     return mutex;
 }
 
+// Set by a fatal signal once the terminal is restored: nothing may draw after
+// it. Constant-initialised and lock-free, so the signal handler may set it.
+std::atomic<bool>& output_released() {
+    static std::atomic<bool> released{false};
+    static_assert(std::atomic<bool>::is_always_lock_free);
+    return released;
+}
+
 void write_out(std::string_view s) {
     if (s.empty()) {
         return;
     }
     const std::scoped_lock lock(output_mutex());
+    if (output_released().load()) {
+        return;
+    }
     std::fwrite(s.data(), 1, s.size(), stdout);
     std::fflush(stdout);
 }
@@ -143,27 +154,39 @@ SignalRestore& signal_restore() {
 
 void on_terminal_signal(int sig, siginfo_t* info, void* context) {
     static constexpr std::string_view kRestore = "\033[?7h\033[?25h";
+    auto& s                                    = signal_restore();
+    const struct sigaction* prev               = nullptr;
+    for (std::size_t i = 0; i < SignalRestore::kSignals.size(); ++i) {
+        if (SignalRestore::kSignals[i] == sig && s.installed[i]) {
+            prev = &s.previous[i];
+            break;
+        }
+    }
+    const bool siginfo =
+        prev != nullptr && (static_cast<unsigned>(prev->sa_flags) &
+                            static_cast<unsigned>(SA_SIGINFO)) != 0U;
+    const bool fatal =
+        prev != nullptr && !siginfo && prev->sa_handler == SIG_DFL;
+    if (fatal) {
+        // The default action ends the process: the render thread must not
+        // draw a frame after the restore below.
+        output_released().store(true);
+    }
     // write() is async-signal-safe; stdio is not.
     [[maybe_unused]] const auto restored =
         write(STDOUT_FILENO, kRestore.data(), kRestore.size());
-    auto& s = signal_restore();
-    for (std::size_t i = 0; i < SignalRestore::kSignals.size(); ++i) {
-        if (SignalRestore::kSignals[i] != sig || !s.installed[i]) {
-            continue;
-        }
-        // Hand the signal on to the handler that was there before.
-        const struct sigaction& prev = s.previous[i];
-        if ((static_cast<unsigned>(prev.sa_flags) &
-             static_cast<unsigned>(SA_SIGINFO)) != 0U) {
-            prev.sa_sigaction(sig, info, context);
-        } else if (prev.sa_handler == SIG_DFL) {
-            [[maybe_unused]] const auto newline = write(STDOUT_FILENO, "\n", 1);
-            sigaction(sig, &prev, nullptr);
-            std::raise(sig);
-        } else if (prev.sa_handler != SIG_IGN) {
-            prev.sa_handler(sig);
-        }
+    if (prev == nullptr) {
         return;
+    }
+    // Hand the signal on to the handler that was there before.
+    if (siginfo) {
+        prev->sa_sigaction(sig, info, context);
+    } else if (fatal) {
+        [[maybe_unused]] const auto newline = write(STDOUT_FILENO, "\n", 1);
+        sigaction(sig, prev, nullptr);
+        std::raise(sig);
+    } else if (prev->sa_handler != SIG_IGN) {
+        prev->sa_handler(sig);
     }
 }
 

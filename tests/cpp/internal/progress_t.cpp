@@ -275,5 +275,11 @@ TEST_CASE("a fatal signal during a live bar restores the terminal",
     REQUIRE(WIFSIGNALED(status));
     REQUIRE(WTERMSIG(status) == SIGINT);
     REQUIRE(out.starts_with("\033[?25l\033[?7l"));
-    REQUIRE(out.ends_with("\033[?7h\033[?25h\n"));
+    // The terminal ends restored: the restore comes after the last hide
+    // cursor / wrap off. (A frame the render thread was writing at that
+    // instant may still follow it; that does not change the terminal state.)
+    const auto restore = out.rfind("\033[?7h\033[?25h");
+    REQUIRE(restore != std::string::npos);
+    CHECK(out.find("\033[?25l", restore) == std::string::npos);
+    CHECK(out.find("\033[?7l", restore) == std::string::npos);
 }

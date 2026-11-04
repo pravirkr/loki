@@ -159,6 +159,14 @@ target_compile_options(
   ${LOKI_COMPILE_OPTIONS}
   INTERFACE $<$<AND:$<BOOL:${LOKI_WARNINGS_AS_ERRORS}>,$<COMPILE_LANGUAGE:CXX>>:-Werror>
 )
+# Clang < 18 cannot vectorize some `#pragma omp simd` loops for a baseline
+# x86-64 target (lib/cpu/kadane_cpu.cpp) and reports it as -Wpass-failed. The
+# loop is still correct, so keep that one a warning.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 18.0)
+  target_compile_options(
+    ${LOKI_COMPILE_OPTIONS} INTERFACE $<$<COMPILE_LANGUAGE:CXX>:-Wno-error=pass-failed>
+  )
+endif()
 target_compile_options(
   ${LOKI_COMPILE_OPTIONS}
   INTERFACE "$<$<CONFIG:Debug>:${LOKI_DEBUG_OPTIMIZATION};-g>"
