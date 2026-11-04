@@ -37,7 +37,7 @@ These are **never** downloaded by loki and must be discoverable by CMake on your
 | GCC | 11 | system GCC 11+, or `mamba install gxx_linux-64` *(Linux)* |
 | Python | 3.12 | `mamba install python>=3.12` |
 
-Header-only C++ dependencies (fmt, spdlog, HighFive, CLI11, xsimd, etc.) are fetched automatically via [CPM.cmake](https://github.com/cpm-cmake/CPM.cmake) unless `LOKI_USE_SYSTEM_DEPS=ON`.
+C++ dependencies (fmt, spdlog, HighFive, CLI11, xsimd, etc.) are fetched automatically via [CPM.cmake](https://github.com/cpm-cmake/CPM.cmake) unless `LOKI_USE_SYSTEM_DEPS=ON`. fmt and spdlog are compiled into libloki, so an installed loki needs neither.
 
 ### GPU and toolchain support policy
 

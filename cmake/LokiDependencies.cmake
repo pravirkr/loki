@@ -5,8 +5,10 @@
 #   1. OpenMP and HDF5 are hard system dependencies — never fetched.
 #   2. OpenMP and HDF5 are internal. For a SHARED loki they are linked PRIVATE;
 #      for STATIC loki they are linked PUBLIC so consumers can resolve symbols.
-#   3. fmt and spdlog are CPM-pinned header-only libraries (single translation
-#      unit, no version skew with libc++ std::format instantiations).
+#   3. fmt and spdlog are CPM-pinned and compiled once, into loki itself
+#      (loki_fmt_spdlog objects), not header-only in every translation unit.
+#      Loki's targets use the loki_fmt / loki_spdlog interfaces; consumers of
+#      an installed loki need neither library.
 #   4. CLI11, xsimd, Boost::math, BS_thread_pool, tomlplusplus, HighFive,
 #      psrio and pocketfft are header-only internal dependencies ->
 #      BUILD_INTERFACE only. pocketfft is included by lib/cpu/fft_cpu.cpp only.
@@ -30,35 +32,69 @@ endif()
 
 
 
+# fmt and spdlog — sources only. Header-only, every translation unit that
+# includes them compiles their implementation again (about 1 s per unit with
+# both); compiled once, they cost a few seconds per build. The objects go into
+# loki (lib/CMakeLists.txt), so a static or shared loki carries the symbols.
 # fmt — keep version in sync with spdlog's expected fmt release.
 CPMAddPackage(
   NAME fmt
   VERSION 12.1.0
   URL https://github.com/fmtlib/fmt/archive/refs/tags/12.1.0.tar.gz
-  OPTIONS "FMT_INSTALL ON" "FMT_HEADER_ONLY ON"
-  EXCLUDE_FROM_ALL YES
-  SYSTEM YES
+  DOWNLOAD_ONLY YES
 )
-
-# spdlog — use the fmt package above (header-only external fmt).
 CPMAddPackage(
   NAME spdlog
   VERSION 1.17.0
   URL https://github.com/gabime/spdlog/archive/refs/tags/v1.17.0.tar.gz
-  OPTIONS "SPDLOG_INSTALL ON" "SPDLOG_FMT_EXTERNAL_HO ON" "SPDLOG_BUILD_SHARED OFF"
-  EXCLUDE_FROM_ALL YES
-  SYSTEM YES
+  DOWNLOAD_ONLY YES
 )
 
-if(NOT TARGET fmt::fmt-header-only)
-  message(FATAL_ERROR "fmt::fmt-header-only target not available after CPM setup.")
+find_package(Threads REQUIRED)
+add_library(loki_fmt INTERFACE)
+add_library(loki_spdlog INTERFACE)
+set(LOKI_FMT_SPDLOG_SOURCES "")
+if(fmt_ADDED)
+  target_include_directories(loki_fmt SYSTEM INTERFACE "${fmt_SOURCE_DIR}/include")
+  list(APPEND LOKI_FMT_SPDLOG_SOURCES "${fmt_SOURCE_DIR}/src/format.cc"
+       "${fmt_SOURCE_DIR}/src/os.cc"
+  )
+  # psrio links fmt::fmt-header-only when that target exists: give it this fmt,
+  # so every translation unit uses the same (compiled) fmt.
+  add_library(fmt::fmt-header-only ALIAS loki_fmt)
+elseif(TARGET fmt::fmt-header-only)
+  # LOKI_USE_SYSTEM_DEPS found an installed fmt: its header-only target.
+  target_link_libraries(loki_fmt INTERFACE fmt::fmt-header-only)
+else()
+  message(FATAL_ERROR "fmt is not available after CPM setup.")
 endif()
-if(NOT TARGET spdlog::spdlog_header_only)
-  message(FATAL_ERROR "spdlog::spdlog_header_only target not available after CPM setup.")
+if(spdlog_ADDED)
+  target_include_directories(loki_spdlog SYSTEM INTERFACE "${spdlog_SOURCE_DIR}/include")
+  target_compile_definitions(loki_spdlog INTERFACE SPDLOG_COMPILED_LIB SPDLOG_FMT_EXTERNAL)
+  target_link_libraries(loki_spdlog INTERFACE loki_fmt Threads::Threads)
+  foreach(src IN ITEMS spdlog stdout_sinks color_sinks file_sinks async cfg)
+    list(APPEND LOKI_FMT_SPDLOG_SOURCES "${spdlog_SOURCE_DIR}/src/${src}.cpp")
+  endforeach()
+elseif(TARGET spdlog::spdlog_header_only)
+  target_link_libraries(loki_spdlog INTERFACE spdlog::spdlog_header_only)
+else()
+  message(FATAL_ERROR "spdlog is not available after CPM setup.")
+endif()
+if(LOKI_FMT_SPDLOG_SOURCES)
+  add_library(loki_fmt_spdlog OBJECT ${LOKI_FMT_SPDLOG_SOURCES})
+  target_link_libraries(loki_fmt_spdlog PRIVATE loki_fmt loki_spdlog)
+  if(spdlog_ADDED)
+    # As spdlog's own build: the unlocked fwrite where libc has it.
+    include(CheckSymbolExists)
+    check_symbol_exists(fwrite_unlocked "stdio.h" LOKI_HAVE_FWRITE_UNLOCKED)
+    if(LOKI_HAVE_FWRITE_UNLOCKED)
+      target_compile_definitions(loki_fmt_spdlog PRIVATE SPDLOG_FWRITE_UNLOCKED)
+    endif()
+  endif()
 endif()
 
 # psrio — header-only SIGPROC/PRESTO reader. After fmt: psrio links fmt::fmt-header-only
-# and reuses this target. CPM adds the subdirectory so the
+# and reuses loki's fmt (loki_fmt above). CPM adds the subdirectory so the
 # psrio::psrio interface target (include path and C++20) is available.
 CPMAddPackage(
   NAME psrio
@@ -106,11 +142,13 @@ endif()
 
 # pocketfft (C++ branch, header-only, BSD-3-Clause): the host FFT for long
 # transforms (lib/cpu/fft_cpu.cpp). Upstream is
-# https://gitlab.mpcdf.mpg.de/mtr/pocketfft (branch cpp); the author's GitHub
-# mirror serves the same commit as a plain archive.
+# https://gitlab.mpcdf.mpg.de/mtr/pocketfft (branch cpp, commit c90e55b); the
+# author's GitHub mirror serves the same commit as a plain archive. The branch
+# has no releases, so VERSION is a placeholder: it must stay a plain number,
+# which LOKI_USE_SYSTEM_DEPS=ON passes to find_package(pocketfft).
 CPMAddPackage(
   NAME pocketfft
-  VERSION 0.0.0-c90e55b
+  VERSION 0.0.0
   URL https://github.com/mreineck/pocketfft/archive/c90e55b3d529f8efa40ed01a20de22405f45fc65.tar.gz
   URL_HASH SHA256=2d90016da31a8cc1dd0ac0c89c1f2fb55df8f4ccc3f0386dcfbad09ac6d1c3ba
   DOWNLOAD_ONLY YES

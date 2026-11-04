@@ -83,18 +83,23 @@ endif()
 # Header-only internal deps: BUILD_INTERFACE only (never exported to consumers).
 target_link_libraries(
   ${LOKI_LIBRARY_NAME}
-  PRIVATE $<BUILD_INTERFACE:${LOKI_COMPILE_OPTIONS}>
+  PRIVATE $<BUILD_INTERFACE:loki_fmt>
+          $<BUILD_INTERFACE:loki_spdlog>
+          $<BUILD_INTERFACE:${LOKI_COMPILE_OPTIONS}>
           $<BUILD_INTERFACE:CLI11::CLI11>
           $<BUILD_INTERFACE:xsimd>
           $<BUILD_INTERFACE:Boost::math>
           $<BUILD_INTERFACE:BS_thread_pool>
           $<BUILD_INTERFACE:tomlplusplus>
           $<BUILD_INTERFACE:HighFive::HighFive>
-          $<BUILD_INTERFACE:fmt::fmt-header-only>
-          $<BUILD_INTERFACE:spdlog::spdlog_header_only>
           $<BUILD_INTERFACE:psrio::psrio>
           $<BUILD_INTERFACE:pocketfft>
 )
+# The compiled fmt and spdlog (cmake/LokiDependencies.cmake) live in loki, so
+# loki's own executables and an installed loki's consumers link nothing else.
+if(TARGET loki_fmt_spdlog)
+  target_sources(${LOKI_LIBRARY_NAME} PRIVATE $<TARGET_OBJECTS:loki_fmt_spdlog>)
+endif()
 
 # System/runtime deps: PRIVATE for shared loki, PUBLIC for static loki.
 if(BUILD_SHARED_LIBS)
@@ -137,7 +142,7 @@ target_include_directories(${LOKI_LIBRARY_NAME}_internal INTERFACE ${PROJECT_SOU
 target_compile_definitions(${LOKI_LIBRARY_NAME}_internal INTERFACE ${LOKI_BACKEND_DEFINITIONS})
 # Private headers include fmt and spdlog (lib/detail/progress.hpp, ...).
 target_link_libraries(
-  ${LOKI_LIBRARY_NAME}_internal INTERFACE fmt::fmt-header-only spdlog::spdlog_header_only
+  ${LOKI_LIBRARY_NAME}_internal INTERFACE loki_fmt loki_spdlog
 )
 if(CMAKE_CUDA_COMPILER)
   target_include_directories(

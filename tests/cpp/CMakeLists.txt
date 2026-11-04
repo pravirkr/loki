@@ -46,9 +46,9 @@ foreach(kind api internal)
   set(_target ${LOKI_LIBRARY_NAME}_${kind}_tests)
   add_executable(${_target} ${_sources})
   target_link_libraries(
-    ${_target} PRIVATE ${PROJECT_NAME}::${LOKI_LIBRARY_NAME} ${LOKI_COMPILE_OPTIONS}
-                       Catch2::Catch2WithMain OpenMP::OpenMP_CXX HighFive::HighFive
-                       fmt::fmt-header-only
+    ${_target} PRIVATE loki_fmt loki_spdlog ${PROJECT_NAME}::${LOKI_LIBRARY_NAME}
+                       ${LOKI_COMPILE_OPTIONS} Catch2::Catch2WithMain OpenMP::OpenMP_CXX
+                       HighFive::HighFive
   )
   # Catch2 tags become CTest labels: [slow] marks the tests the sanitizer preset
   # skips (ctest -LE slow). Two tags run alone (RUN_SERIAL), whatever ctest -j:

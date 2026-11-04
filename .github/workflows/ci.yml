@@ -95,6 +95,9 @@ jobs:
     name: C++ ASan/UBSan (g++-14)
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      # Instrumented objects are large: at 1G this cache filled and evicted.
+      CCACHE_MAXSIZE: 2G
     steps:
       - uses: actions/checkout@v7
 
@@ -228,7 +231,10 @@ jobs:
 
       # Wall time is mostly uv sync (pyloki git dep), extension compile, and tests.
       - name: Install package and test dependencies
-        run: uv sync --extra tests
+        run: |
+          ccache --zero-stats || true
+          uv sync --extra tests
+          ccache --show-stats || true
         env:
           CMAKE_ARGS: >-
             -DLOKI_CUDA=OFF

@@ -29,11 +29,18 @@ set(LOKI_PYMODULE_NAME lib${LOKI_LIBRARY_NAME})
 file(GLOB LOKI_PYBIND_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/bindings/*.cpp)
 pybind11_add_module(${LOKI_PYMODULE_NAME} loki_python.cpp ${LOKI_PYBIND_SOURCES})
 target_include_directories(${LOKI_PYMODULE_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+# set_log_level: the module uses the spdlog compiled into loki (one registry).
+target_link_libraries(${LOKI_PYMODULE_NAME} PRIVATE $<BUILD_INTERFACE:loki_spdlog>)
+# pybind11's include directory comes first, and in a shared prefix (Homebrew,
+# conda) it may hold another fmt/spdlog: search loki's copies before it.
+target_include_directories(
+  ${LOKI_PYMODULE_NAME} SYSTEM BEFORE
+  PRIVATE $<TARGET_PROPERTY:loki_fmt,INTERFACE_INCLUDE_DIRECTORIES>
+          $<TARGET_PROPERTY:loki_spdlog,INTERFACE_INCLUDE_DIRECTORIES>
+)
 target_link_libraries(
   ${LOKI_PYMODULE_NAME} PUBLIC ${PROJECT_NAME}::${LOKI_LIBRARY_NAME} ${LOKI_COMPILE_OPTIONS}
 )
-# set_log_level: the module shares loki's header-only spdlog registry.
-target_link_libraries(${LOKI_PYMODULE_NAME} PRIVATE $<BUILD_INTERFACE:spdlog::spdlog_header_only>)
 install(TARGETS ${LOKI_PYMODULE_NAME} DESTINATION ${LOKI_LIBRARY_NAME})
 
 # Development builds: keep src/loki/ importable with PYTHONPATH=src, with no
