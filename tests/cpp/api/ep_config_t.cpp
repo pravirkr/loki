@@ -322,6 +322,30 @@ TEST_CASE("EP threshold simulation has an independent target SNR",
     }
 }
 
+TEST_CASE("EP overflow keep fraction defaults to the median and is kept",
+          "[config][ep]") {
+    const auto defaults = loki::search::EPTomlConfig::from_string(make_doc())
+                              .to_ep_search_config();
+    REQUIRE(defaults.get_overflow_keep_fraction() == 0.5);
+    const auto custom = loki::search::EPTomlConfig::from_string(
+                            make_doc("overflow_keep_fraction = 0.9\n"))
+                            .to_ep_search_config();
+    REQUIRE(custom.get_overflow_keep_fraction() == 0.9);
+    const auto updated = custom.get_updated_ep_config(64, 1.0, 140.0, 141.0);
+    REQUIRE(updated.get_overflow_keep_fraction() == 0.9);
+    const auto copied = custom;
+    REQUIRE(copied.get_overflow_keep_fraction() == 0.9);
+    REQUIRE_NOTHROW(loki::search::EPTomlConfig::from_string(
+        make_doc("overflow_keep_fraction = 1\n")));
+    for (const auto value : {"0.0", "-0.5", "1.5", "nan", "inf"}) {
+        CAPTURE(value);
+        REQUIRE_THROWS_AS(
+            loki::search::EPTomlConfig::from_string(make_doc(
+                std::string("overflow_keep_fraction = ") + value + "\n")),
+            std::invalid_argument);
+    }
+}
+
 TEST_CASE("EP target SNR defaults follow the search parameter count",
           "[config][ep]") {
     const std::vector<double> expected{8.5, 8.5, 9.2, 9.8, 10.0};

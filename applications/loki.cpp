@@ -1938,6 +1938,10 @@ int main(int argc, char** argv) {
         "--conservative-tile,!--no-conservative-tile",
         ep_cfg.use_conservative_tile,
         "Use the conservative tile of the Fourier search (default: off)");
+    ep_grp_pruning->add_option(
+        "--overflow-keep-fraction", ep_cfg.overflow_keep_fraction,
+        "Fraction of the stage's survivors and batch a full world tree keeps "
+        "when a batch overflows it, in (0, 1] (default: 0.5)");
 
     auto* ep_grp_perf = ep->add_option_group("Performance & Limits");
     ep_grp_perf->add_option(

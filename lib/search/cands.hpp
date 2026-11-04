@@ -90,6 +90,8 @@ struct PruneStats {
     SizeType n_leaves_masked = 0; ///< Rejected by the pulsar mask
     SizeType n_leaves_vetoed = 0; ///< Rejected by the stage-consistency veto
     SizeType n_harvested     = 0; ///< Removed from the tree by early harvest
+    /// Batches that overflowed the world tree; each trimmed the stage
+    SizeType n_overloads = 0;
 
     [[nodiscard]] double lb_leaves() const noexcept;
     [[nodiscard]] double lb_leaves_phys() const noexcept;

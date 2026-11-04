@@ -1,11 +1,13 @@
 #include "lib/utils/world_tree.hpp"
 
+#include <algorithm>
 #include <numeric>
 #include <span>
 #include <vector>
 
 #include <catch2/catch_template_test_macros.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
 #include "loki/common/types.hpp"
 
@@ -23,7 +25,106 @@ template <typename T> T make_value(SizeType i) {
     }
 }
 
+/// Scores of the live leaves of a tree that is not updating, in buffer order,
+/// each checked against the first value of its leaf (the tests store a leaf's
+/// score there).
+template <typename T> std::vector<float> live_scores(const WorldTree<T>& tree) {
+    const auto view   = tree.get_scores_circular_view();
+    const auto leaves = tree.get_leaves_circular_view();
+    const auto stride = tree.get_leaves_stride();
+    std::vector<float> out(view.first.begin(), view.first.end());
+    out.insert(out.end(), view.second.begin(), view.second.end());
+    std::vector<double> firsts;
+    for (SizeType i = 0; i < leaves.first.size(); i += stride) {
+        firsts.push_back(leaves.first[i]);
+    }
+    for (SizeType i = 0; i < leaves.second.size(); i += stride) {
+        firsts.push_back(leaves.second[i]);
+    }
+    REQUIRE(firsts.size() == out.size());
+    for (SizeType i = 0; i < out.size(); ++i) {
+        REQUIRE(firsts[i] == static_cast<double>(out[i]));
+    }
+    return out;
+}
+
 } // namespace
+
+TEMPLATE_TEST_CASE("WorldTree overflow keeps at most keep_fraction of the pool",
+                   "[world_tree]",
+                   float,
+                   ComplexType) {
+    // 2 * kBatch candidates for kCapacity slots. The fraction ranks the
+    // lowest score that may stay; past rank kCapacity - 1 the top-k decides.
+    // 0.5 is the median of the pool.
+    const auto [keep_fraction, n_kept] = GENERATE(table<double, SizeType>({
+        {0.5, 40},
+        {0.75, 60},
+        {0.9, 63},
+        {1.0, 63},
+    }));
+    CAPTURE(keep_fraction);
+    constexpr SizeType kCapacity = 64;
+    constexpr SizeType kNParams  = 2;
+    constexpr SizeType kNBins    = 8;
+    constexpr SizeType kBatch    = 40;
+    constexpr SizeType kNSeeds   = 8;
+
+    WorldTree<TestType> tree(kCapacity, kNParams, kNBins, kBatch);
+    const auto leaves_stride = tree.get_leaves_stride();
+    const auto folds_stride  = tree.get_folds_stride();
+
+    // Two batches of kBatch leaves: the first holds the even scores, the
+    // second the odd ones, so the pool of both is 0, 1, ..., 2 * kBatch - 1.
+    // Each leaf stores its score as its first value.
+    auto make_batch = [&](SizeType parity, std::vector<double>& leaves,
+                          std::vector<TestType>& folds,
+                          std::vector<float>& scores) {
+        leaves.assign(kBatch * leaves_stride, 0.0);
+        folds.assign(kBatch * folds_stride, make_value<TestType>(1));
+        scores.resize(kBatch);
+        for (SizeType i = 0; i < kBatch; ++i) {
+            scores[i]                 = static_cast<float>((2 * i) + parity);
+            leaves[i * leaves_stride] = static_cast<double>(scores[i]);
+        }
+    };
+    std::vector<double> leaves;
+    std::vector<TestType> folds;
+    std::vector<float> scores;
+    std::vector<SizeType> identity(kBatch);
+    std::iota(identity.begin(), identity.end(), SizeType{0});
+
+    // Consume every parent first, so the whole ring is free for the new level.
+    make_batch(0, leaves, folds, scores);
+    tree.add_initial(leaves, folds, scores, kNSeeds);
+    tree.prepare_in_place_update();
+    tree.consume_read(kNSeeds);
+
+    // A batch that fits is stored whatever the fraction.
+    float threshold = tree.add_batch_scattered(leaves, folds, scores, identity,
+                                               0.0F, kBatch, keep_fraction);
+    REQUIRE(threshold == 0.0F);
+    REQUIRE(tree.get_size() == kBatch);
+    REQUIRE(tree.get_n_overloads() == 0);
+
+    // The pool is 0, 1, ..., 2 * kBatch - 1, so the n_kept highest stay.
+    const auto n_pool = 2 * kBatch;
+    make_batch(1, leaves, folds, scores);
+    threshold = tree.add_batch_scattered(leaves, folds, scores, identity,
+                                         threshold, kBatch, keep_fraction);
+    REQUIRE(tree.get_n_overloads() == 1);
+    REQUIRE(threshold > static_cast<float>(n_pool - n_kept - 1));
+    REQUIRE(threshold <= static_cast<float>(n_pool - n_kept));
+    REQUIRE(tree.get_size() == n_kept);
+    tree.finalize_in_place_update();
+
+    auto kept = live_scores(tree);
+    std::ranges::sort(kept);
+    std::vector<float> expected(n_kept);
+    std::iota(expected.begin(), expected.end(),
+              static_cast<float>(n_pool - n_kept));
+    REQUIRE(kept == expected);
+}
 
 TEMPLATE_TEST_CASE("WorldTree::add_initial_scattered matches add_initial",
                    "[world_tree]",
@@ -164,6 +265,8 @@ TEMPLATE_TEST_CASE("WorldTree::add_initial_scattered matches add_initial",
 TEST_CASE("WorldTree overflow threshold uses descending median and keeps "
           "score == threshold",
           "[world_tree]") {
+    // The median rule: an overflow keeps at most half of the pool.
+    constexpr double kMedian     = 0.5;
     constexpr SizeType kCapacity = 8;
     constexpr SizeType kNParams  = 1;
     constexpr SizeType kNBins    = 4;
@@ -189,15 +292,16 @@ TEST_CASE("WorldTree overflow threshold uses descending median and keeps "
 
     tree.prepare_in_place_update();
     REQUIRE(tree.add_batch_scattered(batch1_leaves, batch1_folds, batch1_scores,
-                                     batch1_indices, 5.0F, 6) == 5.0F);
+                                     batch1_indices, 5.0F, 6, kMedian) == 5.0F);
 
     std::vector<double> batch2_leaves(4 * leaves_stride, 2.0);
     std::vector<float> batch2_folds(4 * folds_stride, 2.0F);
     std::vector<float> batch2_scores{25.0F, 35.0F, 45.0F, 55.0F};
     std::vector<SizeType> batch2_indices{0, 1, 2, 3};
 
-    const float new_thresh = tree.add_batch_scattered(
-        batch2_leaves, batch2_folds, batch2_scores, batch2_indices, 5.0F, 4);
+    const float new_thresh =
+        tree.add_batch_scattered(batch2_leaves, batch2_folds, batch2_scores,
+                                 batch2_indices, 5.0F, 4, kMedian);
     REQUIRE(new_thresh == exact_thresh);
     REQUIRE(tree.get_size() == 5);
 }

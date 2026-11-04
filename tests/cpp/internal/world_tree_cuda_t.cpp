@@ -126,6 +126,8 @@ TEMPLATE_TEST_CASE("WorldTreeCUDA::add_initial takes the leading seeds of a "
 TEST_CASE(
     "WorldTreeCUDA overflow matches CPU and validate checks leaves stride",
     "[world_tree][cuda]") {
+    // The median rule: an overflow keeps at most half of the pool.
+    constexpr double kMedian = 0.5;
     loki::cuda_utils::CudaSetDeviceGuard const guard(0);
     constexpr SizeType kCapacity = 8;
     constexpr SizeType kNParams  = 1;
@@ -155,7 +157,7 @@ TEST_CASE(
                                  loki::cuda_utils::as_span(batch1_folds_d),
                                  loki::cuda_utils::as_span(batch1_scores_d),
                                  loki::cuda_utils::as_span(batch1_indices_d),
-                                 5.0F, 6, stream) == 5.0F);
+                                 5.0F, 6, kMedian, stream) == 5.0F);
     REQUIRE(tree.get_size() == 6);
 
     std::vector<double> batch2_leaves(4 * leaves_stride, 2.0);
@@ -171,7 +173,7 @@ TEST_CASE(
         loki::cuda_utils::as_span(batch2_leaves_d),
         loki::cuda_utils::as_span(batch2_folds_d),
         loki::cuda_utils::as_span(batch2_scores_d),
-        loki::cuda_utils::as_span(batch2_indices_d), 5.0F, 4, stream);
+        loki::cuda_utils::as_span(batch2_indices_d), 5.0F, 4, kMedian, stream);
     REQUIRE(new_thresh == exact_thresh);
     REQUIRE(tree.get_size() == 5);
 

@@ -438,7 +438,8 @@ float WorldTree<FoldType>::add_batch_scattered(
     std::span<const float> scores_batch,
     std::span<const SizeType> indices_batch,
     float current_threshold,
-    SizeType slots_to_write) {
+    SizeType slots_to_write,
+    double keep_fraction) {
     error_check::check(m_is_updating,
                        "WorldTree: add_batch only allowed during updates");
     // Always use scores_batch to get the correct batch size
@@ -456,13 +457,14 @@ float WorldTree<FoldType>::add_batch_scattered(
         return current_threshold;
     }
 
-    // Slow path: Overflow & Pruning (Median + Top-K Strategy)
+    // Slow path: Overflow & Pruning (Severity + Top-K Strategy)
     ++m_n_overloads;
     error_check::check_less_equal(slots_to_write, m_max_batch_size,
                                   "WorldTree: Suggestions too large to add.");
     // Determine the Global Pruning Threshold
-    const float effective_threshold = get_prune_threshold(
-        scores_batch, indices_batch, slots_to_write, current_threshold);
+    const float effective_threshold =
+        get_prune_threshold(scores_batch, indices_batch, slots_to_write,
+                            current_threshold, keep_fraction);
     // Remove old items that are strictly worse than the new global pruning
     // threshold.
     prune_on_overload(effective_threshold);
@@ -676,7 +678,8 @@ float WorldTree<FoldType>::get_prune_threshold(
     std::span<const float> scores_batch,
     std::span<const SizeType> indices_batch,
     SizeType slots_to_write,
-    float current_threshold) {
+    float current_threshold,
+    double keep_fraction) {
     if (slots_to_write == 0) {
         return current_threshold;
     }
@@ -710,16 +713,22 @@ float WorldTree<FoldType>::get_prune_threshold(
     const float topk_threshold =
         std::nextafter(*kth, std::numeric_limits<float>::max());
 
-    // Median score for severity (restricted range)
-    auto const mid = begin + total_candidates / 2;
-    if (mid <= kth) {
-        std::nth_element(begin, mid, kth + 1, std::greater<float>());
-    } else {
-        std::nth_element(kth + 1, mid, end, std::greater<float>());
+    // Severity: keep at most keep_fraction of the pool, so that a trim
+    // leaves room for the batches after it (0.5: the median of the pool).
+    // [begin, kth) holds the total_capacity - 1 highest scores, so a rank at
+    // or past kth leaves the top-k threshold in charge.
+    const auto keep_rank =
+        std::min(total_candidates - 1,
+                 static_cast<SizeType>(keep_fraction *
+                                       static_cast<double>(total_candidates)));
+    auto const mid = begin + keep_rank;
+    if (mid >= kth) {
+        return std::max(current_threshold, topk_threshold);
     }
-    const float median_threshold =
+    std::nth_element(begin, mid, kth, std::greater<float>());
+    const float severity_threshold =
         std::nextafter(*mid, std::numeric_limits<float>::max());
-    return std::max({current_threshold, topk_threshold, median_threshold});
+    return std::max({current_threshold, topk_threshold, severity_threshold});
 }
 
 template <SupportedFoldType FoldType>
