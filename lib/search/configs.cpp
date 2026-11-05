@@ -900,8 +900,8 @@ public:
         validate();
         m_tseg_brute = static_cast<double>(m_bseg_brute) * m_tsamp;
         m_tseg_ffa   = static_cast<double>(m_bseg_ffa) * m_tsamp;
-        m_niters_ffa = static_cast<SizeType>(std::countr_zero(m_bseg_ffa) -
-                                             std::countr_zero(m_bseg_brute));
+        m_niters_ffa =
+            static_cast<SizeType>(std::countr_zero(m_bseg_ffa / m_bseg_brute));
         m_scoring_widths =
             detection::generate_box_width_trials(m_nbins, m_ducy_max, m_wtsp);
         m_boxcar_kadane_biases = {1.42F, 0.76F, 0.41F};
@@ -1067,8 +1067,7 @@ private:
     std::vector<float> m_boxcar_kadane_biases;
 
     void validate() const {
-        error_check::check_greater(m_nsamps, 0, "nsamps must be positive");
-        error_check::check_power_of_2(m_nsamps, "nsamps");
+        error_check::check_greater_equal(m_nsamps, 4, "nsamps must be >= 4");
         error_check::check_greater(m_tsamp, 0, "tsamp must be positive");
         error_check::check_greater(m_eta, 0,
                                    "eta (tolerance bins) must be positive");
@@ -1082,16 +1081,23 @@ private:
         error_check::check_greater_equal(
             m_nbins_max, m_nbins,
             "nbins_max must be greater than or equal to nbins");
-        error_check::check_power_of_2(m_bseg_brute, "bseg_brute");
-        error_check::check_power_of_2(m_bseg_ffa, "bseg_ffa");
+        error_check::check_greater_equal(m_bseg_brute, 2,
+                                         "bseg_brute must be >= 2");
         error_check::check_less(m_bseg_brute, m_nsamps,
                                 "bseg_brute must be less than nsamps");
-        error_check::check_less_equal(
-            m_bseg_ffa, m_nsamps,
-            "bseg_ffa must be less than or equal to nsamps");
+        const SizeType nsegments_init = nsegments_init_for(m_bseg_brute);
+        error_check::check_power_of_2(nsegments_init,
+                                      "bit_ceil(ceil(nsamps / bseg_brute))");
         error_check::check_greater_equal(
             m_bseg_ffa, m_bseg_brute,
             "bseg_ffa must be greater than or equal to bseg_brute");
+        error_check::check_less_equal(
+            m_bseg_ffa, nsegments_init * m_bseg_brute,
+            "bseg_ffa must be <= nsegments_init * bseg_brute");
+        error_check::check_equal(m_bseg_ffa % m_bseg_brute, 0,
+                                 "bseg_ffa must be a multiple of bseg_brute");
+        error_check::check_power_of_2(m_bseg_ffa / m_bseg_brute,
+                                      "bseg_ffa / bseg_brute");
         error_check::check_greater_equal(m_nparams, 1,
                                          "nparams must be at least 1");
         error_check::check_greater(m_f_min, 0.0,
@@ -1114,8 +1120,7 @@ private:
      * Chosen by a cycles-at-f_max target, or by a cost model for the
      * direct-DFT Fourier brute fold (see select_bseg_brute). The previous
      * "two cycles at f_min" heuristic is kept as a fallback for degenerate
-     * configurations (e.g. nsamps that is not a power of two, which validate()
-     * rejects anyway, or parameter ranges the grid-count helpers refuse).
+     * configurations (e.g. parameter ranges the grid-count helpers refuse).
      */
     SizeType get_bseg_brute_default() const {
         try {
@@ -1130,38 +1135,73 @@ private:
         return get_bseg_brute_legacy();
     }
 
-    /**
-     * @brief Largest k such that B = 2^k is a valid brute segment length, or
-     * std::nullopt when no power-of-two choice exists (nsamps that is not a
-     * power of two, which validate() rejects anyway).
-     *
-     * B must stay below nsamps (validate) and below the FFA segment cap.
-     */
-    [[nodiscard]] std::optional<SizeType> bseg_brute_k_max() const {
-        if (m_nsamps < 4 || !std::has_single_bit(m_nsamps)) {
-            return std::nullopt;
-        }
-        const SizeType bseg_ffa_cap = m_bseg_ffa_explicit.value_or(m_nsamps);
-        if (bseg_ffa_cap < 2 || !std::has_single_bit(bseg_ffa_cap) ||
-            bseg_ffa_cap > m_nsamps) {
-            return std::nullopt;
-        }
-        return std::min(static_cast<SizeType>(std::countr_zero(bseg_ffa_cap)),
-                        static_cast<SizeType>(std::countr_zero(m_nsamps)) - 1);
+    [[nodiscard]] SizeType nsegments_init_for(SizeType bseg) const noexcept {
+        return std::bit_ceil((m_nsamps + bseg - 1) / bseg);
     }
 
-    /// validate_plan(): level 0 (segments of 2^k samples) may only have a
+    /**
+     * @brief Ascending list of valid brute segment lengths B such that
+     * bit_ceil(ceil(nsamps / B)) is a power of two >= 2 (and respects any
+     * explicit bseg_ffa cap). When nsamps is a power of two, these are the
+     * exact powers of two 2^1, 2^2, ..., nsamps / 2.
+     */
+    [[nodiscard]] std::vector<SizeType> candidate_bseg_brute() const {
+        if (m_nsamps < 4) {
+            return {};
+        }
+        std::vector<SizeType> cands;
+        if (m_bseg_ffa_explicit.has_value()) {
+            const SizeType cap = *m_bseg_ffa_explicit;
+            if (cap < 2) {
+                return {};
+            }
+            const auto max_shift = static_cast<SizeType>(std::countr_zero(cap));
+            for (SizeType s = max_shift + 1; s > 0; --s) {
+                const SizeType shift  = s - 1;
+                const SizeType bseg_k = cap >> shift;
+                if (bseg_k < 2 || bseg_k >= m_nsamps) {
+                    continue;
+                }
+                const SizeType nseg = nsegments_init_for(bseg_k);
+                if (nseg < 2 || cap < bseg_k || cap > nseg * bseg_k) {
+                    continue;
+                }
+                if (cands.empty() || cands.back() != bseg_k) {
+                    cands.push_back(bseg_k);
+                }
+            }
+            return cands;
+        }
+        const auto max_m =
+            static_cast<SizeType>(std::bit_width(m_nsamps / 2)) - 1;
+        for (SizeType m = max_m; m >= 1; --m) {
+            const SizeType nseg   = SizeType{1} << m;
+            const SizeType bseg_k = (m_nsamps + nseg - 1) / nseg;
+            if (bseg_k < 2 || bseg_k >= m_nsamps) {
+                continue;
+            }
+            if (nsegments_init_for(bseg_k) != nseg) {
+                continue;
+            }
+            if (cands.empty() || cands.back() != bseg_k) {
+                cands.push_back(bseg_k);
+            }
+        }
+        return cands;
+    }
+
+    /// validate_plan(): level 0 (segments of bseg_k samples) may only have a
     /// frequency grid, i.e. a single trial for every higher-order parameter.
-    [[nodiscard]] bool level0_is_frequency_only(SizeType k) const {
-        const auto c0 = get_param_grid_count(
-            static_cast<double>(SizeType{1} << k) * m_tsamp);
+    [[nodiscard]] bool level0_is_frequency_only(SizeType bseg_k) const {
+        const auto c0 =
+            get_param_grid_count(static_cast<double>(bseg_k) * m_tsamp);
         return std::all_of(c0.begin(), c0.end() - 1,
                            [](SizeType count) { return count == 1; });
     }
 
     /**
-     * @brief Pick the default brute segment length B (a power of two), or
-     * std::nullopt if no valid choice exists.
+     * @brief Pick the default brute segment length B, or std::nullopt if no
+     * valid choice exists.
      *
      * - Direct-DFT Fourier: minimise a cost model (select_bseg_direct_dft).
      * - Time domain and lossy Fourier: a cycles-at-f_max target
@@ -1185,29 +1225,33 @@ private:
      * B is set from a target number of cycles at f_max, the fast end of the
      * chunk, which the planner keeps within octave_scale of f_min.
      *
-     * Takes the largest valid B at or below the power of two nearest to the
+     * Takes the largest valid B at or below the candidate nearest to the
      * target; the smallest valid B if all candidates are above it.
      */
     [[nodiscard]] std::optional<SizeType> select_bseg_by_cycles() const {
-        const auto k_max = bseg_brute_k_max();
-        if (!k_max.has_value()) {
+        const auto cands = candidate_bseg_brute();
+        if (cands.empty()) {
             return std::nullopt;
         }
         const double target_cycles  = bseg_target_cycles();
         const double target_samples = target_cycles / (m_tsamp * m_f_max);
-        const auto desired_k        = static_cast<SizeType>(std::max(
-            1L, std::lround(std::log2(std::max(target_samples, 2.0)))));
+        const double max_target_bseg =
+            std::has_single_bit(m_nsamps)
+                ? static_cast<double>(
+                      SizeType{1} << static_cast<SizeType>(
+                          std::max(1L, std::lround(std::log2(
+                                           std::max(target_samples, 2.0))))))
+                : target_samples * std::sqrt(2.0);
         std::optional<SizeType> largest_below_target;
         std::optional<SizeType> smallest_valid;
-        for (SizeType k = 1; k <= *k_max; ++k) {
-            if (!level0_is_frequency_only(k)) {
+        for (const SizeType bseg_k : cands) {
+            if (!level0_is_frequency_only(bseg_k)) {
                 continue;
             }
-            const auto bseg_k = SizeType{1} << k;
             if (!smallest_valid.has_value()) {
                 smallest_valid = bseg_k;
             }
-            if (k <= desired_k) {
+            if (static_cast<double>(bseg_k) <= max_target_bseg) {
                 largest_below_target = bseg_k;
             }
         }
@@ -1244,33 +1288,35 @@ private:
      * skipped.
      */
     [[nodiscard]] std::optional<SizeType> select_bseg_direct_dft() const {
-        const auto k_max_opt = bseg_brute_k_max();
-        if (!k_max_opt.has_value()) {
+        const auto cands = candidate_bseg_brute();
+        if (cands.empty()) {
             return std::nullopt;
         }
-        const SizeType k_max = *k_max_opt;
-        const auto width     = static_cast<double>(m_nbins_f);
-        const auto nsamps    = static_cast<double>(m_nsamps);
-        const auto& w        = kDirectDftWeights;
+        const auto n_cands = cands.size();
+        const auto width   = static_cast<double>(m_nbins_f);
+        const auto nsamps  = static_cast<double>(m_nsamps);
+        const auto& w      = kDirectDftWeights;
 
-        // Level-0 frequency counts and merge work per segment length 2^k.
-        std::vector<SizeType> nfreqs0(k_max + 1, 0);
-        std::vector<double> merge_elems(k_max + 1, 0.0);
-        for (SizeType k = 1; k <= k_max; ++k) {
-            const double tseg = static_cast<double>(SizeType{1} << k) * m_tsamp;
-            const auto counts = get_param_grid_count(tseg);
-            nfreqs0[k]        = counts.back();
-            double ncoords    = 1.0;
+        // Level-0 frequency counts and merge work per candidate segment length.
+        std::vector<SizeType> nfreqs0(n_cands, 0);
+        std::vector<double> merge_elems(n_cands, 0.0);
+        for (SizeType idx = 0; idx < n_cands; ++idx) {
+            const SizeType bseg_k = cands[idx];
+            const double tseg     = static_cast<double>(bseg_k) * m_tsamp;
+            const auto counts     = get_param_grid_count(tseg);
+            nfreqs0[idx]          = counts.back();
+            double ncoords        = 1.0;
             for (const auto c : counts) {
                 ncoords *= static_cast<double>(c);
             }
-            const double nsegments = nsamps / static_cast<double>(1ULL << k);
-            merge_elems[k]         = ncoords * nsegments * 2.0 * width;
+            const auto nsegments =
+                static_cast<double>(nsegments_init_for(bseg_k));
+            merge_elems[idx] = ncoords * nsegments * 2.0 * width;
         }
-        // Suffix sums: merge work of all levels above k.
-        std::vector<double> merge_above(k_max + 2, 0.0);
-        for (SizeType k = k_max; k >= 1; --k) {
-            merge_above[k - 1] = merge_above[k] + merge_elems[k];
+        // Suffix sums: merge work of all levels above idx.
+        std::vector<double> merge_above(n_cands + 1, 0.0);
+        for (SizeType idx = n_cands; idx >= 1; --idx) {
+            merge_above[idx - 1] = merge_above[idx] + merge_elems[idx - 1];
         }
 
         // Beyond ~16 bins' worth of samples a larger B can no longer pay for
@@ -1286,18 +1332,18 @@ private:
         std::optional<SizeType> best;
         double best_cost = 0.0;
         for (const bool guarded : {true, false}) {
-            for (SizeType k = 1; k <= k_max; ++k) {
-                const auto bseg_k = SizeType{1} << k;
+            for (SizeType idx = 0; idx < n_cands; ++idx) {
+                const SizeType bseg_k = cands[idx];
                 if (guarded && bseg_k > bseg_guard) {
                     break;
                 }
-                if (!level0_is_frequency_only(k)) {
+                if (!level0_is_frequency_only(bseg_k)) {
                     continue;
                 }
                 const double brute_ops =
-                    2.0 * nsamps * static_cast<double>(nfreqs0[k]) * width;
+                    2.0 * nsamps * static_cast<double>(nfreqs0[idx]) * width;
                 const double cost =
-                    (w.brute_op * brute_ops) + (w.merge_op * merge_above[k]);
+                    (w.brute_op * brute_ops) + (w.merge_op * merge_above[idx]);
                 if (!best.has_value() || cost <= best_cost) {
                     best      = bseg_k;
                     best_cost = cost;
@@ -1339,20 +1385,36 @@ private:
 
     /// Legacy heuristic: roughly two cycles at f_min (four for nparams > 1).
     SizeType get_bseg_brute_legacy() const {
+        const auto cands  = candidate_bseg_brute();
         const auto tobs   = static_cast<double>(m_nsamps) * m_tsamp;
         const auto cycles = tobs * m_f_min;
-        if (cycles <= 1.0) {
-            return std::min(m_nsamps / 2, SizeType{64});
+        SizeType target   = std::min(m_nsamps / 2, SizeType{64});
+        if (cycles > 1.0) {
+            const auto levels = static_cast<int>(std::floor(std::log2(cycles)));
+            const int init_levels = (m_nparams == 1) ? 1 : 2;
+            const int shift       = std::max(1, levels - init_levels);
+            const auto bseg =
+                static_cast<SizeType>(m_nsamps >> static_cast<unsigned>(shift));
+            target = std::clamp(bseg, SizeType{2}, m_nsamps / 2);
         }
-        const auto levels     = static_cast<int>(std::floor(std::log2(cycles)));
-        const int init_levels = (m_nparams == 1) ? 1 : 2;
-        const int shift       = std::max(1, levels - init_levels);
-        const auto bseg =
-            static_cast<SizeType>(m_nsamps >> static_cast<unsigned>(shift));
-        return std::clamp(bseg, SizeType{2}, m_nsamps / 2);
+        if (cands.empty()) {
+            return target;
+        }
+        SizeType best = cands.front();
+        for (const SizeType c : cands) {
+            if (c <= target) {
+                best = c;
+            }
+        }
+        return best;
     }
 
-    SizeType get_bseg_ffa_default() const { return m_nsamps; }
+    SizeType get_bseg_ffa_default() const {
+        if (m_bseg_brute == 0) {
+            return m_nsamps;
+        }
+        return nsegments_init_for(m_bseg_brute) * m_bseg_brute;
+    }
 };
 
 // ==============================================================================

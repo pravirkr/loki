@@ -41,12 +41,13 @@ public:
           m_nthreads(nthreads) {
         error_check::check(!m_freq_arr.empty(),
                            "BruteFold::Impl: Frequency array is empty");
-        error_check::check_equal(m_nsamps % m_segment_len, 0,
-                                 "BruteFold::Impl: Number of samples is not a "
-                                 "multiple of segment length");
+        error_check::check_greater(m_nsamps, 0,
+                                   "BruteFold::Impl: nsamps must be > 0");
+        error_check::check_greater(m_segment_len, 0,
+                                   "BruteFold::Impl: segment_len must be > 0");
         m_nthreads  = std::max(m_nthreads, 1);
         m_nfreqs    = m_freq_arr.size();
-        m_nsegments = m_nsamps / m_segment_len;
+        m_nsegments = (m_nsamps + m_segment_len - 1) / m_segment_len;
         m_nbins_f   = (nbins / 2) + 1;
         if constexpr (std::is_same_v<FoldType, float>) {
             compute_phase_time_domain();
@@ -90,13 +91,13 @@ public:
             core::brute_fold_ts(ts_e.data(), ts_v.data(), fold.data(),
                                 m_runs.data(), m_run_offsets.data(),
                                 m_nsegments, m_nfreqs, m_segment_len, m_nbins,
-                                m_nthreads);
+                                m_nthreads, m_nsamps);
 
         } else {
             core::brute_fold_ts_complex(ts_e.data(), ts_v.data(), fold.data(),
                                         m_freq_arr.data(), m_nfreqs,
                                         m_nsegments, m_segment_len, m_nbins,
-                                        m_tsamp, m_t_ref, m_nthreads);
+                                        m_tsamp, m_t_ref, m_nthreads, m_nsamps);
         }
     }
 
@@ -122,11 +123,12 @@ public:
                 ts_v.size(), ts_e.size(),
                 "BruteFoldCpuEngine::execute_fused_freq: ts_v "
                 "must have size nsamps");
+            const SizeType nsegments_padded = std::bit_ceil(m_nsegments);
             error_check::check_greater_equal(
                 nlevels, 1,
                 "BruteFoldCpuEngine::execute_fused_freq: nlevels must be >= 1");
             error_check::check_equal(
-                m_nsegments % (SizeType{1} << nlevels), 0,
+                nsegments_padded % (SizeType{1} << nlevels), 0,
                 "BruteFoldCpuEngine::execute_fused_freq: nsegments must be a "
                 "multiple of 2^nlevels");
             error_check::check_greater_equal(
@@ -140,15 +142,15 @@ public:
                                      "BruteFoldCpuEngine::execute_fused_freq: "
                                      "ncoords[0] must equal nfreqs");
             error_check::check_equal(fold_out.size(),
-                                     (m_nsegments >> nlevels) *
+                                     (nsegments_padded >> nlevels) *
                                          ncoords[nlevels] * 2 * m_nbins,
                                      "BruteFoldCpuEngine::execute_fused_freq: "
                                      "fold_out has wrong size");
             core::brute_fold_ffa_fused_freq(
                 ts_e.data(), ts_v.data(), fold_out.data(), m_runs.data(),
                 m_run_offsets.data(), coords_levels.data(), ncoords.data(),
-                m_nsegments, m_nfreqs, m_segment_len, m_nbins, nlevels,
-                m_nthreads);
+                nsegments_padded, m_nfreqs, m_segment_len, m_nbins, nlevels,
+                m_nthreads, m_nsamps);
         } else {
             throw std::logic_error(
                 "execute_fused_freq only supported on float engine");
@@ -196,44 +198,103 @@ private:
             m_segment_len,
             static_cast<SizeType>(std::numeric_limits<uint32_t>::max()),
             "BruteFold segment length does not fit in a phase-run index");
-        std::vector<std::vector<coord::PhaseRun>> runs_per_freq(m_nfreqs);
+        const auto nt = static_cast<SizeType>(m_nthreads);
+        std::vector<std::vector<coord::PhaseRun>> thread_runs(nt);
+        std::vector<SizeType> freq_counts(m_nfreqs, 0);
         // NOLINTNEXTLINE(openmp-use-default-none): clauses cannot name members
-#pragma omp parallel for schedule(static) num_threads(m_nthreads)
-        for (SizeType ifreq = 0; ifreq < m_nfreqs; ++ifreq) {
-            runs_per_freq[ifreq] = phase_runs(m_freq_arr[ifreq]);
+#pragma omp parallel num_threads(m_nthreads)
+        {
+            const auto tid    = static_cast<SizeType>(omp_get_thread_num());
+            const auto nthr   = static_cast<SizeType>(omp_get_num_threads());
+            const SizeType f0 = (tid * m_nfreqs) / nthr;
+            const SizeType f1 = ((tid + 1) * m_nfreqs) / nthr;
+            auto& local       = thread_runs[tid];
+            for (SizeType ifreq = f0; ifreq < f1; ++ifreq) {
+                const SizeType before = local.size();
+                append_phase_runs(m_freq_arr[ifreq], local);
+                freq_counts[ifreq] = local.size() - before;
+            }
         }
-        m_run_offsets.assign(m_nfreqs + 1, 0);
+        m_run_offsets.resize(m_nfreqs + 1);
+        m_run_offsets[0] = 0;
         for (SizeType ifreq = 0; ifreq < m_nfreqs; ++ifreq) {
             m_run_offsets[ifreq + 1] =
-                m_run_offsets[ifreq] + runs_per_freq[ifreq].size();
+                m_run_offsets[ifreq] + freq_counts[ifreq];
         }
-        m_runs.clear();
-        m_runs.reserve(m_run_offsets.back());
-        for (const auto& runs : runs_per_freq) {
-            m_runs.insert(m_runs.end(), runs.begin(), runs.end());
+        std::vector<SizeType> thread_offsets(nt + 1, 0);
+        for (SizeType t = 0; t < nt; ++t) {
+            thread_offsets[t + 1] = thread_offsets[t] + thread_runs[t].size();
+        }
+        m_runs.resize(m_run_offsets.back());
+        // NOLINTNEXTLINE(openmp-use-default-none): clauses cannot name members
+#pragma omp parallel for schedule(static) num_threads(m_nthreads)
+        for (SizeType t = 0; t < nt; ++t) {
+            if (!thread_runs[t].empty()) {
+                std::ranges::copy(thread_runs[t],
+                                  m_runs.begin() + static_cast<std::ptrdiff_t>(
+                                                       thread_offsets[t]));
+            }
         }
     }
 
-    /// Phase runs of one frequency over a segment.
-    [[nodiscard]] std::vector<coord::PhaseRun> phase_runs(double freq) const {
-        std::vector<coord::PhaseRun> runs;
+    /// Append phase runs of one frequency over a segment to `runs`.
+    void append_phase_runs(double freq,
+                           std::vector<coord::PhaseRun>& runs) const {
+        error_check::check_greater_equal(freq, 0.0,
+                                         "Frequency must be positive");
+        error_check::check_greater_equal(m_nbins, 1,
+                                         "Number of bins must be positive");
+        if (m_segment_len == 0) {
+            return;
+        }
+        const auto nbins_d    = static_cast<double>(m_nbins);
+        const auto nbins_u32  = static_cast<uint32_t>(m_nbins);
+        const double step_bin = m_tsamp * freq * nbins_d;
+        const double inv_step =
+            (step_bin > 0.0 && step_bin < 0.5) ? (1.0 / step_bin) : 0.0;
+        // Margin of 2e-3 bins (> 32 float ULPs at nbins <= 1024) before the
+        // half-integer boundary so the exact formula always decides boundary
+        // samples.
+        constexpr double kBoundaryMargin = 2.0e-3;
+
         uint32_t prev_bin = 0;
-        for (SizeType isamp = 0; isamp < m_segment_len; ++isamp) {
-            const auto proper_time =
+        for (SizeType isamp = 0; isamp < m_segment_len;) {
+            const double proper_time =
                 (static_cast<double>(isamp) * m_tsamp) - m_t_ref;
-            const uint32_t iphase =
-                psr_utils::get_phase_idx_uint(proper_time, freq, m_nbins, 0.0);
-            if (isamp > 0 && iphase != prev_bin) {
+            const double total_phase = proper_time * freq;
+            const double norm_phase  = total_phase - std::floor(total_phase);
+            double bin_phase         = norm_phase * nbins_d;
+            if (bin_phase >= nbins_d) {
+                bin_phase = 0.0;
+            }
+            const auto iphase = static_cast<float>(bin_phase);
+            auto iphase_int   = static_cast<uint32_t>(iphase + 0.5F);
+            if (iphase_int == nbins_u32) {
+                iphase_int = 0;
+            }
+            if (isamp > 0 && iphase_int != prev_bin) {
                 runs.push_back(
                     {.end = static_cast<uint32_t>(isamp), .bin = prev_bin});
             }
-            prev_bin = iphase;
+            prev_bin = iphase_int;
+
+            if (inv_step > 0.0) {
+                const double target =
+                    (iphase_int == 0 && bin_phase >= nbins_d - 0.5)
+                        ? (nbins_d + 0.5)
+                        : (static_cast<double>(iphase_int) + 0.5);
+                const double rem = target - bin_phase - kBoundaryMargin;
+                if (rem > step_bin) {
+                    const auto skip = static_cast<SizeType>(rem * inv_step);
+                    isamp = std::min(m_segment_len,
+                                     isamp + std::max<SizeType>(1, skip));
+                    continue;
+                }
+            }
+            ++isamp;
         }
-        if (m_segment_len > 0) {
-            runs.push_back(
-                {.end = static_cast<uint32_t>(m_segment_len), .bin = prev_bin});
-        }
-        return runs;
+        runs.push_back(
+            {.end = static_cast<uint32_t>(m_segment_len), .bin = prev_bin});
     }
 
 }; // End BruteFoldCpuEngine definition

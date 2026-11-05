@@ -9,8 +9,11 @@
 
 #include "loki/common/coord.hpp"
 #include "loki/common/types.hpp"
+#include "loki/detection/score.hpp"
 
 #include "lib/core/kernels.hpp"
+#include "lib/core/taylor_ffa.hpp"
+#include "lib/cpu/boxcar_kernels.hpp"
 #include "lib/detail/utils.hpp"
 
 using loki::ComplexType;
@@ -183,4 +186,155 @@ TEST_CASE("Two fused final Fourier levels are bit-exact with the stored "
     CHECK(std::memcmp(static_cast<const void*>(fused.profiles.data()),
                       static_cast<const void*>(expected.profiles.data()),
                       expected.profiles.size() * sizeof(ComplexType)) == 0);
+}
+
+TEST_CASE("Single-pass Taylor FFA resolve is bit-exact with per-half resolve",
+          "[ffa][resolve]") {
+    const int nthreads     = GENERATE(1, 4);
+    const SizeType n_accel = GENERATE(SizeType{2}, SizeType{11});
+    const SizeType n_freq  = 137;
+    const SizeType nbins   = 64;
+    const double tseg      = 0.065536;
+    const SizeType level   = 5;
+
+    SECTION("n_params = 2 (accel)") {
+        const std::vector<SizeType> cur  = {n_accel, n_freq};
+        const std::vector<SizeType> prev = {std::max<SizeType>(1, n_accel / 2),
+                                            n_freq / 2};
+        const std::vector<loki::ParamLimit> limits = {
+            {.min = -50.0, .max = 50.0},
+            {.min = 100.0, .max = 100.5},
+        };
+        const SizeType ncoords = cur[0] * cur[1];
+        std::vector<FFACoord> expected(ncoords);
+        std::vector<FFACoord> single_pass(ncoords);
+        std::vector<FFACoord> row_pass(ncoords);
+
+        loki::core::ffa_taylor_resolve_poly_batch(
+            cur, prev, limits, expected, level, /*latter=*/0, tseg, nbins,
+            /*n_params=*/2, 1);
+        loki::core::ffa_taylor_resolve_poly_batch(
+            cur, prev, limits, expected, level, /*latter=*/1, tseg, nbins,
+            /*n_params=*/2, 1);
+
+        loki::core::ffa_taylor_resolve_poly_batch(
+            cur, prev, limits, single_pass, level, tseg, nbins, /*n_params=*/2,
+            nthreads);
+        loki::core::ffa_taylor_resolve_accel_rows(cur, prev, limits, row_pass,
+                                                  level, tseg, nbins, 0, cur[0],
+                                                  nthreads);
+
+        CHECK(std::memcmp(single_pass.data(), expected.data(),
+                          ncoords * sizeof(FFACoord)) == 0);
+        CHECK(std::memcmp(row_pass.data(), expected.data(),
+                          ncoords * sizeof(FFACoord)) == 0);
+    }
+
+    SECTION("n_params = 3 (jerk)") {
+        const SizeType n_jerk            = 3;
+        const std::vector<SizeType> cur  = {n_jerk, n_accel, n_freq};
+        const std::vector<SizeType> prev = {
+            2, std::max<SizeType>(1, n_accel / 2), n_freq / 2};
+        const std::vector<loki::ParamLimit> limits = {
+            {.min = -2.0, .max = 2.0},
+            {.min = -50.0, .max = 50.0},
+            {.min = 100.0, .max = 100.5},
+        };
+        const SizeType ncoords = cur[0] * cur[1] * cur[2];
+        std::vector<FFACoord> expected(ncoords);
+        std::vector<FFACoord> single_pass(ncoords);
+
+        loki::core::ffa_taylor_resolve_poly_batch(
+            cur, prev, limits, expected, level, /*latter=*/0, tseg, nbins,
+            /*n_params=*/3, 1);
+        loki::core::ffa_taylor_resolve_poly_batch(
+            cur, prev, limits, expected, level, /*latter=*/1, tseg, nbins,
+            /*n_params=*/3, 1);
+
+        loki::core::ffa_taylor_resolve_poly_batch(
+            cur, prev, limits, single_pass, level, tseg, nbins, /*n_params=*/3,
+            nthreads);
+
+        CHECK(std::memcmp(single_pass.data(), expected.data(),
+                          ncoords * sizeof(FFACoord)) == 0);
+    }
+}
+
+namespace {
+struct PrunedScoreCtx {
+    std::span<const SizeType> widths;
+    float threshold{};
+    SizeType scored_profiles{0};
+    std::vector<loki::detection::SnrHit> hits;
+};
+
+void score_pruned_tile(const float* profiles,
+                       SizeType coord_begin,
+                       SizeType nprofiles,
+                       SizeType nbins,
+                       void* ctx) {
+    auto& state = *static_cast<PrunedScoreCtx*>(ctx);
+    state.scored_profiles += nprofiles;
+    loki::detection::detail::BoxcarScorer3D scorer(nbins, state.widths.data(),
+                                                   state.widths.size());
+    loki::detection::detail::append_boxcar_hits(
+        scorer, profiles, coord_begin, nprofiles, state.threshold, state.hits);
+}
+} // namespace
+
+TEST_CASE("Two fused final levels with parent-bound pruning preserve all hits",
+          "[ffa][fused][final2][prune]") {
+    const SizeType nbins               = 64;
+    const SizeType tile                = 128;
+    const std::vector<SizeType> widths = {1, 2, 4, 8};
+    constexpr float kThreshold         = 5.0F;
+    std::mt19937 rng(42);
+    const Levels lv = make_levels(nbins, rng);
+
+    std::normal_distribution<float> noise(0.0F, 1.0F);
+    std::vector<float> level2(4 * lv.n2 * 2 * nbins);
+    for (SizeType s = 0; s < 4 * lv.n2; ++s) {
+        float* e = level2.data() + (s * 2 * nbins);
+        float* v = e + nbins;
+        for (SizeType j = 0; j < nbins; ++j) {
+            e[j] = noise(rng);
+            v[j] = 16.0F + (0.5F * std::abs(noise(rng)));
+        }
+    }
+    // Inject strong pulses into a couple of level-(L-2) rows so several final
+    // coordinates exceed S/N = 5 while most tiles remain pure noise.
+    for (SizeType s : {SizeType{5}, SizeType{42}, SizeType{305}}) {
+        float* e = level2.data() + (s * 2 * nbins);
+        for (SizeType j = 10; j < 14; ++j) {
+            e[j] += 40.0F;
+        }
+    }
+
+    PrunedScoreCtx ref_ctx{.widths          = widths,
+                           .threshold       = kThreshold,
+                           .scored_profiles = 0,
+                           .hits            = {}};
+    loki::core::ffa_final2_scored(level2.data(), lv.coords_prev.data(),
+                                  lv.coords.data(), lv.ncoords(), lv.n2, nbins,
+                                  lv.row_len, lv.row_len_prev, tile,
+                                  &score_pruned_tile, &ref_ctx, /*nthreads=*/1,
+                                  /*threshold=*/0.0F, widths);
+
+    PrunedScoreCtx pruned_ctx{.widths          = widths,
+                              .threshold       = kThreshold,
+                              .scored_profiles = 0,
+                              .hits            = {}};
+    loki::core::ffa_final2_scored(level2.data(), lv.coords_prev.data(),
+                                  lv.coords.data(), lv.ncoords(), lv.n2, nbins,
+                                  lv.row_len, lv.row_len_prev, tile,
+                                  &score_pruned_tile, &pruned_ctx,
+                                  /*nthreads=*/1, kThreshold, widths);
+
+    REQUIRE(!ref_ctx.hits.empty());
+    CHECK(pruned_ctx.scored_profiles < ref_ctx.scored_profiles);
+    REQUIRE(pruned_ctx.hits.size() == ref_ctx.hits.size());
+    for (SizeType i = 0; i < ref_ctx.hits.size(); ++i) {
+        CHECK(pruned_ctx.hits[i].score_index == ref_ctx.hits[i].score_index);
+        CHECK(pruned_ctx.hits[i].snr == ref_ctx.hits[i].snr);
+    }
 }

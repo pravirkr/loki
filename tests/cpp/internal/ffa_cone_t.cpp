@@ -266,3 +266,104 @@ TEST_CASE("execute_scored without cone bands matches a threshold scan",
         CHECK(hits[i].snr == expected[i].snr);
     }
 }
+
+TEST_CASE("Lossy-Fourier cone bands are bit-exact with unfused lossy init",
+          "[ffa][cone][fourier]") {
+    constexpr SizeType kNsamps = 1U << 15U;
+    constexpr double kTsamp    = 1.0e-3;
+    std::mt19937 rng(29);
+    std::normal_distribution<float> dist(0.0F, 1.0F);
+    std::vector<float> ts_e(kNsamps);
+    std::vector<float> ts_v(kNsamps);
+    for (SizeType i = 0; i < kNsamps; ++i) {
+        ts_e[i] = dist(rng);
+        ts_v[i] = 1.0F + (0.05F * (dist(rng) * dist(rng)));
+    }
+    const std::vector<ParamLimit> limits = {{.min = 5.0, .max = 14.0}};
+    for (const SizeType nbins : {SizeType{50}, SizeType{64}}) {
+        for (const int nthreads : {1, 3}) {
+            const PulsarSearchConfig cfg(kNsamps, kTsamp, nbins,
+                                         /*eta=*/0.5, limits,
+                                         /*ducy_max=*/0.2,
+                                         /*wtsp=*/1.5,
+                                         /*use_fourier=*/true, nthreads,
+                                         /*max_process_memory_gb=*/4.0,
+                                         /*octave_scale=*/2.0,
+                                         /*nbins_max=*/1024,
+                                         /*nbins_min_lossy_bf=*/32,
+                                         /*bseg_brute=*/128);
+            const auto widths          = cfg.get_scoring_widths();
+            constexpr float kThreshold = 1.5F;
+
+            loki::algorithms::FFAFourier unfused(cfg, /*show_progress=*/false);
+            unfused.set_fuse_levels(SizeType{0});
+            std::vector<loki::detection::SnrHit> expected;
+            unfused.execute_scored(ts_e, ts_v, kThreshold, widths, expected);
+
+            loki::algorithms::FFAFourier fused(cfg, /*show_progress=*/false);
+            std::vector<loki::detection::SnrHit> got;
+            fused.execute_scored(ts_e, ts_v, kThreshold, widths, got);
+
+            INFO("nbins=" << nbins << " nthreads=" << nthreads);
+            CHECK(fused.get_last_fuse_levels() >= 1);
+            REQUIRE(got.size() == expected.size());
+            for (SizeType i = 0; i < got.size(); ++i) {
+                CHECK(got[i].score_index == expected[i].score_index);
+                CHECK(std::memcmp(&got[i].snr, &expected[i].snr,
+                                  sizeof(float)) == 0);
+            }
+        }
+    }
+}
+
+TEST_CASE("BruteFold phase runs match the sample-by-sample reference",
+          "[ffa][runs]") {
+    constexpr double kTsamp = 64.0e-6;
+    std::vector<double> freqs;
+    for (int i = 0; i < 64; ++i) {
+        freqs.push_back(0.05 + (0.0173 * static_cast<double>(i)));
+        freqs.push_back(10.0 + (2.3456789 * static_cast<double>(i)));
+    }
+    for (const SizeType nbins : {SizeType{32}, SizeType{50}, SizeType{512}}) {
+        for (const SizeType seg_len : {SizeType{256}, SizeType{2048}}) {
+            for (const double t_ref :
+                 {0.0, 0.5 * static_cast<double>(seg_len) * kTsamp}) {
+                const loki::algorithms::BruteFold<float> bf(
+                    freqs, seg_len, nbins, seg_len * 4, kTsamp, t_ref,
+                    loki::Exec::cpu(3));
+                const auto got_runs    = bf.runs();
+                const auto got_offsets = bf.run_offsets();
+                REQUIRE(got_offsets.size() == freqs.size() + 1);
+
+                std::vector<loki::coord::PhaseRun> exp_runs;
+                std::vector<SizeType> exp_offsets(freqs.size() + 1, 0);
+                for (SizeType ifreq = 0; ifreq < freqs.size(); ++ifreq) {
+                    uint32_t prev_bin = 0;
+                    for (SizeType isamp = 0; isamp < seg_len; ++isamp) {
+                        const double proper_time =
+                            (static_cast<double>(isamp) * kTsamp) - t_ref;
+                        const uint32_t iphase = get_phase_idx_uint(
+                            proper_time, freqs[ifreq], nbins, 0.0);
+                        if (isamp > 0 && iphase != prev_bin) {
+                            exp_runs.push_back(
+                                {.end = static_cast<uint32_t>(isamp),
+                                 .bin = prev_bin});
+                        }
+                        prev_bin = iphase;
+                    }
+                    exp_runs.push_back({.end = static_cast<uint32_t>(seg_len),
+                                        .bin = prev_bin});
+                    exp_offsets[ifreq + 1] = exp_runs.size();
+                }
+
+                INFO("nbins=" << nbins << " seg_len=" << seg_len
+                              << " t_ref=" << t_ref);
+                CHECK(std::ranges::equal(got_offsets, exp_offsets));
+                REQUIRE(got_runs.size() == exp_runs.size());
+                CHECK(std::memcmp(got_runs.data(), exp_runs.data(),
+                                  exp_runs.size() *
+                                      sizeof(loki::coord::PhaseRun)) == 0);
+            }
+        }
+    }
+}

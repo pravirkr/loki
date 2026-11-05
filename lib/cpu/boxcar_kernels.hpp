@@ -530,7 +530,13 @@ private:
         }
     }
 #else
-    void score_group(const float* __restrict__ folds, SizeType /*nvalid*/) {
+#if defined(__GNUC__) && !defined(__clang__)
+#define LOKI_NOIPA __attribute__((noipa))
+#else
+#define LOKI_NOIPA
+#endif
+    [[gnu::noinline]] LOKI_NOIPA void
+    score_group(const float* __restrict__ folds, SizeType /*nvalid*/) {
         const SizeType nbins = m_nbins;
         ev_circular_prefix(folds, folds + nbins, m_psum.data(), nbins,
                            nbins + m_wmax);
@@ -541,6 +547,7 @@ private:
             m_snr[iw]        = (m_hb[iw] * dmax) - (m_b[iw] * sum);
         }
     }
+#undef LOKI_NOIPA
 #endif
 };
 

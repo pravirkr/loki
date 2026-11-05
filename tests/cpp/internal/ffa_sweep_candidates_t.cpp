@@ -347,3 +347,71 @@ TEST_CASE("Candidates decode against their own chunk's width set",
 
     std::filesystem::remove(path);
 }
+
+TEST_CASE("Non-power-of-2 accelerated FFAFreqSweep shifts candidates to true "
+          "observation midpoint",
+          "[ffa_sweep_candidates][nsamps]") {
+    // Choose kNsamps = 20000 and bseg_brute = 128 at dt = 1 ms so:
+    // - true observation is 20.0 s (midpoint 10.0 s),
+    // - padded tree is 256 * 128 = 32768 samples = 32.768 s (midpoint 16.384
+    // s),
+    // - epoch shift delta_t_epoch = -6.384 s shifts f0 by 2.14e-3 Hz (~2.25
+    // bins).
+    constexpr SizeType kNsamps     = 20000;
+    constexpr SizeType kBsegBrute  = 128;
+    constexpr double kTsamp        = 1.0e-3;
+    constexpr double kTobs         = static_cast<double>(kNsamps) * kTsamp;
+    constexpr double kMidObs       = 0.5 * kTobs;
+    constexpr double kSpeedOfLight = 2.99792458e8;
+
+    constexpr double kTrueAcc  = 5000.0;
+    constexpr double kTrueFreq = 20.12345;
+
+    std::vector<float> ts_e(kNsamps, 0.0F);
+    std::vector<float> ts_v(kNsamps, 1.0F);
+    for (SizeType i = 0; i < kNsamps; ++i) {
+        const double dt = (static_cast<double>(i) * kTsamp) - kMidObs;
+        const double d_delay =
+            dt * (1.0 - (0.5 * kTrueAcc * dt / kSpeedOfLight));
+        double phase = std::fmod(kTrueFreq * d_delay, 1.0);
+        if (phase < 0.0) {
+            phase += 1.0;
+        }
+        const double diff = std::min(phase, 1.0 - phase);
+        ts_e[i]           = static_cast<float>(
+            10.0 * std::exp(-0.5 * (diff / 0.015) * (diff / 0.015)));
+    }
+
+    const std::vector<ParamLimit> limits{
+        ParamLimit{.min = 4000.0, .max = 6000.0},
+        ParamLimit{.min = 20.115, .max = 20.130},
+    };
+    const loki::search::FFASearchConfig cfg(
+        kNsamps, kTsamp, /*nbins=*/32, /*eta=*/1.0, limits,
+        /*ducy_max=*/0.2, /*wtsp=*/1.5, /*use_fourier=*/false,
+        /*nthreads=*/2, /*max_process_memory_gb=*/4.0,
+        /*octave_scale=*/2.0, /*nbins_max=*/128,
+        /*nbins_min_lossy_bf=*/32, kBsegBrute, /*bseg_ffa=*/std::nullopt,
+        /*snr_min=*/8.0, /*max_passing_candidates=*/100000);
+
+    FFAFreqSweep sweep(cfg, /*show_progress=*/false);
+    const auto outdir        = std::filesystem::temp_directory_path();
+    const std::string prefix = "loki_np2_accel_midpoint";
+    sweep.execute(ts_e, ts_v, outdir, prefix);
+    const auto h5_path = outdir / (prefix + "_ffa_results.h5");
+    const auto res     = read_results(h5_path);
+    std::filesystem::remove(h5_path);
+
+    REQUIRE_FALSE(res.snr.empty());
+    const auto best_it = std::ranges::max_element(res.snr);
+    const auto best_row =
+        static_cast<SizeType>(std::distance(res.snr.begin(), best_it));
+    const double got_acc  = res.param_sets[(best_row * 2) + 0];
+    const double got_freq = res.param_sets[(best_row * 2) + 1];
+
+    // Without the delta_t_epoch shift (-6.384 s), got_freq would be shifted by
+    // kTrueAcc * 6.384 / c * kTrueFreq = 2.14e-3 Hz, whereas with the shift it
+    // recovers kTrueFreq within one frequency bin (~9.5e-4 Hz).
+    REQUIRE(std::abs(got_acc - kTrueAcc) < 1000.0);
+    REQUIRE(std::abs(got_freq - kTrueFreq) < 1.0e-3);
+}

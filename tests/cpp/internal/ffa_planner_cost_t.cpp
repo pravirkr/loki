@@ -215,6 +215,43 @@ TEST_CASE("FFARegionPlanner CPU: a frequency-only search keeps one chunk per "
     }
 }
 
+TEST_CASE("FFARegionPlanner GPU: cost-model chunks tile the regions and split "
+          "wide accel bands",
+          "[regions][planner_cost]") {
+    const auto regions = generate_ffa_regions(1.0 / kFMax, 1.0 / kFMin, kTsamp,
+                                              kNbins, /*eta_min=*/1.0);
+    for (const bool use_fourier : {false, true}) {
+        CAPTURE(use_fourier);
+        const auto accel_cfg = make_cfg(use_fourier, 8.0, /*accel=*/true);
+        const auto freq_cfg  = make_cfg(use_fourier, 8.0, /*accel=*/false);
+        if (use_fourier) {
+            const FFARegionPlanner<ComplexType> accel_planner(accel_cfg,
+                                                              /*use_gpu=*/true);
+            check_covers_regions(accel_planner, true);
+            CHECK(accel_planner.get_nregions() > regions.size());
+            CHECK(accel_planner.get_stats().get_freq_sweep_memory_usage() <=
+                  detail::effective_memory_limit_gb(8.0) + 1.0e-6);
+
+            const FFARegionPlanner<ComplexType> freq_planner(freq_cfg,
+                                                             /*use_gpu=*/true);
+            check_covers_regions(freq_planner, false);
+            CHECK(freq_planner.get_nregions() == regions.size());
+        } else {
+            const FFARegionPlanner<float> accel_planner(accel_cfg,
+                                                        /*use_gpu=*/true);
+            check_covers_regions(accel_planner, true);
+            CHECK(accel_planner.get_nregions() > regions.size());
+            CHECK(accel_planner.get_stats().get_freq_sweep_memory_usage() <=
+                  detail::effective_memory_limit_gb(8.0) + 1.0e-6);
+
+            const FFARegionPlanner<float> freq_planner(freq_cfg,
+                                                       /*use_gpu=*/true);
+            check_covers_regions(freq_planner, false);
+            CHECK(freq_planner.get_nregions() == regions.size());
+        }
+    }
+}
+
 namespace {
 
 // Closed-form FLOP count of a frequency-only plan: data arithmetic only, a

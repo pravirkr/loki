@@ -26,7 +26,8 @@ void brute_fold_ts_cuda(const float* __restrict__ ts_e,
                         SizeType nfreqs,
                         SizeType segment_len,
                         SizeType nbins,
-                        cudaStream_t stream);
+                        cudaStream_t stream,
+                        SizeType nsamps = 0);
 
 void brute_fold_ts_complex_cuda(const float* __restrict__ ts_e,
                                 const float* __restrict__ ts_v,
@@ -38,7 +39,8 @@ void brute_fold_ts_complex_cuda(const float* __restrict__ ts_e,
                                 SizeType nbins_f,
                                 double tsamp,
                                 double t_ref,
-                                cudaStream_t stream);
+                                cudaStream_t stream,
+                                SizeType nsamps = 0);
 
 void ffa_iter_cuda(const float* __restrict__ fold_in,
                    float* __restrict__ fold_out,

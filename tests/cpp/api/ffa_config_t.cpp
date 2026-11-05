@@ -189,6 +189,18 @@ TEST_CASE("FFASearchConfig validation throws on invalid arguments",
                           8.0, 2.0, 1024, 64, std::nullopt, std::nullopt, 5.0,
                           1000, false),
                       std::runtime_error);
+
+    // Invalid bseg_ffa values: < bseg_brute, > nsamps, not a multiple of
+    // bseg_brute, or nsegments_ffa not a power of two.
+    for (const loki::SizeType bad_bseg_ffa :
+         {loki::SizeType{16}, loki::SizeType{2048}, loki::SizeType{48},
+          loki::SizeType{96}}) {
+        REQUIRE_THROWS_AS(loki::search::FFASearchConfig(
+                              1024, 0.0001, 64, 1.0, valid_limits, 0.2, 1.5,
+                              true, 1, 8.0, 2.0, 1024, 64, loki::SizeType{32},
+                              bad_bseg_ffa, 5.0, 1000, false),
+                          std::runtime_error);
+    }
 }
 
 TEST_CASE("EPSearchConfig inherits and adds EP parameters", "[config][ep]") {
@@ -426,5 +438,43 @@ TEST_CASE("FFASearchConfig default bseg_brute tracks cycles at f_max",
             2097152, 64e-6, 32, 1.0, limits, 0.2, 1.5, false, 1, 4.0, 1.5, 1024,
             64, loki::SizeType{512}, std::nullopt, 6.0, 1000, false);
         REQUIRE(cfg.get_bseg_brute() == 512);
+    }
+    SECTION("non-power-of-2 nsamps selects near-target bseg_brute") {
+        const std::vector<loki::ParamLimit> limits = {{200.0, 300.0}};
+        for (const loki::SizeType nsamps :
+             {loki::SizeType{10000}, loki::SizeType{100003},
+              loki::SizeType{2000000}}) {
+            for (const bool use_fourier : {false, true}) {
+                const loki::search::FFASearchConfig cfg(
+                    nsamps, 64e-6, 32, 1.0, limits, 0.2, 1.5, use_fourier, 1,
+                    4.0, 1.5, 1024, 64, std::nullopt, std::nullopt, 6.0, 1000,
+                    false);
+                REQUIRE(cfg.get_nsamps() == nsamps);
+                REQUIRE(cfg.get_bseg_brute() >= 2);
+                REQUIRE(cfg.get_bseg_brute() < nsamps);
+                REQUIRE(cfg.get_bseg_ffa() >= nsamps);
+                REQUIRE(cfg.get_bseg_ffa() % cfg.get_bseg_brute() == 0);
+                REQUIRE(cfg.get_niters_ffa() >= 1);
+            }
+        }
+        // Explicit power-of-2 bseg_brute on non-power-of-2 nsamps
+        const loki::search::FFASearchConfig explicit_cfg(
+            10000, 64e-6, 32, 1.0, limits, 0.2, 1.5, false, 1, 4.0, 1.5, 1024,
+            64, loki::SizeType{128}, std::nullopt, 6.0, 1000, false);
+        REQUIRE(explicit_cfg.get_bseg_brute() == 128);
+        REQUIRE(explicit_cfg.get_bseg_ffa() == 16384);
+        REQUIRE(explicit_cfg.get_niters_ffa() == 7);
+
+        // EPSearchConfig also supports non-power-of-2 nsamps natively
+        const loki::search::EPSearchConfig ep_np2(10000, 64e-6, 32, 1.0,
+                                                  limits);
+        REQUIRE(ep_np2.get_nsamps() == 10000);
+        REQUIRE(ep_np2.get_bseg_ffa() >= 10000);
+        const loki::search::EPSearchConfig ep_np2_cap(
+            10000, 64e-6, 32, 1.0, limits, 0.2, 1.5, false, 1, 4.0, 1.5, 1024,
+            64, std::nullopt, loki::SizeType{1024});
+        REQUIRE(ep_np2_cap.get_nsamps() == 10000);
+        REQUIRE(ep_np2_cap.get_bseg_ffa() == 1024);
+        REQUIRE(1024 % ep_np2_cap.get_bseg_brute() == 0);
     }
 }

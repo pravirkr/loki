@@ -108,6 +108,258 @@ void ffa_taylor_resolve_accel_batch(
         ffa_level, tseg_brute, nbins, 0, param_grid_count_cur[0]);
 }
 
+// Single-pass accel resolve of both tail (LATTER=0) and head (LATTER=1) for
+// rows [row_begin, row_end), parallelized across rows (or frequencies when
+// fewer rows than threads). Bit-identical to calling
+// ffa_taylor_resolve_accel_rows<0> and <1>.
+void ffa_taylor_resolve_accel_rows_both(
+    std::span<const SizeType> param_grid_count_cur,
+    std::span<const SizeType> param_grid_count_prev,
+    std::span<const ParamLimit> param_limits,
+    std::span<coord::FFACoord> coords,
+    SizeType ffa_level,
+    double tseg_brute,
+    SizeType nbins,
+    SizeType row_begin,
+    SizeType row_end,
+    int nthreads) {
+    nthreads                    = std::max(nthreads, 1);
+    const SizeType n_accel_cur  = param_grid_count_cur[0];
+    const SizeType n_freq_cur   = param_grid_count_cur[1];
+    const SizeType n_accel_prev = param_grid_count_prev[0];
+    const SizeType n_freq_prev  = param_grid_count_prev[1];
+    const ParamLimit lim_accel  = param_limits[0];
+    const ParamLimit lim_freq   = param_limits[1];
+
+    const double tsegment =
+        std::ldexp(tseg_brute, static_cast<int>(ffa_level - 1));
+    const double delta_t_tail    = -0.5 * tsegment;
+    const double delta_t_head    = 0.5 * tsegment;
+    const double half_delta_t_sq = 0.5 * delta_t_tail * delta_t_tail;
+    const auto nrows  = static_cast<std::int64_t>(row_end - row_begin);
+    const auto nfreqs = static_cast<std::int64_t>(n_freq_cur);
+
+    if (nrows >= static_cast<std::int64_t>(nthreads)) {
+#pragma omp parallel for schedule(static) num_threads(nthreads) default(none)  \
+    shared(coords)                                                             \
+    firstprivate(nrows, row_begin, n_accel_cur, n_freq_cur, n_accel_prev,      \
+                     n_freq_prev, lim_accel, lim_freq, delta_t_tail,           \
+                     delta_t_head, half_delta_t_sq, nbins)
+        for (std::int64_t r = 0; r < nrows; ++r) {
+            const auto accel_idx = row_begin + static_cast<SizeType>(r);
+            const auto a_cur     = psr_utils::get_param_val_at_idx(
+                lim_accel, n_accel_cur, accel_idx);
+            const auto v_new_tail = a_cur * delta_t_tail;
+            const auto v_new_head = a_cur * delta_t_head;
+            const auto d_new      = a_cur * half_delta_t_sq;
+            const auto idx_a      = psr_utils::get_nearest_idx_analytical(
+                a_cur, lim_accel, n_accel_prev);
+            const auto coord_a_offset = static_cast<SizeType>(r) * n_freq_cur;
+            const auto idx_a_offset   = idx_a * n_freq_prev;
+
+            for (SizeType freq_idx = 0; freq_idx < n_freq_cur; ++freq_idx) {
+                const auto f_cur = psr_utils::get_param_val_at_idx(
+                    lim_freq, n_freq_cur, freq_idx);
+                const auto f_new_tail =
+                    f_cur * (1.0 - (v_new_tail * utils::kInvCval));
+                const auto f_new_head =
+                    f_cur * (1.0 - (v_new_head * utils::kInvCval));
+                const auto delay_rel = d_new * utils::kInvCval;
+
+                const auto phase_tail = psr_utils::get_phase_idx(
+                    delta_t_tail, f_cur, nbins, delay_rel);
+                const auto phase_head = psr_utils::get_phase_idx(
+                    delta_t_head, f_cur, nbins, delay_rel);
+                const auto idx_f_tail = psr_utils::get_nearest_idx_analytical(
+                    f_new_tail, lim_freq, n_freq_prev);
+                const auto idx_f_head = psr_utils::get_nearest_idx_analytical(
+                    f_new_head, lim_freq, n_freq_prev);
+
+                const auto coord_idx = coord_a_offset + freq_idx;
+                coords[coord_idx].i_tail =
+                    static_cast<uint32_t>(idx_a_offset + idx_f_tail);
+                coords[coord_idx].shift_tail = phase_tail;
+                coords[coord_idx].i_head =
+                    static_cast<uint32_t>(idx_a_offset + idx_f_head);
+                coords[coord_idx].shift_head = phase_head;
+            }
+        }
+    } else {
+#pragma omp parallel num_threads(nthreads) default(none) shared(coords)        \
+    firstprivate(nrows, nfreqs, row_begin, n_accel_cur, n_freq_cur,            \
+                     n_accel_prev, n_freq_prev, lim_accel, lim_freq,           \
+                     delta_t_tail, delta_t_head, half_delta_t_sq, nbins)
+        {
+            for (std::int64_t r = 0; r < nrows; ++r) {
+                const auto accel_idx = row_begin + static_cast<SizeType>(r);
+                const auto a_cur     = psr_utils::get_param_val_at_idx(
+                    lim_accel, n_accel_cur, accel_idx);
+                const auto v_new_tail = a_cur * delta_t_tail;
+                const auto v_new_head = a_cur * delta_t_head;
+                const auto d_new      = a_cur * half_delta_t_sq;
+                const auto idx_a      = psr_utils::get_nearest_idx_analytical(
+                    a_cur, lim_accel, n_accel_prev);
+                const auto coord_a_offset =
+                    static_cast<SizeType>(r) * n_freq_cur;
+                const auto idx_a_offset = idx_a * n_freq_prev;
+
+#pragma omp for schedule(static)
+                for (std::int64_t f = 0; f < nfreqs; ++f) {
+                    const auto freq_idx = static_cast<SizeType>(f);
+                    const auto f_cur    = psr_utils::get_param_val_at_idx(
+                        lim_freq, n_freq_cur, freq_idx);
+                    const auto f_new_tail =
+                        f_cur * (1.0 - (v_new_tail * utils::kInvCval));
+                    const auto f_new_head =
+                        f_cur * (1.0 - (v_new_head * utils::kInvCval));
+                    const auto delay_rel = d_new * utils::kInvCval;
+
+                    const auto phase_tail = psr_utils::get_phase_idx(
+                        delta_t_tail, f_cur, nbins, delay_rel);
+                    const auto phase_head = psr_utils::get_phase_idx(
+                        delta_t_head, f_cur, nbins, delay_rel);
+                    const auto idx_f_tail =
+                        psr_utils::get_nearest_idx_analytical(
+                            f_new_tail, lim_freq, n_freq_prev);
+                    const auto idx_f_head =
+                        psr_utils::get_nearest_idx_analytical(
+                            f_new_head, lim_freq, n_freq_prev);
+
+                    const auto coord_idx = coord_a_offset + freq_idx;
+                    coords[coord_idx].i_tail =
+                        static_cast<uint32_t>(idx_a_offset + idx_f_tail);
+                    coords[coord_idx].shift_tail = phase_tail;
+                    coords[coord_idx].i_head =
+                        static_cast<uint32_t>(idx_a_offset + idx_f_head);
+                    coords[coord_idx].shift_head = phase_head;
+                }
+            }
+        }
+    }
+}
+
+void ffa_taylor_resolve_jerk_batch_both(
+    std::span<const SizeType> param_grid_count_cur,
+    std::span<const SizeType> param_grid_count_prev,
+    std::span<const ParamLimit> param_limits,
+    std::span<coord::FFACoord> coords,
+    SizeType ffa_level,
+    double tseg_brute,
+    SizeType nbins,
+    SizeType param_stride,
+    int nthreads) {
+    constexpr SizeType kParams = 3;
+    error_check::check_greater_equal(
+        param_grid_count_cur.size(), kParams,
+        "param_grid_count_cur should have 3 elements");
+    error_check::check_greater_equal(
+        param_grid_count_prev.size(), kParams,
+        "param_grid_count_prev should have 3 elements");
+    error_check::check_greater_equal(param_limits.size(), kParams,
+                                     "param_limits should have 3 elements");
+    error_check::check_greater_equal(
+        param_stride, kParams,
+        "param_stride should be greater than or equal to 3");
+
+    nthreads                    = std::max(nthreads, 1);
+    const SizeType po           = param_stride - kParams;
+    const SizeType n_jerk_cur   = param_grid_count_cur[po + 0];
+    const SizeType n_accel_cur  = param_grid_count_cur[po + 1];
+    const SizeType n_freq_cur   = param_grid_count_cur[po + 2];
+    const SizeType n_jerk_prev  = param_grid_count_prev[po + 0];
+    const SizeType n_accel_prev = param_grid_count_prev[po + 1];
+    const SizeType n_freq_prev  = param_grid_count_prev[po + 2];
+    const ParamLimit lim_jerk   = param_limits[po + 0];
+    const ParamLimit lim_accel  = param_limits[po + 1];
+    const ParamLimit lim_freq   = param_limits[po + 2];
+    const auto ncoords          = n_jerk_cur * n_accel_cur * n_freq_cur;
+    error_check::check_equal(coords.size(), ncoords, "coords size mismatch");
+
+    const double tsegment =
+        std::ldexp(tseg_brute, static_cast<int>(ffa_level - 1));
+    const double delta_t_tail        = -0.5 * tsegment;
+    const double delta_t_head        = 0.5 * tsegment;
+    const double delta_t_sq          = delta_t_tail * delta_t_tail;
+    const double half_delta_t_sq     = 0.5 * delta_t_sq;
+    const double sixth_dt_cubed_tail = (delta_t_sq * delta_t_tail) / 6.0;
+    const double sixth_dt_cubed_head = (delta_t_sq * delta_t_head) / 6.0;
+    const auto njerks                = static_cast<std::int64_t>(n_jerk_cur);
+    const auto naccels               = static_cast<std::int64_t>(n_accel_cur);
+
+#pragma omp parallel for collapse(2) schedule(static)                          \
+    num_threads(nthreads) default(none) shared(coords)                         \
+    firstprivate(njerks, naccels, n_jerk_cur, n_accel_cur, n_freq_cur,         \
+                     n_jerk_prev, n_accel_prev, n_freq_prev, lim_jerk,         \
+                     lim_accel, lim_freq, delta_t_tail, delta_t_head,          \
+                     delta_t_sq, half_delta_t_sq, sixth_dt_cubed_tail,         \
+                     sixth_dt_cubed_head, nbins)
+    for (std::int64_t j = 0; j < njerks; ++j) {
+        for (std::int64_t a = 0; a < naccels; ++a) {
+            const auto jerk_idx  = static_cast<SizeType>(j);
+            const auto accel_idx = static_cast<SizeType>(a);
+            const auto j_cur =
+                psr_utils::get_param_val_at_idx(lim_jerk, n_jerk_cur, jerk_idx);
+            const auto j_dt_tail    = j_cur * delta_t_tail;
+            const auto j_dt_head    = j_cur * delta_t_head;
+            const auto half_j_dt_sq = 0.5 * j_cur * delta_t_sq;
+            const auto j_sixth_tail = j_cur * sixth_dt_cubed_tail;
+            const auto j_sixth_head = j_cur * sixth_dt_cubed_head;
+            const auto idx_j        = psr_utils::get_nearest_idx_analytical(
+                j_cur, lim_jerk, n_jerk_prev);
+            const auto coord_j_offset = jerk_idx * n_accel_cur * n_freq_cur;
+            const auto idx_j_offset   = idx_j * n_accel_prev * n_freq_prev;
+
+            const auto a_cur = psr_utils::get_param_val_at_idx(
+                lim_accel, n_accel_cur, accel_idx);
+            const auto a_new_tail = a_cur + j_dt_tail;
+            const auto a_new_head = a_cur + j_dt_head;
+            const auto v_new_tail = (a_cur * delta_t_tail) + half_j_dt_sq;
+            const auto v_new_head = (a_cur * delta_t_head) + half_j_dt_sq;
+            const auto d_new_tail = (a_cur * half_delta_t_sq) + j_sixth_tail;
+            const auto d_new_head = (a_cur * half_delta_t_sq) + j_sixth_head;
+
+            const auto idx_a_tail = psr_utils::get_nearest_idx_analytical(
+                a_new_tail, lim_accel, n_accel_prev);
+            const auto idx_a_head = psr_utils::get_nearest_idx_analytical(
+                a_new_head, lim_accel, n_accel_prev);
+            const auto coord_a_offset =
+                coord_j_offset + (accel_idx * n_freq_cur);
+            const auto idx_a_off_tail =
+                idx_j_offset + (idx_a_tail * n_freq_prev);
+            const auto idx_a_off_head =
+                idx_j_offset + (idx_a_head * n_freq_prev);
+
+            for (SizeType freq_idx = 0; freq_idx < n_freq_cur; ++freq_idx) {
+                const auto f_cur = psr_utils::get_param_val_at_idx(
+                    lim_freq, n_freq_cur, freq_idx);
+                const auto f_new_tail =
+                    f_cur * (1.0 - (v_new_tail * utils::kInvCval));
+                const auto f_new_head =
+                    f_cur * (1.0 - (v_new_head * utils::kInvCval));
+                const auto delay_tail = d_new_tail * utils::kInvCval;
+                const auto delay_head = d_new_head * utils::kInvCval;
+
+                const auto phase_tail = psr_utils::get_phase_idx(
+                    delta_t_tail, f_cur, nbins, delay_tail);
+                const auto phase_head = psr_utils::get_phase_idx(
+                    delta_t_head, f_cur, nbins, delay_head);
+                const auto idx_f_tail = psr_utils::get_nearest_idx_analytical(
+                    f_new_tail, lim_freq, n_freq_prev);
+                const auto idx_f_head = psr_utils::get_nearest_idx_analytical(
+                    f_new_head, lim_freq, n_freq_prev);
+
+                const auto coord_idx = coord_a_offset + freq_idx;
+                coords[coord_idx].i_tail =
+                    static_cast<uint32_t>(idx_a_off_tail + idx_f_tail);
+                coords[coord_idx].shift_tail = phase_tail;
+                coords[coord_idx].i_head =
+                    static_cast<uint32_t>(idx_a_off_head + idx_f_head);
+                coords[coord_idx].shift_head = phase_head;
+            }
+        }
+    }
+}
+
 template <int LATTER>
 void ffa_taylor_resolve_jerk_batch(
     std::span<const SizeType> param_grid_count_cur,
@@ -340,6 +592,46 @@ void ffa_taylor_resolve_poly_batch(
     launch(latter != 0U);
 }
 
+void ffa_taylor_resolve_poly_batch(
+    std::span<const SizeType> param_grid_count_cur,
+    std::span<const SizeType> param_grid_count_prev,
+    std::span<const ParamLimit> param_limits,
+    std::span<coord::FFACoord> coords,
+    SizeType ffa_level,
+    double tseg_brute,
+    SizeType nbins,
+    SizeType n_params,
+    int nthreads) {
+    switch (n_params) {
+    case 2: {
+        constexpr SizeType kParams = 2;
+        error_check::check_equal(param_grid_count_cur.size(), kParams,
+                                 "param_grid_count_cur should have 2 elements");
+        error_check::check_equal(
+            param_grid_count_prev.size(), kParams,
+            "param_grid_count_prev should have 2 elements");
+        error_check::check_equal(param_limits.size(), kParams,
+                                 "param_limits should have 2 elements");
+        const auto ncoords = param_grid_count_cur[0] * param_grid_count_cur[1];
+        error_check::check_equal(coords.size(), ncoords,
+                                 "coords size mismatch");
+        ffa_taylor_resolve_accel_rows_both(
+            param_grid_count_cur, param_grid_count_prev, param_limits, coords,
+            ffa_level, tseg_brute, nbins, 0, param_grid_count_cur[0], nthreads);
+        break;
+    }
+    case 3:
+    case 4:
+    case 5:
+        ffa_taylor_resolve_jerk_batch_both(
+            param_grid_count_cur, param_grid_count_prev, param_limits, coords,
+            ffa_level, tseg_brute, nbins, n_params, nthreads);
+        break;
+    default:
+        throw std::invalid_argument("Unsupported Taylor order");
+    }
+}
+
 void ffa_taylor_resolve_accel_rows(
     std::span<const SizeType> param_grid_count_cur,
     std::span<const SizeType> param_grid_count_prev,
@@ -364,19 +656,9 @@ void ffa_taylor_resolve_accel_rows(
     error_check::check_greater_equal(
         coords.size(), (row_end - row_begin) * n_freq,
         "ffa_taylor_resolve_accel_rows: coords too small for the rows");
-    const auto nrows = static_cast<std::int64_t>(row_end - row_begin);
-#pragma omp parallel for num_threads(std::max(nthreads, 1)) schedule(static)
-    for (std::int64_t i = 0; i < nrows; ++i) {
-        const auto row = row_begin + static_cast<SizeType>(i);
-        const auto row_coords =
-            coords.subspan(static_cast<SizeType>(i) * n_freq, n_freq);
-        ffa_taylor_resolve_accel_rows<0>(
-            param_grid_count_cur, param_grid_count_prev, param_limits,
-            row_coords, ffa_level, tseg_brute, nbins, row, row + 1);
-        ffa_taylor_resolve_accel_rows<1>(
-            param_grid_count_cur, param_grid_count_prev, param_limits,
-            row_coords, ffa_level, tseg_brute, nbins, row, row + 1);
-    }
+    ffa_taylor_resolve_accel_rows_both(
+        param_grid_count_cur, param_grid_count_prev, param_limits, coords,
+        ffa_level, tseg_brute, nbins, row_begin, row_end, nthreads);
 }
 
 } // namespace loki::core

@@ -775,13 +775,10 @@ public:
         for (SizeType i_level = 1; i_level < final; ++i_level) {
             const auto level_coords =
                 coords.subspan(offsets[i_level], ncoords[i_level]);
-            for (SizeType latter = 0; latter < 2; ++latter) {
-                core::ffa_taylor_resolve_poly_batch(
-                    counts[i_level], counts[i_level - 1],
-                    m_cfg.get_param_limits(), level_coords, i_level, latter,
-                    m_cfg.get_tseg_brute(), m_cfg.get_nbins(), n_params,
-                    m_nthreads);
-            }
+            core::ffa_taylor_resolve_poly_batch(
+                counts[i_level], counts[i_level - 1], m_cfg.get_param_limits(),
+                level_coords, i_level, m_cfg.get_tseg_brute(),
+                m_cfg.get_nbins(), n_params, m_nthreads);
         }
     }
 
@@ -830,12 +827,13 @@ public:
                         m_ffa_plan.get_ncoords_offsets()[final - 1],
                     coords, ncoords_cur, m_ffa_plan.get_ncoords()[final - 2],
                     nbins, row_len, row_len_prev, tile, &offset_score_tile,
-                    &shifted, m_nthreads);
+                    &shifted, m_nthreads, score_ctx.threshold,
+                    score_ctx.widths);
             } else {
                 core::ffa_final_scored(src, coords, ncoords_cur, ncoords_prev,
                                        nbins, row_len, row_len_prev, tile,
-                                       &offset_score_tile, &shifted,
-                                       m_nthreads);
+                                       &offset_score_tile, &shifted, m_nthreads,
+                                       score_ctx.threshold, score_ctx.widths);
             }
         } else {
             // A multiple of the merge step block and of the lane FFT width;
@@ -1179,7 +1177,8 @@ private:
                         score_in_band ? &score_ctx : nullptr, &stats,
                         score_in_band ? hit_batch_coords() : 0,
                         score_in_band ? &drain_batch : nullptr,
-                        score_in_band ? &drain : nullptr, m_nthreads);
+                        score_in_band ? &drain : nullptr, m_nthreads,
+                        m_cfg.get_nsamps());
                     drain.rethrow();
                     account_cone_band(step_timer.stop(), stats);
                 } else {
@@ -1354,6 +1353,7 @@ private:
             const auto& shapes     = m_ffa_plan.get_fold_shapes_time();
             const SizeType nbins   = m_cfg.get_nbins();
             const SizeType nbins_f = m_cfg.get_nbins_f();
+            const SizeType seg_len = m_ffa_plan.get_segment_lens().front();
             const SizeType budget  = detail::cpu_cone_scratch_budget_bytes();
             const SizeType tile_forced            = cone_tile_override();
             auto& ws                              = get_workspace();
@@ -1364,7 +1364,7 @@ private:
             while (done < n_merge) {
                 const ConeChoice step = choose_cone_step_complex(
                     done, n_merge - done, ncoords, offsets, shapes, nbins_f,
-                    budget, step_table.size(), tile_forced,
+                    seg_len, budget, step_table.size(), tile_forced,
                     ws.coords_freq.data());
                 steps.push_back(step);
                 done += step.k;
@@ -1380,10 +1380,15 @@ private:
                                    /*timed=*/true);
             FourierScoreCtx ctx(&score_ctx, nbins, nbins_f, m_nthreads);
             HitDrain drain{.score = &score_ctx, .sink = &sink, .error = {}};
-            ComplexType* buf_a = ws.fold_internal.data();
-            ComplexType* buf_b = scratch.data();
-            initialize(ts_e, ts_v, buf_a, buf_b);
-            const ComplexType* current = buf_a;
+            ComplexType* buf_a           = ws.fold_internal.data();
+            ComplexType* buf_b           = scratch.data();
+            const bool fuse_lossy_bottom = m_use_lossy_init &&
+                                           steps.front().cone &&
+                                           m_the_bf_float != nullptr;
+            if (!fuse_lossy_bottom) {
+                initialize(ts_e, ts_v, buf_a, buf_b);
+            }
+            const ComplexType* current = fuse_lossy_bottom ? nullptr : buf_a;
             for (SizeType istep = 0; istep < steps.size(); ++istep) {
                 const ConeChoice& step = steps[istep];
                 const bool last        = istep + 1 == steps.size();
@@ -1400,15 +1405,36 @@ private:
                         coords[j] =
                             ws.coords_freq.data() + offsets[step.done + j];
                     }
+                    const bool bottom_lossy = (istep == 0) && fuse_lossy_bottom;
+                    core::ConeBandThreadSeconds stats;
                     core::ffa_complex_cone_band_freq(
-                        current, dest, coords.data(), counts.data(),
-                        shapes[step.done][0], nbins_f, nbins, step.k, step.tile,
-                        last ? &fourier_score_tile : nullptr,
+                        bottom_lossy ? nullptr : current, dest, coords.data(),
+                        counts.data(), shapes[step.done][0], nbins_f, nbins,
+                        step.k, step.tile, last ? &fourier_score_tile : nullptr,
                         last ? &ctx : nullptr, step_table,
                         last ? hit_batch_coords() : 0,
                         last ? &drain_batch : nullptr, last ? &drain : nullptr,
-                        m_nthreads);
+                        m_nthreads, bottom_lossy ? ts_e.data() : nullptr,
+                        bottom_lossy ? ts_v.data() : nullptr,
+                        bottom_lossy ? m_the_bf_float->runs().data() : nullptr,
+                        bottom_lossy ? m_the_bf_float->run_offsets().data()
+                                     : nullptr,
+                        bottom_lossy ? seg_len : 0,
+                        bottom_lossy ? &stats : nullptr, m_cfg.get_nsamps());
                     drain.rethrow();
+                    if (bottom_lossy) {
+                        const auto wall =
+                            static_cast<double>(step_timer.stop());
+                        const double prefix     = stats.prefix_wall;
+                        const double rest       = std::max(0.0, wall - prefix);
+                        const double thread_sum = stats.brute + stats.merge;
+                        const double brute_s =
+                            prefix + (thread_sum > 0.0
+                                          ? rest * (stats.brute / thread_sum)
+                                          : 0.0);
+                        m_brutefold_time +=
+                            static_cast<float>(std::min(wall, brute_s));
+                    }
                 } else {
                     execute_iter_freq(current, dest, step.done + 1);
                 }
@@ -1434,8 +1460,8 @@ private:
     }
 
     /// choose_cone_step for complex folds: the band starts from a stored
-    /// level, so only the two scratch buffers count, and the phase steps of
-    /// one tile must fit the step table.
+    /// level (or, for the bottom band of a lossy-init plan, from the segment
+    /// prefix sums), and the phase steps of one tile must fit the step table.
     [[nodiscard]] ConeChoice
     choose_cone_step_complex(SizeType done,
                              SizeType remain,
@@ -1443,6 +1469,7 @@ private:
                              std::span<const uint32_t> offsets,
                              const std::vector<std::vector<SizeType>>& shapes,
                              SizeType nbins_f,
+                             SizeType seg_len,
                              SizeType budget,
                              SizeType table_bytes,
                              SizeType tile_forced,
@@ -1471,9 +1498,22 @@ private:
                     tile_forced == 0 ? kTiles[itile] : tile_forced;
                 const SizeType elems = core::cone_band_working_floats(
                     coords.data(), counts.data(), k, tile, nbins_f);
-                if (elems != 0 && 2 * elems * sizeof(ComplexType) <= budget &&
-                    core::cone_band_tile_step_bytes(
-                        coords.data(), counts.data(), k, tile) <= table_bytes) {
+                if (elems == 0) {
+                    continue;
+                }
+                SizeType bytes    = 2 * elems * sizeof(ComplexType);
+                SizeType step_cap = tile;
+                if (done == 0 && m_use_lossy_init) {
+                    if ((tile >> k) < 4) {
+                        continue;
+                    }
+                    bytes +=
+                        (SizeType{1} << k) * (seg_len + 1) * 2 * sizeof(double);
+                    step_cap = counts[k];
+                }
+                if (bytes <= budget && core::cone_band_tile_step_bytes(
+                                           coords.data(), counts.data(), k,
+                                           step_cap) <= table_bytes) {
                     return ConeChoice{
                         .k = k, .tile = tile, .cone = true, .done = done};
                 }
@@ -1556,6 +1596,11 @@ private:
                     FoldType* temp_buffer) {
         timing::SimpleTimer timer;
         timer.start();
+        const SizeType level0_fold_size =
+            m_ffa_plan.get_fold_shapes()[0][0] * m_ffa_plan.get_ncoords()[0] *
+            2 *
+            (std::is_same_v<FoldType, float> ? m_cfg.get_nbins()
+                                             : m_cfg.get_nbins_f());
         if constexpr (std::is_same_v<FoldType, ComplexType>) {
             if (m_use_lossy_init) {
                 // Lossy path: use time-domain BruteFold, then RFFT to frequency
@@ -1574,15 +1619,25 @@ private:
                 // Forward transform from temp_buffer (real) to init_buffer
                 // (complex)
                 const auto nfft = brute_fold_size_time / m_cfg.get_nbins();
+                const auto bf_complex_size = nfft * m_cfg.get_nbins_f();
                 lane_fft::forward_batch(real_temp_view.data(), init_buffer,
                                         nfft, m_cfg.get_nbins(), m_nthreads);
+                if (level0_fold_size > bf_complex_size) {
+                    std::fill(init_buffer + bf_complex_size,
+                              init_buffer + level0_fold_size,
+                              ComplexType(0.0F, 0.0F));
+                }
                 m_brutefold_time += timer.stop();
                 return;
             }
         }
         // Normal path (float or ComplexType with nbins <= 64)
-        m_the_bf->execute(ts_e, ts_v,
-                          std::span(init_buffer, m_the_bf->get_fold_size()));
+        const auto bf_fold_size = m_the_bf->get_fold_size();
+        m_the_bf->execute(ts_e, ts_v, std::span(init_buffer, bf_fold_size));
+        if (level0_fold_size > bf_fold_size) {
+            std::fill(init_buffer + bf_fold_size,
+                      init_buffer + level0_fold_size, FoldType{});
+        }
         m_brutefold_time += timer.stop();
     }
 

@@ -390,12 +390,13 @@ __global__ void kernel_fold_time_1d(const float* __restrict__ ts_e,
                                     uint32_t nfreqs,
                                     uint32_t nsegments,
                                     uint32_t segment_len,
-                                    uint32_t nbins) {
+                                    uint32_t nbins,
+                                    size_t nsamps) {
     const uint32_t tid = (blockIdx.x * blockDim.x) + threadIdx.x;
     // Total (segment, sample) pairs
     const uint32_t total_work = nsegments * segment_len;
 
-    if (tid >= total_work) {
+    if (tid >= total_work || static_cast<size_t>(tid) >= nsamps) {
         return;
     }
 
@@ -426,7 +427,8 @@ __global__ void kernel_fold_time_2d(const float* __restrict__ ts_e,
                                     uint32_t nfreqs,
                                     uint32_t nsegments,
                                     uint32_t segment_len,
-                                    uint32_t nbins) {
+                                    uint32_t nbins,
+                                    size_t nsamps) {
     const uint32_t isamp = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (isamp >= segment_len) {
         return;
@@ -439,6 +441,9 @@ __global__ void kernel_fold_time_2d(const float* __restrict__ ts_e,
         for (uint32_t iseg = 0; iseg < nsegments; ++iseg) {
             const size_t ts_idx =
                 (static_cast<size_t>(iseg) * segment_len) + isamp;
+            if (ts_idx >= nsamps) {
+                break;
+            }
             const size_t fold_base_idx =
                 (static_cast<size_t>(iseg) * nfreqs + ifreq) * (2U * nbins);
 
@@ -458,7 +463,8 @@ __global__ void kernel_fold_time_shmem(const float* __restrict__ ts_e,
                                        uint32_t nfreqs,
                                        uint32_t nsegments,
                                        uint32_t segment_len,
-                                       uint32_t nbins) {
+                                       uint32_t nbins,
+                                       size_t nsamps) {
     extern __shared__ float shared_bins[];
     float* shared_e = shared_bins;
     float* shared_v = shared_bins + nbins;
@@ -477,12 +483,17 @@ __global__ void kernel_fold_time_shmem(const float* __restrict__ ts_e,
     }
     __syncthreads();
 
-    for (uint32_t isamp = tid; isamp < segment_len;
-         isamp += threads_per_block) {
+    const size_t seg_start = static_cast<size_t>(iseg) * segment_len;
+    const uint32_t valid_len =
+        (seg_start >= nsamps)
+            ? 0U
+            : static_cast<uint32_t>(
+                  min(static_cast<size_t>(segment_len), nsamps - seg_start));
+    for (uint32_t isamp = tid; isamp < valid_len; isamp += threads_per_block) {
         const size_t phase_idx =
             (static_cast<size_t>(ifreq) * segment_len) + isamp;
         const uint32_t phase_bin = phase_map[phase_idx];
-        const size_t ts_idx = (static_cast<size_t>(iseg) * segment_len) + isamp;
+        const size_t ts_idx      = seg_start + isamp;
         atomicAdd(&shared_e[phase_bin], ts_e[ts_idx]);
         atomicAdd(&shared_v[phase_bin], ts_v[ts_idx]);
     }
@@ -524,7 +535,8 @@ __global__ void kernel_fold_complex_tiled(const float* __restrict__ ts_e,
                                           SizeType segment_len,
                                           uint32_t nbins_f,
                                           double tsamp,
-                                          double t_ref) {
+                                          double t_ref,
+                                          SizeType nsamps) {
     // Tiles of tile_len <= kFoldTile samples (dynamic: short segments keep
     // shared memory small and occupancy high).
     extern __shared__ float sh[];
@@ -533,12 +545,16 @@ __global__ void kernel_fold_complex_tiled(const float* __restrict__ ts_e,
     float* sh_e = sh;
     float* sh_v = sh + tile_len;
     for (SizeType pair = blockIdx.x; pair < npairs; pair += gridDim.x) {
-        const SizeType iseg  = pair / nfreqs;
-        const SizeType ifreq = pair % nfreqs;
-        const float* e_seg   = ts_e + (iseg * segment_len);
-        const float* v_seg   = ts_v + (iseg * segment_len);
-        ComplexTypeCUDA* out = fold + (pair * 2 * nbins_f);
-        const double f       = freqs[ifreq];
+        const SizeType iseg      = pair / nfreqs;
+        const SizeType ifreq     = pair % nfreqs;
+        const SizeType seg_start = iseg * segment_len;
+        const SizeType valid_len = (seg_start >= nsamps)
+                                       ? SizeType{0}
+                                       : min(segment_len, nsamps - seg_start);
+        const float* e_seg       = ts_e + seg_start;
+        const float* v_seg       = ts_v + seg_start;
+        ComplexTypeCUDA* out     = fold + (pair * 2 * nbins_f);
+        const double f           = freqs[ifreq];
         for (uint32_t m0 = 0; m0 < nbins_f; m0 += blockDim.x) {
             const uint32_t m  = m0 + threadIdx.x;
             const bool active = m < nbins_f;
@@ -549,9 +565,9 @@ __global__ void kernel_fold_complex_tiled(const float* __restrict__ ts_e,
             const double c_step = -fm * tsamp;
             float2 acc_e{0.0F, 0.0F};
             float2 acc_v{0.0F, 0.0F};
-            for (SizeType t0 = 0; t0 < segment_len; t0 += tile_len) {
+            for (SizeType t0 = 0; t0 < valid_len; t0 += tile_len) {
                 const auto len = static_cast<uint32_t>(
-                    min(SizeType{tile_len}, segment_len - t0));
+                    min(SizeType{tile_len}, valid_len - t0));
                 __syncthreads(); // the previous tile is consumed
                 for (uint32_t i = threadIdx.x; i < len; i += blockDim.x) {
                     sh_e[i] = e_seg[t0 + i];
@@ -832,7 +848,10 @@ void brute_fold_ts_cuda(const float* __restrict__ ts_e,
                         SizeType nfreqs,
                         SizeType segment_len,
                         SizeType nbins,
-                        cudaStream_t stream) {
+                        cudaStream_t stream,
+                        SizeType nsamps) {
+    const size_t total_samps =
+        (nsamps == 0) ? (nsegments * segment_len) : nsamps;
     // The atomic kernels accumulate into the fold, so they need it zeroed.
     // The shared-memory kernel writes every element.
     const auto zero_fold = [&] {
@@ -855,7 +874,8 @@ void brute_fold_ts_cuda(const float* __restrict__ ts_e,
         cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
         zero_fold();
         kernel_fold_time_1d<<<grid_dim, block_dim, 0, stream>>>(
-            ts_e, ts_v, phase_map, fold, nfreqs, nsegments, segment_len, nbins);
+            ts_e, ts_v, phase_map, fold, nfreqs, nsegments, segment_len, nbins,
+            total_samps);
     } else if (nbins <= 512 && nfreqs <= 65535) {
         // Use shared memory for small bin counts
         constexpr SizeType kThreadsPerBlock = 256;
@@ -865,7 +885,8 @@ void brute_fold_ts_cuda(const float* __restrict__ ts_e,
         const auto shmem_size = 2 * nbins * sizeof(float);
         cuda_utils::check_kernel_launch_params(grid_dim, block_dim, shmem_size);
         kernel_fold_time_shmem<<<grid_dim, block_dim, shmem_size, stream>>>(
-            ts_e, ts_v, phase_map, fold, nfreqs, nsegments, segment_len, nbins);
+            ts_e, ts_v, phase_map, fold, nfreqs, nsegments, segment_len, nbins,
+            total_samps);
     } else {
         // Use 2D block configuration for large nfreqs
         constexpr SizeType kThreadsPerBlock = 256;
@@ -877,7 +898,8 @@ void brute_fold_ts_cuda(const float* __restrict__ ts_e,
         cuda_utils::check_kernel_launch_params(grid_dim, block_dim);
         zero_fold();
         kernel_fold_time_2d<<<grid_dim, block_dim, 0, stream>>>(
-            ts_e, ts_v, phase_map, fold, nfreqs, nsegments, segment_len, nbins);
+            ts_e, ts_v, phase_map, fold, nfreqs, nsegments, segment_len, nbins,
+            total_samps);
     }
     cuda_utils::check_last_cuda_error("kernel_fold launch failed");
 }
@@ -892,11 +914,14 @@ void brute_fold_ts_complex_cuda(const float* __restrict__ ts_e,
                                 SizeType nbins_f,
                                 double tsamp,
                                 double t_ref,
-                                cudaStream_t stream) {
+                                cudaStream_t stream,
+                                SizeType nsamps) {
     const SizeType npairs = nsegments * nfreqs;
     if (npairs == 0) {
         return;
     }
+    const SizeType total_samps =
+        (nsamps == 0) ? (nsegments * segment_len) : nsamps;
     // A warp-multiple of threads, one harmonic each, at most 256 per group.
     const SizeType threads =
         std::clamp<SizeType>(((nbins_f + 31) / 32) * 32, 32, 256);
@@ -908,7 +933,7 @@ void brute_fold_ts_complex_cuda(const float* __restrict__ ts_e,
     cuda_utils::check_kernel_launch_params(grid_dim, block_dim, smem);
     kernel_fold_complex_tiled<<<grid_dim, block_dim, smem, stream>>>(
         ts_e, ts_v, fold, freqs, static_cast<uint32_t>(nfreqs), npairs,
-        segment_len, static_cast<uint32_t>(nbins_f), tsamp, t_ref);
+        segment_len, static_cast<uint32_t>(nbins_f), tsamp, t_ref, total_samps);
     cuda_utils::check_last_cuda_error("kernel_fold_complex_tiled failed");
 }
 

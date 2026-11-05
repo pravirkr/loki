@@ -212,7 +212,8 @@ void brute_fold_segment_cuda(const float* ts_e,
                              SizeType nfreqs,
                              SizeType segment_len,
                              SizeType nbins,
-                             cudaStream_t stream);
+                             cudaStream_t stream,
+                             SizeType nsamps = 0);
 
 /// Whether a k-level complex frequency-only fused tile fits the per-block
 /// (opt-in) shared memory.

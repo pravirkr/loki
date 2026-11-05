@@ -50,6 +50,23 @@ cpu_chunk_cost_model(bool use_fourier) noexcept {
             .per_chunk_s = 0.03};
 }
 
+/// GPU sweep cost model for the time or the Fourier domain.
+[[nodiscard]] constexpr ChunkCostModel
+gpu_chunk_cost_model(bool use_fourier) noexcept {
+    if (use_fourier) {
+        return {.brute_s     = 0.30e-9,
+                .merge_s     = 0.055e-9,
+                .prev_s      = 0.055e-9,
+                .final_s     = 0.080e-9,
+                .per_chunk_s = 0.001};
+    }
+    return {.brute_s     = 0.20e-9,
+            .merge_s     = 0.045e-9,
+            .prev_s      = 0.045e-9,
+            .final_s     = 0.045e-9,
+            .per_chunk_s = 0.001};
+}
+
 /**
  * @brief Modelled run time (seconds) of one chunk from its plan.
  *
@@ -59,16 +76,18 @@ cpu_chunk_cost_model(bool use_fourier) noexcept {
  */
 template <SupportedFoldType FoldType>
 [[nodiscard]] double estimate_chunk_cost(const plans::FFAPlan<FoldType>& plan,
-                                         const ChunkCostModel& model) {
+                                         const ChunkCostModel& model,
+                                         bool use_gpu = false) {
     const std::span<const SizeType> nsegments = plan.get_nsegments();
     const std::span<const SizeType> ncoords   = plan.get_ncoords();
     const SizeType n_levels                   = plan.get_n_levels();
-    const auto nbins = static_cast<double>(plan.get_config().get_nbins());
-    const auto units = [&](SizeType level) {
+    const SizeType nbins_u                    = plan.get_config().get_nbins();
+    const auto nbins                          = static_cast<double>(nbins_u);
+    const auto units                          = [&](SizeType level) {
         return static_cast<double>(nsegments[level]) *
                static_cast<double>(ncoords[level]) * 2.0 * nbins;
     };
-    const bool fused_prev = cpu_scored_fused_levels(plan) == 2;
+    const bool fused_prev = !use_gpu && (cpu_scored_fused_levels(plan) == 2);
     double cost           = model.per_chunk_s + (model.brute_s * units(0));
     for (SizeType level = 1; level + 1 < n_levels; ++level) {
         const bool prev = fused_prev && level + 2 == n_levels;

@@ -461,7 +461,7 @@ cpu_ffa_thread_scratch_bytes(const plans::FFAPlan<FoldType>& plan) {
         // a band too narrow for one group per thread shares prefix sums of
         // at most 2 * budget per thread instead. Fourier: the two tiles.
         const SizeType budget = cpu_cone_scratch_budget_bytes();
-        merge                 = std::max(merge, kFourier ? budget : 3 * budget);
+        merge = std::max(merge, (kFourier && !lossy) ? budget : 3 * budget);
         if (!kFourier) {
             // Fused brute fold of the plain path (execute_unified): two
             // tiles and the prefix sums of 2^k segments.
@@ -479,8 +479,10 @@ cpu_ffa_thread_scratch_bytes(const plans::FFAPlan<FoldType>& plan) {
             merge,
             ((tile * 2 * nbins_f) + (2 * (tile + 128) * 2 * nbins_f)) * kC);
     } else {
-        merge = std::max(
-            merge, ((tile * 2 * nbins) + (2 * (tile + 64) * 4 * nbins)) * kF);
+        merge = std::max(merge,
+                         ((tile * 2 * nbins) + (2 * (tile + 64) * 4 * nbins) +
+                          (2 * nbins) + (10 * (tile + 64))) *
+                             kF);
     }
     // Boxcar scorer (BoxcarScorer3D: 16 profiles in flight, wmax <= nbins)
     // and, for Fourier folds, the lane FFT (EVTransform: four buffers of 16

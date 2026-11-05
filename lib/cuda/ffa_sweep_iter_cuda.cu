@@ -141,10 +141,16 @@ kernel_brute_fold_segment(const float* __restrict__ ts_e,
                           uint32_t nfreqs,
                           uint32_t segment_len,
                           uint32_t nbins,
-                          uint32_t freqs_per_pass) {
+                          uint32_t freqs_per_pass,
+                          size_t nsamps) {
     extern __shared__ float s_prof[]; // NOLINT
     const size_t iseg     = blockIdx.x;
     const size_t seg_base = iseg * segment_len;
+    const uint32_t valid_len =
+        (seg_base >= nsamps)
+            ? 0U
+            : static_cast<uint32_t>(
+                  min(static_cast<size_t>(segment_len), nsamps - seg_base));
     const uint32_t stride = 2 * nbins;
     for (uint32_t f0 = 0; f0 < nfreqs; f0 += freqs_per_pass) {
         const uint32_t nf    = min(freqs_per_pass, nfreqs - f0);
@@ -153,7 +159,7 @@ kernel_brute_fold_segment(const float* __restrict__ ts_e,
             s_prof[j] = 0.0F;
         }
         __syncthreads();
-        for (uint32_t i = threadIdx.x; i < segment_len; i += blockDim.x) {
+        for (uint32_t i = threadIdx.x; i < valid_len; i += blockDim.x) {
             const float e = ts_e[seg_base + i];
             const float v = ts_v[seg_base + i];
             for (uint32_t f = 0; f < nf; ++f) {
@@ -450,10 +456,13 @@ void brute_fold_segment_cuda(const float* ts_e,
                              SizeType nfreqs,
                              SizeType segment_len,
                              SizeType nbins,
-                             cudaStream_t stream) {
+                             cudaStream_t stream,
+                             SizeType nsamps) {
     if (nsegments == 0 || nfreqs == 0) {
         return;
     }
+    const size_t total_samps =
+        (nsamps == 0) ? (nsegments * segment_len) : nsamps;
     constexpr SizeType kSmemBudget = 32U * 1024U;
     const SizeType per_freq        = 2 * nbins * sizeof(float);
     const SizeType freqs_per_pass =
@@ -466,7 +475,7 @@ void brute_fold_segment_cuda(const float* ts_e,
                                 stream>>>(
         ts_e, ts_v, phase_map, fold, static_cast<uint32_t>(nfreqs),
         static_cast<uint32_t>(segment_len), static_cast<uint32_t>(nbins),
-        static_cast<uint32_t>(freqs_per_pass));
+        static_cast<uint32_t>(freqs_per_pass), total_samps);
     cuda_utils::check_last_cuda_error(
         "kernel_brute_fold_segment launch failed");
 }
