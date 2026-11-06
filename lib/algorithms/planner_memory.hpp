@@ -475,9 +475,11 @@ cpu_ffa_thread_scratch_bytes(const plans::FFAPlan<FoldType>& plan) {
     // (time: each channel twice; Fourier: block-aligned rows).
     const SizeType tile = cpu_final_tile_coords(nbins, kFourier);
     if (kFourier) {
-        merge = std::max(
-            merge,
-            ((tile * 2 * nbins_f) + (2 * (tile + 128) * 2 * nbins_f)) * kC);
+        merge = std::max(merge,
+                         (((tile * 2 * nbins_f) +
+                           (2 * (tile + 128) * 2 * nbins_f) + (32 * nbins_f)) *
+                          kC) +
+                             (((64 * nbins) + (10 * (tile + 128))) * kF));
     } else {
         merge = std::max(merge,
                          ((tile * 2 * nbins) + (2 * (tile + 64) * 4 * nbins) +

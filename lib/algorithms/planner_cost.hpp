@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <span>
+#include <type_traits>
 
 #include "loki/common/plans.hpp"
 #include "loki/common/types.hpp"
@@ -14,6 +15,25 @@
 #include "lib/algorithms/planner_memory.hpp"
 
 namespace loki::algorithms::detail {
+
+/// Whether @p n factors over 2 and the odd radices (3, 5, 7, 11, 13) of the
+/// direct Stockham FFT (`lane_fft::EVTransform`); larger prime factors use
+/// Bluestein's algorithm.
+[[nodiscard]] constexpr bool is_direct_fft(SizeType n) noexcept {
+    if (n < 2) {
+        return false;
+    }
+    while ((n & 1U) == 0U) {
+        n >>= 1U;
+    }
+    for (const SizeType r :
+         {SizeType{3}, SizeType{5}, SizeType{7}, SizeType{11}, SizeType{13}}) {
+        while (n % r == 0) {
+            n /= r;
+        }
+    }
+    return n == 1;
+}
 
 /**
  * @brief Seconds per work unit of each FFA stage, plus a fixed cost per chunk.
@@ -93,7 +113,11 @@ template <SupportedFoldType FoldType>
         const bool prev = fused_prev && level + 2 == n_levels;
         cost += (prev ? model.prev_s : model.merge_s) * units(level);
     }
-    cost += model.final_s * units(n_levels - 1);
+    constexpr bool kFourier = std::is_same_v<FoldType, ComplexType>;
+    const double final_s    = (kFourier && !is_direct_fft(nbins_u))
+                                  ? (2.0 * model.final_s)
+                                  : model.final_s;
+    cost += final_s * units(n_levels - 1);
     return cost;
 }
 

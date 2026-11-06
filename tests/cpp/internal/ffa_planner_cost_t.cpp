@@ -317,3 +317,31 @@ TEST_CASE("FFAPlan: FLOP count matches the closed form (Fourier fold)",
                 Approx(expected_gflops(plan, cfg, true)).epsilon(1e-4));
     }
 }
+
+TEST_CASE("estimate_chunk_cost applies Bluestein penalty to non-direct Fourier "
+          "nbins",
+          "[regions][planner_cost]") {
+    STATIC_REQUIRE(detail::is_direct_fft(32));
+    STATIC_REQUIRE(detail::is_direct_fft(50));
+    STATIC_REQUIRE(detail::is_direct_fft(52));
+    STATIC_REQUIRE_FALSE(detail::is_direct_fft(34)); // prime factor 17
+
+    const std::vector<ParamLimit> limits{
+        {.min = -kAccel, .max = kAccel},
+        {.min = kFMin, .max = kFMax},
+    };
+    const FFASearchConfig cfg34(SizeType{1} << 18U, kTsamp, 34, 1.0, limits,
+                                0.2, 1.5, /*use_fourier=*/true);
+    const FFAPlan<ComplexType> plan34(cfg34);
+    const auto model       = detail::cpu_chunk_cost_model(true);
+    auto model_no_final    = model;
+    model_no_final.final_s = 0.0;
+    const double base_cost = detail::estimate_chunk_cost(plan34, model);
+    const double non_final =
+        detail::estimate_chunk_cost(plan34, model_no_final);
+    const double final_units =
+        static_cast<double>(plan34.get_nsegments().back()) *
+        static_cast<double>(plan34.get_ncoords().back()) * 2.0 * 34.0;
+    CHECK((base_cost - non_final) ==
+          Approx(2.0 * model.final_s * final_units).epsilon(1e-9));
+}

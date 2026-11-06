@@ -1996,7 +1996,11 @@ void ffa_complex_final_tiles(const ComplexType* __restrict__ fold_in,
                              SizeType tile_coords,
                              ComplexTileFn tile_fn,
                              void* tile_ctx,
-                             int nthreads) {
+                             int nthreads,
+                             float threshold,
+                             std::span<const SizeType> widths) {
+    (void)threshold;
+    (void)widths;
     const SizeType fold_stride  = 2 * nbins_f;
     const ComplexType* seg_tail = fold_in;
     const ComplexType* seg_head = fold_in + (ncoords_prev * fold_stride);
@@ -2405,6 +2409,88 @@ void ffa_final2_scored(const float* __restrict__ fold_in,
     }
 }
 
+namespace {
+
+struct FourierPrunePlan {
+    bool enabled{false};
+    float thresh_guard{0.0F};
+    SizeType nbins{0};
+    SizeType nbins_f{0};
+    SizeType nwidths{0};
+    SizeType wmax{0};
+    float hb_max{0.0F};
+    std::vector<SizeType> widths;
+    std::vector<float> b_vals;
+    std::vector<float> hb_vals;
+    std::vector<ComplexType> half_phasor;
+    std::vector<float> w_secant_e;
+    std::vector<float> w_secant_l1;
+    std::vector<float> w_v;
+};
+
+FourierPrunePlan make_fourier_prune_plan(SizeType nbins,
+                                         SizeType nbins_f,
+                                         float threshold,
+                                         std::span<const SizeType> widths) {
+    FourierPrunePlan plan;
+    plan.nbins   = nbins;
+    plan.nbins_f = nbins_f;
+    if (threshold < 4.0F || widths.empty() ||
+        !lane_fft::EVTransform::supports(nbins)) {
+        return plan;
+    }
+    lane_fft::EVTransform::prepare(nbins);
+    plan.enabled      = true;
+    plan.thresh_guard = threshold - 1.0e-3F;
+    plan.nwidths      = widths.size();
+    plan.wmax         = *std::ranges::max_element(widths);
+    plan.widths.assign(widths.begin(), widths.end());
+    plan.b_vals.resize(plan.nwidths);
+    plan.hb_vals.resize(plan.nwidths);
+    for (SizeType iw = 0; iw < plan.nwidths; ++iw) {
+        const auto w  = widths[iw];
+        const float h = std::sqrt(static_cast<float>(nbins - w) /
+                                  static_cast<float>(nbins * w));
+        const float b =
+            static_cast<float>(w) * h / static_cast<float>(nbins - w);
+        plan.b_vals[iw]  = b;
+        plan.hb_vals[iw] = h + b;
+        plan.hb_max      = std::max({plan.hb_max, h, b});
+    }
+    plan.half_phasor.resize(nbins_f, ComplexType{1.0F, 0.0F});
+    plan.w_secant_e.resize(nbins_f, 0.0F);
+    plan.w_secant_l1.resize(nbins_f, 0.0F);
+    plan.w_v.resize(nbins_f, 0.0F);
+    const float inv_nbins = 1.0F / static_cast<float>(nbins);
+    for (SizeType k = 1; k < nbins_f; ++k) {
+        const double alpha  = (std::numbers::pi * static_cast<double>(k)) /
+                              static_cast<double>(nbins);
+        plan.half_phasor[k] = ComplexType{static_cast<float>(std::cos(alpha)),
+                                          static_cast<float>(std::sin(alpha))};
+        const float w_k     = (2 * k == nbins) ? inv_nbins : (2.0F * inv_nbins);
+        const float c_k =
+            1.001F * static_cast<float>(1.0 - std::cos(0.5 * alpha));
+        const double sin_den = std::sin(alpha);
+        float g_max          = 0.0F;
+        for (SizeType iw = 0; iw < plan.nwidths; ++iw) {
+            const auto w = widths[iw];
+            const float ratio =
+                (w == 1)
+                    ? 1.0F
+                    : static_cast<float>(std::abs(
+                          std::sin(alpha * static_cast<double>(w)) / sin_den));
+            g_max = std::max(g_max, plan.hb_vals[iw] * ratio);
+        }
+        plan.w_secant_e[k] = w_k * c_k * g_max;
+        plan.w_secant_l1[k] =
+            plan.hb_max * static_cast<float>(nbins) * w_k * c_k;
+        plan.w_v[k] = w_k;
+    }
+    return plan;
+}
+
+} // namespace
+
 void ffa_complex_final2_tiles(const ComplexType* __restrict__ fold_in,
                               const coord::FFACoord* __restrict__ coords_prev,
                               const coord::FFACoord* __restrict__ coords,
@@ -2418,7 +2504,9 @@ void ffa_complex_final2_tiles(const ComplexType* __restrict__ fold_in,
                               SizeType tile_coords,
                               ComplexTileFn tile_fn,
                               void* tile_ctx,
-                              int nthreads) {
+                              int nthreads,
+                              float threshold,
+                              std::span<const SizeType> widths) {
     nthreads                           = std::max(nthreads, 1);
     const SizeType fold_stride         = 2 * nbins_f;
     const SizeType seg2                = ncoords_prev2 * fold_stride;
@@ -2431,20 +2519,193 @@ void ffa_complex_final2_tiles(const ComplexType* __restrict__ fold_in,
     // Level-(L-1) rows are merged in the phase-step blocks of the stored
     // level (multiples of kMergeStepBlock), so the steps are identical.
     const SizeType cap = tile_coords + (2 * kMergeStepBlock) + 64;
+    const FourierPrunePlan pplan =
+        make_fourier_prune_plan(nbins, nbins_f, threshold, widths);
 
 #pragma omp parallel num_threads(nthreads) default(none)                       \
     shared(fold_in, coords_prev, coords, ncoords_prev, nbins_f, nbins,         \
                tile_coords, tile_fn, tile_ctx, fold_stride, seg2, ntiles,      \
-               tiles, row_len, cap)
+               tiles, row_len, cap, pplan)
     {
         utils::UninitVector<ComplexType> scratch(tile_coords * fold_stride);
         utils::UninitVector<ComplexType> par_tail(cap * fold_stride);
         utils::UninitVector<ComplexType> par_head(cap * fold_stride);
         std::array<PhaseStep, kMergeStepBlock> steps_tail;
         std::array<PhaseStep, kMergeStepBlock> steps_head;
+        std::optional<lane_fft::EVTransform> fft;
+        if (pplan.enabled) {
+            fft.emplace(nbins);
+        }
+        utils::UninitVector<ComplexType> fft_spec(
+            pplan.enabled ? (2 * lane_fft::kLanes * nbins_f) : 0);
+        utils::UninitVector<float> psum0(
+            pplan.enabled ? ((nbins + pplan.wmax) * lane_fft::kLanes) : 0);
+        utils::UninitVector<float> psumh(
+            pplan.enabled ? ((nbins + pplan.wmax) * lane_fft::kLanes) : 0);
+        std::vector<float> u_tail(pplan.enabled ? cap : 0);
+        std::vector<float> n_tail(pplan.enabled ? cap : 0);
+        std::vector<float> vmin_tail(pplan.enabled ? cap : 0);
+        std::vector<float> vmax_tail(pplan.enabled ? cap : 0);
+        std::vector<float> b_tail(pplan.enabled ? cap : 0);
+        std::vector<float> u_head(pplan.enabled ? cap : 0);
+        std::vector<float> n_head(pplan.enabled ? cap : 0);
+        std::vector<float> vmin_head(pplan.enabled ? cap : 0);
+        std::vector<float> vmax_head(pplan.enabled ? cap : 0);
+        std::vector<float> b_head(pplan.enabled ? cap : 0);
+
+        const auto summarize_parents = [&](const ComplexType* par_base,
+                                           SizeType np, float* u_out,
+                                           float* n_out, float* vmin_out,
+                                           float* vmax_out) {
+            constexpr SizeType kL    = lane_fft::kLanes;
+            constexpr float kOctBeta = 0.41421356F; // sqrt(2) - 1
+            const float inv_nbins    = 1.0F / static_cast<float>(nbins);
+            const ComplexType* __restrict__ h_phasor = pplan.half_phasor.data();
+            const float* __restrict__ w_se           = pplan.w_secant_e.data();
+            const float* __restrict__ w_sl1          = pplan.w_secant_l1.data();
+            const float* __restrict__ w_v            = pplan.w_v.data();
+            for (SizeType p0 = 0; p0 < np; p0 += kL) {
+                const SizeType nb = std::min(kL, np - p0);
+                for (SizeType lane = 0; lane < nb; ++lane) {
+                    const SizeType p      = p0 + lane;
+                    const ComplexType* ep = par_base + (p * fold_stride);
+                    const ComplexType* vp = ep + nbins_f;
+                    ComplexType* __restrict__ s0 =
+                        fft_spec.data() + ((2 * lane) * nbins_f);
+                    ComplexType* __restrict__ s1 =
+                        fft_spec.data() + (((2 * lane) + 1) * nbins_f);
+                    s0[0]      = ep[0];
+                    s1[0]      = ep[0];
+                    float r_e  = 0.0F;
+                    float r_l1 = 0.0F;
+                    float dv   = 0.0F;
+#pragma omp simd reduction(+ : r_e, r_l1, dv)
+                    for (SizeType k = 1; k < nbins_f; ++k) {
+                        const float er    = ep[k].real();
+                        const float ei    = ep[k].imag();
+                        const float pr    = h_phasor[k].real();
+                        const float pi    = h_phasor[k].imag();
+                        s0[k]             = ep[k];
+                        s1[k]             = ComplexType{(er * pr) - (ei * pi),
+                                                        (er * pi) + (ei * pr)};
+                        const float aer   = std::abs(er);
+                        const float aei   = std::abs(ei);
+                        const float mag_e = std::max(aer, aei) +
+                                            (kOctBeta * std::min(aer, aei));
+                        const float avr   = std::abs(vp[k].real());
+                        const float avi   = std::abs(vp[k].imag());
+                        const float mag_v = std::max(avr, avi) +
+                                            (kOctBeta * std::min(avr, avi));
+                        r_e += w_se[k] * mag_e;
+                        r_l1 += w_sl1[k] * mag_e;
+                        dv += w_v[k] * mag_v;
+                    }
+                    const float v_mean = vp[0].real() * inv_nbins;
+                    u_out[p]           = r_e;
+                    n_out[p]           = r_l1;
+                    vmin_out[p]        = v_mean - dv;
+                    vmax_out[p]        = v_mean + dv;
+                }
+                fft->inverse(fft_spec.data(), nb);
+                const float* __restrict__ e0_lanes = fft->e_lanes();
+                const float* __restrict__ eh_lanes = fft->v_lanes();
+                float* __restrict__ ps0            = psum0.data();
+                float* __restrict__ psh            = psumh.data();
+                alignas(64) std::array<float, kL> abs_e0{};
+                alignas(64) std::array<float, kL> abs_eh{};
+                alignas(64) std::array<float, kL> e0_max1{};
+                alignas(64) std::array<float, kL> eh_max1{};
+                alignas(64) std::array<float, kL> run0{};
+                alignas(64) std::array<float, kL> runh{};
+                alignas(64) std::array<float, kL> u_max{};
+                e0_max1.fill(std::numeric_limits<float>::lowest());
+                eh_max1.fill(std::numeric_limits<float>::lowest());
+                u_max.fill(std::numeric_limits<float>::lowest());
+
+                for (SizeType j = 0; j < nbins; ++j) {
+                    const float* __restrict__ r0 = e0_lanes + (j * kL);
+                    const float* __restrict__ rh = eh_lanes + (j * kL);
+                    float* __restrict__ p0_row   = ps0 + (j * kL);
+                    float* __restrict__ ph_row   = psh + (j * kL);
+#pragma omp simd
+                    for (SizeType l = 0; l < kL; ++l) {
+                        const float v0 = r0[l];
+                        const float vh = rh[l];
+                        abs_e0[l] += std::abs(v0);
+                        abs_eh[l] += std::abs(vh);
+                        e0_max1[l] = std::max(e0_max1[l], v0);
+                        eh_max1[l] = std::max(eh_max1[l], vh);
+                        run0[l] += v0;
+                        runh[l] += vh;
+                        p0_row[l] = run0[l];
+                        ph_row[l] = runh[l];
+                    }
+                }
+                for (SizeType j = 0; j < pplan.wmax; ++j) {
+                    const float* __restrict__ r0 = e0_lanes + (j * kL);
+                    const float* __restrict__ rh = eh_lanes + (j * kL);
+                    float* __restrict__ p0_row   = ps0 + ((nbins + j) * kL);
+                    float* __restrict__ ph_row   = psh + ((nbins + j) * kL);
+#pragma omp simd
+                    for (SizeType l = 0; l < kL; ++l) {
+                        run0[l] += r0[l];
+                        runh[l] += rh[l];
+                        p0_row[l] = run0[l];
+                        ph_row[l] = runh[l];
+                    }
+                }
+                const float* __restrict__ sum0 = ps0 + ((nbins - 1) * kL);
+                const float* __restrict__ sumh = psh + ((nbins - 1) * kL);
+                for (SizeType iw = 0; iw < pplan.nwidths; ++iw) {
+                    const SizeType w = pplan.widths[iw];
+                    const float hb   = pplan.hb_vals[iw];
+                    const float b    = pplan.b_vals[iw];
+                    if (w == 1) {
+#pragma omp simd
+                        for (SizeType l = 0; l < kL; ++l) {
+                            u_max[l] = std::max(
+                                {u_max[l], (hb * e0_max1[l]) - (b * sum0[l]),
+                                 (hb * eh_max1[l]) - (b * sumh[l])});
+                        }
+                    } else {
+                        alignas(64) std::array<float, kL> d0{};
+                        alignas(64) std::array<float, kL> dh{};
+                        d0.fill(std::numeric_limits<float>::lowest());
+                        dh.fill(std::numeric_limits<float>::lowest());
+                        for (SizeType j = 0; j < nbins; ++j) {
+                            const float* __restrict__ p0_hi =
+                                ps0 + ((j + w) * kL);
+                            const float* __restrict__ p0_lo = ps0 + (j * kL);
+                            const float* __restrict__ ph_hi =
+                                psh + ((j + w) * kL);
+                            const float* __restrict__ ph_lo = psh + (j * kL);
+#pragma omp simd
+                            for (SizeType l = 0; l < kL; ++l) {
+                                d0[l] = std::max(d0[l], p0_hi[l] - p0_lo[l]);
+                                dh[l] = std::max(dh[l], ph_hi[l] - ph_lo[l]);
+                            }
+                        }
+#pragma omp simd
+                        for (SizeType l = 0; l < kL; ++l) {
+                            u_max[l] = std::max({u_max[l],
+                                                 (hb * d0[l]) - (b * sum0[l]),
+                                                 (hb * dh[l]) - (b * sumh[l])});
+                        }
+                    }
+                }
+                for (SizeType lane = 0; lane < nb; ++lane) {
+                    const SizeType p = p0 + lane;
+                    u_out[p] += u_max[lane];
+                    n_out[p] +=
+                        pplan.hb_max * std::max(abs_e0[lane], abs_eh[lane]);
+                }
+            }
+        };
+
         // Level L-1 segment `seg` rows [lo, hi) (lo a multiple of
-        // kMergeStepBlock).
+        // kMergeStepBlock); only rows in [span_lo, span_hi) are merged.
         const auto fill = [&](SizeType seg, SizeType lo, SizeType hi,
+                              SizeType span_lo, SizeType span_hi,
                               ComplexType* par) {
             const ComplexType* l2_tail = fold_in + ((2 * seg) * seg2);
             const ComplexType* l2_head = fold_in + ((2 * seg + 1) * seg2);
@@ -2458,7 +2719,10 @@ void ffa_complex_final2_tiles(const ComplexType* __restrict__ fold_in,
                 fill_merge_phase_steps(
                     [block](SizeType i) { return block[i].shift_head; }, nblock,
                     nbins, steps_head.data());
-                for (SizeType i = 0; i < nblock; ++i) {
+                const SizeType i0 = (b0 < span_lo) ? (span_lo - b0) : 0;
+                const SizeType i1 =
+                    (span_hi > b0) ? std::min(nblock, span_hi - b0) : 0;
+                for (SizeType i = i0; i < i1; ++i) {
                     shift_add_complex_recurrence_binary_steps(
                         l2_tail + (static_cast<SizeType>(block[i].i_tail) *
                                    fold_stride),
@@ -2484,46 +2748,177 @@ void ffa_complex_final2_tiles(const ComplexType* __restrict__ fold_in,
                                    kMergeStepBlock) *
                                       kMergeStepBlock,
                                   ncoords_prev),
-                         par_tail.data());
+                         sp.tail_lo, sp.tail_hi, par_tail.data());
                     fill(1, head_lo,
                          std::min(((sp.head_hi + kMergeStepBlock - 1) /
                                    kMergeStepBlock) *
                                       kMergeStepBlock,
                                   ncoords_prev),
-                         par_head.data());
+                         sp.head_lo, sp.head_hi, par_head.data());
+                    bool tile_prune   = false;
+                    const SizeType nt = sp.tail_hi - sp.tail_lo;
+                    const SizeType nh = sp.head_hi - sp.head_lo;
+                    if (pplan.enabled &&
+                        ((nt + nh) * 2 <= tile.nrows * tile.ncols)) {
+                        summarize_parents(
+                            par_tail.data() +
+                                ((sp.tail_lo - tail_lo) * fold_stride),
+                            nt, u_tail.data(), n_tail.data(), vmin_tail.data(),
+                            vmax_tail.data());
+                        summarize_parents(
+                            par_head.data() +
+                                ((sp.head_lo - head_lo) * fold_stride),
+                            nh, u_head.data(), n_head.data(), vmin_head.data(),
+                            vmax_head.data());
+                        float t_vmin = std::numeric_limits<float>::max();
+                        float t_vmax = 0.0F;
+                        for (SizeType p = 0; p < nt; ++p) {
+                            t_vmin = std::min(t_vmin, vmin_tail[p]);
+                            t_vmax = std::max(t_vmax, vmax_tail[p]);
+                        }
+                        float h_vmin = std::numeric_limits<float>::max();
+                        float h_vmax = 0.0F;
+                        for (SizeType p = 0; p < nh; ++p) {
+                            h_vmin = std::min(h_vmin, vmin_head[p]);
+                            h_vmax = std::max(h_vmax, vmax_head[p]);
+                        }
+                        const float tot_vmin = t_vmin + h_vmin;
+                        const float tot_vmax = t_vmax + h_vmax;
+                        if (tot_vmin > 0.0F && tot_vmax >= tot_vmin) {
+                            tile_prune           = true;
+                            const float inv_vmin = 1.0F / std::sqrt(tot_vmin);
+                            const float inv_vmax = 1.0F / std::sqrt(tot_vmax);
+                            const float mu       = 0.5F * (inv_vmin + inv_vmax);
+                            const float eps      = 0.5F * (inv_vmin - inv_vmax);
+                            float bt_max = std::numeric_limits<float>::lowest();
+                            for (SizeType p = 0; p < nt; ++p) {
+                                const float b =
+                                    (mu * u_tail[p]) + (eps * n_tail[p]);
+                                b_tail[p] = b;
+                                bt_max    = std::max(bt_max, b);
+                            }
+                            float bh_max = std::numeric_limits<float>::lowest();
+                            for (SizeType p = 0; p < nh; ++p) {
+                                const float b =
+                                    (mu * u_head[p]) + (eps * n_head[p]);
+                                b_head[p] = b;
+                                bh_max    = std::max(bh_max, b);
+                            }
+                            if (bt_max + bh_max < pplan.thresh_guard) {
+                                return;
+                            }
+                        }
+                    }
                     for (SizeType row = tile.row_begin;
                          row < tile.row_begin + tile.nrows; ++row) {
                         const SizeType begin = (row * row_len) + tile.col_begin;
-                        for (SizeType b0 = 0; b0 < tile.ncols;
-                             b0 += kMergeStepBlock) {
-                            const SizeType nblock = std::min(
-                                SizeType{kMergeStepBlock}, tile.ncols - b0);
-                            const coord::FFACoord* block = coords + begin + b0;
-                            fill_merge_phase_steps(
-                                [block](SizeType i) {
-                                    return block[i].shift_tail;
-                                },
-                                nblock, nbins, steps_tail.data());
-                            fill_merge_phase_steps(
-                                [block](SizeType i) {
-                                    return block[i].shift_head;
-                                },
-                                nblock, nbins, steps_head.data());
-                            for (SizeType i = 0; i < nblock; ++i) {
+                        if (!tile_prune) {
+                            for (SizeType b0 = 0; b0 < tile.ncols;
+                                 b0 += kMergeStepBlock) {
+                                const SizeType nblock = std::min(
+                                    SizeType{kMergeStepBlock}, tile.ncols - b0);
+                                const coord::FFACoord* block =
+                                    coords + begin + b0;
+                                fill_merge_phase_steps(
+                                    [block](SizeType i) {
+                                        return block[i].shift_tail;
+                                    },
+                                    nblock, nbins, steps_tail.data());
+                                fill_merge_phase_steps(
+                                    [block](SizeType i) {
+                                        return block[i].shift_head;
+                                    },
+                                    nblock, nbins, steps_head.data());
+                                for (SizeType i = 0; i < nblock; ++i) {
+                                    shift_add_complex_recurrence_binary_steps(
+                                        par_tail.data() +
+                                            ((block[i].i_tail - tail_lo) *
+                                             fold_stride),
+                                        steps_tail[i],
+                                        par_head.data() +
+                                            ((block[i].i_head - head_lo) *
+                                             fold_stride),
+                                        steps_head[i],
+                                        scratch.data() +
+                                            ((b0 + i) * fold_stride),
+                                        nbins_f);
+                                }
+                            }
+                            tile_fn(scratch.data(), begin, tile.ncols,
+                                    tile_ctx);
+                            continue;
+                        }
+                        SizeType i = 0;
+                        SizeType cached_b0 =
+                            std::numeric_limits<SizeType>::max();
+                        while (i < tile.ncols) {
+                            while (i < tile.ncols) {
+                                const auto& c = coords[begin + i];
+                                if (b_tail[c.i_tail - sp.tail_lo] +
+                                        b_head[c.i_head - sp.head_lo] >=
+                                    pplan.thresh_guard) {
+                                    break;
+                                }
+                                ++i;
+                            }
+                            if (i >= tile.ncols) {
+                                break;
+                            }
+                            const SizeType run_start = i;
+                            SizeType run_end         = i + 1;
+                            SizeType gap             = 0;
+                            for (++i; i < tile.ncols; ++i) {
+                                const auto& c = coords[begin + i];
+                                if (b_tail[c.i_tail - sp.tail_lo] +
+                                        b_head[c.i_head - sp.head_lo] >=
+                                    pplan.thresh_guard) {
+                                    run_end = i + 1;
+                                    gap     = 0;
+                                } else {
+                                    ++gap;
+                                    if (gap >= lane_fft::kLanes) {
+                                        break;
+                                    }
+                                }
+                            }
+                            const SizeType run_len = run_end - run_start;
+                            for (SizeType r = 0; r < run_len; ++r) {
+                                const SizeType col = run_start + r;
+                                const SizeType b0 =
+                                    (col / kMergeStepBlock) * kMergeStepBlock;
+                                if (b0 != cached_b0) {
+                                    cached_b0 = b0;
+                                    const SizeType nblock =
+                                        std::min(SizeType{kMergeStepBlock},
+                                                 tile.ncols - b0);
+                                    const coord::FFACoord* block =
+                                        coords + begin + b0;
+                                    fill_merge_phase_steps(
+                                        [block](SizeType k) {
+                                            return block[k].shift_tail;
+                                        },
+                                        nblock, nbins, steps_tail.data());
+                                    fill_merge_phase_steps(
+                                        [block](SizeType k) {
+                                            return block[k].shift_head;
+                                        },
+                                        nblock, nbins, steps_head.data());
+                                }
+                                const SizeType in_block = col - b0;
+                                const auto& c           = coords[begin + col];
                                 shift_add_complex_recurrence_binary_steps(
                                     par_tail.data() +
-                                        ((block[i].i_tail - tail_lo) *
-                                         fold_stride),
-                                    steps_tail[i],
+                                        ((c.i_tail - tail_lo) * fold_stride),
+                                    steps_tail[in_block],
                                     par_head.data() +
-                                        ((block[i].i_head - head_lo) *
-                                         fold_stride),
-                                    steps_head[i],
-                                    scratch.data() + ((b0 + i) * fold_stride),
+                                        ((c.i_head - head_lo) * fold_stride),
+                                    steps_head[in_block],
+                                    scratch.data() + (r * fold_stride),
                                     nbins_f);
                             }
+                            tile_fn(scratch.data(), begin + run_start, run_len,
+                                    tile_ctx);
                         }
-                        tile_fn(scratch.data(), begin, tile.ncols, tile_ctx);
                     }
                 });
         }

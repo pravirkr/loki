@@ -855,12 +855,12 @@ public:
                     coords, ncoords_cur, ncoords_prev,
                     m_ffa_plan.get_ncoords()[final - 2], m_cfg.get_nbins_f(),
                     nbins, row_len, row_len_prev, tile, &offset_tile, &shifted,
-                    m_nthreads);
+                    m_nthreads, score_ctx.threshold, score_ctx.widths);
             } else {
                 core::ffa_complex_final_tiles(
                     src, coords, ncoords_cur, ncoords_prev, m_cfg.get_nbins_f(),
                     nbins, row_len, row_len_prev, tile, &offset_tile, &shifted,
-                    m_nthreads);
+                    m_nthreads, score_ctx.threshold, score_ctx.widths);
             }
         }
     }

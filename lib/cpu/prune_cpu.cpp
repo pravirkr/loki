@@ -30,6 +30,7 @@
 #include "lib/algorithms/ffa_engine.hpp"
 #include "lib/algorithms/prune_engine.hpp"
 #include "lib/core/dynamic.hpp"
+#include "lib/core/transforms.hpp"
 #include "lib/detail/error_check.hpp"
 #include "lib/detail/progress.hpp"
 #include "lib/detail/psr_utils.hpp"
@@ -47,6 +48,30 @@ namespace {
 // Number of individual harvests echoed to the log at info level per run;
 // beyond this only per-level summaries are emitted.
 constexpr SizeType kMaxHarvestLogLines = 16;
+
+void shift_reported_leaves_epoch(std::span<double> leaves,
+                                 SizeType n_leaves,
+                                 SizeType n_params,
+                                 double delta_t_epoch) {
+    if (n_leaves == 0 || n_params < 2 || std::abs(delta_t_epoch) <= 1e-12) {
+        return;
+    }
+    constexpr SizeType kParamStride = 2U;
+    const SizeType leaves_stride    = (n_params + 2) * kParamStride;
+    std::vector<double> params(n_params);
+    for (SizeType i = 0; i < n_leaves; ++i) {
+        const SizeType leaf_offset = i * leaves_stride;
+        for (SizeType j = 0; j < n_params; ++j) {
+            params[j] = leaves[leaf_offset + (j * kParamStride)];
+        }
+        const auto [shifted, delay] =
+            core::shift_taylor_params_d_f(params, delta_t_epoch);
+        (void)delay;
+        for (SizeType j = 0; j < n_params; ++j) {
+            leaves[leaf_offset + (j * kParamStride)] = shifted[j];
+        }
+    }
+}
 
 template <SupportedFoldType FoldType> class PruneImpl {
 public:
@@ -423,6 +448,14 @@ private:
             m_prune_funcs->report(leaves_view.first, coord_mid, n1);
             if (n2 > 0) {
                 m_prune_funcs->report(leaves_view.second, coord_mid, n2);
+            }
+            const double delta_t_epoch =
+                (0.5 * m_cfg.get_tobs()) - coord_mid.first;
+            shift_reported_leaves_epoch(leaves_view.first, n1,
+                                        m_cfg.get_nparams(), delta_t_epoch);
+            if (n2 > 0) {
+                shift_reported_leaves_epoch(leaves_view.second, n2,
+                                            m_cfg.get_nparams(), delta_t_epoch);
             }
         }
         const auto total_pruning_gflops = compute_total_prune_gflops();

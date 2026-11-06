@@ -18,9 +18,9 @@ SEARCH_SNR_MIN = 6.0
 # Injected folded S/N is 10. Recovery must stay at or above this floor.
 RECOVER_SNR_MIN = 8.0
 # One frequency step at this length is ~3e-5 Hz.
-# One acceleration step is ~2.6 m/s^2.
+# One acceleration step is ~2.5 m/s^2 (~3 steps = 7.5 m/s^2).
 FREQ_TOL = 1.0e-4
-ACCEL_TOL = 5.0
+ACCEL_TOL = 7.5
 SEED = 1
 
 

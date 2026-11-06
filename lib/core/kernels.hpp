@@ -239,7 +239,9 @@ void ffa_complex_final_tiles(const ComplexType* __restrict__ fold_in,
                              SizeType tile_coords,
                              ComplexTileFn tile_fn,
                              void* tile_ctx,
-                             int nthreads);
+                             int nthreads,
+                             float threshold                  = 0.0F,
+                             std::span<const SizeType> widths = {});
 
 /**
  * @brief The last two FFA levels (accel, time domain) merged straight into a
@@ -285,7 +287,9 @@ void ffa_complex_final2_tiles(const ComplexType* __restrict__ fold_in,
                               SizeType tile_coords,
                               ComplexTileFn tile_fn,
                               void* tile_ctx,
-                              int nthreads);
+                              int nthreads,
+                              float threshold                  = 0.0F,
+                              std::span<const SizeType> widths = {});
 
 void ffa_complex_final_tiles_freq(
     const ComplexType* __restrict__ fold_in,

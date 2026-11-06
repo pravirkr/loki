@@ -14,6 +14,7 @@
 #include "lib/core/kernels.hpp"
 #include "lib/core/taylor_ffa.hpp"
 #include "lib/cpu/boxcar_kernels.hpp"
+#include "lib/cpu/lane_fft.hpp"
 #include "lib/detail/utils.hpp"
 
 using loki::ComplexType;
@@ -280,6 +281,30 @@ void score_pruned_tile(const float* profiles,
     loki::detection::detail::append_boxcar_hits(
         scorer, profiles, coord_begin, nprofiles, state.threshold, state.hits);
 }
+
+struct PrunedFourierScoreCtx {
+    SizeType nbins{};
+    std::span<const SizeType> widths;
+    float threshold{};
+    SizeType scored_profiles{0};
+    std::vector<loki::detection::SnrHit> hits;
+};
+
+void score_pruned_fourier_tile(ComplexType* tile,
+                               SizeType coord_begin,
+                               SizeType count,
+                               void* ctx) {
+    auto& state = *static_cast<PrunedFourierScoreCtx*>(ctx);
+    state.scored_profiles += count;
+    std::vector<float> profiles(count * 2 * state.nbins);
+    loki::lane_fft::inverse_batch(tile, profiles.data(), count * 2, state.nbins,
+                                  /*nthreads=*/1);
+    loki::detection::detail::BoxcarScorer3D scorer(
+        state.nbins, state.widths.data(), state.widths.size());
+    loki::detection::detail::append_boxcar_hits(scorer, profiles.data(),
+                                                coord_begin, count,
+                                                state.threshold, state.hits);
+}
 } // namespace
 
 TEST_CASE("Two fused final levels with parent-bound pruning preserve all hits",
@@ -329,6 +354,68 @@ TEST_CASE("Two fused final levels with parent-bound pruning preserve all hits",
                                   lv.row_len, lv.row_len_prev, tile,
                                   &score_pruned_tile, &pruned_ctx,
                                   /*nthreads=*/1, kThreshold, widths);
+
+    REQUIRE(!ref_ctx.hits.empty());
+    CHECK(pruned_ctx.scored_profiles < ref_ctx.scored_profiles);
+    REQUIRE(pruned_ctx.hits.size() == ref_ctx.hits.size());
+    for (SizeType i = 0; i < ref_ctx.hits.size(); ++i) {
+        CHECK(pruned_ctx.hits[i].score_index == ref_ctx.hits[i].score_index);
+        CHECK(pruned_ctx.hits[i].snr == ref_ctx.hits[i].snr);
+    }
+}
+
+TEST_CASE("Two fused final Fourier levels with parent-bound pruning preserve "
+          "all hits",
+          "[ffa][fused][final2][prune][fourier]") {
+    const SizeType nbins               = GENERATE(SizeType{64}, SizeType{50});
+    const SizeType nbins_f             = (nbins / 2) + 1;
+    const SizeType tile                = 128;
+    const std::vector<SizeType> widths = {1, 2, 4, 8};
+    constexpr float kThreshold         = 5.0F;
+    std::mt19937 rng(42 + static_cast<unsigned>(nbins));
+    const Levels lv = make_levels(nbins, rng);
+
+    std::normal_distribution<float> noise(0.0F, 1.0F);
+    std::vector<float> level2_real(4 * lv.n2 * 2 * nbins);
+    for (SizeType s = 0; s < 4 * lv.n2; ++s) {
+        float* e = level2_real.data() + (s * 2 * nbins);
+        float* v = e + nbins;
+        for (SizeType j = 0; j < nbins; ++j) {
+            e[j] = noise(rng);
+            v[j] = 16.0F + (0.5F * std::abs(noise(rng)));
+        }
+    }
+    for (SizeType s : {SizeType{5}, SizeType{42}, SizeType{305}}) {
+        float* e = level2_real.data() + (s * 2 * nbins);
+        for (SizeType j = 10; j < 14; ++j) {
+            e[j] += 40.0F;
+        }
+    }
+    std::vector<ComplexType> level2(4 * lv.n2 * 2 * nbins_f);
+    loki::lane_fft::forward_batch(level2_real.data(), level2.data(),
+                                  4 * lv.n2 * 2, nbins, /*nthreads=*/1);
+
+    PrunedFourierScoreCtx ref_ctx{.nbins           = nbins,
+                                  .widths          = widths,
+                                  .threshold       = kThreshold,
+                                  .scored_profiles = 0,
+                                  .hits            = {}};
+    loki::core::ffa_complex_final2_tiles(
+        level2.data(), lv.coords_prev.data(), lv.coords.data(), lv.ncoords(),
+        lv.ncoords_prev(), lv.n2, nbins_f, nbins, lv.row_len, lv.row_len_prev,
+        tile, &score_pruned_fourier_tile, &ref_ctx, /*nthreads=*/1,
+        /*threshold=*/0.0F, widths);
+
+    PrunedFourierScoreCtx pruned_ctx{.nbins           = nbins,
+                                     .widths          = widths,
+                                     .threshold       = kThreshold,
+                                     .scored_profiles = 0,
+                                     .hits            = {}};
+    loki::core::ffa_complex_final2_tiles(
+        level2.data(), lv.coords_prev.data(), lv.coords.data(), lv.ncoords(),
+        lv.ncoords_prev(), lv.n2, nbins_f, nbins, lv.row_len, lv.row_len_prev,
+        tile, &score_pruned_fourier_tile, &pruned_ctx, /*nthreads=*/1,
+        kThreshold, widths);
 
     REQUIRE(!ref_ctx.hits.empty());
     CHECK(pruned_ctx.scored_profiles < ref_ctx.scored_profiles);

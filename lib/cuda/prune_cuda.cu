@@ -27,6 +27,7 @@
 #include "loki/utils/workspace.hpp"
 
 #include "lib/algorithms/prune_engine.hpp"
+#include "lib/core/transforms.hpp"
 #include "lib/cuda/cuda_utils.cuh"
 #include "lib/cuda/dynamic_cuda.cuh"
 #include "lib/cuda/ffa_cuda.cuh"
@@ -41,6 +42,30 @@
 namespace loki::algorithms {
 
 namespace {
+
+void shift_reported_leaves_epoch(std::span<double> leaves,
+                                 SizeType n_leaves,
+                                 SizeType n_params,
+                                 double delta_t_epoch) {
+    if (n_leaves == 0 || n_params < 2 || std::abs(delta_t_epoch) <= 1e-12) {
+        return;
+    }
+    constexpr SizeType kParamStride = 2U;
+    const SizeType leaves_stride    = (n_params + 2) * kParamStride;
+    std::vector<double> params(n_params);
+    for (SizeType i = 0; i < n_leaves; ++i) {
+        const SizeType leaf_offset = i * leaves_stride;
+        for (SizeType j = 0; j < n_params; ++j) {
+            params[j] = leaves[leaf_offset + (j * kParamStride)];
+        }
+        const auto [shifted, delay] =
+            core::shift_taylor_params_d_f(params, delta_t_epoch);
+        (void)delay;
+        for (SizeType j = 0; j < n_params; ++j) {
+            leaves[leaf_offset + (j * kParamStride)] = shifted[j];
+        }
+    }
+}
 
 struct ExecutionStream {
     cudaStream_t stream{nullptr};
@@ -520,6 +545,10 @@ private:
         cuda_utils::check_cuda_call(
             cudaStreamSynchronize(m_stream),
             "cudaStreamSynchronize write results failed");
+
+        const double delta_t_epoch = (0.5 * m_cfg.get_tobs()) - coord_mid.first;
+        shift_reported_leaves_epoch(leaves_report_h, n_leaves,
+                                    m_cfg.get_nparams(), delta_t_epoch);
 
         if (m_result_sink) {
             m_result_sink(pipelines::detail::EPResultPayload{
