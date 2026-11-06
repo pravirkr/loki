@@ -1315,8 +1315,10 @@ private:
         }
         // Suffix sums: merge work of all levels above idx.
         std::vector<double> merge_above(n_cands + 1, 0.0);
-        for (SizeType idx = n_cands; idx >= 1; --idx) {
-            merge_above[idx - 1] = merge_above[idx] + merge_elems[idx - 1];
+        // merge_above[idx] excludes merge_elems[idx]: with B = cands[idx],
+        // level 0 is the brute fold, so only longer segments are merged.
+        for (SizeType idx = n_cands - 1; idx >= 1; --idx) {
+            merge_above[idx - 1] = merge_above[idx] + merge_elems[idx];
         }
 
         // Beyond ~16 bins' worth of samples a larger B can no longer pay for

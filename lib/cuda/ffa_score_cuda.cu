@@ -9,6 +9,7 @@
 
 #include "lib/cuda/cuda_utils.cuh"
 #include "lib/cuda/ffa_score_device.cuh"
+#include "lib/cuda/kernel_utils.cuh"
 #include "lib/detail/error_check.hpp"
 
 namespace loki::core {
@@ -267,8 +268,8 @@ __global__ __launch_bounds__(kSerialThreads) void kernel_final_score_serial(
 
     uint32_t keep_mask = (n == kWarpSize) ? 0xFFFFFFFFU : ((1U << n) - 1U);
     if (args.threshold >= 4.0F) {
-        const uint32_t match_t   = __match_any_sync(0xFFFFFFFFU, th.i_tail);
-        const uint32_t match_h   = __match_any_sync(0xFFFFFFFFU, th.i_head);
+        const uint32_t match_t   = loki::utils::warp_match_any(th.i_tail);
+        const uint32_t match_h   = loki::utils::warp_match_any(th.i_head);
         const uint32_t rep_t     = static_cast<uint32_t>(__ffs(match_t) - 1);
         const uint32_t rep_h     = static_cast<uint32_t>(__ffs(match_h) - 1);
         const uint32_t leaders_t = __ballot_sync(0xFFFFFFFFU, lane_id == rep_t);

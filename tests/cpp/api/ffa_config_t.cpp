@@ -477,4 +477,13 @@ TEST_CASE("FFASearchConfig default bseg_brute tracks cycles at f_max",
         REQUIRE(ep_np2_cap.get_bseg_ffa() == 1024);
         REQUIRE(1024 % ep_np2_cap.get_bseg_brute() == 0);
     }
+    SECTION("direct-DFT Fourier counts merge work only above level 0") {
+        // The brute level's own merge work must not be charged to B: doing
+        // so picked B = 64 here instead of 32 (the cost model's minimum).
+        const std::vector<loki::ParamLimit> limits = {{50.0, 55.0}};
+        const loki::search::FFASearchConfig cfg(loki::SizeType{1} << 17U, 5e-4,
+                                                16, 1.0, limits, 0.2, 1.5, true,
+                                                1, 64.0);
+        REQUIRE(cfg.get_bseg_brute() == 32);
+    }
 }
