@@ -69,7 +69,8 @@ void brute_fold_ts(const float* __restrict__ ts_e,
                    SizeType nfreqs,
                    SizeType segment_len,
                    SizeType nbins,
-                   int nthreads);
+                   int nthreads,
+                   SizeType nsamps = 0);
 
 /**
  * @brief Fused time-domain brute fold + first `nlevels` frequency-only FFA
@@ -102,7 +103,8 @@ void brute_fold_ffa_fused_freq(const float* __restrict__ ts_e,
                                SizeType segment_len,
                                SizeType nbins,
                                SizeType nlevels,
-                               int nthreads);
+                               int nthreads,
+                               SizeType nsamps = 0);
 
 /**
  * @brief Working-set size, in floats, of one frequency tile of a cone band.
@@ -178,7 +180,8 @@ void ffa_cone_band_freq(const float* level_in,
                         SizeType batch_coords,
                         ConeBatchFn batch_fn,
                         void* batch_ctx,
-                        int nthreads);
+                        int nthreads,
+                        SizeType nsamps = 0);
 
 /**
  * @brief Final FFA level (time domain, accel) merged straight into a scored
@@ -203,7 +206,9 @@ void ffa_final_scored(const float* __restrict__ fold_in,
                       SizeType tile_coords,
                       ConeScoreFn score_fn,
                       void* score_ctx,
-                      int nthreads);
+                      int nthreads,
+                      float threshold                  = 0.0F,
+                      std::span<const SizeType> widths = {});
 
 /// Called on each tile of final Fourier-domain profiles (layout `[count, 2,
 /// nbins_f]`) in per-thread scratch; must be thread-safe.
@@ -234,7 +239,9 @@ void ffa_complex_final_tiles(const ComplexType* __restrict__ fold_in,
                              SizeType tile_coords,
                              ComplexTileFn tile_fn,
                              void* tile_ctx,
-                             int nthreads);
+                             int nthreads,
+                             float threshold                  = 0.0F,
+                             std::span<const SizeType> widths = {});
 
 /**
  * @brief The last two FFA levels (accel, time domain) merged straight into a
@@ -258,7 +265,9 @@ void ffa_final2_scored(const float* __restrict__ fold_in,
                        SizeType tile_coords,
                        ConeScoreFn score_fn,
                        void* score_ctx,
-                       int nthreads);
+                       int nthreads,
+                       float threshold                  = 0.0F,
+                       std::span<const SizeType> widths = {});
 
 /**
  * @brief Fourier-domain counterpart of `ffa_final2_scored`: level L-1 rows
@@ -278,7 +287,9 @@ void ffa_complex_final2_tiles(const ComplexType* __restrict__ fold_in,
                               SizeType tile_coords,
                               ComplexTileFn tile_fn,
                               void* tile_ctx,
-                              int nthreads);
+                              int nthreads,
+                              float threshold                  = 0.0F,
+                              std::span<const SizeType> widths = {});
 
 void ffa_complex_final_tiles_freq(
     const ComplexType* __restrict__ fold_in,
@@ -326,7 +337,14 @@ void ffa_complex_cone_band_freq(const ComplexType* level_in,
                                 SizeType batch_coords,
                                 ConeBatchFn batch_fn,
                                 void* batch_ctx,
-                                int nthreads);
+                                int nthreads,
+                                const float* ts_e                     = nullptr,
+                                const float* ts_v                     = nullptr,
+                                const coord::PhaseRun* runs           = nullptr,
+                                const SizeType* run_offsets           = nullptr,
+                                SizeType segment_len                  = 0,
+                                ConeBandThreadSeconds* thread_seconds = nullptr,
+                                SizeType nsamps                       = 0);
 
 /// Bytes of one phase step of the complex merges (depends on the SIMD
 /// width of the build).
@@ -353,7 +371,8 @@ void brute_fold_ts_complex(const float* __restrict__ ts_e,
                            SizeType nbins,
                            double tsamp,
                            double t_ref,
-                           int nthreads);
+                           int nthreads,
+                           SizeType nsamps = 0);
 
 void ffa_iter(const float* __restrict__ fold_in,
               float* __restrict__ fold_out,

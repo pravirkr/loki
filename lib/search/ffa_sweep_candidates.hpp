@@ -13,6 +13,7 @@
 #include "loki/common/types.hpp"
 #include "loki/search/configs.hpp"
 
+#include "lib/core/transforms.hpp"
 #include "lib/detail/error_check.hpp"
 #include "lib/detail/psr_utils.hpp"
 #include "lib/search/cands.hpp"
@@ -37,7 +38,9 @@ struct RegionDecode {
     SizeType ncoords{};
     SizeType nbins{};
     SizeType nsegments{};
-    double gflops{}; ///< FFA plus scoring cost for this chunk.
+    double
+        delta_t_epoch{}; ///< Shift from tree midpoint to observation midpoint.
+    double gflops{};     ///< FFA plus scoring cost for this chunk.
 
     /// @brief Number of raw scores this chunk produces (ncoords * n_widths).
     [[nodiscard]] SizeType get_n_scores() const noexcept {
@@ -70,6 +73,10 @@ build_region_decode_table(std::span<const search::FFASearchConfig> cfgs) {
         dec.ncoords       = plan.get_ncoords().back();
         dec.nbins         = cfg.get_nbins();
         dec.nsegments     = plan.get_nsegments().back();
+        if (dec.nsegments == 1 && cfg.get_nparams() >= 2) {
+            dec.delta_t_epoch =
+                0.5 * (cfg.get_tobs() - plan.get_tsegments().back());
+        }
 
         // Scoring cost (data arithmetic only): per bin, a prefix sum and a
         // normalisation, plus one subtract and one max per width.
@@ -242,6 +249,15 @@ inline void flush_candidates(CandidateBuffer& buf,
                 param_sets_scratch[(k * n_params) + j] =
                     psr_utils::get_param_val_at_idx(
                         dec.param_limits[j], dec.param_counts[j], param_idx);
+            }
+            if (n_params >= 2 && dec.delta_t_epoch != 0.0) {
+                const auto [shifted, delay] = core::shift_taylor_params_d_f(
+                    param_sets_scratch.subspan(k * n_params, n_params),
+                    dec.delta_t_epoch);
+                (void)delay;
+                std::ranges::copy(shifted,
+                                  param_sets_scratch.begin() +
+                                      static_cast<IndexType>(k * n_params));
             }
             width_scratch[k] =
                 static_cast<std::uint16_t>(dec.widths[width_idx]);

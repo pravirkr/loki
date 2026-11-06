@@ -179,11 +179,15 @@ __device__ __forceinline__ uint32_t tile_order(uint32_t s,
     }
     const uint32_t per_group = args.tile_rows * args.grid_cols;
     const uint32_t g         = s / per_group;
-    const uint32_t r         = s - (g * per_group);
+    uint32_t r               = s - (g * per_group);
     const uint32_t row0      = g * args.tile_rows;
     const uint32_t h         = min(args.tile_rows, args.grid_rows - row0);
-    const uint32_t f         = r / h;
-    const uint32_t a         = row0 + (r - (f * h));
+    if (h == 16U && ((r & ~127U) + 128U) <= per_group) {
+        const uint32_t x = ((r >> 3U) ^ r) & 0x0CU;
+        r ^= x | (x << 3U);
+    }
+    const uint32_t f = r / h;
+    const uint32_t a = row0 + (r - (f * h));
     return (a * args.grid_cols) + f;
 }
 

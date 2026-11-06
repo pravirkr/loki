@@ -67,12 +67,13 @@ public:
           m_device_id(device_id) {
         error_check::check(!m_freq_arr.empty(),
                            "BruteFoldCudaEngine: Frequency array is empty");
-        error_check::check(m_nsamps % m_segment_len == 0,
-                           "BruteFoldCudaEngine: Number of samples is not a "
-                           "multiple of segment length");
+        error_check::check_greater(m_nsamps, 0,
+                                   "BruteFoldCudaEngine: nsamps must be > 0");
+        error_check::check_greater(
+            m_segment_len, 0, "BruteFoldCudaEngine: segment_len must be > 0");
         cuda_utils::CudaSetDeviceGuard device_guard(m_device_id);
         m_nfreqs     = m_freq_arr.size();
-        m_nsegments  = m_nsamps / m_segment_len;
+        m_nsegments  = (m_nsamps + m_segment_len - 1) / m_segment_len;
         m_freq_arr_d = thrust::device_vector<double>(m_freq_arr);
         if constexpr (std::is_same_v<FoldType, float>) {
             // Time domain - allocate phase map
@@ -221,13 +222,13 @@ private:
             core::brute_fold_ts_cuda(
                 ts_e.data(), ts_v.data(), fold.data(),
                 thrust::raw_pointer_cast(m_phase_map_d.data()), m_nsegments,
-                m_nfreqs, m_segment_len, m_nbins, stream);
+                m_nfreqs, m_segment_len, m_nbins, stream, m_nsamps);
         } else {
             core::brute_fold_ts_complex_cuda(
                 ts_e.data(), ts_v.data(), fold.data(),
                 thrust::raw_pointer_cast(m_freq_arr_d.data()), m_nfreqs,
-                m_nsegments, m_segment_len, m_nbins_f, m_tsamp, m_t_ref,
-                stream);
+                m_nsegments, m_segment_len, m_nbins_f, m_tsamp, m_t_ref, stream,
+                m_nsamps);
         }
         spdlog::debug(
             "BruteFoldCudaEngine: Device execution complete on stream");

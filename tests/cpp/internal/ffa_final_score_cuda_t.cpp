@@ -414,4 +414,112 @@ TEST_CASE("Fused Fourier scoring matches cuFFT C2R for every nbins",
                                   static_cast<std::uint32_t>(nbins), 1);
     }
 }
+
+TEST_CASE("Fused final FFA level parent pruning preserves all passing hits",
+          "[ffa][cuda][score][prune]") {
+    if (!loki::is_available(Backend::kCUDA)) {
+        SKIP("CUDA backend not available");
+    }
+    const loki::cuda_utils::CudaSetDeviceGuard device_guard(0);
+    const SizeType nbins       = GENERATE(32, 64);
+    const int depth            = GENERATE(1, 2);
+    const SizeType grid_rows   = 64;
+    const SizeType grid_cols   = 1100;
+    const SizeType ncoords_cur = grid_rows * grid_cols;
+    const SizeType mid_rows    = grid_rows / 4;
+    const SizeType mid_cols    = (grid_cols / 2) + 8;
+    const SizeType ncoords_mid = mid_rows * mid_cols;
+    const SizeType ncoords_src = depth == 2 ? 4096 : ncoords_mid;
+    const auto widths          = geometric_widths(nbins, 8);
+    std::mt19937 rng(42);
+    LevelCoords mid(ncoords_mid, ncoords_src, nbins, false, rng);
+    LevelCoords fin(ncoords_cur, ncoords_mid, nbins, false, rng);
+    std::uniform_real_distribution<float> unif(0.0F, 1.0F);
+    std::vector<uint32_t> it(ncoords_cur);
+    std::vector<uint32_t> ih(ncoords_cur);
+    std::vector<float> st(ncoords_cur);
+    std::vector<float> sh(ncoords_cur);
+    for (SizeType a = 0; a < grid_rows; ++a) {
+        for (SizeType f = 0; f < grid_cols; ++f) {
+            const SizeType c  = (a * grid_cols) + f;
+            const SizeType ma = a / 4;
+            const SizeType mf = (f / 2) + (a % 4);
+            it[c]             = static_cast<uint32_t>((ma * mid_cols) + mf);
+            ih[c]             = static_cast<uint32_t>((ma * mid_cols) + mf + 1);
+            st[c]             = unif(rng) * static_cast<float>(nbins);
+            sh[c]             = unif(rng) * static_cast<float>(nbins);
+        }
+    }
+    fin.i_tail.assign(it.begin(), it.end());
+    fin.i_head.assign(ih.begin(), ih.end());
+    fin.s_tail.assign(st.begin(), st.end());
+    fin.s_head.assign(sh.begin(), sh.end());
+
+    const thrust::device_vector<uint32_t> widths_d(widths.begin(),
+                                                   widths.end());
+    const SizeType nscores = ncoords_cur * widths.size();
+    const float threshold  = 4.5F;
+    cudaStream_t stream    = nullptr;
+    loki::memory::DeviceCounter counter;
+
+    std::normal_distribution<float> normal(0.0F, 1.0F);
+    const SizeType stride = 2 * nbins;
+    const SizeType nseg   = SizeType{1} << static_cast<unsigned>(depth);
+    std::vector<float> source(nseg * ncoords_src * stride);
+    for (SizeType p = 0; p < nseg * ncoords_src; ++p) {
+        for (SizeType i = 0; i < nbins; ++i) {
+            source[(p * stride) + i]         = normal(rng);
+            source[(p * stride) + nbins + i] = 1.0F + (0.2F * unif(rng));
+        }
+    }
+    for (SizeType seg = 0; seg < nseg; ++seg) {
+        for (SizeType p = 0; p < ncoords_src; p += 128) {
+            source[(((seg * ncoords_src) + p) * stride) + 5] += 8.0F;
+        }
+    }
+    const thrust::device_vector<float> source_d(source.begin(), source.end());
+    const float* source_ptr = thrust::raw_pointer_cast(source_d.data());
+
+    thrust::device_vector<float> mid_d(2 * ncoords_mid * stride);
+    const float* parent_ptr = source_ptr;
+    if (depth == 2) {
+        loki::core::ffa_iter_cuda(
+            source_ptr, thrust::raw_pointer_cast(mid_d.data()), mid.accel(),
+            ncoords_mid, ncoords_src, 2, nbins, stream);
+        parent_ptr = thrust::raw_pointer_cast(mid_d.data());
+    }
+    thrust::device_vector<float> fold_d(ncoords_cur * stride);
+    loki::core::ffa_iter_cuda(
+        parent_ptr, thrust::raw_pointer_cast(fold_d.data()), fin.accel(),
+        ncoords_cur, ncoords_mid, 1, nbins, stream);
+    thrust::device_vector<float> ref_scores_d(nscores);
+    thrust::device_vector<uint32_t> ref_indices_d(nscores);
+    const SizeType n_ref = loki::detection::score_and_filter_cuda_d(
+        loki::cuda_utils::as_span(fold_d), loki::cuda_utils::as_span(widths_d),
+        loki::cuda_utils::as_span(ref_scores_d),
+        loki::cuda_utils::as_span(ref_indices_d), threshold, ncoords_cur, nbins,
+        stream, counter, 1.0F);
+
+    thrust::device_vector<float> scores_d(nscores);
+    thrust::device_vector<uint32_t> indices_d(nscores);
+    counter.reset(stream);
+    const loki::core::FFAFinalScoreArgs args{
+        .widths    = thrust::raw_pointer_cast(widths_d.data()),
+        .nwidths   = static_cast<uint32_t>(widths.size()),
+        .threshold = threshold,
+        .scores    = thrust::raw_pointer_cast(scores_d.data()),
+        .indices   = thrust::raw_pointer_cast(indices_d.data()),
+        .counter   = counter.data(),
+        .grid_rows = static_cast<uint32_t>(grid_rows),
+        .grid_cols = static_cast<uint32_t>(grid_cols),
+        .tile_rows = 16U};
+    loki::core::ffa_final_score_cuda(source_ptr, fin.accel(), mid.accel(),
+                                     ncoords_cur, ncoords_mid, ncoords_src,
+                                     depth, nbins, args, stream);
+    const SizeType n_fused = counter.value_sync(stream);
+    REQUIRE(n_ref > 0);
+    REQUIRE(n_fused == n_ref);
+    CHECK(bit_equal(collect(ref_scores_d, ref_indices_d, n_ref),
+                    collect(scores_d, indices_d, n_fused)));
+}
 #endif // LOKI_ENABLE_CUDA

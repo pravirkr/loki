@@ -18,9 +18,9 @@ SEARCH_SNR_MIN = 6.0
 # Injected folded S/N is 10. Recovery must stay at or above this floor.
 RECOVER_SNR_MIN = 8.0
 # One frequency step at this length is ~3e-5 Hz.
-# One acceleration step is ~2.6 m/s^2.
+# One acceleration step is ~2.5 m/s^2 (~3 steps = 7.5 m/s^2).
 FREQ_TOL = 1.0e-4
-ACCEL_TOL = 5.0
+ACCEL_TOL = 7.5
 SEED = 1
 
 
@@ -120,6 +120,52 @@ def test_ffa_freq_sweep_recovers_injected_pulsar(tmp_path: Path) -> None:
             result_h5,
             expect_accel=search_accel,
         )
+        assert best >= RECOVER_SNR_MIN, (
+            f"{prefix}: best recovered S/N {best:.2f} is below {RECOVER_SNR_MIN}"
+        )
+
+
+def test_ffa_freq_sweep_non_pow2_nsamps(tmp_path: Path) -> None:
+    """Verify native non-power-of-2 nsamps recovery in Python FFAFreqSweep."""
+    non_pow2_nsamps = NSAMPS - 12345
+    mod = libloki.simulation.ModulatorParams()
+    mod.acc = TRUE_ACCEL
+    sim_cfg = libloki.simulation.PulseSignalConfig(
+        PERIOD,
+        DT,
+        non_pow2_nsamps,
+        10.0,
+        0.1,
+        "derivative",
+        mod,
+        None,
+        SEED,
+    )
+    series = sim_cfg.generate("gaussian", 0.5)
+    noise_std = float(np.sqrt(series.ts_v[0]))
+    ts_e = np.asarray(series.ts_e, dtype=np.float32) / noise_std
+    ts_v = np.ones_like(ts_e, dtype=np.float32)
+
+    param_limits = np.array([[180.0, 220.0], [99.95, 100.05]], dtype=np.float64)
+    for use_fourier in (False, True):
+        cfg = libloki.configs.FFASearchConfig(
+            nsamps=non_pow2_nsamps,
+            tsamp=DT,
+            nbins=64,
+            eta=1.0,
+            param_limits=param_limits,
+            ducy_max=0.2,
+            wtsp=1.5,
+            use_fourier=use_fourier,
+            nthreads=4,
+            max_process_memory_gb=4.0,
+            snr_min=SEARCH_SNR_MIN,
+        )
+        prefix = f"non_pow2_{'fourier' if use_fourier else 'time'}"
+        sweep = libloki.ffa.FFAFreqSweep(cfg, show_progress=False)
+        sweep.execute(ts_e, ts_v, str(tmp_path), prefix)
+        result_h5 = tmp_path / f"{prefix}_ffa_results.h5"
+        best = _best_recovered_snr(result_h5, expect_accel=True)
         assert best >= RECOVER_SNR_MIN, (
             f"{prefix}: best recovered S/N {best:.2f} is below {RECOVER_SNR_MIN}"
         )

@@ -54,4 +54,32 @@ TEST_CASE("FFA CLI dry run plans with the input header", "[cli]") {
     REQUIRE(text.find("nsamps 1048576, tobs 67.11 s") != std::string::npos);
     REQUIRE(text.find("No input timeseries") == std::string::npos);
     REQUIRE(text.find("limit of 3.000 GB") != std::string::npos);
+
+    // Non-power-of-2 input is planned natively on all 100000 samples.
+    constexpr loki::SizeType kNp2Nsamps = 100000;
+    const auto np2_path                 = base / "input_np2.tim";
+    loki::io::TimeSeries(std::vector<float>(kNp2Nsamps, 0.0F),
+                         std::vector<float>(kNp2Nsamps, 1.0F), 6.4e-5)
+        .write(np2_path);
+    const auto np2_toml = base / "ffa_np2.toml";
+    {
+        std::ofstream out(np2_toml);
+        out << "[input]\n"
+            << "timeseries = \"" << np2_path.string() << "\"\n"
+            << "[search]\nf_min = 1.0\nf_max = 10.0\nnbins = 64\n"
+            << "[performance]\nnthreads = 1\nmax_process_memory_gb = 4.0\n";
+    }
+    const auto np2_log = base / "dry_run_np2.log";
+    const std::string cmd_native =
+        fmt::format(R"("{}" search ffa --config "{}" --dry-run > "{}" 2>&1)",
+                    app_path, np2_toml.string(), np2_log.string());
+    // NOLINTNEXTLINE(bugprone-command-processor): runs the built CLI on purpose
+    REQUIRE(std::system(cmd_native.c_str()) == 0);
+    {
+        std::ifstream log_np2(np2_log);
+        const std::string text_np2((std::istreambuf_iterator<char>(log_np2)),
+                                   std::istreambuf_iterator<char>());
+        INFO(text_np2);
+        REQUIRE(text_np2.find("nsamps 100000") != std::string::npos);
+    }
 }

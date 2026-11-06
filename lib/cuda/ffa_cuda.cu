@@ -593,8 +593,9 @@ private:
         auto& ws               = get_workspace();
         const SizeType nfreqs  = m_bf_freqs.size();
         const SizeType seg_len = m_ffa_plan.get_segment_lens()[0];
-        const SizeType nsegs   = m_cfg.get_nsamps() / seg_len;
+        const SizeType nsegs   = m_ffa_plan.get_nsegments()[0];
         const SizeType nbins   = m_cfg.get_nbins();
+        const SizeType nsamps  = m_cfg.get_nsamps();
         const double t_ref =
             m_is_freq_only ? 0.0 : m_ffa_plan.get_tsegments()[0] / 2.0;
         if (ws.bf_freqs_d.size() < nfreqs) {
@@ -616,7 +617,7 @@ private:
                 core::brute_fold_ts_complex_cuda(
                     ts_e_d.data(), ts_v_d.data(), init_buffer_d, freqs_d,
                     nfreqs, nsegs, seg_len, m_cfg.get_nbins_f(),
-                    m_cfg.get_tsamp(), t_ref, stream);
+                    m_cfg.get_tsamp(), t_ref, stream, nsamps);
                 return;
             }
         }
@@ -629,16 +630,16 @@ private:
                                         m_cfg.get_tsamp(), t_ref, phase_map,
                                         stream);
         if constexpr (std::is_same_v<FoldTypeCUDA, float>) {
-            core::brute_fold_segment_cuda(ts_e_d.data(), ts_v_d.data(),
-                                          phase_map, init_buffer_d, nsegs,
-                                          nfreqs, seg_len, nbins, stream);
+            core::brute_fold_segment_cuda(
+                ts_e_d.data(), ts_v_d.data(), phase_map, init_buffer_d, nsegs,
+                nfreqs, seg_len, nbins, stream, nsamps);
         } else {
             // Lossy: time-domain fold into the other buffer, then R2C.
             auto* real_temp = reinterpret_cast<float*>(temp_buffer_d);
             const SizeType fold_size_time = nsegs * nfreqs * 2 * nbins;
             core::brute_fold_segment_cuda(ts_e_d.data(), ts_v_d.data(),
                                           phase_map, real_temp, nsegs, nfreqs,
-                                          seg_len, nbins, stream);
+                                          seg_len, nbins, stream, nsamps);
             const auto nfft = fold_size_time / nbins;
             get_fft().rfft_batch(
                 cuda::std::span<float>(real_temp, fold_size_time),

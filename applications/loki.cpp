@@ -236,8 +236,6 @@ int run_simulate(double period,
     return 0;
 }
 
-enum class NsampsPolicy : std::uint8_t { kFail, kTruncate };
-
 std::string read_text_file(const std::filesystem::path& path) {
     std::ifstream in(path);
     if (!in.is_open()) {
@@ -349,25 +347,6 @@ void warn_long_masked_run(const std::optional<loki::io::PreprocessReport>& rep,
     }
 }
 
-/// The sample count a search runs on, as --nsamps-policy asks for.
-loki::SizeType power_of_two_nsamps(loki::SizeType actual_nsamps,
-                                   NsampsPolicy policy) {
-    if (std::has_single_bit(actual_nsamps)) {
-        return actual_nsamps;
-    }
-    if (policy == NsampsPolicy::kFail) {
-        throw std::invalid_argument(fmt::format(
-            "Timeseries length {} is not a power of 2; use --nsamps-policy "
-            "truncate",
-            actual_nsamps));
-    }
-    const auto pow2_nsamps = std::bit_floor(actual_nsamps);
-    SPDLOG_WARN("Timeseries length {} is not a power of 2; truncating search "
-                "to {}",
-                actual_nsamps, pow2_nsamps);
-    return pow2_nsamps;
-}
-
 struct SearchDims {
     loki::SizeType nsamps;
     double tsamp;
@@ -376,8 +355,7 @@ struct SearchDims {
 /// The sample count and interval a dry run plans with: those of the input
 /// header when the config names an input (only the header is read), else
 /// [input] nsamps / tsamp, else 2^21 samples of 64 us.
-SearchDims dry_run_dims(const loki::search::FFATomlConfig& cfg,
-                        NsampsPolicy nsamps_policy) {
+SearchDims dry_run_dims(const loki::search::FFATomlConfig& cfg) {
     if (!cfg.timeseries_path.empty()) {
         const std::filesystem::path ts_path = cfg.timeseries_path;
         if (!std::filesystem::exists(ts_path)) {
@@ -388,8 +366,7 @@ SearchDims dry_run_dims(const loki::search::FFATomlConfig& cfg,
         SPDLOG_INFO("Input header: nsamps = {}, dt = {:.6e} s, tobs = {:.2f} s",
                     info.nsamps, info.dt,
                     static_cast<double>(info.nsamps) * info.dt);
-        return {.nsamps = power_of_two_nsamps(info.nsamps, nsamps_policy),
-                .tsamp  = info.dt};
+        return {.nsamps = info.nsamps, .tsamp = info.dt};
     }
     const SearchDims dims{.nsamps = cfg.nsamps.value_or(1U << 21U),
                           .tsamp  = cfg.tsamp.value_or(6.4e-5)};
@@ -436,15 +413,14 @@ void print_ffa_plan(const loki::search::FFASearchConfig& cfg, loki::Exec exec) {
 
 int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
                    std::string_view config_toml,
-                   bool dry_run,
-                   NsampsPolicy nsamps_policy) {
+                   bool dry_run) {
     check_frequency_range(toml_cfg);
     toml_cfg.candidates.validate();
     toml_cfg.observation.validate();
     const loki::Exec exec = search_exec(toml_cfg);
 
     if (dry_run) {
-        const auto dims  = dry_run_dims(toml_cfg, nsamps_policy);
+        const auto dims  = dry_run_dims(toml_cfg);
         auto preview_cfg = toml_cfg.to_search_config(dims.nsamps, dims.tsamp);
         if (toml_cfg.candidates.enabled &&
             exec.backend == loki::Backend::kCPU) {
@@ -482,8 +458,7 @@ int run_search_ffa(const loki::search::FFATomlConfig& toml_cfg,
     if (device_init.joinable()) {
         device_init.join();
     }
-    const loki::SizeType actual_nsamps =
-        power_of_two_nsamps(ts.get_nsamps(), nsamps_policy);
+    const loki::SizeType actual_nsamps = ts.get_nsamps();
 
     const auto ffa_cfg = toml_cfg.to_search_config(actual_nsamps, ts.get_dt());
     warn_long_masked_run(loaded.report, ffa_cfg.get_bseg_brute());
@@ -915,13 +890,11 @@ prepare_ep_plan_cache(const loki::search::EPTomlConfig& toml_cfg,
 }
 
 /// `search ep`: runs the EP sweep over the timeseries and prints a summary.
-int run_search_ep(const loki::search::EPTomlConfig& toml_cfg,
-                  bool dry_run,
-                  NsampsPolicy nsamps_policy) {
+int run_search_ep(const loki::search::EPTomlConfig& toml_cfg, bool dry_run) {
     check_frequency_range(toml_cfg);
     const loki::Exec exec = search_exec(toml_cfg);
     if (dry_run) {
-        const auto dims = dry_run_dims(toml_cfg, nsamps_policy);
+        const auto dims = dry_run_dims(toml_cfg);
         const auto preview_cfg =
             toml_cfg.to_ep_search_config(dims.nsamps, dims.tsamp);
         // The plan cache is prepared as the search would prepare it, so a
@@ -933,10 +906,9 @@ int run_search_ep(const loki::search::EPTomlConfig& toml_cfg,
         return 0;
     }
 
-    auto loaded = load_search_timeseries(toml_cfg, exec);
-    auto& ts    = loaded.ts;
-    const loki::SizeType actual_nsamps =
-        power_of_two_nsamps(ts.get_nsamps(), nsamps_policy);
+    auto loaded                        = load_search_timeseries(toml_cfg, exec);
+    auto& ts                           = loaded.ts;
+    const loki::SizeType actual_nsamps = ts.get_nsamps();
     const auto ep_cfg =
         toml_cfg.to_ep_search_config(actual_nsamps, ts.get_dt());
     warn_long_masked_run(loaded.report, ep_cfg.get_bseg_brute());
@@ -1533,8 +1505,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    bool ffa_dry_run              = false;
-    std::string nsamps_policy_str = "fail";
+    bool ffa_dry_run = false;
 
     std::string ffa_config_path;
     std::string gen_ffa_config_path;
@@ -1660,9 +1631,6 @@ int main(int argc, char** argv) {
         "Use Fourier-domain FFA folding (default) or Time-domain folding");
     ffa->add_flag("--dry-run", ffa_dry_run,
                   "Validate config and memory planner without loading data");
-    ffa->add_option(
-        "--nsamps-policy", nsamps_policy_str,
-        "When nsamps is not a power of 2: fail (default) or truncate");
 
     auto* grp_perf = ffa->add_option_group("Performance & Limits");
     grp_perf->add_option(
@@ -1708,10 +1676,9 @@ int main(int argc, char** argv) {
                        "output path]")
             ->expected(0, 1);
 
-    bool ep_dry_run                  = false;
-    bool ep_plan_only                = false;
-    bool ep_no_plan_cache            = false;
-    std::string ep_nsamps_policy_str = "fail";
+    bool ep_dry_run       = false;
+    bool ep_plan_only     = false;
+    bool ep_no_plan_cache = false;
     std::string ep_plan_cache_path;
     std::string ep_backend_name;
     std::vector<SizeType> ep_ref_segs;
@@ -1911,9 +1878,6 @@ int main(int argc, char** argv) {
     ep->add_flag("--plan-only", ep_plan_only,
                  "Plan the chunks, write the plan cache and print the plan; "
                  "reads no data");
-    ep->add_option("--nsamps-policy", ep_nsamps_policy_str,
-                   "When nsamps is not a power of 2: fail (default) or "
-                   "truncate");
 
     // =========================================================================
     // Subcommand: inspect
@@ -2027,15 +1991,7 @@ int main(int argc, char** argv) {
                 config_toml = read_text_file(config_path);
             }
 
-            NsampsPolicy policy = NsampsPolicy::kFail;
-            if (nsamps_policy_str == "truncate") {
-                policy = NsampsPolicy::kTruncate;
-            } else if (nsamps_policy_str != "fail") {
-                throw std::invalid_argument(
-                    "--nsamps-policy must be fail or truncate");
-            }
-
-            return run_search_ffa(ffa_cfg, config_toml, ffa_dry_run, policy);
+            return run_search_ffa(ffa_cfg, config_toml, ffa_dry_run);
         }
 
         if (search->parsed() && ep->parsed()) {
@@ -2053,18 +2009,10 @@ int main(int argc, char** argv) {
                     "--dry-run and --plan-only are separate modes; pass one");
             }
 
-            NsampsPolicy policy = NsampsPolicy::kFail;
-            if (ep_nsamps_policy_str == "truncate") {
-                policy = NsampsPolicy::kTruncate;
-            } else if (ep_nsamps_policy_str != "fail") {
-                throw std::invalid_argument(
-                    "--nsamps-policy must be fail or truncate");
-            }
-
             if (ep_plan_only) {
                 return run_plan_ep(ep_cfg);
             }
-            return run_search_ep(ep_cfg, ep_dry_run, policy);
+            return run_search_ep(ep_cfg, ep_dry_run);
         }
     } catch (const loki::Interrupted&) {
         const int sig = loki::interrupt_signal();

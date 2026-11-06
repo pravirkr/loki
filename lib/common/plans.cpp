@@ -92,17 +92,9 @@ struct FFAPlanBase::Impl {
             const auto coords_span =
                 coords.subspan(ncoords_offset, ncoords_cur);
 
-            // Tail coordinates
             core::ffa_taylor_resolve_poly_batch(
                 param_counts[i_level], param_counts[i_level - 1],
-                m_cfg.get_param_limits(), coords_span, i_level, 0,
-                m_cfg.get_tseg_brute(), m_cfg.get_nbins(), n_params,
-                m_cfg.get_nthreads());
-
-            // Head coordinates
-            core::ffa_taylor_resolve_poly_batch(
-                param_counts[i_level], param_counts[i_level - 1],
-                m_cfg.get_param_limits(), coords_span, i_level, 1,
+                m_cfg.get_param_limits(), coords_span, i_level,
                 m_cfg.get_tseg_brute(), m_cfg.get_nbins(), n_params,
                 m_cfg.get_nthreads());
         }
@@ -298,11 +290,14 @@ private:
         dparams.resize(levels);
         dparams_act.resize(levels);
 
+        const auto nsegments_init =
+            std::bit_ceil((m_cfg.get_nsamps() + m_cfg.get_bseg_brute() - 1) /
+                          m_cfg.get_bseg_brute());
         for (SizeType i_level = 0; i_level < levels; ++i_level) {
             const auto segment_len = m_cfg.get_bseg_brute() * (1U << i_level);
             const auto tsegment =
                 static_cast<double>(segment_len) * m_cfg.get_tsamp();
-            const auto nsegments_cur    = m_cfg.get_nsamps() / segment_len;
+            const auto nsegments_cur    = nsegments_init >> i_level;
             const auto dparam_arr       = m_cfg.get_dparams(tsegment);
             const auto dparam_arr_act   = m_cfg.get_dparams_actual(tsegment);
             const auto param_grid_count = m_cfg.get_param_grid_count(tsegment);

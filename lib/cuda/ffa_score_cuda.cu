@@ -9,6 +9,7 @@
 
 #include "lib/cuda/cuda_utils.cuh"
 #include "lib/cuda/ffa_score_device.cuh"
+#include "lib/cuda/kernel_utils.cuh"
 #include "lib/detail/error_check.hpp"
 
 namespace loki::core {
@@ -40,16 +41,22 @@ struct FinalSource {
         uint32_t shift[kRows];
     };
 
+    static constexpr int kParentRows = (kDepth == 2) ? 2 : 1;
+    struct ParentRows {
+        uint32_t off[kParentRows];
+        uint32_t shift[kParentRows];
+    };
+
     __device__ __forceinline__ static uint32_t
     add_shift(uint32_t a, uint32_t b, uint32_t nbins) {
         const uint32_t s = a + b;
         return (s >= nbins) ? s - nbins : s;
     }
 
-    __device__ __forceinline__ Rows get(uint32_t icoord, uint32_t nbins) const {
+    __device__ __forceinline__ Rows get_from_th(const TailHead& th,
+                                                uint32_t nbins) const {
         Rows r{};
         const uint32_t stride = 2 * nbins;
-        const TailHead th     = final_parents.get(icoord, nbins);
         if constexpr (kDepth == 1) {
             r.off[0]   = th.i_tail * stride;
             r.off[1]   = (ncoords_src + th.i_head) * stride;
@@ -66,6 +73,39 @@ struct FinalSource {
             r.shift[1]        = add_shift(th.shift_tail, pt.shift_head, nbins);
             r.shift[2]        = add_shift(th.shift_head, ph.shift_tail, nbins);
             r.shift[3]        = add_shift(th.shift_head, ph.shift_head, nbins);
+        }
+        return r;
+    }
+
+    __device__ __forceinline__ Rows get(uint32_t icoord, uint32_t nbins) const {
+        return get_from_th(final_parents.get(icoord, nbins), nbins);
+    }
+
+    __device__ __forceinline__ ParentRows get_parent(uint32_t seg,
+                                                     uint32_t parent_icoord,
+                                                     uint32_t nbins) const {
+        ParentRows r{};
+        const uint32_t stride = 2 * nbins;
+        if constexpr (kDepth == 1) {
+            r.off[0]   = ((seg * ncoords_src) + parent_icoord) * stride;
+            r.shift[0] = 0U;
+        } else {
+            const TailHead p = prev_parents.get(parent_icoord, nbins);
+            r.off[0]         = (((2 * seg) * ncoords_src) + p.i_tail) * stride;
+            r.off[1]   = ((((2 * seg) + 1) * ncoords_src) + p.i_head) * stride;
+            r.shift[0] = p.shift_tail;
+            r.shift[1] = p.shift_head;
+        }
+        return r;
+    }
+
+    __device__ __forceinline__ static ParentRows
+    bcast_parent(const ParentRows& mine, int src) {
+        ParentRows r;
+#pragma unroll
+        for (int i = 0; i < kParentRows; ++i) {
+            r.off[i]   = __shfl_sync(0xFFFFFFFF, mine.off[i], src);
+            r.shift[i] = __shfl_sync(0xFFFFFFFF, mine.shift[i], src);
         }
         return r;
     }
@@ -110,71 +150,28 @@ struct FinalSource {
             v = (a[nbins] + b[nbins]) + (c[nbins] + d[nbins]);
         }
     }
-};
 
-// Final-level profiles [p0, p0 + nprof) into shared memory: e and v rows
-// (kNormalized false) or the normalized bins fold_norm_bin(e * s, v * s)
-// (kNormalized true, one row). Each warp takes 32 consecutive profiles;
-// lane i resolves the rows of profile i (coalesced coordinate loads), which
-// are then broadcast, and kUnroll profiles are loaded per step.
-template <bool kNormalized, class Src>
-__device__ __forceinline__ void
-merge_final_to_smem(const float* __restrict__ fold,
-                    const Src& src,
-                    const FFAFinalScoreArgs& args,
-                    uint32_t p0,
-                    uint32_t nprof,
-                    uint32_t nbins,
-                    float fold_scale,
-                    float* __restrict__ s_e,
-                    float* __restrict__ s_v,
-                    uint32_t pitch) {
-    constexpr uint32_t kUnroll = 16;
-    const uint32_t warp_id     = threadIdx.x / kWarpSize;
-    const uint32_t lane_id     = threadIdx.x % kWarpSize;
-    const uint32_t nwarps      = blockDim.x / kWarpSize;
-    for (uint32_t base = warp_id * kWarpSize; base < nprof;
-         base += nwarps * kWarpSize) {
-        const uint32_t n = min(kWarpSize, nprof - base);
-        typename Src::Rows mine{};
-        if (lane_id < n) {
-            mine = src.get(tile_order(p0 + base + lane_id, args), nbins);
-        }
-        for (uint32_t q = 0; q < n; q += kUnroll) {
-            typename Src::Rows rows[kUnroll];
-#pragma unroll
-            for (uint32_t u = 0; u < kUnroll; ++u) {
-                rows[u] = Src::bcast(mine, static_cast<int>(min(q + u, n - 1)));
-            }
-            for (uint32_t ibin = lane_id; ibin < nbins; ibin += kWarpSize) {
-                // All loads of kUnroll profiles before any store; a profile
-                // past n repeats the last one and is not stored.
-                float e[kUnroll];
-                float v[kUnroll];
-#pragma unroll
-                for (uint32_t u = 0; u < kUnroll; ++u) {
-                    src.eval(fold, rows[u], ibin, nbins, e[u], v[u]);
-                }
-#pragma unroll
-                for (uint32_t u = 0; u < kUnroll; ++u) {
-                    if (q + u < n) {
-                        const uint32_t at = ((base + q + u) * pitch) + ibin;
-                        if constexpr (kNormalized) {
-                            s_e[at] = fold_norm_bin(e[u] * fold_scale,
-                                                    v[u] * fold_scale);
-                        } else {
-                            s_e[at] = e[u];
-                            s_v[at] = v[u];
-                        }
-                    }
-                }
-            }
+    __device__ __forceinline__ void eval_parent(const float* __restrict__ fold,
+                                                const ParentRows& r,
+                                                uint32_t n,
+                                                uint32_t nbins,
+                                                float& e,
+                                                float& v) const {
+        const float* a = fold + r.off[0] + rot(n, r.shift[0], nbins, bin_mask);
+        if constexpr (kDepth == 1) {
+            e = a[0];
+            v = a[nbins];
+        } else {
+            const float* b =
+                fold + r.off[1] + rot(n, r.shift[1], nbins, bin_mask);
+            e = a[0] + b[0];
+            v = a[nbins] + b[nbins];
         }
     }
-}
+};
 
-// Warp-regime variant of merge_final_to_smem: one warp per profile (blocks
-// hold a few large profiles), lanes over bins, e and v rows.
+// Warp-regime variant: one warp per profile (blocks hold a few large profiles),
+// lanes over bins, e and v rows.
 template <class Src>
 __device__ __forceinline__ void
 merge_final_to_smem_warp(const float* __restrict__ fold,
@@ -242,20 +239,194 @@ __global__ __launch_bounds__(kSerialThreads) void kernel_final_score_serial(
     const uint32_t pitch = nbins + 1;
     float* s_x           = smem;
 
-    const uint32_t p0    = args.profile_begin + (blockIdx.x * kSerialProfiles);
-    const uint32_t nprof = min(kSerialProfiles, ncoords_cur - p0);
-    merge_final_to_smem</*kNormalized=*/true>(fold_in, src, args, p0, nprof,
-                                              nbins, args.fold_scale, s_x,
-                                              nullptr, pitch);
     load_width_consts(args, static_cast<int>(nbins), s_wc);
     __syncthreads();
-    if (threadIdx.x >= nprof) {
+
+    const uint32_t p0    = args.profile_begin + (blockIdx.x * kSerialProfiles);
+    const uint32_t nprof = min(kSerialProfiles, ncoords_cur - p0);
+    const uint32_t warp_id = threadIdx.x / kWarpSize;
+    const uint32_t lane_id = threadIdx.x % kWarpSize;
+    const uint32_t base    = warp_id * kWarpSize;
+    if (base >= nprof) {
+        return;
+    }
+    const uint32_t n        = min(kWarpSize, nprof - base);
+    float* s_warp           = s_x + (base * pitch);
+    const uint32_t my_coord = (lane_id < n)
+                                  ? tile_order(p0 + base + lane_id, args)
+                                  : tile_order(p0 + base, args);
+    TailHead th{};
+    if (lane_id < n) {
+        th = src.final_parents.get(my_coord, nbins);
+    }
+    const uint32_t t0 = __shfl_sync(0xFFFFFFFFU, th.i_tail, 0);
+    const uint32_t h0 = __shfl_sync(0xFFFFFFFFU, th.i_head, 0);
+    if (lane_id >= n) {
+        th.i_tail = t0;
+        th.i_head = h0;
+    }
+
+    uint32_t keep_mask = (n == kWarpSize) ? 0xFFFFFFFFU : ((1U << n) - 1U);
+    if (args.threshold >= 4.0F) {
+        const uint32_t match_t   = loki::utils::warp_match_any(th.i_tail);
+        const uint32_t match_h   = loki::utils::warp_match_any(th.i_head);
+        const uint32_t rep_t     = static_cast<uint32_t>(__ffs(match_t) - 1);
+        const uint32_t rep_h     = static_cast<uint32_t>(__ffs(match_h) - 1);
+        const uint32_t leaders_t = __ballot_sync(0xFFFFFFFFU, lane_id == rep_t);
+        const uint32_t leaders_h = __ballot_sync(0xFFFFFFFFU, lane_id == rep_h);
+        const auto nt            = static_cast<uint32_t>(__popc(leaders_t));
+        const auto nh            = static_cast<uint32_t>(__popc(leaders_h));
+        const uint32_t np        = nt + nh;
+        if (np <= 16U && (np * 2U) <= n) {
+            const auto my_tp =
+                static_cast<uint32_t>(__popc(leaders_t & ((1U << rep_t) - 1U)));
+            const auto my_hp =
+                nt +
+                static_cast<uint32_t>(__popc(leaders_h & ((1U << rep_h) - 1U)));
+            auto* s_prows = reinterpret_cast<typename Src::ParentRows*>(s_warp);
+            if (lane_id == rep_t) {
+                s_prows[my_tp] = src.get_parent(0U, th.i_tail, nbins);
+            }
+            if (lane_id == rep_h) {
+                s_prows[my_hp] = src.get_parent(1U, th.i_head, nbins);
+            }
+            __syncwarp();
+            typename Src::ParentRows my_pr{};
+            if (lane_id < np) {
+                my_pr = s_prows[lane_id];
+            }
+            __syncwarp();
+
+            typename Src::ParentRows prows[16];
+#pragma unroll
+            for (uint32_t u = 0; u < 16; ++u) {
+                prows[u] =
+                    Src::bcast_parent(my_pr, static_cast<int>(min(u, np - 1U)));
+            }
+            for (uint32_t ibin = lane_id; ibin < nbins; ibin += kWarpSize) {
+                float ep[16];
+                float vp[16];
+#pragma unroll
+                for (uint32_t u = 0; u < 16; ++u) {
+                    if (u < np) {
+                        src.eval_parent(fold_in, prows[u], ibin, nbins, ep[u],
+                                        vp[u]);
+                    }
+                }
+#pragma unroll
+                for (uint32_t u = 0; u < 16; ++u) {
+                    if (u < np) {
+                        s_warp[(u * pitch) + ibin] = ep[u] * args.fold_scale;
+                        s_warp[((u + 16) * pitch) + ibin] =
+                            vp[u] * args.fold_scale;
+                    }
+                }
+            }
+            __syncwarp();
+
+            float u_p    = 0.0F;
+            float n_p    = 0.0F;
+            float vmin_p = 0.0F;
+            float vmax_p = 0.0F;
+            if (lane_id < np) {
+                float* ep       = s_warp + (lane_id * pitch);
+                const float* vp = s_warp + ((lane_id + 16) * pitch);
+                float running   = 0.0F;
+                float abs_e     = 0.0F;
+                vmin_p          = cuda::std::numeric_limits<float>::max();
+                vmax_p          = 0.0F;
+#pragma unroll 8
+                for (int i = 0; i < static_cast<int>(nbins); ++i) {
+                    const float e_val = ep[i];
+                    const float v_val = vp[i];
+                    running += e_val;
+                    ep[i] = running;
+                    abs_e += fabsf(e_val);
+                    vmin_p = fminf(vmin_p, v_val);
+                    vmax_p = fmaxf(vmax_p, v_val);
+                }
+                u_p       = cuda::std::numeric_limits<float>::lowest();
+                float hbm = 0.0F;
+                score_prefixed_row_serial<NW>(
+                    ep, running, static_cast<int>(nbins), s_wc, args.nwidths,
+                    [&](uint32_t iw, float snr) {
+                        u_p = fmaxf(u_p, snr);
+                        hbm = fmaxf(hbm, fmaxf(s_wc.h[iw], s_wc.b[iw]));
+                    });
+                n_p = hbm * abs_e;
+            }
+            const float u_t =
+                __shfl_sync(0xFFFFFFFFU, u_p, static_cast<int>(my_tp));
+            const float n_t =
+                __shfl_sync(0xFFFFFFFFU, n_p, static_cast<int>(my_tp));
+            const float vmin_t =
+                __shfl_sync(0xFFFFFFFFU, vmin_p, static_cast<int>(my_tp));
+            const float vmax_t =
+                __shfl_sync(0xFFFFFFFFU, vmax_p, static_cast<int>(my_tp));
+            const float u_h =
+                __shfl_sync(0xFFFFFFFFU, u_p, static_cast<int>(my_hp));
+            const float n_h =
+                __shfl_sync(0xFFFFFFFFU, n_p, static_cast<int>(my_hp));
+            const float vmin_h =
+                __shfl_sync(0xFFFFFFFFU, vmin_p, static_cast<int>(my_hp));
+            const float vmax_h =
+                __shfl_sync(0xFFFFFFFFU, vmax_p, static_cast<int>(my_hp));
+            const float tot_vmin = vmin_t + vmin_h;
+            const float tot_vmax = vmax_t + vmax_h;
+            bool keep            = (lane_id < n);
+            if (tot_vmin > 0.0F && tot_vmax >= tot_vmin) {
+                const float inv_vmin = rsqrtf(tot_vmin);
+                const float inv_vmax = rsqrtf(tot_vmax);
+                const float mu       = 0.5F * (inv_vmin + inv_vmax);
+                const float eps      = 0.5F * (inv_vmin - inv_vmax);
+                const float ub       = (mu * (u_t + u_h)) + (eps * (n_t + n_h));
+                keep = keep && (ub >= (args.threshold - 1.0e-3F));
+            }
+            keep_mask = __ballot_sync(0xFFFFFFFFU, keep);
+            if (keep_mask == 0U) {
+                return;
+            }
+            __syncwarp();
+        }
+    }
+
+    constexpr uint32_t kUnroll = 16;
+    typename Src::Rows mine{};
+    if (lane_id < n) {
+        mine = src.get_from_th(th, nbins);
+    }
+    for (uint32_t q = 0; q < n; q += kUnroll) {
+        if (((keep_mask >> q) & 0xFFFFU) == 0U) {
+            continue;
+        }
+        typename Src::Rows rows[kUnroll];
+#pragma unroll
+        for (uint32_t u = 0; u < kUnroll; ++u) {
+            rows[u] = Src::bcast(mine, static_cast<int>(min(q + u, n - 1)));
+        }
+        for (uint32_t ibin = lane_id; ibin < nbins; ibin += kWarpSize) {
+            float e[kUnroll];
+            float v[kUnroll];
+#pragma unroll
+            for (uint32_t u = 0; u < kUnroll; ++u) {
+                src.eval(fold_in, rows[u], ibin, nbins, e[u], v[u]);
+            }
+#pragma unroll
+            for (uint32_t u = 0; u < kUnroll; ++u) {
+                if (q + u < n) {
+                    s_warp[((q + u) * pitch) + ibin] = fold_norm_bin(
+                        e[u] * args.fold_scale, v[u] * args.fold_scale);
+                }
+            }
+        }
+    }
+    __syncwarp();
+    if (((keep_mask >> lane_id) & 1U) == 0U) {
         return;
     }
 
-    score_row_serial<NW>(
-        s_x + (threadIdx.x * pitch), static_cast<int>(nbins), s_wc,
-        tile_order(p0 + threadIdx.x, args) * args.nwidths, args);
+    score_row_serial<NW>(s_warp + (lane_id * pitch), static_cast<int>(nbins),
+                         s_wc, my_coord * args.nwidths, args);
 }
 
 // Warp-per-profile scoring (kernel_snr_boxcar_warp): a warp scan in chunks of

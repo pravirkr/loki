@@ -140,3 +140,75 @@ def test_ep_freq_sweep_recovers_with_five_parameters(tmp_path: Path) -> None:
     assert best >= RECOVER_SNR_MIN, (
         f"best score near the pulsar {best:.2f} is below {RECOVER_SNR_MIN}"
     )
+
+
+@pytest.mark.parametrize("backend", ["cpu", "cuda"])
+def test_ep_freq_sweep_recovers_non_power_of_two_nsamps(
+    tmp_path: Path, backend: str
+) -> None:
+    """Non-power-of-2 nsamps aligns reported EP leaves to 0.5 * T_obs."""
+    if backend == "cuda" and not _cuda_built():
+        pytest.skip("CUDA backend not built")
+    nsamps_np2 = 100_000
+    true_accel = 400.0
+    mod = libloki.simulation.ModulatorParams()
+    mod.acc = true_accel
+    sig_cfg = libloki.simulation.PulseSignalConfig(
+        1.0 / TRUE_FREQ,
+        DT,
+        nsamps_np2,
+        INJECTED_SNR,
+        0.1,
+        "derivative",
+        mod,
+        None,
+        SEED,
+    )
+    series = sig_cfg.generate("gaussian", 0.5)
+    noise_std = float(np.sqrt(series.ts_v[0]))
+    ts_e = np.asarray(series.ts_e, dtype=np.float32) / noise_std
+    ts_v = np.ones_like(ts_e, dtype=np.float32)
+
+    param_limits = np.array([[385.0, 415.0], [142.0, 142.6]], dtype=np.float64)
+    cfg = libloki.configs.PulsarSearchConfig(
+        nsamps=nsamps_np2,
+        tsamp=DT,
+        nbins=32,
+        eta=1.0,
+        param_limits=param_limits,
+        ducy_max=0.3,
+        use_fourier=False,
+        nthreads=1,
+        max_process_memory_gb=4.0,
+        bseg_brute=1024,
+        bseg_ffa=16384,
+        prune_poly_order=2,
+    )
+    sweep = libloki.prune.EPFreqSweep(
+        cfg,
+        min_pd=0.5,
+        show_progress=False,
+        ref_segs=[4],
+        backend=backend,
+    )
+    sweep.execute(ts_e, ts_v, str(tmp_path), f"np2_{backend}")
+    result_h5 = tmp_path / f"np2_{backend}_ep_results.h5"
+
+    # Without the 0.5 * T_tree -> 0.5 * T_obs epoch shift, a=400 m/s^2 over
+    # delta_t = -0.994 s shifts f by 1.89e-4 Hz > 1 / T_obs (1.56e-4 Hz).
+    freq_tol_np2 = 1.0 / (nsamps_np2 * DT)
+    best = 0.0
+    with h5py.File(result_h5, "r") as handle:
+        for chunk in handle["chunks"].values():
+            for run in chunk["runs"].values():
+                scores = np.asarray(run["scores"][:], dtype=np.float64)
+                accels = np.asarray(run["param_sets"][:, 0, 0], dtype=np.float64)
+                freqs = np.asarray(run["param_sets"][:, 1, 0], dtype=np.float64)
+                near = (np.abs(freqs - TRUE_FREQ) <= freq_tol_np2) & (
+                    np.abs(accels - true_accel) <= 10.0
+                )
+                if np.any(near):
+                    best = max(best, float(scores[near].max()))
+    assert best >= RECOVER_SNR_MIN, (
+        f"{backend}: best score at 0.5 * T_obs {best:.2f} is below {RECOVER_SNR_MIN}"
+    )

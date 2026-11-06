@@ -407,4 +407,21 @@ __device__ __forceinline__ void load_block_cooperative_map_device(
     __syncthreads();
 }
 
+// Lanes of the warp holding the same @p value (__match_any_sync, sm_70+;
+// the same mask from 32 shuffles on older GPUs). Whole warp only.
+__device__ __forceinline__ unsigned warp_match_any(uint32_t value) {
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 700
+    return __match_any_sync(0xFFFFFFFFU, value);
+#else
+    unsigned peers = 0;
+#pragma unroll
+    for (int src = 0; src < 32; ++src) {
+        if (__shfl_sync(0xFFFFFFFFU, value, src) == value) {
+            peers |= 1U << static_cast<unsigned>(src);
+        }
+    }
+    return peers;
+#endif
+}
+
 } // namespace loki::utils
