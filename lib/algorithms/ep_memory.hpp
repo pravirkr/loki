@@ -73,7 +73,8 @@ constexpr SizeType kEPBatchSizeCuda = SizeType{1} << 16U;
 /// 11: ring capacity from the margin-inflated live forecast, rounded up to a
 ///     multiple of kEPRingGranularity (was bit_ceil).
 /// 12: final winning-width reporting, uint32 per surviving CPU leaf.
-constexpr std::uint32_t kEPMemoryModelVersion = 12U;
+/// 13: CPU Fourier phase-step table included in transient FFA bytes.
+constexpr std::uint32_t kEPMemoryModelVersion = 13U;
 
 /// Worst-case size of the per-run harvest store (see PruneRFIConfig).
 /// Normalised: all fields are zero/false when harvesting is disabled.
@@ -472,7 +473,7 @@ template <SupportedFoldType FoldType>
 SizeType ep_ffa_transient_bytes(const EPMemoryContext& ctx,
                                 const plans::FFAPlan<FoldType>& plan) {
     if (ctx.kind != EPMemoryKind::kCuda) {
-        return 0;
+        return cpu_phase_step_table_bytes(plan);
     }
     const SizeType nfreqs  = plan.get_param_counts().front().back();
     const SizeType seg_len = plan.get_segment_lens().front();
@@ -533,7 +534,7 @@ SizeType ep_fixed_bytes(const EPMemoryContext& ctx,
                ep_input_bytes(ctx.nsamps) + ffa_transient_bytes;
     }
     return ep_shared_bytes<FoldType>(ctx.nparams, buffer_size, coord_size) +
-           ep_input_bytes(ctx.nsamps);
+           ep_input_bytes(ctx.nsamps) + ffa_transient_bytes;
 }
 
 [[nodiscard]] inline double ep_total_gb(int n_workers,

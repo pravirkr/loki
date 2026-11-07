@@ -55,7 +55,7 @@ namespace {
     return f;
 }
 
-constexpr std::string_view kCacheVersion = "1.19.0";
+constexpr std::string_view kCacheVersion = "1.20.0";
 
 /// Threshold-scheme simulation of the planner. The seeds are fixed: the
 /// scheme sets the chunking, so plans of one configuration must not change
@@ -119,7 +119,13 @@ double calculate_max_drift(const search::PulsarSearchConfig& cfg) {
         return 0.0;
     }
     const auto param_limits = cfg.get_param_limits();
-    const auto t_half       = cfg.get_tobs() / 2.0;
+    const SizeType bseg_ffa = cfg.get_bseg_ffa();
+    const SizeType n_segs_active =
+        bseg_ffa > 0 ? (cfg.get_nsamps() + bseg_ffa - 1) / bseg_ffa : 0;
+    const auto t_half =
+        std::max(cfg.get_tobs(),
+                 static_cast<double>(n_segs_active) * cfg.get_tseg_ffa()) /
+        2.0;
     if (cfg.get_nparams() == 2) {
         const auto max_accel = std::max(std::abs(param_limits[0].min),
                                         std::abs(param_limits[0].max));
@@ -258,7 +264,9 @@ public:
          std::optional<SizeType> n_runs,
          const std::optional<std::vector<SizeType>>& ref_segs,
          const Exec& exec)
-        : m_base_cfg(std::move(cfg)),
+        : m_base_cfg(cfg.has_explicit_nsegments()
+                         ? std::move(cfg)
+                         : cfg.with_ep_default_nsegments()),
           m_min_pd(min_pd),
           m_poly_basis(poly_basis),
           m_ref_ducy(ref_ducy),
@@ -282,9 +290,10 @@ public:
         // Every coarse region uses the same FFA segmentation for this cfg.
         const plans::FFAPlan<FoldType> initial_plan(m_base_cfg);
         if (!m_n_runs && !m_ref_segs) {
-            m_n_runs = initial_plan.get_nsegments().back();
+            m_n_runs = initial_plan.get_nsegments_ref_pool();
         }
-        (void)utils::determine_ref_segs(initial_plan.get_nsegments().back(),
+        (void)utils::determine_ref_segs(initial_plan.get_nsegments_ref_pool(
+                                            m_n_runs, m_ref_segs.has_value()),
                                         m_n_runs, m_ref_segs);
         if (plan_cache_file && std::filesystem::exists(*plan_cache_file)) {
             load_cache(*plan_cache_file);
@@ -341,9 +350,11 @@ public:
         file.createAttribute("dts_native_max_bins", kDtsNativeMaxBins);
         file.createAttribute("dts_min_pulse_bins", kDtsMinPulseBins);
         const plans::FFAPlan<FoldType> run_plan(m_base_cfg);
-        file.createDataSet("ref_segs", utils::determine_ref_segs(
-                                           run_plan.get_nsegments().back(),
-                                           m_n_runs, m_ref_segs));
+        file.createDataSet(
+            "ref_segs",
+            utils::determine_ref_segs(run_plan.get_nsegments_ref_pool(
+                                          m_n_runs, m_ref_segs.has_value()),
+                                      m_n_runs, m_ref_segs));
         file.createAttribute("nsamps", m_base_cfg.get_nsamps());
         file.createAttribute("tsamp", m_base_cfg.get_tsamp());
         file.createAttribute("f_min", m_base_cfg.get_f_min());
@@ -369,6 +380,10 @@ public:
         file.createAttribute("p_orb_min", m_base_cfg.get_p_orb_min());
         file.createAttribute("m_c_max", m_base_cfg.get_m_c_max());
         file.createAttribute("m_p_min", m_base_cfg.get_m_p_min());
+        file.createAttribute("propagator_significance",
+                             m_base_cfg.get_propagator_significance());
+        file.createAttribute("validation_significance",
+                             m_base_cfg.get_validation_significance());
         file.createAttribute(
             "use_conservative_tile",
             static_cast<uint8_t>(m_base_cfg.get_use_conservative_tile()));
@@ -523,11 +538,16 @@ public:
         check_attr_size("prune_poly_order", m_base_cfg.get_prune_poly_order());
         // Only five parameters use the orbit limits, and a five-parameter
         // cache always records them.
-        if (m_base_cfg.get_nparams() == 5) {
+        if (m_base_cfg.get_nparams() == 5 ||
+            m_poly_basis == "circular_taylor") {
             check_attr_double("p_orb_min", m_base_cfg.get_p_orb_min());
             check_attr_double("m_c_max", m_base_cfg.get_m_c_max());
             check_attr_double("m_p_min", m_base_cfg.get_m_p_min());
         }
+        check_attr_double("propagator_significance",
+                          m_base_cfg.get_propagator_significance());
+        check_attr_double("validation_significance",
+                          m_base_cfg.get_validation_significance());
 
         uint8_t file_use_fourier{};
         file.getAttribute("use_fourier").read(file_use_fourier);
@@ -609,7 +629,8 @@ public:
         file.getDataSet("ref_segs").read(cached_runs);
         const plans::FFAPlan<FoldType> run_plan(m_base_cfg);
         const auto requested_runs = utils::determine_ref_segs(
-            run_plan.get_nsegments().back(), m_n_runs, m_ref_segs);
+            run_plan.get_nsegments_ref_pool(m_n_runs, m_ref_segs.has_value()),
+            m_n_runs, m_ref_segs);
         for (const auto ref_seg : requested_runs) {
             if (std::ranges::find(cached_runs, ref_seg) == cached_runs.end()) {
                 throw std::invalid_argument(
@@ -1172,7 +1193,7 @@ private:
             .f_end     = f_end,
             .nbins     = nbins,
             .eta       = eta,
-            .nsegments = rep_plan.get_nsegments().back(),
+            .nsegments = rep_plan.get_nsegments_active(),
             .design    = std::move(design),
         };
     }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <map>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -56,6 +57,15 @@ public:
     [[nodiscard]] std::span<const SizeType> get_segment_lens() const noexcept;
     /// @brief Number of segments for each level.
     [[nodiscard]] std::span<const SizeType> get_nsegments() const noexcept;
+    /// @brief Number of final FFA segments holding data (for EP pruning).
+    /// All of them unless the brute segments are so short that the
+    /// zero-filled tail (< 2^L samples) spans a whole final segment.
+    [[nodiscard]] SizeType get_nsegments_active() const noexcept;
+    /// @brief Number of final FFA segments eligible as EP reference segments
+    /// (excludes a <50% populated trailing tail segment when possible).
+    [[nodiscard]] SizeType
+    get_nsegments_ref_pool(std::optional<SizeType> n_runs = std::nullopt,
+                           bool explicit_ref_segs = false) const noexcept;
     /// @brief Segment lengths in seconds.
     [[nodiscard]] std::span<const double> get_tsegments() const noexcept;
     /// @brief Number of coordinates for each level.

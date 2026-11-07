@@ -116,3 +116,24 @@ TEMPLATE_TEST_CASE("EP memory model matches the reserved harvest store",
     }
     CHECK(ep_harvest_bytes<TestType>(2, kNBins, EPHarvestBound{}) == 0);
 }
+
+TEST_CASE("CPU EP memory model counts Fourier phase-step tables in transient",
+          "[ep_memory]") {
+    const std::vector<loki::ParamLimit> limits{
+        {.min = -10.0, .max = 10.0},
+        {.min = 140.0, .max = 145.0},
+    };
+    const loki::search::PulsarSearchConfig cfg_time(
+        1U << 16U, 64e-6, 32, 1.0, limits, 0.3, 1.5, /*use_fourier=*/false, 1,
+        4.0, 2.0, 1024, 64, 1024, 8);
+    const loki::search::PulsarSearchConfig cfg_fourier(
+        1U << 16U, 64e-6, 32, 1.0, limits, 0.3, 1.5, /*use_fourier=*/true, 1,
+        4.0, 2.0, 1024, 64, 1024, 8);
+    const loki::plans::FFAPlan<float> plan_time(cfg_time);
+    const loki::plans::FFAPlan<ComplexType> plan_fourier(cfg_fourier);
+    const loki::algorithms::detail::EPMemoryContext ctx{};
+    CHECK(loki::algorithms::detail::ep_ffa_transient_bytes(ctx, plan_time) ==
+          0U);
+    CHECK(loki::algorithms::detail::ep_ffa_transient_bytes(ctx, plan_fourier) >
+          0U);
+}

@@ -103,7 +103,7 @@ def make_config(
         nthreads=1,
         max_process_memory_gb=memory_gb,
         bseg_brute=nsamps // 8192,
-        bseg_ffa=nsamps // 128,
+        nsegments=128,
         prune_poly_order=3,
     )
 

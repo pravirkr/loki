@@ -8,6 +8,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -39,6 +40,7 @@
 #include "lib/detail/utils.hpp"
 #include "lib/pipelines/ep_freq_sweep_engine.hpp"
 #include "lib/pipelines/ep_sweep_common.hpp"
+#include "lib/search/ep_support.hpp"
 
 namespace loki::pipelines {
 
@@ -94,7 +96,9 @@ public:
         std::optional<SizeType> n_runs,
         const std::optional<std::vector<SizeType>>& ref_segs,
         int device_id)
-        : m_base_cfg(std::move(cfg)),
+        : m_base_cfg(cfg.has_explicit_nsegments()
+                         ? std::move(cfg)
+                         : cfg.with_ep_default_nsegments()),
           m_min_pd(min_pd),
           m_poly_basis(poly_basis),
           m_ref_ducy(ref_ducy),
@@ -204,13 +208,8 @@ public:
         sweep_timer.start();
         cuda_utils::CudaSetDeviceGuard device_guard(m_device_id);
 
-        if (ts_e.size() != m_base_cfg.get_nsamps() ||
-            ts_v.size() != m_base_cfg.get_nsamps()) {
-            throw std::invalid_argument(fmt::format(
-                "EPFreqSweep::execute: ts_e and ts_v must have nsamps={} "
-                "samples, got {} and {}",
-                m_base_cfg.get_nsamps(), ts_e.size(), ts_v.size()));
-        }
+        std::tie(ts_e, ts_v) = search::detail::ep_input_series(
+            m_base_cfg, ts_e, ts_v, "EPFreqSweep::execute");
         check_device_has_room();
 
         std::error_code ec;

@@ -1,7 +1,9 @@
 #pragma once
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <source_location>
 
 #include <cuda/std/cmath>
@@ -422,6 +424,78 @@ __device__ __forceinline__ unsigned warp_match_any(uint32_t value) {
     }
     return peers;
 #endif
+}
+
+/// Output proxy for cub::DeviceScan::ExclusiveSum that stores
+/// leaf_output_offset and simultaneously writes the total branched count
+/// (last_offset + last_count) to *total_out on the final leaf.
+struct BranchOffsetProxy {
+    uint32_t* __restrict__ offsets;
+    const uint32_t* __restrict__ counts;
+    uint32_t* __restrict__ total_out;
+    uint32_t idx;
+    uint32_t last_idx;
+
+    __device__ __forceinline__ BranchOffsetProxy& operator=(uint32_t val) {
+        offsets[idx] = val;
+        if (idx == last_idx) {
+            *total_out = val + counts[idx];
+        }
+        return *this;
+    }
+};
+
+struct BranchOffsetOutIter {
+    using iterator_category = std::random_access_iterator_tag;
+    using value_type        = uint32_t;
+    using difference_type   = ptrdiff_t;
+    using pointer           = uint32_t*;
+    using reference         = BranchOffsetProxy;
+
+    uint32_t* __restrict__ offsets;
+    const uint32_t* __restrict__ counts;
+    uint32_t* __restrict__ total_out;
+    uint32_t idx;
+    uint32_t last_idx;
+
+    __host__ __device__ __forceinline__ BranchOffsetProxy
+    operator[](ptrdiff_t n) const {
+        return {offsets, counts, total_out,
+                static_cast<uint32_t>(static_cast<ptrdiff_t>(idx) + n),
+                last_idx};
+    }
+    __host__ __device__ __forceinline__ BranchOffsetProxy operator*() const {
+        return {offsets, counts, total_out, idx, last_idx};
+    }
+    __host__ __device__ __forceinline__ BranchOffsetOutIter
+    operator+(ptrdiff_t n) const {
+        return {offsets, counts, total_out,
+                static_cast<uint32_t>(static_cast<ptrdiff_t>(idx) + n),
+                last_idx};
+    }
+};
+
+// Branching fast path (every leaf has one child): copy the leaves, the
+// identity origins and an all-valid mask in one pass. A template so that
+// every .cu including this header can instantiate it without duplicate
+// kernel symbols at link time (`inline` on a __global__ is not portable).
+template <typename LeafT>
+__global__ void kernel_copy_unbranched(const LeafT* __restrict__ leaves_tree,
+                                       LeafT* __restrict__ leaves_branch,
+                                       uint32_t* __restrict__ leaves_origins,
+                                       uint8_t* __restrict__ validation_mask,
+                                       uint32_t n_leaves,
+                                       uint32_t leaves_stride) {
+    const uint32_t tid    = (blockIdx.x * blockDim.x) + threadIdx.x;
+    const size_t n_values = static_cast<size_t>(n_leaves) * leaves_stride;
+    for (size_t i = tid; i < n_values;
+         i += static_cast<size_t>(gridDim.x) * blockDim.x) {
+        leaves_branch[i] = leaves_tree[i];
+    }
+    if (tid < n_leaves) {
+        leaves_origins[tid]  = tid;
+        validation_mask[tid] = 1;
+    }
 }
 
 } // namespace loki::utils

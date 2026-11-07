@@ -37,7 +37,7 @@ def config(fourier: bool, *, threads: int = 2):
         nthreads=threads,
         max_process_memory_gb=4.0,
         bseg_brute=1024,
-        bseg_ffa=N // 8,
+        nsegments=8,
         prune_poly_order=2,
         snr_min=7,
     )

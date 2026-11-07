@@ -160,3 +160,44 @@ TEMPLATE_TEST_CASE("WorldTree::add_initial_scattered matches add_initial",
             kNUsed));
     }
 }
+
+TEST_CASE("WorldTree overflow threshold uses descending median and keeps "
+          "score == threshold",
+          "[world_tree]") {
+    constexpr SizeType kCapacity = 8;
+    constexpr SizeType kNParams  = 1;
+    constexpr SizeType kNBins    = 4;
+    constexpr SizeType kBatch    = 8;
+
+    WorldTree<float> tree(kCapacity, kNParams, kNBins, kBatch);
+    const auto leaves_stride = tree.get_leaves_stride();
+    const auto folds_stride  = tree.get_folds_stride();
+
+    const float exact_thresh =
+        std::nextafter(35.0F, std::numeric_limits<float>::max());
+    // The tree holds [10, 20, 30, exact_thresh, 50, 60]; a batch of
+    // [25, 35, 45, 55] makes 10 candidates for 8 slots. Sorted descending:
+    // [60, 55, 50, 45, exact_thresh, 35, 30, 25, 20, 10]; the median (rank 5,
+    // 35) bumped by one ULP is exact_thresh, so the leaves scoring exactly
+    // the threshold survive in the tree (>=) as they do in the batch:
+    // 3 tree leaves (exact_thresh, 50, 60) and 2 batch leaves (45, 55).
+    std::vector<double> batch1_leaves(6 * leaves_stride, 1.0);
+    std::vector<float> batch1_folds(6 * folds_stride, 1.0F);
+    std::vector<float> batch1_scores{10.0F,        20.0F, 30.0F,
+                                     exact_thresh, 50.0F, 60.0F};
+    std::vector<SizeType> batch1_indices{0, 1, 2, 3, 4, 5};
+
+    tree.prepare_in_place_update();
+    REQUIRE(tree.add_batch_scattered(batch1_leaves, batch1_folds, batch1_scores,
+                                     batch1_indices, 5.0F, 6) == 5.0F);
+
+    std::vector<double> batch2_leaves(4 * leaves_stride, 2.0);
+    std::vector<float> batch2_folds(4 * folds_stride, 2.0F);
+    std::vector<float> batch2_scores{25.0F, 35.0F, 45.0F, 55.0F};
+    std::vector<SizeType> batch2_indices{0, 1, 2, 3};
+
+    const float new_thresh = tree.add_batch_scattered(
+        batch2_leaves, batch2_folds, batch2_scores, batch2_indices, 5.0F, 4);
+    REQUIRE(new_thresh == exact_thresh);
+    REQUIRE(tree.get_size() == 5);
+}

@@ -64,7 +64,7 @@ def _search_config(
         nthreads=1,
         max_process_memory_gb=4.0,
         bseg_brute=1024,
-        bseg_ffa=NSAMPS // 8,
+        nsegments=8,
         prune_poly_order=2,
         **orbit,
     )
@@ -142,11 +142,18 @@ def test_ep_freq_sweep_recovers_with_five_parameters(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.parametrize("poly_basis", ["taylor", "chebyshev"])
 @pytest.mark.parametrize("backend", ["cpu", "cuda"])
 def test_ep_freq_sweep_recovers_non_power_of_two_nsamps(
-    tmp_path: Path, backend: str
+    tmp_path: Path, backend: str, poly_basis: str
 ) -> None:
-    """Non-power-of-2 nsamps aligns reported EP leaves to 0.5 * T_obs."""
+    """Non-power-of-2 nsamps: EP takes the full series and recovers the pulsar.
+
+    EP keeps whole segments only: 100000 samples are 64 brute segments of
+    1562, so it analyses the first 99968 (8 segments of 12496) and reports
+    at their midpoint. Both polynomial bases must recover the injected
+    parameters there.
+    """
     if backend == "cuda" and not _cuda_built():
         pytest.skip("CUDA backend not built")
     nsamps_np2 = 100_000
@@ -181,21 +188,26 @@ def test_ep_freq_sweep_recovers_non_power_of_two_nsamps(
         nthreads=1,
         max_process_memory_gb=4.0,
         bseg_brute=1024,
-        bseg_ffa=16384,
+        nsegments=8,
         prune_poly_order=2,
     )
     sweep = libloki.prune.EPFreqSweep(
         cfg,
         min_pd=0.5,
+        poly_basis=poly_basis,
         show_progress=False,
         ref_segs=[4],
         backend=backend,
     )
-    sweep.execute(ts_e, ts_v, str(tmp_path), f"np2_{backend}")
-    result_h5 = tmp_path / f"np2_{backend}_ep_results.h5"
+    prefix = f"np2_{backend}_{poly_basis}"
+    assert cfg.nsamps_input == nsamps_np2
+    assert cfg.nsamps == 99_968
+    assert cfg.bseg_ffa == 12_496
+    sweep.execute(ts_e, ts_v, str(tmp_path), prefix)
+    result_h5 = tmp_path / f"{prefix}_ep_results.h5"
 
-    # Without the 0.5 * T_tree -> 0.5 * T_obs epoch shift, a=400 m/s^2 over
-    # delta_t = -0.994 s shifts f by 1.89e-4 Hz > 1 / T_obs (1.56e-4 Hz).
+    # The analysed midpoint is 16 samples (~1 ms) before the input midpoint,
+    # a frequency offset of ~2e-7 Hz at a=400 m/s^2, far below 1 / T_obs.
     freq_tol_np2 = 1.0 / (nsamps_np2 * DT)
     best = 0.0
     with h5py.File(result_h5, "r") as handle:
@@ -210,5 +222,6 @@ def test_ep_freq_sweep_recovers_non_power_of_two_nsamps(
                 if np.any(near):
                     best = max(best, float(scores[near].max()))
     assert best >= RECOVER_SNR_MIN, (
-        f"{backend}: best score at 0.5 * T_obs {best:.2f} is below {RECOVER_SNR_MIN}"
+        f"{backend}/{poly_basis}: best score near the injection {best:.2f} is below "
+        f"{RECOVER_SNR_MIN}"
     )

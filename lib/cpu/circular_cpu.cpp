@@ -407,7 +407,7 @@ SizeType circ_taylor_validate_batch(std::span<double> leaves_branch,
                                      "leaves_branch size mismatch");
 
     const double omega_max_sq = std::pow(2.0 * std::numbers::pi / p_orb_min, 2);
-    std::vector<bool> mask_keep(n_leaves, false);
+    SizeType write_idx        = 0;
 
     for (SizeType i = 0; i < n_leaves; ++i) {
         const SizeType lo   = i * kLeavesStride;
@@ -424,33 +424,23 @@ SizeType circ_taylor_validate_batch(std::span<double> leaves_branch,
         const bool is_physical_snap = (-snap * accel) > 0.0;
         const bool snap_unphysical =
             is_sig_snap && is_sig_accel && !is_physical_snap;
+        if (snap_unphysical) {
+            continue; // kill outright
+        }
         const bool snap_region =
             is_sig_snap && is_sig_accel && is_physical_snap;
-        if (snap_unphysical) {
-            mask_keep[i] = false; // kill outright
-            continue;
-        }
-        if (!snap_region) {
-            mask_keep[i] = true; // hole region — always preserve
-            continue;
-        }
-        // snap_region: apply physical validity checks
-        const double omega_sq = -snap / accel;
-        const double limit_accel =
-            x_mass_const * std::pow(omega_sq, kTwoThirds);
+        if (snap_region) {
+            // snap_region: apply physical validity checks
+            const double omega_sq = -snap / accel;
+            const double limit_accel =
+                x_mass_const * std::pow(omega_sq, kTwoThirds);
 
-        const bool valid_omega = omega_sq < omega_max_sq;
-        // |d2| < x * omega^(4/3)
-        const bool valid_accel = std::abs(accel) <= limit_accel;
-
-        mask_keep[i] = valid_omega && valid_accel;
-    }
-
-    // Compact arrays in-place
-    SizeType write_idx = 0;
-    for (SizeType i = 0; i < n_leaves; ++i) {
-        if (!mask_keep[i]) {
-            continue;
+            const bool valid_omega = omega_sq < omega_max_sq;
+            // |d2| < x * omega^(4/3)
+            const bool valid_accel = std::abs(accel) <= limit_accel;
+            if (!valid_omega || !valid_accel) {
+                continue;
+            }
         }
         if (write_idx != i) {
             std::copy_n(leaves_branch.begin() +
@@ -458,12 +448,10 @@ SizeType circ_taylor_validate_batch(std::span<double> leaves_branch,
                         kLeavesStride,
                         leaves_branch.begin() +
                             static_cast<IndexType>(write_idx * kLeavesStride));
-            // Copy origin
             leaves_origins[write_idx] = leaves_origins[i];
         }
         ++write_idx;
     }
-    // write_idx is the new number of valid leaves
     return write_idx;
 }
 

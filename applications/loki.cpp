@@ -34,6 +34,7 @@
 #include "loki/algorithms/regions.hpp"
 #include "loki/common/backend.hpp"
 #include "loki/common/interrupt.hpp"
+#include "loki/common/plans.hpp"
 #include "loki/common/progress.hpp"
 #include "loki/common/types.hpp"
 #include "loki/io/candidate_file.hpp"
@@ -142,7 +143,8 @@ template <typename TomlConfig>
 void record_provenance(const std::filesystem::path& result_file,
                        TomlConfig cfg,
                        loki::SizeType nsamps,
-                       double tsamp) {
+                       double tsamp,
+                       std::string_view config_toml = {}) {
     if (!std::filesystem::exists(result_file)) {
         return;
     }
@@ -154,6 +156,20 @@ void record_provenance(const std::filesystem::path& result_file,
                          .command_line     = run_command_line(),
                          .loki_version     = LOKI_VERSION,
                      });
+    if (!config_toml.empty()) {
+        HighFive::File file(result_file.string(), HighFive::File::ReadWrite);
+        const std::string text(config_toml);
+        if (!file.hasAttribute("config_toml")) {
+            file.createAttribute("config_toml", text);
+        }
+        if (file.exist("search")) {
+            auto search = file.getGroup("search");
+            if (!search.hasAttribute("config_toml")) {
+                search.createAttribute("config_toml", text);
+            }
+        }
+        file.flush();
+    }
 }
 
 std::string lower_copy(std::string text) {
@@ -699,7 +715,8 @@ ep_candidate_planning_config(const loki::search::EPTomlConfig& config,
 void plan_and_print_ep(const loki::search::EPTomlConfig& toml_cfg,
                        const loki::search::PulsarSearchConfig& input_cfg,
                        const std::optional<std::filesystem::path>& cache_path,
-                       loki::Exec exec) {
+                       loki::Exec exec,
+                       bool force_replan = false) {
     const auto cfg = ep_candidate_planning_config(toml_cfg, input_cfg, exec);
     // The same worker count the sweep uses, so the cache matches it. The GPU
     // sweep prunes its runs on one worker.
@@ -707,24 +724,30 @@ void plan_and_print_ep(const loki::search::EPTomlConfig& toml_cfg,
         cfg.get_nthreads(), toml_cfg.n_runs, toml_cfg.ref_segs);
     const SizeType workers =
         exec.backend == loki::Backend::kCPU ? n_workers : SizeType{1};
+    const auto load_path = force_replan ? std::nullopt : cache_path;
     if (cfg.get_use_fourier()) {
         const loki::algorithms::EPRegionPlanner<loki::ComplexType> planner(
             cfg, toml_cfg.min_pd, toml_cfg.poly_basis, toml_cfg.ref_ducy,
-            cache_path, {}, n_workers, toml_cfg.n_runs, toml_cfg.ref_segs,
-            exec);
+            load_path, {}, n_workers, toml_cfg.n_runs, toml_cfg.ref_segs, exec);
+        if (force_replan && cache_path.has_value()) {
+            planner.save_cache(*cache_path);
+        }
         print_ep_plan(planner, workers, cache_path);
     } else {
         const loki::algorithms::EPRegionPlanner<float> planner(
             cfg, toml_cfg.min_pd, toml_cfg.poly_basis, toml_cfg.ref_ducy,
-            cache_path, {}, n_workers, toml_cfg.n_runs, toml_cfg.ref_segs,
-            exec);
+            load_path, {}, n_workers, toml_cfg.n_runs, toml_cfg.ref_segs, exec);
+        if (force_replan && cache_path.has_value()) {
+            planner.save_cache(*cache_path);
+        }
         print_ep_plan(planner, workers, cache_path);
     }
 }
 
 /// `search ep --plan-only`: plans the chunks, writes the plan cache and prints
 /// the plan. No timeseries is read, so the sample count comes from the config.
-int run_plan_ep(const loki::search::EPTomlConfig& toml_cfg) {
+int run_plan_ep(loki::search::EPTomlConfig toml_cfg,
+                bool clamp_default_runs = false) {
     check_frequency_range(toml_cfg);
     const loki::Exec exec = search_exec(toml_cfg);
     if (!toml_cfg.nsamps.has_value() || !toml_cfg.tsamp.has_value()) {
@@ -735,6 +758,11 @@ int run_plan_ep(const loki::search::EPTomlConfig& toml_cfg) {
     }
     const auto cfg =
         toml_cfg.to_ep_search_config(*toml_cfg.nsamps, *toml_cfg.tsamp);
+    if (clamp_default_runs && toml_cfg.n_runs.has_value()) {
+        const loki::plans::FFAPlanBase plan_base(cfg);
+        toml_cfg.n_runs =
+            std::min(*toml_cfg.n_runs, plan_base.get_nsegments_ref_pool());
+    }
     const auto cache_path = toml_cfg.plan_cache.value_or(
         std::filesystem::path(toml_cfg.outdir) /
         fmt::format("{}_ep_plan.h5", toml_cfg.prefix));
@@ -743,7 +771,7 @@ int run_plan_ep(const loki::search::EPTomlConfig& toml_cfg) {
                 "nsamps={}, nbins={}, backend={}",
                 cfg.get_f_min(), cfg.get_f_max(), cfg.get_nsamps(),
                 cfg.get_nbins(), loki::to_string(exec.backend));
-    plan_and_print_ep(toml_cfg, cfg, cache_path, exec);
+    plan_and_print_ep(toml_cfg, cfg, cache_path, exec, /*force_replan=*/true);
     return 0;
 }
 
@@ -757,6 +785,7 @@ void print_ep_summary(const std::filesystem::path& result_file) {
     }
     try {
         const HighFive::File h5(result_file.string(), HighFive::File::ReadOnly);
+        std::vector<std::pair<std::string, std::string>> rows;
         if (h5.hasAttribute("n_candidates")) {
             std::uint64_t detections = 0;
             std::uint64_t selected   = 0;
@@ -766,6 +795,9 @@ void print_ep_summary(const std::filesystem::path& result_file) {
                         detections);
             SPDLOG_INFO("Selected EP candidates                  : {}",
                         selected);
+            rows.emplace_back("Detections above snr_min",
+                              std::to_string(detections));
+            rows.emplace_back("Selected candidates", std::to_string(selected));
         }
         std::vector<std::string> param_names;
         if (h5.hasAttribute("param_names")) {
@@ -808,12 +840,56 @@ void print_ep_summary(const std::filesystem::path& result_file) {
                     }
                 }
             }
+            rows.emplace_back("Runs pruned",
+                              fmt::format("{} ({} leaves)", n_runs, n_leaves));
         }
 
-        std::vector<std::pair<std::string, std::string>> rows;
-        rows.emplace_back("Runs pruned",
-                          fmt::format("{} ({} leaves)", n_runs, n_leaves));
-        if (found) {
+        if (h5.exist("candidates/snr")) {
+            const auto snr_dset  = h5.getDataSet("candidates/snr");
+            const auto dims      = snr_dset.getDimensions();
+            const size_t n_cands = dims.empty() ? 0UL : dims[0];
+            if (n_cands > 0) {
+                float top_snr           = std::numeric_limits<float>::lowest();
+                size_t top_idx          = 0;
+                constexpr size_t kChunk = 65536;
+                for (size_t offset = 0; offset < n_cands; offset += kChunk) {
+                    const size_t count = std::min(kChunk, n_cands - offset);
+                    std::vector<float> snrs(count);
+                    snr_dset.select({offset}, {count}).read(snrs);
+                    const auto max_it = std::ranges::max_element(snrs);
+                    if (max_it != snrs.end() && *max_it > top_snr) {
+                        top_snr = *max_it;
+                        top_idx = offset + static_cast<size_t>(std::distance(
+                                               snrs.begin(), max_it));
+                    }
+                }
+                rows.emplace_back(
+                    "Top candidate SNR",
+                    fmt::format("{:.2f} (candidate #{})", top_snr, top_idx));
+                if (h5.exist("candidates/param_sets") && n_params > 0) {
+                    const auto p_dset = h5.getDataSet("candidates/param_sets");
+                    const auto p_dims = p_dset.getDimensions();
+                    if (p_dims.size() == 2 && p_dims[0] == n_cands &&
+                        p_dims[1] >= n_params) {
+                        std::vector<double> top_params(p_dims[1]);
+                        p_dset.select({top_idx, 0}, {1, p_dims[1]})
+                            .read_raw(top_params.data());
+                        std::string p_str;
+                        for (SizeType pi = 0; pi < n_params; ++pi) {
+                            if (pi > 0) {
+                                p_str += ", ";
+                            }
+                            p_str += fmt::format("{}={:.6f}", param_names[pi],
+                                                 top_params[pi]);
+                        }
+                        rows.emplace_back("Top candidate parameters",
+                                          fmt::format("[{}]", p_str));
+                    }
+                }
+            } else {
+                rows.emplace_back("Top candidate", "none above snr_min");
+            }
+        } else if (found) {
             const auto run    = h5.getGroup("chunks")
                                     .getGroup(top_chunk)
                                     .getGroup("runs")
@@ -852,15 +928,16 @@ std::optional<std::filesystem::path>
 prepare_ep_plan_cache(const loki::search::EPTomlConfig& toml_cfg,
                       const loki::search::PulsarSearchConfig& cfg,
                       loki::Exec exec) {
-    if (toml_cfg.plan_cache || !toml_cfg.use_plan_cache) {
-        return toml_cfg.plan_cache;
+    if (!toml_cfg.plan_cache.has_value() && !toml_cfg.use_plan_cache) {
+        return std::nullopt;
     }
-    const auto path    = std::filesystem::path(toml_cfg.outdir) /
-                         fmt::format("{}_ep_plan.h5", toml_cfg.prefix);
+    const auto path = toml_cfg.plan_cache.value_or(
+        std::filesystem::path(toml_cfg.outdir) /
+        fmt::format("{}_ep_plan.h5", toml_cfg.prefix));
     const auto workers = loki::algorithms::ep_sweep_n_workers(
         cfg.get_nthreads(), toml_cfg.n_runs, toml_cfg.ref_segs);
-    // An implicit cache that no longer matches the configuration is replanned;
-    // planning errors themselves propagate.
+    // A cache that no longer matches the configuration is replanned and
+    // overwritten; planning errors themselves propagate.
     if (std::filesystem::exists(path)) {
         try {
             const loki::algorithms::EPRegionPlanner<FoldType> cached(
@@ -868,7 +945,7 @@ prepare_ep_plan_cache(const loki::search::EPTomlConfig& toml_cfg,
                 path, {}, workers, toml_cfg.n_runs, toml_cfg.ref_segs, exec);
             return path;
         } catch (const std::exception& error) {
-            SPDLOG_WARN("Automatic EP plan cache '{}' is stale, replanning: {}",
+            SPDLOG_WARN("EP plan cache '{}' is stale, replanning: {}",
                         path.string(), error.what());
         }
     }
@@ -890,13 +967,21 @@ prepare_ep_plan_cache(const loki::search::EPTomlConfig& toml_cfg,
 }
 
 /// `search ep`: runs the EP sweep over the timeseries and prints a summary.
-int run_search_ep(const loki::search::EPTomlConfig& toml_cfg, bool dry_run) {
+int run_search_ep(loki::search::EPTomlConfig toml_cfg,
+                  std::string_view config_toml,
+                  bool dry_run,
+                  bool clamp_default_runs = false) {
     check_frequency_range(toml_cfg);
     const loki::Exec exec = search_exec(toml_cfg);
     if (dry_run) {
         const auto dims = dry_run_dims(toml_cfg);
         const auto preview_cfg =
             toml_cfg.to_ep_search_config(dims.nsamps, dims.tsamp);
+        if (clamp_default_runs && toml_cfg.n_runs.has_value()) {
+            const loki::plans::FFAPlanBase plan_base(preview_cfg);
+            toml_cfg.n_runs =
+                std::min(*toml_cfg.n_runs, plan_base.get_nsegments_ref_pool());
+        }
         // The plan cache is prepared as the search would prepare it, so a
         // search after the dry run reuses it.
         plan_and_print_ep(toml_cfg, preview_cfg,
@@ -911,6 +996,11 @@ int run_search_ep(const loki::search::EPTomlConfig& toml_cfg, bool dry_run) {
     const loki::SizeType actual_nsamps = ts.get_nsamps();
     const auto ep_cfg =
         toml_cfg.to_ep_search_config(actual_nsamps, ts.get_dt());
+    if (clamp_default_runs && toml_cfg.n_runs.has_value()) {
+        const loki::plans::FFAPlanBase plan_base(ep_cfg);
+        toml_cfg.n_runs =
+            std::min(*toml_cfg.n_runs, plan_base.get_nsegments_ref_pool());
+    }
     warn_long_masked_run(loaded.report, ep_cfg.get_bseg_brute());
 
     const std::filesystem::path outdir_path = toml_cfg.outdir;
@@ -958,7 +1048,8 @@ int run_search_ep(const loki::search::EPTomlConfig& toml_cfg, bool dry_run) {
 
     const auto result_file =
         outdir_path / fmt::format("{}_ep_results.h5", toml_cfg.prefix);
-    record_provenance(result_file, toml_cfg, actual_nsamps, ts.get_dt());
+    record_provenance(result_file, toml_cfg, actual_nsamps, ts.get_dt(),
+                      config_toml);
     print_ep_summary(result_file);
     return 0;
 }
@@ -1649,6 +1740,8 @@ int main(int argc, char** argv) {
     grp_perf->add_option(
         "--max-passing-candidates", ffa_cfg.max_passing_candidates,
         "Maximum candidate buffer capacity (default: 4194304)");
+    grp_perf->add_option("--bseg-brute", ffa_cfg.bseg_brute,
+                         "Minimum brute-force fold segment length in samples");
 
     // Always listed; a build without the chosen backend rejects it at run
     // time with the list of available backends.
@@ -1691,6 +1784,12 @@ int main(int argc, char** argv) {
                           "Output directory for the results file");
     ep_grp_io->add_option("-p,--prefix", ep_cfg.prefix,
                           "Prefix for the results file");
+    ep_grp_io->add_option("--dm", ep_cfg.observation.dm,
+                          "Override single-trial dispersion measure");
+    ep_grp_io->add_option("--start-mjd", ep_cfg.observation.start_mjd,
+                          "Override MJD of the first sample");
+    ep_grp_io->add_option("--barycentric", ep_cfg.observation.barycentric,
+                          "Override barycentric/topocentric timing frame");
     ep_grp_io->add_flag("--preprocess,!--no-preprocess", ep_cfg.preprocess,
                         "Enable/disable preprocessing of the raw timeseries");
     ep_grp_io
@@ -1732,12 +1831,6 @@ int main(int argc, char** argv) {
     ep_grp_range->add_option("--jerk-max", ep_cfg.jerk_max,
                              "Maximum jerk in m/s^3");
 
-    ep->add_option("--dm", ep_cfg.observation.dm,
-                   "Override single-trial dispersion measure");
-    ep->add_option("--start-mjd", ep_cfg.observation.start_mjd,
-                   "Override MJD of the first sample");
-    ep->add_option("--barycentric", ep_cfg.observation.barycentric,
-                   "Override barycentric/topocentric timing frame");
     auto* ep_grp_candidates = ep->add_option_group("Candidate processing");
     ep_grp_candidates->add_flag(
         "--candidates,!--no-candidates", ep_cfg.candidates.enabled,
@@ -1864,6 +1957,12 @@ int main(int argc, char** argv) {
     ep_grp_perf->add_option(
         "--max-passing-candidates", ep_cfg.max_passing_candidates,
         "Maximum candidate buffer capacity (default: 4194304)");
+    ep_grp_perf->add_option(
+        "--nsegments", ep_cfg.nsegments,
+        "Segments the pruning starts from, a power of 2 (default: 128)");
+    ep_grp_perf->add_option(
+        "--bseg-brute", ep_cfg.bseg_brute,
+        "Minimum brute-force fold segment length in samples");
     ep_grp_perf
         ->add_option("--backend", ep_backend_name,
                      "Execution backend: cpu or cuda (default: cpu)")
@@ -2009,10 +2108,28 @@ int main(int argc, char** argv) {
                     "--dry-run and --plan-only are separate modes; pass one");
             }
 
-            if (ep_plan_only) {
-                return run_plan_ep(ep_cfg);
+            std::string config_toml;
+            std::filesystem::path config_path;
+            if (!ep_config_path.empty()) {
+                config_path = ep_config_path;
+            } else if (cfg_arg.has_value()) {
+                config_path = *cfg_arg;
             }
-            return run_search_ep(ep_cfg, ep_dry_run);
+            if (!config_path.empty() && std::filesystem::exists(config_path)) {
+                config_toml = read_text_file(config_path);
+            }
+            bool clamp_default_runs = false;
+            // Neither the config nor the command line chose the runs.
+            if (!ep_cfg.n_runs.has_value() && !ep_cfg.ref_segs.has_value()) {
+                ep_cfg.n_runs      = 16;
+                clamp_default_runs = true;
+            }
+
+            if (ep_plan_only) {
+                return run_plan_ep(ep_cfg, clamp_default_runs);
+            }
+            return run_search_ep(ep_cfg, config_toml, ep_dry_run,
+                                 clamp_default_runs);
         }
     } catch (const loki::Interrupted&) {
         const int sig = loki::interrupt_signal();

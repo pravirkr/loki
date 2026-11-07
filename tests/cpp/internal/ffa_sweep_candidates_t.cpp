@@ -290,7 +290,8 @@ TEST_CASE("A real multi-chunk sweep is unaffected by accumulator capacity",
             /*nthreads=*/1, /*max_process_memory_gb=*/4.0,
             /*octave_scale=*/2.0, /*nbins_max=*/256,
             /*nbins_min_lossy_bf=*/64, /*bseg_brute=*/std::nullopt,
-            /*bseg_ffa=*/std::nullopt, /*snr_min=*/1.0, max_passing_candidates);
+            /*nsegments=*/std::nullopt, /*snr_min=*/1.0,
+            max_passing_candidates);
         FFAFreqSweep sweep(cfg, /*show_progress=*/false);
         const auto outdir = std::filesystem::temp_directory_path();
         sweep.execute(ts_e, ts_v, outdir, prefix);
@@ -351,14 +352,15 @@ TEST_CASE("Candidates decode against their own chunk's width set",
 TEST_CASE("Non-power-of-2 accelerated FFAFreqSweep shifts candidates to true "
           "observation midpoint",
           "[ffa_sweep_candidates][nsamps]") {
-    // Choose kNsamps = 20000 and bseg_brute = 128 at dt = 1 ms so:
+    // Choose kNsamps = 20000 and bseg_brute = 79 at dt = 1 ms so:
     // - true observation is 20.0 s (midpoint 10.0 s),
-    // - padded tree is 256 * 128 = 32768 samples = 32.768 s (midpoint 16.384
-    // s),
-    // - epoch shift delta_t_epoch = -6.384 s shifts f0 by 2.14e-3 Hz (~2.25
-    // bins).
+    // - the tree is 256 brute segments of ceil(20000 / 256) = 79 samples,
+    //   20224 samples = 20.224 s (midpoint 10.112 s),
+    // - epoch shift delta_t_epoch = -0.112 s, a shift of f0 by 3.8e-5 Hz.
+    // Longer brute segments (157 or 625 samples) bias this accelerated
+    // signal by ~2.5 frequency bins whatever the padding.
     constexpr SizeType kNsamps     = 20000;
-    constexpr SizeType kBsegBrute  = 128;
+    constexpr SizeType kBsegBrute  = 79;
     constexpr double kTsamp        = 1.0e-3;
     constexpr double kTobs         = static_cast<double>(kNsamps) * kTsamp;
     constexpr double kMidObs       = 0.5 * kTobs;
@@ -391,7 +393,7 @@ TEST_CASE("Non-power-of-2 accelerated FFAFreqSweep shifts candidates to true "
         /*ducy_max=*/0.2, /*wtsp=*/1.5, /*use_fourier=*/false,
         /*nthreads=*/2, /*max_process_memory_gb=*/4.0,
         /*octave_scale=*/2.0, /*nbins_max=*/128,
-        /*nbins_min_lossy_bf=*/32, kBsegBrute, /*bseg_ffa=*/std::nullopt,
+        /*nbins_min_lossy_bf=*/32, kBsegBrute, /*nsegments=*/std::nullopt,
         /*snr_min=*/8.0, /*max_passing_candidates=*/100000);
 
     FFAFreqSweep sweep(cfg, /*show_progress=*/false);
@@ -409,9 +411,9 @@ TEST_CASE("Non-power-of-2 accelerated FFAFreqSweep shifts candidates to true "
     const double got_acc  = res.param_sets[(best_row * 2) + 0];
     const double got_freq = res.param_sets[(best_row * 2) + 1];
 
-    // Without the delta_t_epoch shift (-6.384 s), got_freq would be shifted by
-    // kTrueAcc * 6.384 / c * kTrueFreq = 2.14e-3 Hz, whereas with the shift it
-    // recovers kTrueFreq within one frequency bin (~9.5e-4 Hz).
+    // With the delta_t_epoch shift it recovers kTrueFreq within one
+    // frequency bin (~9.5e-4 Hz).
+    REQUIRE(cfg.get_bseg_brute() == 79U);
     REQUIRE(std::abs(got_acc - kTrueAcc) < 1000.0);
     REQUIRE(std::abs(got_freq - kTrueFreq) < 1.0e-3);
 }

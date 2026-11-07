@@ -44,6 +44,11 @@ void bind_plans(py::module_& m) {
                                [](const FFAPlanBase& self) {
                                    return as_pyarray_ref(self.get_nsegments());
                                })
+        .def_property_readonly("nsegments_active",
+                               &FFAPlanBase::get_nsegments_active)
+        .def("nsegments_ref_pool", &FFAPlanBase::get_nsegments_ref_pool,
+             py::arg("n_runs")            = std::nullopt,
+             py::arg("explicit_ref_segs") = false)
         .def_property_readonly("tsegments",
                                [](const FFAPlanBase& self) {
                                    return as_pyarray_ref(self.get_tsegments());

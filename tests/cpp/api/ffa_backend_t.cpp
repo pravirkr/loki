@@ -244,8 +244,11 @@ TEST_CASE("snr_boxcar_2d and snr_boxcar_2d_max CPU vs CUDA parity",
 
 TEST_CASE("FFA non-power-of-2 nsamps matches zero-padded reference and CUDA",
           "[ffa][backend][nsamps]") {
+    // bseg_brute 128 is a minimum: 10000 samples are 64 brute segments of
+    // ceil(10000 / 64) = 157, the same tree as 10048 samples with the last
+    // 48 zero-filled.
     constexpr SizeType kNsamps       = 10000;
-    constexpr SizeType kNsampsPadded = 16384;
+    constexpr SizeType kNsampsPadded = 10048;
     constexpr SizeType kBsegBrute    = 128;
     constexpr double kTsamp          = 1.0e-3;
 
@@ -283,6 +286,8 @@ TEST_CASE("FFA non-power-of-2 nsamps matches zero-padded reference and CUDA",
                 compute_ffa_scores(ts_e_pad, ts_v_pad, cfg_pad, /*quiet=*/true,
                                    /*show_progress=*/false, Exec::cpu(2));
 
+            REQUIRE(cfg_np2.get_bseg_brute() == 157U);
+            REQUIRE(cfg_pad.get_bseg_brute() == 157U);
             REQUIRE(scores_np2.size() == scores_pad.size());
             for (SizeType i = 0; i < scores_np2.size(); ++i) {
                 REQUIRE(scores_np2[i] == Approx(scores_pad[i]).margin(1.0e-5F));

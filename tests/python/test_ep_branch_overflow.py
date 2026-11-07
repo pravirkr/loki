@@ -56,7 +56,7 @@ def _config() -> libloki.configs.PulsarSearchConfig:
         use_fourier=True,
         nthreads=1,
         bseg_brute=NSAMPS // NSEG // 16,
-        bseg_ffa=NSAMPS // NSEG,
+        nsegments=NSEG,
         prune_poly_order=3,
     )
 

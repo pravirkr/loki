@@ -62,7 +62,7 @@ TEST_CASE("FFASearchConfig standard construction and getters",
         /*nbins_max=*/1024,
         /*nbins_min_lossy_bf=*/64,
         /*bseg_brute=*/32,
-        /*bseg_ffa=*/64,
+        /*nsegments=*/16384,
         /*snr_min=*/6.0,
         /*max_passing_candidates=*/1000000,
         /*use_boxcar_kadane=*/false);
@@ -97,7 +97,7 @@ TEST_CASE("FFASearchConfig copy, move and get_updated_config",
     const std::vector<loki::ParamLimit> limits = {{2.0, 20.0}};
     const loki::search::FFASearchConfig orig(262144, 0.0002, 64, 1.0, limits,
                                              0.15, 1.4, false, 2, 2.0, 2.0, 512,
-                                             32, 16, 32, 5.0, 500000, true);
+                                             32, 16, 8192, 5.0, 500000, true);
 
     // Copy construction
     loki::search::FFASearchConfig copied = orig;
@@ -190,17 +190,22 @@ TEST_CASE("FFASearchConfig validation throws on invalid arguments",
                           1000, false),
                       std::runtime_error);
 
-    // Invalid bseg_ffa values: < bseg_brute, > nsamps, not a multiple of
-    // bseg_brute, or nsegments_ffa not a power of two.
-    for (const loki::SizeType bad_bseg_ffa :
-         {loki::SizeType{16}, loki::SizeType{2048}, loki::SizeType{48},
-          loki::SizeType{96}}) {
+    // Invalid nsegments (bseg_brute 32 gives 32 brute segments): zero, not
+    // a power of two, or more than the brute segments.
+    for (const loki::SizeType bad_nsegments :
+         {loki::SizeType{0}, loki::SizeType{3}, loki::SizeType{6},
+          loki::SizeType{64}}) {
         REQUIRE_THROWS_AS(loki::search::FFASearchConfig(
                               1024, 0.0001, 64, 1.0, valid_limits, 0.2, 1.5,
                               true, 1, 8.0, 2.0, 1024, 64, loki::SizeType{32},
-                              bad_bseg_ffa, 5.0, 1000, false),
-                          std::runtime_error);
+                              bad_nsegments, 5.0, 1000, false),
+                          std::exception);
     }
+    // bseg_brute above nsamps / 2 leaves no FFA level.
+    REQUIRE_THROWS_AS(loki::search::FFASearchConfig(
+                          1024, 0.0001, 64, 1.0, valid_limits, 0.2, 1.5, true,
+                          1, 8.0, 2.0, 1024, 64, loki::SizeType{513}),
+                      std::invalid_argument);
 }
 
 TEST_CASE("EPSearchConfig inherits and adds EP parameters", "[config][ep]") {
@@ -219,7 +224,7 @@ TEST_CASE("EPSearchConfig inherits and adds EP parameters", "[config][ep]") {
         /*nbins_max=*/1024,
         /*nbins_min_lossy_bf=*/64,
         /*bseg_brute=*/32,
-        /*bseg_ffa=*/64,
+        /*nsegments=*/8192,
         /*snr_min=*/5.0,
         /*max_passing_candidates=*/100000,
         /*prune_poly_order=*/2,
@@ -432,6 +437,28 @@ TEST_CASE("FFASearchConfig default bseg_brute tracks cycles at f_max",
             REQUIRE(cycles <= 5.7);
         }
     }
+    SECTION("explicit bseg_brute is a minimum with equal segments") {
+        const std::vector<loki::ParamLimit> limits = {{200.0, 300.0}};
+        // nsamps = 2^23 + 1: 16384 segments of 513 samples, not 32768
+        // segments of 512 (a series padded to twice its length).
+        const loki::search::FFASearchConfig odd(
+            (loki::SizeType{1} << 23U) + 1, 64e-6, 32, 1.0, limits, 0.2, 1.5,
+            false, 1, 4.0, 1.5, 1024, 64, loki::SizeType{512});
+        REQUIRE(odd.get_bseg_brute() == 513);
+        REQUIRE(odd.get_niters_ffa() == 14);
+        REQUIRE(odd.get_bseg_ffa() == 513U << 14U);
+        const loki::search::FFASearchConfig twelve_m(
+            12000000, 64e-6, 32, 1.0, limits, 0.2, 1.5, false, 1, 4.0, 1.5,
+            1024, 64, loki::SizeType{512});
+        REQUIRE(twelve_m.get_bseg_brute() == 733);
+        REQUIRE(twelve_m.get_niters_ffa() == 14);
+        // The effective length maps to itself.
+        const loki::search::FFASearchConfig again(
+            12000000, 64e-6, 32, 1.0, limits, 0.2, 1.5, false, 1, 4.0, 1.5,
+            1024, 64, twelve_m.get_bseg_brute());
+        REQUIRE(again.get_bseg_brute() == 733);
+        REQUIRE(again.get_niters_ffa() == 14);
+    }
     SECTION("explicit bseg_brute is respected") {
         const std::vector<loki::ParamLimit> limits = {{200.0, 300.0}};
         const loki::search::FFASearchConfig cfg(
@@ -457,13 +484,16 @@ TEST_CASE("FFASearchConfig default bseg_brute tracks cycles at f_max",
                 REQUIRE(cfg.get_niters_ffa() >= 1);
             }
         }
-        // Explicit power-of-2 bseg_brute on non-power-of-2 nsamps
+        // An explicit bseg_brute is a minimum: 10000 samples split into
+        // 64 segments of ceil(10000 / 64) = 157 >= 128 (128 segments of 79
+        // would be too short), zero-filling 48 samples.
         const loki::search::FFASearchConfig explicit_cfg(
             10000, 64e-6, 32, 1.0, limits, 0.2, 1.5, false, 1, 4.0, 1.5, 1024,
             64, loki::SizeType{128}, std::nullopt, 6.0, 1000, false);
-        REQUIRE(explicit_cfg.get_bseg_brute() == 128);
-        REQUIRE(explicit_cfg.get_bseg_ffa() == 16384);
-        REQUIRE(explicit_cfg.get_niters_ffa() == 7);
+        REQUIRE(explicit_cfg.get_bseg_brute() == 157);
+        REQUIRE(explicit_cfg.get_nsegments() == 1);
+        REQUIRE(explicit_cfg.get_bseg_ffa() == 10048);
+        REQUIRE(explicit_cfg.get_niters_ffa() == 6);
 
         // EPSearchConfig also supports non-power-of-2 nsamps natively
         const loki::search::EPSearchConfig ep_np2(10000, 64e-6, 32, 1.0,
@@ -472,10 +502,15 @@ TEST_CASE("FFASearchConfig default bseg_brute tracks cycles at f_max",
         REQUIRE(ep_np2.get_bseg_ffa() >= 10000);
         const loki::search::EPSearchConfig ep_np2_cap(
             10000, 64e-6, 32, 1.0, limits, 0.2, 1.5, false, 1, 4.0, 1.5, 1024,
-            64, std::nullopt, loki::SizeType{1024});
-        REQUIRE(ep_np2_cap.get_nsamps() == 10000);
-        REQUIRE(ep_np2_cap.get_bseg_ffa() == 1024);
-        REQUIRE(1024 % ep_np2_cap.get_bseg_brute() == 0);
+            64, std::nullopt, loki::SizeType{16});
+        // More than one segment (EP) keeps whole segments only.
+        REQUIRE(ep_np2_cap.get_nsamps_input() == 10000);
+        REQUIRE(ep_np2_cap.get_nsegments() == 16);
+        REQUIRE(ep_np2_cap.get_bseg_ffa() % ep_np2_cap.get_bseg_brute() == 0);
+        REQUIRE(ep_np2_cap.get_nsamps() == ep_np2_cap.get_bseg_ffa() * 16);
+        REQUIRE(ep_np2_cap.get_nsamps() <= 10000);
+        REQUIRE(10000 - ep_np2_cap.get_nsamps() <
+                ep_np2_cap.get_nsamps() / ep_np2_cap.get_bseg_brute());
     }
     SECTION("direct-DFT Fourier counts merge work only above level 0") {
         // The brute level's own merge work must not be charged to B: doing

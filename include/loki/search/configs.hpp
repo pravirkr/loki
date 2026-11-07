@@ -75,8 +75,8 @@ struct FFATomlConfig {
     double octave_scale{2.0};
     SizeType nbins_max{1024};
     SizeType nbins_min_lossy_bf{64};
+    /// Minimum brute-fold segment length; empty = chosen by the planner.
     std::optional<SizeType> bseg_brute;
-    std::optional<SizeType> bseg_ffa;
     SizeType max_passing_candidates{1U << 22U}; // 4M
 
     // [output]
@@ -133,7 +133,7 @@ public:
                     SizeType nbins_max                 = 1024,
                     SizeType nbins_min_lossy_bf        = 64,
                     std::optional<SizeType> bseg_brute = std::nullopt,
-                    std::optional<SizeType> bseg_ffa   = std::nullopt,
+                    std::optional<SizeType> nsegments  = std::nullopt,
                     double snr_min                     = 7.0,
                     SizeType max_passing_candidates    = 1U << 22U, // 4M
                     bool use_boxcar_kadane             = false);
@@ -145,7 +145,12 @@ public:
     FFASearchConfig& operator=(const FFASearchConfig& other);
 
     // --- Getters ---
+    /// Samples analysed. An EP config (nsegments > 1) keeps only the leading
+    /// whole segments, 2^L * bseg_brute samples, so it can be shorter than
+    /// the series; an FFA search analyses all of it.
     SizeType get_nsamps() const noexcept;
+    /// The series length the config was built for.
+    SizeType get_nsamps_input() const noexcept;
     double get_tsamp() const noexcept;
     SizeType get_nbins() const noexcept;
     double get_tobs() const noexcept;
@@ -160,8 +165,15 @@ public:
     double get_octave_scale() const noexcept;
     SizeType get_nbins_max() const noexcept;
     SizeType get_nbins_min_lossy_bf() const noexcept;
+    /// Brute-fold segment length: ceil(nsamps / 2^L) for the 2^L brute
+    /// segments, at least the requested (minimum) bseg_brute.
     SizeType get_bseg_brute() const noexcept;
+    /// Segments the FFA merges the brute segments down to (a power of 2):
+    /// 1 for an FFA search, the starting segments of an EP search.
+    SizeType get_nsegments() const noexcept;
+    /// Length of those segments: bseg_brute * 2^niters_ffa.
     SizeType get_bseg_ffa() const noexcept;
+    bool has_explicit_nsegments() const noexcept;
     /// Minimum candidate SNR written to final FFA/EP HDF5 (default 6).
     /// Currently applied by FFA; EP output filtering is reserved for later.
     double get_snr_min() const noexcept;
@@ -204,6 +216,15 @@ public:
                                                      double f_min,
                                                      double f_max) const;
 
+    /// The same config with @p target_n_segs FFA output segments (clamped to
+    /// the brute segments an explicit bseg_brute gives), unless nsegments
+    /// was set explicitly.
+    [[nodiscard]] FFASearchConfig
+    with_ep_default_nsegments(SizeType target_n_segs = 128) const;
+
+    /// The same config with @p nsegments FFA output segments.
+    [[nodiscard]] FFASearchConfig with_nsegments(SizeType nsegments) const;
+
     // --- TOML Helpers ---
     static FFASearchConfig
     from_toml(const std::filesystem::path& path,
@@ -220,6 +241,7 @@ public:
 
 protected:
     class Impl;
+    explicit FFASearchConfig(std::unique_ptr<Impl> impl);
     std::unique_ptr<Impl> m_impl;
 };
 
@@ -233,6 +255,8 @@ protected:
  */
 class EPSearchConfig : public FFASearchConfig {
 public:
+    static constexpr SizeType kDefaultEPSegments = 128;
+
     EPSearchConfig() = delete;
     EPSearchConfig(SizeType nsamps,
                    double tsamp,
@@ -248,7 +272,7 @@ public:
                    SizeType nbins_max                 = 1024,
                    SizeType nbins_min_lossy_bf        = 64,
                    std::optional<SizeType> bseg_brute = std::nullopt,
-                   std::optional<SizeType> bseg_ffa   = std::nullopt,
+                   std::optional<SizeType> nsegments  = std::nullopt,
                    double snr_min                     = 7.0,
                    SizeType max_passing_candidates    = 1U << 22U, // 4M
                    SizeType prune_poly_order          = 3,
@@ -304,6 +328,25 @@ public:
                                                        double f_min,
                                                        double f_max) const;
 
+    /// Same as FFASearchConfig::with_ep_default_nsegments, keeping the EP
+    /// fields.
+    [[nodiscard]] EPSearchConfig with_ep_default_nsegments(
+        SizeType target_n_segs = kDefaultEPSegments) const;
+
+    // --- TOML Helpers ---
+    static EPSearchConfig
+    from_toml(const std::filesystem::path& path,
+              std::optional<SizeType> nsamps = std::nullopt,
+              std::optional<double> tsamp    = std::nullopt);
+
+    static EPSearchConfig
+    from_toml_string(std::string_view toml_content,
+                     std::optional<SizeType> nsamps = std::nullopt,
+                     std::optional<double> tsamp    = std::nullopt);
+
+    static void write_default_toml(const std::filesystem::path& path);
+    static std::string_view default_toml_string();
+
 private:
     class EPImpl;
     std::unique_ptr<EPImpl> m_ep_impl;
@@ -327,6 +370,8 @@ struct EPTomlConfig : FFATomlConfig {
     SizeType prune_poly_order{3};   ///< Polynomial order of the pruning
     std::optional<SizeType> n_runs; ///< Runs to prune; empty = all
     std::optional<std::vector<SizeType>> ref_segs; ///< Explicit runs
+    /// Segments the pruning starts from (power of 2); empty = 128.
+    std::optional<SizeType> nsegments;
     double p_orb_min{1e-5};
     double m_c_max{10.0};
     double m_p_min{1.4};

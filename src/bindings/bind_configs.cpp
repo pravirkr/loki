@@ -53,7 +53,7 @@ void bind_configs(py::module_& m) {
                          double octave_scale, SizeType nbins_max,
                          SizeType nbins_min_lossy_bf,
                          std::optional<SizeType> bseg_brute,
-                         std::optional<SizeType> bseg_ffa, double snr_min,
+                         std::optional<SizeType> nsegments, double snr_min,
                          SizeType max_passing_candidates,
                          bool use_boxcar_kadane) {
                  if (param_limits.ndim() != 2 || param_limits.shape(1) != 2) {
@@ -75,7 +75,7 @@ void bind_configs(py::module_& m) {
                  return std::make_unique<FFASearchConfig>(
                      nsamps, tsamp, nbins, eta, limits, ducy_max, wtsp,
                      use_fourier, nthreads, max_process_memory_gb, octave_scale,
-                     nbins_max, nbins_min_lossy_bf, bseg_brute, bseg_ffa,
+                     nbins_max, nbins_min_lossy_bf, bseg_brute, nsegments,
                      snr_min, max_passing_candidates, use_boxcar_kadane);
              }),
              py::arg("nsamps"), py::arg("tsamp"), py::arg("nbins"),
@@ -85,10 +85,12 @@ void bind_configs(py::module_& m) {
              py::arg("octave_scale") = 2.0, py::arg("nbins_max") = 1024,
              py::arg("nbins_min_lossy_bf") = 64,
              py::arg("bseg_brute")         = std::nullopt,
-             py::arg("bseg_ffa") = std::nullopt, py::arg("snr_min") = 7.0,
+             py::arg("nsegments") = std::nullopt, py::arg("snr_min") = 7.0,
              py::arg("max_passing_candidates") = 1U << 22U, // 4M
              py::arg("use_boxcar_kadane")      = false)
         .def_property_readonly("nsamps", &FFASearchConfig::get_nsamps)
+        .def_property_readonly("nsamps_input",
+                               &FFASearchConfig::get_nsamps_input)
         .def_property_readonly("tsamp", &FFASearchConfig::get_tsamp)
         .def_property_readonly("tobs", &FFASearchConfig::get_tobs)
         .def_property_readonly("nbins", &FFASearchConfig::get_nbins)
@@ -106,6 +108,7 @@ void bind_configs(py::module_& m) {
         .def_property_readonly("ducy_max", &FFASearchConfig::get_ducy_max)
         .def_property_readonly("wtsp", &FFASearchConfig::get_wtsp)
         .def_property_readonly("bseg_brute", &FFASearchConfig::get_bseg_brute)
+        .def_property_readonly("nsegments", &FFASearchConfig::get_nsegments)
         .def_property_readonly("bseg_ffa", &FFASearchConfig::get_bseg_ffa)
         .def_property_readonly("use_fourier", &FFASearchConfig::get_use_fourier)
         .def_property_readonly("use_conservative_tile",
@@ -135,7 +138,24 @@ void bind_configs(py::module_& m) {
         .def("dparams_f", &FFASearchConfig::get_dparams_f, py::arg("tseg_cur"))
         .def("dparams", &FFASearchConfig::get_dparams, py::arg("tseg_cur"))
         .def("dparams_actual", &FFASearchConfig::get_dparams_actual,
-             py::arg("tseg_cur"));
+             py::arg("tseg_cur"))
+        .def("has_explicit_nsegments", &FFASearchConfig::has_explicit_nsegments)
+        .def("with_ep_default_nsegments",
+             &FFASearchConfig::with_ep_default_nsegments,
+             py::arg("target_n_segs") = 128)
+        .def("with_nsegments", &FFASearchConfig::with_nsegments,
+             py::arg("nsegments"))
+        .def_static("from_toml", &FFASearchConfig::from_toml, py::arg("path"),
+                    py::arg("nsamps") = std::nullopt,
+                    py::arg("tsamp")  = std::nullopt)
+        .def_static("from_toml_string", &FFASearchConfig::from_toml_string,
+                    py::arg("toml_content"), py::arg("nsamps") = std::nullopt,
+                    py::arg("tsamp") = std::nullopt)
+        .def_static("write_default_toml", &FFASearchConfig::write_default_toml,
+                    py::arg("path"))
+        .def_static("default_toml_string", [] {
+            return std::string(FFASearchConfig::default_toml_string());
+        });
 
     py::class_<PulsarSearchConfig, FFASearchConfig>(m_configs,
                                                     "PulsarSearchConfig")
@@ -146,7 +166,7 @@ void bind_configs(py::module_& m) {
                     double max_process_memory_gb, double octave_scale,
                     SizeType nbins_max, SizeType nbins_min_lossy_bf,
                     std::optional<SizeType> bseg_brute,
-                    std::optional<SizeType> bseg_ffa, double snr_min,
+                    std::optional<SizeType> nsegments, double snr_min,
                     SizeType max_passing_candidates, SizeType prune_poly_order,
                     double p_orb_min, double m_c_max, double m_p_min,
                     double propagator_significance,
@@ -173,7 +193,7 @@ void bind_configs(py::module_& m) {
                          nsamps, tsamp, nbins, eta, limits, ducy_max, wtsp,
                          use_fourier, nthreads, max_process_memory_gb,
                          octave_scale, nbins_max, nbins_min_lossy_bf,
-                         bseg_brute, bseg_ffa, snr_min, max_passing_candidates,
+                         bseg_brute, nsegments, snr_min, max_passing_candidates,
                          prune_poly_order, p_orb_min, m_c_max, m_p_min,
                          propagator_significance, validation_significance,
                          use_conservative_tile, use_boxcar_kadane, target_snr);
@@ -185,7 +205,7 @@ void bind_configs(py::module_& m) {
              py::arg("octave_scale") = 2.0, py::arg("nbins_max") = 1024,
              py::arg("nbins_min_lossy_bf") = 64,
              py::arg("bseg_brute")         = std::nullopt,
-             py::arg("bseg_ffa") = std::nullopt, py::arg("snr_min") = 7.0,
+             py::arg("nsegments") = std::nullopt, py::arg("snr_min") = 7.0,
              py::arg("max_passing_candidates") = 1U << 22U, // 4M
              py::arg("prune_poly_order") = 3, py::arg("p_orb_min") = 1e-5,
              py::arg("m_c_max") = 10.0, py::arg("m_p_min") = 1.4,
@@ -208,9 +228,113 @@ void bind_configs(py::module_& m) {
         .def_property_readonly("validation_significance",
                                &PulsarSearchConfig::get_validation_significance)
         .def_property_readonly("x_mass_const",
-                               &PulsarSearchConfig::get_x_mass_const);
+                               &PulsarSearchConfig::get_x_mass_const)
+        .def("with_ep_default_nsegments",
+             &PulsarSearchConfig::with_ep_default_nsegments,
+             py::arg("target_n_segs") = PulsarSearchConfig::kDefaultEPSegments)
+        .def_static("from_toml", &PulsarSearchConfig::from_toml,
+                    py::arg("path"), py::arg("nsamps") = std::nullopt,
+                    py::arg("tsamp") = std::nullopt)
+        .def_static("from_toml_string", &PulsarSearchConfig::from_toml_string,
+                    py::arg("toml_content"), py::arg("nsamps") = std::nullopt,
+                    py::arg("tsamp") = std::nullopt)
+        .def_static("write_default_toml",
+                    &PulsarSearchConfig::write_default_toml, py::arg("path"))
+        .def_static("default_toml_string", [] {
+            return std::string(PulsarSearchConfig::default_toml_string());
+        });
 
     m_configs.attr("EPSearchConfig") = m_configs.attr("PulsarSearchConfig");
+
+    using OL = search::FFATomlConfig::OrbitLimits;
+    py::class_<OL>(m_configs, "OrbitLimits")
+        .def(py::init<>())
+        .def_readwrite("order", &OL::order)
+        .def_readwrite("p_orb_min", &OL::p_orb_min)
+        .def_readwrite("p_orb_min_tobs", &OL::p_orb_min_tobs)
+        .def_readwrite("m_c_max", &OL::m_c_max)
+        .def_readwrite("m_p_min", &OL::m_p_min);
+
+    using FTC = search::FFATomlConfig;
+    py::class_<FTC>(m_configs, "FFATomlConfig")
+        .def(py::init<>())
+        .def_readwrite("timeseries_path", &FTC::timeseries_path)
+        .def_readwrite("observation", &FTC::observation)
+        .def_readwrite("candidates", &FTC::candidates)
+        .def_readwrite("preprocess", &FTC::preprocess)
+        .def_readwrite("preprocessing", &FTC::preprocessing)
+        .def_readwrite("min_window_periods", &FTC::min_window_periods)
+        .def_readwrite("f_min", &FTC::f_min)
+        .def_readwrite("f_max", &FTC::f_max)
+        .def_readwrite("acc_min", &FTC::acc_min)
+        .def_readwrite("acc_max", &FTC::acc_max)
+        .def_readwrite("jerk_min", &FTC::jerk_min)
+        .def_readwrite("jerk_max", &FTC::jerk_max)
+        .def_readwrite("orbit", &FTC::orbit)
+        .def_readwrite("nbins", &FTC::nbins)
+        .def_readwrite("eta", &FTC::eta)
+        .def_readwrite("ducy_max", &FTC::ducy_max)
+        .def_readwrite("wtsp", &FTC::wtsp)
+        .def_readwrite("snr_min", &FTC::snr_min)
+        .def_readwrite("use_fourier", &FTC::use_fourier)
+        .def_readwrite("use_boxcar_kadane", &FTC::use_boxcar_kadane)
+        .def_readwrite("nsamps", &FTC::nsamps)
+        .def_readwrite("tsamp", &FTC::tsamp)
+        .def_readwrite("nthreads", &FTC::nthreads)
+        .def_property(
+            "backend",
+            [](const FTC& self) {
+                return std::string(to_string(self.backend));
+            },
+            [](FTC& self, std::string_view name) {
+                self.backend = parse_backend(name);
+            })
+        .def_readwrite("device", &FTC::device)
+        .def_readwrite("max_process_memory_gb", &FTC::max_process_memory_gb)
+        .def_readwrite("octave_scale", &FTC::octave_scale)
+        .def_readwrite("nbins_max", &FTC::nbins_max)
+        .def_readwrite("nbins_min_lossy_bf", &FTC::nbins_min_lossy_bf)
+        .def_readwrite("bseg_brute", &FTC::bseg_brute)
+        .def_readwrite("max_passing_candidates", &FTC::max_passing_candidates)
+        .def_readwrite("outdir", &FTC::outdir)
+        .def_readwrite("prefix", &FTC::prefix)
+        .def("to_preprocess_options", &FTC::to_preprocess_options)
+        .def("to_search_config", &FTC::to_search_config,
+             py::arg("nsamps") = std::nullopt, py::arg("tsamp") = std::nullopt)
+        .def("to_toml_string", &FTC::to_toml_string)
+        .def_static("load", &FTC::load, py::arg("path"))
+        .def_static("from_string", &FTC::from_string, py::arg("toml_content"))
+        .def_static("write_default", &FTC::write_default, py::arg("path"))
+        .def_static("default_toml_string",
+                    [] { return std::string(FTC::default_toml_string()); });
+
+    using ETC = search::EPTomlConfig;
+    py::class_<ETC, FTC>(m_configs, "EPTomlConfig")
+        .def(py::init<>())
+        .def_readwrite("target_snr", &ETC::target_snr)
+        .def_readwrite("poly_basis", &ETC::poly_basis)
+        .def_readwrite("min_pd", &ETC::min_pd)
+        .def_readwrite("ref_ducy", &ETC::ref_ducy)
+        .def_readwrite("prune_poly_order", &ETC::prune_poly_order)
+        .def_readwrite("n_runs", &ETC::n_runs)
+        .def_readwrite("ref_segs", &ETC::ref_segs)
+        .def_readwrite("nsegments", &ETC::nsegments)
+        .def_readwrite("p_orb_min", &ETC::p_orb_min)
+        .def_readwrite("m_c_max", &ETC::m_c_max)
+        .def_readwrite("m_p_min", &ETC::m_p_min)
+        .def_readwrite("propagator_significance", &ETC::propagator_significance)
+        .def_readwrite("validation_significance", &ETC::validation_significance)
+        .def_readwrite("use_conservative_tile", &ETC::use_conservative_tile)
+        .def_readwrite("plan_cache", &ETC::plan_cache)
+        .def_readwrite("use_plan_cache", &ETC::use_plan_cache)
+        .def("to_ep_search_config", &ETC::to_ep_search_config,
+             py::arg("nsamps") = std::nullopt, py::arg("tsamp") = std::nullopt)
+        .def("to_toml_string", &ETC::to_toml_string)
+        .def_static("load", &ETC::load, py::arg("path"))
+        .def_static("from_string", &ETC::from_string, py::arg("toml_content"))
+        .def_static("write_default", &ETC::write_default, py::arg("path"))
+        .def_static("default_toml_string",
+                    [] { return std::string(ETC::default_toml_string()); });
 
     m_configs.def(
         "circular_param_limits",

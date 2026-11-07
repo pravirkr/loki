@@ -10,10 +10,8 @@
 
 #include <omp.h>
 #include <xsimd/xsimd.hpp>
-#if defined(__AVX2__)
-#include <immintrin.h>
-#endif
 
+#include "lib/cpu/simd_utils.hpp"
 #include "lib/detail/error_check.hpp"
 
 namespace loki::lane_fft {
@@ -57,38 +55,7 @@ constexpr SizeType kBlock = 8;
 [[gnu::always_inline]] inline void
 transpose8(const std::array<const float*, kBlock>& src,
            const std::array<float*, kBlock>& dst) noexcept {
-    const __m256 t0 =
-        _mm256_unpacklo_ps(_mm256_loadu_ps(src[0]), _mm256_loadu_ps(src[1]));
-    const __m256 t1 =
-        _mm256_unpackhi_ps(_mm256_loadu_ps(src[0]), _mm256_loadu_ps(src[1]));
-    const __m256 t2 =
-        _mm256_unpacklo_ps(_mm256_loadu_ps(src[2]), _mm256_loadu_ps(src[3]));
-    const __m256 t3 =
-        _mm256_unpackhi_ps(_mm256_loadu_ps(src[2]), _mm256_loadu_ps(src[3]));
-    const __m256 t4 =
-        _mm256_unpacklo_ps(_mm256_loadu_ps(src[4]), _mm256_loadu_ps(src[5]));
-    const __m256 t5 =
-        _mm256_unpackhi_ps(_mm256_loadu_ps(src[4]), _mm256_loadu_ps(src[5]));
-    const __m256 t6 =
-        _mm256_unpacklo_ps(_mm256_loadu_ps(src[6]), _mm256_loadu_ps(src[7]));
-    const __m256 t7 =
-        _mm256_unpackhi_ps(_mm256_loadu_ps(src[6]), _mm256_loadu_ps(src[7]));
-    const __m256 u0 = _mm256_shuffle_ps(t0, t2, _MM_SHUFFLE(1, 0, 1, 0));
-    const __m256 u1 = _mm256_shuffle_ps(t0, t2, _MM_SHUFFLE(3, 2, 3, 2));
-    const __m256 u2 = _mm256_shuffle_ps(t1, t3, _MM_SHUFFLE(1, 0, 1, 0));
-    const __m256 u3 = _mm256_shuffle_ps(t1, t3, _MM_SHUFFLE(3, 2, 3, 2));
-    const __m256 u4 = _mm256_shuffle_ps(t4, t6, _MM_SHUFFLE(1, 0, 1, 0));
-    const __m256 u5 = _mm256_shuffle_ps(t4, t6, _MM_SHUFFLE(3, 2, 3, 2));
-    const __m256 u6 = _mm256_shuffle_ps(t5, t7, _MM_SHUFFLE(1, 0, 1, 0));
-    const __m256 u7 = _mm256_shuffle_ps(t5, t7, _MM_SHUFFLE(3, 2, 3, 2));
-    _mm256_storeu_ps(dst[0], _mm256_permute2f128_ps(u0, u4, 0x20));
-    _mm256_storeu_ps(dst[1], _mm256_permute2f128_ps(u1, u5, 0x20));
-    _mm256_storeu_ps(dst[2], _mm256_permute2f128_ps(u2, u6, 0x20));
-    _mm256_storeu_ps(dst[3], _mm256_permute2f128_ps(u3, u7, 0x20));
-    _mm256_storeu_ps(dst[4], _mm256_permute2f128_ps(u0, u4, 0x31));
-    _mm256_storeu_ps(dst[5], _mm256_permute2f128_ps(u1, u5, 0x31));
-    _mm256_storeu_ps(dst[6], _mm256_permute2f128_ps(u2, u6, 0x31));
-    _mm256_storeu_ps(dst[7], _mm256_permute2f128_ps(u3, u7, 0x31));
+    simd_utils::transpose8x8(src.data(), dst.data());
 }
 #else
 constexpr SizeType kBlock = kWidth;
@@ -108,66 +75,19 @@ inline void transpose8(const std::array<const float*, kBlock>& src,
 #endif
 static_assert(kLanes % kBlock == 0, "kLanes must be a multiple of the block");
 
-#if defined(__AVX512F__)
-/// dst[c][0..16) = src[0..16)[c] for a 16 x 16 block of floats.
-[[gnu::always_inline]] inline void
-transpose16(const std::array<const float*, kLanes>& src,
-            float* __restrict__ dst) noexcept {
-    // NOLINTBEGIN(modernize-avoid-c-arrays): std::array drops the vector alignment attribute
-    __m512 r[16];
-    __m512 t[16];
-    // NOLINTEND(modernize-avoid-c-arrays)
-    for (SizeType i = 0; i < 16; ++i) {
-        r[i] = _mm512_loadu_ps(src[i]);
-    }
-    // 32-bit interleave within 128-bit lanes, then 64-bit.
-    for (SizeType i = 0; i < 16; i += 2) {
-        t[i]     = _mm512_unpacklo_ps(r[i], r[i + 1]);
-        t[i + 1] = _mm512_unpackhi_ps(r[i], r[i + 1]);
-    }
-    for (SizeType i = 0; i < 16; i += 4) {
-        r[i] = _mm512_castpd_ps(_mm512_unpacklo_pd(_mm512_castps_pd(t[i]),
-                                                   _mm512_castps_pd(t[i + 2])));
-        r[i + 1] = _mm512_castpd_ps(_mm512_unpackhi_pd(
-            _mm512_castps_pd(t[i]), _mm512_castps_pd(t[i + 2])));
-        r[i + 2] = _mm512_castpd_ps(_mm512_unpacklo_pd(
-            _mm512_castps_pd(t[i + 1]), _mm512_castps_pd(t[i + 3])));
-        r[i + 3] = _mm512_castpd_ps(_mm512_unpackhi_pd(
-            _mm512_castps_pd(t[i + 1]), _mm512_castps_pd(t[i + 3])));
-    }
-    // r[4 g + j] holds column (4 l + j) of rows 4 g .. 4 g + 3 in 128-bit
-    // lane l. Gather the four row groups of each column: 128-bit shuffles.
-    for (SizeType j = 0; j < 4; ++j) {
-        const __m512 a = _mm512_shuffle_f32x4(r[j], r[4 + j], 0x44);
-        const __m512 b = _mm512_shuffle_f32x4(r[j], r[4 + j], 0xEE);
-        const __m512 c = _mm512_shuffle_f32x4(r[8 + j], r[12 + j], 0x44);
-        const __m512 d = _mm512_shuffle_f32x4(r[8 + j], r[12 + j], 0xEE);
-        // a = [g0 l0, g0 l1, g1 l0, g1 l1], c likewise for g2, g3.
-        _mm512_storeu_ps(dst + ((0 + j) * kLanes),
-                         _mm512_shuffle_f32x4(a, c, 0x88));
-        _mm512_storeu_ps(dst + ((4 + j) * kLanes),
-                         _mm512_shuffle_f32x4(a, c, 0xDD));
-        _mm512_storeu_ps(dst + ((8 + j) * kLanes),
-                         _mm512_shuffle_f32x4(b, d, 0x88));
-        _mm512_storeu_ps(dst + ((12 + j) * kLanes),
-                         _mm512_shuffle_f32x4(b, d, 0xDD));
-    }
-}
-#endif
-
 /// dst[c][lane] = rows[lane][c] for c < ncols; dst has a kLanes stride.
 void rows_to_lanes(const std::array<const float*, kLanes>& rows,
                    SizeType ncols,
                    float* __restrict__ dst) noexcept {
     SizeType c0 = 0;
 #if defined(__AVX512F__)
-    static_assert(kLanes == 16, "transpose16 is a 16 x 16 block");
+    static_assert(kLanes == 16, "transpose16x16 is a 16 x 16 block");
     std::array<const float*, kLanes> src16{};
     for (; c0 + kLanes <= ncols; c0 += kLanes) {
         for (SizeType r = 0; r < kLanes; ++r) {
             src16[r] = rows[r] + c0;
         }
-        transpose16(src16, dst + (c0 * kLanes));
+        simd_utils::transpose16x16(src16.data(), dst + (c0 * kLanes), kLanes);
     }
 #endif
     const SizeType nfull = ncols - (ncols % kBlock);

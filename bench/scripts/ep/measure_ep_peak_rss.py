@@ -101,7 +101,7 @@ def make_config(
         nthreads=nthreads,
         max_process_memory_gb=max_memory_gb,
         bseg_brute=1024,
-        bseg_ffa=nsamps // 8,
+        nsegments=8,
         prune_poly_order=2,
     )
 

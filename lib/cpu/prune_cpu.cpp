@@ -13,6 +13,7 @@
 #include <stdexcept>
 #include <string_view>
 #include <system_error>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -30,13 +31,13 @@
 #include "lib/algorithms/ffa_engine.hpp"
 #include "lib/algorithms/prune_engine.hpp"
 #include "lib/core/dynamic.hpp"
-#include "lib/core/transforms.hpp"
 #include "lib/detail/error_check.hpp"
 #include "lib/detail/progress.hpp"
 #include "lib/detail/psr_utils.hpp"
 #include "lib/detail/timing.hpp"
 #include "lib/detail/utils.hpp"
 #include "lib/search/cands.hpp"
+#include "lib/search/ep_support.hpp"
 #include "lib/search/prune_mask.hpp"
 #include "lib/utils/workspace_impl.hpp"
 #include "lib/utils/world_tree.hpp"
@@ -48,30 +49,6 @@ namespace {
 // Number of individual harvests echoed to the log at info level per run;
 // beyond this only per-level summaries are emitted.
 constexpr SizeType kMaxHarvestLogLines = 16;
-
-void shift_reported_leaves_epoch(std::span<double> leaves,
-                                 SizeType n_leaves,
-                                 SizeType n_params,
-                                 double delta_t_epoch) {
-    if (n_leaves == 0 || n_params < 2 || std::abs(delta_t_epoch) <= 1e-12) {
-        return;
-    }
-    constexpr SizeType kParamStride = 2U;
-    const SizeType leaves_stride    = (n_params + 2) * kParamStride;
-    std::vector<double> params(n_params);
-    for (SizeType i = 0; i < n_leaves; ++i) {
-        const SizeType leaf_offset = i * leaves_stride;
-        for (SizeType j = 0; j < n_params; ++j) {
-            params[j] = leaves[leaf_offset + (j * kParamStride)];
-        }
-        const auto [shifted, delay] =
-            core::shift_taylor_params_d_f(params, delta_t_epoch);
-        (void)delay;
-        for (SizeType j = 0; j < n_params; ++j) {
-            leaves[leaf_offset + (j * kParamStride)] = shifted[j];
-        }
-    }
-}
 
 template <SupportedFoldType FoldType> class PruneImpl {
 public:
@@ -86,7 +63,8 @@ public:
               const PruneRFIConfig& rfi_config,
               const search::GridMask& mask_base)
         : m_workspace_ptr(&workspace),
-          m_cfg(std::move(cfg)),
+          m_cfg(cfg.has_explicit_nsegments() ? std::move(cfg)
+                                             : cfg.with_ep_default_nsegments()),
           m_ffa_plan(m_cfg),
           m_threshold_scheme(threshold_scheme.begin(), threshold_scheme.end()),
           m_max_sugg(max_sugg),
@@ -101,7 +79,7 @@ public:
         m_prune_funcs = core::create_prune_dp_functs<FoldType>(
             m_poly_basis, m_ffa_plan.get_param_counts().back(),
             m_ffa_plan.get_dparams_actual().back(),
-            m_ffa_plan.get_nsegments().back(),
+            m_ffa_plan.get_nsegments_active(),
             m_ffa_plan.get_tsegments().back(), m_cfg, m_batch_size,
             m_branch_max);
         const auto n_params = m_cfg.get_nparams();
@@ -156,7 +134,7 @@ public:
         log << fmt::format("Pruning log for ref segment: {}\n", ref_seg);
         log.close();
 
-        const auto nsegments = m_ffa_plan.get_nsegments().back();
+        const auto nsegments = m_ffa_plan.get_nsegments_active();
         // A task of the shared display, or a bar of its own.
         std::unique_ptr<progress::ProgressTracker> bar;
         if (tracker != nullptr) {
@@ -254,7 +232,7 @@ private:
 
     /// Duration of the data covered by the middle-out scheme (seconds).
     [[nodiscard]] double get_tobs_scheme() const noexcept {
-        return static_cast<double>(m_ffa_plan.get_nsegments().back()) *
+        return static_cast<double>(m_ffa_plan.get_nsegments_active()) *
                m_ffa_plan.get_tsegments().back();
     }
 
@@ -278,7 +256,7 @@ private:
         world_tree.reset();
 
         // Initialize snail scheme for current ref_seg
-        const auto nsegments = m_ffa_plan.get_nsegments().back();
+        const auto nsegments = m_ffa_plan.get_nsegments_active();
         const auto tseg      = m_ffa_plan.get_tsegments().back();
         m_snail_scheme = psr_utils::MiddleOutScheme(nsegments, ref_seg, tseg);
 
@@ -441,21 +419,15 @@ private:
 
         if (n_leaves > 0) {
             // Transform the suggestion params to middle of the data
-            const auto coord_mid     = m_snail_scheme.get_coord(m_prune_level);
+            const auto coord_mid = m_snail_scheme.get_coord(m_prune_level);
+            search::detail::check_report_epoch(m_cfg, coord_mid.first,
+                                               "EPMultiPass::report");
             const auto leaves_stride = world_tree.get_leaves_stride();
             const auto n1            = leaves_view.first.size() / leaves_stride;
             const auto n2 = leaves_view.second.size() / leaves_stride;
             m_prune_funcs->report(leaves_view.first, coord_mid, n1);
             if (n2 > 0) {
                 m_prune_funcs->report(leaves_view.second, coord_mid, n2);
-            }
-            const double delta_t_epoch =
-                (0.5 * m_cfg.get_tobs()) - coord_mid.first;
-            shift_reported_leaves_epoch(leaves_view.first, n1,
-                                        m_cfg.get_nparams(), delta_t_epoch);
-            if (n2 > 0) {
-                shift_reported_leaves_epoch(leaves_view.second, n2,
-                                            m_cfg.get_nparams(), delta_t_epoch);
             }
         }
         const auto total_pruning_gflops = compute_total_prune_gflops();
@@ -1029,7 +1001,8 @@ public:
                          std::string_view poly_basis,
                          bool show_progress,
                          PruneRFIConfig rfi_config)
-        : m_cfg(std::move(cfg)),
+        : m_cfg(cfg.has_explicit_nsegments() ? std::move(cfg)
+                                             : cfg.with_ep_default_nsegments()),
           m_threshold_scheme(threshold_scheme.begin(), threshold_scheme.end()),
           m_n_runs(n_runs),
           m_ref_segs(std::move(ref_segs)),
@@ -1049,7 +1022,7 @@ public:
         m_branch_max        = detail::compute_branch_max(forecast.max_children);
 
         // Allocate workspaces
-        const auto nsegments = m_ffa_plan.get_nsegments().back();
+        const auto nsegments = m_ffa_plan.get_nsegments_active();
         setup_rfi_control(nsegments);
         m_workspace_storage.reserve(m_n_workers);
         const auto ncoords_ffa = m_ffa_plan.get_ncoords().back();
@@ -1101,7 +1074,8 @@ public:
         bool show_progress,
         PruneRFIConfig rfi_config)
         : m_workspaces(external_workspaces.begin(), external_workspaces.end()),
-          m_cfg(std::move(cfg)),
+          m_cfg(cfg.has_explicit_nsegments() ? std::move(cfg)
+                                             : cfg.with_ep_default_nsegments()),
           m_threshold_scheme(threshold_scheme.begin(), threshold_scheme.end()),
           m_n_runs(n_runs),
           m_ref_segs(std::move(ref_segs)),
@@ -1121,7 +1095,7 @@ public:
         m_branch_max        = detail::compute_branch_max(forecast.max_children);
         // Validate workspaces
         const auto ncoords_ffa = m_ffa_plan.get_ncoords().back();
-        const auto nsegments   = m_ffa_plan.get_nsegments().back();
+        const auto nsegments   = m_ffa_plan.get_nsegments_active();
         setup_rfi_control(nsegments);
         error_check::check_greater_equal(
             m_workspaces.size(), m_n_workers,
@@ -1161,7 +1135,8 @@ public:
         : m_workspaces(external_workspaces.begin(), external_workspaces.end()),
           m_ffa_workspace_ptr(&external_ffa_workspace),
           m_ffa_fold_span(external_ffa_fold),
-          m_cfg(std::move(cfg)),
+          m_cfg(cfg.has_explicit_nsegments() ? std::move(cfg)
+                                             : cfg.with_ep_default_nsegments()),
           m_threshold_scheme(threshold_scheme.begin(), threshold_scheme.end()),
           m_n_runs(n_runs),
           m_ref_segs(std::move(ref_segs)),
@@ -1181,7 +1156,7 @@ public:
         m_branch_max        = detail::compute_branch_max(forecast.max_children);
         // Validate workspaces
         const auto ncoords_ffa = m_ffa_plan.get_ncoords().back();
-        const auto nsegments   = m_ffa_plan.get_nsegments().back();
+        const auto nsegments   = m_ffa_plan.get_nsegments_active();
         setup_rfi_control(nsegments);
         error_check::check_greater_equal(
             m_workspaces.size(), m_n_workers,
@@ -1214,6 +1189,8 @@ public:
                  std::string_view file_prefix) override {
         timing::SimpleTimer timer;
         timer.start();
+        std::tie(ts_e, ts_v) = search::detail::ep_input_series(
+            m_cfg, ts_e, ts_v, "EPMultiPass::execute");
         spdlog::debug("EPMultiPass: Initializing with FFA");
 
         const auto buffer_size = m_ffa_plan.get_buffer_size();
@@ -1230,7 +1207,7 @@ public:
             std::span<const FoldType>(fold_span).first(fold_size);
 
         // Setup output files and directory
-        const auto nsegments = m_ffa_plan.get_nsegments().back();
+        const auto nsegments = m_ffa_plan.get_nsegments_active();
         const std::string filebase =
             fmt::format("{}_pruning_nstages_{}", file_prefix, nsegments);
         const auto log_file =
@@ -1250,8 +1227,9 @@ public:
         }
 
         // Determine ref_segs to process
-        auto ref_segs_to_process =
-            utils::determine_ref_segs(nsegments, m_n_runs, m_ref_segs);
+        auto ref_segs_to_process = utils::determine_ref_segs(
+            m_ffa_plan.get_nsegments_ref_pool(m_n_runs, m_ref_segs.has_value()),
+            m_n_runs, m_ref_segs);
         spdlog::debug("Starting Pruning for {} runs, with {} threads ({} "
                       "workers)",
                       ref_segs_to_process.size(), m_nthreads, m_n_workers);
@@ -1385,7 +1363,7 @@ private:
         std::vector<int> task_ids;
         task_ids.reserve(ref_segs.size());
 
-        const auto nsegments = m_ffa_plan.get_nsegments().back();
+        const auto nsegments = m_ffa_plan.get_nsegments_active();
         int id               = 0;
         for (const auto ref_seg : ref_segs) {
             if (tracker) {

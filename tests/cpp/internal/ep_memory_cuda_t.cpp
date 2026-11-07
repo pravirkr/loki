@@ -92,7 +92,7 @@ make_cfg(SizeType nparams, bool kadane = false, SizeType nbins = kNbins) {
             /*nbins_max=*/std::max<SizeType>(1024, nbins),
             /*nbins_min_lossy_bf=*/64,
             /*bseg_brute=*/1024,
-            /*bseg_ffa=*/(1U << 16U) / 8,
+            /*nsegments=*/8,
             /*snr_min=*/5.0,
             /*max_passing_candidates=*/1U << 20U,
             /*prune_poly_order=*/2,
@@ -240,7 +240,7 @@ TEMPLATE_TEST_CASE("CUDA EP shared group seeds only each chunk's coordinates",
                                              {.min = 140.0, .max = f_max}};
         return PulsarSearchConfig(1U << 16U, 64e-6, 32, 1.0, limits, 0.3, 1.5,
                                   std::is_same_v<TestType, ComplexTypeCUDA>, 1,
-                                  4.0, 2.0, 1024, 64, 1024, 8192);
+                                  4.0, 2.0, 1024, 64, 1024, 8);
     };
     const auto larger  = config(145.0);
     const auto smaller = config(141.0);

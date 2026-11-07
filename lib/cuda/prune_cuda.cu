@@ -11,6 +11,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -27,7 +28,6 @@
 #include "loki/utils/workspace.hpp"
 
 #include "lib/algorithms/prune_engine.hpp"
-#include "lib/core/transforms.hpp"
 #include "lib/cuda/cuda_utils.cuh"
 #include "lib/cuda/dynamic_cuda.cuh"
 #include "lib/cuda/ffa_cuda.cuh"
@@ -38,34 +38,11 @@
 #include "lib/detail/timing.hpp"
 #include "lib/detail/utils.hpp"
 #include "lib/search/cands.hpp"
+#include "lib/search/ep_support.hpp"
 
 namespace loki::algorithms {
 
 namespace {
-
-void shift_reported_leaves_epoch(std::span<double> leaves,
-                                 SizeType n_leaves,
-                                 SizeType n_params,
-                                 double delta_t_epoch) {
-    if (n_leaves == 0 || n_params < 2 || std::abs(delta_t_epoch) <= 1e-12) {
-        return;
-    }
-    constexpr SizeType kParamStride = 2U;
-    const SizeType leaves_stride    = (n_params + 2) * kParamStride;
-    std::vector<double> params(n_params);
-    for (SizeType i = 0; i < n_leaves; ++i) {
-        const SizeType leaf_offset = i * leaves_stride;
-        for (SizeType j = 0; j < n_params; ++j) {
-            params[j] = leaves[leaf_offset + (j * kParamStride)];
-        }
-        const auto [shifted, delay] =
-            core::shift_taylor_params_d_f(params, delta_t_epoch);
-        (void)delay;
-        for (SizeType j = 0; j < n_params; ++j) {
-            leaves[leaf_offset + (j * kParamStride)] = shifted[j];
-        }
-    }
-}
 
 struct ExecutionStream {
     cudaStream_t stream{nullptr};
@@ -138,7 +115,8 @@ public:
                   std::function<void(pipelines::detail::EPResultPayload)>
                       result_sink = {})
         : m_workspace_ptr(&workspace),
-          m_cfg(std::move(cfg)),
+          m_cfg(cfg.has_explicit_nsegments() ? std::move(cfg)
+                                             : cfg.with_ep_default_nsegments()),
           m_ffa_plan(m_cfg),
           m_threshold_scheme(threshold_scheme.begin(), threshold_scheme.end()),
           m_max_sugg(max_sugg),
@@ -155,9 +133,9 @@ public:
         m_prune_funcs = core::create_prune_dp_functs_cuda<FoldTypeCUDA>(
             m_poly_basis, m_ffa_plan.get_param_counts().back(),
             m_ffa_plan.get_dparams_actual().back(),
-            m_ffa_plan.get_nsegments().back(),
+            m_ffa_plan.get_nsegments_active(),
             m_ffa_plan.get_tsegments().back(), m_cfg, m_batch_size,
-            m_branch_max, m_device_id);
+            m_branch_max, m_device_id, m_stream);
     }
 
     ~PruneCUDAImpl()                               = default;
@@ -201,7 +179,7 @@ public:
         std::filesystem::path actual_result_file = result_file.value_or(
             outdir / fmt::format("tmp_{}_results.h5", run_name));
 
-        const auto nsegments = m_ffa_plan.get_nsegments().back();
+        const auto nsegments = m_ffa_plan.get_nsegments_active();
 
         initialize(ffa_fold, ref_seg, m_stream);
         spdlog::debug("Pruning run {:03d}: initialized", ref_seg);
@@ -295,7 +273,7 @@ private:
         world_tree.reset();
 
         // Initialize snail scheme for current ref_seg
-        const auto nsegments = m_ffa_plan.get_nsegments().back();
+        const auto nsegments = m_ffa_plan.get_nsegments_active();
         const auto tseg      = m_ffa_plan.get_tsegments().back();
         m_snail_scheme = psr_utils::MiddleOutScheme(nsegments, ref_seg, tseg);
 
@@ -492,6 +470,8 @@ private:
 
         if (n_leaves > 0) {
             // Transform the suggestion params to middle of the data
+            search::detail::check_report_epoch(m_cfg, coord_mid.first,
+                                               "EPMultiPass::report");
             m_prune_funcs->report(leaves_view.first, coord_mid, n1, m_stream);
             if (n2 > 0) {
                 m_prune_funcs->report(leaves_view.second, coord_mid, n2,
@@ -545,10 +525,6 @@ private:
         cuda_utils::check_cuda_call(
             cudaStreamSynchronize(m_stream),
             "cudaStreamSynchronize write results failed");
-
-        const double delta_t_epoch = (0.5 * m_cfg.get_tobs()) - coord_mid.first;
-        shift_reported_leaves_epoch(leaves_report_h, n_leaves,
-                                    m_cfg.get_nparams(), delta_t_epoch);
 
         if (m_result_sink) {
             m_result_sink(pipelines::detail::EPResultPayload{
@@ -765,15 +741,37 @@ private:
         };
         // A direct-mode batch is collected once the next batch's branch is
         // enqueued (its count sync then also covers the fused kernel).
-        bool direct_pending = false;
-        auto collect_direct = [&]() {
+        bool direct_pending        = false;
+        SizeType direct_write_head = 0;
+        auto collect_direct        = [&]() {
             if (!direct_pending) {
                 return;
             }
+            SizeType n_valid = 0;
             const auto n_passing =
-                m_prune_funcs->collect_shift_add_score(batch_minmax);
+                m_prune_funcs->collect_shift_add_score(batch_minmax, &n_valid);
+            stats.n_leaves_phy += n_valid;
             accumulate_min_max(batch_minmax);
             world_tree.commit_direct_write(n_passing);
+            if (n_passing > 0) {
+                const auto capacity      = world_tree.get_capacity();
+                const auto leaves_stride = world_tree.get_leaves_stride();
+                auto* const tree_leaves  = world_tree.get_direct_write().leaves;
+                const auto n1 =
+                    std::min(n_passing, capacity - direct_write_head);
+                const auto n2 = n_passing - n1;
+                m_prune_funcs->transform(
+                    cuda::std::span<double>(
+                        tree_leaves + (direct_write_head * leaves_stride),
+                        n1 * leaves_stride),
+                    {}, coord_next, coord_cur, n1, stream);
+                if (n2 > 0) {
+                    m_prune_funcs->transform(
+                        cuda::std::span<double>(tree_leaves,
+                                                n2 * leaves_stride),
+                        {}, coord_next, coord_cur, n2, stream);
+                }
+            }
             direct_pending = false;
         };
 
@@ -816,33 +814,29 @@ private:
                 "Branch factor exceeded workspace size:n_leaves_batch <= "
                 "max_branched_leaves");
 
-            // Validation
-            const auto n_leaves_after_validation = m_prune_funcs->validate(
+            // Validation (asynchronous: valid count is accumulated in the
+            // fused shift-add-score kernel and read back with its stats).
+            m_prune_funcs->validate_async(
                 cuda_utils::as_span(prune_ws.branched_leaves_d),
                 cuda_utils::as_span(prune_ws.branched_indices_d),
                 cuda_utils::as_span(prune_ws.validation_mask_d), coord_cur,
-                n_leaves_batch, scratch_ws, stream);
-            stats.n_leaves_phy += n_leaves_after_validation;
-            if (n_leaves_after_validation == 0) {
-                world_tree.consume_read(current_batch_size);
-                continue;
-            }
+                n_leaves_batch, stream);
 
             // Direct path: when even an all-passing batch fits the free
             // slots (add_batch_scattered's fast path), the fused kernel
             // writes the survivors into the tree itself, in the order of
-            // the compaction below. Every valid leaf is resolved and
-            // transformed first (the survivors' values are the same).
+            // the compaction below, and only those survivors are transformed
+            // once collected.
             const bool direct = n_leaves_batch <= world_tree.get_space_left();
             if (direct) {
-                m_prune_funcs->resolve_transform(
+                m_prune_funcs->resolve(
                     cuda_utils::as_span(prune_ws.branched_leaves_d),
                     cuda_utils::as_span(prune_ws.validation_mask_d),
                     cuda_utils::as_span(prune_ws.branched_param_idx_d),
                     cuda_utils::as_span(prune_ws.branched_phase_shift_d),
-                    coord_add, coord_cur, coord_init, coord_next,
-                    n_leaves_batch, stream);
-                const auto dw = world_tree.get_direct_write();
+                    coord_add, coord_cur, coord_init, n_leaves_batch, stream);
+                const auto dw     = world_tree.get_direct_write();
+                direct_write_head = dw.write_head;
                 const core::EPDirectWriteCUDA<FoldTypeCUDA> target{
                     .leaves_batch =
                         cuda_utils::as_span(prune_ws.branched_leaves_d),
@@ -880,6 +874,7 @@ private:
             // Shift-add and score (one fused kernel for Fourier folds).
             // branched_indices_d are logical indices, converted to physical
             // indices in the kernel.
+            SizeType n_valid            = 0;
             const auto n_leaves_passing = m_prune_funcs->shift_add_score(
                 world_tree.get_folds_span(),
                 cuda_utils::as_span(prune_ws.branched_indices_d),
@@ -892,7 +887,8 @@ private:
                 cuda_utils::as_span(prune_ws.filtered_mask_d),
                 current_threshold, n_leaves_batch,
                 world_tree.get_physical_start_idx(), world_tree.get_capacity(),
-                scratch_ws, stream, nullptr, &batch_minmax);
+                scratch_ws, stream, nullptr, &batch_minmax, &n_valid);
+            stats.n_leaves_phy += n_valid;
 
             accumulate_min_max(batch_minmax);
 
@@ -1008,7 +1004,8 @@ public:
          SizeType batch_size,
          std::string_view poly_basis,
          int device_id)
-        : m_cfg(std::move(cfg)),
+        : m_cfg(cfg.has_explicit_nsegments() ? std::move(cfg)
+                                             : cfg.with_ep_default_nsegments()),
           m_threshold_scheme(threshold_scheme.begin(), threshold_scheme.end()),
           m_n_runs(n_runs),
           m_ref_segs(std::move(ref_segs)),
@@ -1030,12 +1027,12 @@ public:
                               std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>
                                   ? m_cfg.get_nbins_f()
                                   : m_cfg.get_nbins(),
-                              m_ffa_plan.get_nsegments().back(),
+                              m_ffa_plan.get_nsegments_active(),
                               m_execution_stream.get()),
           m_workspace_ptr(&m_workspace_storage) {
         // Validate workspace
         const auto ncoords_ffa = m_ffa_plan.get_ncoords().back();
-        const auto nsegments   = m_ffa_plan.get_nsegments().back();
+        const auto nsegments   = m_ffa_plan.get_nsegments_active();
         const auto nbins       = std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>
                                      ? m_cfg.get_nbins_f()
                                      : m_cfg.get_nbins();
@@ -1055,7 +1052,8 @@ public:
          SizeType batch_size,
          std::string_view poly_basis,
          int device_id)
-        : m_cfg(std::move(cfg)),
+        : m_cfg(cfg.has_explicit_nsegments() ? std::move(cfg)
+                                             : cfg.with_ep_default_nsegments()),
           m_threshold_scheme(threshold_scheme.begin(), threshold_scheme.end()),
           m_n_runs(n_runs),
           m_ref_segs(std::move(ref_segs)),
@@ -1076,7 +1074,7 @@ public:
         // Validate workspaces
         const auto& ws         = get_workspace();
         const auto ncoords_ffa = m_ffa_plan.get_ncoords().back();
-        const auto nsegments   = m_ffa_plan.get_nsegments().back();
+        const auto nsegments   = m_ffa_plan.get_nsegments_active();
         const SizeType nbins   = std::is_same_v<FoldTypeCUDA, ComplexTypeCUDA>
                                      ? m_cfg.get_nbins_f()
                                      : m_cfg.get_nbins();
@@ -1097,7 +1095,8 @@ public:
          SizeType batch_size,
          std::string_view poly_basis,
          int device_id)
-        : m_cfg(std::move(cfg)),
+        : m_cfg(cfg.has_explicit_nsegments() ? std::move(cfg)
+                                             : cfg.with_ep_default_nsegments()),
           m_threshold_scheme(threshold_scheme.begin(), threshold_scheme.end()),
           m_n_runs(n_runs),
           m_ref_segs(std::move(ref_segs)),
@@ -1123,7 +1122,7 @@ public:
         const auto branch_max_needed =
             detail::compute_branch_max(forecast.max_children);
         const auto ncoords_ffa = m_ffa_plan.get_ncoords().back();
-        const auto nsegments   = m_ffa_plan.get_nsegments().back();
+        const auto nsegments   = m_ffa_plan.get_nsegments_active();
         // The group's workspace and the prune functors use the group's
         // branch_max: a stale plan whose groups are too small must not run.
         if (branch_max_needed > pipeline.ws_branch_max ||
@@ -1159,6 +1158,8 @@ public:
                  std::string_view file_prefix) {
         timing::SimpleTimer timer;
         timer.start();
+        std::tie(ts_e, ts_v) = search::detail::ep_input_series(
+            m_cfg, ts_e, ts_v, "EPMultiPass::execute");
         spdlog::debug("EPMultiPassCudaCore: Initializing with FFA");
         // Create appropriate FFA fold
         std::tuple<thrust::device_vector<FoldTypeCUDA>,
@@ -1244,7 +1245,7 @@ private:
                      timing::SimpleTimer& timer) {
         const nvtx::Range range("ep: pruning");
         // Setup output files and directory
-        const auto nsegments = m_ffa_plan.get_nsegments().back();
+        const auto nsegments = m_ffa_plan.get_nsegments_active();
         const std::string filebase =
             fmt::format("{}_pruning_nstages_{}", file_prefix, nsegments);
         const auto log_file =
@@ -1264,8 +1265,9 @@ private:
         }
 
         // Determine ref_segs to process
-        auto ref_segs_to_process =
-            utils::determine_ref_segs(nsegments, m_n_runs, m_ref_segs);
+        auto ref_segs_to_process = utils::determine_ref_segs(
+            m_ffa_plan.get_nsegments_ref_pool(m_n_runs, m_ref_segs.has_value()),
+            m_n_runs, m_ref_segs);
         spdlog::debug("Starting Pruning for {} runs, on CUDA device {}",
                       ref_segs_to_process.size(), m_device_id);
 

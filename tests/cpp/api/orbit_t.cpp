@@ -180,8 +180,7 @@ TEST_CASE("[search.orbit] sets the orbit of the EP pruning",
     const auto ep_doc = [](const std::string& ep_extra) {
         return orbit_doc("order = \"crackle\"\np_orb_min_tobs = 10.0\n"
                          "m_c_max = 0.5\nm_p_min = 1.3\n") +
-               "[ep]\nn_runs = 2\n" + ep_extra +
-               "[performance]\nbseg_ffa = 8192\n";
+               "[ep]\nn_runs = 2\nnsegments = 8\n" + ep_extra;
     };
     const auto cfg =
         EPTomlConfig::from_string(ep_doc("")).to_ep_search_config();

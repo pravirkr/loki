@@ -72,7 +72,7 @@ loki::search::PulsarSearchConfig overflow_config() {
         /*nbins_max=*/1024,
         /*nbins_min_lossy_bf=*/64,
         /*bseg_brute=*/kNsamps / kNseg / 16,
-        /*bseg_ffa=*/kNsamps / kNseg,
+        /*nsegments=*/kNseg,
         /*snr_min=*/5.0,
         /*max_passing_candidates=*/1U << 22U,
         /*prune_poly_order=*/3,

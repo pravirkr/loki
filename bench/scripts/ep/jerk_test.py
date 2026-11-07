@@ -78,7 +78,7 @@ def run(args: argparse.Namespace) -> None:
         use_fourier=fourier,
         nthreads=1,
         bseg_brute=NSAMPS // 8192,
-        bseg_ffa=NSAMPS // 128,
+        nsegments=128,
         prune_poly_order=3,
         use_boxcar_kadane=args.kadane,
     )

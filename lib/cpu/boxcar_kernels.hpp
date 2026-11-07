@@ -17,12 +17,21 @@
 #include <omp.h>
 
 #if defined(__AVX2__) && defined(__FMA__)
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#pragma GCC diagnostic ignored "-Wuninitialized"
+#endif
 #include <immintrin.h>
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 #endif
 
 #include "loki/common/types.hpp"
 #include "loki/detection/score.hpp"
 
+#include "lib/cpu/simd_utils.hpp"
 #include "lib/detail/utils.hpp"
 
 namespace loki::detection::detail {
@@ -299,51 +308,30 @@ private:
 
 #if defined(__AVX2__) && defined(__FMA__)
     /// Transpose an 8 x 8 block: rows[r][c0 + c] -> dst[c * stride + r].
-    static void transpose8(const float* const* rows,
-                           SizeType c0,
-                           float* dst,
-                           SizeType stride) noexcept {
-        const __m256 r0 = _mm256_loadu_ps(rows[0] + c0);
-        const __m256 r1 = _mm256_loadu_ps(rows[1] + c0);
-        const __m256 r2 = _mm256_loadu_ps(rows[2] + c0);
-        const __m256 r3 = _mm256_loadu_ps(rows[3] + c0);
-        const __m256 r4 = _mm256_loadu_ps(rows[4] + c0);
-        const __m256 r5 = _mm256_loadu_ps(rows[5] + c0);
-        const __m256 r6 = _mm256_loadu_ps(rows[6] + c0);
-        const __m256 r7 = _mm256_loadu_ps(rows[7] + c0);
-        const __m256 t0 = _mm256_unpacklo_ps(r0, r1);
-        const __m256 t1 = _mm256_unpackhi_ps(r0, r1);
-        const __m256 t2 = _mm256_unpacklo_ps(r2, r3);
-        const __m256 t3 = _mm256_unpackhi_ps(r2, r3);
-        const __m256 t4 = _mm256_unpacklo_ps(r4, r5);
-        const __m256 t5 = _mm256_unpackhi_ps(r4, r5);
-        const __m256 t6 = _mm256_unpacklo_ps(r6, r7);
-        const __m256 t7 = _mm256_unpackhi_ps(r6, r7);
-        const __m256 u0 = _mm256_shuffle_ps(t0, t2, _MM_SHUFFLE(1, 0, 1, 0));
-        const __m256 u1 = _mm256_shuffle_ps(t0, t2, _MM_SHUFFLE(3, 2, 3, 2));
-        const __m256 u2 = _mm256_shuffle_ps(t1, t3, _MM_SHUFFLE(1, 0, 1, 0));
-        const __m256 u3 = _mm256_shuffle_ps(t1, t3, _MM_SHUFFLE(3, 2, 3, 2));
-        const __m256 u4 = _mm256_shuffle_ps(t4, t6, _MM_SHUFFLE(1, 0, 1, 0));
-        const __m256 u5 = _mm256_shuffle_ps(t4, t6, _MM_SHUFFLE(3, 2, 3, 2));
-        const __m256 u6 = _mm256_shuffle_ps(t5, t7, _MM_SHUFFLE(1, 0, 1, 0));
-        const __m256 u7 = _mm256_shuffle_ps(t5, t7, _MM_SHUFFLE(3, 2, 3, 2));
-        _mm256_storeu_ps(dst + (0 * stride),
-                         _mm256_permute2f128_ps(u0, u4, 0x20));
-        _mm256_storeu_ps(dst + (1 * stride),
-                         _mm256_permute2f128_ps(u1, u5, 0x20));
-        _mm256_storeu_ps(dst + (2 * stride),
-                         _mm256_permute2f128_ps(u2, u6, 0x20));
-        _mm256_storeu_ps(dst + (3 * stride),
-                         _mm256_permute2f128_ps(u3, u7, 0x20));
-        _mm256_storeu_ps(dst + (4 * stride),
-                         _mm256_permute2f128_ps(u0, u4, 0x31));
-        _mm256_storeu_ps(dst + (5 * stride),
-                         _mm256_permute2f128_ps(u1, u5, 0x31));
-        _mm256_storeu_ps(dst + (6 * stride),
-                         _mm256_permute2f128_ps(u2, u6, 0x31));
-        _mm256_storeu_ps(dst + (7 * stride),
-                         _mm256_permute2f128_ps(u3, u7, 0x31));
+    [[gnu::always_inline]] static void transpose8(const float* const* rows,
+                                                  SizeType c0,
+                                                  float* dst,
+                                                  SizeType stride) noexcept {
+        std::array<const float*, 8> in{};
+        std::array<float*, 8> out{};
+        for (SizeType r = 0; r < 8; ++r) {
+            in[r]  = rows[r] + c0;
+            out[r] = dst + (r * stride);
+        }
+        simd_utils::transpose8x8(in.data(), out.data());
     }
+
+#if defined(__AVX512F__)
+    /// Transpose a 16 x 16 block: rows[r][c0 + c] -> dst[c * kGroup + r].
+    [[gnu::always_inline]] static void
+    transpose16(const float* const* rows, SizeType c0, float* dst) noexcept {
+        std::array<const float*, 16> in{};
+        for (SizeType r = 0; r < 16; ++r) {
+            in[r] = rows[r] + c0;
+        }
+        simd_utils::transpose16x16(in.data(), dst, kGroup);
+    }
+#endif
 
     /// Normalised sample e * y, y = rsqrt(v) refined: the scalar lowering.
     static __m256 inv_sigma(__m256 v) noexcept {
@@ -355,6 +343,23 @@ private:
         // v <= 0 contributes nothing (the scalar code skips the add).
         return _mm256_and_ps(y,
                              _mm256_cmp_ps(v, _mm256_setzero_ps(), _CMP_GT_OQ));
+    }
+
+    [[gnu::noinline]] static void scan_block(float* __restrict__ ps_block,
+                                             const float* __restrict__ vt_block,
+                                             SizeType ncol,
+                                             __m256& run0,
+                                             __m256& run1) noexcept {
+        for (SizeType c = 0; c < ncol; ++c) {
+            float* row        = ps_block + (c * kGroup);
+            const float* vrow = vt_block + (c * kGroup);
+            run0 = _mm256_fmadd_ps(_mm256_loadu_ps(row),
+                                   inv_sigma(_mm256_loadu_ps(vrow)), run0);
+            run1 = _mm256_fmadd_ps(_mm256_loadu_ps(row + 8),
+                                   inv_sigma(_mm256_loadu_ps(vrow + 8)), run1);
+            _mm256_storeu_ps(row, run0);
+            _mm256_storeu_ps(row + 8, run1);
+        }
     }
 
     void score_group(const float* __restrict__ folds, SizeType nvalid) {
@@ -370,13 +375,20 @@ private:
         float* __restrict__ ps = m_psum.data();
         // Transpose e into psum[bin][lane] and v into the scratch tail; the
         // scan then overwrites psum in place.
-        std::array<float, 8 * kGroup> vt{};
-        __m256 run0          = _mm256_setzero_ps();
-        __m256 run1          = _mm256_setzero_ps();
+        __m256 run0 = _mm256_setzero_ps();
+        __m256 run1 = _mm256_setzero_ps();
+        std::array<float, 16 * kGroup> vt{};
         const SizeType nfull = nbins - (nbins % 8);
-        for (SizeType c0 = 0; c0 < nbins; c0 += 8) {
-            const SizeType ncol = std::min<SizeType>(8, nbins - c0);
-            if (c0 < nfull) {
+        for (SizeType c0 = 0; c0 < nbins;) {
+            SizeType ncol = std::min<SizeType>(8, nbins - c0);
+#if defined(__AVX512F__)
+            if (c0 + 16 <= nbins) {
+                ncol = 16;
+                transpose16(rows_e.data(), c0, ps + (c0 * kGroup));
+                transpose16(rows_v.data(), c0, vt.data());
+            } else
+#endif
+                if (c0 < nfull) {
                 transpose8(rows_e.data(), c0, ps + (c0 * kGroup), kGroup);
                 transpose8(rows_e.data() + 8, c0, ps + (c0 * kGroup) + 8,
                            kGroup);
@@ -390,17 +402,8 @@ private:
                     }
                 }
             }
-            for (SizeType c = 0; c < ncol; ++c) {
-                float* row        = ps + ((c0 + c) * kGroup);
-                const float* vrow = vt.data() + (c * kGroup);
-                run0 = _mm256_fmadd_ps(_mm256_loadu_ps(row),
-                                       inv_sigma(_mm256_loadu_ps(vrow)), run0);
-                run1 =
-                    _mm256_fmadd_ps(_mm256_loadu_ps(row + 8),
-                                    inv_sigma(_mm256_loadu_ps(vrow + 8)), run1);
-                _mm256_storeu_ps(row, run0);
-                _mm256_storeu_ps(row + 8, run1);
-            }
+            scan_block(ps + (c0 * kGroup), vt.data(), ncol, run0, run1);
+            c0 += ncol;
         }
         finish_group();
     }

@@ -46,7 +46,7 @@ struct KeepPredicate {
     __host__ __device__ bool operator()(uint32_t logical_idx) const {
         const uint32_t phys_idx =
             get_phys_idx_device(logical_idx, start, capacity);
-        return scores[phys_idx] > threshold;
+        return scores[phys_idx] >= threshold;
     }
 };
 
@@ -778,7 +778,8 @@ void WorldTreeCUDA<FoldTypeCUDA>::validate(SizeType capacity,
     error_check::check_equal(m_nparams, nparams,
                              "WorldTreeCUDA: nparams mismatch");
     error_check::check_equal(m_nbins, nbins, "WorldTreeCUDA: nbins mismatch");
-    error_check::check_greater_equal(m_leaves.size(), capacity * (nparams + 2),
+    error_check::check_greater_equal(m_leaves.size(),
+                                     capacity * (nparams + 2) * kParamStride,
                                      "WorldTreeCUDA: leaves size mismatch");
     error_check::check_greater_equal(m_folds.size(), capacity * 2 * nbins,
                                      "WorldTreeCUDA: folds size mismatch");
@@ -845,9 +846,6 @@ void WorldTreeCUDA<FoldTypeCUDA>::copy_from_circular(
                             cudaMemcpyDeviceToDevice, stream),
             "cudaMemcpyAsync copy_from_circular failed");
     }
-    cuda_utils::check_cuda_call(
-        cudaStreamSynchronize(stream),
-        "cudaStreamSynchronize copy_from_circular failed");
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
