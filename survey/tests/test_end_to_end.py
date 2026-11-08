@@ -1,0 +1,114 @@
+"""Milestone 1's check: a simulated pulsar is found end to end, FFA and EP."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+import h5py
+import numpy as np
+
+from loki import libloki
+from loki_survey.cli import main
+
+from .conftest import write_site
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+NSAMPS = 1 << 18
+DT = 64e-6
+TRUE_FREQ = 142.3
+TRUE_ACCEL = 50.0
+INJECTED_SNR = 15.0
+# The injected pulsar must come back at this folded S/N or more.
+RECOVER_SNR_MIN = 10.0
+# Two frequency resolutions 1 / T_obs.
+FREQ_TOL = 2.0 / (NSAMPS * DT)
+SEED = 1
+
+SURVEY = """
+[survey]
+name = "end-to-end"
+[data]
+series = ["data/*.dat"]
+[search]
+snr_min = 7.0
+min_pd = 0.5
+[[search.region]]
+name = "mid"
+f_hz = [100.0, 200.0]
+nbins = 32
+[[search.box]]
+name = "ffa_accel"
+kind = "ffa"
+order = "accel"
+limits = { accel = [-100.0, 100.0] }
+[[search.box]]
+name = "ep_accel"
+kind = "ep"
+order = "accel"
+limits = { accel = [-100.0, 100.0] }
+segments = 8
+bseg_brute = 1024
+ref_segs = [4]
+[output]
+raw_fraction = 1.0
+"""
+
+
+def simulate(path: Path) -> None:
+    mod = libloki.simulation.ModulatorParams()
+    mod.acc = TRUE_ACCEL
+    cfg = libloki.simulation.PulseSignalConfig(
+        1.0 / TRUE_FREQ,
+        DT,
+        NSAMPS,
+        INJECTED_SNR,
+        0.1,
+        "derivative",
+        mod,
+        None,
+        SEED,
+    )
+    series = cfg.generate("gaussian", 0.5)
+    libloki.io.TimeSeries(
+        np.asarray(series.ts_e, dtype=np.float32),
+        np.asarray(series.ts_v, dtype=np.float32),
+        DT,
+    ).write(str(path))
+
+
+def best_near_truth(output: Path) -> float:
+    with h5py.File(output, "r") as handle:
+        f0 = np.asarray(handle["candidates/f0"][:])
+        snr = np.asarray(handle["candidates/snr"][:])
+    near = np.abs(f0 - TRUE_FREQ) <= FREQ_TOL
+    return float(snr[near].max()) if near.any() else 0.0
+
+
+def test_simulated_pulsar_is_found(tmp_path: Path, unit_python: str) -> None:
+    run = tmp_path / "run"
+    (run / "data").mkdir(parents=True)
+    simulate(run / "data" / "sim_DM10.00.dat")
+    (run / "survey.toml").write_text(SURVEY)
+    write_site(run, unit_python)
+
+    assert main(["run", str(run)]) == 0
+
+    for box in ("ffa_accel", "ep_accel"):
+        uid = f"sim_DM10.00__mid__b0__{box}"
+        best = best_near_truth(run / "out" / f"{uid}.h5")
+        assert best >= RECOVER_SNR_MIN, f"{box}: best S/N {best:.2f}"
+        with h5py.File(run / "out" / f"{uid}.h5", "r") as handle:
+            assert "science_sha256" in handle["survey"].attrs
+        assert (run / "out" / "raw").is_dir()
+
+    # A second run finds nothing to do and changes no output.
+    before = {p.name: p.stat().st_mtime_ns for p in (run / "out").glob("*.h5")}
+    assert main(["run", str(run)]) == 0
+    after = {p.name: p.stat().st_mtime_ns for p in (run / "out").glob("*.h5")}
+    assert before == after
+
+    # Changing the science after units finished is refused.
+    (run / "survey.toml").write_text(SURVEY.replace("snr_min = 7.0", "snr_min = 6.0"))
+    assert main(["check", str(run)]) == 1
