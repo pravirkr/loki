@@ -1,0 +1,22 @@
+# site.toml: the machine a loki-survey run uses.
+#
+# Nothing here changes what the search finds; the same survey.toml runs on a
+# laptop or a cluster.
+
+[executor]
+kind = "local"        # run units as processes on this machine
+max_memory_gb = 16.0  # total memory all running units may reserve
+max_threads = 4       # total threads all running units may use
+# python = "/path/to/python"  # default: the Python running loki-survey
+# poll_s = 1.0
+
+[unit]
+memory_gb = 8.0    # reservation per unit; a unit above it is stopped
+overhead_gb = 1.0  # Python and HDF5 outside loki's own memory budget
+threads = 2
+# backend = "cpu"  # or "cuda"
+# device = 0
+
+[retry]
+# oom_retries = 1    # rerun a unit stopped for memory this many times...
+# oom_factor = 1.5   # ...each time with this much more memory

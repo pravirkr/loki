@@ -1,0 +1,65 @@
+# survey.toml: the science of one loki-survey run.
+#
+# Every value here changes what the search finds, and `loki-survey check`
+# hashes this file's resolved content. Values marked "loki's default" may be
+# left out; resolved.json then records the value used.
+
+[survey]
+name = "my-survey"
+
+[data]
+# Dedispersed series, one per DM: PRESTO .dat (with its .inf) or SIGPROC .tim.
+# Globs are relative to the run directory.
+series = ["data/*.dat"]
+# "pow2" searches the first 2^k samples (the longest power of two); "none"
+# searches them all.
+truncate = "pow2"
+# Bad stretches to give zero weight, in seconds from the start of each file.
+# Data breaks marked in a PRESTO .inf are masked without listing them here.
+# [data.masks]
+# "obs_DM10.00.dat" = [[120.0, 135.5]]
+
+# loki's robust normalisation (docs/preprocessing.md in loki); any field of
+# libloki.io.PreprocessOptions. Leave the table empty for loki's defaults.
+[preprocess]
+# filter_window = 1.0  # baseline window in seconds (loki's default)
+
+[search]
+# Candidates below this folded S/N are not written.
+snr_min = 7.0
+# eta = 1.0     # loki's default (PulsarSearchConfig.eta)
+# min_pd = 0.1  # loki's default: requested detection probability of the EP thresholds
+
+# Frequency regions: each with its own bin count and sampling. A region with
+# downsample = 2 is searched on a series summed in pairs of samples.
+[[search.region]]
+name = "high"
+f_hz = [100.0, 1000.0]
+nbins = 32
+# downsample = 1   # default
+# ducy_max = 0.2   # loki's default: widest pulse searched, as a duty cycle
+# bands = 1        # split the region into this many log-uniform bands
+
+# Search boxes. kind "ffa" or "ep"; order is the highest derivative searched
+# ("freq", "accel", "jerk" or "snap"). Give the derivative limits directly...
+[[search.box]]
+name = "accel"
+kind = "ffa"
+order = "accel"
+limits = { accel = [-50.0, 50.0] }   # m/s^2
+
+# EP boxes may also set the pruning segments (loki's defaults otherwise):
+# segments = 8        # FFA segments: bseg_ffa = nsamps / segments
+# bseg_brute = 1024   # samples per brute-force segment
+# ref_segs = [4]      # reference segments the tree grows from
+
+# ...or as circular-orbit priors, from which loki derives the limits per band.
+# [[search.box]]
+# name = "binary"
+# kind = "ep"
+# order = "jerk"
+# orbit = { p_orb_min_s = 10800.0, m_c_max = 0.5, m_p_min = 1.2 }
+
+[output]
+# Fraction of units that keep loki's full result file (a fixed sample).
+raw_fraction = 0.0
