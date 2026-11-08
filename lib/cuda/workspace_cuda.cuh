@@ -66,6 +66,12 @@ public:
     // level-0 frequencies and the time-domain phase-bin map.
     cuda_utils::DeviceVectorNoInit<double> bf_freqs_d;
     cuda_utils::DeviceVectorNoInit<uint32_t> bf_phase_map_d;
+    /// Size the brute-fold tables once, to the largest chunk of a sweep: a
+    /// grown table is a cudaMalloc (an implicit sync) in the chunk loop, and
+    /// thrust holds the old and the new storage at once while it grows.
+    void reserve_brute_tables(SizeType nfreqs, SizeType phase_map_entries);
+    /// Bytes of the brute-fold tables (not part of get_buffers_bytes()).
+    [[nodiscard]] SizeType get_brute_table_bytes() const noexcept;
 
     /**
      * @brief Pinned staging for the small per-chunk uploads of a pipelined

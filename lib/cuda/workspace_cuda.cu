@@ -114,6 +114,24 @@ SizeType FFAWorkspaceCUDA<FoldTypeCUDA>::get_buffers_bytes() const noexcept {
 }
 
 template <SupportedFoldTypeCUDA FoldTypeCUDA>
+void FFAWorkspaceCUDA<FoldTypeCUDA>::reserve_brute_tables(
+    SizeType nfreqs, SizeType phase_map_entries) {
+    if (bf_freqs_d.size() < nfreqs) {
+        bf_freqs_d.resize(nfreqs);
+    }
+    if (bf_phase_map_d.size() < phase_map_entries) {
+        bf_phase_map_d.resize(phase_map_entries);
+    }
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
+SizeType
+FFAWorkspaceCUDA<FoldTypeCUDA>::get_brute_table_bytes() const noexcept {
+    return (bf_freqs_d.size() * sizeof(double)) +
+           (bf_phase_map_d.size() * sizeof(uint32_t));
+}
+
+template <SupportedFoldTypeCUDA FoldTypeCUDA>
 SizeType
 FFAWorkspaceCUDA<FoldTypeCUDA>::get_memory_usage_bytes() const noexcept {
     return get_buffers_bytes() + (m_param_counts_d.size() * sizeof(uint32_t)) +

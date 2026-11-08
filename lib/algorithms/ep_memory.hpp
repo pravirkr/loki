@@ -461,13 +461,39 @@ SizeType ep_cuda_shared_bytes(SizeType nparams,
            (coord_size * coord_unit_bytes);
 }
 
+/// Entries of the brute-fold tables of one chunk's FFA (CUDA policy).
+struct EPBruteTableSizes {
+    SizeType nfreqs{0};            ///< Level-0 frequencies (double each).
+    SizeType phase_map_entries{0}; ///< uint32 phase-bin map, 0 when unused.
+};
+
 /**
- * @brief Transient device scratch of one chunk's FFA, live while the EP
- * workspace is allocated (CUDA policy only).
+ * @brief Brute-fold tables of one chunk (BruteFoldCudaEngine): the frequency
+ * grid and, for time-domain folds (and the lossy Fourier start of large
+ * nbins), a uint32 phase map of nfreqs * segment_len entries.
  *
- * The brute fold keeps the frequency grid and, for time-domain folds (and the
- * lossy Fourier start of large nbins), a uint32 phase map of
- * nfreqs * segment_len entries (BruteFoldCudaEngine).
+ * The CUDA sweep sizes the tables of its FFA workspace from these once, at
+ * the maxima over its chunks, so no chunk grows them mid-sweep.
+ */
+template <SupportedFoldType FoldType>
+EPBruteTableSizes
+ep_cuda_brute_table_sizes(const plans::FFAPlan<FoldType>& plan) {
+    const SizeType nfreqs  = plan.get_param_counts().front().back();
+    const SizeType seg_len = plan.get_segment_lens().front();
+    const SizeType nbins   = plan.get_config().get_nbins();
+    const bool has_phase_map =
+        !std::is_same_v<FoldType, ComplexType> ||
+        nbins > plan.get_config().get_nbins_min_lossy_bf();
+    return {.nfreqs            = nfreqs,
+            .phase_map_entries = has_phase_map ? nfreqs * seg_len : 0};
+}
+
+/**
+ * @brief FFA scratch of one chunk that the model counts for the whole sweep.
+ *
+ * CUDA policy: the brute-fold tables (ep_cuda_brute_table_sizes), kept in the
+ * FFA workspace and sized once for the sweep. CPU policy: the Fourier
+ * phase-step table.
  */
 template <SupportedFoldType FoldType>
 SizeType ep_ffa_transient_bytes(const EPMemoryContext& ctx,
@@ -475,14 +501,9 @@ SizeType ep_ffa_transient_bytes(const EPMemoryContext& ctx,
     if (ctx.kind != EPMemoryKind::kCuda) {
         return cpu_phase_step_table_bytes(plan);
     }
-    const SizeType nfreqs  = plan.get_param_counts().front().back();
-    const SizeType seg_len = plan.get_segment_lens().front();
-    const SizeType nbins   = plan.get_config().get_nbins();
-    const bool has_phase_map =
-        !std::is_same_v<FoldType, ComplexType> ||
-        nbins > plan.get_config().get_nbins_min_lossy_bf();
-    return (nfreqs * sizeof(double)) +
-           (has_phase_map ? nfreqs * seg_len * sizeof(std::uint32_t) : 0);
+    const auto tables = ep_cuda_brute_table_sizes(plan);
+    return (tables.nfreqs * sizeof(double)) +
+           (tables.phase_map_entries * sizeof(std::uint32_t));
 }
 
 /// Bytes each worker needs for one chunk group.

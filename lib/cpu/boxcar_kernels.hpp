@@ -321,18 +321,6 @@ private:
         simd_utils::transpose8x8(in.data(), out.data());
     }
 
-#if defined(__AVX512F__)
-    /// Transpose a 16 x 16 block: rows[r][c0 + c] -> dst[c * kGroup + r].
-    [[gnu::always_inline]] static void
-    transpose16(const float* const* rows, SizeType c0, float* dst) noexcept {
-        std::array<const float*, 16> in{};
-        for (SizeType r = 0; r < 16; ++r) {
-            in[r] = rows[r] + c0;
-        }
-        simd_utils::transpose16x16(in.data(), dst, kGroup);
-    }
-#endif
-
     /// Normalised sample e * y, y = rsqrt(v) refined: the scalar lowering.
     static __m256 inv_sigma(__m256 v) noexcept {
         const __m256 r  = _mm256_rsqrt_ps(v);
@@ -374,21 +362,15 @@ private:
         }
         float* __restrict__ ps = m_psum.data();
         // Transpose e into psum[bin][lane] and v into the scratch tail; the
-        // scan then overwrites psum in place.
+        // scan then overwrites psum in place. Blocks are 8 columns: a 16 x 16
+        // transpose step measured 1-4% slower (Zen 4, nbins 64..256).
         __m256 run0 = _mm256_setzero_ps();
         __m256 run1 = _mm256_setzero_ps();
-        std::array<float, 16 * kGroup> vt{};
+        std::array<float, 8 * kGroup> vt{};
         const SizeType nfull = nbins - (nbins % 8);
         for (SizeType c0 = 0; c0 < nbins;) {
-            SizeType ncol = std::min<SizeType>(8, nbins - c0);
-#if defined(__AVX512F__)
-            if (c0 + 16 <= nbins) {
-                ncol = 16;
-                transpose16(rows_e.data(), c0, ps + (c0 * kGroup));
-                transpose16(rows_v.data(), c0, vt.data());
-            } else
-#endif
-                if (c0 < nfull) {
+            const SizeType ncol = std::min<SizeType>(8, nbins - c0);
+            if (c0 < nfull) {
                 transpose8(rows_e.data(), c0, ps + (c0 * kGroup), kGroup);
                 transpose8(rows_e.data() + 8, c0, ps + (c0 * kGroup) + 8,
                            kGroup);

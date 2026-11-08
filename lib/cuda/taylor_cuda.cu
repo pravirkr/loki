@@ -651,7 +651,7 @@ transform_taylor_accel(double* __restrict__ leaves_tree,
     if (tid >= n_leaves) {
         return;
     }
-    if (validation_mask[tid] == 0) {
+    if (validation_mask != nullptr && validation_mask[tid] == 0) {
         return;
     }
 
@@ -700,7 +700,7 @@ transform_taylor_jerk(double* __restrict__ leaves_tree,
     if (tid >= n_leaves) {
         return;
     }
-    if (validation_mask[tid] == 0) {
+    if (validation_mask != nullptr && validation_mask[tid] == 0) {
         return;
     }
 
@@ -759,7 +759,7 @@ transform_taylor_snap(double* __restrict__ leaves_tree,
     if (tid >= n_leaves) {
         return;
     }
-    if (validation_mask[tid] == 0) {
+    if (validation_mask != nullptr && validation_mask[tid] == 0) {
         return;
     }
 

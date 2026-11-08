@@ -161,6 +161,9 @@ public:
     collect_shift_add_score(MinMaxFloat& minmax,
                             SizeType* n_valid_out = nullptr) = 0;
 
+    /// Transform the first @p n_leaves leaves to @p coord_next. An empty
+    /// @p validation_mask means every leaf is valid (all three bases honour
+    /// this: the direct-write path transforms passing leaves only).
     virtual void transform(cuda::std::span<double> leaves_tree,
                            cuda::std::span<const uint8_t> validation_mask,
                            std::pair<double, double> coord_next,

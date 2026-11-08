@@ -567,7 +567,7 @@ kernel_circ_taylor_transform_batch(double* __restrict__ leaves_tree,
     if (tid >= n_leaves) {
         return;
     }
-    if (validation_mask[tid] == 0) {
+    if (validation_mask != nullptr && validation_mask[tid] == 0) {
         return;
     }
 

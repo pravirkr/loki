@@ -894,7 +894,10 @@ public:
         if (m_param_limits.empty()) {
             throw std::runtime_error("coord_limits must be non-empty");
         }
-        // Before the defaults below, which depend on nbins.
+        // Before the defaults below, which depend on nbins and divide by
+        // nsamps (an integer divide by zero traps on x86).
+        error_check::check_greater_equal(m_nsamps, 4, "nsamps must be >= 4");
+        error_check::check_greater(m_tsamp, 0, "tsamp must be positive");
         error_check::check_greater_equal(m_nbins, 2, "nbins must be >= 2");
         m_nbins_f = (m_nbins / 2) + 1;
         m_nparams = m_param_limits.size();
