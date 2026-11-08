@@ -24,6 +24,7 @@ namespace {
 // 0: Taylor, 1: Circular Snap, 2: Circular Crackle
 __device__ __forceinline__ uint32_t
 get_circ_taylor_mask_device(double crackle,
+                            double dcrackle,
                             double snap,
                             double dsnap,
                             double jerk,
@@ -39,7 +40,10 @@ get_circ_taylor_mask_device(double crackle,
     }
     const bool is_sig_jerk = fabs(jerk) > (propagator_significance * djerk);
     const bool is_physical_crackle = (-crackle * jerk) > 0.0;
-    if (is_sig_jerk && is_physical_crackle) {
+    // A crackle within round-off of zero on the scale of its step is the
+    // Taylor case, as in get_circ_taylor_mask_scattered.
+    const bool is_zero_crackle = fabs(crackle) <= (utils::kFloatEps * dcrackle);
+    if (is_sig_jerk && is_physical_crackle && !is_zero_crackle) {
         return 2;
     }
     return 0;
@@ -409,6 +413,7 @@ kernel_circ_taylor_resolve_batch(const double* __restrict__ leaves_tree,
 
     const uint32_t lo     = tid * kLeavesStride;
     const double c_t_cur  = leaves_tree[lo + 0];
+    const double dc_t_cur = leaves_tree[lo + 1];
     const double s_t_cur  = leaves_tree[lo + 2];
     const double ds_t_cur = leaves_tree[lo + 3];
     const double j_t_cur  = leaves_tree[lo + 4];
@@ -420,8 +425,8 @@ kernel_circ_taylor_resolve_batch(const double* __restrict__ leaves_tree,
 
     double a_new, delta_v, delta_d;
     const uint32_t mask_circular = get_circ_taylor_mask_device(
-        c_t_cur, s_t_cur, ds_t_cur, j_t_cur, dj_t_cur, a_t_cur, da_t_cur,
-        propagator_significance);
+        c_t_cur, dc_t_cur, s_t_cur, ds_t_cur, j_t_cur, dj_t_cur, a_t_cur,
+        da_t_cur, propagator_significance);
     if (mask_circular == 0) {
         a_new   = a_t_cur + (j_t_cur * dt_add) + (s_t_cur * half_dt2_add) +
                   (c_t_cur * sixth_dt3_add);
@@ -500,6 +505,7 @@ __global__ void kernel_circ_taylor_ascend_resolve_batch(
 
     const uint32_t lo   = tid * kLeavesStride;
     const double c_cur  = leaves_tree[lo + 0];
+    const double dc_cur = leaves_tree[lo + 1];
     const double s_cur  = leaves_tree[lo + 2];
     const double ds_cur = leaves_tree[lo + 3];
     const double j_cur  = leaves_tree[lo + 4];
@@ -512,8 +518,8 @@ __global__ void kernel_circ_taylor_ascend_resolve_batch(
 
     double a_new, v_new, d_new;
     const uint32_t mask_circular =
-        get_circ_taylor_mask_device(c_cur, s_cur, ds_cur, j_cur, dj_cur, a_cur,
-                                    da_cur, propagator_significance);
+        get_circ_taylor_mask_device(c_cur, dc_cur, s_cur, ds_cur, j_cur, dj_cur,
+                                    a_cur, da_cur, propagator_significance);
     if (mask_circular == 0) {
         a_new = a_cur + (j_cur * dt) + (s_cur * half_dt2) + (c_cur * sixth_dt3);
         v_new = v_cur + (a_cur * dt) + (j_cur * half_dt2) +
@@ -593,8 +599,8 @@ kernel_circ_taylor_transform_batch(double* __restrict__ leaves_tree,
     const double d0_err_i = leaves_tree[lo + 11];
 
     const uint32_t mask_circular = get_circ_taylor_mask_device(
-        d5_val_i, d4_val_i, d4_err_i, d3_val_i, d3_err_i, d2_val_i, d2_err_i,
-        propagator_significance);
+        d5_val_i, d5_err_i, d4_val_i, d4_err_i, d3_val_i, d3_err_i, d2_val_i,
+        d2_err_i, propagator_significance);
 
     if (mask_circular == 0) {
         leaves_tree[lo + 0] = d5_val_i;

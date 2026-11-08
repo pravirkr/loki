@@ -53,6 +53,7 @@ get_circ_taylor_mask_scattered(std::span<const double> leaves_batch,
         const auto leaf_idx = indices_batch[i];
         const auto lo       = leaf_idx * kLeavesStride;
         const auto crackle  = leaves_batch[lo + 0];
+        const auto dcrackle = leaves_batch[lo + 1];
         const auto snap     = leaves_batch[lo + 2];
         const auto dsnap    = leaves_batch[lo + 3];
         const auto jerk     = leaves_batch[lo + 4];
@@ -80,7 +81,14 @@ get_circ_taylor_mask_scattered(std::span<const double> leaves_batch,
             std::abs(jerk) > (propagator_significance * djerk);
         // Check if implied Omega^2 = -crackle/jerk is physical
         const bool is_physical_crackle = (-crackle * jerk) > 0.0;
-        if (is_sig_jerk && is_physical_crackle) {
+        // A crackle within round-off of zero on the scale of its step (the
+        // middle child of a crackle split around zero) is the Taylor case:
+        // its Omega is a numerical zero, and the circular resolve and
+        // transform, which divide by Omega^2, would cancel catastrophically.
+        // Every other child of a split sits at least half a step from zero.
+        const bool is_zero_crackle =
+            std::abs(crackle) <= (utils::kFloatEps * dcrackle);
+        if (is_sig_jerk && is_physical_crackle && !is_zero_crackle) {
             idx_circular_crackle.push_back(leaf_idx);
         } else {
             idx_taylor.push_back(leaf_idx);
