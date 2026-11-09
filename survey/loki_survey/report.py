@@ -190,6 +190,26 @@ def _ledger_section(run: RunDir) -> dict[str, Any] | None:
     return {"total": len(entries), "by_rule": counts, "rows": entries[:TOP_LEDGER]}
 
 
+def _folds_section(run: RunDir) -> dict[str, Any] | None:
+    summary_path = run.root / "folds" / "summary.json"
+    if not summary_path.is_file():
+        return None
+    summary = read_json(summary_path)
+    rows = []
+    with h5py.File(run.root / "folds" / "folds.h5", "r") as handle:
+        for entry in summary["groups"]:
+            group = handle[f"group_{entry['group']:06d}"]
+            profile = group["profile"][:]
+            norm = np.divide(
+                profile[0],
+                np.sqrt(profile[1]),
+                out=np.zeros_like(profile[0]),
+                where=profile[1] > 0,
+            )
+            rows.append({**entry, "profile": (norm - norm.mean()).tolist()})
+    return {"control_factor": summary["fold"]["control_factor"], "rows": rows}
+
+
 def build_report(run: RunDir, resolved: Resolved, units: list[Unit]) -> dict[str, Any]:
     """Gather everything the page shows into one document."""
     resolved_doc = read_json(run.resolved_json)
@@ -217,6 +237,7 @@ def build_report(run: RunDir, resolved: Resolved, units: list[Unit]) -> dict[str
         if evaluated.is_file()
         else None,
         "lines": read_json(evaluated).get("lines") if evaluated.is_file() else None,
+        "folds": _folds_section(run),
         "ledger": _ledger_section(run),
     }
 
@@ -281,6 +302,26 @@ def _table(headers: list[str], rows: list[list[str]], numeric: set[int]) -> str:
     return (
         f'<div class="scroll"><table><thead><tr>{head}</tr></thead>'
         f"<tbody>{body}</tbody></table></div>"
+    )
+
+
+def _profile_svg(profile: list[float]) -> str:
+    """Return a small pulse-profile line over one turn."""
+    if len(profile) < 2 or max(profile) == min(profile):
+        return ""
+    width, height, pad = 120.0, 28.0, 3.0
+    lo, hi = min(profile), max(profile)
+    n = len(profile)
+    points = " ".join(
+        f"{pad + i / (n - 1) * (width - 2 * pad):.1f},"
+        f"{height - pad - (v - lo) / (hi - lo) * (height - 2 * pad):.1f}"
+        for i, v in enumerate(profile)
+    )
+    return (
+        f'<svg class="curve" width="{width:.0f}" height="{height:.0f}" '
+        f'viewBox="0 0 {width:.0f} {height:.0f}" role="img" '
+        f'aria-label="folded profile"><title>folded profile</title>'
+        f'<polyline points="{points}"/></svg>'
     )
 
 
@@ -529,6 +570,46 @@ def render_html(doc: dict[str, Any]) -> str:
             f"<code>{_e(lines['series'])}</code> (DM {_num(lines['dm'], 2)}, "
             f"false-alarm rate {lines['fap']:g}); {lines['groups_on_lines']} groups "
             "lie on one.</p>",
+        )
+
+    folds = doc.get("folds")
+    if folds:
+        parts.append("<h2>Folds</h2>")
+        parts.append(
+            '<p class="note">The strongest candidates folded on their own series with '
+            "loki's model of their leaf. The control is a fold at "
+            f"{folds['control_factor']:g} f, where a pulsar smears; a steady pulsar "
+            "gives about S/N / &radic;2 in each half.</p>",
+        )
+        parts.append(
+            _table(
+                [
+                    "#",
+                    "f (Hz)",
+                    "Search S/N",
+                    "Fold S/N",
+                    "Control S/N",
+                    "Halves",
+                    "Model",
+                    "Profile",
+                    "Fold S/N vs DM",
+                ],
+                [
+                    [
+                        str(r["group"]),
+                        _num(r["f0"], 6),
+                        _num(r["search_snr"], 2),
+                        _num(r["snr"], 2),
+                        _num(r["snr_control"], 2),
+                        " / ".join(_num(h, 2) for h in r["snr_halves"]),
+                        _e(r["model"]),
+                        _profile_svg(r["profile"]),
+                        _curve_svg(r["dm_curve"]),
+                    ]
+                    for r in folds["rows"]
+                ],
+                {0, 1, 2, 3, 4},
+            ),
         )
 
     parts.append("<h2>Ledger</h2>")

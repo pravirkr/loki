@@ -24,6 +24,7 @@ loki-survey status myrun
 | `status` | `out/`, `status.sqlite` | nothing |
 | `collect` | `out/` | `collect/candidates.h5`, `collect/ledger.jsonl`, `collect/summary.json` |
 | `evaluate` | `collect/`, the catalogue, the lowest-DM series | `evaluate/matches.jsonl`, `evaluate/summary.json` |
+| `fold` | `collect/`, the units' leaves, `prep/` | `folds/folds.h5` and `folds/summary.json` |
 | `report` | everything above | `report/report.json` and `report/index.html` made from it |
 
 Each stage does only what is missing, so rerunning `loki-survey run` after an
@@ -110,9 +111,18 @@ orbit's v/c), and with the spectral lines of the lowest-DM series. Lines and
 matches are labels; they remove nothing. Its summary lists every catalogued
 pulsar: searched or not, found or not, and whether a rule removed its group.
 
+`fold` folds the strongest selected groups (`[fold] candidates`) on their own
+series with loki's model of their leaf (`libloki.psr_utils.leaf_phase`, the
+model the search used, circular orbits included) and scores the profile with
+loki's boxcar scorer. With it come a control fold at 1.002 f, where a pulsar
+smears, the two halves of the span folded apart, and, with `dm_curve`, the
+same model folded on every DM. `run-unit` keeps each EP candidate's leaf for
+this; an FFA candidate's leaf is built from its Taylor parameters.
+
 `report` writes `report/report.json`, everything the page shows, and
 `report/index.html`, made from that file alone: units and failures, cost,
-candidates with their S/N against DM, catalogue recall and the ledger.
+candidates with their S/N against DM, catalogue recall, folds with their
+profiles, and the ledger.
 
 ## Tests
 

@@ -131,6 +131,25 @@ def search(run: RunDir, resolved: Resolved, unit: Unit, workdir: Path) -> Path:
     return result
 
 
+def candidate_leaves(src: h5py.File) -> np.ndarray | None:
+    """Return each EP candidate's final leaf, (value, error) rows, or None.
+
+    ``fold`` evaluates loki's phase model on the leaf, which needs the errors
+    (a five-parameter search decides per leaf, from them, whether it is an
+    orbit) that the candidate table does not keep. An FFA result has none.
+    """
+    if "candidates" not in src or "search/sources/run_path" not in src:
+        return None
+    paths = src["search/sources/run_path"].asstr()[:]
+    regions = src["candidates/source_region"][:]
+    rows = src["candidates/source_index"][:]
+    nparams = len(src.attrs["param_names"])
+    leaves = np.zeros((len(rows), nparams + 2, 2), dtype=np.float64)
+    for i, (region, row) in enumerate(zip(regions, rows, strict=True)):
+        leaves[i] = src[paths[int(region)]]["param_sets"][int(row)]
+    return leaves
+
+
 def compact(result: Path, out: Path, provenance: dict[str, Any]) -> dict[str, int]:
     """Copy loki's common tables into ``out`` and add the run's provenance."""
     counts = {}
@@ -147,6 +166,9 @@ def compact(result: Path, out: Path, provenance: dict[str, Any]) -> dict[str, in
             meta.attrs[key] = (
                 value if isinstance(value, str | int | float) else canonical_json(value)
             )
+        leaves = candidate_leaves(src)
+        if leaves is not None:
+            meta.create_dataset("leaves", data=leaves)
     return counts
 
 

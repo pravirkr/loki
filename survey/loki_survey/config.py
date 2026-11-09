@@ -135,6 +135,11 @@ DEFAULT_DOPPLER = 1.0e-4
 # A spectral line is a run of FFT bins whose power has this false-alarm
 # probability over the whole spectrum.
 DEFAULT_LINE_FAP = 1.0e-3
+# fold folds this many of the strongest selected groups.
+DEFAULT_FOLD_CANDIDATES = 20
+# The control fold is at the candidate's frequency times this: a pulsar's
+# profile smears there (1.002 f slips 0.002 f T cycles over the span T).
+DEFAULT_FOLD_CONTROL = 1.002
 
 
 @dataclass(frozen=True)
@@ -167,9 +172,19 @@ class Evaluate:
 
 
 @dataclass(frozen=True)
+class Fold:
+    """How ``fold`` checks the strongest candidates with loki's own model."""
+
+    candidates: int = DEFAULT_FOLD_CANDIDATES
+    control_factor: float = DEFAULT_FOLD_CONTROL
+    dm_curve: bool = True
+
+
+@dataclass(frozen=True)
 class Analysis:
     collect: Collect = Collect()
     evaluate: Evaluate = Evaluate()
+    fold: Fold = Fold()
 
 
 # Site defaults, written into resolved.json when site.toml leaves them out.
@@ -401,7 +416,16 @@ def parse_survey(doc: dict[str, Any], where: str = "survey.toml") -> Survey:
     """Validate a parsed ``survey.toml`` and fill in loki's defaults."""
     _check_keys(
         doc,
-        {"survey", "data", "preprocess", "search", "output", "collect", "evaluate"},
+        {
+            "survey",
+            "data",
+            "preprocess",
+            "search",
+            "output",
+            "collect",
+            "evaluate",
+            "fold",
+        },
         where,
     )
     survey = _table(doc, "survey", where)
@@ -556,7 +580,23 @@ def parse_analysis(doc: dict[str, Any], where: str = "survey.toml") -> Analysis:
             ),
         ),
     )
-    return Analysis(collect=collect, evaluate=evaluate)
+    raw = _table(doc, "fold", where)
+    fw = f"{where} [fold]"
+    _check_keys(raw, set(Fold.__dataclass_fields__), fw)
+    fdefaults = Fold()
+    control = _positive(
+        raw.get("control_factor", fdefaults.control_factor),
+        f"{fw}.control_factor",
+    )
+    if control == 1.0:
+        msg = f"{fw}.control_factor: must differ from 1"
+        raise ConfigError(msg)
+    fold = Fold(
+        candidates=_nonnegative_int(raw, "candidates", fdefaults.candidates, fw),
+        control_factor=float(control),
+        dm_curve=_bool(raw, "dm_curve", fdefaults.dm_curve, fw),
+    )
+    return Analysis(collect=collect, evaluate=evaluate, fold=fold)
 
 
 def _nonnegative_int(table: dict[str, Any], key: str, default: int, where: str) -> int:
@@ -900,6 +940,7 @@ def load_resolved(run: RunDir) -> Resolved:
         analysis = Analysis(
             collect=Collect(**raw["collect"]),
             evaluate=Evaluate(**raw["evaluate"]),
+            fold=Fold(**raw.get("fold", {})),
         )
     return Resolved(survey=survey, site=site, science_sha256=sha, analysis=analysis)
 

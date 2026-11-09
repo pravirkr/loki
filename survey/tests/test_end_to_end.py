@@ -118,6 +118,13 @@ def test_simulated_pulsar_is_found(tmp_path: Path, unit_python: str) -> None:
     assert pulsar["found"]
     assert pulsar["best"]["selected"]
     assert "SIM" in (run / "report" / "index.html").read_text()
+    # Folded with loki's own model: the pulsar keeps its S/N, the 1.002 f
+    # control loses it, and both halves carry it.
+    (folded, *_) = json.loads((run / "folds" / "summary.json").read_text())["groups"]
+    assert folded["snr"] >= RECOVER_SNR_MIN
+    assert folded["snr_control"] < folded["snr"] / 2
+    assert min(folded["snr_halves"]) > folded["snr"] / 2
+    assert "Folds" in (run / "report" / "index.html").read_text()
 
     # A second run finds nothing to do and changes no output.
     before = {p.name: p.stat().st_mtime_ns for p in (run / "out").glob("*.h5")}

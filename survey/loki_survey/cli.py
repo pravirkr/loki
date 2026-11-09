@@ -280,6 +280,22 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_fold(args: argparse.Namespace) -> int:
+    from loki_survey.fold import fold  # noqa: PLC0415
+    from loki_survey.plan import load_units  # noqa: PLC0415
+
+    run = RunDir.at(args.rundir)
+    summary = fold(run, load_resolved(run), load_units(run))
+    for row in summary["groups"]:
+        print(
+            f"fold: group {row['group']} at {row['f0']:.6f} Hz: S/N {row['snr']:.2f} "
+            f"(search {row['search_snr']:.2f}, control {row['snr_control']:.2f}, "
+            f"halves {row['snr_halves'][0]:.2f}/{row['snr_halves'][1]:.2f}; "
+            f"{row['model']})",
+        )
+    return 0
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     from loki_survey.plan import load_units  # noqa: PLC0415
     from loki_survey.report import REPORT_HTML, write_report  # noqa: PLC0415
@@ -321,7 +337,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         print("units are still running; collect, evaluate and report when they end")
         return 0
     args.partial = False
-    for step in (cmd_collect, cmd_evaluate, cmd_report):
+    for step in (cmd_collect, cmd_evaluate, cmd_fold, cmd_report):
         code = step(args)
         if code:
             return code
@@ -367,11 +383,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="collect although some units have not finished",
     )
     add("evaluate", cmd_evaluate, "match candidates to the catalogue and to lines")
+    add("fold", cmd_fold, "fold the strongest candidates with loki's model")
     add("report", cmd_report, "write report/index.html")
     p = add(
         "run",
         cmd_run,
-        "check, prep, plan and submit; then collect, evaluate and report",
+        "check, prep, plan and submit; then collect, evaluate, fold and report",
     )
     p.add_argument("--threads", type=int, default=None)
     p.add_argument("--units", nargs="*", help="only these unit ids")

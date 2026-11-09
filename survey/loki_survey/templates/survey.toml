@@ -88,3 +88,9 @@ raw_fraction = 0.0
 # dm_tol = 0.0            # DMs must agree this closely; 0: not checked
 # line_fap = 1e-3         # false-alarm probability of a spectral line
 # line_tol_bins = 1.0     # a group within this many 1/T_obs of a line is on it
+
+# How fold checks the strongest candidates, with loki's own model of each leaf.
+[fold]
+# candidates = 20         # fold this many of the strongest selected groups
+# control_factor = 1.002  # control fold at this times the frequency
+# dm_curve = true         # also fold every series (DM) of the region
