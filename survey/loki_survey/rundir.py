@@ -66,6 +66,10 @@ class RunDir:
         return self.root / "collect"
 
     @property
+    def evaluate_dir(self) -> Path:
+        return self.root / "evaluate"
+
+    @property
     def status_db(self) -> Path:
         return self.root / "status.sqlite"
 
